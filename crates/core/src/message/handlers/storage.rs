@@ -14,6 +14,7 @@ use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::effects::CoreEffect;
 use crate::message::types::FoundVNode;
 use crate::message::types::Message;
 use crate::message::types::SearchVNode;
@@ -51,7 +52,7 @@ pub trait ChordStorageInterfaceCacheChecker {
     async fn storage_check_cache(&self, vid: Did) -> Option<VirtualNode>;
 }
 
-/// Handle the storage fetch action of the peer ring.
+/// Execute storage fetch actions for the Swarm-facing storage API.
 #[cfg_attr(feature = "wasm", async_recursion(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_recursion)]
 async fn handle_storage_fetch_act(
@@ -85,7 +86,7 @@ async fn handle_storage_fetch_act(
     Ok(())
 }
 
-/// Handle the storage store operations of the peer ring.
+/// Execute storage store actions for the Swarm-facing storage API.
 #[cfg_attr(feature = "wasm", async_recursion(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_recursion)]
 pub(super) async fn handle_storage_store_act(
@@ -109,26 +110,57 @@ pub(super) async fn handle_storage_store_act(
     Ok(())
 }
 
-/// Handle the storage store operations of the peer ring.
+/// Execute storage store actions emitted by inbound message handlers.
+#[cfg_attr(feature = "wasm", async_recursion(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_recursion)]
+async fn handle_storage_store_handler_act(
+    handler: MessageHandler,
+    act: PeerRingAction,
+) -> Result<()> {
+    match act {
+        PeerRingAction::None => Ok(()),
+        PeerRingAction::RemoteAction(target, PeerRingRemoteAction::FindVNodeForOperate(op)) => {
+            handler
+                .run_effects([CoreEffect::send_message(Message::OperateVNode(op), target)])
+                .await
+        }
+        PeerRingAction::MultiActions(acts) => {
+            for act in acts {
+                handle_storage_store_handler_act(handler.clone(), act).await?;
+            }
+            Ok(())
+        }
+        act => Err(Error::PeerRingUnexpectedAction(act)),
+    }
+}
+
+/// Execute storage search actions emitted by inbound message handlers.
 #[cfg_attr(feature = "wasm", async_recursion(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_recursion)]
 async fn handle_storage_search_act(
-    transport: Arc<SwarmTransport>,
+    handler: MessageHandler,
     ctx: &MessagePayload,
     act: PeerRingAction,
 ) -> Result<()> {
     match act {
         PeerRingAction::None => Ok(()),
         PeerRingAction::SomeVNode(v) => {
-            transport
-                .send_report_message(ctx, Message::FoundVNode(FoundVNode { data: vec![v] }))
+            handler
+                .run_effects([CoreEffect::send_report_message(
+                    ctx,
+                    Message::FoundVNode(FoundVNode { data: vec![v] }),
+                )])
                 .await
         }
-        PeerRingAction::RemoteAction(next, _) => transport.reset_destination(ctx, next).await,
+        PeerRingAction::RemoteAction(next, _) => {
+            handler
+                .run_effects([CoreEffect::reset_destination(ctx, next)])
+                .await
+        }
         PeerRingAction::MultiActions(acts) => {
             let jobs = acts.iter().map(|act| {
-                let transport_clone = transport.clone();
-                async move { handle_storage_operate_act(transport_clone, ctx, act).await }
+                let handler_clone = handler.clone();
+                async move { handle_storage_operate_act(handler_clone, ctx, act).await }
             });
 
             for res in futures::future::join_all(jobs).await {
@@ -143,21 +175,25 @@ async fn handle_storage_search_act(
     }
 }
 
-/// Handle the storage store operations of the peer ring.
+/// Execute storage operation actions emitted by inbound message handlers.
 #[cfg_attr(feature = "wasm", async_recursion(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_recursion)]
-pub(super) async fn handle_storage_operate_act(
-    transport: Arc<SwarmTransport>,
+async fn handle_storage_operate_act(
+    handler: MessageHandler,
     ctx: &MessagePayload,
     act: &PeerRingAction,
 ) -> Result<()> {
     match act {
         PeerRingAction::None => Ok(()),
-        PeerRingAction::RemoteAction(next, _) => transport.reset_destination(ctx, *next).await,
+        PeerRingAction::RemoteAction(next, _) => {
+            handler
+                .run_effects([CoreEffect::reset_destination(ctx, *next)])
+                .await
+        }
         PeerRingAction::MultiActions(acts) => {
             let jobs = acts.iter().map(|act| {
-                let transport_clone = transport.clone();
-                async move { handle_storage_operate_act(transport_clone, ctx, act).await }
+                let handler_clone = handler.clone();
+                async move { handle_storage_operate_act(handler_clone, ctx, act).await }
             });
 
             for res in futures::future::join_all(jobs).await {
@@ -226,7 +262,7 @@ impl HandleMsg<SearchVNode> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &SearchVNode) -> Result<()> {
         // For relay message, set redundant to 1
         match <PeerRing as ChordStorage<_, 1>>::vnode_lookup(&self.dht, msg.vid).await {
-            Ok(action) => handle_storage_search_act(self.transport.clone(), ctx, action).await,
+            Ok(action) => handle_storage_search_act(self.clone(), ctx, action).await,
             Err(e) => Err(e),
         }
     }
@@ -237,7 +273,9 @@ impl HandleMsg<SearchVNode> for MessageHandler {
 impl HandleMsg<FoundVNode> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &FoundVNode) -> Result<()> {
         if self.dht.did != ctx.relay.destination {
-            return self.transport.forward_payload(ctx, None).await;
+            return self
+                .run_effects([CoreEffect::forward_payload(ctx, None)])
+                .await;
         }
         for data in msg.data.iter().cloned() {
             self.dht.local_cache_put(data).await?;
@@ -253,7 +291,7 @@ impl HandleMsg<VNodeOperation> for MessageHandler {
         // For relay message, set redundant to 1
         let action =
             <PeerRing as ChordStorage<_, 1>>::vnode_operate(&self.dht, msg.clone()).await?;
-        handle_storage_operate_act(self.transport.clone(), ctx, &action).await
+        handle_storage_operate_act(self.clone(), ctx, &action).await
     }
 }
 
@@ -267,7 +305,7 @@ impl HandleMsg<SyncVNodeWithSuccessor> for MessageHandler {
             // For relay message, set redundant to 1
             let op = VNodeOperation::Overwrite(data);
             let act = <PeerRing as ChordStorage<_, 1>>::vnode_operate(&self.dht, op).await?;
-            handle_storage_store_act(self.transport.clone(), act).await?;
+            handle_storage_store_handler_act(self.clone(), act).await?;
         }
         Ok(())
     }

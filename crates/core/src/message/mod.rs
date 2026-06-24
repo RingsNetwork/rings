@@ -4,6 +4,8 @@ pub use encoder::Decoder;
 pub use encoder::Encoded;
 pub use encoder::Encoder;
 
+mod effects;
+
 mod payload;
 pub use payload::decode_gzip_data;
 pub use payload::encode_data_gzip;
