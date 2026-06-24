@@ -185,7 +185,7 @@ impl DummyConnection {
             Event::DataChannelOpen => self.callback.on_data_channel_open().await,
             Event::DataChannelClose => self.callback.on_data_channel_close().await,
             Event::Message(data) => {
-                if SEND_MESSAGE_DELAY {
+                if SEND_MESSAGE_DELAY && !CONTROLLED.with(|c| c.get()) {
                     random_delay().await;
                 }
                 self.callback.on_message(&data).await

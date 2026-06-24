@@ -22,6 +22,7 @@ pub use chord::TopoInfo;
 pub use chord::VNodeStorage;
 pub use did::Did;
 pub use finger::FingerTable;
+pub use finger::DEFAULT_FINGER_TABLE_SIZE;
 pub use stabilization::Stabilizer;
 pub use successor::SuccessorReader;
 pub use successor::SuccessorWriter;

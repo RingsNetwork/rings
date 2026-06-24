@@ -11,6 +11,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use super::did::BiasId;
+use super::finger::DEFAULT_FINGER_TABLE_SIZE;
 use super::successor::SuccessorSeq;
 use super::types::Chord;
 use super::types::ChordStorage;
@@ -193,11 +194,25 @@ impl From<Vec<PeerRingAction>> for PeerRingAction {
 impl PeerRing {
     /// Same as new with config, but with a given storage.
     pub fn new_with_storage(did: Did, succ_max: u8, storage: VNodeStorage) -> Self {
+        Self::new_with_storage_and_finger_table_size(
+            did,
+            succ_max,
+            storage,
+            DEFAULT_FINGER_TABLE_SIZE,
+        )
+    }
+
+    /// Same as new with config, but with a given storage and finger table size.
+    pub fn new_with_storage_and_finger_table_size(
+        did: Did,
+        succ_max: u8,
+        storage: VNodeStorage,
+        finger_table_size: usize,
+    ) -> Self {
         Self {
             successor_seq: SuccessorSeq::new(did, succ_max),
             predecessor: Arc::new(Mutex::new(None)),
-            // for Eth address, it's 160
-            finger: Arc::new(Mutex::new(FingerTable::new(did, 160))),
+            finger: Arc::new(Mutex::new(FingerTable::new(did, finger_table_size))),
             storage,
             cache: Box::new(MemStorage::new()),
             did,
@@ -339,10 +354,17 @@ impl Chord<PeerRingAction> for PeerRing {
     /// According to the paper, this method should be called periodically.
     /// According to the paper, only one finger should be fixed at a time.
     fn fix_fingers(&self) -> Result<PeerRingAction> {
-        let mut fix_finger_index = self.lock_finger()?.fix_finger_index;
+        let (mut fix_finger_index, finger_table_size) = {
+            let finger = self.lock_finger()?;
+            (finger.fix_finger_index, finger.slot_count())
+        };
+
+        if finger_table_size == 0 {
+            return Ok(PeerRingAction::None);
+        }
 
         // Only one finger should be fixed at a time.
-        fix_finger_index = (fix_finger_index + 1) % 160;
+        fix_finger_index = (fix_finger_index + 1) % finger_table_size;
 
         // Get finger did.
         let finger_did = Did::from(BigUint::from(2u16).pow(fix_finger_index as u32));

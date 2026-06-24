@@ -44,10 +44,18 @@ impl HandleMsg<QueryForTopoInfoReport> for MessageHandler {
         match msg.then {
             <QueryForTopoInfoReport as Then>::Then::SyncSuccessor => {
                 for peer in msg.info.successors.iter() {
-                    self.join_dht(*peer).await?;
+                    if self.transport.get_connection(*peer).is_some() {
+                        self.join_dht(*peer).await?;
+                    }
                 }
             }
             <QueryForTopoInfoReport as Then>::Then::Stabilization => {
+                if let Some(peer) = msg.info.predecessor {
+                    self.connect_dht_peer(peer).await?;
+                }
+                for peer in msg.info.successors.iter() {
+                    self.connect_dht_peer(*peer).await?;
+                }
                 let ev = self.dht.stabilize(msg.info.clone())?;
                 self.handle_dht_events(&ev).await?;
             }

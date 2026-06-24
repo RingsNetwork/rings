@@ -147,8 +147,11 @@ async fn test_handle_connect_node() -> Result<()> {
         WebrtcConnectionState::Connected,
     );
 
-    // node1.dht() send msg to node2.dht() ask for connecting node3.dht()
-    node1.swarm.connect(node3.did()).await.unwrap();
+    // node1 may already have connected node3 while syncing successor-list
+    // candidates. If not, ask DHT to connect it through node2.
+    if node1.swarm.transport.get_connection(node3.did()).is_none() {
+        node1.swarm.connect(node3.did()).await.unwrap();
+    }
     sleep(Duration::from_millis(10000)).await;
 
     let connection_1_to_3 = node1.swarm.transport.get_connection(node3.did());

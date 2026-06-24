@@ -67,6 +67,17 @@ impl MessageHandler {
         InnerSwarmCallback::new(self.transport.clone(), self.swarm_callback.clone())
     }
 
+    pub(crate) async fn connect_dht_peer(&self, peer: Did) -> Result<bool> {
+        if peer == self.dht.did || self.transport.get_connection(peer).is_some() {
+            return Ok(false);
+        }
+
+        match self.transport.connect(peer, self.inner_callback()).await {
+            Ok(()) | Err(Error::AlreadyConnected) => Ok(true),
+            Err(e) => Err(e),
+        }
+    }
+
     pub(crate) async fn join_dht(&self, peer: Did) -> Result<()> {
         // Default HMCC/Zave join path: maps to the JoinThenSync operation in
         // the CorrectChord spec (see tests/default/dht_convergence.rs).
@@ -129,6 +140,10 @@ impl MessageHandler {
             }
             // A new successor is set, request the new successor for it's successor list
             PeerRingAction::RemoteAction(next, PeerRingRemoteAction::QueryForSuccessorList) => {
+                if !self.transport.is_connected(*next) {
+                    self.connect_dht_peer(*next).await?;
+                    return Ok(());
+                }
                 self.transport
                     .send_direct_message(
                         Message::QueryForTopoInfoSend(QueryForTopoInfoSend::new_for_sync(*next)),
@@ -138,12 +153,16 @@ impl MessageHandler {
                 Ok(())
             }
             PeerRingAction::RemoteAction(did, PeerRingRemoteAction::TryConnect) => {
-                self.transport.connect(*did, self.inner_callback()).await?;
+                self.connect_dht_peer(*did).await?;
                 Ok(())
             }
             PeerRingAction::RemoteAction(did, PeerRingRemoteAction::Notify(predecessor)) => {
                 if did == predecessor {
                     tracing::warn!("Notify target is equal to predecessor, may implement wrong.");
+                    return Ok(());
+                }
+                if !self.transport.is_connected(*did) {
+                    self.connect_dht_peer(*did).await?;
                     return Ok(());
                 }
                 // `RemoteAction(target, Notify(pred))` means "send pred to target"

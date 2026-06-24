@@ -10,6 +10,9 @@ use serde::Serialize;
 
 use crate::dht::Did;
 
+/// Default number of Chord finger slots for a 160-bit `Did`.
+pub const DEFAULT_FINGER_TABLE_SIZE: usize = 160;
+
 /// Finger table of Chord DHT
 /// Ring's finger table is implemented with BiasRing
 #[derive(Derivative, Clone, Debug, Serialize, Deserialize)]
@@ -19,7 +22,7 @@ pub struct FingerTable {
     size: usize,
     finger: Vec<Option<Did>>,
     #[derivative(PartialEq = "ignore")]
-    pub(super) fix_finger_index: u8,
+    pub(super) fix_finger_index: usize,
 }
 
 impl FingerTable {
@@ -162,6 +165,11 @@ impl FingerTable {
     /// get length of finger
     pub fn len(&self) -> usize {
         self.finger.iter().flatten().count()
+    }
+
+    /// Get the number of slots in this finger table.
+    pub fn slot_count(&self) -> usize {
+        self.size
     }
 
     /// get finger list

@@ -7,6 +7,7 @@ use std::sync::RwLock;
 
 use crate::dht::PeerRing;
 use crate::dht::VNodeStorage;
+use crate::dht::DEFAULT_FINGER_TABLE_SIZE;
 use crate::measure::MeasureImpl;
 use crate::session::SessionSk;
 use crate::swarm::callback::SharedSwarmCallback;
@@ -23,6 +24,7 @@ pub struct SwarmBuilder {
     ice_servers: String,
     external_address: Option<String>,
     dht_succ_max: u8,
+    dht_finger_table_size: usize,
     dht_storage: VNodeStorage,
     session_sk: SessionSk,
     session_ttl: Option<usize>,
@@ -43,6 +45,7 @@ impl SwarmBuilder {
             ice_servers: ice_servers.to_string(),
             external_address: None,
             dht_succ_max: 3,
+            dht_finger_table_size: DEFAULT_FINGER_TABLE_SIZE,
             dht_storage,
             session_sk,
             session_ttl: None,
@@ -54,6 +57,12 @@ impl SwarmBuilder {
     /// Sets up the maximum length of successors in the DHT.
     pub fn dht_succ_max(mut self, succ_max: u8) -> Self {
         self.dht_succ_max = succ_max;
+        self
+    }
+
+    /// Sets up the number of slots in the DHT finger table.
+    pub fn dht_finger_table_size(mut self, size: usize) -> Self {
+        self.dht_finger_table_size = size;
         self
     }
 
@@ -86,10 +95,11 @@ impl SwarmBuilder {
     pub fn build(self) -> Swarm {
         let dht_did = self.session_sk.account_did();
 
-        let dht = Arc::new(PeerRing::new_with_storage(
+        let dht = Arc::new(PeerRing::new_with_storage_and_finger_table_size(
             dht_did,
             self.dht_succ_max,
             self.dht_storage,
+            self.dht_finger_table_size,
         ));
 
         let callback = RwLock::new(
