@@ -1,4 +1,17 @@
-//! secp256k1 adapter for the generic ElGamal algorithm.
+//! secp256k1 plaintext and ciphertext adapter for ElGamal.
+//!
+//! The generic ElGamal implementation encrypts group elements. Existing Rings
+//! callers encrypt strings and exchange `PublicKey<33>` values, so this module
+//! provides the compatibility layer:
+//!
+//! - map UTF-8 bytes into secp256k1 points with a reversible x-coordinate
+//!   encoding;
+//! - call [`crate::ecc::elgamal::ElGamal`] over `Group<Secp256k1>`;
+//! - serialize ciphertext points back into `CurveEle<33>` pairs.
+//!
+//! The point encoding is intentionally local to this adapter. Other curves can
+//! choose different message encodings without changing the ElGamal algorithm or
+//! the finite-group abstraction.
 
 use std::convert::TryFrom;
 use std::convert::TryInto;
@@ -7,6 +20,8 @@ use libsecp256k1::curve::Affine;
 use libsecp256k1::curve::Field;
 
 use crate::ecc::elgamal::ElGamal;
+use crate::ecc::elgamal::ElGamalPublicKey;
+use crate::ecc::elgamal::ElGamalSecretKey;
 use crate::ecc::group::Group;
 use crate::ecc::group::Point;
 use crate::ecc::group::Scalar as GroupScalar;
@@ -175,9 +190,9 @@ pub fn affine_to_str(a: &[Affine]) -> Result<String> {
 
 /// Encrypt a string with the current secp256k1 compatibility adapter.
 pub fn encrypt(s: &str, k: PublicKey<33>) -> Result<Vec<(CurveEle<33>, CurveEle<33>)>> {
-    let public_key: Point<Secp256k1> = k.try_into()?;
+    let public_key = ElGamalPublicKey::<Group<Secp256k1>>::from_element(k.try_into()?);
     let points = MessagePoints::from(Plaintext::from(s));
-    ElGamal::<Group<Secp256k1>>::encrypt(points, public_key)
+    ElGamal::<Group<Secp256k1>>::encrypt(points, &public_key)
         .into_iter()
         .map(|(c1, c2)| Ok((c1.try_into()?, c2.try_into()?)))
         .collect()
@@ -185,12 +200,13 @@ pub fn encrypt(s: &str, k: PublicKey<33>) -> Result<Vec<(CurveEle<33>, CurveEle<
 
 /// Decrypt ciphertext produced by the current secp256k1 compatibility adapter.
 pub fn decrypt(m: &[(CurveEle<33>, CurveEle<33>)], k: SecretKey) -> Result<String> {
-    let secret_key: GroupScalar<Secp256k1> = k.into();
+    let secret_key =
+        ElGamalSecretKey::<Group<Secp256k1>>::from_scalar(GroupScalar::<Secp256k1>::from(k));
     let ciphertext = m
         .iter()
         .map(|(c1, c2)| Ok(((*c1).try_into()?, (*c2).try_into()?)))
         .collect::<Result<Vec<(Point<Secp256k1>, Point<Secp256k1>)>>>()?;
-    let points = ElGamal::<Group<Secp256k1>>::decrypt(&ciphertext, secret_key);
+    let points = ElGamal::<Group<Secp256k1>>::decrypt(&ciphertext, &secret_key);
     String::try_from(MessagePoints::from(points))
 }
 

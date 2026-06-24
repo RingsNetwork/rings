@@ -81,7 +81,6 @@ use crate::consts::DEFAULT_SESSION_TTL_MS;
 use crate::dht::Did;
 use crate::ecc::keccak256;
 use crate::ecc::keys::AccountVerifier;
-use crate::ecc::keys::DidSubject;
 use crate::ecc::keys::SignatureAlgorithm;
 use crate::ecc::keys::VerificationPublicKey;
 use crate::ecc::signers;
@@ -425,7 +424,6 @@ impl SessionSk {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::ecc::keys::SecretKeyMaterial;
     use crate::ecc::keys::SigningSecretKey;
 
     #[test]

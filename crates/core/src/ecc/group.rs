@@ -1,4 +1,28 @@
-//! Elliptic-curve group abstractions and curve adapters.
+//! Finite-group abstractions and elliptic-curve group adapters.
+//!
+//! The algebraic layer in this module is intentionally smaller than any
+//! concrete elliptic-curve library API:
+//!
+//! - [`GroupOps`] models a finite additive group: identity, addition,
+//!   inverse, equality, and scalar action on group elements.
+//! - [`CyclicGroup`] adds a distinguished generator `g`; every element in the
+//!   subgroup used by the cryptographic algorithm is representable as `xg`.
+//! - [`CryptographicGroup`] adds non-zero scalar sampling. This is not a group
+//!   axiom; it belongs to cryptographic algorithms such as ElGamal key
+//!   generation and encryption randomness.
+//! - [`CurveGroup`] is the adapter boundary for elliptic-curve libraries. A
+//!   marker type such as [`Secp256k1`] or [`Bls12381G1`] supplies native point
+//!   and scalar types, while [`Point<C>`], [`Scalar<C>`], and [`Group<C>`]
+//!   expose them through the same algebraic interface.
+//!
+//! All operations are written in additive notation. For a scalar `x` and
+//! generator `g`, `xg` is represented by [`CyclicGroup::generator_mul`].
+//!
+//! This split gives the rest of the cryptographic code one stable vocabulary:
+//! algorithms depend on finite-group laws, not on a concrete crate such as
+//! `libsecp256k1`, `p256`, `arkworks`, or `curve25519-dalek`. Adding a curve is
+//! therefore a matter of implementing the adapter boundary once; algorithms
+//! such as ElGamal do not need per-curve branches.
 
 use std::cell::RefCell;
 use std::convert::TryFrom;
@@ -56,7 +80,10 @@ pub trait CyclicGroup: GroupOps {
     fn generator_mul(scalar: Self::Scalar) -> Self::Element {
         Self::generator() * scalar
     }
+}
 
+/// Cryptographic group extension that can sample non-zero scalars.
+pub trait CryptographicGroup: CyclicGroup {
     /// Generate a fresh non-zero random scalar.
     fn random_scalar() -> Self::Scalar;
 }
@@ -80,9 +107,6 @@ pub trait CurveGroup {
         Self::mul(&generator, scalar)
     }
 
-    /// Generate a fresh non-zero random scalar.
-    fn random_scalar() -> Self::Scalar;
-
     /// Group addition.
     fn add(lhs: &Self::Point, rhs: &Self::Point) -> Self::Point;
 
@@ -94,6 +118,12 @@ pub trait CurveGroup {
 
     /// Element equality.
     fn eq(lhs: &Self::Point, rhs: &Self::Point) -> bool;
+}
+
+/// Curve adapter extension that can sample non-zero scalars for cryptography.
+pub trait CurveScalarSampler: CurveGroup {
+    /// Generate a fresh non-zero random scalar.
+    fn random_scalar() -> Self::Scalar;
 }
 
 /// Generic group element for curve marker `C`.
@@ -215,7 +245,9 @@ impl<C: CurveGroup> CyclicGroup for Group<C> {
     fn generator_mul(scalar: Self::Scalar) -> Self::Element {
         Point::new(C::generator_mul(&scalar.inner))
     }
+}
 
+impl<C: CurveScalarSampler> CryptographicGroup for Group<C> {
     fn random_scalar() -> Self::Scalar {
         Scalar::new(C::random_scalar())
     }
@@ -253,6 +285,76 @@ impl<C: CurveGroup> PartialEq for Point<C> {
 
 impl<C: CurveGroup> Eq for Point<C> {}
 
+// The simple curve adapters below all have the same shape: the native library
+// already exposes identity, generator, addition, negation, scalar
+// multiplication, equality, and point conversion. Keeping that pattern in one
+// macro makes each supported curve a short declaration while preserving the
+// explicit algebraic operations at the trait boundary. secp256k1 remains
+// hand-written because it needs precomputed multiplication contexts and
+// explicit infinity handling from `libsecp256k1`.
+macro_rules! impl_curve_group_adapter {
+    (
+        $curve:ty {
+            point: $point:ty,
+            scalar: $scalar:ty,
+            identity: $identity:expr,
+            generator: $generator:expr,
+            random_scalar: $random_scalar:block,
+            add: $add:expr,
+            neg: $neg:expr,
+            mul: $mul:expr,
+            eq: $eq:expr $(,)?
+        }
+    ) => {
+        impl CurveGroup for $curve {
+            type Point = $point;
+            type Scalar = $scalar;
+
+            fn identity() -> Self::Point {
+                $identity
+            }
+
+            fn generator() -> Self::Point {
+                $generator
+            }
+
+            fn add(lhs: &Self::Point, rhs: &Self::Point) -> Self::Point {
+                ($add)(lhs, rhs)
+            }
+
+            fn neg(point: &Self::Point) -> Self::Point {
+                ($neg)(point)
+            }
+
+            fn mul(point: &Self::Point, scalar: &Self::Scalar) -> Self::Point {
+                ($mul)(point, scalar)
+            }
+
+            fn eq(lhs: &Self::Point, rhs: &Self::Point) -> bool {
+                ($eq)(lhs, rhs)
+            }
+        }
+
+        impl CurveScalarSampler for $curve {
+            fn random_scalar() -> Self::Scalar {
+                $random_scalar
+            }
+        }
+
+        impl From<$point> for Point<$curve> {
+            fn from(point: $point) -> Self {
+                Self::new(point)
+            }
+        }
+
+        impl From<Point<$curve>> for $point {
+            fn from(point: Point<$curve>) -> Self {
+                point.inner
+            }
+        }
+    };
+}
+
 impl CurveGroup for Secp256k1 {
     type Point = Jacobian;
     type Scalar = SecpK1FieldScalar;
@@ -271,10 +373,6 @@ impl CurveGroup for Secp256k1 {
             context.ecmult_gen(&mut result, scalar);
             result
         })
-    }
-
-    fn random_scalar() -> Self::Scalar {
-        with_group_rng(|rng| libsecp256k1::SecretKey::random(rng).into())
     }
 
     fn add(lhs: &Self::Point, rhs: &Self::Point) -> Self::Point {
@@ -301,119 +399,74 @@ impl CurveGroup for Secp256k1 {
     }
 }
 
-impl CurveGroup for Secp256r1 {
-    type Point = ProjectivePoint;
-    type Scalar = Secp256r1ScalarField;
-
-    fn identity() -> Self::Point {
-        ProjectivePoint::IDENTITY
-    }
-
-    fn generator() -> Self::Point {
-        ProjectivePoint::GENERATOR
-    }
-
+impl CurveScalarSampler for Secp256k1 {
     fn random_scalar() -> Self::Scalar {
-        loop {
-            let scalar = with_group_rng(|rng| Secp256r1ScalarField::random(rng));
-            if !bool::from(scalar.is_zero()) {
-                return scalar;
-            }
-        }
-    }
-
-    fn add(lhs: &Self::Point, rhs: &Self::Point) -> Self::Point {
-        *lhs + *rhs
-    }
-
-    fn neg(point: &Self::Point) -> Self::Point {
-        -*point
-    }
-
-    fn mul(point: &Self::Point, scalar: &Self::Scalar) -> Self::Point {
-        *point * *scalar
-    }
-
-    fn eq(lhs: &Self::Point, rhs: &Self::Point) -> bool {
-        lhs == rhs
+        with_group_rng(|rng| libsecp256k1::SecretKey::random(rng).into())
     }
 }
 
-impl CurveGroup for Bls12381G1 {
-    type Point = G1Projective;
-    type Scalar = Bls12381ScalarField;
-
-    fn identity() -> Self::Point {
-        G1Projective::zero()
-    }
-
-    fn generator() -> Self::Point {
-        G1Projective::generator()
-    }
-
-    fn random_scalar() -> Self::Scalar {
-        loop {
-            let scalar = with_group_rng(Bls12381ScalarField::rand);
-            if !scalar.is_zero() {
-                return scalar;
+impl_curve_group_adapter! {
+    Secp256r1 {
+        point: ProjectivePoint,
+        scalar: Secp256r1ScalarField,
+        identity: ProjectivePoint::IDENTITY,
+        generator: ProjectivePoint::GENERATOR,
+        random_scalar: {
+            loop {
+                let scalar = with_group_rng(|rng| Secp256r1ScalarField::random(rng));
+                if !bool::from(scalar.is_zero()) {
+                    return scalar;
+                }
             }
-        }
-    }
-
-    fn add(lhs: &Self::Point, rhs: &Self::Point) -> Self::Point {
-        *lhs + *rhs
-    }
-
-    fn neg(point: &Self::Point) -> Self::Point {
-        -*point
-    }
-
-    fn mul(point: &Self::Point, scalar: &Self::Scalar) -> Self::Point {
-        *point * *scalar
-    }
-
-    fn eq(lhs: &Self::Point, rhs: &Self::Point) -> bool {
-        lhs == rhs
+        },
+        add: |lhs: &ProjectivePoint, rhs: &ProjectivePoint| *lhs + *rhs,
+        neg: |point: &ProjectivePoint| -*point,
+        mul: |point: &ProjectivePoint, scalar: &Secp256r1ScalarField| *point * *scalar,
+        eq: |lhs: &ProjectivePoint, rhs: &ProjectivePoint| lhs == rhs,
     }
 }
 
-impl CurveGroup for Ristretto255 {
-    type Point = RistrettoPoint;
-    type Scalar = Ristretto255ScalarField;
-
-    fn identity() -> Self::Point {
-        RistrettoPoint::identity()
-    }
-
-    fn generator() -> Self::Point {
-        RISTRETTO_BASEPOINT_POINT
-    }
-
-    fn random_scalar() -> Self::Scalar {
-        loop {
-            let mut bytes = [0u8; 64];
-            with_group_rng(|rng| rng.fill_bytes(&mut bytes));
-            let scalar = Ristretto255ScalarField::from_bytes_mod_order_wide(&bytes);
-            if scalar != Ristretto255ScalarField::zero() {
-                return scalar;
+impl_curve_group_adapter! {
+    Bls12381G1 {
+        point: G1Projective,
+        scalar: Bls12381ScalarField,
+        identity: G1Projective::zero(),
+        generator: G1Projective::generator(),
+        random_scalar: {
+            loop {
+                let scalar = with_group_rng(Bls12381ScalarField::rand);
+                if !scalar.is_zero() {
+                    return scalar;
+                }
             }
-        }
+        },
+        add: |lhs: &G1Projective, rhs: &G1Projective| *lhs + *rhs,
+        neg: |point: &G1Projective| -*point,
+        mul: |point: &G1Projective, scalar: &Bls12381ScalarField| *point * *scalar,
+        eq: |lhs: &G1Projective, rhs: &G1Projective| lhs == rhs,
     }
+}
 
-    fn add(lhs: &Self::Point, rhs: &Self::Point) -> Self::Point {
-        lhs + rhs
-    }
-
-    fn neg(point: &Self::Point) -> Self::Point {
-        -point
-    }
-
-    fn mul(point: &Self::Point, scalar: &Self::Scalar) -> Self::Point {
-        point * scalar
-    }
-
-    fn eq(lhs: &Self::Point, rhs: &Self::Point) -> bool {
-        lhs == rhs
+impl_curve_group_adapter! {
+    Ristretto255 {
+        point: RistrettoPoint,
+        scalar: Ristretto255ScalarField,
+        identity: RistrettoPoint::identity(),
+        generator: RISTRETTO_BASEPOINT_POINT,
+        random_scalar: {
+            loop {
+                let mut bytes = [0u8; 64];
+                with_group_rng(|rng| rng.fill_bytes(&mut bytes));
+                let scalar = Ristretto255ScalarField::from_bytes_mod_order_wide(&bytes);
+                if scalar != Ristretto255ScalarField::zero() {
+                    return scalar;
+                }
+            }
+        },
+        add: |lhs: &RistrettoPoint, rhs: &RistrettoPoint| lhs + rhs,
+        neg: |point: &RistrettoPoint| -point,
+        mul: |point: &RistrettoPoint, scalar: &Ristretto255ScalarField| point * scalar,
+        eq: |lhs: &RistrettoPoint, rhs: &RistrettoPoint| lhs == rhs,
     }
 }
 
@@ -452,42 +505,6 @@ impl TryFrom<Point<Secp256k1>> for PublicKey<33> {
             return Err(Error::InvalidPublicKey);
         }
         Affine::from(point).try_into()
-    }
-}
-
-impl From<ProjectivePoint> for Point<Secp256r1> {
-    fn from(point: ProjectivePoint) -> Self {
-        Self::new(point)
-    }
-}
-
-impl From<Point<Secp256r1>> for ProjectivePoint {
-    fn from(point: Point<Secp256r1>) -> Self {
-        point.inner
-    }
-}
-
-impl From<G1Projective> for Point<Bls12381G1> {
-    fn from(point: G1Projective) -> Self {
-        Self::new(point)
-    }
-}
-
-impl From<Point<Bls12381G1>> for G1Projective {
-    fn from(point: Point<Bls12381G1>) -> Self {
-        point.inner
-    }
-}
-
-impl From<RistrettoPoint> for Point<Ristretto255> {
-    fn from(point: RistrettoPoint) -> Self {
-        Self::new(point)
-    }
-}
-
-impl From<Point<Ristretto255>> for RistrettoPoint {
-    fn from(point: Point<Ristretto255>) -> Self {
-        point.inner
     }
 }
 
@@ -539,7 +556,7 @@ mod tests {
 
     fn group_laws<G>()
     where
-        G: CyclicGroup,
+        G: CryptographicGroup,
         G::Element: Eq + std::fmt::Debug,
     {
         let a = G::generator() * G::random_scalar();

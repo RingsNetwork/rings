@@ -19,7 +19,6 @@ use crate::error::Result;
 pub mod elgamal;
 pub mod group;
 pub mod keys;
-pub mod secp256k1_elgamal;
 pub mod signers;
 mod types;
 use elliptic_curve::generic_array::typenum::U32;

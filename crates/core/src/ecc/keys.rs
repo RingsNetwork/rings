@@ -1,4 +1,22 @@
-//! Key and DID abstractions shared by signing, sessions, and encryption.
+//! Account-signing keys and DID derivation.
+//!
+//! This module is deliberately scoped to account identity and session
+//! verification:
+//!
+//! - [`SigningSecretKey`] owns account-signing secret material.
+//! - [`VerificationPublicKey`] owns the explicit public key needed by
+//!   non-recoverable signature schemes.
+//! - [`AccountVerifier`] is the session-facing verifier. Recoverable schemes
+//!   can use a DID plus algorithm; non-recoverable schemes carry a public key.
+//!
+//! ElGamal encryption keys live in [`crate::ecc::elgamal`], where they can be
+//! parameterized by any finite cyclic group. Keeping encryption keys out of this
+//! module avoids implying that account identity keys and message-encryption
+//! keys are the same cryptographic object.
+//!
+//! DID derivation uses domain-separated public-key transcripts:
+//! `algorithm || 0x00 || raw_public_key`. This prevents equal raw bytes under
+//! different algorithms from resolving to the same account DID.
 
 use rand::RngCore;
 use rand::SeedableRng;
@@ -15,39 +33,15 @@ use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
 
-/// A value that has a stable Rings DID.
-pub trait DidSubject {
-    /// Derive or return the Rings DID for this subject.
-    fn did(&self) -> Did;
+fn public_key_transcript(algorithm: &str, raw_bytes: &[u8]) -> Vec<u8> {
+    let mut out = algorithm.as_bytes().to_vec();
+    out.push(0);
+    out.extend_from_slice(raw_bytes);
+    out
 }
 
-/// Common public-key material behavior.
-pub trait PublicKeyMaterial: DidSubject {
-    /// Stable lower-case algorithm name.
-    fn algorithm(&self) -> &'static str;
-
-    /// Raw public key bytes.
-    fn raw_bytes(&self) -> &[u8];
-
-    /// Stable transcript binding bytes.
-    fn transcript_bytes(&self) -> Vec<u8> {
-        let mut out = self.algorithm().as_bytes().to_vec();
-        out.push(0);
-        out.extend_from_slice(self.raw_bytes());
-        out
-    }
-}
-
-/// Common secret-key material behavior.
-pub trait SecretKeyMaterial {
-    /// Public key type produced by this secret.
-    type PublicKey: PublicKeyMaterial;
-
-    /// Stable lower-case algorithm name.
-    fn algorithm(&self) -> &'static str;
-
-    /// Public key corresponding to this secret.
-    fn public_key(&self) -> Result<Self::PublicKey>;
+fn domain_separated_address(algorithm: &str, raw_bytes: &[u8]) -> PublicKeyAddress {
+    PublicKeyAddress::from_slice(&keccak256(&public_key_transcript(algorithm, raw_bytes))[12..])
 }
 
 /// Signature algorithm used by an account signing key.
@@ -65,13 +59,6 @@ pub enum SignatureAlgorithm {
     Ed25519,
     /// BLS12-381 signatures with G1 public keys and G2 signatures.
     Bls12381,
-}
-
-/// Encryption algorithm used for message encryption.
-#[derive(Deserialize, Serialize, Debug, Clone, Copy, Eq, PartialEq)]
-pub enum EncryptionAlgorithm {
-    /// EC-ElGamal over secp256k1.
-    Secp256k1ElGamal,
 }
 
 /// Public key used for signature verification and account addressing.
@@ -129,27 +116,6 @@ pub enum SigningSecretKey {
     Bls12381(SecretKey),
 }
 
-/// Public key used for message encryption.
-#[derive(Deserialize, Serialize, Debug, Clone, Copy, Eq, PartialEq)]
-pub enum EncryptionPublicKey {
-    /// secp256k1 public key used by the current EC-ElGamal adapter.
-    Secp256k1(PublicKey<33>),
-}
-
-/// Secret key used for message decryption.
-#[derive(Deserialize, Serialize, Debug, Clone, Copy, Eq, PartialEq)]
-pub enum EncryptionSecretKey {
-    /// secp256k1 secret key used by the current EC-ElGamal adapter.
-    Secp256k1(SecretKey),
-}
-
-/// An encryption keypair, intentionally separate from the signing keypair.
-#[derive(Deserialize, Serialize, Debug, Clone, Copy, Eq, PartialEq)]
-pub struct EncryptionKeyPair {
-    secret: EncryptionSecretKey,
-    public: EncryptionPublicKey,
-}
-
 impl SignatureAlgorithm {
     /// Stable lower-case algorithm name.
     pub fn as_str(self) -> &'static str {
@@ -166,15 +132,6 @@ impl SignatureAlgorithm {
     /// Whether the public key can be recovered from a message signature.
     pub fn is_recoverable(self) -> bool {
         matches!(self, Self::Secp256k1 | Self::Eip191 | Self::Bip137)
-    }
-}
-
-impl EncryptionAlgorithm {
-    /// Stable lower-case algorithm name.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Secp256k1ElGamal => "secp256k1-elgamal",
-        }
     }
 }
 
@@ -221,29 +178,23 @@ impl VerificationPublicKey {
         }
     }
 
-    fn domain_separated_address(&self) -> PublicKeyAddress {
-        PublicKeyAddress::from_slice(&keccak256(&self.transcript_bytes())[12..])
+    /// Domain-separated transcript bytes used to derive non-recoverable DIDs.
+    pub fn transcript_bytes(&self) -> Vec<u8> {
+        public_key_transcript(self.algorithm().as_str(), self.raw_bytes())
     }
-}
 
-impl DidSubject for VerificationPublicKey {
-    fn did(&self) -> Did {
+    fn domain_separated_address(&self) -> PublicKeyAddress {
+        domain_separated_address(self.algorithm().as_str(), self.raw_bytes())
+    }
+
+    /// DID represented by this verification key.
+    pub fn did(&self) -> Did {
         match self {
             Self::Secp256k1(pk) | Self::Eip191(pk) | Self::Bip137(pk) => pk.address().into(),
             Self::Secp256r1(_) | Self::Ed25519(_) | Self::Bls12381(_) => {
                 self.domain_separated_address().into()
             }
         }
-    }
-}
-
-impl PublicKeyMaterial for VerificationPublicKey {
-    fn algorithm(&self) -> &'static str {
-        self.algorithm().as_str()
-    }
-
-    fn raw_bytes(&self) -> &[u8] {
-        self.raw_bytes()
     }
 }
 
@@ -344,8 +295,9 @@ impl AccountVerifier {
     }
 }
 
-impl DidSubject for AccountVerifier {
-    fn did(&self) -> Did {
+impl AccountVerifier {
+    /// DID represented by this verifier.
+    pub fn did(&self) -> Did {
         match self {
             Self::Recoverable { did, .. } => *did,
             Self::PublicKey(public_key) => public_key.did(),
@@ -425,10 +377,9 @@ impl SigningSecretKey {
     }
 }
 
-impl SecretKeyMaterial for SigningSecretKey {
-    type PublicKey = VerificationPublicKey;
-
-    fn algorithm(&self) -> &'static str {
+impl SigningSecretKey {
+    /// Stable lower-case algorithm name.
+    pub fn algorithm(&self) -> &'static str {
         match self {
             Self::Secp256k1(_) => SignatureAlgorithm::Secp256k1.as_str(),
             Self::Eip191(_) => SignatureAlgorithm::Eip191.as_str(),
@@ -439,7 +390,8 @@ impl SecretKeyMaterial for SigningSecretKey {
         }
     }
 
-    fn public_key(&self) -> Result<Self::PublicKey> {
+    /// Public verification key corresponding to this signing secret.
+    pub fn public_key(&self) -> Result<VerificationPublicKey> {
         Ok(match self {
             Self::Secp256k1(sk) => VerificationPublicKey::Secp256k1(sk.pubkey()),
             Self::Eip191(sk) => VerificationPublicKey::Eip191(sk.pubkey()),
@@ -448,117 +400,6 @@ impl SecretKeyMaterial for SigningSecretKey {
             Self::Ed25519(sk) => VerificationPublicKey::Ed25519(sk.public_key()?),
             Self::Bls12381(sk) => VerificationPublicKey::Bls12381(signers::bls::public_key(sk)?),
         })
-    }
-}
-
-impl EncryptionPublicKey {
-    /// Encryption algorithm for this public key.
-    pub fn algorithm(&self) -> EncryptionAlgorithm {
-        match self {
-            Self::Secp256k1(_) => EncryptionAlgorithm::Secp256k1ElGamal,
-        }
-    }
-
-    /// Extract the current secp256k1 ElGamal public key.
-    pub fn secp256k1(self) -> Result<PublicKey<33>> {
-        match self {
-            Self::Secp256k1(pk) => Ok(pk),
-        }
-    }
-}
-
-impl PublicKeyMaterial for EncryptionPublicKey {
-    fn algorithm(&self) -> &'static str {
-        self.algorithm().as_str()
-    }
-
-    fn raw_bytes(&self) -> &[u8] {
-        match self {
-            Self::Secp256k1(pk) => &pk.0,
-        }
-    }
-}
-
-impl DidSubject for EncryptionPublicKey {
-    fn did(&self) -> Did {
-        PublicKeyAddress::from_slice(&keccak256(&self.transcript_bytes())[12..]).into()
-    }
-}
-
-impl EncryptionSecretKey {
-    /// Generate a random encryption secret key.
-    pub fn random() -> Self {
-        Self::Secp256k1(SecretKey::random())
-    }
-
-    /// Extract the current secp256k1 ElGamal secret key.
-    pub fn secp256k1(self) -> Result<SecretKey> {
-        match self {
-            Self::Secp256k1(sk) => Ok(sk),
-        }
-    }
-}
-
-impl SecretKeyMaterial for EncryptionSecretKey {
-    type PublicKey = EncryptionPublicKey;
-
-    fn algorithm(&self) -> &'static str {
-        match self {
-            Self::Secp256k1(_) => EncryptionAlgorithm::Secp256k1ElGamal.as_str(),
-        }
-    }
-
-    fn public_key(&self) -> Result<Self::PublicKey> {
-        Ok(match self {
-            Self::Secp256k1(sk) => EncryptionPublicKey::Secp256k1(sk.pubkey()),
-        })
-    }
-}
-
-impl EncryptionKeyPair {
-    /// Generate a random encryption keypair.
-    pub fn random() -> Self {
-        let secret = EncryptionSecretKey::random();
-        let public = secret.public_key().expect("valid encryption secret key");
-        Self { secret, public }
-    }
-
-    /// Public half of this encryption keypair.
-    pub fn public_key(&self) -> EncryptionPublicKey {
-        self.public
-    }
-
-    /// Secret half of this encryption keypair.
-    pub fn secret_key(&self) -> EncryptionSecretKey {
-        self.secret
-    }
-}
-
-impl From<PublicKey<33>> for EncryptionPublicKey {
-    fn from(pk: PublicKey<33>) -> Self {
-        Self::Secp256k1(pk)
-    }
-}
-
-impl From<SecretKey> for EncryptionSecretKey {
-    fn from(sk: SecretKey) -> Self {
-        Self::Secp256k1(sk)
-    }
-}
-
-impl TryFrom<EncryptionPublicKey> for PublicKey<33> {
-    type Error = Error;
-
-    fn try_from(key: EncryptionPublicKey) -> Result<Self> {
-        key.secp256k1()
-    }
-}
-
-impl TryFrom<EncryptionSecretKey> for SecretKey {
-    type Error = Error;
-
-    fn try_from(key: EncryptionSecretKey) -> Result<Self> {
-        key.secp256k1()
     }
 }
 
@@ -694,17 +535,6 @@ mod tests {
         assert_eq!(ed.transcript_bytes(), expected_transcript);
         assert_ne!(secp.did(), ed.did());
         assert_eq!(ed.did(), AccountVerifier::PublicKey(ed.clone()).did());
-    }
-
-    #[test]
-    fn encryption_key_has_separate_subject_id() {
-        let secret = EncryptionSecretKey::random();
-        let public = secret.public_key().unwrap();
-        let verification_key =
-            VerificationPublicKey::Secp256k1(secret.secp256k1().unwrap().pubkey());
-
-        assert_ne!(public.did(), verification_key.did());
-        assert_eq!(public.algorithm(), EncryptionAlgorithm::Secp256k1ElGamal);
     }
 
     #[test]
