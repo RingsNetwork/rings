@@ -218,8 +218,9 @@ pub(super) mod spec {
         if pred == me {
             return None;
         }
-        match current.first() {
-            Some(&head) if dist(me, pred) >= dist(me, head) => None,
+        let old_head = current.iter().copied().min_by_key(|&did| dist(me, did));
+        match old_head {
+            Some(head) if dist(me, pred) >= dist(me, head) => None,
             _ => Some(pred),
         }
     }
@@ -464,6 +465,19 @@ fn correct_stabilize_without_predecessor_still_notifies_successor() {
 fn correct_stabilize_self_predecessor_does_not_query_self() {
     let dids = Layout::Even(3).dids();
     assert_correct_stabilize_matches_spec(dids[0], &[dids[1]], &[dids[2]], Some(dids[0]));
+}
+
+/// The production successor list is distance-sorted by `SuccessorSeq::update`;
+/// the spec mirror must not depend on the raw order of test fixtures.
+#[test]
+fn correct_stabilize_unsorted_current_successors_matches_spec() {
+    let dids = Layout::Even(6).dids();
+    assert_correct_stabilize_matches_spec(
+        dids[0],
+        &[dids[3], dids[1]],
+        &[dids[4], dids[5], dids[0]],
+        Some(dids[2]),
+    );
 }
 
 /// Empty TopoInfo is a no-op when the node has no successor to notify.

@@ -232,6 +232,18 @@ mod tests {
     }
 
     #[test]
+    fn test_successor_extend_sorts_unordered_input() -> Result<()> {
+        let dids = gen_ordered_dids(6);
+        let succ = SuccessorSeq::new(dids[0], 3);
+
+        succ.extend(&[dids[4], dids[2], dids[5], dids[1], dids[3]])?;
+
+        assert_eq!(succ.list()?, dids[1..4]);
+        assert_eq!(succ.min()?, dids[1]);
+        Ok(())
+    }
+
+    #[test]
     fn test_successor_remove() -> Result<()> {
         let dids = gen_ordered_dids(4);
 

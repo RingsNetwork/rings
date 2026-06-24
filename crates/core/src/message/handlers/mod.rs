@@ -75,7 +75,13 @@ impl MessageHandler {
             .get_connection(peer)
             .ok_or(Error::SwarmMissDidInTable(peer))?;
         let dht_ev = self.dht.join_then_sync(conn).await?;
-        self.handle_dht_events(&dht_ev).await
+        // The local join has completed. Follow-up convergence messages are
+        // best-effort: a peer can churn before these sends complete, and that
+        // must not suppress the application-level Connected event.
+        if let Err(e) = self.handle_dht_events(&dht_ev).await {
+            tracing::warn!("Failed to handle dht events while joining {peer}: {e:?}");
+        }
+        Ok(())
     }
 
     pub(crate) async fn leave_dht(&self, peer: Did) -> Result<()> {
