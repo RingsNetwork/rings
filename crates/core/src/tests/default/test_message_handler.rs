@@ -1,5 +1,9 @@
 use std::str::FromStr;
+#[cfg(feature = "dummy")]
+use std::sync::Arc;
 
+#[cfg(feature = "dummy")]
+use rings_transport::connections::dummy_controlled;
 use rings_transport::core::transport::WebrtcConnectionState;
 use tokio::time::sleep;
 use tokio::time::Duration;
@@ -14,9 +18,19 @@ use crate::message::Encoder;
 use crate::message::FindSuccessorReportHandler;
 use crate::message::FindSuccessorThen;
 use crate::message::Message;
+#[cfg(feature = "dummy")]
+use crate::message::MessageHandler;
 use crate::prelude::vnode::VNodeOperation;
+#[cfg(feature = "dummy")]
+use crate::swarm::callback::SwarmCallback;
 use crate::tests::default::prepare_node;
 use crate::tests::manually_establish_connection;
+
+#[cfg(feature = "dummy")]
+struct NoopCallback;
+
+#[cfg(feature = "dummy")]
+impl SwarmCallback for NoopCallback {}
 
 #[tokio::test]
 async fn test_handle_join() -> Result<()> {
@@ -31,6 +45,40 @@ async fn test_handle_join() -> Result<()> {
         .successors()
         .list()?
         .contains(&key2.address().into()));
+    Ok(())
+}
+
+#[cfg(feature = "dummy")]
+#[tokio::test]
+async fn test_join_dht_keeps_local_join_when_convergence_send_fails() -> Result<()> {
+    dummy_controlled::enable(true);
+    dummy_controlled::set_max_message_size(0);
+
+    let key1 = SecretKey::random();
+    let key2 = SecretKey::random();
+    let node1 = prepare_node(key1).await;
+    let node2 = prepare_node(key2).await;
+    manually_establish_connection(&node1.swarm, &node2.swarm).await;
+
+    assert!(
+        node1.dht().successors().list()?.is_empty(),
+        "controlled delivery should prevent automatic DataChannelOpen join"
+    );
+
+    dummy_controlled::enable(false);
+    dummy_controlled::set_max_message_size(1);
+
+    let handler = MessageHandler::new(node1.swarm.transport.clone(), Arc::new(NoopCallback));
+    let join_result = handler.join_dht(node2.did()).await;
+
+    dummy_controlled::set_max_message_size(0);
+
+    assert!(
+        join_result.is_ok(),
+        "join must not fail when follow-up convergence sends fail: {join_result:?}"
+    );
+    assert!(node1.dht().successors().list()?.contains(&node2.did()));
+
     Ok(())
 }
 

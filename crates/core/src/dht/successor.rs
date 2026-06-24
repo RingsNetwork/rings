@@ -244,6 +244,44 @@ mod tests {
     }
 
     #[test]
+    fn test_successor_extend_is_order_independent() -> Result<()> {
+        let dids = gen_ordered_dids(7);
+        let expected = vec![dids[1], dids[2], dids[3]];
+        let orders = [
+            vec![dids[6], dids[5], dids[4], dids[3], dids[2], dids[1]],
+            vec![dids[1], dids[2], dids[3], dids[4], dids[5], dids[6]],
+            vec![
+                dids[0], dids[3], dids[1], dids[6], dids[2], dids[1], dids[5],
+            ],
+            vec![dids[4], dids[2], dids[6], dids[1], dids[3], dids[0]],
+        ];
+
+        for order in orders {
+            let succ = SuccessorSeq::new(dids[0], 3);
+            succ.extend(&order)?;
+            assert_eq!(succ.list()?, expected, "order was {order:?}");
+            assert_eq!(succ.min()?, dids[1]);
+            assert_eq!(succ.max()?, dids[3]);
+            assert!(!succ.contains(&dids[0])?, "self must never be a successor");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_successor_extend_sorts_across_ring_wrap() -> Result<()> {
+        let dids = gen_ordered_dids(7);
+        let succ = SuccessorSeq::new(dids[4], 3);
+
+        succ.extend(&[dids[2], dids[6], dids[0], dids[5], dids[3], dids[1]])?;
+
+        assert_eq!(succ.list()?, vec![dids[5], dids[6], dids[0]]);
+        assert_eq!(succ.min()?, dids[5]);
+        assert_eq!(succ.max()?, dids[0]);
+        Ok(())
+    }
+
+    #[test]
     fn test_successor_remove() -> Result<()> {
         let dids = gen_ordered_dids(4);
 

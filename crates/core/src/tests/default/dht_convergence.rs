@@ -480,6 +480,42 @@ fn correct_stabilize_unsorted_current_successors_matches_spec() {
     );
 }
 
+/// A predecessor that is farther than the old successor head may still be
+/// learned as a backup successor, but must not trigger the improved-successor
+/// query side effect.
+#[test]
+fn correct_stabilize_farther_predecessor_does_not_query() {
+    let dids = Layout::Even(6).dids();
+    assert_correct_stabilize_matches_spec(
+        dids[0],
+        &[dids[3], dids[1]],
+        &[dids[4], dids[5]],
+        Some(dids[2]),
+    );
+}
+
+/// Duplicate candidates and self references are ignored by `SuccessorSeq`,
+/// then the merged known set is truncated to the K nearest forward nodes.
+#[test]
+fn correct_stabilize_deduplicates_self_and_truncates_candidates() {
+    let dids = Layout::Even(8).dids();
+    assert_correct_stabilize_matches_spec(
+        dids[0],
+        &[dids[4], dids[0], dids[2], dids[2]],
+        &[dids[1], dids[3], dids[5], dids[0]],
+        Some(dids[2]),
+    );
+}
+
+/// `CorrectStabilize` imports all but the last entry from the successor's
+/// successor list. A close node in the last position must not be learned from
+/// this operation.
+#[test]
+fn correct_stabilize_ignores_last_topo_successor() {
+    let dids = Layout::Even(6).dids();
+    assert_correct_stabilize_matches_spec(dids[0], &[dids[4]], &[dids[5], dids[1]], None);
+}
+
 /// Empty TopoInfo is a no-op when the node has no successor to notify.
 #[test]
 fn correct_stabilize_empty_topo_without_successor_is_noop() {
