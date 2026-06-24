@@ -14,9 +14,7 @@ struct PublicKeyVisitor<const SIZE: usize>;
 // /// twist from https://docs.rs/libsecp256k1/latest/src/libsecp256k1/lib.rs.html#335-344
 impl<const SIZE: usize> Serialize for PublicKey<SIZE> {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where
-        S: serde::ser::Serializer,
-    {
+    where S: serde::ser::Serializer {
         serializer.serialize_str(
             &base58_monero::encode_check(&self.0[..]).map_err(serde::ser::Error::custom)?,
         )
@@ -103,9 +101,7 @@ impl<'de, const SIZE: usize> serde::de::Visitor<'de> for PublicKeyVisitor<SIZE> 
     }
 
     fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
-    where
-        E: serde::de::Error,
-    {
+    where E: serde::de::Error {
         let value =
             base58_monero::decode_check(value).map_err(|_| E::custom(Error::PublicKeyBadFormat))?;
         if SIZE == 33 {
@@ -118,9 +114,7 @@ impl<'de, const SIZE: usize> serde::de::Visitor<'de> for PublicKeyVisitor<SIZE> 
 
 impl<'de, const SIZE: usize> Deserialize<'de> for PublicKey<SIZE> {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::de::Deserializer<'de>,
-    {
+    where D: serde::de::Deserializer<'de> {
         deserializer.deserialize_str(PublicKeyVisitor)
     }
 }

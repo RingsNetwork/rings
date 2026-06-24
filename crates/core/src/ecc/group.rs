@@ -353,7 +353,7 @@ impl CurveGroup for Bls12381G1 {
 
     fn random_scalar() -> Self::Scalar {
         loop {
-            let scalar = with_group_rng(|rng| Bls12381ScalarField::rand(rng));
+            let scalar = with_group_rng(Bls12381ScalarField::rand);
             if !scalar.is_zero() {
                 return scalar;
             }

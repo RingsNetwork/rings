@@ -22,14 +22,11 @@ pub type GroupCiphertext<G> = Vec<(<G as GroupOps>::Element, <G as GroupOps>::El
 pub struct ElGamal<G>(PhantomData<G>);
 
 impl<G> ElGamal<G>
-where
-    G: CyclicGroup,
+where G: CyclicGroup
 {
     /// Encrypt group elements under the given public group element.
     pub fn encrypt<I>(message: I, public_key: G::Element) -> GroupCiphertext<G>
-    where
-        I: IntoIterator<Item = G::Element>,
-    {
+    where I: IntoIterator<Item = G::Element> {
         message
             .into_iter()
             .map(|message_element| {
@@ -56,10 +53,11 @@ where
 
 #[cfg(test)]
 mod test {
-    use rand::Rng;
     use std::ops::Add;
     use std::ops::Mul;
     use std::ops::Neg;
+
+    use rand::Rng;
 
     use super::*;
 

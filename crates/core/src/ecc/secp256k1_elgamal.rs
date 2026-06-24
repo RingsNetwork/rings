@@ -196,8 +196,6 @@ pub fn decrypt(m: &[(CurveEle<33>, CurveEle<33>)], k: SecretKey) -> Result<Strin
 
 #[cfg(test)]
 mod test {
-    use rand::distributions::Alphanumeric;
-    use rand::Rng;
     use std::collections::HashSet;
     use std::time::Instant;
 
@@ -205,6 +203,8 @@ mod test {
     use libsecp256k1::curve::ECMultGenContext;
     use libsecp256k1::curve::Jacobian;
     use libsecp256k1::curve::Scalar;
+    use rand::distributions::Alphanumeric;
+    use rand::Rng;
 
     use super::*;
 

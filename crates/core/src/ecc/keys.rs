@@ -1,11 +1,10 @@
 //! Key and DID abstractions shared by signing, sessions, and encryption.
 
-use serde::Deserialize;
-use serde::Serialize;
-
 use rand::RngCore;
 use rand::SeedableRng;
 use rand_hc::Hc128Rng;
+use serde::Deserialize;
+use serde::Serialize;
 
 use super::keccak256;
 use super::signers;
