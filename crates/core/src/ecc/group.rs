@@ -7,8 +7,8 @@
 //!   inverse, equality, and scalar action on group elements.
 //! - [`CyclicGroup`] adds a distinguished generator `g`; every element in the
 //!   subgroup used by the cryptographic algorithm is representable as `xg`.
-//! - [`CryptographicGroup`] adds non-zero scalar sampling. This is not a group
-//!   axiom; it belongs to cryptographic algorithms such as ElGamal key
+//! - [`CryptographicGroup`] adds explicit non-zero scalar sampling. This is not
+//!   a group axiom; it belongs to cryptographic algorithms such as ElGamal key
 //!   generation and encryption randomness.
 //! - [`CurveGroup`] is the adapter boundary for elliptic-curve libraries. A
 //!   marker type such as [`Secp256k1`] or [`Bls12381G1`] supplies native point
@@ -58,6 +58,18 @@ use crate::error::Error;
 use crate::error::Result;
 
 /// Additive group abstraction.
+///
+/// Implementors model one finite additive group. The expected laws are:
+///
+/// - `add_ref` is associative and commutative.
+/// - `identity` is the neutral element.
+/// - `neg_ref(a)` is the inverse of `a`.
+/// - `mul_ref(a, x)` is the scalar action of `x` on `a`.
+///
+/// The std `Add`, `Neg`, and `Mul` bounds keep the wrapped element convenient to
+/// use in tests and callers. Algorithms should prefer the reference-based
+/// methods below so a curve adapter can call its native borrowed operations
+/// without cloning large point representations.
 pub trait GroupOps {
     /// Group element type.
     type Element: Clone
@@ -69,6 +81,21 @@ pub trait GroupOps {
 
     /// Additive identity element.
     fn identity() -> Self::Element;
+
+    /// Group addition on borrowed elements.
+    fn add_ref(lhs: &Self::Element, rhs: &Self::Element) -> Self::Element {
+        lhs.clone() + rhs.clone()
+    }
+
+    /// Group inverse on a borrowed element.
+    fn neg_ref(element: &Self::Element) -> Self::Element {
+        -element.clone()
+    }
+
+    /// Scalar action on a borrowed element and scalar.
+    fn mul_ref(element: &Self::Element, scalar: &Self::Scalar) -> Self::Element {
+        element.clone() * scalar.clone()
+    }
 }
 
 /// Cyclic group abstraction with a distinguished generator.
@@ -84,11 +111,38 @@ pub trait CyclicGroup: GroupOps {
 
 /// Cryptographic group extension that can sample non-zero scalars.
 pub trait CryptographicGroup: CyclicGroup {
-    /// Generate a fresh non-zero random scalar.
-    fn random_scalar() -> Self::Scalar;
+    /// Generate a fresh non-zero random scalar from an explicit RNG.
+    fn random_scalar_with_rng(rng: &mut impl RngCore) -> Self::Scalar;
+
+    /// Generate a fresh non-zero random scalar from the default thread-local RNG.
+    fn random_scalar() -> Self::Scalar {
+        with_group_rng(|rng| Self::random_scalar_with_rng(rng))
+    }
 }
 
 /// Curve-specific group operations implemented by curve markers.
+///
+/// This trait is the adapter boundary between abstract finite-group algorithms
+/// and concrete elliptic-curve libraries. For a marker `C`, the native
+/// `Point` type must represent elements of one finite abelian group, and
+/// `Scalar` must represent the scalar ring used for the group action.
+///
+/// Implementors must preserve the following laws after accounting for native
+/// representation details such as projective coordinates:
+///
+/// - `identity` is a left and right identity for `add`.
+/// - `add` is associative and commutative over the represented group.
+/// - `neg(p)` is the additive inverse of `p`.
+/// - `eq` is an equivalence relation over group elements, not merely raw
+///   representation equality; equivalent projective representatives must
+///   compare equal.
+/// - `eq` is compatible with `add`, `neg`, `mul`, and `generator_mul`.
+/// - `generator_mul(s)` is equivalent to `mul(generator(), s)`.
+///
+/// Because this abstraction keeps `Scalar` opaque and only requires `Clone`,
+/// scalar-ring laws such as distributivity cannot be stated directly in the
+/// trait bounds. They are still semantic requirements of any cryptographic
+/// curve adapter.
 pub trait CurveGroup {
     /// Native point representation for this curve group.
     type Point: Clone;
@@ -122,8 +176,13 @@ pub trait CurveGroup {
 
 /// Curve adapter extension that can sample non-zero scalars for cryptography.
 pub trait CurveScalarSampler: CurveGroup {
-    /// Generate a fresh non-zero random scalar.
-    fn random_scalar() -> Self::Scalar;
+    /// Generate a fresh non-zero random scalar from an explicit RNG.
+    fn random_scalar_with_rng(rng: &mut impl RngCore) -> Self::Scalar;
+
+    /// Generate a fresh non-zero random scalar from the default thread-local RNG.
+    fn random_scalar() -> Self::Scalar {
+        with_group_rng(|rng| Self::random_scalar_with_rng(rng))
+    }
 }
 
 /// Generic group element for curve marker `C`.
@@ -235,6 +294,18 @@ impl<C: CurveGroup> GroupOps for Group<C> {
     fn identity() -> Self::Element {
         Point::new(C::identity())
     }
+
+    fn add_ref(lhs: &Self::Element, rhs: &Self::Element) -> Self::Element {
+        Point::new(C::add(&lhs.inner, &rhs.inner))
+    }
+
+    fn neg_ref(element: &Self::Element) -> Self::Element {
+        Point::new(C::neg(&element.inner))
+    }
+
+    fn mul_ref(element: &Self::Element, scalar: &Self::Scalar) -> Self::Element {
+        Point::new(C::mul(&element.inner, &scalar.inner))
+    }
 }
 
 impl<C: CurveGroup> CyclicGroup for Group<C> {
@@ -248,8 +319,8 @@ impl<C: CurveGroup> CyclicGroup for Group<C> {
 }
 
 impl<C: CurveScalarSampler> CryptographicGroup for Group<C> {
-    fn random_scalar() -> Self::Scalar {
-        Scalar::new(C::random_scalar())
+    fn random_scalar_with_rng(rng: &mut impl RngCore) -> Self::Scalar {
+        Scalar::new(C::random_scalar_with_rng(rng))
     }
 }
 
@@ -299,7 +370,7 @@ macro_rules! impl_curve_group_adapter {
             scalar: $scalar:ty,
             identity: $identity:expr,
             generator: $generator:expr,
-            random_scalar: $random_scalar:block,
+            random_scalar: |$rng:ident| $random_scalar:block,
             add: $add:expr,
             neg: $neg:expr,
             mul: $mul:expr,
@@ -336,7 +407,8 @@ macro_rules! impl_curve_group_adapter {
         }
 
         impl CurveScalarSampler for $curve {
-            fn random_scalar() -> Self::Scalar {
+            fn random_scalar_with_rng(rng: &mut impl RngCore) -> Self::Scalar {
+                let $rng = rng;
                 $random_scalar
             }
         }
@@ -400,8 +472,8 @@ impl CurveGroup for Secp256k1 {
 }
 
 impl CurveScalarSampler for Secp256k1 {
-    fn random_scalar() -> Self::Scalar {
-        with_group_rng(|rng| libsecp256k1::SecretKey::random(rng).into())
+    fn random_scalar_with_rng(rng: &mut impl RngCore) -> Self::Scalar {
+        libsecp256k1::SecretKey::random(rng).into()
     }
 }
 
@@ -411,11 +483,11 @@ impl_curve_group_adapter! {
         scalar: Secp256r1ScalarField,
         identity: ProjectivePoint::IDENTITY,
         generator: ProjectivePoint::GENERATOR,
-        random_scalar: {
+        random_scalar: |rng| {
             loop {
-                let scalar = with_group_rng(|rng| Secp256r1ScalarField::random(rng));
+                let scalar = Secp256r1ScalarField::random(&mut *rng);
                 if !bool::from(scalar.is_zero()) {
-                    return scalar;
+                    break scalar;
                 }
             }
         },
@@ -432,11 +504,11 @@ impl_curve_group_adapter! {
         scalar: Bls12381ScalarField,
         identity: G1Projective::zero(),
         generator: G1Projective::generator(),
-        random_scalar: {
+        random_scalar: |rng| {
             loop {
-                let scalar = with_group_rng(Bls12381ScalarField::rand);
+                let scalar = Bls12381ScalarField::rand(&mut *rng);
                 if !scalar.is_zero() {
-                    return scalar;
+                    break scalar;
                 }
             }
         },
@@ -453,13 +525,13 @@ impl_curve_group_adapter! {
         scalar: Ristretto255ScalarField,
         identity: RistrettoPoint::identity(),
         generator: RISTRETTO_BASEPOINT_POINT,
-        random_scalar: {
+        random_scalar: |rng| {
             loop {
                 let mut bytes = [0u8; 64];
-                with_group_rng(|rng| rng.fill_bytes(&mut bytes));
+                rng.fill_bytes(&mut bytes);
                 let scalar = Ristretto255ScalarField::from_bytes_mod_order_wide(&bytes);
                 if scalar != Ristretto255ScalarField::zero() {
-                    return scalar;
+                    break scalar;
                 }
             }
         },
@@ -559,14 +631,25 @@ mod tests {
         G: CryptographicGroup,
         G::Element: Eq + std::fmt::Debug,
     {
-        let a = G::generator() * G::random_scalar();
-        let b = G::generator() * G::random_scalar();
-        let c = G::generator() * G::random_scalar();
+        let scalar_a = G::random_scalar();
+        let scalar_b = G::random_scalar();
+        let scalar_c = G::random_scalar();
+        let a = G::generator() * scalar_a.clone();
+        let b = G::generator() * scalar_b;
+        let c = G::generator() * scalar_c;
 
         assert_eq!(a.clone() + G::identity(), a);
         assert_eq!(G::identity() + a.clone(), a);
         assert_eq!(a.clone() + -a.clone(), G::identity());
         assert_eq!((a.clone() + b.clone()) + c.clone(), a + (b + c));
+        assert_eq!(
+            G::generator_mul(scalar_a.clone()),
+            G::mul_ref(&G::generator(), &scalar_a)
+        );
+        assert_eq!(
+            G::generator_mul(scalar_a.clone()),
+            G::generator() * scalar_a
+        );
     }
 
     #[test]

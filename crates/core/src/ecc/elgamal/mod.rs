@@ -42,11 +42,18 @@
 //! 4. compute `c2 = m + s`
 //!
 //! Decryption computes `m = c2 - x c1`.
+//!
+//! The pure group operation is [`ElGamal::encrypt_block`]. Randomness is passed
+//! into [`ElGamal::encrypt_with_rng`] explicitly; [`ElGamal::encrypt`] is only a
+//! convenience shell around the default thread-local sampler.
 
 use std::marker::PhantomData;
 
+use rand::RngCore;
+
 use crate::ecc::group::Bls12381G1;
 use crate::ecc::group::CryptographicGroup;
+use crate::ecc::group::CyclicGroup;
 use crate::ecc::group::Group;
 use crate::ecc::group::GroupOps;
 use crate::ecc::group::Ristretto255Group;
@@ -140,13 +147,8 @@ where G::Scalar: Clone
 }
 
 impl<G> ElGamalSecretKey<G>
-where G: CryptographicGroup
+where G: CyclicGroup
 {
-    /// Generate a fresh non-zero ElGamal secret scalar.
-    pub fn random() -> Self {
-        Self::from_scalar(G::random_scalar())
-    }
-
     /// Derive the public key `h = xg`.
     pub fn public_key(&self) -> ElGamalPublicKey<G> {
         ElGamalPublicKey::from_element(G::generator_mul(self.scalar.clone()))
@@ -154,15 +156,8 @@ where G: CryptographicGroup
 }
 
 impl<G> ElGamalKeyPair<G>
-where G: CryptographicGroup
+where G: GroupOps
 {
-    /// Generate a fresh ElGamal key pair.
-    pub fn random() -> Self {
-        let secret = ElGamalSecretKey::<G>::random();
-        let public = secret.public_key();
-        Self { secret, public }
-    }
-
     /// Borrow the public key.
     pub fn public_key(&self) -> &ElGamalPublicKey<G> {
         &self.public
@@ -174,24 +169,41 @@ where G: CryptographicGroup
     }
 }
 
-impl<G> ElGamal<G>
+impl<G> ElGamalSecretKey<G>
 where G: CryptographicGroup
 {
-    /// Encrypt group elements under the given public group element.
-    pub fn encrypt<I>(message: I, public_key: &ElGamalPublicKey<G>) -> GroupCiphertext<G>
-    where I: IntoIterator<Item = G::Element> {
-        message
-            .into_iter()
-            .map(|message_element| {
-                let ephemeral_scalar = G::random_scalar();
-                let shared_secret = public_key.as_element().clone() * ephemeral_scalar.clone();
-                let c1 = G::generator_mul(ephemeral_scalar);
-                let c2 = message_element + shared_secret;
-                (c1, c2)
-            })
-            .collect()
+    /// Generate a fresh non-zero ElGamal secret scalar from an explicit RNG.
+    pub fn random_with_rng(rng: &mut impl RngCore) -> Self {
+        Self::from_scalar(G::random_scalar_with_rng(rng))
     }
 
+    /// Generate a fresh non-zero ElGamal secret scalar.
+    pub fn random() -> Self {
+        Self::from_scalar(G::random_scalar())
+    }
+}
+
+impl<G> ElGamalKeyPair<G>
+where G: CryptographicGroup
+{
+    /// Generate a fresh ElGamal key pair from an explicit RNG.
+    pub fn random_with_rng(rng: &mut impl RngCore) -> Self {
+        let secret = ElGamalSecretKey::<G>::random_with_rng(rng);
+        let public = secret.public_key();
+        Self { secret, public }
+    }
+
+    /// Generate a fresh ElGamal key pair.
+    pub fn random() -> Self {
+        let secret = ElGamalSecretKey::<G>::random();
+        let public = secret.public_key();
+        Self { secret, public }
+    }
+}
+
+impl<G> ElGamal<G>
+where G: GroupOps
+{
     /// Decrypt ciphertext pairs into group elements with the given scalar.
     pub fn decrypt(
         ciphertext: &[(G::Element, G::Element)],
@@ -199,7 +211,65 @@ where G: CryptographicGroup
     ) -> Vec<G::Element> {
         ciphertext
             .iter()
-            .map(|(c1, c2)| c2.clone() + -(c1.clone() * secret_key.as_scalar().clone()))
+            .map(|(c1, c2)| {
+                let shared_secret = G::mul_ref(c1, secret_key.as_scalar());
+                G::add_ref(c2, &G::neg_ref(&shared_secret))
+            })
+            .collect()
+    }
+}
+
+impl<G> ElGamal<G>
+where G: CyclicGroup
+{
+    /// Encrypt one group element using caller-supplied randomness.
+    ///
+    /// This is the pure ElGamal kernel over additive group notation:
+    /// `(c1, c2) = (rg, m + rh)` where `h` is the public key and `r` is the
+    /// ephemeral scalar. It performs no sampling and has no hidden side effects.
+    pub fn encrypt_block(
+        message_element: G::Element,
+        public_key: &ElGamalPublicKey<G>,
+        ephemeral_scalar: G::Scalar,
+    ) -> (G::Element, G::Element) {
+        let shared_secret = G::mul_ref(public_key.as_element(), &ephemeral_scalar);
+        let c1 = G::generator_mul(ephemeral_scalar);
+        let c2 = G::add_ref(&message_element, &shared_secret);
+        (c1, c2)
+    }
+}
+
+impl<G> ElGamal<G>
+where G: CryptographicGroup
+{
+    /// Encrypt group elements under the given public group element using an
+    /// explicit RNG for ephemeral scalars.
+    pub fn encrypt_with_rng<I>(
+        message: I,
+        public_key: &ElGamalPublicKey<G>,
+        rng: &mut impl RngCore,
+    ) -> GroupCiphertext<G>
+    where
+        I: IntoIterator<Item = G::Element>,
+    {
+        message
+            .into_iter()
+            .map(|message_element| {
+                let ephemeral_scalar = G::random_scalar_with_rng(rng);
+                Self::encrypt_block(message_element, public_key, ephemeral_scalar)
+            })
+            .collect()
+    }
+
+    /// Encrypt group elements under the given public group element.
+    pub fn encrypt<I>(message: I, public_key: &ElGamalPublicKey<G>) -> GroupCiphertext<G>
+    where I: IntoIterator<Item = G::Element> {
+        message
+            .into_iter()
+            .map(|message_element| {
+                let ephemeral_scalar = G::random_scalar();
+                Self::encrypt_block(message_element, public_key, ephemeral_scalar)
+            })
             .collect()
     }
 }
@@ -210,7 +280,9 @@ mod test {
     use std::ops::Mul;
     use std::ops::Neg;
 
-    use rand::Rng;
+    use rand::RngCore;
+    use rand::SeedableRng;
+    use rand_hc::Hc128Rng;
 
     use super::*;
     use crate::ecc::group::Bls12381G1;
@@ -270,9 +342,24 @@ mod test {
     }
 
     impl CryptographicGroup for TestGroup {
-        fn random_scalar() -> Self::Scalar {
-            TestScalar(rand::thread_rng().gen_range(1..TEST_GROUP_ORDER))
+        fn random_scalar_with_rng(rng: &mut impl RngCore) -> Self::Scalar {
+            TestScalar(rng.next_u32() % (TEST_GROUP_ORDER - 1) + 1)
         }
+    }
+
+    #[test]
+    fn encrypt_block_is_pure_group_operation() {
+        let secret_key = ElGamalSecretKey::<TestGroup>::from_scalar(TestScalar(5));
+        let public_key = secret_key.public_key();
+
+        let ciphertext =
+            ElGamal::<TestGroup>::encrypt_block(TestElement(7), &public_key, TestScalar(3));
+
+        assert_eq!(ciphertext, (TestElement(3), TestElement(22)));
+        assert_eq!(
+            ElGamal::<TestGroup>::decrypt(&[ciphertext], &secret_key),
+            vec![TestElement(7)]
+        );
     }
 
     #[test]
@@ -293,9 +380,25 @@ mod test {
         let secret_key = ElGamalSecretKey::<TestGroup>::from_scalar(TestScalar(42));
         let public_key = secret_key.public_key();
         let message = vec![TestElement(7); 4];
-        let ciphertext = ElGamal::<TestGroup>::encrypt(message, &public_key);
+        let mut rng = Hc128Rng::seed_from_u64(7);
+        let ciphertext = ElGamal::<TestGroup>::encrypt_with_rng(message, &public_key, &mut rng);
 
         assert!(ciphertext.windows(2).any(|pair| pair[0].0 != pair[1].0));
+    }
+
+    #[test]
+    fn encrypt_with_rng_is_reproducible_for_same_seed() {
+        let secret_key = ElGamalSecretKey::<TestGroup>::from_scalar(TestScalar(42));
+        let public_key = secret_key.public_key();
+        let message = vec![TestElement(7), TestElement(8), TestElement(9)];
+        let mut rng_a = Hc128Rng::seed_from_u64(42);
+        let mut rng_b = Hc128Rng::seed_from_u64(42);
+
+        let ciphertext_a =
+            ElGamal::<TestGroup>::encrypt_with_rng(message.clone(), &public_key, &mut rng_a);
+        let ciphertext_b = ElGamal::<TestGroup>::encrypt_with_rng(message, &public_key, &mut rng_b);
+
+        assert_eq!(ciphertext_a, ciphertext_b);
     }
 
     fn encrypt_decrypt_over_curve_group<G>()
@@ -303,13 +406,15 @@ mod test {
         G: CryptographicGroup,
         G::Element: Eq + std::fmt::Debug,
     {
-        let keypair = ElGamalKeyPair::<G>::random();
+        let mut rng = Hc128Rng::seed_from_u64(11);
+        let keypair = ElGamalKeyPair::<G>::random_with_rng(&mut rng);
         let message = vec![
             G::generator(),
-            G::generator_mul(G::random_scalar()),
+            G::generator_mul(G::random_scalar_with_rng(&mut rng)),
             G::identity(),
         ];
-        let ciphertext = ElGamal::<G>::encrypt(message.clone(), keypair.public_key());
+        let ciphertext =
+            ElGamal::<G>::encrypt_with_rng(message.clone(), keypair.public_key(), &mut rng);
 
         assert_eq!(
             ElGamal::<G>::decrypt(&ciphertext, keypair.secret_key()),

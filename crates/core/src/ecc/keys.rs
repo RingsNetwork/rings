@@ -18,6 +18,8 @@
 //! `algorithm || 0x00 || raw_public_key`. This prevents equal raw bytes under
 //! different algorithms from resolving to the same account DID.
 
+use std::cell::RefCell;
+
 use rand::RngCore;
 use rand::SeedableRng;
 use rand_hc::Hc128Rng;
@@ -32,6 +34,10 @@ use super::SecretKey;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
+
+thread_local! {
+    static KEY_RNG: RefCell<Hc128Rng> = RefCell::new(Hc128Rng::from_entropy());
+}
 
 fn public_key_transcript(algorithm: &str, raw_bytes: &[u8]) -> Vec<u8> {
     let mut out = algorithm.as_bytes().to_vec();
@@ -306,11 +312,16 @@ impl AccountVerifier {
 }
 
 impl Ed25519SecretKey {
+    /// Generate a random Ed25519 signing seed from an explicit RNG.
+    pub fn random_with_rng(rng: &mut impl RngCore) -> Self {
+        let mut seed = [0u8; 32];
+        rng.fill_bytes(&mut seed);
+        Self(seed)
+    }
+
     /// Generate a random Ed25519 signing seed.
     pub fn random() -> Self {
-        let mut seed = [0u8; 32];
-        Hc128Rng::from_entropy().fill_bytes(&mut seed);
-        Self(seed)
+        with_key_rng(Self::random_with_rng)
     }
 
     /// Build an Ed25519 signing seed from exact bytes.
@@ -358,6 +369,11 @@ impl SigningSecretKey {
             Self::Ed25519(sk) => sk.sign_raw(msg)?.to_vec(),
             Self::Bls12381(sk) => signers::bls::sign(*sk, msg)?.0.to_vec(),
         })
+    }
+
+    /// Generate an Ed25519 signing secret key.
+    pub fn random_ed25519_with_rng(rng: &mut impl RngCore) -> Self {
+        Self::Ed25519(Ed25519SecretKey::random_with_rng(rng))
     }
 
     /// Generate an Ed25519 signing secret key.
@@ -411,6 +427,13 @@ fn secp256r1_public_key(secret_key: SecretKey) -> PublicKey<33> {
     PublicKey::from_u8(&encoded.as_bytes()[1..]).expect("uncompressed secp256r1 key is 64 bytes")
 }
 
+fn with_key_rng<R>(f: impl FnOnce(&mut Hc128Rng) -> R) -> R {
+    KEY_RNG.with(|rng| {
+        let mut rng = rng.borrow_mut();
+        f(&mut rng)
+    })
+}
+
 fn public_key_from_b58m_exact<const SIZE: usize>(value: &str) -> Result<PublicKey<SIZE>> {
     let bytes = base58_monero::decode_check(value).map_err(|_| Error::PublicKeyBadFormat)?;
     PublicKey::from_exact_u8(&bytes)
@@ -418,6 +441,9 @@ fn public_key_from_b58m_exact<const SIZE: usize>(value: &str) -> Result<PublicKe
 
 #[cfg(test)]
 mod tests {
+    use rand::SeedableRng;
+    use rand_hc::Hc128Rng;
+
     use super::*;
 
     #[test]
@@ -520,6 +546,17 @@ mod tests {
             AccountVerifier::from_account_parts(&pk.to_base58_string().unwrap(), "ed25519")
                 .unwrap(),
             AccountVerifier::PublicKey(VerificationPublicKey::Ed25519(pk))
+        );
+    }
+
+    #[test]
+    fn ed25519_random_with_rng_is_reproducible_for_same_seed() {
+        let mut rng_a = Hc128Rng::seed_from_u64(42);
+        let mut rng_b = Hc128Rng::seed_from_u64(42);
+
+        assert_eq!(
+            SigningSecretKey::random_ed25519_with_rng(&mut rng_a),
+            SigningSecretKey::random_ed25519_with_rng(&mut rng_b)
         );
     }
 

@@ -12,12 +12,26 @@
 //! The point encoding is intentionally local to this adapter. Other curves can
 //! choose different message encodings without changing the ElGamal algorithm or
 //! the finite-group abstraction.
+//!
+//! Plaintext chunks are encoded into 32-byte secp256k1 field candidates as:
+//!
+//! - byte `0`: initial lift-search bias, starting at `0xFF`;
+//! - byte `1`: adapter marker `0x52`;
+//! - byte `2`: plaintext length for this chunk;
+//! - bytes `3..3+len`: the raw plaintext bytes;
+//! - remaining bytes: zero padding.
+//!
+//! `lift_x` may overwrite byte `0` while searching for an x-coordinate that
+//! lies on secp256k1. Decoding therefore ignores byte `0` and validates the
+//! marker, length, and zero padding before returning bytes `3..3+len`. This is
+//! why embedded NUL bytes are preserved instead of being trimmed.
 
 use std::convert::TryFrom;
 use std::convert::TryInto;
 
 use libsecp256k1::curve::Affine;
 use libsecp256k1::curve::Field;
+use rand::RngCore;
 
 use crate::ecc::elgamal::ElGamal;
 use crate::ecc::elgamal::ElGamalPublicKey;
@@ -99,7 +113,12 @@ impl TryFrom<MessagePoints> for String {
     }
 }
 
-/// Convert a string into field elements using a reversible secp256k1 encoding.
+/// Convert a string into field elements using the adapter encoding.
+///
+/// Each plaintext chunk is at most 29 bytes so the field candidate can carry
+/// `0xFF || 0x52 || len || chunk || zero padding`. The first byte is only a
+/// search bias for `lift_x`; the marker and length bytes make the mapping
+/// reversible and preserve leading or embedded NUL bytes.
 pub fn str_to_field(s: &str) -> Vec<Field> {
     s.as_bytes()
         .chunks(FIELD_CHUNK_SIZE)
@@ -116,7 +135,7 @@ pub fn str_to_field(s: &str) -> Vec<Field> {
         .collect()
 }
 
-/// Decode field elements produced by `str_to_field`.
+/// Decode field elements produced by [`str_to_field`].
 pub fn field_to_str(f: &[Field]) -> Result<String> {
     String::from_utf8(f.iter().fold(vec![], |mut acc, x| {
         let mut field = *x;
@@ -142,6 +161,13 @@ fn decode_field_bytes(mut bytes: [u8; 32]) -> Vec<u8> {
     bytes.into_iter().skip_while(|n| *n == 0u8).collect()
 }
 
+/// Lift a field candidate into a secp256k1 affine point.
+///
+/// The initial candidate uses its own parity. If it is not on the curve, the
+/// search decrements byte `0` from `254` to `1` and retries. This keeps bytes
+/// `1..` intact, so decoding can recover the original marker, chunk length, and
+/// plaintext bytes. The panic at `Some(0)` is an invariant failure: for the
+/// adapter's 254 alternate high-byte candidates, at least one should lift.
 fn lift_x(x: &Field, bias: Option<u8>) -> Affine {
     let mut ec = Affine::default();
     let mut x = *x;
@@ -155,7 +181,7 @@ fn lift_x(x: &Field, bias: Option<u8>) -> Affine {
             }
         }
         Some(0) => {
-            panic!("failed to lift x");
+            panic!("failed to lift secp256k1 x-coordinate candidate");
         }
         Some(a) => {
             let mut v = x.b32();
@@ -198,6 +224,20 @@ pub fn encrypt(s: &str, k: PublicKey<33>) -> Result<Vec<(CurveEle<33>, CurveEle<
         .collect()
 }
 
+/// Encrypt a string with caller-supplied randomness for ElGamal ephemerals.
+pub fn encrypt_with_rng(
+    s: &str,
+    k: PublicKey<33>,
+    rng: &mut impl RngCore,
+) -> Result<Vec<(CurveEle<33>, CurveEle<33>)>> {
+    let public_key = ElGamalPublicKey::<Group<Secp256k1>>::from_element(k.try_into()?);
+    let points = MessagePoints::from(Plaintext::from(s));
+    ElGamal::<Group<Secp256k1>>::encrypt_with_rng(points, &public_key, rng)
+        .into_iter()
+        .map(|(c1, c2)| Ok((c1.try_into()?, c2.try_into()?)))
+        .collect()
+}
+
 /// Decrypt ciphertext produced by the current secp256k1 compatibility adapter.
 pub fn decrypt(m: &[(CurveEle<33>, CurveEle<33>)], k: SecretKey) -> Result<String> {
     let secret_key =
@@ -221,6 +261,8 @@ mod test {
     use libsecp256k1::curve::Scalar;
     use rand::distributions::Alphanumeric;
     use rand::Rng;
+    use rand::SeedableRng;
+    use rand_hc::Hc128Rng;
 
     use super::*;
 
@@ -395,6 +437,23 @@ mod test {
             decrypt(&encrypt(&message, pubkey).unwrap(), key).unwrap(),
             message
         );
+    }
+
+    #[test]
+    fn test_encrypt_with_rng_is_reproducible_for_same_seed() {
+        let key =
+            SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")
+                .unwrap();
+        let pubkey = key.pubkey();
+        let message = format!("prefix\0{}tail", "a".repeat(FIELD_CHUNK_SIZE));
+        let mut rng_a = Hc128Rng::seed_from_u64(42);
+        let mut rng_b = Hc128Rng::seed_from_u64(42);
+
+        let ciphertext_a = encrypt_with_rng(&message, pubkey, &mut rng_a).unwrap();
+        let ciphertext_b = encrypt_with_rng(&message, pubkey, &mut rng_b).unwrap();
+
+        assert_eq!(ciphertext_a, ciphertext_b);
+        assert_eq!(decrypt(&ciphertext_a, key).unwrap(), message);
     }
 
     #[test]
