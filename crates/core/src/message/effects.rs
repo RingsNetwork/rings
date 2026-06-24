@@ -341,6 +341,10 @@ impl<'handler> CoreEffectInterpreter<'handler> {
         }
     }
 
+    fn connection_is_satisfied(&self, peer: Did) -> bool {
+        peer == self.transport.dht.did || self.transport.get_connection(peer).is_some()
+    }
+
     /// Interpret one `CoreEffect`, preserving the existing transport behavior.
     pub(crate) async fn run<'payload>(&self, effect: CoreEffect<'payload>) -> Result<()> {
         match effect {
@@ -368,7 +372,7 @@ impl<'handler> CoreEffectInterpreter<'handler> {
                 }
             },
             CoreEffect::Connection(ConnectionFunctor::ConnectDhtPeer { peer }) => {
-                if peer == self.transport.dht.did || self.transport.get_connection(peer).is_some() {
+                if self.connection_is_satisfied(peer) {
                     return Ok(());
                 }
 

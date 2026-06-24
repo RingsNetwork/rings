@@ -28,7 +28,7 @@ use crate::message::MessagePayload;
 impl HandleMsg<QueryForTopoInfoSend> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &QueryForTopoInfoSend) -> Result<()> {
         let info: TopoInfo = TopoInfo::try_from(self.dht.as_ref())?;
-        if msg.did == self.dht.did {
+        if msg.targets(self.dht.did) {
             self.run_effects([PayloadRelayFunctor::send_report_message(
                 ctx,
                 Message::QueryForTopoInfoReport(msg.resp(info)),
@@ -78,7 +78,7 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
             return Ok(());
         }
 
-        if self.dht.did != ctx.relay.destination {
+        if ctx.should_forward_from(self.dht.did) {
             self.run_effects([PayloadRelayFunctor::forward_payload(ctx, None).into()])
                 .await
         } else {
@@ -100,7 +100,7 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<ConnectNodeReport> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &ConnectNodeReport) -> Result<()> {
-        if self.dht.did != ctx.relay.destination {
+        if ctx.should_forward_from(self.dht.did) {
             self.run_effects([PayloadRelayFunctor::forward_payload(ctx, None).into()])
                 .await
         } else {
@@ -117,7 +117,7 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &FindSuccessorSend) -> Result<()> {
         match self.dht.find_successor(msg.did)? {
             PeerRingAction::Some(did) => {
-                if !msg.strict || self.dht.did == msg.did {
+                if msg.accepts_local_successor(self.dht.did) {
                     match &msg.then {
                         FindSuccessorThen::Report(handler) => {
                             self.run_effects([PayloadRelayFunctor::send_report_message(
@@ -149,7 +149,7 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<FindSuccessorReport> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &FindSuccessorReport) -> Result<()> {
-        if self.dht.did != ctx.relay.destination {
+        if ctx.should_forward_from(self.dht.did) {
             return self
                 .run_effects([PayloadRelayFunctor::forward_payload(ctx, None).into()])
                 .await;
@@ -157,7 +157,7 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
 
         match &msg.handler {
             FindSuccessorReportHandler::FixFingerTable | FindSuccessorReportHandler::Connect => {
-                if msg.did != self.dht.did {
+                if msg.reports_remote_successor(self.dht.did) {
                     let offer_msg = self
                         .transport
                         .prepare_connection_offer(msg.did, self.inner_callback())

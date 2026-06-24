@@ -190,6 +190,16 @@ impl MessagePayload {
             .map(Bytes::from)
             .map_err(Error::BincodeSerialize)
     }
+
+    /// Returns whether `local` is the relay destination of this payload.
+    pub(crate) fn is_relay_destination_for(&self, local: Did) -> bool {
+        self.relay.destination == local
+    }
+
+    /// Returns whether `local` should forward this payload to another node.
+    pub(crate) fn should_forward_from(&self, local: Did) -> bool {
+        !self.is_relay_destination_for(local)
+    }
 }
 
 impl MessageVerificationExt for Transaction {
@@ -379,6 +389,26 @@ pub mod test {
 
         let payload = new_test_payload(did2);
         assert!(payload.verify());
+    }
+
+    #[test]
+    fn relay_destination_predicates_name_forwarding_state() -> Result<()> {
+        let local_key = SecretKey::random();
+        let session_sk = SessionSk::new_with_seckey(&local_key)?;
+        let local: Did = local_key.address().into();
+        let remote: Did = SecretKey::random().address().into();
+
+        let local_payload =
+            MessagePayload::new_send(Message::custom(b"local")?, &session_sk, local, local)?;
+        assert!(local_payload.is_relay_destination_for(local));
+        assert!(!local_payload.should_forward_from(local));
+
+        let remote_payload =
+            MessagePayload::new_send(Message::custom(b"remote")?, &session_sk, remote, remote)?;
+        assert!(!remote_payload.is_relay_destination_for(local));
+        assert!(remote_payload.should_forward_from(local));
+
+        Ok(())
     }
 
     /// The sender cuts chunk data at `max_message_size - (MAX_CHUNK_ENVELOPE_OVERHEAD +

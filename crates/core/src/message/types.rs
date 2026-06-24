@@ -59,6 +59,20 @@ pub struct FindSuccessorReport {
     pub handler: FindSuccessorReportHandler,
 }
 
+impl FindSuccessorSend {
+    /// Returns whether this query allows `local` to report its local successor.
+    pub(crate) fn accepts_local_successor(&self, local: Did) -> bool {
+        !self.strict || self.did == local
+    }
+}
+
+impl FindSuccessorReport {
+    /// Returns whether the reported successor is remote from `local`.
+    pub(crate) fn reports_remote_successor(&self, local: Did) -> bool {
+        self.did != local
+    }
+}
+
 /// MessageType use notify the successor about the predecessor inferred by current node.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct NotifyPredecessorSend {
@@ -123,6 +137,11 @@ impl QueryForTopoInfoSend {
             info,
             then: self.then,
         }
+    }
+
+    /// Returns whether this query targets `local`.
+    pub(crate) fn targets(&self, local: Did) -> bool {
+        self.did == local
     }
 }
 
@@ -233,5 +252,70 @@ impl std::fmt::Debug for CustomMessage {
         f.debug_struct("CustomMessage")
             .field("size", &self.0.len())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ecc::SecretKey;
+
+    fn random_did() -> Did {
+        SecretKey::random().address().into()
+    }
+
+    #[test]
+    fn find_successor_send_predicate_names_local_report_rule() {
+        let local = random_did();
+        let remote = random_did();
+        let then = FindSuccessorThen::Report(FindSuccessorReportHandler::None);
+
+        let strict_local = FindSuccessorSend {
+            did: local,
+            strict: true,
+            then: then.clone(),
+        };
+        assert!(strict_local.accepts_local_successor(local));
+
+        let strict_remote = FindSuccessorSend {
+            did: remote,
+            strict: true,
+            then: then.clone(),
+        };
+        assert!(!strict_remote.accepts_local_successor(local));
+
+        let relaxed_remote = FindSuccessorSend {
+            did: remote,
+            strict: false,
+            then,
+        };
+        assert!(relaxed_remote.accepts_local_successor(local));
+    }
+
+    #[test]
+    fn find_successor_report_predicate_names_remote_successor() {
+        let local = random_did();
+        let remote = random_did();
+
+        let local_report = FindSuccessorReport {
+            did: local,
+            handler: FindSuccessorReportHandler::Connect,
+        };
+        assert!(!local_report.reports_remote_successor(local));
+
+        let remote_report = FindSuccessorReport {
+            did: remote,
+            handler: FindSuccessorReportHandler::Connect,
+        };
+        assert!(remote_report.reports_remote_successor(local));
+    }
+
+    #[test]
+    fn topo_info_query_predicate_names_target_node() {
+        let local = random_did();
+        let remote = random_did();
+
+        assert!(QueryForTopoInfoSend::new_for_sync(local).targets(local));
+        assert!(!QueryForTopoInfoSend::new_for_sync(remote).targets(local));
     }
 }

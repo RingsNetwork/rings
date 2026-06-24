@@ -274,7 +274,7 @@ impl HandleMsg<SearchVNode> for MessageHandler {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<FoundVNode> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &FoundVNode) -> Result<()> {
-        if self.dht.did != ctx.relay.destination {
+        if ctx.should_forward_from(self.dht.did) {
             return self
                 .run_effects([PayloadRelayFunctor::forward_payload(ctx, None).into()])
                 .await;

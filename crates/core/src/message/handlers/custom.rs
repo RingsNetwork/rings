@@ -13,7 +13,7 @@ pub(crate) fn custom_message_effects<'payload>(
     local: Did,
     ctx: &'payload MessagePayload,
 ) -> Option<CoreEffect<'payload>> {
-    if local != ctx.relay.destination {
+    if ctx.should_forward_from(local) {
         Some(PayloadRelayFunctor::forward_payload(ctx, None).into())
     } else {
         None
