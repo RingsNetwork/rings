@@ -1,39 +1,47 @@
-//! ElGamal encryption over an abstract cyclic group.
+//! Elgamal Crypto Implementation
 //! ----------------
 //! Algorithm Description
+//! # Encrypt
+//! A second party, Bob, encrypts a message 𝑀 to Alice under her public key (𝐺,𝑞,𝑔,ℎ)
+//! as follows:
+//!    Map the message 𝑀 to an element 𝑚 of 𝐺 using a reversible mapping function.
+//! Choose an integer 𝑦
+//! randomly from {1,…,𝑞−1}
+//! 1. Compute 𝑠:=ℎ𝑦 This is called the shared secret.
+//! 2. Compute 𝑐1:=𝑔𝑦
+//! 3. Compute 𝑐2:=𝑚⋅𝑠
+//! 4. Bob sends the ciphertext (𝑐1,𝑐2) to Alice.
+//!
+//! # Decrypt
+//! Alice decrypts a ciphertext 𝑐1,𝑐2 with her private key 𝑠𝑘 as follows:
+//! 1. Compute 𝑠:=𝑐𝑥1
+//! 2. Compute 𝑠−1, the inverse of 𝑠 in the group 𝐺
+//! 3. Compute 𝑚:=𝑐2⋅𝑠−1
+//!
+//! ref:
+//!    T. ElGamal. A Public Key Cryptosystem and a Signature Scheme Based on Discrete Logarithms. IEEE Trans. Info. Theory, IT 31:469–472, 1985.
+//!    ElGamal encryption <https://en.wikipedia.org/wiki/ElGamal_encryption>
+//!    <http://www.docsdrive.com/pdfs/ansinet/itj/2005/299-306.pdf>
+//!
+//! # Abstract group implementation
 //!
 //! ElGamal is a public-key encryption algorithm over a finite cyclic group. It
 //! is not tied to a particular elliptic curve; an elliptic curve group is one
 //! possible implementation of the group operation.
 //!
-//! # Encrypt
-//! Bob encrypts a message `M` to Alice under her public key `(G, q, g, h)`,
-//! where `G` is a cyclic group of order `q`, `g` is a generator, and
-//! `h = xg` is Alice's public key.
-//!
-//! 1. Map the message `M` to an element `m` of `G` using a reversible mapping.
-//! 2. Choose a fresh random scalar `y` from `{1, ..., q - 1}`.
-//! 3. Compute the shared secret `s := yh`.
-//! 4. Compute `c1 := yg`.
-//! 5. Compute `c2 := m + s` in additive notation.
-//! 6. Send the ciphertext `(c1, c2)` to Alice.
-//!
-//! # Decrypt
-//! Alice decrypts `(c1, c2)` with private scalar `x`:
-//!
-//! 1. Compute `s := xc1`.
-//! 2. Compute the inverse of `s`, written `-s` in additive notation.
-//! 3. Recover `m := c2 - s`.
-//!
 //! In multiplicative notation, `c2 := m * s` and decryption computes
 //! `m := c2 * s^{-1}`. The implementation below uses additive notation because
 //! that is the natural convention for elliptic curve groups.
 //!
-//! ref:
-//! - T. ElGamal. A Public Key Cryptosystem and a Signature Scheme Based on
-//!   Discrete Logarithms. IEEE Trans. Info. Theory, IT 31:469-472, 1985.
-//! - ElGamal encryption <https://en.wikipedia.org/wiki/ElGamal_encryption>
-//! - <http://www.docsdrive.com/pdfs/ansinet/itj/2005/299-306.pdf>
+//! With the group written additively, encryption of a group element `m` under
+//! public key `h = xg` is:
+//!
+//! 1. choose fresh random scalar `r`
+//! 2. compute `c1 = rg`
+//! 3. compute shared secret `s = rh`
+//! 4. compute `c2 = m + s`
+//!
+//! Decryption computes `m = c2 - x c1`.
 
 use std::marker::PhantomData;
 
