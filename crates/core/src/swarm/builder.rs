@@ -61,6 +61,9 @@ impl SwarmBuilder {
     }
 
     /// Sets up the number of slots in the DHT finger table.
+    ///
+    /// `Did` is 160-bit, so values above `DEFAULT_FINGER_TABLE_SIZE` are clamped
+    /// by `FingerTable::new`. A size of zero disables finger maintenance.
     pub fn dht_finger_table_size(mut self, size: usize) -> Self {
         self.dht_finger_table_size = size;
         self

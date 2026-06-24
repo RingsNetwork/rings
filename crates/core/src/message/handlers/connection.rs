@@ -50,6 +50,8 @@ impl HandleMsg<QueryForTopoInfoReport> for MessageHandler {
                 }
             }
             <QueryForTopoInfoReport as Then>::Then::Stabilization => {
+                // Establish stabilization-learned candidates first so the
+                // resulting Notify/Query actions can usually send immediately.
                 if let Some(peer) = msg.info.predecessor {
                     self.connect_dht_peer(peer).await?;
                 }

@@ -27,7 +27,13 @@ pub struct FingerTable {
 
 impl FingerTable {
     /// builder
+    ///
+    /// `Did` is represented by H160, so finger slots above 160 would wrap the
+    /// `2^index` lookup target back into the same 160-bit space. Values above
+    /// [`DEFAULT_FINGER_TABLE_SIZE`] are clamped; zero is allowed for tests that
+    /// intentionally disable finger maintenance.
     pub fn new(did: Did, size: usize) -> Self {
+        let size = size.min(DEFAULT_FINGER_TABLE_SIZE);
         Self {
             did,
             size,
@@ -201,6 +207,17 @@ impl Index<usize> for FingerTable {
 mod test {
     use super::*;
     use crate::dht::tests::gen_ordered_dids;
+
+    #[test]
+    fn test_finger_table_size_bounds() {
+        let did = gen_ordered_dids(1)[0];
+
+        assert_eq!(
+            FingerTable::new(did, DEFAULT_FINGER_TABLE_SIZE + 1).slot_count(),
+            DEFAULT_FINGER_TABLE_SIZE
+        );
+        assert_eq!(FingerTable::new(did, 0).slot_count(), 0);
+    }
 
     #[test]
     fn test_finger_table_get_set_remove() {

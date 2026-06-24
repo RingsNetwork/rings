@@ -95,7 +95,10 @@ pub enum RemoteAction {
     FindVNode(Did),
     /// Need `did_a` to find VirtualNode for operating.
     FindVNodeForOperate(VNodeOperation),
-    /// Let `did_a` [notify](Chord::notify) `did_b`.
+    /// Send a predecessor notification to `did_a`.
+    ///
+    /// `did_a` is the remote recipient from [`PeerRingAction::RemoteAction`].
+    /// This field is the predecessor DID announced in `NotifyPredecessorSend`.
     Notify(Did),
     /// Let `did_a` sync data with it's successor.
     SyncVNodeWithSuccessor(Vec<VirtualNode>),
@@ -203,6 +206,9 @@ impl PeerRing {
     }
 
     /// Same as new with config, but with a given storage and finger table size.
+    ///
+    /// `Did` is 160-bit. Sizes above [`DEFAULT_FINGER_TABLE_SIZE`] are clamped
+    /// by [`FingerTable::new`]; zero is allowed to disable finger maintenance.
     pub fn new_with_storage_and_finger_table_size(
         did: Did,
         succ_max: u8,
@@ -616,7 +622,12 @@ impl CorrectChord<PeerRingAction> for PeerRing {
     }
 
     /// Stabilize Operation:
-    /// Perform stabilization for the successor list.
+    ///
+    /// Mirrors the TLA+-style `CorrectStabilize` operator in
+    /// `tests/default/dht_convergence.rs`.
+    /// The old head is captured before updating successors for the improved-successor
+    /// query check; the remote successor list contributes `but_last`; and notify
+    /// is emitted for the post-update head when that head is not self.
     fn stabilize(&self, info: TopoInfo) -> Result<PeerRingAction> {
         let mut ret = vec![];
         let successors = self.successors();

@@ -67,13 +67,18 @@ impl MessageHandler {
         InnerSwarmCallback::new(self.transport.clone(), self.swarm_callback.clone())
     }
 
-    pub(crate) async fn connect_dht_peer(&self, peer: Did) -> Result<bool> {
+    /// Idempotently establish a DHT-driven transport connection.
+    ///
+    /// Self and already-connected peers are no-ops. `AlreadyConnected` is treated
+    /// as success so concurrent DHT actions racing through `MultiActions` do not
+    /// fail the whole handler.
+    pub(crate) async fn connect_dht_peer(&self, peer: Did) -> Result<()> {
         if peer == self.dht.did || self.transport.get_connection(peer).is_some() {
-            return Ok(false);
+            return Ok(());
         }
 
         match self.transport.connect(peer, self.inner_callback()).await {
-            Ok(()) | Err(Error::AlreadyConnected) => Ok(true),
+            Ok(()) | Err(Error::AlreadyConnected) => Ok(()),
             Err(e) => Err(e),
         }
     }
