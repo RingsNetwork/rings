@@ -57,6 +57,9 @@ At the protocol layer, we have implemented the concept of a Delegated Session Ke
 
 The nucleus of Rings Network is similar to the Actor Model, and it requires that each message type possess a Handler Trait. This allows for the separation of processing system messages, network messages, internal messages, and application-layer messages.
 
+# Migration Notes
+
+- `Session::account_pubkey()` now only returns legacy secp256k1-compatible account public keys. For secp256r1, Ed25519, and BLS12-381 accounts, use `Session::account_verification_pubkey()` or `Session::account_verifier()`.
 
 # Build
 

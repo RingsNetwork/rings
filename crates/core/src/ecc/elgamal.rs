@@ -60,6 +60,11 @@ mod test {
     use rand::Rng;
 
     use super::*;
+    use crate::ecc::group::Bls12381G1;
+    use crate::ecc::group::Group;
+    use crate::ecc::group::Ristretto255Group;
+    use crate::ecc::group::Secp256k1;
+    use crate::ecc::group::Secp256r1;
 
     const TEST_GROUP_ORDER: u32 = 65_521;
 
@@ -135,5 +140,30 @@ mod test {
         let ciphertext = ElGamal::<TestGroup>::encrypt(message, public_key);
 
         assert!(ciphertext.windows(2).any(|pair| pair[0].0 != pair[1].0));
+    }
+
+    fn encrypt_decrypt_over_curve_group<G>()
+    where
+        G: CyclicGroup,
+        G::Element: Eq + std::fmt::Debug,
+    {
+        let secret_key = G::random_scalar();
+        let public_key = G::generator_mul(secret_key.clone());
+        let message = vec![
+            G::generator(),
+            G::generator_mul(G::random_scalar()),
+            G::identity(),
+        ];
+        let ciphertext = ElGamal::<G>::encrypt(message.clone(), public_key);
+
+        assert_eq!(ElGamal::<G>::decrypt(&ciphertext, secret_key), message);
+    }
+
+    #[test]
+    fn supported_curve_groups_encrypt_and_decrypt() {
+        encrypt_decrypt_over_curve_group::<Group<Secp256k1>>();
+        encrypt_decrypt_over_curve_group::<Group<Secp256r1>>();
+        encrypt_decrypt_over_curve_group::<Group<Bls12381G1>>();
+        encrypt_decrypt_over_curve_group::<Ristretto255Group>();
     }
 }

@@ -222,10 +222,7 @@ impl VerificationPublicKey {
     }
 
     fn domain_separated_address(&self) -> PublicKeyAddress {
-        let mut material = self.algorithm().as_str().as_bytes().to_vec();
-        material.push(0);
-        material.extend_from_slice(self.raw_bytes());
-        PublicKeyAddress::from_slice(&keccak256(&material)[12..])
+        PublicKeyAddress::from_slice(&keccak256(&self.transcript_bytes())[12..])
     }
 }
 
@@ -484,10 +481,7 @@ impl PublicKeyMaterial for EncryptionPublicKey {
 
 impl DidSubject for EncryptionPublicKey {
     fn did(&self) -> Did {
-        let mut material = self.algorithm().as_str().as_bytes().to_vec();
-        material.push(0);
-        material.extend_from_slice(self.raw_bytes());
-        PublicKeyAddress::from_slice(&keccak256(&material)[12..]).into()
+        PublicKeyAddress::from_slice(&keccak256(&self.transcript_bytes())[12..]).into()
     }
 }
 
@@ -694,6 +688,10 @@ mod tests {
         let secp = VerificationPublicKey::Secp256k1(pk);
         let ed = VerificationPublicKey::Ed25519(pk);
 
+        let mut expected_transcript = b"ed25519\0".to_vec();
+        expected_transcript.extend_from_slice(&pk.0);
+
+        assert_eq!(ed.transcript_bytes(), expected_transcript);
         assert_ne!(secp.did(), ed.did());
         assert_eq!(ed.did(), AccountVerifier::PublicKey(ed.clone()).did());
     }
