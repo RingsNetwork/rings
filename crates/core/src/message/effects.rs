@@ -26,53 +26,50 @@ use crate::swarm::transport::SwarmTransport;
 
 /// Payload relay base functor.
 #[derive(Clone, Debug)]
-pub(crate) enum PayloadRelayFunctor {
+pub(crate) enum PayloadRelayFunctor<'payload> {
     /// Forward an existing payload through the relay path.
     ForwardPayload {
         /// Payload to forward.
-        payload: Box<MessagePayload>,
+        payload: &'payload MessagePayload,
         /// Optional explicit next hop. `None` preserves current DHT inference.
         next_hop: Option<Did>,
     },
     /// Send a report message using the original request payload.
     SendReportMessage {
         /// Request payload to report against.
-        payload: Box<MessagePayload>,
+        payload: &'payload MessagePayload,
         /// Report message to send.
         msg: Box<Message>,
     },
     /// Reset a relayed payload to a new destination/next-hop.
     ResetDestination {
         /// Payload to relay after resetting destination.
-        payload: Box<MessagePayload>,
+        payload: &'payload MessagePayload,
         /// New destination and next hop.
         next_hop: Did,
     },
 }
 
-impl PayloadRelayFunctor {
+impl<'payload> PayloadRelayFunctor<'payload> {
     /// Create a payload-forwarding effect.
-    pub(crate) fn forward_payload(payload: &MessagePayload, next_hop: Option<Did>) -> Self {
-        Self::ForwardPayload {
-            payload: Box::new(payload.clone()),
-            next_hop,
-        }
+    pub(crate) fn forward_payload(
+        payload: &'payload MessagePayload,
+        next_hop: Option<Did>,
+    ) -> Self {
+        Self::ForwardPayload { payload, next_hop }
     }
 
     /// Create a report-message effect.
-    pub(crate) fn send_report_message(payload: &MessagePayload, msg: Message) -> Self {
+    pub(crate) fn send_report_message(payload: &'payload MessagePayload, msg: Message) -> Self {
         Self::SendReportMessage {
-            payload: Box::new(payload.clone()),
+            payload,
             msg: Box::new(msg),
         }
     }
 
     /// Create a destination-reset effect.
-    pub(crate) fn reset_destination(payload: &MessagePayload, next_hop: Did) -> Self {
-        Self::ResetDestination {
-            payload: Box::new(payload.clone()),
-            next_hop,
-        }
+    pub(crate) fn reset_destination(payload: &'payload MessagePayload, next_hop: Did) -> Self {
+        Self::ResetDestination { payload, next_hop }
     }
 }
 
@@ -132,36 +129,39 @@ impl ConnectionFunctor {
 
 /// The coproduct of Core effect functors.
 #[derive(Clone, Debug)]
-pub(crate) enum CoreEffect {
+pub(crate) enum CoreEffect<'payload> {
     /// Payload relay functor.
-    Payload(PayloadRelayFunctor),
+    Payload(PayloadRelayFunctor<'payload>),
     /// New message send functor.
     Message(MessageSendFunctor),
     /// Connection management functor.
     Connection(ConnectionFunctor),
 }
 
-impl From<PayloadRelayFunctor> for CoreEffect {
-    fn from(effect: PayloadRelayFunctor) -> Self {
+impl<'payload> From<PayloadRelayFunctor<'payload>> for CoreEffect<'payload> {
+    fn from(effect: PayloadRelayFunctor<'payload>) -> Self {
         Self::Payload(effect)
     }
 }
 
-impl From<MessageSendFunctor> for CoreEffect {
+impl<'payload> From<MessageSendFunctor> for CoreEffect<'payload> {
     fn from(effect: MessageSendFunctor) -> Self {
         Self::Message(effect)
     }
 }
 
-impl From<ConnectionFunctor> for CoreEffect {
+impl<'payload> From<ConnectionFunctor> for CoreEffect<'payload> {
     fn from(effect: ConnectionFunctor) -> Self {
         Self::Connection(effect)
     }
 }
 
-impl CoreEffect {
+impl<'payload> CoreEffect<'payload> {
     /// Create a payload-forwarding effect.
-    pub(crate) fn forward_payload(payload: &MessagePayload, next_hop: Option<Did>) -> Self {
+    pub(crate) fn forward_payload(
+        payload: &'payload MessagePayload,
+        next_hop: Option<Did>,
+    ) -> Self {
         PayloadRelayFunctor::forward_payload(payload, next_hop).into()
     }
 
@@ -176,12 +176,12 @@ impl CoreEffect {
     }
 
     /// Create a report-message effect.
-    pub(crate) fn send_report_message(payload: &MessagePayload, msg: Message) -> Self {
+    pub(crate) fn send_report_message(payload: &'payload MessagePayload, msg: Message) -> Self {
         PayloadRelayFunctor::send_report_message(payload, msg).into()
     }
 
     /// Create a destination-reset effect.
-    pub(crate) fn reset_destination(payload: &MessagePayload, next_hop: Did) -> Self {
+    pub(crate) fn reset_destination(payload: &'payload MessagePayload, next_hop: Did) -> Self {
         PayloadRelayFunctor::reset_destination(payload, next_hop).into()
     }
 
@@ -279,7 +279,10 @@ impl From<DhtActionFunctor> for PeerRingAction {
 
 impl DhtActionFunctor {
     /// Lower this DHT functor into the Core effect coproduct.
-    pub(crate) fn lower(self, is_connected: impl Fn(Did) -> bool) -> Vec<CoreEffect> {
+    pub(crate) fn lower<'payload>(
+        self,
+        is_connected: impl Fn(Did) -> bool,
+    ) -> Vec<CoreEffect<'payload>> {
         match self {
             Self::None => Vec::new(),
             Self::FindSuccessorForConnect { next, did } => {
@@ -336,10 +339,10 @@ impl DhtActionFunctor {
 /// `MultiActions` preserve their old concurrent best-effort behavior in
 /// `MessageHandler::handle_dht_events`, so this function intentionally handles
 /// only the leaf actions emitted by Core DHT operations.
-pub(crate) fn lower_dht_action(
+pub(crate) fn lower_dht_action<'payload>(
     act: &PeerRingAction,
     is_connected: impl Fn(Did) -> bool,
-) -> Result<Vec<CoreEffect>> {
+) -> Result<Vec<CoreEffect<'payload>>> {
     DhtActionFunctor::try_from(act).map(|functor| functor.lower(is_connected))
 }
 
@@ -360,23 +363,17 @@ impl CoreEffectInterpreter {
     }
 
     /// Interpret one `CoreEffect`, preserving the existing transport behavior.
-    pub(crate) async fn run(&self, effect: CoreEffect) -> Result<()> {
+    pub(crate) async fn run<'payload>(&self, effect: CoreEffect<'payload>) -> Result<()> {
         match effect {
             CoreEffect::Payload(effect) => match effect {
                 PayloadRelayFunctor::ForwardPayload { payload, next_hop } => {
-                    self.transport
-                        .forward_payload(payload.as_ref(), next_hop)
-                        .await
+                    self.transport.forward_payload(payload, next_hop).await
                 }
                 PayloadRelayFunctor::SendReportMessage { payload, msg } => {
-                    self.transport
-                        .send_report_message(payload.as_ref(), *msg)
-                        .await
+                    self.transport.send_report_message(payload, *msg).await
                 }
                 PayloadRelayFunctor::ResetDestination { payload, next_hop } => {
-                    self.transport
-                        .reset_destination(payload.as_ref(), next_hop)
-                        .await
+                    self.transport.reset_destination(payload, next_hop).await
                 }
             },
             CoreEffect::Message(effect) => match effect {
@@ -407,9 +404,9 @@ impl CoreEffectInterpreter {
     }
 
     /// Interpret effects in order and fail on the first execution error.
-    pub(crate) async fn run_all(
+    pub(crate) async fn run_all<'payload>(
         &self,
-        effects: impl IntoIterator<Item = CoreEffect>,
+        effects: impl IntoIterator<Item = CoreEffect<'payload>>,
     ) -> Result<()> {
         for effect in effects {
             self.run(effect).await?;
@@ -440,7 +437,9 @@ mod tests {
         )
     }
 
-    fn single_effect(effects: Result<Vec<CoreEffect>>) -> Result<CoreEffect> {
+    fn single_effect<'payload>(
+        effects: Result<Vec<CoreEffect<'payload>>>,
+    ) -> Result<CoreEffect<'payload>> {
         let effects = effects?;
         assert_eq!(effects.len(), 1);
         effects
@@ -449,35 +448,60 @@ mod tests {
             .ok_or_else(|| Error::InvalidMessage("expected one effect".to_string()))
     }
 
-    fn assert_dht_action_functor_isomorphism(functor: DhtActionFunctor) -> Result<()> {
+    fn assert_dht_action_functor_section(functor: DhtActionFunctor) -> Result<()> {
         let action: PeerRingAction = functor.clone().into();
         assert_eq!(DhtActionFunctor::try_from(&action)?, functor);
         Ok(())
     }
 
-    #[test]
-    fn dht_action_functor_isomorphic_to_peer_ring_leaf_actions() -> Result<()> {
-        assert_dht_action_functor_isomorphism(DhtActionFunctor::None)?;
-
-        assert_dht_action_functor_isomorphism(DhtActionFunctor::FindSuccessorForConnect {
-            next: did(),
-            did: did(),
-        })?;
-
-        assert_dht_action_functor_isomorphism(DhtActionFunctor::QueryForSuccessorList {
-            successor: did(),
-        })?;
-        assert_dht_action_functor_isomorphism(DhtActionFunctor::TryConnect { peer: did() })?;
-
-        assert_dht_action_functor_isomorphism(DhtActionFunctor::Notify {
-            target: did(),
-            predecessor: did(),
-        })?;
+    fn assert_dht_action_functor_retraction(action: PeerRingAction) -> Result<()> {
+        let functor = DhtActionFunctor::try_from(&action)?;
+        let roundtrip: PeerRingAction = functor.into();
+        assert_eq!(roundtrip, action);
         Ok(())
     }
 
     #[test]
-    fn send_report_message_effect_owns_payload_and_message() -> Result<()> {
+    fn dht_action_functor_isomorphic_to_peer_ring_leaf_actions() -> Result<()> {
+        assert_dht_action_functor_section(DhtActionFunctor::None)?;
+
+        assert_dht_action_functor_section(DhtActionFunctor::FindSuccessorForConnect {
+            next: did(),
+            did: did(),
+        })?;
+
+        assert_dht_action_functor_section(DhtActionFunctor::QueryForSuccessorList {
+            successor: did(),
+        })?;
+        assert_dht_action_functor_section(DhtActionFunctor::TryConnect { peer: did() })?;
+
+        assert_dht_action_functor_section(DhtActionFunctor::Notify {
+            target: did(),
+            predecessor: did(),
+        })?;
+
+        assert_dht_action_functor_retraction(PeerRingAction::None)?;
+        assert_dht_action_functor_retraction(PeerRingAction::RemoteAction(
+            did(),
+            PeerRingRemoteAction::FindSuccessorForConnect(did()),
+        ))?;
+        assert_dht_action_functor_retraction(PeerRingAction::RemoteAction(
+            did(),
+            PeerRingRemoteAction::QueryForSuccessorList,
+        ))?;
+        assert_dht_action_functor_retraction(PeerRingAction::RemoteAction(
+            did(),
+            PeerRingRemoteAction::TryConnect,
+        ))?;
+        assert_dht_action_functor_retraction(PeerRingAction::RemoteAction(
+            did(),
+            PeerRingRemoteAction::Notify(did()),
+        ))?;
+        Ok(())
+    }
+
+    #[test]
+    fn send_report_message_effect_borrows_payload_and_owns_message() -> Result<()> {
         let destination = did();
         let payload = payload(destination)?;
         let effect = CoreEffect::send_report_message(
@@ -492,19 +516,27 @@ mod tests {
                 payload: effect_payload,
                 msg,
             }) => {
-                assert_eq!(effect_payload.as_ref(), &payload);
+                assert!(std::ptr::eq(effect_payload, &payload));
                 match *msg {
                     Message::NotifyPredecessorReport(report) => assert_eq!(report.did, destination),
-                    msg => panic!("expected NotifyPredecessorReport, got {msg:?}"),
+                    msg => {
+                        return Err(Error::InvalidMessage(format!(
+                            "expected NotifyPredecessorReport, got {msg:?}"
+                        )))
+                    }
                 }
             }
-            effect => panic!("expected SendReportMessage, got {effect:?}"),
+            effect => {
+                return Err(Error::InvalidMessage(format!(
+                    "expected SendReportMessage, got {effect:?}"
+                )))
+            }
         }
         Ok(())
     }
 
     #[test]
-    fn reset_destination_effect_owns_payload_and_next_hop() -> Result<()> {
+    fn reset_destination_effect_borrows_payload_and_next_hop() -> Result<()> {
         let destination = did();
         let next_hop = did();
         let payload = payload(destination)?;
@@ -515,10 +547,14 @@ mod tests {
                 payload: effect_payload,
                 next_hop: effect_next_hop,
             }) => {
-                assert_eq!(effect_payload.as_ref(), &payload);
+                assert!(std::ptr::eq(effect_payload, &payload));
                 assert_eq!(effect_next_hop, next_hop);
             }
-            effect => panic!("expected ResetDestination, got {effect:?}"),
+            effect => {
+                return Err(Error::InvalidMessage(format!(
+                    "expected ResetDestination, got {effect:?}"
+                )))
+            }
         }
         Ok(())
     }

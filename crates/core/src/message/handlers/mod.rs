@@ -62,9 +62,9 @@ impl MessageHandler {
         InnerSwarmCallback::new(self.transport.clone(), self.swarm_callback.clone())
     }
 
-    pub(crate) async fn run_effects(
+    pub(crate) async fn run_effects<'payload>(
         &self,
-        effects: impl IntoIterator<Item = CoreEffect>,
+        effects: impl IntoIterator<Item = CoreEffect<'payload>>,
     ) -> Result<()> {
         CoreEffectInterpreter::new(self.transport.clone(), self.swarm_callback.clone())
             .run_all(effects)

@@ -10,7 +10,10 @@ use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 
-pub(crate) fn custom_message_effects(local: Did, ctx: &MessagePayload) -> Vec<CoreEffect> {
+pub(crate) fn custom_message_effects<'payload>(
+    local: Did,
+    ctx: &'payload MessagePayload,
+) -> Vec<CoreEffect<'payload>> {
     if local != ctx.relay.destination {
         vec![CoreEffect::forward_payload(ctx, None)]
     } else {
@@ -31,6 +34,7 @@ impl HandleMsg<CustomMessage> for MessageHandler {
 mod tests {
     use super::*;
     use crate::ecc::SecretKey;
+    use crate::error::Error;
     use crate::message::Message;
     use crate::session::SessionSk;
 
@@ -61,16 +65,25 @@ mod tests {
         let payload = custom_payload(remote)?;
         let effects = custom_message_effects(local, &payload);
 
-        assert_eq!(effects.len(), 1);
-        match &effects[0] {
-            CoreEffect::Payload(PayloadRelayFunctor::ForwardPayload {
+        match effects.as_slice() {
+            [CoreEffect::Payload(PayloadRelayFunctor::ForwardPayload {
                 payload: forwarded,
                 next_hop,
-            }) => {
-                assert_eq!(forwarded.as_ref(), &payload);
+            })] => {
+                assert!(std::ptr::eq(*forwarded, &payload));
                 assert_eq!(*next_hop, None);
             }
-            effect => panic!("expected ForwardPayload, got {effect:?}"),
+            [effect] => {
+                return Err(Error::InvalidMessage(format!(
+                    "expected ForwardPayload, got {effect:?}"
+                )))
+            }
+            effects => {
+                return Err(Error::InvalidMessage(format!(
+                    "expected one ForwardPayload effect, got {}",
+                    effects.len()
+                )))
+            }
         }
         Ok(())
     }
