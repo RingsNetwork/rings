@@ -50,6 +50,12 @@ const STORAGE_LOOKUP_OBSERVATION_TTL_MS: i64 = 30_000;
 /// Maximum number of read-repair miss observation buckets retained per transport.
 pub(crate) const STORAGE_LOOKUP_OBSERVATION_CAPACITY: usize = 1024;
 
+// Invariant: after every successful observation-buffer mutation,
+// observations.len() <= STORAGE_LOOKUP_OBSERVATION_CAPACITY.
+// Invariant: after evict_storage_lookup_observations(observations, now), every
+// retained bucket satisfies
+// now.saturating_sub(observed_at_ms) <= STORAGE_LOOKUP_OBSERVATION_TTL_MS. This
+// is the freshness witness required before PlacementMiss.owner drives read-repair.
 type StorageLookupObservationMap = BTreeMap<StorageLookupObservationKey, StorageLookupObservation>;
 
 pub struct SwarmTransport {
@@ -78,6 +84,11 @@ fn storage_lookup_observation_now_ms() -> i64 {
     Utc::now().timestamp_millis()
 }
 
+// Post: observations.len() <= STORAGE_LOOKUP_OBSERVATION_CAPACITY.
+// Post: forall bucket in observations,
+// now_ms.saturating_sub(bucket.observed_at_ms) <= STORAGE_LOOKUP_OBSERVATION_TTL_MS.
+// Preservation: removing expired buckets and then oldest buckets cannot create
+// a stale bucket or increase the number of buckets.
 fn evict_storage_lookup_observations(observations: &mut StorageLookupObservationMap, now_ms: i64) {
     observations.retain(|_, observation| {
         now_ms.saturating_sub(observation.observed_at_ms) <= STORAGE_LOOKUP_OBSERVATION_TTL_MS
@@ -260,6 +271,10 @@ impl SwarmTransport {
     /// This removes any previous miss observations for the same resource and
     /// redundancy so targeted read-repair never drains misses from an older
     /// lookup round.
+    ///
+    /// Post: no bucket exists for `(resource, redundancy)`.
+    /// Preservation: eviction establishes the capacity and freshness invariants
+    /// before removing the lookup-round bucket.
     pub(crate) fn start_storage_lookup(&self, resource: Did, redundancy: u16) -> Result<()> {
         let mut observations = self
             .storage_lookup_observations
@@ -275,6 +290,12 @@ impl SwarmTransport {
     }
 
     /// Buffer placement misses observed by an in-flight storage lookup.
+    ///
+    /// Post: retained observation buckets satisfy the capacity and freshness
+    /// invariants.
+    /// Post: if the `(resource, redundancy)` bucket survives capacity eviction,
+    /// it contains the supplied misses and its freshness witness is this call's
+    /// observation time.
     pub(crate) fn observe_storage_misses(
         &self,
         resource: Did,
@@ -308,6 +329,12 @@ impl SwarmTransport {
     }
 
     /// Drain fresh miss observations for a found entry.
+    ///
+    /// Post: returned misses come only from a bucket that survived freshness
+    /// eviction at this call's observation time.
+    /// Post: no bucket remains for `(resource, redundancy)`.
+    /// Preservation: eviction before drain prevents stale owners from driving
+    /// late read-repair.
     pub(crate) fn take_storage_misses(
         &self,
         resource: Did,
