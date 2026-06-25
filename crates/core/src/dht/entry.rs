@@ -183,10 +183,10 @@ impl Entry {
         self.did == other.did
     }
 
-    fn trim_count(current_len: usize, incoming_len: usize) -> usize {
-        current_len
-            .saturating_add(incoming_len)
-            .saturating_sub(ENTRY_DATA_MAX_LEN)
+    // Post: result is a suffix of `data` and result.len() <= ENTRY_DATA_MAX_LEN.
+    fn cap_recent_data(data: Vec<Encoded>) -> Vec<Encoded> {
+        let skip_count = data.len().saturating_sub(ENTRY_DATA_MAX_LEN);
+        data.into_iter().skip(skip_count).collect()
     }
 
     /// The entry point of [EntryOperation].
@@ -212,7 +212,11 @@ impl Entry {
         if !self.same_key_as(&other) {
             return Err(Error::EntryDidNotEqual);
         }
-        Ok(other)
+        Ok(Self {
+            did: other.did,
+            data: Self::cap_recent_data(other.data),
+            kind: other.kind,
+        })
     }
 
     /// This method is used to extend data to a Data kind [`Entry`].
@@ -228,10 +232,9 @@ impl Entry {
             return Err(Error::EntryDidNotEqual);
         }
 
-        let trim_num = Self::trim_count(self.data.len(), other.data.len());
-
-        let mut data = self.data.iter().skip(trim_num).cloned().collect::<Vec<_>>();
+        let mut data = self.data.clone();
         data.extend_from_slice(&other.data);
+        let data = Self::cap_recent_data(data);
 
         Ok(Self {
             did: self.did,
@@ -254,20 +257,14 @@ impl Entry {
             return Err(Error::EntryDidNotEqual);
         }
 
-        let remains = self
+        let mut data = self
             .data
             .iter()
             .filter(|e| !other.data.contains(e))
-            .collect::<Vec<_>>();
-
-        let trim_num = Self::trim_count(remains.len(), other.data.len());
-
-        let mut data = remains
-            .into_iter()
-            .skip(trim_num)
             .cloned()
             .collect::<Vec<_>>();
         data.extend_from_slice(&other.data);
+        let data = Self::cap_recent_data(data);
 
         Ok(Self {
             did: self.did,
@@ -304,12 +301,50 @@ mod tests {
         (topic.to_string(), encoded(value)?).try_into()
     }
 
+    fn data_entry_from_values(topic: &str, values: Vec<String>) -> Result<Entry> {
+        let data = values
+            .into_iter()
+            .map(|value| value.encode())
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Entry {
+            did: Entry::gen_did(topic)?,
+            data,
+            kind: EntryKind::Data,
+        })
+    }
+
+    fn overflowing_data_entry(topic: &str, overflow: usize) -> Result<(Entry, usize)> {
+        let incoming_count = ENTRY_DATA_MAX_LEN + overflow;
+        let entry = data_entry_from_values(
+            topic,
+            (0..incoming_count)
+                .map(|i| format!("incoming{i}"))
+                .collect::<Vec<_>>(),
+        )?;
+        Ok((entry, incoming_count))
+    }
+
     fn decode_entry_data(entry: &Entry) -> Result<Vec<String>> {
         entry
             .data
             .iter()
             .map(|item| item.decode())
             .collect::<Result<Vec<String>>>()
+    }
+
+    fn assert_entry_keeps_recent_overflow(
+        entry: &Entry,
+        incoming_count: usize,
+        overflow: usize,
+    ) -> Result<()> {
+        assert_eq!(entry.data.len(), ENTRY_DATA_MAX_LEN);
+        let decoded = decode_entry_data(entry)?;
+        assert_eq!(decoded.first(), Some(&format!("incoming{overflow}")));
+        assert_eq!(
+            decoded.last(),
+            Some(&format!("incoming{}", incoming_count - 1))
+        );
+        Ok(())
     }
 
     fn subring_entry(name: &str) -> Result<Entry> {
@@ -366,6 +401,17 @@ mod tests {
     }
 
     #[test]
+    fn overwrite_caps_payloads_larger_than_max_len() -> Result<()> {
+        let overflow = 3;
+        let (incoming, incoming_count) = overflowing_data_entry("topic", overflow)?;
+        let entry = data_entry("topic", "base")?;
+
+        let updated = entry.overwrite(incoming)?;
+
+        assert_entry_keeps_recent_overflow(&updated, incoming_count, overflow)
+    }
+
+    #[test]
     fn extend_appends_data_for_same_entry() -> Result<()> {
         let entry = data_entry("topic", "first")?;
         let other = data_entry("topic", "second")?;
@@ -406,6 +452,17 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn extend_caps_incoming_payloads_larger_than_max_len() -> Result<()> {
+        let overflow = 3;
+        let (incoming, incoming_count) = overflowing_data_entry("topic", overflow)?;
+        let entry = data_entry("topic", "base")?;
+
+        let updated = entry.extend(incoming)?;
+
+        assert_entry_keeps_recent_overflow(&updated, incoming_count, overflow)
     }
 
     #[test]
@@ -451,6 +508,17 @@ mod tests {
         assert_eq!(decoded.first(), Some(&String::from("test1")));
         assert_eq!(decoded.last(), Some(&String::from("test0")));
         Ok(())
+    }
+
+    #[test]
+    fn touch_caps_incoming_payloads_larger_than_max_len() -> Result<()> {
+        let overflow = 3;
+        let (incoming, incoming_count) = overflowing_data_entry("topic", overflow)?;
+        let entry = data_entry("topic", "base")?;
+
+        let updated = entry.touch(incoming)?;
+
+        assert_entry_keeps_recent_overflow(&updated, incoming_count, overflow)
     }
 
     #[test]
