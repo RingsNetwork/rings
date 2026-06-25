@@ -118,7 +118,11 @@ impl MessageRelay {
     }
 
     /// Get the origin sender of current message.
-    /// Should be the first element of path.
+    ///
+    /// The origin should be the first element of `path`. Empty relay paths keep
+    /// the legacy fallback to `destination`; callers that must distinguish an
+    /// invalid relay boundary from a real origin should use
+    /// [`try_origin_sender`](Self::try_origin_sender).
     pub fn origin_sender(&self) -> Did {
         self.path.first().copied().unwrap_or(self.destination)
     }
@@ -129,9 +133,7 @@ impl MessageRelay {
 const INFINITE_LOOP_TOLERANCE: usize = 3;
 
 fn has_infinite_loop<T>(path: &[T]) -> bool
-where
-    T: PartialEq,
-{
+where T: PartialEq {
     // Invariant: a relay loop is witnessed by a non-empty suffix period P such
     // that the final path segment is P repeated INFINITE_LOOP_TOLERANCE times.
     for period in 1..=path.len() / INFINITE_LOOP_TOLERANCE {

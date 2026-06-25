@@ -140,6 +140,8 @@ pub fn str_to_field(s: &str) -> Vec<Field> {
             {
                 *target = source;
             }
+            // `FIELD_ENCODING_MARKER` is below the secp256k1 modulus prefix, so
+            // the encoded 32-byte candidate always fits in the field.
             let _ = field.set_b32(&data);
             field
         })
