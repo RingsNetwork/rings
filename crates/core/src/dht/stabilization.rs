@@ -261,70 +261,27 @@ mod stabilizer {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use wasm_bindgen::closure::Closure;
-    use wasm_bindgen::JsCast;
-    use wasm_bindgen::JsValue;
     use wasm_bindgen_futures::spawn_local;
 
     use super::*;
-    use crate::utils::js_utils::global;
-    use crate::utils::js_utils::Global;
-
-    fn set_stabilize_timeout(
-        global: &Global,
-        callback: &js_sys::Function,
-        millis: i32,
-    ) -> std::result::Result<i32, JsValue> {
-        let args = js_sys::Array::of1(callback);
-        match global {
-            Global::Window(window) => {
-                window.set_timeout_with_callback_and_timeout_and_arguments(callback, millis, &args)
-            }
-            Global::WorkerGlobal(window) => {
-                window.set_timeout_with_callback_and_timeout_and_arguments(callback, millis, &args)
-            }
-            Global::ServiceWorkerGlobal(window) => {
-                window.set_timeout_with_callback_and_timeout_and_arguments(callback, millis, &args)
-            }
-        }
-    }
+    use crate::utils::js_utils::window_sleep;
 
     impl Stabilizer {
         /// Run stabilization in a loop.
         pub async fn wait(self: Arc<Self>, interval: Duration) {
             let millis = i32::try_from(interval.as_millis()).unwrap_or(i32::MAX);
-            let caller = Arc::clone(&self);
-            let func = Closure::wrap(Box::new(move |func: js_sys::Function| {
-                let caller = caller.clone();
-                spawn_local(Box::pin(async move {
-                    caller
-                        .stabilize()
+            spawn_local(async move {
+                loop {
+                    if let Err(error) = window_sleep(millis).await {
+                        tracing::error!("failed to wait for stabilization interval {:?}", error);
+                        return;
+                    }
+
+                    self.stabilize()
                         .await
                         .unwrap_or_else(|e| tracing::error!("failed to stabilize {:?}", e));
-                }));
-
-                let Some(global) = global() else {
-                    tracing::error!("failed to schedule stabilization: no JS global scope");
-                    return;
-                };
-
-                if let Err(error) = set_stabilize_timeout(&global, &func, millis) {
-                    tracing::error!("failed to schedule stabilization: {:?}", error);
                 }
-            }) as Box<dyn FnMut(js_sys::Function)>);
-
-            let Some(global) = global() else {
-                tracing::error!("failed to schedule stabilization: no JS global scope");
-                return;
-            };
-
-            let callback = func.as_ref().unchecked_ref::<js_sys::Function>();
-            if let Err(error) = set_stabilize_timeout(&global, callback, millis) {
-                tracing::error!("failed to schedule stabilization: {:?}", error);
-                return;
-            }
-
-            func.forget();
+            });
         }
     }
 }
