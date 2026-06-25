@@ -7,6 +7,7 @@ use super::PeerRingAction;
 use super::RemoteAction;
 use crate::dht::entry::Entry;
 use crate::dht::entry::PlacedEntry;
+use crate::dht::entry::SyncedEntryAck;
 use crate::dht::ChordStorageSync;
 use crate::dht::Did;
 use crate::error::Result;
@@ -46,19 +47,24 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
         }
     }
 
-    async fn acknowledge_synced_entries(&self, keys: &[Did]) -> Result<PeerRingAction> {
-        // Pre S2: each key in keys is contained in a
+    async fn acknowledge_synced_entries(&self, acks: &[SyncedEntryAck]) -> Result<PeerRingAction> {
+        // Pre S2': each ack in acks is contained in a
         // SyncEntriesWithSuccessorReport sent only after the receiver persisted
-        // PlacedEntry { key, entry }. The checkable finite model is
-        // storage_sync_model_preserves_no_last_copy_loss in dht_stateright.
-        // Post: only keys in `keys` may be removed from local storage.
-        // Invariant gap: this proves acked-key durability, not that the local
-        // value still equals the copied value. A write racing between copy and
-        // ack could be newer than the acked value and still be removed here.
-        // Closing that stronger property requires Entry version/timestamp
-        // metadata so delete can be conditional on equality.
-        for key in keys {
-            self.storage.remove(&key.to_string()).await?;
+        // SyncedEntryAck { key, entry } at key.
+        // Post S2': a local key is removed only if
+        // local_before[key] == ack.entry. If local_before[key] differs, the
+        // local value is preserved and will be offered again by a later
+        // sync_entries_with_successor transition.
+        // Preservation: a write racing between copy and ack changes
+        // local_before[key], so confirms_local_value is false and delete is
+        // skipped.
+        for ack in acks {
+            let Some(local_entry) = self.storage.get(&ack.key.to_string()).await? else {
+                continue;
+            };
+            if ack.confirms_local_value(&local_entry) {
+                self.storage.remove(&ack.key.to_string()).await?;
+            }
         }
 
         Ok(PeerRingAction::None)

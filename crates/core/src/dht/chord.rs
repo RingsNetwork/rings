@@ -642,8 +642,11 @@ impl CorrectChord<PeerRingAction> for PeerRing {
         } else {
             Some(successors.min()?)
         };
-        let succ_len = info.successors.len();
-        let but_last = &info.successors[..succ_len.saturating_sub(1)].to_vec();
+        let but_last = info
+            .successors
+            .split_last()
+            .map(|(_, successors_before_last)| successors_before_last)
+            .unwrap_or(&[]);
         let improved_successor = info.predecessor.filter(|new_succ| {
             *new_succ != self.did
                 && old_head.is_none_or(|head| self.bias(*new_succ) < self.bias(head))

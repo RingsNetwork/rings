@@ -6,6 +6,7 @@ use async_recursion::async_recursion;
 use async_trait::async_trait;
 
 use crate::dht::entry::Entry;
+use crate::dht::entry::SyncedEntryAck;
 use crate::dht::Chord;
 use crate::dht::ChordStorage;
 use crate::dht::ChordStorageCache;
@@ -286,8 +287,8 @@ async fn handle_storage_operate_act(
 async fn persist_synced_entries(
     handler: &MessageHandler,
     msg: &SyncEntriesWithSuccessor,
-) -> Result<Vec<Did>> {
-    let mut keys = Vec::with_capacity(msg.data.len());
+) -> Result<Vec<SyncedEntryAck>> {
+    let mut acks = Vec::with_capacity(msg.data.len());
     for placed in msg.data.iter() {
         let entry = placed.entry.clone().into_storage_entry();
         handler
@@ -295,9 +296,9 @@ async fn persist_synced_entries(
             .storage
             .put(&placed.key.to_string(), &entry)
             .await?;
-        keys.push(placed.key);
+        acks.push(SyncedEntryAck::new(placed.key, entry));
     }
-    Ok(keys)
+    Ok(acks)
 }
 
 fn next_hop_for_sync_entries(
@@ -321,12 +322,12 @@ fn next_hop_for_sync_entries(
 async fn report_synced_entries(
     handler: &MessageHandler,
     ctx: &MessagePayload,
-    keys: Vec<Did>,
+    acks: Vec<SyncedEntryAck>,
 ) -> Result<()> {
     handler
         .run_effects([PayloadRelayFunctor::send_report_message(
             ctx,
-            Message::SyncEntriesWithSuccessorReport(SyncEntriesWithSuccessorReport { keys }),
+            Message::SyncEntriesWithSuccessorReport(SyncEntriesWithSuccessorReport { acks }),
         )
         .into()])
         .await
@@ -409,16 +410,17 @@ impl HandleMsg<FoundEntry> for MessageHandler {
                 .run_effects([PayloadRelayFunctor::forward_payload(ctx, None).into()])
                 .await;
         }
+        let found_entry = msg.single_entry()?;
         self.transport.observe_storage_misses(
             msg.resource,
             msg.redundancy,
             msg.misses.iter().copied(),
         )?;
-        for data in msg.data.iter().cloned() {
+        if let Some(data) = found_entry {
             self.dht.local_cache_put(data.clone()).await?;
-            repair_observed_storage_misses(self.transport.clone(), data, msg.redundancy).await?;
-        }
-        if msg.data.is_empty() && !msg.misses.is_empty() {
+            repair_observed_storage_misses(self.transport.clone(), data.clone(), msg.redundancy)
+                .await?;
+        } else if !msg.misses.is_empty() {
             if let Some(entry) = self.dht.local_cache_get(msg.resource).await? {
                 repair_observed_storage_misses(self.transport.clone(), entry, msg.redundancy)
                     .await?;
@@ -450,8 +452,8 @@ impl HandleMsg<SyncEntriesWithSuccessor> for MessageHandler {
                 .await;
         }
 
-        let keys = persist_synced_entries(self, msg).await?;
-        if let Err(e) = report_synced_entries(self, ctx, keys).await {
+        let acks = persist_synced_entries(self, msg).await?;
+        if let Err(e) = report_synced_entries(self, ctx, acks).await {
             tracing::warn!("Failed to report synced entries: {e:?}");
         }
         Ok(())
@@ -466,7 +468,7 @@ impl HandleMsg<SyncEntriesWithSuccessorReport> for MessageHandler {
         _ctx: &MessagePayload,
         msg: &SyncEntriesWithSuccessorReport,
     ) -> Result<()> {
-        let action = self.dht.acknowledge_synced_entries(&msg.keys).await?;
+        let action = self.dht.acknowledge_synced_entries(&msg.acks).await?;
         finish_storage_action(action)
     }
 }
@@ -653,8 +655,8 @@ mod test {
         let ack = next_payload(&node1).await?;
         assert!(matches!(
             ack.transaction.data()?,
-            Message::SyncEntriesWithSuccessorReport(SyncEntriesWithSuccessorReport { keys })
-                if keys == vec![placement_key]
+            Message::SyncEntriesWithSuccessorReport(SyncEntriesWithSuccessorReport { acks })
+                if acks == vec![SyncedEntryAck::new(placement_key, entry.clone())]
         ));
         assert_eq!(
             node1.dht().storage.get(&placement_key.to_string()).await?,
@@ -818,6 +820,52 @@ mod test {
     }
 
     #[tokio::test]
+    async fn found_entry_rejects_multiple_entries() -> Result<()> {
+        let node = prepare_node(SecretKey::random()).await;
+        let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+        let resource = Did::from(10u32);
+        let first = Entry {
+            did: resource,
+            data: vec!["first".to_string().encode()?],
+            kind: EntryKind::Data,
+        };
+        let second = Entry {
+            did: resource,
+            data: vec!["second".to_string().encode()?],
+            kind: EntryKind::Data,
+        };
+        let context_key = SecretKey::random();
+        let context_session = SessionSk::new_with_seckey(&context_key)?;
+        let context = MessagePayload::new_send(
+            Message::FoundEntry(FoundEntry {
+                data: vec![first.clone(), second.clone()],
+                misses: vec![],
+                resource,
+                redundancy: 2,
+            }),
+            &context_session,
+            node.did(),
+            node.did(),
+        )?;
+
+        let result = handler
+            .handle(&context, &FoundEntry {
+                data: vec![first, second],
+                misses: vec![],
+                resource,
+                redundancy: 2,
+            })
+            .await;
+
+        assert!(
+            matches!(result, Err(Error::InvalidMessage(message)) if message.contains("more than one"))
+        );
+        assert_eq!(node.swarm.storage_check_cache(resource).await, None);
+        assert_eq!(node.swarm.transport.storage_lookup_observation_count()?, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn storage_miss_observation_buffer_is_bounded() -> Result<()> {
         let node = prepare_node(SecretKey::random()).await;
         for index in 0..(STORAGE_LOOKUP_OBSERVATION_CAPACITY + 8) {
@@ -905,7 +953,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn sync_entries_handler_reports_persisted_placement_keys() -> Result<()> {
+    async fn sync_entries_handler_reports_persisted_entries() -> Result<()> {
         let sender = prepare_node(SecretKey::random()).await;
         let receiver = prepare_node(SecretKey::random()).await;
         manually_establish_connection(&sender.swarm, &receiver.swarm).await;
@@ -933,7 +981,10 @@ mod test {
         let payload = next_payload(&sender).await?;
         match payload.transaction.data::<Message>()? {
             Message::SyncEntriesWithSuccessorReport(report) => {
-                assert_eq!(report.keys, vec![placement_key]);
+                assert_eq!(report.acks, vec![SyncedEntryAck::new(
+                    placement_key,
+                    entry.clone()
+                )]);
             }
             message => {
                 return Err(Error::InvalidMessage(format!(
@@ -985,7 +1036,7 @@ mod test {
 
         handler
             .handle(&context, &SyncEntriesWithSuccessorReport {
-                keys: vec![acked_key],
+                acks: vec![SyncedEntryAck::new(acked_key, acked_entry)],
             })
             .await?;
 

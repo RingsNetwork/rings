@@ -7,6 +7,7 @@ use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::PlacementMiss;
+use crate::dht::entry::SyncedEntryAck;
 use crate::dht::successor::SuccessorWriter;
 use crate::dht::ChordStorage;
 use crate::dht::ChordStorageRepair;
@@ -23,6 +24,29 @@ fn data_entry(did: Did) -> Entry {
         data: vec![],
         kind: EntryKind::Data,
     }
+}
+
+fn data_entry_with_data(did: Did, data: &str) -> Entry {
+    Entry {
+        did,
+        data: vec![data.into()],
+        kind: EntryKind::Data,
+    }
+}
+
+fn first_two_affine_keys(did: Did) -> Result<(Did, Did)> {
+    let mut keys = did.rotate_affine(2)?.into_iter();
+    let Some(first) = keys.next() else {
+        return Err(Error::InvalidMessage(
+            "rotate_affine(2) returned no placement key".to_string(),
+        ));
+    };
+    let Some(second) = keys.next() else {
+        return Err(Error::InvalidMessage(
+            "rotate_affine(2) returned one placement key".to_string(),
+        ));
+    };
+    Ok((first, second))
 }
 
 struct FailingGetStorageFixture;
@@ -116,10 +140,43 @@ async fn sync_ack_deletes_local_entry_after_copy() -> Result<()> {
         PeerRingAction::RemoteAction(_, RemoteAction::SyncEntriesWithSuccessor(_))
     ));
 
-    let ack_action = node.acknowledge_synced_entries(&[placement_key]).await?;
+    let ack_action = node
+        .acknowledge_synced_entries(&[SyncedEntryAck::new(placement_key, entry)])
+        .await?;
 
     assert_eq!(ack_action, PeerRingAction::None);
     assert_eq!(node.storage.get(&placement_key.to_string()).await?, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn sync_ack_retains_changed_local_value() -> Result<()> {
+    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
+    let new_successor = Did::from(50u32);
+    let placement_key = Did::from(100u32);
+    let resource_id = Did::from(10u32);
+    let copied_entry = data_entry_with_data(resource_id, "copied");
+    let local_write = data_entry_with_data(resource_id, "local-write");
+    node.storage
+        .put(&placement_key.to_string(), &copied_entry)
+        .await?;
+
+    let action = node.sync_entries_with_successor(new_successor).await?;
+    assert!(matches!(
+        action,
+        PeerRingAction::RemoteAction(_, RemoteAction::SyncEntriesWithSuccessor(_))
+    ));
+    node.storage
+        .put(&placement_key.to_string(), &local_write)
+        .await?;
+
+    node.acknowledge_synced_entries(&[SyncedEntryAck::new(placement_key, copied_entry)])
+        .await?;
+
+    assert_eq!(
+        node.storage.get(&placement_key.to_string()).await?,
+        Some(local_write)
+    );
     Ok(())
 }
 
@@ -137,7 +194,8 @@ async fn sync_partial_ack_retains_unacked_entries() -> Result<()> {
         .put(&pending_key.to_string(), &pending_entry)
         .await?;
 
-    node.acknowledge_synced_entries(&[acked_key]).await?;
+    node.acknowledge_synced_entries(&[SyncedEntryAck::new(acked_key, acked_entry)])
+        .await?;
 
     assert_eq!(node.storage.get(&acked_key.to_string()).await?, None);
     assert_eq!(
@@ -161,7 +219,8 @@ async fn sync_ack_deletes_placement_key_not_entry_identity() -> Result<()> {
         .put(&resource_id.to_string(), &identity_entry)
         .await?;
 
-    node.acknowledge_synced_entries(&[placement_key]).await?;
+    node.acknowledge_synced_entries(&[SyncedEntryAck::new(placement_key, placed_entry)])
+        .await?;
 
     assert_eq!(node.storage.get(&placement_key.to_string()).await?, None);
     assert_eq!(
@@ -175,9 +234,7 @@ async fn sync_ack_deletes_placement_key_not_entry_identity() -> Result<()> {
 async fn periodic_republish_restores_missing_local_affine_replica() -> Result<()> {
     let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
     let entry = data_entry(Did::from(10u32));
-    let placement_keys = entry.did.rotate_affine(2)?;
-    let first_key = placement_keys[0];
-    let second_key = placement_keys[1];
+    let (first_key, second_key) = first_two_affine_keys(entry.did)?;
     node.storage.put(&first_key.to_string(), &entry).await?;
 
     let action = node.republish_local_entries(2).await?;
@@ -200,7 +257,7 @@ async fn republish_remote_actions_preserve_affine_placement_keys() -> Result<()>
     let successor = Did::from(100u32);
     node.successors().update(successor)?;
     let entry = data_entry(Did::from(10u32));
-    let placement_keys = entry.did.rotate_affine(2)?;
+    let (first_key, second_key) = first_two_affine_keys(entry.did)?;
     node.storage.put(&entry.did.to_string(), &entry).await?;
 
     let action = node.republish_local_entries(2).await?;
@@ -209,18 +266,15 @@ async fn republish_remote_actions_preserve_affine_placement_keys() -> Result<()>
         action,
         PeerRingAction::MultiActions(vec![
             PeerRingAction::RemoteAction(
-                placement_keys[0],
+                first_key,
                 RemoteAction::SyncEntriesWithSuccessor(vec![PlacedEntry::new(
-                    placement_keys[0],
+                    first_key,
                     entry.clone()
                 )])
             ),
             PeerRingAction::RemoteAction(
-                placement_keys[1],
-                RemoteAction::SyncEntriesWithSuccessor(vec![PlacedEntry::new(
-                    placement_keys[1],
-                    entry
-                )])
+                second_key,
+                RemoteAction::SyncEntriesWithSuccessor(vec![PlacedEntry::new(second_key, entry)])
             )
         ])
     );

@@ -18,11 +18,11 @@
 //! Safety:
 //! - S1 Additivity: repair transitions in this module never call
 //!   `storage.remove`.
-//! - S2 No-last-copy-loss: the only deletion transition is
+//! - S2' No-update-loss: the only deletion transition is
 //!   `acknowledge_synced_entries`; the finite model
-//!   `storage_sync_model_preserves_no_last_copy_loss` in `dht_stateright`
-//!   checks that an ack-delete transition is reachable only after the receiver
-//!   state contains the acked placement key.
+//!   `storage_sync_model_preserves_no_update_loss` in `dht_stateright` checks
+//!   that ack-delete removes a local value only when the receiver state contains
+//!   the same value.
 //! - S3 Idempotence: copy transitions overwrite the same key with an equal
 //!   value, so applying the same repair twice is observationally equivalent to
 //!   applying it once.

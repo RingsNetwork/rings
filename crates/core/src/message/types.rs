@@ -11,8 +11,10 @@ use crate::dht::entry::Entry;
 use crate::dht::entry::EntryOperation;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::PlacementMiss;
+use crate::dht::entry::SyncedEntryAck;
 use crate::dht::Did;
 use crate::dht::TopoInfo;
+use crate::error::Error;
 use crate::error::Result;
 
 /// The `Then` trait is used to associate a type with a "then" scenario.
@@ -179,6 +181,24 @@ pub struct FoundEntry {
     pub redundancy: u16,
 }
 
+impl FoundEntry {
+    /// Returns the single found entry carried by this response.
+    ///
+    /// Post: `Ok(None)` iff this is a miss-only response.
+    /// Post: `Ok(Some(_))` iff this response carries exactly one entry.
+    /// Error: more than one entry violates the `SearchEntry -> FoundEntry`
+    /// single-resource response model.
+    pub(crate) fn single_entry(&self) -> Result<Option<&Entry>> {
+        match self.data.as_slice() {
+            [] => Ok(None),
+            [entry] => Ok(Some(entry)),
+            _ => Err(Error::InvalidMessage(
+                "FoundEntry carries more than one entry".to_string(),
+            )),
+        }
+    }
+}
+
 /// MessageType after `FindSuccessorSend` and syncing data.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SyncEntriesWithSuccessor {
@@ -189,8 +209,8 @@ pub struct SyncEntriesWithSuccessor {
 /// MessageType used to acknowledge durable storage of synced entries.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SyncEntriesWithSuccessorReport {
-    /// Placement keys durably persisted by the sync receiver.
-    pub keys: Vec<Did>,
+    /// Placement keys and exact values durably persisted by the sync receiver.
+    pub acks: Vec<SyncedEntryAck>,
 }
 
 /// MessageType use to customize message, will be handle by `custom_message` method.

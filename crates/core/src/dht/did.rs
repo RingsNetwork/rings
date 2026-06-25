@@ -239,10 +239,13 @@ impl From<Did> for BigUint {
 impl From<BigUint> for Did {
     fn from(a: BigUint) -> Self {
         let ff = a % (BigUint::from(2u16).pow(160));
-        let mut va: Vec<u8> = ff.to_bytes_be();
-        let mut res = vec![0u8; 20 - va.len()];
-        res.append(&mut va);
-        assert_eq!(res.len(), 20, "{res:?}");
+        let bytes = ff.to_bytes_be();
+        let mut res = [0u8; 20];
+        // Post: modulo 2^160 makes bytes.len() <= 20. Right-aligning with
+        // iterators keeps the conversion total and panic-free.
+        for (dst, src) in res.iter_mut().rev().zip(bytes.iter().rev()) {
+            *dst = *src;
+        }
         Self(H160::from_slice(&res))
     }
 }

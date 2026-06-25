@@ -86,6 +86,31 @@ impl PlacedEntry {
     }
 }
 
+/// Durable-storage acknowledgement for an entry hand-off.
+///
+/// `key` is the placement key durably persisted by the receiver. `entry` is the
+/// exact value persisted there and therefore the equality witness used by the
+/// sender before deleting its local copy.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyncedEntryAck {
+    /// The placement key durably persisted by the sync receiver.
+    pub key: Did,
+    /// The exact value durably persisted by the sync receiver.
+    pub entry: Entry,
+}
+
+impl SyncedEntryAck {
+    /// Witness that `entry` was durably persisted at `key`.
+    pub fn new(key: Did, entry: Entry) -> Self {
+        Self { key, entry }
+    }
+
+    /// Returns whether this ack proves that `local` equals the copied value.
+    pub fn confirms_local_value(&self, local: &Entry) -> bool {
+        &self.entry == local
+    }
+}
+
 /// A lookup request for a concrete placement of an entry identity.
 ///
 /// `resource` is `id(e)`. `placement` is one element of
@@ -187,6 +212,8 @@ impl EntryOperation {
 impl TryFrom<MessagePayload> for Entry {
     type Error = Error;
     fn try_from(msg: MessagePayload) -> Result<Self> {
+        // Relay entries target the signer's successor on R = Z / 2^160, so the
+        // `+ 1` intentionally wraps through `Did::from(BigUint)`.
         let did = BigUint::from(msg.signer()) + BigUint::from(1u16);
         let data = msg.encode()?;
         Ok(Self {

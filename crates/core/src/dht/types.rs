@@ -7,6 +7,7 @@ use super::did::Did;
 use super::entry::Entry;
 use super::entry::EntryOperation;
 use super::entry::PlacementMiss;
+use super::entry::SyncedEntryAck;
 use crate::error::Result;
 
 /// Chord is a distributed hash table (DHT) algorithm that is designed to efficiently
@@ -85,11 +86,13 @@ pub trait ChordStorageSync<Action>: Chord<Action> {
     /// storage for specific placement keys.
     async fn sync_entries_with_successor(&self, new_successor: Did) -> Result<Action>;
 
-    /// Delete local entries whose placement keys were durably stored by the
-    /// successor during sync.
+    /// Delete local entries whose placement keys and exact values were durably
+    /// stored by the successor during sync.
     ///
-    /// Post: only keys present in `keys` may be removed.
-    async fn acknowledge_synced_entries(&self, keys: &[Did]) -> Result<Action>;
+    /// Post S2': only keys present in `acks` may be removed, and a key is
+    /// removed only if its current local value equals the value carried by the
+    /// corresponding ack.
+    async fn acknowledge_synced_entries(&self, acks: &[SyncedEntryAck]) -> Result<Action>;
 }
 
 /// ChordStorageRepair defines additive repair for redundant DHT storage.

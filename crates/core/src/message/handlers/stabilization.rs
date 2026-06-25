@@ -72,6 +72,7 @@ mod test {
     use crate::dht::entry::Entry;
     use crate::dht::entry::EntryKind;
     use crate::dht::entry::PlacedEntry;
+    use crate::dht::entry::SyncedEntryAck;
     use crate::dht::successor::SuccessorReader;
     use crate::ecc::tests::gen_ordered_keys;
     use crate::ecc::SecretKey;
@@ -216,8 +217,8 @@ mod test {
         };
 
         match payload.transaction.data::<Message>()? {
-            Message::SyncEntriesWithSuccessorReport(SyncEntriesWithSuccessorReport { keys }) => {
-                assert_eq!(keys, vec![entry.did]);
+            Message::SyncEntriesWithSuccessorReport(SyncEntriesWithSuccessorReport { acks }) => {
+                assert_eq!(acks, vec![SyncedEntryAck::new(entry.did, entry.clone())]);
             }
             message => {
                 return Err(Error::InvalidMessage(format!(
