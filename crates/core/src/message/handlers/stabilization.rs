@@ -1,9 +1,12 @@
 use async_trait::async_trait;
 
+use crate::dht::entry::PlacedEntry;
 use crate::dht::Chord;
 use crate::dht::ChordStorageSync;
+use crate::dht::Did;
 use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
+use crate::error::Error;
 use crate::error::Result;
 use crate::message::effects::ConnectionFunctor;
 use crate::message::effects::MessageSendFunctor;
@@ -15,6 +18,29 @@ use crate::message::types::SyncEntriesWithSuccessor;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
+
+fn collect_sync_entries_actions(
+    act: PeerRingAction,
+    out: &mut Vec<(Did, Vec<PlacedEntry>)>,
+) -> Result<()> {
+    match act {
+        PeerRingAction::None => Ok(()),
+        PeerRingAction::RemoteAction(
+            next,
+            PeerRingRemoteAction::SyncEntriesWithSuccessor(data),
+        ) => {
+            out.push((next, data));
+            Ok(())
+        }
+        PeerRingAction::MultiActions(actions) => {
+            for action in actions {
+                collect_sync_entries_actions(action, out)?;
+            }
+            Ok(())
+        }
+        action => Err(Error::PeerRingUnexpectedAction(action)),
+    }
+}
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
@@ -43,18 +69,22 @@ impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
         self.run_effects([ConnectionFunctor::connect_dht_peer(msg.did).into()])
             .await?;
 
-        if let PeerRingAction::RemoteAction(
-            next,
-            PeerRingRemoteAction::SyncEntriesWithSuccessor(data),
-        ) = self.dht.sync_entries_with_successor(msg.did).await?
-        {
-            self.run_effects([MessageSendFunctor::send_message(
-                Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor { data }),
-                next,
-            )
-            .into()])
-                .await?;
-        }
+        let mut sync_actions = Vec::new();
+        collect_sync_entries_actions(
+            self.dht.sync_entries_with_successor(msg.did).await?,
+            &mut sync_actions,
+        )?;
+        let effects = sync_actions
+            .into_iter()
+            .map(|(next, data)| {
+                MessageSendFunctor::send_message(
+                    Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor { data }),
+                    next,
+                )
+                .into()
+            })
+            .collect::<Vec<_>>();
+        self.run_effects(effects).await?;
 
         Ok(())
     }

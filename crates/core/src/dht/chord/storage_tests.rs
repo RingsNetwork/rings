@@ -1,8 +1,15 @@
+use std::collections::BTreeMap;
+
 use async_trait::async_trait;
 
+use super::storage_sync::sync_entries_batch_wire_cost;
+use super::storage_sync::sync_entries_batches;
+use super::storage_sync::SYNC_BATCH_MAX_BYTES;
 use super::PeerRing;
 use super::PeerRingAction;
 use super::RemoteAction;
+use crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD;
+use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
@@ -15,6 +22,8 @@ use crate::dht::ChordStorageSync;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::types::Message;
+use crate::message::types::SyncEntriesWithSuccessor;
 use crate::storage::KvStorageInterface;
 use crate::storage::MemStorage;
 
@@ -34,6 +43,14 @@ fn data_entry_with_data(did: Did, data: &str) -> Entry {
     }
 }
 
+fn data_entry_with_payload_len(did: Did, len: usize) -> Entry {
+    Entry {
+        did,
+        data: vec!["x".repeat(len).into()],
+        kind: EntryKind::Data,
+    }
+}
+
 fn first_two_affine_keys(did: Did) -> Result<(Did, Did)> {
     let mut keys = did.rotate_affine(2)?.into_iter();
     let Some(first) = keys.next() else {
@@ -47,6 +64,39 @@ fn first_two_affine_keys(did: Did) -> Result<(Did, Did)> {
         ));
     };
     Ok((first, second))
+}
+
+fn collect_sync_batches(act: PeerRingAction) -> Result<Vec<(Did, Vec<PlacedEntry>)>> {
+    let mut batches = Vec::new();
+    collect_sync_batches_into(act, &mut batches)?;
+    Ok(batches)
+}
+
+fn collect_sync_batches_into(
+    act: PeerRingAction,
+    batches: &mut Vec<(Did, Vec<PlacedEntry>)>,
+) -> Result<()> {
+    match act {
+        PeerRingAction::None => Ok(()),
+        PeerRingAction::RemoteAction(target, RemoteAction::SyncEntriesWithSuccessor(data)) => {
+            batches.push((target, data));
+            Ok(())
+        }
+        PeerRingAction::MultiActions(actions) => {
+            for action in actions {
+                collect_sync_batches_into(action, batches)?;
+            }
+            Ok(())
+        }
+        act => Err(Error::PeerRingUnexpectedAction(act)),
+    }
+}
+
+fn placed_entries_by_key(entries: impl IntoIterator<Item = PlacedEntry>) -> BTreeMap<Did, Entry> {
+    entries
+        .into_iter()
+        .map(|placed| (placed.key, placed.entry))
+        .collect()
 }
 
 struct FailingGetStorageFixture;
@@ -107,18 +157,13 @@ async fn sync_without_ack_retains_entry_for_next_handoff() -> Result<()> {
 
     let action = node.sync_entries_with_successor(new_successor).await?;
     let retried_action = node.sync_entries_with_successor(new_successor).await?;
+    let expected = vec![(new_successor, vec![PlacedEntry::new(
+        placement_key,
+        entry.clone(),
+    )])];
 
-    assert_eq!(
-        action,
-        PeerRingAction::RemoteAction(
-            new_successor,
-            RemoteAction::SyncEntriesWithSuccessor(vec![PlacedEntry::new(
-                placement_key,
-                entry.clone()
-            )])
-        )
-    );
-    assert_eq!(retried_action, action);
+    assert_eq!(collect_sync_batches(action)?, expected);
+    assert_eq!(collect_sync_batches(retried_action)?, expected);
     assert_eq!(
         node.storage.get(&placement_key.to_string()).await?,
         Some(entry)
@@ -135,10 +180,7 @@ async fn sync_ack_deletes_local_entry_after_copy() -> Result<()> {
     node.storage.put(&placement_key.to_string(), &entry).await?;
 
     let action = node.sync_entries_with_successor(new_successor).await?;
-    assert!(matches!(
-        action,
-        PeerRingAction::RemoteAction(_, RemoteAction::SyncEntriesWithSuccessor(_))
-    ));
+    assert_eq!(collect_sync_batches(action)?.len(), 1);
 
     let ack_action = node
         .acknowledge_synced_entries(&[SyncedEntryAck::new(placement_key, entry)])
@@ -162,10 +204,7 @@ async fn sync_ack_retains_changed_local_value() -> Result<()> {
         .await?;
 
     let action = node.sync_entries_with_successor(new_successor).await?;
-    assert!(matches!(
-        action,
-        PeerRingAction::RemoteAction(_, RemoteAction::SyncEntriesWithSuccessor(_))
-    ));
+    assert_eq!(collect_sync_batches(action)?.len(), 1);
     node.storage
         .put(&placement_key.to_string(), &local_write)
         .await?;
@@ -227,6 +266,172 @@ async fn sync_ack_deletes_placement_key_not_entry_identity() -> Result<()> {
         node.storage.get(&resource_id.to_string()).await?,
         Some(identity_entry)
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn sync_entries_with_successor_batches_by_wire_budget() -> Result<()> {
+    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
+    let new_successor = Did::from(50u32);
+    let payload_len = SYNC_BATCH_MAX_BYTES / 2;
+    let entries = vec![
+        PlacedEntry::new(
+            Did::from(100u32),
+            data_entry_with_payload_len(Did::from(10u32), payload_len),
+        ),
+        PlacedEntry::new(
+            Did::from(120u32),
+            data_entry_with_payload_len(Did::from(20u32), payload_len),
+        ),
+        PlacedEntry::new(
+            Did::from(140u32),
+            data_entry_with_payload_len(Did::from(30u32), payload_len),
+        ),
+    ];
+    for placed in &entries {
+        node.storage
+            .put(&placed.key.to_string(), &placed.entry)
+            .await?;
+    }
+
+    let batches = collect_sync_batches(node.sync_entries_with_successor(new_successor).await?)?;
+
+    assert!(
+        batches.len() > 1,
+        "entries should be split into more than one sync batch"
+    );
+    for (target, batch) in &batches {
+        assert_eq!(*target, new_successor);
+        assert!(
+            sync_entries_batch_wire_cost(batch)? <= SYNC_BATCH_MAX_BYTES,
+            "sync batch exceeds byte budget"
+        );
+    }
+    let actual =
+        placed_entries_by_key(batches.into_iter().flat_map(|(_, batch)| batch.into_iter()));
+    let expected = placed_entries_by_key(entries);
+    assert_eq!(actual, expected);
+    Ok(())
+}
+
+#[test]
+fn sync_entries_batching_emits_oversized_single_entry_alone() -> Result<()> {
+    let placed = PlacedEntry::new(
+        Did::from(100u32),
+        data_entry_with_data(Did::from(10u32), "x"),
+    );
+
+    assert!(sync_entries_batch_wire_cost(std::slice::from_ref(&placed))? > 1);
+    let batches = sync_entries_batches(vec![placed.clone()], 1)?;
+
+    assert_eq!(batches, vec![vec![placed]]);
+    Ok(())
+}
+
+#[test]
+fn sync_entries_batching_preserves_input_order_across_batches() -> Result<()> {
+    let entries = vec![
+        PlacedEntry::new(
+            Did::from(100u32),
+            data_entry_with_data(Did::from(10u32), "first"),
+        ),
+        PlacedEntry::new(
+            Did::from(120u32),
+            data_entry_with_data(Did::from(20u32), "second"),
+        ),
+        PlacedEntry::new(
+            Did::from(140u32),
+            data_entry_with_data(Did::from(30u32), "third"),
+        ),
+    ];
+    let expected_order = entries.iter().map(|placed| placed.key).collect::<Vec<_>>();
+
+    let batches = sync_entries_batches(entries, 1)?;
+
+    assert_eq!(batches.len(), 3);
+    let actual_order = batches
+        .iter()
+        .flat_map(|batch| batch.iter().map(|placed| placed.key))
+        .collect::<Vec<_>>();
+    assert_eq!(actual_order, expected_order);
+    Ok(())
+}
+
+#[test]
+fn sync_entries_batch_wire_cost_matches_serialized_message_cost() -> Result<()> {
+    let entries = vec![
+        PlacedEntry::new(
+            Did::from(100u32),
+            data_entry_with_data(Did::from(10u32), "first"),
+        ),
+        PlacedEntry::new(
+            Did::from(120u32),
+            data_entry_with_data(Did::from(20u32), "second"),
+        ),
+    ];
+    let message = Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor {
+        data: entries.clone(),
+    });
+    let serialized_bytes = bincode::serialized_size(&message).map_err(Error::BincodeSerialize)?;
+    let message_bytes =
+        usize::try_from(serialized_bytes).map_err(|_| Error::MessageTooLarge(usize::MAX))?;
+    let expected = message_bytes
+        .checked_add(MAX_CHUNK_ENVELOPE_OVERHEAD + TRANSPORT_CUSTOM_OVERHEAD)
+        .ok_or(Error::MessageTooLarge(usize::MAX))?;
+
+    assert_eq!(sync_entries_batch_wire_cost(&entries)?, expected);
+    Ok(())
+}
+
+#[tokio::test]
+async fn sync_batch_ack_deletes_acked_batch_and_retries_unacked_batches() -> Result<()> {
+    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
+    let new_successor = Did::from(50u32);
+    let payload_len = SYNC_BATCH_MAX_BYTES / 2;
+    let entries = vec![
+        PlacedEntry::new(
+            Did::from(100u32),
+            data_entry_with_payload_len(Did::from(10u32), payload_len),
+        ),
+        PlacedEntry::new(
+            Did::from(120u32),
+            data_entry_with_payload_len(Did::from(20u32), payload_len),
+        ),
+        PlacedEntry::new(
+            Did::from(140u32),
+            data_entry_with_payload_len(Did::from(30u32), payload_len),
+        ),
+    ];
+    for placed in &entries {
+        node.storage
+            .put(&placed.key.to_string(), &placed.entry)
+            .await?;
+    }
+    let batches = collect_sync_batches(node.sync_entries_with_successor(new_successor).await?)?;
+    let Some((_, acked_batch)) = batches.first() else {
+        return Err(Error::InvalidMessage("expected sync batch".to_string()));
+    };
+    let acked_batch = acked_batch.clone();
+    let acks = acked_batch
+        .iter()
+        .cloned()
+        .map(|placed| SyncedEntryAck::new(placed.key, placed.entry))
+        .collect::<Vec<_>>();
+
+    node.acknowledge_synced_entries(&acks).await?;
+
+    for placed in &acked_batch {
+        assert_eq!(node.storage.get(&placed.key.to_string()).await?, None);
+    }
+    let retried = collect_sync_batches(node.sync_entries_with_successor(new_successor).await?)?;
+    let retried_entries =
+        placed_entries_by_key(retried.into_iter().flat_map(|(_, batch)| batch.into_iter()));
+    let expected_remaining = placed_entries_by_key(
+        entries
+            .into_iter()
+            .filter(|placed| !acked_batch.iter().any(|acked| acked.key == placed.key)),
+    );
+    assert_eq!(retried_entries, expected_remaining);
     Ok(())
 }
 
