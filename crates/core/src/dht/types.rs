@@ -168,9 +168,17 @@ pub trait CorrectChord<Action>: Chord<Action> {
     /// list, with the last element of the list trimmed off to produce a result of fixed length.
     async fn join_then_sync(&self, did: impl LiveDid) -> Result<Action>;
 
-    /// Rectify Operation in the paper.
+    /// HMCC/Zave Rectify operation.
     ///
-    /// A node rectifies when it is notified.
+    /// A node rectifies when it receives a predecessor notification. The only
+    /// state transition is local predecessor selection:
+    ///
+    /// - Pre: in protocol traces, `pred` is the notifying node and `pred != self`.
+    /// - Post: the predecessor becomes `pred` exactly when no predecessor is
+    ///   known yet or `pred` is closer behind this node than the current
+    ///   predecessor; otherwise the predecessor is unchanged.
+    /// - Preservation: successors, fingers, storage, and transport side effects
+    ///   are unchanged by this operation.
     fn rectify(&self, pred: Did) -> Result<()>;
 
     /// Steps before Stabilize Operation.

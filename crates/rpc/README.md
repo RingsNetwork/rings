@@ -27,7 +27,25 @@ curl -X POST \
 
 #### javascript
 
-TODO
+Use `fetch` to send a JSON-RPC request:
+
+```javascript
+const response = await fetch("http://127.0.0.1:50000", {
+  method: "POST",
+  headers: {
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "nodeInfo",
+    params: [],
+  }),
+});
+
+const result = await response.json();
+console.log(result);
+```
 
 ## JSON-RPC methods
 

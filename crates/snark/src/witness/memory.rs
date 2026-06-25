@@ -54,7 +54,9 @@ impl Deref for SafeMemory {
 impl SafeMemory {
     /// Constructs a new `SafeMemory` object given WebAssembly memory, size of field elements, and the prime field.
     pub fn new(memory: Memory, n32: usize, prime: U256) -> Self {
-        // TODO: Figure out a better way to calculate these
+        // Circom's short integer representation stores signed 32-bit values
+        // inline. Values in [0, 2^31) and [prime - 2^31, prime) round-trip
+        // through the short path; all other field elements use the long form.
         let short_max = U256::from(0x8000_0000u64);
         let short_min = short_max.neg_mod(&prime);
 

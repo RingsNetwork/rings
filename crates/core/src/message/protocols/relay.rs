@@ -1,6 +1,5 @@
 #![warn(missing_docs)]
 
-use itertools::izip;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -121,43 +120,21 @@ impl MessageRelay {
 const INFINITE_LOOP_TOLERANCE: usize = 3;
 
 fn has_infinite_loop<T>(path: &[T]) -> bool
-where T: PartialEq + std::fmt::Debug {
-    if let Some(last) = path.last() {
-        let indexes = path
-            .iter()
-            .rev()
-            .enumerate()
-            .filter(|(_, r)| r == &last)
-            .map(|(index, _)| index)
-            .take(INFINITE_LOOP_TOLERANCE)
-            .collect::<Vec<_>>();
-
-        if indexes.len() >= INFINITE_LOOP_TOLERANCE {
-            let p1 = path.iter().rev().skip(indexes[0]);
-            let p2 = path.iter().rev().skip(indexes[1]);
-            let p3 = path.iter().rev().skip(indexes[2]);
-
-            let lens = [
-                indexes[1] - indexes[0],
-                indexes[2] - indexes[1],
-                path.len() - indexes[2],
-            ];
-
-            let min_len = lens.iter().min().unwrap();
-
-            for (i, (x, y, z)) in izip!(p1, p2, p3).enumerate() {
-                if !(x == y && y == z) {
-                    return false;
-                }
-
-                if i == min_len - 1 {
-                    break;
-                }
-            }
-
-            if lens[0] == lens[1] {
-                return true;
-            }
+where T: PartialEq {
+    // Invariant: a relay loop is witnessed by a non-empty suffix period P such
+    // that the final path segment is P repeated INFINITE_LOOP_TOLERANCE times.
+    for period in 1..=path.len() / INFINITE_LOOP_TOLERANCE {
+        let repeated_len = period * INFINITE_LOOP_TOLERANCE;
+        let start = path.len() - repeated_len;
+        let Some(suffix) = path.get(start..) else {
+            continue;
+        };
+        let mut chunks = suffix.chunks_exact(period);
+        let Some(first) = chunks.next() else {
+            continue;
+        };
+        if chunks.all(|chunk| chunk == first) {
+            return true;
         }
     }
 
@@ -229,8 +206,7 @@ mod test {
             1, 2, 3,
         ]));
 
-        // TODO: try to detect this earlier.
-        assert!(!has_infinite_loop(&[
+        assert!(has_infinite_loop(&[
                   3,
             1, 2, 3,
                   3,
@@ -239,8 +215,7 @@ mod test {
             1, 2, 3,
         ]));
 
-        // TODO: try to detect this earlier.
-        assert!(!has_infinite_loop(&[
+        assert!(has_infinite_loop(&[
             1, 2, 3,
             1, 2, 3,
                   3,
@@ -249,7 +224,6 @@ mod test {
             1, 2, 3,
         ]));
 
-        // The above two cases will be detected finally.
         assert!(has_infinite_loop(&[
                   1, 2,
                3, 1, 2,
@@ -267,8 +241,7 @@ mod test {
                4, 3,
         ]));
 
-        // TODO: try to detect this earlier.
-        assert!(!has_infinite_loop(&[
+        assert!(has_infinite_loop(&[
             1, 2, 3,
                4, 3,
             1, 2, 3,
@@ -277,7 +250,6 @@ mod test {
                4, 3,
         ]));
 
-        // The above case will be detected finally.
         assert!(has_infinite_loop(&[
                1, 2, 3, 4,
             3, 1, 2, 3, 4,

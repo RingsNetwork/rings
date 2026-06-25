@@ -87,6 +87,15 @@
 //!   /\ query'  = IF Improved(n, cur, topoPred) THEN <<topoPred>> ELSE <<>>
 //!   /\ notify' = IF Len(next) = 0 THEN <<>> ELSE <<Head(next)>>
 //!
+//! \* CorrectChord rectify operation (HMCC/Zave path). A notify message from p
+//! \* carries one candidate predecessor. Rectify adopts it only when it is
+//! \* closer behind n than the current predecessor.
+//! RectifyPred(n, curPred, p) ==
+//!   IF curPred = none \/ dist(n, curPred) < dist(n, p) THEN p ELSE curPred
+//! CorrectRectify(n, curPred, p) ==
+//!   /\ p # n
+//!   /\ pred'[n] = RectifyPred(n, curPred, p)
+//!
 //! \* Converged(n): the materialised local state equals the operators above.
 //! Converged(n) ==
 //!   /\ succ[n]  = Successors(n)
@@ -122,6 +131,7 @@ use crate::dht::PeerRing;
 use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
 use crate::dht::TopoInfo;
+use crate::error::Result;
 use crate::storage::MemStorage;
 
 /// Successor-list capacity; matches `SwarmBuilder::dht_succ_max` (production).
@@ -156,6 +166,14 @@ pub(super) mod spec {
             .copied()
             .filter(|&d| d != n)
             .max_by_key(|&d| dist(n, d))
+    }
+
+    /// `CorrectRectify` predecessor transition.
+    pub fn correct_rectify_predecessor(me: Did, current: Option<Did>, pred: Did) -> Option<Did> {
+        match current {
+            Some(cur) if dist(me, cur) >= dist(me, pred) => Some(cur),
+            _ => Some(pred),
+        }
     }
 
     /// `Finger(n, bit)` — nearest forward node at distance `>= 2^bit`, else None.
@@ -389,11 +407,73 @@ fn assert_correct_stabilize_matches_spec(
     );
 }
 
+fn assert_correct_rectify_matches_spec(layout: &Layout) -> Result<()> {
+    let dids = layout.dids();
+    for &me in &dids {
+        let current_predecessors = std::iter::once(None)
+            .chain(dids.iter().copied().filter(|&did| did != me).map(Some))
+            .collect::<Vec<_>>();
+
+        for current in current_predecessors {
+            for pred in dids.iter().copied().filter(|&did| did != me) {
+                let dht = PeerRing::new_with_storage(me, K as u8, Box::new(MemStorage::new()));
+                for other in dids.iter().copied().filter(|&did| did != me) {
+                    let _ = dht.join(other)?;
+                }
+                {
+                    let mut predecessor = dht.lock_predecessor()?;
+                    *predecessor = current;
+                }
+
+                let expected = spec::correct_rectify_predecessor(me, current, pred);
+                let successors_before = dht.successors().list()?;
+                let fingers_before = dht.lock_finger()?.list().clone();
+
+                dht.rectify(pred)?;
+
+                assert_eq!(
+                    *dht.lock_predecessor()?,
+                    expected,
+                    "CorrectRectify predecessor mismatch (me={me}, current={current:?}, pred={pred})"
+                );
+                assert_eq!(
+                    dht.successors().list()?,
+                    successors_before,
+                    "CorrectRectify changed successors (me={me}, pred={pred})"
+                );
+                assert_eq!(
+                    dht.lock_finger()?.list().clone(),
+                    fingers_before,
+                    "CorrectRectify changed fingers (me={me}, pred={pred})"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Base case P(2): a single forward neighbour — the wrap-around case, where each
 /// node's only successor and its predecessor are the same peer.
 #[test]
 fn convergence_base_n2() {
     assert_converged_matches_spec(&Layout::Even(2));
+}
+
+/// Operation conformance for the HMCC/Zave `CorrectRectify` operator:
+/// predecessor notifications update only the predecessor slot, using the same
+/// closest-behind rule as the formal model.
+#[test]
+fn correct_rectify_matches_predecessor_spec() -> Result<()> {
+    for layout in [
+        Layout::Even(3),
+        Layout::Even(6),
+        Layout::Pow2(8),
+        Layout::Clustered,
+        Layout::DyadicBoundary,
+    ] {
+        assert_correct_rectify_matches_spec(&layout)?;
+    }
+    Ok(())
 }
 
 /// Base case P(3): the smallest ring with a non-trivial successor/predecessor

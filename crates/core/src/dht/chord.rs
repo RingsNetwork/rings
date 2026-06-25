@@ -117,10 +117,6 @@ pub enum RemoteAction {
     /// Need `did_a` to find `did_b` then send back with `for finger table fixing` flag.
     FindSuccessorForFix(Did),
 
-    // TODO: The check_processor method is not using. Cannot give correct description.
-    /// Check predecessor
-    CheckPredecessor,
-
     /// Fetch successor_list from successor
     QueryForSuccessorList,
     /// Fetch successor_list and pred from successor
@@ -604,10 +600,19 @@ impl CorrectChord<PeerRingAction> for PeerRing {
         Ok(PeerRingAction::MultiActions(ret))
     }
 
-    /// TODO: Please check this function and make sure it is correct.
-    /// TODO: Please comment this with clear description.
-    /// Rectify Operation in the paper.
+    /// HMCC/Zave Rectify operation.
+    ///
+    /// Rectify is the local predecessor transition run when this node receives
+    /// a predecessor notification from `pred`. It has no remote action: the
+    /// message layer's report path is handled by `NotifyPredecessorSend`.
     fn rectify(&self, pred: Did) -> Result<()> {
+        // Pre: in protocol traces, pred is the notifier's DID and pred != self.did.
+        // Post: predecessor' = pred iff predecessor = None or
+        // bias(predecessor) < bias(pred); otherwise predecessor is unchanged.
+        // Preservation: successor list, finger table, and storage state are
+        // unchanged. Delegating to Chord::notify is exactly this predecessor
+        // choice rule; Rectify discards the returned predecessor because it
+        // emits no follow-up action.
         self.notify(pred)?;
         Ok(())
     }

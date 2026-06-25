@@ -178,11 +178,14 @@ pub fn load_r1cs_from_bin_file<F: PrimeField>(filename: impl AsRef<Path>) -> R1C
 fn read_field<R: Read, Fr: PrimeField>(mut reader: R) -> Result<Fr> {
     let mut repr = Fr::ZERO.to_repr();
     for digit in repr.as_mut().iter_mut() {
-        // TODO: may need to reverse order?
+        // Invariant: Circom witness/R1CS field elements are stored as canonical
+        // little-endian byte strings, and ff::PrimeField::Repr uses the same
+        // little-endian encoding expected by from_repr.
         *digit = reader.read_u8()?;
     }
-    let fr = Fr::from_repr(repr).unwrap();
-    Ok(fr)
+    Option::<Fr>::from(Fr::from_repr(repr)).ok_or_else(|| {
+        Error::InvalidDataWhenReadingR1CS("field element is not canonical".to_string())
+    })
 }
 
 fn read_header<R: Read>(mut reader: R, size: u64, expected_prime: &str) -> Result<Header> {
