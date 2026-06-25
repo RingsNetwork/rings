@@ -190,7 +190,13 @@ impl WebSysWebrtcConnection {
 impl WebSysWebrtcTransport {
     /// Create a new [WebSysWebrtcTransport] instance.
     pub fn new(ice_servers: &str, _external_address: Option<String>) -> Self {
-        let ice_servers = IceServer::vec_from_str(ice_servers).unwrap();
+        let ice_servers = match IceServer::vec_from_str(ice_servers) {
+            Ok(ice_servers) => ice_servers,
+            Err(error) => {
+                tracing::warn!(%error, "Ignoring invalid WebSys WebRTC ICE server configuration");
+                Vec::new()
+            }
+        };
 
         Self {
             ice_servers,
@@ -398,12 +404,17 @@ impl TransportInterface for WebSysWebrtcTransport {
                             return;
                         }
                         let data_buffer =
-                            wasm_bindgen_futures::JsFuture::from(data.array_buffer()).await;
-                        if let Err(e) = data_buffer {
-                            tracing::error!("Failed to read array_buffer from Blob, {:?}", e);
-                            return;
-                        }
-                        js_sys::Uint8Array::new(&data_buffer.unwrap()).to_vec()
+                            match wasm_bindgen_futures::JsFuture::from(data.array_buffer()).await {
+                                Ok(data_buffer) => data_buffer,
+                                Err(error) => {
+                                    tracing::error!(
+                                        "Failed to read array_buffer from Blob, {:?}",
+                                        error
+                                    );
+                                    return;
+                                }
+                            };
+                        js_sys::Uint8Array::new(&data_buffer).to_vec()
                     } else {
                         js_sys::Uint8Array::new(data.as_ref()).to_vec()
                     };

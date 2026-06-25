@@ -212,7 +212,7 @@ impl SortRing for Vec<Did> {
     fn sort(&mut self, did: Did) {
         self.sort_by(|a, b| {
             let (da, db) = (*a - did, *b - did);
-            (da).partial_cmp(&db).unwrap()
+            da.cmp(&db)
         });
     }
 }

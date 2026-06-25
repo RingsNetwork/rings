@@ -58,10 +58,10 @@ impl PublicKey<33> {
             }
             33 => Ok(s),
             64 => {
-                let pk: [u8; 64] = s.try_into().unwrap();
-                let mut x: Vec<u8> = pk[..32].to_vec();
-                let y: [u8; 32] = pk[32..].try_into().unwrap();
-                let y_odd = if y[31] & 1 == 1 { 2u8 } else { 3u8 };
+                let pk: [u8; 64] = value.try_into().map_err(|_| Error::PublicKeyBadFormat)?;
+                let mut x: Vec<u8> = pk.iter().take(32).copied().collect();
+                let y_last = pk.last().copied().ok_or(Error::PublicKeyBadFormat)?;
+                let y_odd = if y_last & 1 == 1 { 2u8 } else { 3u8 };
                 x.reverse();
                 x.push(y_odd);
                 x.reverse();

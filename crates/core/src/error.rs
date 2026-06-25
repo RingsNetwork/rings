@@ -22,6 +22,9 @@ pub enum Error {
     #[error("Secp256k1/ECDSA pubkey bad format")]
     ECDSAPublicKeyBadFormat,
 
+    #[error("Failed to lift encoded plaintext into a secp256k1 point")]
+    Secp256k1PointLiftFailed,
+
     #[error("Secp256r1/ECDSA Error: {0}")]
     ECDSAError(#[from] ecdsa::Error),
 
@@ -167,6 +170,14 @@ pub enum Error {
 
     #[error("Failed on read successors")]
     FailedToReadSuccessors,
+
+    #[error("Successor index {index} is out of bounds for length {len}")]
+    SuccessorIndexOutOfBounds {
+        /// Requested successor index.
+        index: usize,
+        /// Current successor sequence length.
+        len: usize,
+    },
 
     #[error("Failed on write successors")]
     FailedToWriteSuccessors,

@@ -4,6 +4,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::MutexGuard;
 use std::task::Context;
 use std::task::Poll;
 
@@ -23,9 +24,16 @@ struct NotifierState {
 pub struct Notifier(Arc<Mutex<NotifierState>>);
 
 impl Notifier {
+    fn state(&self) -> MutexGuard<'_, NotifierState> {
+        match self.0.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
     /// Immediately wake the notifier.
     pub fn wake(&self) {
-        let mut state = self.0.lock().unwrap();
+        let mut state = self.state();
         state.woken = true;
         for waker in state.wakers.drain(..) {
             waker.wake();
@@ -34,8 +42,8 @@ impl Notifier {
 
     /// Wake the notifier after the specified time.
     #[cfg(not(any(feature = "web-sys-webrtc", feature = "native-webrtc")))]
-    pub fn set_timeout(&self, _: u8) {
-        unimplemented!()
+    pub fn set_timeout(&self, seconds: u8) {
+        self.set_timeout_ms(u64::from(seconds) * 1000);
     }
 
     /// Wake the notifier after the specified time.
@@ -60,8 +68,12 @@ impl Notifier {
 
     /// Wake the notifier after the specified number of milliseconds.
     #[cfg(not(any(feature = "web-sys-webrtc", feature = "native-webrtc")))]
-    pub fn set_timeout_ms(&self, _: u64) {
-        unimplemented!()
+    pub fn set_timeout_ms(&self, millis: u64) {
+        let this = self.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(millis));
+            this.wake();
+        });
     }
 
     /// Wake the notifier after the specified time.
@@ -77,12 +89,18 @@ impl Notifier {
 
         let millis = millis as i32;
 
-        let this = self.clone();
+        let timeout_notifier = self.clone();
+        let fallback_notifier = self.clone();
         let wake = wasm_bindgen::closure::Closure::once_into_js(move || {
-            this.wake();
+            timeout_notifier.wake();
         });
 
-        match js_utils::global().unwrap() {
+        let Some(global) = js_utils::global() else {
+            fallback_notifier.wake();
+            return;
+        };
+
+        let scheduled = match global {
             js_utils::Global::Window(window) => window
                 .set_timeout_with_callback_and_timeout_and_arguments_0(
                     wake.as_ref().unchecked_ref(),
@@ -98,15 +116,17 @@ impl Notifier {
                     wake.as_ref().unchecked_ref(),
                     millis,
                 ),
+        };
+        if scheduled.is_err() {
+            fallback_notifier.wake();
         }
-        .unwrap();
     }
 }
 
 impl Future for Notifier {
     type Output = ();
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut state = self.0.lock().unwrap();
+        let mut state = self.state();
 
         if state.woken {
             return Poll::Ready(());

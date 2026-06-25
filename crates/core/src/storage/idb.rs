@@ -5,7 +5,6 @@ use std::ops::Add;
 use std::ops::Sub;
 
 use async_trait::async_trait;
-use itertools::Itertools;
 use rexie::Index;
 use rexie::ObjectStore;
 use rexie::Rexie;
@@ -187,15 +186,16 @@ where V: DeserializeOwned + Serialize + Sized
             .await
             .map_err(Error::IDBError)?;
 
-        Ok(entries
+        entries
             .iter()
             .map(|(k, v)| {
-                (
-                    k.as_string().unwrap(),
-                    js_value::deserialize::<DataStruct<V>>(v).unwrap().data,
-                )
+                let key = k
+                    .as_string()
+                    .ok_or_else(|| Error::JsError("IndexedDB key is not a string".to_string()))?;
+                let data = js_value::deserialize::<DataStruct<V>>(v)?.data;
+                Ok((key, data))
             })
-            .collect_vec())
+            .collect()
     }
 
     async fn remove(&self, key: &str) -> Result<()> {

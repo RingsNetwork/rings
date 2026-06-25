@@ -48,7 +48,7 @@ impl HandleMsg<NotifyPredecessorSend> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &NotifyPredecessorSend) -> Result<()> {
         let predecessor = self.dht.notify(msg.did)?;
 
-        if predecessor != ctx.relay.origin_sender() {
+        if predecessor != ctx.relay.try_origin_sender()? {
             return self
                 .run_effects([PayloadRelayFunctor::send_report_message(
                     ctx,

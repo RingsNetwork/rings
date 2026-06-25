@@ -26,6 +26,17 @@ wasm-bindgen-macro-support = "0.2.100"
 wasm-bindgen-test = "0.3.50"
 webrtc = { version = "0.17.1" }
 
+[workspace.lints.rust]
+warnings = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+indexing_slicing = "deny"
+
 [profile.release]
 opt-level = 3
 lto = true

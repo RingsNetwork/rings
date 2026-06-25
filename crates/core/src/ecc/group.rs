@@ -581,11 +581,7 @@ impl TryFrom<Point<Secp256k1>> for PublicKey<33> {
 }
 
 fn secp256k1_generator() -> Jacobian {
-    let mut one = [0u8; 32];
-    one[31] = 1;
-    let scalar: SecpK1FieldScalar = libsecp256k1::SecretKey::parse(&one)
-        .expect("scalar one is valid")
-        .into();
+    let scalar = SecpK1FieldScalar::from_int(1);
     SECP256K1_GEN_CONTEXT.with(|context| {
         let mut point = Jacobian::default();
         context.ecmult_gen(&mut point, &scalar);

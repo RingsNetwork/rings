@@ -91,13 +91,15 @@ impl IntoIterator for MessagePoints {
     }
 }
 
-impl<'a> From<Plaintext<'a>> for MessagePoints {
-    fn from(message: Plaintext<'a>) -> Self {
-        str_to_affine(message.as_str())
+impl<'a> TryFrom<Plaintext<'a>> for MessagePoints {
+    type Error = Error;
+
+    fn try_from(message: Plaintext<'a>) -> Result<Self> {
+        Ok(str_to_affine(message.as_str())?
             .into_iter()
             .map(Point::<Secp256k1>::from)
             .collect::<Vec<_>>()
-            .into()
+            .into())
     }
 }
 
@@ -125,11 +127,20 @@ pub fn str_to_field(s: &str) -> Vec<Field> {
         .map(|x| {
             let mut data = [0u8; 32];
             let mut field = Field::default();
-            data[0] = 255;
-            data[1] = FIELD_ENCODING_MARKER;
-            data[2] = x.len() as u8;
-            data[FIELD_ENCODING_OVERHEAD..FIELD_ENCODING_OVERHEAD + x.len()].copy_from_slice(x);
-            assert!(field.set_b32(&data));
+            for (target, source) in data
+                .iter_mut()
+                .zip([255, FIELD_ENCODING_MARKER, x.len() as u8])
+            {
+                *target = source;
+            }
+            for (target, source) in data
+                .iter_mut()
+                .skip(FIELD_ENCODING_OVERHEAD)
+                .zip(x.iter().copied())
+            {
+                *target = source;
+            }
+            let _ = field.set_b32(&data);
             field
         })
         .collect()
@@ -147,17 +158,18 @@ pub fn field_to_str(f: &[Field]) -> Result<String> {
 }
 
 fn decode_field_bytes(mut bytes: [u8; 32]) -> Vec<u8> {
-    let len = bytes[2] as usize;
-    if bytes[1] == FIELD_ENCODING_MARKER
+    let [_, marker, len_byte, payload @ ..] = bytes;
+    let len = len_byte as usize;
+    if marker == FIELD_ENCODING_MARKER
         && len <= FIELD_CHUNK_SIZE
-        && bytes[FIELD_ENCODING_OVERHEAD + len..]
-            .iter()
-            .all(|byte| *byte == 0)
+        && payload.iter().skip(len).all(|byte| *byte == 0)
     {
-        return bytes[FIELD_ENCODING_OVERHEAD..FIELD_ENCODING_OVERHEAD + len].to_vec();
+        return payload.iter().take(len).copied().collect();
     }
 
-    bytes[0] = 0u8;
+    if let Some(first) = bytes.first_mut() {
+        *first = 0u8;
+    }
     bytes.into_iter().skip_while(|n| *n == 0u8).collect()
 }
 
@@ -168,45 +180,44 @@ fn decode_field_bytes(mut bytes: [u8; 32]) -> Vec<u8> {
 /// `1..` intact, so decoding can recover the original marker, chunk length, and
 /// plaintext bytes. The panic at `Some(0)` is an invariant failure: for the
 /// adapter's 254 alternate high-byte candidates, at least one should lift.
-fn lift_x(x: &Field, bias: Option<u8>) -> Affine {
+fn lift_x(x: &Field) -> Result<Affine> {
     let mut ec = Affine::default();
     let mut x = *x;
     x.normalize();
-    match bias {
-        None => {
-            if !ec.set_xo_var(&x, x.is_odd()) {
-                lift_x(&x, Some(254))
-            } else {
-                ec
-            }
+
+    if ec.set_xo_var(&x, x.is_odd()) {
+        return Ok(ec);
+    }
+
+    for bias in (1..=254).rev() {
+        let mut bytes = x.b32();
+        let Some(first) = bytes.first_mut() else {
+            return Err(Error::Secp256k1PointLiftFailed);
+        };
+        *first = bias;
+
+        let mut candidate = Field::default();
+        if !candidate.set_b32(&bytes) {
+            continue;
         }
-        Some(0) => {
-            panic!("failed to lift secp256k1 x-coordinate candidate");
-        }
-        Some(a) => {
-            let mut v = x.b32();
-            let mut x = Field::default();
-            v[0] = a;
-            assert_eq!(v.len(), 32);
-            assert!(x.set_b32(&v));
-            x.normalize();
-            if !ec.set_xo_var(&x, x.is_odd()) {
-                lift_x(&x, Some(a - 1))
-            } else {
-                ec.x.normalize();
-                ec.y.normalize();
-                ec
-            }
+        candidate.normalize();
+
+        if ec.set_xo_var(&candidate, candidate.is_odd()) {
+            ec.x.normalize();
+            ec.y.normalize();
+            return Ok(ec);
         }
     }
+
+    Err(Error::Secp256k1PointLiftFailed)
 }
 
 /// Convert a string into secp256k1 points using the adapter encoding.
-pub fn str_to_affine(s: &str) -> Vec<Affine> {
+pub fn str_to_affine(s: &str) -> Result<Vec<Affine>> {
     str_to_field(s)
         .into_iter()
-        .map(|a| lift_x(&a, None))
-        .collect::<Vec<Affine>>()
+        .map(|a| lift_x(&a))
+        .collect::<Result<Vec<Affine>>>()
 }
 
 /// Decode secp256k1 points produced by `str_to_affine`.
@@ -217,7 +228,7 @@ pub fn affine_to_str(a: &[Affine]) -> Result<String> {
 /// Encrypt a string with the current secp256k1 compatibility adapter.
 pub fn encrypt(s: &str, k: PublicKey<33>) -> Result<Vec<(CurveEle<33>, CurveEle<33>)>> {
     let public_key = ElGamalPublicKey::<Group<Secp256k1>>::from_element(k.try_into()?);
-    let points = MessagePoints::from(Plaintext::from(s));
+    let points = MessagePoints::try_from(Plaintext::from(s))?;
     ElGamal::<Group<Secp256k1>>::encrypt(points, &public_key)
         .into_iter()
         .map(|(c1, c2)| Ok((c1.try_into()?, c2.try_into()?)))
@@ -231,7 +242,7 @@ pub fn encrypt_with_rng(
     rng: &mut impl RngCore,
 ) -> Result<Vec<(CurveEle<33>, CurveEle<33>)>> {
     let public_key = ElGamalPublicKey::<Group<Secp256k1>>::from_element(k.try_into()?);
-    let points = MessagePoints::from(Plaintext::from(s));
+    let points = MessagePoints::try_from(Plaintext::from(s))?;
     ElGamal::<Group<Secp256k1>>::encrypt_with_rng(points, &public_key, rng)
         .into_iter()
         .map(|(c1, c2)| Ok((c1.try_into()?, c2.try_into()?)))
@@ -301,10 +312,10 @@ mod test {
     #[test]
     fn test_string_to_affine() {
         let t: String = random(1024);
-        assert_eq!(affine_to_str(&str_to_affine(&t)).unwrap(), t);
+        assert_eq!(affine_to_str(&str_to_affine(&t).unwrap()).unwrap(), t);
 
         let t: String = random(127);
-        assert_eq!(affine_to_str(&str_to_affine(&t)).unwrap(), t);
+        assert_eq!(affine_to_str(&str_to_affine(&t).unwrap()).unwrap(), t);
     }
 
     #[test]
@@ -328,9 +339,9 @@ mod test {
         assert_eq!(pub_point.x.b32(), pub_x);
         assert_eq!(pub_point.y.b32(), pub_y);
         let test = "test";
-        let points = str_to_affine(test);
+        let points = str_to_affine(test).unwrap();
         assert_eq!(points.len(), 1);
-        assert_eq!(affine_to_str(&str_to_affine(test)).unwrap(), test);
+        assert_eq!(affine_to_str(&str_to_affine(test).unwrap()).unwrap(), test);
         let m_point = points[0];
         let r: libsecp256k1::SecretKey =
             SecretKey::try_from("1f9275dbafdfba81942eb3330b07f38cbee4ebb86bdc2174af9648d5f5509a54")

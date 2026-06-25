@@ -264,22 +264,26 @@ mod stabilizer {
     use wasm_bindgen_futures::spawn_local;
 
     use super::*;
-    use crate::poll;
+    use crate::utils::js_utils::window_sleep;
 
     impl Stabilizer {
         /// Run stabilization in a loop.
         pub async fn wait(self: Arc<Self>, interval: Duration) {
-            let caller = Arc::clone(&self);
-            let func = move || {
-                let caller = caller.clone();
+            let millis = i32::try_from(interval.as_millis()).unwrap_or(i32::MAX);
+            loop {
+                if let Err(error) = window_sleep(millis).await {
+                    tracing::error!("failed to wait for stabilization interval {:?}", error);
+                    return;
+                }
+
+                let caller = self.clone();
                 spawn_local(Box::pin(async move {
                     caller
                         .stabilize()
                         .await
                         .unwrap_or_else(|e| tracing::error!("failed to stabilize {:?}", e));
-                }))
-            };
-            poll!(func, interval.as_millis().try_into().unwrap());
+                }));
+            }
         }
     }
 }

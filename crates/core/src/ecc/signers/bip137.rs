@@ -77,10 +77,9 @@ fn varint_buf_num(n: u64) -> Vec<u8> {
         buf.extend_from_slice(&(n as u32).to_le_bytes());
         buf
     } else {
-        let mut buf = vec![255u8, 0, 0, 0, 0, 0, 0, 0, 0];
-        buf[1..5].copy_from_slice(&n.to_le_bytes()[..4]);
-        buf[5..9].copy_from_slice(&((n >> 32) as u32).to_le_bytes()[..4]);
-        buf.truncate(1 + 8);
+        let mut buf = Vec::with_capacity(9);
+        buf.push(255u8);
+        buf.extend_from_slice(&n.to_le_bytes());
         buf
     }
 }

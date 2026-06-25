@@ -10,6 +10,9 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[lints]
+workspace = true
+
 [features]
 # Deprecated compatibility alias. The formerly experimental correct-chord path
 # now runs by default.

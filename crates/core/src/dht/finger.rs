@@ -12,6 +12,7 @@ use crate::dht::Did;
 
 /// Default number of Chord finger slots for a 160-bit `Did`.
 pub const DEFAULT_FINGER_TABLE_SIZE: usize = 160;
+const EMPTY_FINGER_SLOT: Option<Did> = None;
 
 /// Finger table of Chord DHT
 /// Ring's finger table is implemented with BiasRing
@@ -49,30 +50,17 @@ impl FingerTable {
 
     /// Get first element from Finger Table
     pub fn first(&self) -> Option<Did> {
-        let ids = self
-            .finger
-            .iter()
-            .filter(|x| x.is_some())
-            .take(1)
-            .map(|x| x.unwrap())
-            .collect::<Vec<Did>>();
-        ids.first().copied()
+        self.finger.iter().flatten().next().copied()
     }
 
     /// getter
     pub fn get(&self, index: usize) -> Option<Did> {
-        if index >= self.finger.len() {
-            return None;
-        }
-        self.finger[index]
+        self.finger.get(index).copied().flatten()
     }
 
     /// ref getter
     pub fn get_ref(&self, index: usize) -> &Option<Did> {
-        if index >= self.finger.len() {
-            return &None;
-        }
-        &self.finger[index]
+        self.finger.get(index).unwrap_or(&EMPTY_FINGER_SLOT)
     }
 
     /// setter
@@ -86,7 +74,9 @@ impl FingerTable {
             tracing::trace!("set finger table with self did, ignore it");
             return;
         }
-        self.finger[index] = Some(did);
+        if let Some(slot) = self.finger.get_mut(index) {
+            *slot = Some(did);
+        }
     }
 
     /// setter for fix_finger_index
@@ -105,24 +95,19 @@ impl FingerTable {
             .map(|(id, _)| id)
             .collect();
 
-        if let Some(last_idx) = indexes.last() {
-            let (first_idx, end_idx) = (*indexes.first().unwrap(), *last_idx + 1);
+        if let (Some(first_idx), Some(last_idx)) =
+            (indexes.first().copied(), indexes.last().copied())
+        {
+            let end_idx = last_idx + 1;
 
             // Update to the next did of last equaled did in finger table.
             // If cannot get that, use None.
-            let fix_id = self
-                .finger
-                .iter()
-                .skip(end_idx)
-                .take(1)
-                .collect::<Vec<_>>()
-                .first()
-                .unwrap_or(&&None)
-                .as_ref()
-                .copied();
+            let fix_id = self.finger.get(end_idx).copied().flatten();
 
             for idx in first_idx..end_idx {
-                self.finger[idx] = fix_id
+                if let Some(slot) = self.finger.get_mut(idx) {
+                    *slot = fix_id;
+                }
             }
         }
     }
@@ -131,20 +116,22 @@ impl FingerTable {
     pub fn join(&mut self, did: Did) {
         let bias = did.bias(self.did);
 
-        for k in 0u32..self.size as u32 {
-            let pos = Did::from(BigUint::from(2u16).pow(k));
+        for k in 0..self.size {
+            let pos = Did::from(BigUint::from(2u16).pow(k as u32));
 
             if bias.pos() < pos {
                 continue;
             }
 
-            if let Some(v) = self.finger[k as usize] {
+            if let Some(v) = self.finger.get(k).copied().flatten() {
                 if bias > v.bias(self.did) {
                     continue;
                 }
             }
 
-            self.finger[k as usize] = Some(did);
+            if let Some(slot) = self.finger.get_mut(k) {
+                *slot = Some(did);
+            }
         }
     }
 
@@ -158,7 +145,7 @@ impl FingerTable {
         let bias = did.bias(self.did);
 
         for i in (0..self.size).rev() {
-            if let Some(v) = self.finger[i] {
+            if let Some(v) = self.finger.get(i).copied().flatten() {
                 if v.bias(self.did) < bias {
                     return v;
                 }

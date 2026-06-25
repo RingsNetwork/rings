@@ -13,7 +13,12 @@ use proc_macro::TokenStream;
 #[proc_macro_attribute]
 pub fn wasm_export(attr: TokenStream, input: TokenStream) -> TokenStream {
     if !attr.is_empty() {
-        std::unimplemented!("wasm_export is not ready for attribute case");
+        return syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "wasm_export does not support attribute arguments",
+        )
+        .to_compile_error()
+        .into();
     }
     #[cfg(feature = "wasm")]
     return match wasm_bindgen_macro_support::expand(attr.into(), input.into()) {

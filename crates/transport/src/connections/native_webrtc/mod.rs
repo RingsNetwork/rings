@@ -183,7 +183,13 @@ impl WebrtcConnection {
 impl WebrtcTransport {
     /// Create a new [WebrtcTransport] instance.
     pub fn new(ice_servers: &str, external_address: Option<String>) -> Self {
-        let ice_servers = IceServer::vec_from_str(ice_servers).unwrap();
+        let ice_servers = match IceServer::vec_from_str(ice_servers) {
+            Ok(ice_servers) => ice_servers,
+            Err(error) => {
+                tracing::warn!(%error, "Ignoring invalid native WebRTC ICE server configuration");
+                Vec::new()
+            }
+        };
 
         Self {
             ice_servers,

@@ -58,21 +58,12 @@ use crate::error::Error;
 use crate::error::Result;
 
 /// sign function with `hash` data. Recover is no needed.
-pub fn sign(sec: SecretKey, hash: &[u8; 32]) -> [u8; 64] {
-    match (|| -> Result<[u8; 64]> {
-        let sk_bytes: FieldBytes<p256::NistP256> = sec.into();
-        let sk = ecdsa::SigningKey::<p256::NistP256>::from_bytes(&sk_bytes)?;
-        let (sig, _rid) = sk
-            .sign_prehash_recoverable(hash)
-            .expect("Failed on signing message hash");
-        let sig_bytes: [u8; 64] = sig.to_bytes().as_slice().try_into()?;
-        Ok(sig_bytes)
-    })() {
-        Ok(s) => s,
-        Err(e) => {
-            panic!("Got error on signing msg with secp256r1 {e:?}")
-        }
-    }
+pub fn sign(sec: SecretKey, hash: &[u8; 32]) -> Result<[u8; 64]> {
+    let sk_bytes: FieldBytes<p256::NistP256> = sec.into();
+    let sk = ecdsa::SigningKey::<p256::NistP256>::from_bytes(&sk_bytes)?;
+    let (sig, _rid) = sk.sign_prehash_recoverable(hash)?;
+    let sig_bytes: [u8; 64] = sig.to_bytes().as_slice().try_into()?;
+    Ok(sig_bytes)
 }
 
 // Prefix with magic string
@@ -191,7 +182,7 @@ mod test {
         let sig: [u8; 64] = hex::decode("43e9f1ce3f4fc0761805cb13b3ec188ccd3d509b7e563f3794e5daf84eaf43bf4fe1343f0b08a810768475fa87fd061a586e943ca9665ee167a3f63c70c72fd9").unwrap().try_into().unwrap();
 
         // Check our sign and verify work right
-        let our_sig = sign(sk, &hash(msg.as_bytes()));
+        let our_sig = sign(sk, &hash(msg.as_bytes())).unwrap();
         assert!(verify(msg.as_bytes(), &pk.address(), our_sig, &pk));
 
         let hash_msg: [u8; 32] =

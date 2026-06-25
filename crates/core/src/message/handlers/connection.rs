@@ -84,7 +84,11 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
         } else {
             let answer = self
                 .transport
-                .answer_remote_connection(ctx.relay.origin_sender(), self.inner_callback(), msg)
+                .answer_remote_connection(
+                    ctx.relay.try_origin_sender()?,
+                    self.inner_callback(),
+                    msg,
+                )
                 .await?;
             self.run_effects([PayloadRelayFunctor::send_report_message(
                 ctx,
@@ -105,7 +109,7 @@ impl HandleMsg<ConnectNodeReport> for MessageHandler {
                 .await
         } else {
             self.transport
-                .accept_remote_connection(ctx.relay.origin_sender(), msg)
+                .accept_remote_connection(ctx.relay.try_origin_sender()?, msg)
                 .await
         }
     }

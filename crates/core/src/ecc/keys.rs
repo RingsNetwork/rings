@@ -364,7 +364,7 @@ impl SigningSecretKey {
                 out
             }
             Self::Secp256r1(sk) => {
-                signers::secp256r1::sign(*sk, &signers::secp256r1::hash(msg)).to_vec()
+                signers::secp256r1::sign(*sk, &signers::secp256r1::hash(msg))?.to_vec()
             }
             Self::Ed25519(sk) => sk.sign_raw(msg)?.to_vec(),
             Self::Bls12381(sk) => signers::bls::sign(*sk, msg)?.0.to_vec(),
@@ -412,19 +412,22 @@ impl SigningSecretKey {
             Self::Secp256k1(sk) => VerificationPublicKey::Secp256k1(sk.pubkey()),
             Self::Eip191(sk) => VerificationPublicKey::Eip191(sk.pubkey()),
             Self::Bip137(sk) => VerificationPublicKey::Bip137(sk.pubkey()),
-            Self::Secp256r1(sk) => VerificationPublicKey::Secp256r1(secp256r1_public_key(*sk)),
+            Self::Secp256r1(sk) => VerificationPublicKey::Secp256r1(secp256r1_public_key(*sk)?),
             Self::Ed25519(sk) => VerificationPublicKey::Ed25519(sk.public_key()?),
             Self::Bls12381(sk) => VerificationPublicKey::Bls12381(signers::bls::public_key(sk)?),
         })
     }
 }
 
-fn secp256r1_public_key(secret_key: SecretKey) -> PublicKey<33> {
+fn secp256r1_public_key(secret_key: SecretKey) -> Result<PublicKey<33>> {
     let sk_bytes: elliptic_curve::FieldBytes<p256::NistP256> = secret_key.into();
-    let signing_key = ecdsa::SigningKey::<p256::NistP256>::from_bytes(&sk_bytes)
-        .expect("valid secp256r1 signing key");
+    let signing_key = ecdsa::SigningKey::<p256::NistP256>::from_bytes(&sk_bytes)?;
     let encoded = signing_key.verifying_key().to_encoded_point(false);
-    PublicKey::from_u8(&encoded.as_bytes()[1..]).expect("uncompressed secp256r1 key is 64 bytes")
+    let uncompressed = encoded
+        .as_bytes()
+        .get(1..)
+        .ok_or(Error::PublicKeyBadFormat)?;
+    PublicKey::from_u8(uncompressed)
 }
 
 fn with_key_rng<R>(f: impl FnOnce(&mut Hc128Rng) -> R) -> R {

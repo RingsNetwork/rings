@@ -456,7 +456,8 @@ mod test {
             SessionSkBuilder::new(account_entity.to_string(), "secp256r1".to_string());
         let proof = builder.unsigned_proof();
         let sig =
-            signers::secp256r1::sign(signing_key, &signers::secp256r1::hash(proof.as_bytes()));
+            signers::secp256r1::sign(signing_key, &signers::secp256r1::hash(proof.as_bytes()))
+                .unwrap();
         builder = builder.set_session_sig(sig.to_vec());
 
         let session = builder.build().unwrap().session();

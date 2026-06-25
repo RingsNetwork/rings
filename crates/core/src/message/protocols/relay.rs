@@ -68,8 +68,8 @@ impl MessageRelay {
 
         Ok(Self {
             path: vec![current],
-            next_hop: self.path[self.path.len() - 1],
-            destination: self.origin_sender(),
+            next_hop: self.path.last().copied().ok_or(Error::CannotInferNextHop)?,
+            destination: self.try_origin_sender()?,
         })
     }
 
@@ -88,7 +88,11 @@ impl MessageRelay {
         }
 
         // Adjacent elements in self.path cannot be equal
-        if self.path.windows(2).any(|w| w[0] == w[1]) {
+        if self
+            .path
+            .windows(2)
+            .any(|window| matches!(window, [left, right] if left == right))
+        {
             return Err(Error::InvalidRelayPath);
         }
 
@@ -105,13 +109,18 @@ impl MessageRelay {
     /// Should be the first element of path.
     #[deprecated(note = "please use `origin_sender` instead")]
     pub fn sender(&self) -> Did {
-        *self.path.first().unwrap()
+        self.origin_sender()
+    }
+
+    /// Get the origin sender of current message as a checked relay-path boundary.
+    pub fn try_origin_sender(&self) -> Result<Did> {
+        self.path.first().copied().ok_or(Error::CannotInferNextHop)
     }
 
     /// Get the origin sender of current message.
     /// Should be the first element of path.
     pub fn origin_sender(&self) -> Did {
-        *self.path.first().unwrap()
+        self.path.first().copied().unwrap_or(self.destination)
     }
 }
 
@@ -120,7 +129,9 @@ impl MessageRelay {
 const INFINITE_LOOP_TOLERANCE: usize = 3;
 
 fn has_infinite_loop<T>(path: &[T]) -> bool
-where T: PartialEq {
+where
+    T: PartialEq,
+{
     // Invariant: a relay loop is witnessed by a non-empty suffix period P such
     // that the final path segment is P repeated INFINITE_LOOP_TOLERANCE times.
     for period in 1..=path.len() / INFINITE_LOOP_TOLERANCE {
@@ -256,5 +267,17 @@ mod test {
             3, 1, 2, 3, 4,
             3, 1, 2, 3, 4,
         ]));
+    }
+
+    #[test]
+    fn empty_path_origin_sender_is_checked() {
+        let fallback_destination = Did::from(2);
+        let relay = MessageRelay::new(vec![], Did::from(1), fallback_destination);
+
+        assert!(matches!(
+            relay.try_origin_sender(),
+            Err(Error::CannotInferNextHop)
+        ));
+        assert_eq!(relay.origin_sender(), fallback_destination);
     }
 }

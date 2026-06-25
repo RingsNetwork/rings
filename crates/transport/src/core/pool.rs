@@ -82,14 +82,12 @@ impl<T: Clone> RoundRobin<T> for RoundRobinPool<T> {
             .read()
             .map_err(|_| Error::RwLockRead("Failed to read RR pool when selecting".to_string()))?;
         let len = pool.len();
-        let idx = self
-            .idx
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |x| {
-                Some((x + 1) % len)
-            })
-            .expect("Unable to update index for round-robin selection.");
+        if len == 0 {
+            return Err(Error::RoundRobinPoolEmpty);
+        }
 
-        Ok(pool[idx].clone())
+        let idx = self.idx.fetch_add(1, Ordering::Relaxed) % len;
+        pool.get(idx).cloned().ok_or(Error::RoundRobinPoolEmpty)
     }
 
     /// Accesses all resources pooled, potentially for inspection or bulk operations.
@@ -163,5 +161,11 @@ pub mod tests {
         assert_eq!(pool.select().unwrap(), 1);
         assert_eq!(pool.select().unwrap(), 2);
         assert_eq!(pool.select().unwrap(), 3);
+    }
+
+    #[test]
+    fn empty_rr_pool_returns_typed_error() {
+        let pool = RoundRobinPool::<usize>::default();
+        assert!(matches!(pool.select(), Err(Error::RoundRobinPoolEmpty)));
     }
 }

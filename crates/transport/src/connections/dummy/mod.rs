@@ -3,6 +3,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::MutexGuard;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -193,8 +194,20 @@ impl DummyConnection {
         }
     }
 
+    fn remote_rand_id(&self) -> MutexGuard<'_, Option<String>> {
+        self.remote_rand_id
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn connection_state(&self) -> MutexGuard<'_, WebrtcConnectionState> {
+        self.webrtc_connection_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     fn remote_conn(&self) -> Option<Arc<DummyConnection>> {
-        let cid = { self.remote_rand_id.lock().unwrap() }.clone()?;
+        let cid = self.remote_rand_id().clone()?;
         // The remote may already have been closed and removed from the global
         // map (e.g. during a disconnect). Return None instead of panicking, so
         // callers treat it like a closed connection.
@@ -202,7 +215,7 @@ impl DummyConnection {
     }
 
     fn set_remote_rand_id(&self, rand_id: String) {
-        let mut remote_rand_id = self.remote_rand_id.lock().unwrap();
+        let mut remote_rand_id = self.remote_rand_id();
         *remote_rand_id = Some(rand_id);
     }
 
@@ -221,7 +234,7 @@ impl DummyConnection {
 
     async fn set_webrtc_connection_state(&self, state: WebrtcConnectionState) {
         {
-            let mut webrtc_connection_state = self.webrtc_connection_state.lock().unwrap();
+            let mut webrtc_connection_state = self.connection_state();
 
             if state == *webrtc_connection_state {
                 return;
@@ -248,7 +261,9 @@ impl DummyConnection {
 impl DummyTransport {
     /// Create a new [DummyTransport] instance.
     pub fn new(ice_servers: &str, _external_address: Option<String>) -> Self {
-        let _ice_servers = IceServer::vec_from_str(ice_servers).unwrap();
+        if let Err(error) = IceServer::vec_from_str(ice_servers) {
+            tracing::warn!(%error, "Ignoring invalid dummy ICE server configuration");
+        }
 
         Self { pool: Pool::new() }
     }
@@ -283,7 +298,7 @@ impl ConnectionInterface for DummyConnection {
     }
 
     fn webrtc_connection_state(&self) -> WebrtcConnectionState {
-        *self.webrtc_connection_state.lock().unwrap()
+        *self.connection_state()
     }
 
     fn max_message_size(&self) -> usize {

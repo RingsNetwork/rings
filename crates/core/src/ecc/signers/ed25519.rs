@@ -32,7 +32,10 @@ pub fn verify(
     if sig.as_ref().len() != 64 {
         return false;
     }
-    let sig_data: [u8; 64] = sig.as_ref().try_into().unwrap();
+    let sig_data = match <[u8; 64]>::try_from(sig.as_ref()) {
+        Ok(sig_data) => sig_data,
+        Err(_) => return false,
+    };
     if let Ok(p) = TryInto::<ed25519_dalek::VerifyingKey>::try_into(*pubkey) {
         let s = ed25519_dalek::Signature::from_bytes(&sig_data);
         match p.verify(msg, &s) {

@@ -96,10 +96,8 @@ impl TryFrom<PublicKey<33>> for ed25519_dalek::VerifyingKey {
     type Error = Error;
     fn try_from(key: PublicKey<33>) -> Result<Self> {
         // pubkey[0] == 0
-        let bytes = key.0[1..]
-            .try_into()
-            .map_err(|_| Error::EdDSAPublicKeyBadFormat)?;
-        Self::from_bytes(bytes).map_err(|_| Error::EdDSAPublicKeyBadFormat)
+        let [_, bytes @ ..] = key.0;
+        Self::from_bytes(&bytes).map_err(|_| Error::EdDSAPublicKeyBadFormat)
     }
 }
 
@@ -107,12 +105,13 @@ impl AffineCoordinates for PublicKey<33> {
     type FieldRepr = GenericArray<u8, U32>;
 
     fn x(&self) -> Self::FieldRepr {
-        let x: [u8; 32] = self.0[1..].try_into().expect("Expecting length is 32");
+        let [_, x @ ..] = self.0;
         GenericArray::<u8, U32>::from(x)
     }
 
     fn y_is_odd(&self) -> subtle::Choice {
-        match self.0[0] {
+        let [prefix, ..] = self.0;
+        match prefix {
             2u8 => Choice::from(1),
             3u8 => Choice::from(0),
             _ => Choice::from(0),
@@ -153,12 +152,11 @@ impl From<ed25519_dalek::VerifyingKey> for PublicKey<33> {
     fn from(key: ed25519_dalek::VerifyingKey) -> Self {
         // [u8;32] here
         // ref: https://docs.rs/ed25519-dalek/latest/ed25519_dalek/struct.VerifyingKey.html
-        let mut s = key.to_bytes().as_slice().to_vec();
-        // [u8;32] + [0]
-        s.reverse();
-        s.push(0);
-        s.reverse();
-        Self(s.as_slice().try_into().unwrap())
+        let mut data = [0u8; 33];
+        for (target, source) in data.iter_mut().skip(1).zip(key.to_bytes()) {
+            *target = source;
+        }
+        Self(data)
     }
 }
 

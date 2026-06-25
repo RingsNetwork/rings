@@ -56,6 +56,9 @@ pub enum Error {
 
     #[error("Rwlock try read failed: {0}")]
     RwLockRead(String),
+
+    #[error("Cannot select from an empty round-robin pool")]
+    RoundRobinPoolEmpty,
 }
 
 #[cfg(feature = "web-sys-webrtc")]

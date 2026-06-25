@@ -114,7 +114,13 @@ impl SuccessorReader for SuccessorSeq {
     /// Retrieve a successor from the list by index
     fn get(&self, index: usize) -> Result<Did> {
         let succs = self.successors()?;
-        Ok(succs[index])
+        succs
+            .get(index)
+            .copied()
+            .ok_or(Error::SuccessorIndexOutOfBounds {
+                index,
+                len: succs.len(),
+            })
     }
 
     /// Return the length of the successors list
@@ -296,5 +302,16 @@ mod tests {
         succ.remove(dids[2])?;
         assert_eq!(succ.list()?, vec![dids[1], dids[3]]);
         Ok(())
+    }
+
+    #[test]
+    fn get_out_of_bounds_returns_typed_error() {
+        let dids = gen_ordered_dids(1);
+        let succ = SuccessorSeq::new(dids[0], 3);
+
+        assert!(matches!(
+            succ.get(0),
+            Err(Error::SuccessorIndexOutOfBounds { index: 0, len: 0 })
+        ));
     }
 }

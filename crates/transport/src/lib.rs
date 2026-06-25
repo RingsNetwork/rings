@@ -1,5 +1,15 @@
 #![warn(missing_docs)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::unwrap_used
+    )
+)]
 #![doc = include_str!("../README.md")]
+
 pub mod callback;
 pub mod connection_ref;
 pub mod connections;
