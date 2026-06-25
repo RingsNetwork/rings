@@ -6,8 +6,10 @@ use async_recursion::async_recursion;
 use async_trait::async_trait;
 
 use crate::dht::entry::Entry;
+use crate::dht::Chord;
 use crate::dht::ChordStorage;
 use crate::dht::ChordStorageCache;
+use crate::dht::ChordStorageRepair;
 use crate::dht::ChordStorageSync;
 use crate::dht::Did;
 use crate::dht::PeerRing;
@@ -81,13 +83,15 @@ async fn reset_storage_relay_destination(
 /// Execute storage fetch actions for the Swarm-facing storage API.
 #[cfg_attr(feature = "wasm", async_recursion(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_recursion)]
-async fn handle_storage_fetch_act(
+async fn handle_storage_fetch_act<const REDUNDANT: u16>(
     transport: Arc<SwarmTransport>,
     act: PeerRingAction,
 ) -> Result<()> {
     match act {
         PeerRingAction::SomeEntry(v) => {
-            transport.dht.local_cache_put(v).await?;
+            transport.dht.local_cache_put(v.clone()).await?;
+            let repair = transport.dht.read_repair_entry(v, REDUNDANT).await?;
+            handle_storage_repair_act(transport.clone(), repair).await?;
         }
         PeerRingAction::RemoteAction(next, dht_act) => {
             if let PeerRingRemoteAction::FindEntry(entry_key) = dht_act {
@@ -97,13 +101,19 @@ async fn handle_storage_fetch_act(
                     next
                 );
                 transport
-                    .send_message(Message::SearchEntry(SearchEntry { key: entry_key }), next)
+                    .send_message(
+                        Message::SearchEntry(SearchEntry {
+                            key: entry_key,
+                            redundancy: REDUNDANT,
+                        }),
+                        next,
+                    )
                     .await?;
             }
         }
         PeerRingAction::MultiActions(acts) => {
             for act in acts {
-                handle_storage_fetch_act(transport.clone(), act).await?;
+                handle_storage_fetch_act::<REDUNDANT>(transport.clone(), act).await?;
             }
         }
         act => finish_storage_action(act)?,
@@ -134,6 +144,35 @@ pub(super) async fn handle_storage_store_act(
     Ok(())
 }
 
+/// Execute copy-only storage repair actions.
+#[cfg_attr(feature = "wasm", async_recursion(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_recursion)]
+pub(super) async fn handle_storage_repair_act(
+    transport: Arc<SwarmTransport>,
+    act: PeerRingAction,
+) -> Result<()> {
+    match act {
+        PeerRingAction::RemoteAction(
+            destination,
+            PeerRingRemoteAction::SyncEntriesWithSuccessor(data),
+        ) => {
+            transport
+                .send_message(
+                    Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor { data }),
+                    destination,
+                )
+                .await?;
+        }
+        PeerRingAction::MultiActions(acts) => {
+            for act in acts {
+                handle_storage_repair_act(transport.clone(), act).await?;
+            }
+        }
+        act => finish_storage_action(act)?,
+    }
+    Ok(())
+}
+
 /// Execute storage search actions emitted by inbound message handlers.
 #[cfg_attr(feature = "wasm", async_recursion(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_recursion)]
@@ -141,13 +180,17 @@ async fn handle_storage_search_act(
     handler: &MessageHandler,
     ctx: &MessagePayload,
     act: PeerRingAction,
+    redundancy: u16,
 ) -> Result<()> {
     match act {
         PeerRingAction::SomeEntry(v) => {
             handler
                 .run_effects([PayloadRelayFunctor::send_report_message(
                     ctx,
-                    Message::FoundEntry(FoundEntry { data: vec![v] }),
+                    Message::FoundEntry(FoundEntry {
+                        data: vec![v],
+                        redundancy,
+                    }),
                 )
                 .into()])
                 .await
@@ -156,9 +199,9 @@ async fn handle_storage_search_act(
             reset_storage_relay_destination(handler, ctx, next).await
         }
         PeerRingAction::MultiActions(acts) => {
-            let jobs = acts
-                .iter()
-                .map(|act| async move { handle_storage_operate_act(handler, ctx, act).await });
+            let jobs = acts.iter().map(|act| async move {
+                handle_storage_search_act(handler, ctx, act.clone(), redundancy).await
+            });
 
             for res in futures::future::join_all(jobs).await {
                 if res.is_err() {
@@ -218,6 +261,24 @@ async fn persist_synced_entries(
     Ok(keys)
 }
 
+fn next_hop_for_sync_entries(
+    handler: &MessageHandler,
+    ctx: &MessagePayload,
+) -> Result<Option<Did>> {
+    if ctx.is_relay_destination_for(handler.dht.did) {
+        return Ok(None);
+    }
+
+    match handler.dht.find_successor(ctx.relay.destination)? {
+        PeerRingAction::Some(owner) if owner == handler.dht.did => Ok(None),
+        PeerRingAction::Some(next) => Ok(Some(next)),
+        PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessor(_)) => {
+            Ok(Some(next))
+        }
+        action => Err(Error::PeerRingUnexpectedAction(action)),
+    }
+}
+
 async fn report_synced_entries(
     handler: &MessageHandler,
     ctx: &MessagePayload,
@@ -250,7 +311,7 @@ impl<const REDUNDANT: u16> ChordStorageInterface<REDUNDANT> for Swarm {
         // If peer found that data is on it's localstore, copy it to the cache
         let act =
             <PeerRing as ChordStorage<_, REDUNDANT>>::entry_lookup(&self.dht, entry_key).await?;
-        handle_storage_fetch_act(self.transport.clone(), act).await?;
+        handle_storage_fetch_act::<REDUNDANT>(self.transport.clone(), act).await?;
         Ok(())
     }
 
@@ -287,7 +348,7 @@ impl HandleMsg<SearchEntry> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &SearchEntry) -> Result<()> {
         // For relay message, set redundant to 1
         match <PeerRing as ChordStorage<_, 1>>::entry_lookup(&self.dht, msg.key).await {
-            Ok(action) => handle_storage_search_act(self, ctx, action).await,
+            Ok(action) => handle_storage_search_act(self, ctx, action, msg.redundancy).await,
             Err(e) => Err(e),
         }
     }
@@ -303,7 +364,9 @@ impl HandleMsg<FoundEntry> for MessageHandler {
                 .await;
         }
         for data in msg.data.iter().cloned() {
-            self.dht.local_cache_put(data).await?;
+            self.dht.local_cache_put(data.clone()).await?;
+            let repair = self.dht.read_repair_entry(data, msg.redundancy).await?;
+            handle_storage_repair_act(self.transport.clone(), repair).await?;
         }
         Ok(())
     }
@@ -325,6 +388,12 @@ impl HandleMsg<EntryOperation> for MessageHandler {
 impl HandleMsg<SyncEntriesWithSuccessor> for MessageHandler {
     // received remote sync entry request
     async fn handle(&self, ctx: &MessagePayload, msg: &SyncEntriesWithSuccessor) -> Result<()> {
+        if let Some(next) = next_hop_for_sync_entries(self, ctx)? {
+            return self
+                .run_effects([PayloadRelayFunctor::forward_payload(ctx, Some(next)).into()])
+                .await;
+        }
+
         let keys = persist_synced_entries(self, msg).await?;
         if let Err(e) = report_synced_entries(self, ctx, keys).await {
             tracing::warn!("Failed to report synced entries: {e:?}");
@@ -354,12 +423,16 @@ mod test {
     use super::*;
     use crate::consts::ENTRY_DATA_MAX_LEN;
     use crate::dht::entry::PlacedEntry;
+    use crate::dht::successor::SuccessorReader;
+    use crate::dht::successor::SuccessorWriter;
     use crate::ecc::tests::gen_ordered_keys;
     use crate::ecc::SecretKey;
     use crate::message::Encoder;
     use crate::prelude::entry::EntryKind;
     use crate::session::SessionSk;
+    use crate::storage::MemStorage;
     use crate::swarm::callback::SwarmCallback;
+    use crate::swarm::SwarmBuilder;
     use crate::tests::default::assert_no_more_msg;
     use crate::tests::default::prepare_node;
     use crate::tests::default::wait_for_msgs;
@@ -480,6 +553,101 @@ mod test {
             .ok_or_else(|| Error::InvalidMessage("expected capped payload".to_string()))?
             .decode()?;
         assert_eq!(first_payload, String::from("payload3"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sync_entries_handler_routes_repair_by_placement_destination() -> Result<()> {
+        let mut keys = gen_ordered_keys(2).into_iter();
+        let node1 = prepare_node(next_generated_key(&mut keys)?).await;
+        let node2 = prepare_node(next_generated_key(&mut keys)?).await;
+        manually_establish_connection(&node1.swarm, &node2.swarm).await;
+        wait_for_msgs([&node1, &node2]).await;
+        assert_no_more_msg([&node1, &node2]).await;
+
+        let handler = MessageHandler::new(node1.swarm.transport.clone(), Arc::new(NoopCallback));
+        let placement_key = node2.did();
+        let entry = Entry {
+            did: Did::from(10u32),
+            data: vec!["routed repair".to_string().encode()?],
+            kind: EntryKind::Data,
+        };
+        let msg = SyncEntriesWithSuccessor {
+            data: vec![PlacedEntry::new(placement_key, entry.clone())],
+        };
+        let context_key = SecretKey::random();
+        let context_session = SessionSk::new_with_seckey(&context_key)?;
+        let context = MessagePayload::new_send(
+            Message::SyncEntriesWithSuccessor(msg.clone()),
+            &context_session,
+            node1.did(),
+            placement_key,
+        )?;
+
+        handler.handle(&context, &msg).await?;
+
+        let forwarded = next_payload(&node2).await?;
+        assert!(matches!(
+            forwarded.transaction.data()?,
+            Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor { data })
+                if data == vec![PlacedEntry::new(placement_key, entry.clone())]
+        ));
+        let ack = next_payload(&node1).await?;
+        assert!(matches!(
+            ack.transaction.data()?,
+            Message::SyncEntriesWithSuccessorReport(SyncEntriesWithSuccessorReport { keys })
+                if keys == vec![placement_key]
+        ));
+        assert_eq!(
+            node1.dht().storage.get(&placement_key.to_string()).await?,
+            None
+        );
+        assert_eq!(
+            node2.dht().storage.get(&placement_key.to_string()).await?,
+            Some(entry)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn leave_dht_republishes_after_responsibility_peer_departure() -> Result<()> {
+        let key = SecretKey::random();
+        let session = SessionSk::new_with_seckey(&key)?;
+        let swarm = Arc::new(
+            SwarmBuilder::new(
+                0,
+                "stun://stun.l.google.com:19302",
+                Box::new(MemStorage::new()),
+                session,
+            )
+            .dht_storage_redundancy(2)
+            .build(),
+        );
+        let node = Node::new(swarm);
+        let departed = Did::from(100u32);
+        node.dht().successors().update(departed)?;
+        let entry = Entry {
+            did: key.address().into(),
+            data: vec![],
+            kind: EntryKind::Data,
+        };
+        let placement_keys = entry.did.rotate_affine(2)?;
+        node.dht()
+            .storage
+            .put(&placement_keys[0].to_string(), &entry)
+            .await?;
+        let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+
+        handler.leave_dht(departed).await?;
+
+        assert!(!node.dht().successors().contains(&departed)?);
+        assert_eq!(
+            node.dht()
+                .storage
+                .get(&placement_keys[1].to_string())
+                .await?,
+            Some(entry)
+        );
         Ok(())
     }
 

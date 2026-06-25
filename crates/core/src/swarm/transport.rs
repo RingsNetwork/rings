@@ -46,6 +46,7 @@ pub struct SwarmTransport {
     transport: Transport,
     session_sk: SessionSk,
     pub(crate) dht: Arc<PeerRing>,
+    storage_redundancy: u16,
     #[allow(dead_code)]
     measure: Option<MeasureImpl>,
 }
@@ -180,14 +181,21 @@ impl SwarmTransport {
         session_sk: SessionSk,
         dht: Arc<PeerRing>,
         measure: Option<MeasureImpl>,
+        storage_redundancy: u16,
     ) -> Self {
         Self {
             network_id,
             transport: Transport::new(ice_servers, external_address),
             session_sk,
             dht,
+            storage_redundancy,
             measure,
         }
+    }
+
+    /// Redundancy used by storage repair and anti-entropy.
+    pub(crate) fn storage_redundancy(&self) -> u16 {
+        self.storage_redundancy
     }
 
     /// Create new connection that will be handled by swarm.

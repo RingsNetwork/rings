@@ -41,6 +41,13 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
     }
 
     async fn acknowledge_synced_entries(&self, keys: &[Did]) -> Result<PeerRingAction> {
+        // Invariant gap: ack currently proves "successor durably stored this
+        // placement key", not "the local value is unchanged since copy".
+        // A write racing between copy and ack could be newer than the acked
+        // value and still be removed here. Closing that requires Entry
+        // version/timestamp metadata so delete can be conditional on equality.
+        // The storage durability work in #612 keeps repair additive until that
+        // versioned delete proof exists.
         for key in keys {
             self.storage.remove(&key.to_string()).await?;
         }

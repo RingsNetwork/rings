@@ -29,6 +29,7 @@ pub use successor::SuccessorWriter;
 pub use types::Chord;
 pub use types::ChordStorage;
 pub use types::ChordStorageCache;
+pub use types::ChordStorageRepair;
 pub use types::ChordStorageSync;
 pub use types::CorrectChord;
 pub use types::LiveDid;

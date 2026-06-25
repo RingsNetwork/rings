@@ -11,6 +11,7 @@ use super::effects::ConnectionFunctor;
 use super::effects::CoreEffect;
 use super::effects::CoreEffectInterpreter;
 use super::MessagePayload;
+use crate::dht::ChordStorageRepair;
 use crate::dht::CorrectChord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
@@ -109,7 +110,18 @@ impl MessageHandler {
             .await
             .is_none()
         {
+            let should_repair = self
+                .dht
+                .peer_may_share_storage_responsibility(peer, self.transport.storage_redundancy())
+                .await?;
             self.dht.remove(peer)?;
+            if should_repair {
+                let repair = self
+                    .dht
+                    .republish_local_entries(self.transport.storage_redundancy())
+                    .await?;
+                storage::handle_storage_repair_act(self.transport.clone(), repair).await?;
+            }
         };
         Ok(())
     }

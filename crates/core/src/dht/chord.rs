@@ -99,7 +99,11 @@ pub enum RemoteAction {
     /// `did_a` is the remote recipient from [`PeerRingAction::RemoteAction`].
     /// This field is the predecessor DID announced in `NotifyPredecessorSend`.
     Notify(Did),
-    /// Let `did_a` sync placed entries with its successor.
+    /// Copy placed entries to the storage destination represented by `did_a`.
+    ///
+    /// In successor hand-off, `did_a` is the new successor node. In repair and
+    /// republish, `did_a` is the placement key and the message layer routes it
+    /// to that key's current successor.
     SyncEntriesWithSuccessor(Vec<PlacedEntry>),
 
     /// Need `did_a` to find `did_b` then send back with `for connect` flag.
@@ -497,6 +501,7 @@ impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing 
     }
 }
 
+mod storage_repair;
 mod storage_sync;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]

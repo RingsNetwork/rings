@@ -91,6 +91,26 @@ pub trait ChordStorageSync<Action>: Chord<Action> {
     async fn acknowledge_synced_entries(&self, keys: &[Did]) -> Result<Action>;
 }
 
+/// ChordStorageRepair defines additive repair for redundant DHT storage.
+///
+/// Repair never deletes local copies. It only republishes a known [`Entry`] to
+/// the current affine placement set so missing owners can regain a copy.
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+pub trait ChordStorageRepair<Action>: Chord<Action> {
+    /// Republish every locally stored entry to its current affine owners.
+    ///
+    /// Post: no local key is removed. Remote actions, if any, are copy-only
+    /// sync messages carrying explicit placement keys.
+    async fn republish_local_entries(&self, redundancy: u16) -> Result<Action>;
+
+    /// Republish a found entry to its current affine owners.
+    ///
+    /// This is the read-repair transition. `redundancy <= 1` is a no-op because
+    /// there are no additional replicas to restore.
+    async fn read_repair_entry(&self, entry: Entry, redundancy: u16) -> Result<Action>;
+}
+
 /// ChordStorageCache defines the basic API for getting and setting DHT cache storage.
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]

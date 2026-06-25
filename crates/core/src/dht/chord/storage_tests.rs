@@ -6,7 +6,9 @@ use super::RemoteAction;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
+use crate::dht::successor::SuccessorWriter;
 use crate::dht::ChordStorage;
+use crate::dht::ChordStorageRepair;
 use crate::dht::ChordStorageSync;
 use crate::dht::Did;
 use crate::error::Error;
@@ -165,5 +167,73 @@ async fn sync_ack_deletes_placement_key_not_entry_identity() -> Result<()> {
         node.storage.get(&resource_id.to_string()).await?,
         Some(identity_entry)
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn periodic_republish_restores_missing_local_affine_replica() -> Result<()> {
+    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
+    let entry = data_entry(Did::from(10u32));
+    let placement_keys = entry.did.rotate_affine(2)?;
+    let first_key = placement_keys[0];
+    let second_key = placement_keys[1];
+    node.storage.put(&first_key.to_string(), &entry).await?;
+
+    let action = node.republish_local_entries(2).await?;
+
+    assert_eq!(action, PeerRingAction::None);
+    assert_eq!(
+        node.storage.get(&first_key.to_string()).await?,
+        Some(entry.clone())
+    );
+    assert_eq!(
+        node.storage.get(&second_key.to_string()).await?,
+        Some(entry)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn republish_remote_actions_preserve_affine_placement_keys() -> Result<()> {
+    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
+    let successor = Did::from(100u32);
+    node.successors().update(successor)?;
+    let entry = data_entry(Did::from(10u32));
+    let placement_keys = entry.did.rotate_affine(2)?;
+    node.storage.put(&entry.did.to_string(), &entry).await?;
+
+    let action = node.republish_local_entries(2).await?;
+
+    assert_eq!(
+        action,
+        PeerRingAction::MultiActions(vec![
+            PeerRingAction::RemoteAction(
+                placement_keys[0],
+                RemoteAction::SyncEntriesWithSuccessor(vec![PlacedEntry::new(
+                    placement_keys[0],
+                    entry.clone()
+                )])
+            ),
+            PeerRingAction::RemoteAction(
+                placement_keys[1],
+                RemoteAction::SyncEntriesWithSuccessor(vec![PlacedEntry::new(
+                    placement_keys[1],
+                    entry
+                )])
+            )
+        ])
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_repair_is_noop_for_single_replica_storage() -> Result<()> {
+    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
+    let entry = data_entry(Did::from(10u32));
+
+    let action = node.read_repair_entry(entry, 1).await?;
+
+    assert_eq!(action, PeerRingAction::None);
+    assert_eq!(node.storage.count().await?, 0);
     Ok(())
 }

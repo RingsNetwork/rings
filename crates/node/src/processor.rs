@@ -240,6 +240,7 @@ impl ProcessorBuilder {
 
         let mut swarm_builder =
             SwarmBuilder::new(self.network_id, &self.ice_servers, storage, self.session_sk);
+        swarm_builder = swarm_builder.dht_storage_redundancy(DATA_REDUNDANT);
 
         if let Some(external_address) = self.external_address {
             swarm_builder = swarm_builder.external_address(external_address);

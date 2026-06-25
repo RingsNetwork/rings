@@ -3,11 +3,17 @@ use std::time::Duration;
 
 use tokio::time::sleep;
 
+use crate::dht::entry::Entry;
+use crate::dht::entry::EntryKind;
 use crate::dht::successor::SuccessorReader;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
+use crate::session::SessionSk;
+use crate::storage::MemStorage;
+use crate::swarm::SwarmBuilder;
 use crate::tests::default::prepare_node;
+use crate::tests::default::Node;
 use crate::tests::manually_establish_connection;
 
 #[tokio::test]
@@ -48,6 +54,44 @@ async fn test_stabilization_once() -> Result<()> {
         .list()?
         .contains(&key2.address().into()));
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn stabilize_republishes_local_entries_to_missing_affine_owners() -> Result<()> {
+    let key = SecretKey::random();
+    let session = SessionSk::new_with_seckey(&key)?;
+    let swarm = Arc::new(
+        SwarmBuilder::new(
+            0,
+            "stun://stun.l.google.com:19302",
+            Box::new(MemStorage::new()),
+            session,
+        )
+        .dht_storage_redundancy(2)
+        .build(),
+    );
+    let node = Node::new(swarm);
+    let entry = Entry {
+        did: key.address().into(),
+        data: vec![],
+        kind: EntryKind::Data,
+    };
+    let placement_keys = entry.did.rotate_affine(2)?;
+    node.dht()
+        .storage
+        .put(&placement_keys[0].to_string(), &entry)
+        .await?;
+
+    node.swarm.stabilizer().stabilize().await?;
+
+    assert_eq!(
+        node.dht()
+            .storage
+            .get(&placement_keys[1].to_string())
+            .await?,
+        Some(entry)
+    );
     Ok(())
 }
 

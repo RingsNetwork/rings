@@ -159,6 +159,8 @@ impl Then for QueryForTopoInfoSend {
 pub struct SearchEntry {
     /// The ring key of the searched entry.
     pub key: Did,
+    /// Redundancy used by the requester for read-repair after a hit.
+    pub redundancy: u16,
 }
 
 /// MessageType used to report found DHT storage entries to the origin.
@@ -166,6 +168,8 @@ pub struct SearchEntry {
 pub struct FoundEntry {
     /// Response of [SearchEntry], containing response data
     pub data: Vec<Entry>,
+    /// Redundancy used by the requester for read-repair after this hit.
+    pub redundancy: u16,
 }
 
 /// MessageType after `FindSuccessorSend` and syncing data.

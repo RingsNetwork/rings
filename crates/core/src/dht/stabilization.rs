@@ -4,9 +4,12 @@ use std::sync::Arc;
 
 use rings_transport::core::transport::WebrtcConnectionState;
 
+use crate::dht::entry::PlacedEntry;
 use crate::dht::successor::SuccessorReader;
+use crate::dht::types::ChordStorageRepair;
 use crate::dht::types::CorrectChord;
 use crate::dht::Chord;
+use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
@@ -19,6 +22,7 @@ use crate::message::MessagePayload;
 use crate::message::NotifyPredecessorSend;
 use crate::message::PayloadSender;
 use crate::message::QueryForTopoInfoSend;
+use crate::message::SyncEntriesWithSuccessor;
 use crate::swarm::transport::SwarmTransport;
 
 /// The stabilization runner.
@@ -62,7 +66,61 @@ impl Stabilizer {
             tracing::error!("[stabilize] Failed on call correct stabilize {:?}", e);
         }
         tracing::debug!("STABILIZATION correct_stabilize end");
+        tracing::debug!("STABILIZATION repair_storage start");
+        if let Err(e) = self.repair_storage().await {
+            tracing::error!("[stabilize] Failed on repair storage {:?}", e);
+        }
+        tracing::debug!("STABILIZATION repair_storage end");
         Ok(())
+    }
+
+    fn collect_storage_repair_actions(
+        act: PeerRingAction,
+        out: &mut Vec<(Did, Vec<PlacedEntry>)>,
+    ) -> Result<()> {
+        match act {
+            PeerRingAction::None => Ok(()),
+            PeerRingAction::RemoteAction(
+                destination,
+                PeerRingRemoteAction::SyncEntriesWithSuccessor(data),
+            ) => {
+                out.push((destination, data));
+                Ok(())
+            }
+            PeerRingAction::MultiActions(actions) => {
+                for action in actions {
+                    Self::collect_storage_repair_actions(action, out)?;
+                }
+                Ok(())
+            }
+            action => {
+                tracing::error!("Invalid storage repair action: {action:?}");
+                Err(crate::error::Error::PeerRingUnexpectedAction(action))
+            }
+        }
+    }
+
+    async fn handle_storage_repair_action(&self, act: PeerRingAction) -> Result<()> {
+        let mut messages = Vec::new();
+        Self::collect_storage_repair_actions(act, &mut messages)?;
+        for (destination, data) in messages {
+            self.transport
+                .send_message(
+                    Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor { data }),
+                    destination,
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Republish locally-held entries to their current affine owners.
+    pub async fn repair_storage(&self) -> Result<()> {
+        let action = self
+            .dht
+            .republish_local_entries(self.transport.storage_redundancy())
+            .await?;
+        self.handle_storage_repair_action(action).await
     }
 
     /// Clean unavailable connections in transport.
@@ -80,7 +138,14 @@ impl Stabilizer {
                 WebrtcConnectionState::Failed | WebrtcConnectionState::Closed
             ) {
                 tracing::info!("STABILIZATION clean_unavailable_transports: {:?}", did);
+                let should_repair = self
+                    .dht
+                    .peer_may_share_storage_responsibility(did, self.transport.storage_redundancy())
+                    .await?;
                 self.transport.disconnect(did).await?;
+                if should_repair {
+                    self.repair_storage().await?;
+                }
             }
         }
 
