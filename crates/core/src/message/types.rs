@@ -175,6 +175,13 @@ pub struct SyncEntriesWithSuccessor {
     pub data: Vec<PlacedEntry>,
 }
 
+/// MessageType used to acknowledge durable storage of synced entries.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct SyncEntriesWithSuccessorReport {
+    /// Placement keys durably persisted by the sync receiver.
+    pub keys: Vec<Did>,
+}
+
 /// MessageType use to customize message, will be handle by `custom_message` method.
 #[derive(Deserialize, Serialize, Clone)]
 pub struct CustomMessage(pub Vec<u8>);
@@ -225,6 +232,8 @@ pub enum Message {
     OperateEntry(EntryOperation),
     /// Remote message for entry syncing.
     SyncEntriesWithSuccessor(SyncEntriesWithSuccessor),
+    /// Response after synced entries are durably persisted.
+    SyncEntriesWithSuccessorReport(SyncEntriesWithSuccessorReport),
     /// Custom messages
     CustomMessage(CustomMessage),
     /// Remote message of query topological info of a node.

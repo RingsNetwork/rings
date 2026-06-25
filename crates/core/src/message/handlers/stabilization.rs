@@ -77,6 +77,7 @@ mod test {
     use crate::ecc::SecretKey;
     use crate::error::Error;
     use crate::message::Encoder;
+    use crate::message::SyncEntriesWithSuccessorReport;
     use crate::session::SessionSk;
     use crate::swarm::callback::SwarmCallback;
     use crate::swarm::Swarm;
@@ -200,8 +201,33 @@ mod test {
                 )))
             }
         }
+        let payload = match timeout(Duration::from_secs(1), node1.listen_once()).await {
+            Ok(Some(payload)) => payload,
+            Ok(None) => {
+                return Err(Error::InvalidMessage(
+                    "node1 message stream closed before entry sync ack".to_string(),
+                ))
+            }
+            Err(_) => {
+                return Err(Error::InvalidMessage(
+                    "timed out waiting for entry sync ack".to_string(),
+                ))
+            }
+        };
+
+        match payload.transaction.data::<Message>()? {
+            Message::SyncEntriesWithSuccessorReport(SyncEntriesWithSuccessorReport { keys }) => {
+                assert_eq!(keys, vec![entry.did]);
+            }
+            message => {
+                return Err(Error::InvalidMessage(format!(
+                    "expected SyncEntriesWithSuccessorReport, got {message:?}"
+                )))
+            }
+        }
+        assert_eq!(node1.dht().storage.get(&entry.did.to_string()).await?, None);
         assert_eq!(
-            node1.dht().storage.get(&entry.did.to_string()).await?,
+            node2.dht().storage.get(&entry.did.to_string()).await?,
             Some(entry)
         );
 

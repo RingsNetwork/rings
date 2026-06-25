@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use crate::dht::entry::Entry;
 use crate::dht::ChordStorage;
 use crate::dht::ChordStorageCache;
+use crate::dht::ChordStorageSync;
 use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::dht::PeerRingAction;
@@ -19,6 +20,7 @@ use crate::message::types::FoundEntry;
 use crate::message::types::Message;
 use crate::message::types::SearchEntry;
 use crate::message::types::SyncEntriesWithSuccessor;
+use crate::message::types::SyncEntriesWithSuccessorReport;
 use crate::message::Encoded;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
@@ -199,6 +201,37 @@ async fn handle_storage_operate_act(
     }
 }
 
+async fn persist_synced_entries(
+    handler: &MessageHandler,
+    msg: &SyncEntriesWithSuccessor,
+) -> Result<Vec<Did>> {
+    let mut keys = Vec::with_capacity(msg.data.len());
+    for placed in msg.data.iter() {
+        let entry = placed.entry.clone().into_storage_entry();
+        handler
+            .dht
+            .storage
+            .put(&placed.key.to_string(), &entry)
+            .await?;
+        keys.push(placed.key);
+    }
+    Ok(keys)
+}
+
+async fn report_synced_entries(
+    handler: &MessageHandler,
+    ctx: &MessagePayload,
+    keys: Vec<Did>,
+) -> Result<()> {
+    handler
+        .run_effects([PayloadRelayFunctor::send_report_message(
+            ctx,
+            Message::SyncEntriesWithSuccessorReport(SyncEntriesWithSuccessorReport { keys }),
+        )
+        .into()])
+        .await
+}
+
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl ChordStorageInterfaceCacheChecker for Swarm {
@@ -291,15 +324,25 @@ impl HandleMsg<EntryOperation> for MessageHandler {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<SyncEntriesWithSuccessor> for MessageHandler {
     // received remote sync entry request
-    async fn handle(&self, _ctx: &MessagePayload, msg: &SyncEntriesWithSuccessor) -> Result<()> {
-        for placed in msg.data.iter() {
-            let entry = placed.entry.clone().into_storage_entry();
-            self.dht
-                .storage
-                .put(&placed.key.to_string(), &entry)
-                .await?;
+    async fn handle(&self, ctx: &MessagePayload, msg: &SyncEntriesWithSuccessor) -> Result<()> {
+        let keys = persist_synced_entries(self, msg).await?;
+        if let Err(e) = report_synced_entries(self, ctx, keys).await {
+            tracing::warn!("Failed to report synced entries: {e:?}");
         }
         Ok(())
+    }
+}
+
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl HandleMsg<SyncEntriesWithSuccessorReport> for MessageHandler {
+    async fn handle(
+        &self,
+        _ctx: &MessagePayload,
+        msg: &SyncEntriesWithSuccessorReport,
+    ) -> Result<()> {
+        let action = self.dht.acknowledge_synced_entries(&msg.keys).await?;
+        finish_storage_action(action)
     }
 }
 
@@ -437,6 +480,99 @@ mod test {
             .ok_or_else(|| Error::InvalidMessage("expected capped payload".to_string()))?
             .decode()?;
         assert_eq!(first_payload, String::from("payload3"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sync_entries_handler_reports_persisted_placement_keys() -> Result<()> {
+        let sender = prepare_node(SecretKey::random()).await;
+        let receiver = prepare_node(SecretKey::random()).await;
+        manually_establish_connection(&sender.swarm, &receiver.swarm).await;
+        wait_for_msgs([&sender, &receiver]).await;
+
+        let handler = MessageHandler::new(receiver.swarm.transport.clone(), Arc::new(NoopCallback));
+        let placement_key = Did::from(100u32);
+        let entry = Entry {
+            did: Did::from(10u32),
+            data: vec!["acked".to_string().encode()?],
+            kind: EntryKind::Data,
+        };
+        let sync_msg = SyncEntriesWithSuccessor {
+            data: vec![PlacedEntry::new(placement_key, entry.clone())],
+        };
+        let context = MessagePayload::new_send(
+            Message::SyncEntriesWithSuccessor(sync_msg.clone()),
+            sender.swarm.transport.session_sk(),
+            receiver.did(),
+            receiver.did(),
+        )?;
+
+        handler.handle(&context, &sync_msg).await?;
+
+        let payload = next_payload(&sender).await?;
+        match payload.transaction.data::<Message>()? {
+            Message::SyncEntriesWithSuccessorReport(report) => {
+                assert_eq!(report.keys, vec![placement_key]);
+            }
+            message => {
+                return Err(Error::InvalidMessage(format!(
+                    "expected SyncEntriesWithSuccessorReport, got {message:?}"
+                )))
+            }
+        }
+        assert_eq!(
+            receiver
+                .dht()
+                .storage
+                .get(&placement_key.to_string())
+                .await?,
+            Some(entry)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sync_entries_report_handler_deletes_only_acked_keys() -> Result<()> {
+        let node = prepare_node(SecretKey::random()).await;
+        let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+        let acked_key = Did::from(100u32);
+        let pending_key = Did::from(120u32);
+        let acked_entry = Entry {
+            did: Did::from(10u32),
+            data: vec![],
+            kind: EntryKind::Data,
+        };
+        let pending_entry = Entry {
+            did: Did::from(20u32),
+            data: vec![],
+            kind: EntryKind::Data,
+        };
+        let context = MessagePayload::new_send(
+            Message::custom(b"sync ack context")?,
+            node.swarm.transport.session_sk(),
+            node.did(),
+            node.did(),
+        )?;
+        node.dht()
+            .storage
+            .put(&acked_key.to_string(), &acked_entry)
+            .await?;
+        node.dht()
+            .storage
+            .put(&pending_key.to_string(), &pending_entry)
+            .await?;
+
+        handler
+            .handle(&context, &SyncEntriesWithSuccessorReport {
+                keys: vec![acked_key],
+            })
+            .await?;
+
+        assert_eq!(node.dht().storage.get(&acked_key.to_string()).await?, None);
+        assert_eq!(
+            node.dht().storage.get(&pending_key.to_string()).await?,
+            Some(pending_entry)
+        );
         Ok(())
     }
 

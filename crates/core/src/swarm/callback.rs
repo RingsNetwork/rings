@@ -104,6 +104,9 @@ impl InnerSwarmCallback {
             Message::SyncEntriesWithSuccessor(ref msg) => {
                 self.message_handler.handle(payload, msg).await
             }
+            Message::SyncEntriesWithSuccessorReport(ref msg) => {
+                self.message_handler.handle(payload, msg).await
+            }
             Message::OperateEntry(ref msg) => self.message_handler.handle(payload, msg).await,
             Message::CustomMessage(ref msg) => self.message_handler.handle(payload, msg).await,
             Message::QueryForTopoInfoSend(ref msg) => {

@@ -1,6 +1,5 @@
 //! Chord algorithm implement.
 #![warn(missing_docs)]
-use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -19,7 +18,6 @@ use super::successor::SuccessorSeq;
 use super::types::Chord;
 use super::types::ChordStorage;
 use super::types::ChordStorageCache;
-use super::types::ChordStorageSync;
 use super::types::CorrectChord;
 use super::FingerTable;
 use crate::dht::Did;
@@ -499,36 +497,7 @@ impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing 
     }
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
-impl ChordStorageSync<PeerRingAction> for PeerRing {
-    /// When the successor of a node is updated, it needs to check if there are
-    /// `Entry`s that are no longer between current node and `new_successor`,
-    /// and copy them to the new successor.
-    async fn sync_entries_with_successor(&self, new_successor: Did) -> Result<PeerRingAction> {
-        let mut data = Vec::<PlacedEntry>::new();
-        let all_items: Vec<(String, Entry)> = self.storage.get_all().await?;
-
-        // Preservation: sync is copy-before-delete. Until an ack protocol exists, this
-        // action does not remove the local copy, so message loss cannot destroy the only
-        // stored value.
-        for (entry_key_str, entry) in all_items.iter() {
-            let entry_key = Did::from_str(entry_key_str)?;
-            if self.bias(entry_key) > self.bias(new_successor) {
-                data.push(PlacedEntry::new(entry_key, entry.clone()));
-            }
-        }
-
-        if !data.is_empty() {
-            Ok(PeerRingAction::RemoteAction(
-                new_successor,
-                RemoteAction::SyncEntriesWithSuccessor(data), // TODO: This might be too large.
-            ))
-        } else {
-            Ok(PeerRingAction::None)
-        }
-    }
-}
+mod storage_sync;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]

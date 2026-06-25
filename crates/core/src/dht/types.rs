@@ -71,7 +71,7 @@ pub trait ChordStorage<Action, const REDUNDANT: u16>: Chord<Action> {
     async fn entry_operate(&self, op: EntryOperation) -> Result<Action>;
 }
 
-/// ChordStorageSync defines the synchronous entry storage behavior.
+/// ChordStorageSync defines entry hand-off when successor ownership changes.
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait ChordStorageSync<Action>: Chord<Action> {
@@ -79,8 +79,16 @@ pub trait ChordStorageSync<Action>: Chord<Action> {
     /// `Entry`s that are no longer between current node and `new_successor`,
     /// and copy them to the new successor.
     ///
-    /// The local copy is kept until an explicit ack/delete protocol exists.
+    /// Post: this only copies entries. Deletion is performed by
+    /// [`Self::acknowledge_synced_entries`] after the successor reports durable
+    /// storage for specific placement keys.
     async fn sync_entries_with_successor(&self, new_successor: Did) -> Result<Action>;
+
+    /// Delete local entries whose placement keys were durably stored by the
+    /// successor during sync.
+    ///
+    /// Post: only keys present in `keys` may be removed.
+    async fn acknowledge_synced_entries(&self, keys: &[Did]) -> Result<Action>;
 }
 
 /// ChordStorageCache defines the basic API for getting and setting DHT cache storage.
