@@ -92,11 +92,14 @@ impl TryFrom<PublicKey<33>> for libsecp256k1::PublicKey {
     }
 }
 
-impl TryFrom<PublicKey<33>> for ed25519_dalek::PublicKey {
+impl TryFrom<PublicKey<33>> for ed25519_dalek::VerifyingKey {
     type Error = Error;
     fn try_from(key: PublicKey<33>) -> Result<Self> {
         // pubkey[0] == 0
-        Self::from_bytes(&key.0[1..]).map_err(|_| Error::EdDSAPublicKeyBadFormat)
+        let bytes = key.0[1..]
+            .try_into()
+            .map_err(|_| Error::EdDSAPublicKeyBadFormat)?;
+        Self::from_bytes(bytes).map_err(|_| Error::EdDSAPublicKeyBadFormat)
     }
 }
 
@@ -146,10 +149,10 @@ impl From<SecretKey> for FieldBytes<NistP256> {
     }
 }
 
-impl From<ed25519_dalek::PublicKey> for PublicKey<33> {
-    fn from(key: ed25519_dalek::PublicKey) -> Self {
+impl From<ed25519_dalek::VerifyingKey> for PublicKey<33> {
+    fn from(key: ed25519_dalek::VerifyingKey) -> Self {
         // [u8;32] here
-        // ref: https://docs.rs/ed25519-dalek/latest/ed25519_dalek/struct.PublicKey.html
+        // ref: https://docs.rs/ed25519-dalek/latest/ed25519_dalek/struct.VerifyingKey.html
         let mut s = key.to_bytes().as_slice().to_vec();
         // [u8;32] + [0]
         s.reverse();

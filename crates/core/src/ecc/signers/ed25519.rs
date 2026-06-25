@@ -4,24 +4,19 @@ use ed25519_dalek::Verifier;
 
 use crate::ecc::PublicKey;
 use crate::ecc::PublicKeyAddress;
-use crate::error::Error;
 use crate::error::Result;
 
 /// Derive an Ed25519 public key from a 32-byte seed.
 pub fn public_key(seed: &[u8; 32]) -> Result<PublicKey<33>> {
-    let secret =
-        ed25519_dalek::SecretKey::from_bytes(seed).map_err(|_| Error::PrivateKeyBadFormat)?;
-    let public = ed25519_dalek::PublicKey::from(&secret);
+    let secret = ed25519_dalek::SigningKey::from_bytes(seed);
+    let public = ed25519_dalek::VerifyingKey::from(&secret);
     Ok(public.into())
 }
 
 /// Sign raw message bytes with an Ed25519 seed.
 pub fn sign(seed: &[u8; 32], msg: &[u8]) -> Result<[u8; 64]> {
-    let secret =
-        ed25519_dalek::SecretKey::from_bytes(seed).map_err(|_| Error::PrivateKeyBadFormat)?;
-    let public = ed25519_dalek::PublicKey::from(&secret);
-    let keypair = ed25519_dalek::Keypair { secret, public };
-    Ok(keypair.sign(msg).to_bytes())
+    let secret = ed25519_dalek::SigningKey::from_bytes(seed);
+    Ok(secret.sign(msg).to_bytes())
 }
 
 /// ref <https://www.rfc-editor.org/rfc/rfc8709>
@@ -38,10 +33,8 @@ pub fn verify(
         return false;
     }
     let sig_data: [u8; 64] = sig.as_ref().try_into().unwrap();
-    if let (Ok(p), Ok(s)) = (
-        TryInto::<ed25519_dalek::PublicKey>::try_into(*pubkey),
-        ed25519_dalek::Signature::from_bytes(&sig_data),
-    ) {
+    if let Ok(p) = TryInto::<ed25519_dalek::VerifyingKey>::try_into(*pubkey) {
+        let s = ed25519_dalek::Signature::from_bytes(&sig_data);
         match p.verify(msg, &s) {
             Ok(()) => true,
             Err(_) => false,
