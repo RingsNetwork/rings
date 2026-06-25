@@ -329,7 +329,7 @@ impl SwarmTransport {
             .unwrap_or_default())
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(feature = "wasm")))]
     /// Test hook: make one observation bucket older than the freshness TTL.
     pub(crate) fn expire_storage_lookup_observation(
         &self,
@@ -350,7 +350,7 @@ impl SwarmTransport {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(feature = "wasm")))]
     /// Test hook: count retained observation buckets.
     pub(crate) fn storage_lookup_observation_count(&self) -> Result<usize> {
         let observations = self
