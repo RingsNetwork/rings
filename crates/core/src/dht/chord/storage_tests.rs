@@ -14,11 +14,13 @@ use crate::error::Result;
 use crate::storage::KvStorageInterface;
 use crate::storage::MemStorage;
 
-struct FailingGetStorage;
+struct FailingGetStorageFixture;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-impl KvStorageInterface<Entry> for FailingGetStorage {
+impl KvStorageInterface<Entry> for FailingGetStorageFixture {
+    // Test-only fixture for the read-error boundary. Browser/localStorage
+    // adapters are production storage implementations and are cfg-excluded here.
     async fn get(&self, _key: &str) -> Result<Option<Entry>> {
         Err(Error::InvalidMessage("storage get failed".to_string()))
     }
@@ -47,7 +49,7 @@ impl KvStorageInterface<Entry> for FailingGetStorage {
 #[tokio::test]
 async fn entry_lookup_reports_local_storage_failure() -> Result<()> {
     let did = Did::from(1u32);
-    let node = PeerRing::new_with_storage(did, 3, Box::new(FailingGetStorage));
+    let node = PeerRing::new_with_storage(did, 3, Box::new(FailingGetStorageFixture));
 
     let result = <PeerRing as ChordStorage<_, 1>>::entry_lookup(&node, did).await;
 
