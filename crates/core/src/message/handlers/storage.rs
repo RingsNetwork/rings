@@ -348,6 +348,7 @@ impl<const REDUNDANT: u16> ChordStorageInterface<REDUNDANT> for Swarm {
     /// otherwise query the responsible remote node.
     async fn storage_fetch(&self, entry_key: Did) -> Result<()> {
         self.transport.ensure_storage_redundancy::<REDUNDANT>()?;
+        self.transport.start_storage_lookup(entry_key, REDUNDANT)?;
         // If peer found that data is on it's localstore, copy it to the cache
         let act =
             <PeerRing as ChordStorage<_, REDUNDANT>>::entry_lookup(&self.dht, entry_key).await?;
@@ -488,6 +489,7 @@ mod test {
     use crate::session::SessionSk;
     use crate::storage::MemStorage;
     use crate::swarm::callback::SwarmCallback;
+    use crate::swarm::transport::STORAGE_LOOKUP_OBSERVATION_CAPACITY;
     use crate::swarm::SwarmBuilder;
     use crate::tests::default::assert_no_more_msg;
     use crate::tests::default::prepare_node;
@@ -810,6 +812,93 @@ mod test {
         );
         assert_eq!(
             node.dht().storage.get(&unknown_key.to_string()).await?,
+            None
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn storage_miss_observation_buffer_is_bounded() -> Result<()> {
+        let node = prepare_node(SecretKey::random()).await;
+        for index in 0..(STORAGE_LOOKUP_OBSERVATION_CAPACITY + 8) {
+            let resource = Did::from((index + 1) as u32);
+            let placement = Did::from((index + 10_000) as u32);
+            node.swarm
+                .transport
+                .observe_storage_misses(resource, 2, [PlacementMiss::new(placement, node.did())])?;
+        }
+
+        assert!(
+            node.swarm.transport.storage_lookup_observation_count()?
+                <= STORAGE_LOOKUP_OBSERVATION_CAPACITY
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn storage_fetch_starts_fresh_observation_round() -> Result<()> {
+        let node = prepare_node(SecretKey::random()).await;
+        let resource = Did::from(10u32);
+        let placement = Did::from(100u32);
+        node.swarm
+            .transport
+            .observe_storage_misses(resource, 1, [PlacementMiss::new(placement, node.did())])?;
+
+        node.swarm.transport.start_storage_lookup(resource, 1)?;
+        let misses = node.swarm.transport.take_storage_misses(resource, 1)?;
+
+        assert!(misses.is_empty());
+        assert_eq!(node.swarm.transport.storage_lookup_observation_count()?, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn expired_storage_misses_do_not_trigger_late_repair() -> Result<()> {
+        let node = prepare_node(SecretKey::random()).await;
+        let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+        let entry = Entry {
+            did: Did::from(10u32),
+            data: vec!["fresh".to_string().encode()?],
+            kind: EntryKind::Data,
+        };
+        let placement_key = Did::from(100u32);
+        let context_key = SecretKey::random();
+        let context_session = SessionSk::new_with_seckey(&context_key)?;
+        let context = MessagePayload::new_send(
+            Message::FoundEntry(FoundEntry {
+                data: vec![],
+                misses: vec![PlacementMiss::new(placement_key, node.did())],
+                resource: entry.did,
+                redundancy: 2,
+            }),
+            &context_session,
+            node.did(),
+            node.did(),
+        )?;
+
+        handler
+            .handle(&context, &FoundEntry {
+                data: vec![],
+                misses: vec![PlacementMiss::new(placement_key, node.did())],
+                resource: entry.did,
+                redundancy: 2,
+            })
+            .await?;
+        node.swarm
+            .transport
+            .expire_storage_lookup_observation(entry.did, 2)?;
+        handler
+            .handle(&context, &FoundEntry {
+                data: vec![entry.clone()],
+                misses: vec![],
+                resource: entry.did,
+                redundancy: 2,
+            })
+            .await?;
+
+        assert_eq!(node.swarm.storage_check_cache(entry.did).await, Some(entry));
+        assert_eq!(
+            node.dht().storage.get(&placement_key.to_string()).await?,
             None
         );
         Ok(())

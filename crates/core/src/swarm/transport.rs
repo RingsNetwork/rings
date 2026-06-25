@@ -6,6 +6,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use chrono::Utc;
 use rings_transport::connection_ref::ConnectionRef;
 #[cfg(feature = "dummy")]
 pub use rings_transport::connections::DummyConnection as ConnectionOwner;
@@ -45,14 +46,19 @@ use crate::message::PayloadSender;
 use crate::session::SessionSk;
 use crate::swarm::callback::InnerSwarmCallback;
 
+const STORAGE_LOOKUP_OBSERVATION_TTL_MS: i64 = 30_000;
+/// Maximum number of read-repair miss observation buckets retained per transport.
+pub(crate) const STORAGE_LOOKUP_OBSERVATION_CAPACITY: usize = 1024;
+
+type StorageLookupObservationMap = BTreeMap<StorageLookupObservationKey, StorageLookupObservation>;
+
 pub struct SwarmTransport {
     pub(crate) network_id: u32,
     transport: Transport,
     session_sk: SessionSk,
     pub(crate) dht: Arc<PeerRing>,
     storage_redundancy: u16,
-    storage_lookup_observations:
-        Mutex<BTreeMap<StorageLookupObservationKey, BTreeSet<PlacementMiss>>>,
+    storage_lookup_observations: Mutex<StorageLookupObservationMap>,
     #[allow(dead_code)]
     measure: Option<MeasureImpl>,
 }
@@ -61,6 +67,32 @@ pub struct SwarmTransport {
 struct StorageLookupObservationKey {
     resource: Did,
     redundancy: u16,
+}
+
+struct StorageLookupObservation {
+    observed_at_ms: i64,
+    misses: BTreeSet<PlacementMiss>,
+}
+
+fn storage_lookup_observation_now_ms() -> i64 {
+    Utc::now().timestamp_millis()
+}
+
+fn evict_storage_lookup_observations(observations: &mut StorageLookupObservationMap, now_ms: i64) {
+    observations.retain(|_, observation| {
+        now_ms.saturating_sub(observation.observed_at_ms) <= STORAGE_LOOKUP_OBSERVATION_TTL_MS
+    });
+
+    while observations.len() > STORAGE_LOOKUP_OBSERVATION_CAPACITY {
+        let Some(stale_key) = observations
+            .iter()
+            .min_by_key(|(_, observation)| observation.observed_at_ms)
+            .map(|(key, _)| *key)
+        else {
+            break;
+        };
+        observations.remove(&stale_key);
+    }
 }
 
 #[derive(Clone)]
@@ -223,24 +255,59 @@ impl SwarmTransport {
         }
     }
 
+    /// Start a fresh lookup round for `resource`.
+    ///
+    /// This removes any previous miss observations for the same resource and
+    /// redundancy so targeted read-repair never drains misses from an older
+    /// lookup round.
+    pub(crate) fn start_storage_lookup(&self, resource: Did, redundancy: u16) -> Result<()> {
+        let mut observations = self
+            .storage_lookup_observations
+            .lock()
+            .map_err(|_| Error::DHTSyncLockError)?;
+        let now = storage_lookup_observation_now_ms();
+        evict_storage_lookup_observations(&mut observations, now);
+        observations.remove(&StorageLookupObservationKey {
+            resource,
+            redundancy,
+        });
+        Ok(())
+    }
+
+    /// Buffer placement misses observed by an in-flight storage lookup.
     pub(crate) fn observe_storage_misses(
         &self,
         resource: Did,
         redundancy: u16,
         misses: impl IntoIterator<Item = PlacementMiss>,
     ) -> Result<()> {
+        let mut misses = misses.into_iter().peekable();
+        if misses.peek().is_none() {
+            return Ok(());
+        }
         let mut observations = self
             .storage_lookup_observations
             .lock()
             .map_err(|_| Error::DHTSyncLockError)?;
+        let now = storage_lookup_observation_now_ms();
+        evict_storage_lookup_observations(&mut observations, now);
         let key = StorageLookupObservationKey {
             resource,
             redundancy,
         };
-        observations.entry(key).or_default().extend(misses);
+        let observation = observations
+            .entry(key)
+            .or_insert_with(|| StorageLookupObservation {
+                observed_at_ms: now,
+                misses: BTreeSet::new(),
+            });
+        observation.observed_at_ms = now;
+        observation.misses.extend(misses);
+        evict_storage_lookup_observations(&mut observations, now);
         Ok(())
     }
 
+    /// Drain fresh miss observations for a found entry.
     pub(crate) fn take_storage_misses(
         &self,
         resource: Did,
@@ -250,14 +317,47 @@ impl SwarmTransport {
             .storage_lookup_observations
             .lock()
             .map_err(|_| Error::DHTSyncLockError)?;
+        let now = storage_lookup_observation_now_ms();
+        evict_storage_lookup_observations(&mut observations, now);
         let key = StorageLookupObservationKey {
             resource,
             redundancy,
         };
         Ok(observations
             .remove(&key)
-            .map(|misses| misses.into_iter().collect())
+            .map(|observation| observation.misses.into_iter().collect())
             .unwrap_or_default())
+    }
+
+    #[cfg(test)]
+    /// Test hook: make one observation bucket older than the freshness TTL.
+    pub(crate) fn expire_storage_lookup_observation(
+        &self,
+        resource: Did,
+        redundancy: u16,
+    ) -> Result<()> {
+        let mut observations = self
+            .storage_lookup_observations
+            .lock()
+            .map_err(|_| Error::DHTSyncLockError)?;
+        if let Some(observation) = observations.get_mut(&StorageLookupObservationKey {
+            resource,
+            redundancy,
+        }) {
+            observation.observed_at_ms = storage_lookup_observation_now_ms()
+                .saturating_sub(STORAGE_LOOKUP_OBSERVATION_TTL_MS + 1);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    /// Test hook: count retained observation buckets.
+    pub(crate) fn storage_lookup_observation_count(&self) -> Result<usize> {
+        let observations = self
+            .storage_lookup_observations
+            .lock()
+            .map_err(|_| Error::DHTSyncLockError)?;
+        Ok(observations.len())
     }
 
     /// Create new connection that will be handled by swarm.

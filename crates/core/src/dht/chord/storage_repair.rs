@@ -30,7 +30,9 @@
 //! Read-repair:
 //! Given lookup observation `o : place(id(e), N) -> {Hit(e), Miss, Unknown}`,
 //! `repair_targets(o) = { k | o(k) = Miss }`. `read_repair_entry` copies only
-//! `repair_targets(o)` and does not evaluate `place` or `succ`.
+//! `repair_targets(o)` and does not evaluate `place` or `succ`. Transport keeps
+//! observations bounded by lookup round, TTL, and capacity, so a miss owner is
+//! a fresh lookup witness rather than persistent routing state.
 
 use async_trait::async_trait;
 
@@ -154,8 +156,9 @@ impl PeerRing {
         miss: PlacementMiss,
         entry: &Entry,
     ) -> Result<PeerRingAction> {
-        // Pre: miss was produced by entry_lookup/SearchEntry, so miss.owner was
-        // the responsible owner for miss.key under the lookup's routing view.
+        // Pre: miss was produced by entry_lookup/SearchEntry and is still
+        // fresh under the transport observation TTL, so miss.owner was the
+        // responsible owner for miss.key under the lookup's routing view.
         // Post R1/R2: exactly miss.key is repaired; Hit and Unknown placements
         // are not touched by this transition.
         // Post R4: this function performs no place()/succ() computation. It
