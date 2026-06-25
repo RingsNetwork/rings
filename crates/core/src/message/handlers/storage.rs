@@ -648,7 +648,6 @@ mod test {
         Ok(())
     }
 
-    #[cfg(not(feature = "redundant"))]
     #[tokio::test]
     async fn storage_append_data_preserves_entry_payload_order() -> Result<()> {
         let mut keys = gen_ordered_keys(2).into_iter();
@@ -749,7 +748,6 @@ mod test {
         Ok(())
     }
 
-    #[cfg(not(feature = "redundant"))]
     #[tokio::test]
     async fn storage_touch_data_moves_existing_entry_payload_to_end_once() -> Result<()> {
         let mut keys = gen_ordered_keys(2).into_iter();
