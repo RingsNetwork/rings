@@ -55,6 +55,9 @@ pub enum Error {
     #[error("The type of Entry is not allowed to be joined as a subring")]
     EntryNotJoinable,
 
+    #[error("Affine rotation scalar must be greater than zero")]
+    InvalidAffineScalar,
+
     #[error("Encode a byte vector into a base58-check string, adds 4 bytes checksum")]
     Encode,
 

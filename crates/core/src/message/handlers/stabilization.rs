@@ -43,10 +43,10 @@ impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
         self.run_effects([ConnectionFunctor::connect_dht_peer(msg.did).into()])
             .await?;
 
-        if let Ok(PeerRingAction::RemoteAction(
+        if let PeerRingAction::RemoteAction(
             next,
             PeerRingRemoteAction::SyncEntriesWithSuccessor(data),
-        )) = self.dht.sync_entries_with_successor(msg.did).await
+        ) = self.dht.sync_entries_with_successor(msg.did).await?
         {
             self.run_effects([MessageSendFunctor::send_message(
                 Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor { data }),
@@ -71,6 +71,7 @@ mod test {
     use super::*;
     use crate::dht::entry::Entry;
     use crate::dht::entry::EntryKind;
+    use crate::dht::entry::PlacedEntry;
     use crate::dht::successor::SuccessorReader;
     use crate::ecc::tests::gen_ordered_keys;
     use crate::ecc::SecretKey;
@@ -191,7 +192,7 @@ mod test {
 
         match payload.transaction.data::<Message>()? {
             Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor { data }) => {
-                assert_eq!(data, vec![entry]);
+                assert_eq!(data, vec![PlacedEntry::new(entry.did, entry.clone())]);
             }
             message => {
                 return Err(Error::InvalidMessage(format!(
@@ -199,7 +200,10 @@ mod test {
                 )))
             }
         }
-        assert_eq!(node1.dht().storage.count().await?, 0);
+        assert_eq!(
+            node1.dht().storage.get(&entry.did.to_string()).await?,
+            Some(entry)
+        );
 
         Ok(())
     }

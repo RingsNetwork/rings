@@ -14,7 +14,6 @@ use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
 use crate::error::Error;
 use crate::error::Result;
-use crate::message::effects::MessageSendFunctor;
 use crate::message::effects::PayloadRelayFunctor;
 use crate::message::types::FoundEntry;
 use crate::message::types::Message;
@@ -131,31 +130,6 @@ pub(super) async fn handle_storage_store_act(
         act => finish_storage_action(act)?,
     }
     Ok(())
-}
-
-/// Execute storage store actions emitted by inbound message handlers.
-#[cfg_attr(feature = "wasm", async_recursion(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_recursion)]
-async fn handle_storage_store_handler_act(
-    handler: &MessageHandler,
-    act: PeerRingAction,
-) -> Result<()> {
-    match act {
-        PeerRingAction::RemoteAction(target, PeerRingRemoteAction::FindEntryForOperate(op)) => {
-            handler
-                .run_effects([
-                    MessageSendFunctor::send_message(Message::OperateEntry(op), target).into(),
-                ])
-                .await
-        }
-        PeerRingAction::MultiActions(acts) => {
-            for act in acts {
-                handle_storage_store_handler_act(handler, act).await?;
-            }
-            Ok(())
-        }
-        act => finish_storage_action(act),
-    }
 }
 
 /// Execute storage search actions emitted by inbound message handlers.
@@ -318,12 +292,11 @@ impl HandleMsg<EntryOperation> for MessageHandler {
 impl HandleMsg<SyncEntriesWithSuccessor> for MessageHandler {
     // received remote sync entry request
     async fn handle(&self, _ctx: &MessagePayload, msg: &SyncEntriesWithSuccessor) -> Result<()> {
-        for data in msg.data.iter().cloned() {
-            // only simply store here
-            // For relay message, set redundant to 1
-            let op = EntryOperation::Overwrite(data);
-            let act = <PeerRing as ChordStorage<_, 1>>::entry_operate(&self.dht, op).await?;
-            handle_storage_store_handler_act(self, act).await?;
+        for placed in msg.data.iter() {
+            self.dht
+                .storage
+                .put(&placed.key.to_string(), &placed.entry)
+                .await?;
         }
         Ok(())
     }
@@ -332,16 +305,25 @@ impl HandleMsg<SyncEntriesWithSuccessor> for MessageHandler {
 #[cfg(not(feature = "wasm"))]
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::dht::entry::PlacedEntry;
     use crate::ecc::tests::gen_ordered_keys;
     use crate::ecc::SecretKey;
     use crate::message::Encoder;
     use crate::prelude::entry::EntryKind;
+    use crate::session::SessionSk;
+    use crate::swarm::callback::SwarmCallback;
     use crate::tests::default::assert_no_more_msg;
     use crate::tests::default::prepare_node;
     use crate::tests::default::wait_for_msgs;
     use crate::tests::default::Node;
     use crate::tests::manually_establish_connection;
+
+    struct NoopCallback;
+
+    impl SwarmCallback for NoopCallback {}
 
     async fn next_payload(node: &Node) -> Result<MessagePayload> {
         node.listen_once()
@@ -373,6 +355,43 @@ mod test {
                 "expected unexpected storage action, got {res:?}"
             ))),
         }
+    }
+
+    #[tokio::test]
+    async fn sync_entries_handler_stores_entry_at_placement_key() -> Result<()> {
+        let node = prepare_node(SecretKey::random()).await;
+        let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+        let resource_id = Did::from(10u32);
+        let placement_key = Did::from(100u32);
+        let entry = Entry {
+            did: resource_id,
+            data: vec!["placed".to_string().encode()?],
+            kind: EntryKind::Data,
+        };
+        let context_key = SecretKey::random();
+        let context_session = SessionSk::new_with_seckey(&context_key)?;
+        let context = MessagePayload::new_send(
+            Message::custom(b"sync context")?,
+            &context_session,
+            node.did(),
+            node.did(),
+        )?;
+
+        handler
+            .handle(&context, &SyncEntriesWithSuccessor {
+                data: vec![PlacedEntry::new(placement_key, entry.clone())],
+            })
+            .await?;
+
+        assert_eq!(
+            node.dht().storage.get(&placement_key.to_string()).await?,
+            Some(entry)
+        );
+        assert_eq!(
+            node.dht().storage.get(&resource_id.to_string()).await?,
+            None
+        );
+        Ok(())
     }
 
     #[tokio::test]

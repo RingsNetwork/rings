@@ -9,6 +9,7 @@ use serde::Serialize;
 use crate::chunk::Chunk;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryOperation;
+use crate::dht::entry::PlacedEntry;
 use crate::dht::Did;
 use crate::dht::TopoInfo;
 use crate::error::Result;
@@ -170,8 +171,8 @@ pub struct FoundEntry {
 /// MessageType after `FindSuccessorSend` and syncing data.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SyncEntriesWithSuccessor {
-    /// Entries to sync to the new successor.
-    pub data: Vec<Entry>,
+    /// Entries to sync to the new successor, paired with their placement keys.
+    pub data: Vec<PlacedEntry>,
 }
 
 /// MessageType use to customize message, will be handle by `custom_message` method.

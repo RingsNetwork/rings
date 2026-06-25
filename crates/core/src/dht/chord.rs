@@ -13,6 +13,7 @@ use serde::Serialize;
 use super::did::BiasId;
 use super::entry::Entry;
 use super::entry::EntryOperation;
+use super::entry::PlacedEntry;
 use super::finger::DEFAULT_FINGER_TABLE_SIZE;
 use super::successor::SuccessorSeq;
 use super::types::Chord;
@@ -100,8 +101,8 @@ pub enum RemoteAction {
     /// `did_a` is the remote recipient from [`PeerRingAction::RemoteAction`].
     /// This field is the predecessor DID announced in `NotifyPredecessorSend`.
     Notify(Did),
-    /// Let `did_a` sync data with it's successor.
-    SyncEntriesWithSuccessor(Vec<Entry>),
+    /// Let `did_a` sync placed entries with its successor.
+    SyncEntriesWithSuccessor(Vec<PlacedEntry>),
 
     /// Need `did_a` to find `did_b` then send back with `for connect` flag.
     FindSuccessorForConnect(Did),
@@ -420,8 +421,8 @@ impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing 
     /// stored in current node.
     async fn entry_lookup(&self, entry_key: Did) -> Result<PeerRingAction> {
         let mut ret = vec![];
-        for entry_key in entry_key.rotate_affine(REDUNDANT) {
-            let maybe_act = match self.find_successor(entry_key) {
+        for entry_key in entry_key.rotate_affine(REDUNDANT)? {
+            let act = match self.find_successor(entry_key) {
                 // Resource should be stored in current node.
                 Ok(PeerRingAction::Some(succ)) => {
                     match self.storage.get(&entry_key.to_string()).await {
@@ -441,7 +442,7 @@ impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing 
                                 ))
                             }
                         }
-                        Err(_) => Ok(PeerRingAction::None),
+                        Err(e) => Err(e),
                     }
                 }
                 // Resource is stored in other nodes.
@@ -451,15 +452,13 @@ impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing 
                 }
                 Ok(a) => Err(Error::PeerRingUnexpectedAction(a)),
                 Err(e) => Err(e),
-            };
-            if let Ok(act) = maybe_act {
-                if act.is_remote() {
-                    ret.push(act.clone());
-                } else {
-                    // If found entry, break and return directly
-                    if act.is_some_entry() {
-                        return Ok(act);
-                    }
+            }?;
+            if act.is_remote() {
+                ret.push(act);
+            } else {
+                // If found entry, break and return directly
+                if act.is_some_entry() {
+                    return Ok(act);
                 }
             }
         }
@@ -472,16 +471,14 @@ impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing 
     async fn entry_operate(&self, op: EntryOperation) -> Result<PeerRingAction> {
         let entry_key = op.did()?;
         let mut ret = vec![];
-        for entry_key in entry_key.rotate_affine(REDUNDANT) {
-            let maybe_act = match self.find_successor(entry_key) {
+        for entry_key in entry_key.rotate_affine(REDUNDANT)? {
+            let act = match self.find_successor(entry_key) {
                 // `entry` should be on current node.
                 Ok(PeerRingAction::Some(_)) => {
-                    let this =
-                        if let Ok(Some(this)) = self.storage.get(&entry_key.to_string()).await {
-                            Ok(this)
-                        } else {
-                            op.clone().gen_default_entry()
-                        }?;
+                    let this = match self.storage.get(&entry_key.to_string()).await? {
+                        Some(this) => this,
+                        None => op.clone().gen_default_entry()?,
+                    };
                     let entry = this.operate(op.clone())?;
                     self.storage.put(&entry_key.to_string(), &entry).await?;
                     Ok(PeerRingAction::None)
@@ -493,11 +490,9 @@ impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing 
                 ),
                 Ok(a) => Err(Error::PeerRingUnexpectedAction(a)),
                 Err(e) => Err(e),
-            };
-            if let Ok(act) = maybe_act {
-                if act.is_remote() {
-                    ret.push(act);
-                }
+            }?;
+            if act.is_remote() {
+                ret.push(act);
             }
         }
         Ok(ret.into())
@@ -509,18 +504,18 @@ impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing 
 impl ChordStorageSync<PeerRingAction> for PeerRing {
     /// When the successor of a node is updated, it needs to check if there are
     /// `Entry`s that are no longer between current node and `new_successor`,
-    /// and sync them to the new successor.
+    /// and copy them to the new successor.
     async fn sync_entries_with_successor(&self, new_successor: Did) -> Result<PeerRingAction> {
-        let mut data = Vec::<Entry>::new();
+        let mut data = Vec::<PlacedEntry>::new();
         let all_items: Vec<(String, Entry)> = self.storage.get_all().await?;
 
-        // Pop out all items that are not between current node and `new_successor`.
+        // Preservation: sync is copy-before-delete. Until an ack protocol exists, this
+        // action does not remove the local copy, so message loss cannot destroy the only
+        // stored value.
         for (entry_key_str, entry) in all_items.iter() {
             let entry_key = Did::from_str(entry_key_str)?;
-            if self.bias(entry_key) > self.bias(new_successor)
-                && self.storage.remove(entry_key_str).await.is_ok()
-            {
-                data.push(entry.clone());
+            if self.bias(entry_key) > self.bias(new_successor) {
+                data.push(PlacedEntry::new(entry_key, entry.clone()));
             }
         }
 
@@ -673,8 +668,10 @@ impl CorrectChord<PeerRingAction> for PeerRing {
     }
 }
 
-#[cfg(not(feature = "wasm"))]
-#[cfg(test)]
+#[cfg(all(not(feature = "wasm"), test))]
+mod storage_tests;
+
+#[cfg(all(not(feature = "wasm"), test))]
 mod tests {
     //! test module
     use std::str::FromStr;

@@ -174,10 +174,22 @@ impl Did {
     }
 
     /// Rotate Transport did to a list of affined did
-    /// affine x, n = [x + rotate(360/n)]
-    pub fn rotate_affine(&self, scalar: u16) -> Vec<Did> {
-        let angle = 360 / scalar;
-        (0..scalar).map(|i| (*self).rotate(i * angle)).collect()
+    ///
+    /// Law: for scalar n > 0, result[i] = self + floor(2^160 * i / n).
+    pub fn rotate_affine(&self, scalar: u16) -> Result<Vec<Did>> {
+        if scalar == 0 {
+            return Err(Error::InvalidAffineScalar);
+        }
+
+        let ring_size = BigUint::from(2u16).pow(160);
+        let denominator = BigUint::from(scalar);
+        let origin = BigUint::from(*self);
+        Ok((0..scalar)
+            .map(|i| {
+                let offset = (&ring_size * BigUint::from(i)) / &denominator;
+                Did::from(origin.clone() + offset)
+            })
+            .collect())
     }
 }
 
@@ -273,6 +285,7 @@ impl Sub for Did {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::str::FromStr;
 
     use super::*;
@@ -326,14 +339,51 @@ mod tests {
     }
 
     #[test]
-    fn test_did_affine() {
+    fn test_did_affine() -> Result<()> {
         let did = Did::from(10u32);
-        let affine_dids = did.rotate_affine(4);
+        let affine_dids = did.rotate_affine(4)?;
         assert_eq!(affine_dids.len(), 4);
-        assert_eq!(affine_dids[0], did.rotate(0));
-        assert_eq!(affine_dids[1], did.rotate(90));
-        assert_eq!(affine_dids[2], did.rotate(180));
-        assert_eq!(affine_dids[3], did.rotate(270));
+        assert_eq!(affine_dids, vec![
+            did.rotate(0),
+            did.rotate(90),
+            did.rotate(180),
+            did.rotate(270)
+        ]);
+        Ok(())
+    }
+
+    #[test]
+    fn rotate_affine_rejects_zero_scalar() {
+        let did = Did::from(10u32);
+
+        assert!(matches!(
+            did.rotate_affine(0),
+            Err(Error::InvalidAffineScalar)
+        ));
+    }
+
+    #[test]
+    fn rotate_affine_supports_non_degree_divisors() -> Result<()> {
+        let did = Did::from(10u32);
+        let affine_dids = did.rotate_affine(7)?;
+        let unique_dids = affine_dids.iter().copied().collect::<BTreeSet<_>>();
+
+        assert_eq!(affine_dids.len(), 7);
+        assert_eq!(unique_dids.len(), 7);
+        assert_eq!(affine_dids.first(), Some(&did));
+        Ok(())
+    }
+
+    #[test]
+    fn rotate_affine_supports_more_than_360_replicas() -> Result<()> {
+        let did = Did::from(10u32);
+        let affine_dids = did.rotate_affine(361)?;
+        let unique_dids = affine_dids.iter().copied().collect::<BTreeSet<_>>();
+
+        assert_eq!(affine_dids.len(), 361);
+        assert_eq!(unique_dids.len(), 361);
+        assert_eq!(affine_dids.first(), Some(&did));
+        Ok(())
     }
 
     #[test]

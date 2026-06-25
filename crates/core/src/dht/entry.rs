@@ -67,6 +67,25 @@ pub struct Entry {
     pub kind: EntryKind,
 }
 
+/// An [`Entry`] paired with its Chord placement key.
+///
+/// `key` is the DHT storage location. `entry.did` is the resource identity. These two
+/// values may differ for redundant replicas.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlacedEntry {
+    /// The key used to place this value in DHT storage.
+    pub key: Did,
+    /// The stored entry value.
+    pub entry: Entry,
+}
+
+impl PlacedEntry {
+    /// Pair an entry value with the key where it is stored.
+    pub fn new(key: Did, entry: Entry) -> Self {
+        Self { key, entry }
+    }
+}
+
 impl Entry {
     /// Generate did from topic.
     pub fn gen_did(topic: &str) -> Result<Did> {
@@ -152,12 +171,13 @@ impl TryFrom<String> for Entry {
 
 impl Entry {
     /// Affine Transport entry to a list of affined did
-    pub fn affine(&self, scalar: u16) -> Vec<Entry> {
-        self.did
-            .rotate_affine(scalar)
-            .iter()
-            .map(|did| self.clone_with_did(did.to_owned()))
-            .collect()
+    pub fn affine(&self, scalar: u16) -> Result<Vec<Entry>> {
+        Ok(self
+            .did
+            .rotate_affine(scalar)?
+            .into_iter()
+            .map(|did| self.clone_with_did(did))
+            .collect())
     }
 
     /// Clone and setup with new DID
@@ -575,7 +595,7 @@ mod tests {
     #[test]
     fn affine_preserves_payload_and_kind_while_rotating_keys() -> Result<()> {
         let entry = data_entry("topic", "value")?;
-        let affined = entry.affine(3);
+        let affined = entry.affine(3)?;
 
         assert_eq!(affined.len(), 3);
         for rotated in affined {

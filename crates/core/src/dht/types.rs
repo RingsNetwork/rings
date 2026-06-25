@@ -77,7 +77,9 @@ pub trait ChordStorage<Action, const REDUNDANT: u16>: Chord<Action> {
 pub trait ChordStorageSync<Action>: Chord<Action> {
     /// When the successor of a node is updated, it needs to check if there are
     /// `Entry`s that are no longer between current node and `new_successor`,
-    /// and sync them to the new successor.
+    /// and copy them to the new successor.
+    ///
+    /// The local copy is kept until an explicit ack/delete protocol exists.
     async fn sync_entries_with_successor(&self, new_successor: Did) -> Result<Action>;
 }
 
