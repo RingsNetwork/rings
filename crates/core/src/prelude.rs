@@ -8,7 +8,7 @@ pub use libsecp256k1;
 pub use url;
 pub use uuid;
 
-pub use crate::dht::vnode;
+pub use crate::dht::entry;
 pub use crate::message;
 pub use crate::message::ChordStorageInterface;
 pub use crate::message::ChordStorageInterfaceCacheChecker;

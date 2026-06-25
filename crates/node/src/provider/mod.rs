@@ -5,7 +5,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use rings_core::dht::VNodeStorage;
+use rings_core::dht::EntryStorage;
 use rings_core::session::SessionSkBuilder;
 use rings_core::storage::MemStorage;
 use rings_core::swarm::callback::SharedSwarmCallback;
@@ -108,16 +108,16 @@ impl Provider {
     /// Create a provider instance with storage name
     pub(crate) async fn new_provider_with_storage_internal(
         config: ProcessorConfig,
-        vnode_storage: Option<VNodeStorage>,
+        entry_storage: Option<EntryStorage>,
         measure_storage: Option<MeasureStorage>,
     ) -> Result<Provider> {
-        let vnode_storage = vnode_storage.unwrap_or_else(|| Box::new(MemStorage::new()));
+        let entry_storage = entry_storage.unwrap_or_else(|| Box::new(MemStorage::new()));
         let measure_storage = measure_storage.unwrap_or_else(|| Box::new(MemStorage::new()));
 
         let measure = PeriodicMeasure::new(measure_storage);
 
         let processor_builder = ProcessorBuilder::from_config(&config)?
-            .storage(vnode_storage)
+            .storage(entry_storage)
             .measure(measure);
 
         let processor = Arc::new(processor_builder.build()?);
@@ -147,7 +147,7 @@ impl Provider {
         account: String,
         account_type: String,
         signer: Signer,
-        vnode_storage: Option<VNodeStorage>,
+        entry_storage: Option<EntryStorage>,
         measure_storage: Option<MeasureStorage>,
     ) -> Result<Provider> {
         let mut sk_builder = SessionSkBuilder::new(account, account_type);
@@ -159,7 +159,7 @@ impl Provider {
         sk_builder = sk_builder.set_session_sig(sig.to_vec());
         let session_sk = sk_builder.build().map_err(Error::InternalError)?;
         let config = ProcessorConfig::new(network_id, ice_servers, session_sk, stabilize_interval);
-        Self::new_provider_with_storage_internal(config, vnode_storage, measure_storage).await
+        Self::new_provider_with_storage_internal(config, entry_storage, measure_storage).await
     }
 
     /// Install the extension [`Backend`] as the swarm's inbound callback, so inbound

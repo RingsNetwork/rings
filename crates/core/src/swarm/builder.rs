@@ -5,8 +5,8 @@
 use std::sync::Arc;
 use std::sync::RwLock;
 
+use crate::dht::EntryStorage;
 use crate::dht::PeerRing;
-use crate::dht::VNodeStorage;
 use crate::dht::DEFAULT_FINGER_TABLE_SIZE;
 use crate::measure::MeasureImpl;
 use crate::session::SessionSk;
@@ -25,7 +25,7 @@ pub struct SwarmBuilder {
     external_address: Option<String>,
     dht_succ_max: u8,
     dht_finger_table_size: usize,
-    dht_storage: VNodeStorage,
+    dht_storage: EntryStorage,
     session_sk: SessionSk,
     session_ttl: Option<usize>,
     measure: Option<MeasureImpl>,
@@ -37,7 +37,7 @@ impl SwarmBuilder {
     pub fn new(
         network_id: u32,
         ice_servers: &str,
-        dht_storage: VNodeStorage,
+        dht_storage: EntryStorage,
         session_sk: SessionSk,
     ) -> Self {
         SwarmBuilder {

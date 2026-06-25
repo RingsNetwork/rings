@@ -7,8 +7,8 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::chunk::Chunk;
-use crate::dht::vnode::VNodeOperation;
-use crate::dht::vnode::VirtualNode;
+use crate::dht::entry::Entry;
+use crate::dht::entry::EntryOperation;
 use crate::dht::Did;
 use crate::dht::TopoInfo;
 use crate::error::Result;
@@ -153,25 +153,25 @@ impl Then for QueryForTopoInfoSend {
     type Then = QueryFor;
 }
 
-/// MessageType use to search virtual node.
+/// MessageType used to search a DHT storage entry.
 #[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct SearchVNode {
-    /// The virtual id of searching target
-    pub vid: Did,
+pub struct SearchEntry {
+    /// The ring key of the searched entry.
+    pub key: Did,
 }
 
-/// MessageType report to origin found virtual node.
+/// MessageType used to report found DHT storage entries to the origin.
 #[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct FoundVNode {
-    /// Response of [SearchVNode], containing response data
-    pub data: Vec<VirtualNode>,
+pub struct FoundEntry {
+    /// Response of [SearchEntry], containing response data
+    pub data: Vec<Entry>,
 }
 
 /// MessageType after `FindSuccessorSend` and syncing data.
 #[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct SyncVNodeWithSuccessor {
-    /// Data of virtual nodes for syncing.
-    pub data: Vec<VirtualNode>,
+pub struct SyncEntriesWithSuccessor {
+    /// Entries to sync to the new successor.
+    pub data: Vec<Entry>,
 }
 
 /// MessageType use to customize message, will be handle by `custom_message` method.
@@ -216,14 +216,14 @@ pub enum Message {
     NotifyPredecessorSend(NotifyPredecessorSend),
     /// Response of NotifyPredecessorSend
     NotifyPredecessorReport(NotifyPredecessorReport),
-    /// Remote message of search a virtual node.
-    SearchVNode(SearchVNode),
-    /// Response when found a virtual node.
-    FoundVNode(FoundVNode),
-    /// Remote message of operations of virtual node.
-    OperateVNode(VNodeOperation),
-    /// Remote message for virtual node syncing.
-    SyncVNodeWithSuccessor(SyncVNodeWithSuccessor),
+    /// Remote message for searching an entry.
+    SearchEntry(SearchEntry),
+    /// Response when entries are found.
+    FoundEntry(FoundEntry),
+    /// Remote message for entry operations.
+    OperateEntry(EntryOperation),
+    /// Remote message for entry syncing.
+    SyncEntriesWithSuccessor(SyncEntriesWithSuccessor),
     /// Custom messages
     CustomMessage(CustomMessage),
     /// Remote message of query topological info of a node.

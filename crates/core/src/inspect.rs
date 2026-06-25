@@ -1,10 +1,10 @@
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::dht::vnode::VirtualNode;
+use crate::dht::entry::Entry;
+use crate::dht::EntryStorage;
 use crate::dht::PeerRing;
 use crate::dht::SuccessorReader;
-use crate::dht::VNodeStorage;
 use crate::swarm::Swarm;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,7 +32,7 @@ pub struct DHTInspect {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageInspect {
-    pub items: Vec<(String, VirtualNode)>,
+    pub items: Vec<(String, Entry)>,
 }
 
 impl SwarmInspect {
@@ -90,7 +90,7 @@ impl DHTInspect {
 }
 
 impl StorageInspect {
-    pub async fn inspect_kv_storage(storage: &VNodeStorage) -> Self {
+    pub async fn inspect_kv_storage(storage: &EntryStorage) -> Self {
         Self {
             items: storage
                 .get_all()

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_recursion::async_recursion;
 use async_trait::async_trait;
 
-use crate::dht::vnode::VirtualNode;
+use crate::dht::entry::Entry;
 use crate::dht::ChordStorage;
 use crate::dht::ChordStorageCache;
 use crate::dht::Did;
@@ -16,16 +16,16 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::message::effects::MessageSendFunctor;
 use crate::message::effects::PayloadRelayFunctor;
-use crate::message::types::FoundVNode;
+use crate::message::types::FoundEntry;
 use crate::message::types::Message;
-use crate::message::types::SearchVNode;
-use crate::message::types::SyncVNodeWithSuccessor;
+use crate::message::types::SearchEntry;
+use crate::message::types::SyncEntriesWithSuccessor;
 use crate::message::Encoded;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
-use crate::prelude::vnode::VNodeOperation;
+use crate::prelude::entry::EntryOperation;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::Swarm;
 
@@ -33,13 +33,13 @@ use crate::swarm::Swarm;
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait ChordStorageInterface<const REDUNDANT: u16> {
-    /// fetch virtual node from DHT
-    async fn storage_fetch(&self, vid: Did) -> Result<()>;
-    /// store virtual node on DHT
-    async fn storage_store(&self, vnode: VirtualNode) -> Result<()>;
-    /// append data to Data type virtual node
+    /// Fetch an entry from DHT storage.
+    async fn storage_fetch(&self, entry_key: Did) -> Result<()>;
+    /// Store an entry on DHT storage.
+    async fn storage_store(&self, entry: Entry) -> Result<()>;
+    /// Append data to a Data kind entry.
     async fn storage_append_data(&self, topic: &str, data: Encoded) -> Result<()>;
-    /// append data to Data type virtual node uniquely
+    /// Append data to a Data kind entry uniquely.
     async fn storage_touch_data(&self, topic: &str, data: Encoded) -> Result<()>;
 }
 
@@ -47,10 +47,10 @@ pub trait ChordStorageInterface<const REDUNDANT: u16> {
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait ChordStorageInterfaceCacheChecker {
-    // Check the local cache of the DHT for a specific virtual node identifier (vid).
+    /// Check the local cache of the DHT for a specific entry key.
     ///
-    /// Returns an optional `VirtualNode` representing the cached data, or `None` if it is not found.
-    async fn storage_check_cache(&self, vid: Did) -> Option<VirtualNode>;
+    /// Returns an optional `Entry` representing the cached data, or `None` if it is not found.
+    async fn storage_check_cache(&self, entry_key: Did) -> Option<Entry>;
 }
 
 fn finish_storage_action(act: PeerRingAction) -> Result<()> {
@@ -85,18 +85,18 @@ async fn handle_storage_fetch_act(
     act: PeerRingAction,
 ) -> Result<()> {
     match act {
-        PeerRingAction::SomeVNode(v) => {
+        PeerRingAction::SomeEntry(v) => {
             transport.dht.local_cache_put(v).await?;
         }
         PeerRingAction::RemoteAction(next, dht_act) => {
-            if let PeerRingRemoteAction::FindVNode(vid) = dht_act {
+            if let PeerRingRemoteAction::FindEntry(entry_key) = dht_act {
                 tracing::debug!(
-                    "storage_fetch send_message: SearchVNode({:?}) to {:?}",
-                    vid,
+                    "storage_fetch send_message: SearchEntry({:?}) to {:?}",
+                    entry_key,
                     next
                 );
                 transport
-                    .send_message(Message::SearchVNode(SearchVNode { vid }), next)
+                    .send_message(Message::SearchEntry(SearchEntry { key: entry_key }), next)
                     .await?;
             }
         }
@@ -118,9 +118,9 @@ pub(super) async fn handle_storage_store_act(
     act: PeerRingAction,
 ) -> Result<()> {
     match act {
-        PeerRingAction::RemoteAction(target, PeerRingRemoteAction::FindVNodeForOperate(op)) => {
+        PeerRingAction::RemoteAction(target, PeerRingRemoteAction::FindEntryForOperate(op)) => {
             transport
-                .send_message(Message::OperateVNode(op), target)
+                .send_message(Message::OperateEntry(op), target)
                 .await?;
         }
         PeerRingAction::MultiActions(acts) => {
@@ -141,10 +141,10 @@ async fn handle_storage_store_handler_act(
     act: PeerRingAction,
 ) -> Result<()> {
     match act {
-        PeerRingAction::RemoteAction(target, PeerRingRemoteAction::FindVNodeForOperate(op)) => {
+        PeerRingAction::RemoteAction(target, PeerRingRemoteAction::FindEntryForOperate(op)) => {
             handler
                 .run_effects([
-                    MessageSendFunctor::send_message(Message::OperateVNode(op), target).into(),
+                    MessageSendFunctor::send_message(Message::OperateEntry(op), target).into(),
                 ])
                 .await
         }
@@ -167,11 +167,11 @@ async fn handle_storage_search_act(
     act: PeerRingAction,
 ) -> Result<()> {
     match act {
-        PeerRingAction::SomeVNode(v) => {
+        PeerRingAction::SomeEntry(v) => {
             handler
                 .run_effects([PayloadRelayFunctor::send_report_message(
                     ctx,
-                    Message::FoundVNode(FoundVNode { data: vec![v] }),
+                    Message::FoundEntry(FoundEntry { data: vec![v] }),
                 )
                 .into()])
                 .await
@@ -229,43 +229,44 @@ async fn handle_storage_operate_act(
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl ChordStorageInterfaceCacheChecker for Swarm {
     /// Check local cache
-    async fn storage_check_cache(&self, vid: Did) -> Option<VirtualNode> {
-        self.dht.local_cache_get(vid).await.ok().flatten()
+    async fn storage_check_cache(&self, entry_key: Did) -> Option<Entry> {
+        self.dht.local_cache_get(entry_key).await.ok().flatten()
     }
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl<const REDUNDANT: u16> ChordStorageInterface<REDUNDANT> for Swarm {
-    /// Fetch virtual node, if exist in localstoreage, copy it to the cache,
-    /// else Query Remote Node
-    async fn storage_fetch(&self, vid: Did) -> Result<()> {
+    /// Fetch an entry. If it exists in local storage, copy it to the cache;
+    /// otherwise query the responsible remote node.
+    async fn storage_fetch(&self, entry_key: Did) -> Result<()> {
         // If peer found that data is on it's localstore, copy it to the cache
-        let act = <PeerRing as ChordStorage<_, REDUNDANT>>::vnode_lookup(&self.dht, vid).await?;
+        let act =
+            <PeerRing as ChordStorage<_, REDUNDANT>>::entry_lookup(&self.dht, entry_key).await?;
         handle_storage_fetch_act(self.transport.clone(), act).await?;
         Ok(())
     }
 
-    /// Store VirtualNode, `TryInto<VirtualNode>` is implemented for alot of types
-    async fn storage_store(&self, vnode: VirtualNode) -> Result<()> {
-        let op = VNodeOperation::Overwrite(vnode);
-        let act = <PeerRing as ChordStorage<_, REDUNDANT>>::vnode_operate(&self.dht, op).await?;
+    /// Store Entry, `TryInto<Entry>` is implemented for alot of types
+    async fn storage_store(&self, entry: Entry) -> Result<()> {
+        let op = EntryOperation::Overwrite(entry);
+        let act = <PeerRing as ChordStorage<_, REDUNDANT>>::entry_operate(&self.dht, op).await?;
         handle_storage_store_act(self.transport.clone(), act).await?;
         Ok(())
     }
 
     async fn storage_append_data(&self, topic: &str, data: Encoded) -> Result<()> {
-        let vnode: VirtualNode = (topic.to_string(), data).try_into()?;
-        let op = VNodeOperation::Extend(vnode);
-        let act = <PeerRing as ChordStorage<_, REDUNDANT>>::vnode_operate(&self.dht, op).await?;
+        let entry: Entry = (topic.to_string(), data).try_into()?;
+        let op = EntryOperation::Extend(entry);
+        let act = <PeerRing as ChordStorage<_, REDUNDANT>>::entry_operate(&self.dht, op).await?;
         handle_storage_store_act(self.transport.clone(), act).await?;
         Ok(())
     }
 
     async fn storage_touch_data(&self, topic: &str, data: Encoded) -> Result<()> {
-        let vnode: VirtualNode = (topic.to_string(), data).try_into()?;
-        let op = VNodeOperation::Touch(vnode);
-        let act = <PeerRing as ChordStorage<_, REDUNDANT>>::vnode_operate(&self.dht, op).await?;
+        let entry: Entry = (topic.to_string(), data).try_into()?;
+        let op = EntryOperation::Touch(entry);
+        let act = <PeerRing as ChordStorage<_, REDUNDANT>>::entry_operate(&self.dht, op).await?;
         handle_storage_store_act(self.transport.clone(), act).await?;
         Ok(())
     }
@@ -273,12 +274,12 @@ impl<const REDUNDANT: u16> ChordStorageInterface<REDUNDANT> for Swarm {
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-impl HandleMsg<SearchVNode> for MessageHandler {
-    /// Search VNode via successor
-    /// If a VNode is storead local, it will response immediately.(See Chordstorageinterface::storage_fetch)
-    async fn handle(&self, ctx: &MessagePayload, msg: &SearchVNode) -> Result<()> {
+impl HandleMsg<SearchEntry> for MessageHandler {
+    /// Search Entry via successor
+    /// If a Entry is storead local, it will response immediately.(See Chordstorageinterface::storage_fetch)
+    async fn handle(&self, ctx: &MessagePayload, msg: &SearchEntry) -> Result<()> {
         // For relay message, set redundant to 1
-        match <PeerRing as ChordStorage<_, 1>>::vnode_lookup(&self.dht, msg.vid).await {
+        match <PeerRing as ChordStorage<_, 1>>::entry_lookup(&self.dht, msg.key).await {
             Ok(action) => handle_storage_search_act(self, ctx, action).await,
             Err(e) => Err(e),
         }
@@ -287,8 +288,8 @@ impl HandleMsg<SearchVNode> for MessageHandler {
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-impl HandleMsg<FoundVNode> for MessageHandler {
-    async fn handle(&self, ctx: &MessagePayload, msg: &FoundVNode) -> Result<()> {
+impl HandleMsg<FoundEntry> for MessageHandler {
+    async fn handle(&self, ctx: &MessagePayload, msg: &FoundEntry) -> Result<()> {
         if ctx.should_forward_from(self.dht.did) {
             return self
                 .run_effects([PayloadRelayFunctor::forward_payload(ctx, None).into()])
@@ -303,25 +304,25 @@ impl HandleMsg<FoundVNode> for MessageHandler {
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-impl HandleMsg<VNodeOperation> for MessageHandler {
-    async fn handle(&self, ctx: &MessagePayload, msg: &VNodeOperation) -> Result<()> {
+impl HandleMsg<EntryOperation> for MessageHandler {
+    async fn handle(&self, ctx: &MessagePayload, msg: &EntryOperation) -> Result<()> {
         // For relay message, set redundant to 1
         let action =
-            <PeerRing as ChordStorage<_, 1>>::vnode_operate(&self.dht, msg.clone()).await?;
+            <PeerRing as ChordStorage<_, 1>>::entry_operate(&self.dht, msg.clone()).await?;
         handle_storage_operate_act(self, ctx, &action).await
     }
 }
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-impl HandleMsg<SyncVNodeWithSuccessor> for MessageHandler {
-    // received remote sync vnode request
-    async fn handle(&self, _ctx: &MessagePayload, msg: &SyncVNodeWithSuccessor) -> Result<()> {
+impl HandleMsg<SyncEntriesWithSuccessor> for MessageHandler {
+    // received remote sync entry request
+    async fn handle(&self, _ctx: &MessagePayload, msg: &SyncEntriesWithSuccessor) -> Result<()> {
         for data in msg.data.iter().cloned() {
             // only simply store here
             // For relay message, set redundant to 1
-            let op = VNodeOperation::Overwrite(data);
-            let act = <PeerRing as ChordStorage<_, 1>>::vnode_operate(&self.dht, op).await?;
+            let op = EntryOperation::Overwrite(data);
+            let act = <PeerRing as ChordStorage<_, 1>>::entry_operate(&self.dht, op).await?;
             handle_storage_store_handler_act(self, act).await?;
         }
         Ok(())
@@ -335,7 +336,7 @@ mod test {
     use crate::ecc::tests::gen_ordered_keys;
     use crate::ecc::SecretKey;
     use crate::message::Encoder;
-    use crate::prelude::vnode::VNodeType;
+    use crate::prelude::entry::EntryKind;
     use crate::tests::default::assert_no_more_msg;
     use crate::tests::default::prepare_node;
     use crate::tests::default::wait_for_msgs;
@@ -346,6 +347,11 @@ mod test {
         node.listen_once()
             .await
             .ok_or_else(|| Error::InvalidMessage("expected message payload".to_string()))
+    }
+
+    fn next_generated_key(keys: &mut impl Iterator<Item = SecretKey>) -> Result<SecretKey> {
+        keys.next()
+            .ok_or_else(|| Error::InvalidMessage("expected generated key".to_string()))
     }
 
     #[test]
@@ -370,9 +376,10 @@ mod test {
     }
 
     #[tokio::test]
-    async fn test_store_vnode() -> Result<()> {
-        let keys = gen_ordered_keys(2);
-        let (key1, key2) = (keys[0], keys[1]);
+    async fn storage_store_fetches_remote_entry_into_cache() -> Result<()> {
+        let mut keys = gen_ordered_keys(2).into_iter();
+        let key1 = next_generated_key(&mut keys)?;
+        let key2 = next_generated_key(&mut keys)?;
         let node1 = prepare_node(key1).await;
         let node2 = prepare_node(key2).await;
 
@@ -383,11 +390,11 @@ mod test {
         // Now, node1 is the successor of node2, and node2 is the successor of node1.
         // Following tests storing data on node2 and query it from node1.
         let data = "Across the Great Wall we can reach every corner in the world.".to_string();
-        let vnode: VirtualNode = data.clone().try_into()?;
-        let vid = vnode.did;
+        let entry: Entry = data.clone().try_into()?;
+        let entry_key = entry.did;
 
         // Make sure the data is stored on node2.
-        let (node1, node2) = if vid.in_range(node2.did(), node2.did(), node1.did()) {
+        let (node1, node2) = if entry_key.in_range(node2.did(), node2.did(), node1.did()) {
             (node1, node2)
         } else {
             (node2, node1)
@@ -395,45 +402,45 @@ mod test {
 
         assert_eq!(node1.dht().cache.count().await?, 0);
         assert_eq!(node2.dht().cache.count().await?, 0);
-        assert!(node1.swarm.storage_check_cache(vid).await.is_none());
-        assert!(node2.swarm.storage_check_cache(vid).await.is_none());
+        assert!(node1.swarm.storage_check_cache(entry_key).await.is_none());
+        assert!(node2.swarm.storage_check_cache(entry_key).await.is_none());
 
-        <Swarm as ChordStorageInterface<1>>::storage_store(&node1.swarm, vnode.clone()).await?;
+        <Swarm as ChordStorageInterface<1>>::storage_store(&node1.swarm, entry.clone()).await?;
         let ev = next_payload(&node2).await?;
         assert!(matches!(
             ev.transaction.data()?,
-            Message::OperateVNode(VNodeOperation::Overwrite(x)) if x.did == vid
+            Message::OperateEntry(EntryOperation::Overwrite(x)) if x.did == entry_key
         ));
 
-        assert!(node1.swarm.storage_check_cache(vid).await.is_none());
-        assert!(node2.swarm.storage_check_cache(vid).await.is_none());
+        assert!(node1.swarm.storage_check_cache(entry_key).await.is_none());
+        assert!(node2.swarm.storage_check_cache(entry_key).await.is_none());
         assert!(node1.dht().storage.count().await? == 0);
         assert!(node2.dht().storage.count().await? != 0);
 
         // test remote query
-        println!("vid is on node2 {:?}", node2.did());
-        <Swarm as ChordStorageInterface<1>>::storage_fetch(&node1.swarm, vid).await?;
+        println!("entry_key is on node2 {:?}", node2.did());
+        <Swarm as ChordStorageInterface<1>>::storage_fetch(&node1.swarm, entry_key).await?;
 
         // it will send request to node2
         let ev = next_payload(&node2).await?;
-        // node2 received search vnode request
+        // node2 received search entry request
         assert!(matches!(
             ev.transaction.data()?,
-            Message::SearchVNode(x) if x.vid == vid
+            Message::SearchEntry(x) if x.key == entry_key
         ));
 
         let ev = next_payload(&node1).await?;
         assert!(matches!(
             ev.transaction.data()?,
-            Message::FoundVNode(x) if x.data[0].did == vid
+            Message::FoundEntry(x) if x.data.first().is_some_and(|entry| entry.did == entry_key)
         ));
 
         assert_eq!(
-            node1.swarm.storage_check_cache(vid).await,
-            Some(VirtualNode {
-                did: vid,
+            node1.swarm.storage_check_cache(entry_key).await,
+            Some(Entry {
+                did: entry_key,
                 data: vec![data.encode()?],
-                kind: VNodeType::Data
+                kind: EntryKind::Data
             })
         );
 
@@ -442,9 +449,10 @@ mod test {
 
     #[cfg(not(feature = "redundant"))]
     #[tokio::test]
-    async fn test_extend_data() -> Result<()> {
-        let keys = gen_ordered_keys(2);
-        let (key1, key2) = (keys[0], keys[1]);
+    async fn storage_append_data_preserves_entry_payload_order() -> Result<()> {
+        let mut keys = gen_ordered_keys(2).into_iter();
+        let key1 = next_generated_key(&mut keys)?;
+        let key2 = next_generated_key(&mut keys)?;
         let node1 = prepare_node(key1).await;
         let node2 = prepare_node(key2).await;
 
@@ -455,11 +463,11 @@ mod test {
         // Now, node1 is the successor of node2, and node2 is the successor of node1.
         // Following tests storing data on node2 and query it from node1.
         let topic = "Across the Great Wall we can reach every corner in the world.".to_string();
-        let vnode: VirtualNode = topic.clone().try_into()?;
-        let vid = vnode.did;
+        let entry: Entry = topic.clone().try_into()?;
+        let entry_key = entry.did;
 
         // Make sure the data is stored on node2.
-        let (node1, node2) = if vid.in_range(node2.did(), node2.did(), node1.did()) {
+        let (node1, node2) = if entry_key.in_range(node2.did(), node2.did(), node1.did()) {
             (node1, node2)
         } else {
             (node2, node1)
@@ -467,8 +475,8 @@ mod test {
 
         assert_eq!(node1.dht().cache.count().await?, 0);
         assert_eq!(node2.dht().cache.count().await?, 0);
-        assert!(node1.swarm.storage_check_cache(vid).await.is_none());
-        assert!(node2.swarm.storage_check_cache(vid).await.is_none());
+        assert!(node1.swarm.storage_check_cache(entry_key).await.is_none());
+        assert!(node2.swarm.storage_check_cache(entry_key).await.is_none());
 
         <Swarm as ChordStorageInterface<1>>::storage_append_data(
             &node1.swarm,
@@ -488,23 +496,23 @@ mod test {
         wait_for_msgs([&node1, &node2]).await;
         assert_no_more_msg([&node1, &node2]).await;
 
-        assert!(node1.swarm.storage_check_cache(vid).await.is_none());
-        assert!(node2.swarm.storage_check_cache(vid).await.is_none());
+        assert!(node1.swarm.storage_check_cache(entry_key).await.is_none());
+        assert!(node2.swarm.storage_check_cache(entry_key).await.is_none());
         assert!(node1.dht().storage.count().await? == 0);
         assert!(node2.dht().storage.count().await? != 0);
 
         // test remote query
-        println!("vid is on node2 {:?}", node2.did());
-        <Swarm as ChordStorageInterface<1>>::storage_fetch(&node1.swarm, vid).await?;
+        println!("entry_key is on node2 {:?}", node2.did());
+        <Swarm as ChordStorageInterface<1>>::storage_fetch(&node1.swarm, entry_key).await?;
         wait_for_msgs([&node1, &node2]).await;
         assert_no_more_msg([&node1, &node2]).await;
 
         assert_eq!(
-            node1.swarm.storage_check_cache(vid).await,
-            Some(VirtualNode {
-                did: vid,
+            node1.swarm.storage_check_cache(entry_key).await,
+            Some(Entry {
+                did: entry_key,
                 data: vec!["111".to_string().encode()?, "222".to_string().encode()?],
-                kind: VNodeType::Data
+                kind: EntryKind::Data
             })
         );
 
@@ -519,21 +527,80 @@ mod test {
         assert_no_more_msg([&node1, &node2]).await;
 
         // test remote query agagin
-        println!("vid is on node2 {:?}", node2.did());
-        <Swarm as ChordStorageInterface<1>>::storage_fetch(&node1.swarm, vid).await?;
+        println!("entry_key is on node2 {:?}", node2.did());
+        <Swarm as ChordStorageInterface<1>>::storage_fetch(&node1.swarm, entry_key).await?;
         wait_for_msgs([&node1, &node2]).await;
         assert_no_more_msg([&node1, &node2]).await;
 
         assert_eq!(
-            node1.swarm.storage_check_cache(vid).await,
-            Some(VirtualNode {
-                did: vid,
+            node1.swarm.storage_check_cache(entry_key).await,
+            Some(Entry {
+                did: entry_key,
                 data: vec![
                     "111".to_string().encode()?,
                     "222".to_string().encode()?,
                     "333".to_string().encode()?
                 ],
-                kind: VNodeType::Data
+                kind: EntryKind::Data
+            })
+        );
+
+        Ok(())
+    }
+
+    #[cfg(not(feature = "redundant"))]
+    #[tokio::test]
+    async fn storage_touch_data_moves_existing_entry_payload_to_end_once() -> Result<()> {
+        let mut keys = gen_ordered_keys(2).into_iter();
+        let key1 = next_generated_key(&mut keys)?;
+        let key2 = next_generated_key(&mut keys)?;
+        let node1 = prepare_node(key1).await;
+        let node2 = prepare_node(key2).await;
+
+        manually_establish_connection(&node1.swarm, &node2.swarm).await;
+        wait_for_msgs([&node1, &node2]).await;
+        assert_no_more_msg([&node1, &node2]).await;
+
+        let topic = "touch keeps unique entry payloads ordered by recency".to_string();
+        let entry: Entry = topic.clone().try_into()?;
+        let entry_key = entry.did;
+
+        let (node1, node2) = if entry_key.in_range(node2.did(), node2.did(), node1.did()) {
+            (node1, node2)
+        } else {
+            (node2, node1)
+        };
+
+        for value in ["111", "222", "333", "222"] {
+            <Swarm as ChordStorageInterface<1>>::storage_touch_data(
+                &node1.swarm,
+                &topic,
+                value.to_string().encode()?,
+            )
+            .await?;
+            wait_for_msgs([&node1, &node2]).await;
+            assert_no_more_msg([&node1, &node2]).await;
+        }
+
+        assert!(node1.swarm.storage_check_cache(entry_key).await.is_none());
+        assert!(node2.swarm.storage_check_cache(entry_key).await.is_none());
+        assert_eq!(node1.dht().storage.count().await?, 0);
+        assert_ne!(node2.dht().storage.count().await?, 0);
+
+        <Swarm as ChordStorageInterface<1>>::storage_fetch(&node1.swarm, entry_key).await?;
+        wait_for_msgs([&node1, &node2]).await;
+        assert_no_more_msg([&node1, &node2]).await;
+
+        assert_eq!(
+            node1.swarm.storage_check_cache(entry_key).await,
+            Some(Entry {
+                did: entry_key,
+                data: vec![
+                    "111".to_string().encode()?,
+                    "333".to_string().encode()?,
+                    "222".to_string().encode()?
+                ],
+                kind: EntryKind::Data
             })
         );
 

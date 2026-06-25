@@ -56,7 +56,7 @@ fn did_frac(num: u64, den: u64) -> Did {
 }
 
 /// The hashable topology state of a node — everything in `PeerRing` that drives
-/// routing/convergence, and nothing else (no VNode storage/cache).
+/// routing/convergence, and nothing else (no Entry storage/cache).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct DhtSnapshot {
     pub did: Did,

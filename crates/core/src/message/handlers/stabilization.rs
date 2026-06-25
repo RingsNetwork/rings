@@ -11,7 +11,7 @@ use crate::message::effects::PayloadRelayFunctor;
 use crate::message::types::Message;
 use crate::message::types::NotifyPredecessorReport;
 use crate::message::types::NotifyPredecessorSend;
-use crate::message::types::SyncVNodeWithSuccessor;
+use crate::message::types::SyncEntriesWithSuccessor;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
@@ -45,11 +45,11 @@ impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
 
         if let Ok(PeerRingAction::RemoteAction(
             next,
-            PeerRingRemoteAction::SyncVNodeWithSuccessor(data),
-        )) = self.dht.sync_vnode_with_successor(msg.did).await
+            PeerRingRemoteAction::SyncEntriesWithSuccessor(data),
+        )) = self.dht.sync_entries_with_successor(msg.did).await
         {
             self.run_effects([MessageSendFunctor::send_message(
-                Message::SyncVNodeWithSuccessor(SyncVNodeWithSuccessor { data }),
+                Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor { data }),
                 next,
             )
             .into()])
@@ -69,9 +69,9 @@ mod test {
     use tokio::time::Duration;
 
     use super::*;
+    use crate::dht::entry::Entry;
+    use crate::dht::entry::EntryKind;
     use crate::dht::successor::SuccessorReader;
-    use crate::dht::vnode::VNodeType;
-    use crate::dht::vnode::VirtualNode;
     use crate::ecc::tests::gen_ordered_keys;
     use crate::ecc::SecretKey;
     use crate::error::Error;
@@ -137,7 +137,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn notify_predecessor_report_syncs_vnodes_when_predecessor_already_connected(
+    async fn notify_predecessor_report_syncs_entries_when_predecessor_already_connected(
     ) -> Result<()> {
         let mut keys = gen_ordered_keys(3).into_iter();
         let key1 = next_generated_key(&mut keys)?;
@@ -150,15 +150,15 @@ mod test {
         wait_for_msgs([&node1, &node2]).await;
         assert_no_more_msg([&node1, &node2]).await;
 
-        let vnode = VirtualNode {
+        let entry = Entry {
             did: key3.address().into(),
             data: vec![String::from("sync me").encode()?],
-            kind: VNodeType::Data,
+            kind: EntryKind::Data,
         };
         node1
             .dht()
             .storage
-            .put(&vnode.did.to_string(), &vnode)
+            .put(&entry.did.to_string(), &entry)
             .await?;
 
         let context_key = SecretKey::random();
@@ -179,23 +179,23 @@ mod test {
             Ok(Some(payload)) => payload,
             Ok(None) => {
                 return Err(Error::InvalidMessage(
-                    "node2 message stream closed before vnode sync".to_string(),
+                    "node2 message stream closed before entry sync".to_string(),
                 ))
             }
             Err(_) => {
                 return Err(Error::InvalidMessage(
-                    "timed out waiting for vnode sync".to_string(),
+                    "timed out waiting for entry sync".to_string(),
                 ))
             }
         };
 
         match payload.transaction.data::<Message>()? {
-            Message::SyncVNodeWithSuccessor(SyncVNodeWithSuccessor { data }) => {
-                assert_eq!(data, vec![vnode]);
+            Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor { data }) => {
+                assert_eq!(data, vec![entry]);
             }
             message => {
                 return Err(Error::InvalidMessage(format!(
-                    "expected SyncVNodeWithSuccessor, got {message:?}"
+                    "expected SyncEntriesWithSuccessor, got {message:?}"
                 )))
             }
         }

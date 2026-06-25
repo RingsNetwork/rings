@@ -4,8 +4,8 @@ use async_trait::async_trait;
 
 use super::chord::TopoInfo;
 use super::did::Did;
-use super::vnode::VNodeOperation;
-use super::vnode::VirtualNode;
+use super::entry::Entry;
+use super::entry::EntryOperation;
 use crate::error::Result;
 
 /// Chord is a distributed hash table (DHT) algorithm that is designed to efficiently
@@ -50,13 +50,12 @@ pub trait Chord<Action> {
 /// whose Did is the predecessor of that resource's Did. Save the resource in its
 /// predecessor node.
 ///
-/// To accomplish this, all resources stored by this protocol will be wrapped in
-/// [VirtualNode](super::vnode::VirtualNode).
+/// To accomplish this, all resources stored by this protocol will be wrapped in an
+/// [Entry](super::entry::Entry).
 ///
-/// Known that although the Did of a `VirtualNode` has the same data type as the Did of a
-/// node (they both can be used as key for the DHT), since the `VirtualNode` is only a
-/// logical node, it will not be selected to be connected as a real node, but will only
-/// be classified as the predecessor of a real node.
+/// An [`Entry`] key has the same representation as a node [`Did`], but it is not a
+/// node identity. It is only used to choose the node responsible for storing the
+/// entry.
 ///
 /// Some methods return an `Action`. It's because the real storing node may not be this
 /// node. The outer should take the action to forward the request to the real storing
@@ -64,22 +63,22 @@ pub trait Chord<Action> {
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait ChordStorage<Action, const REDUNDANT: u16>: Chord<Action> {
-    /// Look up a VirtualNode by its Did.
+    /// Look up an [`Entry`] by its ring key.
     /// Always finds resource by DHT, ignoring the local cache.
-    async fn vnode_lookup(&self, vid: Did) -> Result<Action>;
-    /// Store `vnode` if it's between current node and the successor of current node,
+    async fn entry_lookup(&self, entry_key: Did) -> Result<Action>;
+    /// Store `entry` if it's between current node and the successor of current node,
     /// otherwise find the responsible node and return as Action.
-    async fn vnode_operate(&self, op: VNodeOperation) -> Result<Action>;
+    async fn entry_operate(&self, op: EntryOperation) -> Result<Action>;
 }
 
-/// ChordStorageSync defines the synchronous vnode storage behavior.
+/// ChordStorageSync defines the synchronous entry storage behavior.
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait ChordStorageSync<Action>: Chord<Action> {
     /// When the successor of a node is updated, it needs to check if there are
-    /// `VirtualNode`s that are no longer between current node and `new_successor`,
+    /// `Entry`s that are no longer between current node and `new_successor`,
     /// and sync them to the new successor.
-    async fn sync_vnode_with_successor(&self, new_successor: Did) -> Result<Action>;
+    async fn sync_entries_with_successor(&self, new_successor: Did) -> Result<Action>;
 }
 
 /// ChordStorageCache defines the basic API for getting and setting DHT cache storage.
@@ -87,9 +86,9 @@ pub trait ChordStorageSync<Action>: Chord<Action> {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait ChordStorageCache<Action>: Chord<Action> {
     /// Cache fetched resource locally.
-    async fn local_cache_put(&self, vnode: VirtualNode) -> Result<()>;
+    async fn local_cache_put(&self, entry: Entry) -> Result<()>;
     /// Get local cache.
-    async fn local_cache_get(&self, vid: Did) -> Result<Option<VirtualNode>>;
+    async fn local_cache_get(&self, entry_key: Did) -> Result<Option<Entry>>;
 }
 
 /// Chord online correction that inspired by Pamela Zave's work.
