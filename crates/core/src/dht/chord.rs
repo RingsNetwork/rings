@@ -11,8 +11,11 @@ use serde::Serialize;
 
 use super::did::BiasId;
 use super::entry::Entry;
+use super::entry::EntryLookupEvidence;
+use super::entry::EntryLookupKey;
 use super::entry::EntryOperation;
 use super::entry::PlacedEntry;
+use super::entry::PlacementMiss;
 use super::finger::DEFAULT_FINGER_TABLE_SIZE;
 use super::successor::SuccessorSeq;
 use super::types::Chord;
@@ -70,8 +73,10 @@ type Target = Did;
 pub enum PeerRingAction {
     /// No result, the whole manipulation is done internally.
     None,
-    /// Found some Entry.
-    SomeEntry(Entry),
+    /// Found an entry together with lookup evidence.
+    SomeEntry(EntryLookupEvidence),
+    /// Observed placement misses without a hit.
+    EntryMisses(Vec<PlacementMiss>),
     /// Found some node.
     Some(Did),
     /// Trigger a remote action.
@@ -90,8 +95,8 @@ pub enum PeerRingAction {
 pub enum RemoteAction {
     /// Need `did_a` to find `did_b`.
     FindSuccessor(Did),
-    /// Need `did_a` to find entry `did_b`.
-    FindEntry(Did),
+    /// Need `did_a` to find one entry placement.
+    FindEntry(EntryLookupKey),
     /// Need `did_a` to find Entry for operating.
     FindEntryForOperate(EntryOperation),
     /// Send a predecessor notification to `did_a`.
@@ -423,12 +428,26 @@ impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing 
     /// stored in current node.
     async fn entry_lookup(&self, entry_key: Did) -> Result<PeerRingAction> {
         let mut ret = vec![];
-        for entry_key in entry_key.rotate_affine(REDUNDANT)? {
-            let act = match self.find_successor(entry_key) {
+        let mut misses = vec![];
+        // Pre: REDUNDANT > 0, enforced by rotate_affine.
+        // Post: if result is SomeEntry(e), e.misses contains exactly the
+        // local placement misses observed before the first hit in
+        // place(entry_key, REDUNDANT). Later placements are Unknown.
+        // Post: EntryMisses carries only observed misses; no remote
+        // SearchEntry is emitted solely to classify Unknown as Miss.
+        for placement_key in entry_key.rotate_affine(REDUNDANT)? {
+            let query = EntryLookupKey::new(entry_key, placement_key);
+            let act = match self.find_successor(placement_key) {
                 // Resource should be stored in current node.
                 Ok(PeerRingAction::Some(succ)) => {
-                    match self.storage.get(&entry_key.to_string()).await {
-                        Ok(Some(v)) => Ok(PeerRingAction::SomeEntry(v)),
+                    match self.storage.get(&placement_key.to_string()).await {
+                        Ok(Some(v)) => {
+                            let observed_misses = std::mem::take(&mut misses);
+                            Ok(PeerRingAction::SomeEntry(EntryLookupEvidence::new(
+                                v,
+                                observed_misses,
+                            )))
+                        }
                         Ok(None) => {
                             tracing::debug!(
                                 "Cannot find entry in local storage, try to query from successor"
@@ -436,11 +455,12 @@ impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing 
                             // If cannot find and has successor, try to query it from successor.
                             // This is useful when the node is just joined and has not stabilized yet.
                             if succ == self.did {
+                                misses.push(PlacementMiss::new(placement_key, succ));
                                 Ok(PeerRingAction::None)
                             } else {
                                 Ok(PeerRingAction::RemoteAction(
                                     succ,
-                                    RemoteAction::FindEntry(entry_key),
+                                    RemoteAction::FindEntry(query),
                                 ))
                             }
                         }
@@ -450,7 +470,10 @@ impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing 
                 // Resource is stored in other nodes.
                 // Return an action to describe how to find it.
                 Ok(PeerRingAction::RemoteAction(n, RemoteAction::FindSuccessor(id))) => {
-                    Ok(PeerRingAction::RemoteAction(n, RemoteAction::FindEntry(id)))
+                    Ok(PeerRingAction::RemoteAction(
+                        n,
+                        RemoteAction::FindEntry(EntryLookupKey::new(entry_key, id)),
+                    ))
                 }
                 Ok(a) => Err(Error::PeerRingUnexpectedAction(a)),
                 Err(e) => Err(e),
@@ -464,6 +487,9 @@ impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing 
                 }
             }
         }
+        if !misses.is_empty() {
+            ret.push(PeerRingAction::EntryMisses(misses));
+        }
         Ok(ret.into())
     }
 
@@ -473,6 +499,14 @@ impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing 
     async fn entry_operate(&self, op: EntryOperation) -> Result<PeerRingAction> {
         let entry_key = op.did()?;
         let mut ret = vec![];
+        // Pre: op.did() is the entry identity id(e), and REDUNDANT > 0 is
+        // checked by rotate_affine.
+        // Post: for every k in place(id(e), REDUNDANT), either sigma_self[k]
+        // is updated with Entry::operate(op) when self is the observed owner,
+        // or exactly one FindEntryForOperate action is emitted toward the
+        // current routing owner for k.
+        // Preservation: no placement outside place(id(e), REDUNDANT) is
+        // written by this transition.
         for entry_key in entry_key.rotate_affine(REDUNDANT)? {
             let act = match self.find_successor(entry_key) {
                 // `entry` should be on current node.

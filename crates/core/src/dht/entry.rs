@@ -86,6 +86,60 @@ impl PlacedEntry {
     }
 }
 
+/// A lookup request for a concrete placement of an entry identity.
+///
+/// `resource` is `id(e)`. `placement` is one element of
+/// `place(resource, REDUNDANT)`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EntryLookupKey {
+    /// Entry identity being searched.
+    pub resource: Did,
+    /// Placement key being interrogated.
+    pub placement: Did,
+}
+
+impl EntryLookupKey {
+    /// Pair an entry identity with one of its placement keys.
+    pub fn new(resource: Did, placement: Did) -> Self {
+        Self {
+            resource,
+            placement,
+        }
+    }
+}
+
+/// A placement key observed missing during lookup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct PlacementMiss {
+    /// Placement key whose responsible owner returned `None`.
+    pub key: Did,
+    /// Owner that was responsible for `key` when the miss was observed.
+    pub owner: Did,
+}
+
+impl PlacementMiss {
+    /// Witness that `owner` was queried for `key` and did not have the entry.
+    pub fn new(key: Did, owner: Did) -> Self {
+        Self { key, owner }
+    }
+}
+
+/// A successful lookup result plus the missing placements observed before it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EntryLookupEvidence {
+    /// Entry found by the lookup.
+    pub entry: Entry,
+    /// Placement misses observed as part of the same lookup.
+    pub misses: Vec<PlacementMiss>,
+}
+
+impl EntryLookupEvidence {
+    /// Construct lookup evidence.
+    pub fn new(entry: Entry, misses: Vec<PlacementMiss>) -> Self {
+        Self { entry, misses }
+    }
+}
+
 impl Entry {
     /// Generate did from topic.
     pub fn gen_did(topic: &str) -> Result<Did> {

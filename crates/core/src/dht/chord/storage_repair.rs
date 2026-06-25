@@ -1,3 +1,37 @@
+//! Formal storage-replication model.
+//!
+//! State variables:
+//! - `R = Z / 2^160`, represented by [`Did`].
+//! - `place(id(e), N) = [k_0, ..., k_{N-1}]`, computed by
+//!   [`Did::rotate_affine`].
+//! - `sigma_n[k]` is the [`Entry`] stored by node `n` under placement key `k`.
+//! - `succ(k)` is the owner returned by Chord routing for placement key `k`.
+//!
+//! Invariant REPLICATED(e, N):
+//! `forall k in place(id(e), N), sigma_{succ(k)}[k] = e`.
+//!
+//! Liveness S4:
+//! In a quiescent window, if at least one placement copy of `e` remains at the
+//! start of an anti-entropy period, one `republish_local_entries` round copies
+//! `e` to every current owner in `place(id(e), N)`.
+//!
+//! Safety:
+//! - S1 Additivity: repair transitions in this module never call
+//!   `storage.remove`.
+//! - S2 No-last-copy-loss: the only deletion transition is
+//!   `acknowledge_synced_entries`; the finite model
+//!   `storage_sync_model_preserves_no_last_copy_loss` in `dht_stateright`
+//!   checks that an ack-delete transition is reachable only after the receiver
+//!   state contains the acked placement key.
+//! - S3 Idempotence: copy transitions overwrite the same key with an equal
+//!   value, so applying the same repair twice is observationally equivalent to
+//!   applying it once.
+//!
+//! Read-repair:
+//! Given lookup observation `o : place(id(e), N) -> {Hit(e), Miss, Unknown}`,
+//! `repair_targets(o) = { k | o(k) = Miss }`. `read_repair_entry` copies only
+//! `repair_targets(o)` and does not evaluate `place` or `succ`.
+
 use async_trait::async_trait;
 
 use super::PeerRing;
@@ -5,6 +39,7 @@ use super::PeerRingAction;
 use super::RemoteAction;
 use crate::dht::entry::Entry;
 use crate::dht::entry::PlacedEntry;
+use crate::dht::entry::PlacementMiss;
 use crate::dht::successor::SuccessorReader;
 use crate::dht::Chord;
 use crate::dht::ChordStorageRepair;
@@ -40,6 +75,12 @@ impl PeerRing {
         peer: Did,
         redundancy: u16,
     ) -> Result<bool> {
+        // Pre: peer is a terminal or departing DID under the caller's routing
+        // view.
+        // Post: true iff peer is observed in a routing position that can affect
+        // storage responsibility: predecessor, successor list, finger table, or
+        // owner of some locally held affine placement key.
+        // Preservation S1: this predicate performs no storage writes/removes.
         if self
             .lock_predecessor()?
             .is_some_and(|predecessor| predecessor == peer)
@@ -78,6 +119,14 @@ impl PeerRing {
         placement_key: Did,
         entry: &Entry,
     ) -> Result<PeerRingAction> {
+        // Pre: placement_key belongs to place(id(entry), redundancy) for the
+        // caller's anti-entropy or republish transition.
+        // Post S1: no local key is removed.
+        // Post S3: if self owns placement_key, sigma_self[placement_key] = entry
+        // after the transition; repeating the write preserves sigma.
+        // Post: if another node owns placement_key, the returned action carries
+        // PlacedEntry { key: placement_key, entry } so placement identity is not
+        // recomputed by the receiver.
         let placed = PlacedEntry::new(placement_key, entry.clone());
         match self.find_successor(placement_key)? {
             PeerRingAction::Some(owner) if owner == self.did => {
@@ -97,6 +146,31 @@ impl PeerRing {
                 ))
             }
             action => Err(Error::PeerRingUnexpectedAction(action)),
+        }
+    }
+
+    async fn copy_entry_to_observed_miss(
+        &self,
+        miss: PlacementMiss,
+        entry: &Entry,
+    ) -> Result<PeerRingAction> {
+        // Pre: miss was produced by entry_lookup/SearchEntry, so miss.owner was
+        // the responsible owner for miss.key under the lookup's routing view.
+        // Post R1/R2: exactly miss.key is repaired; Hit and Unknown placements
+        // are not touched by this transition.
+        // Post R4: this function performs no place()/succ() computation. It
+        // reuses the owner observed by lookup and emits only a copy action.
+        let placed = PlacedEntry::new(miss.key, entry.clone());
+        if miss.owner == self.did {
+            self.storage
+                .put(&miss.key.to_string(), &entry.clone().into_storage_entry())
+                .await?;
+            Ok(PeerRingAction::None)
+        } else {
+            Ok(PeerRingAction::RemoteAction(
+                miss.owner,
+                RemoteAction::SyncEntriesWithSuccessor(vec![placed]),
+            ))
         }
     }
 
@@ -123,13 +197,14 @@ impl ChordStorageRepair<PeerRingAction> for PeerRing {
             return Ok(PeerRingAction::None);
         }
 
-        // State variables:
-        // - local: entries durably stored on this node before this transition.
-        // - owners(entry): affine placement keys under the current routing view.
-        //
-        // Preservation: forall key in local, key remains in local after this
-        // transition. Repair emits only copy actions; deletion remains isolated
-        // to acknowledge_synced_entries after #611 ack.
+        // Pre: redundancy > 1 and every local storage value is an Entry.
+        // Post S1: forall key in local_before, local_after[key] =
+        // local_before[key]. This transition only copies.
+        // Post S3: repeating this transition produces the same sigma mapping as
+        // one application because put(k, e) overwrites with equal e.
+        // Post S4: for every local entry e, a copy action exists for each key
+        // in place(id(e), redundancy) whose owner is not self; self-owned
+        // placements are written locally.
         let mut actions = Vec::new();
         for (_, entry) in self.storage.get_all().await? {
             let action = self.republish_entry(entry, redundancy).await?;
@@ -138,7 +213,25 @@ impl ChordStorageRepair<PeerRingAction> for PeerRing {
         Ok(merge_actions(actions))
     }
 
-    async fn read_repair_entry(&self, entry: Entry, redundancy: u16) -> Result<PeerRingAction> {
-        self.republish_entry(entry, redundancy).await
+    async fn read_repair_entry(
+        &self,
+        entry: Entry,
+        misses: &[PlacementMiss],
+    ) -> Result<PeerRingAction> {
+        // Pre: misses = repair_targets(o) for the lookup observation that found
+        // entry, and each miss.owner was observed while querying miss.key.
+        // Post R1: emitted copy actions are in one-to-one correspondence with
+        // misses whose owner is remote; self-owned misses are written locally.
+        // Post R2/R3: Hit and Unknown placements are absent from misses, so no
+        // action can target them. A local-hit short circuit has misses = [].
+        // Post R4: no placement vector or successor is recomputed here.
+        // Preservation S1/S3: this transition never removes and duplicate copy
+        // actions overwrite with equal Entry values.
+        let mut actions = Vec::new();
+        for miss in misses.iter().copied() {
+            let action = self.copy_entry_to_observed_miss(miss, &entry).await?;
+            push_action(&mut actions, action);
+        }
+        Ok(merge_actions(actions))
     }
 }

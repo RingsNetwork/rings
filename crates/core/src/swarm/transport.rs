@@ -1,5 +1,8 @@
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -27,6 +30,7 @@ use crate::chunk::ChunkList;
 use crate::chunk::Framing;
 use crate::chunk::WireReserves;
 use crate::consts::TRANSPORT_MAX_SIZE;
+use crate::dht::entry::PlacementMiss;
 use crate::dht::Did;
 use crate::dht::LiveDid;
 use crate::dht::PeerRing;
@@ -47,8 +51,16 @@ pub struct SwarmTransport {
     session_sk: SessionSk,
     pub(crate) dht: Arc<PeerRing>,
     storage_redundancy: u16,
+    storage_lookup_observations:
+        Mutex<BTreeMap<StorageLookupObservationKey, BTreeSet<PlacementMiss>>>,
     #[allow(dead_code)]
     measure: Option<MeasureImpl>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct StorageLookupObservationKey {
+    resource: Did,
+    redundancy: u16,
 }
 
 #[derive(Clone)]
@@ -189,6 +201,7 @@ impl SwarmTransport {
             session_sk,
             dht,
             storage_redundancy,
+            storage_lookup_observations: Mutex::new(BTreeMap::new()),
             measure,
         }
     }
@@ -208,6 +221,43 @@ impl SwarmTransport {
                 requested: REDUNDANT,
             })
         }
+    }
+
+    pub(crate) fn observe_storage_misses(
+        &self,
+        resource: Did,
+        redundancy: u16,
+        misses: impl IntoIterator<Item = PlacementMiss>,
+    ) -> Result<()> {
+        let mut observations = self
+            .storage_lookup_observations
+            .lock()
+            .map_err(|_| Error::DHTSyncLockError)?;
+        let key = StorageLookupObservationKey {
+            resource,
+            redundancy,
+        };
+        observations.entry(key).or_default().extend(misses);
+        Ok(())
+    }
+
+    pub(crate) fn take_storage_misses(
+        &self,
+        resource: Did,
+        redundancy: u16,
+    ) -> Result<Vec<PlacementMiss>> {
+        let mut observations = self
+            .storage_lookup_observations
+            .lock()
+            .map_err(|_| Error::DHTSyncLockError)?;
+        let key = StorageLookupObservationKey {
+            resource,
+            redundancy,
+        };
+        Ok(observations
+            .remove(&key)
+            .map(|misses| misses.into_iter().collect())
+            .unwrap_or_default())
     }
 
     /// Create new connection that will be handled by swarm.

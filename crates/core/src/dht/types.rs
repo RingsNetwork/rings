@@ -6,6 +6,7 @@ use super::chord::TopoInfo;
 use super::did::Did;
 use super::entry::Entry;
 use super::entry::EntryOperation;
+use super::entry::PlacementMiss;
 use crate::error::Result;
 
 /// Chord is a distributed hash table (DHT) algorithm that is designed to efficiently
@@ -104,11 +105,12 @@ pub trait ChordStorageRepair<Action>: Chord<Action> {
     /// sync messages carrying explicit placement keys.
     async fn republish_local_entries(&self, redundancy: u16) -> Result<Action>;
 
-    /// Republish a found entry to its current affine owners.
+    /// Copy a found entry only to placement keys observed missing during lookup.
     ///
-    /// This is the read-repair transition. `redundancy <= 1` is a no-op because
-    /// there are no additional replicas to restore.
-    async fn read_repair_entry(&self, entry: Entry, redundancy: u16) -> Result<Action>;
+    /// Post: `misses.is_empty()` is a no-op. Non-empty repair emits copy-only
+    /// actions for exactly the observed misses and performs no additional
+    /// placement probing.
+    async fn read_repair_entry(&self, entry: Entry, misses: &[PlacementMiss]) -> Result<Action>;
 }
 
 /// ChordStorageCache defines the basic API for getting and setting DHT cache storage.

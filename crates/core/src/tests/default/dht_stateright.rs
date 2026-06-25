@@ -25,6 +25,9 @@
 //!     notified) — illustrating the order-sensitivity mechanism behind the
 //!     integration test's residual flakiness, not formally pinning the 6-node
 //!     configuration.
+//!   * Stage 3 — a finite storage-sync safety model for #613 S2. It abstracts
+//!     one placement key through copy -> ack -> delete and checks that local
+//!     deletion is reachable only after the successor state contains the key.
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
@@ -528,6 +531,71 @@ fn discovery_model(all: Vec<Did>, rounds: u8) -> ActorModel<DiscoveryNode, Cfg, 
         )
 }
 
+// ===================================================================
+// Stage 3: storage sync safety for one placement key.
+//
+// SCOPE: this is the #613 S2 model, not a full storage liveness model. It
+// abstracts exactly one placement key and the #611 hand-off order:
+//
+//   local_has --SendCopy--> copy_in_flight --DeliverCopy-->
+//   successor_has + ack_in_flight --DeliverAckDelete--> !local_has
+//
+// Property checked below:
+//
+//   Always: local_has changes true -> false only if successor_has is true.
+//
+// This is the no-last-copy-loss safety property required by #613. The stronger
+// "delete only if the local value is unchanged since copy" property is outside
+// this model and remains the versioned-delete follow-up.
+// ===================================================================
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+enum StorageSyncStep {
+    SendCopy,
+    DeliverCopy,
+    DeliverAckDelete,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct StorageSyncState {
+    local_has: bool,
+    successor_has: bool,
+    copy_in_flight: bool,
+    ack_in_flight: bool,
+}
+
+impl StorageSyncState {
+    fn initial() -> Self {
+        Self {
+            local_has: true,
+            successor_has: false,
+            copy_in_flight: false,
+            ack_in_flight: false,
+        }
+    }
+
+    fn step(self, step: StorageSyncStep) -> Option<Self> {
+        match step {
+            StorageSyncStep::SendCopy if self.local_has => Some(Self {
+                copy_in_flight: true,
+                ..self
+            }),
+            StorageSyncStep::DeliverCopy if self.copy_in_flight => Some(Self {
+                successor_has: true,
+                copy_in_flight: false,
+                ack_in_flight: true,
+                ..self
+            }),
+            StorageSyncStep::DeliverAckDelete if self.ack_in_flight => Some(Self {
+                local_has: false,
+                ack_in_flight: false,
+                ..self
+            }),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -696,6 +764,36 @@ mod tests {
                 "expected a no-bounded-convergence counterexample at rounds={rounds} \
                  (a peer learned after a node's stabilization budget is never notified)"
             );
+        }
+    }
+
+    /// Stage 3 — storage S2. Exhaustively explores the finite state graph for
+    /// one placement hand-off and checks the formal safety predicate:
+    /// deleting the local placement key is allowed only after the successor has
+    /// durably stored the same key and sent an ack.
+    #[test]
+    fn storage_sync_model_preserves_no_last_copy_loss() {
+        let mut seen = BTreeSet::new();
+        let mut frontier = vec![StorageSyncState::initial()];
+        while let Some(state) = frontier.pop() {
+            if !seen.insert(state) {
+                continue;
+            }
+            for step in [
+                StorageSyncStep::SendCopy,
+                StorageSyncStep::DeliverCopy,
+                StorageSyncStep::DeliverAckDelete,
+            ] {
+                if let Some(next) = state.step(step) {
+                    assert!(
+                        !state.local_has || next.local_has || next.successor_has,
+                        "S2 violated by {step:?}: {state:?} -> {next:?}"
+                    );
+                    if !seen.contains(&next) {
+                        frontier.push(next);
+                    }
+                }
+            }
         }
     }
 }

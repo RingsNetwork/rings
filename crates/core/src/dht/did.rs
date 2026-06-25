@@ -173,9 +173,17 @@ impl Did {
         BiasId::new(did, *self)
     }
 
-    /// Rotate Transport did to a list of affined did
+    /// Rotate this DID into a redundant placement vector.
     ///
-    /// Law: for scalar n > 0, `result[i] = self + floor(2^160 * i / n)`.
+    /// Pre: `scalar > 0`.
+    ///
+    /// Law: `place(self, n)[i] = self + floor(2^160 * i / n)` for
+    /// `i in 0..n`.
+    ///
+    /// Law: `place(self, n)[0] = self`.
+    ///
+    /// Law: for `i != j`, `place(self, n)[i] != place(self, n)[j]` while
+    /// `n <= 2^160`; the current `u16` domain is therefore injective.
     pub fn rotate_affine(&self, scalar: u16) -> Result<Vec<Did>> {
         if scalar == 0 {
             return Err(Error::InvalidAffineScalar);

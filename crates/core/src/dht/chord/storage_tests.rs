@@ -6,6 +6,7 @@ use super::RemoteAction;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
+use crate::dht::entry::PlacementMiss;
 use crate::dht::successor::SuccessorWriter;
 use crate::dht::ChordStorage;
 use crate::dht::ChordStorageRepair;
@@ -231,9 +232,96 @@ async fn read_repair_is_noop_for_single_replica_storage() -> Result<()> {
     let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
     let entry = data_entry(Did::from(10u32));
 
-    let action = node.read_repair_entry(entry, 1).await?;
+    let action = node.read_repair_entry(entry, &[]).await?;
 
     assert_eq!(action, PeerRingAction::None);
     assert_eq!(node.storage.count().await?, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn local_hit_lookup_has_no_read_repair_targets() -> Result<()> {
+    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
+    let entry = data_entry(Did::from(10u32));
+    let mut placement_keys = entry.did.rotate_affine(2)?.into_iter();
+    let first_key = placement_keys
+        .next()
+        .ok_or_else(|| Error::InvalidMessage("expected first placement".to_string()))?;
+    node.storage.put(&first_key.to_string(), &entry).await?;
+
+    let action = <PeerRing as ChordStorage<_, 2>>::entry_lookup(&node, entry.did).await?;
+    let evidence = match action {
+        PeerRingAction::SomeEntry(evidence) => evidence,
+        action => return Err(Error::PeerRingUnexpectedAction(action)),
+    };
+    let repair = node
+        .read_repair_entry(evidence.entry.clone(), &evidence.misses)
+        .await?;
+
+    assert!(evidence.misses.is_empty());
+    assert_eq!(repair, PeerRingAction::None);
+    assert_eq!(node.storage.count().await?, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_repair_targets_only_observed_missing_placements() -> Result<()> {
+    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
+    let entry = data_entry(Did::from(10u32));
+    let placement_keys = entry.did.rotate_affine(3)?;
+    let first_key = *placement_keys
+        .first()
+        .ok_or_else(|| Error::InvalidMessage("expected first placement".to_string()))?;
+    let second_key = *placement_keys
+        .get(1)
+        .ok_or_else(|| Error::InvalidMessage("expected second placement".to_string()))?;
+    let third_key = *placement_keys
+        .get(2)
+        .ok_or_else(|| Error::InvalidMessage("expected third placement".to_string()))?;
+    node.storage.put(&second_key.to_string(), &entry).await?;
+
+    let action = <PeerRing as ChordStorage<_, 3>>::entry_lookup(&node, entry.did).await?;
+    let evidence = match action {
+        PeerRingAction::SomeEntry(evidence) => evidence,
+        action => return Err(Error::PeerRingUnexpectedAction(action)),
+    };
+    let repair = node
+        .read_repair_entry(evidence.entry.clone(), &evidence.misses)
+        .await?;
+
+    assert_eq!(evidence.misses, vec![PlacementMiss::new(
+        first_key, node.did
+    )]);
+    assert_eq!(repair, PeerRingAction::None);
+    assert_eq!(
+        node.storage.get(&first_key.to_string()).await?,
+        Some(entry.clone())
+    );
+    assert_eq!(
+        node.storage.get(&second_key.to_string()).await?,
+        Some(entry)
+    );
+    assert_eq!(node.storage.get(&third_key.to_string()).await?, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_repair_uses_observed_remote_owner() -> Result<()> {
+    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
+    let owner = Did::from(100u32);
+    let placement_key = Did::from(40u32);
+    let entry = data_entry(Did::from(10u32));
+
+    let action = node
+        .read_repair_entry(entry.clone(), &[PlacementMiss::new(placement_key, owner)])
+        .await?;
+
+    assert_eq!(
+        action,
+        PeerRingAction::MultiActions(vec![PeerRingAction::RemoteAction(
+            owner,
+            RemoteAction::SyncEntriesWithSuccessor(vec![PlacedEntry::new(placement_key, entry)])
+        )])
+    );
     Ok(())
 }

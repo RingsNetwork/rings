@@ -21,8 +21,14 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
         let mut data = Vec::<PlacedEntry>::new();
         let all_items: Vec<(String, Entry)> = self.storage.get_all().await?;
 
-        // Preservation: sync is copy-before-ack-before-delete. This step only
-        // copies entries; acknowledge_synced_entries removes acked keys later.
+        // Pre: new_successor is the successor adopted by stabilization.
+        // Post S1: forall key in local_before, local_after[key] =
+        // local_before[key]; this transition emits copies only.
+        // Post S2(copy): every emitted PlacedEntry keeps the exact local
+        // placement key, so an eventual ack names the key whose durable copy was
+        // reported by the receiver.
+        // Preservation: sync is copy-before-ack-before-delete.
+        // acknowledge_synced_entries is the only delete transition.
         for (entry_key_str, entry) in all_items.iter() {
             let entry_key = Did::from_str(entry_key_str)?;
             if self.bias(entry_key) > self.bias(new_successor) {
@@ -41,13 +47,16 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
     }
 
     async fn acknowledge_synced_entries(&self, keys: &[Did]) -> Result<PeerRingAction> {
-        // Invariant gap: ack currently proves "successor durably stored this
-        // placement key", not "the local value is unchanged since copy".
-        // A write racing between copy and ack could be newer than the acked
-        // value and still be removed here. Closing that requires Entry
-        // version/timestamp metadata so delete can be conditional on equality.
-        // The storage durability work in #612 keeps repair additive until that
-        // versioned delete proof exists.
+        // Pre S2: each key in keys is contained in a
+        // SyncEntriesWithSuccessorReport sent only after the receiver persisted
+        // PlacedEntry { key, entry }. The checkable finite model is
+        // storage_sync_model_preserves_no_last_copy_loss in dht_stateright.
+        // Post: only keys in `keys` may be removed from local storage.
+        // Invariant gap: this proves acked-key durability, not that the local
+        // value still equals the copied value. A write racing between copy and
+        // ack could be newer than the acked value and still be removed here.
+        // Closing that stronger property requires Entry version/timestamp
+        // metadata so delete can be conditional on equality.
         for key in keys {
             self.storage.remove(&key.to_string()).await?;
         }

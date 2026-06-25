@@ -10,6 +10,7 @@ use crate::chunk::Chunk;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryOperation;
 use crate::dht::entry::PlacedEntry;
+use crate::dht::entry::PlacementMiss;
 use crate::dht::Did;
 use crate::dht::TopoInfo;
 use crate::error::Result;
@@ -157,8 +158,10 @@ impl Then for QueryForTopoInfoSend {
 /// MessageType used to search a DHT storage entry.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SearchEntry {
-    /// The ring key of the searched entry.
-    pub key: Did,
+    /// Entry identity being searched.
+    pub resource: Did,
+    /// Placement key being interrogated.
+    pub placement: Did,
     /// Redundancy used by the requester for read-repair after a hit.
     pub redundancy: u16,
 }
@@ -168,6 +171,10 @@ pub struct SearchEntry {
 pub struct FoundEntry {
     /// Response of [SearchEntry], containing response data
     pub data: Vec<Entry>,
+    /// Placement misses observed while answering [SearchEntry].
+    pub misses: Vec<PlacementMiss>,
+    /// Entry identity searched by the requester.
+    pub resource: Did,
     /// Redundancy used by the requester for read-repair after this hit.
     pub redundancy: u16,
 }
