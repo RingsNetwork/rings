@@ -10,8 +10,8 @@ use tokio::time::sleep;
 use tokio::time::timeout;
 use tokio::time::Duration;
 
+use crate::dht::entry::Entry;
 use crate::dht::successor::SuccessorReader;
-use crate::dht::vnode::VirtualNode;
 #[cfg(feature = "dummy")]
 use crate::dht::PeerRingAction;
 #[cfg(feature = "dummy")]
@@ -26,7 +26,7 @@ use crate::message::FindSuccessorThen;
 use crate::message::Message;
 #[cfg(feature = "dummy")]
 use crate::message::MessageHandler;
-use crate::prelude::vnode::VNodeOperation;
+use crate::prelude::entry::EntryOperation;
 #[cfg(feature = "dummy")]
 use crate::swarm::callback::SwarmCallback;
 use crate::tests::default::prepare_node;
@@ -477,12 +477,12 @@ async fn test_handle_storage() -> Result<()> {
     assert!(node2.dht().storage.count().await.unwrap() == 0);
     let message = String::from("this is a test string");
     let encoded_message = message.encode().unwrap();
-    // the vid is hash of string
-    let vnode: VirtualNode = (message.clone(), encoded_message).try_into().unwrap();
+    // the entry_key is hash of string
+    let entry: Entry = (message.clone(), encoded_message).try_into().unwrap();
     node1
         .swarm
         .send_message(
-            Message::OperateVNode(VNodeOperation::Overwrite(vnode.clone())),
+            Message::OperateEntry(EntryOperation::Overwrite(entry.clone())),
             node2.did(),
         )
         .await
@@ -490,8 +490,8 @@ async fn test_handle_storage() -> Result<()> {
     sleep(Duration::from_millis(5000)).await;
     assert!(node1.dht().storage.count().await.unwrap() == 0);
     assert!(node2.dht().storage.count().await.unwrap() > 0);
-    let data: Result<Option<VirtualNode>> = node2.dht().storage.get(&vnode.did.to_string()).await;
-    assert!(data.is_ok(), "vnode: {:?} not in", vnode.did);
+    let data: Result<Option<Entry>> = node2.dht().storage.get(&entry.did.to_string()).await;
+    assert!(data.is_ok(), "entry: {:?} not in", entry.did);
     let data = data.unwrap().unwrap();
     assert_eq!(data.data[0].clone().decode::<String>().unwrap(), message);
     Ok(())

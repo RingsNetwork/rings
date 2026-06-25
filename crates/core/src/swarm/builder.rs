@@ -5,8 +5,8 @@
 use std::sync::Arc;
 use std::sync::RwLock;
 
+use crate::dht::EntryStorage;
 use crate::dht::PeerRing;
-use crate::dht::VNodeStorage;
 use crate::dht::DEFAULT_FINGER_TABLE_SIZE;
 use crate::measure::MeasureImpl;
 use crate::session::SessionSk;
@@ -25,7 +25,8 @@ pub struct SwarmBuilder {
     external_address: Option<String>,
     dht_succ_max: u8,
     dht_finger_table_size: usize,
-    dht_storage: VNodeStorage,
+    dht_storage_redundancy: u16,
+    dht_storage: EntryStorage,
     session_sk: SessionSk,
     session_ttl: Option<usize>,
     measure: Option<MeasureImpl>,
@@ -37,7 +38,7 @@ impl SwarmBuilder {
     pub fn new(
         network_id: u32,
         ice_servers: &str,
-        dht_storage: VNodeStorage,
+        dht_storage: EntryStorage,
         session_sk: SessionSk,
     ) -> Self {
         SwarmBuilder {
@@ -46,6 +47,7 @@ impl SwarmBuilder {
             external_address: None,
             dht_succ_max: 3,
             dht_finger_table_size: DEFAULT_FINGER_TABLE_SIZE,
+            dht_storage_redundancy: 1,
             dht_storage,
             session_sk,
             session_ttl: None,
@@ -66,6 +68,12 @@ impl SwarmBuilder {
     /// by `FingerTable::new`. A size of zero disables finger maintenance.
     pub fn dht_finger_table_size(mut self, size: usize) -> Self {
         self.dht_finger_table_size = size;
+        self
+    }
+
+    /// Sets up the redundancy used by storage repair and anti-entropy.
+    pub fn dht_storage_redundancy(mut self, redundancy: u16) -> Self {
+        self.dht_storage_redundancy = redundancy;
         self
     }
 
@@ -117,6 +125,7 @@ impl SwarmBuilder {
             self.session_sk,
             dht.clone(),
             self.measure,
+            self.dht_storage_redundancy,
         ));
 
         Swarm {

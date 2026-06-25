@@ -11,8 +11,8 @@ use js_sys;
 use js_sys::Uint8Array;
 use rings_core::dht::Did;
 use rings_core::ecc::PublicKey;
-use rings_core::prelude::vnode;
-use rings_core::prelude::vnode::VirtualNode;
+use rings_core::prelude::entry;
+use rings_core::prelude::entry::Entry;
 use rings_core::storage::idb::IdbStorage;
 use rings_core::utils::js_utils;
 use rings_core::utils::js_value;
@@ -87,15 +87,22 @@ impl Provider {
                     let signer = signer.clone();
                     Box::pin(async move {
                         let signer = signer.clone();
-                        let sig: js_sys::Uint8Array = Uint8Array::from(
-                            JsFuture::from(js_sys::Promise::from(
-                                signer
-                                    .call1(&JsValue::NULL, &JsValue::from_str(&data))
-                                    .expect("Failed on call external Js Function"),
-                            ))
-                            .await
-                            .expect("Failed await call external Js Promise"),
-                        );
+                        let promise = match signer.call1(&JsValue::NULL, &JsValue::from_str(&data))
+                        {
+                            Ok(value) => js_sys::Promise::from(value),
+                            Err(error) => {
+                                tracing::error!("failed to call external JS signer: {error:?}");
+                                return Vec::new();
+                            }
+                        };
+                        let value = match JsFuture::from(promise).await {
+                            Ok(value) => value,
+                            Err(error) => {
+                                tracing::error!("external JS signer rejected: {error:?}");
+                                return Vec::new();
+                            }
+                        };
+                        let sig: js_sys::Uint8Array = Uint8Array::from(value);
                         sig.to_vec()
                     })
                 },
@@ -105,16 +112,16 @@ impl Provider {
         future_to_promise(async move {
             let signer = wrapped_signer(signer);
 
-            let vnode_storage = Box::new(
+            let entry_storage = Box::new(
                 IdbStorage::new_with_cap_and_name(50000, "rings-node")
                     .await
-                    .expect("Failed on create vnode storage"),
+                    .map_err(JsError::from)?,
             );
 
             let measure_storage = Box::new(
                 IdbStorage::new_with_cap_and_name(50000, "rings-node/measure")
                     .await
-                    .expect("Failed on create measure storage"),
+                    .map_err(JsError::from)?,
             );
 
             let provider = Provider::new_provider_internal(
@@ -124,14 +131,12 @@ impl Provider {
                 account,
                 account_type,
                 Signer::Async(Box::new(signer)),
-                Some(vnode_storage),
+                Some(entry_storage),
                 Some(measure_storage),
             )
             .await?;
 
-            provider
-                .set_backend()
-                .expect("Failed on set swarm callback");
+            provider.set_backend().map_err(JsError::from)?;
 
             Ok(JsValue::from(provider))
         })
@@ -139,8 +144,10 @@ impl Provider {
 
     /// Create new provider instance with serialized config (yaml/json)
     pub fn new_provider_with_serialized_config(config: String) -> js_sys::Promise {
-        let cfg: ProcessorConfig = serde_yaml::from_str(&config).unwrap();
-        Self::new_provider_with_config(cfg)
+        future_to_promise(async move {
+            let cfg: ProcessorConfig = serde_yaml::from_str(&config).map_err(JsError::from)?;
+            JsFuture::from(Self::new_provider_with_config(cfg)).await
+        })
     }
 
     /// Create a new provider instance.
@@ -160,28 +167,26 @@ impl Provider {
         storage_name: String,
     ) -> js_sys::Promise {
         future_to_promise(async move {
-            let vnode_storage = Box::new(
+            let entry_storage = Box::new(
                 IdbStorage::new_with_cap_and_name(50000, &storage_name)
                     .await
-                    .expect("Failed on create vnode storage"),
+                    .map_err(JsError::from)?,
             );
 
             let measure_storage = Box::new(
                 IdbStorage::new_with_cap_and_name(50000, &format!("{storage_name}/measure"))
                     .await
-                    .expect("Failed on create measure storage"),
+                    .map_err(JsError::from)?,
             );
 
             let provider = Self::new_provider_with_storage_internal(
                 config,
-                Some(vnode_storage),
+                Some(entry_storage),
                 Some(measure_storage),
             )
             .await
             .map_err(JsError::from)?;
-            provider
-                .set_backend()
-                .expect("Failed on set swarm callback");
+            provider.set_backend().map_err(JsError::from)?;
             Ok(JsValue::from(provider))
         })
     }
@@ -232,10 +237,10 @@ impl Provider {
     /// connect peer with remote jsonrpc server url
     pub fn connect_peer_via_http(&self, remote_url: String) -> js_sys::Promise {
         log::debug!("remote_url: {remote_url}");
-        self.request(
-            "ConnectPeerViaHttp".to_string(),
-            js_value::serialize(&ConnectPeerViaHttpRequest { url: remote_url }).unwrap(),
-        )
+        match js_value::serialize(&ConnectPeerViaHttpRequest { url: remote_url }) {
+            Ok(request) => self.request("ConnectPeerViaHttp".to_string(), request),
+            Err(error) => js_sys::Promise::reject(&JsValue::from(JsError::from(error))),
+        }
     }
 
     /// connect peer with web3 address
@@ -338,12 +343,12 @@ impl Provider {
         })
     }
 
-    /// store virtual node on DHT
+    /// Store an entry on DHT storage
     pub fn storage_store(&self, data: String) -> js_sys::Promise {
         let p = self.processor.clone();
         future_to_promise(async move {
-            let vnode_info = vnode::VirtualNode::try_from(data).map_err(JsError::from)?;
-            p.storage_store(vnode_info).await.map_err(JsError::from)?;
+            let entry_info = entry::Entry::try_from(data).map_err(JsError::from)?;
+            p.storage_store(entry_info).await.map_err(JsError::from)?;
             Ok(JsValue::null())
         })
     }
@@ -354,16 +359,16 @@ impl Provider {
         let p = self.processor.clone();
 
         future_to_promise(async move {
-            let rid = VirtualNode::gen_did(&name).map_err(JsError::from)?;
+            let entry_key = Entry::gen_did(&name).map_err(JsError::from)?;
 
-            tracing::debug!("browser lookup_service storage_fetch: {}", rid);
-            p.storage_fetch(rid).await.map_err(JsError::from)?;
-            tracing::debug!("browser lookup_service finish storage_fetch: {}", rid);
+            tracing::debug!("browser lookup_service storage_fetch: {}", entry_key);
+            p.storage_fetch(entry_key).await.map_err(JsError::from)?;
+            tracing::debug!("browser lookup_service finish storage_fetch: {}", entry_key);
             js_utils::window_sleep(500).await?;
-            let result = p.storage_check_cache(rid).await;
+            let result = p.storage_check_cache(entry_key).await;
 
-            if let Some(vnode) = result {
-                let dids = vnode
+            if let Some(entry) = result {
+                let dids = entry
                     .data
                     .iter()
                     .map(|v| v.decode())

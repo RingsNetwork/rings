@@ -1,7 +1,7 @@
 use crate::prelude::rings_core::consts::*;
 
 pub const BACKEND_MTU: usize = TRANSPORT_MAX_SIZE - TRANSPORT_MTU;
-/// Redundant setting of vnode data storage
+/// Redundant setting of entry data storage
 pub const DATA_REDUNDANT: u16 = 6;
 /// Connect Behaviour
 pub const CONNECT_FAILED_LIMIT: i64 = 3;

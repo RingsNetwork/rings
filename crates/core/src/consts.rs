@@ -26,4 +26,5 @@ pub const MAX_CHUNK_ENVELOPE_OVERHEAD: usize = 4096;
 /// message into a huge number of near-empty chunks. This bounds the chunk count for any payload:
 /// at most `TRANSPORT_MAX_SIZE / MIN_CHUNK_DATA` chunks.
 pub const MIN_CHUNK_DATA: usize = 1024;
-pub const VNODE_DATA_MAX_LEN: usize = 1024;
+/// Maximum number of encoded payloads kept in a single DHT storage entry.
+pub const ENTRY_DATA_MAX_LEN: usize = 1024;

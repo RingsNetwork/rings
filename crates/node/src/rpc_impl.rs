@@ -19,7 +19,7 @@ use rings_core::message::Encoded;
 use rings_core::message::Encoder;
 use rings_core::message::MessagePayload;
 use rings_core::message::MessageVerificationExt;
-use rings_core::prelude::vnode::VirtualNode;
+use rings_core::prelude::entry::Entry;
 use rings_rpc::protos::rings_node::*;
 use rings_rpc::protos::rings_node_handler::HandleRpc;
 
@@ -238,17 +238,17 @@ impl HandleRpc<FetchTopicMessagesRequest, FetchTopicMessagesResponse> for Proces
         &self,
         req: FetchTopicMessagesRequest,
     ) -> Result<FetchTopicMessagesResponse> {
-        let vid = VirtualNode::gen_did(&req.topic)
+        let entry_key = Entry::gen_did(&req.topic)
             .map_err(|_| Error::invalid_params("Failed to get id of topic"))?;
 
-        self.storage_fetch(vid).await?;
-        let result = self.storage_check_cache(vid).await;
+        self.storage_fetch(entry_key).await?;
+        let result = self.storage_check_cache(entry_key).await;
 
-        let Some(vnode) = result else {
+        let Some(entry) = result else {
             return Ok(FetchTopicMessagesResponse { data: vec![] });
         };
 
-        let data = vnode
+        let data = entry
             .data
             .iter()
             .skip(req.skip as usize)
@@ -273,17 +273,17 @@ impl HandleRpc<RegisterServiceRequest, RegisterServiceResponse> for Processor {
 #[cfg_attr(not(feature = "browser"), async_trait)]
 impl HandleRpc<LookupServiceRequest, LookupServiceResponse> for Processor {
     async fn handle_rpc(&self, req: LookupServiceRequest) -> Result<LookupServiceResponse> {
-        let vid = VirtualNode::gen_did(&req.name)
+        let entry_key = Entry::gen_did(&req.name)
             .map_err(|_| Error::invalid_params("Failed to get id of topic"))?;
 
-        self.storage_fetch(vid).await?;
-        let result = self.storage_check_cache(vid).await;
+        self.storage_fetch(entry_key).await?;
+        let result = self.storage_check_cache(entry_key).await;
 
-        let Some(vnode) = result else {
+        let Some(entry) = result else {
             return Ok(LookupServiceResponse { dids: vec![] });
         };
 
-        let dids = vnode
+        let dids = entry
             .data
             .iter()
             .map(|v| v.decode())

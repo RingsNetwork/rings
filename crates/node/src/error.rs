@@ -63,8 +63,8 @@ pub enum Error {
     ConnectError(rings_core::error::Error) = 600,
     #[error("Send message error: {0}")]
     SendMessage(rings_core::error::Error) = 601,
-    #[error("vnode action error: {0}")]
-    VNodeError(rings_core::error::Error) = 603,
+    #[error("entry action error: {0}")]
+    EntryError(rings_core::error::Error) = 603,
     #[error("service register action error: {0}")]
     ServiceRegisterError(rings_core::error::Error) = 604,
     #[error("JsError: {0}")]

@@ -99,12 +99,15 @@ impl InnerSwarmCallback {
             Message::NotifyPredecessorReport(ref msg) => {
                 self.message_handler.handle(payload, msg).await
             }
-            Message::SearchVNode(ref msg) => self.message_handler.handle(payload, msg).await,
-            Message::FoundVNode(ref msg) => self.message_handler.handle(payload, msg).await,
-            Message::SyncVNodeWithSuccessor(ref msg) => {
+            Message::SearchEntry(ref msg) => self.message_handler.handle(payload, msg).await,
+            Message::FoundEntry(ref msg) => self.message_handler.handle(payload, msg).await,
+            Message::SyncEntriesWithSuccessor(ref msg) => {
                 self.message_handler.handle(payload, msg).await
             }
-            Message::OperateVNode(ref msg) => self.message_handler.handle(payload, msg).await,
+            Message::SyncEntriesWithSuccessorReport(ref msg) => {
+                self.message_handler.handle(payload, msg).await
+            }
+            Message::OperateEntry(ref msg) => self.message_handler.handle(payload, msg).await,
             Message::CustomMessage(ref msg) => self.message_handler.handle(payload, msg).await,
             Message::QueryForTopoInfoSend(ref msg) => {
                 self.message_handler.handle(payload, msg).await

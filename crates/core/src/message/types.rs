@@ -7,10 +7,14 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::chunk::Chunk;
-use crate::dht::vnode::VNodeOperation;
-use crate::dht::vnode::VirtualNode;
+use crate::dht::entry::Entry;
+use crate::dht::entry::EntryOperation;
+use crate::dht::entry::PlacedEntry;
+use crate::dht::entry::PlacementMiss;
+use crate::dht::entry::SyncedEntryAck;
 use crate::dht::Did;
 use crate::dht::TopoInfo;
+use crate::error::Error;
 use crate::error::Result;
 
 /// The `Then` trait is used to associate a type with a "then" scenario.
@@ -153,25 +157,60 @@ impl Then for QueryForTopoInfoSend {
     type Then = QueryFor;
 }
 
-/// MessageType use to search virtual node.
+/// MessageType used to search a DHT storage entry.
 #[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct SearchVNode {
-    /// The virtual id of searching target
-    pub vid: Did,
+pub struct SearchEntry {
+    /// Entry identity being searched.
+    pub resource: Did,
+    /// Placement key being interrogated.
+    pub placement: Did,
+    /// Redundancy used by the requester for read-repair after a hit.
+    pub redundancy: u16,
 }
 
-/// MessageType report to origin found virtual node.
+/// MessageType used to report found DHT storage entries to the origin.
 #[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct FoundVNode {
-    /// Response of [SearchVNode], containing response data
-    pub data: Vec<VirtualNode>,
+pub struct FoundEntry {
+    /// Response of [SearchEntry], containing response data
+    pub data: Vec<Entry>,
+    /// Placement misses observed while answering [SearchEntry].
+    pub misses: Vec<PlacementMiss>,
+    /// Entry identity searched by the requester.
+    pub resource: Did,
+    /// Redundancy used by the requester for read-repair after this hit.
+    pub redundancy: u16,
+}
+
+impl FoundEntry {
+    /// Returns the single found entry carried by this response.
+    ///
+    /// Post: `Ok(None)` iff this is a miss-only response.
+    /// Post: `Ok(Some(_))` iff this response carries exactly one entry.
+    /// Error: more than one entry violates the `SearchEntry -> FoundEntry`
+    /// single-resource response model.
+    pub(crate) fn single_entry(&self) -> Result<Option<&Entry>> {
+        match self.data.as_slice() {
+            [] => Ok(None),
+            [entry] => Ok(Some(entry)),
+            _ => Err(Error::InvalidMessage(
+                "FoundEntry carries more than one entry".to_string(),
+            )),
+        }
+    }
 }
 
 /// MessageType after `FindSuccessorSend` and syncing data.
 #[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct SyncVNodeWithSuccessor {
-    /// Data of virtual nodes for syncing.
-    pub data: Vec<VirtualNode>,
+pub struct SyncEntriesWithSuccessor {
+    /// Entries to sync to the new successor, paired with their placement keys.
+    pub data: Vec<PlacedEntry>,
+}
+
+/// MessageType used to acknowledge durable storage of synced entries.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct SyncEntriesWithSuccessorReport {
+    /// Placement keys and exact values durably persisted by the sync receiver.
+    pub acks: Vec<SyncedEntryAck>,
 }
 
 /// MessageType use to customize message, will be handle by `custom_message` method.
@@ -216,14 +255,16 @@ pub enum Message {
     NotifyPredecessorSend(NotifyPredecessorSend),
     /// Response of NotifyPredecessorSend
     NotifyPredecessorReport(NotifyPredecessorReport),
-    /// Remote message of search a virtual node.
-    SearchVNode(SearchVNode),
-    /// Response when found a virtual node.
-    FoundVNode(FoundVNode),
-    /// Remote message of operations of virtual node.
-    OperateVNode(VNodeOperation),
-    /// Remote message for virtual node syncing.
-    SyncVNodeWithSuccessor(SyncVNodeWithSuccessor),
+    /// Remote message for searching an entry.
+    SearchEntry(SearchEntry),
+    /// Response when entries are found.
+    FoundEntry(FoundEntry),
+    /// Remote message for entry operations.
+    OperateEntry(EntryOperation),
+    /// Remote message for entry syncing.
+    SyncEntriesWithSuccessor(SyncEntriesWithSuccessor),
+    /// Response after synced entries are durably persisted.
+    SyncEntriesWithSuccessorReport(SyncEntriesWithSuccessorReport),
     /// Custom messages
     CustomMessage(CustomMessage),
     /// Remote message of query topological info of a node.

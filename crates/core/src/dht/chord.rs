@@ -1,6 +1,5 @@
 //! Chord algorithm implement.
 #![warn(missing_docs)]
-use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -11,15 +10,18 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use super::did::BiasId;
+use super::entry::Entry;
+use super::entry::EntryLookupEvidence;
+use super::entry::EntryLookupKey;
+use super::entry::EntryOperation;
+use super::entry::PlacedEntry;
+use super::entry::PlacementMiss;
 use super::finger::DEFAULT_FINGER_TABLE_SIZE;
 use super::successor::SuccessorSeq;
 use super::types::Chord;
 use super::types::ChordStorage;
 use super::types::ChordStorageCache;
-use super::types::ChordStorageSync;
 use super::types::CorrectChord;
-use super::vnode::VNodeOperation;
-use super::vnode::VirtualNode;
 use super::FingerTable;
 use crate::dht::Did;
 use crate::dht::LiveDid;
@@ -30,15 +32,15 @@ use crate::error::Result;
 use crate::storage::KvStorageInterface;
 use crate::storage::MemStorage;
 
-/// `VNodeStorage` is the type accepted by `PeerRing::new_with_storage`.
-/// It's used to store [VirtualNode]s in a storage media provided by user.
+/// `EntryStorage` is the type accepted by `PeerRing::new_with_storage`.
+/// It's used to store [Entry]s in a storage media provided by user.
 #[cfg(feature = "wasm")]
-pub type VNodeStorage = Box<dyn KvStorageInterface<VirtualNode>>;
+pub type EntryStorage = Box<dyn KvStorageInterface<Entry>>;
 
-/// `VNodeStorage` is the type accepted by `PeerRing::new_with_storage`.
-/// It's used to store [VirtualNode]s in a storage media provided by user.
+/// `EntryStorage` is the type accepted by `PeerRing::new_with_storage`.
+/// It's used to store [Entry]s in a storage media provided by user.
 #[cfg(not(feature = "wasm"))]
-pub type VNodeStorage = Box<dyn KvStorageInterface<VirtualNode> + Send + Sync>;
+pub type EntryStorage = Box<dyn KvStorageInterface<Entry> + Send + Sync>;
 
 /// PeerRing is used to help a node interact with other nodes.
 /// All nodes in rings network form a clockwise ring in the order of Did.
@@ -57,9 +59,9 @@ pub struct PeerRing {
     /// The did of previous node on the ring.
     pub predecessor: Arc<Mutex<Option<Did>>>,
     /// Local storage for [ChordStorage].
-    pub storage: VNodeStorage,
+    pub storage: EntryStorage,
     /// Local cache for [ChordStorage].
-    pub cache: VNodeStorage,
+    pub cache: EntryStorage,
 }
 
 /// Type alias is just for making the code easy to read.
@@ -71,8 +73,10 @@ type Target = Did;
 pub enum PeerRingAction {
     /// No result, the whole manipulation is done internally.
     None,
-    /// Found some VirtualNode.
-    SomeVNode(VirtualNode),
+    /// Found an entry together with lookup evidence.
+    SomeEntry(EntryLookupEvidence),
+    /// Observed placement misses without a hit.
+    EntryMisses(Vec<PlacementMiss>),
     /// Found some node.
     Some(Did),
     /// Trigger a remote action.
@@ -91,17 +95,21 @@ pub enum PeerRingAction {
 pub enum RemoteAction {
     /// Need `did_a` to find `did_b`.
     FindSuccessor(Did),
-    /// Need `did_a` to find virtual node `did_b`.
-    FindVNode(Did),
-    /// Need `did_a` to find VirtualNode for operating.
-    FindVNodeForOperate(VNodeOperation),
+    /// Need `did_a` to find one entry placement.
+    FindEntry(EntryLookupKey),
+    /// Need `did_a` to find Entry for operating.
+    FindEntryForOperate(EntryOperation),
     /// Send a predecessor notification to `did_a`.
     ///
     /// `did_a` is the remote recipient from [`PeerRingAction::RemoteAction`].
     /// This field is the predecessor DID announced in `NotifyPredecessorSend`.
     Notify(Did),
-    /// Let `did_a` sync data with it's successor.
-    SyncVNodeWithSuccessor(Vec<VirtualNode>),
+    /// Copy placed entries to the storage destination represented by `did_a`.
+    ///
+    /// In successor hand-off, `did_a` is the new successor node. In repair and
+    /// republish, `did_a` is the placement key and the message layer routes it
+    /// to that key's current successor.
+    SyncEntriesWithSuccessor(Vec<PlacedEntry>),
 
     /// Need `did_a` to find `did_b` then send back with `for connect` flag.
     FindSuccessorForConnect(Did),
@@ -159,9 +167,9 @@ impl PeerRingAction {
         false
     }
 
-    /// Returns `true` if the action is a [PeerRingAction::SomeVNode] value.
-    pub fn is_some_vnode(&self) -> bool {
-        if let Self::SomeVNode(_) = self {
+    /// Returns `true` if the action is a [PeerRingAction::SomeEntry] value.
+    pub fn is_some_entry(&self) -> bool {
+        if let Self::SomeEntry(_) = self {
             return true;
         }
         false
@@ -196,7 +204,7 @@ impl From<Vec<PeerRingAction>> for PeerRingAction {
 
 impl PeerRing {
     /// Same as new with config, but with a given storage.
-    pub fn new_with_storage(did: Did, succ_max: u8, storage: VNodeStorage) -> Self {
+    pub fn new_with_storage(did: Did, succ_max: u8, storage: EntryStorage) -> Self {
         Self::new_with_storage_and_finger_table_size(
             did,
             succ_max,
@@ -212,7 +220,7 @@ impl PeerRing {
     pub fn new_with_storage_and_finger_table_size(
         did: Did,
         succ_max: u8,
-        storage: VNodeStorage,
+        storage: EntryStorage,
         finger_table_size: usize,
     ) -> Self {
         Self {
@@ -414,135 +422,133 @@ impl Chord<PeerRingAction> for PeerRing {
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing {
-    /// Look up a VirtualNode by its Did.
+    /// Look up an [`Entry`] by its ring key.
     /// Always finds resource by finger table, ignoring the local cache.
-    /// If the `vid` is between current node and its successor, its resource should be
+    /// If the `entry_key` is between current node and its successor, its resource should be
     /// stored in current node.
-    async fn vnode_lookup(&self, vid: Did) -> Result<PeerRingAction> {
+    async fn entry_lookup(&self, entry_key: Did) -> Result<PeerRingAction> {
         let mut ret = vec![];
-        for vid in vid.rotate_affine(REDUNDANT) {
-            let maybe_act = match self.find_successor(vid) {
+        let mut misses = vec![];
+        // Pre: REDUNDANT > 0, enforced by rotate_affine.
+        // Post: if result is SomeEntry(e), e.misses contains exactly the
+        // local placement misses observed before the first hit in
+        // place(entry_key, REDUNDANT). Later placements are Unknown.
+        // Post: EntryMisses carries only observed misses; no remote
+        // SearchEntry is emitted solely to classify Unknown as Miss.
+        for placement_key in entry_key.rotate_affine(REDUNDANT)? {
+            let query = EntryLookupKey::new(entry_key, placement_key);
+            let act = match self.find_successor(placement_key) {
                 // Resource should be stored in current node.
-                Ok(PeerRingAction::Some(succ)) => match self.storage.get(&vid.to_string()).await {
-                    Ok(Some(v)) => Ok(PeerRingAction::SomeVNode(v)),
-                    Ok(None) => {
-                        tracing::debug!(
-                            "Cannot find vnode in local storage, try to query from successor"
-                        );
-                        // If cannot find and has successor, try to query it from successor.
-                        // This is useful when the node is just joined and has not stabilized yet.
-                        if succ == self.did {
-                            Ok(PeerRingAction::None)
-                        } else {
-                            Ok(PeerRingAction::RemoteAction(
-                                succ,
-                                RemoteAction::FindVNode(vid),
-                            ))
+                Ok(PeerRingAction::Some(succ)) => {
+                    match self.storage.get(&placement_key.to_string()).await {
+                        Ok(Some(v)) => {
+                            let observed_misses = std::mem::take(&mut misses);
+                            Ok(PeerRingAction::SomeEntry(EntryLookupEvidence::new(
+                                v,
+                                observed_misses,
+                            )))
                         }
+                        Ok(None) => {
+                            tracing::debug!(
+                                "Cannot find entry in local storage, try to query from successor"
+                            );
+                            // If cannot find and has successor, try to query it from successor.
+                            // This is useful when the node is just joined and has not stabilized yet.
+                            if succ == self.did {
+                                misses.push(PlacementMiss::new(placement_key, succ));
+                                Ok(PeerRingAction::None)
+                            } else {
+                                Ok(PeerRingAction::RemoteAction(
+                                    succ,
+                                    RemoteAction::FindEntry(query),
+                                ))
+                            }
+                        }
+                        Err(e) => Err(e),
                     }
-                    Err(_) => Ok(PeerRingAction::None),
-                },
+                }
                 // Resource is stored in other nodes.
                 // Return an action to describe how to find it.
                 Ok(PeerRingAction::RemoteAction(n, RemoteAction::FindSuccessor(id))) => {
-                    Ok(PeerRingAction::RemoteAction(n, RemoteAction::FindVNode(id)))
+                    Ok(PeerRingAction::RemoteAction(
+                        n,
+                        RemoteAction::FindEntry(EntryLookupKey::new(entry_key, id)),
+                    ))
                 }
                 Ok(a) => Err(Error::PeerRingUnexpectedAction(a)),
                 Err(e) => Err(e),
-            };
-            if let Ok(act) = maybe_act {
-                if act.is_remote() {
-                    ret.push(act.clone());
-                } else {
-                    // If found vnode, break and return directly
-                    if act.is_some_vnode() {
-                        return Ok(act);
-                    }
+            }?;
+            if act.is_remote() {
+                ret.push(act);
+            } else {
+                // If found entry, break and return directly
+                if act.is_some_entry() {
+                    return Ok(act);
                 }
             }
+        }
+        if !misses.is_empty() {
+            ret.push(PeerRingAction::EntryMisses(misses));
         }
         Ok(ret.into())
     }
 
-    /// Handle [VNodeOperation] if the target vnode between current node and the
+    /// Handle [EntryOperation] if the target entry between current node and the
     /// successor of current node, otherwise find the responsible node and return
     /// as Action.
-    async fn vnode_operate(&self, op: VNodeOperation) -> Result<PeerRingAction> {
-        let vid = op.did()?;
+    async fn entry_operate(&self, op: EntryOperation) -> Result<PeerRingAction> {
+        let entry_key = op.did()?;
         let mut ret = vec![];
-        for vid in vid.rotate_affine(REDUNDANT) {
-            let maybe_act = match self.find_successor(vid) {
-                // `vnode` should be on current node.
+        // Pre: op.did() is the entry identity id(e), and REDUNDANT > 0 is
+        // checked by rotate_affine.
+        // Post: for every k in place(id(e), REDUNDANT), either sigma_self[k]
+        // is updated with Entry::operate(op) when self is the observed owner,
+        // or exactly one FindEntryForOperate action is emitted toward the
+        // current routing owner for k.
+        // Preservation: no placement outside place(id(e), REDUNDANT) is
+        // written by this transition.
+        for entry_key in entry_key.rotate_affine(REDUNDANT)? {
+            let act = match self.find_successor(entry_key) {
+                // `entry` should be on current node.
                 Ok(PeerRingAction::Some(_)) => {
-                    let this = if let Ok(Some(this)) = self.storage.get(&vid.to_string()).await {
-                        Ok(this)
-                    } else {
-                        op.clone().gen_default_vnode()
-                    }?;
-                    let vnode = this.operate(op.clone())?;
-                    self.storage.put(&vid.to_string(), &vnode).await?;
+                    let this = match self.storage.get(&entry_key.to_string()).await? {
+                        Some(this) => this,
+                        None => op.clone().gen_default_entry()?,
+                    };
+                    let entry = this.operate(op.clone())?;
+                    self.storage.put(&entry_key.to_string(), &entry).await?;
                     Ok(PeerRingAction::None)
                 }
-                // `vnode` should be on other nodes.
+                // `entry` should be on other nodes.
                 // Return an action to describe how to store it.
                 Ok(PeerRingAction::RemoteAction(n, RemoteAction::FindSuccessor(_))) => Ok(
-                    PeerRingAction::RemoteAction(n, RemoteAction::FindVNodeForOperate(op.clone())),
+                    PeerRingAction::RemoteAction(n, RemoteAction::FindEntryForOperate(op.clone())),
                 ),
                 Ok(a) => Err(Error::PeerRingUnexpectedAction(a)),
                 Err(e) => Err(e),
-            };
-            if let Ok(act) = maybe_act {
-                if act.is_remote() {
-                    ret.push(act);
-                }
+            }?;
+            if act.is_remote() {
+                ret.push(act);
             }
         }
         Ok(ret.into())
     }
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
-impl ChordStorageSync<PeerRingAction> for PeerRing {
-    /// When the successor of a node is updated, it needs to check if there are
-    /// `VirtualNode`s that are no longer between current node and `new_successor`,
-    /// and sync them to the new successor.
-    async fn sync_vnode_with_successor(&self, new_successor: Did) -> Result<PeerRingAction> {
-        let mut data = Vec::<VirtualNode>::new();
-        let all_items: Vec<(String, VirtualNode)> = self.storage.get_all().await?;
-
-        // Pop out all items that are not between current node and `new_successor`.
-        for (vid_str, vnode) in all_items.iter() {
-            let vid = Did::from_str(vid_str)?;
-            if self.bias(vid) > self.bias(new_successor)
-                && self.storage.remove(vid_str).await.is_ok()
-            {
-                data.push(vnode.clone());
-            }
-        }
-
-        if !data.is_empty() {
-            Ok(PeerRingAction::RemoteAction(
-                new_successor,
-                RemoteAction::SyncVNodeWithSuccessor(data), // TODO: This might be too large.
-            ))
-        } else {
-            Ok(PeerRingAction::None)
-        }
-    }
-}
+mod storage_repair;
+mod storage_sync;
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl ChordStorageCache<PeerRingAction> for PeerRing {
-    /// Cache fetched `vnode` locally.
-    async fn local_cache_put(&self, vnode: VirtualNode) -> Result<()> {
-        self.cache.put(&vnode.did.to_string(), &vnode).await
+    /// Cache fetched `entry` locally.
+    async fn local_cache_put(&self, entry: Entry) -> Result<()> {
+        self.cache.put(&entry.did.to_string(), &entry).await
     }
 
-    /// Get vnode from local cache.
-    async fn local_cache_get(&self, vid: Did) -> Result<Option<VirtualNode>> {
-        self.cache.get(&vid.to_string()).await
+    /// Get entry from local cache.
+    async fn local_cache_get(&self, entry_key: Did) -> Result<Option<Entry>> {
+        self.cache.get(&entry_key.to_string()).await
     }
 }
 
@@ -636,8 +642,11 @@ impl CorrectChord<PeerRingAction> for PeerRing {
         } else {
             Some(successors.min()?)
         };
-        let succ_len = info.successors.len();
-        let but_last = &info.successors[..succ_len.saturating_sub(1)].to_vec();
+        let but_last = info
+            .successors
+            .split_last()
+            .map(|(_, successors_before_last)| successors_before_last)
+            .unwrap_or(&[]);
         let improved_successor = info.predecessor.filter(|new_succ| {
             *new_succ != self.did
                 && old_head.is_none_or(|head| self.bias(*new_succ) < self.bias(head))
@@ -670,8 +679,10 @@ impl CorrectChord<PeerRingAction> for PeerRing {
     }
 }
 
-#[cfg(not(feature = "wasm"))]
-#[cfg(test)]
+#[cfg(all(not(feature = "wasm"), test))]
+mod storage_tests;
+
+#[cfg(all(not(feature = "wasm"), test))]
 mod tests {
     //! test module
     use std::str::FromStr;

@@ -15,7 +15,6 @@ repository.workspace = true
 # now runs by default.
 experimental = ["std"]
 default = ["std"]
-redundant = ["default"]
 std = [
     "webrtc",
     "sled",

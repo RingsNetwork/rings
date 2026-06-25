@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rings_core::dht::Did;
-use rings_core::dht::VNodeStorage;
+use rings_core::dht::EntryStorage;
 use rings_core::measure::MeasureImpl;
 use rings_core::message::Encoded;
 use rings_core::message::Encoder;
@@ -24,7 +24,7 @@ use crate::consts::DATA_REDUNDANT;
 use crate::error::Error;
 use crate::error::Result;
 use crate::measure::PeriodicMeasure;
-use crate::prelude::vnode;
+use crate::prelude::entry;
 use crate::prelude::wasm_export;
 use crate::prelude::ChordStorageInterface;
 use crate::prelude::ChordStorageInterfaceCacheChecker;
@@ -183,7 +183,7 @@ pub struct ProcessorBuilder {
     ice_servers: String,
     external_address: Option<String>,
     session_sk: SessionSk,
-    storage: Option<VNodeStorage>,
+    storage: Option<EntryStorage>,
     measure: Option<MeasureImpl>,
     stabilize_interval: Duration,
 }
@@ -218,7 +218,7 @@ impl ProcessorBuilder {
     }
 
     /// Set the storage for the processor.
-    pub fn storage(mut self, storage: VNodeStorage) -> Self {
+    pub fn storage(mut self, storage: EntryStorage) -> Self {
         self.storage = Some(storage);
         self
     }
@@ -240,6 +240,7 @@ impl ProcessorBuilder {
 
         let mut swarm_builder =
             SwarmBuilder::new(self.network_id, &self.ice_servers, storage, self.session_sk);
+        swarm_builder = swarm_builder.dht_storage_redundancy(DATA_REDUNDANT);
 
         if let Some(external_address) = self.external_address {
             swarm_builder = swarm_builder.external_address(external_address);
@@ -316,25 +317,25 @@ impl Processor {
     }
 
     /// check local cache of dht
-    pub async fn storage_check_cache(&self, did: Did) -> Option<vnode::VirtualNode> {
-        self.swarm.storage_check_cache(did).await
+    pub async fn storage_check_cache(&self, entry_key: Did) -> Option<entry::Entry> {
+        self.swarm.storage_check_cache(entry_key).await
     }
 
-    /// fetch virtual node from DHT
-    pub async fn storage_fetch(&self, did: Did) -> Result<()> {
-        <Swarm as ChordStorageInterface<DATA_REDUNDANT>>::storage_fetch(&self.swarm, did)
+    /// Fetch an entry from DHT storage
+    pub async fn storage_fetch(&self, entry_key: Did) -> Result<()> {
+        <Swarm as ChordStorageInterface<DATA_REDUNDANT>>::storage_fetch(&self.swarm, entry_key)
             .await
-            .map_err(Error::VNodeError)
+            .map_err(Error::EntryError)
     }
 
-    /// store virtual node on DHT
-    pub async fn storage_store(&self, vnode: vnode::VirtualNode) -> Result<()> {
-        <Swarm as ChordStorageInterface<DATA_REDUNDANT>>::storage_store(&self.swarm, vnode)
+    /// Store an entry on DHT storage
+    pub async fn storage_store(&self, entry: entry::Entry) -> Result<()> {
+        <Swarm as ChordStorageInterface<DATA_REDUNDANT>>::storage_store(&self.swarm, entry)
             .await
-            .map_err(Error::VNodeError)
+            .map_err(Error::EntryError)
     }
 
-    /// append data to a virtual node on DHT
+    /// Append data to an entry on DHT storage
     pub async fn storage_append_data(&self, topic: &str, data: Encoded) -> Result<()> {
         <Swarm as ChordStorageInterface<DATA_REDUNDANT>>::storage_append_data(
             &self.swarm,
@@ -342,7 +343,7 @@ impl Processor {
             data,
         )
         .await
-        .map_err(Error::VNodeError)
+        .map_err(Error::EntryError)
     }
 
     /// register service

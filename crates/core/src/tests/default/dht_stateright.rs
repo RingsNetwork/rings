@@ -25,6 +25,9 @@
 //!     notified) — illustrating the order-sensitivity mechanism behind the
 //!     integration test's residual flakiness, not formally pinning the 6-node
 //!     configuration.
+//!   * Stage 3 — a finite storage-sync safety model for #613 S2. It abstracts
+//!     one placement key through copy -> ack -> delete and checks that local
+//!     deletion is reachable only after the successor state contains the key.
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
@@ -56,7 +59,7 @@ fn did_frac(num: u64, den: u64) -> Did {
 }
 
 /// The hashable topology state of a node — everything in `PeerRing` that drives
-/// routing/convergence, and nothing else (no VNode storage/cache).
+/// routing/convergence, and nothing else (no Entry storage/cache).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct DhtSnapshot {
     pub did: Did,
@@ -528,6 +531,107 @@ fn discovery_model(all: Vec<Did>, rounds: u8) -> ActorModel<DiscoveryNode, Cfg, 
         )
 }
 
+// ===================================================================
+// Stage 3: storage sync safety for one placement key.
+//
+// SCOPE: this is the #614 S2' model, not a full storage liveness model. It
+// abstracts exactly one placement key, the copy -> ack -> delete hand-off, and
+// arbitrary local writes over a finite representative value domain while a
+// copy or ack is in flight:
+//
+//   local(v) --SendCopy(v)--> copy_in_flight(v)
+//   copy_in_flight(v) --DeliverCopy--> successor(v) + ack_in_flight(v)
+//   local(v) --LocalWrite(w)--> local(w)
+//   ack_in_flight(v) --DeliverAckDelete--> delete local only if local == v
+//
+// Property checked below:
+//
+//   Always S2': local(k) is removed only if successor(k) contains the same
+//   value at the moment of removal.
+//
+// This is the no-update-loss safety property required by #614.
+// ===================================================================
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+enum StorageSyncStep {
+    SendCopy,
+    DeliverCopy,
+    LocalWrite(StorageValue),
+    DeliverAckDelete,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+enum StorageValue {
+    V0,
+    V1,
+    V2,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct StorageSyncState {
+    local: Option<StorageValue>,
+    successor: Option<StorageValue>,
+    copy_in_flight: Option<StorageValue>,
+    ack_in_flight: Option<StorageValue>,
+}
+
+impl StorageSyncState {
+    fn initial() -> Self {
+        Self {
+            local: Some(StorageValue::V0),
+            successor: None,
+            copy_in_flight: None,
+            ack_in_flight: None,
+        }
+    }
+
+    fn step(self, step: StorageSyncStep) -> Option<Self> {
+        match step {
+            StorageSyncStep::SendCopy => Some(Self {
+                copy_in_flight: Some(self.local?),
+                ..self
+            }),
+            StorageSyncStep::DeliverCopy => {
+                let copied = self.copy_in_flight?;
+                Some(Self {
+                    successor: Some(copied),
+                    copy_in_flight: None,
+                    ack_in_flight: Some(copied),
+                    ..self
+                })
+            }
+            StorageSyncStep::LocalWrite(value)
+                if self.copy_in_flight.is_some() || self.ack_in_flight.is_some() =>
+            {
+                Some(Self {
+                    local: Some(value),
+                    ..self
+                })
+            }
+            StorageSyncStep::DeliverAckDelete => {
+                let acked = self.ack_in_flight?;
+                let local = match self.local {
+                    Some(current) if current == acked => None,
+                    current => current,
+                };
+                Some(Self {
+                    local,
+                    ack_in_flight: None,
+                    ..self
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn removed_local_value(self, next: Self) -> Option<StorageValue> {
+        match (self.local, next.local) {
+            (Some(removed), None) => Some(removed),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -696,6 +800,43 @@ mod tests {
                 "expected a no-bounded-convergence counterexample at rounds={rounds} \
                  (a peer learned after a node's stabilization budget is never notified)"
             );
+        }
+    }
+
+    /// Stage 3 — storage S2'. Exhaustively explores the finite state graph for
+    /// one placement hand-off and checks the formal safety predicate:
+    /// deleting the local placement key is allowed only when the successor has
+    /// durably stored the same value.
+    #[test]
+    fn storage_sync_model_preserves_no_update_loss() {
+        let mut seen = BTreeSet::new();
+        let mut frontier = vec![StorageSyncState::initial()];
+        while let Some(state) = frontier.pop() {
+            if !seen.insert(state) {
+                continue;
+            }
+            let steps = [
+                StorageSyncStep::SendCopy,
+                StorageSyncStep::DeliverCopy,
+                StorageSyncStep::LocalWrite(StorageValue::V0),
+                StorageSyncStep::LocalWrite(StorageValue::V1),
+                StorageSyncStep::LocalWrite(StorageValue::V2),
+                StorageSyncStep::DeliverAckDelete,
+            ];
+            for step in steps {
+                if let Some(next) = state.step(step) {
+                    if let Some(removed) = state.removed_local_value(next) {
+                        assert_eq!(
+                            next.successor,
+                            Some(removed),
+                            "S2' violated by {step:?}: {state:?} -> {next:?}"
+                        );
+                    }
+                    if !seen.contains(&next) {
+                        frontier.push(next);
+                    }
+                }
+            }
         }
     }
 }

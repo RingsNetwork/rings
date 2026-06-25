@@ -40,20 +40,31 @@ pub enum Error {
     #[error("InvalidPublicKey")]
     InvalidPublicKey,
 
-    #[error("VirtualNode kind not equal when overwriting")]
-    VNodeKindNotEqual,
+    #[error("Entry kind not equal when overwriting")]
+    EntryKindNotEqual,
 
-    #[error("Did of VirtualNode not equal")]
-    VNodeDidNotEqual,
+    #[error("Did of Entry not equal")]
+    EntryDidNotEqual,
 
-    #[error("The type of VirtualNode is not allowed to be overwritten")]
-    VNodeNotOverwritable,
+    #[error("The type of Entry is not allowed to be overwritten")]
+    EntryNotOverwritable,
 
-    #[error("The type of VirtualNode is not allowed to be appended")]
-    VNodeNotAppendable,
+    #[error("The type of Entry is not allowed to be appended")]
+    EntryNotAppendable,
 
-    #[error("The type of VirtualNode is not allowed to be joined as a subring")]
-    VNodeNotJoinable,
+    #[error("The type of Entry is not allowed to be joined as a subring")]
+    EntryNotJoinable,
+
+    #[error("Affine rotation scalar must be greater than zero")]
+    InvalidAffineScalar,
+
+    #[error("Storage redundancy mismatch: transport configured {configured}, storage request uses {requested}")]
+    StorageRedundancyMismatch {
+        /// Redundancy configured on swarm transport for repair.
+        configured: u16,
+        /// Redundancy requested by the storage API const generic.
+        requested: u16,
+    },
 
     #[error("Encode a byte vector into a base58-check string, adds 4 bytes checksum")]
     Encode,
@@ -160,8 +171,8 @@ pub enum Error {
     #[error("Failed on write successors")]
     FailedToWriteSuccessors,
 
-    #[error("Failed on TryInto VNode")]
-    PeerRingInvalidVNode,
+    #[error("Failed on TryInto Entry")]
+    PeerRingInvalidEntry,
 
     #[error("Unexpected PeerRingAction, {0:?}")]
     PeerRingUnexpectedAction(crate::dht::PeerRingAction),
@@ -208,8 +219,8 @@ pub enum Error {
     #[error("Invalid peer type")]
     InvalidPeerType,
 
-    #[error("Invalid virtual node type")]
-    InvalidVNodeType,
+    #[error("Invalid entry kind")]
+    InvalidEntryKind,
 
     #[cfg(not(feature = "wasm"))]
     #[error("RTC new peer connection failed")]
