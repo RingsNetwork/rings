@@ -58,6 +58,14 @@ pub enum Error {
     #[error("Affine rotation scalar must be greater than zero")]
     InvalidAffineScalar,
 
+    #[error("Storage redundancy mismatch: transport configured {configured}, storage request uses {requested}")]
+    StorageRedundancyMismatch {
+        /// Redundancy configured on swarm transport for repair.
+        configured: u16,
+        /// Redundancy requested by the storage API const generic.
+        requested: u16,
+    },
+
     #[error("Encode a byte vector into a base58-check string, adds 4 bytes checksum")]
     Encode,
 

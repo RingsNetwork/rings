@@ -90,6 +90,9 @@ async fn handle_storage_fetch_act<const REDUNDANT: u16>(
     match act {
         PeerRingAction::SomeEntry(v) => {
             transport.dht.local_cache_put(v.clone()).await?;
+            // Read-repair is full affine republish today. It is additive and
+            // idempotent, but can send redundant copies because entry_lookup
+            // does not yet return the exact placement keys observed missing.
             let repair = transport.dht.read_repair_entry(v, REDUNDANT).await?;
             handle_storage_repair_act(transport.clone(), repair).await?;
         }
@@ -308,6 +311,7 @@ impl<const REDUNDANT: u16> ChordStorageInterface<REDUNDANT> for Swarm {
     /// Fetch an entry. If it exists in local storage, copy it to the cache;
     /// otherwise query the responsible remote node.
     async fn storage_fetch(&self, entry_key: Did) -> Result<()> {
+        self.transport.ensure_storage_redundancy::<REDUNDANT>()?;
         // If peer found that data is on it's localstore, copy it to the cache
         let act =
             <PeerRing as ChordStorage<_, REDUNDANT>>::entry_lookup(&self.dht, entry_key).await?;
@@ -317,6 +321,7 @@ impl<const REDUNDANT: u16> ChordStorageInterface<REDUNDANT> for Swarm {
 
     /// Store Entry, `TryInto<Entry>` is implemented for alot of types
     async fn storage_store(&self, entry: Entry) -> Result<()> {
+        self.transport.ensure_storage_redundancy::<REDUNDANT>()?;
         let op = EntryOperation::Overwrite(entry);
         let act = <PeerRing as ChordStorage<_, REDUNDANT>>::entry_operate(&self.dht, op).await?;
         handle_storage_store_act(self.transport.clone(), act).await?;
@@ -324,6 +329,7 @@ impl<const REDUNDANT: u16> ChordStorageInterface<REDUNDANT> for Swarm {
     }
 
     async fn storage_append_data(&self, topic: &str, data: Encoded) -> Result<()> {
+        self.transport.ensure_storage_redundancy::<REDUNDANT>()?;
         let entry: Entry = (topic.to_string(), data).try_into()?;
         let op = EntryOperation::Extend(entry);
         let act = <PeerRing as ChordStorage<_, REDUNDANT>>::entry_operate(&self.dht, op).await?;
@@ -332,6 +338,7 @@ impl<const REDUNDANT: u16> ChordStorageInterface<REDUNDANT> for Swarm {
     }
 
     async fn storage_touch_data(&self, topic: &str, data: Encoded) -> Result<()> {
+        self.transport.ensure_storage_redundancy::<REDUNDANT>()?;
         let entry: Entry = (topic.to_string(), data).try_into()?;
         let op = EntryOperation::Touch(entry);
         let act = <PeerRing as ChordStorage<_, REDUNDANT>>::entry_operate(&self.dht, op).await?;
@@ -365,6 +372,9 @@ impl HandleMsg<FoundEntry> for MessageHandler {
         }
         for data in msg.data.iter().cloned() {
             self.dht.local_cache_put(data.clone()).await?;
+            // The requester may be far from the entry's placement key. Until
+            // lookup reports per-replica misses, read-repair republishes the
+            // full affine set and relies on additive/idempotent sync.
             let repair = self.dht.read_repair_entry(data, msg.redundancy).await?;
             handle_storage_repair_act(self.transport.clone(), repair).await?;
         }
@@ -648,6 +658,23 @@ mod test {
                 .await?,
             Some(entry)
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn storage_api_rejects_redundancy_mismatch() -> Result<()> {
+        let node = prepare_node(SecretKey::random()).await;
+
+        let result =
+            <Swarm as ChordStorageInterface<2>>::storage_fetch(&node.swarm, node.did()).await;
+
+        assert!(matches!(
+            result,
+            Err(Error::StorageRedundancyMismatch {
+                configured: 1,
+                requested: 2
+            })
+        ));
         Ok(())
     }
 

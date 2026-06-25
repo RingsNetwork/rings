@@ -57,6 +57,10 @@ impl PeerRing {
             return Ok(false);
         }
 
+        // Departure repair is only an accelerator; periodic anti-entropy is
+        // the authoritative backstop. This scan is O(entries * redundancy) and
+        // may race with another terminal-state trigger, but repair is
+        // copy-only, so duplicate triggers preserve storage state.
         for (_, entry) in self.storage.get_all().await? {
             for placement_key in entry.did.rotate_affine(redundancy)? {
                 match self.find_successor(placement_key)? {

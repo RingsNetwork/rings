@@ -198,6 +198,18 @@ impl SwarmTransport {
         self.storage_redundancy
     }
 
+    /// Ensure the storage API redundancy matches repair redundancy.
+    pub(crate) fn ensure_storage_redundancy<const REDUNDANT: u16>(&self) -> Result<()> {
+        if self.storage_redundancy == REDUNDANT {
+            Ok(())
+        } else {
+            Err(Error::StorageRedundancyMismatch {
+                configured: self.storage_redundancy,
+                requested: REDUNDANT,
+            })
+        }
+    }
+
     /// Create new connection that will be handled by swarm.
     pub async fn new_connection(&self, peer: Did, callback: InnerSwarmCallback) -> Result<()> {
         if peer == self.dht.did {
