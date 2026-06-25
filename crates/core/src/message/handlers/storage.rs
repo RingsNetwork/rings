@@ -293,9 +293,10 @@ impl HandleMsg<SyncEntriesWithSuccessor> for MessageHandler {
     // received remote sync entry request
     async fn handle(&self, _ctx: &MessagePayload, msg: &SyncEntriesWithSuccessor) -> Result<()> {
         for placed in msg.data.iter() {
+            let entry = placed.entry.clone().into_storage_entry();
             self.dht
                 .storage
-                .put(&placed.key.to_string(), &placed.entry)
+                .put(&placed.key.to_string(), &entry)
                 .await?;
         }
         Ok(())
@@ -308,6 +309,7 @@ mod test {
     use std::sync::Arc;
 
     use super::*;
+    use crate::consts::ENTRY_DATA_MAX_LEN;
     use crate::dht::entry::PlacedEntry;
     use crate::ecc::tests::gen_ordered_keys;
     use crate::ecc::SecretKey;
@@ -391,6 +393,50 @@ mod test {
             node.dht().storage.get(&resource_id.to_string()).await?,
             None
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sync_entries_handler_caps_inbound_entry_payloads() -> Result<()> {
+        let node = prepare_node(SecretKey::random()).await;
+        let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+        let placement_key = Did::from(100u32);
+        let entry = Entry {
+            did: Did::from(10u32),
+            data: (0..ENTRY_DATA_MAX_LEN + 3)
+                .map(|i| format!("payload{i}").encode())
+                .collect::<Result<Vec<_>>>()?,
+            kind: EntryKind::Data,
+        };
+        let context_key = SecretKey::random();
+        let context_session = SessionSk::new_with_seckey(&context_key)?;
+        let context = MessagePayload::new_send(
+            Message::custom(b"sync context")?,
+            &context_session,
+            node.did(),
+            node.did(),
+        )?;
+
+        handler
+            .handle(&context, &SyncEntriesWithSuccessor {
+                data: vec![PlacedEntry::new(placement_key, entry)],
+            })
+            .await?;
+
+        let stored = node
+            .dht()
+            .storage
+            .get(&placement_key.to_string())
+            .await?
+            .ok_or_else(|| Error::InvalidMessage("expected stored sync entry".to_string()))?;
+
+        assert_eq!(stored.data.len(), ENTRY_DATA_MAX_LEN);
+        let first_payload: String = stored
+            .data
+            .first()
+            .ok_or_else(|| Error::InvalidMessage("expected capped payload".to_string()))?
+            .decode()?;
+        assert_eq!(first_payload, String::from("payload3"));
         Ok(())
     }
 

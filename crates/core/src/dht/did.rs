@@ -175,7 +175,7 @@ impl Did {
 
     /// Rotate Transport did to a list of affined did
     ///
-    /// Law: for scalar n > 0, result[i] = self + floor(2^160 * i / n).
+    /// Law: for scalar n > 0, `result[i] = self + floor(2^160 * i / n)`.
     pub fn rotate_affine(&self, scalar: u16) -> Result<Vec<Did>> {
         if scalar == 0 {
             return Err(Error::InvalidAffineScalar);

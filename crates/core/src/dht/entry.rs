@@ -209,6 +209,17 @@ impl Entry {
         data.into_iter().skip(skip_count).collect()
     }
 
+    /// Normalize an entry immediately before it is persisted.
+    ///
+    /// Post: `result.data.len() <= ENTRY_DATA_MAX_LEN`.
+    pub fn into_storage_entry(self) -> Self {
+        Self {
+            did: self.did,
+            data: Self::cap_recent_data(self.data),
+            kind: self.kind,
+        }
+    }
+
     /// The entry point of [EntryOperation].
     /// Will dispatch to different operation handlers according to the variant.
     pub fn operate(&self, op: EntryOperation) -> Result<Self> {
