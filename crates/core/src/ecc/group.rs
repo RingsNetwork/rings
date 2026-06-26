@@ -176,6 +176,19 @@ pub trait CurveScalarField: CurveGroup {
 /// implements [`AbelianGroup`] and [`Module`]. The implementation obligation is
 /// that `generator_mul(s)` equals `generator() * s` and that sampled scalars are
 /// non-zero field elements.
+///
+/// `Module<Self::Scalar>` stays as an explicit consumer bound instead of a
+/// supertrait here. `CyclicModule` introduces the associated scalar type, while
+/// [`Module`] proves the right scalar action for arbitrary elements; consumers
+/// that multiply elements by scalars should request both
+/// `CyclicModule` and `Module<Element::Scalar>`. This keeps the generator and
+/// sampling capability separate from the module-action proof while still
+/// requiring `generator_mul(s)` to be observationally equal to `generator() * s`.
+///
+/// Non-zero scalar sampling also appears in [`CurveScalarField`] intentionally.
+/// Curve adapters provide the native scalar-field sampler; `CyclicModule`
+/// exposes the same cryptographic capability through the element carrier so
+/// algorithms do not need to know the curve marker type.
 pub trait CyclicModule: AbelianGroup + Sized {
     /// Scalar field for the module action.
     type Scalar: AlgebraField;
