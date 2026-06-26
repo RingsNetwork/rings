@@ -295,20 +295,6 @@ where T: Field + Clone + Eq + Debug {
     }
 }
 
-/// Assert module laws for representative scalar and element samples.
-///
-/// This helper checks the scalar ring laws and the right scalar-action laws. It
-/// is written for right actions: `element * scalar`.
-#[cfg(test)]
-pub fn assert_module_laws<Scalar, Element>(scalars: &[Scalar], elements: &[Element])
-where
-    Scalar: Ring + Clone + Eq + Debug,
-    Element: Module<Scalar> + Clone + Eq + Debug,
-{
-    assert_ring_laws(scalars);
-    assert_module_action_laws(scalars, elements);
-}
-
 /// Assert right scalar-action laws for representative samples.
 ///
 /// This helper assumes the caller has already checked the scalar carrier laws.
