@@ -2,12 +2,13 @@
 //! Pure topology transition model for Chord.
 //!
 //! This module is the production home of the algebraic operators previously
-//! mirrored only in convergence tests. The mutable [`PeerRing`](super::PeerRing)
+//! mirrored only in convergence tests. The mutable [`PeerRing`](crate::dht::PeerRing)
 //! shell interprets these pure transitions by writing successor/predecessor
-//! fields and by turning [`TopologyAction`] values into transport actions.
+//! fields and by turning [`TopologyAction`](crate::dht::topology::TopologyAction)
+//! values into transport actions.
 //!
 //! State variables:
-//! - `R = Z / 2^160`, represented by [`Did`].
+//! - `R = Z / 2^160`, represented by [`Did`](crate::dht::Did).
 //! - `succ[n]` is the bounded successor sequence for node `n`.
 //! - `pred[n]` is the optional predecessor for node `n`.
 //! - `finger[n][i]` is the optional sparse/no-wrap finger-table entry at slot `i`.
