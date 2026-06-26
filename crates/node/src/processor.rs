@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use rings_core::dht::Did;
 use rings_core::dht::EntryStorage;
+use rings_core::dht::DEFAULT_FINGER_TABLE_SIZE;
 use rings_core::measure::MeasureImpl;
 use rings_core::message::Encoded;
 use rings_core::message::Encoder;
@@ -186,6 +187,7 @@ pub struct ProcessorBuilder {
     storage: Option<EntryStorage>,
     measure: Option<MeasureImpl>,
     stabilize_interval: Duration,
+    dht_finger_table_size: usize,
 }
 
 /// Processor for rings-node rpc server
@@ -214,6 +216,7 @@ impl ProcessorBuilder {
             storage: None,
             measure: None,
             stabilize_interval: config.stabilize_interval,
+            dht_finger_table_size: DEFAULT_FINGER_TABLE_SIZE,
         })
     }
 
@@ -229,6 +232,12 @@ impl ProcessorBuilder {
         self
     }
 
+    /// Set the number of DHT finger-table slots for the processor's swarm.
+    pub fn dht_finger_table_size(mut self, size: usize) -> Self {
+        self.dht_finger_table_size = size;
+        self
+    }
+
     /// Build the [Processor].
     pub fn build(self) -> Result<Processor> {
         self.session_sk
@@ -241,6 +250,7 @@ impl ProcessorBuilder {
         let mut swarm_builder =
             SwarmBuilder::new(self.network_id, &self.ice_servers, storage, self.session_sk);
         swarm_builder = swarm_builder.dht_storage_redundancy(DATA_REDUNDANT);
+        swarm_builder = swarm_builder.dht_finger_table_size(self.dht_finger_table_size);
 
         if let Some(external_address) = self.external_address {
             swarm_builder = swarm_builder.external_address(external_address);

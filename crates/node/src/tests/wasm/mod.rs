@@ -17,6 +17,8 @@ use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
 use crate::provider::Provider;
 
+const TEST_DHT_FINGER_TABLE_SIZE: usize = 8;
+
 pub fn setup_log() {
     init_logging(crate::logging::LogLevel::Info);
     tracing::debug!("test")
@@ -44,6 +46,7 @@ pub async fn prepare_processor() -> Processor {
     ProcessorBuilder::from_serialized(&config)
         .unwrap()
         .storage(storage)
+        .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
         .build()
         .unwrap()
 }

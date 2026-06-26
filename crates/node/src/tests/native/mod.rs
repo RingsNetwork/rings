@@ -7,6 +7,8 @@ use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
 pub mod snark;
 
+const TEST_DHT_FINGER_TABLE_SIZE: usize = 8;
+
 pub async fn prepare_processor() -> Processor {
     let key = SecretKey::random();
     let sm = SessionSk::new_with_seckey(&key).unwrap();
@@ -23,7 +25,8 @@ pub async fn prepare_processor() -> Processor {
 
     let procssor_builder = ProcessorBuilder::from_serialized(&config)
         .unwrap()
-        .storage(storage);
+        .storage(storage)
+        .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE);
 
     procssor_builder.build().unwrap()
 }

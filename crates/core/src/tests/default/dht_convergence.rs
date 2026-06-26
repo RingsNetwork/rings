@@ -452,13 +452,6 @@ fn assert_correct_rectify_matches_spec(layout: &Layout) -> Result<()> {
     Ok(())
 }
 
-/// Base case P(2): a single forward neighbour — the wrap-around case, where each
-/// node's only successor and its predecessor are the same peer.
-#[test]
-fn convergence_base_n2() {
-    assert_converged_matches_spec(&Layout::Even(2));
-}
-
 /// Operation conformance for the HMCC/Zave `CorrectRectify` operator:
 /// predecessor notifications update only the predecessor slot, using the same
 /// closest-behind rule as the formal model.
@@ -474,13 +467,6 @@ fn correct_rectify_matches_predecessor_spec() -> Result<()> {
         assert_correct_rectify_matches_spec(&layout)?;
     }
     Ok(())
-}
-
-/// Base case P(3): the smallest ring with a non-trivial successor/predecessor
-/// distinction.
-#[test]
-fn convergence_base_n3() {
-    assert_converged_matches_spec(&Layout::Even(3));
 }
 
 /// Inductive ladder P(2)..P(8) on evenly-spaced rings: discharges the base and
@@ -501,19 +487,13 @@ fn convergence_pow2_full_finger_n8() {
     assert_converged_matches_spec(&Layout::Pow2(8));
 }
 
-/// Pathologically-clustered ring (the six production addresses): the
-/// collapsed-finger regime, where immediate successors are only distinguished by
-/// high-index fingers. Same fixpoint correctness must hold.
+/// Representative non-uniform layouts: clustered production addresses cover the
+/// collapsed-finger regime, and the dyadic layout covers `dist == 2^k` ties.
 #[test]
-fn convergence_clustered_n6() {
-    assert_converged_matches_spec(&Layout::Clustered);
-}
-
-/// Dyadic boundary: a node exactly `2^k` away, exercising the `>= 2^k` tie in the
-/// finger construction.
-#[test]
-fn convergence_dyadic_boundary() {
-    assert_converged_matches_spec(&Layout::DyadicBoundary);
+fn convergence_representative_non_uniform_layouts() {
+    for layout in [Layout::Clustered, Layout::DyadicBoundary] {
+        assert_converged_matches_spec(&layout);
+    }
 }
 
 /// Operation conformance for the HMCC/Zave `CorrectStabilize` operator:

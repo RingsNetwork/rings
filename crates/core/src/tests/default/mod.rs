@@ -1,15 +1,16 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use dashmap::DashMap;
 use futures::lock::Mutex;
-use futures::stream::FuturesUnordered;
-use futures::StreamExt;
 use rings_transport::core::transport::WebrtcConnectionState;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tokio::time::Duration;
 
+use crate::dht::entry::Entry;
+use crate::dht::successor::SuccessorReader;
 use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::ecc::SecretKey;
@@ -36,6 +37,10 @@ mod test_connection;
 mod test_chunk_e2e;
 mod test_message_handler;
 mod test_stabilization;
+
+const TEST_DHT_FINGER_TABLE_SIZE: usize = 8;
+const TEST_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+const TEST_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(5);
 
 pub struct Node {
     pub swarm: Arc<Swarm>,
@@ -107,7 +112,7 @@ impl SwarmCallback for NodeCallback {
     async fn on_validate(
         &self,
         payload: &MessagePayload,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         // Here we are using on_validate to record messages.
         // When on_validate return error, the message will be ignored, which is not on purpose.
         // To prevent returning errors when sending fails, we choose to panic instead.
@@ -121,12 +126,91 @@ pub async fn prepare_node(key: SecretKey) -> Node {
     let storage = Box::new(MemStorage::new());
 
     let session_sk = SessionSk::new_with_seckey(&key).unwrap();
-    let swarm = Arc::new(SwarmBuilder::new(0, stun, storage, session_sk).build());
+    let swarm = Arc::new(
+        SwarmBuilder::new(0, stun, storage, session_sk)
+            .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
+            .build(),
+    );
 
     println!("key: {:?}", key.to_string());
     println!("did: {:?}", swarm.did());
 
     Node::new(swarm)
+}
+
+pub async fn wait_until_result(
+    label: &str,
+    mut ready: impl FnMut() -> crate::error::Result<bool>,
+) -> crate::error::Result<()> {
+    // Pre: `ready` observes the protocol state named by `label`.
+    // Post: returns Ok only after `ready` is true; timeout is a failure deadline,
+    // not the condition that makes the passing path proceed.
+    let started = Instant::now();
+    loop {
+        if ready()? {
+            return Ok(());
+        }
+
+        assert!(
+            started.elapsed() <= TEST_WAIT_TIMEOUT,
+            "condition did not become true within {TEST_WAIT_TIMEOUT:?}: {label}"
+        );
+        tokio::task::yield_now().await;
+        sleep(TEST_WAIT_POLL_INTERVAL).await;
+    }
+}
+
+pub async fn wait_for_connection_state(
+    node: &Node,
+    peer: Did,
+    state: WebrtcConnectionState,
+) -> crate::error::Result<()> {
+    wait_until_result("connection reaches expected state", || {
+        Ok(node
+            .swarm
+            .transport
+            .get_connection(peer)
+            .map(|conn| conn.webrtc_connection_state() == state)
+            .unwrap_or(false))
+    })
+    .await
+}
+
+pub async fn wait_for_successor(node: &Node, successor: Did) -> crate::error::Result<()> {
+    wait_until_result("successor list contains expected peer", || {
+        Ok(node.dht().successors().list()?.contains(&successor))
+    })
+    .await
+}
+
+pub async fn wait_for_finger(node: &Node, peer: Did) -> crate::error::Result<()> {
+    wait_until_result("finger table contains expected peer", || {
+        Ok(node.dht().lock_finger()?.contains(Some(peer)))
+    })
+    .await
+}
+
+pub async fn wait_for_predecessor(node: &Node, predecessor: Did) -> crate::error::Result<()> {
+    wait_until_result("predecessor becomes expected peer", || {
+        Ok(*node.dht().lock_predecessor()? == Some(predecessor))
+    })
+    .await
+}
+
+pub async fn wait_for_storage_entry(node: &Node, entry: Did) -> crate::error::Result<Entry> {
+    let started = Instant::now();
+    loop {
+        if let Some(entry) = node.dht().storage.get(&entry.to_string()).await? {
+            return Ok(entry);
+        }
+
+        assert!(
+            started.elapsed() <= TEST_WAIT_TIMEOUT,
+            "storage entry did not appear within {TEST_WAIT_TIMEOUT:?}: {entry}"
+        );
+        tokio::task::yield_now().await;
+        sleep(TEST_WAIT_POLL_INTERVAL).await;
+    }
 }
 
 pub fn gen_pure_dht(did: Did) -> PeerRing {
@@ -156,32 +240,41 @@ pub fn gen_sorted_dht(s: usize) -> Vec<PeerRing> {
 }
 
 pub async fn assert_no_more_msg(nodes: impl IntoIterator<Item = &Node>) {
+    let nodes: Vec<&Node> = nodes.into_iter().collect();
     let did_names: DashMap<Did, String> = DashMap::new();
-    let mut listeners = vec![];
 
-    for (i, node) in nodes.into_iter().enumerate() {
+    for (i, node) in nodes.iter().enumerate() {
         let name = format!("node{}", i + 1);
         did_names.insert(node.did(), name);
-
-        listeners.push(async {
-            let payload = node.listen_once().await.unwrap();
-            format!(
-                "{} should not receive any Msg, but got Msg {} -> {} [{} => {}] : {:?}",
-                *did_names.get(&node.did()).unwrap(),
-                *did_names.get(&payload.signer()).unwrap(),
-                *did_names.get(&node.did()).unwrap(),
-                *did_names.get(&payload.transaction.signer()).unwrap(),
-                *did_names.get(&payload.transaction.destination).unwrap(),
-                payload.transaction.data::<Message>().unwrap()
-            )
-        });
     }
 
-    let mut listeners = FuturesUnordered::from_iter(listeners);
-
-    tokio::select! {
-        error_msg = listeners.next() => unreachable!("{}", error_msg.unwrap()),
-        _ = sleep(Duration::from_secs(3)) => {}
+    tokio::task::yield_now().await;
+    for node in nodes {
+        // The quiescence proof belongs to `wait_for_msgs`. This assertion only checks that no
+        // buffered application message remains after the causal wait has completed.
+        if let Some(payload) = node.try_listen_once().await {
+            let node_name = did_names
+                .get(&node.did())
+                .map(|name| name.clone())
+                .unwrap_or_else(|| node.did().to_string());
+            let signer_name = did_names
+                .get(&payload.signer())
+                .map(|name| name.clone())
+                .unwrap_or_else(|| payload.signer().to_string());
+            let transaction_signer_name = did_names
+                .get(&payload.transaction.signer())
+                .map(|name| name.clone())
+                .unwrap_or_else(|| payload.transaction.signer().to_string());
+            let destination_name = did_names
+                .get(&payload.transaction.destination)
+                .map(|name| name.clone())
+                .unwrap_or_else(|| payload.transaction.destination.to_string());
+            panic!(
+                "{node_name} should not receive any Msg, but got Msg {signer_name} -> \
+                 {node_name} [{transaction_signer_name} => {destination_name}] : {:?}",
+                payload.transaction.data::<Message>()
+            );
+        }
     }
 }
 

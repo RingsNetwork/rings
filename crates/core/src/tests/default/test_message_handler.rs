@@ -5,9 +5,9 @@ use std::sync::Arc;
 #[cfg(feature = "dummy")]
 use rings_transport::connections::dummy_controlled;
 use rings_transport::core::transport::WebrtcConnectionState;
-use tokio::time::sleep;
 #[cfg(feature = "dummy")]
 use tokio::time::timeout;
+#[cfg(feature = "dummy")]
 use tokio::time::Duration;
 
 use crate::dht::entry::Entry;
@@ -30,6 +30,12 @@ use crate::prelude::entry::EntryOperation;
 #[cfg(feature = "dummy")]
 use crate::swarm::callback::SwarmCallback;
 use crate::tests::default::prepare_node;
+use crate::tests::default::wait_for_connection_state;
+use crate::tests::default::wait_for_finger;
+use crate::tests::default::wait_for_msgs;
+use crate::tests::default::wait_for_predecessor;
+use crate::tests::default::wait_for_storage_entry;
+use crate::tests::default::wait_for_successor;
 use crate::tests::manually_establish_connection;
 
 #[cfg(feature = "dummy")]
@@ -142,16 +148,11 @@ async fn test_handle_connect_node() -> Result<()> {
     // 1 to 2
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
 
-    sleep(Duration::from_secs(3)).await;
-
-    // handle join dht situation
-    println!("wait connection 1 to 2 and connection 2 to 3 connected");
-    sleep(Duration::from_millis(1)).await;
-    let connection_1_to_2 = node1.swarm.transport.get_connection(node2.did()).unwrap();
-    let connection_2_to_3 = node2.swarm.transport.get_connection(node3.did()).unwrap();
-
-    println!("wait events trigger");
-    sleep(Duration::from_millis(1)).await;
+    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
+    wait_for_connection_state(&node2, node3.did(), WebrtcConnectionState::Connected).await?;
+    wait_for_successor(&node1, key2.address().into()).await?;
+    wait_for_successor(&node2, key3.address().into()).await?;
+    wait_for_successor(&node3, key2.address().into()).await?;
 
     println!("node1 key address: {:?}", node1.did());
     println!("node2 key address: {:?}", node2.did());
@@ -183,35 +184,12 @@ async fn test_handle_connect_node() -> Result<()> {
         );
     }
 
-    assert_eq!(
-        connection_1_to_2.webrtc_connection_state(),
-        WebrtcConnectionState::Connected,
-    );
-    assert_eq!(
-        connection_2_to_3.webrtc_connection_state(),
-        WebrtcConnectionState::Connected,
-    );
-
     // node1 may already have connected node3 while syncing successor-list
     // candidates. If not, ask DHT to connect it through node2.
     if node1.swarm.transport.get_connection(node3.did()).is_none() {
         node1.swarm.connect(node3.did()).await.unwrap();
     }
-    sleep(Duration::from_millis(10000)).await;
-
-    let connection_1_to_3 = node1.swarm.transport.get_connection(node3.did());
-    assert!(connection_1_to_3.is_some());
-    let connection_1_to_3 = connection_1_to_3.unwrap();
-    let both = {
-        connection_1_to_3.webrtc_connection_state() == WebrtcConnectionState::New
-            || connection_1_to_3.webrtc_connection_state() == WebrtcConnectionState::Connecting
-            || connection_1_to_3.webrtc_connection_state() == WebrtcConnectionState::Connected
-    };
-    assert!(both, "{:?}", connection_1_to_3.webrtc_connection_state());
-    assert_eq!(
-        connection_1_to_3.webrtc_connection_state(),
-        WebrtcConnectionState::Connected
-    );
+    wait_for_connection_state(&node1, node3.did(), WebrtcConnectionState::Connected).await?;
 
     Ok(())
 }
@@ -224,22 +202,9 @@ async fn test_handle_notify_predecessor() -> Result<()> {
     let node2 = prepare_node(key2).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
 
-    let connection_1_to_2 = node1.swarm.transport.get_connection(node2.did()).unwrap();
-    sleep(Duration::from_millis(1000)).await;
-    assert!(node1
-        .dht()
-        .successors()
-        .list()?
-        .contains(&key2.address().into()));
-    assert!(node2
-        .dht()
-        .successors()
-        .list()?
-        .contains(&key1.address().into()));
-    assert_eq!(
-        connection_1_to_2.webrtc_connection_state(),
-        WebrtcConnectionState::Connected
-    );
+    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
+    wait_for_successor(&node1, key2.address().into()).await?;
+    wait_for_successor(&node2, key1.address().into()).await?;
     node1
         .swarm
         .send_message(
@@ -250,11 +215,7 @@ async fn test_handle_notify_predecessor() -> Result<()> {
         )
         .await
         .unwrap();
-    sleep(Duration::from_millis(1000)).await;
-    assert_eq!(
-        *node2.dht().lock_predecessor()?,
-        Some(key1.address().into())
-    );
+    wait_for_predecessor(&node2, key1.address().into()).await?;
     assert!(node1
         .dht()
         .successors()
@@ -275,26 +236,9 @@ async fn test_handle_find_successor_increase() -> Result<()> {
     let node2 = prepare_node(key2).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
 
-    let connection_1_to_2 = node1.swarm.transport.get_connection(node2.did()).unwrap();
-    sleep(Duration::from_millis(1000)).await;
-    assert!(
-        node1
-            .dht()
-            .successors()
-            .list()?
-            .contains(&key2.address().into()),
-        "{:?}",
-        node1.dht().successors().list()?
-    );
-    assert!(node2
-        .dht()
-        .successors()
-        .list()?
-        .contains(&key1.address().into()));
-    assert_eq!(
-        connection_1_to_2.webrtc_connection_state(),
-        WebrtcConnectionState::Connected
-    );
+    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
+    wait_for_successor(&node1, key2.address().into()).await?;
+    wait_for_successor(&node2, key1.address().into()).await?;
     node1
         .swarm
         .send_message(
@@ -303,11 +247,7 @@ async fn test_handle_find_successor_increase() -> Result<()> {
         )
         .await
         .unwrap();
-    sleep(Duration::from_millis(1000)).await;
-    assert_eq!(
-        *node2.dht().lock_predecessor()?,
-        Some(key1.address().into())
-    );
+    wait_for_predecessor(&node2, key1.address().into()).await?;
     assert!(node1
         .dht()
         .successors()
@@ -327,7 +267,7 @@ async fn test_handle_find_successor_increase() -> Result<()> {
         )
         .await
         .unwrap();
-    sleep(Duration::from_millis(1000)).await;
+    wait_for_msgs([&node1, &node2]).await;
     assert!(node2
         .dht()
         .successors()
@@ -354,30 +294,11 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
     let node2 = prepare_node(key2).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
 
-    let connection_1_to_2 = node1.swarm.transport.get_connection(node2.did()).unwrap();
-    sleep(Duration::from_millis(1000)).await;
-    assert!(node1
-        .dht()
-        .successors()
-        .list()?
-        .contains(&key2.address().into()));
-    assert!(node2
-        .dht()
-        .successors()
-        .list()?
-        .contains(&key1.address().into()));
-    assert!(node1
-        .dht()
-        .lock_finger()?
-        .contains(Some(key2.address().into())));
-    assert!(node2
-        .dht()
-        .lock_finger()?
-        .contains(Some(key1.address().into())));
-    assert_eq!(
-        connection_1_to_2.webrtc_connection_state(),
-        WebrtcConnectionState::Connected
-    );
+    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
+    wait_for_successor(&node1, key2.address().into()).await?;
+    wait_for_successor(&node2, key1.address().into()).await?;
+    wait_for_finger(&node1, key2.address().into()).await?;
+    wait_for_finger(&node2, key1.address().into()).await?;
     node1
         .swarm
         .send_message(
@@ -386,11 +307,7 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
         )
         .await
         .unwrap();
-    sleep(Duration::from_millis(1000)).await;
-    assert_eq!(
-        *node2.dht().lock_predecessor()?,
-        Some(key1.address().into())
-    );
+    wait_for_predecessor(&node2, key1.address().into()).await?;
     assert!(node1
         .dht()
         .successors()
@@ -409,7 +326,7 @@ async fn test_handle_find_successor_decrease() -> Result<()> {
         )
         .await
         .unwrap();
-    sleep(Duration::from_millis(1000)).await;
+    wait_for_msgs([&node1, &node2]).await;
     let dht1_successor = node1.dht().successors();
     let dht2_successor = node2.dht().successors();
     assert!(dht2_successor.list()?.contains(&key1.address().into()));
@@ -437,24 +354,11 @@ async fn test_handle_storage() -> Result<()> {
     let node2 = prepare_node(key2).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
 
-    let connection_1_to_2 = node1.swarm.transport.get_connection(node2.did()).unwrap();
-    sleep(Duration::from_millis(1000)).await;
     // node1's successor is node2
     // node2's successor is node1
-    assert!(node1
-        .dht()
-        .successors()
-        .list()?
-        .contains(&key2.address().into()));
-    assert!(node2
-        .dht()
-        .successors()
-        .list()?
-        .contains(&key1.address().into()));
-    assert_eq!(
-        connection_1_to_2.webrtc_connection_state(),
-        WebrtcConnectionState::Connected
-    );
+    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
+    wait_for_successor(&node1, key2.address().into()).await?;
+    wait_for_successor(&node2, key1.address().into()).await?;
     node1
         .swarm
         .send_message(
@@ -463,11 +367,7 @@ async fn test_handle_storage() -> Result<()> {
         )
         .await
         .unwrap();
-    sleep(Duration::from_millis(1000)).await;
-    assert_eq!(
-        *node2.dht().lock_predecessor()?,
-        Some(key1.address().into())
-    );
+    wait_for_predecessor(&node2, key1.address().into()).await?;
     assert!(node1
         .dht()
         .successors()
@@ -487,12 +387,9 @@ async fn test_handle_storage() -> Result<()> {
         )
         .await
         .unwrap();
-    sleep(Duration::from_millis(5000)).await;
+    let data = wait_for_storage_entry(&node2, entry.did).await?;
     assert!(node1.dht().storage.count().await.unwrap() == 0);
     assert!(node2.dht().storage.count().await.unwrap() > 0);
-    let data: Result<Option<Entry>> = node2.dht().storage.get(&entry.did.to_string()).await;
-    assert!(data.is_ok(), "entry: {:?} not in", entry.did);
-    let data = data.unwrap().unwrap();
     assert_eq!(data.data[0].clone().decode::<String>().unwrap(), message);
     Ok(())
 }

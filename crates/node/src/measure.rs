@@ -2,6 +2,7 @@
 
 //! This module implemented the `Measure` trait for swarm.
 
+use std::sync::Arc;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
@@ -39,10 +40,29 @@ pub type MeasureStorage = Box<dyn KvStorageInterface<u64> + Sync + Send>;
 pub struct PeriodicMeasure {
     storage: MeasureStorage,
     counters: DashMap<(Did, MeasureCounter), Mutex<PeriodicCounter>>,
+    clock: Arc<dyn MeasureClock>,
+}
+
+// Boundary: wall-clock time is injected here. The counter transition below is
+// pure with respect to its `now` input, so tests can advance time without
+// sleeping while production still reads `Utc::now`.
+trait MeasureClock: Send + Sync {
+    fn now(&self) -> DateTime<Utc>;
+}
+
+struct SystemMeasureClock;
+
+impl MeasureClock for SystemMeasureClock {
+    fn now(&self) -> DateTime<Utc> {
+        Utc::now()
+    }
 }
 
 #[derive(Debug)]
 struct PeriodicCounter {
+    // Invariant: `previous` is the start time of the current counting window;
+    // `count` records the current window; `previous_count` records the most
+    // recently completed window persisted through `barely_get`.
     period: Duration,
     count: u64,
     previous: DateTime<Utc>,
@@ -50,19 +70,17 @@ struct PeriodicCounter {
 }
 
 impl PeriodicCounter {
-    fn new(period: u64, previous_count: u64) -> Self {
+    fn new(period: u64, previous_count: u64, now: DateTime<Utc>) -> Self {
         Self {
             period: Duration::seconds(period as i64),
             count: 0,
-            previous: Utc::now(),
+            previous: now,
             previous_count,
         }
     }
 
     // Reset periodic count on next period
-    fn refresh(&mut self) -> bool {
-        let now = Utc::now();
-
+    fn refresh_at(&mut self, now: DateTime<Utc>) -> bool {
         if now - self.previous < self.period {
             return false;
         }
@@ -83,15 +101,15 @@ impl PeriodicCounter {
     }
 
     // Check period, then increase
-    fn incr(&mut self) -> (u64, bool) {
-        let is_refreshed = self.refresh();
+    fn incr_at(&mut self, now: DateTime<Utc>) -> (u64, bool) {
+        let is_refreshed = self.refresh_at(now);
         self.count += 1;
         (self.barely_get(), is_refreshed)
     }
 
     // Check period, return count or previous count
-    fn get(&mut self) -> (u64, bool) {
-        let is_refreshed = self.refresh();
+    fn get_at(&mut self, now: DateTime<Utc>) -> (u64, bool) {
+        let is_refreshed = self.refresh_at(now);
         (self.barely_get(), is_refreshed)
     }
 }
@@ -102,6 +120,16 @@ impl PeriodicMeasure {
         Self {
             storage,
             counters: DashMap::new(),
+            clock: Arc::new(SystemMeasureClock),
+        }
+    }
+
+    #[cfg(all(test, feature = "node"))]
+    fn new_with_clock(storage: MeasureStorage, clock: Arc<dyn MeasureClock>) -> Self {
+        Self {
+            storage,
+            counters: DashMap::new(),
+            clock,
         }
     }
 
@@ -114,6 +142,7 @@ impl PeriodicMeasure {
         &self,
         did: Did,
         counter: MeasureCounter,
+        now: DateTime<Utc>,
     ) -> RefMut<'_, (Did, MeasureCounter), Mutex<PeriodicCounter>> {
         let k = Self::gen_storage_key(did, counter);
         let count = self
@@ -127,7 +156,7 @@ impl PeriodicMeasure {
             .unwrap_or(0);
         self.counters
             .entry((did, counter))
-            .or_insert_with(|| Mutex::new(PeriodicCounter::new(DURATION, count)))
+            .or_insert_with(|| Mutex::new(PeriodicCounter::new(DURATION, count, now)))
     }
 
     async fn save_counter(&self, did: Did, counter: MeasureCounter, count: u64) {
@@ -143,10 +172,11 @@ impl PeriodicMeasure {
 impl Measure for PeriodicMeasure {
     /// `incr` increments the counter of the given peer.
     async fn incr(&self, did: Did, counter: MeasureCounter) {
+        let now = self.clock.now();
         let (count, is_refreshed) = {
-            let c = self.ensure_counter(did, counter).await;
+            let c = self.ensure_counter(did, counter, now).await;
             let result = if let Ok(mut c) = c.lock() {
-                c.incr()
+                c.incr_at(now)
             } else {
                 return;
             };
@@ -159,10 +189,11 @@ impl Measure for PeriodicMeasure {
 
     /// `get_count` returns the counter of a peer in the current or previous period.
     async fn get_count(&self, did: Did, counter: MeasureCounter) -> u64 {
+        let now = self.clock.now();
         let (count, is_refreshed) = {
-            let c = self.ensure_counter(did, counter).await;
+            let c = self.ensure_counter(did, counter, now).await;
             let result = if let Ok(mut c) = c.lock() {
-                c.get()
+                c.get_at(now)
             } else {
                 return 0;
             };
@@ -189,11 +220,49 @@ impl measure::BehaviourJudgement for PeriodicMeasure {
 #[cfg(feature = "node")]
 mod tests {
     use std::str::FromStr;
+    use std::sync::Arc;
+    use std::sync::Mutex;
 
     use rings_core::storage::sled::SledStorage;
     use rings_core::storage::MemStorage;
 
     use super::*;
+
+    #[derive(Clone)]
+    struct ManualMeasureClock {
+        now: Arc<Mutex<DateTime<Utc>>>,
+    }
+
+    impl ManualMeasureClock {
+        fn new(now: DateTime<Utc>) -> Self {
+            Self {
+                now: Arc::new(Mutex::new(now)),
+            }
+        }
+
+        fn advance(&self, duration: Duration) {
+            let Ok(mut now) = self.now.lock() else {
+                panic!("manual measure clock lock poisoned");
+            };
+            let Some(advanced) = now.checked_add_signed(duration) else {
+                panic!("manual measure clock overflow");
+            };
+            *now = advanced;
+        }
+    }
+
+    impl MeasureClock for ManualMeasureClock {
+        fn now(&self) -> DateTime<Utc> {
+            let Ok(now) = self.now.lock() else {
+                panic!("manual measure clock lock poisoned");
+            };
+            now.to_owned()
+        }
+    }
+
+    fn advance_period(clock: &ManualMeasureClock) {
+        clock.advance(Duration::seconds(DURATION as i64));
+    }
 
     #[tokio::test]
     async fn test_measure_counter() {
@@ -202,7 +271,8 @@ mod tests {
         let did1 = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
         let did2 = Did::from_str("0x999999cf1046e68e36E1aA2E0E07105eDDD1f08E").unwrap();
 
-        let measure = PeriodicMeasure::new(ms);
+        let clock = ManualMeasureClock::new(Utc::now());
+        let measure = PeriodicMeasure::new_with_clock(ms, Arc::new(clock.clone()));
         assert_eq!(measure.get_count(did1, MeasureCounter::Sent).await, 0);
         assert_eq!(measure.get_count(did2, MeasureCounter::Sent).await, 0);
         assert_eq!(measure.get_count(did1, MeasureCounter::Received).await, 0);
@@ -229,7 +299,8 @@ mod tests {
 
         let did = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
 
-        let measure = PeriodicMeasure::new(ms);
+        let clock = ManualMeasureClock::new(Utc::now());
+        let measure = PeriodicMeasure::new_with_clock(ms, Arc::new(clock.clone()));
         assert_eq!(measure.get_count(did, MeasureCounter::Sent).await, 0);
         assert_eq!(measure.get_count(did, MeasureCounter::Received).await, 0);
 
@@ -241,7 +312,7 @@ mod tests {
         assert_eq!(measure.get_count(did, MeasureCounter::Sent).await, 2);
         assert_eq!(measure.get_count(did, MeasureCounter::Received).await, 1);
 
-        tokio::time::sleep(std::time::Duration::from_secs(DURATION)).await;
+        advance_period(&clock);
 
         measure.incr(did, MeasureCounter::Sent).await;
         measure.incr(did, MeasureCounter::Received).await;
@@ -252,13 +323,13 @@ mod tests {
         assert_eq!(measure.get_count(did, MeasureCounter::Sent).await, 2);
         assert_eq!(measure.get_count(did, MeasureCounter::Received).await, 1);
 
-        tokio::time::sleep(std::time::Duration::from_secs(DURATION)).await;
+        advance_period(&clock);
 
         // Will take previous count.
         assert_eq!(measure.get_count(did, MeasureCounter::Sent).await, 1);
         assert_eq!(measure.get_count(did, MeasureCounter::Received).await, 3);
 
-        tokio::time::sleep(std::time::Duration::from_secs(DURATION)).await;
+        advance_period(&clock);
 
         // Will take previous count.
         assert_eq!(measure.get_count(did, MeasureCounter::Sent).await, 0);
@@ -275,7 +346,8 @@ mod tests {
         ms.clear().await.unwrap();
 
         let did = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
-        let measure = PeriodicMeasure::new(ms);
+        let clock = ManualMeasureClock::new(Utc::now());
+        let measure = PeriodicMeasure::new_with_clock(ms, Arc::new(clock.clone()));
         assert_eq!(measure.get_count(did, MeasureCounter::Sent).await, 0);
         assert_eq!(measure.get_count(did, MeasureCounter::Received).await, 0);
 
@@ -283,7 +355,7 @@ mod tests {
         measure.incr(did, MeasureCounter::Sent).await;
         measure.incr(did, MeasureCounter::Received).await;
 
-        tokio::time::sleep(std::time::Duration::from_secs(DURATION)).await;
+        advance_period(&clock);
 
         // Flush to storage.
         let c1 = measure.get_count(did, MeasureCounter::Sent).await;
@@ -300,7 +372,7 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        let measure2 = PeriodicMeasure::new(ms2);
+        let measure2 = PeriodicMeasure::new_with_clock(ms2, Arc::new(clock));
 
         // Will take previous count from storage.
         assert_eq!(measure2.get_count(did, MeasureCounter::Sent).await, 2);
