@@ -16,6 +16,9 @@ use crate::dht::Did;
 use crate::dht::TopoInfo;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::e2e::E2eHandshakeRequest;
+use crate::message::e2e::E2eHandshakeResponse;
+use crate::message::e2e::E2eStreamFrame;
 
 /// The `Then` trait is used to associate a type with a "then" scenario.
 pub trait Then {
@@ -270,6 +273,12 @@ pub enum Message {
     SyncEntriesWithSuccessorReport(SyncEntriesWithSuccessorReport),
     /// Custom messages
     CustomMessage(CustomMessage),
+    /// Request to negotiate E2E ElGamal encryption with a signed public key.
+    E2eHandshakeRequest(E2eHandshakeRequest),
+    /// Response accepting E2E ElGamal encryption with a signed public key.
+    E2eHandshakeResponse(E2eHandshakeResponse),
+    /// Direct ElGamal-encrypted E2E stream frame.
+    E2eStreamFrame(E2eStreamFrame),
     /// Remote message of query topological info of a node.
     QueryForTopoInfoSend(QueryForTopoInfoSend),
     /// Response of QueryForTopoInfoSend

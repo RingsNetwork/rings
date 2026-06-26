@@ -16,6 +16,7 @@ use self::callback::InnerSwarmCallback;
 use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::dht::Stabilizer;
+use crate::ecc::PublicKey;
 use crate::error::Error;
 use crate::error::Result;
 use crate::inspect::ConnectionInspect;
@@ -40,6 +41,11 @@ impl Swarm {
     /// Get did of self.
     pub fn did(&self) -> Did {
         self.dht.did
+    }
+
+    /// Get the local account public key used for E2E public-key negotiation.
+    pub fn account_pubkey(&self) -> Result<PublicKey<33>> {
+        self.transport.session_sk().session().account_pubkey()
     }
 
     /// Get DHT(Distributed Hash Table) of self.

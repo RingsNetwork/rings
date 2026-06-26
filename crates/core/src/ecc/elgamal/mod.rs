@@ -7,7 +7,7 @@
 //!    Map the message 𝑀 to an element 𝑚 of 𝐺 using a reversible mapping function.
 //! Choose an integer 𝑦
 //! randomly from {1,…,𝑞−1}
-//! 1. Compute 𝑠:=ℎ𝑦 This is called the shared secret.
+//! 1. Compute 𝑠:=ℎ𝑦 as the ElGamal masking element.
 //! 2. Compute 𝑐1:=𝑔𝑦
 //! 3. Compute 𝑐2:=𝑚⋅𝑠
 //! 4. Bob sends the ciphertext (𝑐1,𝑐2) to Alice.
@@ -38,7 +38,7 @@
 //!
 //! 1. choose fresh random scalar `r`
 //! 2. compute `c1 = rg`
-//! 3. compute shared secret `s = rh`
+//! 3. compute masking element `s = rh`
 //! 4. compute `c2 = m + s`
 //!
 //! Decryption computes `m = c2 - x c1`.
@@ -217,8 +217,8 @@ where
         ciphertext
             .iter()
             .map(|(c1, c2)| {
-                let shared_secret = c1.clone() * secret_key.as_scalar().clone();
-                c2.clone() - shared_secret
+                let mask = c1.clone() * secret_key.as_scalar().clone();
+                c2.clone() - mask
             })
             .collect()
     }
@@ -234,8 +234,8 @@ where
         ephemeral_scalar: Element::Scalar,
     ) -> (Element, Element) {
         let c1 = Element::generator_mul(&ephemeral_scalar);
-        let shared_secret = public_key.as_element().clone() * ephemeral_scalar;
-        let c2 = message_element + shared_secret;
+        let mask = public_key.as_element().clone() * ephemeral_scalar;
+        let c2 = message_element + mask;
         (c1, c2)
     }
 

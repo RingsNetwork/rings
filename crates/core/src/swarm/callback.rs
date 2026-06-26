@@ -110,6 +110,13 @@ impl InnerSwarmCallback {
             }
             Message::OperateEntry(ref msg) => self.message_handler.handle(payload, msg).await,
             Message::CustomMessage(ref msg) => self.message_handler.handle(payload, msg).await,
+            Message::E2eHandshakeRequest(ref msg) => {
+                self.message_handler.handle(payload, msg).await
+            }
+            Message::E2eHandshakeResponse(ref msg) => {
+                self.message_handler.handle(payload, msg).await
+            }
+            Message::E2eStreamFrame(ref msg) => self.message_handler.handle(payload, msg).await,
             Message::QueryForTopoInfoSend(ref msg) => {
                 self.message_handler.handle(payload, msg).await
             }

@@ -25,6 +25,39 @@ pub enum Error {
     #[error("Failed to lift encoded plaintext into a secp256k1 point")]
     Secp256k1PointLiftFailed,
 
+    #[error("E2E stream id mismatch: expected {expected}, actual {actual}")]
+    E2eStreamIdMismatch {
+        /// Stream ID expected by the decryptor.
+        expected: uuid::Uuid,
+        /// Stream ID carried by the frame.
+        actual: uuid::Uuid,
+    },
+
+    #[error("E2E frame sequence mismatch: expected {expected}, actual {actual}")]
+    E2eFrameSequenceMismatch {
+        /// Sequence number expected by the decryptor.
+        expected: u64,
+        /// Sequence number carried by the frame.
+        actual: u64,
+    },
+
+    #[error("E2E frame sequence counter overflowed")]
+    E2eFrameSequenceOverflow,
+
+    #[error("E2E frame received after the authenticated final frame")]
+    E2eFrameAfterFinal,
+
+    #[error("E2E stream is missing the authenticated final frame")]
+    E2eMissingFinalFrame,
+
+    #[error("E2E public key resolves to {actual}, expected {expected}")]
+    E2ePublicKeyDidMismatch {
+        /// DID expected by the signed message context.
+        expected: crate::dht::Did,
+        /// DID derived from the supplied public key.
+        actual: crate::dht::Did,
+    },
+
     #[error("Secp256r1/ECDSA Error: {0}")]
     ECDSAError(#[from] ecdsa::Error),
 

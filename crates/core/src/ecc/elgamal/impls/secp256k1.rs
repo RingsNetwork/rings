@@ -50,8 +50,17 @@ const FIELD_ENCODING_OVERHEAD: usize = 3;
 const FIELD_CHUNK_SIZE: usize = 32 - FIELD_ENCODING_OVERHEAD;
 const FIELD_CHUNK_SIZE_U8: u8 = 29;
 
+/// Plaintext bytes carried by one secp256k1 point in this adapter.
+pub const PLAINTEXT_BLOCK_SIZE: usize = FIELD_CHUNK_SIZE;
+
+/// One serialized ElGamal ciphertext block over secp256k1.
+pub type CiphertextBlock = (CurveEle<33>, CurveEle<33>);
+
 /// Plaintext input before it is mapped into secp256k1 group elements.
 pub struct Plaintext<'a>(&'a str);
+
+/// Binary plaintext input before it is mapped into secp256k1 group elements.
+pub struct PlaintextBytes<'a>(&'a [u8]);
 
 /// secp256k1 group elements that encode one plaintext message.
 pub struct MessagePoints(Vec<Point<Secp256k1>>);
@@ -59,6 +68,13 @@ pub struct MessagePoints(Vec<Point<Secp256k1>>);
 impl<'a> Plaintext<'a> {
     /// Plaintext string before group encoding.
     pub fn as_str(&self) -> &'a str {
+        self.0
+    }
+}
+
+impl<'a> PlaintextBytes<'a> {
+    /// Plaintext bytes before group encoding.
+    pub fn as_bytes(&self) -> &'a [u8] {
         self.0
     }
 }
@@ -72,6 +88,12 @@ impl MessagePoints {
 
 impl<'a> From<&'a str> for Plaintext<'a> {
     fn from(message: &'a str) -> Self {
+        Self(message)
+    }
+}
+
+impl<'a> From<&'a [u8]> for PlaintextBytes<'a> {
+    fn from(message: &'a [u8]) -> Self {
         Self(message)
     }
 }
@@ -95,7 +117,15 @@ impl<'a> TryFrom<Plaintext<'a>> for MessagePoints {
     type Error = Error;
 
     fn try_from(message: Plaintext<'a>) -> Result<Self> {
-        Ok(str_to_affine(message.as_str())?
+        MessagePoints::try_from(PlaintextBytes::from(message.as_str().as_bytes()))
+    }
+}
+
+impl<'a> TryFrom<PlaintextBytes<'a>> for MessagePoints {
+    type Error = Error;
+
+    fn try_from(message: PlaintextBytes<'a>) -> Result<Self> {
+        Ok(bytes_to_affine(message.as_bytes())?
             .into_iter()
             .map(Point::<Secp256k1>::from)
             .collect::<Vec<_>>()
@@ -107,11 +137,19 @@ impl TryFrom<MessagePoints> for String {
     type Error = Error;
 
     fn try_from(points: MessagePoints) -> Result<Self> {
+        String::from_utf8(Vec::<u8>::try_from(points)?).map_err(Error::Utf8Encoding)
+    }
+}
+
+impl TryFrom<MessagePoints> for Vec<u8> {
+    type Error = Error;
+
+    fn try_from(points: MessagePoints) -> Result<Self> {
         let affines = points
             .into_iter()
             .map(Affine::from)
             .collect::<Vec<Affine>>();
-        affine_to_str(&affines)
+        Ok(affine_to_bytes(&affines))
     }
 }
 
@@ -122,8 +160,13 @@ impl TryFrom<MessagePoints> for String {
 /// search bias for `lift_x`; the marker and length bytes make the mapping
 /// reversible and preserve leading or embedded NUL bytes.
 pub fn str_to_field(s: &str) -> Vec<Field> {
-    s.as_bytes()
-        .chunks(FIELD_CHUNK_SIZE)
+    bytes_to_field(s.as_bytes())
+}
+
+/// Convert arbitrary bytes into field elements using the adapter encoding.
+pub fn bytes_to_field(bytes: &[u8]) -> Vec<Field> {
+    bytes
+        .chunks(PLAINTEXT_BLOCK_SIZE)
         .map(|x| {
             let data = encode_field_candidate(x);
             let mut field = Field::default();
@@ -155,13 +198,17 @@ fn encode_field_candidate(chunk: &[u8]) -> [u8; 32] {
 
 /// Decode field elements produced by [`str_to_field`].
 pub fn field_to_str(f: &[Field]) -> Result<String> {
-    String::from_utf8(f.iter().fold(vec![], |mut acc, x| {
+    String::from_utf8(field_to_bytes(f)).map_err(Error::Utf8Encoding)
+}
+
+/// Decode field elements produced by [`bytes_to_field`].
+pub fn field_to_bytes(f: &[Field]) -> Vec<u8> {
+    f.iter().fold(vec![], |mut acc, x| {
         let mut field = *x;
         field.normalize();
         acc.extend(decode_field_bytes(field.b32()));
         acc
-    }))
-    .map_err(Error::Utf8Encoding)
+    })
 }
 
 fn decode_field_bytes(mut bytes: [u8; 32]) -> Vec<u8> {
@@ -223,7 +270,12 @@ fn lift_x(x: &Field) -> Result<Affine> {
 
 /// Convert a string into secp256k1 points using the adapter encoding.
 pub fn str_to_affine(s: &str) -> Result<Vec<Affine>> {
-    str_to_field(s)
+    bytes_to_affine(s.as_bytes())
+}
+
+/// Convert arbitrary bytes into secp256k1 points using the adapter encoding.
+pub fn bytes_to_affine(bytes: &[u8]) -> Result<Vec<Affine>> {
+    bytes_to_field(bytes)
         .into_iter()
         .map(|a| lift_x(&a))
         .collect::<Result<Vec<Affine>>>()
@@ -231,11 +283,16 @@ pub fn str_to_affine(s: &str) -> Result<Vec<Affine>> {
 
 /// Decode secp256k1 points produced by `str_to_affine`.
 pub fn affine_to_str(a: &[Affine]) -> Result<String> {
-    field_to_str(a.iter().map(|x| x.x).collect::<Vec<Field>>().as_slice())
+    String::from_utf8(affine_to_bytes(a)).map_err(Error::Utf8Encoding)
+}
+
+/// Decode secp256k1 points produced by [`bytes_to_affine`].
+pub fn affine_to_bytes(a: &[Affine]) -> Vec<u8> {
+    field_to_bytes(a.iter().map(|x| x.x).collect::<Vec<Field>>().as_slice())
 }
 
 /// Encrypt a string with the current secp256k1 compatibility adapter.
-pub fn encrypt(s: &str, k: PublicKey<33>) -> Result<Vec<(CurveEle<33>, CurveEle<33>)>> {
+pub fn encrypt(s: &str, k: PublicKey<33>) -> Result<Vec<CiphertextBlock>> {
     let public_key = ElGamalPublicKey::<Point<Secp256k1>>::from_element(k.try_into()?);
     let points = MessagePoints::try_from(Plaintext::from(s))?;
     ElGamal::<Point<Secp256k1>>::encrypt(points, &public_key)
@@ -249,9 +306,18 @@ pub fn encrypt_with_rng(
     s: &str,
     k: PublicKey<33>,
     rng: &mut impl RngCore,
-) -> Result<Vec<(CurveEle<33>, CurveEle<33>)>> {
+) -> Result<Vec<CiphertextBlock>> {
+    encrypt_bytes_with_rng(s.as_bytes(), k, rng)
+}
+
+/// Encrypt arbitrary bytes with caller-supplied randomness for ElGamal ephemerals.
+pub fn encrypt_bytes_with_rng(
+    bytes: &[u8],
+    k: PublicKey<33>,
+    rng: &mut impl RngCore,
+) -> Result<Vec<CiphertextBlock>> {
     let public_key = ElGamalPublicKey::<Point<Secp256k1>>::from_element(k.try_into()?);
-    let points = MessagePoints::try_from(Plaintext::from(s))?;
+    let points = MessagePoints::try_from(PlaintextBytes::from(bytes))?;
     ElGamal::<Point<Secp256k1>>::encrypt_with_rng(points, &public_key, rng)
         .into_iter()
         .map(|(c1, c2)| Ok((c1.try_into()?, c2.try_into()?)))
@@ -259,7 +325,12 @@ pub fn encrypt_with_rng(
 }
 
 /// Decrypt ciphertext produced by the current secp256k1 compatibility adapter.
-pub fn decrypt(m: &[(CurveEle<33>, CurveEle<33>)], k: SecretKey) -> Result<String> {
+pub fn decrypt(m: &[CiphertextBlock], k: SecretKey) -> Result<String> {
+    String::from_utf8(decrypt_bytes(m, k)?).map_err(Error::Utf8Encoding)
+}
+
+/// Decrypt arbitrary bytes produced by [`encrypt_bytes_with_rng`].
+pub fn decrypt_bytes(m: &[CiphertextBlock], k: SecretKey) -> Result<Vec<u8>> {
     let secret_key =
         ElGamalSecretKey::<Point<Secp256k1>>::from_scalar(GroupScalar::<Secp256k1>::from(k));
     let ciphertext = m
@@ -267,7 +338,7 @@ pub fn decrypt(m: &[(CurveEle<33>, CurveEle<33>)], k: SecretKey) -> Result<Strin
         .map(|(c1, c2)| Ok(((*c1).try_into()?, (*c2).try_into()?)))
         .collect::<Result<Vec<(Point<Secp256k1>, Point<Secp256k1>)>>>()?;
     let points = ElGamal::<Point<Secp256k1>>::decrypt(&ciphertext, &secret_key);
-    String::try_from(MessagePoints::from(points))
+    Vec::<u8>::try_from(MessagePoints::from(points))
 }
 
 #[cfg(test)]
@@ -319,12 +390,30 @@ mod test {
     }
 
     #[test]
+    fn test_bytes_to_field_keeps_binary_payload() {
+        let mut payload = vec![0, 255, 1, 2, 3];
+        payload.extend((0..FIELD_CHUNK_SIZE * 2).map(|i| (i % 251) as u8));
+
+        assert_eq!(field_to_bytes(&bytes_to_field(&payload)), payload);
+    }
+
+    #[test]
     fn test_string_to_affine() {
         let t: String = random(1024);
         assert_eq!(affine_to_str(&str_to_affine(&t).unwrap()).unwrap(), t);
 
         let t: String = random(127);
         assert_eq!(affine_to_str(&str_to_affine(&t).unwrap()).unwrap(), t);
+    }
+
+    #[test]
+    fn test_bytes_to_affine() {
+        let payload = [0, 1, 2, 3, 255, 128, 0, 42, 77, 0, 99];
+
+        assert_eq!(
+            affine_to_bytes(&bytes_to_affine(&payload).unwrap()),
+            payload
+        );
     }
 
     #[test]
@@ -380,25 +469,25 @@ mod test {
         assert_eq!(a_c1.x.b32(), c1_x);
         assert_eq!(a_c1.y.b32(), c1_y);
 
-        let mut shared_sec = Jacobian::default();
+        let mut mask_point = Jacobian::default();
         let cxt2 = ECMultContext::new_boxed();
-        cxt2.ecmult_const(&mut shared_sec, &pub_point, &r_sca);
-        let mut a_ss = Affine::from_gej(&shared_sec);
-        a_ss.x.normalize();
-        a_ss.y.normalize();
+        cxt2.ecmult_const(&mut mask_point, &pub_point, &r_sca);
+        let mut a_mask = Affine::from_gej(&mask_point);
+        a_mask.x.normalize();
+        a_mask.y.normalize();
 
-        let ss_x = [
+        let mask_x = [
             218, 19, 55, 137, 15, 46, 160, 160, 208, 222, 206, 77, 46, 79, 32, 80, 64, 243, 93, 23,
             223, 130, 148, 226, 131, 17, 254, 95, 43, 95, 35, 34,
         ];
 
-        let ss_y = [
+        let mask_y = [
             106, 127, 47, 58, 214, 6, 110, 28, 171, 176, 73, 11, 34, 28, 125, 10, 82, 154, 84, 154,
             11, 80, 191, 68, 111, 197, 98, 224, 84, 116, 208, 115,
         ];
-        assert_eq!(a_ss.x.b32(), ss_x);
-        assert_eq!(a_ss.y.b32(), ss_y);
-        let c2 = shared_sec.add_ge(&m_point);
+        assert_eq!(a_mask.x.b32(), mask_x);
+        assert_eq!(a_mask.y.b32(), mask_y);
+        let c2 = mask_point.add_ge(&m_point);
         let c2_y = [
             225, 196, 104, 44, 46, 208, 86, 14, 40, 40, 133, 81, 125, 222, 217, 21, 242, 64, 68,
             206, 194, 27, 61, 193, 20, 18, 110, 198, 39, 60, 214, 200,
@@ -457,6 +546,21 @@ mod test {
             decrypt(&encrypt(&message, pubkey).unwrap(), key).unwrap(),
             message
         );
+    }
+
+    #[test]
+    fn test_encrypt_decrypt_binary_bytes() {
+        let key =
+            SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")
+                .unwrap();
+        let pubkey = key.pubkey();
+        let mut rng = Hc128Rng::seed_from_u64(608);
+        let mut payload = vec![0, 255, 1, 2, 3];
+        payload.extend((0..FIELD_CHUNK_SIZE * 3).map(|i| (i % 251) as u8));
+
+        let ciphertext = encrypt_bytes_with_rng(&payload, pubkey, &mut rng).unwrap();
+
+        assert_eq!(decrypt_bytes(&ciphertext, key).unwrap(), payload);
     }
 
     #[test]

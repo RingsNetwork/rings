@@ -4,6 +4,8 @@ pub use encoder::Decoder;
 pub use encoder::Encoded;
 pub use encoder::Encoder;
 
+pub mod e2e;
+
 mod effects;
 
 mod payload;

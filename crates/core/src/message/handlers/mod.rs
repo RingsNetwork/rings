@@ -26,6 +26,8 @@ use crate::swarm::transport::SwarmTransport;
 pub mod connection;
 /// Operator and Handler for CustomMessage
 pub mod custom;
+/// Operator and Handler for E2E encrypted messages
+pub mod e2e;
 /// Operator and handler for DHT stabilization
 pub mod stabilization;
 /// Operator and Handler for Storage
