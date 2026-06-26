@@ -3,7 +3,6 @@
 #![warn(missing_docs)]
 
 use derivative::Derivative;
-use num_bigint::BigUint;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -112,10 +111,7 @@ impl FingerTable {
         let bias = did.bias(self.did);
 
         for k in 0..self.size {
-            let Ok(exponent) = u32::try_from(k) else {
-                continue;
-            };
-            let pos = Did::from(BigUint::from(2u16).pow(exponent));
+            let pos = Did::power_of_two(k);
 
             if bias.pos() < pos {
                 continue;

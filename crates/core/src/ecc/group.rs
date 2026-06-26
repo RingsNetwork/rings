@@ -30,15 +30,20 @@ use std::marker::PhantomData;
 use std::ops::Add;
 use std::ops::Mul;
 use std::ops::Neg;
+use std::sync::OnceLock;
 
 use ark_bls12_381::Fr as Bls12381ScalarField;
 use ark_bls12_381::G1Projective;
 use ark_ec::Group as ArkGroup;
 use ark_ff::Zero;
 use ark_std::UniformRand;
+#[cfg(feature = "curve-ristretto255")]
 use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
+#[cfg(feature = "curve-ristretto255")]
 use curve25519_dalek::ristretto::RistrettoPoint;
+#[cfg(feature = "curve-ristretto255")]
 use curve25519_dalek::scalar::Scalar as Ristretto255ScalarField;
+#[cfg(feature = "curve-ristretto255")]
 use curve25519_dalek::traits::Identity as _;
 use elliptic_curve::ff::Field as _;
 use libsecp256k1::curve::Affine;
@@ -214,18 +219,19 @@ pub struct Secp256r1;
 pub struct Bls12381G1;
 
 /// Ristretto255 group marker.
+#[cfg(feature = "curve-ristretto255")]
 #[derive(Debug)]
 pub struct Ristretto255;
 
 /// Ristretto255 group.
+#[cfg(feature = "curve-ristretto255")]
 pub type Ristretto255Group = Group<Ristretto255>;
 
 thread_local! {
-    static SECP256K1_GENERATOR: Point<Secp256k1> = Point::new(secp256k1_generator());
-    static SECP256K1_GEN_CONTEXT: Box<ECMultGenContext> = ECMultGenContext::new_boxed();
-    static SECP256K1_MUL_CONTEXT: Box<ECMultContext> = ECMultContext::new_boxed();
     static GROUP_RNG: RefCell<Hc128Rng> = RefCell::new(Hc128Rng::from_entropy());
 }
+
+static SECP256K1_GENERATOR: OnceLock<Jacobian> = OnceLock::new();
 
 impl<C: CurveGroup> Point<C> {
     /// Build a group element from the curve-native point type.
@@ -436,15 +442,13 @@ impl CurveGroup for Secp256k1 {
     }
 
     fn generator() -> Self::Point {
-        SECP256K1_GENERATOR.with(|generator| generator.inner)
+        *SECP256K1_GENERATOR.get_or_init(secp256k1_generator)
     }
 
     fn generator_mul(scalar: &Self::Scalar) -> Self::Point {
-        SECP256K1_GEN_CONTEXT.with(|context| {
-            let mut result = Jacobian::default();
-            context.ecmult_gen(&mut result, scalar);
-            result
-        })
+        let mut result = Jacobian::default();
+        secp256k1_generator_context().ecmult_gen(&mut result, scalar);
+        result
     }
 
     fn add(lhs: &Self::Point, rhs: &Self::Point) -> Self::Point {
@@ -459,11 +463,13 @@ impl CurveGroup for Secp256k1 {
         if point.is_infinity() {
             return secp256k1_identity();
         }
-        SECP256K1_MUL_CONTEXT.with(|context| {
-            let mut result = Jacobian::default();
-            context.ecmult_const(&mut result, &Affine::from_gej(point), scalar);
-            result
-        })
+        let mut result = Jacobian::default();
+        secp256k1_multiplication_context().ecmult_const(
+            &mut result,
+            &Affine::from_gej(point),
+            scalar,
+        );
+        result
     }
 
     fn eq(lhs: &Self::Point, rhs: &Self::Point) -> bool {
@@ -519,6 +525,7 @@ impl_curve_group_adapter! {
     }
 }
 
+#[cfg(feature = "curve-ristretto255")]
 impl_curve_group_adapter! {
     Ristretto255 {
         point: RistrettoPoint,
@@ -582,11 +589,25 @@ impl TryFrom<Point<Secp256k1>> for PublicKey<33> {
 
 fn secp256k1_generator() -> Jacobian {
     let scalar = SecpK1FieldScalar::from_int(1);
-    SECP256K1_GEN_CONTEXT.with(|context| {
-        let mut point = Jacobian::default();
-        context.ecmult_gen(&mut point, &scalar);
-        point
-    })
+    let mut point = Jacobian::default();
+    secp256k1_generator_context().ecmult_gen(&mut point, &scalar);
+    point
+}
+
+// Pre:
+// - libsecp256k1 exposes immutable precomputed tables under `static-context`.
+// - group randomness remains independent mutable state and stays in `GROUP_RNG`.
+// Invariant:
+// - every secp256k1 group operation borrows the same process-global contexts.
+// - no worker thread constructs its own `ECMultContext` or `ECMultGenContext`.
+// Post:
+// - secp256k1 arithmetic does not allocate per-thread precomputation tables.
+fn secp256k1_generator_context() -> &'static ECMultGenContext {
+    &libsecp256k1::ECMULT_GEN_CONTEXT
+}
+
+fn secp256k1_multiplication_context() -> &'static ECMultContext {
+    &libsecp256k1::ECMULT_CONTEXT
 }
 
 fn secp256k1_identity() -> Jacobian {
@@ -653,6 +674,47 @@ mod tests {
         group_laws::<Group<Secp256k1>>();
         group_laws::<Group<Secp256r1>>();
         group_laws::<Group<Bls12381G1>>();
+        #[cfg(feature = "curve-ristretto255")]
         group_laws::<Ristretto255Group>();
+    }
+
+    #[test]
+    fn secp256k1_contexts_are_shared_across_threads() {
+        const THREAD_COUNT: usize = 4;
+
+        let context_addresses = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..THREAD_COUNT)
+                .map(|_| {
+                    scope.spawn(|| {
+                        let scalar = SecpK1FieldScalar::from_int(2);
+                        let generator = <Secp256k1 as CurveGroup>::generator();
+                        let _ = <Secp256k1 as CurveGroup>::generator_mul(&scalar);
+                        let _ = <Secp256k1 as CurveGroup>::mul(&generator, &scalar);
+
+                        (
+                            secp256k1_generator_context() as *const ECMultGenContext as usize,
+                            secp256k1_multiplication_context() as *const ECMultContext as usize,
+                        )
+                    })
+                })
+                .collect();
+
+            let mut addresses = std::collections::BTreeSet::new();
+            for handle in handles {
+                match handle.join() {
+                    Ok(address) => {
+                        addresses.insert(address);
+                    }
+                    Err(payload) => std::panic::resume_unwind(payload),
+                }
+            }
+            addresses
+        });
+
+        assert_eq!(
+            context_addresses.len(),
+            1,
+            "secp256k1 precomputed contexts must be process-global"
+        );
     }
 }

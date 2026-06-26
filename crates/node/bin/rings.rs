@@ -4,6 +4,7 @@ use std::sync::Arc;
 use clap::Args;
 use clap::Parser;
 use clap::Subcommand;
+use clap::ValueEnum;
 use futures::pin_mut;
 use futures::StreamExt;
 use rings_node::extension::Backend;
@@ -14,6 +15,7 @@ use rings_node::native::cli::Client;
 use rings_node::native::config;
 use rings_node::native::endpoint::run_external_api;
 use rings_node::native::endpoint::run_internal_api;
+use rings_node::prelude::rings_core::chunk::ReassemblyLimits;
 use rings_node::prelude::rings_core::dht::Did;
 use rings_node::prelude::rings_core::ecc::SecretKey;
 use rings_node::prelude::rings_core::storage::sled::SledStorage;
@@ -34,6 +36,49 @@ struct Cli {
 
     #[arg(long, default_value_t = LogLevel::Info, value_enum, env)]
     log_level: LogLevel,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value = "multi-thread",
+        env,
+        help = "Tokio runtime scheduler for this process"
+    )]
+    runtime: RuntimeFlavor,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum RuntimeFlavor {
+    MultiThread,
+    CurrentThread,
+}
+
+impl RuntimeFlavor {
+    fn build(self) -> std::io::Result<tokio::runtime::Runtime> {
+        match self {
+            Self::MultiThread => tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build(),
+            Self::CurrentThread => tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+enum ReassemblyProfile {
+    Production,
+    Constrained,
+}
+
+impl ReassemblyProfile {
+    fn limits(self) -> ReassemblyLimits {
+        match self {
+            Self::Production => ReassemblyLimits::production(),
+            Self::Constrained => ReassemblyLimits::constrained(),
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -146,6 +191,15 @@ struct RunCommand {
         env
     )]
     pub storage_capacity: Option<u32>,
+
+    #[arg(
+        long,
+        value_enum,
+        default_value = "production",
+        env,
+        help = "Inbound chunk reassembly memory profile"
+    )]
+    pub reassembly_profile: ReassemblyProfile,
 
     #[command(flatten)]
     config_args: ConfigArgs,
@@ -394,6 +448,7 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
         ProcessorBuilder::from_config(&pc)?
             .storage(per_data_storage)
             .measure(measure)
+            .reassembly_limits(args.reassembly_profile.limits())
             .build()?,
     );
     println!("Did: {}", processor.swarm.did());
@@ -431,24 +486,33 @@ async fn pubsub_run(client_args: ClientArgs, topic: String) -> anyhow::Result<()
     loop {
         tokio::select! {
             line = stdin.next_line() => {
-                let line = line?.expect("stdin closed");
-                client.publish_message_to_topic(&topic, &line).await?;
+                match line? {
+                    Some(line) => {
+                        client.publish_message_to_topic(&topic, &line).await?;
+                    }
+                    None => return Ok(()),
+                }
             }
             msg = stream.next() => {
-                let msg = msg.expect("sub stream closed");
-                println!("{msg}");
+                match msg {
+                    Some(msg) => println!("{msg}"),
+                    None => return Ok(()),
+                }
             }
         }
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     dotenv::dotenv().ok();
 
     let cli = Cli::parse();
-    init_logging(cli.log_level);
+    init_logging(cli.log_level.clone());
+    let runtime = cli.runtime.build()?;
+    runtime.block_on(run(cli))
+}
 
+async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Command::Run(args) => daemon_run(args).await,
         Command::Pubsub(args) => pubsub_run(args.client_args, args.topic).await,

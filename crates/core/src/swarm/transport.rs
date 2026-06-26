@@ -29,6 +29,7 @@ use rings_transport::delivery::DeliveryFuture;
 use crate::chunk::Chunk;
 use crate::chunk::ChunkList;
 use crate::chunk::Framing;
+use crate::chunk::ReassemblyLimits;
 use crate::chunk::WireReserves;
 use crate::consts::TRANSPORT_MAX_SIZE;
 use crate::dht::entry::PlacementMiss;
@@ -64,9 +65,27 @@ pub struct SwarmTransport {
     session_sk: SessionSk,
     pub(crate) dht: Arc<PeerRing>,
     storage_redundancy: u16,
+    reassembly_limits: ReassemblyLimits,
     storage_lookup_observations: Mutex<StorageLookupObservationMap>,
     #[allow(dead_code)]
     measure: Option<MeasureImpl>,
+}
+
+/// Runtime limits used by [`SwarmTransport`].
+#[derive(Clone, Copy)]
+pub(crate) struct SwarmTransportSettings {
+    storage_redundancy: u16,
+    reassembly_limits: ReassemblyLimits,
+}
+
+impl SwarmTransportSettings {
+    /// Build transport settings from storage repair redundancy and chunk reassembly limits.
+    pub(crate) fn new(storage_redundancy: u16, reassembly_limits: ReassemblyLimits) -> Self {
+        Self {
+            storage_redundancy,
+            reassembly_limits,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -229,21 +248,22 @@ fn spawn_chunked_send(
 }
 
 impl SwarmTransport {
-    pub fn new(
+    pub(crate) fn new(
         network_id: u32,
         ice_servers: &str,
         external_address: Option<String>,
         session_sk: SessionSk,
         dht: Arc<PeerRing>,
         measure: Option<MeasureImpl>,
-        storage_redundancy: u16,
+        settings: SwarmTransportSettings,
     ) -> Self {
         Self {
             network_id,
             transport: Transport::new(ice_servers, external_address),
             session_sk,
             dht,
-            storage_redundancy,
+            storage_redundancy: settings.storage_redundancy,
+            reassembly_limits: settings.reassembly_limits,
             storage_lookup_observations: Mutex::new(BTreeMap::new()),
             measure,
         }
@@ -252,6 +272,11 @@ impl SwarmTransport {
     /// Redundancy used by storage repair and anti-entropy.
     pub(crate) fn storage_redundancy(&self) -> u16 {
         self.storage_redundancy
+    }
+
+    /// Chunk reassembly limits enforced by inbound callbacks.
+    pub(crate) fn reassembly_limits(&self) -> ReassemblyLimits {
+        self.reassembly_limits
     }
 
     /// Ensure the storage API redundancy matches repair redundancy.

@@ -6,6 +6,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use rings_core::chunk::ReassemblyLimits;
 use rings_core::dht::Did;
 use rings_core::dht::EntryStorage;
 use rings_core::dht::DEFAULT_FINGER_TABLE_SIZE;
@@ -188,6 +189,7 @@ pub struct ProcessorBuilder {
     measure: Option<MeasureImpl>,
     stabilize_interval: Duration,
     dht_finger_table_size: usize,
+    reassembly_limits: ReassemblyLimits,
 }
 
 /// Processor for rings-node rpc server
@@ -217,6 +219,7 @@ impl ProcessorBuilder {
             measure: None,
             stabilize_interval: config.stabilize_interval,
             dht_finger_table_size: DEFAULT_FINGER_TABLE_SIZE,
+            reassembly_limits: ReassemblyLimits::production(),
         })
     }
 
@@ -238,6 +241,12 @@ impl ProcessorBuilder {
         self
     }
 
+    /// Set inbound chunk reassembly limits for the processor's swarm.
+    pub fn reassembly_limits(mut self, limits: ReassemblyLimits) -> Self {
+        self.reassembly_limits = limits;
+        self
+    }
+
     /// Build the [Processor].
     pub fn build(self) -> Result<Processor> {
         self.session_sk
@@ -251,6 +260,7 @@ impl ProcessorBuilder {
             SwarmBuilder::new(self.network_id, &self.ice_servers, storage, self.session_sk);
         swarm_builder = swarm_builder.dht_storage_redundancy(DATA_REDUNDANT);
         swarm_builder = swarm_builder.dht_finger_table_size(self.dht_finger_table_size);
+        swarm_builder = swarm_builder.reassembly_limits(self.reassembly_limits);
 
         if let Some(external_address) = self.external_address {
             swarm_builder = swarm_builder.external_address(external_address);

@@ -104,6 +104,26 @@ impl ReassemblyLimits {
         }
     }
 
+    /// Smaller limits for constrained deployments.
+    ///
+    /// This profile preserves the protocol-level 60 MB send ceiling elsewhere,
+    /// but bounds one receiver's reassembly memory to a few MiB so weak devices
+    /// can reject oversized in-flight transfers before allocating for them.
+    pub fn constrained() -> Self {
+        const CONSTRAINED_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
+        const CONSTRAINED_TOTAL_COST: usize = 8 * 1024 * 1024;
+
+        Self {
+            max_pending_messages: 64,
+            max_chunk_data_len: MAX_DATA_CHANNEL_MESSAGE_SIZE,
+            max_message_bytes: CONSTRAINED_MESSAGE_BYTES,
+            max_chunks_per_message: CONSTRAINED_MESSAGE_BYTES / MIN_CHUNK_DATA + 1,
+            max_total_buffered_cost: CONSTRAINED_TOTAL_COST,
+            slot_overhead: 128,
+            max_completed_ids: 256,
+        }
+    }
+
     /// Clamp nonsensical values to safe minimums so a caller-supplied [`ReassemblyLimits`] cannot
     /// disable an invariant: every cap is forced to at least `1` (a `0` cap would, depending on the
     /// field, reject all traffic or — for `max_completed_ids` — silently void the tombstone
@@ -684,6 +704,22 @@ mod test {
             slot_overhead: 8,
             max_completed_ids: 8,
         }
+    }
+
+    #[test]
+    fn constrained_reassembly_limits_are_smaller_than_production() {
+        let production = ReassemblyLimits::production();
+        let constrained = ReassemblyLimits::constrained();
+
+        assert!(constrained.max_pending_messages < production.max_pending_messages);
+        assert!(constrained.max_message_bytes < production.max_message_bytes);
+        assert!(constrained.max_chunks_per_message < production.max_chunks_per_message);
+        assert!(constrained.max_total_buffered_cost < production.max_total_buffered_cost);
+        assert!(constrained.max_completed_ids < production.max_completed_ids);
+        assert_eq!(
+            constrained.max_chunk_data_len,
+            production.max_chunk_data_len
+        );
     }
 
     #[test]

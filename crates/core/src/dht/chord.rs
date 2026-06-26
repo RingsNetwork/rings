@@ -5,7 +5,6 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 
 use async_trait::async_trait;
-use num_bigint::BigUint;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -377,10 +376,7 @@ impl Chord<PeerRingAction> for PeerRing {
         fix_finger_index = (fix_finger_index + 1) % finger_table_size;
 
         // Get finger did.
-        let Ok(exponent) = u32::try_from(fix_finger_index) else {
-            return Ok(PeerRingAction::None);
-        };
-        let finger_did = Did::from(BigUint::from(2u16).pow(exponent));
+        let finger_did = Did::power_of_two(fix_finger_index);
 
         // Caution here that there are also locks in find_successor.
         // You cannot lock finger table before calling find_successor.
@@ -694,6 +690,8 @@ mod storage_tests;
 mod tests {
     //! test module
     use std::str::FromStr;
+
+    use num_bigint::BigUint;
 
     use super::*;
     use crate::ecc::SecretKey;

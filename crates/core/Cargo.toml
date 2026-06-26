@@ -17,7 +17,11 @@ workspace = true
 # Deprecated compatibility alias. The formerly experimental correct-chord path
 # now runs by default.
 experimental = ["std"]
-default = ["std"]
+# Provider login/signature algorithms stay unconditional: secp256k1,
+# secp256r1, Ed25519, and BLS12-381 must all remain available by default.
+# This flag only controls the non-login Ristretto ElGamal group adapter.
+default = ["std", "curve-ristretto255"]
+curve-ristretto255 = ["dep:curve25519-dalek"]
 std = [
     "webrtc",
     "sled",
@@ -60,7 +64,7 @@ base58-monero = { version = "0.3", default-features = false, features = ["check"
 bincode = "1.3.3"
 bytes = { version = "1.2.1", features = ["serde"] }
 chrono = { version = "0.4.19", features = ["wasmbind"] }
-curve25519-dalek = "4.1.3"
+curve25519-dalek = { version = "4.1.3", optional = true }
 dashmap = "5"
 derivative = "2.2.0"
 ecdsa = { version = "0.16.6", features = ["signing"] }
@@ -74,8 +78,9 @@ futures = "0.3.21"
 futures-timer = "3.0.2"
 hex = "0.4.3"
 itertools = "0.10.3"
-libsecp256k1 = "0.7.0"
+libsecp256k1 = { version = "0.7.0", features = ["static-context"] }
 num-bigint = "0.4.3"
+num-traits = "0.2.19"
 p256 = "0.13.2"
 primeorder = "0.13.2"
 rand = { version = "0.8.5", features = ["getrandom"] }
@@ -101,7 +106,7 @@ webrtc = { workspace = true, optional = true }
 
 # dummy
 lazy_static = { version = "1.4.0", optional = true }
-tokio = { version = "1.13.0", features = ["full"], optional = true }
+tokio = { version = "1.13.0", features = ["rt", "sync", "time"], optional = true }
 
 # wasm
 js-sys = { workspace = true, optional = true }
@@ -129,4 +134,4 @@ wasm-bindgen-test = { workspace = true }
 # Model checker — pulls getrandom/tiny_http, which don't build for wasm32, so
 # it (and the dht_stateright module that uses it) is non-wasm only.
 stateright = "0.31.0"
-tokio = { version = "1.13.0", features = ["full"] }
+tokio = { version = "1.13.0", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }

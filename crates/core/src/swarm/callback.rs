@@ -71,11 +71,12 @@ impl InnerSwarmCallback {
     /// Create a new [InnerSwarmCallback] with the provided transport and callback.
     pub fn new(transport: Arc<SwarmTransport>, callback: SharedSwarmCallback) -> Self {
         let message_handler = MessageHandler::new(transport.clone(), callback.clone());
+        let reassembler = MessageReassembler::with_limits(transport.reassembly_limits());
         Self {
             transport,
             message_handler,
             callback,
-            reassembler: Default::default(),
+            reassembler: FuturesMutex::new(reassembler),
         }
     }
 

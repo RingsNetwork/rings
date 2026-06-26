@@ -12,7 +12,7 @@ rings-core = { workspace = true }
 rings-node = { workspace = true }
 rings-rpc = { workspace = true }
 rings-snark = { workspace = true }
-tokio = { version = "1.13.0", features = ["full"] }
+tokio = { version = "1.13.0", features = ["macros", "rt-multi-thread"] }
 
 [[example]]
 name = "rings-bn256-example"

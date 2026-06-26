@@ -1,40 +1,44 @@
 #![warn(missing_docs)]
 
-//! This module defines distributed identity for rings network.
-//! The Did of rings network is also a abstract Ring structure of abstract algebra.
-//! The Did is implemented with H160, which is a 160 bits, which can present as:
+//! Distributed identities for the Rings DHT.
 //!
-//! ## Algebraic Did
-//! In abstract algebra, a "ring" is an algebraic structure consisting of a non-empty set
-//! and two binary operations (commonly referred to as addition and multiplication).
-//! The definition of a ring can be stated as follows:
+//! A [`Did`] is a protocol identity located on the Chord identifier circle. It
+//! is also the concrete carrier for the additive cyclic group of `Z / 2^160`
+//! used by Chord routing and placement. The
+//! [`crate::dht::ring::AbelianGroup`] trait names the operation set; `Did`
+//! supplies the representation and implementation. `Did` does not implement
+//! [`crate::dht::ring::Ring`] because Chord never uses identifier
+//! multiplication.
 //!
-//! * Addition is closed: For any two elements a and b in R, their sum a + b belongs to R.
+//! ## Chord identity model
 //!
-//! * Addition is commutative: For any two elements a and b in R, a + b = b + a.
+//! Chord assigns every node, resource, and placement target a point in a
+//! 160-bit circular identifier space. Clockwise distance is not ordinary
+//! integer distance: it is subtraction in `Z / 2^160`. For an observer `b`, the
+//! relative position of `x` is therefore `x - b`. This translation makes the
+//! observer's position the local zero point and lets a total byte order witness
+//! clockwise ordering from that observer.
 //!
-//! * Addition is associative: For any three elements a, b, and c in R, (a + b) + c = a + (b + c).
+//! [`BiasId`] is the domain type for that translated view. It is used when a
+//! caller needs to compare identifiers relative to a reference point instead of
+//! comparing their raw encodings. The raw [`Did`] order remains the canonical
+//! representation order; biased order is a separate protocol proposition.
 //!
-//! * Existence of an additive identity: There exists an element 0 in R such that for any element a in R, a + 0 = 0 + a = a.
+//! ## Placement model
 //!
-//! * Existence of additive inverses: For every element a in R, there exists an element -a such that a + (-a) = (-a) + a = 0.
+//! Redundant storage placement uses affine offsets around the identifier ring.
+//! For redundancy `n`, [`Did::rotate_affine`] returns
+//! `self + floor(2^160 * i / n)` for every `i in 0..n`. This is a DHT placement
+//! operation over identities, not a new carrier type. The additive group law is
+//! witnessed by `Did`'s [`crate::dht::ring::AbelianGroup`] implementation.
 //!
-//! * Multiplication is closed: For any two elements a and b in R, their product a · b belongs to R.
+//! ## Boundary
 //!
-//! * Multiplication satisfies the distributive law:
-//!
-//! For any three elements a, b, and c in R, a · (b + c) = a · b + a · c and (a + b) · c = a · c + b · c.
-//!
-//! ## Concrete Did
-//!
-//! In our implementation, we have essentially implemented a cyclic Ring structure.
-//! As a result, we can utilize rotation operations as a substitute for multiplication.
-//! Within this module, we have implemented the additive operation for Did, as well as the rotate operation in place of multiaction.
-//! This is because what we actually require is the scalar multiplication of affine multiaction.
-//! Did is represented as a wrapper of H160 (\[u8; 20\]). Since there is no `Eq` trait available for algebraic Rings, we have introduced the [BiasId]
-//! struct to implement [Eq] and [PartialEq].
+//! `Did` owns parsing, serialization, display, biasing, range checks, fixed
+//! width arithmetic, and DHT placement. Protocol handlers depend on `Did`
+//! operations and do not perform byte-level arithmetic.
 
-use std::cmp::PartialEq;
+use std::num::NonZeroU32;
 use std::ops::Add;
 use std::ops::Deref;
 use std::ops::Neg;
@@ -43,14 +47,25 @@ use std::str::FromStr;
 
 use ethereum_types::H160;
 use num_bigint::BigUint;
+use num_traits::Zero;
 use serde::Deserialize;
 use serde::Serialize;
 
+use super::ring::AbelianGroup;
 use crate::ecc::HashStr;
 use crate::error::Error;
 use crate::error::Result;
 
-/// Did is a finate Ring R(P) where P = 2^160, wrap H160.
+/// DHT identity over the `Z / 2^160` identifier ring.
+///
+/// Invariant: the inner [`H160`] is the canonical 20-byte big-endian encoding
+/// of one residue class modulo `2^160`.
+///
+/// Law: `Did` addition, subtraction, and negation are the lifted additive group
+/// operations of the underlying 160-bit ring.
+///
+/// Law: parsing, display, serialization, and conversion through [`H160`]
+/// preserve the same 20-byte canonical encoding.
 #[derive(Copy, Clone, Eq, Ord, PartialEq, PartialOrd, Debug, Serialize, Deserialize, Hash)]
 pub struct Did(H160);
 
@@ -61,10 +76,17 @@ impl std::fmt::Display for Did {
     }
 }
 
-/// Bias Did is a special Did which set origin Did's identity to bias
-/// The underlying concept of BiasId is that while we cannot determine the order between two Dids, such as `did_a` and `did_b`,
-/// we can establish a reference Did, referred to as `did_x`, and compare which one is closer to it. Hence, we introduced BiasId,
-/// where a bias value is applied. Essentially, it considers the midpoint `x` as the zero point within the Ring algebraic structure for observation.
+/// DHT identity observed from a reference point.
+///
+/// Chord interval comparisons are relative to an observer. Given raw
+/// identifiers `a` and `b`, there is no single protocol answer to "which is
+/// closer" until a reference identifier `x` is chosen. `BiasId` records that
+/// reference and stores `did - x`, so the reference point becomes zero in the
+/// lifted ring order.
+///
+/// Invariant: `did` is always stored as `raw_did - bias`.
+///
+/// Law: `BiasId::new(x, y).to_did() == y`.
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Serialize, Deserialize, Hash)]
 pub struct BiasId {
     /// the zero point for determine order of Did.
@@ -73,9 +95,10 @@ pub struct BiasId {
     did: Did,
 }
 
-/// The `Rotate` trait represents a affine transformation for values
-/// in a finite ring. It defines a method `rotate` which allows applying
-/// the transformation to the implementing type.
+/// Affine rotation on the 160-bit Chord circle.
+///
+/// For [`Did`], degrees are mapped to the dyadic ring offset
+/// `floor(2^160 * angle / 360)`.
 pub trait Rotate<Rhs = u16> {
     /// output type of rotate operation
     type Output;
@@ -86,8 +109,10 @@ pub trait Rotate<Rhs = u16> {
 impl Rotate<u16> for Did {
     type Output = Self;
     fn rotate(&self, angle: u16) -> Self::Output {
-        *self
-            + Did::from(BigUint::from(2u16).pow(160) * BigUint::from(angle) / BigUint::from(360u32))
+        let Some(denominator) = NonZeroU32::new(360) else {
+            return *self;
+        };
+        *self + Did::dyadic_fraction(angle.into(), denominator)
     }
 }
 
@@ -150,7 +175,12 @@ impl From<&BiasId> for Did {
 
 impl From<u32> for Did {
     fn from(id: u32) -> Did {
-        Self::from(BigUint::from(id))
+        let bytes = id.to_be_bytes();
+        let mut out = [0u8; Self::BYTE_LEN];
+        for (dst, src) in out.iter_mut().rev().zip(bytes.iter().rev()) {
+            *dst = *src;
+        }
+        Self::from_be_bytes(out)
     }
 }
 
@@ -162,13 +192,32 @@ impl TryFrom<HashStr> for Did {
 }
 
 impl Did {
-    /// Test x <- (a, b)
+    const BITS: usize = 160;
+
+    const BYTE_LEN: usize = 20;
+
+    const ZERO: Self = Self(H160([0u8; Self::BYTE_LEN]));
+
+    fn from_be_bytes(bytes: [u8; Self::BYTE_LEN]) -> Self {
+        Self(H160::from(bytes))
+    }
+
+    fn to_be_bytes(self) -> [u8; Self::BYTE_LEN] {
+        self.0.to_fixed_bytes()
+    }
+
+    /// Test whether this identity is inside the open clockwise interval
+    /// `(a, b)` observed from `base_id`.
+    ///
+    /// Post: returns `true` exactly when `self - base_id` is strictly after
+    /// `a - base_id` and strictly before `b - base_id` in the canonical ring
+    /// order.
     pub fn in_range(&self, base_id: Self, a: Self, b: Self) -> bool {
         // Test x > a && b > x
         *self - base_id > a - base_id && b - base_id > *self - base_id
     }
 
-    /// Transform Did to BiasDid
+    /// Transform this identity into the view whose zero point is `did`.
     pub fn bias(&self, did: Self) -> BiasId {
         BiasId::new(did, *self)
     }
@@ -188,16 +237,93 @@ impl Did {
         if scalar == 0 {
             return Err(Error::InvalidAffineScalar);
         }
+        let Some(denominator) = NonZeroU32::new(u32::from(scalar)) else {
+            return Err(Error::InvalidAffineScalar);
+        };
 
-        let ring_size = BigUint::from(2u16).pow(160);
-        let denominator = BigUint::from(scalar);
-        let origin = BigUint::from(*self);
         Ok((0..scalar)
             .map(|i| {
-                let offset = (&ring_size * BigUint::from(i)) / &denominator;
-                Did::from(origin.clone() + offset)
+                let offset = Did::dyadic_fraction(i.into(), denominator);
+                *self + offset
             })
             .collect())
+    }
+
+    /// Return `2^bit` in `Z / 2^160`.
+    ///
+    /// Law: `bit < 160 => result = 2^bit`.
+    /// Law: `bit >= 160 => result = 0`.
+    pub fn power_of_two(bit: usize) -> Self {
+        if bit >= Self::BITS {
+            return Self::ZERO;
+        }
+
+        let mut bytes = [0u8; Self::BYTE_LEN];
+        set_ring_bit(&mut bytes, bit);
+        Self::from_be_bytes(bytes)
+    }
+
+    // Pre: `denominator != 0`.
+    // Post: result is `floor(2^160 * numerator / denominator) mod 2^160`.
+    // Invariant: `remainder < denominator` before and after every bit step.
+    fn dyadic_fraction(numerator: u32, denominator: NonZeroU32) -> Self {
+        let denominator = u64::from(denominator.get());
+        let mut remainder = u64::from(numerator) % denominator;
+        let mut bytes = [0u8; Self::BYTE_LEN];
+
+        for bit in (0..Self::BITS).rev() {
+            remainder *= 2;
+            if remainder >= denominator {
+                set_ring_bit(&mut bytes, bit);
+                remainder -= denominator;
+            }
+        }
+
+        Self::from_be_bytes(bytes)
+    }
+
+    // Post: result = (self + rhs) mod 2^160.
+    // Preservation: carry beyond the most-significant byte is discarded, which
+    // is exactly quotienting by the 160-bit ring modulus.
+    fn add_mod(self, rhs: Self) -> Self {
+        let lhs = self.to_be_bytes();
+        let rhs = rhs.to_be_bytes();
+        let mut out = [0u8; Self::BYTE_LEN];
+        let mut carry = 0u16;
+
+        for ((dst, lhs), rhs) in out
+            .iter_mut()
+            .rev()
+            .zip(lhs.iter().rev())
+            .zip(rhs.iter().rev())
+        {
+            let sum = u16::from(*lhs) + u16::from(*rhs) + carry;
+            let [low, _] = sum.to_le_bytes();
+            *dst = low;
+            carry = sum >> 8;
+        }
+
+        Self::from_be_bytes(out)
+    }
+
+    // Post: result = -self mod 2^160.
+    // Preservation: two's-complement over exactly 20 bytes computes the
+    // additive inverse in `Z / 2^160`; zero maps to zero.
+    fn additive_inverse(self) -> Self {
+        let mut out = self.to_be_bytes();
+        for byte in &mut out {
+            *byte = !*byte;
+        }
+
+        let mut carry = 1u16;
+        for byte in out.iter_mut().rev() {
+            let sum = u16::from(*byte) + carry;
+            let [low, _] = sum.to_le_bytes();
+            *byte = low;
+            carry = sum >> 8;
+        }
+
+        Self::from_be_bytes(out)
     }
 }
 
@@ -226,7 +352,7 @@ impl Deref for Did {
 
 impl From<Did> for H160 {
     fn from(a: Did) -> Self {
-        a.0.to_owned()
+        a.0
     }
 }
 
@@ -238,15 +364,20 @@ impl From<Did> for BigUint {
 
 impl From<BigUint> for Did {
     fn from(a: BigUint) -> Self {
-        let ff = a % (BigUint::from(2u16).pow(160));
-        let bytes = ff.to_bytes_be();
-        let mut res = [0u8; 20];
-        // Post: modulo 2^160 makes bytes.len() <= 20. Right-aligning with
-        // iterators keeps the conversion total and panic-free.
-        for (dst, src) in res.iter_mut().rev().zip(bytes.iter().rev()) {
+        let bytes = a.to_bytes_be();
+        let mut out = [0u8; Self::BYTE_LEN];
+
+        // Post: taking the least-significant 20 bytes is reduction modulo
+        // `2^160`; right-aligning keeps the conversion total and panic-free.
+        for (dst, src) in out
+            .iter_mut()
+            .rev()
+            .zip(bytes.iter().rev().take(Self::BYTE_LEN))
+        {
             *dst = *src;
         }
-        Self(H160::from_slice(&res))
+
+        Self::from_be_bytes(out)
     }
 }
 
@@ -263,12 +394,22 @@ impl FromStr for Did {
     }
 }
 
-// impl Finate Ring For Did
+impl Zero for Did {
+    fn zero() -> Self {
+        Self::ZERO
+    }
+
+    fn is_zero(&self) -> bool {
+        *self == Self::ZERO
+    }
+}
+
+impl AbelianGroup for Did {}
+
 impl Neg for Did {
     type Output = Self;
     fn neg(self) -> Self {
-        let ret = BigUint::from(2u16).pow(160) - BigUint::from(self);
-        ret.into()
+        self.additive_inverse()
     }
 }
 
@@ -283,7 +424,7 @@ impl Neg for &Did {
 impl Add for Did {
     type Output = Self;
     fn add(self, rhs: Self) -> Self {
-        ((BigUint::from(self) + BigUint::from(rhs)) % (BigUint::from(2u16).pow(160))).into()
+        self.add_mod(rhs)
     }
 }
 
@@ -294,12 +435,105 @@ impl Sub for Did {
     }
 }
 
+// Pre: `bytes` encodes a 160-bit big-endian ring element.
+// Post: if `bit < 160`, the corresponding bit is set; otherwise `bytes` is
+// unchanged.
+fn set_ring_bit(bytes: &mut [u8; Did::BYTE_LEN], bit: usize) {
+    let Some(byte) = (Did::BYTE_LEN - 1).checked_sub(bit / 8) else {
+        return;
+    };
+
+    if let Some(slot) = bytes.get_mut(byte) {
+        *slot |= 1u8 << (bit % 8);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::fmt::Debug;
     use std::str::FromStr;
 
     use super::*;
+    use crate::dht::ring::AbelianGroup;
+
+    fn ring_size() -> BigUint {
+        BigUint::from(1u8) << 160usize
+    }
+
+    fn samples() -> Vec<Did> {
+        vec![
+            Did::zero(),
+            Did::from(1u32),
+            Did::from(10u32),
+            Did::from(ring_size() - BigUint::from(1u8)),
+            Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap(),
+        ]
+    }
+
+    fn assert_abelian_group_laws<T>(values: &[T])
+    where T: AbelianGroup + Debug {
+        for &a in values {
+            assert_eq!(a + T::zero(), a);
+            assert_eq!(T::zero() + a, a);
+            assert_eq!(a + (-a), T::zero());
+            assert_eq!((-a) + a, T::zero());
+            assert_eq!(-(-a), a);
+
+            for &b in values {
+                let lhs = a + b;
+                let rhs = b + a;
+                assert_eq!(lhs, rhs);
+
+                for &c in values {
+                    let lhs = (a + b) + c;
+                    let rhs = a + (b + c);
+                    assert_eq!(lhs, rhs);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn did_abelian_group_laws_hold_on_representative_set() {
+        assert_abelian_group_laws(&samples());
+    }
+
+    #[test]
+    fn did_addition_matches_biguint_ring_oracle() {
+        for lhs in samples() {
+            for rhs in samples() {
+                let expected = Did::from((BigUint::from(lhs) + BigUint::from(rhs)) % ring_size());
+                assert_eq!(lhs + rhs, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn did_dyadic_fraction_matches_biguint_oracle() {
+        for denominator in [1u32, 2, 3, 7, 17, 360, 361, u16::MAX.into()] {
+            let Some(nonzero_denominator) = NonZeroU32::new(denominator) else {
+                continue;
+            };
+
+            for numerator in [
+                0,
+                1,
+                denominator / 2,
+                denominator.saturating_sub(1),
+                denominator,
+                denominator.saturating_add(1),
+                denominator.saturating_mul(2).saturating_add(1),
+            ] {
+                let expected =
+                    Did::from(ring_size() * BigUint::from(numerator) / BigUint::from(denominator));
+                assert_eq!(
+                    Did::dyadic_fraction(numerator, nonzero_denominator),
+                    expected
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_did() {
@@ -347,6 +581,44 @@ mod tests {
         let did = Did::from(10u32);
         let ret: Did = did.rotate(180);
         assert_eq!(ret, did + Did::from(BigUint::from(2u16).pow(159)));
+    }
+
+    #[test]
+    fn did_fixed_width_arithmetic_matches_biguint_ring_oracle() -> Result<()> {
+        let zero = Did::from(0u32);
+        let one = Did::from(1u32);
+        let max = Did::from(ring_size() - BigUint::from(1u8));
+        let sample = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0")?;
+
+        assert_eq!(max + one, zero);
+        assert_eq!(zero - one, max);
+        assert_eq!(-zero, zero);
+        assert_eq!(-sample + sample, zero);
+
+        for (lhs, rhs) in [(zero, one), (one, max), (sample, max), (sample, sample)] {
+            let expected = Did::from((BigUint::from(lhs) + BigUint::from(rhs)) % ring_size());
+            assert_eq!(lhs + rhs, expected);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn did_rotate_matches_biguint_dyadic_offset_oracle() {
+        let did = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
+
+        for angle in [0u16, 1, 90, 180, 359, 360, 361, u16::MAX] {
+            let expected_offset =
+                Did::from(ring_size() * BigUint::from(angle) / BigUint::from(360u32));
+            assert_eq!(did.rotate(angle), did + expected_offset);
+        }
+    }
+
+    #[test]
+    fn did_power_of_two_matches_biguint_oracle() {
+        for bit in [0usize, 1, 8, 31, 32, 63, 64, 127, 128, 159, 160, 255] {
+            let expected = Did::from(BigUint::from(1u8) << bit);
+            assert_eq!(Did::power_of_two(bit), expected);
+        }
     }
 
     #[test]

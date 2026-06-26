@@ -9,7 +9,7 @@ repository.workspace = true
 [dependencies]
 rings-core = { workspace = true }
 rings-node = { workspace = true }
-tokio = { version = "1.13.0", features = ["full"] }
+tokio = { version = "1.13.0", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 
 [[example]]
 name = "rings-tcp-relay-example"

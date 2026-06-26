@@ -56,6 +56,7 @@ use crate::ecc::group::CryptographicGroup;
 use crate::ecc::group::CyclicGroup;
 use crate::ecc::group::Group;
 use crate::ecc::group::GroupOps;
+#[cfg(feature = "curve-ristretto255")]
 use crate::ecc::group::Ristretto255Group;
 use crate::ecc::group::Secp256k1;
 use crate::ecc::group::Secp256r1;
@@ -75,6 +76,7 @@ pub type Secp256r1ElGamal = ElGamal<Group<Secp256r1>>;
 pub type Bls12381G1ElGamal = ElGamal<Group<Bls12381G1>>;
 
 /// ElGamal over Ristretto255 group elements.
+#[cfg(feature = "curve-ristretto255")]
 pub type Ristretto255ElGamal = ElGamal<Ristretto255Group>;
 
 /// ElGamal public key `h = xg` over one cyclic group.
@@ -288,6 +290,7 @@ mod test {
     use crate::ecc::group::Bls12381G1;
     use crate::ecc::group::CyclicGroup;
     use crate::ecc::group::Group;
+    #[cfg(feature = "curve-ristretto255")]
     use crate::ecc::group::Ristretto255Group;
     use crate::ecc::group::Secp256k1;
     use crate::ecc::group::Secp256r1;
@@ -427,6 +430,7 @@ mod test {
         encrypt_decrypt_over_curve_group::<Group<Secp256k1>>();
         encrypt_decrypt_over_curve_group::<Group<Secp256r1>>();
         encrypt_decrypt_over_curve_group::<Group<Bls12381G1>>();
+        #[cfg(feature = "curve-ristretto255")]
         encrypt_decrypt_over_curve_group::<Ristretto255Group>();
     }
 }

@@ -1,7 +1,6 @@
 #![warn(missing_docs)]
 use std::str::FromStr;
 
-use num_bigint::BigUint;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -213,11 +212,11 @@ impl TryFrom<MessagePayload> for Entry {
     type Error = Error;
     fn try_from(msg: MessagePayload) -> Result<Self> {
         // Relay entries target the signer's successor on R = Z / 2^160, so the
-        // `+ 1` intentionally wraps through `Did::from(BigUint)`.
-        let did = BigUint::from(msg.signer()) + BigUint::from(1u16);
+        // `+ 1` intentionally wraps in the fixed-width DID ring.
+        let did = msg.signer() + Did::from(1u32);
         let data = msg.encode()?;
         Ok(Self {
-            did: did.into(),
+            did,
             data: vec![data],
             kind: EntryKind::RelayMessage,
         })
@@ -400,6 +399,8 @@ impl Entry {
 
 #[cfg(test)]
 mod tests {
+    use num_bigint::BigUint;
+
     use super::*;
     use crate::ecc::SecretKey;
     use crate::message::Message;
