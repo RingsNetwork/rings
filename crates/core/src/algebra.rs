@@ -296,17 +296,32 @@ where T: Field + Clone + Eq + Debug {
 
 /// Assert module laws for representative scalar and element samples.
 ///
-/// This helper checks the scalar ring laws, element abelian-group laws, scalar
-/// additivity, element additivity, scalar-associativity, and right identity of
-/// the scalar action. It is written for right actions: `element * scalar`.
+/// This helper checks the scalar ring laws and the right scalar-action laws. It
+/// is written for right actions: `element * scalar`.
 #[cfg(test)]
 pub fn assert_module_laws<Scalar, Element>(scalars: &[Scalar], elements: &[Element])
 where
     Scalar: Ring + Clone + Eq + Debug,
     Element: Module<Scalar> + Clone + Eq + Debug,
 {
-    assert_abelian_group_laws(elements);
     assert_ring_laws(scalars);
+    assert_module_action_laws(scalars, elements);
+}
+
+/// Assert right scalar-action laws for representative samples.
+///
+/// This helper assumes the caller has already checked the scalar carrier laws.
+/// It still checks the element abelian-group laws because module elements carry
+/// their own additive group structure. Use it when a test has already run a
+/// stricter scalar law helper, such as [`assert_field_laws`], and only needs the
+/// module action witness afterward.
+#[cfg(test)]
+pub fn assert_module_action_laws<Scalar, Element>(scalars: &[Scalar], elements: &[Element])
+where
+    Scalar: Ring + Clone + Eq + Debug,
+    Element: Module<Scalar> + Clone + Eq + Debug,
+{
+    assert_abelian_group_laws(elements);
 
     for s in scalars {
         for t in scalars {

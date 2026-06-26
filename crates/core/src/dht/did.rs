@@ -59,6 +59,9 @@ use crate::ecc::HashStr;
 use crate::error::Error;
 use crate::error::Result;
 
+/// Non-zero witness for the 360-degree denominator used by [`Rotate`].
+const FULL_ROTATION_DENOMINATOR: NonZeroU32 = NonZeroU32::MIN.saturating_add(359);
+
 /// DHT identity over the `Z / 2^160` identifier ring.
 ///
 /// Invariant: the inner [`H160`] is the canonical 20-byte big-endian encoding
@@ -112,10 +115,7 @@ pub trait Rotate<Rhs = u16> {
 impl Rotate<u16> for Did {
     type Output = Self;
     fn rotate(&self, angle: u16) -> Self::Output {
-        let Some(denominator) = NonZeroU32::new(360) else {
-            return *self;
-        };
-        *self + Did::dyadic_fraction(angle.into(), denominator)
+        *self + Did::dyadic_fraction(angle.into(), FULL_ROTATION_DENOMINATOR)
     }
 }
 
@@ -237,9 +237,6 @@ impl Did {
     /// Law: for `i != j`, `place(self, n)[i] != place(self, n)[j]` while
     /// `n <= 2^160`; the current `u16` domain is therefore injective.
     pub fn rotate_affine(&self, scalar: u16) -> Result<Vec<Did>> {
-        if scalar == 0 {
-            return Err(Error::InvalidAffineScalar);
-        }
         let Some(denominator) = NonZeroU32::new(u32::from(scalar)) else {
             return Err(Error::InvalidAffineScalar);
         };

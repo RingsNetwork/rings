@@ -917,7 +917,7 @@ fn secp256k1_jacobian_bytes(point: Jacobian) -> Option<([u8; 32], [u8; 32])> {
 mod tests {
     use super::*;
     use crate::algebra::assert_field_laws;
-    use crate::algebra::assert_module_laws;
+    use crate::algebra::assert_module_action_laws;
     use crate::algebra::One;
     use crate::algebra::Zero;
 
@@ -974,7 +974,7 @@ mod tests {
         ];
 
         assert_field_laws(&scalars);
-        assert_module_laws(&scalars, &points);
+        assert_module_action_laws(&scalars, &points);
     }
 
     #[test]
