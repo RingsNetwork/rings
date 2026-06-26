@@ -17,25 +17,26 @@
 //! obligation: the implementation asserts the law, and law tests witness the
 //! assertion on representative samples.
 //!
-//! The trait tower is intentionally split into additive and multiplicative
-//! towers:
+//! The public surface is intentionally small:
 //!
-//! - [`AdditiveMagma`] -> [`AdditiveSemigroup`] -> [`AdditiveMonoid`] ->
-//!   [`AdditiveGroup`] -> [`AbelianGroup`].
-//! - [`MultiplicativeMagma`] -> [`MultiplicativeSemigroup`] ->
-//!   [`MultiplicativeMonoid`].
-//! - [`Ring`] combines an additive abelian group with a multiplicative monoid.
-//! - [`Field`] is a ring whose non-zero elements have multiplicative inverses.
-//! - [`Module`] is a right scalar action of a ring on an abelian group.
+//! - [`Zero`] and [`One`] name additive and multiplicative identities together
+//!   with the operations whose identities they are.
+//! - [`AbelianGroup`] is the additive structure used by Chord identifiers and
+//!   elliptic-curve points.
+//! - [`CommutativeRing`] combines an additive abelian group with commutative
+//!   multiplication and a multiplicative identity.
+//! - [`Field`] is a commutative ring whose non-zero elements have inverses.
+//! - [`Module`] is a right scalar action of a commutative ring on an abelian
+//!   group.
 //!
 //! ## Rings DHT
 //!
 //! [`crate::dht::Did`] is the carrier for Chord identifier arithmetic. It is an
 //! [`AbelianGroup`] under addition in `Z / 2^160`, which is exactly the
 //! operation used for clockwise offsets, biased ordering, finger targets, and
-//! affine replica placement. It intentionally does not implement [`Ring`]:
-//! Chord does not use identifier multiplication as a protocol operation, so the
-//! public model should not expose it.
+//! affine replica placement. It intentionally does not implement
+//! [`CommutativeRing`]: Chord does not use identifier multiplication as a
+//! protocol operation, so the public model should not expose it.
 //!
 //! ## Elliptic Curves
 //!
@@ -67,12 +68,12 @@ use std::ops::Sub;
 
 /// Additive identity for an additive carrier.
 ///
-/// Implement this only for a type whose `zero()` value is the neutral element
-/// for its [`Add`] operation. `is_zero` must recognize exactly that same value;
-/// algorithms use it as a semantic predicate, not as an encoding shortcut.
+/// Implement this only for a type whose [`Add`] operation has an identity
+/// element. `is_zero` must recognize exactly that same value; algorithms use it
+/// as a semantic predicate, not as an encoding shortcut.
 ///
 /// Law: `a + zero() == a` and `zero() + a == a`.
-pub trait Zero: Sized {
+pub trait Zero: Sized + Add<Self, Output = Self> {
     /// Return the additive identity.
     fn zero() -> Self;
 
@@ -82,111 +83,66 @@ pub trait Zero: Sized {
 
 /// Multiplicative identity for a multiplicative carrier.
 ///
-/// Implement this only for a type whose `one()` value is the neutral element
-/// for its [`Mul`] operation.
+/// Implement this only for a type whose [`Mul`] operation has an identity
+/// element.
 ///
 /// Law: `a * one() == a` and `one() * a == a`.
-pub trait One: Sized {
+pub trait One: Sized + Mul<Self, Output = Self> {
     /// Return the multiplicative identity.
     fn one() -> Self;
 }
 
-/// Magma under addition.
+/// Abelian group under addition.
 ///
-/// This is the first additive layer. It states that `+` is a total operation on
-/// the carrier: adding two valid values returns another valid value of the same
-/// carrier.
+/// This is the additive structure used by Chord identifiers and elliptic-curve
+/// points. Subtraction must be the derived operation `a - b == a + (-b)`, not an
+/// unrelated primitive.
 ///
-/// Law: addition is closed over `Self`.
-pub trait AdditiveMagma: Sized + Add<Self, Output = Self> {}
-
-/// Semigroup under addition.
-///
-/// This layer adds associativity to the additive operation.
-///
-/// Law: addition is associative.
-pub trait AdditiveSemigroup: AdditiveMagma {}
-
-/// Monoid under addition.
-///
-/// This layer adds an additive identity to an associative additive operation.
+/// Law: addition is associative and commutative.
 ///
 /// Law: [`Zero::zero`] is the additive identity.
-pub trait AdditiveMonoid: AdditiveSemigroup + Zero {}
-
-/// Group under addition.
-///
-/// This layer adds additive inverses. Subtraction must be the derived operation
-/// `a - b == a + (-b)`, not an unrelated primitive.
 ///
 /// Law: [`Neg`] returns the additive inverse.
 ///
 /// Law: [`Sub`] is addition with the additive inverse.
-pub trait AdditiveGroup: AdditiveMonoid + Neg<Output = Self> + Sub<Self, Output = Self> {}
-
-/// Abelian group under addition.
-///
-/// This is the additive structure used by Chord identifiers and elliptic-curve
-/// points. It adds commutativity to [`AdditiveGroup`].
-///
-/// Law: addition is commutative.
-pub trait AbelianGroup: AdditiveGroup {}
-
-/// Magma under multiplication.
-///
-/// This is the first multiplicative layer. It states that `*` is a total
-/// operation on the carrier.
-///
-/// Law: multiplication is closed over `Self`.
-pub trait MultiplicativeMagma: Sized + Mul<Self, Output = Self> {}
-
-/// Semigroup under multiplication.
-///
-/// This layer adds associativity to the multiplicative operation.
-///
-/// Law: multiplication is associative.
-pub trait MultiplicativeSemigroup: MultiplicativeMagma {}
-
-/// Monoid under multiplication.
-///
-/// This layer adds a multiplicative identity to an associative multiplicative
-/// operation.
-///
-/// Law: [`One::one`] is the multiplicative identity.
-pub trait MultiplicativeMonoid: MultiplicativeSemigroup + One {}
+pub trait AbelianGroup:
+    Sized + Add<Self, Output = Self> + Sub<Self, Output = Self> + Neg<Output = Self> + Zero
+{
+}
 
 /// Unital commutative ring.
 ///
-/// `Ring` is a capability boundary: implement it only when both addition and
-/// multiplication are semantic operations of the domain type. A type may have a
-/// mathematically possible multiplication and still not implement `Ring` when
-/// that operation is outside the protocol model.
+/// `CommutativeRing` is a capability boundary: implement it only when both
+/// addition and multiplication are semantic operations of the domain type. A
+/// type may have a mathematically possible multiplication and still not
+/// implement `CommutativeRing` when that operation is outside the protocol
+/// model.
 ///
 /// Law: the implementor is an [`AbelianGroup`] under addition.
 ///
-/// Law: the implementor is a [`MultiplicativeMonoid`] under multiplication.
+/// Law: multiplication is associative and commutative.
 ///
-/// Law: multiplication is commutative.
+/// Law: [`One::one`] is the multiplicative identity.
 ///
 /// Law: multiplication distributes over addition.
-pub trait Ring: AbelianGroup + MultiplicativeMonoid {}
+pub trait CommutativeRing: AbelianGroup + Mul<Self, Output = Self> + One {}
 
 /// Field.
 ///
-/// A field is a ring whose non-zero values form a multiplicative group.
-/// `try_inverse` is fallible only because zero has no multiplicative inverse;
-/// returning `None` for a non-zero value violates the trait law.
+/// A field is a commutative ring whose non-zero values form a multiplicative
+/// group. `try_inverse` is fallible only because zero has no multiplicative
+/// inverse; returning `None` for a non-zero value violates the trait law.
 ///
 /// Law: non-zero values have a multiplicative inverse.
-pub trait Field: Ring {
+pub trait Field: CommutativeRing {
     /// Return the multiplicative inverse.
     ///
-    /// Pre: `self != zero()`.
-    /// Post: `self * self.try_inverse()? == one()`.
+    /// Post: if this returns `Some(inv)`, then `self * inv == one()` and
+    /// `inv * self == one()`.
     fn try_inverse(&self) -> Option<Self>;
 }
 
-/// Right scalar action of a ring on an abelian group.
+/// Right scalar action of a commutative ring on an abelian group.
 ///
 /// `Module<Scalar>` is parameterized by the scalar carrier. The element carrier
 /// is `Self`, and the scalar action is expressed by `Self: Mul<Scalar>`. In this
@@ -202,9 +158,9 @@ pub trait Field: Ring {
 ///
 /// Law: `a * (s * t) == (a * s) * t`.
 ///
-/// Law: `a * one() == a`.
+/// Law: `a * Scalar::one() == a`.
 pub trait Module<Scalar>: AbelianGroup + Mul<Scalar, Output = Self>
-where Scalar: Ring
+where Scalar: CommutativeRing
 {
 }
 
@@ -246,8 +202,8 @@ where T: AbelianGroup + Clone + Eq + Debug {
 /// is required to be commutative, left distributivity witnesses right
 /// distributivity on the same sample.
 #[cfg(test)]
-pub fn assert_ring_laws<T>(values: &[T])
-where T: Ring + Clone + Eq + Debug {
+pub fn assert_commutative_ring_laws<T>(values: &[T])
+where T: CommutativeRing + Clone + Eq + Debug {
     assert_abelian_group_laws(values);
 
     for a in values {
@@ -274,12 +230,12 @@ where T: Ring + Clone + Eq + Debug {
 
 /// Assert the field inverse laws for a representative finite sample.
 ///
-/// This helper first checks the ring laws. It then checks that zero has no
-/// inverse and every sampled non-zero value has a two-sided inverse.
+/// This helper first checks the commutative-ring laws. It then checks that zero
+/// has no inverse and every sampled non-zero value has a two-sided inverse.
 #[cfg(test)]
 pub fn assert_field_laws<T>(values: &[T])
 where T: Field + Clone + Eq + Debug {
-    assert_ring_laws(values);
+    assert_commutative_ring_laws(values);
 
     for a in values {
         if a.is_zero() {
@@ -305,7 +261,7 @@ where T: Field + Clone + Eq + Debug {
 #[cfg(test)]
 pub fn assert_module_action_laws<Scalar, Element>(scalars: &[Scalar], elements: &[Element])
 where
-    Scalar: Ring + Clone + Eq + Debug,
+    Scalar: CommutativeRing + Clone + Eq + Debug,
     Element: Module<Scalar> + Clone + Eq + Debug,
 {
     assert_abelian_group_laws(elements);

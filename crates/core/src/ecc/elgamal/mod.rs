@@ -26,8 +26,8 @@
 //! # Abstract group implementation
 //!
 //! ElGamal is a public-key encryption algorithm over a finite cyclic group. It
-//! is not tied to a particular elliptic curve; an elliptic curve group is one
-//! possible implementation of the group operation.
+//! is not tied to a particular elliptic curve; an elliptic curve point group is
+//! one possible implementation of the carrier.
 //!
 //! In multiplicative notation, `c2 := m * s` and decryption computes
 //! `m := c2 * s^{-1}`. The implementation below uses additive notation because
@@ -51,225 +51,225 @@ use std::marker::PhantomData;
 
 use rand::RngCore;
 
+use crate::algebra::Module;
 use crate::ecc::group::Bls12381G1;
-use crate::ecc::group::CryptographicGroup;
-use crate::ecc::group::CyclicGroup;
-use crate::ecc::group::Group;
-use crate::ecc::group::GroupOps;
+use crate::ecc::group::CyclicModule;
+use crate::ecc::group::Point;
 #[cfg(feature = "curve-ristretto255")]
-use crate::ecc::group::Ristretto255Group;
+use crate::ecc::group::Ristretto255;
 use crate::ecc::group::Secp256k1;
 use crate::ecc::group::Secp256r1;
 
 pub mod impls;
 
-/// Ciphertext pairs over one cyclic group.
-pub type GroupCiphertext<G> = Vec<(<G as GroupOps>::Element, <G as GroupOps>::Element)>;
+/// Ciphertext pairs over one cyclic module carrier.
+pub type GroupCiphertext<Element> = Vec<(Element, Element)>;
 
 /// ElGamal over secp256k1 group elements.
-pub type Secp256k1ElGamal = ElGamal<Group<Secp256k1>>;
+pub type Secp256k1ElGamal = ElGamal<Point<Secp256k1>>;
 
 /// ElGamal over secp256r1/P-256 group elements.
-pub type Secp256r1ElGamal = ElGamal<Group<Secp256r1>>;
+pub type Secp256r1ElGamal = ElGamal<Point<Secp256r1>>;
 
 /// ElGamal over BLS12-381 G1 group elements.
-pub type Bls12381G1ElGamal = ElGamal<Group<Bls12381G1>>;
+pub type Bls12381G1ElGamal = ElGamal<Point<Bls12381G1>>;
 
 /// ElGamal over Ristretto255 group elements.
 #[cfg(feature = "curve-ristretto255")]
-pub type Ristretto255ElGamal = ElGamal<Ristretto255Group>;
+pub type Ristretto255ElGamal = ElGamal<Point<Ristretto255>>;
 
-/// ElGamal public key `h = xg` over one cyclic group.
-pub struct ElGamalPublicKey<G: GroupOps> {
-    element: G::Element,
+/// ElGamal public key `h = xg` over one cyclic module carrier.
+pub struct ElGamalPublicKey<Element: CyclicModule> {
+    element: Element,
 }
 
-/// ElGamal secret scalar `x` over one cyclic group.
-pub struct ElGamalSecretKey<G: GroupOps> {
-    scalar: G::Scalar,
+/// ElGamal secret scalar `x` over one cyclic module carrier.
+pub struct ElGamalSecretKey<Element: CyclicModule> {
+    scalar: Element::Scalar,
 }
 
-/// ElGamal key pair over one cyclic group.
-pub struct ElGamalKeyPair<G: GroupOps> {
-    secret: ElGamalSecretKey<G>,
-    public: ElGamalPublicKey<G>,
+/// ElGamal key pair over one cyclic module carrier.
+pub struct ElGamalKeyPair<Element: CyclicModule> {
+    secret: ElGamalSecretKey<Element>,
+    public: ElGamalPublicKey<Element>,
 }
 
-/// Generic ElGamal implementation parameterized only by a cyclic group.
-pub struct ElGamal<G>(PhantomData<G>);
+/// Generic ElGamal implementation parameterized only by the element carrier.
+pub struct ElGamal<Element>(PhantomData<Element>);
 
-impl<G: GroupOps> ElGamalPublicKey<G> {
+impl<Element> ElGamalPublicKey<Element>
+where Element: CyclicModule
+{
     /// Build a public key from an existing group element.
-    pub fn from_element(element: G::Element) -> Self {
+    pub fn from_element(element: Element) -> Self {
         Self { element }
     }
 
     /// Borrow the public group element.
-    pub fn as_element(&self) -> &G::Element {
+    pub fn as_element(&self) -> &Element {
         &self.element
     }
 
     /// Unwrap into the public group element.
-    pub fn into_element(self) -> G::Element {
+    pub fn into_element(self) -> Element {
         self.element
     }
 }
 
-impl<G: GroupOps> Clone for ElGamalPublicKey<G>
-where G::Element: Clone
+impl<Element> Clone for ElGamalPublicKey<Element>
+where Element: CyclicModule + Clone
 {
     fn clone(&self) -> Self {
         Self::from_element(self.element.clone())
     }
 }
 
-impl<G: GroupOps> ElGamalSecretKey<G> {
+impl<Element> ElGamalSecretKey<Element>
+where Element: CyclicModule
+{
     /// Build a secret key from an existing scalar.
-    pub fn from_scalar(scalar: G::Scalar) -> Self {
+    pub fn from_scalar(scalar: Element::Scalar) -> Self {
         Self { scalar }
     }
 
     /// Borrow the secret scalar.
-    pub fn as_scalar(&self) -> &G::Scalar {
+    pub fn as_scalar(&self) -> &Element::Scalar {
         &self.scalar
     }
 
     /// Unwrap into the secret scalar.
-    pub fn into_scalar(self) -> G::Scalar {
+    pub fn into_scalar(self) -> Element::Scalar {
         self.scalar
+    }
+
+    /// Derive the public key `h = xg`.
+    pub fn public_key(&self) -> ElGamalPublicKey<Element> {
+        ElGamalPublicKey::from_element(Element::generator_mul(&self.scalar))
     }
 }
 
-impl<G: GroupOps> Clone for ElGamalSecretKey<G>
-where G::Scalar: Clone
+impl<Element> Clone for ElGamalSecretKey<Element>
+where
+    Element: CyclicModule,
+    Element::Scalar: Clone,
 {
     fn clone(&self) -> Self {
         Self::from_scalar(self.scalar.clone())
     }
 }
 
-impl<G> ElGamalSecretKey<G>
-where G: CyclicGroup
-{
-    /// Derive the public key `h = xg`.
-    pub fn public_key(&self) -> ElGamalPublicKey<G> {
-        ElGamalPublicKey::from_element(G::generator_mul(self.scalar.clone()))
-    }
-}
-
-impl<G> ElGamalKeyPair<G>
-where G: GroupOps
+impl<Element> ElGamalKeyPair<Element>
+where Element: CyclicModule
 {
     /// Borrow the public key.
-    pub fn public_key(&self) -> &ElGamalPublicKey<G> {
+    pub fn public_key(&self) -> &ElGamalPublicKey<Element> {
         &self.public
     }
 
     /// Borrow the secret key.
-    pub fn secret_key(&self) -> &ElGamalSecretKey<G> {
+    pub fn secret_key(&self) -> &ElGamalSecretKey<Element> {
         &self.secret
     }
 }
 
-impl<G> ElGamalSecretKey<G>
-where G: CryptographicGroup
+impl<Element> ElGamalSecretKey<Element>
+where Element: CyclicModule
 {
     /// Generate a fresh non-zero ElGamal secret scalar from an explicit RNG.
     pub fn random_with_rng(rng: &mut impl RngCore) -> Self {
-        Self::from_scalar(G::random_scalar_with_rng(rng))
+        Self::from_scalar(Element::random_scalar_with_rng(rng))
     }
 
     /// Generate a fresh non-zero ElGamal secret scalar.
     pub fn random() -> Self {
-        Self::from_scalar(G::random_scalar())
+        Self::from_scalar(Element::random_scalar())
     }
 }
 
-impl<G> ElGamalKeyPair<G>
-where G: CryptographicGroup
+impl<Element> ElGamalKeyPair<Element>
+where Element: CyclicModule
 {
     /// Generate a fresh ElGamal key pair from an explicit RNG.
     pub fn random_with_rng(rng: &mut impl RngCore) -> Self {
-        let secret = ElGamalSecretKey::<G>::random_with_rng(rng);
+        let secret = ElGamalSecretKey::<Element>::random_with_rng(rng);
         let public = secret.public_key();
         Self { secret, public }
     }
 
     /// Generate a fresh ElGamal key pair.
     pub fn random() -> Self {
-        let secret = ElGamalSecretKey::<G>::random();
+        let secret = ElGamalSecretKey::<Element>::random();
         let public = secret.public_key();
         Self { secret, public }
     }
 }
 
-impl<G> ElGamal<G>
-where G: GroupOps
+impl<Element> ElGamal<Element>
+where
+    Element: CyclicModule + Module<Element::Scalar> + Clone,
+    Element::Scalar: Clone,
 {
     /// Decrypt ciphertext pairs into group elements with the given scalar.
     pub fn decrypt(
-        ciphertext: &[(G::Element, G::Element)],
-        secret_key: &ElGamalSecretKey<G>,
-    ) -> Vec<G::Element> {
+        ciphertext: &[(Element, Element)],
+        secret_key: &ElGamalSecretKey<Element>,
+    ) -> Vec<Element> {
         ciphertext
             .iter()
             .map(|(c1, c2)| {
-                let shared_secret = G::mul_ref(c1, secret_key.as_scalar());
-                G::add_ref(c2, &G::neg_ref(&shared_secret))
+                let shared_secret = c1.clone() * secret_key.as_scalar().clone();
+                c2.clone() - shared_secret
             })
             .collect()
     }
-}
 
-impl<G> ElGamal<G>
-where G: CyclicGroup
-{
     /// Encrypt one group element using caller-supplied randomness.
     ///
     /// This is the pure ElGamal kernel over additive group notation:
     /// `(c1, c2) = (rg, m + rh)` where `h` is the public key and `r` is the
     /// ephemeral scalar. It performs no sampling and has no hidden side effects.
     pub fn encrypt_block(
-        message_element: G::Element,
-        public_key: &ElGamalPublicKey<G>,
-        ephemeral_scalar: G::Scalar,
-    ) -> (G::Element, G::Element) {
-        let shared_secret = G::mul_ref(public_key.as_element(), &ephemeral_scalar);
-        let c1 = G::generator_mul(ephemeral_scalar);
-        let c2 = G::add_ref(&message_element, &shared_secret);
+        message_element: Element,
+        public_key: &ElGamalPublicKey<Element>,
+        ephemeral_scalar: Element::Scalar,
+    ) -> (Element, Element) {
+        let c1 = Element::generator_mul(&ephemeral_scalar);
+        let shared_secret = public_key.as_element().clone() * ephemeral_scalar;
+        let c2 = message_element + shared_secret;
         (c1, c2)
     }
-}
 
-impl<G> ElGamal<G>
-where G: CryptographicGroup
-{
     /// Encrypt group elements under the given public group element using an
     /// explicit RNG for ephemeral scalars.
     pub fn encrypt_with_rng<I>(
         message: I,
-        public_key: &ElGamalPublicKey<G>,
+        public_key: &ElGamalPublicKey<Element>,
         rng: &mut impl RngCore,
-    ) -> GroupCiphertext<G>
+    ) -> GroupCiphertext<Element>
     where
-        I: IntoIterator<Item = G::Element>,
+        I: IntoIterator<Item = Element>,
     {
         message
             .into_iter()
             .map(|message_element| {
-                let ephemeral_scalar = G::random_scalar_with_rng(rng);
+                let ephemeral_scalar = Element::random_scalar_with_rng(rng);
                 Self::encrypt_block(message_element, public_key, ephemeral_scalar)
             })
             .collect()
     }
 
     /// Encrypt group elements under the given public group element.
-    pub fn encrypt<I>(message: I, public_key: &ElGamalPublicKey<G>) -> GroupCiphertext<G>
-    where I: IntoIterator<Item = G::Element> {
+    pub fn encrypt<I>(
+        message: I,
+        public_key: &ElGamalPublicKey<Element>,
+    ) -> GroupCiphertext<Element>
+    where
+        I: IntoIterator<Item = Element>,
+    {
         message
             .into_iter()
             .map(|message_element| {
-                let ephemeral_scalar = G::random_scalar();
+                let ephemeral_scalar = Element::random_scalar();
                 Self::encrypt_block(message_element, public_key, ephemeral_scalar)
             })
             .collect()
@@ -281,17 +281,21 @@ mod test {
     use std::ops::Add;
     use std::ops::Mul;
     use std::ops::Neg;
+    use std::ops::Sub;
 
     use rand::RngCore;
     use rand::SeedableRng;
     use rand_hc::Hc128Rng;
 
     use super::*;
+    use crate::algebra::AbelianGroup;
+    use crate::algebra::CommutativeRing;
+    use crate::algebra::Field as AlgebraField;
+    use crate::algebra::One;
+    use crate::algebra::Zero;
     use crate::ecc::group::Bls12381G1;
-    use crate::ecc::group::CyclicGroup;
-    use crate::ecc::group::Group;
     #[cfg(feature = "curve-ristretto255")]
-    use crate::ecc::group::Ristretto255Group;
+    use crate::ecc::group::Ristretto255;
     use crate::ecc::group::Secp256k1;
     use crate::ecc::group::Secp256r1;
 
@@ -300,16 +304,38 @@ mod test {
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     struct TestElement(u32);
 
-    #[derive(Clone, Copy, Debug)]
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     struct TestScalar(u32);
 
-    struct TestGroup;
+    fn scalar_product(lhs: u32, rhs: u32) -> u32 {
+        ((u64::from(lhs) * u64::from(rhs)) % u64::from(TEST_GROUP_ORDER)) as u32
+    }
+
+    fn scalar_pow(mut base: TestScalar, mut exponent: u32) -> TestScalar {
+        let mut acc = TestScalar::one();
+        while exponent > 0 {
+            if exponent & 1 == 1 {
+                acc = acc * base;
+            }
+            base = base * base;
+            exponent >>= 1;
+        }
+        acc
+    }
 
     impl Add for TestElement {
         type Output = Self;
 
         fn add(self, rhs: Self) -> Self::Output {
             Self((self.0 + rhs.0) % TEST_GROUP_ORDER)
+        }
+    }
+
+    impl Sub for TestElement {
+        type Output = Self;
+
+        fn sub(self, rhs: Self) -> Self::Output {
+            self + -rhs
         }
     }
 
@@ -325,112 +351,184 @@ mod test {
         type Output = Self;
 
         fn mul(self, rhs: TestScalar) -> Self::Output {
-            Self((self.0 * rhs.0) % TEST_GROUP_ORDER)
+            Self(scalar_product(self.0, rhs.0))
         }
     }
 
-    impl GroupOps for TestGroup {
-        type Element = TestElement;
+    impl Zero for TestElement {
+        fn zero() -> Self {
+            Self(0)
+        }
+
+        fn is_zero(&self) -> bool {
+            self.0 == 0
+        }
+    }
+
+    impl AbelianGroup for TestElement {}
+
+    impl Module<TestScalar> for TestElement {}
+
+    impl CyclicModule for TestElement {
         type Scalar = TestScalar;
 
-        fn identity() -> Self::Element {
-            TestElement(0)
+        fn generator() -> Self {
+            Self(1)
         }
-    }
 
-    impl CyclicGroup for TestGroup {
-        fn generator() -> Self::Element {
-            TestElement(1)
+        fn generator_mul(scalar: &Self::Scalar) -> Self {
+            Self::generator() * *scalar
         }
-    }
 
-    impl CryptographicGroup for TestGroup {
         fn random_scalar_with_rng(rng: &mut impl RngCore) -> Self::Scalar {
             TestScalar(rng.next_u32() % (TEST_GROUP_ORDER - 1) + 1)
         }
     }
 
+    impl Add for TestScalar {
+        type Output = Self;
+
+        fn add(self, rhs: Self) -> Self::Output {
+            Self((self.0 + rhs.0) % TEST_GROUP_ORDER)
+        }
+    }
+
+    impl Sub for TestScalar {
+        type Output = Self;
+
+        fn sub(self, rhs: Self) -> Self::Output {
+            self + -rhs
+        }
+    }
+
+    impl Neg for TestScalar {
+        type Output = Self;
+
+        fn neg(self) -> Self::Output {
+            Self((TEST_GROUP_ORDER - self.0) % TEST_GROUP_ORDER)
+        }
+    }
+
+    impl Mul for TestScalar {
+        type Output = Self;
+
+        fn mul(self, rhs: Self) -> Self::Output {
+            Self(scalar_product(self.0, rhs.0))
+        }
+    }
+
+    impl Zero for TestScalar {
+        fn zero() -> Self {
+            Self(0)
+        }
+
+        fn is_zero(&self) -> bool {
+            self.0 == 0
+        }
+    }
+
+    impl One for TestScalar {
+        fn one() -> Self {
+            Self(1)
+        }
+    }
+
+    impl AbelianGroup for TestScalar {}
+
+    impl CommutativeRing for TestScalar {}
+
+    impl AlgebraField for TestScalar {
+        fn try_inverse(&self) -> Option<Self> {
+            if self.is_zero() {
+                None
+            } else {
+                Some(scalar_pow(*self, TEST_GROUP_ORDER - 2))
+            }
+        }
+    }
+
     #[test]
     fn encrypt_block_is_pure_group_operation() {
-        let secret_key = ElGamalSecretKey::<TestGroup>::from_scalar(TestScalar(5));
+        let secret_key = ElGamalSecretKey::<TestElement>::from_scalar(TestScalar(5));
         let public_key = secret_key.public_key();
 
         let ciphertext =
-            ElGamal::<TestGroup>::encrypt_block(TestElement(7), &public_key, TestScalar(3));
+            ElGamal::<TestElement>::encrypt_block(TestElement(7), &public_key, TestScalar(3));
 
         assert_eq!(ciphertext, (TestElement(3), TestElement(22)));
         assert_eq!(
-            ElGamal::<TestGroup>::decrypt(&[ciphertext], &secret_key),
+            ElGamal::<TestElement>::decrypt(&[ciphertext], &secret_key),
             vec![TestElement(7)]
         );
     }
 
     #[test]
     fn encrypt_decrypt_over_generic_finite_group() {
-        let secret_key = ElGamalSecretKey::<TestGroup>::from_scalar(TestScalar(12_345));
+        let secret_key = ElGamalSecretKey::<TestElement>::from_scalar(TestScalar(12_345));
         let public_key = secret_key.public_key();
         let message = vec![TestElement(1), TestElement(42), TestElement(65_520)];
-        let ciphertext = ElGamal::<TestGroup>::encrypt(message.clone(), &public_key);
+        let ciphertext = ElGamal::<TestElement>::encrypt(message.clone(), &public_key);
 
         assert_eq!(
-            ElGamal::<TestGroup>::decrypt(&ciphertext, &secret_key),
+            ElGamal::<TestElement>::decrypt(&ciphertext, &secret_key),
             message
         );
     }
 
     #[test]
     fn encryption_uses_fresh_ephemeral_point_per_block() {
-        let secret_key = ElGamalSecretKey::<TestGroup>::from_scalar(TestScalar(42));
+        let secret_key = ElGamalSecretKey::<TestElement>::from_scalar(TestScalar(42));
         let public_key = secret_key.public_key();
         let message = vec![TestElement(7); 4];
         let mut rng = Hc128Rng::seed_from_u64(7);
-        let ciphertext = ElGamal::<TestGroup>::encrypt_with_rng(message, &public_key, &mut rng);
+        let ciphertext = ElGamal::<TestElement>::encrypt_with_rng(message, &public_key, &mut rng);
 
         assert!(ciphertext.windows(2).any(|pair| pair[0].0 != pair[1].0));
     }
 
     #[test]
     fn encrypt_with_rng_is_reproducible_for_same_seed() {
-        let secret_key = ElGamalSecretKey::<TestGroup>::from_scalar(TestScalar(42));
+        let secret_key = ElGamalSecretKey::<TestElement>::from_scalar(TestScalar(42));
         let public_key = secret_key.public_key();
         let message = vec![TestElement(7), TestElement(8), TestElement(9)];
         let mut rng_a = Hc128Rng::seed_from_u64(42);
         let mut rng_b = Hc128Rng::seed_from_u64(42);
 
         let ciphertext_a =
-            ElGamal::<TestGroup>::encrypt_with_rng(message.clone(), &public_key, &mut rng_a);
-        let ciphertext_b = ElGamal::<TestGroup>::encrypt_with_rng(message, &public_key, &mut rng_b);
+            ElGamal::<TestElement>::encrypt_with_rng(message.clone(), &public_key, &mut rng_a);
+        let ciphertext_b =
+            ElGamal::<TestElement>::encrypt_with_rng(message, &public_key, &mut rng_b);
 
         assert_eq!(ciphertext_a, ciphertext_b);
     }
 
-    fn encrypt_decrypt_over_curve_group<G>()
+    fn encrypt_decrypt_over_curve_group<Element>()
     where
-        G: CryptographicGroup,
-        G::Element: Eq + std::fmt::Debug,
+        Element: CyclicModule + Module<Element::Scalar> + Clone + Eq + std::fmt::Debug,
+        Element::Scalar: Clone,
     {
         let mut rng = Hc128Rng::seed_from_u64(11);
-        let keypair = ElGamalKeyPair::<G>::random_with_rng(&mut rng);
+        let keypair = ElGamalKeyPair::<Element>::random_with_rng(&mut rng);
         let message = vec![
-            G::generator(),
-            G::generator_mul(G::random_scalar_with_rng(&mut rng)),
-            G::identity(),
+            Element::generator(),
+            Element::generator_mul(&Element::random_scalar_with_rng(&mut rng)),
+            Element::zero(),
         ];
         let ciphertext =
-            ElGamal::<G>::encrypt_with_rng(message.clone(), keypair.public_key(), &mut rng);
+            ElGamal::<Element>::encrypt_with_rng(message.clone(), keypair.public_key(), &mut rng);
 
         assert_eq!(
-            ElGamal::<G>::decrypt(&ciphertext, keypair.secret_key()),
+            ElGamal::<Element>::decrypt(&ciphertext, keypair.secret_key()),
             message
         );
     }
 
     #[test]
     fn supported_curve_groups_encrypt_and_decrypt() {
-        encrypt_decrypt_over_curve_group::<Group<Secp256k1>>();
-        encrypt_decrypt_over_curve_group::<Group<Secp256r1>>();
-        encrypt_decrypt_over_curve_group::<Group<Bls12381G1>>();
+        encrypt_decrypt_over_curve_group::<Point<Secp256k1>>();
+        encrypt_decrypt_over_curve_group::<Point<Secp256r1>>();
+        encrypt_decrypt_over_curve_group::<Point<Bls12381G1>>();
         #[cfg(feature = "curve-ristretto255")]
-        encrypt_decrypt_over_curve_group::<Ristretto255Group>();
+        encrypt_decrypt_over_curve_group::<Point<Ristretto255>>();
     }
 }

@@ -6,8 +6,8 @@
 //! is also the concrete carrier for the additive cyclic group of `Z / 2^160`
 //! used by Chord routing and placement. The [`crate::algebra::AbelianGroup`]
 //! trait names the operation set; `Did` supplies the representation and
-//! implementation. `Did` does not implement [`crate::algebra::Ring`] because
-//! Chord never uses identifier multiplication.
+//! implementation. `Did` does not implement [`crate::algebra::CommutativeRing`]
+//! because Chord never uses identifier multiplication.
 //!
 //! ## Chord identity model
 //!
@@ -50,10 +50,6 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::algebra::AbelianGroup;
-use crate::algebra::AdditiveGroup;
-use crate::algebra::AdditiveMagma;
-use crate::algebra::AdditiveMonoid;
-use crate::algebra::AdditiveSemigroup;
 use crate::algebra::Zero;
 use crate::ecc::HashStr;
 use crate::error::Error;
@@ -263,7 +259,7 @@ impl Did {
         Self::from_be_bytes(bytes)
     }
 
-    // Pre: `denominator != 0`.
+    // Type: `NonZeroU32` makes a zero denominator unrepresentable.
     // Post: result is `floor(2^160 * numerator / denominator) mod 2^160`.
     // Invariant: `remainder < denominator` before and after every bit step.
     fn dyadic_fraction(numerator: u32, denominator: NonZeroU32) -> Self {
@@ -403,14 +399,6 @@ impl Zero for Did {
         *self == Self::ZERO
     }
 }
-
-impl AdditiveMagma for Did {}
-
-impl AdditiveSemigroup for Did {}
-
-impl AdditiveMonoid for Did {}
-
-impl AdditiveGroup for Did {}
 
 impl AbelianGroup for Did {}
 
