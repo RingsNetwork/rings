@@ -398,7 +398,7 @@ fn step_fix_finger(state: &TopologyState) -> TopologyStep {
         };
     }
     let index = (state.fix_finger_index + 1) % state.fingers.len();
-    let did = Did::power_of_two(index);
+    let did = state.local + Did::power_of_two(index);
     match find_successor(state, did) {
         FindSuccessorStep::Local(successor) => TopologyStep {
             state: TopologyState {
@@ -629,6 +629,31 @@ mod tests {
         assert_eq!(next.actions, vec![TopologyAction::FindSuccessorForFix {
             next: next_hop,
             did: Did::power_of_two(3),
+            index: 3
+        }]);
+    }
+
+    #[test]
+    fn fix_finger_step_queries_local_relative_probe() {
+        let local = did(100);
+        let successor = did(104);
+        let next_hop = did(106);
+        let next = step(
+            &state(
+                local,
+                vec![successor],
+                None,
+                vec![None, None, Some(next_hop), None],
+                2,
+            ),
+            TopologyEvent::FixFinger,
+            DEFAULT_SUCCESSOR_CAPACITY,
+        );
+
+        assert_eq!(next.state.fix_finger_index, 3);
+        assert_eq!(next.actions, vec![TopologyAction::FindSuccessorForFix {
+            next: next_hop,
+            did: local + Did::power_of_two(3),
             index: 3
         }]);
     }
