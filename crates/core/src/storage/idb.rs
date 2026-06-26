@@ -46,6 +46,12 @@ impl<T> DataStruct<T> {
     }
 }
 
+fn next_visit_time(previous: i64) -> i64 {
+    chrono::Utc::now()
+        .timestamp_millis()
+        .max(previous.saturating_add(1))
+}
+
 /// StorageInstance struct
 pub struct IdbStorage {
     db: Rexie,
@@ -152,7 +158,7 @@ where V: DeserializeOwned + Serialize + Sized
         let v = store.get(&k).await.map_err(Error::IDBError)?;
         let v: Option<DataStruct<V>> = js_value::deserialize(&v)?;
         if let Some(mut v) = v {
-            v.last_visit_time = chrono::Utc::now().timestamp_millis();
+            v.last_visit_time = next_visit_time(v.last_visit_time);
             v.visit_count += 1;
             store
                 .put(
