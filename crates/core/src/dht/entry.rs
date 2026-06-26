@@ -41,15 +41,9 @@ pub enum EntryKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct EntryElement {
-    value: Encoded,
-    dot: EntryDot,
-}
-
-fn append_digest_part(out: &mut String, part: &str) {
-    out.push_str(&part.len().to_string());
-    out.push(':');
-    out.push_str(part);
+enum EntryStampKind {
+    Overwrite,
+    Delta,
 }
 
 /// Operations supported by a DHT storage entry.
@@ -233,13 +227,19 @@ impl EntryOperation {
     /// origin's dot/version instead of being reissued by every routing hop.
     pub fn stamped(self, actor: Did) -> Result<Self> {
         Ok(match self {
-            EntryOperation::Overwrite(entry) => {
-                EntryOperation::Overwrite(entry.ensure_overwrite_stamp(actor)?)
-            }
-            EntryOperation::Extend(entry) => {
-                EntryOperation::Extend(entry.ensure_delta_stamp(actor)?)
-            }
-            EntryOperation::Touch(entry) => EntryOperation::Touch(entry.ensure_delta_stamp(actor)?),
+            EntryOperation::Overwrite(entry) => EntryOperation::Overwrite(
+                entry.ensure_stamp_after(actor, None, EntryStampKind::Overwrite)?,
+            ),
+            EntryOperation::Extend(entry) => EntryOperation::Extend(entry.ensure_stamp_after(
+                actor,
+                None,
+                EntryStampKind::Delta,
+            )?),
+            EntryOperation::Touch(entry) => EntryOperation::Touch(entry.ensure_stamp_after(
+                actor,
+                None,
+                EntryStampKind::Delta,
+            )?),
             EntryOperation::JoinSubring(name, did) => EntryOperation::JoinSubring(name, did),
             EntryOperation::Tombstone(entry) => EntryOperation::Tombstone(entry),
         })
@@ -325,13 +325,13 @@ impl Entry {
             .data
             .iter()
             .enumerate()
-            .map(|(index, value)| EntryDot::for_encoded(version, index, value))
+            .map(|(index, _)| EntryDot::for_index(version, index))
             .collect::<Result<Vec<_>>>()?;
         Ok(self)
     }
 
     fn stamp_overwrite(mut self, version: EntryVersion) -> Result<Self> {
-        self.crdt.register = version;
+        self.crdt.register = Some(version);
         self.with_element_dots(version)
     }
 
@@ -339,69 +339,56 @@ impl Entry {
         self.with_element_dots(version)
     }
 
+    fn stamp(self, version: EntryVersion, kind: EntryStampKind) -> Result<Self> {
+        match kind {
+            EntryStampKind::Overwrite => self.stamp_overwrite(version),
+            EntryStampKind::Delta => self.stamp_delta(version),
+        }
+    }
+
     fn operation_digest(&self) -> Result<Did> {
-        let kind = match self.kind {
-            EntryKind::Data => "data",
-            EntryKind::Subring => "subring",
-            EntryKind::RelayMessage => "relay",
+        #[derive(Serialize)]
+        struct OperationDigest<'a> {
+            kind: EntryKind,
+            did: Did,
+            data: &'a [Encoded],
+        }
+
+        let digest = OperationDigest {
+            kind: self.kind,
+            did: self.did,
+            data: &self.data,
         };
-        let mut input = String::new();
-        append_digest_part(&mut input, kind);
-        append_digest_part(&mut input, &self.did.to_string());
-        for data in &self.data {
-            append_digest_part(&mut input, data.value());
-        }
-        Self::gen_did(&input)
+        let bytes = bincode::serialize(&digest).map_err(Error::BincodeSerialize)?;
+        let encoded = bytes.encode()?;
+        Self::gen_did(encoded.value())
     }
 
-    fn ensure_overwrite_stamp(self, actor: Did) -> Result<Self> {
-        if self.crdt.has_witness() {
-            Ok(self)
-        } else {
-            let operation = self.operation_digest()?;
-            self.stamp_overwrite(EntryVersion::issued_by(actor, operation))
-        }
+    fn issue_version_after(&self, actor: Did, floor: Option<EntryVersion>) -> Result<EntryVersion> {
+        Ok(EntryVersion::issued_by(actor, self.operation_digest()?).after(floor))
     }
 
-    fn ensure_delta_stamp(self, actor: Did) -> Result<Self> {
-        if self.crdt.has_witness() {
-            Ok(self)
-        } else {
-            let operation = self.operation_digest()?;
-            self.stamp_delta(EntryVersion::issued_by(actor, operation))
+    fn ensure_stamp_after(
+        self,
+        actor: Did,
+        floor: Option<EntryVersion>,
+        kind: EntryStampKind,
+    ) -> Result<Self> {
+        if self.crdt.has_write_witness() {
+            return Ok(self);
         }
+        let version = self.issue_version_after(actor, floor)?;
+        self.stamp(version, kind)
     }
 
-    fn max_observed_version(&self) -> EntryVersion {
+    fn max_observed_version(&self) -> Option<EntryVersion> {
         self.crdt
             .dots
             .iter()
             .map(|dot| dot.version)
             .chain(self.crdt.tombstones.iter().map(|dot| dot.version))
-            .fold(self.crdt.register, EntryVersion::max)
-    }
-
-    fn observed_operation_version(&self, actor: Did) -> Result<EntryVersion> {
-        let issued = EntryVersion::issued_by(actor, self.operation_digest()?);
-        Ok(self
-            .crdt
-            .dots
-            .iter()
-            .map(|dot| dot.version)
-            .chain(std::iter::once(self.crdt.register))
+            .chain(self.crdt.register)
             .max()
-            .filter(|version| *version != EntryVersion::default())
-            .unwrap_or(issued))
-    }
-
-    fn ensure_overwrite_stamp_after(self, actor: Did, floor: EntryVersion) -> Result<Self> {
-        let version = self.observed_operation_version(actor)?.after(floor);
-        self.stamp_overwrite(version)
-    }
-
-    fn ensure_delta_stamp_after(self, actor: Did, floor: EntryVersion) -> Result<Self> {
-        let version = self.observed_operation_version(actor)?.after(floor);
-        self.stamp_delta(version)
     }
 
     fn validate_same_carrier(&self, other: &Self) -> Result<()> {
@@ -414,31 +401,23 @@ impl Entry {
         Ok(())
     }
 
-    fn elements(&self) -> Result<Vec<EntryElement>> {
-        self.data
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(index, value)| {
-                let dot = if let Some(dot) = self.crdt.dots.get(index).copied() {
-                    dot
-                } else {
-                    EntryDot::for_encoded(self.crdt.register, index, &value)?
-                };
-                Ok(EntryElement { value, dot })
-            })
-            .collect()
+    fn dot_for_element(&self, index: usize) -> Result<EntryDot> {
+        if let Some(dot) = self.crdt.dots.get(index).copied() {
+            return Ok(dot);
+        }
+        EntryDot::for_index(self.crdt.legacy_floor(), index)
     }
 
     fn topic_buffer(&self) -> Result<DataTopicBuffer> {
         let mut values = BTreeMap::new();
-        for element in self.elements()? {
+        for (index, value) in self.data.iter().cloned().enumerate() {
+            let dot = self.dot_for_element(index)?;
             values
-                .entry(element.value)
+                .entry(value)
                 .and_modify(|current: &mut EntryDot| {
-                    *current = (*current).max(element.dot);
+                    *current = (*current).max(dot);
                 })
-                .or_insert(element.dot);
+                .or_insert(dot);
         }
         Ok(DataTopicBuffer::new(self.crdt.register, values))
     }
@@ -462,15 +441,22 @@ impl Entry {
     fn materialize_elements(
         did: Did,
         kind: EntryKind,
-        register: EntryVersion,
+        register: Option<EntryVersion>,
         elements: impl IntoIterator<Item = (Encoded, EntryDot)>,
         tombstones: BTreeSet<EntryDot>,
     ) -> Self {
         let mut visible = elements
             .into_iter()
-            .filter(|(_, dot)| dot.version >= register && !tombstones.contains(dot))
+            .filter(|(_, dot)| {
+                let visible_after_reset = register.is_none_or(|floor| dot.version >= floor);
+                visible_after_reset && !tombstones.contains(dot)
+            })
             .collect::<Vec<_>>();
-        visible.sort_by_key(|(value, dot)| (*dot, value.clone()));
+        visible.sort_by(|(left_value, left_dot), (right_value, right_dot)| {
+            left_dot
+                .cmp(right_dot)
+                .then_with(|| left_value.cmp(right_value))
+        });
         let skip_count = visible.len().saturating_sub(ENTRY_DATA_MAX_LEN);
         let visible = visible.into_iter().skip(skip_count).collect::<Vec<_>>();
         let (data, dots): (Vec<_>, Vec<_>) = visible.into_iter().unzip();
@@ -562,6 +548,10 @@ impl Entry {
         self.kind == EntryKind::Subring
     }
 
+    fn is_relay_entry(&self) -> bool {
+        self.kind == EntryKind::RelayMessage
+    }
+
     fn same_kind_as(&self, other: &Self) -> bool {
         self.kind == other.kind
     }
@@ -604,12 +594,22 @@ impl Entry {
     }
 
     /// Overwrite current data with new data.
+    ///
+    /// Preservation: the replacement is represented as a CRDT join. A newly
+    /// stamped overwrite carries a reset floor, and materialization keeps only
+    /// dots at or after that floor, so older payload dots are removed without a
+    /// non-monotone assignment.
+    ///
     /// The handler of [EntryOperation::Overwrite].
     pub fn overwrite(&self, other: Self, actor: Did) -> Result<Self> {
         if !self.is_data_entry() {
             return Err(Error::EntryNotOverwritable);
         }
-        self.join(other.ensure_overwrite_stamp_after(actor, self.max_observed_version())?)
+        self.join(other.ensure_stamp_after(
+            actor,
+            self.max_observed_version(),
+            EntryStampKind::Overwrite,
+        )?)
     }
 
     /// This method is used to extend data to a Data kind [`Entry`].
@@ -618,7 +618,11 @@ impl Entry {
         if !self.is_data_entry() {
             return Err(Error::EntryNotAppendable);
         }
-        self.join(other.ensure_delta_stamp_after(actor, self.max_observed_version())?)
+        self.join(other.ensure_stamp_after(
+            actor,
+            self.max_observed_version(),
+            EntryStampKind::Delta,
+        )?)
     }
 
     /// This method is used to extend data to a Data kind [`Entry`] uniquely.
@@ -628,7 +632,11 @@ impl Entry {
         if !self.is_data_entry() {
             return Err(Error::EntryNotAppendable);
         }
-        self.join(other.ensure_delta_stamp_after(actor, self.max_observed_version())?)
+        self.join(other.ensure_stamp_after(
+            actor,
+            self.max_observed_version(),
+            EntryStampKind::Delta,
+        )?)
     }
 
     /// This method is used to join a subring.
@@ -650,7 +658,7 @@ impl Entry {
     /// Post: every removed payload is represented by an add-dot tombstone, so
     /// future joins with stale add replicas cannot resurrect it.
     pub fn tombstone(&self, other: Self) -> Result<Self> {
-        if self.kind != EntryKind::RelayMessage {
+        if !self.is_relay_entry() {
             return Err(Error::EntryNotTombstonable);
         }
         self.validate_same_carrier(&other)?;
@@ -863,13 +871,13 @@ mod tests {
             .data
             .iter()
             .enumerate()
-            .map(|(index, value)| {
+            .map(|(index, _)| {
                 let counter = if index == 0 {
                     10_000
                 } else {
                     u32::try_from(index).map_err(|_| Error::EntryDotIndexOutOfBounds { index })?
                 };
-                EntryDot::for_encoded(version(counter), index, value)
+                EntryDot::for_index(version(counter), index)
             })
             .collect::<Result<Vec<_>>>()?;
 
@@ -893,7 +901,7 @@ mod tests {
                 .map(|i| format!("legacy{i}"))
                 .collect::<Vec<_>>(),
         )?;
-        entry.crdt.dots = vec![EntryDot::for_encoded(version(10_000), 0, &entry.data[0])?];
+        entry.crdt.dots = vec![EntryDot::for_index(version(10_000), 0)?];
 
         let normalized = entry.try_into_storage_entry()?;
 
@@ -908,11 +916,11 @@ mod tests {
         let stale = encoded("stale")?;
         let live = encoded("live")?;
         let mut values = BTreeMap::new();
-        values.insert(stale.clone(), EntryDot::for_encoded(version(1), 0, &stale)?);
-        let live_dot = EntryDot::for_encoded(version(11), 0, &live)?;
+        values.insert(stale.clone(), EntryDot::for_index(version(1), 0)?);
+        let live_dot = EntryDot::for_index(version(11), 0)?;
         values.insert(live.clone(), live_dot);
 
-        let buffer = DataTopicBuffer::new(register, values);
+        let buffer = DataTopicBuffer::new(Some(register), values);
         assert_eq!(buffer.values.len(), 1);
         assert!(buffer.values.contains_key(&live));
 
@@ -937,6 +945,17 @@ mod tests {
 
         assert_eq!(forward, reverse);
         assert_eq!(decode_entry_data(&forward)?, vec![String::from("higher")]);
+        Ok(())
+    }
+
+    #[test]
+    fn forwarded_overwrite_witness_is_not_reissued_after_local_floor() -> Result<()> {
+        let current = overwrite_delta("topic", "current", 10)?;
+        let stale_forwarded = overwrite_delta("topic", "stale", 1)?;
+
+        let updated = current.overwrite(stale_forwarded, actor())?;
+
+        assert_eq!(decode_entry_data(&updated)?, vec![String::from("current")]);
         Ok(())
     }
 

@@ -1,18 +1,22 @@
 //! CRDT carriers for DHT entries.
 //!
 //! State variables:
-//! - `register` is an LWW reset floor for overwrite.
+//! - `register` is an optional LWW reset floor for overwrite.
 //! - `values` is an LWW element set keyed by encoded payload.
 //! - `removes` is a two-phase tombstone set for relay-message entries.
 //!
-//! Laws:
+//! Semilattice laws:
 //! - `GSet` join is set union.
+//! - `DataTopicBuffer` join is idempotent, commutative, and associative over
+//!   normalized LWW element sets.
+//! - `RelayMessageSet` join is idempotent, commutative, and associative over
+//!   normalized two-phase sets.
+//!
+//! Constructor postconditions:
 //! - `DataTopicBuffer::new` preserves only values whose dot is at or after the
-//!   reset floor.
-//! - `DataTopicBuffer` join is pointwise maximum plus the maximum reset floor.
+//!   reset floor when a reset floor exists.
 //! - `RelayMessageSet::new` preserves only adds whose dot has not been
 //!   tombstoned.
-//! - `RelayMessageSet` join is add-set join plus tombstone union.
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
@@ -20,23 +24,25 @@ use std::collections::BTreeSet;
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::Entry;
 use crate::algebra::JoinSemilattice;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::Encoded;
 
-/// Version for LWW entry registers and element dots.
+/// Hybrid logical version for LWW entry registers and element dots.
 ///
-/// The timestamp and storage actor are assigned at the storage-operation
-/// boundary. `operation` is a deterministic content digest of that operation,
-/// giving registers and element dots a total tiebreak when one actor processes
-/// multiple writes in the same millisecond.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+/// `logical_time_ms` starts from the wall-clock millisecond observed at the
+/// storage-operation boundary, then advances beyond any local floor that would
+/// otherwise dominate it. `actor` and `operation` make concurrent writes from
+/// the same millisecond totally ordered without claiming wall-clock recency.
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 pub struct EntryVersion {
-    /// Milliseconds since Unix epoch when the operation was issued.
-    pub epoch_ms: u128,
+    /// Hybrid logical time in milliseconds.
+    #[serde(alias = "epoch_ms")]
+    pub logical_time_ms: u128,
     /// Storage node that first stamped the operation.
     pub actor: Did,
     /// Deterministic digest of the stamped operation payload.
@@ -45,10 +51,10 @@ pub struct EntryVersion {
 }
 
 impl EntryVersion {
-    /// Construct a version from an explicit timestamp and actor.
-    pub fn new(epoch_ms: u128, actor: Did, operation: Did) -> Self {
+    /// Construct a version from an explicit hybrid logical time and actor.
+    pub fn new(logical_time_ms: u128, actor: Did, operation: Did) -> Self {
         Self {
-            epoch_ms,
+            logical_time_ms,
             actor,
             operation,
         }
@@ -59,42 +65,36 @@ impl EntryVersion {
         Self::new(crate::utils::get_epoch_ms(), actor, operation)
     }
 
-    pub(super) fn after(self, floor: Self) -> Self {
+    pub(super) fn after(self, floor: Option<Self>) -> Self {
+        let Some(floor) = floor else {
+            return self;
+        };
         if self > floor {
-            self
-        } else {
-            Self {
-                epoch_ms: floor.epoch_ms.saturating_add(1),
-                actor: self.actor,
-                operation: self.operation,
-            }
+            return self;
+        }
+        Self {
+            logical_time_ms: floor.logical_time_ms.saturating_add(1),
+            actor: self.actor,
+            operation: self.operation,
         }
     }
 }
 
 /// Unique add witness for one visible entry payload element.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 pub struct EntryDot {
     /// LWW version that issued this element.
     pub version: EntryVersion,
     /// Element position inside the issuing operation.
     pub index: u32,
-    /// Stable digest of the encoded element.
-    pub digest: Did,
 }
 
 impl EntryDot {
-    pub(super) fn for_encoded(
-        version: EntryVersion,
-        index: usize,
-        value: &Encoded,
-    ) -> Result<Self> {
+    pub(super) fn for_index(version: EntryVersion, index: usize) -> Result<Self> {
         let index = u32::try_from(index).map_err(|_| Error::EntryDotIndexOutOfBounds { index })?;
-        Ok(Self {
-            version,
-            index,
-            digest: Entry::gen_did(value.value())?,
-        })
+        Ok(Self { version, index })
     }
 }
 
@@ -105,8 +105,8 @@ impl EntryDot {
 /// remove set for relay-message two-phase semantics.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EntryCrdt {
-    /// LWW reset floor for the entry payload.
-    pub register: EntryVersion,
+    /// Optional LWW reset floor for the entry payload.
+    pub register: Option<EntryVersion>,
     /// Per-element add dots. When absent, legacy entries synthesize dots from
     /// their payload order and value digest.
     pub dots: Vec<EntryDot>,
@@ -115,8 +115,13 @@ pub struct EntryCrdt {
 }
 
 impl EntryCrdt {
-    pub(super) fn has_witness(&self) -> bool {
-        *self != Self::default()
+    pub(super) fn has_write_witness(&self) -> bool {
+        self.register.is_some() || !self.dots.is_empty()
+    }
+
+    /// Return the bottom floor used only to lift legacy payloads without dots.
+    pub(super) fn legacy_floor(&self) -> EntryVersion {
+        self.register.unwrap_or_default()
     }
 }
 
@@ -155,14 +160,18 @@ impl<T: Ord> JoinSemilattice for GSet<T> {
 /// Bounded LWW element set used by data topic buffers.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DataTopicBuffer {
-    pub(super) register: EntryVersion,
+    pub(super) register: Option<EntryVersion>,
     pub(super) values: BTreeMap<Encoded, EntryDot>,
 }
 
 impl DataTopicBuffer {
-    pub(super) fn new(register: EntryVersion, values: BTreeMap<Encoded, EntryDot>) -> Self {
-        let mut values = values;
-        values.retain(|_, dot| dot.version >= register);
+    pub(super) fn new(
+        register: Option<EntryVersion>,
+        mut values: BTreeMap<Encoded, EntryDot>,
+    ) -> Self {
+        if let Some(floor) = register {
+            values.retain(|_, dot| dot.version >= floor);
+        }
         Self { register, values }
     }
 }

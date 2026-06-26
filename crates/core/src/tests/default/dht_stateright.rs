@@ -34,6 +34,8 @@
 
 use std::borrow::Cow;
 use std::collections::BTreeSet;
+use std::hash::Hash;
+use std::hash::Hasher;
 
 use num_bigint::BigUint;
 use stateright::actor::model_timeout;
@@ -51,11 +53,18 @@ use super::dht_convergence::spec;
 use super::dht_convergence::K;
 use crate::algebra::assert_join_semilattice_laws;
 use crate::algebra::JoinSemilattice;
+use crate::consts::ENTRY_DATA_MAX_LEN;
+use crate::dht::entry::Entry;
+use crate::dht::entry::EntryCrdt;
+use crate::dht::entry::EntryDot;
+use crate::dht::entry::EntryKind;
+use crate::dht::entry::EntryVersion;
 use crate::dht::successor::SuccessorReader;
 use crate::dht::successor::SuccessorWriter;
 use crate::dht::Chord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
+use crate::message::Encoded;
 use crate::storage::MemStorage;
 
 /// A DID at `num/den` of the way round the ring — deterministic test positions.
@@ -542,48 +551,353 @@ fn discovery_model(all: Vec<Did>, rounds: u8) -> ActorModel<DiscoveryNode, Cfg, 
 // State variables:
 //   phase    in {Partitioned, Merged}
 //   replica  in StorageJoinValue^3
-//   network  subset of {from, to, value}
 //
 // Initial state:
 //   replicas start with independent local writes A, B, C.
-//   phase = Partitioned, where only nodes 0 and 1 may exchange messages.
+//   phase = Partitioned, where only same-side nodes may exchange state.
 //
 // Next-state relation:
-//   Send(from, to) inserts the sender's current value when the topology allows
-//   that edge and no message on that edge is already pending.
-//   Deliver(msg) removes one pending message and applies replica[to] :=
-//   replica[to] join msg.value.
+//   Transfer(from, to) applies replica[to] := replica[to] join replica[from]
+//   whenever the topology allows that edge.
 //   Merge changes phase from Partitioned to Merged, enabling every edge.
 //
 // Invariant:
 //   forall node. replica[node] <= A join B join C.
 //
 // Liveness expectation under fair anti-entropy:
-//   from any reachable Merged state, repeated Send/Deliver steps reach the
-//   single least upper bound at every replica. Reordering and duplication are
-//   covered by the semilattice law: every delivery is a join.
+//   from any reachable Merged state, repeated Transfer steps reach the single
+//   least upper bound at every replica.
+//
+// Refinement:
+//   An asynchronous send/deliver trace projects to this Transfer model because
+//   delivery is a pure join of a sender snapshot into the receiver. Message
+//   reordering and duplication are covered by the semilattice law checked
+//   below: join is commutative and idempotent.
 // ===================================================================
 
 const STORAGE_REPLICA_COUNT: usize = 3;
+const STORAGE_PARTITION_MASKS: [StoragePartition; STORAGE_REPLICA_COUNT] = [
+    StoragePartition(0b001),
+    StoragePartition(0b010),
+    StoragePartition(0b011),
+];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-struct StorageJoinValue(u8);
+struct StoragePartition(u8);
+
+impl StoragePartition {
+    fn permits(self, from: usize, to: usize) -> bool {
+        if from == to {
+            return false;
+        }
+        self.side(from) == self.side(to)
+    }
+
+    fn side(self, node: usize) -> bool {
+        let shift = match u32::try_from(node) {
+            Ok(shift) => shift,
+            Err(_) => return false,
+        };
+        let Some(bit) = 1u8.checked_shl(shift) else {
+            return false;
+        };
+        self.0 & bit != 0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+enum StorageJoinCarrier {
+    DataBoundedTopN,
+    DataOverwriteReset,
+    RelayTombstone,
+}
+
+#[derive(Clone, Debug)]
+struct StorageJoinValue {
+    carrier: StorageJoinCarrier,
+    bits: u8,
+    entry: Entry,
+}
 
 impl StorageJoinValue {
-    const EMPTY: Self = Self(0);
-    const A: Self = Self(0b001);
-    const B: Self = Self(0b010);
-    const C: Self = Self(0b100);
-    const ALL: Self = Self(Self::A.0 | Self::B.0 | Self::C.0);
+    fn new(carrier: StorageJoinCarrier, bits: u8, entry: Entry) -> Self {
+        match entry.try_into_storage_entry() {
+            Ok(entry) => Self {
+                carrier,
+                bits,
+                entry,
+            },
+            Err(error) => panic!("storage model entry must normalize: {error}"),
+        }
+    }
 
-    fn is_subset_of(self, other: Self) -> bool {
-        self.join(other) == other
+    fn bottom_like(&self) -> Self {
+        storage_value_from_bits(self.carrier, 0)
+    }
+
+    fn is_subset_of(&self, other: &Self) -> bool {
+        self.clone().join(other.clone()) == *other
+    }
+}
+
+impl PartialEq for StorageJoinValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.carrier == other.carrier && self.bits == other.bits
+    }
+}
+
+impl Eq for StorageJoinValue {}
+
+impl Hash for StorageJoinValue {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.carrier.hash(state);
+        self.bits.hash(state);
+    }
+}
+
+impl Ord for StorageJoinValue {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.carrier
+            .cmp(&other.carrier)
+            .then_with(|| self.bits.cmp(&other.bits))
+    }
+}
+
+impl PartialOrd for StorageJoinValue {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
     }
 }
 
 impl JoinSemilattice for StorageJoinValue {
     fn join(self, other: Self) -> Self {
-        Self(self.0 | other.0)
+        if self.carrier != other.carrier {
+            panic!("storage model joins only one carrier");
+        }
+        let carrier = self.carrier;
+        let bits = self.bits | other.bits;
+        let joined = storage_join_entry(self.entry, other.entry);
+        Self::new(carrier, bits, joined)
+    }
+}
+
+struct StorageJoinScenario {
+    name: &'static str,
+    initial: [StorageJoinValue; STORAGE_REPLICA_COUNT],
+}
+
+impl StorageJoinScenario {
+    fn bottom(&self) -> StorageJoinValue {
+        self.initial[0].bottom_like()
+    }
+
+    fn global_lub(&self) -> StorageJoinValue {
+        self.initial
+            .iter()
+            .cloned()
+            .fold(self.bottom(), JoinSemilattice::join)
+    }
+}
+
+fn storage_model_did(offset: u32) -> Did {
+    Did::from(10_000u32.saturating_add(offset))
+}
+
+fn storage_version(time: u128, actor: u32, operation: u32) -> EntryVersion {
+    EntryVersion::new(time, Did::from(actor), Did::from(operation))
+}
+
+fn storage_index(index: usize) -> u32 {
+    match u32::try_from(index) {
+        Ok(index) => index,
+        Err(_) => panic!("storage model index must fit in u32"),
+    }
+}
+
+fn storage_dot(version: EntryVersion, index: usize) -> EntryDot {
+    let index = storage_index(index);
+    EntryDot { version, index }
+}
+
+fn storage_encoded(label: &str) -> Encoded {
+    Encoded::from(label)
+}
+
+fn storage_join_entry(left: Entry, right: Entry) -> Entry {
+    let joined = match left.join(right) {
+        Ok(entry) => entry,
+        Err(error) => panic!("storage model joins only compatible entries: {error}"),
+    };
+    match joined.try_into_storage_entry() {
+        Ok(entry) => entry,
+        Err(error) => panic!("storage model join result must normalize: {error}"),
+    }
+}
+
+fn data_value_range(did: Did, label: &'static str, start_time: u128, count: usize) -> Entry {
+    let data = (0..count)
+        .map(|index| storage_encoded(&format!("{label}-{index}")))
+        .collect::<Vec<_>>();
+    let dots = (0..count)
+        .map(|offset| {
+            let index = storage_index(offset);
+            let time = start_time.saturating_add(u128::from(index));
+            storage_dot(
+                storage_version(time, 1, 1_000u32.saturating_add(index)),
+                offset,
+            )
+        })
+        .collect::<Vec<_>>();
+    Entry {
+        did,
+        data,
+        kind: EntryKind::Data,
+        crdt: EntryCrdt {
+            register: None,
+            dots,
+            tombstones: Vec::new(),
+        },
+    }
+}
+
+fn data_overwrite_value(did: Did, label: &'static str, version: EntryVersion) -> Entry {
+    Entry {
+        did,
+        data: vec![storage_encoded(label)],
+        kind: EntryKind::Data,
+        crdt: EntryCrdt {
+            register: Some(version),
+            dots: vec![storage_dot(version, 0)],
+            tombstones: Vec::new(),
+        },
+    }
+}
+
+fn relay_add_value(did: Did, label: &'static str, dot: EntryDot) -> Entry {
+    Entry {
+        did,
+        data: vec![storage_encoded(label)],
+        kind: EntryKind::RelayMessage,
+        crdt: EntryCrdt {
+            register: None,
+            dots: vec![dot],
+            tombstones: Vec::new(),
+        },
+    }
+}
+
+fn relay_remove_value(did: Did, dot: EntryDot) -> Entry {
+    Entry {
+        did,
+        data: Vec::new(),
+        kind: EntryKind::RelayMessage,
+        crdt: EntryCrdt {
+            register: None,
+            dots: Vec::new(),
+            tombstones: vec![dot],
+        },
+    }
+}
+
+fn storage_delta_entry(carrier: StorageJoinCarrier, bit: u8) -> Entry {
+    match carrier {
+        StorageJoinCarrier::DataBoundedTopN => data_value_range(
+            storage_model_did(1),
+            match bit {
+                0b001 => "low",
+                0b010 => "mid",
+                0b100 => "high",
+                _ => panic!("storage model delta bit must be singleton"),
+            },
+            match bit {
+                0b001 => 1,
+                0b010 => 1_000,
+                0b100 => 2_000,
+                _ => panic!("storage model delta bit must be singleton"),
+            },
+            ENTRY_DATA_MAX_LEN,
+        ),
+        StorageJoinCarrier::DataOverwriteReset => match bit {
+            0b001 => data_value_range(storage_model_did(2), "stale-a", 1, 3),
+            0b010 => {
+                data_overwrite_value(storage_model_did(2), "reset", storage_version(100, 2, 200))
+            }
+            0b100 => data_value_range(storage_model_did(2), "stale-c", 10, 3),
+            _ => panic!("storage model delta bit must be singleton"),
+        },
+        StorageJoinCarrier::RelayTombstone => {
+            let relay_a_dot = storage_dot(storage_version(1, 1, 10), 0);
+            let relay_b_dot = storage_dot(storage_version(2, 2, 20), 0);
+            match bit {
+                0b001 => relay_add_value(storage_model_did(3), "relay-a", relay_a_dot),
+                0b010 => relay_add_value(storage_model_did(3), "relay-b", relay_b_dot),
+                0b100 => relay_remove_value(storage_model_did(3), relay_a_dot),
+                _ => panic!("storage model delta bit must be singleton"),
+            }
+        }
+    }
+}
+
+fn storage_bottom_entry(carrier: StorageJoinCarrier) -> Entry {
+    let (did, kind) = match carrier {
+        StorageJoinCarrier::DataBoundedTopN => (storage_model_did(1), EntryKind::Data),
+        StorageJoinCarrier::DataOverwriteReset => (storage_model_did(2), EntryKind::Data),
+        StorageJoinCarrier::RelayTombstone => (storage_model_did(3), EntryKind::RelayMessage),
+    };
+    Entry::new(did, Vec::new(), kind)
+}
+
+fn storage_value_from_bits(carrier: StorageJoinCarrier, bits: u8) -> StorageJoinValue {
+    let mut entry = storage_bottom_entry(carrier);
+    for bit in [0b001, 0b010, 0b100] {
+        if bits & bit != 0 {
+            entry = storage_join_entry(entry, storage_delta_entry(carrier, bit));
+        }
+    }
+    StorageJoinValue::new(carrier, bits, entry)
+}
+
+fn storage_join_scenarios() -> Vec<StorageJoinScenario> {
+    vec![
+        StorageJoinScenario {
+            name: "data bounded top-n",
+            initial: [
+                storage_value_from_bits(StorageJoinCarrier::DataBoundedTopN, 0b001),
+                storage_value_from_bits(StorageJoinCarrier::DataBoundedTopN, 0b010),
+                storage_value_from_bits(StorageJoinCarrier::DataBoundedTopN, 0b100),
+            ],
+        },
+        StorageJoinScenario {
+            name: "data overwrite reset floor",
+            initial: [
+                storage_value_from_bits(StorageJoinCarrier::DataOverwriteReset, 0b001),
+                storage_value_from_bits(StorageJoinCarrier::DataOverwriteReset, 0b010),
+                storage_value_from_bits(StorageJoinCarrier::DataOverwriteReset, 0b100),
+            ],
+        },
+        StorageJoinScenario {
+            name: "relay tombstone prevents resurrection",
+            initial: [
+                storage_value_from_bits(StorageJoinCarrier::RelayTombstone, 0b001),
+                storage_value_from_bits(StorageJoinCarrier::RelayTombstone, 0b010),
+                storage_value_from_bits(StorageJoinCarrier::RelayTombstone, 0b100),
+            ],
+        },
+    ]
+}
+
+fn storage_join_carriers() -> [StorageJoinCarrier; 3] {
+    [
+        StorageJoinCarrier::DataBoundedTopN,
+        StorageJoinCarrier::DataOverwriteReset,
+        StorageJoinCarrier::RelayTombstone,
+    ]
+}
+
+fn storage_value_by_bits(values: &[StorageJoinValue], bits: u8) -> &StorageJoinValue {
+    match values.get(usize::from(bits)) {
+        Some(value) => value,
+        None => panic!("storage model bitmask must be in the finite carrier"),
     }
 }
 
@@ -593,30 +907,22 @@ enum StorageJoinPhase {
     Merged,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-struct StorageJoinMessage {
-    from: usize,
-    to: usize,
-    value: StorageJoinValue,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 struct StorageJoinState {
+    partition: StoragePartition,
     phase: StorageJoinPhase,
     replicas: [StorageJoinValue; STORAGE_REPLICA_COUNT],
-    messages: BTreeSet<StorageJoinMessage>,
 }
 
 impl StorageJoinState {
-    fn initial() -> Self {
+    fn initial(
+        partition: StoragePartition,
+        replicas: [StorageJoinValue; STORAGE_REPLICA_COUNT],
+    ) -> Self {
         Self {
+            partition,
             phase: StorageJoinPhase::Partitioned,
-            replicas: [
-                StorageJoinValue::A,
-                StorageJoinValue::B,
-                StorageJoinValue::C,
-            ],
-            messages: BTreeSet::new(),
+            replicas,
         }
     }
 
@@ -625,35 +931,19 @@ impl StorageJoinState {
             return false;
         }
         match self.phase {
-            StorageJoinPhase::Partitioned => from < 2 && to < 2,
+            StorageJoinPhase::Partitioned => self.partition.permits(from, to),
             StorageJoinPhase::Merged => from < STORAGE_REPLICA_COUNT && to < STORAGE_REPLICA_COUNT,
         }
     }
 
-    fn has_pending_edge(&self, from: usize, to: usize) -> bool {
-        self.messages
-            .iter()
-            .any(|message| message.from == from && message.to == to)
-    }
-
-    fn send_current(&self, from: usize, to: usize) -> Option<Self> {
-        if !self.topology_permits(from, to) || self.has_pending_edge(from, to) {
+    fn transfer_current(&self, from: usize, to: usize) -> Option<Self> {
+        if !self.topology_permits(from, to) {
             return None;
         }
-        let value = self.replicas.get(from).copied()?;
+        let value = self.replicas.get(from).cloned()?;
         let mut next = self.clone();
-        next.messages.insert(StorageJoinMessage { from, to, value });
-        Some(next)
-    }
-
-    fn deliver(&self, message: StorageJoinMessage) -> Option<Self> {
-        if !self.messages.contains(&message) {
-            return None;
-        }
-        let mut next = self.clone();
-        next.messages.remove(&message);
-        let replica = next.replicas.get_mut(message.to)?;
-        *replica = replica.join(message.value);
+        let replica = next.replicas.get_mut(to)?;
+        *replica = replica.clone().join(value);
         Some(next)
     }
 
@@ -674,40 +964,29 @@ impl StorageJoinState {
         }
         for from in 0..STORAGE_REPLICA_COUNT {
             for to in 0..STORAGE_REPLICA_COUNT {
-                if let Some(sent) = self.send_current(from, to) {
-                    next.push(sent);
+                if let Some(transferred) = self.transfer_current(from, to) {
+                    next.push(transferred);
                 }
-            }
-        }
-        for message in self.messages.iter().copied().collect::<Vec<_>>() {
-            if let Some(delivered) = self.deliver(message) {
-                next.push(delivered);
             }
         }
         next
     }
 
-    fn preserves_lub_bound(&self) -> bool {
+    fn is_below_global_lub(&self, global_lub: &StorageJoinValue) -> bool {
         self.replicas
             .iter()
-            .copied()
-            .all(|value| value.is_subset_of(StorageJoinValue::ALL))
+            .all(|value| value.is_subset_of(global_lub))
     }
 
-    fn is_quiescent_lub(&self) -> bool {
-        self.messages.is_empty()
-            && self
-                .replicas
-                .iter()
-                .copied()
-                .all(|value| value == StorageJoinValue::ALL)
+    fn is_quiescent_lub(&self, global_lub: &StorageJoinValue) -> bool {
+        self.replicas.iter().all(|value| value == global_lub)
     }
 
-    fn send_all_current(&self) -> Self {
+    fn transfer_all_current(&self) -> Self {
         let mut state = self.clone();
         for from in 0..STORAGE_REPLICA_COUNT {
             for to in 0..STORAGE_REPLICA_COUNT {
-                if let Some(next) = state.send_current(from, to) {
+                if let Some(next) = state.transfer_current(from, to) {
                     state = next;
                 }
             }
@@ -715,23 +994,13 @@ impl StorageJoinState {
         state
     }
 
-    fn deliver_all(&self) -> Self {
-        let mut state = self.clone();
-        for message in self.messages.iter().copied().collect::<Vec<_>>() {
-            if let Some(next) = state.deliver(message) {
-                state = next;
-            }
-        }
-        state
-    }
-
-    fn drive_to_quiescent_lub(&self) -> Self {
+    fn drive_to_quiescent_lub(&self, global_lub: &StorageJoinValue) -> Self {
         let mut state = self.clone();
         for _ in 0..STORAGE_REPLICA_COUNT * 8 {
-            if state.is_quiescent_lub() {
+            if state.is_quiescent_lub(global_lub) {
                 return state;
             }
-            let next = state.send_all_current().deliver_all();
+            let next = state.transfer_all_current();
             if next == state {
                 return next;
             }
@@ -741,9 +1010,12 @@ impl StorageJoinState {
     }
 }
 
-fn reachable_storage_join_states() -> BTreeSet<StorageJoinState> {
+fn reachable_storage_join_states(
+    partition: StoragePartition,
+    replicas: [StorageJoinValue; STORAGE_REPLICA_COUNT],
+) -> BTreeSet<StorageJoinState> {
     let mut seen = BTreeSet::new();
-    let mut frontier = vec![StorageJoinState::initial()];
+    let mut frontier = vec![StorageJoinState::initial(partition, replicas)];
     while let Some(state) = frontier.pop() {
         if !seen.insert(state.clone()) {
             continue;
@@ -1028,37 +1300,67 @@ mod tests {
         }
     }
 
-    /// Stage 3 — CRDT SEC law. Storage values are bounded join-semilattice
-    /// states; anti-entropy messages only deliver more joins.
+    /// Stage 3 — CRDT SEC law. Storage values are real finite [`Entry`]
+    /// carriers; anti-entropy messages only deliver more joins.
     #[test]
-    fn storage_join_value_satisfies_semilattice_laws() {
-        assert_join_semilattice_laws(&[
-            StorageJoinValue::EMPTY,
-            StorageJoinValue::A,
-            StorageJoinValue::B,
-            StorageJoinValue::C,
-            StorageJoinValue::A.join(StorageJoinValue::B),
-            StorageJoinValue::ALL,
-        ]);
+    fn storage_entry_join_satisfies_semilattice_laws() {
+        for carrier in storage_join_carriers() {
+            let values = (0u8..8)
+                .map(|bits| storage_value_from_bits(carrier, bits))
+                .collect::<Vec<_>>();
+            assert_join_semilattice_laws(&values);
+
+            for left in &values {
+                let idempotent = storage_join_entry(left.entry.clone(), left.entry.clone());
+                assert_eq!(idempotent, left.entry);
+                for right in &values {
+                    let expected = storage_value_by_bits(&values, left.bits | right.bits);
+                    let left_right = storage_join_entry(left.entry.clone(), right.entry.clone());
+                    let right_left = storage_join_entry(right.entry.clone(), left.entry.clone());
+                    assert_eq!(left_right, expected.entry);
+                    assert_eq!(left_right, right_left);
+
+                    for third in &values {
+                        let left_assoc = storage_join_entry(
+                            storage_join_entry(left.entry.clone(), right.entry.clone()),
+                            third.entry.clone(),
+                        );
+                        let right_assoc = storage_join_entry(
+                            left.entry.clone(),
+                            storage_join_entry(right.entry.clone(), third.entry.clone()),
+                        );
+                        assert_eq!(left_assoc, right_assoc);
+                    }
+                }
+            }
+        }
     }
 
     /// Stage 3 — topology-aware SEC. Every reachable partition/merge state
     /// stays below the global lub, and every merged state reaches that lub under
-    /// fair repeated send/deliver. This is the storage convergence proof; the
-    /// copy/ack/delete model below is only local cleanup safety.
+    /// fair repeated send/deliver. The finite carriers cover bounded top-N data,
+    /// overwrite reset floors, and relay tombstones. The copy/ack/delete model
+    /// below is only local cleanup safety.
     #[test]
     fn storage_join_topology_model_converges_after_partition_merge() {
-        for state in reachable_storage_join_states() {
-            assert!(
-                state.preserves_lub_bound(),
-                "storage join exceeded global lub: {state:?}"
-            );
-            if state.phase == StorageJoinPhase::Merged {
-                let closed = state.drive_to_quiescent_lub();
-                assert!(
-                    closed.is_quiescent_lub(),
-                    "merged state did not close to global lub: start={state:?}, closed={closed:?}"
-                );
+        for scenario in storage_join_scenarios() {
+            let global_lub = scenario.global_lub();
+            for partition in STORAGE_PARTITION_MASKS {
+                for state in reachable_storage_join_states(partition, scenario.initial.clone()) {
+                    assert!(
+                        state.is_below_global_lub(&global_lub),
+                        "storage join exceeded global lub for {}: {state:?}",
+                        scenario.name
+                    );
+                    if state.phase == StorageJoinPhase::Merged {
+                        let closed = state.drive_to_quiescent_lub(&global_lub);
+                        assert!(
+                            closed.is_quiescent_lub(&global_lub),
+                            "merged state did not close to global lub for {}: start={state:?}, closed={closed:?}",
+                            scenario.name
+                        );
+                    }
+                }
             }
         }
     }
