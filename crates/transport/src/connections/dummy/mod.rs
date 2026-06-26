@@ -25,7 +25,7 @@ use crate::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 use crate::delivery::DeliveryFuture;
 use crate::error::Error;
 use crate::error::Result;
-use crate::ice_server::IceServer;
+use crate::ice_server::parse_ice_servers_or_warn;
 use crate::notifier::Notifier;
 use crate::pool::Pool;
 
@@ -261,9 +261,7 @@ impl DummyConnection {
 impl DummyTransport {
     /// Create a new [DummyTransport] instance.
     pub fn new(ice_servers: &str, _external_address: Option<String>) -> Self {
-        if let Err(error) = IceServer::vec_from_str(ice_servers) {
-            tracing::warn!(%error, "Ignoring invalid dummy ICE server configuration");
-        }
+        let _ = parse_ice_servers_or_warn(ice_servers, "dummy");
 
         Self { pool: Pool::new() }
     }

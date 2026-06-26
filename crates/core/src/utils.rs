@@ -130,6 +130,8 @@ pub mod js_func {
 
 #[cfg(feature = "wasm")]
 pub mod js_utils {
+    use std::future::Future;
+
     use wasm_bindgen::closure::Closure;
     use wasm_bindgen::JsCast;
     use wasm_bindgen::JsValue;
@@ -210,5 +212,23 @@ pub mod js_utils {
             }
         };
         wasm_bindgen_futures::JsFuture::from(promise)
+    }
+
+    /// Spawn a wasm-local interval loop that waits for each tick task to finish.
+    pub fn spawn_interval<F, Fut>(millis: i32, mut task: F)
+    where
+        F: FnMut() -> Fut + 'static,
+        Fut: Future<Output = ()> + 'static,
+    {
+        wasm_bindgen_futures::spawn_local(async move {
+            loop {
+                if let Err(error) = window_sleep(millis).await {
+                    tracing::error!("failed to wait for interval tick: {:?}", error);
+                    return;
+                }
+
+                task().await;
+            }
+        });
     }
 }

@@ -46,6 +46,17 @@ impl IceServer {
     }
 }
 
+/// Parse ICE servers, log invalid configuration, and continue without servers.
+pub(crate) fn parse_ice_servers_or_warn(config: &str, transport: &str) -> Vec<IceServer> {
+    match IceServer::vec_from_str(config) {
+        Ok(ice_servers) => ice_servers,
+        Err(error) => {
+            tracing::warn!(%error, %transport, "Ignoring invalid ICE server configuration");
+            Vec::new()
+        }
+    }
+}
+
 impl Default for IceServer {
     fn default() -> Self {
         Self {

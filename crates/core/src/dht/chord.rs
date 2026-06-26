@@ -377,7 +377,10 @@ impl Chord<PeerRingAction> for PeerRing {
         fix_finger_index = (fix_finger_index + 1) % finger_table_size;
 
         // Get finger did.
-        let finger_did = Did::from(BigUint::from(2u16).pow(fix_finger_index as u32));
+        let Ok(exponent) = u32::try_from(fix_finger_index) else {
+            return Ok(PeerRingAction::None);
+        };
+        let finger_did = Did::from(BigUint::from(2u16).pow(exponent));
 
         // Caution here that there are also locks in find_successor.
         // You cannot lock finger table before calling find_successor.

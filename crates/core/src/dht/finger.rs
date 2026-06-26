@@ -1,7 +1,6 @@
 //! FingerTable
 
 #![warn(missing_docs)]
-use std::ops::Index;
 
 use derivative::Derivative;
 use num_bigint::BigUint;
@@ -12,7 +11,6 @@ use crate::dht::Did;
 
 /// Default number of Chord finger slots for a 160-bit `Did`.
 pub const DEFAULT_FINGER_TABLE_SIZE: usize = 160;
-const EMPTY_FINGER_SLOT: Option<Did> = None;
 
 /// Finger table of Chord DHT
 /// Ring's finger table is implemented with BiasRing
@@ -58,9 +56,14 @@ impl FingerTable {
         self.finger.get(index).copied().flatten()
     }
 
-    /// ref getter
-    pub fn get_ref(&self, index: usize) -> &Option<Did> {
-        self.finger.get(index).unwrap_or(&EMPTY_FINGER_SLOT)
+    fn write_slot(&mut self, index: usize, did: Option<Did>) -> bool {
+        match self.finger.get_mut(index) {
+            Some(slot) => {
+                *slot = did;
+                true
+            }
+            None => false,
+        }
     }
 
     /// setter
@@ -74,9 +77,7 @@ impl FingerTable {
             tracing::trace!("set finger table with self did, ignore it");
             return;
         }
-        if let Some(slot) = self.finger.get_mut(index) {
-            *slot = Some(did);
-        }
+        self.write_slot(index, Some(did));
     }
 
     /// setter for fix_finger_index
@@ -105,9 +106,7 @@ impl FingerTable {
             let fix_id = self.finger.get(end_idx).copied().flatten();
 
             for idx in first_idx..end_idx {
-                if let Some(slot) = self.finger.get_mut(idx) {
-                    *slot = fix_id;
-                }
+                self.write_slot(idx, fix_id);
             }
         }
     }
@@ -117,7 +116,10 @@ impl FingerTable {
         let bias = did.bias(self.did);
 
         for k in 0..self.size {
-            let pos = Did::from(BigUint::from(2u16).pow(k as u32));
+            let Ok(exponent) = u32::try_from(k) else {
+                continue;
+            };
+            let pos = Did::from(BigUint::from(2u16).pow(exponent));
 
             if bias.pos() < pos {
                 continue;
@@ -129,9 +131,7 @@ impl FingerTable {
                 }
             }
 
-            if let Some(slot) = self.finger.get_mut(k) {
-                *slot = Some(did);
-            }
+            self.write_slot(k, Some(did));
         }
     }
 
@@ -180,13 +180,6 @@ impl FingerTable {
     #[cfg(test)]
     pub fn clone_finger(self) -> Vec<Option<Did>> {
         self.finger
-    }
-}
-
-impl Index<usize> for FingerTable {
-    type Output = Option<Did>;
-    fn index(&self, index: usize) -> &Self::Output {
-        self.get_ref(index)
     }
 }
 

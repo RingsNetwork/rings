@@ -35,6 +35,7 @@ use crate::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 use crate::delivery::DeliveryFuture;
 use crate::error::Error;
 use crate::error::Result;
+use crate::ice_server::parse_ice_servers_or_warn;
 use crate::ice_server::IceCredentialType;
 use crate::ice_server::IceServer;
 use crate::notifier::Notifier;
@@ -183,13 +184,7 @@ impl WebrtcConnection {
 impl WebrtcTransport {
     /// Create a new [WebrtcTransport] instance.
     pub fn new(ice_servers: &str, external_address: Option<String>) -> Self {
-        let ice_servers = match IceServer::vec_from_str(ice_servers) {
-            Ok(ice_servers) => ice_servers,
-            Err(error) => {
-                tracing::warn!(%error, "Ignoring invalid native WebRTC ICE server configuration");
-                Vec::new()
-            }
-        };
+        let ice_servers = parse_ice_servers_or_warn(ice_servers, "native-webrtc");
 
         Self {
             ice_servers,

@@ -153,8 +153,9 @@ impl From<ed25519_dalek::VerifyingKey> for PublicKey<33> {
         // [u8;32] here
         // ref: https://docs.rs/ed25519-dalek/latest/ed25519_dalek/struct.VerifyingKey.html
         let mut data = [0u8; 33];
-        for (target, source) in data.iter_mut().skip(1).zip(key.to_bytes()) {
-            *target = source;
+        let key_bytes = key.to_bytes();
+        if let Some(suffix) = data.get_mut(1..) {
+            suffix.copy_from_slice(&key_bytes);
         }
         Self(data)
     }

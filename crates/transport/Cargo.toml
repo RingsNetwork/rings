@@ -14,7 +14,7 @@ workspace = true
 
 [features]
 # Include nothing by default
-# The wasm transport backend is target-specific; build.rs rejects native+wasm combinations.
+# The crate root rejects native+wasm backend combinations.
 default = ["tokio/time", "tokio-util"]
 dummy = ["webrtc", "rand", "lazy_static"]
 native-webrtc = ["webrtc", "tokio-util", "tokio/sync", "tokio/time"]

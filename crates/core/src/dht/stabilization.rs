@@ -261,27 +261,26 @@ mod stabilizer {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use wasm_bindgen_futures::spawn_local;
-
     use super::*;
-    use crate::utils::js_utils::window_sleep;
+    use crate::poll;
 
     impl Stabilizer {
         /// Run stabilization in a loop.
         pub async fn wait(self: Arc<Self>, interval: Duration) {
             let millis = i32::try_from(interval.as_millis()).unwrap_or(i32::MAX);
-            spawn_local(async move {
-                loop {
-                    if let Err(error) = window_sleep(millis).await {
-                        tracing::error!("failed to wait for stabilization interval {:?}", error);
-                        return;
+            let stabilizer = self;
+            poll!(
+                {
+                    let stabilizer = Arc::clone(&stabilizer);
+                    async move {
+                        stabilizer
+                            .stabilize()
+                            .await
+                            .unwrap_or_else(|e| tracing::error!("failed to stabilize {:?}", e));
                     }
-
-                    self.stabilize()
-                        .await
-                        .unwrap_or_else(|e| tracing::error!("failed to stabilize {:?}", e));
-                }
-            });
+                },
+                millis
+            );
         }
     }
 }

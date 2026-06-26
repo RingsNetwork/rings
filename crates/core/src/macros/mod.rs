@@ -1,7 +1,6 @@
 //! Macro for ring-core
 //!
-//! for impl recursion, we need:
-//! `poll` macro help to implement await operation finish when feature using `wasm`
+//! `poll` schedules a future expression repeatedly on wasm runtimes.
 //!
 //! # Example
 //!
@@ -45,7 +44,6 @@
 //! ```rust,ignore
 //! # extern crate async_trait;
 //! # extern crate ring_core;
-//! # extern crate wasm_bindgen_futures;
 //! # extern crate log;
 //!
 //! # use std::sync::Arc;
@@ -53,98 +51,31 @@
 //! # use async_trait::async_trait;
 //! # use ring_core::dht::Stabilization;
 //! # use ring_core::dht::TStabilize;
-//! # use ring_core::macros::poll;
-//! # use wasm_bindgen_futures::spawn_local;
+//! # use ring_core::poll;
 //!  #[async_trait(?Send)]
 //!  impl TStabilize for Stabilization {
 //!      async fn wait(self: Arc<Self>) {
 //!          let caller = Arc::clone(&self);
-//!          let func = move || {
-//!             let caller = caller.clone();
-//!             spawn_local(Box::pin(async move {
-//!                 caller
-//!                     .stabilize()
-//!                     .await
-//!                     .unwrap_or_else(|e| log::error!("failed to stabilize {:?}", e));
-//!             }))
-//!         };
-//!         poll!(func, 25000);
+//!          poll!(
+//!              {
+//!                  let caller = Arc::clone(&caller);
+//!                  async move {
+//!                      caller
+//!                          .stabilize()
+//!                          .await
+//!                          .unwrap_or_else(|e| log::error!("failed to stabilize {:?}", e));
+//!                  }
+//!              },
+//!              25000
+//!          );
 //!     }
 //!  }
 //!  ```
 
-/// poll macro use for wasm futures and wait, act like `async-await`.
+/// Schedule a future expression repeatedly with a wasm timeout.
 #[macro_export]
 macro_rules! poll {
-    ( $func:expr, $ttl:expr ) => {{
-        use wasm_bindgen::JsCast;
-        use $crate::utils::js_utils::global;
-        use $crate::utils::js_utils::Global;
-        let func = wasm_bindgen::prelude::Closure::wrap(
-            (Box::new(move |func: js_sys::Function| {
-                $func();
-                match global().unwrap() {
-                    Global::Window(window) => {
-                        window
-                            .set_timeout_with_callback_and_timeout_and_arguments(
-                                func.unchecked_ref(),
-                                $ttl,
-                                &js_sys::Array::of1(&func),
-                            )
-                            .unwrap();
-                    }
-                    Global::WorkerGlobal(window) => {
-                        window
-                            .set_timeout_with_callback_and_timeout_and_arguments(
-                                func.unchecked_ref(),
-                                $ttl,
-                                &js_sys::Array::of1(&func),
-                            )
-                            .unwrap();
-                    }
-                    Global::ServiceWorkerGlobal(window) => {
-                        window
-                            .set_timeout_with_callback_and_timeout_and_arguments(
-                                func.unchecked_ref(),
-                                $ttl,
-                                &js_sys::Array::of1(&func),
-                            )
-                            .unwrap();
-                    }
-                }
-            })) as Box<dyn FnMut(js_sys::Function)>,
-        );
-        match global().unwrap() {
-            Global::Window(window) => {
-                window
-                    .set_timeout_with_callback_and_timeout_and_arguments(
-                        &func.as_ref().unchecked_ref(),
-                        $ttl,
-                        &js_sys::Array::of1(&func.as_ref().unchecked_ref()),
-                    )
-                    .unwrap();
-                func.forget();
-            }
-            Global::WorkerGlobal(window) => {
-                window
-                    .set_timeout_with_callback_and_timeout_and_arguments(
-                        &func.as_ref().unchecked_ref(),
-                        $ttl,
-                        &js_sys::Array::of1(&func.as_ref().unchecked_ref()),
-                    )
-                    .unwrap();
-                func.forget();
-            }
-            Global::ServiceWorkerGlobal(window) => {
-                window
-                    .set_timeout_with_callback_and_timeout_and_arguments(
-                        &func.as_ref().unchecked_ref(),
-                        $ttl,
-                        &js_sys::Array::of1(&func.as_ref().unchecked_ref()),
-                    )
-                    .unwrap();
-                func.forget();
-            }
-        }
+    ( $future:expr, $ttl:expr ) => {{
+        $crate::utils::js_utils::spawn_interval($ttl, move || $future);
     }};
 }

@@ -49,6 +49,7 @@ use crate::error::Result;
 const FIELD_ENCODING_MARKER: u8 = 0x52;
 const FIELD_ENCODING_OVERHEAD: usize = 3;
 const FIELD_CHUNK_SIZE: usize = 32 - FIELD_ENCODING_OVERHEAD;
+const FIELD_CHUNK_SIZE_U8: u8 = 29;
 
 /// Plaintext input before it is mapped into secp256k1 group elements.
 pub struct Plaintext<'a>(&'a str);
@@ -127,18 +128,14 @@ pub fn str_to_field(s: &str) -> Vec<Field> {
         .map(|x| {
             let mut data = [0u8; 32];
             let mut field = Field::default();
-            for (target, source) in data
-                .iter_mut()
-                .zip([255, FIELD_ENCODING_MARKER, x.len() as u8])
-            {
-                *target = source;
+            let chunk_len = u8::try_from(x.len()).unwrap_or(FIELD_CHUNK_SIZE_U8);
+            if let Some(header) = data.get_mut(..FIELD_ENCODING_OVERHEAD) {
+                header.copy_from_slice(&[255, FIELD_ENCODING_MARKER, chunk_len]);
             }
-            for (target, source) in data
-                .iter_mut()
-                .skip(FIELD_ENCODING_OVERHEAD)
-                .zip(x.iter().copied())
+            if let Some(payload) =
+                data.get_mut(FIELD_ENCODING_OVERHEAD..FIELD_ENCODING_OVERHEAD + x.len())
             {
-                *target = source;
+                payload.copy_from_slice(x);
             }
             // `FIELD_ENCODING_MARKER` is below the secp256k1 modulus prefix, so
             // the encoded 32-byte candidate always fits in the field.
@@ -211,6 +208,8 @@ fn lift_x(x: &Field) -> Result<Affine> {
         }
     }
 
+    // Typed safeguard for future encoding changes; normal adapter chunks should
+    // find a valid lift among the high-byte candidates above.
     Err(Error::Secp256k1PointLiftFailed)
 }
 

@@ -10,6 +10,14 @@
 )]
 #![doc = include_str!("../README.md")]
 
+#[cfg(all(
+    feature = "web-sys-webrtc",
+    any(feature = "dummy", feature = "native-webrtc")
+))]
+compile_error!(
+    "rings-transport feature `web-sys-webrtc` cannot be combined with native transport features"
+);
+
 pub mod callback;
 pub mod connection_ref;
 pub mod connections;
