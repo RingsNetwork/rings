@@ -58,6 +58,7 @@
 //! Identities are functions rather than associated constants because several
 //! curve adapters obtain identity values through their native libraries.
 
+#[cfg(test)]
 use std::fmt::Debug;
 use std::ops::Add;
 use std::ops::Mul;
