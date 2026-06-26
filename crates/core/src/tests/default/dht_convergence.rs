@@ -139,64 +139,31 @@ pub(super) const K: usize = 3;
 /// Ring bit-width; `Did` is `Z/2^160`, the finger table has one slot per bit.
 const BITS: usize = 160;
 
-/// The formal operators — a direct, independent Rust mirror of the TLA+ spec in
-/// the module doc. Kept deliberately tiny and obviously-correct so they serve as
-/// the *specification* that the production DHT code is checked against. Shared
-/// (the `mod spec` pivot) with the Stateright protocol model in `dht_stateright`.
+/// The formal operators used by the tests. This is deliberately only a thin
+/// wrapper over the production pure topology module, so convergence tests no
+/// longer maintain a second Chord oracle.
 pub(super) mod spec {
     use super::*;
-
-    /// `dist(a,b) == (Id[b] - Id[a]) % 2^160` — clockwise distance / `BiasId.pos()`.
-    pub fn dist(a: Did, b: Did) -> BigUint {
-        // `Did - Did` is already modular subtraction on Z/2^160 (see dht/did.rs).
-        BigUint::from(b - a)
-    }
+    pub use crate::dht::topology::dist;
 
     /// `Successors(n)` — the K nearest forward nodes, in increasing distance.
     pub fn successors(all: &[Did], n: Did) -> Vec<Did> {
-        let mut others: Vec<Did> = all.iter().copied().filter(|&d| d != n).collect();
-        others.sort_by_key(|&d| dist(n, d));
-        others.truncate(K);
-        others
+        crate::dht::topology::successors(all, n, K)
     }
 
     /// `Predecessor(n)` — the farthest-forward node (= nearest behind self).
     pub fn predecessor(all: &[Did], n: Did) -> Option<Did> {
-        all.iter()
-            .copied()
-            .filter(|&d| d != n)
-            .max_by_key(|&d| dist(n, d))
+        crate::dht::topology::predecessor(all, n)
     }
 
     /// `CorrectRectify` predecessor transition.
     pub fn correct_rectify_predecessor(me: Did, current: Option<Did>, pred: Did) -> Option<Did> {
-        match current {
-            Some(cur) if dist(me, cur) >= dist(me, pred) => Some(cur),
-            _ => Some(pred),
-        }
-    }
-
-    /// `Finger(n, bit)` — nearest forward node at distance `>= 2^bit`, else None.
-    /// Mirrors Rings' `finger.join` (no wrap: None when nothing is far enough),
-    /// which intentionally differs from the Chord paper's wrapping
-    /// `successor((n + 2^bit) mod M)`. See the module-doc DEVIATION note.
-    pub fn finger(all: &[Did], n: Did, bit: usize) -> Option<Did> {
-        let threshold = BigUint::from(1u8) << bit;
-        all.iter()
-            .copied()
-            .filter(|&d| d != n && dist(n, d) >= threshold)
-            .min_by_key(|&d| dist(n, d))
+        crate::dht::topology::rectify_predecessor(me, current, pred)
     }
 
     /// The full per-node finger table the spec predicts (one slot per ring bit).
     pub fn finger_table(all: &[Did], n: Did) -> Vec<Option<Did>> {
-        (0..BITS).map(|bit| finger(all, n, bit)).collect()
-    }
-
-    fn push_unique(xs: &mut Vec<Did>, x: Did) {
-        if !xs.contains(&x) {
-            xs.push(x);
-        }
+        crate::dht::topology::finger_table(all, n)
     }
 
     /// `CorrectStabilize` successor update: merge current successors with the
@@ -208,20 +175,13 @@ pub(super) mod spec {
         topo_successors: &[Did],
         topo_predecessor: Option<Did>,
     ) -> Vec<Did> {
-        let mut known = vec![me];
-        for &did in current {
-            push_unique(&mut known, did);
-        }
-        if let Some(pred) = topo_predecessor {
-            push_unique(&mut known, pred);
-        }
-        for &did in topo_successors
-            .iter()
-            .take(topo_successors.len().saturating_sub(1))
-        {
-            push_unique(&mut known, did);
-        }
-        successors(&known, me)
+        crate::dht::topology::stabilize_successors(
+            me,
+            current,
+            topo_successors,
+            topo_predecessor,
+            K,
+        )
     }
 
     /// `CorrectStabilize` query side effect: ask the successor's predecessor for
@@ -232,20 +192,12 @@ pub(super) mod spec {
         current: &[Did],
         topo_predecessor: Option<Did>,
     ) -> Option<Did> {
-        let pred = topo_predecessor?;
-        if pred == me {
-            return None;
-        }
-        let old_head = current.iter().copied().min_by_key(|&did| dist(me, did));
-        match old_head {
-            Some(head) if dist(me, pred) >= dist(me, head) => None,
-            _ => Some(pred),
-        }
+        crate::dht::topology::stabilize_query(me, current, topo_predecessor)
     }
 
     /// `CorrectStabilize` notify side effect: notify the new successor, if any.
     pub fn correct_stabilize_notify(me: Did, next_successors: &[Did]) -> Option<Did> {
-        next_successors.first().copied().filter(|&did| did != me)
+        crate::dht::topology::stabilize_notify(me, next_successors)
     }
 }
 

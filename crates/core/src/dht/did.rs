@@ -390,6 +390,12 @@ impl FromStr for Did {
     }
 }
 
+impl Default for Did {
+    fn default() -> Self {
+        Self::ZERO
+    }
+}
+
 impl Zero for Did {
     fn zero() -> Self {
         Self::ZERO

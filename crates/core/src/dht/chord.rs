@@ -17,6 +17,10 @@ use super::entry::PlacedEntry;
 use super::entry::PlacementMiss;
 use super::finger::DEFAULT_FINGER_TABLE_SIZE;
 use super::successor::SuccessorSeq;
+use super::topology;
+use super::topology::TopologyAction;
+use super::topology::TopologyEvent;
+use super::topology::TopologyState;
 use super::types::Chord;
 use super::types::ChordStorage;
 use super::types::ChordStorageCache;
@@ -275,6 +279,40 @@ impl PeerRing {
     pub fn bias(&self, did: Did) -> BiasId {
         BiasId::new(self.did, did)
     }
+
+    fn topology_state(&self) -> Result<TopologyState> {
+        Ok(TopologyState::new(
+            self.did,
+            self.successors().list()?,
+            *self.lock_predecessor()?,
+        ))
+    }
+
+    fn replace_successors(&self, next: &[Did]) -> Result<()> {
+        let successors = self.successors();
+        for did in successors.list()? {
+            successors.remove(did)?;
+        }
+        successors.extend(next)?;
+        Ok(())
+    }
+
+    /// Join an incoming replicated entry delta into local storage.
+    ///
+    /// Post: the stored value is the least upper bound of the previous local
+    /// value and `incoming` when a previous value exists; otherwise it is
+    /// `incoming` normalized for storage.
+    pub(crate) async fn join_storage_entry(&self, key: Did, incoming: Entry) -> Result<Entry> {
+        let incoming = incoming.into_storage_entry();
+        let stored = if let Some(local) = self.storage.get(&key.to_string()).await? {
+            local.join(incoming)?
+        } else {
+            incoming
+        }
+        .into_storage_entry();
+        self.storage.put(&key.to_string(), &stored).await?;
+        Ok(stored)
+    }
 }
 
 impl Chord<PeerRingAction> for PeerRing {
@@ -492,6 +530,7 @@ impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing 
     /// successor of current node, otherwise find the responsible node and return
     /// as Action.
     async fn entry_operate(&self, op: EntryOperation) -> Result<PeerRingAction> {
+        let op = op.stamped(self.did)?;
         let entry_key = op.did()?;
         let mut ret = vec![];
         // Pre: op.did() is the entry identity id(e), and REDUNDANT > 0 is
@@ -511,7 +550,7 @@ impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing 
                         None => op.clone().gen_default_entry()?,
                     };
                     let entry = this.operate(op.clone())?;
-                    self.storage.put(&entry_key.to_string(), &entry).await?;
+                    self.join_storage_entry(entry_key, entry).await?;
                     Ok(PeerRingAction::None)
                 }
                 // `entry` should be on other nodes.
@@ -612,7 +651,13 @@ impl CorrectChord<PeerRingAction> for PeerRing {
         // unchanged. Delegating to Chord::notify is exactly this predecessor
         // choice rule; Rectify discards the returned predecessor because it
         // emits no follow-up action.
-        self.notify(pred)?;
+        let next = topology::step(
+            &self.topology_state()?,
+            TopologyEvent::Rectify { predecessor: pred },
+            self.successors().capacity(),
+        );
+        let mut predecessor = self.lock_predecessor()?;
+        *predecessor = next.state.predecessor;
         Ok(())
     }
 
@@ -639,42 +684,28 @@ impl CorrectChord<PeerRingAction> for PeerRing {
     /// query check; the remote successor list contributes `but_last`; and notify
     /// is emitted for the post-update head when that head is not self.
     fn stabilize(&self, info: TopoInfo) -> Result<PeerRingAction> {
-        let mut ret = vec![];
-        let successors = self.successors();
-        let old_head = if successors.is_empty()? {
-            None
-        } else {
-            Some(successors.min()?)
-        };
-        let but_last = info
-            .successors
-            .split_last()
-            .map(|(_, successors_before_last)| successors_before_last)
-            .unwrap_or(&[]);
-        let improved_successor = info.predecessor.filter(|new_succ| {
-            *new_succ != self.did
-                && old_head.is_none_or(|head| self.bias(*new_succ) < self.bias(head))
-        });
-        if let Some(new_succ) = info.predecessor {
-            successors.update(new_succ)?;
-        }
-        successors.extend(but_last)?;
-        // Check if new_succ was between self.did and the old head of successors.
-        if let Some(new_succ) = improved_successor {
-            ret.push(PeerRingAction::RemoteAction(
-                new_succ,
-                RemoteAction::QueryForSuccessorList,
-            ));
-        }
-        // Notify the node's minimum successor of its existence.
-        let head = successors.min()?;
-        if head != self.did {
-            ret.push(PeerRingAction::RemoteAction(
-                head,
-                RemoteAction::Notify(self.did),
-            ));
-        }
-        Ok(PeerRingAction::MultiActions(ret))
+        let next = topology::step(
+            &self.topology_state()?,
+            TopologyEvent::Stabilize {
+                successors: info.successors,
+                predecessor: info.predecessor,
+            },
+            self.successors().capacity(),
+        );
+        self.replace_successors(&next.state.successors)?;
+        Ok(PeerRingAction::MultiActions(
+            next.actions
+                .into_iter()
+                .map(|action| match action {
+                    TopologyAction::QuerySuccessorList(did) => {
+                        PeerRingAction::RemoteAction(did, RemoteAction::QueryForSuccessorList)
+                    }
+                    TopologyAction::Notify(did) => {
+                        PeerRingAction::RemoteAction(did, RemoteAction::Notify(self.did))
+                    }
+                })
+                .collect(),
+        ))
     }
 
     /// A function to provide topological information about the chord.

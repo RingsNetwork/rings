@@ -78,6 +78,11 @@ impl SuccessorSeq {
         BiasId::new(self.did, did)
     }
 
+    /// Maximum number of successors retained by this sequence.
+    pub fn capacity(&self) -> usize {
+        self.max.into()
+    }
+
     /// Check if a node should be inserted into the sequence.
     pub fn should_insert(&self, did: Did) -> Result<bool> {
         if (self.contains(&did)?) || (did == self.did) {

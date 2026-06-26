@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use super::entry::Entry;
+use super::entry::EntryCrdt;
 use super::entry::EntryKind;
 use super::FingerTable;
 use crate::dht::Did;
@@ -44,6 +45,7 @@ impl TryFrom<Subring> for Entry {
             did: Self::gen_did(&ring.name)?,
             data: vec![data.encode()?],
             kind: EntryKind::Subring,
+            crdt: EntryCrdt::default(),
         })
     }
 }

@@ -183,11 +183,11 @@ mod test {
         wait_for_msgs([&node1, &node2]).await;
         assert_no_more_msg([&node1, &node2]).await;
 
-        let entry = Entry {
-            did: key3.address().into(),
-            data: vec![String::from("sync me").encode()?],
-            kind: EntryKind::Data,
-        };
+        let entry = Entry::new(
+            key3.address().into(),
+            vec![String::from("sync me").encode()?],
+            EntryKind::Data,
+        );
         node1
             .dht()
             .storage

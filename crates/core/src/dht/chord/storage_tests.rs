@@ -28,27 +28,15 @@ use crate::storage::KvStorageInterface;
 use crate::storage::MemStorage;
 
 fn data_entry(did: Did) -> Entry {
-    Entry {
-        did,
-        data: vec![],
-        kind: EntryKind::Data,
-    }
+    Entry::new(did, vec![], EntryKind::Data)
 }
 
 fn data_entry_with_data(did: Did, data: &str) -> Entry {
-    Entry {
-        did,
-        data: vec![data.into()],
-        kind: EntryKind::Data,
-    }
+    Entry::new(did, vec![data.into()], EntryKind::Data)
 }
 
 fn data_entry_with_payload_len(did: Did, len: usize) -> Entry {
-    Entry {
-        did,
-        data: vec!["x".repeat(len).into()],
-        kind: EntryKind::Data,
-    }
+    Entry::new(did, vec!["x".repeat(len).into()], EntryKind::Data)
 }
 
 fn first_two_affine_keys(did: Did) -> Result<(Did, Did)> {

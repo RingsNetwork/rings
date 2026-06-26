@@ -132,11 +132,7 @@ impl PeerRing {
         let placed = PlacedEntry::new(placement_key, entry.clone());
         match self.find_successor(placement_key)? {
             PeerRingAction::Some(owner) if owner == self.did => {
-                self.storage
-                    .put(
-                        &placement_key.to_string(),
-                        &entry.clone().into_storage_entry(),
-                    )
+                self.join_storage_entry(placement_key, entry.clone())
                     .await?;
                 Ok(PeerRingAction::None)
             }
@@ -165,9 +161,7 @@ impl PeerRing {
         // reuses the owner observed by lookup and emits only a copy action.
         let placed = PlacedEntry::new(miss.key, entry.clone());
         if miss.owner == self.did {
-            self.storage
-                .put(&miss.key.to_string(), &entry.clone().into_storage_entry())
-                .await?;
+            self.join_storage_entry(miss.key, entry.clone()).await?;
             Ok(PeerRingAction::None)
         } else {
             Ok(PeerRingAction::RemoteAction(

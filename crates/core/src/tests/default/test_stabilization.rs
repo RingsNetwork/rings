@@ -52,11 +52,7 @@ async fn stabilize_republishes_local_entries_to_missing_affine_owners() -> Resul
         .build(),
     );
     let node = Node::new(swarm);
-    let entry = Entry {
-        did: key.address().into(),
-        data: vec![],
-        kind: EntryKind::Data,
-    };
+    let entry = Entry::new(key.address().into(), vec![], EntryKind::Data);
     let placement_keys = entry.did.rotate_affine(2)?;
     node.dht()
         .storage

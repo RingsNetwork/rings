@@ -1,10 +1,13 @@
 #![warn(missing_docs)]
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::str::FromStr;
 
 use serde::Deserialize;
 use serde::Serialize;
 
 use super::subring::Subring;
+use crate::algebra::JoinSemilattice;
 use crate::consts::ENTRY_DATA_MAX_LEN;
 use crate::dht::Did;
 use crate::ecc::HashStr;
@@ -14,6 +17,16 @@ use crate::message::Encoded;
 use crate::message::Encoder;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
+
+mod crdt;
+
+pub use crdt::DataTopicBuffer;
+pub use crdt::EntryCrdt;
+pub use crdt::EntryDot;
+pub use crdt::EntryVersion;
+pub use crdt::GSet;
+pub use crdt::RelayMessageSet;
+pub use crdt::SubringMemberSet;
 
 /// DHT storage entry categories.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,6 +38,12 @@ pub enum EntryKind {
     /// A relayed but unreached message, which should be stored on
     /// the successor of the destination Did.
     RelayMessage,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct EntryElement {
+    value: Encoded,
+    dot: EntryDot,
 }
 
 /// Operations supported by a DHT storage entry.
@@ -64,6 +83,9 @@ pub struct Entry {
     pub data: Vec<Encoded>,
     /// The type indicates how the data is encoded and how the Did is generated.
     pub kind: EntryKind,
+    /// CRDT metadata that makes replicated merge a join-semilattice operation.
+    #[serde(default)]
+    pub crdt: EntryCrdt,
 }
 
 /// An [`Entry`] paired with its Chord placement key.
@@ -85,11 +107,12 @@ impl PlacedEntry {
     }
 }
 
-/// Durable-storage acknowledgement for an entry hand-off.
+/// Durable-storage acknowledgement for an entry hand-off delta.
 ///
-/// `key` is the placement key durably persisted by the receiver. `entry` is the
-/// exact value persisted there and therefore the equality witness used by the
-/// sender before deleting its local copy.
+/// `key` is the placement key updated by the receiver. `entry` is the copied
+/// delta that the receiver joined into its local least upper bound. The sender
+/// uses equality with its current local value before deleting; if the sender has
+/// observed any newer delta meanwhile, deletion is skipped.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncedEntryAck {
     /// The placement key durably persisted by the sync receiver.
@@ -99,7 +122,7 @@ pub struct SyncedEntryAck {
 }
 
 impl SyncedEntryAck {
-    /// Witness that `entry` was durably persisted at `key`.
+    /// Witness that `entry` was durably joined at `key`.
     pub fn new(key: Did, entry: Entry) -> Self {
         Self { key, entry }
     }
@@ -165,6 +188,16 @@ impl EntryLookupEvidence {
 }
 
 impl Entry {
+    /// Construct an entry with empty CRDT metadata.
+    pub fn new(did: Did, data: Vec<Encoded>, kind: EntryKind) -> Self {
+        Self {
+            did,
+            data,
+            kind,
+            crdt: EntryCrdt::default(),
+        }
+    }
+
     /// Generate did from topic.
     pub fn gen_did(topic: &str) -> Result<Did> {
         let hash: HashStr = topic.into();
@@ -175,6 +208,23 @@ impl Entry {
 }
 
 impl EntryOperation {
+    /// Return this operation with CRDT versions assigned at the operation boundary.
+    ///
+    /// Existing CRDT witnesses are preserved so forwarded operations keep the
+    /// origin's dot/version instead of being reissued by every routing hop.
+    pub fn stamped(self, actor: Did) -> Result<Self> {
+        Ok(match self {
+            EntryOperation::Overwrite(entry) => {
+                EntryOperation::Overwrite(entry.ensure_overwrite_stamp(actor)?)
+            }
+            EntryOperation::Extend(entry) => {
+                EntryOperation::Extend(entry.ensure_delta_stamp(actor)?)
+            }
+            EntryOperation::Touch(entry) => EntryOperation::Touch(entry.ensure_delta_stamp(actor)?),
+            EntryOperation::JoinSubring(name, did) => EntryOperation::JoinSubring(name, did),
+        })
+    }
+
     /// Extract the did of target Entry.
     pub fn did(&self) -> Result<Did> {
         Ok(match self {
@@ -199,11 +249,7 @@ impl EntryOperation {
     pub fn gen_default_entry(self) -> Result<Entry> {
         match self {
             EntryOperation::JoinSubring(name, did) => Subring::new(&name, did)?.try_into(),
-            _ => Ok(Entry {
-                did: self.did()?,
-                data: vec![],
-                kind: self.kind(),
-            }),
+            _ => Ok(Entry::new(self.did()?, vec![], self.kind())),
         }
     }
 }
@@ -219,6 +265,7 @@ impl TryFrom<MessagePayload> for Entry {
             did,
             data: vec![data],
             kind: EntryKind::RelayMessage,
+            crdt: EntryCrdt::default(),
         })
     }
 }
@@ -230,6 +277,7 @@ impl TryFrom<(String, Encoded)> for Entry {
             did: Self::gen_did(&topic)?,
             data: vec![e],
             kind: EntryKind::Data,
+            crdt: EntryCrdt::default(),
         })
     }
 }
@@ -250,6 +298,205 @@ impl TryFrom<String> for Entry {
 }
 
 impl Entry {
+    fn with_element_dots(mut self, version: EntryVersion) -> Result<Self> {
+        self.crdt.dots = self
+            .data
+            .iter()
+            .enumerate()
+            .map(|(index, value)| EntryDot::for_encoded(version, index, value))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(self)
+    }
+
+    fn stamp_overwrite(mut self, version: EntryVersion) -> Result<Self> {
+        self.crdt.register = version;
+        self.with_element_dots(version)
+    }
+
+    fn stamp_delta(self, version: EntryVersion) -> Result<Self> {
+        self.with_element_dots(version)
+    }
+
+    fn ensure_overwrite_stamp(self, actor: Did) -> Result<Self> {
+        if self.crdt.has_witness() {
+            Ok(self)
+        } else {
+            self.stamp_overwrite(EntryVersion::issued_by(actor))
+        }
+    }
+
+    fn ensure_delta_stamp(self, actor: Did) -> Result<Self> {
+        if self.crdt.has_witness() {
+            Ok(self)
+        } else {
+            self.stamp_delta(EntryVersion::issued_by(actor))
+        }
+    }
+
+    fn max_observed_version(&self) -> EntryVersion {
+        self.crdt
+            .dots
+            .iter()
+            .map(|dot| dot.version)
+            .chain(self.crdt.tombstones.iter().map(|dot| dot.version))
+            .fold(self.crdt.register, EntryVersion::max)
+    }
+
+    fn observed_operation_version(&self, actor: Did) -> EntryVersion {
+        let issued = EntryVersion::issued_by(actor);
+        self.crdt
+            .dots
+            .iter()
+            .map(|dot| dot.version)
+            .chain(std::iter::once(self.crdt.register))
+            .max()
+            .filter(|version| *version != EntryVersion::default())
+            .unwrap_or(issued)
+    }
+
+    fn ensure_overwrite_stamp_after(self, actor: Did, floor: EntryVersion) -> Result<Self> {
+        let version = self.observed_operation_version(actor).after(floor);
+        self.stamp_overwrite(version)
+    }
+
+    fn ensure_delta_stamp_after(self, actor: Did, floor: EntryVersion) -> Result<Self> {
+        let version = self.observed_operation_version(actor).after(floor);
+        self.stamp_delta(version)
+    }
+
+    fn validate_same_carrier(&self, other: &Self) -> Result<()> {
+        if !self.same_kind_as(other) {
+            return Err(Error::EntryKindNotEqual);
+        }
+        if !self.same_key_as(other) {
+            return Err(Error::EntryDidNotEqual);
+        }
+        Ok(())
+    }
+
+    fn elements(&self) -> Result<Vec<EntryElement>> {
+        self.data
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, value)| {
+                let dot = if let Some(dot) = self.crdt.dots.get(index).copied() {
+                    dot
+                } else {
+                    EntryDot::for_encoded(self.crdt.register, index, &value)?
+                };
+                Ok(EntryElement { value, dot })
+            })
+            .collect()
+    }
+
+    fn topic_buffer(&self) -> Result<DataTopicBuffer> {
+        let mut values = BTreeMap::new();
+        for element in self.elements()? {
+            values
+                .entry(element.value)
+                .and_modify(|current: &mut EntryDot| {
+                    *current = (*current).max(element.dot);
+                })
+                .or_insert(element.dot);
+        }
+        Ok(DataTopicBuffer::new(self.crdt.register, values))
+    }
+
+    fn relay_set(&self) -> Result<RelayMessageSet> {
+        Ok(RelayMessageSet::new(
+            self.topic_buffer()?,
+            self.crdt.tombstones.iter().copied().collect(),
+        ))
+    }
+
+    fn subring_member_set(&self) -> Result<SubringMemberSet> {
+        let subring: Subring = self.clone().try_into()?;
+        let mut members = SubringMemberSet::new();
+        for member in subring.finger.list().iter().flatten().copied() {
+            members.insert(member);
+        }
+        Ok(members)
+    }
+
+    fn materialize_elements(
+        did: Did,
+        kind: EntryKind,
+        register: EntryVersion,
+        elements: impl IntoIterator<Item = (Encoded, EntryDot)>,
+        tombstones: BTreeSet<EntryDot>,
+    ) -> Self {
+        let mut visible = elements
+            .into_iter()
+            .filter(|(_, dot)| dot.version >= register && !tombstones.contains(dot))
+            .collect::<Vec<_>>();
+        visible.sort_by_key(|(value, dot)| (*dot, value.clone()));
+        let skip_count = visible.len().saturating_sub(ENTRY_DATA_MAX_LEN);
+        let visible = visible.into_iter().skip(skip_count).collect::<Vec<_>>();
+        let (data, dots): (Vec<_>, Vec<_>) = visible.into_iter().unzip();
+
+        Self {
+            did,
+            data,
+            kind,
+            crdt: EntryCrdt {
+                register,
+                dots,
+                tombstones: tombstones.into_iter().collect(),
+            },
+        }
+    }
+
+    fn materialize_topic_buffer(&self, buffer: DataTopicBuffer) -> Self {
+        Self::materialize_elements(
+            self.did,
+            self.kind,
+            buffer.register,
+            buffer.values,
+            BTreeSet::new(),
+        )
+    }
+
+    fn materialize_relay_set(&self, set: RelayMessageSet) -> Self {
+        Self::materialize_elements(
+            self.did,
+            self.kind,
+            set.adds.register,
+            set.adds.values,
+            set.removes,
+        )
+    }
+
+    fn join_subring_entry(&self, other: &Self) -> Result<Self> {
+        let members = self.subring_member_set()?.join(other.subring_member_set()?);
+        let mut subring: Subring = self.clone().try_into()?;
+        for member in members.iter().copied() {
+            subring.finger.join(member);
+        }
+        let mut entry: Entry = subring.try_into()?;
+        entry.crdt.register = self.crdt.register.max(other.crdt.register);
+        Ok(entry)
+    }
+
+    /// Merge two entries from the same replicated carrier.
+    ///
+    /// Law: for a fixed `(did, kind)` carrier, this is the state-based CRDT
+    /// join. Data entries are bounded LWW element sets with an LWW overwrite
+    /// register; subring entries are grow-only member sets; relay entries are
+    /// two-phase sets whose remove side is carried by tombstones.
+    pub fn join(&self, other: Self) -> Result<Self> {
+        self.validate_same_carrier(&other)?;
+        match self.kind {
+            EntryKind::Data => {
+                Ok(self.materialize_topic_buffer(self.topic_buffer()?.join(other.topic_buffer()?)))
+            }
+            EntryKind::RelayMessage => {
+                Ok(self.materialize_relay_set(self.relay_set()?.join(other.relay_set()?)))
+            }
+            EntryKind::Subring => self.join_subring_entry(&other),
+        }
+    }
+
     /// Affine Transport entry to a list of affined did
     pub fn affine(&self, scalar: u16) -> Result<Vec<Entry>> {
         Ok(self
@@ -293,10 +540,21 @@ impl Entry {
     ///
     /// Post: `result.data.len() <= ENTRY_DATA_MAX_LEN`.
     pub fn into_storage_entry(self) -> Self {
+        let skip_count = self.data.len().saturating_sub(ENTRY_DATA_MAX_LEN);
+        let dots = if self.crdt.dots.len() == self.data.len() {
+            self.crdt.dots.into_iter().skip(skip_count).collect()
+        } else {
+            self.crdt.dots
+        };
         Self {
             did: self.did,
             data: Self::cap_recent_data(self.data),
             kind: self.kind,
+            crdt: EntryCrdt {
+                register: self.crdt.register,
+                dots,
+                tombstones: self.crdt.tombstones,
+            },
         }
     }
 
@@ -317,17 +575,7 @@ impl Entry {
         if !self.is_data_entry() {
             return Err(Error::EntryNotOverwritable);
         }
-        if !self.same_kind_as(&other) {
-            return Err(Error::EntryKindNotEqual);
-        }
-        if !self.same_key_as(&other) {
-            return Err(Error::EntryDidNotEqual);
-        }
-        Ok(Self {
-            did: other.did,
-            data: Self::cap_recent_data(other.data),
-            kind: other.kind,
-        })
+        self.join(other.ensure_overwrite_stamp_after(Did::default(), self.max_observed_version())?)
     }
 
     /// This method is used to extend data to a Data kind [`Entry`].
@@ -336,22 +584,7 @@ impl Entry {
         if !self.is_data_entry() {
             return Err(Error::EntryNotAppendable);
         }
-        if !self.same_kind_as(&other) {
-            return Err(Error::EntryKindNotEqual);
-        }
-        if !self.same_key_as(&other) {
-            return Err(Error::EntryDidNotEqual);
-        }
-
-        let mut data = self.data.clone();
-        data.extend_from_slice(&other.data);
-        let data = Self::cap_recent_data(data);
-
-        Ok(Self {
-            did: self.did,
-            data,
-            kind: self.kind,
-        })
+        self.join(other.ensure_delta_stamp_after(Did::default(), self.max_observed_version())?)
     }
 
     /// This method is used to extend data to a Data kind [`Entry`] uniquely.
@@ -361,27 +594,7 @@ impl Entry {
         if !self.is_data_entry() {
             return Err(Error::EntryNotAppendable);
         }
-        if !self.same_kind_as(&other) {
-            return Err(Error::EntryKindNotEqual);
-        }
-        if !self.same_key_as(&other) {
-            return Err(Error::EntryDidNotEqual);
-        }
-
-        let mut data = self
-            .data
-            .iter()
-            .filter(|e| !other.data.contains(e))
-            .cloned()
-            .collect::<Vec<_>>();
-        data.extend_from_slice(&other.data);
-        let data = Self::cap_recent_data(data);
-
-        Ok(Self {
-            did: self.did,
-            data,
-            kind: self.kind,
-        })
+        self.join(other.ensure_delta_stamp_after(Did::default(), self.max_observed_version())?)
     }
 
     /// This method is used to join a subring.
@@ -393,7 +606,8 @@ impl Entry {
 
         let mut subring: Subring = self.clone().try_into()?;
         subring.finger.join(did);
-        subring.try_into()
+        let other: Entry = subring.try_into()?;
+        self.join(other)
     }
 }
 
@@ -402,6 +616,8 @@ mod tests {
     use num_bigint::BigUint;
 
     use super::*;
+    use crate::algebra::assert_join_semilattice_laws;
+    use crate::algebra::assert_strong_eventual_consistency;
     use crate::ecc::SecretKey;
     use crate::message::Message;
     use crate::session::SessionSk;
@@ -419,11 +635,7 @@ mod tests {
             .into_iter()
             .map(|value| value.encode())
             .collect::<Result<Vec<_>>>()?;
-        Ok(Entry {
-            did: Entry::gen_did(topic)?,
-            data,
-            kind: EntryKind::Data,
-        })
+        Ok(Entry::new(Entry::gen_did(topic)?, data, EntryKind::Data))
     }
 
     fn overflowing_data_entry(topic: &str, overflow: usize) -> Result<(Entry, usize)> {
@@ -465,13 +677,111 @@ mod tests {
         Subring::new(name, creator)?.try_into()
     }
 
+    fn version(counter: u128) -> EntryVersion {
+        EntryVersion::new(
+            counter,
+            Did::from(u32::try_from(counter).unwrap_or(u32::MAX)),
+        )
+    }
+
+    fn data_delta(topic: &str, value: &str, counter: u128) -> Result<Entry> {
+        data_entry(topic, value)?.stamp_delta(version(counter))
+    }
+
+    fn overwrite_delta(topic: &str, value: &str, counter: u128) -> Result<Entry> {
+        data_entry(topic, value)?.stamp_overwrite(version(counter))
+    }
+
+    #[test]
+    fn gset_satisfies_join_semilattice_laws() {
+        let mut a = GSet::new();
+        a.insert(Did::from(1u32));
+        let mut b = GSet::new();
+        b.insert(Did::from(2u32));
+        let mut ab = GSet::new();
+        ab.insert(Did::from(1u32));
+        ab.insert(Did::from(2u32));
+
+        assert_join_semilattice_laws(&[GSet::new(), a, b, ab]);
+    }
+
+    #[test]
+    fn data_topic_buffer_satisfies_join_semilattice_laws() -> Result<()> {
+        let samples = [
+            Entry::new(Entry::gen_did("topic")?, vec![], EntryKind::Data).topic_buffer()?,
+            data_delta("topic", "a", 1)?.topic_buffer()?,
+            data_delta("topic", "b", 2)?.topic_buffer()?,
+            overwrite_delta("topic", "c", 3)?.topic_buffer()?,
+        ];
+
+        assert_join_semilattice_laws(&samples);
+        Ok(())
+    }
+
+    #[test]
+    fn relay_message_set_satisfies_join_semilattice_laws() -> Result<()> {
+        let did = Did::from(10u32);
+        let a = Entry::new(did, vec![encoded("a")?], EntryKind::RelayMessage)
+            .stamp_delta(version(1))?
+            .relay_set()?;
+        let b = Entry::new(did, vec![encoded("b")?], EntryKind::RelayMessage)
+            .stamp_delta(version(2))?
+            .relay_set()?;
+
+        assert_join_semilattice_laws(&[RelayMessageSet::default(), a, b]);
+        Ok(())
+    }
+
+    #[test]
+    fn entry_join_is_strongly_eventually_consistent_for_data_deltas() -> Result<()> {
+        let base = Entry::new(Entry::gen_did("topic")?, vec![], EntryKind::Data);
+        let deltas = vec![
+            data_delta("topic", "a", 1)?,
+            data_delta("topic", "b", 2)?,
+            data_delta("topic", "a", 3)?,
+        ];
+
+        let forward = deltas
+            .iter()
+            .cloned()
+            .try_fold(base.clone(), |acc, delta| acc.join(delta))?;
+        let reverse = deltas
+            .iter()
+            .rev()
+            .cloned()
+            .try_fold(base.clone(), |acc, delta| acc.join(delta))?;
+        let duplicated = deltas
+            .iter()
+            .cloned()
+            .chain(deltas.iter().cloned())
+            .try_fold(base, |acc, delta| acc.join(delta))?;
+
+        assert_eq!(forward, reverse);
+        assert_eq!(forward, duplicated);
+        assert_eq!(decode_entry_data(&forward)?, vec![
+            String::from("b"),
+            String::from("a")
+        ]);
+        Ok(())
+    }
+
+    #[test]
+    fn generic_sec_witness_accepts_data_topic_buffer_deltas() -> Result<()> {
+        let base = Entry::new(Entry::gen_did("topic")?, vec![], EntryKind::Data).topic_buffer()?;
+        let deltas = vec![
+            data_delta("topic", "a", 1)?.topic_buffer()?,
+            data_delta("topic", "b", 2)?.topic_buffer()?,
+        ];
+
+        assert_strong_eventual_consistency(base, &deltas);
+        Ok(())
+    }
+
     #[test]
     fn overwrite_replaces_data_for_same_data_entry() -> Result<()> {
         let entry = data_entry("topic", "old")?;
         let other = data_entry("topic", "new")?;
-
         let updated = entry.overwrite(other)?;
-
         assert_eq!(decode_entry_data(&updated)?, vec![String::from("new")]);
         Ok(())
     }
@@ -518,9 +828,7 @@ mod tests {
         let overflow = 3;
         let (incoming, incoming_count) = overflowing_data_entry("topic", overflow)?;
         let entry = data_entry("topic", "base")?;
-
         let updated = entry.overwrite(incoming)?;
-
         assert_entry_keeps_recent_overflow(&updated, incoming_count, overflow)
     }
 
@@ -528,9 +836,7 @@ mod tests {
     fn extend_appends_data_for_same_entry() -> Result<()> {
         let entry = data_entry("topic", "first")?;
         let other = data_entry("topic", "second")?;
-
         let updated = entry.extend(other)?;
-
         assert_eq!(decode_entry_data(&updated)?, vec![
             String::from("first"),
             String::from("second")
@@ -541,7 +847,6 @@ mod tests {
     #[test]
     fn extend_trims_oldest_items_at_max_len() -> Result<()> {
         let mut entry = data_entry("topic", "test0")?;
-
         for i in 1..ENTRY_DATA_MAX_LEN {
             let data = format!("test{i}");
             let other = data_entry("topic", &data)?;
@@ -553,9 +858,7 @@ mod tests {
             let data = format!("test{i}");
             let other = data_entry("topic", &data)?;
             entry = entry.extend(other)?;
-
             assert_eq!(entry.data.len(), ENTRY_DATA_MAX_LEN);
-
             let decoded = decode_entry_data(&entry)?;
             assert_eq!(
                 decoded.first(),
@@ -563,7 +866,6 @@ mod tests {
             );
             assert_eq!(decoded.last(), Some(&data));
         }
-
         Ok(())
     }
 
@@ -572,9 +874,7 @@ mod tests {
         let overflow = 3;
         let (incoming, incoming_count) = overflowing_data_entry("topic", overflow)?;
         let entry = data_entry("topic", "base")?;
-
         let updated = entry.extend(incoming)?;
-
         assert_entry_keeps_recent_overflow(&updated, incoming_count, overflow)
     }
 
@@ -596,9 +896,7 @@ mod tests {
             .extend(data_entry("topic", "b")?)?
             .extend(data_entry("topic", "c")?)?;
         let touched = data_entry("topic", "b")?;
-
         let updated = entry.touch(touched)?;
-
         assert_eq!(decode_entry_data(&updated)?, vec![
             String::from("a"),
             String::from("c"),
@@ -613,9 +911,7 @@ mod tests {
         for i in 1..ENTRY_DATA_MAX_LEN {
             entry = entry.extend(data_entry("topic", &format!("test{i}"))?)?;
         }
-
         let updated = entry.touch(data_entry("topic", "test0")?)?;
-
         assert_eq!(updated.data.len(), ENTRY_DATA_MAX_LEN);
         let decoded = decode_entry_data(&updated)?;
         assert_eq!(decoded.first(), Some(&String::from("test1")));
@@ -628,9 +924,7 @@ mod tests {
         let overflow = 3;
         let (incoming, incoming_count) = overflowing_data_entry("topic", overflow)?;
         let entry = data_entry("topic", "base")?;
-
         let updated = entry.touch(incoming)?;
-
         assert_entry_keeps_recent_overflow(&updated, incoming_count, overflow)
     }
 
@@ -638,10 +932,8 @@ mod tests {
     fn join_subring_adds_member_to_subring_entry() -> Result<()> {
         let entry = subring_entry("ring")?;
         let member = Entry::gen_did("member")?;
-
         let updated = entry.join_subring(member)?;
         let subring = Subring::try_from(updated)?;
-
         assert_eq!(subring.finger.first(), Some(member));
         Ok(())
     }
@@ -662,7 +954,6 @@ mod tests {
     fn operation_default_entry_matches_operation_kind() -> Result<()> {
         let target = data_entry("topic", "value")?;
         let default = EntryOperation::Extend(target.clone()).gen_default_entry()?;
-
         assert_eq!(default.did, target.did);
         assert_eq!(default.kind, EntryKind::Data);
         assert!(default.data.is_empty());
@@ -676,10 +967,8 @@ mod tests {
         let signer: Did = key.address().into();
         let payload =
             MessagePayload::new_send(Message::custom(b"relay")?, &session, signer, signer)?;
-
         let entry = Entry::try_from(payload)?;
         let expected = BigUint::from(signer) + BigUint::from(1u16);
-
         assert_eq!(entry.did, expected.into());
         assert_eq!(entry.kind, EntryKind::RelayMessage);
         Ok(())
@@ -689,7 +978,6 @@ mod tests {
     fn affine_preserves_payload_and_kind_while_rotating_keys() -> Result<()> {
         let entry = data_entry("topic", "value")?;
         let affined = entry.affine(3)?;
-
         assert_eq!(affined.len(), 3);
         for rotated in affined {
             assert_eq!(rotated.data, entry.data);

@@ -13,6 +13,8 @@ mod stabilization;
 /// Subring model stored through DHT entries.
 pub mod subring;
 pub mod successor;
+/// Pure Chord topology transition model.
+pub mod topology;
 pub mod types;
 
 pub use chord::EntryStorage;

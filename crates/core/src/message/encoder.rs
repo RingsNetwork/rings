@@ -16,7 +16,7 @@ pub trait Decoder: Sized {
     fn from_encoded(encoded: &Encoded) -> Result<Self>;
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Encoded(String);
 
 impl Encoded {
