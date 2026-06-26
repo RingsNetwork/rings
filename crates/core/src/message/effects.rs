@@ -233,7 +233,7 @@ impl TryFrom<&PeerRingAction> for DhtActionFunctor {
                     predecessor: *predecessor,
                 })
             }
-            act => Err(Error::PeerRingUnexpectedAction(act.clone())),
+            act => Err(Error::unexpected_peer_ring_action(act.clone())),
         }
     }
 }

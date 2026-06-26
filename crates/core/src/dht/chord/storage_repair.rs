@@ -145,7 +145,7 @@ impl PeerRing {
                     RemoteAction::SyncEntriesWithSuccessor(vec![placed]),
                 ))
             }
-            action => Err(Error::PeerRingUnexpectedAction(action)),
+            action => Err(Error::unexpected_peer_ring_action(action)),
         }
     }
 

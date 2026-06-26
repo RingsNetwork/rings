@@ -60,14 +60,14 @@ pub trait ChordStorageInterfaceCacheChecker {
 fn finish_storage_action(act: PeerRingAction) -> Result<()> {
     match act {
         PeerRingAction::None => Ok(()),
-        act => Err(Error::PeerRingUnexpectedAction(act)),
+        act => Err(Error::unexpected_peer_ring_action(act)),
     }
 }
 
 fn finish_storage_action_ref(act: &PeerRingAction) -> Result<()> {
     match act {
         PeerRingAction::None => Ok(()),
-        act => Err(Error::PeerRingUnexpectedAction(act.clone())),
+        act => Err(Error::unexpected_peer_ring_action(act.clone())),
     }
 }
 
@@ -314,7 +314,7 @@ fn next_hop_for_sync_entries(
         PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessor(_)) => {
             Ok(Some(next))
         }
-        action => Err(Error::PeerRingUnexpectedAction(action)),
+        action => Err(Error::unexpected_peer_ring_action(action)),
     }
 }
 
@@ -546,8 +546,8 @@ mod test {
     fn finish_storage_action_rejects_unhandled_action() -> Result<()> {
         let did = SecretKey::random().address().into();
         match finish_storage_action(PeerRingAction::Some(did)) {
-            Err(Error::PeerRingUnexpectedAction(PeerRingAction::Some(actual))) => {
-                assert_eq!(actual, did);
+            Err(Error::PeerRingUnexpectedAction(action)) => {
+                assert_eq!(*action, PeerRingAction::Some(did));
                 Ok(())
             }
             res => Err(Error::InvalidMessage(format!(

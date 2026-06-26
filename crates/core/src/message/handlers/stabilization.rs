@@ -38,7 +38,7 @@ fn collect_sync_entries_actions(
             }
             Ok(())
         }
-        action => Err(Error::PeerRingUnexpectedAction(action)),
+        action => Err(Error::unexpected_peer_ring_action(action)),
     }
 }
 

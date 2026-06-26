@@ -96,7 +96,7 @@ impl Stabilizer {
             }
             action => {
                 tracing::error!("Invalid storage repair action: {action:?}");
-                Err(crate::error::Error::PeerRingUnexpectedAction(action))
+                Err(crate::error::Error::unexpected_peer_ring_action(action))
             }
         }
     }

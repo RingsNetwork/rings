@@ -144,7 +144,7 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
                 self.run_effects([PayloadRelayFunctor::reset_destination(ctx, next).into()])
                     .await
             }
-            act => Err(Error::PeerRingUnexpectedAction(act)),
+            act => Err(Error::unexpected_peer_ring_action(act)),
         }
     }
 }

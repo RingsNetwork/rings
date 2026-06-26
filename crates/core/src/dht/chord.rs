@@ -499,7 +499,7 @@ impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing 
                         RemoteAction::FindEntry(EntryLookupKey::new(entry_key, id)),
                     ))
                 }
-                Ok(a) => Err(Error::PeerRingUnexpectedAction(a)),
+                Ok(a) => Err(Error::unexpected_peer_ring_action(a)),
                 Err(e) => Err(e),
             }?;
             if act.is_remote() {
@@ -549,7 +549,7 @@ impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing 
                 Ok(PeerRingAction::RemoteAction(n, RemoteAction::FindSuccessor(_))) => Ok(
                     PeerRingAction::RemoteAction(n, RemoteAction::FindEntryForOperate(op.clone())),
                 ),
-                Ok(a) => Err(Error::PeerRingUnexpectedAction(a)),
+                Ok(a) => Err(Error::unexpected_peer_ring_action(a)),
                 Err(e) => Err(e),
             }?;
             if act.is_remote() {
