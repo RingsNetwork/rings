@@ -2,13 +2,13 @@
 //!
 //! These tests pin down the **safety** half of stabilization: for any fixed set
 //! of DIDs the converged DHT (successor list, predecessor, finger table) is the
-//! *unique fixpoint* of Chord's invariants, and the production code path
-//! (`PeerRing::{join,notify}` + `finger.join`) must materialise exactly that
-//! fixpoint. There is no transport and no message ordering here, so the result
-//! is fully deterministic — the *liveness* half (does the async protocol reach
-//! the fixpoint under arbitrary message interleavings?) is intentionally NOT
-//! tested here; it is covered by the integration test (`test_stabilization_*`,
-//! which polls) and, in the future, by model-checking the TLA+ `Spec` below.
+//! *unique fixpoint* of Chord's invariants, and the production pure topology
+//! transition (`dht::topology::step`, interpreted by `PeerRing`) must
+//! materialise exactly that fixpoint. There is no transport and no message
+//! ordering here, so the result is fully deterministic — the *liveness* half
+//! (does the async protocol reach the fixpoint under arbitrary message
+//! interleavings?) is covered by the integration test (`test_stabilization_*`,
+//! which polls) and by the scoped StateRight models in `dht_stateright`.
 //!
 //! ====================================================================
 //! FORMAL SPEC (TLA+) — the constraint these tests discharge.

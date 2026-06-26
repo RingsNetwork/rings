@@ -157,9 +157,29 @@ impl FingerTable {
         self.size
     }
 
+    /// Get the next finger index maintained by the periodic fixer.
+    pub fn fix_finger_index(&self) -> usize {
+        self.fix_finger_index
+    }
+
     /// get finger list
     pub fn list(&self) -> &Vec<Option<Did>> {
         &self.finger
+    }
+
+    /// Replace the full finger state with a value produced by the pure topology transition.
+    ///
+    /// Post: the table keeps its fixed slot count; entries beyond that count
+    /// are ignored, missing entries become `None`, and the fix cursor is
+    /// clamped to a valid slot when the table is non-empty.
+    pub(crate) fn replace_state(&mut self, fingers: &[Option<Did>], fix_finger_index: usize) {
+        self.finger = fingers.iter().copied().take(self.size).collect();
+        self.finger.resize(self.size, None);
+        self.fix_finger_index = if self.size == 0 {
+            0
+        } else {
+            fix_finger_index % self.size
+        };
     }
 
     /// Reset finger table to empty vector

@@ -25,8 +25,11 @@
 //!     notified) — illustrating the order-sensitivity mechanism behind the
 //!     integration test's residual flakiness, not formally pinning the 6-node
 //!     configuration.
-//!   * Stage 3 — a finite storage-sync safety model for #613 S2. It abstracts
-//!     one placement key through copy -> ack -> delete and checks that local
+//!   * Stage 3 — a finite storage CRDT SEC topology model. It explores a
+//!     partition-then-merge shape where replicas exchange only join deltas and
+//!     checks that every merged state can close to one least upper bound.
+//!   * Stage 4 — hand-off cleanup safety for #614 S2'. It abstracts one
+//!     placement key through copy -> ack -> delete and checks that local
 //!     deletion is reachable only after the successor state contains the key.
 
 use std::borrow::Cow;
@@ -46,6 +49,8 @@ use stateright::Model;
 
 use super::dht_convergence::spec;
 use super::dht_convergence::K;
+use crate::algebra::assert_join_semilattice_laws;
+use crate::algebra::JoinSemilattice;
 use crate::dht::successor::SuccessorReader;
 use crate::dht::successor::SuccessorWriter;
 use crate::dht::Chord;
@@ -532,12 +537,234 @@ fn discovery_model(all: Vec<Did>, rounds: u8) -> ActorModel<DiscoveryNode, Cfg, 
 }
 
 // ===================================================================
-// Stage 3: storage sync safety for one placement key.
+// Stage 3: storage CRDT SEC topology model.
 //
-// SCOPE: this is the #614 S2' model, not a full storage liveness model. It
-// abstracts exactly one placement key, the copy -> ack -> delete hand-off, and
-// arbitrary local writes over a finite representative value domain while a
-// copy or ack is in flight:
+// State variables:
+//   phase    in {Partitioned, Merged}
+//   replica  in StorageJoinValue^3
+//   network  subset of {from, to, value}
+//
+// Initial state:
+//   replicas start with independent local writes A, B, C.
+//   phase = Partitioned, where only nodes 0 and 1 may exchange messages.
+//
+// Next-state relation:
+//   Send(from, to) inserts the sender's current value when the topology allows
+//   that edge and no message on that edge is already pending.
+//   Deliver(msg) removes one pending message and applies replica[to] :=
+//   replica[to] join msg.value.
+//   Merge changes phase from Partitioned to Merged, enabling every edge.
+//
+// Invariant:
+//   forall node. replica[node] <= A join B join C.
+//
+// Liveness expectation under fair anti-entropy:
+//   from any reachable Merged state, repeated Send/Deliver steps reach the
+//   single least upper bound at every replica. Reordering and duplication are
+//   covered by the semilattice law: every delivery is a join.
+// ===================================================================
+
+const STORAGE_REPLICA_COUNT: usize = 3;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+struct StorageJoinValue(u8);
+
+impl StorageJoinValue {
+    const EMPTY: Self = Self(0);
+    const A: Self = Self(0b001);
+    const B: Self = Self(0b010);
+    const C: Self = Self(0b100);
+    const ALL: Self = Self(Self::A.0 | Self::B.0 | Self::C.0);
+
+    fn is_subset_of(self, other: Self) -> bool {
+        self.join(other) == other
+    }
+}
+
+impl JoinSemilattice for StorageJoinValue {
+    fn join(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+enum StorageJoinPhase {
+    Partitioned,
+    Merged,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+struct StorageJoinMessage {
+    from: usize,
+    to: usize,
+    value: StorageJoinValue,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+struct StorageJoinState {
+    phase: StorageJoinPhase,
+    replicas: [StorageJoinValue; STORAGE_REPLICA_COUNT],
+    messages: BTreeSet<StorageJoinMessage>,
+}
+
+impl StorageJoinState {
+    fn initial() -> Self {
+        Self {
+            phase: StorageJoinPhase::Partitioned,
+            replicas: [
+                StorageJoinValue::A,
+                StorageJoinValue::B,
+                StorageJoinValue::C,
+            ],
+            messages: BTreeSet::new(),
+        }
+    }
+
+    fn topology_permits(&self, from: usize, to: usize) -> bool {
+        if from == to {
+            return false;
+        }
+        match self.phase {
+            StorageJoinPhase::Partitioned => from < 2 && to < 2,
+            StorageJoinPhase::Merged => from < STORAGE_REPLICA_COUNT && to < STORAGE_REPLICA_COUNT,
+        }
+    }
+
+    fn has_pending_edge(&self, from: usize, to: usize) -> bool {
+        self.messages
+            .iter()
+            .any(|message| message.from == from && message.to == to)
+    }
+
+    fn send_current(&self, from: usize, to: usize) -> Option<Self> {
+        if !self.topology_permits(from, to) || self.has_pending_edge(from, to) {
+            return None;
+        }
+        let value = self.replicas.get(from).copied()?;
+        let mut next = self.clone();
+        next.messages.insert(StorageJoinMessage { from, to, value });
+        Some(next)
+    }
+
+    fn deliver(&self, message: StorageJoinMessage) -> Option<Self> {
+        if !self.messages.contains(&message) {
+            return None;
+        }
+        let mut next = self.clone();
+        next.messages.remove(&message);
+        let replica = next.replicas.get_mut(message.to)?;
+        *replica = replica.join(message.value);
+        Some(next)
+    }
+
+    fn merge_partition(&self) -> Option<Self> {
+        if self.phase == StorageJoinPhase::Merged {
+            return None;
+        }
+        Some(Self {
+            phase: StorageJoinPhase::Merged,
+            ..self.clone()
+        })
+    }
+
+    fn successors(&self) -> Vec<Self> {
+        let mut next = Vec::new();
+        if let Some(merged) = self.merge_partition() {
+            next.push(merged);
+        }
+        for from in 0..STORAGE_REPLICA_COUNT {
+            for to in 0..STORAGE_REPLICA_COUNT {
+                if let Some(sent) = self.send_current(from, to) {
+                    next.push(sent);
+                }
+            }
+        }
+        for message in self.messages.iter().copied().collect::<Vec<_>>() {
+            if let Some(delivered) = self.deliver(message) {
+                next.push(delivered);
+            }
+        }
+        next
+    }
+
+    fn preserves_lub_bound(&self) -> bool {
+        self.replicas
+            .iter()
+            .copied()
+            .all(|value| value.is_subset_of(StorageJoinValue::ALL))
+    }
+
+    fn is_quiescent_lub(&self) -> bool {
+        self.messages.is_empty()
+            && self
+                .replicas
+                .iter()
+                .copied()
+                .all(|value| value == StorageJoinValue::ALL)
+    }
+
+    fn send_all_current(&self) -> Self {
+        let mut state = self.clone();
+        for from in 0..STORAGE_REPLICA_COUNT {
+            for to in 0..STORAGE_REPLICA_COUNT {
+                if let Some(next) = state.send_current(from, to) {
+                    state = next;
+                }
+            }
+        }
+        state
+    }
+
+    fn deliver_all(&self) -> Self {
+        let mut state = self.clone();
+        for message in self.messages.iter().copied().collect::<Vec<_>>() {
+            if let Some(next) = state.deliver(message) {
+                state = next;
+            }
+        }
+        state
+    }
+
+    fn drive_to_quiescent_lub(&self) -> Self {
+        let mut state = self.clone();
+        for _ in 0..STORAGE_REPLICA_COUNT * 8 {
+            if state.is_quiescent_lub() {
+                return state;
+            }
+            let next = state.send_all_current().deliver_all();
+            if next == state {
+                return next;
+            }
+            state = next;
+        }
+        state
+    }
+}
+
+fn reachable_storage_join_states() -> BTreeSet<StorageJoinState> {
+    let mut seen = BTreeSet::new();
+    let mut frontier = vec![StorageJoinState::initial()];
+    while let Some(state) = frontier.pop() {
+        if !seen.insert(state.clone()) {
+            continue;
+        }
+        for next in state.successors() {
+            if !seen.contains(&next) {
+                frontier.push(next);
+            }
+        }
+    }
+    seen
+}
+
+// ===================================================================
+// Stage 4: storage hand-off cleanup safety for one placement key.
+//
+// SCOPE: this is the #614 S2' cleanup model, not the storage convergence
+// theorem. Convergence is Stage 3's join-semilattice fact. This stage abstracts
+// exactly one placement key, the copy -> ack -> delete hand-off, and arbitrary
+// local writes over a finite representative value domain while a copy or ack is
+// in flight:
 //
 //   local(v) --SendCopy(v)--> copy_in_flight(v)
 //   copy_in_flight(v) --DeliverCopy--> successor(v) + ack_in_flight(v)
@@ -548,8 +775,6 @@ fn discovery_model(all: Vec<Did>, rounds: u8) -> ActorModel<DiscoveryNode, Cfg, 
 //
 //   Always S2': local(k) is removed only if successor(k) contains the same
 //   value at the moment of removal.
-//
-// This is the no-update-loss safety property required by #614.
 // ===================================================================
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -803,8 +1028,43 @@ mod tests {
         }
     }
 
-    /// Stage 3 — storage S2'. Exhaustively explores the finite state graph for
-    /// one placement hand-off and checks the formal safety predicate:
+    /// Stage 3 — CRDT SEC law. Storage values are bounded join-semilattice
+    /// states; anti-entropy messages only deliver more joins.
+    #[test]
+    fn storage_join_value_satisfies_semilattice_laws() {
+        assert_join_semilattice_laws(&[
+            StorageJoinValue::EMPTY,
+            StorageJoinValue::A,
+            StorageJoinValue::B,
+            StorageJoinValue::C,
+            StorageJoinValue::A.join(StorageJoinValue::B),
+            StorageJoinValue::ALL,
+        ]);
+    }
+
+    /// Stage 3 — topology-aware SEC. Every reachable partition/merge state
+    /// stays below the global lub, and every merged state reaches that lub under
+    /// fair repeated send/deliver. This is the storage convergence proof; the
+    /// copy/ack/delete model below is only local cleanup safety.
+    #[test]
+    fn storage_join_topology_model_converges_after_partition_merge() {
+        for state in reachable_storage_join_states() {
+            assert!(
+                state.preserves_lub_bound(),
+                "storage join exceeded global lub: {state:?}"
+            );
+            if state.phase == StorageJoinPhase::Merged {
+                let closed = state.drive_to_quiescent_lub();
+                assert!(
+                    closed.is_quiescent_lub(),
+                    "merged state did not close to global lub: start={state:?}, closed={closed:?}"
+                );
+            }
+        }
+    }
+
+    /// Stage 4 — storage S2'. Exhaustively explores the finite state graph for
+    /// one placement hand-off and checks the cleanup safety predicate:
     /// deleting the local placement key is allowed only when the successor has
     /// durably stored the same value.
     #[test]

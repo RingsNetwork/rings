@@ -10,9 +10,12 @@
 //! - `R = Z / 2^160`, represented by [`Did`].
 //! - `succ[n]` is the bounded successor sequence for node `n`.
 //! - `pred[n]` is the optional predecessor for node `n`.
+//! - `finger[n][i]` is the optional sparse/no-wrap finger-table entry at slot `i`.
 //!
-//! Law: stabilize and rectify are monotone refinements over the finite known
-//! topology set. Their least fixpoint is the converged Chord state.
+//! Law: join, remove, notify, stabilize, and finger maintenance are pure
+//! transitions over this state. Stabilize/notify/finger refinement are monotone
+//! over the finite known topology set; their least fixpoint is the converged
+//! Chord state plus a finger table derived from that topology.
 
 use num_bigint::BigUint;
 
@@ -33,24 +36,65 @@ pub struct TopologyState {
     pub successors: Vec<Did>,
     /// Known predecessor.
     pub predecessor: Option<Did>,
+    /// Sparse/no-wrap finger table.
+    pub fingers: Vec<Option<Did>>,
+    /// Next finger index maintained by the periodic finger fixer.
+    pub fix_finger_index: usize,
 }
 
 impl TopologyState {
     /// Construct a pure topology state.
-    pub fn new(local: Did, successors: Vec<Did>, predecessor: Option<Did>) -> Self {
+    pub fn new(
+        local: Did,
+        successors: Vec<Did>,
+        predecessor: Option<Did>,
+        fingers: Vec<Option<Did>>,
+        fix_finger_index: usize,
+    ) -> Self {
         Self {
             local,
             successors,
             predecessor,
+            fingers,
+            fix_finger_index,
         }
     }
+}
+
+/// Pure result of looking up the owner of a DID in local topology state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FindSuccessorStep {
+    /// The local state can answer with this successor.
+    Local(Did),
+    /// The query must be forwarded to `next`.
+    Remote {
+        /// Next hop.
+        next: Did,
+        /// DID whose successor is being searched.
+        did: Did,
+    },
 }
 
 /// Pure topology input event.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TopologyEvent {
-    /// HMCC/Zave rectify input: one candidate predecessor notified this node.
-    Rectify {
+    /// A connected peer is introduced to the topology state.
+    Join {
+        /// Peer learned by the local node.
+        peer: Did,
+    },
+    /// A peer is removed from successor, predecessor, and finger state.
+    Remove {
+        /// Peer that left or failed.
+        peer: Did,
+    },
+    /// A successor candidate was accepted by the liveness/interpreter boundary.
+    UpdateSuccessor {
+        /// Candidate successor.
+        successor: Did,
+    },
+    /// HMCC/Zave notify input: one candidate predecessor notified this node.
+    Notify {
         /// Candidate predecessor.
         predecessor: Did,
     },
@@ -62,11 +106,36 @@ pub enum TopologyEvent {
         /// Predecessor reported by the successor.
         predecessor: Option<Did>,
     },
+    /// Periodic finger-fix transition.
+    FixFinger,
+    /// Apply a reported successor to a fixed finger slot.
+    ApplyFinger {
+        /// Finger slot to update.
+        index: usize,
+        /// Successor reported for that slot.
+        successor: Did,
+    },
 }
 
 /// Pure topology side effect emitted by a transition.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TopologyAction {
+    /// Ask `next` to find `did` and report with the connect handler.
+    FindSuccessorForConnect {
+        /// Next hop.
+        next: Did,
+        /// DID being searched.
+        did: Did,
+    },
+    /// Ask `next` to find `did` and report with the finger-fix handler.
+    FindSuccessorForFix {
+        /// Next hop.
+        next: Did,
+        /// DID being searched.
+        did: Did,
+        /// Finger slot to update when the report returns.
+        index: usize,
+    },
     /// Query this improved successor for its successor list.
     QuerySuccessorList(Did),
     /// Notify this successor that `local` is its predecessor candidate.
@@ -93,12 +162,17 @@ fn push_unique(xs: &mut Vec<Did>, x: Did) {
     }
 }
 
+fn sorted_successors(mut candidates: Vec<Did>, local: Did, capacity: usize) -> Vec<Did> {
+    candidates.retain(|&did| did != local);
+    candidates.sort_by_key(|&did| dist(local, did));
+    candidates.dedup();
+    candidates.truncate(capacity);
+    candidates
+}
+
 /// `Successors(n)`: the nearest forward nodes, ordered by clockwise distance.
 pub fn successors(all: &[Did], n: Did, capacity: usize) -> Vec<Did> {
-    let mut others: Vec<Did> = all.iter().copied().filter(|&did| did != n).collect();
-    others.sort_by_key(|&did| dist(n, did));
-    others.truncate(capacity);
-    others
+    sorted_successors(all.to_vec(), n, capacity)
 }
 
 /// `Predecessor(n)`: the nearest node behind `n`.
@@ -124,6 +198,84 @@ pub fn finger(all: &[Did], n: Did, bit: usize) -> Option<Did> {
 /// Full sparse/no-wrap finger table predicted by the topology operator.
 pub fn finger_table(all: &[Did], n: Did) -> Vec<Option<Did>> {
     (0..RING_BITS).map(|bit| finger(all, n, bit)).collect()
+}
+
+/// Correct successor list after introducing one candidate successor.
+pub fn update_successors(local: Did, current: &[Did], candidate: Did, capacity: usize) -> Vec<Did> {
+    let mut candidates = current.to_vec();
+    push_unique(&mut candidates, candidate);
+    sorted_successors(candidates, local, capacity)
+}
+
+fn finger_join(local: Did, current: &[Option<Did>], peer: Did) -> Vec<Option<Did>> {
+    let bias = dist(local, peer);
+    current
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(slot, old)| {
+            let pos = BigUint::from(Did::power_of_two(slot));
+            if bias < pos || peer == local {
+                old
+            } else {
+                match old {
+                    Some(existing) if dist(local, existing) < bias => old,
+                    _ => Some(peer),
+                }
+            }
+        })
+        .collect()
+}
+
+fn finger_remove(current: &[Option<Did>], peer: Did) -> Vec<Option<Did>> {
+    let mut next = current.to_vec();
+    let indexes = next
+        .iter()
+        .enumerate()
+        .filter(|(_, did)| **did == Some(peer))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let (Some(first), Some(last)) = (indexes.first().copied(), indexes.last().copied()) else {
+        return next;
+    };
+    let replacement = next.get(last.saturating_add(1)).copied().flatten();
+    for slot in next.iter_mut().take(last.saturating_add(1)).skip(first) {
+        *slot = replacement;
+    }
+    next
+}
+
+fn finger_set(
+    local: Did,
+    current: &[Option<Did>],
+    index: usize,
+    successor: Did,
+) -> Vec<Option<Did>> {
+    let mut next = current.to_vec();
+    if successor != local {
+        if let Some(slot) = next.get_mut(index) {
+            *slot = Some(successor);
+        }
+    }
+    next
+}
+
+/// Pure Chord successor lookup against one topology state.
+pub fn find_successor(state: &TopologyState, did: Did) -> FindSuccessorStep {
+    let head = state.successors.first().copied().unwrap_or(state.local);
+    if state.successors.is_empty() || dist(state.local, did) <= dist(state.local, head) {
+        FindSuccessorStep::Local(head)
+    } else {
+        let next = state
+            .fingers
+            .iter()
+            .rev()
+            .flatten()
+            .copied()
+            .find(|peer| dist(state.local, *peer) < dist(state.local, did))
+            .unwrap_or(state.local);
+        FindSuccessorStep::Remote { next, did }
+    }
 }
 
 /// Correct predecessor value after one HMCC/Zave rectify transition.
@@ -176,13 +328,107 @@ pub fn stabilize_notify(local: Did, next_successors: &[Did]) -> Option<Did> {
     next_successors.first().copied().filter(|&did| did != local)
 }
 
+fn step_join(state: &TopologyState, peer: Did, capacity: usize) -> TopologyStep {
+    if peer == state.local {
+        return TopologyStep {
+            state: state.clone(),
+            actions: Vec::new(),
+        };
+    }
+    TopologyStep {
+        state: TopologyState {
+            successors: update_successors(state.local, &state.successors, peer, capacity),
+            fingers: finger_join(state.local, &state.fingers, peer),
+            ..state.clone()
+        },
+        actions: vec![TopologyAction::FindSuccessorForConnect {
+            next: peer,
+            did: state.local,
+        }],
+    }
+}
+
+fn step_remove(state: &TopologyState, peer: Did, capacity: usize) -> TopologyStep {
+    let mut next_successors = state
+        .successors
+        .iter()
+        .copied()
+        .filter(|&did| did != peer)
+        .collect::<Vec<_>>();
+    let fingers = finger_remove(&state.fingers, peer);
+    if next_successors.is_empty() {
+        if let Some(first_finger) = fingers.iter().flatten().copied().next() {
+            next_successors =
+                update_successors(state.local, &next_successors, first_finger, capacity);
+        }
+    }
+    TopologyStep {
+        state: TopologyState {
+            successors: next_successors,
+            predecessor: state.predecessor.filter(|&did| did != peer),
+            fingers,
+            ..state.clone()
+        },
+        actions: Vec::new(),
+    }
+}
+
+fn step_update_successor(state: &TopologyState, successor: Did, capacity: usize) -> TopologyStep {
+    let next_successors = update_successors(state.local, &state.successors, successor, capacity);
+    let inserted = !state.successors.contains(&successor) && next_successors.contains(&successor);
+    TopologyStep {
+        state: TopologyState {
+            successors: next_successors,
+            ..state.clone()
+        },
+        actions: if inserted {
+            vec![TopologyAction::QuerySuccessorList(successor)]
+        } else {
+            Vec::new()
+        },
+    }
+}
+
+fn step_fix_finger(state: &TopologyState) -> TopologyStep {
+    if state.fingers.is_empty() {
+        return TopologyStep {
+            state: state.clone(),
+            actions: Vec::new(),
+        };
+    }
+    let index = (state.fix_finger_index + 1) % state.fingers.len();
+    let did = Did::power_of_two(index);
+    match find_successor(state, did) {
+        FindSuccessorStep::Local(successor) => TopologyStep {
+            state: TopologyState {
+                fingers: finger_set(state.local, &state.fingers, index, successor),
+                fix_finger_index: index,
+                ..state.clone()
+            },
+            actions: Vec::new(),
+        },
+        FindSuccessorStep::Remote { next, did } => TopologyStep {
+            state: TopologyState {
+                fix_finger_index: index,
+                ..state.clone()
+            },
+            actions: vec![TopologyAction::FindSuccessorForFix { next, did, index }],
+        },
+    }
+}
+
 /// Apply one pure topology transition.
 ///
 /// Post: the returned state depends only on `state` and `event`; no locks,
 /// storage, clocks, randomness, or transport effects are read here.
 pub fn step(state: &TopologyState, event: TopologyEvent, capacity: usize) -> TopologyStep {
     match event {
-        TopologyEvent::Rectify { predecessor } => TopologyStep {
+        TopologyEvent::Join { peer } => step_join(state, peer, capacity),
+        TopologyEvent::Remove { peer } => step_remove(state, peer, capacity),
+        TopologyEvent::UpdateSuccessor { successor } => {
+            step_update_successor(state, successor, capacity)
+        }
+        TopologyEvent::Notify { predecessor } => TopologyStep {
             state: TopologyState {
                 predecessor: rectify_predecessor(state.local, state.predecessor, predecessor),
                 ..state.clone()
@@ -215,5 +461,162 @@ pub fn step(state: &TopologyState, event: TopologyEvent, capacity: usize) -> Top
                 actions,
             }
         }
+        TopologyEvent::FixFinger => step_fix_finger(state),
+        TopologyEvent::ApplyFinger { index, successor } => TopologyStep {
+            state: TopologyState {
+                fingers: finger_set(state.local, &state.fingers, index, successor),
+                ..state.clone()
+            },
+            actions: Vec::new(),
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn did(value: u32) -> Did {
+        Did::from(value)
+    }
+
+    fn state(
+        local: Did,
+        successors: Vec<Did>,
+        predecessor: Option<Did>,
+        fingers: Vec<Option<Did>>,
+        fix_finger_index: usize,
+    ) -> TopologyState {
+        TopologyState::new(local, successors, predecessor, fingers, fix_finger_index)
+    }
+
+    #[test]
+    fn join_step_updates_successors_fingers_and_connect_action() {
+        let local = did(0);
+        let peer = did(8);
+        let next = step(
+            &state(local, vec![], None, vec![None; 5], 0),
+            TopologyEvent::Join { peer },
+            DEFAULT_SUCCESSOR_CAPACITY,
+        );
+
+        assert_eq!(next.state.successors, vec![peer]);
+        assert_eq!(next.state.fingers, vec![
+            Some(peer),
+            Some(peer),
+            Some(peer),
+            Some(peer),
+            None
+        ]);
+        assert_eq!(next.actions, vec![
+            TopologyAction::FindSuccessorForConnect {
+                next: peer,
+                did: local
+            }
+        ]);
+    }
+
+    #[test]
+    fn remove_step_removes_peer_from_every_topology_slot() {
+        let local = did(0);
+        let peer = did(8);
+        let next = step(
+            &state(
+                local,
+                vec![peer],
+                Some(peer),
+                vec![Some(peer), Some(peer)],
+                0,
+            ),
+            TopologyEvent::Remove { peer },
+            DEFAULT_SUCCESSOR_CAPACITY,
+        );
+
+        assert!(next.state.successors.is_empty());
+        assert_eq!(next.state.predecessor, None);
+        assert_eq!(next.state.fingers, vec![None, None]);
+        assert!(next.actions.is_empty());
+    }
+
+    #[test]
+    fn fix_finger_step_updates_local_successor_slot() {
+        let local = did(0);
+        let successor = did(8);
+        let next = step(
+            &state(local, vec![successor], None, vec![None; 4], 2),
+            TopologyEvent::FixFinger,
+            DEFAULT_SUCCESSOR_CAPACITY,
+        );
+
+        assert_eq!(next.state.fix_finger_index, 3);
+        assert_eq!(next.state.fingers, vec![None, None, None, Some(successor)]);
+        assert!(next.actions.is_empty());
+    }
+
+    #[test]
+    fn fix_finger_step_emits_indexed_remote_action() {
+        let local = did(0);
+        let successor = did(4);
+        let next_hop = did(6);
+        let next = step(
+            &state(
+                local,
+                vec![successor],
+                None,
+                vec![None, None, Some(next_hop), None],
+                2,
+            ),
+            TopologyEvent::FixFinger,
+            DEFAULT_SUCCESSOR_CAPACITY,
+        );
+
+        assert_eq!(next.state.fix_finger_index, 3);
+        assert_eq!(next.actions, vec![TopologyAction::FindSuccessorForFix {
+            next: next_hop,
+            did: Did::power_of_two(3),
+            index: 3
+        }]);
+    }
+
+    #[test]
+    fn apply_finger_step_updates_exact_slot() {
+        let local = did(0);
+        let successor = did(8);
+        let next = step(
+            &state(local, vec![], None, vec![None; 4], 0),
+            TopologyEvent::ApplyFinger {
+                index: 2,
+                successor,
+            },
+            DEFAULT_SUCCESSOR_CAPACITY,
+        );
+
+        assert_eq!(next.state.fingers, vec![None, None, Some(successor), None]);
+        assert!(next.actions.is_empty());
+    }
+
+    #[test]
+    fn apply_finger_step_ignores_self_and_out_of_range_slot() {
+        let local = did(0);
+        let current = state(local, vec![], None, vec![None; 2], 0);
+        let self_update = step(
+            &current,
+            TopologyEvent::ApplyFinger {
+                index: 1,
+                successor: local,
+            },
+            DEFAULT_SUCCESSOR_CAPACITY,
+        );
+        let out_of_range = step(
+            &current,
+            TopologyEvent::ApplyFinger {
+                index: 9,
+                successor: did(9),
+            },
+            DEFAULT_SUCCESSOR_CAPACITY,
+        );
+
+        assert_eq!(self_update.state, current);
+        assert_eq!(out_of_range.state, current);
     }
 }

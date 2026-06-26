@@ -18,6 +18,7 @@ use super::entry::PlacementMiss;
 use super::finger::DEFAULT_FINGER_TABLE_SIZE;
 use super::successor::SuccessorSeq;
 use super::topology;
+use super::topology::FindSuccessorStep;
 use super::topology::TopologyAction;
 use super::topology::TopologyEvent;
 use super::topology::TopologyState;
@@ -118,7 +119,12 @@ pub enum RemoteAction {
     FindSuccessorForConnect(Did),
 
     /// Need `did_a` to find `did_b` then send back with `for finger table fixing` flag.
-    FindSuccessorForFix(Did),
+    FindSuccessorForFix {
+        /// DID whose successor should populate the finger slot.
+        did: Did,
+        /// Finger slot that should be updated by the report.
+        index: usize,
+    },
 
     /// Fetch successor_list from successor
     QueryForSuccessorList,
@@ -257,22 +263,12 @@ impl PeerRing {
     /// Also remove it from successor sequence.
     /// If successor_seq become empty, try setting the closest node to it.
     pub fn remove(&self, did: Did) -> Result<()> {
-        let mut finger = self.lock_finger()?;
-        let successor = self.successors();
-        let mut predecessor = self.lock_predecessor()?;
-        if let Some(pid) = *predecessor {
-            if pid == did {
-                *predecessor = None;
-            }
-        }
-        finger.remove(did);
-        successor.remove(did)?;
-        if successor.is_empty()? {
-            if let Some(x) = finger.first() {
-                successor.update(x)?;
-            }
-        }
-        Ok(())
+        let next = topology::step(
+            &self.topology_state()?,
+            TopologyEvent::Remove { peer: did },
+            self.successors().capacity(),
+        );
+        self.interpret_topology_state(&next.state)
     }
 
     /// Calculate bias of the Did on the ring.
@@ -281,20 +277,74 @@ impl PeerRing {
     }
 
     fn topology_state(&self) -> Result<TopologyState> {
+        let finger = self.lock_finger()?;
         Ok(TopologyState::new(
             self.did,
             self.successors().list()?,
             *self.lock_predecessor()?,
+            finger.list().clone(),
+            finger.fix_finger_index(),
         ))
     }
 
-    fn replace_successors(&self, next: &[Did]) -> Result<()> {
+    fn interpret_topology_state(&self, next: &TopologyState) -> Result<()> {
         let successors = self.successors();
         for did in successors.list()? {
             successors.remove(did)?;
         }
-        successors.extend(next)?;
+        successors.extend(&next.successors)?;
+        *self.lock_predecessor()? = next.predecessor;
+        self.lock_finger()?
+            .replace_state(&next.fingers, next.fix_finger_index);
         Ok(())
+    }
+
+    fn topology_action(&self, action: TopologyAction) -> PeerRingAction {
+        match action {
+            TopologyAction::FindSuccessorForConnect { next, did } => {
+                PeerRingAction::RemoteAction(next, RemoteAction::FindSuccessorForConnect(did))
+            }
+            TopologyAction::FindSuccessorForFix { next, did, index } => {
+                PeerRingAction::RemoteAction(next, RemoteAction::FindSuccessorForFix { did, index })
+            }
+            TopologyAction::QuerySuccessorList(did) => {
+                PeerRingAction::RemoteAction(did, RemoteAction::QueryForSuccessorList)
+            }
+            TopologyAction::Notify(did) => {
+                PeerRingAction::RemoteAction(did, RemoteAction::Notify(self.did))
+            }
+        }
+    }
+
+    fn topology_leaf_actions(&self, actions: Vec<TopologyAction>) -> PeerRingAction {
+        let mut actions = actions
+            .into_iter()
+            .map(|action| self.topology_action(action))
+            .collect::<Vec<_>>();
+        match actions.len() {
+            0 => PeerRingAction::None,
+            1 => actions.pop().unwrap_or(PeerRingAction::None),
+            _ => PeerRingAction::MultiActions(actions),
+        }
+    }
+
+    fn topology_multi_actions(&self, actions: Vec<TopologyAction>) -> PeerRingAction {
+        PeerRingAction::MultiActions(
+            actions
+                .into_iter()
+                .map(|action| self.topology_action(action))
+                .collect(),
+        )
+    }
+
+    /// Apply a reported finger successor through the pure topology transition.
+    pub(crate) fn apply_fixed_finger(&self, index: usize, successor: Did) -> Result<()> {
+        let next = topology::step(
+            &self.topology_state()?,
+            TopologyEvent::ApplyFinger { index, successor },
+            self.successors().capacity(),
+        );
+        self.interpret_topology_state(&next.state)
     }
 
     /// Join an incoming replicated entry delta into local storage.
@@ -324,47 +374,38 @@ impl Chord<PeerRingAction> for PeerRing {
     /// The caller will send it to the node identified by `did`, and let the node find
     /// the successor of current node and make current node connect to that successor.
     fn join(&self, did: Did) -> Result<PeerRingAction> {
-        if did == self.did {
-            return Ok(PeerRingAction::None);
-        }
-
-        let mut finger = self.lock_finger()?;
-
-        finger.join(did);
-        // Always try update
-        self.successors().update(did)?;
-        Ok(PeerRingAction::RemoteAction(
-            did,
-            RemoteAction::FindSuccessorForConnect(self.did),
-        ))
+        let next = topology::step(
+            &self.topology_state()?,
+            TopologyEvent::Join { peer: did },
+            self.successors().capacity(),
+        );
+        self.interpret_topology_state(&next.state)?;
+        Ok(self.topology_leaf_actions(next.actions))
     }
 
     /// Find the successor of a Did.
     /// May return a remote action for the successor is recorded in another node.
     fn find_successor(&self, did: Did) -> Result<PeerRingAction> {
-        let successor = self.successors();
-        let finger = self.lock_finger()?;
-
-        let succ = {
-            if successor.is_empty()? || self.bias(did) <= self.bias(successor.min()?) {
-                // If the did is closer to self than successor, return successor as the
-                // successor of that did.
-                Ok(PeerRingAction::Some(successor.min()?))
-            } else {
-                // Otherwise, find the closest preceding node and ask it to find the successor.
-                let closest_predecessor = finger.closest_predecessor(did);
-                Ok(PeerRingAction::RemoteAction(
-                    closest_predecessor,
-                    RemoteAction::FindSuccessor(did),
-                ))
+        let state = self.topology_state()?;
+        let succ = match topology::find_successor(&state, did) {
+            FindSuccessorStep::Local(successor) => {
+                // If the DID is closer to self than the successor head, return
+                // that head as the successor. With an empty successor list, the
+                // pure topology model returns `self.did`, matching
+                // `SuccessorSeq::min`.
+                Ok(PeerRingAction::Some(successor))
             }
+            FindSuccessorStep::Remote { next, did } => Ok(PeerRingAction::RemoteAction(
+                next,
+                RemoteAction::FindSuccessor(did),
+            )),
         };
 
         tracing::debug!(
             "find_successor: self: {}, did: {}, successor: {:?}, result: {:?}",
             self.did,
             did,
-            successor,
+            state.successors,
             succ
         );
 
@@ -376,79 +417,29 @@ impl Chord<PeerRingAction> for PeerRing {
     /// If that node is closer to current node or current node has no predecessor, set it to the did.
     /// This method will return current predecessor after setting.
     fn notify(&self, did: Did) -> Result<Did> {
-        let mut predecessor = self.lock_predecessor()?;
-
-        match *predecessor {
-            Some(pre) => {
-                // If the did is closer to self than predecessor, set it to the predecessor.
-                // Otherwise tell the real predecessor back.
-                if self.bias(pre) < self.bias(did) {
-                    *predecessor = Some(did);
-                    Ok(did)
-                } else {
-                    Ok(pre)
-                }
-            }
-            None => {
-                // Self has no predecessor, set it to the did directly.
-                *predecessor = Some(did);
-                Ok(did)
-            }
-        }
+        let next = topology::step(
+            &self.topology_state()?,
+            TopologyEvent::Notify { predecessor: did },
+            self.successors().capacity(),
+        );
+        let Some(predecessor) = next.state.predecessor else {
+            return Err(Error::PeerRingInvalidAction);
+        };
+        self.interpret_topology_state(&next.state)?;
+        Ok(predecessor)
     }
 
     /// Fix finger table by finding the successor for each finger.
     /// According to the paper, this method should be called periodically.
     /// According to the paper, only one finger should be fixed at a time.
     fn fix_fingers(&self) -> Result<PeerRingAction> {
-        let (mut fix_finger_index, finger_table_size) = {
-            let finger = self.lock_finger()?;
-            (finger.fix_finger_index, finger.slot_count())
-        };
-
-        if finger_table_size == 0 {
-            return Ok(PeerRingAction::None);
-        }
-
-        // Only one finger should be fixed at a time.
-        fix_finger_index = (fix_finger_index + 1) % finger_table_size;
-
-        // Get finger did.
-        let finger_did = Did::power_of_two(fix_finger_index);
-
-        // Caution here that there are also locks in find_successor.
-        // You cannot lock finger table before calling find_successor.
-        // Have to lock_finger in each branch of the match.
-        match self.find_successor(finger_did) {
-            Ok(res) => match res {
-                PeerRingAction::Some(v) => {
-                    let mut finger = self.lock_finger()?;
-                    finger.fix_finger_index = fix_finger_index;
-                    finger.set_fix(v);
-                    Ok(PeerRingAction::None)
-                }
-                PeerRingAction::RemoteAction(
-                    closest_predecessor,
-                    RemoteAction::FindSuccessor(finger_did),
-                ) => {
-                    let mut finger = self.lock_finger()?;
-                    finger.fix_finger_index = fix_finger_index;
-                    Ok(PeerRingAction::RemoteAction(
-                        closest_predecessor,
-                        RemoteAction::FindSuccessorForFix(finger_did),
-                    ))
-                }
-                _ => {
-                    tracing::error!("Invalid PeerRing Action");
-                    Err(Error::PeerRingInvalidAction)
-                }
-            },
-            Err(e) => {
-                let mut finger = self.lock_finger()?;
-                finger.fix_finger_index = fix_finger_index;
-                Err(Error::PeerRingFindSuccessor(e.to_string()))
-            }
-        }
+        let next = topology::step(
+            &self.topology_state()?,
+            TopologyEvent::FixFinger,
+            self.successors().capacity(),
+        );
+        self.interpret_topology_state(&next.state)?;
+        Ok(self.topology_leaf_actions(next.actions))
     }
 }
 
@@ -598,14 +589,15 @@ impl CorrectChord<PeerRingAction> for PeerRing {
                 RemoteAction::TryConnect,
             ));
         }
-        if let Some(new_succ) = self.successors().update(did.into())? {
-            Ok(PeerRingAction::RemoteAction(
-                new_succ,
-                RemoteAction::QueryForSuccessorList,
-            ))
-        } else {
-            Ok(PeerRingAction::None)
-        }
+        let next = topology::step(
+            &self.topology_state()?,
+            TopologyEvent::UpdateSuccessor {
+                successor: did.into(),
+            },
+            self.successors().capacity(),
+        );
+        self.interpret_topology_state(&next.state)?;
+        Ok(self.topology_leaf_actions(next.actions))
     }
 
     async fn extend_successor(&self, dids: &[impl LiveDid]) -> Result<PeerRingAction> {
@@ -653,12 +645,10 @@ impl CorrectChord<PeerRingAction> for PeerRing {
         // emits no follow-up action.
         let next = topology::step(
             &self.topology_state()?,
-            TopologyEvent::Rectify { predecessor: pred },
+            TopologyEvent::Notify { predecessor: pred },
             self.successors().capacity(),
         );
-        let mut predecessor = self.lock_predecessor()?;
-        *predecessor = next.state.predecessor;
-        Ok(())
+        self.interpret_topology_state(&next.state)
     }
 
     /// Pre-Stabilize Operation:
@@ -692,20 +682,8 @@ impl CorrectChord<PeerRingAction> for PeerRing {
             },
             self.successors().capacity(),
         );
-        self.replace_successors(&next.state.successors)?;
-        Ok(PeerRingAction::MultiActions(
-            next.actions
-                .into_iter()
-                .map(|action| match action {
-                    TopologyAction::QuerySuccessorList(did) => {
-                        PeerRingAction::RemoteAction(did, RemoteAction::QueryForSuccessorList)
-                    }
-                    TopologyAction::Notify(did) => {
-                        PeerRingAction::RemoteAction(did, RemoteAction::Notify(self.did))
-                    }
-                })
-                .collect(),
-        ))
+        self.interpret_topology_state(&next.state)?;
+        Ok(self.topology_multi_actions(next.actions))
     }
 
     /// A function to provide topological information about the chord.

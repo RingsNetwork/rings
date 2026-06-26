@@ -8,24 +8,25 @@
 //! - `succ(k)` is the owner returned by Chord routing for placement key `k`.
 //!
 //! Invariant REPLICATED(e, N):
-//! `forall k in place(id(e), N), sigma_{succ(k)}[k] = e`.
+//! `forall k in place(id(e), N), sigma_{succ(k)}[k] >= e_delta`, where `>=`
+//! is the partial order induced by [`crate::algebra::JoinSemilattice`].
 //!
 //! Liveness S4:
 //! In a quiescent window, if at least one placement copy of `e` remains at the
-//! start of an anti-entropy period, one `republish_local_entries` round copies
-//! `e` to every current owner in `place(id(e), N)`.
+//! start of an anti-entropy period, one `republish_local_entries` round
+//! delivers the entry's join state to every current owner in `place(id(e), N)`.
 //!
 //! Safety:
-//! - S1 Additivity: repair transitions in this module never call
-//!   `storage.remove`.
-//! - S2' No-update-loss: the only deletion transition is
+//! - S1 Additivity (#612): repair transitions in this module never call
+//!   `storage.remove`; they only deliver additional joins.
+//! - S2' No-update-loss (#611/#614 cleanup): the only deletion transition is
 //!   `acknowledge_synced_entries`; the finite model
 //!   `storage_sync_model_preserves_no_update_loss` in `dht_stateright` checks
 //!   that ack-delete removes a local value only when the receiver state contains
-//!   the same value.
-//! - S3 Idempotence: copy transitions overwrite the same key with an equal
-//!   value, so applying the same repair twice is observationally equivalent to
-//!   applying it once.
+//!   the same joined value.
+//! - S3 Idempotence: duplicate repair delivery is observationally equivalent to
+//!   one delivery because [`Entry::join`](crate::dht::entry::Entry::join) is
+//!   idempotent.
 //!
 //! Read-repair:
 //! Given lookup observation `o : place(id(e), N) -> {Hit(e), Miss, Unknown}`,
@@ -102,8 +103,8 @@ impl PeerRing {
 
         // Departure repair is only an accelerator; periodic anti-entropy is
         // the authoritative backstop. This scan is O(entries * redundancy) and
-        // may race with another terminal-state trigger, but repair is
-        // copy-only, so duplicate triggers preserve storage state.
+        // may race with another terminal-state trigger, but repair only
+        // delivers joins, so duplicate triggers preserve storage state.
         for (_, entry) in self.storage.get_all().await? {
             for placement_key in entry.did.rotate_affine(redundancy)? {
                 match self.find_successor(placement_key)? {
@@ -124,8 +125,9 @@ impl PeerRing {
         // Pre: placement_key belongs to place(id(entry), redundancy) for the
         // caller's anti-entropy or republish transition.
         // Post S1: no local key is removed.
-        // Post S3: if self owns placement_key, sigma_self[placement_key] = entry
-        // after the transition; repeating the write preserves sigma.
+        // Post S3: if self owns placement_key, sigma_self[placement_key] is
+        // joined with entry after the transition; repeating the write preserves
+        // sigma by join idempotence.
         // Post: if another node owns placement_key, the returned action carries
         // PlacedEntry { key: placement_key, entry } so placement identity is not
         // recomputed by the receiver.
@@ -196,9 +198,9 @@ impl ChordStorageRepair<PeerRingAction> for PeerRing {
 
         // Pre: redundancy > 1 and every local storage value is an Entry.
         // Post S1: forall key in local_before, local_after[key] =
-        // local_before[key]. This transition only copies.
+        // local_before[key]. This transition only emits join deliveries.
         // Post S3: repeating this transition produces the same sigma mapping as
-        // one application because put(k, e) overwrites with equal e.
+        // one application because storage writes are Entry::join deliveries.
         // Post S4: for every local entry e, a copy action exists for each key
         // in place(id(e), redundancy) whose owner is not self; self-owned
         // placements are written locally.
@@ -223,7 +225,7 @@ impl ChordStorageRepair<PeerRingAction> for PeerRing {
         // action can target them. A local-hit short circuit has misses = [].
         // Post R4: no placement vector or successor is recomputed here.
         // Preservation S1/S3: this transition never removes and duplicate copy
-        // actions overwrite with equal Entry values.
+        // actions are duplicate Entry::join deliveries.
         let mut actions = Vec::new();
         for miss in misses.iter().copied() {
             let action = self.copy_entry_to_observed_miss(miss, &entry).await?;

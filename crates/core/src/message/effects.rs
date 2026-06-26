@@ -172,6 +172,15 @@ pub(crate) enum DhtActionFunctor {
         /// DID being searched.
         did: Did,
     },
+    /// Ask `next` to find `did` and report with the finger-fix handler.
+    FindSuccessorForFix {
+        /// Next hop to query.
+        next: Did,
+        /// DID being searched.
+        did: Did,
+        /// Finger slot fixed by this lookup.
+        index: usize,
+    },
     /// Query a successor for its successor list.
     QueryForSuccessorList {
         /// Successor to query.
@@ -204,6 +213,14 @@ impl TryFrom<&PeerRingAction> for DhtActionFunctor {
                 next: *next,
                 did: *did,
             }),
+            PeerRingAction::RemoteAction(
+                next,
+                PeerRingRemoteAction::FindSuccessorForFix { did, index },
+            ) => Ok(Self::FindSuccessorForFix {
+                next: *next,
+                did: *did,
+                index: *index,
+            }),
             PeerRingAction::RemoteAction(next, PeerRingRemoteAction::QueryForSuccessorList) => {
                 Ok(Self::QueryForSuccessorList { successor: *next })
             }
@@ -227,6 +244,12 @@ impl From<DhtActionFunctor> for PeerRingAction {
             DhtActionFunctor::None => Self::None,
             DhtActionFunctor::FindSuccessorForConnect { next, did } => {
                 Self::RemoteAction(next, PeerRingRemoteAction::FindSuccessorForConnect(did))
+            }
+            DhtActionFunctor::FindSuccessorForFix { next, did, index } => {
+                Self::RemoteAction(next, PeerRingRemoteAction::FindSuccessorForFix {
+                    did,
+                    index,
+                })
             }
             DhtActionFunctor::QueryForSuccessorList { successor } => {
                 Self::RemoteAction(successor, PeerRingRemoteAction::QueryForSuccessorList)
@@ -261,6 +284,25 @@ impl DhtActionFunctor {
                                 strict: false,
                                 then: FindSuccessorThen::Report(
                                     FindSuccessorReportHandler::Connect,
+                                ),
+                            }),
+                            next,
+                        )
+                        .into(),
+                    )
+                }
+            }
+            Self::FindSuccessorForFix { next, did, index } => {
+                if next == did {
+                    None
+                } else {
+                    Some(
+                        MessageSendFunctor::send_direct_message(
+                            Message::FindSuccessorSend(FindSuccessorSend {
+                                did,
+                                strict: false,
+                                then: FindSuccessorThen::Report(
+                                    FindSuccessorReportHandler::FixFingerTable { index },
                                 ),
                             }),
                             next,
@@ -449,6 +491,11 @@ mod tests {
             next: did(),
             did: did(),
         })?;
+        assert_dht_action_functor_section(DhtActionFunctor::FindSuccessorForFix {
+            next: did(),
+            did: did(),
+            index: 7,
+        })?;
 
         assert_dht_action_functor_section(DhtActionFunctor::QueryForSuccessorList {
             successor: did(),
@@ -464,6 +511,13 @@ mod tests {
         assert_dht_action_functor_retraction(PeerRingAction::RemoteAction(
             did(),
             PeerRingRemoteAction::FindSuccessorForConnect(did()),
+        ))?;
+        assert_dht_action_functor_retraction(PeerRingAction::RemoteAction(
+            did(),
+            PeerRingRemoteAction::FindSuccessorForFix {
+                did: did(),
+                index: 7,
+            },
         ))?;
         assert_dht_action_functor_retraction(PeerRingAction::RemoteAction(
             did(),
@@ -598,6 +652,56 @@ mod tests {
             |_| true,
         )?
         .is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn dht_find_successor_for_fix_sends_direct_indexed_report() -> Result<()> {
+        let next = did();
+        let target = did();
+        let index = 11;
+
+        let effect = single_effect(lower_dht_action(
+            &PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessorForFix {
+                did: target,
+                index,
+            }),
+            |_| true,
+        ))?;
+
+        match effect {
+            CoreEffect::Message(MessageSendFunctor::SendDirectMessage { msg, destination }) => {
+                match *msg {
+                    Message::FindSuccessorSend(msg) => {
+                        assert_eq!(destination, next);
+                        assert_eq!(msg.did, target);
+                        assert!(!msg.strict);
+                        match msg.then {
+                            FindSuccessorThen::Report(
+                                FindSuccessorReportHandler::FixFingerTable {
+                                    index: reported_index,
+                                },
+                            ) => assert_eq!(reported_index, index),
+                            handler => {
+                                return Err(Error::InvalidMessage(format!(
+                                    "expected fix-finger report handler, got {handler:?}"
+                                )))
+                            }
+                        }
+                    }
+                    msg => {
+                        return Err(Error::InvalidMessage(format!(
+                            "expected FindSuccessorSend, got {msg:?}"
+                        )))
+                    }
+                }
+            }
+            effect => {
+                return Err(Error::InvalidMessage(format!(
+                    "expected SendDirectMessage FindSuccessorSend, got {effect:?}"
+                )))
+            }
+        }
         Ok(())
     }
 

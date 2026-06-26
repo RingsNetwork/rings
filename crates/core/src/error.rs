@@ -58,6 +58,9 @@ pub enum Error {
     #[error("The type of Entry is not allowed to be joined as a subring")]
     EntryNotJoinable,
 
+    #[error("The type of Entry is not allowed to be tombstoned")]
+    EntryNotTombstonable,
+
     #[error("Affine rotation scalar must be greater than zero")]
     InvalidAffineScalar,
 

@@ -81,7 +81,7 @@ pub trait ChordStorageSync<Action>: Chord<Action> {
     /// `Entry`s that are no longer between current node and `new_successor`,
     /// and copy them to the new successor.
     ///
-    /// Post: this only copies entries. Deletion is performed by
+    /// Post: this only delivers entry joins. Local cleanup is performed by
     /// [`Self::acknowledge_synced_entries`] after the successor reports durable
     /// storage for specific placement keys.
     async fn sync_entries_with_successor(&self, new_successor: Did) -> Result<Action>;
@@ -97,14 +97,15 @@ pub trait ChordStorageSync<Action>: Chord<Action> {
 
 /// ChordStorageRepair defines additive repair for redundant DHT storage.
 ///
-/// Repair never deletes local copies. It only republishes a known [`Entry`] to
-/// the current affine placement set so missing owners can regain a copy.
+/// Repair never deletes local copies. It only republishes a known [`Entry`] as
+/// a join delivery to the current affine placement set so missing owners can
+/// regain a copy.
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait ChordStorageRepair<Action>: Chord<Action> {
     /// Republish every locally stored entry to its current affine owners.
     ///
-    /// Post: no local key is removed. Remote actions, if any, are copy-only
+    /// Post: no local key is removed. Remote actions, if any, are join-delivery
     /// sync messages carrying explicit placement keys.
     async fn republish_local_entries(&self, redundancy: u16) -> Result<Action>;
 

@@ -118,12 +118,13 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
 
         // Pre: new_successor is the successor adopted by stabilization.
         // Post S1: forall key in local_before, local_after[key] =
-        // local_before[key]; this transition emits copies only.
+        // local_before[key]; this transition emits join deliveries only.
         // Post S2(copy): every emitted PlacedEntry keeps the exact local
         // placement key, so an eventual ack names the key whose durable copy was
         // reported by the receiver.
-        // Preservation: sync is copy-before-ack-before-delete.
-        // acknowledge_synced_entries is the only delete transition.
+        // Preservation #611/#614: sync hand-off is join-before-ack-before-local
+        // cleanup. acknowledge_synced_entries is the only local cleanup
+        // transition and does not define storage convergence.
         for (entry_key_str, entry) in all_items.iter() {
             let entry_key = Did::from_str(entry_key_str)?;
             if self.bias(entry_key) > self.bias(new_successor) {
@@ -152,7 +153,7 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
         // local_before[key] == ack.entry. If local_before[key] differs, the
         // local value is preserved and will be offered again by a later
         // sync_entries_with_successor transition.
-        // Preservation: a write racing between copy and ack changes
+        // Preservation #614: a write racing between copy and ack changes
         // local_before[key], so confirms_local_value is false and delete is
         // skipped.
         for ack in acks {

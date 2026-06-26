@@ -233,8 +233,11 @@ pub enum FindSuccessorReportHandler {
     None,
     /// - Connect: connect origin node.
     Connect,
-    /// - FixFingerTable: update fingers table.
-    FixFingerTable,
+    /// - FixFingerTable: update one finger table slot.
+    FixFingerTable {
+        /// Finger slot that the original lookup was fixing.
+        index: usize,
+    },
     /// - CustomCallback: custom callback handle by `custom_message` method.
     CustomCallback(u8),
 }

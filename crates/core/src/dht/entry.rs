@@ -60,6 +60,13 @@ pub enum EntryOperation {
     Touch(Entry),
     /// Join subring.
     JoinSubring(String, Did),
+    /// Tombstone observed relay-message payloads in a two-phase set.
+    ///
+    /// The payload identifies the relay-message carrier and the values to
+    /// remove. If CRDT dots are present, those dots are the remove witnesses;
+    /// otherwise the receiver tombstones currently observed dots with matching
+    /// payload bytes.
+    Tombstone(Entry),
 }
 
 /// A DHT storage entry with an [`EntryKind`] and a ring key represented as [`Did`].
@@ -222,6 +229,7 @@ impl EntryOperation {
             }
             EntryOperation::Touch(entry) => EntryOperation::Touch(entry.ensure_delta_stamp(actor)?),
             EntryOperation::JoinSubring(name, did) => EntryOperation::JoinSubring(name, did),
+            EntryOperation::Tombstone(entry) => EntryOperation::Tombstone(entry),
         })
     }
 
@@ -232,6 +240,7 @@ impl EntryOperation {
             EntryOperation::Extend(entry) => entry.did,
             EntryOperation::Touch(entry) => entry.did,
             EntryOperation::JoinSubring(name, _) => Entry::gen_did(name)?,
+            EntryOperation::Tombstone(entry) => entry.did,
         })
     }
 
@@ -242,6 +251,7 @@ impl EntryOperation {
             EntryOperation::Extend(entry) => entry.kind,
             EntryOperation::Touch(entry) => entry.kind,
             EntryOperation::JoinSubring(..) => EntryKind::Subring,
+            EntryOperation::Tombstone(entry) => entry.kind,
         }
     }
 
@@ -566,6 +576,7 @@ impl Entry {
             EntryOperation::Extend(entry) => self.extend(entry),
             EntryOperation::Touch(entry) => self.touch(entry),
             EntryOperation::JoinSubring(_, did) => self.join_subring(did),
+            EntryOperation::Tombstone(entry) => self.tombstone(entry),
         }
     }
 
@@ -608,6 +619,31 @@ impl Entry {
         subring.finger.join(did);
         let other: Entry = subring.try_into()?;
         self.join(other)
+    }
+
+    /// Tombstone observed relay messages.
+    ///
+    /// Pre: `self` and `other` are the same relay-message carrier.
+    /// Post: every removed payload is represented by an add-dot tombstone, so
+    /// future joins with stale add replicas cannot resurrect it.
+    pub fn tombstone(&self, other: Self) -> Result<Self> {
+        if self.kind != EntryKind::RelayMessage {
+            return Err(Error::EntryNotTombstonable);
+        }
+        self.validate_same_carrier(&other)?;
+
+        let mut set = self.relay_set()?;
+        let target_values = other.data.into_iter().collect::<BTreeSet<_>>();
+        let target_dots = other.crdt.dots.into_iter().collect::<BTreeSet<_>>();
+        let has_dot_witness = !target_dots.is_empty();
+
+        for (value, dot) in &set.adds.values {
+            if target_dots.contains(dot) || (!has_dot_witness && target_values.contains(value)) {
+                set.removes.insert(*dot);
+            }
+        }
+
+        Ok(self.materialize_relay_set(set))
     }
 }
 
@@ -692,6 +728,11 @@ mod tests {
         data_entry(topic, value)?.stamp_overwrite(version(counter))
     }
 
+    fn relay_delta(did: Did, value: &str, counter: u128) -> Result<Entry> {
+        Entry::new(did, vec![encoded(value)?], EntryKind::RelayMessage)
+            .stamp_delta(version(counter))
+    }
+
     #[test]
     fn gset_satisfies_join_semilattice_laws() {
         let mut a = GSet::new();
@@ -727,8 +768,12 @@ mod tests {
         let b = Entry::new(did, vec![encoded("b")?], EntryKind::RelayMessage)
             .stamp_delta(version(2))?
             .relay_set()?;
+        let ab = Entry::new(did, vec![], EntryKind::RelayMessage)
+            .join(relay_delta(did, "a", 1)?)?
+            .join(relay_delta(did, "b", 2)?)?;
+        let tombstoned_a = ab.tombstone(relay_delta(did, "a", 1)?)?.relay_set()?;
 
-        assert_join_semilattice_laws(&[RelayMessageSet::default(), a, b]);
+        assert_join_semilattice_laws(&[RelayMessageSet::default(), a, b, tombstoned_a]);
         Ok(())
     }
 
@@ -916,6 +961,37 @@ mod tests {
         let decoded = decode_entry_data(&updated)?;
         assert_eq!(decoded.first(), Some(&String::from("test1")));
         assert_eq!(decoded.last(), Some(&String::from("test0")));
+        Ok(())
+    }
+
+    #[test]
+    fn relay_tombstone_removes_observed_message_by_join() -> Result<()> {
+        let did = Did::from(30u32);
+        let first = relay_delta(did, "first", 1)?;
+        let second = relay_delta(did, "second", 2)?;
+        let carrier = Entry::new(did, vec![], EntryKind::RelayMessage)
+            .join(first.clone())?
+            .join(second.clone())?;
+
+        let removed = carrier.tombstone(first.clone())?;
+
+        assert_eq!(decode_entry_data(&removed)?, vec![String::from("second")]);
+        let joined_with_stale_add = removed.join(first)?;
+        assert_eq!(decode_entry_data(&joined_with_stale_add)?, vec![
+            String::from("second")
+        ]);
+        Ok(())
+    }
+
+    #[test]
+    fn relay_tombstone_rejects_non_relay_entry() -> Result<()> {
+        let entry = data_entry("topic", "value")?;
+        let other = entry.clone();
+
+        assert!(matches!(
+            entry.tombstone(other),
+            Err(Error::EntryNotTombstonable)
+        ));
         Ok(())
     }
 
