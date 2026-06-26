@@ -69,6 +69,7 @@
     )
 )]
 
+pub mod algebra;
 pub mod dht;
 pub mod ecc;
 pub mod error;

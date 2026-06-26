@@ -1,10 +1,14 @@
-//! Finite-group abstractions and elliptic-curve group adapters.
+//! Algebraic abstractions and elliptic-curve group adapters.
 //!
-//! The algebraic layer in this module is intentionally smaller than any
-//! concrete elliptic-curve library API:
+//! The generic algebraic vocabulary lives in [`crate::algebra`]. This module
+//! connects that trait tower to concrete elliptic-curve libraries:
 //!
-//! - [`GroupOps`] models a finite additive group: identity, addition,
-//!   inverse, equality, and scalar action on group elements.
+//! - [`Point<C>`] is the curve element carrier and implements the additive
+//!   abelian-group and module traits.
+//! - [`Scalar<C>`] is the curve scalar carrier and implements the field traits.
+//! - [`GroupOps`] remains the finite-group adapter used by existing
+//!   cryptographic algorithms: identity, addition, inverse, equality, and
+//!   scalar action on group elements.
 //! - [`CyclicGroup`] adds a distinguished generator `g`; every element in the
 //!   subgroup used by the cryptographic algorithm is representable as `xg`.
 //! - [`CryptographicGroup`] adds explicit non-zero scalar sampling. This is not
@@ -30,12 +34,14 @@ use std::marker::PhantomData;
 use std::ops::Add;
 use std::ops::Mul;
 use std::ops::Neg;
+use std::ops::Sub;
 use std::sync::OnceLock;
 
 use ark_bls12_381::Fr as Bls12381ScalarField;
 use ark_bls12_381::G1Projective;
 use ark_ec::Group as ArkGroup;
-use ark_ff::Zero;
+use ark_ff::Field as _;
+use ark_ff::Zero as _;
 use ark_std::UniformRand;
 #[cfg(feature = "curve-ristretto255")]
 use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
@@ -57,6 +63,19 @@ use rand::RngCore;
 use rand::SeedableRng;
 use rand_hc::Hc128Rng;
 
+use crate::algebra::AbelianGroup;
+use crate::algebra::AdditiveGroup;
+use crate::algebra::AdditiveMagma;
+use crate::algebra::AdditiveMonoid;
+use crate::algebra::AdditiveSemigroup;
+use crate::algebra::Field as AlgebraField;
+use crate::algebra::Module;
+use crate::algebra::MultiplicativeMagma;
+use crate::algebra::MultiplicativeMonoid;
+use crate::algebra::MultiplicativeSemigroup;
+use crate::algebra::One as AlgebraOne;
+use crate::algebra::Ring;
+use crate::algebra::Zero as AlgebraZero;
 use crate::ecc::PublicKey;
 use crate::ecc::SecretKey;
 use crate::error::Error;
@@ -125,12 +144,12 @@ pub trait CryptographicGroup: CyclicGroup {
     }
 }
 
-/// Curve-specific group operations implemented by curve markers.
+/// Curve-specific point-group and scalar-field operations implemented by curve markers.
 ///
 /// This trait is the adapter boundary between abstract finite-group algorithms
 /// and concrete elliptic-curve libraries. For a marker `C`, the native
 /// `Point` type must represent elements of one finite abelian group, and
-/// `Scalar` must represent the scalar ring used for the group action.
+/// `Scalar` must represent the scalar field used for the group action.
 ///
 /// Implementors must preserve the following laws after accounting for native
 /// representation details such as projective coordinates:
@@ -143,11 +162,11 @@ pub trait CryptographicGroup: CyclicGroup {
 ///   compare equal.
 /// - `eq` is compatible with `add`, `neg`, `mul`, and `generator_mul`.
 /// - `generator_mul(s)` is equivalent to `mul(generator(), s)`.
-///
-/// Because this abstraction keeps `Scalar` opaque and only requires `Clone`,
-/// scalar-ring laws such as distributivity cannot be stated directly in the
-/// trait bounds. They are still semantic requirements of any cryptographic
-/// curve adapter.
+/// - scalar operations form a field: additive abelian group, multiplicative
+///   abelian group on non-zero values, distributivity, and total equality over
+///   canonical scalar values.
+/// - scalar multiplication is a right module action:
+///   `mul(mul(p, s), t) == mul(p, scalar_mul(s, t))`.
 pub trait CurveGroup {
     /// Native point representation for this curve group.
     type Point: Clone;
@@ -177,6 +196,33 @@ pub trait CurveGroup {
 
     /// Element equality.
     fn eq(lhs: &Self::Point, rhs: &Self::Point) -> bool;
+
+    /// Scalar additive identity.
+    fn scalar_zero() -> Self::Scalar;
+
+    /// Scalar multiplicative identity.
+    fn scalar_one() -> Self::Scalar;
+
+    /// Return whether the scalar is the additive identity.
+    fn scalar_is_zero(scalar: &Self::Scalar) -> bool;
+
+    /// Scalar addition.
+    fn scalar_add(lhs: &Self::Scalar, rhs: &Self::Scalar) -> Self::Scalar;
+
+    /// Scalar subtraction.
+    fn scalar_sub(lhs: &Self::Scalar, rhs: &Self::Scalar) -> Self::Scalar;
+
+    /// Scalar additive inverse.
+    fn scalar_neg(scalar: &Self::Scalar) -> Self::Scalar;
+
+    /// Scalar multiplication.
+    fn scalar_mul(lhs: &Self::Scalar, rhs: &Self::Scalar) -> Self::Scalar;
+
+    /// Scalar multiplicative inverse.
+    fn scalar_inverse(scalar: &Self::Scalar) -> Option<Self::Scalar>;
+
+    /// Scalar equality.
+    fn scalar_eq(lhs: &Self::Scalar, rhs: &Self::Scalar) -> bool;
 }
 
 /// Curve adapter extension that can sample non-zero scalars for cryptography.
@@ -346,6 +392,14 @@ impl<C: CurveGroup> Neg for Point<C> {
     }
 }
 
+impl<C: CurveGroup> Sub for Point<C> {
+    type Output = Self;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        self + (-rhs)
+    }
+}
+
 impl<C: CurveGroup> Mul<Scalar<C>> for Point<C> {
     type Output = Self;
 
@@ -361,6 +415,108 @@ impl<C: CurveGroup> PartialEq for Point<C> {
 }
 
 impl<C: CurveGroup> Eq for Point<C> {}
+
+impl<C: CurveGroup> AlgebraZero for Point<C> {
+    fn zero() -> Self {
+        Self::new(C::identity())
+    }
+
+    fn is_zero(&self) -> bool {
+        C::eq(&self.inner, &C::identity())
+    }
+}
+
+impl<C: CurveGroup> AdditiveMagma for Point<C> {}
+
+impl<C: CurveGroup> AdditiveSemigroup for Point<C> {}
+
+impl<C: CurveGroup> AdditiveMonoid for Point<C> {}
+
+impl<C: CurveGroup> AdditiveGroup for Point<C> {}
+
+impl<C: CurveGroup> AbelianGroup for Point<C> {}
+
+impl<C: CurveGroup> Module<Scalar<C>> for Point<C> {}
+
+impl<C: CurveGroup> Add for Scalar<C> {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Self::new(C::scalar_add(&self.inner, &rhs.inner))
+    }
+}
+
+impl<C: CurveGroup> Sub for Scalar<C> {
+    type Output = Self;
+
+    fn sub(self, rhs: Self) -> Self::Output {
+        Self::new(C::scalar_sub(&self.inner, &rhs.inner))
+    }
+}
+
+impl<C: CurveGroup> Neg for Scalar<C> {
+    type Output = Self;
+
+    fn neg(self) -> Self::Output {
+        Self::new(C::scalar_neg(&self.inner))
+    }
+}
+
+impl<C: CurveGroup> Mul for Scalar<C> {
+    type Output = Self;
+
+    fn mul(self, rhs: Self) -> Self::Output {
+        Self::new(C::scalar_mul(&self.inner, &rhs.inner))
+    }
+}
+
+impl<C: CurveGroup> PartialEq for Scalar<C> {
+    fn eq(&self, other: &Self) -> bool {
+        C::scalar_eq(&self.inner, &other.inner)
+    }
+}
+
+impl<C: CurveGroup> Eq for Scalar<C> {}
+
+impl<C: CurveGroup> AlgebraZero for Scalar<C> {
+    fn zero() -> Self {
+        Self::new(C::scalar_zero())
+    }
+
+    fn is_zero(&self) -> bool {
+        C::scalar_is_zero(&self.inner)
+    }
+}
+
+impl<C: CurveGroup> AlgebraOne for Scalar<C> {
+    fn one() -> Self {
+        Self::new(C::scalar_one())
+    }
+}
+
+impl<C: CurveGroup> AdditiveMagma for Scalar<C> {}
+
+impl<C: CurveGroup> AdditiveSemigroup for Scalar<C> {}
+
+impl<C: CurveGroup> AdditiveMonoid for Scalar<C> {}
+
+impl<C: CurveGroup> AdditiveGroup for Scalar<C> {}
+
+impl<C: CurveGroup> AbelianGroup for Scalar<C> {}
+
+impl<C: CurveGroup> MultiplicativeMagma for Scalar<C> {}
+
+impl<C: CurveGroup> MultiplicativeSemigroup for Scalar<C> {}
+
+impl<C: CurveGroup> MultiplicativeMonoid for Scalar<C> {}
+
+impl<C: CurveGroup> Ring for Scalar<C> {}
+
+impl<C: CurveGroup> AlgebraField for Scalar<C> {
+    fn try_inverse(&self) -> Option<Self> {
+        C::scalar_inverse(&self.inner).map(Self::new)
+    }
+}
 
 // The simple curve adapters below all have the same shape: the native library
 // already exposes identity, generator, addition, negation, scalar
@@ -380,7 +536,16 @@ macro_rules! impl_curve_group_adapter {
             add: $add:expr,
             neg: $neg:expr,
             mul: $mul:expr,
-            eq: $eq:expr $(,)?
+            eq: $eq:expr,
+            scalar_zero: $scalar_zero:expr,
+            scalar_one: $scalar_one:expr,
+            scalar_is_zero: $scalar_is_zero:expr,
+            scalar_add: $scalar_add:expr,
+            scalar_sub: $scalar_sub:expr,
+            scalar_neg: $scalar_neg:expr,
+            scalar_mul: $scalar_mul:expr,
+            scalar_inverse: $scalar_inverse:expr,
+            scalar_eq: $scalar_eq:expr $(,)?
         }
     ) => {
         impl CurveGroup for $curve {
@@ -409,6 +574,42 @@ macro_rules! impl_curve_group_adapter {
 
             fn eq(lhs: &Self::Point, rhs: &Self::Point) -> bool {
                 ($eq)(lhs, rhs)
+            }
+
+            fn scalar_zero() -> Self::Scalar {
+                $scalar_zero
+            }
+
+            fn scalar_one() -> Self::Scalar {
+                $scalar_one
+            }
+
+            fn scalar_is_zero(scalar: &Self::Scalar) -> bool {
+                ($scalar_is_zero)(scalar)
+            }
+
+            fn scalar_add(lhs: &Self::Scalar, rhs: &Self::Scalar) -> Self::Scalar {
+                ($scalar_add)(lhs, rhs)
+            }
+
+            fn scalar_sub(lhs: &Self::Scalar, rhs: &Self::Scalar) -> Self::Scalar {
+                ($scalar_sub)(lhs, rhs)
+            }
+
+            fn scalar_neg(scalar: &Self::Scalar) -> Self::Scalar {
+                ($scalar_neg)(scalar)
+            }
+
+            fn scalar_mul(lhs: &Self::Scalar, rhs: &Self::Scalar) -> Self::Scalar {
+                ($scalar_mul)(lhs, rhs)
+            }
+
+            fn scalar_inverse(scalar: &Self::Scalar) -> Option<Self::Scalar> {
+                ($scalar_inverse)(scalar)
+            }
+
+            fn scalar_eq(lhs: &Self::Scalar, rhs: &Self::Scalar) -> bool {
+                ($scalar_eq)(lhs, rhs)
             }
         }
 
@@ -475,6 +676,46 @@ impl CurveGroup for Secp256k1 {
     fn eq(lhs: &Self::Point, rhs: &Self::Point) -> bool {
         secp256k1_jacobian_bytes(*lhs) == secp256k1_jacobian_bytes(*rhs)
     }
+
+    fn scalar_zero() -> Self::Scalar {
+        SecpK1FieldScalar::from_int(0)
+    }
+
+    fn scalar_one() -> Self::Scalar {
+        SecpK1FieldScalar::from_int(1)
+    }
+
+    fn scalar_is_zero(scalar: &Self::Scalar) -> bool {
+        scalar.is_zero()
+    }
+
+    fn scalar_add(lhs: &Self::Scalar, rhs: &Self::Scalar) -> Self::Scalar {
+        *lhs + *rhs
+    }
+
+    fn scalar_sub(lhs: &Self::Scalar, rhs: &Self::Scalar) -> Self::Scalar {
+        *lhs + -*rhs
+    }
+
+    fn scalar_neg(scalar: &Self::Scalar) -> Self::Scalar {
+        -*scalar
+    }
+
+    fn scalar_mul(lhs: &Self::Scalar, rhs: &Self::Scalar) -> Self::Scalar {
+        *lhs * *rhs
+    }
+
+    fn scalar_inverse(scalar: &Self::Scalar) -> Option<Self::Scalar> {
+        if scalar.is_zero() {
+            None
+        } else {
+            Some(scalar.inv())
+        }
+    }
+
+    fn scalar_eq(lhs: &Self::Scalar, rhs: &Self::Scalar) -> bool {
+        lhs == rhs
+    }
 }
 
 impl CurveScalarSampler for Secp256k1 {
@@ -501,6 +742,15 @@ impl_curve_group_adapter! {
         neg: |point: &ProjectivePoint| -*point,
         mul: |point: &ProjectivePoint, scalar: &Secp256r1ScalarField| *point * *scalar,
         eq: |lhs: &ProjectivePoint, rhs: &ProjectivePoint| lhs == rhs,
+        scalar_zero: Secp256r1ScalarField::ZERO,
+        scalar_one: Secp256r1ScalarField::ONE,
+        scalar_is_zero: |scalar: &Secp256r1ScalarField| bool::from(scalar.is_zero()),
+        scalar_add: |lhs: &Secp256r1ScalarField, rhs: &Secp256r1ScalarField| *lhs + *rhs,
+        scalar_sub: |lhs: &Secp256r1ScalarField, rhs: &Secp256r1ScalarField| *lhs - *rhs,
+        scalar_neg: |scalar: &Secp256r1ScalarField| -*scalar,
+        scalar_mul: |lhs: &Secp256r1ScalarField, rhs: &Secp256r1ScalarField| *lhs * *rhs,
+        scalar_inverse: |scalar: &Secp256r1ScalarField| scalar.invert().into_option(),
+        scalar_eq: |lhs: &Secp256r1ScalarField, rhs: &Secp256r1ScalarField| lhs == rhs,
     }
 }
 
@@ -522,6 +772,15 @@ impl_curve_group_adapter! {
         neg: |point: &G1Projective| -*point,
         mul: |point: &G1Projective, scalar: &Bls12381ScalarField| *point * *scalar,
         eq: |lhs: &G1Projective, rhs: &G1Projective| lhs == rhs,
+        scalar_zero: Bls12381ScalarField::ZERO,
+        scalar_one: Bls12381ScalarField::ONE,
+        scalar_is_zero: |scalar: &Bls12381ScalarField| scalar.is_zero(),
+        scalar_add: |lhs: &Bls12381ScalarField, rhs: &Bls12381ScalarField| *lhs + *rhs,
+        scalar_sub: |lhs: &Bls12381ScalarField, rhs: &Bls12381ScalarField| *lhs - *rhs,
+        scalar_neg: |scalar: &Bls12381ScalarField| -*scalar,
+        scalar_mul: |lhs: &Bls12381ScalarField, rhs: &Bls12381ScalarField| *lhs * *rhs,
+        scalar_inverse: |scalar: &Bls12381ScalarField| scalar.inverse(),
+        scalar_eq: |lhs: &Bls12381ScalarField, rhs: &Bls12381ScalarField| lhs == rhs,
     }
 }
 
@@ -546,6 +805,21 @@ impl_curve_group_adapter! {
         neg: |point: &RistrettoPoint| -point,
         mul: |point: &RistrettoPoint, scalar: &Ristretto255ScalarField| point * scalar,
         eq: |lhs: &RistrettoPoint, rhs: &RistrettoPoint| lhs == rhs,
+        scalar_zero: Ristretto255ScalarField::ZERO,
+        scalar_one: Ristretto255ScalarField::ONE,
+        scalar_is_zero: |scalar: &Ristretto255ScalarField| *scalar == Ristretto255ScalarField::ZERO,
+        scalar_add: |lhs: &Ristretto255ScalarField, rhs: &Ristretto255ScalarField| *lhs + *rhs,
+        scalar_sub: |lhs: &Ristretto255ScalarField, rhs: &Ristretto255ScalarField| *lhs - *rhs,
+        scalar_neg: |scalar: &Ristretto255ScalarField| -*scalar,
+        scalar_mul: |lhs: &Ristretto255ScalarField, rhs: &Ristretto255ScalarField| *lhs * *rhs,
+        scalar_inverse: |scalar: &Ristretto255ScalarField| {
+            if *scalar == Ristretto255ScalarField::ZERO {
+                None
+            } else {
+                Some(scalar.invert())
+            }
+        },
+        scalar_eq: |lhs: &Ristretto255ScalarField, rhs: &Ristretto255ScalarField| lhs == rhs,
     }
 }
 
@@ -642,6 +916,10 @@ fn secp256k1_jacobian_bytes(point: Jacobian) -> Option<([u8; 32], [u8; 32])> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::algebra::assert_field_laws;
+    use crate::algebra::assert_module_laws;
+    use crate::algebra::One;
+    use crate::algebra::Zero;
 
     fn group_laws<G>()
     where
@@ -669,6 +947,36 @@ mod tests {
         );
     }
 
+    fn algebra_laws<C>()
+    where
+        C: CurveScalarSampler,
+        Point<C>: Eq + std::fmt::Debug,
+        Scalar<C>: Eq + std::fmt::Debug,
+    {
+        let scalar_a = Scalar::<C>::new(C::random_scalar());
+        let scalar_b = Scalar::<C>::new(C::random_scalar());
+        let scalar_c = Scalar::<C>::new(C::random_scalar());
+        let scalars = vec![
+            Scalar::<C>::zero(),
+            Scalar::<C>::one(),
+            scalar_a.clone(),
+            scalar_b.clone(),
+            scalar_c.clone(),
+        ];
+
+        let generator = Point::<C>::new(C::generator());
+        let points = vec![
+            Point::<C>::zero(),
+            generator.clone(),
+            generator.clone() * scalar_a,
+            generator.clone() * scalar_b,
+            generator * scalar_c,
+        ];
+
+        assert_field_laws(&scalars);
+        assert_module_laws(&scalars, &points);
+    }
+
     #[test]
     fn supported_curve_groups_satisfy_basic_laws() {
         group_laws::<Group<Secp256k1>>();
@@ -676,6 +984,15 @@ mod tests {
         group_laws::<Group<Bls12381G1>>();
         #[cfg(feature = "curve-ristretto255")]
         group_laws::<Ristretto255Group>();
+    }
+
+    #[test]
+    fn supported_curve_groups_satisfy_algebra_laws() {
+        algebra_laws::<Secp256k1>();
+        algebra_laws::<Secp256r1>();
+        algebra_laws::<Bls12381G1>();
+        #[cfg(feature = "curve-ristretto255")]
+        algebra_laws::<Ristretto255>();
     }
 
     #[test]

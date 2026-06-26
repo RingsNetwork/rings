@@ -4,11 +4,10 @@
 //!
 //! A [`Did`] is a protocol identity located on the Chord identifier circle. It
 //! is also the concrete carrier for the additive cyclic group of `Z / 2^160`
-//! used by Chord routing and placement. The
-//! [`crate::dht::ring::AbelianGroup`] trait names the operation set; `Did`
-//! supplies the representation and implementation. `Did` does not implement
-//! [`crate::dht::ring::Ring`] because Chord never uses identifier
-//! multiplication.
+//! used by Chord routing and placement. The [`crate::algebra::AbelianGroup`]
+//! trait names the operation set; `Did` supplies the representation and
+//! implementation. `Did` does not implement [`crate::algebra::Ring`] because
+//! Chord never uses identifier multiplication.
 //!
 //! ## Chord identity model
 //!
@@ -30,7 +29,7 @@
 //! For redundancy `n`, [`Did::rotate_affine`] returns
 //! `self + floor(2^160 * i / n)` for every `i in 0..n`. This is a DHT placement
 //! operation over identities, not a new carrier type. The additive group law is
-//! witnessed by `Did`'s [`crate::dht::ring::AbelianGroup`] implementation.
+//! witnessed by `Did`'s [`crate::algebra::AbelianGroup`] implementation.
 //!
 //! ## Boundary
 //!
@@ -47,11 +46,15 @@ use std::str::FromStr;
 
 use ethereum_types::H160;
 use num_bigint::BigUint;
-use num_traits::Zero;
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::ring::AbelianGroup;
+use crate::algebra::AbelianGroup;
+use crate::algebra::AdditiveGroup;
+use crate::algebra::AdditiveMagma;
+use crate::algebra::AdditiveMonoid;
+use crate::algebra::AdditiveSemigroup;
+use crate::algebra::Zero;
 use crate::ecc::HashStr;
 use crate::error::Error;
 use crate::error::Result;
@@ -404,6 +407,14 @@ impl Zero for Did {
     }
 }
 
+impl AdditiveMagma for Did {}
+
+impl AdditiveSemigroup for Did {}
+
+impl AdditiveMonoid for Did {}
+
+impl AdditiveGroup for Did {}
+
 impl AbelianGroup for Did {}
 
 impl Neg for Did {
@@ -451,11 +462,10 @@ fn set_ring_bit(bytes: &mut [u8; Did::BYTE_LEN], bit: usize) {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
-    use std::fmt::Debug;
     use std::str::FromStr;
 
     use super::*;
-    use crate::dht::ring::AbelianGroup;
+    use crate::algebra::assert_abelian_group_laws;
 
     fn ring_size() -> BigUint {
         BigUint::from(1u8) << 160usize
@@ -469,29 +479,6 @@ mod tests {
             Did::from(ring_size() - BigUint::from(1u8)),
             Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap(),
         ]
-    }
-
-    fn assert_abelian_group_laws<T>(values: &[T])
-    where T: AbelianGroup + Debug {
-        for &a in values {
-            assert_eq!(a + T::zero(), a);
-            assert_eq!(T::zero() + a, a);
-            assert_eq!(a + (-a), T::zero());
-            assert_eq!((-a) + a, T::zero());
-            assert_eq!(-(-a), a);
-
-            for &b in values {
-                let lhs = a + b;
-                let rhs = b + a;
-                assert_eq!(lhs, rhs);
-
-                for &c in values {
-                    let lhs = (a + b) + c;
-                    let rhs = a + (b + c);
-                    assert_eq!(lhs, rhs);
-                }
-            }
-        }
     }
 
     #[test]

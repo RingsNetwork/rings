@@ -80,7 +80,6 @@ hex = "0.4.3"
 itertools = "0.10.3"
 libsecp256k1 = { version = "0.7.0", features = ["static-context"] }
 num-bigint = "0.4.3"
-num-traits = "0.2.19"
 p256 = "0.13.2"
 primeorder = "0.13.2"
 rand = { version = "0.8.5", features = ["getrandom"] }

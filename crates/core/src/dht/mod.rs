@@ -9,8 +9,6 @@ pub mod did;
 pub mod entry;
 /// Finger table for Rings
 pub mod finger;
-/// Algebraic operation traits for Chord identifier rings.
-pub mod ring;
 mod stabilization;
 /// Subring model stored through DHT entries.
 pub mod subring;
@@ -25,8 +23,6 @@ pub use chord::TopoInfo;
 pub use did::Did;
 pub use finger::FingerTable;
 pub use finger::DEFAULT_FINGER_TABLE_SIZE;
-pub use ring::AbelianGroup;
-pub use ring::Ring;
 pub use stabilization::Stabilizer;
 pub use successor::SuccessorReader;
 pub use successor::SuccessorWriter;
