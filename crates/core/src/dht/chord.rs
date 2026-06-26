@@ -353,13 +353,13 @@ impl PeerRing {
     /// value and `incoming` when a previous value exists; otherwise it is
     /// `incoming` normalized for storage.
     pub(crate) async fn join_storage_entry(&self, key: Did, incoming: Entry) -> Result<Entry> {
-        let incoming = incoming.into_storage_entry();
+        let incoming = incoming.try_into_storage_entry()?;
         let stored = if let Some(local) = self.storage.get(&key.to_string()).await? {
             local.join(incoming)?
         } else {
             incoming
         }
-        .into_storage_entry();
+        .try_into_storage_entry()?;
         self.storage.put(&key.to_string(), &stored).await?;
         Ok(stored)
     }
@@ -540,7 +540,7 @@ impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing 
                         Some(this) => this,
                         None => op.clone().gen_default_entry()?,
                     };
-                    let entry = this.operate(op.clone())?;
+                    let entry = this.operate(op.clone(), self.did)?;
                     self.join_storage_entry(entry_key, entry).await?;
                     Ok(PeerRingAction::None)
                 }

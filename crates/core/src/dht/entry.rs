@@ -46,6 +46,12 @@ struct EntryElement {
     dot: EntryDot,
 }
 
+fn append_digest_part(out: &mut String, part: &str) {
+    out.push_str(&part.len().to_string());
+    out.push(':');
+    out.push_str(part);
+}
+
 /// Operations supported by a DHT storage entry.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EntryOperation {
@@ -118,8 +124,9 @@ impl PlacedEntry {
 ///
 /// `key` is the placement key updated by the receiver. `entry` is the copied
 /// delta that the receiver joined into its local least upper bound. The sender
-/// uses equality with its current local value before deleting; if the sender has
-/// observed any newer delta meanwhile, deletion is skipped.
+/// compares the storage-normalized ack value with its current local value
+/// before deleting; if the sender has observed any newer durable delta
+/// meanwhile, deletion is skipped.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SyncedEntryAck {
     /// The placement key durably persisted by the sync receiver.
@@ -135,8 +142,13 @@ impl SyncedEntryAck {
     }
 
     /// Returns whether this ack proves that `local` equals the copied value.
-    pub fn confirms_local_value(&self, local: &Entry) -> bool {
-        &self.entry == local
+    ///
+    /// Post: comparison is performed on storage canonical forms, so legacy
+    /// entries without dots compare equal to the normalized value durably
+    /// persisted by the receiver.
+    pub fn confirms_local_value(&self, local: &Entry) -> Result<bool> {
+        Ok(self.entry.clone().try_into_storage_entry()?
+            == local.clone().try_into_storage_entry()?)
     }
 }
 
@@ -327,11 +339,27 @@ impl Entry {
         self.with_element_dots(version)
     }
 
+    fn operation_digest(&self) -> Result<Did> {
+        let kind = match self.kind {
+            EntryKind::Data => "data",
+            EntryKind::Subring => "subring",
+            EntryKind::RelayMessage => "relay",
+        };
+        let mut input = String::new();
+        append_digest_part(&mut input, kind);
+        append_digest_part(&mut input, &self.did.to_string());
+        for data in &self.data {
+            append_digest_part(&mut input, data.value());
+        }
+        Self::gen_did(&input)
+    }
+
     fn ensure_overwrite_stamp(self, actor: Did) -> Result<Self> {
         if self.crdt.has_witness() {
             Ok(self)
         } else {
-            self.stamp_overwrite(EntryVersion::issued_by(actor))
+            let operation = self.operation_digest()?;
+            self.stamp_overwrite(EntryVersion::issued_by(actor, operation))
         }
     }
 
@@ -339,7 +367,8 @@ impl Entry {
         if self.crdt.has_witness() {
             Ok(self)
         } else {
-            self.stamp_delta(EntryVersion::issued_by(actor))
+            let operation = self.operation_digest()?;
+            self.stamp_delta(EntryVersion::issued_by(actor, operation))
         }
     }
 
@@ -352,25 +381,26 @@ impl Entry {
             .fold(self.crdt.register, EntryVersion::max)
     }
 
-    fn observed_operation_version(&self, actor: Did) -> EntryVersion {
-        let issued = EntryVersion::issued_by(actor);
-        self.crdt
+    fn observed_operation_version(&self, actor: Did) -> Result<EntryVersion> {
+        let issued = EntryVersion::issued_by(actor, self.operation_digest()?);
+        Ok(self
+            .crdt
             .dots
             .iter()
             .map(|dot| dot.version)
             .chain(std::iter::once(self.crdt.register))
             .max()
             .filter(|version| *version != EntryVersion::default())
-            .unwrap_or(issued)
+            .unwrap_or(issued))
     }
 
     fn ensure_overwrite_stamp_after(self, actor: Did, floor: EntryVersion) -> Result<Self> {
-        let version = self.observed_operation_version(actor).after(floor);
+        let version = self.observed_operation_version(actor)?.after(floor);
         self.stamp_overwrite(version)
     }
 
     fn ensure_delta_stamp_after(self, actor: Did, floor: EntryVersion) -> Result<Self> {
-        let version = self.observed_operation_version(actor).after(floor);
+        let version = self.observed_operation_version(actor)?.after(floor);
         self.stamp_delta(version)
     }
 
@@ -540,41 +570,34 @@ impl Entry {
         self.did == other.did
     }
 
-    // Post: result is a suffix of `data` and result.len() <= ENTRY_DATA_MAX_LEN.
-    fn cap_recent_data(data: Vec<Encoded>) -> Vec<Encoded> {
-        let skip_count = data.len().saturating_sub(ENTRY_DATA_MAX_LEN);
-        data.into_iter().skip(skip_count).collect()
-    }
-
     /// Normalize an entry immediately before it is persisted.
     ///
+    /// Post: normalization uses the same carrier materialization as
+    /// [`Self::join`]; there is no second cap strategy outside the CRDT.
     /// Post: `result.data.len() <= ENTRY_DATA_MAX_LEN`.
-    pub fn into_storage_entry(self) -> Self {
-        let skip_count = self.data.len().saturating_sub(ENTRY_DATA_MAX_LEN);
-        let dots = if self.crdt.dots.len() == self.data.len() {
-            self.crdt.dots.into_iter().skip(skip_count).collect()
-        } else {
-            self.crdt.dots
-        };
-        Self {
-            did: self.did,
-            data: Self::cap_recent_data(self.data),
-            kind: self.kind,
-            crdt: EntryCrdt {
-                register: self.crdt.register,
-                dots,
-                tombstones: self.crdt.tombstones,
-            },
+    /// Post: `result.data.len() == result.crdt.dots.len()` for Data and
+    /// RelayMessage entries.
+    pub fn try_into_storage_entry(self) -> Result<Self> {
+        match self.kind {
+            EntryKind::Data => {
+                let buffer = self.topic_buffer()?;
+                Ok(self.materialize_topic_buffer(buffer))
+            }
+            EntryKind::RelayMessage => {
+                let set = self.relay_set()?;
+                Ok(self.materialize_relay_set(set))
+            }
+            EntryKind::Subring => Ok(self),
         }
     }
 
     /// The entry point of [EntryOperation].
     /// Will dispatch to different operation handlers according to the variant.
-    pub fn operate(&self, op: EntryOperation) -> Result<Self> {
+    pub fn operate(&self, op: EntryOperation, actor: Did) -> Result<Self> {
         match op {
-            EntryOperation::Overwrite(entry) => self.overwrite(entry),
-            EntryOperation::Extend(entry) => self.extend(entry),
-            EntryOperation::Touch(entry) => self.touch(entry),
+            EntryOperation::Overwrite(entry) => self.overwrite(entry, actor),
+            EntryOperation::Extend(entry) => self.extend(entry, actor),
+            EntryOperation::Touch(entry) => self.touch(entry, actor),
             EntryOperation::JoinSubring(_, did) => self.join_subring(did),
             EntryOperation::Tombstone(entry) => self.tombstone(entry),
         }
@@ -582,30 +605,30 @@ impl Entry {
 
     /// Overwrite current data with new data.
     /// The handler of [EntryOperation::Overwrite].
-    pub fn overwrite(&self, other: Self) -> Result<Self> {
+    pub fn overwrite(&self, other: Self, actor: Did) -> Result<Self> {
         if !self.is_data_entry() {
             return Err(Error::EntryNotOverwritable);
         }
-        self.join(other.ensure_overwrite_stamp_after(Did::default(), self.max_observed_version())?)
+        self.join(other.ensure_overwrite_stamp_after(actor, self.max_observed_version())?)
     }
 
     /// This method is used to extend data to a Data kind [`Entry`].
     /// The handler of [EntryOperation::Extend].
-    pub fn extend(&self, other: Self) -> Result<Self> {
+    pub fn extend(&self, other: Self, actor: Did) -> Result<Self> {
         if !self.is_data_entry() {
             return Err(Error::EntryNotAppendable);
         }
-        self.join(other.ensure_delta_stamp_after(Did::default(), self.max_observed_version())?)
+        self.join(other.ensure_delta_stamp_after(actor, self.max_observed_version())?)
     }
 
     /// This method is used to extend data to a Data kind [`Entry`] uniquely.
     /// If any element is already existed, move it to the end of the data vector.
     /// The handler of [EntryOperation::Touch].
-    pub fn touch(&self, other: Self) -> Result<Self> {
+    pub fn touch(&self, other: Self, actor: Did) -> Result<Self> {
         if !self.is_data_entry() {
             return Err(Error::EntryNotAppendable);
         }
-        self.join(other.ensure_delta_stamp_after(Did::default(), self.max_observed_version())?)
+        self.join(other.ensure_delta_stamp_after(actor, self.max_observed_version())?)
     }
 
     /// This method is used to join a subring.
@@ -713,22 +736,27 @@ mod tests {
         Subring::new(name, creator)?.try_into()
     }
 
-    fn version(counter: u128) -> EntryVersion {
+    fn actor() -> Did {
+        Did::from(42u32)
+    }
+
+    fn version(counter: u32) -> EntryVersion {
         EntryVersion::new(
-            counter,
-            Did::from(u32::try_from(counter).unwrap_or(u32::MAX)),
+            u128::from(counter),
+            Did::from(counter),
+            Did::from(counter.saturating_add(1000)),
         )
     }
 
-    fn data_delta(topic: &str, value: &str, counter: u128) -> Result<Entry> {
+    fn data_delta(topic: &str, value: &str, counter: u32) -> Result<Entry> {
         data_entry(topic, value)?.stamp_delta(version(counter))
     }
 
-    fn overwrite_delta(topic: &str, value: &str, counter: u128) -> Result<Entry> {
+    fn overwrite_delta(topic: &str, value: &str, counter: u32) -> Result<Entry> {
         data_entry(topic, value)?.stamp_overwrite(version(counter))
     }
 
-    fn relay_delta(did: Did, value: &str, counter: u128) -> Result<Entry> {
+    fn relay_delta(did: Did, value: &str, counter: u32) -> Result<Entry> {
         Entry::new(did, vec![encoded(value)?], EntryKind::RelayMessage)
             .stamp_delta(version(counter))
     }
@@ -823,10 +851,100 @@ mod tests {
     }
 
     #[test]
+    fn storage_normalization_uses_lattice_top_n_order() -> Result<()> {
+        let incoming_count = ENTRY_DATA_MAX_LEN + 3;
+        let mut entry = data_entry_from_values(
+            "topic",
+            (0..incoming_count)
+                .map(|i| format!("incoming{i}"))
+                .collect::<Vec<_>>(),
+        )?;
+        entry.crdt.dots = entry
+            .data
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                let counter = if index == 0 {
+                    10_000
+                } else {
+                    u32::try_from(index).map_err(|_| Error::EntryDotIndexOutOfBounds { index })?
+                };
+                EntryDot::for_encoded(version(counter), index, value)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let normalized = entry.try_into_storage_entry()?;
+        let decoded = decode_entry_data(&normalized)?;
+
+        assert_eq!(normalized.data.len(), ENTRY_DATA_MAX_LEN);
+        assert_eq!(normalized.data.len(), normalized.crdt.dots.len());
+        assert!(decoded.contains(&String::from("incoming0")));
+        assert!(!decoded.contains(&String::from("incoming1")));
+        assert!(!decoded.contains(&String::from("incoming2")));
+        assert!(!decoded.contains(&String::from("incoming3")));
+        Ok(())
+    }
+
+    #[test]
+    fn storage_normalization_realigns_legacy_mismatched_dots() -> Result<()> {
+        let mut entry = data_entry_from_values(
+            "topic",
+            (0..ENTRY_DATA_MAX_LEN + 2)
+                .map(|i| format!("legacy{i}"))
+                .collect::<Vec<_>>(),
+        )?;
+        entry.crdt.dots = vec![EntryDot::for_encoded(version(10_000), 0, &entry.data[0])?];
+
+        let normalized = entry.try_into_storage_entry()?;
+
+        assert_eq!(normalized.data.len(), ENTRY_DATA_MAX_LEN);
+        assert_eq!(normalized.data.len(), normalized.crdt.dots.len());
+        Ok(())
+    }
+
+    #[test]
+    fn crdt_constructors_normalize_carrier_invariants() -> Result<()> {
+        let register = version(10);
+        let stale = encoded("stale")?;
+        let live = encoded("live")?;
+        let mut values = BTreeMap::new();
+        values.insert(stale.clone(), EntryDot::for_encoded(version(1), 0, &stale)?);
+        let live_dot = EntryDot::for_encoded(version(11), 0, &live)?;
+        values.insert(live.clone(), live_dot);
+
+        let buffer = DataTopicBuffer::new(register, values);
+        assert_eq!(buffer.values.len(), 1);
+        assert!(buffer.values.contains_key(&live));
+
+        let relay = RelayMessageSet::new(buffer, BTreeSet::from([live_dot]));
+        assert!(relay.adds.values.is_empty());
+        assert!(relay.removes.contains(&live_dot));
+        Ok(())
+    }
+
+    #[test]
+    fn overwrite_register_tiebreaker_converges_for_same_timestamp_actor() -> Result<()> {
+        let did = Entry::gen_did("topic")?;
+        let issuer = actor();
+        let lower = Entry::new(did, vec![encoded("lower")?], EntryKind::Data)
+            .stamp_overwrite(EntryVersion::new(1, issuer, Did::from(1u32)))?;
+        let higher = Entry::new(did, vec![encoded("higher")?], EntryKind::Data)
+            .stamp_overwrite(EntryVersion::new(1, issuer, Did::from(2u32)))?;
+        let base = Entry::new(did, vec![], EntryKind::Data);
+
+        let forward = base.clone().join(lower.clone())?.join(higher.clone())?;
+        let reverse = base.join(higher)?.join(lower)?;
+
+        assert_eq!(forward, reverse);
+        assert_eq!(decode_entry_data(&forward)?, vec![String::from("higher")]);
+        Ok(())
+    }
+
+    #[test]
     fn overwrite_replaces_data_for_same_data_entry() -> Result<()> {
         let entry = data_entry("topic", "old")?;
         let other = data_entry("topic", "new")?;
-        let updated = entry.overwrite(other)?;
+        let updated = entry.overwrite(other, actor())?;
         assert_eq!(decode_entry_data(&updated)?, vec![String::from("new")]);
         Ok(())
     }
@@ -837,7 +955,7 @@ mod tests {
         let other = entry.clone();
 
         assert!(matches!(
-            entry.overwrite(other),
+            entry.overwrite(other, actor()),
             Err(Error::EntryNotOverwritable)
         ));
         Ok(())
@@ -850,7 +968,7 @@ mod tests {
         other.kind = EntryKind::RelayMessage;
 
         assert!(matches!(
-            entry.overwrite(other),
+            entry.overwrite(other, actor()),
             Err(Error::EntryKindNotEqual)
         ));
         Ok(())
@@ -862,7 +980,7 @@ mod tests {
         let other = data_entry("topic-b", "new")?;
 
         assert!(matches!(
-            entry.overwrite(other),
+            entry.overwrite(other, actor()),
             Err(Error::EntryDidNotEqual)
         ));
         Ok(())
@@ -873,7 +991,7 @@ mod tests {
         let overflow = 3;
         let (incoming, incoming_count) = overflowing_data_entry("topic", overflow)?;
         let entry = data_entry("topic", "base")?;
-        let updated = entry.overwrite(incoming)?;
+        let updated = entry.overwrite(incoming, actor())?;
         assert_entry_keeps_recent_overflow(&updated, incoming_count, overflow)
     }
 
@@ -881,7 +999,7 @@ mod tests {
     fn extend_appends_data_for_same_entry() -> Result<()> {
         let entry = data_entry("topic", "first")?;
         let other = data_entry("topic", "second")?;
-        let updated = entry.extend(other)?;
+        let updated = entry.extend(other, actor())?;
         assert_eq!(decode_entry_data(&updated)?, vec![
             String::from("first"),
             String::from("second")
@@ -895,14 +1013,14 @@ mod tests {
         for i in 1..ENTRY_DATA_MAX_LEN {
             let data = format!("test{i}");
             let other = data_entry("topic", &data)?;
-            entry = entry.extend(other)?;
+            entry = entry.extend(other, actor())?;
             assert_eq!(entry.data.len(), i + 1);
         }
 
         for i in ENTRY_DATA_MAX_LEN..ENTRY_DATA_MAX_LEN + 10 {
             let data = format!("test{i}");
             let other = data_entry("topic", &data)?;
-            entry = entry.extend(other)?;
+            entry = entry.extend(other, actor())?;
             assert_eq!(entry.data.len(), ENTRY_DATA_MAX_LEN);
             let decoded = decode_entry_data(&entry)?;
             assert_eq!(
@@ -919,7 +1037,7 @@ mod tests {
         let overflow = 3;
         let (incoming, incoming_count) = overflowing_data_entry("topic", overflow)?;
         let entry = data_entry("topic", "base")?;
-        let updated = entry.extend(incoming)?;
+        let updated = entry.extend(incoming, actor())?;
         assert_entry_keeps_recent_overflow(&updated, incoming_count, overflow)
     }
 
@@ -929,7 +1047,7 @@ mod tests {
         let other = entry.clone();
 
         assert!(matches!(
-            entry.extend(other),
+            entry.extend(other, actor()),
             Err(Error::EntryNotAppendable)
         ));
         Ok(())
@@ -938,10 +1056,10 @@ mod tests {
     #[test]
     fn touch_moves_existing_items_to_end_once() -> Result<()> {
         let entry = data_entry("topic", "a")?
-            .extend(data_entry("topic", "b")?)?
-            .extend(data_entry("topic", "c")?)?;
+            .extend(data_entry("topic", "b")?, actor())?
+            .extend(data_entry("topic", "c")?, actor())?;
         let touched = data_entry("topic", "b")?;
-        let updated = entry.touch(touched)?;
+        let updated = entry.touch(touched, actor())?;
         assert_eq!(decode_entry_data(&updated)?, vec![
             String::from("a"),
             String::from("c"),
@@ -954,9 +1072,9 @@ mod tests {
     fn touch_trims_oldest_non_touched_items_at_max_len() -> Result<()> {
         let mut entry = data_entry("topic", "test0")?;
         for i in 1..ENTRY_DATA_MAX_LEN {
-            entry = entry.extend(data_entry("topic", &format!("test{i}"))?)?;
+            entry = entry.extend(data_entry("topic", &format!("test{i}"))?, actor())?;
         }
-        let updated = entry.touch(data_entry("topic", "test0")?)?;
+        let updated = entry.touch(data_entry("topic", "test0")?, actor())?;
         assert_eq!(updated.data.len(), ENTRY_DATA_MAX_LEN);
         let decoded = decode_entry_data(&updated)?;
         assert_eq!(decoded.first(), Some(&String::from("test1")));
@@ -1000,7 +1118,7 @@ mod tests {
         let overflow = 3;
         let (incoming, incoming_count) = overflowing_data_entry("topic", overflow)?;
         let entry = data_entry("topic", "base")?;
-        let updated = entry.touch(incoming)?;
+        let updated = entry.touch(incoming, actor())?;
         assert_entry_keeps_recent_overflow(&updated, incoming_count, overflow)
     }
 

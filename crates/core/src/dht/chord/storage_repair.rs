@@ -23,7 +23,7 @@
 //!   `acknowledge_synced_entries`; the finite model
 //!   `storage_sync_model_preserves_no_update_loss` in `dht_stateright` checks
 //!   that ack-delete removes a local value only when the receiver state contains
-//!   the same joined value.
+//!   the same storage-canonical joined value.
 //! - S3 Idempotence: duplicate repair delivery is observationally equivalent to
 //!   one delivery because [`Entry::join`](crate::dht::entry::Entry::join) is
 //!   idempotent.
@@ -178,7 +178,7 @@ impl PeerRing {
             return Ok(PeerRingAction::None);
         }
 
-        let entry = entry.into_storage_entry();
+        let entry = entry.try_into_storage_entry()?;
         let mut actions = Vec::new();
         for placement_key in entry.did.rotate_affine(redundancy)? {
             let action = self.copy_entry_to_placement(placement_key, &entry).await?;

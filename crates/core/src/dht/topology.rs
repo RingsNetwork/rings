@@ -474,6 +474,8 @@ pub fn step(state: &TopologyState, event: TopologyEvent, capacity: usize) -> Top
 
 #[cfg(test)]
 mod tests {
+    use num_bigint::BigUint;
+
     use super::*;
 
     fn did(value: u32) -> Did {
@@ -488,6 +490,29 @@ mod tests {
         fix_finger_index: usize,
     ) -> TopologyState {
         TopologyState::new(local, successors, predecessor, fingers, fix_finger_index)
+    }
+
+    fn successor_distances(local: Did, successors: &[Did], capacity: usize) -> Vec<BigUint> {
+        let infinity = BigUint::from(1u8) << RING_BITS;
+        (0..capacity)
+            .map(|index| {
+                successors
+                    .get(index)
+                    .map(|successor| dist(local, *successor))
+                    .unwrap_or_else(|| infinity.clone())
+            })
+            .collect()
+    }
+
+    fn refines_successor_distances(before: &TopologyState, after: &TopologyState) -> bool {
+        let before_distances =
+            successor_distances(before.local, &before.successors, DEFAULT_SUCCESSOR_CAPACITY);
+        let after_distances =
+            successor_distances(after.local, &after.successors, DEFAULT_SUCCESSOR_CAPACITY);
+        before_distances
+            .iter()
+            .zip(after_distances.iter())
+            .all(|(before, after)| after <= before)
     }
 
     #[test]
@@ -514,6 +539,35 @@ mod tests {
                 did: local
             }
         ]);
+    }
+
+    #[test]
+    fn join_step_refines_successor_distance_vector() {
+        let local = did(0);
+        let current = state(local, vec![did(20), did(40)], None, vec![None; 5], 0);
+        let next = step(
+            &current,
+            TopologyEvent::Join { peer: did(10) },
+            DEFAULT_SUCCESSOR_CAPACITY,
+        );
+
+        assert!(refines_successor_distances(&current, &next.state));
+    }
+
+    #[test]
+    fn stabilize_step_refines_successor_distance_vector() {
+        let local = did(0);
+        let current = state(local, vec![did(40)], None, vec![None; 5], 0);
+        let next = step(
+            &current,
+            TopologyEvent::Stabilize {
+                successors: vec![did(50), did(60)],
+                predecessor: Some(did(10)),
+            },
+            DEFAULT_SUCCESSOR_CAPACITY,
+        );
+
+        assert!(refines_successor_distances(&current, &next.state));
     }
 
     #[test]

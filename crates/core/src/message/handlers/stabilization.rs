@@ -188,6 +188,7 @@ mod test {
             vec![String::from("sync me").encode()?],
             EntryKind::Data,
         );
+        let stored_entry = entry.clone().try_into_storage_entry()?;
         node1
             .dht()
             .storage
@@ -248,7 +249,10 @@ mod test {
 
         match payload.transaction.data::<Message>()? {
             Message::SyncEntriesWithSuccessorReport(SyncEntriesWithSuccessorReport { acks }) => {
-                assert_eq!(acks, vec![SyncedEntryAck::new(entry.did, entry.clone())]);
+                assert_eq!(acks, vec![SyncedEntryAck::new(
+                    entry.did,
+                    stored_entry.clone()
+                )]);
             }
             message => {
                 return Err(Error::InvalidMessage(format!(
@@ -259,7 +263,7 @@ mod test {
         assert_eq!(node1.dht().storage.get(&entry.did.to_string()).await?, None);
         assert_eq!(
             node2.dht().storage.get(&entry.did.to_string()).await?,
-            Some(entry)
+            Some(stored_entry)
         );
 
         Ok(())

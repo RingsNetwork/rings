@@ -290,7 +290,7 @@ async fn persist_synced_entries(
 ) -> Result<Vec<SyncedEntryAck>> {
     let mut acks = Vec::with_capacity(msg.data.len());
     for placed in msg.data.iter() {
-        let entry = placed.entry.clone().into_storage_entry();
+        let entry = placed.entry.clone().try_into_storage_entry()?;
         handler
             .dht
             .join_storage_entry(placed.key, entry.clone())
@@ -567,6 +567,7 @@ mod test {
             vec!["placed".to_string().encode()?],
             EntryKind::Data,
         );
+        let stored_entry = entry.clone().try_into_storage_entry()?;
         let context_key = SecretKey::random();
         let context_session = SessionSk::new_with_seckey(&context_key)?;
         let context = MessagePayload::new_send(
@@ -584,7 +585,7 @@ mod test {
 
         assert_eq!(
             node.dht().storage.get(&placement_key.to_string()).await?,
-            Some(entry)
+            Some(stored_entry)
         );
         assert_eq!(
             node.dht().storage.get(&resource_id.to_string()).await?,
@@ -653,6 +654,7 @@ mod test {
             vec!["routed repair".to_string().encode()?],
             EntryKind::Data,
         );
+        let stored_entry = entry.clone().try_into_storage_entry()?;
         let msg = SyncEntriesWithSuccessor {
             data: vec![PlacedEntry::new(placement_key, entry.clone())],
         };
@@ -677,7 +679,7 @@ mod test {
         assert!(matches!(
             ack.transaction.data()?,
             Message::SyncEntriesWithSuccessorReport(SyncEntriesWithSuccessorReport { acks })
-                if acks == vec![SyncedEntryAck::new(placement_key, entry.clone())]
+                if acks == vec![SyncedEntryAck::new(placement_key, stored_entry.clone())]
         ));
         assert_eq!(
             node1.dht().storage.get(&placement_key.to_string()).await?,
@@ -685,7 +687,7 @@ mod test {
         );
         assert_eq!(
             node2.dht().storage.get(&placement_key.to_string()).await?,
-            Some(entry)
+            Some(stored_entry)
         );
         Ok(())
     }
@@ -792,6 +794,7 @@ mod test {
             vec!["repair".to_string().encode()?],
             EntryKind::Data,
         );
+        let stored_entry = entry.clone().try_into_storage_entry()?;
         let placement_key = Did::from(100u32);
         let unknown_key = Did::from(120u32);
         let context_key = SecretKey::random();
@@ -827,7 +830,7 @@ mod test {
 
         assert_eq!(
             node.dht().storage.get(&placement_key.to_string()).await?,
-            Some(entry)
+            Some(stored_entry)
         );
         assert_eq!(
             node.dht().storage.get(&unknown_key.to_string()).await?,
@@ -983,6 +986,7 @@ mod test {
             vec!["acked".to_string().encode()?],
             EntryKind::Data,
         );
+        let stored_entry = entry.clone().try_into_storage_entry()?;
         let sync_msg = SyncEntriesWithSuccessor {
             data: vec![PlacedEntry::new(placement_key, entry.clone())],
         };
@@ -1000,7 +1004,7 @@ mod test {
             Message::SyncEntriesWithSuccessorReport(report) => {
                 assert_eq!(report.acks, vec![SyncedEntryAck::new(
                     placement_key,
-                    entry.clone()
+                    stored_entry.clone()
                 )]);
             }
             message => {
@@ -1015,7 +1019,7 @@ mod test {
                 .storage
                 .get(&placement_key.to_string())
                 .await?,
-            Some(entry)
+            Some(stored_entry)
         );
         Ok(())
     }

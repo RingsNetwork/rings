@@ -7,7 +7,11 @@
 //!
 //! Laws:
 //! - `GSet` join is set union.
+//! - `DataTopicBuffer::new` preserves only values whose dot is at or after the
+//!   reset floor.
 //! - `DataTopicBuffer` join is pointwise maximum plus the maximum reset floor.
+//! - `RelayMessageSet::new` preserves only adds whose dot has not been
+//!   tombstoned.
 //! - `RelayMessageSet` join is add-set join plus tombstone union.
 
 use std::collections::BTreeMap;
@@ -19,30 +23,40 @@ use serde::Serialize;
 use super::Entry;
 use crate::algebra::JoinSemilattice;
 use crate::dht::Did;
+use crate::error::Error;
 use crate::error::Result;
 use crate::message::Encoded;
 
 /// Version for LWW entry registers and element dots.
 ///
-/// The timestamp is assigned at the storage-operation boundary. The join
-/// operation only compares versions; it never reads clocks.
+/// The timestamp and storage actor are assigned at the storage-operation
+/// boundary. `operation` is a deterministic content digest of that operation,
+/// giving registers and element dots a total tiebreak when one actor processes
+/// multiple writes in the same millisecond.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct EntryVersion {
     /// Milliseconds since Unix epoch when the operation was issued.
     pub epoch_ms: u128,
-    /// Actor that issued the operation.
+    /// Storage node that first stamped the operation.
     pub actor: Did,
+    /// Deterministic digest of the stamped operation payload.
+    #[serde(default)]
+    pub operation: Did,
 }
 
 impl EntryVersion {
     /// Construct a version from an explicit timestamp and actor.
-    pub fn new(epoch_ms: u128, actor: Did) -> Self {
-        Self { epoch_ms, actor }
+    pub fn new(epoch_ms: u128, actor: Did, operation: Did) -> Self {
+        Self {
+            epoch_ms,
+            actor,
+            operation,
+        }
     }
 
     /// Construct a version at the current operation boundary.
-    pub fn issued_by(actor: Did) -> Self {
-        Self::new(crate::utils::get_epoch_ms(), actor)
+    pub fn issued_by(actor: Did, operation: Did) -> Self {
+        Self::new(crate::utils::get_epoch_ms(), actor, operation)
     }
 
     pub(super) fn after(self, floor: Self) -> Self {
@@ -52,6 +66,7 @@ impl EntryVersion {
             Self {
                 epoch_ms: floor.epoch_ms.saturating_add(1),
                 actor: self.actor,
+                operation: self.operation,
             }
         }
     }
@@ -65,7 +80,7 @@ pub struct EntryDot {
     /// Element position inside the issuing operation.
     pub index: u32,
     /// Stable digest of the encoded element.
-    pub value: Did,
+    pub digest: Did,
 }
 
 impl EntryDot {
@@ -74,11 +89,11 @@ impl EntryDot {
         index: usize,
         value: &Encoded,
     ) -> Result<Self> {
-        let index = u32::try_from(index).unwrap_or(u32::MAX);
+        let index = u32::try_from(index).map_err(|_| Error::EntryDotIndexOutOfBounds { index })?;
         Ok(Self {
             version,
             index,
-            value: Entry::gen_did(value.value())?,
+            digest: Entry::gen_did(value.value())?,
         })
     }
 }
@@ -87,8 +102,7 @@ impl EntryDot {
 ///
 /// `register` is the LWW reset floor used by overwrite. `dots` are per-element
 /// add witnesses used by data/topic and relay element sets. `tombstones` is the
-/// remove set for relay-message two-phase semantics; current production paths
-/// only add messages, but the remove carrier is part of the replicated state.
+/// remove set for relay-message two-phase semantics.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EntryCrdt {
     /// LWW reset floor for the entry payload.
@@ -147,6 +161,8 @@ pub struct DataTopicBuffer {
 
 impl DataTopicBuffer {
     pub(super) fn new(register: EntryVersion, values: BTreeMap<Encoded, EntryDot>) -> Self {
+        let mut values = values;
+        values.retain(|_, dot| dot.version >= register);
         Self { register, values }
     }
 }
@@ -160,8 +176,7 @@ impl JoinSemilattice for DataTopicBuffer {
                 .and_modify(|current| *current = (*current).max(dot))
                 .or_insert(dot);
         }
-        self.values.retain(|_, dot| dot.version >= self.register);
-        self
+        Self::new(self.register, self.values)
     }
 }
 
@@ -174,6 +189,8 @@ pub struct RelayMessageSet {
 
 impl RelayMessageSet {
     pub(super) fn new(adds: DataTopicBuffer, removes: BTreeSet<EntryDot>) -> Self {
+        let mut adds = adds;
+        adds.values.retain(|_, dot| !removes.contains(dot));
         Self { adds, removes }
     }
 }
@@ -182,10 +199,7 @@ impl JoinSemilattice for RelayMessageSet {
     fn join(mut self, other: Self) -> Self {
         self.adds = self.adds.join(other.adds);
         self.removes.extend(other.removes);
-        self.adds
-            .values
-            .retain(|_, dot| !self.removes.contains(dot));
-        self
+        Self::new(self.adds, self.removes)
     }
 }
 

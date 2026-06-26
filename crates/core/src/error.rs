@@ -61,6 +61,12 @@ pub enum Error {
     #[error("The type of Entry is not allowed to be tombstoned")]
     EntryNotTombstonable,
 
+    #[error("Entry dot index {index} is out of bounds")]
+    EntryDotIndexOutOfBounds {
+        /// Dot index that could not be represented.
+        index: usize,
+    },
+
     #[error("Affine rotation scalar must be greater than zero")]
     InvalidAffineScalar,
 
