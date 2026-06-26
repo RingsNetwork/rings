@@ -6,6 +6,7 @@ use serde_json::Value as JsonValue;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_test::wasm_bindgen_test;
 
+use crate::storage::idb::next_visit_time_after;
 use crate::storage::idb::IdbStorage;
 use crate::storage::KvStorageInterface;
 
@@ -25,6 +26,22 @@ async fn create_db_instance(cap: u32) -> IdbStorage {
 async fn create_kv_db<V>(cap: u32) -> Box<dyn KvStorageInterface<V>>
 where V: DeserializeOwned + Serialize + Sized {
     Box::new(create_db_instance(cap).await)
+}
+
+#[wasm_bindgen_test]
+fn next_visit_time_uses_wall_clock_when_it_advances() {
+    assert_eq!(next_visit_time_after(10, 15), 15);
+}
+
+#[wasm_bindgen_test]
+fn next_visit_time_advances_when_wall_clock_stalls_or_rewinds() {
+    assert_eq!(next_visit_time_after(10, 10), 11);
+    assert_eq!(next_visit_time_after(10, 5), 11);
+}
+
+#[wasm_bindgen_test]
+fn next_visit_time_saturates_at_i64_max() {
+    assert_eq!(next_visit_time_after(i64::MAX, i64::MIN), i64::MAX);
 }
 
 #[wasm_bindgen_test]

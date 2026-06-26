@@ -126,23 +126,32 @@ pub fn str_to_field(s: &str) -> Vec<Field> {
     s.as_bytes()
         .chunks(FIELD_CHUNK_SIZE)
         .map(|x| {
-            let mut data = [0u8; 32];
+            let data = encode_field_candidate(x);
             let mut field = Field::default();
-            let chunk_len = u8::try_from(x.len()).unwrap_or(FIELD_CHUNK_SIZE_U8);
-            if let Some(header) = data.get_mut(..FIELD_ENCODING_OVERHEAD) {
-                header.copy_from_slice(&[255, FIELD_ENCODING_MARKER, chunk_len]);
-            }
-            if let Some(payload) =
-                data.get_mut(FIELD_ENCODING_OVERHEAD..FIELD_ENCODING_OVERHEAD + x.len())
-            {
-                payload.copy_from_slice(x);
-            }
             // `FIELD_ENCODING_MARKER` is below the secp256k1 modulus prefix, so
             // the encoded 32-byte candidate always fits in the field.
             let _ = field.set_b32(&data);
             field
         })
         .collect()
+}
+
+fn encode_field_candidate(chunk: &[u8]) -> [u8; 32] {
+    let mut data = [0u8; 32];
+    let payload_len = chunk.len().min(FIELD_CHUNK_SIZE);
+    let chunk_len = u8::try_from(payload_len).unwrap_or(FIELD_CHUNK_SIZE_U8);
+    if let Some(header) = data.get_mut(..FIELD_ENCODING_OVERHEAD) {
+        header.copy_from_slice(&[255, FIELD_ENCODING_MARKER, chunk_len]);
+    }
+
+    let payload_end = FIELD_ENCODING_OVERHEAD + payload_len;
+    if let (Some(payload), Some(source)) = (
+        data.get_mut(FIELD_ENCODING_OVERHEAD..payload_end),
+        chunk.get(..payload_len),
+    ) {
+        payload.copy_from_slice(source);
+    }
+    data
 }
 
 /// Decode field elements produced by [`str_to_field`].

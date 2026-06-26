@@ -28,6 +28,7 @@ use crate::error::Result;
 use crate::ice_server::parse_ice_servers_or_warn;
 use crate::notifier::Notifier;
 use crate::pool::Pool;
+use crate::sync_utils::lock_recover;
 
 /// Max delay in ms on sending message
 const DUMMY_DELAY_MAX: u64 = 100;
@@ -195,15 +196,11 @@ impl DummyConnection {
     }
 
     fn remote_rand_id(&self) -> MutexGuard<'_, Option<String>> {
-        self.remote_rand_id
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        lock_recover(&self.remote_rand_id)
     }
 
     fn connection_state(&self) -> MutexGuard<'_, WebrtcConnectionState> {
-        self.webrtc_connection_state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        lock_recover(&self.webrtc_connection_state)
     }
 
     fn remote_conn(&self) -> Option<Arc<DummyConnection>> {

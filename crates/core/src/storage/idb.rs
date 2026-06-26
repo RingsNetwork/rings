@@ -46,10 +46,15 @@ impl<T> DataStruct<T> {
     }
 }
 
+/// Compute the next per-key IndexedDB visit timestamp.
+pub(crate) fn next_visit_time_after(previous: i64, now: i64) -> i64 {
+    // Post: for previous < i64::MAX, result > previous. The prune index
+    // remains monotonic per key under equal-ms or backward wall-clock readings.
+    now.max(previous.saturating_add(1))
+}
+
 fn next_visit_time(previous: i64) -> i64 {
-    chrono::Utc::now()
-        .timestamp_millis()
-        .max(previous.saturating_add(1))
+    next_visit_time_after(previous, chrono::Utc::now().timestamp_millis())
 }
 
 /// StorageInstance struct

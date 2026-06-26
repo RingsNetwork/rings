@@ -142,6 +142,26 @@ pub mod js_utils {
         ServiceWorkerGlobal(web_sys::ServiceWorkerGlobalScope),
     }
 
+    impl Global {
+        pub fn set_timeout_0(
+            &self,
+            callback: &js_sys::Function,
+            millis: i32,
+        ) -> Result<i32, JsValue> {
+            match self {
+                Global::Window(global) => {
+                    global.set_timeout_with_callback_and_timeout_and_arguments_0(callback, millis)
+                }
+                Global::WorkerGlobal(global) => {
+                    global.set_timeout_with_callback_and_timeout_and_arguments_0(callback, millis)
+                }
+                Global::ServiceWorkerGlobal(global) => {
+                    global.set_timeout_with_callback_and_timeout_and_arguments_0(callback, millis)
+                }
+            }
+        }
+    }
+
     pub fn global() -> Option<Global> {
         let obj = JsValue::from(js_sys::global());
         if obj.has_type::<web_sys::Window>() {
@@ -171,11 +191,12 @@ pub mod js_utils {
     }
 
     fn schedule_sleep<F>(resolve: js_sys::Function, reject: js_sys::Function, schedule: F)
-    where F: FnOnce(&JsValue) -> Result<i32, JsValue> {
+    where F: FnOnce(&js_sys::Function) -> Result<i32, JsValue> {
         let func = Closure::once_into_js(move || {
             resolve_sleep(&resolve);
         });
-        if let Err(error) = schedule(&func) {
+        let callback = func.as_ref().unchecked_ref();
+        if let Err(error) = schedule(callback) {
             tracing::error!("Failed to schedule sleep timeout: {:?}", error);
             reject_sleep(&reject, error);
         }
@@ -184,32 +205,11 @@ pub mod js_utils {
     pub fn window_sleep(millis: i32) -> wasm_bindgen_futures::JsFuture {
         let promise = match global() {
             None => js_sys::Promise::reject(&JsValue::from_str("No global scope for window_sleep")),
-            Some(Global::Window(window)) => js_sys::Promise::new(&mut |resolve, reject| {
-                schedule_sleep(resolve, reject, |func| {
-                    window.set_timeout_with_callback_and_timeout_and_arguments_0(
-                        func.as_ref().unchecked_ref(),
-                        millis,
-                    )
+            Some(global) => js_sys::Promise::new(&mut move |resolve, reject| {
+                schedule_sleep(resolve, reject, |callback| {
+                    global.set_timeout_0(callback, millis)
                 });
             }),
-            Some(Global::WorkerGlobal(window)) => js_sys::Promise::new(&mut |resolve, reject| {
-                schedule_sleep(resolve, reject, |func| {
-                    window.set_timeout_with_callback_and_timeout_and_arguments_0(
-                        func.as_ref().unchecked_ref(),
-                        millis,
-                    )
-                });
-            }),
-            Some(Global::ServiceWorkerGlobal(window)) => {
-                js_sys::Promise::new(&mut |resolve, reject| {
-                    schedule_sleep(resolve, reject, |func| {
-                        window.set_timeout_with_callback_and_timeout_and_arguments_0(
-                            func.as_ref().unchecked_ref(),
-                            millis,
-                        )
-                    });
-                })
-            }
         };
         wasm_bindgen_futures::JsFuture::from(promise)
     }
