@@ -56,13 +56,9 @@ impl FingerTable {
         self.finger.get(index).copied().flatten()
     }
 
-    fn write_slot(&mut self, index: usize, did: Option<Did>) -> bool {
-        match self.finger.get_mut(index) {
-            Some(slot) => {
-                *slot = did;
-                true
-            }
-            None => false,
+    fn write_slot(&mut self, index: usize, did: Option<Did>) {
+        if let Some(slot) = self.finger.get_mut(index) {
+            *slot = did;
         }
     }
 
