@@ -15,6 +15,7 @@ use rings_node::extension::ext::Transition;
 use rings_node::extension::ext::Wire;
 use rings_node::logging::init_logging;
 use rings_node::logging::LogLevel;
+use rings_node::native::config::DEFAULT_NETWORK_ID;
 use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
 use rings_node::provider::Provider;
@@ -23,6 +24,7 @@ use rings_rpc::protos::rings_node::*;
 
 /// Namespace this example speaks over.
 const EXAMPLE_NAMESPACE: &str = "example";
+const REPLY_WINDOW_SECONDS: u64 = 30;
 
 /// A decoded example message (who sent it + the text).
 struct Received {
@@ -108,8 +110,13 @@ async fn main() {
     let sk = skb.build().unwrap();
 
     // Build processor
-    let config = ProcessorConfig::new(0, "stun://stun.l.google.com:19302".to_string(), sk, 3);
-    println!("===> Use network_id: 0");
+    let config = ProcessorConfig::new(
+        DEFAULT_NETWORK_ID,
+        "stun://stun.l.google.com:19302".to_string(),
+        sk,
+        3,
+    );
+    println!("===> Use network_id: {DEFAULT_NETWORK_ID}");
 
     let storage = Box::new(MemStorage::new());
     let processor = Arc::new(
@@ -196,6 +203,6 @@ async fn main() {
         .unwrap();
     println!("<=== SendBackendMessage: {resp:?}");
 
-    // Wait for message sent.
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    println!("<=== waiting {REPLY_WINDOW_SECONDS}s for example replies...");
+    tokio::time::sleep(Duration::from_secs(REPLY_WINDOW_SECONDS)).await;
 }
