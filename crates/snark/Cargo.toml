@@ -1,7 +1,7 @@
 [package]
 name = "rings-snark"
 description = "IVC SNARK implementation of Rings Network"
-version = "0.10.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
