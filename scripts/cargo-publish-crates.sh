@@ -157,6 +157,10 @@ run_publish() {
     local version
     manifest="$(manifest_for "$crate")"
     version="$(package_version "$manifest")"
+    if crate_version_indexed "$crate" "$version"; then
+      echo "already indexed $crate $version; skipping publish"
+      continue
+    fi
     echo "publishing $crate $version"
     cargo publish -p "$crate"
     wait_for_index "$crate" "$version"
