@@ -13,6 +13,9 @@ on:
         required: false
         type: string
 
+permissions:
+  contents: read
+
 jobs:
   gen_version:
     name: generate version
@@ -55,6 +58,8 @@ jobs:
   # The build matrix lives in a reusable workflow so PR CI (QACI) runs the exact same steps.
   build:
     needs: gen_version
+    permissions:
+      contents: read
     uses: ./.github/workflows/release-build.yml
     with:
       version: ${{ needs.gen_version.outputs.version }}
@@ -63,6 +68,9 @@ jobs:
   release:
     needs: [gen_version, build]
     runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
     steps:
       - uses: actions/checkout@v3
         with:

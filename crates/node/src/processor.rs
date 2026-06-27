@@ -317,11 +317,7 @@ impl Processor {
 
     /// Send custom message to a did.
     pub async fn send_message(&self, destination: Did, msg: &[u8]) -> Result<uuid::Uuid> {
-        tracing::info!(
-            "send_message, destination: {}, message size: {:?}",
-            destination,
-            msg.len(),
-        );
+        tracing::info!("send_message, message size: {:?}", msg.len());
 
         let msg = Message::custom(msg).map_err(Error::SendMessage)?;
 

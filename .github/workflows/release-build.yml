@@ -25,6 +25,9 @@ on:
         type: boolean
         default: false
 
+permissions:
+  contents: read
+
 jobs:
   build_macos:
     name: build macos version binary
