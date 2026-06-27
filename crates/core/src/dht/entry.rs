@@ -360,8 +360,7 @@ impl Entry {
             data: &self.data,
         };
         let bytes = bincode::serialize(&digest).map_err(Error::BincodeSerialize)?;
-        let encoded = bytes.encode()?;
-        Self::gen_did(encoded.value())
+        Did::try_from(HashStr::from_bytes(&bytes))
     }
 
     fn issue_version_after(&self, actor: Did, floor: Option<EntryVersion>) -> Result<EntryVersion> {

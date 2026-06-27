@@ -1,6 +1,5 @@
 //! ECDSA, EdDSA, and ElGamal
 use std::convert::TryFrom;
-use std::fmt::Write;
 use std::ops::Deref;
 use std::str::FromStr;
 
@@ -64,6 +63,13 @@ pub fn keccak256(bytes: &[u8]) -> [u8; 32] {
 impl HashStr {
     pub fn new<T: Into<String>>(s: T) -> Self {
         HashStr(s.into())
+    }
+
+    /// Compute the SHA-1 digest of raw bytes and encode it as lowercase hex.
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        let mut hasher = Sha1::new();
+        hasher.update(bytes);
+        HashStr(hex::encode(hasher.finalize()))
     }
 
     pub fn inner(&self) -> String {
@@ -205,14 +211,7 @@ where T: Into<String>
 {
     fn from(s: T) -> Self {
         let inputs = s.into();
-        let mut hasher = Sha1::new();
-        hasher.update(inputs.as_bytes());
-        let bytes = hasher.finalize();
-        let mut ret = String::with_capacity(bytes.len() * 2);
-        for &b in &bytes {
-            write!(ret, "{b:02x}").unwrap();
-        }
-        HashStr(ret)
+        HashStr::from_bytes(inputs.as_bytes())
     }
 }
 

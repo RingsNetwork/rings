@@ -197,8 +197,7 @@ pub struct RelayMessageSet {
 }
 
 impl RelayMessageSet {
-    pub(super) fn new(adds: DataTopicBuffer, removes: BTreeSet<EntryDot>) -> Self {
-        let mut adds = adds;
+    pub(super) fn new(mut adds: DataTopicBuffer, removes: BTreeSet<EntryDot>) -> Self {
         adds.values.retain(|_, dot| !removes.contains(dot));
         Self { adds, removes }
     }

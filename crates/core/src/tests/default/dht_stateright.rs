@@ -51,7 +51,6 @@ use stateright::Model;
 
 use super::dht_convergence::spec;
 use super::dht_convergence::K;
-use crate::algebra::assert_join_semilattice_laws;
 use crate::algebra::JoinSemilattice;
 use crate::consts::ENTRY_DATA_MAX_LEN;
 use crate::dht::entry::Entry;
@@ -573,6 +572,13 @@ fn discovery_model(all: Vec<Did>, rounds: u8) -> ActorModel<DiscoveryNode, Cfg, 
 //   delivery is a pure join of a sender snapshot into the receiver. Message
 //   reordering and duplication are covered by the semilattice law checked
 //   below: join is commutative and idempotent.
+//
+// Quotient:
+//   `StorageJoinValue` hashes and compares only `(carrier, bits)` so BFS stays
+//   finite. The test `storage_entry_join_satisfies_semilattice_laws` is the
+//   refinement witness: for every finite carrier state, real Entry::join equals
+//   canonical(bits_a union bits_b). The topology model is therefore checked on
+//   the quotient, while carrier correctness is checked on the real entries.
 // ===================================================================
 
 const STORAGE_REPLICA_COUNT: usize = 3;
@@ -636,7 +642,10 @@ impl StorageJoinValue {
     }
 
     fn is_subset_of(&self, other: &Self) -> bool {
-        self.clone().join(other.clone()) == *other
+        if self.carrier != other.carrier {
+            return false;
+        }
+        storage_join_entry(self.entry.clone(), other.entry.clone()) == other.entry
     }
 }
 
@@ -1308,7 +1317,6 @@ mod tests {
             let values = (0u8..8)
                 .map(|bits| storage_value_from_bits(carrier, bits))
                 .collect::<Vec<_>>();
-            assert_join_semilattice_laws(&values);
 
             for left in &values {
                 let idempotent = storage_join_entry(left.entry.clone(), left.entry.clone());
