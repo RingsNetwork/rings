@@ -72,9 +72,14 @@ use std::ops::Sub;
 ///
 /// `join` returns the least upper bound of two states from the same carrier.
 /// Implementors must make this operation inflationary with respect to the
-/// carrier's partial order; because Rust does not expose that order here, the
-/// obligation is witnessed through the idempotence, commutativity, and
-/// associativity laws below.
+/// carrier's induced partial order `a <= b iff a.join(b) == b`; because Rust
+/// does not expose that order here, the obligation is witnessed through the
+/// idempotence, commutativity, and associativity laws below.
+///
+/// The operation takes both arguments by value to model a pure state transition
+/// into a canonical least upper bound. Implementations that need an in-place
+/// merge can provide that adapter separately and keep this law-facing
+/// signature as the common algebraic surface.
 ///
 /// Law: `a.join(a) == a`.
 ///
@@ -152,6 +157,8 @@ pub trait CommutativeRing: AbelianGroup + Mul<Self, Output = Self> + One {}
 /// A field is a commutative ring whose non-zero values form a multiplicative
 /// group. `try_inverse` is fallible only because zero has no multiplicative
 /// inverse; returning `None` for a non-zero value violates the trait law.
+///
+/// Law: [`Zero::zero`] is distinct from [`One::one`].
 ///
 /// Law: non-zero values have a multiplicative inverse.
 pub trait Field: CommutativeRing {
@@ -300,12 +307,14 @@ where T: CommutativeRing + Clone + Eq + Debug {
 
 /// Assert the field inverse laws for a representative finite sample.
 ///
-/// This helper first checks the commutative-ring laws. It then checks that zero
-/// has no inverse and every sampled non-zero value has a two-sided inverse.
+/// This helper first checks the commutative-ring laws and the field
+/// non-degeneracy law `zero() != one()`. It then checks that zero has no inverse
+/// and every sampled non-zero value has a two-sided inverse.
 #[cfg(test)]
 pub fn assert_field_laws<T>(values: &[T])
 where T: Field + Clone + Eq + Debug {
     assert_commutative_ring_laws(values);
+    assert_ne!(T::zero(), T::one());
 
     for a in values {
         if a.is_zero() {
