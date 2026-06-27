@@ -1,10 +1,10 @@
 #![cfg(target_arch = "wasm32")]
-//! Browser integration test (wasm-bindgen-test) for the protocol the example registers.
+//! Browser integration test (wasm-bindgen-test) for the Rust `Echo` helper protocol.
 //!
-//! It exercises the pure `Echo::step` the example installs — deterministic, no overlay
-//! needed — so it runs reliably under `wasm-pack test`. The full two-node browser
-//! round-trip (connect + namespaced protocol + send) is covered by the node crate's
-//! `tests/wasm/browser.rs` suite, which has the in-browser connection harness.
+//! The browser page in `index.html` registers a JS `example` protocol through
+//! `provider.on(...)`. This test intentionally covers the separate Rust helper path in
+//! `src/lib.rs`, where applications can register the built-in `Echo` protocol from WASM.
+//! It exercises the pure `Echo::step` transition with no overlay, so it stays deterministic.
 
 use rings_core::dht::Did;
 use rings_core::ecc::SecretKey;

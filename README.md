@@ -90,7 +90,7 @@ Runnable examples live in [`examples/`](./examples):
 | Example | What it shows |
 |---|---|
 | [`native`](./examples/native) | A minimal native node registering a custom namespaced protocol |
-| [`browser`](./examples/browser) | The same protocol model in the browser (WASM) — same Rust code, no JS handler |
+| [`browser`](./examples/browser) | Browser-to-browser and browser-to-native connectivity over a seed node, without manual SDP exchange |
 | [`relay`](./examples/relay) | TCP & UDP tunnels to a peer's service over the overlay (`tcp.rs` / `udp.rs`) |
 | [`snark`](./examples/snark) | Fold-scheme zkSNARK proving / verification |
 | [`proof-demo`](./examples/proof-demo) | A browser zk-proof app (Yew / Trunk) |
