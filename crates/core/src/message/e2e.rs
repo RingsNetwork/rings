@@ -43,6 +43,9 @@ pub const E2E_PLAINTEXT_BLOCK_LEN: usize = secp256k1::PLAINTEXT_BLOCK_SIZE;
 /// Default plaintext bytes per encrypted E2E stream frame.
 pub const DEFAULT_E2E_PLAINTEXT_FRAME_LEN: usize = E2E_PLAINTEXT_BLOCK_LEN * 16;
 
+/// Default maximum number of out-of-order future frames buffered per stream.
+pub const DEFAULT_E2E_REORDER_WINDOW_FRAMES: u64 = 64;
+
 /// Identifier shared by all frames of one encrypted E2E stream.
 pub type E2eStreamId = uuid::Uuid;
 
@@ -111,17 +114,14 @@ pub struct E2eStreamDecryptor {
     next_sequence: u64,
     final_sequence: Option<u64>,
     seen_final: bool,
+    reorder_window: u64,
     pending_frames: BTreeMap<u64, E2eStreamFrame>,
 }
 
-impl<'a> E2ePlaintextFrame<'a> {
-    fn plaintext(&self) -> &'a [u8] {
-        self.plaintext
-    }
-
-    fn is_final(&self) -> bool {
-        self.is_final
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrameAcceptance {
+    New,
+    Duplicate,
 }
 
 impl<'a> E2ePlaintextFrames<'a> {
@@ -255,10 +255,10 @@ impl E2eStreamEncryptor {
         frame: E2ePlaintextFrame<'_>,
         rng: &mut impl RngCore,
     ) -> Result<E2eStreamFrame> {
-        if frame.is_final() {
-            self.encrypt_final(frame.plaintext(), rng)
+        if frame.is_final {
+            self.encrypt_final(frame.plaintext, rng)
         } else {
-            self.encrypt_next(frame.plaintext(), rng)
+            self.encrypt_next(frame.plaintext, rng)
         }
     }
 
@@ -298,6 +298,21 @@ impl E2eStreamDecryptor {
         expected_sender: Did,
         recipient_secret_key: SecretKey,
     ) -> Self {
+        Self::with_reorder_window(
+            stream_id,
+            expected_sender,
+            recipient_secret_key,
+            DEFAULT_E2E_REORDER_WINDOW_FRAMES,
+        )
+    }
+
+    /// Create a decryptor with an explicit future-frame reorder window.
+    pub fn with_reorder_window(
+        stream_id: E2eStreamId,
+        expected_sender: Did,
+        recipient_secret_key: SecretKey,
+        reorder_window: u64,
+    ) -> Self {
         Self {
             stream_id,
             expected_sender,
@@ -305,6 +320,7 @@ impl E2eStreamDecryptor {
             next_sequence: 0,
             final_sequence: None,
             seen_final: false,
+            reorder_window,
             pending_frames: BTreeMap::new(),
         }
     }
@@ -314,7 +330,10 @@ impl E2eStreamDecryptor {
     /// Out-of-order future frames are buffered and return an empty vector until
     /// the missing lower sequence numbers arrive.
     pub fn decrypt_next(&mut self, frame: &E2eStreamFrame) -> Result<Vec<u8>> {
-        self.validate_frame(frame)?;
+        if self.validate_frame(frame)? == FrameAcceptance::Duplicate {
+            return Ok(Vec::new());
+        }
+
         if frame.is_final {
             self.final_sequence = Some(frame.sequence);
         }
@@ -331,11 +350,7 @@ impl E2eStreamDecryptor {
         }
     }
 
-    fn validate_frame(&self, frame: &E2eStreamFrame) -> Result<()> {
-        if self.seen_final {
-            return Err(Error::E2eFrameAfterFinal);
-        }
-
+    fn validate_frame(&self, frame: &E2eStreamFrame) -> Result<FrameAcceptance> {
         if frame.stream_id != self.stream_id {
             return Err(Error::E2eStreamIdMismatch {
                 expected: self.stream_id,
@@ -345,11 +360,30 @@ impl E2eStreamDecryptor {
 
         frame.verify_sender(self.expected_sender)?;
 
-        if frame.sequence < self.next_sequence || self.pending_frames.contains_key(&frame.sequence)
-        {
+        if self.is_consumed_duplicate(frame) {
+            return Ok(FrameAcceptance::Duplicate);
+        }
+
+        if let Some(pending_frame) = self.pending_frames.get(&frame.sequence) {
+            if pending_frame == frame {
+                return Ok(FrameAcceptance::Duplicate);
+            }
+
             return Err(Error::E2eFrameSequenceMismatch {
                 expected: self.next_sequence,
                 actual: frame.sequence,
+            });
+        }
+
+        if self.seen_final {
+            return Err(Error::E2eFrameAfterFinal);
+        }
+
+        if self.exceeds_reorder_window(frame.sequence) {
+            return Err(Error::E2eFrameReorderWindowExceeded {
+                next_sequence: self.next_sequence,
+                actual: frame.sequence,
+                window: self.reorder_window,
             });
         }
 
@@ -370,7 +404,7 @@ impl E2eStreamDecryptor {
             return Err(Error::E2eFrameAfterFinal);
         }
 
-        Ok(())
+        Ok(FrameAcceptance::New)
     }
 
     fn decrypt_ready_frames(&mut self) -> Result<Vec<u8>> {
@@ -398,6 +432,21 @@ impl E2eStreamDecryptor {
         self.pending_frames
             .last_key_value()
             .is_some_and(|(pending_sequence, _)| *pending_sequence > sequence)
+    }
+
+    fn is_consumed_duplicate(&self, frame: &E2eStreamFrame) -> bool {
+        if frame.sequence < self.next_sequence {
+            return true;
+        }
+
+        self.seen_final
+            && self
+                .final_sequence
+                .is_some_and(|final_sequence| frame.sequence <= final_sequence)
+    }
+
+    fn exceeds_reorder_window(&self, sequence: u64) -> bool {
+        sequence.saturating_sub(self.next_sequence) > self.reorder_window
     }
 }
 
@@ -458,24 +507,6 @@ pub fn encrypt_stream_with_rng(
         recipient_public_key,
         max_plaintext_frame_len,
         rng,
-    )?
-    .collect()
-}
-
-/// Encrypt a byte slice into direct-ElGamal E2E stream frames with the default thread-local RNG.
-pub fn encrypt_stream(
-    plaintext: &[u8],
-    stream_id: E2eStreamId,
-    sender_public_key: PublicKey<33>,
-    recipient_public_key: PublicKey<33>,
-    max_plaintext_frame_len: usize,
-) -> Result<Vec<E2eStreamFrame>> {
-    encrypt_stream_frames(
-        plaintext,
-        stream_id,
-        sender_public_key,
-        recipient_public_key,
-        max_plaintext_frame_len,
     )?
     .collect()
 }
@@ -696,6 +727,112 @@ mod tests {
             decrypt_stream(&frames, stream_id, sender.address().into(), recipient).unwrap(),
             payload
         );
+    }
+
+    #[test]
+    fn replayed_consumed_frame_is_idempotent() {
+        let sender = sender_key();
+        let recipient = recipient_key();
+        let mut rng = Hc128Rng::seed_from_u64(16);
+        let stream_id = uuid::Uuid::new_v4();
+        let payload = vec![16u8; 96];
+        let frames = encrypt_stream_with_rng(
+            &payload,
+            stream_id,
+            sender.pubkey(),
+            recipient.pubkey(),
+            16,
+            &mut rng,
+        )
+        .unwrap();
+        let final_frame = frames.last().unwrap().clone();
+        let mut decryptor = E2eStreamDecryptor::new(stream_id, sender.address().into(), recipient);
+        let mut plaintext = Vec::new();
+
+        plaintext.extend_from_slice(&decryptor.decrypt_next(&frames[0]).unwrap());
+        assert_eq!(
+            decryptor.decrypt_next(&frames[0]).unwrap(),
+            Vec::<u8>::new()
+        );
+
+        for frame in &frames[1..] {
+            plaintext.extend_from_slice(&decryptor.decrypt_next(frame).unwrap());
+        }
+        decryptor.finish().unwrap();
+
+        assert_eq!(
+            decryptor.decrypt_next(&final_frame).unwrap(),
+            Vec::<u8>::new()
+        );
+        assert_eq!(plaintext, payload);
+    }
+
+    #[test]
+    fn replayed_buffered_frame_is_idempotent() {
+        let sender = sender_key();
+        let recipient = recipient_key();
+        let mut rng = Hc128Rng::seed_from_u64(17);
+        let stream_id = uuid::Uuid::new_v4();
+        let payload = vec![17u8; 96];
+        let frames = encrypt_stream_with_rng(
+            &payload,
+            stream_id,
+            sender.pubkey(),
+            recipient.pubkey(),
+            16,
+            &mut rng,
+        )
+        .unwrap();
+        let mut decryptor = E2eStreamDecryptor::new(stream_id, sender.address().into(), recipient);
+        let mut plaintext = Vec::new();
+
+        assert_eq!(
+            decryptor.decrypt_next(&frames[1]).unwrap(),
+            Vec::<u8>::new()
+        );
+        assert_eq!(
+            decryptor.decrypt_next(&frames[1]).unwrap(),
+            Vec::<u8>::new()
+        );
+
+        for frame in &frames {
+            plaintext.extend_from_slice(&decryptor.decrypt_next(frame).unwrap());
+        }
+        decryptor.finish().unwrap();
+
+        assert_eq!(plaintext, payload);
+    }
+
+    #[test]
+    fn future_frame_outside_reorder_window_is_rejected() {
+        let sender = sender_key();
+        let recipient = recipient_key();
+        let mut rng = Hc128Rng::seed_from_u64(18);
+        let stream_id = uuid::Uuid::new_v4();
+        let frames = encrypt_stream_with_rng(
+            &[18u8; 5],
+            stream_id,
+            sender.pubkey(),
+            recipient.pubkey(),
+            1,
+            &mut rng,
+        )
+        .unwrap();
+        let mut decryptor = E2eStreamDecryptor::with_reorder_window(
+            stream_id,
+            sender.address().into(),
+            recipient,
+            2,
+        );
+
+        assert!(matches!(
+            decryptor.decrypt_next(&frames[3]),
+            Err(Error::E2eFrameReorderWindowExceeded {
+                next_sequence: 0,
+                actual: 3,
+                window: 2
+            })
+        ));
     }
 
     #[test]

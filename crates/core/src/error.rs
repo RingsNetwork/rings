@@ -41,6 +41,18 @@ pub enum Error {
         actual: u64,
     },
 
+    #[error(
+        "E2E frame sequence {actual} exceeds reorder window {window} from next sequence {next_sequence}"
+    )]
+    E2eFrameReorderWindowExceeded {
+        /// Next contiguous sequence number expected by the decryptor.
+        next_sequence: u64,
+        /// Sequence number carried by the frame.
+        actual: u64,
+        /// Maximum accepted gap ahead of the next sequence.
+        window: u64,
+    },
+
     #[error("E2E frame sequence counter overflowed")]
     E2eFrameSequenceOverflow,
 

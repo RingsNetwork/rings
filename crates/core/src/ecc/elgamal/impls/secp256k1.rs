@@ -232,8 +232,8 @@ fn decode_field_bytes(mut bytes: [u8; 32]) -> Vec<u8> {
 /// The initial candidate uses its own parity. If it is not on the curve, the
 /// search decrements byte `0` from `254` to `1` and retries. This keeps bytes
 /// `1..` intact, so decoding can recover the original marker, chunk length, and
-/// plaintext bytes. The panic at `Some(0)` is an invariant failure: for the
-/// adapter's 254 alternate high-byte candidates, at least one should lift.
+/// plaintext bytes. If no high-byte candidate lifts, the adapter returns a
+/// typed error.
 fn lift_x(x: &Field) -> Result<Affine> {
     let mut ec = Affine::default();
     let mut x = *x;
