@@ -19,7 +19,7 @@ test-node-browser:
 	cd crates/node; wasm-pack test --chrome --features browser_chrome_test --no-default-features
 
 publish-dry:
-	scripts/cargo-publish-crates.sh dry-run
+	bash scripts/cargo-publish-crates.sh dry-run
 
 publish:
-	scripts/cargo-publish-crates.sh publish
+	bash scripts/cargo-publish-crates.sh publish
