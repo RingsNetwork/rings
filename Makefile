@@ -1,3 +1,5 @@
+.PHONY: fmt clippy-fix test-core-wasm test-node-browser publish-dry publish
+
 fmt:
 	cargo +nightly fmt --all
 # require taplo_cli, which can be install with
@@ -15,3 +17,9 @@ test-core-wasm:
 
 test-node-browser:
 	cd crates/node; wasm-pack test --chrome --features browser_chrome_test --no-default-features
+
+publish-dry:
+	scripts/cargo-publish-crates.sh dry-run
+
+publish:
+	scripts/cargo-publish-crates.sh publish
