@@ -46,6 +46,17 @@ enum EntryStampKind {
     Delta,
 }
 
+// Canonical stamp input for EntryVersion.operation.
+//
+// This digest is an unreleased CRDT tie-break witness between nodes running the
+// same code, not a stable storage key or cross-version protocol identifier.
+#[derive(Serialize)]
+struct OperationDigest<'a> {
+    kind: EntryKind,
+    did: Did,
+    data: &'a [Encoded],
+}
+
 /// Operations supported by a DHT storage entry.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EntryOperation {
@@ -347,13 +358,6 @@ impl Entry {
     }
 
     fn operation_digest(&self) -> Result<Did> {
-        #[derive(Serialize)]
-        struct OperationDigest<'a> {
-            kind: EntryKind,
-            did: Did,
-            data: &'a [Encoded],
-        }
-
         let digest = OperationDigest {
             kind: self.kind,
             did: self.did,
@@ -944,6 +948,25 @@ mod tests {
 
         assert_eq!(forward, reverse);
         assert_eq!(decode_entry_data(&forward)?, vec![String::from("higher")]);
+        Ok(())
+    }
+
+    #[test]
+    fn operation_digest_hashes_canonical_bytes_not_legacy_base58() -> Result<()> {
+        let entry = data_entry("topic", "value")?;
+        let digest = OperationDigest {
+            kind: entry.kind,
+            did: entry.did,
+            data: &entry.data,
+        };
+        let bytes = bincode::serialize(&digest).map_err(Error::BincodeSerialize)?;
+
+        let direct = Did::try_from(HashStr::from_bytes(&bytes))?;
+        let legacy_encoded = bytes.encode()?;
+        let legacy_base58 = Entry::gen_did(legacy_encoded.value())?;
+
+        assert_eq!(entry.operation_digest()?, direct);
+        assert_ne!(direct, legacy_base58);
         Ok(())
     }
 
