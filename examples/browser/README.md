@@ -9,6 +9,10 @@ The page in `index.html` uses the browser WASM provider directly. Each browser n
 overlay through a seed node HTTP endpoint, then dials a peer by DID with `connectWithDid`.
 Messages are sent with `sendBackendMessage` under the `example` namespace.
 
+The page imports `ethers@6.13.5` from jsDelivr to create an EIP-191 signing wallet in the
+browser. Running the page therefore needs internet access unless that dependency is vendored or
+served locally.
+
 `src/lib.rs` also keeps the smaller Rust/WASM helper functions used by application code that
 wants to register the built-in Rust `Echo` protocol from a browser provider.
 
@@ -72,7 +76,8 @@ Use `http://127.0.0.1:50001` as the browser page's seed HTTP endpoint.
 
 4. On both pages, click `Start provider`, then `Connect seed`.
 5. Copy browser B's DID into browser A's `Remote peer DID`.
-6. On browser A, click `Connect DID`, then `Send example message`.
+6. Wait a few seconds, or click `List peers` until each page shows the seed as connected.
+7. On browser A, click `Connect DID`, then `Send example message`.
 
 No SDP is copied by the user. The seed gives the peers an initial overlay path; `connectWithDid`
 performs the peer connection by DID.
@@ -82,7 +87,8 @@ performs the peer connection by DID.
 1. Start the seed node.
 2. Open the browser page, click `Start provider`, then `Connect seed`.
 3. Copy the browser DID.
-4. Start the native example and pass the seed URL plus the browser DID:
+4. Wait a few seconds, or click `List peers` until the page shows the seed as connected.
+5. Start the native example and pass the seed URL plus the browser DID:
 
    ```sh
    cargo run -p rings-native-example -- http://127.0.0.1:50001 BROWSER_DID
@@ -94,7 +100,8 @@ the browser, and then waits for replies. To send back from the browser, paste th
 
 ## Test
 
-The browser page is an integration example. The deterministic protocol unit runs in node:
+The browser page is an integration example. The deterministic protocol unit for the Rust `Echo`
+helper runs in node:
 
 ```sh
 wasm-pack test --release --node examples/browser
@@ -107,3 +114,7 @@ The full two-provider browser connection harness lives in
 cargo test -p rings-node --release --target=wasm32-unknown-unknown \
   --features browser_default --no-default-features
 ```
+
+That harness covers direct offer/answer connection setup, `listPeers`, `sendBackendMessage`, and
+`provider.on` message handling. It does not start a native seed daemon, so the seed HTTP join plus
+`connectWithDid` flow documented above remains a manual integration path.

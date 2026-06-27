@@ -30,5 +30,5 @@ cargo run -p rings-native-example -- http://127.0.0.1:50001 BROWSER_DID
 ```
 
 The native example uses the same default network id as the daemon (`1`), sends one
-`example`-namespace message to the browser, and waits briefly so the browser can send an
+`example`-namespace message to the browser, and waits 30 seconds so the browser can send an
 `example` message back to the native DID printed at startup.
