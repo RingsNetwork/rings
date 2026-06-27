@@ -9,7 +9,7 @@ usage() {
 Usage: scripts/cargo-publish-crates.sh <check|dry-run|publish>
 
 check    validate crate-local package versions and internal path+version deps
-dry-run  build package archives locally when internal deps are indexed
+dry-run  run cargo publish --dry-run when internal deps are indexed
 publish  publish crates in dependency order, waiting for crates.io indexing
 USAGE
 }
@@ -91,8 +91,8 @@ run_dry_run() {
     if ! internal_dependencies_indexed "$crate"; then
       continue
     fi
-    echo "packaging $crate"
-    cargo package -p "$crate" --allow-dirty --no-verify
+    echo "dry-running publish $crate"
+    cargo publish --dry-run -p "$crate" --allow-dirty
   done
 }
 

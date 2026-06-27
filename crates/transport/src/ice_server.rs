@@ -47,6 +47,11 @@ impl IceServer {
 }
 
 /// Parse ICE servers, log invalid configuration, and continue without servers.
+#[cfg(any(
+    feature = "dummy",
+    feature = "native-webrtc",
+    feature = "web-sys-webrtc"
+))]
 pub(crate) fn parse_ice_servers_or_warn(config: &str, transport: &str) -> Vec<IceServer> {
     match IceServer::vec_from_str(config) {
         Ok(ice_servers) => ice_servers,
