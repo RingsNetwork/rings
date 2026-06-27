@@ -37,11 +37,11 @@ pub const DEFAULT_STORAGE_CAPACITY: u32 = 200000000;
 pub fn get_storage_location<P>(prefix: P, path: P) -> String
 where P: AsRef<std::path::Path> {
     let home_dir = env::var_os("HOME").map(PathBuf::from);
-    let expect = match home_dir {
+    let storage_path = match home_dir {
         Some(dir) => dir.join(prefix).join(path),
         None => std::path::Path::new("data").join(prefix).join(path),
     };
-    expect.to_str().unwrap().to_string()
+    storage_path.to_string_lossy().to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -59,6 +59,10 @@ pub struct Config {
     pub stabilize_interval: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_ip: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub webrtc_udp_port_min: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub webrtc_udp_port_max: Option<u16>,
     pub data_storage: StorageConfig,
     pub measure_storage: StorageConfig,
 }
@@ -70,14 +74,15 @@ impl TryFrom<Config> for ProcessorConfigSerialized {
         let session_sk: String = if let Some(sk) = config.ecdsa_key {
             tracing::warn!("Field `ecdsa_key` is deprecated, use `session_sk` instead.");
             SessionSk::new_with_seckey(&sk)
-                .expect("create session sk failed")
-                .dump()
-                .expect("dump session sk failed")
+                .and_then(|session_sk| session_sk.dump())
+                .map_err(|e| Error::VerifyError(e.to_string()))?
         } else if let Some(ssk) = config.session_manager {
             tracing::warn!("Field `session_manager` is deprecated, use `session_sk` instead.");
             ssk
         } else {
-            let ssk_file = config.session_sk.expect("session_sk is not set.");
+            let Some(ssk_file) = config.session_sk else {
+                return Err(Error::InvalidData);
+            };
             let ssk_file_expand_home = expand_home(&ssk_file)?;
             fs::read_to_string(ssk_file_expand_home).unwrap_or_else(|e| {
                 tracing::warn!("Read session_sk file failed: {e:?}. Handling it as raw session_sk string. This mode is deprecated. please use a file path.");
@@ -94,6 +99,15 @@ impl TryFrom<Config> for ProcessorConfigSerialized {
 
         cs = if let Some(ext_ip) = config.external_ip {
             cs.external_address(ext_ip)
+        } else {
+            cs
+        };
+        let udp_range = crate::processor::parse_webrtc_udp_port_range(
+            config.webrtc_udp_port_min,
+            config.webrtc_udp_port_max,
+        )?;
+        cs = if let Some(range) = udp_range {
+            cs.webrtc_udp_port_range(range)
         } else {
             cs
         };
@@ -124,6 +138,8 @@ impl Config {
             ice_servers: DEFAULT_ICE_SERVERS.to_string(),
             stabilize_interval: DEFAULT_STABILIZE_INTERVAL,
             external_ip: None,
+            webrtc_udp_port_min: None,
+            webrtc_udp_port_max: None,
             data_storage: DEFAULT_DATA_STORAGE_CONFIG.clone(),
             measure_storage: DEFAULT_MEASURE_STORAGE_CONFIG.clone(),
         }
@@ -137,7 +153,9 @@ impl Config {
             fs::File::create(path.as_path()).map_err(|e| Error::CreateFileError(e.to_string()))?;
         let f_writer = io::BufWriter::new(f);
         serde_yaml::to_writer(f_writer, self).map_err(|_| Error::EncodeError)?;
-        Ok(path.to_str().unwrap().to_owned())
+        path.to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| Error::PathUtf8Error(path.display().to_string()))
     }
 
     pub fn read_fs<P>(path: P) -> Result<Config>
@@ -169,6 +187,18 @@ impl StorageConfig {
 mod tests {
     use super::*;
 
+    fn dumped_session_sk() -> String {
+        let key = SecretKey::random();
+        let session = match SessionSk::new_with_seckey(&key) {
+            Ok(session) => session,
+            Err(error) => panic!("session key construction failed: {error}"),
+        };
+        match session.dump() {
+            Ok(dump) => dump,
+            Err(error) => panic!("session key dump failed: {error}"),
+        }
+    }
+
     #[test]
     fn test_deserialization_with_missed_field() {
         let yaml = r#"
@@ -180,6 +210,8 @@ endpoint_url: http://127.0.0.1:50000
 ice_servers: stun://stun.l.google.com:19302
 stabilize_interval: 3
 external_ip: null
+webrtc_udp_port_min: null
+webrtc_udp_port_max: null
 data_storage:
   path: /Users/foo/.rings/data
   capacity: 200000000
@@ -189,5 +221,35 @@ measure_storage:
 "#;
         let cfg: Config = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(cfg.network_id, 1);
+    }
+
+    #[test]
+    fn config_with_valid_webrtc_udp_range_builds_processor_config() {
+        let mut config = Config::new(dumped_session_sk());
+        config.webrtc_udp_port_min = Some(49160);
+        config.webrtc_udp_port_max = Some(49200);
+
+        let processor_config = ProcessorConfig::try_from(config);
+
+        assert!(matches!(
+            processor_config.and_then(|config| config.webrtc_udp_port_range()),
+            Ok(Some(range)) if range.min() == 49160 && range.max() == 49200
+        ));
+    }
+
+    #[test]
+    fn config_with_partial_webrtc_udp_range_is_rejected() {
+        let mut config = Config::new(dumped_session_sk());
+        config.webrtc_udp_port_min = Some(49160);
+
+        let processor_config = ProcessorConfig::try_from(config);
+
+        assert!(matches!(
+            processor_config,
+            Err(Error::IncompleteWebrtcUdpPortRange {
+                min: Some(49160),
+                max: None
+            })
+        ));
     }
 }

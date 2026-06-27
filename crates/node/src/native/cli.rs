@@ -211,11 +211,13 @@ impl Client {
                             })
                             .await;
 
-                        if let Err(e) = result {
-                            tracing::error!("Failed to fetch messages of topic: {}, {}", topic, e);
-                            continue;
-                        }
-                        let messages = result.unwrap().data;
+                        let messages = match result {
+                            Ok(result) => result.data,
+                            Err(e) => {
+                                tracing::error!("Failed to fetch messages of topic: {}, {}", topic, e);
+                                continue;
+                            }
+                        };
                         for msg in messages.iter().cloned() {
                             yield msg
                         }
@@ -234,7 +236,7 @@ impl Client {
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?
             .swarm
-            .unwrap();
+            .ok_or_else(|| anyhow::anyhow!("node_info response did not include swarm info"))?;
 
         let display =
             serde_json::to_string_pretty(&swarm_info).map_err(|e| anyhow::anyhow!("{}", e))?;

@@ -25,6 +25,7 @@ use rings_transport::core::transport::TransportInterface;
 use rings_transport::core::transport::TransportMessage;
 use rings_transport::core::transport::WebrtcConnectionState;
 use rings_transport::delivery::DeliveryFuture;
+use rings_transport::webrtc_config::WebrtcUdpPortRange;
 
 use crate::chunk::Chunk;
 use crate::chunk::ChunkList;
@@ -84,6 +85,32 @@ impl SwarmTransportSettings {
         Self {
             storage_redundancy,
             reassembly_limits,
+        }
+    }
+}
+
+/// WebRTC transport configuration used when constructing [`SwarmTransport`].
+pub(crate) struct SwarmWebrtcConfig {
+    ice_servers: String,
+    external_address: Option<String>,
+    udp_port_range: Option<WebrtcUdpPortRange>,
+}
+
+impl SwarmWebrtcConfig {
+    /// Build WebRTC transport configuration.
+    ///
+    /// Invariant: a present `udp_port_range` already proves `1 <= min <= max`.
+    /// Native transports use it to constrain ICE UDP gathering; browser
+    /// transports ignore it because local ICE ports are owned by the browser.
+    pub(crate) fn new(
+        ice_servers: String,
+        external_address: Option<String>,
+        udp_port_range: Option<WebrtcUdpPortRange>,
+    ) -> Self {
+        Self {
+            ice_servers,
+            external_address,
+            udp_port_range,
         }
     }
 }
@@ -250,8 +277,7 @@ fn spawn_chunked_send(
 impl SwarmTransport {
     pub(crate) fn new(
         network_id: u32,
-        ice_servers: &str,
-        external_address: Option<String>,
+        webrtc: SwarmWebrtcConfig,
         session_sk: SessionSk,
         dht: Arc<PeerRing>,
         measure: Option<MeasureImpl>,
@@ -259,7 +285,11 @@ impl SwarmTransport {
     ) -> Self {
         Self {
             network_id,
-            transport: Transport::new(ice_servers, external_address),
+            transport: Transport::new(
+                &webrtc.ice_servers,
+                webrtc.external_address,
+                webrtc.udp_port_range,
+            ),
             session_sk,
             dht,
             storage_redundancy: settings.storage_redundancy,

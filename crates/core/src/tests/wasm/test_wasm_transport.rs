@@ -27,7 +27,7 @@ async fn get_fake_permission() {
 }
 
 async fn prepare_transport() -> Transport {
-    let trans = Transport::new("stun://stun.l.google.com:19302", None);
+    let trans = Transport::new("stun://stun.l.google.com:19302", None, None);
     trans
         .new_connection("test", Box::new(DefaultCallback))
         .await

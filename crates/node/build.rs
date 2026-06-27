@@ -7,7 +7,9 @@ fn gen_version() {
         .args(["rev-parse", "--short", "HEAD"])
         .output()
     {
-        let git_short_hash = String::from_utf8(output.stdout).unwrap();
+        let Ok(git_short_hash) = String::from_utf8(output.stdout) else {
+            return;
+        };
         println!("cargo:rustc-env=GIT_SHORT_HASH={git_short_hash}");
     }
 }

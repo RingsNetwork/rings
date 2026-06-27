@@ -82,7 +82,7 @@ pub async fn run_internal_api(port: u16, processor: Arc<Processor>) -> anyhow::R
 
 /// Run a web server to handle jsonrpc request from external
 pub async fn run_external_api(addr: String, processor: Arc<Processor>) -> anyhow::Result<()> {
-    let binding_addr = addr.parse().unwrap();
+    let binding_addr: SocketAddr = addr.parse()?;
 
     let jsonrpc_handler = MetaIoHandler::with_middleware(ExternalRpcMiddleware);
     let jsonrpc_state = Arc::new(JsonRpcState {

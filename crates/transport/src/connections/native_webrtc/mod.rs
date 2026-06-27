@@ -12,6 +12,8 @@ use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::data_channel_state::RTCDataChannelState;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice::mdns::MulticastDnsMode;
+use webrtc::ice::udp_network::EphemeralUDP;
+use webrtc::ice::udp_network::UDPNetwork;
 use webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
@@ -40,6 +42,7 @@ use crate::ice_server::IceCredentialType;
 use crate::ice_server::IceServer;
 use crate::notifier::Notifier;
 use crate::pool::Pool;
+use crate::webrtc_config::WebrtcUdpPortRange;
 
 const WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT: u8 = 8; // seconds
 const WEBRTC_GATHER_TIMEOUT: u8 = 60; // seconds
@@ -138,6 +141,7 @@ pub struct WebrtcConnection {
 pub struct WebrtcTransport {
     ice_servers: Vec<IceServer>,
     external_address: Option<String>,
+    udp_port_range: Option<WebrtcUdpPortRange>,
     pool: Pool<WebrtcConnection>,
 }
 
@@ -183,15 +187,40 @@ impl WebrtcConnection {
 
 impl WebrtcTransport {
     /// Create a new [WebrtcTransport] instance.
-    pub fn new(ice_servers: &str, external_address: Option<String>) -> Self {
+    pub fn new(
+        ice_servers: &str,
+        external_address: Option<String>,
+        udp_port_range: Option<WebrtcUdpPortRange>,
+    ) -> Self {
         let ice_servers = parse_ice_servers_or_warn(ice_servers, "native-webrtc");
 
         Self {
             ice_servers,
             external_address,
+            udp_port_range,
             pool: Pool::new(),
         }
     }
+}
+
+fn ephemeral_udp_for_range(range: WebrtcUdpPortRange) -> Result<EphemeralUDP> {
+    EphemeralUDP::new(range.min(), range.max()).map_err(|e| {
+        Error::WebrtcUdpPortRange(format!(
+            "min={}, max={}, reason={e}",
+            range.min(),
+            range.max()
+        ))
+    })
+}
+
+fn set_udp_network_range(
+    setting: &mut webrtc::api::setting_engine::SettingEngine,
+    range: Option<WebrtcUdpPortRange>,
+) -> Result<()> {
+    if let Some(range) = range {
+        setting.set_udp_network(UDPNetwork::Ephemeral(ephemeral_udp_for_range(range)?));
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -329,6 +358,7 @@ impl TransportInterface for WebrtcTransport {
         };
 
         let mut setting = webrtc::api::setting_engine::SettingEngine::default();
+        set_udp_network_range(&mut setting, self.udp_port_range)?;
         if let Some(ref addr) = self.external_address {
             tracing::debug!("setting external ip {:?}", addr);
             setting.set_nat_1to1_ips(vec![addr.to_string()], RTCIceCandidateType::Host);
@@ -498,5 +528,37 @@ impl From<RTCPeerConnectionState> for WebrtcConnectionState {
             RTCPeerConnectionState::Failed => Self::Failed,
             RTCPeerConnectionState::Closed => Self::Closed,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn valid_test_range() -> WebrtcUdpPortRange {
+        match WebrtcUdpPortRange::new(49160, 49200) {
+            Ok(range) => range,
+            Err(error) => panic!("valid range rejected: {error}"),
+        }
+    }
+
+    #[test]
+    fn native_udp_range_builds_ephemeral_udp_with_same_bounds() {
+        let udp = ephemeral_udp_for_range(valid_test_range());
+        let udp = match udp {
+            Ok(udp) => udp,
+            Err(error) => panic!("valid range rejected by ICE stack: {error}"),
+        };
+
+        assert_eq!(udp.port_min(), 49160);
+        assert_eq!(udp.port_max(), 49200);
+    }
+
+    #[test]
+    fn native_transport_keeps_configured_udp_range() {
+        let range = valid_test_range();
+        let transport = WebrtcTransport::new("", None, Some(range));
+
+        assert_eq!(transport.udp_port_range, Some(range));
     }
 }

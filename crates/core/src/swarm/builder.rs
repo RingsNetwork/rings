@@ -5,6 +5,8 @@
 use std::sync::Arc;
 use std::sync::RwLock;
 
+use rings_transport::webrtc_config::WebrtcUdpPortRange;
+
 use crate::chunk::ReassemblyLimits;
 use crate::dht::EntryStorage;
 use crate::dht::PeerRing;
@@ -15,6 +17,7 @@ use crate::swarm::callback::SharedSwarmCallback;
 use crate::swarm::callback::SwarmCallback;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::transport::SwarmTransportSettings;
+use crate::swarm::transport::SwarmWebrtcConfig;
 use crate::swarm::Swarm;
 
 struct DefaultCallback;
@@ -25,6 +28,7 @@ pub struct SwarmBuilder {
     network_id: u32,
     ice_servers: String,
     external_address: Option<String>,
+    webrtc_udp_port_range: Option<WebrtcUdpPortRange>,
     dht_succ_max: u8,
     dht_finger_table_size: usize,
     dht_storage_redundancy: u16,
@@ -48,6 +52,7 @@ impl SwarmBuilder {
             network_id,
             ice_servers: ice_servers.to_string(),
             external_address: None,
+            webrtc_udp_port_range: None,
             dht_succ_max: 3,
             dht_finger_table_size: DEFAULT_FINGER_TABLE_SIZE,
             dht_storage_redundancy: 1,
@@ -94,6 +99,15 @@ impl SwarmBuilder {
         self
     }
 
+    /// Sets the native WebRTC UDP port range used during ICE gathering.
+    ///
+    /// Invariant: a present range has already proven `1 <= min <= max`.
+    /// Browser transports ignore this native deployment setting.
+    pub fn webrtc_udp_port_range(mut self, range: WebrtcUdpPortRange) -> Self {
+        self.webrtc_udp_port_range = Some(range);
+        self
+    }
+
     /// Setup timeout for session.
     pub fn session_ttl(mut self, ttl: usize) -> Self {
         self.session_ttl = Some(ttl);
@@ -130,8 +144,11 @@ impl SwarmBuilder {
 
         let transport = Arc::new(SwarmTransport::new(
             self.network_id,
-            &self.ice_servers,
-            self.external_address,
+            SwarmWebrtcConfig::new(
+                self.ice_servers,
+                self.external_address,
+                self.webrtc_udp_port_range,
+            ),
             self.session_sk,
             dht.clone(),
             self.measure,

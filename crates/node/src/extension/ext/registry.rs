@@ -335,7 +335,10 @@ impl Extensions {
         let mut handlers = self.core.handlers.write().map_err(|_| Error::Lock)?;
         // Check-all (existing table + intra-batch duplicates) before mutating anything.
         for (index, (namespace, _)) in prepared.iter().enumerate() {
-            let duplicate_in_batch = prepared[..index].iter().any(|(seen, _)| seen == namespace);
+            let duplicate_in_batch = prepared
+                .iter()
+                .take(index)
+                .any(|(seen, _)| seen == namespace);
             if duplicate_in_batch || handlers.contains_key(namespace) {
                 return Err(Error::ExtensionError(format!(
                     "namespace {namespace:?} is already registered"

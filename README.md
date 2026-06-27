@@ -169,6 +169,11 @@ path**. Each layer maps directly to a crate/module:
 
 - **Transport** establishes direct, peer-to-peer WebRTC datachannels — browser-to-browser
   included — using STUN/ICE/SDP for NAT traversal, so traffic never transits a central server.
+  Native nodes deployed behind cloud firewalls can bound ICE UDP gathering with
+  `external_ip`, `webrtc_udp_port_min`, and `webrtc_udp_port_max`; for example,
+  `49160..=49200` maps to an AWS security-group rule for `UDP 49160-49200`.
+  Browser nodes still use the browser ICE stack, whose local UDP ports are not
+  controlled by Rings.
 - **Overlay** organizes peers into a Chord DHT and routes messages by DID; distinct overlays are
   isolated by `network_id`.
 - **Extension runtime** is a *functional core / imperative shell*: a protocol's state transition

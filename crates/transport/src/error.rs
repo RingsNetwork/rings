@@ -42,6 +42,9 @@ pub enum Error {
     #[error("WebRTC local SDP generation error: {0}")]
     WebrtcLocalSdpGenerationError(String),
 
+    #[error("WebRTC UDP port range was rejected by the ICE stack: {0}")]
+    WebrtcUdpPortRange(String),
+
     #[error("Connection {0} already exists")]
     ConnectionAlreadyExists(String),
 

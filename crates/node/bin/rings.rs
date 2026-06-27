@@ -179,6 +179,20 @@ struct RunCommand {
 
     #[arg(
         long,
+        help = "Minimum UDP port used by native WebRTC ICE gathering. Must be paired with --webrtc-udp-port-max.",
+        env
+    )]
+    pub webrtc_udp_port_min: Option<u16>,
+
+    #[arg(
+        long,
+        help = "Maximum UDP port used by native WebRTC ICE gathering. Must be paired with --webrtc-udp-port-min.",
+        env
+    )]
+    pub webrtc_udp_port_max: Option<u16>,
+
+    #[arg(
+        long,
         help = "Storage files location. If not provided, use storage.path in config file or ~/.local/share/rings",
         env
     )]
@@ -408,6 +422,12 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     if let Some(external_ip) = args.external_ip {
         c.external_ip = Some(external_ip);
     }
+    if args.webrtc_udp_port_min.is_some() {
+        c.webrtc_udp_port_min = args.webrtc_udp_port_min;
+    }
+    if args.webrtc_udp_port_max.is_some() {
+        c.webrtc_udp_port_max = args.webrtc_udp_port_max;
+    }
     if let Some(stabilize_interval) = args.stabilize_interval {
         c.stabilize_interval = stabilize_interval;
     }
@@ -422,14 +442,14 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
 
     let (data_storage, measure_storage) = if let Some(storage_path) = args.storage_path {
         let storage_path = Path::new(&storage_path);
-        let data_path = storage_path.join("data");
-        let measure_path = storage_path.join("measure");
+        let data_path = storage_path.join("data").to_string_lossy().to_string();
+        let measure_path = storage_path.join("measure").to_string_lossy().to_string();
         let capacity = args
             .storage_capacity
             .unwrap_or(config::DEFAULT_STORAGE_CAPACITY);
         (
-            config::StorageConfig::new(data_path.to_str().unwrap(), capacity),
-            config::StorageConfig::new(measure_path.to_str().unwrap(), capacity),
+            config::StorageConfig::new(&data_path, capacity),
+            config::StorageConfig::new(&measure_path, capacity),
         )
     } else {
         (c.data_storage, c.measure_storage)
@@ -463,7 +483,7 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     // The Backend decodes inbound custom messages as namespaced envelopes and routes
     // them to the protocol registry.
     let backend = Arc::new(Backend::new(provider));
-    processor.swarm.set_callback(backend).unwrap();
+    processor.swarm.set_callback(backend)?;
 
     let processor_clone1 = processor.clone();
     let processor_clone2 = processor.clone();

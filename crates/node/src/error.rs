@@ -89,6 +89,11 @@ pub enum Error {
     Swarm(rings_core::error::Error) = 808,
     #[error("Invalid logging level: {0}")]
     InvalidLoggingLevel(String) = 809,
+    #[error("Invalid WebRTC UDP port range: {0}")]
+    InvalidWebrtcUdpPortRange(#[from] rings_transport::webrtc_config::WebrtcUdpPortRangeError) =
+        810,
+    #[error("Both webrtc_udp_port_min and webrtc_udp_port_max must be set together: min={min:?}, max={max:?}")]
+    IncompleteWebrtcUdpPortRange { min: Option<u16>, max: Option<u16> } = 811,
     #[error("Create File Error: {0}")]
     CreateFileError(String) = 900,
     #[error("Open File Error: {0}")]
@@ -99,6 +104,8 @@ pub enum Error {
     HomeDirError = 903,
     #[error("Cannot find parent directory")]
     ParentDirError = 904,
+    #[error("Path is not valid UTF-8: {0}")]
+    PathUtf8Error(String) = 905,
     #[error("Serde json error: {0}")]
     SerdeJsonError(#[from] serde_json::Error) = 1000,
     #[error("Serde yaml error: {0}")]

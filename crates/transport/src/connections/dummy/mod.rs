@@ -29,6 +29,7 @@ use crate::ice_server::parse_ice_servers_or_warn;
 use crate::notifier::Notifier;
 use crate::pool::Pool;
 use crate::sync_utils::lock_recover;
+use crate::webrtc_config::WebrtcUdpPortRange;
 
 /// Max delay in ms on sending message
 const DUMMY_DELAY_MAX: u64 = 100;
@@ -257,7 +258,11 @@ impl DummyConnection {
 
 impl DummyTransport {
     /// Create a new [DummyTransport] instance.
-    pub fn new(ice_servers: &str, _external_address: Option<String>) -> Self {
+    pub fn new(
+        ice_servers: &str,
+        _external_address: Option<String>,
+        _udp_port_range: Option<WebrtcUdpPortRange>,
+    ) -> Self {
         let _ = parse_ice_servers_or_warn(ice_servers, "dummy");
 
         Self { pool: Pool::new() }

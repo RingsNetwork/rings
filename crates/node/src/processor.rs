@@ -26,6 +26,7 @@ use rings_core::storage::MemStorage;
 use rings_core::swarm::Swarm;
 use rings_core::swarm::SwarmBuilder;
 use rings_rpc::protos::rings_node::*;
+use rings_transport::webrtc_config::WebrtcUdpPortRange;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -51,6 +52,10 @@ pub struct ProcessorConfig {
     ice_servers: String,
     /// External address for webrtc
     external_address: Option<String>,
+    /// Inclusive lower native WebRTC UDP port bound.
+    webrtc_udp_port_min: Option<u16>,
+    /// Inclusive upper native WebRTC UDP port bound.
+    webrtc_udp_port_max: Option<u16>,
     /// [SessionSk].
     session_sk: SessionSk,
     /// Stabilization interval.
@@ -70,6 +75,8 @@ impl ProcessorConfig {
             network_id,
             ice_servers,
             external_address: None,
+            webrtc_udp_port_min: None,
+            webrtc_udp_port_max: None,
             session_sk,
             stabilize_interval: Duration::from_secs(stabilize_interval),
         }
@@ -78,6 +85,13 @@ impl ProcessorConfig {
     /// Return associated [SessionSk].
     pub fn session_sk(&self) -> SessionSk {
         self.session_sk.clone()
+    }
+}
+
+impl ProcessorConfig {
+    /// Returns the validated native WebRTC UDP port range, when configured.
+    pub fn webrtc_udp_port_range(&self) -> Result<Option<WebrtcUdpPortRange>> {
+        parse_webrtc_udp_port_range(self.webrtc_udp_port_min, self.webrtc_udp_port_max)
     }
 }
 
@@ -101,6 +115,10 @@ pub struct ProcessorConfigSerialized {
     ice_servers: String,
     /// An optional string representing the external address for WebRTC
     external_address: Option<String>,
+    /// Inclusive lower native WebRTC UDP port bound.
+    webrtc_udp_port_min: Option<u16>,
+    /// Inclusive upper native WebRTC UDP port bound.
+    webrtc_udp_port_max: Option<u16>,
     /// A string representing the dumped `SessionSk`.
     session_sk: String,
     /// An unsigned integer representing the stabilization interval in seconds.
@@ -119,6 +137,8 @@ impl ProcessorConfigSerialized {
             network_id,
             ice_servers,
             external_address: None,
+            webrtc_udp_port_min: None,
+            webrtc_udp_port_max: None,
             session_sk,
             stabilize_interval,
         }
@@ -130,6 +150,26 @@ impl ProcessorConfigSerialized {
         self.external_address = Some(external_address);
         self
     }
+
+    /// Sets the native WebRTC UDP port range bounds.
+    pub fn webrtc_udp_port_range(mut self, range: WebrtcUdpPortRange) -> Self {
+        self.webrtc_udp_port_min = Some(range.min());
+        self.webrtc_udp_port_max = Some(range.max());
+        self
+    }
+}
+
+pub(crate) fn parse_webrtc_udp_port_range(
+    min: Option<u16>,
+    max: Option<u16>,
+) -> Result<Option<WebrtcUdpPortRange>> {
+    match (min, max) {
+        (None, None) => Ok(None),
+        (Some(min), Some(max)) => WebrtcUdpPortRange::new(min, max)
+            .map(Some)
+            .map_err(Error::from),
+        (min, max) => Err(Error::IncompleteWebrtcUdpPortRange { min, max }),
+    }
 }
 
 impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
@@ -139,6 +179,8 @@ impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
             network_id: ins.network_id,
             ice_servers: ins.ice_servers.clone(),
             external_address: ins.external_address.clone(),
+            webrtc_udp_port_min: ins.webrtc_udp_port_min,
+            webrtc_udp_port_max: ins.webrtc_udp_port_max,
             session_sk: ins.session_sk.dump()?,
             stabilize_interval: ins.stabilize_interval.as_secs(),
         })
@@ -148,10 +190,14 @@ impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
 impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
     type Error = Error;
     fn try_from(ins: ProcessorConfigSerialized) -> Result<Self> {
+        let webrtc_udp_port_range =
+            parse_webrtc_udp_port_range(ins.webrtc_udp_port_min, ins.webrtc_udp_port_max)?;
         Ok(Self {
             network_id: ins.network_id,
             ice_servers: ins.ice_servers.clone(),
             external_address: ins.external_address.clone(),
+            webrtc_udp_port_min: webrtc_udp_port_range.map(WebrtcUdpPortRange::min),
+            webrtc_udp_port_max: webrtc_udp_port_range.map(WebrtcUdpPortRange::max),
             session_sk: SessionSk::from_str(&ins.session_sk)?,
             stabilize_interval: Duration::from_secs(ins.stabilize_interval),
         })
@@ -191,6 +237,7 @@ pub struct ProcessorBuilder {
     network_id: u32,
     ice_servers: String,
     external_address: Option<String>,
+    webrtc_udp_port_range: Option<WebrtcUdpPortRange>,
     session_sk: SessionSk,
     storage: Option<EntryStorage>,
     measure: Option<MeasureImpl>,
@@ -221,6 +268,7 @@ impl ProcessorBuilder {
             network_id: config.network_id,
             ice_servers: config.ice_servers.clone(),
             external_address: config.external_address.clone(),
+            webrtc_udp_port_range: config.webrtc_udp_port_range()?,
             session_sk: config.session_sk.clone(),
             storage: None,
             measure: None,
@@ -271,6 +319,9 @@ impl ProcessorBuilder {
 
         if let Some(external_address) = self.external_address {
             swarm_builder = swarm_builder.external_address(external_address);
+        }
+        if let Some(range) = self.webrtc_udp_port_range {
+            swarm_builder = swarm_builder.webrtc_udp_port_range(range);
         }
 
         if let Some(measure) = self.measure {
@@ -531,6 +582,66 @@ mod test {
     use super::*;
     use crate::prelude::*;
     use crate::tests::native::prepare_processor;
+
+    #[test]
+    fn webrtc_udp_port_range_absent_by_default() {
+        let range = parse_webrtc_udp_port_range(None, None);
+
+        assert!(matches!(range, core::result::Result::Ok(None)));
+    }
+
+    #[test]
+    fn webrtc_udp_port_range_accepts_valid_bounds() {
+        let range = parse_webrtc_udp_port_range(Some(49160), Some(49200));
+
+        assert!(matches!(
+            range,
+            Ok(Some(range)) if range.min() == 49160 && range.max() == 49200
+        ));
+    }
+
+    #[test]
+    fn webrtc_udp_port_range_rejects_partial_bounds() {
+        let range = parse_webrtc_udp_port_range(Some(49160), None);
+
+        assert!(matches!(
+            range,
+            Err(Error::IncompleteWebrtcUdpPortRange {
+                min: Some(49160),
+                max: None
+            })
+        ));
+    }
+
+    #[test]
+    fn webrtc_udp_port_range_rejects_zero_bound() {
+        let range = parse_webrtc_udp_port_range(Some(0), Some(49200));
+
+        assert!(matches!(
+            range,
+            Err(Error::InvalidWebrtcUdpPortRange(
+                rings_transport::webrtc_config::WebrtcUdpPortRangeError::ZeroBound {
+                    min: 0,
+                    max: 49200
+                }
+            ))
+        ));
+    }
+
+    #[test]
+    fn webrtc_udp_port_range_rejects_inverted_bounds() {
+        let range = parse_webrtc_udp_port_range(Some(49200), Some(49160));
+
+        assert!(matches!(
+            range,
+            Err(Error::InvalidWebrtcUdpPortRange(
+                rings_transport::webrtc_config::WebrtcUdpPortRangeError::Inverted {
+                    min: 49200,
+                    max: 49160
+                }
+            ))
+        ));
+    }
 
     #[tokio::test]
     async fn test_processor_create_offer() {

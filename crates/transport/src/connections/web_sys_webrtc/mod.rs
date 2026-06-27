@@ -46,6 +46,7 @@ use crate::ice_server::IceCredentialType;
 use crate::ice_server::IceServer;
 use crate::notifier::Notifier;
 use crate::pool::Pool;
+use crate::webrtc_config::WebrtcUdpPortRange;
 
 const WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT: u8 = 8; // seconds
 const WEBRTC_GATHER_TIMEOUT: u8 = 60; // seconds
@@ -190,7 +191,11 @@ impl WebSysWebrtcConnection {
 
 impl WebSysWebrtcTransport {
     /// Create a new [WebSysWebrtcTransport] instance.
-    pub fn new(ice_servers: &str, _external_address: Option<String>) -> Self {
+    pub fn new(
+        ice_servers: &str,
+        _external_address: Option<String>,
+        _udp_port_range: Option<WebrtcUdpPortRange>,
+    ) -> Self {
         let ice_servers = parse_ice_servers_or_warn(ice_servers, "web-sys-webrtc");
 
         Self {

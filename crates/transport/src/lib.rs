@@ -27,5 +27,6 @@ pub mod error;
 pub mod ice_server;
 pub mod notifier;
 pub mod pool;
+pub mod webrtc_config;
 
 mod sync_utils;
