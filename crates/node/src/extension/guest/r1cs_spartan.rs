@@ -167,7 +167,7 @@ impl SpartanR1csProgram {
 
     /// Serialize this program.
     pub fn encode(&self) -> Result<Vec<u8>, GuestError> {
-        bincode::serialize(&self.spec).map_err(decode_error)
+        bincode::serialize(&self.spec).map_err(encode_error)
     }
 
     fn instance(&self) -> Result<Instance, GuestError> {
@@ -516,6 +516,12 @@ fn decode_error(error: impl ToString) -> GuestError {
     }
 }
 
+fn encode_error(error: impl ToString) -> GuestError {
+    GuestError::ProofDataEncode {
+        reason: error.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use rings_core::dht::Did;
@@ -763,6 +769,38 @@ mod tests {
     }
 
     #[test]
+    fn spartan_r1cs_runtime_enforces_memory_before_proving() {
+        let program = SpartanR1csProgram::new(SpartanR1csProgramSpec {
+            num_constraints: 3_000,
+            num_variables: 1,
+            num_public_inputs: 1,
+            a: Vec::new(),
+            b: Vec::new(),
+            c: Vec::new(),
+        })
+        .expect("large program with valid dimensions");
+        let manifest = manifest_with_limits(10_000, 1);
+        let runtime = instantiate_spartan_r1cs_runtime(&manifest, binary(&program, &manifest))
+            .expect("runtime");
+
+        assert_eq!(
+            runtime.step(GuestStepInput {
+                state: GuestState::new(Bytes::from_static(b"state")),
+                event: GuestEvent {
+                    from: Did::from(2u32),
+                    payload: Bytes::from_static(b"not decoded before metering"),
+                },
+                context: GuestContext::from_manifest(&manifest, Did::from(1u32)),
+                public_input: public_input(),
+            }),
+            Err(GuestError::MemoryLimitExceeded {
+                used: program.memory_pages_used(),
+                limit: 1
+            })
+        );
+    }
+
+    #[test]
     fn spartan_r1cs_registry_drives_backend_through_generic_profile() {
         let program = cubic_program();
         let manifest = manifest();
@@ -778,5 +816,45 @@ mod tests {
         let witness = witness_for(&manifest, public_input(), output_for_x(x), x);
 
         assert!(runtime.step(input_for(&manifest, witness)).is_ok());
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    mod wasm32 {
+        use wasm_bindgen_test::wasm_bindgen_test;
+        use wasm_bindgen_test::wasm_bindgen_test_configure;
+
+        use super::*;
+
+        wasm_bindgen_test_configure!(run_in_browser);
+
+        #[wasm_bindgen_test]
+        fn spartan_r1cs_wasm32_verifier_accepts_real_receipt() {
+            let (manifest, verifier, output) = proved_output();
+            let receipt = output.receipt.as_ref().expect("receipt");
+            let claim = GuestReceiptClaim::new(
+                manifest.module_hash(),
+                public_input(),
+                output.public_output.clone(),
+            );
+
+            assert!(verifier.verify(&claim, receipt).is_ok());
+        }
+
+        #[wasm_bindgen_test]
+        fn spartan_r1cs_wasm32_verifier_rejects_tampered_proof() {
+            let (manifest, verifier, mut output) = proved_output();
+            let receipt = output.receipt.as_mut().expect("receipt");
+            let mut proof = receipt.proof.to_vec();
+            let first = proof.first_mut().expect("proof byte");
+            *first ^= 1;
+            receipt.proof = Bytes::from(proof);
+            let claim = GuestReceiptClaim::new(
+                manifest.module_hash(),
+                public_input(),
+                output.public_output.clone(),
+            );
+
+            assert!(verifier.verify(&claim, receipt).is_err());
+        }
     }
 }

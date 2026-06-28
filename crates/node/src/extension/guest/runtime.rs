@@ -94,6 +94,12 @@ pub enum GuestError {
         /// Decoding reason.
         reason: String,
     },
+    /// A proving runtime failed to encode a program, witness, or receipt.
+    #[error("guest proof data encode failed: {reason}")]
+    ProofDataEncode {
+        /// Encoding reason.
+        reason: String,
+    },
     /// A proving runtime failed while producing a proof.
     #[error("guest proof generation failed: {reason}")]
     ProofGenerationFailed {
