@@ -20,6 +20,8 @@
 
 mod manifest;
 mod protocol;
+#[cfg(feature = "guest-r1cs-proof")]
+mod r1cs_spartan;
 mod runtime;
 #[cfg(test)]
 mod runtime_tests;
@@ -37,6 +39,26 @@ pub use protocol::register_guest_extension;
 pub use protocol::GuestProtocol;
 pub use protocol::GuestProtocolState;
 pub use protocol::GuestShell;
+#[cfg(feature = "guest-r1cs-proof")]
+pub use r1cs_spartan::instantiate_spartan_r1cs_runtime;
+#[cfg(feature = "guest-r1cs-proof")]
+pub use r1cs_spartan::spartan_r1cs_claim_scalar;
+#[cfg(feature = "guest-r1cs-proof")]
+pub use r1cs_spartan::spartan_r1cs_runtime_adapter;
+#[cfg(feature = "guest-r1cs-proof")]
+pub use r1cs_spartan::SpartanR1csEntry;
+#[cfg(feature = "guest-r1cs-proof")]
+pub use r1cs_spartan::SpartanR1csProgram;
+#[cfg(feature = "guest-r1cs-proof")]
+pub use r1cs_spartan::SpartanR1csProgramSpec;
+#[cfg(feature = "guest-r1cs-proof")]
+pub use r1cs_spartan::SpartanR1csRuntime;
+#[cfg(feature = "guest-r1cs-proof")]
+pub use r1cs_spartan::SpartanR1csRuntimeAdapter;
+#[cfg(feature = "guest-r1cs-proof")]
+pub use r1cs_spartan::SpartanR1csStepWitness;
+#[cfg(feature = "guest-r1cs-proof")]
+pub use r1cs_spartan::SpartanR1csVerifier;
 pub use runtime::assert_deterministic_replay;
 pub use runtime::GuestAcceptedOutput;
 pub use runtime::GuestBinary;

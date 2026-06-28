@@ -82,6 +82,24 @@ pub enum GuestError {
         /// Adapter-specific reason.
         reason: String,
     },
+    /// A proving runtime rejected its encoded program.
+    #[error("guest proof program is invalid: {reason}")]
+    ProofProgramInvalid {
+        /// Validation reason.
+        reason: String,
+    },
+    /// A proving runtime failed to decode a program, witness, or receipt.
+    #[error("guest proof data decode failed: {reason}")]
+    ProofDataDecode {
+        /// Decoding reason.
+        reason: String,
+    },
+    /// A proving runtime failed while producing a proof.
+    #[error("guest proof generation failed: {reason}")]
+    ProofGenerationFailed {
+        /// Prover reason.
+        reason: String,
+    },
     /// Guest output used more fuel than its manifest allows.
     #[error("guest used {used} fuel but manifest allows {limit}")]
     FuelLimitExceeded {
@@ -346,7 +364,8 @@ impl GuestReceiptClaim {
         }
     }
 
-    fn matches_receipt(&self, receipt: &GuestReceipt) -> bool {
+    /// Whether a receipt carries exactly this public claim.
+    pub fn matches_receipt(&self, receipt: &GuestReceipt) -> bool {
         self.program_hash == receipt.program_hash
             && self.public_input == receipt.public_input
             && self.public_output == receipt.public_output
