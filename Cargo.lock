@@ -5581,6 +5581,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "rings-proofs"
+version = "0.12.0"
+dependencies = [
+ "ark-bn254 0.4.0",
+ "ark-ec 0.4.2",
+ "ark-ff 0.4.2",
+ "bincode",
+ "bytes",
+ "num-bigint 0.4.6",
+ "risc0-zkvm",
+ "rmp-serde",
+ "serde",
+ "thiserror 1.0.69",
+ "tiny-keccak 2.0.2",
+ "wasm-bindgen-test",
+]
+
+[[package]]
 name = "rings-relay-example"
 version = "0.12.0"
 dependencies = [
@@ -5609,15 +5627,10 @@ dependencies = [
 name = "rings-runtime"
 version = "0.12.0"
 dependencies = [
- "ark-bn254 0.4.0",
- "ark-ec 0.4.2",
- "ark-ff 0.4.2",
  "bincode",
  "bytes",
- "num-bigint 0.4.6",
  "rings-core",
- "risc0-zkvm",
- "rmp-serde",
+ "rings-proofs",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

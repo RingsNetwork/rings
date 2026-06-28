@@ -7,8 +7,7 @@
 //! Rings binds a receipt by requiring the guest circuit to expose
 //! [`zkwasm_aggregator_claim_scalar`] as the first target instance.
 
-#[path = "zkwasm_aggregator_generated.rs"]
-mod zkwasm_aggregator_generated;
+mod generated;
 
 use ark_bn254::Bn254;
 use ark_bn254::Fq;
@@ -26,14 +25,15 @@ use ark_ff::PrimeField;
 use ark_ff::Zero;
 use bytes::Bytes;
 use num_bigint::BigUint;
-use rings_core::ecc::keccak256;
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::GuestError;
-use super::GuestReceipt;
-use super::GuestReceiptClaim;
-use super::GuestReceiptVerifier;
+use crate::data_decode;
+use crate::data_encode;
+use crate::keccak256;
+use crate::ProofClaim;
+use crate::ProofError;
+use crate::ProofSystem;
 
 type Word = BigUint;
 
@@ -51,7 +51,7 @@ const Q_MOD_BE: [u8; WORD_BYTES] = [
     0x28, 0x33, 0xe8, 0x48, 0x79, 0xb9, 0x70, 0x91, 0x43, 0xe1, 0xf5, 0x93, 0xf0, 0x00, 0x00, 0x01,
 ];
 
-/// Delphinus zkWasm aggregator proof payload carried in [`GuestReceipt::proof`].
+/// Delphinus zkWasm aggregator proof payload carried in receipt proof bytes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ZkWasmAggregatorReceipt {
     /// Aggregated proof transcript as little-endian 32-byte chunks.
@@ -71,7 +71,7 @@ impl ZkWasmAggregatorReceipt {
         verify_instance: &[u8],
         aux: &[u8],
         target_instances: Vec<Vec<[u8; WORD_BYTES]>>,
-    ) -> Result<Self, GuestError> {
+    ) -> Result<Self, ProofError> {
         Ok(Self {
             proof: split_chunks(proof, "proof")?,
             verify_instance: split_chunks(verify_instance, "verify_instance")?,
@@ -80,20 +80,16 @@ impl ZkWasmAggregatorReceipt {
         })
     }
 
-    /// Encode this payload for [`GuestReceipt::proof`].
-    pub fn encode(&self) -> Result<Bytes, GuestError> {
+    /// Encode this payload for receipt proof bytes.
+    pub fn encode(&self) -> Result<Bytes, ProofError> {
         bincode::serialize(self)
             .map(Bytes::from)
-            .map_err(|error| GuestError::ProofDataEncode {
-                reason: error.to_string(),
-            })
+            .map_err(|error| data_encode(error.to_string()))
     }
 
-    /// Decode this payload from [`GuestReceipt::proof`].
-    pub fn decode(bytes: &[u8]) -> Result<Self, GuestError> {
-        bincode::deserialize(bytes).map_err(|error| GuestError::ProofDataDecode {
-            reason: error.to_string(),
-        })
+    /// Decode this payload from receipt proof bytes.
+    pub fn decode(bytes: &[u8]) -> Result<Self, ProofError> {
+        bincode::deserialize(bytes).map_err(|error| data_decode(error.to_string()))
     }
 }
 
@@ -108,49 +104,48 @@ impl ZkWasmAggregatorVerifier {
     }
 }
 
-impl GuestReceiptVerifier for ZkWasmAggregatorVerifier {
-    fn verify(&self, claim: &GuestReceiptClaim, receipt: &GuestReceipt) -> Result<(), GuestError> {
-        if !claim.matches_receipt(receipt) {
-            return Err(GuestError::ReceiptClaimMismatch);
-        }
-        let payload = ZkWasmAggregatorReceipt::decode(receipt.proof.as_ref())?;
+impl ProofSystem for ZkWasmAggregatorVerifier {
+    type Verified = ();
+
+    fn verify(&self, claim: &ProofClaim, proof: &[u8]) -> Result<Self::Verified, ProofError> {
+        let payload = ZkWasmAggregatorReceipt::decode(proof)?;
         verify_claim_binding(claim, &payload)?;
         verify_aggregator_payload(&payload)
     }
 }
 
 /// Compute the first target instance that binds a zkWasm proof to a Rings receipt claim.
-pub fn zkwasm_aggregator_claim_scalar(claim: &GuestReceiptClaim) -> [u8; WORD_BYTES] {
+pub fn zkwasm_aggregator_claim_scalar(claim: &ProofClaim) -> [u8; WORD_BYTES] {
     word_to_32_le(&zkwasm_aggregator_claim_word(claim))
 }
 
-fn zkwasm_aggregator_claim_word(claim: &GuestReceiptClaim) -> Word {
+fn zkwasm_aggregator_claim_word(claim: &ProofClaim) -> Word {
     let mut transcript = Vec::new();
     transcript.extend_from_slice(CLAIM_BINDING_DOMAIN);
-    transcript.extend_from_slice(claim.program_hash.as_bytes());
-    append_len_prefixed(&mut transcript, claim.public_input.bytes());
-    append_len_prefixed(&mut transcript, claim.public_output.bytes());
+    transcript.extend_from_slice(claim.program_hash());
+    append_len_prefixed(&mut transcript, claim.public_input());
+    append_len_prefixed(&mut transcript, claim.public_output());
     let hash = keccak256(transcript.as_slice());
     BigUint::from_bytes_be(&hash) % q_mod()
 }
 
 fn verify_claim_binding(
-    claim: &GuestReceiptClaim,
+    claim: &ProofClaim,
     payload: &ZkWasmAggregatorReceipt,
-) -> Result<(), GuestError> {
+) -> Result<(), ProofError> {
     let Some(first_row) = payload.target_instances.first() else {
-        return Err(GuestError::ReceiptClaimMismatch);
+        return Err(ProofError::ClaimMismatch);
     };
     let Some(first_instance) = first_row.first() else {
-        return Err(GuestError::ReceiptClaimMismatch);
+        return Err(ProofError::ClaimMismatch);
     };
     if chunk_to_word_le(first_instance) != zkwasm_aggregator_claim_word(claim) {
-        return Err(GuestError::ReceiptClaimMismatch);
+        return Err(ProofError::ClaimMismatch);
     }
     Ok(())
 }
 
-fn verify_aggregator_payload(payload: &ZkWasmAggregatorReceipt) -> Result<(), GuestError> {
+fn verify_aggregator_payload(payload: &ZkWasmAggregatorReceipt) -> Result<(), ProofError> {
     let proof = chunks_to_words(payload.proof.as_slice());
     let verify_instance = chunks_to_words(payload.verify_instance.as_slice());
     let aux = chunks_to_words(payload.aux.as_slice());
@@ -167,7 +162,7 @@ fn verify_aggregator(
     verify_instance: &[Word],
     aux: &[Word],
     target_instances: &[Vec<Word>],
-) -> Result<(), GuestError> {
+) -> Result<(), ProofError> {
     let mut buf = vec![zero(); VERIFY_BUF_WORDS];
     let mut len = 0usize;
     for row in target_instances {
@@ -189,13 +184,13 @@ fn verify_aggregator(
 
     calc_verify_circuit_lagrange(buf.as_mut_slice())?;
     get_challenges(proof, buf.as_mut_slice())?;
-    zkwasm_aggregator_generated::step1(proof, aux, buf.as_mut_slice())?;
-    zkwasm_aggregator_generated::step2(proof, aux, buf.as_mut_slice())?;
-    zkwasm_aggregator_generated::step3(proof, aux, buf.as_mut_slice())?;
-    let ret = zkwasm_aggregator_generated::step4(proof, aux, buf.as_mut_slice())?;
+    generated::step1(proof, aux, buf.as_mut_slice())?;
+    generated::step2(proof, aux, buf.as_mut_slice())?;
+    generated::step3(proof, aux, buf.as_mut_slice())?;
+    let ret = generated::step4(proof, aux, buf.as_mut_slice())?;
 
     if ret.iter().any(is_zero_word) {
-        return Err(GuestError::ReceiptVerificationFailed {
+        return Err(ProofError::VerificationFailed {
             reason: "invalid generated pairing point".to_string(),
         });
     }
@@ -206,7 +201,7 @@ fn verify_aggregator(
     set_word(pairing_buf.as_mut_slice(), 7, word(ret.as_slice(), 3)?)?;
     fill_verify_circuits_g2(pairing_buf.as_mut_slice())?;
     if !pairing(pairing_buf.as_slice())? {
-        return Err(GuestError::ReceiptVerificationFailed {
+        return Err(ProofError::VerificationFailed {
             reason: "verify circuit pairing check failed".to_string(),
         });
     }
@@ -218,9 +213,9 @@ fn append_len_prefixed(buffer: &mut Vec<u8>, value: &[u8]) {
     buffer.extend_from_slice(value);
 }
 
-fn split_chunks(bytes: &[u8], field: &'static str) -> Result<Vec<[u8; WORD_BYTES]>, GuestError> {
+fn split_chunks(bytes: &[u8], field: &'static str) -> Result<Vec<[u8; WORD_BYTES]>, ProofError> {
     if bytes.len() % WORD_BYTES != 0 {
-        return Err(GuestError::ProofDataDecode {
+        return Err(ProofError::DataDecode {
             reason: format!("{field} length is not a multiple of {WORD_BYTES} bytes"),
         });
     }
@@ -251,7 +246,7 @@ fn word_to_32_le(value: &Word) -> [u8; WORD_BYTES] {
     out
 }
 
-fn word_to_32_be(value: &Word) -> Result<[u8; WORD_BYTES], GuestError> {
+fn word_to_32_be(value: &Word) -> Result<[u8; WORD_BYTES], ProofError> {
     let bytes = value.to_bytes_be();
     if bytes.len() > WORD_BYTES {
         return Err(proof_decode("uint256 word exceeds 32 bytes"));
@@ -284,20 +279,20 @@ fn is_zero_word(value: &Word) -> bool {
     value == &zero()
 }
 
-fn word_dec(value: &str) -> Result<Word, GuestError> {
-    BigUint::parse_bytes(value.as_bytes(), 10).ok_or_else(|| GuestError::ProofProgramInvalid {
+fn word_dec(value: &str) -> Result<Word, ProofError> {
+    BigUint::parse_bytes(value.as_bytes(), 10).ok_or_else(|| ProofError::ProgramInvalid {
         reason: format!("invalid generated verifier constant {value}"),
     })
 }
 
-fn word(values: &[Word], index: usize) -> Result<Word, GuestError> {
+fn word(values: &[Word], index: usize) -> Result<Word, ProofError> {
     values
         .get(index)
         .cloned()
         .ok_or_else(|| proof_decode(format!("missing word at index {index}")))
 }
 
-fn set_word(values: &mut [Word], index: usize, value: Word) -> Result<(), GuestError> {
+fn set_word(values: &mut [Word], index: usize, value: Word) -> Result<(), ProofError> {
     let Some(slot) = values.get_mut(index) else {
         return Err(proof_decode(format!("word index {index} is out of range")));
     };
@@ -313,25 +308,25 @@ fn evm_mulmod(a: Word, b: Word, modulus: Word) -> Word {
     (a * b) % modulus
 }
 
-fn q_mod_minus(value: Word) -> Result<Word, GuestError> {
+fn q_mod_minus(value: Word) -> Result<Word, ProofError> {
     let modulus = q_mod();
     if value > modulus {
-        return Err(GuestError::ReceiptVerificationFailed {
+        return Err(ProofError::VerificationFailed {
             reason: "field subtraction underflow in generated verifier".to_string(),
         });
     }
     Ok(modulus - value)
 }
 
-fn fr_div(a: Word, b: Word, aux: Word) -> Result<Word, GuestError> {
+fn fr_div(a: Word, b: Word, aux: Word) -> Result<Word, ProofError> {
     if is_zero_word(&b) {
-        return Err(GuestError::ReceiptVerificationFailed {
+        return Err(ProofError::VerificationFailed {
             reason: "division by zero in generated verifier".to_string(),
         });
     }
     let modulus = q_mod();
     if evm_mulmod(b, aux.clone(), modulus.clone()) != a % modulus.clone() {
-        return Err(GuestError::ReceiptVerificationFailed {
+        return Err(ProofError::VerificationFailed {
             reason: "division witness mismatch in generated verifier".to_string(),
         });
     }
@@ -342,7 +337,7 @@ fn fr_pow(a: Word, power: Word) -> Word {
     a.modpow(&power, &q_mod())
 }
 
-fn hash_instances(values: &[Word], len: usize) -> Result<Word, GuestError> {
+fn hash_instances(values: &[Word], len: usize) -> Result<Word, ProofError> {
     let words = values
         .get(..len)
         .ok_or_else(|| proof_decode(format!("hash_instances length {len} is out of range")))?;
@@ -353,7 +348,7 @@ fn hash_instances(values: &[Word], len: usize) -> Result<Word, GuestError> {
     Ok(BigUint::from_bytes_be(&keccak256(bytes.as_slice())) % q_mod())
 }
 
-fn hash_with_trailing_zero(values: &[Word], len: usize) -> Result<Word, GuestError> {
+fn hash_with_trailing_zero(values: &[Word], len: usize) -> Result<Word, ProofError> {
     let words = values
         .get(..len)
         .ok_or_else(|| proof_decode(format!("challenge length {len} is out of range")))?;
@@ -365,14 +360,14 @@ fn hash_with_trailing_zero(values: &[Word], len: usize) -> Result<Word, GuestErr
     Ok(BigUint::from_bytes_be(&keccak256(bytes.as_slice())))
 }
 
-fn squeeze_challenge(absorbing: &mut [Word], len: usize) -> Result<Word, GuestError> {
+fn squeeze_challenge(absorbing: &mut [Word], len: usize) -> Result<Word, ProofError> {
     set_word(absorbing, len, zero())?;
     let challenge = hash_with_trailing_zero(absorbing, len)?;
     set_word(absorbing, 0, challenge.clone())?;
     Ok(challenge % q_mod())
 }
 
-fn check_on_curve(x: &Word, y: &Word) -> Result<(), GuestError> {
+fn check_on_curve(x: &Word, y: &Word) -> Result<(), ProofError> {
     if is_zero_word(x) && is_zero_word(y) {
         return Ok(());
     }
@@ -382,14 +377,14 @@ fn check_on_curve(x: &Word, y: &Word) -> Result<(), GuestError> {
     let x3 = evm_mulmod(x2, x.clone(), modulus.clone());
     let right = evm_addmod(x3, word_dec("3")?, modulus);
     if left != right {
-        return Err(GuestError::ReceiptVerificationFailed {
+        return Err(ProofError::VerificationFailed {
             reason: "generated verifier point is not on BN254 G1".to_string(),
         });
     }
     Ok(())
 }
 
-fn fill_verify_circuits_g2(pairing_buf: &mut [Word]) -> Result<(), GuestError> {
+fn fill_verify_circuits_g2(pairing_buf: &mut [Word]) -> Result<(), ProofError> {
     set_word(
         pairing_buf,
         2,
@@ -433,7 +428,7 @@ fn fill_verify_circuits_g2(pairing_buf: &mut [Word]) -> Result<(), GuestError> {
     Ok(())
 }
 
-fn calc_verify_circuit_lagrange(buf: &mut [Word]) -> Result<(), GuestError> {
+fn calc_verify_circuit_lagrange(buf: &mut [Word]) -> Result<(), ProofError> {
     set_word(
         buf,
         0,
@@ -447,7 +442,7 @@ fn calc_verify_circuit_lagrange(buf: &mut [Word]) -> Result<(), GuestError> {
     msm(buf, 0, 1)
 }
 
-fn get_challenges(transcript: &[Word], buf: &mut [Word]) -> Result<(), GuestError> {
+fn get_challenges(transcript: &[Word], buf: &mut [Word]) -> Result<(), ProofError> {
     let mut absorbing = vec![zero(); CHALLENGE_WORDS];
     set_word(
         absorbing.as_mut_slice(),
@@ -543,7 +538,7 @@ fn absorb_curve_points(
     pos: &mut usize,
     transcript_pos: &mut usize,
     count: usize,
-) -> Result<(), GuestError> {
+) -> Result<(), ProofError> {
     for _ in 0..count {
         let x = word(transcript, *transcript_pos)?;
         let y = word(
@@ -568,9 +563,9 @@ fn absorb_curve_points(
     Ok(())
 }
 
-fn msm(buf: &mut [Word], offset: usize, count: usize) -> Result<(), GuestError> {
+fn msm(buf: &mut [Word], offset: usize, count: usize) -> Result<(), ProofError> {
     if count != 1 {
-        return Err(GuestError::ProofProgramInvalid {
+        return Err(ProofError::ProgramInvalid {
             reason: format!("unsupported generated verifier MSM count {count}"),
         });
     }
@@ -598,7 +593,7 @@ fn msm(buf: &mut [Word], offset: usize, count: usize) -> Result<(), GuestError> 
     )
 }
 
-fn ecc_mul(buf: &mut [Word], offset: usize) -> Result<(), GuestError> {
+fn ecc_mul(buf: &mut [Word], offset: usize) -> Result<(), ProofError> {
     let scalar = word(
         buf,
         offset
@@ -611,7 +606,7 @@ fn ecc_mul(buf: &mut [Word], offset: usize) -> Result<(), GuestError> {
     msm(buf, offset, 1)
 }
 
-fn ecc_mul_add(buf: &mut [Word], offset: usize) -> Result<(), GuestError> {
+fn ecc_mul_add(buf: &mut [Word], offset: usize) -> Result<(), ProofError> {
     let acc = g1_from_words(
         &word(buf, offset)?,
         &word(
@@ -649,11 +644,11 @@ fn ecc_mul_add(buf: &mut [Word], offset: usize) -> Result<(), GuestError> {
     )
 }
 
-fn g1_mul(x: &Word, y: &Word, scalar: &Word) -> Result<(Word, Word), GuestError> {
+fn g1_mul(x: &Word, y: &Word, scalar: &Word) -> Result<(Word, Word), ProofError> {
     g1_projective_to_words(g1_mul_projective(x, y, scalar)?)
 }
 
-fn g1_mul_projective(x: &Word, y: &Word, scalar: &Word) -> Result<G1Projective, GuestError> {
+fn g1_mul_projective(x: &Word, y: &Word, scalar: &Word) -> Result<G1Projective, ProofError> {
     let point = g1_from_words(x, y)?;
     if point.is_zero() || is_zero_word(scalar) {
         return Ok(G1Projective::zero());
@@ -661,7 +656,7 @@ fn g1_mul_projective(x: &Word, y: &Word, scalar: &Word) -> Result<G1Projective, 
     Ok(point * fr_from_word_mod(scalar)?)
 }
 
-fn g1_from_words(x: &Word, y: &Word) -> Result<G1Affine, GuestError> {
+fn g1_from_words(x: &Word, y: &Word) -> Result<G1Affine, ProofError> {
     if is_zero_word(x) && is_zero_word(y) {
         return Ok(G1Affine::identity());
     }
@@ -670,9 +665,9 @@ fn g1_from_words(x: &Word, y: &Word) -> Result<G1Affine, GuestError> {
     Ok(point)
 }
 
-fn validate_g1(point: G1Affine) -> Result<(), GuestError> {
+fn validate_g1(point: G1Affine) -> Result<(), ProofError> {
     if !point.is_on_curve() || !point.is_in_correct_subgroup_assuming_on_curve() {
-        return Err(GuestError::ReceiptVerificationFailed {
+        return Err(ProofError::VerificationFailed {
             reason: "invalid BN254 G1 point".to_string(),
         });
     }
@@ -684,20 +679,20 @@ fn g2_from_words(
     x_re: &Word,
     y_im: &Word,
     y_re: &Word,
-) -> Result<G2Affine, GuestError> {
+) -> Result<G2Affine, ProofError> {
     let point = G2Affine::new_unchecked(
         Fq2::new(fq_from_word(x_re)?, fq_from_word(x_im)?),
         Fq2::new(fq_from_word(y_re)?, fq_from_word(y_im)?),
     );
     if !point.is_on_curve() || !point.is_in_correct_subgroup_assuming_on_curve() {
-        return Err(GuestError::ReceiptVerificationFailed {
+        return Err(ProofError::VerificationFailed {
             reason: "invalid BN254 G2 point".to_string(),
         });
     }
     Ok(point)
 }
 
-fn g1_projective_to_words(point: G1Projective) -> Result<(Word, Word), GuestError> {
+fn g1_projective_to_words(point: G1Projective) -> Result<(Word, Word), ProofError> {
     if point.is_zero() {
         return Ok((zero(), zero()));
     }
@@ -705,7 +700,7 @@ fn g1_projective_to_words(point: G1Projective) -> Result<(Word, Word), GuestErro
     Ok((field_to_word(&affine.x), field_to_word(&affine.y)))
 }
 
-fn pairing(input: &[Word]) -> Result<bool, GuestError> {
+fn pairing(input: &[Word]) -> Result<bool, ProofError> {
     if input.len() != PAIRING_WORDS {
         return Err(proof_decode("pairing input must have 12 words"));
     }
@@ -729,16 +724,16 @@ fn pairing(input: &[Word]) -> Result<bool, GuestError> {
     )
 }
 
-fn fq_from_word(value: &Word) -> Result<Fq, GuestError> {
+fn fq_from_word(value: &Word) -> Result<Fq, ProofError> {
     if value >= &p_mod() {
-        return Err(GuestError::ReceiptVerificationFailed {
+        return Err(ProofError::VerificationFailed {
             reason: "BN254 base-field element is out of range".to_string(),
         });
     }
     Ok(Fq::from_be_bytes_mod_order(&word_to_32_be(value)?))
 }
 
-fn fr_from_word_mod(value: &Word) -> Result<Fr, GuestError> {
+fn fr_from_word_mod(value: &Word) -> Result<Fr, ProofError> {
     Ok(Fr::from_be_bytes_mod_order(&word_to_32_be(
         &(value % q_mod()),
     )?))
@@ -749,8 +744,8 @@ where F: PrimeField {
     BigUint::from_bytes_be(&value.into_bigint().to_bytes_be())
 }
 
-fn proof_decode(reason: impl Into<String>) -> GuestError {
-    GuestError::ProofDataDecode {
+fn proof_decode(reason: impl Into<String>) -> ProofError {
+    ProofError::DataDecode {
         reason: reason.into(),
     }
 }
@@ -758,36 +753,25 @@ fn proof_decode(reason: impl Into<String>) -> GuestError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::GuestProgramHash;
-    use crate::GuestPublicInput;
-    use crate::GuestPublicOutput;
 
-    fn hash(seed: u8) -> Result<GuestProgramHash, GuestError> {
-        GuestProgramHash::new([seed; WORD_BYTES], "test")
+    fn hash(seed: u8) -> [u8; WORD_BYTES] {
+        [seed; WORD_BYTES]
     }
 
-    fn claim() -> Result<GuestReceiptClaim, GuestError> {
-        Ok(GuestReceiptClaim::new(
-            hash(7)?,
-            GuestPublicInput::new(Bytes::from_static(b"in")),
-            GuestPublicOutput::new(Bytes::from_static(b"out")),
-        ))
+    fn claim() -> ProofClaim {
+        ProofClaim::new(
+            hash(7),
+            Bytes::from_static(b"in"),
+            Bytes::from_static(b"out"),
+        )
     }
 
-    fn receipt_from_payload(
-        claim: &GuestReceiptClaim,
-        payload: ZkWasmAggregatorReceipt,
-    ) -> Result<GuestReceipt, GuestError> {
-        Ok(GuestReceipt {
-            program_hash: claim.program_hash,
-            public_input: claim.public_input.clone(),
-            public_output: claim.public_output.clone(),
-            proof: payload.encode()?,
-        })
+    fn proof_from_payload(payload: ZkWasmAggregatorReceipt) -> Result<Bytes, ProofError> {
+        payload.encode()
     }
 
-    fn malformed_bound_receipt(claim: &GuestReceiptClaim) -> Result<GuestReceipt, GuestError> {
-        receipt_from_payload(claim, ZkWasmAggregatorReceipt {
+    fn malformed_bound_proof(claim: &ProofClaim) -> Result<Bytes, ProofError> {
+        proof_from_payload(ZkWasmAggregatorReceipt {
             proof: Vec::new(),
             verify_instance: Vec::new(),
             aux: Vec::new(),
@@ -796,8 +780,8 @@ mod tests {
     }
 
     #[test]
-    fn zkwasm_claim_scalar_is_stable_and_field_reduced() -> Result<(), GuestError> {
-        let scalar = zkwasm_aggregator_claim_scalar(&claim()?);
+    fn zkwasm_claim_scalar_is_stable_and_field_reduced() {
+        let scalar = zkwasm_aggregator_claim_scalar(&claim());
         let word = chunk_to_word_le(&scalar);
 
         assert!(word < q_mod());
@@ -806,14 +790,13 @@ mod tests {
             0xcc, 0xf2, 0xa7, 0x99, 0x00, 0x2a, 0xdf, 0xec, 0x4f, 0x42, 0x81, 0x8e, 0x68, 0x2a,
             0x37, 0x9f, 0x14, 0x14,
         ]);
-        Ok(())
     }
 
     #[test]
     fn service_bytes_must_be_whole_words() {
         assert!(matches!(
             ZkWasmAggregatorReceipt::from_service_bytes(&[1, 2], &[], &[], Vec::new()),
-            Err(GuestError::ProofDataDecode { .. })
+            Err(ProofError::DataDecode { .. })
         ));
     }
 
@@ -821,36 +804,36 @@ mod tests {
     fn generated_field_subtraction_underflow_returns_error() {
         assert!(matches!(
             q_mod_minus(q_mod() + one()),
-            Err(GuestError::ReceiptVerificationFailed { .. })
+            Err(ProofError::VerificationFailed { .. })
         ));
     }
 
     #[test]
-    fn verifier_rejects_receipt_without_claim_binding() -> Result<(), GuestError> {
-        let claim = claim()?;
+    fn verifier_rejects_receipt_without_claim_binding() -> Result<(), ProofError> {
+        let claim = claim();
         let payload = ZkWasmAggregatorReceipt {
             proof: Vec::new(),
             verify_instance: Vec::new(),
             aux: Vec::new(),
             target_instances: Vec::new(),
         };
-        let receipt = receipt_from_payload(&claim, payload)?;
+        let proof = proof_from_payload(payload)?;
 
         assert_eq!(
-            ZkWasmAggregatorVerifier::new().verify(&claim, &receipt),
-            Err(GuestError::ReceiptClaimMismatch)
+            ZkWasmAggregatorVerifier::new().verify(&claim, proof.as_ref()),
+            Err(ProofError::ClaimMismatch)
         );
         Ok(())
     }
 
     #[test]
-    fn verifier_rejects_malformed_proof_after_claim_binding() -> Result<(), GuestError> {
-        let claim = claim()?;
-        let receipt = malformed_bound_receipt(&claim)?;
+    fn verifier_rejects_malformed_proof_after_claim_binding() -> Result<(), ProofError> {
+        let claim = claim();
+        let proof = malformed_bound_proof(&claim)?;
 
         assert!(matches!(
-            ZkWasmAggregatorVerifier::new().verify(&claim, &receipt),
-            Err(GuestError::ProofDataDecode { .. })
+            ZkWasmAggregatorVerifier::new().verify(&claim, proof.as_ref()),
+            Err(ProofError::DataDecode { .. })
         ));
         Ok(())
     }
@@ -866,14 +849,8 @@ mod tests {
 
         #[wasm_bindgen_test]
         fn zkwasm_aggregator_wasm32_rejects_malformed_bound_receipt() {
-            let claim = match claim() {
-                Ok(claim) => claim,
-                Err(error) => {
-                    assert!(false, "valid test claim failed: {error}");
-                    return;
-                }
-            };
-            let receipt = match malformed_bound_receipt(&claim) {
+            let claim = claim();
+            let proof = match malformed_bound_proof(&claim) {
                 Ok(receipt) => receipt,
                 Err(error) => {
                     assert!(false, "malformed test receipt failed: {error}");
@@ -882,8 +859,8 @@ mod tests {
             };
 
             assert!(matches!(
-                ZkWasmAggregatorVerifier::new().verify(&claim, &receipt),
-                Err(GuestError::ProofDataDecode { .. })
+                ZkWasmAggregatorVerifier::new().verify(&claim, proof.as_ref()),
+                Err(ProofError::DataDecode { .. })
             ));
         }
     }

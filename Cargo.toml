@@ -16,6 +16,7 @@ jsonrpc-core = "18.0.0"
 rings-core = { path = "crates/core", version = "0.12.0", default-features = false }
 rings-derive = { path = "crates/derive", version = "0.12.0", default-features = false }
 rings-node = { path = "crates/node", version = "0.12.0" }
+rings-proofs = { path = "crates/proofs", version = "0.12.0", default-features = false }
 rings-rpc = { path = "crates/rpc", version = "0.12.0", default-features = false }
 rings-runtime = { path = "crates/runtime", version = "0.12.0", default-features = false }
 rings-snark = { path = "crates/snark", version = "0.12.0", default-features = false }

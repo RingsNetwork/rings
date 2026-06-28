@@ -2,17 +2,19 @@
 //! Guest extension runtime model and proof adapters.
 //!
 //! This crate owns the runtime-neutral guest state-transition model, manifest
-//! validation, receipt contract, and concrete proof adapters. `rings-node`
-//! should only bind this model to the node extension registry and host `Scope`.
+//! validation, receipt contract, and thin proof adapters. `rings-node` should
+//! only bind this model to the node extension registry and host `Scope`.
 
 mod manifest;
+#[cfg(any(feature = "risc0-proof", feature = "wasm-proof"))]
+mod proofs;
 #[cfg(feature = "risc0-proof")]
-mod risc0_zkvm;
+mod risc0;
 mod runtime;
 #[cfg(test)]
 mod runtime_tests;
 #[cfg(feature = "wasm-proof")]
-mod zkwasm_aggregator;
+mod zkwasm;
 
 pub use manifest::GuestCapabilities;
 pub use manifest::GuestCapability;
@@ -24,17 +26,17 @@ pub use manifest::GuestRuntimeKind;
 pub use manifest::ProofPolicy;
 pub use manifest::SUPPORTED_GUEST_ABI_VERSION;
 #[cfg(all(feature = "risc0-prove", not(target_arch = "wasm32")))]
-pub use risc0_zkvm::instantiate_risc0_zkvm_runtime;
+pub use risc0::instantiate_risc0_zkvm_runtime;
 #[cfg(feature = "risc0-proof")]
-pub use risc0_zkvm::risc0_image_id_hash;
+pub use risc0::risc0_image_id_hash;
 #[cfg(all(feature = "risc0-prove", not(target_arch = "wasm32")))]
-pub use risc0_zkvm::risc0_zkvm_runtime_adapter;
+pub use risc0::risc0_zkvm_runtime_adapter;
 #[cfg(feature = "risc0-proof")]
-pub use risc0_zkvm::Risc0ReceiptVerifier;
+pub use risc0::Risc0ReceiptVerifier;
 #[cfg(all(feature = "risc0-prove", not(target_arch = "wasm32")))]
-pub use risc0_zkvm::Risc0ZkvmRuntime;
+pub use risc0::Risc0ZkvmRuntime;
 #[cfg(all(feature = "risc0-prove", not(target_arch = "wasm32")))]
-pub use risc0_zkvm::Risc0ZkvmRuntimeAdapter;
+pub use risc0::Risc0ZkvmRuntimeAdapter;
 pub use runtime::accept_step_output;
 pub use runtime::assert_deterministic_replay;
 pub use runtime::GuestAcceptedOutput;
@@ -57,11 +59,11 @@ pub use runtime::GuestState;
 pub use runtime::GuestStepInput;
 pub use runtime::GuestStepOutput;
 #[cfg(feature = "wasm-proof")]
-pub use zkwasm_aggregator::zkwasm_aggregator_claim_scalar;
+pub use zkwasm::zkwasm_aggregator_claim_scalar;
 #[cfg(feature = "wasm-proof")]
-pub use zkwasm_aggregator::ZkWasmAggregatorReceipt;
+pub use zkwasm::ZkWasmAggregatorReceipt;
 #[cfg(feature = "wasm-proof")]
-pub use zkwasm_aggregator::ZkWasmAggregatorVerifier;
+pub use zkwasm::ZkWasmAggregatorVerifier;
 
 /// Auto-trait bound that is `Send + Sync` on native and empty on browser.
 ///

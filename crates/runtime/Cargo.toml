@@ -15,32 +15,23 @@ default = ["std"]
 std = ["rings-core/std"]
 browser = ["rings-core/wasm"]
 risc0-proof = [
-    "dep:risc0-zkvm",
-    "risc0-zkvm/disable-dev-mode",
-    "dep:rmp-serde",
+    "dep:rings-proofs",
+    "rings-proofs/risc0-proof",
 ]
 risc0-prove = [
     "risc0-proof",
-    "risc0-zkvm/client",
-    "risc0-zkvm/prove",
+    "rings-proofs/risc0-prove",
 ]
 wasm-proof = [
-    "dep:ark-bn254",
-    "dep:ark-ec",
-    "dep:ark-ff",
-    "dep:num-bigint",
+    "dep:rings-proofs",
+    "rings-proofs/wasm-proof",
 ]
 
 [dependencies]
-ark-bn254 = { version = "0.4.0", default-features = false, features = ["curve"], optional = true }
-ark-ec = { version = "0.4.2", default-features = false, optional = true }
-ark-ff = { version = "0.4.2", default-features = false, optional = true }
 bincode = "1.3.3"
 bytes = { version = "1.2.1", features = ["serde"] }
-num-bigint = { version = "0.4.3", optional = true }
 rings-core = { workspace = true, default-features = false }
-risc0-zkvm = { version = "=3.0.5", default-features = false, optional = true }
-rmp-serde = { version = "1.3.1", optional = true }
+rings-proofs = { workspace = true, optional = true }
 serde = { version = "1.0.136", features = ["derive"] }
 serde_json = "1.0.70"
 thiserror = "1"

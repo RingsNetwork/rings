@@ -1,11 +1,11 @@
 #![allow(missing_docs)]
 // This file is mechanically translated from Delphinus continuation-batcher Solidity verifier steps.
 // The source Solidity verifier files declare SPDX-License-Identifier: MIT.
-// Keep the handwritten verifier boundary in zkwasm_aggregator.rs; this module is generated glue.
+// Keep the handwritten verifier boundary in zkwasm/mod.rs; this module is generated glue.
 
 use super::*;
 
-pub(super) fn step1(transcript: &[Word], aux: &[Word], buf: &mut [Word]) -> Result<(), GuestError> {
+pub(super) fn step1(transcript: &[Word], aux: &[Word], buf: &mut [Word]) -> Result<(), ProofError> {
     let value_10_11_a = word(transcript, 124)?;
     let value_10_11_b = word(transcript, 125)?;
     set_word(buf, 10, value_10_11_a)?;
@@ -1147,7 +1147,7 @@ pub(super) fn step1(transcript: &[Word], aux: &[Word], buf: &mut [Word]) -> Resu
     Ok(())
 }
 
-pub(super) fn step2(transcript: &[Word], aux: &[Word], buf: &mut [Word]) -> Result<(), GuestError> {
+pub(super) fn step2(transcript: &[Word], aux: &[Word], buf: &mut [Word]) -> Result<(), ProofError> {
     set_word(buf, 33, evm_addmod(evm_mulmod(evm_addmod(word(buf, 33)?, evm_mulmod(word(buf, 3)?, word(transcript, 96)?, q_mod()), q_mod()), evm_mulmod(evm_addmod(word(buf, 34)?, evm_mulmod(word(buf, 3)?, word(transcript, 95)?, q_mod()), q_mod()), word(transcript, 109)?, q_mod()), q_mod()), q_mod_minus(evm_mulmod(evm_addmod(word(buf, 33)?, evm_mulmod(word_dec("4131629893567559867359510883348571134090853742863529169391034518566172092834")?, word(buf, 35)?, q_mod()), q_mod()), evm_mulmod(evm_addmod(word(buf, 34)?, word(buf, 35)?, q_mod()), word(transcript, 108)?, q_mod()), q_mod()))?, q_mod()))?;
     set_word(
         buf,
@@ -2264,7 +2264,7 @@ pub(super) fn step3(
     transcript: &[Word],
     _aux: &[Word],
     buf: &mut [Word],
-) -> Result<(), GuestError> {
+) -> Result<(), ProofError> {
     set_word(
         buf,
         34,
@@ -2620,7 +2620,7 @@ pub(super) fn step4(
     transcript: &[Word],
     _aux: &[Word],
     buf: &mut [Word],
-) -> Result<Vec<Word>, GuestError> {
+) -> Result<Vec<Word>, ProofError> {
     let value_14_15_a =
         word_dec("3485352785218733130382545172103328837021794818319892061587750343874992026690")?;
     let value_14_15_b =
