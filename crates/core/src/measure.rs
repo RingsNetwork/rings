@@ -55,11 +55,6 @@ impl PeerQuality {
             Self::Degraded => 2,
         }
     }
-
-    /// Return whether this quality still permits the normal preferred path.
-    pub const fn permits_preferred_path(self) -> bool {
-        !matches!(self, Self::Degraded)
-    }
 }
 
 /// Failure limits used to classify local peer-quality evidence.
@@ -186,18 +181,22 @@ pub trait Measure {
     async fn get_count(&self, did: Did, counter: MeasureCounter) -> u64;
 }
 
-/// `BehaviourJudgement` trait defines a method `good` for assessing whether a node behaves well.
-/// Any structure implementing this trait should provide a way to measure the "goodness" of a node.
+/// `BehaviourJudgement` classifies local evidence about a peer.
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait BehaviourJudgement: Measure {
     /// Classify local peer quality for DHT connection scheduling.
+    ///
+    /// This value is advisory. It orders connection attempts and does not gate
+    /// Chord membership, routing, ownership, or storage placement.
     async fn quality(&self, did: Did) -> PeerQuality;
 
-    /// This asynchronous method should return a boolean indicating whether the node identified by `did` is behaving well.
-    async fn good(&self, did: Did) -> bool {
-        self.quality(did).await.permits_preferred_path()
-    }
+    /// Return the legacy boolean judgement for callers that need a yes/no decision.
+    ///
+    /// This method is intentionally independent from [Self::quality]. Mapping
+    /// the three-valued quality order to a boolean would turn advisory DHT
+    /// scheduling evidence into a hidden gating rule.
+    async fn good(&self, did: Did) -> bool;
 }
 
 /// `ConnectBehaviour` trait offers a default implementation for the `good` method, providing a judgement
@@ -272,6 +271,10 @@ mod tests {
         );
         assert_eq!(
             PeerQualityEvidence::new(1, 0, 0, 10, 0, 0).classify(thresholds),
+            PeerQuality::Degraded
+        );
+        assert_eq!(
+            PeerQualityEvidence::new(1, 0, 0, 0, 0, 10).classify(thresholds),
             PeerQuality::Degraded
         );
     }

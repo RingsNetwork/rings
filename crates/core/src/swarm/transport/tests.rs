@@ -60,6 +60,10 @@ impl BehaviourJudgement for RecordingMeasure {
             }
         }
     }
+
+    async fn good(&self, _did: Did) -> bool {
+        true
+    }
 }
 
 fn transport_with_measure(measure: MeasureImpl) -> Result<SwarmTransport> {

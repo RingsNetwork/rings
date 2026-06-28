@@ -222,6 +222,22 @@ impl measure::BehaviourJudgement for PeriodicMeasure {
             .await
             .classify(thresholds)
     }
+
+    async fn good(&self, did: Did) -> bool {
+        let connection_is_good = <Self as measure::ConnectBehaviour<
+            { crate::consts::CONNECT_FAILED_LIMIT },
+        >>::good(self, did)
+        .await;
+        let send_is_good = <Self as measure::MessageSendBehaviour<
+            { crate::consts::MSG_SEND_FAILED_LIMIT },
+        >>::good(self, did)
+        .await;
+        let receive_is_good = <Self as measure::MessageRecvBehaviour<
+            { crate::consts::MSG_RECV_FAILED_LIMIT },
+        >>::good(self, did)
+        .await;
+        connection_is_good && send_is_good && receive_is_good
+    }
 }
 
 #[cfg(test)]
@@ -406,7 +422,6 @@ mod tests {
         }
 
         assert_eq!(measure.quality(did).await, PeerQuality::Degraded);
-        assert!(!BehaviourJudgement::good(&measure, did).await);
         Ok(())
     }
 }
