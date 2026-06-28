@@ -98,6 +98,7 @@ pub trait ProofSystem {
 }
 
 /// Build a decode error.
+#[cfg(any(feature = "risc0-proof", feature = "wasm-proof"))]
 pub(crate) fn data_decode(reason: impl Into<String>) -> ProofError {
     ProofError::DataDecode {
         reason: reason.into(),
@@ -105,6 +106,7 @@ pub(crate) fn data_decode(reason: impl Into<String>) -> ProofError {
 }
 
 /// Build an encode error.
+#[cfg(any(feature = "risc0-prove", feature = "wasm-proof", test))]
 pub(crate) fn data_encode(reason: impl Into<String>) -> ProofError {
     ProofError::DataEncode {
         reason: reason.into(),
