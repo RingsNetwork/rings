@@ -20,9 +20,8 @@ pub const SUPPORTED_GUEST_ABI_VERSION: u16 = 1;
 pub enum GuestRuntimeKind {
     /// WebAssembly guest runtime.
     Wasm,
-    /// R1CS guest runtime, intended for SNARK-friendly adapters.
-    #[serde(alias = "riscv")]
-    R1cs,
+    /// RISC-V zkVM guest runtime.
+    Riscv,
 }
 
 /// Host capabilities a v1 guest may request.
@@ -388,14 +387,10 @@ mod tests {
     }
 
     #[test]
-    fn runtime_kind_deserializes_r1cs_and_legacy_riscv_name() {
+    fn runtime_kind_deserializes_riscv_name() {
         assert_eq!(
-            serde_json::from_str::<GuestRuntimeKind>("\"r1cs\"").expect("parse r1cs"),
-            GuestRuntimeKind::R1cs
-        );
-        assert_eq!(
-            serde_json::from_str::<GuestRuntimeKind>("\"riscv\"").expect("parse legacy riscv"),
-            GuestRuntimeKind::R1cs
+            serde_json::from_str::<GuestRuntimeKind>("\"riscv\"").expect("parse riscv"),
+            GuestRuntimeKind::Riscv
         );
     }
 
@@ -410,14 +405,14 @@ mod tests {
             ProofPolicy::VerifyReceipt
         );
 
-        let mut r1cs_without_receipt = valid_spec();
-        r1cs_without_receipt.runtime = GuestRuntimeKind::R1cs;
-        r1cs_without_receipt.proof_policy = ProofPolicy::None;
+        let mut riscv_without_receipt = valid_spec();
+        riscv_without_receipt.runtime = GuestRuntimeKind::Riscv;
+        riscv_without_receipt.proof_policy = ProofPolicy::None;
         assert_eq!(
-            GuestManifest::validate(r1cs_without_receipt)
-                .expect("r1cs replay adapter profile is allowed")
+            GuestManifest::validate(riscv_without_receipt)
+                .expect("riscv replay adapter profile is allowed")
                 .runtime(),
-            GuestRuntimeKind::R1cs
+            GuestRuntimeKind::Riscv
         );
     }
 

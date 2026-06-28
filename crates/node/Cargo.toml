@@ -72,11 +72,15 @@ browser = [
 ]
 # run unittest with snark
 browser_chrome_test = ["browser_default"]
-guest-r1cs-proof = [
-    "curve25519-dalek",
-    "getrandom",
-    "merlin",
-    "spartan",
+guest-riscv-proof = [
+    "risc0-zkvm",
+    "risc0-zkvm/disable-dev-mode",
+    "rmp-serde",
+]
+guest-riscv-prove = [
+    "guest-riscv-proof",
+    "risc0-zkvm/client",
+    "risc0-zkvm/prove",
 ]
 guest-wasm-proof = [
     "ark-bn254",
@@ -96,26 +100,24 @@ base64 = { version = "0.13.0" }
 bincode = "1.3.3"
 bytes = { version = "1.2.1", features = ["serde"] }
 chrono = "0.4.23"
-curve25519-dalek = { version = "4.1.1", default-features = false, features = ["alloc", "rand_core", "serde"], optional = true }
 dashmap = "5"
 dotenv = "0.15.0"
 futures = { version = "0.3.21", features = ["alloc"] }
 futures-timer = "3.0.2"
-getrandom = { version = "0.2", features = ["js"], optional = true }
 http = "0.2.6"
 jsonrpc-core = { workspace = true }
 log = { version = "0.4", features = ["std"] }
-merlin = { version = "3.0.0", default-features = false, optional = true }
 num-bigint = { version = "0.4.3", optional = true }
+risc0-zkvm = { version = "=3.0.5", default-features = false, optional = true }
 rings-core = { workspace = true, optional = true }
 rings-derive = { workspace = true, optional = true }
 rings-rpc = { workspace = true, optional = true }
 rings-snark = { workspace = true, optional = true }
 rings-transport = { workspace = true }
+rmp-serde = { version = "1.3.1", optional = true }
 serde = { version = "1.0.136", features = ["derive"] }
 serde_json = "1.0.70"
 serde_yaml = "0.9.17"
-spartan = { version = "0.9.0", default-features = false, optional = true }
 strum = "0.25.0"
 thiserror = "1"
 tracing = "0.1.37"

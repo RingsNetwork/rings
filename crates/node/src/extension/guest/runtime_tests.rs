@@ -220,7 +220,7 @@ fn output_validation_enforces_fuel_and_memory_limits() {
 #[test]
 fn receipt_policy_requires_matching_verified_receipt() {
     let manifest = manifest_with(
-        GuestRuntimeKind::R1cs,
+        GuestRuntimeKind::Riscv,
         Vec::new(),
         ProofPolicy::VerifyReceipt,
     );
@@ -327,15 +327,15 @@ fn wasm_proof_test_factory(
     }))
 }
 
-fn r1cs_test_factory(
+fn riscv_test_factory(
     _manifest: &GuestManifest,
     _binary: GuestBinary,
 ) -> Result<Box<dyn GuestRuntime>, GuestError> {
     Ok(Box::new(StaticRuntime {
         output: GuestStepOutput {
-            state: GuestState::new(Bytes::from_static(b"r1cs")),
+            state: GuestState::new(Bytes::from_static(b"riscv")),
             effects: Vec::new(),
-            public_output: GuestPublicOutput::new(Bytes::from_static(b"r1cs")),
+            public_output: GuestPublicOutput::new(Bytes::from_static(b"riscv")),
             receipt: None,
             fuel_used: 1,
             memory_pages_used: 1,
@@ -369,10 +369,10 @@ fn deterministic_replay_rejects_divergent_output() {
 }
 
 #[test]
-fn runtime_registry_selects_wasm_and_r1cs_adapters_from_manifest() {
+fn runtime_registry_selects_wasm_and_riscv_adapters_from_manifest() {
     let wasm_manifest = manifest_with(GuestRuntimeKind::Wasm, Vec::new(), ProofPolicy::None);
-    let r1cs_manifest = manifest_with(
-        GuestRuntimeKind::R1cs,
+    let riscv_manifest = manifest_with(
+        GuestRuntimeKind::Riscv,
         Vec::new(),
         ProofPolicy::VerifyReceipt,
     );
@@ -388,11 +388,11 @@ fn runtime_registry_selects_wasm_and_r1cs_adapters_from_manifest() {
         .expect("register wasm adapter");
     registry
         .register(GuestRuntimeFnAdapter::new(
-            profile(GuestRuntimeKind::R1cs, ProofPolicy::VerifyReceipt),
-            r1cs_test_factory
+            profile(GuestRuntimeKind::Riscv, ProofPolicy::VerifyReceipt),
+            riscv_test_factory
                 as fn(&GuestManifest, GuestBinary) -> Result<Box<dyn GuestRuntime>, GuestError>,
         ))
-        .expect("register r1cs adapter");
+        .expect("register riscv adapter");
 
     let wasm = registry
         .instantiate(&wasm_manifest, binary.clone())
@@ -404,14 +404,15 @@ fn runtime_registry_selects_wasm_and_r1cs_adapters_from_manifest() {
         GuestState::new(Bytes::from_static(b"wasm"))
     );
 
-    let r1cs = registry
-        .instantiate(&r1cs_manifest, binary)
-        .expect("instantiate r1cs");
+    let riscv = registry
+        .instantiate(&riscv_manifest, binary)
+        .expect("instantiate riscv");
     assert_eq!(
-        r1cs.step(input_for(&r1cs_manifest))
-            .expect("r1cs step")
+        riscv
+            .step(input_for(&riscv_manifest))
+            .expect("riscv step")
             .state,
-        GuestState::new(Bytes::from_static(b"r1cs"))
+        GuestState::new(Bytes::from_static(b"riscv"))
     );
 }
 
@@ -467,7 +468,7 @@ fn runtime_registry_selects_same_runtime_by_proof_policy() {
 #[test]
 fn runtime_registry_rejects_unregistered_profile() {
     let manifest = manifest_with(
-        GuestRuntimeKind::R1cs,
+        GuestRuntimeKind::Riscv,
         Vec::new(),
         ProofPolicy::VerifyReceipt,
     );
@@ -480,7 +481,7 @@ fn runtime_registry_rejects_unregistered_profile() {
         Err(GuestError::RuntimeUnavailable {
             profile: missing_profile
         })
-        if missing_profile == profile(GuestRuntimeKind::R1cs, ProofPolicy::VerifyReceipt)
+        if missing_profile == profile(GuestRuntimeKind::Riscv, ProofPolicy::VerifyReceipt)
     ));
 }
 
