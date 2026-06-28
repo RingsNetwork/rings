@@ -53,6 +53,16 @@ pub enum GuestError {
         /// Duplicated capability.
         capability: GuestCapability,
     },
+    /// Runtime kind and proof policy describe an unsupported verification mode.
+    #[error("guest runtime {runtime:?} requires proof policy {expected:?}, got {proof_policy:?}")]
+    InvalidProofPolicyForRuntime {
+        /// Requested runtime.
+        runtime: GuestRuntimeKind,
+        /// Manifest proof policy.
+        proof_policy: ProofPolicy,
+        /// Required proof policy for this runtime.
+        expected: ProofPolicy,
+    },
     /// A guest binary hash did not match the manifest module hash.
     #[error("guest binary hash does not match manifest module hash")]
     ProgramHashMismatch {
@@ -398,6 +408,10 @@ pub struct GuestAcceptedOutput {
 }
 
 /// Runtime-neutral guest execution interface.
+///
+/// Manifest resource limits are authoritative. Concrete adapters must meter and
+/// trap in flight using the limits supplied in [`GuestContext`]; host-side output
+/// validation is only a backstop for reported usage.
 pub trait GuestRuntime: MaybeSend {
     /// Execute one deterministic guest transition.
     fn step(&self, input: GuestStepInput) -> Result<GuestStepOutput, GuestError>;
@@ -416,53 +430,25 @@ pub trait GuestRuntimeAdapter: MaybeSend {
     ) -> Result<Box<dyn GuestRuntime>, GuestError>;
 }
 
-/// WASM runtime adapter wrapper.
-pub struct WasmGuestRuntime<F> {
+/// Function-backed runtime adapter tagged by [`GuestRuntimeKind`].
+pub struct GuestRuntimeFnAdapter<F> {
+    runtime: GuestRuntimeKind,
     factory: F,
 }
 
-impl<F> WasmGuestRuntime<F> {
-    /// Build a WASM adapter from an instantiation function.
-    pub fn new(factory: F) -> Self {
-        Self { factory }
+impl<F> GuestRuntimeFnAdapter<F> {
+    /// Build a runtime adapter from its kind and instantiation function.
+    pub fn new(runtime: GuestRuntimeKind, factory: F) -> Self {
+        Self { runtime, factory }
     }
 }
 
-impl<F> GuestRuntimeAdapter for WasmGuestRuntime<F>
+impl<F> GuestRuntimeAdapter for GuestRuntimeFnAdapter<F>
 where F: for<'a> Fn(&'a GuestManifest, GuestBinary) -> Result<Box<dyn GuestRuntime>, GuestError>
         + MaybeSend
 {
     fn runtime(&self) -> GuestRuntimeKind {
-        GuestRuntimeKind::Wasm
-    }
-
-    fn instantiate(
-        &self,
-        manifest: &GuestManifest,
-        binary: GuestBinary,
-    ) -> Result<Box<dyn GuestRuntime>, GuestError> {
-        (self.factory)(manifest, binary)
-    }
-}
-
-/// RISC-V runtime adapter wrapper.
-pub struct RiscvGuestRuntime<F> {
-    factory: F,
-}
-
-impl<F> RiscvGuestRuntime<F> {
-    /// Build a RISC-V adapter from an instantiation function.
-    pub fn new(factory: F) -> Self {
-        Self { factory }
-    }
-}
-
-impl<F> GuestRuntimeAdapter for RiscvGuestRuntime<F>
-where F: for<'a> Fn(&'a GuestManifest, GuestBinary) -> Result<Box<dyn GuestRuntime>, GuestError>
-        + MaybeSend
-{
-    fn runtime(&self) -> GuestRuntimeKind {
-        GuestRuntimeKind::Riscv
+        self.runtime
     }
 
     fn instantiate(

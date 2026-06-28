@@ -6,6 +6,7 @@ use std::num::NonZeroU32;
 use std::num::NonZeroU64;
 
 use serde::Deserialize;
+use serde::Deserializer;
 use serde::Serialize;
 
 use super::GuestError;
@@ -21,6 +22,21 @@ pub enum GuestRuntimeKind {
     Wasm,
     /// RISC-V guest runtime, intended for zkVM-friendly adapters.
     Riscv,
+}
+
+impl GuestRuntimeKind {
+    /// Proof policy required by this runtime family.
+    pub fn required_proof_policy(self) -> ProofPolicy {
+        match self {
+            Self::Wasm => ProofPolicy::None,
+            Self::Riscv => ProofPolicy::VerifyReceipt,
+        }
+    }
+
+    /// Whether this runtime accepts `proof_policy`.
+    pub fn permits_proof_policy(self, proof_policy: ProofPolicy) -> bool {
+        self.required_proof_policy() == proof_policy
+    }
 }
 
 /// Host capabilities a v1 guest may request.
@@ -44,7 +60,7 @@ pub enum ProofPolicy {
 }
 
 /// A 32-byte commitment to guest code or schemas.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct GuestProgramHash([u8; 32]);
 
 impl GuestProgramHash {
@@ -59,6 +75,14 @@ impl GuestProgramHash {
     /// Return the raw bytes.
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for GuestProgramHash {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: Deserializer<'de> {
+        let bytes = <[u8; 32]>::deserialize(deserializer)?;
+        Self::new(bytes, "guest_program_hash").map_err(serde::de::Error::custom)
     }
 }
 
@@ -124,6 +148,10 @@ impl GuestResourceLimits {
 }
 
 /// Raw manifest data supplied by a loader before validation.
+///
+/// The schema hashes are commitments for runtime or proof adapters. This core
+/// layer stores and binds them, but does not parse opaque guest state, event or
+/// effect bytes to enforce schema conformance.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GuestManifestSpec {
     /// Protocol namespace owned by this guest extension.
@@ -151,7 +179,12 @@ pub struct GuestManifestSpec {
 }
 
 /// Validated guest manifest.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// This type does not deserialize directly. Loaders deserialize
+/// [`GuestManifestSpec`] and must call [`GuestManifest::validate`] so namespace,
+/// hash, capability, resource and proof-policy invariants are checked once at
+/// the boundary.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct GuestManifest {
     namespace: String,
     runtime: GuestRuntimeKind,
@@ -175,16 +208,21 @@ impl GuestManifest {
                 actual: spec.abi_version,
             });
         }
+        validate_runtime_proof_policy(spec.runtime, spec.proof_policy)?;
+        let module_hash = validate_hash(spec.module_hash, "module_hash")?;
+        let state_schema_hash = validate_hash(spec.state_schema_hash, "state_schema_hash")?;
+        let event_schema_hash = validate_hash(spec.event_schema_hash, "event_schema_hash")?;
+        let effect_schema_hash = validate_hash(spec.effect_schema_hash, "effect_schema_hash")?;
         let capabilities = GuestCapabilities::new(spec.capabilities)?;
         let limits = GuestResourceLimits::new(spec.memory_limit, spec.fuel_limit)?;
         Ok(Self {
             namespace: spec.namespace,
             runtime: spec.runtime,
             abi_version: spec.abi_version,
-            module_hash: spec.module_hash,
-            state_schema_hash: spec.state_schema_hash,
-            event_schema_hash: spec.event_schema_hash,
-            effect_schema_hash: spec.effect_schema_hash,
+            module_hash,
+            state_schema_hash,
+            event_schema_hash,
+            effect_schema_hash,
             capabilities,
             limits,
             proof_policy: spec.proof_policy,
@@ -257,6 +295,27 @@ fn validate_namespace(namespace: &str) -> Result<(), GuestError> {
         });
     }
     Ok(())
+}
+
+fn validate_runtime_proof_policy(
+    runtime: GuestRuntimeKind,
+    proof_policy: ProofPolicy,
+) -> Result<(), GuestError> {
+    if !runtime.permits_proof_policy(proof_policy) {
+        return Err(GuestError::InvalidProofPolicyForRuntime {
+            runtime,
+            proof_policy,
+            expected: runtime.required_proof_policy(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_hash(
+    hash: GuestProgramHash,
+    field: &'static str,
+) -> Result<GuestProgramHash, GuestError> {
+    GuestProgramHash::new(*hash.as_bytes(), field)
 }
 
 fn is_namespace_char(ch: char) -> bool {
@@ -353,6 +412,52 @@ mod tests {
             GuestManifest::validate(zero_fuel),
             Err(GuestError::ZeroFuelLimit)
         );
+    }
+
+    #[test]
+    fn manifest_validation_rejects_runtime_proof_policy_mismatch() {
+        let mut wasm_with_receipt = valid_spec();
+        wasm_with_receipt.proof_policy = ProofPolicy::VerifyReceipt;
+        assert_eq!(
+            GuestManifest::validate(wasm_with_receipt),
+            Err(GuestError::InvalidProofPolicyForRuntime {
+                runtime: GuestRuntimeKind::Wasm,
+                proof_policy: ProofPolicy::VerifyReceipt,
+                expected: ProofPolicy::None,
+            })
+        );
+
+        let mut riscv_without_receipt = valid_spec();
+        riscv_without_receipt.runtime = GuestRuntimeKind::Riscv;
+        riscv_without_receipt.proof_policy = ProofPolicy::None;
+        assert_eq!(
+            GuestManifest::validate(riscv_without_receipt),
+            Err(GuestError::InvalidProofPolicyForRuntime {
+                runtime: GuestRuntimeKind::Riscv,
+                proof_policy: ProofPolicy::None,
+                expected: ProofPolicy::VerifyReceipt,
+            })
+        );
+    }
+
+    #[test]
+    fn manifest_validation_rejects_hashes_that_bypass_constructor() {
+        let mut spec = valid_spec();
+        spec.module_hash = GuestProgramHash([0; 32]);
+
+        assert_eq!(
+            GuestManifest::validate(spec),
+            Err(GuestError::EmptyHash {
+                field: "module_hash"
+            })
+        );
+    }
+
+    #[test]
+    fn program_hash_deserialization_rejects_zero_hash() {
+        let encoded = bincode::serialize(&[0u8; 32]).expect("encode zero hash bytes");
+
+        assert!(bincode::deserialize::<GuestProgramHash>(&encoded).is_err());
     }
 
     #[test]
