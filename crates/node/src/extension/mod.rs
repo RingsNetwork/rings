@@ -2,6 +2,7 @@
 //! This module provide basic mechanism.
 
 pub mod ext;
+pub mod guest;
 pub mod protocols;
 #[cfg(feature = "snark")]
 pub mod snark;
