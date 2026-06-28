@@ -88,6 +88,17 @@ impl MessageHandler {
             .await
     }
 
+    /// Idempotently establish DHT-driven transport connections in local quality order.
+    pub(crate) async fn connect_dht_peers(
+        &self,
+        peers: impl IntoIterator<Item = Did>,
+    ) -> Result<()> {
+        for peer in self.transport.order_dht_candidates_by_quality(peers).await {
+            self.connect_dht_peer(peer).await?;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn join_dht(&self, peer: Did) -> Result<()> {
         // Default HMCC/Zave join path: maps to the JoinThenSync operation in
         // the CorrectChord spec (see tests/default/dht_convergence.rs).
@@ -128,28 +139,71 @@ impl MessageHandler {
         Ok(())
     }
 
-    #[cfg_attr(feature = "wasm", async_recursion(?Send))]
-    #[cfg_attr(not(feature = "wasm"), async_recursion)]
-    pub(crate) async fn handle_dht_events(&self, act: &PeerRingAction) -> Result<()> {
+    fn collect_dht_effects(
+        &self,
+        act: &PeerRingAction,
+        effects: &mut Vec<CoreEffect<'static>>,
+    ) -> Result<()> {
         match act {
             PeerRingAction::MultiActions(acts) => {
-                let jobs = acts
-                    .iter()
-                    .map(|act| async move { self.handle_dht_events(act).await });
-
-                for res in futures::future::join_all(jobs).await {
-                    if res.is_err() {
-                        tracing::error!("Failed on handle multi actions: {:#?}", res)
-                    }
+                for act in acts {
+                    self.collect_dht_effects(act, effects)?;
                 }
-
                 Ok(())
             }
             act => {
-                let effects =
-                    lower_dht_action(act, |did| self.transport.get_connection(did).is_some())?;
-                self.run_effects(effects).await
+                if let Some(effect) =
+                    lower_dht_action(act, |did| self.transport.get_connection(did).is_some())?
+                {
+                    effects.push(effect);
+                }
+                Ok(())
             }
+        }
+    }
+
+    async fn run_prioritized_dht_effects(&self, effects: Vec<CoreEffect<'static>>) -> Result<()> {
+        let mut connection_peers = Vec::new();
+        let mut other_effects = Vec::new();
+        for effect in effects {
+            match effect {
+                CoreEffect::Connection(ConnectionFunctor::ConnectDhtPeer { peer }) => {
+                    connection_peers.push(peer);
+                }
+                effect => other_effects.push(effect),
+            }
+        }
+
+        for peer in self
+            .transport
+            .order_dht_candidates_by_quality(connection_peers)
+            .await
+        {
+            if let Err(e) = self.connect_dht_peer(peer).await {
+                tracing::error!("Failed on handle multi connection action: {e:?}");
+            }
+        }
+
+        for effect in other_effects {
+            if let Err(e) = self.run_effects([effect]).await {
+                tracing::error!("Failed on handle multi action: {e:?}");
+            }
+        }
+
+        Ok(())
+    }
+
+    #[cfg_attr(feature = "wasm", async_recursion(?Send))]
+    #[cfg_attr(not(feature = "wasm"), async_recursion)]
+    pub(crate) async fn handle_dht_events(&self, act: &PeerRingAction) -> Result<()> {
+        if matches!(act, PeerRingAction::MultiActions(_)) {
+            let mut effects = Vec::new();
+            self.collect_dht_effects(act, &mut effects)?;
+            self.run_prioritized_dht_effects(effects).await
+        } else {
+            let effects =
+                lower_dht_action(act, |did| self.transport.get_connection(did).is_some())?;
+            self.run_effects(effects).await
         }
     }
 }

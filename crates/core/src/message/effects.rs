@@ -355,9 +355,10 @@ impl DhtActionFunctor {
 
 /// Natural transformation from a single DHT leaf action to Core effects.
 ///
-/// `MultiActions` preserve their old concurrent best-effort behavior in
-/// `MessageHandler::handle_dht_events`, so this function intentionally handles
-/// only the leaf actions emitted by Core DHT operations.
+/// `MultiActions` are flattened by `MessageHandler::handle_dht_events`, which
+/// can quality-order connection leaves while preserving best-effort execution.
+/// This function intentionally handles only the leaf actions emitted by Core DHT
+/// operations.
 pub(crate) fn lower_dht_action<'payload>(
     act: &PeerRingAction,
     is_connected: impl Fn(Did) -> bool,

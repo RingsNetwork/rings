@@ -6,7 +6,6 @@ use crate::dht::PeerRingAction;
 use crate::dht::TopoInfo;
 use crate::error::Error;
 use crate::error::Result;
-use crate::message::effects::MessageSendFunctor;
 use crate::message::effects::PayloadRelayFunctor;
 use crate::message::types::ConnectNodeReport;
 use crate::message::types::ConnectNodeSend;
@@ -56,12 +55,12 @@ impl HandleMsg<QueryForTopoInfoReport> for MessageHandler {
             <QueryForTopoInfoReport as Then>::Then::Stabilization => {
                 // Establish stabilization-learned candidates first so the
                 // resulting Notify/Query actions can usually send immediately.
-                if let Some(peer) = msg.info.predecessor {
-                    self.connect_dht_peer(peer).await?;
-                }
-                for peer in msg.info.successors.iter() {
-                    self.connect_dht_peer(*peer).await?;
-                }
+                let candidates = msg
+                    .info
+                    .predecessor
+                    .into_iter()
+                    .chain(msg.info.successors.iter().copied());
+                self.connect_dht_peers(candidates).await?;
                 let ev = self.dht.stabilize(msg.info.clone())?;
                 self.handle_dht_events(&ev).await?;
             }
@@ -163,30 +162,12 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
             FindSuccessorReportHandler::FixFingerTable { index } => {
                 self.dht.apply_fixed_finger(*index, msg.did)?;
                 if msg.reports_remote_successor(self.dht.did) {
-                    let offer_msg = self
-                        .transport
-                        .prepare_connection_offer(msg.did, self.inner_callback())
-                        .await?;
-                    self.run_effects([MessageSendFunctor::send_message(
-                        Message::ConnectNodeSend(offer_msg),
-                        msg.did,
-                    )
-                    .into()])
-                        .await?;
+                    self.connect_dht_peer(msg.did).await?;
                 }
             }
             FindSuccessorReportHandler::Connect => {
                 if msg.reports_remote_successor(self.dht.did) {
-                    let offer_msg = self
-                        .transport
-                        .prepare_connection_offer(msg.did, self.inner_callback())
-                        .await?;
-                    self.run_effects([MessageSendFunctor::send_message(
-                        Message::ConnectNodeSend(offer_msg),
-                        msg.did,
-                    )
-                    .into()])
-                        .await?;
+                    self.connect_dht_peer(msg.did).await?;
                 }
             }
             _ => {}

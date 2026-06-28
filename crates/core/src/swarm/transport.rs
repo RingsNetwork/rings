@@ -39,7 +39,10 @@ use crate::dht::LiveDid;
 use crate::dht::PeerRing;
 use crate::error::Error;
 use crate::error::Result;
+use crate::measure::order_peers_by_quality;
+use crate::measure::MeasureCounter;
 use crate::measure::MeasureImpl;
+use crate::measure::PeerQuality;
 use crate::message::ConnectNodeReport;
 use crate::message::ConnectNodeSend;
 use crate::message::Message;
@@ -68,7 +71,7 @@ pub struct SwarmTransport {
     storage_redundancy: u16,
     reassembly_limits: ReassemblyLimits,
     storage_lookup_observations: Mutex<StorageLookupObservationMap>,
-    #[allow(dead_code)]
+    measured_disconnects: Mutex<BTreeSet<Did>>,
     measure: Option<MeasureImpl>,
 }
 
@@ -158,26 +161,40 @@ pub struct SwarmConnection {
     pub connection: ConnectionRef<ConnectionOwner>,
 }
 
-/// Drive a message's [DeliveryFuture] to completion on the runtime, logging if
-/// the message was lost before it could be flushed. This keeps delivery
-/// tracking confined to the send site: the status never propagates up through
-/// the swarm/node layers.
+async fn record_measurement(measure: Option<MeasureImpl>, did: Did, counter: MeasureCounter) {
+    if let Some(measure) = measure {
+        measure.incr(did, counter).await;
+    }
+}
+
+/// Drive a message's [DeliveryFuture] to completion on the runtime, recording
+/// the eventual peer-quality observation. This keeps delivery tracking confined
+/// to the send site: the status never propagates up through the swarm/node
+/// layers.
 #[cfg(feature = "wasm")]
-fn spawn_delivery(fut: DeliveryFuture, did: Did) {
+fn spawn_delivery(fut: DeliveryFuture, did: Did, measure: Option<MeasureImpl>) {
     wasm_bindgen_futures::spawn_local(async move {
-        if let Err(e) = fut.await {
-            tracing::warn!("Message to {did} was not delivered: {e}");
+        match fut.await {
+            Ok(()) => record_measurement(measure, did, MeasureCounter::Sent).await,
+            Err(e) => {
+                tracing::warn!("Message to {did} was not delivered: {e}");
+                record_measurement(measure, did, MeasureCounter::FailedToSend).await;
+            }
         }
     });
 }
 
-/// Drive a message's [DeliveryFuture] to completion on the runtime, logging if
-/// the message was lost before it could be flushed.
+/// Drive a message's [DeliveryFuture] to completion on the runtime, recording
+/// the eventual peer-quality observation.
 #[cfg(not(feature = "wasm"))]
-fn spawn_delivery(fut: DeliveryFuture, did: Did) {
+fn spawn_delivery(fut: DeliveryFuture, did: Did, measure: Option<MeasureImpl>) {
     tokio::spawn(async move {
-        if let Err(e) = fut.await {
-            tracing::warn!("Message to {did} was not delivered: {e}");
+        match fut.await {
+            Ok(()) => record_measurement(measure, did, MeasureCounter::Sent).await,
+            Err(e) => {
+                tracing::warn!("Message to {did} was not delivered: {e}");
+                record_measurement(measure, did, MeasureCounter::FailedToSend).await;
+            }
         }
     });
 }
@@ -208,9 +225,11 @@ async fn run_chunked_send(
     first_delivery: DeliveryFuture,
     session_sk: SessionSk,
     did: Did,
+    measure: Option<MeasureImpl>,
 ) {
     if let Err(e) = first_delivery.await {
         tracing::warn!("Chunked send to {did} stopped before the first chunk flushed: {e}");
+        record_measurement(measure, did, MeasureCounter::FailedToSend).await;
         return;
     }
     for chunk in tail {
@@ -225,15 +244,18 @@ async fn run_chunked_send(
             Ok(delivery) => {
                 if let Err(e) = delivery.await {
                     tracing::warn!("Chunked send to {did} stopped before flush: {e}");
+                    record_measurement(measure, did, MeasureCounter::FailedToSend).await;
                     return;
                 }
             }
             Err(e) => {
                 tracing::warn!("Chunked send to {did} stopped: {e}");
+                record_measurement(measure, did, MeasureCounter::FailedToSend).await;
                 return;
             }
         }
     }
+    record_measurement(measure, did, MeasureCounter::Sent).await;
 }
 
 /// Drive the tail of a chunked send on the runtime (one bounded task per large message). See
@@ -245,6 +267,7 @@ fn spawn_chunked_send(
     first_delivery: DeliveryFuture,
     session_sk: SessionSk,
     did: Did,
+    measure: Option<MeasureImpl>,
 ) {
     wasm_bindgen_futures::spawn_local(run_chunked_send(
         conn,
@@ -252,6 +275,7 @@ fn spawn_chunked_send(
         first_delivery,
         session_sk,
         did,
+        measure,
     ));
 }
 
@@ -264,6 +288,7 @@ fn spawn_chunked_send(
     first_delivery: DeliveryFuture,
     session_sk: SessionSk,
     did: Did,
+    measure: Option<MeasureImpl>,
 ) {
     tokio::spawn(run_chunked_send(
         conn,
@@ -271,6 +296,7 @@ fn spawn_chunked_send(
         first_delivery,
         session_sk,
         did,
+        measure,
     ));
 }
 
@@ -295,6 +321,7 @@ impl SwarmTransport {
             storage_redundancy: settings.storage_redundancy,
             reassembly_limits: settings.reassembly_limits,
             storage_lookup_observations: Mutex::new(BTreeMap::new()),
+            measured_disconnects: Mutex::new(BTreeSet::new()),
             measure,
         }
     }
@@ -307,6 +334,84 @@ impl SwarmTransport {
     /// Chunk reassembly limits enforced by inbound callbacks.
     pub(crate) fn reassembly_limits(&self) -> ReassemblyLimits {
         self.reassembly_limits
+    }
+
+    async fn record_peer_measurement(&self, peer: Did, counter: MeasureCounter) {
+        record_measurement(self.measure.clone(), peer, counter).await;
+    }
+
+    /// Record that `peer` reached an open data channel.
+    pub(crate) async fn record_peer_connected(&self, peer: Did) {
+        match self.measured_disconnects.lock() {
+            Ok(mut measured) => {
+                measured.remove(&peer);
+            }
+            Err(_) => {
+                tracing::warn!("Failed to update disconnect epoch for connected peer {peer}");
+            }
+        }
+        self.record_peer_measurement(peer, MeasureCounter::Connect)
+            .await;
+    }
+
+    /// Record that `peer` left the usable connection epoch.
+    ///
+    /// Invariant: for one connection epoch, at most one `Disconnected` counter is
+    /// recorded. `record_peer_connected` starts a new epoch by clearing the marker.
+    pub(crate) async fn record_peer_disconnected(&self, peer: Did) {
+        let should_record = match self.measured_disconnects.lock() {
+            Ok(mut measured) => measured.insert(peer),
+            Err(_) => {
+                tracing::warn!("Failed to update disconnect epoch for disconnected peer {peer}");
+                true
+            }
+        };
+        if should_record {
+            self.record_peer_measurement(peer, MeasureCounter::Disconnected)
+                .await;
+        }
+    }
+
+    /// Record that a payload from `peer` was accepted and verified by the swarm.
+    pub(crate) async fn record_peer_message_received(&self, peer: Did) {
+        self.record_peer_measurement(peer, MeasureCounter::Received)
+            .await;
+    }
+
+    /// Record that a payload from `peer` could not be decoded or verified.
+    pub(crate) async fn record_peer_message_receive_failed(&self, peer: Did) {
+        self.record_peer_measurement(peer, MeasureCounter::FailedToReceive)
+            .await;
+    }
+
+    /// Record that an outbound payload to `peer` failed before delivery.
+    pub(crate) async fn record_peer_message_send_failed(&self, peer: Did) {
+        self.record_peer_measurement(peer, MeasureCounter::FailedToSend)
+            .await;
+    }
+
+    /// Return this node's local quality judgement for `peer`.
+    pub(crate) async fn peer_quality(&self, peer: Did) -> PeerQuality {
+        match &self.measure {
+            Some(measure) => measure.quality(peer).await,
+            None => PeerQuality::Unknown,
+        }
+    }
+
+    /// Order DHT-produced connection candidates by local quality evidence.
+    ///
+    /// Invariant: this is a stable permutation of the DHT-produced candidate
+    /// sequence. It changes attempt order only; it never changes Chord ownership,
+    /// successor responsibility, or storage placement.
+    pub(crate) async fn order_dht_candidates_by_quality(
+        &self,
+        candidates: impl IntoIterator<Item = Did>,
+    ) -> Vec<Did> {
+        let mut measured = Vec::new();
+        for did in candidates {
+            measured.push((did, self.peer_quality(did).await));
+        }
+        order_peers_by_quality(measured)
     }
 
     /// Ensure the storage API redundancy matches repair redundancy.
@@ -507,7 +612,14 @@ impl SwarmTransport {
     /// Connect a given Did. If the did is already connected, return Err,
     /// else try prepare offer and establish connection by dht.
     pub async fn connect(&self, peer: Did, callback: InnerSwarmCallback) -> Result<()> {
-        let offer_msg = self.prepare_connection_offer(peer, callback).await?;
+        let offer_msg = match self.prepare_connection_offer(peer, callback).await {
+            Ok(offer_msg) => offer_msg,
+            Err(Error::AlreadyConnected) => return Err(Error::AlreadyConnected),
+            Err(e) => {
+                self.record_peer_message_send_failed(peer).await;
+                return Err(e);
+            }
+        };
         self.send_message(Message::ConnectNodeSend(offer_msg), peer)
             .await?;
         Ok(())
@@ -670,10 +782,10 @@ impl PayloadSender for SwarmTransport {
     }
 
     async fn do_send_payload(&self, did: Did, payload: MessagePayload) -> Result<()> {
-        let conn = self
-            .get_and_check_connection(did)
-            .await
-            .ok_or(Error::SwarmMissDidInTable(did))?;
+        let Some(conn) = self.get_and_check_connection(did).await else {
+            self.record_peer_message_send_failed(did).await;
+            return Err(Error::SwarmMissDidInTable(did));
+        };
 
         tracing::debug!(
             "Try send {:?}, to node {:?}",
@@ -696,11 +808,18 @@ impl PayloadSender for SwarmTransport {
         // `DeliveryFuture` to the runtime, and a chunked message is driven by one bounded background
         // task (one chunk in flight; see `run_chunked_send`), so a large payload never blocks the
         // caller's path while keeping memory and the runtime task count bounded.
-        let plan = WireReserves::PRODUCTION
-            .plan(data.len(), conn.max_message_size())
-            .ok_or(Error::PeerMaxMessageSizeTooSmall(conn.max_message_size()))?;
+        let Some(plan) = WireReserves::PRODUCTION.plan(data.len(), conn.max_message_size()) else {
+            self.record_peer_message_send_failed(did).await;
+            return Err(Error::PeerMaxMessageSizeTooSmall(conn.max_message_size()));
+        };
         match plan {
-            Framing::Whole => spawn_delivery(conn.send_data(data).await?, did),
+            Framing::Whole => match conn.send_data(data).await {
+                Ok(delivery) => spawn_delivery(delivery, did, self.measure.clone()),
+                Err(e) => {
+                    self.record_peer_message_send_failed(did).await;
+                    return Err(e);
+                }
+            },
             Framing::Chunked { chunk_size } => {
                 // Frame and accept the FIRST chunk on the caller's path, so an immediate send
                 // failure (the buffer rejecting the bytes) surfaces here exactly as it does for a
@@ -710,14 +829,22 @@ impl PayloadSender for SwarmTransport {
                 let mut chunks = ChunkList::stream(data, chunk_size);
                 if let Some(first) = chunks.next() {
                     let first = frame_chunk(&self.session_sk, did, first)?;
-                    let first_delivery = conn.send_data(first).await?;
-                    spawn_chunked_send(
-                        conn,
-                        Box::new(chunks),
-                        first_delivery,
-                        self.session_sk.clone(),
-                        did,
-                    );
+                    match conn.send_data(first).await {
+                        Ok(first_delivery) => {
+                            spawn_chunked_send(
+                                conn,
+                                Box::new(chunks),
+                                first_delivery,
+                                self.session_sk.clone(),
+                                did,
+                                self.measure.clone(),
+                            );
+                        }
+                        Err(e) => {
+                            self.record_peer_message_send_failed(did).await;
+                            return Err(e);
+                        }
+                    }
                 }
             }
         }
@@ -745,3 +872,6 @@ impl From<SwarmConnection> for Did {
         conn.peer
     }
 }
+
+#[cfg(all(test, not(feature = "wasm")))]
+mod tests;

@@ -286,7 +286,7 @@ impl ProcessorBuilder {
 
     /// Set the measure for the processor.
     pub fn measure(mut self, implement: PeriodicMeasure) -> Self {
-        self.measure = Some(Box::new(implement));
+        self.measure = Some(Arc::new(implement));
         self
     }
 

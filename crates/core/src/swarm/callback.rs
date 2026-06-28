@@ -154,10 +154,29 @@ impl InnerSwarmCallback {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl TransportCallback for InnerSwarmCallback {
     async fn on_message(&self, cid: &str, msg: &[u8]) -> Result<(), CallbackError> {
-        let payload = MessagePayload::from_bincode(msg)?;
+        let peer = Did::from_str(cid).ok();
+        let payload = match MessagePayload::from_bincode(msg) {
+            Ok(payload) => payload,
+            Err(e) => {
+                if let Some(peer) = peer {
+                    self.transport
+                        .record_peer_message_receive_failed(peer)
+                        .await;
+                }
+                return Err(e.into());
+            }
+        };
         if !(payload.verify() && payload.transaction.verify()) {
             tracing::error!("Cannot verify msg or it's expired: {:?}", payload);
+            if let Some(peer) = peer {
+                self.transport
+                    .record_peer_message_receive_failed(peer)
+                    .await;
+            }
             return Err("Cannot verify msg or it's expired".into());
+        }
+        if let Some(peer) = peer {
+            self.transport.record_peer_message_received(peer).await;
         }
         self.callback.on_validate(&payload).await?;
         self.handle_payload(cid, &payload).await
@@ -177,6 +196,7 @@ impl TransportCallback for InnerSwarmCallback {
             // `Failed` and `Closed` are terminal states, so we remove the peer
             // from the DHT here.
             WebrtcConnectionState::Failed | WebrtcConnectionState::Closed => {
+                self.transport.record_peer_disconnected(did).await;
                 self.message_handler.leave_dht(did).await?;
             }
             // `Disconnected` is a transient ICE state that frequently recovers
@@ -186,6 +206,7 @@ impl TransportCallback for InnerSwarmCallback {
             // with no reconnect path. We leave it alone: it will either recover,
             // or degrade to `Failed`, which is handled above.
             WebrtcConnectionState::Disconnected => {
+                self.transport.record_peer_disconnected(did).await;
                 tracing::info!("Connection to {did} is disconnected, waiting for recovery");
             }
             _ => {}
@@ -212,6 +233,7 @@ impl TransportCallback for InnerSwarmCallback {
             return Ok(());
         };
 
+        self.transport.record_peer_connected(did).await;
         self.message_handler.join_dht(did).await?;
 
         // Notify Connected state here instead of on_peer_connection_state_change.
@@ -236,6 +258,7 @@ impl TransportCallback for InnerSwarmCallback {
         // instead of waiting for the ICE state to reach `Failed`. This is the
         // graceful counterpart to a local `disconnect()`: the remote learns of
         // it promptly without relying on the transient `Disconnected` state.
+        self.transport.record_peer_disconnected(did).await;
         self.message_handler.leave_dht(did).await?;
         Ok(())
     }

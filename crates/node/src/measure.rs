@@ -15,6 +15,9 @@ use rings_core::dht::Did;
 use rings_core::measure;
 use rings_core::measure::Measure;
 use rings_core::measure::MeasureCounter;
+use rings_core::measure::PeerQuality;
+use rings_core::measure::PeerQualityEvidence;
+use rings_core::measure::PeerQualityThresholds;
 use rings_core::storage::KvStorageInterface;
 use rings_derive::MeasureBehaviour;
 
@@ -209,10 +212,15 @@ impl Measure for PeriodicMeasure {
 #[cfg_attr(feature = "node", async_trait)]
 #[cfg_attr(feature = "browser", async_trait(?Send))]
 impl measure::BehaviourJudgement for PeriodicMeasure {
-    async fn good(&self, did: Did) -> bool {
-        <Self as measure::ConnectBehaviour<{crate::consts::CONNECT_FAILED_LIMIT}>>::good(self, did).await &&
-	    <Self as measure::MessageSendBehaviour<{crate::consts::MSG_SEND_FAILED_LIMIT}>>::good(self, did).await &&
-            <Self as measure::MessageRecvBehaviour<{crate::consts::MSG_RECV_FAILED_LIMIT}>>::good(self, did).await
+    async fn quality(&self, did: Did) -> PeerQuality {
+        let thresholds = PeerQualityThresholds::new(
+            crate::consts::CONNECT_FAILED_LIMIT,
+            crate::consts::MSG_SEND_FAILED_LIMIT,
+            crate::consts::MSG_RECV_FAILED_LIMIT,
+        );
+        PeerQualityEvidence::from_measure(self, did)
+            .await
+            .classify(thresholds)
     }
 }
 
@@ -223,6 +231,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::Mutex;
 
+    use rings_core::measure::BehaviourJudgement;
     use rings_core::storage::sled::SledStorage;
     use rings_core::storage::MemStorage;
 
@@ -377,5 +386,27 @@ mod tests {
         // Will take previous count from storage.
         assert_eq!(measure2.get_count(did, MeasureCounter::Sent).await, 2);
         assert_eq!(measure2.get_count(did, MeasureCounter::Received).await, 1);
+    }
+
+    #[tokio::test]
+    async fn repeated_disconnections_degrade_peer_quality(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let ms = Box::new(MemStorage::new());
+        let did = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0")?;
+        let clock = ManualMeasureClock::new(Utc::now());
+        let measure = PeriodicMeasure::new_with_clock(ms, Arc::new(clock));
+
+        assert_eq!(measure.quality(did).await, PeerQuality::Unknown);
+
+        measure.incr(did, MeasureCounter::Connect).await;
+        assert_eq!(measure.quality(did).await, PeerQuality::Healthy);
+
+        for _ in 0..crate::consts::CONNECT_FAILED_LIMIT {
+            measure.incr(did, MeasureCounter::Disconnected).await;
+        }
+
+        assert_eq!(measure.quality(did).await, PeerQuality::Degraded);
+        assert!(!BehaviourJudgement::good(&measure, did).await);
+        Ok(())
     }
 }
