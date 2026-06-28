@@ -36,12 +36,23 @@
 //!
 //! Please check python example at examples/ffi/rings.py
 
+use std::collections::HashMap;
+use std::error::Error as StdError;
 use std::ffi::c_char;
 use std::ffi::CStr;
 use std::ffi::CString;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::OnceLock;
 
+use async_trait::async_trait;
 use futures::executor;
+use rings_core::ecc::PublicKey;
+use rings_core::message::Message;
+use rings_core::message::MessagePayload;
+use rings_core::message::MessageVerificationExt;
+use rings_core::swarm::callback::SwarmCallback;
+use serde::Serialize;
 use tokio::runtime::Runtime;
 
 use super::Provider;
@@ -49,6 +60,123 @@ use super::Signer;
 use crate::error::Error;
 use crate::error::Result;
 use crate::extension::Backend;
+
+type FfiE2eInbox = Mutex<Vec<FfiE2eEvent>>;
+
+static FFI_E2E_INBOXES: OnceLock<Mutex<HashMap<usize, Arc<FfiE2eInbox>>>> = OnceLock::new();
+
+#[derive(Clone, Debug, Serialize)]
+struct FfiE2eEvent {
+    kind: &'static str,
+    from: String,
+    public_key: Option<String>,
+    stream_id: Option<String>,
+    sequence: Option<u64>,
+    is_final: Option<bool>,
+    ciphertext_blocks: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct TakeFfiE2eEventsResponse {
+    events: Vec<FfiE2eEvent>,
+}
+
+struct FfiBackend {
+    backend: Backend,
+    e2e_events: Arc<FfiE2eInbox>,
+}
+
+impl FfiBackend {
+    fn new(backend: Backend, e2e_events: Arc<FfiE2eInbox>) -> Self {
+        Self {
+            backend,
+            e2e_events,
+        }
+    }
+
+    fn push_e2e_event(&self, event: FfiE2eEvent) -> Result<()> {
+        self.e2e_events.lock().map_err(|_| Error::Lock)?.push(event);
+        Ok(())
+    }
+}
+
+#[cfg_attr(feature = "browser", async_trait(?Send))]
+#[cfg_attr(not(feature = "browser"), async_trait)]
+impl SwarmCallback for FfiBackend {
+    async fn on_inbound(
+        &self,
+        payload: &MessagePayload,
+    ) -> std::result::Result<(), Box<dyn StdError>> {
+        let data: Message = payload.transaction.data()?;
+        let from = payload.transaction.signer().to_string();
+
+        match data {
+            Message::CustomMessage(_) => self.backend.on_inbound(payload).await?,
+            Message::E2eHandshakeRequest(request) => self.push_e2e_event(FfiE2eEvent {
+                kind: "handshakeRequest",
+                from,
+                public_key: Some(public_key_json_string(request.requester_public_key)?),
+                stream_id: None,
+                sequence: None,
+                is_final: None,
+                ciphertext_blocks: None,
+            })?,
+            Message::E2eHandshakeResponse(response) => self.push_e2e_event(FfiE2eEvent {
+                kind: "handshakeResponse",
+                from,
+                public_key: Some(public_key_json_string(response.responder_public_key)?),
+                stream_id: None,
+                sequence: None,
+                is_final: None,
+                ciphertext_blocks: None,
+            })?,
+            Message::E2eStreamFrame(frame) => self.push_e2e_event(FfiE2eEvent {
+                kind: "streamFrame",
+                from,
+                public_key: Some(public_key_json_string(frame.sender_public_key)?),
+                stream_id: Some(frame.stream_id.to_string()),
+                sequence: Some(frame.sequence),
+                is_final: Some(frame.is_final),
+                ciphertext_blocks: Some(frame.ciphertext.len()),
+            })?,
+            _ => {}
+        }
+
+        Ok(())
+    }
+}
+
+fn public_key_json_string(public_key: PublicKey<33>) -> Result<String> {
+    let value = serde_json::to_value(public_key)?;
+    value.as_str().map(str::to_owned).ok_or(Error::InvalidData)
+}
+
+fn ffi_e2e_inboxes() -> &'static Mutex<HashMap<usize, Arc<FfiE2eInbox>>> {
+    FFI_E2E_INBOXES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn provider_key(provider: &Arc<Provider>) -> usize {
+    Arc::as_ptr(provider) as usize
+}
+
+fn register_ffi_e2e_inbox(provider: &Arc<Provider>, inbox: Arc<FfiE2eInbox>) -> Result<()> {
+    ffi_e2e_inboxes()
+        .lock()
+        .map_err(|_| Error::Lock)?
+        .insert(provider_key(provider), inbox);
+    Ok(())
+}
+
+fn take_ffi_e2e_events(provider: &Arc<Provider>) -> Result<Vec<FfiE2eEvent>> {
+    let inbox = ffi_e2e_inboxes()
+        .lock()
+        .map_err(|_| Error::Lock)?
+        .get(&provider_key(provider))
+        .cloned()
+        .ok_or_else(|| Error::ExtensionError("missing FFI E2E inbox".to_string()))?;
+    let mut events = inbox.lock().map_err(|_| Error::Lock)?;
+    Ok(std::mem::take(&mut *events))
+}
 
 /// A structure to represent the Provider in a C-compatible format.
 /// This is necessary as using Arc directly in FFI can be unsafe.
@@ -189,19 +317,23 @@ pub extern "C" fn request(
 
         let method = c_char_to_string(method)?;
         let params = c_char_to_string(params)?;
-        let params = serde_json::from_str(&params)
-            .unwrap_or_else(|_| panic!("Failed on covering data {params:?} to JSON"));
+        let params = serde_json::from_str(&params)?;
 
-        let handle = std::thread::spawn(move || {
-            provider.runtime.block_on(async {
+        let ret = if method == "takeE2eEvents" {
+            serde_json::to_value(TakeFfiE2eEventsResponse {
+                events: take_ffi_e2e_events(&provider.provider)?,
+            })?
+        } else {
+            let handle = std::thread::spawn(move || {
                 provider
-                    .provider
-                    .request_internal(method, params)
-                    .await
-                    .unwrap()
-            })
-        });
-        let ret: String = serde_json::to_string(&handle.join().unwrap())?;
+                    .runtime
+                    .block_on(async { provider.provider.request_internal(method, params).await })
+            });
+            handle
+                .join()
+                .map_err(|_| Error::ExtensionError("FFI request thread panicked".to_string()))??
+        };
+        let ret: String = serde_json::to_string(&ret)?;
         let c_ret = CString::new(ret)?.into_raw();
         Ok(c_ret)
     })() {
@@ -276,10 +408,13 @@ pub unsafe extern "C" fn new_provider_with_callback(
     let runtime = Arc::new(Runtime::new().expect("Failed to create runtime"));
     let provider = Arc::new(provider.clone());
     let backend = Backend::new(provider.clone());
+    let e2e_events = Arc::new(Mutex::new(Vec::new()));
+    let callback = FfiBackend::new(backend, e2e_events.clone());
 
     provider
-        .set_swarm_callback_internal(Arc::new(backend))
+        .set_swarm_callback_internal(Arc::new(callback))
         .expect("Failed to set callback");
+    register_ffi_e2e_inbox(&provider, e2e_events).expect("Failed to register FFI E2E inbox");
     let ret: ProviderPtr = (&ProviderWithRuntime::new(provider.clone(), runtime.clone())).into();
     ret
 }

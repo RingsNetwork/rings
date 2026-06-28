@@ -8,7 +8,44 @@
 
 use std::time::Duration;
 
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpStream;
+use tokio::net::UdpSocket;
+
 const CONNECT_BUDGET: Duration = Duration::from_secs(45);
+
+#[tokio::test]
+async fn tcp_echo_helper_round_trips_locally() {
+    let addr = rings_relay_example::spawn_tcp_echo().await;
+    let payload = b"local tcp echo";
+    let mut stream = TcpStream::connect(addr).await.expect("connect echo");
+    stream.write_all(payload).await.expect("write echo");
+
+    let mut got = vec![0u8; payload.len()];
+    stream.read_exact(&mut got).await.expect("read echo");
+
+    assert_eq!(got.as_slice(), payload);
+}
+
+#[tokio::test]
+async fn udp_echo_helper_round_trips_locally() {
+    let addr = rings_relay_example::spawn_udp_echo().await;
+    let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind client");
+    let payload = b"local udp echo";
+
+    socket.send_to(payload, addr).await.expect("send echo");
+
+    let mut got = vec![0u8; payload.len()];
+    let (len, peer) = tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut got))
+        .await
+        .expect("recv timeout")
+        .expect("recv echo");
+
+    assert_eq!(peer, addr);
+    got.truncate(len);
+    assert_eq!(got.as_slice(), payload);
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn tcp_relay_round_trip() {

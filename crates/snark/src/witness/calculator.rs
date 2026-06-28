@@ -38,6 +38,7 @@ use super::circom::CircomBase;
 use super::circom::Wasm;
 use super::fnv;
 use super::memory::SafeMemory;
+use crate::error::Error;
 use crate::error::Result;
 
 /// A calculator for generating witness data from Circom circuits.
@@ -94,20 +95,22 @@ pub fn to_vec_u32<F: PrimeField>(f: F) -> Vec<u32> {
 /// Little endian
 /// Converts a slice of `u32` values to a `U256` number in little endian format.
 /// Primarily used for handling cryptographic operations that require 256-bit integers.
-pub fn u256_from_vec_u32(data: &[u32]) -> U256 {
-    let mut limbs = [0u32; 8];
-    limbs.copy_from_slice(data);
+pub fn u256_from_vec_u32(data: &[u32]) -> Result<U256> {
+    const U256_U32_WORDS: usize = 8;
 
-    cfg_if::cfg_if! {
-        if #[cfg(target_pointer_width = "64")] {
-            let (pre, limbs, suf) = unsafe { limbs.align_to::<u64>() };
-            assert_eq!(pre.len(), 0);
-            assert_eq!(suf.len(), 0);
-            U256::from_words(limbs.try_into().unwrap())
-        } else {
-            U256::from_words(limbs.as_ref().try_into().unwrap())
-        }
+    if data.len() != U256_U32_WORDS {
+        return Err(Error::WitnessInvalidU256WordLength {
+            expected: U256_U32_WORDS,
+            actual: data.len(),
+        });
     }
+
+    let mut bytes = [0u8; 32];
+    for (word, bytes) in data.iter().zip(bytes.chunks_exact_mut(4)) {
+        bytes.copy_from_slice(&word.to_le_bytes());
+    }
+
+    Ok(U256::from_le_slice(&bytes))
 }
 
 /// Little endian
@@ -154,7 +157,8 @@ impl WitnessCalculator {
     /// Sets up the necessary environment, such as memory and instance, for the module.
     pub fn from_module(module: Module, mut store: Store) -> Result<Self> {
         // Set up the memory
-        let memory = Memory::new(&mut store, MemoryType::new(2000, None, false)).unwrap();
+        let memory = Memory::new(&mut store, MemoryType::new(2000, None, false))
+            .map_err(|error| Error::WitnessWasmMemoryError(error.to_string()))?;
         let import_object = imports! {
             "env" => {
                 "memory" => memory.clone(),
@@ -174,7 +178,7 @@ impl WitnessCalculator {
             }
         };
         let instance = Wasm::new(Instance::new(&mut store, &module, &import_object)?);
-        let version = instance.get_version(&mut store).unwrap_or(1);
+        let version = instance.get_version(&mut store)?;
 
         fn new_circom2(
             mut store: Store,
@@ -190,7 +194,7 @@ impl WitnessCalculator {
                 let res = instance.read_shared_rw_memory(&mut store, i)?;
                 arr[i as usize] = res;
             }
-            let prime = u256_from_vec_u32(&arr);
+            let prime = u256_from_vec_u32(&arr)?;
 
             let n64 = ((prime.bits() - 1) / 64 + 1) as u32;
             safe_memory.prime = prime;
@@ -231,7 +235,7 @@ impl WitnessCalculator {
         match version {
             2 => new_circom2(store, instance, memory, version),
             1 => new_circom1(store, instance, memory, version),
-            _ => panic!("Unknown Circom version"),
+            _ => Err(Error::WitnessUnsupportedCircomVersion(version)),
         }
     }
 
@@ -248,7 +252,7 @@ impl WitnessCalculator {
         match self.circom_version {
             2 => self.calculate_witness_circom2(input, sanity_check),
             1 => self.calculate_witness_circom1(input, sanity_check),
-            _ => panic!("Unknown Circom version"),
+            _ => Err(Error::WitnessUnsupportedCircomVersion(self.circom_version)),
         }
     }
 
@@ -274,7 +278,7 @@ impl WitnessCalculator {
             let sig_offset = self.memory.read_u32(&self.store, p_sig_offset as usize) as usize;
 
             for (i, value) in values.into_iter().enumerate() {
-                let value = u256_from_vec_u32(&to_vec_u32(value));
+                let value = u256_from_vec_u32(&to_vec_u32(value))?;
                 self.memory.write_fr(&self.store, p_fr as usize, value)?;
                 self.instance
                     .set_signal(&mut self.store, 0, 0, (sig_offset + i) as u32, p_fr)?;

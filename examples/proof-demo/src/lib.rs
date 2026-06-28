@@ -42,9 +42,9 @@ struct Node {
 
 /// Build an in-browser node (IndexedDB storage), install the extension backend, register
 /// the SNARK protocol, and start the message loop. Mirrors how the daemon is wired.
-async fn build_node() -> Node {
+async fn build_node_with_storage(storage_name: &str) -> Result<Node, String> {
     let key = SecretKey::random();
-    let session_sk = SessionSk::new_with_seckey(&key).expect("session sk");
+    let session_sk = SessionSk::new_with_seckey(&key).map_err(|e| format!("session sk: {e}"))?;
     let config = ProcessorConfig::new(
         0,
         "stun://stun.l.google.com:19302".to_string(),
@@ -52,28 +52,37 @@ async fn build_node() -> Node {
         200,
     );
     let storage = Box::new(
-        IdbStorage::new_with_cap_and_name(50_000, "rings-proof-demo")
+        IdbStorage::new_with_cap_and_name(50_000, storage_name)
             .await
-            .expect("idb storage"),
+            .map_err(|e| format!("idb storage: {e}"))?,
     );
     let processor = Arc::new(
         ProcessorBuilder::from_config(&config)
-            .expect("processor builder")
+            .map_err(|e| format!("processor builder: {e}"))?
             .storage(storage)
             .build()
-            .expect("build processor"),
+            .map_err(|e| format!("build processor: {e}"))?,
     );
     let provider = Arc::new(Provider::from_processor(processor));
-    provider.set_backend().expect("install backend");
+    provider
+        .set_backend()
+        .map_err(|e| format!("install backend: {e}"))?;
     let snark = SNARKBehaviour::default();
-    snark.register(&provider).expect("register snark");
+    snark
+        .register(&provider)
+        .map_err(|e| format!("register snark: {e}"))?;
 
     let listening = provider.clone();
     spawn_local(async move {
         let _ = JsFuture::from(listening.listen()).await;
     });
 
-    Node { provider, snark }
+    Ok(Node { provider, snark })
+}
+
+/// Build the UI node with its stable IndexedDB name.
+async fn build_node() -> Result<Node, String> {
+    build_node_with_storage("rings-proof-demo").await
 }
 
 /// Join the overlay via a seed node's HTTP endpoint.
@@ -155,10 +164,14 @@ fn app() -> Html {
         let status = status.clone();
         use_effect_with((), move |_| {
             spawn_local(async move {
-                let built = build_node().await;
-                did.set(built.provider.address());
-                *node.borrow_mut() = Some(built);
-                status.set("ready — connect to a seed, then send a proof".to_string());
+                match build_node().await {
+                    Ok(built) => {
+                        did.set(built.provider.address());
+                        *node.borrow_mut() = Some(built);
+                        status.set("ready — connect to a seed, then send a proof".to_string());
+                    }
+                    Err(e) => status.set(format!("node init failed: {e}")),
+                }
             });
             || ()
         });
@@ -264,6 +277,12 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    use js_sys::Array;
+    use js_sys::Date;
+    use js_sys::Object;
+    use js_sys::Reflect;
+    use rings_node::prelude::rings_core::utils::js_utils::window_sleep;
+    use wasm_bindgen::JsValue;
     use wasm_bindgen_test::wasm_bindgen_test;
     use wasm_bindgen_test::wasm_bindgen_test_configure;
 
@@ -278,9 +297,100 @@ mod tests {
     // actual peer to prove against).
     #[wasm_bindgen_test]
     async fn builds_a_node_with_a_did() {
-        let node = build_node().await;
+        let node = build_node().await.expect("build node");
         let did = node.provider.address();
         assert!(did.starts_with("0x"), "expected a DID, got {did:?}");
+    }
+
+    fn obj(pairs: &[(&str, &str)]) -> JsValue {
+        let object = Object::new();
+        for (key, value) in pairs {
+            Reflect::set(&object, &JsValue::from_str(key), &JsValue::from_str(value))
+                .expect("object field set");
+        }
+        object.into()
+    }
+
+    fn get_str(value: &JsValue, key: &str) -> String {
+        Reflect::get(value, &JsValue::from_str(key))
+            .ok()
+            .and_then(|field| field.as_string())
+            .unwrap_or_else(|| panic!("missing string field {key:?}"))
+    }
+
+    async fn rpc(provider: &Arc<Provider>, method: &str, params: JsValue) -> JsValue {
+        JsFuture::from(provider.request(method.to_string(), params))
+            .await
+            .unwrap_or_else(|e| panic!("rpc {method} failed: {e:?}"))
+    }
+
+    async fn connect(a: &Arc<Provider>, b: &Arc<Provider>) {
+        let offer = get_str(
+            &rpc(a, "createOffer", obj(&[("did", &b.address())])).await,
+            "offer",
+        );
+        let answer = get_str(
+            &rpc(b, "answerOffer", obj(&[("offer", &offer)])).await,
+            "answer",
+        );
+        let _accepted = rpc(a, "acceptAnswer", obj(&[("answer", &answer)])).await;
+    }
+
+    async fn list_peers(provider: &Arc<Provider>) -> JsValue {
+        rpc(provider, "listPeers", obj(&[])).await
+    }
+
+    fn has_connected_peer(peers_response: &JsValue, did: &str) -> bool {
+        let Ok(peers) = Reflect::get(peers_response, &JsValue::from_str("peers")) else {
+            return false;
+        };
+        let peers = Array::from(&peers);
+        (0..peers.length()).any(|index| {
+            let peer = peers.get(index);
+            let peer_did = Reflect::get(&peer, &JsValue::from_str("did"))
+                .ok()
+                .and_then(|field| field.as_string());
+            let state = Reflect::get(&peer, &JsValue::from_str("state"))
+                .ok()
+                .and_then(|field| field.as_string());
+            peer_did.as_deref() == Some(did) && state.as_deref() == Some("Connected")
+        })
+    }
+
+    async fn wait_connected_peer(provider: &Arc<Provider>, did: &str) {
+        for _ in 0..60 {
+            let peers = list_peers(provider).await;
+            if has_connected_peer(&peers, did) {
+                return;
+            }
+            window_sleep(250).await.expect("sleep");
+        }
+        let peers = list_peers(provider).await;
+        assert!(
+            has_connected_peer(&peers, did),
+            "peer {did} did not reach Connected"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn two_snark_registered_nodes_connect_over_offer_answer() {
+        let suffix = Date::now().to_string();
+        let a = build_node_with_storage(&format!("rings-proof-demo-test-a-{suffix}"))
+            .await
+            .expect("build node a");
+        let b = build_node_with_storage(&format!("rings-proof-demo-test-b-{suffix}"))
+            .await
+            .expect("build node b");
+
+        connect(&a.provider, &b.provider).await;
+        wait_connected_peer(&a.provider, &b.provider.address()).await;
+        wait_connected_peer(&b.provider, &a.provider.address()).await;
+
+        let missing_task = a
+            .snark
+            .get_task_result("00000000-0000-0000-0000-000000000000".to_string())
+            .expect("read empty task store");
+        assert_eq!(missing_task, ProofResult::Pending);
     }
 
     #[wasm_bindgen_test]

@@ -432,10 +432,11 @@ impl Processor {
             recipient_public_key,
             max_plaintext_frame_len,
         )
+        .map_err(Error::SendMessage)?
+        .collect::<rings_core::error::Result<Vec<_>>>()
         .map_err(Error::SendMessage)?;
 
         for frame in frames {
-            let frame = frame.map_err(Error::SendMessage)?;
             self.swarm
                 .send_message(Message::E2eStreamFrame(frame), destination)
                 .await

@@ -42,6 +42,8 @@ impl InternalRpcHandler {
             + HandleRpc<AcceptAnswerRequest, AcceptAnswerResponse>
             + HandleRpc<DisconnectRequest, DisconnectResponse>
             + HandleRpc<SendBackendMessageRequest, SendBackendMessageResponse>
+            + HandleRpc<SendE2eHandshakeRequest, SendE2eHandshakeResponse>
+            + HandleRpc<SendE2eMessageRequest, SendE2eMessageResponse>
             + HandleRpc<PublishMessageToTopicRequest, PublishMessageToTopicResponse>
             + HandleRpc<FetchTopicMessagesRequest, FetchTopicMessagesResponse>
             + HandleRpc<RegisterServiceRequest, RegisterServiceResponse>
@@ -106,6 +108,18 @@ impl InternalRpcHandler {
             }
             Method::SendBackendMessage => {
                 let req = serde_json::from_value::<SendBackendMessageRequest>(params)
+                    .map_err(|e| Error::invalid_params(e.to_string()))?;
+                let resp = processor.handle_rpc(req).await?;
+                serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
+            }
+            Method::SendE2eHandshake => {
+                let req = serde_json::from_value::<SendE2eHandshakeRequest>(params)
+                    .map_err(|e| Error::invalid_params(e.to_string()))?;
+                let resp = processor.handle_rpc(req).await?;
+                serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
+            }
+            Method::SendE2eMessage => {
+                let req = serde_json::from_value::<SendE2eMessageRequest>(params)
                     .map_err(|e| Error::invalid_params(e.to_string()))?;
                 let resp = processor.handle_rpc(req).await?;
                 serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))

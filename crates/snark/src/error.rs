@@ -21,9 +21,36 @@ pub enum Error {
     /// Error on create wasm instance
     #[error("Error on create wasm instance: {0}")]
     WitnessWasmInstanceError(Box<wasmer::InstantiationError>),
+    /// Error on create wasm memory
+    #[error("Error on create wasm memory: {0}")]
+    WitnessWasmMemoryError(String),
     /// Wasm runtime error
     #[error("Error on wasm runtime: {0}")]
     WitnessCompileError(Box<wasmer::CompileError>),
+    /// Required Wasm export is not available
+    #[error("Wasm export not found: {0}")]
+    WitnessMissingExport(String),
+    /// Wasm export returned a value that does not match the Circom ABI
+    #[error("Invalid wasm return from {function}: expected {expected}, got {actual}")]
+    WitnessInvalidReturn {
+        /// Wasm function name.
+        function: String,
+        /// Expected return shape.
+        expected: &'static str,
+        /// Actual return shape.
+        actual: String,
+    },
+    /// Unsupported Circom compiler ABI version
+    #[error("Unsupported Circom version: {0}")]
+    WitnessUnsupportedCircomVersion(u32),
+    /// Invalid number of 32-bit words for a 256-bit integer
+    #[error("Invalid U256 word length: expected {expected}, got {actual}")]
+    WitnessInvalidU256WordLength {
+        /// Expected number of 32-bit words.
+        expected: usize,
+        /// Actual number of 32-bit words.
+        actual: usize,
+    },
     /// Failed on load wasm module
     #[error("Error on load wasm module: {0}")]
     WitnessIoCompileError(Box<wasmer::IoCompileError>),

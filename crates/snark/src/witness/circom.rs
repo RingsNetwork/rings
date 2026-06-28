@@ -19,7 +19,24 @@ use wasmer::Function;
 use wasmer::Instance;
 use wasmer::Value;
 
+use crate::error::Error;
 use crate::error::Result;
+
+fn first_i32_result(function: &str, values: &[Value]) -> Result<u32> {
+    match values.first() {
+        Some(Value::I32(value)) => Ok(*value as u32),
+        Some(value) => Err(Error::WitnessInvalidReturn {
+            function: function.to_string(),
+            expected: "i32",
+            actual: format!("{value:?}"),
+        }),
+        None => Err(Error::WitnessInvalidReturn {
+            function: function.to_string(),
+            expected: "i32",
+            actual: "no return value".to_string(),
+        }),
+    }
+}
 
 /// Represents a Wasm runtime instance.
 /// Encapsulates a `wasmer::Instance` to provide higher-level operations specific to Circom Wasm modules.
@@ -32,7 +49,7 @@ pub trait CircomBase {
     /// Performs an optional sanity check.
     fn init(&self, store: &mut impl AsStoreMut, sanity_check: bool) -> Result<()>;
     /// Retrieves a reference to a Wasm function by its name.
-    fn func(&self, name: &str) -> &Function;
+    fn func(&self, name: &str) -> Result<&Function>;
     /// Get wrapped wasm function
     fn get_ptr_witness_buffer(&self, store: &mut impl AsStoreMut) -> Result<u32>;
     /// Retrieves a pointer to a specific witness in the Wasm store.
@@ -129,19 +146,20 @@ impl Circom2 for Wasm {
     }
 
     fn get_raw_prime(&self, store: &mut impl AsStoreMut) -> Result<()> {
-        let func = self.func("getRawPrime");
+        let func = self.func("getRawPrime")?;
         func.call(store, &[])?;
         Ok(())
     }
 
     fn read_shared_rw_memory(&self, store: &mut impl AsStoreMut, i: u32) -> Result<u32> {
-        let func = self.func("readSharedRWMemory");
+        let name = "readSharedRWMemory";
+        let func = self.func(name)?;
         let result = func.call(store, &[i.into()])?;
-        Ok(result[0].unwrap_i32() as u32)
+        first_i32_result(name, &result)
     }
 
     fn write_shared_rw_memory(&self, store: &mut impl AsStoreMut, i: u32, v: u32) -> Result<()> {
-        let func = self.func("writeSharedRWMemory");
+        let func = self.func("writeSharedRWMemory")?;
         func.call(store, &[i.into(), v.into()])?;
         Ok(())
     }
@@ -153,13 +171,13 @@ impl Circom2 for Wasm {
         hlsb: u32,
         pos: u32,
     ) -> Result<()> {
-        let func = self.func("setInputSignal");
+        let func = self.func("setInputSignal")?;
         func.call(store, &[hmsb.into(), hlsb.into(), pos.into()])?;
         Ok(())
     }
 
     fn get_witness(&self, store: &mut impl AsStoreMut, i: u32) -> Result<()> {
-        let func = self.func("getWitness");
+        let func = self.func("getWitness")?;
         func.call(store, &[i.into()])?;
         Ok(())
     }
@@ -171,7 +189,7 @@ impl Circom2 for Wasm {
 
 impl CircomBase for Wasm {
     fn init(&self, store: &mut impl AsStoreMut, sanity_check: bool) -> Result<()> {
-        let func = self.func("init");
+        let func = self.func("init")?;
         func.call(store, &[Value::I32(i32::from(sanity_check))])?;
         Ok(())
     }
@@ -181,10 +199,11 @@ impl CircomBase for Wasm {
     }
 
     fn get_ptr_witness(&self, store: &mut impl AsStoreMut, w: u32) -> Result<u32> {
-        let func = self.func("getPWitness");
+        let name = "getPWitness";
+        let func = self.func(name)?;
         let res = func.call(store, &[w.into()])?;
 
-        Ok(res[0].unwrap_i32() as u32)
+        first_i32_result(name, &res)
     }
 
     fn get_n_vars(&self, store: &mut impl AsStoreMut) -> Result<u32> {
@@ -199,7 +218,7 @@ impl CircomBase for Wasm {
         hash_msb: u32,
         hash_lsb: u32,
     ) -> Result<()> {
-        let func = self.func("getSignalOffset32");
+        let func = self.func("getSignalOffset32")?;
         func.call(store, &[
             p_sig_offset.into(),
             component.into(),
@@ -218,7 +237,7 @@ impl CircomBase for Wasm {
         signal: u32,
         p_val: u32,
     ) -> Result<()> {
-        let func = self.func("setSignal");
+        let func = self.func("setSignal")?;
         func.call(store, &[
             c_idx.into(),
             component.into(),
@@ -231,23 +250,27 @@ impl CircomBase for Wasm {
 
     // Default to version 1 if it isn't explicitly defined
     fn get_version(&self, store: &mut impl AsStoreMut) -> Result<u32> {
-        match self.0.exports.get_function("getVersion") {
-            Ok(func) => Ok(func.call(store, &[])?[0].unwrap_i32() as u32), // should be 2
+        let name = "getVersion";
+        match self.0.exports.get_function(name) {
+            Ok(func) => {
+                let result = func.call(store, &[])?;
+                first_i32_result(name, &result)
+            }
             Err(_) => Ok(1),
         }
     }
 
     fn get_u32(&self, store: &mut impl AsStoreMut, name: &str) -> Result<u32> {
-        let func = self.func(name);
+        let func = self.func(name)?;
         let result = func.call(store, &[])?;
-        Ok(result[0].unwrap_i32() as u32)
+        first_i32_result(name, &result)
     }
 
-    fn func(&self, name: &str) -> &Function {
+    fn func(&self, name: &str) -> Result<&Function> {
         self.0
             .exports
             .get_function(name)
-            .unwrap_or_else(|_| panic!("function {name} not found"))
+            .map_err(|_| Error::WitnessMissingExport(name.to_string()))
     }
 }
 

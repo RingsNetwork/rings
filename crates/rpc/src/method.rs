@@ -26,6 +26,10 @@ pub enum Method {
     Disconnect,
     /// SendBackendMessage
     SendBackendMessage,
+    /// Send an E2E public-key handshake request
+    SendE2eHandshake,
+    /// Send an encrypted E2E message stream
+    SendE2eMessage,
     /// Append data to topic
     PublishMessageToTopic,
     /// Fetch data of topic
@@ -53,6 +57,8 @@ impl Method {
             Method::Disconnect => "disconnect",
             Method::AcceptAnswer => "acceptAnswer",
             Method::SendBackendMessage => "sendBackendMessage",
+            Method::SendE2eHandshake => "sendE2eHandshake",
+            Method::SendE2eMessage => "sendE2eMessage",
             Method::PublishMessageToTopic => "publishMessageToTopic",
             Method::FetchTopicMessages => "fetchTopicMessages",
             Method::RegisterService => "registerService",
@@ -84,6 +90,8 @@ impl TryFrom<&str> for Method {
             "disconnect" => Self::Disconnect,
             "acceptAnswer" => Self::AcceptAnswer,
             "sendBackendMessage" => Self::SendBackendMessage,
+            "sendE2eHandshake" => Self::SendE2eHandshake,
+            "sendE2eMessage" => Self::SendE2eMessage,
             "publishMessageToTopic" => Method::PublishMessageToTopic,
             "fetchTopicMessages" => Method::FetchTopicMessages,
             "registerService" => Method::RegisterService,

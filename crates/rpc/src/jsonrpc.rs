@@ -164,6 +164,20 @@ impl Client {
         self.call_method(Method::SendBackendMessage, req).await
     }
 
+    pub async fn send_e2e_handshake(
+        &self,
+        req: &SendE2eHandshakeRequest,
+    ) -> Result<SendE2eHandshakeResponse> {
+        self.call_method(Method::SendE2eHandshake, req).await
+    }
+
+    pub async fn send_e2e_message(
+        &self,
+        req: &SendE2eMessageRequest,
+    ) -> Result<SendE2eMessageResponse> {
+        self.call_method(Method::SendE2eMessage, req).await
+    }
+
     /// Publishes a message to the specified topic.
     pub async fn publish_message_to_topic(
         &self,

@@ -14,6 +14,8 @@ use jsonrpc_core::types::error::Error;
 use jsonrpc_core::types::error::ErrorCode;
 use jsonrpc_core::Result;
 use rings_core::dht::Did;
+use rings_core::ecc::PublicKey;
+use rings_core::message::e2e;
 use rings_core::message::Decoder;
 use rings_core::message::Encoded;
 use rings_core::message::Encoder;
@@ -217,6 +219,41 @@ impl HandleRpc<SendBackendMessageRequest, SendBackendMessageResponse> for Proces
 
 #[cfg_attr(feature = "browser", async_trait(?Send))]
 #[cfg_attr(not(feature = "browser"), async_trait)]
+impl HandleRpc<SendE2eHandshakeRequest, SendE2eHandshakeResponse> for Processor {
+    async fn handle_rpc(&self, req: SendE2eHandshakeRequest) -> Result<SendE2eHandshakeResponse> {
+        let destination = s2d(&req.destination_did)?;
+        let tx_id = self.send_e2e_handshake(destination).await?;
+        Ok(SendE2eHandshakeResponse {
+            tx_id: tx_id.to_string(),
+        })
+    }
+}
+
+#[cfg_attr(feature = "browser", async_trait(?Send))]
+#[cfg_attr(not(feature = "browser"), async_trait)]
+impl HandleRpc<SendE2eMessageRequest, SendE2eMessageResponse> for Processor {
+    async fn handle_rpc(&self, req: SendE2eMessageRequest) -> Result<SendE2eMessageResponse> {
+        let destination = s2d(&req.destination_did)?;
+        let recipient_public_key = s2pk(&req.recipient_public_key)?;
+        let payload = base64::decode(req.data.as_str())
+            .map_err(|e| Error::invalid_params(format!("data is not valid base64: {e:?}")))?;
+        let frame_len = if req.max_plaintext_frame_len == 0 {
+            e2e::DEFAULT_E2E_PLAINTEXT_FRAME_LEN
+        } else {
+            req.max_plaintext_frame_len as usize
+        };
+
+        let stream_id = self
+            .send_e2e_message_with_frame_len(destination, recipient_public_key, &payload, frame_len)
+            .await?;
+        Ok(SendE2eMessageResponse {
+            stream_id: stream_id.to_string(),
+        })
+    }
+}
+
+#[cfg_attr(feature = "browser", async_trait(?Send))]
+#[cfg_attr(not(feature = "browser"), async_trait)]
 impl HandleRpc<PublishMessageToTopicRequest, PublishMessageToTopicResponse> for Processor {
     async fn handle_rpc(
         &self,
@@ -318,4 +355,10 @@ impl HandleRpc<NodeDidRequest, NodeDidResponse> for Processor {
 /// Get did from string or return InvalidParam Error
 fn s2d(s: &str) -> Result<Did> {
     Did::from_str(s).map_err(|_| Error::invalid_params(format!("Invalid Did: {s}")))
+}
+
+fn s2pk(s: &str) -> Result<PublicKey<33>> {
+    PublicKey::try_from_b58m(s)
+        .or_else(|_| PublicKey::from_hex_string(s))
+        .map_err(|_| Error::invalid_params("Invalid secp256k1 public key"))
 }

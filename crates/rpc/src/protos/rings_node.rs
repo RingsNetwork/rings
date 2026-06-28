@@ -105,6 +105,34 @@ pub struct SendBackendMessageRequest {
 pub struct SendBackendMessageResponse {}
 
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct SendE2eHandshakeRequest {
+    pub destination_did: String,
+}
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct SendE2eHandshakeResponse {
+    pub tx_id: String,
+}
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct SendE2eMessageRequest {
+    pub destination_did: String,
+    /// Recipient public key as a base58-check string. Hex is accepted by node implementations
+    /// for development ergonomics.
+    pub recipient_public_key: String,
+    /// Plaintext bytes, base64-encoded for the JSON RPC boundary.
+    pub data: String,
+    /// Optional plaintext frame length. `0` means the core default.
+    #[serde(default)]
+    pub max_plaintext_frame_len: u32,
+}
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct SendE2eMessageResponse {
+    pub stream_id: String,
+}
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct PublishMessageToTopicRequest {
     pub topic: String,
     pub data: String,

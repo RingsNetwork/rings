@@ -8,7 +8,7 @@ repository.workspace = true
 
 [dependencies]
 rings-core = { workspace = true }
-rings-node = { workspace = true }
+rings-node = { path = "../../crates/node", default-features = false, features = ["node"] }
 tokio = { version = "1.13.0", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 
 [[example]]

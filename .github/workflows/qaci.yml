@@ -32,7 +32,7 @@ jobs:
 
   build_wasm:
     name: Build and test for wasm
-    timeout-minutes: 10
+    timeout-minutes: 45
     strategy:
       matrix:
         os: ["ubuntu-latest"]
@@ -65,6 +65,28 @@ jobs:
 
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Run browser example core tests
+        run: |
+          node --check examples/browser/app.mjs
+          node --test examples/browser/tests/*.test.mjs
+
+      - name: Run browser example wasm tests
+        run: wasm-pack test --release --node examples/browser
+
+      - name: Run dweb example browser tests
+        uses: coactions/setup-xvfb@v1
+        with:
+          run: |
+            wasm-pack test --release --headless --chrome . -- --skip two_nodes_fetch_a_hosted_page
+            wasm-pack test --release --headless --chrome . -- two_nodes_fetch_a_hosted_page --nocapture
+          working-directory: ./examples/dweb
+
+      - name: Run proof-demo browser tests
+        uses: coactions/setup-xvfb@v1
+        with:
+          run: wasm-pack test --release --headless --chrome
+          working-directory: ./examples/proof-demo
 
       - name: Run core browser tests
         uses: coactions/setup-xvfb@v1
@@ -146,8 +168,13 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Smoke test ffi
-        run: pip install wheel && pip install web3 cffi && python examples/ffi/rings.py
+      - name: Install Python FFI test dependencies
+        run: python -m pip install --upgrade pip wheel && python -m pip install web3 cffi pytest
+
+      - name: Run FFI Python integration tests
+        env:
+          RINGS_FFI_REQUIRE_LIBRARY: "1"
+        run: pytest examples/ffi/tests
 
       # - name: Smoke test native
       #   run: cargo run -p rings-native-example

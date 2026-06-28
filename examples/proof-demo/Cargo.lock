@@ -3899,7 +3899,7 @@ dependencies = [
 
 [[package]]
 name = "rings-core"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "ark-bls12-381",
  "ark-ec",
@@ -3916,7 +3916,6 @@ dependencies = [
  "bincode",
  "bytes",
  "chrono",
- "curve25519-dalek",
  "dashmap 5.5.3",
  "derivative",
  "ecdsa",
@@ -3959,7 +3958,7 @@ dependencies = [
 
 [[package]]
 name = "rings-derive"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3969,7 +3968,7 @@ dependencies = [
 
 [[package]]
 name = "rings-node"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "anyhow",
  "arrayref",
@@ -4018,6 +4017,7 @@ name = "rings-proof-demo"
 version = "0.1.0"
 dependencies = [
  "gloo-timers 0.3.0",
+ "js-sys",
  "rings-node",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -4028,7 +4028,7 @@ dependencies = [
 
 [[package]]
 name = "rings-rpc"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "async-trait",
  "base64 0.13.1",
@@ -4044,7 +4044,7 @@ dependencies = [
 
 [[package]]
 name = "rings-snark"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "bellpepper-core",
  "byteorder",
@@ -4072,7 +4072,7 @@ dependencies = [
 
 [[package]]
 name = "rings-transport"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "async-trait",
  "bincode",
@@ -4498,16 +4498,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
-name = "signal-hook-registry"
-version = "1.4.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
-dependencies = [
- "errno",
- "libc",
-]
-
-[[package]]
 name = "signature"
 version = "1.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4823,9 +4813,7 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
- "parking_lot",
  "pin-project-lite",
- "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",
