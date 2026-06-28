@@ -192,6 +192,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ark-bn254"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a22f4561524cd949590d78d7d4c5df8f592430d221f7f3c9497bbafd8972120f"
+dependencies = [
+ "ark-ec",
+ "ark-ff",
+ "ark-std",
+]
+
+[[package]]
 name = "ark-ec"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4359,6 +4370,9 @@ name = "rings-node"
 version = "0.12.0"
 dependencies = [
  "anyhow",
+ "ark-bn254",
+ "ark-ec",
+ "ark-ff",
  "arrayref",
  "async-stream",
  "async-trait",
@@ -4388,6 +4402,7 @@ dependencies = [
  "lazy_static",
  "log",
  "merlin",
+ "num-bigint 0.4.6",
  "pin-project",
  "reqwest",
  "rings-core",

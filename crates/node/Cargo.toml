@@ -78,9 +78,18 @@ guest-r1cs-proof = [
     "merlin",
     "spartan",
 ]
+guest-wasm-proof = [
+    "ark-bn254",
+    "ark-ec",
+    "ark-ff",
+    "num-bigint",
+]
 
 [dependencies]
 anyhow = "1.0.45"
+ark-bn254 = { version = "0.4.0", default-features = false, features = ["curve"], optional = true }
+ark-ec = { version = "0.4.2", default-features = false, optional = true }
+ark-ff = { version = "0.4.2", default-features = false, optional = true }
 arrayref = "0.3.6"
 async-trait = { workspace = true }
 base64 = { version = "0.13.0" }
@@ -97,6 +106,7 @@ http = "0.2.6"
 jsonrpc-core = { workspace = true }
 log = { version = "0.4", features = ["std"] }
 merlin = { version = "3.0.0", default-features = false, optional = true }
+num-bigint = { version = "0.4.3", optional = true }
 rings-core = { workspace = true, optional = true }
 rings-derive = { workspace = true, optional = true }
 rings-rpc = { workspace = true, optional = true }

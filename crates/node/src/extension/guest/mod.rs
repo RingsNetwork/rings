@@ -25,6 +25,8 @@ mod r1cs_spartan;
 mod runtime;
 #[cfg(test)]
 mod runtime_tests;
+#[cfg(feature = "guest-wasm-proof")]
+mod zkwasm_aggregator;
 
 pub use manifest::GuestCapabilities;
 pub use manifest::GuestCapability;
@@ -79,3 +81,9 @@ pub use runtime::GuestRuntimeRegistry;
 pub use runtime::GuestState;
 pub use runtime::GuestStepInput;
 pub use runtime::GuestStepOutput;
+#[cfg(feature = "guest-wasm-proof")]
+pub use zkwasm_aggregator::zkwasm_aggregator_claim_scalar;
+#[cfg(feature = "guest-wasm-proof")]
+pub use zkwasm_aggregator::ZkWasmAggregatorReceipt;
+#[cfg(feature = "guest-wasm-proof")]
+pub use zkwasm_aggregator::ZkWasmAggregatorVerifier;
