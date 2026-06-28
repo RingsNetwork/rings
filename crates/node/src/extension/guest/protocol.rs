@@ -2,8 +2,8 @@
 //! Integration with the existing extension protocol registry.
 
 use bytes::Bytes;
+use rings_runtime::accept_step_output;
 
-use super::runtime::accept_step_output;
 use super::GuestContext;
 use super::GuestEffect;
 use super::GuestError;
@@ -188,25 +188,26 @@ mod tests {
     use crate::extension::guest::ProofPolicy;
     use crate::extension::guest::SUPPORTED_GUEST_ABI_VERSION;
 
-    fn hash(seed: u8, field: &'static str) -> GuestProgramHash {
-        GuestProgramHash::new([seed; 32], field).expect("non-zero test hash")
+    fn hash(seed: u8, field: &'static str) -> std::result::Result<GuestProgramHash, GuestError> {
+        GuestProgramHash::new([seed; 32], field)
     }
 
-    fn manifest(capabilities: Vec<GuestCapability>) -> GuestManifest {
+    fn manifest(
+        capabilities: Vec<GuestCapability>,
+    ) -> std::result::Result<GuestManifest, GuestError> {
         GuestManifest::validate(GuestManifestSpec {
             namespace: "guest.protocol".to_string(),
             runtime: GuestRuntimeKind::Wasm,
             abi_version: SUPPORTED_GUEST_ABI_VERSION,
-            module_hash: hash(1, "module_hash"),
-            state_schema_hash: hash(2, "state_schema_hash"),
-            event_schema_hash: hash(3, "event_schema_hash"),
-            effect_schema_hash: hash(4, "effect_schema_hash"),
+            module_hash: hash(1, "module_hash")?,
+            state_schema_hash: hash(2, "state_schema_hash")?,
+            event_schema_hash: hash(3, "event_schema_hash")?,
+            effect_schema_hash: hash(4, "effect_schema_hash")?,
             capabilities,
             memory_limit: 16,
             fuel_limit: 100,
             proof_policy: ProofPolicy::None,
         })
-        .expect("valid guest manifest")
     }
 
     struct AllowVerifier;
@@ -243,9 +244,9 @@ mod tests {
     }
 
     #[test]
-    fn guest_protocol_uses_manifest_namespace() {
+    fn guest_protocol_uses_manifest_namespace() -> std::result::Result<(), GuestError> {
         let protocol = GuestProtocol::new(
-            manifest(Vec::new()),
+            manifest(Vec::new())?,
             StaticRuntime {
                 output: Ok(output_with(Vec::new())),
             },
@@ -254,12 +255,14 @@ mod tests {
         );
 
         assert_eq!(protocol.namespace(), "guest.protocol");
+        Ok(())
     }
 
     #[test]
-    fn guest_protocol_records_runtime_error_without_effects() {
+    fn guest_protocol_records_runtime_error_without_effects() -> std::result::Result<(), GuestError>
+    {
         let protocol = GuestProtocol::new(
-            manifest(Vec::new()),
+            manifest(Vec::new())?,
             StaticRuntime {
                 output: Err(GuestError::RuntimeRejected {
                     reason: "boom".to_string(),
@@ -291,12 +294,14 @@ mod tests {
             transition.state.guest_state(),
             &GuestState::new(Bytes::from_static(b"initial"))
         );
+        Ok(())
     }
 
     #[test]
-    fn guest_protocol_denies_undeclared_effect_before_shell_boundary() {
+    fn guest_protocol_denies_undeclared_effect_before_shell_boundary(
+    ) -> std::result::Result<(), GuestError> {
         let protocol = GuestProtocol::new(
-            manifest(Vec::new()),
+            manifest(Vec::new())?,
             StaticRuntime {
                 output: Ok(output_with(vec![GuestEffect::Send {
                     to: Did::from(3u32),
@@ -325,15 +330,17 @@ mod tests {
                 capability: GuestCapability::Send
             })
         );
+        Ok(())
     }
 
     #[test]
-    fn guest_protocol_accepts_declared_effects_as_host_shell_work() {
+    fn guest_protocol_accepts_declared_effects_as_host_shell_work(
+    ) -> std::result::Result<(), GuestError> {
         let effects = vec![GuestEffect::Inject {
             payload: Bytes::from_static(b"loop"),
         }];
         let protocol = GuestProtocol::new(
-            manifest(vec![GuestCapability::Inject]),
+            manifest(vec![GuestCapability::Inject])?,
             StaticRuntime {
                 output: Ok(output_with(effects.clone())),
             },
@@ -358,17 +365,19 @@ mod tests {
             &GuestState::new(Bytes::from_static(b"next"))
         );
         assert_eq!(transition.state.last_error(), None);
+        Ok(())
     }
 
     #[cfg(feature = "node")]
     #[tokio::test]
-    async fn guest_registration_rejects_duplicate_namespace() {
+    async fn guest_registration_rejects_duplicate_namespace() -> std::result::Result<(), GuestError>
+    {
         use std::sync::Arc;
 
         use crate::provider::Provider;
         use crate::tests::native::prepare_processor;
 
-        let manifest = manifest(Vec::new());
+        let manifest = manifest(Vec::new())?;
         let provider = Provider::from_processor(Arc::new(prepare_processor().await));
         let first = GuestProtocol::new(
             manifest.clone(),
@@ -387,8 +396,8 @@ mod tests {
             GuestState::new(Bytes::new()),
         );
 
-        register_guest_extension(&provider.extensions(), first)
-            .expect("first guest registration succeeds");
+        assert!(register_guest_extension(&provider.extensions(), first).is_ok());
         assert!(register_guest_extension(&provider.extensions(), second).is_err());
+        Ok(())
     }
 }

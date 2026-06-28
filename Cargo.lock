@@ -5524,9 +5524,6 @@ name = "rings-node"
 version = "0.12.0"
 dependencies = [
  "anyhow",
- "ark-bn254 0.4.0",
- "ark-ec 0.4.2",
- "ark-ff 0.4.2",
  "arrayref",
  "async-stream",
  "async-trait",
@@ -5553,16 +5550,14 @@ dependencies = [
  "jsonrpc-core",
  "lazy_static",
  "log",
- "num-bigint 0.4.6",
  "pin-project",
  "reqwest",
  "rings-core",
  "rings-derive",
  "rings-rpc",
+ "rings-runtime",
  "rings-snark",
  "rings-transport",
- "risc0-zkvm",
- "rmp-serde",
  "serde",
  "serde-wasm-bindgen 0.6.5",
  "serde_json",
@@ -5608,6 +5603,25 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "rings-runtime"
+version = "0.12.0"
+dependencies = [
+ "ark-bn254 0.4.0",
+ "ark-ec 0.4.2",
+ "ark-ff 0.4.2",
+ "bincode",
+ "bytes",
+ "num-bigint 0.4.6",
+ "rings-core",
+ "risc0-zkvm",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "wasm-bindgen-test",
 ]
 
 [[package]]

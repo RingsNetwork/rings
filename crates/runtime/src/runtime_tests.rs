@@ -31,29 +31,28 @@ use super::GuestStepOutput;
 use super::ProofPolicy;
 use super::SUPPORTED_GUEST_ABI_VERSION;
 
-fn hash(seed: u8, field: &'static str) -> GuestProgramHash {
-    GuestProgramHash::new([seed; 32], field).expect("non-zero test hash")
+fn hash(seed: u8, field: &'static str) -> Result<GuestProgramHash, GuestError> {
+    GuestProgramHash::new([seed; 32], field)
 }
 
 fn manifest_with(
     runtime: GuestRuntimeKind,
     capabilities: Vec<GuestCapability>,
     proof_policy: ProofPolicy,
-) -> GuestManifest {
+) -> Result<GuestManifest, GuestError> {
     GuestManifest::validate(GuestManifestSpec {
         namespace: "guest.test".to_string(),
         runtime,
         abi_version: SUPPORTED_GUEST_ABI_VERSION,
-        module_hash: hash(1, "module_hash"),
-        state_schema_hash: hash(2, "state_schema_hash"),
-        event_schema_hash: hash(3, "event_schema_hash"),
-        effect_schema_hash: hash(4, "effect_schema_hash"),
+        module_hash: hash(1, "module_hash")?,
+        state_schema_hash: hash(2, "state_schema_hash")?,
+        event_schema_hash: hash(3, "event_schema_hash")?,
+        effect_schema_hash: hash(4, "effect_schema_hash")?,
         capabilities,
         memory_limit: 2,
         fuel_limit: 10,
         proof_policy,
     })
-    .expect("valid guest manifest")
 }
 
 fn profile(runtime: GuestRuntimeKind, proof_policy: ProofPolicy) -> GuestRuntimeProfile {
@@ -84,24 +83,26 @@ fn output_with(effects: Vec<GuestEffect>) -> GuestStepOutput {
 }
 
 #[test]
-fn step_input_abi_round_trip_preserves_value() {
-    let manifest = manifest_with(GuestRuntimeKind::Wasm, Vec::new(), ProofPolicy::None);
+fn step_input_abi_round_trip_preserves_value() -> Result<(), GuestError> {
+    let manifest = manifest_with(GuestRuntimeKind::Wasm, Vec::new(), ProofPolicy::None)?;
     let input = input_for(&manifest);
 
-    let encoded = input.encode_abi().expect("encode input ABI");
-    let decoded = GuestStepInput::decode_abi(encoded.as_slice()).expect("decode input ABI");
+    let encoded = input.encode_abi()?;
+    let decoded = GuestStepInput::decode_abi(encoded.as_slice())?;
     assert_eq!(decoded, input);
+    Ok(())
 }
 
 #[test]
-fn step_output_abi_round_trip_preserves_value() {
+fn step_output_abi_round_trip_preserves_value() -> Result<(), GuestError> {
     let output = output_with(vec![GuestEffect::Inject {
         payload: Bytes::from_static(b"self"),
     }]);
 
-    let encoded = output.encode_abi().expect("encode output ABI");
-    let decoded = GuestStepOutput::decode_abi(encoded.as_slice()).expect("decode output ABI");
+    let encoded = output.encode_abi()?;
+    let decoded = GuestStepOutput::decode_abi(encoded.as_slice())?;
     assert_eq!(decoded, output);
+    Ok(())
 }
 
 #[test]
@@ -139,22 +140,24 @@ impl GuestReceiptVerifier for DenyVerifier {
 }
 
 #[test]
-fn binary_validation_requires_matching_manifest_hash() {
-    let manifest = manifest_with(GuestRuntimeKind::Wasm, Vec::new(), ProofPolicy::None);
-    let binary = GuestBinary::new(Bytes::from_static(b"module"), hash(9, "module_hash")).unwrap();
+fn binary_validation_requires_matching_manifest_hash() -> Result<(), GuestError> {
+    let manifest = manifest_with(GuestRuntimeKind::Wasm, Vec::new(), ProofPolicy::None)?;
+    let other_hash = hash(9, "module_hash")?;
+    let binary = GuestBinary::new(Bytes::from_static(b"module"), other_hash)?;
 
     assert_eq!(
         binary.validate_manifest(&manifest),
         Err(GuestError::ProgramHashMismatch {
             expected: manifest.module_hash(),
-            actual: hash(9, "module_hash"),
+            actual: other_hash,
         })
     );
+    Ok(())
 }
 
 #[test]
-fn output_validation_denies_undeclared_capability() {
-    let manifest = manifest_with(GuestRuntimeKind::Wasm, Vec::new(), ProofPolicy::None);
+fn output_validation_denies_undeclared_capability() -> Result<(), GuestError> {
+    let manifest = manifest_with(GuestRuntimeKind::Wasm, Vec::new(), ProofPolicy::None)?;
     let input = input_for(&manifest);
     let output = output_with(vec![GuestEffect::Send {
         to: Did::from(3u32),
@@ -167,15 +170,16 @@ fn output_validation_denies_undeclared_capability() {
             capability: GuestCapability::Send
         })
     );
+    Ok(())
 }
 
 #[test]
-fn output_validation_accepts_declared_capabilities() {
+fn output_validation_accepts_declared_capabilities() -> Result<(), GuestError> {
     let manifest = manifest_with(
         GuestRuntimeKind::Wasm,
         vec![GuestCapability::Send, GuestCapability::Inject],
         ProofPolicy::None,
-    );
+    )?;
     let input = input_for(&manifest);
     let effects = vec![
         GuestEffect::Send {
@@ -188,15 +192,15 @@ fn output_validation_accepts_declared_capabilities() {
     ];
     let output = output_with(effects.clone());
 
-    let accepted =
-        accept_step_output(&manifest, &input, output, &AllowVerifier).expect("accepted output");
+    let accepted = accept_step_output(&manifest, &input, output, &AllowVerifier)?;
     assert_eq!(accepted.effects, effects);
     assert_eq!(accepted.state, GuestState::new(Bytes::from_static(b"next")));
+    Ok(())
 }
 
 #[test]
-fn output_validation_enforces_fuel_and_memory_limits() {
-    let manifest = manifest_with(GuestRuntimeKind::Wasm, Vec::new(), ProofPolicy::None);
+fn output_validation_enforces_fuel_and_memory_limits() -> Result<(), GuestError> {
+    let manifest = manifest_with(GuestRuntimeKind::Wasm, Vec::new(), ProofPolicy::None)?;
     let input = input_for(&manifest);
 
     let mut high_fuel = output_with(Vec::new());
@@ -215,15 +219,16 @@ fn output_validation_enforces_fuel_and_memory_limits() {
         accept_step_output(&manifest, &input, high_memory, &AllowVerifier),
         Err(GuestError::MemoryLimitExceeded { used: 3, limit: 2 })
     );
+    Ok(())
 }
 
 #[test]
-fn receipt_policy_requires_matching_verified_receipt() {
+fn receipt_policy_requires_matching_verified_receipt() -> Result<(), GuestError> {
     let manifest = manifest_with(
         GuestRuntimeKind::Riscv,
         Vec::new(),
         ProofPolicy::VerifyReceipt,
-    );
+    )?;
     let input = input_for(&manifest);
 
     assert_eq!(
@@ -233,7 +238,7 @@ fn receipt_policy_requires_matching_verified_receipt() {
 
     let mut mismatched = output_with(Vec::new());
     mismatched.receipt = Some(GuestReceipt {
-        program_hash: hash(9, "module_hash"),
+        program_hash: hash(9, "module_hash")?,
         public_input: input.public_input.clone(),
         public_output: mismatched.public_output.clone(),
         proof: Bytes::from_static(b"proof"),
@@ -265,6 +270,7 @@ fn receipt_policy_requires_matching_verified_receipt() {
         proof: Bytes::from_static(b"proof"),
     });
     assert!(accept_step_output(&manifest, &input, verified, &AllowVerifier).is_ok());
+    Ok(())
 }
 
 struct StaticRuntime {
@@ -344,20 +350,20 @@ fn riscv_test_factory(
 }
 
 #[test]
-fn deterministic_replay_returns_the_replayed_output() {
-    let manifest = manifest_with(GuestRuntimeKind::Wasm, Vec::new(), ProofPolicy::None);
+fn deterministic_replay_returns_the_replayed_output() -> Result<(), GuestError> {
+    let manifest = manifest_with(GuestRuntimeKind::Wasm, Vec::new(), ProofPolicy::None)?;
     let runtime = StaticRuntime {
         output: output_with(Vec::new()),
     };
 
-    let output =
-        assert_deterministic_replay(&runtime, input_for(&manifest)).expect("deterministic runtime");
+    let output = assert_deterministic_replay(&runtime, input_for(&manifest))?;
     assert_eq!(output.state, GuestState::new(Bytes::from_static(b"next")));
+    Ok(())
 }
 
 #[test]
-fn deterministic_replay_rejects_divergent_output() {
-    let manifest = manifest_with(GuestRuntimeKind::Wasm, Vec::new(), ProofPolicy::None);
+fn deterministic_replay_rejects_divergent_output() -> Result<(), GuestError> {
+    let manifest = manifest_with(GuestRuntimeKind::Wasm, Vec::new(), ProofPolicy::None)?;
     let runtime = CounterRuntime {
         counter: AtomicU8::new(0),
     };
@@ -366,114 +372,87 @@ fn deterministic_replay_rejects_divergent_output() {
         assert_deterministic_replay(&runtime, input_for(&manifest)),
         Err(GuestError::NonDeterministicOutput)
     );
+    Ok(())
 }
 
 #[test]
-fn runtime_registry_selects_wasm_and_riscv_adapters_from_manifest() {
-    let wasm_manifest = manifest_with(GuestRuntimeKind::Wasm, Vec::new(), ProofPolicy::None);
+fn runtime_registry_selects_wasm_and_riscv_adapters_from_manifest() -> Result<(), GuestError> {
+    let wasm_manifest = manifest_with(GuestRuntimeKind::Wasm, Vec::new(), ProofPolicy::None)?;
     let riscv_manifest = manifest_with(
         GuestRuntimeKind::Riscv,
         Vec::new(),
         ProofPolicy::VerifyReceipt,
-    );
-    let binary = GuestBinary::new(Bytes::from_static(b"module"), wasm_manifest.module_hash())
-        .expect("guest binary");
+    )?;
+    let binary = GuestBinary::new(Bytes::from_static(b"module"), wasm_manifest.module_hash())?;
     let mut registry = GuestRuntimeRegistry::new();
-    registry
-        .register(GuestRuntimeFnAdapter::new(
-            profile(GuestRuntimeKind::Wasm, ProofPolicy::None),
-            wasm_test_factory
-                as fn(&GuestManifest, GuestBinary) -> Result<Box<dyn GuestRuntime>, GuestError>,
-        ))
-        .expect("register wasm adapter");
-    registry
-        .register(GuestRuntimeFnAdapter::new(
-            profile(GuestRuntimeKind::Riscv, ProofPolicy::VerifyReceipt),
-            riscv_test_factory
-                as fn(&GuestManifest, GuestBinary) -> Result<Box<dyn GuestRuntime>, GuestError>,
-        ))
-        .expect("register riscv adapter");
+    registry.register(GuestRuntimeFnAdapter::new(
+        profile(GuestRuntimeKind::Wasm, ProofPolicy::None),
+        wasm_test_factory
+            as fn(&GuestManifest, GuestBinary) -> Result<Box<dyn GuestRuntime>, GuestError>,
+    ))?;
+    registry.register(GuestRuntimeFnAdapter::new(
+        profile(GuestRuntimeKind::Riscv, ProofPolicy::VerifyReceipt),
+        riscv_test_factory
+            as fn(&GuestManifest, GuestBinary) -> Result<Box<dyn GuestRuntime>, GuestError>,
+    ))?;
 
-    let wasm = registry
-        .instantiate(&wasm_manifest, binary.clone())
-        .expect("instantiate wasm");
+    let wasm = registry.instantiate(&wasm_manifest, binary.clone())?;
     assert_eq!(
-        wasm.step(input_for(&wasm_manifest))
-            .expect("wasm step")
-            .state,
+        wasm.step(input_for(&wasm_manifest))?.state,
         GuestState::new(Bytes::from_static(b"wasm"))
     );
 
-    let riscv = registry
-        .instantiate(&riscv_manifest, binary)
-        .expect("instantiate riscv");
+    let riscv = registry.instantiate(&riscv_manifest, binary)?;
     assert_eq!(
-        riscv
-            .step(input_for(&riscv_manifest))
-            .expect("riscv step")
-            .state,
+        riscv.step(input_for(&riscv_manifest))?.state,
         GuestState::new(Bytes::from_static(b"riscv"))
     );
+    Ok(())
 }
 
 #[test]
-fn runtime_registry_selects_same_runtime_by_proof_policy() {
-    let replay_manifest = manifest_with(GuestRuntimeKind::Wasm, Vec::new(), ProofPolicy::None);
+fn runtime_registry_selects_same_runtime_by_proof_policy() -> Result<(), GuestError> {
+    let replay_manifest = manifest_with(GuestRuntimeKind::Wasm, Vec::new(), ProofPolicy::None)?;
     let proving_manifest = manifest_with(
         GuestRuntimeKind::Wasm,
         Vec::new(),
         ProofPolicy::VerifyReceipt,
-    );
-    let binary = GuestBinary::new(Bytes::from_static(b"module"), replay_manifest.module_hash())
-        .expect("guest binary");
+    )?;
+    let binary = GuestBinary::new(Bytes::from_static(b"module"), replay_manifest.module_hash())?;
     let mut registry = GuestRuntimeRegistry::new();
-    registry
-        .register(GuestRuntimeFnAdapter::new(
-            profile(GuestRuntimeKind::Wasm, ProofPolicy::None),
-            wasm_test_factory
-                as fn(&GuestManifest, GuestBinary) -> Result<Box<dyn GuestRuntime>, GuestError>,
-        ))
-        .expect("register wasm replay adapter");
-    registry
-        .register(GuestRuntimeFnAdapter::new(
-            profile(GuestRuntimeKind::Wasm, ProofPolicy::VerifyReceipt),
-            wasm_proof_test_factory
-                as fn(&GuestManifest, GuestBinary) -> Result<Box<dyn GuestRuntime>, GuestError>,
-        ))
-        .expect("register wasm proving adapter");
+    registry.register(GuestRuntimeFnAdapter::new(
+        profile(GuestRuntimeKind::Wasm, ProofPolicy::None),
+        wasm_test_factory
+            as fn(&GuestManifest, GuestBinary) -> Result<Box<dyn GuestRuntime>, GuestError>,
+    ))?;
+    registry.register(GuestRuntimeFnAdapter::new(
+        profile(GuestRuntimeKind::Wasm, ProofPolicy::VerifyReceipt),
+        wasm_proof_test_factory
+            as fn(&GuestManifest, GuestBinary) -> Result<Box<dyn GuestRuntime>, GuestError>,
+    ))?;
 
-    let replay = registry
-        .instantiate(&replay_manifest, binary.clone())
-        .expect("instantiate wasm replay");
+    let replay = registry.instantiate(&replay_manifest, binary.clone())?;
     assert_eq!(
-        replay
-            .step(input_for(&replay_manifest))
-            .expect("wasm replay step")
-            .state,
+        replay.step(input_for(&replay_manifest))?.state,
         GuestState::new(Bytes::from_static(b"wasm"))
     );
 
-    let proving = registry
-        .instantiate(&proving_manifest, binary)
-        .expect("instantiate wasm proving");
+    let proving = registry.instantiate(&proving_manifest, binary)?;
     assert_eq!(
-        proving
-            .step(input_for(&proving_manifest))
-            .expect("wasm proving step")
-            .state,
+        proving.step(input_for(&proving_manifest))?.state,
         GuestState::new(Bytes::from_static(b"wasm-proof"))
     );
+    Ok(())
 }
 
 #[test]
-fn runtime_registry_rejects_unregistered_profile() {
+fn runtime_registry_rejects_unregistered_profile() -> Result<(), GuestError> {
     let manifest = manifest_with(
         GuestRuntimeKind::Riscv,
         Vec::new(),
         ProofPolicy::VerifyReceipt,
-    );
-    let binary =
-        GuestBinary::new(Bytes::from_static(b"module"), manifest.module_hash()).expect("binary");
+    )?;
+    let binary = GuestBinary::new(Bytes::from_static(b"module"), manifest.module_hash())?;
     let registry = GuestRuntimeRegistry::new();
 
     assert!(matches!(
@@ -483,18 +462,17 @@ fn runtime_registry_rejects_unregistered_profile() {
         })
         if missing_profile == profile(GuestRuntimeKind::Riscv, ProofPolicy::VerifyReceipt)
     ));
+    Ok(())
 }
 
 #[test]
-fn runtime_registry_rejects_duplicate_adapter_profile() {
+fn runtime_registry_rejects_duplicate_adapter_profile() -> Result<(), GuestError> {
     let mut registry = GuestRuntimeRegistry::new();
     let factory = wasm_test_factory
         as fn(&GuestManifest, GuestBinary) -> Result<Box<dyn GuestRuntime>, GuestError>;
     let wasm_replay = profile(GuestRuntimeKind::Wasm, ProofPolicy::None);
 
-    registry
-        .register(GuestRuntimeFnAdapter::new(wasm_replay, factory))
-        .expect("first wasm adapter registration succeeds");
+    registry.register(GuestRuntimeFnAdapter::new(wasm_replay, factory))?;
 
     assert_eq!(
         registry.register(GuestRuntimeFnAdapter::new(wasm_replay, factory)),
@@ -502,4 +480,5 @@ fn runtime_registry_rejects_duplicate_adapter_profile() {
             profile: wasm_replay
         })
     );
+    Ok(())
 }

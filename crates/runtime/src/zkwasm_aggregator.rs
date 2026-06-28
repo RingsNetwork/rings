@@ -758,42 +758,35 @@ fn proof_decode(reason: impl Into<String>) -> GuestError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extension::guest::GuestProgramHash;
-    use crate::extension::guest::GuestPublicInput;
-    use crate::extension::guest::GuestPublicOutput;
+    use crate::GuestProgramHash;
+    use crate::GuestPublicInput;
+    use crate::GuestPublicOutput;
 
-    fn hash(seed: u8) -> GuestProgramHash {
-        match GuestProgramHash::new([seed; WORD_BYTES], "test") {
-            Ok(hash) => hash,
-            Err(error) => panic!("valid test hash failed: {error}"),
-        }
+    fn hash(seed: u8) -> Result<GuestProgramHash, GuestError> {
+        GuestProgramHash::new([seed; WORD_BYTES], "test")
     }
 
-    fn claim() -> GuestReceiptClaim {
-        GuestReceiptClaim::new(
-            hash(7),
+    fn claim() -> Result<GuestReceiptClaim, GuestError> {
+        Ok(GuestReceiptClaim::new(
+            hash(7)?,
             GuestPublicInput::new(Bytes::from_static(b"in")),
             GuestPublicOutput::new(Bytes::from_static(b"out")),
-        )
+        ))
     }
 
     fn receipt_from_payload(
         claim: &GuestReceiptClaim,
         payload: ZkWasmAggregatorReceipt,
-    ) -> GuestReceipt {
-        let proof = match payload.encode() {
-            Ok(bytes) => bytes,
-            Err(error) => panic!("encode failed: {error}"),
-        };
-        GuestReceipt {
+    ) -> Result<GuestReceipt, GuestError> {
+        Ok(GuestReceipt {
             program_hash: claim.program_hash,
             public_input: claim.public_input.clone(),
             public_output: claim.public_output.clone(),
-            proof,
-        }
+            proof: payload.encode()?,
+        })
     }
 
-    fn malformed_bound_receipt(claim: &GuestReceiptClaim) -> GuestReceipt {
+    fn malformed_bound_receipt(claim: &GuestReceiptClaim) -> Result<GuestReceipt, GuestError> {
         receipt_from_payload(claim, ZkWasmAggregatorReceipt {
             proof: Vec::new(),
             verify_instance: Vec::new(),
@@ -803,8 +796,8 @@ mod tests {
     }
 
     #[test]
-    fn zkwasm_claim_scalar_is_stable_and_field_reduced() {
-        let scalar = zkwasm_aggregator_claim_scalar(&claim());
+    fn zkwasm_claim_scalar_is_stable_and_field_reduced() -> Result<(), GuestError> {
+        let scalar = zkwasm_aggregator_claim_scalar(&claim()?);
         let word = chunk_to_word_le(&scalar);
 
         assert!(word < q_mod());
@@ -813,6 +806,7 @@ mod tests {
             0xcc, 0xf2, 0xa7, 0x99, 0x00, 0x2a, 0xdf, 0xec, 0x4f, 0x42, 0x81, 0x8e, 0x68, 0x2a,
             0x37, 0x9f, 0x14, 0x14,
         ]);
+        Ok(())
     }
 
     #[test]
@@ -832,31 +826,33 @@ mod tests {
     }
 
     #[test]
-    fn verifier_rejects_receipt_without_claim_binding() {
-        let claim = claim();
+    fn verifier_rejects_receipt_without_claim_binding() -> Result<(), GuestError> {
+        let claim = claim()?;
         let payload = ZkWasmAggregatorReceipt {
             proof: Vec::new(),
             verify_instance: Vec::new(),
             aux: Vec::new(),
             target_instances: Vec::new(),
         };
-        let receipt = receipt_from_payload(&claim, payload);
+        let receipt = receipt_from_payload(&claim, payload)?;
 
         assert_eq!(
             ZkWasmAggregatorVerifier::new().verify(&claim, &receipt),
             Err(GuestError::ReceiptClaimMismatch)
         );
+        Ok(())
     }
 
     #[test]
-    fn verifier_rejects_malformed_proof_after_claim_binding() {
-        let claim = claim();
-        let receipt = malformed_bound_receipt(&claim);
+    fn verifier_rejects_malformed_proof_after_claim_binding() -> Result<(), GuestError> {
+        let claim = claim()?;
+        let receipt = malformed_bound_receipt(&claim)?;
 
         assert!(matches!(
             ZkWasmAggregatorVerifier::new().verify(&claim, &receipt),
             Err(GuestError::ProofDataDecode { .. })
         ));
+        Ok(())
     }
 
     #[cfg(target_arch = "wasm32")]
@@ -870,8 +866,20 @@ mod tests {
 
         #[wasm_bindgen_test]
         fn zkwasm_aggregator_wasm32_rejects_malformed_bound_receipt() {
-            let claim = claim();
-            let receipt = malformed_bound_receipt(&claim);
+            let claim = match claim() {
+                Ok(claim) => claim,
+                Err(error) => {
+                    assert!(false, "valid test claim failed: {error}");
+                    return;
+                }
+            };
+            let receipt = match malformed_bound_receipt(&claim) {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    assert!(false, "malformed test receipt failed: {error}");
+                    return;
+                }
+            };
 
             assert!(matches!(
                 ZkWasmAggregatorVerifier::new().verify(&claim, &receipt),

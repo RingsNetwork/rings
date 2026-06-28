@@ -18,64 +18,56 @@
 //! extension layer: the manifest validates a loadable program, runtime adapters execute the
 //! deterministic transition, and the host shell interprets only declared capabilities.
 
-mod manifest;
 mod protocol;
-#[cfg(feature = "guest-riscv-proof")]
-mod risc0_zkvm;
-mod runtime;
-#[cfg(test)]
-mod runtime_tests;
-#[cfg(feature = "guest-wasm-proof")]
-mod zkwasm_aggregator;
 
-pub use manifest::GuestCapabilities;
-pub use manifest::GuestCapability;
-pub use manifest::GuestManifest;
-pub use manifest::GuestManifestSpec;
-pub use manifest::GuestProgramHash;
-pub use manifest::GuestResourceLimits;
-pub use manifest::GuestRuntimeKind;
-pub use manifest::ProofPolicy;
-pub use manifest::SUPPORTED_GUEST_ABI_VERSION;
 pub use protocol::register_guest_extension;
 pub use protocol::GuestProtocol;
 pub use protocol::GuestProtocolState;
 pub use protocol::GuestShell;
+pub use rings_runtime::assert_deterministic_replay;
 #[cfg(all(feature = "guest-riscv-prove", not(target_arch = "wasm32")))]
-pub use risc0_zkvm::instantiate_risc0_zkvm_runtime;
+pub use rings_runtime::instantiate_risc0_zkvm_runtime;
 #[cfg(feature = "guest-riscv-proof")]
-pub use risc0_zkvm::risc0_image_id_hash;
+pub use rings_runtime::risc0_image_id_hash;
 #[cfg(all(feature = "guest-riscv-prove", not(target_arch = "wasm32")))]
-pub use risc0_zkvm::risc0_zkvm_runtime_adapter;
+pub use rings_runtime::risc0_zkvm_runtime_adapter;
+#[cfg(feature = "guest-wasm-proof")]
+pub use rings_runtime::zkwasm_aggregator_claim_scalar;
+pub use rings_runtime::GuestAcceptedOutput;
+pub use rings_runtime::GuestBinary;
+pub use rings_runtime::GuestCapabilities;
+pub use rings_runtime::GuestCapability;
+pub use rings_runtime::GuestContext;
+pub use rings_runtime::GuestEffect;
+pub use rings_runtime::GuestError;
+pub use rings_runtime::GuestEvent;
+pub use rings_runtime::GuestManifest;
+pub use rings_runtime::GuestManifestSpec;
+pub use rings_runtime::GuestProgramHash;
+pub use rings_runtime::GuestPublicInput;
+pub use rings_runtime::GuestPublicOutput;
+pub use rings_runtime::GuestReceipt;
+pub use rings_runtime::GuestReceiptClaim;
+pub use rings_runtime::GuestReceiptVerifier;
+pub use rings_runtime::GuestResourceLimits;
+pub use rings_runtime::GuestRuntime;
+pub use rings_runtime::GuestRuntimeAdapter;
+pub use rings_runtime::GuestRuntimeFnAdapter;
+pub use rings_runtime::GuestRuntimeKind;
+pub use rings_runtime::GuestRuntimeProfile;
+pub use rings_runtime::GuestRuntimeRegistry;
+pub use rings_runtime::GuestState;
+pub use rings_runtime::GuestStepInput;
+pub use rings_runtime::GuestStepOutput;
+pub use rings_runtime::ProofPolicy;
 #[cfg(feature = "guest-riscv-proof")]
-pub use risc0_zkvm::Risc0ReceiptVerifier;
+pub use rings_runtime::Risc0ReceiptVerifier;
 #[cfg(all(feature = "guest-riscv-prove", not(target_arch = "wasm32")))]
-pub use risc0_zkvm::Risc0ZkvmRuntime;
+pub use rings_runtime::Risc0ZkvmRuntime;
 #[cfg(all(feature = "guest-riscv-prove", not(target_arch = "wasm32")))]
-pub use risc0_zkvm::Risc0ZkvmRuntimeAdapter;
-pub use runtime::assert_deterministic_replay;
-pub use runtime::GuestAcceptedOutput;
-pub use runtime::GuestBinary;
-pub use runtime::GuestContext;
-pub use runtime::GuestEffect;
-pub use runtime::GuestError;
-pub use runtime::GuestEvent;
-pub use runtime::GuestPublicInput;
-pub use runtime::GuestPublicOutput;
-pub use runtime::GuestReceipt;
-pub use runtime::GuestReceiptClaim;
-pub use runtime::GuestReceiptVerifier;
-pub use runtime::GuestRuntime;
-pub use runtime::GuestRuntimeAdapter;
-pub use runtime::GuestRuntimeFnAdapter;
-pub use runtime::GuestRuntimeProfile;
-pub use runtime::GuestRuntimeRegistry;
-pub use runtime::GuestState;
-pub use runtime::GuestStepInput;
-pub use runtime::GuestStepOutput;
+pub use rings_runtime::Risc0ZkvmRuntimeAdapter;
 #[cfg(feature = "guest-wasm-proof")]
-pub use zkwasm_aggregator::zkwasm_aggregator_claim_scalar;
+pub use rings_runtime::ZkWasmAggregatorReceipt;
 #[cfg(feature = "guest-wasm-proof")]
-pub use zkwasm_aggregator::ZkWasmAggregatorReceipt;
-#[cfg(feature = "guest-wasm-proof")]
-pub use zkwasm_aggregator::ZkWasmAggregatorVerifier;
+pub use rings_runtime::ZkWasmAggregatorVerifier;
+pub use rings_runtime::SUPPORTED_GUEST_ABI_VERSION;

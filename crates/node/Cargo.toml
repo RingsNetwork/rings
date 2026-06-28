@@ -44,6 +44,7 @@ node = [
     "axum/headers",
     "rings-core/default",
     "rings-rpc/std",
+    "rings-runtime/std",
     "rings-derive/default",
     "rings-transport/native-webrtc",
     "wasmer/default",
@@ -60,6 +61,7 @@ browser = [
     "reqwest/json",
     "rings-core/wasm",
     "rings-rpc/wasm",
+    "rings-runtime/browser",
     "rings-derive/wasm",
     "rings-transport/web-sys-webrtc",
     "serde-wasm-bindgen",
@@ -73,27 +75,18 @@ browser = [
 # run unittest with snark
 browser_chrome_test = ["browser_default"]
 guest-riscv-proof = [
-    "risc0-zkvm",
-    "risc0-zkvm/disable-dev-mode",
-    "rmp-serde",
+    "rings-runtime/risc0-proof",
 ]
 guest-riscv-prove = [
     "guest-riscv-proof",
-    "risc0-zkvm/client",
-    "risc0-zkvm/prove",
+    "rings-runtime/risc0-prove",
 ]
 guest-wasm-proof = [
-    "ark-bn254",
-    "ark-ec",
-    "ark-ff",
-    "num-bigint",
+    "rings-runtime/wasm-proof",
 ]
 
 [dependencies]
 anyhow = "1.0.45"
-ark-bn254 = { version = "0.4.0", default-features = false, features = ["curve"], optional = true }
-ark-ec = { version = "0.4.2", default-features = false, optional = true }
-ark-ff = { version = "0.4.2", default-features = false, optional = true }
 arrayref = "0.3.6"
 async-trait = { workspace = true }
 base64 = { version = "0.13.0" }
@@ -107,14 +100,12 @@ futures-timer = "3.0.2"
 http = "0.2.6"
 jsonrpc-core = { workspace = true }
 log = { version = "0.4", features = ["std"] }
-num-bigint = { version = "0.4.3", optional = true }
-risc0-zkvm = { version = "=3.0.5", default-features = false, optional = true }
 rings-core = { workspace = true, optional = true }
 rings-derive = { workspace = true, optional = true }
 rings-rpc = { workspace = true, optional = true }
+rings-runtime = { workspace = true }
 rings-snark = { workspace = true, optional = true }
 rings-transport = { workspace = true }
-rmp-serde = { version = "1.3.1", optional = true }
 serde = { version = "1.0.136", features = ["derive"] }
 serde_json = "1.0.70"
 serde_yaml = "0.9.17"

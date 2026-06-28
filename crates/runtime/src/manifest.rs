@@ -298,40 +298,41 @@ fn is_namespace_char(ch: char) -> bool {
 mod tests {
     use super::*;
 
-    fn hash(seed: u8, field: &'static str) -> GuestProgramHash {
-        GuestProgramHash::new([seed; 32], field).expect("non-zero test hash")
+    fn hash(seed: u8, field: &'static str) -> Result<GuestProgramHash, GuestError> {
+        GuestProgramHash::new([seed; 32], field)
     }
 
-    fn valid_spec() -> GuestManifestSpec {
-        GuestManifestSpec {
+    fn valid_spec() -> Result<GuestManifestSpec, GuestError> {
+        Ok(GuestManifestSpec {
             namespace: "guest.example".to_string(),
             runtime: GuestRuntimeKind::Wasm,
             abi_version: SUPPORTED_GUEST_ABI_VERSION,
-            module_hash: hash(1, "module_hash"),
-            state_schema_hash: hash(2, "state_schema_hash"),
-            event_schema_hash: hash(3, "event_schema_hash"),
-            effect_schema_hash: hash(4, "effect_schema_hash"),
+            module_hash: hash(1, "module_hash")?,
+            state_schema_hash: hash(2, "state_schema_hash")?,
+            event_schema_hash: hash(3, "event_schema_hash")?,
+            effect_schema_hash: hash(4, "effect_schema_hash")?,
             capabilities: vec![GuestCapability::Send, GuestCapability::Inject],
             memory_limit: 16,
             fuel_limit: 1_000,
             proof_policy: ProofPolicy::None,
-        }
+        })
     }
 
     #[test]
-    fn manifest_validation_rejects_empty_namespace() {
-        let mut spec = valid_spec();
+    fn manifest_validation_rejects_empty_namespace() -> Result<(), GuestError> {
+        let mut spec = valid_spec()?;
         spec.namespace.clear();
 
         assert_eq!(
             GuestManifest::validate(spec),
             Err(GuestError::EmptyNamespace)
         );
+        Ok(())
     }
 
     #[test]
-    fn manifest_validation_rejects_invalid_namespace_characters() {
-        let mut spec = valid_spec();
+    fn manifest_validation_rejects_invalid_namespace_characters() -> Result<(), GuestError> {
+        let mut spec = valid_spec()?;
         spec.namespace = "guest/example".to_string();
 
         assert_eq!(
@@ -340,11 +341,12 @@ mod tests {
                 namespace: "guest/example".to_string()
             })
         );
+        Ok(())
     }
 
     #[test]
-    fn manifest_validation_rejects_unsupported_abi_version() {
-        let mut spec = valid_spec();
+    fn manifest_validation_rejects_unsupported_abi_version() -> Result<(), GuestError> {
+        let mut spec = valid_spec()?;
         spec.abi_version = SUPPORTED_GUEST_ABI_VERSION + 1;
 
         assert_eq!(
@@ -354,11 +356,12 @@ mod tests {
                 actual: SUPPORTED_GUEST_ABI_VERSION + 1,
             })
         );
+        Ok(())
     }
 
     #[test]
-    fn manifest_validation_rejects_duplicate_capabilities() {
-        let mut spec = valid_spec();
+    fn manifest_validation_rejects_duplicate_capabilities() -> Result<(), GuestError> {
+        let mut spec = valid_spec()?;
         spec.capabilities = vec![GuestCapability::Send, GuestCapability::Send];
 
         assert_eq!(
@@ -367,58 +370,58 @@ mod tests {
                 capability: GuestCapability::Send
             })
         );
+        Ok(())
     }
 
     #[test]
-    fn manifest_validation_rejects_zero_limits() {
-        let mut zero_memory = valid_spec();
+    fn manifest_validation_rejects_zero_limits() -> Result<(), GuestError> {
+        let mut zero_memory = valid_spec()?;
         zero_memory.memory_limit = 0;
         assert_eq!(
             GuestManifest::validate(zero_memory),
             Err(GuestError::ZeroMemoryLimit)
         );
 
-        let mut zero_fuel = valid_spec();
+        let mut zero_fuel = valid_spec()?;
         zero_fuel.fuel_limit = 0;
         assert_eq!(
             GuestManifest::validate(zero_fuel),
             Err(GuestError::ZeroFuelLimit)
         );
+        Ok(())
     }
 
     #[test]
-    fn runtime_kind_deserializes_riscv_name() {
+    fn runtime_kind_deserializes_riscv_name() -> Result<(), serde_json::Error> {
         assert_eq!(
-            serde_json::from_str::<GuestRuntimeKind>("\"riscv\"").expect("parse riscv"),
+            serde_json::from_str::<GuestRuntimeKind>("\"riscv\"")?,
             GuestRuntimeKind::Riscv
         );
+        Ok(())
     }
 
     #[test]
-    fn manifest_validation_accepts_proof_policy_as_adapter_capability() {
-        let mut wasm_with_receipt = valid_spec();
+    fn manifest_validation_accepts_proof_policy_as_adapter_capability() -> Result<(), GuestError> {
+        let mut wasm_with_receipt = valid_spec()?;
         wasm_with_receipt.proof_policy = ProofPolicy::VerifyReceipt;
         assert_eq!(
-            GuestManifest::validate(wasm_with_receipt)
-                .expect("wasm proving adapter profile is allowed")
-                .proof_policy(),
+            GuestManifest::validate(wasm_with_receipt)?.proof_policy(),
             ProofPolicy::VerifyReceipt
         );
 
-        let mut riscv_without_receipt = valid_spec();
+        let mut riscv_without_receipt = valid_spec()?;
         riscv_without_receipt.runtime = GuestRuntimeKind::Riscv;
         riscv_without_receipt.proof_policy = ProofPolicy::None;
         assert_eq!(
-            GuestManifest::validate(riscv_without_receipt)
-                .expect("riscv replay adapter profile is allowed")
-                .runtime(),
+            GuestManifest::validate(riscv_without_receipt)?.runtime(),
             GuestRuntimeKind::Riscv
         );
+        Ok(())
     }
 
     #[test]
-    fn manifest_validation_rejects_hashes_that_bypass_constructor() {
-        let mut spec = valid_spec();
+    fn manifest_validation_rejects_hashes_that_bypass_constructor() -> Result<(), GuestError> {
+        let mut spec = valid_spec()?;
         spec.module_hash = GuestProgramHash([0; 32]);
 
         assert_eq!(
@@ -427,18 +430,20 @@ mod tests {
                 field: "module_hash"
             })
         );
+        Ok(())
     }
 
     #[test]
-    fn program_hash_deserialization_rejects_zero_hash() {
-        let encoded = bincode::serialize(&[0u8; 32]).expect("encode zero hash bytes");
+    fn program_hash_deserialization_rejects_zero_hash() -> Result<(), Box<dyn std::error::Error>> {
+        let encoded = bincode::serialize(&[0u8; 32])?;
 
         assert!(bincode::deserialize::<GuestProgramHash>(&encoded).is_err());
+        Ok(())
     }
 
     #[test]
-    fn manifest_validation_preserves_declared_capability_set() {
-        let manifest = GuestManifest::validate(valid_spec()).expect("valid guest manifest");
+    fn manifest_validation_preserves_declared_capability_set() -> Result<(), GuestError> {
+        let manifest = GuestManifest::validate(valid_spec()?)?;
 
         assert!(manifest.permits(GuestCapability::Send));
         assert!(manifest.permits(GuestCapability::Inject));
@@ -446,5 +451,6 @@ mod tests {
             GuestCapability::Send,
             GuestCapability::Inject
         ]);
+        Ok(())
     }
 }

@@ -13,7 +13,7 @@ use super::GuestManifest;
 use super::GuestProgramHash;
 use super::GuestRuntimeKind;
 use super::ProofPolicy;
-use crate::extension::ext::MaybeSend;
+use crate::MaybeSend;
 
 /// Guest extension error.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
