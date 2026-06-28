@@ -106,7 +106,11 @@ pub(crate) fn data_decode(reason: impl Into<String>) -> ProofError {
 }
 
 /// Build an encode error.
-#[cfg(any(feature = "risc0-prove", feature = "wasm-proof", test))]
+#[cfg(any(
+    feature = "risc0-prove",
+    feature = "wasm-proof",
+    all(test, feature = "risc0-proof")
+))]
 pub(crate) fn data_encode(reason: impl Into<String>) -> ProofError {
     ProofError::DataEncode {
         reason: reason.into(),
