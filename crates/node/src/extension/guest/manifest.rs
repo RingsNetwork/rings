@@ -20,23 +20,9 @@ pub const SUPPORTED_GUEST_ABI_VERSION: u16 = 1;
 pub enum GuestRuntimeKind {
     /// WebAssembly guest runtime.
     Wasm,
-    /// RISC-V guest runtime, intended for zkVM-friendly adapters.
-    Riscv,
-}
-
-impl GuestRuntimeKind {
-    /// Proof policy required by this runtime family.
-    pub fn required_proof_policy(self) -> ProofPolicy {
-        match self {
-            Self::Wasm => ProofPolicy::None,
-            Self::Riscv => ProofPolicy::VerifyReceipt,
-        }
-    }
-
-    /// Whether this runtime accepts `proof_policy`.
-    pub fn permits_proof_policy(self, proof_policy: ProofPolicy) -> bool {
-        self.required_proof_policy() == proof_policy
-    }
+    /// R1CS guest runtime, intended for SNARK-friendly adapters.
+    #[serde(alias = "riscv")]
+    R1cs,
 }
 
 /// Host capabilities a v1 guest may request.
@@ -50,7 +36,7 @@ pub enum GuestCapability {
 }
 
 /// Receipt policy for a guest transition.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProofPolicy {
     /// No proof receipt is required for accepting a transition.
@@ -174,7 +160,10 @@ pub struct GuestManifestSpec {
     pub memory_limit: u32,
     /// Fuel limit for one transition.
     pub fuel_limit: u64,
-    /// Proof policy for transition acceptance.
+    /// Proof policy requested from the runtime adapter.
+    ///
+    /// This is adapter capability, not a runtime-family invariant: the same
+    /// runtime family may support deterministic replay and proving adapters.
     pub proof_policy: ProofPolicy,
 }
 
@@ -182,8 +171,7 @@ pub struct GuestManifestSpec {
 ///
 /// This type does not deserialize directly. Loaders deserialize
 /// [`GuestManifestSpec`] and must call [`GuestManifest::validate`] so namespace,
-/// hash, capability, resource and proof-policy invariants are checked once at
-/// the boundary.
+/// hash, capability and resource invariants are checked once at the boundary.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct GuestManifest {
     namespace: String,
@@ -208,7 +196,6 @@ impl GuestManifest {
                 actual: spec.abi_version,
             });
         }
-        validate_runtime_proof_policy(spec.runtime, spec.proof_policy)?;
         let module_hash = validate_hash(spec.module_hash, "module_hash")?;
         let state_schema_hash = validate_hash(spec.state_schema_hash, "state_schema_hash")?;
         let event_schema_hash = validate_hash(spec.event_schema_hash, "event_schema_hash")?;
@@ -292,20 +279,6 @@ fn validate_namespace(namespace: &str) -> Result<(), GuestError> {
     if !namespace.chars().all(is_namespace_char) {
         return Err(GuestError::InvalidNamespace {
             namespace: namespace.to_string(),
-        });
-    }
-    Ok(())
-}
-
-fn validate_runtime_proof_policy(
-    runtime: GuestRuntimeKind,
-    proof_policy: ProofPolicy,
-) -> Result<(), GuestError> {
-    if !runtime.permits_proof_policy(proof_policy) {
-        return Err(GuestError::InvalidProofPolicyForRuntime {
-            runtime,
-            proof_policy,
-            expected: runtime.required_proof_policy(),
         });
     }
     Ok(())
@@ -415,28 +388,36 @@ mod tests {
     }
 
     #[test]
-    fn manifest_validation_rejects_runtime_proof_policy_mismatch() {
+    fn runtime_kind_deserializes_r1cs_and_legacy_riscv_name() {
+        assert_eq!(
+            serde_json::from_str::<GuestRuntimeKind>("\"r1cs\"").expect("parse r1cs"),
+            GuestRuntimeKind::R1cs
+        );
+        assert_eq!(
+            serde_json::from_str::<GuestRuntimeKind>("\"riscv\"").expect("parse legacy riscv"),
+            GuestRuntimeKind::R1cs
+        );
+    }
+
+    #[test]
+    fn manifest_validation_accepts_proof_policy_as_adapter_capability() {
         let mut wasm_with_receipt = valid_spec();
         wasm_with_receipt.proof_policy = ProofPolicy::VerifyReceipt;
         assert_eq!(
-            GuestManifest::validate(wasm_with_receipt),
-            Err(GuestError::InvalidProofPolicyForRuntime {
-                runtime: GuestRuntimeKind::Wasm,
-                proof_policy: ProofPolicy::VerifyReceipt,
-                expected: ProofPolicy::None,
-            })
+            GuestManifest::validate(wasm_with_receipt)
+                .expect("wasm proving adapter profile is allowed")
+                .proof_policy(),
+            ProofPolicy::VerifyReceipt
         );
 
-        let mut riscv_without_receipt = valid_spec();
-        riscv_without_receipt.runtime = GuestRuntimeKind::Riscv;
-        riscv_without_receipt.proof_policy = ProofPolicy::None;
+        let mut r1cs_without_receipt = valid_spec();
+        r1cs_without_receipt.runtime = GuestRuntimeKind::R1cs;
+        r1cs_without_receipt.proof_policy = ProofPolicy::None;
         assert_eq!(
-            GuestManifest::validate(riscv_without_receipt),
-            Err(GuestError::InvalidProofPolicyForRuntime {
-                runtime: GuestRuntimeKind::Riscv,
-                proof_policy: ProofPolicy::None,
-                expected: ProofPolicy::VerifyReceipt,
-            })
+            GuestManifest::validate(r1cs_without_receipt)
+                .expect("r1cs replay adapter profile is allowed")
+                .runtime(),
+            GuestRuntimeKind::R1cs
         );
     }
 

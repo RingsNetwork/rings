@@ -52,6 +52,7 @@ pub use runtime::GuestReceiptVerifier;
 pub use runtime::GuestRuntime;
 pub use runtime::GuestRuntimeAdapter;
 pub use runtime::GuestRuntimeFnAdapter;
+pub use runtime::GuestRuntimeProfile;
 pub use runtime::GuestRuntimeRegistry;
 pub use runtime::GuestState;
 pub use runtime::GuestStepInput;

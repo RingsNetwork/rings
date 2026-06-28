@@ -53,16 +53,6 @@ pub enum GuestError {
         /// Duplicated capability.
         capability: GuestCapability,
     },
-    /// Runtime kind and proof policy describe an unsupported verification mode.
-    #[error("guest runtime {runtime:?} requires proof policy {expected:?}, got {proof_policy:?}")]
-    InvalidProofPolicyForRuntime {
-        /// Requested runtime.
-        runtime: GuestRuntimeKind,
-        /// Manifest proof policy.
-        proof_policy: ProofPolicy,
-        /// Required proof policy for this runtime.
-        expected: ProofPolicy,
-    },
     /// A guest binary hash did not match the manifest module hash.
     #[error("guest binary hash does not match manifest module hash")]
     ProgramHashMismatch {
@@ -74,17 +64,17 @@ pub enum GuestError {
     /// A guest binary has no bytes.
     #[error("guest binary is empty")]
     EmptyBinary,
-    /// No runtime adapter is registered for the requested backend.
-    #[error("no guest runtime registered for {runtime:?}")]
+    /// No runtime adapter is registered for the requested profile.
+    #[error("no guest runtime registered for {profile:?}")]
     RuntimeUnavailable {
-        /// Requested runtime.
-        runtime: GuestRuntimeKind,
+        /// Requested runtime profile.
+        profile: GuestRuntimeProfile,
     },
-    /// Runtime adapter registration conflicts with an existing backend.
-    #[error("guest runtime adapter for {runtime:?} is already registered")]
+    /// Runtime adapter registration conflicts with an existing profile.
+    #[error("guest runtime adapter for {profile:?} is already registered")]
     DuplicateRuntimeAdapter {
-        /// Duplicated runtime.
-        runtime: GuestRuntimeKind,
+        /// Duplicated runtime profile.
+        profile: GuestRuntimeProfile,
     },
     /// The runtime rejected the transition.
     #[error("guest runtime rejected transition: {reason}")]
@@ -417,10 +407,46 @@ pub trait GuestRuntime: MaybeSend {
     fn step(&self, input: GuestStepInput) -> Result<GuestStepOutput, GuestError>;
 }
 
+/// Runtime adapter capability selected by a manifest.
+///
+/// The runtime family and proof policy are independent dimensions. For example,
+/// a WebAssembly adapter may be deterministic-replay only or may produce a
+/// receipt through a proving backend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct GuestRuntimeProfile {
+    runtime: GuestRuntimeKind,
+    proof_policy: ProofPolicy,
+}
+
+impl GuestRuntimeProfile {
+    /// Build a runtime profile.
+    pub fn new(runtime: GuestRuntimeKind, proof_policy: ProofPolicy) -> Self {
+        Self {
+            runtime,
+            proof_policy,
+        }
+    }
+
+    /// Build the profile requested by a validated manifest.
+    pub fn from_manifest(manifest: &GuestManifest) -> Self {
+        Self::new(manifest.runtime(), manifest.proof_policy())
+    }
+
+    /// Runtime family served by this profile.
+    pub fn runtime(&self) -> GuestRuntimeKind {
+        self.runtime
+    }
+
+    /// Receipt policy served by this profile.
+    pub fn proof_policy(&self) -> ProofPolicy {
+        self.proof_policy
+    }
+}
+
 /// Runtime adapter able to instantiate a concrete guest runtime.
 pub trait GuestRuntimeAdapter: MaybeSend {
-    /// Backend this adapter serves.
-    fn runtime(&self) -> GuestRuntimeKind;
+    /// Runtime and proof capability this adapter serves.
+    fn profile(&self) -> GuestRuntimeProfile;
 
     /// Instantiate a guest runtime from a validated manifest and matching binary.
     fn instantiate(
@@ -430,16 +456,16 @@ pub trait GuestRuntimeAdapter: MaybeSend {
     ) -> Result<Box<dyn GuestRuntime>, GuestError>;
 }
 
-/// Function-backed runtime adapter tagged by [`GuestRuntimeKind`].
+/// Function-backed runtime adapter tagged by [`GuestRuntimeProfile`].
 pub struct GuestRuntimeFnAdapter<F> {
-    runtime: GuestRuntimeKind,
+    profile: GuestRuntimeProfile,
     factory: F,
 }
 
 impl<F> GuestRuntimeFnAdapter<F> {
-    /// Build a runtime adapter from its kind and instantiation function.
-    pub fn new(runtime: GuestRuntimeKind, factory: F) -> Self {
-        Self { runtime, factory }
+    /// Build a runtime adapter from its profile and instantiation function.
+    pub fn new(profile: GuestRuntimeProfile, factory: F) -> Self {
+        Self { profile, factory }
     }
 }
 
@@ -447,8 +473,8 @@ impl<F> GuestRuntimeAdapter for GuestRuntimeFnAdapter<F>
 where F: for<'a> Fn(&'a GuestManifest, GuestBinary) -> Result<Box<dyn GuestRuntime>, GuestError>
         + MaybeSend
 {
-    fn runtime(&self) -> GuestRuntimeKind {
-        self.runtime
+    fn profile(&self) -> GuestRuntimeProfile {
+        self.profile
     }
 
     fn instantiate(
@@ -460,10 +486,10 @@ where F: for<'a> Fn(&'a GuestManifest, GuestBinary) -> Result<Box<dyn GuestRunti
     }
 }
 
-/// Runtime adapter registry keyed by manifest backend.
+/// Runtime adapter registry keyed by manifest runtime and proof capability.
 #[derive(Default)]
 pub struct GuestRuntimeRegistry {
-    adapters: BTreeMap<GuestRuntimeKind, Box<dyn GuestRuntimeAdapter>>,
+    adapters: BTreeMap<GuestRuntimeProfile, Box<dyn GuestRuntimeAdapter>>,
 }
 
 impl GuestRuntimeRegistry {
@@ -472,14 +498,14 @@ impl GuestRuntimeRegistry {
         Self::default()
     }
 
-    /// Register one backend adapter.
+    /// Register one runtime/profile adapter.
     pub fn register<A>(&mut self, adapter: A) -> Result<(), GuestError>
     where A: GuestRuntimeAdapter + 'static {
-        let runtime = adapter.runtime();
-        if self.adapters.contains_key(&runtime) {
-            return Err(GuestError::DuplicateRuntimeAdapter { runtime });
+        let profile = adapter.profile();
+        if self.adapters.contains_key(&profile) {
+            return Err(GuestError::DuplicateRuntimeAdapter { profile });
         }
-        self.adapters.insert(runtime, Box::new(adapter));
+        self.adapters.insert(profile, Box::new(adapter));
         Ok(())
     }
 
@@ -490,9 +516,9 @@ impl GuestRuntimeRegistry {
         binary: GuestBinary,
     ) -> Result<Box<dyn GuestRuntime>, GuestError> {
         binary.validate_manifest(manifest)?;
-        let runtime = manifest.runtime();
-        let Some(adapter) = self.adapters.get(&runtime) else {
-            return Err(GuestError::RuntimeUnavailable { runtime });
+        let profile = GuestRuntimeProfile::from_manifest(manifest);
+        let Some(adapter) = self.adapters.get(&profile) else {
+            return Err(GuestError::RuntimeUnavailable { profile });
         };
         adapter.instantiate(manifest, binary)
     }
