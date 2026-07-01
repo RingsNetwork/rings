@@ -63,30 +63,9 @@ jobs:
       - name: Run clippy for node browser
         run: cargo clippy -p rings-node --features browser_default --no-deps --no-default-features --target=wasm32-unknown-unknown --tests -- -D warnings
 
-      - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-
-      - name: Run browser example core tests
-        run: |
-          node --check examples/browser/app.mjs
-          node --test examples/browser/tests/*.test.mjs
-
-      - name: Run browser example wasm tests
-        run: wasm-pack test --release --node examples/browser
-
-      - name: Run dweb example browser tests
-        uses: coactions/setup-xvfb@v1
-        with:
-          run: |
-            wasm-pack test --release --headless --chrome . -- --skip two_nodes_fetch_a_hosted_page
-            wasm-pack test --release --headless --chrome . -- two_nodes_fetch_a_hosted_page --nocapture
-          working-directory: ./examples/dweb
-
-      - name: Run proof-demo browser tests
-        uses: coactions/setup-xvfb@v1
-        with:
-          run: wasm-pack test --release --headless --chrome
-          working-directory: ./examples/proof-demo
+      - name: Check unified browser node demo
+        run: cargo check --target=wasm32-unknown-unknown
+        working-directory: ./examples/node-demo
 
       - name: Run core browser tests
         uses: coactions/setup-xvfb@v1

@@ -2,9 +2,9 @@
 
 This native example registers the `example` namespace, connects to a seed node over HTTP, and sends
 a message to a destination DID. It is intended to interoperate with
-[`examples/browser`](../browser).
+[`examples/node-demo`](../node-demo).
 
-## Run with the browser example
+## Run with the node demo
 
 Start a seed daemon first:
 
@@ -20,8 +20,8 @@ cargo run -p rings-node --bin rings -- run \
   --storage-path /tmp/rings-seed/storage
 ```
 
-Open the browser example, start its provider, connect it to `http://127.0.0.1:50001`, then copy
-the browser DID.
+Open the node demo, start its provider, connect it to `http://127.0.0.1:50001`, then copy
+the browser DID. The demo registers the `example` namespace by default for native interop.
 
 Run the native example:
 

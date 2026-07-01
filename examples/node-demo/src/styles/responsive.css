@@ -1,0 +1,13 @@
+@media (max-width: 860px) {
+  main {
+    padding: 14px;
+  }
+
+  .shell {
+    grid-template-columns: 1fr;
+  }
+
+  .grid {
+    grid-template-columns: 1fr;
+  }
+}

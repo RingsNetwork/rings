@@ -1,0 +1,48 @@
+main {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 22px;
+}
+
+.shell {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: 18px;
+  align-items: start;
+}
+
+.side,
+.panel {
+  border: 1px solid #d9e0e8;
+  background: #fff;
+  border-radius: 8px;
+}
+
+.side {
+  padding: 14px;
+}
+
+.panel {
+  padding: 16px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0 0 14px;
+  border-bottom: 1px solid #d9e0e8;
+}

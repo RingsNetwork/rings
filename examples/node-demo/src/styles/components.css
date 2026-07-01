@@ -1,0 +1,47 @@
+.field {
+  display: grid;
+  gap: 5px;
+  margin: 0 0 10px;
+}
+
+.field span {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #4b5968;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+
+.muted {
+  color: #607080;
+}
+
+.status {
+  padding: 10px 12px;
+  border-radius: 7px;
+  background: #eef5ff;
+  color: #173f73;
+}
+
+.list {
+  display: grid;
+  gap: 7px;
+  margin: 10px 0 0;
+}
+
+.list-item {
+  padding: 8px 9px;
+  border: 1px solid #e1e6ec;
+  border-radius: 7px;
+}
+
+.iframe {
+  width: 100%;
+  min-height: 320px;
+  border: 1px solid #c8d0d9;
+  border-radius: 6px;
+  background: #fff;
+}

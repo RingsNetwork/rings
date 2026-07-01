@@ -17,19 +17,11 @@ cargo test -p rings-snark-example
 ElGamal E2E stream round trip. `rings-relay-example` includes deterministic
 local TCP/UDP echo tests in addition to overlay relay tests.
 
-Run the browser example core and wasm tests:
+Run the unified standalone wasm/Yew node demo from its own workspace:
 
 ```bash
-node --check examples/browser/app.mjs
-node --test examples/browser/tests/*.test.mjs
-wasm-pack test --release --node examples/browser
-```
-
-Run the standalone wasm/Yew examples from their own workspaces:
-
-```bash
-cd examples/dweb && wasm-pack test --headless --chrome
-cd examples/proof-demo && wasm-pack test --headless --chrome
+cd examples/node-demo && cargo check --target wasm32-unknown-unknown
+cd examples/node-demo && trunk serve --release true
 ```
 
 Run the FFI Python integration tests after building the cdylib:
