@@ -5,17 +5,25 @@
 //! application source in this example.
 
 mod app;
+mod browser_api;
+mod connect;
+mod controls;
 mod custom;
 mod dweb;
+mod extension;
+mod forms;
 mod node;
+mod peer_sync;
 mod proof;
 mod styles;
+mod topology;
 mod wallet;
+mod workbench;
 
 /// Mount the Yew app.
 pub fn run() {
-    if app::is_offscreen_document() {
-        yew::Renderer::<app::HeadlessNode>::new().render();
+    if extension::is_offscreen_document() {
+        yew::Renderer::<extension::HeadlessNode>::new().render();
     } else {
         yew::Renderer::<app::App>::new().render();
     }

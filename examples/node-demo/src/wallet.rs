@@ -189,8 +189,16 @@ fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, String> {
         .as_bytes()
         .chunks_exact(2)
         .map(|pair| {
-            let high = hex_nibble(pair[0])?;
-            let low = hex_nibble(pair[1])?;
+            let high = hex_nibble(
+                *pair
+                    .first()
+                    .ok_or_else(|| "wallet returned an invalid hex signature".to_string())?,
+            )?;
+            let low = hex_nibble(
+                *pair
+                    .get(1)
+                    .ok_or_else(|| "wallet returned an invalid hex signature".to_string())?,
+            )?;
             Ok((high << 4) | low)
         })
         .collect()
@@ -513,20 +521,29 @@ mod wasm_tests {
 
     #[wasm_bindgen_test(async)]
     async fn webcrypto_account_authorizes_session_key() {
-        let account = connect_webcrypto().await.expect("webcrypto account");
+        let account = connect_webcrypto().await;
+        assert!(account.is_ok());
+        let Ok(account) = account else {
+            return;
+        };
         assert_eq!(account.account_type.as_str(), "secp256r1");
 
         let mut builder =
             SessionSkBuilder::new(account.account.clone(), account.account_type.clone());
         let proof = builder.unsigned_proof();
-        let signature = account
-            .sign_session_proof(&proof)
-            .await
-            .expect("webcrypto signature");
+        let signature = account.sign_session_proof(&proof).await;
+        assert!(signature.is_ok());
+        let Ok(signature) = signature else {
+            return;
+        };
         assert_eq!(signature.len(), 64);
 
         builder = builder.set_session_sig(signature);
-        let session_key = builder.build().expect("valid webcrypto session key");
+        let session_key = builder.build();
+        assert!(session_key.is_ok());
+        let Ok(session_key) = session_key else {
+            return;
+        };
         assert!(session_key.session().verify_self().is_ok());
     }
 }

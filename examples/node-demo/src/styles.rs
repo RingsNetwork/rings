@@ -9,6 +9,8 @@ pub const APP_CSS: &str = concat!(
     "\n",
     include_str!("styles/components.css"),
     "\n",
+    include_str!("styles/dialogs.css"),
+    "\n",
     include_str!("styles/features.css"),
     "\n",
     include_str!("styles/responsive.css"),

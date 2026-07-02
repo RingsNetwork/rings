@@ -1,0 +1,177 @@
+.modal-shell {
+  position: fixed;
+  z-index: 20;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.dialog-backdrop {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  background:
+    linear-gradient(90deg, rgba(0, 229, 255, 0.06) 1px, transparent 1px),
+    linear-gradient(180deg, rgba(84, 255, 208, 0.045) 1px, transparent 1px),
+    rgba(0, 0, 0, 0.72);
+  background-size: 32px 32px, 32px 32px, auto;
+  box-shadow: none;
+}
+
+.link-dialog {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  width: min(920px, calc(100vw - 48px));
+  height: min(560px, calc(100dvh - 48px));
+  min-height: 0;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background:
+    linear-gradient(180deg, rgba(5, 18, 24, 0.96), rgba(3, 8, 12, 0.98)),
+    var(--surface);
+  box-shadow: 0 0 46px rgba(0, 229, 255, 0.18), inset 0 0 34px rgba(0, 229, 255, 0.06);
+  overflow: hidden;
+}
+
+.setup-dialog {
+  width: min(820px, calc(100vw - 48px));
+  height: min(480px, calc(100dvh - 48px));
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.setup-mobile-primary {
+  display: none;
+}
+
+.workbench-dialog {
+  width: min(1080px, calc(100vw - 48px));
+  height: min(620px, calc(100dvh - 48px));
+}
+
+.workbench-dialog .workspace-tabs {
+  display: grid;
+  grid-area: auto;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.setup-pane,
+.workbench-dialog-body {
+  min-width: 0;
+  min-height: 0;
+}
+
+.workbench-dialog-body {
+  display: grid;
+  grid-area: auto;
+}
+
+.setup-grid {
+  display: grid;
+  min-width: 0;
+  min-height: 100%;
+  grid-template-columns: minmax(210px, 0.72fr) minmax(280px, 1fr) minmax(220px, 0.82fr);
+  grid-template-rows: minmax(min-content, 1fr);
+  gap: 10px;
+  align-items: stretch;
+}
+
+.setup-grid .node-control-group {
+  padding: 0 10px;
+  overflow: hidden;
+}
+
+.setup-identity {
+  grid-column: auto;
+}
+
+.setup-identity .account-details {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 6px;
+}
+
+.setup-identity .identity-value code {
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.workbench-dialog-body .feature-panel {
+  height: 100%;
+}
+
+.dialog-header {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.dialog-close {
+  min-width: 84px;
+}
+
+.dialog-tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.dialog-tab {
+  border-color: transparent;
+  background: transparent;
+  color: var(--muted);
+  box-shadow: none;
+}
+
+.dialog-tab:hover,
+.dialog-tab.active {
+  border-color: var(--line);
+  background: rgba(0, 229, 255, 0.12);
+  color: var(--blue);
+}
+
+.dialog-body,
+.dialog-pane {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.dialog-body {
+  display: grid;
+}
+
+.setup-dialog .dialog-body,
+.setup-pane {
+  overflow: auto;
+}
+
+.dialog-pane {
+  display: grid;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 10px;
+  background: rgba(6, 18, 24, 0.84);
+}
+
+.http-pane {
+  align-content: start;
+  gap: 10px;
+}

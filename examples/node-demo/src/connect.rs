@@ -1,0 +1,569 @@
+//! Peer connection controls and SDP exchange dialog.
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use yew::prelude::*;
+
+use crate::extension;
+use crate::forms::readonly_textarea;
+use crate::forms::text_input;
+use crate::forms::textarea;
+use crate::node;
+use crate::node::DemoNode;
+use crate::node::PeerView;
+use crate::peer_sync;
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum SdpMode {
+    Initiator,
+    Responder,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum LinkTab {
+    ManualSdp,
+    HttpEndpoint,
+}
+
+pub(crate) struct ConnectState<'a> {
+    pub(crate) http_endpoint: &'a UseStateHandle<String>,
+    pub(crate) sdp_remote_did: &'a UseStateHandle<String>,
+    pub(crate) generated_offer: &'a UseStateHandle<String>,
+    pub(crate) remote_offer: &'a UseStateHandle<String>,
+    pub(crate) generated_answer: &'a UseStateHandle<String>,
+    pub(crate) remote_answer: &'a UseStateHandle<String>,
+    pub(crate) sdp_mode: &'a UseStateHandle<SdpMode>,
+    pub(crate) link_dialog_open: &'a UseStateHandle<bool>,
+    pub(crate) link_tab: &'a UseStateHandle<LinkTab>,
+    pub(crate) launcher_hidden: bool,
+}
+
+pub(crate) fn link_control(
+    state: ConnectState<'_>,
+    node_ref: Rc<RefCell<Option<DemoNode>>>,
+    peers: UseStateHandle<Vec<PeerView>>,
+    status: UseStateHandle<String>,
+) -> Html {
+    let on_http_connect = {
+        let node_ref = node_ref.clone();
+        let endpoint = (*state.http_endpoint).clone();
+        let peers = peers.clone();
+        let status = status.clone();
+        let link_dialog_open = (*state.link_dialog_open).clone();
+        Callback::from(move |_| {
+            if let Some(bridge) = extension::extension_node_bridge() {
+                let endpoint = (*endpoint).clone();
+                let peers = peers.clone();
+                let status = status.clone();
+                let link_dialog_open = link_dialog_open.clone();
+                status.set(format!("connecting {endpoint}"));
+                wasm_bindgen_futures::spawn_local(async move {
+                    match extension::extension_node_connect_http(&bridge, endpoint).await {
+                        Ok(snapshot) => {
+                            link_dialog_open.set(false);
+                            peers.set(snapshot.peers);
+                            status.set(snapshot.message);
+                        }
+                        Err(error) => status.set(error),
+                    }
+                });
+                return;
+            }
+
+            let Some(node) = node_ref.borrow().clone() else {
+                status.set("start the node first".to_string());
+                return;
+            };
+            let endpoint = (*endpoint).clone();
+            let peers = peers.clone();
+            let status = status.clone();
+            let link_dialog_open = link_dialog_open.clone();
+            status.set(format!("connecting {endpoint}"));
+            wasm_bindgen_futures::spawn_local(async move {
+                match node::connect_http(&node.provider, endpoint).await {
+                    Ok(seed_did) => {
+                        link_dialog_open.set(false);
+                        let seed_peer = PeerView {
+                            did: seed_did,
+                            state: "Connected".to_string(),
+                        };
+                        peer_sync::sync_peers_after_handshake(
+                            node,
+                            peers,
+                            status,
+                            "HTTP endpoint connected",
+                            Some(seed_peer),
+                        )
+                        .await;
+                    }
+                    Err(error) => status.set(error),
+                }
+            });
+        })
+    };
+    let on_create_offer = {
+        let node_ref = node_ref.clone();
+        let remote_did = (*state.sdp_remote_did).clone();
+        let generated_offer = (*state.generated_offer).clone();
+        let status = status.clone();
+        Callback::from(move |_| {
+            if let Some(bridge) = extension::extension_node_bridge() {
+                let remote_did = (*remote_did).trim().to_string();
+                if remote_did.is_empty() {
+                    status.set("enter a remote DID".to_string());
+                    return;
+                }
+                let generated_offer = generated_offer.clone();
+                let status = status.clone();
+                wasm_bindgen_futures::spawn_local(async move {
+                    match extension::extension_node_create_offer(&bridge, remote_did).await {
+                        Ok(offer) => {
+                            generated_offer.set(offer);
+                            status.set("offer created".to_string());
+                        }
+                        Err(error) => status.set(error),
+                    }
+                });
+                return;
+            }
+
+            let Some(node) = node_ref.borrow().clone() else {
+                status.set("start the node first".to_string());
+                return;
+            };
+            let remote_did = (*remote_did).trim().to_string();
+            if remote_did.is_empty() {
+                status.set("enter a remote DID".to_string());
+                return;
+            }
+            let generated_offer = generated_offer.clone();
+            let status = status.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                match node::create_offer(&node.provider, remote_did).await {
+                    Ok(offer) => {
+                        generated_offer.set(offer);
+                        status.set("offer created".to_string());
+                    }
+                    Err(error) => status.set(error),
+                }
+            });
+        })
+    };
+    let on_answer_offer = {
+        let node_ref = node_ref.clone();
+        let remote_offer = (*state.remote_offer).clone();
+        let generated_answer = (*state.generated_answer).clone();
+        let status = status.clone();
+        Callback::from(move |_| {
+            if let Some(bridge) = extension::extension_node_bridge() {
+                let offer = (*remote_offer).trim().to_string();
+                if offer.is_empty() {
+                    status.set("paste an offer first".to_string());
+                    return;
+                }
+                let generated_answer = generated_answer.clone();
+                let status = status.clone();
+                wasm_bindgen_futures::spawn_local(async move {
+                    match extension::extension_node_answer_offer(&bridge, offer).await {
+                        Ok(answer) => {
+                            generated_answer.set(answer);
+                            status.set("answer created".to_string());
+                        }
+                        Err(error) => status.set(error),
+                    }
+                });
+                return;
+            }
+
+            let Some(node) = node_ref.borrow().clone() else {
+                status.set("start the node first".to_string());
+                return;
+            };
+            let offer = (*remote_offer).trim().to_string();
+            if offer.is_empty() {
+                status.set("paste an offer first".to_string());
+                return;
+            }
+            let generated_answer = generated_answer.clone();
+            let status = status.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                match node::answer_offer(&node.provider, offer).await {
+                    Ok(answer) => {
+                        generated_answer.set(answer);
+                        status.set("answer created".to_string());
+                    }
+                    Err(error) => status.set(error),
+                }
+            });
+        })
+    };
+    let on_accept_answer = {
+        let node_ref = node_ref.clone();
+        let remote_answer = (*state.remote_answer).clone();
+        let peers = peers.clone();
+        let status = status.clone();
+        let link_dialog_open = (*state.link_dialog_open).clone();
+        Callback::from(move |_| {
+            if let Some(bridge) = extension::extension_node_bridge() {
+                let answer = (*remote_answer).trim().to_string();
+                if answer.is_empty() {
+                    status.set("paste an answer first".to_string());
+                    return;
+                }
+                let peers = peers.clone();
+                let status = status.clone();
+                let link_dialog_open = link_dialog_open.clone();
+                wasm_bindgen_futures::spawn_local(async move {
+                    match extension::extension_node_accept_answer(&bridge, answer).await {
+                        Ok(snapshot) => {
+                            link_dialog_open.set(false);
+                            peers.set(snapshot.peers);
+                            status.set(snapshot.message);
+                        }
+                        Err(error) => status.set(error),
+                    }
+                });
+                return;
+            }
+
+            let Some(node) = node_ref.borrow().clone() else {
+                status.set("start the node first".to_string());
+                return;
+            };
+            let answer = (*remote_answer).trim().to_string();
+            if answer.is_empty() {
+                status.set("paste an answer first".to_string());
+                return;
+            }
+            let peers = peers.clone();
+            let status = status.clone();
+            let link_dialog_open = link_dialog_open.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                match node::accept_answer(&node.provider, answer).await {
+                    Ok(()) => {
+                        link_dialog_open.set(false);
+                        peer_sync::sync_peers_after_handshake(
+                            node,
+                            peers,
+                            status,
+                            "answer accepted",
+                            None,
+                        )
+                        .await;
+                    }
+                    Err(error) => status.set(error),
+                }
+            });
+        })
+    };
+    let set_initiator = {
+        let sdp_mode = (*state.sdp_mode).clone();
+        Callback::from(move |_| sdp_mode.set(SdpMode::Initiator))
+    };
+    let set_responder = {
+        let sdp_mode = (*state.sdp_mode).clone();
+        Callback::from(move |_| sdp_mode.set(SdpMode::Responder))
+    };
+    let open_dialog = {
+        let link_dialog_open = (*state.link_dialog_open).clone();
+        Callback::from(move |_| link_dialog_open.set(true))
+    };
+    let close_dialog = {
+        let link_dialog_open = (*state.link_dialog_open).clone();
+        Callback::from(move |_| link_dialog_open.set(false))
+    };
+    let set_manual_sdp = {
+        let link_tab = (*state.link_tab).clone();
+        Callback::from(move |_| link_tab.set(LinkTab::ManualSdp))
+    };
+    let set_http_endpoint = {
+        let link_tab = (*state.link_tab).clone();
+        Callback::from(move |_| link_tab.set(LinkTab::HttpEndpoint))
+    };
+
+    html! {
+        <div class="node-link-control">
+            if !state.launcher_hidden {
+                <button class="topology-add-button" type="button" aria-label="Connect peer" title="Connect peer" onclick={open_dialog}>
+                    <span aria-hidden="true">{ "+" }</span>
+                </button>
+            }
+            {
+                if **state.link_dialog_open {
+                    connect_dialog(
+                        **state.link_tab,
+                        **state.sdp_mode,
+                        set_manual_sdp,
+                        set_http_endpoint,
+                        set_initiator,
+                        set_responder,
+                        close_dialog,
+                        (*state.http_endpoint).clone(),
+                        (*state.sdp_remote_did).clone(),
+                        (*state.generated_offer).clone(),
+                        (*state.remote_offer).clone(),
+                        (*state.generated_answer).clone(),
+                        (*state.remote_answer).clone(),
+                        status.clone(),
+                        on_http_connect,
+                        on_create_offer,
+                        on_answer_offer,
+                        on_accept_answer,
+                    )
+                } else {
+                    html! {}
+                }
+            }
+        </div>
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn connect_dialog(
+    active_tab: LinkTab,
+    active_sdp_mode: SdpMode,
+    set_manual_sdp: Callback<MouseEvent>,
+    set_http_endpoint: Callback<MouseEvent>,
+    set_initiator: Callback<MouseEvent>,
+    set_responder: Callback<MouseEvent>,
+    close_dialog: Callback<MouseEvent>,
+    http_endpoint: UseStateHandle<String>,
+    sdp_remote_did: UseStateHandle<String>,
+    generated_offer: UseStateHandle<String>,
+    remote_offer: UseStateHandle<String>,
+    generated_answer: UseStateHandle<String>,
+    remote_answer: UseStateHandle<String>,
+    status: UseStateHandle<String>,
+    on_http_connect: Callback<MouseEvent>,
+    on_create_offer: Callback<MouseEvent>,
+    on_answer_offer: Callback<MouseEvent>,
+    on_accept_answer: Callback<MouseEvent>,
+) -> Html {
+    html! {
+        <div class="modal-shell">
+            <button class="dialog-backdrop" aria-label="Close link dialog" onclick={close_dialog.clone()}></button>
+            <section class="link-dialog" role="dialog" aria-modal="true" aria-labelledby="link-dialog-title">
+                <header class="dialog-header">
+                    <div>
+                        <p class="eyebrow">{ "Peer link" }</p>
+                        <h2 id="link-dialog-title">{ "Connection exchange" }</h2>
+                    </div>
+                    <button class="secondary dialog-close" onclick={close_dialog}>{ "Close" }</button>
+                </header>
+                { link_dialog_tabs(active_tab, set_manual_sdp, set_http_endpoint) }
+                <div class="dialog-body">
+                    {
+                        match active_tab {
+                            LinkTab::ManualSdp => html! {
+                                <div class="dialog-pane sdp-tool">
+                                    <div class="tool-header">
+                                        <h3>{ "Manual SDP exchange" }</h3>
+                                        { sdp_mode_switch(active_sdp_mode, set_initiator, set_responder) }
+                                    </div>
+                                    {
+                                        match active_sdp_mode {
+                                            SdpMode::Initiator => sdp_initiator_flow(
+                                                sdp_remote_did,
+                                                generated_offer,
+                                                remote_answer,
+                                                status.clone(),
+                                                on_create_offer,
+                                                on_accept_answer,
+                                            ),
+                                            SdpMode::Responder => sdp_responder_flow(
+                                                remote_offer,
+                                                generated_answer,
+                                                status.clone(),
+                                                on_answer_offer,
+                                            ),
+                                        }
+                                    }
+                                </div>
+                            },
+                            LinkTab::HttpEndpoint => html! {
+                                <div class="dialog-pane http-pane">
+                                    <div class="tool-header">
+                                        <h3>{ "HTTP endpoint" }</h3>
+                                        <span class="payload-state">{ "Seed" }</span>
+                                    </div>
+                                    { text_input("Seed HTTP endpoint", http_endpoint) }
+                                    <button onclick={on_http_connect}>{ "Connect endpoint" }</button>
+                                </div>
+                            },
+                        }
+                    }
+                </div>
+            </section>
+        </div>
+    }
+}
+
+fn link_dialog_tabs(
+    active: LinkTab,
+    set_manual_sdp: Callback<MouseEvent>,
+    set_http_endpoint: Callback<MouseEvent>,
+) -> Html {
+    let manual_class = if active == LinkTab::ManualSdp {
+        "dialog-tab active"
+    } else {
+        "dialog-tab"
+    };
+    let http_class = if active == LinkTab::HttpEndpoint {
+        "dialog-tab active"
+    } else {
+        "dialog-tab"
+    };
+    html! {
+        <nav class="dialog-tabs" aria-label="Connection mode">
+            <button class={manual_class} onclick={set_manual_sdp}>{ "Manual SDP" }</button>
+            <button class={http_class} onclick={set_http_endpoint}>{ "HTTP endpoint" }</button>
+        </nav>
+    }
+}
+
+fn sdp_mode_switch(
+    active: SdpMode,
+    set_initiator: Callback<MouseEvent>,
+    set_responder: Callback<MouseEvent>,
+) -> Html {
+    let initiator_class = if active == SdpMode::Initiator {
+        "segment active"
+    } else {
+        "segment"
+    };
+    let responder_class = if active == SdpMode::Responder {
+        "segment active"
+    } else {
+        "segment"
+    };
+    html! {
+        <div class="segmented" aria-label="SDP role">
+            <button class={initiator_class} onclick={set_initiator}>{ "Initiator" }</button>
+            <button class={responder_class} onclick={set_responder}>{ "Responder" }</button>
+        </div>
+    }
+}
+
+fn sdp_initiator_flow(
+    remote_did: UseStateHandle<String>,
+    generated_offer: UseStateHandle<String>,
+    remote_answer: UseStateHandle<String>,
+    status: UseStateHandle<String>,
+    on_create_offer: Callback<MouseEvent>,
+    on_accept_answer: Callback<MouseEvent>,
+) -> Html {
+    html! {
+        <div class="sdp-flow">
+            { sdp_step(
+                "1",
+                "Remote DID",
+                html! {
+                    <>
+                        { text_input("Remote DID", remote_did) }
+                        <button onclick={on_create_offer}>{ "Create offer" }</button>
+                    </>
+                },
+            ) }
+            { sdp_output_step("2", "Local offer", (*generated_offer).clone(), status) }
+            { sdp_step(
+                "3",
+                "Remote answer",
+                html! {
+                    <>
+                        { textarea("Remote answer", remote_answer) }
+                        <button onclick={on_accept_answer}>{ "Accept answer" }</button>
+                    </>
+                },
+            ) }
+        </div>
+    }
+}
+
+fn sdp_responder_flow(
+    remote_offer: UseStateHandle<String>,
+    generated_answer: UseStateHandle<String>,
+    status: UseStateHandle<String>,
+    on_answer_offer: Callback<MouseEvent>,
+) -> Html {
+    html! {
+        <div class="sdp-flow">
+            { sdp_step(
+                "1",
+                "Remote offer",
+                html! {
+                    <>
+                        { textarea("Remote offer", remote_offer) }
+                        <button onclick={on_answer_offer}>{ "Answer offer" }</button>
+                    </>
+                },
+            ) }
+            { sdp_output_step("2", "Local answer", (*generated_answer).clone(), status) }
+        </div>
+    }
+}
+
+fn sdp_step(index: &'static str, title: &'static str, body: Html) -> Html {
+    html! {
+        <div class="sdp-step">
+            <div class="sdp-index">{ index }</div>
+            <div class="sdp-step-body">
+                <h4>{ title }</h4>
+                { body }
+            </div>
+        </div>
+    }
+}
+
+fn sdp_output_step(
+    index: &'static str,
+    title: &'static str,
+    value: String,
+    status: UseStateHandle<String>,
+) -> Html {
+    let can_copy = !value.trim().is_empty();
+    let state = if value.trim().is_empty() {
+        "Waiting"
+    } else {
+        "Ready"
+    };
+    let on_copy = {
+        let value = value.clone();
+        Callback::from(move |_| {
+            if value.trim().is_empty() {
+                status.set("generate SDP first".to_string());
+                return;
+            }
+            let value = value.clone();
+            let status = status.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                match extension::copy_text_to_clipboard(value).await {
+                    Ok(()) => status.set(format!("{title} copied")),
+                    Err(error) => status.set(format!("copy SDP failed: {error}")),
+                }
+            });
+        })
+    };
+    html! {
+        <div class="sdp-step">
+            <div class="sdp-index">{ index }</div>
+            <div class="sdp-step-body">
+                <div class="sdp-output-header">
+                    <h4>{ title }</h4>
+                    <div class="sdp-output-actions">
+                        <span class="payload-state">{ state }</span>
+                        <button
+                            class="copy-button sdp-copy"
+                            type="button"
+                            disabled={!can_copy}
+                            onclick={on_copy}
+                        >
+                            { "Copy" }
+                        </button>
+                    </div>
+                </div>
+                { readonly_textarea(title, value) }
+            </div>
+        </div>
+    }
+}

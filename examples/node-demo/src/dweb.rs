@@ -22,6 +22,16 @@ use yew::Callback;
 /// Hosted path table.
 pub type Site = Rc<RefCell<HashMap<String, String>>>;
 
+/// Build the default hosted page table.
+pub fn default_site() -> HashMap<String, String> {
+    HashMap::from([("/".to_string(), default_page())])
+}
+
+/// Default page hosted by a newly started browser node.
+pub fn default_page() -> String {
+    "<h1>Hello from Rings</h1><p>This page is hosted by a browser node.</p>".to_string()
+}
+
 /// A rendered dweb response.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DwebResponse {
