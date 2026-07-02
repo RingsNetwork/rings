@@ -1,0 +1,7 @@
+# One secp256k1 ECDSA private key per non-comment line.
+# Values may be plain 64-character lowercase/uppercase hex or 0x-prefixed hex.
+# This file intentionally contains placeholders only.
+#
+# 0x<64-hex-private-key-for-node-0>
+# 0x<64-hex-private-key-for-node-1>
+# 0x<64-hex-private-key-for-node-2>

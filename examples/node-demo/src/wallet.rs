@@ -1,6 +1,8 @@
-//! Browser account providers used to authorize a Rings session key.
+//! Browser account standards used to authorize a Rings session key.
 
 use base58::FromBase58;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use js_sys::Array;
 use js_sys::Function;
 use js_sys::Object;
@@ -11,21 +13,23 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
 
-/// Wallet provider selected by the user.
+const EXTENSION_WALLET_BRIDGE: &str = "RingsExtensionWalletBridge";
+
+/// Account authorization standard selected by the user.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WalletKind {
     /// Browser-native P-256 key generated with WebCrypto.
     WebCrypto,
-    /// EIP-191 signature through `window.ethereum`.
-    MetaMask,
-    /// Ed25519 signature through Phantom's Solana provider.
-    Phantom,
+    /// EIP-191 signature through an EIP-1193 Ethereum provider.
+    EthereumEip191,
+    /// Ed25519 signature through a Solana provider.
+    SolanaEd25519,
 }
 
 /// Connected browser account and the opaque signing handle.
 #[derive(Clone)]
 pub struct WalletAccount {
-    /// Provider kind that created this account.
+    /// Account standard that created this account.
     pub kind: WalletKind,
     /// Account entity passed to `SessionSkBuilder`.
     pub account: String,
@@ -38,8 +42,8 @@ impl WalletKind {
     /// Parse a UI value.
     pub fn from_value(value: &str) -> Self {
         match value {
-            "metamask" => Self::MetaMask,
-            "phantom" => Self::Phantom,
+            "eip191" | "metamask" => Self::EthereumEip191,
+            "ed25519" | "phantom" => Self::SolanaEd25519,
             _ => Self::WebCrypto,
         }
     }
@@ -48,8 +52,8 @@ impl WalletKind {
     pub fn value(self) -> &'static str {
         match self {
             Self::WebCrypto => "webcrypto",
-            Self::MetaMask => "metamask",
-            Self::Phantom => "phantom",
+            Self::EthereumEip191 => "eip191",
+            Self::SolanaEd25519 => "ed25519",
         }
     }
 
@@ -57,19 +61,34 @@ impl WalletKind {
     pub fn label(self) -> &'static str {
         match self {
             Self::WebCrypto => "WebCrypto P-256",
-            Self::MetaMask => "MetaMask EIP-191",
-            Self::Phantom => "Phantom Ed25519",
+            Self::EthereumEip191 => "Ethereum EIP-191",
+            Self::SolanaEd25519 => "Solana Ed25519",
         }
     }
 }
 
 impl WalletAccount {
+    /// Build a display-only account view for an already running extension node.
+    pub fn extension_view(
+        kind: WalletKind,
+        account: String,
+        account_type: String,
+        handle: JsValue,
+    ) -> Self {
+        Self {
+            kind,
+            account,
+            account_type,
+            handle,
+        }
+    }
+
     /// Sign the session proof expected by `SessionSkBuilder`.
     pub async fn sign_session_proof(&self, proof: &str) -> Result<Vec<u8>, String> {
         match self.kind {
             WalletKind::WebCrypto => sign_webcrypto(&self.handle, proof).await,
-            WalletKind::MetaMask => sign_metamask(&self.handle, &self.account, proof).await,
-            WalletKind::Phantom => sign_phantom(&self.handle, proof).await,
+            WalletKind::EthereumEip191 => sign_eip191(&self.handle, &self.account, proof).await,
+            WalletKind::SolanaEd25519 => sign_ed25519(&self.handle, proof).await,
         }
     }
 }
@@ -78,8 +97,8 @@ impl WalletAccount {
 pub async fn connect(kind: WalletKind) -> Result<WalletAccount, String> {
     match kind {
         WalletKind::WebCrypto => connect_webcrypto().await,
-        WalletKind::MetaMask => connect_metamask().await,
-        WalletKind::Phantom => connect_phantom().await,
+        WalletKind::EthereumEip191 => connect_eip191().await,
+        WalletKind::SolanaEd25519 => connect_ed25519().await,
     }
 }
 
@@ -163,7 +182,7 @@ fn bytes_to_hex(bytes: &[u8]) -> String {
 
 fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, String> {
     let clean = hex.strip_prefix("0x").unwrap_or(hex);
-    if clean.len() % 2 != 0 || !clean.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+    if !clean.len().is_multiple_of(2) || !clean.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("wallet returned an invalid hex signature".to_string());
     }
     clean
@@ -187,18 +206,9 @@ fn hex_nibble(byte: u8) -> Result<u8, String> {
 }
 
 fn base64_url_to_bytes(value: &str) -> Result<Vec<u8>, String> {
-    let normalized = value.replace('-', "+").replace('_', "/");
-    let padded = match normalized.len() % 4 {
-        0 => normalized,
-        rem => format!("{}{}", normalized, "=".repeat(4 - rem)),
-    };
-    let atob = method(&js_sys::global(), "atob")?;
-    let binary = atob
-        .call1(&JsValue::NULL, &JsValue::from_str(&padded))
-        .map_err(js_err)?
-        .as_string()
-        .ok_or_else(|| "atob returned a non-string".to_string())?;
-    Ok(binary.bytes().collect())
+    URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|error| format!("invalid base64url field: {error}"))
 }
 
 fn rings_prefixed_message(message: &str) -> Vec<u8> {
@@ -275,10 +285,15 @@ async fn sign_webcrypto(private_key: &JsValue, proof: &str) -> Result<Vec<u8>, S
     Ok(Uint8Array::new(&signature).to_vec())
 }
 
-async fn connect_metamask() -> Result<WalletAccount, String> {
+async fn connect_eip191() -> Result<WalletAccount, String> {
+    if let Some(bridge) = extension_wallet_bridge() {
+        return connect_extension_wallet(&bridge, WalletKind::EthereumEip191, "eip191", "eip191")
+            .await;
+    }
+
     let ethereum = global_prop("ethereum")?;
     if ethereum.is_undefined() || ethereum.is_null() {
-        return Err("MetaMask provider not found".to_string());
+        return Err("EIP-1193 Ethereum provider not found".to_string());
     }
     let accounts = await_js(request(
         &ethereum,
@@ -289,27 +304,36 @@ async fn connect_metamask() -> Result<WalletAccount, String> {
     let account = Array::from(&accounts)
         .get(0)
         .as_string()
-        .ok_or_else(|| "MetaMask returned no account".to_string())?;
+        .ok_or_else(|| "Ethereum provider returned no account".to_string())?;
     Ok(WalletAccount {
-        kind: WalletKind::MetaMask,
+        kind: WalletKind::EthereumEip191,
         account,
         account_type: "eip191".to_string(),
         handle: ethereum,
     })
 }
 
-async fn sign_metamask(ethereum: &JsValue, account: &str, proof: &str) -> Result<Vec<u8>, String> {
+async fn sign_eip191(ethereum: &JsValue, account: &str, proof: &str) -> Result<Vec<u8>, String> {
+    if is_extension_wallet_bridge(ethereum) {
+        let signed = sign_extension_wallet(ethereum, "eip191", proof, Some(account)).await?;
+        let signature = prop(&signed, "signature")
+            .unwrap_or(signed)
+            .as_string()
+            .ok_or_else(|| "EIP-191 bridge returned a non-string signature".to_string())?;
+        return hex_to_bytes(&signature);
+    }
+
     let params = Array::new();
     params.push(&JsValue::from_str(proof));
     params.push(&JsValue::from_str(account));
     let signature = await_js(request(ethereum, "personal_sign", params.into())?).await?;
     let signature = signature
         .as_string()
-        .ok_or_else(|| "MetaMask returned a non-string signature".to_string())?;
+        .ok_or_else(|| "Ethereum provider returned a non-string signature".to_string())?;
     hex_to_bytes(&signature)
 }
 
-fn phantom_provider() -> Result<JsValue, String> {
+fn solana_provider() -> Result<JsValue, String> {
     let phantom = global_prop("phantom").unwrap_or(JsValue::UNDEFINED);
     let nested = if phantom.is_undefined() || phantom.is_null() {
         JsValue::UNDEFINED
@@ -321,28 +345,39 @@ fn phantom_provider() -> Result<JsValue, String> {
     }
     let solana = global_prop("solana")?;
     if solana.is_undefined() || solana.is_null() {
-        Err("Phantom provider not found".to_string())
+        Err("Solana provider not found".to_string())
     } else {
         Ok(solana)
     }
 }
 
-async fn connect_phantom() -> Result<WalletAccount, String> {
-    let provider = phantom_provider()?;
+async fn connect_ed25519() -> Result<WalletAccount, String> {
+    if let Some(bridge) = extension_wallet_bridge() {
+        return connect_extension_wallet(&bridge, WalletKind::SolanaEd25519, "ed25519", "ed25519")
+            .await;
+    }
+
+    let provider = solana_provider()?;
     await_js(call0(&provider, "connect")?).await?;
     let public_key = prop(&provider, "publicKey")?;
     let account = call0(&public_key, "toBase58")?
         .as_string()
-        .ok_or_else(|| "Phantom returned no public key".to_string())?;
+        .ok_or_else(|| "Solana provider returned no public key".to_string())?;
     Ok(WalletAccount {
-        kind: WalletKind::Phantom,
+        kind: WalletKind::SolanaEd25519,
         account,
         account_type: "ed25519".to_string(),
         handle: provider,
     })
 }
 
-async fn sign_phantom(provider: &JsValue, proof: &str) -> Result<Vec<u8>, String> {
+async fn sign_ed25519(provider: &JsValue, proof: &str) -> Result<Vec<u8>, String> {
+    if is_extension_wallet_bridge(provider) {
+        let signed = sign_extension_wallet(provider, "ed25519", proof, None).await?;
+        let signature = prop(&signed, "signature").unwrap_or(signed);
+        return ed25519_signature_bytes(&signature);
+    }
+
     let message = Uint8Array::from(proof.as_bytes());
     let signed = if !prop(provider, "signMessage")?.is_undefined() {
         await_js(call2(
@@ -358,21 +393,94 @@ async fn sign_phantom(provider: &JsValue, proof: &str) -> Result<Vec<u8>, String
         await_js(request(provider, "signMessage", params.into())?).await?
     };
     let signature = prop(&signed, "signature").unwrap_or(signed);
-    phantom_signature_bytes(&signature)
+    ed25519_signature_bytes(&signature)
 }
 
-fn phantom_signature_bytes(signature: &JsValue) -> Result<Vec<u8>, String> {
+fn ed25519_signature_bytes(signature: &JsValue) -> Result<Vec<u8>, String> {
     if let Some(value) = signature.as_string() {
         return value
             .from_base58()
-            .map_err(|_| "Phantom returned an invalid base58 signature".to_string());
+            .map_err(|_| "Solana provider returned an invalid base58 signature".to_string());
+    }
+    if Array::is_array(signature) {
+        let array = Array::from(signature);
+        let mut out = Vec::with_capacity(array.length() as usize);
+        for index in 0..array.length() {
+            let value = array
+                .get(index)
+                .as_f64()
+                .ok_or_else(|| "Ed25519 bridge returned a non-byte signature".to_string())?;
+            if !(0.0..=255.0).contains(&value) || value.fract() != 0.0 {
+                return Err("Ed25519 bridge returned a non-byte signature".to_string());
+            }
+            out.push(value as u8);
+        }
+        return Ok(out);
     }
     Ok(Uint8Array::new(signature).to_vec())
+}
+
+fn extension_wallet_bridge() -> Option<JsValue> {
+    let bridge = global_prop(EXTENSION_WALLET_BRIDGE).ok()?;
+    if bridge.is_undefined() || bridge.is_null() || !is_extension_wallet_bridge(&bridge) {
+        return None;
+    }
+    Some(bridge)
+}
+
+fn is_extension_wallet_bridge(value: &JsValue) -> bool {
+    is_callable(value, "connect") && is_callable(value, "sign")
+}
+
+fn is_callable(object: &JsValue, name: &str) -> bool {
+    prop(object, name)
+        .ok()
+        .and_then(|value| value.dyn_into::<Function>().ok())
+        .is_some()
+}
+
+async fn connect_extension_wallet(
+    bridge: &JsValue,
+    kind: WalletKind,
+    wallet: &str,
+    fallback_account_type: &str,
+) -> Result<WalletAccount, String> {
+    let response = await_js(call1(bridge, "connect", &JsValue::from_str(wallet))?).await?;
+    let account = string_prop(&response, "account")?;
+    let account_type =
+        string_prop(&response, "accountType").unwrap_or_else(|_| fallback_account_type.to_string());
+    Ok(WalletAccount {
+        kind,
+        account,
+        account_type,
+        handle: bridge.clone(),
+    })
+}
+
+async fn sign_extension_wallet(
+    bridge: &JsValue,
+    wallet: &str,
+    proof: &str,
+    account: Option<&str>,
+) -> Result<JsValue, String> {
+    await_js(call3(
+        bridge,
+        "sign",
+        &JsValue::from_str(wallet),
+        &JsValue::from_str(proof),
+        &JsValue::from_str(account.unwrap_or_default()),
+    )?)
+    .await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base64url_decoder_preserves_non_ascii_coordinate_bytes() {
+        assert_eq!(base64_url_to_bytes("AH-A_w"), Ok(vec![0, 127, 128, 255]));
+    }
 
     #[test]
     fn rings_prefix_matches_core_secp256r1_transcript() {
@@ -385,5 +493,40 @@ mod tests {
     #[test]
     fn hex_signature_parser_accepts_prefixed_even_hex() {
         assert_eq!(hex_to_bytes("0x000aff"), Ok(vec![0, 10, 255]));
+    }
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod wasm_tests {
+    use rings_node::prelude::rings_core::session::SessionSkBuilder;
+    use wasm_bindgen_test::wasm_bindgen_test;
+    use wasm_bindgen_test::wasm_bindgen_test_configure;
+
+    use super::*;
+
+    wasm_bindgen_test_configure!(run_in_browser);
+
+    #[wasm_bindgen_test]
+    fn base64url_decoder_preserves_webcrypto_coordinate_bytes() {
+        assert_eq!(base64_url_to_bytes("AH-A_w"), Ok(vec![0, 127, 128, 255]));
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn webcrypto_account_authorizes_session_key() {
+        let account = connect_webcrypto().await.expect("webcrypto account");
+        assert_eq!(account.account_type.as_str(), "secp256r1");
+
+        let mut builder =
+            SessionSkBuilder::new(account.account.clone(), account.account_type.clone());
+        let proof = builder.unsigned_proof();
+        let signature = account
+            .sign_session_proof(&proof)
+            .await
+            .expect("webcrypto signature");
+        assert_eq!(signature.len(), 64);
+
+        builder = builder.set_session_sig(signature);
+        let session_key = builder.build().expect("valid webcrypto session key");
+        assert!(session_key.session().verify_self().is_ok());
     }
 }

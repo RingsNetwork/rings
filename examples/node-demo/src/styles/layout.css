@@ -1,35 +1,190 @@
-main {
-  max-width: 1180px;
-  margin: 0 auto;
-  padding: 22px;
-}
-
-.shell {
+.app-shell {
   display: grid;
-  grid-template-columns: 300px minmax(0, 1fr);
-  gap: 18px;
-  align-items: start;
+  width: 100vw;
+  height: 100dvh;
+  min-height: 0;
+  margin: 0;
+  padding: 12px;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 8px;
+  overflow: hidden;
 }
 
-.side,
-.panel {
-  border: 1px solid #d9e0e8;
-  background: #fff;
-  border-radius: 8px;
+.topology-shell {
+  grid-template-rows: auto minmax(0, 1fr);
 }
 
-.side {
-  padding: 14px;
-}
-
-.panel {
-  padding: 16px;
-}
-
-.grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+.app-header {
+  display: flex;
+  min-height: 0;
   gap: 12px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 10px;
+  border: 1px solid rgba(0, 229, 255, 0.12);
+  border-radius: 6px;
+  background: rgba(4, 12, 17, 0.72);
+  box-shadow: none;
+}
+
+.node-band {
+  display: grid;
+  min-height: 0;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background:
+    linear-gradient(90deg, rgba(0, 229, 255, 0.08), transparent 34%, rgba(84, 255, 208, 0.07)),
+    var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.node-control-grid {
+  display: grid;
+  grid-template-columns: minmax(300px, 1fr) minmax(280px, 0.82fr) minmax(250px, 0.74fr);
+  gap: 0;
+  align-items: start;
+  min-width: 0;
+  min-height: 0;
+}
+
+.workspace,
+.network-stage {
+  display: grid;
+  min-height: 0;
+  gap: 10px;
+  min-width: 0;
+}
+
+.workspace {
+  grid-template-columns: minmax(360px, 0.84fr) minmax(500px, 1.16fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-areas:
+    "network tabs"
+    "network body";
+}
+
+.network-stage {
+  grid-area: network;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: linear-gradient(180deg, rgba(6, 18, 24, 0.94), rgba(3, 8, 12, 0.94));
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.topology-stage {
+  grid-area: auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  padding: 12px;
+}
+
+.topology-layout {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  min-width: 0;
+  min-height: 0;
+}
+
+.topology-hud {
+  display: grid;
+  grid-template-columns: minmax(170px, 0.42fr) minmax(360px, 1fr);
+  gap: 12px;
+  align-items: center;
+  min-width: 0;
+}
+
+.stage-top {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.session-strip {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(90px, 0.72fr) minmax(52px, 0.36fr);
+  gap: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.topology-wrap {
+  position: relative;
+  display: grid;
+  min-height: 0;
+  min-width: 0;
+}
+
+.topology-stage .topology-wrap {
+  min-height: 0;
+}
+
+.workspace-body {
+  grid-area: body;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.workspace-tabs {
+  grid-area: tabs;
+}
+
+.section-heading {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.section-heading p {
+  margin: 0;
+}
+
+.feature-panel {
+  display: grid;
+  height: 100%;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.feature-panel > .section-heading {
+  display: none;
+}
+
+.workflow-grid,
+.proof-grid {
+  display: grid;
+  min-height: 0;
+  gap: 10px;
+  align-items: stretch;
+  overflow: hidden;
+}
+
+.workflow-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.proof-grid {
+  grid-template-columns: minmax(320px, 0.9fr) minmax(260px, 0.6fr);
+}
+
+.proof-states {
+  display: grid;
+  gap: 8px;
 }
 
 .row {
@@ -39,10 +194,6 @@ main {
   align-items: center;
 }
 
-.tabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin: 0 0 14px;
-  border-bottom: 1px solid #d9e0e8;
+.section-heading:not(.compact) {
+  margin-bottom: 8px;
 }

@@ -250,12 +250,12 @@ impl PeerRing {
     }
 
     /// Lock and return MutexGuard of finger table.
-    pub fn lock_finger(&self) -> Result<MutexGuard<FingerTable>> {
+    pub fn lock_finger(&self) -> Result<MutexGuard<'_, FingerTable>> {
         self.finger.lock().map_err(|_| Error::DHTSyncLockError)
     }
 
     /// Lock and return MutexGuard of predecessor.
-    pub fn lock_predecessor(&self) -> Result<MutexGuard<Option<Did>>> {
+    pub fn lock_predecessor(&self) -> Result<MutexGuard<'_, Option<Did>>> {
         self.predecessor.lock().map_err(|_| Error::DHTSyncLockError)
     }
 

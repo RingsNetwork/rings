@@ -1,12 +1,65 @@
 :root {
-  color-scheme: light;
-  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  background: #f6f7f9;
-  color: #17202a;
+  color-scheme: dark;
+  --bg: #06090c;
+  --surface: rgba(7, 14, 19, 0.9);
+  --surface-soft: rgba(7, 19, 25, 0.72);
+  --surface-tint: rgba(0, 229, 255, 0.08);
+  --ink: #d7f7ff;
+  --ink-strong: #f1fdff;
+  --muted: #6fa7b6;
+  --line: rgba(0, 229, 255, 0.18);
+  --line-strong: rgba(84, 255, 208, 0.34);
+  --blue: #00e5ff;
+  --blue-soft: rgba(0, 229, 255, 0.13);
+  --green: #54ffd0;
+  --green-soft: rgba(84, 255, 208, 0.12);
+  --amber: #ffcc66;
+  --amber-soft: rgba(255, 204, 102, 0.12);
+  --violet: #9d7cff;
+  --danger: #ff667c;
+  --shadow: 0 0 24px rgba(0, 229, 255, 0.08);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  background: var(--bg);
+  color: var(--ink);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  height: 100%;
+  overflow: hidden;
 }
 
 body {
   margin: 0;
+  width: 100vw;
+  height: 100dvh;
+  overflow: hidden;
+  background:
+    linear-gradient(90deg, rgba(0, 229, 255, 0.045) 1px, transparent 1px),
+    linear-gradient(180deg, rgba(84, 255, 208, 0.035) 1px, transparent 1px),
+    linear-gradient(180deg, rgba(0, 229, 255, 0.1), transparent 36%),
+    linear-gradient(135deg, #05080b 0%, #071017 48%, #030609 100%);
+  background-size: 56px 56px, 56px 56px, auto, auto;
+}
+
+body::before {
+  position: fixed;
+  z-index: 5;
+  inset: 0;
+  pointer-events: none;
+  content: "";
+  background: repeating-linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.035) 0,
+    rgba(255, 255, 255, 0.035) 1px,
+    transparent 1px,
+    transparent 5px
+  );
+  mix-blend-mode: screen;
+  opacity: 0.1;
 }
 
 button,
@@ -17,46 +70,117 @@ textarea {
 }
 
 button {
-  border: 0;
-  border-radius: 6px;
-  padding: 8px 11px;
-  background: #0b63ce;
-  color: #fff;
-  font-weight: 650;
+  min-height: 26px;
+  border: 1px solid var(--blue);
+  border-radius: 3px;
+  padding: 6px 9px;
+  background: rgba(0, 229, 255, 0.14);
+  color: var(--ink-strong);
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0;
   cursor: pointer;
+  box-shadow: inset 0 0 14px rgba(0, 229, 255, 0.1), 0 0 14px rgba(0, 229, 255, 0.08);
+  white-space: nowrap;
+  text-transform: uppercase;
+}
+
+button:hover {
+  border-color: var(--green);
+  background: rgba(84, 255, 208, 0.16);
+  color: var(--green);
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 button.secondary {
-  background: #e7ebf0;
-  color: #17202a;
+  border-color: var(--line);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--ink);
+  box-shadow: none;
 }
 
-button.tab {
-  background: transparent;
-  color: #3b4856;
-  border-bottom: 2px solid transparent;
-  border-radius: 0;
-}
-
-button.tab.active {
-  color: #0b63ce;
-  border-bottom-color: #0b63ce;
+button.secondary:hover {
+  border-color: var(--blue);
+  color: var(--blue);
 }
 
 input,
 select,
 textarea {
-  box-sizing: border-box;
   width: 100%;
-  border: 1px solid #c8d0d9;
-  border-radius: 6px;
-  padding: 8px 9px;
-  background: #fff;
-  color: inherit;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 7px 9px;
+  background: rgba(0, 0, 0, 0.34);
+  color: var(--ink);
+  box-shadow: inset 0 0 14px rgba(0, 229, 255, 0.05);
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--blue);
+  outline: 3px solid rgba(37, 99, 235, 0.12);
 }
 
 textarea {
-  min-height: 96px;
-  resize: vertical;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  min-height: 42px;
+  resize: none;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.72rem;
+  line-height: 1.25;
+}
+
+h1,
+h2,
+h3,
+h4,
+p {
+  margin-top: 0;
+}
+
+h1,
+h2,
+h3,
+h4 {
+  color: var(--ink-strong);
+  letter-spacing: 0;
+  line-height: 1.16;
+}
+
+h1 {
+  margin-bottom: 0;
+  font-size: 1.35rem;
+  text-transform: uppercase;
+}
+
+h2 {
+  margin-bottom: 0;
+  font-size: 0.94rem;
+  text-transform: uppercase;
+}
+
+h3 {
+  margin-bottom: 8px;
+  font-size: 0.82rem;
+  text-transform: uppercase;
+}
+
+h4 {
+  margin-bottom: 6px;
+  font-size: 0.74rem;
+  text-transform: uppercase;
+}
+
+a {
+  color: var(--blue);
+}
+
+::selection {
+  background: var(--blue-soft);
+  color: var(--ink-strong);
 }

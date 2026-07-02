@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use clap::Args;
@@ -267,6 +268,14 @@ struct SessionArgs {
     pub ecdsa_key: Option<SecretKey>,
 
     #[arg(
+        long = "key-file",
+        value_name = "FILE",
+        conflicts_with = "ecdsa_key",
+        help = "Read your ECDSA key from a file instead of passing it on the command line"
+    )]
+    pub ecdsa_key_file: Option<String>,
+
+    #[arg(
         long,
         default_value = "2592000",
         help = "The ttl of session file in seconds"
@@ -276,11 +285,7 @@ struct SessionArgs {
 
 impl SessionArgs {
     fn new_session_then_write_to_fs(&self) -> anyhow::Result<&std::path::Path> {
-        let key = self.ecdsa_key.unwrap_or_else(|| {
-            let rand_key = SecretKey::random();
-            println!("Your random ecdsa key is: {}", rand_key.to_string());
-            rand_key
-        });
+        let key = self.load_or_create_key()?;
         let key_did: Did = key.address().into();
 
         let ssk_builder = SessionSkBuilder::new(key_did.to_string(), "secp256k1".to_string())
@@ -300,6 +305,34 @@ impl SessionArgs {
 
         Ok(ssk_path)
     }
+
+    fn load_or_create_key(&self) -> anyhow::Result<SecretKey> {
+        if let Some(key) = self.ecdsa_key {
+            return Ok(key);
+        }
+
+        if let Some(key_file) = &self.ecdsa_key_file {
+            return read_secret_key_file(key_file);
+        }
+
+        let rand_key = SecretKey::random();
+        println!("Your random ecdsa key is: {}", rand_key.to_string());
+        Ok(rand_key)
+    }
+}
+
+fn read_secret_key_file(path: &str) -> anyhow::Result<SecretKey> {
+    let path = expand_home(path)?;
+    let raw = std::fs::read_to_string(path)?;
+    let Some(key) = raw
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#'))
+    else {
+        anyhow::bail!("ECDSA key file is empty");
+    };
+    let key = key.strip_prefix("0x").unwrap_or(key);
+    SecretKey::from_str(key).map_err(|_| anyhow::anyhow!("ECDSA key file contains an invalid key"))
 }
 
 #[derive(Subcommand, Debug)]

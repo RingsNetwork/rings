@@ -1,13 +1,480 @@
 @media (max-width: 860px) {
-  main {
-    padding: 14px;
-  }
-
-  .shell {
+  .workflow-grid,
+  .proof-grid {
     grid-template-columns: 1fr;
   }
 
-  .grid {
+  .topology-hud {
     grid-template-columns: 1fr;
+    gap: 8px;
+    align-items: stretch;
+  }
+
+  .node-control-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .node-control-group:nth-child(odd) {
+    border-left: 0;
+    padding-left: 0;
+  }
+
+  .workspace {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(190px, 0.82fr) auto minmax(0, 1fr);
+    grid-template-areas:
+      "network"
+      "tabs"
+      "body";
+  }
+
+  .identity-group .account-details {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .setup-grid {
+    grid-template-columns: 1fr;
+    grid-template-rows: none;
+    align-items: start;
+  }
+}
+
+@media (max-width: 720px) {
+  .app-shell {
+    padding: 8px;
+    gap: 6px;
+  }
+
+  .app-header {
+    align-items: center;
+    padding: 6px 8px;
+  }
+
+  .node-band,
+  .network-stage {
+    padding: 8px;
+  }
+
+  .topology-stage {
+    position: relative;
+    grid-template-rows: minmax(0, 1fr) auto auto;
+    gap: 8px;
+  }
+
+  .topology-layout {
+    order: 1;
+  }
+
+  .topology-hud {
+    order: 2;
+  }
+
+  .node-status-line {
+    order: 3;
+  }
+
+  .stage-top {
+    align-items: center;
+    flex-direction: row;
+  }
+
+  .identity-group .account-details {
+    display: none;
+  }
+
+  .workspace-tabs {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .workspace-tab {
+    width: 100%;
+  }
+
+  .topology {
+    min-height: 0;
+  }
+
+  .topology-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
+    gap: 6px;
+    min-height: 0;
+  }
+
+  .topology-stage .topology-wrap {
+    height: auto;
+  }
+
+  .topology-hud {
+    gap: 6px;
+  }
+
+  .topology-hud .section-heading {
+    display: none;
+  }
+
+  .mobile-telemetry-strip {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 0;
+    padding-top: 6px;
+    border-top: 1px solid rgba(0, 229, 255, 0.12);
+  }
+
+  .mobile-telemetry-strip .metric:first-child {
+    border-left: 0;
+    padding-left: 0;
+  }
+
+  .control-sidebar {
+    position: relative;
+    z-index: 2;
+    width: 100%;
+    min-height: 0;
+    padding: 4px;
+    border-color: rgba(0, 229, 255, 0.16);
+    background:
+      linear-gradient(90deg, rgba(0, 229, 255, 0.1), rgba(84, 255, 208, 0.05)),
+      rgba(3, 8, 12, 0.9);
+    box-shadow: inset 0 0 18px rgba(0, 229, 255, 0.04);
+  }
+
+  .control-sidebar.collapsed {
+    width: 100%;
+    height: 38px;
+    padding: 0;
+  }
+
+  .control-sidebar:not(.collapsed) .sidebar-toggle {
+    display: none;
+  }
+
+  .control-sidebar.collapsed .sidebar-toggle {
+    position: static;
+    width: 100%;
+    height: 38px;
+    grid-template-columns: auto auto;
+    grid-template-rows: minmax(0, 1fr);
+    justify-content: center;
+    gap: 8px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: 5px;
+  }
+
+  .control-sidebar.collapsed .sidebar-toggle-label {
+    writing-mode: horizontal-tb;
+    text-orientation: mixed;
+  }
+
+  .modal-shell {
+    place-items: stretch;
+    padding: 0;
+    overflow: hidden;
+  }
+
+  .dialog-backdrop {
+    display: none;
+  }
+
+  .link-dialog,
+  .setup-dialog,
+  .workbench-dialog {
+    width: 100dvw;
+    height: 100dvh;
+    padding: 10px;
+    border: 0;
+    border-radius: 0;
+    box-shadow: inset 0 0 34px rgba(0, 229, 255, 0.06);
+  }
+
+  .dialog-header {
+    display: grid;
+    min-height: 42px;
+    grid-template-columns: 36px minmax(0, 1fr);
+    gap: 8px;
+    align-items: center;
+    padding: 0 0 8px;
+    border-bottom: 1px solid rgba(0, 229, 255, 0.16);
+  }
+
+  .dialog-header > div {
+    min-width: 0;
+    grid-column: 2;
+  }
+
+  .dialog-header .eyebrow {
+    display: none;
+  }
+
+  .dialog-header h2 {
+    margin: 0;
+    font-size: 0.95rem;
+    line-height: 1.1;
+  }
+
+  .dialog-close {
+    grid-column: 1;
+    grid-row: 1;
+    width: 34px;
+    min-width: 34px;
+    min-height: 34px;
+    padding: 0;
+    font-size: 0;
+    line-height: 1;
+  }
+
+  .dialog-close::before {
+    content: "<";
+    color: var(--blue);
+    font-size: 1.05rem;
+    font-weight: 900;
+  }
+
+  .setup-dialog {
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    gap: 0;
+  }
+
+  .setup-dialog .dialog-body {
+    overflow: hidden;
+  }
+
+  .setup-pane {
+    border: 0;
+    border-radius: 0;
+    padding: 12px 0 0;
+    background: transparent;
+    overflow: auto;
+  }
+
+  .setup-grid {
+    display: flex;
+    min-height: 0;
+    flex-direction: column;
+    gap: 10px;
+    align-items: stretch;
+  }
+
+  .setup-grid .node-control-group {
+    width: 100%;
+    padding: 12px 0 0;
+    border-top: 1px solid rgba(0, 229, 255, 0.12);
+    border-left: 0;
+    overflow: visible;
+  }
+
+  .setup-grid .node-control-group:first-child {
+    border-top: 0;
+    padding-top: 0;
+  }
+
+  .setup-launch-section .tool-header {
+    display: none;
+  }
+
+  .setup-start-button {
+    display: none;
+  }
+
+  .setup-dialog .setup-identity .account-details {
+    display: none;
+  }
+
+  .setup-mobile-primary {
+    display: grid;
+    padding-top: 10px;
+    border-top: 1px solid rgba(0, 229, 255, 0.16);
+    background: linear-gradient(180deg, rgba(3, 8, 12, 0), rgba(3, 8, 12, 0.92) 42%);
+  }
+
+  .setup-mobile-start {
+    width: 100%;
+    min-height: 44px;
+  }
+
+  .sidebar-command-panel {
+    height: auto;
+    gap: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .command-panel-header,
+  .rail-telemetry {
+    display: none;
+  }
+
+  .command-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 4px;
+  }
+
+  .command-grid > * {
+    display: grid;
+    min-width: 0;
+  }
+
+  .command-grid .action-button,
+  .command-grid .link-open {
+    display: grid;
+    min-height: 46px;
+    place-items: center;
+    padding: 5px 2px 4px;
+    font-size: 0.9rem;
+    line-height: 1.05;
+  }
+
+  .command-grid .label-desktop {
+    display: none;
+  }
+
+  .command-grid .label-mobile {
+    display: inline-grid;
+    gap: 3px;
+    place-items: center;
+  }
+
+  .node-link-control {
+    top: 8px;
+    right: 8px;
+  }
+
+  .topology-add-button {
+    width: 38px;
+    height: 38px;
+    min-width: 38px;
+    min-height: 38px;
+    font-size: 1.22rem;
+  }
+}
+
+@media (max-width: 520px) {
+  h1 {
+    font-size: 1rem;
+  }
+
+  button {
+    white-space: normal;
+  }
+
+  .surface,
+  .tool-block {
+    padding: 8px;
+  }
+
+  .node-control-grid {
+    gap: 6px;
+  }
+
+  .workflow-grid,
+  .workbench-dialog .workflow-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .node-control-group {
+    gap: 5px;
+    padding: 6px;
+  }
+
+  .node-control-group:nth-child(odd) {
+    padding-left: 6px;
+  }
+
+  .advanced-settings {
+    display: none;
+  }
+
+  .status {
+    padding: 5px 7px;
+    font-size: 0.68rem;
+  }
+
+  .session-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .session-strip .local-did-metric {
+    grid-column: 1 / -1;
+  }
+
+  .session-strip .metric:nth-child(2),
+  .mobile-telemetry-strip .metric:nth-child(odd) {
+    border-left: 0;
+    padding-left: 0;
+  }
+
+  .mobile-telemetry-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .field span,
+  .eyebrow,
+  .metric span,
+  .identity-value span {
+    font-size: 0.58rem;
+  }
+
+  .modal-shell {
+    padding: 0;
+  }
+
+  .link-dialog,
+  .setup-dialog,
+  .workbench-dialog {
+    width: 100dvw;
+    height: 100dvh;
+    padding: 8px;
+  }
+
+  .setup-dialog {
+    grid-template-rows: auto minmax(0, 1fr) auto;
+  }
+
+  .setup-grid {
+    min-height: 0;
+    grid-auto-rows: max-content;
+    gap: 8px;
+  }
+
+  .setup-grid .node-control-group {
+    overflow: visible;
+  }
+
+  .dialog-header {
+    align-items: center;
+  }
+
+  .link-open {
+    width: 100%;
+  }
+
+  .header-tags {
+    display: none;
+  }
+
+  .workspace {
+    grid-template-rows: minmax(150px, 0.72fr) auto minmax(0, 1fr);
+  }
+
+  .tool-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .setup-identity .account-details {
+    display: none;
+  }
+
+  .segmented {
+    width: 100%;
+  }
+
+  .segment {
+    width: 50%;
   }
 }

@@ -14,5 +14,9 @@ mod wallet;
 
 /// Mount the Yew app.
 pub fn run() {
-    yew::Renderer::<app::App>::new().render();
+    if app::is_offscreen_document() {
+        yew::Renderer::<app::HeadlessNode>::new().render();
+    } else {
+        yew::Renderer::<app::App>::new().render();
+    }
 }

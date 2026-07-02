@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use futures::future::AbortHandle;
+use futures::future::Abortable;
 use js_sys::Array;
 use js_sys::Object;
 use js_sys::Reflect;
@@ -25,6 +27,14 @@ pub struct DemoNode {
     pub provider: Arc<Provider>,
     /// SNARK behaviour and task store.
     pub snark: SNARKBehaviour,
+    listen_abort: AbortHandle,
+}
+
+impl DemoNode {
+    /// Stop the background listen/stabilize loop started for this demo node.
+    pub fn stop(&self) {
+        self.listen_abort.abort();
+    }
 }
 
 /// Peer entry rendered in the topology panel.
@@ -49,6 +59,7 @@ pub struct NodeSettings {
 }
 
 /// Build a browser provider from a wallet-authorized session key.
+#[allow(clippy::arc_with_non_send_sync)]
 pub async fn build_node(
     wallet: &WalletAccount,
     settings: NodeSettings,
@@ -89,22 +100,30 @@ pub async fn build_node(
         .map_err(|error| format!("register snark protocol: {error}"))?;
 
     let listening = provider.clone();
+    let (listen_abort, listen_registration) = AbortHandle::new_pair();
     spawn_local(async move {
-        let _result = JsFuture::from(listening.listen()).await;
+        let listen = async move {
+            let _result = JsFuture::from(listening.listen()).await;
+        };
+        let _result = Abortable::new(listen, listen_registration).await;
     });
 
-    Ok(DemoNode { provider, snark })
+    Ok(DemoNode {
+        provider,
+        snark,
+        listen_abort,
+    })
 }
 
 /// Connect to a seed node through its HTTP JSON-RPC endpoint.
-pub async fn connect_http(provider: &Arc<Provider>, endpoint: String) -> Result<(), String> {
-    request(
+pub async fn connect_http(provider: &Arc<Provider>, endpoint: String) -> Result<String, String> {
+    let response = request(
         provider,
         "connectPeerViaHttp",
         obj(&[("url", endpoint.as_str())]),
     )
-    .await
-    .map(|_| ())
+    .await?;
+    get_string(&response, "did")
 }
 
 /// Create an SDP offer for a remote DID.
@@ -128,6 +147,30 @@ pub async fn accept_answer(provider: &Arc<Provider>, answer: String) -> Result<(
     )
     .await
     .map(|_| ())
+}
+
+/// Disconnect all currently known peers from a local provider.
+pub async fn disconnect_all(provider: &Arc<Provider>) -> Result<usize, String> {
+    let peers = list_peers(provider).await?;
+    let mut closed = 0;
+    let mut attempted = 0;
+    for peer in peers {
+        if peer.did == "unknown" {
+            continue;
+        }
+        attempted += 1;
+        if request(provider, "disconnect", obj(&[("did", peer.did.as_str())]))
+            .await
+            .is_ok()
+        {
+            closed += 1;
+        }
+    }
+    if attempted == closed {
+        Ok(closed)
+    } else {
+        Err(format!("closed {closed}/{attempted} peer links"))
+    }
 }
 
 /// Send a namespace-scoped payload to a remote DID.

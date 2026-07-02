@@ -1,0 +1,18 @@
+[watch]
+watch = [
+  "index.html",
+  "src",
+  "assets",
+  "Cargo.toml",
+  "Trunk.toml",
+  "scripts/package-extension.mjs",
+]
+ignore = [
+  "dist",
+  "dist-extension",
+]
+
+[[hooks]]
+stage = "post_build"
+command = "node"
+command_arguments = ["scripts/package-extension.mjs"]

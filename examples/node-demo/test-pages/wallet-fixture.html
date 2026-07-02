@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Rings Wallet Fixture</title>
+  </head>
+  <body>
+    <h1>Rings Wallet Fixture</h1>
+    <pre id="calls"></pre>
+    <script>
+      const calls = [];
+      const callsNode = document.getElementById("calls");
+
+      function record(call) {
+        calls.push(call);
+        callsNode.textContent = JSON.stringify(calls, null, 2);
+      }
+
+      const evmAccount = "0x1234567890abcdef1234567890abcdef12345678";
+      let metamaskConnected = false;
+      const metamaskProvider = {
+        async request(payload) {
+          record({ wallet: "metamask", payload });
+          if (payload.method === "eth_requestAccounts") {
+            metamaskConnected = true;
+            return [evmAccount];
+          }
+          if (payload.method === "eth_accounts") {
+            return metamaskConnected ? [evmAccount] : [];
+          }
+          if (payload.method === "personal_sign") {
+            return "0x00112233445566778899aabbccddeeff";
+          }
+          throw new Error(`unexpected MetaMask method: ${payload.method}`);
+        },
+      };
+
+      const phantomEvmProvider = {
+        async request(payload) {
+          record({ wallet: "phantom-evm", payload });
+          if (payload.method === "eth_accounts") {
+            return [];
+          }
+          if (payload.method === "eth_requestAccounts") {
+            throw new Error("Phantom request rejected");
+          }
+          throw new Error(`unexpected Phantom EVM method: ${payload.method}`);
+        },
+      };
+
+      const evmProviders = {
+        metamask: metamaskProvider,
+        phantom: phantomEvmProvider,
+      };
+      let nextEip191Wallet = "metamask";
+      let selectedEip191Provider = metamaskProvider;
+      window.__ringsFixtureChooseEip191Wallet = (wallet) => {
+        if (!evmProviders[wallet]) {
+          throw new Error(`unknown EIP-191 wallet fixture: ${wallet}`);
+        }
+        nextEip191Wallet = wallet;
+      };
+
+      window.ethereum = {
+        async request(payload) {
+          record({ wallet: "browser-selector", payload });
+          if (payload.method === "eth_requestAccounts") {
+            const provider = evmProviders[nextEip191Wallet];
+            const accounts = await provider.request(payload);
+            selectedEip191Provider = provider;
+            return accounts;
+          }
+          return selectedEip191Provider.request(payload);
+        },
+      };
+
+      const phantomPublicKey = {
+        toBase58() {
+          return "Bridge1111111111111111111111111111111111";
+        },
+      };
+
+      window.phantom = {
+        solana: {
+          isConnected: false,
+          publicKey: phantomPublicKey,
+          async connect() {
+            record({ wallet: "phantom", method: "connect" });
+            this.isConnected = true;
+            return { publicKey: phantomPublicKey };
+          },
+          async signMessage(message, display) {
+            record({
+              wallet: "phantom",
+              method: "signMessage",
+              display,
+              message: Array.from(message),
+            });
+            return {
+              publicKey: phantomPublicKey,
+              signature: new Uint8Array([
+                0, 1, 2, 3, 4, 5, 6, 7,
+                8, 9, 10, 11, 12, 13, 14, 15,
+              ]),
+            };
+          },
+        },
+      };
+    </script>
+  </body>
+</html>

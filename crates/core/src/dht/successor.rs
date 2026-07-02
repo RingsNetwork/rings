@@ -67,7 +67,7 @@ impl SuccessorSeq {
     }
 
     /// Returns the list of successors in a read lock.
-    pub fn successors(&self) -> Result<RwLockReadGuard<Vec<Did>>> {
+    pub fn successors(&self) -> Result<RwLockReadGuard<'_, Vec<Did>>> {
         self.successors
             .read()
             .map_err(|_| Error::FailedToReadSuccessors)
