@@ -12,12 +12,14 @@
   },
   "scripts": {
     "wasm_pack": "wasm-pack build crates/node --release --scope ringsnetwork -t web --no-default-features --features browser_default --features console_error_panic_hook",
-    "prepare": "npm run wasm_pack && rm -rf dist && mkdir -p dist && cp crates/node/pkg/rings_node* ./dist && cp index.ts ./dist && tsc ./dist/index.ts"
+    "prepare": "npm run wasm_pack && rm -rf dist && mkdir -p dist && cp crates/node/pkg/rings_node* ./dist && cp index.ts ./dist && tsc ./dist/index.ts",
+    "test:node-demo-extension-wallet": "node examples/node-demo/scripts/test-extension-wallet-bridge.mjs"
   },
   "dependencies": {
     "circomlib": "^2.0.5"
   },
   "devDependencies": {
+    "playwright": "1.61.1",
     "typescript": "^4.9.5"
   },
   "files": [

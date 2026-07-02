@@ -69,10 +69,14 @@ not require a centralized bridge website, but it does require the user to have a
 normal wallet-enabled page open as the active tab.
 
 To test the extension wallet bridge without MetaMask, Phantom, or a remote
-website, run the local fixture test after packaging the extension:
+website, install the repository JavaScript dependencies and run the local
+fixture test after packaging the extension:
 
 ```sh
-node scripts/test-extension-wallet-bridge.mjs
+cd ../..
+npm install --ignore-scripts --package-lock=false
+npx playwright install chromium
+npm run test:node-demo-extension-wallet
 ```
 
 The test opens `test-pages/wallet-fixture.html` from a local `127.0.0.1` server,
@@ -87,5 +91,8 @@ cargo fmt --check
 cargo check --target wasm32-unknown-unknown
 cargo test --release --target wasm32-unknown-unknown
 trunk build --release
-node scripts/test-extension-wallet-bridge.mjs
+cd ../..
+npm install --ignore-scripts --package-lock=false
+npx playwright install chromium
+npm run test:node-demo-extension-wallet
 ```
