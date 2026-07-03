@@ -14,11 +14,7 @@ Rings Node (The node service of Rings Network)
 
 Rings is a structured peer-to-peer network implementation using WebRTC, Chord algorithm, and full WebAssembly (WASM) support.
 
-For more details you can check our [Rings Whitepaper](https://raw.githubusercontent.com/RingsNetwork/whitepaper/master/rings.pdf).
-
-You can also visit [Rings Network's homepage](https://ringsnetwork.io) to get more project info.
-
-And you can get more document [here](https://rings.gitbook.io/).
+For protocol details, see the repository-owned [Rings Whitepaper](../../assets/paper/rings-whitepaper.pdf).
 
 ## Installation
 

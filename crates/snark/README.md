@@ -22,8 +22,6 @@ Rings SNARK is a SNARK proof system based on NOVA. It automates the process of t
 The following diagram illustrates the core logic of Rings SNARK. The top side represents the input from `circom`, including the compiled r1cs and wasm. The right side shows the circuit's input, including public and private input.
 
 
-![Snark workflow](https://raw.githubusercontent.com/RingsNetwork/asserts/main/imgs/snark.png)
-
 #### WASM Reader
 
 Rings SNARK includes a loader module for [Circom](https://github.com/iden3/circom) Witness Calculator (Wasm). It uses wasmer for reading wasm and transforms it into a Circuit compatible with Nova standards.

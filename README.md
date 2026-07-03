@@ -17,11 +17,7 @@ The Rings Network aimed at creating a fully decentralized network. It is built u
 Rings Network allows all traffic to bypass centralized infrastructures, achieving complete decentralization.
 
 
-For more details you can check our [Rings Whitepaper](https://raw.githubusercontent.com/RingsNetwork/whitepaper/master/rings.pdf).
-
-You can also visit [Rings Network's homepage](https://ringsnetwork.io) to get more project info.
-
-And you can get more document [here](https://rings.gitbook.io/).
+For protocol details, see the repository-owned [Rings Whitepaper](./assets/paper/rings-whitepaper.pdf).
 
 
 ## Features
@@ -117,17 +113,13 @@ In the browser a protocol can be a JS handler instead: `provider.on(namespace, i
 handler)`. See [`examples/relay`](./examples/relay) and
 [`crates/node/src/extension`](./crates/node/src/extension).
 
-## Resource
+## Resources
 
-| Resource                         | Link                                                                       | Status                                                                                                                                                                                    |
-|----------------------------------|----------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Rings Whitepaper                 | [Rings Whitepaper](https://github.com/RingsNetwork/whitepaper)             | [![rings-ext-v2](https://github.com/RingsNetwork/rings_ext_v2/actions/workflows/dev.yml/badge.svg)](https://github.com/RingsNetwork/rings_ext_v2/actions/workflows/dev.yml)               |
-| Rings Documentation              | [Rings Docs](https://rings.gitbook.io/)                                    |                                                                                                                                                                                           |
-| Rings                            | [Rings](./examples/frontend)                                               | Browser frontend replacing the historical browser example                                                                                                                                 |
-| Rings Browser Handshakes Example | [Rings Browser Handshakes](https://github.com/RingsNetwork/rings-wasm-p2p) | Historical Demo / PoC                                                                                                                                                                     |
-| Rings Browser Extension          | [Rings Browser Extension](https://github.com/RingsNetwork/rings_ext_v2)    | Beta                                                                                                                                                                                      |
-| Rings dWeb Demo                  | [Rings dWeb Demo](https://github.com/RingsNetwork/rings-dweb)              | [![rings-ext-v2](https://github.com/RingsNetwork/rings_dweb/actions/workflows/nextjs.yml/badge.svg?branch=page)](https://github.com/RingsNetwork/rings_dweb/actions/workflows/nextjs.yml) |
-| Rings zkProof Demo               | [Rings zkProof Demo](https://zkp.rings.rs)                                 | ![rings-snark-demo](https://github.com/RingsNetwork/rings-proof-demo/actions/workflows/nextjs.yml/badge.svg?branch=page)                                                                  |
+| Resource | Link | Notes |
+|---|---|---|
+| Rings Whitepaper | [Rings Whitepaper](./assets/paper/rings-whitepaper.pdf) | Repository-owned copy |
+| Browser frontend | [`examples/frontend`](./examples/frontend) | Web page and extension workflow |
+| Examples | [`examples/`](./examples) | Native, frontend, dweb, proof, relay, snark, and FFI examples |
 
 ## Components:
 
