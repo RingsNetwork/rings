@@ -49,7 +49,7 @@
 
 \author{Ryan~J.~Kung%
 \thanks{Ryan J. Kung can be reached at ryankung@ieee.org. Manuscript created February 8, 2023; last updated July 4, 2026.}}
-\title{Rings: A peer-to-peer network for the sovereign age}
+\title{Rings: An Algebraic Structured Peer-to-Peer Network for Decentralized Identity and Resource Ownership}
 \date{}
 \IEEEaftertitletext{%
 \vspace{0.5\baselineskip}%
@@ -57,14 +57,15 @@
 \parbox{0.90\textwidth}{%
 \centering\bfseries Abstract\\[0.5\baselineskip]%
 \normalfont
-Rings is a prospective peer-to-peer network specification for user-sovereign
-identity, transport, storage, and application protocols.  The project starts
-from a concrete failure mode in contemporary Internet systems: application
-servers, DNS names, relay services, and platform accounts often become the
-authority that identities and data must trust.  Rings instead models identity
-and resources as owned points in a CorrectChord overlay, with browser and native
-runtimes connected through WebRTC/WebAssembly adapters and cryptographic
-protocols kept on carriers separate from the routing identifier space.
+Rings is an implemented algebraic structured peer-to-peer network for
+decentralized identity, resource ownership, transport, storage, and application
+protocols.  The project starts from a concrete failure mode in contemporary
+Internet systems: application servers, DNS names, relay services, and platform
+accounts often become the authority that identities and data must trust.  Rings
+instead treats identities and resources as algebraic objects over a structured
+CorrectChord overlay, with browser and native runtimes connected through
+WebRTC/WebAssembly adapters and cryptographic protocols kept on carriers
+separate from the routing identifier space.
 The core object is
 \[
   \mathcal{Rings}=
@@ -106,15 +107,15 @@ establish a session, route to another identity or resource, and run application
 protocols without turning a single application server into the root of
 authority.
 
-Rings is not described here as a snapshot of one implementation.  This paper is
-a target model.  It states the ideal algebra, transition boundaries, and safety
-obligations that the implementation should converge toward.  The older
-intuition was that Decentralized Identifiers (DIDs) directly form a finite ring
-suitable for all routing and cryptographic operations.  The refined model is
-more precise: Chord identifiers form an additive circular carrier for placement,
-interval order, replica selection, and finger targets; threshold schemes,
-signatures, encryption, and zero-knowledge protocols use their own fields or
-groups.
+Rings is implemented as a network, but this paper is organized around the
+algebraic structure that makes the implementation coherent.  It states the
+ideal carrier, ownership, transition, and safety laws that the implementation
+realizes and continues to refine.  The older intuition was that Decentralized
+Identifiers (DIDs) directly form a finite ring suitable for all routing and
+cryptographic operations.  The refined model is more precise: Chord identifiers
+form an additive circular carrier for placement, interval order, replica
+selection, and finger targets; threshold schemes, signatures, encryption, and
+zero-knowledge protocols use their own fields or groups.
 
 The resulting design has three practical consequences.  First, DIDs and virtual
 DIDs (VIDs) share the same 160-bit placement surface, so identities, mailboxes,
@@ -135,8 +136,8 @@ does not by itself give Rings the circular ownership law needed for successor
 lists, replicated ownership, and interval-based placement.  Relay networks and
 mixnets improve metadata resistance, but they are not structured P2P ownership
 systems.  Blockchains provide global ordering, but embedding consensus in every
-message or storage operation would turn Rings into a ledger rather than a
-general peer-to-peer substrate.
+message or storage operation would turn Rings into a ledger rather than an
+algebraic structured peer-to-peer substrate.
 
 The problem is therefore to specify a network object
 \[
@@ -149,21 +150,22 @@ that simultaneously supports:
 \item browser-native and native transport surfaces;
 \item application protocols with typed side effects;
 \item cryptographic protocols over correct carriers;
-\item bounded formal obligations for routing and state repair.
+\item bounded algebraic and operational obligations for routing and state repair.
 \end{enumerate}
 
-This paper makes the following contributions.  It models the Rings identifier
-space as the additive cyclic group \(R=\mathbb{Z}/2^{160}\mathbb{Z}\), not as a
-general finite field.  It lifts resource placement into \(\mathbf{Set}/R\), so
-each protocol object carries an explicit map into the overlay.  It uses
-CorrectChord as the maintenance law before introducing Rings-specific
-replication, storage, mailbox, relay, and ranking semantics.  It gives a writer
-effect monad for DHT transitions and a TLA-style state relation for model
-checking and trace replay.  These mathematical artifacts are the dry core of
-the paper; the surrounding text explains why those artifacts exist and how they
-relate to prior systems.
+This paper makes the following contributions.  It presents Rings as an
+algebraic structured peer-to-peer network, not merely as an overlay lookup
+routine.  It models the Rings identifier space as the additive cyclic group
+\(R=\mathbb{Z}/2^{160}\mathbb{Z}\), not as a general finite field.  It lifts
+resource placement into \(\mathbf{Set}/R\), so each protocol object carries an
+explicit map into the overlay.  It uses CorrectChord as the maintenance law
+before introducing Rings-specific replication, storage, mailbox, relay, and
+ranking semantics.  It gives a writer effect monad for DHT transitions and a
+TLA-style state relation for model checking and trace replay.  These algebraic
+and operational artifacts are the core of the paper; the surrounding text
+explains why those artifacts exist and how they relate to prior systems.
 
-\section{Formal Model}
+\section{Algebraic System Model}
 
 \begin{assumption}[System scope]
 \[
@@ -1267,6 +1269,11 @@ Rings
 \end{table}
 
 \section{Conclusion}
+
+Rings is an algebraic structured peer-to-peer network: structured because
+ownership, routing, replication, and repair are defined over CorrectChord's
+circular overlay, and algebraic because each layer preserves an explicit carrier
+or morphism rather than hiding semantics inside ad hoc network procedures.
 
 \[
   \mathcal{Rings}=
