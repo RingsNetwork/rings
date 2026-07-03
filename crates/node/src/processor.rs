@@ -580,13 +580,35 @@ impl Processor {
         ))
     }
 
+    async fn publish_online_node_descriptor_for_heartbeat(&self) {
+        if let Err(error) = self.publish_online_node_descriptor().await {
+            tracing::warn!("Failed to publish online node descriptor: {error:?}");
+        }
+    }
+
+    #[cfg(not(feature = "browser"))]
     async fn online_node_heartbeat_daemon(&self) {
         loop {
-            if let Err(error) = self.publish_online_node_descriptor().await {
-                tracing::warn!("Failed to publish online node descriptor: {error:?}");
-            }
+            self.publish_online_node_descriptor_for_heartbeat().await;
             futures_timer::Delay::new(self.online_node_heartbeat_interval).await;
         }
+    }
+
+    #[cfg(feature = "browser")]
+    async fn online_node_heartbeat_daemon(&self) {
+        self.publish_online_node_descriptor_for_heartbeat().await;
+
+        let interval_ms =
+            i32::try_from(self.online_node_heartbeat_interval.as_millis()).unwrap_or(i32::MAX);
+        let processor = self.clone();
+        rings_core::utils::js_utils::spawn_interval(interval_ms, move || {
+            let processor = processor.clone();
+            async move {
+                processor
+                    .publish_online_node_descriptor_for_heartbeat()
+                    .await;
+            }
+        });
     }
 
     /// Run stabilization daemon
