@@ -1,7 +1,6 @@
-\documentclass[twocolumn]{article}
+\documentclass[journal,onecolumn]{IEEEtran}
 \usepackage{color}
 \usepackage{cite}
-\usepackage{draftwatermark}
 \usepackage{multirow}
 \usepackage{listings}
 \usepackage{float}
@@ -20,7 +19,6 @@
 \usepackage{tikz}
 \usepackage{algorithm}
 \usepackage[noend]{algpseudocode}
-\usepackage{abstract}
 
 \newtheorem{definition}{Definition}
 \newtheorem{constraint}{Constraint}
@@ -29,14 +27,7 @@
 \newtheorem{invariant}{Invariant}
 \newtheorem{obligation}{Obligation}
 
-\date{Created: February 8, 2023\\Source: RingsNetwork/whitepaper repository\\Timestamp: 2023-02-08T13:27:55Z\\Last updated: July 4, 2026}
 \usetikzlibrary{shapes,arrows,positioning,patterns,through}
-\SetWatermarkText{Preview}
-\SetWatermarkScale{1}
-\setlength\parskip{.5\baselineskip}
-
-\definecolor{pagecolor}{rgb}{1,0.98,0.9}
-\pagecolor{pagecolor}
 
 \tikzset{
   dot node/.style={
@@ -57,16 +48,14 @@
   }
 }
 
-\author{
-  Ryan J. Kung \\ ryankung@ieee.org \\
-}
+\author{Ryan~J.~Kung%
+\thanks{Ryan J. Kung can be reached at ryankung@ieee.org. Manuscript created February 8, 2023; last updated July 4, 2026.}}
 \title{Rings: A peer-to-peer network for the sovereign age}
+\date{}
 
 \begin{document}
-\twocolumn[
-  \begin{@twocolumnfalse}
-    \maketitle
-    \begin{abstract}
+\maketitle
+\begin{abstract}
       Rings is the specification
       \[
         \mathcal{Rings}=
@@ -92,8 +81,6 @@
   ~\\
   ~\\
 \end{abstract}
-\end{@twocolumnfalse}
-]
 
 \section{Formal Model}
 
@@ -1185,6 +1172,6 @@ Y_\nu&=&\mathsf{T}^{\mathcal{E}_\nu}_{A_\nu}(S_\nu\times O_\nu),\\
 \end{array}
 \]
 
-\bibliographystyle{unsrt}
+\bibliographystyle{IEEEtran}
 \bibliography{./cites}
 \end{document}
