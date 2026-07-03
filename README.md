@@ -17,7 +17,7 @@ The Rings Network aimed at creating a fully decentralized network. It is built u
 Rings Network allows all traffic to bypass centralized infrastructures, achieving complete decentralization.
 
 
-For protocol details, see the repository-owned [Rings Whitepaper](./assets/paper/rings-whitepaper.pdf).
+For protocol details, see the repository-owned [Rings Whitepaper](./papers/rings.pdf).
 
 
 ## Features
@@ -117,7 +117,7 @@ handler)`. See [`examples/relay`](./examples/relay) and
 
 | Resource | Link | Notes |
 |---|---|---|
-| Rings Whitepaper | [Rings Whitepaper](./assets/paper/rings-whitepaper.pdf) | Repository-owned copy |
+| Rings Whitepaper | [PDF](./papers/rings.pdf), [LaTeX source](./papers/rings.tex) | Repository-owned copy |
 | Browser frontend | [`examples/frontend`](./examples/frontend) | Web page and extension workflow |
 | Examples | [`examples/`](./examples) | Native, frontend, dweb, proof, relay, snark, and FFI examples |
 
