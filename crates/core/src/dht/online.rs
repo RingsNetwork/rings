@@ -70,8 +70,23 @@ impl OnlineNodeDescriptorBody {
         Ok(())
     }
 
+    fn body_ref(&self) -> OnlineNodeDescriptorBodyRef<'_> {
+        OnlineNodeDescriptorBodyRef {
+            did: self.did,
+            public_key: &self.public_key,
+            node_type: &self.node_type,
+            network_id: self.network_id,
+            capabilities: &self.capabilities,
+            endpoint_hint: &self.endpoint_hint,
+            started_at_ms: self.started_at_ms,
+            heartbeat_at_ms: self.heartbeat_at_ms,
+            expires_at_ms: self.expires_at_ms,
+            version: self.version.as_str(),
+        }
+    }
+
     fn signing_data(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self).map_err(Error::BincodeSerialize)
+        self.body_ref().signing_data()
     }
 }
 
@@ -86,7 +101,7 @@ struct OnlineNodeDescriptorBodyRef<'a> {
     started_at_ms: u128,
     heartbeat_at_ms: u128,
     expires_at_ms: u128,
-    version: &'a String,
+    version: &'a str,
 }
 
 impl OnlineNodeDescriptorBodyRef<'_> {
@@ -167,7 +182,7 @@ impl OnlineNodeDescriptor {
             started_at_ms: *started_at_ms,
             heartbeat_at_ms: *heartbeat_at_ms,
             expires_at_ms: *expires_at_ms,
-            version,
+            version: version.as_str(),
         }
     }
 

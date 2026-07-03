@@ -936,6 +936,9 @@ mod test {
     use crate::provider::Provider;
     use crate::tests::native::prepare_processor;
 
+    // Native WebRTC tests share process-global ICE/UDP resources and timing-sensitive
+    // connection callbacks; run them serially so one test's candidates or callbacks
+    // cannot add pressure to another test's handshake.
     static NETWORK_TEST_LOCK: OnceLock<AsyncTestMutex<()>> = OnceLock::new();
 
     #[test]
