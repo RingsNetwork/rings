@@ -98,13 +98,12 @@ impl NodeBackend {
             }
             Self::Local(node) => {
                 let seed_did = node::connect_http(&node.provider, endpoint).await?;
+                let required_peer = PeerView::connected(seed_did)
+                    .ok_or_else(|| "seed returned an empty DID".to_string())?;
                 Ok(PeerUpdate::Local {
                     node,
                     context: "HTTP endpoint connected",
-                    required_peer: Some(PeerView {
-                        did: seed_did,
-                        state: "Connected".to_string(),
-                    }),
+                    required_peer: Some(required_peer),
                 })
             }
         }

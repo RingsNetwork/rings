@@ -41,9 +41,9 @@ impl DemoNode {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PeerView {
     /// Peer DID.
-    pub did: String,
+    did: String,
     /// Transport state reported by `listPeers`.
-    pub state: String,
+    state: String,
 }
 
 impl PeerView {
@@ -53,6 +53,26 @@ impl PeerView {
             return None;
         }
         Some(Self { did, state })
+    }
+
+    /// Build a connected peer row from an RPC-returned DID.
+    pub fn connected(did: String) -> Option<Self> {
+        Self::from_fields(did, "Connected".to_string())
+    }
+
+    /// Peer DID.
+    pub fn did(&self) -> &str {
+        &self.did
+    }
+
+    /// Transport state reported by `listPeers`.
+    pub fn state(&self) -> &str {
+        &self.state
+    }
+
+    /// True when this row can be used as a peer operation target.
+    pub fn is_addressable(&self) -> bool {
+        !self.did.trim().is_empty()
     }
 }
 
@@ -170,7 +190,7 @@ pub async fn disconnect_all(provider: &Arc<Provider>) -> Result<usize, String> {
     let mut attempted = 0;
     for peer in peers {
         attempted += 1;
-        if request(provider, "disconnect", obj(&[("did", peer.did.as_str())]))
+        if request(provider, "disconnect", obj(&[("did", peer.did())]))
             .await
             .is_ok()
         {

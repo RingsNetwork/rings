@@ -90,7 +90,7 @@ fn topology_component(props: &TopologyProps) -> Html {
                 let flow_class = format!("data-flow finger-flow {tone}");
                 let flow_delay = format!(
                     "animation-delay: -{}ms;",
-                    (edge.source() * 311 + edge.exponent * 17) % 3600
+                    (edge.source() * 311 + edge.target() * 43 + edge.exponent * 17) % 3600
                 );
                 let path = finger_curve_path(center_x, center_y, edge.exponent, source.angle, target.angle);
                 Some(html! {
@@ -228,6 +228,10 @@ impl InferredFinger {
         self.edge.source
     }
 
+    fn target(&self) -> usize {
+        self.edge.target
+    }
+
     fn endpoints<'a>(&self, nodes: &'a [ChordNode]) -> Option<(&'a ChordNode, &'a ChordNode)> {
         self.edge.endpoints(nodes)
     }
@@ -245,13 +249,13 @@ fn chord_nodes(did: &str, peers: &[PeerView]) -> Vec<ChordNode> {
         });
     }
     for peer in peers {
-        if nodes.iter().any(|node| node.did == peer.did) {
+        if nodes.iter().any(|node| node.did == peer.did()) {
             continue;
         }
-        if let Some(id) = did_identifier(&peer.did) {
+        if let Some(id) = did_identifier(peer.did()) {
             nodes.push(ChordNode {
-                did: peer.did.clone(),
-                state: peer.state.clone(),
+                did: peer.did().to_string(),
+                state: peer.state().to_string(),
                 angle: chord_angle(&id),
                 id,
                 is_local: false,
@@ -619,13 +623,6 @@ pub(crate) fn short_did(did: &str) -> String {
 mod tests {
     use super::*;
 
-    fn peer(did: &str) -> PeerView {
-        PeerView {
-            did: did.to_string(),
-            state: "Connected".to_string(),
-        }
-    }
-
     fn did_with_high_byte(value: u8) -> String {
         format!("0x{value:02x}{}", "00".repeat(CHORD_ID_BYTES - 1))
     }
@@ -680,7 +677,11 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn local_context_uses_sorted_ring_neighbors() {
-        let nodes = chord_nodes("0x20", &[peer("0x10"), peer("0x30")]);
+        let peers = ["0x10", "0x30"]
+            .into_iter()
+            .filter_map(|did| PeerView::connected(did.to_string()))
+            .collect::<Vec<_>>();
+        let nodes = chord_nodes("0x20", &peers);
 
         assert_eq!(
             local_chord_context(&nodes),
@@ -691,7 +692,11 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn local_context_wraps_for_first_ring_node() {
-        let nodes = chord_nodes("0x01", &[peer("0x20"), peer("0x30")]);
+        let peers = ["0x20", "0x30"]
+            .into_iter()
+            .filter_map(|did| PeerView::connected(did.to_string()))
+            .collect::<Vec<_>>();
+        let nodes = chord_nodes("0x01", &peers);
 
         assert_eq!(
             local_chord_context(&nodes),
@@ -719,7 +724,7 @@ mod tests {
     fn inferred_finger_links_have_bounded_non_self_targets() {
         let local = did_with_high_byte(0);
         let peers = (1u8..8)
-            .map(|index| peer(&did_with_high_byte(index * 32)))
+            .filter_map(|index| PeerView::connected(did_with_high_byte(index * 32)))
             .collect::<Vec<_>>();
         let nodes = chord_nodes(&local, &peers);
         let links = inferred_finger_links(&nodes);
@@ -727,7 +732,7 @@ mod tests {
         assert!(!links.is_empty());
         assert!(links
             .iter()
-            .all(|link| link.source() < nodes.len() && link.edge.target < nodes.len()));
-        assert!(links.iter().all(|link| link.source() != link.edge.target));
+            .all(|link| link.source() < nodes.len() && link.target() < nodes.len()));
+        assert!(links.iter().all(|link| link.source() != link.target()));
     }
 }

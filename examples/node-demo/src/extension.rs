@@ -86,6 +86,12 @@ struct HeadlessNodeState {
     starting: bool,
     start_error: Option<String>,
     message: String,
+    generation: u64,
+}
+
+struct HeadlessDemoNode {
+    node: DemoNode,
+    generation: u64,
 }
 
 /// Return true when this wasm bundle is mounted inside the MV3 offscreen page.
@@ -106,6 +112,7 @@ pub fn headless_node() -> Html {
         starting: false,
         start_error: None,
         message: "background node offline".to_string(),
+        generation: 0,
     });
 
     {
@@ -185,7 +192,14 @@ async fn handle_headless_node_message(
 ) -> Result<JsValue, String> {
     match message_type.as_str() {
         EXTENSION_NODE_STATUS => {
-            headless_node_snapshot(state, "background node active".to_string(), None, false).await
+            headless_node_snapshot(
+                state,
+                "background node active".to_string(),
+                None,
+                false,
+                None,
+            )
+            .await
         }
         EXTENSION_NODE_START => start_headless_node(state, &message).await,
         EXTENSION_NODE_STOP => stop_headless_node(state).await,
@@ -207,12 +221,19 @@ async fn start_headless_node(
             "background node already active".to_string(),
             None,
             false,
+            None,
         )
         .await;
     }
     if state.borrow().starting {
-        return headless_node_snapshot(state, "background node starting".to_string(), None, false)
-            .await;
+        return headless_node_snapshot(
+            state,
+            "background node starting".to_string(),
+            None,
+            false,
+            None,
+        )
+        .await;
     }
 
     let settings_value = js_prop(message, "settings")?;
@@ -220,33 +241,48 @@ async fn start_headless_node(
         .map(|value| WalletKind::from_value(&value))
         .unwrap_or(WalletKind::WebCrypto);
     let settings = extension_start_settings_from_js(&settings_value);
-    set_headless_starting(
-        &state,
-        format!("connecting {}", wallet_kind.label()),
-        None,
-        true,
-    );
+    let generation = begin_headless_start(&state, format!("connecting {}", wallet_kind.label()));
     wasm_bindgen_futures::spawn_local(run_headless_node_start(
         state.clone(),
+        generation,
         wallet_kind,
         settings,
     ));
-    headless_node_snapshot(state, "background node starting".to_string(), None, false).await
+    headless_node_snapshot(
+        state,
+        "background node starting".to_string(),
+        None,
+        false,
+        Some(generation),
+    )
+    .await
 }
 
 async fn run_headless_node_start(
     state: Rc<RefCell<HeadlessNodeState>>,
+    generation: u64,
     wallet_kind: WalletKind,
     settings: ExtensionStartSettings,
 ) {
-    match start_headless_node_inner(state.clone(), wallet_kind, settings).await {
-        Ok(message) => set_headless_starting(&state, message, None, false),
-        Err(error) => set_headless_starting(&state, error.clone(), Some(error), false),
+    match start_headless_node_inner(state.clone(), generation, wallet_kind, settings).await {
+        Ok(message) => {
+            set_headless_starting_for_generation(&state, generation, message, None, false);
+        }
+        Err(error) => {
+            set_headless_starting_for_generation(
+                &state,
+                generation,
+                error.clone(),
+                Some(error),
+                false,
+            );
+        }
     }
 }
 
 async fn start_headless_node_inner(
     state: Rc<RefCell<HeadlessNodeState>>,
+    generation: u64,
     wallet_kind: WalletKind,
     settings: ExtensionStartSettings,
 ) -> Result<String, String> {
@@ -262,28 +298,59 @@ async fn start_headless_node_inner(
         wallet::connect(wallet_kind),
     )
     .await?;
-    set_headless_starting(&state, "authorizing session key".to_string(), None, true);
+    if !headless_generation_current(&state, generation) {
+        return Ok("background node start cancelled".to_string());
+    }
+    set_headless_starting_for_generation(
+        &state,
+        generation,
+        "authorizing session key".to_string(),
+        None,
+        true,
+    );
     let built = operation_timeout(
         "session authorization",
         SESSION_AUTH_TIMEOUT,
         node::build_node(&account, node_settings),
     )
     .await?;
-    set_headless_starting(&state, "registering node protocols".to_string(), None, true);
+    if !headless_generation_current(&state, generation) {
+        built.stop();
+        return Ok("background node start cancelled".to_string());
+    }
+    set_headless_starting_for_generation(
+        &state,
+        generation,
+        "registering node protocols".to_string(),
+        None,
+        true,
+    );
     let my_did = built.provider.address();
     let site = Rc::new(RefCell::new(dweb::default_site()));
     site.borrow_mut().insert(
         "/".to_string(),
         format!("<h1>Rings node {my_did}</h1><p>Served by the extension background node.</p>"),
     );
-    dweb::register(
+    if let Err(error) = dweb::register(
         &built.provider,
         site,
         Callback::from(|_: dweb::DwebResponse| {}),
-    )?;
+    ) {
+        built.stop();
+        return Err(error);
+    }
     let on_custom = Callback::from(|_: custom::CustomEvent| {});
     for namespace in custom::DEMO_NAMESPACES {
-        custom::register(&built.provider, namespace.to_string(), on_custom.clone())?;
+        if let Err(error) =
+            custom::register(&built.provider, namespace.to_string(), on_custom.clone())
+        {
+            built.stop();
+            return Err(error);
+        }
+    }
+    if !headless_generation_current(&state, generation) {
+        built.stop();
+        return Ok("background node start cancelled".to_string());
     }
 
     {
@@ -298,23 +365,23 @@ async fn start_headless_node_inner(
         return Ok("background node ready".to_string());
     }
 
-    set_headless_starting(
+    set_headless_starting_for_generation(
         &state,
+        generation,
         format!("background node ready; connecting seed {seed_url}"),
         None,
         true,
     );
     match node::connect_http(&built.provider, seed_url).await {
         Ok(seed_did) => {
-            let seed_peer = PeerView {
-                did: seed_did,
-                state: "Connected".to_string(),
-            };
+            let seed_peer = PeerView::connected(seed_did)
+                .ok_or_else(|| "seed returned an empty DID".to_string())?;
             let snapshot = headless_node_snapshot(
                 state.clone(),
                 "seed URL connected".to_string(),
                 Some(seed_peer),
                 true,
+                Some(generation),
             )
             .await?;
             Ok(js_string_field(&snapshot, "message")
@@ -327,25 +394,21 @@ async fn start_headless_node_inner(
 }
 
 async fn stop_headless_node(state: Rc<RefCell<HeadlessNodeState>>) -> Result<JsValue, String> {
-    let node = {
+    let (node, stop_generation) = {
         let mut state = state.borrow_mut();
+        state.generation = state.generation.wrapping_add(1);
         state.wallet_account = None;
         state.peers = Vec::new();
         state.starting = false;
         state.start_error = None;
         state.message = "stopping background node".to_string();
-        state.node.take()
+        let node = state.node.take();
+        (node, state.generation)
     };
     let Some(node) = node else {
-        return headless_snapshot_js(
-            false,
-            String::new(),
-            &[],
-            None,
-            "background node already offline".to_string(),
-            false,
-            None,
-        );
+        let message = "background node already offline".to_string();
+        state.borrow_mut().message = message.clone();
+        return headless_snapshot_js(false, String::new(), &[], None, message, false, None);
     };
 
     let provider = node.provider.clone();
@@ -361,7 +424,12 @@ async fn stop_headless_node(state: Rc<RefCell<HeadlessNodeState>>) -> Result<JsV
         _ = timeout => "background node stopped; peer cleanup timed out".to_string(),
     };
     node.stop();
-    state.borrow_mut().message = message.clone();
+    {
+        let mut state = state.borrow_mut();
+        if state.generation == stop_generation {
+            state.message = message.clone();
+        }
+    }
     headless_snapshot_js(false, String::new(), &[], None, message, false, None)
 }
 
@@ -369,21 +437,20 @@ async fn connect_headless_node_http(
     state: Rc<RefCell<HeadlessNodeState>>,
     message: &JsValue,
 ) -> Result<JsValue, String> {
-    let node = headless_demo_node(&state)?;
+    let handle = headless_demo_node(&state)?;
     let endpoint = js_string_field(message, "endpoint")?.trim().to_string();
     if endpoint.is_empty() {
         return Err("enter a seed HTTP endpoint".to_string());
     }
-    let seed_did = node::connect_http(&node.provider, endpoint).await?;
-    let seed_peer = PeerView {
-        did: seed_did,
-        state: "Connected".to_string(),
-    };
+    let seed_did = node::connect_http(&handle.node.provider, endpoint).await?;
+    let seed_peer =
+        PeerView::connected(seed_did).ok_or_else(|| "seed returned an empty DID".to_string())?;
     headless_node_snapshot(
         state,
         "HTTP endpoint connected".to_string(),
         Some(seed_peer),
         true,
+        Some(handle.generation),
     )
     .await
 }
@@ -392,12 +459,13 @@ async fn create_headless_offer(
     state: Rc<RefCell<HeadlessNodeState>>,
     message: &JsValue,
 ) -> Result<JsValue, String> {
-    let node = headless_demo_node(&state)?;
+    let handle = headless_demo_node(&state)?;
     let remote_did = js_string_field(message, "did")?.trim().to_string();
     if remote_did.is_empty() {
         return Err("enter a remote DID".to_string());
     }
-    let offer = node::create_offer(&node.provider, remote_did).await?;
+    let offer = node::create_offer(&handle.node.provider, remote_did).await?;
+    ensure_headless_generation_current(&state, handle.generation)?;
     let result = Object::new();
     js_set(&result, "offer", &JsValue::from_str(&offer))?;
     js_set(&result, "message", &JsValue::from_str("offer created"))?;
@@ -408,12 +476,13 @@ async fn answer_headless_offer(
     state: Rc<RefCell<HeadlessNodeState>>,
     message: &JsValue,
 ) -> Result<JsValue, String> {
-    let node = headless_demo_node(&state)?;
+    let handle = headless_demo_node(&state)?;
     let offer = js_string_field(message, "offer")?.trim().to_string();
     if offer.is_empty() {
         return Err("paste an offer first".to_string());
     }
-    let answer = node::answer_offer(&node.provider, offer).await?;
+    let answer = node::answer_offer(&handle.node.provider, offer).await?;
+    ensure_headless_generation_current(&state, handle.generation)?;
     let result = Object::new();
     js_set(&result, "answer", &JsValue::from_str(&answer))?;
     js_set(&result, "message", &JsValue::from_str("answer created"))?;
@@ -424,33 +493,73 @@ async fn accept_headless_answer(
     state: Rc<RefCell<HeadlessNodeState>>,
     message: &JsValue,
 ) -> Result<JsValue, String> {
-    let node = headless_demo_node(&state)?;
+    let handle = headless_demo_node(&state)?;
     let answer = js_string_field(message, "answer")?.trim().to_string();
     if answer.is_empty() {
         return Err("paste an answer first".to_string());
     }
-    node::accept_answer(&node.provider, answer).await?;
-    headless_node_snapshot(state, "answer accepted".to_string(), None, true).await
+    node::accept_answer(&handle.node.provider, answer).await?;
+    headless_node_snapshot(
+        state,
+        "answer accepted".to_string(),
+        None,
+        true,
+        Some(handle.generation),
+    )
+    .await
 }
 
-fn headless_demo_node(state: &Rc<RefCell<HeadlessNodeState>>) -> Result<DemoNode, String> {
-    state
-        .borrow()
-        .node
-        .clone()
-        .ok_or_else(|| "start the node first".to_string())
+fn headless_demo_node(state: &Rc<RefCell<HeadlessNodeState>>) -> Result<HeadlessDemoNode, String> {
+    let state = state.borrow();
+    Ok(HeadlessDemoNode {
+        node: state
+            .node
+            .clone()
+            .ok_or_else(|| "start the node first".to_string())?,
+        generation: state.generation,
+    })
 }
 
-fn set_headless_starting(
+fn begin_headless_start(state: &Rc<RefCell<HeadlessNodeState>>, message: String) -> u64 {
+    let mut state = state.borrow_mut();
+    state.generation = state.generation.wrapping_add(1);
+    state.starting = true;
+    state.start_error = None;
+    state.message = message;
+    state.peers = Vec::new();
+    state.generation
+}
+
+fn set_headless_starting_for_generation(
     state: &Rc<RefCell<HeadlessNodeState>>,
+    generation: u64,
     message: String,
     error: Option<String>,
     starting: bool,
-) {
+) -> bool {
     let mut state = state.borrow_mut();
+    if state.generation != generation {
+        return false;
+    }
     state.starting = starting;
     state.start_error = error;
     state.message = message;
+    true
+}
+
+fn headless_generation_current(state: &Rc<RefCell<HeadlessNodeState>>, generation: u64) -> bool {
+    state.borrow().generation == generation
+}
+
+fn ensure_headless_generation_current(
+    state: &Rc<RefCell<HeadlessNodeState>>,
+    generation: u64,
+) -> Result<(), String> {
+    if headless_generation_current(state, generation) {
+        Ok(())
+    } else {
+        Err("node operation cancelled".to_string())
+    }
 }
 
 pub(crate) async fn operation_timeout<T, F>(
@@ -475,8 +584,9 @@ async fn headless_node_snapshot(
     context: String,
     required_peer: Option<PeerView>,
     settle: bool,
+    expected_generation: Option<u64>,
 ) -> Result<JsValue, String> {
-    let (node, account, state_peers, starting, start_error, state_message) = {
+    let (node, account, state_peers, starting, start_error, state_message, generation) = {
         let state = state.borrow();
         (
             state.node.clone(),
@@ -485,8 +595,34 @@ async fn headless_node_snapshot(
             state.starting,
             state.start_error.clone(),
             state.message.clone(),
+            state.generation,
         )
     };
+    if expected_generation.is_some_and(|expected| expected != generation) {
+        let online = node.is_some();
+        let did = node
+            .as_ref()
+            .map(|node| node.provider.address())
+            .unwrap_or_default();
+        let message = if state_message.trim().is_empty() {
+            if online {
+                "background node active".to_string()
+            } else {
+                "background node offline".to_string()
+            }
+        } else {
+            state_message
+        };
+        return headless_snapshot_js(
+            online,
+            did,
+            &state_peers,
+            account.as_ref(),
+            message,
+            starting,
+            start_error.as_deref(),
+        );
+    }
     let Some(node) = node else {
         let message = if state_message.trim().is_empty() {
             "background node offline".to_string()
@@ -533,8 +669,12 @@ async fn headless_node_snapshot(
     }
     {
         let mut state = state.borrow_mut();
-        state.peers = peers.clone();
-        state.message = message.clone();
+        if state.generation == generation && state.node.is_some() {
+            state.peers = peers.clone();
+            if settle {
+                state.message = message.clone();
+            }
+        }
     }
 
     headless_snapshot_js(
@@ -586,8 +726,8 @@ fn peer_views_js(peers: &[PeerView]) -> JsValue {
     let array = Array::new();
     for peer in peers {
         let object = Object::new();
-        let _did = js_set(&object, "did", &JsValue::from_str(&peer.did));
-        let _state = js_set(&object, "state", &JsValue::from_str(&peer.state));
+        let _did = js_set(&object, "did", &JsValue::from_str(peer.did()));
+        let _state = js_set(&object, "state", &JsValue::from_str(peer.state()));
         array.push(&object.into());
     }
     array.into()

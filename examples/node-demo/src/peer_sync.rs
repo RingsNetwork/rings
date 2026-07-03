@@ -43,10 +43,10 @@ pub(crate) async fn sync_peers_after_handshake(
 }
 
 pub(crate) fn merge_required_peer(mut peers: Vec<PeerView>, required: &PeerView) -> Vec<PeerView> {
-    if required.did.trim().is_empty() {
+    if !required.is_addressable() {
         return peers;
     }
-    if !peers.iter().any(|peer| peer.did == required.did) {
+    if !peers.iter().any(|peer| peer.did() == required.did()) {
         peers.insert(0, required.clone());
     }
     peers

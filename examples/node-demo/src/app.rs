@@ -210,7 +210,11 @@ pub fn app() -> Html {
             let dweb_page = dweb_page.clone();
             let custom_events = custom_events.clone();
             let kind = *wallet_kind;
-            *node_generation.borrow_mut() += 1;
+            let start_generation = {
+                let mut generation = node_generation.borrow_mut();
+                *generation = generation.wrapping_add(1);
+                *generation
+            };
             node_starting.set(true);
             status.set(format!("connecting {}", kind.label()));
             wasm_bindgen_futures::spawn_local(async move {
@@ -269,8 +273,10 @@ pub fn app() -> Html {
                 ) {
                     Ok(settings) => settings,
                     Err(error) => {
-                        node_starting.set(false);
-                        status.set(error);
+                        if *node_generation.borrow() == start_generation {
+                            node_starting.set(false);
+                            status.set(error);
+                        }
                         return;
                     }
                 };
@@ -283,11 +289,16 @@ pub fn app() -> Html {
                 {
                     Ok(account) => account,
                     Err(error) => {
-                        node_starting.set(false);
-                        status.set(error);
+                        if *node_generation.borrow() == start_generation {
+                            node_starting.set(false);
+                            status.set(error);
+                        }
                         return;
                     }
                 };
+                if *node_generation.borrow() != start_generation {
+                    return;
+                }
                 status.set("authorizing session key".to_string());
                 let built = match extension::operation_timeout(
                     "session authorization",
@@ -298,11 +309,17 @@ pub fn app() -> Html {
                 {
                     Ok(node) => node,
                     Err(error) => {
-                        node_starting.set(false);
-                        status.set(error);
+                        if *node_generation.borrow() == start_generation {
+                            node_starting.set(false);
+                            status.set(error);
+                        }
                         return;
                     }
                 };
+                if *node_generation.borrow() != start_generation {
+                    built.stop();
+                    return;
+                }
                 let my_did = built.provider.address();
                 site.borrow_mut().insert(
                     "/".to_string(),
@@ -318,8 +335,11 @@ pub fn app() -> Html {
                 };
                 if let Err(error) = dweb::register(&built.provider, site.clone(), on_dweb_response)
                 {
-                    node_starting.set(false);
-                    status.set(error);
+                    built.stop();
+                    if *node_generation.borrow() == start_generation {
+                        node_starting.set(false);
+                        status.set(error);
+                    }
                     return;
                 }
                 let on_custom = {
@@ -335,10 +355,17 @@ pub fn app() -> Html {
                     if let Err(error) =
                         custom::register(&built.provider, namespace.to_string(), on_custom.clone())
                     {
-                        node_starting.set(false);
-                        status.set(error);
+                        built.stop();
+                        if *node_generation.borrow() == start_generation {
+                            node_starting.set(false);
+                            status.set(error);
+                        }
                         return;
                     }
+                }
+                if *node_generation.borrow() != start_generation {
+                    built.stop();
+                    return;
                 }
                 did.set(my_did);
                 wallet_account.set(Some(account));
@@ -352,10 +379,15 @@ pub fn app() -> Html {
                 status.set(format!("node ready; connecting seed {seed_url}"));
                 match node::connect_http(&built.provider, seed_url).await {
                     Ok(seed_did) => {
-                        let seed_peer = PeerView {
-                            did: seed_did,
-                            state: "Connected".to_string(),
+                        let Some(seed_peer) = PeerView::connected(seed_did) else {
+                            if *node_generation.borrow() == start_generation {
+                                status.set("node ready; seed returned an empty DID".to_string());
+                            }
+                            return;
                         };
+                        if *node_generation.borrow() != start_generation {
+                            return;
+                        }
                         peer_sync::sync_peers_after_handshake(
                             built,
                             peers,
@@ -365,7 +397,11 @@ pub fn app() -> Html {
                         )
                         .await;
                     }
-                    Err(error) => status.set(format!("node ready; seed connect failed: {error}")),
+                    Err(error) => {
+                        if *node_generation.borrow() == start_generation {
+                            status.set(format!("node ready; seed connect failed: {error}"));
+                        }
+                    }
                 }
             });
         })
@@ -424,16 +460,17 @@ pub fn app() -> Html {
                 return;
             }
 
+            let cleanup_generation = {
+                let mut generation = node_generation.borrow_mut();
+                *generation = generation.wrapping_add(1);
+                *generation
+            };
             let Some(node) = node_ref.borrow_mut().take() else {
+                node_starting.set(false);
                 status.set("node already offline".to_string());
                 return;
             };
             let provider = node.provider.clone();
-            let cleanup_generation = {
-                let mut generation = node_generation.borrow_mut();
-                *generation += 1;
-                *generation
-            };
             did.set(String::new());
             wallet_account.set(None);
             node_starting.set(false);

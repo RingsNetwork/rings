@@ -133,21 +133,15 @@ fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, String> {
         .as_bytes()
         .chunks_exact(2)
         .map(|pair| {
-            let high = hex::hex_nibble(
-                *pair
-                    .first()
-                    .ok_or_else(|| "wallet returned an invalid hex signature".to_string())?,
-            )
-            .ok_or_else(|| "wallet returned an invalid hex signature".to_string())?;
-            let low = hex::hex_nibble(
-                *pair
-                    .get(1)
-                    .ok_or_else(|| "wallet returned an invalid hex signature".to_string())?,
-            )
-            .ok_or_else(|| "wallet returned an invalid hex signature".to_string())?;
+            let [high, low] = pair else {
+                return Err(());
+            };
+            let high = hex::hex_nibble(*high).ok_or(())?;
+            let low = hex::hex_nibble(*low).ok_or(())?;
             Ok((high << 4) | low)
         })
-        .collect()
+        .collect::<Result<Vec<_>, ()>>()
+        .map_err(|()| "wallet returned an invalid hex signature".to_string())
 }
 
 fn base64_url_to_bytes(value: &str) -> Result<Vec<u8>, String> {
