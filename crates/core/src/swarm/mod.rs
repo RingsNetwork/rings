@@ -41,6 +41,24 @@ pub struct Swarm {
     callback: RwLock<SharedSwarmCallback>,
 }
 
+/// Parameters used to build a signed online-node descriptor.
+pub struct OnlineNodeDescriptorParams {
+    /// Runtime family advertised by this node.
+    pub node_type: OnlineNodeType,
+    /// Capability labels advertised by this node.
+    pub capabilities: Vec<String>,
+    /// Optional externally reachable endpoint hint.
+    pub endpoint_hint: Option<String>,
+    /// Process start timestamp in milliseconds since Unix epoch.
+    pub started_at_ms: u128,
+    /// Heartbeat timestamp in milliseconds since Unix epoch.
+    pub heartbeat_at_ms: u128,
+    /// Expiry timestamp in milliseconds since Unix epoch.
+    pub expires_at_ms: u128,
+    /// Node software version.
+    pub version: String,
+}
+
 impl Swarm {
     /// Get did of self.
     pub fn did(&self) -> Did {
@@ -68,25 +86,19 @@ impl Swarm {
     /// Build and sign an online-node descriptor for this swarm.
     pub fn online_node_descriptor(
         &self,
-        node_type: OnlineNodeType,
-        capabilities: Vec<String>,
-        endpoint_hint: Option<String>,
-        started_at_ms: u128,
-        heartbeat_at_ms: u128,
-        expires_at_ms: u128,
-        version: String,
+        params: OnlineNodeDescriptorParams,
     ) -> Result<OnlineNodeDescriptor> {
         OnlineNodeDescriptor::new_signed(
             self.did(),
             self.account_verification_pubkey()?,
-            node_type,
+            params.node_type,
             self.network_id(),
-            capabilities,
-            endpoint_hint,
-            started_at_ms,
-            heartbeat_at_ms,
-            expires_at_ms,
-            version,
+            params.capabilities,
+            params.endpoint_hint,
+            params.started_at_ms,
+            params.heartbeat_at_ms,
+            params.expires_at_ms,
+            params.version,
             self.transport.session_sk(),
         )
     }

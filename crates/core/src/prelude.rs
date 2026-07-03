@@ -19,3 +19,4 @@ pub use crate::message::ChordStorageInterfaceCacheChecker;
 pub use crate::message::MessageRelay;
 pub use crate::message::ReportReturnPolicy;
 pub use crate::message::SubringInterface;
+pub use crate::swarm::OnlineNodeDescriptorParams;

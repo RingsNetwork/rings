@@ -27,6 +27,7 @@ use rings_core::message::Encoder;
 use rings_core::message::Message;
 use rings_core::prelude::uuid;
 use rings_core::storage::MemStorage;
+use rings_core::swarm::OnlineNodeDescriptorParams;
 use rings_core::swarm::Swarm;
 use rings_core::swarm::SwarmBuilder;
 use rings_core::utils::get_epoch_ms;
@@ -410,11 +411,11 @@ impl Processor {
     fn online_node_type() -> OnlineNodeType {
         #[cfg(feature = "ffi")]
         {
-            return OnlineNodeType::Ffi;
+            OnlineNodeType::Ffi
         }
         #[cfg(all(not(feature = "ffi"), feature = "browser"))]
         {
-            return OnlineNodeType::Browser;
+            OnlineNodeType::Browser
         }
         #[cfg(all(not(feature = "ffi"), not(feature = "browser")))]
         {
@@ -435,15 +436,15 @@ impl Processor {
 
     fn online_node_descriptor_at(&self, now_ms: u128) -> Result<OnlineNodeDescriptor> {
         self.swarm
-            .online_node_descriptor(
-                Self::online_node_type(),
-                Self::online_node_capabilities(),
-                self.online_node_endpoint_hint.clone(),
-                self.online_node_started_at_ms,
-                now_ms,
-                now_ms + self.online_node_ttl.as_millis(),
-                crate::util::build_version(),
-            )
+            .online_node_descriptor(OnlineNodeDescriptorParams {
+                node_type: Self::online_node_type(),
+                capabilities: Self::online_node_capabilities(),
+                endpoint_hint: self.online_node_endpoint_hint.clone(),
+                started_at_ms: self.online_node_started_at_ms,
+                heartbeat_at_ms: now_ms,
+                expires_at_ms: now_ms + self.online_node_ttl.as_millis(),
+                version: crate::util::build_version(),
+            })
             .map_err(Error::CoreError)
     }
 
@@ -888,15 +889,15 @@ mod test {
         let live = processor.online_node_descriptor_at(now_ms)?;
         let expired = expired_processor
             .swarm
-            .online_node_descriptor(
-                Processor::online_node_type(),
-                Processor::online_node_capabilities(),
-                None,
-                now_ms.saturating_sub(120_000),
-                now_ms.saturating_sub(90_000),
-                now_ms.saturating_sub(30_000),
-                crate::util::build_version(),
-            )
+            .online_node_descriptor(OnlineNodeDescriptorParams {
+                node_type: Processor::online_node_type(),
+                capabilities: Processor::online_node_capabilities(),
+                endpoint_hint: None,
+                started_at_ms: now_ms.saturating_sub(120_000),
+                heartbeat_at_ms: now_ms.saturating_sub(90_000),
+                expires_at_ms: now_ms.saturating_sub(30_000),
+                version: crate::util::build_version(),
+            })
             .map_err(Error::CoreError)?;
 
         processor

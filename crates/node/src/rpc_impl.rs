@@ -338,8 +338,7 @@ impl HandleRpc<LookupOnlineNodesRequest, LookupOnlineNodesResponse> for Processo
         self.lookup_online_nodes(req.include_expired)
             .await
             .map(|nodes| LookupOnlineNodesResponse { nodes })
-            .map_err(ServerError::from)
-            .map_err(Into::into)
+            .map_err(Error::from)
     }
 }
 
