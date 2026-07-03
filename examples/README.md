@@ -25,6 +25,13 @@ cd examples/frontend && cargo test --release --target wasm32-unknown-unknown
 cd examples/frontend && trunk serve --release true
 ```
 
+Run the standalone dweb and proof wasm/Yew demos from their own workspaces:
+
+```bash
+cd examples/dweb && wasm-pack test --headless --chrome
+cd examples/proof-demo && wasm-pack test --headless --chrome
+```
+
 Run the FFI Python integration tests after building the cdylib:
 
 ```bash

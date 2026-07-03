@@ -5,8 +5,8 @@ config*.yaml
 **/*.rs.bk
 **/*.ipynb
 **/*.js
-!examples/node-demo/extension-assets/
-!examples/node-demo/extension-assets/*.js
+!examples/frontend/extension-assets/
+!examples/frontend/extension-assets/*.js
 .ipynb_checkpoints
 # Local environment configuration
 .envrc

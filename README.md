@@ -93,6 +93,8 @@ Runnable examples live in [`examples/`](./examples):
 | [`frontend`](./examples/frontend) | Browser frontend replacing the historical browser example: wallet login, SDP/HTTP connectivity, topology, dweb workbench, proof workbench, and custom messages |
 | [`relay`](./examples/relay) | TCP & UDP tunnels to a peer's service over the overlay (`tcp.rs` / `udp.rs`) |
 | [`snark`](./examples/snark) | Fold-scheme zkSNARK proving / verification |
+| [`proof-demo`](./examples/proof-demo) | A browser zk-proof app (Yew / Trunk) |
+| [`dweb`](./examples/dweb) | A decentralized-web app (Yew / Trunk) |
 | [`ffi`](./examples/ffi) | Driving a node over the C FFI |
 
 ## Extending Rings
@@ -124,6 +126,8 @@ handler)`. See [`examples/relay`](./examples/relay) and
 | Rings                            | [Rings](./examples/frontend)                                               | Browser frontend replacing the historical browser example                                                                                                                                 |
 | Rings Browser Handshakes Example | [Rings Browser Handshakes](https://github.com/RingsNetwork/rings-wasm-p2p) | Historical Demo / PoC                                                                                                                                                                     |
 | Rings Browser Extension          | [Rings Browser Extension](https://github.com/RingsNetwork/rings_ext_v2)    | Beta                                                                                                                                                                                      |
+| Rings dWeb Demo                  | [Rings dWeb Demo](https://github.com/RingsNetwork/rings-dweb)              | [![rings-ext-v2](https://github.com/RingsNetwork/rings_dweb/actions/workflows/nextjs.yml/badge.svg?branch=page)](https://github.com/RingsNetwork/rings_dweb/actions/workflows/nextjs.yml) |
+| Rings zkProof Demo               | [Rings zkProof Demo](https://zkp.rings.rs)                                 | ![rings-snark-demo](https://github.com/RingsNetwork/rings-proof-demo/actions/workflows/nextjs.yml/badge.svg?branch=page)                                                                  |
 
 ## Components:
 
