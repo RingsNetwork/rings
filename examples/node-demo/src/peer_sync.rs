@@ -17,17 +17,33 @@ pub(crate) async fn sync_peers_after_handshake(
     status: UseStateHandle<String>,
     context: &'static str,
     required_peer: Option<PeerView>,
+    still_current: impl Fn() -> bool + 'static,
 ) {
+    if !still_current() {
+        return;
+    }
     status.set(format!("{context}; syncing peers"));
     if let Some(required_peer) = required_peer.as_ref() {
+        if !still_current() {
+            return;
+        }
         peers.set(merge_required_peer((*peers).clone(), required_peer));
     }
     for delay_ms in PEER_SETTLE_DELAYS_MS {
+        if !still_current() {
+            return;
+        }
         if *delay_ms > 0 {
             sleep(Duration::from_millis(*delay_ms)).await;
         }
+        if !still_current() {
+            return;
+        }
         match node::list_peers(&node.provider).await {
             Ok(next) => {
+                if !still_current() {
+                    return;
+                }
                 let next = if let Some(required_peer) = required_peer.as_ref() {
                     merge_required_peer(next, required_peer)
                 } else {
@@ -37,7 +53,11 @@ pub(crate) async fn sync_peers_after_handshake(
                 peers.set(next);
                 status.set(peer_sync_status(context, count));
             }
-            Err(error) => status.set(format!("{context}; peer sync failed: {error}")),
+            Err(error) => {
+                if still_current() {
+                    status.set(format!("{context}; peer sync failed: {error}"));
+                }
+            }
         }
     }
 }

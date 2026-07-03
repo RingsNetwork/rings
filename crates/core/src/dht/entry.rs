@@ -819,7 +819,7 @@ mod tests {
     #[test]
     fn entry_join_is_strongly_eventually_consistent_for_data_deltas() -> Result<()> {
         let base = Entry::new(Entry::gen_did("topic")?, vec![], EntryKind::Data);
-        let deltas = vec![
+        let deltas = [
             data_delta("topic", "a", 1)?,
             data_delta("topic", "b", 2)?,
             data_delta("topic", "a", 3)?,

@@ -438,10 +438,7 @@ async fn connect_headless_node_http(
     message: &JsValue,
 ) -> Result<JsValue, String> {
     let handle = headless_demo_node(&state)?;
-    let endpoint = js_string_field(message, "endpoint")?.trim().to_string();
-    if endpoint.is_empty() {
-        return Err("enter a seed HTTP endpoint".to_string());
-    }
+    let endpoint = required_message_field(message, "endpoint", "enter a seed HTTP endpoint")?;
     let seed_did = node::connect_http(&handle.node.provider, endpoint).await?;
     let seed_peer =
         PeerView::connected(seed_did).ok_or_else(|| "seed returned an empty DID".to_string())?;
@@ -460,10 +457,7 @@ async fn create_headless_offer(
     message: &JsValue,
 ) -> Result<JsValue, String> {
     let handle = headless_demo_node(&state)?;
-    let remote_did = js_string_field(message, "did")?.trim().to_string();
-    if remote_did.is_empty() {
-        return Err("enter a remote DID".to_string());
-    }
+    let remote_did = required_message_field(message, "did", "enter a remote DID")?;
     let offer = node::create_offer(&handle.node.provider, remote_did).await?;
     ensure_headless_generation_current(&state, handle.generation)?;
     let result = Object::new();
@@ -477,10 +471,7 @@ async fn answer_headless_offer(
     message: &JsValue,
 ) -> Result<JsValue, String> {
     let handle = headless_demo_node(&state)?;
-    let offer = js_string_field(message, "offer")?.trim().to_string();
-    if offer.is_empty() {
-        return Err("paste an offer first".to_string());
-    }
+    let offer = required_message_field(message, "offer", "paste an offer first")?;
     let answer = node::answer_offer(&handle.node.provider, offer).await?;
     ensure_headless_generation_current(&state, handle.generation)?;
     let result = Object::new();
@@ -494,10 +485,7 @@ async fn accept_headless_answer(
     message: &JsValue,
 ) -> Result<JsValue, String> {
     let handle = headless_demo_node(&state)?;
-    let answer = js_string_field(message, "answer")?.trim().to_string();
-    if answer.is_empty() {
-        return Err("paste an answer first".to_string());
-    }
+    let answer = required_message_field(message, "answer", "paste an answer first")?;
     node::accept_answer(&handle.node.provider, answer).await?;
     headless_node_snapshot(
         state,
@@ -520,6 +508,19 @@ fn headless_demo_node(state: &Rc<RefCell<HeadlessNodeState>>) -> Result<Headless
     })
 }
 
+fn required_message_field(
+    message: &JsValue,
+    field: &'static str,
+    empty_message: &'static str,
+) -> Result<String, String> {
+    let value = js_string_field(message, field)?.trim().to_string();
+    if value.is_empty() {
+        Err(empty_message.to_string())
+    } else {
+        Ok(value)
+    }
+}
+
 fn begin_headless_start(state: &Rc<RefCell<HeadlessNodeState>>, message: String) -> u64 {
     let mut state = state.borrow_mut();
     state.generation = state.generation.wrapping_add(1);
@@ -536,15 +537,14 @@ fn set_headless_starting_for_generation(
     message: String,
     error: Option<String>,
     starting: bool,
-) -> bool {
+) {
     let mut state = state.borrow_mut();
     if state.generation != generation {
-        return false;
+        return;
     }
     state.starting = starting;
     state.start_error = error;
     state.message = message;
-    true
 }
 
 fn headless_generation_current(state: &Rc<RefCell<HeadlessNodeState>>, generation: u64) -> bool {
@@ -579,6 +579,17 @@ where
     }
 }
 
+fn retained_headless_message(message: String, online: bool) -> String {
+    if !message.trim().is_empty() {
+        return message;
+    }
+    if online {
+        "background node active".to_string()
+    } else {
+        "background node offline".to_string()
+    }
+}
+
 async fn headless_node_snapshot(
     state: Rc<RefCell<HeadlessNodeState>>,
     context: String,
@@ -604,15 +615,7 @@ async fn headless_node_snapshot(
             .as_ref()
             .map(|node| node.provider.address())
             .unwrap_or_default();
-        let message = if state_message.trim().is_empty() {
-            if online {
-                "background node active".to_string()
-            } else {
-                "background node offline".to_string()
-            }
-        } else {
-            state_message
-        };
+        let message = retained_headless_message(state_message, online);
         return headless_snapshot_js(
             online,
             did,
@@ -624,11 +627,7 @@ async fn headless_node_snapshot(
         );
     }
     let Some(node) = node else {
-        let message = if state_message.trim().is_empty() {
-            "background node offline".to_string()
-        } else {
-            state_message
-        };
+        let message = retained_headless_message(state_message, false);
         return headless_snapshot_js(
             false,
             String::new(),

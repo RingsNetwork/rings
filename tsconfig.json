@@ -1,8 +1,9 @@
 {
   "compilerOptions": {
-    "outDir": "./dist",
-    "target": "es6",
+    "target": "ES2022",
+    "lib": ["ES2022", "ESNext.Disposable", "DOM"],
     "declaration": true,
     "esModuleInterop": true
-  }
+  },
+  "include": ["dist/index.ts"]
 }

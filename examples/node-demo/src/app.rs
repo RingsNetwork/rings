@@ -21,6 +21,7 @@ use crate::custom;
 use crate::dweb;
 use crate::extension;
 use crate::forms::select_value;
+use crate::generation::GenerationClock;
 use crate::node;
 use crate::node::DemoNode;
 use crate::node::PeerView;
@@ -56,6 +57,7 @@ pub fn app() -> Html {
     let node_starting = use_state(|| false);
     let node_ref = use_mut_ref(|| None::<DemoNode>);
     let node_generation = use_mut_ref(|| 0_u64);
+    let generation = GenerationClock::new(node_generation.clone());
     let site = use_mut_ref(dweb::default_site);
 
     let did = use_state(String::new);
@@ -179,7 +181,7 @@ pub fn app() -> Html {
         let wallet_account = wallet_account.clone();
         let node_starting = node_starting.clone();
         let node_ref = node_ref.clone();
-        let node_generation = node_generation.clone();
+        let generation = generation.clone();
         let site = site.clone();
         let did = did.clone();
         let status = status.clone();
@@ -198,7 +200,7 @@ pub fn app() -> Html {
             let wallet_account = wallet_account.clone();
             let node_starting = node_starting.clone();
             let node_ref = node_ref.clone();
-            let node_generation = node_generation.clone();
+            let generation = generation.clone();
             let site = site.clone();
             let did = did.clone();
             let settings_dialog_open = settings_dialog_open.clone();
@@ -210,11 +212,7 @@ pub fn app() -> Html {
             let dweb_page = dweb_page.clone();
             let custom_events = custom_events.clone();
             let kind = *wallet_kind;
-            let start_generation = {
-                let mut generation = node_generation.borrow_mut();
-                *generation = generation.wrapping_add(1);
-                *generation
-            };
+            let start_token = generation.bump();
             node_starting.set(true);
             status.set(format!("connecting {}", kind.label()));
             wasm_bindgen_futures::spawn_local(async move {
@@ -273,7 +271,7 @@ pub fn app() -> Html {
                 ) {
                     Ok(settings) => settings,
                     Err(error) => {
-                        if *node_generation.borrow() == start_generation {
+                        if start_token.is_current() {
                             node_starting.set(false);
                             status.set(error);
                         }
@@ -289,14 +287,14 @@ pub fn app() -> Html {
                 {
                     Ok(account) => account,
                     Err(error) => {
-                        if *node_generation.borrow() == start_generation {
+                        if start_token.is_current() {
                             node_starting.set(false);
                             status.set(error);
                         }
                         return;
                     }
                 };
-                if *node_generation.borrow() != start_generation {
+                if !start_token.is_current() {
                     return;
                 }
                 status.set("authorizing session key".to_string());
@@ -309,14 +307,14 @@ pub fn app() -> Html {
                 {
                     Ok(node) => node,
                     Err(error) => {
-                        if *node_generation.borrow() == start_generation {
+                        if start_token.is_current() {
                             node_starting.set(false);
                             status.set(error);
                         }
                         return;
                     }
                 };
-                if *node_generation.borrow() != start_generation {
+                if !start_token.is_current() {
                     built.stop();
                     return;
                 }
@@ -336,7 +334,7 @@ pub fn app() -> Html {
                 if let Err(error) = dweb::register(&built.provider, site.clone(), on_dweb_response)
                 {
                     built.stop();
-                    if *node_generation.borrow() == start_generation {
+                    if start_token.is_current() {
                         node_starting.set(false);
                         status.set(error);
                     }
@@ -356,14 +354,14 @@ pub fn app() -> Html {
                         custom::register(&built.provider, namespace.to_string(), on_custom.clone())
                     {
                         built.stop();
-                        if *node_generation.borrow() == start_generation {
+                        if start_token.is_current() {
                             node_starting.set(false);
                             status.set(error);
                         }
                         return;
                     }
                 }
-                if *node_generation.borrow() != start_generation {
+                if !start_token.is_current() {
                     built.stop();
                     return;
                 }
@@ -380,25 +378,27 @@ pub fn app() -> Html {
                 match node::connect_http(&built.provider, seed_url).await {
                     Ok(seed_did) => {
                         let Some(seed_peer) = PeerView::connected(seed_did) else {
-                            if *node_generation.borrow() == start_generation {
+                            if start_token.is_current() {
                                 status.set("node ready; seed returned an empty DID".to_string());
                             }
                             return;
                         };
-                        if *node_generation.borrow() != start_generation {
+                        if !start_token.is_current() {
                             return;
                         }
+                        let seed_token = start_token.clone();
                         peer_sync::sync_peers_after_handshake(
                             built,
                             peers,
                             status,
                             "seed URL connected",
                             Some(seed_peer),
+                            move || seed_token.is_current(),
                         )
                         .await;
                     }
                     Err(error) => {
-                        if *node_generation.borrow() == start_generation {
+                        if start_token.is_current() {
                             status.set(format!("node ready; seed connect failed: {error}"));
                         }
                     }
@@ -411,7 +411,7 @@ pub fn app() -> Html {
         let wallet_account = wallet_account.clone();
         let node_starting = node_starting.clone();
         let node_ref = node_ref.clone();
-        let node_generation = node_generation.clone();
+        let generation = generation.clone();
         let did = did.clone();
         let status = status.clone();
         let peers = peers.clone();
@@ -460,14 +460,16 @@ pub fn app() -> Html {
                 return;
             }
 
-            let cleanup_generation = {
-                let mut generation = node_generation.borrow_mut();
-                *generation = generation.wrapping_add(1);
-                *generation
-            };
+            let was_starting = *node_starting;
+            let cleanup_token = generation.bump();
             let Some(node) = node_ref.borrow_mut().take() else {
                 node_starting.set(false);
-                status.set("node already offline".to_string());
+                let message = if was_starting {
+                    "node start cancelled"
+                } else {
+                    "node already offline"
+                };
+                status.set(message.to_string());
                 return;
             };
             let provider = node.provider.clone();
@@ -484,7 +486,6 @@ pub fn app() -> Html {
             status.set("node disconnected".to_string());
 
             let status = status.clone();
-            let node_generation = node_generation.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 let cleanup = node::disconnect_all(&provider).fuse();
                 let timeout = sleep(Duration::from_secs(2)).fuse();
@@ -498,7 +499,7 @@ pub fn app() -> Html {
                     _ = timeout => "node disconnected; peer cleanup timed out".to_string(),
                 };
                 node.stop();
-                if *node_generation.borrow() == cleanup_generation {
+                if cleanup_token.is_current() {
                     status.set(message);
                 }
             });
@@ -507,6 +508,7 @@ pub fn app() -> Html {
 
     {
         let node_ref = node_ref.clone();
+        let generation = generation.clone();
         let peers = peers.clone();
         let did = did.clone();
         let wallet_account = wallet_account.clone();
@@ -535,10 +537,13 @@ pub fn app() -> Html {
                     let Some(node) = node_ref.borrow().clone() else {
                         return;
                     };
+                    let refresh_token = generation.token();
                     let peers = peers.clone();
                     wasm_bindgen_futures::spawn_local(async move {
                         if let Ok(next) = node::list_peers(&node.provider).await {
-                            peers.set(next);
+                            if refresh_token.is_current() {
+                                peers.set(next);
+                            }
                         }
                     });
                 }))
@@ -586,6 +591,7 @@ pub fn app() -> Html {
             launcher_hidden: *settings_dialog_open || *workbench_dialog_open,
         },
         node_ref.clone(),
+        generation.clone(),
         peers.clone(),
         status.clone(),
     );

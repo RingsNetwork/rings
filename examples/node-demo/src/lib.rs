@@ -12,6 +12,7 @@ mod custom;
 mod dweb;
 mod extension;
 mod forms;
+mod generation;
 mod hex;
 mod node;
 mod peer_sync;

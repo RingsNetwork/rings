@@ -10,6 +10,8 @@ use crate::extension;
 use crate::forms::readonly_textarea;
 use crate::forms::text_input;
 use crate::forms::textarea;
+use crate::generation::GenerationClock;
+use crate::generation::GenerationToken;
 use crate::node;
 use crate::node::DemoNode;
 use crate::node::PeerView;
@@ -66,27 +68,37 @@ struct ConnectDialogActions {
 
 enum NodeBackend {
     Extension(JsValue),
-    Local(DemoNode),
+    Local {
+        node: DemoNode,
+        token: GenerationToken,
+    },
 }
 
 enum PeerUpdate {
     Snapshot(extension::ExtensionNodeSnapshot),
     Local {
         node: DemoNode,
+        token: GenerationToken,
         context: &'static str,
         required_peer: Option<PeerView>,
     },
 }
 
 impl NodeBackend {
-    fn current(node_ref: &Rc<RefCell<Option<DemoNode>>>) -> Result<Self, String> {
+    fn current(
+        node_ref: &Rc<RefCell<Option<DemoNode>>>,
+        generation: &GenerationClock,
+    ) -> Result<Self, String> {
         if let Some(bridge) = extension::extension_node_bridge() {
             return Ok(Self::Extension(bridge));
         }
         node_ref
             .borrow()
             .clone()
-            .map(Self::Local)
+            .map(|node| Self::Local {
+                node,
+                token: generation.token(),
+            })
             .ok_or_else(|| "start the node first".to_string())
     }
 
@@ -96,12 +108,13 @@ impl NodeBackend {
                 let snapshot = extension::extension_node_connect_http(&bridge, endpoint).await?;
                 Ok(PeerUpdate::Snapshot(snapshot))
             }
-            Self::Local(node) => {
+            Self::Local { node, token } => {
                 let seed_did = node::connect_http(&node.provider, endpoint).await?;
                 let required_peer = PeerView::connected(seed_did)
                     .ok_or_else(|| "seed returned an empty DID".to_string())?;
                 Ok(PeerUpdate::Local {
                     node,
+                    token,
                     context: "HTTP endpoint connected",
                     required_peer: Some(required_peer),
                 })
@@ -114,14 +127,14 @@ impl NodeBackend {
             Self::Extension(bridge) => {
                 extension::extension_node_create_offer(&bridge, remote_did).await
             }
-            Self::Local(node) => node::create_offer(&node.provider, remote_did).await,
+            Self::Local { node, .. } => node::create_offer(&node.provider, remote_did).await,
         }
     }
 
     async fn answer_offer(self, offer: String) -> Result<String, String> {
         match self {
             Self::Extension(bridge) => extension::extension_node_answer_offer(&bridge, offer).await,
-            Self::Local(node) => node::answer_offer(&node.provider, offer).await,
+            Self::Local { node, .. } => node::answer_offer(&node.provider, offer).await,
         }
     }
 
@@ -131,10 +144,11 @@ impl NodeBackend {
                 let snapshot = extension::extension_node_accept_answer(&bridge, answer).await?;
                 Ok(PeerUpdate::Snapshot(snapshot))
             }
-            Self::Local(node) => {
+            Self::Local { node, token } => {
                 node::accept_answer(&node.provider, answer).await?;
                 Ok(PeerUpdate::Local {
                     node,
+                    token,
                     context: "answer accepted",
                     required_peer: None,
                 })
@@ -152,11 +166,19 @@ impl PeerUpdate {
             }
             Self::Local {
                 node,
+                token,
                 context,
                 required_peer,
             } => {
-                peer_sync::sync_peers_after_handshake(node, peers, status, context, required_peer)
-                    .await;
+                peer_sync::sync_peers_after_handshake(
+                    node,
+                    peers,
+                    status,
+                    context,
+                    required_peer,
+                    move || token.is_current(),
+                )
+                .await;
             }
         }
     }
@@ -174,17 +196,19 @@ fn required_input(value: String, empty_message: &'static str) -> Result<String, 
 pub(crate) fn link_control(
     state: ConnectState<'_>,
     node_ref: Rc<RefCell<Option<DemoNode>>>,
+    generation: GenerationClock,
     peers: UseStateHandle<Vec<PeerView>>,
     status: UseStateHandle<String>,
 ) -> Html {
     let on_http_connect = {
         let node_ref = node_ref.clone();
+        let generation = generation.clone();
         let endpoint = (*state.http_endpoint).clone();
         let peers = peers.clone();
         let status = status.clone();
         let link_dialog_open = (*state.link_dialog_open).clone();
         Callback::from(move |_| {
-            let backend = match NodeBackend::current(&node_ref) {
+            let backend = match NodeBackend::current(&node_ref, &generation) {
                 Ok(backend) => backend,
                 Err(error) => {
                     status.set(error);
@@ -215,11 +239,12 @@ pub(crate) fn link_control(
     };
     let on_create_offer = {
         let node_ref = node_ref.clone();
+        let generation = generation.clone();
         let remote_did = (*state.sdp_remote_did).clone();
         let generated_offer = (*state.generated_offer).clone();
         let status = status.clone();
         Callback::from(move |_| {
-            let backend = match NodeBackend::current(&node_ref) {
+            let backend = match NodeBackend::current(&node_ref, &generation) {
                 Ok(backend) => backend,
                 Err(error) => {
                     status.set(error);
@@ -248,11 +273,12 @@ pub(crate) fn link_control(
     };
     let on_answer_offer = {
         let node_ref = node_ref.clone();
+        let generation = generation.clone();
         let remote_offer = (*state.remote_offer).clone();
         let generated_answer = (*state.generated_answer).clone();
         let status = status.clone();
         Callback::from(move |_| {
-            let backend = match NodeBackend::current(&node_ref) {
+            let backend = match NodeBackend::current(&node_ref, &generation) {
                 Ok(backend) => backend,
                 Err(error) => {
                     status.set(error);
@@ -281,12 +307,13 @@ pub(crate) fn link_control(
     };
     let on_accept_answer = {
         let node_ref = node_ref.clone();
+        let generation = generation.clone();
         let remote_answer = (*state.remote_answer).clone();
         let peers = peers.clone();
         let status = status.clone();
         let link_dialog_open = (*state.link_dialog_open).clone();
         Callback::from(move |_| {
-            let backend = match NodeBackend::current(&node_ref) {
+            let backend = match NodeBackend::current(&node_ref, &generation) {
                 Ok(backend) => backend,
                 Err(error) => {
                     status.set(error);
