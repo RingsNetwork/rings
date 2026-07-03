@@ -130,9 +130,7 @@ impl PeerMeasurement {
 
     /// Read all counters for `did` from a measurement implementation.
     pub async fn from_measure<M>(measure: &M, did: Did) -> Self
-    where
-        M: Measure + ?Sized,
-    {
+    where M: Measure + ?Sized {
         Self {
             did,
             connected: measure.get_count(did, MeasureCounter::Connect).await,
@@ -169,9 +167,7 @@ impl PeerQualityEvidence {
 
     /// Read all counters for `did` from a measurement implementation.
     pub async fn from_measure<M>(measure: &M, did: Did) -> Self
-    where
-        M: Measure + ?Sized,
-    {
+    where M: Measure + ?Sized {
         Self {
             connected: measure.get_count(did, MeasureCounter::Connect).await,
             disconnected: measure.get_count(did, MeasureCounter::Disconnected).await,
