@@ -67,7 +67,27 @@
   \begin{@twocolumnfalse}
     \maketitle
     \begin{abstract}
-      Rings Network is specified as a peer-to-peer protocol family over the circular carrier $R=\mathbb{Z}/2^{160}\mathbb{Z}$. The overlay layer is a Correct-Chord maintenance object; DID, VID, mailbox, hidden-service, ranking, and sequencing protocols are namespace objects over $R$; placement is post-composition by the live owner map; effectful transitions are Kleisli morphisms of a writer monad over protocol actions. The paper states the carrier, topology, category, state, effect, cryptographic, verification, and evaluation obligations of the target Rings model while keeping implementation-facing algorithms, figures, and performance baselines as executable witnesses of the model.
+      Rings is the specification
+      \[
+        \mathcal{Rings}=
+        (R,\mathcal{R}_N,\mathbf{Set}/R,\Omega_N,
+         \mathsf{T}^{\mathcal{E}}_A,\Pi,\mathbb{G},\mathcal{X})
+      \]
+      with
+      \[
+      \begin{array}{rcl}
+        R&=&\mathbb{Z}/2^{160}\mathbb{Z},\\
+        \mathcal{R}_N&=&\text{Correct-Chord overlay object},\\
+        \Omega_N(X,H)&=&(X,\operatorname{owner}_N\circ H),\\
+        \tau_\nu&:&S_\nu\times I_\nu
+          \to\mathsf{T}^{\mathcal{E}_\nu}_{A_\nu}(S_\nu\times O_\nu).
+      \end{array}
+      \]
+      \[
+        \{D,V,M,H,Q,W\}\subset\operatorname{Obj}(\mathbf{Set}/R),
+        \qquad
+        \mathsf{CryptoCarrier}\cap R=\varnothing.
+      \]
 
   ~\\
   ~\\
@@ -78,54 +98,64 @@
 \section{Formal Model}
 
 \begin{assumption}[System scope]
-Rings is modeled as a fail-stop structured overlay with authenticated participants, signed protocol messages, asynchronous delivery, and runtime-specific IO interpreters. Byzantine consensus is not a base-overlay operation. Stronger ordering is represented by sidecar witnesses. Cryptographic multiplication, threshold interpolation, pairings, and subgroup checks live in explicit cryptographic carriers, not in the Chord identifier carrier.
+\[
+\begin{array}{rcl}
+\mathsf{fault}&=&\mathsf{fail\mbox{-}stop},\\
+\mathsf{auth}(m,\sigma,k)&=&V(k,\sigma,m),\\
+\mathsf{net}&=&\mathsf{async},\\
+\mathsf{io}&=&I_X:A_X^*\to\mathsf{IO},\\
+\mathsf{consensus}&\notin&\mathsf{Overlay},\\
+\mathsf{order}&=&\mathsf{SidecarWitness},\\
+\mathsf{crypto\_ops}&\cap&\mathsf{route\_ops}=\varnothing.
+\end{array}
+\]
 \end{assumption}
 
 \begin{definition}[Identifier carrier]
-Let
 \[
-  M=2^{160},\qquad R=\mathbb{Z}/M\mathbb{Z}.
+\begin{array}{rcl}
+M&=&2^{160},\\
+R&=&\mathbb{Z}/M\mathbb{Z},\\
+\delta_a(x)&=&(x-a)\bmod M,\\
+(a,b]_R&=&\{x\in R:0<\delta_a(x)\leq\delta_a(b)\},\\
+\mathsf{RouteOps}_R&=&\{0,+,-,\delta_a,(\_,\_]_R\},\\
+\mathsf{Mult}_R&\notin&\mathsf{RouteOps}_R.
+\end{array}
 \]
-For $a,x\in R$, define clockwise distance
-\[
-  \delta_a(x)=(x-a)\bmod M
-\]
-and circular interval
-\[
-  (a,b]_R=\{x\in R:0<\delta_a(x)\leq\delta_a(b)\}.
-\]
-The overlay uses $(R,+,0,-)$ as an additive cyclic group. Multiplication in $R$ is outside the routing model.
 \end{definition}
 
 \begin{definition}[Live topology]
-For a nonempty live set $N\subset R$ and $n,k\in R$,
 \[
+\begin{array}{rcl}
+  N&\subset&R,\quad N\neq\varnothing,\\[2pt]
   \operatorname{owner}_N(k)
-    =\arg\min_{u\in N}\delta_k(u),
-\]
-\[
+    &=&\arg\min_{u\in N}\delta_k(u),\\[6pt]
   \operatorname{pred}_N(n)
-    =\arg\min_{p\in N\setminus\{n\}}\delta_p(n),
-\]
-\[
+    &=&\arg\min_{p\in N\setminus\{n\}}\delta_p(n),\\[6pt]
   \operatorname{Succ}^q_N(n)
-    =
+    &=&
     \operatorname{take}_q
-    \bigl(\operatorname{sort}_{\delta_n}(N\setminus\{n\})\bigr).
+    \bigl(\operatorname{sort}_{\delta_n}(N\setminus\{n\})\bigr),\\[6pt]
+  \delta_a|_N&=&\mathsf{injective}.
+\end{array}
 \]
-Argmins are unique because $\delta_a$ is injective on $N$.
 \end{definition}
 
 \begin{assumption}[Correct-Chord stable base]
-Let $r$ be the successor-list length. Steady-state algebra assumes
 \[
-  |N|\geq r+1.
+\begin{array}{rcl}
+r&=&|\operatorname{Succ}^r_N(n)|,\\
+\mathsf{Steady}(N)&\Rightarrow&|N|\geq r+1,\\
+|N|<r+1&\Rightarrow&\mathsf{Init}(N),\\
+\mathsf{Maintain}&=&
+  \{\mathsf{join},\mathsf{rectify}\}\\
+&&\cup\{\mathsf{stabilize}\}_{CorrectChord}.
+\end{array}
 \]
-Bootstrap states with fewer members are initialization states. The maintenance reference is Zave's Correct Chord transition family of join, rectify, and stabilize \cite{ZaveChordCorrect}.
+\cite{ZaveChordCorrect}
 \end{assumption}
 
 \begin{definition}[Replica set]
-For replication factor $r$,
 \[
   \operatorname{Rep}^r_N(k)=
   \{\operatorname{owner}_N(k)\}
@@ -134,40 +164,58 @@ For replication factor $r$,
     \operatorname{Succ}^{r-1}_N(\operatorname{owner}_N(k))
   \bigr).
 \]
-Thus the owner is included at index $0$ of storage responsibility.
 \end{definition}
 
 \begin{definition}[Rings overlay object]
-A steady Rings overlay state over $N$ is
 \[
   \mathcal{R}_N=
   (R,N,\operatorname{owner}_N,\operatorname{pred}_N,
    \operatorname{Succ}^r_N,\operatorname{Rep}^r_N,F,E),
 \]
-where $F$ is the sparse finger relation and $E$ is the replicated entry algebra. The safety root is $(\operatorname{pred}_N,\operatorname{Succ}^r_N)$; fingers are routing witnesses.
+\[
+\begin{array}{rcl}
+F&\subseteq&N\times\mathbb{N}\times N,\\
+E&=&\prod_{v\in VID}E_v,\\
+\mathsf{SafetyRoot}(\mathcal{R}_N)&=&
+  (\operatorname{pred}_N,\operatorname{Succ}^r_N),\\
+\mathsf{PerfWitness}(\mathcal{R}_N)&=&F.
+\end{array}
+\]
 \end{definition}
 
 \begin{proposition}[Rotation equivariance]
-For $t\in R$, $N+t=\{n+t:n\in N\}$ satisfies
 \[
+\begin{aligned}
+  t\in R,\quad N+t=\{n+t:n\in N\}
+  &\Rightarrow\\
   \operatorname{owner}_{N+t}(k+t)=\operatorname{owner}_N(k)+t.
+\end{aligned}
 \]
 \end{proposition}
 \begin{proof}
-For each $n\in N$,
 \[
-  \delta_{k+t}(n+t)=((n+t)-(k+t))\bmod M=\delta_k(n).
+\begin{aligned}
+  \forall n\in N.\quad
+  \delta_{k+t}(n+t)
+  &=((n+t)-(k+t))\bmod M\\
+  &=\delta_k(n).
+\end{aligned}
 \]
-Translation preserves the order used by $\arg\min$.
 \end{proof}
 
 \begin{constraint}[Carrier separation]
-Overlay placement may use only
 \[
-  0,\quad +,\quad -,\quad \delta_a,\quad (a,b]_R,\quad
-  \operatorname{owner}_N,\quad \operatorname{Rep}^r_N.
+\begin{array}{rcl}
+\mathsf{PlacementOps}&=&
+  \{0,+,-,\delta_a,(a,b]_R\}\\
+&&\cup\{\operatorname{owner}_N,\operatorname{Rep}^r_N\},\\
+\mathsf{CryptoOps}&=&
+  \{\times,^{-1},\cdot_{scalar},\mathsf{interp}\}\\
+&&\cup\{\mathsf{pair},\mathsf{subgroup}\},\\
+\mathsf{PlacementOps}&\cap&\mathsf{CryptoOps}=\varnothing,\\
+\mathsf{CryptoCarrier}&\in&\{\mathbb{F}_q,\mathbb{G},\mathbb{Z}_q\}.
+\end{array}
 \]
-A protocol requiring multiplication, inversion, scalar multiplication, polynomial interpolation, pairings, or subgroup checks names a separate carrier such as a finite field $\mathbb{F}_q$ or elliptic-curve group $\mathbb{G}$.
 \end{constraint}
 
 \begin{table}[htbp]
@@ -193,11 +241,19 @@ Effects & writer monad over action lists \\
 \section{Architecture As Interfaces}
 
 \begin{definition}[Layer tuple]
-The target architecture is a six-tuple
 \[
   \mathcal{A}=(I,T,O,X,P,L)
 \]
-where $I$ is identity, $T$ is transport, $O$ is overlay, $X$ is extension runtime, $P$ is protocol algebra, and $L$ is application logic.
+\[
+\begin{array}{c|c}
+I & (DID,\Pi,\operatorname{Session})\\
+T & (C,A_T,\mathsf{offer},\mathsf{answer},\mathsf{send},\mathsf{recv})\\
+O & \mathcal{R}_N\\
+X & (S_X,A_X,\mathsf{cap},I_X)\\
+P & \{\mathcal{P}_\nu\}_{\nu\in Namespace}\\
+L & \mathsf{App}\circ P
+\end{array}
+\]
 \end{definition}
 
 \begin{figure}[htbp]
@@ -215,35 +271,45 @@ where $I$ is identity, $T$ is transport, $O$ is overlay, $X$ is extension runtim
 \end{figure}
 
 \begin{definition}[Identity proof]
-A DID proof family is a tuple
 \[
   \Pi=(K,\Sigma,V,D,\mathsf{enc},\mathsf{ttl})
 \]
-where $K$ is the public-key space, $\Sigma$ is the signature space, $V:K\times\Sigma\times B^*\to\{\top,\bot\}$ is verification, $D:K\to R$ is DID derivation, $\mathsf{enc}$ is signature encoding, and $\mathsf{ttl}$ bounds replay.
+\[
+\begin{array}{rcl}
+V&:&K\times\Sigma\times B^*\to\{\top,\bot\},\\
+D&:&K\to R,\\
+\mathsf{enc}&:&\Sigma\to B^*,\\
+\mathsf{ttl}&:&\Sigma\to Time.
+\end{array}
+\]
 \end{definition}
 
 \begin{invariant}[Session authority]
-For account DID $d$ and delegated session key $s$,
+\[
+  d\in X_D,\qquad s\in K.
+\]
 \[
   \operatorname{Session}(d,s,e)
   \Rightarrow
   V(k_d,\sigma_{d\to s},d\Vert s\Vert e)=\top
   \land now<e.
 \]
-Every hop may check session authority without resolving a W3C DID document in the overlay path.
+\[
+  \mathsf{HopCheck}(d,s,e)\equiv\operatorname{Session}(d,s,e).
+\]
 \end{invariant}
 
 \begin{definition}[Transport interface]
-Transport is modeled as
 \[
   T=(C,\mathsf{offer},\mathsf{answer},\mathsf{send},\mathsf{recv})
 \]
-with channel state $C$ and action alphabet
 \[
   A_T=\{\mathsf{Offer},\mathsf{Answer},\mathsf{Ice},\mathsf{Open},
         \mathsf{Send},\mathsf{Recv},\mathsf{Close}\}.
 \]
-WebRTC and native transports are interpreters of $A_T^*$.
+\[
+  I_T:A_T^*\to\mathsf{IO}_{WebRTC}\cup\mathsf{IO}_{Native}.
+\]
 \end{definition}
 
 \begin{figure}[htbp]
@@ -282,15 +348,17 @@ WebRTC and native transports are interpreters of $A_T^*$.
 \end{figure}
 
 \begin{definition}[Runtime interpreter]
-An extension runtime is
 \[
-  \mathcal{X}=(S_X,A_X,\mathsf{cap},I_X),
+  \mathcal{X}=(S_X,A_X,\mathsf{cap},I_X)
 \]
-where $S_X$ is extension state, $A_X$ is the action alphabet, $\mathsf{cap}\subseteq A_X$ is the capability set, and
 \[
-  I_X:A_X^*\to \mathsf{IO}
+\begin{array}{rcl}
+\mathsf{cap}&\subseteq&A_X,\\
+I_X&:&A_X^*\to \mathsf{IO},\\
+I_X(\epsilon)&=&\mathsf{Noop},\\
+I_X(\alpha\cdot\beta)&=&I_X(\alpha);I_X(\beta).
+\end{array}
 \]
-is a monoid homomorphism into IO actions under sequential composition.
 \end{definition}
 
 \begin{figure}[htbp]
@@ -316,86 +384,101 @@ is a monoid homomorphism into IO actions under sequential composition.
 \end{figure}
 
 \begin{obligation}[Runtime confinement]
-For every extension transition $\tau$ and interpreter $I_X$,
 \[
-  \tau:S\times I\to \mathcal{E}+(S\times O\times A_X^*)
+\begin{array}{rcl}
+\tau&:&S\times I\to \mathcal{E}+(S\times O\times A_X^*),\\
+\mathsf{emit}(\tau(s,i))&\subseteq&\mathsf{cap},\\
+a\notin\mathsf{cap}&\Rightarrow&I_X(a)=\mathsf{Reject}(a).
+\end{array}
 \]
-may emit only actions in $\mathsf{cap}$. The interpreter rejects $a\notin\mathsf{cap}$ before IO.
 \end{obligation}
 
 \section{Category and Effects}
 
 \begin{definition}[Namespace object]
-A namespace $\nu$ is an object of the slice category $\mathbf{Set}/R$:
 \[
-  H_\nu:X_\nu\to R.
+\begin{array}{rcl}
+\nu&\in&\{D,V,M,H,U,Q,W\},\\
+H_\nu&:&X_\nu\to R,\\
+(X_\nu,H_\nu)&\in&\mathbf{Set}/R.
+\end{array}
 \]
-DIDs, VIDs, mailbox roots, service descriptors, subring anchors, and ranking keys are distinct namespace objects over the same carrier.
 \end{definition}
 
 \begin{definition}[Placement functor]
-For live topology $N$, define
 \[
-  \Omega_N:\mathbf{Set}/R\to\mathbf{Set}/N
+\begin{array}{rcl}
+  \Omega_N&:&\mathbf{Set}/R\to\mathbf{Set}/N,\\
+  (X,H)&\mapsto&(X,\operatorname{owner}_N\circ H).
+\end{array}
 \]
-by
-\[
-  \Omega_N(X,H)=(X,\operatorname{owner}_N\circ H).
-\]
-The placement map of namespace $\nu$ is
 \[
   P^N_\nu=\operatorname{owner}_N\circ H_\nu:X_\nu\to N.
 \]
 \end{definition}
 
 \begin{proposition}[Placement functoriality]
-If $f:X_\nu\to X_\mu$ satisfies $H_\mu\circ f=H_\nu$, then
+\[
+  f:X_\nu\to X_\mu,\qquad H_\mu\circ f=H_\nu.
+\]
 \[
   P^N_\mu\circ f=P^N_\nu.
 \]
 \end{proposition}
 \begin{proof}
-Post-compose $H_\mu\circ f=H_\nu$ with $\operatorname{owner}_N$.
+\[
+  \operatorname{owner}_N\circ H_\mu\circ f
+  =
+  \operatorname{owner}_N\circ H_\nu.
+\]
 \end{proof}
 
 \begin{definition}[Writer effect monad]
-For action alphabet $A$, let $A^*$ be the free monoid of finite action lists. Define
 \[
-  \mathsf{T}_A(X)=X\times A^*,
-\]
-\[
-  \eta(x)=(x,\epsilon),
-\]
-\[
+\begin{array}{rcl}
+  A^*&=&\mathsf{FreeMonoid}(A),\\
+  \mathsf{T}_A(X)&=&X\times A^*,\\
+  \eta(x)&=&(x,\epsilon),\\
   (x,\alpha)\mathbin{\gg\!=}f
-    =
-  \text{let } f(x)=(y,\beta)
-  \text{ in }(y,\alpha\cdot\beta).
+    &=&
+  \mathsf{let}\ f(x)=(y,\beta)\ \mathsf{in}\ (y,\alpha\cdot\beta).
+\end{array}
 \]
 \end{definition}
 
 \begin{proposition}[Effect associativity]
-Kleisli composition for $\mathsf{T}_A$ is associative.
+\[
+  (h^\star\circ g^\star)\circ f^\star
+  =
+  h^\star\circ(g^\star\circ f^\star).
+\]
 \end{proposition}
 \begin{proof}
-The accumulated effect is $\alpha\cdot\beta\cdot\gamma$; associativity follows from associativity of the free monoid $A^*$.
+\[
+  ((\alpha\cdot\beta)\cdot\gamma)
+  =
+  (\alpha\cdot(\beta\cdot\gamma)).
+\]
 \end{proof}
 
 \begin{definition}[Typed failure stack]
-Rings uses strict error-over-writer composition:
 \[
   \mathsf{T}^{\mathcal{E}}_A(X)=\mathcal{E}+(X\times A^*).
 \]
-An error branch has no executable action list. Recoverable reports are ordinary successful actions.
+\[
+\begin{array}{rcl}
+\pi_A(e\in\mathcal{E})&=&\epsilon,\\
+\pi_A(x,\alpha)&=&\alpha,\\
+\mathsf{RecoverableReport}&\in&A.
+\end{array}
+\]
 \end{definition}
 
 \begin{definition}[Protocol object]
-A protocol namespace is
 \[
   \mathcal{P}_\nu=
   (X_\nu,S_\nu,I_\nu,O_\nu,A_\nu,\mathcal{E}_\nu,H_\nu,\tau_\nu)
 \]
-with transition
 \[
   \tau_\nu:S_\nu\times I_\nu
   \to
@@ -404,20 +487,22 @@ with transition
 \end{definition}
 
 \begin{definition}[Protocol morphism]
-A morphism $\Sigma:\mathcal{P}_\nu\to\mathcal{P}_\mu$ is a family
 \[
+  \Sigma:\mathcal{P}_\nu\to\mathcal{P}_\mu
+  =
   (\sigma_X,\sigma_S,\sigma_I,\sigma_O,\sigma_{\mathcal{E}},\sigma_A^*)
 \]
-where $\sigma_A^*:A_\nu^*\to A_\mu^*$ is a monoid homomorphism and
 \[
-  H_\mu\circ\sigma_X=H_\nu,
-\]
-\[
+\begin{array}{rcl}
+\sigma_A^*&:&A_\nu^*\to A_\mu^*,\\
+\sigma_A^*(\alpha\cdot\beta)&=&\sigma_A^*(\alpha)\cdot\sigma_A^*(\beta),\\
+H_\mu\circ\sigma_X&=&H_\nu,\\[4pt]
   \mathsf{T}_{\sigma_A}^{\sigma_{\mathcal{E}}}
     (\sigma_S\times\sigma_O)
   \circ\tau_\nu
-  =
+  &=&
   \tau_\mu\circ(\sigma_S\times\sigma_I).
+\end{array}
 \]
 \end{definition}
 
@@ -437,7 +522,16 @@ where $\sigma_A^*:A_\nu^*\to A_\mu^*$ is a monoid homomorphism and
 
 \section{Chord Overlay}
 
-Rings builds on Chord \cite{Chord} and adopts Correct Chord \cite{ZaveChordCorrect} as the maintenance reference. The formal object is $\mathcal{R}_N$; the algorithms below are transition witnesses.
+\[
+\begin{array}{rcl}
+\mathsf{Base}&=&\mathsf{Chord},\\
+\mathsf{Maintenance}&=&\mathsf{CorrectChord},\\
+\mathsf{Object}&=&\mathcal{R}_N,\\
+\mathsf{Witnesses}&=&
+  \{\text{Algorithms }\ref{alg:join},\ref{alg:lookup},\ref{alg:stabilize}\}.
+\end{array}
+\]
+\cite{Chord,ZaveChordCorrect}
 
 \begin{figure}[h]
     \begin{center}
@@ -461,28 +555,31 @@ Rings builds on Chord \cite{Chord} and adopts Correct Chord \cite{ZaveChordCorre
 \end{figure}
 
 \begin{definition}[Local node state]
-For node $n\in N$,
 \[
   S_n=(p_n,L_n,F_n,E_n)
 \]
-where $p_n$ is predecessor, $L_n$ is successor list, $F_n$ is sparse finger table, and $E_n$ is local entry evidence. The fixpoint target is
 \[
+\begin{array}{rcl}
+p_n&\in&N\cup\{\bot\},\\
+L_n&\in&N^{\leq r},\\
+F_n&:&\mathbb{N}\rightharpoonup N,\\
+E_n&\subseteq&E,\\
   p_n=\operatorname{pred}_N(n),
-  \qquad
+&&
   L_n=\operatorname{Succ}^r_N(n).
+\end{array}
 \]
 \end{definition}
 
 \begin{definition}[Finger target]
-For slot $i$,
 \[
-  \operatorname{target}_i(n)=n+2^i,
+\begin{array}{rcl}
+  \operatorname{target}_i(n)&=&n+2^i,\\
+  \operatorname{finger}_i(n)&=&
+  \operatorname{owner}_N(\operatorname{target}_i(n)),\\
+  F_n(i)&\in&\{\bot,\operatorname{finger}_i(n)\}.
+\end{array}
 \]
-\[
-  \operatorname{finger}_i(n)=
-  \operatorname{owner}_N(\operatorname{target}_i(n)).
-\]
-Sparse no-wrap state permits $F_n(i)=\bot$; present fingers are performance witnesses.
 \end{definition}
 
 \begin{algorithm}
@@ -590,29 +687,50 @@ Sparse no-wrap state permits $F_n(i)=\bot$; present fingers are performance witn
 \end{invariant}
 
 \begin{invariant}[Lookup owner preservation]
-For steady topology $N$,
 \[
+\begin{aligned}
+&\mathsf{Steady}(N)\land\operatorname{Inv}_{ring}(N,S)\\
+&\Rightarrow
   \operatorname{Lookup}(S,k)\Downarrow
   \operatorname{owner}_N(k).
+\end{aligned}
 \]
-The judgment $\Downarrow$ is reachability in the action-interpreter transition relation generated by Algorithms \ref{alg:lookup} and \ref{alg:stabilize}.
+\[
+  \Downarrow
+  =
+  \mathsf{Reach}_{A_D}(\ref{alg:lookup},\ref{alg:stabilize}).
+\]
 \end{invariant}
 
 \section{DID and Resource Algebra}
 
 \begin{definition}[DID namespace]
-A DID namespace is $H_D:X_D\to R$. Account-controlled DIDs add proof family $\Pi$ and session relation $\operatorname{Session}(d,s,e)$.
+\[
+  \mathcal{D}=(X_D,H_D,\Pi,\operatorname{Session}),
+  \qquad
+  H_D:X_D\to R.
+\]
+\[
+\begin{array}{rcl}
+D(k)&=&H_D(k),\\
+\operatorname{owner}_N(D(k))&\in&N,\\
+\operatorname{Session}&\subseteq&X_D\times K\times Time.
+\end{array}
+\]
 \end{definition}
 
 \begin{definition}[VID namespace]
-A VID namespace is $H_V:X_V\to R$ with no private key attached to $H_V(x)$. Authorization is carried by entry operations:
 \[
-  \operatorname{Auth}_V(op,x,\sigma,caps)\in\{\top,\bot\}.
+\begin{array}{rcl}
+\mathcal{V}&=&(X_V,H_V,\operatorname{Auth}_V),\\
+H_V&:&X_V\to R,\\
+\operatorname{PrivateKey}(H_V(x))&=&\bot,\\
+\operatorname{Auth}_V(op,x,\sigma,caps)&\in&\{\top,\bot\}.
+\end{array}
 \]
 \end{definition}
 
 \begin{definition}[Biased order]
-For fixed point $C$,
 \[
   A\leq_C B
   \Longleftrightarrow
@@ -639,15 +757,25 @@ For fixed point $C$,
 \end{algorithm}
 
 \begin{definition}[Replicated entry algebra]
-For each VID $v$, entry state is either a join semilattice
 \[
-  (E_v,\sqsubseteq,\sqcup,\bot)
+\begin{array}{rcl}
+\mathcal{E}^{join}_v&=&(E_v,\sqsubseteq,\sqcup,\bot),\\
+\mathcal{E}^{final}_v&=&(E_v,\mathsf{conflict}_v,\mathsf{finalize}_v).
+\end{array}
 \]
-with commutativity, associativity, idempotence, and bottom identity, or a pair
 \[
-  (E_v,\mathsf{conflict}_v,\mathsf{finalize}_v)
+\begin{array}{rcl}
+x\sqcup y&=&y\sqcup x,\\
+(x\sqcup y)\sqcup z&=&x\sqcup(y\sqcup z),\\
+x\sqcup x&=&x,\\
+x\sqcup\bot&=&x,\\
+\mathsf{finalize}_v&:&\mathsf{conflict}_v(E_v)\to E_v.
+\end{array}
 \]
-that resolves conflicts explicitly. The semilattice case follows CRDT merge discipline \cite{ShapiroCRDT}.
+\[
+  \mathsf{case}_1=\mathsf{CRDT}.
+\]
+\cite{ShapiroCRDT}
 \end{definition}
 
 \begin{invariant}[Placement]
@@ -661,34 +789,51 @@ that resolves conflicts explicitly. The semilattice case follows CRDT merge disc
 \end{invariant}
 
 \begin{definition}[Mailbox]
-For DID $d$ and epoch $e$,
 \[
-  mbox(d,e)=H_M(\mathtt{rings.mailbox}\Vert d\Vert e).
+\begin{array}{rcl}
+mbox(d,e)&=&H_M(\mathtt{rings.mailbox}\Vert d\Vert e),\\
+entry_M&=&(\eta,exp,proof_s,dst,cipher).
+\end{array}
 \]
-Mailbox entries are encrypted envelopes with nonce, expiration, sender proof, recipient DID, and ciphertext.
 \end{definition}
 
 \begin{definition}[Hidden service descriptor]
-A service descriptor is
 \[
-  h=(\nu,\rho,Intro,Relay,Cap,K,exp,rank).
+\begin{array}{rcl}
+h&=&(\nu,\rho,Intro,Relay,\\
+&&Cap,K,exp,rank),\\
+VID(h)&=&H_H(h),\\
+\mathsf{Lookup}(h)&=&P^N_H(h),\\
+\mathsf{Valid}(h,\sigma)&=&\operatorname{Auth}_H(h,\sigma).
+\end{array}
 \]
-Its VID is $H_H(h)$; lookup returns placement, while authorization is $\operatorname{Auth}_H(h,\sigma)$.
 \end{definition}
 
 \begin{definition}[Subring]
-A subring is
 \[
   \mathcal{S}_u=(u,N_u,\operatorname{owner}_{N_u},
   \operatorname{Succ}^{r_u}_{N_u},E_u)
 \]
-where $u=H_U(policy)$ anchors membership. Membership operations form a mergeable log or finalized state.
+\[
+\begin{array}{rcl}
+u&=&H_U(policy),\\
+memberlog_u&\in&\mathsf{MergeLog}\cup\mathsf{FinalState}.
+\end{array}
+\]
 \end{definition}
 
 \section{Cryptographic Carriers and Traffic}
 
 \begin{definition}[End-to-end carrier]
-Let $\mathbb{G}$ be an elliptic-curve group of order $q$ with scalar field $\mathbb{Z}_q$. Private key $x\in\mathbb{Z}_q$ has public key $h=g^x$. This carrier is distinct from $R$.
+\[
+\begin{array}{rcl}
+|\mathbb{G}|&=&q,\\
+\mathsf{Scalar}(\mathbb{G})&=&\mathbb{Z}_q,\\
+x&\in&\mathbb{Z}_q,\\
+h&=&g^x,\\
+\mathbb{G}&\neq&R.
+\end{array}
+\]
 \end{definition}
 
 \begin{algorithm}[h]
@@ -711,15 +856,14 @@ Let $\mathbb{G}$ be an elliptic-curve group of order $q$ with scalar field $\mat
 \end{algorithm}
 
 \begin{definition}[Signed encrypted frame]
-An encrypted frame is
 \[
   f=(sid,seq,last,cipher,pk_s,\sigma_s).
 \]
-Validity is
 \[
 \begin{aligned}
-  &V(pk_s,\sigma_s,
-    sid\Vert seq\Vert last\Vert cipher)=\top\\
+  m_f&=sid\Vert seq\Vert last\Vert cipher,\\
+  \operatorname{FrameValid}(f)
+  \Leftrightarrow\;&V(pk_s,\sigma_s,m_f)=\top\\
   &\land\;
     \operatorname{Session}(D(pk_s),sid,e).
 \end{aligned}
@@ -727,19 +871,30 @@ Validity is
 \end{definition}
 
 \begin{definition}[Secret sharing placement]
-For threshold polynomial $P\in\mathbb{F}_q[X]$, shares are
 \[
-  sh_i=(i,P(i))\in\mathbb{F}_q^2.
+\begin{array}{rcl}
+P&\in&\mathbb{F}_q[X],\\
+sh_i&=&(i,P(i))\in\mathbb{F}_q^2,\\
+H_S(sh_i)&\in&R,\\
+\operatorname{reconstruct}(\{sh_i\})&=&P(0)\quad(\mathbb{F}_q\text{-interp.})
+\end{array}
 \]
-Overlay placement is $H_S(sh_i)\in R$; reconstruction is field interpolation in $\mathbb{F}_q$ \cite{ssss}.
+\cite{ssss}
 \end{definition}
 
 \begin{definition}[Relay frame]
-A hop-by-hop frame is
 \[
   r=(path,dst,\nu,session,payload,report).
 \]
-Rings borrows message splitting vocabulary from MSRP \cite{RFC4975}, while relay validity is native to this tuple.
+\[
+\begin{array}{rcl}
+\operatorname{RelayValid}(r)&=&
+  \operatorname{SessionValid}(session)\\
+&&\land\ dst\in R,\\
+\operatorname{SplitVocabulary}&=&\mathsf{MSRP}.
+\end{array}
+\]
+\cite{RFC4975}
 \end{definition}
 
 \begin{algorithm}[h]
@@ -761,7 +916,6 @@ Rings borrows message splitting vocabulary from MSRP \cite{RFC4975}, while relay
 \end{algorithm}
 
 \begin{invariant}[Chunk reassembly]
-For message $m$ with chunks $c_i$,
 \[
 \begin{aligned}
   \operatorname{complete}(m)
@@ -776,13 +930,12 @@ For message $m$ with chunks $c_i$,
 \section{Ordering, Ranking, and Security}
 
 \begin{definition}[Sidecar witness]
-A witness is
 \[
   w=(domain,root,height,time,finality).
 \]
-For message commitment $c=H(msg)$,
 \[
 \begin{aligned}
+  c&=H(msg),\\
   \operatorname{Witness}(msg,w)
   \Leftrightarrow\;&
   \operatorname{Include}(c,w.root)=\top\\
@@ -792,7 +945,6 @@ For message commitment $c=H(msg)$,
 \end{definition}
 
 \begin{definition}[Witness order]
-For messages $a,b$ with witnesses $w_a,w_b$,
 \[
 \begin{aligned}
   a\prec b
@@ -801,21 +953,18 @@ For messages $a,b$ with witnesses $w_a,w_b$,
   &\land time(w_a)<time(w_b).
 \end{aligned}
 \]
-Different domains require an application comparison morphism
 \[
   \chi:Domain_a\times Domain_b\to Order.
 \]
 \end{definition}
 
 \begin{definition}[Ranking event]
-A ranking event is
 \[
 \begin{aligned}
   q=(&subject,rater,behavior,\\
      &evidence,epoch,weight,\sigma).
 \end{aligned}
 \]
-Its validity predicate is
 \[
 \begin{aligned}
   m_q &= subject\Vert behavior\Vert evidence\Vert epoch,\\
@@ -826,7 +975,6 @@ Its validity predicate is
 \end{definition}
 
 \begin{definition}[Score aggregation]
-For epoch $e$ and subject $s$,
 \[
 \begin{aligned}
   score_e(s)=
@@ -835,7 +983,9 @@ For epoch $e$ and subject $s$,
   &q.subject=s\}.
 \end{aligned}
 \]
-The aggregation function is median, trimmed mean, or another declared robust statistic.
+\[
+  \operatorname{robust}\in\{\mathsf{median},\mathsf{trimmedMean},\mathsf{declared}\}.
+\]
 \end{definition}
 
 \begin{table}[htbp]
@@ -857,54 +1007,63 @@ DoS & unbounded resource use & quotas, ranking, chunk bounds \\
 \end{table}
 
 \begin{obligation}[Replay rejection]
-For session $s$ and message nonce $\eta$,
 \[
-  \operatorname{accept}(s,\eta,t)
-  \Rightarrow
-  \eta\notin Seen_s
-  \land t<exp(s).
+\begin{array}{rcl}
+\operatorname{accept}(s,\eta,t)
+&\Rightarrow&
+  \eta\notin Seen_s\land t<exp(s),\\
+Seen'_s&=&Seen_s\cup\{\eta\},\\
+\mathsf{emitDelivery}&<&Seen'_s.
+\end{array}
 \]
-The transition inserts $\eta$ into $Seen_s$ before emitting delivery actions.
 \end{obligation}
 
 \section{Verification and Evaluation}
 
 \begin{definition}[State relation]
-A model configuration is
 \[
   C=(S,Q)
 \]
-where $S$ is protocol state and $Q\in A^*$ is the pending action list. The step relation
 \[
-  C\to C'
+\frac{
+  Q=a::Q_0\quad
+  I_A(a)=i\quad
+  \tau(S,i)=(S',O,\beta)
+}{
+  (S,Q)\to(S',Q_0\cdot\beta)
+}
 \]
-interprets the head of $Q$, applies a pure transition $\tau$, and appends emitted actions. This is the TLA-style state relation used for finite model exploration \cite{LamportSpecifyingSystems,Stateright}.
+\[
+  \mathsf{Explore}=\mathsf{TLAStyle}(\to)
+\]
+\cite{LamportSpecifyingSystems,Stateright}
 \end{definition}
 
 \begin{invariant}[Effect refinement]
-For implementation path $\operatorname{Impl}_A$ and action interpreter $I_A^\sharp$,
 \[
   \operatorname{Impl}_A(s,i)
   \preceq
   I_A^\sharp(\tau(s,i)).
 \]
-Runtime scheduling and logging are refinement details; protocol state changes factor through $\tau$.
+\[
+  \pi_{state}(\operatorname{Impl}_A)=\pi_{state}(I_A^\sharp\circ\tau).
+\]
 \end{invariant}
 
 \begin{obligation}[Topology coverage]
-The model-checking domain contains representative layouts
 \[
   \mathcal{L}=\{line,wrap,gap,partition,merge,churn\}
 \]
-and schedule classes
 \[
   \mathcal{S}=\{loss,dup,reorder,timeout,restart\}.
 \]
-Each checked property names $(L,S,P)$ with $L\in\mathcal{L}$, $S\in\mathcal{S}$, and predicate $P$.
+\[
+  \mathsf{CheckCase}=(L,S,P),
+  \qquad L\in\mathcal{L},\ S\in\mathcal{S}.
+\]
 \end{obligation}
 
 \begin{definition}[Latency decomposition]
-End-to-end latency is modeled as
 \[
   T_{total}
   =
@@ -914,7 +1073,9 @@ End-to-end latency is modeled as
   +T_{app}
   +T_{witness}.
 \]
-For Chord lookup, $h=O(\log |N|)$ under populated fingers.
+\[
+  h=O(\log |N|)\quad(F_n\text{ populated}).
+\]
 \end{definition}
 
 \begin{table}[htbp]
@@ -937,13 +1098,11 @@ For Chord lookup, $h=O(\log |N|)$ under populated fingers.
 \end{figure*}
 
 \begin{definition}[Reliability baseline]
-For lookup trials $Q$ and failed lookups $F$,
 \[
-  failrate=\frac{|F|}{|Q|}.
-\]
-For timeout count $to(q)$,
-\[
-  timeoutMean=\frac{1}{|Q|}\sum_{q\in Q}to(q).
+\begin{array}{rcl}
+failrate&=&\dfrac{|F|}{|Q|},\\[8pt]
+timeoutMean&=&\dfrac{1}{|Q|}\sum_{q\in Q}to(q).
+\end{array}
 \]
 \end{definition}
 
@@ -969,7 +1128,6 @@ For timeout count $to(q)$,
 \end{table}
 
 \begin{obligation}[Evaluation morphism]
-Chord reference metrics instantiate Rings evaluation by
 \[
 \begin{aligned}
   \Phi_{eval}:&
@@ -978,22 +1136,54 @@ Chord reference metrics instantiate Rings evaluation by
   (T_{total},timeoutMean,failrate)_{Rings},
 \end{aligned}
 \]
-where $\Phi_{eval}$ adds transport establishment, cryptographic work, witness verification, and application protocol cost.
+\[
+  \Delta\Phi=
+  T_{conn}+T_{crypto}+T_{witness}+T_{app}.
+\]
 \end{obligation}
 
 \section{Related Work}
 
-Kademlia-derived networks use XOR distance rather than circular successor order \cite{Kademlia,IPFS,Libp2p}. Tor and Nym emphasize relay anonymity rather than structured ownership \cite{TorNetwork,NymNetwork}. Rings selects Chord because the functions $\operatorname{owner}_N$, $\operatorname{Succ}^r_N$, and $\operatorname{Rep}^r_N$ give DID and VID placement a small algebraic core.
+\begin{table}[htbp]
+\centering
+\small
+\setlength{\tabcolsep}{2pt}
+\begin{tabular}{p{1.35cm}|p{1.55cm}|p{2.25cm}}
+\hline
+System & Metric & Ownership law \\ \hline
+Kademlia fam.
+  & XOR & bucket routing \\
+Relay mixnets
+  & path & no structured owner \\
+Rings
+  & circular & owner, Succ, Rep \\
+\hline
+\end{tabular}
+\caption{Routing and ownership comparison \cite{Kademlia,IPFS,Libp2p,TorNetwork,NymNetwork}}
+\label{related-table}
+\end{table}
 
 \section{Conclusion}
 
-Rings is the tuple
 \[
   \mathcal{Rings}=
   (R,\mathcal{R}_N,\mathbf{Set}/R,\Omega_N,
    \mathsf{T}^{\mathcal{E}}_A,\Pi,\mathbb{G},\mathcal{X}).
 \]
-Its base overlay is Correct Chord over an additive circular carrier. Its resources are namespace objects. Its protocol transitions are pure state morphisms with explicit action evidence. Its privacy protocols use separate cryptographic carriers. Its evaluation artifacts are tables, figures, algorithms, invariants, and obligations tied to the same model.
+\[
+\begin{array}{rcl}
+\mathsf{Overlay}&=&\mathsf{CorrectChord}(R,N,r),\\
+\mathsf{Resource}&=&(X_\nu,H_\nu)\in\mathbf{Set}/R,\\
+\mathsf{Placement}&=&\Omega_N(X_\nu,H_\nu),\\
+\mathsf{Transition}&=&\tau_\nu:S_\nu\times I_\nu\to Y_\nu,\\
+Y_\nu&=&\mathsf{T}^{\mathcal{E}_\nu}_{A_\nu}(S_\nu\times O_\nu),\\
+\mathsf{Crypto}&=&\mathbb{G}\lor\mathbb{F}_q,\quad
+  \mathsf{Crypto}\cap R=\varnothing,\\
+\mathsf{Evidence}&=&
+  \{\mathsf{figures},\mathsf{tables},\mathsf{algorithms}\}\\
+&&\cup\{\mathsf{invariants},\mathsf{obligations}\}.
+\end{array}
+\]
 
 \bibliographystyle{unsrt}
 \bibliography{./cites}
