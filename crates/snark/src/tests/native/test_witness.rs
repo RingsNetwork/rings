@@ -3,6 +3,8 @@ use crate::prelude::nova::provider::VestaEngine;
 use crate::prelude::nova::traits::Engine;
 use crate::r1cs;
 
+const SIMPLE_BN256_WASM: &str = "src/tests/native/circoms/simple_bn256.wasm";
+
 #[tokio::test]
 pub async fn test_calcu_witness_sha256() -> Result<()> {
     type F = <VestaEngine as Engine>::Scalar;
@@ -47,11 +49,10 @@ pub async fn test_calcu_witness_sha256() -> Result<()> {
 #[tokio::test]
 pub async fn test_calcu_witness_bn256() -> Result<()> {
     type F = <VestaEngine as Engine>::Base;
-    let mut witness_calculator = r1cs::load_circom_witness_calculator(r1cs::Path::Local(
-        "src/tests/native/circoms/simple_bn256.wasm".to_string(),
-    ))
-    .await
-    .unwrap();
+    let mut witness_calculator =
+        r1cs::load_circom_witness_calculator(r1cs::Path::Local(SIMPLE_BN256_WASM.to_string()))
+            .await
+            .unwrap();
     let input = vec![("step_in".to_string(), vec![F::from(4u64), F::from(2u64)])];
     let witness = witness_calculator
         .calculate_witness::<F>(input, true)
@@ -75,12 +76,11 @@ pub async fn test_calcu_witness_bn256() -> Result<()> {
 }
 
 #[tokio::test]
-pub async fn test_load_witness_remote() -> Result<()> {
+pub async fn test_load_witness_local_fixture() -> Result<()> {
     type F = <VestaEngine as Engine>::Base;
 
-    let url = "https://github.com/RingsNetwork/rings/raw/master/crates/snark/src/tests/native/circoms/simple_bn256.wasm";
     let mut witness_calculator =
-        r1cs::load_circom_witness_calculator(r1cs::Path::Remote(url.to_string()))
+        r1cs::load_circom_witness_calculator(r1cs::Path::Local(SIMPLE_BN256_WASM.to_string()))
             .await
             .unwrap();
     let input = vec![("step_in".to_string(), vec![F::from(4u64), F::from(2u64)])];
