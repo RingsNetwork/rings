@@ -22,6 +22,10 @@
 \usepackage[noend]{algpseudocode}
 \usepackage{abstract}
 
+\newtheorem{definition}{Definition}
+\newtheorem{law}{Law}
+\newtheorem{proposition}{Proposition}
+
 \date{Created: February 8, 2023\\Source: RingsNetwork/whitepaper repository\\Timestamp: 2023-02-08T13:27:55Z\\Last updated: July 4, 2026}
 \usetikzlibrary{shapes,arrows,positioning,patterns,through}
 \SetWatermarkText{Preview}
@@ -61,7 +65,7 @@
     \maketitle
     \begin{abstract}
 
-      Rings Network is a decentralized peer-to-peer network for the sovereign age. This paper describes a target architecture in which browsers and native devices participate as first-class nodes, identities are addressed as DIDs on a Chord overlay, resources and services are mapped into the same identifier space, and applications compose privacy-preserving protocols such as encrypted messaging, offline mailboxes, hidden service descriptors, ranking, and sidecar ordering. This paper presents the ideal Rings model while updating directions that have been superseded: Chord identifiers are treated as an additive circular space for routing and placement, cryptographic groups and fields are separate protocol carriers, and message relay, ranking, and sequencing are specified as Rings protocols rather than inherited wholesale from unrelated systems.
+      Rings Network is a decentralized peer-to-peer network for the sovereign age. This paper describes a target architecture in which browsers and native devices participate as first-class nodes, identities are addressed as DIDs on a Chord overlay, resources and services are mapped into the same identifier space, and applications compose privacy-preserving protocols such as encrypted messaging, offline mailboxes, hidden service descriptors, ranking, and sidecar ordering. The model is formalized as protocol objects over the circular carrier $\mathbb{Z}/2^{160}\mathbb{Z}$, with placement functors into the live Chord topology and Kleisli morphisms for effectful protocol transitions. This paper presents the ideal Rings model while updating directions that have been superseded: Chord identifiers are treated as an additive circular space for routing and placement, cryptographic groups and fields are separate protocol carriers, and message relay, ranking, and sequencing are specified as Rings protocols rather than inherited wholesale from unrelated systems.
 
   ~\\
   ~\\
@@ -381,6 +385,120 @@ The original Chord paper is not enough as a formal maintenance model under churn
 
 Rings adopts Correct Chord as the maintenance reference before adding Rings-specific semantics. The relevant transition family is join, rectify, and stabilize. Join introduces a node through a known peer and constructs a bounded successor list. Rectify processes a predecessor notification and accepts it only when it is a better predecessor candidate. Stabilize refines the successor list from the current successor's topology. Finger maintenance remains a routing optimization, and storage repair is a Rings extension layered on top of Chord placement.
 
+\subsection{Rings as an Algebraic Object}
+
+The Rings model is not merely "Chord plus applications." It is a family of protocol objects indexed over one circular carrier, with effects interpreted through a monadic runtime boundary. We use standard category-theoretic language for the shape of the construction \cite{MacLaneCategories}, and monadic language for effectful protocol composition \cite{MoggiMonads}.
+
+\begin{definition}[Carrier and circular order]
+Let
+\[
+  M = 2^{160},
+  \qquad
+  R = \mathbb{Z}/M\mathbb{Z}.
+\]
+For an observer $a \in R$, define clockwise distance and interval membership by
+\[
+  \delta_a(x) = (x-a) \bmod M,
+\]
+\[
+  (a,b]_R =
+  \{x \in R : 0 < \delta_a(x)
+  \land \delta_a(x) \leq \delta_a(b)\}.
+\]
+The carrier operation used by the overlay is addition in $R$. Multiplication in $R$ is not a routing operation.
+\end{definition}
+
+For a finite live set $N \subset R$, the mathematical owner of a key $k$ is
+\[
+  \operatorname{owner}_N(k)
+    = \arg\min_{n \in N} \delta_k(n).
+\]
+The bounded successor sequence of node $n$ is
+\[
+  \operatorname{Succ}^r_N(n)
+    = \operatorname{take}_r
+      \bigl(\operatorname{sort}_{\delta_n}(N \setminus \{n\})\bigr).
+\]
+Correct Chord gives the maintenance discipline for making local successor-list state converge toward these mathematical functions; Rings adds typed identities, resources, storage, sessions, and extension protocols on top of them.
+
+\begin{definition}[Rings object]
+A Rings overlay state over $N$ is the tuple
+\[
+\mathcal{R}_N =
+  (R,N,\operatorname{owner}_N,\operatorname{pred},
+   \operatorname{Succ}^r,F,E)
+\]
+where $F$ is the sparse finger relation and $E$ is the replicated entry store indexed by VIDs. The safety root is $(\operatorname{pred},\operatorname{Succ}^r)$; $F$ is a performance witness, and $E$ is a protocol-indexed payload algebra.
+\end{definition}
+
+Rings' main categorical move is to put every routable thing in the slice category $\mathbf{Set}/R$. A DID namespace, a mailbox namespace, a service-descriptor namespace, and a subring namespace are all sets equipped with a derivation map into $R$:
+\[
+  H_\nu : X_\nu \longrightarrow R .
+\]
+DIDs are account-controlled elements of such a namespace. VIDs are resource-controlled or protocol-derived elements. Both are objects over the same carrier, not elements of the same cryptographic group.
+
+For a fixed live topology $N$, placement is the composite
+\[
+  P^N_\nu = \operatorname{owner}_N \circ H_\nu :
+  X_\nu \longrightarrow N .
+\]
+Viewing $X_\nu$ and $N$ as discrete categories, $P^N_\nu$ is the placement functor for namespace $\nu$.
+If a namespace morphism $f:X_\nu \to X_\mu$ preserves derivation,
+\[
+  H_\mu \circ f = H_\nu ,
+\]
+then placement is natural:
+\[
+  P^N_\mu \circ f = P^N_\nu .
+\]
+This is the precise claim behind "DIDs, resources, mailboxes, service descriptors, and subrings share the same ring." They share placement by a commuting diagram over $R$; they do not share authorization, payload semantics, or cryptographic carrier laws.
+
+\begin{law}[Carrier separation]
+Overlay placement may use only
+\[
+  0,\quad +,\quad -,\quad \delta_a,\quad (a,b]_R,\quad
+  \operatorname{owner}_N .
+\]
+Any protocol requiring multiplication, inversion, scalar multiplication, polynomial interpolation, pairings, or subgroup checks must name a separate carrier such as a finite field $\mathbb{F}_q$ or elliptic-curve group $\mathbb{G}$. The only bridge from bytes or proofs into $R$ is an explicit, domain-separated derivation map $H_\nu$.
+\end{law}
+
+\begin{law}[Rotation equivariance]
+For every offset $t \in R$, define $T_t(x)=x+t$ and $N+t=\{n+t\mid n\in N\}$. Rings placement is independent of the absolute zero point:
+\[
+  \operatorname{owner}_{N+t}(k+t)
+    = \operatorname{owner}_N(k)+t .
+\]
+Thus a diagram, storage policy, or test that depends only on circular offsets can be translated around the ring without changing its algebraic content.
+\end{law}
+
+For an action alphabet $A$, let $A^*$ be the free monoid of finite action lists with identity $\epsilon$ and concatenation $\cdot$. The Rings effect monad is
+\[
+  \mathsf{T}_A(X)=X\times A^*,
+\]
+with unit and bind
+\[
+  \eta(x)=(x,\epsilon),
+\]
+\[
+  (x,\alpha)\mathbin{\gg\!=} f =
+    \text{let } f(x)=(y,\beta)
+    \text{ in } (y,\alpha\cdot\beta).
+\]
+Typed errors add a sum component, $\mathsf{E}+\mathsf{T}_A(X)$, but do not change the effect-composition law.
+
+\begin{definition}[Protocol object]
+A Rings protocol namespace is a tuple
+\[
+  \mathcal{P}_\nu=(X_\nu,S_\nu,I_\nu,O_\nu,A_\nu,H_\nu,\tau_\nu)
+\]
+where $X_\nu$ is the descriptor space, $S_\nu$ is protocol state, $I_\nu$ is input, $O_\nu$ is output, $A_\nu$ is the action alphabet, $H_\nu:X_\nu\to R$ is placement, and
+\[
+  \tau_\nu:S_\nu \times I_\nu \to
+  \mathsf{T}_{A_\nu}(S_\nu \times O_\nu)
+\]
+is the transition. A morphism of protocols preserves placement and maps transitions to transitions; in other words, protocol refactoring must commute with $H_\nu$ and with $\tau_\nu$.
+\end{definition}
+
 \subsection{Rings Extension: DID Ring and Carrier Boundaries}
 
 On top of Chord, Rings replaces opaque node keys with protocol DIDs and VIDs. DID ownership is proven through account verification algorithms. Recoverable signature schemes can identify an account by DID/address, while non-recoverable schemes carry explicit public keys and derive DIDs from domain-separated public-key transcripts. This verifier interface is the stable boundary; new proof systems must implement it rather than bypassing session verification.
@@ -397,19 +515,92 @@ Rings expresses the Chord layer as a pure state transition system interpreted by
 \[
   \operatorname{dist}_n(x) = (x - n) \bmod 2^{160}
 \]
-The successor sequence of $n$ is the bounded list of the nearest nodes by increasing $\operatorname{dist}_n$, and the predecessor is the farthest forward node, which is equivalent to the nearest node behind $n$ on the circle. A finger slot $i$ is the nearest known node whose clockwise distance is at least $2^i$; Rings uses a sparse no-wrap finger table, so a high slot may be empty when the known topology does not contain such a node.
+The local state carried by a node is modeled as
+\[
+  S_n=(p_n,L_n,F_n,E_n)
+\]
+where $p_n$ is predecessor, $L_n$ is a bounded successor sequence, $F_n$ is a sparse finger partial function, and $E_n$ is local replicated entry evidence. The mathematical target state is
+\[
+  p_n=\operatorname{pred}_N(n),
+  \qquad
+  L_n=\operatorname{Succ}^r_N(n).
+\]
+A finger slot is a partial witness for the Chord target:
+\[
+  target_i(n)=n+2^i,
+\]
+\[
+  finger_i(n)=\operatorname{owner}_N(target_i(n)).
+\]
+Rings uses a sparse no-wrap finger table, so $F_n(i)=\bot$ is a valid routing-state fact when the known topology cannot witness the slot. A present finger is a performance morphism toward the owner relation, not an additional membership proof.
+
+For storage and mailbox state, each VID $v$ has a payload algebra $E_v$. The default replicated-entry law is a join semilattice:
+\[
+  (E_v,\sqsubseteq,\sqcup,\bot)
+\]
+with commutativity, associativity, idempotence, and bottom identity. If a namespace cannot use semilattice merge, it must define an explicit conflict relation and finalization rule instead of inheriting DHT replication as if it were consensus.
 
 This formalization keeps the academic Chord story intact, then names Rings' deviations explicitly. Rings keeps Correct Chord's successor-list and predecessor-centered safety model, but maps every participant, storage entry, mailbox, service descriptor, subring anchor, and application rendezvous point into the same DID/VID carrier. Rings also uses sparse no-wrap fingers in its current model, so high-index finger absence is a routing-state fact, not a Chord theorem.
 
 \subsection{Rings Extension: Monadic Effect Boundary}
 
-Rings also models side effects algebraically. A DHT transition should not directly perform network IO. It returns an action value such as find-successor, query-successor-list, try-connect, notify, sync-storage, or no-op. The message layer treats these values as a small action functor and lowers them into the coproduct of core effects: payload relay, fresh message send, and connection management. The interpreter then executes those effects against the current transport implementation.
+Rings also models side effects algebraically. A DHT transition should not directly perform network IO. It is a Kleisli morphism
+\[
+  S \longrightarrow \mathsf{T}_A(S\times O)
+\]
+that returns a new state, an output, and a finite action list. Typical actions are find-successor, query-successor-list, try-connect, notify, sync-storage, and no-op. The message layer lowers protocol actions into the coproduct of core effects: payload relay, fresh message send, connection management, storage placement, and timer scheduling.
 
-This is a monadic boundary in the operational sense: pure protocol logic builds an effect description, composition sequences descriptions such as multi-actions, and an interpreter finally binds the description to IO. The target architecture does not require every runtime to expose a generic Monad trait, but it does require the same separation of pure state transition, effect value, and interpreter. This keeps protocol laws testable without opening real sockets, while allowing browser, native, and embedded runtimes to use different effect interpreters.
+Composition is Kleisli composition:
+\[
+  \tau_2 \star \tau_1
+    = \lambda s.\ \tau_1(s)\mathbin{\gg\!=}\tau_2 .
+\]
+Operationally, this means protocol composition concatenates action evidence rather than executing it. A runtime interpreter is a monoid homomorphism
+\[
+  I_A:A^*\to IO
+\]
+such that $I_A(\epsilon)$ is no-op and $I_A(\alpha\cdot\beta)$ executes $I_A(\alpha)$ before $I_A(\beta)$. Browser, native, and embedded runtimes may choose different interpreters; the protocol law remains the same as long as they interpret the same action alphabet.
+
+The target architecture therefore does not require every runtime to expose a generic Monad trait, but it does require the same separation of pure state transition, effect value, and interpreter. This keeps protocol laws testable without opening real sockets, while allowing runtime-specific IO adapters.
 
 \subsection{Rings Extension: Formal Verification Boundary}
 
-The Rings formal-methods style starts from the Chord and Correct Chord literature, then writes the Rings state machine in TLA-like state variables and operators. The state variables are the DID carrier $R = \mathbb{Z}/2^{160}\mathbb{Z}$, the successor sequence, predecessor, sparse finger table, and replicated entry state. The operators are join, rectify, stabilize, finger repair, storage sync, storage repair, and lookup. The main invariant is that the converged local state is the unique fixpoint determined by the sorted circular topology.
+The Rings formal-methods style starts from the Chord and Correct Chord literature, then writes the Rings state machine in TLA-like state variables and operators. The state variables are the DID carrier $R = \mathbb{Z}/2^{160}\mathbb{Z}$, the live set $N$, predecessor map $p$, successor sequence $L$, sparse finger table $F$, replicated entry state $E$, and pending action list $Q$. The operators are join, rectify, stabilize, finger repair, storage sync, storage repair, and lookup.
+
+The central safety predicate is that converged local state is a fixpoint of the mathematical topology:
+\[
+  \begin{aligned}
+  \operatorname{Inv}_{ring}(N,S)
+  \equiv \forall n\in N.\;&
+  p_n=\operatorname{pred}_N(n)
+  \\
+  &\land\;
+  L_n=\operatorname{Succ}^r_N(n).
+  \end{aligned}
+\]
+Lookup safety is owner preservation:
+\[
+  \operatorname{Lookup}(S,k)
+  \Downarrow
+  \operatorname{owner}_N(k)
+\]
+where $\Downarrow$ means that repeated Kleisli interpretation of remote lookup actions reaches the same owner as the mathematical function, under the modeled delivery assumptions.
+
+Replica placement is a namespace-indexed invariant:
+\[
+  \operatorname{Inv}_{place}
+  \equiv
+  \forall \nu,x.\;
+  replicas(H_\nu(x))
+  \subseteq
+  \operatorname{Succ}^r_N(P^N_\nu(x)).
+\]
+Effect transparency is the boundary invariant:
+\[
+  \pi_S(\tau(s,i)) = s'
+  \quad\text{is independent of } I_A,
+\]
+meaning that pure transition results do not depend on the runtime interpreter chosen for browser, native, or embedded IO.
 
 The verification boundary is intentionally scoped. Deterministic convergence checks show that, for representative finite layouts, the pure Chord operators materialize the expected safety fixpoint. Stateright models exhaust finite message interleavings for selected subprotocols such as predecessor notification, a small discovery abstraction, storage CRDT merge, and hand-off cleanup. Trace replay checks the real multi-hop lookup implementation on converged rings against the mathematical successor relation. These artifacts support the paper's Chord and DID algebra, but they do not claim a full proof of asynchronous liveness, arbitrary network fairness, Byzantine behavior, or every production runtime schedule.
 
