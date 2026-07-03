@@ -363,22 +363,38 @@ pub fn app() -> Html {
         let settings_dialog_open = settings_dialog_open.clone();
         Callback::from(move |_| {
             if let Some(bridge) = extension::extension_node_bridge() {
-                did.set(String::new());
-                wallet_account.set(None);
-                node_starting.set(false);
-                peers.set(Vec::new());
-                generated_offer.set(String::new());
-                remote_offer.set(String::new());
-                generated_answer.set(String::new());
-                remote_answer.set(String::new());
-                link_dialog_open.set(false);
-                settings_dialog_open.set(false);
+                node_starting.set(true);
                 status.set("stopping background node".to_string());
                 let status = status.clone();
+                let did = did.clone();
+                let wallet_account = wallet_account.clone();
+                let node_starting = node_starting.clone();
+                let peers = peers.clone();
+                let generated_offer = generated_offer.clone();
+                let remote_offer = remote_offer.clone();
+                let generated_answer = generated_answer.clone();
+                let remote_answer = remote_answer.clone();
+                let link_dialog_open = link_dialog_open.clone();
+                let settings_dialog_open = settings_dialog_open.clone();
                 wasm_bindgen_futures::spawn_local(async move {
                     match extension::extension_node_stop(&bridge).await {
-                        Ok(message) => status.set(message),
-                        Err(error) => status.set(format!("background stop failed: {error}")),
+                        Ok(message) => {
+                            did.set(String::new());
+                            wallet_account.set(None);
+                            node_starting.set(false);
+                            peers.set(Vec::new());
+                            generated_offer.set(String::new());
+                            remote_offer.set(String::new());
+                            generated_answer.set(String::new());
+                            remote_answer.set(String::new());
+                            link_dialog_open.set(false);
+                            settings_dialog_open.set(false);
+                            status.set(message);
+                        }
+                        Err(error) => {
+                            node_starting.set(false);
+                            status.set(format!("background stop failed: {error}"));
+                        }
                     }
                 });
                 return;
@@ -544,11 +560,13 @@ pub fn app() -> Html {
             ) }
         },
     };
+    let extension_mode = extension::extension_node_bridge().is_some();
     let workbench_control = controls::workbench_control(
         *active_panel,
         active_panel.clone(),
         workbench_dialog_open.clone(),
         workbench_body,
+        !extension_mode,
     );
     let control_sidebar = controls::control_sidebar(
         control_view,

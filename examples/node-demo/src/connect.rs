@@ -39,6 +39,30 @@ pub(crate) struct ConnectState<'a> {
     pub(crate) launcher_hidden: bool,
 }
 
+struct ConnectDialogView {
+    active_tab: LinkTab,
+    active_sdp_mode: SdpMode,
+    http_endpoint: UseStateHandle<String>,
+    sdp_remote_did: UseStateHandle<String>,
+    generated_offer: UseStateHandle<String>,
+    remote_offer: UseStateHandle<String>,
+    generated_answer: UseStateHandle<String>,
+    remote_answer: UseStateHandle<String>,
+    status: UseStateHandle<String>,
+}
+
+struct ConnectDialogActions {
+    set_manual_sdp: Callback<MouseEvent>,
+    set_http_endpoint: Callback<MouseEvent>,
+    set_initiator: Callback<MouseEvent>,
+    set_responder: Callback<MouseEvent>,
+    close_dialog: Callback<MouseEvent>,
+    on_http_connect: Callback<MouseEvent>,
+    on_create_offer: Callback<MouseEvent>,
+    on_answer_offer: Callback<MouseEvent>,
+    on_accept_answer: Callback<MouseEvent>,
+}
+
 pub(crate) fn link_control(
     state: ConnectState<'_>,
     node_ref: Rc<RefCell<Option<DemoNode>>>,
@@ -292,24 +316,28 @@ pub(crate) fn link_control(
             {
                 if **state.link_dialog_open {
                     connect_dialog(
-                        **state.link_tab,
-                        **state.sdp_mode,
-                        set_manual_sdp,
-                        set_http_endpoint,
-                        set_initiator,
-                        set_responder,
-                        close_dialog,
-                        (*state.http_endpoint).clone(),
-                        (*state.sdp_remote_did).clone(),
-                        (*state.generated_offer).clone(),
-                        (*state.remote_offer).clone(),
-                        (*state.generated_answer).clone(),
-                        (*state.remote_answer).clone(),
-                        status.clone(),
-                        on_http_connect,
-                        on_create_offer,
-                        on_answer_offer,
-                        on_accept_answer,
+                        ConnectDialogView {
+                            active_tab: **state.link_tab,
+                            active_sdp_mode: **state.sdp_mode,
+                            http_endpoint: (*state.http_endpoint).clone(),
+                            sdp_remote_did: (*state.sdp_remote_did).clone(),
+                            generated_offer: (*state.generated_offer).clone(),
+                            remote_offer: (*state.remote_offer).clone(),
+                            generated_answer: (*state.generated_answer).clone(),
+                            remote_answer: (*state.remote_answer).clone(),
+                            status: status.clone(),
+                        },
+                        ConnectDialogActions {
+                            set_manual_sdp,
+                            set_http_endpoint,
+                            set_initiator,
+                            set_responder,
+                            close_dialog,
+                            on_http_connect,
+                            on_create_offer,
+                            on_answer_offer,
+                            on_accept_answer,
+                        },
                     )
                 } else {
                     html! {}
@@ -319,63 +347,47 @@ pub(crate) fn link_control(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn connect_dialog(
-    active_tab: LinkTab,
-    active_sdp_mode: SdpMode,
-    set_manual_sdp: Callback<MouseEvent>,
-    set_http_endpoint: Callback<MouseEvent>,
-    set_initiator: Callback<MouseEvent>,
-    set_responder: Callback<MouseEvent>,
-    close_dialog: Callback<MouseEvent>,
-    http_endpoint: UseStateHandle<String>,
-    sdp_remote_did: UseStateHandle<String>,
-    generated_offer: UseStateHandle<String>,
-    remote_offer: UseStateHandle<String>,
-    generated_answer: UseStateHandle<String>,
-    remote_answer: UseStateHandle<String>,
-    status: UseStateHandle<String>,
-    on_http_connect: Callback<MouseEvent>,
-    on_create_offer: Callback<MouseEvent>,
-    on_answer_offer: Callback<MouseEvent>,
-    on_accept_answer: Callback<MouseEvent>,
-) -> Html {
+fn connect_dialog(view: ConnectDialogView, actions: ConnectDialogActions) -> Html {
     html! {
         <div class="modal-shell">
-            <button class="dialog-backdrop" aria-label="Close link dialog" onclick={close_dialog.clone()}></button>
+            <button class="dialog-backdrop" aria-label="Close link dialog" onclick={actions.close_dialog.clone()}></button>
             <section class="link-dialog" role="dialog" aria-modal="true" aria-labelledby="link-dialog-title">
                 <header class="dialog-header">
                     <div>
                         <p class="eyebrow">{ "Peer link" }</p>
                         <h2 id="link-dialog-title">{ "Connection exchange" }</h2>
                     </div>
-                    <button class="secondary dialog-close" onclick={close_dialog}>{ "Close" }</button>
+                    <button class="secondary dialog-close" onclick={actions.close_dialog}>{ "Close" }</button>
                 </header>
-                { link_dialog_tabs(active_tab, set_manual_sdp, set_http_endpoint) }
+                { link_dialog_tabs(view.active_tab, actions.set_manual_sdp, actions.set_http_endpoint) }
                 <div class="dialog-body">
                     {
-                        match active_tab {
+                        match view.active_tab {
                             LinkTab::ManualSdp => html! {
                                 <div class="dialog-pane sdp-tool">
                                     <div class="tool-header">
                                         <h3>{ "Manual SDP exchange" }</h3>
-                                        { sdp_mode_switch(active_sdp_mode, set_initiator, set_responder) }
+                                        { sdp_mode_switch(
+                                            view.active_sdp_mode,
+                                            actions.set_initiator,
+                                            actions.set_responder,
+                                        ) }
                                     </div>
                                     {
-                                        match active_sdp_mode {
+                                        match view.active_sdp_mode {
                                             SdpMode::Initiator => sdp_initiator_flow(
-                                                sdp_remote_did,
-                                                generated_offer,
-                                                remote_answer,
-                                                status.clone(),
-                                                on_create_offer,
-                                                on_accept_answer,
+                                                view.sdp_remote_did,
+                                                view.generated_offer,
+                                                view.remote_answer,
+                                                view.status.clone(),
+                                                actions.on_create_offer,
+                                                actions.on_accept_answer,
                                             ),
                                             SdpMode::Responder => sdp_responder_flow(
-                                                remote_offer,
-                                                generated_answer,
-                                                status.clone(),
-                                                on_answer_offer,
+                                                view.remote_offer,
+                                                view.generated_answer,
+                                                view.status.clone(),
+                                                actions.on_answer_offer,
                                             ),
                                         }
                                     }
@@ -387,8 +399,8 @@ fn connect_dialog(
                                         <h3>{ "HTTP endpoint" }</h3>
                                         <span class="payload-state">{ "Seed" }</span>
                                     </div>
-                                    { text_input("Seed HTTP endpoint", http_endpoint) }
-                                    <button onclick={on_http_connect}>{ "Connect endpoint" }</button>
+                                    { text_input("Seed HTTP endpoint", view.http_endpoint) }
+                                    <button onclick={actions.on_http_connect}>{ "Connect endpoint" }</button>
                                 </div>
                             },
                         }

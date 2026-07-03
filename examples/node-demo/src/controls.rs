@@ -439,18 +439,40 @@ pub(crate) fn workbench_control(
     active_panel: UseStateHandle<Panel>,
     dialog_open: UseStateHandle<bool>,
     body: Html,
+    available: bool,
 ) -> Html {
     let open_dialog = {
         let dialog_open = dialog_open.clone();
-        Callback::from(move |_| dialog_open.set(true))
+        Callback::from(move |_| {
+            if available {
+                dialog_open.set(true);
+            }
+        })
     };
     let close_dialog = {
         let dialog_open = dialog_open.clone();
         Callback::from(move |_| dialog_open.set(false))
     };
+    let button_class = if available {
+        "secondary action-button command-button workbench-button"
+    } else {
+        "secondary action-button command-button workbench-button disabled"
+    };
+    let button_title = if available {
+        "WorkBench"
+    } else {
+        "WorkBench is available in webpage mode"
+    };
     html! {
         <div class="workbench-control">
-            <button class="secondary action-button command-button workbench-button" type="button" aria-label="WorkBench" title="WorkBench" onclick={open_dialog}>
+            <button
+                class={button_class}
+                type="button"
+                aria-label="WorkBench"
+                title={button_title}
+                disabled={!available}
+                onclick={open_dialog}
+            >
                 <span class="label-desktop">{ "WorkBench" }</span>
                 <span class="label-mobile command-icon" aria-hidden="true">
                     { ui_icon(UiIcon::Terminal) }
@@ -458,7 +480,7 @@ pub(crate) fn workbench_control(
                 </span>
             </button>
             {
-                if *dialog_open {
+                if available && *dialog_open {
                     html! {
                         <div class="modal-shell">
                             <button class="dialog-backdrop" aria-label="Close workbench" onclick={close_dialog.clone()}></button>
