@@ -1,4 +1,4 @@
-//! Yew application for the unified node demo.
+//! Yew application for the Rings browser frontend.
 
 use std::time::Duration;
 
@@ -44,12 +44,15 @@ struct SettingsSnapshot {
     http_endpoint: String,
 }
 
-/// Unified Rings node demo app.
+/// Rings browser frontend app.
 #[function_component(App)]
 pub fn app() -> Html {
     let active_panel = use_state(|| Panel::Dweb);
     let wallet_kind = use_state(|| {
-        extension::load_setting(extension::SETTING_WALLET_KIND)
+        extension::load_setting_with_legacy(
+            extension::SETTING_WALLET_KIND,
+            extension::LEGACY_SETTING_WALLET_KIND,
+        )
             .map(|value| WalletKind::from_value(&value))
             .unwrap_or(WalletKind::WebCrypto)
     });
@@ -63,26 +66,47 @@ pub fn app() -> Html {
     let did = use_state(String::new);
     let status = use_state(|| "select an account standard and start the browser node".to_string());
     let network_id = use_state(|| {
-        extension::load_setting(extension::SETTING_NETWORK_ID).unwrap_or_else(|| "1".to_string())
+        extension::load_setting_with_legacy(
+            extension::SETTING_NETWORK_ID,
+            extension::LEGACY_SETTING_NETWORK_ID,
+        )
+        .unwrap_or_else(|| "1".to_string())
     });
     let ice_servers = use_state(|| {
-        extension::load_setting(extension::SETTING_ICE_SERVERS)
+        extension::load_setting_with_legacy(
+            extension::SETTING_ICE_SERVERS,
+            extension::LEGACY_SETTING_ICE_SERVERS,
+        )
             .unwrap_or_else(|| "stun://stun.l.google.com:19302".to_string())
     });
     let stabilize_interval = use_state(|| {
-        extension::load_setting(extension::SETTING_STABILIZE_INTERVAL)
+        extension::load_setting_with_legacy(
+            extension::SETTING_STABILIZE_INTERVAL,
+            extension::LEGACY_SETTING_STABILIZE_INTERVAL,
+        )
             .unwrap_or_else(|| "3".to_string())
     });
     let storage_name = use_state(|| {
-        extension::load_setting(extension::SETTING_STORAGE_NAME)
-            .unwrap_or_else(|| "rings-node-demo".to_string())
+        extension::load_setting_with_legacy(
+            extension::SETTING_STORAGE_NAME,
+            extension::LEGACY_SETTING_STORAGE_NAME,
+        )
+        .unwrap_or_else(|| "rings-frontend".to_string())
     });
     let peers = use_state(Vec::<PeerView>::new);
 
-    let seed_url =
-        use_state(|| extension::load_setting(extension::SETTING_SEED_URL).unwrap_or_default());
+    let seed_url = use_state(|| {
+        extension::load_setting_with_legacy(
+            extension::SETTING_SEED_URL,
+            extension::LEGACY_SETTING_SEED_URL,
+        )
+        .unwrap_or_default()
+    });
     let http_endpoint = use_state(|| {
-        extension::load_setting(extension::SETTING_HTTP_ENDPOINT)
+        extension::load_setting_with_legacy(
+            extension::SETTING_HTTP_ENDPOINT,
+            extension::LEGACY_SETTING_HTTP_ENDPOINT,
+        )
             .unwrap_or_else(|| "http://127.0.0.1:50001".to_string())
     });
     let sdp_remote_did = use_state(String::new);
@@ -330,7 +354,7 @@ pub fn app() -> Html {
                 site.borrow_mut().insert(
                     "/".to_string(),
                     format!(
-                        "<h1>Rings node {my_did}</h1><p>Served by the unified browser demo.</p>"
+                        "<h1>Rings node {my_did}</h1><p>Served by the Rings browser frontend.</p>"
                     ),
                 );
                 let on_dweb_response = {

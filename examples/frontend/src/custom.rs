@@ -15,7 +15,7 @@ use yew::Callback;
 
 use crate::node;
 
-/// Namespaces installed automatically for the unified node demo.
+/// Namespaces installed automatically for the browser frontend.
 pub const DEMO_NAMESPACES: &[&str] = &["custom", "example"];
 
 /// Custom message observed by the local node.

@@ -1,7 +1,9 @@
-# Rings
+# Rings Frontend
 
-Unified browser node demo for Rings. This replaces the separate browser connectivity,
-dweb, and proof-demo surfaces as the shared website and browser-extension app.
+Browser frontend for Rings. This replaces the historical browser connectivity
+example as the shared web and browser-extension app. The standalone `dweb` and
+`proof-demo` surfaces remain conceptually separate; this frontend only includes
+dweb and proof workbench panels for operating a browser node from one screen.
 
 The implementation is Rust/Yew. Browser APIs for WebCrypto, MetaMask, and Phantom
 are called from Rust through `js_sys` and `wasm_bindgen`; the core application has
@@ -22,13 +24,13 @@ Styles are split under `src/styles/` by responsibility:
 - Connect by SDP offer/answer or by a seed node HTTP endpoint.
 - Render connected peers as a circular topology.
 - Host and fetch dweb pages over the `dweb` namespace.
-- Run the distributed SNARK proof flow from the previous proof demo.
+- Run the distributed SNARK proof workbench flow alongside the retained proof demo.
 - Register and send user custom namespace messages.
 
 ## Run as a Web App
 
 ```sh
-cd examples/node-demo
+cd examples/frontend
 trunk serve --release true
 ```
 
@@ -43,7 +45,7 @@ Build the same Yew/Wasm application with Trunk. The Trunk `post_build` hook
 rewrites the web output into a Chrome Manifest V3 package after every build:
 
 ```sh
-cd examples/node-demo
+cd examples/frontend
 trunk build --release
 ```
 
@@ -76,7 +78,7 @@ fixture test after packaging the extension:
 cd ../..
 npm install --ignore-scripts --package-lock=false
 npx playwright install chromium
-npm run test:node-demo-extension-wallet
+npm run test:frontend-extension-wallet
 ```
 
 The test opens `test-pages/wallet-fixture.html` from a local `127.0.0.1` server,
@@ -86,7 +88,7 @@ Phantom bridge calls against mock providers in the current tab.
 ## Check
 
 ```sh
-cd examples/node-demo
+cd examples/frontend
 cargo fmt --check
 cargo check --target wasm32-unknown-unknown
 cargo test --release --target wasm32-unknown-unknown
@@ -94,5 +96,5 @@ trunk build --release
 cd ../..
 npm install --ignore-scripts --package-lock=false
 npx playwright install chromium
-npm run test:node-demo-extension-wallet
+npm run test:frontend-extension-wallet
 ```

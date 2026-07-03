@@ -1,4 +1,4 @@
-//! Unified Rings browser node demo.
+//! Rings browser frontend.
 //!
 //! The app is implemented in Rust/Yew. Browser wallet and WebCrypto APIs are
 //! reached through `js_sys`/`wasm_bindgen`; there is no JavaScript or TypeScript

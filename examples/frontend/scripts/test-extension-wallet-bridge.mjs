@@ -54,7 +54,7 @@ try {
           networkId: "1",
           iceServers: "stun://stun.l.google.com:19302",
           stabilizeInterval: "3",
-          storageName: "rings-node-demo-wallet-fixture",
+          storageName: "rings-frontend-wallet-fixture",
           seedUrl: "",
         }),
       };

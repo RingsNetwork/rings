@@ -38,8 +38,17 @@ const ICON_STATES = {
   },
 };
 
-const files = await readdir(sourceDist);
-const sourceHtml = await readFile(join(sourceDist, "index.html"), "utf8").catch(() => "");
+let sourceRoot = sourceDist;
+let files = await readdir(sourceRoot);
+if (!files.some((file) => file.endsWith(".js"))) {
+  const stageDist = join(sourceDist, ".stage");
+  const stageFiles = await readdir(stageDist).catch(() => []);
+  if (stageFiles.some((file) => file.endsWith(".js"))) {
+    sourceRoot = stageDist;
+    files = stageFiles;
+  }
+}
+const sourceHtml = await readFile(join(sourceRoot, "index.html"), "utf8").catch(() => "");
 const jsFile =
   entryFileFromHtml(sourceHtml, files, /import\s+init[\s\S]*?from\s+['"]([^'"]+\.js)['"]/) ??
   entryFileFromHtml(sourceHtml, files, /<link[^>]+rel="modulepreload"[^>]+href="([^"]+\.js)"/) ??
@@ -51,8 +60,8 @@ const wasmFile =
 
 await rm(extensionDist, { force: true, recursive: true });
 await mkdir(extensionDist, { recursive: true });
-await cp(join(sourceDist, jsFile), join(extensionDist, jsFile));
-await cp(join(sourceDist, wasmFile), join(extensionDist, wasmFile));
+await cp(join(sourceRoot, jsFile), join(extensionDist, jsFile));
+await cp(join(sourceRoot, wasmFile), join(extensionDist, wasmFile));
 
 await writeFile(
   join(extensionDist, "index.html"),
@@ -84,7 +93,7 @@ console.log(`Packaged Chrome MV3 extension at ${extensionDist}`);
 function singleFile(files, predicate, label) {
   const matches = files.filter(predicate);
   if (matches.length !== 1) {
-    throw new Error(`Expected one ${label} in ${sourceDist}, found ${matches.length}`);
+    throw new Error(`Expected one ${label} in ${sourceRoot}, found ${matches.length}`);
   }
   return matches[0];
 }
@@ -195,10 +204,10 @@ globalThis.dispatchEvent(new CustomEvent("TrunkApplicationStarted", { detail: { 
 function manifest(version) {
   return {
     manifest_version: 3,
-    name: "Rings Node",
+    name: "Rings Frontend",
     short_name: "Rings",
     version,
-    description: "Rings browser node console for WebRTC peer connectivity and Chord topology.",
+    description: "Rings browser frontend for WebRTC peer connectivity and Chord topology.",
     minimum_chrome_version: "116",
     icons: {
       16: "icons/rings-16.png",

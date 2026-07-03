@@ -4161,6 +4161,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "rings-frontend"
+version = "0.1.0"
+dependencies = [
+ "base58",
+ "base64 0.22.1",
+ "futures",
+ "gloo-timers 0.3.0",
+ "js-sys",
+ "rings-node",
+ "serde",
+ "serde_json",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test",
+ "web-sys",
+ "yew",
+]
+
+[[package]]
 name = "rings-node"
 version = "0.12.0"
 dependencies = [
@@ -4203,25 +4222,6 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
-]
-
-[[package]]
-name = "rings-node-demo"
-version = "0.1.0"
-dependencies = [
- "base58",
- "base64 0.22.1",
- "futures",
- "gloo-timers 0.3.0",
- "js-sys",
- "rings-node",
- "serde",
- "serde_json",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "wasm-bindgen-test",
- "web-sys",
- "yew",
 ]
 
 [[package]]

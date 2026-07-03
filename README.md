@@ -90,7 +90,7 @@ Runnable examples live in [`examples/`](./examples):
 | Example | What it shows |
 |---|---|
 | [`native`](./examples/native) | A minimal native node registering a custom namespaced protocol |
-| [`node-demo`](./examples/node-demo) | Unified browser node demo and future website app: wallet login, SDP/HTTP connectivity, topology, dweb, proofs, and custom messages |
+| [`frontend`](./examples/frontend) | Browser frontend replacing the historical browser example: wallet login, SDP/HTTP connectivity, topology, dweb workbench, proof workbench, and custom messages |
 | [`relay`](./examples/relay) | TCP & UDP tunnels to a peer's service over the overlay (`tcp.rs` / `udp.rs`) |
 | [`snark`](./examples/snark) | Fold-scheme zkSNARK proving / verification |
 | [`ffi`](./examples/ffi) | Driving a node over the C FFI |
@@ -121,7 +121,7 @@ handler)`. See [`examples/relay`](./examples/relay) and
 |----------------------------------|----------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | Rings Whitepaper                 | [Rings Whitepaper](https://github.com/RingsNetwork/whitepaper)             | [![rings-ext-v2](https://github.com/RingsNetwork/rings_ext_v2/actions/workflows/dev.yml/badge.svg)](https://github.com/RingsNetwork/rings_ext_v2/actions/workflows/dev.yml)               |
 | Rings Documentation              | [Rings Docs](https://rings.gitbook.io/)                                    |                                                                                                                                                                                           |
-| Rings                            | [Rings](./examples/node-demo)                                              | Unified browser node demo and future website app                                                                                                                                          |
+| Rings                            | [Rings](./examples/frontend)                                               | Browser frontend replacing the historical browser example                                                                                                                                 |
 | Rings Browser Handshakes Example | [Rings Browser Handshakes](https://github.com/RingsNetwork/rings-wasm-p2p) | Historical Demo / PoC                                                                                                                                                                     |
 | Rings Browser Extension          | [Rings Browser Extension](https://github.com/RingsNetwork/rings_ext_v2)    | Beta                                                                                                                                                                                      |
 

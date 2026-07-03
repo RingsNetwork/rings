@@ -50,13 +50,23 @@ const EXTENSION_NODE_CONNECT_HTTP: &str = "rings.node.connectHttp";
 const EXTENSION_NODE_CREATE_OFFER: &str = "rings.node.createOffer";
 const EXTENSION_NODE_ANSWER_OFFER: &str = "rings.node.answerOffer";
 const EXTENSION_NODE_ACCEPT_ANSWER: &str = "rings.node.acceptAnswer";
-pub(crate) const SETTING_WALLET_KIND: &str = "rings.node-demo.walletKind";
-pub(crate) const SETTING_NETWORK_ID: &str = "rings.node-demo.networkId";
-pub(crate) const SETTING_ICE_SERVERS: &str = "rings.node-demo.iceServers";
-pub(crate) const SETTING_STABILIZE_INTERVAL: &str = "rings.node-demo.stabilizeInterval";
-pub(crate) const SETTING_STORAGE_NAME: &str = "rings.node-demo.storageName";
-pub(crate) const SETTING_SEED_URL: &str = "rings.node-demo.seedUrl";
-pub(crate) const SETTING_HTTP_ENDPOINT: &str = "rings.node-demo.httpEndpoint";
+pub(crate) const SETTING_WALLET_KIND: &str = "rings.frontend.walletKind";
+pub(crate) const SETTING_NETWORK_ID: &str = "rings.frontend.networkId";
+pub(crate) const SETTING_ICE_SERVERS: &str = "rings.frontend.iceServers";
+pub(crate) const SETTING_STABILIZE_INTERVAL: &str = "rings.frontend.stabilizeInterval";
+pub(crate) const SETTING_STORAGE_NAME: &str = "rings.frontend.storageName";
+pub(crate) const SETTING_SEED_URL: &str = "rings.frontend.seedUrl";
+pub(crate) const SETTING_HTTP_ENDPOINT: &str = "rings.frontend.httpEndpoint";
+
+// Preserve settings saved before the browser demo was renamed to frontend.
+pub(crate) const LEGACY_SETTING_WALLET_KIND: &str = "rings.node-demo.walletKind";
+pub(crate) const LEGACY_SETTING_NETWORK_ID: &str = "rings.node-demo.networkId";
+pub(crate) const LEGACY_SETTING_ICE_SERVERS: &str = "rings.node-demo.iceServers";
+pub(crate) const LEGACY_SETTING_STABILIZE_INTERVAL: &str =
+    "rings.node-demo.stabilizeInterval";
+pub(crate) const LEGACY_SETTING_STORAGE_NAME: &str = "rings.node-demo.storageName";
+pub(crate) const LEGACY_SETTING_SEED_URL: &str = "rings.node-demo.seedUrl";
+pub(crate) const LEGACY_SETTING_HTTP_ENDPOINT: &str = "rings.node-demo.httpEndpoint";
 pub(crate) const WALLET_CONNECT_TIMEOUT: Duration = Duration::from_secs(45);
 pub(crate) const SESSION_AUTH_TIMEOUT: Duration = Duration::from_secs(60);
 const NODE_START_POLL_ATTEMPTS: usize = 240;
@@ -78,6 +88,14 @@ pub(crate) struct ExtensionNodeSnapshot {
     pub(crate) wallet_account: Option<WalletAccount>,
     pub(crate) message: String,
     pub(crate) error: Option<String>,
+}
+
+pub(crate) fn load_setting_with_legacy(key: &str, legacy_key: &str) -> Option<String> {
+    load_setting(key).or_else(|| {
+        let value = load_setting(legacy_key)?;
+        save_setting(key, &value);
+        Some(value)
+    })
 }
 
 struct HeadlessNodeState {
@@ -776,7 +794,7 @@ fn extension_start_settings_from_js(value: &JsValue) -> ExtensionStartSettings {
         stabilize_interval: js_string_field(value, "stabilizeInterval")
             .unwrap_or_else(|_| "3".to_string()),
         storage_name: js_string_field(value, "storageName")
-            .unwrap_or_else(|_| "rings-node-demo".to_string()),
+            .unwrap_or_else(|_| "rings-frontend".to_string()),
         seed_url: js_string_field(value, "seedUrl").unwrap_or_default(),
     }
 }
