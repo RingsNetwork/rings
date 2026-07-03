@@ -16,9 +16,26 @@ The Rings Network aimed at creating a fully decentralized network. It is built u
 
 Rings Network allows all traffic to bypass centralized infrastructures, achieving complete decentralization.
 
+## Whitepaper
 
-For protocol details, see the repository-owned [Rings Whitepaper](./papers/rings.pdf).
+The canonical protocol paper is maintained in this repository:
 
+- [Rings whitepaper PDF](./papers/rings.pdf)
+- [LaTeX source](./papers/rings.tex)
+- [Paper assets and build notes](./papers/)
+
+If you cite Rings in academic or technical writing, use:
+
+```bibtex
+@misc{rings-network,
+  author = {Ryan J. Kung},
+  title = {Rings: A peer-to-peer network for sovereign age},
+  year = {2023},
+  month = feb,
+  url = {https://github.com/RyanKung/rings/blob/master/papers/rings.pdf},
+  note = {Repository-owned whitepaper and LaTeX source: https://github.com/RyanKung/rings/tree/master/papers}
+}
+```
 
 ## Features
 
@@ -117,7 +134,7 @@ handler)`. See [`examples/relay`](./examples/relay) and
 
 | Resource | Link | Notes |
 |---|---|---|
-| Rings Whitepaper | [PDF](./papers/rings.pdf), [LaTeX source](./papers/rings.tex) | Repository-owned copy |
+| Rings Whitepaper | [PDF](./papers/rings.pdf), [LaTeX source](./papers/rings.tex), [citation](#whitepaper) | Canonical protocol paper |
 | Browser frontend | [`examples/frontend`](./examples/frontend) | Web page and extension workflow |
 | Examples | [`examples/`](./examples) | Native, frontend, dweb, proof, relay, snark, and FFI examples |
 
