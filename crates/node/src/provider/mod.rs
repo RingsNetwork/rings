@@ -108,9 +108,14 @@ impl Provider {
         self.core().send(to, namespace, payload).await
     }
 
-    /// Return local measurement counters for a peer.
-    pub async fn peer_measurement(&self, did: Did) -> PeerMeasurement {
+    /// Return local measurement counters for a peer, if observed.
+    pub async fn peer_measurement(&self, did: Did) -> Option<PeerMeasurement> {
         self.processor.peer_measurement(did).await
+    }
+
+    /// Return observed local measurement counters for all connected peers.
+    pub async fn peer_measurements(&self) -> Vec<PeerMeasurement> {
+        self.processor.peer_measurements().await
     }
 
     /// Create a provider instance with storage name

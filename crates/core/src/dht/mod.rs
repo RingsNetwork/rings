@@ -9,8 +9,6 @@ pub mod did;
 pub mod entry;
 /// Finger table for Rings
 pub mod finger;
-/// Signed online-node registry descriptors.
-pub mod online;
 mod stabilization;
 /// Subring model stored through DHT entries.
 pub mod subring;
@@ -27,12 +25,6 @@ pub use chord::TopoInfo;
 pub use did::Did;
 pub use finger::FingerTable;
 pub use finger::DEFAULT_FINGER_TABLE_SIZE;
-pub use online::OnlineNodeDescriptor;
-pub use online::OnlineNodeDescriptorBody;
-pub use online::OnlineNodeType;
-pub use online::ONLINE_NODES_TOPIC;
-pub use online::ONLINE_NODE_CAPABILITY_SNARK;
-pub use online::ONLINE_NODE_CAPABILITY_STORAGE;
 pub use stabilization::Stabilizer;
 pub use successor::SuccessorReader;
 pub use successor::SuccessorWriter;

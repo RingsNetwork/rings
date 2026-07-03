@@ -8,8 +8,8 @@ use serde::Serialize;
 
 use crate::chunk::Chunk;
 use crate::dht::entry::Entry;
-use crate::dht::entry::EntryOperation;
 use crate::dht::entry::PlacedEntry;
+use crate::dht::entry::PlacedEntryOperation;
 use crate::dht::entry::PlacementMiss;
 use crate::dht::entry::SyncedEntryAck;
 use crate::dht::Did;
@@ -266,7 +266,7 @@ pub enum Message {
     /// Response when entries are found.
     FoundEntry(FoundEntry),
     /// Remote message for entry operations.
-    OperateEntry(EntryOperation),
+    OperateEntry(PlacedEntryOperation),
     /// Remote message for entry syncing.
     SyncEntriesWithSuccessor(SyncEntriesWithSuccessor),
     /// Response after synced entries are durably persisted.

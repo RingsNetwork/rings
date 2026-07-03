@@ -4,8 +4,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde::Deserialize;
-use serde::Serialize;
 
 use crate::dht::Did;
 
@@ -82,7 +80,7 @@ impl PeerQualityThresholds {
 ///
 /// The counters are local observations only. They do not claim global
 /// reputation and are not signed or replicated.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PeerQualityEvidence {
     /// Successful connection observations.
     pub connected: u64,
@@ -102,7 +100,7 @@ pub struct PeerQualityEvidence {
 ///
 /// These counters are local observations only. They are not signed, replicated,
 /// or global reputation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PeerMeasurement {
     /// Peer DID these counters describe.
     pub did: Did,
@@ -111,21 +109,18 @@ pub struct PeerMeasurement {
 }
 
 impl PeerMeasurement {
-    /// Return a zero-count snapshot for `did`.
-    pub const fn empty(did: Did) -> Self {
-        Self {
-            did,
-            evidence: PeerQualityEvidence::new(0, 0, 0, 0, 0, 0),
-        }
-    }
-
-    /// Read all counters for `did` from a measurement implementation.
-    pub async fn from_measure<M>(measure: &M, did: Did) -> Self
+    /// Read counters for `did` from a measurement implementation.
+    ///
+    /// Returns `None` when no counter has ever been recorded for `did`; absence
+    /// is distinct from an observed peer with non-zero counters.
+    pub async fn from_measure<M>(measure: &M, did: Did) -> Option<Self>
     where M: Measure + ?Sized {
-        Self {
-            did,
-            evidence: PeerQualityEvidence::from_measure(measure, did).await,
+        let evidence = PeerQualityEvidence::from_measure(measure, did).await;
+        if evidence == PeerQualityEvidence::default() {
+            return None;
         }
+
+        Some(Self { did, evidence })
     }
 }
 

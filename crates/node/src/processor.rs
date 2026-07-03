@@ -7,17 +7,12 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::future::join_all;
 use futures::lock::Mutex as AsyncMutex;
 use rings_core::chunk::ReassemblyLimits;
 use rings_core::dht::Did;
 use rings_core::dht::EntryStorage;
-use rings_core::dht::OnlineNodeDescriptor;
-use rings_core::dht::OnlineNodeType;
 use rings_core::dht::DEFAULT_FINGER_TABLE_SIZE;
-use rings_core::dht::ONLINE_NODES_TOPIC;
-#[cfg(feature = "snark")]
-use rings_core::dht::ONLINE_NODE_CAPABILITY_SNARK;
-use rings_core::dht::ONLINE_NODE_CAPABILITY_STORAGE;
 use rings_core::ecc::PublicKey;
 use rings_core::ecc::SecretKey;
 use rings_core::measure::MeasureImpl;
@@ -32,7 +27,6 @@ use rings_core::message::Encoder;
 use rings_core::message::Message;
 use rings_core::prelude::uuid;
 use rings_core::storage::MemStorage;
-use rings_core::swarm::OnlineNodeDescriptorParams;
 use rings_core::swarm::Swarm;
 use rings_core::swarm::SwarmBuilder;
 use rings_core::utils::get_epoch_ms;
@@ -45,6 +39,13 @@ use crate::consts::DATA_REDUNDANT;
 use crate::error::Error;
 use crate::error::Result;
 use crate::measure::PeriodicMeasure;
+use crate::online::OnlineNodeDescriptor;
+use crate::online::OnlineNodeDescriptorBody;
+use crate::online::OnlineNodeType;
+use crate::online::ONLINE_NODES_TOPIC;
+#[cfg(feature = "snark")]
+use crate::online::ONLINE_NODE_CAPABILITY_SNARK;
+use crate::online::ONLINE_NODE_CAPABILITY_STORAGE;
 use crate::prelude::entry;
 use crate::prelude::wasm_export;
 use crate::prelude::ChordStorageInterface;
@@ -399,6 +400,7 @@ pub struct ProcessorBuilder {
 pub struct Processor {
     /// a swarm instance
     pub swarm: Arc<Swarm>,
+    session_sk: SessionSk,
     stabilize_interval: Duration,
     online_node_heartbeat_interval: Duration,
     online_node_ttl: Duration,
@@ -488,6 +490,7 @@ impl ProcessorBuilder {
         let storage = self.storage.unwrap_or_else(|| Box::new(MemStorage::new()));
         let endpoint_hint = self.external_address.clone();
 
+        let session_sk = self.session_sk.clone();
         let mut swarm_builder =
             SwarmBuilder::new(self.network_id, &self.ice_servers, storage, self.session_sk);
         swarm_builder = swarm_builder.dht_storage_redundancy(DATA_REDUNDANT);
@@ -508,6 +511,7 @@ impl ProcessorBuilder {
 
         Ok(Processor {
             swarm,
+            session_sk,
             stabilize_interval: self.stabilize_interval,
             online_node_heartbeat_interval: self.online_node_heartbeat_interval,
             online_node_ttl: self.online_node_ttl,
@@ -538,17 +542,25 @@ impl Processor {
     }
 
     fn online_node_descriptor_at(&self, now_ms: u128) -> Result<OnlineNodeDescriptor> {
-        self.swarm
-            .online_node_descriptor(OnlineNodeDescriptorParams {
+        OnlineNodeDescriptor::new_signed(
+            OnlineNodeDescriptorBody {
+                did: self.swarm.did(),
+                public_key: self
+                    .swarm
+                    .account_verification_pubkey()
+                    .map_err(Error::CoreError)?,
                 node_type: self.online_node_type.clone(),
+                network_id: self.swarm.network_id(),
                 capabilities: Self::online_node_capabilities(),
                 endpoint_hint: self.online_node_endpoint_hint.clone(),
                 started_at_ms: self.online_node_started_at_ms,
                 heartbeat_at_ms: now_ms,
                 expires_at_ms: now_ms + self.online_node_ttl.as_millis(),
                 version: crate::util::build_version(),
-            })
-            .map_err(Error::CoreError)
+            },
+            &self.session_sk,
+        )
+        .map_err(Error::CoreError)
     }
 
     fn online_node_descriptors_from_entry(entry: &entry::Entry) -> Vec<OnlineNodeDescriptor> {
@@ -872,17 +884,23 @@ impl Processor {
         .map_err(Error::EntryError)
     }
 
-    /// Return local measurement counters for a peer.
-    pub async fn peer_measurement(&self, did: Did) -> PeerMeasurement {
+    /// Return local measurement counters for a peer, if observed.
+    pub async fn peer_measurement(&self, did: Did) -> Option<PeerMeasurement> {
         self.swarm.peer_measurement(did).await
     }
 
-    /// Return local measurement counters for all connected peers.
+    /// Return observed local measurement counters for all connected peers.
     pub async fn peer_measurements(&self) -> Vec<PeerMeasurement> {
-        let mut measurements = Vec::new();
-        for did in self.swarm.peer_dids() {
-            measurements.push(self.peer_measurement(did).await);
-        }
+        let mut measurements = join_all(
+            self.swarm
+                .peer_dids()
+                .into_iter()
+                .map(|did| self.peer_measurement(did)),
+        )
+        .await
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
         measurements.sort_by_key(|measurement| measurement.did);
         measurements
     }
@@ -907,7 +925,6 @@ impl Processor {
         Ok(NodeInfoResponse {
             version: crate::util::build_version(),
             swarm: Some(self.swarm.inspect().await.into()),
-            measurements: self.peer_measurements().await,
         })
     }
 }
@@ -915,6 +932,7 @@ impl Processor {
 #[cfg(test)]
 #[cfg(feature = "node")]
 mod test {
+    use std::collections::BTreeMap;
     use std::sync::Mutex;
     use std::sync::OnceLock;
     use std::time::Duration;
@@ -1114,18 +1132,25 @@ mod test {
         let expired_processor = prepare_processor().await;
         let now_ms = get_epoch_ms();
         let live = processor.online_node_descriptor_at(now_ms)?;
-        let expired = expired_processor
-            .swarm
-            .online_node_descriptor(OnlineNodeDescriptorParams {
-                node_type: processor.online_node_type.clone(),
+        let expired = OnlineNodeDescriptor::new_signed(
+            OnlineNodeDescriptorBody {
+                did: expired_processor.did(),
+                public_key: expired_processor
+                    .swarm
+                    .account_verification_pubkey()
+                    .map_err(Error::CoreError)?,
+                node_type: expired_processor.online_node_type.clone(),
+                network_id: expired_processor.swarm.network_id(),
                 capabilities: Processor::online_node_capabilities(),
                 endpoint_hint: None,
                 started_at_ms: now_ms.saturating_sub(120_000),
                 heartbeat_at_ms: now_ms.saturating_sub(90_000),
                 expires_at_ms: now_ms.saturating_sub(30_000),
                 version: crate::util::build_version(),
-            })
-            .map_err(Error::CoreError)?;
+            },
+            &expired_processor.session_sk,
+        )
+        .map_err(Error::CoreError)?;
 
         processor
             .storage_store(Processor::online_node_registry_entry(vec![
@@ -1205,17 +1230,31 @@ mod test {
         connect_processors(&publisher, &owner, &callback, &other_callback).await;
         wait_for_mutual_dht_topology(&publisher, &owner).await?;
         let registry_key = entry::Entry::gen_did(ONLINE_NODES_TOPIC)?;
-        for placement_key in registry_key.rotate_affine(DATA_REDUNDANT)? {
-            assert!(!owns_entry_placement(&publisher, placement_key)?);
-            assert!(owns_entry_placement(&owner, placement_key)?);
+        let placement_keys = registry_key.rotate_affine(DATA_REDUNDANT)?;
+        for placement_key in placement_keys.as_slice() {
+            assert!(!owns_entry_placement(&publisher, *placement_key)?);
+            assert!(owns_entry_placement(&owner, *placement_key)?);
         }
 
         let published = publisher.publish_online_node_descriptor().await?;
         let mut expected = BTreeSet::from([published.did]);
-        wait_for_online_node_dids(&owner, &expected, "owner sees publisher publish").await?;
+        wait_for_online_node_dids_in_storage(
+            &owner,
+            placement_keys.as_slice(),
+            &expected,
+            "owner stores publisher publish",
+        )
+        .await?;
 
         let owner_published = owner.publish_online_node_descriptor().await?;
         expected.insert(owner_published.did);
+        wait_for_online_node_dids_in_storage(
+            &owner,
+            placement_keys.as_slice(),
+            &expected,
+            "owner stores both publishers at every placement",
+        )
+        .await?;
         let other_nodes =
             wait_for_online_node_dids(&owner, &expected, "owner sees both publishers").await?;
         let nodes =
@@ -1562,6 +1601,57 @@ mod test {
         }
     }
 
+    async fn wait_for_online_node_dids_in_storage(
+        processor: &Processor,
+        placement_keys: &[Did],
+        expected: &BTreeSet<Did>,
+        context: &str,
+    ) -> Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let mut observed_by_placement = BTreeMap::new();
+            for placement_key in placement_keys {
+                let observed = match processor
+                    .swarm
+                    .dht()
+                    .storage
+                    .get(&placement_key.to_string())
+                    .await
+                    .map_err(Error::Storage)?
+                {
+                    Some(entry) => Processor::online_node_descriptors_from_entry(&entry)
+                        .into_iter()
+                        .map(|descriptor| descriptor.did)
+                        .collect::<BTreeSet<_>>(),
+                    None => BTreeSet::new(),
+                };
+                observed_by_placement.insert(*placement_key, observed);
+            }
+
+            if observed_by_placement
+                .values()
+                .all(|observed| expected.is_subset(observed))
+            {
+                return Ok(());
+            }
+
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "online node registry storage did not converge during {context}: expected {expected:?}, observed {observed_by_placement:?}",
+                    )
+                });
+            tokio::time::timeout(remaining, tokio::time::sleep(Duration::from_millis(20)))
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "online node registry storage did not converge during {context}: expected {expected:?}, observed {observed_by_placement:?}",
+                    )
+                });
+        }
+    }
+
     async fn wait_for_peer_measurement(
         processor: &Processor,
         did: Did,
@@ -1569,9 +1659,10 @@ mod test {
     ) -> PeerMeasurement {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let measurement = processor.peer_measurement(did).await;
-            if predicate(&measurement) {
-                return measurement;
+            if let Some(measurement) = processor.peer_measurement(did).await {
+                if predicate(&measurement) {
+                    return measurement;
+                }
             }
 
             let remaining = deadline
@@ -1686,6 +1777,17 @@ mod test {
     }
 
     #[tokio::test]
+    async fn peer_measurement_is_absent_without_measure_or_observation() {
+        let unmeasured = prepare_processor_with_identity_key(SecretKey::random()).await;
+        let unseen_did = SecretKey::random().address().into();
+        assert!(unmeasured.peer_measurement(unseen_did).await.is_none());
+
+        let measured = prepare_measured_processor().await;
+        assert!(measured.peer_measurement(unseen_did).await.is_none());
+        assert!(measured.peer_measurements().await.is_empty());
+    }
+
+    #[tokio::test]
     async fn provider_exposes_sent_and_received_peer_measurements() {
         let _network_guard = network_test_guard().await;
         let callback1 = test_callback();
@@ -1718,13 +1820,11 @@ mod test {
         assert_eq!(received.did, p1.did());
 
         let node_info = p1.get_node_info().await.unwrap();
-        assert!(node_info
-            .measurements
-            .iter()
-            .any(|measurement| measurement.did == p2.did() && measurement.evidence.sent >= 1));
+        assert_eq!(node_info.version, crate::util::build_version());
+        assert!(node_info.swarm.is_some());
 
         let provider = Provider::from_processor(Arc::new(p1));
-        let provider_measurement = provider.peer_measurement(p2.did()).await;
+        let provider_measurement = provider.peer_measurement(p2.did()).await.unwrap();
         assert!(provider_measurement.evidence.sent >= 1);
 
         let rpc_value = provider
@@ -1734,7 +1834,22 @@ mod test {
             .await
             .unwrap();
         let rpc_measurement: PeerMeasurementResponse = serde_json::from_value(rpc_value).unwrap();
-        assert!(rpc_measurement.measurement.evidence.sent >= 1);
+        assert!(rpc_measurement
+            .measurement
+            .as_ref()
+            .is_some_and(|measurement| measurement.counters.sent >= 1));
+
+        let list_value = provider
+            .request(Method::ListPeerMeasurements, ListPeerMeasurementsRequest {})
+            .await
+            .unwrap();
+        let list_measurements: ListPeerMeasurementsResponse =
+            serde_json::from_value(list_value).unwrap();
+        let p2_did_json = serde_json::to_value(p2.did()).unwrap();
+        assert!(list_measurements
+            .measurements
+            .iter()
+            .any(|measurement| measurement.did == p2_did_json && measurement.counters.sent >= 1));
     }
 
     #[tokio::test]

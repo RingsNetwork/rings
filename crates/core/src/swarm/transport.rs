@@ -399,11 +399,11 @@ impl SwarmTransport {
         }
     }
 
-    /// Return this node's local measurement counters for `peer`.
-    pub(crate) async fn peer_measurement(&self, peer: Did) -> PeerMeasurement {
+    /// Return this node's local measurement counters for `peer`, if observed.
+    pub(crate) async fn peer_measurement(&self, peer: Did) -> Option<PeerMeasurement> {
         match &self.measure {
             Some(measure) => PeerMeasurement::from_measure(measure.as_ref(), peer).await,
-            None => PeerMeasurement::empty(peer),
+            None => None,
         }
     }
 

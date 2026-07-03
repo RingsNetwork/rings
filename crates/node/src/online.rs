@@ -4,18 +4,17 @@
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 
+use rings_core::dht::Did;
+use rings_core::ecc::VerificationPublicKey;
+use rings_core::error::Error;
+use rings_core::error::Result;
+use rings_core::message::Decoder;
+use rings_core::message::Encoded;
+use rings_core::message::Encoder;
+use rings_core::message::MessageVerification;
+use rings_core::session::SessionSk;
 use serde::Deserialize;
 use serde::Serialize;
-
-use crate::dht::Did;
-use crate::ecc::VerificationPublicKey;
-use crate::error::Error;
-use crate::error::Result;
-use crate::message::Decoder;
-use crate::message::Encoded;
-use crate::message::Encoder;
-use crate::message::MessageVerification;
-use crate::session::SessionSk;
 
 /// DHT topic used for online-node registry descriptors.
 pub const ONLINE_NODES_TOPIC: &str = "online_nodes";
@@ -276,9 +275,10 @@ impl Decoder for OnlineNodeDescriptor {
 
 #[cfg(test)]
 mod tests {
+    use rings_core::ecc::SecretKey;
+    use rings_core::session::SessionSk;
+
     use super::*;
-    use crate::ecc::SecretKey;
-    use crate::session::SessionSk;
 
     fn descriptor_at(heartbeat_at_ms: u128, expires_at_ms: u128) -> Result<OnlineNodeDescriptor> {
         let key = SecretKey::random();

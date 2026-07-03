@@ -14,9 +14,6 @@ pub use builder::SwarmBuilder;
 
 use self::callback::InnerSwarmCallback;
 use crate::dht::Did;
-use crate::dht::OnlineNodeDescriptor;
-use crate::dht::OnlineNodeDescriptorBody;
-use crate::dht::OnlineNodeType;
 use crate::dht::PeerRing;
 use crate::dht::Stabilizer;
 use crate::ecc::PublicKey;
@@ -42,24 +39,6 @@ pub struct Swarm {
     callback: RwLock<SharedSwarmCallback>,
 }
 
-/// Parameters used to build a signed online-node descriptor.
-pub struct OnlineNodeDescriptorParams {
-    /// Runtime family advertised by this node.
-    pub node_type: OnlineNodeType,
-    /// Capability labels advertised by this node.
-    pub capabilities: Vec<String>,
-    /// Optional externally reachable endpoint hint.
-    pub endpoint_hint: Option<String>,
-    /// Process start timestamp in milliseconds since Unix epoch.
-    pub started_at_ms: u128,
-    /// Heartbeat timestamp in milliseconds since Unix epoch.
-    pub heartbeat_at_ms: u128,
-    /// Expiry timestamp in milliseconds since Unix epoch.
-    pub expires_at_ms: u128,
-    /// Node software version.
-    pub version: String,
-}
-
 impl Swarm {
     /// Get did of self.
     pub fn did(&self) -> Did {
@@ -82,28 +61,6 @@ impl Swarm {
     /// Get this swarm's network id.
     pub fn network_id(&self) -> u32 {
         self.transport.network_id
-    }
-
-    /// Build and sign an online-node descriptor for this swarm.
-    pub fn online_node_descriptor(
-        &self,
-        params: OnlineNodeDescriptorParams,
-    ) -> Result<OnlineNodeDescriptor> {
-        OnlineNodeDescriptor::new_signed(
-            OnlineNodeDescriptorBody {
-                did: self.did(),
-                public_key: self.account_verification_pubkey()?,
-                node_type: params.node_type,
-                network_id: self.network_id(),
-                capabilities: params.capabilities,
-                endpoint_hint: params.endpoint_hint,
-                started_at_ms: params.started_at_ms,
-                heartbeat_at_ms: params.heartbeat_at_ms,
-                expires_at_ms: params.expires_at_ms,
-                version: params.version,
-            },
-            self.transport.session_sk(),
-        )
     }
 
     /// Get DHT(Distributed Hash Table) of self.
@@ -183,8 +140,8 @@ impl Swarm {
         self.transport.get_connection_ids()
     }
 
-    /// Return local measurement counters for `peer`.
-    pub async fn peer_measurement(&self, peer: Did) -> PeerMeasurement {
+    /// Return local measurement counters for `peer`, if observed.
+    pub async fn peer_measurement(&self, peer: Did) -> Option<PeerMeasurement> {
         self.transport.peer_measurement(peer).await
     }
 

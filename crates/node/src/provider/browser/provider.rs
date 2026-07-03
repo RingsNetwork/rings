@@ -289,6 +289,8 @@ impl Provider {
         future_to_promise(async move {
             let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
             let measurement = p.peer_measurement(did).await;
+            let measurement = crate::rpc_dto::optional_peer_measurement_info(measurement)
+                .map_err(JsError::from)?;
             let v = js_value::serialize(&measurement).map_err(JsError::from)?;
             Ok(v)
         })

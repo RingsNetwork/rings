@@ -6,6 +6,7 @@ use async_recursion::async_recursion;
 use async_trait::async_trait;
 
 use crate::dht::entry::Entry;
+use crate::dht::entry::PlacedEntryOperation;
 use crate::dht::entry::SyncedEntryAck;
 use crate::dht::Chord;
 use crate::dht::ChordStorage;
@@ -63,13 +64,6 @@ fn finish_storage_action(act: PeerRingAction) -> Result<()> {
     match act {
         PeerRingAction::None => Ok(()),
         act => Err(Error::unexpected_peer_ring_action(act)),
-    }
-}
-
-fn finish_storage_action_ref(act: &PeerRingAction) -> Result<()> {
-    match act {
-        PeerRingAction::None => Ok(()),
-        act => Err(Error::unexpected_peer_ring_action(act.clone())),
     }
 }
 
@@ -169,6 +163,37 @@ pub(super) async fn handle_storage_store_act(
     Ok(())
 }
 
+async fn operate_entry_at_placement(
+    dht: &PeerRing,
+    placement: Did,
+    op: EntryOperation,
+) -> Result<()> {
+    let op = op.stamped(dht.did)?;
+    let this = match dht.storage.get(&placement.to_string()).await? {
+        Some(this) => this,
+        None => op.clone().gen_default_entry()?,
+    };
+    let entry = this.operate(op, dht.did)?;
+    dht.join_storage_entry(placement, entry).await?;
+    Ok(())
+}
+
+async fn handle_placed_entry_operation(
+    handler: &MessageHandler,
+    ctx: &MessagePayload,
+    msg: &PlacedEntryOperation,
+) -> Result<()> {
+    match handler.dht.find_successor(msg.placement)? {
+        PeerRingAction::Some(_) => {
+            operate_entry_at_placement(&handler.dht, msg.placement, msg.op.clone()).await
+        }
+        PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessor(_)) => {
+            reset_storage_relay_destination(handler, ctx, next).await
+        }
+        action => Err(Error::unexpected_peer_ring_action(action)),
+    }
+}
+
 /// Execute copy-only storage repair actions.
 #[cfg_attr(feature = "wasm", async_recursion(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_recursion)]
@@ -254,35 +279,6 @@ async fn handle_storage_search_act(
             Ok(())
         }
         act => finish_storage_action(act),
-    }
-}
-
-/// Execute storage operation actions emitted by inbound message handlers.
-#[cfg_attr(feature = "wasm", async_recursion(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_recursion)]
-async fn handle_storage_operate_act(
-    handler: &MessageHandler,
-    ctx: &MessagePayload,
-    act: &PeerRingAction,
-) -> Result<()> {
-    match act {
-        PeerRingAction::RemoteAction(next, _) => {
-            reset_storage_relay_destination(handler, ctx, *next).await
-        }
-        PeerRingAction::MultiActions(acts) => {
-            let jobs = acts
-                .iter()
-                .map(|act| async move { handle_storage_operate_act(handler, ctx, act).await });
-
-            for res in futures::future::join_all(jobs).await {
-                if res.is_err() {
-                    tracing::error!("Failed on handle multi actions: {:#?}", res)
-                }
-            }
-
-            Ok(())
-        }
-        act => finish_storage_action_ref(act),
     }
 }
 
@@ -442,12 +438,9 @@ impl HandleMsg<FoundEntry> for MessageHandler {
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
-impl HandleMsg<EntryOperation> for MessageHandler {
-    async fn handle(&self, ctx: &MessagePayload, msg: &EntryOperation) -> Result<()> {
-        // For relay message, set redundant to 1
-        let action =
-            <PeerRing as ChordStorage<_, 1>>::entry_operate(&self.dht, msg.clone()).await?;
-        handle_storage_operate_act(self, ctx, &action).await
+impl HandleMsg<PlacedEntryOperation> for MessageHandler {
+    async fn handle(&self, ctx: &MessagePayload, msg: &PlacedEntryOperation) -> Result<()> {
+        handle_placed_entry_operation(self, ctx, msg).await
     }
 }
 
@@ -549,7 +542,6 @@ mod test {
     #[test]
     fn finish_storage_action_accepts_empty_action() -> Result<()> {
         finish_storage_action(PeerRingAction::None)?;
-        finish_storage_action_ref(&PeerRingAction::None)?;
         Ok(())
     }
 
@@ -1106,7 +1098,10 @@ mod test {
         let ev = next_payload(&node2).await?;
         assert!(matches!(
             ev.transaction.data()?,
-            Message::OperateEntry(EntryOperation::Overwrite(x)) if x.did == entry_key
+            Message::OperateEntry(PlacedEntryOperation {
+                placement,
+                op: EntryOperation::Overwrite(x),
+            }) if placement == entry_key && x.did == entry_key
         ));
 
         assert!(node1.swarm.storage_check_cache(entry_key).await.is_none());

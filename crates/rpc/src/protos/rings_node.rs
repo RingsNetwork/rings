@@ -5,10 +5,9 @@
 //! now plain serde structs. Field names and types are kept identical to the
 //! previous prost-generated output to preserve the on-the-wire JSON shape.
 
-use rings_core::dht::OnlineNodeDescriptor;
-use rings_core::measure::PeerMeasurement;
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::Value;
 
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct PeerInfo {
@@ -179,8 +178,31 @@ pub struct LookupOnlineNodesRequest {
 }
 
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub enum OnlineNodeTypeInfo {
+    #[default]
+    Native,
+    Browser,
+    Ffi,
+}
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct OnlineNodeDescriptorInfo {
+    pub did: Value,
+    pub public_key: Value,
+    pub node_type: OnlineNodeTypeInfo,
+    pub network_id: u32,
+    pub capabilities: Vec<String>,
+    pub endpoint_hint: Option<String>,
+    pub started_at_ms: u128,
+    pub heartbeat_at_ms: u128,
+    pub expires_at_ms: u128,
+    pub version: String,
+    pub signature: Value,
+}
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct LookupOnlineNodesResponse {
-    pub nodes: Vec<OnlineNodeDescriptor>,
+    pub nodes: Vec<OnlineNodeDescriptorInfo>,
 }
 
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
@@ -231,8 +253,6 @@ pub struct SwarmInfo {
 pub struct NodeInfoResponse {
     pub version: String,
     pub swarm: Option<SwarmInfo>,
-    #[serde(default)]
-    pub measurements: Vec<PeerMeasurement>,
 }
 
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
@@ -241,8 +261,32 @@ pub struct PeerMeasurementRequest {
 }
 
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct ListPeerMeasurementsRequest {}
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct PeerMeasurementCountersInfo {
+    pub connected: u64,
+    pub disconnected: u64,
+    pub sent: u64,
+    pub failed_to_send: u64,
+    pub received: u64,
+    pub failed_to_receive: u64,
+}
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct PeerMeasurementInfo {
+    pub did: Value,
+    pub counters: PeerMeasurementCountersInfo,
+}
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct ListPeerMeasurementsResponse {
+    pub measurements: Vec<PeerMeasurementInfo>,
+}
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct PeerMeasurementResponse {
-    pub measurement: PeerMeasurement,
+    pub measurement: Option<PeerMeasurementInfo>,
 }
 
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]

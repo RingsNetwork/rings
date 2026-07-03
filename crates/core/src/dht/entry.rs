@@ -80,6 +80,15 @@ pub enum EntryOperation {
     Tombstone(Entry),
 }
 
+/// A storage operation targeted at one concrete affine placement key.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlacedEntryOperation {
+    /// Placement key that must receive the operation.
+    pub placement: Did,
+    /// Operation to apply at `placement`.
+    pub op: EntryOperation,
+}
+
 /// A DHT storage entry with an [`EntryKind`] and a ring key represented as [`Did`].
 ///
 /// An [`Entry`] is data stored by [`ChordStorage`](super::ChordStorage). It is not a

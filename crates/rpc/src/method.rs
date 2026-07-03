@@ -44,6 +44,8 @@ pub enum Method {
     NodeInfo,
     /// Retrieve local measurement counters for a peer
     PeerMeasurement,
+    /// Retrieve local measurement counters for connected peers
+    ListPeerMeasurements,
     /// Retrieve Node DID
     NodeDid,
 }
@@ -70,6 +72,7 @@ impl Method {
             Method::LookupOnlineNodes => "lookupOnlineNodes",
             Method::NodeInfo => "nodeInfo",
             Method::PeerMeasurement => "peerMeasurement",
+            Method::ListPeerMeasurements => "listPeerMeasurements",
             Method::NodeDid => "nodeDid",
         }
     }
@@ -105,6 +108,7 @@ impl TryFrom<&str> for Method {
             "lookupOnlineNodes" => Method::LookupOnlineNodes,
             "nodeInfo" => Method::NodeInfo,
             "peerMeasurement" => Method::PeerMeasurement,
+            "listPeerMeasurements" => Method::ListPeerMeasurements,
             "nodeDid" => Method::NodeDid,
             _ => return Err(Error::InvalidMethod),
         })

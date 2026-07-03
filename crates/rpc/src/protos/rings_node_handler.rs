@@ -51,6 +51,7 @@ impl InternalRpcHandler {
             + HandleRpc<LookupOnlineNodesRequest, LookupOnlineNodesResponse>
             + HandleRpc<NodeInfoRequest, NodeInfoResponse>
             + HandleRpc<PeerMeasurementRequest, PeerMeasurementResponse>
+            + HandleRpc<ListPeerMeasurementsRequest, ListPeerMeasurementsResponse>
             + HandleRpc<NodeDidRequest, NodeDidResponse>,
     {
         let method = Method::try_from(method.as_str()).map_err(|_| Error {
@@ -164,6 +165,12 @@ impl InternalRpcHandler {
             }
             Method::PeerMeasurement => {
                 let req = serde_json::from_value::<PeerMeasurementRequest>(params)
+                    .map_err(|e| Error::invalid_params(e.to_string()))?;
+                let resp = processor.handle_rpc(req).await?;
+                serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
+            }
+            Method::ListPeerMeasurements => {
+                let req = serde_json::from_value::<ListPeerMeasurementsRequest>(params)
                     .map_err(|e| Error::invalid_params(e.to_string()))?;
                 let resp = processor.handle_rpc(req).await?;
                 serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))

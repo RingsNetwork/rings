@@ -230,6 +230,14 @@ impl Client {
         self.call_method(Method::PeerMeasurement, req).await
     }
 
+    /// Query local measurement counters for all connected peers.
+    pub async fn list_peer_measurements(
+        &self,
+        req: &ListPeerMeasurementsRequest,
+    ) -> Result<ListPeerMeasurementsResponse> {
+        self.call_method(Method::ListPeerMeasurements, req).await
+    }
+
     pub async fn node_did(&self, req: &NodeDidRequest) -> Result<NodeDidResponse> {
         self.call_method(Method::NodeDid, req).await
     }

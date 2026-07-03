@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use crate::error::Error;
 use crate::error::Result;
-use crate::prelude::rings_core::dht::OnlineNodeType;
+use crate::online::OnlineNodeType;
 use crate::prelude::rings_core::ecc::SecretKey;
 use crate::prelude::SessionSk;
 use crate::processor::ProcessorConfig;

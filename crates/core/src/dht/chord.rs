@@ -14,6 +14,7 @@ use super::entry::EntryLookupEvidence;
 use super::entry::EntryLookupKey;
 use super::entry::EntryOperation;
 use super::entry::PlacedEntry;
+use super::entry::PlacedEntryOperation;
 use super::entry::PlacementMiss;
 use super::finger::DEFAULT_FINGER_TABLE_SIZE;
 use super::successor::SuccessorSeq;
@@ -101,8 +102,8 @@ pub enum RemoteAction {
     FindSuccessor(Did),
     /// Need `did_a` to find one entry placement.
     FindEntry(EntryLookupKey),
-    /// Need `did_a` to find Entry for operating.
-    FindEntryForOperate(EntryOperation),
+    /// Need `did_a` to find one placement for operating.
+    FindEntryForOperate(PlacedEntryOperation),
     /// Send a predecessor notification to `did_a`.
     ///
     /// `did_a` is the remote recipient from [`PeerRingAction::RemoteAction`].
@@ -546,9 +547,15 @@ impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing 
                 }
                 // `entry` should be on other nodes.
                 // Return an action to describe how to store it.
-                Ok(PeerRingAction::RemoteAction(n, RemoteAction::FindSuccessor(_))) => Ok(
-                    PeerRingAction::RemoteAction(n, RemoteAction::FindEntryForOperate(op.clone())),
-                ),
+                Ok(PeerRingAction::RemoteAction(n, RemoteAction::FindSuccessor(_))) => {
+                    Ok(PeerRingAction::RemoteAction(
+                        n,
+                        RemoteAction::FindEntryForOperate(PlacedEntryOperation {
+                            placement: entry_key,
+                            op: op.clone(),
+                        }),
+                    ))
+                }
                 Ok(a) => Err(Error::unexpected_peer_ring_action(a)),
                 Err(e) => Err(e),
             }?;

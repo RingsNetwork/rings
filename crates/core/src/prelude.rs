@@ -9,12 +9,6 @@ pub use url;
 pub use uuid;
 
 pub use crate::dht::entry;
-pub use crate::dht::OnlineNodeDescriptor;
-pub use crate::dht::OnlineNodeDescriptorBody;
-pub use crate::dht::OnlineNodeType;
-pub use crate::dht::ONLINE_NODES_TOPIC;
-pub use crate::dht::ONLINE_NODE_CAPABILITY_SNARK;
-pub use crate::dht::ONLINE_NODE_CAPABILITY_STORAGE;
 pub use crate::measure::PeerMeasurement;
 pub use crate::message;
 pub use crate::message::ChordStorageInterface;
@@ -22,4 +16,3 @@ pub use crate::message::ChordStorageInterfaceCacheChecker;
 pub use crate::message::MessageRelay;
 pub use crate::message::ReportReturnPolicy;
 pub use crate::message::SubringInterface;
-pub use crate::swarm::OnlineNodeDescriptorParams;

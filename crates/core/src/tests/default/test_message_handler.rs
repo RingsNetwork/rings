@@ -11,6 +11,7 @@ use tokio::time::timeout;
 use tokio::time::Duration;
 
 use crate::dht::entry::Entry;
+use crate::dht::entry::PlacedEntryOperation;
 use crate::dht::successor::SuccessorReader;
 #[cfg(feature = "dummy")]
 use crate::dht::PeerRingAction;
@@ -382,7 +383,10 @@ async fn test_handle_storage() -> Result<()> {
     node1
         .swarm
         .send_message(
-            Message::OperateEntry(EntryOperation::Overwrite(entry.clone())),
+            Message::OperateEntry(PlacedEntryOperation {
+                placement: entry.did,
+                op: EntryOperation::Overwrite(entry.clone()),
+            }),
             node2.did(),
         )
         .await

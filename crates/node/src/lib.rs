@@ -7,9 +7,11 @@ pub mod logging;
 pub mod measure;
 #[cfg(feature = "node")]
 pub mod native;
+pub mod online;
 pub mod prelude;
 pub mod processor;
 pub mod provider;
+mod rpc_dto;
 mod rpc_impl;
 pub mod seed;
 #[cfg(test)]
