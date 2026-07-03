@@ -10,6 +10,7 @@ pub use uuid;
 
 pub use crate::dht::entry;
 pub use crate::dht::OnlineNodeDescriptor;
+pub use crate::dht::OnlineNodeDescriptorBody;
 pub use crate::dht::OnlineNodeType;
 pub use crate::dht::ONLINE_NODES_TOPIC;
 pub use crate::measure::PeerMeasurement;

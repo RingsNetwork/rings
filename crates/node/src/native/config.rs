@@ -8,6 +8,7 @@ use serde::Serialize;
 
 use crate::error::Error;
 use crate::error::Result;
+use crate::prelude::rings_core::dht::OnlineNodeType;
 use crate::prelude::rings_core::ecc::SecretKey;
 use crate::prelude::SessionSk;
 use crate::processor::ProcessorConfig;
@@ -61,6 +62,10 @@ pub struct Config {
     pub online_node_heartbeat_interval_secs: u64,
     #[serde(default = "crate::processor::default_online_node_ttl_secs")]
     pub online_node_ttl_secs: u64,
+    #[serde(default = "crate::processor::default_online_node_type")]
+    pub online_node_type: OnlineNodeType,
+    #[serde(default = "crate::processor::default_publish_online_node")]
+    pub publish_online_node: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_ip: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -101,7 +106,9 @@ impl TryFrom<Config> for ProcessorConfigSerialized {
             config.stabilize_interval,
         )
         .online_node_heartbeat_interval_secs(config.online_node_heartbeat_interval_secs)
-        .online_node_ttl_secs(config.online_node_ttl_secs);
+        .online_node_ttl_secs(config.online_node_ttl_secs)
+        .online_node_type(config.online_node_type)
+        .publish_online_node(config.publish_online_node);
 
         cs = if let Some(ext_ip) = config.external_ip {
             cs.external_address(ext_ip)
@@ -146,6 +153,8 @@ impl Config {
             online_node_heartbeat_interval_secs:
                 crate::processor::default_online_node_heartbeat_interval_secs(),
             online_node_ttl_secs: crate::processor::default_online_node_ttl_secs(),
+            online_node_type: crate::processor::default_online_node_type(),
+            publish_online_node: crate::processor::default_publish_online_node(),
             external_ip: None,
             webrtc_udp_port_min: None,
             webrtc_udp_port_max: None,

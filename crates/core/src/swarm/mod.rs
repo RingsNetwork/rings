@@ -15,6 +15,7 @@ pub use builder::SwarmBuilder;
 use self::callback::InnerSwarmCallback;
 use crate::dht::Did;
 use crate::dht::OnlineNodeDescriptor;
+use crate::dht::OnlineNodeDescriptorBody;
 use crate::dht::OnlineNodeType;
 use crate::dht::PeerRing;
 use crate::dht::Stabilizer;
@@ -89,16 +90,18 @@ impl Swarm {
         params: OnlineNodeDescriptorParams,
     ) -> Result<OnlineNodeDescriptor> {
         OnlineNodeDescriptor::new_signed(
-            self.did(),
-            self.account_verification_pubkey()?,
-            params.node_type,
-            self.network_id(),
-            params.capabilities,
-            params.endpoint_hint,
-            params.started_at_ms,
-            params.heartbeat_at_ms,
-            params.expires_at_ms,
-            params.version,
+            OnlineNodeDescriptorBody {
+                did: self.did(),
+                public_key: self.account_verification_pubkey()?,
+                node_type: params.node_type,
+                network_id: self.network_id(),
+                capabilities: params.capabilities,
+                endpoint_hint: params.endpoint_hint,
+                started_at_ms: params.started_at_ms,
+                heartbeat_at_ms: params.heartbeat_at_ms,
+                expires_at_ms: params.expires_at_ms,
+                version: params.version,
+            },
             self.transport.session_sk(),
         )
     }

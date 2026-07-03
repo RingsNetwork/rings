@@ -82,24 +82,8 @@ impl PeerQualityThresholds {
 ///
 /// The counters are local observations only. They do not claim global
 /// reputation and are not signed or replicated.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PeerQualityEvidence {
-    connected: u64,
-    disconnected: u64,
-    sent: u64,
-    failed_to_send: u64,
-    received: u64,
-    failed_to_receive: u64,
-}
-
-/// Local measurement counters for one peer.
-///
-/// These counters are local observations only. They are not signed, replicated,
-/// or global reputation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct PeerMeasurement {
-    /// Peer DID these counters describe.
-    pub did: Did,
+pub struct PeerQualityEvidence {
     /// Successful connection observations.
     pub connected: u64,
     /// Disconnection observations.
@@ -114,17 +98,24 @@ pub struct PeerMeasurement {
     pub failed_to_receive: u64,
 }
 
+/// Local measurement counters for one peer.
+///
+/// These counters are local observations only. They are not signed, replicated,
+/// or global reputation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PeerMeasurement {
+    /// Peer DID these counters describe.
+    pub did: Did,
+    /// Local evidence counters for this peer.
+    pub evidence: PeerQualityEvidence,
+}
+
 impl PeerMeasurement {
     /// Return a zero-count snapshot for `did`.
     pub const fn empty(did: Did) -> Self {
         Self {
             did,
-            connected: 0,
-            disconnected: 0,
-            sent: 0,
-            failed_to_send: 0,
-            received: 0,
-            failed_to_receive: 0,
+            evidence: PeerQualityEvidence::new(0, 0, 0, 0, 0, 0),
         }
     }
 
@@ -133,14 +124,7 @@ impl PeerMeasurement {
     where M: Measure + ?Sized {
         Self {
             did,
-            connected: measure.get_count(did, MeasureCounter::Connect).await,
-            disconnected: measure.get_count(did, MeasureCounter::Disconnected).await,
-            sent: measure.get_count(did, MeasureCounter::Sent).await,
-            failed_to_send: measure.get_count(did, MeasureCounter::FailedToSend).await,
-            received: measure.get_count(did, MeasureCounter::Received).await,
-            failed_to_receive: measure
-                .get_count(did, MeasureCounter::FailedToReceive)
-                .await,
+            evidence: PeerQualityEvidence::from_measure(measure, did).await,
         }
     }
 }

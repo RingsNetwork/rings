@@ -162,7 +162,7 @@ jobs:
       # If you need to reset the cache version, increment the number after `v`
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ffi-${{ matrix.os }}-v1
+          shared-key: ffi-${{ runner.os }}-${{ runner.arch }}-v2
 
       - name: Run clippy for node ffi
         run: cargo clippy -p rings-node --features ffi

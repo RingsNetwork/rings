@@ -400,6 +400,8 @@ pub trait PayloadSender {
     async fn send_report_message<T>(&self, payload: &MessagePayload, msg: T) -> Result<()>
     where T: Serialize + Send {
         let policy = payload.transaction.report_return;
+        // Keep this send-boundary check even though transaction verification
+        // enforces the same authorization when the request is received.
         policy.validate_authorized_by(payload.transaction.signer())?;
         let routed_next_hop = match policy {
             ReportReturnPolicy::Path => None,

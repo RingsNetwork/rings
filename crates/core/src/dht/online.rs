@@ -1,6 +1,7 @@
 #![warn(missing_docs)]
 //! Signed online-node descriptors stored in the DHT.
 
+use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
@@ -30,6 +31,46 @@ pub enum OnlineNodeType {
     Ffi,
 }
 
+/// Descriptor fields covered by the online-node signature.
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+pub struct OnlineNodeDescriptorBody {
+    /// DID of the node/account.
+    pub did: Did,
+    /// Account public key corresponding to `did`.
+    pub public_key: VerificationPublicKey,
+    /// Runtime family of this node.
+    pub node_type: OnlineNodeType,
+    /// Network identifier.
+    pub network_id: u32,
+    /// Optional capability labels.
+    pub capabilities: Vec<String>,
+    /// Optional endpoint hint, controlled by node policy/configuration.
+    pub endpoint_hint: Option<String>,
+    /// Process start timestamp in milliseconds since Unix epoch.
+    pub started_at_ms: u128,
+    /// Heartbeat timestamp in milliseconds since Unix epoch.
+    pub heartbeat_at_ms: u128,
+    /// Expiry timestamp in milliseconds since Unix epoch.
+    pub expires_at_ms: u128,
+    /// Node software version.
+    pub version: String,
+}
+
+impl OnlineNodeDescriptorBody {
+    fn validate_signer(&self, session_sk: &SessionSk) -> Result<()> {
+        if self.public_key.did() != self.did || session_sk.account_did() != self.did {
+            return Err(Error::InvalidMessage(
+                "online node descriptor DID/public key/session mismatch".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn signing_data(&self) -> Result<Vec<u8>> {
+        bincode::serialize(self).map_err(Error::BincodeSerialize)
+    }
+}
+
 /// Signed descriptor published by online nodes.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct OnlineNodeDescriptor {
@@ -57,44 +98,28 @@ pub struct OnlineNodeDescriptor {
     pub signature: MessageVerification,
 }
 
-#[derive(Serialize)]
-struct OnlineNodeDescriptorSigningData<'a> {
-    did: Did,
-    public_key: &'a VerificationPublicKey,
-    node_type: &'a OnlineNodeType,
-    network_id: u32,
-    capabilities: &'a [String],
-    endpoint_hint: &'a Option<String>,
-    started_at_ms: u128,
-    heartbeat_at_ms: u128,
-    expires_at_ms: u128,
-    version: &'a str,
-}
-
 impl OnlineNodeDescriptor {
     /// Create and sign a descriptor.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_signed(
-        did: Did,
-        public_key: VerificationPublicKey,
-        node_type: OnlineNodeType,
-        network_id: u32,
-        capabilities: Vec<String>,
-        endpoint_hint: Option<String>,
-        started_at_ms: u128,
-        heartbeat_at_ms: u128,
-        expires_at_ms: u128,
-        version: String,
-        session_sk: &SessionSk,
-    ) -> Result<Self> {
-        if public_key.did() != did || session_sk.account_did() != did {
-            return Err(Error::InvalidMessage(
-                "online node descriptor DID/public key/session mismatch".to_string(),
-            ));
-        }
+    pub fn new_signed(body: OnlineNodeDescriptorBody, session_sk: &SessionSk) -> Result<Self> {
+        body.validate_signer(session_sk)?;
+        let signature = MessageVerification::new(&body.signing_data()?, session_sk)?;
+        Ok(Self {
+            did: body.did,
+            public_key: body.public_key,
+            node_type: body.node_type,
+            network_id: body.network_id,
+            capabilities: body.capabilities,
+            endpoint_hint: body.endpoint_hint,
+            started_at_ms: body.started_at_ms,
+            heartbeat_at_ms: body.heartbeat_at_ms,
+            expires_at_ms: body.expires_at_ms,
+            version: body.version,
+            signature,
+        })
+    }
 
-        let placeholder = MessageVerification::new(&[], session_sk)?;
-        let mut descriptor = Self {
+    fn body(&self) -> OnlineNodeDescriptorBody {
+        let Self {
             did,
             public_key,
             node_type,
@@ -105,26 +130,30 @@ impl OnlineNodeDescriptor {
             heartbeat_at_ms,
             expires_at_ms,
             version,
-            signature: placeholder,
-        };
-        descriptor.signature = MessageVerification::new(&descriptor.signing_data()?, session_sk)?;
-        Ok(descriptor)
+            signature: _,
+        } = self;
+
+        OnlineNodeDescriptorBody {
+            did: *did,
+            public_key: public_key.clone(),
+            node_type: node_type.clone(),
+            network_id: *network_id,
+            capabilities: capabilities.clone(),
+            endpoint_hint: endpoint_hint.clone(),
+            started_at_ms: *started_at_ms,
+            heartbeat_at_ms: *heartbeat_at_ms,
+            expires_at_ms: *expires_at_ms,
+            version: version.clone(),
+        }
     }
 
     fn signing_data(&self) -> Result<Vec<u8>> {
-        let data = OnlineNodeDescriptorSigningData {
-            did: self.did,
-            public_key: &self.public_key,
-            node_type: &self.node_type,
-            network_id: self.network_id,
-            capabilities: &self.capabilities,
-            endpoint_hint: &self.endpoint_hint,
-            started_at_ms: self.started_at_ms,
-            heartbeat_at_ms: self.heartbeat_at_ms,
-            expires_at_ms: self.expires_at_ms,
-            version: &self.version,
-        };
-        bincode::serialize(&data).map_err(Error::BincodeSerialize)
+        self.body().signing_data()
+    }
+
+    /// Return whether this descriptor belongs to `network_id`.
+    pub const fn matches_network(&self, network_id: u32) -> bool {
+        self.network_id == network_id
     }
 
     /// Verify the descriptor signature and DID/public-key binding.
@@ -170,14 +199,16 @@ impl OnlineNodeDescriptor {
             if !include_expired && descriptor.is_expired_at(now_ms) {
                 continue;
             }
-            latest
-                .entry(descriptor.did)
-                .and_modify(|current| {
-                    if descriptor.heartbeat_at_ms > current.heartbeat_at_ms {
-                        *current = descriptor.clone();
+            match latest.entry(descriptor.did) {
+                Entry::Occupied(mut entry) => {
+                    if descriptor.heartbeat_at_ms > entry.get().heartbeat_at_ms {
+                        entry.insert(descriptor);
                     }
-                })
-                .or_insert(descriptor);
+                }
+                Entry::Vacant(entry) => {
+                    entry.insert(descriptor);
+                }
+            }
         }
         latest.into_values().collect()
     }
@@ -209,16 +240,18 @@ mod tests {
         let session_sk = SessionSk::new_with_seckey(&key)?;
         let did = session_sk.account_did();
         OnlineNodeDescriptor::new_signed(
-            did,
-            session_sk.session().account_verification_pubkey()?,
-            OnlineNodeType::Native,
-            1,
-            vec!["storage".to_string()],
-            None,
-            10,
-            heartbeat_at_ms,
-            expires_at_ms,
-            "test".to_string(),
+            OnlineNodeDescriptorBody {
+                did,
+                public_key: session_sk.session().account_verification_pubkey()?,
+                node_type: OnlineNodeType::Native,
+                network_id: 1,
+                capabilities: vec!["storage".to_string()],
+                endpoint_hint: None,
+                started_at_ms: 10,
+                heartbeat_at_ms,
+                expires_at_ms,
+                version: "test".to_string(),
+            },
             &session_sk,
         )
     }
@@ -252,29 +285,33 @@ mod tests {
         let public_key = session_sk.session().account_verification_pubkey()?;
 
         let older = OnlineNodeDescriptor::new_signed(
-            did,
-            public_key.clone(),
-            OnlineNodeType::Native,
-            1,
-            vec![],
-            None,
-            1,
-            10,
-            100,
-            "old".to_string(),
+            OnlineNodeDescriptorBody {
+                did,
+                public_key: public_key.clone(),
+                node_type: OnlineNodeType::Native,
+                network_id: 1,
+                capabilities: vec![],
+                endpoint_hint: None,
+                started_at_ms: 1,
+                heartbeat_at_ms: 10,
+                expires_at_ms: 100,
+                version: "old".to_string(),
+            },
             &session_sk,
         )?;
         let newer = OnlineNodeDescriptor::new_signed(
-            did,
-            public_key,
-            OnlineNodeType::Native,
-            1,
-            vec![],
-            None,
-            1,
-            20,
-            100,
-            "new".to_string(),
+            OnlineNodeDescriptorBody {
+                did,
+                public_key,
+                node_type: OnlineNodeType::Native,
+                network_id: 1,
+                capabilities: vec![],
+                endpoint_hint: None,
+                started_at_ms: 1,
+                heartbeat_at_ms: 20,
+                expires_at_ms: 100,
+                version: "new".to_string(),
+            },
             &session_sk,
         )?;
         let other_live = descriptor_at(25, 100)?;

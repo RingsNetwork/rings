@@ -28,6 +28,7 @@ pub use did::Did;
 pub use finger::FingerTable;
 pub use finger::DEFAULT_FINGER_TABLE_SIZE;
 pub use online::OnlineNodeDescriptor;
+pub use online::OnlineNodeDescriptorBody;
 pub use online::OnlineNodeType;
 pub use online::ONLINE_NODES_TOPIC;
 pub use stabilization::Stabilizer;
