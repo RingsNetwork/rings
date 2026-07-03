@@ -187,16 +187,18 @@ pub enum OnlineNodeTypeInfo {
 
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct OnlineNodeDescriptorInfo {
-    pub did: Value,
+    pub did: String,
+    /// Verification public key encoded with the core serde shape.
     pub public_key: Value,
     pub node_type: OnlineNodeTypeInfo,
     pub network_id: u32,
     pub capabilities: Vec<String>,
     pub endpoint_hint: Option<String>,
-    pub started_at_ms: u128,
-    pub heartbeat_at_ms: u128,
-    pub expires_at_ms: u128,
+    pub started_at_ms: u64,
+    pub heartbeat_at_ms: u64,
+    pub expires_at_ms: u64,
     pub version: String,
+    /// Descriptor signature encoded with the core serde shape.
     pub signature: Value,
 }
 
@@ -275,7 +277,7 @@ pub struct PeerMeasurementCountersInfo {
 
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct PeerMeasurementInfo {
-    pub did: Value,
+    pub did: String,
     pub counters: PeerMeasurementCountersInfo,
 }
 

@@ -26,19 +26,23 @@ fn online_node_type_info(node_type: OnlineNodeType) -> OnlineNodeTypeInfo {
     }
 }
 
+fn descriptor_timestamp_ms(value: u128) -> Result<u64> {
+    u64::try_from(value).map_err(|_| Error::InvalidData)
+}
+
 pub(crate) fn online_node_descriptor_info(
     descriptor: OnlineNodeDescriptor,
 ) -> Result<OnlineNodeDescriptorInfo> {
     Ok(OnlineNodeDescriptorInfo {
-        did: json_value(descriptor.did)?,
+        did: descriptor.did.to_string(),
         public_key: json_value(descriptor.public_key)?,
         node_type: online_node_type_info(descriptor.node_type),
         network_id: descriptor.network_id,
         capabilities: descriptor.capabilities,
         endpoint_hint: descriptor.endpoint_hint,
-        started_at_ms: descriptor.started_at_ms,
-        heartbeat_at_ms: descriptor.heartbeat_at_ms,
-        expires_at_ms: descriptor.expires_at_ms,
+        started_at_ms: descriptor_timestamp_ms(descriptor.started_at_ms)?,
+        heartbeat_at_ms: descriptor_timestamp_ms(descriptor.heartbeat_at_ms)?,
+        expires_at_ms: descriptor_timestamp_ms(descriptor.expires_at_ms)?,
         version: descriptor.version,
         signature: json_value(descriptor.signature)?,
     })
@@ -66,7 +70,7 @@ fn peer_measurement_counters_info(evidence: PeerQualityEvidence) -> PeerMeasurem
 
 pub(crate) fn peer_measurement_info(measurement: PeerMeasurement) -> Result<PeerMeasurementInfo> {
     Ok(PeerMeasurementInfo {
-        did: json_value(measurement.did)?,
+        did: measurement.did.to_string(),
         counters: peer_measurement_counters_info(measurement.evidence),
     })
 }

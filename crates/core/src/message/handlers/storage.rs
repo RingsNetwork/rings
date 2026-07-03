@@ -183,6 +183,8 @@ async fn handle_placed_entry_operation(
     ctx: &MessagePayload,
     msg: &PlacedEntryOperation,
 ) -> Result<()> {
+    msg.validate_placement(handler.transport.storage_redundancy())?;
+
     match handler.dht.find_successor(msg.placement)? {
         PeerRingAction::Some(_) => {
             operate_entry_at_placement(&handler.dht, msg.placement, msg.op.clone()).await
@@ -517,6 +519,78 @@ mod test {
             .ok_or_else(|| Error::InvalidMessage("expected generated key".to_string()))
     }
 
+    fn prepare_node_with_storage_redundancy(key: SecretKey, redundancy: u16) -> Result<Node> {
+        let session_sk = SessionSk::new_with_seckey(&key)?;
+        let swarm = Arc::new(
+            SwarmBuilder::new(
+                0,
+                "stun://stun.l.google.com:19302",
+                Box::new(MemStorage::new()),
+                session_sk,
+            )
+            .dht_storage_redundancy(redundancy)
+            .dht_finger_table_size(8)
+            .build(),
+        );
+        Ok(Node::new(swarm))
+    }
+
+    fn owner_index(nodes: &[&Node], placement: Did) -> Result<usize> {
+        let mut owner = None;
+        for (index, node) in nodes.iter().enumerate() {
+            if !matches!(
+                node.dht().find_successor(placement)?,
+                PeerRingAction::Some(_)
+            ) {
+                continue;
+            }
+
+            if owner.replace(index).is_some() {
+                return Err(Error::InvalidMessage(
+                    "placement has more than one observed owner".to_string(),
+                ));
+            }
+        }
+        owner.ok_or_else(|| Error::InvalidMessage("placement has no observed owner".to_string()))
+    }
+
+    fn split_redundant_entry(nodes: &[&Node]) -> Result<(Entry, Did, Did, usize, usize)> {
+        for attempt in 0..512 {
+            let topic = format!("split remote replica placement {attempt}");
+            let entry: Entry = topic.try_into()?;
+            let mut placements = entry.did.rotate_affine(2)?.into_iter();
+            let primary = placements
+                .next()
+                .ok_or_else(|| Error::InvalidMessage("expected primary placement".to_string()))?;
+            let replica = placements
+                .next()
+                .ok_or_else(|| Error::InvalidMessage("expected replica placement".to_string()))?;
+            let primary_owner = owner_index(nodes, primary)?;
+            let replica_owner = owner_index(nodes, replica)?;
+            if primary_owner != replica_owner {
+                return Ok((entry, primary, replica, primary_owner, replica_owner));
+            }
+        }
+
+        Err(Error::InvalidMessage(
+            "could not sample a split-owner redundant entry".to_string(),
+        ))
+    }
+
+    fn non_affine_placement(entry_key: Did, redundancy: u16) -> Result<Did> {
+        let placements = entry_key.rotate_affine(redundancy)?;
+        for attempt in 0..512 {
+            let candidate = Entry::gen_did(&format!("non-affine placement {attempt}"))?;
+            if !placements.contains(&candidate) {
+                return Ok(candidate);
+            }
+        }
+
+        Err(Error::InvalidMessage(
+            "could not sample non-affine placement".to_string(),
+        ))
+    }
+
     async fn assert_cached_data_values(
         node: &Node,
         entry_key: Did,
@@ -747,6 +821,100 @@ mod test {
                 requested: 2
             })
         ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn placed_entry_operation_rejects_non_affine_placement() -> Result<()> {
+        let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
+        let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+        let topic = "reject misplaced remote storage operation".to_string();
+        let entry: Entry = topic.try_into()?;
+        let invalid_placement = non_affine_placement(entry.did, 2)?;
+        let msg = PlacedEntryOperation {
+            placement: invalid_placement,
+            op: EntryOperation::Overwrite(entry.clone()),
+        };
+        let sender_session = SessionSk::new_with_seckey(&SecretKey::random())?;
+        let context = MessagePayload::new_send(
+            Message::OperateEntry(msg.clone()),
+            &sender_session,
+            node.did(),
+            node.did(),
+        )?;
+
+        assert!(!msg.placement_belongs_to_entry(2)?);
+        let result = handler.handle(&context, &msg).await;
+
+        assert!(matches!(
+            result,
+            Err(Error::InvalidMessage(message)) if message.contains("affine replica set")
+        ));
+        assert_eq!(
+            node.dht()
+                .storage
+                .get(&invalid_placement.to_string())
+                .await?,
+            None
+        );
+        assert_eq!(node.dht().storage.get(&entry.did.to_string()).await?, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn remote_redundant_store_writes_split_replica_at_affine_placement() -> Result<()> {
+        let mut keys = gen_ordered_keys(2).into_iter();
+        let node1 = prepare_node_with_storage_redundancy(next_generated_key(&mut keys)?, 2)?;
+        let node2 = prepare_node_with_storage_redundancy(next_generated_key(&mut keys)?, 2)?;
+
+        manually_establish_connection(&node1.swarm, &node2.swarm).await;
+        wait_for_msgs([&node1, &node2]).await;
+        assert_no_more_msg([&node1, &node2]).await;
+
+        let nodes = [&node1, &node2];
+        let (entry, primary, replica, primary_owner, replica_owner) =
+            split_redundant_entry(&nodes)?;
+        assert_eq!(primary, entry.did);
+        let writer = nodes[primary_owner];
+        let remote_replica_owner = nodes[replica_owner];
+
+        <Swarm as ChordStorageInterface<2>>::storage_store(&writer.swarm, entry.clone()).await?;
+
+        let payload = next_payload(remote_replica_owner).await?;
+        assert!(matches!(
+            payload.transaction.data()?,
+            Message::OperateEntry(PlacedEntryOperation {
+                placement,
+                op: EntryOperation::Overwrite(remote_entry),
+            }) if placement == replica && remote_entry.did == entry.did
+        ));
+        assert_eq!(
+            writer
+                .dht()
+                .storage
+                .get(&primary.to_string())
+                .await?
+                .map(|stored| stored.did),
+            Some(entry.did)
+        );
+        assert_eq!(
+            remote_replica_owner
+                .dht()
+                .storage
+                .get(&replica.to_string())
+                .await?
+                .map(|stored| stored.did),
+            Some(entry.did)
+        );
+        assert_eq!(
+            remote_replica_owner
+                .dht()
+                .storage
+                .get(&primary.to_string())
+                .await?,
+            None
+        );
+        assert_no_more_msg([&node1, &node2]).await;
         Ok(())
     }
 

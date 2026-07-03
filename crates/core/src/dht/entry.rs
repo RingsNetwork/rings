@@ -81,12 +81,44 @@ pub enum EntryOperation {
 }
 
 /// A storage operation targeted at one concrete affine placement key.
+///
+/// Invariant: `placement` must be one of the affine replica keys derived from
+/// the operation's entry DID under the receiver's configured storage
+/// redundancy. The sender may choose a replica from that set, but cannot choose
+/// where the replica set itself lives.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlacedEntryOperation {
     /// Placement key that must receive the operation.
     pub placement: Did,
     /// Operation to apply at `placement`.
     pub op: EntryOperation,
+}
+
+impl PlacedEntryOperation {
+    /// Return the entry identity carried by this operation.
+    pub fn entry_key(&self) -> Result<Did> {
+        self.op.did()
+    }
+
+    /// Return whether `placement` is in this entry's affine replica set.
+    pub fn placement_belongs_to_entry(&self, redundancy: u16) -> Result<bool> {
+        let entry_key = self.entry_key()?;
+        Ok(entry_key
+            .rotate_affine(redundancy)?
+            .contains(&self.placement))
+    }
+
+    /// Enforce that `placement` belongs to the operation's entry.
+    pub fn validate_placement(&self, redundancy: u16) -> Result<()> {
+        if self.placement_belongs_to_entry(redundancy)? {
+            return Ok(());
+        }
+
+        Err(Error::InvalidMessage(
+            "placed entry operation targets a placement outside the entry's affine replica set"
+                .to_string(),
+        ))
+    }
 }
 
 /// A DHT storage entry with an [`EntryKind`] and a ring key represented as [`Did`].

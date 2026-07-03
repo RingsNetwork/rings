@@ -400,6 +400,7 @@ pub struct ProcessorBuilder {
 pub struct Processor {
     /// a swarm instance
     pub swarm: Arc<Swarm>,
+    /// Same session key held by the swarm transport; kept here for node-layer descriptor signing.
     session_sk: SessionSk,
     stabilize_interval: Duration,
     online_node_heartbeat_interval: Duration,

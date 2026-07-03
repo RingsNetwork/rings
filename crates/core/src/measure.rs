@@ -116,7 +116,7 @@ impl PeerMeasurement {
     pub async fn from_measure<M>(measure: &M, did: Did) -> Option<Self>
     where M: Measure + ?Sized {
         let evidence = PeerQualityEvidence::from_measure(measure, did).await;
-        if evidence == PeerQualityEvidence::default() {
+        if evidence.is_unobserved() {
             return None;
         }
 
@@ -157,6 +157,16 @@ impl PeerQualityEvidence {
                 .get_count(did, MeasureCounter::FailedToReceive)
                 .await,
         }
+    }
+
+    /// Return whether this evidence contains no observed counter.
+    pub const fn is_unobserved(self) -> bool {
+        self.connected == 0
+            && self.disconnected == 0
+            && self.sent == 0
+            && self.failed_to_send == 0
+            && self.received == 0
+            && self.failed_to_receive == 0
     }
 
     /// Classify this evidence under the supplied thresholds.
