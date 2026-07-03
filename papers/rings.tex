@@ -22,7 +22,7 @@
 \usepackage[noend]{algpseudocode}
 \usepackage{abstract}
 
-\date{Created: February 8, 2023\\Last updated: July 4, 2026}
+\date{Created: February 8, 2023\\Source: RingsNetwork/whitepaper repository\\Timestamp: 2023-02-08T13:27:55Z\\Last updated: July 4, 2026}
 \usetikzlibrary{shapes,arrows,positioning,patterns,through}
 \SetWatermarkText{Preview}
 \SetWatermarkScale{1}
@@ -61,7 +61,7 @@
     \maketitle
     \begin{abstract}
 
-      Rings Network is a decentralized peer-to-peer network for the sovereign age. It describes a target architecture in which browsers and native devices participate as first-class nodes, identities are addressed as DIDs on a Chord overlay, resources and services are mapped into the same identifier space, and applications compose privacy-preserving protocols such as encrypted messaging, offline mailboxes, hidden service descriptors, ranking, and sidecar ordering. This paper presents the ideal Rings model while updating directions that have been superseded: Chord identifiers are treated as an additive circular space for routing and placement, cryptographic groups and fields are separate protocol carriers, and message relay, ranking, and sequencing are specified as Rings protocols rather than inherited wholesale from unrelated systems.
+      Rings Network is a decentralized peer-to-peer network for the sovereign age. This paper describes a target architecture in which browsers and native devices participate as first-class nodes, identities are addressed as DIDs on a Chord overlay, resources and services are mapped into the same identifier space, and applications compose privacy-preserving protocols such as encrypted messaging, offline mailboxes, hidden service descriptors, ranking, and sidecar ordering. This paper presents the ideal Rings model while updating directions that have been superseded: Chord identifiers are treated as an additive circular space for routing and placement, cryptographic groups and fields are separate protocol carriers, and message relay, ranking, and sequencing are specified as Rings protocols rather than inherited wholesale from unrelated systems.
 
   ~\\
   ~\\
@@ -135,27 +135,6 @@ The Rings Network architecture is not a direct restatement of the TCP/IP referen
 \item Protocol Layer: relay, mailbox, ranking, sidecar sequencing, service discovery, private storage, and verifiable-computation protocols.
 \item Application Layer: decentralized web, secure messaging, hidden services, proof applications, and user-defined sovereign applications.
 \end{itemize}
-% \begin{figure}[htpb]
-% \centering
-% \begin{tikzpicture}[every node/.style={anchor=base,text depth=.5ex,text width=4cm, text centered}]
-% \node (1) at (4.5,0) {\textbf{Physical Layer}};
-% \node (2) at (4.5,0.7) {\textbf{Data Link Layer}};
-% \node (3) at (4.5,1.4) {\textbf{Network Layer}};
-% \node (4) at (4.5,2.1) {\textbf{Transport Layer}};
-% \node (5) at (4.5,2.8) {\textbf{Session Layer}};
-% \node (6) at (4.5,3.5) {\textbf{Presentation Layer}};
-% \node (7) at (4.5,4.2) {\textbf{Application Layer}};
-
-% \draw[] (1.south west) -- (1.south east) -- (1.north east) -- (1.north west) -- cycle;
-%   \draw[] (2.south west) -- (2.south east) -- (2.north east) -- (2.north west) -- cycle;
-%   \draw[] (3.south west) -- (3.south east) -- (3.north east) -- (3.north west) -- cycle;
-%   \draw[] (4.south west) -- (4.south east) -- (4.north east) -- (4.north west) -- cycle;
-%   \draw[] (5.south west) -- (5.south east) -- (5.north east) -- (5.north west) -- cycle;
-%   \draw[] (6.south west) -- (6.south east) -- (6.north east) -- (6.north west) -- cycle;
-%   \draw[] (7.south west) -- (7.south east) -- (7.north east) -- (7.north west) -- cycle;
-% \end{tikzpicture}
-% \caption{The TCP/IP OSI Model}
-% \end{figure}
 
 \begin{figure}[htbp]
 \centering
@@ -175,43 +154,14 @@ The Rings Network architecture is not a direct restatement of the TCP/IP referen
 
 
 
-\subsection{Identity and Runtime Surfaces}
+\subsection{Identity Layer}
 
 The design goal of Rings Network is to make the same overlay and identity model available from multiple runtime surfaces. Native nodes, mobile nodes, embedded nodes, and browser nodes should share DID addressing, delegated sessions, Chord routing, and message semantics. Each runtime supplies the IO adapters available in that environment, so equality means equal protocol authority rather than identical local resources.
 
+The identity layer owns DID derivation, account-proof verification, delegated sessions, and virtual-resource identities. It names who or what is allowed to sign a protocol operation; it does not decide transport reachability, overlay placement, or application-specific authorization policy.
 
-WebAssembly, or Wasm, is a low-level binary format for executing code in web browsers. It provides a way for developers to write high-performance code in languages such as C, C++, and Rust, and then run that code in a browser with native performance. WebAssembly is designed to be fast and efficient, with a compact binary format that is easy to parse and execute. It uses a low-level instruction set, which makes it well-suited for demanding tasks such as cryptography, compression, and image processing.
-
-\begin{figure}[htbp]
-  \begin{tikzpicture}[node distance=3cm,auto,>=latex']
-  \node (A) {Browser};
-  \node (B) [right of=A] {Wasm Module};
-  \node (C) [right of=B] {Js Runtime};
-  \draw (A) -- (A |-, -5.5);
-  \draw (B) -- (B |-, -5.5);
-  \draw (C) -- (C |-, -5.5);
-  \draw[->] (A |-, -1) -- node[midway, above] {Download Module} (B |-, -1);
-  \draw[->] (B |-, -2) -- node[midway, above] {Decode Binary} (C |-, -2);
-  \draw[->] (C|-, -3) -- node[midway, above] {Compile} (B|-, -3);
-  \draw[->] (B|-,-4) -- node[midway, above] {Execute} (C|-, -4);
-  \draw[->] (C|-,-5) -- node[midway, above] {Call} (B|-,-5);
-  \draw[pattern=north east lines, pattern color=gray] (A.south west) -- (A.south east) -- (A.north east) -- (A.north west) -- cycle;
-  \draw[pattern=north east lines, pattern color=gray] (B.south west) -- (B.south east) -- (B.north east) -- (B.north west) -- cycle;
-  \draw[pattern=north east lines, pattern color=gray] (C.south west) -- (C.south east) -- (C.north east) -- (C.north west) -- cycle;
-  \draw[->,dashed] (B) -- (C);
-\end{tikzpicture}
-\caption{How wasm module works}
-\end{figure}
-
-The Rings Network provides multiple options for interacting with WebAssembly (Wasm) modules:
-
-\begin{itemize}[itemsep=2pt,topsep=0pt,parsep=0pt]
-\item Build browser applications using wasm-based frameworks such as Yew and Trunk.
-\item Load the exported JavaScript/Wasm module directly from web applications.
-\item Use a browser provider or extension workflow, where applications interact with a Rings provider surface and register namespace-scoped handlers.
-\end{itemize}
-\subsection{Transport layer}
- The use of WebRTC and WebAssembly in Rings Network provides several advantages for users. Firstly, the browser-based approach means that users do not need to install any additional software or plugins to participate in the network. Secondly, the use of WebRTC and WebAssembly enables the network to target low latency and high throughput, making it suitable for real-time communication and data transfer.
+\subsection{Transport Layer}
+ The transport layer uses WebRTC data channels and native transport adapters to give browser and non-browser nodes peer-to-peer connectivity. The browser-based approach means that users do not need to install additional software or plugins to participate in the network. WebRTC allows the network to target low latency and high throughput for real-time communication and data transfer, while native adapters can expose capabilities unavailable to a browser tab.
 
  WebRTC, or Web Real-Time Communication, provides browsers and mobile apps with real-time communication capabilities through simple APIs. With WebRTC, users can easily send audio, video, and data streams directly between browsers, without the need for any plug-ins or extra software.
 At the same time, the Rings Network has some special optimizations for the WebRTC handshakes process.
@@ -276,7 +226,7 @@ Once the WebRTC handshake is complete, browsers can send and receive data stream
 \caption{Exchange SDP}
 \end{figure}
 
-\subsection{Network Layer}
+\subsection{Overlay Layer}
 
 The Rings Network is a structured peer-to-peer network that incorporates a distributed hash table (DHT) to facilitate efficient and scalable lookups. The Chord algorithm is utilized to implement lookup within the DHT, thereby enabling message routing and replicated storage operations in a peer-to-peer setting. Availability depends on transport connectivity, stabilization progress, redundancy settings, and churn; the DHT gives the protocol a structured basis for routing rather than a standalone availability guarantee.
 
@@ -322,11 +272,46 @@ In this way, the Chord algorithm provides a scalable way to store and retrieve d
     \end{figure}
 In the DHT, as illustrated in Figure \ref{dht}, all nodes have the capability to perceive their own predecessor and successor through the join and stabilization algorithms. The predecessor of a node is determined as the node with the largest identifier that precedes the identifier of the current node in the identifier space. Conversely, the successor of a node is defined as the node with the smallest identifier that follows the identifier of the current node in the identifier space. These two nodes, the predecessor and the successor, are considered the immediate neighbor nodes of a particular node within the network.
 
+\subsection{Extension Runtime Layer}
+
+The extension runtime layer is the interpreter boundary for namespace-scoped protocol logic. Protocol handlers should be modeled as pure state transitions that return effect descriptions, while the runtime supplies capability-limited host calls for storage, transport, timers, and cryptographic verification. This keeps extension behavior replayable and testable without giving each extension direct ambient access to the node process.
+
+WebAssembly, or Wasm, is a low-level binary format for executing code in web browsers. It provides a way for developers to write high-performance code in languages such as C, C++, and Rust, and then run that code in a browser with native performance. WebAssembly is designed to be fast and efficient, with a compact binary format that is easy to parse and execute. It uses a low-level instruction set, which makes it well-suited for demanding tasks such as cryptography, compression, and image processing.
+
+\begin{figure}[htbp]
+  \begin{tikzpicture}[node distance=3cm,auto,>=latex']
+  \node (A) {Browser};
+  \node (B) [right of=A] {Wasm Module};
+  \node (C) [right of=B] {Js Runtime};
+  \draw (A) -- (A |-, -5.5);
+  \draw (B) -- (B |-, -5.5);
+  \draw (C) -- (C |-, -5.5);
+  \draw[->] (A |-, -1) -- node[midway, above] {Download Module} (B |-, -1);
+  \draw[->] (B |-, -2) -- node[midway, above] {Decode Binary} (C |-, -2);
+  \draw[->] (C|-, -3) -- node[midway, above] {Compile} (B|-, -3);
+  \draw[->] (B|-,-4) -- node[midway, above] {Execute} (C|-, -4);
+  \draw[->] (C|-,-5) -- node[midway, above] {Call} (B|-,-5);
+  \draw[pattern=north east lines, pattern color=gray] (A.south west) -- (A.south east) -- (A.north east) -- (A.north west) -- cycle;
+  \draw[pattern=north east lines, pattern color=gray] (B.south west) -- (B.south east) -- (B.north east) -- (B.north west) -- cycle;
+  \draw[pattern=north east lines, pattern color=gray] (C.south west) -- (C.south east) -- (C.north east) -- (C.north west) -- cycle;
+  \draw[->,dashed] (B) -- (C);
+\end{tikzpicture}
+\caption{How wasm module works}
+\end{figure}
+
+The Rings Network provides multiple options for interacting with WebAssembly (Wasm) modules:
+
+\begin{itemize}[itemsep=2pt,topsep=0pt,parsep=0pt]
+\item Build browser applications using wasm-based frameworks such as Yew and Trunk.
+\item Load the exported JavaScript/Wasm module directly from web applications.
+\item Use a browser provider or extension workflow, where applications interact with a Rings provider surface and register namespace-scoped handlers.
+\end{itemize}
+
 \subsection{Protocol Layer}
 
-In the protocol layer, the central design concept revolves around the utilization of a Decentralized Identifier (DID). A DID is a $2^{160}$-point Chord identifier represented as an element of the additive cyclic group $Z / 2^{160}$. Addition, subtraction, and negation model clockwise offsets, biased ordering, finger targets, and affine replica placement. DID multiplication is outside the Rings routing model: cryptographic multiplication belongs to the fields or groups used by specific cryptographic protocols, not to Chord identifiers themselves.
+In the protocol layer, the central design concept revolves around the utilization of a Decentralized Identifier (DID). A DID is a 160-bit Chord identifier in a space with $2^{160}$ points, represented as an element of the additive cyclic group $\mathbb{Z}/2^{160}\mathbb{Z}$. Addition, subtraction, and negation model clockwise offsets, biased ordering, finger targets, and affine replica placement. DID multiplication is outside the Rings routing model: cryptographic multiplication belongs to the fields or groups used by specific cryptographic protocols, not to Chord identifiers themselves.
 
-However, elements in a circular identifier space cannot be compared by a single global less-than relation that is meaningful for every observer. The BiasDID algorithm addresses this limitation. The algorithm selects a fixed point C and compares A and B by their clockwise offsets from C. In this manner, ordering is always relative to the observer or operation that chose the fixed point.
+However, elements in a circular identifier space cannot be compared by a single global less-than relation that is meaningful for every observer. Algorithm \ref{alg:biasdid} addresses this limitation. The algorithm selects a fixed point C and compares A and B by their clockwise offsets from C. In this manner, ordering is always relative to the observer or operation that chose the fixed point.
 
 
 \begin{algorithm}[htpb]
@@ -356,7 +341,7 @@ The DID architecture also encompasses signed Session and Message Relay modules. 
 
 \subsection{Application Layer}
 
-The nucleus of Rings Network is similar to the Actor Model\cite{Actor_Model}: inbound messages are decoded into typed protocol messages and handled by explicit handler traits. The newer extension model further separates protocol logic into a pure state transition and an interpreter shell. This allows built-in and user-defined protocols to run behind namespace-scoped capabilities without adding a global command bus.
+The nucleus of Rings Network is similar to the Actor Model\cite{Actor_Model}: inbound messages are decoded into typed protocol messages and handled by explicit handler traits. The extension runtime described above separates protocol logic into a pure state transition and an interpreter shell. This allows built-in and user-defined protocols to run behind namespace-scoped capabilities without adding a global command bus.
 
 Rings Network provides a comprehensive set of interfaces for application-layer messages, which can be accessed through Remote Procedure Calls (RPC) or Foreign Function Interface (FFI). This implies that application developers have the option to not only control Rings Network through Rust or WebAssembly (Wasm), but can also access it via RPC using lighter weight programming languages such as Python or JavaScript. Furthermore, embedded developers can integrate Rings Network into microcontrollers through the use of FFI.
 
@@ -400,7 +385,7 @@ Rings adopts Correct Chord as the maintenance reference before adding Rings-spec
 
 On top of Chord, Rings replaces opaque node keys with protocol DIDs and VIDs. DID ownership is proven through account verification algorithms. Recoverable signature schemes can identify an account by DID/address, while non-recoverable schemes carry explicit public keys and derive DIDs from domain-separated public-key transcripts. This verifier interface is the stable boundary; new proof systems must implement it rather than bypassing session verification.
 
-In Rings Network, the representation of Decentralized Identifiers (DIDs) is achieved through a fixed-width Chord identifier space. A DID is represented by a 160-bit value, and Chord interval comparisons are relative to an observer. Rings uses biased ordering to compare positions from a chosen reference point, and additive offsets for finger targets and redundant placement. This is additive cyclic-group arithmetic over $Z / 2^{160}$, not protocol-level finite-field multiplication.
+In Rings Network, the representation of Decentralized Identifiers (DIDs) is achieved through a fixed-width Chord identifier space. A DID is represented by a 160-bit value, and Chord interval comparisons are relative to an observer. Rings uses biased ordering to compare positions from a chosen reference point, and additive offsets for finger targets and redundant placement. This is additive cyclic-group arithmetic over $\mathbb{Z}/2^{160}\mathbb{Z}$, not protocol-level finite-field multiplication.
 
 The term ring is therefore used carefully. A DID belongs to the Chord identifier ring because the identifier space wraps around modulo $2^{160}$. Algebraically, the protocol depends on the additive abelian group structure of this carrier: zero is the local reference point, addition and subtraction model clockwise movement, and negation models movement in the opposite direction. Rings intentionally does not treat DID multiplication as a protocol operation. If a cryptographic protocol needs multiplication, inversion, or a finite field, it must use a separate scalar-field or curve-group carrier with its own laws.
 
@@ -424,7 +409,7 @@ This is a monadic boundary in the operational sense: pure protocol logic builds 
 
 \subsection{Rings Extension: Formal Verification Boundary}
 
-The Rings formal-methods style starts from the Chord and Correct Chord literature, then writes the Rings state machine in TLA-like state variables and operators. The state variables are the DID carrier $R = Z / 2^{160}$, the successor sequence, predecessor, sparse finger table, and replicated entry state. The operators are join, rectify, stabilize, finger repair, storage sync, storage repair, and lookup. The main invariant is that the converged local state is the unique fixpoint determined by the sorted circular topology.
+The Rings formal-methods style starts from the Chord and Correct Chord literature, then writes the Rings state machine in TLA-like state variables and operators. The state variables are the DID carrier $R = \mathbb{Z}/2^{160}\mathbb{Z}$, the successor sequence, predecessor, sparse finger table, and replicated entry state. The operators are join, rectify, stabilize, finger repair, storage sync, storage repair, and lookup. The main invariant is that the converged local state is the unique fixpoint determined by the sorted circular topology.
 
 The verification boundary is intentionally scoped. Deterministic convergence checks show that, for representative finite layouts, the pure Chord operators materialize the expected safety fixpoint. Stateright models exhaust finite message interleavings for selected subprotocols such as predecessor notification, a small discovery abstraction, storage CRDT merge, and hand-off cleanup. Trace replay checks the real multi-hop lookup implementation on converged rings against the mathematical successor relation. These artifacts support the paper's Chord and DID algebra, but they do not claim a full proof of asynchronous liveness, arbitrary network fairness, Byzantine behavior, or every production runtime schedule.
 
@@ -432,23 +417,33 @@ The verification boundary is intentionally scoped. Deterministic convergence che
 
 In a network topology, all the nodes form a ring structure. Rings uses Chord-derived join, lookup, and stabilization algorithms for the ring network. The algorithms below are protocol-level sketches of the algebraic transitions; a production node emits action values that are interpreted by the message and transport layers.
 \begin{algorithm}
-\caption{DHT Join Algorithm}
+\caption{DHT Join Transitions}
 \label{alg:join}
 \begin{algorithmic}[1]
-\Function{JoinThenSync}{$n, known$}
-\State $s\gets known.find\_successor(n.did)$
-\State $t\gets query\_topology(s)$
-\State $succ[n]\gets take(K, s :: t.succ)$
+\Function{BeginJoin}{$n, known$}
 \State $pred[n]\gets none$
-\State \textbf{emit} $QuerySuccList(s)$
+\State $a\gets FindSuccessor(n.did)$
+\State \Return $Remote(known, a)$
+\EndFunction
+\Function{InstallSuccessor}{$n, s$}
+\State $succ[n]\gets take(r, [s])$
+\State \Return $Remote(s, QuerySuccList(s))$
+\EndFunction
+\Function{InstallSuccList}{$n, s, list$}
+\State $succ[n]\gets take(r, s :: list)$
 \If{$head(succ[n]) \neq none$}
-\State \textbf{emit} $Notify(head(succ[n]), n.did)$
+\State $h\gets head(succ[n])$
+\State $notify\gets Notify(h, n.did)$
+\State $sync\gets SyncStorage(h)$
+\State \Return $Multi(notify, sync)$
+\Else
+\State \Return $Noop$
 \EndIf
 \EndFunction
 \end{algorithmic}
 \end{algorithm}
 
-When a participant joins the network, it uses an existing peer as an entry point, asks the overlay to locate its successor, initializes a bounded successor sequence, and then emits follow-up actions for synchronization and notification. The join transition does not directly mutate remote peers. It describes the local state update and the messages that the effect interpreter must deliver.
+When a participant joins the network, Algorithm \ref{alg:join} models the join as reply-driven local transitions. The node uses an existing peer as an entry point, returns an action asking the overlay to locate its successor, installs the successor returned by that action, then asks the successor for its successor list. Once the reply arrives, the node initializes a bounded successor sequence and returns follow-up actions for synchronization and notification. No join transition directly calls a remote peer or mutates remote state; it describes the local state update and the messages that the effect interpreter must deliver.
 
 The \textbf{join} algorithm is therefore a local state transition plus an effect value. Awareness of the new node spreads through notify, stabilize, finger repair, and storage repair. Finger tables are routing indexes rather than authoritative membership maps.
 
@@ -458,15 +453,18 @@ The \textbf{join} algorithm is therefore a local state transition plus an effect
 \begin{algorithmic}[1]
 \Function{Lookup}{$key, node$}
     \State $s\gets head(succ[node])$
+    \If{$s = none$}
+        \State \Return $Repair(QuerySuccList(node))$
+    \EndIf
     \If{$key \in (node.did, s]$}
         \State \Return $Local(s)$
     \EndIf
     \State $next\gets closest\_preceding\_node(node, key)$
     \If{$next = none$}
-        \State \Return $Local(s)$
+        \State \Return $Repair(QuerySuccList(s))$
     \Else
-        \State \Return $Remote(next)$
-        \State \textbf{effect} $FindSuccessor(key)$
+        \State $a\gets FindSuccessor(key)$
+        \State \Return $Remote(next, a)$
     \EndIf
 \EndFunction
 \end{algorithmic}
@@ -514,7 +512,7 @@ The \textbf{join} algorithm is therefore a local state transition plus an effect
 
     \end{figure}
 
-The \textbf{lookup} algorithm locates the successor of a DID or VID. If the local successor sequence can answer the interval query, the transition returns a local owner. Otherwise it returns a remote action naming the next hop and the requested key. On a converged ring, repeatedly interpreting the remote action resolves to the mathematical successor of the target. The $O(log N)$ routing expectation depends on sufficiently populated finger tables; correctness still falls back to the successor sequence.
+Algorithm \ref{alg:lookup} locates the successor of a DID or VID. If the local successor sequence can answer the interval query, the transition returns a local owner. Otherwise it returns a remote action naming the next hop and the requested key. The $next = none$ branch is not an ownership claim: after an interval miss it is unreachable in a converged ring, and under partial local state it returns a repair action so the interpreter refreshes successor evidence before retrying. On a converged ring, repeatedly interpreting the remote action resolves to the mathematical successor of the target. The $O(log N)$ routing expectation depends on sufficiently populated finger tables; correctness still falls back to the successor sequence.
 
 \begin{algorithm}[h]
 \caption{DHT Stabilization}
@@ -526,7 +524,7 @@ The \textbf{lookup} algorithm locates the successor of a DID or VID. If the loca
 \State $succ[n]\gets insert(succ[n], c)$
 \State \textbf{emit} $FindSuccessor(c)$
 \EndIf
-\State $succ[n]\gets take(K, merge(succ[n], topo.succ))$
+\State $succ[n]\gets take(r, merge(succ[n], topo.succ))$
 \If{$head(succ[n]) \neq none$}
 \State \textbf{emit} $Notify(head(succ[n]), n.did)$
 \EndIf
@@ -565,11 +563,11 @@ The message relay and chunking layers borrow concepts from MSRP-style message sp
 
 Rings Network places significant emphasis on End-to-End Encryption as a means to ensure privacy and security. The target E2E protocol uses public keys that are proven to match the signed sender or recipient DID. RSA is not part of the Rings target unless a later design explicitly reintroduces it; the privacy layer should focus on elliptic-curve encryption, signed envelopes, and cryptographic carriers that can support private computation.
 
-Given an elliptic-curve cyclic group $\mathbb{G}$ of order $q$ with generator $g$, a private key $x \in \mathbb{Z}_q$, and public key $h = g^x$, the ElGamal operation can be summarized as follows:
+Given an elliptic-curve cyclic group $\mathbb{G}$ of order $q$ with generator $g$, a private key $x \in \mathbb{Z}_q$, and public key $h = g^x$, Algorithm \ref{alg:elgamal} summarizes the ElGamal operation:
 
 \begin{algorithm}[h]
-\caption{ElGamal Encryption Algorithm}
-\label{ElGamal Encryption}
+\caption{ElGamal Encryption and Decryption}
+\label{alg:elgamal}
 \begin{algorithmic}[1]
 \State \textbf{Input:} Message $m$, private key $x \in \mathbb{Z}_q$, public key $h = g^x$, generator $g$
 \State \textbf{Output:} Encrypted message $(c_1, c_2)$
@@ -721,7 +719,7 @@ A denial-of-service (DoS) attack is a type of cyberattack where an attacker send
 \end{itemize}
 
 \section{Conclusion}
-The Rings Network is a decentralized, peer-to-peer network architecture optimized for the digital era of sovereignty. It offers a secure and efficient solution for communication, data storage, and service delivery, by leveraging cutting-edge technologies such as WebRTC, WebAssembly, and decentralized identifier (DID) proofs, along with a lookup protocol and encryption scheme. Additionally, its support for virtual DIDs makes the Rings Network a paradigm-shifting solution in the realm of decentralized networks and applications.
+This paper presents Rings Network as a target decentralized, peer-to-peer architecture for the digital era of sovereignty. In the ideal model, Rings combines WebRTC, WebAssembly, DID proofs, Chord-derived lookup, signed sessions, encrypted messages, and virtual DIDs to support secure communication, data placement, and service discovery. The remaining engineering task is to validate these protocol claims with implementation-specific measurements, failure models, and extension-runtime constraints.
 
 \bibliographystyle{unsrt}
 \bibliography{./cites}
