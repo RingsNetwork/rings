@@ -1,11 +1,11 @@
 //! Control sidebar, settings dialog, and shell UI.
 
-use js_sys::Reflect;
-use wasm_bindgen::JsValue;
 use web_sys::Event;
 use web_sys::MouseEvent;
 use yew::prelude::*;
 
+use crate::browser_api::js_global_prop;
+use crate::browser_api::js_string_field;
 use crate::extension;
 use crate::forms::text_input;
 use crate::node::PeerView;
@@ -590,13 +590,8 @@ fn workspace_tabs(active: Panel, active_panel: UseStateHandle<Panel>) -> Html {
 }
 
 pub(crate) fn metric(label: &'static str, value: String) -> Html {
-    let class = if label == "Local DID" {
-        "metric local-did-metric"
-    } else {
-        "metric"
-    };
     html! {
-        <div class={class}>
+        <div class="metric">
             <span>{ label }</span>
             <strong>{ value }</strong>
         </div>
@@ -834,14 +829,6 @@ fn detect_browser() -> BrowserKind {
 }
 
 fn navigator_user_agent() -> Result<String, String> {
-    let navigator =
-        Reflect::get(&js_sys::global(), &JsValue::from_str("navigator")).map_err(js_error_label)?;
-    Reflect::get(&navigator, &JsValue::from_str("userAgent"))
-        .map_err(js_error_label)?
-        .as_string()
-        .ok_or_else(|| "missing string field userAgent".to_string())
-}
-
-fn js_error_label(error: JsValue) -> String {
-    error.as_string().unwrap_or_else(|| format!("{error:?}"))
+    let navigator = js_global_prop("navigator")?;
+    js_string_field(&navigator, "userAgent")
 }

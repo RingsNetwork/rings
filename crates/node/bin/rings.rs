@@ -329,7 +329,7 @@ fn read_secret_key_file(path: &str) -> anyhow::Result<SecretKey> {
         .map(str::trim)
         .find(|line| !line.is_empty() && !line.starts_with('#'))
     else {
-        anyhow::bail!("ECDSA key file is empty");
+        anyhow::bail!("ECDSA key file contains no key entries");
     };
     let key = key.strip_prefix("0x").unwrap_or(key);
     SecretKey::from_str(key).map_err(|_| anyhow::anyhow!("ECDSA key file contains an invalid key"))

@@ -46,6 +46,16 @@ pub struct PeerView {
     pub state: String,
 }
 
+impl PeerView {
+    /// Build a peer row only when the provider returned an addressable DID.
+    pub fn from_fields(did: String, state: String) -> Option<Self> {
+        if did.trim().is_empty() {
+            return None;
+        }
+        Some(Self { did, state })
+    }
+}
+
 /// User-controlled node startup settings.
 pub struct NodeSettings {
     /// Rings network id.
@@ -59,6 +69,10 @@ pub struct NodeSettings {
 }
 
 /// Build a browser provider from a wallet-authorized session key.
+///
+/// The browser provider is used only on the single-threaded wasm event loop, but
+/// the upstream `Provider` handle is exposed behind `Arc`; keep that shape at
+/// this adapter boundary instead of introducing a parallel wasm-only provider.
 #[allow(clippy::arc_with_non_send_sync)]
 pub async fn build_node(
     wallet: &WalletAccount,
@@ -155,9 +169,6 @@ pub async fn disconnect_all(provider: &Arc<Provider>) -> Result<usize, String> {
     let mut closed = 0;
     let mut attempted = 0;
     for peer in peers {
-        if peer.did == "unknown" {
-            continue;
-        }
         attempted += 1;
         if request(provider, "disconnect", obj(&[("did", peer.did.as_str())]))
             .await
@@ -195,9 +206,11 @@ pub async fn list_peers(provider: &Arc<Provider>) -> Result<Vec<PeerView>, Strin
     let mut out = Vec::new();
     for index in 0..peers.length() {
         let peer = peers.get(index);
-        let did = get_string(&peer, "did").unwrap_or_else(|_| "unknown".to_string());
+        let did = get_string(&peer, "did").unwrap_or_default();
         let state = get_string(&peer, "state").unwrap_or_else(|_| "Unknown".to_string());
-        out.push(PeerView { did, state });
+        if let Some(peer) = PeerView::from_fields(did, state) {
+            out.push(peer);
+        }
     }
     Ok(out)
 }

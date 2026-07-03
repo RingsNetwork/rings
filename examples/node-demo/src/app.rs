@@ -32,6 +32,17 @@ use crate::wallet::WalletKind;
 use crate::workbench;
 use crate::workbench::DwebState;
 
+#[derive(Clone, PartialEq)]
+struct SettingsSnapshot {
+    wallet_kind: String,
+    network_id: String,
+    ice_servers: String,
+    stabilize_interval: String,
+    storage_name: String,
+    seed_url: String,
+    http_endpoint: String,
+}
+
 /// Unified Rings node demo app.
 #[function_component(App)]
 pub fn app() -> Html {
@@ -44,6 +55,7 @@ pub fn app() -> Html {
     let wallet_account = use_state(|| None::<WalletAccount>);
     let node_starting = use_state(|| false);
     let node_ref = use_mut_ref(|| None::<DemoNode>);
+    let node_generation = use_mut_ref(|| 0_u64);
     let site = use_mut_ref(dweb::default_site);
 
     let did = use_state(String::new);
@@ -95,7 +107,12 @@ pub fn app() -> Html {
     let wasm_url = use_state(|| "http://127.0.0.1:8080/simple_bn256.wasm".to_string());
 
     let custom_namespace = use_state(|| "custom".to_string());
-    let custom_registered = use_state(|| vec!["custom".to_string(), "example".to_string()]);
+    let custom_registered = use_state(|| {
+        custom::DEMO_NAMESPACES
+            .iter()
+            .map(|namespace| (*namespace).to_string())
+            .collect::<Vec<_>>()
+    });
     let custom_peer = use_state(String::new);
     let custom_payload = use_state(|| "hello from Rings".to_string());
     let custom_events = use_state(Vec::<custom::CustomEvent>::new);
@@ -110,23 +127,26 @@ pub fn app() -> Html {
     };
 
     {
-        let settings_snapshot = (
-            (*wallet_kind).value().to_string(),
-            (*network_id).clone(),
-            (*ice_servers).clone(),
-            (*stabilize_interval).clone(),
-            (*storage_name).clone(),
-            (*seed_url).clone(),
-            (*http_endpoint).clone(),
-        );
+        let settings_snapshot = SettingsSnapshot {
+            wallet_kind: (*wallet_kind).value().to_string(),
+            network_id: (*network_id).clone(),
+            ice_servers: (*ice_servers).clone(),
+            stabilize_interval: (*stabilize_interval).clone(),
+            storage_name: (*storage_name).clone(),
+            seed_url: (*seed_url).clone(),
+            http_endpoint: (*http_endpoint).clone(),
+        };
         use_effect_with(settings_snapshot, move |settings| {
-            extension::save_setting(extension::SETTING_WALLET_KIND, &settings.0);
-            extension::save_setting(extension::SETTING_NETWORK_ID, &settings.1);
-            extension::save_setting(extension::SETTING_ICE_SERVERS, &settings.2);
-            extension::save_setting(extension::SETTING_STABILIZE_INTERVAL, &settings.3);
-            extension::save_setting(extension::SETTING_STORAGE_NAME, &settings.4);
-            extension::save_setting(extension::SETTING_SEED_URL, &settings.5);
-            extension::save_setting(extension::SETTING_HTTP_ENDPOINT, &settings.6);
+            extension::save_setting(extension::SETTING_WALLET_KIND, &settings.wallet_kind);
+            extension::save_setting(extension::SETTING_NETWORK_ID, &settings.network_id);
+            extension::save_setting(extension::SETTING_ICE_SERVERS, &settings.ice_servers);
+            extension::save_setting(
+                extension::SETTING_STABILIZE_INTERVAL,
+                &settings.stabilize_interval,
+            );
+            extension::save_setting(extension::SETTING_STORAGE_NAME, &settings.storage_name);
+            extension::save_setting(extension::SETTING_SEED_URL, &settings.seed_url);
+            extension::save_setting(extension::SETTING_HTTP_ENDPOINT, &settings.http_endpoint);
         });
     }
 
@@ -159,6 +179,7 @@ pub fn app() -> Html {
         let wallet_account = wallet_account.clone();
         let node_starting = node_starting.clone();
         let node_ref = node_ref.clone();
+        let node_generation = node_generation.clone();
         let site = site.clone();
         let did = did.clone();
         let status = status.clone();
@@ -177,6 +198,7 @@ pub fn app() -> Html {
             let wallet_account = wallet_account.clone();
             let node_starting = node_starting.clone();
             let node_ref = node_ref.clone();
+            let node_generation = node_generation.clone();
             let site = site.clone();
             let did = did.clone();
             let settings_dialog_open = settings_dialog_open.clone();
@@ -188,6 +210,7 @@ pub fn app() -> Html {
             let dweb_page = dweb_page.clone();
             let custom_events = custom_events.clone();
             let kind = *wallet_kind;
+            *node_generation.borrow_mut() += 1;
             node_starting.set(true);
             status.set(format!("connecting {}", kind.label()));
             wasm_bindgen_futures::spawn_local(async move {
@@ -308,7 +331,7 @@ pub fn app() -> Html {
                         custom_events.set(next);
                     })
                 };
-                for namespace in ["custom", "example"] {
+                for namespace in custom::DEMO_NAMESPACES {
                     if let Err(error) =
                         custom::register(&built.provider, namespace.to_string(), on_custom.clone())
                     {
@@ -352,6 +375,7 @@ pub fn app() -> Html {
         let wallet_account = wallet_account.clone();
         let node_starting = node_starting.clone();
         let node_ref = node_ref.clone();
+        let node_generation = node_generation.clone();
         let did = did.clone();
         let status = status.clone();
         let peers = peers.clone();
@@ -405,6 +429,11 @@ pub fn app() -> Html {
                 return;
             };
             let provider = node.provider.clone();
+            let cleanup_generation = {
+                let mut generation = node_generation.borrow_mut();
+                *generation += 1;
+                *generation
+            };
             did.set(String::new());
             wallet_account.set(None);
             node_starting.set(false);
@@ -418,7 +447,7 @@ pub fn app() -> Html {
             status.set("node disconnected".to_string());
 
             let status = status.clone();
-            let did = did.clone();
+            let node_generation = node_generation.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 let cleanup = node::disconnect_all(&provider).fuse();
                 let timeout = sleep(Duration::from_secs(2)).fuse();
@@ -432,7 +461,7 @@ pub fn app() -> Html {
                     _ = timeout => "node disconnected; peer cleanup timed out".to_string(),
                 };
                 node.stop();
-                if (*did).is_empty() {
+                if *node_generation.borrow() == cleanup_generation {
                     status.set(message);
                 }
             });

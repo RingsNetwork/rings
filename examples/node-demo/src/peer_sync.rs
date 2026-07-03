@@ -9,6 +9,8 @@ use crate::node;
 use crate::node::DemoNode;
 use crate::node::PeerView;
 
+pub(crate) const PEER_SETTLE_DELAYS_MS: &[u64] = &[0, 1_000, 2_000, 4_000];
+
 pub(crate) async fn sync_peers_after_handshake(
     node: DemoNode,
     peers: UseStateHandle<Vec<PeerView>>,
@@ -20,9 +22,9 @@ pub(crate) async fn sync_peers_after_handshake(
     if let Some(required_peer) = required_peer.as_ref() {
         peers.set(merge_required_peer((*peers).clone(), required_peer));
     }
-    for delay_ms in [0, 1_000, 2_000, 4_000] {
-        if delay_ms > 0 {
-            sleep(Duration::from_millis(delay_ms)).await;
+    for delay_ms in PEER_SETTLE_DELAYS_MS {
+        if *delay_ms > 0 {
+            sleep(Duration::from_millis(*delay_ms)).await;
         }
         match node::list_peers(&node.provider).await {
             Ok(next) => {

@@ -33,3 +33,11 @@ yew = { version = "0.21", features = ["csr"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "=0.3.71"
+
+[lints.clippy]
+expect_used = "deny"
+indexing_slicing = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"

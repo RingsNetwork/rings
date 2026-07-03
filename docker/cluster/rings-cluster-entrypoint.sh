@@ -293,13 +293,12 @@ log "starting $NODE_COUNT Rings node(s): topology=$TOPOLOGY, internal=$BASE_INTE
 for i in $(seq 0 $((NODE_COUNT - 1))); do
     internal_port=$((BASE_INTERNAL_PORT + i))
     external_port=$((BASE_EXTERNAL_PORT + i))
-    node_dir="$CLUSTER_DIR/node-$i"
     session_file="$CLUSTER_DIR/keys/node-$i.session_sk"
     config_file="$CLUSTER_DIR/config/node-$i.yaml"
     storage_path="$CLUSTER_DIR/storage/node-$i"
     log_file="$CLUSTER_DIR/logs/node-$i.log"
 
-    mkdir -p "$node_dir" "$storage_path"
+    mkdir -p "$storage_path"
     create_session_file "$i" "$session_file"
     write_config "$i" "$config_file" "$session_file" "$internal_port" "$external_port" "$storage_path"
 

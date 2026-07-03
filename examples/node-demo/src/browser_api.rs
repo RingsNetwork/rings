@@ -124,6 +124,10 @@ pub(crate) async fn await_js(value: JsValue) -> Result<JsValue, String> {
         .map_err(js_error_label)
 }
 
+pub(crate) fn js_global_prop(name: &str) -> Result<JsValue, String> {
+    Reflect::get(&js_sys::global(), &JsValue::from_str(name)).map_err(js_error_label)
+}
+
 pub(crate) fn chrome_runtime_on_message() -> Option<JsValue> {
     let runtime = chrome_runtime()?;
     let on_message = js_prop(&runtime, "onMessage").ok()?;
@@ -155,6 +159,41 @@ pub(crate) fn js_method(object: &JsValue, name: &str) -> Result<Function, String
     js_prop(object, name)?
         .dyn_into::<Function>()
         .map_err(|_| format!("{name} is not callable"))
+}
+
+pub(crate) fn js_call0(object: &JsValue, name: &str) -> Result<JsValue, String> {
+    js_method(object, name)?
+        .call0(object)
+        .map_err(|error| format!("{name} failed: {}", js_error_label(error)))
+}
+
+pub(crate) fn js_call1(object: &JsValue, name: &str, a: &JsValue) -> Result<JsValue, String> {
+    js_method(object, name)?
+        .call1(object, a)
+        .map_err(|error| format!("{name} failed: {}", js_error_label(error)))
+}
+
+pub(crate) fn js_call2(
+    object: &JsValue,
+    name: &str,
+    a: &JsValue,
+    b: &JsValue,
+) -> Result<JsValue, String> {
+    js_method(object, name)?
+        .call2(object, a, b)
+        .map_err(|error| format!("{name} failed: {}", js_error_label(error)))
+}
+
+pub(crate) fn js_call3(
+    object: &JsValue,
+    name: &str,
+    a: &JsValue,
+    b: &JsValue,
+    c: &JsValue,
+) -> Result<JsValue, String> {
+    js_method(object, name)?
+        .call3(object, a, b, c)
+        .map_err(|error| format!("{name} failed: {}", js_error_label(error)))
 }
 
 pub(crate) fn js_prop(object: &JsValue, name: &str) -> Result<JsValue, String> {

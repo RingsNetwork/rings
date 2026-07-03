@@ -3,6 +3,7 @@
 use web_sys::MouseEvent;
 use yew::prelude::*;
 
+use crate::hex;
 use crate::node::PeerView;
 
 const CHORD_ID_BYTES: usize = 20;
@@ -89,7 +90,7 @@ fn topology_component(props: &TopologyProps) -> Html {
                 let flow_class = format!("data-flow finger-flow {tone}");
                 let flow_delay = format!(
                     "animation-delay: -{}ms;",
-                    (edge.source * 311 + edge.exponent * 17) % 3600
+                    (edge.source() * 311 + edge.exponent * 17) % 3600
                 );
                 let path = finger_curve_path(center_x, center_y, edge.exponent, source.angle, target.angle);
                 Some(html! {
@@ -212,8 +213,7 @@ struct InferredEdge {
 }
 
 struct InferredFinger {
-    source: usize,
-    target: usize,
+    edge: InferredEdge,
     exponent: usize,
 }
 
@@ -224,8 +224,12 @@ impl InferredEdge {
 }
 
 impl InferredFinger {
+    fn source(&self) -> usize {
+        self.edge.source
+    }
+
     fn endpoints<'a>(&self, nodes: &'a [ChordNode]) -> Option<(&'a ChordNode, &'a ChordNode)> {
-        Some((nodes.get(self.source)?, nodes.get(self.target)?))
+        self.edge.endpoints(nodes)
     }
 }
 
@@ -289,8 +293,7 @@ fn inferred_finger_links(nodes: &[ChordNode]) -> Vec<InferredFinger> {
                 continue;
             }
             links.push(InferredFinger {
-                source,
-                target,
+                edge: InferredEdge { source, target },
                 exponent: *exponent,
             });
             source_targets.push(target);
@@ -367,41 +370,32 @@ fn chord_add_power_of_two(id: &[u8; CHORD_ID_BYTES], exponent: usize) -> [u8; CH
 }
 
 fn did_identifier(did: &str) -> Option<[u8; CHORD_ID_BYTES]> {
-    let hex = did.trim().strip_prefix("0x").unwrap_or(did.trim());
-    let hex_len = hex.chars().count();
-    if hex_len == 0 || !hex_len.is_multiple_of(2) {
+    let hex_value = did.trim().strip_prefix("0x").unwrap_or(did.trim());
+    if hex_value.is_empty()
+        || !hex_value.len().is_multiple_of(2)
+        || !hex_value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
         return None;
     }
-    let hex_chars: Vec<char> = hex
-        .chars()
-        .rev()
-        .take(CHORD_HEX_CHARS)
+
+    let low_hex = hex_value
+        .as_bytes()
+        .rchunks_exact(2)
+        .take(CHORD_HEX_CHARS / 2)
         .collect::<Vec<_>>()
         .into_iter()
         .rev()
-        .collect();
-    if !hex_chars.len().is_multiple_of(2) {
-        return None;
-    }
-    let byte_count = hex_chars.len() / 2;
-    if byte_count > CHORD_ID_BYTES {
-        return None;
-    }
+        .collect::<Vec<_>>();
+    let byte_count = low_hex.len();
     let mut id = [0_u8; CHORD_ID_BYTES];
     let offset = CHORD_ID_BYTES - byte_count;
-    for (index, pair) in hex_chars.chunks_exact(2).enumerate() {
-        let high = hex_nibble(*pair.first()?)?;
-        let low = hex_nibble(*pair.get(1)?)?;
+    for (index, pair) in low_hex.into_iter().enumerate() {
+        let high = hex::hex_nibble(*pair.first()?)?;
+        let low = hex::hex_nibble(*pair.get(1)?)?;
         let byte = id.get_mut(offset + index)?;
         *byte = (high << 4) | low;
     }
     Some(id)
-}
-
-fn hex_nibble(value: char) -> Option<u8> {
-    value
-        .to_digit(16)
-        .and_then(|digit| u8::try_from(digit).ok())
 }
 
 fn chord_angle(id: &[u8; CHORD_ID_BYTES]) -> f64 {
@@ -733,7 +727,7 @@ mod tests {
         assert!(!links.is_empty());
         assert!(links
             .iter()
-            .all(|link| link.source < nodes.len() && link.target < nodes.len()));
-        assert!(links.iter().all(|link| link.source != link.target));
+            .all(|link| link.source() < nodes.len() && link.edge.target < nodes.len()));
+        assert!(links.iter().all(|link| link.source() != link.edge.target));
     }
 }

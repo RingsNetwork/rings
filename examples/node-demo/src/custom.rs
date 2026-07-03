@@ -15,6 +15,9 @@ use yew::Callback;
 
 use crate::node;
 
+/// Namespaces installed automatically for the unified node demo.
+pub const DEMO_NAMESPACES: &[&str] = &["custom", "example"];
+
 /// Custom message observed by the local node.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CustomEvent {

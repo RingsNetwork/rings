@@ -58,6 +58,8 @@ pub(crate) const SETTING_SEED_URL: &str = "rings.node-demo.seedUrl";
 pub(crate) const SETTING_HTTP_ENDPOINT: &str = "rings.node-demo.httpEndpoint";
 pub(crate) const WALLET_CONNECT_TIMEOUT: Duration = Duration::from_secs(45);
 pub(crate) const SESSION_AUTH_TIMEOUT: Duration = Duration::from_secs(60);
+const NODE_START_POLL_ATTEMPTS: usize = 240;
+const NODE_START_POLL_DELAY_MS: u64 = 750;
 
 pub(crate) struct ExtensionStartSettings {
     pub(crate) network_id: String,
@@ -80,6 +82,7 @@ pub(crate) struct ExtensionNodeSnapshot {
 struct HeadlessNodeState {
     node: Option<DemoNode>,
     wallet_account: Option<WalletAccount>,
+    peers: Vec<PeerView>,
     starting: bool,
     start_error: Option<String>,
     message: String,
@@ -99,6 +102,7 @@ pub fn headless_node() -> Html {
     let state = use_mut_ref(|| HeadlessNodeState {
         node: None,
         wallet_account: None,
+        peers: Vec::new(),
         starting: false,
         start_error: None,
         message: "background node offline".to_string(),
@@ -278,13 +282,14 @@ async fn start_headless_node_inner(
         Callback::from(|_: dweb::DwebResponse| {}),
     )?;
     let on_custom = Callback::from(|_: custom::CustomEvent| {});
-    for namespace in ["custom", "example"] {
+    for namespace in custom::DEMO_NAMESPACES {
         custom::register(&built.provider, namespace.to_string(), on_custom.clone())?;
     }
 
     {
         let mut state = state.borrow_mut();
         state.wallet_account = Some(account);
+        state.peers = Vec::new();
         state.node = Some(built.clone());
     }
 
@@ -305,14 +310,15 @@ async fn start_headless_node_inner(
                 did: seed_did,
                 state: "Connected".to_string(),
             };
-            let _snapshot = headless_node_snapshot(
+            let snapshot = headless_node_snapshot(
                 state.clone(),
                 "seed URL connected".to_string(),
                 Some(seed_peer),
                 true,
             )
-            .await;
-            Ok("seed URL connected".to_string())
+            .await?;
+            Ok(js_string_field(&snapshot, "message")
+                .unwrap_or_else(|_| "seed URL connected".to_string()))
         }
         Err(error) => Ok(format!(
             "background node ready; seed connect failed: {error}"
@@ -324,9 +330,10 @@ async fn stop_headless_node(state: Rc<RefCell<HeadlessNodeState>>) -> Result<JsV
     let node = {
         let mut state = state.borrow_mut();
         state.wallet_account = None;
+        state.peers = Vec::new();
         state.starting = false;
         state.start_error = None;
-        state.message = "background node stopped".to_string();
+        state.message = "stopping background node".to_string();
         state.node.take()
     };
     let Some(node) = node else {
@@ -354,6 +361,7 @@ async fn stop_headless_node(state: Rc<RefCell<HeadlessNodeState>>) -> Result<JsV
         _ = timeout => "background node stopped; peer cleanup timed out".to_string(),
     };
     node.stop();
+    state.borrow_mut().message = message.clone();
     headless_snapshot_js(false, String::new(), &[], None, message, false, None)
 }
 
@@ -468,11 +476,12 @@ async fn headless_node_snapshot(
     required_peer: Option<PeerView>,
     settle: bool,
 ) -> Result<JsValue, String> {
-    let (node, account, starting, start_error, state_message) = {
+    let (node, account, state_peers, starting, start_error, state_message) = {
         let state = state.borrow();
         (
             state.node.clone(),
             state.wallet_account.clone(),
+            state.peers.clone(),
             state.starting,
             state.start_error.clone(),
             state.message.clone(),
@@ -495,10 +504,10 @@ async fn headless_node_snapshot(
         );
     };
 
-    let mut peers = Vec::new();
+    let mut peers = state_peers;
     let mut message = context.clone();
     let delays: &[u64] = if settle {
-        &[0, 1_000, 2_000, 4_000]
+        peer_sync::PEER_SETTLE_DELAYS_MS
     } else {
         &[0]
     };
@@ -521,6 +530,11 @@ async fn headless_node_snapshot(
                 message = format!("{context}; peer sync failed: {error}");
             }
         }
+    }
+    {
+        let mut state = state.borrow_mut();
+        state.peers = peers.clone();
+        state.message = message.clone();
     }
 
     headless_snapshot_js(
@@ -637,8 +651,8 @@ pub(crate) async fn poll_extension_node_start(
     status: UseStateHandle<String>,
 ) -> Result<(), String> {
     let mut last_message = "background node starting".to_string();
-    for _attempt in 0..240 {
-        sleep(Duration::from_millis(750)).await;
+    for _attempt in 0..NODE_START_POLL_ATTEMPTS {
+        sleep(Duration::from_millis(NODE_START_POLL_DELAY_MS)).await;
         let snapshot = extension_node_status(bridge).await?;
         let message = snapshot
             .error
@@ -835,9 +849,11 @@ fn parse_peer_views(value: &JsValue) -> Result<Vec<PeerView>, String> {
     let mut out = Vec::with_capacity(array.length() as usize);
     for index in 0..array.length() {
         let peer = array.get(index);
-        let did = js_string_field(&peer, "did").unwrap_or_else(|_| "unknown".to_string());
+        let did = js_string_field(&peer, "did").unwrap_or_default();
         let state = js_string_field(&peer, "state").unwrap_or_else(|_| "Unknown".to_string());
-        out.push(PeerView { did, state });
+        if let Some(peer) = PeerView::from_fields(did, state) {
+            out.push(peer);
+        }
     }
     Ok(out)
 }

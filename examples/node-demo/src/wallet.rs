@@ -4,14 +4,21 @@ use base58::FromBase58;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
 use js_sys::Array;
-use js_sys::Function;
 use js_sys::Object;
-use js_sys::Promise;
-use js_sys::Reflect;
 use js_sys::Uint8Array;
-use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
-use wasm_bindgen_futures::JsFuture;
+
+use crate::browser_api::await_js;
+use crate::browser_api::is_callable;
+use crate::browser_api::js_call0;
+use crate::browser_api::js_call1;
+use crate::browser_api::js_call2;
+use crate::browser_api::js_call3;
+use crate::browser_api::js_global_prop;
+use crate::browser_api::js_prop;
+use crate::browser_api::js_set;
+use crate::browser_api::js_string_field;
+use crate::hex;
 
 const EXTENSION_WALLET_BRIDGE: &str = "RingsExtensionWalletBridge";
 
@@ -27,6 +34,10 @@ pub enum WalletKind {
 }
 
 /// Connected browser account and the opaque signing handle.
+///
+/// `Clone` duplicates a JavaScript object reference, not private key material.
+/// Each clone carries the same signing authority, so clone only across UI state
+/// handles that need to observe or invoke the same connected account.
 #[derive(Clone)]
 pub struct WalletAccount {
     /// Account standard that created this account.
@@ -102,78 +113,11 @@ pub async fn connect(kind: WalletKind) -> Result<WalletAccount, String> {
     }
 }
 
-fn js_err(error: JsValue) -> String {
-    if let Some(message) = error.as_string() {
-        return message;
-    }
-    format!("{error:?}")
-}
-
-fn global_prop(name: &str) -> Result<JsValue, String> {
-    Reflect::get(&js_sys::global(), &JsValue::from_str(name)).map_err(js_err)
-}
-
-fn prop(object: &JsValue, name: &str) -> Result<JsValue, String> {
-    Reflect::get(object, &JsValue::from_str(name)).map_err(js_err)
-}
-
-fn string_prop(object: &JsValue, name: &str) -> Result<String, String> {
-    prop(object, name)?
-        .as_string()
-        .ok_or_else(|| format!("missing string field {name}"))
-}
-
-fn set(object: &Object, name: &str, value: &JsValue) -> Result<(), String> {
-    Reflect::set(object, &JsValue::from_str(name), value)
-        .map(|_| ())
-        .map_err(js_err)
-}
-
-fn method(object: &JsValue, name: &str) -> Result<Function, String> {
-    prop(object, name)?
-        .dyn_into::<Function>()
-        .map_err(|_| format!("{name} is not callable"))
-}
-
-async fn await_js(value: JsValue) -> Result<JsValue, String> {
-    JsFuture::from(Promise::from(value)).await.map_err(js_err)
-}
-
-fn call0(object: &JsValue, name: &str) -> Result<JsValue, String> {
-    method(object, name)?
-        .call0(object)
-        .map_err(|error| format!("{name} failed: {}", js_err(error)))
-}
-
-fn call1(object: &JsValue, name: &str, a: &JsValue) -> Result<JsValue, String> {
-    method(object, name)?
-        .call1(object, a)
-        .map_err(|error| format!("{name} failed: {}", js_err(error)))
-}
-
-fn call2(object: &JsValue, name: &str, a: &JsValue, b: &JsValue) -> Result<JsValue, String> {
-    method(object, name)?
-        .call2(object, a, b)
-        .map_err(|error| format!("{name} failed: {}", js_err(error)))
-}
-
-fn call3(
-    object: &JsValue,
-    name: &str,
-    a: &JsValue,
-    b: &JsValue,
-    c: &JsValue,
-) -> Result<JsValue, String> {
-    method(object, name)?
-        .call3(object, a, b, c)
-        .map_err(|error| format!("{name} failed: {}", js_err(error)))
-}
-
 fn request(provider: &JsValue, method_name: &str, params: JsValue) -> Result<JsValue, String> {
     let body = Object::new();
-    set(&body, "method", &JsValue::from_str(method_name))?;
-    set(&body, "params", &params)?;
-    call1(provider, "request", &body.into())
+    js_set(&body, "method", &JsValue::from_str(method_name))?;
+    js_set(&body, "params", &params)?;
+    js_call1(provider, "request", &body.into())
 }
 
 fn bytes_to_hex(bytes: &[u8]) -> String {
@@ -189,28 +133,21 @@ fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, String> {
         .as_bytes()
         .chunks_exact(2)
         .map(|pair| {
-            let high = hex_nibble(
+            let high = hex::hex_nibble(
                 *pair
                     .first()
                     .ok_or_else(|| "wallet returned an invalid hex signature".to_string())?,
-            )?;
-            let low = hex_nibble(
+            )
+            .ok_or_else(|| "wallet returned an invalid hex signature".to_string())?;
+            let low = hex::hex_nibble(
                 *pair
                     .get(1)
                     .ok_or_else(|| "wallet returned an invalid hex signature".to_string())?,
-            )?;
+            )
+            .ok_or_else(|| "wallet returned an invalid hex signature".to_string())?;
             Ok((high << 4) | low)
         })
         .collect()
-}
-
-fn hex_nibble(byte: u8) -> Result<u8, String> {
-    match byte {
-        b'0'..=b'9' => Ok(byte - b'0'),
-        b'a'..=b'f' => Ok(byte - b'a' + 10),
-        b'A'..=b'F' => Ok(byte - b'A' + 10),
-        _ => Err("wallet returned an invalid hex signature".to_string()),
-    }
 }
 
 fn base64_url_to_bytes(value: &str) -> Result<Vec<u8>, String> {
@@ -228,14 +165,14 @@ fn rings_prefixed_message(message: &str) -> Vec<u8> {
 
 fn ecdsa_algorithm() -> Result<Object, String> {
     let algorithm = Object::new();
-    set(&algorithm, "name", &JsValue::from_str("ECDSA"))?;
-    set(&algorithm, "namedCurve", &JsValue::from_str("P-256"))?;
+    js_set(&algorithm, "name", &JsValue::from_str("ECDSA"))?;
+    js_set(&algorithm, "namedCurve", &JsValue::from_str("P-256"))?;
     Ok(algorithm)
 }
 
 async fn connect_webcrypto() -> Result<WalletAccount, String> {
-    let crypto = global_prop("crypto")?;
-    let subtle = prop(&crypto, "subtle")?;
+    let crypto = js_global_prop("crypto")?;
+    let subtle = js_prop(&crypto, "subtle")?;
     if subtle.is_undefined() || subtle.is_null() {
         return Err("WebCrypto SubtleCrypto is not available".to_string());
     }
@@ -243,7 +180,7 @@ async fn connect_webcrypto() -> Result<WalletAccount, String> {
     let usages = Array::new();
     usages.push(&JsValue::from_str("sign"));
     usages.push(&JsValue::from_str("verify"));
-    let key_pair = await_js(call3(
+    let key_pair = await_js(js_call3(
         &subtle,
         "generateKey",
         &ecdsa_algorithm()?.into(),
@@ -251,17 +188,17 @@ async fn connect_webcrypto() -> Result<WalletAccount, String> {
         &usages.into(),
     )?)
     .await?;
-    let public_key = prop(&key_pair, "publicKey")?;
-    let private_key = prop(&key_pair, "privateKey")?;
-    let jwk = await_js(call2(
+    let public_key = js_prop(&key_pair, "publicKey")?;
+    let private_key = js_prop(&key_pair, "privateKey")?;
+    let jwk = await_js(js_call2(
         &subtle,
         "exportKey",
         &JsValue::from_str("jwk"),
         &public_key,
     )?)
     .await?;
-    let x = base64_url_to_bytes(&string_prop(&jwk, "x")?)?;
-    let y = base64_url_to_bytes(&string_prop(&jwk, "y")?)?;
+    let x = base64_url_to_bytes(&js_string_field(&jwk, "x")?)?;
+    let y = base64_url_to_bytes(&js_string_field(&jwk, "y")?)?;
     let mut public = x;
     public.extend_from_slice(&y);
 
@@ -274,15 +211,15 @@ async fn connect_webcrypto() -> Result<WalletAccount, String> {
 }
 
 async fn sign_webcrypto(private_key: &JsValue, proof: &str) -> Result<Vec<u8>, String> {
-    let crypto = global_prop("crypto")?;
-    let subtle = prop(&crypto, "subtle")?;
+    let crypto = js_global_prop("crypto")?;
+    let subtle = js_prop(&crypto, "subtle")?;
     let hash = Object::new();
-    set(&hash, "name", &JsValue::from_str("SHA-256"))?;
+    js_set(&hash, "name", &JsValue::from_str("SHA-256"))?;
     let algorithm = Object::new();
-    set(&algorithm, "name", &JsValue::from_str("ECDSA"))?;
-    set(&algorithm, "hash", &hash.into())?;
+    js_set(&algorithm, "name", &JsValue::from_str("ECDSA"))?;
+    js_set(&algorithm, "hash", &hash.into())?;
     let message = Uint8Array::from(rings_prefixed_message(proof).as_slice());
-    let signature = await_js(call3(
+    let signature = await_js(js_call3(
         &subtle,
         "sign",
         &algorithm.into(),
@@ -299,7 +236,7 @@ async fn connect_eip191() -> Result<WalletAccount, String> {
             .await;
     }
 
-    let ethereum = global_prop("ethereum")?;
+    let ethereum = js_global_prop("ethereum")?;
     if ethereum.is_undefined() || ethereum.is_null() {
         return Err("EIP-1193 Ethereum provider not found".to_string());
     }
@@ -324,7 +261,7 @@ async fn connect_eip191() -> Result<WalletAccount, String> {
 async fn sign_eip191(ethereum: &JsValue, account: &str, proof: &str) -> Result<Vec<u8>, String> {
     if is_extension_wallet_bridge(ethereum) {
         let signed = sign_extension_wallet(ethereum, "eip191", proof, Some(account)).await?;
-        let signature = prop(&signed, "signature")
+        let signature = js_prop(&signed, "signature")
             .unwrap_or(signed)
             .as_string()
             .ok_or_else(|| "EIP-191 bridge returned a non-string signature".to_string())?;
@@ -342,16 +279,16 @@ async fn sign_eip191(ethereum: &JsValue, account: &str, proof: &str) -> Result<V
 }
 
 fn solana_provider() -> Result<JsValue, String> {
-    let phantom = global_prop("phantom").unwrap_or(JsValue::UNDEFINED);
+    let phantom = js_global_prop("phantom").unwrap_or(JsValue::UNDEFINED);
     let nested = if phantom.is_undefined() || phantom.is_null() {
         JsValue::UNDEFINED
     } else {
-        prop(&phantom, "solana").unwrap_or(JsValue::UNDEFINED)
+        js_prop(&phantom, "solana").unwrap_or(JsValue::UNDEFINED)
     };
     if !nested.is_undefined() && !nested.is_null() {
         return Ok(nested);
     }
-    let solana = global_prop("solana")?;
+    let solana = js_global_prop("solana")?;
     if solana.is_undefined() || solana.is_null() {
         Err("Solana provider not found".to_string())
     } else {
@@ -366,9 +303,9 @@ async fn connect_ed25519() -> Result<WalletAccount, String> {
     }
 
     let provider = solana_provider()?;
-    await_js(call0(&provider, "connect")?).await?;
-    let public_key = prop(&provider, "publicKey")?;
-    let account = call0(&public_key, "toBase58")?
+    await_js(js_call0(&provider, "connect")?).await?;
+    let public_key = js_prop(&provider, "publicKey")?;
+    let account = js_call0(&public_key, "toBase58")?
         .as_string()
         .ok_or_else(|| "Solana provider returned no public key".to_string())?;
     Ok(WalletAccount {
@@ -382,13 +319,13 @@ async fn connect_ed25519() -> Result<WalletAccount, String> {
 async fn sign_ed25519(provider: &JsValue, proof: &str) -> Result<Vec<u8>, String> {
     if is_extension_wallet_bridge(provider) {
         let signed = sign_extension_wallet(provider, "ed25519", proof, None).await?;
-        let signature = prop(&signed, "signature").unwrap_or(signed);
+        let signature = js_prop(&signed, "signature").unwrap_or(signed);
         return ed25519_signature_bytes(&signature);
     }
 
     let message = Uint8Array::from(proof.as_bytes());
-    let signed = if !prop(provider, "signMessage")?.is_undefined() {
-        await_js(call2(
+    let signed = if !js_prop(provider, "signMessage")?.is_undefined() {
+        await_js(js_call2(
             provider,
             "signMessage",
             &message.into(),
@@ -397,10 +334,10 @@ async fn sign_ed25519(provider: &JsValue, proof: &str) -> Result<Vec<u8>, String
         .await?
     } else {
         let params = Object::new();
-        set(&params, "message", &message.into())?;
+        js_set(&params, "message", &message.into())?;
         await_js(request(provider, "signMessage", params.into())?).await?
     };
-    let signature = prop(&signed, "signature").unwrap_or(signed);
+    let signature = js_prop(&signed, "signature").unwrap_or(signed);
     ed25519_signature_bytes(&signature)
 }
 
@@ -429,7 +366,7 @@ fn ed25519_signature_bytes(signature: &JsValue) -> Result<Vec<u8>, String> {
 }
 
 fn extension_wallet_bridge() -> Option<JsValue> {
-    let bridge = global_prop(EXTENSION_WALLET_BRIDGE).ok()?;
+    let bridge = js_global_prop(EXTENSION_WALLET_BRIDGE).ok()?;
     if bridge.is_undefined() || bridge.is_null() || !is_extension_wallet_bridge(&bridge) {
         return None;
     }
@@ -440,23 +377,16 @@ fn is_extension_wallet_bridge(value: &JsValue) -> bool {
     is_callable(value, "connect") && is_callable(value, "sign")
 }
 
-fn is_callable(object: &JsValue, name: &str) -> bool {
-    prop(object, name)
-        .ok()
-        .and_then(|value| value.dyn_into::<Function>().ok())
-        .is_some()
-}
-
 async fn connect_extension_wallet(
     bridge: &JsValue,
     kind: WalletKind,
     wallet: &str,
     fallback_account_type: &str,
 ) -> Result<WalletAccount, String> {
-    let response = await_js(call1(bridge, "connect", &JsValue::from_str(wallet))?).await?;
-    let account = string_prop(&response, "account")?;
-    let account_type =
-        string_prop(&response, "accountType").unwrap_or_else(|_| fallback_account_type.to_string());
+    let response = await_js(js_call1(bridge, "connect", &JsValue::from_str(wallet))?).await?;
+    let account = js_string_field(&response, "account")?;
+    let account_type = js_string_field(&response, "accountType")
+        .unwrap_or_else(|_| fallback_account_type.to_string());
     Ok(WalletAccount {
         kind,
         account,
@@ -471,7 +401,7 @@ async fn sign_extension_wallet(
     proof: &str,
     account: Option<&str>,
 ) -> Result<JsValue, String> {
-    await_js(call3(
+    await_js(js_call3(
         bridge,
         "sign",
         &JsValue::from_str(wallet),
@@ -485,12 +415,14 @@ async fn sign_extension_wallet(
 mod tests {
     use super::*;
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn base64url_decoder_preserves_non_ascii_coordinate_bytes() {
         assert_eq!(base64_url_to_bytes("AH-A_w"), Ok(vec![0, 127, 128, 255]));
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn rings_prefix_matches_core_secp256r1_transcript() {
         assert_eq!(
             bytes_to_hex(&rings_prefixed_message("hello world")),
@@ -498,7 +430,8 @@ mod tests {
         );
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn hex_signature_parser_accepts_prefixed_even_hex() {
         assert_eq!(hex_to_bytes("0x000aff"), Ok(vec![0, 10, 255]));
     }
@@ -513,11 +446,6 @@ mod wasm_tests {
     use super::*;
 
     wasm_bindgen_test_configure!(run_in_browser);
-
-    #[wasm_bindgen_test]
-    fn base64url_decoder_preserves_webcrypto_coordinate_bytes() {
-        assert_eq!(base64_url_to_bytes("AH-A_w"), Ok(vec![0, 127, 128, 255]));
-    }
 
     #[wasm_bindgen_test(async)]
     async fn webcrypto_account_authorizes_session_key() {

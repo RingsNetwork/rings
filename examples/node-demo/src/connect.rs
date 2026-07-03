@@ -3,6 +3,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use wasm_bindgen::JsValue;
 use yew::prelude::*;
 
 use crate::extension;
@@ -63,6 +64,114 @@ struct ConnectDialogActions {
     on_accept_answer: Callback<MouseEvent>,
 }
 
+enum NodeBackend {
+    Extension(JsValue),
+    Local(DemoNode),
+}
+
+enum PeerUpdate {
+    Snapshot(extension::ExtensionNodeSnapshot),
+    Local {
+        node: DemoNode,
+        context: &'static str,
+        required_peer: Option<PeerView>,
+    },
+}
+
+impl NodeBackend {
+    fn current(node_ref: &Rc<RefCell<Option<DemoNode>>>) -> Result<Self, String> {
+        if let Some(bridge) = extension::extension_node_bridge() {
+            return Ok(Self::Extension(bridge));
+        }
+        node_ref
+            .borrow()
+            .clone()
+            .map(Self::Local)
+            .ok_or_else(|| "start the node first".to_string())
+    }
+
+    async fn connect_http(self, endpoint: String) -> Result<PeerUpdate, String> {
+        match self {
+            Self::Extension(bridge) => {
+                let snapshot = extension::extension_node_connect_http(&bridge, endpoint).await?;
+                Ok(PeerUpdate::Snapshot(snapshot))
+            }
+            Self::Local(node) => {
+                let seed_did = node::connect_http(&node.provider, endpoint).await?;
+                Ok(PeerUpdate::Local {
+                    node,
+                    context: "HTTP endpoint connected",
+                    required_peer: Some(PeerView {
+                        did: seed_did,
+                        state: "Connected".to_string(),
+                    }),
+                })
+            }
+        }
+    }
+
+    async fn create_offer(self, remote_did: String) -> Result<String, String> {
+        match self {
+            Self::Extension(bridge) => {
+                extension::extension_node_create_offer(&bridge, remote_did).await
+            }
+            Self::Local(node) => node::create_offer(&node.provider, remote_did).await,
+        }
+    }
+
+    async fn answer_offer(self, offer: String) -> Result<String, String> {
+        match self {
+            Self::Extension(bridge) => extension::extension_node_answer_offer(&bridge, offer).await,
+            Self::Local(node) => node::answer_offer(&node.provider, offer).await,
+        }
+    }
+
+    async fn accept_answer(self, answer: String) -> Result<PeerUpdate, String> {
+        match self {
+            Self::Extension(bridge) => {
+                let snapshot = extension::extension_node_accept_answer(&bridge, answer).await?;
+                Ok(PeerUpdate::Snapshot(snapshot))
+            }
+            Self::Local(node) => {
+                node::accept_answer(&node.provider, answer).await?;
+                Ok(PeerUpdate::Local {
+                    node,
+                    context: "answer accepted",
+                    required_peer: None,
+                })
+            }
+        }
+    }
+}
+
+impl PeerUpdate {
+    async fn apply(self, peers: UseStateHandle<Vec<PeerView>>, status: UseStateHandle<String>) {
+        match self {
+            Self::Snapshot(snapshot) => {
+                peers.set(snapshot.peers);
+                status.set(snapshot.error.unwrap_or(snapshot.message));
+            }
+            Self::Local {
+                node,
+                context,
+                required_peer,
+            } => {
+                peer_sync::sync_peers_after_handshake(node, peers, status, context, required_peer)
+                    .await;
+            }
+        }
+    }
+}
+
+fn required_input(value: String, empty_message: &'static str) -> Result<String, String> {
+    let value = value.trim().to_string();
+    if value.is_empty() {
+        Err(empty_message.to_string())
+    } else {
+        Ok(value)
+    }
+}
+
 pub(crate) fn link_control(
     state: ConnectState<'_>,
     node_ref: Rc<RefCell<Option<DemoNode>>>,
@@ -76,50 +185,29 @@ pub(crate) fn link_control(
         let status = status.clone();
         let link_dialog_open = (*state.link_dialog_open).clone();
         Callback::from(move |_| {
-            if let Some(bridge) = extension::extension_node_bridge() {
-                let endpoint = (*endpoint).clone();
-                let peers = peers.clone();
-                let status = status.clone();
-                let link_dialog_open = link_dialog_open.clone();
-                status.set(format!("connecting {endpoint}"));
-                wasm_bindgen_futures::spawn_local(async move {
-                    match extension::extension_node_connect_http(&bridge, endpoint).await {
-                        Ok(snapshot) => {
-                            link_dialog_open.set(false);
-                            peers.set(snapshot.peers);
-                            status.set(snapshot.message);
-                        }
-                        Err(error) => status.set(error),
-                    }
-                });
-                return;
-            }
-
-            let Some(node) = node_ref.borrow().clone() else {
-                status.set("start the node first".to_string());
-                return;
+            let backend = match NodeBackend::current(&node_ref) {
+                Ok(backend) => backend,
+                Err(error) => {
+                    status.set(error);
+                    return;
+                }
             };
-            let endpoint = (*endpoint).clone();
+            let endpoint = match required_input((*endpoint).clone(), "enter a seed HTTP endpoint") {
+                Ok(endpoint) => endpoint,
+                Err(error) => {
+                    status.set(error);
+                    return;
+                }
+            };
             let peers = peers.clone();
             let status = status.clone();
             let link_dialog_open = link_dialog_open.clone();
             status.set(format!("connecting {endpoint}"));
             wasm_bindgen_futures::spawn_local(async move {
-                match node::connect_http(&node.provider, endpoint).await {
-                    Ok(seed_did) => {
+                match backend.connect_http(endpoint).await {
+                    Ok(update) => {
                         link_dialog_open.set(false);
-                        let seed_peer = PeerView {
-                            did: seed_did,
-                            state: "Connected".to_string(),
-                        };
-                        peer_sync::sync_peers_after_handshake(
-                            node,
-                            peers,
-                            status,
-                            "HTTP endpoint connected",
-                            Some(seed_peer),
-                        )
-                        .await;
+                        update.apply(peers, status).await;
                     }
                     Err(error) => status.set(error),
                 }
@@ -132,39 +220,24 @@ pub(crate) fn link_control(
         let generated_offer = (*state.generated_offer).clone();
         let status = status.clone();
         Callback::from(move |_| {
-            if let Some(bridge) = extension::extension_node_bridge() {
-                let remote_did = (*remote_did).trim().to_string();
-                if remote_did.is_empty() {
-                    status.set("enter a remote DID".to_string());
+            let backend = match NodeBackend::current(&node_ref) {
+                Ok(backend) => backend,
+                Err(error) => {
+                    status.set(error);
                     return;
                 }
-                let generated_offer = generated_offer.clone();
-                let status = status.clone();
-                wasm_bindgen_futures::spawn_local(async move {
-                    match extension::extension_node_create_offer(&bridge, remote_did).await {
-                        Ok(offer) => {
-                            generated_offer.set(offer);
-                            status.set("offer created".to_string());
-                        }
-                        Err(error) => status.set(error),
-                    }
-                });
-                return;
-            }
-
-            let Some(node) = node_ref.borrow().clone() else {
-                status.set("start the node first".to_string());
-                return;
             };
-            let remote_did = (*remote_did).trim().to_string();
-            if remote_did.is_empty() {
-                status.set("enter a remote DID".to_string());
-                return;
-            }
+            let remote_did = match required_input((*remote_did).clone(), "enter a remote DID") {
+                Ok(remote_did) => remote_did,
+                Err(error) => {
+                    status.set(error);
+                    return;
+                }
+            };
             let generated_offer = generated_offer.clone();
             let status = status.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                match node::create_offer(&node.provider, remote_did).await {
+                match backend.create_offer(remote_did).await {
                     Ok(offer) => {
                         generated_offer.set(offer);
                         status.set("offer created".to_string());
@@ -180,39 +253,24 @@ pub(crate) fn link_control(
         let generated_answer = (*state.generated_answer).clone();
         let status = status.clone();
         Callback::from(move |_| {
-            if let Some(bridge) = extension::extension_node_bridge() {
-                let offer = (*remote_offer).trim().to_string();
-                if offer.is_empty() {
-                    status.set("paste an offer first".to_string());
+            let backend = match NodeBackend::current(&node_ref) {
+                Ok(backend) => backend,
+                Err(error) => {
+                    status.set(error);
                     return;
                 }
-                let generated_answer = generated_answer.clone();
-                let status = status.clone();
-                wasm_bindgen_futures::spawn_local(async move {
-                    match extension::extension_node_answer_offer(&bridge, offer).await {
-                        Ok(answer) => {
-                            generated_answer.set(answer);
-                            status.set("answer created".to_string());
-                        }
-                        Err(error) => status.set(error),
-                    }
-                });
-                return;
-            }
-
-            let Some(node) = node_ref.borrow().clone() else {
-                status.set("start the node first".to_string());
-                return;
             };
-            let offer = (*remote_offer).trim().to_string();
-            if offer.is_empty() {
-                status.set("paste an offer first".to_string());
-                return;
-            }
+            let offer = match required_input((*remote_offer).clone(), "paste an offer first") {
+                Ok(offer) => offer,
+                Err(error) => {
+                    status.set(error);
+                    return;
+                }
+            };
             let generated_answer = generated_answer.clone();
             let status = status.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                match node::answer_offer(&node.provider, offer).await {
+                match backend.answer_offer(offer).await {
                     Ok(answer) => {
                         generated_answer.set(answer);
                         status.set("answer created".to_string());
@@ -229,52 +287,28 @@ pub(crate) fn link_control(
         let status = status.clone();
         let link_dialog_open = (*state.link_dialog_open).clone();
         Callback::from(move |_| {
-            if let Some(bridge) = extension::extension_node_bridge() {
-                let answer = (*remote_answer).trim().to_string();
-                if answer.is_empty() {
-                    status.set("paste an answer first".to_string());
+            let backend = match NodeBackend::current(&node_ref) {
+                Ok(backend) => backend,
+                Err(error) => {
+                    status.set(error);
                     return;
                 }
-                let peers = peers.clone();
-                let status = status.clone();
-                let link_dialog_open = link_dialog_open.clone();
-                wasm_bindgen_futures::spawn_local(async move {
-                    match extension::extension_node_accept_answer(&bridge, answer).await {
-                        Ok(snapshot) => {
-                            link_dialog_open.set(false);
-                            peers.set(snapshot.peers);
-                            status.set(snapshot.message);
-                        }
-                        Err(error) => status.set(error),
-                    }
-                });
-                return;
-            }
-
-            let Some(node) = node_ref.borrow().clone() else {
-                status.set("start the node first".to_string());
-                return;
             };
-            let answer = (*remote_answer).trim().to_string();
-            if answer.is_empty() {
-                status.set("paste an answer first".to_string());
-                return;
-            }
+            let answer = match required_input((*remote_answer).clone(), "paste an answer first") {
+                Ok(answer) => answer,
+                Err(error) => {
+                    status.set(error);
+                    return;
+                }
+            };
             let peers = peers.clone();
             let status = status.clone();
             let link_dialog_open = link_dialog_open.clone();
             wasm_bindgen_futures::spawn_local(async move {
-                match node::accept_answer(&node.provider, answer).await {
-                    Ok(()) => {
+                match backend.accept_answer(answer).await {
+                    Ok(update) => {
                         link_dialog_open.set(false);
-                        peer_sync::sync_peers_after_handshake(
-                            node,
-                            peers,
-                            status,
-                            "answer accepted",
-                            None,
-                        )
-                        .await;
+                        update.apply(peers, status).await;
                     }
                     Err(error) => status.set(error),
                 }
