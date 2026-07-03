@@ -224,7 +224,10 @@ impl Provider {
         })
     }
 
-    /// listen message.
+    /// Start the long-running listener.
+    ///
+    /// The returned Promise is not a readiness barrier and does not resolve
+    /// during normal operation.
     pub fn listen(&self) -> js_sys::Promise {
         let p = self.processor.clone();
 

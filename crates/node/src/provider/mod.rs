@@ -229,7 +229,9 @@ impl Provider {
         self.request_internal(method.to_string(), params).await
     }
 
-    /// Listen messages
+    /// Listen for messages until this future is dropped or aborted.
+    ///
+    /// This is a long-running task; do not await completion as a readiness signal.
     pub async fn listen(&self) {
         self.processor.listen().await;
     }

@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use futures::lock::Mutex as AsyncMutex;
 use rings_core::chunk::ReassemblyLimits;
 use rings_core::dht::Did;
 use rings_core::dht::EntryStorage;
@@ -92,16 +93,18 @@ fn validate_online_node_timing(
 }
 
 #[cfg(not(feature = "browser"))]
-async fn sleep_online_node_heartbeat_interval(interval: Duration) {
+async fn sleep_online_node_heartbeat_interval(interval: Duration) -> Result<()> {
     futures_timer::Delay::new(interval).await;
+    Ok(())
 }
 
 #[cfg(feature = "browser")]
-async fn sleep_online_node_heartbeat_interval(interval: Duration) {
+async fn sleep_online_node_heartbeat_interval(interval: Duration) -> Result<()> {
     let interval_ms = i32::try_from(interval.as_millis()).unwrap_or(i32::MAX);
-    if let Err(error) = rings_core::utils::js_utils::window_sleep(interval_ms).await {
-        tracing::warn!("Failed to wait for online node heartbeat interval: {error:?}");
-    }
+    rings_core::utils::js_utils::window_sleep(interval_ms)
+        .await
+        .map_err(|error| Error::JsError(format!("{error:?}")))?;
+    Ok(())
 }
 
 /// ProcessorConfig is usually serialized as json or yaml.
@@ -396,6 +399,7 @@ pub struct Processor {
     publish_online_node: bool,
     online_node_started_at_ms: u128,
     online_node_endpoint_hint: Option<String>,
+    online_node_publish_lock: Arc<AsyncMutex<()>>,
     online_node_published_descriptors: Arc<Mutex<BTreeSet<Encoded>>>,
 }
 
@@ -505,6 +509,7 @@ impl ProcessorBuilder {
             publish_online_node: self.publish_online_node,
             online_node_started_at_ms: get_epoch_ms(),
             online_node_endpoint_hint: endpoint_hint,
+            online_node_publish_lock: Arc::new(AsyncMutex::new(())),
             online_node_published_descriptors: Arc::new(Mutex::new(BTreeSet::new())),
         })
     }
@@ -588,6 +593,7 @@ impl Processor {
 
     /// Publish this node's signed online descriptor to the online-node registry.
     pub async fn publish_online_node_descriptor(&self) -> Result<OnlineNodeDescriptor> {
+        let _publish_guard = self.online_node_publish_lock.lock().await;
         let now_ms = get_epoch_ms();
         let descriptor = self.online_node_descriptor_at(now_ms)?;
         let encoded = descriptor.encode().map_err(Error::CoreError)?;
@@ -635,11 +641,20 @@ impl Processor {
     async fn online_node_heartbeat_daemon(&self) {
         loop {
             self.publish_online_node_descriptor_for_heartbeat().await;
-            sleep_online_node_heartbeat_interval(self.online_node_heartbeat_interval).await;
+            if let Err(error) =
+                sleep_online_node_heartbeat_interval(self.online_node_heartbeat_interval).await
+            {
+                tracing::warn!(
+                    "Stopping online node heartbeat daemon after timer error: {error:?}"
+                );
+                return;
+            }
         }
     }
 
-    /// Run stabilization daemon
+    /// Run stabilization and online-node heartbeat until this future is dropped or aborted.
+    ///
+    /// This is a long-running task; do not await completion as a readiness signal.
     pub async fn listen(&self) {
         let stabilizer = self.swarm.stabilizer();
         let stabilizer = Arc::new(stabilizer);
