@@ -1,4 +1,4 @@
-\documentclass[journal,onecolumn]{IEEEtran}
+\documentclass[journal]{IEEEtran}
 \usepackage{color}
 \usepackage{cite}
 \usepackage{multirow}
@@ -10,7 +10,6 @@
 \usepackage{amsthm}
 \usepackage{epsfig}
 \usepackage{epstopdf}
-\usepackage{titling}
 \usepackage{url}
 \usepackage{enumitem}
 \usepackage{array}
@@ -52,35 +51,40 @@
 \thanks{Ryan J. Kung can be reached at ryankung@ieee.org. Manuscript created February 8, 2023; last updated July 4, 2026.}}
 \title{Rings: A peer-to-peer network for the sovereign age}
 \date{}
+\IEEEaftertitletext{%
+\vspace{0.5\baselineskip}%
+\noindent\hfill
+\parbox{0.88\textwidth}{%
+\centering\bfseries Abstract\\[0.5\baselineskip]%
+\normalfont
+Rings is the specification
+\[
+  \mathcal{Rings}=
+  (R,\mathcal{R}_N,\mathbf{Set}/R,\Omega_N,
+   \mathsf{T}^{\mathcal{E}}_A,\Pi,\mathbb{G},\mathcal{X})
+\]
+with
+\[
+\begin{array}{rcl}
+  R&=&\mathbb{Z}/2^{160}\mathbb{Z},\\
+  \mathcal{R}_N&=&\text{Correct-Chord overlay object},\\
+  \Omega_N(X,H)&=&(X,\operatorname{owner}_N\circ H),\\
+  \tau_\nu&:&S_\nu\times I_\nu
+    \to\mathsf{T}^{\mathcal{E}_\nu}_{A_\nu}(S_\nu\times O_\nu).
+\end{array}
+\]
+\[
+  \{D,V,M,H,Q,W\}\subset\operatorname{Obj}(\mathbf{Set}/R),
+  \qquad
+  \mathsf{CryptoCarrier}\cap R=\varnothing.
+\]
+}%
+\hfill\mbox{}%
+\vspace{0.5\baselineskip}%
+}
 
 \begin{document}
 \maketitle
-\begin{abstract}
-      Rings is the specification
-      \[
-        \mathcal{Rings}=
-        (R,\mathcal{R}_N,\mathbf{Set}/R,\Omega_N,
-         \mathsf{T}^{\mathcal{E}}_A,\Pi,\mathbb{G},\mathcal{X})
-      \]
-      with
-      \[
-      \begin{array}{rcl}
-        R&=&\mathbb{Z}/2^{160}\mathbb{Z},\\
-        \mathcal{R}_N&=&\text{Correct-Chord overlay object},\\
-        \Omega_N(X,H)&=&(X,\operatorname{owner}_N\circ H),\\
-        \tau_\nu&:&S_\nu\times I_\nu
-          \to\mathsf{T}^{\mathcal{E}_\nu}_{A_\nu}(S_\nu\times O_\nu).
-      \end{array}
-      \]
-      \[
-        \{D,V,M,H,Q,W\}\subset\operatorname{Obj}(\mathbf{Set}/R),
-        \qquad
-        \mathsf{CryptoCarrier}\cap R=\varnothing.
-      \]
-
-  ~\\
-  ~\\
-\end{abstract}
 
 \section{Formal Model}
 
@@ -139,7 +143,7 @@ r&=&|\operatorname{Succ}^r_N(n)|,\\
 &&\cup\{\mathsf{stabilize}\}_{CorrectChord}.
 \end{array}
 \]
-\cite{ZaveChordCorrect}
+This is the CorrectChord stable base of Zave~\cite{ZaveChordCorrect}.
 \end{assumption}
 
 \begin{definition}[Replica set]
@@ -518,7 +522,7 @@ H_\mu\circ\sigma_X&=&H_\nu,\\[4pt]
   \{\text{Algorithms }\ref{alg:join},\ref{alg:lookup},\ref{alg:stabilize}\}.
 \end{array}
 \]
-\cite{Chord,ZaveChordCorrect}
+This section fixes Chord as the base protocol and CorrectChord as the maintenance law~\cite{Chord,ZaveChordCorrect}.
 
 \begin{figure}[h]
     \begin{center}
@@ -762,7 +766,7 @@ x\sqcup\bot&=&x,\\
 \[
   \mathsf{case}_1=\mathsf{CRDT}.
 \]
-\cite{ShapiroCRDT}
+This is the CRDT join-semilattice case~\cite{ShapiroCRDT}.
 \end{definition}
 
 \begin{invariant}[Placement]
@@ -866,7 +870,7 @@ H_S(sh_i)&\in&R,\\
 \operatorname{reconstruct}(\{sh_i\})&=&P(0)\quad(\mathbb{F}_q\text{-interp.})
 \end{array}
 \]
-\cite{ssss}
+This is Shamir reconstruction over the separate field carrier~\cite{ssss}.
 \end{definition}
 
 \begin{definition}[Relay frame]
@@ -881,7 +885,7 @@ H_S(sh_i)&\in&R,\\
 \operatorname{SplitVocabulary}&=&\mathsf{MSRP}.
 \end{array}
 \]
-\cite{RFC4975}
+The split vocabulary follows MSRP~\cite{RFC4975}.
 \end{definition}
 
 \begin{algorithm}[h]
@@ -1023,7 +1027,7 @@ Seen'_s&=&Seen_s\cup\{\eta\},\\
 \[
   \mathsf{Explore}=\mathsf{TLAStyle}(\to)
 \]
-\cite{LamportSpecifyingSystems,Stateright}
+The exploration relation follows TLA+ style and Stateright execution~\cite{LamportSpecifyingSystems,Stateright}.
 \end{definition}
 
 \begin{invariant}[Effect refinement]
