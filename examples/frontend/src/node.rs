@@ -123,6 +123,7 @@ pub async fn build_node(
             .build()
             .map_err(|error| format!("build processor: {error}"))?,
     );
+    let listening = processor.clone();
     let provider = Arc::new(Provider::from_processor(processor));
     provider
         .set_backend()
@@ -133,13 +134,9 @@ pub async fn build_node(
         .register(&provider)
         .map_err(|error| format!("register snark protocol: {error}"))?;
 
-    let listening = provider.clone();
     let (listen_abort, listen_registration) = AbortHandle::new_pair();
     spawn_local(async move {
-        let listen = async move {
-            let _result = JsFuture::from(listening.listen()).await;
-        };
-        let _result = Abortable::new(listen, listen_registration).await;
+        let _result = Abortable::new(listening.listen(), listen_registration).await;
     });
 
     Ok(DemoNode {

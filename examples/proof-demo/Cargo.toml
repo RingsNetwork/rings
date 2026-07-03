@@ -13,6 +13,7 @@ publish = false
 [workspace]
 
 [dependencies]
+futures = "0.3"
 gloo-timers = { version = "0.3", features = ["futures"] }
 js-sys = "=0.3.98"
 rings-node = { path = "../../crates/node", default-features = false, features = ["browser_default"] }

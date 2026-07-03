@@ -15,6 +15,7 @@ use rings_core::dht::OnlineNodeDescriptor;
 use rings_core::dht::OnlineNodeType;
 use rings_core::dht::DEFAULT_FINGER_TABLE_SIZE;
 use rings_core::dht::ONLINE_NODES_TOPIC;
+#[cfg(feature = "snark")]
 use rings_core::dht::ONLINE_NODE_CAPABILITY_SNARK;
 use rings_core::dht::ONLINE_NODE_CAPABILITY_STORAGE;
 use rings_core::ecc::PublicKey;
@@ -1169,11 +1170,13 @@ mod test {
     async fn online_node_registry_lists_multiple_nodes() -> Result<()> {
         let processor = prepare_processor().await;
         let other = prepare_processor().await;
+        let other_descriptor = other.online_node_descriptor_at(get_epoch_ms())?;
 
         processor
-            .storage_store(Processor::online_node_registry_entry(vec![
-                other.online_node_descriptor_at(get_epoch_ms())?
-            ])?)
+            .storage_touch_data(
+                ONLINE_NODES_TOPIC,
+                other_descriptor.encode().map_err(Error::CoreError)?,
+            )
             .await?;
         let published = processor.publish_online_node_descriptor().await?;
         let mut nodes = processor.lookup_online_nodes(false).await?;
@@ -1206,16 +1209,15 @@ mod test {
 
         let published = publisher.publish_online_node_descriptor().await?;
         let mut expected = BTreeSet::from([published.did]);
-        wait_for_online_node_dids(&publisher, &expected, "publisher sees first publish").await?;
-        wait_for_online_node_dids(&owner, &expected, "owner sees first publish").await?;
+        wait_for_online_node_dids(&owner, &expected, "owner sees publisher publish").await?;
 
         let owner_published = owner.publish_online_node_descriptor().await?;
         expected.insert(owner_published.did);
+        let other_nodes =
+            wait_for_online_node_dids(&owner, &expected, "owner sees both publishers").await?;
         let nodes =
             wait_for_online_node_dids(&publisher, &expected, "publisher sees both publishers")
                 .await?;
-        let other_nodes =
-            wait_for_online_node_dids(&owner, &expected, "owner sees both publishers").await?;
 
         assert!(nodes.iter().all(OnlineNodeDescriptor::verify_signature));
         assert!(other_nodes

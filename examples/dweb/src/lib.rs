@@ -14,6 +14,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use futures::future::AbortHandle;
+use futures::future::Abortable;
 use js_sys::Array;
 use js_sys::Function;
 use js_sys::Object;
@@ -50,9 +52,25 @@ enum DwebMsg {
 /// The site this node hosts: `path -> html`.
 type Site = Rc<RefCell<HashMap<String, String>>>;
 
+struct DwebNode {
+    provider: Arc<Provider>,
+    listen_abort: AbortHandle,
+}
+
+impl DwebNode {
+    fn stop(&self) {
+        self.listen_abort.abort();
+    }
+}
+
 /// Build an in-browser node (IndexedDB under `storage_name`), install the backend, start
 /// the message loop. Distinct `storage_name`s let two nodes coexist (e.g. in a test).
-async fn build_node(storage_name: &str) -> Arc<Provider> {
+///
+/// The browser provider is used only on the single-threaded wasm event loop, but
+/// the upstream `Provider` constructor takes an `Arc<Processor>`; keep that shape
+/// at this adapter boundary instead of introducing a parallel wasm-only provider.
+#[allow(clippy::arc_with_non_send_sync)]
+async fn build_node(storage_name: &str) -> DwebNode {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).expect("session sk");
     let config = ProcessorConfig::new(
@@ -73,14 +91,19 @@ async fn build_node(storage_name: &str) -> Arc<Provider> {
             .build()
             .expect("build processor"),
     );
+    let listening = processor.clone();
     let provider = Arc::new(Provider::from_processor(processor));
     provider.set_backend().expect("install backend");
 
-    let listening = provider.clone();
+    let (listen_abort, listen_registration) = AbortHandle::new_pair();
     spawn_local(async move {
-        let _ = JsFuture::from(listening.listen()).await;
+        let _ = Abortable::new(listening.listen(), listen_registration).await;
     });
-    provider
+
+    DwebNode {
+        provider,
+        listen_abort,
+    }
 }
 
 /// The pure-shaped `dweb` handler `(ctx, event) -> { state, effects }`: a `req` is
@@ -164,7 +187,7 @@ fn input_value(e: &InputEvent) -> String {
 
 #[function_component(App)]
 fn app() -> Html {
-    let provider: Rc<RefCell<Option<Arc<Provider>>>> = use_mut_ref(|| None);
+    let node: Rc<RefCell<Option<DwebNode>>> = use_mut_ref(|| None);
     let did = use_state(String::new);
     let status = use_state(|| "starting node…".to_string());
     let peer_did = use_state(String::new);
@@ -172,13 +195,15 @@ fn app() -> Html {
     let page = use_state(String::new);
 
     {
-        let provider = provider.clone();
+        let node = node.clone();
         let did = did.clone();
         let status = status.clone();
         let page = page.clone();
         use_effect_with((), move |_| {
+            let node_for_task = node.clone();
             spawn_local(async move {
-                let p = build_node("rings-dweb").await;
+                let built = build_node("rings-dweb").await;
+                let p = built.provider.clone();
                 let my_did = p.address();
                 did.set(my_did.clone());
 
@@ -199,10 +224,14 @@ fn app() -> Html {
                 };
                 register_dweb(&p, site, on_response);
 
-                *provider.borrow_mut() = Some(p);
+                *node_for_task.borrow_mut() = Some(built);
                 status.set("ready — paste a peer DID and fetch a path".to_string());
             });
-            || ()
+            move || {
+                if let Some(node) = node.borrow_mut().take() {
+                    node.stop();
+                }
+            }
         });
     }
 
@@ -216,12 +245,16 @@ fn app() -> Html {
     };
 
     let on_fetch = {
-        let provider = provider.clone();
+        let node = node.clone();
         let status = status.clone();
         let peer_did = peer_did.clone();
         let path = path.clone();
         Callback::from(move |_| {
-            let Some(p) = provider.borrow().clone() else {
+            let Some(p) = node
+                .borrow()
+                .as_ref()
+                .map(|node| node.provider.clone())
+            else {
                 return;
             };
             let (peer, path) = ((*peer_did).trim().to_string(), (*path).clone());
@@ -428,7 +461,7 @@ mod tests {
         // B hosts a page.
         let b = build_node("rings-dweb-test-b").await;
         register_dweb(
-            &b,
+            &b.provider,
             Rc::new(RefCell::new(HashMap::from([(
                 "/".to_string(),
                 "<h1>from B</h1>".to_string(),
@@ -439,17 +472,17 @@ mod tests {
         // A is the fetcher; it records the page it receives.
         let got: Rc<RefCell<Option<(String, String)>>> = Rc::new(RefCell::new(None));
         let a = build_node("rings-dweb-test-a").await;
-        register_dweb(&a, Rc::new(RefCell::new(HashMap::new())), {
+        register_dweb(&a.provider, Rc::new(RefCell::new(HashMap::new())), {
             let got = got.clone();
             Callback::from(move |r| *got.borrow_mut() = Some(r))
         });
 
-        connect(&a, &b).await;
+        connect(&a.provider, &b.provider).await;
 
         // Retry the request until the overlay link is up and B's response arrives.
-        let b_did = b.address();
+        let b_did = b.provider.address();
         for _ in 0..60 {
-            let _ = fetch_path(a.clone(), b_did.clone(), "/".to_string()).await;
+            let _ = fetch_path(a.provider.clone(), b_did.clone(), "/".to_string()).await;
             window_sleep(500).await.ok();
             if got.borrow().is_some() {
                 break;
@@ -459,5 +492,7 @@ mod tests {
         let page = got.borrow().clone().expect("no response received from B");
         assert_eq!(page.0, "/");
         assert_eq!(page.1, "<h1>from B</h1>");
+        a.stop();
+        b.stop();
     }
 }

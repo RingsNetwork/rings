@@ -14,6 +14,8 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::future::AbortHandle;
+use futures::future::Abortable;
 use gloo_timers::future::sleep;
 use rings_node::extension::snark::Field;
 use rings_node::extension::snark::Input;
@@ -38,10 +40,22 @@ use yew::prelude::*;
 struct Node {
     provider: Arc<Provider>,
     snark: SNARKBehaviour,
+    listen_abort: AbortHandle,
+}
+
+impl Node {
+    fn stop(&self) {
+        self.listen_abort.abort();
+    }
 }
 
 /// Build an in-browser node (IndexedDB storage), install the extension backend, register
 /// the SNARK protocol, and start the message loop. Mirrors how the daemon is wired.
+///
+/// The browser provider is used only on the single-threaded wasm event loop, but
+/// the upstream `Provider` constructor takes an `Arc<Processor>`; keep that shape
+/// at this adapter boundary instead of introducing a parallel wasm-only provider.
+#[allow(clippy::arc_with_non_send_sync)]
 async fn build_node_with_storage(storage_name: &str) -> Result<Node, String> {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).map_err(|e| format!("session sk: {e}"))?;
@@ -63,6 +77,7 @@ async fn build_node_with_storage(storage_name: &str) -> Result<Node, String> {
             .build()
             .map_err(|e| format!("build processor: {e}"))?,
     );
+    let listening = processor.clone();
     let provider = Arc::new(Provider::from_processor(processor));
     provider
         .set_backend()
@@ -72,12 +87,16 @@ async fn build_node_with_storage(storage_name: &str) -> Result<Node, String> {
         .register(&provider)
         .map_err(|e| format!("register snark: {e}"))?;
 
-    let listening = provider.clone();
+    let (listen_abort, listen_registration) = AbortHandle::new_pair();
     spawn_local(async move {
-        let _ = JsFuture::from(listening.listen()).await;
+        let _ = Abortable::new(listening.listen(), listen_registration).await;
     });
 
-    Ok(Node { provider, snark })
+    Ok(Node {
+        provider,
+        snark,
+        listen_abort,
+    })
 }
 
 /// Build the UI node with its stable IndexedDB name.
@@ -163,17 +182,24 @@ fn app() -> Html {
         let did = did.clone();
         let status = status.clone();
         use_effect_with((), move |_| {
+            let node_for_task = node.clone();
             spawn_local(async move {
                 match build_node().await {
                     Ok(built) => {
                         did.set(built.provider.address());
-                        *node.borrow_mut() = Some(built);
+                        if let Some(previous) = node_for_task.borrow_mut().replace(built) {
+                            previous.stop();
+                        }
                         status.set("ready — connect to a seed, then send a proof".to_string());
                     }
                     Err(e) => status.set(format!("node init failed: {e}")),
                 }
             });
-            || ()
+            move || {
+                if let Some(node) = node.borrow_mut().take() {
+                    node.stop();
+                }
+            }
         });
     }
 
@@ -300,6 +326,7 @@ mod tests {
         let node = build_node().await.expect("build node");
         let did = node.provider.address();
         assert!(did.starts_with("0x"), "expected a DID, got {did:?}");
+        node.stop();
     }
 
     fn obj(pairs: &[(&str, &str)]) -> JsValue {
@@ -391,6 +418,8 @@ mod tests {
             .get_task_result("00000000-0000-0000-0000-000000000000".to_string())
             .expect("read empty task store");
         assert_eq!(missing_task, ProofResult::Pending);
+        a.stop();
+        b.stop();
     }
 
     #[wasm_bindgen_test]

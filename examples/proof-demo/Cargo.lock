@@ -4218,6 +4218,7 @@ dependencies = [
 name = "rings-proof-demo"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "gloo-timers 0.3.0",
  "js-sys",
  "rings-node",
