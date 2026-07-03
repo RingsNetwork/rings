@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 /// Shared monotonically increasing UI generation counter.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub(crate) struct GenerationClock {
     current: Rc<RefCell<u64>>,
 }
@@ -17,10 +17,6 @@ pub(crate) struct GenerationToken {
 }
 
 impl GenerationClock {
-    pub(crate) fn new(current: Rc<RefCell<u64>>) -> Self {
-        Self { current }
-    }
-
     pub(crate) fn bump(&self) -> GenerationToken {
         let mut current = self.current.borrow_mut();
         *current = current.wrapping_add(1);

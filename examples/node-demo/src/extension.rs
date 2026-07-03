@@ -31,6 +31,7 @@ pub(crate) use crate::browser_api::open_debug_url;
 pub(crate) use crate::browser_api::save_setting;
 use crate::custom;
 use crate::dweb;
+use crate::generation::GenerationToken;
 use crate::node;
 use crate::node::DemoNode;
 use crate::node::NodeSettings;
@@ -806,7 +807,11 @@ pub(crate) fn apply_extension_snapshot(
     wallet_account: &UseStateHandle<Option<WalletAccount>>,
     node_starting: &UseStateHandle<bool>,
     status: &UseStateHandle<String>,
-) {
+    token: &GenerationToken,
+) -> bool {
+    if !token.is_current() {
+        return false;
+    }
     node_starting.set(snapshot.starting);
     if snapshot.online {
         did.set(snapshot.did);
@@ -814,6 +819,7 @@ pub(crate) fn apply_extension_snapshot(
         wallet_account.set(snapshot.wallet_account);
     }
     status.set(snapshot.error.unwrap_or(snapshot.message));
+    true
 }
 
 pub(crate) async fn poll_extension_node_start(
@@ -823,11 +829,23 @@ pub(crate) async fn poll_extension_node_start(
     wallet_account: UseStateHandle<Option<WalletAccount>>,
     node_starting: UseStateHandle<bool>,
     status: UseStateHandle<String>,
+    token: GenerationToken,
 ) -> Result<(), String> {
     let mut last_message = "background node starting".to_string();
     for _attempt in 0..NODE_START_POLL_ATTEMPTS {
         sleep(Duration::from_millis(NODE_START_POLL_DELAY_MS)).await;
-        let snapshot = extension_node_status(bridge).await?;
+        if !token.is_current() {
+            return Ok(());
+        }
+        let snapshot = match extension_node_status(bridge).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                if token.is_current() {
+                    return Err(error);
+                }
+                return Ok(());
+            }
+        };
         let message = snapshot
             .error
             .clone()
@@ -836,14 +854,17 @@ pub(crate) async fn poll_extension_node_start(
         let online = snapshot.online;
         let starting = snapshot.starting;
         let error = snapshot.error.clone();
-        apply_extension_snapshot(
+        if !apply_extension_snapshot(
             snapshot,
             &did,
             &peers,
             &wallet_account,
             &node_starting,
             &status,
-        );
+            &token,
+        ) {
+            return Ok(());
+        }
         if online && !starting {
             return Ok(());
         }

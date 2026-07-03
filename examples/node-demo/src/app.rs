@@ -56,8 +56,8 @@ pub fn app() -> Html {
     let wallet_account = use_state(|| None::<WalletAccount>);
     let node_starting = use_state(|| false);
     let node_ref = use_mut_ref(|| None::<DemoNode>);
-    let node_generation = use_mut_ref(|| 0_u64);
-    let generation = GenerationClock::new(node_generation.clone());
+    let generation_ref = use_mut_ref(GenerationClock::default);
+    let generation = generation_ref.borrow().clone();
     let site = use_mut_ref(dweb::default_site);
 
     let did = use_state(String::new);
@@ -233,14 +233,17 @@ pub fn app() -> Html {
                         Ok(snapshot) => {
                             *node_ref.borrow_mut() = None;
                             settings_dialog_open.set(false);
-                            extension::apply_extension_snapshot(
+                            if !extension::apply_extension_snapshot(
                                 snapshot,
                                 &did,
                                 &peers,
                                 &wallet_account,
                                 &node_starting,
                                 &status,
-                            );
+                                &start_token,
+                            ) {
+                                return;
+                            }
                             if let Err(error) = extension::poll_extension_node_start(
                                 &bridge,
                                 did,
@@ -248,16 +251,21 @@ pub fn app() -> Html {
                                 wallet_account,
                                 node_starting.clone(),
                                 status.clone(),
+                                start_token.clone(),
                             )
                             .await
                             {
-                                node_starting.set(false);
-                                status.set(error);
+                                if start_token.is_current() {
+                                    node_starting.set(false);
+                                    status.set(error);
+                                }
                             }
                         }
                         Err(error) => {
-                            node_starting.set(false);
-                            status.set(error);
+                            if start_token.is_current() {
+                                node_starting.set(false);
+                                status.set(error);
+                            }
                         }
                     }
                     return;

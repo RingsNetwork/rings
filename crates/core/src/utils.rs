@@ -45,40 +45,55 @@ pub mod js_func {
     /// # Example:
     /// For macro calling: of!(of2, a: T0, b: T1);
     /// Will generate code:
-    /// ```rust,ignore
-    /// pub fn of2<'a, 'b: 'a, T0: TryInto<JsValue> + Clone, T1: TryInto<JsValue> + Clone>(
-    ///     func: &Function,
-    /// ) -> Box<dyn Fn(T0, T1) -> Pin<Box<dyn Future<Output = Result<()>> + 'b>>>
+    /// ```rust,no_run
+    /// pub fn of2<
+    ///     'a,
+    ///     'b: 'a,
+    ///     T0: TryInto<wasm_bindgen::JsValue> + Clone,
+    ///     T1: TryInto<wasm_bindgen::JsValue> + Clone,
+    /// >(
+    ///     func: &js_sys::Function,
+    /// ) -> Box<
+    ///     dyn Fn(
+    ///         T0,
+    ///         T1,
+    ///     ) -> std::pin::Pin<
+    ///         Box<dyn std::future::Future<Output = rings_core::error::Result<()>> + 'b>,
+    ///     >,
+    /// >
     /// where
+    ///     T0::Error: std::fmt::Debug,
+    ///     T1::Error: std::fmt::Debug,
     ///     T0: 'b,
     ///     T1: 'b,
-    ///     T0::Error: Debug,
-    ///     T1::Error: Debug,
     /// {
     ///     let func = func.clone();
     ///     Box::new(
-    ///         move |a: T0, b: T1| -> Pin<Box<dyn Future<Output = Result<()>>>> {
+    ///         move |a: T0,
+    ///               b: T1|
+    ///               -> std::pin::Pin<
+    ///             Box<dyn std::future::Future<Output = rings_core::error::Result<()>>>,
+    ///         > {
     ///             let func = func.clone();
     ///             Box::pin(async move {
     ///                 let func = func.clone();
     ///                 let params = js_sys::Array::new();
-    ///                 let a: JsValue = a
+    ///                 let a: wasm_bindgen::JsValue = a
     ///                     .clone()
     ///                     .try_into()
-    ///                     .map_err(|_| Error::JsError(format!("{:?}", e)));
+    ///                     .map_err(|e| rings_core::error::Error::JsError(format!("{:?}", e)))?;
     ///                 params.push(&a);
-    ///                 let b: JsValue = b
+    ///                 let b: wasm_bindgen::JsValue = b
     ///                     .clone()
     ///                     .try_into()
-    ///                     .map_err(|_| Error::JsError(format!("{:?}", e)));
+    ///                     .map_err(|e| rings_core::error::Error::JsError(format!("{:?}", e)))?;
     ///                 params.push(&b);
-    ///                 JsFuture::from(js_sys::Promise::from(
-    ///                     func.apply(&JsValue::NULL, &params).map_err(|e| {
-    ///                         Error::JsError(js_sys::Error::from(e).to_string().into())
-    ///                     })?,
+    ///                 wasm_bindgen_futures::JsFuture::from(js_sys::Promise::from(
+    ///                     func.apply(&wasm_bindgen::JsValue::NULL, &params)
+    ///                         .map_err(|e| rings_core::error::Error::from(js_sys::Error::from(e)))?,
     ///                 ))
     ///                 .await
-    ///                 .map_err(|e| Error::JsError(js_sys::Error::from(e).to_string().into()))?;
+    ///                 .map_err(|e| rings_core::error::Error::from(js_sys::Error::from(e)))?;
     ///                 Ok(())
     ///             })
     ///         },
