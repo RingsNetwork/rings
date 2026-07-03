@@ -13,6 +13,8 @@ pub use crate::dht::OnlineNodeDescriptor;
 pub use crate::dht::OnlineNodeDescriptorBody;
 pub use crate::dht::OnlineNodeType;
 pub use crate::dht::ONLINE_NODES_TOPIC;
+pub use crate::dht::ONLINE_NODE_CAPABILITY_SNARK;
+pub use crate::dht::ONLINE_NODE_CAPABILITY_STORAGE;
 pub use crate::measure::PeerMeasurement;
 pub use crate::message;
 pub use crate::message::ChordStorageInterface;

@@ -5,7 +5,6 @@
 use std::collections::BTreeSet;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use futures::lock::Mutex as AsyncMutex;
@@ -16,6 +15,8 @@ use rings_core::dht::OnlineNodeDescriptor;
 use rings_core::dht::OnlineNodeType;
 use rings_core::dht::DEFAULT_FINGER_TABLE_SIZE;
 use rings_core::dht::ONLINE_NODES_TOPIC;
+use rings_core::dht::ONLINE_NODE_CAPABILITY_SNARK;
+use rings_core::dht::ONLINE_NODE_CAPABILITY_STORAGE;
 use rings_core::ecc::PublicKey;
 use rings_core::ecc::SecretKey;
 use rings_core::measure::MeasureImpl;
@@ -94,6 +95,8 @@ fn validate_online_node_timing(
 
 #[cfg(not(feature = "browser"))]
 async fn sleep_online_node_heartbeat_interval(interval: Duration) -> Result<()> {
+    // Native timers are infallible; the Result keeps the daemon shape shared
+    // with the wasm arm, where browser timer setup can fail.
     futures_timer::Delay::new(interval).await;
     Ok(())
 }
@@ -387,7 +390,10 @@ pub struct ProcessorBuilder {
     reassembly_limits: ReassemblyLimits,
 }
 
-/// Processor for rings-node rpc server
+/// Processor for rings-node rpc server.
+///
+/// Cloning shares the same node handle; publishes from any clone are serialized
+/// against each other.
 #[derive(Clone)]
 pub struct Processor {
     /// a swarm instance
@@ -399,8 +405,7 @@ pub struct Processor {
     publish_online_node: bool,
     online_node_started_at_ms: u128,
     online_node_endpoint_hint: Option<String>,
-    online_node_publish_lock: Arc<AsyncMutex<()>>,
-    online_node_published_descriptors: Arc<Mutex<BTreeSet<Encoded>>>,
+    online_node_published_descriptors: Arc<AsyncMutex<BTreeSet<Encoded>>>,
 }
 
 impl ProcessorBuilder {
@@ -509,8 +514,7 @@ impl ProcessorBuilder {
             publish_online_node: self.publish_online_node,
             online_node_started_at_ms: get_epoch_ms(),
             online_node_endpoint_hint: endpoint_hint,
-            online_node_publish_lock: Arc::new(AsyncMutex::new(())),
-            online_node_published_descriptors: Arc::new(Mutex::new(BTreeSet::new())),
+            online_node_published_descriptors: Arc::new(AsyncMutex::new(BTreeSet::new())),
         })
     }
 }
@@ -522,11 +526,11 @@ impl Processor {
     }
 
     fn online_node_capabilities() -> Vec<String> {
-        let capabilities = vec!["storage".to_string()];
+        let capabilities = vec![ONLINE_NODE_CAPABILITY_STORAGE.to_string()];
         #[cfg(feature = "snark")]
         let capabilities = {
             let mut capabilities = capabilities;
-            capabilities.push("snark".to_string());
+            capabilities.push(ONLINE_NODE_CAPABILITY_SNARK.to_string());
             capabilities
         };
         capabilities
@@ -554,29 +558,6 @@ impl Processor {
             .collect()
     }
 
-    fn record_online_node_descriptor(&self, descriptor: Encoded) -> Result<Vec<Encoded>> {
-        let mut published = self
-            .online_node_published_descriptors
-            .lock()
-            .map_err(|_| Error::Lock)?;
-        let stale = published
-            .iter()
-            .filter(|published| *published != &descriptor)
-            .cloned()
-            .collect();
-        published.insert(descriptor);
-        Ok(stale)
-    }
-
-    fn retain_online_node_descriptor(&self, descriptor: &Encoded) -> Result<()> {
-        let mut published = self
-            .online_node_published_descriptors
-            .lock()
-            .map_err(|_| Error::Lock)?;
-        published.retain(|published| published == descriptor);
-        Ok(())
-    }
-
     #[cfg(all(test, feature = "node"))]
     fn online_node_registry_entry(descriptors: Vec<OnlineNodeDescriptor>) -> Result<entry::Entry> {
         let data = descriptors
@@ -593,19 +574,24 @@ impl Processor {
 
     /// Publish this node's signed online descriptor to the online-node registry.
     pub async fn publish_online_node_descriptor(&self) -> Result<OnlineNodeDescriptor> {
-        let _publish_guard = self.online_node_publish_lock.lock().await;
+        let mut published_descriptors = self.online_node_published_descriptors.lock().await;
         let now_ms = get_epoch_ms();
         let descriptor = self.online_node_descriptor_at(now_ms)?;
         let encoded = descriptor.encode().map_err(Error::CoreError)?;
-        let stale_descriptors = self.record_online_node_descriptor(encoded.clone())?;
+        let stale_descriptors = published_descriptors
+            .iter()
+            .filter(|published| *published != &encoded)
+            .cloned()
+            .collect::<Vec<_>>();
 
         self.storage_touch_data(ONLINE_NODES_TOPIC, encoded.clone())
             .await?;
+        published_descriptors.insert(encoded);
         for stale_descriptor in stale_descriptors {
-            self.storage_tombstone_data(ONLINE_NODES_TOPIC, stale_descriptor)
+            self.storage_tombstone_data(ONLINE_NODES_TOPIC, stale_descriptor.clone())
                 .await?;
+            published_descriptors.remove(&stale_descriptor);
         }
-        self.retain_online_node_descriptor(&encoded)?;
         Ok(descriptor)
     }
 
@@ -929,20 +915,27 @@ impl Processor {
 #[cfg(feature = "node")]
 mod test {
     use std::sync::Mutex;
+    use std::sync::OnceLock;
     use std::time::Duration;
     use std::time::Instant;
 
+    use rings_core::dht::Chord;
+    use rings_core::dht::PeerRingAction;
+    use rings_core::dht::PeerRingRemoteAction;
     use rings_core::storage::MemStorage;
     use rings_core::swarm::callback::SwarmCallback;
     use rings_core::swarm::callback::SwarmEvent;
     use rings_rpc::method::Method;
     use rings_transport::core::transport::WebrtcConnectionState;
+    use tokio::sync::Mutex as AsyncTestMutex;
     use tokio::sync::Notify;
 
     use super::*;
     use crate::prelude::*;
     use crate::provider::Provider;
     use crate::tests::native::prepare_processor;
+
+    static NETWORK_TEST_LOCK: OnceLock<AsyncTestMutex<()>> = OnceLock::new();
 
     #[test]
     fn webrtc_udp_port_range_absent_by_default() {
@@ -1084,6 +1077,34 @@ mod test {
     }
 
     #[tokio::test]
+    async fn online_node_concurrent_publish_keeps_one_self_record() -> Result<()> {
+        let processor = prepare_processor().await;
+        let processor_clone = processor.clone();
+
+        let (first, second) = futures::try_join!(
+            processor.publish_online_node_descriptor(),
+            processor_clone.publish_online_node_descriptor(),
+        )?;
+        let entry_key = entry::Entry::gen_did(ONLINE_NODES_TOPIC)?;
+        processor.storage_fetch(entry_key).await?;
+        let entry = processor
+            .storage_check_cache(entry_key)
+            .await
+            .expect("online node registry entry should be cached after publish");
+        let stored = Processor::online_node_descriptors_from_entry(&entry);
+        let nodes = processor.lookup_online_nodes(false).await?;
+
+        assert_eq!(stored.len(), 1);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].did, processor.did());
+        assert!(
+            nodes[0].heartbeat_at_ms == first.heartbeat_at_ms
+                || nodes[0].heartbeat_at_ms == second.heartbeat_at_ms
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn online_node_lookup_filters_expired_descriptors_by_default() -> Result<()> {
         let processor = prepare_processor().await;
         let expired_processor = prepare_processor().await;
@@ -1168,6 +1189,42 @@ mod test {
     }
 
     #[tokio::test]
+    async fn online_node_registry_lists_two_publishers_over_network() -> Result<()> {
+        let _network_guard = network_test_guard().await;
+        let (publisher, owner) = prepare_online_node_registry_pair(42).await?;
+        let callback = test_callback();
+        let other_callback = test_callback();
+        publisher.swarm.set_callback(callback.clone()).unwrap();
+        owner.swarm.set_callback(other_callback.clone()).unwrap();
+        connect_processors(&publisher, &owner, &callback, &other_callback).await;
+        wait_for_mutual_dht_topology(&publisher, &owner).await?;
+        let registry_key = entry::Entry::gen_did(ONLINE_NODES_TOPIC)?;
+        for placement_key in registry_key.rotate_affine(DATA_REDUNDANT)? {
+            assert!(!owns_entry_placement(&publisher, placement_key)?);
+            assert!(owns_entry_placement(&owner, placement_key)?);
+        }
+
+        let published = publisher.publish_online_node_descriptor().await?;
+        let mut expected = BTreeSet::from([published.did]);
+        wait_for_online_node_dids(&publisher, &expected, "publisher sees first publish").await?;
+        wait_for_online_node_dids(&owner, &expected, "owner sees first publish").await?;
+
+        let owner_published = owner.publish_online_node_descriptor().await?;
+        expected.insert(owner_published.did);
+        let nodes =
+            wait_for_online_node_dids(&publisher, &expected, "publisher sees both publishers")
+                .await?;
+        let other_nodes =
+            wait_for_online_node_dids(&owner, &expected, "owner sees both publishers").await?;
+
+        assert!(nodes.iter().all(OnlineNodeDescriptor::verify_signature));
+        assert!(other_nodes
+            .iter()
+            .all(OnlineNodeDescriptor::verify_signature));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn online_node_type_is_configurable() {
         let processor = prepare_processor_with_online_node_type(OnlineNodeType::Browser).await;
         let descriptor = processor.online_node_descriptor_at(get_epoch_ms()).unwrap();
@@ -1231,10 +1288,24 @@ mod test {
         })
     }
 
+    async fn network_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+        NETWORK_TEST_LOCK
+            .get_or_init(|| AsyncTestMutex::new(()))
+            .lock()
+            .await
+    }
+
     async fn prepare_processor_with_identity_key(identity_key: SecretKey) -> Processor {
+        prepare_processor_with_identity_key_and_network(identity_key, 0).await
+    }
+
+    async fn prepare_processor_with_identity_key_and_network(
+        identity_key: SecretKey,
+        network_id: u32,
+    ) -> Processor {
         let session_sk = SessionSk::new_with_seckey(&identity_key).unwrap();
         let config = ProcessorConfig::new(
-            0,
+            network_id,
             "stun://stun.l.google.com:19302".to_string(),
             session_sk,
             3,
@@ -1247,6 +1318,45 @@ mod test {
             .dht_finger_table_size(8)
             .build()
             .unwrap()
+    }
+
+    async fn prepare_online_node_registry_pair(network_id: u32) -> Result<(Processor, Processor)> {
+        let registry_key = entry::Entry::gen_did(ONLINE_NODES_TOPIC)?;
+        let placement_keys = registry_key.rotate_affine(DATA_REDUNDANT)?;
+        // Keep the fetch path deterministic: storage_fetch returns the first
+        // placement hit, so the publisher must not own a stale replica on any
+        // registry placement before it asks the owner for the merged entry.
+        for _ in 0..512 {
+            let first_key = SecretKey::random();
+            let second_key = SecretKey::random();
+            let first_did = first_key.address().into();
+            let second_did = second_key.address().into();
+            let first_owns_all =
+                owns_all_placements(first_did, second_did, placement_keys.as_slice());
+            let second_owns_all =
+                owns_all_placements(second_did, first_did, placement_keys.as_slice());
+            let Some((publisher_key, owner_key)) = (match (first_owns_all, second_owns_all) {
+                (true, false) => Some((second_key, first_key)),
+                (false, true) => Some((first_key, second_key)),
+                _ => None,
+            }) else {
+                continue;
+            };
+            let publisher =
+                prepare_processor_with_identity_key_and_network(publisher_key, network_id).await;
+            let owner =
+                prepare_processor_with_identity_key_and_network(owner_key, network_id).await;
+            return Ok((publisher, owner));
+        }
+        Err(Error::InvalidConfig(
+            "could not generate an online-node registry owner covering every placement".to_string(),
+        ))
+    }
+
+    fn owns_all_placements(local: Did, successor: Did, placements: &[Did]) -> bool {
+        placements
+            .iter()
+            .all(|placement| *placement - local <= successor - local)
     }
 
     async fn prepare_processor_with_network(network_id: u32) -> Processor {
@@ -1266,6 +1376,16 @@ mod test {
             .dht_finger_table_size(8)
             .build()
             .unwrap()
+    }
+
+    fn owns_entry_placement(processor: &Processor, placement_key: Did) -> Result<bool> {
+        match processor.swarm.dht().find_successor(placement_key)? {
+            PeerRingAction::Some(_) => Ok(true),
+            PeerRingAction::RemoteAction(_, PeerRingRemoteAction::FindSuccessor(_)) => Ok(false),
+            action => Err(Error::InvalidConfig(format!(
+                "unexpected registry owner lookup action: {action:?}"
+            ))),
+        }
     }
 
     async fn prepare_processor_with_online_node_type(node_type: OnlineNodeType) -> Processor {
@@ -1358,6 +1478,85 @@ mod test {
             .any(|conn| conn.did == peer && conn.state == "Connected")
     }
 
+    async fn wait_for_mutual_dht_topology(processor: &Processor, other: &Processor) -> Result<()> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let inspect = processor.swarm.inspect().await;
+            let other_inspect = other.swarm.inspect().await;
+            let did = processor.did().to_string();
+            let other_did = other.did().to_string();
+            let processor_sees_other = inspect
+                .dht
+                .successors
+                .iter()
+                .any(|successor| successor == &other_did)
+                && inspect.dht.predecessor.as_ref() == Some(&other_did);
+            let other_sees_processor = other_inspect
+                .dht
+                .successors
+                .iter()
+                .any(|successor| successor == &did)
+                && other_inspect.dht.predecessor.as_ref() == Some(&did);
+            if processor_sees_other && other_sees_processor {
+                return Ok(());
+            }
+
+            let stabilizer = processor.swarm.stabilizer();
+            let other_stabilizer = other.swarm.stabilizer();
+            futures::try_join!(stabilizer.stabilize(), other_stabilizer.stabilize(),)
+                .map_err(Error::CoreError)?;
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "mutual DHT topology did not converge: processor={:?}, other={:?}",
+                        inspect.dht, other_inspect.dht
+                    )
+                });
+            tokio::time::timeout(remaining, tokio::time::sleep(Duration::from_millis(20)))
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "mutual DHT topology did not converge: processor={:?}, other={:?}",
+                        inspect.dht, other_inspect.dht
+                    )
+                });
+        }
+    }
+
+    async fn wait_for_online_node_dids(
+        processor: &Processor,
+        expected: &BTreeSet<Did>,
+        context: &str,
+    ) -> Result<Vec<OnlineNodeDescriptor>> {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            let nodes = processor.lookup_online_nodes(false).await?;
+            let observed = nodes
+                .iter()
+                .map(|descriptor| descriptor.did)
+                .collect::<BTreeSet<_>>();
+            if expected.is_subset(&observed) {
+                return Ok(nodes);
+            }
+
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "online node registry did not converge during {context}: expected {expected:?}, observed {observed:?}",
+                    )
+                });
+            tokio::time::timeout(remaining, tokio::time::sleep(Duration::from_millis(20)))
+                .await
+                .unwrap_or_else(|_| {
+                    panic!(
+                        "online node registry did not converge during {context}: expected {expected:?}, observed {observed:?}",
+                    )
+                });
+        }
+    }
+
     async fn wait_for_peer_measurement(
         processor: &Processor,
         did: Did,
@@ -1434,6 +1633,7 @@ mod test {
 
     #[tokio::test]
     async fn test_processor_handshake_msg() {
+        let _network_guard = network_test_guard().await;
         let callback1 = test_callback();
         let callback2 = test_callback();
 
@@ -1482,6 +1682,7 @@ mod test {
 
     #[tokio::test]
     async fn provider_exposes_sent_and_received_peer_measurements() {
+        let _network_guard = network_test_guard().await;
         let callback1 = test_callback();
         let callback2 = test_callback();
         let p1 = prepare_measured_processor().await;
@@ -1533,6 +1734,7 @@ mod test {
 
     #[tokio::test]
     async fn test_processor_e2e_handshake_exchanges_verified_public_keys() {
+        let _network_guard = network_test_guard().await;
         let callback1 = test_callback();
         let callback2 = test_callback();
 
@@ -1584,6 +1786,7 @@ mod test {
 
     #[tokio::test]
     async fn test_processor_e2e_message_streams_and_decrypts_with_receiver_identity_key() {
+        let _network_guard = network_test_guard().await;
         let callback1 = test_callback();
         let callback2 = test_callback();
         let identity1 = SecretKey::random();

@@ -31,6 +31,8 @@ pub use online::OnlineNodeDescriptor;
 pub use online::OnlineNodeDescriptorBody;
 pub use online::OnlineNodeType;
 pub use online::ONLINE_NODES_TOPIC;
+pub use online::ONLINE_NODE_CAPABILITY_SNARK;
+pub use online::ONLINE_NODE_CAPABILITY_STORAGE;
 pub use stabilization::Stabilizer;
 pub use successor::SuccessorReader;
 pub use successor::SuccessorWriter;

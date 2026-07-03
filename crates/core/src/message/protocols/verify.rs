@@ -83,7 +83,12 @@ pub trait MessageVerificationExt {
 
         let now = get_epoch_ms();
 
-        if self.verification().ts_ms - TS_OFFSET_TOLERANCE_MS > now {
+        if self
+            .verification()
+            .ts_ms
+            .saturating_sub(TS_OFFSET_TOLERANCE_MS)
+            > now
+        {
             return false;
         }
 
@@ -108,5 +113,37 @@ pub trait MessageVerificationExt {
     /// Get signer did from verification.
     fn signer(&self) -> Did {
         self.verification().session.account_did()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ecc::SecretKey;
+
+    struct VerifiedFixture {
+        verification: MessageVerification,
+    }
+
+    impl MessageVerificationExt for VerifiedFixture {
+        fn verification_data(&self) -> Result<Vec<u8>> {
+            Ok(Vec::new())
+        }
+
+        fn verification(&self) -> &MessageVerification {
+            &self.verification
+        }
+    }
+
+    #[test]
+    fn expiration_handles_timestamp_below_tolerance_without_underflow() -> Result<()> {
+        let key = SecretKey::random();
+        let session_sk = SessionSk::new_with_seckey(&key)?;
+        let mut verification = MessageVerification::new(&[], &session_sk)?;
+        verification.ts_ms = 0;
+        let fixture = VerifiedFixture { verification };
+
+        assert!(fixture.is_expired());
+        Ok(())
     }
 }

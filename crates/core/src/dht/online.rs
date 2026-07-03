@@ -19,6 +19,10 @@ use crate::session::SessionSk;
 
 /// DHT topic used for online-node registry descriptors.
 pub const ONLINE_NODES_TOPIC: &str = "online_nodes";
+/// Capability label for nodes that provide DHT storage.
+pub const ONLINE_NODE_CAPABILITY_STORAGE: &str = "storage";
+/// Capability label for nodes that provide SNARK proof services.
+pub const ONLINE_NODE_CAPABILITY_SNARK: &str = "snark";
 
 /// Runtime family advertised by a node descriptor.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -71,6 +75,26 @@ impl OnlineNodeDescriptorBody {
     }
 }
 
+#[derive(Serialize)]
+struct OnlineNodeDescriptorBodyRef<'a> {
+    did: Did,
+    public_key: &'a VerificationPublicKey,
+    node_type: &'a OnlineNodeType,
+    network_id: u32,
+    capabilities: &'a [String],
+    endpoint_hint: &'a Option<String>,
+    started_at_ms: u128,
+    heartbeat_at_ms: u128,
+    expires_at_ms: u128,
+    version: &'a String,
+}
+
+impl OnlineNodeDescriptorBodyRef<'_> {
+    fn signing_data(&self) -> Result<Vec<u8>> {
+        bincode::serialize(self).map_err(Error::BincodeSerialize)
+    }
+}
+
 /// Signed descriptor published by online nodes.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct OnlineNodeDescriptor {
@@ -118,7 +142,7 @@ impl OnlineNodeDescriptor {
         })
     }
 
-    fn body(&self) -> OnlineNodeDescriptorBody {
+    fn body_ref(&self) -> OnlineNodeDescriptorBodyRef<'_> {
         let Self {
             did,
             public_key,
@@ -133,22 +157,22 @@ impl OnlineNodeDescriptor {
             signature: _,
         } = self;
 
-        OnlineNodeDescriptorBody {
+        OnlineNodeDescriptorBodyRef {
             did: *did,
-            public_key: public_key.clone(),
-            node_type: node_type.clone(),
+            public_key,
+            node_type,
             network_id: *network_id,
-            capabilities: capabilities.clone(),
-            endpoint_hint: endpoint_hint.clone(),
+            capabilities,
+            endpoint_hint,
             started_at_ms: *started_at_ms,
             heartbeat_at_ms: *heartbeat_at_ms,
             expires_at_ms: *expires_at_ms,
-            version: version.clone(),
+            version,
         }
     }
 
     fn signing_data(&self) -> Result<Vec<u8>> {
-        self.body().signing_data()
+        self.body_ref().signing_data()
     }
 
     /// Return whether this descriptor belongs to `network_id`.
@@ -157,6 +181,11 @@ impl OnlineNodeDescriptor {
     }
 
     /// Verify the descriptor signature and DID/public-key binding.
+    ///
+    /// This does not apply the embedded [`MessageVerification`] timestamp/TTL
+    /// as a liveness rule. Online-node liveness is defined solely by the
+    /// signed `expires_at_ms` descriptor field; use [`Self::is_live_at`] when
+    /// expiry should be enforced.
     pub fn verify_signature(&self) -> bool {
         if self.public_key.did() != self.did || self.signature.session.account_did() != self.did {
             return false;
@@ -193,10 +222,11 @@ impl OnlineNodeDescriptor {
     ) -> Vec<Self> {
         let mut latest = BTreeMap::<Did, Self>::new();
         for descriptor in descriptors {
-            if !descriptor.verify_signature() {
-                continue;
-            }
-            if !include_expired && descriptor.is_expired_at(now_ms) {
+            if include_expired {
+                if !descriptor.verify_signature() {
+                    continue;
+                }
+            } else if !descriptor.is_live_at(now_ms) {
                 continue;
             }
             match latest.entry(descriptor.did) {
@@ -245,7 +275,7 @@ mod tests {
                 public_key: session_sk.session().account_verification_pubkey()?,
                 node_type: OnlineNodeType::Native,
                 network_id: 1,
-                capabilities: vec!["storage".to_string()],
+                capabilities: vec![ONLINE_NODE_CAPABILITY_STORAGE.to_string()],
                 endpoint_hint: None,
                 started_at_ms: 10,
                 heartbeat_at_ms,

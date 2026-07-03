@@ -8,6 +8,8 @@ pub use self::rings_core::dht::OnlineNodeDescriptor;
 pub use self::rings_core::dht::OnlineNodeType;
 pub use self::rings_core::dht::PeerRing;
 pub use self::rings_core::dht::ONLINE_NODES_TOPIC;
+pub use self::rings_core::dht::ONLINE_NODE_CAPABILITY_SNARK;
+pub use self::rings_core::dht::ONLINE_NODE_CAPABILITY_STORAGE;
 pub use self::rings_core::ecc::SecretKey;
 pub use self::rings_core::measure::PeerMeasurement;
 pub use self::rings_core::message::CustomMessage;
