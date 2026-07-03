@@ -18,11 +18,8 @@ async fn test_two_provider_connect_and_list() {
     let provider1 = new_provider().await;
     let provider2 = new_provider().await;
 
-    futures::try_join!(
-        JsFuture::from(provider1.listen()),
-        JsFuture::from(provider2.listen()),
-    )
-    .unwrap();
+    let _listen1 = provider1.listen();
+    let _listen2 = provider2.listen();
 
     create_connection(&provider1, &provider2).await;
     console_log!("wait for register");
@@ -50,11 +47,8 @@ async fn test_send_backend_message() {
     let provider1 = new_provider().await;
     let provider2 = new_provider().await;
 
-    futures::try_join!(
-        JsFuture::from(provider1.listen()),
-        JsFuture::from(provider2.listen()),
-    )
-    .unwrap();
+    let _listen1 = provider1.listen();
+    let _listen2 = provider2.listen();
 
     create_connection(&provider1, &provider2).await;
     console_log!("wait for register");

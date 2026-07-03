@@ -2,8 +2,10 @@
 
 //! Processor of rings-node rpc server.
 
+use std::collections::BTreeSet;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use rings_core::chunk::ReassemblyLimits;
@@ -82,9 +84,24 @@ fn validate_online_node_timing(
     ttl: Duration,
 ) -> Result<()> {
     if publish_online_node && heartbeat_interval >= ttl {
-        return Err(Error::InvalidData);
+        return Err(Error::InvalidConfig(format!(
+            "online_node_heartbeat_interval ({heartbeat_interval:?}) must be less than online_node_ttl ({ttl:?}) when publish_online_node is enabled"
+        )));
     }
     Ok(())
+}
+
+#[cfg(not(feature = "browser"))]
+async fn sleep_online_node_heartbeat_interval(interval: Duration) {
+    futures_timer::Delay::new(interval).await;
+}
+
+#[cfg(feature = "browser")]
+async fn sleep_online_node_heartbeat_interval(interval: Duration) {
+    let interval_ms = i32::try_from(interval.as_millis()).unwrap_or(i32::MAX);
+    if let Err(error) = rings_core::utils::js_utils::window_sleep(interval_ms).await {
+        tracing::warn!("Failed to wait for online node heartbeat interval: {error:?}");
+    }
 }
 
 /// ProcessorConfig is usually serialized as json or yaml.
@@ -379,6 +396,7 @@ pub struct Processor {
     publish_online_node: bool,
     online_node_started_at_ms: u128,
     online_node_endpoint_hint: Option<String>,
+    online_node_published_descriptors: Arc<Mutex<BTreeSet<Encoded>>>,
 }
 
 impl ProcessorBuilder {
@@ -487,6 +505,7 @@ impl ProcessorBuilder {
             publish_online_node: self.publish_online_node,
             online_node_started_at_ms: get_epoch_ms(),
             online_node_endpoint_hint: endpoint_hint,
+            online_node_published_descriptors: Arc::new(Mutex::new(BTreeSet::new())),
         })
     }
 }
@@ -530,6 +549,29 @@ impl Processor {
             .collect()
     }
 
+    fn record_online_node_descriptor(&self, descriptor: Encoded) -> Result<Vec<Encoded>> {
+        let mut published = self
+            .online_node_published_descriptors
+            .lock()
+            .map_err(|_| Error::Lock)?;
+        let stale = published
+            .iter()
+            .filter(|published| *published != &descriptor)
+            .cloned()
+            .collect();
+        published.insert(descriptor);
+        Ok(stale)
+    }
+
+    fn retain_online_node_descriptor(&self, descriptor: &Encoded) -> Result<()> {
+        let mut published = self
+            .online_node_published_descriptors
+            .lock()
+            .map_err(|_| Error::Lock)?;
+        published.retain(|published| published == descriptor);
+        Ok(())
+    }
+
     #[cfg(all(test, feature = "node"))]
     fn online_node_registry_entry(descriptors: Vec<OnlineNodeDescriptor>) -> Result<entry::Entry> {
         let data = descriptors
@@ -548,12 +590,16 @@ impl Processor {
     pub async fn publish_online_node_descriptor(&self) -> Result<OnlineNodeDescriptor> {
         let now_ms = get_epoch_ms();
         let descriptor = self.online_node_descriptor_at(now_ms)?;
+        let encoded = descriptor.encode().map_err(Error::CoreError)?;
+        let stale_descriptors = self.record_online_node_descriptor(encoded.clone())?;
 
-        self.storage_touch_data(
-            ONLINE_NODES_TOPIC,
-            descriptor.encode().map_err(Error::CoreError)?,
-        )
-        .await?;
+        self.storage_touch_data(ONLINE_NODES_TOPIC, encoded.clone())
+            .await?;
+        for stale_descriptor in stale_descriptors {
+            self.storage_tombstone_data(ONLINE_NODES_TOPIC, stale_descriptor)
+                .await?;
+        }
+        self.retain_online_node_descriptor(&encoded)?;
         Ok(descriptor)
     }
 
@@ -586,29 +632,11 @@ impl Processor {
         }
     }
 
-    #[cfg(not(feature = "browser"))]
     async fn online_node_heartbeat_daemon(&self) {
         loop {
             self.publish_online_node_descriptor_for_heartbeat().await;
-            futures_timer::Delay::new(self.online_node_heartbeat_interval).await;
+            sleep_online_node_heartbeat_interval(self.online_node_heartbeat_interval).await;
         }
-    }
-
-    #[cfg(feature = "browser")]
-    async fn online_node_heartbeat_daemon(&self) {
-        self.publish_online_node_descriptor_for_heartbeat().await;
-
-        let interval_ms =
-            i32::try_from(self.online_node_heartbeat_interval.as_millis()).unwrap_or(i32::MAX);
-        let processor = self.clone();
-        rings_core::utils::js_utils::spawn_interval(interval_ms, move || {
-            let processor = processor.clone();
-            async move {
-                processor
-                    .publish_online_node_descriptor_for_heartbeat()
-                    .await;
-            }
-        });
     }
 
     /// Run stabilization daemon
@@ -831,6 +859,17 @@ impl Processor {
         .map_err(Error::EntryError)
     }
 
+    /// Tombstone observed data in an entry on DHT storage.
+    pub async fn storage_tombstone_data(&self, topic: &str, data: Encoded) -> Result<()> {
+        <Swarm as ChordStorageInterface<DATA_REDUNDANT>>::storage_tombstone_data(
+            &self.swarm,
+            topic,
+            data,
+        )
+        .await
+        .map_err(Error::EntryError)
+    }
+
     /// Return local measurement counters for a peer.
     pub async fn peer_measurement(&self, did: Did) -> PeerMeasurement {
         self.swarm.peer_measurement(did).await
@@ -965,7 +1004,9 @@ mod test {
 
         assert!(matches!(
             ProcessorConfig::try_from(serialized),
-            Err(Error::InvalidData)
+            Err(Error::InvalidConfig(message))
+                if message.contains("online_node_heartbeat_interval")
+                    && message.contains("online_node_ttl")
         ));
     }
 
@@ -1019,7 +1060,7 @@ mod test {
         let stored = Processor::online_node_descriptors_from_entry(&entry);
         let nodes = processor.lookup_online_nodes(false).await?;
 
-        assert_eq!(stored.len(), 2);
+        assert_eq!(stored.len(), 1);
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].did, processor.did());
         assert!(second.heartbeat_at_ms >= first.heartbeat_at_ms);

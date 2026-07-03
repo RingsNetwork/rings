@@ -1,7 +1,6 @@
 use rings_snark::prelude::nova::provider;
 use rings_snark::prelude::nova::traits::Engine;
 use wasm_bindgen::JsValue;
-use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::wasm_bindgen_test;
 use wasm_bindgen_test::*;
 
@@ -55,11 +54,8 @@ async fn test_send_snark_backend_message() {
     let provider1 = super::new_provider().await;
     let provider2 = super::new_provider().await;
 
-    futures::try_join!(
-        JsFuture::from(provider1.listen()),
-        JsFuture::from(provider2.listen()),
-    )
-    .unwrap();
+    let _listen1 = provider1.listen();
+    let _listen2 = provider2.listen();
 
     super::create_connection(&provider1, &provider2).await;
     console_log!("wait for register");

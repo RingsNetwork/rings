@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use futures::lock::Mutex;
 use rings_core::dht::Did;
 use rings_core::swarm::callback::SwarmCallback;
+use wasm_bindgen_futures::spawn_local;
 use wasm_bindgen_test::*;
 
 use crate::prelude::*;
@@ -106,8 +107,14 @@ async fn test_processor_handshake_and_msg() {
     console_log!("p2_did: {}", p2_did);
 
     console_log!("listen");
-    p1.listen().await;
-    p2.listen().await;
+    let p1_listener = p1.clone();
+    spawn_local(async move {
+        p1_listener.listen().await;
+    });
+    let p2_listener = p2.clone();
+    spawn_local(async move {
+        p2_listener.listen().await;
+    });
 
     console_log!("processor_hs_connect_1_2");
     create_connection(&p1, &p2).await;

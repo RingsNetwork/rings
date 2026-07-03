@@ -3,7 +3,7 @@
 //! State variables:
 //! - `register` is an optional LWW reset floor for overwrite.
 //! - `values` is an LWW element set keyed by encoded payload.
-//! - `removes` is a two-phase tombstone set for relay-message entries.
+//! - `removes` is a two-phase tombstone set for observed data dots.
 //!
 //! Semilattice laws:
 //! - `GSet` join is set union.
@@ -15,7 +15,7 @@
 //! Constructor postconditions:
 //! - `DataTopicBuffer::new` preserves only values whose dot is at or after the
 //!   reset floor when a reset floor exists.
-//! - `RelayMessageSet::new` preserves only adds whose dot has not been
+//! - Tombstone-aware constructors preserve only adds whose dot has not been
 //!   tombstoned.
 
 use std::collections::BTreeMap;
@@ -102,7 +102,7 @@ impl EntryDot {
 ///
 /// `register` is the LWW reset floor used by overwrite. `dots` are per-element
 /// add witnesses used by data/topic and relay element sets. `tombstones` is the
-/// remove set for relay-message two-phase semantics.
+/// remove set for observed add dots.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EntryCrdt {
     /// Optional LWW reset floor for the entry payload.
@@ -162,30 +162,39 @@ impl<T: Ord> JoinSemilattice for GSet<T> {
 pub struct DataTopicBuffer {
     pub(super) register: Option<EntryVersion>,
     pub(super) values: BTreeMap<Encoded, EntryDot>,
+    pub(super) removes: BTreeSet<EntryDot>,
 }
 
 impl DataTopicBuffer {
     pub(super) fn new(
         register: Option<EntryVersion>,
         mut values: BTreeMap<Encoded, EntryDot>,
+        mut removes: BTreeSet<EntryDot>,
     ) -> Self {
         if let Some(floor) = register {
             values.retain(|_, dot| dot.version >= floor);
+            removes.retain(|dot| dot.version >= floor);
         }
-        Self { register, values }
+        values.retain(|_, dot| !removes.contains(dot));
+        Self {
+            register,
+            values,
+            removes,
+        }
     }
 }
 
 impl JoinSemilattice for DataTopicBuffer {
     fn join(mut self, other: Self) -> Self {
         self.register = self.register.max(other.register);
+        self.removes.extend(other.removes);
         for (value, dot) in other.values {
             self.values
                 .entry(value)
                 .and_modify(|current| *current = (*current).max(dot))
                 .or_insert(dot);
         }
-        Self::new(self.register, self.values)
+        Self::new(self.register, self.values, self.removes)
     }
 }
 
@@ -198,7 +207,9 @@ pub struct RelayMessageSet {
 
 impl RelayMessageSet {
     pub(super) fn new(mut adds: DataTopicBuffer, removes: BTreeSet<EntryDot>) -> Self {
-        adds.values.retain(|_, dot| !removes.contains(dot));
+        let mut removes = removes;
+        removes.extend(adds.removes.iter().copied());
+        adds = DataTopicBuffer::new(adds.register, adds.values, removes.clone());
         Self { adds, removes }
     }
 }

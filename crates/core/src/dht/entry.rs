@@ -71,9 +71,9 @@ pub enum EntryOperation {
     Touch(Entry),
     /// Join subring.
     JoinSubring(String, Did),
-    /// Tombstone observed relay-message payloads in a two-phase set.
+    /// Tombstone observed data or relay-message payloads in a two-phase set.
     ///
-    /// The payload identifies the relay-message carrier and the values to
+    /// The payload identifies the entry carrier and the values to
     /// remove. If CRDT dots are present, those dots are the remove witnesses;
     /// otherwise the receiver tombstones currently observed dots with matching
     /// payload bytes.
@@ -422,7 +422,11 @@ impl Entry {
                 })
                 .or_insert(dot);
         }
-        Ok(DataTopicBuffer::new(self.crdt.register, values))
+        Ok(DataTopicBuffer::new(
+            self.crdt.register,
+            values,
+            self.crdt.tombstones.iter().copied().collect(),
+        ))
     }
 
     fn relay_set(&self) -> Result<RelayMessageSet> {
@@ -482,7 +486,7 @@ impl Entry {
             self.kind,
             buffer.register,
             buffer.values,
-            BTreeSet::new(),
+            buffer.removes,
         )
     }
 
@@ -655,29 +659,46 @@ impl Entry {
         self.join(other)
     }
 
-    /// Tombstone observed relay messages.
+    /// Tombstone observed data or relay-message payloads.
     ///
-    /// Pre: `self` and `other` are the same relay-message carrier.
+    /// Pre: `self` and `other` are the same data or relay-message carrier.
     /// Post: every removed payload is represented by an add-dot tombstone, so
     /// future joins with stale add replicas cannot resurrect it.
     pub fn tombstone(&self, other: Self) -> Result<Self> {
-        if !self.is_relay_entry() {
+        if !self.is_data_entry() && !self.is_relay_entry() {
             return Err(Error::EntryNotTombstonable);
         }
         self.validate_same_carrier(&other)?;
 
-        let mut set = self.relay_set()?;
         let target_values = other.data.into_iter().collect::<BTreeSet<_>>();
         let target_dots = other.crdt.dots.into_iter().collect::<BTreeSet<_>>();
         let has_dot_witness = !target_dots.is_empty();
 
-        for (value, dot) in &set.adds.values {
-            if target_dots.contains(dot) || (!has_dot_witness && target_values.contains(value)) {
-                set.removes.insert(*dot);
+        match self.kind {
+            EntryKind::Data => {
+                let mut buffer = self.topic_buffer()?;
+                for (value, dot) in &buffer.values {
+                    if target_dots.contains(dot)
+                        || (!has_dot_witness && target_values.contains(value))
+                    {
+                        buffer.removes.insert(*dot);
+                    }
+                }
+                Ok(self.materialize_topic_buffer(buffer))
             }
+            EntryKind::RelayMessage => {
+                let mut set = self.relay_set()?;
+                for (value, dot) in &set.adds.values {
+                    if target_dots.contains(dot)
+                        || (!has_dot_witness && target_values.contains(value))
+                    {
+                        set.removes.insert(*dot);
+                    }
+                }
+                Ok(self.materialize_relay_set(set))
+            }
+            EntryKind::Subring => Err(Error::EntryNotTombstonable),
         }
-
-        Ok(self.materialize_relay_set(set))
     }
 }
 
@@ -787,11 +808,18 @@ mod tests {
 
     #[test]
     fn data_topic_buffer_satisfies_join_semilattice_laws() -> Result<()> {
+        let carrier = Entry::new(Entry::gen_did("topic")?, vec![], EntryKind::Data)
+            .join(data_delta("topic", "a", 1)?)?
+            .join(data_delta("topic", "b", 2)?)?;
+        let tombstoned_a = carrier
+            .tombstone(data_delta("topic", "a", 1)?)?
+            .topic_buffer()?;
         let samples = [
             Entry::new(Entry::gen_did("topic")?, vec![], EntryKind::Data).topic_buffer()?,
             data_delta("topic", "a", 1)?.topic_buffer()?,
             data_delta("topic", "b", 2)?.topic_buffer()?,
             overwrite_delta("topic", "c", 3)?.topic_buffer()?,
+            tombstoned_a,
         ];
 
         assert_join_semilattice_laws(&samples);
@@ -923,7 +951,7 @@ mod tests {
         let live_dot = EntryDot::for_index(version(11), 0)?;
         values.insert(live.clone(), live_dot);
 
-        let buffer = DataTopicBuffer::new(Some(register), values);
+        let buffer = DataTopicBuffer::new(Some(register), values, BTreeSet::new());
         assert_eq!(buffer.values.len(), 1);
         assert!(buffer.values.contains_key(&live));
 
@@ -1143,8 +1171,26 @@ mod tests {
     }
 
     #[test]
-    fn relay_tombstone_rejects_non_relay_entry() -> Result<()> {
-        let entry = data_entry("topic", "value")?;
+    fn data_tombstone_removes_observed_payload_by_join() -> Result<()> {
+        let first = data_delta("topic", "first", 1)?;
+        let second = data_delta("topic", "second", 2)?;
+        let carrier = Entry::new(Entry::gen_did("topic")?, vec![], EntryKind::Data)
+            .join(first.clone())?
+            .join(second.clone())?;
+
+        let removed = carrier.tombstone(first.clone())?;
+
+        assert_eq!(decode_entry_data(&removed)?, vec![String::from("second")]);
+        let joined_with_stale_add = removed.join(first)?;
+        assert_eq!(decode_entry_data(&joined_with_stale_add)?, vec![
+            String::from("second")
+        ]);
+        Ok(())
+    }
+
+    #[test]
+    fn tombstone_rejects_non_data_or_relay_entry() -> Result<()> {
+        let entry = subring_entry("ring")?;
         let other = entry.clone();
 
         assert!(matches!(

@@ -45,6 +45,8 @@ pub trait ChordStorageInterface<const REDUNDANT: u16> {
     async fn storage_append_data(&self, topic: &str, data: Encoded) -> Result<()>;
     /// Append data to a Data kind entry uniquely.
     async fn storage_touch_data(&self, topic: &str, data: Encoded) -> Result<()>;
+    /// Tombstone observed data in a Data kind entry.
+    async fn storage_tombstone_data(&self, topic: &str, data: Encoded) -> Result<()>;
 }
 
 /// ChordStorageInterfaceCacheChecker defines the interface for checking the local cache of the DHT.
@@ -378,6 +380,15 @@ impl<const REDUNDANT: u16> ChordStorageInterface<REDUNDANT> for Swarm {
         self.transport.ensure_storage_redundancy::<REDUNDANT>()?;
         let entry: Entry = (topic.to_string(), data).try_into()?;
         let op = EntryOperation::Touch(entry);
+        let act = <PeerRing as ChordStorage<_, REDUNDANT>>::entry_operate(&self.dht, op).await?;
+        handle_storage_store_act(self.transport.clone(), act).await?;
+        Ok(())
+    }
+
+    async fn storage_tombstone_data(&self, topic: &str, data: Encoded) -> Result<()> {
+        self.transport.ensure_storage_redundancy::<REDUNDANT>()?;
+        let entry: Entry = (topic.to_string(), data).try_into()?;
+        let op = EntryOperation::Tombstone(entry);
         let act = <PeerRing as ChordStorage<_, REDUNDANT>>::entry_operate(&self.dht, op).await?;
         handle_storage_store_act(self.transport.clone(), act).await?;
         Ok(())
@@ -1254,6 +1265,57 @@ mod test {
         assert_no_more_msg([&node1, &node2]).await;
 
         assert_cached_data_values(&node1, entry_key, &["111", "333", "222"]).await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn storage_tombstone_data_removes_observed_payload() -> Result<()> {
+        let mut keys = gen_ordered_keys(2).into_iter();
+        let key1 = next_generated_key(&mut keys)?;
+        let key2 = next_generated_key(&mut keys)?;
+        let node1 = prepare_node(key1).await;
+        let node2 = prepare_node(key2).await;
+
+        manually_establish_connection(&node1.swarm, &node2.swarm).await;
+        wait_for_msgs([&node1, &node2]).await;
+        assert_no_more_msg([&node1, &node2]).await;
+
+        let topic = "tombstone removes stale data topic payloads".to_string();
+        let entry: Entry = topic.clone().try_into()?;
+        let entry_key = entry.did;
+
+        let (node1, node2) = if entry_key.in_range(node2.did(), node2.did(), node1.did()) {
+            (node1, node2)
+        } else {
+            (node2, node1)
+        };
+
+        for value in ["111", "222"] {
+            <Swarm as ChordStorageInterface<1>>::storage_touch_data(
+                &node1.swarm,
+                &topic,
+                value.to_string().encode()?,
+            )
+            .await?;
+            wait_for_msgs([&node1, &node2]).await;
+            assert_no_more_msg([&node1, &node2]).await;
+        }
+
+        <Swarm as ChordStorageInterface<1>>::storage_tombstone_data(
+            &node1.swarm,
+            &topic,
+            "111".to_string().encode()?,
+        )
+        .await?;
+        wait_for_msgs([&node1, &node2]).await;
+        assert_no_more_msg([&node1, &node2]).await;
+
+        <Swarm as ChordStorageInterface<1>>::storage_fetch(&node1.swarm, entry_key).await?;
+        wait_for_msgs([&node1, &node2]).await;
+        assert_no_more_msg([&node1, &node2]).await;
+
+        assert_cached_data_values(&node1, entry_key, &["222"]).await?;
 
         Ok(())
     }

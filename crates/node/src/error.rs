@@ -94,6 +94,8 @@ pub enum Error {
         810,
     #[error("Both webrtc_udp_port_min and webrtc_udp_port_max must be set together: min={min:?}, max={max:?}")]
     IncompleteWebrtcUdpPortRange { min: Option<u16>, max: Option<u16> } = 811,
+    #[error("Invalid configuration: {0}")]
+    InvalidConfig(String) = 812,
     #[error("Create File Error: {0}")]
     CreateFileError(String) = 900,
     #[error("Open File Error: {0}")]
