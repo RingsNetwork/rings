@@ -73,6 +73,6 @@ The substrate both layers build on:
 ## Contributing to the roadmap
 
 Direction is shaped through RFCs and issues on
-[GitHub](https://github.com/RingsNetwork/rings-node/issues). If you want to help build either
+[GitHub](https://github.com/RyanKung/rings/issues). If you want to help build either
 layer, an extension protocol is the lightest way in — see **Extending Rings** in the
 [README](./README.md).

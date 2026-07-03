@@ -6,10 +6,10 @@
 # Rings SNARK
 ======================
 
-[![rings-node](https://github.com/RingsNetwork/rings-node/actions/workflows/auto-release.yml/badge.svg)](https://github.com/RingsNetwork/rings-node/actions/workflows/auto-release.yml)
+[![rings-node](https://github.com/RyanKung/rings/actions/workflows/auto-release.yml/badge.svg)](https://github.com/RyanKung/rings/actions/workflows/auto-release.yml)
 [![cargo](https://img.shields.io/crates/v/rings-node.svg)](https://crates.io/crates/rings-node)
 [![docs](https://docs.rs/rings-node/badge.svg)](https://docs.rs/rings-node/latest/rings_node/)
-![GitHub](https://img.shields.io/github/license/RingsNetwork/rings-node)
+![GitHub](https://img.shields.io/github/license/RyanKung/rings)
 
 This crate contains the implementation of Rings SNARK, which is based on Nova
 

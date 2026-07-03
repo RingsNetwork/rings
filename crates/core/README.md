@@ -7,7 +7,7 @@
 Rings Core
 ===============
 
-[![rings-node](https://github.com/RingsNetwork/rings-node/actions/workflows/auto-release.yml/badge.svg)](https://github.com/RingsNetwork/rings-node/actions/workflows/auto-release.yml)
+[![rings-node](https://github.com/RyanKung/rings/actions/workflows/auto-release.yml/badge.svg)](https://github.com/RyanKung/rings/actions/workflows/auto-release.yml)
 [![cargo](https://img.shields.io/crates/v/rings-core.svg)](https://crates.io/crates/rings-node)
 [![docs](https://docs.rs/rings-core/badge.svg)](https://docs.rs/rings-node/latest/rings_node/)
 
@@ -36,7 +36,7 @@ Assuming Node A and Node B want to create a WebRTC connection, they would need t
 
 For native implementation, the transport layer is based on `webrtc.rs`, and for browser case, we implemented based on `web_sys` and `wasm_bindgen`.
 
-To check the implementation of transport layer: https://github.com/RingsNetwork/rings-node/tree/master/transport
+To check the implementation of transport layer: https://github.com/RyanKung/rings/tree/master/crates/transport
 
 
 #### Network Layer
