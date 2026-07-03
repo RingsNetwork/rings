@@ -23,7 +23,8 @@
 \usepackage{abstract}
 
 \newtheorem{definition}{Definition}
-\newtheorem{law}{Law}
+\newtheorem{constraint}{Constraint}
+\newtheorem{assumption}{Assumption}
 \newtheorem{proposition}{Proposition}
 
 \date{Created: February 8, 2023\\Source: RingsNetwork/whitepaper repository\\Timestamp: 2023-02-08T13:27:55Z\\Last updated: July 4, 2026}
@@ -57,7 +58,7 @@
 \author{
   Ryan J. Kung \\ ryankung@ieee.org \\
 }
-\title{Rings: A peer-to-peer network for sovereign age}
+\title{Rings: A peer-to-peer network for the sovereign age}
 
 \begin{document}
 \twocolumn[
@@ -65,7 +66,7 @@
     \maketitle
     \begin{abstract}
 
-      Rings Network is a decentralized peer-to-peer network for the sovereign age. This paper describes a target architecture in which browsers and native devices participate as first-class nodes, identities are addressed as DIDs on a Chord overlay, resources and services are mapped into the same identifier space, and applications compose privacy-preserving protocols such as encrypted messaging, offline mailboxes, hidden service descriptors, ranking, and sidecar ordering. The model is formalized as protocol objects over the circular carrier $\mathbb{Z}/2^{160}\mathbb{Z}$, with placement functors into the live Chord topology and Kleisli morphisms for effectful protocol transitions. This paper presents the ideal Rings model while updating directions that have been superseded: Chord identifiers are treated as an additive circular space for routing and placement, cryptographic groups and fields are separate protocol carriers, and message relay, ranking, and sequencing are specified as Rings protocols rather than inherited wholesale from unrelated systems.
+      Rings Network is a decentralized peer-to-peer network for the sovereign age. This paper specifies a target architecture in which browsers and native devices participate as first-class nodes, identities are addressed as DIDs on a Chord overlay, resources and services are mapped into the same identifier space, and applications compose privacy-preserving protocols such as encrypted messaging, offline mailboxes, hidden service descriptors, ranking, and sidecar ordering. The formal core models namespaces as objects in the slice category $\mathbf{Set}/R$ for $R=\mathbb{Z}/2^{160}\mathbb{Z}$, places them by post-composition with the live Chord owner map, and composes effectful protocol transitions as writer-monad Kleisli morphisms. The ideal model also updates directions that have been superseded: Chord identifiers are treated as an additive circular space for routing and placement, cryptographic groups and fields are separate protocol carriers, and message relay, ranking, and sequencing are specified as Rings protocols rather than inherited wholesale from unrelated systems.
 
   ~\\
   ~\\
@@ -74,23 +75,22 @@
 ]
 \section{Introduction and Motivation}
 
-Centralized systems have long posed significant privacy and security risks to Internet users, as evidenced by numerous studies \cite{Kshetri2014, Kokkonen2018, G2016, tim}. The emergence of decentralized technologies has therefore attracted considerable interest as a means of mitigating these risks, while moving towards a "sovereign age" characterized by increased user control and data ownership.
+Centralized systems have long posed privacy, security, and data-control risks to Internet users \cite{Kshetri2014, Kokkonen2018, G2016, tim}. Rings studies a narrower design problem: how can browser and native runtimes share one peer-to-peer overlay without treating identity, routing, storage, and application protocols as centralized services?
 
-The Rings Network represents a decentralized peer-to-peer alternative that aims to address these privacy and security challenges, offering a secure and private means of conducting online interactions. The objective of this paper is to introduce the Rings Network and demonstrate its potential for mitigating the risks posed by centralized systems, thus advancing the development of a sovereign age.
-
-The technical specifications and architecture of the Rings Network will be thoroughly analyzed and its potential impact on personal privacy and the internet will be explored. These findings will contribute to the ongoing discussions about the future of the internet and the role of decentralized technologies in enhancing privacy, security, and control for users.
-
-This paper aims to make a meaningful contribution to the discourse surrounding decentralized solutions such as the Rings network and their ability to advance towards a more secure, private and sovereign Internet.
+This paper makes four contributions:
+\begin{itemize}[itemsep=2pt,topsep=0pt,parsep=0pt]
+\item it models Rings identifiers as an additive circular carrier used for Chord placement, not as a cryptographic field;
+\item it adopts Correct Chord as the maintenance reference before adding Rings-specific DID, VID, storage, mailbox, and service semantics;
+\item it defines namespace placement categorically and protocol execution through a writer-monad effect boundary;
+\item it states the verification boundary for lookup, storage placement, and protocol effects without claiming full asynchronous liveness or Byzantine fault tolerance.
+\end{itemize}
 
 \subsection{Browser Native}
 
 The Rings Network is characterized as a browser-native network at the protocol level: a browser tab can own an identity, establish peer-to-peer transport, participate in routing, store replicated state within its capability profile, and host applications without depending on an application server. Native and browser environments expose different operating-system capabilities, but the ideal model gives both the same overlay authority and isolates environment-specific IO behind adapters.
 
 
-An important aspect of the Rings Network is its communication layer, which is based on WebRTC\cite{webrtc-standard} and WebAssembly\cite{webassembly}. These technologies support browser-to-browser peer-to-peer networking and allow data traffic to avoid a central application server once peers have enough connectivity information to establish a WebRTC data channel.
-
-
-WebRTC, as a standard for real-time communication on the internet, offers a smooth user experience for the Rings Network. Meanwhile, WebAssembly, a low-level binary format for web-based applications, provides the necessary performance for the network. These technologies are widely supported by contemporary browsers, making the Rings Network accessible to a vast user base.
+The browser communication layer uses WebRTC \cite{webrtc-standard} and WebAssembly \cite{webassembly}. WebRTC provides browser-to-browser data channels after peers exchange connectivity information. WebAssembly lets the same protocol core run inside browser capability boundaries while native nodes use host adapters.
 
 Moreover, the integration of WebRTC and WebAssembly allows decentralized applications to run on top of the same overlay. The target application space includes secure file sharing, decentralized web publishing, private mailboxes, verifiable computation, relay/tunnel services, and market or exchange protocols that can be expressed as namespace-scoped applications.
 
@@ -99,35 +99,35 @@ Moreover, the integration of WebRTC and WebAssembly allows decentralized applica
 
 Decentralized Identifiers (DIDs) in Rings are protocol identities located on the Chord identifier circle. A participant proves control of a DID through an account proof and a delegated session proof. Rings does not require a W3C DID-document resolver in the core overlay path; DID resolution is a routing and proof problem inside the overlay.
 
-  The target DID proof system is pluggable but not arbitrary. Each proof family must define a verifier, a domain-separated transcript, DID derivation, signature encoding, replay bounds, and whether the public key is recoverable from the signature or must be carried explicitly. This keeps Rings compatible with multiple cryptographic ecosystems without losing a uniform proof boundary.
+The target DID proof system is pluggable but not arbitrary. Each proof family specifies a verifier, a domain-separated transcript, DID derivation, signature encoding, replay bounds, and whether the public key is recoverable from the signature or carried explicitly. This keeps Rings compatible with multiple cryptographic ecosystems without losing a uniform proof boundary.
 
-Incorporating DID proofs into the Rings network facilitates the development of secure and trusted methods for identifying and authenticating network participants. This, in turn, promotes the establishment of secure and confidential communications and data exchange based on trusted relationships between parties.
+The DID proof boundary is therefore an authorization interface: routing locates an identifier, while protocol verification decides whether a signed operation is valid for that identifier.
 
 
 \subsection{Lookup Protocol and Encryption}
 
 The Rings Network leverages the Chord algorithm\cite{Chord} for overlay lookup. The network is organized as a circular identifier space, and each node maintains successor, predecessor, and finger-table state to route messages and storage operations toward a destination DID or resource identifier.
 
-In conjunction with the lookup protocol, the Rings Network uses signed message payloads and end-to-end encryption. Peers exchange signed public-key handshakes, then carry ordered ciphertext frames inside signed message envelopes. Secret sharing, private storage, and verifiable computation use their own cryptographic fields or groups; they must not assume that the Chord identifier space itself is a finite field.
+In conjunction with the lookup protocol, the Rings Network uses signed message payloads and end-to-end encryption. Peers exchange signed public-key handshakes, then carry ordered ciphertext frames inside signed message envelopes. Secret sharing, private storage, and verifiable computation use their own cryptographic fields or groups; the Chord identifier space itself is not a finite field.
 
-These lookup protocol and encryption capabilities provide a secure and efficient method of communication and data sharing in the Rings Network, surpassing the privacy and security offerings of traditional centralized networks.
+Lookup and encryption have distinct security roles. Chord routes to a DID or VID owner under the overlay assumptions; signed sessions and end-to-end encryption protect message authenticity and payload confidentiality.
 
 \subsection{Data and Service Provision}
 
 Rings maps resources and service records into the same 160-bit identifier space used by the Chord overlay. Virtual DIDs represent data, mailboxes, service descriptors, subrings, and application-specific rendezvous points. A virtual DID has no account proof of its own; its authenticity comes from signed entry operations, encrypted payloads, capability descriptors, and the application protocol that defines how the resource may be read or updated.
 
 \section{Related Work}
-In the field of decentralized networks, Rings Network is not the sole option available. There are several other decentralized networks, such as Tor, GnuNet, Nym, and IPFS, that aim to provide users with privacy, security, and censorship resistance. In this section, we will undertake a comparative analysis of Rings Network with other peer-to-peer (P2P) networks.
+Several decentralized networks, including Tor, GnuNet, Nym, and IPFS, address privacy, security, censorship resistance, or content routing. Rings differs by making browser-capable Chord placement the shared substrate for identity, storage, and protocol rendezvous.
 
-In P2P networks, Distributed Hash Tables (DHTs\cite{DHT}) are commonly utilized. Many prominent decentralized networks, such as Edonkey\cite{Edonkey}, Ethereum\cite{Ethereum}, IPFS\cite{IPFS}, and Libp2p\cite{Libp2p}, have adopted the Kademlia\cite{Kademlia} algorithm as their DHT solution. Rings Network instead employs the Chord protocol for structured routing. This gives Rings a deterministic ring model for successor, predecessor, and finger-table reasoning. Broadcast and gossip performance should be evaluated as Rings protocol behavior rather than inferred solely from the choice of DHT.
+Distributed Hash Tables (DHTs\cite{DHT}) are common in P2P systems. Networks such as Edonkey\cite{Edonkey}, Ethereum\cite{Ethereum}, IPFS\cite{IPFS}, and Libp2p\cite{Libp2p} use Kademlia-derived routing \cite{Kademlia}. Rings instead employs Chord for structured routing, which gives the model a circular order for successor, predecessor, and finger-table reasoning. Broadcast and gossip behavior is treated as Rings protocol behavior rather than inferred from the DHT alone.
 
-On the other hand, Rings Network belongs to the category of structured P2P networks, while Nym, Bitcoin, and BitTorrent networks are considered unstructured P2P networks. Structured P2P networks, such as Rings Network, have a well-defined topology and routing mechanism, while unstructured P2P networks rely on nodes to discover and connect with each other in a random manner. This structured architecture grants Rings Network a higher degree of scalability, efficiency, and robustness compared to unstructured P2P networks.
+Rings belongs to the structured P2P family. Unstructured overlays can be more tolerant of arbitrary churn and partial knowledge, while structured overlays provide deterministic lookup targets and compact routing state when their maintenance assumptions hold. Rings chooses the latter tradeoff because DID and VID placement need a stable owner relation.
 
 In terms of P2P communication protocols, the Chord protocol is employed by Rings Network, whereas IPFS and Ethereum utilize Kademlia-derived systems. Rings' design goal is to use the structured ring as the base for lookup, relay, storage placement, and service rendezvous, while keeping privacy-sensitive network addresses out of application-level identifiers whenever possible.
 
 In contrast, Tor network and Nym network are not structured P2P networks but rather relay networks that are decentralized but not P2P. Rings takes a different path by making the structured overlay itself the routing and service-discovery substrate. This reduces dependence on fixed relay infrastructure, while traffic-analysis and metadata-resistance claims still depend on the selected relay, ranking, mailbox, and cover-traffic protocols.
 
-Finally, it is worth noting that Rings Network is a browser-native P2P network, a unique feature that sets it apart from other existing network implementations. Rings Network can be executed on browsers, mobile devices, or PCs, thus making it a true P2P network that provides every individual with complete control over their data sovereignty.
+Finally, Rings treats browser runtimes as first-class peers. Browser, mobile, and native nodes differ in persistence and transport capabilities, but the target protocol gives them the same identity and overlay authority when they satisfy the same proof and session rules.
 \section{The Rings Network Architecture}
 The Rings Network architecture is not a direct restatement of the TCP/IP reference model \cite{TCP_IP}. It is a sovereign-network architecture organized around six cooperating layers: identity, transport, overlay, extension runtime, protocol, and application.
 
@@ -160,16 +160,14 @@ The Rings Network architecture is not a direct restatement of the TCP/IP referen
 
 \subsection{Identity Layer}
 
-The design goal of Rings Network is to make the same overlay and identity model available from multiple runtime surfaces. Native nodes, mobile nodes, embedded nodes, and browser nodes should share DID addressing, delegated sessions, Chord routing, and message semantics. Each runtime supplies the IO adapters available in that environment, so equality means equal protocol authority rather than identical local resources.
+The design goal of Rings Network is to make the same overlay and identity model available from multiple runtime surfaces. Native nodes, mobile nodes, embedded nodes, and browser nodes share DID addressing, delegated sessions, Chord routing, and message semantics. Each runtime supplies the IO adapters available in that environment, so equality means equal protocol authority rather than identical local resources.
 
 The identity layer owns DID derivation, account-proof verification, delegated sessions, and virtual-resource identities. It names who or what is allowed to sign a protocol operation; it does not decide transport reachability, overlay placement, or application-specific authorization policy.
 
 \subsection{Transport Layer}
- The transport layer uses WebRTC data channels and native transport adapters to give browser and non-browser nodes peer-to-peer connectivity. The browser-based approach means that users do not need to install additional software or plugins to participate in the network. WebRTC allows the network to target low latency and high throughput for real-time communication and data transfer, while native adapters can expose capabilities unavailable to a browser tab.
+The transport layer uses WebRTC data channels and native transport adapters to give browser and non-browser nodes peer-to-peer connectivity. Browser nodes use the standardized SDP/ICE exchange to establish data channels; native adapters expose equivalent transport capabilities where a browser tab cannot.
 
- WebRTC, or Web Real-Time Communication, provides browsers and mobile apps with real-time communication capabilities through simple APIs. With WebRTC, users can easily send audio, video, and data streams directly between browsers, without the need for any plug-ins or extra software.
-At the same time, the Rings Network has some special optimizations for the WebRTC handshakes process.
- Assuming Node A and Node B want to create a WebRTC connection, they would need to exchange a minimum of three messages with each other:
+Figure \ref{webrtc-standard-sdp} sketches the ordinary SDP/ICE exchange between two WebRTC peers:
 
  \begin{itemize}[itemsep=2pt,topsep=0pt,parsep=0pt]
   \item Node A gathers a list of ICE candidates and generates an SDP offer. The SDP offer includes information about the media streams and network addresses that Node A is willing to receive or transmit.
@@ -197,21 +195,11 @@ At the same time, the Rings Network has some special optimizations for the WebRT
   \draw[blue, thick] (B.south) -- ++(0,-5.2cm);
 \end{tikzpicture}
 
-\caption{Exchange SDP}
+\caption{Standard SDP/ICE exchange}
+\label{webrtc-standard-sdp}
 \end{figure}
-By optimizing the WebRTC handshakes process, the Rings Network reduces the latency and overhead associated with establishing WebRTC connections. This results in a more efficient and reliable communication experience for users.
 
-  \begin{itemize}[itemsep=2pt,topsep=0pt,parsep=0pt]
-
-\item Gather ICE candidates and create an SDP offer, which is sent to the other party.
-\item The recipient accepts the offer and generates an SDP answer, which is sent back along with its own list of ICE candidates.
-\item At this point, the connection is established and the peer-to-peer communication channel is ready for use.
-\end{itemize}
-At its core, WebRTC is based on the exchange of Session Description Protocol (SDP) between browsers. The SDP is used to negotiate the communication settings and exchange cryptographic keys, allowing for secure communication between browsers. The process of exchanging SDP and establishing a secure connection is known as the WebRTC handshake.
-
-In Rings Network, the WebRTC handshake is optimized by generating both the ICE Candidates and Offer simultaneously and exchanging them in a single Request-Response transaction. This significantly improves the efficiency of the handshake between nodes.
-
-Once the WebRTC handshake is complete, browsers can send and receive data streams directly, with low latency and high bandwidth. This makes WebRTC ideal for real-time communication applications, such as video conferencing, online gaming, and live streaming.
+Rings compresses the overlay handshake by carrying the offer and locally gathered ICE candidates in one request, and the answer and responder candidates in one response. Figure \ref{webrtc-rings-sdp} shows the single round-trip form. The optimization changes the Rings signaling protocol, not the WebRTC security model itself.
 
 
 \begin{figure}[htbp]
@@ -227,16 +215,17 @@ Once the WebRTC handshake is complete, browsers can send and receive data stream
   \draw[blue, thick] (B.south) -- ++(0,-2.2cm);
 \end{tikzpicture}
 
-\caption{Exchange SDP}
+\caption{Rings single round-trip SDP/ICE exchange}
+\label{webrtc-rings-sdp}
 \end{figure}
 
 \subsection{Overlay Layer}
 
 The Rings Network is a structured peer-to-peer network that incorporates a distributed hash table (DHT) to facilitate efficient and scalable lookups. The Chord algorithm is utilized to implement lookup within the DHT, thereby enabling message routing and replicated storage operations in a peer-to-peer setting. Availability depends on transport connectivity, stabilization progress, redundancy settings, and churn; the DHT gives the protocol a structured basis for routing rather than a standalone availability guarantee.
 
-Each node in the Rings Network is assigned a range of keys and maintains a finger table containing information about other nodes in the network. This allows for quick determination of the node responsible for a given key and facilitates the forwarding of queries to the appropriate node. The nodes and keys within the network are arranged in an identifier ring, which has at most $2^m$ nodes, ranging from 0 to $2^m-1$. The identifier ring provides a convenient method for mapping keys to nodes, and each node in the identifier ring has a successor and a predecessor. The successor of a node is the next node in the identifier ring in a clockwise direction, while the predecessor is the previous node in a counter-clockwise direction.
+Each node in the Rings Network occupies a point in an $m$-bit identifier space with $2^m$ possible identifiers. The live node set is a finite subset of that space. A key is owned by the first live node encountered clockwise from the key. Each node stores predecessor and bounded successor-list state as its safety root, and may also store finger entries as routing hints.
 
-To maintain the robustness of the network in the event of node failures or departures, each node records a segment of the ring adjacent to it, including the preceding and following nodes. This results in a high probability that a node will be able to accurately locate its successor or predecessor, even in networks that experience a high failure rate. The information regarding the closest successor or predecessor of a node is stored in the finger table maintained by each node.
+To maintain the robustness of the network in the event of node failures or departures, each node records a segment of the ring adjacent to it, including the preceding and following nodes. The predecessor and successor list are maintained by join, rectify, and stabilize operations; finger tables are repaired separately and are not the authoritative source for immediate neighbor correctness.
 
 The Rings Network uses Chord-style finger routing to reduce query times and improve lookup efficiency. When a node seeks to look up a key, it forwards the query to the closest known predecessor or successor of the key, as determined by the information stored in its finger table and successor list, until the responsible node is found. This approach reduces the number of nodes that must be traversed to locate the responsible node, providing a scalable solution for data storage and retrieval within a peer-to-peer network.
 
@@ -278,9 +267,9 @@ In the DHT, as illustrated in Figure \ref{dht}, all nodes have the capability to
 
 \subsection{Extension Runtime Layer}
 
-The extension runtime layer is the interpreter boundary for namespace-scoped protocol logic. Protocol handlers should be modeled as pure state transitions that return effect descriptions, while the runtime supplies capability-limited host calls for storage, transport, timers, and cryptographic verification. This keeps extension behavior replayable and testable without giving each extension direct ambient access to the node process.
+The extension runtime layer is the interpreter boundary for namespace-scoped protocol logic. Protocol handlers are modeled as pure state transitions that return effect descriptions, while the runtime supplies capability-limited host calls for storage, transport, timers, and cryptographic verification. This keeps extension behavior replayable and testable without giving each extension direct ambient access to the node process.
 
-WebAssembly, or Wasm, is a low-level binary format for executing code in web browsers. It provides a way for developers to write high-performance code in languages such as C, C++, and Rust, and then run that code in a browser with native performance. WebAssembly is designed to be fast and efficient, with a compact binary format that is easy to parse and execute. It uses a low-level instruction set, which makes it well-suited for demanding tasks such as cryptography, compression, and image processing.
+WebAssembly (Wasm) is the browser-side module format used by this boundary \cite{webassembly}. In Rings, Wasm is relevant because it lets protocol code run behind browser capability checks while native nodes expose equivalent adapters.
 
 \begin{figure}[htbp]
   \begin{tikzpicture}[node distance=3cm,auto,>=latex']
@@ -300,7 +289,7 @@ WebAssembly, or Wasm, is a low-level binary format for executing code in web bro
   \draw[pattern=north east lines, pattern color=gray] (C.south west) -- (C.south east) -- (C.north east) -- (C.north west) -- cycle;
   \draw[->,dashed] (B) -- (C);
 \end{tikzpicture}
-\caption{How wasm module works}
+\caption{Wasm module execution boundary}
 \end{figure}
 
 The Rings Network provides multiple options for interacting with WebAssembly (Wasm) modules:
@@ -315,27 +304,13 @@ The Rings Network provides multiple options for interacting with WebAssembly (Wa
 
 In the protocol layer, the central design concept revolves around the utilization of a Decentralized Identifier (DID). A DID is a 160-bit Chord identifier in a space with $2^{160}$ points, represented as an element of the additive cyclic group $\mathbb{Z}/2^{160}\mathbb{Z}$. Addition, subtraction, and negation model clockwise offsets, biased ordering, finger targets, and affine replica placement. DID multiplication is outside the Rings routing model: cryptographic multiplication belongs to the fields or groups used by specific cryptographic protocols, not to Chord identifiers themselves.
 
-However, elements in a circular identifier space cannot be compared by a single global less-than relation that is meaningful for every observer. Algorithm \ref{alg:biasdid} addresses this limitation. The algorithm selects a fixed point C and compares A and B by their clockwise offsets from C. In this manner, ordering is always relative to the observer or operation that chose the fixed point.
-
-
-\begin{algorithm}[htpb]
-\caption{Bias Order}
-\label{alg:biasdid}
-\textbf{Input}: Elements A and B, and fixed point C. \
-\textbf{Output}: Result of comparison between A and B \
-\begin{algorithmic}[1]
-\State calculate $A-C$ and $B-C$
-\If{$A-C < B-C$}
-\State \textbf{return} $A < B$
-\Else
-\If{$A-C > B-C$}
-\State \textbf{return} $B < A$
-\Else
-\State \textbf{return} $A = B$
-\EndIf
-\EndIf
-\end{algorithmic}
-\end{algorithm}
+However, elements in a circular identifier space cannot be compared by a single global less-than relation that is meaningful for every observer. For a fixed point $C$, Rings uses the biased order
+\[
+  A \leq_C B
+  \quad\Longleftrightarrow\quad
+  \delta_C(A) \leq \delta_C(B).
+\]
+This is the pullback of the ordinary order on $[0,M)$ along $\delta_C$. It is total for each fixed $C$, but changing $C$ changes the order; that observer-dependence is the reason Chord interval tests always name a reference point.
 
 
 The DID, as an element of the Chord identifier space, also provides a placement target for resources and storage entries. Resource identifiers are derived into the same 160-bit space so the same lookup and placement logic can route storage, mailbox, service, and subring operations.
@@ -347,7 +322,7 @@ The DID architecture also encompasses signed Session and Message Relay modules. 
 
 The nucleus of Rings Network is similar to the Actor Model\cite{Actor_Model}: inbound messages are decoded into typed protocol messages and handled by explicit handler traits. The extension runtime described above separates protocol logic into a pure state transition and an interpreter shell. This allows built-in and user-defined protocols to run behind namespace-scoped capabilities without adding a global command bus.
 
-Rings Network provides a comprehensive set of interfaces for application-layer messages, which can be accessed through Remote Procedure Calls (RPC) or Foreign Function Interface (FFI). This implies that application developers have the option to not only control Rings Network through Rust or WebAssembly (Wasm), but can also access it via RPC using lighter weight programming languages such as Python or JavaScript. Furthermore, embedded developers can integrate Rings Network into microcontrollers through the use of FFI.
+Rings exposes application-layer messages through Remote Procedure Calls (RPC) and Foreign Function Interface (FFI) surfaces. Rust and WebAssembly applications can call the protocol core directly, scripting environments can use RPC, and embedded runtimes can bind through FFI when their capability profile supports the required transport and storage adapters.
 
 Additionally, applications can store data in the Distributed Hash Table (DHT), look up services, and register namespace-scoped protocols. In the ideal model, peer quality and global ranking provide admission and routing signals, while local counters remain the lowest-level evidence source.
 
@@ -367,7 +342,7 @@ Additionally, applications can store data in the Distributed Hash Table (DHT), l
 
 \end{figure}
 
-Several application classes motivate Rings Network: decentralized chat, dWeb publishing, relay/tunnel services, browser proof applications, private mailbox delivery, and hidden-service style rendezvous. Concrete demos may change over time; the paper should describe the application class and protocol requirement rather than depending on historical demo names.
+Several application classes motivate Rings Network: decentralized chat, dWeb publishing, relay/tunnel services, browser proof applications, private mailbox delivery, and hidden-service style rendezvous. The model characterizes these applications by protocol class and requirement rather than by transient demo names.
 
 \section{Algebraic Network}
 
@@ -377,7 +352,7 @@ Rings builds on the Chord distributed hash table rather than inventing a new ove
 
 Chord lookup is a routing procedure over this circular order. If the target key lies between the local node and its successor, the successor is returned. Otherwise the query is forwarded to the closest preceding known node, usually obtained from the finger table, until a node can answer the successor relation. Periodic maintenance then repairs the local view: stabilization asks the current successor for topology information, notification lets a successor learn a better predecessor, and finger repair refreshes long-distance routing hints.
 
-This base model gives Rings its first algebraic object: a circular identifier carrier with relative order, successor, predecessor, and finger relations. It also defines the separation between correctness and performance. The successor/predecessor structure is the safety-critical ring-maintenance state, while fingers are an optimization that should improve hop count without becoming the proof root for membership correctness.
+This base model gives Rings its first algebraic object: a circular identifier carrier with relative order, successor, predecessor, and finger relations. It also defines the separation between correctness and performance. The successor/predecessor structure is the safety-critical ring-maintenance state, while fingers optimize hop count without becoming the proof root for membership correctness.
 
 \subsection{Correct Chord as Maintenance Model}
 
@@ -387,7 +362,11 @@ Rings adopts Correct Chord as the maintenance reference before adding Rings-spec
 
 \subsection{Rings as an Algebraic Object}
 
-The Rings model is not merely "Chord plus applications." It is a family of protocol objects indexed over one circular carrier, with effects interpreted through a monadic runtime boundary. We use standard category-theoretic language for the shape of the construction \cite{MacLaneCategories}, and monadic language for effectful protocol composition \cite{MoggiMonads}.
+The Rings model is not merely "Chord plus applications." It is a family of protocol objects indexed over one circular carrier, with effects interpreted through a monadic runtime boundary. We use standard category-theoretic language for the placement construction \cite{MacLaneCategories}, and monadic language for effectful protocol composition \cite{MoggiMonads}.
+
+\begin{assumption}[Overlay model]
+The steady-state algebra below assumes a finite live set $N\subset R$, a successor-list length $r\geq 1$, and the Correct Chord stable-base condition $|N|\geq r+1$. Bootstrap rings with fewer nodes are initialization states, not instances of the steady-state lookup theorem. Nodes are fail-stop, not Byzantine, and modeled remote or repair actions are delivered under the fairness assumptions of the selected verification artifact.
+\end{assumption}
 
 \begin{definition}[Carrier and circular order]
 Let
@@ -408,16 +387,30 @@ For an observer $a \in R$, define clockwise distance and interval membership by
 The carrier operation used by the overlay is addition in $R$. Multiplication in $R$ is not a routing operation.
 \end{definition}
 
-For a finite live set $N \subset R$, the mathematical owner of a key $k$ is
+For a nonempty finite live set $N \subset R$, the mathematical owner of a key $k$ is
 \[
   \operatorname{owner}_N(k)
     = \arg\min_{n \in N} \delta_k(n).
 \]
-The bounded successor sequence of node $n$ is
+The predecessor and bounded successor sequence of node $n\in N$ are
 \[
-  \operatorname{Succ}^r_N(n)
-    = \operatorname{take}_r
+  \operatorname{pred}_N(n)
+    = \arg\min_{p \in N\setminus\{n\}} \delta_p(n),
+\]
+\[
+  \operatorname{Succ}^q_N(n)
+    = \operatorname{take}_q
       \bigl(\operatorname{sort}_{\delta_n}(N \setminus \{n\})\bigr).
+\]
+The argmins are unique because $\delta_a$ is a bijection from $R$ to $\{0,\ldots,M-1\}$ for each fixed $a$. For a replication factor $r$, the intended storage set for key $k$ is
+\[
+  \operatorname{Rep}^r_N(k)
+  =
+  \{\operatorname{owner}_N(k)\}
+  \cup\;
+  \mathrm{set}\!\bigl(
+    \operatorname{Succ}^{r-1}_N(\operatorname{owner}_N(k))
+  \bigr).
 \]
 Correct Chord gives the maintenance discipline for making local successor-list state converge toward these mathematical functions; Rings adds typed identities, resources, storage, sessions, and extension protocols on top of them.
 
@@ -425,8 +418,8 @@ Correct Chord gives the maintenance discipline for making local successor-list s
 A Rings overlay state over $N$ is the tuple
 \[
 \mathcal{R}_N =
-  (R,N,\operatorname{owner}_N,\operatorname{pred},
-   \operatorname{Succ}^r,F,E)
+  (R,N,\operatorname{owner}_N,\operatorname{pred}_N,
+   \operatorname{Succ}^r_N,\operatorname{Rep}^r_N,F,E)
 \]
 where $F$ is the sparse finger relation and $E$ is the replicated entry store indexed by VIDs. The safety root is $(\operatorname{pred},\operatorname{Succ}^r)$; $F$ is a performance witness, and $E$ is a protocol-indexed payload algebra.
 \end{definition}
@@ -437,41 +430,52 @@ Rings' main categorical move is to put every routable thing in the slice categor
 \]
 DIDs are account-controlled elements of such a namespace. VIDs are resource-controlled or protocol-derived elements. Both are objects over the same carrier, not elements of the same cryptographic group.
 
-For a fixed live topology $N$, placement is the composite
+For a fixed live topology $N$, the owner map induces a post-composition functor
+\[
+  \Omega_N:\mathbf{Set}/R \longrightarrow \mathbf{Set}/N.
+\]
+It maps an object $(X,H:X\to R)$ to $(X,\operatorname{owner}_N\circ H:X\to N)$ and maps a slice morphism $f$ to the same underlying function $f$. Thus namespace placement is the composite
 \[
   P^N_\nu = \operatorname{owner}_N \circ H_\nu :
   X_\nu \longrightarrow N .
 \]
-Viewing $X_\nu$ and $N$ as discrete categories, $P^N_\nu$ is the placement functor for namespace $\nu$.
-If a namespace morphism $f:X_\nu \to X_\mu$ preserves derivation,
+\begin{proposition}[Placement functoriality]
+If $f:X_\nu \to X_\mu$ is a morphism in $\mathbf{Set}/R$, then placement commutes with $f$:
 \[
   H_\mu \circ f = H_\nu ,
 \]
-then placement is natural:
 \[
   P^N_\mu \circ f = P^N_\nu .
 \]
+\end{proposition}
+\begin{proof}
+Post-compose the first equation with $\operatorname{owner}_N$. Identities and composition are preserved because $\Omega_N$ leaves the underlying function unchanged.
+\end{proof}
 This is the precise claim behind "DIDs, resources, mailboxes, service descriptors, and subrings share the same ring." They share placement by a commuting diagram over $R$; they do not share authorization, payload semantics, or cryptographic carrier laws.
 
-\begin{law}[Carrier separation]
+\begin{constraint}[Carrier separation]
 Overlay placement may use only
 \[
   0,\quad +,\quad -,\quad \delta_a,\quad (a,b]_R,\quad
   \operatorname{owner}_N .
 \]
 Any protocol requiring multiplication, inversion, scalar multiplication, polynomial interpolation, pairings, or subgroup checks must name a separate carrier such as a finite field $\mathbb{F}_q$ or elliptic-curve group $\mathbb{G}$. The only bridge from bytes or proofs into $R$ is an explicit, domain-separated derivation map $H_\nu$.
-\end{law}
+\end{constraint}
 
-\begin{law}[Rotation equivariance]
+\begin{proposition}[Rotation equivariance]
 For every offset $t \in R$, define $T_t(x)=x+t$ and $N+t=\{n+t\mid n\in N\}$. Rings placement is independent of the absolute zero point:
 \[
   \operatorname{owner}_{N+t}(k+t)
     = \operatorname{owner}_N(k)+t .
 \]
 Thus a diagram, storage policy, or test that depends only on circular offsets can be translated around the ring without changing its algebraic content.
-\end{law}
+\end{proposition}
+\begin{proof}
+For every $n\in N$, $\delta_{k+t}(n+t)=((n+t)-(k+t))\bmod M=\delta_k(n)$. Translation therefore preserves the ordering used by $\arg\min$, so the translated minimizer is the minimizer translated by $t$.
+\end{proof}
 
-For an action alphabet $A$, let $A^*$ be the free monoid of finite action lists with identity $\epsilon$ and concatenation $\cdot$. The Rings effect monad is
+\begin{definition}[Writer effect monad]
+For an action alphabet $A$, let $A^*$ be the free monoid of finite action lists with identity $\epsilon$ and concatenation $\cdot$. The Rings effect monad is the writer monad over $A^*$:
 \[
   \mathsf{T}_A(X)=X\times A^*,
 \]
@@ -484,19 +488,53 @@ with unit and bind
     \text{let } f(x)=(y,\beta)
     \text{ in } (y,\alpha\cdot\beta).
 \]
-Typed errors add a sum component, $\mathsf{E}+\mathsf{T}_A(X)$, but do not change the effect-composition law.
+\end{definition}
+\begin{proposition}[Writer laws]
+$\mathsf{T}_A$ satisfies the monad laws.
+\end{proposition}
+\begin{proof}
+Left and right identity follow from $\epsilon\cdot\alpha=\alpha=\alpha\cdot\epsilon$. Associativity follows from $(\alpha\cdot\beta)\cdot\gamma=\alpha\cdot(\beta\cdot\gamma)$.
+\end{proof}
+
+Typed errors use a strict error-over-writer stack:
+\[
+  \mathsf{T}^{\mathcal{E}}_A(X)
+  =
+  \mathcal{E} + (X\times A^*).
+\]
+A failed transition returns an error and no executable action list. A successful transition composes actions by the writer law. If a protocol needs to report a recoverable fault to the network, that report is an explicit successful action rather than an implicit pre-error effect.
 
 \begin{definition}[Protocol object]
 A Rings protocol namespace is a tuple
 \[
-  \mathcal{P}_\nu=(X_\nu,S_\nu,I_\nu,O_\nu,A_\nu,H_\nu,\tau_\nu)
+  \mathcal{P}_\nu=
+  (X_\nu,S_\nu,I_\nu,O_\nu,A_\nu,\mathcal{E}_\nu,H_\nu,\tau_\nu)
 \]
-where $X_\nu$ is the descriptor space, $S_\nu$ is protocol state, $I_\nu$ is input, $O_\nu$ is output, $A_\nu$ is the action alphabet, $H_\nu:X_\nu\to R$ is placement, and
+where $X_\nu$ is the descriptor space, $S_\nu$ is protocol state, $I_\nu$ is input, $O_\nu$ is output, $A_\nu$ is the action alphabet, $\mathcal{E}_\nu$ is the error set, $H_\nu:X_\nu\to R$ is placement, and
 \[
   \tau_\nu:S_\nu \times I_\nu \to
-  \mathsf{T}_{A_\nu}(S_\nu \times O_\nu)
+  \mathsf{T}^{\mathcal{E}_\nu}_{A_\nu}(S_\nu \times O_\nu)
 \]
-is the transition. A morphism of protocols preserves placement and maps transitions to transitions; in other words, protocol refactoring must commute with $H_\nu$ and with $\tau_\nu$.
+is the transition.
+
+A protocol morphism $\Sigma:\mathcal{P}_\nu\to\mathcal{P}_\mu$ consists of maps
+\[
+  \sigma_X,\sigma_S,\sigma_I,\sigma_O,\sigma_{\mathcal{E}}
+\]
+and a monoid homomorphism $\sigma_A^*:A_\nu^*\to A_\mu^*$ induced by the action translation. It preserves placement by
+\[
+  H_\mu\circ\sigma_X=H_\nu
+\]
+and preserves transitions by the commuting square
+\[
+  \mathsf{T}_{\sigma_A}^{\sigma_{\mathcal{E}}}
+    (\sigma_S\times\sigma_O)
+  \circ \tau_\nu
+  =
+  \tau_\mu\circ(\sigma_S\times\sigma_I).
+\]
+Here $\mathsf{T}_{\sigma_A}^{\sigma_{\mathcal{E}}}$ maps successful action lists by $\sigma_A^*$ and errors by $\sigma_{\mathcal{E}}$.
+This is the checkable content of protocol refactoring: it must commute with both derivation and transition semantics.
 \end{definition}
 
 \subsection{Rings Extension: DID Ring and Carrier Boundaries}
@@ -507,14 +545,11 @@ In Rings Network, the representation of Decentralized Identifiers (DIDs) is achi
 
 The term ring is therefore used carefully. A DID belongs to the Chord identifier ring because the identifier space wraps around modulo $2^{160}$. Algebraically, the protocol depends on the additive abelian group structure of this carrier: zero is the local reference point, addition and subtraction model clockwise movement, and negation models movement in the opposite direction. Rings intentionally does not treat DID multiplication as a protocol operation. If a cryptographic protocol needs multiplication, inversion, or a finite field, it must use a separate scalar-field or curve-group carrier with its own laws.
 
-The generation of resource identifiers for data and service records also uses the same identifier space. The DHT structure in Rings Network implements join, lookup, stabilization, storage sync, and storage repair operations over this shared Chord model.
+The generation of resource identifiers for data and service records also uses the same identifier space. The DHT structure in Rings Network implements join, lookup, stabilization, storage sync, and storage repair operations over the shared functions $\delta$, $\operatorname{owner}_N$, $\operatorname{pred}_N$, and $\operatorname{Succ}^r_N$.
 
 \subsection{Rings Extension: State Algebra}
 
-Rings expresses the Chord layer as a pure state transition system interpreted by a mutable node runtime. For a finite live set $N$ and a local node $n$, Rings defines clockwise distance as:
-\[
-  \operatorname{dist}_n(x) = (x - n) \bmod 2^{160}
-\]
+Rings expresses the Chord layer as a pure state transition system interpreted by a mutable node runtime. For a finite live set $N$ and a local node $n$, all local order comparisons use the clockwise-distance function $\delta_n$ from Definition 1.
 The local state carried by a node is modeled as
 \[
   S_n=(p_n,L_n,F_n,E_n)
@@ -527,14 +562,15 @@ where $p_n$ is predecessor, $L_n$ is a bounded successor sequence, $F_n$ is a sp
 \]
 A finger slot is a partial witness for the Chord target:
 \[
-  target_i(n)=n+2^i,
+  \operatorname{target}_i(n)=n+2^i,
 \]
 \[
-  finger_i(n)=\operatorname{owner}_N(target_i(n)).
+  \operatorname{finger}_i(n)
+  =\operatorname{owner}_N(\operatorname{target}_i(n)).
 \]
-Rings uses a sparse no-wrap finger table, so $F_n(i)=\bot$ is a valid routing-state fact when the known topology cannot witness the slot. A present finger is a performance morphism toward the owner relation, not an additional membership proof.
+Rings uses a sparse no-wrap finger table, so $F_n(i)=\bot$ is a valid routing-state fact when the known topology cannot witness the slot. A present finger is a performance witness for the owner relation, not an additional membership proof.
 
-For storage and mailbox state, each VID $v$ has a payload algebra $E_v$. The default replicated-entry law is a join semilattice:
+For storage and mailbox state, each VID $v$ has a payload algebra $E_v$. The default replicated-entry law is a join semilattice, following the CRDT convergence discipline for mergeable replicated state \cite{ShapiroCRDT}:
 \[
   (E_v,\sqsubseteq,\sqcup,\bot)
 \]
@@ -544,20 +580,20 @@ This formalization keeps the academic Chord story intact, then names Rings' devi
 
 \subsection{Rings Extension: Monadic Effect Boundary}
 
-Rings also models side effects algebraically. A DHT transition should not directly perform network IO. It is a Kleisli morphism
+Rings also models side effects algebraically. A DHT transition does not directly perform network IO. It is a Kleisli morphism
 \[
-  S \longrightarrow \mathsf{T}_A(S\times O)
+  S \longrightarrow \mathsf{T}^{\mathcal{E}}_A(S\times O)
 \]
-that returns a new state, an output, and a finite action list. Typical actions are find-successor, query-successor-list, try-connect, notify, sync-storage, and no-op. The message layer lowers protocol actions into the coproduct of core effects: payload relay, fresh message send, connection management, storage placement, and timer scheduling.
+that returns either a typed error or a new state, an output, and a finite action list. Typical actions are find-successor, query-successor-list, try-connect, notify, sync-storage, and no-op. The message layer lowers protocol actions into the coproduct of core effects: payload relay, fresh message send, connection management, storage placement, and timer scheduling.
 
 Composition is Kleisli composition:
 \[
   \tau_2 \star \tau_1
     = \lambda s.\ \tau_1(s)\mathbin{\gg\!=}\tau_2 .
 \]
-Operationally, this means protocol composition concatenates action evidence rather than executing it. A runtime interpreter is a monoid homomorphism
+Operationally, this means protocol composition concatenates action evidence rather than executing it. A runtime interpreter maps the free action monoid into IO actions under sequential composition:
 \[
-  I_A:A^*\to IO
+  I_A:A^*\to \operatorname{IO}
 \]
 such that $I_A(\epsilon)$ is no-op and $I_A(\alpha\cdot\beta)$ executes $I_A(\alpha)$ before $I_A(\beta)$. Browser, native, and embedded runtimes may choose different interpreters; the protocol law remains the same as long as they interpret the same action alphabet.
 
@@ -565,7 +601,7 @@ The target architecture therefore does not require every runtime to expose a gen
 
 \subsection{Rings Extension: Formal Verification Boundary}
 
-The Rings formal-methods style starts from the Chord and Correct Chord literature, then writes the Rings state machine in TLA-like state variables and operators. The state variables are the DID carrier $R = \mathbb{Z}/2^{160}\mathbb{Z}$, the live set $N$, predecessor map $p$, successor sequence $L$, sparse finger table $F$, replicated entry state $E$, and pending action list $Q$. The operators are join, rectify, stabilize, finger repair, storage sync, storage repair, and lookup.
+The Rings formal-methods style starts from the Chord and Correct Chord literature, then writes the Rings state machine in TLA-style state variables and operators \cite{LamportSpecifyingSystems}. The state variables are the DID carrier $R = \mathbb{Z}/2^{160}\mathbb{Z}$, the live set $N$, predecessor map $p$, successor sequence $L$, sparse finger table $F$, and replicated entry state $E$. The operators are join, rectify, stabilize, finger repair, storage sync, storage repair, and lookup.
 
 The central safety predicate is that converged local state is a fixpoint of the mathematical topology:
 \[
@@ -586,23 +622,26 @@ Lookup safety is owner preservation:
 \]
 where $\Downarrow$ means that repeated Kleisli interpretation of remote lookup actions reaches the same owner as the mathematical function, under the modeled delivery assumptions.
 
+More explicitly, a configuration is a pair $(S,\alpha)$ of protocol state and pending action list. A step relation $(S,\alpha)\to(S',\alpha')$ interprets the head action, applies the corresponding peer transition, and appends the returned action list. The judgment $\operatorname{Lookup}(S,k)\Downarrow n$ means that every modeled terminating execution reaches $Local(n)$ and the converged-ring execution reaches $n=\operatorname{owner}_N(k)$.
+
 Replica placement is a namespace-indexed invariant:
 \[
   \operatorname{Inv}_{place}
   \equiv
   \forall \nu,x.\;
-  replicas(H_\nu(x))
+  \operatorname{replicas}(H_\nu(x))
   \subseteq
-  \operatorname{Succ}^r_N(P^N_\nu(x)).
+  \operatorname{Rep}^r_N(H_\nu(x)).
 \]
-Effect transparency is the boundary invariant:
+Effect transparency is an implementation factorization obligation, not a vacuous invariant of the mathematical transition type:
 \[
-  \pi_S(\tau(s,i)) = s'
-  \quad\text{is independent of } I_A,
+  \operatorname{Impl}_A(s,i)
+  \preceq
+  I_A^\sharp(\tau(s,i)),
 \]
-meaning that pure transition results do not depend on the runtime interpreter chosen for browser, native, or embedded IO.
+meaning that every production code path refines a pure transition followed by an interpreter for the emitted actions. The refinement relation $\preceq$ permits runtime scheduling and logging but not extra protocol state changes outside $\tau$.
 
-The verification boundary is intentionally scoped. Deterministic convergence checks show that, for representative finite layouts, the pure Chord operators materialize the expected safety fixpoint. Stateright models exhaust finite message interleavings for selected subprotocols such as predecessor notification, a small discovery abstraction, storage CRDT merge, and hand-off cleanup. Trace replay checks the real multi-hop lookup implementation on converged rings against the mathematical successor relation. These artifacts support the paper's Chord and DID algebra, but they do not claim a full proof of asynchronous liveness, arbitrary network fairness, Byzantine behavior, or every production runtime schedule.
+The verification boundary is intentionally scoped. Deterministic convergence checks show that, for representative finite layouts, the pure Chord operators materialize the expected safety fixpoint. Stateright models exhaust finite message interleavings for selected subprotocols such as predecessor notification, a small discovery abstraction, storage CRDT merge, and hand-off cleanup \cite{Stateright}. Trace replay checks the real multi-hop lookup implementation on converged rings against the mathematical successor relation. These artifacts support the paper's Chord and DID algebra, but they do not claim a full proof of asynchronous liveness, arbitrary network fairness, Byzantine behavior, or every production runtime schedule.
 
 \subsection{Network DID}
 
@@ -703,27 +742,30 @@ The \textbf{join} algorithm is therefore a local state transition plus an effect
 
     \end{figure}
 
-Algorithm \ref{alg:lookup} locates the successor of a DID or VID. If the local successor sequence can answer the interval query, the transition returns a local owner. Otherwise it returns a remote action naming the next hop and the requested key. The $next = none$ branch is not an ownership claim: after an interval miss it is unreachable in a converged ring, and under partial local state it returns a repair action so the interpreter refreshes successor evidence before retrying. On a converged ring, repeatedly interpreting the remote action resolves to the mathematical successor of the target. The $O(log N)$ routing expectation depends on sufficiently populated finger tables; correctness still falls back to the successor sequence.
+Algorithm \ref{alg:lookup} locates the successor of a DID or VID. If the local successor sequence can answer the interval query, the transition returns a local owner. Otherwise it returns a remote action naming the next hop and the requested key. The $next = none$ branch is not an ownership claim: after an interval miss it is unreachable in a converged ring, and under partial local state it returns a repair action so the interpreter refreshes successor evidence before retrying. On a converged ring, repeatedly interpreting the remote action resolves to the mathematical successor of the target. The $O(\log N)$ routing expectation depends on sufficiently populated finger tables; correctness still falls back to the successor sequence.
 
 \begin{algorithm}[h]
 \caption{DHT Stabilization}
 \begin{algorithmic}[1]
 \Procedure{Stabilize}{$n, topo$}
+\State $actions\gets []$
 \State $c\gets topo.pred$
 \State $s\gets head(succ[n])$
 \If {$c \neq none$ and $c \in (n.did, s)$}
 \State $succ[n]\gets insert(succ[n], c)$
-\State \textbf{emit} $FindSuccessor(c)$
+\State $actions\gets actions :: FindSuccessor(c)$
 \EndIf
 \State $succ[n]\gets take(r, merge(succ[n], topo.succ))$
 \If{$head(succ[n]) \neq none$}
-\State \textbf{emit} $Notify(head(succ[n]), n.did)$
+\State $h\gets head(succ[n])$
+\State $actions\gets actions :: Notify(h, n.did)$
 \EndIf
+\State \Return $Multi(actions)$
 \EndProcedure
 \end{algorithmic}
 \end{algorithm}
 
-The \textbf{stabilization} algorithm is a monotone refinement step over known topology. It accepts a better successor candidate when the current successor reports a predecessor closer to the local node, merges bounded successor-list evidence, and emits a notification to the new head successor. Finger repair is a separate optimization pass that uses the same biased-distance order. Stabilization improves routing efficiency, storage placement, and hand-off safety, but the formal claim is scoped to convergence toward the Chord safety fixpoint under the modeled assumptions.
+The \textbf{stabilization} algorithm is a monotone refinement step over known topology. It accepts a better successor candidate when the current successor reports a predecessor closer to the local node, merges bounded successor-list evidence, and returns actions for follow-up lookup or notification. Finger repair is a separate optimization pass that uses the same biased-distance order. Stabilization improves routing efficiency, storage placement, and hand-off safety, but the formal claim is scoped to convergence toward the Chord safety fixpoint under the modeled assumptions.
 
 \subsection{Virtual DID}
 
@@ -735,7 +777,7 @@ For a resource descriptor $x$, a protocol derives a VID with a domain-separated 
 
 \textbf{Mailbox} provides asynchronous delivery for DIDs that are offline or unreachable. A mailbox root can be derived as $H(\mathtt{rings.mailbox} \Vert DID \Vert epoch)$, where the epoch limits scanning and storage growth. Senders append encrypted envelopes to the mailbox entry. Each envelope contains the recipient DID, sender session proof or anonymous credential, ciphertext, expiration, replay nonce, and optional postage or ranking evidence. The recipient retrieves mailbox entries by proving control of the DID, decrypts envelopes locally, and acknowledges or garbage-collects messages according to the mailbox policy. This design gives offline delivery without requiring direct interaction, but it does not hide the existence of a mailbox access pattern unless combined with cover traffic or private retrieval.
 
-\textbf{Hidden services} are service descriptors stored under VIDs rather than ordinary DNS names. A descriptor contains a service namespace, rendezvous policy, relay or introduction points, capability requirements, public keys, expiration, and ranking/admission constraints. Clients look up the descriptor, verify its signature, choose an introduction path, and establish an encrypted application session through the overlay. Rings should claim service pseudonymity and server-location privacy only to the extent provided by the descriptor, relay-path selection, and traffic-analysis defenses.
+\textbf{Hidden services} are service descriptors stored under VIDs rather than ordinary DNS names. A descriptor contains a service namespace, rendezvous policy, relay or introduction points, capability requirements, public keys, expiration, and ranking/admission constraints. Clients look up the descriptor, verify its signature, choose an introduction path, and establish an encrypted application session through the overlay. Service pseudonymity and server-location privacy are limited to the protections provided by the descriptor, relay-path selection, and traffic-analysis defenses.
 
 \textbf{Sub Ring} is a scoped overlay whose membership and routing state are anchored by a VID. The subring name or policy derives the subring VID, while members join by submitting signed membership operations. The DHT-persisted state stores the membership log or a compact joined state; participants keep local finger tables using the subring's fixed point and membership set. Convergence requires that join operations are idempotent and mergeable, that conflicting membership updates have deterministic resolution, and that stale members expire or are removed by signed policy operations.
 
@@ -748,11 +790,11 @@ In Rings Network, the abstraction of traffic is divided into two approaches: Hop
 
 In Rings Network, a structured peer-to-peer network, accounts prove DID ownership with account signature algorithms, then delegate a time-bounded session keypair. Each hop carries signed message payloads, routing metadata, and typed messages. The overlay infers a next hop from the local DHT when a direct transport connection to the final destination is not available.
 
-The message relay and chunking layers borrow concepts from MSRP-style message splitting, but Rings should define its own relay semantics instead of claiming MSRP compliance. A Rings relay frame contains the path state needed by the overlay, a destination DID or VID, a namespace, a signed session proof, and either an application payload or a report. Reports acknowledge delivery, failure, forwarding refusal, or storage placement, giving applications enough information to retry or choose a different path.
+The message relay and chunking layers borrow concepts from MSRP-style message splitting \cite{RFC4975}, but Rings defines its own relay semantics instead of claiming MSRP compliance. A Rings relay frame contains the path state needed by the overlay, a destination DID or VID, a namespace, a signed session proof, and either an application payload or a report. Reports acknowledge delivery, failure, forwarding refusal, or storage placement, giving applications enough information to retry or choose a different path.
 
 \subsection{End to End}
 
-Rings Network places significant emphasis on End-to-End Encryption as a means to ensure privacy and security. The target E2E protocol uses public keys that are proven to match the signed sender or recipient DID. RSA is not part of the Rings target unless a later design explicitly reintroduces it; the privacy layer should focus on elliptic-curve encryption, signed envelopes, and cryptographic carriers that can support private computation.
+Rings Network places significant emphasis on End-to-End Encryption as a means to ensure privacy and security. The target E2E protocol uses public keys that are proven to match the signed sender or recipient DID. RSA is not part of the Rings target unless a later design explicitly reintroduces it; the privacy layer uses elliptic-curve encryption, signed envelopes, and cryptographic carriers that can support private computation.
 
 Given an elliptic-curve cyclic group $\mathbb{G}$ of order $q$ with generator $g$, a private key $x \in \mathbb{Z}_q$, and public key $h = g^x$, Algorithm \ref{alg:elgamal} summarizes the ElGamal operation:
 
@@ -781,7 +823,7 @@ Secret sharing is a separate privacy-layer primitive. The secret is first encode
 
  \subsection{Chunking}
 
- When the size of a message exceeds the negotiated transport message size, Rings splits the payload into ordered chunks and reassembles the original payload once all chunks arrive. The safe baseline is whole-message buffering with bounded reassembly: the receiver accepts out-of-order chunks, ignores duplicate positions, drops partial messages by TTL, and enforces per-message and total memory limits. A future streaming mode must specify interruption, partial-delivery, and backpressure semantics explicitly.
+ When the size of a message exceeds the negotiated transport message size, Rings splits the payload into ordered chunks and reassembles the original payload once all chunks arrive. The safe baseline is whole-message buffering with bounded reassembly: the receiver accepts out-of-order chunks, ignores duplicate positions, drops partial messages by TTL, and enforces per-message and total memory limits. Streaming mode is outside the baseline until interruption, partial-delivery, and backpressure semantics are specified explicitly.
 
  \begin{algorithm}[h]
 \caption{End-to-End Chunking Algorithm}
@@ -805,7 +847,7 @@ Algorithm \ref{alg:e2e_chunking} shows the sender-side shape of whole-message ch
 
 \section{Sequencer and Ranking}
 
-A sequencer in a distributed system is a component responsible for determining the order in which messages are delivered or transactions are executed. Rings should not embed a global consensus system into the base overlay; doing so would turn the network into a blockchain rather than a sovereign peer-to-peer substrate. Instead, Rings uses local protocol ordering where possible and sidecar witnesses where a stronger ordering proof is required.
+A sequencer in a distributed system is a component responsible for determining the order in which messages are delivered or transactions are executed. Rings does not embed a global consensus system into the base overlay; doing so would turn the network into a blockchain rather than a sovereign peer-to-peer substrate. Instead, Rings uses local protocol ordering where possible and sidecar witnesses where a stronger ordering proof is required.
 
 \subsection{Sidecar Sequencer}
 
@@ -817,7 +859,7 @@ The Sidecar Sequencer is a witness protocol, not a mandatory base-layer consensu
 \item the application accepts the witness source and its finality rule.
 \end{itemize}
 
-Sidecar sequencing therefore gives a partial order unless all compared messages use the same finality domain or the application defines a cross-domain comparison rule. If Message A is witnessed by Bitcoin and Message B by Solana, Rings cannot infer a universal total order from those witnesses alone. The application must either accept a partial order, choose a canonical witness domain, or define a deterministic tie-breaker.
+Sidecar sequencing therefore gives a partial order unless all compared messages use the same finality domain or the application defines a cross-domain comparison rule. If Message A is witnessed by Bitcoin and Message B by Solana, Rings cannot infer a universal total order from those witnesses alone. The application either accepts a partial order, chooses a canonical witness domain, or defines a deterministic tie-breaker.
 
 \subsection{Byzantine Fault Boundary}
 
@@ -837,11 +879,11 @@ The target Ranking Protocol turns peer quality into a signed, challengeable, and
 
 Scores are aggregated by epoch with robust statistics such as median or trimmed mean so that outliers do not dominate. The ranking result is not a moral identity score; it is an operational routing and admission signal. A node may use ranking to choose relay paths, reject storage writes, select mailbox replicas, throttle spam, or require stronger payment/proof from low-quality peers.
 
-Sybil resistance requires more than peer voting. The protocol must combine admission cost, proof-of-work or stake, social or issuer credentials, freeze periods for new rank claims, and challenge/slashing rules for false evidence. A low-ranked node should still be able to recover by producing fresh good evidence, while a malicious high-ranked node should lose score when challenged with signed failure evidence.
+Sybil resistance requires more than peer voting. The protocol combines admission cost, proof-of-work or stake, social or issuer credentials, freeze periods for new rank claims, and challenge/slashing rules for false evidence. A low-ranked node can recover by producing fresh good evidence, while a malicious high-ranked node loses score when challenged with signed failure evidence.
 
 \section{Performance}
 
-We will discuss the performance of Rings Network from two aspects: Latency, Reliability.
+The performance discussion separates latency from reliability and treats Chord measurements as reference data rather than Rings deployment evidence.
 
 \subsection{Latency}
 For Rings Network, latency mainly comes from transport establishment, lookup/routing through the Chord overlay, relay path length, sidecar witness verification, and application protocol work such as encryption or proof verification. The Chord reference data below is useful for reasoning about expected lookup behavior, but it is not a substitute for Rings-owned measurements under browser, native, NAT, relay, and churn conditions.
@@ -863,7 +905,7 @@ For Rings Network, latency mainly comes from transport establishment, lookup/rou
   \label{path}
 \end{figure*}
 
-According to the cited Chord simulation results, when the number of nodes increases from 10 to 100K, the path length only increases by about 3 times. The left side of Figure \ref{path} shows this scenario, and the right side is the PDF (probability density function) of the path length. Rings should validate this expectation with its own transport and application workloads before making deployment-level latency claims.
+According to the cited Chord simulation results, when the number of nodes increases from 10 to 100K, the path length only increases by about 3 times. The left side of Figure \ref{path} shows this scenario, and the right side is the PDF (probability density function) of the path length. Rings treats this as a Chord reference expectation until measured under its own transport and application workloads.
 \subsection{Reliability}
 
 Rings Network allows browser nodes to participate directly in the overlay, which increases expected join and leave rates. Hence, the network's performance with frequent node churn is crucial for evaluation. Browser nodes may have equal protocol authority without identical persistence, socket, or background-execution capabilities.
@@ -891,11 +933,11 @@ Rings Network allows browser nodes to participate directly in the overlay, which
 \label{failure}
 \end{table}
 
-Table \ref{failure} shows Chord reference simulation results under increasing join/leave rates. Rings should treat these numbers as theoretical guidance and produce independent measurements for the full protocol stack before claiming a concrete availability percentage.
+Table \ref{failure} shows Chord reference simulation results under increasing join/leave rates. Rings treats these numbers as theoretical guidance; concrete availability claims require independent measurements for the full protocol stack.
 
 
 \section{Security}
-As a decentralized platform, Rings Network is susceptible to various security risks and malicious attacks. Therefore, it is crucial to implement robust security measures to ensure the integrity and confidentiality of the network.
+As a decentralized platform, Rings Network has security exposure at the identity, routing, storage, relay, and application layers. The target model scopes the following attacks and mitigations:
 \begin{itemize}[itemsep=2pt,topsep=0pt,parsep=0pt]
 \item Sybil Attack: A Sybil attack represents a malicious attempt to undermine the trust and control of a network by creating multiple fake identities. The target Ranking protocol mitigates this through admission cost, signed evidence, freeze periods, challengeable claims, and local/global routing signals. Ranking reduces Sybil impact; it does not eliminate Sybil attacks without an economic or credential cost model.
 
