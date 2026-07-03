@@ -610,33 +610,26 @@ async fn headless_node_snapshot(
         )
     };
     if expected_generation.is_some_and(|expected| expected != generation) {
-        let online = node.is_some();
-        let did = node
-            .as_ref()
-            .map(|node| node.provider.address())
-            .unwrap_or_default();
-        let message = retained_headless_message(state_message, online);
-        return headless_snapshot_js(
-            online,
-            did,
-            &state_peers,
-            account.as_ref(),
-            message,
+        let state = HeadlessSnapshotState {
+            node: node.as_ref(),
+            peers: &state_peers,
+            account: account.as_ref(),
             starting,
-            start_error.as_deref(),
-        );
+            start_error: start_error.as_deref(),
+            message: state_message,
+        };
+        return retained_headless_snapshot_js(state);
     }
     let Some(node) = node else {
-        let message = retained_headless_message(state_message, false);
-        return headless_snapshot_js(
-            false,
-            String::new(),
-            &[],
-            None,
-            message,
+        let state = HeadlessSnapshotState {
+            node: None,
+            peers: &[],
+            account: None,
             starting,
-            start_error.as_deref(),
-        );
+            start_error: start_error.as_deref(),
+            message: state_message,
+        };
+        return retained_headless_snapshot_js(state);
     };
 
     let mut peers = state_peers;
@@ -668,11 +661,12 @@ async fn headless_node_snapshot(
     }
     {
         let mut state = state.borrow_mut();
-        if state.generation == generation && state.node.is_some() {
-            state.peers = peers.clone();
-            if settle {
-                state.message = message.clone();
-            }
+        if state.generation != generation || state.node.is_none() {
+            return retained_live_headless_snapshot_js(&state);
+        }
+        state.peers = peers.clone();
+        if settle {
+            state.message = message.clone();
         }
     }
 
@@ -684,6 +678,47 @@ async fn headless_node_snapshot(
         message,
         starting,
         start_error.as_deref(),
+    )
+}
+
+struct HeadlessSnapshotState<'a> {
+    node: Option<&'a DemoNode>,
+    peers: &'a [PeerView],
+    account: Option<&'a WalletAccount>,
+    message: String,
+    starting: bool,
+    start_error: Option<&'a str>,
+}
+
+fn retained_live_headless_snapshot_js(state: &HeadlessNodeState) -> Result<JsValue, String> {
+    let snapshot = HeadlessSnapshotState {
+        node: state.node.as_ref(),
+        peers: &state.peers,
+        account: state.wallet_account.as_ref(),
+        message: state.message.clone(),
+        starting: state.starting,
+        start_error: state.start_error.as_deref(),
+    };
+    retained_headless_snapshot_js(snapshot)
+}
+
+fn retained_headless_snapshot_js(state: HeadlessSnapshotState<'_>) -> Result<JsValue, String> {
+    let online = state.node.is_some();
+    let did = state
+        .node
+        .map(|node| node.provider.address())
+        .unwrap_or_default();
+    let peers = if online { state.peers } else { &[] };
+    let account = if online { state.account } else { None };
+    let message = retained_headless_message(state.message, online);
+    headless_snapshot_js(
+        online,
+        did,
+        peers,
+        account,
+        message,
+        state.starting,
+        state.start_error,
     )
 }
 

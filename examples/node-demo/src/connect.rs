@@ -67,7 +67,10 @@ struct ConnectDialogActions {
 }
 
 enum NodeBackend {
-    Extension(JsValue),
+    Extension {
+        bridge: JsValue,
+        token: GenerationToken,
+    },
     Local {
         node: DemoNode,
         token: GenerationToken,
@@ -75,7 +78,10 @@ enum NodeBackend {
 }
 
 enum PeerUpdate {
-    Snapshot(extension::ExtensionNodeSnapshot),
+    Snapshot {
+        snapshot: extension::ExtensionNodeSnapshot,
+        token: GenerationToken,
+    },
     Local {
         node: DemoNode,
         token: GenerationToken,
@@ -90,7 +96,10 @@ impl NodeBackend {
         generation: &GenerationClock,
     ) -> Result<Self, String> {
         if let Some(bridge) = extension::extension_node_bridge() {
-            return Ok(Self::Extension(bridge));
+            return Ok(Self::Extension {
+                bridge,
+                token: generation.token(),
+            });
         }
         node_ref
             .borrow()
@@ -104,9 +113,9 @@ impl NodeBackend {
 
     async fn connect_http(self, endpoint: String) -> Result<PeerUpdate, String> {
         match self {
-            Self::Extension(bridge) => {
+            Self::Extension { bridge, token } => {
                 let snapshot = extension::extension_node_connect_http(&bridge, endpoint).await?;
-                Ok(PeerUpdate::Snapshot(snapshot))
+                Ok(PeerUpdate::Snapshot { snapshot, token })
             }
             Self::Local { node, token } => {
                 let seed_did = node::connect_http(&node.provider, endpoint).await?;
@@ -124,7 +133,7 @@ impl NodeBackend {
 
     async fn create_offer(self, remote_did: String) -> Result<String, String> {
         match self {
-            Self::Extension(bridge) => {
+            Self::Extension { bridge, .. } => {
                 extension::extension_node_create_offer(&bridge, remote_did).await
             }
             Self::Local { node, .. } => node::create_offer(&node.provider, remote_did).await,
@@ -133,16 +142,18 @@ impl NodeBackend {
 
     async fn answer_offer(self, offer: String) -> Result<String, String> {
         match self {
-            Self::Extension(bridge) => extension::extension_node_answer_offer(&bridge, offer).await,
+            Self::Extension { bridge, .. } => {
+                extension::extension_node_answer_offer(&bridge, offer).await
+            }
             Self::Local { node, .. } => node::answer_offer(&node.provider, offer).await,
         }
     }
 
     async fn accept_answer(self, answer: String) -> Result<PeerUpdate, String> {
         match self {
-            Self::Extension(bridge) => {
+            Self::Extension { bridge, token } => {
                 let snapshot = extension::extension_node_accept_answer(&bridge, answer).await?;
-                Ok(PeerUpdate::Snapshot(snapshot))
+                Ok(PeerUpdate::Snapshot { snapshot, token })
             }
             Self::Local { node, token } => {
                 node::accept_answer(&node.provider, answer).await?;
@@ -160,9 +171,11 @@ impl NodeBackend {
 impl PeerUpdate {
     async fn apply(self, peers: UseStateHandle<Vec<PeerView>>, status: UseStateHandle<String>) {
         match self {
-            Self::Snapshot(snapshot) => {
-                peers.set(snapshot.peers);
-                status.set(snapshot.error.unwrap_or(snapshot.message));
+            Self::Snapshot { snapshot, token } => {
+                if token.is_current() {
+                    peers.set(snapshot.peers);
+                    status.set(snapshot.error.unwrap_or(snapshot.message));
+                }
             }
             Self::Local {
                 node,

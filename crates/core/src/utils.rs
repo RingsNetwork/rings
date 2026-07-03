@@ -45,7 +45,7 @@ pub mod js_func {
     /// # Example:
     /// For macro calling: of!(of2, a: T0, b: T1);
     /// Will generate code:
-    /// ```rust
+    /// ```rust,ignore
     /// pub fn of2<'a, 'b: 'a, T0: TryInto<JsValue> + Clone, T1: TryInto<JsValue> + Clone>(
     ///     func: &Function,
     /// ) -> Box<dyn Fn(T0, T1) -> Pin<Box<dyn Future<Output = Result<()>> + 'b>>>

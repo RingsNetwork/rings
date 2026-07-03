@@ -423,6 +423,7 @@ pub fn app() -> Html {
         let settings_dialog_open = settings_dialog_open.clone();
         Callback::from(move |_| {
             if let Some(bridge) = extension::extension_node_bridge() {
+                let stop_token = generation.bump();
                 node_starting.set(true);
                 status.set("stopping background node".to_string());
                 let status = status.clone();
@@ -438,7 +439,7 @@ pub fn app() -> Html {
                 let settings_dialog_open = settings_dialog_open.clone();
                 wasm_bindgen_futures::spawn_local(async move {
                     match extension::extension_node_stop(&bridge).await {
-                        Ok(message) => {
+                        Ok(message) if stop_token.is_current() => {
                             did.set(String::new());
                             wallet_account.set(None);
                             node_starting.set(false);
@@ -451,10 +452,12 @@ pub fn app() -> Html {
                             settings_dialog_open.set(false);
                             status.set(message);
                         }
-                        Err(error) => {
+                        Ok(_) => {}
+                        Err(error) if stop_token.is_current() => {
                             node_starting.set(false);
                             status.set(format!("background stop failed: {error}"));
                         }
+                        Err(_) => {}
                     }
                 });
                 return;
@@ -518,12 +521,16 @@ pub fn app() -> Html {
             let interval = if *online {
                 Some(Interval::new(4_000, move || {
                     if let Some(bridge) = extension::extension_node_bridge() {
+                        let refresh_token = generation.token();
                         let did = did.clone();
                         let peers = peers.clone();
                         let wallet_account = wallet_account.clone();
                         let node_starting = node_starting.clone();
                         wasm_bindgen_futures::spawn_local(async move {
                             if let Ok(snapshot) = extension::extension_node_status(&bridge).await {
+                                if !refresh_token.is_current() {
+                                    return;
+                                }
                                 if snapshot.online {
                                     did.set(snapshot.did);
                                     peers.set(snapshot.peers);

@@ -24,20 +24,14 @@ pub(crate) async fn sync_peers_after_handshake(
     }
     status.set(format!("{context}; syncing peers"));
     if let Some(required_peer) = required_peer.as_ref() {
-        if !still_current() {
-            return;
-        }
         peers.set(merge_required_peer((*peers).clone(), required_peer));
     }
     for delay_ms in PEER_SETTLE_DELAYS_MS {
-        if !still_current() {
-            return;
-        }
         if *delay_ms > 0 {
             sleep(Duration::from_millis(*delay_ms)).await;
-        }
-        if !still_current() {
-            return;
+            if !still_current() {
+                return;
+            }
         }
         match node::list_peers(&node.provider).await {
             Ok(next) => {
