@@ -530,7 +530,7 @@ impl Processor {
             .collect()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "node"))]
     fn online_node_registry_entry(descriptors: Vec<OnlineNodeDescriptor>) -> Result<entry::Entry> {
         let data = descriptors
             .into_iter()
