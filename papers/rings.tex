@@ -54,10 +54,18 @@
 \IEEEaftertitletext{%
 \vspace{0.5\baselineskip}%
 \noindent\hfill
-\parbox{0.88\textwidth}{%
+\parbox{0.90\textwidth}{%
 \centering\bfseries Abstract\\[0.5\baselineskip]%
 \normalfont
-Rings is the specification
+Rings is a prospective peer-to-peer network specification for user-sovereign
+identity, transport, storage, and application protocols.  The project starts
+from a concrete failure mode in contemporary Internet systems: application
+servers, DNS names, relay services, and platform accounts often become the
+authority that identities and data must trust.  Rings instead models identity
+and resources as owned points in a CorrectChord overlay, with browser and native
+runtimes connected through WebRTC/WebAssembly adapters and cryptographic
+protocols kept on carriers separate from the routing identifier space.
+The core object is
 \[
   \mathcal{Rings}=
   (R,\mathcal{R}_N,\mathbf{Set}/R,\Omega_N,
@@ -85,6 +93,75 @@ with
 
 \begin{document}
 \maketitle
+
+\section{Introduction}
+
+Centralized application platforms simplify deployment, but they also concentrate
+identity, naming, storage, and traffic control at service operators.  Cloud and
+platform centralization therefore becomes a privacy, availability, and autonomy
+risk for users who need direct communication and durable control over their
+data~\cite{Kshetri2014,Kokkonen2018,G2016}.  The Rings project is motivated by
+this observation: a sovereign network should let a participant own an identity,
+establish a session, route to another identity or resource, and run application
+protocols without turning a single application server into the root of
+authority.
+
+Rings is not described here as a snapshot of one implementation.  This paper is
+a target model.  It states the ideal algebra, transition boundaries, and safety
+obligations that the implementation should converge toward.  The older
+intuition was that Decentralized Identifiers (DIDs) directly form a finite ring
+suitable for all routing and cryptographic operations.  The refined model is
+more precise: Chord identifiers form an additive circular carrier for placement,
+interval order, replica selection, and finger targets; threshold schemes,
+signatures, encryption, and zero-knowledge protocols use their own fields or
+groups.
+
+The resulting design has three practical consequences.  First, DIDs and virtual
+DIDs (VIDs) share the same 160-bit placement surface, so identities, mailboxes,
+service descriptors, chunks, subrings, and application rendezvous points can be
+routed by one owner function.  Second, Rings builds on Chord and CorrectChord
+rather than replacing the overlay literature: successor lists, predecessor
+relations, join, rectify, and stabilize are the maintenance substrate on which
+Rings semantics are layered~\cite{Chord,ZaveChordCorrect}.  Third, state
+transitions return typed effects instead of directly performing network IO,
+which allows the overlay to be reasoned about as a pure state machine and then
+interpreted by browser or native runtimes.
+
+\section{Problem Statement and Design Goals}
+
+Rings addresses a narrow but recurring gap between existing decentralized
+systems.  Kademlia-derived systems provide scalable lookup, but the XOR metric
+does not by itself give Rings the circular ownership law needed for successor
+lists, replicated ownership, and interval-based placement.  Relay networks and
+mixnets improve metadata resistance, but they are not structured P2P ownership
+systems.  Blockchains provide global ordering, but embedding consensus in every
+message or storage operation would turn Rings into a ledger rather than a
+general peer-to-peer substrate.
+
+The problem is therefore to specify a network object
+\[
+  \mathcal{Rings}
+\]
+that simultaneously supports:
+\begin{enumerate}[leftmargin=*,noitemsep,topsep=0pt]
+\item self-certifying identity and delegated sessions;
+\item structured lookup and resource ownership;
+\item browser-native and native transport surfaces;
+\item application protocols with typed side effects;
+\item cryptographic protocols over correct carriers;
+\item bounded formal obligations for routing and state repair.
+\end{enumerate}
+
+This paper makes the following contributions.  It models the Rings identifier
+space as the additive cyclic group \(R=\mathbb{Z}/2^{160}\mathbb{Z}\), not as a
+general finite field.  It lifts resource placement into \(\mathbf{Set}/R\), so
+each protocol object carries an explicit map into the overlay.  It uses
+CorrectChord as the maintenance law before introducing Rings-specific
+replication, storage, mailbox, relay, and ranking semantics.  It gives a writer
+effect monad for DHT transitions and a TLA-style state relation for model
+checking and trace replay.  These mathematical artifacts are the dry core of
+the paper; the surrounding text explains why those artifacts exist and how they
+relate to prior systems.
 
 \section{Formal Model}
 
@@ -1082,11 +1159,11 @@ The exploration relation follows TLA+ style and Stateright execution~\cite{Lampo
 \label{latency-table}
 \end{table}
 
-\begin{figure*}[htbp]
-  \includegraphics[width=\linewidth]{imgs/rings/path.png}
+\begin{figure}[htbp]
+  \includegraphics[width=\columnwidth]{imgs/rings/path.png}
   \caption{Chord lookup path \cite{Chord}}
   \label{path}
-\end{figure*}
+\end{figure}
 
 \begin{definition}[Reliability baseline]
 \[
@@ -1134,6 +1211,41 @@ timeoutMean&=&\dfrac{1}{|Q|}\sum_{q\in Q}to(q).
 \end{obligation}
 
 \section{Related Work}
+
+Distributed hash tables give Rings its closest technical ancestry.  IPFS and
+libp2p use Kademlia-derived routing, where distance is measured by XOR and
+routing state is organized into buckets~\cite{Kademlia,IPFS,Libp2p}.  This is a
+strong fit for content-addressed lookup, but Rings needs a different law: the
+owner of a DID or VID is the first live node clockwise from that point, and
+replica ownership is obtained by successor-list extension.  The paper therefore
+uses Chord's circular order as the base model, then uses Zave's CorrectChord
+results to avoid treating the original Chord maintenance protocol as already
+correct under churn~\cite{Chord,ZaveChordCorrect}.
+
+Relay anonymity systems take a different route.  Tor and Nym route traffic over
+selected relay paths and focus on hiding communication metadata from local
+observers or intermediate services~\cite{TorNetwork,NymNetwork}.  Rings does
+not replace these systems as anonymity systems.  It instead specifies a
+structured ownership substrate on which relay, mailbox, and hidden-service style
+protocols can be written.  This distinction matters: a relay path can carry
+traffic, but it does not define the algebraic owner of a DID, mailbox, chunk, or
+service descriptor.
+
+Blockchain and account-based decentralized systems provide another partial
+answer.  A ledger can publish names, order events, and make writes globally
+auditable, but the price is global consensus on operations that often only need
+local routing, replicated storage, or protocol-specific ordering.  Rings keeps
+global consensus outside the base overlay.  When a protocol needs stronger
+ordering evidence, it uses sidecar witnesses rather than changing the overlay
+into a blockchain.
+
+Browser-native networking is also part of the design space.  WebRTC gives
+browsers a standardized peer transport, while WebAssembly gives portable code a
+browser execution target~\cite{webrtc-standard,webassembly}.  Rings treats
+these as adapters for the same abstract protocol object, not as separate
+networks.  The same DID/session, Chord owner, effect, and resource-placement
+laws should hold for browser nodes and native nodes; only the IO interpreter
+changes.
 
 \begin{table}[htbp]
 \centering
