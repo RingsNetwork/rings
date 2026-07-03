@@ -276,6 +276,21 @@ impl Provider {
         })
     }
 
+    /// Get local measurement counters for a peer.
+    pub fn get_peer_measurement(
+        &self,
+        address: String,
+        addr_type: Option<AddressType>,
+    ) -> js_sys::Promise {
+        let p = self.processor.clone();
+        future_to_promise(async move {
+            let did = get_did(address.as_str(), addr_type.unwrap_or(AddressType::DEFAULT))?;
+            let measurement = p.peer_measurement(did).await;
+            let v = js_value::serialize(&measurement).map_err(JsError::from)?;
+            Ok(v)
+        })
+    }
+
     /// disconnect a peer with web3 address
     pub fn disconnect(&self, address: String, addr_type: Option<AddressType>) -> js_sys::Promise {
         let p = self.processor.clone();

@@ -31,3 +31,4 @@ mod protocols;
 pub use protocols::MessageRelay;
 pub use protocols::MessageVerification;
 pub use protocols::MessageVerificationExt;
+pub use protocols::ReportReturnPolicy;

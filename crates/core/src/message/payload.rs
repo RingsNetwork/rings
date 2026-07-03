@@ -19,6 +19,7 @@ use super::encoder::Encoder;
 use super::protocols::MessageRelay;
 use super::protocols::MessageVerification;
 use super::protocols::MessageVerificationExt;
+use super::protocols::ReportReturnPolicy;
 use crate::dht::Chord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
@@ -38,7 +39,9 @@ pub fn encode_data_gzip(data: &Bytes, level: u8) -> Result<Bytes> {
 
 /// Serializes the given data using JSON and compresses it with gzip using the specified compression level.
 pub fn gzip_data<T>(data: &T, level: u8) -> Result<Bytes>
-where T: Serialize {
+where
+    T: Serialize,
+{
     let json_bytes = serde_json::to_vec(data).map_err(|_| Error::SerializeToString)?;
     encode_data_gzip(&json_bytes.into(), level)
 }
@@ -55,17 +58,31 @@ pub fn decode_gzip_data(data: &Bytes) -> Result<Bytes> {
 
 /// From gzip data to deserialized
 pub fn from_gzipped_data<T>(data: &Bytes) -> Result<T>
-where T: DeserializeOwned {
+where
+    T: DeserializeOwned,
+{
     let data = decode_gzip_data(data)?;
     let m = serde_json::from_slice(&data).map_err(Error::Deserialize)?;
     Ok(m)
 }
 
-fn hash_transaction(destination: Did, tx_id: uuid::Uuid, data: &[u8]) -> [u8; 32] {
+fn hash_transaction(
+    destination: Did,
+    tx_id: uuid::Uuid,
+    report_return: ReportReturnPolicy,
+    data: &[u8],
+) -> [u8; 32] {
     let mut msg = vec![];
 
     msg.extend_from_slice(destination.as_bytes());
     msg.extend_from_slice(tx_id.as_bytes());
+    match report_return {
+        ReportReturnPolicy::Path => msg.push(0),
+        ReportReturnPolicy::Routed { destination } => {
+            msg.push(1);
+            msg.extend_from_slice(destination.as_bytes());
+        }
+    }
     msg.extend_from_slice(data);
 
     keccak256(&msg)
@@ -86,6 +103,9 @@ pub struct Transaction {
     pub tx_id: uuid::Uuid,
     /// data
     pub data: Vec<u8>,
+    /// Return policy used by reports for this transaction.
+    #[serde(default)]
+    pub report_return: ReportReturnPolicy,
     /// This field holds a signature from a node,
     /// which is used to prove that the transaction was created by that node.
     #[derivative(Debug = "ignore")]
@@ -120,20 +140,44 @@ impl Transaction {
     where
         T: Serialize,
     {
+        Self::new_with_report_return(
+            destination,
+            tx_id,
+            data,
+            ReportReturnPolicy::Path,
+            session_sk,
+        )
+    }
+
+    /// Wrap data with an explicit report-return policy.
+    pub fn new_with_report_return<T>(
+        destination: Did,
+        tx_id: uuid::Uuid,
+        data: T,
+        report_return: ReportReturnPolicy,
+        session_sk: &SessionSk,
+    ) -> Result<Self>
+    where
+        T: Serialize,
+    {
+        report_return.validate_authorized_by(session_sk.account_did())?;
         let data = bincode::serialize(&data).map_err(Error::BincodeSerialize)?;
-        let msg_hash = hash_transaction(destination, tx_id, &data);
+        let msg_hash = hash_transaction(destination, tx_id, report_return, &data);
         let verification = MessageVerification::new(&msg_hash, session_sk)?;
         Ok(Self {
             destination,
             tx_id,
             data,
+            report_return,
             verification,
         })
     }
 
     /// Deserializes the data field into a `T` instance.
     pub fn data<T>(&self) -> Result<T>
-    where T: DeserializeOwned {
+    where
+        T: DeserializeOwned,
+    {
         bincode::deserialize(&self.data).map_err(Error::BincodeDeserialize)
     }
 }
@@ -149,6 +193,7 @@ impl MessagePayload {
         let msg_hash = hash_transaction(
             transaction.destination,
             transaction.tx_id,
+            transaction.report_return,
             &transaction.data,
         );
         let verification = MessageVerification::new(&msg_hash, session_sk)?;
@@ -204,7 +249,8 @@ impl MessagePayload {
 
 impl MessageVerificationExt for Transaction {
     fn verification_data(&self) -> Result<Vec<u8>> {
-        Ok(hash_transaction(self.destination, self.tx_id, &self.data).to_vec())
+        self.report_return.validate_authorized_by(self.signer())?;
+        Ok(hash_transaction(self.destination, self.tx_id, self.report_return, &self.data).to_vec())
     }
 
     fn verification(&self) -> &MessageVerification {
@@ -214,9 +260,13 @@ impl MessageVerificationExt for Transaction {
 
 impl MessageVerificationExt for MessagePayload {
     fn verification_data(&self) -> Result<Vec<u8>> {
+        self.transaction
+            .report_return
+            .validate_authorized_by(self.transaction.signer())?;
         Ok(hash_transaction(
             self.transaction.destination,
             self.transaction.tx_id,
+            self.transaction.report_return,
             &self.transaction.data,
         )
         .to_vec())
@@ -294,24 +344,84 @@ pub trait PayloadSender {
         Ok(tx_id)
     }
 
+    /// Send a message to a specified destination by specified next hop with an explicit report policy.
+    async fn send_message_by_hop_with_report_return<T>(
+        &self,
+        msg: T,
+        destination: Did,
+        next_hop: Did,
+        report_return: ReportReturnPolicy,
+    ) -> Result<uuid::Uuid>
+    where
+        T: Serialize + Send,
+    {
+        let tx_id = uuid::Uuid::new_v4();
+        let transaction = Transaction::new_with_report_return(
+            destination,
+            tx_id,
+            msg,
+            report_return,
+            self.session_sk(),
+        )?;
+        let relay = MessageRelay::new(
+            vec![self.session_sk().account_did()],
+            next_hop,
+            transaction.destination,
+        );
+        let payload = MessagePayload::new(transaction, self.session_sk(), relay)?;
+        self.send_payload(payload).await?;
+        Ok(tx_id)
+    }
+
     /// Send a message to a specified destination.
     async fn send_message<T>(&self, msg: T, destination: Did) -> Result<uuid::Uuid>
-    where T: Serialize + Send {
+    where
+        T: Serialize + Send,
+    {
         let next_hop = self.infer_next_hop(destination, None)?;
         self.send_message_by_hop(msg, destination, next_hop).await
     }
 
+    /// Send a message to a specified destination with an explicit report policy.
+    async fn send_message_with_report_return<T>(
+        &self,
+        msg: T,
+        destination: Did,
+        report_return: ReportReturnPolicy,
+    ) -> Result<uuid::Uuid>
+    where
+        T: Serialize + Send,
+    {
+        let next_hop = self.infer_next_hop(destination, None)?;
+        self.send_message_by_hop_with_report_return(msg, destination, next_hop, report_return)
+            .await
+    }
+
     /// Send a direct message to a specified destination.
     async fn send_direct_message<T>(&self, msg: T, destination: Did) -> Result<uuid::Uuid>
-    where T: Serialize + Send {
+    where
+        T: Serialize + Send,
+    {
         self.send_message_by_hop(msg, destination, destination)
             .await
     }
 
     /// Send a report message to a specified destination.
     async fn send_report_message<T>(&self, payload: &MessagePayload, msg: T) -> Result<()>
-    where T: Serialize + Send {
-        let relay = payload.relay.report(self.dht().did)?;
+    where
+        T: Serialize + Send,
+    {
+        let policy = payload.transaction.report_return;
+        policy.validate_authorized_by(payload.transaction.signer())?;
+        let routed_next_hop = match policy {
+            ReportReturnPolicy::Path => None,
+            ReportReturnPolicy::Routed { destination } => {
+                Some(self.infer_next_hop(destination, None)?)
+            }
+        };
+        let relay = payload
+            .relay
+            .report(self.dht().did, policy, routed_next_hop)?;
 
         let transaction = Transaction::new(
             relay.destination,
@@ -375,7 +485,9 @@ pub mod test {
     }
 
     pub fn new_payload<T>(data: T, next_hop: Did) -> MessagePayload
-    where T: Serialize + DeserializeOwned {
+    where
+        T: Serialize + DeserializeOwned,
+    {
         let key = SecretKey::random();
         let destination = SecretKey::random().address().into();
         let session_sk = SessionSk::new_with_seckey(&key).unwrap();
@@ -408,6 +520,51 @@ pub mod test {
         assert!(!remote_payload.is_relay_destination_for(local));
         assert!(remote_payload.should_forward_from(local));
 
+        Ok(())
+    }
+
+    #[test]
+    fn report_return_policy_is_signed_by_transaction() -> Result<()> {
+        let sender_key = SecretKey::random();
+        let session_sk = SessionSk::new_with_seckey(&sender_key)?;
+        let sender = session_sk.account_did();
+        let destination: Did = SecretKey::random().address().into();
+
+        let mut transaction = Transaction::new_with_report_return(
+            destination,
+            uuid::Uuid::new_v4(),
+            Message::custom(b"policy")?,
+            ReportReturnPolicy::Routed {
+                destination: sender,
+            },
+            &session_sk,
+        )?;
+        assert!(transaction.verify());
+
+        transaction.report_return = ReportReturnPolicy::Path;
+        assert!(!transaction.verify());
+        Ok(())
+    }
+
+    #[test]
+    fn routed_report_return_destination_must_match_signer() -> Result<()> {
+        let sender_key = SecretKey::random();
+        let session_sk = SessionSk::new_with_seckey(&sender_key)?;
+        let destination: Did = SecretKey::random().address().into();
+        let unrelated_return: Did = SecretKey::random().address().into();
+
+        assert!(matches!(
+            Transaction::new_with_report_return(
+                destination,
+                uuid::Uuid::new_v4(),
+                Message::custom(b"policy")?,
+                ReportReturnPolicy::Routed {
+                    destination: unrelated_return,
+                },
+                &session_sk,
+            ),
+            Err(Error::InvalidMessage(_))
+        ));
         Ok(())
     }
 

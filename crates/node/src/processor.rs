@@ -9,10 +9,14 @@ use std::time::Duration;
 use rings_core::chunk::ReassemblyLimits;
 use rings_core::dht::Did;
 use rings_core::dht::EntryStorage;
+use rings_core::dht::OnlineNodeDescriptor;
+use rings_core::dht::OnlineNodeType;
 use rings_core::dht::DEFAULT_FINGER_TABLE_SIZE;
+use rings_core::dht::ONLINE_NODES_TOPIC;
 use rings_core::ecc::PublicKey;
 use rings_core::ecc::SecretKey;
 use rings_core::measure::MeasureImpl;
+use rings_core::measure::PeerMeasurement;
 use rings_core::message::e2e;
 use rings_core::message::e2e::E2eHandshakeRequest;
 use rings_core::message::e2e::E2eHandshakeResponse;
@@ -25,6 +29,7 @@ use rings_core::prelude::uuid;
 use rings_core::storage::MemStorage;
 use rings_core::swarm::Swarm;
 use rings_core::swarm::SwarmBuilder;
+use rings_core::utils::get_epoch_ms;
 use rings_rpc::protos::rings_node::*;
 use rings_transport::webrtc_config::WebrtcUdpPortRange;
 use serde::Deserialize;
@@ -39,6 +44,17 @@ use crate::prelude::wasm_export;
 use crate::prelude::ChordStorageInterface;
 use crate::prelude::ChordStorageInterfaceCacheChecker;
 use crate::prelude::SessionSk;
+
+const DEFAULT_ONLINE_NODE_HEARTBEAT_INTERVAL_SECS: u64 = 30;
+const DEFAULT_ONLINE_NODE_TTL_SECS: u64 = 90;
+
+pub(crate) fn default_online_node_heartbeat_interval_secs() -> u64 {
+    DEFAULT_ONLINE_NODE_HEARTBEAT_INTERVAL_SECS
+}
+
+pub(crate) fn default_online_node_ttl_secs() -> u64 {
+    DEFAULT_ONLINE_NODE_TTL_SECS
+}
 
 /// ProcessorConfig is usually serialized as json or yaml.
 /// There is a `from_config` method in [ProcessorBuilder] used to initialize the Builder with a serialized ProcessorConfig.
@@ -60,6 +76,10 @@ pub struct ProcessorConfig {
     session_sk: SessionSk,
     /// Stabilization interval.
     stabilize_interval: Duration,
+    /// Online-node registry heartbeat interval.
+    online_node_heartbeat_interval: Duration,
+    /// Online-node registry descriptor TTL.
+    online_node_ttl: Duration,
 }
 
 #[wasm_export]
@@ -79,6 +99,10 @@ impl ProcessorConfig {
             webrtc_udp_port_max: None,
             session_sk,
             stabilize_interval: Duration::from_secs(stabilize_interval),
+            online_node_heartbeat_interval: Duration::from_secs(
+                DEFAULT_ONLINE_NODE_HEARTBEAT_INTERVAL_SECS,
+            ),
+            online_node_ttl: Duration::from_secs(DEFAULT_ONLINE_NODE_TTL_SECS),
         }
     }
 
@@ -123,6 +147,12 @@ pub struct ProcessorConfigSerialized {
     session_sk: String,
     /// An unsigned integer representing the stabilization interval in seconds.
     stabilize_interval: u64,
+    /// Online-node registry heartbeat interval in seconds.
+    #[serde(default = "default_online_node_heartbeat_interval_secs")]
+    online_node_heartbeat_interval_secs: u64,
+    /// Online-node registry descriptor TTL in seconds.
+    #[serde(default = "default_online_node_ttl_secs")]
+    online_node_ttl_secs: u64,
 }
 
 impl ProcessorConfigSerialized {
@@ -141,6 +171,8 @@ impl ProcessorConfigSerialized {
             webrtc_udp_port_max: None,
             session_sk,
             stabilize_interval,
+            online_node_heartbeat_interval_secs: DEFAULT_ONLINE_NODE_HEARTBEAT_INTERVAL_SECS,
+            online_node_ttl_secs: DEFAULT_ONLINE_NODE_TTL_SECS,
         }
     }
 
@@ -155,6 +187,18 @@ impl ProcessorConfigSerialized {
     pub fn webrtc_udp_port_range(mut self, range: WebrtcUdpPortRange) -> Self {
         self.webrtc_udp_port_min = Some(range.min());
         self.webrtc_udp_port_max = Some(range.max());
+        self
+    }
+
+    /// Sets the online-node registry heartbeat interval in seconds.
+    pub fn online_node_heartbeat_interval_secs(mut self, interval_secs: u64) -> Self {
+        self.online_node_heartbeat_interval_secs = interval_secs;
+        self
+    }
+
+    /// Sets the online-node registry descriptor TTL in seconds.
+    pub fn online_node_ttl_secs(mut self, ttl_secs: u64) -> Self {
+        self.online_node_ttl_secs = ttl_secs;
         self
     }
 }
@@ -183,6 +227,8 @@ impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
             webrtc_udp_port_max: ins.webrtc_udp_port_max,
             session_sk: ins.session_sk.dump()?,
             stabilize_interval: ins.stabilize_interval.as_secs(),
+            online_node_heartbeat_interval_secs: ins.online_node_heartbeat_interval.as_secs(),
+            online_node_ttl_secs: ins.online_node_ttl.as_secs(),
         })
     }
 }
@@ -200,6 +246,10 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
             webrtc_udp_port_max: webrtc_udp_port_range.map(WebrtcUdpPortRange::max),
             session_sk: SessionSk::from_str(&ins.session_sk)?,
             stabilize_interval: Duration::from_secs(ins.stabilize_interval),
+            online_node_heartbeat_interval: Duration::from_secs(
+                ins.online_node_heartbeat_interval_secs,
+            ),
+            online_node_ttl: Duration::from_secs(ins.online_node_ttl_secs),
         })
     }
 }
@@ -219,7 +269,9 @@ impl Serialize for ProcessorConfig {
 
 impl<'de> serde::de::Deserialize<'de> for ProcessorConfig {
     fn deserialize<D>(deserializer: D) -> core::result::Result<Self, D::Error>
-    where D: serde::Deserializer<'de> {
+    where
+        D: serde::Deserializer<'de>,
+    {
         match ProcessorConfigSerialized::deserialize(deserializer) {
             Ok(ins) => {
                 let cfg: ProcessorConfig = ins
@@ -242,6 +294,8 @@ pub struct ProcessorBuilder {
     storage: Option<EntryStorage>,
     measure: Option<MeasureImpl>,
     stabilize_interval: Duration,
+    online_node_heartbeat_interval: Duration,
+    online_node_ttl: Duration,
     dht_finger_table_size: usize,
     reassembly_limits: ReassemblyLimits,
 }
@@ -252,6 +306,10 @@ pub struct Processor {
     /// a swarm instance
     pub swarm: Arc<Swarm>,
     stabilize_interval: Duration,
+    online_node_heartbeat_interval: Duration,
+    online_node_ttl: Duration,
+    online_node_started_at_ms: u128,
+    online_node_endpoint_hint: Option<String>,
 }
 
 impl ProcessorBuilder {
@@ -273,6 +331,8 @@ impl ProcessorBuilder {
             storage: None,
             measure: None,
             stabilize_interval: config.stabilize_interval,
+            online_node_heartbeat_interval: config.online_node_heartbeat_interval,
+            online_node_ttl: config.online_node_ttl,
             dht_finger_table_size: DEFAULT_FINGER_TABLE_SIZE,
             reassembly_limits: ReassemblyLimits::production(),
         })
@@ -310,6 +370,7 @@ impl ProcessorBuilder {
             .map_err(|e| Error::VerifyError(e.to_string()))?;
 
         let storage = self.storage.unwrap_or_else(|| Box::new(MemStorage::new()));
+        let endpoint_hint = self.external_address.clone();
 
         let mut swarm_builder =
             SwarmBuilder::new(self.network_id, &self.ice_servers, storage, self.session_sk);
@@ -332,6 +393,10 @@ impl ProcessorBuilder {
         Ok(Processor {
             swarm,
             stabilize_interval: self.stabilize_interval,
+            online_node_heartbeat_interval: self.online_node_heartbeat_interval,
+            online_node_ttl: self.online_node_ttl,
+            online_node_started_at_ms: get_epoch_ms(),
+            online_node_endpoint_hint: endpoint_hint,
         })
     }
 }
@@ -342,10 +407,127 @@ impl Processor {
         self.swarm.did()
     }
 
+    fn online_node_type() -> OnlineNodeType {
+        #[cfg(feature = "ffi")]
+        {
+            return OnlineNodeType::Ffi;
+        }
+        #[cfg(all(not(feature = "ffi"), feature = "browser"))]
+        {
+            return OnlineNodeType::Browser;
+        }
+        #[cfg(all(not(feature = "ffi"), not(feature = "browser")))]
+        {
+            OnlineNodeType::Native
+        }
+    }
+
+    fn online_node_capabilities() -> Vec<String> {
+        let capabilities = vec!["storage".to_string()];
+        #[cfg(feature = "snark")]
+        let capabilities = {
+            let mut capabilities = capabilities;
+            capabilities.push("snark".to_string());
+            capabilities
+        };
+        capabilities
+    }
+
+    fn online_node_descriptor_at(&self, now_ms: u128) -> Result<OnlineNodeDescriptor> {
+        self.swarm
+            .online_node_descriptor(
+                Self::online_node_type(),
+                Self::online_node_capabilities(),
+                self.online_node_endpoint_hint.clone(),
+                self.online_node_started_at_ms,
+                now_ms,
+                now_ms + self.online_node_ttl.as_millis(),
+                crate::util::build_version(),
+            )
+            .map_err(Error::CoreError)
+    }
+
+    fn online_node_descriptors_from_entry(entry: &entry::Entry) -> Vec<OnlineNodeDescriptor> {
+        entry
+            .data
+            .iter()
+            .filter_map(|value| value.decode::<OnlineNodeDescriptor>().ok())
+            .collect()
+    }
+
+    fn online_node_registry_entry(descriptors: Vec<OnlineNodeDescriptor>) -> Result<entry::Entry> {
+        let data = descriptors
+            .into_iter()
+            .map(|descriptor| descriptor.encode().map_err(Error::CoreError))
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(entry::Entry::new(
+            entry::Entry::gen_did(ONLINE_NODES_TOPIC)?,
+            data,
+            entry::EntryKind::Data,
+        ))
+    }
+
+    /// Publish this node's signed online descriptor to the online-node registry.
+    pub async fn publish_online_node_descriptor(&self) -> Result<OnlineNodeDescriptor> {
+        let now_ms = get_epoch_ms();
+        let descriptor = self.online_node_descriptor_at(now_ms)?;
+        let entry_key = entry::Entry::gen_did(ONLINE_NODES_TOPIC)?;
+
+        self.storage_fetch(entry_key).await?;
+        let mut descriptors = self
+            .storage_check_cache(entry_key)
+            .await
+            .as_ref()
+            .map(Self::online_node_descriptors_from_entry)
+            .unwrap_or_default();
+        descriptors.push(descriptor.clone());
+
+        let descriptors = OnlineNodeDescriptor::latest_valid_by_did(descriptors, now_ms, true);
+        self.storage_store(Self::online_node_registry_entry(descriptors)?)
+            .await?;
+        Ok(descriptor)
+    }
+
+    /// List signed online-node descriptors from the registry.
+    pub async fn lookup_online_nodes(
+        &self,
+        include_expired: bool,
+    ) -> Result<Vec<OnlineNodeDescriptor>> {
+        let entry_key = entry::Entry::gen_did(ONLINE_NODES_TOPIC)?;
+
+        self.storage_fetch(entry_key).await?;
+        let Some(entry) = self.storage_check_cache(entry_key).await else {
+            return Ok(vec![]);
+        };
+
+        let descriptors = Self::online_node_descriptors_from_entry(&entry);
+
+        Ok(OnlineNodeDescriptor::latest_valid_by_did(
+            descriptors,
+            get_epoch_ms(),
+            include_expired,
+        ))
+    }
+
+    async fn online_node_heartbeat_daemon(&self) {
+        loop {
+            if let Err(error) = self.publish_online_node_descriptor().await {
+                tracing::warn!("Failed to publish online node descriptor: {error:?}");
+            }
+            futures_timer::Delay::new(self.online_node_heartbeat_interval).await;
+        }
+    }
+
     /// Run stabilization daemon
     pub async fn listen(&self) {
         let stabilizer = self.swarm.stabilizer();
-        Arc::new(stabilizer).wait(self.stabilize_interval).await
+        let stabilizer = Arc::new(stabilizer);
+        let _ = futures::future::join(
+            stabilizer.wait(self.stabilize_interval),
+            self.online_node_heartbeat_daemon(),
+        )
+        .await;
     }
 
     /// Connect peer with web3 did.
@@ -542,6 +724,21 @@ impl Processor {
         .map_err(Error::EntryError)
     }
 
+    /// Return local measurement counters for a peer.
+    pub async fn peer_measurement(&self, did: Did) -> PeerMeasurement {
+        self.swarm.peer_measurement(did).await
+    }
+
+    /// Return local measurement counters for all connected peers.
+    pub async fn peer_measurements(&self) -> Vec<PeerMeasurement> {
+        let mut measurements = Vec::new();
+        for did in self.swarm.peer_dids() {
+            measurements.push(self.peer_measurement(did).await);
+        }
+        measurements.sort_by_key(|measurement| measurement.did);
+        measurements
+    }
+
     /// register service
     pub async fn register_service(&self, name: &str) -> Result<()> {
         let encoded_did = self
@@ -563,6 +760,7 @@ impl Processor {
         Ok(NodeInfoResponse {
             version: crate::util::build_version(),
             swarm: Some(self.swarm.inspect().await.into()),
+            measurements: self.peer_measurements().await,
         })
     }
 }
@@ -577,11 +775,13 @@ mod test {
     use rings_core::storage::MemStorage;
     use rings_core::swarm::callback::SwarmCallback;
     use rings_core::swarm::callback::SwarmEvent;
+    use rings_rpc::method::Method;
     use rings_transport::core::transport::WebrtcConnectionState;
     use tokio::sync::Notify;
 
     use super::*;
     use crate::prelude::*;
+    use crate::provider::Provider;
     use crate::tests::native::prepare_processor;
 
     #[test]
@@ -642,6 +842,106 @@ mod test {
                 }
             ))
         ));
+    }
+
+    #[tokio::test]
+    async fn online_node_descriptor_publishes_and_lists_signed_self() -> Result<()> {
+        let processor = prepare_processor().await;
+        let published = processor.publish_online_node_descriptor().await?;
+        let nodes = processor.lookup_online_nodes(false).await?;
+
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].did, processor.did());
+        assert_eq!(nodes[0].did, published.did);
+        assert_eq!(nodes[0].network_id, processor.swarm.network_id());
+        assert!(nodes[0].verify_signature());
+        assert!(!nodes[0].is_expired_at(get_epoch_ms()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn online_node_descriptor_refresh_replaces_previous_self_record() -> Result<()> {
+        let processor = prepare_processor().await;
+        let first = processor.publish_online_node_descriptor().await?;
+        let second = processor.publish_online_node_descriptor().await?;
+        let entry_key = entry::Entry::gen_did(ONLINE_NODES_TOPIC)?;
+        let entry = processor
+            .storage_check_cache(entry_key)
+            .await
+            .expect("online node registry entry should be cached after publish");
+        let stored = Processor::online_node_descriptors_from_entry(&entry);
+        let nodes = processor.lookup_online_nodes(false).await?;
+
+        assert_eq!(stored.len(), 1);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].did, processor.did());
+        assert!(second.heartbeat_at_ms >= first.heartbeat_at_ms);
+        assert_eq!(nodes[0].heartbeat_at_ms, second.heartbeat_at_ms);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn online_node_lookup_filters_expired_descriptors_by_default() -> Result<()> {
+        let processor = prepare_processor().await;
+        let expired_processor = prepare_processor().await;
+        let now_ms = get_epoch_ms();
+        let live = processor.online_node_descriptor_at(now_ms)?;
+        let expired = expired_processor
+            .swarm
+            .online_node_descriptor(
+                Processor::online_node_type(),
+                Processor::online_node_capabilities(),
+                None,
+                now_ms.saturating_sub(120_000),
+                now_ms.saturating_sub(90_000),
+                now_ms.saturating_sub(30_000),
+                crate::util::build_version(),
+            )
+            .map_err(Error::CoreError)?;
+
+        processor
+            .storage_store(Processor::online_node_registry_entry(vec![
+                live.clone(),
+                expired.clone(),
+            ])?)
+            .await?;
+
+        let live_nodes = processor.lookup_online_nodes(false).await?;
+        assert_eq!(live_nodes, vec![live]);
+
+        let all_nodes = processor.lookup_online_nodes(true).await?;
+        assert_eq!(all_nodes.len(), 2);
+        assert!(all_nodes
+            .iter()
+            .any(|descriptor| descriptor.did == processor.did()));
+        assert!(all_nodes
+            .iter()
+            .any(|descriptor| descriptor.did == expired_processor.did()));
+        assert!(all_nodes.iter().any(|descriptor| descriptor == &expired));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn online_node_registry_lists_multiple_nodes() -> Result<()> {
+        let processor = prepare_processor().await;
+        let other = prepare_processor().await;
+
+        processor
+            .storage_store(Processor::online_node_registry_entry(vec![
+                other.online_node_descriptor_at(get_epoch_ms())?
+            ])?)
+            .await?;
+        let published = processor.publish_online_node_descriptor().await?;
+        let mut nodes = processor.lookup_online_nodes(false).await?;
+        nodes.sort_by_key(|descriptor| descriptor.did);
+
+        assert_eq!(nodes.len(), 2);
+        assert!(nodes
+            .iter()
+            .any(|descriptor| descriptor.did == published.did));
+        assert!(nodes.iter().any(|descriptor| descriptor.did == other.did()));
+        assert!(nodes.iter().all(OnlineNodeDescriptor::verify_signature));
+        Ok(())
     }
 
     #[tokio::test]
@@ -718,6 +1018,27 @@ mod test {
             .unwrap()
     }
 
+    async fn prepare_measured_processor() -> Processor {
+        let key = SecretKey::random();
+        let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+        let config = ProcessorConfig::new(
+            0,
+            "stun://stun.l.google.com:19302".to_string(),
+            session_sk,
+            3,
+        );
+        let storage = Box::new(MemStorage::new());
+        let measure = PeriodicMeasure::new(Box::new(MemStorage::new()));
+
+        ProcessorBuilder::from_config(&config)
+            .unwrap()
+            .storage(storage)
+            .measure(measure)
+            .dht_finger_table_size(8)
+            .build()
+            .unwrap()
+    }
+
     async fn connect_processors(
         p1: &Processor,
         p2: &Processor,
@@ -765,6 +1086,27 @@ mod test {
             .peers()
             .into_iter()
             .any(|conn| conn.did == peer && conn.state == "Connected")
+    }
+
+    async fn wait_for_peer_measurement(
+        processor: &Processor,
+        did: Did,
+        predicate: impl Fn(&PeerMeasurement) -> bool,
+    ) -> PeerMeasurement {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let measurement = processor.peer_measurement(did).await;
+            if predicate(&measurement) {
+                return measurement;
+            }
+
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .expect("measurement was not updated");
+            tokio::time::timeout(remaining, tokio::time::sleep(Duration::from_millis(20)))
+                .await
+                .expect("measurement was not updated");
+        }
     }
 
     async fn wait_for_inbound_message(
@@ -866,6 +1208,57 @@ mod test {
         })
         .await;
         assert!(matches!(got_msg1, Message::CustomMessage(_)));
+    }
+
+    #[tokio::test]
+    async fn provider_exposes_sent_and_received_peer_measurements() {
+        let callback1 = test_callback();
+        let callback2 = test_callback();
+        let p1 = prepare_measured_processor().await;
+        let p2 = prepare_measured_processor().await;
+
+        p1.swarm.set_callback(callback1.clone()).unwrap();
+        p2.swarm.set_callback(callback2.clone()).unwrap();
+        connect_processors(&p1, &p2, &callback1, &callback2).await;
+
+        p1.send_message(p2.did(), b"measure-provider")
+            .await
+            .unwrap();
+        let got_msg2 = wait_for_inbound_message(
+            &callback2,
+            |msg| matches!(msg, Message::CustomMessage(custom) if custom.0 == b"measure-provider"),
+        )
+        .await;
+        assert!(matches!(got_msg2, Message::CustomMessage(_)));
+
+        let sent =
+            wait_for_peer_measurement(&p1, p2.did(), |measurement| measurement.sent >= 1).await;
+        let received =
+            wait_for_peer_measurement(&p2, p1.did(), |measurement| measurement.received >= 1).await;
+        assert_eq!(sent.did, p2.did());
+        assert_eq!(received.did, p1.did());
+
+        let node_info = p1.get_node_info().await.unwrap();
+        assert!(node_info
+            .measurements
+            .iter()
+            .any(|measurement| measurement.did == p2.did() && measurement.sent >= 1));
+
+        let provider = Provider::from_processor(Arc::new(p1));
+        let provider_measurement = provider.peer_measurement(p2.did()).await;
+        assert!(provider_measurement.sent >= 1);
+
+        let rpc_value = provider
+            .request(
+                Method::PeerMeasurement,
+                PeerMeasurementRequest {
+                    did: p2.did().to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        let rpc_measurement: PeerMeasurementResponse = serde_json::from_value(rpc_value).unwrap();
+        assert!(rpc_measurement.measurement.sent >= 1);
     }
 
     #[tokio::test]

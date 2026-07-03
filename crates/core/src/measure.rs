@@ -4,6 +4,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use serde::Deserialize;
+use serde::Serialize;
 
 use crate::dht::Did;
 
@@ -90,6 +92,61 @@ pub struct PeerQualityEvidence {
     failed_to_receive: u64,
 }
 
+/// Local measurement counters for one peer.
+///
+/// These counters are local observations only. They are not signed, replicated,
+/// or global reputation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PeerMeasurement {
+    /// Peer DID these counters describe.
+    pub did: Did,
+    /// Successful connection observations.
+    pub connected: u64,
+    /// Disconnection observations.
+    pub disconnected: u64,
+    /// Successfully sent messages.
+    pub sent: u64,
+    /// Messages that failed before successful send.
+    pub failed_to_send: u64,
+    /// Successfully received and verified messages.
+    pub received: u64,
+    /// Messages that failed decode or verification.
+    pub failed_to_receive: u64,
+}
+
+impl PeerMeasurement {
+    /// Return a zero-count snapshot for `did`.
+    pub const fn empty(did: Did) -> Self {
+        Self {
+            did,
+            connected: 0,
+            disconnected: 0,
+            sent: 0,
+            failed_to_send: 0,
+            received: 0,
+            failed_to_receive: 0,
+        }
+    }
+
+    /// Read all counters for `did` from a measurement implementation.
+    pub async fn from_measure<M>(measure: &M, did: Did) -> Self
+    where
+        M: Measure + ?Sized,
+    {
+        Self {
+            did,
+            connected: measure.get_count(did, MeasureCounter::Connect).await,
+            disconnected: measure.get_count(did, MeasureCounter::Disconnected).await,
+            sent: measure.get_count(did, MeasureCounter::Sent).await,
+            failed_to_send: measure.get_count(did, MeasureCounter::FailedToSend).await,
+            received: measure.get_count(did, MeasureCounter::Received).await,
+            failed_to_receive: measure
+                .get_count(did, MeasureCounter::FailedToReceive)
+                .await,
+        }
+    }
+}
+
 impl PeerQualityEvidence {
     /// Build evidence from explicit counter values.
     pub const fn new(
@@ -112,7 +169,9 @@ impl PeerQualityEvidence {
 
     /// Read all counters for `did` from a measurement implementation.
     pub async fn from_measure<M>(measure: &M, did: Did) -> Self
-    where M: Measure + ?Sized {
+    where
+        M: Measure + ?Sized,
+    {
         Self {
             connected: measure.get_count(did, MeasureCounter::Connect).await,
             disconnected: measure.get_count(did, MeasureCounter::Disconnected).await,

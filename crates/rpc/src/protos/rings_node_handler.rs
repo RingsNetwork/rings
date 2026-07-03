@@ -48,7 +48,9 @@ impl InternalRpcHandler {
             + HandleRpc<FetchTopicMessagesRequest, FetchTopicMessagesResponse>
             + HandleRpc<RegisterServiceRequest, RegisterServiceResponse>
             + HandleRpc<LookupServiceRequest, LookupServiceResponse>
+            + HandleRpc<LookupOnlineNodesRequest, LookupOnlineNodesResponse>
             + HandleRpc<NodeInfoRequest, NodeInfoResponse>
+            + HandleRpc<PeerMeasurementRequest, PeerMeasurementResponse>
             + HandleRpc<NodeDidRequest, NodeDidResponse>,
     {
         let method = Method::try_from(method.as_str()).map_err(|_| Error {
@@ -148,8 +150,20 @@ impl InternalRpcHandler {
                 let resp = processor.handle_rpc(req).await?;
                 serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
             }
+            Method::LookupOnlineNodes => {
+                let req = serde_json::from_value::<LookupOnlineNodesRequest>(params)
+                    .map_err(|e| Error::invalid_params(e.to_string()))?;
+                let resp = processor.handle_rpc(req).await?;
+                serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
+            }
             Method::NodeInfo => {
                 let req = serde_json::from_value::<NodeInfoRequest>(params)
+                    .map_err(|e| Error::invalid_params(e.to_string()))?;
+                let resp = processor.handle_rpc(req).await?;
+                serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
+            }
+            Method::PeerMeasurement => {
+                let req = serde_json::from_value::<PeerMeasurementRequest>(params)
                     .map_err(|e| Error::invalid_params(e.to_string()))?;
                 let resp = processor.handle_rpc(req).await?;
                 serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))

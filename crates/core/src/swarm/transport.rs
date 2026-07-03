@@ -42,6 +42,7 @@ use crate::error::Result;
 use crate::measure::order_peers_by_quality;
 use crate::measure::MeasureCounter;
 use crate::measure::MeasureImpl;
+use crate::measure::PeerMeasurement;
 use crate::measure::PeerQuality;
 use crate::message::ConnectNodeReport;
 use crate::message::ConnectNodeSend;
@@ -398,6 +399,14 @@ impl SwarmTransport {
         }
     }
 
+    /// Return this node's local measurement counters for `peer`.
+    pub(crate) async fn peer_measurement(&self, peer: Did) -> PeerMeasurement {
+        match &self.measure {
+            Some(measure) => PeerMeasurement::from_measure(measure.as_ref(), peer).await,
+            None => PeerMeasurement::empty(peer),
+        }
+    }
+
     /// Order DHT-produced connection candidates by local quality evidence.
     ///
     /// Invariant: this is a stable permutation of the DHT-produced candidate
@@ -578,10 +587,13 @@ impl SwarmTransport {
             .into_iter()
             .filter_map(|(k, v)| {
                 Did::from_str(&k).ok().map(|did| {
-                    (did, SwarmConnection {
-                        peer: did,
-                        connection: v,
-                    })
+                    (
+                        did,
+                        SwarmConnection {
+                            peer: did,
+                            connection: v,
+                        },
+                    )
                 })
             })
             .collect()

@@ -35,7 +35,9 @@ pub const DEFAULT_STABILIZE_INTERVAL: u64 = 3;
 pub const DEFAULT_STORAGE_CAPACITY: u32 = 200000000;
 
 pub fn get_storage_location<P>(prefix: P, path: P) -> String
-where P: AsRef<std::path::Path> {
+where
+    P: AsRef<std::path::Path>,
+{
     let home_dir = env::var_os("HOME").map(PathBuf::from);
     let storage_path = match home_dir {
         Some(dir) => dir.join(prefix).join(path),
@@ -57,6 +59,10 @@ pub struct Config {
     pub endpoint_url: String,
     pub ice_servers: String,
     pub stabilize_interval: u64,
+    #[serde(default = "crate::processor::default_online_node_heartbeat_interval_secs")]
+    pub online_node_heartbeat_interval_secs: u64,
+    #[serde(default = "crate::processor::default_online_node_ttl_secs")]
+    pub online_node_ttl_secs: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_ip: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -95,7 +101,9 @@ impl TryFrom<Config> for ProcessorConfigSerialized {
             config.ice_servers,
             session_sk,
             config.stabilize_interval,
-        );
+        )
+        .online_node_heartbeat_interval_secs(config.online_node_heartbeat_interval_secs)
+        .online_node_ttl_secs(config.online_node_ttl_secs);
 
         cs = if let Some(ext_ip) = config.external_ip {
             cs.external_address(ext_ip)
@@ -125,7 +133,9 @@ impl TryFrom<Config> for ProcessorConfig {
 
 impl Config {
     pub fn new<P>(session_sk: P) -> Self
-    where P: AsRef<std::path::Path> {
+    where
+        P: AsRef<std::path::Path>,
+    {
         let session_sk = session_sk.as_ref().to_string_lossy().to_string();
         Self {
             network_id: DEFAULT_NETWORK_ID,
@@ -137,6 +147,9 @@ impl Config {
             endpoint_url: DEFAULT_ENDPOINT_URL.to_string(),
             ice_servers: DEFAULT_ICE_SERVERS.to_string(),
             stabilize_interval: DEFAULT_STABILIZE_INTERVAL,
+            online_node_heartbeat_interval_secs:
+                crate::processor::default_online_node_heartbeat_interval_secs(),
+            online_node_ttl_secs: crate::processor::default_online_node_ttl_secs(),
             external_ip: None,
             webrtc_udp_port_min: None,
             webrtc_udp_port_max: None,
@@ -146,7 +159,9 @@ impl Config {
     }
 
     pub fn write_fs<P>(&self, path: P) -> Result<String>
-    where P: AsRef<std::path::Path> {
+    where
+        P: AsRef<std::path::Path>,
+    {
         let path = expand_home(path)?;
         ensure_parent_dir(&path)?;
         let f =
@@ -159,7 +174,9 @@ impl Config {
     }
 
     pub fn read_fs<P>(path: P) -> Result<Config>
-    where P: AsRef<std::path::Path> {
+    where
+        P: AsRef<std::path::Path>,
+    {
         let path = expand_home(path)?;
         tracing::debug!("Read config from: {:?}", path);
         let f = fs::File::open(path).map_err(|e| Error::OpenFileError(e.to_string()))?;

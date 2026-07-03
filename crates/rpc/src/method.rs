@@ -38,8 +38,12 @@ pub enum Method {
     RegisterService,
     /// Lookup service
     LookupService,
+    /// Lookup online-node registry descriptors
+    LookupOnlineNodes,
     /// Retrieve Node info
     NodeInfo,
+    /// Retrieve local measurement counters for a peer
+    PeerMeasurement,
     /// Retrieve Node DID
     NodeDid,
 }
@@ -63,7 +67,9 @@ impl Method {
             Method::FetchTopicMessages => "fetchTopicMessages",
             Method::RegisterService => "registerService",
             Method::LookupService => "lookupService",
+            Method::LookupOnlineNodes => "lookupOnlineNodes",
             Method::NodeInfo => "nodeInfo",
+            Method::PeerMeasurement => "peerMeasurement",
             Method::NodeDid => "nodeDid",
         }
     }
@@ -96,7 +102,9 @@ impl TryFrom<&str> for Method {
             "fetchTopicMessages" => Method::FetchTopicMessages,
             "registerService" => Method::RegisterService,
             "lookupService" => Method::LookupService,
+            "lookupOnlineNodes" => Method::LookupOnlineNodes,
             "nodeInfo" => Method::NodeInfo,
+            "peerMeasurement" => Method::PeerMeasurement,
             "nodeDid" => Method::NodeDid,
             _ => return Err(Error::InvalidMethod),
         })

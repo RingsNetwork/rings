@@ -333,11 +333,34 @@ impl HandleRpc<LookupServiceRequest, LookupServiceResponse> for Processor {
 
 #[cfg_attr(feature = "browser", async_trait(?Send))]
 #[cfg_attr(not(feature = "browser"), async_trait)]
+impl HandleRpc<LookupOnlineNodesRequest, LookupOnlineNodesResponse> for Processor {
+    async fn handle_rpc(&self, req: LookupOnlineNodesRequest) -> Result<LookupOnlineNodesResponse> {
+        self.lookup_online_nodes(req.include_expired)
+            .await
+            .map(|nodes| LookupOnlineNodesResponse { nodes })
+            .map_err(ServerError::from)
+            .map_err(Into::into)
+    }
+}
+
+#[cfg_attr(feature = "browser", async_trait(?Send))]
+#[cfg_attr(not(feature = "browser"), async_trait)]
 impl HandleRpc<NodeInfoRequest, NodeInfoResponse> for Processor {
     async fn handle_rpc(&self, _req: NodeInfoRequest) -> Result<NodeInfoResponse> {
         self.get_node_info()
             .await
             .map_err(|_| Error::new(ErrorCode::InternalError))
+    }
+}
+
+#[cfg_attr(feature = "browser", async_trait(?Send))]
+#[cfg_attr(not(feature = "browser"), async_trait)]
+impl HandleRpc<PeerMeasurementRequest, PeerMeasurementResponse> for Processor {
+    async fn handle_rpc(&self, req: PeerMeasurementRequest) -> Result<PeerMeasurementResponse> {
+        let did = s2d(&req.did)?;
+        Ok(PeerMeasurementResponse {
+            measurement: self.peer_measurement(did).await,
+        })
     }
 }
 

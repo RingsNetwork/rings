@@ -14,13 +14,17 @@ pub use builder::SwarmBuilder;
 
 use self::callback::InnerSwarmCallback;
 use crate::dht::Did;
+use crate::dht::OnlineNodeDescriptor;
+use crate::dht::OnlineNodeType;
 use crate::dht::PeerRing;
 use crate::dht::Stabilizer;
 use crate::ecc::PublicKey;
+use crate::ecc::VerificationPublicKey;
 use crate::error::Error;
 use crate::error::Result;
 use crate::inspect::ConnectionInspect;
 use crate::inspect::SwarmInspect;
+use crate::measure::PeerMeasurement;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
@@ -46,6 +50,45 @@ impl Swarm {
     /// Get the local account public key used for E2E public-key negotiation.
     pub fn account_pubkey(&self) -> Result<PublicKey<33>> {
         self.transport.session_sk().session().account_pubkey()
+    }
+
+    /// Get the typed account verification public key.
+    pub fn account_verification_pubkey(&self) -> Result<VerificationPublicKey> {
+        self.transport
+            .session_sk()
+            .session()
+            .account_verification_pubkey()
+    }
+
+    /// Get this swarm's network id.
+    pub fn network_id(&self) -> u32 {
+        self.transport.network_id
+    }
+
+    /// Build and sign an online-node descriptor for this swarm.
+    pub fn online_node_descriptor(
+        &self,
+        node_type: OnlineNodeType,
+        capabilities: Vec<String>,
+        endpoint_hint: Option<String>,
+        started_at_ms: u128,
+        heartbeat_at_ms: u128,
+        expires_at_ms: u128,
+        version: String,
+    ) -> Result<OnlineNodeDescriptor> {
+        OnlineNodeDescriptor::new_signed(
+            self.did(),
+            self.account_verification_pubkey()?,
+            node_type,
+            self.network_id(),
+            capabilities,
+            endpoint_hint,
+            started_at_ms,
+            heartbeat_at_ms,
+            expires_at_ms,
+            version,
+            self.transport.session_sk(),
+        )
     }
 
     /// Get DHT(Distributed Hash Table) of self.
@@ -118,6 +161,16 @@ impl Swarm {
                 state: format!("{:?}", c.webrtc_connection_state()),
             })
             .collect()
+    }
+
+    /// List peer DIDs known to the transport.
+    pub fn peer_dids(&self) -> Vec<Did> {
+        self.transport.get_connection_ids()
+    }
+
+    /// Return local measurement counters for `peer`.
+    pub async fn peer_measurement(&self, peer: Did) -> PeerMeasurement {
+        self.transport.peer_measurement(peer).await
     }
 
     /// Check the status of swarm

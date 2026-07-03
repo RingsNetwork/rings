@@ -5,6 +5,8 @@
 //! now plain serde structs. Field names and types are kept identical to the
 //! previous prost-generated output to preserve the on-the-wire JSON shape.
 
+use rings_core::dht::OnlineNodeDescriptor;
+use rings_core::measure::PeerMeasurement;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -171,6 +173,17 @@ pub struct LookupServiceResponse {
 }
 
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct LookupOnlineNodesRequest {
+    #[serde(default)]
+    pub include_expired: bool,
+}
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct LookupOnlineNodesResponse {
+    pub nodes: Vec<OnlineNodeDescriptor>,
+}
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct NodeInfoRequest {}
 
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
@@ -218,6 +231,18 @@ pub struct SwarmInfo {
 pub struct NodeInfoResponse {
     pub version: String,
     pub swarm: Option<SwarmInfo>,
+    #[serde(default)]
+    pub measurements: Vec<PeerMeasurement>,
+}
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct PeerMeasurementRequest {
+    pub did: String,
+}
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct PeerMeasurementResponse {
+    pub measurement: PeerMeasurement,
 }
 
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]

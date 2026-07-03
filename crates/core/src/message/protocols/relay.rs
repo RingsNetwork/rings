@@ -7,6 +7,36 @@ use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
 
+/// Policy used when sending a report for a request payload.
+///
+/// The default preserves the legacy path-return behavior. Routed returns are
+/// opt-in and send the report as a fresh Chord-routed payload to the declared
+/// destination.
+#[derive(Deserialize, Serialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReportReturnPolicy {
+    /// Return the report through the reversed relay path.
+    #[default]
+    Path,
+    /// Route the report normally through Chord to this destination.
+    Routed {
+        /// DID that should receive the report.
+        destination: Did,
+    },
+}
+
+impl ReportReturnPolicy {
+    /// Validate that this policy is authorized by the signed request origin.
+    pub fn validate_authorized_by(&self, signer: Did) -> Result<()> {
+        match self {
+            Self::Path => Ok(()),
+            Self::Routed { destination } if *destination == signer => Ok(()),
+            Self::Routed { destination } => Err(Error::InvalidMessage(format!(
+                "routed report return destination {destination} is not signed by that destination"
+            ))),
+        }
+    }
+}
+
 /// MessageRelay guide message passing on rings network by relay.
 ///
 /// All messages should be sent with `MessageRelay`.
@@ -59,7 +89,7 @@ impl MessageRelay {
     /// Validate relay, then create a new `MessageRelay` that used to report the message.
     /// The new relay will use `self.path[self.path.len() - 1]` as `next_hop` and `self.sender()` as `destination`.
     /// In the new relay, the path will be cleared and only have `current` did.
-    pub fn report(&self, current: Did) -> Result<Self> {
+    pub fn path_report(&self, current: Did) -> Result<Self> {
         self.validate(current)?;
 
         if self.path.is_empty() {
@@ -71,6 +101,37 @@ impl MessageRelay {
             next_hop: self.path.last().copied().ok_or(Error::CannotInferNextHop)?,
             destination: self.try_origin_sender()?,
         })
+    }
+
+    /// Validate relay, then create a fresh Chord-routed report relay.
+    ///
+    /// The caller must infer `next_hop` from the destination before invoking
+    /// this constructor.
+    pub fn routed_report(&self, current: Did, destination: Did, next_hop: Did) -> Result<Self> {
+        self.validate(current)?;
+
+        Ok(Self {
+            path: vec![current],
+            next_hop,
+            destination,
+        })
+    }
+
+    /// Create a report relay with an explicit return policy.
+    pub fn report(
+        &self,
+        current: Did,
+        policy: ReportReturnPolicy,
+        routed_next_hop: Option<Did>,
+    ) -> Result<Self> {
+        match policy {
+            ReportReturnPolicy::Path => self.path_report(current),
+            ReportReturnPolicy::Routed { destination } => self.routed_report(
+                current,
+                destination,
+                routed_next_hop.ok_or(Error::CannotInferNextHop)?,
+            ),
+        }
     }
 
     /// Sometime the sender may not know the destination of the message. They just use next_hop as destination.
@@ -133,7 +194,9 @@ impl MessageRelay {
 const INFINITE_LOOP_TOLERANCE: usize = 3;
 
 fn has_infinite_loop<T>(path: &[T]) -> bool
-where T: PartialEq {
+where
+    T: PartialEq,
+{
     // Invariant: a relay loop is witnessed by a non-empty suffix period P such
     // that the final path segment is P repeated INFINITE_LOOP_TOLERANCE times.
     for period in 1..=path.len() / INFINITE_LOOP_TOLERANCE {
@@ -281,5 +344,79 @@ mod test {
             Err(Error::CannotInferNextHop)
         ));
         assert_eq!(relay.origin_sender(), fallback_destination);
+    }
+
+    #[test]
+    fn path_report_preserves_legacy_reverse_path() -> Result<()> {
+        let origin = Did::from(1);
+        let hop = Did::from(2);
+        let current = Did::from(3);
+        let relay = MessageRelay::new(vec![origin, hop], current, current);
+
+        let report = relay.report(current, ReportReturnPolicy::Path, None)?;
+
+        assert_eq!(report.path, vec![current]);
+        assert_eq!(report.next_hop, hop);
+        assert_eq!(report.destination, origin);
+        Ok(())
+    }
+
+    #[test]
+    fn routed_report_uses_declared_destination_and_next_hop() -> Result<()> {
+        let origin = Did::from(1);
+        let current = Did::from(2);
+        let return_destination = Did::from(3);
+        let routed_next_hop = Did::from(4);
+        let relay = MessageRelay::new(vec![origin], current, current);
+
+        let report = relay.report(
+            current,
+            ReportReturnPolicy::Routed {
+                destination: return_destination,
+            },
+            Some(routed_next_hop),
+        )?;
+
+        assert_eq!(report.path, vec![current]);
+        assert_eq!(report.next_hop, routed_next_hop);
+        assert_eq!(report.destination, return_destination);
+        Ok(())
+    }
+
+    #[test]
+    fn routed_report_requires_explicit_next_hop() {
+        let origin = Did::from(1);
+        let current = Did::from(2);
+        let return_destination = Did::from(3);
+        let relay = MessageRelay::new(vec![origin], current, current);
+
+        assert!(matches!(
+            relay.report(
+                current,
+                ReportReturnPolicy::Routed {
+                    destination: return_destination,
+                },
+                None,
+            ),
+            Err(Error::CannotInferNextHop)
+        ));
+    }
+
+    #[test]
+    fn routed_policy_must_be_authorized_by_destination_signer() -> Result<()> {
+        let signer = Did::from(1);
+        let other = Did::from(2);
+
+        ReportReturnPolicy::Path.validate_authorized_by(signer)?;
+        ReportReturnPolicy::Routed {
+            destination: signer,
+        }
+        .validate_authorized_by(signer)?;
+
+        assert!(matches!(
+            ReportReturnPolicy::Routed { destination: other }.validate_authorized_by(signer),
+            Err(Error::InvalidMessage(_))
+        ));
+        Ok(())
     }
 }
