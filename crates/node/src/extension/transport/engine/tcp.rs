@@ -48,10 +48,12 @@ impl TransportSessions {
                         let Some(token) = self.stash_pending(Pending::Tcp(stream)) else {
                             continue;
                         };
-                        inject_accepted(&scope, token, peer, service.clone()).await;
-                        // If the round-trip didn't bind it (unknown namespace / reject / error),
-                        // drop the stashed stream so it can't leak.
-                        self.evict_pending(token);
+                        if inject_accepted(&scope, token, peer, service.clone())
+                            .await
+                            .is_err()
+                        {
+                            self.evict_pending(token);
+                        }
                     }
                     Err(e) => {
                         tracing::error!("transport accept on {local_addr} failed: {e:?}");

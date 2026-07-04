@@ -59,9 +59,7 @@ pub async fn register_native_onion_exit_targets(
     relay: &RelayHandle,
     policy: &OnionExitPolicy,
 ) -> Result<()> {
-    for target in &policy.allowed_targets {
-        let target = OnionProxyTarget::parse_authority(target)?;
-        let authority = target.authority();
+    for authority in native_onion_exit_target_authorities(policy)? {
         let addr = resolve_target(&authority).await?;
         relay
             .register_tcp_service(authority, addr)
@@ -71,6 +69,15 @@ pub async fn register_native_onion_exit_targets(
             })?;
     }
     Ok(())
+}
+
+fn native_onion_exit_target_authorities(policy: &OnionExitPolicy) -> Result<Vec<String>> {
+    policy
+        .allowed_targets
+        .iter()
+        .filter(|target| policy.allows_target(target))
+        .map(|target| OnionProxyTarget::parse_authority(target).map(|target| target.authority()))
+        .collect()
 }
 
 async fn handle_connect(
@@ -203,5 +210,24 @@ mod tests {
             parse_connect_request_line("GET http://example.com/ HTTP/1.1"),
             Err(Error::HttpRequestError(_))
         ));
+    }
+
+    #[test]
+    fn native_exit_target_registration_honors_deny_list() -> Result<()> {
+        let policy = OnionExitPolicy {
+            allowed_targets: vec![
+                "Example.COM:443".to_string(),
+                "blocked.example.com:443".to_string(),
+            ],
+            denied_targets: vec!["blocked.example.com:443".to_string()],
+            max_circuits: 0,
+            max_streams_per_circuit: 0,
+            max_bytes_per_minute: 0,
+        };
+
+        assert_eq!(native_onion_exit_target_authorities(&policy)?, vec![
+            "example.com:443".to_string()
+        ]);
+        Ok(())
     }
 }

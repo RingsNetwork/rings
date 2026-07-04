@@ -63,9 +63,12 @@ impl TransportSessions {
                                     src,
                                     first: bytes,
                                 }) {
-                                    inject_accepted(&scope, token, peer, service.clone()).await;
-                                    // Drop the stashed flow if the round-trip didn't bind it.
-                                    self.evict_pending(token);
+                                    if inject_accepted(&scope, token, peer, service.clone())
+                                        .await
+                                        .is_err()
+                                    {
+                                        self.evict_pending(token);
+                                    }
                                 }
                             }
                         }

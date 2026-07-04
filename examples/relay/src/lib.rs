@@ -169,6 +169,43 @@ pub async fn tcp_round_trip(request: &[u8]) -> Result<Vec<u8>> {
     Ok(got)
 }
 
+/// Run the same TCP relay flow, but hand an already-accepted stream to the relay handle.
+///
+/// This is the path used by higher-level local ingress protocols such as HTTP CONNECT: they
+/// accept the client connection themselves, parse the first protocol message, then transfer the
+/// remaining byte stream into the relay.
+pub async fn tcp_stream_relay_round_trip(request: &[u8]) -> Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
+
+    let (server_p, _server, server_relay) = spawn_node().await;
+    let (client_p, _client, client_relay) = spawn_node().await;
+    connect(&client_p, &server_p).await?;
+
+    let echo_addr = spawn_tcp_echo().await;
+    server_relay
+        .register_tcp_service("echo".to_string(), echo_addr)
+        .await?;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let proxy_addr = listener.local_addr()?;
+    let peer = server_p.swarm.did();
+    tokio::spawn(async move {
+        if let Ok((stream, _)) = listener.accept().await {
+            let _ = client_relay
+                .relay_tcp_stream(stream, peer, "echo".to_string())
+                .await;
+        }
+    });
+
+    let mut stream = TcpStream::connect(proxy_addr).await?;
+    stream.write_all(request).await?;
+
+    let mut got = vec![0u8; request.len()];
+    stream.read_exact(&mut got).await?;
+    Ok(got)
+}
+
 /// Relay an HTTP request to a real external host **through a peer**: `A → B → host`.
 ///
 /// The server node B registers a service pointing at `target` (e.g. `google.com:80`);

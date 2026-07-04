@@ -202,8 +202,9 @@ impl TransportSessions {
         let Some(token) = self.stash_pending(Pending::Tcp(stream)) else {
             return;
         };
-        inject_accepted(&scope, token, peer, service).await;
-        self.evict_pending(token);
+        if inject_accepted(&scope, token, peer, service).await.is_err() {
+            self.evict_pending(token);
+        }
     }
 
     /// Deliver peer bytes to a session's local socket. Unknown sessions are dropped — and a
@@ -330,9 +331,9 @@ impl TransportSessions {
         Some(token)
     }
 
-    /// Drop a still-unbound pending accept (its socket/stream), so a dropped/failed
-    /// `Accepted` round-trip — unknown namespace, decode reject, dispatch error — can't leak
-    /// the resource. A no-op once `bind_accepted` has consumed the token.
+    /// Drop a still-unbound pending accept (its socket/stream), so a failed
+    /// `Accepted` inject — decode reject, dispatch error — can't leak the resource.
+    /// A no-op once `bind_accepted` has consumed the token.
     fn evict_pending(&self, token: u64) {
         if let Ok(mut pending) = self.pending.lock() {
             pending.remove(&token);
@@ -454,15 +455,14 @@ async fn send_frame(scope: &Scope, peer: Did, frame: Frame) -> Result<()> {
 
 /// Report a client-side accept to the pure relay (which mints the session id and replies
 /// with `OpenAccepted`). The engine passes only its local `token` — it picks no identity.
-async fn inject_accepted(scope: &Scope, token: u64, peer: Did, service: String) {
+async fn inject_accepted(scope: &Scope, token: u64, peer: Did, service: String) -> Result<()> {
     let command = RelayCommand::<SocketAddr>::Accepted {
         token,
         peer,
         service,
     };
-    if let Ok(bytes) = bincode::serialize(&command) {
-        let _ = scope.inject(Bytes::from(bytes)).await;
-    }
+    let bytes = bincode::serialize(&command).map_err(|_| Error::EncodeError)?;
+    scope.inject(Bytes::from(bytes)).await
 }
 
 /// Feed a teardown back to the pure relay so it removes the session from `State.sessions`.

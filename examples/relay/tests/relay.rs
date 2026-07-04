@@ -58,6 +58,21 @@ async fn tcp_relay_round_trip() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tcp_stream_relay_round_trip() {
+    let payload = b"ping accepted tcp relay stream";
+    match tokio::time::timeout(
+        CONNECT_BUDGET,
+        rings_relay_example::tcp_stream_relay_round_trip(payload),
+    )
+    .await
+    {
+        Ok(Ok(got)) => assert_eq!(got.as_slice(), payload, "relay must echo the bytes back"),
+        Ok(Err(e)) => eprintln!("SKIP tcp_stream_relay_round_trip: overlay unavailable: {e}"),
+        Err(_) => eprintln!("SKIP tcp_stream_relay_round_trip: overlay connect timed out"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn udp_relay_round_trip() {
     let payload = b"ping rings udp relay";
     match tokio::time::timeout(CONNECT_BUDGET, rings_relay_example::udp_round_trip(payload)).await {
