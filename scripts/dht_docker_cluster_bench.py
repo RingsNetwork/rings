@@ -563,6 +563,10 @@ def sample(args: argparse.Namespace, sample_index: int) -> dict[str, Any]:
             "sample_index": sample_index,
             "sample_time_ms": int(time.time() * 1000),
             "base_internal_port": args.base_internal_port,
+            "configured_finger_table_size": args.finger_table_size,
+            "cluster_topology": args.cluster_topology,
+            "stabilize_interval_seconds": args.stabilize_interval_seconds,
+            "docker_image": args.docker_image,
         }
     )
     if args.throughput_messages > 0:
@@ -590,6 +594,22 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--base-internal-port",
         type=int,
         default=env_int("RINGS_BASE_INTERNAL_PORT", 50000),
+    )
+    parser.add_argument(
+        "--cluster-topology",
+        default=os.environ.get("RINGS_CONNECT_TOPOLOGY", "unknown"),
+        help="Topology mode used when the Docker cluster was started.",
+    )
+    parser.add_argument(
+        "--stabilize-interval-seconds",
+        type=float,
+        default=float(os.environ.get("RINGS_STABILIZE_INTERVAL", "0")),
+        help="Stabilization interval used when the Docker cluster was started.",
+    )
+    parser.add_argument(
+        "--docker-image",
+        default=os.environ.get("RINGS_DHT_BENCH_DOCKER_IMAGE", "unknown"),
+        help="Docker image tag or ID used for the cluster.",
     )
     parser.add_argument(
         "--finger-table-size",

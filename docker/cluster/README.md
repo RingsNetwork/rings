@@ -81,6 +81,9 @@ real node daemons:
 python3 scripts/dht_docker_cluster_bench.py \
   --container rings-cluster-16-bench \
   --nodes 16 \
+  --cluster-topology ring \
+  --stabilize-interval-seconds 1 \
+  --docker-image rings-node-cluster \
   --samples 5 \
   --sample-interval-seconds 30
 ```
@@ -91,6 +94,9 @@ Add a real WebRTC transport burst sample:
 python3 scripts/dht_docker_cluster_bench.py \
   --container rings-cluster-16-bench \
   --nodes 16 \
+  --cluster-topology ring \
+  --stabilize-interval-seconds 1 \
+  --docker-image rings-node-cluster \
   --throughput-messages 1024 \
   --throughput-payload-bytes 65536 \
   --throughput-flush-timeout-ms 60000 \
