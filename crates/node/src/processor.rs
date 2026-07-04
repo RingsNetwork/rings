@@ -2,13 +2,11 @@
 
 //! Processor of rings-node rpc server.
 
-use std::collections::BTreeSet;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::join_all;
-use futures::lock::Mutex as AsyncMutex;
 use rings_core::chunk::ReassemblyLimits;
 use rings_core::dht::Did;
 use rings_core::dht::EntryStorage;
@@ -40,77 +38,22 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::measure::PeriodicMeasure;
 use crate::online::OnlineNodeDescriptor;
-use crate::online::OnlineNodeDescriptorBody;
 use crate::online::OnlineNodeType;
 use crate::online::ONLINE_NODES_TOPIC;
-#[cfg(feature = "snark")]
-use crate::online::ONLINE_NODE_CAPABILITY_SNARK;
-use crate::online::ONLINE_NODE_CAPABILITY_STORAGE;
 use crate::prelude::entry;
 use crate::prelude::wasm_export;
 use crate::prelude::ChordStorageInterface;
 use crate::prelude::ChordStorageInterfaceCacheChecker;
 use crate::prelude::SessionSk;
-
-const DEFAULT_ONLINE_NODE_HEARTBEAT_INTERVAL_SECS: u64 = 30;
-const DEFAULT_ONLINE_NODE_TTL_SECS: u64 = 90;
-
-pub(crate) fn default_online_node_heartbeat_interval_secs() -> u64 {
-    DEFAULT_ONLINE_NODE_HEARTBEAT_INTERVAL_SECS
-}
-
-pub(crate) fn default_online_node_ttl_secs() -> u64 {
-    DEFAULT_ONLINE_NODE_TTL_SECS
-}
-
-pub(crate) fn default_online_node_type() -> OnlineNodeType {
-    #[cfg(feature = "ffi")]
-    {
-        OnlineNodeType::Ffi
-    }
-    #[cfg(all(not(feature = "ffi"), feature = "browser"))]
-    {
-        OnlineNodeType::Browser
-    }
-    #[cfg(all(not(feature = "ffi"), not(feature = "browser")))]
-    {
-        OnlineNodeType::Native
-    }
-}
-
-pub(crate) const fn default_publish_online_node() -> bool {
-    true
-}
-
-fn validate_online_node_timing(
-    publish_online_node: bool,
-    heartbeat_interval: Duration,
-    ttl: Duration,
-) -> Result<()> {
-    if publish_online_node && heartbeat_interval >= ttl {
-        return Err(Error::InvalidConfig(format!(
-            "online_node_heartbeat_interval ({heartbeat_interval:?}) must be less than online_node_ttl ({ttl:?}) when publish_online_node is enabled"
-        )));
-    }
-    Ok(())
-}
-
-#[cfg(not(feature = "browser"))]
-async fn sleep_online_node_heartbeat_interval(interval: Duration) -> Result<()> {
-    // Native timers are infallible; the Result keeps the daemon shape shared
-    // with the wasm arm, where browser timer setup can fail.
-    futures_timer::Delay::new(interval).await;
-    Ok(())
-}
-
-#[cfg(feature = "browser")]
-async fn sleep_online_node_heartbeat_interval(interval: Duration) -> Result<()> {
-    let interval_ms = i32::try_from(interval.as_millis()).unwrap_or(i32::MAX);
-    rings_core::utils::js_utils::window_sleep(interval_ms)
-        .await
-        .map_err(|error| Error::JsError(format!("{error:?}")))?;
-    Ok(())
-}
+use crate::registration::default_online_node_heartbeat_interval_secs;
+use crate::registration::default_online_node_ttl_secs;
+use crate::registration::default_online_node_type;
+use crate::registration::default_register_online_node;
+use crate::registration::sleep_registration_interval;
+use crate::registration::validate_online_node_registration_timing;
+use crate::registration::OnlineNodeRegistration;
+use crate::registration::RegistrationContext;
+use crate::registration::RegistrationTask;
 
 /// ProcessorConfig is usually serialized as json or yaml.
 /// There is a `from_config` method in [ProcessorBuilder] used to initialize the Builder with a serialized ProcessorConfig.
@@ -138,8 +81,8 @@ pub struct ProcessorConfig {
     online_node_ttl: Duration,
     /// Runtime family advertised in the online-node registry.
     online_node_type: OnlineNodeType,
-    /// Whether listen() publishes this node to the online-node registry.
-    publish_online_node: bool,
+    /// Whether listen() registers this node in the online-node registry.
+    register_online_node: bool,
 }
 
 #[wasm_export]
@@ -160,11 +103,11 @@ impl ProcessorConfig {
             session_sk,
             stabilize_interval: Duration::from_secs(stabilize_interval),
             online_node_heartbeat_interval: Duration::from_secs(
-                DEFAULT_ONLINE_NODE_HEARTBEAT_INTERVAL_SECS,
+                default_online_node_heartbeat_interval_secs(),
             ),
-            online_node_ttl: Duration::from_secs(DEFAULT_ONLINE_NODE_TTL_SECS),
+            online_node_ttl: Duration::from_secs(default_online_node_ttl_secs()),
             online_node_type: default_online_node_type(),
-            publish_online_node: default_publish_online_node(),
+            register_online_node: default_register_online_node(),
         }
     }
 
@@ -218,9 +161,9 @@ pub struct ProcessorConfigSerialized {
     /// Runtime family advertised in the online-node registry.
     #[serde(default = "default_online_node_type")]
     online_node_type: OnlineNodeType,
-    /// Whether listen() publishes this node to the online-node registry.
-    #[serde(default = "default_publish_online_node")]
-    publish_online_node: bool,
+    /// Whether listen() registers this node in the online-node registry.
+    #[serde(default = "default_register_online_node")]
+    register_online_node: bool,
 }
 
 impl ProcessorConfigSerialized {
@@ -239,10 +182,10 @@ impl ProcessorConfigSerialized {
             webrtc_udp_port_max: None,
             session_sk,
             stabilize_interval,
-            online_node_heartbeat_interval_secs: DEFAULT_ONLINE_NODE_HEARTBEAT_INTERVAL_SECS,
-            online_node_ttl_secs: DEFAULT_ONLINE_NODE_TTL_SECS,
+            online_node_heartbeat_interval_secs: default_online_node_heartbeat_interval_secs(),
+            online_node_ttl_secs: default_online_node_ttl_secs(),
             online_node_type: default_online_node_type(),
-            publish_online_node: default_publish_online_node(),
+            register_online_node: default_register_online_node(),
         }
     }
 
@@ -278,9 +221,9 @@ impl ProcessorConfigSerialized {
         self
     }
 
-    /// Sets whether listen() publishes this node to the online-node registry.
-    pub fn publish_online_node(mut self, publish: bool) -> Self {
-        self.publish_online_node = publish;
+    /// Sets whether listen() registers this node in the online-node registry.
+    pub fn register_online_node(mut self, register: bool) -> Self {
+        self.register_online_node = register;
         self
     }
 }
@@ -312,7 +255,7 @@ impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
             online_node_heartbeat_interval_secs: ins.online_node_heartbeat_interval.as_secs(),
             online_node_ttl_secs: ins.online_node_ttl.as_secs(),
             online_node_type: ins.online_node_type,
-            publish_online_node: ins.publish_online_node,
+            register_online_node: ins.register_online_node,
         })
     }
 }
@@ -325,8 +268,8 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
         let online_node_heartbeat_interval =
             Duration::from_secs(ins.online_node_heartbeat_interval_secs);
         let online_node_ttl = Duration::from_secs(ins.online_node_ttl_secs);
-        validate_online_node_timing(
-            ins.publish_online_node,
+        validate_online_node_registration_timing(
+            ins.register_online_node,
             online_node_heartbeat_interval,
             online_node_ttl,
         )?;
@@ -341,7 +284,7 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
             online_node_heartbeat_interval,
             online_node_ttl,
             online_node_type: ins.online_node_type,
-            publish_online_node: ins.publish_online_node,
+            register_online_node: ins.register_online_node,
         })
     }
 }
@@ -387,7 +330,8 @@ pub struct ProcessorBuilder {
     online_node_heartbeat_interval: Duration,
     online_node_ttl: Duration,
     online_node_type: OnlineNodeType,
-    publish_online_node: bool,
+    register_online_node: bool,
+    registration_tasks: Vec<Arc<dyn RegistrationTask>>,
     dht_finger_table_size: usize,
     reassembly_limits: ReassemblyLimits,
 }
@@ -403,13 +347,8 @@ pub struct Processor {
     /// Same session key held by the swarm transport; kept here for node-layer descriptor signing.
     session_sk: SessionSk,
     stabilize_interval: Duration,
-    online_node_heartbeat_interval: Duration,
-    online_node_ttl: Duration,
-    online_node_type: OnlineNodeType,
-    publish_online_node: bool,
-    online_node_started_at_ms: u128,
-    online_node_endpoint_hint: Option<String>,
-    online_node_published_descriptors: Arc<AsyncMutex<BTreeSet<Encoded>>>,
+    online_node_registration: OnlineNodeRegistration,
+    registration_tasks: Vec<Arc<dyn RegistrationTask>>,
 }
 
 impl ProcessorBuilder {
@@ -422,8 +361,8 @@ impl ProcessorBuilder {
 
     /// initialize a [ProcessorBuilder] with a [ProcessorConfig].
     pub fn from_config(config: &ProcessorConfig) -> Result<Self> {
-        validate_online_node_timing(
-            config.publish_online_node,
+        validate_online_node_registration_timing(
+            config.register_online_node,
             config.online_node_heartbeat_interval,
             config.online_node_ttl,
         )?;
@@ -439,7 +378,8 @@ impl ProcessorBuilder {
             online_node_heartbeat_interval: config.online_node_heartbeat_interval,
             online_node_ttl: config.online_node_ttl,
             online_node_type: config.online_node_type.clone(),
-            publish_online_node: config.publish_online_node,
+            register_online_node: config.register_online_node,
+            registration_tasks: Vec::new(),
             dht_finger_table_size: DEFAULT_FINGER_TABLE_SIZE,
             reassembly_limits: ReassemblyLimits::production(),
         })
@@ -475,9 +415,22 @@ impl ProcessorBuilder {
         self
     }
 
-    /// Set whether listen() publishes this node to the online-node registry.
-    pub fn publish_online_node(mut self, publish: bool) -> Self {
-        self.publish_online_node = publish;
+    /// Set whether listen() registers this node in the online-node registry.
+    pub fn register_online_node(mut self, register: bool) -> Self {
+        self.register_online_node = register;
+        self
+    }
+
+    /// Add a custom periodic registration task.
+    pub fn registration_task<T>(mut self, task: T) -> Self
+    where T: RegistrationTask + 'static {
+        self.registration_tasks.push(Arc::new(task));
+        self
+    }
+
+    /// Add an already shared custom periodic registration task.
+    pub fn shared_registration_task(mut self, task: Arc<dyn RegistrationTask>) -> Self {
+        self.registration_tasks.push(task);
         self
     }
 
@@ -492,6 +445,18 @@ impl ProcessorBuilder {
         let endpoint_hint = self.external_address.clone();
 
         let session_sk = self.session_sk.clone();
+        let online_node_registration = OnlineNodeRegistration::new(
+            self.online_node_heartbeat_interval,
+            self.online_node_ttl,
+            self.online_node_type,
+            endpoint_hint,
+        );
+        let mut registration_tasks = self.registration_tasks;
+        if self.register_online_node {
+            online_node_registration.validate_enabled_schedule()?;
+            registration_tasks.push(Arc::new(online_node_registration.clone()));
+        }
+
         let mut swarm_builder =
             SwarmBuilder::new(self.network_id, &self.ice_servers, storage, self.session_sk);
         swarm_builder = swarm_builder.dht_storage_redundancy(DATA_REDUNDANT);
@@ -514,13 +479,8 @@ impl ProcessorBuilder {
             swarm,
             session_sk,
             stabilize_interval: self.stabilize_interval,
-            online_node_heartbeat_interval: self.online_node_heartbeat_interval,
-            online_node_ttl: self.online_node_ttl,
-            online_node_type: self.online_node_type,
-            publish_online_node: self.publish_online_node,
-            online_node_started_at_ms: get_epoch_ms(),
-            online_node_endpoint_hint: endpoint_hint,
-            online_node_published_descriptors: Arc::new(AsyncMutex::new(BTreeSet::new())),
+            online_node_registration,
+            registration_tasks,
         })
     }
 }
@@ -531,45 +491,22 @@ impl Processor {
         self.swarm.did()
     }
 
-    fn online_node_capabilities() -> Vec<String> {
-        let capabilities = vec![ONLINE_NODE_CAPABILITY_STORAGE.to_string()];
-        #[cfg(feature = "snark")]
-        let capabilities = {
-            let mut capabilities = capabilities;
-            capabilities.push(ONLINE_NODE_CAPABILITY_SNARK.to_string());
-            capabilities
-        };
-        capabilities
+    pub(crate) fn session_sk(&self) -> &SessionSk {
+        &self.session_sk
     }
 
+    fn registration_context(&self) -> RegistrationContext<'_> {
+        RegistrationContext::new(self)
+    }
+
+    #[cfg(all(test, feature = "node"))]
     fn online_node_descriptor_at(&self, now_ms: u128) -> Result<OnlineNodeDescriptor> {
-        OnlineNodeDescriptor::new_signed(
-            OnlineNodeDescriptorBody {
-                did: self.swarm.did(),
-                public_key: self
-                    .swarm
-                    .account_verification_pubkey()
-                    .map_err(Error::CoreError)?,
-                node_type: self.online_node_type.clone(),
-                network_id: self.swarm.network_id(),
-                capabilities: Self::online_node_capabilities(),
-                endpoint_hint: self.online_node_endpoint_hint.clone(),
-                started_at_ms: self.online_node_started_at_ms,
-                heartbeat_at_ms: now_ms,
-                expires_at_ms: now_ms + self.online_node_ttl.as_millis(),
-                version: crate::util::build_version(),
-            },
-            &self.session_sk,
-        )
-        .map_err(Error::CoreError)
+        self.online_node_registration
+            .descriptor_at(&self.registration_context(), now_ms)
     }
 
     fn online_node_descriptors_from_entry(entry: &entry::Entry) -> Vec<OnlineNodeDescriptor> {
-        entry
-            .data
-            .iter()
-            .filter_map(|value| value.decode::<OnlineNodeDescriptor>().ok())
-            .collect()
+        OnlineNodeRegistration::descriptors_from_entry(entry)
     }
 
     #[cfg(all(test, feature = "node"))]
@@ -588,25 +525,9 @@ impl Processor {
 
     /// Publish this node's signed online descriptor to the online-node registry.
     pub async fn publish_online_node_descriptor(&self) -> Result<OnlineNodeDescriptor> {
-        let mut published_descriptors = self.online_node_published_descriptors.lock().await;
-        let now_ms = get_epoch_ms();
-        let descriptor = self.online_node_descriptor_at(now_ms)?;
-        let encoded = descriptor.encode().map_err(Error::CoreError)?;
-        let stale_descriptors = published_descriptors
-            .iter()
-            .filter(|published| *published != &encoded)
-            .cloned()
-            .collect::<Vec<_>>();
-
-        self.storage_touch_data(ONLINE_NODES_TOPIC, encoded.clone())
-            .await?;
-        published_descriptors.insert(encoded);
-        for stale_descriptor in stale_descriptors {
-            self.storage_tombstone_data(ONLINE_NODES_TOPIC, stale_descriptor.clone())
-                .await?;
-            published_descriptors.remove(&stale_descriptor);
-        }
-        Ok(descriptor)
+        self.online_node_registration
+            .publish_descriptor(&self.registration_context())
+            .await
     }
 
     /// List signed online-node descriptors from the registry.
@@ -632,40 +553,44 @@ impl Processor {
         ))
     }
 
-    async fn publish_online_node_descriptor_for_heartbeat(&self) {
-        if let Err(error) = self.publish_online_node_descriptor().await {
-            tracing::warn!("Failed to publish online node descriptor: {error:?}");
-        }
-    }
-
-    async fn online_node_heartbeat_daemon(&self) {
+    async fn registration_task_daemon(&self, task: &dyn RegistrationTask) {
         loop {
-            self.publish_online_node_descriptor_for_heartbeat().await;
-            if let Err(error) =
-                sleep_online_node_heartbeat_interval(self.online_node_heartbeat_interval).await
-            {
+            if let Err(error) = task.register_once(&self.registration_context()).await {
+                tracing::warn!("Failed to run {} registration task: {error:?}", task.name());
+            }
+            if let Err(error) = sleep_registration_interval(task.interval()).await {
                 tracing::warn!(
-                    "Stopping online node heartbeat daemon after timer error: {error:?}"
+                    "Stopping {} registration task after timer error: {error:?}",
+                    task.name()
                 );
                 return;
             }
         }
     }
 
-    /// Run stabilization and online-node heartbeat until this future is dropped or aborted.
+    async fn registration_daemons(&self) {
+        join_all(
+            self.registration_tasks
+                .iter()
+                .map(|task| self.registration_task_daemon(task.as_ref())),
+        )
+        .await;
+    }
+
+    /// Run stabilization and node registration tasks until this future is dropped or aborted.
     ///
     /// This is a long-running task; do not await completion as a readiness signal.
     pub async fn listen(&self) {
         let stabilizer = self.swarm.stabilizer();
         let stabilizer = Arc::new(stabilizer);
-        if self.publish_online_node {
+        if self.registration_tasks.is_empty() {
+            stabilizer.wait(self.stabilize_interval).await;
+        } else {
             let _ = futures::future::join(
                 stabilizer.wait(self.stabilize_interval),
-                self.online_node_heartbeat_daemon(),
+                self.registration_daemons(),
             )
             .await;
-        } else {
-            stabilizer.wait(self.stabilize_interval).await;
         }
     }
 
@@ -934,6 +859,7 @@ impl Processor {
 #[cfg(feature = "node")]
 mod test {
     use std::collections::BTreeMap;
+    use std::collections::BTreeSet;
     use std::sync::Mutex;
     use std::sync::OnceLock;
     use std::time::Duration;
@@ -951,6 +877,7 @@ mod test {
     use tokio::sync::Notify;
 
     use super::*;
+    use crate::online::OnlineNodeDescriptorBody;
     use crate::prelude::*;
     use crate::provider::Provider;
     use crate::tests::native::prepare_processor;
@@ -1042,7 +969,7 @@ mod test {
     }
 
     #[test]
-    fn online_node_publication_can_be_disabled() {
+    fn online_node_registration_can_be_disabled() {
         let key = SecretKey::random();
         let session_sk = SessionSk::new_with_seckey(&key).unwrap();
         let serialized = ProcessorConfigSerialized::new(
@@ -1053,12 +980,74 @@ mod test {
         )
         .online_node_heartbeat_interval_secs(90)
         .online_node_ttl_secs(30)
-        .publish_online_node(false);
+        .register_online_node(false);
 
         let config = ProcessorConfig::try_from(serialized).unwrap();
         let builder = ProcessorBuilder::from_config(&config).unwrap();
 
-        assert!(!builder.publish_online_node);
+        assert!(!builder.register_online_node);
+        assert!(builder.registration_tasks.is_empty());
+    }
+
+    #[test]
+    fn online_node_registration_is_enabled_by_default() {
+        let key = SecretKey::random();
+        let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+        let serialized = ProcessorConfigSerialized::new(
+            0,
+            "stun://stun.l.google.com:19302".to_string(),
+            session_sk.dump().unwrap(),
+            3,
+        );
+
+        let config = ProcessorConfig::try_from(serialized).unwrap();
+        let builder = ProcessorBuilder::from_config(&config).unwrap();
+
+        assert!(builder.register_online_node);
+    }
+
+    #[tokio::test]
+    async fn custom_registration_task_publishes_through_shared_dht_sink() -> Result<()> {
+        let topic = "custom_registration_task";
+        let value = "custom-value"
+            .to_string()
+            .encode()
+            .map_err(Error::CoreError)?;
+        let key = SecretKey::random();
+        let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+        let config = ProcessorConfig::try_from(
+            ProcessorConfigSerialized::new(
+                0,
+                "stun://stun.l.google.com:19302".to_string(),
+                session_sk.dump().unwrap(),
+                3,
+            )
+            .register_online_node(false),
+        )
+        .unwrap();
+        let processor = ProcessorBuilder::from_config(&config)
+            .unwrap()
+            .storage(Box::new(MemStorage::new()))
+            .dht_finger_table_size(8)
+            .registration_task(StaticRegistration::new(topic, value.clone()))
+            .build()
+            .unwrap();
+
+        assert_eq!(processor.registration_tasks.len(), 1);
+        for task in &processor.registration_tasks {
+            task.register_once(&processor.registration_context())
+                .await?;
+        }
+
+        let entry_key = entry::Entry::gen_did(topic)?;
+        processor.storage_fetch(entry_key).await?;
+        let entry = processor
+            .storage_check_cache(entry_key)
+            .await
+            .expect("custom registration entry should be cached after publish");
+
+        assert!(entry.data.contains(&value));
+        Ok(())
     }
 
     #[tokio::test]
@@ -1140,9 +1129,9 @@ mod test {
                     .swarm
                     .account_verification_pubkey()
                     .map_err(Error::CoreError)?,
-                node_type: expired_processor.online_node_type.clone(),
+                node_type: default_online_node_type(),
                 network_id: expired_processor.swarm.network_id(),
-                capabilities: Processor::online_node_capabilities(),
+                capabilities: OnlineNodeRegistration::capabilities(),
                 endpoint_hint: None,
                 started_at_ms: now_ms.saturating_sub(120_000),
                 heartbeat_at_ms: now_ms.saturating_sub(90_000),
@@ -1291,6 +1280,35 @@ mod test {
         inbound: Mutex<Vec<Message>>,
         inbound_notify: Notify,
         connected_notify: Notify,
+    }
+
+    struct StaticRegistration {
+        publisher: crate::registration::DhtRegistrationPublisher,
+        value: Encoded,
+    }
+
+    impl StaticRegistration {
+        fn new(topic: &str, value: Encoded) -> Self {
+            Self {
+                publisher: crate::registration::DhtRegistrationPublisher::new(topic),
+                value,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl RegistrationTask for StaticRegistration {
+        fn name(&self) -> &'static str {
+            "static-test"
+        }
+
+        fn interval(&self) -> Duration {
+            Duration::from_secs(60)
+        }
+
+        async fn register_once(&self, context: &RegistrationContext<'_>) -> Result<()> {
+            self.publisher.publish(context, self.value.clone()).await
+        }
     }
 
     #[async_trait]

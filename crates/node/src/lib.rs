@@ -11,6 +11,7 @@ pub mod online;
 pub mod prelude;
 pub mod processor;
 pub mod provider;
+pub mod registration;
 mod rpc_dto;
 mod rpc_impl;
 pub mod seed;

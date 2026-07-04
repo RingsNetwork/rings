@@ -58,14 +58,14 @@ pub struct Config {
     pub endpoint_url: String,
     pub ice_servers: String,
     pub stabilize_interval: u64,
-    #[serde(default = "crate::processor::default_online_node_heartbeat_interval_secs")]
+    #[serde(default = "crate::registration::default_online_node_heartbeat_interval_secs")]
     pub online_node_heartbeat_interval_secs: u64,
-    #[serde(default = "crate::processor::default_online_node_ttl_secs")]
+    #[serde(default = "crate::registration::default_online_node_ttl_secs")]
     pub online_node_ttl_secs: u64,
-    #[serde(default = "crate::processor::default_online_node_type")]
+    #[serde(default = "crate::registration::default_online_node_type")]
     pub online_node_type: OnlineNodeType,
-    #[serde(default = "crate::processor::default_publish_online_node")]
-    pub publish_online_node: bool,
+    #[serde(default = "crate::registration::default_register_online_node")]
+    pub register_online_node: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_ip: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -108,7 +108,7 @@ impl TryFrom<Config> for ProcessorConfigSerialized {
         .online_node_heartbeat_interval_secs(config.online_node_heartbeat_interval_secs)
         .online_node_ttl_secs(config.online_node_ttl_secs)
         .online_node_type(config.online_node_type)
-        .publish_online_node(config.publish_online_node);
+        .register_online_node(config.register_online_node);
 
         cs = if let Some(ext_ip) = config.external_ip {
             cs.external_address(ext_ip)
@@ -151,10 +151,10 @@ impl Config {
             ice_servers: DEFAULT_ICE_SERVERS.to_string(),
             stabilize_interval: DEFAULT_STABILIZE_INTERVAL,
             online_node_heartbeat_interval_secs:
-                crate::processor::default_online_node_heartbeat_interval_secs(),
-            online_node_ttl_secs: crate::processor::default_online_node_ttl_secs(),
-            online_node_type: crate::processor::default_online_node_type(),
-            publish_online_node: crate::processor::default_publish_online_node(),
+                crate::registration::default_online_node_heartbeat_interval_secs(),
+            online_node_ttl_secs: crate::registration::default_online_node_ttl_secs(),
+            online_node_type: crate::registration::default_online_node_type(),
+            register_online_node: crate::registration::default_register_online_node(),
             external_ip: None,
             webrtc_udp_port_min: None,
             webrtc_udp_port_max: None,
@@ -239,6 +239,7 @@ measure_storage:
 "#;
         let cfg: Config = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(cfg.network_id, 1);
+        assert!(cfg.register_online_node);
     }
 
     #[test]
