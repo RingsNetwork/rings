@@ -61,6 +61,8 @@ use crate::onion::ONION_RELAY_CAPABILITY;
 use crate::onion_proxy::OnionProxyConfig;
 use crate::onion_proxy::OnionProxyRoute;
 use crate::onion_proxy::OnionProxyTarget;
+#[cfg(feature = "browser")]
+use crate::onion_proxy::ONION_PROXY_HTTPS_SERVICE;
 use crate::online::OnlineNodeDescriptor;
 use crate::online::OnlineNodeType;
 use crate::online::ONLINE_NODES_TOPIC;
@@ -191,6 +193,23 @@ impl ProcessorConfig {
     /// Returns the validated native WebRTC UDP port range, when configured.
     pub fn webrtc_udp_port_range(&self) -> Result<Option<WebrtcUdpPortRange>> {
         parse_webrtc_udp_port_range(self.webrtc_udp_port_min, self.webrtc_udp_port_max)
+    }
+
+    /// Sets the onion-exit policy.
+    pub fn onion_exit_policy(mut self, policy: OnionExitPolicy) -> Self {
+        self.onion_exit_policy = policy;
+        self
+    }
+
+    /// Return the browser HTTPS onion-exit policy when this config advertises that service.
+    #[cfg(feature = "browser")]
+    pub fn onion_https_exit_policy(&self) -> Option<OnionExitPolicy> {
+        (self.advertise_onion_exit
+            && self
+                .onion_exit_services
+                .iter()
+                .any(|service| service.has_name(ONION_PROXY_HTTPS_SERVICE)))
+        .then(|| self.onion_exit_policy.clone())
     }
 }
 
@@ -872,13 +891,31 @@ impl Processor {
         proxy: OnionProxyConfig,
         target: OnionProxyTarget,
     ) -> Result<OnionProxyRoute> {
-        let route = self
-            .build_onion_route(
-                proxy.exit_service().to_string(),
-                proxy.hop_count,
-                proxy.allow_short_paths,
-            )
-            .await?;
+        let service = proxy.exit_service().to_string();
+        let target_authority = target.authority();
+        let request = OnionRouteRequest {
+            service: service.clone(),
+            hop_count: proxy.hop_count,
+            allow_short_paths: proxy.allow_short_paths,
+        };
+        let online_nodes = self.lookup_online_nodes(false).await?;
+        let exits = self
+            .lookup_onion_exits(&service, false)
+            .await?
+            .into_iter()
+            .filter(|exit| exit.policy.allows_target(&target_authority));
+        let candidates = OnionRouteCandidates::from_validated_descriptors(
+            self.did(),
+            &service,
+            online_nodes,
+            exits,
+        );
+        let route = select_onion_route_from_candidates(
+            &request,
+            candidates,
+            self.onion_route_peer_qualities().await,
+            &mut SystemRouteEntropy::new(),
+        )?;
 
         Ok(OnionProxyRoute {
             protocol: proxy.protocol,
@@ -1776,6 +1813,53 @@ mod test {
     }
 
     #[tokio::test]
+    async fn onion_proxy_route_filters_exits_by_target_policy() -> Result<()> {
+        let processor = prepare_processor().await;
+        let allowed_exit = prepare_processor().await;
+        let denied_exit = prepare_processor().await;
+        let now_ms = get_epoch_ms();
+        let allowed_descriptor = onion_exit_descriptor_for_processor_with_policy(
+            &allowed_exit,
+            "https",
+            now_ms,
+            OnionExitPolicy {
+                allowed_targets: vec!["example.com:443".to_string()],
+                denied_targets: vec![],
+                max_circuits: 8,
+                max_streams_per_circuit: 2,
+                max_bytes_per_minute: 4096,
+            },
+        )?;
+        let denied_descriptor = onion_exit_descriptor_for_processor_with_policy(
+            &denied_exit,
+            "https",
+            now_ms,
+            OnionExitPolicy {
+                allowed_targets: vec!["example.com:443".to_string()],
+                denied_targets: vec!["example.com:443".to_string()],
+                max_circuits: 8,
+                max_streams_per_circuit: 2,
+                max_bytes_per_minute: 4096,
+            },
+        )?;
+
+        processor
+            .storage_store(Processor::onion_exit_registry_entry(vec![
+                denied_descriptor,
+                allowed_descriptor,
+            ])?)
+            .await?;
+
+        let target = OnionProxyTarget::parse_authority("example.com:443")?;
+        let route = processor
+            .build_onion_proxy_route(OnionProxyConfig::https_proxy(1, false), target)
+            .await?;
+
+        assert_eq!(route.exit_did(), allowed_exit.did());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn online_node_registry_lists_two_publishers_over_network() -> Result<()> {
         let _network_guard = network_test_guard().await;
         let (publisher, owner) = prepare_online_node_registry_pair(42).await?;
@@ -2042,6 +2126,26 @@ mod test {
         service: &str,
         now_ms: u128,
     ) -> Result<OnionExitDescriptor> {
+        onion_exit_descriptor_for_processor_with_policy(
+            processor,
+            service,
+            now_ms,
+            OnionExitPolicy {
+                allowed_targets: vec!["127.0.0.1:8080".to_string(), "example.com:443".to_string()],
+                denied_targets: vec![],
+                max_circuits: 8,
+                max_streams_per_circuit: 2,
+                max_bytes_per_minute: 4096,
+            },
+        )
+    }
+
+    fn onion_exit_descriptor_for_processor_with_policy(
+        processor: &Processor,
+        service: &str,
+        now_ms: u128,
+        policy: OnionExitPolicy,
+    ) -> Result<OnionExitDescriptor> {
         OnionExitDescriptor::new_signed(
             OnionExitDescriptorBody {
                 did: processor.did(),
@@ -2055,13 +2159,7 @@ mod test {
                     name: service.to_string(),
                     transport: OnionExitTransport::Tcp,
                 }],
-                policy: OnionExitPolicy {
-                    allowed_targets: vec!["127.0.0.1:8080".to_string()],
-                    denied_targets: vec![],
-                    max_circuits: 8,
-                    max_streams_per_circuit: 2,
-                    max_bytes_per_minute: 4096,
-                },
+                policy,
                 started_at_ms: now_ms,
                 heartbeat_at_ms: now_ms,
                 expires_at_ms: now_ms + 90_000,

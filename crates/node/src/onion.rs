@@ -169,21 +169,31 @@ impl OnionExitPolicy {
 
     /// Return whether `target` is admitted by this policy's allow-list.
     pub fn allows_target(&self, target: &str) -> bool {
-        let target = target.trim();
-        if target.is_empty() || self.is_closed() {
+        let Some(target) = canonical_exit_target(target) else {
+            return false;
+        };
+        if self.is_closed() {
             return false;
         }
         if self
             .denied_targets
             .iter()
-            .any(|denied| denied.as_str() == target)
+            .filter_map(|denied| canonical_exit_target(denied))
+            .any(|denied| denied == target)
         {
             return false;
         }
         self.allowed_targets
             .iter()
-            .any(|allowed| allowed.as_str() == target)
+            .filter_map(|allowed| canonical_exit_target(allowed))
+            .any(|allowed| allowed == target)
     }
+}
+
+fn canonical_exit_target(target: &str) -> Option<String> {
+    crate::onion_proxy::OnionProxyTarget::parse_authority(target)
+        .ok()
+        .map(|target| target.authority())
 }
 
 /// Descriptor fields covered by the onion-exit signature.
@@ -910,8 +920,8 @@ mod tests {
     fn exit_policy_allow_list_controls_targets() {
         let policy = OnionExitPolicy {
             allowed_targets: vec![
-                "example.com:443".to_string(),
-                "api.example.com:443".to_string(),
+                "Example.COM.:443".to_string(),
+                "API.example.com:443".to_string(),
             ],
             denied_targets: vec!["api.example.com:443".to_string()],
             max_circuits: 0,

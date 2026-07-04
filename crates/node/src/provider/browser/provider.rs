@@ -24,6 +24,14 @@ use wasm_bindgen_futures;
 use wasm_bindgen_futures::future_to_promise;
 use wasm_bindgen_futures::JsFuture;
 
+use crate::onion::OnionExitPolicy;
+use crate::onion_https::encode_request as encode_onion_https_request;
+use crate::onion_https::runtime_for_provider;
+use crate::onion_https::OnionHttpsClientRequest;
+use crate::onion_https::OnionHttpsProtocol;
+use crate::onion_https::OnionHttpsRuntime;
+use crate::onion_https::OnionHttpsShell;
+use crate::onion_https::ONION_HTTPS_PROXY_NAMESPACE;
 use crate::onion_proxy::OnionProxyConfig;
 use crate::processor::Processor;
 use crate::processor::ProcessorConfig;
@@ -63,6 +71,7 @@ impl ProviderRef {
 pub struct BrowserOnionProxy {
     processor: Arc<Processor>,
     config: OnionProxyConfig,
+    runtime: Arc<OnionHttpsRuntime>,
 }
 
 #[wasm_export]
@@ -97,6 +106,48 @@ impl BrowserOnionProxy {
                 crate::rpc_dto::onion_route_response(route.route).map_err(JsError::from)?;
             let value = js_value::serialize(&response).map_err(JsError::from)?;
             Ok(value)
+        })
+    }
+
+    /// Send one HTTPS request through this onion proxy.
+    ///
+    /// `target_authority` is `host:port`. `request` is an object with optional `method`, `path`,
+    /// `headers`, and `body` fields. The returned Promise resolves to `{ status, headers, body }`.
+    pub fn request(&self, target_authority: String, request: JsValue) -> js_sys::Promise {
+        let p = self.processor.clone();
+        let config = self.config;
+        let runtime = self.runtime.clone();
+        future_to_promise(async move {
+            let target = crate::onion_proxy::OnionProxyTarget::parse_authority(&target_authority)
+                .map_err(JsError::from)?;
+            let request = if request.is_null() || request.is_undefined() {
+                OnionHttpsClientRequest::default()
+            } else {
+                js_value::deserialize::<OnionHttpsClientRequest>(request).map_err(JsError::from)?
+            };
+            let proxy_route = p
+                .build_onion_proxy_route(config, target.clone())
+                .await
+                .map_err(JsError::from)?;
+            let exit = proxy_route.exit_did();
+            let (id, receiver) = runtime.begin_request(exit).map_err(JsError::from)?;
+            let payload =
+                encode_onion_https_request(id, &target, request).map_err(JsError::from)?;
+            let envelope = crate::extension::ext::Envelope::new(
+                ONION_HTTPS_PROXY_NAMESPACE.to_string(),
+                payload,
+            );
+            if let Err(error) = p.send_envelope(exit, &envelope).await {
+                runtime.cancel_request(id);
+                return Err(JsValue::from(JsError::from(error)));
+            }
+            match receiver.await {
+                Ok(Ok(response)) => Ok(js_value::serialize(&response).map_err(JsError::from)?),
+                Ok(Err(message)) => Err(JsValue::from_str(&message)),
+                Err(_) => Err(JsValue::from_str(
+                    "onion HTTPS proxy response channel closed",
+                )),
+            }
         })
     }
 }
@@ -228,6 +279,68 @@ impl Provider {
             .await?;
 
             provider.set_backend().map_err(JsError::from)?;
+            provider
+                .install_onion_https_protocol(Some(crate::onion::default_onion_exit_policy()))
+                .map_err(JsError::from)?;
+
+            Ok(JsValue::from(provider))
+        })
+    }
+
+    /// Create a browser provider that advertises an HTTPS onion exit with explicit target policy.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_https_exit_instance_with_targets(
+        network_id: u32,
+        ice_servers: String,
+        stabilize_interval: u64,
+        account: String,
+        account_type: String,
+        signer: js_sys::Function,
+        allowed_targets: Vec<String>,
+        denied_targets: Vec<String>,
+    ) -> js_sys::Promise {
+        future_to_promise(async move {
+            let signer = wrapped_signer(signer);
+            let policy = OnionExitPolicy {
+                allowed_targets,
+                denied_targets,
+                ..OnionExitPolicy::default()
+            };
+
+            let entry_storage = Box::new(
+                IdbStorage::new_with_cap_and_name(50000, "rings-node")
+                    .await
+                    .map_err(JsError::from)?,
+            );
+
+            let measure_storage = Box::new(
+                IdbStorage::new_with_cap_and_name(50000, "rings-node/measure")
+                    .await
+                    .map_err(JsError::from)?,
+            );
+
+            let config_policy = policy.clone();
+            let provider = Provider::new_provider_internal_with_config(
+                network_id,
+                ice_servers,
+                stabilize_interval,
+                account,
+                account_type,
+                Signer::Async(Box::new(signer)),
+                Some(entry_storage),
+                Some(measure_storage),
+                move |config| {
+                    config
+                        .enable_https_onion_exit()
+                        .onion_exit_policy(config_policy)
+                },
+            )
+            .await?;
+
+            provider.set_backend().map_err(JsError::from)?;
+            provider
+                .install_onion_https_protocol(Some(policy))
+                .map_err(JsError::from)?;
 
             Ok(JsValue::from(provider))
         })
@@ -258,6 +371,7 @@ impl Provider {
         storage_name: String,
     ) -> js_sys::Promise {
         future_to_promise(async move {
+            let onion_https_exit_policy = config.onion_https_exit_policy();
             let entry_storage = Box::new(
                 IdbStorage::new_with_cap_and_name(50000, &storage_name)
                     .await
@@ -278,6 +392,11 @@ impl Provider {
             .await
             .map_err(JsError::from)?;
             provider.set_backend().map_err(JsError::from)?;
+            if let Some(policy) = onion_https_exit_policy {
+                provider
+                    .install_onion_https_protocol(Some(policy))
+                    .map_err(JsError::from)?;
+            }
             Ok(JsValue::from(provider))
         })
     }
@@ -432,8 +551,10 @@ impl Provider {
         hop_count: usize,
         allow_short_paths: bool,
     ) -> js_sys::Promise {
-        self.onion_https_proxy(hop_count, allow_short_paths)
-            .route(target)
+        match self.onion_https_proxy(hop_count, allow_short_paths) {
+            Ok(proxy) => proxy.route(target),
+            Err(error) => js_sys::Promise::reject(&JsValue::from(error)),
+        }
     }
 
     /// Create a browser-compatible HTTPS onion proxy.
@@ -444,11 +565,15 @@ impl Provider {
         &self,
         hop_count: usize,
         allow_short_paths: bool,
-    ) -> BrowserOnionProxy {
-        BrowserOnionProxy {
+    ) -> Result<BrowserOnionProxy, JsError> {
+        let runtime = self
+            .install_onion_https_protocol(None)
+            .map_err(JsError::from)?;
+        Ok(BrowserOnionProxy {
             processor: self.processor.clone(),
             config: OnionProxyConfig::https_proxy(hop_count, allow_short_paths),
-        }
+            runtime,
+        })
     }
 
     /// Check local cache
@@ -521,6 +646,22 @@ impl Provider {
                 Ok(JsValue::from(js_sys::Array::new()))
             }
         })
+    }
+}
+
+impl Provider {
+    fn install_onion_https_protocol(
+        &self,
+        exit_policy: Option<OnionExitPolicy>,
+    ) -> crate::error::Result<Arc<OnionHttpsRuntime>> {
+        let runtime = runtime_for_provider(format!("{:p}", Arc::as_ptr(&self.processor)))?;
+        if exit_policy.is_some() {
+            runtime.set_exit_policy(exit_policy);
+        }
+        if !self.extensions().contains(ONION_HTTPS_PROXY_NAMESPACE) {
+            self.register_protocol(OnionHttpsProtocol, OnionHttpsShell::new(runtime.clone()))?;
+        }
+        Ok(runtime)
     }
 }
 
