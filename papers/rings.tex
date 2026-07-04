@@ -11,7 +11,6 @@
 \usepackage{epsfig}
 \usepackage{epstopdf}
 \usepackage{url}
-\usepackage{enumitem}
 \usepackage{array}
 \usepackage[utf8]{inputenc}
 \usepackage[english]{babel}
@@ -25,6 +24,9 @@
 \newtheorem{proposition}{Proposition}
 \newtheorem{invariant}{Invariant}
 \newtheorem{obligation}{Obligation}
+
+\newcommand{\RingsObj}{\mathsf{Rings}}
+\newcommand{\SetOverR}{\mathbf{Set}/R}
 
 \usetikzlibrary{shapes,arrows,positioning,patterns,through}
 
@@ -58,19 +60,21 @@ for Decentralized Identity and Resource Ownership}
 \parbox{0.90\textwidth}{%
 \centering\bfseries Abstract\\[0.5\baselineskip]%
 \normalfont
-Rings is an implemented algebraic structured peer-to-peer network for
-decentralized identity, resource ownership, transport, storage, and application
-protocols.  The project starts from a concrete failure mode in contemporary
+Rings is an implemented structured peer-to-peer network whose design is stated
+as algebraic carriers, ownership maps, protocol transitions, and explicit proof
+obligations.  The project starts from a concrete failure mode in contemporary
 Internet systems: application servers, DNS names, relay services, and platform
 accounts often become the authority that identities and data must trust.  Rings
-instead treats identities and resources as algebraic objects over a structured
-CorrectChord overlay, with browser and native runtimes connected through
-WebRTC/WebAssembly adapters and cryptographic protocols kept on carriers
-separate from the routing identifier space.
+instead places identities and resources over a CorrectChord overlay, connects
+browser and native runtimes through WebRTC/WebAssembly adapters, and keeps
+cryptographic protocols on carriers separate from the routing identifier space.
+This paper distinguishes implemented mechanisms from scoped verification
+evidence and from evaluation obligations that still require Rings-specific
+measurement.
 The core object is
 \[
-  \mathcal{Rings}=
-  (R,\mathcal{R}_N,\mathbf{Set}/R,\Omega_N,
+  \RingsObj=
+  (R,\mathcal{R}_N,\SetOverR,\Omega_N,
    \mathsf{T}^{\mathcal{E}}_A,\Pi,\mathbb{G},\mathcal{X})
 \]
 with
@@ -84,7 +88,7 @@ with
 \end{array}
 \]
 \[
-  \{D,V,M,H,Q,W\}\subset\operatorname{Obj}(\mathbf{Set}/R),
+  \{D,V,M,H,Q,W\}\subset\operatorname{Obj}(\SetOverR),
   \qquad
   \mathsf{CryptoCarrier}\cap R=\varnothing.
 \]
@@ -109,9 +113,10 @@ protocols without turning a single application server into the root of
 authority.
 
 Rings is implemented as a network, but this paper is organized around the
-algebraic structure that makes the implementation coherent.  It states the
-ideal carrier, ownership, transition, and safety laws that the implementation
-realizes and continues to refine.  The older intuition was that Decentralized
+algebraic structure that makes the implementation coherent.  It separates
+implemented mechanisms from ideal carrier, ownership, transition, and safety
+laws that remain obligations for stronger verification and evaluation.  The
+older intuition was that Decentralized
 Identifiers (DIDs) directly form a finite ring suitable for all routing and
 cryptographic operations.  The refined model is more precise: Chord identifiers
 form an additive circular carrier for placement, interval order, replica
@@ -140,31 +145,25 @@ systems.  Blockchains provide global ordering, but embedding consensus in every
 message or storage operation would turn Rings into a ledger rather than an
 algebraic structured peer-to-peer substrate.
 
-The problem is therefore to specify a network object
-\[
-  \mathcal{Rings}
-\]
-that simultaneously supports:
-\begin{enumerate}[leftmargin=*,noitemsep,topsep=0pt]
-\item self-certifying identity and delegated sessions;
-\item structured lookup and resource ownership;
-\item browser-native and native transport surfaces;
-\item application protocols with typed side effects;
-\item cryptographic protocols over correct carriers;
-\item bounded algebraic and operational obligations for routing and state repair.
-\end{enumerate}
+The problem is therefore to specify a network object \(\RingsObj\) that
+simultaneously supports self-certifying identity and delegated sessions,
+structured lookup and resource ownership, browser-native and native transport
+surfaces, application protocols with typed side effects, cryptographic protocols
+over correct carriers, and bounded algebraic and operational obligations for
+routing and state repair.
 
 This paper makes the following contributions.  It presents Rings as an
 algebraic structured peer-to-peer network, not merely as an overlay lookup
 routine.  It models the Rings identifier space as the additive cyclic group
 \(R=\mathbb{Z}/2^{160}\mathbb{Z}\), not as a general finite field.  It lifts
-resource placement into \(\mathbf{Set}/R\), so each protocol object carries an
+resource placement into \(\SetOverR\), so each protocol object carries an
 explicit map into the overlay.  It uses CorrectChord as the maintenance law
 before introducing Rings-specific replication, storage, mailbox, relay, and
 ranking semantics.  It gives a writer effect monad for DHT transitions and a
-TLA-style state relation for model checking and trace replay.  These algebraic
-and operational artifacts are the core of the paper; the surrounding text
-explains why those artifacts exist and how they relate to prior systems.
+TLA-style state relation for scoped model checking and trace replay.  These
+algebraic and operational artifacts are the core of the paper; the surrounding
+text explains which parts are implemented, which parts are checked in bounded
+models, and which parts remain future measurement obligations.
 
 \section{Algebraic System Model}
 
@@ -232,24 +231,29 @@ This is the CorrectChord stable base of Zave~\cite{ZaveChordCorrect}.
 \[
 \begin{array}{rcl}
 \rho&\in&\mathbb{N}_{>0},\\
-\operatorname{rot}^{\rho}_i(k)
+\operatorname{repkey}^{\rho}_i(k)
   &=&k+\left\lfloor M\cdot i/\rho\right\rfloor,\\[4pt]
-\operatorname{Rep}^{\rho}_N(k)
+\operatorname{RepKey}^{\rho}(k)
   &=&
-  \{\operatorname{owner}_N(\operatorname{rot}^{\rho}_i(k)):
-    0\leq i<\rho\}.
+  \langle \operatorname{repkey}^{\rho}_i(k):0\leq i<\rho\rangle,\\[4pt]
+\operatorname{RepOwner}^{\rho}_N(k)
+  &=&
+  \langle \operatorname{owner}_N(\operatorname{repkey}^{\rho}_i(k)):
+    0\leq i<\rho\rangle.
 \end{array}
 \]
-Storage redundancy uses affine rotations of the entry key.  Successor lists
-remain the CorrectChord safety root for topology maintenance, not the storage
-replica set.
+Storage redundancy is specified first as distinct placement keys.  Effective
+node-level redundancy depends on how those keys map through the live owner
+function; two placement keys can collapse to the same live owner when the
+topology is too small or poorly spaced.  Successor lists remain the
+CorrectChord safety root for topology maintenance, not the storage replica set.
 \end{definition}
 
 \begin{definition}[Rings overlay object]
 \[
   \mathcal{R}_N=
   (R,N,\operatorname{owner}_N,\operatorname{pred}_N,
-   \operatorname{Succ}^r_N,\operatorname{Rep}^{\rho}_N,F,E),
+   \operatorname{Succ}^r_N,\operatorname{RepOwner}^{\rho}_N,F,E),
 \]
 \[
 \begin{array}{rcl}
@@ -287,7 +291,9 @@ E&=&\prod_{v\in VID}E_v,\\
 \begin{array}{rcl}
 \mathsf{PlacementOps}&=&
   \{0,+,-,\delta_a,(a,b]_R\}\\
-&&\cup\{\operatorname{owner}_N,\operatorname{Rep}^r_N\},\\
+&&\cup\{\operatorname{owner}_N\}\\
+&&\cup\{\operatorname{RepKey}^{\rho},
+        \operatorname{RepOwner}^{\rho}_N\},\\
 \mathsf{CryptoOps}&=&
   \{\times,^{-1},\cdot_{scalar},\mathsf{interp}\}\\
 &&\cup\{\mathsf{pair},\mathsf{subgroup}\},\\
@@ -299,20 +305,19 @@ E&=&\prod_{v\in VID}E_v,\\
 
 \begin{table}[htbp]
 \centering
-\small
-\begin{tabular}{p{2.0cm}|p{4.8cm}}
+\footnotesize
+\begin{tabular}{p{1.65cm}|p{5.15cm}}
 \hline
 Object & Carrier or law \\ \hline
 Chord IDs & additive cyclic group $R$ \\
 DID proof & signature verifier and transcript law \\
 VID placement & $H_\nu:X_\nu\to R$ then owner map \\
 Storage merge & join semilattice or explicit finalizer \\
-E2E encryption & finite field or curve group \\
+E2E encryption & group operation plus byte-to-point adapter \\
 Sequencing & partial order over witness domains \\
 Effects & writer monad over action lists \\
 \hline
 \end{tabular}
-\normalsize
 \caption{Carrier boundaries in the Rings model}
 \label{carrier-table}
 \end{table}
@@ -479,7 +484,7 @@ a\notin\mathsf{cap}&\Rightarrow&I_X(a)=\mathsf{Reject}(a).
 \begin{array}{rcl}
 \nu&\in&\{D,V,M,H,U,Q,W\},\\
 H_\nu&:&X_\nu\to R,\\
-(X_\nu,H_\nu)&\in&\mathbf{Set}/R.
+(X_\nu,H_\nu)&\in&\SetOverR.
 \end{array}
 \]
 \end{definition}
@@ -487,7 +492,7 @@ H_\nu&:&X_\nu\to R,\\
 \begin{definition}[Placement functor]
 \[
 \begin{array}{rcl}
-  \Omega_N&:&\mathbf{Set}/R\to\mathbf{Set}/N,\\
+  \Omega_N&:&\SetOverR\to\mathbf{Set}/N,\\
   (X,H)&\mapsto&(X,\operatorname{owner}_N\circ H).
 \end{array}
 \]
@@ -612,27 +617,6 @@ H_\mu\circ\sigma_X&=&H_\nu,\\[4pt]
 \]
 This section fixes Chord as the base protocol and CorrectChord as the maintenance law~\cite{Chord,ZaveChordCorrect}.
 
-\begin{figure}[h]
-    \begin{center}
-  \begin{tikzpicture}[node distance=5cm,auto,>=latex']
-    \xdef\N{16}
-    \xdef\S{3}
-    \xdef\deltadegree{360/\N}
-    \draw[thick] (0,0) circle (\S);
-    \foreach \i in {0,...,15} {
-      \foreach \j in {1,...,4}{
-            \pgfmathsetmacro{\result}{mod(\i+2^\j,\N)}
-            \draw (-\i*\deltadegree+90:\S) -- (-1*\result*\deltadegree+90:\S);
-        }
-    }
-    \foreach \i in {0,...,15}
-    \node (\i) [circle,fill=white,draw=black,thick] at (-\i*\deltadegree+90:\S) {\i};
-  \end{tikzpicture}
-    \end{center}
-      \caption{Chord algorithm, lookup protocol}
-    \label{dht}
-\end{figure}
-
 \begin{definition}[Local node state]
 \[
   S_n=(p_n,L_n,F_n,E_n)
@@ -728,7 +712,7 @@ E_n&\subseteq&E,\\
     \node (\i) [circle,fill=white,draw=black,thick] at (-\i*\deltadegree+90:\S) {\i};
   \end{tikzpicture}
       \end{center}
-      \caption{Chord algorithm, lookup protocol}
+      \caption{Chord finger targets from node 1 in a 16-node ring}
       \label{lookup-figure}
 \end{figure}
 
@@ -859,11 +843,17 @@ This is the CRDT join-semilattice case~\cite{ShapiroCRDT}.
 
 \begin{invariant}[Placement]
 \[
-  \operatorname{Inv}_{place}\equiv
-  \forall \nu,x.\;
-  \operatorname{replicas}(H_\nu(x))
-  \subseteq
-  \operatorname{Rep}^{\rho}_N(H_\nu(x)).
+\begin{array}{rcl}
+K_{\nu,x}&=&\operatorname{replicaKeys}(H_\nu(x)),\\[2pt]
+P_{\nu,x}&=&\operatorname{set}(\operatorname{RepKey}^{\rho}(H_\nu(x))),\\[2pt]
+O_{\nu,x}&=&\operatorname{set}(\operatorname{RepOwner}^{\rho}_N(H_\nu(x))),\\[2pt]
+U_{\nu,x}&=&\operatorname{owner}_N[K_{\nu,x}],\\[2pt]
+\operatorname{Inv}_{place}
+&\equiv&
+\forall \nu,x.\;
+K_{\nu,x}\subseteq P_{\nu,x}
+\land U_{\nu,x}\subseteq O_{\nu,x}.
+\end{array}
 \]
 \end{invariant}
 
@@ -919,24 +909,31 @@ h&=&g^x,\\
 \caption{ElGamal Encryption and Decryption}
 \label{alg:elgamal}
 \begin{algorithmic}[1]
-\State \textbf{Input:} Message $m$, private key $x \in \mathbb{Z}_q$, public key $h = g^x$, generator $g$
-\State \textbf{Output:} Encrypted message $(c_1, c_2)$
+\State \textbf{Input:} Encoded group element $m_G\in\mathbb{G}$, private key $x \in \mathbb{Z}_q$, public key $h = g^x$, generator $g$
+\State \textbf{Output:} Group ciphertext $(c_1, c_2)$
 \Procedure{Encryption}{}
 \State Choose a random integer $k \in \mathbb{Z}_q$
 \State Compute $c_1 = g^k$
-\State Compute $c_2 = m\cdot h^k$
+\State Compute $c_2 = m_G\cdot h^k$
 \State \Return $(c_1, c_2)$
 \EndProcedure
 \Procedure{Decryption}{}
-\State Compute $m = c_2\cdot(c_1)^{-x}$
-\State \Return $m$
+\State Compute $m_G = c_2\cdot(c_1)^{-x}$
+\State \Return $m_G$
 \EndProcedure
 \end{algorithmic}
 \end{algorithm}
 
+Algorithm~\ref{alg:elgamal} is the group-level carrier operation.  Byte
+payloads must first be encoded into curve points and split into bounded frames.
+The direct ElGamal body is malleable when detached from its signed transport
+envelope; Rings therefore treats message signatures, DID ownership of the
+public key, stream identifiers, sequence numbers, and final-frame checks as
+part of the security boundary rather than as optional metadata.
+
 \begin{definition}[Signed encrypted frame]
 \[
-  f=(sid,seq,last,cipher,pk_s,\sigma_s).
+  f=(sid,seq,last,cipher,pk_s,\sigma_s,win).
 \]
 \[
 \begin{aligned}
@@ -944,7 +941,9 @@ h&=&g^x,\\
   \operatorname{FrameValid}(f)
   \Leftrightarrow\;&V(pk_s,\sigma_s,m_f)=\top\\
   &\land\;
-    \operatorname{Session}(D(pk_s),sid,e).
+    \operatorname{Session}(D(pk_s),sid,e)\\
+  &\land\;
+    \operatorname{SeqOK}(sid,seq,last,win).
 \end{aligned}
 \]
 \end{definition}
@@ -1069,21 +1068,25 @@ The split vocabulary follows MSRP~\cite{RFC4975}.
 
 \begin{table}[htbp]
 \centering
-\small
+\footnotesize
 \setlength{\tabcolsep}{2pt}
-\begin{tabular}{p{1.1cm}|p{2.1cm}|p{2.35cm}}
+\begin{tabular}{p{1.05cm}|p{2.0cm}|p{2.45cm}}
 \hline
-Attack & Predicate & Rings control \\ \hline
-Sybil & many DIDs, one actor & admission cost, ranking, challenge \\
-Replay & stale valid $\sigma$ & nonce, TTL, session epoch \\
-MITM & wrong key for DID & DID proof, signed envelope, E2E \\
-DoS & unbounded resource use & quotas, ranking, chunk bounds \\
+Attack & Predicate & Required boundary \\ \hline
+Sybil & many DIDs, one actor & admission and ranking policy \\
+Replay & stale valid $\sigma$ & TTL, stream order, final marker \\
+MITM & wrong key for DID & DID proof and signed envelope \\
+DoS & unbounded resource use & quotas and chunk bounds \\
 \hline
 \end{tabular}
-\normalsize
-\caption{Security predicates and controls}
+\caption{Security predicates and required controls}
 \label{security-table}
 \end{table}
+
+Table~\ref{security-table} is a boundary summary, not a standalone proof of
+Sybil resistance, anonymity, or denial-of-service tolerance.  Those properties
+depend on protocol-specific admission, ranking, relay, and resource-accounting
+policies outside the base overlay.
 
 \begin{obligation}[Replay rejection]
 \[
@@ -1097,7 +1100,13 @@ Seen'_s&=&Seen_s\cup\{\eta\},\\
 \]
 \end{obligation}
 
-\section{Verification and Evaluation}
+\section{Verification Evidence and Evaluation Scope}
+
+This section separates three things that are easy to conflate: algebraic
+specification, scoped verification evidence, and performance evaluation.  The
+repository contains executable evidence for specific overlay, storage, and
+message-flow obligations.  It does not yet contain a wide-area Rings benchmark
+that can replace a published Chord latency or churn experiment.
 
 \begin{definition}[State relation]
 \[
@@ -1113,9 +1122,13 @@ Seen'_s&=&Seen_s\cup\{\eta\},\\
 }
 \]
 \[
-  \mathsf{Explore}=\mathsf{TLAStyle}(\to)
+  \mathsf{Explore}_{scope}=\mathsf{ModelCheck}(\to,\Gamma)
 \]
-The exploration relation follows TLA+ style and Stateright execution~\cite{LamportSpecifyingSystems,Stateright}.
+The exploration relation follows TLA+ style and Stateright execution for a
+finite scope \(\Gamma\)~\cite{LamportSpecifyingSystems,Stateright}.  The scope
+must state the node count, topology shape, message scheduler, and failure model;
+otherwise the result is only an implementation test, not a model-checking
+claim.
 \end{definition}
 
 \begin{invariant}[Effect refinement]
@@ -1142,6 +1155,31 @@ The exploration relation follows TLA+ style and Stateright execution~\cite{Lampo
 \]
 \end{obligation}
 
+\begin{table}[htbp]
+\centering
+\footnotesize
+\setlength{\tabcolsep}{2pt}
+\begin{tabular}{p{1.35cm}|p{2.65cm}|p{2.45cm}}
+\hline
+Artifact & Checked scope & Limitation \\ \hline
+Topology tests
+  & join, rectify, stabilize fixpoints on finite DID layouts
+  & not a parametric TLAPS proof \\
+Stateright
+  & predecessor update, small discovery abstraction, storage CRDT, handoff
+  & scoped models, not a full live network \\
+Trace replay
+  & deterministic delivery schedules over real routing code
+  & not an Internet latency benchmark \\
+E2E tests
+  & signed direct-ElGamal frame order, final marker, and replay behavior
+  & not a symbolic cryptographic proof \\
+\hline
+\end{tabular}
+\caption{Verification evidence and explicit limits}
+\label{verification-table}
+\end{table}
+
 \begin{definition}[Latency decomposition]
 \[
   T_{total}
@@ -1157,25 +1195,6 @@ The exploration relation follows TLA+ style and Stateright execution~\cite{Lampo
 \]
 \end{definition}
 
-\begin{table}[htbp]
-\centering
-\begin{tabular}{l|l|l}
-\cline{1-3}
-  \shortstack{Fraction of \\failed nodes} & \shortstack{Mean \\routing hops} &\shortstack{Mean num. of \\lookup timeouts}   \\ \cline{1-3}
-0                        & 3.84             & 0.0                     \\ \cline{1-3}
-0.1                      & 4.03             & 0.60                    \\ \cline{1-3}
-0.2                      & 4.22             & 1.17                    \\ \cline{1-3}
-\end{tabular}
-\caption{Latency on failed node rate of Chord \cite{Chord}}
-\label{latency-table}
-\end{table}
-
-\begin{figure}[htbp]
-  \includegraphics[width=\columnwidth]{imgs/rings/path.png}
-  \caption{Chord lookup path \cite{Chord}}
-  \label{path}
-\end{figure}
-
 \begin{definition}[Reliability baseline]
 \[
 \begin{array}{rcl}
@@ -1185,41 +1204,26 @@ timeoutMean&=&\dfrac{1}{|Q|}\sum_{q\in Q}to(q).
 \]
 \end{definition}
 
-\begin{table}[htpb]
-\centering
-  \begin{tabular}{l|l|l|l}
-\cline{1-4}
-  \shortstack{join/leave rate \\ (per sec./stab. \\ period)}
-  & \shortstack{Mean \\routing\\ hops}
-  &\shortstack{Mean \\num. of \\lookup \\timeouts}
-  &\shortstack{Lookup \\ failures \\ per 10k} \\ \cline{1-4}
-0.05/1.5                        & 3.90             & 0.5              &    0   \\ \cline{1-4}
-0.10/2                      & 3.83             & 0.11             &    0   \\ \cline{1-4}
-  0.15/4.5                      & 3.84             & 0.16             &    2   \\ \cline{1-4}
-  0.20/6                      & 3.81             & 0.23             &    5   \\ \cline{1-4}
-0.25/7.5                      & 3.83             & 0.30             &    6   \\ \cline{1-4}
-  0.30/9                      & 3.91             & 0.34             &    8   \\ \cline{1-4}
-  0.35/10.5                      & 3.94             & 0.42             &    16   \\ \cline{1-4}
-0.40/12                      & 4.06             & 0.46             &    15   \\ \cline{1-4}
-\end{tabular}
-\caption{Failure rate of Chord \cite{Chord}}
-\label{failure}
-\end{table}
-
-\begin{obligation}[Evaluation morphism]
+\begin{obligation}[Benchmark report]
 \[
 \begin{aligned}
-  \Phi_{eval}:&
-  (h,timeouts,failures)_{Chord}\\
-  &\mapsto
-  (T_{total},timeoutMean,failrate)_{Rings},
+  \mathsf{Report}_{Rings} =
+  (&N,\rho,r,\mathsf{transport},\mathsf{runtime},\\
+   &\mathsf{scheduler},T_{total},timeoutMean,failrate).
 \end{aligned}
 \]
 \[
-  \Delta\Phi=
-  T_{conn}+T_{crypto}+T_{witness}+T_{app}.
+  \mathsf{Baseline}_{Chord}
+  \not\equiv
+  \mathsf{Measurement}_{Rings}.
 \]
 \end{obligation}
+
+Chord's published hop-count and churn measurements remain the baseline for the
+underlying circular overlay~\cite{Chord}.  A Rings performance claim must add
+the measured cost of connection establishment, browser or native transport,
+cryptographic framing, storage replication, and application witnesses on a
+specified implementation build.
 
 \section{Related Work}
 
@@ -1261,19 +1265,20 @@ changes.
 
 \begin{table}[htbp]
 \centering
-\small
+\footnotesize
 \setlength{\tabcolsep}{2pt}
-\begin{tabular}{p{1.35cm}|p{1.55cm}|p{2.25cm}}
+\begin{tabular}{p{1.25cm}|p{1.25cm}|p{2.95cm}}
 \hline
 System & Metric & Ownership law \\ \hline
-Kademlia fam.
+Kademlia
   & XOR & bucket routing \\
 Relay mixnets
   & path & no structured owner \\
 Rings
-  & circular & owner, Succ, affine Rep \\
+  & circular & clockwise owner, successor list, affine placement keys \\
 \hline
 \end{tabular}
+\vspace{2pt}
 \caption{Routing and ownership comparison \cite{Kademlia,IPFS,Libp2p,TorNetwork,NymNetwork}}
 \label{related-table}
 \end{table}
@@ -1287,22 +1292,22 @@ explicit carrier or morphism rather than hiding semantics inside ad hoc network
 procedures.
 
 \[
-  \mathsf{Rings}=
-  (R,\mathcal{R}_N,\mathbf{Set}/R,\Omega_N,
+  \RingsObj=
+  (R,\mathcal{R}_N,\SetOverR,\Omega_N,
    \mathsf{T}^{\mathcal{E}}_A,\Pi,\mathbb{G},\mathcal{X}).
 \]
 \[
 \begin{array}{rcl}
 \mathsf{Overlay}&=&\mathsf{CorrectChord}(R,N,r),\\
-\mathsf{Resource}&=&(X_\nu,H_\nu)\in\mathbf{Set}/R,\\
+\mathsf{Resource}&=&(X_\nu,H_\nu)\in\SetOverR,\\
 \mathsf{Placement}&=&\Omega_N(X_\nu,H_\nu),\\
 \mathsf{Transition}&=&\tau_\nu:S_\nu\times I_\nu\to Y_\nu,\\
 Y_\nu&=&\mathsf{T}^{\mathcal{E}_\nu}_{A_\nu}(S_\nu\times O_\nu),\\
 \mathsf{Crypto}&=&\mathbb{G}\lor\mathbb{F}_q,\quad
   \mathsf{Crypto}\cap R=\varnothing,\\
 \mathsf{Evidence}&=&
-  \{\mathsf{figures},\mathsf{tables},\mathsf{algorithms}\}\\
-&&\cup\{\mathsf{invariants},\mathsf{obligations}\}.
+  \{\mathsf{scopedModels},\mathsf{traceReplay}\}\\
+&&\cup\{\mathsf{invariants},\mathsf{benchmarkObligations}\}.
 \end{array}
 \]
 
