@@ -175,6 +175,13 @@ struct RunCommand {
     )]
     pub stabilize_interval: Option<u64>,
 
+    #[arg(
+        long,
+        env = "RINGS_DHT_FINGER_TABLE_SIZE",
+        help = "DHT finger table slot count. If not provided, use dht_finger_table_size in config file or 160. Values above 160 are clamped by the DHT."
+    )]
+    pub dht_finger_table_size: Option<usize>,
+
     #[arg(long, help = "external ip address", env)]
     pub external_ip: Option<String>,
 
@@ -463,6 +470,9 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     }
     if let Some(stabilize_interval) = args.stabilize_interval {
         c.stabilize_interval = stabilize_interval;
+    }
+    if let Some(dht_finger_table_size) = args.dht_finger_table_size {
+        c.dht_finger_table_size = dht_finger_table_size;
     }
     if let Some(external_api_addr) = args.external_api_addr {
         c.external_api_addr = external_api_addr;

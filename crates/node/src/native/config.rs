@@ -58,6 +58,8 @@ pub struct Config {
     pub endpoint_url: String,
     pub ice_servers: String,
     pub stabilize_interval: u64,
+    #[serde(default = "crate::processor::default_dht_finger_table_size")]
+    pub dht_finger_table_size: usize,
     #[serde(default = "crate::registration::default_online_node_heartbeat_interval_secs")]
     pub online_node_heartbeat_interval_secs: u64,
     #[serde(default = "crate::registration::default_online_node_ttl_secs")]
@@ -106,6 +108,7 @@ impl TryFrom<Config> for ProcessorConfigSerialized {
             session_sk,
             config.stabilize_interval,
         )
+        .dht_finger_table_size(config.dht_finger_table_size)
         .online_node_heartbeat_interval_secs(config.online_node_heartbeat_interval_secs)
         .online_node_ttl_secs(config.online_node_ttl_secs)
         .online_node_type(config.online_node_type)
@@ -152,6 +155,7 @@ impl Config {
             endpoint_url: DEFAULT_ENDPOINT_URL.to_string(),
             ice_servers: DEFAULT_ICE_SERVERS.to_string(),
             stabilize_interval: DEFAULT_STABILIZE_INTERVAL,
+            dht_finger_table_size: crate::processor::default_dht_finger_table_size(),
             online_node_heartbeat_interval_secs:
                 crate::registration::default_online_node_heartbeat_interval_secs(),
             online_node_ttl_secs: crate::registration::default_online_node_ttl_secs(),
@@ -256,6 +260,7 @@ external_api_addr: 127.0.0.1:50001
 endpoint_url: http://127.0.0.1:50000
 ice_servers: stun://stun.l.google.com:19302
 stabilize_interval: 3
+dht_finger_table_size: 160
 external_ip: null
 webrtc_udp_port_min: null
 webrtc_udp_port_max: null
@@ -273,6 +278,46 @@ measure_storage:
             result,
             Err(error) if error.to_string().contains("dht_virtual_nodes")
         ));
+    }
+
+    #[test]
+    fn deserialization_defaults_dht_finger_table_size() {
+        let yaml = r#"
+network_id: 1
+session_sk: session_sk
+internal_api_port: 50000
+external_api_addr: 127.0.0.1:50001
+endpoint_url: http://127.0.0.1:50000
+ice_servers: stun://stun.l.google.com:19302
+stabilize_interval: 3
+dht_virtual_nodes: 0
+external_ip: null
+webrtc_udp_port_min: null
+webrtc_udp_port_max: null
+data_storage:
+  path: /Users/foo/.rings/data
+  capacity: 200000000
+measure_storage:
+  path: /Users/foo/.rings/measure
+  capacity: 200000000
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.network_id, 1);
+        assert_eq!(
+            cfg.dht_finger_table_size,
+            crate::processor::default_dht_finger_table_size()
+        );
+        assert!(cfg.advertise_presence);
+    }
+
+    #[test]
+    fn config_with_dht_finger_table_size_builds_processor_config() {
+        let mut config = Config::new(dumped_session_sk());
+        config.dht_finger_table_size = 16;
+
+        let processor_config = ProcessorConfig::try_from(config).unwrap();
+
+        assert_eq!(processor_config.dht_finger_table_size_value(), 16);
     }
 
     #[test]

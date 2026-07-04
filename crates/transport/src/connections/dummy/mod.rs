@@ -122,6 +122,12 @@ pub mod controlled {
         conn.handle_event(event).await;
         true
     }
+
+    /// Drop the queued event at `index` without invoking its target handler.
+    /// Returns false when `index` is out of range.
+    pub fn drop_queued(index: usize) -> bool {
+        DELIVERY.with(|q| q.borrow_mut().remove(index).is_some())
+    }
 }
 
 enum Event {

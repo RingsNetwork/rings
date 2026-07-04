@@ -77,6 +77,8 @@ pub struct ProcessorConfig {
     session_sk: SessionSk,
     /// Stabilization interval.
     stabilize_interval: Duration,
+    /// Number of DHT finger-table slots maintained by this node.
+    dht_finger_table_size: usize,
     /// Online-node registry heartbeat interval.
     online_node_heartbeat_interval: Duration,
     /// Online-node registry descriptor TTL.
@@ -106,6 +108,7 @@ impl ProcessorConfig {
             webrtc_udp_port_max: None,
             session_sk,
             stabilize_interval: Duration::from_secs(stabilize_interval),
+            dht_finger_table_size: default_dht_finger_table_size(),
             online_node_heartbeat_interval: Duration::from_secs(
                 default_online_node_heartbeat_interval_secs(),
             ),
@@ -123,10 +126,34 @@ impl ProcessorConfig {
 }
 
 impl ProcessorConfig {
+    /// Default number of DHT finger-table slots used by node runtime config.
+    pub const fn default_dht_finger_table_size() -> usize {
+        DEFAULT_FINGER_TABLE_SIZE
+    }
+
     /// Returns the validated native WebRTC UDP port range, when configured.
     pub fn webrtc_udp_port_range(&self) -> Result<Option<WebrtcUdpPortRange>> {
         parse_webrtc_udp_port_range(self.webrtc_udp_port_min, self.webrtc_udp_port_max)
     }
+
+    /// Set the number of DHT finger-table slots maintained by this node.
+    ///
+    /// Values above the 160-bit identifier width are clamped by the core
+    /// [`rings_core::dht::FingerTable`] constructor; zero disables finger maintenance.
+    pub fn dht_finger_table_size(mut self, size: usize) -> Self {
+        self.dht_finger_table_size = size;
+        self
+    }
+
+    /// Return the configured DHT finger-table slot count.
+    pub fn dht_finger_table_size_value(&self) -> usize {
+        self.dht_finger_table_size
+    }
+}
+
+/// Default number of DHT finger-table slots used by serialized/native config.
+pub const fn default_dht_finger_table_size() -> usize {
+    ProcessorConfig::default_dht_finger_table_size()
 }
 
 impl FromStr for ProcessorConfig {
@@ -157,6 +184,9 @@ pub struct ProcessorConfigSerialized {
     session_sk: String,
     /// An unsigned integer representing the stabilization interval in seconds.
     stabilize_interval: u64,
+    /// Number of DHT finger-table slots maintained by this node.
+    #[serde(default = "default_dht_finger_table_size")]
+    dht_finger_table_size: usize,
     /// Online-node registry heartbeat interval in seconds.
     #[serde(default = "default_online_node_heartbeat_interval_secs")]
     online_node_heartbeat_interval_secs: u64,
@@ -189,6 +219,7 @@ impl ProcessorConfigSerialized {
             webrtc_udp_port_max: None,
             session_sk,
             stabilize_interval,
+            dht_finger_table_size: default_dht_finger_table_size(),
             online_node_heartbeat_interval_secs: default_online_node_heartbeat_interval_secs(),
             online_node_ttl_secs: default_online_node_ttl_secs(),
             online_node_type: default_online_node_type(),
@@ -208,6 +239,15 @@ impl ProcessorConfigSerialized {
     pub fn webrtc_udp_port_range(mut self, range: WebrtcUdpPortRange) -> Self {
         self.webrtc_udp_port_min = Some(range.min());
         self.webrtc_udp_port_max = Some(range.max());
+        self
+    }
+
+    /// Sets the number of DHT finger-table slots maintained by this node.
+    ///
+    /// Values above the 160-bit identifier width are clamped by the core
+    /// [`rings_core::dht::FingerTable`] constructor; zero disables finger maintenance.
+    pub fn dht_finger_table_size(mut self, size: usize) -> Self {
+        self.dht_finger_table_size = size;
         self
     }
 
@@ -281,6 +321,7 @@ impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
             webrtc_udp_port_max: ins.webrtc_udp_port_max,
             session_sk: ins.session_sk.dump()?,
             stabilize_interval: ins.stabilize_interval.as_secs(),
+            dht_finger_table_size: ins.dht_finger_table_size,
             online_node_heartbeat_interval_secs: ins.online_node_heartbeat_interval.as_secs(),
             online_node_ttl_secs: ins.online_node_ttl.as_secs(),
             online_node_type: ins.online_node_type,
@@ -312,6 +353,7 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
             webrtc_udp_port_max: webrtc_udp_port_range.map(WebrtcUdpPortRange::max),
             session_sk: SessionSk::from_str(&ins.session_sk)?,
             stabilize_interval: Duration::from_secs(ins.stabilize_interval),
+            dht_finger_table_size: ins.dht_finger_table_size,
             online_node_heartbeat_interval,
             online_node_ttl,
             online_node_type: ins.online_node_type,
@@ -413,7 +455,7 @@ impl ProcessorBuilder {
             online_node_type: config.online_node_type.clone(),
             advertise_presence: config.advertise_presence,
             registration_tasks: Vec::new(),
-            dht_finger_table_size: DEFAULT_FINGER_TABLE_SIZE,
+            dht_finger_table_size: config.dht_finger_table_size,
             dht_virtual_nodes: config.dht_virtual_nodes,
             reassembly_limits: ReassemblyLimits::production(),
         })
@@ -1100,6 +1142,25 @@ advertise_presence: true
             result,
             Err(error) if error.to_string().contains("dht_virtual_nodes")
         ));
+    }
+
+    #[test]
+    fn dht_finger_table_size_flows_from_serialized_config_to_builder() {
+        let key = SecretKey::random();
+        let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+        let serialized = ProcessorConfigSerialized::new(
+            0,
+            "stun://stun.l.google.com:19302".to_string(),
+            session_sk.dump().unwrap(),
+            3,
+        )
+        .dht_finger_table_size(16);
+
+        let config = ProcessorConfig::try_from(serialized).unwrap();
+        let builder = ProcessorBuilder::from_config(&config).unwrap();
+
+        assert_eq!(config.dht_finger_table_size_value(), 16);
+        assert_eq!(builder.dht_finger_table_size, 16);
     }
 
     #[tokio::test]
