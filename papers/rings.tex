@@ -1286,11 +1286,17 @@ E2E tests
 \]
 \end{definition}
 
-\begin{definition}[Reliability baseline]
+\begin{definition}[Chord performance baseline]
 \[
 \begin{array}{rcl}
-failrate&=&\dfrac{|F|}{|Q|},\\[8pt]
-timeoutMean&=&\dfrac{1}{|Q|}\sum_{q\in Q}to(q).
+\operatorname{fail}(Q,F)&=&\dfrac{|F|}{|Q|},\\[8pt]
+\operatorname{timeout}(Q)&=&\dfrac{1}{|Q|}\sum_{q\in Q}to(q),\\[8pt]
+\eta&=&(|N|,\mathsf{churn},\mathsf{stabilize},\mathsf{loss}),\\[4pt]
+B_C(\eta)&=&
+  (\mathbb{E}[h_C],
+   \operatorname{timeout}(Q_C),
+   \operatorname{fail}(Q_C,F_C)),\\[4pt]
+\mathbb{E}[h_C]&\in&O(\log |N|).
 \end{array}
 \]
 \end{definition}
@@ -1300,25 +1306,33 @@ timeoutMean&=&\dfrac{1}{|Q|}\sum_{q\in Q}to(q).
 \begin{aligned}
   \mathsf{Report}_{Rings} =
   (&N,\rho,r,\mathsf{transport},\mathsf{runtime},\\
-   &\mathsf{scheduler},T_{total},timeoutMean,failrate).
+   &\mathsf{scheduler},\vec{T}_R,
+     \operatorname{timeout}(Q_R),
+     \operatorname{fail}(Q_R,F_R)).
 \end{aligned}
 \]
 \[
-  \mathsf{Baseline}_{Chord}
+  B_C(\eta)
   \not\equiv
-  \mathsf{Measurement}_{Rings}.
+  \mathsf{Report}_{Rings}.
 \]
 \end{obligation}
 
 \[
 \begin{array}{rcl}
-\vec{T}&=&(T_{conn},T_{hop},T_{crypto},T_{app},T_{witness}),\\
-\mathsf{PerfClaim}_{R}&\Rightarrow&\mathsf{Measure}_{build}(\vec{T}),\\
-\mathsf{Baseline}_{C}&=&\mathsf{hop/churn}.
+\vec{T}_R&=&(T_{conn},h_R T_{hop},T_{crypto},\\
+&&T_{app},T_{witness}),\\
+\mathsf{Overhead}_{R/C}
+  &=&(T_{conn},T_{crypto},T_{app},\\
+&&T_{witness},\mathsf{runtime}),\\
+\mathsf{PerfClaim}_{R}
+  &\Rightarrow&
+  \mathsf{Measure}_{build}(\mathsf{Report}_{Rings})\\
+&&{}\wedge\mathsf{Cite}(B_C).
 \end{array}
 \]
-Chord remains the overlay baseline~\cite{Chord}; Rings performance requires
-Rings-specific measurements.
+Chord supplies the lookup/churn baseline~\cite{Chord}; Rings performance
+requires Rings-specific measurements.
 
 \section{Related Work}
 
