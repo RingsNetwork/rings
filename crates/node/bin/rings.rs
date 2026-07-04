@@ -18,9 +18,9 @@ use rings_node::native::cli::Client;
 use rings_node::native::config;
 use rings_node::native::endpoint::run_external_api;
 use rings_node::native::endpoint::run_internal_api;
-use rings_node::native::onion_http_proxy::register_native_onion_exit_targets;
 use rings_node::native::onion_http_proxy::run_onion_http_proxy;
 use rings_node::native::onion_http_proxy::OnionHttpProxyOptions;
+use rings_node::onion::tcp::NativeOnionCircuitHandle;
 use rings_node::onion::OnionExitService;
 use rings_node::onion::OnionExitTransport;
 use rings_node::prelude::rings_core::chunk::ReassemblyLimits;
@@ -113,6 +113,19 @@ fn parse_onion_exit_service(raw: &str) -> Result<OnionExitService, String> {
         name: name.to_string(),
         transport,
     })
+}
+
+fn validate_native_onion_exit_services(services: &[OnionExitService]) -> anyhow::Result<()> {
+    for service in services {
+        if service.transport != OnionExitTransport::Tcp {
+            anyhow::bail!(
+                "native onion exits can serve only TCP transport; service {:?} uses {:?}. Use a browser node for HTTPS exits.",
+                service.name,
+                service.transport
+            );
+        }
+    }
+    Ok(())
 }
 
 #[derive(Subcommand, Debug)]
@@ -621,6 +634,9 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     if args.onion_http_proxy_allow_short_paths {
         c.onion_http_proxy_allow_short_paths = true;
     }
+    if c.advertise_onion_exit {
+        validate_native_onion_exit_services(&c.onion_exit_services)?;
+    }
 
     let pc = ProcessorConfig::try_from(c.clone())?;
     let advertise_onion_exit = c.advertise_onion_exit;
@@ -665,11 +681,12 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     // The relay is an opt-in extension owning its own engine; install it so the daemon can
     // serve TCP/UDP tunnels. The handle is unused server-side — the engine lives on inside the
     // registered interpreters.
-    let relay =
+    let _relay =
         rings_node::extension::protocols::relay::RelayHandle::install(&provider.extensions())?;
-    if advertise_onion_exit {
-        register_native_onion_exit_targets(&relay, &onion_exit_policy).await?;
-    }
+    let onion = NativeOnionCircuitHandle::install(
+        &provider.extensions(),
+        advertise_onion_exit.then_some(onion_exit_policy.clone()),
+    )?;
     // SNARK is a namespaced protocol now; register it so the daemon can prove/verify.
     #[cfg(feature = "snark")]
     rings_node::extension::snark::SNARKBehaviour::default().register(provider.as_ref())?;
@@ -691,7 +708,7 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
             processor.listen(),
             run_internal_api(c.internal_api_port, processor_clone2),
             run_external_api(c.external_api_addr, processor_clone1),
-            run_onion_http_proxy(proxy_options, processor.clone(), relay),
+            run_onion_http_proxy(proxy_options, processor.clone(), onion),
         );
     } else {
         let _ = futures::join!(

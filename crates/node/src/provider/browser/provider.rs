@@ -6,7 +6,10 @@ use std::future::Future;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
+use futures::future::Either;
+use futures::FutureExt;
 use js_sys;
 use js_sys::Uint8Array;
 use rings_core::dht::Did;
@@ -24,14 +27,17 @@ use wasm_bindgen_futures;
 use wasm_bindgen_futures::future_to_promise;
 use wasm_bindgen_futures::JsFuture;
 
+use crate::onion::circuit::encode_initial_forward;
+use crate::onion::circuit::BrowserOnionCircuitHandler;
+use crate::onion::circuit::OnionCircuitPayload;
+use crate::onion::circuit::OnionCircuitProtocol;
+use crate::onion::circuit::OnionCircuitShell;
+use crate::onion::circuit::ONION_CIRCUIT_NAMESPACE;
 use crate::onion::OnionExitPolicy;
-use crate::onion_https::encode_request as encode_onion_https_request;
+use crate::onion_https::client_request as onion_https_client_request;
 use crate::onion_https::runtime_for_provider;
 use crate::onion_https::OnionHttpsClientRequest;
-use crate::onion_https::OnionHttpsProtocol;
 use crate::onion_https::OnionHttpsRuntime;
-use crate::onion_https::OnionHttpsShell;
-use crate::onion_https::ONION_HTTPS_PROXY_NAMESPACE;
 use crate::onion_proxy::OnionProxyConfig;
 use crate::processor::Processor;
 use crate::processor::ProcessorConfig;
@@ -129,24 +135,41 @@ impl BrowserOnionProxy {
                 .build_onion_proxy_route(config, target.clone())
                 .await
                 .map_err(JsError::from)?;
-            let exit = proxy_route.exit_did();
-            let (id, receiver) = runtime.begin_request(exit).map_err(JsError::from)?;
-            let payload =
-                encode_onion_https_request(id, &target, request).map_err(JsError::from)?;
-            let envelope = crate::extension::ext::Envelope::new(
-                ONION_HTTPS_PROXY_NAMESPACE.to_string(),
-                payload,
-            );
-            if let Err(error) = p.send_envelope(exit, &envelope).await {
+            let first_hop = proxy_route.route.hops.first().copied().ok_or_else(|| {
+                JsError::from(crate::error::Error::OnionRouteError(
+                    "onion route has no hops".to_string(),
+                ))
+            })?;
+            let (id, receiver) = runtime.begin_request(first_hop).map_err(JsError::from)?;
+            let request = onion_https_client_request(&target, request).map_err(JsError::from)?;
+            let (to, payload) = encode_initial_forward(
+                p.did(),
+                &proxy_route.route,
+                id,
+                OnionCircuitPayload::HttpsRequest(request),
+            )
+            .map_err(JsError::from)?;
+            let envelope =
+                crate::extension::ext::Envelope::new(ONION_CIRCUIT_NAMESPACE.to_string(), payload);
+            if let Err(error) = p.send_envelope(to, &envelope).await {
                 runtime.cancel_request(id);
                 return Err(JsValue::from(JsError::from(error)));
             }
-            match receiver.await {
-                Ok(Ok(response)) => Ok(js_value::serialize(&response).map_err(JsError::from)?),
-                Ok(Err(message)) => Err(JsValue::from_str(&message)),
-                Err(_) => Err(JsValue::from_str(
-                    "onion HTTPS proxy response channel closed",
-                )),
+            let response = receiver.fuse();
+            let timeout = futures_timer::Delay::new(Duration::from_secs(30)).fuse();
+            futures::pin_mut!(response, timeout);
+            match futures::future::select(response, timeout).await {
+                Either::Left((result, _)) => match result {
+                    Ok(Ok(response)) => Ok(js_value::serialize(&response).map_err(JsError::from)?),
+                    Ok(Err(message)) => Err(JsValue::from_str(&message)),
+                    Err(_) => Err(JsValue::from_str(
+                        "onion HTTPS proxy response channel closed",
+                    )),
+                },
+                Either::Right((_, _)) => {
+                    runtime.cancel_request(id);
+                    Err(JsValue::from_str("onion HTTPS proxy request timed out"))
+                }
             }
         })
     }
@@ -658,8 +681,11 @@ impl Provider {
         if exit_policy.is_some() {
             runtime.set_exit_policy(exit_policy);
         }
-        if !self.extensions().contains(ONION_HTTPS_PROXY_NAMESPACE) {
-            self.register_protocol(OnionHttpsProtocol, OnionHttpsShell::new(runtime.clone()))?;
+        if !self.extensions().contains(ONION_CIRCUIT_NAMESPACE) {
+            self.register_protocol(
+                OnionCircuitProtocol,
+                OnionCircuitShell::new(BrowserOnionCircuitHandler::new(runtime.clone())),
+            )?;
         }
         Ok(runtime)
     }

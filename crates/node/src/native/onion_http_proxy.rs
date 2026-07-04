@@ -13,6 +13,7 @@ use tokio::net::TcpStream;
 use crate::error::Error;
 use crate::error::Result;
 use crate::extension::protocols::relay::RelayHandle;
+use crate::onion::tcp::NativeOnionCircuitHandle;
 use crate::onion::OnionExitPolicy;
 use crate::onion_proxy::OnionProxyConfig;
 use crate::onion_proxy::OnionProxyTarget;
@@ -35,7 +36,7 @@ pub struct OnionHttpProxyOptions {
 pub async fn run_onion_http_proxy(
     options: OnionHttpProxyOptions,
     processor: Arc<Processor>,
-    relay: RelayHandle,
+    onion: NativeOnionCircuitHandle,
 ) -> anyhow::Result<()> {
     let listener = TcpListener::bind(options.listen_addr).await?;
     let listen_addr = listener.local_addr()?;
@@ -44,10 +45,10 @@ pub async fn run_onion_http_proxy(
     loop {
         let (stream, peer_addr) = listener.accept().await?;
         let processor = processor.clone();
-        let relay = relay.clone();
+        let onion = onion.clone();
         let options = options.clone();
         tokio::spawn(async move {
-            if let Err(error) = handle_connect(stream, processor, relay, options).await {
+            if let Err(error) = handle_connect(stream, processor, onion, options).await {
                 tracing::warn!("onion HTTP proxy request from {peer_addr} failed: {error:?}");
             }
         });
@@ -83,7 +84,7 @@ fn native_onion_exit_target_authorities(policy: &OnionExitPolicy) -> Result<Vec<
 async fn handle_connect(
     mut stream: TcpStream,
     processor: Arc<Processor>,
-    relay: RelayHandle,
+    onion: NativeOnionCircuitHandle,
     options: OnionHttpProxyOptions,
 ) -> Result<()> {
     let target = match read_connect_target(&mut stream).await {
@@ -99,11 +100,10 @@ async fn handle_connect(
             target,
         )
         .await?;
-    let service = proxy_route.target.authority();
-    let exit = proxy_route.exit_did();
-
     write_proxy_response(&mut stream, "200 Connection Established").await?;
-    relay.relay_tcp_stream(stream, exit, service).await
+    onion
+        .relay_tcp_stream(stream, proxy_route.route, proxy_route.target)
+        .await
 }
 
 async fn read_connect_target(stream: &mut TcpStream) -> Result<OnionProxyTarget> {

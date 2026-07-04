@@ -169,7 +169,7 @@ impl ProcessorConfig {
         self
     }
 
-    /// Enables default native onion exit advertisement, including HTTPS and TCP services.
+    /// Enables default native onion exit advertisement.
     pub fn enable_default_onion_exit(mut self) -> Self {
         self.advertise_onion_exit = true;
         self.onion_exit_services = default_onion_exit_services();
@@ -383,7 +383,7 @@ impl ProcessorConfigSerialized {
         self
     }
 
-    /// Enables the default native onion exit services, including HTTPS and TCP.
+    /// Enables the default native onion exit services.
     pub fn enable_default_onion_exit(mut self) -> Self {
         self.advertise_onion_exit = true;
         self.onion_exit_services = default_onion_exit_services();
@@ -869,20 +869,7 @@ impl Processor {
             hop_count,
             allow_short_paths,
         };
-        let online_nodes = self.lookup_online_nodes(false).await?;
-        let exits = self.lookup_onion_exits(&service, false).await?;
-        let candidates = OnionRouteCandidates::from_validated_descriptors(
-            self.did(),
-            &service,
-            online_nodes,
-            exits,
-        );
-        select_onion_route_from_candidates(
-            &request,
-            candidates,
-            self.onion_route_peer_qualities().await,
-            &mut SystemRouteEntropy::new(),
-        )
+        self.build_filtered_onion_route(request, |_| true).await
     }
 
     /// Build an onion proxy route for a client target through a target-agnostic proxy config.
@@ -898,30 +885,43 @@ impl Processor {
             hop_count: proxy.hop_count,
             allow_short_paths: proxy.allow_short_paths,
         };
-        let online_nodes = self.lookup_online_nodes(false).await?;
-        let exits = self
-            .lookup_onion_exits(&service, false)
-            .await?
-            .into_iter()
-            .filter(|exit| exit.policy.allows_target(&target_authority));
-        let candidates = OnionRouteCandidates::from_validated_descriptors(
-            self.did(),
-            &service,
-            online_nodes,
-            exits,
-        );
-        let route = select_onion_route_from_candidates(
-            &request,
-            candidates,
-            self.onion_route_peer_qualities().await,
-            &mut SystemRouteEntropy::new(),
-        )?;
+        let route = self
+            .build_filtered_onion_route(request, |exit| {
+                exit.policy.allows_target(&target_authority)
+            })
+            .await?;
 
         Ok(OnionProxyRoute {
             protocol: proxy.protocol,
             target,
             route,
         })
+    }
+
+    async fn build_filtered_onion_route(
+        &self,
+        request: OnionRouteRequest,
+        exit_filter: impl Fn(&OnionExitDescriptor) -> bool,
+    ) -> Result<OnionRoute> {
+        let service = request.service.clone();
+        let online_nodes = self.lookup_online_nodes(false).await?;
+        let exits = self
+            .lookup_onion_exits(&service, false)
+            .await?
+            .into_iter()
+            .filter(exit_filter);
+        let candidates = OnionRouteCandidates::from_validated_descriptors(
+            self.did(),
+            &service,
+            online_nodes,
+            exits,
+        );
+        select_onion_route_from_candidates(
+            &request,
+            candidates,
+            self.onion_route_peer_qualities().await,
+            &mut SystemRouteEntropy::new(),
+        )
     }
 
     async fn onion_route_peer_qualities(&self) -> Vec<(Did, PeerQuality)> {
@@ -1475,7 +1475,7 @@ mod test {
     }
 
     #[test]
-    fn default_onion_exit_config_uses_https_and_tcp_services() {
+    fn default_onion_exit_config_uses_native_tcp_service() {
         let key = SecretKey::random();
         let session_sk = SessionSk::new_with_seckey(&key).unwrap();
         let config = ProcessorConfig::new(
@@ -1488,10 +1488,7 @@ mod test {
 
         assert!(config.advertise_onion_exit);
         assert_eq!(config.onion_exit_services, default_onion_exit_services());
-        assert_eq!(config.onion_exit_services, vec![
-            OnionExitService::https(),
-            OnionExitService::tcp()
-        ]);
+        assert_eq!(config.onion_exit_services, vec![OnionExitService::tcp()]);
     }
 
     #[tokio::test]

@@ -1,9 +1,9 @@
 #![warn(missing_docs)]
-//! Browser HTTPS onion-exit request/response data plane.
+//! Browser HTTPS onion-exit request/response adapter.
 //!
 //! This protocol is intentionally application-layer HTTPS. Browser exits cannot expose raw TCP,
-//! so a client sends an HTTPS request description to the selected exit, the exit performs
-//! `fetch`, and the response is sent back over the same namespace.
+//! so a client sends an HTTPS request description over the route-aware onion circuit, the exit
+//! performs `fetch`, and the response is sent back over the circuit return path.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -13,7 +13,6 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use bytes::Bytes;
 use futures::channel::oneshot;
 use js_sys::Function;
 use js_sys::Object;
@@ -21,6 +20,7 @@ use js_sys::Promise;
 use js_sys::Reflect;
 use js_sys::Uint8Array;
 use rings_core::dht::Did;
+use rings_core::utils::get_epoch_ms;
 use serde::Deserialize;
 use serde::Serialize;
 use wasm_bindgen::closure::Closure;
@@ -30,18 +30,12 @@ use wasm_bindgen_futures::JsFuture;
 
 use crate::error::Error;
 use crate::error::Result;
-use crate::extension::ext::Ctx;
-use crate::extension::ext::Interpret;
-use crate::extension::ext::Protocol;
-use crate::extension::ext::Reject;
-use crate::extension::ext::Scope;
-use crate::extension::ext::Transition;
-use crate::extension::ext::Wire;
+use crate::onion::circuit::OnionHttpsRequest;
+use crate::onion::circuit::OnionHttpsResponse;
 use crate::onion::OnionExitPolicy;
 use crate::onion_proxy::OnionProxyTarget;
 
-/// Namespace used by the browser HTTPS onion proxy protocol.
-pub const ONION_HTTPS_PROXY_NAMESPACE: &str = "onion-https";
+const EXIT_LIMIT_WINDOW_MS: u128 = 60_000;
 
 lazy_static::lazy_static! {
     static ref RUNTIMES: Mutex<HashMap<String, Arc<OnionHttpsRuntime>>> =
@@ -96,48 +90,37 @@ pub struct OnionHttpsClientResponse {
     pub body: Vec<u8>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
-pub(crate) struct OnionHttpsRequest {
-    id: u64,
-    target: String,
-    method: String,
-    path: String,
-    headers: Vec<(String, String)>,
-    body: Vec<u8>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
-pub(crate) struct OnionHttpsResponse {
-    id: u64,
-    status: u16,
-    headers: Vec<(String, String)>,
-    body: Vec<u8>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
-pub(crate) struct OnionHttpsError {
-    id: u64,
-    message: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
-pub(crate) enum OnionHttpsMessage {
-    Request(OnionHttpsRequest),
-    Response(OnionHttpsResponse),
-    Error(OnionHttpsError),
-}
-
 /// Shared runtime for the local browser HTTPS proxy protocol.
 #[derive(Default)]
 pub(crate) struct OnionHttpsRuntime {
     next_request: AtomicU64,
     pending: Mutex<HashMap<u64, PendingRequest>>,
     exit_policy: Mutex<Option<OnionExitPolicy>>,
+    limiter: Arc<Mutex<ExitLimiter>>,
 }
 
 struct PendingRequest {
-    exit: Did,
+    expected_return_peer: Did,
     sender: oneshot::Sender<std::result::Result<OnionHttpsClientResponse, String>>,
+}
+
+#[derive(Default)]
+struct ExitLimiter {
+    active_circuits: u32,
+    window_start_ms: u128,
+    bytes_this_window: u64,
+}
+
+struct ExitCircuitLease {
+    limiter: Arc<Mutex<ExitLimiter>>,
+}
+
+impl Drop for ExitCircuitLease {
+    fn drop(&mut self) {
+        if let Ok(mut limiter) = self.limiter.lock() {
+            limiter.active_circuits = limiter.active_circuits.saturating_sub(1);
+        }
+    }
 }
 
 impl OnionHttpsRuntime {
@@ -153,10 +136,10 @@ impl OnionHttpsRuntime {
         }
     }
 
-    /// Begin a client request expected to complete from `exit`.
+    /// Begin a client request expected to complete from the immediate return peer.
     pub(crate) fn begin_request(
         &self,
-        exit: Did,
+        expected_return_peer: Did,
     ) -> Result<(
         u64,
         oneshot::Receiver<std::result::Result<OnionHttpsClientResponse, String>>,
@@ -166,7 +149,10 @@ impl OnionHttpsRuntime {
         self.pending
             .lock()
             .map_err(|_| Error::Lock)?
-            .insert(id, PendingRequest { exit, sender });
+            .insert(id, PendingRequest {
+                expected_return_peer,
+                sender,
+            });
         Ok((id, receiver))
     }
 
@@ -177,8 +163,9 @@ impl OnionHttpsRuntime {
         }
     }
 
-    fn complete_response(&self, from: Did, response: OnionHttpsResponse) {
-        let Some(pending) = self.take_pending(from, response.id) else {
+    /// Complete a pending HTTPS request with a response.
+    pub(crate) fn complete_response(&self, from: Did, id: u64, response: OnionHttpsResponse) {
+        let Some(pending) = self.take_pending(from, id) else {
             return;
         };
         let _ = pending.sender.send(Ok(OnionHttpsClientResponse {
@@ -188,17 +175,18 @@ impl OnionHttpsRuntime {
         }));
     }
 
-    fn complete_error(&self, from: Did, error: OnionHttpsError) {
-        let Some(pending) = self.take_pending(from, error.id) else {
+    /// Complete a pending HTTPS request with an error.
+    pub(crate) fn complete_error(&self, from: Did, id: u64, message: String) {
+        let Some(pending) = self.take_pending(from, id) else {
             return;
         };
-        let _ = pending.sender.send(Err(error.message));
+        let _ = pending.sender.send(Err(message));
     }
 
     fn take_pending(&self, from: Did, id: u64) -> Option<PendingRequest> {
         let mut pending = self.pending.lock().ok()?;
         let request = pending.remove(&id)?;
-        if request.exit == from {
+        if request.expected_return_peer == from {
             Some(request)
         } else {
             pending.insert(id, request);
@@ -206,157 +194,79 @@ impl OnionHttpsRuntime {
         }
     }
 
-    fn exit_policy(&self) -> Option<OnionExitPolicy> {
+    pub(crate) fn exit_policy(&self) -> Option<OnionExitPolicy> {
         self.exit_policy
             .lock()
             .ok()
             .and_then(|policy| policy.clone())
     }
-}
 
-/// Browser HTTPS onion proxy protocol.
-pub(crate) struct OnionHttpsProtocol;
-
-pub(crate) struct OnionHttpsEvent {
-    from: Did,
-    message: OnionHttpsMessage,
-}
-
-/// Effects interpreted by [`OnionHttpsShell`].
-pub(crate) enum OnionHttpsEffect {
-    /// Execute a local browser fetch and reply to the requester.
-    FetchAndReply {
-        /// Requester DID.
-        to: Did,
-        /// Fetch request.
-        request: OnionHttpsRequest,
-    },
-    /// Complete a pending local client request.
-    CompleteResponse {
-        /// Exit DID.
-        from: Did,
-        /// Response from the exit.
-        response: OnionHttpsResponse,
-    },
-    /// Complete a pending local client request with an error.
-    CompleteError {
-        /// Exit DID.
-        from: Did,
-        /// Error from the exit.
-        error: OnionHttpsError,
-    },
-}
-
-impl Protocol for OnionHttpsProtocol {
-    type State = ();
-    type Event = OnionHttpsEvent;
-    type Effect = OnionHttpsEffect;
-
-    fn namespace(&self) -> &str {
-        ONION_HTTPS_PROXY_NAMESPACE
-    }
-
-    fn init(&self) -> Self::State {}
-
-    fn decode(&self, wire: Wire<'_>) -> std::result::Result<Self::Event, Reject> {
-        let message = bincode::deserialize::<OnionHttpsMessage>(wire.payload)
-            .map_err(|error| Reject(format!("bad onion HTTPS proxy message: {error}")))?;
-        Ok(OnionHttpsEvent {
-            from: wire.from,
-            message,
-        })
-    }
-
-    fn step(
-        &self,
-        _ctx: Ctx<'_, Self::State>,
-        event: Self::Event,
-    ) -> Transition<Self::State, Self::Effect> {
-        let effect = match event.message {
-            OnionHttpsMessage::Request(request) => OnionHttpsEffect::FetchAndReply {
-                to: event.from,
-                request,
-            },
-            OnionHttpsMessage::Response(response) => OnionHttpsEffect::CompleteResponse {
-                from: event.from,
-                response,
-            },
-            OnionHttpsMessage::Error(error) => OnionHttpsEffect::CompleteError {
-                from: event.from,
-                error,
-            },
-        };
-        Transition::with((), vec![effect])
-    }
-}
-
-/// Browser HTTPS onion proxy interpreter.
-pub(crate) struct OnionHttpsShell {
-    runtime: Arc<OnionHttpsRuntime>,
-}
-
-impl OnionHttpsShell {
-    /// Create an interpreter backed by `runtime`.
-    pub(crate) fn new(runtime: Arc<OnionHttpsRuntime>) -> Self {
-        Self { runtime }
-    }
-}
-
-#[async_trait::async_trait(?Send)]
-impl Interpret for OnionHttpsShell {
-    type Effect = OnionHttpsEffect;
-
-    async fn run(&self, scope: &Scope, effect: OnionHttpsEffect) -> Result<Vec<Bytes>> {
-        match effect {
-            OnionHttpsEffect::FetchAndReply { to, request } => {
-                let response = execute_exit_fetch(self.runtime.exit_policy(), &request).await;
-                let message = match response {
-                    Ok(response) => OnionHttpsMessage::Response(response),
-                    Err(error) => OnionHttpsMessage::Error(OnionHttpsError {
-                        id: request.id,
-                        message: error.to_string(),
-                    }),
-                };
-                let payload = bincode::serialize(&message).map_err(|_| Error::EncodeError)?;
-                scope.send(to, Bytes::from(payload)).await?;
-            }
-            OnionHttpsEffect::CompleteResponse { from, response } => {
-                self.runtime.complete_response(from, response);
-            }
-            OnionHttpsEffect::CompleteError { from, error } => {
-                self.runtime.complete_error(from, error);
-            }
+    fn admit_exit_request(&self, policy: &OnionExitPolicy, bytes: u64) -> Result<ExitCircuitLease> {
+        let mut limiter = self.limiter.lock().map_err(|_| Error::Lock)?;
+        if policy.max_circuits > 0 && limiter.active_circuits >= policy.max_circuits {
+            return Err(Error::NoPermission);
         }
-        Ok(Vec::new())
+        limiter.active_circuits = limiter.active_circuits.saturating_add(1);
+        drop(limiter);
+
+        let lease = ExitCircuitLease {
+            limiter: self.limiter.clone(),
+        };
+        if let Err(error) = self.record_exit_bytes(policy, bytes) {
+            drop(lease);
+            return Err(error);
+        }
+        Ok(lease)
+    }
+
+    fn record_exit_bytes(&self, policy: &OnionExitPolicy, bytes: u64) -> Result<()> {
+        if policy.max_bytes_per_minute == 0 || bytes == 0 {
+            return Ok(());
+        }
+        let mut limiter = self.limiter.lock().map_err(|_| Error::Lock)?;
+        let now_ms = get_epoch_ms();
+        if now_ms.saturating_sub(limiter.window_start_ms) >= EXIT_LIMIT_WINDOW_MS {
+            limiter.window_start_ms = now_ms;
+            limiter.bytes_this_window = 0;
+        }
+        let next = limiter.bytes_this_window.saturating_add(bytes);
+        if next > policy.max_bytes_per_minute {
+            return Err(Error::NoPermission);
+        }
+        limiter.bytes_this_window = next;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn pending_len(&self) -> usize {
+        self.pending
+            .lock()
+            .map(|pending| pending.len())
+            .unwrap_or(0)
     }
 }
 
 /// Encode one client request for the selected exit.
-pub(crate) fn encode_request(
-    id: u64,
+pub(crate) fn client_request(
     target: &OnionProxyTarget,
     request: OnionHttpsClientRequest,
-) -> Result<Bytes> {
-    let message = OnionHttpsMessage::Request(OnionHttpsRequest {
-        id,
+) -> Result<OnionHttpsRequest> {
+    Ok(OnionHttpsRequest {
         target: target.authority(),
         method: normalize_method(&request.method),
         path: normalize_path(&request.path)?,
         headers: request.headers,
         body: request.body,
-    });
-    bincode::serialize(&message)
-        .map(Bytes::from)
-        .map_err(|_| Error::EncodeError)
+    })
 }
 
-async fn execute_exit_fetch(
-    policy: Option<OnionExitPolicy>,
+pub(crate) async fn execute_exit_fetch(
+    runtime: &OnionHttpsRuntime,
     request: &OnionHttpsRequest,
 ) -> Result<OnionHttpsResponse> {
     let target = OnionProxyTarget::parse_authority(&request.target)?;
     let authority = target.authority();
-    let Some(policy) = policy else {
+    let Some(policy) = runtime.exit_policy() else {
         return Err(Error::InvalidConfig(
             "browser HTTPS onion exit is not enabled locally".to_string(),
         ));
@@ -364,10 +274,11 @@ async fn execute_exit_fetch(
     if !policy.allows_target(&authority) {
         return Err(Error::NoPermission);
     }
+    let _lease = runtime.admit_exit_request(&policy, request.body.len() as u64)?;
     let url = format!("https://{}{}", authority, normalize_path(&request.path)?);
-    let response = browser_fetch(&url, request).await?;
+    let response = browser_fetch(&url, request, policy.max_bytes_per_minute).await?;
+    runtime.record_exit_bytes(&policy, response.body.len() as u64)?;
     Ok(OnionHttpsResponse {
-        id: request.id,
         status: response.status,
         headers: response.headers,
         body: response.body,
@@ -380,7 +291,11 @@ struct FetchResponse {
     body: Vec<u8>,
 }
 
-async fn browser_fetch(url: &str, request: &OnionHttpsRequest) -> Result<FetchResponse> {
+async fn browser_fetch(
+    url: &str,
+    request: &OnionHttpsRequest,
+    max_body_bytes: u64,
+) -> Result<FetchResponse> {
     let global = js_sys::global();
     let fetch = Reflect::get(global.as_ref(), JsValue::from_str("fetch").as_ref())
         .map_err(js_error)?
@@ -405,7 +320,8 @@ async fn browser_fetch(url: &str, request: &OnionHttpsRequest) -> Result<FetchRe
             Error::HttpRequestError("fetch response status is not numeric".to_string())
         })? as u16;
     let headers = collect_headers(&response)?;
-    let body = response_body(&response).await?;
+    reject_content_length_over_limit(&headers, max_body_bytes)?;
+    let body = response_body(&response, max_body_bytes).await?;
     Ok(FetchResponse {
         status,
         headers,
@@ -470,17 +386,74 @@ fn collect_headers(response: &JsValue) -> Result<Vec<(String, String)>> {
     Ok(collected)
 }
 
-async fn response_body(response: &JsValue) -> Result<Vec<u8>> {
-    let array_buffer = Reflect::get(response, JsValue::from_str("arrayBuffer").as_ref())
+fn reject_content_length_over_limit(
+    headers: &[(String, String)],
+    max_body_bytes: u64,
+) -> Result<()> {
+    if max_body_bytes == 0 {
+        return Ok(());
+    }
+    let Some(length) = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .and_then(|(_, value)| value.parse::<u64>().ok())
+    else {
+        return Ok(());
+    };
+    if length > max_body_bytes {
+        return Err(Error::NoPermission);
+    }
+    Ok(())
+}
+
+async fn response_body(response: &JsValue, max_body_bytes: u64) -> Result<Vec<u8>> {
+    let body = Reflect::get(response, JsValue::from_str("body").as_ref()).map_err(js_error)?;
+    if body.is_null() || body.is_undefined() {
+        return Ok(Vec::new());
+    }
+    let get_reader = Reflect::get(body.as_ref(), JsValue::from_str("getReader").as_ref())
         .map_err(js_error)?
         .dyn_into::<Function>()
         .map_err(js_error)?;
-    let buffer = JsFuture::from(Promise::from(
-        array_buffer.call0(response).map_err(js_error)?,
-    ))
-    .await
-    .map_err(js_error)?;
-    Ok(Uint8Array::new(buffer.as_ref()).to_vec())
+    let reader = get_reader.call0(body.as_ref()).map_err(js_error)?;
+    let read = Reflect::get(reader.as_ref(), JsValue::from_str("read").as_ref())
+        .map_err(js_error)?
+        .dyn_into::<Function>()
+        .map_err(js_error)?;
+    let cancel = Reflect::get(reader.as_ref(), JsValue::from_str("cancel").as_ref())
+        .ok()
+        .and_then(|value| value.dyn_into::<Function>().ok());
+    let mut body = Vec::new();
+    loop {
+        let chunk = JsFuture::from(Promise::from(
+            read.call0(reader.as_ref()).map_err(js_error)?,
+        ))
+        .await
+        .map_err(js_error)?;
+        let done = Reflect::get(chunk.as_ref(), JsValue::from_str("done").as_ref())
+            .map_err(js_error)?
+            .as_bool()
+            .unwrap_or(false);
+        if done {
+            break;
+        }
+        let value =
+            Reflect::get(chunk.as_ref(), JsValue::from_str("value").as_ref()).map_err(js_error)?;
+        if value.is_null() || value.is_undefined() {
+            continue;
+        }
+        let bytes = Uint8Array::new(value.as_ref()).to_vec();
+        if max_body_bytes > 0
+            && (body.len() as u64).saturating_add(bytes.len() as u64) > max_body_bytes
+        {
+            if let Some(cancel) = cancel {
+                let _ = cancel.call0(reader.as_ref());
+            }
+            return Err(Error::NoPermission);
+        }
+        body.extend_from_slice(bytes.as_slice());
+    }
+    Ok(body)
 }
 
 fn normalize_method(method: &str) -> String {
@@ -522,7 +495,13 @@ fn js_error(error: JsValue) -> Error {
 
 #[cfg(test)]
 mod tests {
+    use rings_core::ecc::SecretKey;
+
     use super::*;
+
+    fn did() -> Did {
+        SecretKey::random().address().into()
+    }
 
     #[test]
     fn normalizes_empty_request_defaults() {
@@ -533,20 +512,15 @@ mod tests {
             body: Vec::new(),
         };
         let target = OnionProxyTarget::parse_authority("Example.COM:443").unwrap();
-        let payload = encode_request(7, &target, request).unwrap();
-        let decoded = bincode::deserialize::<OnionHttpsMessage>(&payload).unwrap();
+        let wire = client_request(&target, request).unwrap();
 
-        assert_eq!(
-            decoded,
-            OnionHttpsMessage::Request(OnionHttpsRequest {
-                id: 7,
-                target: "example.com:443".to_string(),
-                method: "GET".to_string(),
-                path: "/".to_string(),
-                headers: Vec::new(),
-                body: Vec::new(),
-            })
-        );
+        assert_eq!(wire, OnionHttpsRequest {
+            target: "example.com:443".to_string(),
+            method: "GET".to_string(),
+            path: "/".to_string(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        });
     }
 
     #[test]
@@ -554,6 +528,45 @@ mod tests {
         assert!(matches!(
             normalize_path("index.html"),
             Err(Error::HttpRequestError(_))
+        ));
+    }
+
+    #[test]
+    fn cancel_request_removes_pending_request() {
+        let runtime = OnionHttpsRuntime::new();
+        let (id, _receiver) = runtime.begin_request(did()).unwrap();
+
+        assert_eq!(runtime.pending_len(), 1);
+        runtime.cancel_request(id);
+        assert_eq!(runtime.pending_len(), 0);
+    }
+
+    #[test]
+    fn pending_request_completes_only_from_expected_return_peer() {
+        let runtime = OnionHttpsRuntime::new();
+        let expected = did();
+        let other = did();
+        let (id, receiver) = runtime.begin_request(expected).unwrap();
+
+        runtime.complete_error(other, id, "wrong peer".to_string());
+        assert_eq!(runtime.pending_len(), 1);
+        drop(receiver);
+        runtime.cancel_request(id);
+    }
+
+    #[test]
+    fn exit_limiter_rejects_bytes_over_policy_window() {
+        let runtime = OnionHttpsRuntime::new();
+        let policy = OnionExitPolicy {
+            max_bytes_per_minute: 8,
+            ..OnionExitPolicy::default()
+        };
+        let _lease = runtime.admit_exit_request(&policy, 4).unwrap();
+
+        assert!(runtime.record_exit_bytes(&policy, 4).is_ok());
+        assert!(matches!(
+            runtime.record_exit_bytes(&policy, 1),
+            Err(Error::NoPermission)
         ));
     }
 }
