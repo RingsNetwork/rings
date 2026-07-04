@@ -12,6 +12,7 @@ BASE_EXTERNAL_PORT="${RINGS_BASE_EXTERNAL_PORT:-51000}"
 NETWORK_ID="${RINGS_NETWORK_ID:-1}"
 ICE_SERVERS="${RINGS_ICE_SERVERS:-stun://stun.l.google.com:19302}"
 STABILIZE_INTERVAL="${RINGS_STABILIZE_INTERVAL:-3}"
+DHT_FINGER_TABLE_SIZE="${RINGS_DHT_FINGER_TABLE_SIZE:-}"
 SESSION_TTL_SECONDS="${RINGS_SESSION_TTL_SECONDS:-2592000}"
 READY_RETRIES="${RINGS_READY_RETRIES:-60}"
 READY_SLEEP_SECONDS="${RINGS_READY_SLEEP_SECONDS:-1}"
@@ -72,6 +73,9 @@ require_uint RINGS_BASE_INTERNAL_PORT "$BASE_INTERNAL_PORT"
 require_uint RINGS_BASE_EXTERNAL_PORT "$BASE_EXTERNAL_PORT"
 require_uint RINGS_NETWORK_ID "$NETWORK_ID"
 require_uint RINGS_STABILIZE_INTERVAL "$STABILIZE_INTERVAL"
+if [[ -n "$DHT_FINGER_TABLE_SIZE" ]]; then
+    require_uint RINGS_DHT_FINGER_TABLE_SIZE "$DHT_FINGER_TABLE_SIZE"
+fi
 require_uint RINGS_SESSION_TTL_SECONDS "$SESSION_TTL_SECONDS"
 require_uint RINGS_READY_RETRIES "$READY_RETRIES"
 require_uint RINGS_READY_SLEEP_SECONDS "$READY_SLEEP_SECONDS"
@@ -207,6 +211,9 @@ write_config() {
         printf 'endpoint_url: %s\n' "$(yaml_quote "http://127.0.0.1:$internal_port")"
         printf 'ice_servers: %s\n' "$(yaml_quote "$ICE_SERVERS")"
         printf 'stabilize_interval: %s\n' "$STABILIZE_INTERVAL"
+        if [[ -n "$DHT_FINGER_TABLE_SIZE" ]]; then
+            printf 'dht_finger_table_size: %s\n' "$DHT_FINGER_TABLE_SIZE"
+        fi
         printf 'external_ip: null\n'
         if [[ -n "$WEBRTC_UDP_PORT_MIN" || -n "$WEBRTC_UDP_PORT_MAX" ]]; then
             [[ -n "$WEBRTC_UDP_PORT_MIN" && -n "$WEBRTC_UDP_PORT_MAX" ]] \

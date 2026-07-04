@@ -48,9 +48,54 @@ Useful environment variables:
 - `RINGS_CLUSTER_DIR`: config, logs, storage, and session key directory; default `/var/lib/rings-cluster`
 - `RINGS_ICE_SERVERS`: ICE server list passed to every node
 - `RINGS_RUNTIME`: Tokio runtime flavor for each node process; default `current-thread`
+- `RINGS_STABILIZE_INTERVAL`: DHT stabilization interval in seconds; default `3`
+- `RINGS_DHT_FINGER_TABLE_SIZE`: optional DHT finger table slot count written into every node config
 
 Topology modes:
 
 - `ring`: node `i` connects to node `i+1`, and the final node connects to node `0`
 - `seed`: every non-zero node connects to node `0`
 - `mesh`: every pair is connected once; use carefully for larger N because handshakes grow as `N*(N-1)/2`
+
+## 16-node DHT benchmark collection
+
+Start a 16-node cluster with a short stabilization interval:
+
+```sh
+docker run -d --rm \
+  --name rings-cluster-16-bench \
+  -e RINGS_NODE_COUNT=16 \
+  -e RINGS_ALLOW_RANDOM_KEYS=true \
+  -e RINGS_CONNECT_TOPOLOGY=ring \
+  -e RINGS_STABILIZE_INTERVAL=1 \
+  -e RINGS_DHT_FINGER_TABLE_SIZE=16 \
+  -e RINGS_READY_RETRIES=180 \
+  -e RINGS_LOG_LEVEL=warn \
+  rings-node-cluster
+```
+
+After the log shows `cluster ready`, collect status-based DHT metrics from the
+real node daemons:
+
+```sh
+python3 scripts/dht_docker_cluster_bench.py \
+  --container rings-cluster-16-bench \
+  --nodes 16 \
+  --samples 5 \
+  --sample-interval-seconds 30
+```
+
+Add a direct WebRTC transport send sample:
+
+```sh
+python3 scripts/dht_docker_cluster_bench.py \
+  --container rings-cluster-16-bench \
+  --nodes 16 \
+  --throughput-messages 64 \
+  --throughput-payload-bytes 16384
+```
+
+The DHT lookup metrics are computed by replaying each node's `/status`
+successor and finger-table state. Reports therefore label the lookup model as
+`status_snapshot_route`; use the transport section for real RPC send throughput
+over the running WebRTC nodes.
