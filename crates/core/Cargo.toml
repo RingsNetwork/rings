@@ -138,4 +138,3 @@ tokio = { version = "1.13.0", features = ["macros", "rt", "rt-multi-thread", "sy
 [[bench]]
 name = "dht_network_sim"
 harness = false
-required-features = ["dummy"]
