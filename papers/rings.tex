@@ -178,14 +178,14 @@ G_{id}\land G_{own}\land G_{io}
 \to\mathsf{Spec}_C
 \to\mathsf{Alg}_P
 \to\mathsf{ImplMap}\\
-&&{}\to\mathsf{Ev}_{\Gamma}
-\to\mathsf{OpenObl},\\[3pt]
+&&{}\to\mathsf{Evidence}_{\Gamma}
+\to\mathsf{Obligation},\\[3pt]
 \Gamma&=&(|N|,\mathsf{topology},\mathsf{scheduler},\mathsf{fault}),\\[3pt]
 \mathsf{Admit}(c)
 &\Rightarrow&
 c\in
 \mathsf{Spec}\cup\mathsf{Impl}\\
-&&{}\cup\mathsf{Ev}_{\Gamma}\cup\mathsf{Obl}.
+&&{}\cup\mathsf{Evidence}_{\Gamma}\cup\mathsf{Obligation}.
 \end{array}
 \]
 The prose in this paper is used only where the construction needs motivation,
@@ -891,16 +891,26 @@ This is the CRDT join-semilattice case~\cite{ShapiroCRDT}.
 \begin{array}{rcl}
 K_{\nu,x}&=&\operatorname{replicaKeys}(H_\nu(x)),\\[2pt]
 P_{\nu,x}&=&\operatorname{set}(\operatorname{RepKey}^{\rho}(H_\nu(x))),\\[2pt]
-O_{\nu,x}&=&\operatorname{set}(\operatorname{RepOwner}^{\rho}_N(H_\nu(x))),\\[2pt]
-U_{\nu,x}&=&\operatorname{owner}_N[K_{\nu,x}],\\[2pt]
 \operatorname{Inv}_{place}
 &\equiv&
-\forall \nu,x.\;
-K_{\nu,x}\subseteq P_{\nu,x}
-\land U_{\nu,x}\subseteq O_{\nu,x}.
+\forall \nu,x.\;K_{\nu,x}\subseteq P_{\nu,x}.
 \end{array}
 \]
 \end{invariant}
+
+\begin{obligation}[Replica realization]
+\[
+\begin{array}{rcl}
+O_{\nu,x}&=&\operatorname{set}(\operatorname{RepOwner}^{\rho}_N(H_\nu(x))),\\
+L_{\nu,x}&=&|O_{\nu,x}|,\\
+\mathsf{FullRed}_{\nu,x}&\Leftrightarrow&L_{\nu,x}=\min(\rho,|N|),\\
+\mathsf{Collapse}_{\nu,x}&\Leftrightarrow&L_{\nu,x}<\min(\rho,|N|),\\
+\mathsf{LiveClaim}_{\nu,x}(\rho)&\Rightarrow&\mathsf{FullRed}_{\nu,x},\\
+\mathsf{Report}_{Rings}&\ni&
+  |\{(\nu,x):\mathsf{Collapse}_{\nu,x}\}|.
+\end{array}
+\]
+\end{obligation}
 
 \begin{definition}[Mailbox]
 \[
@@ -978,19 +988,44 @@ part of the security boundary rather than as optional metadata.
 
 \begin{definition}[Signed encrypted frame]
 \[
-  f=(sid,seq,last,cipher,pk_s,\sigma_s,win).
+  f=(sid,seq,last,cipher,pk_s,\sigma_s).
 \]
 \[
 \begin{aligned}
   m_f&=sid\Vert seq\Vert last\Vert cipher,\\
-  \operatorname{FrameValid}(f)
+  \operatorname{FrameValid}_{\Delta}(f)
   \Leftrightarrow\;&V(pk_s,\sigma_s,m_f)=\top\\
   &\land\;
     \operatorname{Session}(D(pk_s),sid,e)\\
   &\land\;
-    \operatorname{SeqOK}(sid,seq,last,win).
+    \operatorname{SeqOK}_{\Delta}(seq,last).
 \end{aligned}
 \]
+\end{definition}
+
+\begin{definition}[Receiver sequence policy]
+\[
+  \Delta=(next,final,closed,pending,seen,w).
+\]
+\[
+\begin{array}{rcl}
+\mathsf{NoFuture}_{\Delta}(seq)&\Leftrightarrow&
+  \neg\exists p\in pending.\;p>seq,\\
+\mathsf{Dup}_{\Delta}(seq)&\Leftrightarrow&
+  seq\in seen\cup pending,\\
+\mathsf{New}_{\Delta}(seq,last)&\Leftrightarrow&
+  seq\notin seen\cup pending\\
+&&{}\land\neg closed\\
+&&{}\land seq-next\leq w\\
+&&{}\land(final=\bot\lor seq\leq final)\\
+&&{}\land(last\Rightarrow\mathsf{NoFuture}_{\Delta}(seq)),\\
+\operatorname{SeqOK}_{\Delta}(seq,last)&\Leftrightarrow&
+  \mathsf{Dup}_{\Delta}(seq)\\
+&&{}\lor\mathsf{New}_{\Delta}(seq,last),\\
+\mathsf{Dup}_{\Delta}(seq)&\Rightarrow&\mathsf{emit}=\epsilon.
+\end{array}
+\]
+Here \(w\) is receiver policy, not a signed wire field.
 \end{definition}
 
 \begin{definition}[Secret sharing placement]
@@ -1119,7 +1154,7 @@ The split vocabulary follows MSRP~\cite{RFC4975}.
 \hline
 Attack & Predicate & Required boundary \\ \hline
 Sybil & many DIDs, one actor & admission and ranking policy \\
-Replay & stale valid $\sigma$ & TTL, stream order, final marker \\
+Replay & stale valid $\sigma$ & TTL, nonce cache, stream/final \\
 MITM & wrong key for DID & DID proof and signed envelope \\
 DoS & unbounded resource use & quotas and chunk bounds \\
 \hline
@@ -1131,7 +1166,7 @@ DoS & unbounded resource use & quotas and chunk bounds \\
 \[
 \begin{array}{rcl}
 \mathsf{Base}&\not\vdash&
-  \mathsf{Sybil}\land\mathsf{Anon}\land\mathsf{DoS},\\
+  \mathsf{SybilResist}\land\mathsf{Anon}\land\mathsf{DoSResist},\\
 \mathsf{SecClaim}&\Rightarrow&
   \mathsf{Adm}\land\mathsf{Rank}
   \land\mathsf{Relay}\land\mathsf{Quota}.
@@ -1172,7 +1207,7 @@ message-flow obligations; it does not yet contain a wide-area Rings benchmark.
 }
 \]
 \[
-  \mathsf{Explore}_{scope}=\mathsf{ModelCheck}(\to,\Gamma)
+  \mathsf{Explore}_{\Gamma}=\mathsf{ModelCheck}(\to,\Gamma)
 \]
 \[
 \begin{array}{rcl}
@@ -1290,7 +1325,15 @@ Rings-specific measurements.
 Use the comparison coordinates
 \[
   \mathsf{Axis}(S)=
-  (m,o,q,r).
+  (\mu,\omega,\chi,\lambda).
+\]
+\[
+\begin{array}{rcl}
+\mu&=&\mathsf{metric},\\
+\omega&=&\mathsf{owner},\\
+\chi&=&\mathsf{order},\\
+\lambda&=&\mathsf{runtime}.
+\end{array}
 \]
 \[
 \begin{array}{c|c}
