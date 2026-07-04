@@ -596,9 +596,8 @@ mod tests {
     use rings_core::ecc::SecretKey;
     use rings_core::session::SessionSk;
 
-    use crate::online::OnlineNodeDescriptorBody;
-
     use super::*;
+    use crate::online::OnlineNodeDescriptorBody;
 
     fn service(name: &str) -> OnionExitService {
         OnionExitService {
@@ -816,18 +815,10 @@ mod tests {
             allow_short_paths: false,
         };
 
-        let route = select_onion_route(
-            local,
-            1,
-            50,
-            &request,
-            online,
-            vec![exit],
-            vec![
-                (degraded.account_did(), PeerQuality::Degraded),
-                (healthy.account_did(), PeerQuality::Healthy),
-            ],
-        )?;
+        let route = select_onion_route(local, 1, 50, &request, online, vec![exit], vec![
+            (degraded.account_did(), PeerQuality::Degraded),
+            (healthy.account_did(), PeerQuality::Healthy),
+        ])?;
 
         assert_eq!(route.hops.first().copied(), Some(healthy.account_did()));
         Ok(())
