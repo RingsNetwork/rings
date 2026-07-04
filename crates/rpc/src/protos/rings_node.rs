@@ -214,6 +214,7 @@ pub enum OnionExitTransportInfo {
     Udp,
     WebTransport,
     RequestResponse,
+    Https,
 }
 
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
@@ -277,7 +278,7 @@ pub struct BuildOnionRouteResponse {
     /// Ordered DID hops, ending with the selected exit.
     pub hops: Vec<String>,
     pub service: String,
-    pub exit: Option<OnionExitDescriptorInfo>,
+    pub exit: OnionExitDescriptorInfo,
 }
 
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]

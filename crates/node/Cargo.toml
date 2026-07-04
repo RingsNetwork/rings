@@ -90,6 +90,7 @@ rings-derive = { workspace = true, optional = true }
 rings-rpc = { workspace = true, optional = true }
 rings-snark = { workspace = true, optional = true }
 rings-transport = { workspace = true }
+rand = { version = "0.8.5", features = ["getrandom"] }
 serde = { version = "1.0.136", features = ["derive"] }
 serde_json = "1.0.70"
 serde_yaml = "0.9.17"

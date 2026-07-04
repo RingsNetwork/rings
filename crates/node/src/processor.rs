@@ -16,7 +16,6 @@ use rings_core::ecc::SecretKey;
 use rings_core::measure::MeasureImpl;
 use rings_core::measure::PeerMeasurement;
 use rings_core::measure::PeerQuality;
-use rings_core::measure::PeerQualityThresholds;
 use rings_core::message::e2e;
 use rings_core::message::e2e::E2eHandshakeRequest;
 use rings_core::message::e2e::E2eHandshakeResponse;
@@ -38,13 +37,27 @@ use serde::Serialize;
 use crate::consts::DATA_REDUNDANT;
 use crate::error::Error;
 use crate::error::Result;
+use crate::measure::peer_quality_thresholds;
 use crate::measure::PeriodicMeasure;
-use crate::onion::select_onion_route;
+use crate::onion::default_advertise_onion_exit;
+use crate::onion::default_advertise_onion_relay;
+use crate::onion::default_onion_exit_heartbeat_interval_secs;
+use crate::onion::default_onion_exit_policy;
+use crate::onion::default_onion_exit_services;
+use crate::onion::default_onion_exit_ttl_secs;
+use crate::onion::select_onion_route_from_candidates;
+use crate::onion::validate_onion_exit_registration_timing;
 use crate::onion::OnionExitDescriptor;
+use crate::onion::OnionExitPolicy;
 use crate::onion::OnionExitRegistration;
+use crate::onion::OnionExitService;
 use crate::onion::OnionRoute;
+use crate::onion::OnionRouteCandidates;
 use crate::onion::OnionRouteRequest;
+use crate::onion::SystemRouteEntropy;
 use crate::onion::ONION_EXITS_TOPIC;
+use crate::onion::ONION_EXIT_CAPABILITY;
+use crate::onion::ONION_RELAY_CAPABILITY;
 use crate::online::OnlineNodeDescriptor;
 use crate::online::OnlineNodeType;
 use crate::online::ONLINE_NODES_TOPIC;
@@ -91,6 +104,18 @@ pub struct ProcessorConfig {
     online_node_type: OnlineNodeType,
     /// Whether listen() advertises this node's presence.
     advertise_presence: bool,
+    /// Whether this node advertises onion relay capability in the online-node registry.
+    advertise_onion_relay: bool,
+    /// Whether this node publishes an onion-exit descriptor.
+    advertise_onion_exit: bool,
+    /// Onion-exit registry heartbeat interval.
+    onion_exit_heartbeat_interval: Duration,
+    /// Onion-exit registry descriptor TTL.
+    onion_exit_ttl: Duration,
+    /// Services this node publishes when onion exit advertisement is enabled.
+    onion_exit_services: Vec<OnionExitService>,
+    /// Exit policy this node publishes when onion exit advertisement is enabled.
+    onion_exit_policy: OnionExitPolicy,
 }
 
 #[wasm_export]
@@ -116,12 +141,39 @@ impl ProcessorConfig {
             online_node_ttl: Duration::from_secs(default_online_node_ttl_secs()),
             online_node_type: default_online_node_type(),
             advertise_presence: default_advertise_presence(),
+            advertise_onion_relay: default_advertise_onion_relay(),
+            advertise_onion_exit: default_advertise_onion_exit(),
+            onion_exit_heartbeat_interval: Duration::from_secs(
+                default_onion_exit_heartbeat_interval_secs(),
+            ),
+            onion_exit_ttl: Duration::from_secs(default_onion_exit_ttl_secs()),
+            onion_exit_services: default_onion_exit_services(),
+            onion_exit_policy: default_onion_exit_policy(),
         }
     }
 
     /// Return associated [SessionSk].
     pub fn session_sk(&self) -> SessionSk {
         self.session_sk.clone()
+    }
+
+    /// Enables browser-friendly HTTPS onion exit advertisement.
+    pub fn enable_https_onion_exit(mut self) -> Self {
+        self.advertise_onion_exit = true;
+        self.onion_exit_services = default_onion_exit_services();
+        self
+    }
+
+    /// Sets whether listen() advertises this node as an onion relay.
+    pub fn advertise_onion_relay(mut self, advertise: bool) -> Self {
+        self.advertise_onion_relay = advertise;
+        self
+    }
+
+    /// Sets whether listen() publishes this node as an onion exit.
+    pub fn advertise_onion_exit(mut self, advertise: bool) -> Self {
+        self.advertise_onion_exit = advertise;
+        self
     }
 }
 
@@ -172,6 +224,24 @@ pub struct ProcessorConfigSerialized {
     /// Whether listen() advertises this node's presence.
     #[serde(default = "default_advertise_presence")]
     advertise_presence: bool,
+    /// Whether listen() advertises onion relay capability.
+    #[serde(default = "default_advertise_onion_relay")]
+    advertise_onion_relay: bool,
+    /// Whether listen() publishes an onion-exit descriptor.
+    #[serde(default = "default_advertise_onion_exit")]
+    advertise_onion_exit: bool,
+    /// Onion-exit registry heartbeat interval in seconds.
+    #[serde(default = "default_onion_exit_heartbeat_interval_secs")]
+    onion_exit_heartbeat_interval_secs: u64,
+    /// Onion-exit registry descriptor TTL in seconds.
+    #[serde(default = "default_onion_exit_ttl_secs")]
+    onion_exit_ttl_secs: u64,
+    /// Exit services advertised by this node.
+    #[serde(default = "default_onion_exit_services")]
+    onion_exit_services: Vec<OnionExitService>,
+    /// Exit policy advertised by this node.
+    #[serde(default = "default_onion_exit_policy")]
+    onion_exit_policy: OnionExitPolicy,
 }
 
 impl ProcessorConfigSerialized {
@@ -194,6 +264,12 @@ impl ProcessorConfigSerialized {
             online_node_ttl_secs: default_online_node_ttl_secs(),
             online_node_type: default_online_node_type(),
             advertise_presence: default_advertise_presence(),
+            advertise_onion_relay: default_advertise_onion_relay(),
+            advertise_onion_exit: default_advertise_onion_exit(),
+            onion_exit_heartbeat_interval_secs: default_onion_exit_heartbeat_interval_secs(),
+            onion_exit_ttl_secs: default_onion_exit_ttl_secs(),
+            onion_exit_services: default_onion_exit_services(),
+            onion_exit_policy: default_onion_exit_policy(),
         }
     }
 
@@ -234,6 +310,49 @@ impl ProcessorConfigSerialized {
         self.advertise_presence = advertise;
         self
     }
+
+    /// Sets whether listen() advertises onion relay capability.
+    pub fn advertise_onion_relay(mut self, advertise: bool) -> Self {
+        self.advertise_onion_relay = advertise;
+        self
+    }
+
+    /// Sets whether listen() publishes an onion-exit descriptor.
+    pub fn advertise_onion_exit(mut self, advertise: bool) -> Self {
+        self.advertise_onion_exit = advertise;
+        self
+    }
+
+    /// Sets the onion-exit registry heartbeat interval in seconds.
+    pub fn onion_exit_heartbeat_interval_secs(mut self, interval_secs: u64) -> Self {
+        self.onion_exit_heartbeat_interval_secs = interval_secs;
+        self
+    }
+
+    /// Sets the onion-exit registry descriptor TTL in seconds.
+    pub fn onion_exit_ttl_secs(mut self, ttl_secs: u64) -> Self {
+        self.onion_exit_ttl_secs = ttl_secs;
+        self
+    }
+
+    /// Sets the onion-exit services advertised by this node.
+    pub fn onion_exit_services(mut self, services: Vec<OnionExitService>) -> Self {
+        self.onion_exit_services = services;
+        self
+    }
+
+    /// Sets the onion-exit policy advertised by this node.
+    pub fn onion_exit_policy(mut self, policy: OnionExitPolicy) -> Self {
+        self.onion_exit_policy = policy;
+        self
+    }
+
+    /// Enables the default browser-friendly HTTPS onion exit service.
+    pub fn enable_https_onion_exit(mut self) -> Self {
+        self.advertise_onion_exit = true;
+        self.onion_exit_services = default_onion_exit_services();
+        self
+    }
 }
 
 pub(crate) fn parse_webrtc_udp_port_range(
@@ -247,6 +366,26 @@ pub(crate) fn parse_webrtc_udp_port_range(
             .map_err(Error::from),
         (min, max) => Err(Error::IncompleteWebrtcUdpPortRange { min, max }),
     }
+}
+
+fn validate_onion_role_config(
+    advertise_presence: bool,
+    advertise_onion_relay: bool,
+    advertise_onion_exit: bool,
+    onion_exit_services: &[OnionExitService],
+) -> Result<()> {
+    if advertise_onion_relay && !advertise_presence {
+        return Err(Error::InvalidConfig(
+            "advertise_onion_relay requires advertise_presence because relay capability is published in online-node descriptors"
+                .to_string(),
+        ));
+    }
+    if advertise_onion_exit && onion_exit_services.is_empty() {
+        return Err(Error::InvalidConfig(
+            "advertise_onion_exit requires at least one onion_exit_services entry".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
@@ -264,6 +403,12 @@ impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
             online_node_ttl_secs: ins.online_node_ttl.as_secs(),
             online_node_type: ins.online_node_type,
             advertise_presence: ins.advertise_presence,
+            advertise_onion_relay: ins.advertise_onion_relay,
+            advertise_onion_exit: ins.advertise_onion_exit,
+            onion_exit_heartbeat_interval_secs: ins.onion_exit_heartbeat_interval.as_secs(),
+            onion_exit_ttl_secs: ins.onion_exit_ttl.as_secs(),
+            onion_exit_services: ins.onion_exit_services,
+            onion_exit_policy: ins.onion_exit_policy,
         })
     }
 }
@@ -276,10 +421,24 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
         let online_node_heartbeat_interval =
             Duration::from_secs(ins.online_node_heartbeat_interval_secs);
         let online_node_ttl = Duration::from_secs(ins.online_node_ttl_secs);
+        let onion_exit_heartbeat_interval =
+            Duration::from_secs(ins.onion_exit_heartbeat_interval_secs);
+        let onion_exit_ttl = Duration::from_secs(ins.onion_exit_ttl_secs);
         validate_online_node_registration_timing(
             ins.advertise_presence,
             online_node_heartbeat_interval,
             online_node_ttl,
+        )?;
+        validate_onion_exit_registration_timing(
+            ins.advertise_onion_exit,
+            onion_exit_heartbeat_interval,
+            onion_exit_ttl,
+        )?;
+        validate_onion_role_config(
+            ins.advertise_presence,
+            ins.advertise_onion_relay,
+            ins.advertise_onion_exit,
+            &ins.onion_exit_services,
         )?;
         Ok(Self {
             network_id: ins.network_id,
@@ -293,6 +452,12 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
             online_node_ttl,
             online_node_type: ins.online_node_type,
             advertise_presence: ins.advertise_presence,
+            advertise_onion_relay: ins.advertise_onion_relay,
+            advertise_onion_exit: ins.advertise_onion_exit,
+            onion_exit_heartbeat_interval,
+            onion_exit_ttl,
+            onion_exit_services: ins.onion_exit_services,
+            onion_exit_policy: ins.onion_exit_policy,
         })
     }
 }
@@ -339,6 +504,12 @@ pub struct ProcessorBuilder {
     online_node_ttl: Duration,
     online_node_type: OnlineNodeType,
     advertise_presence: bool,
+    advertise_onion_relay: bool,
+    advertise_onion_exit: bool,
+    onion_exit_heartbeat_interval: Duration,
+    onion_exit_ttl: Duration,
+    onion_exit_services: Vec<OnionExitService>,
+    onion_exit_policy: OnionExitPolicy,
     registration_tasks: Vec<Arc<dyn RegistrationTask>>,
     dht_finger_table_size: usize,
     reassembly_limits: ReassemblyLimits,
@@ -374,6 +545,17 @@ impl ProcessorBuilder {
             config.online_node_heartbeat_interval,
             config.online_node_ttl,
         )?;
+        validate_onion_exit_registration_timing(
+            config.advertise_onion_exit,
+            config.onion_exit_heartbeat_interval,
+            config.onion_exit_ttl,
+        )?;
+        validate_onion_role_config(
+            config.advertise_presence,
+            config.advertise_onion_relay,
+            config.advertise_onion_exit,
+            &config.onion_exit_services,
+        )?;
         Ok(Self {
             network_id: config.network_id,
             ice_servers: config.ice_servers.clone(),
@@ -387,6 +569,12 @@ impl ProcessorBuilder {
             online_node_ttl: config.online_node_ttl,
             online_node_type: config.online_node_type.clone(),
             advertise_presence: config.advertise_presence,
+            advertise_onion_relay: config.advertise_onion_relay,
+            advertise_onion_exit: config.advertise_onion_exit,
+            onion_exit_heartbeat_interval: config.onion_exit_heartbeat_interval,
+            onion_exit_ttl: config.onion_exit_ttl,
+            onion_exit_services: config.onion_exit_services.clone(),
+            onion_exit_policy: config.onion_exit_policy.clone(),
             registration_tasks: Vec::new(),
             dht_finger_table_size: DEFAULT_FINGER_TABLE_SIZE,
             reassembly_limits: ReassemblyLimits::production(),
@@ -429,6 +617,18 @@ impl ProcessorBuilder {
         self
     }
 
+    /// Set whether listen() advertises this node as an onion relay.
+    pub fn advertise_onion_relay(mut self, advertise: bool) -> Self {
+        self.advertise_onion_relay = advertise;
+        self
+    }
+
+    /// Set whether listen() publishes this node as an onion exit.
+    pub fn advertise_onion_exit(mut self, advertise: bool) -> Self {
+        self.advertise_onion_exit = advertise;
+        self
+    }
+
     /// Add a custom periodic registration task.
     pub fn registration_task<T>(mut self, task: T) -> Self
     where T: RegistrationTask + 'static {
@@ -451,18 +651,37 @@ impl ProcessorBuilder {
 
         let storage = self.storage.unwrap_or_else(|| Box::new(MemStorage::new()));
         let endpoint_hint = self.external_address.clone();
+        let mut online_node_capabilities = Vec::new();
+        if self.advertise_onion_relay {
+            online_node_capabilities.push(ONION_RELAY_CAPABILITY.to_string());
+        }
+        if self.advertise_onion_exit {
+            online_node_capabilities.push(ONION_EXIT_CAPABILITY.to_string());
+        }
 
         let session_sk = self.session_sk.clone();
         let online_node_registration = OnlineNodeRegistration::new(
             self.online_node_heartbeat_interval,
             self.online_node_ttl,
-            self.online_node_type,
+            self.online_node_type.clone(),
             endpoint_hint,
+            online_node_capabilities,
         );
         let mut registration_tasks = self.registration_tasks;
         if self.advertise_presence {
             online_node_registration.validate_enabled_schedule()?;
             registration_tasks.push(Arc::new(online_node_registration.clone()));
+        }
+        if self.advertise_onion_exit {
+            let onion_exit_registration = OnionExitRegistration::new(
+                self.onion_exit_heartbeat_interval,
+                self.onion_exit_ttl,
+                self.online_node_type,
+                self.onion_exit_services,
+                self.onion_exit_policy,
+            );
+            onion_exit_registration.validate_enabled_schedule()?;
+            registration_tasks.push(Arc::new(onion_exit_registration));
         }
 
         let mut swarm_builder =
@@ -620,23 +839,23 @@ impl Processor {
         };
         let online_nodes = self.lookup_online_nodes(false).await?;
         let exits = self.lookup_onion_exits(&service, false).await?;
-        select_onion_route(
+        let candidates = OnionRouteCandidates::from_validated_descriptors(
             self.did(),
             self.swarm.network_id(),
-            get_epoch_ms(),
-            &request,
+            &service,
             online_nodes,
             exits,
+        );
+        select_onion_route_from_candidates(
+            &request,
+            candidates,
             self.onion_route_peer_qualities().await,
+            &mut SystemRouteEntropy::new(),
         )
     }
 
     async fn onion_route_peer_qualities(&self) -> Vec<(Did, PeerQuality)> {
-        let thresholds = PeerQualityThresholds::new(
-            crate::consts::CONNECT_FAILED_LIMIT,
-            crate::consts::MSG_SEND_FAILED_LIMIT,
-            crate::consts::MSG_RECV_FAILED_LIMIT,
-        );
+        let thresholds = peer_quality_thresholds();
         self.peer_measurements()
             .await
             .into_iter()
@@ -1098,6 +1317,93 @@ mod test {
         assert!(builder.advertise_presence);
     }
 
+    #[test]
+    fn onion_relay_requires_presence_advertisement() {
+        let key = SecretKey::random();
+        let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+        let serialized = ProcessorConfigSerialized::new(
+            0,
+            "stun://stun.l.google.com:19302".to_string(),
+            session_sk.dump().unwrap(),
+            3,
+        )
+        .advertise_presence(false)
+        .advertise_onion_relay(true);
+
+        assert!(matches!(
+            ProcessorConfig::try_from(serialized),
+            Err(Error::InvalidConfig(message))
+                if message.contains("advertise_onion_relay")
+                    && message.contains("advertise_presence")
+        ));
+    }
+
+    #[test]
+    fn onion_exit_registration_task_can_run_without_presence_advertisement() {
+        let key = SecretKey::random();
+        let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+        let serialized = ProcessorConfigSerialized::new(
+            0,
+            "stun://stun.l.google.com:19302".to_string(),
+            session_sk.dump().unwrap(),
+            3,
+        )
+        .advertise_presence(false)
+        .advertise_onion_exit(true);
+
+        let config = ProcessorConfig::try_from(serialized).unwrap();
+        let processor = ProcessorBuilder::from_config(&config)
+            .unwrap()
+            .storage(Box::new(MemStorage::new()))
+            .dht_finger_table_size(8)
+            .build()
+            .unwrap();
+
+        assert_eq!(processor.registration_tasks.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn onion_relay_capability_is_advertised_in_online_descriptor() {
+        let key = SecretKey::random();
+        let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+        let config = ProcessorConfig::new(
+            0,
+            "stun://stun.l.google.com:19302".to_string(),
+            session_sk,
+            3,
+        )
+        .advertise_onion_relay(true);
+
+        let processor = ProcessorBuilder::from_config(&config)
+            .unwrap()
+            .storage(Box::new(MemStorage::new()))
+            .dht_finger_table_size(8)
+            .build()
+            .unwrap();
+        let descriptor = processor.online_node_descriptor_at(get_epoch_ms()).unwrap();
+
+        assert!(descriptor
+            .capabilities
+            .iter()
+            .any(|capability| capability == ONION_RELAY_CAPABILITY));
+    }
+
+    #[test]
+    fn https_onion_exit_config_uses_default_https_service() {
+        let key = SecretKey::random();
+        let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+        let config = ProcessorConfig::new(
+            0,
+            "stun://stun.l.google.com:19302".to_string(),
+            session_sk,
+            3,
+        )
+        .enable_https_onion_exit();
+
+        assert!(config.advertise_onion_exit);
+        assert_eq!(config.onion_exit_services, default_onion_exit_services());
+    }
+
     #[tokio::test]
     async fn custom_registration_task_publishes_through_shared_dht_sink() -> Result<()> {
         let topic = "custom_registration_task";
@@ -1223,7 +1529,7 @@ mod test {
                     .map_err(Error::CoreError)?,
                 node_type: default_online_node_type(),
                 network_id: expired_processor.swarm.network_id(),
-                capabilities: OnlineNodeRegistration::capabilities(),
+                capabilities: OnlineNodeRegistration::default_capabilities(),
                 endpoint_hint: None,
                 started_at_ms: now_ms.saturating_sub(120_000),
                 heartbeat_at_ms: now_ms.saturating_sub(90_000),
@@ -1360,8 +1666,8 @@ mod test {
 
         processor
             .storage_store(Processor::online_node_registry_entry(vec![
-                first_relay.online_node_descriptor_at(now_ms)?,
-                second_relay.online_node_descriptor_at(now_ms)?,
+                online_relay_descriptor_for_processor(&first_relay, now_ms)?,
+                online_relay_descriptor_for_processor(&second_relay, now_ms)?,
                 exit.online_node_descriptor_at(now_ms)?,
             ])?)
             .await?;
@@ -1671,6 +1977,33 @@ mod test {
                     max_streams_per_circuit: 2,
                     max_bytes_per_minute: 4096,
                 },
+                started_at_ms: now_ms,
+                heartbeat_at_ms: now_ms,
+                expires_at_ms: now_ms + 90_000,
+                version: crate::util::build_version(),
+            },
+            &processor.session_sk,
+        )
+        .map_err(Error::CoreError)
+    }
+
+    fn online_relay_descriptor_for_processor(
+        processor: &Processor,
+        now_ms: u128,
+    ) -> Result<OnlineNodeDescriptor> {
+        let mut capabilities = OnlineNodeRegistration::default_capabilities();
+        capabilities.push(ONION_RELAY_CAPABILITY.to_string());
+        OnlineNodeDescriptor::new_signed(
+            OnlineNodeDescriptorBody {
+                did: processor.did(),
+                public_key: processor
+                    .swarm
+                    .account_verification_pubkey()
+                    .map_err(Error::CoreError)?,
+                node_type: default_online_node_type(),
+                network_id: processor.swarm.network_id(),
+                capabilities,
+                endpoint_hint: None,
                 started_at_ms: now_ms,
                 heartbeat_at_ms: now_ms,
                 expires_at_ms: now_ms + 90_000,

@@ -1,9 +1,6 @@
 #![warn(missing_docs)]
 //! Signed online-node descriptors stored in the DHT.
 
-use std::collections::btree_map::Entry;
-use std::collections::BTreeMap;
-
 use rings_core::dht::Did;
 use rings_core::ecc::VerificationPublicKey;
 use rings_core::error::Error;
@@ -15,6 +12,11 @@ use rings_core::message::MessageVerification;
 use rings_core::session::SessionSk;
 use serde::Deserialize;
 use serde::Serialize;
+
+use crate::descriptor::decode_descriptor;
+use crate::descriptor::encode_descriptor;
+use crate::descriptor::latest_valid_by_did;
+use crate::descriptor::SignedDescriptor;
 
 /// DHT topic used for online-node registry descriptors.
 pub const ONLINE_NODES_TOPIC: &str = "online_nodes";
@@ -201,31 +203,17 @@ impl OnlineNodeDescriptor {
     /// signed `expires_at_ms` descriptor field; use [`Self::is_live_at`] when
     /// expiry should be enforced.
     pub fn verify_signature(&self) -> bool {
-        if self.public_key.did() != self.did || self.signature.session.account_did() != self.did {
-            return false;
-        }
-
-        let Ok(session_public_key) = self.signature.session.account_verification_pubkey() else {
-            return false;
-        };
-        if session_public_key != self.public_key {
-            return false;
-        }
-
-        let Ok(data) = self.signing_data() else {
-            return false;
-        };
-        self.signature.verify(&data)
+        self.descriptor_verify_signature()
     }
 
     /// Returns whether this descriptor is expired at `now_ms`.
     pub fn is_expired_at(&self, now_ms: u128) -> bool {
-        self.expires_at_ms < now_ms
+        self.descriptor_is_expired_at(now_ms)
     }
 
     /// Returns whether this descriptor has a valid signature and is not expired.
     pub fn is_live_at(&self, now_ms: u128) -> bool {
-        self.verify_signature() && !self.is_expired_at(now_ms)
+        self.descriptor_is_live_at(now_ms)
     }
 
     /// Select the newest valid descriptor per DID.
@@ -234,42 +222,45 @@ impl OnlineNodeDescriptor {
         now_ms: u128,
         include_expired: bool,
     ) -> Vec<Self> {
-        let mut latest = BTreeMap::<Did, Self>::new();
-        for descriptor in descriptors {
-            if include_expired {
-                if !descriptor.verify_signature() {
-                    continue;
-                }
-            } else if !descriptor.is_live_at(now_ms) {
-                continue;
-            }
-            match latest.entry(descriptor.did) {
-                Entry::Occupied(mut entry) => {
-                    if descriptor.heartbeat_at_ms > entry.get().heartbeat_at_ms {
-                        entry.insert(descriptor);
-                    }
-                }
-                Entry::Vacant(entry) => {
-                    entry.insert(descriptor);
-                }
-            }
-        }
-        latest.into_values().collect()
+        latest_valid_by_did(descriptors, now_ms, include_expired)
+    }
+}
+
+impl SignedDescriptor for OnlineNodeDescriptor {
+    fn descriptor_did(&self) -> Did {
+        self.did
+    }
+
+    fn descriptor_public_key(&self) -> &VerificationPublicKey {
+        &self.public_key
+    }
+
+    fn descriptor_signature(&self) -> &MessageVerification {
+        &self.signature
+    }
+
+    fn descriptor_heartbeat_at_ms(&self) -> u128 {
+        self.heartbeat_at_ms
+    }
+
+    fn descriptor_expires_at_ms(&self) -> u128 {
+        self.expires_at_ms
+    }
+
+    fn descriptor_signing_data(&self) -> Result<Vec<u8>> {
+        self.signing_data()
     }
 }
 
 impl Encoder for OnlineNodeDescriptor {
     fn encode(&self) -> Result<Encoded> {
-        bincode::serialize(self)
-            .map_err(Error::BincodeSerialize)?
-            .encode()
+        encode_descriptor(self)
     }
 }
 
 impl Decoder for OnlineNodeDescriptor {
     fn from_encoded(encoded: &Encoded) -> Result<Self> {
-        let data: Vec<u8> = encoded.decode()?;
-        bincode::deserialize(&data).map_err(Error::BincodeDeserialize)
+        decode_descriptor(encoded)
     }
 }
 

@@ -26,6 +26,15 @@ const DURATION: u64 = 1;
 #[cfg(not(test))]
 const DURATION: u64 = 60 * 60;
 
+/// Shared peer-quality thresholds used by measurement and route selection.
+pub(crate) const fn peer_quality_thresholds() -> PeerQualityThresholds {
+    PeerQualityThresholds::new(
+        crate::consts::CONNECT_FAILED_LIMIT,
+        crate::consts::MSG_SEND_FAILED_LIMIT,
+        crate::consts::MSG_RECV_FAILED_LIMIT,
+    )
+}
+
 /// `MeasureStorage` is the type accepted by `PeriodicMeasure::new`.
 /// It's used to store counts in a storage media provided by user.
 #[cfg(feature = "browser")]
@@ -213,11 +222,7 @@ impl Measure for PeriodicMeasure {
 #[cfg_attr(feature = "browser", async_trait(?Send))]
 impl measure::BehaviourJudgement for PeriodicMeasure {
     async fn quality(&self, did: Did) -> PeerQuality {
-        let thresholds = PeerQualityThresholds::new(
-            crate::consts::CONNECT_FAILED_LIMIT,
-            crate::consts::MSG_SEND_FAILED_LIMIT,
-            crate::consts::MSG_RECV_FAILED_LIMIT,
-        );
+        let thresholds = peer_quality_thresholds();
         PeerQualityEvidence::from_measure(self, did)
             .await
             .classify(thresholds)

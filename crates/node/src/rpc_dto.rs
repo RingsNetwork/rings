@@ -73,6 +73,7 @@ fn onion_exit_transport_info(transport: OnionExitTransport) -> OnionExitTranspor
         OnionExitTransport::Udp => OnionExitTransportInfo::Udp,
         OnionExitTransport::WebTransport => OnionExitTransportInfo::WebTransport,
         OnionExitTransport::RequestResponse => OnionExitTransportInfo::RequestResponse,
+        OnionExitTransport::Https => OnionExitTransportInfo::Https,
     }
 }
 
@@ -128,7 +129,7 @@ pub(crate) fn onion_route_response(route: OnionRoute) -> Result<BuildOnionRouteR
     Ok(BuildOnionRouteResponse {
         hops: route.hops.into_iter().map(|did| did.to_string()).collect(),
         service: route.service,
-        exit: Some(onion_exit_descriptor_info(route.exit)?),
+        exit: onion_exit_descriptor_info(route.exit)?,
     })
 }
 

@@ -200,6 +200,7 @@ pub struct OnlineNodeRegistration {
     node_type: OnlineNodeType,
     started_at_ms: u128,
     endpoint_hint: Option<String>,
+    additional_capabilities: Vec<String>,
     publisher: DhtRegistrationPublisher,
 }
 
@@ -210,6 +211,7 @@ impl OnlineNodeRegistration {
         ttl: Duration,
         node_type: OnlineNodeType,
         endpoint_hint: Option<String>,
+        additional_capabilities: Vec<String>,
     ) -> Self {
         Self {
             heartbeat_interval,
@@ -217,6 +219,7 @@ impl OnlineNodeRegistration {
             node_type,
             started_at_ms: get_epoch_ms(),
             endpoint_hint,
+            additional_capabilities,
             publisher: DhtRegistrationPublisher::new(ONLINE_NODES_TOPIC),
         }
     }
@@ -227,7 +230,7 @@ impl OnlineNodeRegistration {
     }
 
     /// Return capability labels advertised by online-node descriptors.
-    pub fn capabilities() -> Vec<String> {
+    pub fn default_capabilities() -> Vec<String> {
         let capabilities = vec![ONLINE_NODE_CAPABILITY_STORAGE.to_string()];
         #[cfg(feature = "snark")]
         let capabilities = {
@@ -235,6 +238,17 @@ impl OnlineNodeRegistration {
             capabilities.push(ONLINE_NODE_CAPABILITY_SNARK.to_string());
             capabilities
         };
+        capabilities
+    }
+
+    /// Return capability labels advertised by this registration.
+    pub fn capabilities(&self) -> Vec<String> {
+        let mut capabilities = Self::default_capabilities();
+        for capability in &self.additional_capabilities {
+            if !capabilities.iter().any(|known| known == capability) {
+                capabilities.push(capability.clone());
+            }
+        }
         capabilities
     }
 
@@ -250,7 +264,7 @@ impl OnlineNodeRegistration {
                 public_key: context.account_verification_pubkey()?,
                 node_type: self.node_type.clone(),
                 network_id: context.network_id(),
-                capabilities: Self::capabilities(),
+                capabilities: self.capabilities(),
                 endpoint_hint: self.endpoint_hint.clone(),
                 started_at_ms: self.started_at_ms,
                 heartbeat_at_ms: now_ms,

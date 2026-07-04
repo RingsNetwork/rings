@@ -5,7 +5,6 @@
 //! remains the storage and discovery substrate, while onion exit policy is an
 //! application protocol decision.
 
-use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -15,7 +14,6 @@ use rings_core::dht::Did;
 use rings_core::ecc::VerificationPublicKey;
 use rings_core::error::Error as CoreError;
 use rings_core::error::Result as CoreResult;
-use rings_core::measure::order_peers_by_quality;
 use rings_core::measure::PeerQuality;
 use rings_core::message::Decoder;
 use rings_core::message::Encoded;
@@ -26,6 +24,10 @@ use rings_core::utils::get_epoch_ms;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::descriptor::decode_descriptor;
+use crate::descriptor::encode_descriptor;
+use crate::descriptor::latest_valid_by_did;
+use crate::descriptor::SignedDescriptor;
 use crate::error::Error;
 use crate::error::Result;
 use crate::online::OnlineNodeDescriptor;
@@ -46,6 +48,53 @@ pub const ONION_RELAY_CAPABILITY: &str = "onion-relay";
 /// Capability label for nodes willing to publish onion exit policy.
 pub const ONION_EXIT_CAPABILITY: &str = "onion-exit";
 
+const DEFAULT_ONION_EXIT_HEARTBEAT_INTERVAL_SECS: u64 = 30;
+const DEFAULT_ONION_EXIT_TTL_SECS: u64 = 90;
+
+/// Default onion-exit registry heartbeat interval in seconds.
+pub(crate) const fn default_onion_exit_heartbeat_interval_secs() -> u64 {
+    DEFAULT_ONION_EXIT_HEARTBEAT_INTERVAL_SECS
+}
+
+/// Default onion-exit registry descriptor TTL in seconds.
+pub(crate) const fn default_onion_exit_ttl_secs() -> u64 {
+    DEFAULT_ONION_EXIT_TTL_SECS
+}
+
+/// Default onion relay advertisement enablement.
+pub(crate) const fn default_advertise_onion_relay() -> bool {
+    false
+}
+
+/// Default onion exit advertisement enablement.
+pub(crate) const fn default_advertise_onion_exit() -> bool {
+    false
+}
+
+/// Default exit services. It is only published when onion-exit advertisement is enabled.
+pub fn default_onion_exit_services() -> Vec<OnionExitService> {
+    vec![OnionExitService::https()]
+}
+
+/// Default exit policy. It is intentionally closed until the operator configures targets.
+pub fn default_onion_exit_policy() -> OnionExitPolicy {
+    OnionExitPolicy::default()
+}
+
+/// Validate onion-exit registration scheduling.
+pub(crate) fn validate_onion_exit_registration_timing(
+    advertise_exit: bool,
+    heartbeat_interval: Duration,
+    ttl: Duration,
+) -> Result<()> {
+    if advertise_exit && heartbeat_interval >= ttl {
+        return Err(Error::InvalidConfig(format!(
+            "onion_exit_heartbeat_interval ({heartbeat_interval:?}) must be less than onion_exit_ttl ({ttl:?}) when advertise_onion_exit is enabled"
+        )));
+    }
+    Ok(())
+}
+
 /// Application transport exposed by an onion exit service.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub enum OnionExitTransport {
@@ -57,6 +106,8 @@ pub enum OnionExitTransport {
     WebTransport,
     /// Protocol-specific request/response service.
     RequestResponse,
+    /// Browser HTTPS fetch service.
+    Https,
 }
 
 /// One named service offered by an onion exit.
@@ -69,6 +120,14 @@ pub struct OnionExitService {
 }
 
 impl OnionExitService {
+    /// Return the standard browser HTTPS exit service.
+    pub fn https() -> Self {
+        Self {
+            name: "https".to_string(),
+            transport: OnionExitTransport::Https,
+        }
+    }
+
     /// Return whether this service has the requested name.
     pub fn has_name(&self, service: &str) -> bool {
         self.name == service
@@ -259,31 +318,17 @@ impl OnionExitDescriptor {
 
     /// Verify the descriptor signature and DID/public-key binding.
     pub fn verify_signature(&self) -> bool {
-        if self.public_key.did() != self.did || self.signature.session.account_did() != self.did {
-            return false;
-        }
-
-        let Ok(session_public_key) = self.signature.session.account_verification_pubkey() else {
-            return false;
-        };
-        if session_public_key != self.public_key {
-            return false;
-        }
-
-        let Ok(data) = self.signing_data() else {
-            return false;
-        };
-        self.signature.verify(&data)
+        self.descriptor_verify_signature()
     }
 
     /// Returns whether this descriptor is expired at `now_ms`.
     pub fn is_expired_at(&self, now_ms: u128) -> bool {
-        self.expires_at_ms < now_ms
+        self.descriptor_is_expired_at(now_ms)
     }
 
     /// Returns whether this descriptor has a valid signature and is not expired.
     pub fn is_live_at(&self, now_ms: u128) -> bool {
-        self.verify_signature() && !self.is_expired_at(now_ms)
+        self.descriptor_is_live_at(now_ms)
     }
 
     /// Select the newest valid onion-exit descriptor per DID.
@@ -292,42 +337,45 @@ impl OnionExitDescriptor {
         now_ms: u128,
         include_expired: bool,
     ) -> Vec<Self> {
-        let mut latest = BTreeMap::<Did, Self>::new();
-        for descriptor in descriptors {
-            if include_expired {
-                if !descriptor.verify_signature() {
-                    continue;
-                }
-            } else if !descriptor.is_live_at(now_ms) {
-                continue;
-            }
-            match latest.entry(descriptor.did) {
-                Entry::Occupied(mut entry) => {
-                    if descriptor.heartbeat_at_ms > entry.get().heartbeat_at_ms {
-                        entry.insert(descriptor);
-                    }
-                }
-                Entry::Vacant(entry) => {
-                    entry.insert(descriptor);
-                }
-            }
-        }
-        latest.into_values().collect()
+        latest_valid_by_did(descriptors, now_ms, include_expired)
+    }
+}
+
+impl SignedDescriptor for OnionExitDescriptor {
+    fn descriptor_did(&self) -> Did {
+        self.did
+    }
+
+    fn descriptor_public_key(&self) -> &VerificationPublicKey {
+        &self.public_key
+    }
+
+    fn descriptor_signature(&self) -> &MessageVerification {
+        &self.signature
+    }
+
+    fn descriptor_heartbeat_at_ms(&self) -> u128 {
+        self.heartbeat_at_ms
+    }
+
+    fn descriptor_expires_at_ms(&self) -> u128 {
+        self.expires_at_ms
+    }
+
+    fn descriptor_signing_data(&self) -> CoreResult<Vec<u8>> {
+        self.signing_data()
     }
 }
 
 impl Encoder for OnionExitDescriptor {
     fn encode(&self) -> CoreResult<Encoded> {
-        bincode::serialize(self)
-            .map_err(CoreError::BincodeSerialize)?
-            .encode()
+        encode_descriptor(self)
     }
 }
 
 impl Decoder for OnionExitDescriptor {
     fn from_encoded(encoded: &Encoded) -> CoreResult<Self> {
-        let data: Vec<u8> = encoded.decode()?;
-        bincode::deserialize(&data).map_err(CoreError::BincodeDeserialize)
+        decode_descriptor(encoded)
     }
 }
 
@@ -477,6 +525,70 @@ impl OnionRoute {
     }
 }
 
+pub(crate) trait RouteEntropy {
+    fn next_u64(&mut self) -> u64;
+}
+
+pub(crate) struct SystemRouteEntropy;
+
+impl SystemRouteEntropy {
+    pub(crate) const fn new() -> Self {
+        Self
+    }
+}
+
+#[cfg(not(feature = "browser"))]
+impl RouteEntropy for SystemRouteEntropy {
+    fn next_u64(&mut self) -> u64 {
+        rand::random()
+    }
+}
+
+#[cfg(feature = "browser")]
+impl RouteEntropy for SystemRouteEntropy {
+    fn next_u64(&mut self) -> u64 {
+        let upper = (js_sys::Math::random() * (u32::MAX as f64)) as u64;
+        let lower = (js_sys::Math::random() * (u32::MAX as f64)) as u64;
+        (upper << 32) | lower
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct OnionRouteCandidates {
+    relays: Vec<Did>,
+    exits: Vec<OnionExitDescriptor>,
+}
+
+impl OnionRouteCandidates {
+    pub(crate) fn from_validated_descriptors(
+        local: Did,
+        network_id: u32,
+        service: &str,
+        online_nodes: impl IntoIterator<Item = OnlineNodeDescriptor>,
+        exits: impl IntoIterator<Item = OnionExitDescriptor>,
+    ) -> Self {
+        let relays = online_nodes
+            .into_iter()
+            .filter(|descriptor| descriptor.matches_network(network_id))
+            .filter(has_onion_relay_capability)
+            .map(|descriptor| descriptor.did)
+            .filter(|did| *did != local)
+            .collect::<BTreeSet<_>>();
+
+        let exits = exits
+            .into_iter()
+            .filter(|descriptor| descriptor.matches_network(network_id))
+            .filter(|descriptor| descriptor.offers_service(service))
+            .filter(|descriptor| descriptor.did != local)
+            .collect::<Vec<_>>();
+
+        Self {
+            relays: relays.into_iter().collect(),
+            exits,
+        }
+    }
+}
+
 /// Select an onion route from live presence and exit descriptors.
 ///
 /// Invariant: the returned hop list contains no duplicate DID and always ends
@@ -491,6 +603,30 @@ pub fn select_onion_route(
     qualities: impl IntoIterator<Item = (Did, PeerQuality)>,
 ) -> Result<OnionRoute> {
     let service = request.service.trim();
+    let candidates = OnionRouteCandidates {
+        relays: eligible_relay_dids(network_id, now_ms, local, online_nodes)
+            .into_iter()
+            .collect(),
+        exits: eligible_exits(network_id, now_ms, service, exits)
+            .into_iter()
+            .filter(|descriptor| descriptor.did != local)
+            .collect(),
+    };
+    select_onion_route_from_candidates(
+        request,
+        candidates,
+        qualities,
+        &mut SystemRouteEntropy::new(),
+    )
+}
+
+pub(crate) fn select_onion_route_from_candidates(
+    request: &OnionRouteRequest,
+    candidates: OnionRouteCandidates,
+    qualities: impl IntoIterator<Item = (Did, PeerQuality)>,
+    entropy: &mut impl RouteEntropy,
+) -> Result<OnionRoute> {
+    let service = request.service.trim();
     if service.is_empty() {
         return Err(Error::OnionRouteError(
             "onion route service must not be empty".to_string(),
@@ -498,28 +634,32 @@ pub fn select_onion_route(
     }
 
     let quality_by_did = qualities.into_iter().collect::<BTreeMap<_, _>>();
-    let mut exits_by_did = eligible_exits(network_id, now_ms, service, exits)
-        .into_iter()
-        .map(|descriptor| (descriptor.did, descriptor))
-        .collect::<BTreeMap<_, _>>();
-
-    let exit_did = order_dids_by_quality(exits_by_did.keys().copied(), &quality_by_did)
-        .into_iter()
-        .find(|did| *did != local)
-        .ok_or_else(|| {
+    let mut exit_candidates = candidates.exits;
+    let exit_dids = exit_candidates
+        .iter()
+        .map(|descriptor| descriptor.did)
+        .collect::<Vec<_>>();
+    let exit_index =
+        pick_weighted_index(&exit_dids, &quality_by_did, entropy).ok_or_else(|| {
             Error::OnionRouteError(format!("no live onion exit offers service {service:?}"))
         })?;
-    let exit = exits_by_did.remove(&exit_did).ok_or_else(|| {
-        Error::OnionRouteError("selected onion exit disappeared during route selection".to_string())
-    })?;
+    let exit = exit_candidates.remove(exit_index);
+    let exit_did = exit.did;
 
-    let relay_dids = eligible_relay_dids(network_id, now_ms, local, exit_did, online_nodes);
-    let ordered_relays = order_dids_by_quality(relay_dids, &quality_by_did);
-    let relay_hops_needed = request.target_hop_count().saturating_sub(1);
-    let selected_relays = ordered_relays
+    let mut relay_candidates = candidates
+        .relays
         .into_iter()
-        .take(relay_hops_needed)
+        .filter(|did| *did != exit_did)
         .collect::<Vec<_>>();
+    let relay_hops_needed = request.target_hop_count().saturating_sub(1);
+    let mut selected_relays = Vec::with_capacity(relay_hops_needed);
+    while selected_relays.len() < relay_hops_needed {
+        let Some(next_index) = pick_weighted_index(&relay_candidates, &quality_by_did, entropy)
+        else {
+            break;
+        };
+        selected_relays.push(relay_candidates.remove(next_index));
+    }
 
     if selected_relays.len() < relay_hops_needed && !request.allow_short_paths {
         return Err(Error::OnionRouteError(format!(
@@ -530,17 +670,45 @@ pub fn select_onion_route(
 
     let mut hops = selected_relays;
     hops.push(exit_did);
-    if has_duplicate_dids(&hops) {
-        return Err(Error::OnionRouteError(
-            "onion route selection produced duplicate DIDs".to_string(),
-        ));
-    }
+    debug_assert!(!has_duplicate_dids(&hops));
 
     Ok(OnionRoute {
         service: service.to_string(),
         hops,
         exit,
     })
+}
+
+fn pick_weighted_index(
+    dids: &[Did],
+    quality_by_did: &BTreeMap<Did, PeerQuality>,
+    entropy: &mut impl RouteEntropy,
+) -> Option<usize> {
+    let total_weight = dids
+        .iter()
+        .map(|did| quality_weight(quality_by_did.get(did).copied()))
+        .sum::<u64>();
+    if total_weight == 0 {
+        return None;
+    }
+
+    let mut roll = entropy.next_u64() % total_weight;
+    for (index, did) in dids.iter().enumerate() {
+        let weight = quality_weight(quality_by_did.get(did).copied());
+        if roll < weight {
+            return Some(index);
+        }
+        roll -= weight;
+    }
+    None
+}
+
+fn quality_weight(quality: Option<PeerQuality>) -> u64 {
+    match quality {
+        Some(PeerQuality::Healthy) => 8,
+        Some(PeerQuality::Unknown) | None => 4,
+        Some(PeerQuality::Degraded) => 1,
+    }
 }
 
 fn eligible_exits(
@@ -560,30 +728,22 @@ fn eligible_relay_dids(
     network_id: u32,
     now_ms: u128,
     local: Did,
-    exit: Did,
     online_nodes: impl IntoIterator<Item = OnlineNodeDescriptor>,
 ) -> BTreeSet<Did> {
     OnlineNodeDescriptor::latest_valid_by_did(online_nodes, now_ms, false)
         .into_iter()
         .filter(|descriptor| descriptor.matches_network(network_id))
+        .filter(has_onion_relay_capability)
         .map(|descriptor| descriptor.did)
-        .filter(|did| *did != local && *did != exit)
+        .filter(|did| *did != local)
         .collect()
 }
 
-fn order_dids_by_quality(
-    dids: impl IntoIterator<Item = Did>,
-    quality_by_did: &BTreeMap<Did, PeerQuality>,
-) -> Vec<Did> {
-    order_peers_by_quality(dids.into_iter().map(|did| {
-        (
-            did,
-            quality_by_did
-                .get(&did)
-                .copied()
-                .unwrap_or(PeerQuality::Unknown),
-        )
-    }))
+fn has_onion_relay_capability(descriptor: &OnlineNodeDescriptor) -> bool {
+    descriptor
+        .capabilities
+        .iter()
+        .any(|capability| capability == ONION_RELAY_CAPABILITY)
 }
 
 fn has_duplicate_dids(hops: &[Did]) -> bool {
@@ -593,6 +753,8 @@ fn has_duplicate_dids(hops: &[Did]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+
     use rings_core::ecc::SecretKey;
     use rings_core::session::SessionSk;
 
@@ -641,13 +803,24 @@ mod tests {
         heartbeat_at_ms: u128,
         expires_at_ms: u128,
     ) -> CoreResult<OnlineNodeDescriptor> {
+        online_node_at_with_capabilities(session_sk, heartbeat_at_ms, expires_at_ms, vec![
+            ONION_RELAY_CAPABILITY.to_string(),
+        ])
+    }
+
+    fn online_node_at_with_capabilities(
+        session_sk: &SessionSk,
+        heartbeat_at_ms: u128,
+        expires_at_ms: u128,
+        capabilities: Vec<String>,
+    ) -> CoreResult<OnlineNodeDescriptor> {
         OnlineNodeDescriptor::new_signed(
             OnlineNodeDescriptorBody {
                 did: session_sk.account_did(),
                 public_key: session_sk.session().account_verification_pubkey()?,
                 node_type: OnlineNodeType::Native,
                 network_id: 1,
-                capabilities: vec![],
+                capabilities,
                 endpoint_hint: None,
                 started_at_ms: 1,
                 heartbeat_at_ms,
@@ -660,6 +833,24 @@ mod tests {
 
     fn node_key() -> CoreResult<SessionSk> {
         SessionSk::new_with_seckey(&SecretKey::random())
+    }
+
+    struct FixedEntropy {
+        values: VecDeque<u64>,
+    }
+
+    impl FixedEntropy {
+        fn new(values: impl IntoIterator<Item = u64>) -> Self {
+            Self {
+                values: values.into_iter().collect(),
+            }
+        }
+    }
+
+    impl RouteEntropy for FixedEntropy {
+        fn next_u64(&mut self) -> u64 {
+            self.values.pop_front().unwrap_or(0)
+        }
     }
 
     #[test]
@@ -800,27 +991,91 @@ mod tests {
     }
 
     #[test]
-    fn route_builder_orders_relays_by_quality() -> Result<()> {
+    fn route_builder_rejects_nodes_without_relay_capability() -> Result<()> {
         let local = node_key().map_err(Error::CoreError)?.account_did();
-        let degraded = node_key().map_err(Error::CoreError)?;
-        let healthy = node_key().map_err(Error::CoreError)?;
+        let relay = node_key().map_err(Error::CoreError)?;
         let exit = signed_exit_at(20, 100).map_err(Error::CoreError)?;
-        let online = vec![
-            online_node_at(&degraded, 20, 100).map_err(Error::CoreError)?,
-            online_node_at(&healthy, 20, 100).map_err(Error::CoreError)?,
-        ];
         let request = OnionRouteRequest {
             service: "web".to_string(),
             hop_count: 2,
             allow_short_paths: false,
         };
 
-        let route = select_onion_route(local, 1, 50, &request, online, vec![exit], vec![
-            (degraded.account_did(), PeerQuality::Degraded),
-            (healthy.account_did(), PeerQuality::Healthy),
-        ])?;
+        let result = select_onion_route(
+            local,
+            1,
+            50,
+            &request,
+            vec![online_node_at_with_capabilities(&relay, 20, 100, vec![])
+                .map_err(Error::CoreError)?],
+            vec![exit],
+            Vec::new(),
+        );
+
+        assert!(
+            matches!(result, Err(Error::OnionRouteError(message)) if message.contains("not enough relay"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn route_builder_samples_relays_by_quality_weight() -> Result<()> {
+        let local = node_key().map_err(Error::CoreError)?.account_did();
+        let degraded = node_key().map_err(Error::CoreError)?;
+        let healthy = node_key().map_err(Error::CoreError)?;
+        let exit = signed_exit_at(20, 100).map_err(Error::CoreError)?;
+        let request = OnionRouteRequest {
+            service: "web".to_string(),
+            hop_count: 2,
+            allow_short_paths: false,
+        };
+        let candidates = OnionRouteCandidates {
+            relays: vec![degraded.account_did(), healthy.account_did()],
+            exits: vec![exit],
+        };
+        let mut entropy = FixedEntropy::new([0, 1]);
+
+        let route = select_onion_route_from_candidates(
+            &request,
+            candidates,
+            vec![
+                (degraded.account_did(), PeerQuality::Degraded),
+                (healthy.account_did(), PeerQuality::Healthy),
+            ],
+            &mut entropy,
+        )?;
 
         assert_eq!(route.hops.first().copied(), Some(healthy.account_did()));
+        assert_ne!(route.hops.first().copied(), Some(local));
+        Ok(())
+    }
+
+    #[test]
+    fn route_builder_entropy_can_select_second_unknown_relay() -> Result<()> {
+        let first = node_key().map_err(Error::CoreError)?.account_did();
+        let second = node_key().map_err(Error::CoreError)?.account_did();
+        let exit = signed_exit_at(20, 100).map_err(Error::CoreError)?;
+        let request = OnionRouteRequest {
+            service: "web".to_string(),
+            hop_count: 2,
+            allow_short_paths: false,
+        };
+        let mut relay_dids = vec![first, second];
+        relay_dids.sort();
+        let second_sorted = relay_dids
+            .get(1)
+            .copied()
+            .ok_or_else(|| Error::OnionRouteError("missing second relay".to_string()))?;
+        let candidates = OnionRouteCandidates {
+            relays: relay_dids,
+            exits: vec![exit],
+        };
+        let mut entropy = FixedEntropy::new([0, 4]);
+
+        let route =
+            select_onion_route_from_candidates(&request, candidates, Vec::new(), &mut entropy)?;
+
+        assert_eq!(route.hops.first().copied(), Some(second_sorted));
         Ok(())
     }
 }

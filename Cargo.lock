@@ -4501,6 +4501,7 @@ dependencies = [
  "lazy_static",
  "log",
  "pin-project",
+ "rand 0.8.6",
  "reqwest",
  "rings-core",
  "rings-derive",

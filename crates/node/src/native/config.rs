@@ -8,6 +8,8 @@ use serde::Serialize;
 
 use crate::error::Error;
 use crate::error::Result;
+use crate::onion::OnionExitPolicy;
+use crate::onion::OnionExitService;
 use crate::online::OnlineNodeType;
 use crate::prelude::rings_core::ecc::SecretKey;
 use crate::prelude::SessionSk;
@@ -66,6 +68,18 @@ pub struct Config {
     pub online_node_type: OnlineNodeType,
     #[serde(default = "crate::registration::default_advertise_presence")]
     pub advertise_presence: bool,
+    #[serde(default = "crate::onion::default_advertise_onion_relay")]
+    pub advertise_onion_relay: bool,
+    #[serde(default = "crate::onion::default_advertise_onion_exit")]
+    pub advertise_onion_exit: bool,
+    #[serde(default = "crate::onion::default_onion_exit_heartbeat_interval_secs")]
+    pub onion_exit_heartbeat_interval_secs: u64,
+    #[serde(default = "crate::onion::default_onion_exit_ttl_secs")]
+    pub onion_exit_ttl_secs: u64,
+    #[serde(default = "crate::onion::default_onion_exit_services")]
+    pub onion_exit_services: Vec<OnionExitService>,
+    #[serde(default = "crate::onion::default_onion_exit_policy")]
+    pub onion_exit_policy: OnionExitPolicy,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_ip: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -108,7 +122,13 @@ impl TryFrom<Config> for ProcessorConfigSerialized {
         .online_node_heartbeat_interval_secs(config.online_node_heartbeat_interval_secs)
         .online_node_ttl_secs(config.online_node_ttl_secs)
         .online_node_type(config.online_node_type)
-        .advertise_presence(config.advertise_presence);
+        .advertise_presence(config.advertise_presence)
+        .advertise_onion_relay(config.advertise_onion_relay)
+        .advertise_onion_exit(config.advertise_onion_exit)
+        .onion_exit_heartbeat_interval_secs(config.onion_exit_heartbeat_interval_secs)
+        .onion_exit_ttl_secs(config.onion_exit_ttl_secs)
+        .onion_exit_services(config.onion_exit_services)
+        .onion_exit_policy(config.onion_exit_policy);
 
         cs = if let Some(ext_ip) = config.external_ip {
             cs.external_address(ext_ip)
@@ -155,6 +175,13 @@ impl Config {
             online_node_ttl_secs: crate::registration::default_online_node_ttl_secs(),
             online_node_type: crate::registration::default_online_node_type(),
             advertise_presence: crate::registration::default_advertise_presence(),
+            advertise_onion_relay: crate::onion::default_advertise_onion_relay(),
+            advertise_onion_exit: crate::onion::default_advertise_onion_exit(),
+            onion_exit_heartbeat_interval_secs:
+                crate::onion::default_onion_exit_heartbeat_interval_secs(),
+            onion_exit_ttl_secs: crate::onion::default_onion_exit_ttl_secs(),
+            onion_exit_services: crate::onion::default_onion_exit_services(),
+            onion_exit_policy: crate::onion::default_onion_exit_policy(),
             external_ip: None,
             webrtc_udp_port_min: None,
             webrtc_udp_port_max: None,
@@ -240,6 +267,12 @@ measure_storage:
         let cfg: Config = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(cfg.network_id, 1);
         assert!(cfg.advertise_presence);
+        assert!(!cfg.advertise_onion_relay);
+        assert!(!cfg.advertise_onion_exit);
+        assert_eq!(
+            cfg.onion_exit_services,
+            crate::onion::default_onion_exit_services()
+        );
     }
 
     #[test]

@@ -52,6 +52,33 @@ impl ProviderRef {
     }
 }
 
+fn wrapped_signer(signer: js_sys::Function) -> AsyncSigner {
+    Box::new(
+        move |data: String| -> Pin<Box<dyn Future<Output = Vec<u8>>>> {
+            let signer = signer.clone();
+            Box::pin(async move {
+                let signer = signer.clone();
+                let promise = match signer.call1(&JsValue::NULL, &JsValue::from_str(&data)) {
+                    Ok(value) => js_sys::Promise::from(value),
+                    Err(error) => {
+                        tracing::error!("failed to call external JS signer: {error:?}");
+                        return Vec::new();
+                    }
+                };
+                let value = match JsFuture::from(promise).await {
+                    Ok(value) => value,
+                    Err(error) => {
+                        tracing::error!("external JS signer rejected: {error:?}");
+                        return Vec::new();
+                    }
+                };
+                let sig: js_sys::Uint8Array = Uint8Array::from(value);
+                sig.to_vec()
+            })
+        },
+    )
+}
+
 #[wasm_export]
 impl Provider {
     /// make provider as an As arc ref
@@ -81,34 +108,6 @@ impl Provider {
         account_type: String,
         signer: js_sys::Function,
     ) -> js_sys::Promise {
-        fn wrapped_signer(signer: js_sys::Function) -> AsyncSigner {
-            Box::new(
-                move |data: String| -> Pin<Box<dyn Future<Output = Vec<u8>>>> {
-                    let signer = signer.clone();
-                    Box::pin(async move {
-                        let signer = signer.clone();
-                        let promise = match signer.call1(&JsValue::NULL, &JsValue::from_str(&data))
-                        {
-                            Ok(value) => js_sys::Promise::from(value),
-                            Err(error) => {
-                                tracing::error!("failed to call external JS signer: {error:?}");
-                                return Vec::new();
-                            }
-                        };
-                        let value = match JsFuture::from(promise).await {
-                            Ok(value) => value,
-                            Err(error) => {
-                                tracing::error!("external JS signer rejected: {error:?}");
-                                return Vec::new();
-                            }
-                        };
-                        let sig: js_sys::Uint8Array = Uint8Array::from(value);
-                        sig.to_vec()
-                    })
-                },
-            )
-        }
-
         future_to_promise(async move {
             let signer = wrapped_signer(signer);
 
@@ -133,6 +132,49 @@ impl Provider {
                 Signer::Async(Box::new(signer)),
                 Some(entry_storage),
                 Some(measure_storage),
+            )
+            .await?;
+
+            provider.set_backend().map_err(JsError::from)?;
+
+            Ok(JsValue::from(provider))
+        })
+    }
+
+    /// Create a browser provider that advertises the default HTTPS onion exit service.
+    pub fn new_https_exit_instance(
+        network_id: u32,
+        ice_servers: String,
+        stabilize_interval: u64,
+        account: String,
+        account_type: String,
+        signer: js_sys::Function,
+    ) -> js_sys::Promise {
+        future_to_promise(async move {
+            let signer = wrapped_signer(signer);
+
+            let entry_storage = Box::new(
+                IdbStorage::new_with_cap_and_name(50000, "rings-node")
+                    .await
+                    .map_err(JsError::from)?,
+            );
+
+            let measure_storage = Box::new(
+                IdbStorage::new_with_cap_and_name(50000, "rings-node/measure")
+                    .await
+                    .map_err(JsError::from)?,
+            );
+
+            let provider = Provider::new_provider_internal_with_config(
+                network_id,
+                ice_servers,
+                stabilize_interval,
+                account,
+                account_type,
+                Signer::Async(Box::new(signer)),
+                Some(entry_storage),
+                Some(measure_storage),
+                ProcessorConfig::enable_https_onion_exit,
             )
             .await?;
 
