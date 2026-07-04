@@ -40,6 +40,10 @@ pub enum Method {
     LookupService,
     /// Lookup online-node registry descriptors
     LookupOnlineNodes,
+    /// Lookup application-layer onion exit descriptors
+    LookupOnionExits,
+    /// Build an onion route from live presence and exit descriptors
+    BuildOnionRoute,
     /// Retrieve Node info
     NodeInfo,
     /// Retrieve local measurement counters for a peer
@@ -70,6 +74,8 @@ impl Method {
             Method::RegisterService => "registerService",
             Method::LookupService => "lookupService",
             Method::LookupOnlineNodes => "lookupOnlineNodes",
+            Method::LookupOnionExits => "lookupOnionExits",
+            Method::BuildOnionRoute => "buildOnionRoute",
             Method::NodeInfo => "nodeInfo",
             Method::PeerMeasurement => "peerMeasurement",
             Method::ListPeerMeasurements => "listPeerMeasurements",
@@ -106,6 +112,8 @@ impl TryFrom<&str> for Method {
             "registerService" => Method::RegisterService,
             "lookupService" => Method::LookupService,
             "lookupOnlineNodes" => Method::LookupOnlineNodes,
+            "lookupOnionExits" => Method::LookupOnionExits,
+            "buildOnionRoute" => Method::BuildOnionRoute,
             "nodeInfo" => Method::NodeInfo,
             "peerMeasurement" => Method::PeerMeasurement,
             "listPeerMeasurements" => Method::ListPeerMeasurements,

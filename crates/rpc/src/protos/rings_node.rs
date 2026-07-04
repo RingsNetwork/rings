@@ -208,6 +208,79 @@ pub struct LookupOnlineNodesResponse {
 }
 
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub enum OnionExitTransportInfo {
+    #[default]
+    Tcp,
+    Udp,
+    WebTransport,
+    RequestResponse,
+}
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct OnionExitServiceInfo {
+    pub name: String,
+    pub transport: OnionExitTransportInfo,
+}
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct OnionExitPolicyInfo {
+    pub allowed_targets: Vec<String>,
+    pub denied_targets: Vec<String>,
+    pub max_circuits: u32,
+    pub max_streams_per_circuit: u32,
+    pub max_bytes_per_minute: u64,
+}
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct OnionExitDescriptorInfo {
+    pub did: String,
+    /// Verification public key encoded with the core serde shape.
+    pub public_key: Value,
+    pub node_type: OnlineNodeTypeInfo,
+    pub network_id: u32,
+    pub services: Vec<OnionExitServiceInfo>,
+    pub policy: OnionExitPolicyInfo,
+    pub started_at_ms: u64,
+    pub heartbeat_at_ms: u64,
+    pub expires_at_ms: u64,
+    pub version: String,
+    /// Descriptor signature encoded with the core serde shape.
+    pub signature: Value,
+}
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct LookupOnionExitsRequest {
+    #[serde(default)]
+    pub service: String,
+    #[serde(default)]
+    pub include_expired: bool,
+}
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct LookupOnionExitsResponse {
+    pub exits: Vec<OnionExitDescriptorInfo>,
+}
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct BuildOnionRouteRequest {
+    pub service: String,
+    /// Desired hop count including the exit. `0` means node default.
+    #[serde(default)]
+    pub hop_count: u32,
+    /// Allow route selection to return fewer hops when too few relays are live.
+    #[serde(default)]
+    pub allow_short_paths: bool,
+}
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct BuildOnionRouteResponse {
+    /// Ordered DID hops, ending with the selected exit.
+    pub hops: Vec<String>,
+    pub service: String,
+    pub exit: Option<OnionExitDescriptorInfo>,
+}
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct NodeInfoRequest {}
 
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]

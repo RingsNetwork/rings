@@ -147,6 +147,8 @@ pub enum Error {
     BackendError(String) = 1501,
     #[error("Extension error: {0}")]
     ExtensionError(String) = 1502,
+    #[error("Onion route error: {0}")]
+    OnionRouteError(String) = 1601,
 }
 
 impl Error {

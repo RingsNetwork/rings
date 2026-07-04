@@ -347,6 +347,32 @@ impl HandleRpc<LookupOnlineNodesRequest, LookupOnlineNodesResponse> for Processo
 
 #[cfg_attr(feature = "browser", async_trait(?Send))]
 #[cfg_attr(not(feature = "browser"), async_trait)]
+impl HandleRpc<LookupOnionExitsRequest, LookupOnionExitsResponse> for Processor {
+    async fn handle_rpc(&self, req: LookupOnionExitsRequest) -> Result<LookupOnionExitsResponse> {
+        let exits = self
+            .lookup_onion_exits(&req.service, req.include_expired)
+            .await
+            .map_err(Error::from)?;
+        Ok(LookupOnionExitsResponse {
+            exits: crate::rpc_dto::onion_exit_descriptor_infos(exits)?,
+        })
+    }
+}
+
+#[cfg_attr(feature = "browser", async_trait(?Send))]
+#[cfg_attr(not(feature = "browser"), async_trait)]
+impl HandleRpc<BuildOnionRouteRequest, BuildOnionRouteResponse> for Processor {
+    async fn handle_rpc(&self, req: BuildOnionRouteRequest) -> Result<BuildOnionRouteResponse> {
+        let route = self
+            .build_onion_route(req.service, req.hop_count as usize, req.allow_short_paths)
+            .await
+            .map_err(Error::from)?;
+        crate::rpc_dto::onion_route_response(route).map_err(Error::from)
+    }
+}
+
+#[cfg_attr(feature = "browser", async_trait(?Send))]
+#[cfg_attr(not(feature = "browser"), async_trait)]
 impl HandleRpc<NodeInfoRequest, NodeInfoResponse> for Processor {
     async fn handle_rpc(&self, _req: NodeInfoRequest) -> Result<NodeInfoResponse> {
         self.get_node_info()

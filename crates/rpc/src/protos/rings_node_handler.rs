@@ -49,6 +49,8 @@ impl InternalRpcHandler {
             + HandleRpc<RegisterServiceRequest, RegisterServiceResponse>
             + HandleRpc<LookupServiceRequest, LookupServiceResponse>
             + HandleRpc<LookupOnlineNodesRequest, LookupOnlineNodesResponse>
+            + HandleRpc<LookupOnionExitsRequest, LookupOnionExitsResponse>
+            + HandleRpc<BuildOnionRouteRequest, BuildOnionRouteResponse>
             + HandleRpc<NodeInfoRequest, NodeInfoResponse>
             + HandleRpc<PeerMeasurementRequest, PeerMeasurementResponse>
             + HandleRpc<ListPeerMeasurementsRequest, ListPeerMeasurementsResponse>
@@ -153,6 +155,18 @@ impl InternalRpcHandler {
             }
             Method::LookupOnlineNodes => {
                 let req = serde_json::from_value::<LookupOnlineNodesRequest>(params)
+                    .map_err(|e| Error::invalid_params(e.to_string()))?;
+                let resp = processor.handle_rpc(req).await?;
+                serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
+            }
+            Method::LookupOnionExits => {
+                let req = serde_json::from_value::<LookupOnionExitsRequest>(params)
+                    .map_err(|e| Error::invalid_params(e.to_string()))?;
+                let resp = processor.handle_rpc(req).await?;
+                serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
+            }
+            Method::BuildOnionRoute => {
+                let req = serde_json::from_value::<BuildOnionRouteRequest>(params)
                     .map_err(|e| Error::invalid_params(e.to_string()))?;
                 let resp = processor.handle_rpc(req).await?;
                 serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))

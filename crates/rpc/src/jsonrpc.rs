@@ -46,7 +46,9 @@ impl Client {
     }
 
     pub async fn call_method<T>(&self, method: Method, req: &impl Serialize) -> Result<T>
-    where T: DeserializeOwned {
+    where
+        T: DeserializeOwned,
+    {
         use jsonrpc_core::*;
 
         let params = serde_json::to_value(req)
@@ -215,6 +217,22 @@ impl Client {
         req: &LookupOnlineNodesRequest,
     ) -> Result<LookupOnlineNodesResponse> {
         self.call_method(Method::LookupOnlineNodes, req).await
+    }
+
+    /// Looks up signed onion-exit descriptors.
+    pub async fn lookup_onion_exits(
+        &self,
+        req: &LookupOnionExitsRequest,
+    ) -> Result<LookupOnionExitsResponse> {
+        self.call_method(Method::LookupOnionExits, req).await
+    }
+
+    /// Builds an onion route from live presence and exit descriptors.
+    pub async fn build_onion_route(
+        &self,
+        req: &BuildOnionRouteRequest,
+    ) -> Result<BuildOnionRouteResponse> {
+        self.call_method(Method::BuildOnionRoute, req).await
     }
 
     /// Query for swarm inspect info.

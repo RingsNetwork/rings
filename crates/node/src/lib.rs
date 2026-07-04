@@ -7,6 +7,7 @@ pub mod logging;
 pub mod measure;
 #[cfg(feature = "node")]
 pub mod native;
+pub mod onion;
 pub mod online;
 pub mod prelude;
 pub mod processor;

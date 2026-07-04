@@ -15,6 +15,8 @@ use rings_core::ecc::PublicKey;
 use rings_core::ecc::SecretKey;
 use rings_core::measure::MeasureImpl;
 use rings_core::measure::PeerMeasurement;
+use rings_core::measure::PeerQuality;
+use rings_core::measure::PeerQualityThresholds;
 use rings_core::message::e2e;
 use rings_core::message::e2e::E2eHandshakeRequest;
 use rings_core::message::e2e::E2eHandshakeResponse;
@@ -37,6 +39,12 @@ use crate::consts::DATA_REDUNDANT;
 use crate::error::Error;
 use crate::error::Result;
 use crate::measure::PeriodicMeasure;
+use crate::onion::select_onion_route;
+use crate::onion::OnionExitDescriptor;
+use crate::onion::OnionExitRegistration;
+use crate::onion::OnionRoute;
+use crate::onion::OnionRouteRequest;
+use crate::onion::ONION_EXITS_TOPIC;
 use crate::online::OnlineNodeDescriptor;
 use crate::online::OnlineNodeType;
 use crate::online::ONLINE_NODES_TOPIC;
@@ -509,6 +517,10 @@ impl Processor {
         OnlineNodeRegistration::descriptors_from_entry(entry)
     }
 
+    fn onion_exit_descriptors_from_entry(entry: &entry::Entry) -> Vec<OnionExitDescriptor> {
+        OnionExitRegistration::descriptors_from_entry(entry)
+    }
+
     #[cfg(all(test, feature = "node"))]
     fn online_node_registry_entry(descriptors: Vec<OnlineNodeDescriptor>) -> Result<entry::Entry> {
         let data = descriptors
@@ -518,6 +530,20 @@ impl Processor {
 
         Ok(entry::Entry::new(
             entry::Entry::gen_did(ONLINE_NODES_TOPIC)?,
+            data,
+            entry::EntryKind::Data,
+        ))
+    }
+
+    #[cfg(all(test, feature = "node"))]
+    fn onion_exit_registry_entry(descriptors: Vec<OnionExitDescriptor>) -> Result<entry::Entry> {
+        let data = descriptors
+            .into_iter()
+            .map(|descriptor| descriptor.encode().map_err(Error::CoreError))
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(entry::Entry::new(
+            entry::Entry::gen_did(ONION_EXITS_TOPIC)?,
             data,
             entry::EntryKind::Data,
         ))
@@ -551,6 +577,71 @@ impl Processor {
             get_epoch_ms(),
             include_expired,
         ))
+    }
+
+    /// List signed onion-exit descriptors from the application-layer exit registry.
+    pub async fn lookup_onion_exits(
+        &self,
+        service: &str,
+        include_expired: bool,
+    ) -> Result<Vec<OnionExitDescriptor>> {
+        let entry_key = entry::Entry::gen_did(ONION_EXITS_TOPIC)?;
+
+        self.storage_fetch(entry_key).await?;
+        let Some(entry) = self.storage_check_cache(entry_key).await else {
+            return Ok(vec![]);
+        };
+
+        let service = service.trim();
+        let descriptors = OnionExitDescriptor::latest_valid_by_did(
+            Self::onion_exit_descriptors_from_entry(&entry)
+                .into_iter()
+                .filter(|descriptor| descriptor.matches_network(self.swarm.network_id())),
+            get_epoch_ms(),
+            include_expired,
+        )
+        .into_iter()
+        .filter(|descriptor| service.is_empty() || descriptor.offers_service(service));
+
+        Ok(descriptors.collect())
+    }
+
+    /// Build an onion route from live presence descriptors and live exit descriptors.
+    pub async fn build_onion_route(
+        &self,
+        service: String,
+        hop_count: usize,
+        allow_short_paths: bool,
+    ) -> Result<OnionRoute> {
+        let request = OnionRouteRequest {
+            service: service.clone(),
+            hop_count,
+            allow_short_paths,
+        };
+        let online_nodes = self.lookup_online_nodes(false).await?;
+        let exits = self.lookup_onion_exits(&service, false).await?;
+        select_onion_route(
+            self.did(),
+            self.swarm.network_id(),
+            get_epoch_ms(),
+            &request,
+            online_nodes,
+            exits,
+            self.onion_route_peer_qualities().await,
+        )
+    }
+
+    async fn onion_route_peer_qualities(&self) -> Vec<(Did, PeerQuality)> {
+        let thresholds = PeerQualityThresholds::new(
+            crate::consts::CONNECT_FAILED_LIMIT,
+            crate::consts::MSG_SEND_FAILED_LIMIT,
+            crate::consts::MSG_RECV_FAILED_LIMIT,
+        );
+        self.peer_measurements()
+            .await
+            .into_iter()
+            .map(|measurement| (measurement.did, measurement.evidence.classify(thresholds)))
+            .collect()
     }
 
     async fn registration_task_daemon(&self, task: &dyn RegistrationTask) {
@@ -877,6 +968,7 @@ mod test {
     use tokio::sync::Notify;
 
     use super::*;
+    use crate::onion::OnionExitDescriptorBody;
     use crate::online::OnlineNodeDescriptorBody;
     use crate::prelude::*;
     use crate::provider::Provider;
@@ -1210,6 +1302,89 @@ mod test {
     }
 
     #[tokio::test]
+    async fn onion_exit_lookup_uses_dedicated_exit_registry() -> Result<()> {
+        let processor = prepare_processor().await;
+        let relay_only = prepare_processor().await;
+        let exit = prepare_processor().await;
+        let relay_descriptor = relay_only.online_node_descriptor_at(get_epoch_ms())?;
+        let exit_descriptor = onion_exit_descriptor_for_processor(&exit, "web", get_epoch_ms())?;
+
+        processor
+            .storage_store(Processor::online_node_registry_entry(vec![
+                relay_descriptor,
+            ])?)
+            .await?;
+        processor
+            .storage_store(Processor::onion_exit_registry_entry(vec![
+                exit_descriptor.clone()
+            ])?)
+            .await?;
+
+        let exits = processor.lookup_onion_exits("web", false).await?;
+
+        assert_eq!(exits, vec![exit_descriptor]);
+        assert!(exits.iter().all(OnionExitDescriptor::verify_signature));
+        assert!(!exits
+            .iter()
+            .any(|descriptor| descriptor.did == relay_only.did()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn onion_exit_lookup_applies_service_filter_after_latest_descriptor() -> Result<()> {
+        let processor = prepare_processor().await;
+        let exit = prepare_processor().await;
+        let now_ms = get_epoch_ms();
+        let older_web = onion_exit_descriptor_for_processor(&exit, "web", now_ms)?;
+        let newer_ssh = onion_exit_descriptor_for_processor(&exit, "ssh", now_ms + 1)?;
+
+        processor
+            .storage_store(Processor::onion_exit_registry_entry(vec![
+                older_web, newer_ssh,
+            ])?)
+            .await?;
+
+        assert!(processor.lookup_onion_exits("web", false).await?.is_empty());
+        assert_eq!(processor.lookup_onion_exits("ssh", false).await?.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn onion_route_builder_uses_presence_relays_without_exit_descriptor() -> Result<()> {
+        let processor = prepare_processor().await;
+        let first_relay = prepare_processor().await;
+        let second_relay = prepare_processor().await;
+        let exit = prepare_processor().await;
+        let now_ms = get_epoch_ms();
+        let exit_descriptor = onion_exit_descriptor_for_processor(&exit, "web", now_ms)?;
+
+        processor
+            .storage_store(Processor::online_node_registry_entry(vec![
+                first_relay.online_node_descriptor_at(now_ms)?,
+                second_relay.online_node_descriptor_at(now_ms)?,
+                exit.online_node_descriptor_at(now_ms)?,
+            ])?)
+            .await?;
+        processor
+            .storage_store(Processor::onion_exit_registry_entry(vec![
+                exit_descriptor.clone()
+            ])?)
+            .await?;
+
+        let route = processor
+            .build_onion_route("web".to_string(), 3, false)
+            .await?;
+
+        assert_eq!(route.hops.len(), 3);
+        assert_eq!(route.exit_did(), exit.did());
+        assert_eq!(route.hops.last().copied(), Some(exit.did()));
+        assert!(route.hops.contains(&first_relay.did()));
+        assert!(route.hops.contains(&second_relay.did()));
+        assert_eq!(route.exit, exit_descriptor);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn online_node_registry_lists_two_publishers_over_network() -> Result<()> {
         let _network_guard = network_test_guard().await;
         let (publisher, owner) = prepare_online_node_registry_pair(42).await?;
@@ -1469,6 +1644,41 @@ mod test {
             .dht_finger_table_size(8)
             .build()
             .unwrap()
+    }
+
+    fn onion_exit_descriptor_for_processor(
+        processor: &Processor,
+        service: &str,
+        now_ms: u128,
+    ) -> Result<OnionExitDescriptor> {
+        OnionExitDescriptor::new_signed(
+            OnionExitDescriptorBody {
+                did: processor.did(),
+                public_key: processor
+                    .swarm
+                    .account_verification_pubkey()
+                    .map_err(Error::CoreError)?,
+                node_type: default_online_node_type(),
+                network_id: processor.swarm.network_id(),
+                services: vec![OnionExitService {
+                    name: service.to_string(),
+                    transport: OnionExitTransport::Tcp,
+                }],
+                policy: OnionExitPolicy {
+                    allowed_targets: vec!["127.0.0.1:8080".to_string()],
+                    denied_targets: vec![],
+                    max_circuits: 8,
+                    max_streams_per_circuit: 2,
+                    max_bytes_per_minute: 4096,
+                },
+                started_at_ms: now_ms,
+                heartbeat_at_ms: now_ms,
+                expires_at_ms: now_ms + 90_000,
+                version: crate::util::build_version(),
+            },
+            &processor.session_sk,
+        )
+        .map_err(Error::CoreError)
     }
 
     async fn prepare_measured_processor() -> Processor {

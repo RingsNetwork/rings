@@ -2,6 +2,11 @@
 
 use rings_core::measure::PeerMeasurement;
 use rings_core::measure::PeerQualityEvidence;
+use rings_rpc::protos::rings_node::BuildOnionRouteResponse;
+use rings_rpc::protos::rings_node::OnionExitDescriptorInfo;
+use rings_rpc::protos::rings_node::OnionExitPolicyInfo;
+use rings_rpc::protos::rings_node::OnionExitServiceInfo;
+use rings_rpc::protos::rings_node::OnionExitTransportInfo;
 use rings_rpc::protos::rings_node::OnlineNodeDescriptorInfo;
 use rings_rpc::protos::rings_node::OnlineNodeTypeInfo;
 use rings_rpc::protos::rings_node::PeerMeasurementCountersInfo;
@@ -11,6 +16,11 @@ use serde_json::Value;
 
 use crate::error::Error;
 use crate::error::Result;
+use crate::onion::OnionExitDescriptor;
+use crate::onion::OnionExitPolicy;
+use crate::onion::OnionExitService;
+use crate::onion::OnionExitTransport;
+use crate::onion::OnionRoute;
 use crate::online::OnlineNodeDescriptor;
 use crate::online::OnlineNodeType;
 
@@ -55,6 +65,71 @@ pub(crate) fn online_node_descriptor_infos(
         .into_iter()
         .map(online_node_descriptor_info)
         .collect()
+}
+
+fn onion_exit_transport_info(transport: OnionExitTransport) -> OnionExitTransportInfo {
+    match transport {
+        OnionExitTransport::Tcp => OnionExitTransportInfo::Tcp,
+        OnionExitTransport::Udp => OnionExitTransportInfo::Udp,
+        OnionExitTransport::WebTransport => OnionExitTransportInfo::WebTransport,
+        OnionExitTransport::RequestResponse => OnionExitTransportInfo::RequestResponse,
+    }
+}
+
+fn onion_exit_service_info(service: OnionExitService) -> OnionExitServiceInfo {
+    OnionExitServiceInfo {
+        name: service.name,
+        transport: onion_exit_transport_info(service.transport),
+    }
+}
+
+fn onion_exit_policy_info(policy: OnionExitPolicy) -> OnionExitPolicyInfo {
+    OnionExitPolicyInfo {
+        allowed_targets: policy.allowed_targets,
+        denied_targets: policy.denied_targets,
+        max_circuits: policy.max_circuits,
+        max_streams_per_circuit: policy.max_streams_per_circuit,
+        max_bytes_per_minute: policy.max_bytes_per_minute,
+    }
+}
+
+pub(crate) fn onion_exit_descriptor_info(
+    descriptor: OnionExitDescriptor,
+) -> Result<OnionExitDescriptorInfo> {
+    Ok(OnionExitDescriptorInfo {
+        did: descriptor.did.to_string(),
+        public_key: json_value(descriptor.public_key)?,
+        node_type: online_node_type_info(descriptor.node_type),
+        network_id: descriptor.network_id,
+        services: descriptor
+            .services
+            .into_iter()
+            .map(onion_exit_service_info)
+            .collect(),
+        policy: onion_exit_policy_info(descriptor.policy),
+        started_at_ms: descriptor_timestamp_ms(descriptor.started_at_ms)?,
+        heartbeat_at_ms: descriptor_timestamp_ms(descriptor.heartbeat_at_ms)?,
+        expires_at_ms: descriptor_timestamp_ms(descriptor.expires_at_ms)?,
+        version: descriptor.version,
+        signature: json_value(descriptor.signature)?,
+    })
+}
+
+pub(crate) fn onion_exit_descriptor_infos(
+    descriptors: impl IntoIterator<Item = OnionExitDescriptor>,
+) -> Result<Vec<OnionExitDescriptorInfo>> {
+    descriptors
+        .into_iter()
+        .map(onion_exit_descriptor_info)
+        .collect()
+}
+
+pub(crate) fn onion_route_response(route: OnionRoute) -> Result<BuildOnionRouteResponse> {
+    Ok(BuildOnionRouteResponse {
+        hops: route.hops.into_iter().map(|did| did.to_string()).collect(),
+        service: route.service,
+        exit: Some(onion_exit_descriptor_info(route.exit)?),
+    })
 }
 
 fn peer_measurement_counters_info(evidence: PeerQualityEvidence) -> PeerMeasurementCountersInfo {
