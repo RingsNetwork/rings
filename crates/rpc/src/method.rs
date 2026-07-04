@@ -26,6 +26,8 @@ pub enum Method {
     Disconnect,
     /// SendBackendMessage
     SendBackendMessage,
+    /// Run an internal transport benchmark burst
+    TransportBenchmark,
     /// Send an E2E public-key handshake request
     SendE2eHandshake,
     /// Send an encrypted E2E message stream
@@ -63,6 +65,7 @@ impl Method {
             Method::Disconnect => "disconnect",
             Method::AcceptAnswer => "acceptAnswer",
             Method::SendBackendMessage => "sendBackendMessage",
+            Method::TransportBenchmark => "transportBenchmark",
             Method::SendE2eHandshake => "sendE2eHandshake",
             Method::SendE2eMessage => "sendE2eMessage",
             Method::PublishMessageToTopic => "publishMessageToTopic",
@@ -99,6 +102,7 @@ impl TryFrom<&str> for Method {
             "disconnect" => Self::Disconnect,
             "acceptAnswer" => Self::AcceptAnswer,
             "sendBackendMessage" => Self::SendBackendMessage,
+            "transportBenchmark" => Self::TransportBenchmark,
             "sendE2eHandshake" => Self::SendE2eHandshake,
             "sendE2eMessage" => Self::SendE2eMessage,
             "publishMessageToTopic" => Method::PublishMessageToTopic,

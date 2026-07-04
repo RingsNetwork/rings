@@ -164,6 +164,13 @@ impl Client {
         self.call_method(Method::SendBackendMessage, req).await
     }
 
+    pub async fn transport_benchmark(
+        &self,
+        req: &TransportBenchmarkRequest,
+    ) -> Result<TransportBenchmarkResponse> {
+        self.call_method(Method::TransportBenchmark, req).await
+    }
+
     pub async fn send_e2e_handshake(
         &self,
         req: &SendE2eHandshakeRequest,

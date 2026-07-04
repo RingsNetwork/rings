@@ -2162,6 +2162,47 @@ advertise_presence: true
     }
 
     #[tokio::test]
+    async fn transport_benchmark_flushes_internal_burst() {
+        let _network_guard = network_test_guard().await;
+        let callback1 = test_callback();
+        let callback2 = test_callback();
+        let p1 = prepare_measured_processor().await;
+        let p2 = prepare_measured_processor().await;
+
+        p1.swarm.set_callback(callback1.clone()).unwrap();
+        p2.swarm.set_callback(callback2.clone()).unwrap();
+        connect_processors(&p1, &p2, &callback1, &callback2).await;
+
+        let provider = Provider::from_processor(Arc::new(p1.clone()));
+        let rpc_value = provider
+            .request(
+                Method::TransportBenchmark,
+                TransportBenchmarkRequest {
+                    destination_did: p2.did().to_string(),
+                    namespace: "bench".to_string(),
+                    payload_bytes: 1024,
+                    messages: 4,
+                    flush_timeout_ms: 5_000,
+                },
+            )
+            .await
+            .unwrap();
+        let report: TransportBenchmarkResponse = serde_json::from_value(rpc_value).unwrap();
+
+        assert_eq!(report.admitted_messages, 4);
+        assert_eq!(report.flushed_messages, 4);
+        assert_eq!(report.total_payload_bytes, 4096);
+        assert!(!report.flush_timed_out);
+        assert!(report.flush_mbps > 0.0);
+
+        let received = wait_for_peer_measurement(&p2, p1.did(), |measurement| {
+            measurement.evidence.received >= 4
+        })
+        .await;
+        assert_eq!(received.did, p1.did());
+    }
+
+    #[tokio::test]
     async fn test_processor_e2e_handshake_exchanges_verified_public_keys() {
         let _network_guard = network_test_guard().await;
         let callback1 = test_callback();

@@ -4,15 +4,14 @@
 The collector uses the real native node daemons inside the Docker cluster. DHT
 lookup metrics are computed by replaying the successor/finger state exposed by
 each node's /status endpoint, so the report explicitly labels them as a status
-snapshot routing model. Optional transport sampling sends real RPC messages over
-the node stack with sendBackendMessage; it measures the RPC send path, not raw
-WebRTC datachannel bandwidth.
+snapshot routing model. Optional transport sampling starts a node-internal
+transport burst with one RPC call, so the measured loop runs inside the source
+node process instead of paying one docker/curl/JSON-RPC round trip per message.
 """
 
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import os
 import statistics
@@ -397,6 +396,7 @@ def transport_report(
     payload_bytes: int,
     messages: int,
     settle_seconds: float,
+    flush_timeout_ms: int,
 ) -> dict[str, Any]:
     pair = choose_connected_pair(nodes)
     if pair is None:
@@ -407,7 +407,6 @@ def transport_report(
         }
 
     source, destination = pair
-    payload = base64.b64encode(b"Z" * payload_bytes).decode("ascii")
     errors: list[str] = []
 
     try:
@@ -423,24 +422,23 @@ def transport_report(
         errors.append(str(exc))
 
     started = time.monotonic()
-    sent = 0
-    for _ in range(messages):
-        try:
-            rpc(
-                container,
-                source["port"],
-                "sendBackendMessage",
-                {
-                    "destination_did": destination["did"],
-                    "namespace": "bench",
-                    "data": payload,
-                },
-            )
-            sent += 1
-        except Exception as exc:  # noqa: BLE001
-            errors.append(str(exc))
-            break
-    send_elapsed = time.monotonic() - started
+    benchmark: dict[str, Any] = {}
+    try:
+        benchmark = rpc(
+            container,
+            source["port"],
+            "transportBenchmark",
+            {
+                "destination_did": destination["did"],
+                "namespace": "bench",
+                "payload_bytes": payload_bytes,
+                "messages": messages,
+                "flush_timeout_ms": flush_timeout_ms,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        errors.append(str(exc))
+    control_elapsed = time.monotonic() - started
 
     if settle_seconds > 0:
         time.sleep(settle_seconds)
@@ -457,27 +455,37 @@ def transport_report(
         dest_after = {}
         errors.append(str(exc))
 
-    total_payload_bytes = payload_bytes * sent
-    rpc_messages_per_second = sent / send_elapsed if send_elapsed > 0 else 0.0
-    rpc_send_mbps = (
-        total_payload_bytes * 8.0 / send_elapsed / 1_000_000.0
-        if send_elapsed > 0
-        else 0.0
+    admitted = int(benchmark.get("admitted_messages", 0))
+    flushed = int(benchmark.get("flushed_messages", 0))
+    total_payload_bytes = int(
+        benchmark.get("total_payload_bytes", payload_bytes * admitted)
     )
+    admission_elapsed_ms = float(benchmark.get("admission_elapsed_ms", 0.0))
+    flush_elapsed_ms = float(benchmark.get("flush_elapsed_ms", 0.0))
+    admission_mbps = float(benchmark.get("admission_mbps", 0.0))
+    flush_mbps = float(benchmark.get("flush_mbps", 0.0))
     return {
         "report": "docker_cluster_transport",
         "enabled": True,
+        "mode": "node_internal_burst",
         "source_index": source["index"],
         "source_did": source["did"],
         "destination_index": destination["index"],
         "destination_did": destination["did"],
         "payload_bytes": payload_bytes,
         "messages": messages,
-        "sent_messages": sent,
-        "send_elapsed_ms": send_elapsed * 1000.0,
-        "rpc_messages_per_second": rpc_messages_per_second,
-        "rpc_send_mbps": rpc_send_mbps,
-        "send_mbps": rpc_send_mbps,
+        "admitted_messages": admitted,
+        "flushed_messages": flushed,
+        "sent_messages": flushed,
+        "total_payload_bytes": total_payload_bytes,
+        "control_elapsed_ms": control_elapsed * 1000.0,
+        "admission_elapsed_ms": admission_elapsed_ms,
+        "flush_elapsed_ms": flush_elapsed_ms,
+        "admission_mbps": admission_mbps,
+        "flush_mbps": flush_mbps,
+        "send_elapsed_ms": flush_elapsed_ms,
+        "send_mbps": flush_mbps,
+        "flush_timed_out": bool(benchmark.get("flush_timed_out", False)),
         "source_sent_delta": counter_delta(
             source_before, source_after, destination["did"], "sent"
         ),
@@ -522,6 +530,7 @@ def sample(args: argparse.Namespace, sample_index: int) -> dict[str, Any]:
             args.throughput_payload_bytes,
             args.throughput_messages,
             args.throughput_settle_seconds,
+            args.throughput_flush_timeout_ms,
         )
     return dht
 
@@ -583,6 +592,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--throughput-settle-seconds",
         type=float,
         default=float(os.environ.get("RINGS_DHT_BENCH_THROUGHPUT_SETTLE_SECONDS", "2")),
+    )
+    parser.add_argument(
+        "--throughput-flush-timeout-ms",
+        type=int,
+        default=env_int("RINGS_DHT_BENCH_THROUGHPUT_FLUSH_TIMEOUT_MS", 30_000),
     )
     return parser.parse_args(argv)
 

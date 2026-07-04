@@ -85,24 +85,24 @@ python3 scripts/dht_docker_cluster_bench.py \
   --sample-interval-seconds 30
 ```
 
-Add a direct WebRTC transport send sample:
+Add a real WebRTC transport burst sample:
 
 ```sh
 python3 scripts/dht_docker_cluster_bench.py \
   --container rings-cluster-16-bench \
   --nodes 16 \
-  --throughput-messages 64 \
-  --throughput-payload-bytes 16384
+  --throughput-messages 1024 \
+  --throughput-payload-bytes 65536 \
+  --throughput-flush-timeout-ms 60000
 ```
 
 The DHT lookup metrics are computed by replaying each node's `/status`
 successor and finger-table state. Reports therefore label the lookup model as
-`status_snapshot_route`; use the transport section for real `sendBackendMessage`
-RPC-path sampling over the running WebRTC nodes.
+`status_snapshot_route`.
 
-The transport fields `rpc_send_mbps` and `rpc_messages_per_second` include the
-collector path (`docker exec`, `curl`, HTTP JSON-RPC, base64 decode, envelope
-encoding, and node send admission). They are useful as an API-path smoke test,
-but they are not raw WebRTC datachannel bandwidth. Use larger payloads and
-message counts for a less latency-dominated sample, or add a node-internal
-streaming harness when the goal is saturated link throughput.
+The transport section uses one internal `transportBenchmark` RPC to start a
+burst inside the source node process. The reported `flush_mbps` waits for the
+source node's delivery measurement to confirm that the messages have flushed to
+the WebRTC send path, and `destination_received_delta` confirms how many
+messages the destination accepted. This avoids the earlier per-message
+`docker exec`, `curl`, HTTP JSON-RPC, and base64 overhead.

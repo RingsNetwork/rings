@@ -7,14 +7,19 @@
 
 use std::collections::HashSet;
 use std::str::FromStr;
+use std::time::Duration;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use futures::future::join_all;
+#[cfg(not(feature = "browser"))]
+use futures_timer::Delay;
 use jsonrpc_core::types::error::Error;
 use jsonrpc_core::types::error::ErrorCode;
 use jsonrpc_core::Result;
 use rings_core::dht::Did;
 use rings_core::ecc::PublicKey;
+use rings_core::measure::PeerMeasurement;
 use rings_core::message::e2e;
 use rings_core::message::Decoder;
 use rings_core::message::Encoded;
@@ -28,6 +33,11 @@ use rings_rpc::protos::rings_node_handler::HandleRpc;
 use crate::error::Error as ServerError;
 use crate::processor::Processor;
 use crate::seed::Seed;
+
+const DEFAULT_TRANSPORT_BENCHMARK_FLUSH_TIMEOUT_MS: u64 = 30_000;
+const TRANSPORT_BENCHMARK_POLL_MS: u64 = 10;
+const MAX_TRANSPORT_BENCHMARK_PAYLOAD_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_TRANSPORT_BENCHMARK_MESSAGES: u64 = 1_000_000;
 
 #[cfg_attr(feature = "browser", async_trait(?Send))]
 #[cfg_attr(not(feature = "browser"), async_trait)]
@@ -214,6 +224,142 @@ impl HandleRpc<SendBackendMessageRequest, SendBackendMessageResponse> for Proces
             crate::extension::ext::Envelope::new(req.namespace, bytes::Bytes::from(payload));
         self.send_envelope(destination, &envelope).await?;
         Ok(SendBackendMessageResponse {})
+    }
+}
+
+fn transport_benchmark_flush_timeout_ms(raw: u64) -> u64 {
+    if raw == 0 {
+        DEFAULT_TRANSPORT_BENCHMARK_FLUSH_TIMEOUT_MS
+    } else {
+        raw
+    }
+}
+
+fn validate_transport_benchmark_request(
+    req: &TransportBenchmarkRequest,
+) -> Result<(Did, usize, u64)> {
+    let destination = s2d(&req.destination_did)?;
+    if req.namespace.is_empty() {
+        return Err(Error::invalid_params("namespace must not be empty"));
+    }
+    if req.payload_bytes == 0 {
+        return Err(Error::invalid_params(
+            "payload_bytes must be greater than 0",
+        ));
+    }
+    if req.payload_bytes > MAX_TRANSPORT_BENCHMARK_PAYLOAD_BYTES {
+        return Err(Error::invalid_params(format!(
+            "payload_bytes must be at most {MAX_TRANSPORT_BENCHMARK_PAYLOAD_BYTES}"
+        )));
+    }
+    if req.messages == 0 {
+        return Err(Error::invalid_params("messages must be greater than 0"));
+    }
+    if req.messages > MAX_TRANSPORT_BENCHMARK_MESSAGES {
+        return Err(Error::invalid_params(format!(
+            "messages must be at most {MAX_TRANSPORT_BENCHMARK_MESSAGES}"
+        )));
+    }
+    let payload_bytes = usize::try_from(req.payload_bytes)
+        .map_err(|_| Error::invalid_params("payload_bytes does not fit usize"))?;
+    Ok((destination, payload_bytes, req.messages))
+}
+
+fn sent_count(measurement: Option<PeerMeasurement>) -> u64 {
+    measurement
+        .map(|measurement| measurement.evidence.sent)
+        .unwrap_or(0)
+}
+
+#[cfg(not(feature = "browser"))]
+async fn transport_benchmark_poll_delay(duration: Duration) {
+    Delay::new(duration).await;
+}
+
+#[cfg(feature = "browser")]
+async fn transport_benchmark_poll_delay(duration: Duration) {
+    let millis = i32::try_from(duration.as_millis()).unwrap_or(i32::MAX);
+    let _ = rings_core::utils::js_utils::window_sleep(millis).await;
+}
+
+async fn wait_for_sent_count(
+    processor: &Processor,
+    destination: Did,
+    target_sent: u64,
+    deadline: Instant,
+) -> u64 {
+    loop {
+        let current = sent_count(processor.peer_measurement(destination).await);
+        if current >= target_sent || Instant::now() >= deadline {
+            return current;
+        }
+
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .unwrap_or_default();
+        let poll = remaining.min(Duration::from_millis(TRANSPORT_BENCHMARK_POLL_MS));
+        transport_benchmark_poll_delay(poll).await;
+    }
+}
+
+fn throughput_mbps(bytes: u64, duration: Duration) -> f64 {
+    let elapsed = duration.as_secs_f64();
+    if elapsed == 0.0 {
+        return 0.0;
+    }
+    bytes as f64 * 8.0 / elapsed / 1_000_000.0
+}
+
+#[cfg_attr(feature = "browser", async_trait(?Send))]
+#[cfg_attr(not(feature = "browser"), async_trait)]
+impl HandleRpc<TransportBenchmarkRequest, TransportBenchmarkResponse> for Processor {
+    async fn handle_rpc(
+        &self,
+        req: TransportBenchmarkRequest,
+    ) -> Result<TransportBenchmarkResponse> {
+        let (destination, payload_bytes, messages) = validate_transport_benchmark_request(&req)?;
+        let baseline_sent = sent_count(self.peer_measurement(destination).await);
+        let payload = bytes::Bytes::from(vec![0x5au8; payload_bytes]);
+        let envelope = crate::extension::ext::Envelope::new(req.namespace.clone(), payload);
+
+        let started = Instant::now();
+        let mut admitted_messages = 0u64;
+        for _ in 0..messages {
+            self.send_envelope(destination, &envelope).await?;
+            admitted_messages = admitted_messages.saturating_add(1);
+        }
+        let admission_elapsed = started.elapsed();
+
+        let target_sent = baseline_sent.saturating_add(admitted_messages);
+        let flush_timeout =
+            Duration::from_millis(transport_benchmark_flush_timeout_ms(req.flush_timeout_ms));
+        let flushed_sent = wait_for_sent_count(
+            self,
+            destination,
+            target_sent,
+            Instant::now() + flush_timeout,
+        )
+        .await;
+        let flushed_messages = flushed_sent
+            .saturating_sub(baseline_sent)
+            .min(admitted_messages);
+        let flush_elapsed = started.elapsed();
+        let total_payload_bytes = req.payload_bytes.saturating_mul(admitted_messages);
+
+        Ok(TransportBenchmarkResponse {
+            destination_did: req.destination_did,
+            namespace: req.namespace,
+            payload_bytes: req.payload_bytes,
+            messages,
+            admitted_messages,
+            flushed_messages,
+            total_payload_bytes,
+            admission_elapsed_ms: admission_elapsed.as_secs_f64() * 1000.0,
+            flush_elapsed_ms: flush_elapsed.as_secs_f64() * 1000.0,
+            admission_mbps: throughput_mbps(total_payload_bytes, admission_elapsed),
+            flush_mbps: throughput_mbps(total_payload_bytes, flush_elapsed),
+            flush_timed_out: flushed_messages < admitted_messages,
+        })
     }
 }
 

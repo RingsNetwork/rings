@@ -106,6 +106,32 @@ pub struct SendBackendMessageRequest {
 pub struct SendBackendMessageResponse {}
 
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct TransportBenchmarkRequest {
+    pub destination_did: String,
+    pub namespace: String,
+    pub payload_bytes: u64,
+    pub messages: u64,
+    #[serde(default)]
+    pub flush_timeout_ms: u64,
+}
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct TransportBenchmarkResponse {
+    pub destination_did: String,
+    pub namespace: String,
+    pub payload_bytes: u64,
+    pub messages: u64,
+    pub admitted_messages: u64,
+    pub flushed_messages: u64,
+    pub total_payload_bytes: u64,
+    pub admission_elapsed_ms: f64,
+    pub flush_elapsed_ms: f64,
+    pub admission_mbps: f64,
+    pub flush_mbps: f64,
+    pub flush_timed_out: bool,
+}
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct SendE2eHandshakeRequest {
     pub destination_did: String,
 }

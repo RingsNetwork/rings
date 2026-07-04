@@ -42,6 +42,7 @@ impl InternalRpcHandler {
             + HandleRpc<AcceptAnswerRequest, AcceptAnswerResponse>
             + HandleRpc<DisconnectRequest, DisconnectResponse>
             + HandleRpc<SendBackendMessageRequest, SendBackendMessageResponse>
+            + HandleRpc<TransportBenchmarkRequest, TransportBenchmarkResponse>
             + HandleRpc<SendE2eHandshakeRequest, SendE2eHandshakeResponse>
             + HandleRpc<SendE2eMessageRequest, SendE2eMessageResponse>
             + HandleRpc<PublishMessageToTopicRequest, PublishMessageToTopicResponse>
@@ -111,6 +112,12 @@ impl InternalRpcHandler {
             }
             Method::SendBackendMessage => {
                 let req = serde_json::from_value::<SendBackendMessageRequest>(params)
+                    .map_err(|e| Error::invalid_params(e.to_string()))?;
+                let resp = processor.handle_rpc(req).await?;
+                serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
+            }
+            Method::TransportBenchmark => {
+                let req = serde_json::from_value::<TransportBenchmarkRequest>(params)
                     .map_err(|e| Error::invalid_params(e.to_string()))?;
                 let resp = processor.handle_rpc(req).await?;
                 serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
