@@ -36,6 +36,7 @@ pub use crate::onion::OnionRoute;
 pub use crate::onion::OnionRouteRequest;
 pub use crate::onion::ONION_EXITS_TOPIC;
 pub use crate::onion::ONION_RELAY_CAPABILITY;
+pub use crate::onion_proxy::OnionProxyConfig;
 pub use crate::onion_proxy::OnionProxyProtocol;
 pub use crate::onion_proxy::OnionProxyRoute;
 pub use crate::onion_proxy::OnionProxyTarget;

@@ -58,7 +58,7 @@ use crate::onion::OnionRouteRequest;
 use crate::onion::SystemRouteEntropy;
 use crate::onion::ONION_EXITS_TOPIC;
 use crate::onion::ONION_RELAY_CAPABILITY;
-use crate::onion_proxy::OnionProxyProtocol;
+use crate::onion_proxy::OnionProxyConfig;
 use crate::onion_proxy::OnionProxyRoute;
 use crate::onion_proxy::OnionProxyTarget;
 use crate::online::OnlineNodeDescriptor;
@@ -866,24 +866,22 @@ impl Processor {
         )
     }
 
-    /// Build an onion proxy route for a client target and ingress protocol.
+    /// Build an onion proxy route for a client target through a target-agnostic proxy config.
     pub async fn build_onion_proxy_route(
         &self,
-        protocol: OnionProxyProtocol,
+        proxy: OnionProxyConfig,
         target: OnionProxyTarget,
-        hop_count: usize,
-        allow_short_paths: bool,
     ) -> Result<OnionProxyRoute> {
         let route = self
             .build_onion_route(
-                protocol.exit_service().to_string(),
-                hop_count,
-                allow_short_paths,
+                proxy.exit_service().to_string(),
+                proxy.hop_count,
+                proxy.allow_short_paths,
             )
             .await?;
 
         Ok(OnionProxyRoute {
-            protocol,
+            protocol: proxy.protocol,
             target,
             route,
         })
@@ -1764,10 +1762,10 @@ mod test {
 
         let target = OnionProxyTarget::parse_authority("example.com:443")?;
         let tcp_route = processor
-            .build_onion_proxy_route(OnionProxyProtocol::TcpConnect, target.clone(), 1, false)
+            .build_onion_proxy_route(OnionProxyConfig::tcp_connect(1, false), target.clone())
             .await?;
         let https_route = processor
-            .build_onion_proxy_route(OnionProxyProtocol::HttpsFetch, target, 1, false)
+            .build_onion_proxy_route(OnionProxyConfig::https_proxy(1, false), target)
             .await?;
 
         assert_eq!(tcp_route.exit_service(), "tcp");

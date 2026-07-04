@@ -14,7 +14,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::extension::protocols::relay::RelayHandle;
 use crate::onion::OnionExitPolicy;
-use crate::onion_proxy::OnionProxyProtocol;
+use crate::onion_proxy::OnionProxyConfig;
 use crate::onion_proxy::OnionProxyTarget;
 use crate::processor::Processor;
 
@@ -95,10 +95,8 @@ async fn handle_connect(
     };
     let proxy_route = processor
         .build_onion_proxy_route(
-            OnionProxyProtocol::TcpConnect,
+            OnionProxyConfig::tcp_connect(options.hop_count, options.allow_short_paths),
             target,
-            options.hop_count,
-            options.allow_short_paths,
         )
         .await?;
     let service = proxy_route.target.authority();

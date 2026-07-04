@@ -110,7 +110,7 @@ pub enum OnionExitTransport {
     WebTransport,
     /// Protocol-specific request/response service.
     RequestResponse,
-    /// Browser HTTPS fetch service.
+    /// Browser/application-layer HTTPS proxy service.
     Https,
 }
 

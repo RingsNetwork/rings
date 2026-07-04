@@ -24,6 +24,8 @@ use wasm_bindgen_futures;
 use wasm_bindgen_futures::future_to_promise;
 use wasm_bindgen_futures::JsFuture;
 
+use crate::onion_proxy::OnionProxyConfig;
+use crate::processor::Processor;
 use crate::processor::ProcessorConfig;
 use crate::provider::AsyncSigner;
 use crate::provider::Provider;
@@ -49,6 +51,53 @@ impl ProviderRef {
     /// get wrapped arc, this is useful for wasm case
     pub fn inner(&self) -> Arc<Provider> {
         self.inner.clone()
+    }
+}
+
+/// Browser-compatible onion proxy handle.
+///
+/// The proxy is target-agnostic: callers create it once with route-selection options, then ask it
+/// to plan one onion route per target authority.
+#[derive(Clone)]
+#[wasm_export]
+pub struct BrowserOnionProxy {
+    processor: Arc<Processor>,
+    config: OnionProxyConfig,
+}
+
+#[wasm_export]
+impl BrowserOnionProxy {
+    /// Return the exit service class this proxy selects.
+    pub fn exit_service(&self) -> String {
+        self.config.exit_service().to_string()
+    }
+
+    /// Return the desired hop count, including the exit. `0` means the node default.
+    pub fn hop_count(&self) -> usize {
+        self.config.hop_count
+    }
+
+    /// Return whether this proxy may use fewer hops when too few relays are live.
+    pub fn allow_short_paths(&self) -> bool {
+        self.config.allow_short_paths
+    }
+
+    /// Build a browser-compatible HTTPS onion proxy route for `target_authority` (`host:port`).
+    pub fn route(&self, target_authority: String) -> js_sys::Promise {
+        let p = self.processor.clone();
+        let config = self.config;
+        future_to_promise(async move {
+            let target = crate::onion_proxy::OnionProxyTarget::parse_authority(&target_authority)
+                .map_err(JsError::from)?;
+            let route = p
+                .build_onion_proxy_route(config, target)
+                .await
+                .map_err(JsError::from)?;
+            let response =
+                crate::rpc_dto::onion_route_response(route.route).map_err(JsError::from)?;
+            let value = js_value::serialize(&response).map_err(JsError::from)?;
+            Ok(value)
+        })
     }
 }
 
@@ -383,24 +432,23 @@ impl Provider {
         hop_count: usize,
         allow_short_paths: bool,
     ) -> js_sys::Promise {
-        let p = self.processor.clone();
-        future_to_promise(async move {
-            let target = crate::onion_proxy::OnionProxyTarget::parse_authority(&target)
-                .map_err(JsError::from)?;
-            let route = p
-                .build_onion_proxy_route(
-                    crate::onion_proxy::OnionProxyProtocol::HttpsFetch,
-                    target,
-                    hop_count,
-                    allow_short_paths,
-                )
-                .await
-                .map_err(JsError::from)?;
-            let response =
-                crate::rpc_dto::onion_route_response(route.route).map_err(JsError::from)?;
-            let value = js_value::serialize(&response).map_err(JsError::from)?;
-            Ok(value)
-        })
+        self.onion_https_proxy(hop_count, allow_short_paths)
+            .route(target)
+    }
+
+    /// Create a browser-compatible HTTPS onion proxy.
+    ///
+    /// The returned proxy is not bound to a URL; route planning happens per target authority via
+    /// [`BrowserOnionProxy::route`].
+    pub fn onion_https_proxy(
+        &self,
+        hop_count: usize,
+        allow_short_paths: bool,
+    ) -> BrowserOnionProxy {
+        BrowserOnionProxy {
+            processor: self.processor.clone(),
+            config: OnionProxyConfig::https_proxy(hop_count, allow_short_paths),
+        }
     }
 
     /// Check local cache
