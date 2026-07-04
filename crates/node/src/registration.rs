@@ -59,20 +59,20 @@ pub(crate) fn default_online_node_type() -> OnlineNodeType {
     }
 }
 
-/// Default online-node registry enablement.
-pub(crate) const fn default_register_online_node() -> bool {
+/// Default node presence advertisement enablement.
+pub(crate) const fn default_advertise_presence() -> bool {
     true
 }
 
 /// Validate online-node registration scheduling.
 pub(crate) fn validate_online_node_registration_timing(
-    register_online_node: bool,
+    advertise_presence: bool,
     heartbeat_interval: Duration,
     ttl: Duration,
 ) -> Result<()> {
-    if register_online_node && heartbeat_interval >= ttl {
+    if advertise_presence && heartbeat_interval >= ttl {
         return Err(Error::InvalidConfig(format!(
-            "online_node_heartbeat_interval ({heartbeat_interval:?}) must be less than online_node_ttl ({ttl:?}) when register_online_node is enabled"
+            "online_node_heartbeat_interval ({heartbeat_interval:?}) must be less than online_node_ttl ({ttl:?}) when advertise_presence is enabled"
         )));
     }
     Ok(())

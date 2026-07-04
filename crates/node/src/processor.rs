@@ -45,10 +45,10 @@ use crate::prelude::wasm_export;
 use crate::prelude::ChordStorageInterface;
 use crate::prelude::ChordStorageInterfaceCacheChecker;
 use crate::prelude::SessionSk;
+use crate::registration::default_advertise_presence;
 use crate::registration::default_online_node_heartbeat_interval_secs;
 use crate::registration::default_online_node_ttl_secs;
 use crate::registration::default_online_node_type;
-use crate::registration::default_register_online_node;
 use crate::registration::sleep_registration_interval;
 use crate::registration::validate_online_node_registration_timing;
 use crate::registration::OnlineNodeRegistration;
@@ -81,8 +81,8 @@ pub struct ProcessorConfig {
     online_node_ttl: Duration,
     /// Runtime family advertised in the online-node registry.
     online_node_type: OnlineNodeType,
-    /// Whether listen() registers this node in the online-node registry.
-    register_online_node: bool,
+    /// Whether listen() advertises this node's presence.
+    advertise_presence: bool,
 }
 
 #[wasm_export]
@@ -107,7 +107,7 @@ impl ProcessorConfig {
             ),
             online_node_ttl: Duration::from_secs(default_online_node_ttl_secs()),
             online_node_type: default_online_node_type(),
-            register_online_node: default_register_online_node(),
+            advertise_presence: default_advertise_presence(),
         }
     }
 
@@ -161,9 +161,9 @@ pub struct ProcessorConfigSerialized {
     /// Runtime family advertised in the online-node registry.
     #[serde(default = "default_online_node_type")]
     online_node_type: OnlineNodeType,
-    /// Whether listen() registers this node in the online-node registry.
-    #[serde(default = "default_register_online_node")]
-    register_online_node: bool,
+    /// Whether listen() advertises this node's presence.
+    #[serde(default = "default_advertise_presence")]
+    advertise_presence: bool,
 }
 
 impl ProcessorConfigSerialized {
@@ -185,7 +185,7 @@ impl ProcessorConfigSerialized {
             online_node_heartbeat_interval_secs: default_online_node_heartbeat_interval_secs(),
             online_node_ttl_secs: default_online_node_ttl_secs(),
             online_node_type: default_online_node_type(),
-            register_online_node: default_register_online_node(),
+            advertise_presence: default_advertise_presence(),
         }
     }
 
@@ -221,9 +221,9 @@ impl ProcessorConfigSerialized {
         self
     }
 
-    /// Sets whether listen() registers this node in the online-node registry.
-    pub fn register_online_node(mut self, register: bool) -> Self {
-        self.register_online_node = register;
+    /// Sets whether listen() advertises this node's presence.
+    pub fn advertise_presence(mut self, advertise: bool) -> Self {
+        self.advertise_presence = advertise;
         self
     }
 }
@@ -255,7 +255,7 @@ impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
             online_node_heartbeat_interval_secs: ins.online_node_heartbeat_interval.as_secs(),
             online_node_ttl_secs: ins.online_node_ttl.as_secs(),
             online_node_type: ins.online_node_type,
-            register_online_node: ins.register_online_node,
+            advertise_presence: ins.advertise_presence,
         })
     }
 }
@@ -269,7 +269,7 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
             Duration::from_secs(ins.online_node_heartbeat_interval_secs);
         let online_node_ttl = Duration::from_secs(ins.online_node_ttl_secs);
         validate_online_node_registration_timing(
-            ins.register_online_node,
+            ins.advertise_presence,
             online_node_heartbeat_interval,
             online_node_ttl,
         )?;
@@ -284,7 +284,7 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
             online_node_heartbeat_interval,
             online_node_ttl,
             online_node_type: ins.online_node_type,
-            register_online_node: ins.register_online_node,
+            advertise_presence: ins.advertise_presence,
         })
     }
 }
@@ -330,7 +330,7 @@ pub struct ProcessorBuilder {
     online_node_heartbeat_interval: Duration,
     online_node_ttl: Duration,
     online_node_type: OnlineNodeType,
-    register_online_node: bool,
+    advertise_presence: bool,
     registration_tasks: Vec<Arc<dyn RegistrationTask>>,
     dht_finger_table_size: usize,
     reassembly_limits: ReassemblyLimits,
@@ -362,7 +362,7 @@ impl ProcessorBuilder {
     /// initialize a [ProcessorBuilder] with a [ProcessorConfig].
     pub fn from_config(config: &ProcessorConfig) -> Result<Self> {
         validate_online_node_registration_timing(
-            config.register_online_node,
+            config.advertise_presence,
             config.online_node_heartbeat_interval,
             config.online_node_ttl,
         )?;
@@ -378,7 +378,7 @@ impl ProcessorBuilder {
             online_node_heartbeat_interval: config.online_node_heartbeat_interval,
             online_node_ttl: config.online_node_ttl,
             online_node_type: config.online_node_type.clone(),
-            register_online_node: config.register_online_node,
+            advertise_presence: config.advertise_presence,
             registration_tasks: Vec::new(),
             dht_finger_table_size: DEFAULT_FINGER_TABLE_SIZE,
             reassembly_limits: ReassemblyLimits::production(),
@@ -415,9 +415,9 @@ impl ProcessorBuilder {
         self
     }
 
-    /// Set whether listen() registers this node in the online-node registry.
-    pub fn register_online_node(mut self, register: bool) -> Self {
-        self.register_online_node = register;
+    /// Set whether listen() advertises this node's presence.
+    pub fn advertise_presence(mut self, advertise: bool) -> Self {
+        self.advertise_presence = advertise;
         self
     }
 
@@ -452,7 +452,7 @@ impl ProcessorBuilder {
             endpoint_hint,
         );
         let mut registration_tasks = self.registration_tasks;
-        if self.register_online_node {
+        if self.advertise_presence {
             online_node_registration.validate_enabled_schedule()?;
             registration_tasks.push(Arc::new(online_node_registration.clone()));
         }
@@ -969,7 +969,7 @@ mod test {
     }
 
     #[test]
-    fn online_node_registration_can_be_disabled() {
+    fn presence_advertisement_can_be_disabled() {
         let key = SecretKey::random();
         let session_sk = SessionSk::new_with_seckey(&key).unwrap();
         let serialized = ProcessorConfigSerialized::new(
@@ -980,17 +980,17 @@ mod test {
         )
         .online_node_heartbeat_interval_secs(90)
         .online_node_ttl_secs(30)
-        .register_online_node(false);
+        .advertise_presence(false);
 
         let config = ProcessorConfig::try_from(serialized).unwrap();
         let builder = ProcessorBuilder::from_config(&config).unwrap();
 
-        assert!(!builder.register_online_node);
+        assert!(!builder.advertise_presence);
         assert!(builder.registration_tasks.is_empty());
     }
 
     #[test]
-    fn online_node_registration_is_enabled_by_default() {
+    fn presence_advertisement_is_enabled_by_default() {
         let key = SecretKey::random();
         let session_sk = SessionSk::new_with_seckey(&key).unwrap();
         let serialized = ProcessorConfigSerialized::new(
@@ -1003,7 +1003,7 @@ mod test {
         let config = ProcessorConfig::try_from(serialized).unwrap();
         let builder = ProcessorBuilder::from_config(&config).unwrap();
 
-        assert!(builder.register_online_node);
+        assert!(builder.advertise_presence);
     }
 
     #[tokio::test]
@@ -1022,7 +1022,7 @@ mod test {
                 session_sk.dump().unwrap(),
                 3,
             )
-            .register_online_node(false),
+            .advertise_presence(false),
         )
         .unwrap();
         let processor = ProcessorBuilder::from_config(&config)
