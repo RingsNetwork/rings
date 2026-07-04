@@ -372,6 +372,37 @@ impl Provider {
         })
     }
 
+    /// Build a browser-compatible HTTPS onion proxy route for `target` (`host:port`).
+    ///
+    /// Browser callers cannot bind a local SOCKS/HTTP listener; this exposes the shared
+    /// application-layer HTTPS proxy planner so an extension/fetch bridge can use the same exit
+    /// registry as native.
+    pub fn build_onion_https_proxy_route(
+        &self,
+        target: String,
+        hop_count: usize,
+        allow_short_paths: bool,
+    ) -> js_sys::Promise {
+        let p = self.processor.clone();
+        future_to_promise(async move {
+            let target = crate::onion_proxy::OnionProxyTarget::parse_authority(&target)
+                .map_err(JsError::from)?;
+            let route = p
+                .build_onion_proxy_route(
+                    crate::onion_proxy::OnionProxyProtocol::HttpsFetch,
+                    target,
+                    hop_count,
+                    allow_short_paths,
+                )
+                .await
+                .map_err(JsError::from)?;
+            let response =
+                crate::rpc_dto::onion_route_response(route.route).map_err(JsError::from)?;
+            let value = js_value::serialize(&response).map_err(JsError::from)?;
+            Ok(value)
+        })
+    }
+
     /// Check local cache
     pub fn storage_check_cache(
         &self,

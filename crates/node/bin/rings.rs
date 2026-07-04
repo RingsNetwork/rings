@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -17,6 +18,9 @@ use rings_node::native::cli::Client;
 use rings_node::native::config;
 use rings_node::native::endpoint::run_external_api;
 use rings_node::native::endpoint::run_internal_api;
+use rings_node::native::onion_http_proxy::register_native_onion_exit_targets;
+use rings_node::native::onion_http_proxy::run_onion_http_proxy;
+use rings_node::native::onion_http_proxy::OnionHttpProxyOptions;
 use rings_node::onion::OnionExitService;
 use rings_node::onion::OnionExitTransport;
 use rings_node::prelude::rings_core::chunk::ReassemblyLimits;
@@ -119,7 +123,7 @@ enum Command {
     #[command(about = "Creates a new session secret key.")]
     NewSession(NewSessionCommand),
     #[command(about = "Starts a long-running node daemon.")]
-    Run(RunCommand),
+    Run(Box<RunCommand>),
     #[command(about = "Provides chat room-like functionality on the Rings Network.")]
     Pubsub(PubsubCommand),
     #[command(about = "Connects to a remote peer.", subcommand)]
@@ -301,6 +305,28 @@ struct RunCommand {
 
     #[arg(long, help = "Onion-exit registry descriptor TTL in seconds", env)]
     pub onion_exit_ttl_secs: Option<u64>,
+
+    #[arg(
+        long,
+        help = "Bind a local HTTP CONNECT proxy that routes client TCP streams through onion exits, e.g. 127.0.0.1:18080",
+        env
+    )]
+    pub onion_http_proxy_addr: Option<String>,
+
+    #[arg(
+        long,
+        help = "Desired hop count for the local onion HTTP proxy. 0 uses node default.",
+        env
+    )]
+    pub onion_http_proxy_hop_count: Option<usize>,
+
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        help = "Allow the local onion HTTP proxy to use shorter routes when too few relays are live",
+        env
+    )]
+    pub onion_http_proxy_allow_short_paths: bool,
 
     #[command(flatten)]
     config_args: ConfigArgs,
@@ -586,8 +612,22 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     if let Some(ttl_secs) = args.onion_exit_ttl_secs {
         c.onion_exit_ttl_secs = ttl_secs;
     }
+    if let Some(addr) = args.onion_http_proxy_addr {
+        c.onion_http_proxy_addr = Some(addr);
+    }
+    if let Some(hop_count) = args.onion_http_proxy_hop_count {
+        c.onion_http_proxy_hop_count = hop_count;
+    }
+    if args.onion_http_proxy_allow_short_paths {
+        c.onion_http_proxy_allow_short_paths = true;
+    }
 
     let pc = ProcessorConfig::try_from(c.clone())?;
+    let advertise_onion_exit = c.advertise_onion_exit;
+    let onion_exit_policy = c.onion_exit_policy.clone();
+    let onion_http_proxy_addr = c.onion_http_proxy_addr.clone();
+    let onion_http_proxy_hop_count = c.onion_http_proxy_hop_count;
+    let onion_http_proxy_allow_short_paths = c.onion_http_proxy_allow_short_paths;
 
     let (data_storage, measure_storage) = if let Some(storage_path) = args.storage_path {
         let storage_path = Path::new(&storage_path);
@@ -625,7 +665,11 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     // The relay is an opt-in extension owning its own engine; install it so the daemon can
     // serve TCP/UDP tunnels. The handle is unused server-side — the engine lives on inside the
     // registered interpreters.
-    rings_node::extension::protocols::relay::RelayHandle::install(&provider.extensions())?;
+    let relay =
+        rings_node::extension::protocols::relay::RelayHandle::install(&provider.extensions())?;
+    if advertise_onion_exit {
+        register_native_onion_exit_targets(&relay, &onion_exit_policy).await?;
+    }
     // SNARK is a namespaced protocol now; register it so the daemon can prove/verify.
     #[cfg(feature = "snark")]
     rings_node::extension::snark::SNARKBehaviour::default().register(provider.as_ref())?;
@@ -636,11 +680,26 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
 
     let processor_clone1 = processor.clone();
     let processor_clone2 = processor.clone();
-    let _ = futures::join!(
-        processor.listen(),
-        run_internal_api(c.internal_api_port, processor_clone2),
-        run_external_api(c.external_api_addr, processor_clone1),
-    );
+    if let Some(onion_http_proxy_addr) = onion_http_proxy_addr {
+        let onion_http_proxy_addr = onion_http_proxy_addr.parse::<SocketAddr>()?;
+        let proxy_options = OnionHttpProxyOptions {
+            listen_addr: onion_http_proxy_addr,
+            hop_count: onion_http_proxy_hop_count,
+            allow_short_paths: onion_http_proxy_allow_short_paths,
+        };
+        let _ = futures::join!(
+            processor.listen(),
+            run_internal_api(c.internal_api_port, processor_clone2),
+            run_external_api(c.external_api_addr, processor_clone1),
+            run_onion_http_proxy(proxy_options, processor.clone(), relay),
+        );
+    } else {
+        let _ = futures::join!(
+            processor.listen(),
+            run_internal_api(c.internal_api_port, processor_clone2),
+            run_external_api(c.external_api_addr, processor_clone1),
+        );
+    }
 
     Ok(())
 }
@@ -683,7 +742,7 @@ fn main() -> anyhow::Result<()> {
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
-        Command::Run(args) => daemon_run(args).await,
+        Command::Run(args) => daemon_run(*args).await,
         Command::Pubsub(args) => pubsub_run(args.client_args, args.topic).await,
         Command::Connect(ConnectCommand::Node(args)) => {
             args.client_args

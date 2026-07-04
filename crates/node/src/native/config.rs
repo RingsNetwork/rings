@@ -80,6 +80,12 @@ pub struct Config {
     pub onion_exit_services: Vec<OnionExitService>,
     #[serde(default = "crate::onion::default_onion_exit_policy")]
     pub onion_exit_policy: OnionExitPolicy,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onion_http_proxy_addr: Option<String>,
+    #[serde(default)]
+    pub onion_http_proxy_hop_count: usize,
+    #[serde(default)]
+    pub onion_http_proxy_allow_short_paths: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_ip: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -182,6 +188,9 @@ impl Config {
             onion_exit_ttl_secs: crate::onion::default_onion_exit_ttl_secs(),
             onion_exit_services: crate::onion::default_onion_exit_services(),
             onion_exit_policy: crate::onion::default_onion_exit_policy(),
+            onion_http_proxy_addr: None,
+            onion_http_proxy_hop_count: 0,
+            onion_http_proxy_allow_short_paths: false,
             external_ip: None,
             webrtc_udp_port_min: None,
             webrtc_udp_port_max: None,
@@ -269,6 +278,9 @@ measure_storage:
         assert!(cfg.advertise_presence);
         assert!(!cfg.advertise_onion_relay);
         assert!(!cfg.advertise_onion_exit);
+        assert_eq!(cfg.onion_http_proxy_addr, None);
+        assert_eq!(cfg.onion_http_proxy_hop_count, 0);
+        assert!(!cfg.onion_http_proxy_allow_short_paths);
         assert_eq!(
             cfg.onion_exit_services,
             crate::onion::default_onion_exit_services()

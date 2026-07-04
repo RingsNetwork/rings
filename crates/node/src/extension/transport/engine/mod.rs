@@ -191,6 +191,21 @@ impl TransportSessions {
         }
     }
 
+    /// Client side. Relay an already-accepted TCP stream to `peer`'s `service`.
+    pub async fn relay_tcp_stream(
+        self: Arc<Self>,
+        scope: Scope,
+        stream: TcpStream,
+        peer: Did,
+        service: String,
+    ) {
+        let Some(token) = self.stash_pending(Pending::Tcp(stream)) else {
+            return;
+        };
+        inject_accepted(&scope, token, peer, service).await;
+        self.evict_pending(token);
+    }
+
     /// Deliver peer bytes to a session's local socket. Unknown sessions are dropped — and a
     /// non-owner peer's key never resolves, so it cannot write to a session it does not own.
     pub async fn write(&self, key: &SessionKey, bytes: Bytes) {

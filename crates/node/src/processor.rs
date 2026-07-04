@@ -58,6 +58,9 @@ use crate::onion::OnionRouteRequest;
 use crate::onion::SystemRouteEntropy;
 use crate::onion::ONION_EXITS_TOPIC;
 use crate::onion::ONION_RELAY_CAPABILITY;
+use crate::onion_proxy::OnionProxyProtocol;
+use crate::onion_proxy::OnionProxyRoute;
+use crate::onion_proxy::OnionProxyTarget;
 use crate::online::OnlineNodeDescriptor;
 use crate::online::OnlineNodeType;
 use crate::online::ONLINE_NODES_TOPIC;
@@ -861,6 +864,29 @@ impl Processor {
             self.onion_route_peer_qualities().await,
             &mut SystemRouteEntropy::new(),
         )
+    }
+
+    /// Build an onion proxy route for a client target and ingress protocol.
+    pub async fn build_onion_proxy_route(
+        &self,
+        protocol: OnionProxyProtocol,
+        target: OnionProxyTarget,
+        hop_count: usize,
+        allow_short_paths: bool,
+    ) -> Result<OnionProxyRoute> {
+        let route = self
+            .build_onion_route(
+                protocol.exit_service().to_string(),
+                hop_count,
+                allow_short_paths,
+            )
+            .await?;
+
+        Ok(OnionProxyRoute {
+            protocol,
+            target,
+            route,
+        })
     }
 
     async fn onion_route_peer_qualities(&self) -> Vec<(Did, PeerQuality)> {
@@ -1716,6 +1742,38 @@ mod test {
         assert!(route.hops.contains(&first_relay.did()));
         assert!(route.hops.contains(&second_relay.did()));
         assert_eq!(route.exit, exit_descriptor);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn onion_proxy_route_uses_protocol_service_class() -> Result<()> {
+        let processor = prepare_processor().await;
+        let tcp_exit = prepare_processor().await;
+        let https_exit = prepare_processor().await;
+        let now_ms = get_epoch_ms();
+        let tcp_exit_descriptor = onion_exit_descriptor_for_processor(&tcp_exit, "tcp", now_ms)?;
+        let https_exit_descriptor =
+            onion_exit_descriptor_for_processor(&https_exit, "https", now_ms)?;
+
+        processor
+            .storage_store(Processor::onion_exit_registry_entry(vec![
+                tcp_exit_descriptor,
+                https_exit_descriptor,
+            ])?)
+            .await?;
+
+        let target = OnionProxyTarget::parse_authority("example.com:443")?;
+        let tcp_route = processor
+            .build_onion_proxy_route(OnionProxyProtocol::TcpConnect, target.clone(), 1, false)
+            .await?;
+        let https_route = processor
+            .build_onion_proxy_route(OnionProxyProtocol::HttpsFetch, target, 1, false)
+            .await?;
+
+        assert_eq!(tcp_route.exit_service(), "tcp");
+        assert_eq!(tcp_route.exit_did(), tcp_exit.did());
+        assert_eq!(https_route.exit_service(), "https");
+        assert_eq!(https_route.exit_did(), https_exit.did());
         Ok(())
     }
 

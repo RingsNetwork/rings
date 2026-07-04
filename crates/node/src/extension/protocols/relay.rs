@@ -585,6 +585,20 @@ impl RelayHandle {
             .await
     }
 
+    /// Relay one already-accepted **TCP** stream to `peer`'s `service`.
+    pub async fn relay_tcp_stream(
+        &self,
+        stream: tokio::net::TcpStream,
+        peer: Did,
+        service: String,
+    ) -> crate::error::Result<()> {
+        self.engine
+            .clone()
+            .relay_tcp_stream(self.tcp.clone(), stream, peer, service)
+            .await;
+        Ok(())
+    }
+
     /// Open a local **UDP** tunnel: bind `local_addr` and relay each datagram flow to `peer`'s
     /// `service` (client side, forward proxy).
     pub async fn open_udp_tunnel(
