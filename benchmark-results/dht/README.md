@@ -1,6 +1,8 @@
 # DHT Benchmark Artifacts - 2026-07-05
 
-Commit: `2efb302bf92a7b383e10c3c6d17b0a7764b92579` (`codex/dht-benchmark-653`)
+Commit: base Docker artifacts were collected from `2efb302bf92a7b383e10c3c6d17b0a7764b92579`;
+the dummy simulator JSONL was regenerated after applying the Chord wrapping
+finger fix tracked by issue #658 in this PR branch.
 Machine: Apple M1 Max, 68719476736 bytes RAM, macOS-15.6.1-arm64-arm-64bit-Mach-O
 Tools: `rustc 1.94.1 (e408947bf 2026-03-25)`, `cargo 1.94.1 (29ea6fb6a 2026-03-24)`, `Docker version 28.3.2, build 578ccf607d`
 Docker image: `rings-node-cluster:benchmark-artifacts-2efb302b` / `sha256:1c5d41481958e3fe0f403b53955831cbbd36d2041bf3954a34d71ad02b6a5b5a`
@@ -8,7 +10,6 @@ Docker image: `rings-node-cluster:benchmark-artifacts-2efb302b` / `sha256:1c5d41
 ## Files
 
 - `dummy-paper-scale-2026-07-05.jsonl`: Paper-scale Chord baseline from the dummy DHT simulator.
-- `dummy-paper-scale-2026-07-05.log`: Cargo bench stderr for the dummy simulator run.
 - `docker-convergence-16node-2026-07-05.jsonl`: Fresh 16-node ring Docker/WebRTC cluster samples from cluster-ready for about 5 minutes.
 - `docker-transport-16node-2026-07-05.jsonl`: Real WebRTC node-internal transport burst payload sweep on fixed node0 -> node1.
 - `environment-2026-07-05.json`: Machine, tool, image, commit, and command metadata.
@@ -41,7 +42,7 @@ RINGS_DHT_BENCH_NODES=1600 RINGS_DHT_BENCH_LOOKUPS_PER_NODE=64 RINGS_DHT_BENCH_F
 
 ## Dummy DHT Simulator
 
-This is the Chord-style baseline for paper object `B_C(eta)`. It does not use WebRTC; it uses deterministic Chord routing state at `N=1600`, `finger_table_size=160`, and `lookups_per_node=64`.
+This is the Chord-style baseline for paper object `B_C(eta)`. It does not use WebRTC; it uses deterministic Chord routing state with wrapping Chord finger semantics at `N=1600`, `finger_table_size=160`, and `lookups_per_node=64`.
 
 | scenario | active nodes | lookups | correctness | avg hops | timeouts | failures / 10k | full matches |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -59,7 +60,10 @@ This is the Chord-style baseline for paper object `B_C(eta)`. It does not use We
 
 The dummy JSONL includes per-scenario `build_elapsed_ms` and
 `lookup_elapsed_ms`. Summed across the 11 emitted scenarios, build time was
-606.914 ms and lookup time was 70994.068 ms.
+519.763 ms and lookup time was 69914.777 ms. After switching to wrapping
+finger semantics, the stable baseline remained `avg_hops=5.469355`; the change
+aligns runtime/spec finger semantics but does not by itself reduce this
+aggregate stable hop count.
 
 ## Docker/WebRTC Convergence
 

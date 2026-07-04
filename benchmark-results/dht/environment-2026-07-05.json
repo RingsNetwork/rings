@@ -10,9 +10,12 @@
     "id": "sha256:1c5d41481958e3fe0f403b53955831cbbd36d2041bf3954a34d71ad02b6a5b5a",
     "tag": "rings-node-cluster:benchmark-artifacts-2efb302b"
   },
+  "dht_finger_policy": "chord_wrapping",
   "git_branch": "codex/dht-benchmark-653",
   "git_head": "2efb302bf92a7b383e10c3c6d17b0a7764b92579",
   "git_head_short": "2efb302b",
+  "git_head_scope": "base Docker artifacts only",
+  "dummy_source": "current PR branch after issue #658 Chord wrapping finger fix",
   "machine": {
     "cpu_brand": "Apple M1 Max",
     "machine": "arm64",
@@ -24,5 +27,9 @@
     "cargo": "cargo 1.94.1 (29ea6fb6a 2026-03-24)",
     "docker": "Docker version 28.3.2, build 578ccf607d",
     "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)"
-  }
+  },
+  "notes": [
+    "dummy-paper-scale-2026-07-05.jsonl was regenerated after applying issue #658 Chord wrapping finger semantics in the PR branch.",
+    "Docker convergence and transport artifacts still use rings-node-cluster:benchmark-artifacts-2efb302b."
+  ]
 }

@@ -16,7 +16,7 @@
 //! finger table — is a DETERMINISTIC FUNCTION of the set of peers it knows:
 //!   Successors(n) = the K closest forward nodes of `known[n]`
 //!   Predecessor(n) = the closest node behind n among those that notify it
-//!   Finger(n,k)   = the no-wrap finger rule over `known[n]`
+//!   Finger(n,k)   = successor((n + 2^k) mod M) over `known[n]`
 //! This is exactly `MODULE ChordConvergence` (dht_convergence.rs) evaluated at a
 //! given `known[n]`. `known[n]` only grows (connections are not dropped on the
 //! happy path) and, for these six fully-discoverable DIDs, converges to "all

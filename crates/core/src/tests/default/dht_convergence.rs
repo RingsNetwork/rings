@@ -52,21 +52,11 @@
 //! Predecessor(n) ==
 //!   CHOOSE x \in Others(n) : \A y \in Others(n) : dist(n,x) >= dist(n,y)
 //!
-//! \* Finger(n, k): nearest forward node at clockwise distance >= 2^k, else
-//! \* "none". Fingers are 2^k spaced, NOT linear.
-//! \*
-//! \* DEVIATION from the Chord paper (intentional): the paper's finger[k] is
-//! \* successor((n + 2^k) mod M), which WRAPS, so it is always a live node. This
-//! \* operator returns "none" when no known node is at distance >= 2^k (no wrap)
-//! \* — deliberately, because it mirrors Rings' `finger.join`, which leaves
-//! \* finger[k] = None in that case. So these tests verify Rings' sparse/no-wrap
-//! \* finger table, not the paper-accurate wrapping one. Routing/liveness here do
-//! \* not lean on high-index wrap fingers (successor list + low/mid fingers
-//! \* carry it); a paper-accurate wrapping spec would be a separate exercise.
+//! \* Finger(n, k): successor((n + 2^k) mod M). Fingers are 2^k spaced,
+//! \* wrapping Chord entries, NOT linear slots.
 //! Finger(n, k) ==
-//!   LET C == { x \in Others(n) : dist(n,x) >= 2^k } IN
-//!   IF C = {} THEN none
-//!   ELSE CHOOSE x \in C : \A y \in C : dist(n,x) <= dist(n,y)
+//!   LET target == (n + 2^k) % M IN
+//!   CHOOSE x \in Nodes : \A y \in Nodes : dist(target,x) <= dist(target,y)
 //!
 //! \* CorrectChord stabilize operation (HMCC/Zave path). This is the default
 //! \* production path: `Stabilizer::stabilize` calls `correct_stabilize`, and
@@ -110,7 +100,7 @@
 //! \* around): let P(N) == "for every Node with |Node| = N satisfying Ring,
 //! \* the converged state = the operators above".
 //! \*   Base   : P(2)  (one forward neighbour, the wrap case).
-//! \*   Step   : P(N) => P(N+1). join/notify/finger.join are monotone in the
+//! \*   Step   : P(N) => P(N+1). join/notify/finger refinement are monotone in the
 //! \*            known-node set and the operators are defined by the same
 //! \*            min/max-by-dist, so inserting a node only refines each slot
 //! \*            toward a strictly-closer candidate, preserving the equality.
@@ -231,8 +221,8 @@ pub(super) enum Layout {
     /// test (gaps spanning 0.61%..37%): immediate successors are only told apart
     /// by high-index fingers. The collapsed-finger regime.
     Clustered,
-    /// A node placed *exactly* on a `2^k` boundary, so `dist == 2^k`: exercises
-    /// the `>= 2^k` boundary (dyadic tie) in `finger.join` / `Finger`.
+    /// A node placed exactly at a `n + 2^k` probe target: exercises the
+    /// zero-distance successor case in `finger.join` / `Finger`.
     DyadicBoundary,
 }
 

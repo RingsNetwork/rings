@@ -476,19 +476,7 @@ fn finger_index(
 ) -> Option<usize> {
     let threshold = BigUint::from(1u8) << bit;
     let target = add_mod(&identities.get(local_index)?.value, &threshold, ring_size);
-    let candidate = successor_at_or_after(known, identities, &target)?;
-    if candidate == local_index {
-        return None;
-    }
-    if clockwise_distance(
-        &identities.get(local_index)?.value,
-        &identities.get(candidate)?.value,
-        ring_size,
-    ) < threshold
-    {
-        return None;
-    }
-    Some(candidate)
+    successor_at_or_after(known, identities, &target)
 }
 
 fn successor_at_or_after(

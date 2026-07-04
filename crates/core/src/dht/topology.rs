@@ -11,7 +11,7 @@
 //! - `R = Z / 2^160`, represented by [`Did`](crate::dht::Did).
 //! - `succ[n]` is the bounded successor sequence for node `n`.
 //! - `pred[n]` is the optional predecessor for node `n`.
-//! - `finger[n][i]` is the optional sparse/no-wrap finger-table entry at slot `i`.
+//! - `finger[n][i]` is the optional Chord wrapping finger-table entry at slot `i`.
 //!
 //! Law: join, remove, notify, stabilize, and finger maintenance are pure
 //! transitions over this state. Stabilize/notify/finger refinement are monotone
@@ -37,7 +37,7 @@ pub struct TopologyState {
     pub successors: Vec<Did>,
     /// Known predecessor.
     pub predecessor: Option<Did>,
-    /// Sparse/no-wrap finger table.
+    /// Chord wrapping finger table.
     pub fingers: Vec<Option<Did>>,
     /// Next finger index maintained by the periodic finger fixer.
     pub fix_finger_index: usize,
@@ -184,19 +184,13 @@ pub fn predecessor(all: &[Did], n: Did) -> Option<Did> {
         .max_by_key(|&did| dist(n, did))
 }
 
-/// `Finger(n, bit)`: nearest forward node at distance `>= 2^bit`, else `None`.
-///
-/// This mirrors Rings' sparse/no-wrap finger table, not the Chord paper's
-/// wrapping finger definition.
+/// `Finger(n, bit)`: successor of `(n + 2^bit) mod 2^160`.
 pub fn finger(all: &[Did], n: Did, bit: usize) -> Option<Did> {
-    let threshold = BigUint::from(1u8) << bit;
-    all.iter()
-        .copied()
-        .filter(|&did| did != n && dist(n, did) >= threshold)
-        .min_by_key(|&did| dist(n, did))
+    let target = n + Did::power_of_two(bit);
+    all.iter().copied().min_by_key(|&did| dist(target, did))
 }
 
-/// Full sparse/no-wrap finger table predicted by the topology operator.
+/// Full Chord wrapping finger table predicted by the topology operator.
 pub fn finger_table(all: &[Did], n: Did) -> Vec<Option<Did>> {
     (0..RING_BITS).map(|bit| finger(all, n, bit)).collect()
 }
@@ -209,21 +203,16 @@ pub fn update_successors(local: Did, current: &[Did], candidate: Did, capacity: 
 }
 
 fn finger_join(local: Did, current: &[Option<Did>], peer: Did) -> Vec<Option<Did>> {
-    let bias = dist(local, peer);
     current
         .iter()
         .copied()
         .enumerate()
         .map(|(slot, old)| {
-            let pos = BigUint::from(Did::power_of_two(slot));
-            if bias < pos || peer == local {
-                old
-            } else {
-                match old {
-                    Some(existing) if dist(local, existing) < bias => old,
-                    _ => Some(peer),
-                }
-            }
+            let target = local + Did::power_of_two(slot);
+            [Some(local), old, Some(peer)]
+                .into_iter()
+                .flatten()
+                .min_by_key(|&did| dist(target, did))
         })
         .collect()
 }
@@ -247,16 +236,14 @@ fn finger_remove(current: &[Option<Did>], peer: Did) -> Vec<Option<Did>> {
 }
 
 fn finger_set(
-    local: Did,
+    _local: Did,
     current: &[Option<Did>],
     index: usize,
     successor: Did,
 ) -> Vec<Option<Did>> {
     let mut next = current.to_vec();
-    if successor != local {
-        if let Some(slot) = next.get_mut(index) {
-            *slot = Some(successor);
-        }
+    if let Some(slot) = next.get_mut(index) {
+        *slot = Some(successor);
     }
     next
 }
@@ -273,8 +260,9 @@ pub fn find_successor(state: &TopologyState, did: Did) -> FindSuccessorStep {
             .rev()
             .flatten()
             .copied()
+            .filter(|peer| *peer != state.local)
             .find(|peer| dist(state.local, *peer) < dist(state.local, did))
-            .unwrap_or(state.local);
+            .unwrap_or(head);
         FindSuccessorStep::Remote { next, did }
     }
 }
@@ -527,19 +515,17 @@ mod tests {
         );
 
         assert_eq!(next.state.successors, vec![peer]);
-        assert_eq!(next.state.fingers, vec![
-            Some(peer),
-            Some(peer),
-            Some(peer),
-            Some(peer),
-            None
-        ]);
-        assert_eq!(next.actions, vec![
-            TopologyAction::FindSuccessorForConnect {
+        assert_eq!(
+            next.state.fingers,
+            vec![Some(peer), Some(peer), Some(peer), Some(peer), Some(local)]
+        );
+        assert_eq!(
+            next.actions,
+            vec![TopologyAction::FindSuccessorForConnect {
                 next: peer,
                 did: local
-            }
-        ]);
+            }]
+        );
     }
 
     #[test]
@@ -626,11 +612,14 @@ mod tests {
         );
 
         assert_eq!(next.state.fix_finger_index, 3);
-        assert_eq!(next.actions, vec![TopologyAction::FindSuccessorForFix {
-            next: next_hop,
-            did: Did::power_of_two(3),
-            index: 3
-        }]);
+        assert_eq!(
+            next.actions,
+            vec![TopologyAction::FindSuccessorForFix {
+                next: next_hop,
+                did: Did::power_of_two(3),
+                index: 3
+            }]
+        );
     }
 
     #[test]
@@ -651,11 +640,14 @@ mod tests {
         );
 
         assert_eq!(next.state.fix_finger_index, 3);
-        assert_eq!(next.actions, vec![TopologyAction::FindSuccessorForFix {
-            next: next_hop,
-            did: local + Did::power_of_two(3),
-            index: 3
-        }]);
+        assert_eq!(
+            next.actions,
+            vec![TopologyAction::FindSuccessorForFix {
+                next: next_hop,
+                did: local + Did::power_of_two(3),
+                index: 3
+            }]
+        );
     }
 
     #[test]
@@ -676,7 +668,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_finger_step_ignores_self_and_out_of_range_slot() {
+    fn apply_finger_step_accepts_self_and_ignores_out_of_range_slot() {
         let local = did(0);
         let current = state(local, vec![], None, vec![None; 2], 0);
         let self_update = step(
@@ -696,7 +688,26 @@ mod tests {
             DEFAULT_SUCCESSOR_CAPACITY,
         );
 
-        assert_eq!(self_update.state, current);
+        assert_eq!(
+            self_update.state,
+            state(local, vec![], None, vec![None, Some(local)], 0)
+        );
         assert_eq!(out_of_range.state, current);
+    }
+
+    #[test]
+    fn find_successor_skips_self_finger() {
+        let local = did(0);
+        let successor = did(4);
+        let target = did(8);
+        let current = state(local, vec![successor], None, vec![Some(local)], 0);
+
+        assert_eq!(
+            find_successor(&current, target),
+            FindSuccessorStep::Remote {
+                next: successor,
+                did: target
+            }
+        );
     }
 }

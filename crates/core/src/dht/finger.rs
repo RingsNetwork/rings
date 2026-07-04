@@ -68,10 +68,6 @@ impl FingerTable {
             tracing::error!("set finger index out of range, index: {}", index);
             return;
         }
-        if did == self.did {
-            tracing::trace!("set finger table with self did, ignore it");
-            return;
-        }
         self.write_slot(index, Some(did));
     }
 
@@ -106,24 +102,16 @@ impl FingerTable {
         }
     }
 
-    /// Join FingerTable
+    /// Join FingerTable with Chord wrapping finger semantics.
     pub fn join(&mut self, did: Did) {
-        let bias = did.bias(self.did);
-
         for k in 0..self.size {
-            let pos = Did::power_of_two(k);
-
-            if bias.pos() < pos {
-                continue;
-            }
-
-            if let Some(v) = self.finger.get(k).copied().flatten() {
-                if bias > v.bias(self.did) {
-                    continue;
-                }
-            }
-
-            self.write_slot(k, Some(did));
+            let target = self.did + Did::power_of_two(k);
+            let current = self.finger.get(k).copied().flatten().unwrap_or(self.did);
+            let next = [self.did, current, did]
+                .into_iter()
+                .min_by_key(|candidate| candidate.bias(target).pos())
+                .unwrap_or(self.did);
+            self.write_slot(k, Some(next));
         }
     }
 
@@ -138,7 +126,7 @@ impl FingerTable {
 
         for i in (0..self.size).rev() {
             if let Some(v) = self.finger.get(i).copied().flatten() {
-                if v.bias(self.did) < bias {
+                if v != self.did && v.bias(self.did) < bias {
                     return v;
                 }
             }
@@ -209,6 +197,28 @@ mod test {
             DEFAULT_FINGER_TABLE_SIZE
         );
         assert_eq!(FingerTable::new(did, 0).slot_count(), 0);
+    }
+
+    #[test]
+    fn test_finger_table_set_accepts_self_for_wrapping_slots() {
+        let did = gen_ordered_dids(1)[0];
+        let mut table = FingerTable::new(did, 3);
+
+        table.set(2, did);
+
+        assert_eq!(table.get(2), Some(did));
+        assert_eq!(table.len(), 1);
+    }
+
+    #[test]
+    fn test_finger_table_join_accepts_self_for_wrapping_slots() {
+        let did = gen_ordered_dids(1)[0];
+        let mut table = FingerTable::new(did, 3);
+
+        table.join(did);
+
+        assert_eq!(table.list(), &vec![Some(did), Some(did), Some(did)]);
+        assert_eq!(table.len(), 3);
     }
 
     #[test]
