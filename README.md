@@ -12,9 +12,18 @@ Rings Network
 ![GitHub](https://img.shields.io/github/license/RyanKung/rings)
 [![Sponsor](https://img.shields.io/badge/Sponsor-RingsNetwork-ea4aaa?logo=githubsponsors)](https://github.com/sponsors/RingsNetwork)
 
-The Rings Network aimed at creating a fully decentralized network. It is built upon technologies such as WebRTC, WASM (WebAssembly), and Chord DHT (Distributed Hash Table), enabling direct connections between browsers.
+**A peer-to-peer network for the sovereign age.**
 
-Rings Network allows all traffic to bypass centralized infrastructures, achieving complete decentralization.
+Rings is a browser-native, structured peer-to-peer network for applications that need
+their own network layer instead of a server-owned data path. Browser tabs and native
+daemons can join the same overlay, discover peers by DID, and exchange messages over
+direct WebRTC datachannels routed by a Chord DHT.
+
+At the application layer, Rings gives developers a namespace-scoped protocol runtime:
+write a pure state machine, attach an interpreter shell, and run it over a decentralized
+overlay. Built-in protocols already cover peer service relay and fold-scheme zkSNARK
+proving; the roadmap extends this into a fully server-less network layer and privacy
+layer.
 
 ## Whitepaper
 
@@ -39,61 +48,72 @@ If you cite Rings in academic or technical writing, use:
 
 ## Features
 
-### Browser Native:
+### Browser-native peers
 
-Utilizing WebRTC, a protocol designed for real-time communication, the Rings Network is fully compatible with browser environments. This capability is further enhanced by their full Rust implementation and web_sys based approach, enabling seamless, direct browser-to-browser communication.
+Rings runs in browsers through WebAssembly and `web_sys`, and on native hosts through
+the same Rust node stack. WebRTC datachannels carry peer-to-peer traffic, including
+browser-to-browser connections without an application server in the data path.
 
-### Crypto Native:
+### DID identity and cryptography
 
-A core aspect of the Rings Network is its support for various cryptographic algorithms, essential for DID (Decentralized Identifier) identification. This includes support for popular cryptographic standards like secp256k1, secp256r1, and ed25519, among others, providing robust security and identity verification mechanisms.
+Peers are addressed by decentralized identifiers backed by selectable signature
+schemes, including secp256k1, secp256r1, ed25519, BLS, and bip137. This lets Rings
+bridge browser, daemon, and wallet-oriented identity workflows without binding the
+network to one key system.
 
-### Struct P2P:
+### Structured peer routing
 
-At the foundation of the Rings Network is the use of Chord DHT (Distributed Hash Table). This technology underpins the routing layer of the network, enabling efficient, scalable, and decentralized peer-to-peer connectivity. The use of Chord DHT ensures that the network can handle a large number of nodes while maintaining effective data retrieval and communication processes.
+The overlay uses a Chord DHT for successor/finger-table routing, DID lookup, message
+relay, stabilization, and `network_id` isolation. Independent overlays stay separate
+while retaining deterministic routing behavior.
+
+### Protocol runtime
+
+Application protocols are namespace-scoped. A protocol's `step` function stays pure,
+and all side effects are performed by its `Interpret` shell through a scoped capability.
+That keeps protocol logic extensible without adding a global effect bus to the core.
 
 ## Installation
 
 You can install rings-node either from Cargo or from source.
 
-### from cargo
+### From Cargo
 
-To install rings-node from Cargo, run the following command:
+Install the `rings` CLI from crates.io:
 
 ```sh
 cargo install rings-node
 ```
 
-### from source
+### From source
 
-To install rings-node from source, follow these steps:
+Install the CLI from a local checkout:
 
 ```sh
 git clone git@github.com:RyanKung/rings.git
 cd ./rings
-cargo install --path .
+cargo install --path crates/node
 ```
 
 ### Build for WebAssembly
 
-
-To build Rings Network for WebAssembly, run the following commands:
+Build the browser provider with Cargo and `wasm-bindgen`:
 
 ```sh
-cargo build --release --target wasm32-unknown-unknown --no-default-features --features browser
+cargo build -p rings-node --release --target wasm32-unknown-unknown --no-default-features --features browser
 wasm-bindgen --out-dir pkg --target web ./target/wasm32-unknown-unknown/release/rings_node.wasm
 ```
 
-Or build with `wasm-pack`
+Or build with `wasm-pack`:
 
 ```sh
-wasm-pack build --scope ringsnetwork -t web --no-default-features --features browser --features console_error_panic_hook
+wasm-pack build --scope ringsnetwork -t web crates/node --no-default-features --features browser,console_error_panic_hook
 ```
-
 
 ## Usage
 
 ```sh
-rings help
+rings --help
 ```
 
 ## Examples
@@ -138,19 +158,19 @@ handler)`. See [`examples/relay`](./examples/relay) and
 | Browser frontend | [`examples/frontend`](./examples/frontend) | Web page and extension workflow |
 | Examples | [`examples/`](./examples) | Native, frontend, dweb, proof, relay, snark, and FFI examples |
 
-## Components:
+## Components
 
-* core: The core implementation of rings network, including DHT and Swarm.
+* core: DHT, swarm, DID routing, messages, and cryptographic identity primitives.
 
-* node: The implementation of Rings native, Rings browser, and Rings FFI provider.
+* node: Native daemon, browser/WASM provider, extension runtime, relay protocol, and FFI provider.
 
 * rpc: Rings RPC shared types and the JSON-RPC client/handlers (over HTTP).
 
 * derive: Rings macros, including `wasm_export` macro.
 
-* transport: Rings Transport implementation, including native transport and `web_sys` based transport.
+* transport: Native WebRTC transport and `web_sys`-based browser transport.
 
-* snark: Rings SNARK is based on fold scheme and zkSNARK
+* snark: Fold-scheme zkSNARK proving and verification protocol.
 
 ## Architecture
 
