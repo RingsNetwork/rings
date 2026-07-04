@@ -73,7 +73,7 @@ pub(crate) const fn default_advertise_onion_exit() -> bool {
 
 /// Default exit services. It is only published when onion-exit advertisement is enabled.
 pub fn default_onion_exit_services() -> Vec<OnionExitService> {
-    vec![OnionExitService::https()]
+    vec![OnionExitService::https(), OnionExitService::tcp()]
 }
 
 /// Default exit policy. It is intentionally closed until the operator configures targets.
@@ -125,6 +125,14 @@ impl OnionExitService {
         Self {
             name: "https".to_string(),
             transport: OnionExitTransport::Https,
+        }
+    }
+
+    /// Return the standard native TCP exit service.
+    pub fn tcp() -> Self {
+        Self {
+            name: "tcp".to_string(),
+            transport: OnionExitTransport::Tcp,
         }
     }
 

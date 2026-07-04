@@ -157,7 +157,7 @@ impl ProcessorConfig {
         self.session_sk.clone()
     }
 
-    /// Enables browser-friendly HTTPS onion exit advertisement.
+    /// Enables default onion exit advertisement, including HTTPS and TCP services.
     pub fn enable_https_onion_exit(mut self) -> Self {
         self.advertise_onion_exit = true;
         self.onion_exit_services = default_onion_exit_services();
@@ -347,7 +347,7 @@ impl ProcessorConfigSerialized {
         self
     }
 
-    /// Enables the default browser-friendly HTTPS onion exit service.
+    /// Enables the default onion exit services, including HTTPS and TCP.
     pub fn enable_https_onion_exit(mut self) -> Self {
         self.advertise_onion_exit = true;
         self.onion_exit_services = default_onion_exit_services();
@@ -1389,7 +1389,7 @@ mod test {
     }
 
     #[test]
-    fn https_onion_exit_config_uses_default_https_service() {
+    fn onion_exit_config_uses_default_https_and_tcp_services() {
         let key = SecretKey::random();
         let session_sk = SessionSk::new_with_seckey(&key).unwrap();
         let config = ProcessorConfig::new(
@@ -1402,6 +1402,14 @@ mod test {
 
         assert!(config.advertise_onion_exit);
         assert_eq!(config.onion_exit_services, default_onion_exit_services());
+        assert!(config
+            .onion_exit_services
+            .iter()
+            .any(|service| service == &OnionExitService::https()));
+        assert!(config
+            .onion_exit_services
+            .iter()
+            .any(|service| service == &OnionExitService::tcp()));
     }
 
     #[tokio::test]
