@@ -45,6 +45,21 @@ The network layer is the core component of the Rings Network, responsible for DI
 
 The Chord algorithm is a well-known DHT algorithm characterized by its formation of an abstract circular topology structure among all participating nodes. It has a lookup algorithm complexity of O(log(N)).
 
+To collect paper-scale Chord baseline data without paying WebRTC handshake cost,
+run the dummy DHT simulator bench:
+
+```sh
+RINGS_DHT_BENCH_NODES=1600 \
+RINGS_DHT_BENCH_LOOKUPS_PER_NODE=64 \
+RINGS_DHT_BENCH_FINGER_TABLE_SIZES=160 \
+cargo bench -p rings-core --bench dht_network_sim --no-default-features --features dummy
+```
+
+The simulator emits JSON lines for stable, failed-node, and churn scenarios.
+It measures ring topology convergence, lookup correctness, lookup hop count, and
+failure rate against deterministic Chord routing state. Use the Docker cluster
+benchmark when measuring real WebRTC node behavior or transport throughput.
+
 #### Protocol Layer
 
 In the protocol layer, the central design concept revolves around the utilization of a Decentralized Identifier (DID), which constitutes a finite ring in abstract algebra. The DID is a 160-bit identifier that enables the construction of a mathematical structure that encompasses the characteristics of both a group and a field.

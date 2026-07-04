@@ -4,8 +4,9 @@
 The collector uses the real native node daemons inside the Docker cluster. DHT
 lookup metrics are computed by replaying the successor/finger state exposed by
 each node's /status endpoint, so the report explicitly labels them as a status
-snapshot routing model. Optional transport throughput sends real RPC messages
-over the node stack with sendBackendMessage.
+snapshot routing model. Optional transport sampling sends real RPC messages over
+the node stack with sendBackendMessage; it measures the RPC send path, not raw
+WebRTC datachannel bandwidth.
 """
 
 from __future__ import annotations
@@ -457,6 +458,12 @@ def transport_report(
         errors.append(str(exc))
 
     total_payload_bytes = payload_bytes * sent
+    rpc_messages_per_second = sent / send_elapsed if send_elapsed > 0 else 0.0
+    rpc_send_mbps = (
+        total_payload_bytes * 8.0 / send_elapsed / 1_000_000.0
+        if send_elapsed > 0
+        else 0.0
+    )
     return {
         "report": "docker_cluster_transport",
         "enabled": True,
@@ -468,9 +475,9 @@ def transport_report(
         "messages": messages,
         "sent_messages": sent,
         "send_elapsed_ms": send_elapsed * 1000.0,
-        "send_mbps": (total_payload_bytes * 8.0 / send_elapsed / 1_000_000.0)
-        if send_elapsed > 0
-        else 0.0,
+        "rpc_messages_per_second": rpc_messages_per_second,
+        "rpc_send_mbps": rpc_send_mbps,
+        "send_mbps": rpc_send_mbps,
         "source_sent_delta": counter_delta(
             source_before, source_after, destination["did"], "sent"
         ),

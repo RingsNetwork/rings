@@ -97,5 +97,12 @@ python3 scripts/dht_docker_cluster_bench.py \
 
 The DHT lookup metrics are computed by replaying each node's `/status`
 successor and finger-table state. Reports therefore label the lookup model as
-`status_snapshot_route`; use the transport section for real RPC send throughput
-over the running WebRTC nodes.
+`status_snapshot_route`; use the transport section for real `sendBackendMessage`
+RPC-path sampling over the running WebRTC nodes.
+
+The transport fields `rpc_send_mbps` and `rpc_messages_per_second` include the
+collector path (`docker exec`, `curl`, HTTP JSON-RPC, base64 decode, envelope
+encoding, and node send admission). They are useful as an API-path smoke test,
+but they are not raw WebRTC datachannel bandwidth. Use larger payloads and
+message counts for a less latency-dominated sample, or add a node-internal
+streaming harness when the goal is saturated link throughput.
