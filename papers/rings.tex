@@ -180,6 +180,8 @@ explains why those artifacts exist and how they relate to prior systems.
 \mathsf{crypto\_ops}&\cap&\mathsf{route\_ops}=\varnothing.
 \end{array}
 \]
+The fail-stop clause scopes overlay maintenance; identity, ranking, and
+application protocols still carry adversarial predicates at their own layer.
 \end{assumption}
 
 \begin{definition}[Identifier carrier]
@@ -226,22 +228,28 @@ r&=&|\operatorname{Succ}^r_N(n)|,\\
 This is the CorrectChord stable base of Zave~\cite{ZaveChordCorrect}.
 \end{assumption}
 
-\begin{definition}[Replica set]
+\begin{definition}[Affine replica set]
 \[
-  \operatorname{Rep}^r_N(k)=
-  \{\operatorname{owner}_N(k)\}
-  \cup
-  \mathrm{set}\bigl(
-    \operatorname{Succ}^{r-1}_N(\operatorname{owner}_N(k))
-  \bigr).
+\begin{array}{rcl}
+\rho&\in&\mathbb{N}_{>0},\\
+\operatorname{rot}^{\rho}_i(k)
+  &=&k+\left\lfloor M\cdot i/\rho\right\rfloor,\\[4pt]
+\operatorname{Rep}^{\rho}_N(k)
+  &=&
+  \{\operatorname{owner}_N(\operatorname{rot}^{\rho}_i(k)):
+    0\leq i<\rho\}.
+\end{array}
 \]
+Storage redundancy uses affine rotations of the entry key.  Successor lists
+remain the CorrectChord safety root for topology maintenance, not the storage
+replica set.
 \end{definition}
 
 \begin{definition}[Rings overlay object]
 \[
   \mathcal{R}_N=
   (R,N,\operatorname{owner}_N,\operatorname{pred}_N,
-   \operatorname{Succ}^r_N,\operatorname{Rep}^r_N,F,E),
+   \operatorname{Succ}^r_N,\operatorname{Rep}^{\rho}_N,F,E),
 \]
 \[
 \begin{array}{rcl}
@@ -855,7 +863,7 @@ This is the CRDT join-semilattice case~\cite{ShapiroCRDT}.
   \forall \nu,x.\;
   \operatorname{replicas}(H_\nu(x))
   \subseteq
-  \operatorname{Rep}^r_N(H_\nu(x)).
+  \operatorname{Rep}^{\rho}_N(H_\nu(x)).
 \]
 \end{invariant}
 
@@ -1219,11 +1227,12 @@ Distributed hash tables give Rings its closest technical ancestry.  IPFS and
 libp2p use Kademlia-derived routing, where distance is measured by XOR and
 routing state is organized into buckets~\cite{Kademlia,IPFS,Libp2p}.  This is a
 strong fit for content-addressed lookup, but Rings needs a different law: the
-owner of a DID or VID is the first live node clockwise from that point, and
-replica ownership is obtained by successor-list extension.  The paper therefore
-uses Chord's circular order as the base model, then uses Zave's CorrectChord
-results to avoid treating the original Chord maintenance protocol as already
-correct under churn~\cite{Chord,ZaveChordCorrect}.
+owner of a DID or VID is the first live node clockwise from that point, topology
+repair follows successor-list maintenance, and storage redundancy places
+affine rotations of an entry key around the ring.  The paper therefore uses
+Chord's circular order as the base model, then uses Zave's CorrectChord results
+to avoid treating the original Chord maintenance protocol as already correct
+under churn~\cite{Chord,ZaveChordCorrect}.
 
 Relay anonymity systems take a different route.  Tor and Nym route traffic over
 selected relay paths and focus on hiding communication metadata from local
@@ -1262,7 +1271,7 @@ Kademlia fam.
 Relay mixnets
   & path & no structured owner \\
 Rings
-  & circular & owner, Succ, Rep \\
+  & circular & owner, Succ, affine Rep \\
 \hline
 \end{tabular}
 \caption{Routing and ownership comparison \cite{Kademlia,IPFS,Libp2p,TorNetwork,NymNetwork}}
@@ -1272,12 +1281,13 @@ Rings
 \section{Conclusion}
 
 Rings is an algebraic structured peer-to-peer network: structured because
-ownership, routing, replication, and repair are defined over CorrectChord's
-circular overlay, and algebraic because each layer preserves an explicit carrier
-or morphism rather than hiding semantics inside ad hoc network procedures.
+ownership, routing, affine storage replication, and repair are defined over
+CorrectChord's circular overlay, and algebraic because each layer preserves an
+explicit carrier or morphism rather than hiding semantics inside ad hoc network
+procedures.
 
 \[
-  \mathcal{Rings}=
+  \mathsf{Rings}=
   (R,\mathcal{R}_N,\mathbf{Set}/R,\Omega_N,
    \mathsf{T}^{\mathcal{E}}_A,\Pi,\mathbb{G},\mathcal{X}).
 \]
