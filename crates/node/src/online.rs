@@ -16,7 +16,9 @@ use serde::Serialize;
 use crate::descriptor::decode_descriptor;
 use crate::descriptor::encode_descriptor;
 use crate::descriptor::latest_valid_by_did;
+use crate::descriptor::sign_descriptor_body;
 use crate::descriptor::SignedDescriptor;
+use crate::descriptor::SignedDescriptorBody;
 
 /// DHT topic used for online-node registry descriptors.
 pub const ONLINE_NODES_TOPIC: &str = "online_nodes";
@@ -62,15 +64,6 @@ pub struct OnlineNodeDescriptorBody {
 }
 
 impl OnlineNodeDescriptorBody {
-    fn validate_signer(&self, session_sk: &SessionSk) -> Result<()> {
-        if self.public_key.did() != self.did || session_sk.account_did() != self.did {
-            return Err(Error::InvalidMessage(
-                "online node descriptor DID/public key/session mismatch".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
     fn body_ref(&self) -> OnlineNodeDescriptorBodyRef<'_> {
         OnlineNodeDescriptorBodyRef {
             did: self.did,
@@ -88,6 +81,38 @@ impl OnlineNodeDescriptorBody {
 
     fn signing_data(&self) -> Result<Vec<u8>> {
         self.body_ref().signing_data()
+    }
+}
+
+impl SignedDescriptorBody for OnlineNodeDescriptorBody {
+    type Descriptor = OnlineNodeDescriptor;
+
+    fn body_did(&self) -> Did {
+        self.did
+    }
+
+    fn body_public_key(&self) -> &VerificationPublicKey {
+        &self.public_key
+    }
+
+    fn body_signing_data(&self) -> Result<Vec<u8>> {
+        self.signing_data()
+    }
+
+    fn into_signed_descriptor(self, signature: MessageVerification) -> Self::Descriptor {
+        OnlineNodeDescriptor {
+            did: self.did,
+            public_key: self.public_key,
+            node_type: self.node_type,
+            network_id: self.network_id,
+            capabilities: self.capabilities,
+            endpoint_hint: self.endpoint_hint,
+            started_at_ms: self.started_at_ms,
+            heartbeat_at_ms: self.heartbeat_at_ms,
+            expires_at_ms: self.expires_at_ms,
+            version: self.version,
+            signature,
+        }
     }
 }
 
@@ -141,21 +166,11 @@ pub struct OnlineNodeDescriptor {
 impl OnlineNodeDescriptor {
     /// Create and sign a descriptor.
     pub fn new_signed(body: OnlineNodeDescriptorBody, session_sk: &SessionSk) -> Result<Self> {
-        body.validate_signer(session_sk)?;
-        let signature = MessageVerification::new(&body.signing_data()?, session_sk)?;
-        Ok(Self {
-            did: body.did,
-            public_key: body.public_key,
-            node_type: body.node_type,
-            network_id: body.network_id,
-            capabilities: body.capabilities,
-            endpoint_hint: body.endpoint_hint,
-            started_at_ms: body.started_at_ms,
-            heartbeat_at_ms: body.heartbeat_at_ms,
-            expires_at_ms: body.expires_at_ms,
-            version: body.version,
-            signature,
-        })
+        sign_descriptor_body(
+            body,
+            session_sk,
+            "online node descriptor DID/public key/session mismatch",
+        )
     }
 
     fn body_ref(&self) -> OnlineNodeDescriptorBodyRef<'_> {

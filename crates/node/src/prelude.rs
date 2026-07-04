@@ -35,7 +35,6 @@ pub use crate::onion::OnionExitTransport;
 pub use crate::onion::OnionRoute;
 pub use crate::onion::OnionRouteRequest;
 pub use crate::onion::ONION_EXITS_TOPIC;
-pub use crate::onion::ONION_EXIT_CAPABILITY;
 pub use crate::onion::ONION_RELAY_CAPABILITY;
 pub use crate::online::OnlineNodeDescriptor;
 pub use crate::online::OnlineNodeType;

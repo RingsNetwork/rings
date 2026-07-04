@@ -10,8 +10,35 @@ use rings_core::error::Result;
 use rings_core::message::Encoded;
 use rings_core::message::Encoder;
 use rings_core::message::MessageVerification;
+use rings_core::session::SessionSk;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+
+pub(crate) trait SignedDescriptorBody: Sized {
+    type Descriptor;
+
+    fn body_did(&self) -> Did;
+    fn body_public_key(&self) -> &VerificationPublicKey;
+    fn body_signing_data(&self) -> Result<Vec<u8>>;
+    fn into_signed_descriptor(self, signature: MessageVerification) -> Self::Descriptor;
+}
+
+pub(crate) fn sign_descriptor_body<B>(
+    body: B,
+    session_sk: &SessionSk,
+    mismatch_message: &'static str,
+) -> Result<B::Descriptor>
+where
+    B: SignedDescriptorBody,
+{
+    let did = body.body_did();
+    if body.body_public_key().did() != did || session_sk.account_did() != did {
+        return Err(Error::InvalidMessage(mismatch_message.to_string()));
+    }
+
+    let signature = MessageVerification::new(&body.body_signing_data()?, session_sk)?;
+    Ok(body.into_signed_descriptor(signature))
+}
 
 pub(crate) trait SignedDescriptor: Sized {
     fn descriptor_did(&self) -> Did;

@@ -45,6 +45,7 @@ use crate::onion::default_onion_exit_heartbeat_interval_secs;
 use crate::onion::default_onion_exit_policy;
 use crate::onion::default_onion_exit_services;
 use crate::onion::default_onion_exit_ttl_secs;
+use crate::onion::https_onion_exit_services;
 use crate::onion::select_onion_route_from_candidates;
 use crate::onion::validate_onion_exit_registration_timing;
 use crate::onion::OnionExitDescriptor;
@@ -56,7 +57,6 @@ use crate::onion::OnionRouteCandidates;
 use crate::onion::OnionRouteRequest;
 use crate::onion::SystemRouteEntropy;
 use crate::onion::ONION_EXITS_TOPIC;
-use crate::onion::ONION_EXIT_CAPABILITY;
 use crate::onion::ONION_RELAY_CAPABILITY;
 use crate::online::OnlineNodeDescriptor;
 use crate::online::OnlineNodeType;
@@ -157,8 +157,15 @@ impl ProcessorConfig {
         self.session_sk.clone()
     }
 
-    /// Enables default onion exit advertisement, including HTTPS and TCP services.
+    /// Enables HTTPS-only onion exit advertisement.
     pub fn enable_https_onion_exit(mut self) -> Self {
+        self.advertise_onion_exit = true;
+        self.onion_exit_services = https_onion_exit_services();
+        self
+    }
+
+    /// Enables default native onion exit advertisement, including HTTPS and TCP services.
+    pub fn enable_default_onion_exit(mut self) -> Self {
         self.advertise_onion_exit = true;
         self.onion_exit_services = default_onion_exit_services();
         self
@@ -347,8 +354,15 @@ impl ProcessorConfigSerialized {
         self
     }
 
-    /// Enables the default onion exit services, including HTTPS and TCP.
+    /// Enables HTTPS-only onion exit advertisement.
     pub fn enable_https_onion_exit(mut self) -> Self {
+        self.advertise_onion_exit = true;
+        self.onion_exit_services = https_onion_exit_services();
+        self
+    }
+
+    /// Enables the default native onion exit services, including HTTPS and TCP.
+    pub fn enable_default_onion_exit(mut self) -> Self {
         self.advertise_onion_exit = true;
         self.onion_exit_services = default_onion_exit_services();
         self
@@ -655,10 +669,6 @@ impl ProcessorBuilder {
         if self.advertise_onion_relay {
             online_node_capabilities.push(ONION_RELAY_CAPABILITY.to_string());
         }
-        if self.advertise_onion_exit {
-            online_node_capabilities.push(ONION_EXIT_CAPABILITY.to_string());
-        }
-
         let session_sk = self.session_sk.clone();
         let online_node_registration = OnlineNodeRegistration::new(
             self.online_node_heartbeat_interval,
@@ -841,7 +851,6 @@ impl Processor {
         let exits = self.lookup_onion_exits(&service, false).await?;
         let candidates = OnionRouteCandidates::from_validated_descriptors(
             self.did(),
-            self.swarm.network_id(),
             &service,
             online_nodes,
             exits,
@@ -1389,7 +1398,7 @@ mod test {
     }
 
     #[test]
-    fn onion_exit_config_uses_default_https_and_tcp_services() {
+    fn https_onion_exit_config_uses_https_only_service() {
         let key = SecretKey::random();
         let session_sk = SessionSk::new_with_seckey(&key).unwrap();
         let config = ProcessorConfig::new(
@@ -1401,15 +1410,27 @@ mod test {
         .enable_https_onion_exit();
 
         assert!(config.advertise_onion_exit);
+        assert_eq!(config.onion_exit_services, https_onion_exit_services());
+    }
+
+    #[test]
+    fn default_onion_exit_config_uses_https_and_tcp_services() {
+        let key = SecretKey::random();
+        let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+        let config = ProcessorConfig::new(
+            0,
+            "stun://stun.l.google.com:19302".to_string(),
+            session_sk,
+            3,
+        )
+        .enable_default_onion_exit();
+
+        assert!(config.advertise_onion_exit);
         assert_eq!(config.onion_exit_services, default_onion_exit_services());
-        assert!(config
-            .onion_exit_services
-            .iter()
-            .any(|service| service == &OnionExitService::https()));
-        assert!(config
-            .onion_exit_services
-            .iter()
-            .any(|service| service == &OnionExitService::tcp()));
+        assert_eq!(config.onion_exit_services, vec![
+            OnionExitService::https(),
+            OnionExitService::tcp()
+        ]);
     }
 
     #[tokio::test]

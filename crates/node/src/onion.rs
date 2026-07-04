@@ -27,7 +27,9 @@ use serde::Serialize;
 use crate::descriptor::decode_descriptor;
 use crate::descriptor::encode_descriptor;
 use crate::descriptor::latest_valid_by_did;
+use crate::descriptor::sign_descriptor_body;
 use crate::descriptor::SignedDescriptor;
+use crate::descriptor::SignedDescriptorBody;
 use crate::error::Error;
 use crate::error::Result;
 use crate::online::OnlineNodeDescriptor;
@@ -44,9 +46,6 @@ pub const DEFAULT_ONION_ROUTE_HOPS: usize = 3;
 
 /// Capability label for nodes willing to relay onion cells.
 pub const ONION_RELAY_CAPABILITY: &str = "onion-relay";
-
-/// Capability label for nodes willing to publish onion exit policy.
-pub const ONION_EXIT_CAPABILITY: &str = "onion-exit";
 
 const DEFAULT_ONION_EXIT_HEARTBEAT_INTERVAL_SECS: u64 = 30;
 const DEFAULT_ONION_EXIT_TTL_SECS: u64 = 90;
@@ -74,6 +73,11 @@ pub(crate) const fn default_advertise_onion_exit() -> bool {
 /// Default exit services. It is only published when onion-exit advertisement is enabled.
 pub fn default_onion_exit_services() -> Vec<OnionExitService> {
     vec![OnionExitService::https(), OnionExitService::tcp()]
+}
+
+/// Browser HTTPS-only onion-exit service set.
+pub fn https_onion_exit_services() -> Vec<OnionExitService> {
+    vec![OnionExitService::https()]
 }
 
 /// Default exit policy. It is intentionally closed until the operator configures targets.
@@ -145,9 +149,9 @@ impl OnionExitService {
 /// Signed policy fields for an onion exit.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
 pub struct OnionExitPolicy {
-    /// Target allow-list entries understood by the exit implementation.
+    /// Target allow-list entries understood by the exit implementation. Empty means closed.
     pub allowed_targets: Vec<String>,
-    /// Target deny-list entries understood by the exit implementation.
+    /// Target deny-list entries understood by the exit implementation. Deny entries override allows.
     pub denied_targets: Vec<String>,
     /// Maximum concurrent circuits this exit wants to serve. `0` means unspecified.
     pub max_circuits: u32,
@@ -155,6 +159,31 @@ pub struct OnionExitPolicy {
     pub max_streams_per_circuit: u32,
     /// Maximum bytes per minute. `0` means unspecified.
     pub max_bytes_per_minute: u64,
+}
+
+impl OnionExitPolicy {
+    /// Return whether this policy denies every exit target.
+    pub fn is_closed(&self) -> bool {
+        self.allowed_targets.is_empty()
+    }
+
+    /// Return whether `target` is admitted by this policy's allow-list.
+    pub fn allows_target(&self, target: &str) -> bool {
+        let target = target.trim();
+        if target.is_empty() || self.is_closed() {
+            return false;
+        }
+        if self
+            .denied_targets
+            .iter()
+            .any(|denied| denied.as_str() == target)
+        {
+            return false;
+        }
+        self.allowed_targets
+            .iter()
+            .any(|allowed| allowed.as_str() == target)
+    }
 }
 
 /// Descriptor fields covered by the onion-exit signature.
@@ -183,15 +212,6 @@ pub struct OnionExitDescriptorBody {
 }
 
 impl OnionExitDescriptorBody {
-    fn validate_signer(&self, session_sk: &SessionSk) -> CoreResult<()> {
-        if self.public_key.did() != self.did || session_sk.account_did() != self.did {
-            return Err(CoreError::InvalidMessage(
-                "onion exit descriptor DID/public key/session mismatch".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
     fn body_ref(&self) -> OnionExitDescriptorBodyRef<'_> {
         OnionExitDescriptorBodyRef {
             did: self.did,
@@ -209,6 +229,38 @@ impl OnionExitDescriptorBody {
 
     fn signing_data(&self) -> CoreResult<Vec<u8>> {
         self.body_ref().signing_data()
+    }
+}
+
+impl SignedDescriptorBody for OnionExitDescriptorBody {
+    type Descriptor = OnionExitDescriptor;
+
+    fn body_did(&self) -> Did {
+        self.did
+    }
+
+    fn body_public_key(&self) -> &VerificationPublicKey {
+        &self.public_key
+    }
+
+    fn body_signing_data(&self) -> CoreResult<Vec<u8>> {
+        self.signing_data()
+    }
+
+    fn into_signed_descriptor(self, signature: MessageVerification) -> Self::Descriptor {
+        OnionExitDescriptor {
+            did: self.did,
+            public_key: self.public_key,
+            node_type: self.node_type,
+            network_id: self.network_id,
+            services: self.services,
+            policy: self.policy,
+            started_at_ms: self.started_at_ms,
+            heartbeat_at_ms: self.heartbeat_at_ms,
+            expires_at_ms: self.expires_at_ms,
+            version: self.version,
+            signature,
+        }
     }
 }
 
@@ -262,21 +314,11 @@ pub struct OnionExitDescriptor {
 impl OnionExitDescriptor {
     /// Create and sign an onion-exit descriptor.
     pub fn new_signed(body: OnionExitDescriptorBody, session_sk: &SessionSk) -> CoreResult<Self> {
-        body.validate_signer(session_sk)?;
-        let signature = MessageVerification::new(&body.signing_data()?, session_sk)?;
-        Ok(Self {
-            did: body.did,
-            public_key: body.public_key,
-            node_type: body.node_type,
-            network_id: body.network_id,
-            services: body.services,
-            policy: body.policy,
-            started_at_ms: body.started_at_ms,
-            heartbeat_at_ms: body.heartbeat_at_ms,
-            expires_at_ms: body.expires_at_ms,
-            version: body.version,
-            signature,
-        })
+        sign_descriptor_body(
+            body,
+            session_sk,
+            "onion exit descriptor DID/public key/session mismatch",
+        )
     }
 
     fn body_ref(&self) -> OnionExitDescriptorBodyRef<'_> {
@@ -545,19 +587,9 @@ impl SystemRouteEntropy {
     }
 }
 
-#[cfg(not(feature = "browser"))]
 impl RouteEntropy for SystemRouteEntropy {
     fn next_u64(&mut self) -> u64 {
         rand::random()
-    }
-}
-
-#[cfg(feature = "browser")]
-impl RouteEntropy for SystemRouteEntropy {
-    fn next_u64(&mut self) -> u64 {
-        let upper = (js_sys::Math::random() * (u32::MAX as f64)) as u64;
-        let lower = (js_sys::Math::random() * (u32::MAX as f64)) as u64;
-        (upper << 32) | lower
     }
 }
 
@@ -570,14 +602,12 @@ pub(crate) struct OnionRouteCandidates {
 impl OnionRouteCandidates {
     pub(crate) fn from_validated_descriptors(
         local: Did,
-        network_id: u32,
         service: &str,
         online_nodes: impl IntoIterator<Item = OnlineNodeDescriptor>,
         exits: impl IntoIterator<Item = OnionExitDescriptor>,
     ) -> Self {
         let relays = online_nodes
             .into_iter()
-            .filter(|descriptor| descriptor.matches_network(network_id))
             .filter(has_onion_relay_capability)
             .map(|descriptor| descriptor.did)
             .filter(|did| *did != local)
@@ -585,7 +615,6 @@ impl OnionRouteCandidates {
 
         let exits = exits
             .into_iter()
-            .filter(|descriptor| descriptor.matches_network(network_id))
             .filter(|descriptor| descriptor.offers_service(service))
             .filter(|descriptor| descriptor.did != local)
             .collect::<Vec<_>>();
@@ -859,6 +888,42 @@ mod tests {
         fn next_u64(&mut self) -> u64 {
             self.values.pop_front().unwrap_or(0)
         }
+    }
+
+    #[test]
+    fn default_exit_services_include_https_and_tcp() {
+        assert_eq!(default_onion_exit_services(), vec![
+            OnionExitService::https(),
+            OnionExitService::tcp()
+        ]);
+        assert_eq!(https_onion_exit_services(), vec![OnionExitService::https()]);
+    }
+
+    #[test]
+    fn default_exit_policy_is_closed() {
+        let policy = OnionExitPolicy::default();
+        assert!(policy.is_closed());
+        assert!(!policy.allows_target("example.com:443"));
+    }
+
+    #[test]
+    fn exit_policy_allow_list_controls_targets() {
+        let policy = OnionExitPolicy {
+            allowed_targets: vec![
+                "example.com:443".to_string(),
+                "api.example.com:443".to_string(),
+            ],
+            denied_targets: vec!["api.example.com:443".to_string()],
+            max_circuits: 0,
+            max_streams_per_circuit: 0,
+            max_bytes_per_minute: 0,
+        };
+
+        assert!(!policy.is_closed());
+        assert!(policy.allows_target("example.com:443"));
+        assert!(!policy.allows_target("api.example.com:443"));
+        assert!(!policy.allows_target("other.example.com:443"));
+        assert!(!policy.allows_target(""));
     }
 
     #[test]
