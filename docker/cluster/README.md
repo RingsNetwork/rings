@@ -93,7 +93,9 @@ python3 scripts/dht_docker_cluster_bench.py \
   --nodes 16 \
   --throughput-messages 1024 \
   --throughput-payload-bytes 65536 \
-  --throughput-flush-timeout-ms 60000
+  --throughput-flush-timeout-ms 60000 \
+  --throughput-source-index 0 \
+  --throughput-destination-index 1
 ```
 
 The DHT lookup metrics are computed by replaying each node's `/status`
@@ -106,3 +108,6 @@ source node's delivery measurement to confirm that the messages have flushed to
 the WebRTC send path, and `destination_received_delta` confirms how many
 messages the destination accepted. This avoids the earlier per-message
 `docker exec`, `curl`, HTTP JSON-RPC, and base64 overhead.
+Specify `--throughput-source-index` and `--throughput-destination-index` when
+you want repeatable pair selection; omit them to benchmark the first connected
+in-cluster pair found in the status snapshot.

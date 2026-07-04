@@ -63,7 +63,14 @@ def status(container: str, port: int) -> dict[str, Any]:
     return json.loads(raw)
 
 
-def rpc(container: str, port: int, method: str, params: dict[str, Any]) -> dict[str, Any]:
+def rpc(
+    container: str,
+    port: int,
+    method: str,
+    params: dict[str, Any],
+    *,
+    timeout: int = 60,
+) -> dict[str, Any]:
     body = json.dumps(
         {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
     ).encode()
@@ -79,7 +86,7 @@ def rpc(container: str, port: int, method: str, params: dict[str, Any]) -> dict[
             f"http://127.0.0.1:{port}/",
         ],
         stdin=body,
-        timeout=60,
+        timeout=timeout,
     )
     response = json.loads(raw)
     if "error" in response:
@@ -397,8 +404,40 @@ def transport_report(
     messages: int,
     settle_seconds: float,
     flush_timeout_ms: int,
+    source_index: int | None,
+    destination_index: int | None,
 ) -> dict[str, Any]:
-    pair = choose_connected_pair(nodes)
+    pair_selection = "auto_connected_pair"
+    if source_index is None and destination_index is None:
+        pair = choose_connected_pair(nodes)
+    elif source_index is None or destination_index is None:
+        return {
+            "report": "docker_cluster_transport",
+            "enabled": True,
+            "error": "throughput source and destination indexes must be specified together",
+        }
+    elif source_index < 0 or source_index >= len(nodes):
+        return {
+            "report": "docker_cluster_transport",
+            "enabled": True,
+            "error": f"throughput source index {source_index} is out of range",
+        }
+    elif destination_index < 0 or destination_index >= len(nodes):
+        return {
+            "report": "docker_cluster_transport",
+            "enabled": True,
+            "error": f"throughput destination index {destination_index} is out of range",
+        }
+    elif source_index == destination_index:
+        return {
+            "report": "docker_cluster_transport",
+            "enabled": True,
+            "error": "throughput source and destination indexes must differ",
+        }
+    else:
+        pair = (nodes[source_index], nodes[destination_index])
+        pair_selection = "configured_index_pair"
+
     if pair is None:
         return {
             "report": "docker_cluster_transport",
@@ -423,6 +462,7 @@ def transport_report(
 
     started = time.monotonic()
     benchmark: dict[str, Any] = {}
+    benchmark_timeout = max(60, int(flush_timeout_ms / 1000) + 30)
     try:
         benchmark = rpc(
             container,
@@ -435,6 +475,7 @@ def transport_report(
                 "messages": messages,
                 "flush_timeout_ms": flush_timeout_ms,
             },
+            timeout=benchmark_timeout,
         )
     except Exception as exc:  # noqa: BLE001
         errors.append(str(exc))
@@ -468,6 +509,7 @@ def transport_report(
         "report": "docker_cluster_transport",
         "enabled": True,
         "mode": "node_internal_burst",
+        "pair_selection": pair_selection,
         "source_index": source["index"],
         "source_did": source["did"],
         "destination_index": destination["index"],
@@ -531,6 +573,8 @@ def sample(args: argparse.Namespace, sample_index: int) -> dict[str, Any]:
             args.throughput_messages,
             args.throughput_settle_seconds,
             args.throughput_flush_timeout_ms,
+            args.throughput_source_index,
+            args.throughput_destination_index,
         )
     return dht
 
@@ -598,6 +642,18 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         type=int,
         default=env_int("RINGS_DHT_BENCH_THROUGHPUT_FLUSH_TIMEOUT_MS", 30_000),
     )
+    parser.add_argument(
+        "--throughput-source-index",
+        type=int,
+        default=env_int("RINGS_DHT_BENCH_THROUGHPUT_SOURCE_INDEX", -1),
+        help="Source node index for throughput sampling. -1 chooses an in-cluster connected pair.",
+    )
+    parser.add_argument(
+        "--throughput-destination-index",
+        type=int,
+        default=env_int("RINGS_DHT_BENCH_THROUGHPUT_DESTINATION_INDEX", -1),
+        help="Destination node index for throughput sampling. -1 chooses an in-cluster connected pair.",
+    )
     return parser.parse_args(argv)
 
 
@@ -609,6 +665,10 @@ def main(argv: list[str]) -> int:
         raise SystemExit("--samples must be greater than 0")
     if args.finger_table_size == 0:
         args.finger_table_size = None
+    if args.throughput_source_index < 0:
+        args.throughput_source_index = None
+    if args.throughput_destination_index < 0:
+        args.throughput_destination_index = None
 
     for index in range(args.samples):
         if index > 0:
