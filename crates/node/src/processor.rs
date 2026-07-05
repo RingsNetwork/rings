@@ -205,10 +205,12 @@ impl ProcessorConfig {
     #[cfg(feature = "browser")]
     pub fn onion_https_exit_policy(&self) -> Option<OnionExitPolicy> {
         (self.advertise_onion_exit
-            && self
-                .onion_exit_services
-                .iter()
-                .any(|service| service.has_name(ONION_PROXY_HTTPS_SERVICE)))
+            && self.onion_exit_services.iter().any(|service| {
+                service.matches(
+                    ONION_PROXY_HTTPS_SERVICE,
+                    crate::onion::OnionExitTransport::Https,
+                )
+            }))
         .then(|| self.onion_exit_policy.clone())
     }
 }
@@ -420,6 +422,19 @@ fn validate_onion_role_config(
         return Err(Error::InvalidConfig(
             "advertise_onion_exit requires at least one onion_exit_services entry".to_string(),
         ));
+    }
+    if advertise_onion_exit {
+        for service in onion_exit_services {
+            if let Some(expected) = OnionExitService::reserved_transport(service.name.as_str()) {
+                if service.transport == expected {
+                    continue;
+                }
+                return Err(Error::InvalidConfig(format!(
+                    "onion exit service {:?} must use {:?} transport, got {:?}",
+                    service.name, expected, service.transport
+                )));
+            }
+        }
     }
     Ok(())
 }
@@ -879,6 +894,7 @@ impl Processor {
         target: OnionProxyTarget,
     ) -> Result<OnionProxyRoute> {
         let service = proxy.exit_service().to_string();
+        let transport = proxy.exit_transport();
         let target_authority = target.authority();
         let request = OnionRouteRequest {
             service: service.clone(),
@@ -887,7 +903,8 @@ impl Processor {
         };
         let route = self
             .build_filtered_onion_route(request, |exit| {
-                exit.policy.allows_target(&target_authority)
+                exit.offers_service_transport(&service, transport)
+                    && exit.policy.allows_target(&target_authority)
             })
             .await?;
 
@@ -1258,6 +1275,7 @@ mod test {
 
     use super::*;
     use crate::onion::OnionExitDescriptorBody;
+    use crate::onion::OnionExitTransport;
     use crate::online::OnlineNodeDescriptorBody;
     use crate::prelude::*;
     use crate::provider::Provider;
@@ -1489,6 +1507,44 @@ mod test {
         assert!(config.advertise_onion_exit);
         assert_eq!(config.onion_exit_services, default_onion_exit_services());
         assert_eq!(config.onion_exit_services, vec![OnionExitService::tcp()]);
+    }
+
+    #[test]
+    fn reserved_onion_exit_service_rejects_wrong_transport() {
+        let key = SecretKey::random();
+        let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+        let mut config = ProcessorConfig::new(
+            0,
+            "stun://stun.l.google.com:19302".to_string(),
+            session_sk,
+            3,
+        )
+        .advertise_onion_exit(true);
+        config.onion_exit_services = vec![OnionExitService::new("https", OnionExitTransport::Tcp)];
+
+        assert!(matches!(
+            ProcessorBuilder::from_config(&config),
+            Err(Error::InvalidConfig(message))
+                if message.contains("https")
+                    && message.contains("Https")
+                    && message.contains("Tcp")
+        ));
+    }
+
+    #[test]
+    fn custom_onion_exit_service_allows_explicit_transport() {
+        let key = SecretKey::random();
+        let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+        let mut config = ProcessorConfig::new(
+            0,
+            "stun://stun.l.google.com:19302".to_string(),
+            session_sk,
+            3,
+        )
+        .advertise_onion_exit(true);
+        config.onion_exit_services = vec![OnionExitService::new("web", OnionExitTransport::Tcp)];
+
+        assert!(ProcessorBuilder::from_config(&config).is_ok());
     }
 
     #[tokio::test]
@@ -1806,6 +1862,43 @@ mod test {
         assert_eq!(tcp_route.exit_did(), tcp_exit.did());
         assert_eq!(https_route.exit_service(), "https");
         assert_eq!(https_route.exit_did(), https_exit.did());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn onion_proxy_route_rejects_reserved_service_with_wrong_transport() -> Result<()> {
+        let processor = prepare_processor().await;
+        let exit = prepare_processor().await;
+        let descriptor = onion_exit_descriptor_for_processor_with_service(
+            &exit,
+            OnionExitService::new("https", OnionExitTransport::Tcp),
+            get_epoch_ms(),
+            OnionExitPolicy {
+                allowed_targets: vec!["example.com:443".to_string()],
+                denied_targets: vec![],
+                max_circuits: 8,
+                max_streams_per_circuit: 2,
+                max_bytes_per_minute: 4096,
+            },
+        )?;
+
+        processor
+            .storage_store(Processor::onion_exit_registry_entry(vec![descriptor])?)
+            .await?;
+
+        let target = OnionProxyTarget::parse_authority("example.com:443")?;
+        let error = processor
+            .build_onion_proxy_route(OnionProxyConfig::https_proxy(1, false), target)
+            .await
+            .err()
+            .ok_or_else(|| Error::OnionRouteError("expected route failure".to_string()))?;
+
+        assert!(matches!(
+            error,
+            Error::OnionRouteError(message)
+                if message.contains("no live onion exit")
+                    && message.contains("https")
+        ));
         Ok(())
     }
 
@@ -2143,6 +2236,23 @@ mod test {
         now_ms: u128,
         policy: OnionExitPolicy,
     ) -> Result<OnionExitDescriptor> {
+        onion_exit_descriptor_for_processor_with_service(
+            processor,
+            OnionExitService::new(
+                service,
+                OnionExitService::reserved_transport(service).unwrap_or(OnionExitTransport::Tcp),
+            ),
+            now_ms,
+            policy,
+        )
+    }
+
+    fn onion_exit_descriptor_for_processor_with_service(
+        processor: &Processor,
+        service: OnionExitService,
+        now_ms: u128,
+        policy: OnionExitPolicy,
+    ) -> Result<OnionExitDescriptor> {
         OnionExitDescriptor::new_signed(
             OnionExitDescriptorBody {
                 did: processor.did(),
@@ -2152,10 +2262,7 @@ mod test {
                     .map_err(Error::CoreError)?,
                 node_type: default_online_node_type(),
                 network_id: processor.swarm.network_id(),
-                services: vec![OnionExitService {
-                    name: service.to_string(),
-                    transport: OnionExitTransport::Tcp,
-                }],
+                services: vec![service],
                 policy,
                 started_at_ms: now_ms,
                 heartbeat_at_ms: now_ms,

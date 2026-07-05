@@ -6,15 +6,12 @@ use std::sync::Arc;
 
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
-use tokio::net::lookup_host;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 
 use crate::error::Error;
 use crate::error::Result;
-use crate::extension::protocols::relay::RelayHandle;
 use crate::onion::tcp::NativeOnionCircuitHandle;
-use crate::onion::OnionExitPolicy;
 use crate::onion_proxy::OnionProxyConfig;
 use crate::onion_proxy::OnionProxyTarget;
 use crate::processor::Processor;
@@ -53,32 +50,6 @@ pub async fn run_onion_http_proxy(
             }
         });
     }
-}
-
-/// Register exact allow-list targets as native TCP relay services for this exit.
-pub async fn register_native_onion_exit_targets(
-    relay: &RelayHandle,
-    policy: &OnionExitPolicy,
-) -> Result<()> {
-    for authority in native_onion_exit_target_authorities(policy)? {
-        let addr = resolve_target(&authority).await?;
-        relay
-            .register_tcp_service(authority, addr)
-            .await
-            .map_err(|error| {
-                Error::InvalidConfig(format!("register onion exit target: {error}"))
-            })?;
-    }
-    Ok(())
-}
-
-fn native_onion_exit_target_authorities(policy: &OnionExitPolicy) -> Result<Vec<String>> {
-    policy
-        .allowed_targets
-        .iter()
-        .filter(|target| policy.allows_target(target))
-        .map(|target| OnionProxyTarget::parse_authority(target).map(|target| target.authority()))
-        .collect()
 }
 
 async fn handle_connect(
@@ -178,18 +149,6 @@ async fn write_proxy_response(stream: &mut TcpStream, status: &str) -> Result<()
         .map_err(|error| Error::HttpRequestError(format!("write HTTP proxy response: {error}")))
 }
 
-async fn resolve_target(authority: &str) -> Result<SocketAddr> {
-    lookup_host(authority)
-        .await
-        .map_err(|error| {
-            Error::InvalidConfig(format!("resolve onion exit target {authority:?}: {error}"))
-        })?
-        .next()
-        .ok_or_else(|| {
-            Error::InvalidConfig(format!("onion exit target {authority:?} resolved empty"))
-        })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,24 +167,5 @@ mod tests {
             parse_connect_request_line("GET http://example.com/ HTTP/1.1"),
             Err(Error::HttpRequestError(_))
         ));
-    }
-
-    #[test]
-    fn native_exit_target_registration_honors_deny_list() -> Result<()> {
-        let policy = OnionExitPolicy {
-            allowed_targets: vec![
-                "Example.COM:443".to_string(),
-                "blocked.example.com:443".to_string(),
-            ],
-            denied_targets: vec!["blocked.example.com:443".to_string()],
-            max_circuits: 0,
-            max_streams_per_circuit: 0,
-            max_bytes_per_minute: 0,
-        };
-
-        assert_eq!(native_onion_exit_target_authorities(&policy)?, vec![
-            "example.com:443".to_string()
-        ]);
-        Ok(())
     }
 }

@@ -1,9 +1,12 @@
 use std::collections::VecDeque;
 
 use rings_core::ecc::SecretKey;
+use rings_core::measure::PeerQuality;
 use rings_core::session::SessionSk;
 
+use super::route::RouteEntropy;
 use super::*;
+use crate::online::OnlineNodeDescriptor;
 use crate::online::OnlineNodeDescriptorBody;
 
 fn service(name: &str) -> OnionExitService {

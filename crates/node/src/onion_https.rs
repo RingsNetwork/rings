@@ -35,6 +35,10 @@ use wasm_bindgen_futures::JsFuture;
 
 use crate::error::Error;
 use crate::error::Result;
+use crate::extension::ext::Scope;
+use crate::onion::circuit::send_backward;
+use crate::onion::circuit::OnionCircuitHandler;
+use crate::onion::circuit::OnionCircuitPayload;
 use crate::onion::circuit::OnionHttpsRequest;
 use crate::onion::circuit::OnionHttpsResponse;
 use crate::onion::OnionExitPolicy;
@@ -62,9 +66,9 @@ pub struct OnionHttpsClientRequest {
     /// HTTP method. Defaults to `GET`.
     #[serde(default = "default_method")]
     pub method: String,
-    /// Path and query to request on the target authority. Defaults to `/`.
-    #[serde(default = "default_path")]
-    pub path: String,
+    /// Optional path and query override. Defaults to the request URL path, then `/`.
+    #[serde(default)]
+    pub path: Option<String>,
     /// Request headers.
     #[serde(default)]
     pub headers: Vec<(String, String)>,
@@ -77,7 +81,7 @@ impl Default for OnionHttpsClientRequest {
     fn default() -> Self {
         Self {
             method: default_method(),
-            path: default_path(),
+            path: None,
             headers: Vec::new(),
             body: Vec::new(),
         }
@@ -308,18 +312,193 @@ impl OnionHttpsRuntime {
     }
 }
 
-/// Encode one client request for the selected exit.
-pub(crate) fn client_request(
+/// Parse a full HTTPS URL and encode one client request for its target.
+pub(crate) fn client_request_from_url(
+    url: &str,
+    request: OnionHttpsClientRequest,
+) -> Result<(OnionProxyTarget, OnionHttpsRequest)> {
+    let (target, path) = parse_https_url(url)?;
+    let request = client_request_with_default_path(&target, request, path.as_str())?;
+    Ok((target, request))
+}
+
+fn client_request_with_default_path(
     target: &OnionProxyTarget,
     request: OnionHttpsClientRequest,
+    default_path: &str,
 ) -> Result<OnionHttpsRequest> {
+    let path = request.path.as_deref().unwrap_or(default_path);
     Ok(OnionHttpsRequest {
         target: target.authority(),
         method: normalize_method(&request.method),
-        path: normalize_path(&request.path)?,
+        path: normalize_path(path)?,
         headers: request.headers,
         body: request.body,
     })
+}
+
+fn parse_https_url(url: &str) -> Result<(OnionProxyTarget, String)> {
+    let url = url.trim();
+    let (scheme, rest) = url.split_once("://").ok_or_else(|| {
+        Error::HttpRequestError(
+            "browser HTTPS onion proxy request URL must be absolute".to_string(),
+        )
+    })?;
+    if !scheme.eq_ignore_ascii_case("https") {
+        return Err(Error::HttpRequestError(format!(
+            "browser HTTPS onion proxy only supports https URLs, got scheme {scheme:?}"
+        )));
+    }
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, suffix) = rest.split_at(authority_end);
+    if authority.contains('@') {
+        return Err(Error::HttpRequestError(
+            "browser HTTPS onion proxy URLs must not contain userinfo".to_string(),
+        ));
+    }
+    let authority = https_authority_with_default_port(authority)?;
+    let target = OnionProxyTarget::parse_authority(authority.as_str())?;
+    Ok((target, url_path(suffix)))
+}
+
+fn https_authority_with_default_port(authority: &str) -> Result<String> {
+    let authority = authority.trim();
+    if authority.is_empty() {
+        return Err(Error::HttpRequestError(
+            "browser HTTPS onion proxy URL host must not be empty".to_string(),
+        ));
+    }
+
+    if let Some(rest) = authority.strip_prefix('[') {
+        let Some((host, suffix)) = rest.split_once(']') else {
+            return Err(Error::HttpRequestError(format!(
+                "invalid IPv6 HTTPS onion proxy authority {authority:?}"
+            )));
+        };
+        if host.is_empty() {
+            return Err(Error::HttpRequestError(
+                "browser HTTPS onion proxy URL host must not be empty".to_string(),
+            ));
+        }
+        return if suffix.is_empty() {
+            Ok(format!("[{host}]:443"))
+        } else if let Some(port) = suffix.strip_prefix(':') {
+            if port.is_empty() {
+                Err(Error::HttpRequestError(format!(
+                    "HTTPS onion proxy authority {authority:?} has an empty port"
+                )))
+            } else {
+                Ok(authority.to_string())
+            }
+        } else {
+            Err(Error::HttpRequestError(format!(
+                "invalid IPv6 HTTPS onion proxy authority {authority:?}"
+            )))
+        };
+    }
+
+    if authority.contains('[') || authority.contains(']') {
+        return Err(Error::HttpRequestError(format!(
+            "invalid HTTPS onion proxy authority {authority:?}"
+        )));
+    }
+    let colon_count = authority.chars().filter(|ch| *ch == ':').count();
+    if colon_count > 1 {
+        return Err(Error::HttpRequestError(
+            "IPv6 HTTPS onion proxy URLs must use bracketed hosts".to_string(),
+        ));
+    }
+    if colon_count == 1 {
+        let Some((host, port)) = authority.rsplit_once(':') else {
+            return Err(Error::HttpRequestError(format!(
+                "invalid HTTPS onion proxy authority {authority:?}"
+            )));
+        };
+        if host.is_empty() || port.is_empty() {
+            return Err(Error::HttpRequestError(format!(
+                "invalid HTTPS onion proxy authority {authority:?}"
+            )));
+        }
+        Ok(authority.to_string())
+    } else {
+        Ok(format!("{authority}:443"))
+    }
+}
+
+fn url_path(suffix: &str) -> String {
+    let path = suffix
+        .split_once('#')
+        .map_or(suffix, |(before_fragment, _)| before_fragment);
+    if path.is_empty() {
+        default_path()
+    } else if path.starts_with('?') {
+        format!("/{path}")
+    } else {
+        path.to_string()
+    }
+}
+
+/// Browser handler for HTTPS onion circuits.
+pub(crate) struct BrowserOnionCircuitHandler {
+    https: Arc<OnionHttpsRuntime>,
+}
+
+impl BrowserOnionCircuitHandler {
+    /// Create a browser circuit handler backed by the HTTPS runtime.
+    pub(crate) fn new(https: Arc<OnionHttpsRuntime>) -> Self {
+        Self { https }
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl OnionCircuitHandler for BrowserOnionCircuitHandler {
+    async fn handle_exit(
+        &self,
+        scope: &Scope,
+        _from: Did,
+        stream_id: u64,
+        return_path: Vec<Did>,
+        payload: OnionCircuitPayload,
+    ) -> Result<()> {
+        let response = match payload {
+            OnionCircuitPayload::HttpsRequest(request) => {
+                match execute_exit_fetch(&self.https, &request, &return_path).await {
+                    Ok(response) => OnionCircuitPayload::HttpsResponse(response),
+                    Err(error) => OnionCircuitPayload::HttpsError(error.to_string()),
+                }
+            }
+            OnionCircuitPayload::TcpOpen { .. }
+            | OnionCircuitPayload::TcpData { .. }
+            | OnionCircuitPayload::TcpShutdown
+            | OnionCircuitPayload::TcpClose
+            | OnionCircuitPayload::TcpError { .. } => OnionCircuitPayload::TcpError {
+                message: "browser onion exits do not support TCP".to_string(),
+            },
+            OnionCircuitPayload::HttpsResponse(_) | OnionCircuitPayload::HttpsError(_) => {
+                return Ok(());
+            }
+        };
+        send_backward(scope, stream_id, return_path, response).await
+    }
+
+    async fn handle_client(
+        &self,
+        _scope: &Scope,
+        from: Did,
+        stream_id: u64,
+        payload: OnionCircuitPayload,
+    ) -> Result<()> {
+        match payload {
+            OnionCircuitPayload::HttpsResponse(response) => {
+                self.https.complete_response(from, stream_id, response);
+            }
+            OnionCircuitPayload::HttpsError(message) => {
+                self.https.complete_error(from, stream_id, message);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
 }
 
 pub(crate) async fn execute_exit_fetch(
@@ -570,12 +749,13 @@ mod tests {
     fn normalizes_empty_request_defaults() {
         let request = OnionHttpsClientRequest {
             method: String::new(),
-            path: String::new(),
+            path: Some(String::new()),
             headers: Vec::new(),
             body: Vec::new(),
         };
         let target = OnionProxyTarget::parse_authority("Example.COM:443").unwrap();
-        let wire = client_request(&target, request).unwrap();
+        let wire =
+            client_request_with_default_path(&target, request, default_path().as_str()).unwrap();
 
         assert_eq!(wire, OnionHttpsRequest {
             target: "example.com:443".to_string(),
@@ -584,6 +764,42 @@ mod tests {
             headers: Vec::new(),
             body: Vec::new(),
         });
+    }
+
+    #[test]
+    fn client_request_from_url_uses_https_url_target_and_path() -> Result<()> {
+        let (target, wire) = client_request_from_url(
+            "https://Example.COM/search?q=rust#ignored",
+            Default::default(),
+        )?;
+
+        assert_eq!(target.authority(), "example.com:443");
+        assert_eq!(wire.target, "example.com:443");
+        assert_eq!(wire.method, "GET");
+        assert_eq!(wire.path, "/search?q=rust");
+        Ok(())
+    }
+
+    #[test]
+    fn client_request_from_url_preserves_explicit_port_and_path_override() -> Result<()> {
+        let request = OnionHttpsClientRequest {
+            path: Some("?override=1".to_string()),
+            ..OnionHttpsClientRequest::default()
+        };
+        let (target, wire) = client_request_from_url("https://Example.COM:8443/original", request)?;
+
+        assert_eq!(target.authority(), "example.com:8443");
+        assert_eq!(wire.target, "example.com:8443");
+        assert_eq!(wire.path, "/?override=1");
+        Ok(())
+    }
+
+    #[test]
+    fn client_request_from_url_rejects_non_https_urls() {
+        assert!(matches!(
+            client_request_from_url("http://example.com/", Default::default()),
+            Err(Error::HttpRequestError(_))
+        ));
     }
 
     #[test]

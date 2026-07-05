@@ -8,6 +8,7 @@
 
 use rings_core::dht::Did;
 
+use crate::onion::OnionExitTransport;
 pub use crate::onion::OnionProxyTarget;
 use crate::onion::OnionRoute;
 
@@ -32,6 +33,14 @@ impl OnionProxyProtocol {
         match self {
             Self::TcpConnect => ONION_PROXY_TCP_SERVICE,
             Self::HttpsProxy => ONION_PROXY_HTTPS_SERVICE,
+        }
+    }
+
+    /// Return the onion-exit transport required by this proxy protocol.
+    pub const fn exit_transport(self) -> OnionExitTransport {
+        match self {
+            Self::TcpConnect => OnionExitTransport::Tcp,
+            Self::HttpsProxy => OnionExitTransport::Https,
         }
     }
 }
@@ -78,6 +87,11 @@ impl OnionProxyConfig {
     pub const fn exit_service(self) -> &'static str {
         self.protocol.exit_service()
     }
+
+    /// Return the onion-exit transport required by this proxy.
+    pub const fn exit_transport(self) -> OnionExitTransport {
+        self.protocol.exit_transport()
+    }
 }
 
 /// A proxy route selected for a target.
@@ -101,6 +115,11 @@ impl OnionProxyRoute {
     pub const fn exit_service(&self) -> &'static str {
         self.protocol.exit_service()
     }
+
+    /// Return the exit transport used for route selection.
+    pub const fn exit_transport(&self) -> OnionExitTransport {
+        self.protocol.exit_transport()
+    }
 }
 
 #[cfg(test)]
@@ -113,6 +132,14 @@ mod tests {
     fn proxy_protocol_maps_to_exit_service() {
         assert_eq!(OnionProxyProtocol::TcpConnect.exit_service(), "tcp");
         assert_eq!(OnionProxyProtocol::HttpsProxy.exit_service(), "https");
+        assert_eq!(
+            OnionProxyProtocol::TcpConnect.exit_transport(),
+            OnionExitTransport::Tcp
+        );
+        assert_eq!(
+            OnionProxyProtocol::HttpsProxy.exit_transport(),
+            OnionExitTransport::Https
+        );
     }
 
     #[test]
@@ -120,6 +147,7 @@ mod tests {
         let proxy = OnionProxyConfig::https_proxy(3, false);
 
         assert_eq!(proxy.exit_service(), "https");
+        assert_eq!(proxy.exit_transport(), OnionExitTransport::Https);
         assert_eq!(proxy.hop_count, 3);
         assert!(!proxy.allow_short_paths);
     }
