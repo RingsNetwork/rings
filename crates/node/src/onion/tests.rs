@@ -24,6 +24,7 @@ fn signed_exit_at(heartbeat_at_ms: u128, expires_at_ms: u128) -> CoreResult<Onio
         OnionExitDescriptorBody {
             did,
             public_key: session_sk.session().account_verification_pubkey()?,
+            session_public_key: session_sk.session_public_key(),
             node_type: OnlineNodeType::Native,
             network_id: 1,
             services: vec![service("web")],
@@ -63,6 +64,7 @@ fn online_node_at_with_capabilities(
         OnlineNodeDescriptorBody {
             did: session_sk.account_did(),
             public_key: session_sk.session().account_verification_pubkey()?,
+            session_public_key: session_sk.session_public_key(),
             node_type: OnlineNodeType::Native,
             network_id: 1,
             capabilities,
@@ -188,6 +190,7 @@ fn latest_valid_by_did_filters_expired_and_keeps_newest() -> CoreResult<()> {
         OnionExitDescriptorBody {
             did,
             public_key: public_key.clone(),
+            session_public_key: session_sk.session_public_key(),
             node_type: OnlineNodeType::Native,
             network_id: 1,
             services: vec![service("web")],
@@ -203,6 +206,7 @@ fn latest_valid_by_did_filters_expired_and_keeps_newest() -> CoreResult<()> {
         OnionExitDescriptorBody {
             did,
             public_key,
+            session_public_key: session_sk.session_public_key(),
             node_type: OnlineNodeType::Native,
             network_id: 1,
             services: vec![service("web")],
@@ -339,7 +343,10 @@ fn route_builder_samples_relays_by_quality_weight() -> Result<()> {
         allow_short_paths: false,
     };
     let candidates = OnionRouteCandidates {
-        relays: vec![degraded.account_did(), healthy.account_did()],
+        relays: vec![
+            OnionRouteHop::new(degraded.account_did(), degraded.session_public_key()),
+            OnionRouteHop::new(healthy.account_did(), healthy.session_public_key()),
+        ],
         exits: vec![exit],
     };
     let mut entropy = FixedEntropy::new([0, 1]);
@@ -361,22 +368,25 @@ fn route_builder_samples_relays_by_quality_weight() -> Result<()> {
 
 #[test]
 fn route_builder_entropy_can_select_second_unknown_relay() -> Result<()> {
-    let first = node_key().map_err(Error::CoreError)?.account_did();
-    let second = node_key().map_err(Error::CoreError)?.account_did();
+    let first = node_key().map_err(Error::CoreError)?;
+    let second = node_key().map_err(Error::CoreError)?;
     let exit = signed_exit_at(20, 100).map_err(Error::CoreError)?;
     let request = OnionRouteRequest {
         service: "web".to_string(),
         hop_count: 2,
         allow_short_paths: false,
     };
-    let mut relay_dids = vec![first, second];
-    relay_dids.sort();
-    let second_sorted = relay_dids
+    let mut relay_hops = vec![
+        OnionRouteHop::new(first.account_did(), first.session_public_key()),
+        OnionRouteHop::new(second.account_did(), second.session_public_key()),
+    ];
+    relay_hops.sort_by_key(|hop| hop.did);
+    let second_sorted = relay_hops
         .get(1)
-        .copied()
+        .map(|hop| hop.did)
         .ok_or_else(|| Error::OnionRouteError("missing second relay".to_string()))?;
     let candidates = OnionRouteCandidates {
-        relays: relay_dids,
+        relays: relay_hops,
         exits: vec![exit],
     };
     let mut entropy = FixedEntropy::new([0, 4]);

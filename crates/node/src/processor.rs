@@ -581,6 +581,8 @@ pub struct Processor {
     session_sk: SessionSk,
     stabilize_interval: Duration,
     online_node_registration: OnlineNodeRegistration,
+    #[cfg(feature = "browser")]
+    advertise_onion_relay: bool,
     registration_tasks: Vec<Arc<dyn RegistrationTask>>,
 }
 
@@ -758,6 +760,8 @@ impl ProcessorBuilder {
             session_sk,
             stabilize_interval: self.stabilize_interval,
             online_node_registration,
+            #[cfg(feature = "browser")]
+            advertise_onion_relay: self.advertise_onion_relay,
             registration_tasks,
         })
     }
@@ -771,6 +775,11 @@ impl Processor {
 
     pub(crate) fn session_sk(&self) -> &SessionSk {
         &self.session_sk
+    }
+
+    #[cfg(feature = "browser")]
+    pub(crate) fn advertise_onion_relay(&self) -> bool {
+        self.advertise_onion_relay
     }
 
     fn registration_context(&self) -> RegistrationContext<'_> {
@@ -1700,6 +1709,7 @@ mod test {
                     .swarm
                     .account_verification_pubkey()
                     .map_err(Error::CoreError)?,
+                session_public_key: expired_processor.session_sk.session_public_key(),
                 node_type: default_online_node_type(),
                 network_id: expired_processor.swarm.network_id(),
                 capabilities: OnlineNodeRegistration::default_capabilities(),
@@ -2326,6 +2336,7 @@ mod test {
                     .swarm
                     .account_verification_pubkey()
                     .map_err(Error::CoreError)?,
+                session_public_key: processor.session_sk.session_public_key(),
                 node_type: default_online_node_type(),
                 network_id: processor.swarm.network_id(),
                 services: vec![service],
@@ -2353,6 +2364,7 @@ mod test {
                     .swarm
                     .account_verification_pubkey()
                     .map_err(Error::CoreError)?,
+                session_public_key: processor.session_sk.session_public_key(),
                 node_type: default_online_node_type(),
                 network_id: processor.swarm.network_id(),
                 capabilities,

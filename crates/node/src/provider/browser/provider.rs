@@ -31,6 +31,7 @@ use crate::onion::circuit::encode_initial_forward;
 use crate::onion::circuit::OnionCircuitPayload;
 use crate::onion::circuit::OnionCircuitProtocol;
 use crate::onion::circuit::OnionCircuitShell;
+use crate::onion::circuit::OnionClientReturn;
 use crate::onion::circuit::ONION_CIRCUIT_NAMESPACE;
 use crate::onion::OnionExitPolicy;
 use crate::onion_https::client_request_from_url as onion_https_client_request_from_url;
@@ -143,7 +144,7 @@ impl BrowserOnionProxy {
             })?;
             let (id, receiver) = runtime.begin_request(first_hop).map_err(JsError::from)?;
             let (to, payload) = match encode_initial_forward(
-                p.did(),
+                OnionClientReturn::new(p.did(), p.session_sk().session_public_key()),
                 &proxy_route.route,
                 id,
                 OnionCircuitPayload::HttpsRequest(request),
@@ -631,7 +632,10 @@ impl Provider {
                 )));
             }
             self.register_protocol(
-                OnionCircuitProtocol,
+                OnionCircuitProtocol::new(
+                    self.processor.session_sk().clone(),
+                    self.processor.advertise_onion_relay(),
+                ),
                 OnionCircuitShell::new(BrowserOnionCircuitHandler::new(runtime.clone())),
             )?;
             runtime.mark_circuit_protocol_installed();

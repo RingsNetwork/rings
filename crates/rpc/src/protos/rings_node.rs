@@ -190,6 +190,8 @@ pub struct OnlineNodeDescriptorInfo {
     pub did: String,
     /// Verification public key encoded with the core serde shape.
     pub public_key: Value,
+    /// Session encryption public key encoded with the core serde shape.
+    pub session_public_key: Value,
     pub node_type: OnlineNodeTypeInfo,
     pub network_id: u32,
     pub capabilities: Vec<String>,
@@ -237,6 +239,8 @@ pub struct OnionExitDescriptorInfo {
     pub did: String,
     /// Verification public key encoded with the core serde shape.
     pub public_key: Value,
+    /// Session encryption public key encoded with the core serde shape.
+    pub session_public_key: Value,
     pub node_type: OnlineNodeTypeInfo,
     pub network_id: u32,
     pub services: Vec<OnionExitServiceInfo>,

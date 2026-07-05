@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use rings_core::dht::Did;
+use rings_core::ecc::PublicKey;
 use rings_core::ecc::VerificationPublicKey;
 use rings_core::error::Error as CoreError;
 use rings_core::error::Result as CoreResult;
@@ -47,6 +48,7 @@ pub use route::select_onion_route;
 pub(crate) use route::select_onion_route_from_candidates;
 pub use route::OnionRoute;
 pub(crate) use route::OnionRouteCandidates;
+pub use route::OnionRouteHop;
 pub use route::OnionRouteRequest;
 pub(crate) use route::SystemRouteEntropy;
 pub use route::DEFAULT_ONION_ROUTE_HOPS;
@@ -277,6 +279,8 @@ pub struct OnionExitDescriptorBody {
     pub did: Did,
     /// Account public key corresponding to `did`.
     pub public_key: VerificationPublicKey,
+    /// Session public key used for encrypted onion exit frames.
+    pub session_public_key: PublicKey<33>,
     /// Runtime family of this exit node.
     pub node_type: OnlineNodeType,
     /// Network identifier.
@@ -300,6 +304,7 @@ impl OnionExitDescriptorBody {
         OnionExitDescriptorBodyRef {
             did: self.did,
             public_key: &self.public_key,
+            session_public_key: &self.session_public_key,
             node_type: &self.node_type,
             network_id: self.network_id,
             services: &self.services,
@@ -335,6 +340,7 @@ impl SignedDescriptorBody for OnionExitDescriptorBody {
         OnionExitDescriptor {
             did: self.did,
             public_key: self.public_key,
+            session_public_key: self.session_public_key,
             node_type: self.node_type,
             network_id: self.network_id,
             services: self.services,
@@ -352,6 +358,7 @@ impl SignedDescriptorBody for OnionExitDescriptorBody {
 struct OnionExitDescriptorBodyRef<'a> {
     did: Did,
     public_key: &'a VerificationPublicKey,
+    session_public_key: &'a PublicKey<33>,
     node_type: &'a OnlineNodeType,
     network_id: u32,
     services: &'a [OnionExitService],
@@ -375,6 +382,8 @@ pub struct OnionExitDescriptor {
     pub did: Did,
     /// Account public key corresponding to `did`.
     pub public_key: VerificationPublicKey,
+    /// Session public key used for encrypted onion exit frames.
+    pub session_public_key: PublicKey<33>,
     /// Runtime family of this exit node.
     pub node_type: OnlineNodeType,
     /// Network identifier.
@@ -409,6 +418,7 @@ impl OnionExitDescriptor {
         let Self {
             did,
             public_key,
+            session_public_key,
             node_type,
             network_id,
             services,
@@ -423,6 +433,7 @@ impl OnionExitDescriptor {
         OnionExitDescriptorBodyRef {
             did: *did,
             public_key,
+            session_public_key,
             node_type,
             network_id: *network_id,
             services,
@@ -573,6 +584,7 @@ impl OnionExitRegistration {
             OnionExitDescriptorBody {
                 did: context.did(),
                 public_key: context.account_verification_pubkey()?,
+                session_public_key: context.session_sk().session_public_key(),
                 node_type: self.node_type.clone(),
                 network_id: context.network_id(),
                 services: self.services.clone(),

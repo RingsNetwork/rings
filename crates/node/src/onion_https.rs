@@ -39,6 +39,7 @@ use crate::extension::ext::Scope;
 use crate::onion::circuit::send_backward;
 use crate::onion::circuit::OnionCircuitHandler;
 use crate::onion::circuit::OnionCircuitPayload;
+use crate::onion::circuit::OnionClientReturn;
 use crate::onion::circuit::OnionHttpsRequest;
 use crate::onion::circuit::OnionHttpsResponse;
 use crate::onion::OnionExitPolicy;
@@ -124,13 +125,15 @@ struct ExitLimiter {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct ExitCircuitKey {
-    return_path: Vec<Did>,
+    client: Did,
+    return_peer: Did,
 }
 
 impl ExitCircuitKey {
-    fn new(return_path: &[Did]) -> Self {
+    const fn new(client: Did, return_peer: Did) -> Self {
         Self {
-            return_path: return_path.to_vec(),
+            client,
+            return_peer,
         }
     }
 }
@@ -247,10 +250,11 @@ impl OnionHttpsRuntime {
     fn admit_exit_request(
         &self,
         policy: &OnionExitPolicy,
-        return_path: &[Did],
+        client: Did,
+        return_peer: Did,
         bytes: u64,
     ) -> Result<ExitCircuitLease> {
-        let circuit = ExitCircuitKey::new(return_path);
+        let circuit = ExitCircuitKey::new(client, return_peer);
         let mut limiter = self.limiter.lock().map_err(|_| Error::Lock)?;
         let active_streams = limiter
             .active_streams_by_circuit
@@ -457,12 +461,13 @@ impl OnionCircuitHandler for BrowserOnionCircuitHandler {
         scope: &Scope,
         _from: Did,
         stream_id: u64,
-        return_path: Vec<Did>,
+        return_peer: Did,
+        client: OnionClientReturn,
         payload: OnionCircuitPayload,
     ) -> Result<()> {
         let response = match payload {
             OnionCircuitPayload::HttpsRequest(request) => {
-                match execute_exit_fetch(&self.https, &request, &return_path).await {
+                match execute_exit_fetch(&self.https, &request, client.did, return_peer).await {
                     Ok(response) => OnionCircuitPayload::HttpsResponse(response),
                     Err(error) => OnionCircuitPayload::HttpsError(error.to_string()),
                 }
@@ -478,7 +483,7 @@ impl OnionCircuitHandler for BrowserOnionCircuitHandler {
                 return Ok(());
             }
         };
-        send_backward(scope, stream_id, return_path, response).await
+        send_backward(scope, stream_id, return_peer, client, response).await
     }
 
     async fn handle_client(
@@ -504,7 +509,8 @@ impl OnionCircuitHandler for BrowserOnionCircuitHandler {
 pub(crate) async fn execute_exit_fetch(
     runtime: &OnionHttpsRuntime,
     request: &OnionHttpsRequest,
-    return_path: &[Did],
+    client: Did,
+    return_peer: Did,
 ) -> Result<OnionHttpsResponse> {
     let target = OnionProxyTarget::parse_authority(&request.target)?;
     let authority = target.authority();
@@ -516,7 +522,8 @@ pub(crate) async fn execute_exit_fetch(
     if !policy.allows_target(&authority) {
         return Err(Error::NoPermission);
     }
-    let _lease = runtime.admit_exit_request(&policy, return_path, request.body.len() as u64)?;
+    let _lease =
+        runtime.admit_exit_request(&policy, client, return_peer, request.body.len() as u64)?;
     let url = format!("https://{}{}", authority, normalize_path(&request.path)?);
     let response = browser_fetch(&url, request, policy.max_bytes_per_minute).await?;
     runtime.record_exit_bytes(&policy, response.body.len() as u64)?;
@@ -840,9 +847,10 @@ mod tests {
             max_bytes_per_minute: 8,
             ..OnionExitPolicy::default()
         };
-        let return_path = vec![did()];
+        let client = did();
+        let return_peer = did();
         let _lease = runtime
-            .admit_exit_request(&policy, &return_path, 4)
+            .admit_exit_request(&policy, client, return_peer, 4)
             .unwrap();
 
         assert!(runtime.record_exit_bytes(&policy, 4).is_ok());
@@ -859,17 +867,20 @@ mod tests {
             max_streams_per_circuit: 1,
             ..OnionExitPolicy::default()
         };
-        let return_path = vec![did(), did()];
+        let client = did();
+        let return_peer = did();
 
         let lease = runtime
-            .admit_exit_request(&policy, &return_path, 0)
+            .admit_exit_request(&policy, client, return_peer, 0)
             .expect("first stream admitted");
         assert!(matches!(
-            runtime.admit_exit_request(&policy, &return_path, 0),
+            runtime.admit_exit_request(&policy, client, return_peer, 0),
             Err(Error::NoPermission)
         ));
         drop(lease);
-        assert!(runtime.admit_exit_request(&policy, &return_path, 0).is_ok());
+        assert!(runtime
+            .admit_exit_request(&policy, client, return_peer, 0)
+            .is_ok());
     }
 
     #[test]

@@ -1,13 +1,18 @@
-//! Route-aware circuit data plane.
+//! Encrypted onion circuit data plane.
 //!
-//! Security model: this wire format is a routed circuit frame, not layered onion encryption.
-//! Relays receive the remaining route in clear text so they can forward without a relay
-//! encryption key. A cryptographic onion layer needs a descriptor-published relay encryption
-//! public key and per-hop decrypt/encrypt logic before this protocol can provide onion
-//! confidentiality.
+//! Security model: forward layers are wrapped from exit to entry with the selected hop session
+//! public keys. Each relay decrypts exactly one ElGamal-AEAD layer and learns only the immediate
+//! next hop plus an opaque inner layer. Backward frames carry a client-encrypted AEAD payload and
+//! relays forward them with local return state.
+
+use std::collections::BTreeMap;
 
 use bytes::Bytes;
 use rings_core::dht::Did;
+use rings_core::ecc::elgamal::impls::secp256k1::encrypt_aead_with_rng;
+use rings_core::ecc::elgamal::impls::secp256k1::AeadCiphertext;
+use rings_core::ecc::PublicKey;
+use rings_core::session::SessionSk;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -21,6 +26,7 @@ use crate::extension::ext::Scope;
 use crate::extension::ext::Transition;
 use crate::extension::ext::Wire;
 use crate::onion::OnionRoute;
+use crate::onion::OnionRouteHop;
 
 /// Namespace used by route-aware onion circuit messages.
 pub const ONION_CIRCUIT_NAMESPACE: &str = "onion-circuit";
@@ -28,12 +34,18 @@ pub const ONION_CIRCUIT_NAMESPACE: &str = "onion-circuit";
 /// Security mode implemented by the current circuit wire format.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OnionCircuitSecurity {
-    /// Routed circuit frames without layered per-hop encryption.
-    PlaintextRoute,
+    /// Layered ElGamal-AEAD forward frames with client-encrypted backward payloads.
+    LayeredAead,
 }
 
 /// Current circuit security mode.
-pub const ONION_CIRCUIT_SECURITY: OnionCircuitSecurity = OnionCircuitSecurity::PlaintextRoute;
+pub const ONION_CIRCUIT_SECURITY: OnionCircuitSecurity = OnionCircuitSecurity::LayeredAead;
+
+/// Maximum number of encrypted hops accepted in one circuit.
+pub const MAX_ONION_CIRCUIT_HOPS: u8 = 8;
+
+const MAX_ONION_RELAY_CIRCUITS: usize = 1024;
+const ONION_AEAD_NAMESPACE: &str = "rings-node:onion-circuit:v1";
 
 /// One browser HTTPS request executed by an HTTPS exit.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -91,28 +103,76 @@ pub enum OnionCircuitPayload {
     },
 }
 
+/// Client return identity and key encrypted into the exit layer.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
+pub struct OnionClientReturn {
+    /// Client DID.
+    pub did: Did,
+    /// Client session public key used for backward AEAD payloads.
+    pub session_public_key: PublicKey<33>,
+}
+
+impl OnionClientReturn {
+    /// Build a client return descriptor.
+    pub const fn new(did: Did, session_public_key: PublicKey<33>) -> Self {
+        Self {
+            did,
+            session_public_key,
+        }
+    }
+}
+
 /// Forward direction: client -> relays -> exit.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct OnionForwardFrame {
+    /// Client DID.
+    pub client: Did,
     /// Client-selected stream id, scoped by the client DID.
     pub stream_id: u64,
-    /// Hops that still need to receive this frame before the exit is reached.
-    pub remaining_hops: Vec<Did>,
-    /// Reverse path, immediate previous hop first.
-    pub return_path: Vec<Did>,
-    /// Application payload.
-    pub payload: OnionCircuitPayload,
+    /// AEAD-encrypted layer for the receiving hop.
+    pub layer: AeadCiphertext,
 }
 
 /// Backward direction: exit -> relays -> client.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct OnionBackwardFrame {
+    /// Client DID.
+    pub client: Did,
     /// Client-selected stream id, scoped by the client DID.
     pub stream_id: u64,
-    /// Return path, next immediate hop first.
-    pub return_path: Vec<Did>,
-    /// Application payload.
-    pub payload: OnionCircuitPayload,
+    /// Whether this frame closes relay return state.
+    pub terminal: bool,
+    /// AEAD payload encrypted to the client session public key.
+    pub payload: AeadCiphertext,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+enum OnionForwardLayer {
+    Relay {
+        client: Did,
+        stream_id: u64,
+        next_hop: Did,
+        remaining_hops: u8,
+        inner: AeadCiphertext,
+    },
+    Exit {
+        client: OnionClientReturn,
+        stream_id: u64,
+        payload: OnionCircuitPayload,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+struct RelayReturnKey {
+    client: Did,
+    stream_id: u64,
+    next_hop: Did,
+}
+
+/// Stateful return-hop table for encrypted relay circuits.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct OnionCircuitState {
+    relay_returns: BTreeMap<RelayReturnKey, Did>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -144,8 +204,10 @@ pub enum OnionCircuitEffect {
         from: Did,
         /// Client-selected stream id.
         stream_id: u64,
-        /// Reverse path to the client.
-        return_path: Vec<Did>,
+        /// Immediate return peer.
+        return_peer: Did,
+        /// Client return identity and key.
+        client: OnionClientReturn,
         /// Application payload.
         payload: OnionCircuitPayload,
     },
@@ -160,12 +222,29 @@ pub enum OnionCircuitEffect {
     },
 }
 
-/// Route-aware plaintext circuit protocol.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct OnionCircuitProtocol;
+/// Encrypted onion circuit protocol.
+#[derive(Clone, Debug)]
+pub struct OnionCircuitProtocol {
+    session_sk: SessionSk,
+    allow_relay: bool,
+    max_hops: u8,
+    max_relay_circuits: usize,
+}
+
+impl OnionCircuitProtocol {
+    /// Create a protocol instance for the local session.
+    pub fn new(session_sk: SessionSk, allow_relay: bool) -> Self {
+        Self {
+            session_sk,
+            allow_relay,
+            max_hops: MAX_ONION_CIRCUIT_HOPS,
+            max_relay_circuits: MAX_ONION_RELAY_CIRCUITS,
+        }
+    }
+}
 
 impl Protocol for OnionCircuitProtocol {
-    type State = ();
+    type State = OnionCircuitState;
     type Event = OnionCircuitEvent;
     type Effect = OnionCircuitEffect;
 
@@ -173,7 +252,9 @@ impl Protocol for OnionCircuitProtocol {
         ONION_CIRCUIT_NAMESPACE
     }
 
-    fn init(&self) -> Self::State {}
+    fn init(&self) -> Self::State {
+        OnionCircuitState::default()
+    }
 
     fn decode(&self, wire: Wire<'_>) -> std::result::Result<Self::Event, Reject> {
         let message = bincode::deserialize::<OnionCircuitMessage>(wire.payload)
@@ -189,37 +270,128 @@ impl Protocol for OnionCircuitProtocol {
         ctx: Ctx<'_, Self::State>,
         event: Self::Event,
     ) -> Transition<Self::State, Self::Effect> {
+        let mut state = ctx.state.clone();
         let effect = match event.message {
-            OnionCircuitMessage::Forward(mut frame) => match advance_forward(ctx.did, &mut frame) {
-                Some(to) => encode_message(OnionCircuitMessage::Forward(frame))
-                    .map(|payload| OnionCircuitEffect::Send { to, payload }),
-                None => validate_exit_return_path(event.from, &frame.return_path).map(|()| {
-                    OnionCircuitEffect::Exit {
-                        from: event.from,
-                        stream_id: frame.stream_id,
-                        return_path: frame.return_path,
-                        payload: frame.payload,
-                    }
-                }),
-            },
-            OnionCircuitMessage::Backward(mut frame) => match advance_backward(&mut frame) {
-                Some(to) => encode_message(OnionCircuitMessage::Backward(frame))
-                    .map(|payload| OnionCircuitEffect::Send { to, payload }),
-                None => Ok(OnionCircuitEffect::Client {
-                    from: event.from,
-                    stream_id: frame.stream_id,
-                    payload: frame.payload,
-                }),
-            },
+            OnionCircuitMessage::Forward(frame) => {
+                self.advance_forward(event.from, frame, &mut state)
+            }
+            OnionCircuitMessage::Backward(frame) => {
+                self.advance_backward(ctx.did, event.from, frame, &mut state)
+            }
         };
 
         match effect {
-            Ok(effect) => Transition::with((), vec![effect]),
+            Ok(effect) => Transition::with(state, vec![effect]),
             Err(error) => {
                 tracing::debug!("drop onion circuit message: {error}");
-                Transition::pure(())
+                Transition::pure(state)
             }
         }
+    }
+}
+
+impl OnionCircuitProtocol {
+    fn advance_forward(
+        &self,
+        from: Did,
+        frame: OnionForwardFrame,
+        state: &mut OnionCircuitState,
+    ) -> Result<OnionCircuitEffect> {
+        let layer = decrypt_forward_layer(&self.session_sk, frame.stream_id, &frame.layer)?;
+        match layer {
+            OnionForwardLayer::Relay {
+                client,
+                stream_id,
+                next_hop,
+                remaining_hops,
+                inner,
+            } => {
+                validate_forward_frame(frame.client, frame.stream_id, client, stream_id)?;
+                self.validate_relay_forward(remaining_hops)?;
+                remember_return_hop(
+                    state,
+                    self.max_relay_circuits,
+                    RelayReturnKey {
+                        client,
+                        stream_id,
+                        next_hop,
+                    },
+                    from,
+                )?;
+                encode_message(OnionCircuitMessage::Forward(OnionForwardFrame {
+                    client,
+                    stream_id,
+                    layer: inner,
+                }))
+                .map(|payload| OnionCircuitEffect::Send {
+                    to: next_hop,
+                    payload,
+                })
+            }
+            OnionForwardLayer::Exit {
+                client,
+                stream_id,
+                payload,
+            } => {
+                validate_forward_frame(frame.client, frame.stream_id, client.did, stream_id)?;
+                Ok(OnionCircuitEffect::Exit {
+                    from,
+                    stream_id,
+                    return_peer: from,
+                    client,
+                    payload,
+                })
+            }
+        }
+    }
+
+    fn advance_backward(
+        &self,
+        local: Did,
+        from: Did,
+        frame: OnionBackwardFrame,
+        state: &mut OnionCircuitState,
+    ) -> Result<OnionCircuitEffect> {
+        let key = RelayReturnKey {
+            client: frame.client,
+            stream_id: frame.stream_id,
+            next_hop: from,
+        };
+        if let Some(previous_hop) = state.relay_returns.get(&key).copied() {
+            if frame.terminal {
+                state.relay_returns.remove(&key);
+            }
+            let payload = encode_message(OnionCircuitMessage::Backward(frame))?;
+            return Ok(OnionCircuitEffect::Send {
+                to: previous_hop,
+                payload,
+            });
+        }
+
+        if frame.client != local {
+            return Err(Error::OnionRouteError(format!(
+                "onion backward frame for {:?} reached {:?}",
+                frame.client, local
+            )));
+        }
+        let payload = decrypt_client_payload(&self.session_sk, frame.stream_id, &frame.payload)?;
+        Ok(OnionCircuitEffect::Client {
+            from,
+            stream_id: frame.stream_id,
+            payload,
+        })
+    }
+
+    fn validate_relay_forward(&self, remaining_hops: u8) -> Result<()> {
+        if !self.allow_relay {
+            return Err(Error::NoPermission);
+        }
+        if remaining_hops == 0 || remaining_hops > self.max_hops {
+            return Err(Error::OnionRouteError(format!(
+                "invalid onion relay hop count {remaining_hops}"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -250,11 +422,12 @@ where H: OnionCircuitHandler + crate::extension::ext::MaybeSend + 'static
             OnionCircuitEffect::Exit {
                 from,
                 stream_id,
-                return_path,
+                return_peer,
+                client,
                 payload,
             } => {
                 self.handler
-                    .handle_exit(scope, from, stream_id, return_path, payload)
+                    .handle_exit(scope, from, stream_id, return_peer, client, payload)
                     .await?;
             }
             OnionCircuitEffect::Client {
@@ -281,7 +454,8 @@ pub trait OnionCircuitHandler {
         scope: &Scope,
         from: Did,
         stream_id: u64,
-        return_path: Vec<Did>,
+        return_peer: Did,
+        client: OnionClientReturn,
         payload: OnionCircuitPayload,
     ) -> Result<()>;
 
@@ -297,72 +471,201 @@ pub trait OnionCircuitHandler {
 
 /// Encode the first forward frame for `route`.
 pub fn encode_initial_forward(
-    local: Did,
+    client: OnionClientReturn,
     route: &OnionRoute,
     stream_id: u64,
     payload: OnionCircuitPayload,
 ) -> Result<(Did, Bytes)> {
-    let Some((first, rest)) = route.hops.split_first() else {
+    let Some(first) = route.encryption_hops.first().copied() else {
         return Err(Error::OnionRouteError(
             "onion route has no hops".to_string(),
         ));
     };
+    validate_route_hop_count(route.encryption_hops.len())?;
+    let layer = build_forward_layers(client, &route.encryption_hops, stream_id, payload)?;
     let frame = OnionForwardFrame {
+        client: client.did,
         stream_id,
-        remaining_hops: rest.to_vec(),
-        return_path: vec![local],
-        payload,
+        layer,
     };
-    encode_message(OnionCircuitMessage::Forward(frame)).map(|payload| (*first, payload))
+    encode_message(OnionCircuitMessage::Forward(frame)).map(|payload| (first.did, payload))
 }
 
-/// Send a response payload back along `return_path`.
+/// Send a response payload back to the immediate return peer.
 pub async fn send_backward(
     scope: &Scope,
     stream_id: u64,
-    return_path: Vec<Did>,
+    return_peer: Did,
+    client: OnionClientReturn,
     payload: OnionCircuitPayload,
 ) -> Result<()> {
-    let mut frame = OnionBackwardFrame {
+    let frame = OnionBackwardFrame {
+        client: client.did,
         stream_id,
-        return_path,
-        payload,
-    };
-    let Some(to) = advance_backward(&mut frame) else {
-        return Err(Error::OnionRouteError(
-            "onion response has empty return path".to_string(),
-        ));
+        terminal: payload_closes_circuit(&payload),
+        payload: encrypt_client_payload(stream_id, payload, client.session_public_key)?,
     };
     let payload = encode_message(OnionCircuitMessage::Backward(frame))?;
-    scope.send(to, payload).await
+    scope.send(return_peer, payload).await
 }
 
-fn advance_forward(local: Did, frame: &mut OnionForwardFrame) -> Option<Did> {
-    if frame.remaining_hops.is_empty() {
-        return None;
+fn build_forward_layers(
+    client: OnionClientReturn,
+    hops: &[OnionRouteHop],
+    stream_id: u64,
+    payload: OnionCircuitPayload,
+) -> Result<AeadCiphertext> {
+    let Some(exit) = hops.last().copied() else {
+        return Err(Error::OnionRouteError(
+            "onion route has no hops".to_string(),
+        ));
+    };
+    let mut layer = encrypt_forward_layer(
+        stream_id,
+        OnionForwardLayer::Exit {
+            client,
+            stream_id,
+            payload,
+        },
+        exit.session_public_key,
+    )?;
+
+    for (index, hop) in hops.iter().copied().enumerate().rev().skip(1) {
+        let next_hop = hops
+            .get(index.saturating_add(1))
+            .map(|next| next.did)
+            .ok_or_else(|| Error::OnionRouteError("missing next onion hop".to_string()))?;
+        let remaining_hops = u8::try_from(hops.len().saturating_sub(index + 1))
+            .map_err(|_| Error::OnionRouteError("onion route is too long".to_string()))?;
+        layer = encrypt_forward_layer(
+            stream_id,
+            OnionForwardLayer::Relay {
+                client: client.did,
+                stream_id,
+                next_hop,
+                remaining_hops,
+                inner: layer,
+            },
+            hop.session_public_key,
+        )?;
     }
-    let next = frame.remaining_hops.remove(0);
-    frame.return_path.insert(0, local);
-    Some(next)
+    Ok(layer)
 }
 
-fn advance_backward(frame: &mut OnionBackwardFrame) -> Option<Did> {
-    if frame.return_path.is_empty() {
-        return None;
-    }
-    Some(frame.return_path.remove(0))
+fn encrypt_forward_layer(
+    stream_id: u64,
+    layer: OnionForwardLayer,
+    recipient: PublicKey<33>,
+) -> Result<AeadCiphertext> {
+    let plaintext = bincode::serialize(&layer).map_err(|_| Error::EncodeError)?;
+    let aad = onion_aead_context(OnionAeadDirection::Forward, stream_id)?;
+    let mut rng = rand::thread_rng();
+    encrypt_aead_with_rng(&plaintext, &aad, recipient, &mut rng).map_err(Error::CoreError)
 }
 
-fn validate_exit_return_path(from: Did, return_path: &[Did]) -> Result<()> {
-    match return_path.first().copied() {
-        Some(previous_hop) if previous_hop == from => Ok(()),
-        Some(previous_hop) => Err(Error::OnionRouteError(format!(
-            "onion return path first hop {previous_hop:?} does not match sender {from:?}"
-        ))),
-        None => Err(Error::OnionRouteError(
-            "onion forward frame reached exit with empty return path".to_string(),
-        )),
+fn decrypt_forward_layer(
+    session_sk: &SessionSk,
+    stream_id: u64,
+    sealed: &AeadCiphertext,
+) -> Result<OnionForwardLayer> {
+    let aad = onion_aead_context(OnionAeadDirection::Forward, stream_id)?;
+    let plaintext = session_sk
+        .decrypt_elgamal_aead(sealed, &aad)
+        .map_err(Error::CoreError)?;
+    bincode::deserialize(&plaintext).map_err(|_| Error::DecodeError)
+}
+
+fn encrypt_client_payload(
+    stream_id: u64,
+    payload: OnionCircuitPayload,
+    recipient: PublicKey<33>,
+) -> Result<AeadCiphertext> {
+    let plaintext = bincode::serialize(&payload).map_err(|_| Error::EncodeError)?;
+    let aad = onion_aead_context(OnionAeadDirection::Backward, stream_id)?;
+    let mut rng = rand::thread_rng();
+    encrypt_aead_with_rng(&plaintext, &aad, recipient, &mut rng).map_err(Error::CoreError)
+}
+
+fn decrypt_client_payload(
+    session_sk: &SessionSk,
+    stream_id: u64,
+    sealed: &AeadCiphertext,
+) -> Result<OnionCircuitPayload> {
+    let aad = onion_aead_context(OnionAeadDirection::Backward, stream_id)?;
+    let plaintext = session_sk
+        .decrypt_elgamal_aead(sealed, &aad)
+        .map_err(Error::CoreError)?;
+    bincode::deserialize(&plaintext).map_err(|_| Error::DecodeError)
+}
+
+#[derive(Serialize)]
+struct OnionAeadContext {
+    namespace: &'static str,
+    direction: OnionAeadDirection,
+    stream_id: u64,
+}
+
+#[derive(Clone, Copy, Serialize)]
+enum OnionAeadDirection {
+    Forward,
+    Backward,
+}
+
+fn onion_aead_context(direction: OnionAeadDirection, stream_id: u64) -> Result<Vec<u8>> {
+    bincode::serialize(&OnionAeadContext {
+        namespace: ONION_AEAD_NAMESPACE,
+        direction,
+        stream_id,
+    })
+    .map_err(|_| Error::EncodeError)
+}
+
+fn validate_forward_frame(
+    frame_client: Did,
+    frame_stream: u64,
+    layer_client: Did,
+    layer_stream: u64,
+) -> Result<()> {
+    if frame_client == layer_client && frame_stream == layer_stream {
+        return Ok(());
     }
+    Err(Error::OnionRouteError(
+        "onion forward frame metadata does not match decrypted layer".to_string(),
+    ))
+}
+
+fn validate_route_hop_count(hops: usize) -> Result<()> {
+    if hops == 0 || hops > MAX_ONION_CIRCUIT_HOPS as usize {
+        return Err(Error::OnionRouteError(format!(
+            "onion route hop count {hops} exceeds limit {MAX_ONION_CIRCUIT_HOPS}"
+        )));
+    }
+    Ok(())
+}
+
+fn remember_return_hop(
+    state: &mut OnionCircuitState,
+    max_relay_circuits: usize,
+    key: RelayReturnKey,
+    previous_hop: Did,
+) -> Result<()> {
+    if !state.relay_returns.contains_key(&key) && state.relay_returns.len() >= max_relay_circuits {
+        return Err(Error::OnionRouteError(
+            "onion relay circuit table is full".to_string(),
+        ));
+    }
+    state.relay_returns.insert(key, previous_hop);
+    Ok(())
+}
+
+fn payload_closes_circuit(payload: &OnionCircuitPayload) -> bool {
+    matches!(
+        payload,
+        OnionCircuitPayload::HttpsResponse(_)
+            | OnionCircuitPayload::HttpsError(_)
+            | OnionCircuitPayload::TcpClose
+            | OnionCircuitPayload::TcpError { .. }
+    )
 }
 
 fn encode_message(message: OnionCircuitMessage) -> Result<Bytes> {
@@ -384,26 +687,34 @@ mod tests {
     use crate::onion::OnionRoute;
     use crate::online::OnlineNodeType;
 
-    fn did() -> Did {
-        SecretKey::random().address().into()
+    fn session() -> SessionSk {
+        SessionSk::new_with_seckey(&SecretKey::random()).expect("session key")
     }
 
-    fn route(mut relays: Vec<Did>) -> OnionRoute {
-        let key = SecretKey::random();
-        let session_sk = SessionSk::new_with_seckey(&key).expect("session key");
-        let exit = session_sk.account_did();
-        let public_key = session_sk
+    fn route(relays: &[SessionSk], exit_session: &SessionSk) -> OnionRoute {
+        let exit = exit_session.account_did();
+        let public_key = exit_session
             .session()
             .account_verification_pubkey()
             .expect("verification key");
-        relays.push(exit);
+        let mut encryption_hops = relays
+            .iter()
+            .map(|relay| OnionRouteHop::new(relay.account_did(), relay.session_public_key()))
+            .collect::<Vec<_>>();
+        encryption_hops.push(OnionRouteHop::new(exit, exit_session.session_public_key()));
+        let hops = encryption_hops
+            .iter()
+            .map(|hop| hop.did)
+            .collect::<Vec<_>>();
         OnionRoute {
             service: "https".to_string(),
-            hops: relays,
+            hops,
+            encryption_hops,
             exit: OnionExitDescriptor::new_signed(
                 OnionExitDescriptorBody {
                     did: exit,
                     public_key,
+                    session_public_key: exit_session.session_public_key(),
                     node_type: OnlineNodeType::Native,
                     network_id: 1,
                     services: vec![OnionExitService {
@@ -416,22 +727,22 @@ mod tests {
                     expires_at_ms: 1,
                     version: "test".to_string(),
                 },
-                &session_sk,
+                exit_session,
             )
             .expect("signed exit"),
         }
     }
 
     #[test]
-    fn initial_forward_targets_first_hop_and_keeps_rest() {
-        let local = did();
-        let first = did();
-        let second = did();
-        let route = route(vec![first, second]);
-        let exit = *route.hops.last().expect("route exit");
+    fn initial_forward_targets_first_hop_and_hides_payload() {
+        let client = session();
+        let first = session();
+        let second = session();
+        let exit = session();
+        let route = route(&[first.clone(), second], &exit);
 
         let (to, payload) = encode_initial_forward(
-            local,
+            OnionClientReturn::new(client.account_did(), client.session_public_key()),
             &route,
             9,
             OnionCircuitPayload::HttpsError("probe".to_string()),
@@ -440,76 +751,121 @@ mod tests {
         let decoded =
             bincode::deserialize::<OnionCircuitMessage>(&payload).expect("decode initial route");
 
-        assert_eq!(to, first);
-        assert_eq!(
-            decoded,
-            OnionCircuitMessage::Forward(OnionForwardFrame {
-                stream_id: 9,
-                remaining_hops: vec![second, exit],
-                return_path: vec![local],
-                payload: OnionCircuitPayload::HttpsError("probe".to_string()),
-            })
+        assert_eq!(to, first.account_did());
+        let OnionCircuitMessage::Forward(frame) = decoded else {
+            panic!("expected forward frame");
+        };
+        assert_eq!(frame.client, client.account_did());
+        assert_eq!(frame.stream_id, 9);
+        assert!(!format!("{:?}", frame.layer).contains("probe"));
+    }
+
+    #[test]
+    fn relay_forward_requires_opt_in() {
+        let client = session();
+        let relay = session();
+        let exit = session();
+        let route = route(&[relay.clone()], &exit);
+        let (_, payload) = encode_initial_forward(
+            OnionClientReturn::new(client.account_did(), client.session_public_key()),
+            &route,
+            1,
+            OnionCircuitPayload::TcpShutdown,
+        )
+        .expect("encode forward");
+        let message = bincode::deserialize::<OnionCircuitMessage>(&payload).expect("decode");
+        let protocol = OnionCircuitProtocol::new(relay.clone(), false);
+        let state = protocol.init();
+
+        let transition = protocol.step(
+            Ctx {
+                did: relay.account_did(),
+                state: &state,
+            },
+            OnionCircuitEvent {
+                from: client.account_did(),
+                message,
+            },
         );
+
+        assert!(transition.effects.is_empty());
     }
 
     #[test]
-    fn relay_forward_prepends_reverse_hop() {
-        let client = did();
-        let relay = did();
-        let exit = did();
-        let mut frame = OnionForwardFrame {
-            stream_id: 1,
-            remaining_hops: vec![exit],
-            return_path: vec![client],
-            payload: OnionCircuitPayload::TcpShutdown,
-        };
+    fn relay_decrypts_one_layer_and_remembers_return_hop() {
+        let client = session();
+        let relay = session();
+        let exit = session();
+        let route = route(&[relay.clone()], &exit);
+        let (_, payload) = encode_initial_forward(
+            OnionClientReturn::new(client.account_did(), client.session_public_key()),
+            &route,
+            2,
+            OnionCircuitPayload::TcpShutdown,
+        )
+        .expect("encode forward");
+        let message = bincode::deserialize::<OnionCircuitMessage>(&payload).expect("decode");
+        let protocol = OnionCircuitProtocol::new(relay.clone(), true);
+        let state = protocol.init();
 
-        assert_eq!(advance_forward(relay, &mut frame), Some(exit));
-        assert_eq!(frame.return_path, vec![relay, client]);
-        assert!(frame.remaining_hops.is_empty());
+        let transition = protocol.step(
+            Ctx {
+                did: relay.account_did(),
+                state: &state,
+            },
+            OnionCircuitEvent {
+                from: client.account_did(),
+                message,
+            },
+        );
+
+        assert_eq!(transition.effects.len(), 1);
+        assert!(matches!(
+            transition.effects.first(),
+            Some(OnionCircuitEffect::Send { to, .. }) if *to == exit.account_did()
+        ));
+        assert_eq!(transition.state.relay_returns.len(), 1);
     }
 
     #[test]
-    fn backward_frame_consumes_return_path_one_hop_at_a_time() {
-        let relay = did();
-        let client = did();
-        let mut frame = OnionBackwardFrame {
-            stream_id: 2,
-            return_path: vec![relay, client],
-            payload: OnionCircuitPayload::TcpClose,
-        };
-
-        assert_eq!(advance_backward(&mut frame), Some(relay));
-        assert_eq!(frame.return_path, vec![client]);
-        assert_eq!(advance_backward(&mut frame), Some(client));
-        assert!(frame.return_path.is_empty());
-    }
-
-    #[test]
-    fn exit_forward_requires_return_path_to_start_with_sender() {
-        let local = did();
-        let sender = did();
-        let forged_previous_hop = did();
-        let protocol = OnionCircuitProtocol;
-        let state = ();
-        let event = OnionCircuitEvent {
-            from: sender,
-            message: OnionCircuitMessage::Forward(OnionForwardFrame {
-                stream_id: 3,
-                remaining_hops: Vec::new(),
-                return_path: vec![forged_previous_hop, did()],
-                payload: OnionCircuitPayload::TcpShutdown,
-            }),
+    fn client_decrypts_backward_payload() {
+        let client = session();
+        let exit = session();
+        let protocol = OnionCircuitProtocol::new(client.clone(), false);
+        let state = protocol.init();
+        let stream_id = 3;
+        let frame = OnionBackwardFrame {
+            client: client.account_did(),
+            stream_id,
+            terminal: true,
+            payload: encrypt_client_payload(
+                stream_id,
+                OnionCircuitPayload::TcpError {
+                    message: "closed".to_string(),
+                },
+                client.session_public_key(),
+            )
+            .expect("encrypt backward"),
         };
 
         let transition = protocol.step(
             Ctx {
-                did: local,
+                did: client.account_did(),
                 state: &state,
             },
-            event,
+            OnionCircuitEvent {
+                from: exit.account_did(),
+                message: OnionCircuitMessage::Backward(frame),
+            },
         );
 
-        assert!(transition.effects.is_empty());
+        assert!(matches!(
+            transition.effects.first(),
+            Some(OnionCircuitEffect::Client {
+                from,
+                stream_id: 3,
+                payload: OnionCircuitPayload::TcpError { message },
+            }) if *from == exit.account_did() && message == "closed"
+        ));
     }
 }

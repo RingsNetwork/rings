@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use rings_core::dht::Did;
+use rings_core::ecc::PublicKey;
 use rings_core::measure::PeerQuality;
 
 use super::OnionExitDescriptor;
@@ -36,6 +37,25 @@ impl OnionRouteRequest {
     }
 }
 
+/// One hop selected for encrypted onion routing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OnionRouteHop {
+    /// Hop DID.
+    pub did: Did,
+    /// Hop session public key used for ElGamal-AEAD layers.
+    pub session_public_key: PublicKey<33>,
+}
+
+impl OnionRouteHop {
+    /// Build a route hop from its DID and session public key.
+    pub const fn new(did: Did, session_public_key: PublicKey<33>) -> Self {
+        Self {
+            did,
+            session_public_key,
+        }
+    }
+}
+
 /// Selected onion route.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OnionRoute {
@@ -43,6 +63,8 @@ pub struct OnionRoute {
     pub service: String,
     /// Ordered DIDs, ending with the exit DID.
     pub hops: Vec<Did>,
+    /// Ordered encrypted route hops, ending with the exit hop.
+    pub encryption_hops: Vec<OnionRouteHop>,
     /// Signed descriptor for the selected exit.
     pub exit: OnionExitDescriptor,
 }
@@ -74,7 +96,7 @@ impl RouteEntropy for SystemRouteEntropy {
 
 #[derive(Clone, Debug)]
 pub(crate) struct OnionRouteCandidates {
-    pub(in crate::onion) relays: Vec<Did>,
+    pub(in crate::onion) relays: Vec<OnionRouteHop>,
     pub(in crate::onion) exits: Vec<OnionExitDescriptor>,
 }
 
@@ -88,9 +110,10 @@ impl OnionRouteCandidates {
         let relays = online_nodes
             .into_iter()
             .filter(has_onion_relay_capability)
-            .map(|descriptor| descriptor.did)
-            .filter(|did| *did != local)
-            .collect::<BTreeSet<_>>();
+            .map(|descriptor| OnionRouteHop::new(descriptor.did, descriptor.session_public_key))
+            .filter(|hop| hop.did != local)
+            .map(|hop| (hop.did, hop))
+            .collect::<BTreeMap<_, _>>();
 
         let exits = exits
             .into_iter()
@@ -99,7 +122,7 @@ impl OnionRouteCandidates {
             .collect::<Vec<_>>();
 
         Self {
-            relays: relays.into_iter().collect(),
+            relays: relays.into_values().collect(),
             exits,
         }
     }
@@ -165,12 +188,12 @@ pub(crate) fn select_onion_route_from_candidates(
     let mut relay_candidates = candidates
         .relays
         .into_iter()
-        .filter(|did| *did != exit_did)
+        .filter(|hop| hop.did != exit_did)
         .collect::<Vec<_>>();
     let relay_hops_needed = request.target_hop_count().saturating_sub(1);
     let mut selected_relays = Vec::with_capacity(relay_hops_needed);
     while selected_relays.len() < relay_hops_needed {
-        let Some(next_index) = pick_weighted_index(&relay_candidates, &quality_by_did, entropy)
+        let Some(next_index) = pick_weighted_hop_index(&relay_candidates, &quality_by_did, entropy)
         else {
             break;
         };
@@ -184,15 +207,29 @@ pub(crate) fn select_onion_route_from_candidates(
         )));
     }
 
-    let mut hops = selected_relays;
-    hops.push(exit_did);
+    let mut encryption_hops = selected_relays;
+    encryption_hops.push(OnionRouteHop::new(exit_did, exit.session_public_key));
+    let hops = encryption_hops
+        .iter()
+        .map(|hop| hop.did)
+        .collect::<Vec<_>>();
     debug_assert!(!has_duplicate_dids(&hops));
 
     Ok(OnionRoute {
         service: service.to_string(),
         hops,
+        encryption_hops,
         exit,
     })
+}
+
+fn pick_weighted_hop_index(
+    hops: &[OnionRouteHop],
+    quality_by_did: &BTreeMap<Did, PeerQuality>,
+    entropy: &mut impl RouteEntropy,
+) -> Option<usize> {
+    let dids = hops.iter().map(|hop| hop.did).collect::<Vec<_>>();
+    pick_weighted_index(&dids, quality_by_did, entropy)
 }
 
 fn pick_weighted_index(
@@ -245,13 +282,16 @@ fn eligible_relay_dids(
     now_ms: u128,
     local: Did,
     online_nodes: impl IntoIterator<Item = OnlineNodeDescriptor>,
-) -> BTreeSet<Did> {
+) -> Vec<OnionRouteHop> {
     OnlineNodeDescriptor::latest_valid_by_did(online_nodes, now_ms, false)
         .into_iter()
         .filter(|descriptor| descriptor.matches_network(network_id))
         .filter(has_onion_relay_capability)
-        .map(|descriptor| descriptor.did)
-        .filter(|did| *did != local)
+        .map(|descriptor| OnionRouteHop::new(descriptor.did, descriptor.session_public_key))
+        .filter(|hop| hop.did != local)
+        .map(|hop| (hop.did, hop))
+        .collect::<BTreeMap<_, _>>()
+        .into_values()
         .collect()
 }
 

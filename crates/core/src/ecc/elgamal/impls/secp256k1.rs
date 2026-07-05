@@ -29,9 +29,19 @@
 use std::convert::TryFrom;
 use std::convert::TryInto;
 
+use chacha20poly1305::aead::Aead;
+use chacha20poly1305::aead::KeyInit;
+use chacha20poly1305::aead::Payload;
+use chacha20poly1305::ChaCha20Poly1305;
+use chacha20poly1305::Key;
+use chacha20poly1305::Nonce;
+use hkdf::Hkdf;
 use libsecp256k1::curve::Affine;
 use libsecp256k1::curve::Field;
 use rand::RngCore;
+use serde::Deserialize;
+use serde::Serialize;
+use sha2::Sha256;
 
 use crate::ecc::elgamal::ElGamal;
 use crate::ecc::elgamal::ElGamalPublicKey;
@@ -55,6 +65,32 @@ pub const PLAINTEXT_BLOCK_SIZE: usize = FIELD_CHUNK_SIZE;
 
 /// One serialized ElGamal ciphertext block over secp256k1.
 pub type CiphertextBlock = (CurveEle<33>, CurveEle<33>);
+
+const AEAD_VERSION: u8 = 1;
+const AEAD_KEY_LEN: usize = 32;
+const AEAD_NONCE_LEN: usize = 12;
+const AEAD_HKDF_SALT: &[u8] = b"rings-core:secp256k1-elgamal-aead:salt:v1";
+const AEAD_HKDF_INFO: &[u8] = b"rings-core:secp256k1-elgamal-aead:chacha20poly1305:v1";
+
+/// KEM/DEM ciphertext using secp256k1 ElGamal to wrap a ChaCha20-Poly1305 key.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AeadCiphertext {
+    /// Version of the AEAD envelope format.
+    pub version: u8,
+    /// ElGamal-encrypted DEM key material.
+    pub encrypted_key: Vec<CiphertextBlock>,
+    /// ChaCha20-Poly1305 nonce.
+    pub nonce: [u8; AEAD_NONCE_LEN],
+    /// ChaCha20-Poly1305 ciphertext, including the authentication tag.
+    pub ciphertext: Vec<u8>,
+}
+
+#[derive(Serialize)]
+struct AeadTranscript<'a> {
+    version: u8,
+    encrypted_key: &'a [CiphertextBlock],
+    aad: &'a [u8],
+}
 
 /// Plaintext input before it is mapped into secp256k1 group elements.
 pub struct Plaintext<'a>(&'a str);
@@ -341,6 +377,108 @@ pub fn decrypt_bytes(m: &[CiphertextBlock], k: SecretKey) -> Result<Vec<u8>> {
     Vec::<u8>::try_from(MessagePoints::from(points))
 }
 
+/// Encrypt bytes with an ElGamal-wrapped ChaCha20-Poly1305 content key.
+///
+/// The ElGamal carrier is secp256k1. The DEM operation is ChaCha20-Poly1305.
+/// The external `aad` and ElGamal key-wrapping ciphertext are both bound into
+/// the AEAD transcript.
+pub fn encrypt_aead_with_rng(
+    plaintext: &[u8],
+    aad: &[u8],
+    recipient: PublicKey<33>,
+    rng: &mut impl RngCore,
+) -> Result<AeadCiphertext> {
+    let mut key_material = [0u8; AEAD_KEY_LEN];
+    rng.fill_bytes(&mut key_material);
+    let encrypted_key = encrypt_bytes_with_rng(&key_material, recipient, rng)?;
+    let key = derive_aead_key(&key_material, AeadErrorSide::Encrypt)?;
+    let mut nonce = [0u8; AEAD_NONCE_LEN];
+    rng.fill_bytes(&mut nonce);
+    let associated_data = aead_associated_data(&encrypted_key, aad)?;
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(&nonce), Payload {
+            msg: plaintext,
+            aad: associated_data.as_slice(),
+        })
+        .map_err(|_| Error::MessageEncryptionFailed("AEAD seal failed".to_string()))?;
+
+    Ok(AeadCiphertext {
+        version: AEAD_VERSION,
+        encrypted_key,
+        nonce,
+        ciphertext,
+    })
+}
+
+/// Decrypt bytes produced by [`encrypt_aead_with_rng`].
+pub fn decrypt_aead(
+    sealed: &AeadCiphertext,
+    aad: &[u8],
+    recipient_secret: SecretKey,
+) -> Result<Vec<u8>> {
+    if sealed.version != AEAD_VERSION {
+        return Err(Error::MessageDecryptionFailed(format!(
+            "unsupported ElGamal AEAD version {}",
+            sealed.version
+        )));
+    }
+
+    let key_material = decrypt_bytes(&sealed.encrypted_key, recipient_secret)?;
+    let key = derive_aead_key(&key_material, AeadErrorSide::Decrypt)?;
+    let associated_data = aead_associated_data(&sealed.encrypted_key, aad)?;
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+    cipher
+        .decrypt(Nonce::from_slice(&sealed.nonce), Payload {
+            msg: sealed.ciphertext.as_slice(),
+            aad: associated_data.as_slice(),
+        })
+        .map_err(|_| Error::MessageDecryptionFailed("AEAD open failed".to_string()))
+}
+
+#[derive(Clone, Copy)]
+enum AeadErrorSide {
+    Encrypt,
+    Decrypt,
+}
+
+fn derive_aead_key(key_material: &[u8], side: AeadErrorSide) -> Result<[u8; AEAD_KEY_LEN]> {
+    if key_material.len() != AEAD_KEY_LEN {
+        return Err(match side {
+            AeadErrorSide::Encrypt => Error::MessageEncryptionFailed(format!(
+                "invalid AEAD key material length {}",
+                key_material.len()
+            )),
+            AeadErrorSide::Decrypt => Error::MessageDecryptionFailed(format!(
+                "invalid AEAD key material length {}",
+                key_material.len()
+            )),
+        });
+    }
+
+    let mut key = [0u8; AEAD_KEY_LEN];
+    Hkdf::<Sha256>::new(Some(AEAD_HKDF_SALT), key_material)
+        .expand(AEAD_HKDF_INFO, &mut key)
+        .map_err(|_| match side {
+            AeadErrorSide::Encrypt => {
+                Error::MessageEncryptionFailed("AEAD key derivation failed".to_string())
+            }
+            AeadErrorSide::Decrypt => {
+                Error::MessageDecryptionFailed("AEAD key derivation failed".to_string())
+            }
+        })?;
+    Ok(key)
+}
+
+fn aead_associated_data(encrypted_key: &[CiphertextBlock], aad: &[u8]) -> Result<Vec<u8>> {
+    bincode::serialize(&AeadTranscript {
+        version: AEAD_VERSION,
+        encrypted_key,
+        aad,
+    })
+    .map_err(Error::BincodeSerialize)
+}
+
 #[cfg(test)]
 mod test {
     use std::collections::HashSet;
@@ -607,6 +745,72 @@ mod test {
 
         assert!(result.is_ok());
         assert!(result.unwrap().is_err());
+    }
+
+    #[test]
+    fn test_aead_encrypt_decrypt_binary_bytes() {
+        let key =
+            SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")
+                .unwrap();
+        let pubkey = key.pubkey();
+        let mut rng = Hc128Rng::seed_from_u64(908);
+        let mut payload = vec![0, 255, 42, 0, 17];
+        payload.extend((0..1024).map(|i| (i % 251) as u8));
+        let aad = b"rings-core test associated data";
+
+        let sealed = encrypt_aead_with_rng(&payload, aad, pubkey, &mut rng).unwrap();
+
+        assert_eq!(decrypt_aead(&sealed, aad, key).unwrap(), payload);
+    }
+
+    #[test]
+    fn test_aead_rejects_ciphertext_tampering() {
+        let key =
+            SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")
+                .unwrap();
+        let pubkey = key.pubkey();
+        let mut rng = Hc128Rng::seed_from_u64(909);
+        let mut sealed = encrypt_aead_with_rng(b"authenticated", b"aad", pubkey, &mut rng).unwrap();
+        let first = sealed.ciphertext.first_mut().unwrap();
+        *first ^= 1;
+
+        assert!(matches!(
+            decrypt_aead(&sealed, b"aad", key),
+            Err(Error::MessageDecryptionFailed(_))
+        ));
+    }
+
+    #[test]
+    fn test_aead_rejects_associated_data_tampering() {
+        let key =
+            SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")
+                .unwrap();
+        let pubkey = key.pubkey();
+        let mut rng = Hc128Rng::seed_from_u64(910);
+        let sealed = encrypt_aead_with_rng(b"authenticated", b"aad", pubkey, &mut rng).unwrap();
+
+        assert!(matches!(
+            decrypt_aead(&sealed, b"other-aad", key),
+            Err(Error::MessageDecryptionFailed(_))
+        ));
+    }
+
+    #[test]
+    fn test_aead_rejects_empty_wrapped_key() {
+        let key =
+            SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")
+                .unwrap();
+        let sealed = AeadCiphertext {
+            version: AEAD_VERSION,
+            encrypted_key: Vec::new(),
+            nonce: [0u8; AEAD_NONCE_LEN],
+            ciphertext: Vec::new(),
+        };
+
+        assert!(matches!(
+            decrypt_aead(&sealed, b"aad", key),
+            Err(Error::MessageDecryptionFailed(_))
+        ));
     }
 
     #[test]

@@ -2,6 +2,7 @@
 //! Signed online-node descriptors stored in the DHT.
 
 use rings_core::dht::Did;
+use rings_core::ecc::PublicKey;
 use rings_core::ecc::VerificationPublicKey;
 use rings_core::error::Error;
 use rings_core::error::Result;
@@ -45,6 +46,8 @@ pub struct OnlineNodeDescriptorBody {
     pub did: Did,
     /// Account public key corresponding to `did`.
     pub public_key: VerificationPublicKey,
+    /// Session public key used for encrypted onion relay frames.
+    pub session_public_key: PublicKey<33>,
     /// Runtime family of this node.
     pub node_type: OnlineNodeType,
     /// Network identifier.
@@ -68,6 +71,7 @@ impl OnlineNodeDescriptorBody {
         OnlineNodeDescriptorBodyRef {
             did: self.did,
             public_key: &self.public_key,
+            session_public_key: &self.session_public_key,
             node_type: &self.node_type,
             network_id: self.network_id,
             capabilities: &self.capabilities,
@@ -103,6 +107,7 @@ impl SignedDescriptorBody for OnlineNodeDescriptorBody {
         OnlineNodeDescriptor {
             did: self.did,
             public_key: self.public_key,
+            session_public_key: self.session_public_key,
             node_type: self.node_type,
             network_id: self.network_id,
             capabilities: self.capabilities,
@@ -120,6 +125,7 @@ impl SignedDescriptorBody for OnlineNodeDescriptorBody {
 struct OnlineNodeDescriptorBodyRef<'a> {
     did: Did,
     public_key: &'a VerificationPublicKey,
+    session_public_key: &'a PublicKey<33>,
     node_type: &'a OnlineNodeType,
     network_id: u32,
     capabilities: &'a [String],
@@ -143,6 +149,8 @@ pub struct OnlineNodeDescriptor {
     pub did: Did,
     /// Account public key corresponding to `did`.
     pub public_key: VerificationPublicKey,
+    /// Session public key used for encrypted onion relay frames.
+    pub session_public_key: PublicKey<33>,
     /// Runtime family of this node.
     pub node_type: OnlineNodeType,
     /// Network identifier.
@@ -177,6 +185,7 @@ impl OnlineNodeDescriptor {
         let Self {
             did,
             public_key,
+            session_public_key,
             node_type,
             network_id,
             capabilities,
@@ -191,6 +200,7 @@ impl OnlineNodeDescriptor {
         OnlineNodeDescriptorBodyRef {
             did: *did,
             public_key,
+            session_public_key,
             node_type,
             network_id: *network_id,
             capabilities,
@@ -294,6 +304,7 @@ mod tests {
             OnlineNodeDescriptorBody {
                 did,
                 public_key: session_sk.session().account_verification_pubkey()?,
+                session_public_key: session_sk.session_public_key(),
                 node_type: OnlineNodeType::Native,
                 network_id: 1,
                 capabilities: vec![ONLINE_NODE_CAPABILITY_STORAGE.to_string()],
@@ -339,6 +350,7 @@ mod tests {
             OnlineNodeDescriptorBody {
                 did,
                 public_key: public_key.clone(),
+                session_public_key: session_sk.session_public_key(),
                 node_type: OnlineNodeType::Native,
                 network_id: 1,
                 capabilities: vec![],
@@ -354,6 +366,7 @@ mod tests {
             OnlineNodeDescriptorBody {
                 did,
                 public_key,
+                session_public_key: session_sk.session_public_key(),
                 node_type: OnlineNodeType::Native,
                 network_id: 1,
                 capabilities: vec![],

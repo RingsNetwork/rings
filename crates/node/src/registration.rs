@@ -262,6 +262,7 @@ impl OnlineNodeRegistration {
             OnlineNodeDescriptorBody {
                 did: context.did(),
                 public_key: context.account_verification_pubkey()?,
+                session_public_key: context.session_sk().session_public_key(),
                 node_type: self.node_type.clone(),
                 network_id: context.network_id(),
                 capabilities: self.capabilities(),

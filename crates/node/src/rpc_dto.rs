@@ -46,6 +46,7 @@ pub(crate) fn online_node_descriptor_info(
     Ok(OnlineNodeDescriptorInfo {
         did: descriptor.did.to_string(),
         public_key: json_value(descriptor.public_key)?,
+        session_public_key: json_value(descriptor.session_public_key)?,
         node_type: online_node_type_info(descriptor.node_type),
         network_id: descriptor.network_id,
         capabilities: descriptor.capabilities,
@@ -100,6 +101,7 @@ pub(crate) fn onion_exit_descriptor_info(
     Ok(OnionExitDescriptorInfo {
         did: descriptor.did.to_string(),
         public_key: json_value(descriptor.public_key)?,
+        session_public_key: json_value(descriptor.session_public_key)?,
         node_type: online_node_type_info(descriptor.node_type),
         network_id: descriptor.network_id,
         services: descriptor

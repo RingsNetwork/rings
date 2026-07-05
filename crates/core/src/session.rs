@@ -396,6 +396,20 @@ impl SessionSk {
         self.session.clone()
     }
 
+    /// Return the secp256k1 session public key used for encryption.
+    pub fn session_public_key(&self) -> PublicKey<33> {
+        self.sk.pubkey()
+    }
+
+    /// Decrypt an ElGamal-AEAD envelope with this session key.
+    pub fn decrypt_elgamal_aead(
+        &self,
+        sealed: &crate::ecc::elgamal::impls::secp256k1::AeadCiphertext,
+        aad: &[u8],
+    ) -> Result<Vec<u8>> {
+        crate::ecc::elgamal::impls::secp256k1::decrypt_aead(sealed, aad, self.sk)
+    }
+
     /// Sign message with session.
     pub fn sign(&self, msg: &[u8]) -> Result<Vec<u8>> {
         let key = self.sk;

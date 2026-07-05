@@ -639,6 +639,8 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     }
 
     let pc = ProcessorConfig::try_from(c.clone())?;
+    let onion_session_sk = pc.session_sk();
+    let advertise_onion_relay = c.advertise_onion_relay;
     let advertise_onion_exit = c.advertise_onion_exit;
     let onion_exit_policy = c.onion_exit_policy.clone();
     let onion_http_proxy_addr = c.onion_http_proxy_addr.clone();
@@ -685,6 +687,8 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
         rings_node::extension::protocols::relay::RelayHandle::install(&provider.extensions())?;
     let onion = NativeOnionCircuitHandle::install(
         &provider.extensions(),
+        onion_session_sk,
+        advertise_onion_relay,
         advertise_onion_exit.then_some(onion_exit_policy.clone()),
     )?;
     // SNARK is a namespaced protocol now; register it so the daemon can prove/verify.
