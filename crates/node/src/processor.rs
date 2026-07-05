@@ -411,6 +411,7 @@ fn validate_onion_role_config(
     advertise_onion_relay: bool,
     advertise_onion_exit: bool,
     onion_exit_services: &[OnionExitService],
+    onion_exit_policy: &OnionExitPolicy,
 ) -> Result<()> {
     if advertise_onion_relay && !advertise_presence {
         return Err(Error::InvalidConfig(
@@ -435,6 +436,7 @@ fn validate_onion_role_config(
                 )));
             }
         }
+        onion_exit_policy.validate_targets()?;
     }
     Ok(())
 }
@@ -490,6 +492,7 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
             ins.advertise_onion_relay,
             ins.advertise_onion_exit,
             &ins.onion_exit_services,
+            &ins.onion_exit_policy,
         )?;
         Ok(Self {
             network_id: ins.network_id,
@@ -606,6 +609,7 @@ impl ProcessorBuilder {
             config.advertise_onion_relay,
             config.advertise_onion_exit,
             &config.onion_exit_services,
+            &config.onion_exit_policy,
         )?;
         Ok(Self {
             network_id: config.network_id,
@@ -1427,6 +1431,24 @@ mod test {
     }
 
     #[test]
+    fn advertised_onion_exit_requires_open_policy() {
+        let key = SecretKey::random();
+        let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+        let serialized = ProcessorConfigSerialized::new(
+            0,
+            "stun://stun.l.google.com:19302".to_string(),
+            session_sk.dump().unwrap(),
+            3,
+        )
+        .advertise_onion_exit(true);
+
+        assert!(matches!(
+            ProcessorConfig::try_from(serialized),
+            Err(Error::InvalidConfig(message)) if message.contains("allowed target")
+        ));
+    }
+
+    #[test]
     fn onion_exit_registration_task_can_run_without_presence_advertisement() {
         let key = SecretKey::random();
         let session_sk = SessionSk::new_with_seckey(&key).unwrap();
@@ -1437,7 +1459,11 @@ mod test {
             3,
         )
         .advertise_presence(false)
-        .advertise_onion_exit(true);
+        .advertise_onion_exit(true)
+        .onion_exit_policy(OnionExitPolicy {
+            allowed_targets: vec!["example.com:443".to_string()],
+            ..OnionExitPolicy::default()
+        });
 
         let config = ProcessorConfig::try_from(serialized).unwrap();
         let processor = ProcessorBuilder::from_config(&config)
@@ -1543,6 +1569,10 @@ mod test {
         )
         .advertise_onion_exit(true);
         config.onion_exit_services = vec![OnionExitService::new("web", OnionExitTransport::Tcp)];
+        config.onion_exit_policy = OnionExitPolicy {
+            allowed_targets: vec!["example.com:443".to_string()],
+            ..OnionExitPolicy::default()
+        };
 
         assert!(ProcessorBuilder::from_config(&config).is_ok());
     }
@@ -1862,6 +1892,42 @@ mod test {
         assert_eq!(tcp_route.exit_did(), tcp_exit.did());
         assert_eq!(https_route.exit_service(), "https");
         assert_eq!(https_route.exit_did(), https_exit.did());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn onion_route_rejects_reserved_service_with_wrong_transport() -> Result<()> {
+        let processor = prepare_processor().await;
+        let exit = prepare_processor().await;
+        let descriptor = onion_exit_descriptor_for_processor_with_service(
+            &exit,
+            OnionExitService::new("https", OnionExitTransport::Tcp),
+            get_epoch_ms(),
+            OnionExitPolicy {
+                allowed_targets: vec!["example.com:443".to_string()],
+                denied_targets: vec![],
+                max_circuits: 8,
+                max_streams_per_circuit: 2,
+                max_bytes_per_minute: 4096,
+            },
+        )?;
+
+        processor
+            .storage_store(Processor::onion_exit_registry_entry(vec![descriptor])?)
+            .await?;
+
+        let error = processor
+            .build_onion_route("https".to_string(), 1, false)
+            .await
+            .err()
+            .ok_or_else(|| Error::OnionRouteError("expected route failure".to_string()))?;
+
+        assert!(matches!(
+            error,
+            Error::OnionRouteError(message)
+                if message.contains("no live onion exit")
+                    && message.contains("https")
+        ));
         Ok(())
     }
 

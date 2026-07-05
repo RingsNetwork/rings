@@ -163,6 +163,17 @@ impl OnionExitService {
         self.has_name(service) && self.transport == transport
     }
 
+    /// Return whether this service satisfies a route request for `service`.
+    ///
+    /// Built-in service names reserve their transport class. Custom service names remain
+    /// application-defined and match by name.
+    pub fn matches_route_service(&self, service: &str) -> bool {
+        match Self::reserved_transport(service) {
+            Some(transport) => self.matches(service, transport),
+            None => self.has_name(service),
+        }
+    }
+
     /// Return the reserved transport for a built-in service name.
     pub fn reserved_transport(service: &str) -> Option<OnionExitTransport> {
         match service {
@@ -191,7 +202,43 @@ pub struct OnionExitPolicy {
 impl OnionExitPolicy {
     /// Return whether this policy denies every exit target.
     pub fn is_closed(&self) -> bool {
-        self.allowed_targets.is_empty()
+        !self.has_valid_allowed_target()
+    }
+
+    /// Return whether this policy has at least one syntactically valid allowed target.
+    pub fn has_valid_allowed_target(&self) -> bool {
+        self.allowed_targets
+            .iter()
+            .any(|target| canonical_exit_target(target).is_some())
+    }
+
+    /// Validate target lists for an advertised onion exit.
+    pub fn validate_targets(&self) -> Result<()> {
+        if let Some(target) = self
+            .allowed_targets
+            .iter()
+            .find(|target| canonical_exit_target(target).is_none())
+        {
+            return Err(Error::InvalidConfig(format!(
+                "invalid onion exit allowed target {target:?}; expected host:port"
+            )));
+        }
+        if let Some(target) = self
+            .denied_targets
+            .iter()
+            .find(|target| canonical_exit_target(target).is_none())
+        {
+            return Err(Error::InvalidConfig(format!(
+                "invalid onion exit denied target {target:?}; expected host:port"
+            )));
+        }
+        if self.is_closed() {
+            return Err(Error::InvalidConfig(
+                "advertise_onion_exit requires at least one valid onion_exit_policy allowed target"
+                    .to_string(),
+            ));
+        }
+        Ok(())
     }
 
     /// Return whether `target` is admitted by this policy's allow-list.
@@ -400,7 +447,7 @@ impl OnionExitDescriptor {
     pub fn offers_service(&self, service: &str) -> bool {
         self.services
             .iter()
-            .any(|candidate| candidate.has_name(service))
+            .any(|candidate| candidate.matches_route_service(service))
     }
 
     /// Return whether this descriptor offers `service` over `transport`.

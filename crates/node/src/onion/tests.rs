@@ -105,10 +105,23 @@ fn default_exit_services_include_native_tcp_only() {
 }
 
 #[test]
+fn reserved_service_name_requires_reserved_transport_for_routes() {
+    assert!(OnionExitService::https().matches_route_service("https"));
+    assert!(!OnionExitService::new("https", OnionExitTransport::Tcp).matches_route_service("https"));
+    assert!(
+        OnionExitService::new("custom", OnionExitTransport::Tcp).matches_route_service("custom")
+    );
+}
+
+#[test]
 fn default_exit_policy_is_closed() {
     let policy = OnionExitPolicy::default();
     assert!(policy.is_closed());
     assert!(!policy.allows_target("example.com:443"));
+    assert!(matches!(
+        policy.validate_targets(),
+        Err(Error::InvalidConfig(message)) if message.contains("allowed target")
+    ));
 }
 
 #[test]
@@ -129,6 +142,28 @@ fn exit_policy_allow_list_controls_targets() {
     assert!(!policy.allows_target("api.example.com:443"));
     assert!(!policy.allows_target("other.example.com:443"));
     assert!(!policy.allows_target(""));
+}
+
+#[test]
+fn exit_policy_rejects_invalid_target_entries() {
+    let invalid_allowed = OnionExitPolicy {
+        allowed_targets: vec!["example.com".to_string()],
+        ..OnionExitPolicy::default()
+    };
+    assert!(matches!(
+        invalid_allowed.validate_targets(),
+        Err(Error::InvalidConfig(message)) if message.contains("allowed target")
+    ));
+
+    let invalid_denied = OnionExitPolicy {
+        allowed_targets: vec!["example.com:443".to_string()],
+        denied_targets: vec!["blocked.example.com".to_string()],
+        ..OnionExitPolicy::default()
+    };
+    assert!(matches!(
+        invalid_denied.validate_targets(),
+        Err(Error::InvalidConfig(message)) if message.contains("denied target")
+    ));
 }
 
 #[test]

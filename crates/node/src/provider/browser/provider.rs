@@ -282,19 +282,13 @@ impl Provider {
         denied_targets: Vec<String>,
     ) -> js_sys::Promise {
         future_to_promise(async move {
-            if allowed_targets.is_empty() {
-                return Err(JsValue::from(JsError::from(
-                    crate::error::Error::InvalidConfig(
-                        "browser HTTPS onion exit requires at least one allowed target".to_string(),
-                    ),
-                )));
-            }
             let signer = wrapped_signer(signer);
             let policy = OnionExitPolicy {
                 allowed_targets,
                 denied_targets,
                 ..OnionExitPolicy::default()
             };
+            policy.validate_targets().map_err(JsError::from)?;
 
             let entry_storage = Box::new(
                 IdbStorage::new_with_cap_and_name(50000, "rings-node")
