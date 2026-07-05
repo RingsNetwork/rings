@@ -2,7 +2,8 @@
 
 Commit: base Docker artifacts were collected from `2efb302bf92a7b383e10c3c6d17b0a7764b92579`;
 the dummy simulator JSONL was regenerated after applying the Chord wrapping
-finger fix tracked by issue #658 in this PR branch.
+finger fix tracked by issue #658 and adding the `maintained_chord`
+maintenance model in this PR branch.
 Machine: Apple M1 Max, 68719476736 bytes RAM, macOS-15.6.1-arm64-arm-64bit-Mach-O
 Tools: `rustc 1.94.1 (e408947bf 2026-03-25)`, `cargo 1.94.1 (29ea6fb6a 2026-03-24)`, `Docker version 28.3.2, build 578ccf607d`
 Docker image: `rings-node-cluster:benchmark-artifacts-2efb302b` / `sha256:1c5d41481958e3fe0f403b53955831cbbd36d2041bf3954a34d71ad02b6a5b5a`
@@ -40,30 +41,53 @@ python3 scripts/dht_docker_cluster_bench.py --container rings-cluster-16-artifac
 RINGS_DHT_BENCH_NODES=1600 RINGS_DHT_BENCH_LOOKUPS_PER_NODE=64 RINGS_DHT_BENCH_FINGER_TABLE_SIZES=160 cargo bench -p rings-core --bench dht_network_sim --no-default-features --features dummy
 ```
 
+By default, the dummy bench emits `instant_stale_snapshot` and
+`maintained_chord` rows for failure/churn scenarios. Use
+`RINGS_DHT_BENCH_MAINTENANCE_MODELS=instant_stale_snapshot` or
+`RINGS_DHT_BENCH_MAINTENANCE_MODELS=maintained_chord` to limit the emitted
+maintenance model.
+
 ## Dummy DHT Simulator
 
-This is the Chord-style baseline for paper object `B_C(eta)`. It does not use WebRTC; it uses deterministic Chord routing state with wrapping Chord finger semantics at `N=1600`, `finger_table_size=160`, and `lookups_per_node=64`.
+This is the Chord-style baseline for paper object `B_C(eta)`. It does not use WebRTC; it uses deterministic Chord routing state with wrapping Chord finger semantics at `N=1600`, `finger_table_size=160`, and `lookups_per_node=64`. The `instant_stale_snapshot` rows keep stale failure/churn routing state without repair; the `maintained_chord` rows rebuild active nodes' successor/finger state over the current active ring, modelling post-maintenance steady-state Chord.
 
-| scenario | active nodes | lookups | correctness | avg hops | timeouts | failures / 10k | full matches |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| stable | 1600 | 102400 | 100.00% | 5.469 | 0 | 0.000 | 1600 |
-| failed_nodes_10pct | 1440 | 92160 | 99.02% | 5.758 | 67623 | 98.199 | 398 |
-| failed_nodes_20pct | 1280 | 81920 | 96.85% | 6.186 | 154801 | 314.697 | 97 |
-| churn_5pct | 1600 | 102400 | 94.54% | 5.617 | 36979 | 546.191 | 456 |
-| churn_10pct | 1600 | 102400 | 89.57% | 5.756 | 74269 | 1043.359 | 269 |
-| churn_15pct | 1600 | 102400 | 83.95% | 5.923 | 123922 | 1605.273 | 277 |
-| churn_20pct | 1600 | 102400 | 77.88% | 6.151 | 185826 | 2211.621 | 331 |
-| churn_25pct | 1600 | 102400 | 69.80% | 6.270 | 241159 | 3019.922 | 406 |
-| churn_30pct | 1600 | 102400 | 62.86% | 6.485 | 327091 | 3713.574 | 480 |
-| churn_35pct | 1600 | 102400 | 55.63% | 6.659 | 409032 | 4436.914 | 560 |
-| churn_40pct | 1600 | 102400 | 48.39% | 6.746 | 471442 | 5161.133 | 640 |
+| scenario | model | active nodes | lookups | correctness | avg lookup rounds | avg forward hops | timeouts | failures / 10k | full matches |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| stable | maintained_chord | 1600 | 102400 | 100.00% | 5.469 | 4.469 | 0 | 0.000 | 1600 |
+| failed_nodes_10pct | instant_stale_snapshot | 1440 | 92160 | 99.02% | 5.758 | 4.758 | 67623 | 98.199 | 398 |
+| failed_nodes_10pct | maintained_chord | 1440 | 92160 | 100.00% | 5.394 | 4.394 | 0 | 0.000 | 1440 |
+| failed_nodes_20pct | instant_stale_snapshot | 1280 | 81920 | 96.85% | 6.186 | 5.186 | 154801 | 314.697 | 97 |
+| failed_nodes_20pct | maintained_chord | 1280 | 81920 | 100.00% | 5.316 | 4.316 | 0 | 0.000 | 1280 |
+| churn_5pct | instant_stale_snapshot | 1600 | 102400 | 94.54% | 5.617 | 4.617 | 36979 | 546.191 | 456 |
+| churn_5pct | maintained_chord | 1600 | 102400 | 100.00% | 5.465 | 4.465 | 0 | 0.000 | 1600 |
+| churn_10pct | instant_stale_snapshot | 1600 | 102400 | 89.57% | 5.756 | 4.756 | 74269 | 1043.359 | 269 |
+| churn_10pct | maintained_chord | 1600 | 102400 | 100.00% | 5.464 | 4.464 | 0 | 0.000 | 1600 |
+| churn_15pct | instant_stale_snapshot | 1600 | 102400 | 83.95% | 5.923 | 4.923 | 123922 | 1605.273 | 277 |
+| churn_15pct | maintained_chord | 1600 | 102400 | 100.00% | 5.452 | 4.452 | 0 | 0.000 | 1600 |
+| churn_20pct | instant_stale_snapshot | 1600 | 102400 | 77.88% | 6.151 | 5.151 | 185826 | 2211.621 | 331 |
+| churn_20pct | maintained_chord | 1600 | 102400 | 100.00% | 5.458 | 4.458 | 0 | 0.000 | 1600 |
+| churn_25pct | instant_stale_snapshot | 1600 | 102400 | 69.80% | 6.270 | 5.270 | 241159 | 3019.922 | 406 |
+| churn_25pct | maintained_chord | 1600 | 102400 | 100.00% | 5.456 | 4.456 | 0 | 0.000 | 1600 |
+| churn_30pct | instant_stale_snapshot | 1600 | 102400 | 62.86% | 6.485 | 5.485 | 327091 | 3713.574 | 480 |
+| churn_30pct | maintained_chord | 1600 | 102400 | 100.00% | 5.456 | 4.456 | 0 | 0.000 | 1600 |
+| churn_35pct | instant_stale_snapshot | 1600 | 102400 | 55.63% | 6.659 | 5.659 | 409032 | 4436.914 | 560 |
+| churn_35pct | maintained_chord | 1600 | 102400 | 100.00% | 5.465 | 4.465 | 0 | 0.000 | 1600 |
+| churn_40pct | instant_stale_snapshot | 1600 | 102400 | 48.39% | 6.746 | 5.746 | 471442 | 5161.133 | 640 |
+| churn_40pct | maintained_chord | 1600 | 102400 | 100.00% | 5.470 | 4.470 | 0 | 0.000 | 1600 |
 
 The dummy JSONL includes per-scenario `build_elapsed_ms` and
-`lookup_elapsed_ms`. Summed across the 11 emitted scenarios, build time was
-519.763 ms and lookup time was 69914.777 ms. After switching to wrapping
-finger semantics, the stable baseline remained `avg_hops=5.469355`; the change
-aligns runtime/spec finger semantics but does not by itself reduce this
-aggregate stable hop count.
+`lookup_elapsed_ms`. Summed across the 21 emitted scenarios, build time was
+1031.342 ms and lookup time was 126267.594 ms. `avg_hops` in the JSONL is
+lookup-round count; `avg_forward_hops` subtracts the terminal resolution round
+and is the metric to compare with the Chord paper's forwarding/path length.
+After switching to wrapping finger semantics, the stable baseline remained
+`avg_hops=5.469355` and `avg_forward_hops=4.469355`; the change aligns
+runtime/spec finger semantics but does not by itself reduce this aggregate
+stable hop count.
+
+For paper Chord-baseline comparisons, use the `maintained_chord` rows. The
+`instant_stale_snapshot` rows are retained as a harsher no-maintenance pressure
+test that explains the large timeout/failure counts.
 
 ## Docker/WebRTC Convergence
 
@@ -90,5 +114,7 @@ For 64 KiB payloads, `destination_received_delta` is larger than application mes
 ## Paper Use
 
 - Use `dummy-paper-scale-2026-07-05.jsonl` for the Chord baseline curves and tables.
+- Prefer the `maintained_chord` rows for comparisons against the original Chord paper.
+- Use `instant_stale_snapshot` rows only when discussing stale-state sensitivity after abrupt failure/churn without repair.
 - Use Docker/WebRTC convergence and transport artifacts as Rings implementation evidence, not as the Chord theoretical baseline.
 - Do not collapse the fresh-cluster Docker convergence result into a steady-state lookup number. This run did not converge within the sampled window.

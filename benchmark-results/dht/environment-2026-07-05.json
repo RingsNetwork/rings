@@ -1,5 +1,5 @@
 {
-  "collected_at_unix_ms": 1783194981361,
+  "collected_at_unix_ms": 1783232862348,
   "commands": {
     "docker_convergence": "python3 scripts/dht_docker_cluster_bench.py --container rings-cluster-16-artifacts --nodes 16 --finger-table-size 16 --cluster-topology ring --stabilize-interval-seconds 1 --docker-image rings-node-cluster:benchmark-artifacts-2efb302b --samples 1 (looped every 10s for 30 samples)",
     "docker_ring_start": "docker run -d --rm --name rings-cluster-16-artifacts -e RINGS_NODE_COUNT=16 -e RINGS_ALLOW_RANDOM_KEYS=true -e RINGS_CONNECT_TOPOLOGY=ring -e RINGS_STABILIZE_INTERVAL=1 -e RINGS_DHT_FINGER_TABLE_SIZE=16 -e RINGS_READY_RETRIES=180 -e RINGS_LOG_LEVEL=warn rings-node-cluster:benchmark-artifacts-2efb302b",
@@ -11,11 +11,15 @@
     "tag": "rings-node-cluster:benchmark-artifacts-2efb302b"
   },
   "dht_finger_policy": "chord_wrapping",
+  "dht_maintenance_models": [
+    "instant_stale_snapshot",
+    "maintained_chord"
+  ],
   "git_branch": "codex/dht-benchmark-653",
   "git_head": "2efb302bf92a7b383e10c3c6d17b0a7764b92579",
   "git_head_short": "2efb302b",
   "git_head_scope": "base Docker artifacts only",
-  "dummy_source": "current PR branch after issue #658 Chord wrapping finger fix",
+  "dummy_source": "current PR branch after issue #658 Chord wrapping finger fix and maintained_chord benchmark model",
   "machine": {
     "cpu_brand": "Apple M1 Max",
     "machine": "arm64",
@@ -29,7 +33,7 @@
     "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)"
   },
   "notes": [
-    "dummy-paper-scale-2026-07-05.jsonl was regenerated after applying issue #658 Chord wrapping finger semantics in the PR branch.",
+    "dummy-paper-scale-2026-07-05.jsonl was regenerated after applying issue #658 Chord wrapping finger semantics and adding maintained_chord rows in the PR branch.",
     "Docker convergence and transport artifacts still use rings-node-cluster:benchmark-artifacts-2efb302b."
   ]
 }

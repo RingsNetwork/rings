@@ -16,6 +16,10 @@ const DEFAULT_FINGER_TABLE_SIZES: &[usize] = &[160];
 const DEFAULT_FAILED_NODE_PCTS: &[usize] = &[0, 10, 20];
 const DEFAULT_CHURN_RATE_PCTS: &[usize] = &[5, 10, 15, 20, 25, 30, 35, 40];
 const DEFAULT_LOOKUP_MODE: &str = "random";
+const DEFAULT_MAINTENANCE_MODELS: &[MaintenanceModel] = &[
+    MaintenanceModel::InstantStaleSnapshot,
+    MaintenanceModel::MaintainedChord,
+];
 const DHT_SUCCESSOR_CAPACITY: usize = 3;
 const LOOKUPS_PER_10K: usize = 10_000;
 const MAX_LOOKUP_HOPS: usize = 64;
@@ -32,6 +36,10 @@ enum BenchError {
     EmptyList { name: &'static str },
     #[error("unsupported lookup mode {0:?}; expected random or finger_offsets")]
     UnsupportedLookupMode(String),
+    #[error(
+        "unsupported maintenance model {0:?}; expected instant_stale_snapshot or maintained_chord"
+    )]
+    UnsupportedMaintenanceModel(String),
     #[error("node count must be greater than one")]
     TooFewNodes,
     #[error("active node set must not be empty")]
@@ -58,6 +66,21 @@ impl LookupMode {
         match self {
             Self::Random => "random",
             Self::FingerOffsets => "finger_offsets",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MaintenanceModel {
+    InstantStaleSnapshot,
+    MaintainedChord,
+}
+
+impl MaintenanceModel {
+    fn name(self) -> &'static str {
+        match self {
+            Self::InstantStaleSnapshot => "instant_stale_snapshot",
+            Self::MaintainedChord => "maintained_chord",
         }
     }
 }
@@ -92,6 +115,7 @@ struct LookupMetrics {
     success_rate: f64,
     correctness_rate: f64,
     avg_hops: f64,
+    avg_forward_hops: f64,
     max_hops: usize,
     timeouts: usize,
     mean_lookup_timeouts: f64,
@@ -117,6 +141,7 @@ struct ScenarioReport {
     report: &'static str,
     backend: &'static str,
     scenario: &'static str,
+    maintenance_model: &'static str,
     node_count: usize,
     total_nodes: usize,
     active_nodes: usize,
@@ -197,6 +222,7 @@ fn main() -> Result<(), BenchError> {
     let finger_table_sizes = finger_table_sizes()?;
     let lookups_per_node = env_usize("RINGS_DHT_BENCH_LOOKUPS_PER_NODE", DEFAULT_LOOKUPS_PER_NODE)?;
     let lookup_mode = lookup_mode()?;
+    let maintenance_models = maintenance_models()?;
     let failed_node_pcts =
         percent_list("RINGS_DHT_BENCH_FAILED_NODE_PCTS", DEFAULT_FAILED_NODE_PCTS)?;
     let churn_rate_pcts = percent_list("RINGS_DHT_BENCH_CHURN_RATE_PCTS", DEFAULT_CHURN_RATE_PCTS)?;
@@ -208,6 +234,7 @@ fn main() -> Result<(), BenchError> {
             finger_table_size,
             lookups_per_node,
             lookup_mode,
+            MaintenanceModel::MaintainedChord,
         )?;
         println!("{}", serde_json::to_string(&stable)?);
 
@@ -215,32 +242,38 @@ fn main() -> Result<(), BenchError> {
             if *failed_node_pct == 0 {
                 continue;
             }
-            let report = run_scenario(
-                ScenarioSpec::FailedNodes {
-                    failed_node_pct: *failed_node_pct,
-                },
-                node_count,
-                finger_table_size,
-                lookups_per_node,
-                lookup_mode,
-            )?;
-            println!("{}", serde_json::to_string(&report)?);
+            for maintenance_model in &maintenance_models {
+                let report = run_scenario(
+                    ScenarioSpec::FailedNodes {
+                        failed_node_pct: *failed_node_pct,
+                    },
+                    node_count,
+                    finger_table_size,
+                    lookups_per_node,
+                    lookup_mode,
+                    *maintenance_model,
+                )?;
+                println!("{}", serde_json::to_string(&report)?);
+            }
         }
 
         for join_leave_rate_pct in &churn_rate_pcts {
             if *join_leave_rate_pct == 0 {
                 continue;
             }
-            let report = run_scenario(
-                ScenarioSpec::Churn {
-                    join_leave_rate_pct: *join_leave_rate_pct,
-                },
-                node_count,
-                finger_table_size,
-                lookups_per_node,
-                lookup_mode,
-            )?;
-            println!("{}", serde_json::to_string(&report)?);
+            for maintenance_model in &maintenance_models {
+                let report = run_scenario(
+                    ScenarioSpec::Churn {
+                        join_leave_rate_pct: *join_leave_rate_pct,
+                    },
+                    node_count,
+                    finger_table_size,
+                    lookups_per_node,
+                    lookup_mode,
+                    *maintenance_model,
+                )?;
+                println!("{}", serde_json::to_string(&report)?);
+            }
         }
     }
 
@@ -253,9 +286,10 @@ fn run_scenario(
     finger_table_size: usize,
     lookups_per_node: usize,
     lookup_mode: LookupMode,
+    maintenance_model: MaintenanceModel,
 ) -> Result<ScenarioReport, BenchError> {
     let build_started = Instant::now();
-    let input = scenario_input(&scenario, node_count)?;
+    let input = scenario_input(&scenario, node_count, maintenance_model)?;
     let identities = generate_identities(input.total_nodes)?;
     let network = build_network(
         identities,
@@ -275,6 +309,7 @@ fn run_scenario(
         report: "dummy_dht_sim",
         backend: "peer_ring_topology",
         scenario: scenario.name(),
+        maintenance_model: maintenance_model.name(),
         node_count,
         total_nodes: input.total_nodes,
         active_nodes: network.active.len(),
@@ -304,7 +339,11 @@ fn run_scenario(
     })
 }
 
-fn scenario_input(scenario: &ScenarioSpec, node_count: usize) -> Result<ScenarioInput, BenchError> {
+fn scenario_input(
+    scenario: &ScenarioSpec,
+    node_count: usize,
+    maintenance_model: MaintenanceModel,
+) -> Result<ScenarioInput, BenchError> {
     let total_nodes = match scenario {
         ScenarioSpec::Churn {
             join_leave_rate_pct,
@@ -372,6 +411,17 @@ fn scenario_input(scenario: &ScenarioSpec, node_count: usize) -> Result<Scenario
 
     if active_indices.is_empty() {
         return Err(BenchError::NoActiveNodes);
+    }
+
+    if maintenance_model == MaintenanceModel::MaintainedChord {
+        // Model a post-maintenance steady state: departed nodes have been
+        // removed, joiners have been learned, and all active nodes route over
+        // the same current ring.
+        let active_known = active_indices.iter().copied().collect::<Vec<_>>();
+        state_known_sets.clear();
+        for index in &active_indices {
+            state_known_sets.insert(*index, active_known.clone());
+        }
     }
 
     Ok(ScenarioInput {
@@ -744,6 +794,10 @@ impl LookupAccumulator {
             success_rate: ratio(self.resolved, self.total),
             correctness_rate: ratio(self.correct, self.total),
             avg_hops: average(self.total_hops as u64, self.resolved),
+            avg_forward_hops: average(
+                self.total_hops.saturating_sub(self.resolved) as u64,
+                self.resolved,
+            ),
             max_hops: self.max_hops,
             timeouts: self.timeouts,
             mean_lookup_timeouts: average(self.timeouts as u64, self.total),
@@ -924,6 +978,30 @@ fn lookup_mode() -> Result<LookupMode, BenchError> {
         "finger_offsets" => Ok(LookupMode::FingerOffsets),
         other => Err(BenchError::UnsupportedLookupMode(other.to_string())),
     }
+}
+
+fn maintenance_models() -> Result<Vec<MaintenanceModel>, BenchError> {
+    let Ok(raw) = env::var("RINGS_DHT_BENCH_MAINTENANCE_MODELS") else {
+        return Ok(DEFAULT_MAINTENANCE_MODELS.to_vec());
+    };
+    let mut models = Vec::new();
+    for value in raw
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        models.push(match value {
+            "instant_stale_snapshot" => MaintenanceModel::InstantStaleSnapshot,
+            "maintained_chord" => MaintenanceModel::MaintainedChord,
+            other => return Err(BenchError::UnsupportedMaintenanceModel(other.to_string())),
+        });
+    }
+    if models.is_empty() {
+        return Err(BenchError::EmptyList {
+            name: "RINGS_DHT_BENCH_MAINTENANCE_MODELS",
+        });
+    }
+    Ok(models)
 }
 
 fn add_mod(value: &BigUint, offset: &BigUint, modulus: &BigUint) -> BigUint {
