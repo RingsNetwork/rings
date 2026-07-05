@@ -4,7 +4,8 @@
     "docker_convergence": "python3 scripts/dht_docker_cluster_bench.py --container rings-cluster-16-artifacts --nodes 16 --finger-table-size 16 --cluster-topology ring --stabilize-interval-seconds 1 --docker-image rings-node-cluster:benchmark-artifacts-2efb302b --samples 1 (looped every 10s for 30 samples)",
     "docker_ring_start": "docker run -d --rm --name rings-cluster-16-artifacts -e RINGS_NODE_COUNT=16 -e RINGS_ALLOW_RANDOM_KEYS=true -e RINGS_CONNECT_TOPOLOGY=ring -e RINGS_STABILIZE_INTERVAL=1 -e RINGS_DHT_FINGER_TABLE_SIZE=16 -e RINGS_READY_RETRIES=180 -e RINGS_LOG_LEVEL=warn rings-node-cluster:benchmark-artifacts-2efb302b",
     "docker_transport_sweep": "python3 scripts/dht_docker_cluster_bench.py --container rings-cluster-16-artifacts --nodes 16 --finger-table-size 16 --cluster-topology ring --stabilize-interval-seconds 1 --docker-image rings-node-cluster:benchmark-artifacts-2efb302b --throughput-source-index 0 --throughput-destination-index 1 --throughput-flush-timeout-ms 60000 (payload sweep)",
-    "dummy_paper_scale": "RINGS_DHT_BENCH_NODES=1600 RINGS_DHT_BENCH_LOOKUPS_PER_NODE=64 RINGS_DHT_BENCH_FINGER_TABLE_SIZES=160 cargo bench -p rings-core --bench dht_network_sim --no-default-features --features dummy"
+    "dummy_paper_scale": "RINGS_DHT_BENCH_NODES=1600 RINGS_DHT_BENCH_LOOKUPS_PER_NODE=64 RINGS_DHT_BENCH_FINGER_TABLE_SIZES=160 cargo bench -p rings-core --bench dht_network_sim --no-default-features --features dummy",
+    "chord_paper_sim": "python3 scripts/chord_paper_sim.py --include all > benchmark-results/dht/chord-paper-sim-2026-07-05.jsonl"
   },
   "docker_image": {
     "id": "sha256:1c5d41481958e3fe0f403b53955831cbbd36d2041bf3954a34d71ad02b6a5b5a",
@@ -20,6 +21,8 @@
   "git_head_short": "2efb302b",
   "git_head_scope": "base Docker artifacts only",
   "dummy_source": "current PR branch after issue #658 Chord wrapping finger fix and maintained_chord benchmark model",
+  "paper_sim_source": "scripts/chord_paper_sim.py in current PR branch; simulator-only paper alignment for Chord Table II/III/IV and Fig. 8/9/10",
+  "virtual_nodes_issue": "https://github.com/RyanKung/rings/issues/659",
   "machine": {
     "cpu_brand": "Apple M1 Max",
     "machine": "arm64",
@@ -34,6 +37,8 @@
   },
   "notes": [
     "dummy-paper-scale-2026-07-05.jsonl was regenerated after applying issue #658 Chord wrapping finger semantics and adding maintained_chord rows in the PR branch.",
+    "chord-paper-sim-2026-07-05.jsonl maps the original Chord paper's numbered tables and data figures to local simulator rows.",
+    "Fig. 9 virtual-node data is simulator-only; Rings runtime virtual-node support is tracked separately by issue #659.",
     "Docker convergence and transport artifacts still use rings-node-cluster:benchmark-artifacts-2efb302b."
   ]
 }

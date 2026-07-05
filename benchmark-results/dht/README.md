@@ -11,6 +11,7 @@ Docker image: `rings-node-cluster:benchmark-artifacts-2efb302b` / `sha256:1c5d41
 ## Files
 
 - `dummy-paper-scale-2026-07-05.jsonl`: Paper-scale Chord baseline from the dummy DHT simulator.
+- `chord-paper-sim-2026-07-05.jsonl`: Paper-aligned simulator rows for Chord Table II/III/IV and Fig. 8/9/10.
 - `docker-convergence-16node-2026-07-05.jsonl`: Fresh 16-node ring Docker/WebRTC cluster samples from cluster-ready for about 5 minutes.
 - `docker-transport-16node-2026-07-05.jsonl`: Real WebRTC node-internal transport burst payload sweep on fixed node0 -> node1.
 - `environment-2026-07-05.json`: Machine, tool, image, commit, and command metadata.
@@ -46,8 +47,89 @@ By default, the dummy bench emits `instant_stale_snapshot` and
 `RINGS_DHT_BENCH_MAINTENANCE_MODELS=instant_stale_snapshot` or
 `RINGS_DHT_BENCH_MAINTENANCE_MODELS=maintained_chord` to limit the emitted
 maintenance model. Use `RINGS_DHT_BENCH_SUCCESSOR_CAPACITY=<n>` to override
-the default successor-list capacity of 3; `8` is useful when reproducing the
-smaller hop counts from the original Chord paper's simulation table.
+the default successor-list capacity of 3; use `20` when mapping directly to the
+original Chord paper's Table II/III successor-list setting.
+
+- `chord_paper_sim`:
+
+```sh
+python3 scripts/chord_paper_sim.py --include all > benchmark-results/dht/chord-paper-sim-2026-07-05.jsonl
+```
+
+## Chord Paper Alignment
+
+`chord-paper-sim-2026-07-05.jsonl` is a simulator-only artifact for the
+original Chord paper's numbered tables and data figures. It exists so paper
+claims can be mapped one-to-one to a local artifact. It is not evidence that the
+Rings runtime implements every modeled feature.
+
+| paper item | original metric | artifact coverage |
+| --- | --- | --- |
+| Table I | Chord variable definitions | no benchmark row required; implementation semantics only |
+| Table II | simultaneous failures, `N=1000`, successor list `r=20`, 10,000 lookups | `paper_item=table_ii`, failed nodes 0%-50% |
+| Table III | lookups during stabilization, paired join/leave rates 0.05-0.40/s, `N~=1000`, `r=20` | `paper_item=table_iii`, event-driven dummy churn |
+| Table IV | lookup latency stretch, `N=2^16`, `s=1,2,4,8,16`, iterative/recursive, 3D/transit-stub | `paper_item=table_iv` |
+| Fig. 8 | consistent-hashing load balance, `10^4` nodes, `10^5..10^6` keys, 20 seeds | `paper_item=fig_8a` and `fig_8b` |
+| Fig. 9 | virtual nodes load balance, `10^4` real nodes, `10^6` keys, `r=1,2,5,10,20` virtual nodes | `paper_item=fig_9`, `runtime_support=simulator_only` |
+| Fig. 10 | path length scaling, `N=2^k`, `k=3..14`, plus PDF at `k=12` | `paper_item=fig_10a` and `fig_10b` |
+
+Rings does not currently have Chord-style virtual nodes, meaning one physical
+node advertising multiple unrelated ring positions for ownership/routing. The
+old `VNode` terminology is storage-entry terminology, not this Chord feature.
+Issue #659 tracks the runtime design decision for real virtual-node support.
+
+### Paper Simulator Highlights
+
+Table II, simultaneous node failures:
+
+| failed nodes | avg path length | path p1/p99 | avg timeouts | timeout p1/p99 | failures / 10k |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 0% | 3.815 | (1, 6) | 0.000 | (0, 0) | 0.0 |
+| 10% | 4.007 | (1, 7) | 0.522 | (0, 4) | 0.0 |
+| 20% | 4.177 | (1, 7) | 1.071 | (0, 6) | 0.0 |
+| 30% | 4.354 | (1, 8) | 1.830 | (0, 9) | 0.0 |
+| 40% | 4.791 | (1, 9) | 3.700 | (0, 14) | 0.0 |
+| 50% | 5.345 | (1, 11) | 6.565 | (0, 24) | 0.0 |
+
+Table III, lookups during stabilization:
+
+| join/leave rate | avg path length | path p1/p99 | avg timeouts | timeout p1/p99 | failures / 10k |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 0.05 / 1.5 | 3.905 | (1, 7) | 0.076 | (0, 2) | 7.0 |
+| 0.10 / 3.0 | 3.949 | (1, 7) | 0.168 | (0, 2) | 19.0 |
+| 0.15 / 4.5 | 4.044 | (1, 7) | 0.272 | (0, 3) | 18.0 |
+| 0.20 / 6.0 | 4.094 | (1, 7) | 0.335 | (0, 3) | 35.0 |
+| 0.25 / 7.5 | 4.128 | (1, 7) | 0.405 | (0, 4) | 36.0 |
+| 0.30 / 9.0 | 4.221 | (1, 7) | 0.501 | (0, 4) | 47.0 |
+| 0.35 / 10.5 | 4.308 | (1, 8) | 0.599 | (0, 4) | 60.0 |
+| 0.40 / 12.0 | 4.345 | (1, 8) | 0.656 | (0, 5) | 58.0 |
+
+The Table III simulator keeps the node count stable with paired join/leave
+events and models periodic successor-list plus one-finger stabilization. Its
+path length and timeout trends are paper-aligned, but its lookup failure counts
+are more pessimistic than the original Chord table because it does not model
+every departure optimization and application-level retry behavior from the
+paper.
+
+Table IV, lookup stretch medians with p10/p90 in parentheses:
+
+| s | iterative 3D | recursive 3D | iterative transit-stub | recursive transit-stub |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 7.15 (4.50, 13.73) | 4.02 (2.58, 7.80) | 8.46 (6.00, 11.46) | 4.73 (3.50, 6.23) |
+| 2 | 6.42 (4.04, 12.14) | 3.60 (2.32, 6.96) | 8.46 (5.91, 11.01) | 4.68 (3.46, 6.01) |
+| 4 | 5.59 (3.61, 10.51) | 3.19 (2.07, 6.07) | 7.91 (5.46, 10.91) | 4.46 (3.23, 5.96) |
+| 8 | 4.88 (3.17, 9.02) | 2.83 (1.89, 5.28) | 7.37 (5.00, 10.01) | 4.18 (2.96, 5.46) |
+| 16 | 4.30 (2.84, 7.85) | 2.55 (1.72, 4.78) | 6.46 (4.46, 9.28) | 3.68 (2.68, 4.96) |
+
+Fig. 9, simulator-only virtual-node load balance:
+
+| virtual nodes / real node | mean keys | p1 | p99 | max |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 100.0 | 1 | 464 | 955 |
+| 2 | 100.0 | 7 | 337 | 642 |
+| 5 | 100.0 | 25 | 234 | 423 |
+| 10 | 100.0 | 41 | 190 | 236 |
+| 20 | 100.0 | 55 | 158 | 214 |
 
 ## Dummy DHT Simulator
 
