@@ -1,5 +1,6 @@
 pub mod browser;
 pub mod processor;
+#[cfg(feature = "snark")]
 pub mod snark;
 use std::sync::Arc;
 
