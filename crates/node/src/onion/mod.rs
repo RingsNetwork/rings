@@ -1,9 +1,12 @@
 #![warn(missing_docs)]
-//! Application-layer onion routing directory and route selection.
+//! Application-layer circuit directory and route selection.
 //!
 //! This module deliberately sits in `rings-node`, not `rings-core`: Chord
-//! remains the storage and discovery substrate, while onion exit policy is an
+//! remains the storage and discovery substrate, while exit policy is an
 //! application protocol decision.
+//!
+//! The current data plane selects route-aware circuits and exit policies. It does not yet provide
+//! layered onion encryption; see [`circuit::ONION_CIRCUIT_SECURITY`].
 
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;

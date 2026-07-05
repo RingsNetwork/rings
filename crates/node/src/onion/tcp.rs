@@ -1,9 +1,8 @@
 //! Native TCP adapter for route-aware onion circuits.
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -45,14 +44,12 @@ impl NativeOnionCircuitHandle {
     /// Install the route-aware onion circuit protocol.
     pub fn install(extensions: &Extensions, exit_policy: Option<OnionExitPolicy>) -> Result<Self> {
         let runtime = Arc::new(OnionTcpRuntime::new(exit_policy));
-        if !extensions.contains(ONION_CIRCUIT_NAMESPACE) {
-            extensions.register(
-                OnionCircuitProtocol,
-                OnionCircuitShell::new(NativeOnionCircuitHandler {
-                    runtime: runtime.clone(),
-                }),
-            )?;
-        }
+        extensions.register(
+            OnionCircuitProtocol,
+            OnionCircuitShell::new(NativeOnionCircuitHandler {
+                runtime: runtime.clone(),
+            }),
+        )?;
         Ok(Self {
             runtime,
             scope: Scope::new(extensions.core(), ONION_CIRCUIT_NAMESPACE.to_string()),
@@ -95,19 +92,18 @@ impl OnionCircuitHandler for NativeOnionCircuitHandler {
     async fn handle_client(
         &self,
         scope: &Scope,
-        _from: Did,
+        from: Did,
         stream_id: u64,
         payload: OnionCircuitPayload,
     ) -> Result<()> {
         self.runtime
-            .handle_client_payload(scope.did(), stream_id, payload)
+            .handle_client_payload(scope.did(), from, stream_id, payload)
             .await
     }
 }
 
 struct OnionTcpRuntime {
-    next_stream: AtomicU64,
-    client_streams: Mutex<HashMap<TcpStreamKey, mpsc::Sender<TcpInbound>>>,
+    client_streams: Mutex<HashMap<TcpStreamKey, ClientStream>>,
     exit_streams: Mutex<HashMap<TcpStreamKey, mpsc::Sender<TcpInbound>>>,
     exit_policy: Option<OnionExitPolicy>,
     limiter: Arc<Mutex<TcpExitLimiter>>,
@@ -116,7 +112,6 @@ struct OnionTcpRuntime {
 impl OnionTcpRuntime {
     fn new(exit_policy: Option<OnionExitPolicy>) -> Self {
         Self {
-            next_stream: AtomicU64::new(0),
             client_streams: Mutex::new(HashMap::new()),
             exit_streams: Mutex::new(HashMap::new()),
             exit_policy,
@@ -131,24 +126,22 @@ impl OnionTcpRuntime {
         route: OnionRoute,
         target: OnionProxyTarget,
     ) -> Result<()> {
-        let stream_id = self.next_stream.fetch_add(1, Ordering::Relaxed);
-        let key = TcpStreamKey {
-            client: scope.did(),
-            stream_id,
-        };
+        let expected_return_peer = route
+            .hops
+            .first()
+            .copied()
+            .ok_or_else(|| Error::OnionRouteError("onion route has no hops".to_string()))?;
         let (tx, rx) = mpsc::channel(32);
-        self.client_streams
-            .lock()
-            .map_err(|_| Error::Lock)?
-            .insert(key, tx);
+        let key = self.insert_client_stream(scope.did(), expected_return_peer, tx)?;
         let (to, payload) = encode_initial_forward(
             scope.did(),
             &route,
-            stream_id,
+            key.stream_id,
             OnionCircuitPayload::TcpOpen {
                 target: target.authority(),
             },
         )?;
+        debug_assert_eq!(to, expected_return_peer);
         if let Err(error) = scope.send(to, payload).await {
             self.remove_client_stream(key);
             return Err(error);
@@ -198,6 +191,7 @@ impl OnionTcpRuntime {
     async fn handle_client_payload(
         self: &Arc<Self>,
         local: Did,
+        from: Did,
         stream_id: u64,
         payload: OnionCircuitPayload,
     ) -> Result<()> {
@@ -207,14 +201,18 @@ impl OnionTcpRuntime {
         };
         match payload {
             OnionCircuitPayload::TcpData { bytes } => {
-                self.send_client_inbound(key, TcpInbound::Data(bytes)).await
+                self.send_client_inbound(key, from, TcpInbound::Data(bytes))
+                    .await
             }
             OnionCircuitPayload::TcpShutdown => {
-                self.send_client_inbound(key, TcpInbound::Shutdown).await
+                self.send_client_inbound(key, from, TcpInbound::Shutdown)
+                    .await
             }
-            OnionCircuitPayload::TcpClose => self.send_client_inbound(key, TcpInbound::Close).await,
+            OnionCircuitPayload::TcpClose => {
+                self.send_client_inbound(key, from, TcpInbound::Close).await
+            }
             OnionCircuitPayload::TcpError { message } => {
-                self.send_client_inbound(key, TcpInbound::Error(message))
+                self.send_client_inbound(key, from, TcpInbound::Error(message))
                     .await
             }
             _ => Ok(()),
@@ -253,7 +251,7 @@ impl OnionTcpRuntime {
             )
             .await;
         }
-        let lease = match self.admit_exit_stream(policy, 0) {
+        let lease = match self.admit_exit_stream(policy, &return_path, 0) {
             Ok(lease) => lease,
             Err(error) => {
                 return send_backward(
@@ -315,12 +313,66 @@ impl OnionTcpRuntime {
         Ok(())
     }
 
-    async fn send_client_inbound(&self, key: TcpStreamKey, inbound: TcpInbound) -> Result<()> {
-        send_inbound(&self.client_streams, key, inbound).await
+    fn insert_client_stream(
+        &self,
+        client: Did,
+        expected_return_peer: Did,
+        tx: mpsc::Sender<TcpInbound>,
+    ) -> Result<TcpStreamKey> {
+        let mut streams = self.client_streams.lock().map_err(|_| Error::Lock)?;
+        for _ in 0..16 {
+            let key = TcpStreamKey {
+                client,
+                stream_id: rand::random(),
+            };
+            match streams.entry(key) {
+                Entry::Vacant(entry) => {
+                    entry.insert(ClientStream {
+                        expected_return_peer,
+                        tx,
+                    });
+                    return Ok(key);
+                }
+                Entry::Occupied(_) => {}
+            }
+        }
+        Err(Error::OnionRouteError(
+            "failed to allocate unique onion TCP stream id".to_string(),
+        ))
+    }
+
+    async fn send_client_inbound(
+        &self,
+        key: TcpStreamKey,
+        from: Did,
+        inbound: TcpInbound,
+    ) -> Result<()> {
+        let tx = self.client_inbound_sender(key, from)?;
+        tx.send(inbound)
+            .await
+            .map_err(|_| Error::OnionRouteError("onion TCP stream is closed".to_string()))
     }
 
     async fn send_exit_inbound(&self, key: TcpStreamKey, inbound: TcpInbound) -> Result<()> {
         send_inbound(&self.exit_streams, key, inbound).await
+    }
+
+    fn client_inbound_sender(
+        &self,
+        key: TcpStreamKey,
+        from: Did,
+    ) -> Result<mpsc::Sender<TcpInbound>> {
+        let streams = self.client_streams.lock().map_err(|_| Error::Lock)?;
+        let stream = streams
+            .get(&key)
+            .ok_or_else(|| Error::OnionRouteError("unknown onion TCP stream".to_string()))?;
+        if stream.expected_return_peer != from {
+            return Err(Error::OnionRouteError(format!(
+                "unexpected onion TCP return peer: expected {:?}, got {:?}",
+                stream.expected_return_peer, from
+            )));
+        }
+        Ok(stream.tx.clone())
     }
 
     fn remove_client_stream(&self, key: TcpStreamKey) {
@@ -335,15 +387,38 @@ impl OnionTcpRuntime {
         }
     }
 
-    fn admit_exit_stream(&self, policy: &OnionExitPolicy, bytes: u64) -> Result<TcpExitLease> {
+    fn admit_exit_stream(
+        &self,
+        policy: &OnionExitPolicy,
+        return_path: &[Did],
+        bytes: u64,
+    ) -> Result<TcpExitLease> {
+        let circuit = ExitCircuitKey::new(return_path);
         let mut limiter = self.limiter.lock().map_err(|_| Error::Lock)?;
-        if policy.max_circuits > 0 && limiter.active_circuits >= policy.max_circuits {
+        let active_streams = limiter
+            .active_streams_by_circuit
+            .get(&circuit)
+            .copied()
+            .unwrap_or_default();
+        if policy.max_streams_per_circuit > 0 && active_streams >= policy.max_streams_per_circuit {
             return Err(Error::NoPermission);
         }
-        limiter.active_circuits = limiter.active_circuits.saturating_add(1);
+        if active_streams == 0
+            && policy.max_circuits > 0
+            && limiter.active_circuits >= policy.max_circuits
+        {
+            return Err(Error::NoPermission);
+        }
+        if active_streams == 0 {
+            limiter.active_circuits = limiter.active_circuits.saturating_add(1);
+        }
+        limiter
+            .active_streams_by_circuit
+            .insert(circuit.clone(), active_streams.saturating_add(1));
         drop(limiter);
         let lease = TcpExitLease {
             limiter: self.limiter.clone(),
+            circuit,
         };
         if let Err(error) = self.record_exit_bytes(policy, bytes) {
             drop(lease);
@@ -377,6 +452,11 @@ struct TcpStreamKey {
     stream_id: u64,
 }
 
+struct ClientStream {
+    expected_return_peer: Did,
+    tx: mpsc::Sender<TcpInbound>,
+}
+
 #[derive(Debug)]
 enum TcpInbound {
     Data(Bytes),
@@ -388,18 +468,40 @@ enum TcpInbound {
 #[derive(Default)]
 struct TcpExitLimiter {
     active_circuits: u32,
+    active_streams_by_circuit: HashMap<ExitCircuitKey, u32>,
     window_start_ms: u128,
     bytes_this_window: u64,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ExitCircuitKey {
+    return_path: Vec<Did>,
+}
+
+impl ExitCircuitKey {
+    fn new(return_path: &[Did]) -> Self {
+        Self {
+            return_path: return_path.to_vec(),
+        }
+    }
+}
+
 struct TcpExitLease {
     limiter: Arc<Mutex<TcpExitLimiter>>,
+    circuit: ExitCircuitKey,
 }
 
 impl Drop for TcpExitLease {
     fn drop(&mut self) {
         if let Ok(mut limiter) = self.limiter.lock() {
-            limiter.active_circuits = limiter.active_circuits.saturating_sub(1);
+            if let Some(active_streams) = limiter.active_streams_by_circuit.get_mut(&self.circuit) {
+                if *active_streams > 1 {
+                    *active_streams -= 1;
+                } else {
+                    limiter.active_streams_by_circuit.remove(&self.circuit);
+                    limiter.active_circuits = limiter.active_circuits.saturating_sub(1);
+                }
+            }
         }
     }
 }
@@ -640,5 +742,55 @@ mod tests {
             return_path_client(&[]),
             Err(Error::OnionRouteError(_))
         ));
+    }
+
+    #[test]
+    fn client_stream_accepts_only_expected_return_peer() -> Result<()> {
+        let runtime = OnionTcpRuntime::new(None);
+        let client = did();
+        let expected = did();
+        let attacker = did();
+        let (tx, _rx) = mpsc::channel(1);
+        let key = runtime.insert_client_stream(client, expected, tx)?;
+
+        assert!(runtime.client_inbound_sender(key, expected).is_ok());
+        assert!(matches!(
+            runtime.client_inbound_sender(key, attacker),
+            Err(Error::OnionRouteError(_))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn exit_limiter_enforces_streams_per_circuit() {
+        let runtime = OnionTcpRuntime::new(None);
+        let policy = OnionExitPolicy {
+            max_streams_per_circuit: 1,
+            ..OnionExitPolicy::default()
+        };
+        let return_path = vec![did(), did()];
+
+        let lease = runtime
+            .admit_exit_stream(&policy, &return_path, 0)
+            .expect("first stream admitted");
+        assert!(matches!(
+            runtime.admit_exit_stream(&policy, &return_path, 0),
+            Err(Error::NoPermission)
+        ));
+        drop(lease);
+        assert!(runtime.admit_exit_stream(&policy, &return_path, 0).is_ok());
+    }
+
+    #[tokio::test]
+    async fn install_rejects_duplicate_namespace_instead_of_splitting_runtime() -> Result<()> {
+        let processor = Arc::new(crate::tests::native::prepare_processor().await);
+        let extensions = Extensions::new(processor);
+        let _handle = NativeOnionCircuitHandle::install(&extensions, None)?;
+
+        assert!(matches!(
+            NativeOnionCircuitHandle::install(&extensions, None),
+            Err(Error::ExtensionError(_))
+        ));
+        Ok(())
     }
 }

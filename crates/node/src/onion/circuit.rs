@@ -1,4 +1,10 @@
-//! Route-aware onion circuit data plane.
+//! Route-aware circuit data plane.
+//!
+//! Security model: this wire format is a routed circuit frame, not layered onion encryption.
+//! Relays receive the remaining route in clear text so they can forward without a relay
+//! encryption key. A cryptographic onion layer needs a descriptor-published relay encryption
+//! public key and per-hop decrypt/encrypt logic before this protocol can provide onion
+//! confidentiality.
 
 use bytes::Bytes;
 use rings_core::dht::Did;
@@ -18,6 +24,16 @@ use crate::onion::OnionRoute;
 
 /// Namespace used by route-aware onion circuit messages.
 pub const ONION_CIRCUIT_NAMESPACE: &str = "onion-circuit";
+
+/// Security mode implemented by the current circuit wire format.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OnionCircuitSecurity {
+    /// Routed circuit frames without layered per-hop encryption.
+    PlaintextRoute,
+}
+
+/// Current circuit security mode.
+pub const ONION_CIRCUIT_SECURITY: OnionCircuitSecurity = OnionCircuitSecurity::PlaintextRoute;
 
 /// One browser HTTPS request executed by an HTTPS exit.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -144,7 +160,7 @@ pub enum OnionCircuitEffect {
     },
 }
 
-/// Route-aware onion circuit protocol.
+/// Route-aware plaintext circuit protocol.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct OnionCircuitProtocol;
 
@@ -368,7 +384,9 @@ impl OnionCircuitHandler for BrowserOnionCircuitHandler {
     ) -> Result<()> {
         let response = match payload {
             OnionCircuitPayload::HttpsRequest(request) => {
-                match crate::onion_https::execute_exit_fetch(&self.https, &request).await {
+                match crate::onion_https::execute_exit_fetch(&self.https, &request, &return_path)
+                    .await
+                {
                     Ok(response) => OnionCircuitPayload::HttpsResponse(response),
                     Err(error) => OnionCircuitPayload::HttpsError(error.to_string()),
                 }

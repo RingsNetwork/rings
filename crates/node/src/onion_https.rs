@@ -4,6 +4,10 @@
 //! This protocol is intentionally application-layer HTTPS. Browser exits cannot expose raw TCP,
 //! so a client sends an HTTPS request description over the route-aware onion circuit, the exit
 //! performs `fetch`, and the response is sent back over the circuit return path.
+//!
+//! A browser page exit is constrained by the host browser's `fetch` capability: CORS, forbidden
+//! headers, credentials policy, and extension host permissions still apply. A full arbitrary HTTPS
+//! exit must run in a browser-extension or native context that grants those fetch permissions.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -107,18 +111,40 @@ struct PendingRequest {
 #[derive(Default)]
 struct ExitLimiter {
     active_circuits: u32,
+    active_streams_by_circuit: HashMap<ExitCircuitKey, u32>,
     window_start_ms: u128,
     bytes_this_window: u64,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ExitCircuitKey {
+    return_path: Vec<Did>,
+}
+
+impl ExitCircuitKey {
+    fn new(return_path: &[Did]) -> Self {
+        Self {
+            return_path: return_path.to_vec(),
+        }
+    }
+}
+
 struct ExitCircuitLease {
     limiter: Arc<Mutex<ExitLimiter>>,
+    circuit: ExitCircuitKey,
 }
 
 impl Drop for ExitCircuitLease {
     fn drop(&mut self) {
         if let Ok(mut limiter) = self.limiter.lock() {
-            limiter.active_circuits = limiter.active_circuits.saturating_sub(1);
+            if let Some(active_streams) = limiter.active_streams_by_circuit.get_mut(&self.circuit) {
+                if *active_streams > 1 {
+                    *active_streams -= 1;
+                } else {
+                    limiter.active_streams_by_circuit.remove(&self.circuit);
+                    limiter.active_circuits = limiter.active_circuits.saturating_sub(1);
+                }
+            }
         }
     }
 }
@@ -201,16 +227,39 @@ impl OnionHttpsRuntime {
             .and_then(|policy| policy.clone())
     }
 
-    fn admit_exit_request(&self, policy: &OnionExitPolicy, bytes: u64) -> Result<ExitCircuitLease> {
+    fn admit_exit_request(
+        &self,
+        policy: &OnionExitPolicy,
+        return_path: &[Did],
+        bytes: u64,
+    ) -> Result<ExitCircuitLease> {
+        let circuit = ExitCircuitKey::new(return_path);
         let mut limiter = self.limiter.lock().map_err(|_| Error::Lock)?;
-        if policy.max_circuits > 0 && limiter.active_circuits >= policy.max_circuits {
+        let active_streams = limiter
+            .active_streams_by_circuit
+            .get(&circuit)
+            .copied()
+            .unwrap_or_default();
+        if policy.max_streams_per_circuit > 0 && active_streams >= policy.max_streams_per_circuit {
             return Err(Error::NoPermission);
         }
-        limiter.active_circuits = limiter.active_circuits.saturating_add(1);
+        if active_streams == 0
+            && policy.max_circuits > 0
+            && limiter.active_circuits >= policy.max_circuits
+        {
+            return Err(Error::NoPermission);
+        }
+        if active_streams == 0 {
+            limiter.active_circuits = limiter.active_circuits.saturating_add(1);
+        }
+        limiter
+            .active_streams_by_circuit
+            .insert(circuit.clone(), active_streams.saturating_add(1));
         drop(limiter);
 
         let lease = ExitCircuitLease {
             limiter: self.limiter.clone(),
+            circuit,
         };
         if let Err(error) = self.record_exit_bytes(policy, bytes) {
             drop(lease);
@@ -263,6 +312,7 @@ pub(crate) fn client_request(
 pub(crate) async fn execute_exit_fetch(
     runtime: &OnionHttpsRuntime,
     request: &OnionHttpsRequest,
+    return_path: &[Did],
 ) -> Result<OnionHttpsResponse> {
     let target = OnionProxyTarget::parse_authority(&request.target)?;
     let authority = target.authority();
@@ -274,7 +324,7 @@ pub(crate) async fn execute_exit_fetch(
     if !policy.allows_target(&authority) {
         return Err(Error::NoPermission);
     }
-    let _lease = runtime.admit_exit_request(&policy, request.body.len() as u64)?;
+    let _lease = runtime.admit_exit_request(&policy, return_path, request.body.len() as u64)?;
     let url = format!("https://{}{}", authority, normalize_path(&request.path)?);
     let response = browser_fetch(&url, request, policy.max_bytes_per_minute).await?;
     runtime.record_exit_bytes(&policy, response.body.len() as u64)?;
@@ -561,12 +611,35 @@ mod tests {
             max_bytes_per_minute: 8,
             ..OnionExitPolicy::default()
         };
-        let _lease = runtime.admit_exit_request(&policy, 4).unwrap();
+        let return_path = vec![did()];
+        let _lease = runtime
+            .admit_exit_request(&policy, &return_path, 4)
+            .unwrap();
 
         assert!(runtime.record_exit_bytes(&policy, 4).is_ok());
         assert!(matches!(
             runtime.record_exit_bytes(&policy, 1),
             Err(Error::NoPermission)
         ));
+    }
+
+    #[test]
+    fn exit_limiter_enforces_streams_per_circuit() {
+        let runtime = OnionHttpsRuntime::new();
+        let policy = OnionExitPolicy {
+            max_streams_per_circuit: 1,
+            ..OnionExitPolicy::default()
+        };
+        let return_path = vec![did(), did()];
+
+        let lease = runtime
+            .admit_exit_request(&policy, &return_path, 0)
+            .expect("first stream admitted");
+        assert!(matches!(
+            runtime.admit_exit_request(&policy, &return_path, 0),
+            Err(Error::NoPermission)
+        ));
+        drop(lease);
+        assert!(runtime.admit_exit_request(&policy, &return_path, 0).is_ok());
     }
 }
