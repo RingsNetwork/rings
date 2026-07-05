@@ -50,7 +50,7 @@
 }
 
 \author{Ryan~J.~Kung%
-\thanks{Ryan J. Kung can be reached at ryankung@ieee.org. Manuscript created February 8, 2023; last updated July 4, 2026.}}
+\thanks{Ryan J. Kung can be reached at ryankung@ieee.org. Manuscript created February 8, 2023; last updated July 5, 2026.}}
 \title{\huge Rings: An Algebraic Structured Peer-to-Peer Network\\
 for Decentralized Identity and Resource Ownership}
 \date{}
@@ -1286,53 +1286,141 @@ E2E tests
 \]
 \end{definition}
 
-\begin{definition}[Chord performance baseline]
+\begin{definition}[Benchmark data model]
 \[
 \begin{array}{rcl}
-\operatorname{fail}(Q,F)&=&\dfrac{|F|}{|Q|},\\[8pt]
-\operatorname{timeout}(Q)&=&\dfrac{1}{|Q|}\sum_{q\in Q}to(q),\\[8pt]
-\eta&=&(|N|,\mathsf{churn},\mathsf{stabilize},\mathsf{loss}),\\[4pt]
-B_C(\eta)&=&
-  (\mathbb{E}[h_C],
-   \operatorname{timeout}(Q_C),
-   \operatorname{fail}(Q_C,F_C)),\\[4pt]
-\mathbb{E}[h_C]&\in&O(\log |N|).
+F_X(\eta;D)&\subseteq&Q_X(\eta;D),\\
+to_X&:&Q_X(\eta;D)\to\mathbb{N},\\
+\phi_X(\eta;D)&=&|F_X(\eta;D)|/|Q_X(\eta;D)|,\\[3pt]
+\bar{to}_X(\eta;D)&=&|Q_X|^{-1}\sum_{q\in Q_X}to_X(q),\\[3pt]
+B_X(\eta;D)&=&
+  (\mathbb{E}[h_X^f\mid\eta,D],
+   \mathbb{E}[h_X^r\mid\eta,D],\\
+&& \bar{to}_X(\eta;D),\phi_X(\eta;D)),\\
+h_X^r&=&h_X^f+1.
 \end{array}
 \]
+\[
+\begin{array}{rcl}
+D_{656}&=&D_C^{paper}\cup D_C^{1600}\cup D_R^{docker},\\
+D_C^{paper}&=&\{C_{II},C_{III},C_{IV},C_{8},C_{9},C_{10}\},\\
+D_C^{1600}&=&\{\mathsf{maintained},\mathsf{stale}\},\\
+D_R^{docker}&=&\{\mathsf{convergence},\mathsf{transport}\}.
+\end{array}
+\]
+\[
+\begin{array}{rcl}
+C_{II}&:&(N,r,|Q|)=(1000,20,10^4),\\
+C_{III}&:&(N,r,\lambda) \simeq (1000,20,0.05..0.40),\\
+D_C^{1600}&:&(N,r,m,L)=(1600,3,160,64).
+\end{array}
+\]
+\[
+  D_C^{paper}\not\subset\mathsf{Impl}_{Rings},
+  \qquad
+  D_R^{docker}\subset\mathsf{Impl}_{Rings}.
+\]
 \end{definition}
+
+\begin{table}[htbp]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{2pt}
+\begin{tabular}{c|c|c|c|c}
+\hline
+$\eta$ & $N,r$ & $\mathbb{E}[h_C^f]$ &
+$\operatorname{timeout}_C$ & $10^4\operatorname{fail}_C$ \\ \hline
+$C_{II},f=0$ & $1000,20$ & 3.815 & 0.000 & 0.0 \\
+$C_{II},f=.10$ & $1000,20$ & 4.007 & 0.522 & 0.0 \\
+$C_{II},f=.20$ & $1000,20$ & 4.177 & 1.071 & 0.0 \\
+$C_{II},f=.30$ & $1000,20$ & 4.354 & 1.830 & 0.0 \\
+$C_{II},f=.40$ & $1000,20$ & 4.791 & 3.700 & 0.0 \\
+$C_{II},f=.50$ & $1000,20$ & 5.345 & 6.565 & 0.0 \\
+$C_{III},\lambda=.05$ & $\simeq1000,20$ & 3.905 & 0.076 & 7.0 \\
+$C_{III},\lambda=.10$ & $\simeq1000,20$ & 3.949 & 0.168 & 19.0 \\
+$C_{III},\lambda=.15$ & $\simeq1000,20$ & 4.044 & 0.272 & 18.0 \\
+$C_{III},\lambda=.20$ & $\simeq1000,20$ & 4.094 & 0.335 & 35.0 \\
+$C_{III},\lambda=.25$ & $\simeq1000,20$ & 4.128 & 0.405 & 36.0 \\
+$C_{III},\lambda=.30$ & $\simeq1000,20$ & 4.221 & 0.501 & 47.0 \\
+$C_{III},\lambda=.35$ & $\simeq1000,20$ & 4.308 & 0.599 & 60.0 \\
+$C_{III},\lambda=.40$ & $\simeq1000,20$ & 4.345 & 0.656 & 58.0 \\
+\hline
+\end{tabular}
+\caption{Chord-paper-aligned rows in
+\texttt{chord-paper-sim-2026-07-05.jsonl}.}
+\label{chord-paper-data-table}
+\end{table}
+
+\begin{table}[htbp]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{1.5pt}
+\begin{tabular}{c|c|c|c|c|c}
+\hline
+$\eta$ & $M$ & $\bar h^f/\bar h^r$ &
+$ok$ & $\bar{to}$ & $10^4\phi$ \\ \hline
+stable & m & $4.469/5.469$ & 1.000 & 0.000 & 0.0 \\
+$f=.10$ & m & $4.394/5.394$ & 1.000 & 0.000 & 0.0 \\
+$f=.20$ & m & $4.316/5.316$ & 1.000 & 0.000 & 0.0 \\
+$\chi=.05$ & m & $4.465/5.465$ & 1.000 & 0.000 & 0.0 \\
+$\chi=.40$ & m & $4.470/5.470$ & 1.000 & 0.000 & 0.0 \\
+$f=.10$ & s & $4.758/5.758$ & .990 & .734 & 98.2 \\
+$f=.20$ & s & $5.186/6.186$ & .969 & 1.890 & 314.7 \\
+$\chi=.05$ & s & $4.617/5.617$ & .945 & .361 & 546.2 \\
+$\chi=.40$ & s & $5.746/6.746$ & .484 & 4.604 & 5161.1 \\
+\hline
+\end{tabular}
+\caption{Current Rings-parameter Chord baselines
+($m=$maintained, $s=$stale; churn endpoints) from
+\texttt{dummy-paper-scale-2026-07-05.jsonl}.}
+\label{rings-param-chord-data-table}
+\end{table}
 
 \begin{obligation}[Benchmark report]
 \[
 \begin{aligned}
   \mathsf{Report}_{Rings} =
   (&N,\rho,r,\mathsf{transport},\mathsf{runtime},\\
-   &\mathsf{scheduler},\vec{T}_R,
-     \operatorname{timeout}(Q_R),
-     \operatorname{fail}(Q_R,F_R)).
+   &\mathsf{scheduler},\vec{T}_{total},
+     B_R(\eta_R;D_R^{docker})).
 \end{aligned}
 \]
 \[
-  B_C(\eta)
+  B_C(\eta;D_C^{paper})
   \not\equiv
-  \mathsf{Report}_{Rings}.
+  B_R(\eta_R;D_R^{docker}).
 \]
 \end{obligation}
 
 \[
 \begin{array}{rcl}
-\vec{T}_R&=&(T_{conn},h_R T_{hop},T_{crypto},\\
+\vec{T}_{total}&=&(T_{conn},hT_{hop},T_{crypto},\\
 &&T_{app},T_{witness}),\\
+\sum_i\vec{T}_{total,i}&=&T_{total},\\
 \mathsf{Overhead}_{R/C}
   &=&(T_{conn},T_{crypto},T_{app},\\
 &&T_{witness},\mathsf{runtime}),\\
 \mathsf{PerfClaim}_{R}
   &\Rightarrow&
-  \mathsf{Measure}_{build}(\mathsf{Report}_{Rings})\\
-&&{}\wedge\mathsf{Cite}(B_C).
+  \mathsf{Measure}_{build}(B_R)\\
+&&{}\wedge\mathsf{Cite}(B_C^p),\\
+D_C^p&=&D_C^{paper},\\
+B_C^p&=&B_C(\eta;D_C^p).
 \end{array}
 \]
-Chord supplies the lookup/churn baseline~\cite{Chord}; Rings performance
-requires Rings-specific measurements.
+\[
+\begin{array}{rcl}
+D_R^{conv}&=&
+  (16,309.532s,0/16,3/16,\\
+&& .194,1.026,8058.6),\\
+D_R^{tx}&=&
+\{(1,10.46),(16,107.35),\\
+&& (64,90.36)\}_{\mathrm{KiB},\mathrm{Mbps}}.
+\end{array}
+\]
+Chord supplies the lookup/churn baseline~\cite{Chord}; Rings supplies runtime
+evidence only through Rings measurements.  The fresh Docker/WebRTC cluster above
+is convergence evidence, not a steady-state lookup result.
 
 \section{Related Work}
 
