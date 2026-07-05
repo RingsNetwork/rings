@@ -21,8 +21,13 @@ Docker image: `rings-node-cluster:benchmark-artifacts-2efb302b` / `sha256:1c5d41
 - `docker_convergence`:
 
 ```sh
-python3 scripts/dht_docker_cluster_bench.py --container rings-cluster-16-artifacts --nodes 16 --finger-table-size 16 --cluster-topology ring --stabilize-interval-seconds 1 --docker-image rings-node-cluster:benchmark-artifacts-2efb302b --samples 1 (looped every 10s for 30 samples)
+for port in $(seq 50000 50015); do docker exec rings-cluster-16-artifacts curl -fsS "http://127.0.0.1:${port}/status"; done
 ```
+
+The JSONL artifact was built from these real-node status snapshots, sampled
+every 10 seconds for 30 samples. This PR does not commit a reusable Docker
+collector script; if that automation is reintroduced, it should be a Rust
+tool/bench.
 
 - `docker_ring_start`:
 
@@ -33,8 +38,12 @@ docker run -d --rm --name rings-cluster-16-artifacts -e RINGS_NODE_COUNT=16 -e R
 - `docker_transport_sweep`:
 
 ```sh
-python3 scripts/dht_docker_cluster_bench.py --container rings-cluster-16-artifacts --nodes 16 --finger-table-size 16 --cluster-topology ring --stabilize-interval-seconds 1 --docker-image rings-node-cluster:benchmark-artifacts-2efb302b --throughput-source-index 0 --throughput-destination-index 1 --throughput-flush-timeout-ms 60000 (payload sweep)
+docker exec -i rings-cluster-16-artifacts curl -fsS -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"transportBenchmark","params":{"destination_did":"0x1dd69acbed7f795a9ad105fa97cf60b72d531288","namespace":"bench","payload_bytes":65536,"messages":1024,"flush_timeout_ms":60000}}' http://127.0.0.1:50000/
 ```
+
+The committed transport JSONL contains the repeated node0 -> node1 payload
+sweep and the before/after `listPeerMeasurements` deltas used for the
+throughput summary.
 
 - `dummy_paper_scale`:
 
@@ -53,7 +62,7 @@ original Chord paper's Table II/III successor-list setting.
 - `chord_paper_sim`:
 
 ```sh
-python3 scripts/chord_paper_sim.py --include all > benchmark-results/dht/chord-paper-sim-2026-07-05.jsonl
+cargo bench -p rings-core --bench chord_paper_sim --no-default-features --features dummy -- --include all > benchmark-results/dht/chord-paper-sim-2026-07-05.jsonl
 ```
 
 ## Chord Paper Alignment
@@ -62,6 +71,10 @@ python3 scripts/chord_paper_sim.py --include all > benchmark-results/dht/chord-p
 original Chord paper's numbered tables and data figures. It exists so paper
 claims can be mapped one-to-one to a local artifact. It is not evidence that the
 Rings runtime implements every modeled feature.
+
+The paper-aligned simulator is implemented as a Rust cargo bench and emits
+`ring_identifier_bits=64`. Use `dummy-paper-scale-2026-07-05.jsonl` for the
+160-bit Rings DID baseline.
 
 | paper item | original metric | artifact coverage |
 | --- | --- | --- |
@@ -84,25 +97,25 @@ Table II, simultaneous node failures:
 
 | failed nodes | avg path length | path p1/p99 | avg timeouts | timeout p1/p99 | failures / 10k |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0% | 3.815 | (1, 6) | 0.000 | (0, 0) | 0.0 |
-| 10% | 4.007 | (1, 7) | 0.522 | (0, 4) | 0.0 |
-| 20% | 4.177 | (1, 7) | 1.071 | (0, 6) | 0.0 |
-| 30% | 4.354 | (1, 8) | 1.830 | (0, 9) | 0.0 |
-| 40% | 4.791 | (1, 9) | 3.700 | (0, 14) | 0.0 |
-| 50% | 5.345 | (1, 11) | 6.565 | (0, 24) | 0.0 |
+| 0% | 3.841 | (1, 6) | 0.000 | (0, 0) | 0.0 |
+| 10% | 3.973 | (1, 7) | 0.419 | (0, 3) | 0.0 |
+| 20% | 4.114 | (1, 7) | 0.972 | (0, 5) | 0.0 |
+| 30% | 4.418 | (1, 8) | 1.980 | (0, 8) | 0.0 |
+| 40% | 4.691 | (1, 9) | 3.291 | (0, 13) | 0.0 |
+| 50% | 5.502 | (1, 12) | 6.938 | (0, 27) | 0.0 |
 
 Table III, lookups during stabilization:
 
 | join/leave rate | avg path length | path p1/p99 | avg timeouts | timeout p1/p99 | failures / 10k |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 0.05 / 1.5 | 3.905 | (1, 7) | 0.076 | (0, 2) | 7.0 |
-| 0.10 / 3.0 | 3.949 | (1, 7) | 0.168 | (0, 2) | 19.0 |
-| 0.15 / 4.5 | 4.044 | (1, 7) | 0.272 | (0, 3) | 18.0 |
-| 0.20 / 6.0 | 4.094 | (1, 7) | 0.335 | (0, 3) | 35.0 |
-| 0.25 / 7.5 | 4.128 | (1, 7) | 0.405 | (0, 4) | 36.0 |
-| 0.30 / 9.0 | 4.221 | (1, 7) | 0.501 | (0, 4) | 47.0 |
-| 0.35 / 10.5 | 4.308 | (1, 8) | 0.599 | (0, 4) | 60.0 |
-| 0.40 / 12.0 | 4.345 | (1, 8) | 0.656 | (0, 5) | 58.0 |
+| 0.05 / 1.5 | 3.904 | (1, 7) | 0.081 | (0, 2) | 6.0 |
+| 0.10 / 3.0 | 3.932 | (1, 7) | 0.160 | (0, 2) | 17.0 |
+| 0.15 / 4.5 | 4.032 | (1, 7) | 0.257 | (0, 3) | 21.0 |
+| 0.20 / 6.0 | 4.118 | (1, 7) | 0.359 | (0, 3) | 36.0 |
+| 0.25 / 7.5 | 4.169 | (1, 7) | 0.419 | (0, 4) | 43.0 |
+| 0.30 / 9.0 | 4.233 | (1, 8) | 0.510 | (0, 4) | 41.0 |
+| 0.35 / 10.5 | 4.275 | (1, 8) | 0.571 | (0, 4) | 53.0 |
+| 0.40 / 12.0 | 4.385 | (1, 8) | 0.672 | (0, 5) | 59.0 |
 
 The Table III simulator keeps the node count stable with paired join/leave
 events and models periodic successor-list plus one-finger stabilization. Its
@@ -115,21 +128,21 @@ Table IV, lookup stretch medians with p10/p90 in parentheses:
 
 | s | iterative 3D | recursive 3D | iterative transit-stub | recursive transit-stub |
 | ---: | ---: | ---: | ---: | ---: |
-| 1 | 7.15 (4.50, 13.73) | 4.02 (2.58, 7.80) | 8.46 (6.00, 11.46) | 4.73 (3.50, 6.23) |
-| 2 | 6.42 (4.04, 12.14) | 3.60 (2.32, 6.96) | 8.46 (5.91, 11.01) | 4.68 (3.46, 6.01) |
-| 4 | 5.59 (3.61, 10.51) | 3.19 (2.07, 6.07) | 7.91 (5.46, 10.91) | 4.46 (3.23, 5.96) |
-| 8 | 4.88 (3.17, 9.02) | 2.83 (1.89, 5.28) | 7.37 (5.00, 10.01) | 4.18 (2.96, 5.46) |
-| 16 | 4.30 (2.84, 7.85) | 2.55 (1.72, 4.78) | 6.46 (4.46, 9.28) | 3.68 (2.68, 4.96) |
+| 1 | 7.17 (4.47, 13.63) | 3.98 (2.53, 7.73) | 8.46 (6.00, 11.46) | 4.73 (3.50, 6.23) |
+| 2 | 6.42 (4.04, 12.18) | 3.57 (2.29, 6.98) | 8.46 (5.91, 11.00) | 4.68 (3.46, 6.00) |
+| 4 | 5.61 (3.57, 10.57) | 3.18 (2.08, 6.07) | 7.91 (5.46, 10.91) | 4.46 (3.23, 5.96) |
+| 8 | 4.86 (3.15, 9.08) | 2.82 (1.86, 5.36) | 7.37 (5.00, 10.00) | 4.18 (2.96, 5.46) |
+| 16 | 4.31 (2.80, 7.88) | 2.52 (1.71, 4.83) | 6.47 (4.46, 9.19) | 3.68 (2.68, 4.96) |
 
 Fig. 9, simulator-only virtual-node load balance:
 
 | virtual nodes / real node | mean keys | p1 | p99 | max |
 | ---: | ---: | ---: | ---: | ---: |
-| 1 | 100.0 | 1 | 464 | 955 |
-| 2 | 100.0 | 7 | 337 | 642 |
-| 5 | 100.0 | 25 | 234 | 423 |
-| 10 | 100.0 | 41 | 190 | 236 |
-| 20 | 100.0 | 55 | 158 | 214 |
+| 1 | 100.0 | 1 | 478 | 866 |
+| 2 | 100.0 | 7 | 332 | 619 |
+| 5 | 100.0 | 25 | 235 | 374 |
+| 10 | 100.0 | 41 | 188 | 268 |
+| 20 | 100.0 | 56 | 159 | 227 |
 
 ## Dummy DHT Simulator
 

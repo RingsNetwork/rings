@@ -74,39 +74,32 @@ docker run -d --rm \
   rings-node-cluster
 ```
 
-After the log shows `cluster ready`, collect status-based DHT metrics from the
-real node daemons:
+After the log shows `cluster ready`, collect status snapshots from the real
+node daemons:
 
 ```sh
-python3 scripts/dht_docker_cluster_bench.py \
-  --container rings-cluster-16-bench \
-  --nodes 16 \
-  --cluster-topology ring \
-  --stabilize-interval-seconds 1 \
-  --docker-image rings-node-cluster \
-  --samples 5 \
-  --sample-interval-seconds 30
+for port in $(seq 50000 50015); do
+  docker exec rings-cluster-16-bench curl -fsS "http://127.0.0.1:${port}/status"
+done
 ```
 
 Add a real WebRTC transport burst sample:
 
 ```sh
-python3 scripts/dht_docker_cluster_bench.py \
-  --container rings-cluster-16-bench \
-  --nodes 16 \
-  --cluster-topology ring \
-  --stabilize-interval-seconds 1 \
-  --docker-image rings-node-cluster \
-  --throughput-messages 1024 \
-  --throughput-payload-bytes 65536 \
-  --throughput-flush-timeout-ms 60000 \
-  --throughput-source-index 0 \
-  --throughput-destination-index 1
+docker exec -i rings-cluster-16-bench curl -fsS \
+  -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"transportBenchmark","params":{"destination_did":"<node1_did_from_status>","namespace":"bench","payload_bytes":65536,"messages":1024,"flush_timeout_ms":60000}}' \
+  http://127.0.0.1:50000/
 ```
 
 The DHT lookup metrics are computed by replaying each node's `/status`
 successor and finger-table state. Reports therefore label the lookup model as
 `status_snapshot_route`.
+
+The benchmark artifact PR keeps this project pure Rust and does not commit a
+reusable Docker collector script. If automated collection is needed again,
+implement it as a Rust tool or bench around the `/status`,
+`transportBenchmark`, and `listPeerMeasurements` boundaries.
 
 The transport section uses one internal `transportBenchmark` RPC to start a
 burst inside the source node process. The reported `flush_mbps` waits for the
