@@ -1284,6 +1284,7 @@ E2E tests
 \[
   h=O(\log |N|)\quad(F_n\text{ populated}).
 \]
+Only $hT_{hop}$ is Chord-comparable; the rest is Rings runtime overhead.
 \end{definition}
 
 \begin{definition}[Benchmark data model]
@@ -1320,7 +1321,12 @@ D_C^{1600}&:&(N,r,m,L)=(1600,3,160,64).
   \qquad
   D_R^{docker}\subset\mathsf{Impl}_{Rings}.
 \]
+Here $X\in\{C,R\}$, $\eta$ fixes the workload and fault regime, and $D$ fixes
+the artifact.  $h^f$ counts forwarding hops; $h^r$ counts lookup rounds.
 \end{definition}
+
+Table~\ref{chord-paper-data-table} gives the PR~656 Chord-paper coordinates
+($N=1000,r=20$); it is not Rings runtime evidence.
 
 \begin{table}[htbp]
 \centering
@@ -1351,6 +1357,10 @@ $C_{III},\lambda=.40$ & $\simeq1000,20$ & 4.345 & 0.656 & 58.0 \\
 \label{chord-paper-data-table}
 \end{table}
 
+Table~\ref{rings-param-chord-data-table} fixes Rings' current Chord parameters
+($N=1600,r=3,m=160$).  Maintained rows are the baseline; stale rows are
+no-maintenance sensitivity.
+
 \begin{table}[htbp]
 \centering
 \scriptsize
@@ -1376,6 +1386,8 @@ $\chi=.40$ & s & $5.746/6.746$ & .484 & 4.604 & 5161.1 \\
 \label{rings-param-chord-data-table}
 \end{table}
 
+Thus stale rows explain sensitivity, not the maintained Chord baseline.
+
 \begin{obligation}[Benchmark report]
 \[
 \begin{aligned}
@@ -1390,6 +1402,8 @@ $\chi=.40$ & s & $5.746/6.746$ & .484 & 4.604 & 5161.1 \\
   \not\equiv
   B_R(\eta_R;D_R^{docker}).
 \]
+The report keeps two ledgers: $B_C$ is the paper baseline; $B_R$ is Rings
+runtime evidence.
 \end{obligation}
 
 \[
@@ -1419,8 +1433,8 @@ D_R^{tx}&=&
 \end{array}
 \]
 Chord supplies the lookup/churn baseline~\cite{Chord}; Rings supplies runtime
-evidence only through Rings measurements.  The fresh Docker/WebRTC cluster above
-is convergence evidence, not a steady-state lookup result.
+evidence only through Rings measurements.  The Docker/WebRTC cluster is
+convergence evidence, not steady-state lookup; $D_R^{tx}$ is payload throughput.
 
 \section{Related Work}
 
