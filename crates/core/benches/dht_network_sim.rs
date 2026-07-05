@@ -20,7 +20,7 @@ const DEFAULT_MAINTENANCE_MODELS: &[MaintenanceModel] = &[
     MaintenanceModel::InstantStaleSnapshot,
     MaintenanceModel::MaintainedChord,
 ];
-const DHT_SUCCESSOR_CAPACITY: usize = 3;
+const DEFAULT_SUCCESSOR_CAPACITY: usize = 3;
 const LOOKUPS_PER_10K: usize = 10_000;
 const MAX_LOOKUP_HOPS: usize = 64;
 
@@ -223,6 +223,10 @@ fn main() -> Result<(), BenchError> {
     let lookups_per_node = env_usize("RINGS_DHT_BENCH_LOOKUPS_PER_NODE", DEFAULT_LOOKUPS_PER_NODE)?;
     let lookup_mode = lookup_mode()?;
     let maintenance_models = maintenance_models()?;
+    let successor_capacity = env_usize(
+        "RINGS_DHT_BENCH_SUCCESSOR_CAPACITY",
+        DEFAULT_SUCCESSOR_CAPACITY,
+    )?;
     let failed_node_pcts =
         percent_list("RINGS_DHT_BENCH_FAILED_NODE_PCTS", DEFAULT_FAILED_NODE_PCTS)?;
     let churn_rate_pcts = percent_list("RINGS_DHT_BENCH_CHURN_RATE_PCTS", DEFAULT_CHURN_RATE_PCTS)?;
@@ -235,6 +239,7 @@ fn main() -> Result<(), BenchError> {
             lookups_per_node,
             lookup_mode,
             MaintenanceModel::MaintainedChord,
+            successor_capacity,
         )?;
         println!("{}", serde_json::to_string(&stable)?);
 
@@ -252,6 +257,7 @@ fn main() -> Result<(), BenchError> {
                     lookups_per_node,
                     lookup_mode,
                     *maintenance_model,
+                    successor_capacity,
                 )?;
                 println!("{}", serde_json::to_string(&report)?);
             }
@@ -271,6 +277,7 @@ fn main() -> Result<(), BenchError> {
                     lookups_per_node,
                     lookup_mode,
                     *maintenance_model,
+                    successor_capacity,
                 )?;
                 println!("{}", serde_json::to_string(&report)?);
             }
@@ -287,6 +294,7 @@ fn run_scenario(
     lookups_per_node: usize,
     lookup_mode: LookupMode,
     maintenance_model: MaintenanceModel,
+    successor_capacity: usize,
 ) -> Result<ScenarioReport, BenchError> {
     let build_started = Instant::now();
     let input = scenario_input(&scenario, node_count, maintenance_model)?;
@@ -296,13 +304,14 @@ fn run_scenario(
         input.active_indices,
         input.state_known_sets,
         finger_table_size,
+        successor_capacity,
     )?;
     let build_elapsed = build_started.elapsed();
 
     let lookup_started = Instant::now();
     let lookups = lookup_metrics(&network, lookups_per_node, lookup_mode, finger_table_size)?;
     let lookup_elapsed = lookup_started.elapsed();
-    let expected = expected_active_network(&network, finger_table_size)?;
+    let expected = expected_active_network(&network, finger_table_size, successor_capacity)?;
     let (topology_matches, full_matches) = topology_match_counts(&network, &expected)?;
 
     Ok(ScenarioReport {
@@ -314,7 +323,7 @@ fn run_scenario(
         total_nodes: input.total_nodes,
         active_nodes: network.active.len(),
         finger_table_size,
-        successor_capacity: DHT_SUCCESSOR_CAPACITY,
+        successor_capacity,
         lookup_mode: lookup_mode.name().to_string(),
         lookups_per_node,
         build_elapsed_ms: millis(build_elapsed),
@@ -439,6 +448,7 @@ fn build_network(
     active: BTreeSet<usize>,
     state_known_sets: BTreeMap<usize, Vec<usize>>,
     finger_table_size: usize,
+    successor_capacity: usize,
 ) -> Result<SimNetwork, BenchError> {
     let ring_size = ring_size();
     let mut nodes = vec![None; identities.len()];
@@ -449,6 +459,7 @@ fn build_network(
             &identities,
             &ring_size,
             finger_table_size,
+            successor_capacity,
         );
         if let Some(slot) = nodes.get_mut(local_index) {
             *slot = Some(node);
@@ -465,6 +476,7 @@ fn build_network(
 fn expected_active_network(
     network: &SimNetwork,
     finger_table_size: usize,
+    successor_capacity: usize,
 ) -> Result<SimNetwork, BenchError> {
     let known = network.active.iter().copied().collect::<Vec<_>>();
     let state_known_sets = network
@@ -478,6 +490,7 @@ fn expected_active_network(
         network.active.clone(),
         state_known_sets,
         finger_table_size,
+        successor_capacity,
     )
 }
 
@@ -487,8 +500,9 @@ fn build_node(
     identities: &[Identity],
     ring_size: &BigUint,
     finger_table_size: usize,
+    successor_capacity: usize,
 ) -> SimNode {
-    let successors = successor_indices(local_index, known, DHT_SUCCESSOR_CAPACITY);
+    let successors = successor_indices(local_index, known, successor_capacity);
     let predecessor = predecessor_index(local_index, known);
     let fingers = (0..finger_table_size.min(RING_BITS))
         .map(|bit| finger_index(local_index, known, identities, ring_size, bit))

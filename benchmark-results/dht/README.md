@@ -45,7 +45,9 @@ By default, the dummy bench emits `instant_stale_snapshot` and
 `maintained_chord` rows for failure/churn scenarios. Use
 `RINGS_DHT_BENCH_MAINTENANCE_MODELS=instant_stale_snapshot` or
 `RINGS_DHT_BENCH_MAINTENANCE_MODELS=maintained_chord` to limit the emitted
-maintenance model.
+maintenance model. Use `RINGS_DHT_BENCH_SUCCESSOR_CAPACITY=<n>` to override
+the default successor-list capacity of 3; `8` is useful when reproducing the
+smaller hop counts from the original Chord paper's simulation table.
 
 ## Dummy DHT Simulator
 
