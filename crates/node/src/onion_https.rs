@@ -12,6 +12,7 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -97,6 +98,7 @@ pub struct OnionHttpsClientResponse {
 /// Shared runtime for the local browser HTTPS proxy protocol.
 #[derive(Default)]
 pub(crate) struct OnionHttpsRuntime {
+    circuit_protocol_installed: AtomicBool,
     next_request: AtomicU64,
     pending: Mutex<HashMap<u64, PendingRequest>>,
     exit_policy: Mutex<Option<OnionExitPolicy>>,
@@ -153,6 +155,17 @@ impl OnionHttpsRuntime {
     /// Create an empty runtime.
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// Return whether this runtime installed the shared circuit protocol.
+    pub(crate) fn circuit_protocol_installed(&self) -> bool {
+        self.circuit_protocol_installed.load(Ordering::Acquire)
+    }
+
+    /// Mark the shared circuit protocol as installed by this runtime.
+    pub(crate) fn mark_circuit_protocol_installed(&self) {
+        self.circuit_protocol_installed
+            .store(true, Ordering::Release);
     }
 
     /// Set the local exit policy. `None` means client-only mode.
@@ -641,5 +654,14 @@ mod tests {
         ));
         drop(lease);
         assert!(runtime.admit_exit_request(&policy, &return_path, 0).is_ok());
+    }
+
+    #[test]
+    fn circuit_protocol_install_marker_starts_false_then_marks_true() {
+        let runtime = OnionHttpsRuntime::new();
+
+        assert!(!runtime.circuit_protocol_installed());
+        runtime.mark_circuit_protocol_installed();
+        assert!(runtime.circuit_protocol_installed());
     }
 }

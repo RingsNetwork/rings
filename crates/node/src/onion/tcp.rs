@@ -465,6 +465,41 @@ enum TcpInbound {
     Error(String),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TcpDuplexState {
+    read_open: bool,
+    write_open: bool,
+}
+
+impl TcpDuplexState {
+    const fn open() -> Self {
+        Self {
+            read_open: true,
+            write_open: true,
+        }
+    }
+
+    const fn can_read(self) -> bool {
+        self.read_open
+    }
+
+    const fn can_write(self) -> bool {
+        self.write_open
+    }
+
+    const fn is_closed(self) -> bool {
+        !self.read_open && !self.write_open
+    }
+
+    fn close_read(&mut self) {
+        self.read_open = false;
+    }
+
+    fn close_write(&mut self) {
+        self.write_open = false;
+    }
+}
+
 #[derive(Default)]
 struct TcpExitLimiter {
     active_circuits: u32,
@@ -517,13 +552,19 @@ fn spawn_client_stream(
     tokio::spawn(async move {
         let (mut read, mut write) = stream.into_split();
         let mut read_buf = vec![0_u8; TCP_BUF];
+        let mut state = TcpDuplexState::open();
         loop {
+            if state.is_closed() {
+                break;
+            }
             tokio::select! {
-                read_result = read.read(read_buf.as_mut_slice()) => {
+                read_result = read.read(read_buf.as_mut_slice()), if state.can_read() => {
                     match read_result {
                         Ok(0) => {
-                            let _ = send_client_payload(&scope, &route, key.stream_id, OnionCircuitPayload::TcpShutdown).await;
-                            break;
+                            if send_client_payload(&scope, &route, key.stream_id, OnionCircuitPayload::TcpShutdown).await.is_err() {
+                                break;
+                            }
+                            state.close_read();
                         }
                         Ok(n) => {
                             let bytes = Bytes::copy_from_slice(read_buf.get(..n).unwrap_or_default());
@@ -537,13 +578,18 @@ fn spawn_client_stream(
                 inbound = rx.recv() => {
                     match inbound {
                         Some(TcpInbound::Data(bytes)) => {
+                            if !state.can_write() {
+                                continue;
+                            }
                             if write.write_all(bytes.as_ref()).await.is_err() {
                                 break;
                             }
                         }
                         Some(TcpInbound::Shutdown) => {
-                            let _ = write.shutdown().await;
-                            break;
+                            if state.can_write() {
+                                let _ = write.shutdown().await;
+                                state.close_write();
+                            }
                         }
                         Some(TcpInbound::Close) | None => break,
                         Some(TcpInbound::Error(message)) => {
@@ -585,13 +631,19 @@ fn spawn_exit_stream(task: ExitStreamTask) {
         } = task;
         let (mut read, mut write) = stream.into_split();
         let mut read_buf = vec![0_u8; TCP_BUF];
+        let mut state = TcpDuplexState::open();
         loop {
+            if state.is_closed() {
+                break;
+            }
             tokio::select! {
-                read_result = read.read(read_buf.as_mut_slice()) => {
+                read_result = read.read(read_buf.as_mut_slice()), if state.can_read() => {
                     match read_result {
                         Ok(0) => {
-                            let _ = send_backward(&scope, stream_id, return_path.clone(), OnionCircuitPayload::TcpShutdown).await;
-                            break;
+                            if send_backward(&scope, stream_id, return_path.clone(), OnionCircuitPayload::TcpShutdown).await.is_err() {
+                                break;
+                            }
+                            state.close_read();
                         }
                         Ok(n) => {
                             let bytes = Bytes::copy_from_slice(read_buf.get(..n).unwrap_or_default());
@@ -630,6 +682,9 @@ fn spawn_exit_stream(task: ExitStreamTask) {
                 inbound = rx.recv() => {
                     match inbound {
                         Some(TcpInbound::Data(bytes)) => {
+                            if !state.can_write() {
+                                continue;
+                            }
                             if let Some(policy) = &runtime.exit_policy {
                                 if runtime.record_exit_bytes(policy, bytes.len() as u64).is_err() {
                                     let _ = send_backward(
@@ -649,8 +704,10 @@ fn spawn_exit_stream(task: ExitStreamTask) {
                             }
                         }
                         Some(TcpInbound::Shutdown) => {
-                            let _ = write.shutdown().await;
-                            break;
+                            if state.can_write() {
+                                let _ = write.shutdown().await;
+                                state.close_write();
+                            }
                         }
                         Some(TcpInbound::Close) | None => break,
                         Some(TcpInbound::Error(message)) => {
@@ -726,6 +783,19 @@ mod tests {
 
     fn did() -> Did {
         SecretKey::random().address().into()
+    }
+
+    #[test]
+    fn tcp_duplex_state_closes_only_after_both_halves_close() {
+        let mut state = TcpDuplexState::open();
+
+        state.close_read();
+        assert!(!state.can_read());
+        assert!(state.can_write());
+        assert!(!state.is_closed());
+
+        state.close_write();
+        assert!(state.is_closed());
     }
 
     #[test]

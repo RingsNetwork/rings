@@ -193,11 +193,13 @@ impl Protocol for OnionCircuitProtocol {
             OnionCircuitMessage::Forward(mut frame) => match advance_forward(ctx.did, &mut frame) {
                 Some(to) => encode_message(OnionCircuitMessage::Forward(frame))
                     .map(|payload| OnionCircuitEffect::Send { to, payload }),
-                None => Ok(OnionCircuitEffect::Exit {
-                    from: event.from,
-                    stream_id: frame.stream_id,
-                    return_path: frame.return_path,
-                    payload: frame.payload,
+                None => validate_exit_return_path(event.from, &frame.return_path).map(|()| {
+                    OnionCircuitEffect::Exit {
+                        from: event.from,
+                        stream_id: frame.stream_id,
+                        return_path: frame.return_path,
+                        payload: frame.payload,
+                    }
                 }),
             },
             OnionCircuitMessage::Backward(mut frame) => match advance_backward(&mut frame) {
@@ -349,6 +351,18 @@ fn advance_backward(frame: &mut OnionBackwardFrame) -> Option<Did> {
         return None;
     }
     Some(frame.return_path.remove(0))
+}
+
+fn validate_exit_return_path(from: Did, return_path: &[Did]) -> Result<()> {
+    match return_path.first().copied() {
+        Some(previous_hop) if previous_hop == from => Ok(()),
+        Some(previous_hop) => Err(Error::OnionRouteError(format!(
+            "onion return path first hop {previous_hop:?} does not match sender {from:?}"
+        ))),
+        None => Err(Error::OnionRouteError(
+            "onion forward frame reached exit with empty return path".to_string(),
+        )),
+    }
 }
 
 fn encode_message(message: OnionCircuitMessage) -> Result<Bytes> {
@@ -537,5 +551,33 @@ mod tests {
         assert_eq!(frame.return_path, vec![client]);
         assert_eq!(advance_backward(&mut frame), Some(client));
         assert!(frame.return_path.is_empty());
+    }
+
+    #[test]
+    fn exit_forward_requires_return_path_to_start_with_sender() {
+        let local = did();
+        let sender = did();
+        let forged_previous_hop = did();
+        let protocol = OnionCircuitProtocol;
+        let state = ();
+        let event = OnionCircuitEvent {
+            from: sender,
+            message: OnionCircuitMessage::Forward(OnionForwardFrame {
+                stream_id: 3,
+                remaining_hops: Vec::new(),
+                return_path: vec![forged_previous_hop, did()],
+                payload: OnionCircuitPayload::TcpShutdown,
+            }),
+        };
+
+        let transition = protocol.step(
+            Ctx {
+                did: local,
+                state: &state,
+            },
+            event,
+        );
+
+        assert!(transition.effects.is_empty());
     }
 }

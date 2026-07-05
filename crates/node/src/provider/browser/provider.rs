@@ -135,20 +135,25 @@ impl BrowserOnionProxy {
                 .build_onion_proxy_route(config, target.clone())
                 .await
                 .map_err(JsError::from)?;
+            let request = onion_https_client_request(&target, request).map_err(JsError::from)?;
             let first_hop = proxy_route.route.hops.first().copied().ok_or_else(|| {
                 JsError::from(crate::error::Error::OnionRouteError(
                     "onion route has no hops".to_string(),
                 ))
             })?;
             let (id, receiver) = runtime.begin_request(first_hop).map_err(JsError::from)?;
-            let request = onion_https_client_request(&target, request).map_err(JsError::from)?;
-            let (to, payload) = encode_initial_forward(
+            let (to, payload) = match encode_initial_forward(
                 p.did(),
                 &proxy_route.route,
                 id,
                 OnionCircuitPayload::HttpsRequest(request),
-            )
-            .map_err(JsError::from)?;
+            ) {
+                Ok(encoded) => encoded,
+                Err(error) => {
+                    runtime.cancel_request(id);
+                    return Err(JsValue::from(JsError::from(error)));
+                }
+            };
             let envelope =
                 crate::extension::ext::Envelope::new(ONION_CIRCUIT_NAMESPACE.to_string(), payload);
             if let Err(error) = p.send_envelope(to, &envelope).await {
@@ -681,11 +686,17 @@ impl Provider {
         if exit_policy.is_some() {
             runtime.set_exit_policy(exit_policy);
         }
-        if !self.extensions().contains(ONION_CIRCUIT_NAMESPACE) {
+        if !runtime.circuit_protocol_installed() {
+            if self.extensions().contains(ONION_CIRCUIT_NAMESPACE) {
+                return Err(crate::error::Error::ExtensionError(format!(
+                    "namespace {ONION_CIRCUIT_NAMESPACE:?} is already registered"
+                )));
+            }
             self.register_protocol(
                 OnionCircuitProtocol,
                 OnionCircuitShell::new(BrowserOnionCircuitHandler::new(runtime.clone())),
             )?;
+            runtime.mark_circuit_protocol_installed();
         }
         Ok(runtime)
     }
