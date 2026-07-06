@@ -24,6 +24,7 @@ use super::ONION_RELAY_RETURN_TTL_MS;
 use crate::error::Error;
 use crate::error::Result;
 use crate::extension::ext::Transition;
+use crate::onion::OnionRouteError;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 pub(super) struct RelayReturnKey {
@@ -286,9 +287,12 @@ impl OnionCircuitReducer {
         // client route constructor. A relay can bound the next layer budget; it cannot prove the
         // hidden global route length without breaking onion path privacy.
         if remaining_hops == 0 || remaining_hops > self.max_hops {
-            return Err(Error::OnionRouteError(format!(
-                "invalid onion relay hop count {remaining_hops}"
-            )));
+            return Err(Error::OnionRouteError(
+                OnionRouteError::InvalidRelayHopBudget {
+                    remaining_hops,
+                    max_hops: self.max_hops,
+                },
+            ));
         }
         Ok(())
     }
@@ -307,17 +311,13 @@ pub(super) fn remember_return_hop(
     match state.relay_returns.entry(key) {
         Entry::Occupied(mut entry) => {
             if entry.get().previous_hop != previous_hop {
-                return Err(Error::OnionRouteError(
-                    "onion relay return edge already belongs to another previous hop".to_string(),
-                ));
+                return Err(Error::OnionRouteError(OnionRouteError::ReturnEdgeConflict));
             }
             entry.get_mut().expires_at_ms = now_ms.saturating_add(ttl_ms);
         }
         Entry::Vacant(entry) => {
             if table_is_full {
-                return Err(Error::OnionRouteError(
-                    "onion relay circuit table is full".to_string(),
-                ));
+                return Err(Error::OnionRouteError(OnionRouteError::RelayTableFull));
             }
             entry.insert(RelayReturnEntry {
                 previous_hop,

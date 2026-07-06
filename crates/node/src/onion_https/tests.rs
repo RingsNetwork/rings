@@ -43,7 +43,7 @@ fn dummy_authenticated_payload(
 ) -> OnionAuthenticatedPayload {
     OnionAuthenticatedPayload::new_signed(
         circuit_id,
-        encode_https_payload(OnionHttpsPayload::Error(OnionExitFailure::Protocol(
+        encode_https_payload(OnionHttpsPayload::Error(OnionExitFailure::InvalidTarget(
             "wrong peer".to_string(),
         )))
         .expect("encode payload"),
@@ -63,13 +63,16 @@ fn normalizes_empty_request_defaults() {
     let target = OnionProxyTarget::parse_authority("Example.COM:443").unwrap();
     let wire = client_request_with_default_path(&target, request, default_path().as_str()).unwrap();
 
-    assert_eq!(wire, OnionHttpsRequest {
-        target: "example.com:443".to_string(),
-        method: "GET".to_string(),
-        path: "/".to_string(),
-        headers: Vec::new(),
-        body: Vec::new(),
-    });
+    assert_eq!(
+        wire,
+        OnionHttpsRequest {
+            target: "example.com:443".to_string(),
+            method: "GET".to_string(),
+            path: "/".to_string(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        }
+    );
 }
 
 #[test]
@@ -268,14 +271,12 @@ fn exit_limiter_counts_distinct_circuit_ids() {
 }
 
 #[test]
-fn runtime_exit_policy_starts_empty_then_sets() {
+fn runtime_exit_policy_starts_empty_then_sets() -> Result<()> {
     let runtime = OnionHttpsRuntime::new();
-    let policy = OnionExitPolicy {
-        allowed_targets: vec!["example.com:443".to_string()],
-        ..OnionExitPolicy::default()
-    };
+    let policy = OnionExitPolicy::from_target_strings(vec!["example.com:443".to_string()], vec![])?;
 
     assert_eq!(runtime.exit_policy(), None);
     runtime.set_exit_policy(Some(policy.clone()));
     assert_eq!(runtime.exit_policy(), Some(policy));
+    Ok(())
 }

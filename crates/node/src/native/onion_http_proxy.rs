@@ -34,13 +34,19 @@ pub async fn run_onion_http_proxy(
     options: OnionHttpProxyOptions,
     processor: Arc<Processor>,
     onion: NativeOnionCircuitHandle,
-) -> anyhow::Result<()> {
-    let listener = TcpListener::bind(options.listen_addr).await?;
-    let listen_addr = listener.local_addr()?;
+) -> Result<()> {
+    let listener = TcpListener::bind(options.listen_addr)
+        .await
+        .map_err(|error| Error::OnionProxyIoError(format!("bind HTTP proxy listener: {error}")))?;
+    let listen_addr = listener.local_addr().map_err(|error| {
+        Error::OnionProxyIoError(format!("read HTTP proxy listener address: {error}"))
+    })?;
     println!("Onion HTTP CONNECT proxy endpoint: http://{listen_addr}");
 
     loop {
-        let (stream, peer_addr) = listener.accept().await?;
+        let (stream, peer_addr) = listener.accept().await.map_err(|error| {
+            Error::OnionProxyIoError(format!("accept HTTP proxy connection: {error}"))
+        })?;
         let processor = processor.clone();
         let onion = onion.clone();
         let options = options.clone();

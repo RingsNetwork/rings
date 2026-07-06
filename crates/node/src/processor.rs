@@ -45,17 +45,15 @@ use crate::onion::default_onion_exit_heartbeat_interval_secs;
 use crate::onion::default_onion_exit_policy;
 use crate::onion::default_onion_exit_services;
 use crate::onion::default_onion_exit_ttl_secs;
+use crate::onion::directory;
+use crate::onion::directory::OnionDirectoryReader;
 use crate::onion::https_onion_exit_services;
-use crate::onion::select_onion_route_from_candidates;
 use crate::onion::validate_onion_exit_registration_timing;
 use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionExitRegistration;
 use crate::onion::OnionExitService;
 use crate::onion::OnionRoute;
-use crate::onion::OnionRouteCandidates;
-use crate::onion::OnionRouteRequest;
-use crate::onion::SystemRouteEntropy;
 use crate::onion::ONION_EXITS_TOPIC;
 use crate::onion::ONION_RELAY_CAPABILITY;
 use crate::onion_proxy::OnionProxyConfig;
@@ -531,7 +529,9 @@ impl Serialize for ProcessorConfig {
 
 impl<'de> serde::de::Deserialize<'de> for ProcessorConfig {
     fn deserialize<D>(deserializer: D) -> core::result::Result<Self, D::Error>
-    where D: serde::Deserializer<'de> {
+    where
+        D: serde::Deserializer<'de>,
+    {
         match ProcessorConfigSerialized::deserialize(deserializer) {
             Ok(ins) => {
                 let cfg: ProcessorConfig = ins
@@ -688,7 +688,9 @@ impl ProcessorBuilder {
 
     /// Add a custom periodic registration task.
     pub fn registration_task<T>(mut self, task: T) -> Self
-    where T: RegistrationTask + 'static {
+    where
+        T: RegistrationTask + 'static,
+    {
         self.registration_tasks.push(Arc::new(task));
         self
     }
@@ -892,12 +894,7 @@ impl Processor {
         hop_count: usize,
         allow_short_paths: bool,
     ) -> Result<OnionRoute> {
-        let request = OnionRouteRequest {
-            service: service.clone(),
-            hop_count,
-            allow_short_paths,
-        };
-        self.build_filtered_onion_route(request, |_| true).await
+        directory::build_onion_route(self, service, hop_count, allow_short_paths).await
     }
 
     /// Build an onion proxy route for a client target through a target-agnostic proxy config.
@@ -906,61 +903,7 @@ impl Processor {
         proxy: OnionProxyConfig,
         target: OnionProxyTarget,
     ) -> Result<OnionProxyRoute> {
-        let service = proxy.exit_service().to_string();
-        let transport = proxy.exit_transport();
-        let target_authority = target.authority();
-        let request = OnionRouteRequest {
-            service: service.clone(),
-            hop_count: proxy.hop_count,
-            allow_short_paths: proxy.allow_short_paths,
-        };
-        let route = self
-            .build_filtered_onion_route(request, |exit| {
-                exit.offers_service_transport(&service, transport)
-                    && exit.policy.allows_target(&target_authority)
-            })
-            .await?;
-
-        Ok(OnionProxyRoute {
-            protocol: proxy.protocol,
-            target,
-            route,
-        })
-    }
-
-    async fn build_filtered_onion_route(
-        &self,
-        request: OnionRouteRequest,
-        exit_filter: impl Fn(&OnionExitDescriptor) -> bool,
-    ) -> Result<OnionRoute> {
-        let service = request.service.clone();
-        let online_nodes = self.lookup_online_nodes(false).await?;
-        let exits = self
-            .lookup_onion_exits(&service, false)
-            .await?
-            .into_iter()
-            .filter(exit_filter);
-        let candidates = OnionRouteCandidates::from_validated_descriptors(
-            self.did(),
-            &service,
-            online_nodes,
-            exits,
-        );
-        select_onion_route_from_candidates(
-            &request,
-            candidates,
-            self.onion_route_peer_qualities().await,
-            &mut SystemRouteEntropy::new(),
-        )
-    }
-
-    async fn onion_route_peer_qualities(&self) -> Vec<(Did, PeerQuality)> {
-        let thresholds = peer_quality_thresholds();
-        self.peer_measurements()
-            .await
-            .into_iter()
-            .map(|measurement| (measurement.did, measurement.evidence.classify(thresholds)))
-            .collect()
+        directory::build_onion_proxy_route(self, proxy, target).await
     }
 
     async fn registration_task_daemon(&self, task: &dyn RegistrationTask) {
@@ -1265,6 +1208,31 @@ impl Processor {
     }
 }
 
+#[cfg_attr(feature = "browser", async_trait::async_trait(?Send))]
+#[cfg_attr(not(feature = "browser"), async_trait::async_trait)]
+impl OnionDirectoryReader for Processor {
+    fn local_did(&self) -> Did {
+        self.did()
+    }
+
+    async fn live_online_nodes(&self) -> Result<Vec<OnlineNodeDescriptor>> {
+        self.lookup_online_nodes(false).await
+    }
+
+    async fn live_onion_exits(&self, service: &str) -> Result<Vec<OnionExitDescriptor>> {
+        self.lookup_onion_exits(service, false).await
+    }
+
+    async fn peer_qualities(&self) -> Vec<(Did, PeerQuality)> {
+        let thresholds = peer_quality_thresholds();
+        self.peer_measurements()
+            .await
+            .into_iter()
+            .map(|measurement| (measurement.did, measurement.evidence.classify(thresholds)))
+            .collect()
+    }
+}
+
 #[cfg(test)]
 #[cfg(feature = "node")]
 mod test {
@@ -1289,6 +1257,7 @@ mod test {
     use super::*;
     use crate::onion::OnionExitDescriptorBody;
     use crate::onion::OnionExitTransport;
+    use crate::onion::OnionRouteError;
     use crate::online::OnlineNodeDescriptorBody;
     use crate::prelude::*;
     use crate::provider::Provider;
@@ -1298,6 +1267,19 @@ mod test {
     // connection callbacks; run them serially so one test's candidates or callbacks
     // cannot add pressure to another test's handshake.
     static NETWORK_TEST_LOCK: OnceLock<AsyncTestMutex<()>> = OnceLock::new();
+
+    fn onion_policy(allowed_targets: &[&str], denied_targets: &[&str]) -> Result<OnionExitPolicy> {
+        OnionExitPolicy::from_target_strings(
+            allowed_targets
+                .iter()
+                .map(|target| (*target).to_string())
+                .collect(),
+            denied_targets
+                .iter()
+                .map(|target| (*target).to_string())
+                .collect(),
+        )
+    }
 
     #[test]
     fn webrtc_udp_port_range_absent_by_default() {
@@ -1458,7 +1440,7 @@ mod test {
     }
 
     #[test]
-    fn onion_exit_registration_task_can_run_without_presence_advertisement() {
+    fn onion_exit_registration_task_can_run_without_presence_advertisement() -> Result<()> {
         let key = SecretKey::random();
         let session_sk = SessionSk::new_with_seckey(&key).unwrap();
         let serialized = ProcessorConfigSerialized::new(
@@ -1469,10 +1451,7 @@ mod test {
         )
         .advertise_presence(false)
         .advertise_onion_exit(true)
-        .onion_exit_policy(OnionExitPolicy {
-            allowed_targets: vec!["example.com:443".to_string()],
-            ..OnionExitPolicy::default()
-        });
+        .onion_exit_policy(onion_policy(&["example.com:443"], &[])?);
 
         let config = ProcessorConfig::try_from(serialized).unwrap();
         let processor = ProcessorBuilder::from_config(&config)
@@ -1483,6 +1462,7 @@ mod test {
             .unwrap();
 
         assert_eq!(processor.registration_tasks.len(), 1);
+        Ok(())
     }
 
     #[tokio::test]
@@ -1567,7 +1547,7 @@ mod test {
     }
 
     #[test]
-    fn custom_onion_exit_service_allows_explicit_transport() {
+    fn custom_onion_exit_service_allows_explicit_transport() -> Result<()> {
         let key = SecretKey::random();
         let session_sk = SessionSk::new_with_seckey(&key).unwrap();
         let mut config = ProcessorConfig::new(
@@ -1578,12 +1558,10 @@ mod test {
         )
         .advertise_onion_exit(true);
         config.onion_exit_services = vec![OnionExitService::new("web", OnionExitTransport::Tcp)];
-        config.onion_exit_policy = OnionExitPolicy {
-            allowed_targets: vec!["example.com:443".to_string()],
-            ..OnionExitPolicy::default()
-        };
+        config.onion_exit_policy = onion_policy(&["example.com:443"], &[])?;
 
         assert!(ProcessorBuilder::from_config(&config).is_ok());
+        Ok(())
     }
 
     #[tokio::test]
@@ -1913,12 +1891,12 @@ mod test {
             &exit,
             OnionExitService::new("https", OnionExitTransport::Tcp),
             get_epoch_ms(),
-            OnionExitPolicy {
-                allowed_targets: vec!["example.com:443".to_string()],
-                denied_targets: vec![],
-                max_circuits: 8,
-                max_streams_per_circuit: 2,
-                max_bytes_per_minute: 4096,
+            {
+                let mut policy = onion_policy(&["example.com:443"], &[])?;
+                policy.max_circuits = 8;
+                policy.max_streams_per_circuit = 2;
+                policy.max_bytes_per_minute = 4096;
+                policy
             },
         )?;
 
@@ -1930,13 +1908,12 @@ mod test {
             .build_onion_route("https".to_string(), 1, false)
             .await
             .err()
-            .ok_or_else(|| Error::OnionRouteError("expected route failure".to_string()))?;
+            .ok_or_else(|| Error::InvalidConfig("expected route failure".to_string()))?;
 
         assert!(matches!(
             error,
-            Error::OnionRouteError(message)
-                if message.contains("no live onion exit")
-                    && message.contains("https")
+            Error::OnionRouteError(OnionRouteError::NoLiveExit { service })
+                if service == "https"
         ));
         Ok(())
     }
@@ -1949,12 +1926,12 @@ mod test {
             &exit,
             OnionExitService::new("https", OnionExitTransport::Tcp),
             get_epoch_ms(),
-            OnionExitPolicy {
-                allowed_targets: vec!["example.com:443".to_string()],
-                denied_targets: vec![],
-                max_circuits: 8,
-                max_streams_per_circuit: 2,
-                max_bytes_per_minute: 4096,
+            {
+                let mut policy = onion_policy(&["example.com:443"], &[])?;
+                policy.max_circuits = 8;
+                policy.max_streams_per_circuit = 2;
+                policy.max_bytes_per_minute = 4096;
+                policy
             },
         )?;
 
@@ -1967,13 +1944,12 @@ mod test {
             .build_onion_proxy_route(OnionProxyConfig::https_proxy(1, false), target)
             .await
             .err()
-            .ok_or_else(|| Error::OnionRouteError("expected route failure".to_string()))?;
+            .ok_or_else(|| Error::InvalidConfig("expected route failure".to_string()))?;
 
         assert!(matches!(
             error,
-            Error::OnionRouteError(message)
-                if message.contains("no live onion exit")
-                    && message.contains("https")
+            Error::OnionRouteError(OnionRouteError::NoLiveExit { service })
+                if service == "https"
         ));
         Ok(())
     }
@@ -1984,30 +1960,22 @@ mod test {
         let allowed_exit = prepare_processor().await;
         let denied_exit = prepare_processor().await;
         let now_ms = get_epoch_ms();
-        let allowed_descriptor = onion_exit_descriptor_for_processor_with_policy(
-            &allowed_exit,
-            "https",
-            now_ms,
-            OnionExitPolicy {
-                allowed_targets: vec!["example.com:443".to_string()],
-                denied_targets: vec![],
-                max_circuits: 8,
-                max_streams_per_circuit: 2,
-                max_bytes_per_minute: 4096,
-            },
-        )?;
-        let denied_descriptor = onion_exit_descriptor_for_processor_with_policy(
-            &denied_exit,
-            "https",
-            now_ms,
-            OnionExitPolicy {
-                allowed_targets: vec!["example.com:443".to_string()],
-                denied_targets: vec!["example.com:443".to_string()],
-                max_circuits: 8,
-                max_streams_per_circuit: 2,
-                max_bytes_per_minute: 4096,
-            },
-        )?;
+        let allowed_descriptor =
+            onion_exit_descriptor_for_processor_with_policy(&allowed_exit, "https", now_ms, {
+                let mut policy = onion_policy(&["example.com:443"], &[])?;
+                policy.max_circuits = 8;
+                policy.max_streams_per_circuit = 2;
+                policy.max_bytes_per_minute = 4096;
+                policy
+            })?;
+        let denied_descriptor =
+            onion_exit_descriptor_for_processor_with_policy(&denied_exit, "https", now_ms, {
+                let mut policy = onion_policy(&["example.com:443"], &["example.com:443"])?;
+                policy.max_circuits = 8;
+                policy.max_streams_per_circuit = 2;
+                policy.max_bytes_per_minute = 4096;
+                policy
+            })?;
 
         processor
             .storage_store(Processor::onion_exit_registry_entry(vec![
@@ -2292,18 +2260,13 @@ mod test {
         service: &str,
         now_ms: u128,
     ) -> Result<OnionExitDescriptor> {
-        onion_exit_descriptor_for_processor_with_policy(
-            processor,
-            service,
-            now_ms,
-            OnionExitPolicy {
-                allowed_targets: vec!["127.0.0.1:8080".to_string(), "example.com:443".to_string()],
-                denied_targets: vec![],
-                max_circuits: 8,
-                max_streams_per_circuit: 2,
-                max_bytes_per_minute: 4096,
-            },
-        )
+        onion_exit_descriptor_for_processor_with_policy(processor, service, now_ms, {
+            let mut policy = onion_policy(&["127.0.0.1:8080", "example.com:443"], &[])?;
+            policy.max_circuits = 8;
+            policy.max_streams_per_circuit = 2;
+            policy.max_bytes_per_minute = 4096;
+            policy
+        })
     }
 
     fn onion_exit_descriptor_for_processor_with_policy(
@@ -2755,9 +2718,12 @@ mod test {
         assert!(provider_measurement.evidence.sent >= 1);
 
         let rpc_value = provider
-            .request(Method::PeerMeasurement, PeerMeasurementRequest {
-                did: p2.did().to_string(),
-            })
+            .request(
+                Method::PeerMeasurement,
+                PeerMeasurementRequest {
+                    did: p2.did().to_string(),
+                },
+            )
             .await
             .unwrap();
         let rpc_measurement: PeerMeasurementResponse = serde_json::from_value(rpc_value).unwrap();

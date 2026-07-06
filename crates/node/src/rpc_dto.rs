@@ -87,8 +87,16 @@ fn onion_exit_service_info(service: OnionExitService) -> OnionExitServiceInfo {
 
 fn onion_exit_policy_info(policy: OnionExitPolicy) -> OnionExitPolicyInfo {
     OnionExitPolicyInfo {
-        allowed_targets: policy.allowed_targets,
-        denied_targets: policy.denied_targets,
+        allowed_targets: policy
+            .allowed_targets
+            .into_iter()
+            .map(|target| target.authority().to_string())
+            .collect(),
+        denied_targets: policy
+            .denied_targets
+            .into_iter()
+            .map(|target| target.authority().to_string())
+            .collect(),
         max_circuits: policy.max_circuits,
         max_streams_per_circuit: policy.max_streams_per_circuit,
         max_bytes_per_minute: policy.max_bytes_per_minute,

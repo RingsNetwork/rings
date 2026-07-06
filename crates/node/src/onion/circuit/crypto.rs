@@ -25,6 +25,7 @@ use crate::error::Result;
 use crate::extension::ext::Scope;
 use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionRoute;
+use crate::onion::OnionRouteError;
 use crate::onion::OnionRouteHop;
 
 /// Encode the first forward frame for `route`.
@@ -54,7 +55,7 @@ pub fn route_first_hop(route: &OnionRoute) -> Result<Did> {
         .encryption_hops()
         .first()
         .map(|hop| hop.did)
-        .ok_or_else(|| Error::OnionRouteError("onion route has no hops".to_string()))
+        .ok_or_else(|| Error::OnionRouteError(OnionRouteError::RouteHasNoHops))
 }
 
 /// Send a response payload back to the immediate return peer.
@@ -81,9 +82,7 @@ fn build_forward_layers(
     payload: OnionCircuitPayload,
 ) -> Result<AeadCiphertext> {
     let Some(exit) = hops.last().copied() else {
-        return Err(Error::OnionRouteError(
-            "onion route has no hops".to_string(),
-        ));
+        return Err(Error::OnionRouteError(OnionRouteError::RouteHasNoHops));
     };
     let mut layer = encrypt_forward_layer(
         circuit_id,
@@ -99,9 +98,13 @@ fn build_forward_layers(
         let next_hop = hops
             .get(index.saturating_add(1))
             .map(|next| next.did)
-            .ok_or_else(|| Error::OnionRouteError("missing next onion hop".to_string()))?;
-        let remaining_hops = u8::try_from(hops.len().saturating_sub(index + 1))
-            .map_err(|_| Error::OnionRouteError("onion route is too long".to_string()))?;
+            .ok_or_else(|| Error::OnionRouteError(OnionRouteError::MissingNextHop))?;
+        let remaining_hops = u8::try_from(hops.len().saturating_sub(index + 1)).map_err(|_| {
+            Error::OnionRouteError(OnionRouteError::HopCountOutOfBounds {
+                hop_count: hops.len(),
+                max_hops: super::MAX_ONION_CIRCUIT_HOPS,
+            })
+        })?;
         layer = encrypt_forward_layer(
             circuit_id,
             OnionForwardLayer::Relay {
@@ -202,7 +205,7 @@ impl OnionAuthenticatedPayload {
         let signer = &self.authentication.session;
         if signer.account_did() != expected_exit.did {
             return Err(Error::OnionRouteError(
-                "onion backward payload signer is not the selected exit".to_string(),
+                OnionRouteError::BackwardSignerMismatch,
             ));
         }
         let public_key = signer
@@ -210,12 +213,12 @@ impl OnionAuthenticatedPayload {
             .map_err(Error::CoreError)?;
         if public_key != expected_exit.public_key {
             return Err(Error::OnionRouteError(
-                "onion backward payload account key is not the selected exit".to_string(),
+                OnionRouteError::BackwardAccountKeyMismatch,
             ));
         }
         if signer.session_did() != Did::from(expected_exit.session_public_key.address()) {
             return Err(Error::OnionRouteError(
-                "onion backward payload session key is not the selected exit".to_string(),
+                OnionRouteError::BackwardSessionKeyMismatch,
             ));
         }
         let data = backward_payload_authentication_data(
@@ -226,7 +229,7 @@ impl OnionAuthenticatedPayload {
         )?;
         if !self.authentication.verify_unexpired(&data) {
             return Err(Error::OnionRouteError(
-                "invalid onion backward payload signature".to_string(),
+                OnionRouteError::InvalidBackwardSignature,
             ));
         }
         Ok(OnionVerifiedPayload {
@@ -290,11 +293,12 @@ fn backward_payload_authentication_data(
 
 fn validate_route_payload_service(route: &OnionRoute, payload: &OnionCircuitPayload) -> Result<()> {
     if !payload.is_service(route.service()) {
-        return Err(Error::OnionRouteError(format!(
-            "onion payload service {:?} does not match route service {:?}",
-            payload.service.as_str(),
-            route.service()
-        )));
+        return Err(Error::OnionRouteError(
+            OnionRouteError::PayloadServiceMismatch {
+                payload_service: payload.service.clone(),
+                route_service: route.service().to_string(),
+            },
+        ));
     }
     Ok(())
 }

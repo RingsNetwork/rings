@@ -9,6 +9,7 @@ use rings_core::measure::PeerQuality;
 
 use super::circuit::MAX_ONION_CIRCUIT_HOPS;
 use super::OnionExitDescriptor;
+use super::OnionRouteError;
 use super::ONION_RELAY_CAPABILITY;
 use crate::error::Error;
 use crate::error::Result;
@@ -210,15 +211,16 @@ pub(crate) fn select_onion_route_from_candidates(
 ) -> Result<OnionRoute> {
     let service = request.service.trim();
     if service.is_empty() {
-        return Err(Error::OnionRouteError(
-            "onion route service must not be empty".to_string(),
-        ));
+        return Err(Error::OnionRouteError(OnionRouteError::EmptyRouteService));
     }
     let target_hop_count = request.target_hop_count();
-    if target_hop_count == 0 || target_hop_count > MAX_ONION_CIRCUIT_HOPS as usize {
-        return Err(Error::OnionRouteError(format!(
-            "onion route hop count {target_hop_count} exceeds limit {MAX_ONION_CIRCUIT_HOPS}"
-        )));
+    if target_hop_count == 0 || target_hop_count > usize::from(MAX_ONION_CIRCUIT_HOPS) {
+        return Err(Error::OnionRouteError(
+            OnionRouteError::HopCountOutOfBounds {
+                hop_count: target_hop_count,
+                max_hops: MAX_ONION_CIRCUIT_HOPS,
+            },
+        ));
     }
 
     let quality_by_did = qualities.into_iter().collect::<BTreeMap<_, _>>();
@@ -229,7 +231,9 @@ pub(crate) fn select_onion_route_from_candidates(
         .collect::<Vec<_>>();
     let exit_index =
         pick_weighted_index(&exit_dids, &quality_by_did, entropy).ok_or_else(|| {
-            Error::OnionRouteError(format!("no live onion exit offers service {service:?}"))
+            Error::OnionRouteError(OnionRouteError::NoLiveExit {
+                service: service.to_string(),
+            })
         })?;
     let exit = exit_candidates.remove(exit_index);
     let exit_did = exit.did;
@@ -250,10 +254,9 @@ pub(crate) fn select_onion_route_from_candidates(
     }
 
     if selected_relays.len() < relay_hops_needed && !request.allow_short_paths {
-        return Err(Error::OnionRouteError(format!(
-            "not enough relay candidates for {}-hop onion route",
-            target_hop_count
-        )));
+        return Err(Error::OnionRouteError(OnionRouteError::NotEnoughRelays {
+            hop_count: target_hop_count,
+        }));
     }
 
     let mut encryption_hops = selected_relays;
@@ -351,39 +354,31 @@ fn validate_route_hops(
     exit: &OnionExitDescriptor,
 ) -> Result<()> {
     if service.trim().is_empty() {
-        return Err(Error::OnionRouteError(
-            "onion route service must not be empty".to_string(),
-        ));
+        return Err(Error::OnionRouteError(OnionRouteError::EmptyRouteService));
     }
-    if encryption_hops.is_empty() || encryption_hops.len() > MAX_ONION_CIRCUIT_HOPS as usize {
-        return Err(Error::OnionRouteError(format!(
-            "onion route hop count {} exceeds limit {MAX_ONION_CIRCUIT_HOPS}",
-            encryption_hops.len()
-        )));
+    if encryption_hops.is_empty() || encryption_hops.len() > usize::from(MAX_ONION_CIRCUIT_HOPS) {
+        return Err(Error::OnionRouteError(
+            OnionRouteError::HopCountOutOfBounds {
+                hop_count: encryption_hops.len(),
+                max_hops: MAX_ONION_CIRCUIT_HOPS,
+            },
+        ));
     }
     let Some(last) = encryption_hops.last() else {
-        return Err(Error::OnionRouteError(
-            "onion route has no hops".to_string(),
-        ));
+        return Err(Error::OnionRouteError(OnionRouteError::RouteHasNoHops));
     };
     if last.did != exit.did || last.session_public_key != exit.session_public_key {
-        return Err(Error::OnionRouteError(
-            "onion route exit hop does not match exit descriptor".to_string(),
-        ));
+        return Err(Error::OnionRouteError(OnionRouteError::ExitHopMismatch));
     }
     let hops = encryption_hops
         .iter()
         .map(|hop| hop.did)
         .collect::<Vec<_>>();
     if has_duplicate_dids(&hops) {
-        return Err(Error::OnionRouteError(
-            "onion route contains duplicate hops".to_string(),
-        ));
+        return Err(Error::OnionRouteError(OnionRouteError::DuplicateRouteHops));
     }
     if !exit.offers_service(service) {
-        return Err(Error::OnionRouteError(
-            "onion route exit does not offer selected service".to_string(),
-        ));
+        return Err(Error::OnionRouteError(OnionRouteError::ExitServiceMismatch));
     }
     Ok(())
 }

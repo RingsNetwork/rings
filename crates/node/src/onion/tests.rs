@@ -16,20 +16,23 @@ fn service(name: &str) -> OnionExitService {
     }
 }
 
-fn signed_exit_at(heartbeat_at_ms: u128, expires_at_ms: u128) -> CoreResult<OnionExitDescriptor> {
+fn signed_exit_at(heartbeat_at_ms: u128, expires_at_ms: u128) -> Result<OnionExitDescriptor> {
     let key = SecretKey::random();
-    let session_sk = SessionSk::new_with_seckey(&key)?;
+    let session_sk = SessionSk::new_with_seckey(&key).map_err(Error::CoreError)?;
     let did = session_sk.account_did();
     OnionExitDescriptor::new_signed(
         OnionExitDescriptorBody {
             did,
-            public_key: session_sk.session().account_verification_pubkey()?,
+            public_key: session_sk
+                .session()
+                .account_verification_pubkey()
+                .map_err(Error::CoreError)?,
             session_public_key: session_sk.session_public_key(),
             node_type: OnlineNodeType::Native,
             network_id: 1,
             services: vec![service("web")],
             policy: OnionExitPolicy {
-                allowed_targets: vec!["example.com:443".to_string()],
+                allowed_targets: vec![OnionExitTarget::parse("example.com:443")?],
                 denied_targets: vec![],
                 max_circuits: 16,
                 max_streams_per_circuit: 4,
@@ -42,6 +45,7 @@ fn signed_exit_at(heartbeat_at_ms: u128, expires_at_ms: u128) -> CoreResult<Onio
         },
         &session_sk,
     )
+    .map_err(Error::CoreError)
 }
 
 fn online_node_at(
@@ -49,9 +53,12 @@ fn online_node_at(
     heartbeat_at_ms: u128,
     expires_at_ms: u128,
 ) -> CoreResult<OnlineNodeDescriptor> {
-    online_node_at_with_capabilities(session_sk, heartbeat_at_ms, expires_at_ms, vec![
-        ONION_RELAY_CAPABILITY.to_string(),
-    ])
+    online_node_at_with_capabilities(
+        session_sk,
+        heartbeat_at_ms,
+        expires_at_ms,
+        vec![ONION_RELAY_CAPABILITY.to_string()],
+    )
 }
 
 fn online_node_at_with_capabilities(
@@ -116,60 +123,57 @@ fn reserved_service_name_requires_reserved_transport_for_routes() {
 }
 
 #[test]
-fn default_exit_policy_is_closed() {
+fn default_exit_policy_is_closed() -> Result<()> {
     let policy = OnionExitPolicy::default();
+    let target = OnionExitTarget::parse("example.com:443")?;
+
     assert!(policy.is_closed());
-    assert!(!policy.allows_target("example.com:443"));
+    assert!(!policy.allows_target(&target));
     assert!(matches!(
         policy.validate_targets(),
         Err(Error::InvalidConfig(message)) if message.contains("allowed target")
     ));
+    Ok(())
 }
 
 #[test]
-fn exit_policy_allow_list_controls_targets() {
-    let policy = OnionExitPolicy {
-        allowed_targets: vec![
+fn exit_policy_allow_list_controls_targets() -> Result<()> {
+    let policy = OnionExitPolicy::from_target_strings(
+        vec![
             "Example.COM.:443".to_string(),
             "API.example.com:443".to_string(),
         ],
-        denied_targets: vec!["api.example.com:443".to_string()],
-        max_circuits: 0,
-        max_streams_per_circuit: 0,
-        max_bytes_per_minute: 0,
-    };
+        vec!["api.example.com:443".to_string()],
+    )?;
+    let example = OnionExitTarget::parse("example.com:443")?;
+    let api = OnionExitTarget::parse("api.example.com:443")?;
+    let other = OnionExitTarget::parse("other.example.com:443")?;
 
     assert!(!policy.is_closed());
-    assert!(policy.allows_target("example.com:443"));
-    assert!(!policy.allows_target("api.example.com:443"));
-    assert!(!policy.allows_target("other.example.com:443"));
-    assert!(!policy.allows_target(""));
+    assert!(policy.allows_target(&example));
+    assert!(!policy.allows_target(&api));
+    assert!(!policy.allows_target(&other));
+    Ok(())
 }
 
 #[test]
 fn exit_policy_rejects_invalid_target_entries() {
-    let invalid_allowed = OnionExitPolicy {
-        allowed_targets: vec!["example.com".to_string()],
-        ..OnionExitPolicy::default()
-    };
     assert!(matches!(
-        invalid_allowed.validate_targets(),
-        Err(Error::InvalidConfig(message)) if message.contains("allowed target")
+        OnionExitPolicy::from_target_strings(vec!["example.com".to_string()], vec![]),
+        Err(Error::InvalidConfig(message)) if message.contains("expected host:port")
     ));
 
-    let invalid_denied = OnionExitPolicy {
-        allowed_targets: vec!["example.com:443".to_string()],
-        denied_targets: vec!["blocked.example.com".to_string()],
-        ..OnionExitPolicy::default()
-    };
     assert!(matches!(
-        invalid_denied.validate_targets(),
-        Err(Error::InvalidConfig(message)) if message.contains("denied target")
+        OnionExitPolicy::from_target_strings(
+            vec!["example.com:443".to_string()],
+            vec!["blocked.example.com".to_string()]
+        ),
+        Err(Error::InvalidConfig(message)) if message.contains("expected host:port")
     ));
 }
 
 #[test]
-fn exit_descriptor_signature_covers_policy() -> CoreResult<()> {
+fn exit_descriptor_signature_covers_policy() -> Result<()> {
     let mut descriptor = signed_exit_at(20, 100)?;
     assert!(descriptor.verify_signature());
 
@@ -180,11 +184,14 @@ fn exit_descriptor_signature_covers_policy() -> CoreResult<()> {
 }
 
 #[test]
-fn latest_valid_by_did_filters_expired_and_keeps_newest() -> CoreResult<()> {
+fn latest_valid_by_did_filters_expired_and_keeps_newest() -> Result<()> {
     let key = SecretKey::random();
-    let session_sk = SessionSk::new_with_seckey(&key)?;
+    let session_sk = SessionSk::new_with_seckey(&key).map_err(Error::CoreError)?;
     let did = session_sk.account_did();
-    let public_key = session_sk.session().account_verification_pubkey()?;
+    let public_key = session_sk
+        .session()
+        .account_verification_pubkey()
+        .map_err(Error::CoreError)?;
 
     let older = OnionExitDescriptor::new_signed(
         OnionExitDescriptorBody {
@@ -201,7 +208,8 @@ fn latest_valid_by_did_filters_expired_and_keeps_newest() -> CoreResult<()> {
             version: "old".to_string(),
         },
         &session_sk,
-    )?;
+    )
+    .map_err(Error::CoreError)?;
     let newer = OnionExitDescriptor::new_signed(
         OnionExitDescriptorBody {
             did,
@@ -217,7 +225,8 @@ fn latest_valid_by_did_filters_expired_and_keeps_newest() -> CoreResult<()> {
             version: "new".to_string(),
         },
         &session_sk,
-    )?;
+    )
+    .map_err(Error::CoreError)?;
     let other_live = signed_exit_at(25, 100)?;
     let expired = signed_exit_at(30, 40)?;
 
@@ -249,7 +258,7 @@ fn route_builder_uses_presence_relays_and_exit_registry() -> Result<()> {
     let local = node_key().map_err(Error::CoreError)?.account_did();
     let first_relay = node_key().map_err(Error::CoreError)?;
     let second_relay = node_key().map_err(Error::CoreError)?;
-    let exit = signed_exit_at(20, 100).map_err(Error::CoreError)?;
+    let exit = signed_exit_at(20, 100)?;
     let online = vec![
         online_node_at(&first_relay, 20, 100).map_err(Error::CoreError)?,
         online_node_at(&second_relay, 20, 100).map_err(Error::CoreError)?,
@@ -281,7 +290,7 @@ fn route_builder_uses_presence_relays_and_exit_registry() -> Result<()> {
 fn route_builder_rejects_too_short_production_route() -> Result<()> {
     let local = node_key().map_err(Error::CoreError)?.account_did();
     let relay = node_key().map_err(Error::CoreError)?;
-    let exit = signed_exit_at(20, 100).map_err(Error::CoreError)?;
+    let exit = signed_exit_at(20, 100)?;
     let request = OnionRouteRequest {
         service: "web".to_string(),
         hop_count: 3,
@@ -298,9 +307,12 @@ fn route_builder_rejects_too_short_production_route() -> Result<()> {
         Vec::new(),
     );
 
-    assert!(
-        matches!(result, Err(Error::OnionRouteError(message)) if message.contains("not enough relay"))
-    );
+    assert!(matches!(
+        result,
+        Err(Error::OnionRouteError(OnionRouteError::NotEnoughRelays {
+            hop_count: 3
+        }))
+    ));
     Ok(())
 }
 
@@ -308,7 +320,7 @@ fn route_builder_rejects_too_short_production_route() -> Result<()> {
 fn route_builder_rejects_nodes_without_relay_capability() -> Result<()> {
     let local = node_key().map_err(Error::CoreError)?.account_did();
     let relay = node_key().map_err(Error::CoreError)?;
-    let exit = signed_exit_at(20, 100).map_err(Error::CoreError)?;
+    let exit = signed_exit_at(20, 100)?;
     let request = OnionRouteRequest {
         service: "web".to_string(),
         hop_count: 2,
@@ -325,9 +337,12 @@ fn route_builder_rejects_nodes_without_relay_capability() -> Result<()> {
         Vec::new(),
     );
 
-    assert!(
-        matches!(result, Err(Error::OnionRouteError(message)) if message.contains("not enough relay"))
-    );
+    assert!(matches!(
+        result,
+        Err(Error::OnionRouteError(OnionRouteError::NotEnoughRelays {
+            hop_count: 2
+        }))
+    ));
     Ok(())
 }
 
@@ -336,7 +351,7 @@ fn route_builder_samples_relays_by_quality_weight() -> Result<()> {
     let local = node_key().map_err(Error::CoreError)?.account_did();
     let degraded = node_key().map_err(Error::CoreError)?;
     let healthy = node_key().map_err(Error::CoreError)?;
-    let exit = signed_exit_at(20, 100).map_err(Error::CoreError)?;
+    let exit = signed_exit_at(20, 100)?;
     let request = OnionRouteRequest {
         service: "web".to_string(),
         hop_count: 2,
@@ -370,7 +385,7 @@ fn route_builder_samples_relays_by_quality_weight() -> Result<()> {
 fn route_builder_entropy_can_select_second_unknown_relay() -> Result<()> {
     let first = node_key().map_err(Error::CoreError)?;
     let second = node_key().map_err(Error::CoreError)?;
-    let exit = signed_exit_at(20, 100).map_err(Error::CoreError)?;
+    let exit = signed_exit_at(20, 100)?;
     let request = OnionRouteRequest {
         service: "web".to_string(),
         hop_count: 2,
@@ -384,7 +399,7 @@ fn route_builder_entropy_can_select_second_unknown_relay() -> Result<()> {
     let second_sorted = relay_hops
         .get(1)
         .map(|hop| hop.did)
-        .ok_or_else(|| Error::OnionRouteError("missing second relay".to_string()))?;
+        .ok_or(Error::OnionRouteError(OnionRouteError::MissingTestRelay))?;
     let candidates = OnionRouteCandidates {
         relays: relay_hops,
         exits: vec![exit],

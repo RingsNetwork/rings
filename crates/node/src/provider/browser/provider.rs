@@ -174,7 +174,7 @@ impl BrowserOnionProxy {
             match futures::future::select(response, timeout).await {
                 Either::Left((result, _)) => match result {
                     Ok(Ok(response)) => Ok(js_value::serialize(&response).map_err(JsError::from)?),
-                    Ok(Err(message)) => Err(JsValue::from_str(&message)),
+                    Ok(Err(error)) => Err(JsValue::from(JsError::from(error))),
                     Err(_) => Err(JsValue::from_str(
                         "onion HTTPS proxy response channel closed",
                     )),
@@ -291,11 +291,8 @@ impl Provider {
     ) -> js_sys::Promise {
         future_to_promise(async move {
             let signer = wrapped_signer(signer);
-            let policy = OnionExitPolicy {
-                allowed_targets,
-                denied_targets,
-                ..OnionExitPolicy::default()
-            };
+            let policy = OnionExitPolicy::from_target_strings(allowed_targets, denied_targets)
+                .map_err(JsError::from)?;
             policy.validate_targets().map_err(JsError::from)?;
 
             let entry_storage = Box::new(

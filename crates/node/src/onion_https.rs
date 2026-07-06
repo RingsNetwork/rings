@@ -45,9 +45,12 @@ use crate::onion::exit_accounting::OnionExitAccounting;
 use crate::onion::exit_accounting::OnionExitLease;
 use crate::onion::replay::OnionForwardReplayCache;
 use crate::onion::replay::OnionForwardReplayKey;
+use crate::onion::replay::ReplayAdmission;
 use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitFailure;
 use crate::onion::OnionExitPolicy;
+use crate::onion::OnionExitTarget;
+use crate::onion::OnionRouteError;
 use crate::onion_proxy::OnionProxyTarget;
 use crate::onion_proxy::ONION_PROXY_HTTPS_SERVICE;
 
@@ -152,7 +155,7 @@ pub(crate) struct OnionHttpsRuntime {
 struct PendingRequest {
     expected_return_peer: Did,
     expected_exit: OnionExitDescriptor,
-    sender: oneshot::Sender<std::result::Result<OnionHttpsClientResponse, String>>,
+    sender: oneshot::Sender<std::result::Result<OnionHttpsClientResponse, Error>>,
 }
 
 impl OnionHttpsRuntime {
@@ -175,7 +178,7 @@ impl OnionHttpsRuntime {
         expected_exit: OnionExitDescriptor,
     ) -> Result<(
         OnionCircuitId,
-        oneshot::Receiver<std::result::Result<OnionHttpsClientResponse, String>>,
+        oneshot::Receiver<std::result::Result<OnionHttpsClientResponse, Error>>,
     )> {
         let mut pending = self.pending.lock().map_err(|_| Error::Lock)?;
         for _ in 0..16 {
@@ -184,15 +187,18 @@ impl OnionHttpsRuntime {
                 continue;
             }
             let (sender, receiver) = oneshot::channel();
-            pending.insert(id, PendingRequest {
-                expected_return_peer,
-                expected_exit,
-                sender,
-            });
+            pending.insert(
+                id,
+                PendingRequest {
+                    expected_return_peer,
+                    expected_exit,
+                    sender,
+                },
+            );
             return Ok((id, receiver));
         }
         Err(Error::OnionRouteError(
-            "failed to allocate unique browser onion circuit id".to_string(),
+            OnionRouteError::CircuitIdAllocationFailed,
         ))
     }
 
@@ -222,11 +228,16 @@ impl OnionHttpsRuntime {
                 }));
             }
             Ok(Some(OnionHttpsPayload::Error(failure))) => {
-                let _ = pending.sender.send(Err(failure.to_string()));
+                let _ =
+                    pending
+                        .sender
+                        .send(Err(Error::OnionRouteError(OnionRouteError::ExitFailure(
+                            failure,
+                        ))));
             }
             Ok(Some(OnionHttpsPayload::Request(_)) | None) => {}
             Err(error) => {
-                let _ = pending.sender.send(Err(error.to_string()));
+                let _ = pending.sender.send(Err(error));
             }
         }
     }
@@ -246,7 +257,7 @@ impl OnionHttpsRuntime {
         match payload.into_verified_payload(id, &request.expected_exit) {
             Ok(verified) => Some((request, verified.payload)),
             Err(error) => {
-                let _ = request.sender.send(Err(error.to_string()));
+                let _ = request.sender.send(Err(error));
                 None
             }
         }
@@ -284,10 +295,16 @@ impl OnionHttpsRuntime {
         nonce: OnionForwardNonce,
     ) -> Result<()> {
         let mut replays = self.forward_replays.lock().map_err(|_| Error::Lock)?;
-        replays.consume(
+        match replays.consume(
             OnionForwardReplayKey::new(circuit_id, nonce),
             rings_core::utils::get_epoch_ms(),
-        )
+        ) {
+            ReplayAdmission::Consumed => Ok(()),
+            ReplayAdmission::Duplicate => {
+                Err(Error::OnionRouteError(OnionRouteError::ForwardReplay))
+            }
+            ReplayAdmission::Full => Err(Error::NoPermission),
+        }
     }
 
     #[cfg(test)]
@@ -494,23 +511,25 @@ pub(crate) async fn execute_exit_fetch(
     runtime.consume_forward_nonce(circuit_id, forward_nonce)?;
     let target = OnionProxyTarget::parse_authority(&request.target)?;
     let authority = target.authority();
+    let exit_target = OnionExitTarget::from_proxy_target(&target);
     let Some(policy) = runtime.exit_policy() else {
         return Err(Error::InvalidConfig(
             "browser HTTPS onion exit is not enabled locally".to_string(),
         ));
     };
-    if !policy.allows_target(&authority) {
+    if !policy.allows_target(&exit_target) {
         return Err(Error::NoPermission);
     }
+    let request_body_bytes = usize_to_u64(request.body.len())?;
     let _lease =
-        runtime.admit_exit_request(&policy, circuit_id, return_peer, request.body.len() as u64)?;
+        runtime.admit_exit_request(&policy, circuit_id, return_peer, request_body_bytes)?;
     let body_limit = https_response_body_limit(runtime.remaining_exit_bytes(&policy)?);
     if body_limit == 0 {
         return Err(Error::NoPermission);
     }
     let url = format!("https://{}{}", authority, normalize_path(&request.path)?);
     let response = browser_fetch(&url, request, body_limit).await?;
-    runtime.record_exit_bytes(&policy, response.body.len() as u64)?;
+    runtime.record_exit_bytes(&policy, usize_to_u64(response.body.len())?)?;
     Ok(OnionHttpsResponse {
         status: response.status,
         headers: response.headers,
@@ -624,7 +643,14 @@ fn checked_status_code(status: f64) -> Result<u16> {
             "fetch response status is not a valid HTTP status: {status:?}"
         )));
     }
-    Ok(status as u16)
+    status
+        .to_string()
+        .parse::<u16>()
+        .map_err(|_| Error::HttpRequestError(format!("invalid fetch response status {status:?}")))
+}
+
+fn usize_to_u64(value: usize) -> Result<u64> {
+    u64::try_from(value).map_err(|_| Error::InvalidData)
 }
 
 fn collect_headers(response: &JsValue) -> Result<Vec<(String, String)>> {
@@ -706,9 +732,9 @@ async fn response_body(response: &JsValue, max_body_bytes: u64) -> Result<Vec<u8
             continue;
         }
         let bytes = Uint8Array::new(value.as_ref()).to_vec();
-        if max_body_bytes > 0
-            && (body.len() as u64).saturating_add(bytes.len() as u64) > max_body_bytes
-        {
+        let body_len = usize_to_u64(body.len())?;
+        let bytes_len = usize_to_u64(bytes.len())?;
+        if max_body_bytes > 0 && body_len.saturating_add(bytes_len) > max_body_bytes {
             if let Some(cancel) = cancel {
                 let _ = cancel.call0(reader.as_ref());
             }

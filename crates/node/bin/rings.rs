@@ -22,6 +22,7 @@ use rings_node::native::onion_http_proxy::run_onion_http_proxy;
 use rings_node::native::onion_http_proxy::OnionHttpProxyOptions;
 use rings_node::onion::tcp::NativeOnionCircuitHandle;
 use rings_node::onion::OnionExitService;
+use rings_node::onion::OnionExitTarget;
 use rings_node::onion::OnionExitTransport;
 use rings_node::prelude::rings_core::chunk::ReassemblyLimits;
 use rings_node::prelude::rings_core::dht::Did;
@@ -605,10 +606,11 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
         c.onion_exit_services = args.onion_exit_service;
     }
     if !args.onion_exit_allow_target.is_empty() {
-        c.onion_exit_policy.allowed_targets = args.onion_exit_allow_target;
+        c.onion_exit_policy.allowed_targets =
+            parse_onion_exit_targets(args.onion_exit_allow_target)?;
     }
     if !args.onion_exit_deny_target.is_empty() {
-        c.onion_exit_policy.denied_targets = args.onion_exit_deny_target;
+        c.onion_exit_policy.denied_targets = parse_onion_exit_targets(args.onion_exit_deny_target)?;
     }
     if let Some(max_circuits) = args.onion_exit_max_circuits {
         c.onion_exit_policy.max_circuits = max_circuits;
@@ -723,6 +725,14 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn parse_onion_exit_targets(targets: Vec<String>) -> anyhow::Result<Vec<OnionExitTarget>> {
+    let mut parsed = Vec::with_capacity(targets.len());
+    for target in targets {
+        parsed.push(OnionExitTarget::parse(target)?);
+    }
+    Ok(parsed)
 }
 
 async fn pubsub_run(client_args: ClientArgs, topic: String) -> anyhow::Result<()> {

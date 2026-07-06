@@ -39,6 +39,7 @@ use crate::registration::RegistrationContext;
 use crate::registration::RegistrationTask;
 
 pub mod circuit;
+pub(crate) mod directory;
 pub(crate) mod exit_accounting;
 mod failure;
 pub(crate) mod replay;
@@ -48,6 +49,7 @@ pub mod target;
 pub mod tcp;
 
 pub use failure::OnionExitFailure;
+pub use failure::OnionRouteError;
 pub use route::select_onion_route;
 pub(crate) use route::select_onion_route_from_candidates;
 pub use route::OnionRoute;
@@ -194,9 +196,9 @@ impl OnionExitService {
 #[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
 pub struct OnionExitPolicy {
     /// Target allow-list entries understood by the exit implementation. Empty means closed.
-    pub allowed_targets: Vec<String>,
+    pub allowed_targets: Vec<OnionExitTarget>,
     /// Target deny-list entries understood by the exit implementation. Deny entries override allows.
-    pub denied_targets: Vec<String>,
+    pub denied_targets: Vec<OnionExitTarget>,
     /// Maximum concurrent circuits this exit wants to serve. `0` means unspecified.
     pub max_circuits: u32,
     /// Maximum streams per circuit. `0` means unspecified.
@@ -205,39 +207,69 @@ pub struct OnionExitPolicy {
     pub max_bytes_per_minute: u64,
 }
 
-impl OnionExitPolicy {
-    /// Return whether this policy denies every exit target.
-    pub fn is_closed(&self) -> bool {
-        !self.has_valid_allowed_target()
+/// Canonical target authority admitted by an onion exit policy.
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct OnionExitTarget(String);
+
+impl OnionExitTarget {
+    /// Parse and canonicalize an exit target authority.
+    pub fn parse(target: impl AsRef<str>) -> Result<Self> {
+        OnionProxyTarget::parse_authority(target.as_ref())
+            .map(|target| Self(target.authority()))
+            .map_err(|error| {
+                Error::InvalidConfig(format!(
+                    "invalid onion exit target {:?}; expected host:port: {error}",
+                    target.as_ref()
+                ))
+            })
     }
 
-    /// Return whether this policy has at least one syntactically valid allowed target.
-    pub fn has_valid_allowed_target(&self) -> bool {
-        self.allowed_targets
-            .iter()
-            .any(|target| canonical_exit_target(target).is_some())
+    /// Return the canonical host:port authority.
+    pub fn authority(&self) -> &str {
+        self.0.as_str()
+    }
+
+    /// Build a policy target from an already-validated proxy target.
+    pub fn from_proxy_target(target: &OnionProxyTarget) -> Self {
+        Self(target.authority())
+    }
+}
+
+impl TryFrom<String> for OnionExitTarget {
+    type Error = String;
+
+    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
+        Self::parse(&value).map_err(|error| error.to_string())
+    }
+}
+
+impl From<OnionExitTarget> for String {
+    fn from(target: OnionExitTarget) -> Self {
+        target.0
+    }
+}
+
+impl OnionExitPolicy {
+    /// Build a policy from raw target strings at configuration or API boundaries.
+    pub fn from_target_strings(
+        allowed_targets: Vec<String>,
+        denied_targets: Vec<String>,
+    ) -> Result<Self> {
+        Ok(Self {
+            allowed_targets: parse_exit_targets(allowed_targets)?,
+            denied_targets: parse_exit_targets(denied_targets)?,
+            ..Self::default()
+        })
+    }
+
+    /// Return whether this policy denies every exit target.
+    pub fn is_closed(&self) -> bool {
+        self.allowed_targets.is_empty()
     }
 
     /// Validate target lists for an advertised onion exit.
     pub fn validate_targets(&self) -> Result<()> {
-        if let Some(target) = self
-            .allowed_targets
-            .iter()
-            .find(|target| canonical_exit_target(target).is_none())
-        {
-            return Err(Error::InvalidConfig(format!(
-                "invalid onion exit allowed target {target:?}; expected host:port"
-            )));
-        }
-        if let Some(target) = self
-            .denied_targets
-            .iter()
-            .find(|target| canonical_exit_target(target).is_none())
-        {
-            return Err(Error::InvalidConfig(format!(
-                "invalid onion exit denied target {target:?}; expected host:port"
-            )));
-        }
         if self.is_closed() {
             return Err(Error::InvalidConfig(
                 "advertise_onion_exit requires at least one valid onion_exit_policy allowed target"
@@ -248,32 +280,30 @@ impl OnionExitPolicy {
     }
 
     /// Return whether `target` is admitted by this policy's allow-list.
-    pub fn allows_target(&self, target: &str) -> bool {
-        let Some(target) = canonical_exit_target(target) else {
-            return false;
-        };
+    pub fn allows_target(&self, target: &OnionExitTarget) -> bool {
         if self.is_closed() {
             return false;
         }
-        if self
-            .denied_targets
-            .iter()
-            .filter_map(|denied| canonical_exit_target(denied))
-            .any(|denied| denied == target)
-        {
+        if self.denies(target) {
             return false;
         }
-        self.allowed_targets
-            .iter()
-            .filter_map(|allowed| canonical_exit_target(allowed))
-            .any(|allowed| allowed == target)
+        self.allows(target)
+    }
+
+    fn allows(&self, target: &OnionExitTarget) -> bool {
+        self.allowed_targets.iter().any(|allowed| allowed == target)
+    }
+
+    fn denies(&self, target: &OnionExitTarget) -> bool {
+        self.denied_targets.iter().any(|denied| denied == target)
     }
 }
 
-fn canonical_exit_target(target: &str) -> Option<String> {
-    OnionProxyTarget::parse_authority(target)
-        .ok()
-        .map(|target| target.authority())
+fn parse_exit_targets(targets: Vec<String>) -> Result<Vec<OnionExitTarget>> {
+    targets
+        .into_iter()
+        .map(OnionExitTarget::parse)
+        .collect::<Result<Vec<_>>>()
 }
 
 /// Descriptor fields covered by the onion-exit signature.
