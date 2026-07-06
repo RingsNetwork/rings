@@ -11,11 +11,13 @@ use super::codec::encode_wire_message;
 use super::codec::OnionWireMessage;
 use super::OnionAuthenticatedPayload;
 use super::OnionBackwardFrame;
+use super::OnionBackwardNonce;
 use super::OnionCircuitId;
 use super::OnionCircuitPayload;
 use super::OnionClientReturn;
 use super::OnionForwardFrame;
 use super::OnionForwardLayer;
+use super::OnionVerifiedPayload;
 use super::MAX_ONION_CIRCUIT_HOPS;
 use super::ONION_AEAD_NAMESPACE;
 use crate::error::Error;
@@ -26,12 +28,17 @@ use crate::onion::OnionRoute;
 use crate::onion::OnionRouteHop;
 
 /// Encode the first forward frame for `route`.
+///
+/// Pre: `payload.service` names the same service that selected `route`.
+/// Post: the encrypted exit layer cannot carry a payload for a service different from the selected
+/// exit descriptor service.
 pub fn encode_initial_forward(
     client: OnionClientReturn,
     route: &OnionRoute,
     circuit_id: OnionCircuitId,
     payload: OnionCircuitPayload,
 ) -> Result<(Did, Bytes)> {
+    validate_route_payload_service(route, &payload)?;
     let first = route_first_hop(route)?;
     let layer = build_forward_layers(client, &route.encryption_hops, circuit_id, payload)?;
     let frame = OnionForwardFrame { circuit_id, layer };
@@ -146,15 +153,7 @@ pub(super) fn encrypt_client_payload(
     recipient: PublicKey<33>,
     signer: &SessionSk,
 ) -> Result<AeadCiphertext> {
-    let authentication = MessageVerification::new(
-        &backward_payload_authentication_data(circuit_id, signer.session_public_key(), &payload)?,
-        signer,
-    )
-    .map_err(Error::CoreError)?;
-    let authenticated = OnionAuthenticatedPayload {
-        authentication,
-        payload,
-    };
+    let authenticated = OnionAuthenticatedPayload::new_signed(circuit_id, payload, signer)?;
     let plaintext = bincode::serialize(&authenticated).map_err(|_| Error::EncodeError)?;
     let aad = onion_aead_context(OnionAeadDirection::Backward, circuit_id)?;
     let mut rng = rand::thread_rng();
@@ -174,16 +173,41 @@ pub(super) fn decrypt_client_payload(
 }
 
 impl OnionAuthenticatedPayload {
+    /// Sign one backward payload with a fresh replay nonce.
+    pub fn new_signed(
+        circuit_id: OnionCircuitId,
+        payload: OnionCircuitPayload,
+        signer: &SessionSk,
+    ) -> Result<Self> {
+        let nonce = OnionBackwardNonce::random();
+        let authentication = MessageVerification::new(
+            &backward_payload_authentication_data(
+                circuit_id,
+                nonce,
+                signer.session_public_key(),
+                &payload,
+            )?,
+            signer,
+        )
+        .map_err(Error::CoreError)?;
+        Ok(Self {
+            nonce,
+            authentication,
+            payload,
+        })
+    }
+
     /// Verify that a client-decrypted backward payload was signed by the selected exit session.
     ///
     /// Invariant: accepted backward payloads satisfy all three identity equalities:
     /// signer account DID equals descriptor DID, signer account public key equals descriptor public
-    /// key, and signer session DID equals the descriptor session encryption key DID.
+    /// key, and signer session DID equals the descriptor session encryption key DID. The signed
+    /// transcript also binds the circuit id, per-frame nonce, exit session public key, and payload.
     pub fn into_verified_payload(
         self,
         circuit_id: OnionCircuitId,
         expected_exit: &OnionExitDescriptor,
-    ) -> Result<OnionCircuitPayload> {
+    ) -> Result<OnionVerifiedPayload> {
         let signer = &self.authentication.session;
         if signer.account_did() != expected_exit.did {
             return Err(Error::OnionRouteError(
@@ -205,15 +229,19 @@ impl OnionAuthenticatedPayload {
         }
         let data = backward_payload_authentication_data(
             circuit_id,
+            self.nonce,
             expected_exit.session_public_key,
             &self.payload,
         )?;
-        if !self.authentication.verify(&data) {
+        if !self.authentication.verify_unexpired(&data) {
             return Err(Error::OnionRouteError(
                 "invalid onion backward payload signature".to_string(),
             ));
         }
-        Ok(self.payload)
+        Ok(OnionVerifiedPayload {
+            nonce: self.nonce,
+            payload: self.payload,
+        })
     }
 }
 
@@ -229,6 +257,7 @@ struct OnionBackwardAuthenticationData<'a> {
     namespace: &'static str,
     direction: OnionAeadDirection,
     circuit_id: OnionCircuitId,
+    nonce: OnionBackwardNonce,
     exit_session_public_key: PublicKey<33>,
     payload: &'a OnionCircuitPayload,
 }
@@ -253,6 +282,7 @@ fn onion_aead_context(
 
 fn backward_payload_authentication_data(
     circuit_id: OnionCircuitId,
+    nonce: OnionBackwardNonce,
     exit_session_public_key: PublicKey<33>,
     payload: &OnionCircuitPayload,
 ) -> Result<Vec<u8>> {
@@ -260,10 +290,22 @@ fn backward_payload_authentication_data(
         namespace: ONION_AEAD_NAMESPACE,
         direction: OnionAeadDirection::Backward,
         circuit_id,
+        nonce,
         exit_session_public_key,
         payload,
     })
     .map_err(|_| Error::EncodeError)
+}
+
+fn validate_route_payload_service(route: &OnionRoute, payload: &OnionCircuitPayload) -> Result<()> {
+    if !payload.is_service(route.service.as_str()) {
+        return Err(Error::OnionRouteError(format!(
+            "onion payload service {:?} does not match route service {:?}",
+            payload.service.as_str(),
+            route.service.as_str()
+        )));
+    }
+    Ok(())
 }
 
 fn validate_route_hop_count(hops: usize) -> Result<()> {

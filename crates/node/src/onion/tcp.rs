@@ -2,6 +2,7 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -25,6 +26,7 @@ use crate::onion::circuit::encode_initial_forward;
 use crate::onion::circuit::route_first_hop;
 use crate::onion::circuit::send_backward;
 use crate::onion::circuit::OnionAuthenticatedPayload;
+use crate::onion::circuit::OnionBackwardNonce;
 use crate::onion::circuit::OnionCircuitCapabilities;
 use crate::onion::circuit::OnionCircuitHandler;
 use crate::onion::circuit::OnionCircuitId;
@@ -411,6 +413,7 @@ impl OnionTcpRuntime {
                     entry.insert(ClientStream {
                         expected_return_peer,
                         expected_exit,
+                        consumed_backward_nonces: HashSet::new(),
                         tx,
                     });
                     return Ok(key);
@@ -492,9 +495,33 @@ impl OnionTcpRuntime {
         from: Did,
         payload: OnionAuthenticatedPayload,
     ) -> Result<OnionCircuitPayload> {
-        let streams = self.client_streams.lock().map_err(|_| Error::Lock)?;
+        let expected_exit = {
+            let streams = self.client_streams.lock().map_err(|_| Error::Lock)?;
+            let stream = streams
+                .get(&key)
+                .ok_or_else(|| Error::OnionRouteError("unknown onion TCP stream".to_string()))?;
+            if stream.expected_return_peer != from {
+                return Err(Error::OnionRouteError(format!(
+                    "unexpected onion TCP return peer: expected {:?}, got {:?}",
+                    stream.expected_return_peer, from
+                )));
+            }
+            stream.expected_exit.clone()
+        };
+        let verified = payload.into_verified_payload(key.circuit_id, &expected_exit)?;
+        self.consume_backward_nonce(key, from, verified.nonce)?;
+        Ok(verified.payload)
+    }
+
+    fn consume_backward_nonce(
+        &self,
+        key: TcpStreamKey,
+        from: Did,
+        nonce: OnionBackwardNonce,
+    ) -> Result<()> {
+        let mut streams = self.client_streams.lock().map_err(|_| Error::Lock)?;
         let stream = streams
-            .get(&key)
+            .get_mut(&key)
             .ok_or_else(|| Error::OnionRouteError("unknown onion TCP stream".to_string()))?;
         if stream.expected_return_peer != from {
             return Err(Error::OnionRouteError(format!(
@@ -502,7 +529,12 @@ impl OnionTcpRuntime {
                 stream.expected_return_peer, from
             )));
         }
-        payload.into_verified_payload(key.circuit_id, &stream.expected_exit)
+        if !stream.consumed_backward_nonces.insert(nonce) {
+            return Err(Error::OnionRouteError(
+                "replayed onion TCP backward payload".to_string(),
+            ));
+        }
+        Ok(())
     }
 
     fn exit_inbound_sender(
@@ -566,9 +598,14 @@ struct TcpExitOpen {
     target: String,
 }
 
+// Invariant: each nonce in `consumed_backward_nonces` has already produced at most one
+// `TcpInbound` event for this client stream.
+// Preservation: `verify_client_payload` verifies the exit proof first, then inserts the nonce before
+// decoding the TCP payload; duplicate nonce insertion fails before bytes reach the stream.
 struct ClientStream {
     expected_return_peer: Did,
     expected_exit: OnionExitDescriptor,
+    consumed_backward_nonces: HashSet<OnionBackwardNonce>,
     tx: mpsc::Sender<TcpInbound>,
 }
 

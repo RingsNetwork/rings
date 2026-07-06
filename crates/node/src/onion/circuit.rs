@@ -86,9 +86,36 @@ impl OnionCircuitPayload {
 /// Client-decrypted backward payload plus the exit session proof that authenticated it.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct OnionAuthenticatedPayload {
+    /// Random per-frame nonce signed by the exit and consumed by the client adapter.
+    pub nonce: OnionBackwardNonce,
     /// Exit session signature over the backward payload transcript.
     pub authentication: MessageVerification,
     /// Application payload signed by the exit and encrypted to the client.
+    pub payload: OnionCircuitPayload,
+}
+
+/// Random nonce for one backward payload on a circuit.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct OnionBackwardNonce([u8; 16]);
+
+impl OnionBackwardNonce {
+    /// Build a nonce from random bytes.
+    pub const fn new(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
+    /// Generate a random backward-payload nonce.
+    pub fn random() -> Self {
+        Self(rand::random())
+    }
+}
+
+/// Backward payload that has passed exit identity, signature, and freshness checks.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OnionVerifiedPayload {
+    /// Random per-frame nonce to be consumed exactly once by the client adapter.
+    pub nonce: OnionBackwardNonce,
+    /// Verified application payload.
     pub payload: OnionCircuitPayload,
 }
 

@@ -36,7 +36,11 @@ fn session() -> SessionSk {
 }
 
 fn test_payload(label: &str) -> OnionCircuitPayload {
-    OnionCircuitPayload::new("test", Bytes::copy_from_slice(label.as_bytes()))
+    OnionCircuitPayload::new("https", Bytes::copy_from_slice(label.as_bytes()))
+}
+
+fn payload_for_service(service: &str, label: &str) -> OnionCircuitPayload {
+    OnionCircuitPayload::new(service, Bytes::copy_from_slice(label.as_bytes()))
 }
 
 fn route(relays: &[SessionSk], exit_session: &SessionSk) -> OnionRoute {
@@ -188,6 +192,24 @@ fn route_first_hop_rejects_mismatched_hop_lists() {
 
     assert!(matches!(
         route_first_hop(&route),
+        Err(crate::error::Error::OnionRouteError(_))
+    ));
+}
+
+#[test]
+fn initial_forward_requires_route_payload_service_match() {
+    let client = session();
+    let exit = session();
+    let route = route(&[], &exit);
+    let circuit_id = OnionCircuitId::new([9; 16]);
+
+    assert!(matches!(
+        encode_initial_forward(
+            OnionClientReturn::new(client.session_public_key()),
+            &route,
+            circuit_id,
+            payload_for_service("tcp", "wrong-service"),
+        ),
         Err(crate::error::Error::OnionRouteError(_))
     ));
 }
@@ -427,7 +449,8 @@ async fn client_backward_payload_decryption_runs_in_shell_handler() {
         authenticated
             .clone()
             .into_verified_payload(circuit_id, &expected_exit)
-            .expect("valid exit proof"),
+            .expect("valid exit proof")
+            .payload,
         expected
     );
 }

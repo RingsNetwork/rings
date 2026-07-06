@@ -19,6 +19,8 @@ const EXIT_LIMIT_WINDOW_MS: u128 = 60_000;
 /// non-zero.
 /// Preservation: `admit` increments stream/circuit counters only after policy checks; dropping the
 /// returned lease decrements the same circuit key; `record_bytes` resets stale windows before adding.
+/// Post: `remaining_bytes` returns the exact bytes that may still be recorded in the current window,
+/// or `None` when the byte policy is unlimited.
 #[derive(Clone, Default)]
 pub(crate) struct OnionExitAccounting {
     limiter: Arc<Mutex<ExitLimiter>>,
@@ -118,16 +120,36 @@ impl OnionExitAccounting {
             return Ok(());
         }
         let mut limiter = self.limiter.lock().map_err(|_| Error::Lock)?;
-        let now_ms = get_epoch_ms();
-        if now_ms.saturating_sub(limiter.window_start_ms) >= EXIT_LIMIT_WINDOW_MS {
-            limiter.window_start_ms = now_ms;
-            limiter.bytes_this_window = 0;
-        }
+        limiter.refresh_byte_window(get_epoch_ms());
         let next = limiter.bytes_this_window.saturating_add(bytes);
         if next > policy.max_bytes_per_minute {
             return Err(Error::NoPermission);
         }
         limiter.bytes_this_window = next;
         Ok(())
+    }
+
+    /// Return bytes still available in the current per-minute window.
+    #[cfg(feature = "browser")]
+    pub(crate) fn remaining_bytes(&self, policy: &OnionExitPolicy) -> Result<Option<u64>> {
+        if policy.max_bytes_per_minute == 0 {
+            return Ok(None);
+        }
+        let mut limiter = self.limiter.lock().map_err(|_| Error::Lock)?;
+        limiter.refresh_byte_window(get_epoch_ms());
+        Ok(Some(
+            policy
+                .max_bytes_per_minute
+                .saturating_sub(limiter.bytes_this_window),
+        ))
+    }
+}
+
+impl ExitLimiter {
+    fn refresh_byte_window(&mut self, now_ms: u128) {
+        if now_ms.saturating_sub(self.window_start_ms) >= EXIT_LIMIT_WINDOW_MS {
+            self.window_start_ms = now_ms;
+            self.bytes_this_window = 0;
+        }
     }
 }

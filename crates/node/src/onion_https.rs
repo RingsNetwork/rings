@@ -237,10 +237,9 @@ impl OnionHttpsRuntime {
             return None;
         }
         match payload.into_verified_payload(id, &request.expected_exit) {
-            Ok(payload) => Some((request, payload)),
+            Ok(verified) => Some((request, verified.payload)),
             Err(error) => {
-                tracing::warn!("drop onion HTTPS response with invalid exit proof: {error}");
-                pending.insert(id, request);
+                let _ = request.sender.send(Err(error.to_string()));
                 None
             }
         }
@@ -266,6 +265,10 @@ impl OnionHttpsRuntime {
 
     fn record_exit_bytes(&self, policy: &OnionExitPolicy, bytes: u64) -> Result<()> {
         self.accounting.record_bytes(policy, bytes)
+    }
+
+    fn remaining_exit_bytes(&self, policy: &OnionExitPolicy) -> Result<Option<u64>> {
+        self.accounting.remaining_bytes(policy)
     }
 
     #[cfg(test)]
@@ -480,8 +483,12 @@ pub(crate) async fn execute_exit_fetch(
     }
     let _lease =
         runtime.admit_exit_request(&policy, circuit_id, return_peer, request.body.len() as u64)?;
+    let body_budget = runtime.remaining_exit_bytes(&policy)?;
+    if body_budget == Some(0) {
+        return Err(Error::NoPermission);
+    }
     let url = format!("https://{}{}", authority, normalize_path(&request.path)?);
-    let response = browser_fetch(&url, request, policy.max_bytes_per_minute).await?;
+    let response = browser_fetch(&url, request, body_budget.unwrap_or_default()).await?;
     runtime.record_exit_bytes(&policy, response.body.len() as u64)?;
     Ok(OnionHttpsResponse {
         status: response.status,
@@ -701,7 +708,6 @@ fn js_error(error: JsValue) -> Error {
 #[cfg(test)]
 mod tests {
     use rings_core::ecc::SecretKey;
-    use rings_core::message::MessageVerification;
     use rings_core::session::SessionSk;
 
     use super::*;
@@ -740,12 +746,17 @@ mod tests {
         .expect("signed exit")
     }
 
-    fn dummy_authenticated_payload(session: &SessionSk) -> OnionAuthenticatedPayload {
-        OnionAuthenticatedPayload {
-            authentication: MessageVerification::new(&[], session).expect("message verification"),
-            payload: encode_https_payload(OnionHttpsPayload::Error("wrong peer".to_string()))
+    fn dummy_authenticated_payload(
+        circuit_id: OnionCircuitId,
+        session: &SessionSk,
+    ) -> OnionAuthenticatedPayload {
+        OnionAuthenticatedPayload::new_signed(
+            circuit_id,
+            encode_https_payload(OnionHttpsPayload::Error("wrong peer".to_string()))
                 .expect("encode payload"),
-        }
+            session,
+        )
+        .expect("signed payload")
     }
 
     #[test]
@@ -836,27 +847,26 @@ mod tests {
             .begin_request(expected, exit_descriptor(&exit))
             .unwrap();
 
-        runtime.complete_payload(other, id, dummy_authenticated_payload(&exit));
+        runtime.complete_payload(other, id, dummy_authenticated_payload(id, &exit));
         assert_eq!(runtime.pending_len(), 1);
         drop(receiver);
         runtime.cancel_request(id);
     }
 
     #[test]
-    fn pending_request_keeps_payload_from_wrong_exit_session() {
+    fn pending_request_rejects_payload_from_wrong_exit_session() {
         let runtime = OnionHttpsRuntime::new();
         let expected = did();
         let selected_exit = session();
         let wrong_exit = session();
-        let (id, receiver) = runtime
+        let (id, mut receiver) = runtime
             .begin_request(expected, exit_descriptor(&selected_exit))
             .unwrap();
 
-        runtime.complete_payload(expected, id, dummy_authenticated_payload(&wrong_exit));
+        runtime.complete_payload(expected, id, dummy_authenticated_payload(id, &wrong_exit));
 
-        assert_eq!(runtime.pending_len(), 1);
-        drop(receiver);
-        runtime.cancel_request(id);
+        assert_eq!(runtime.pending_len(), 0);
+        assert!(matches!(receiver.try_recv(), Ok(Some(Err(_)))));
     }
 
     #[test]

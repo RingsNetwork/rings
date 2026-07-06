@@ -64,6 +64,30 @@ impl MessageVerification {
             })
             .is_ok()
     }
+
+    /// Return whether the verification timestamp is outside its accepted lifetime.
+    pub fn is_expired(&self) -> bool {
+        if self.ttl_ms > MAX_TTL_MS {
+            return false;
+        }
+
+        let now = get_epoch_ms();
+        if self.ts_ms.saturating_sub(TS_OFFSET_TOLERANCE_MS) > now {
+            return false;
+        }
+
+        now > self.ts_ms + self.ttl_ms as u128
+    }
+
+    /// Verify the signature only when the verification timestamp is still live.
+    pub fn verify_unexpired(&self, data: &[u8]) -> bool {
+        if self.is_expired() {
+            tracing::warn!("message expired");
+            return false;
+        }
+
+        self.verify(data)
+    }
 }
 
 /// This trait helps a struct with `MessageVerification` field to `verify` itself.
@@ -77,22 +101,7 @@ pub trait MessageVerificationExt {
 
     /// Checks whether the message is expired.
     fn is_expired(&self) -> bool {
-        if self.verification().ttl_ms > MAX_TTL_MS {
-            return false;
-        }
-
-        let now = get_epoch_ms();
-
-        if self
-            .verification()
-            .ts_ms
-            .saturating_sub(TS_OFFSET_TOLERANCE_MS)
-            > now
-        {
-            return false;
-        }
-
-        now > self.verification().ts_ms + self.verification().ttl_ms as u128
+        self.verification().is_expired()
     }
 
     /// Verifies that the message is not expired and that the signature is valid.
@@ -107,7 +116,7 @@ pub trait MessageVerificationExt {
             return false;
         };
 
-        self.verification().verify(&data)
+        self.verification().verify_unexpired(&data)
     }
 
     /// Get signer did from verification.

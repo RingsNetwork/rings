@@ -1,5 +1,4 @@
 use rings_core::ecc::SecretKey;
-use rings_core::message::MessageVerification;
 
 use super::*;
 use crate::onion::OnionExitDescriptorBody;
@@ -41,11 +40,16 @@ fn runtime() -> OnionTcpRuntime {
     OnionTcpRuntime::new(session(), None)
 }
 
-fn dummy_authenticated_payload(session: &SessionSk) -> OnionAuthenticatedPayload {
-    OnionAuthenticatedPayload {
-        authentication: MessageVerification::new(&[], session).expect("message verification"),
-        payload: encode_tcp_payload(OnionTcpPayload::Close).expect("encode payload"),
-    }
+fn dummy_authenticated_payload(
+    circuit_id: OnionCircuitId,
+    session: &SessionSk,
+) -> OnionAuthenticatedPayload {
+    OnionAuthenticatedPayload::new_signed(
+        circuit_id,
+        encode_tcp_payload(OnionTcpPayload::Close).expect("encode payload"),
+        session,
+    )
+    .expect("signed payload")
 }
 
 #[test]
@@ -100,7 +104,30 @@ fn client_stream_rejects_payload_from_wrong_exit_session() -> Result<()> {
     let key = runtime.insert_client_stream(expected, exit_descriptor(&selected_exit), tx)?;
 
     assert!(matches!(
-        runtime.verify_client_payload(key, expected, dummy_authenticated_payload(&wrong_exit)),
+        runtime.verify_client_payload(
+            key,
+            expected,
+            dummy_authenticated_payload(key.circuit_id, &wrong_exit),
+        ),
+        Err(Error::OnionRouteError(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn client_stream_rejects_replayed_backward_nonce() -> Result<()> {
+    let runtime = runtime();
+    let expected = did();
+    let exit = session();
+    let (tx, _rx) = mpsc::channel(1);
+    let key = runtime.insert_client_stream(expected, exit_descriptor(&exit), tx)?;
+    let payload = dummy_authenticated_payload(key.circuit_id, &exit);
+
+    assert!(runtime
+        .verify_client_payload(key, expected, payload.clone())
+        .is_ok());
+    assert!(matches!(
+        runtime.verify_client_payload(key, expected, payload),
         Err(Error::OnionRouteError(_))
     ));
     Ok(())
