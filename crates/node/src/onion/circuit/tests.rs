@@ -7,6 +7,8 @@ use rings_core::session::SessionSk;
 
 use super::codec::encode_wire_message;
 use super::codec::OnionWireMessage;
+use super::crypto::decrypt_client_payload;
+use super::crypto::decrypt_forward_layer;
 use super::crypto::encrypt_client_payload;
 use super::limiter::OnionCryptoLimiter;
 use super::protocol::OnionCircuitCapabilities;
@@ -90,10 +92,6 @@ fn decode_event(
         .expect("decode onion circuit event")
 }
 
-fn capabilities(relay: bool, exit: bool) -> OnionCircuitCapabilities {
-    OnionCircuitCapabilities::from_registration(relay, exit)
-}
-
 fn test_scope(session_sk: SessionSk) -> Scope {
     let config = ProcessorConfig::new(1, String::new(), session_sk, 1);
     let processor = ProcessorBuilder::from_config(&config)
@@ -174,6 +172,23 @@ fn initial_forward_targets_first_hop_and_hides_payload() {
 }
 
 #[test]
+fn route_first_hop_rejects_mismatched_hop_lists() {
+    let first = session();
+    let second = session();
+    let exit = session();
+    let mut route = route(&[first, second.clone()], &exit);
+    let wrong_first = second.account_did();
+    if let Some(first_hop) = route.hops.first_mut() {
+        *first_hop = wrong_first;
+    }
+
+    assert!(matches!(
+        route_first_hop(&route),
+        Err(crate::error::Error::OnionRouteError(_))
+    ));
+}
+
+#[test]
 fn relay_forward_requires_opt_in_before_crypto_effect() {
     let client = session();
     let relay = session();
@@ -187,7 +202,7 @@ fn relay_forward_requires_opt_in_before_crypto_effect() {
         OnionCircuitPayload::TcpShutdown,
     )
     .expect("encode forward");
-    let protocol = OnionCircuitProtocol::new(capabilities(false, false));
+    let protocol = OnionCircuitProtocol::new(OnionCircuitCapabilities::client());
     let event = decode_event(
         &protocol,
         client.account_did(),
@@ -199,6 +214,64 @@ fn relay_forward_requires_opt_in_before_crypto_effect() {
         Ctx {
             did: relay.account_did(),
             state: &protocol.init(),
+        },
+        event,
+    );
+
+    assert!(transition.effects.is_empty());
+}
+
+#[tokio::test]
+async fn relay_capability_does_not_execute_exit_layer() {
+    let client = session();
+    let relay = session();
+    let route = route(&[], &relay);
+    let circuit_id = OnionCircuitId::new([4; 16]);
+    let (_, payload) = encode_initial_forward(
+        OnionClientReturn::new(client.session_public_key()),
+        &route,
+        circuit_id,
+        OnionCircuitPayload::TcpShutdown,
+    )
+    .expect("encode exit layer");
+    let protocol = OnionCircuitProtocol::new(OnionCircuitCapabilities::relay());
+    let shell = OnionCircuitShell::new(relay.clone(), RecordingHandler::default());
+    let scope = test_scope(relay.clone());
+    let state = protocol.init();
+    let event = decode_event(
+        &protocol,
+        client.account_did(),
+        relay.account_did(),
+        &payload,
+    );
+    let transition = protocol.step(
+        Ctx {
+            did: relay.account_did(),
+            state: &state,
+        },
+        event,
+    );
+    let [effect] = transition.effects.as_slice() else {
+        panic!("expected decrypt effect");
+    };
+    let reinjected = shell
+        .run(&scope, effect.clone())
+        .await
+        .expect("decrypt forward");
+    let [local_payload] = reinjected.as_slice() else {
+        panic!("expected local payload");
+    };
+    let event = decode_event(
+        &protocol,
+        relay.account_did(),
+        relay.account_did(),
+        local_payload,
+    );
+
+    let transition = protocol.step(
+        Ctx {
+            did: relay.account_did(),
+            state: &transition.state,
         },
         event,
     );
@@ -220,7 +293,7 @@ async fn relay_decrypts_one_layer_and_remembers_return_hop() {
         OnionCircuitPayload::TcpShutdown,
     )
     .expect("encode forward");
-    let protocol = OnionCircuitProtocol::new(capabilities(true, false));
+    let protocol = OnionCircuitProtocol::new(OnionCircuitCapabilities::relay());
     let shell = OnionCircuitShell::new(relay.clone(), RecordingHandler::default());
     let scope = test_scope(relay.clone());
     let event = decode_event(
@@ -286,7 +359,6 @@ async fn client_backward_payload_decryption_runs_in_shell_handler() {
     };
     let frame = OnionBackwardFrame {
         circuit_id,
-        terminal: true,
         payload: encrypt_client_payload(circuit_id, expected.clone(), client.session_public_key())
             .expect("encrypt backward"),
     };
@@ -371,15 +443,50 @@ fn relay_return_table_evicts_expired_entries() {
 #[test]
 fn crypto_limiter_bounds_sender_window() {
     let peer = session().account_did();
-    let mut limiter = OnionCryptoLimiter::default();
+    let mut limiter = OnionCryptoLimiter::with_limit(2);
 
-    assert!(limiter.admit(peer, 100, 2).is_ok());
-    assert!(limiter.admit(peer, 101, 2).is_ok());
+    assert!(limiter.admit(peer, 100).is_ok());
+    assert!(limiter.admit(peer, 101).is_ok());
     assert!(matches!(
-        limiter.admit(peer, 102, 2),
+        limiter.admit(peer, 102),
         Err(crate::error::Error::NoPermission)
     ));
     assert!(limiter
-        .admit(peer, 100 + ONION_CRYPTO_LIMIT_WINDOW_MS, 2)
+        .admit(peer, 100 + ONION_CRYPTO_LIMIT_WINDOW_MS)
         .is_ok());
+}
+
+#[test]
+fn aead_context_binds_direction_and_circuit_id() {
+    let client = session();
+    let exit = session();
+    let route = route(&[], &exit);
+    let circuit_id = OnionCircuitId::new([5; 16]);
+    let wrong_circuit_id = OnionCircuitId::new([6; 16]);
+    let (_, forward_payload) = encode_initial_forward(
+        OnionClientReturn::new(client.session_public_key()),
+        &route,
+        circuit_id,
+        OnionCircuitPayload::TcpShutdown,
+    )
+    .expect("encode forward");
+    let OnionWireMessage::Forward(frame) =
+        bincode::deserialize::<OnionWireMessage>(&forward_payload).expect("decode forward")
+    else {
+        panic!("expected forward frame");
+    };
+
+    assert!(decrypt_forward_layer(&exit, circuit_id, &frame.layer).is_ok());
+    assert!(decrypt_forward_layer(&exit, wrong_circuit_id, &frame.layer).is_err());
+    assert!(decrypt_client_payload(&exit, circuit_id, &frame.layer).is_err());
+
+    let backward = encrypt_client_payload(
+        circuit_id,
+        OnionCircuitPayload::TcpClose,
+        client.session_public_key(),
+    )
+    .expect("encrypt backward");
+    assert!(decrypt_client_payload(&client, circuit_id, &backward).is_ok());
+    assert!(decrypt_client_payload(&client, wrong_circuit_id, &backward).is_err());
+    assert!(decrypt_forward_layer(&client, circuit_id, &backward).is_err());
 }

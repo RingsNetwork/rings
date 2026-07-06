@@ -28,6 +28,7 @@ use wasm_bindgen_futures::future_to_promise;
 use wasm_bindgen_futures::JsFuture;
 
 use crate::onion::circuit::encode_initial_forward;
+use crate::onion::circuit::route_first_hop;
 use crate::onion::circuit::OnionCircuitCapabilities;
 use crate::onion::circuit::OnionCircuitPayload;
 use crate::onion::circuit::OnionCircuitProtocol;
@@ -138,11 +139,7 @@ impl BrowserOnionProxy {
                 .build_onion_proxy_route(config, target.clone())
                 .await
                 .map_err(JsError::from)?;
-            let first_hop = proxy_route.route.hops.first().copied().ok_or_else(|| {
-                JsError::from(crate::error::Error::OnionRouteError(
-                    "onion route has no hops".to_string(),
-                ))
-            })?;
+            let first_hop = route_first_hop(&proxy_route.route).map_err(JsError::from)?;
             let (id, receiver) = runtime.begin_request(first_hop).map_err(JsError::from)?;
             let (to, payload) = match encode_initial_forward(
                 OnionClientReturn::new(p.session_sk().session_public_key()),

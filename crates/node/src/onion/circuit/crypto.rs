@@ -29,15 +29,35 @@ pub fn encode_initial_forward(
     circuit_id: OnionCircuitId,
     payload: OnionCircuitPayload,
 ) -> Result<(Did, Bytes)> {
-    let Some(first) = route.encryption_hops.first().copied() else {
-        return Err(Error::OnionRouteError(
-            "onion route has no hops".to_string(),
-        ));
-    };
-    validate_route_hop_count(route.encryption_hops.len())?;
+    let first = route_first_hop(route)?;
     let layer = build_forward_layers(client, &route.encryption_hops, circuit_id, payload)?;
     let frame = OnionForwardFrame { circuit_id, layer };
-    encode_wire_message(OnionWireMessage::Forward(frame)).map(|payload| (first.did, payload))
+    encode_wire_message(OnionWireMessage::Forward(frame)).map(|payload| (first, payload))
+}
+
+/// Return the first overlay hop after proving the route hop lists agree.
+///
+/// Invariant: `route.hops[i] == route.encryption_hops[i].did` for every hop. This single
+/// predicate is the source of truth for caller return-peer expectations and forward encoding.
+pub fn route_first_hop(route: &OnionRoute) -> Result<Did> {
+    validate_route_hop_count(route.encryption_hops.len())?;
+    if route.hops.len() != route.encryption_hops.len() {
+        return Err(Error::OnionRouteError(
+            "onion route hop lists disagree".to_string(),
+        ));
+    }
+    for (hop, encryption_hop) in route.hops.iter().zip(route.encryption_hops.iter()) {
+        if *hop != encryption_hop.did {
+            return Err(Error::OnionRouteError(
+                "onion route hop lists disagree".to_string(),
+            ));
+        }
+    }
+    route
+        .encryption_hops
+        .first()
+        .map(|hop| hop.did)
+        .ok_or_else(|| Error::OnionRouteError("onion route has no hops".to_string()))
 }
 
 /// Send a response payload back to the immediate return peer.
@@ -50,7 +70,6 @@ pub async fn send_backward(
 ) -> Result<()> {
     let frame = OnionBackwardFrame {
         circuit_id,
-        terminal: payload_closes_circuit(&payload),
         payload: encrypt_client_payload(circuit_id, payload, client.session_public_key)?,
     };
     let payload = encode_wire_message(OnionWireMessage::Backward(frame))?;
@@ -172,14 +191,4 @@ fn validate_route_hop_count(hops: usize) -> Result<()> {
         )));
     }
     Ok(())
-}
-
-fn payload_closes_circuit(payload: &OnionCircuitPayload) -> bool {
-    matches!(
-        payload,
-        OnionCircuitPayload::HttpsResponse(_)
-            | OnionCircuitPayload::HttpsError(_)
-            | OnionCircuitPayload::TcpClose
-            | OnionCircuitPayload::TcpError { .. }
-    )
 }

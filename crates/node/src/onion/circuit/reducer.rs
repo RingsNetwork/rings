@@ -40,8 +40,9 @@ struct RelayReturnEntry {
 /// Invariant: every `(circuit_id, next_hop) -> previous_hop` entry represents exactly one
 /// live reverse edge learned from a prior forward relay action.
 /// Preservation: forward relay insertion purges expired entries before capacity checks;
-/// backward terminal frames remove the matched edge; non-terminal backward frames refresh
-/// only the matched edge.
+/// backward frames purge expired entries before lookup and refresh only the matched edge.
+/// Return-state removal is TTL-based because backward close semantics are encrypted to the
+/// client and are not authenticated to relays.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct OnionCircuitState {
     relay_returns: BTreeMap<RelayReturnKey, RelayReturnEntry>,
@@ -111,7 +112,7 @@ pub enum OnionCircuitEffect {
 /// ForwardReady(relay layer)    -> state' with return edge, [Send next]
 /// ForwardReady(exit layer)     -> state, [Exit]
 /// BackwardObserved(encrypted)  -> [TimestampBackward]
-/// BackwardReady(return match)  -> state' with updated/removed edge, [Send previous]
+/// BackwardReady(return match)  -> state' with refreshed edge, [Send previous]
 /// BackwardReady(no match)      -> state, [DecryptClient]
 /// ```
 ///
@@ -225,13 +226,18 @@ impl OnionCircuitReducer {
                     payload,
                 })
             }
-            OnionForwardLayer::Exit { client, payload } => Ok(OnionCircuitEffect::Exit {
-                from,
-                circuit_id,
-                return_peer: from,
-                client,
-                payload,
-            }),
+            OnionForwardLayer::Exit { client, payload } => {
+                if !self.capabilities.permits_exit_layer() {
+                    return Err(Error::NoPermission);
+                }
+                Ok(OnionCircuitEffect::Exit {
+                    from,
+                    circuit_id,
+                    return_peer: from,
+                    client,
+                    payload,
+                })
+            }
         }
     }
 
@@ -249,11 +255,7 @@ impl OnionCircuitReducer {
         };
         if let Some(entry) = state.relay_returns.get_mut(&key) {
             let previous_hop = entry.previous_hop;
-            if frame.terminal {
-                state.relay_returns.remove(&key);
-            } else {
-                entry.expires_at_ms = received_at_ms.saturating_add(self.relay_return_ttl_ms);
-            }
+            entry.expires_at_ms = received_at_ms.saturating_add(self.relay_return_ttl_ms);
             let payload = encode_wire_message(OnionWireMessage::Backward(frame))?;
             return Ok(OnionCircuitEffect::Send {
                 to: previous_hop,

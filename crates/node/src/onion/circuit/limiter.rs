@@ -16,18 +16,32 @@ pub(super) struct CryptoWindow {
 
 /// Pure per-peer crypto admission windows.
 ///
-/// Invariant: for every active `from`, `used <= max_ops` within the half-open interval
-/// `[window_start_ms, window_start_ms + ONION_CRYPTO_LIMIT_WINDOW_MS)`.
+/// Invariant: for every active `from`, `used <= max_ops_per_window` within the half-open
+/// interval `[window_start_ms, window_start_ms + ONION_CRYPTO_LIMIT_WINDOW_MS)`.
 /// Preservation: `admit` removes expired windows before lookup, resets a stale peer window
 /// before incrementing, and increments only after the upper bound check succeeds.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct OnionCryptoLimiter {
+    max_ops_per_window: u32,
     windows: BTreeMap<Did, CryptoWindow>,
 }
 
+impl Default for OnionCryptoLimiter {
+    fn default() -> Self {
+        Self::with_limit(MAX_ONION_CRYPTO_OPS_PER_WINDOW)
+    }
+}
+
 impl OnionCryptoLimiter {
-    pub(super) fn admit(&mut self, from: Did, now_ms: u128, max_ops: u32) -> Result<()> {
-        if max_ops == 0 {
+    pub(super) fn with_limit(max_ops_per_window: u32) -> Self {
+        Self {
+            max_ops_per_window,
+            windows: BTreeMap::new(),
+        }
+    }
+
+    pub(super) fn admit(&mut self, from: Did, now_ms: u128) -> Result<()> {
+        if self.max_ops_per_window == 0 {
             return Ok(());
         }
         self.windows.retain(|_, window| {
@@ -41,7 +55,7 @@ impl OnionCryptoLimiter {
             window.window_start_ms = now_ms;
             window.used = 0;
         }
-        if window.used >= max_ops {
+        if window.used >= self.max_ops_per_window {
             return Err(Error::NoPermission);
         }
         window.used = window.used.saturating_add(1);
@@ -57,10 +71,9 @@ pub(super) struct OnionCryptoGate {
 
 impl OnionCryptoGate {
     pub(super) fn admit(&self, from: Did, now_ms: u128) -> Result<()> {
-        self.limiter.lock().map_err(|_| Error::Lock)?.admit(
-            from,
-            now_ms,
-            MAX_ONION_CRYPTO_OPS_PER_WINDOW,
-        )
+        self.limiter
+            .lock()
+            .map_err(|_| Error::Lock)?
+            .admit(from, now_ms)
     }
 }

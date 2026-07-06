@@ -18,6 +18,7 @@ mod tests;
 use bytes::Bytes;
 pub use codec::OnionCircuitEvent;
 pub use crypto::encode_initial_forward;
+pub use crypto::route_first_hop;
 pub use crypto::send_backward;
 pub use protocol::OnionCircuitCapabilities;
 pub use protocol::OnionCircuitProtocol;
@@ -153,8 +154,6 @@ pub struct OnionForwardFrame {
 pub struct OnionBackwardFrame {
     /// Random circuit correlation id.
     pub circuit_id: OnionCircuitId,
-    /// Whether this frame closes relay return state.
-    pub terminal: bool,
     /// AEAD payload encrypted to the client session public key.
     pub payload: AeadCiphertext,
 }

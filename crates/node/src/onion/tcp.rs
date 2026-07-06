@@ -21,6 +21,7 @@ use crate::error::Result;
 use crate::extension::ext::Extensions;
 use crate::extension::ext::Scope;
 use crate::onion::circuit::encode_initial_forward;
+use crate::onion::circuit::route_first_hop;
 use crate::onion::circuit::send_backward;
 use crate::onion::circuit::OnionCircuitCapabilities;
 use crate::onion::circuit::OnionCircuitHandler;
@@ -150,11 +151,7 @@ impl OnionTcpRuntime {
         route: OnionRoute,
         target: OnionProxyTarget,
     ) -> Result<()> {
-        let expected_return_peer = route
-            .hops
-            .first()
-            .copied()
-            .ok_or_else(|| Error::OnionRouteError("onion route has no hops".to_string()))?;
+        let expected_return_peer = route_first_hop(&route)?;
         let (tx, rx) = mpsc::channel(32);
         let key = self.insert_client_stream(expected_return_peer, tx)?;
         let (to, payload) = encode_initial_forward(
@@ -165,7 +162,6 @@ impl OnionTcpRuntime {
                 target: target.authority(),
             },
         )?;
-        debug_assert_eq!(to, expected_return_peer);
         if let Err(error) = scope.send(to, payload).await {
             self.remove_client_stream(key);
             return Err(error);
@@ -295,9 +291,23 @@ impl OnionTcpRuntime {
             )
             .await;
         }
+        let (tx, rx) = mpsc::channel(32);
+        if let Err(error) = self.insert_exit_stream(key, expected_forward_peer, tx) {
+            return send_backward(
+                &scope,
+                circuit_id,
+                return_peer,
+                client,
+                OnionCircuitPayload::TcpError {
+                    message: error.to_string(),
+                },
+            )
+            .await;
+        }
         let lease = match self.admit_exit_stream(policy, circuit_id, return_peer, 0) {
             Ok(lease) => lease,
             Err(error) => {
+                self.remove_exit_stream(key);
                 return send_backward(
                     &scope,
                     circuit_id,
@@ -313,6 +323,7 @@ impl OnionTcpRuntime {
         let addr = match resolve_target(&authority).await {
             Ok(addr) => addr,
             Err(error) => {
+                self.remove_exit_stream(key);
                 drop(lease);
                 return send_backward(
                     &scope,
@@ -329,6 +340,7 @@ impl OnionTcpRuntime {
         let stream = match TcpStream::connect(addr).await {
             Ok(stream) => stream,
             Err(error) => {
+                self.remove_exit_stream(key);
                 drop(lease);
                 return send_backward(
                     &scope,
@@ -342,14 +354,6 @@ impl OnionTcpRuntime {
                 .await;
             }
         };
-        let (tx, rx) = mpsc::channel(32);
-        self.exit_streams
-            .lock()
-            .map_err(|_| Error::Lock)?
-            .insert(key, ExitStream {
-                tx,
-                expected_forward_peer,
-            });
         spawn_exit_stream(ExitStreamTask {
             runtime: self.clone(),
             scope,
@@ -388,6 +392,27 @@ impl OnionTcpRuntime {
         Err(Error::OnionRouteError(
             "failed to allocate unique onion TCP stream id".to_string(),
         ))
+    }
+
+    fn insert_exit_stream(
+        &self,
+        key: TcpStreamKey,
+        expected_forward_peer: Did,
+        tx: mpsc::Sender<TcpInbound>,
+    ) -> Result<()> {
+        let mut streams = self.exit_streams.lock().map_err(|_| Error::Lock)?;
+        match streams.entry(key) {
+            Entry::Vacant(entry) => {
+                entry.insert(ExitStream {
+                    expected_forward_peer,
+                    tx,
+                });
+                Ok(())
+            }
+            Entry::Occupied(_) => Err(Error::OnionRouteError(
+                "duplicate onion TCP open for live circuit".to_string(),
+            )),
+        }
     }
 
     async fn send_client_inbound(
@@ -559,6 +584,7 @@ enum TcpInbound {
 struct TcpDuplexState {
     read_open: bool,
     write_open: bool,
+    remote_terminal_seen: bool,
 }
 
 impl TcpDuplexState {
@@ -566,6 +592,7 @@ impl TcpDuplexState {
         Self {
             read_open: true,
             write_open: true,
+            remote_terminal_seen: false,
         }
     }
 
@@ -581,12 +608,22 @@ impl TcpDuplexState {
         !self.read_open && !self.write_open
     }
 
+    const fn should_announce_terminal(self) -> bool {
+        !self.remote_terminal_seen
+    }
+
     fn close_read(&mut self) {
         self.read_open = false;
     }
 
     fn close_write(&mut self) {
         self.write_open = false;
+    }
+
+    fn observe_remote_terminal(&mut self) {
+        self.read_open = false;
+        self.write_open = false;
+        self.remote_terminal_seen = true;
     }
 }
 
@@ -684,23 +721,29 @@ fn spawn_client_stream(
                                 state.close_write();
                             }
                         }
-                        Some(TcpInbound::Close) | None => break,
+                        Some(TcpInbound::Close) | None => {
+                            state.observe_remote_terminal();
+                            break;
+                        }
                         Some(TcpInbound::Error(message)) => {
                             tracing::warn!("onion TCP client stream failed: {message}");
+                            state.observe_remote_terminal();
                             break;
                         }
                     }
                 }
             }
         }
-        let _ = send_client_payload(
-            &scope,
-            &route,
-            client_return,
-            key.circuit_id,
-            OnionCircuitPayload::TcpClose,
-        )
-        .await;
+        if state.should_announce_terminal() {
+            let _ = send_client_payload(
+                &scope,
+                &route,
+                client_return,
+                key.circuit_id,
+                OnionCircuitPayload::TcpClose,
+            )
+            .await;
+        }
         runtime.remove_client_stream(key);
     });
 }
@@ -813,23 +856,29 @@ fn spawn_exit_stream(task: ExitStreamTask) {
                                 state.close_write();
                             }
                         }
-                        Some(TcpInbound::Close) | None => break,
+                        Some(TcpInbound::Close) | None => {
+                            state.observe_remote_terminal();
+                            break;
+                        }
                         Some(TcpInbound::Error(message)) => {
                             tracing::warn!("onion TCP exit stream failed: {message}");
+                            state.observe_remote_terminal();
                             break;
                         }
                     }
                 }
             }
         }
-        let _ = send_backward(
-            &scope,
-            circuit_id,
-            return_peer,
-            client,
-            OnionCircuitPayload::TcpClose,
-        )
-        .await;
+        if state.should_announce_terminal() {
+            let _ = send_backward(
+                &scope,
+                circuit_id,
+                return_peer,
+                client,
+                OnionCircuitPayload::TcpClose,
+            )
+            .await;
+        }
         runtime.remove_exit_stream(key);
         drop(lease);
     });
@@ -859,112 +908,4 @@ async fn resolve_target(authority: &str) -> Result<SocketAddr> {
 }
 
 #[cfg(test)]
-mod tests {
-    use rings_core::ecc::SecretKey;
-
-    use super::*;
-
-    fn did() -> Did {
-        SecretKey::random().address().into()
-    }
-
-    fn client_return() -> OnionClientReturn {
-        let session_sk = SessionSk::new_with_seckey(&SecretKey::random()).expect("session key");
-        OnionClientReturn::new(session_sk.session_public_key())
-    }
-
-    fn runtime() -> OnionTcpRuntime {
-        OnionTcpRuntime::new(client_return(), None)
-    }
-
-    #[test]
-    fn tcp_duplex_state_closes_only_after_both_halves_close() {
-        let mut state = TcpDuplexState::open();
-
-        state.close_read();
-        assert!(!state.can_read());
-        assert!(state.can_write());
-        assert!(!state.is_closed());
-
-        state.close_write();
-        assert!(state.is_closed());
-    }
-
-    #[test]
-    fn client_stream_accepts_only_expected_return_peer() -> Result<()> {
-        let runtime = runtime();
-        let expected = did();
-        let attacker = did();
-        let (tx, _rx) = mpsc::channel(1);
-        let key = runtime.insert_client_stream(expected, tx)?;
-
-        assert!(runtime.client_inbound_sender(key, expected).is_ok());
-        assert!(matches!(
-            runtime.client_inbound_sender(key, attacker),
-            Err(Error::OnionRouteError(_))
-        ));
-        Ok(())
-    }
-
-    #[test]
-    fn exit_limiter_enforces_streams_per_circuit() {
-        let runtime = runtime();
-        let policy = OnionExitPolicy {
-            max_streams_per_circuit: 1,
-            ..OnionExitPolicy::default()
-        };
-        let circuit_id = OnionCircuitId::new([1; 16]);
-        let return_peer = did();
-
-        let lease = runtime
-            .admit_exit_stream(&policy, circuit_id, return_peer, 0)
-            .expect("first stream admitted");
-        assert!(matches!(
-            runtime.admit_exit_stream(&policy, circuit_id, return_peer, 0),
-            Err(Error::NoPermission)
-        ));
-        drop(lease);
-        assert!(runtime
-            .admit_exit_stream(&policy, circuit_id, return_peer, 0)
-            .is_ok());
-    }
-
-    #[test]
-    fn exit_limiter_counts_distinct_circuit_ids() {
-        let runtime = runtime();
-        let policy = OnionExitPolicy {
-            max_circuits: 1,
-            ..OnionExitPolicy::default()
-        };
-        let return_peer = did();
-        let first = OnionCircuitId::new([1; 16]);
-        let second = OnionCircuitId::new([2; 16]);
-
-        let lease = runtime
-            .admit_exit_stream(&policy, first, return_peer, 0)
-            .expect("first circuit admitted");
-        assert!(matches!(
-            runtime.admit_exit_stream(&policy, second, return_peer, 0),
-            Err(Error::NoPermission)
-        ));
-        drop(lease);
-        assert!(runtime
-            .admit_exit_stream(&policy, second, return_peer, 0)
-            .is_ok());
-    }
-
-    #[tokio::test]
-    async fn install_rejects_duplicate_namespace_instead_of_splitting_runtime() -> Result<()> {
-        let processor = Arc::new(crate::tests::native::prepare_processor().await);
-        let session_sk = processor.session_sk().clone();
-        let extensions = Extensions::new(processor);
-        let _handle =
-            NativeOnionCircuitHandle::install(&extensions, session_sk.clone(), false, None)?;
-
-        assert!(matches!(
-            NativeOnionCircuitHandle::install(&extensions, session_sk, false, None),
-            Err(Error::ExtensionError(_))
-        ));
-        Ok(())
-    }
-}
+mod tests;
