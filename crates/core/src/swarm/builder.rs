@@ -91,7 +91,9 @@ impl SwarmBuilder {
 
     /// Sets storage-only Chord virtual positions derived per physical peer.
     ///
-    /// A value of zero disables virtual-node storage ownership.
+    /// A value of zero disables virtual-node storage ownership. Values above
+    /// [`crate::dht::MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER`] are capped by
+    /// [`VirtualNodeConfig::new`] because this builder is infallible.
     pub fn dht_virtual_nodes(mut self, positions_per_peer: u16) -> Self {
         self.dht_virtual_nodes = positions_per_peer;
         self

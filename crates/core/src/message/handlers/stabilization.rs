@@ -25,13 +25,11 @@ fn collect_sync_entries_actions(
     match act {
         PeerRingAction::None => Ok(()),
         PeerRingAction::RemoteAction(
-            _,
-            PeerRingRemoteAction::SyncEntriesWithSuccessor { destination, data },
+            target,
+            PeerRingRemoteAction::SyncEntriesWithSuccessor { route, data },
         ) => {
-            out.push((destination.did(), SyncEntriesWithSuccessor {
-                destination,
-                data,
-            }));
+            let destination = route.destination(target);
+            out.push((target, SyncEntriesWithSuccessor { destination, data }));
             Ok(())
         }
         PeerRingAction::MultiActions(actions) => {
@@ -101,7 +99,6 @@ mod test {
     use crate::dht::entry::Entry;
     use crate::dht::entry::EntryKind;
     use crate::dht::entry::PlacedEntry;
-    use crate::dht::entry::SyncedEntryAck;
     use crate::dht::successor::SuccessorReader;
     use crate::dht::StorageSyncDestination;
     use crate::ecc::tests::gen_ordered_keys;
@@ -170,7 +167,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn notify_predecessor_report_syncs_entries_when_predecessor_already_connected(
+    async fn notify_predecessor_report_keeps_unowned_sync_entries_when_predecessor_already_connected(
     ) -> Result<()> {
         let mut keys = gen_ordered_keys(3).into_iter();
         let key1 = next_generated_key(&mut keys)?;
@@ -188,7 +185,6 @@ mod test {
             vec![String::from("sync me").encode()?],
             EntryKind::Data,
         );
-        let stored_entry = entry.clone().try_into_storage_entry()?;
         node1
             .dht()
             .storage
@@ -253,10 +249,7 @@ mod test {
 
         match payload.transaction.data::<Message>()? {
             Message::SyncEntriesWithSuccessorReport(SyncEntriesWithSuccessorReport { acks }) => {
-                assert_eq!(acks, vec![SyncedEntryAck::new(
-                    entry.did,
-                    stored_entry.clone()
-                )]);
+                assert!(acks.is_empty());
             }
             message => {
                 return Err(Error::InvalidMessage(format!(
@@ -264,11 +257,11 @@ mod test {
                 )))
             }
         }
-        assert_eq!(node1.dht().storage.get(&entry.did.to_string()).await?, None);
         assert_eq!(
-            node2.dht().storage.get(&entry.did.to_string()).await?,
-            Some(stored_entry)
+            node1.dht().storage.get(&entry.did.to_string()).await?,
+            Some(entry.clone())
         );
+        assert_eq!(node2.dht().storage.get(&entry.did.to_string()).await?, None);
 
         Ok(())
     }

@@ -117,8 +117,8 @@ pub enum RemoteAction {
     Notify(Did),
     /// Copy placed entries to one storage sync destination.
     SyncEntriesWithSuccessor {
-        /// Destination routing semantics carried on the wire.
-        destination: StorageSyncDestination,
+        /// Routing semantics for the outer [`PeerRingAction::RemoteAction`] target.
+        route: StorageSyncRoute,
         /// Entries to copy at their placement keys.
         data: Vec<PlacedEntry>,
     },
@@ -153,9 +153,6 @@ pub struct TopoInfo {
 
 /// Destination semantics for a storage sync hand-off.
 ///
-/// Invariant: `RemoteAction::SyncEntriesWithSuccessor.destination.did()` is the
-/// relay destination carried by the outer [`PeerRingAction::RemoteAction`].
-///
 /// Routing law:
 /// - [`StorageSyncDestination::PhysicalOwner`] is routed as a node DID through
 ///   physical Chord membership.
@@ -174,10 +171,50 @@ pub enum StorageSyncDestination {
 }
 
 impl StorageSyncDestination {
+    /// Build a physical-owner sync destination.
+    pub const fn physical_owner(did: Did) -> Self {
+        Self::PhysicalOwner(did)
+    }
+
+    /// Build a placement-key sync destination.
+    pub const fn placement_key(did: Did) -> Self {
+        Self::PlacementKey(did)
+    }
+
     /// Return the DID placed in the relay destination.
     pub fn did(self) -> Did {
         match self {
             Self::PhysicalOwner(did) | Self::PlacementKey(did) => did,
+        }
+    }
+
+    /// Return the routing semantics for this destination.
+    pub const fn route(self) -> StorageSyncRoute {
+        match self {
+            Self::PhysicalOwner(_) => StorageSyncRoute::PhysicalOwner,
+            Self::PlacementKey(_) => StorageSyncRoute::PlacementKey,
+        }
+    }
+}
+
+/// Routing semantics for a storage sync hand-off.
+///
+/// The route is paired with the outer [`PeerRingAction::RemoteAction`] target,
+/// so the action tree carries the destination DID exactly once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+pub enum StorageSyncRoute {
+    /// Interpret the action target as a physical node DID.
+    PhysicalOwner,
+    /// Interpret the action target as a storage placement key.
+    PlacementKey,
+}
+
+impl StorageSyncRoute {
+    /// Combine this route with the action target DID to form a wire destination.
+    pub const fn destination(self, target: Did) -> StorageSyncDestination {
+        match self {
+            Self::PhysicalOwner => StorageSyncDestination::physical_owner(target),
+            Self::PlacementKey => StorageSyncDestination::placement_key(target),
         }
     }
 }
@@ -205,7 +242,7 @@ impl PeerRingAction {
         data: Vec<PlacedEntry>,
     ) -> Self {
         Self::RemoteAction(destination.did(), RemoteAction::SyncEntriesWithSuccessor {
-            destination,
+            route: destination.route(),
             data,
         })
     }

@@ -81,13 +81,11 @@ impl Stabilizer {
         match act {
             PeerRingAction::None => Ok(()),
             PeerRingAction::RemoteAction(
-                _,
-                PeerRingRemoteAction::SyncEntriesWithSuccessor { destination, data },
+                target,
+                PeerRingRemoteAction::SyncEntriesWithSuccessor { route, data },
             ) => {
-                out.push((destination.did(), SyncEntriesWithSuccessor {
-                    destination,
-                    data,
-                }));
+                let destination = route.destination(target);
+                out.push((target, SyncEntriesWithSuccessor { destination, data }));
                 Ok(())
             }
             PeerRingAction::MultiActions(actions) => {

@@ -23,9 +23,9 @@ pub const MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER: u16 = 256;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VirtualNodeConfig {
     /// Network namespace mixed into derived virtual positions.
-    pub network_id: u32,
+    network_id: u32,
     /// Number of virtual positions derived for each physical owner.
-    pub positions_per_owner: u16,
+    positions_per_owner: u16,
 }
 
 impl VirtualNodeConfig {
@@ -50,6 +50,16 @@ impl VirtualNodeConfig {
     /// Returns whether this configuration enables virtual storage ownership.
     pub const fn is_enabled(self) -> bool {
         self.positions_per_owner > 0
+    }
+
+    /// Return the network namespace mixed into derived virtual positions.
+    pub const fn network_id(self) -> u32 {
+        self.network_id
+    }
+
+    /// Return the bounded number of positions derived for each physical owner.
+    pub const fn positions_per_owner(self) -> u16 {
+        self.positions_per_owner
     }
 
     /// Returns whether `positions_per_owner` is inside the configured cost bound.
@@ -183,8 +193,8 @@ impl StorageVirtualNodes {
     }
 
     fn derive_owner_positions(&self, owner_did: Did) -> Vec<VirtualNode> {
-        (0..self.config.positions_per_owner)
-            .map(|index| VirtualNode::derive(self.config.network_id, owner_did, index))
+        (0..self.config.positions_per_owner())
+            .map(|index| VirtualNode::derive(self.config.network_id(), owner_did, index))
             .collect()
     }
 }
@@ -211,7 +221,7 @@ mod tests {
             VirtualNodeConfig::new(1, MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER.saturating_add(1));
 
         assert_eq!(
-            config.positions_per_owner,
+            config.positions_per_owner(),
             MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER
         );
     }

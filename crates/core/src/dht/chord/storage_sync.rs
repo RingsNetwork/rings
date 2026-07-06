@@ -117,7 +117,7 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
     /// and copy them to the new successor.
     async fn sync_entries_with_successor(&self, new_successor: Did) -> Result<PeerRingAction> {
         if self.storage_virtual_nodes_enabled()? {
-            return self.sync_entries_with_virtual_owners().await;
+            return self.sync_entries_to_current_storage_owners().await;
         }
 
         let mut data = Vec::<PlacedEntry>::new();
@@ -177,7 +177,7 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
 }
 
 impl PeerRing {
-    async fn sync_entries_with_virtual_owners(&self) -> Result<PeerRingAction> {
+    async fn sync_entries_to_current_storage_owners(&self) -> Result<PeerRingAction> {
         let all_items: Vec<(String, Entry)> = self.storage.get_all().await?;
         let mut by_target =
             std::collections::BTreeMap::<StorageSyncDestination, Vec<PlacedEntry>>::new();

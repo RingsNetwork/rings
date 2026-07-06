@@ -24,6 +24,7 @@ pub use chord::PeerRing;
 pub use chord::PeerRingAction;
 pub use chord::RemoteAction as PeerRingRemoteAction;
 pub use chord::StorageSyncDestination;
+pub use chord::StorageSyncRoute;
 pub use chord::TopoInfo;
 pub use did::Did;
 pub use finger::FingerTable;

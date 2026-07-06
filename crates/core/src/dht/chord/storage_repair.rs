@@ -10,11 +10,15 @@
 //!   positions derived from the authenticated owner set in `view`.
 //! - `storage_owner(k, view, cfg) = vowner(k, view, cfg)` when virtual storage is
 //!   enabled, otherwise `succ(k)`.
+//! - `owns(n, k, view, cfg) = storage_owner(k, view, cfg) == n`.
 //!
 //! Invariant REPLICATED(e, N):
 //! `forall k in place(id(e), N), sigma_{storage_owner(k, view, cfg)}[k] >=
 //! e_delta`, where `>=` is the partial order induced by
 //! [`crate::algebra::JoinSemilattice`].
+//! This is a view-relative invariant: every node evaluates `storage_owner` under
+//! its authenticated local view. Global convergence requires a quiescent window
+//! where those local views refine to the same successor relation.
 //!
 //! Liveness S4:
 //! In a quiescent window, if at least one placement copy of `e` remains at the
@@ -27,6 +31,12 @@
 //! - S1' Ownership validation: virtual-owner sync receivers ack only placements
 //!   they still own under their current `view`; stale senders keep unacked local
 //!   entries and retry in a later anti-entropy round.
+//! - S1'' View-relative handoff: for a sync message from sender `s` to receiver
+//!   `r`, an ack for key `k` can be emitted only after
+//!   `owns(r, k, view_r, cfg)` and `sigma_r[k] >= e_delta`. If
+//!   `view_s != view_r`, either `r` refuses the ack and `sigma_s[k]` remains, or
+//!   `r` accepts under `view_r` and at least one durable copy exists before `s`
+//!   can delete.
 //! - S2' No-update-loss (#611/#614 cleanup): the only deletion transition is
 //!   `acknowledge_synced_entries`; the finite model
 //!   `storage_sync_model_preserves_no_update_loss` in `dht_stateright` checks

@@ -237,6 +237,11 @@ impl ProcessorConfigSerialized {
     }
 
     /// Sets storage-only virtual positions derived per physical peer.
+    ///
+    /// Serialized configs reject values above
+    /// [`MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER`]. This setter is infallible
+    /// and leaves final bounding to [`VirtualNodeConfig::new`] during swarm
+    /// construction.
     pub fn dht_virtual_nodes(mut self, positions_per_peer: u16) -> Self {
         self.dht_virtual_nodes = positions_per_peer;
         self
@@ -434,6 +439,11 @@ impl ProcessorBuilder {
     }
 
     /// Set storage-only virtual positions derived per physical peer.
+    ///
+    /// Serialized configs reject values above
+    /// [`MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER`]. This builder setter is
+    /// infallible and leaves final bounding to [`VirtualNodeConfig::new`] during
+    /// swarm construction.
     pub fn dht_virtual_nodes(mut self, positions_per_peer: u16) -> Self {
         self.dht_virtual_nodes = positions_per_peer;
         self

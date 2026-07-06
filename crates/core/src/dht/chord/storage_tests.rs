@@ -23,6 +23,7 @@ use crate::dht::ChordStorageRepair;
 use crate::dht::ChordStorageSync;
 use crate::dht::Did;
 use crate::dht::StorageSyncDestination;
+use crate::dht::StorageSyncRoute;
 use crate::dht::VirtualNodeConfig;
 use crate::error::Error;
 use crate::error::Result;
@@ -96,9 +97,8 @@ fn collect_sync_batches_into(
         PeerRingAction::None => Ok(()),
         PeerRingAction::RemoteAction(
             target,
-            RemoteAction::SyncEntriesWithSuccessor { destination, data },
+            RemoteAction::SyncEntriesWithSuccessor { route: _, data },
         ) => {
-            assert_eq!(target, destination.did());
             batches.push((target, data));
             Ok(())
         }
@@ -617,11 +617,11 @@ async fn republish_remote_actions_preserve_affine_placement_keys() -> Result<()>
         action,
         PeerRingAction::MultiActions(vec![
             PeerRingAction::RemoteAction(first_key, RemoteAction::SyncEntriesWithSuccessor {
-                destination: StorageSyncDestination::PlacementKey(first_key),
+                route: StorageSyncRoute::PlacementKey,
                 data: vec![PlacedEntry::new(first_key, entry.clone())],
             }),
             PeerRingAction::RemoteAction(second_key, RemoteAction::SyncEntriesWithSuccessor {
-                destination: StorageSyncDestination::PlacementKey(second_key),
+                route: StorageSyncRoute::PlacementKey,
                 data: vec![PlacedEntry::new(second_key, entry)],
             })
         ])
@@ -723,7 +723,7 @@ async fn read_repair_uses_observed_remote_owner() -> Result<()> {
         PeerRingAction::MultiActions(vec![PeerRingAction::RemoteAction(
             owner,
             RemoteAction::SyncEntriesWithSuccessor {
-                destination: StorageSyncDestination::PhysicalOwner(owner),
+                route: StorageSyncRoute::PhysicalOwner,
                 data: vec![PlacedEntry::new(placement_key, entry)],
             }
         )])
