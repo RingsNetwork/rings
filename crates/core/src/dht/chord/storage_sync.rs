@@ -6,6 +6,7 @@ use serde::Serialize;
 use super::PeerRing;
 use super::PeerRingAction;
 use super::RemoteAction;
+use super::StorageSyncTarget;
 use crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD;
 use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
 use crate::consts::TRANSPORT_MAX_SIZE;
@@ -113,6 +114,10 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
     /// `Entry`s that are no longer between current node and `new_successor`,
     /// and copy them to the new successor.
     async fn sync_entries_with_successor(&self, new_successor: Did) -> Result<PeerRingAction> {
+        if self.storage_virtual_nodes_enabled()? {
+            return self.sync_entries_with_virtual_owners().await;
+        }
+
         let mut data = Vec::<PlacedEntry>::new();
         let all_items: Vec<(String, Entry)> = self.storage.get_all().await?;
 
@@ -166,5 +171,40 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
         }
 
         Ok(PeerRingAction::None)
+    }
+}
+
+impl PeerRing {
+    async fn sync_entries_with_virtual_owners(&self) -> Result<PeerRingAction> {
+        let all_items: Vec<(String, Entry)> = self.storage.get_all().await?;
+        let mut by_target = std::collections::BTreeMap::<Did, Vec<PlacedEntry>>::new();
+
+        // Pre: storage virtual nodes are enabled and registered from
+        // authenticated physical owner DIDs.
+        // Post: local entries whose current virtual owner is self are retained
+        // without action; entries whose current virtual owner is remote are
+        // emitted as join deliveries to that physical owner.
+        // Preservation: this transition still performs no local delete. Ack
+        // cleanup remains isolated in acknowledge_synced_entries.
+        for (entry_key_str, entry) in all_items.iter() {
+            let entry_key = Did::from_str(entry_key_str)?;
+            if let StorageSyncTarget::Remote(target) = self.storage_sync_target(entry_key)? {
+                by_target
+                    .entry(target)
+                    .or_default()
+                    .push(PlacedEntry::new(entry_key, entry.clone()));
+            }
+        }
+
+        let mut actions = Vec::new();
+        for (target, data) in by_target {
+            for batch in sync_entries_batches(data, SYNC_BATCH_MAX_BYTES)? {
+                actions.push(PeerRingAction::RemoteAction(
+                    target,
+                    RemoteAction::SyncEntriesWithSuccessor(batch),
+                ));
+            }
+        }
+        Ok(actions.into())
     }
 }

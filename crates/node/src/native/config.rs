@@ -66,6 +66,8 @@ pub struct Config {
     pub online_node_type: OnlineNodeType,
     #[serde(default = "crate::registration::default_advertise_presence")]
     pub advertise_presence: bool,
+    #[serde(default)]
+    pub dht_virtual_nodes: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_ip: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -108,7 +110,8 @@ impl TryFrom<Config> for ProcessorConfigSerialized {
         .online_node_heartbeat_interval_secs(config.online_node_heartbeat_interval_secs)
         .online_node_ttl_secs(config.online_node_ttl_secs)
         .online_node_type(config.online_node_type)
-        .advertise_presence(config.advertise_presence);
+        .advertise_presence(config.advertise_presence)
+        .dht_virtual_nodes(config.dht_virtual_nodes);
 
         cs = if let Some(ext_ip) = config.external_ip {
             cs.external_address(ext_ip)
@@ -155,6 +158,7 @@ impl Config {
             online_node_ttl_secs: crate::registration::default_online_node_ttl_secs(),
             online_node_type: crate::registration::default_online_node_type(),
             advertise_presence: crate::registration::default_advertise_presence(),
+            dht_virtual_nodes: 0,
             external_ip: None,
             webrtc_udp_port_min: None,
             webrtc_udp_port_max: None,

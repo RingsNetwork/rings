@@ -16,6 +16,8 @@ pub mod successor;
 /// Pure Chord topology transition model.
 pub mod topology;
 pub mod types;
+/// Chord-style virtual positions for storage ownership.
+pub mod virtual_node;
 
 pub use chord::EntryStorage;
 pub use chord::PeerRing;
@@ -35,6 +37,9 @@ pub use types::ChordStorageRepair;
 pub use types::ChordStorageSync;
 pub use types::CorrectChord;
 pub use types::LiveDid;
+pub use virtual_node::StorageVirtualNodes;
+pub use virtual_node::VirtualNode;
+pub use virtual_node::VirtualNodeConfig;
 
 #[cfg(test)]
 pub mod tests {

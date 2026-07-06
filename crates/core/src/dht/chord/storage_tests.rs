@@ -12,14 +12,17 @@ use crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD;
 use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
+use crate::dht::entry::EntryOperation;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::PlacementMiss;
 use crate::dht::entry::SyncedEntryAck;
 use crate::dht::successor::SuccessorWriter;
+use crate::dht::Chord;
 use crate::dht::ChordStorage;
 use crate::dht::ChordStorageRepair;
 use crate::dht::ChordStorageSync;
 use crate::dht::Did;
+use crate::dht::VirtualNodeConfig;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::types::Message;
@@ -52,6 +55,30 @@ fn first_two_affine_keys(did: Did) -> Result<(Did, Did)> {
         ));
     };
     Ok((first, second))
+}
+
+fn first_virtual_position(node: &PeerRing, owner: Did) -> Result<Did> {
+    node.storage_virtual_positions(owner)?
+        .into_iter()
+        .next()
+        .map(|position| position.vnode_did)
+        .ok_or_else(|| Error::InvalidMessage("owner has no virtual position".to_string()))
+}
+
+fn interval_key_with_virtual_successor(node: &PeerRing, owner: Did) -> Result<Did> {
+    let mut positions = node.storage_virtual_positions(node.did)?;
+    positions.extend(node.storage_virtual_positions(owner)?);
+    positions.sort_by_key(|position| (position.vnode_did, position.owner_did, position.index));
+
+    positions
+        .iter()
+        .zip(positions.iter().cycle().skip(1))
+        .find(|(left, successor)| {
+            let key = left.vnode_did + Did::from(1u32);
+            successor.owner_did == owner && key != successor.vnode_did
+        })
+        .map(|(left, _)| left.vnode_did + Did::from(1u32))
+        .ok_or_else(|| Error::InvalidMessage("missing virtual successor interval".to_string()))
 }
 
 fn collect_sync_batches(act: PeerRingAction) -> Result<Vec<(Did, Vec<PlacedEntry>)>> {
@@ -130,6 +157,131 @@ async fn entry_lookup_reports_local_storage_failure() -> Result<()> {
         result,
         Err(Error::InvalidMessage(message)) if message == "storage get failed"
     ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn virtual_storage_owner_routes_operate_to_physical_owner() -> Result<()> {
+    let local = Did::from(1u32);
+    let remote = Did::from(2u32);
+    let node = PeerRing::new_with_storage_finger_table_size_and_virtual_nodes(
+        local,
+        3,
+        Box::new(MemStorage::new()),
+        8,
+        VirtualNodeConfig::new(7, 2),
+    );
+    let _ = node.join(remote)?;
+    let placement = first_virtual_position(&node, remote)?;
+
+    let act = <PeerRing as ChordStorage<_, 1>>::entry_operate(
+        &node,
+        EntryOperation::Overwrite(data_entry(placement)),
+    )
+    .await?;
+
+    let PeerRingAction::MultiActions(actions) = act else {
+        return Err(Error::unexpected_peer_ring_action(act));
+    };
+    let Some(PeerRingAction::RemoteAction(target, RemoteAction::FindEntryForOperate(op))) =
+        actions.into_iter().next()
+    else {
+        return Err(Error::InvalidMessage(
+            "expected virtual storage operation action".to_string(),
+        ));
+    };
+    {
+        assert_eq!(target, remote);
+        assert_eq!(op.placement, placement);
+        assert_eq!(op.entry_key()?, placement);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn virtual_storage_owner_routes_interval_key_to_successor_position() -> Result<()> {
+    let local = Did::from(1u32);
+    let remote = Did::from(2u32);
+    let node = PeerRing::new_with_storage_finger_table_size_and_virtual_nodes(
+        local,
+        3,
+        Box::new(MemStorage::new()),
+        8,
+        VirtualNodeConfig::new(7, 2),
+    );
+    let _ = node.join(remote)?;
+    let placement = interval_key_with_virtual_successor(&node, remote)?;
+
+    let act = <PeerRing as ChordStorage<_, 1>>::entry_operate(
+        &node,
+        EntryOperation::Overwrite(data_entry(placement)),
+    )
+    .await?;
+
+    let PeerRingAction::MultiActions(actions) = act else {
+        return Err(Error::unexpected_peer_ring_action(act));
+    };
+    let Some(PeerRingAction::RemoteAction(target, RemoteAction::FindEntryForOperate(op))) =
+        actions.into_iter().next()
+    else {
+        return Err(Error::InvalidMessage(
+            "expected interval key to route to virtual successor".to_string(),
+        ));
+    };
+    assert_eq!(target, remote);
+    assert_eq!(op.placement, placement);
+    Ok(())
+}
+
+#[tokio::test]
+async fn virtual_storage_owner_stores_local_position_locally() -> Result<()> {
+    let local = Did::from(1u32);
+    let node = PeerRing::new_with_storage_finger_table_size_and_virtual_nodes(
+        local,
+        3,
+        Box::new(MemStorage::new()),
+        8,
+        VirtualNodeConfig::new(7, 2),
+    );
+    let placement = first_virtual_position(&node, local)?;
+
+    let act = <PeerRing as ChordStorage<_, 1>>::entry_operate(
+        &node,
+        EntryOperation::Overwrite(data_entry(placement)),
+    )
+    .await?;
+
+    assert_eq!(act, PeerRingAction::None);
+    assert!(node.storage.get(&placement.to_string()).await?.is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn virtual_storage_sync_hands_entries_to_virtual_owner() -> Result<()> {
+    let local = Did::from(1u32);
+    let remote = Did::from(2u32);
+    let node = PeerRing::new_with_storage_finger_table_size_and_virtual_nodes(
+        local,
+        3,
+        Box::new(MemStorage::new()),
+        8,
+        VirtualNodeConfig::new(7, 2),
+    );
+    let _ = node.join(remote)?;
+    let placement = first_virtual_position(&node, remote)?;
+    let entry = data_entry_with_data(placement, "handoff");
+    node.storage.put(&placement.to_string(), &entry).await?;
+
+    let batches = collect_sync_batches(node.sync_entries_with_successor(Did::from(99u32)).await?)?;
+
+    assert_eq!(batches.len(), 1);
+    let Some((target, data)) = batches.into_iter().next() else {
+        return Err(Error::InvalidMessage(
+            "missing virtual sync batch".to_string(),
+        ));
+    };
+    assert_eq!(target, remote);
+    assert_eq!(data, vec![PlacedEntry::new(placement, entry)]);
     Ok(())
 }
 

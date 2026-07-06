@@ -83,6 +83,8 @@ pub struct ProcessorConfig {
     online_node_type: OnlineNodeType,
     /// Whether listen() advertises this node's presence.
     advertise_presence: bool,
+    /// Storage-only virtual positions derived per physical peer.
+    dht_virtual_nodes: u16,
 }
 
 #[wasm_export]
@@ -108,6 +110,7 @@ impl ProcessorConfig {
             online_node_ttl: Duration::from_secs(default_online_node_ttl_secs()),
             online_node_type: default_online_node_type(),
             advertise_presence: default_advertise_presence(),
+            dht_virtual_nodes: 0,
         }
     }
 
@@ -164,6 +167,9 @@ pub struct ProcessorConfigSerialized {
     /// Whether listen() advertises this node's presence.
     #[serde(default = "default_advertise_presence")]
     advertise_presence: bool,
+    /// Storage-only virtual positions derived per physical peer.
+    #[serde(default)]
+    dht_virtual_nodes: u16,
 }
 
 impl ProcessorConfigSerialized {
@@ -186,6 +192,7 @@ impl ProcessorConfigSerialized {
             online_node_ttl_secs: default_online_node_ttl_secs(),
             online_node_type: default_online_node_type(),
             advertise_presence: default_advertise_presence(),
+            dht_virtual_nodes: 0,
         }
     }
 
@@ -226,6 +233,12 @@ impl ProcessorConfigSerialized {
         self.advertise_presence = advertise;
         self
     }
+
+    /// Sets storage-only virtual positions derived per physical peer.
+    pub fn dht_virtual_nodes(mut self, positions_per_peer: u16) -> Self {
+        self.dht_virtual_nodes = positions_per_peer;
+        self
+    }
 }
 
 pub(crate) fn parse_webrtc_udp_port_range(
@@ -256,6 +269,7 @@ impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
             online_node_ttl_secs: ins.online_node_ttl.as_secs(),
             online_node_type: ins.online_node_type,
             advertise_presence: ins.advertise_presence,
+            dht_virtual_nodes: ins.dht_virtual_nodes,
         })
     }
 }
@@ -285,6 +299,7 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
             online_node_ttl,
             online_node_type: ins.online_node_type,
             advertise_presence: ins.advertise_presence,
+            dht_virtual_nodes: ins.dht_virtual_nodes,
         })
     }
 }
@@ -333,6 +348,7 @@ pub struct ProcessorBuilder {
     advertise_presence: bool,
     registration_tasks: Vec<Arc<dyn RegistrationTask>>,
     dht_finger_table_size: usize,
+    dht_virtual_nodes: u16,
     reassembly_limits: ReassemblyLimits,
 }
 
@@ -381,6 +397,7 @@ impl ProcessorBuilder {
             advertise_presence: config.advertise_presence,
             registration_tasks: Vec::new(),
             dht_finger_table_size: DEFAULT_FINGER_TABLE_SIZE,
+            dht_virtual_nodes: config.dht_virtual_nodes,
             reassembly_limits: ReassemblyLimits::production(),
         })
     }
@@ -400,6 +417,12 @@ impl ProcessorBuilder {
     /// Set the number of DHT finger-table slots for the processor's swarm.
     pub fn dht_finger_table_size(mut self, size: usize) -> Self {
         self.dht_finger_table_size = size;
+        self
+    }
+
+    /// Set storage-only virtual positions derived per physical peer.
+    pub fn dht_virtual_nodes(mut self, positions_per_peer: u16) -> Self {
+        self.dht_virtual_nodes = positions_per_peer;
         self
     }
 
@@ -461,6 +484,7 @@ impl ProcessorBuilder {
             SwarmBuilder::new(self.network_id, &self.ice_servers, storage, self.session_sk);
         swarm_builder = swarm_builder.dht_storage_redundancy(DATA_REDUNDANT);
         swarm_builder = swarm_builder.dht_finger_table_size(self.dht_finger_table_size);
+        swarm_builder = swarm_builder.dht_virtual_nodes(self.dht_virtual_nodes);
         swarm_builder = swarm_builder.reassembly_limits(self.reassembly_limits);
 
         if let Some(external_address) = self.external_address {

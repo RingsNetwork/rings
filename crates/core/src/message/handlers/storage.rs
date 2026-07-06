@@ -8,7 +8,6 @@ use async_trait::async_trait;
 use crate::dht::entry::Entry;
 use crate::dht::entry::PlacedEntryOperation;
 use crate::dht::entry::SyncedEntryAck;
-use crate::dht::Chord;
 use crate::dht::ChordStorage;
 use crate::dht::ChordStorageCache;
 use crate::dht::ChordStorageRepair;
@@ -185,7 +184,7 @@ async fn handle_placed_entry_operation(
 ) -> Result<()> {
     msg.validate_placement(handler.transport.storage_redundancy())?;
 
-    match handler.dht.find_successor(msg.placement)? {
+    match handler.dht.find_storage_owner(msg.placement)? {
         PeerRingAction::Some(_) => {
             operate_entry_at_placement(&handler.dht, msg.placement, msg.op.clone()).await
         }
@@ -308,7 +307,7 @@ fn next_hop_for_sync_entries(
         return Ok(None);
     }
 
-    match handler.dht.find_successor(ctx.relay.destination)? {
+    match handler.dht.find_storage_owner(ctx.relay.destination)? {
         PeerRingAction::Some(owner) if owner == handler.dht.did => Ok(None),
         PeerRingAction::Some(next) => Ok(Some(next)),
         PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessor(_)) => {
@@ -489,6 +488,7 @@ mod test {
     use crate::dht::entry::PlacementMiss;
     use crate::dht::successor::SuccessorReader;
     use crate::dht::successor::SuccessorWriter;
+    use crate::dht::Chord;
     use crate::ecc::tests::gen_ordered_keys;
     use crate::ecc::SecretKey;
     use crate::message::Encoder;

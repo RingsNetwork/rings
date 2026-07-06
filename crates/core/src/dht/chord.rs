@@ -1,5 +1,6 @@
 //! Chord algorithm implement.
 #![warn(missing_docs)]
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -27,6 +28,9 @@ use super::types::Chord;
 use super::types::ChordStorage;
 use super::types::ChordStorageCache;
 use super::types::CorrectChord;
+use super::virtual_node::StorageVirtualNodes;
+use super::virtual_node::VirtualNode;
+use super::virtual_node::VirtualNodeConfig;
 use super::FingerTable;
 use crate::dht::Did;
 use crate::dht::LiveDid;
@@ -67,6 +71,8 @@ pub struct PeerRing {
     pub storage: EntryStorage,
     /// Local cache for [ChordStorage].
     pub cache: EntryStorage,
+    /// Storage-only virtual ownership configuration.
+    storage_virtual_node_config: VirtualNodeConfig,
 }
 
 /// Type alias is just for making the code easy to read.
@@ -142,6 +148,11 @@ pub struct TopoInfo {
     pub successors: Vec<Did>,
     /// Predecessor
     pub predecessor: Option<Did>,
+}
+
+pub(super) enum StorageSyncTarget {
+    Local,
+    Remote(Did),
 }
 
 impl TryFrom<&PeerRing> for TopoInfo {
@@ -229,12 +240,30 @@ impl PeerRing {
         storage: EntryStorage,
         finger_table_size: usize,
     ) -> Self {
+        Self::new_with_storage_finger_table_size_and_virtual_nodes(
+            did,
+            succ_max,
+            storage,
+            finger_table_size,
+            VirtualNodeConfig::disabled(),
+        )
+    }
+
+    /// Same as new with config, with a storage virtual-node configuration.
+    pub fn new_with_storage_finger_table_size_and_virtual_nodes(
+        did: Did,
+        succ_max: u8,
+        storage: EntryStorage,
+        finger_table_size: usize,
+        virtual_nodes: VirtualNodeConfig,
+    ) -> Self {
         Self {
             successor_seq: SuccessorSeq::new(did, succ_max),
             predecessor: Arc::new(Mutex::new(None)),
             finger: Arc::new(Mutex::new(FingerTable::new(did, finger_table_size))),
             storage,
             cache: Box::new(MemStorage::new()),
+            storage_virtual_node_config: virtual_nodes,
             did,
         }
     }
@@ -248,6 +277,24 @@ impl PeerRing {
     /// Return successor sequence
     pub fn successors(&self) -> SuccessorSeq {
         self.successor_seq.clone()
+    }
+
+    /// Return whether the storage virtual-node registry is enabled.
+    pub fn storage_virtual_nodes_enabled(&self) -> Result<bool> {
+        Ok(self.storage_virtual_node_config.is_enabled())
+    }
+
+    /// Return virtual storage positions owned by `owner`.
+    pub fn storage_virtual_positions(&self, owner: Did) -> Result<Vec<VirtualNode>> {
+        Ok(self.storage_virtual_nodes()?.positions_for_owner(owner))
+    }
+
+    pub(super) fn storage_virtual_owner(&self, placement_key: Did) -> Result<Option<Did>> {
+        Ok(self.storage_virtual_nodes()?.owner_for_key(placement_key))
+    }
+
+    pub(super) fn storage_virtual_owner_registered(&self, owner: Did) -> Result<bool> {
+        Ok(self.storage_virtual_nodes()?.contains_owner(owner))
     }
 
     /// Lock and return MutexGuard of finger table.
@@ -286,6 +333,53 @@ impl PeerRing {
             finger.list().clone(),
             finger.fix_finger_index(),
         ))
+    }
+
+    fn storage_virtual_nodes(&self) -> Result<StorageVirtualNodes> {
+        let state = self.topology_state()?;
+        let mut owners = BTreeSet::new();
+        owners.insert(state.local);
+        owners.extend(state.successors);
+        owners.extend(state.predecessor);
+        owners.extend(state.fingers.into_iter().flatten());
+        Ok(StorageVirtualNodes::from_owners(
+            self.storage_virtual_node_config,
+            owners,
+        ))
+    }
+
+    pub(crate) fn find_storage_owner(&self, placement_key: Did) -> Result<PeerRingAction> {
+        if let Some(owner) = self.storage_virtual_owner(placement_key)? {
+            if owner == self.did {
+                Ok(PeerRingAction::Some(owner))
+            } else {
+                Ok(PeerRingAction::RemoteAction(
+                    owner,
+                    RemoteAction::FindSuccessor(placement_key),
+                ))
+            }
+        } else {
+            self.find_successor(placement_key)
+        }
+    }
+
+    pub(super) fn storage_sync_target(&self, placement_key: Did) -> Result<StorageSyncTarget> {
+        if let Some(owner) = self.storage_virtual_owner(placement_key)? {
+            if owner == self.did {
+                Ok(StorageSyncTarget::Local)
+            } else {
+                Ok(StorageSyncTarget::Remote(owner))
+            }
+        } else {
+            match self.find_successor(placement_key)? {
+                PeerRingAction::Some(owner) if owner == self.did => Ok(StorageSyncTarget::Local),
+                PeerRingAction::Some(_)
+                | PeerRingAction::RemoteAction(_, RemoteAction::FindSuccessor(_)) => {
+                    Ok(StorageSyncTarget::Remote(placement_key))
+                }
+                action => Err(Error::unexpected_peer_ring_action(action)),
+            }
+        }
     }
 
     fn interpret_topology_state(&self, next: &TopologyState) -> Result<()> {
@@ -462,7 +556,7 @@ impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing 
         // SearchEntry is emitted solely to classify Unknown as Miss.
         for placement_key in entry_key.rotate_affine(REDUNDANT)? {
             let query = EntryLookupKey::new(entry_key, placement_key);
-            let act = match self.find_successor(placement_key) {
+            let act = match self.find_storage_owner(placement_key) {
                 // Resource should be stored in current node.
                 Ok(PeerRingAction::Some(succ)) => {
                     match self.storage.get(&placement_key.to_string()).await {
@@ -534,7 +628,7 @@ impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing 
         // Preservation: no placement outside place(id(e), REDUNDANT) is
         // written by this transition.
         for entry_key in entry_key.rotate_affine(REDUNDANT)? {
-            let act = match self.find_successor(entry_key) {
+            let act = match self.find_storage_owner(entry_key) {
                 // `entry` should be on current node.
                 Ok(PeerRingAction::Some(_)) => {
                     let this = match self.storage.get(&entry_key.to_string()).await? {

@@ -40,6 +40,7 @@ use async_trait::async_trait;
 use super::PeerRing;
 use super::PeerRingAction;
 use super::RemoteAction;
+use super::StorageSyncTarget;
 use crate::dht::entry::Entry;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::PlacementMiss;
@@ -47,7 +48,6 @@ use crate::dht::successor::SuccessorReader;
 use crate::dht::Chord;
 use crate::dht::ChordStorageRepair;
 use crate::dht::Did;
-use crate::error::Error;
 use crate::error::Result;
 
 fn merge_actions(actions: Vec<PeerRingAction>) -> PeerRingAction {
@@ -84,6 +84,9 @@ impl PeerRing {
         // storage responsibility: predecessor, successor list, finger table, or
         // owner of some locally held affine placement key.
         // Preservation S1: this predicate performs no storage writes/removes.
+        if self.storage_virtual_owner_registered(peer)? {
+            return Ok(true);
+        }
         if self
             .lock_predecessor()?
             .is_some_and(|predecessor| predecessor == peer)
@@ -132,20 +135,16 @@ impl PeerRing {
         // PlacedEntry { key: placement_key, entry } so placement identity is not
         // recomputed by the receiver.
         let placed = PlacedEntry::new(placement_key, entry.clone());
-        match self.find_successor(placement_key)? {
-            PeerRingAction::Some(owner) if owner == self.did => {
+        match self.storage_sync_target(placement_key)? {
+            StorageSyncTarget::Local => {
                 self.join_storage_entry(placement_key, entry.clone())
                     .await?;
                 Ok(PeerRingAction::None)
             }
-            PeerRingAction::Some(_)
-            | PeerRingAction::RemoteAction(_, RemoteAction::FindSuccessor(_)) => {
-                Ok(PeerRingAction::RemoteAction(
-                    placement_key,
-                    RemoteAction::SyncEntriesWithSuccessor(vec![placed]),
-                ))
-            }
-            action => Err(Error::unexpected_peer_ring_action(action)),
+            StorageSyncTarget::Remote(target) => Ok(PeerRingAction::RemoteAction(
+                target,
+                RemoteAction::SyncEntriesWithSuccessor(vec![placed]),
+            )),
         }
     }
 
