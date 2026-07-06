@@ -64,6 +64,8 @@ pub use target::OnionProxyTarget;
 /// DHT topic used for application-layer onion exit descriptors.
 pub const ONION_EXITS_TOPIC: &str = "onion_exits";
 
+const ONION_EXIT_DESCRIPTOR_SCHEMA_VERSION: u16 = 2;
+
 /// Capability label for nodes willing to relay onion cells.
 pub const ONION_RELAY_CAPABILITY: &str = "onion-relay";
 
@@ -403,6 +405,7 @@ pub struct OnionExitDescriptorBody {
 impl OnionExitDescriptorBody {
     fn body_ref(&self) -> OnionExitDescriptorBodyRef<'_> {
         OnionExitDescriptorBodyRef {
+            schema_version: ONION_EXIT_DESCRIPTOR_SCHEMA_VERSION,
             did: self.did,
             public_key: &self.public_key,
             session_public_key: &self.session_public_key,
@@ -439,6 +442,7 @@ impl SignedDescriptorBody for OnionExitDescriptorBody {
 
     fn into_signed_descriptor(self, signature: MessageVerification) -> Self::Descriptor {
         OnionExitDescriptor {
+            schema_version: ONION_EXIT_DESCRIPTOR_SCHEMA_VERSION,
             did: self.did,
             public_key: self.public_key,
             session_public_key: self.session_public_key,
@@ -457,6 +461,7 @@ impl SignedDescriptorBody for OnionExitDescriptorBody {
 
 #[derive(Serialize)]
 struct OnionExitDescriptorBodyRef<'a> {
+    schema_version: u16,
     did: Did,
     public_key: &'a VerificationPublicKey,
     session_public_key: &'a PublicKey<33>,
@@ -479,6 +484,8 @@ impl OnionExitDescriptorBodyRef<'_> {
 /// Signed descriptor published by onion exits.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct OnionExitDescriptor {
+    /// Onion-exit descriptor wire schema version covered by the descriptor signature.
+    pub schema_version: u16,
     /// DID of the exit node/account.
     pub did: Did,
     /// Account public key corresponding to `did`.
@@ -517,6 +524,7 @@ impl OnionExitDescriptor {
 
     fn body_ref(&self) -> OnionExitDescriptorBodyRef<'_> {
         let Self {
+            schema_version,
             did,
             public_key,
             session_public_key,
@@ -532,6 +540,7 @@ impl OnionExitDescriptor {
         } = self;
 
         OnionExitDescriptorBodyRef {
+            schema_version: *schema_version,
             did: *did,
             public_key,
             session_public_key,
@@ -548,6 +557,11 @@ impl OnionExitDescriptor {
 
     fn signing_data(&self) -> CoreResult<Vec<u8>> {
         self.body_ref().signing_data()
+    }
+
+    /// Return whether this descriptor uses the local registry wire schema.
+    pub const fn has_supported_schema(&self) -> bool {
+        self.schema_version == ONION_EXIT_DESCRIPTOR_SCHEMA_VERSION
     }
 
     /// Return whether this descriptor belongs to `network_id`.
@@ -572,7 +586,7 @@ impl OnionExitDescriptor {
 
     /// Verify the descriptor signature and DID/public-key binding.
     pub fn verify_signature(&self) -> bool {
-        self.descriptor_verify_signature()
+        self.has_supported_schema() && self.descriptor_verify_signature()
     }
 
     /// Returns whether this descriptor is expired at `now_ms`.
@@ -582,7 +596,7 @@ impl OnionExitDescriptor {
 
     /// Returns whether this descriptor has a valid signature and is not expired.
     pub fn is_live_at(&self, now_ms: u128) -> bool {
-        self.descriptor_is_live_at(now_ms)
+        self.verify_signature() && !self.is_expired_at(now_ms)
     }
 
     /// Select the newest valid onion-exit descriptor per `(DID, service)`.
@@ -654,7 +668,28 @@ impl Encoder for OnionExitDescriptor {
 
 impl Decoder for OnionExitDescriptor {
     fn from_encoded(encoded: &Encoded) -> CoreResult<Self> {
-        decode_descriptor(encoded)
+        let descriptor: Self = decode_descriptor(encoded)?;
+        if descriptor.has_supported_schema() {
+            Ok(descriptor)
+        } else {
+            Err(CoreError::Decode)
+        }
+    }
+}
+
+/// Result of decoding one onion-exit registry entry.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct OnionExitDescriptorDecodeReport {
+    /// Descriptors that matched the local wire schema and decoded successfully.
+    pub descriptors: Vec<OnionExitDescriptor>,
+    /// Number of registry values explicitly rejected at the decode boundary.
+    pub rejected_values: usize,
+}
+
+impl OnionExitDescriptorDecodeReport {
+    /// Return whether the entry contained values this node could not decode.
+    pub const fn has_rejections(&self) -> bool {
+        self.rejected_values > 0
     }
 }
 
@@ -755,14 +790,36 @@ impl OnionExitRegistration {
     }
 
     /// Decode onion-exit descriptors from a DHT entry.
+    pub fn decode_descriptors_from_entry(
+        entry: &rings_core::prelude::entry::Entry,
+    ) -> OnionExitDescriptorDecodeReport {
+        let mut report = OnionExitDescriptorDecodeReport::default();
+        for value in &entry.data {
+            match value.decode::<OnionExitDescriptor>() {
+                Ok(descriptor) => report.descriptors.push(descriptor),
+                Err(error) => {
+                    report.rejected_values = report.rejected_values.saturating_add(1);
+                    tracing::debug!(
+                        "rejected onion-exit descriptor registry value at schema boundary: {error}"
+                    );
+                }
+            }
+        }
+        report
+    }
+
+    /// Decode onion-exit descriptors from a DHT entry, dropping values rejected at the schema boundary.
     pub fn descriptors_from_entry(
         entry: &rings_core::prelude::entry::Entry,
     ) -> Vec<OnionExitDescriptor> {
-        entry
-            .data
-            .iter()
-            .filter_map(|value| value.decode::<OnionExitDescriptor>().ok())
-            .collect()
+        let report = Self::decode_descriptors_from_entry(entry);
+        if report.has_rejections() {
+            tracing::warn!(
+                rejected_values = report.rejected_values,
+                "ignored unsupported onion-exit descriptor registry values"
+            );
+        }
+        report.descriptors
     }
 }
 

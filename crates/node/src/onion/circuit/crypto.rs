@@ -49,6 +49,53 @@ pub fn encode_initial_forward(
     encode_wire_message(OnionWireMessage::Forward(frame)).map(|payload| (first, payload))
 }
 
+/// Stable edge-id plan for a long-lived onion circuit.
+///
+/// Invariant: `edge_circuit_ids.len() == route.encryption_hops().len()` and
+/// `first_circuit_id == edge_circuit_ids[0]`. Reusing one path for every payload in a stream
+/// preserves the exit-side stream key and refreshes the same relay return edges.
+#[cfg(feature = "node")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OnionCircuitPath {
+    route: OnionRoute,
+    first_circuit_id: OnionCircuitId,
+    edge_circuit_ids: Vec<OnionCircuitId>,
+}
+
+#[cfg(feature = "node")]
+impl OnionCircuitPath {
+    /// Build a stable circuit path for one route.
+    pub(crate) fn new(route: OnionRoute, first_circuit_id: OnionCircuitId) -> Result<Self> {
+        let edge_circuit_ids = edge_circuit_ids(route.encryption_hops().len(), first_circuit_id)?;
+        Ok(Self {
+            route,
+            first_circuit_id,
+            edge_circuit_ids,
+        })
+    }
+
+    /// Encode one forward payload over this stable path.
+    pub(crate) fn encode_forward(
+        &self,
+        client: OnionClientReturn,
+        payload: OnionCircuitPayload,
+    ) -> Result<(Did, Bytes)> {
+        validate_route_payload_service(&self.route, &payload)?;
+        let first = route_first_hop(&self.route)?;
+        let layer = build_forward_layers_with_ids(
+            client,
+            self.route.encryption_hops(),
+            self.edge_circuit_ids.as_slice(),
+            payload,
+        )?;
+        let frame = OnionForwardFrame {
+            circuit_id: self.first_circuit_id,
+            layer,
+        };
+        encode_wire_message(OnionWireMessage::Forward(frame)).map(|payload| (first, payload))
+    }
+}
+
 /// Return the first overlay hop of a route that was validated at construction.
 ///
 /// Pre: `route` was built by the route module constructor.
@@ -89,10 +136,27 @@ fn build_forward_layers(
     first_circuit_id: OnionCircuitId,
     payload: OnionCircuitPayload,
 ) -> Result<AeadCiphertext> {
+    let circuit_ids = edge_circuit_ids(hops.len(), first_circuit_id)?;
+    build_forward_layers_with_ids(client, hops, circuit_ids.as_slice(), payload)
+}
+
+fn build_forward_layers_with_ids(
+    client: OnionClientReturn,
+    hops: &[OnionRouteHop],
+    circuit_ids: &[OnionCircuitId],
+    payload: OnionCircuitPayload,
+) -> Result<AeadCiphertext> {
     let Some(exit) = hops.last().copied() else {
         return Err(Error::OnionRouteError(OnionRouteError::RouteHasNoHops));
     };
-    let circuit_ids = edge_circuit_ids(hops.len(), first_circuit_id)?;
+    if hops.len() != circuit_ids.len() {
+        return Err(Error::OnionRouteError(
+            OnionRouteError::CircuitPathLengthMismatch {
+                hop_count: hops.len(),
+                edge_count: circuit_ids.len(),
+            },
+        ));
+    }
     let expires_at_ms = get_epoch_ms().saturating_add(ONION_FORWARD_PAYLOAD_TTL_MS);
     let exit_circuit_id = *circuit_ids
         .last()
@@ -240,7 +304,8 @@ impl OnionAuthenticatedPayload {
     /// Invariant: accepted backward payloads satisfy all three identity equalities:
     /// signer account DID equals descriptor DID, signer account public key equals descriptor public
     /// key, and signer session DID equals the descriptor session encryption key DID. The signed
-    /// transcript also binds the circuit id, per-frame nonce, exit session public key, and payload.
+    /// transcript also binds the client/exit return id, per-frame nonce, exit session public key,
+    /// and payload.
     pub fn into_verified_payload(
         self,
         return_id: OnionReturnId,

@@ -22,7 +22,6 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::extension::ext::Extensions;
 use crate::extension::ext::Scope;
-use crate::onion::circuit::encode_initial_forward;
 use crate::onion::circuit::route_first_hop;
 use crate::onion::circuit::send_backward;
 use crate::onion::circuit::OnionAuthenticatedPayload;
@@ -31,6 +30,7 @@ use crate::onion::circuit::OnionCircuitCapabilities;
 use crate::onion::circuit::OnionCircuitExitFrame;
 use crate::onion::circuit::OnionCircuitHandler;
 use crate::onion::circuit::OnionCircuitId;
+use crate::onion::circuit::OnionCircuitPath;
 use crate::onion::circuit::OnionCircuitPayload;
 use crate::onion::circuit::OnionCircuitProtocol;
 use crate::onion::circuit::OnionCircuitShell;
@@ -155,7 +155,7 @@ pub struct NativeOnionOpenStream {
     runtime: Arc<OnionTcpRuntime>,
     scope: Scope,
     key: TcpStreamKey,
-    route: OnionRoute,
+    path: OnionCircuitPath,
     client_return: OnionClientReturn,
     rx: mpsc::Receiver<TcpInbound>,
 }
@@ -168,7 +168,7 @@ impl NativeOnionOpenStream {
             self.scope,
             self.key,
             stream,
-            self.route,
+            self.path,
             self.client_return,
             self.rx,
         );
@@ -238,14 +238,29 @@ impl OnionTcpRuntime {
             open_tx,
             tx,
         )?;
-        let (to, payload) = encode_initial_forward(
-            client_return,
-            &route,
-            key.circuit_id,
-            encode_tcp_payload(OnionTcpPayload::Open {
-                target: target.authority(),
-            })?,
-        )?;
+        let path = match OnionCircuitPath::new(route, key.circuit_id) {
+            Ok(path) => path,
+            Err(error) => {
+                self.remove_client_stream(key);
+                return Err(error);
+            }
+        };
+        let open_payload = match encode_tcp_payload(OnionTcpPayload::Open {
+            target: target.authority(),
+        }) {
+            Ok(payload) => payload,
+            Err(error) => {
+                self.remove_client_stream(key);
+                return Err(error);
+            }
+        };
+        let (to, payload) = match path.encode_forward(client_return, open_payload) {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                self.remove_client_stream(key);
+                return Err(error);
+            }
+        };
         if let Err(error) = scope.send(to, payload).await {
             self.remove_client_stream(key);
             return Err(error);
@@ -255,7 +270,7 @@ impl OnionTcpRuntime {
                 runtime: self.clone(),
                 scope,
                 key,
-                route,
+                path,
                 client_return,
                 rx,
             }),
@@ -759,7 +774,7 @@ fn spawn_client_stream(
     scope: Scope,
     key: TcpStreamKey,
     stream: TcpStream,
-    route: OnionRoute,
+    path: OnionCircuitPath,
     client_return: OnionClientReturn,
     mut rx: mpsc::Receiver<TcpInbound>,
 ) {
@@ -775,14 +790,14 @@ fn spawn_client_stream(
                 read_result = read.read(read_buf.as_mut_slice()), if state.can_read() => {
                     match read_result {
                         Ok(0) => {
-                            if send_client_payload(&scope, &route, client_return, key.circuit_id, OnionTcpPayload::Shutdown).await.is_err() {
+                            if send_client_payload(&scope, &path, client_return, OnionTcpPayload::Shutdown).await.is_err() {
                                 break;
                             }
                             state.close_read();
                         }
                         Ok(n) => {
                             let bytes = Bytes::copy_from_slice(read_buf.get(..n).unwrap_or_default());
-                            if send_client_payload(&scope, &route, client_return, key.circuit_id, OnionTcpPayload::Data { bytes }).await.is_err() {
+                            if send_client_payload(&scope, &path, client_return, OnionTcpPayload::Data { bytes }).await.is_err() {
                                 break;
                             }
                         }
@@ -819,14 +834,7 @@ fn spawn_client_stream(
             }
         }
         if state.should_announce_terminal() {
-            let _ = send_client_payload(
-                &scope,
-                &route,
-                client_return,
-                key.circuit_id,
-                OnionTcpPayload::Close,
-            )
-            .await;
+            let _ = send_client_payload(&scope, &path, client_return, OnionTcpPayload::Close).await;
         }
         runtime.remove_client_stream(key);
     });
@@ -834,13 +842,12 @@ fn spawn_client_stream(
 
 async fn send_client_payload(
     scope: &Scope,
-    route: &OnionRoute,
+    path: &OnionCircuitPath,
     client_return: OnionClientReturn,
-    circuit_id: OnionCircuitId,
     payload: OnionTcpPayload,
 ) -> Result<()> {
     let payload = encode_tcp_payload(payload)?;
-    let (to, payload) = encode_initial_forward(client_return, route, circuit_id, payload)?;
+    let (to, payload) = path.encode_forward(client_return, payload)?;
     scope.send(to, payload).await
 }
 

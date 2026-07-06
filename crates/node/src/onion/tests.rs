@@ -2,6 +2,8 @@ use std::collections::VecDeque;
 
 use rings_core::ecc::SecretKey;
 use rings_core::measure::PeerQuality;
+use rings_core::message::Encoder;
+use rings_core::prelude::entry;
 use rings_core::session::SessionSk;
 
 use super::route::RouteEntropy;
@@ -206,6 +208,43 @@ fn exit_descriptor_signature_covers_policy() -> Result<()> {
     descriptor.policy.max_circuits = 32;
 
     assert!(!descriptor.verify_signature());
+    Ok(())
+}
+
+#[test]
+fn exit_descriptor_signature_covers_schema_version() -> Result<()> {
+    let mut descriptor = signed_exit_at(20, 100)?;
+    assert_eq!(
+        descriptor.schema_version,
+        ONION_EXIT_DESCRIPTOR_SCHEMA_VERSION
+    );
+    assert!(descriptor.verify_signature());
+
+    descriptor.schema_version = descriptor.schema_version.saturating_add(1);
+
+    assert!(!descriptor.verify_signature());
+    Ok(())
+}
+
+#[test]
+fn exit_registry_decode_reports_rejected_schema_values() -> Result<()> {
+    let valid = signed_exit_at(20, 100)?;
+    let mut unsupported = signed_exit_at(21, 100)?;
+    unsupported.schema_version = unsupported.schema_version.saturating_add(1);
+    let data = vec![
+        valid.encode().map_err(Error::CoreError)?,
+        unsupported.encode().map_err(Error::CoreError)?,
+    ];
+    let entry = entry::Entry::new(
+        entry::Entry::gen_did(ONION_EXITS_TOPIC)?,
+        data,
+        entry::EntryKind::Data,
+    );
+
+    let report = OnionExitRegistration::decode_descriptors_from_entry(&entry);
+
+    assert_eq!(report.descriptors, vec![valid]);
+    assert_eq!(report.rejected_values, 1);
     Ok(())
 }
 

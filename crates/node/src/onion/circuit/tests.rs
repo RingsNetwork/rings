@@ -197,6 +197,49 @@ fn relay_layer_uses_distinct_next_edge_circuit_id() {
 }
 
 #[test]
+fn circuit_path_reuses_edge_ids_for_stream_payloads() {
+    let client = session();
+    let first = session();
+    let exit = session();
+    let route = route(std::slice::from_ref(&first), &exit);
+    let first_circuit_id = OnionCircuitId::new([9; 16]);
+    let client_return = OnionClientReturn::new(client.session_public_key());
+    let path = OnionCircuitPath::new(route, first_circuit_id).expect("stable circuit path");
+
+    let (_, first_payload) = path
+        .encode_forward(client_return, test_payload("first"))
+        .expect("encode first payload");
+    let (_, second_payload) = path
+        .encode_forward(client_return, test_payload("second"))
+        .expect("encode second payload");
+
+    let first_next = relay_next_circuit_id(&first, first_circuit_id, &first_payload);
+    let second_next = relay_next_circuit_id(&first, first_circuit_id, &second_payload);
+
+    assert_eq!(first_next, second_next);
+}
+
+fn relay_next_circuit_id(
+    relay: &SessionSk,
+    first_circuit_id: OnionCircuitId,
+    payload: &Bytes,
+) -> OnionCircuitId {
+    let OnionWireMessage::Forward(frame) =
+        bincode::deserialize::<OnionWireMessage>(payload).expect("decode forward frame")
+    else {
+        panic!("expected forward frame");
+    };
+    assert_eq!(frame.circuit_id, first_circuit_id);
+    let OnionForwardLayer::Relay {
+        next_circuit_id, ..
+    } = decrypt_forward_layer(relay, first_circuit_id, &frame.layer).expect("decrypt relay layer")
+    else {
+        panic!("expected relay layer");
+    };
+    next_circuit_id
+}
+
+#[test]
 fn route_constructor_rejects_mismatched_exit_hop() {
     let first = session();
     let exit = session();

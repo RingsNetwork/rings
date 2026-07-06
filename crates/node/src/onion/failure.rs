@@ -62,6 +62,13 @@ pub enum OnionRouteError {
     },
     /// A relay layer references a missing next hop.
     MissingNextHop,
+    /// A constructed circuit path does not have exactly one edge id per hop.
+    CircuitPathLengthMismatch {
+        /// Number of encrypted hops in the route.
+        hop_count: usize,
+        /// Number of edge ids carried by the circuit path.
+        edge_count: usize,
+    },
     /// A relay layer carries an invalid hop budget.
     InvalidRelayHopBudget {
         /// Remaining encrypted hops claimed by the relay layer.
@@ -162,6 +169,13 @@ impl fmt::Display for OnionRouteError {
                 "onion payload service {payload_service:?} does not match route service {route_service:?}"
             ),
             Self::MissingNextHop => f.write_str("missing next onion hop"),
+            Self::CircuitPathLengthMismatch {
+                hop_count,
+                edge_count,
+            } => write!(
+                f,
+                "onion circuit path has {edge_count} edge ids for {hop_count} route hops"
+            ),
             Self::InvalidRelayHopBudget {
                 remaining_hops,
                 max_hops,

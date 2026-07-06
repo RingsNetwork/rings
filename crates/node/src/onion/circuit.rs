@@ -20,6 +20,8 @@ pub use codec::OnionCircuitEvent;
 pub use crypto::encode_initial_forward;
 pub use crypto::route_first_hop;
 pub use crypto::send_backward;
+#[cfg(feature = "node")]
+pub(crate) use crypto::OnionCircuitPath;
 pub use protocol::OnionCircuitCapabilities;
 pub use protocol::OnionCircuitProtocol;
 pub use reducer::OnionCircuitEffect;
