@@ -141,7 +141,7 @@ impl BrowserOnionProxy {
                 .map_err(JsError::from)?;
             let first_hop = route_first_hop(&proxy_route.route).map_err(JsError::from)?;
             let (id, receiver) = runtime
-                .begin_request(first_hop, proxy_route.route.exit.clone())
+                .begin_request(first_hop, proxy_route.route.exit().clone())
                 .map_err(JsError::from)?;
             let request_payload = match encode_https_payload(OnionHttpsPayload::Request(request)) {
                 Ok(payload) => payload,

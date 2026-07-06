@@ -17,6 +17,7 @@ use super::OnionCircuitPayload;
 use super::OnionClientReturn;
 use super::OnionForwardFrame;
 use super::OnionForwardLayer;
+use super::OnionForwardNonce;
 use super::MAX_ONION_CIRCUIT_HOPS;
 use super::MAX_ONION_RELAY_CIRCUITS;
 use super::ONION_RELAY_RETURN_TTL_MS;
@@ -93,6 +94,8 @@ pub enum OnionCircuitEffect {
         return_peer: Did,
         /// Client return key.
         client: OnionClientReturn,
+        /// Random per-frame nonce consumed by the exit adapter.
+        forward_nonce: OnionForwardNonce,
         /// Application payload.
         payload: OnionCircuitPayload,
     },
@@ -226,7 +229,11 @@ impl OnionCircuitReducer {
                     payload,
                 })
             }
-            OnionForwardLayer::Exit { client, payload } => {
+            OnionForwardLayer::Exit {
+                client,
+                forward_nonce,
+                payload,
+            } => {
                 if !self.capabilities.permits_exit_layer() {
                     return Err(Error::NoPermission);
                 }
@@ -235,6 +242,7 @@ impl OnionCircuitReducer {
                     circuit_id,
                     return_peer: from,
                     client,
+                    forward_nonce,
                     payload,
                 })
             }

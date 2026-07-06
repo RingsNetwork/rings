@@ -13,6 +13,7 @@ use super::OnionCircuitEffect;
 use super::OnionCircuitId;
 use super::OnionCircuitPayload;
 use super::OnionClientReturn;
+use super::OnionForwardNonce;
 use crate::error::Error;
 use crate::error::Result;
 use crate::extension::ext::Interpret;
@@ -136,10 +137,18 @@ where H: OnionCircuitHandler + crate::extension::ext::MaybeSend + 'static
                 circuit_id,
                 return_peer,
                 client,
+                forward_nonce,
                 payload,
             } => {
                 self.handler
-                    .handle_exit(scope, from, circuit_id, return_peer, client, payload)
+                    .handle_exit(scope, OnionCircuitExitFrame {
+                        from,
+                        circuit_id,
+                        return_peer,
+                        client,
+                        forward_nonce,
+                        payload,
+                    })
                     .await?;
                 Ok(Vec::new())
             }
@@ -159,20 +168,29 @@ where H: OnionCircuitHandler + crate::extension::ext::MaybeSend + 'static
     }
 }
 
+/// Fully decrypted forward frame that has reached the exit adapter.
+#[derive(Clone, Debug)]
+pub struct OnionCircuitExitFrame {
+    /// Previous peer that delivered this exit frame.
+    pub from: Did,
+    /// Public circuit id shared by all hops on this route.
+    pub circuit_id: OnionCircuitId,
+    /// Relay peer that should receive backward frames from the exit.
+    pub return_peer: Did,
+    /// Client return key encrypted into the exit layer.
+    pub client: OnionClientReturn,
+    /// Exit-layer nonce consumed once by the adapter before side effects.
+    pub forward_nonce: OnionForwardNonce,
+    /// Adapter payload carried by the exit layer.
+    pub payload: OnionCircuitPayload,
+}
+
 /// Runtime-specific circuit handling.
 #[cfg_attr(feature = "browser", async_trait::async_trait(?Send))]
 #[cfg_attr(not(feature = "browser"), async_trait::async_trait)]
 pub trait OnionCircuitHandler {
     /// Handle a frame that reached this node as the exit.
-    async fn handle_exit(
-        &self,
-        scope: &Scope,
-        from: Did,
-        circuit_id: OnionCircuitId,
-        return_peer: Did,
-        client: OnionClientReturn,
-        payload: OnionCircuitPayload,
-    ) -> Result<()>;
+    async fn handle_exit(&self, scope: &Scope, frame: OnionCircuitExitFrame) -> Result<()>;
 
     /// Handle a frame that reached this node as the client.
     async fn handle_client(

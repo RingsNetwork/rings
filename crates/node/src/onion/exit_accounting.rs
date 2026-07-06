@@ -17,8 +17,9 @@ const EXIT_LIMIT_WINDOW_MS: u128 = 60_000;
 /// Invariant: `active_circuits == count({ circuit | active_streams_by_circuit[circuit] > 0 })`.
 /// Invariant: `bytes_this_window <= policy.max_bytes_per_minute` whenever that policy field is
 /// non-zero.
-/// Preservation: `admit` increments stream/circuit counters only after policy checks; dropping the
-/// returned lease decrements the same circuit key; `record_bytes` resets stale windows before adding.
+/// Preservation: `admit` checks active counters and byte budget under one lock before committing any
+/// stream/circuit increment; dropping the returned lease decrements the same circuit key;
+/// `record_bytes` resets stale windows before adding.
 /// Post: `remaining_bytes` returns the exact bytes that may still be recorded in the current window,
 /// or `None` when the byte policy is unlimited.
 #[derive(Clone, Default)]
@@ -81,6 +82,7 @@ impl OnionExitAccounting {
     ) -> Result<OnionExitLease> {
         let circuit = ExitCircuitKey::new(circuit_id, return_peer);
         let mut limiter = self.limiter.lock().map_err(|_| Error::Lock)?;
+        limiter.refresh_byte_window(get_epoch_ms());
         let active_streams = limiter
             .active_streams_by_circuit
             .get(&circuit)
@@ -95,23 +97,20 @@ impl OnionExitAccounting {
         {
             return Err(Error::NoPermission);
         }
+        let next_bytes = limiter.next_recorded_bytes(policy, bytes)?;
         if active_streams == 0 {
             limiter.active_circuits = limiter.active_circuits.saturating_add(1);
         }
         limiter
             .active_streams_by_circuit
             .insert(circuit.clone(), active_streams.saturating_add(1));
-        drop(limiter);
-
-        let lease = OnionExitLease {
+        if let Some(next_bytes) = next_bytes {
+            limiter.bytes_this_window = next_bytes;
+        }
+        Ok(OnionExitLease {
             limiter: self.limiter.clone(),
             circuit,
-        };
-        if let Err(error) = self.record_bytes(policy, bytes) {
-            drop(lease);
-            return Err(error);
-        }
-        Ok(lease)
+        })
     }
 
     /// Record exit payload bytes under the per-minute policy window.
@@ -121,11 +120,9 @@ impl OnionExitAccounting {
         }
         let mut limiter = self.limiter.lock().map_err(|_| Error::Lock)?;
         limiter.refresh_byte_window(get_epoch_ms());
-        let next = limiter.bytes_this_window.saturating_add(bytes);
-        if next > policy.max_bytes_per_minute {
-            return Err(Error::NoPermission);
+        if let Some(next) = limiter.next_recorded_bytes(policy, bytes)? {
+            limiter.bytes_this_window = next;
         }
-        limiter.bytes_this_window = next;
         Ok(())
     }
 
@@ -151,5 +148,16 @@ impl ExitLimiter {
             self.window_start_ms = now_ms;
             self.bytes_this_window = 0;
         }
+    }
+
+    fn next_recorded_bytes(&self, policy: &OnionExitPolicy, bytes: u64) -> Result<Option<u64>> {
+        if policy.max_bytes_per_minute == 0 || bytes == 0 {
+            return Ok(None);
+        }
+        let next = self.bytes_this_window.saturating_add(bytes);
+        if next > policy.max_bytes_per_minute {
+            return Err(Error::NoPermission);
+        }
+        Ok(Some(next))
     }
 }

@@ -129,9 +129,9 @@ pub(crate) fn onion_exit_descriptor_infos(
 
 pub(crate) fn onion_route_response(route: OnionRoute) -> Result<BuildOnionRouteResponse> {
     Ok(BuildOnionRouteResponse {
-        hops: route.hops.into_iter().map(|did| did.to_string()).collect(),
-        service: route.service,
-        exit: onion_exit_descriptor_info(route.exit)?,
+        hops: route.hops().iter().map(|did| did.to_string()).collect(),
+        service: route.service().to_string(),
+        exit: onion_exit_descriptor_info(route.exit().clone())?,
     })
 }
 

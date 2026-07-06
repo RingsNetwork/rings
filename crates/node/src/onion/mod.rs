@@ -40,11 +40,14 @@ use crate::registration::RegistrationTask;
 
 pub mod circuit;
 pub(crate) mod exit_accounting;
+mod failure;
+pub(crate) mod replay;
 pub mod route;
 pub mod target;
 #[cfg(feature = "node")]
 pub mod tcp;
 
+pub use failure::OnionExitFailure;
 pub use route::select_onion_route;
 pub(crate) use route::select_onion_route_from_candidates;
 pub use route::OnionRoute;

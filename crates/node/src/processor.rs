@@ -1864,12 +1864,12 @@ mod test {
             .build_onion_route("web".to_string(), 3, false)
             .await?;
 
-        assert_eq!(route.hops.len(), 3);
+        assert_eq!(route.hops().len(), 3);
         assert_eq!(route.exit_did(), exit.did());
-        assert_eq!(route.hops.last().copied(), Some(exit.did()));
-        assert!(route.hops.contains(&first_relay.did()));
-        assert!(route.hops.contains(&second_relay.did()));
-        assert_eq!(route.exit, exit_descriptor);
+        assert_eq!(route.hops().last().copied(), Some(exit.did()));
+        assert!(route.hops().contains(&first_relay.did()));
+        assert!(route.hops().contains(&second_relay.did()));
+        assert_eq!(route.exit(), &exit_descriptor);
         Ok(())
     }
 

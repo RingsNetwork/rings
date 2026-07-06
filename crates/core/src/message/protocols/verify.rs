@@ -67,16 +67,18 @@ impl MessageVerification {
 
     /// Return whether the verification timestamp is outside its accepted lifetime.
     pub fn is_expired(&self) -> bool {
-        if self.ttl_ms > MAX_TTL_MS {
-            return false;
-        }
+        !self.is_live_at(get_epoch_ms())
+    }
 
-        let now = get_epoch_ms();
-        if self.ts_ms.saturating_sub(TS_OFFSET_TOLERANCE_MS) > now {
-            return false;
-        }
-
-        now > self.ts_ms + self.ttl_ms as u128
+    /// Return whether the verification timestamp and TTL describe a currently live proof.
+    ///
+    /// Pre: `now_ms` is the receiver's current wall-clock time.
+    /// Post: `true` implies `ttl_ms <= MAX_TTL_MS`, the timestamp is not beyond the accepted future
+    /// skew, and `now_ms` has not passed `ts_ms + ttl_ms`.
+    pub fn is_live_at(&self, now_ms: u128) -> bool {
+        self.ttl_ms <= MAX_TTL_MS
+            && self.ts_ms.saturating_sub(TS_OFFSET_TOLERANCE_MS) <= now_ms
+            && now_ms <= self.ts_ms.saturating_add(self.ttl_ms as u128)
     }
 
     /// Verify the signature only when the verification timestamp is still live.
@@ -153,6 +155,48 @@ mod tests {
         let fixture = VerifiedFixture { verification };
 
         assert!(fixture.is_expired());
+        Ok(())
+    }
+
+    fn signed_verification(
+        data: &[u8],
+        session_sk: &SessionSk,
+        ts_ms: u128,
+        ttl_ms: u64,
+    ) -> Result<MessageVerification> {
+        let msg = pack_msg(data, ts_ms, ttl_ms);
+        Ok(MessageVerification {
+            session: session_sk.session(),
+            ttl_ms,
+            ts_ms,
+            sig: session_sk.sign(&msg)?,
+        })
+    }
+
+    #[test]
+    fn verify_unexpired_rejects_ttl_above_max() -> Result<()> {
+        let key = SecretKey::random();
+        let session_sk = SessionSk::new_with_seckey(&key)?;
+        let proof = signed_verification(&[], &session_sk, get_epoch_ms(), MAX_TTL_MS + 1)?;
+
+        assert!(proof.is_expired());
+        assert!(!proof.verify_unexpired(&[]));
+        Ok(())
+    }
+
+    #[test]
+    fn verify_unexpired_rejects_timestamp_beyond_future_tolerance() -> Result<()> {
+        let key = SecretKey::random();
+        let session_sk = SessionSk::new_with_seckey(&key)?;
+        let proof = signed_verification(
+            &[],
+            &session_sk,
+            get_epoch_ms() + TS_OFFSET_TOLERANCE_MS + 60_000,
+            1_000,
+        )?;
+
+        assert!(proof.is_expired());
+        assert!(!proof.verify_unexpired(&[]));
         Ok(())
     }
 }

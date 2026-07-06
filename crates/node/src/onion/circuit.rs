@@ -30,6 +30,7 @@ use rings_core::ecc::PublicKey;
 use rings_core::message::MessageVerification;
 use serde::Deserialize;
 use serde::Serialize;
+pub use shell::OnionCircuitExitFrame;
 pub use shell::OnionCircuitHandler;
 pub use shell::OnionCircuitShell;
 
@@ -110,6 +111,22 @@ impl OnionBackwardNonce {
     }
 }
 
+/// Random nonce for one forward exit payload on a circuit.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct OnionForwardNonce([u8; 16]);
+
+impl OnionForwardNonce {
+    /// Build a nonce from random bytes.
+    pub const fn new(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
+    /// Generate a random forward-payload nonce.
+    pub fn random() -> Self {
+        Self(rand::random())
+    }
+}
+
 /// Backward payload that has passed exit identity, signature, and freshness checks.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OnionVerifiedPayload {
@@ -176,6 +193,7 @@ pub(super) enum OnionForwardLayer {
     },
     Exit {
         client: OnionClientReturn,
+        forward_nonce: OnionForwardNonce,
         payload: OnionCircuitPayload,
     },
 }

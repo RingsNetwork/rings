@@ -17,8 +17,8 @@ use super::OnionCircuitPayload;
 use super::OnionClientReturn;
 use super::OnionForwardFrame;
 use super::OnionForwardLayer;
+use super::OnionForwardNonce;
 use super::OnionVerifiedPayload;
-use super::MAX_ONION_CIRCUIT_HOPS;
 use super::ONION_AEAD_NAMESPACE;
 use crate::error::Error;
 use crate::error::Result;
@@ -40,31 +40,18 @@ pub fn encode_initial_forward(
 ) -> Result<(Did, Bytes)> {
     validate_route_payload_service(route, &payload)?;
     let first = route_first_hop(route)?;
-    let layer = build_forward_layers(client, &route.encryption_hops, circuit_id, payload)?;
+    let layer = build_forward_layers(client, route.encryption_hops(), circuit_id, payload)?;
     let frame = OnionForwardFrame { circuit_id, layer };
     encode_wire_message(OnionWireMessage::Forward(frame)).map(|payload| (first, payload))
 }
 
-/// Return the first overlay hop after proving the route hop lists agree.
+/// Return the first overlay hop of a route that was validated at construction.
 ///
-/// Invariant: `route.hops[i] == route.encryption_hops[i].did` for every hop. This single
-/// predicate is the source of truth for caller return-peer expectations and forward encoding.
+/// Pre: `route` was built by the route module constructor.
+/// Post: result is the first encrypted hop DID used by forward encoding.
 pub fn route_first_hop(route: &OnionRoute) -> Result<Did> {
-    validate_route_hop_count(route.encryption_hops.len())?;
-    if route.hops.len() != route.encryption_hops.len() {
-        return Err(Error::OnionRouteError(
-            "onion route hop lists disagree".to_string(),
-        ));
-    }
-    for (hop, encryption_hop) in route.hops.iter().zip(route.encryption_hops.iter()) {
-        if *hop != encryption_hop.did {
-            return Err(Error::OnionRouteError(
-                "onion route hop lists disagree".to_string(),
-            ));
-        }
-    }
     route
-        .encryption_hops
+        .encryption_hops()
         .first()
         .map(|hop| hop.did)
         .ok_or_else(|| Error::OnionRouteError("onion route has no hops".to_string()))
@@ -100,7 +87,11 @@ fn build_forward_layers(
     };
     let mut layer = encrypt_forward_layer(
         circuit_id,
-        OnionForwardLayer::Exit { client, payload },
+        OnionForwardLayer::Exit {
+            client,
+            forward_nonce: OnionForwardNonce::random(),
+            payload,
+        },
         exit.session_public_key,
     )?;
 
@@ -298,20 +289,11 @@ fn backward_payload_authentication_data(
 }
 
 fn validate_route_payload_service(route: &OnionRoute, payload: &OnionCircuitPayload) -> Result<()> {
-    if !payload.is_service(route.service.as_str()) {
+    if !payload.is_service(route.service()) {
         return Err(Error::OnionRouteError(format!(
             "onion payload service {:?} does not match route service {:?}",
             payload.service.as_str(),
-            route.service.as_str()
-        )));
-    }
-    Ok(())
-}
-
-fn validate_route_hop_count(hops: usize) -> Result<()> {
-    if hops == 0 || hops > MAX_ONION_CIRCUIT_HOPS as usize {
-        return Err(Error::OnionRouteError(format!(
-            "onion route hop count {hops} exceeds limit {MAX_ONION_CIRCUIT_HOPS}"
+            route.service()
         )));
     }
     Ok(())

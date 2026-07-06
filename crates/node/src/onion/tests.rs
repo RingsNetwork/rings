@@ -270,10 +270,10 @@ fn route_builder_uses_presence_relays_and_exit_registry() -> Result<()> {
         Vec::new(),
     )?;
 
-    assert_eq!(route.hops.len(), 3);
+    assert_eq!(route.hops().len(), 3);
     assert_eq!(route.exit_did(), exit.did);
-    assert_eq!(route.hops.last().copied(), Some(exit.did));
-    assert_ne!(route.hops.first().copied(), Some(exit.did));
+    assert_eq!(route.hops().last().copied(), Some(exit.did));
+    assert_ne!(route.hops().first().copied(), Some(exit.did));
     Ok(())
 }
 
@@ -361,8 +361,8 @@ fn route_builder_samples_relays_by_quality_weight() -> Result<()> {
         &mut entropy,
     )?;
 
-    assert_eq!(route.hops.first().copied(), Some(healthy.account_did()));
-    assert_ne!(route.hops.first().copied(), Some(local));
+    assert_eq!(route.hops().first().copied(), Some(healthy.account_did()));
+    assert_ne!(route.hops().first().copied(), Some(local));
     Ok(())
 }
 
@@ -393,6 +393,6 @@ fn route_builder_entropy_can_select_second_unknown_relay() -> Result<()> {
 
     let route = select_onion_route_from_candidates(&request, candidates, Vec::new(), &mut entropy)?;
 
-    assert_eq!(route.hops.first().copied(), Some(second_sorted));
+    assert_eq!(route.hops().first().copied(), Some(second_sorted));
     Ok(())
 }

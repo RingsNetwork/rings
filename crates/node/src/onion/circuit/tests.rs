@@ -54,35 +54,27 @@ fn route(relays: &[SessionSk], exit_session: &SessionSk) -> OnionRoute {
         .map(|relay| OnionRouteHop::new(relay.account_did(), relay.session_public_key()))
         .collect::<Vec<_>>();
     encryption_hops.push(OnionRouteHop::new(exit, exit_session.session_public_key()));
-    let hops = encryption_hops
-        .iter()
-        .map(|hop| hop.did)
-        .collect::<Vec<_>>();
-    OnionRoute {
-        service: "https".to_string(),
-        hops,
-        encryption_hops,
-        exit: OnionExitDescriptor::new_signed(
-            OnionExitDescriptorBody {
-                did: exit,
-                public_key,
-                session_public_key: exit_session.session_public_key(),
-                node_type: OnlineNodeType::Native,
-                network_id: 1,
-                services: vec![OnionExitService {
-                    name: "https".to_string(),
-                    transport: OnionExitTransport::Https,
-                }],
-                policy: Default::default(),
-                started_at_ms: 0,
-                heartbeat_at_ms: 0,
-                expires_at_ms: 1,
-                version: "test".to_string(),
-            },
-            exit_session,
-        )
-        .expect("signed exit"),
-    }
+    let exit = OnionExitDescriptor::new_signed(
+        OnionExitDescriptorBody {
+            did: exit,
+            public_key,
+            session_public_key: exit_session.session_public_key(),
+            node_type: OnlineNodeType::Native,
+            network_id: 1,
+            services: vec![OnionExitService {
+                name: "https".to_string(),
+                transport: OnionExitTransport::Https,
+            }],
+            policy: Default::default(),
+            started_at_ms: 0,
+            heartbeat_at_ms: 0,
+            expires_at_ms: 1,
+            version: "test".to_string(),
+        },
+        exit_session,
+    )
+    .expect("signed exit");
+    OnionRoute::new("https".to_string(), encryption_hops, exit).expect("valid route")
 }
 
 fn decode_event(
@@ -128,11 +120,7 @@ impl OnionCircuitHandler for RecordingHandler {
     async fn handle_exit(
         &self,
         _scope: &Scope,
-        _from: Did,
-        _circuit_id: OnionCircuitId,
-        _return_peer: Did,
-        _client: OnionClientReturn,
-        _payload: OnionCircuitPayload,
+        _frame: OnionCircuitExitFrame,
     ) -> crate::error::Result<()> {
         Ok(())
     }
@@ -180,18 +168,21 @@ fn initial_forward_targets_first_hop_and_hides_payload() {
 }
 
 #[test]
-fn route_first_hop_rejects_mismatched_hop_lists() {
+fn route_constructor_rejects_mismatched_exit_hop() {
     let first = session();
-    let second = session();
     let exit = session();
-    let mut route = route(&[first, second.clone()], &exit);
-    let wrong_first = second.account_did();
-    if let Some(first_hop) = route.hops.first_mut() {
-        *first_hop = wrong_first;
-    }
+    let route = route(&[], &exit);
+    let encryption_hops = vec![OnionRouteHop::new(
+        first.account_did(),
+        first.session_public_key(),
+    )];
 
     assert!(matches!(
-        route_first_hop(&route),
+        OnionRoute::new(
+            route.service().to_string(),
+            encryption_hops,
+            route.exit().clone(),
+        ),
         Err(crate::error::Error::OnionRouteError(_))
     ));
 }
@@ -380,7 +371,7 @@ async fn client_backward_payload_decryption_runs_in_shell_handler() {
     let scope = test_scope(client.clone());
     let state = protocol.init();
     let circuit_id = OnionCircuitId::new([3; 16]);
-    let expected_exit = route(&[], &exit).exit;
+    let expected_exit = route(&[], &exit).exit().clone();
     let expected = test_payload("closed");
     let frame = OnionBackwardFrame {
         circuit_id,
@@ -571,7 +562,7 @@ fn backward_payload_authentication_rejects_wrong_exit_signer() {
         decrypt_client_payload(&client, circuit_id, &sealed).expect("decrypt forged payload");
 
     assert!(matches!(
-        authenticated.into_verified_payload(circuit_id, &route.exit),
+        authenticated.into_verified_payload(circuit_id, route.exit()),
         Err(crate::error::Error::OnionRouteError(_))
     ));
 }

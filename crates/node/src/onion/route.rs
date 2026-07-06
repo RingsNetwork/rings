@@ -7,6 +7,7 @@ use rings_core::dht::Did;
 use rings_core::ecc::PublicKey;
 use rings_core::measure::PeerQuality;
 
+use super::circuit::MAX_ONION_CIRCUIT_HOPS;
 use super::OnionExitDescriptor;
 use super::ONION_RELAY_CAPABILITY;
 use crate::error::Error;
@@ -60,16 +61,58 @@ impl OnionRouteHop {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OnionRoute {
     /// Exit service requested by the route.
-    pub service: String,
+    service: String,
     /// Ordered DIDs, ending with the exit DID.
-    pub hops: Vec<Did>,
+    hops: Vec<Did>,
     /// Ordered encrypted route hops, ending with the exit hop.
-    pub encryption_hops: Vec<OnionRouteHop>,
+    encryption_hops: Vec<OnionRouteHop>,
     /// Signed descriptor for the selected exit.
-    pub exit: OnionExitDescriptor,
+    exit: OnionExitDescriptor,
 }
 
 impl OnionRoute {
+    /// Build a route after proving the hop and exit fields agree.
+    ///
+    /// Invariant: `hops == encryption_hops.map(|hop| hop.did)`, no DID repeats, and the last hop is
+    /// the selected exit descriptor.
+    pub(crate) fn new(
+        service: String,
+        encryption_hops: Vec<OnionRouteHop>,
+        exit: OnionExitDescriptor,
+    ) -> Result<Self> {
+        validate_route_hops(&service, &encryption_hops, &exit)?;
+        let hops = encryption_hops
+            .iter()
+            .map(|hop| hop.did)
+            .collect::<Vec<_>>();
+        Ok(Self {
+            service,
+            hops,
+            encryption_hops,
+            exit,
+        })
+    }
+
+    /// Return the service used to select this route.
+    pub fn service(&self) -> &str {
+        self.service.as_str()
+    }
+
+    /// Return the ordered route DIDs, ending with the exit DID.
+    pub fn hops(&self) -> &[Did] {
+        self.hops.as_slice()
+    }
+
+    /// Return the ordered encrypted hops, ending with the exit hop.
+    pub(crate) fn encryption_hops(&self) -> &[OnionRouteHop] {
+        self.encryption_hops.as_slice()
+    }
+
+    /// Return the selected exit descriptor.
+    pub fn exit(&self) -> &OnionExitDescriptor {
+        &self.exit
+    }
+
     /// Return the selected exit DID.
     pub fn exit_did(&self) -> Did {
         self.exit.did
@@ -171,6 +214,12 @@ pub(crate) fn select_onion_route_from_candidates(
             "onion route service must not be empty".to_string(),
         ));
     }
+    let target_hop_count = request.target_hop_count();
+    if target_hop_count == 0 || target_hop_count > MAX_ONION_CIRCUIT_HOPS as usize {
+        return Err(Error::OnionRouteError(format!(
+            "onion route hop count {target_hop_count} exceeds limit {MAX_ONION_CIRCUIT_HOPS}"
+        )));
+    }
 
     let quality_by_did = qualities.into_iter().collect::<BTreeMap<_, _>>();
     let mut exit_candidates = candidates.exits;
@@ -190,7 +239,7 @@ pub(crate) fn select_onion_route_from_candidates(
         .into_iter()
         .filter(|hop| hop.did != exit_did)
         .collect::<Vec<_>>();
-    let relay_hops_needed = request.target_hop_count().saturating_sub(1);
+    let relay_hops_needed = target_hop_count.saturating_sub(1);
     let mut selected_relays = Vec::with_capacity(relay_hops_needed);
     while selected_relays.len() < relay_hops_needed {
         let Some(next_index) = pick_weighted_hop_index(&relay_candidates, &quality_by_did, entropy)
@@ -203,24 +252,13 @@ pub(crate) fn select_onion_route_from_candidates(
     if selected_relays.len() < relay_hops_needed && !request.allow_short_paths {
         return Err(Error::OnionRouteError(format!(
             "not enough relay candidates for {}-hop onion route",
-            request.target_hop_count()
+            target_hop_count
         )));
     }
 
     let mut encryption_hops = selected_relays;
     encryption_hops.push(OnionRouteHop::new(exit_did, exit.session_public_key));
-    let hops = encryption_hops
-        .iter()
-        .map(|hop| hop.did)
-        .collect::<Vec<_>>();
-    debug_assert!(!has_duplicate_dids(&hops));
-
-    Ok(OnionRoute {
-        service: service.to_string(),
-        hops,
-        encryption_hops,
-        exit,
-    })
+    OnionRoute::new(service.to_string(), encryption_hops, exit)
 }
 
 fn pick_weighted_hop_index(
@@ -305,4 +343,47 @@ fn has_onion_relay_capability(descriptor: &OnlineNodeDescriptor) -> bool {
 fn has_duplicate_dids(hops: &[Did]) -> bool {
     let mut seen = BTreeSet::new();
     hops.iter().any(|did| !seen.insert(*did))
+}
+
+fn validate_route_hops(
+    service: &str,
+    encryption_hops: &[OnionRouteHop],
+    exit: &OnionExitDescriptor,
+) -> Result<()> {
+    if service.trim().is_empty() {
+        return Err(Error::OnionRouteError(
+            "onion route service must not be empty".to_string(),
+        ));
+    }
+    if encryption_hops.is_empty() || encryption_hops.len() > MAX_ONION_CIRCUIT_HOPS as usize {
+        return Err(Error::OnionRouteError(format!(
+            "onion route hop count {} exceeds limit {MAX_ONION_CIRCUIT_HOPS}",
+            encryption_hops.len()
+        )));
+    }
+    let Some(last) = encryption_hops.last() else {
+        return Err(Error::OnionRouteError(
+            "onion route has no hops".to_string(),
+        ));
+    };
+    if last.did != exit.did || last.session_public_key != exit.session_public_key {
+        return Err(Error::OnionRouteError(
+            "onion route exit hop does not match exit descriptor".to_string(),
+        ));
+    }
+    let hops = encryption_hops
+        .iter()
+        .map(|hop| hop.did)
+        .collect::<Vec<_>>();
+    if has_duplicate_dids(&hops) {
+        return Err(Error::OnionRouteError(
+            "onion route contains duplicate hops".to_string(),
+        ));
+    }
+    if !exit.offers_service(service) {
+        return Err(Error::OnionRouteError(
+            "onion route exit does not offer selected service".to_string(),
+        ));
+    }
+    Ok(())
 }

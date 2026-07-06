@@ -52,6 +52,16 @@ fn dummy_authenticated_payload(
     .expect("signed payload")
 }
 
+fn insert_test_client_stream(
+    runtime: &OnionTcpRuntime,
+    expected: Did,
+    exit: OnionExitDescriptor,
+    tx: mpsc::Sender<TcpInbound>,
+) -> Result<TcpStreamKey> {
+    let (open_tx, _open_rx) = tokio::sync::oneshot::channel();
+    runtime.insert_client_stream(expected, exit, open_tx, tx)
+}
+
 #[test]
 fn tcp_duplex_state_closes_only_after_both_halves_close() {
     let mut state = TcpDuplexState::open();
@@ -84,7 +94,7 @@ fn client_stream_accepts_only_expected_return_peer() -> Result<()> {
     let attacker = did();
     let exit = session();
     let (tx, _rx) = mpsc::channel(1);
-    let key = runtime.insert_client_stream(expected, exit_descriptor(&exit), tx)?;
+    let key = insert_test_client_stream(&runtime, expected, exit_descriptor(&exit), tx)?;
 
     assert!(runtime.client_inbound_sender(key, expected).is_ok());
     assert!(matches!(
@@ -101,7 +111,7 @@ fn client_stream_rejects_payload_from_wrong_exit_session() -> Result<()> {
     let selected_exit = session();
     let wrong_exit = session();
     let (tx, _rx) = mpsc::channel(1);
-    let key = runtime.insert_client_stream(expected, exit_descriptor(&selected_exit), tx)?;
+    let key = insert_test_client_stream(&runtime, expected, exit_descriptor(&selected_exit), tx)?;
 
     assert!(matches!(
         runtime.verify_client_payload(
@@ -120,7 +130,7 @@ fn client_stream_rejects_replayed_backward_nonce() -> Result<()> {
     let expected = did();
     let exit = session();
     let (tx, _rx) = mpsc::channel(1);
-    let key = runtime.insert_client_stream(expected, exit_descriptor(&exit), tx)?;
+    let key = insert_test_client_stream(&runtime, expected, exit_descriptor(&exit), tx)?;
     let payload = dummy_authenticated_payload(key.circuit_id, &exit);
 
     assert!(runtime
@@ -128,6 +138,20 @@ fn client_stream_rejects_replayed_backward_nonce() -> Result<()> {
         .is_ok());
     assert!(matches!(
         runtime.verify_client_payload(key, expected, payload),
+        Err(Error::OnionRouteError(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn exit_runtime_rejects_replayed_forward_nonce() -> Result<()> {
+    let runtime = runtime();
+    let circuit_id = OnionCircuitId::new([1; 16]);
+    let nonce = OnionForwardNonce::new([2; 16]);
+
+    assert!(runtime.consume_forward_nonce(circuit_id, nonce).is_ok());
+    assert!(matches!(
+        runtime.consume_forward_nonce(circuit_id, nonce),
         Err(Error::OnionRouteError(_))
     ));
     Ok(())

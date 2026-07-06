@@ -71,10 +71,12 @@ async fn handle_connect(
             target,
         )
         .await?;
+    let opened = onion
+        .open_tcp_stream(proxy_route.route, proxy_route.target)
+        .await?;
     write_proxy_response(&mut stream, "200 Connection Established").await?;
-    onion
-        .relay_tcp_stream(stream, proxy_route.route, proxy_route.target)
-        .await
+    opened.relay(stream);
+    Ok(())
 }
 
 async fn read_connect_target(stream: &mut TcpStream) -> Result<OnionProxyTarget> {
