@@ -51,13 +51,14 @@ impl NativeOnionCircuitHandle {
         allow_relay: bool,
         exit_policy: Option<OnionExitPolicy>,
     ) -> Result<Self> {
+        let allow_exit = exit_policy.is_some();
         let runtime = Arc::new(OnionTcpRuntime::new(
             OnionClientReturn::new(session_sk.session_public_key()),
             exit_policy,
         ));
         extensions.register(
-            OnionCircuitProtocol::new(session_sk, allow_relay),
-            OnionCircuitShell::new(NativeOnionCircuitHandler {
+            OnionCircuitProtocol::new(session_sk.clone(), allow_relay, allow_exit),
+            OnionCircuitShell::new(session_sk, NativeOnionCircuitHandler {
                 runtime: runtime.clone(),
             }),
         )?;

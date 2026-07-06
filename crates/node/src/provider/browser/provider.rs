@@ -622,6 +622,7 @@ impl Provider {
         exit_policy: Option<OnionExitPolicy>,
     ) -> crate::error::Result<Arc<OnionHttpsRuntime>> {
         let runtime = runtime_for_provider(format!("{:p}", Arc::as_ptr(&self.processor)))?;
+        let allow_exit = exit_policy.is_some();
         if exit_policy.is_some() {
             runtime.set_exit_policy(exit_policy);
         }
@@ -635,8 +636,12 @@ impl Provider {
                 OnionCircuitProtocol::new(
                     self.processor.session_sk().clone(),
                     self.processor.advertise_onion_relay(),
+                    allow_exit,
                 ),
-                OnionCircuitShell::new(BrowserOnionCircuitHandler::new(runtime.clone())),
+                OnionCircuitShell::new(
+                    self.processor.session_sk().clone(),
+                    BrowserOnionCircuitHandler::new(runtime.clone()),
+                ),
             )?;
             runtime.mark_circuit_protocol_installed();
         }

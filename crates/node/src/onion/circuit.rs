@@ -6,6 +6,8 @@
 //! relays forward them with local return state.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use bytes::Bytes;
 use rings_core::dht::Did;
@@ -13,6 +15,7 @@ use rings_core::ecc::elgamal::impls::secp256k1::encrypt_aead_with_rng;
 use rings_core::ecc::elgamal::impls::secp256k1::AeadCiphertext;
 use rings_core::ecc::PublicKey;
 use rings_core::session::SessionSk;
+use rings_core::utils::get_epoch_ms;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -45,6 +48,9 @@ pub const ONION_CIRCUIT_SECURITY: OnionCircuitSecurity = OnionCircuitSecurity::L
 pub const MAX_ONION_CIRCUIT_HOPS: u8 = 8;
 
 const MAX_ONION_RELAY_CIRCUITS: usize = 1024;
+const ONION_RELAY_RETURN_TTL_MS: u128 = 120_000;
+const ONION_CRYPTO_LIMIT_WINDOW_MS: u128 = 60_000;
+const MAX_ONION_CRYPTO_OPS_PER_WINDOW: u32 = 4096;
 const ONION_AEAD_NAMESPACE: &str = "rings-node:onion-circuit:v1";
 
 /// One browser HTTPS request executed by an HTTPS exit.
@@ -172,10 +178,16 @@ struct RelayReturnKey {
     next_hop: Did,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RelayReturnEntry {
+    previous_hop: Did,
+    expires_at_ms: u128,
+}
+
 /// Stateful return-hop table for encrypted relay circuits.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct OnionCircuitState {
-    relay_returns: BTreeMap<RelayReturnKey, Did>,
+    relay_returns: BTreeMap<RelayReturnKey, RelayReturnEntry>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -184,11 +196,20 @@ enum OnionCircuitMessage {
     Backward(OnionBackwardFrame),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum OnionDecodedMessage {
+    Forward {
+        circuit_id: OnionCircuitId,
+        layer: OnionForwardLayer,
+    },
+    Backward(OnionBackwardFrame),
+}
+
 /// One decoded circuit event.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OnionCircuitEvent {
     from: Did,
-    message: OnionCircuitMessage,
+    message: OnionDecodedMessage,
 }
 
 /// Effects emitted by the route-aware circuit reducer.
@@ -223,25 +244,52 @@ pub enum OnionCircuitEffect {
         /// Application payload.
         payload: OnionCircuitPayload,
     },
+    /// A backward frame may be for this local client and must be decrypted outside the reducer.
+    ClientEncrypted {
+        /// Authenticated immediate sender.
+        from: Did,
+        /// Random circuit correlation id.
+        circuit_id: OnionCircuitId,
+        /// AEAD payload encrypted to the client session public key.
+        payload: AeadCiphertext,
+    },
 }
 
 /// Encrypted onion circuit protocol.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct OnionCircuitProtocol {
     session_sk: SessionSk,
     allow_relay: bool,
+    allow_forward: bool,
     max_hops: u8,
     max_relay_circuits: usize,
+    relay_return_ttl_ms: u128,
+    crypto_limiter: Arc<Mutex<OnionCryptoLimiter>>,
+}
+
+impl std::fmt::Debug for OnionCircuitProtocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OnionCircuitProtocol")
+            .field("allow_relay", &self.allow_relay)
+            .field("allow_forward", &self.allow_forward)
+            .field("max_hops", &self.max_hops)
+            .field("max_relay_circuits", &self.max_relay_circuits)
+            .field("relay_return_ttl_ms", &self.relay_return_ttl_ms)
+            .finish_non_exhaustive()
+    }
 }
 
 impl OnionCircuitProtocol {
     /// Create a protocol instance for the local session.
-    pub fn new(session_sk: SessionSk, allow_relay: bool) -> Self {
+    pub fn new(session_sk: SessionSk, allow_relay: bool, allow_exit: bool) -> Self {
         Self {
             session_sk,
             allow_relay,
+            allow_forward: allow_relay || allow_exit,
             max_hops: MAX_ONION_CIRCUIT_HOPS,
             max_relay_circuits: MAX_ONION_RELAY_CIRCUITS,
+            relay_return_ttl_ms: ONION_RELAY_RETURN_TTL_MS,
+            crypto_limiter: Arc::new(Mutex::new(OnionCryptoLimiter::default())),
         }
     }
 }
@@ -262,6 +310,21 @@ impl Protocol for OnionCircuitProtocol {
     fn decode(&self, wire: Wire<'_>) -> std::result::Result<Self::Event, Reject> {
         let message = bincode::deserialize::<OnionCircuitMessage>(wire.payload)
             .map_err(|error| Reject(format!("bad onion circuit message: {error}")))?;
+        let message = match message {
+            OnionCircuitMessage::Forward(frame) => {
+                if !self.allow_forward {
+                    return Err(Reject("onion forward handling is disabled".to_string()));
+                }
+                self.admit_crypto(wire.from)?;
+                let layer = decrypt_forward_layer(&self.session_sk, frame.circuit_id, &frame.layer)
+                    .map_err(|error| Reject(format!("bad onion forward layer: {error}")))?;
+                OnionDecodedMessage::Forward {
+                    circuit_id: frame.circuit_id,
+                    layer,
+                }
+            }
+            OnionCircuitMessage::Backward(frame) => OnionDecodedMessage::Backward(frame),
+        };
         Ok(OnionCircuitEvent {
             from: wire.from,
             message,
@@ -275,10 +338,10 @@ impl Protocol for OnionCircuitProtocol {
     ) -> Transition<Self::State, Self::Effect> {
         let mut state = ctx.state.clone();
         let effect = match event.message {
-            OnionCircuitMessage::Forward(frame) => {
-                self.advance_forward(event.from, frame, &mut state)
+            OnionDecodedMessage::Forward { circuit_id, layer } => {
+                self.advance_forward(event.from, circuit_id, layer, &mut state)
             }
-            OnionCircuitMessage::Backward(frame) => {
+            OnionDecodedMessage::Backward(frame) => {
                 self.advance_backward(ctx.did, event.from, frame, &mut state)
             }
         };
@@ -294,13 +357,21 @@ impl Protocol for OnionCircuitProtocol {
 }
 
 impl OnionCircuitProtocol {
+    fn admit_crypto(&self, from: Did) -> std::result::Result<(), Reject> {
+        self.crypto_limiter
+            .lock()
+            .map_err(|_| Reject("onion crypto limiter lock failed".to_string()))?
+            .admit(from, get_epoch_ms(), MAX_ONION_CRYPTO_OPS_PER_WINDOW)
+            .map_err(|error| Reject(error.to_string()))
+    }
+
     fn advance_forward(
         &self,
         from: Did,
-        frame: OnionForwardFrame,
+        circuit_id: OnionCircuitId,
+        layer: OnionForwardLayer,
         state: &mut OnionCircuitState,
     ) -> Result<OnionCircuitEffect> {
-        let layer = decrypt_forward_layer(&self.session_sk, frame.circuit_id, &frame.layer)?;
         match layer {
             OnionForwardLayer::Relay {
                 next_hop,
@@ -311,14 +382,16 @@ impl OnionCircuitProtocol {
                 remember_return_hop(
                     state,
                     self.max_relay_circuits,
+                    self.relay_return_ttl_ms,
                     RelayReturnKey {
-                        circuit_id: frame.circuit_id,
+                        circuit_id,
                         next_hop,
                     },
                     from,
+                    get_epoch_ms(),
                 )?;
                 encode_message(OnionCircuitMessage::Forward(OnionForwardFrame {
-                    circuit_id: frame.circuit_id,
+                    circuit_id,
                     layer: inner,
                 }))
                 .map(|payload| OnionCircuitEffect::Send {
@@ -328,7 +401,7 @@ impl OnionCircuitProtocol {
             }
             OnionForwardLayer::Exit { client, payload } => Ok(OnionCircuitEffect::Exit {
                 from,
-                circuit_id: frame.circuit_id,
+                circuit_id,
                 return_peer: from,
                 client,
                 payload,
@@ -343,13 +416,18 @@ impl OnionCircuitProtocol {
         frame: OnionBackwardFrame,
         state: &mut OnionCircuitState,
     ) -> Result<OnionCircuitEffect> {
+        let now_ms = get_epoch_ms();
+        purge_expired_return_hops(state, now_ms);
         let key = RelayReturnKey {
             circuit_id: frame.circuit_id,
             next_hop: from,
         };
-        if let Some(previous_hop) = state.relay_returns.get(&key).copied() {
+        if let Some(entry) = state.relay_returns.get_mut(&key) {
+            let previous_hop = entry.previous_hop;
             if frame.terminal {
                 state.relay_returns.remove(&key);
+            } else {
+                entry.expires_at_ms = now_ms.saturating_add(self.relay_return_ttl_ms);
             }
             let payload = encode_message(OnionCircuitMessage::Backward(frame))?;
             return Ok(OnionCircuitEffect::Send {
@@ -358,11 +436,10 @@ impl OnionCircuitProtocol {
             });
         }
 
-        let payload = decrypt_client_payload(&self.session_sk, frame.circuit_id, &frame.payload)?;
-        Ok(OnionCircuitEffect::Client {
+        Ok(OnionCircuitEffect::ClientEncrypted {
             from,
             circuit_id: frame.circuit_id,
-            payload,
+            payload: frame.payload,
         })
     }
 
@@ -381,13 +458,27 @@ impl OnionCircuitProtocol {
 
 /// Interpreter for route-aware circuit effects.
 pub struct OnionCircuitShell<H> {
+    session_sk: SessionSk,
+    crypto_limiter: Arc<Mutex<OnionCryptoLimiter>>,
     handler: H,
 }
 
 impl<H> OnionCircuitShell<H> {
     /// Create a circuit interpreter backed by `handler`.
-    pub const fn new(handler: H) -> Self {
-        Self { handler }
+    pub fn new(session_sk: SessionSk, handler: H) -> Self {
+        Self {
+            session_sk,
+            crypto_limiter: Arc::new(Mutex::new(OnionCryptoLimiter::default())),
+            handler,
+        }
+    }
+
+    fn admit_crypto(&self, from: Did) -> Result<()> {
+        self.crypto_limiter.lock().map_err(|_| Error::Lock)?.admit(
+            from,
+            get_epoch_ms(),
+            MAX_ONION_CRYPTO_OPS_PER_WINDOW,
+        )
     }
 }
 
@@ -419,6 +510,17 @@ where H: OnionCircuitHandler + crate::extension::ext::MaybeSend + 'static
                 circuit_id,
                 payload,
             } => {
+                self.handler
+                    .handle_client(scope, from, circuit_id, payload)
+                    .await?;
+            }
+            OnionCircuitEffect::ClientEncrypted {
+                from,
+                circuit_id,
+                payload,
+            } => {
+                self.admit_crypto(from)?;
+                let payload = decrypt_client_payload(&self.session_sk, circuit_id, &payload)?;
                 self.handler
                     .handle_client(scope, from, circuit_id, payload)
                     .await?;
@@ -608,16 +710,63 @@ fn validate_route_hop_count(hops: usize) -> Result<()> {
 fn remember_return_hop(
     state: &mut OnionCircuitState,
     max_relay_circuits: usize,
+    ttl_ms: u128,
     key: RelayReturnKey,
     previous_hop: Did,
+    now_ms: u128,
 ) -> Result<()> {
+    purge_expired_return_hops(state, now_ms);
     if !state.relay_returns.contains_key(&key) && state.relay_returns.len() >= max_relay_circuits {
         return Err(Error::OnionRouteError(
             "onion relay circuit table is full".to_string(),
         ));
     }
-    state.relay_returns.insert(key, previous_hop);
+    state.relay_returns.insert(key, RelayReturnEntry {
+        previous_hop,
+        expires_at_ms: now_ms.saturating_add(ttl_ms),
+    });
     Ok(())
+}
+
+fn purge_expired_return_hops(state: &mut OnionCircuitState, now_ms: u128) {
+    state
+        .relay_returns
+        .retain(|_, entry| entry.expires_at_ms > now_ms);
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CryptoWindow {
+    window_start_ms: u128,
+    used: u32,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct OnionCryptoLimiter {
+    windows: BTreeMap<Did, CryptoWindow>,
+}
+
+impl OnionCryptoLimiter {
+    fn admit(&mut self, from: Did, now_ms: u128, max_ops: u32) -> Result<()> {
+        if max_ops == 0 {
+            return Ok(());
+        }
+        self.windows.retain(|_, window| {
+            now_ms.saturating_sub(window.window_start_ms) < ONION_CRYPTO_LIMIT_WINDOW_MS
+        });
+        let window = self.windows.entry(from).or_insert(CryptoWindow {
+            window_start_ms: now_ms,
+            used: 0,
+        });
+        if now_ms.saturating_sub(window.window_start_ms) >= ONION_CRYPTO_LIMIT_WINDOW_MS {
+            window.window_start_ms = now_ms;
+            window.used = 0;
+        }
+        if window.used >= max_ops {
+            return Err(Error::NoPermission);
+        }
+        window.used = window.used.saturating_add(1);
+        Ok(())
+    }
 }
 
 fn payload_closes_circuit(payload: &OnionCircuitPayload) -> bool {
@@ -695,6 +844,21 @@ mod tests {
         }
     }
 
+    fn decode_event(
+        protocol: &OnionCircuitProtocol,
+        from: Did,
+        me: Did,
+        payload: &Bytes,
+    ) -> OnionCircuitEvent {
+        protocol
+            .decode(Wire {
+                from,
+                me,
+                payload: payload.as_ref(),
+            })
+            .expect("decode onion circuit event")
+    }
+
     #[test]
     fn initial_forward_targets_first_hop_and_hides_payload() {
         let client = session();
@@ -737,22 +901,22 @@ mod tests {
             OnionCircuitPayload::TcpShutdown,
         )
         .expect("encode forward");
-        let message = bincode::deserialize::<OnionCircuitMessage>(&payload).expect("decode");
-        let protocol = OnionCircuitProtocol::new(relay.clone(), false);
-        let state = protocol.init();
+        let protocol = OnionCircuitProtocol::new(relay.clone(), false, false);
 
-        let transition = protocol.step(
-            Ctx {
-                did: relay.account_did(),
-                state: &state,
-            },
-            OnionCircuitEvent {
+        assert!(matches!(
+            protocol.decode(Wire {
                 from: client.account_did(),
-                message,
-            },
-        );
-
-        assert!(transition.effects.is_empty());
+                me: relay.account_did(),
+                payload: payload.as_ref(),
+            }),
+            Err(Reject(_))
+        ));
+        assert!(protocol
+            .crypto_limiter
+            .lock()
+            .expect("crypto limiter")
+            .windows
+            .is_empty());
     }
 
     #[test]
@@ -769,8 +933,13 @@ mod tests {
             OnionCircuitPayload::TcpShutdown,
         )
         .expect("encode forward");
-        let message = bincode::deserialize::<OnionCircuitMessage>(&payload).expect("decode");
-        let protocol = OnionCircuitProtocol::new(relay.clone(), true);
+        let protocol = OnionCircuitProtocol::new(relay.clone(), true, false);
+        let event = decode_event(
+            &protocol,
+            client.account_did(),
+            relay.account_did(),
+            &payload,
+        );
         let state = protocol.init();
 
         let transition = protocol.step(
@@ -778,10 +947,7 @@ mod tests {
                 did: relay.account_did(),
                 state: &state,
             },
-            OnionCircuitEvent {
-                from: client.account_did(),
-                message,
-            },
+            event,
         );
 
         assert_eq!(transition.effects.len(), 1);
@@ -793,10 +959,10 @@ mod tests {
     }
 
     #[test]
-    fn client_decrypts_backward_payload() {
+    fn client_backward_payload_decryption_is_deferred_to_shell() {
         let client = session();
         let exit = session();
-        let protocol = OnionCircuitProtocol::new(client.clone(), false);
+        let protocol = OnionCircuitProtocol::new(client.clone(), false, false);
         let state = protocol.init();
         let circuit_id = OnionCircuitId::new([3; 16]);
         let frame = OnionBackwardFrame {
@@ -811,27 +977,73 @@ mod tests {
             )
             .expect("encrypt backward"),
         };
+        let payload =
+            encode_message(OnionCircuitMessage::Backward(frame)).expect("encode backward");
+        let event = decode_event(
+            &protocol,
+            exit.account_did(),
+            client.account_did(),
+            &payload,
+        );
 
         let transition = protocol.step(
             Ctx {
                 did: client.account_did(),
                 state: &state,
             },
-            OnionCircuitEvent {
-                from: exit.account_did(),
-                message: OnionCircuitMessage::Backward(frame),
-            },
+            event,
         );
 
         assert!(matches!(
             transition.effects.first(),
-            Some(OnionCircuitEffect::Client {
+            Some(OnionCircuitEffect::ClientEncrypted {
                 from,
                 circuit_id: returned_circuit_id,
-                payload: OnionCircuitPayload::TcpError { message },
-            }) if *from == exit.account_did()
-                && *returned_circuit_id == circuit_id
-                && message == "closed"
+                ..
+            }) if *from == exit.account_did() && *returned_circuit_id == circuit_id
         ));
+    }
+
+    #[test]
+    fn relay_return_table_evicts_expired_entries() {
+        let previous = session();
+        let next = session();
+        let other_next = session();
+        let mut state = OnionCircuitState::default();
+        let first = RelayReturnKey {
+            circuit_id: OnionCircuitId::new([1; 16]),
+            next_hop: next.account_did(),
+        };
+        let second = RelayReturnKey {
+            circuit_id: OnionCircuitId::new([2; 16]),
+            next_hop: other_next.account_did(),
+        };
+
+        remember_return_hop(&mut state, 1, 10, first, previous.account_did(), 100)
+            .expect("first return hop");
+        assert!(
+            remember_return_hop(&mut state, 1, 10, second, previous.account_did(), 105).is_err()
+        );
+
+        remember_return_hop(&mut state, 1, 10, second, previous.account_did(), 111)
+            .expect("expired entry evicted");
+        assert!(!state.relay_returns.contains_key(&first));
+        assert!(state.relay_returns.contains_key(&second));
+    }
+
+    #[test]
+    fn crypto_limiter_bounds_sender_window() {
+        let peer = session().account_did();
+        let mut limiter = OnionCryptoLimiter::default();
+
+        assert!(limiter.admit(peer, 100, 2).is_ok());
+        assert!(limiter.admit(peer, 101, 2).is_ok());
+        assert!(matches!(
+            limiter.admit(peer, 102, 2),
+            Err(Error::NoPermission)
+        ));
+        assert!(limiter
+            .admit(peer, 100 + ONION_CRYPTO_LIMIT_WINDOW_MS, 2)
+            .is_ok());
     }
 }
