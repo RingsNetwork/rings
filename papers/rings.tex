@@ -91,13 +91,14 @@ with
 \]
 \[
 \begin{array}{rcl}
-\mathsf{Claim}_{main}
+\mathsf{Claim}_{core}
 &=&
 \mathsf{WellDef}(\Omega_N)
 \land\mathsf{CarrierSep}
 \land\mathsf{MorphismPreserve}\\
-&&{}\land\mathsf{EffectTyped}
-\land\mathsf{EvidenceScoped}_{\Gamma},\\
+&&{}\land\mathsf{EffectTyped},\\
+\mathsf{Claim}_{ledger}
+&=&\mathsf{EvidenceScoped}_{\Gamma}\land\mathsf{LedgerDisc}_{Rings},\\
 \mathsf{CryptoCarrier}\cap R&=&\varnothing.
 \end{array}
 \]
@@ -259,21 +260,21 @@ c\in\mathsf{ClaimKind}.
   \mathsf{WebRTC},\mathsf{CRDT}\},\\
 \mathsf{New}_{Rings}
 &=(\Omega_N,\mathsf{PMor},\mathsf{CarrierSep},
-  \mathsf{Ledger}_{\Gamma}).
+  \mathsf{LedgerDisc}_{Rings}).
 \end{aligned}
 \]
 \[
+\begin{aligned}
 \mathsf{Contribution}_{Rings}
-\equiv
-\mathsf{Reuse}_{Rings}
-\oplus
-\mathsf{New}_{Rings}
-\models
-\mathsf{Main}_{Rings}.
+&\equiv
+\mathsf{Reuse}_{Rings}\oplus\mathsf{New}_{Rings}\\
+&\models
+\mathsf{Core}_{Rings}\land\mathsf{LedgerDisc}_{Rings}.
+\end{aligned}
 \]
-The formal content of \(\mathsf{Main}_{Rings}\) is
-Theorem~\ref{thm:carrier-separated-ownership}; all performance claims remain
-outside it unless admitted by the evidence ledger.
+The formal theorem is Theorem~\ref{thm:carrier-separated-ownership};
+\(\mathsf{LedgerDisc}_{Rings}\) is the admission discipline, not a performance
+theorem.
 \end{definition}
 
 \section{Algebraic System Model}
@@ -774,29 +775,37 @@ Definition~\ref{def:protocol-morphism}.  Then
 &\equiv
 \forall\nu,s,i.\;\tau_\nu(s,i)\in
 \mathsf{T}^{\mathcal{E}_\nu}_{A_\nu}(S_\nu\times O_\nu),\\
-\mathsf{LedgerLaw}
-&\equiv
-\forall c.\;c\in\mathsf{Evidence}_\Gamma
-\Rightarrow \mathsf{finite}(\Gamma)\land\mathsf{declared}(\Gamma),\\
-\mathsf{Main}_{Rings}
+\mathsf{Core}_{Rings}
 &\equiv
 \mathsf{OwnerLaw}\land\mathsf{MorphLaw}
-\land\mathsf{EffectLaw}\land\mathsf{LedgerLaw}.
+\land\mathsf{EffectLaw}.
 \end{aligned}
-\]
-Furthermore,
-\[
-  \forall c\in\NonClaim.\quad \mathsf{Main}_{Rings}\not\vdash c .
 \]
 \end{theorem}
 \begin{proof}
 OwnerLaw is Lemma~\ref{lem:owner-totality}; MorphLaw is
 Lemma~\ref{lem:morphism-preservation}; EffectLaw is
-Lemma~\ref{lem:effect-confinement}.  LedgerLaw follows from the claim-ledger
-methodology.  \(\NonClaim\) is disjoint from
-\(\mathsf{Spec}\cup\mathsf{Impl}\cup\mathsf{Evidence}_\Gamma\); therefore no
-non-claim follows from the theorem.
+Lemma~\ref{lem:effect-confinement}.
 \end{proof}
+
+\begin{constraint}[Claim ledger discipline]
+\label{constraint:claim-ledger}
+\[
+\begin{array}{rcl}
+\mathsf{Admit}_{R}(c,k)&\Rightarrow&
+k\in\mathsf{ClaimKind},\\
+\mathsf{Admit}_{R}(c,\mathsf{Evidence}_{\Gamma})&\Rightarrow&
+\mathsf{finite}(\Gamma)\land\mathsf{declared}(\Gamma),\\
+\mathsf{Reject}_{R}(c)&\Leftrightarrow&c\in\NonClaim,\\
+\mathsf{Reject}_{R}(c)&\Rightarrow&
+\neg\exists k.\;\mathsf{Admit}_{R}(c,k),\\
+\mathsf{LedgerDisc}_{Rings}
+&=&\mathsf{Admit}_{R}\land\mathsf{Reject}_{R}.
+\end{array}
+\]
+Thus non-claims are excluded by the admission judgment; they are not proved
+unreachable by Theorem~\ref{thm:carrier-separated-ownership}.
+\end{constraint}
 
 \section{Chord Overlay}
 
@@ -1373,6 +1382,12 @@ Privacy & route or relay observation & relay policy only; no anonymity theorem \
 \begin{definition}[Security and policy boundary]
 \[
 \begin{array}{rcl}
+\mathsf{AllowedRelay}&\subseteq&\mathsf{Path},\\
+\operatorname{use},\operatorname{limit}
+&:&\mathsf{User}\times\mathsf{Epoch}\to\mathbb{N},\\
+\mathsf{SecEvent}&\subseteq&
+X_D\times\mathsf{Epoch}\times\mathsf{RankEvent}\\
+&&{}\times\mathsf{RelayFrame}\times\mathsf{User},\\
 \mathsf{P}_{adm}&:&X_D\times\mathsf{Epoch}\to\{\top,\bot\},\\
 \mathsf{P}_{rank}(q)&\Leftrightarrow&
   \operatorname{RankValid}(q)\land weight(q)\leq W_{max},\\
@@ -1383,8 +1398,10 @@ Privacy & route or relay observation & relay policy only; no anonymity theorem \
   \operatorname{use}(u,e)\leq \operatorname{limit}(u,e),\\
 z&=&(d,e,q,r,u),\\
 \mathsf{Policy}_{R}(z)&\Leftrightarrow&
-  \mathsf{P}_{adm}(d,e)\land\mathsf{P}_{rank}(q)\\
-&&{}\land\mathsf{P}_{relay}(r)\land\mathsf{P}_{quota}(u,e).
+  \mathsf{P}_{adm}(d,e)\\
+&&{}\land\mathsf{P}_{rank}(q)\\
+&&{}\land\mathsf{P}_{relay}(r)\\
+&&{}\land\mathsf{P}_{quota}(u,e).
 \end{array}
 \]
 \[
@@ -1580,8 +1597,8 @@ Only $hT_{hop}$ is Chord-comparable; the rest is Rings runtime overhead.
 \begin{definition}[Benchmark data model]
 \[
 \begin{array}{rcl}
-\eta&=&(N,r,m,L,f,\lambda,\chi,M),\\
-M&\in&\{\mathsf{maintained},\mathsf{stale}\},\\
+\eta&=&(N,r,m,L,f,\lambda,\gamma,\mu_B),\\
+\mu_B&\in&\{\mathsf{maintained},\mathsf{stale}\},\\
 \pi(d)&\in&\mathsf{Prov},\\
 \mathsf{Regen}(d)&\Rightarrow&
 \mathsf{src}(d)\neq\bot\land\mathsf{rev}(d)\neq\bot\\
@@ -1608,8 +1625,14 @@ D_{external}&=&D_C^{paper},\\
 D_{reported}&=&D_C^{656}\uplus D_R^{docker},\\
 D_{all}&=&D_{external}\uplus D_{reported},\\
 D_{admit}&=&\{d\in D_{all}:\mathsf{AdmittedEval}(d)\},\\
-D_C^{paper}&=&\{C_{II},C_{III},C_{IV},C_{8},C_{9},C_{10}\},\\
-D_C^{656}&=&\{\mathsf{maintained},\mathsf{stale}\},\\
+\mathcal{F}_{II}&=&\{0,.10,.20,.30,.40,.50\},\\
+\Lambda_{III}&=&\{.05,.10,.15,.20,.25,.30,.35,.40\},\\
+D_C^{paper}&=&\{C_{II}(f):f\in\mathcal{F}_{II}\}\\
+&&{}\uplus\{C_{III}(\lambda):\lambda\in\Lambda_{III}\},\\
+D_{maint}^{656}&=&\{stable,f_{.10},f_{.20},\gamma_{.05},\gamma_{.40}\},\\
+D_{stale}^{656}&=&\{f_{.10},f_{.20},\gamma_{.05},\gamma_{.40}\},\\
+D_C^{656}&=&(D_{maint}^{656}\times\{\mathsf{maintained}\})\\
+&&{}\uplus(D_{stale}^{656}\times\{\mathsf{stale}\}),\\
 D_R^{docker}&=&\{D_R^{conv},D_R^{tx}\}.
 \end{array}
 \]
@@ -1683,12 +1706,12 @@ $ok$ & $\bar{to}$ & $10^4\phi$ \\ \hline
 stable & maint. & $4.469/5.469$ & 1.000 & 0.000 & 0.0 \\
 $f=.10$ & maint. & $4.394/5.394$ & 1.000 & 0.000 & 0.0 \\
 $f=.20$ & maint. & $4.316/5.316$ & 1.000 & 0.000 & 0.0 \\
-$\chi=.05$ & maint. & $4.465/5.465$ & 1.000 & 0.000 & 0.0 \\
-$\chi=.40$ & maint. & $4.470/5.470$ & 1.000 & 0.000 & 0.0 \\
+\(\gamma=.05\) & maint. & $4.465/5.465$ & 1.000 & 0.000 & 0.0 \\
+\(\gamma=.40\) & maint. & $4.470/5.470$ & 1.000 & 0.000 & 0.0 \\
 $f=.10$ & stale & $4.758/5.758$ & .990 & .734 & 98.2 \\
 $f=.20$ & stale & $5.186/6.186$ & .969 & 1.890 & 314.7 \\
-$\chi=.05$ & stale & $4.617/5.617$ & .945 & .361 & 546.2 \\
-$\chi=.40$ & stale & $5.746/6.746$ & .484 & 4.604 & 5161.1 \\
+\(\gamma=.05\) & stale & $4.617/5.617$ & .945 & .361 & 546.2 \\
+\(\gamma=.40\) & stale & $5.746/6.746$ & .484 & 4.604 & 5161.1 \\
 \hline
 \end{tabular}
 \caption{Chord-only baselines at Rings parameters
@@ -1702,8 +1725,8 @@ host are shipped.}
 Thus stale rows explain sensitivity, not the maintained Chord baseline:
 \[
 \begin{array}{rcl}
-M=\mathsf{stale}&\Rightarrow&\neg\mathsf{maintenance},\\
-M=\mathsf{maintained}&\Rightarrow&\mathsf{Baseline}_{C}^{656}.
+\mu_B=\mathsf{stale}&\Rightarrow&\neg\mathsf{maintenance},\\
+\mu_B=\mathsf{maintained}&\Rightarrow&\mathsf{Baseline}_{C}^{656}.
 \end{array}
 \]
 
@@ -1758,16 +1781,21 @@ overheads and require Rings measurements.
 \[
 \begin{array}{rcl}
 D_R^{conv}&=&
-  \mathsf{raw}(16,309.532s,0/16,3/16,\\
-&&.194,1.026,8058.6),\\
+  \mathsf{conv}(n=16,T_{wall}=309.532\,\mathrm{s},\\
+&&fail=0/16,partial=3/16,\\
+&&t_{p50}=.194,t_{p95}=1.026,\mathsf{msg}_s=8058.6),\\
 D_R^{tx}&=&
-  \{(1,10.46),(16,107.35),\\
-&& (64,90.36)\}\subset \mathrm{KiB}\times\mathrm{Mbps}.
+  \{\mathsf{tx}(1,10.46),\mathsf{tx}(16,107.35),\\
+&& \mathsf{tx}(64,90.36)\}.
 \end{array}
 \]
-The Docker/WebRTC cluster tuple is convergence evidence, not a steady-state
-lookup benchmark.  \(D_R^{tx}\) is payload throughput; it must not be compared
-to Chord forwarding hops or timeout rates.
+\[
+\mathsf{tx}:\mathrm{KiB}\to\mathrm{Mbps},\qquad
+\mathsf{msg}_s:\mathrm{messages}/\mathrm{s}.
+\]
+The Docker/WebRTC tuple is convergence evidence, not a steady-state lookup
+benchmark.  \(D_R^{tx}\) is payload throughput; it must not be compared to
+Chord forwarding hops or timeout rates.
 
 \noindent\textbf{Artifact provenance.}
 \[
