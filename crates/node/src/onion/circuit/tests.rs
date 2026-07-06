@@ -35,6 +35,10 @@ fn session() -> SessionSk {
     SessionSk::new_with_seckey(&SecretKey::random()).expect("session key")
 }
 
+fn test_payload(label: &str) -> OnionCircuitPayload {
+    OnionCircuitPayload::new("test", Bytes::copy_from_slice(label.as_bytes()))
+}
+
 fn route(relays: &[SessionSk], exit_session: &SessionSk) -> OnionRoute {
     let exit = exit_session.account_did();
     let public_key = exit_session
@@ -105,11 +109,11 @@ fn test_scope(session_sk: SessionSk) -> Scope {
 
 #[derive(Clone, Default)]
 struct RecordingHandler {
-    clients: Arc<Mutex<Vec<(Did, OnionCircuitId, OnionCircuitPayload)>>>,
+    clients: Arc<Mutex<Vec<(Did, OnionCircuitId, OnionAuthenticatedPayload)>>>,
 }
 
 impl RecordingHandler {
-    fn take_clients(&self) -> Vec<(Did, OnionCircuitId, OnionCircuitPayload)> {
+    fn take_clients(&self) -> Vec<(Did, OnionCircuitId, OnionAuthenticatedPayload)> {
         std::mem::take(&mut self.clients.lock().expect("recorded clients"))
     }
 }
@@ -134,7 +138,7 @@ impl OnionCircuitHandler for RecordingHandler {
         _scope: &Scope,
         from: Did,
         circuit_id: OnionCircuitId,
-        payload: OnionCircuitPayload,
+        payload: OnionAuthenticatedPayload,
     ) -> crate::error::Result<()> {
         self.clients
             .lock()
@@ -157,7 +161,7 @@ fn initial_forward_targets_first_hop_and_hides_payload() {
         OnionClientReturn::new(client.session_public_key()),
         &route,
         circuit_id,
-        OnionCircuitPayload::HttpsError("probe".to_string()),
+        test_payload("probe"),
     )
     .expect("encode initial route");
     let decoded = bincode::deserialize::<OnionWireMessage>(&payload).expect("decode initial route");
@@ -199,7 +203,7 @@ fn relay_forward_requires_opt_in_before_crypto_effect() {
         OnionClientReturn::new(client.session_public_key()),
         &route,
         circuit_id,
-        OnionCircuitPayload::TcpShutdown,
+        test_payload("tcp-shutdown"),
     )
     .expect("encode forward");
     let protocol = OnionCircuitProtocol::new(OnionCircuitCapabilities::client());
@@ -231,7 +235,7 @@ async fn relay_capability_does_not_execute_exit_layer() {
         OnionClientReturn::new(client.session_public_key()),
         &route,
         circuit_id,
-        OnionCircuitPayload::TcpShutdown,
+        test_payload("tcp-shutdown"),
     )
     .expect("encode exit layer");
     let protocol = OnionCircuitProtocol::new(OnionCircuitCapabilities::relay());
@@ -290,7 +294,7 @@ async fn relay_decrypts_one_layer_and_remembers_return_hop() {
         OnionClientReturn::new(client.session_public_key()),
         &route,
         circuit_id,
-        OnionCircuitPayload::TcpShutdown,
+        test_payload("tcp-shutdown"),
     )
     .expect("encode forward");
     let protocol = OnionCircuitProtocol::new(OnionCircuitCapabilities::relay());
@@ -354,13 +358,17 @@ async fn client_backward_payload_decryption_runs_in_shell_handler() {
     let scope = test_scope(client.clone());
     let state = protocol.init();
     let circuit_id = OnionCircuitId::new([3; 16]);
-    let expected = OnionCircuitPayload::TcpError {
-        message: "closed".to_string(),
-    };
+    let expected_exit = route(&[], &exit).exit;
+    let expected = test_payload("closed");
     let frame = OnionBackwardFrame {
         circuit_id,
-        payload: encrypt_client_payload(circuit_id, expected.clone(), client.session_public_key())
-            .expect("encrypt backward"),
+        payload: encrypt_client_payload(
+            circuit_id,
+            expected.clone(),
+            client.session_public_key(),
+            &exit,
+        )
+        .expect("encrypt backward"),
     };
     let payload = encode_wire_message(OnionWireMessage::Backward(frame)).expect("encode backward");
     let event = decode_event(
@@ -409,11 +417,19 @@ async fn client_backward_payload_decryption_runs_in_shell_handler() {
         .expect("decrypt client");
 
     assert!(outputs.is_empty());
-    assert_eq!(handler.take_clients(), vec![(
-        exit.account_did(),
-        circuit_id,
+    let clients = handler.take_clients();
+    let [(from, returned_circuit_id, authenticated)] = clients.as_slice() else {
+        panic!("expected one client payload");
+    };
+    assert_eq!(*from, exit.account_did());
+    assert_eq!(*returned_circuit_id, circuit_id);
+    assert_eq!(
+        authenticated
+            .clone()
+            .into_verified_payload(circuit_id, &expected_exit)
+            .expect("valid exit proof"),
         expected
-    )]);
+    );
 }
 
 #[test]
@@ -437,6 +453,27 @@ fn relay_return_table_evicts_expired_entries() {
 
     remember_return_hop(&mut state, 1, 10, second, previous.account_did(), 111)
         .expect("expired entry evicted");
+    assert_eq!(state.relay_return_count(), 1);
+}
+
+#[test]
+fn relay_return_table_rejects_live_edge_overwrite() {
+    let previous = session();
+    let attacker_previous = session();
+    let next = session();
+    let mut state = OnionCircuitState::default();
+    let key = RelayReturnKey {
+        circuit_id: OnionCircuitId::new([7; 16]),
+        next_hop: next.account_did(),
+    };
+
+    remember_return_hop(&mut state, 8, 10, key, previous.account_did(), 100)
+        .expect("first return hop");
+
+    assert!(matches!(
+        remember_return_hop(&mut state, 8, 10, key, attacker_previous.account_did(), 101),
+        Err(crate::error::Error::OnionRouteError(_))
+    ));
     assert_eq!(state.relay_return_count(), 1);
 }
 
@@ -467,7 +504,7 @@ fn aead_context_binds_direction_and_circuit_id() {
         OnionClientReturn::new(client.session_public_key()),
         &route,
         circuit_id,
-        OnionCircuitPayload::TcpShutdown,
+        test_payload("tcp-shutdown"),
     )
     .expect("encode forward");
     let OnionWireMessage::Forward(frame) =
@@ -482,11 +519,36 @@ fn aead_context_binds_direction_and_circuit_id() {
 
     let backward = encrypt_client_payload(
         circuit_id,
-        OnionCircuitPayload::TcpClose,
+        test_payload("tcp-close"),
         client.session_public_key(),
+        &exit,
     )
     .expect("encrypt backward");
     assert!(decrypt_client_payload(&client, circuit_id, &backward).is_ok());
     assert!(decrypt_client_payload(&client, wrong_circuit_id, &backward).is_err());
     assert!(decrypt_forward_layer(&client, circuit_id, &backward).is_err());
+}
+
+#[test]
+fn backward_payload_authentication_rejects_wrong_exit_signer() {
+    let client = session();
+    let exit = session();
+    let attacker = session();
+    let route = route(&[], &exit);
+    let circuit_id = OnionCircuitId::new([8; 16]);
+    let sealed = encrypt_client_payload(
+        circuit_id,
+        test_payload("forged"),
+        client.session_public_key(),
+        &attacker,
+    )
+    .expect("encrypt forged payload");
+
+    let authenticated =
+        decrypt_client_payload(&client, circuit_id, &sealed).expect("decrypt forged payload");
+
+    assert!(matches!(
+        authenticated.into_verified_payload(circuit_id, &route.exit),
+        Err(crate::error::Error::OnionRouteError(_))
+    ));
 }

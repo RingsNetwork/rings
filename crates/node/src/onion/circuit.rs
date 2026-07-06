@@ -27,6 +27,7 @@ pub use reducer::OnionCircuitState;
 use rings_core::dht::Did;
 use rings_core::ecc::elgamal::impls::secp256k1::AeadCiphertext;
 use rings_core::ecc::PublicKey;
+use rings_core::message::MessageVerification;
 use serde::Deserialize;
 use serde::Serialize;
 pub use shell::OnionCircuitHandler;
@@ -45,7 +46,8 @@ pub enum OnionCircuitSecurity {
 /// Current circuit security mode.
 pub const ONION_CIRCUIT_SECURITY: OnionCircuitSecurity = OnionCircuitSecurity::LayeredAead;
 
-/// Maximum number of encrypted hops accepted in one circuit.
+/// Maximum route length encoded by local clients and maximum relay hop-budget value accepted per
+/// decrypted layer.
 pub const MAX_ONION_CIRCUIT_HOPS: u8 = 8;
 
 pub(super) const MAX_ONION_RELAY_CIRCUITS: usize = 1024;
@@ -54,60 +56,40 @@ pub(super) const ONION_CRYPTO_LIMIT_WINDOW_MS: u128 = 60_000;
 pub(super) const MAX_ONION_CRYPTO_OPS_PER_WINDOW: u32 = 4096;
 pub(super) const ONION_AEAD_NAMESPACE: &str = "rings-node:onion-circuit:v1";
 
-/// One browser HTTPS request executed by an HTTPS exit.
+/// Opaque application payload carried over a route-aware onion circuit.
+///
+/// The circuit layer knows only the service label and authenticated bytes. TCP, HTTPS, or future
+/// adapters own their own payload algebra outside the encrypted circuit core.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
-pub struct OnionHttpsRequest {
-    /// Target authority (`host:port`).
-    pub target: String,
-    /// HTTP method.
-    pub method: String,
-    /// Path and query.
-    pub path: String,
-    /// Request headers.
-    pub headers: Vec<(String, String)>,
-    /// Request body bytes.
-    pub body: Vec<u8>,
+pub struct OnionCircuitPayload {
+    /// Application service label selected from the onion-exit registry.
+    pub service: String,
+    /// Adapter-owned payload bytes.
+    pub body: Bytes,
 }
 
-/// One browser HTTPS response returned by an HTTPS exit.
-#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
-pub struct OnionHttpsResponse {
-    /// HTTP status code.
-    pub status: u16,
-    /// Response headers.
-    pub headers: Vec<(String, String)>,
-    /// Response body bytes.
-    pub body: Vec<u8>,
+impl OnionCircuitPayload {
+    /// Build an opaque circuit payload for one application service.
+    pub fn new(service: impl Into<String>, body: impl Into<Bytes>) -> Self {
+        Self {
+            service: service.into(),
+            body: body.into(),
+        }
+    }
+
+    /// Return whether this payload belongs to `service`.
+    pub fn is_service(&self, service: &str) -> bool {
+        self.service == service
+    }
 }
 
-/// Payload carried over a route-aware onion circuit.
+/// Client-decrypted backward payload plus the exit session proof that authenticated it.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
-pub enum OnionCircuitPayload {
-    /// Browser-compatible HTTPS request.
-    HttpsRequest(OnionHttpsRequest),
-    /// Browser-compatible HTTPS response.
-    HttpsResponse(OnionHttpsResponse),
-    /// Browser-compatible HTTPS error.
-    HttpsError(String),
-    /// Open a native TCP stream at the exit.
-    TcpOpen {
-        /// Target authority (`host:port`).
-        target: String,
-    },
-    /// TCP stream data.
-    TcpData {
-        /// Raw stream bytes.
-        bytes: Bytes,
-    },
-    /// TCP half-close.
-    TcpShutdown,
-    /// TCP full close.
-    TcpClose,
-    /// TCP stream error.
-    TcpError {
-        /// Error message.
-        message: String,
-    },
+pub struct OnionAuthenticatedPayload {
+    /// Exit session signature over the backward payload transcript.
+    pub authentication: MessageVerification,
+    /// Application payload signed by the exit and encrypted to the client.
+    pub payload: OnionCircuitPayload,
 }
 
 /// Client return key encrypted into the exit layer.

@@ -1,18 +1,51 @@
 use rings_core::ecc::SecretKey;
+use rings_core::message::MessageVerification;
 
 use super::*;
+use crate::onion::OnionExitDescriptorBody;
+use crate::onion::OnionExitService;
+use crate::online::OnlineNodeType;
 
 fn did() -> Did {
     SecretKey::random().address().into()
 }
 
-fn client_return() -> OnionClientReturn {
-    let session_sk = SessionSk::new_with_seckey(&SecretKey::random()).expect("session key");
-    OnionClientReturn::new(session_sk.session_public_key())
+fn session() -> SessionSk {
+    SessionSk::new_with_seckey(&SecretKey::random()).expect("session key")
+}
+
+fn exit_descriptor(session: &SessionSk) -> OnionExitDescriptor {
+    OnionExitDescriptor::new_signed(
+        OnionExitDescriptorBody {
+            did: session.account_did(),
+            public_key: session
+                .session()
+                .account_verification_pubkey()
+                .expect("verification key"),
+            session_public_key: session.session_public_key(),
+            node_type: OnlineNodeType::Native,
+            network_id: 1,
+            services: vec![OnionExitService::tcp()],
+            policy: OnionExitPolicy::default(),
+            started_at_ms: 0,
+            heartbeat_at_ms: 0,
+            expires_at_ms: 1,
+            version: "test".to_string(),
+        },
+        session,
+    )
+    .expect("signed exit")
 }
 
 fn runtime() -> OnionTcpRuntime {
-    OnionTcpRuntime::new(client_return(), None)
+    OnionTcpRuntime::new(session(), None)
+}
+
+fn dummy_authenticated_payload(session: &SessionSk) -> OnionAuthenticatedPayload {
+    OnionAuthenticatedPayload {
+        authentication: MessageVerification::new(&[], session).expect("message verification"),
+        payload: encode_tcp_payload(OnionTcpPayload::Close).expect("encode payload"),
+    }
 }
 
 #[test]
@@ -45,12 +78,29 @@ fn client_stream_accepts_only_expected_return_peer() -> Result<()> {
     let runtime = runtime();
     let expected = did();
     let attacker = did();
+    let exit = session();
     let (tx, _rx) = mpsc::channel(1);
-    let key = runtime.insert_client_stream(expected, tx)?;
+    let key = runtime.insert_client_stream(expected, exit_descriptor(&exit), tx)?;
 
     assert!(runtime.client_inbound_sender(key, expected).is_ok());
     assert!(matches!(
         runtime.client_inbound_sender(key, attacker),
+        Err(Error::OnionRouteError(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn client_stream_rejects_payload_from_wrong_exit_session() -> Result<()> {
+    let runtime = runtime();
+    let expected = did();
+    let selected_exit = session();
+    let wrong_exit = session();
+    let (tx, _rx) = mpsc::channel(1);
+    let key = runtime.insert_client_stream(expected, exit_descriptor(&selected_exit), tx)?;
+
+    assert!(matches!(
+        runtime.verify_client_payload(key, expected, dummy_authenticated_payload(&wrong_exit)),
         Err(Error::OnionRouteError(_))
     ));
     Ok(())

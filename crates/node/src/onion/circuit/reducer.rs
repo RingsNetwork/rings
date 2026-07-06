@@ -1,3 +1,4 @@
+use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 
 use bytes::Bytes;
@@ -39,8 +40,9 @@ struct RelayReturnEntry {
 ///
 /// Invariant: every `(circuit_id, next_hop) -> previous_hop` entry represents exactly one
 /// live reverse edge learned from a prior forward relay action.
-/// Preservation: forward relay insertion purges expired entries before capacity checks;
-/// backward frames purge expired entries before lookup and refresh only the matched edge.
+/// Preservation: forward relay insertion purges expired entries before capacity checks and never
+/// rewrites a live key to a different previous hop; backward frames purge expired entries before
+/// lookup and refresh only the matched edge.
 /// Return-state removal is TTL-based because backward close semantics are encrypted to the
 /// client and are not authenticated to relays.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -116,9 +118,8 @@ pub enum OnionCircuitEffect {
 /// BackwardReady(no match)      -> state, [DecryptClient]
 /// ```
 ///
-/// Law: replaying `apply(local, state, input)` with the same values returns the same
-/// `(state', effects)`. Clocks, crypto, IO, and locks are represented by effects and live in
-/// the shell.
+/// Law: replaying `apply(state, input)` with the same values returns the same `(state', effects)`.
+/// Clocks, crypto, IO, and locks are represented by effects and live in the shell.
 #[derive(Clone, Debug)]
 pub(super) struct OnionCircuitReducer {
     capabilities: OnionCircuitCapabilities,
@@ -139,7 +140,6 @@ impl OnionCircuitReducer {
 
     pub(super) fn apply(
         &self,
-        _local: Did,
         state: &OnionCircuitState,
         input: OnionCircuitInput,
     ) -> Transition<OnionCircuitState, OnionCircuitEffect> {
@@ -274,6 +274,9 @@ impl OnionCircuitReducer {
         if !self.capabilities.permits_relay_layer() {
             return Err(Error::NoPermission);
         }
+        // Pre: `remaining_hops` is authenticated inside this decrypted layer but authored by the
+        // client route constructor. A relay can bound the next layer budget; it cannot prove the
+        // hidden global route length without breaking onion path privacy.
         if remaining_hops == 0 || remaining_hops > self.max_hops {
             return Err(Error::OnionRouteError(format!(
                 "invalid onion relay hop count {remaining_hops}"
@@ -292,15 +295,28 @@ pub(super) fn remember_return_hop(
     now_ms: u128,
 ) -> Result<()> {
     purge_expired_return_hops(state, now_ms);
-    if !state.relay_returns.contains_key(&key) && state.relay_returns.len() >= max_relay_circuits {
-        return Err(Error::OnionRouteError(
-            "onion relay circuit table is full".to_string(),
-        ));
+    let table_is_full = state.relay_returns.len() >= max_relay_circuits;
+    match state.relay_returns.entry(key) {
+        Entry::Occupied(mut entry) => {
+            if entry.get().previous_hop != previous_hop {
+                return Err(Error::OnionRouteError(
+                    "onion relay return edge already belongs to another previous hop".to_string(),
+                ));
+            }
+            entry.get_mut().expires_at_ms = now_ms.saturating_add(ttl_ms);
+        }
+        Entry::Vacant(entry) => {
+            if table_is_full {
+                return Err(Error::OnionRouteError(
+                    "onion relay circuit table is full".to_string(),
+                ));
+            }
+            entry.insert(RelayReturnEntry {
+                previous_hop,
+                expires_at_ms: now_ms.saturating_add(ttl_ms),
+            });
+        }
     }
-    state.relay_returns.insert(key, RelayReturnEntry {
-        previous_hop,
-        expires_at_ms: now_ms.saturating_add(ttl_ms),
-    });
     Ok(())
 }
 

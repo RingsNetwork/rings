@@ -8,6 +8,7 @@ use super::codec::OnionLocalMessage;
 use super::crypto::decrypt_client_payload;
 use super::crypto::decrypt_forward_layer;
 use super::limiter::OnionCryptoGate;
+use super::OnionAuthenticatedPayload;
 use super::OnionCircuitEffect;
 use super::OnionCircuitId;
 use super::OnionCircuitPayload;
@@ -86,7 +87,7 @@ impl<H> OnionCircuitShell<H> {
         from: Did,
         circuit_id: OnionCircuitId,
         payload: &rings_core::ecc::elgamal::impls::secp256k1::AeadCiphertext,
-    ) -> Result<Option<OnionCircuitPayload>> {
+    ) -> Result<Option<OnionAuthenticatedPayload>> {
         let received_at_ms = get_epoch_ms();
         match self.admit_crypto(from, received_at_ms) {
             Ok(()) => {}
@@ -179,7 +180,7 @@ pub trait OnionCircuitHandler {
         scope: &Scope,
         from: Did,
         circuit_id: OnionCircuitId,
-        payload: OnionCircuitPayload,
+        payload: OnionAuthenticatedPayload,
     ) -> Result<()>;
 }
 

@@ -9,7 +9,8 @@ use std::sync::Mutex;
 use bytes::Bytes;
 use rings_core::dht::Did;
 use rings_core::session::SessionSk;
-use rings_core::utils::get_epoch_ms;
+use serde::Deserialize;
+use serde::Serialize;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::lookup_host;
@@ -23,6 +24,7 @@ use crate::extension::ext::Scope;
 use crate::onion::circuit::encode_initial_forward;
 use crate::onion::circuit::route_first_hop;
 use crate::onion::circuit::send_backward;
+use crate::onion::circuit::OnionAuthenticatedPayload;
 use crate::onion::circuit::OnionCircuitCapabilities;
 use crate::onion::circuit::OnionCircuitHandler;
 use crate::onion::circuit::OnionCircuitId;
@@ -31,12 +33,39 @@ use crate::onion::circuit::OnionCircuitProtocol;
 use crate::onion::circuit::OnionCircuitShell;
 use crate::onion::circuit::OnionClientReturn;
 use crate::onion::circuit::ONION_CIRCUIT_NAMESPACE;
+use crate::onion::exit_accounting::OnionExitAccounting;
+use crate::onion::exit_accounting::OnionExitLease;
+use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionProxyTarget;
 use crate::onion::OnionRoute;
+use crate::onion_proxy::ONION_PROXY_TCP_SERVICE;
 
 const TCP_BUF: usize = 30_000;
-const EXIT_LIMIT_WINDOW_MS: u128 = 60_000;
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+enum OnionTcpPayload {
+    Open { target: String },
+    Data { bytes: Bytes },
+    Shutdown,
+    Close,
+    Error { message: String },
+}
+
+fn encode_tcp_payload(payload: OnionTcpPayload) -> Result<OnionCircuitPayload> {
+    bincode::serialize(&payload)
+        .map(|body| OnionCircuitPayload::new(ONION_PROXY_TCP_SERVICE, Bytes::from(body)))
+        .map_err(|_| Error::EncodeError)
+}
+
+fn decode_tcp_payload(payload: OnionCircuitPayload) -> Result<Option<OnionTcpPayload>> {
+    if !payload.is_service(ONION_PROXY_TCP_SERVICE) {
+        return Ok(None);
+    }
+    bincode::deserialize(payload.body.as_ref())
+        .map(Some)
+        .map_err(|_| Error::DecodeError)
+}
 
 /// Native handle for opening TCP streams over route-aware onion circuits.
 #[derive(Clone)]
@@ -54,10 +83,7 @@ impl NativeOnionCircuitHandle {
         exit_policy: Option<OnionExitPolicy>,
     ) -> Result<Self> {
         let allow_exit = exit_policy.is_some();
-        let runtime = Arc::new(OnionTcpRuntime::new(
-            OnionClientReturn::new(session_sk.session_public_key()),
-            exit_policy,
-        ));
+        let runtime = Arc::new(OnionTcpRuntime::new(session_sk.clone(), exit_policy));
         let capabilities = OnionCircuitCapabilities::from_registration(allow_relay, allow_exit);
         extensions.register(
             OnionCircuitProtocol::new(capabilities),
@@ -117,7 +143,7 @@ impl OnionCircuitHandler for NativeOnionCircuitHandler {
         _scope: &Scope,
         from: Did,
         circuit_id: OnionCircuitId,
-        payload: OnionCircuitPayload,
+        payload: OnionAuthenticatedPayload,
     ) -> Result<()> {
         self.runtime
             .handle_client_payload(from, circuit_id, payload)
@@ -126,21 +152,24 @@ impl OnionCircuitHandler for NativeOnionCircuitHandler {
 }
 
 struct OnionTcpRuntime {
+    session_sk: SessionSk,
     client_return: OnionClientReturn,
     client_streams: Mutex<HashMap<TcpStreamKey, ClientStream>>,
     exit_streams: Mutex<HashMap<TcpStreamKey, ExitStream>>,
     exit_policy: Option<OnionExitPolicy>,
-    limiter: Arc<Mutex<TcpExitLimiter>>,
+    accounting: OnionExitAccounting,
 }
 
 impl OnionTcpRuntime {
-    fn new(client_return: OnionClientReturn, exit_policy: Option<OnionExitPolicy>) -> Self {
+    fn new(session_sk: SessionSk, exit_policy: Option<OnionExitPolicy>) -> Self {
+        let client_return = OnionClientReturn::new(session_sk.session_public_key());
         Self {
+            session_sk,
             client_return,
             client_streams: Mutex::new(HashMap::new()),
             exit_streams: Mutex::new(HashMap::new()),
             exit_policy,
-            limiter: Arc::new(Mutex::new(TcpExitLimiter::default())),
+            accounting: OnionExitAccounting::default(),
         }
     }
 
@@ -152,15 +181,16 @@ impl OnionTcpRuntime {
         target: OnionProxyTarget,
     ) -> Result<()> {
         let expected_return_peer = route_first_hop(&route)?;
+        let expected_exit = route.exit.clone();
         let (tx, rx) = mpsc::channel(32);
-        let key = self.insert_client_stream(expected_return_peer, tx)?;
+        let key = self.insert_client_stream(expected_return_peer, expected_exit, tx)?;
         let (to, payload) = encode_initial_forward(
             self.client_return,
             &route,
             key.circuit_id,
-            OnionCircuitPayload::TcpOpen {
+            encode_tcp_payload(OnionTcpPayload::Open {
                 target: target.authority(),
-            },
+            })?,
         )?;
         if let Err(error) = scope.send(to, payload).await {
             self.remove_client_stream(key);
@@ -188,8 +218,11 @@ impl OnionTcpRuntime {
         payload: OnionCircuitPayload,
     ) -> Result<()> {
         let key = TcpStreamKey { circuit_id };
+        let Some(payload) = decode_tcp_payload(payload)? else {
+            return Ok(());
+        };
         match payload {
-            OnionCircuitPayload::TcpOpen { target } => {
+            OnionTcpPayload::Open { target } => {
                 self.open_exit_stream(TcpExitOpen {
                     scope,
                     key,
@@ -201,30 +234,16 @@ impl OnionTcpRuntime {
                 })
                 .await
             }
-            OnionCircuitPayload::TcpData { bytes } => {
+            OnionTcpPayload::Data { bytes } => {
                 self.send_exit_inbound(key, from, TcpInbound::Data(bytes))
                     .await
             }
-            OnionCircuitPayload::TcpShutdown => {
+            OnionTcpPayload::Shutdown => {
                 self.send_exit_inbound(key, from, TcpInbound::Shutdown)
                     .await
             }
-            OnionCircuitPayload::TcpClose => {
-                self.send_exit_inbound(key, from, TcpInbound::Close).await
-            }
-            OnionCircuitPayload::HttpsRequest(_) => {
-                send_backward(
-                    &scope,
-                    circuit_id,
-                    return_peer,
-                    client,
-                    OnionCircuitPayload::HttpsError(
-                        "native onion exits do not support HTTPS".to_string(),
-                    ),
-                )
-                .await
-            }
-            _ => Ok(()),
+            OnionTcpPayload::Close => self.send_exit_inbound(key, from, TcpInbound::Close).await,
+            OnionTcpPayload::Error { .. } => Ok(()),
         }
     }
 
@@ -232,26 +251,28 @@ impl OnionTcpRuntime {
         self: &Arc<Self>,
         from: Did,
         circuit_id: OnionCircuitId,
-        payload: OnionCircuitPayload,
+        payload: OnionAuthenticatedPayload,
     ) -> Result<()> {
         let key = TcpStreamKey { circuit_id };
+        let payload = self.verify_client_payload(key, from, payload)?;
+        let Some(payload) = decode_tcp_payload(payload)? else {
+            return Ok(());
+        };
         match payload {
-            OnionCircuitPayload::TcpData { bytes } => {
+            OnionTcpPayload::Data { bytes } => {
                 self.send_client_inbound(key, from, TcpInbound::Data(bytes))
                     .await
             }
-            OnionCircuitPayload::TcpShutdown => {
+            OnionTcpPayload::Shutdown => {
                 self.send_client_inbound(key, from, TcpInbound::Shutdown)
                     .await
             }
-            OnionCircuitPayload::TcpClose => {
-                self.send_client_inbound(key, from, TcpInbound::Close).await
-            }
-            OnionCircuitPayload::TcpError { message } => {
+            OnionTcpPayload::Close => self.send_client_inbound(key, from, TcpInbound::Close).await,
+            OnionTcpPayload::Error { message } => {
                 self.send_client_inbound(key, from, TcpInbound::Error(message))
                     .await
             }
-            _ => Ok(()),
+            OnionTcpPayload::Open { .. } => Ok(()),
         }
     }
 
@@ -266,12 +287,13 @@ impl OnionTcpRuntime {
             target,
         } = request;
         let Some(policy) = &self.exit_policy else {
-            return send_backward(
+            return send_tcp_backward(
                 &scope,
+                &self.session_sk,
                 circuit_id,
                 return_peer,
                 client,
-                OnionCircuitPayload::TcpError {
+                OnionTcpPayload::Error {
                     message: "native onion TCP exit is not enabled locally".to_string(),
                 },
             )
@@ -280,12 +302,13 @@ impl OnionTcpRuntime {
         let target = OnionProxyTarget::parse_authority(&target)?;
         let authority = target.authority();
         if !policy.allows_target(&authority) {
-            return send_backward(
+            return send_tcp_backward(
                 &scope,
+                &self.session_sk,
                 circuit_id,
                 return_peer,
                 client,
-                OnionCircuitPayload::TcpError {
+                OnionTcpPayload::Error {
                     message: Error::NoPermission.to_string(),
                 },
             )
@@ -293,12 +316,13 @@ impl OnionTcpRuntime {
         }
         let (tx, rx) = mpsc::channel(32);
         if let Err(error) = self.insert_exit_stream(key, expected_forward_peer, tx) {
-            return send_backward(
+            return send_tcp_backward(
                 &scope,
+                &self.session_sk,
                 circuit_id,
                 return_peer,
                 client,
-                OnionCircuitPayload::TcpError {
+                OnionTcpPayload::Error {
                     message: error.to_string(),
                 },
             )
@@ -308,12 +332,13 @@ impl OnionTcpRuntime {
             Ok(lease) => lease,
             Err(error) => {
                 self.remove_exit_stream(key);
-                return send_backward(
+                return send_tcp_backward(
                     &scope,
+                    &self.session_sk,
                     circuit_id,
                     return_peer,
                     client,
-                    OnionCircuitPayload::TcpError {
+                    OnionTcpPayload::Error {
                         message: error.to_string(),
                     },
                 )
@@ -325,12 +350,13 @@ impl OnionTcpRuntime {
             Err(error) => {
                 self.remove_exit_stream(key);
                 drop(lease);
-                return send_backward(
+                return send_tcp_backward(
                     &scope,
+                    &self.session_sk,
                     circuit_id,
                     return_peer,
                     client,
-                    OnionCircuitPayload::TcpError {
+                    OnionTcpPayload::Error {
                         message: error.to_string(),
                     },
                 )
@@ -342,12 +368,13 @@ impl OnionTcpRuntime {
             Err(error) => {
                 self.remove_exit_stream(key);
                 drop(lease);
-                return send_backward(
+                return send_tcp_backward(
                     &scope,
+                    &self.session_sk,
                     circuit_id,
                     return_peer,
                     client,
-                    OnionCircuitPayload::TcpError {
+                    OnionTcpPayload::Error {
                         message: format!("connect onion TCP target {authority:?}: {error}"),
                     },
                 )
@@ -371,6 +398,7 @@ impl OnionTcpRuntime {
     fn insert_client_stream(
         &self,
         expected_return_peer: Did,
+        expected_exit: OnionExitDescriptor,
         tx: mpsc::Sender<TcpInbound>,
     ) -> Result<TcpStreamKey> {
         let mut streams = self.client_streams.lock().map_err(|_| Error::Lock)?;
@@ -382,6 +410,7 @@ impl OnionTcpRuntime {
                 Entry::Vacant(entry) => {
                     entry.insert(ClientStream {
                         expected_return_peer,
+                        expected_exit,
                         tx,
                     });
                     return Ok(key);
@@ -457,6 +486,25 @@ impl OnionTcpRuntime {
         Ok(stream.tx.clone())
     }
 
+    fn verify_client_payload(
+        &self,
+        key: TcpStreamKey,
+        from: Did,
+        payload: OnionAuthenticatedPayload,
+    ) -> Result<OnionCircuitPayload> {
+        let streams = self.client_streams.lock().map_err(|_| Error::Lock)?;
+        let stream = streams
+            .get(&key)
+            .ok_or_else(|| Error::OnionRouteError("unknown onion TCP stream".to_string()))?;
+        if stream.expected_return_peer != from {
+            return Err(Error::OnionRouteError(format!(
+                "unexpected onion TCP return peer: expected {:?}, got {:?}",
+                stream.expected_return_peer, from
+            )));
+        }
+        payload.into_verified_payload(key.circuit_id, &stream.expected_exit)
+    }
+
     fn exit_inbound_sender(
         &self,
         key: TcpStreamKey,
@@ -493,57 +541,13 @@ impl OnionTcpRuntime {
         circuit_id: OnionCircuitId,
         return_peer: Did,
         bytes: u64,
-    ) -> Result<TcpExitLease> {
-        let circuit = ExitCircuitKey::new(circuit_id, return_peer);
-        let mut limiter = self.limiter.lock().map_err(|_| Error::Lock)?;
-        let active_streams = limiter
-            .active_streams_by_circuit
-            .get(&circuit)
-            .copied()
-            .unwrap_or_default();
-        if policy.max_streams_per_circuit > 0 && active_streams >= policy.max_streams_per_circuit {
-            return Err(Error::NoPermission);
-        }
-        if active_streams == 0
-            && policy.max_circuits > 0
-            && limiter.active_circuits >= policy.max_circuits
-        {
-            return Err(Error::NoPermission);
-        }
-        if active_streams == 0 {
-            limiter.active_circuits = limiter.active_circuits.saturating_add(1);
-        }
-        limiter
-            .active_streams_by_circuit
-            .insert(circuit.clone(), active_streams.saturating_add(1));
-        drop(limiter);
-        let lease = TcpExitLease {
-            limiter: self.limiter.clone(),
-            circuit,
-        };
-        if let Err(error) = self.record_exit_bytes(policy, bytes) {
-            drop(lease);
-            return Err(error);
-        }
-        Ok(lease)
+    ) -> Result<OnionExitLease> {
+        self.accounting
+            .admit(policy, circuit_id, return_peer, bytes)
     }
 
     fn record_exit_bytes(&self, policy: &OnionExitPolicy, bytes: u64) -> Result<()> {
-        if policy.max_bytes_per_minute == 0 || bytes == 0 {
-            return Ok(());
-        }
-        let mut limiter = self.limiter.lock().map_err(|_| Error::Lock)?;
-        let now_ms = get_epoch_ms();
-        if now_ms.saturating_sub(limiter.window_start_ms) >= EXIT_LIMIT_WINDOW_MS {
-            limiter.window_start_ms = now_ms;
-            limiter.bytes_this_window = 0;
-        }
-        let next = limiter.bytes_this_window.saturating_add(bytes);
-        if next > policy.max_bytes_per_minute {
-            return Err(Error::NoPermission);
-        }
-        limiter.bytes_this_window = next;
-        Ok(())
+        self.accounting.record_bytes(policy, bytes)
     }
 }
 
@@ -564,6 +568,7 @@ struct TcpExitOpen {
 
 struct ClientStream {
     expected_return_peer: Did,
+    expected_exit: OnionExitDescriptor,
     tx: mpsc::Sender<TcpInbound>,
 }
 
@@ -580,6 +585,11 @@ enum TcpInbound {
     Error(String),
 }
 
+/// TCP duplex close state for one onion stream.
+///
+/// Invariant: `remote_terminal_seen => !read_open && !write_open`.
+/// Preservation: local half-closes only clear one half and still announce a terminal frame when
+/// both halves close; observing a remote terminal clears both halves and suppresses echo.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct TcpDuplexState {
     read_open: bool,
@@ -627,49 +637,6 @@ impl TcpDuplexState {
     }
 }
 
-#[derive(Default)]
-struct TcpExitLimiter {
-    active_circuits: u32,
-    active_streams_by_circuit: HashMap<ExitCircuitKey, u32>,
-    window_start_ms: u128,
-    bytes_this_window: u64,
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct ExitCircuitKey {
-    circuit_id: OnionCircuitId,
-    return_peer: Did,
-}
-
-impl ExitCircuitKey {
-    const fn new(circuit_id: OnionCircuitId, return_peer: Did) -> Self {
-        Self {
-            circuit_id,
-            return_peer,
-        }
-    }
-}
-
-struct TcpExitLease {
-    limiter: Arc<Mutex<TcpExitLimiter>>,
-    circuit: ExitCircuitKey,
-}
-
-impl Drop for TcpExitLease {
-    fn drop(&mut self) {
-        if let Ok(mut limiter) = self.limiter.lock() {
-            if let Some(active_streams) = limiter.active_streams_by_circuit.get_mut(&self.circuit) {
-                if *active_streams > 1 {
-                    *active_streams -= 1;
-                } else {
-                    limiter.active_streams_by_circuit.remove(&self.circuit);
-                    limiter.active_circuits = limiter.active_circuits.saturating_sub(1);
-                }
-            }
-        }
-    }
-}
-
 fn spawn_client_stream(
     runtime: Arc<OnionTcpRuntime>,
     scope: Scope,
@@ -691,14 +658,14 @@ fn spawn_client_stream(
                 read_result = read.read(read_buf.as_mut_slice()), if state.can_read() => {
                     match read_result {
                         Ok(0) => {
-                            if send_client_payload(&scope, &route, client_return, key.circuit_id, OnionCircuitPayload::TcpShutdown).await.is_err() {
+                            if send_client_payload(&scope, &route, client_return, key.circuit_id, OnionTcpPayload::Shutdown).await.is_err() {
                                 break;
                             }
                             state.close_read();
                         }
                         Ok(n) => {
                             let bytes = Bytes::copy_from_slice(read_buf.get(..n).unwrap_or_default());
-                            if send_client_payload(&scope, &route, client_return, key.circuit_id, OnionCircuitPayload::TcpData { bytes }).await.is_err() {
+                            if send_client_payload(&scope, &route, client_return, key.circuit_id, OnionTcpPayload::Data { bytes }).await.is_err() {
                                 break;
                             }
                         }
@@ -740,7 +707,7 @@ fn spawn_client_stream(
                 &route,
                 client_return,
                 key.circuit_id,
-                OnionCircuitPayload::TcpClose,
+                OnionTcpPayload::Close,
             )
             .await;
         }
@@ -757,7 +724,7 @@ struct ExitStreamTask {
     client: OnionClientReturn,
     stream: TcpStream,
     rx: mpsc::Receiver<TcpInbound>,
-    lease: TcpExitLease,
+    lease: OnionExitLease,
 }
 
 fn spawn_exit_stream(task: ExitStreamTask) {
@@ -784,7 +751,7 @@ fn spawn_exit_stream(task: ExitStreamTask) {
                 read_result = read.read(read_buf.as_mut_slice()), if state.can_read() => {
                     match read_result {
                         Ok(0) => {
-                            if send_backward(&scope, circuit_id, return_peer, client, OnionCircuitPayload::TcpShutdown).await.is_err() {
+                            if send_tcp_backward(&scope, &runtime.session_sk, circuit_id, return_peer, client, OnionTcpPayload::Shutdown).await.is_err() {
                                 break;
                             }
                             state.close_read();
@@ -793,12 +760,13 @@ fn spawn_exit_stream(task: ExitStreamTask) {
                             let bytes = Bytes::copy_from_slice(read_buf.get(..n).unwrap_or_default());
                             if let Some(policy) = &runtime.exit_policy {
                                 if runtime.record_exit_bytes(policy, bytes.len() as u64).is_err() {
-                                    let _ = send_backward(
+                                    let _ = send_tcp_backward(
                                         &scope,
+                                        &runtime.session_sk,
                                         circuit_id,
                                         return_peer,
                                         client,
-                                        OnionCircuitPayload::TcpError {
+                                        OnionTcpPayload::Error {
                                             message: Error::NoPermission.to_string(),
                                         },
                                     )
@@ -806,17 +774,18 @@ fn spawn_exit_stream(task: ExitStreamTask) {
                                     break;
                                 }
                             }
-                            if send_backward(&scope, circuit_id, return_peer, client, OnionCircuitPayload::TcpData { bytes }).await.is_err() {
+                            if send_tcp_backward(&scope, &runtime.session_sk, circuit_id, return_peer, client, OnionTcpPayload::Data { bytes }).await.is_err() {
                                 break;
                             }
                         }
                         Err(error) => {
-                            let _ = send_backward(
+                            let _ = send_tcp_backward(
                                 &scope,
+                                &runtime.session_sk,
                                 circuit_id,
                                 return_peer,
                                 client,
-                                OnionCircuitPayload::TcpError {
+                                OnionTcpPayload::Error {
                                     message: format!("read onion TCP target: {error}"),
                                 },
                             )
@@ -833,12 +802,13 @@ fn spawn_exit_stream(task: ExitStreamTask) {
                             }
                             if let Some(policy) = &runtime.exit_policy {
                                 if runtime.record_exit_bytes(policy, bytes.len() as u64).is_err() {
-                                    let _ = send_backward(
+                                    let _ = send_tcp_backward(
                                         &scope,
+                                        &runtime.session_sk,
                                         circuit_id,
                                         return_peer,
                                         client,
-                                        OnionCircuitPayload::TcpError {
+                                        OnionTcpPayload::Error {
                                             message: Error::NoPermission.to_string(),
                                         },
                                     )
@@ -870,12 +840,13 @@ fn spawn_exit_stream(task: ExitStreamTask) {
             }
         }
         if state.should_announce_terminal() {
-            let _ = send_backward(
+            let _ = send_tcp_backward(
                 &scope,
+                &runtime.session_sk,
                 circuit_id,
                 return_peer,
                 client,
-                OnionCircuitPayload::TcpClose,
+                OnionTcpPayload::Close,
             )
             .await;
         }
@@ -889,10 +860,30 @@ async fn send_client_payload(
     route: &OnionRoute,
     client_return: OnionClientReturn,
     circuit_id: OnionCircuitId,
-    payload: OnionCircuitPayload,
+    payload: OnionTcpPayload,
 ) -> Result<()> {
+    let payload = encode_tcp_payload(payload)?;
     let (to, payload) = encode_initial_forward(client_return, route, circuit_id, payload)?;
     scope.send(to, payload).await
+}
+
+async fn send_tcp_backward(
+    scope: &Scope,
+    signer: &SessionSk,
+    circuit_id: OnionCircuitId,
+    return_peer: Did,
+    client: OnionClientReturn,
+    payload: OnionTcpPayload,
+) -> Result<()> {
+    send_backward(
+        scope,
+        signer,
+        circuit_id,
+        return_peer,
+        client,
+        encode_tcp_payload(payload)?,
+    )
+    .await
 }
 
 async fn resolve_target(authority: &str) -> Result<SocketAddr> {

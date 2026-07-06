@@ -4,6 +4,8 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+#[cfg(feature = "browser")]
+use std::sync::Mutex;
 
 use rings_core::dht::Did;
 use rings_core::dht::EntryStorage;
@@ -39,6 +41,8 @@ pub struct Provider {
     processor: Arc<Processor>,
     handler: InternalRpcHandler,
     extensions: crate::extension::ext::Extensions,
+    #[cfg(feature = "browser")]
+    onion_https_runtime: Arc<Mutex<Option<Arc<crate::onion_https::OnionHttpsRuntime>>>>,
 }
 
 /// Async signer, without Send required
@@ -67,6 +71,8 @@ impl Provider {
             processor,
             handler: InternalRpcHandler,
             extensions,
+            #[cfg(feature = "browser")]
+            onion_https_runtime: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -141,6 +147,8 @@ impl Provider {
             processor,
             handler: InternalRpcHandler,
             extensions,
+            #[cfg(feature = "browser")]
+            onion_https_runtime: Arc::new(Mutex::new(None)),
         })
     }
 

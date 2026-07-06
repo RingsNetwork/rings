@@ -3,11 +3,13 @@ use rings_core::dht::Did;
 use rings_core::ecc::elgamal::impls::secp256k1::encrypt_aead_with_rng;
 use rings_core::ecc::elgamal::impls::secp256k1::AeadCiphertext;
 use rings_core::ecc::PublicKey;
+use rings_core::message::MessageVerification;
 use rings_core::session::SessionSk;
 use serde::Serialize;
 
 use super::codec::encode_wire_message;
 use super::codec::OnionWireMessage;
+use super::OnionAuthenticatedPayload;
 use super::OnionBackwardFrame;
 use super::OnionCircuitId;
 use super::OnionCircuitPayload;
@@ -19,6 +21,7 @@ use super::ONION_AEAD_NAMESPACE;
 use crate::error::Error;
 use crate::error::Result;
 use crate::extension::ext::Scope;
+use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionRoute;
 use crate::onion::OnionRouteHop;
 
@@ -63,6 +66,7 @@ pub fn route_first_hop(route: &OnionRoute) -> Result<Did> {
 /// Send a response payload back to the immediate return peer.
 pub async fn send_backward(
     scope: &Scope,
+    signer: &SessionSk,
     circuit_id: OnionCircuitId,
     return_peer: Did,
     client: OnionClientReturn,
@@ -70,7 +74,7 @@ pub async fn send_backward(
 ) -> Result<()> {
     let frame = OnionBackwardFrame {
         circuit_id,
-        payload: encrypt_client_payload(circuit_id, payload, client.session_public_key)?,
+        payload: encrypt_client_payload(circuit_id, payload, client.session_public_key, signer)?,
     };
     let payload = encode_wire_message(OnionWireMessage::Backward(frame))?;
     scope.send(return_peer, payload).await
@@ -140,8 +144,18 @@ pub(super) fn encrypt_client_payload(
     circuit_id: OnionCircuitId,
     payload: OnionCircuitPayload,
     recipient: PublicKey<33>,
+    signer: &SessionSk,
 ) -> Result<AeadCiphertext> {
-    let plaintext = bincode::serialize(&payload).map_err(|_| Error::EncodeError)?;
+    let authentication = MessageVerification::new(
+        &backward_payload_authentication_data(circuit_id, signer.session_public_key(), &payload)?,
+        signer,
+    )
+    .map_err(Error::CoreError)?;
+    let authenticated = OnionAuthenticatedPayload {
+        authentication,
+        payload,
+    };
+    let plaintext = bincode::serialize(&authenticated).map_err(|_| Error::EncodeError)?;
     let aad = onion_aead_context(OnionAeadDirection::Backward, circuit_id)?;
     let mut rng = rand::thread_rng();
     encrypt_aead_with_rng(&plaintext, &aad, recipient, &mut rng).map_err(Error::CoreError)
@@ -151,7 +165,7 @@ pub(super) fn decrypt_client_payload(
     session_sk: &SessionSk,
     circuit_id: OnionCircuitId,
     sealed: &AeadCiphertext,
-) -> Result<OnionCircuitPayload> {
+) -> Result<OnionAuthenticatedPayload> {
     let aad = onion_aead_context(OnionAeadDirection::Backward, circuit_id)?;
     let plaintext = session_sk
         .decrypt_elgamal_aead(sealed, &aad)
@@ -159,11 +173,64 @@ pub(super) fn decrypt_client_payload(
     bincode::deserialize(&plaintext).map_err(|_| Error::DecodeError)
 }
 
+impl OnionAuthenticatedPayload {
+    /// Verify that a client-decrypted backward payload was signed by the selected exit session.
+    ///
+    /// Invariant: accepted backward payloads satisfy all three identity equalities:
+    /// signer account DID equals descriptor DID, signer account public key equals descriptor public
+    /// key, and signer session DID equals the descriptor session encryption key DID.
+    pub fn into_verified_payload(
+        self,
+        circuit_id: OnionCircuitId,
+        expected_exit: &OnionExitDescriptor,
+    ) -> Result<OnionCircuitPayload> {
+        let signer = &self.authentication.session;
+        if signer.account_did() != expected_exit.did {
+            return Err(Error::OnionRouteError(
+                "onion backward payload signer is not the selected exit".to_string(),
+            ));
+        }
+        let public_key = signer
+            .account_verification_pubkey()
+            .map_err(Error::CoreError)?;
+        if public_key != expected_exit.public_key {
+            return Err(Error::OnionRouteError(
+                "onion backward payload account key is not the selected exit".to_string(),
+            ));
+        }
+        if signer.session_did() != Did::from(expected_exit.session_public_key.address()) {
+            return Err(Error::OnionRouteError(
+                "onion backward payload session key is not the selected exit".to_string(),
+            ));
+        }
+        let data = backward_payload_authentication_data(
+            circuit_id,
+            expected_exit.session_public_key,
+            &self.payload,
+        )?;
+        if !self.authentication.verify(&data) {
+            return Err(Error::OnionRouteError(
+                "invalid onion backward payload signature".to_string(),
+            ));
+        }
+        Ok(self.payload)
+    }
+}
+
 #[derive(Serialize)]
 struct OnionAeadContext {
     namespace: &'static str,
     direction: OnionAeadDirection,
     circuit_id: OnionCircuitId,
+}
+
+#[derive(Serialize)]
+struct OnionBackwardAuthenticationData<'a> {
+    namespace: &'static str,
+    direction: OnionAeadDirection,
+    circuit_id: OnionCircuitId,
+    exit_session_public_key: PublicKey<33>,
+    payload: &'a OnionCircuitPayload,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -180,6 +247,21 @@ fn onion_aead_context(
         namespace: ONION_AEAD_NAMESPACE,
         direction,
         circuit_id,
+    })
+    .map_err(|_| Error::EncodeError)
+}
+
+fn backward_payload_authentication_data(
+    circuit_id: OnionCircuitId,
+    exit_session_public_key: PublicKey<33>,
+    payload: &OnionCircuitPayload,
+) -> Result<Vec<u8>> {
+    bincode::serialize(&OnionBackwardAuthenticationData {
+        namespace: ONION_AEAD_NAMESPACE,
+        direction: OnionAeadDirection::Backward,
+        circuit_id,
+        exit_session_public_key,
+        payload,
     })
     .map_err(|_| Error::EncodeError)
 }

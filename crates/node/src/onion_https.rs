@@ -12,11 +12,10 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use bytes::Bytes;
 use futures::channel::oneshot;
 use js_sys::Function;
 use js_sys::Object;
@@ -24,7 +23,7 @@ use js_sys::Promise;
 use js_sys::Reflect;
 use js_sys::Uint8Array;
 use rings_core::dht::Did;
-use rings_core::utils::get_epoch_ms;
+use rings_core::session::SessionSk;
 use serde::Deserialize;
 use serde::Serialize;
 use wasm_bindgen::closure::Closure;
@@ -36,29 +35,64 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::extension::ext::Scope;
 use crate::onion::circuit::send_backward;
+use crate::onion::circuit::OnionAuthenticatedPayload;
 use crate::onion::circuit::OnionCircuitHandler;
 use crate::onion::circuit::OnionCircuitId;
 use crate::onion::circuit::OnionCircuitPayload;
 use crate::onion::circuit::OnionClientReturn;
-use crate::onion::circuit::OnionHttpsRequest;
-use crate::onion::circuit::OnionHttpsResponse;
+use crate::onion::exit_accounting::OnionExitAccounting;
+use crate::onion::exit_accounting::OnionExitLease;
+use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitPolicy;
 use crate::onion_proxy::OnionProxyTarget;
+use crate::onion_proxy::ONION_PROXY_HTTPS_SERVICE;
 
-const EXIT_LIMIT_WINDOW_MS: u128 = 60_000;
-
-lazy_static::lazy_static! {
-    static ref RUNTIMES: Mutex<HashMap<String, Arc<OnionHttpsRuntime>>> =
-        Mutex::new(HashMap::new());
+/// One browser HTTPS request executed by an HTTPS exit.
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+pub struct OnionHttpsRequest {
+    /// Target authority (`host:port`).
+    pub target: String,
+    /// HTTP method.
+    pub method: String,
+    /// Path and query.
+    pub path: String,
+    /// Request headers.
+    pub headers: Vec<(String, String)>,
+    /// Request body bytes.
+    pub body: Vec<u8>,
 }
 
-/// Return the shared HTTPS proxy runtime for one local provider instance.
-pub(crate) fn runtime_for_provider(provider_key: String) -> Result<Arc<OnionHttpsRuntime>> {
-    let mut runtimes = RUNTIMES.lock().map_err(|_| Error::Lock)?;
-    Ok(runtimes
-        .entry(provider_key)
-        .or_insert_with(|| Arc::new(OnionHttpsRuntime::new()))
-        .clone())
+/// One browser HTTPS response returned by an HTTPS exit.
+#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+pub struct OnionHttpsResponse {
+    /// HTTP status code.
+    pub status: u16,
+    /// Response headers.
+    pub headers: Vec<(String, String)>,
+    /// Response body bytes.
+    pub body: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) enum OnionHttpsPayload {
+    Request(OnionHttpsRequest),
+    Response(OnionHttpsResponse),
+    Error(String),
+}
+
+pub(crate) fn encode_https_payload(payload: OnionHttpsPayload) -> Result<OnionCircuitPayload> {
+    bincode::serialize(&payload)
+        .map(|body| OnionCircuitPayload::new(ONION_PROXY_HTTPS_SERVICE, Bytes::from(body)))
+        .map_err(|_| Error::EncodeError)
+}
+
+fn decode_https_payload(payload: OnionCircuitPayload) -> Result<Option<OnionHttpsPayload>> {
+    if !payload.is_service(ONION_PROXY_HTTPS_SERVICE) {
+        return Ok(None);
+    }
+    bincode::deserialize(payload.body.as_ref())
+        .map(Some)
+        .map_err(|_| Error::DecodeError)
 }
 
 /// JS-facing request fields for one HTTPS proxy request.
@@ -103,75 +137,21 @@ pub struct OnionHttpsClientResponse {
 /// Shared runtime for the local browser HTTPS proxy protocol.
 #[derive(Default)]
 pub(crate) struct OnionHttpsRuntime {
-    circuit_protocol_installed: AtomicBool,
     pending: Mutex<HashMap<OnionCircuitId, PendingRequest>>,
     exit_policy: Mutex<Option<OnionExitPolicy>>,
-    limiter: Arc<Mutex<ExitLimiter>>,
+    accounting: OnionExitAccounting,
 }
 
 struct PendingRequest {
     expected_return_peer: Did,
+    expected_exit: OnionExitDescriptor,
     sender: oneshot::Sender<std::result::Result<OnionHttpsClientResponse, String>>,
-}
-
-#[derive(Default)]
-struct ExitLimiter {
-    active_circuits: u32,
-    active_streams_by_circuit: HashMap<ExitCircuitKey, u32>,
-    window_start_ms: u128,
-    bytes_this_window: u64,
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct ExitCircuitKey {
-    circuit_id: OnionCircuitId,
-    return_peer: Did,
-}
-
-impl ExitCircuitKey {
-    const fn new(circuit_id: OnionCircuitId, return_peer: Did) -> Self {
-        Self {
-            circuit_id,
-            return_peer,
-        }
-    }
-}
-
-struct ExitCircuitLease {
-    limiter: Arc<Mutex<ExitLimiter>>,
-    circuit: ExitCircuitKey,
-}
-
-impl Drop for ExitCircuitLease {
-    fn drop(&mut self) {
-        if let Ok(mut limiter) = self.limiter.lock() {
-            if let Some(active_streams) = limiter.active_streams_by_circuit.get_mut(&self.circuit) {
-                if *active_streams > 1 {
-                    *active_streams -= 1;
-                } else {
-                    limiter.active_streams_by_circuit.remove(&self.circuit);
-                    limiter.active_circuits = limiter.active_circuits.saturating_sub(1);
-                }
-            }
-        }
-    }
 }
 
 impl OnionHttpsRuntime {
     /// Create an empty runtime.
     pub(crate) fn new() -> Self {
         Self::default()
-    }
-
-    /// Return whether this runtime installed the shared circuit protocol.
-    pub(crate) fn circuit_protocol_installed(&self) -> bool {
-        self.circuit_protocol_installed.load(Ordering::Acquire)
-    }
-
-    /// Mark the shared circuit protocol as installed by this runtime.
-    pub(crate) fn mark_circuit_protocol_installed(&self) {
-        self.circuit_protocol_installed
-            .store(true, Ordering::Release);
     }
 
     /// Set the local exit policy. `None` means client-only mode.
@@ -185,6 +165,7 @@ impl OnionHttpsRuntime {
     pub(crate) fn begin_request(
         &self,
         expected_return_peer: Did,
+        expected_exit: OnionExitDescriptor,
     ) -> Result<(
         OnionCircuitId,
         oneshot::Receiver<std::result::Result<OnionHttpsClientResponse, String>>,
@@ -198,6 +179,7 @@ impl OnionHttpsRuntime {
             let (sender, receiver) = oneshot::channel();
             pending.insert(id, PendingRequest {
                 expected_return_peer,
+                expected_exit,
                 sender,
             });
             return Ok((id, receiver));
@@ -214,39 +196,53 @@ impl OnionHttpsRuntime {
         }
     }
 
-    /// Complete a pending HTTPS request with a response.
-    pub(crate) fn complete_response(
+    /// Complete a pending HTTPS request with a signed response or error payload.
+    pub(crate) fn complete_payload(
         &self,
         from: Did,
         id: OnionCircuitId,
-        response: OnionHttpsResponse,
+        payload: OnionAuthenticatedPayload,
     ) {
-        let Some(pending) = self.take_pending(from, id) else {
+        let Some((pending, payload)) = self.take_pending_payload(from, id, payload) else {
             return;
         };
-        let _ = pending.sender.send(Ok(OnionHttpsClientResponse {
-            status: response.status,
-            headers: response.headers,
-            body: response.body,
-        }));
+        match decode_https_payload(payload) {
+            Ok(Some(OnionHttpsPayload::Response(response))) => {
+                let _ = pending.sender.send(Ok(OnionHttpsClientResponse {
+                    status: response.status,
+                    headers: response.headers,
+                    body: response.body,
+                }));
+            }
+            Ok(Some(OnionHttpsPayload::Error(message))) => {
+                let _ = pending.sender.send(Err(message));
+            }
+            Ok(Some(OnionHttpsPayload::Request(_)) | None) => {}
+            Err(error) => {
+                let _ = pending.sender.send(Err(error.to_string()));
+            }
+        }
     }
 
-    /// Complete a pending HTTPS request with an error.
-    pub(crate) fn complete_error(&self, from: Did, id: OnionCircuitId, message: String) {
-        let Some(pending) = self.take_pending(from, id) else {
-            return;
-        };
-        let _ = pending.sender.send(Err(message));
-    }
-
-    fn take_pending(&self, from: Did, id: OnionCircuitId) -> Option<PendingRequest> {
+    fn take_pending_payload(
+        &self,
+        from: Did,
+        id: OnionCircuitId,
+        payload: OnionAuthenticatedPayload,
+    ) -> Option<(PendingRequest, OnionCircuitPayload)> {
         let mut pending = self.pending.lock().ok()?;
         let request = pending.remove(&id)?;
-        if request.expected_return_peer == from {
-            Some(request)
-        } else {
+        if request.expected_return_peer != from {
             pending.insert(id, request);
-            None
+            return None;
+        }
+        match payload.into_verified_payload(id, &request.expected_exit) {
+            Ok(payload) => Some((request, payload)),
+            Err(error) => {
+                tracing::warn!("drop onion HTTPS response with invalid exit proof: {error}");
+                pending.insert(id, request);
+                None
+            }
         }
     }
 
@@ -263,58 +259,13 @@ impl OnionHttpsRuntime {
         circuit_id: OnionCircuitId,
         return_peer: Did,
         bytes: u64,
-    ) -> Result<ExitCircuitLease> {
-        let circuit = ExitCircuitKey::new(circuit_id, return_peer);
-        let mut limiter = self.limiter.lock().map_err(|_| Error::Lock)?;
-        let active_streams = limiter
-            .active_streams_by_circuit
-            .get(&circuit)
-            .copied()
-            .unwrap_or_default();
-        if policy.max_streams_per_circuit > 0 && active_streams >= policy.max_streams_per_circuit {
-            return Err(Error::NoPermission);
-        }
-        if active_streams == 0
-            && policy.max_circuits > 0
-            && limiter.active_circuits >= policy.max_circuits
-        {
-            return Err(Error::NoPermission);
-        }
-        if active_streams == 0 {
-            limiter.active_circuits = limiter.active_circuits.saturating_add(1);
-        }
-        limiter
-            .active_streams_by_circuit
-            .insert(circuit.clone(), active_streams.saturating_add(1));
-        drop(limiter);
-
-        let lease = ExitCircuitLease {
-            limiter: self.limiter.clone(),
-            circuit,
-        };
-        if let Err(error) = self.record_exit_bytes(policy, bytes) {
-            drop(lease);
-            return Err(error);
-        }
-        Ok(lease)
+    ) -> Result<OnionExitLease> {
+        self.accounting
+            .admit(policy, circuit_id, return_peer, bytes)
     }
 
     fn record_exit_bytes(&self, policy: &OnionExitPolicy, bytes: u64) -> Result<()> {
-        if policy.max_bytes_per_minute == 0 || bytes == 0 {
-            return Ok(());
-        }
-        let mut limiter = self.limiter.lock().map_err(|_| Error::Lock)?;
-        let now_ms = get_epoch_ms();
-        if now_ms.saturating_sub(limiter.window_start_ms) >= EXIT_LIMIT_WINDOW_MS {
-            limiter.window_start_ms = now_ms;
-            limiter.bytes_this_window = 0;
-        }
-        let next = limiter.bytes_this_window.saturating_add(bytes);
-        if next > policy.max_bytes_per_minute {
-            return Err(Error::NoPermission);
-        }
-        limiter.bytes_this_window = next;
-        Ok(())
+        self.accounting.record_bytes(policy, bytes)
     }
 
     #[cfg(test)]
@@ -455,12 +406,13 @@ fn url_path(suffix: &str) -> String {
 /// Browser handler for HTTPS onion circuits.
 pub(crate) struct BrowserOnionCircuitHandler {
     https: Arc<OnionHttpsRuntime>,
+    session_sk: SessionSk,
 }
 
 impl BrowserOnionCircuitHandler {
     /// Create a browser circuit handler backed by the HTTPS runtime.
-    pub(crate) fn new(https: Arc<OnionHttpsRuntime>) -> Self {
-        Self { https }
+    pub(crate) fn new(https: Arc<OnionHttpsRuntime>, session_sk: SessionSk) -> Self {
+        Self { https, session_sk }
     }
 }
 
@@ -475,25 +427,27 @@ impl OnionCircuitHandler for BrowserOnionCircuitHandler {
         client: OnionClientReturn,
         payload: OnionCircuitPayload,
     ) -> Result<()> {
+        let Some(payload) = decode_https_payload(payload)? else {
+            return Ok(());
+        };
         let response = match payload {
-            OnionCircuitPayload::HttpsRequest(request) => {
+            OnionHttpsPayload::Request(request) => {
                 match execute_exit_fetch(&self.https, &request, circuit_id, return_peer).await {
-                    Ok(response) => OnionCircuitPayload::HttpsResponse(response),
-                    Err(error) => OnionCircuitPayload::HttpsError(error.to_string()),
+                    Ok(response) => OnionHttpsPayload::Response(response),
+                    Err(error) => OnionHttpsPayload::Error(error.to_string()),
                 }
             }
-            OnionCircuitPayload::TcpOpen { .. }
-            | OnionCircuitPayload::TcpData { .. }
-            | OnionCircuitPayload::TcpShutdown
-            | OnionCircuitPayload::TcpClose
-            | OnionCircuitPayload::TcpError { .. } => OnionCircuitPayload::TcpError {
-                message: "browser onion exits do not support TCP".to_string(),
-            },
-            OnionCircuitPayload::HttpsResponse(_) | OnionCircuitPayload::HttpsError(_) => {
-                return Ok(());
-            }
+            OnionHttpsPayload::Response(_) | OnionHttpsPayload::Error(_) => return Ok(()),
         };
-        send_backward(scope, circuit_id, return_peer, client, response).await
+        send_backward(
+            scope,
+            &self.session_sk,
+            circuit_id,
+            return_peer,
+            client,
+            encode_https_payload(response)?,
+        )
+        .await
     }
 
     async fn handle_client(
@@ -501,17 +455,9 @@ impl OnionCircuitHandler for BrowserOnionCircuitHandler {
         _scope: &Scope,
         from: Did,
         circuit_id: OnionCircuitId,
-        payload: OnionCircuitPayload,
+        payload: OnionAuthenticatedPayload,
     ) -> Result<()> {
-        match payload {
-            OnionCircuitPayload::HttpsResponse(response) => {
-                self.https.complete_response(from, circuit_id, response);
-            }
-            OnionCircuitPayload::HttpsError(message) => {
-                self.https.complete_error(from, circuit_id, message);
-            }
-            _ => {}
-        }
+        self.https.complete_payload(from, circuit_id, payload);
         Ok(())
     }
 }
@@ -755,11 +701,51 @@ fn js_error(error: JsValue) -> Error {
 #[cfg(test)]
 mod tests {
     use rings_core::ecc::SecretKey;
+    use rings_core::message::MessageVerification;
+    use rings_core::session::SessionSk;
 
     use super::*;
+    use crate::onion::OnionExitDescriptorBody;
+    use crate::onion::OnionExitService;
+    use crate::online::OnlineNodeType;
 
     fn did() -> Did {
         SecretKey::random().address().into()
+    }
+
+    fn session() -> SessionSk {
+        SessionSk::new_with_seckey(&SecretKey::random()).expect("session key")
+    }
+
+    fn exit_descriptor(session: &SessionSk) -> OnionExitDescriptor {
+        OnionExitDescriptor::new_signed(
+            OnionExitDescriptorBody {
+                did: session.account_did(),
+                public_key: session
+                    .session()
+                    .account_verification_pubkey()
+                    .expect("verification key"),
+                session_public_key: session.session_public_key(),
+                node_type: OnlineNodeType::Browser,
+                network_id: 1,
+                services: vec![OnionExitService::https()],
+                policy: OnionExitPolicy::default(),
+                started_at_ms: 0,
+                heartbeat_at_ms: 0,
+                expires_at_ms: 1,
+                version: "test".to_string(),
+            },
+            session,
+        )
+        .expect("signed exit")
+    }
+
+    fn dummy_authenticated_payload(session: &SessionSk) -> OnionAuthenticatedPayload {
+        OnionAuthenticatedPayload {
+            authentication: MessageVerification::new(&[], session).expect("message verification"),
+            payload: encode_https_payload(OnionHttpsPayload::Error("wrong peer".to_string()))
+                .expect("encode payload"),
+        }
     }
 
     #[test]
@@ -830,7 +816,10 @@ mod tests {
     #[test]
     fn cancel_request_removes_pending_request() {
         let runtime = OnionHttpsRuntime::new();
-        let (id, _receiver) = runtime.begin_request(did()).unwrap();
+        let exit = session();
+        let (id, _receiver) = runtime
+            .begin_request(did(), exit_descriptor(&exit))
+            .unwrap();
 
         assert_eq!(runtime.pending_len(), 1);
         runtime.cancel_request(id);
@@ -842,9 +831,29 @@ mod tests {
         let runtime = OnionHttpsRuntime::new();
         let expected = did();
         let other = did();
-        let (id, receiver) = runtime.begin_request(expected).unwrap();
+        let exit = session();
+        let (id, receiver) = runtime
+            .begin_request(expected, exit_descriptor(&exit))
+            .unwrap();
 
-        runtime.complete_error(other, id, "wrong peer".to_string());
+        runtime.complete_payload(other, id, dummy_authenticated_payload(&exit));
+        assert_eq!(runtime.pending_len(), 1);
+        drop(receiver);
+        runtime.cancel_request(id);
+    }
+
+    #[test]
+    fn pending_request_keeps_payload_from_wrong_exit_session() {
+        let runtime = OnionHttpsRuntime::new();
+        let expected = did();
+        let selected_exit = session();
+        let wrong_exit = session();
+        let (id, receiver) = runtime
+            .begin_request(expected, exit_descriptor(&selected_exit))
+            .unwrap();
+
+        runtime.complete_payload(expected, id, dummy_authenticated_payload(&wrong_exit));
+
         assert_eq!(runtime.pending_len(), 1);
         drop(receiver);
         runtime.cancel_request(id);
@@ -918,11 +927,15 @@ mod tests {
     }
 
     #[test]
-    fn circuit_protocol_install_marker_starts_false_then_marks_true() {
+    fn runtime_exit_policy_starts_empty_then_sets() {
         let runtime = OnionHttpsRuntime::new();
+        let policy = OnionExitPolicy {
+            allowed_targets: vec!["example.com:443".to_string()],
+            ..OnionExitPolicy::default()
+        };
 
-        assert!(!runtime.circuit_protocol_installed());
-        runtime.mark_circuit_protocol_installed();
-        assert!(runtime.circuit_protocol_installed());
+        assert_eq!(runtime.exit_policy(), None);
+        runtime.set_exit_policy(Some(policy.clone()));
+        assert_eq!(runtime.exit_policy(), Some(policy));
     }
 }

@@ -1,0 +1,133 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::Mutex;
+
+use rings_core::dht::Did;
+use rings_core::utils::get_epoch_ms;
+
+use super::circuit::OnionCircuitId;
+use super::OnionExitPolicy;
+use crate::error::Error;
+use crate::error::Result;
+
+const EXIT_LIMIT_WINDOW_MS: u128 = 60_000;
+
+/// Shared accounting gate for onion exits.
+///
+/// Invariant: `active_circuits == count({ circuit | active_streams_by_circuit[circuit] > 0 })`.
+/// Invariant: `bytes_this_window <= policy.max_bytes_per_minute` whenever that policy field is
+/// non-zero.
+/// Preservation: `admit` increments stream/circuit counters only after policy checks; dropping the
+/// returned lease decrements the same circuit key; `record_bytes` resets stale windows before adding.
+#[derive(Clone, Default)]
+pub(crate) struct OnionExitAccounting {
+    limiter: Arc<Mutex<ExitLimiter>>,
+}
+
+#[derive(Default)]
+struct ExitLimiter {
+    active_circuits: u32,
+    active_streams_by_circuit: HashMap<ExitCircuitKey, u32>,
+    window_start_ms: u128,
+    bytes_this_window: u64,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ExitCircuitKey {
+    circuit_id: OnionCircuitId,
+    return_peer: Did,
+}
+
+impl ExitCircuitKey {
+    const fn new(circuit_id: OnionCircuitId, return_peer: Did) -> Self {
+        Self {
+            circuit_id,
+            return_peer,
+        }
+    }
+}
+
+/// Lease for one admitted exit stream/request.
+pub(crate) struct OnionExitLease {
+    limiter: Arc<Mutex<ExitLimiter>>,
+    circuit: ExitCircuitKey,
+}
+
+impl Drop for OnionExitLease {
+    fn drop(&mut self) {
+        if let Ok(mut limiter) = self.limiter.lock() {
+            if let Some(active_streams) = limiter.active_streams_by_circuit.get_mut(&self.circuit) {
+                if *active_streams > 1 {
+                    *active_streams -= 1;
+                } else {
+                    limiter.active_streams_by_circuit.remove(&self.circuit);
+                    limiter.active_circuits = limiter.active_circuits.saturating_sub(1);
+                }
+            }
+        }
+    }
+}
+
+impl OnionExitAccounting {
+    /// Admit one exit stream or request under `policy`.
+    pub(crate) fn admit(
+        &self,
+        policy: &OnionExitPolicy,
+        circuit_id: OnionCircuitId,
+        return_peer: Did,
+        bytes: u64,
+    ) -> Result<OnionExitLease> {
+        let circuit = ExitCircuitKey::new(circuit_id, return_peer);
+        let mut limiter = self.limiter.lock().map_err(|_| Error::Lock)?;
+        let active_streams = limiter
+            .active_streams_by_circuit
+            .get(&circuit)
+            .copied()
+            .unwrap_or_default();
+        if policy.max_streams_per_circuit > 0 && active_streams >= policy.max_streams_per_circuit {
+            return Err(Error::NoPermission);
+        }
+        if active_streams == 0
+            && policy.max_circuits > 0
+            && limiter.active_circuits >= policy.max_circuits
+        {
+            return Err(Error::NoPermission);
+        }
+        if active_streams == 0 {
+            limiter.active_circuits = limiter.active_circuits.saturating_add(1);
+        }
+        limiter
+            .active_streams_by_circuit
+            .insert(circuit.clone(), active_streams.saturating_add(1));
+        drop(limiter);
+
+        let lease = OnionExitLease {
+            limiter: self.limiter.clone(),
+            circuit,
+        };
+        if let Err(error) = self.record_bytes(policy, bytes) {
+            drop(lease);
+            return Err(error);
+        }
+        Ok(lease)
+    }
+
+    /// Record exit payload bytes under the per-minute policy window.
+    pub(crate) fn record_bytes(&self, policy: &OnionExitPolicy, bytes: u64) -> Result<()> {
+        if policy.max_bytes_per_minute == 0 || bytes == 0 {
+            return Ok(());
+        }
+        let mut limiter = self.limiter.lock().map_err(|_| Error::Lock)?;
+        let now_ms = get_epoch_ms();
+        if now_ms.saturating_sub(limiter.window_start_ms) >= EXIT_LIMIT_WINDOW_MS {
+            limiter.window_start_ms = now_ms;
+            limiter.bytes_this_window = 0;
+        }
+        let next = limiter.bytes_this_window.saturating_add(bytes);
+        if next > policy.max_bytes_per_minute {
+            return Err(Error::NoPermission);
+        }
+        limiter.bytes_this_window = next;
+        Ok(())
+    }
+}

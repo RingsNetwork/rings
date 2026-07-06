@@ -39,6 +39,7 @@ use crate::registration::RegistrationContext;
 use crate::registration::RegistrationTask;
 
 pub mod circuit;
+pub(crate) mod exit_accounting;
 pub mod route;
 pub mod target;
 #[cfg(feature = "node")]

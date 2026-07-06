@@ -30,16 +30,16 @@ use wasm_bindgen_futures::JsFuture;
 use crate::onion::circuit::encode_initial_forward;
 use crate::onion::circuit::route_first_hop;
 use crate::onion::circuit::OnionCircuitCapabilities;
-use crate::onion::circuit::OnionCircuitPayload;
 use crate::onion::circuit::OnionCircuitProtocol;
 use crate::onion::circuit::OnionCircuitShell;
 use crate::onion::circuit::OnionClientReturn;
 use crate::onion::circuit::ONION_CIRCUIT_NAMESPACE;
 use crate::onion::OnionExitPolicy;
 use crate::onion_https::client_request_from_url as onion_https_client_request_from_url;
-use crate::onion_https::runtime_for_provider;
+use crate::onion_https::encode_https_payload;
 use crate::onion_https::BrowserOnionCircuitHandler;
 use crate::onion_https::OnionHttpsClientRequest;
+use crate::onion_https::OnionHttpsPayload;
 use crate::onion_https::OnionHttpsRuntime;
 use crate::onion_proxy::OnionProxyConfig;
 use crate::processor::Processor;
@@ -140,12 +140,21 @@ impl BrowserOnionProxy {
                 .await
                 .map_err(JsError::from)?;
             let first_hop = route_first_hop(&proxy_route.route).map_err(JsError::from)?;
-            let (id, receiver) = runtime.begin_request(first_hop).map_err(JsError::from)?;
+            let (id, receiver) = runtime
+                .begin_request(first_hop, proxy_route.route.exit.clone())
+                .map_err(JsError::from)?;
+            let request_payload = match encode_https_payload(OnionHttpsPayload::Request(request)) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    runtime.cancel_request(id);
+                    return Err(JsValue::from(JsError::from(error)));
+                }
+            };
             let (to, payload) = match encode_initial_forward(
                 OnionClientReturn::new(p.session_sk().session_public_key()),
                 &proxy_route.route,
                 id,
-                OnionCircuitPayload::HttpsRequest(request),
+                request_payload,
             ) {
                 Ok(encoded) => encoded,
                 Err(error) => {
@@ -619,31 +628,58 @@ impl Provider {
         &self,
         exit_policy: Option<OnionExitPolicy>,
     ) -> crate::error::Result<Arc<OnionHttpsRuntime>> {
-        let runtime = runtime_for_provider(format!("{:p}", Arc::as_ptr(&self.processor)))?;
         let allow_exit = exit_policy.is_some();
-        if exit_policy.is_some() {
-            runtime.set_exit_policy(exit_policy);
-        }
-        if !runtime.circuit_protocol_installed() {
-            if self.extensions().contains(ONION_CIRCUIT_NAMESPACE) {
-                return Err(crate::error::Error::ExtensionError(format!(
-                    "namespace {ONION_CIRCUIT_NAMESPACE:?} is already registered"
-                )));
+        let (runtime, registered) = {
+            let mut slot = self
+                .onion_https_runtime
+                .lock()
+                .map_err(|_| crate::error::Error::Lock)?;
+            if let Some(runtime) = slot.as_ref() {
+                (runtime.clone(), true)
+            } else {
+                let runtime = Arc::new(OnionHttpsRuntime::new());
+                if self.extensions().contains(ONION_CIRCUIT_NAMESPACE) {
+                    return Err(crate::error::Error::ExtensionError(format!(
+                        "namespace {ONION_CIRCUIT_NAMESPACE:?} is already registered"
+                    )));
+                }
+                let capabilities = OnionCircuitCapabilities::from_registration(
+                    self.processor.advertise_onion_relay(),
+                    allow_exit,
+                );
+                self.register_protocol(
+                    OnionCircuitProtocol::new(capabilities),
+                    self.onion_https_shell(runtime.clone()),
+                )?;
+                *slot = Some(runtime.clone());
+                (runtime, false)
             }
-            let capabilities = OnionCircuitCapabilities::from_registration(
-                self.processor.advertise_onion_relay(),
-                allow_exit,
-            );
-            self.register_protocol(
-                OnionCircuitProtocol::new(capabilities),
-                OnionCircuitShell::new(
-                    self.processor.session_sk().clone(),
-                    BrowserOnionCircuitHandler::new(runtime.clone()),
-                ),
-            )?;
-            runtime.mark_circuit_protocol_installed();
+        };
+
+        if let Some(policy) = exit_policy {
+            runtime.set_exit_policy(Some(policy));
+            if registered {
+                let capabilities = OnionCircuitCapabilities::from_registration(
+                    self.processor.advertise_onion_relay(),
+                    true,
+                );
+                self.extensions().replace(
+                    OnionCircuitProtocol::new(capabilities),
+                    self.onion_https_shell(runtime.clone()),
+                )?;
+            }
         }
         Ok(runtime)
+    }
+
+    fn onion_https_shell(
+        &self,
+        runtime: Arc<OnionHttpsRuntime>,
+    ) -> OnionCircuitShell<BrowserOnionCircuitHandler> {
+        OnionCircuitShell::new(
+            self.processor.session_sk().clone(),
+            BrowserOnionCircuitHandler::new(runtime, self.processor.session_sk().clone()),
+        )
     }
 }
 

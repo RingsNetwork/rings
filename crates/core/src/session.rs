@@ -310,6 +310,11 @@ impl Session {
             .to_vec()
     }
 
+    /// Return the DID of the session public key.
+    pub fn session_did(&self) -> Did {
+        self.session_id
+    }
+
     /// Check session is expired or not.
     pub fn is_expired(&self) -> bool {
         let now = utils::get_epoch_ms();

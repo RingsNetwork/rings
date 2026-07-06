@@ -99,6 +99,6 @@ impl Protocol for OnionCircuitProtocol {
         ctx: Ctx<'_, Self::State>,
         event: Self::Event,
     ) -> Transition<Self::State, Self::Effect> {
-        self.reducer.apply(ctx.did, ctx.state, event.input)
+        self.reducer.apply(ctx.state, event.input)
     }
 }
