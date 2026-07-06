@@ -22,11 +22,14 @@
 \newtheorem{constraint}{Constraint}
 \newtheorem{assumption}{Assumption}
 \newtheorem{proposition}{Proposition}
+\newtheorem{theorem}{Theorem}
 \newtheorem{invariant}{Invariant}
 \newtheorem{obligation}{Obligation}
 
 \newcommand{\RingsObj}{\mathsf{Rings}}
 \newcommand{\SetOverR}{\mathbf{Set}/R}
+\newcommand{\NS}{\mathsf{NS}}
+\newcommand{\NonClaim}{\mathsf{NonClaim}_{Rings}}
 
 \usetikzlibrary{shapes,arrows,positioning,patterns,through}
 
@@ -50,8 +53,8 @@
 }
 
 \author{Ryan~J.~Kung%
-\thanks{Ryan J. Kung can be reached at ryankung@ieee.org. Manuscript created February 8, 2023; last updated July 5, 2026.}}
-\title{\huge Rings: An Algebraic Structured Peer-to-Peer Network\\
+\thanks{Ryan J. Kung can be reached at ryankung@ieee.org. Manuscript created February 8, 2023; last updated July 7, 2026.}}
+\title{Rings: An Algebraic Structured Peer-to-Peer Network\\
 for Decentralized Identity and Resource Ownership}
 \date{}
 \IEEEaftertitletext{%
@@ -60,16 +63,16 @@ for Decentralized Identity and Resource Ownership}
 \parbox{0.90\textwidth}{%
 \centering\bfseries Abstract\\[0.5\baselineskip]%
 \normalfont
-Rings is an implemented structured peer-to-peer network specified by carriers,
-owner maps, protocol morphisms, and explicit obligations.  Its motivating
+Rings studies an implemented structured peer-to-peer network as an algebraic
+object for decentralized identity and resource ownership.  Its motivating
 failure mode is authority collapse:
 \[
   \mathsf{root}(id,data,route)
   \in\{\mathsf{server},\mathsf{dns},\mathsf{relay},\mathsf{platform}\}.
 \]
-Rings replaces that root with self-certifying identity and resource ownership
-over a CorrectChord overlay, while keeping cryptographic carriers disjoint from
-the routing carrier.  The object studied here is
+The paper does not claim a new DHT, DID method, WebRTC transport, or CRDT merge
+law.  Its claim is that these mechanisms can be composed through a
+carrier-separated ownership model:
 \[
   \RingsObj=
   (R,\mathcal{R}_N,\SetOverR,\Omega_N,
@@ -86,11 +89,18 @@ with
 \end{array}
 \]
 \[
-  \{D,V,M,H,Q,W\}\subset\operatorname{Obj}(\SetOverR),
-  \qquad
-  \mathsf{CryptoCarrier}\cap R=\varnothing.
+\begin{array}{rcl}
+\mathsf{Claim}_{main}
+&=&
+\mathsf{WellDef}(\Omega_N)
+\land\mathsf{CarrierSep}
+\land\mathsf{MorphismPreserve}\\
+&&{}\land\mathsf{EffectTyped}
+\land\mathsf{EvidenceScoped}_{\Gamma},\\
+\mathsf{CryptoCarrier}\cap R&=&\varnothing.
+\end{array}
 \]
-Claims are stratified as
+Claims outside this boundary are stratified as
 \[
   \mathsf{Claim}
   =
@@ -111,12 +121,12 @@ Claims are stratified as
 
 Centralized platforms are efficient deployment mechanisms but poor authority
 carriers: identity, naming, storage, and traffic control collapse to service
-operators~\cite{Kshetri2013,Zissis2012,KshetriMurugesan2013}.  Rings starts
-from the opposite requirement:
+operators~\cite{Kshetri2013,Zissis2012,KshetriMurugesan2013}.  Rings asks a
+narrower question than how to design another overlay:
 \[
 \begin{array}{rcl}
 \mathsf{Own}(d)&=&k_d,\\
-\mathsf{Route}(x)&=&\operatorname{owner}_N(H_\nu(x)),\\
+\mathsf{Place}_\nu(x)&=&\operatorname{owner}_N(H_\nu(x)),\\
 \mathsf{Run}(\mathcal{P}_\nu)&=&
   \tau_\nu:S_\nu\times I_\nu\to
   \mathsf{T}^{\mathcal{E}_\nu}_{A_\nu}(S_\nu\times O_\nu),\\
@@ -124,10 +134,26 @@ from the opposite requirement:
 \end{array}
 \]
 
-The central modeling choice is carrier separation.  The Chord identifier space
-is the additive cyclic group for placement and interval order; signatures,
-threshold schemes, encryption, and zero-knowledge protocols remain in their own
-fields or groups:
+Chord and CorrectChord supply the routing substrate; DID-style proofs supply
+self-certifying identity; WebRTC and WebAssembly supply runtime interpretation;
+CRDTs supply one merge algebra.  None alone gives a typed law for owner,
+carrier, and evidence scope:
+\[
+\begin{array}{rcl}
+\mathsf{Chord}/\mathsf{CorrectChord}
+  &\Rightarrow&\mathsf{ringLookup}\not\Rightarrow\mathsf{resourceAuthority},\\
+\mathsf{DID}
+  &\Rightarrow&\mathsf{keyBoundName}\not\Rightarrow\mathsf{overlayOwner},\\
+\mathsf{WebRTC}
+  &\Rightarrow&\mathsf{browserTransport}\not\Rightarrow\mathsf{protocolLaw},\\
+\mathsf{CRDT}
+  &\Rightarrow&\mathsf{mergeLaw}\not\Rightarrow\mathsf{placementLaw}.
+\end{array}
+\]
+The contribution is therefore an algebraic composition boundary.  The Chord
+identifier space is the additive cyclic group for placement and interval order;
+signatures, threshold schemes, encryption, and zero-knowledge protocols remain
+in their own fields or groups:
 \[
 \begin{array}{rcl}
 R&=&\mathbb{Z}/2^{160}\mathbb{Z},\\
@@ -141,15 +167,22 @@ benchmark obligations.
 
 \section{Problem Statement and Design Goals}
 
-Existing decentralized systems supply only parts of the required object:
+Existing decentralized systems solve orthogonal subproblems.  The missing
+object is the commuting authority layer between identity, placement, execution,
+and evidence:
 \[
 \begin{array}{rcl}
-\mathsf{Kademlia}&\Rightarrow&\mathsf{lookup}_{XOR}
-  \not\Rightarrow\mathsf{clockwiseOwner},\\
-\mathsf{RelayMixnet}&\Rightarrow&\mathsf{pathPrivacy}
-  \not\Rightarrow\mathsf{structuredOwner},\\
-\mathsf{Ledger}&\Rightarrow&\mathsf{globalOrder}
-  \not\Rightarrow\mathsf{localOverlay}.
+\mathcal{N}_R&=&\{(X_\nu,H_\nu)\}_\nu,\qquad
+\mathcal{P}_R=\{\mathcal{P}_\nu\}_\nu,\\
+\mathsf{Input}&=&(\Pi,\mathcal{R}_N,\mathcal{N}_R,\mathcal{P}_R,\mathcal{X}),\\
+\mathsf{Need}&=&
+  \mathsf{Owner}:X_\nu\to N
+  \quad\text{and}\quad
+  \mathsf{Run}:\mathcal{P}_\nu\to\mathsf{Effects},\\
+\mathsf{Forbidden}&=&
+  \mathsf{CryptoCarrier}=R
+  \;\lor\;
+  \mathsf{Evidence}_{\Gamma}=\mathsf{UniversalClaim}.
 \end{array}
 \]
 
@@ -162,64 +195,143 @@ G_{io}&=&\mathsf{BrowserNativeTransport},\\
 G_{eff}&=&\mathsf{TypedProtocolEffect},\\
 G_{cr}&=&\mathsf{CarrierCorrectCrypto},\\
 G_{rep}&=&\mathsf{BoundedRepairEvidence},\\
+G_{bd}&=&\mathsf{ExplicitClaimBoundary},\\
 \RingsObj&\models&
-G_{id}\land G_{own}\land G_{io}
-\land G_{eff}\land G_{cr}\land G_{rep}.
+G_{id}\land G_{own}\land G_{io}\land G_{eff}\\
+&&{}\land G_{cr}\land G_{rep}\land G_{bd}.
 \end{array}
 \]
 \end{obligation}
 
-\begin{definition}[Methodology]
+\begin{definition}[Methodology and claim ledger]
 \[
 \begin{array}{rcl}
 \mathsf{Method}
 &=&
 \mathsf{Mot}
-\to\mathsf{Spec}_C
-\to\mathsf{Alg}_P
+\to\mathsf{Spec}
+\to\mathsf{Algebra}
 \to\mathsf{ImplMap}\\
 &&{}\to\mathsf{Evidence}_{\Gamma}
 \to\mathsf{Obligation},\\[3pt]
 \Gamma&=&(|N|,\mathsf{topology},\mathsf{scheduler},\mathsf{fault}),\\[3pt]
+\mathsf{ClaimKind}
+&=&
+\mathsf{Spec}\cup\mathsf{Impl}
+\cup\mathsf{Evidence}_{\Gamma}\cup\mathsf{Obligation},\\
 \mathsf{Admit}(c)
 &\Rightarrow&
-c\in
-\mathsf{Spec}\cup\mathsf{Impl}\\
-&&{}\cup\mathsf{Evidence}_{\Gamma}\cup\mathsf{Obligation}.
+c\in\mathsf{ClaimKind}.
 \end{array}
 \]
-The prose in this paper is used only where the construction needs motivation,
-scope, or comparison; the claims themselves are carried by definitions,
-constraints, invariants, algorithms, and obligations.
 \end{definition}
 
+\begin{definition}[Global symbols and non-claims]
+\[
+\begin{array}{rcl}
+\NS&=&\{D,V,M,H,U,Q,W\},\qquad VID=V,\\
+\mathsf{Time}&=&\mathbb{T},\quad
+\mathsf{Ctx}=B^*,\quad \mathsf{Cap}\subseteq A^*,\\
+\mathsf{Domain}&=&\mathsf{WitnessDomain},\quad
+\mathsf{Order}=\{<,=,>,\bot\},\\
+\mathsf{Prov}&=&(\mathsf{src},\mathsf{rev},\mathsf{cmd},
+  \mathsf{seed},\mathsf{host}),\\
+\mathsf{Limit}&=&\NonClaim\cup\mathsf{Obligation}.
+\end{array}
+\]
 \[
 \begin{aligned}
-\mathsf{Contribution}=\{&
-R,\SetOverR,\Omega_N,\mathcal{R}_N,
+\NonClaim
+&=\mathsf{new}\{\mathsf{DHT},\mathsf{DID},\mathsf{WebRTC},
+\mathsf{CRDT},\mathsf{Crypto}\}\\
+&\quad{}\cup
+\{\mathsf{ByzLive},\mathsf{Consensus},\mathsf{WANPerf}\}.
+\end{aligned}
+\]
+\end{definition}
+
+\begin{definition}[Contribution]
+\[
+\begin{aligned}
+\mathsf{Contribution}_{Rings}=\{&
+(R,\SetOverR,\Omega_N),\;
+\mathcal{R}_N,\;
 \mathsf{RepKey}^{\rho},\\
-&\mathsf{T}^{\mathcal{E}}_A,
-\mathsf{Explore}_{\Gamma},
+&\mathsf{T}^{\mathcal{E}}_A,\;
+\mathsf{CarrierSep},\;
+\mathsf{Explore}_{\Gamma},\;
 \mathsf{Report}_{Rings}\}.
 \end{aligned}
 \]
+\[
+\mathsf{Reuse}_{Rings}
+=
+\{\mathsf{Chord},\mathsf{CorrectChord},\mathsf{DID},
+  \mathsf{WebRTC},\mathsf{CRDT}\}.
+\]
+\end{definition}
+
+\begin{proposition}[Main property boundary]
+\label{prop:main-boundary}
+Assume \(N\neq\varnothing\), the CorrectChord stable-base obligations for
+\(\mathcal{R}_N\), carrier separation, and typed protocol morphisms.  Write
+\(\Sigma_{\nu\mu}=(\sigma_X,\sigma_S,\sigma_I,\sigma_O,
+\sigma_{\mathcal{E}},\sigma_A^*)\) and
+\(\mathsf{PMor}_{\nu\mu}(\Sigma_{\nu\mu})\) for the laws of
+Definition~\ref{def:protocol-morphism}.  The main claim is:
+\[
+\begin{aligned}
+\mathsf{OwnerLaw}
+&\equiv
+\forall\nu\in\NS.\forall x\in X_\nu.\;
+P^N_\nu(x)=\operatorname{owner}_N(H_\nu(x))\in N,\\
+\mathsf{MorphLaw}
+&\equiv
+\forall\nu,\mu\in\NS.\forall\Sigma_{\nu\mu}.\\
+&\quad
+\mathsf{PMor}_{\nu\mu}(\Sigma_{\nu\mu})
+\Rightarrow P^N_\mu\circ\sigma_X=P^N_\nu,\\
+\mathsf{EffectLaw}
+&\equiv
+\forall\nu\in\NS.\forall s,i.\;\tau_\nu(s,i)\in Y_\nu,\\
+Y_\nu&=\mathsf{T}^{\mathcal{E}_\nu}_{A_\nu}(S_\nu\times O_\nu),\\
+\mathsf{LedgerLaw}
+&\equiv
+\forall c.\;c=\mathsf{Evidence}_{\Gamma}
+\Rightarrow \mathsf{finite}(\Gamma)\land\mathsf{declared}(\Gamma),\\
+\mathsf{Main}_{Rings}
+&\equiv
+\mathsf{OwnerLaw}\land\mathsf{MorphLaw}
+\land\mathsf{EffectLaw}\land\mathsf{LedgerLaw}.
+\end{aligned}
+\]
+It does not entail any \(c\in\NonClaim\):
+\[
+\forall c\in\NonClaim.\quad \mathsf{Main}_{Rings}\not\vdash c.
+\]
+\end{proposition}
 
 \section{Algebraic System Model}
 
-\begin{assumption}[System scope]
+\begin{assumption}[System and adversary scope]
 \[
 \begin{array}{rcl}
-\mathsf{fault}&=&\mathsf{fail\mbox{-}stop},\\
-\mathsf{auth}(m,\sigma,k)&=&V(k,\sigma,m),\\
-\mathsf{net}&=&\mathsf{async},\\
-\mathsf{io}&=&I_X:A_X^*\to\mathsf{IO},\\
+\mathsf{fault}_{overlay}&=&\mathsf{fail\mbox{-}stop},\\
+\mathsf{Adv}_{net}&=&\{\mathsf{delay},\mathsf{drop},\mathsf{dup},
+  \mathsf{reorder},\mathsf{replay}\},\\
+\mathsf{Adv}_{id}&=&\{\mathsf{manyDID},\mathsf{stolenSession},
+  \mathsf{staleProof}\},\\
+\mathsf{Forge}_{\Pi}&=&\bot,\qquad \mathsf{Preimage}_{H}=\bot,\\
 \mathsf{consensus}&\notin&\mathsf{Overlay},\\
 \mathsf{order}&=&\mathsf{SidecarWitness},\\
 \mathsf{crypto\_ops}&\cap&\mathsf{route\_ops}=\varnothing.
 \end{array}
 \]
-The fail-stop clause scopes overlay maintenance; identity, ranking, and
-application protocols still carry adversarial predicates at their own layer.
+Thus CorrectChord is the safety root only for crash-scoped overlay maintenance.
+Byzantine routing, Eclipse resistance, Sybil resistance, anonymity, and
+denial-of-service resistance are not inherited from Chord; they must be
+discharged by admission, session typing, ranking, relay, quota, and measurement
+predicates at their own layers.
 \end{assumption}
 
 \begin{definition}[Identifier carrier]
@@ -238,40 +350,52 @@ R&=&\mathbb{Z}/M\mathbb{Z},\\
 \begin{definition}[Live topology]
 \[
 \begin{array}{rcl}
-  N&\subset&R,\quad N\neq\varnothing,\\[2pt]
+  N&\subset&R,\quad 1\le |N|<\infty,\\[2pt]
   \operatorname{owner}_N(k)
-    &=&\arg\min_{u\in N}\delta_k(u),\\[6pt]
+    &=&\arg\min_{u\in N}\delta_k(u),\\[4pt]
+  \operatorname{cw}_N(n)
+    &=&\operatorname{sort}_{\delta_n}(N\setminus\{n\})\cdot\langle n\rangle,\\[4pt]
+  \operatorname{succ}_N(n)
+    &=&\operatorname{head}(\operatorname{cw}_N(n)),\\[4pt]
   \operatorname{pred}_N(n)
-    &=&\arg\min_{p\in N\setminus\{n\}}\delta_p(n),\\[6pt]
-  \operatorname{Succ}^q_N(n)
     &=&
-    \operatorname{take}_q
-    \bigl(\operatorname{sort}_{\delta_n}(N\setminus\{n\})\bigr),\\[6pt]
-  \delta_a|_N&=&\mathsf{injective}.
+    \begin{cases}
+      \bot,& |N|=1,\\
+      \arg\min_{p\in N\setminus\{n\}}\delta_p(n),& |N|>1,
+    \end{cases}\\[8pt]
+  \operatorname{Succ}^q_N(n)
+    &=&\operatorname{take}_{\min(q,|N|)}(\operatorname{cw}_N(n)).
 \end{array}
 \]
+The list \(\operatorname{cw}_N(n)\) contains strictly clockwise live nodes and
+uses \(n\) only as the wrap-around sentinel.  Hence a singleton ring has
+\(\operatorname{Succ}^q_N(n)=\langle n\rangle\) and
+\(\operatorname{pred}_N(n)=\bot\).
 \end{definition}
 
 \begin{assumption}[Correct-Chord stable base]
 \[
 \begin{array}{rcl}
-r&=&|\operatorname{Succ}^r_N(n)|,\\
-\mathsf{Steady}(N)&\Rightarrow&|N|\geq r+1,\\
-|N|<r+1&\Rightarrow&\mathsf{Init}(N),\\
+r&\in&\mathbb{N}_{>0},\\
+\mathsf{Steady}(N,r)&\Rightarrow&|N|\geq r+1,\\
+\mathsf{Init}(N,r)&\Leftrightarrow&1\le |N|\le r,\\
+|\operatorname{Succ}^r_N(n)|&=&\min(r,|N|),\\
 \mathsf{Maintain}&=&
   \{\mathsf{join},\mathsf{rectify}\}\\
 &&\cup\{\mathsf{stabilize}\}_{CorrectChord}.
 \end{array}
 \]
-This is the CorrectChord stable base of Zave~\cite{ZaveChordCorrect}.
+CorrectChord claims in this paper are stable-ring claims under
+\(\mathsf{Steady}(N,r)\); singleton and small-ring behavior is an explicit
+initialization edge case, not evidence for \(r\) distinct live successors.
 \end{assumption}
 
 \begin{definition}[Affine replica set]
 \[
 \begin{array}{rcl}
-\rho&\in&\mathbb{N}_{>0},\\
+1\le\rho&\le&M,\\
 \operatorname{repkey}^{\rho}_i(k)
-  &=&k+\left\lfloor M\cdot i/\rho\right\rfloor,\\[4pt]
+  &=&(k+\left\lfloor M\cdot i/\rho\right\rfloor)\bmod M,\quad 0\le i<\rho,\\[4pt]
 \operatorname{RepKey}^{\rho}(k)
   &=&
   \langle \operatorname{repkey}^{\rho}_i(k):0\leq i<\rho\rangle,\\[4pt]
@@ -286,12 +410,13 @@ This is the CorrectChord stable base of Zave~\cite{ZaveChordCorrect}.
 P_k&=&\operatorname{set}(\operatorname{RepKey}^{\rho}(k)),\\
 O_k&=&\operatorname{set}(\operatorname{RepOwner}^{\rho}_N(k)),\\
 |P_k|&=&\rho,\\
-|O_k|&\leq&\min(\rho,|N|),\\
-\mathsf{collapse}_{N,\rho}(k)&\Leftrightarrow&|O_k|<\rho.
+1\le |O_k|&\leq&\min(\rho,|N|),\\
+\mathsf{collapse}_{N,\rho}(k)&\Leftrightarrow&|O_k|<\min(\rho,|N|).
 \end{array}
 \]
-Thus replica keys specify redundancy intent; live owner images specify realized
-redundancy.  CorrectChord successor lists remain the topology safety root.
+Replica keys specify intended placement cardinality; live owner images specify
+realizable redundancy under the current live topology.  CorrectChord successor
+lists remain the topology safety root.
 \end{definition}
 
 \begin{definition}[Rings overlay object]
@@ -303,7 +428,7 @@ redundancy.  CorrectChord successor lists remain the topology safety root.
 \[
 \begin{array}{rcl}
 F&\subseteq&N\times\mathbb{N}\times N,\\
-E&=&\prod_{v\in VID}E_v,\\
+E&=&\prod_{\nu\in\NS}E_\nu,\\
 \mathsf{SafetyRoot}(\mathcal{R}_N)&=&
   (\operatorname{pred}_N,\operatorname{Succ}^r_N),\\
 \mathsf{PerfWitness}(\mathcal{R}_N)&=&F.
@@ -379,52 +504,53 @@ I & (DID,\Pi,\operatorname{Session})\\
 T & (C,A_T,\mathsf{offer},\mathsf{answer},\mathsf{send},\mathsf{recv})\\
 O & \mathcal{R}_N\\
 X & (S_X,A_X,\mathsf{cap},I_X)\\
-P & \{\mathcal{P}_\nu\}_{\nu\in Namespace}\\
+P & \{\mathcal{P}_\nu\}_{\nu\in\NS}\\
 L & \mathsf{App}\circ P
 \end{array}
 \]
 \end{definition}
 
-\begin{figure}[htbp]
-\centering
-\begin{tikzpicture}[every node/.style={draw,minimum width=5.1cm,minimum height=.55cm,align=center,font=\bfseries}]
-\node (1) at (4.5,0) {Identity Layer};
-\node (2) at (4.5,0.7) {Transport Layer};
-\node (3) at (4.5,1.4) {Overlay Layer};
-\node (4) at (4.5,2.1) {Extension Runtime Layer};
-\node (5) at (4.5,2.8) {Protocol Layer};
-\node (6) at (4.5,3.5) {Application Layer};
-\end{tikzpicture}
-\caption{Layers of Rings Network}
-\label{layers}
-\end{figure}
+The interface tuple \(\mathcal{A}\) separates identity, transport, overlay,
+extension runtime, protocol, and application layers.  Only the overlay owns
+\(\mathcal{R}_N\); the other layers discharge typed obligations through
+\(I,T,X,P\).
 
 \begin{definition}[Identity proof]
 \[
-  \Pi=(K,\Sigma,V,D,\mathsf{enc},\mathsf{ttl})
+  \Pi=(K,\Sigma,V,\operatorname{did},\mathsf{enc},\mathsf{ttl})
 \]
 \[
 \begin{array}{rcl}
 V&:&K\times\Sigma\times B^*\to\{\top,\bot\},\\
-D&:&K\to R,\\
+\operatorname{did}&:&K\to X_D,\\
 \mathsf{enc}&:&\Sigma\to B^*,\\
-\mathsf{ttl}&:&\Sigma\to Time.
+\mathsf{ttl}&:&\Sigma\to \mathsf{Time}.
 \end{array}
 \]
 \end{definition}
 
-\begin{invariant}[Session authority]
+\begin{invariant}[Typed session authority]
 \[
-  d\in X_D,\qquad s\in K.
+  sid=(d,s,e,ctx,cap),\qquad d\in X_D,\quad s\in K,\quad now<e.
 \]
 \[
-  \operatorname{Session}(d,s,e)
-  \Rightarrow
-  V(k_d,\sigma_{d\to s},d\Vert s\Vert e)=\top
-  \land now<e.
+\begin{aligned}
+\operatorname{Session}(d,s,e,ctx,cap)
+\Leftrightarrow\;&
+V(k_d,\sigma_{d\to s},d\Vert s\Vert e\Vert ctx\Vert cap)=\top\\
+&\land\; \operatorname{KeyOf}(d)=k_d
+\land \operatorname{did}(k_d)=d .
+\end{aligned}
 \]
 \[
-  \mathsf{HopCheck}(d,s,e)\equiv\operatorname{Session}(d,s,e).
+\begin{aligned}
+\mathsf{HopCheck}(sid)&\equiv\operatorname{Session}(d,s,e,ctx,cap),\\
+\mathsf{BoundCtx}(sid)&=(sid,\nu,path,dst),\\
+\mathsf{FrameCtx}(f)&=(sid,\nu,path,dst),\\
+\operatorname{Accept}_{\Delta}(f)&\Rightarrow
+  \operatorname{SessionValid}(sid)\\
+&\land\mathsf{FrameCtx}(f)=\mathsf{BoundCtx}(sid).
+\end{aligned}
 \]
 \end{invariant}
 
@@ -441,40 +567,10 @@ D&:&K\to R,\\
 \]
 \end{definition}
 
-\begin{figure}[htbp]
-\begin{tikzpicture}[node distance=5cm,auto,>=latex']
-  \node (A) {Node 1};
-  \node (B) [right of=A] {Node 2};
-  \draw[->] (A |-, -1) -- node[above] {Offer} (B |-, -1);
-  \draw[->] (B |-, -2) -- node[above] {Answer} (A|-, -2 );
-  \draw[->] (A |-, -3) -- node[above] {Accept Offer} (B |-, -3);
-  \draw[->] (A |-, -4) -- node[above] {Send ICE Candidate} (B |-, -4);
-  \draw[->] (B |-, -5) -- node[above] {Send ICE Candidate} (A |-, -5);
-  \draw[->,dashed] (B) -- (A);
-  \draw[pattern=north east lines, pattern color=red] (A.south west) -- (A.south east) -- (A.north east) -- (A.north west) -- cycle;
-  \draw[pattern=north east lines, pattern color=blue] (B.south west) -- (B.south east) -- (B.north east) -- (B.north west) -- cycle;
-  \draw[red, thick] (A.south) -- ++(0,-5.2cm);
-  \draw[blue, thick] (B.south) -- ++(0,-5.2cm);
-\end{tikzpicture}
-\caption{Standard SDP/ICE exchange}
-\label{webrtc-standard-sdp}
-\end{figure}
-
-\begin{figure}[htbp]
-\begin{tikzpicture}[node distance=5cm,auto,>=latex']
-  \node (A) {Node 1};
-  \node (B) [right of=A] {Node 2};
-  \draw[->] (A |-, -1) -- node[above] {Offer And ICE} (B |-, -1);
-  \draw[->] (B |-, -2) -- node[above] {Answer and ICE} (A|-, -2 );
-  \draw[->,dashed] (B) -- (A);
-  \draw[pattern=north east lines, pattern color=red] (A.south west) -- (A.south east) -- (A.north east) -- (A.north west) -- cycle;
-  \draw[pattern=north east lines, pattern color=blue] (B.south west) -- (B.south east) -- (B.north east) -- (B.north west) -- cycle;
-  \draw[red, thick] (A.south) -- ++(0,-2.2cm);
-  \draw[blue, thick] (B.south) -- ++(0,-2.2cm);
-\end{tikzpicture}
-\caption{Rings single round-trip SDP/ICE exchange}
-\label{webrtc-rings-sdp}
-\end{figure}
+WebRTC signaling is a runtime adapter rather than a new overlay primitive.
+Rings may batch offer, answer, and ICE material into fewer protocol actions,
+but correctness remains delegated to the WebRTC/ICE state machines; evaluation
+therefore reports connection setup separately from overlay lookup.
 
 \begin{definition}[Runtime interpreter]
 \[
@@ -490,27 +586,8 @@ I_X(\alpha\cdot\beta)&=&I_X(\alpha);I_X(\beta).
 \]
 \end{definition}
 
-\begin{figure}[htbp]
-  \begin{tikzpicture}[node distance=3cm,auto,>=latex']
-  \node (A) {Browser};
-  \node (B) [right of=A] {Wasm Module};
-  \node (C) [right of=B] {Js Runtime};
-  \draw (A) -- (A |-, -5.5);
-  \draw (B) -- (B |-, -5.5);
-  \draw (C) -- (C |-, -5.5);
-  \draw[->] (A |-, -1) -- node[midway, above] {Download Module} (B |-, -1);
-  \draw[->] (B |-, -2) -- node[midway, above] {Decode Binary} (C |-, -2);
-  \draw[->] (C|-, -3) -- node[midway, above] {Compile} (B|-, -3);
-  \draw[->] (B|-,-4) -- node[midway, above] {Execute} (C|-, -4);
-  \draw[->] (C|-,-5) -- node[midway, above] {Call} (B|-,-5);
-  \draw[pattern=north east lines, pattern color=gray] (A.south west) -- (A.south east) -- (A.north east) -- (A.north west) -- cycle;
-  \draw[pattern=north east lines, pattern color=gray] (B.south west) -- (B.south east) -- (B.north east) -- (B.north west) -- cycle;
-  \draw[pattern=north east lines, pattern color=gray] (C.south west) -- (C.south east) -- (C.north east) -- (C.north west) -- cycle;
-  \draw[->,dashed] (B) -- (C);
-\end{tikzpicture}
-\caption{Wasm module execution boundary}
-\label{wasm-boundary}
-\end{figure}
+WebAssembly is modeled only through \(I_X\) and \(\mathsf{cap}\): it interprets
+effect lists under runtime capabilities and does not change the overlay object.
 
 \begin{obligation}[Runtime confinement]
 \[
@@ -527,7 +604,7 @@ a\notin\mathsf{cap}&\Rightarrow&I_X(a)=\mathsf{Reject}(a).
 \begin{definition}[Namespace object]
 \[
 \begin{array}{rcl}
-\nu&\in&\{D,V,M,H,U,Q,W\},\\
+\nu&\in&\NS,\\
 H_\nu&:&X_\nu\to R,\\
 (X_\nu,H_\nu)&\in&\SetOverR.
 \end{array}
@@ -616,6 +693,7 @@ H_\nu&:&X_\nu\to R,\\
 \end{definition}
 
 \begin{definition}[Protocol morphism]
+\label{def:protocol-morphism}
 \[
   \Sigma:\mathcal{P}_\nu\to\mathcal{P}_\mu
   =
@@ -635,20 +713,6 @@ H_\mu\circ\sigma_X&=&H_\nu,\\[4pt]
 \]
 \end{definition}
 
-\begin{figure}[htpb]
-  \begin{center}
-\begin{tikzpicture}
-\node[rectangle, draw] (actor) {Actor};
-\node[rectangle, draw, below of=actor] (mailbox) {Mailbox};
-\node[rectangle, draw, below of=mailbox] (message) {Message};
-\draw[->] (actor) -- (mailbox);
-\draw[->] (mailbox) -- (message);
-\end{tikzpicture}
-\end{center}
-\caption{Actor Model}
-\label{actor-model}
-\end{figure}
-
 \section{Chord Overlay}
 
 \[
@@ -662,57 +726,68 @@ H_\mu\circ\sigma_X&=&H_\nu,\\[4pt]
 \]
 This section fixes Chord as the base protocol and CorrectChord as the maintenance law~\cite{Chord,ZaveChordCorrect}.
 
-\begin{definition}[Local node state]
+\begin{definition}[Local node state and Chord auxiliaries]
 \[
-  S_n=(p_n,L_n,F_n,E_n)
+\begin{array}{rcl}
+S_n&=&(p_n,L_n,F_n,E_n),\\
+p_n&\in&N\cup\{\bot\},\quad L_n\in N^{\le r},\\
+F_n&:&\{0,\ldots,159\}\rightharpoonup N.
+\end{array}
 \]
 \[
 \begin{array}{rcl}
-p_n&\in&N\cup\{\bot\},\\
-L_n&\in&N^{\leq r},\\
-F_n&:&\mathbb{N}\rightharpoonup N,\\
-E_n&\subseteq&E,\\
-  p_n=\operatorname{pred}_N(n),
-&&
-  L_n=\operatorname{Succ}^r_N(n).
+\mathsf{head}(\langle\rangle)&=&\bot,\\
+\mathsf{Normalize}_r(n,X)
+&=&\operatorname{take}_{\min(r,|N|)}(U_n(X)),\\
+U_n(X)&=&\operatorname{uniq}(\operatorname{filter}_N(X)\cdot\operatorname{cw}_N(n)),\\
+\operatorname{target}_i(n)&=&n+2^i \bmod M,\\
+\operatorname{finger}_i(n)&=&\operatorname{owner}_N(\operatorname{target}_i(n)),\\
+\mathsf{Cand}_S(n,k)&=&
+(\operatorname{rng}(F_n)\cup\operatorname{set}(L_n))\cap(n,k)_R,\\
+\mathsf{ClosestPreceding}_S(n,k)
+&=&\max_{\delta_n}\mathsf{Cand}_S(n,k).
 \end{array}
 \]
-\end{definition}
-
-\begin{definition}[Finger target]
-\[
-\begin{array}{rcl}
-  \operatorname{target}_i(n)&=&n+2^i,\\
-  \operatorname{finger}_i(n)&=&
-  \operatorname{owner}_N(\operatorname{target}_i(n)),\\
-  F_n(i)&\in&\{\bot,\operatorname{finger}_i(n)\}.
-\end{array}
-\]
+Here \(\mathsf{ClosestPreceding}_S(n,k)=\bot\) when the displayed set is empty.
 \end{definition}
 
 \begin{algorithm}
-\caption{DHT Join Transitions}
+\caption{DHT Join and Rectify Transitions}
 \label{alg:join}
 \begin{algorithmic}[1]
 \Function{BeginJoin}{$n, known$}
-\State $pred[n]\gets none$
-\State $a\gets FindSuccessor(n.did)$
-\State \Return $Remote(known, a)$
+\State $pred[n]\gets \bot$
+\If{$known=\bot$}
+  \State $succ[n]\gets \langle n.did\rangle$
+  \State \Return $Done$
+\EndIf
+\State \Return $Remote(known, FindSuccessor(n.did))$
 \EndFunction
 \Function{InstallSuccessor}{$n, s$}
-\State $succ[n]\gets take(r, [s])$
-\State \Return $Remote(s, QuerySuccList(s))$
+\If{$s=\bot$}
+  \State \Return $Repair(DiscoverSuccessor(n.did))$
+\EndIf
+\State $succ[n]\gets \mathsf{Normalize}_r(n,\langle s\rangle)$
+\State \Return $Remote(s, QuerySuccList)$
 \EndFunction
 \Function{InstallSuccList}{$n, s, list$}
-\State $succ[n]\gets take(r, s :: list)$
-\If{$head(succ[n]) \neq none$}
+\State $succ[n]\gets \mathsf{Normalize}_r(n,\langle s\rangle\cdot list)$
 \State $h\gets head(succ[n])$
-\State $notify\gets Notify(h, n.did)$
-\State $sync\gets SyncStorage(h)$
-\State \Return $Multi(notify, sync)$
+\If{$h=\bot$}
+  \State \Return $Repair(DiscoverSuccessor(n.did))$
+\ElsIf{$h=n.did$}
+  \State \Return $Done$
 \Else
-\State \Return $Noop$
+  \State $a\gets Remote(h, Notify(n.did))$
+  \State $b\gets Remote(h, SyncStorage(n.did))$
+  \State \Return $Multi(a,b)$
 \EndIf
+\EndFunction
+\Function{HandleNotify}{$n, q$}
+\If{$q\neq n.did \land (pred[n]=\bot \lor q\in(pred[n],n.did)_R)$}
+  \State $pred[n]\gets q$
+\EndIf
+\State \Return $Noop$
 \EndFunction
 \end{algorithmic}
 \end{algorithm}
@@ -721,21 +796,23 @@ E_n&\subseteq&E,\\
 \caption{DHT Lookup Algorithm}
 \label{alg:lookup}
 \begin{algorithmic}[1]
-\Function{Lookup}{$key, node$}
-    \State $s\gets head(succ[node])$
-    \If{$s = none$}
-        \State \Return $Repair(QuerySuccList(node))$
-    \EndIf
-    \If{$key \in (node.did, s]$}
-        \State \Return $Local(s)$
-    \EndIf
-    \State $next\gets closest\_preceding\_node(node, key)$
-    \If{$next = none$}
-        \State \Return $Repair(QuerySuccList(s))$
-    \Else
-        \State $a\gets FindSuccessor(key)$
-        \State \Return $Remote(next, a)$
-    \EndIf
+\Function{FindSuccessor}{$key, n$}
+\If{$key=n.did$}
+  \State \Return $Found(n.did)$
+\EndIf
+\State $s\gets head(succ[n])$
+\If{$s=\bot$}
+  \State \Return $Repair(QuerySuccList(n.did))$
+\ElsIf{$s=n.did$}
+  \State \Return $Found(n.did)$
+\ElsIf{$key\in(n.did,s]_R$}
+  \State \Return $Found(s)$
+\EndIf
+\State $next\gets \mathsf{ClosestPreceding}_S(n.did,key)$
+\If{$next=\bot$ or $next=n.did$}
+  \State $next\gets s$
+\EndIf
+\State \Return $Remote(next, FindSuccessor(key))$
 \EndFunction
 \end{algorithmic}
 \end{algorithm}
@@ -765,18 +842,34 @@ E_n&\subseteq&E,\\
 \caption{DHT Stabilization}
 \label{alg:stabilize}
 \begin{algorithmic}[1]
+\Function{BeginStabilize}{$n$}
+\State $s\gets head(succ[n])$
+\If{$s=\bot$}
+  \State \Return $Repair(DiscoverSuccessor(n.did))$
+\ElsIf{$s=n.did$}
+  \State \Return $Noop$
+\Else
+  \State \Return $Remote(s, QueryTopology)$
+\EndIf
+\EndFunction
 \Procedure{Stabilize}{$n, topo$}
 \State $actions\gets []$
-\State $c\gets topo.pred$
 \State $s\gets head(succ[n])$
-\If {$c \neq none$ and $c \in (n.did, s)$}
-\State $succ[n]\gets insert(succ[n], c)$
-\State $actions\gets actions :: FindSuccessor(c)$
+\If{$s=\bot$}
+  \State \Return $Repair(DiscoverSuccessor(n.did))$
+\ElsIf{$s=n.did$}
+  \State \Return $Noop$
 \EndIf
-\State $succ[n]\gets take(r, merge(succ[n], topo.succ))$
-\If{$head(succ[n]) \neq none$}
+\State $c\gets topo.pred$
+\If{$c\neq\bot$ and $c\neq n.did$ and $c\in(n.did,s)_R$}
+  \State $succ[n]\gets \mathsf{Normalize}_r(n,\langle c\rangle\cdot succ[n])$
+\EndIf
+\State $succ[n]\gets \mathsf{Normalize}_r(n,succ[n]\cdot topo.succ)$
 \State $h\gets head(succ[n])$
-\State $actions\gets actions :: Notify(h, n.did)$
+\If{$h\neq\bot$ and $h\neq n.did$}
+  \State $a\gets Remote(h, Notify(n.did))$
+  \State $b\gets Remote(h, QuerySuccList)$
+  \State $actions\gets actions\cdot[a,b]$
 \EndIf
 \State \Return $Multi(actions)$
 \EndProcedure
@@ -789,26 +882,39 @@ E_n&\subseteq&E,\\
   \operatorname{Inv}_{ring}(N,S)
   \equiv \forall n\in N.\;&
   p_n=\operatorname{pred}_N(n)\\
-  &\land L_n=\operatorname{Succ}^r_N(n).
+  &\land L_n=\operatorname{Succ}^r_N(n)\\
+  &\land \mathsf{head}(L_n)=\operatorname{succ}_N(n).
 \end{aligned}
 \]
 \end{invariant}
 
 \begin{invariant}[Lookup owner preservation]
 \[
+\mathsf{Eval}_S(n,k)\Downarrow o
+\]
+be the fair closure of Algorithm~\ref{alg:lookup}, where
+\(Remote(m,FindSuccessor(k))\) resumes the same lookup at node \(m\).  Then
+\[
 \begin{aligned}
-&\mathsf{Steady}(N)\land\operatorname{Inv}_{ring}(N,S)\\
+&(\mathsf{Steady}(N,r)\lor |N|=1)
+\land\operatorname{Inv}_{ring}(N,S)\\
 &\Rightarrow
-  \operatorname{Lookup}(S,k)\Downarrow
-  \operatorname{owner}_N(k).
+\forall n\in N.\forall k\in R.\;
+\mathsf{Eval}_S(n,k)\Downarrow \operatorname{owner}_N(k).
 \end{aligned}
 \]
-\[
-  \Downarrow
-  =
-  \mathsf{Reach}_{A_D}(\ref{alg:lookup},\ref{alg:stabilize}).
-\]
 \end{invariant}
+
+\begin{proof}[Proof obligation]
+If Algorithm~\ref{alg:lookup} returns \(Found(s)\) by the interval test, then
+\(s=head(L_n)=\operatorname{succ}_N(n)\) and no live node lies in \((n,s)_R\);
+therefore \(\operatorname{owner}_N(k)=s\).  If it forwards, the chosen target is
+either the closest preceding finger/list entry or the first successor; in both
+cases it lies in \((n,k)_R\), so \(\delta_{next}(k)<\delta_n(k)\).  Finiteness of
+\(N\) gives termination.  The branches \(key=n.did\) and \(s=n.did\) discharge
+the singleton and exact-owner edge cases.  Repair branches are outside the
+steady-ring premise.
+\end{proof}
 
 \section{DID and Resource Algebra}
 
@@ -820,9 +926,10 @@ E_n&\subseteq&E,\\
 \]
 \[
 \begin{array}{rcl}
-D(k)&=&H_D(k),\\
-\operatorname{owner}_N(D(k))&\in&N,\\
-\operatorname{Session}&\subseteq&X_D\times K\times Time.
+D_K(k)&=&H_D(\operatorname{did}(k)),\\
+\operatorname{owner}_N(D_K(k))&\in&N,\\
+\operatorname{Session}&\subseteq&X_D\times K\times
+  \mathsf{Time}\times\mathsf{Ctx}\times\mathsf{Cap}.
 \end{array}
 \]
 \end{definition}
@@ -889,11 +996,11 @@ This is the CRDT join-semilattice case~\cite{ShapiroCRDT}.
 \begin{invariant}[Placement]
 \[
 \begin{array}{rcl}
-K_{\nu,x}&=&\operatorname{replicaKeys}(H_\nu(x)),\\[2pt]
-P_{\nu,x}&=&\operatorname{set}(\operatorname{RepKey}^{\rho}(H_\nu(x))),\\[2pt]
+P_{\nu,x}&=&\operatorname{set}(\operatorname{RepKey}^{\rho}(H_\nu(x))),\\
+K^{impl}_{\nu,x}&\subseteq&R,\\
 \operatorname{Inv}_{place}
 &\equiv&
-\forall \nu,x.\;K_{\nu,x}\subseteq P_{\nu,x}.
+\forall \nu,x.\;K^{impl}_{\nu,x}\subseteq P_{\nu,x}.
 \end{array}
 \]
 \end{invariant}
@@ -905,11 +1012,14 @@ O_{\nu,x}&=&\operatorname{set}(\operatorname{RepOwner}^{\rho}_N(H_\nu(x))),\\
 L_{\nu,x}&=&|O_{\nu,x}|,\\
 \mathsf{FullRed}_{\nu,x}&\Leftrightarrow&L_{\nu,x}=\min(\rho,|N|),\\
 \mathsf{Collapse}_{\nu,x}&\Leftrightarrow&L_{\nu,x}<\min(\rho,|N|),\\
-\mathsf{LiveClaim}_{\nu,x}(\rho)&\Rightarrow&\mathsf{FullRed}_{\nu,x},\\
+\mathsf{LiveClaim}_{\nu,x}(\rho)&\Rightarrow&
+  \operatorname{Inv}_{place}\land\mathsf{FullRed}_{\nu,x},\\
 \mathsf{Report}_{Rings}&\ni&
   |\{(\nu,x):\mathsf{Collapse}_{\nu,x}\}|.
 \end{array}
 \]
+When \(|N|<\rho\), fewer than \(\rho\) distinct live owners is not collapse;
+collapse means fewer owners than the live topology can realize.
 \end{obligation}
 
 \begin{definition}[Mailbox]
@@ -925,8 +1035,8 @@ entry_M&=&(\eta,exp,proof_s,dst,cipher).
 \[
 \begin{array}{rcl}
 h&=&(\nu,\rho,Intro,Relay,\\
-&&Cap,K,exp,rank),\\
-VID(h)&=&H_H(h),\\
+&&\mathsf{Cap},K,exp,rank),\\
+\operatorname{vid}(h)&=&H_H(h),\\
 \mathsf{Lookup}(h)&=&P^N_H(h),\\
 \mathsf{Valid}(h,\sigma)&=&\operatorname{Auth}_H(h,\sigma).
 \end{array}
@@ -992,13 +1102,14 @@ part of the security boundary rather than as optional metadata.
 \]
 \[
 \begin{aligned}
+  sid&=(d,s,e,ctx,cap),\qquad d\in X_D,\quad s\in K,\\
   m_f&=sid\Vert seq\Vert last\Vert cipher,\\
-  \operatorname{FrameValid}_{\Delta}(f)
+  \operatorname{FrameValid}(f)
   \Leftrightarrow\;&V(pk_s,\sigma_s,m_f)=\top\\
   &\land\;
-    \operatorname{Session}(D(pk_s),sid,e)\\
-  &\land\;
-    \operatorname{SeqOK}_{\Delta}(seq,last).
+    \operatorname{Session}(d,s,e,ctx,cap)\\
+  &\land\;pk_s=s\\
+  &\land\;\mathsf{FrameCtx}(f)=\mathsf{BoundCtx}(sid).
 \end{aligned}
 \]
 \end{definition}
@@ -1019,13 +1130,17 @@ part of the security boundary rather than as optional metadata.
 &&{}\land seq-next\leq w\\
 &&{}\land(final=\bot\lor seq\leq final)\\
 &&{}\land(last\Rightarrow\mathsf{NoFuture}_{\Delta}(seq)),\\
-\operatorname{SeqOK}_{\Delta}(seq,last)&\Leftrightarrow&
-  \mathsf{Dup}_{\Delta}(seq)\\
-&&{}\lor\mathsf{New}_{\Delta}(seq,last),\\
-\mathsf{Dup}_{\Delta}(seq)&\Rightarrow&\mathsf{emit}=\epsilon.
+\operatorname{Accept}_{\Delta}(f)&\Leftrightarrow&
+  \operatorname{FrameValid}(f)
+  \land\mathsf{New}_{\Delta}(seq,last),\\
+\operatorname{DropDup}_{\Delta}(f)&\Leftrightarrow&
+  \operatorname{FrameValid}(f)
+  \land\mathsf{Dup}_{\Delta}(seq)
+  \land\mathsf{emit}=\epsilon.
 \end{array}
 \]
-Here \(w\) is receiver policy, not a signed wire field.
+Here \(w\) is receiver policy, not a signed wire field.  A duplicate frame may
+be valid, but it is not accepted as new input.
 \end{definition}
 
 \begin{definition}[Secret sharing placement]
@@ -1112,7 +1227,7 @@ The split vocabulary follows MSRP~\cite{RFC4975}.
 \end{aligned}
 \]
 \[
-  \chi:Domain_a\times Domain_b\to Order.
+  \chi:\mathsf{Domain}\times\mathsf{Domain}\to\mathsf{Order}.
 \]
 \end{definition}
 
@@ -1148,39 +1263,50 @@ The split vocabulary follows MSRP~\cite{RFC4975}.
 
 \begin{table}[htbp]
 \centering
-\footnotesize
-\setlength{\tabcolsep}{2pt}
-\begin{tabular}{p{1.05cm}|p{2.0cm}|p{2.45cm}}
+\scriptsize
+\setlength{\tabcolsep}{1.5pt}
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{1.05cm}
+>{\raggedright\arraybackslash}p{2.35cm}
+>{\raggedright\arraybackslash}p{2.95cm}@{}}
 \hline
-Attack & Predicate & Required boundary \\ \hline
-Sybil & many DIDs, one actor & admission and ranking policy \\
-Replay & stale valid $\sigma$ & TTL, nonce cache, stream/final \\
-MITM & wrong key for DID & DID proof and signed envelope \\
-DoS & unbounded resource use & quotas and chunk bounds \\
+Attack & Predicate & Boundary claimed here \\ \hline
+Sybil & one actor controls many DIDs & not solved by overlay; admission, ranking, quota \\
+Eclipse & biased neighbor or successor view & not claimed under Byzantine routing; requires secure-routing policy \\
+Replay & stale valid signature or frame & typed session, expiry, nonce/sequence set \\
+MITM & wrong key for DID or session & DID proof, signed envelope, context binding \\
+DoS & unbounded storage, relay, or chunks & quotas, TTL, chunk bounds, backpressure \\
+Privacy & route or relay observation & relay policy only; no anonymity theorem \\
 \hline
 \end{tabular}
-\caption{Security predicates and required controls}
+\caption{Threat predicates and claim boundaries}
 \label{security-table}
 \end{table}
 
 \[
 \begin{array}{rcl}
 \mathsf{Base}&\not\vdash&
-  \mathsf{SybilResist}\land\mathsf{Anon}\land\mathsf{DoSResist},\\
+  \mathsf{SybilResist}\land\mathsf{EclipseResist}
+  \land\mathsf{Anon}\land\mathsf{DoSResist},\\
 \mathsf{SecClaim}&\Rightarrow&
-  \mathsf{Adm}\land\mathsf{Rank}
+  \mathsf{SelfCertID}\land\mathsf{TypedSession}
+  \land\mathsf{ReplayReject}\\
+&&{}\land\mathsf{Adm}\land\mathsf{Rank}
   \land\mathsf{Relay}\land\mathsf{Quota}.
 \end{array}
 \]
 
-\begin{obligation}[Replay rejection]
+\begin{obligation}[Replay and session-confusion rejection]
 \[
 \begin{array}{rcl}
-\operatorname{accept}(s,\eta,t)
-&\Rightarrow&
-  \eta\notin Seen_s\land t<exp(s),\\
-Seen'_s&=&Seen_s\cup\{\eta\},\\
-\mathsf{emitDelivery}&<&Seen'_s.
+\operatorname{Accept}_{\Delta}(f,t)&\Rightarrow&
+\operatorname{SessionValid}(sid(f))\\
+&&{}\land t<exp(sid(f))\\
+&&{}\land\operatorname{ctx}(f)=\operatorname{ctx}(sid(f))\\
+&&{}\land \operatorname{fid}(f)\notin seen,\\
+seen'&=&seen\cup\{\operatorname{fid}(f)\},\\
+\operatorname{emit}(f)&\Rightarrow&\operatorname{fid}(f)\in seen',\\
+\operatorname{DropDup}_{\Delta}(f)&\Rightarrow&
+  \mathsf{emit}=\epsilon .
 \end{array}
 \]
 \end{obligation}
@@ -1188,48 +1314,89 @@ Seen'_s&=&Seen_s\cup\{\eta\},\\
 \section{Verification Evidence and Evaluation Scope}
 
 \[
-  \mathsf{Spec}\neq\mathsf{Evidence}_{\Gamma}\neq\mathsf{Evaluation}.
+  \mathsf{Ledger}
+  =
+  \mathsf{Spec}
+  \uplus \mathsf{Evidence}_{\Gamma}
+  \uplus \mathsf{Baseline}_{C}
+  \uplus \mathsf{Runtime}_{R}.
 \]
-The repository contains executable evidence for finite overlay, storage, and
-message-flow obligations; it does not yet contain a wide-area Rings benchmark.
-
-\begin{definition}[State relation]
+This section is an evidence ledger, not a performance claim.  The repository
+contains executable finite-scope evidence for overlay, storage, and message-flow
+obligations.  It does not yet contain a wide-area Rings benchmark, committed
+benchmark-table regeneration data, or committed seeds sufficient to regenerate
+the tables below.
 \[
-  C=(S,Q)
+\begin{array}{rcl}
+\mathsf{AdmittedEval}(d)&\Leftrightarrow&\mathsf{Regen}(d),\\
+\neg\mathsf{AdmittedEval}(d)&\Rightarrow&d\in\mathsf{ReportedOnly}.
+\end{array}
+\]
+
+\begin{definition}[Execution relation and effect abstraction]
+Let \(A_A\) be concrete scheduled actions and \(\mathcal{I}_A\) the abstract
+inputs of actor \(A\).
+\[
+\begin{array}{rcl}
+I_A&:&A_A\rightharpoonup\mathcal{I}_A,\\
+I_A^\sharp(\langle a_1,\ldots,a_m\rangle)
+&=&\langle I_A(a_j): I_A(a_j)\downarrow\rangle_{j=1}^{m}.
+\end{array}
+\]
+For triples, lift componentwise:
+\[
+I_A^\sharp(s,o,\beta)=(s,o,I_A^\sharp(\beta)).
 \]
 \[
 \frac{
   Q=a::Q_0\quad
   I_A(a)=i\quad
-  \tau(S,i)=(S',O,\beta)
+  \tau_A(S,i)=(S',O,\beta)
 }{
-  (S,Q)\to(S',Q_0\cdot\beta)
+  (S,Q)\to_A(S',Q_0\cdot\beta)
 }
 \]
 \[
-  \mathsf{Explore}_{\Gamma}=\mathsf{ModelCheck}(\to,\Gamma)
+\begin{array}{rcl}
+\mathsf{Explore}_{\Gamma}&=&\mathsf{ModelCheck}(\to_A,\Gamma),\\
+\Gamma&=&(|N|,\mathsf{topology},\mathsf{scheduler},\mathsf{fault}).
+\end{array}
 \]
 \[
-\begin{array}{rcl}
-\Gamma&=&(|N|,\mathsf{topology},\mathsf{scheduler},\mathsf{fault}),\\
 \mathsf{ModelClaim}(\Gamma)
-&\Rightarrow&
-\mathsf{finite}(\Gamma)
-\land\mathsf{declared}(\Gamma).
-\end{array}
+\Rightarrow
+\mathsf{finite}(\Gamma)\land\mathsf{declared}(\Gamma).
 \]
 The relation follows TLA+ style and Stateright execution in the declared finite
 scope~\cite{LamportSpecifyingSystems,Stateright}.
 \end{definition}
 
+\begin{definition}[Effect preorder]
+\[
+\begin{aligned}
+(s,o,\alpha)\preceq_A(s',o',\alpha')
+\Longleftrightarrow\;&s=s'\land o=o'\\
+&\land \mathsf{obs}_A(\alpha)=\mathsf{obs}_A(\alpha').
+\end{aligned}
+\]
+Here \(\mathsf{obs}_A\) erases implementation-local stutter effects such as
+logging, timers already represented by \(\Gamma\), and transport bookkeeping not
+visible in the actor interface.
+\end{definition}
+
 \begin{invariant}[Effect refinement]
 \[
-  \operatorname{Impl}_A(s,i)
-  \preceq
-  I_A^\sharp(\tau(s,i)).
+\forall s,i.\quad
+I_A^\sharp(\operatorname{Impl}_A(s,i))
+\preceq_A
+I_A^\sharp(\tau_A(s,i)).
 \]
+Equivalently, implementation and specification have equal state/output
+projections and equal observable abstract effect traces:
 \[
-  \pi_{state}(\operatorname{Impl}_A)=\pi_{state}(I_A^\sharp\circ\tau).
+\pi_{state,out}(I_A^\sharp(\operatorname{Impl}_A))
+=
+\pi_{state,out}(I_A^\sharp\circ\tau_A).
 \]
 \end{invariant}
 
@@ -1252,22 +1419,26 @@ scope~\cite{LamportSpecifyingSystems,Stateright}.
 \setlength{\tabcolsep}{2pt}
 \begin{tabular}{p{1.35cm}|p{2.65cm}|p{2.45cm}}
 \hline
-Artifact & Checked scope & Limitation \\ \hline
+Artifact & Checked scope & Non-claim / limit \\ \hline
 Topology tests
   & join, rectify, stabilize fixpoints on finite DID layouts
   & not a parametric TLAPS proof \\
 Stateright
-  & predecessor update, small discovery abstraction, storage CRDT, handoff
-  & scoped models, not a full live network \\
+  & predecessor update, bounded discovery abstraction, storage CRDT, handoff
+  & finite scoped models, not a live-network theorem \\
 Trace replay
   & deterministic delivery schedules over real routing code
   & not an Internet latency benchmark \\
 E2E tests
   & signed direct-ElGamal frame order, final marker, and replay behavior
   & not a symbolic cryptographic proof \\
+CI witness
+  & build, test, lint, doc, release-package paths
+  & no benchmark-table regeneration job \\
 \hline
 \end{tabular}
-\caption{Verification evidence and explicit limits}
+\caption{Verification evidence and explicit limits.  Entries are finite-scope
+implementation evidence; none is a wide-area Rings lookup benchmark.}
 \label{verification-table}
 \end{table}
 
@@ -1290,43 +1461,56 @@ Only $hT_{hop}$ is Chord-comparable; the rest is Rings runtime overhead.
 \begin{definition}[Benchmark data model]
 \[
 \begin{array}{rcl}
-F_X(\eta;D)&\subseteq&Q_X(\eta;D),\\
-to_X&:&Q_X(\eta;D)\to\mathbb{N},\\
-\phi_X(\eta;D)&=&|F_X(\eta;D)|/|Q_X(\eta;D)|,\\[3pt]
-\bar{to}_X(\eta;D)&=&|Q_X|^{-1}\sum_{q\in Q_X}to_X(q),\\[3pt]
-B_X(\eta;D)&=&
-  (\mathbb{E}[h_X^f\mid\eta,D],
-   \mathbb{E}[h_X^r\mid\eta,D],\\
-&& \bar{to}_X(\eta;D),\phi_X(\eta;D)),\\
-h_X^r&=&h_X^f+1.
+\eta&=&(N,r,m,L,f,\lambda,\chi,M),\\
+M&\in&\{\mathsf{maintained},\mathsf{stale}\},\\
+\pi(d)&\in&\mathsf{Prov},\\
+\mathsf{Regen}(d)&\Rightarrow&
+\mathsf{src},\mathsf{rev},\mathsf{cmd}\neq\bot,\\
+&&\mathsf{seed},\mathsf{host}\neq\bot .
 \end{array}
 \]
 \[
 \begin{array}{rcl}
-D_{656}&=&D_C^{paper}\cup D_C^{1600}\cup D_R^{docker},\\
+F_C(\eta;D)&\subseteq&Q_C(\eta;D),\\
+\phi_C(\eta;D)&=&|F_C(\eta;D)|/|Q_C(\eta;D)|,\\
+ok_C(\eta;D)&=&1-\phi_C(\eta;D),\\
+\bar{to}_C(\eta;D)&=&|Q_C|^{-1}\sum_{q\in Q_C}to_C(q),\\
+B_C(\eta;D)&=&
+  (\mathbb{E}[h_C^f\mid\eta,D],
+   \mathbb{E}[h_C^r\mid\eta,D],
+   \bar{to}_C,ok_C,\phi_C),\\
+h_C^r&=&h_C^f+1.
+\end{array}
+\]
+\[
+\begin{array}{rcl}
+D_{reported}&=&D_C^{paper}\uplus D_C^{656}\uplus D_R^{docker},\\
+D_{admit}&=&\{d\in D_{reported}:\mathsf{AdmittedEval}(d)\},\\
 D_C^{paper}&=&\{C_{II},C_{III},C_{IV},C_{8},C_{9},C_{10}\},\\
-D_C^{1600}&=&\{\mathsf{maintained},\mathsf{stale}\},\\
-D_R^{docker}&=&\{\mathsf{convergence},\mathsf{transport}\}.
+D_C^{656}&=&\{\mathsf{maintained},\mathsf{stale}\},\\
+D_R^{docker}&=&\{D_R^{conv},D_R^{tx}\}.
 \end{array}
 \]
 \[
 \begin{array}{rcl}
-C_{II}&:&(N,r,|Q|)=(1000,20,10^4),\\
-C_{III}&:&(N,r,\lambda) \simeq (1000,20,0.05..0.40),\\
-D_C^{1600}&:&(N,r,m,L)=(1600,3,160,64).
+D_C^{paper}&:&(N,r)=(1000,20),\\
+D_C^{656}&:&(N,r,m,L)=(1600,3,160,64),\\
+D_C^{paper}\cup D_C^{656}&\subset&\mathsf{Baseline}_{C},\\
+D_R^{docker}&\subset&\mathsf{Runtime}_{R},\\
+\mathsf{Baseline}_{C}\cap\mathsf{Runtime}_{R}&=&\varnothing .
 \end{array}
 \]
-\[
-  D_C^{paper}\not\subset\mathsf{Impl}_{Rings},
-  \qquad
-  D_R^{docker}\subset\mathsf{Impl}_{Rings}.
-\]
-Here $X\in\{C,R\}$, $\eta$ fixes the workload and fault regime, and $D$ fixes
-the artifact.  $h^f$ counts forwarding hops; $h^r$ counts lookup rounds.
+Here \(D_C^{paper}\) is an external Chord-paper coordinate, \(D_C^{656}\) is a
+PR~656 Chord-only coordinate at Rings' current overlay parameters, and
+\(D_R^{docker}\) is reported Rings runtime evidence.  Unless
+\(\mathsf{AdmittedEval}(d)\) holds, a tuple is a reported coordinate only; it is
+not used to prove \(\mathsf{Main}_{Rings}\).  Metrics are not pooled unless a
+Rings lookup benchmark with the same workload key \(\eta\) is added.
 \end{definition}
 
-Table~\ref{chord-paper-data-table} gives the PR~656 Chord-paper coordinates
-($N=1000,r=20$); it is not Rings runtime evidence.
+Table~\ref{chord-paper-data-table} records the Chord-paper baseline coordinates
+(\(N=1000,r=20\)).  It calibrates comparison scale only; it is neither Rings
+runtime evidence nor generated by this repository.
 
 \begin{table}[htbp]
 \centering
@@ -1352,14 +1536,16 @@ $C_{III},\lambda=.35$ & $\simeq1000,20$ & 4.308 & 0.599 & 60.0 \\
 $C_{III},\lambda=.40$ & $\simeq1000,20$ & 4.345 & 0.656 & 58.0 \\
 \hline
 \end{tabular}
-\caption{Chord-paper-aligned rows in
-\texttt{chord-paper-sim-2026-07-05.jsonl}.}
+\caption{External Chord-paper baseline coordinates (\(N=1000,r=20\)),
+transcribed as reported comparison coordinates.  They are not Rings runtime
+evidence and are not regenerated by the current artifact.}
 \label{chord-paper-data-table}
 \end{table}
 
-Table~\ref{rings-param-chord-data-table} fixes Rings' current Chord parameters
-($N=1600,r=3,m=160$).  Maintained rows are the baseline; stale rows are
-no-maintenance sensitivity.
+Table~\ref{rings-param-chord-data-table} fixes a Chord-only baseline at Rings'
+current overlay parameters (\(N=1600,r=3,m=160,L=64\)).  Maintained rows are the
+comparison baseline; stale rows intentionally disable maintenance and measure
+sensitivity, not Rings behavior.
 
 \begin{table}[htbp]
 \centering
@@ -1367,132 +1553,143 @@ no-maintenance sensitivity.
 \setlength{\tabcolsep}{1.5pt}
 \begin{tabular}{c|c|c|c|c|c}
 \hline
-$\eta$ & $M$ & $\bar h^f/\bar h^r$ &
+$\eta$ & model & $\bar h^f/\bar h^r$ &
 $ok$ & $\bar{to}$ & $10^4\phi$ \\ \hline
-stable & m & $4.469/5.469$ & 1.000 & 0.000 & 0.0 \\
-$f=.10$ & m & $4.394/5.394$ & 1.000 & 0.000 & 0.0 \\
-$f=.20$ & m & $4.316/5.316$ & 1.000 & 0.000 & 0.0 \\
-$\chi=.05$ & m & $4.465/5.465$ & 1.000 & 0.000 & 0.0 \\
-$\chi=.40$ & m & $4.470/5.470$ & 1.000 & 0.000 & 0.0 \\
-$f=.10$ & s & $4.758/5.758$ & .990 & .734 & 98.2 \\
-$f=.20$ & s & $5.186/6.186$ & .969 & 1.890 & 314.7 \\
-$\chi=.05$ & s & $4.617/5.617$ & .945 & .361 & 546.2 \\
-$\chi=.40$ & s & $5.746/6.746$ & .484 & 4.604 & 5161.1 \\
+stable & maint. & $4.469/5.469$ & 1.000 & 0.000 & 0.0 \\
+$f=.10$ & maint. & $4.394/5.394$ & 1.000 & 0.000 & 0.0 \\
+$f=.20$ & maint. & $4.316/5.316$ & 1.000 & 0.000 & 0.0 \\
+$\chi=.05$ & maint. & $4.465/5.465$ & 1.000 & 0.000 & 0.0 \\
+$\chi=.40$ & maint. & $4.470/5.470$ & 1.000 & 0.000 & 0.0 \\
+$f=.10$ & stale & $4.758/5.758$ & .990 & .734 & 98.2 \\
+$f=.20$ & stale & $5.186/6.186$ & .969 & 1.890 & 314.7 \\
+$\chi=.05$ & stale & $4.617/5.617$ & .945 & .361 & 546.2 \\
+$\chi=.40$ & stale & $5.746/6.746$ & .484 & 4.604 & 5161.1 \\
 \hline
 \end{tabular}
-\caption{Current Rings-parameter Chord baselines
-($m=$maintained, $s=$stale; churn endpoints) from
-\texttt{dummy-paper-scale-2026-07-05.jsonl}.}
+\caption{Chord-only baselines at Rings parameters
+(\(N=1600,r=3,m=160,L=64\)).  Maintained rows are the baseline; stale rows are
+no-maintenance sensitivity.  These are PR~656 reported coordinates, not
+admitted current-artifact evidence until generator, revision, seed, command, and
+host are shipped.}
 \label{rings-param-chord-data-table}
 \end{table}
 
-Thus stale rows explain sensitivity, not the maintained Chord baseline.
+Thus stale rows explain sensitivity, not the maintained Chord baseline:
+\[
+\begin{array}{rcl}
+M=\mathsf{stale}&\Rightarrow&\neg\mathsf{maintenance},\\
+M=\mathsf{maintained}&\Rightarrow&\mathsf{Baseline}_{C}^{656}.
+\end{array}
+\]
 
 \begin{obligation}[Benchmark report]
 \[
 \begin{aligned}
-  \mathsf{Report}_{Rings} =
-  (&N,\rho,r,\mathsf{transport},\mathsf{runtime},\\
-   &\mathsf{scheduler},\vec{T}_{total},
-     B_R(\eta_R;D_R^{docker})).
+  \mathsf{Report}_{eval} =
+  (&\mathsf{Baseline}_{C}^{paper},
+    \mathsf{Baseline}_{C}^{656},\\
+   &\mathsf{Runtime}_{R}^{docker},
+    \mathsf{Prov},\mathsf{Limit}).
 \end{aligned}
 \]
 \[
-  B_C(\eta;D_C^{paper})
-  \not\equiv
-  B_R(\eta_R;D_R^{docker}).
+\begin{array}{rcl}
+\mathsf{ReportCmp}_{lookup}&=&B_C(\eta;D_C^{paper}\uplus D_C^{656}),\\
+\mathsf{Measure}_{runtime}&=&B_R^{docker}(\eta_R;D_R^{docker}),\\
+\mathsf{ReportCmp}_{lookup}&\not\equiv&\mathsf{Measure}_{runtime}.
+\end{array}
 \]
-The report keeps two ledgers: $B_C$ is the paper baseline; $B_R$ is Rings
-runtime evidence.
+A Rings performance claim must measure Rings under the reported build; a Chord
+baseline may only be cited as a baseline.
 \end{obligation}
 
 \[
 \begin{array}{rcl}
 \vec{T}_{total}&=&(T_{conn},hT_{hop},T_{crypto},\\
 &&T_{app},T_{witness}),\\
-\sum_i\vec{T}_{total,i}&=&T_{total},\\
-\mathsf{Overhead}_{R/C}
-  &=&(T_{conn},T_{crypto},T_{app},\\
-&&T_{witness},\mathsf{runtime}),\\
-\mathsf{PerfClaim}_{R}
-  &\Rightarrow&
-  \mathsf{Measure}_{build}(B_R)\\
-&&{}\wedge\mathsf{Cite}(B_C^p),\\
-D_C^p&=&D_C^{paper},\\
-B_C^p&=&B_C(\eta;D_C^p).
+\mathsf{Ccmp}(\vec{T}_{total})&=&hT_{hop},\\
+\mathsf{Rovh}&=&(T_{conn},T_{crypto},T_{app},\\
+&&T_{witness},\mathsf{runtime}).
 \end{array}
 \]
+Only \(hT_{hop}\) is Chord-comparable.  Connection establishment, cryptography,
+application handling, witness generation, and runtime scheduling are Rings
+overheads and require Rings measurements.
+
 \[
 \begin{array}{rcl}
 D_R^{conv}&=&
-  (16,309.532s,0/16,3/16,\\
-&& .194,1.026,8058.6),\\
+  \mathsf{raw}(16,309.532s,0/16,3/16,\\
+&&.194,1.026,8058.6),\\
 D_R^{tx}&=&
-\{(1,10.46),(16,107.35),\\
-&& (64,90.36)\}_{\mathrm{KiB},\mathrm{Mbps}}.
+  \{(1,10.46),(16,107.35),\\
+&& (64,90.36)\}\subset \mathrm{KiB}\times\mathrm{Mbps}.
 \end{array}
 \]
-Chord supplies the lookup/churn baseline~\cite{Chord}; Rings supplies runtime
-evidence only through Rings measurements.  The Docker/WebRTC cluster is
-convergence evidence, not steady-state lookup; $D_R^{tx}$ is payload throughput.
+The Docker/WebRTC cluster tuple is convergence evidence, not a steady-state
+lookup benchmark.  \(D_R^{tx}\) is payload throughput; it must not be compared
+to Chord forwarding hops or timeout rates.
+
+\noindent\textbf{Artifact provenance.}
+\[
+\begin{array}{rcl}
+\mathsf{AdmittedEval}(d)&\Leftrightarrow&
+\mathsf{src}(d)\neq\bot\land\mathsf{rev}(d)\neq\bot\\
+&&{}\land\mathsf{cmd}(d)\neq\bot\land\mathsf{seed}(d)\neq\bot\\
+&&{}\land\mathsf{host}(d)\neq\bot .
+\end{array}
+\]
+No CI command currently regenerates Table~\ref{chord-paper-data-table},
+Table~\ref{rings-param-chord-data-table}, \(D_R^{conv}\), or \(D_R^{tx}\).
+
+\noindent\textbf{Limitations.}
+The current artifact supports finite model/test evidence and reported baseline
+coordinates.  It does not yet support claims about wide-area latency, NAT
+population behavior, adversarial churn beyond the scoped models, symbolic
+cryptographic security, or steady-state Rings lookup performance.
 
 \section{Related Work}
 
-Use the comparison coordinates
-\[
-  \mathsf{Axis}(S)=
-  (\mu,\omega,\chi,\lambda).
-\]
-\[
-\begin{array}{rcl}
-\mu&=&\mathsf{metric},\\
-\omega&=&\mathsf{owner},\\
-\chi&=&\mathsf{order},\\
-\lambda&=&\mathsf{runtime}.
-\end{array}
-\]
-\[
-\begin{array}{c|c}
-S&\mathsf{Axis}(S)\\ \hline
-\mathsf{Kad}&(XOR,\mathsf{bucket},\bot,\mathsf{native})\\
-\mathsf{Chord}&(\mathsf{circ},\mathsf{succ},\bot,\mathsf{native})\\
-\mathsf{Tor/Nym}&(\mathsf{path},\bot,\bot,\mathsf{relay})\\
-\mathsf{Ledger}&(\bot,\mathsf{acct},\mathsf{global},\mathsf{repl})\\
-\mathsf{Rings}&(\mathsf{circ},\operatorname{owner}_N,\mathsf{sidecar},
-  \mathsf{web}\cup\mathsf{native})
-\end{array}
-\]
-Kademlia/IPFS/libp2p supply scalable lookup but not the clockwise owner law
-needed here~\cite{Kademlia,IPFS,Libp2p}.  Tor and Nym supply relay-path
-privacy, not structured ownership~\cite{TorNetwork,NymNetwork}.  Ledgers
-supply global order; Rings keeps ordering outside the base overlay.  WebRTC and
-WebAssembly are runtime adapters, so the same protocol object is interpreted in
-browser and native environments~\cite{webrtc-standard,webassembly}.
+Self-certifying systems bind names to keys, while DID standardization separates
+identifier syntax, verification methods, and resolution metadata
+\cite{SFS,DIDCore}.  Rings follows that line by making DID control a
+cryptographic predicate, but it places resources through
+\(\Omega_N(X,H)=(X,\operatorname{owner}_N\circ H)\) rather than through a
+global certificate authority or ledger.
 
-\begin{table}[htbp]
-\centering
-\footnotesize
-\setlength{\tabcolsep}{2pt}
-\begin{tabular}{p{1.25cm}|p{1.25cm}|p{2.95cm}}
-\hline
-System & Metric & Ownership law \\ \hline
-Kademlia
-  & XOR & bucket routing \\
-Relay mixnets
-  & path & no structured owner \\
-Rings
-  & circular & clockwise owner, successor list, affine placement keys \\
-\hline
-\end{tabular}
-\vspace{2pt}
-\caption{Routing and ownership comparison \cite{Kademlia,IPFS,Libp2p,TorNetwork,NymNetwork}}
-\label{related-table}
-\end{table}
+Protection systems and authorization logics make authority an explicit
+predicate; monads and algebraic effects make runtime effects typed
+\cite{LampsonProtection,AbadiAccessControl,MoggiMonads,PlotkinPretnarEffects}.
+Rings uses these tools as composition discipline: authority, placement, and
+effect emission live in separate carriers and meet only through typed morphism
+laws.
+
+Structured overlays give different placement laws.  Chord gives clockwise
+successor ownership; Kademlia/IPFS/libp2p give XOR or provider-record lookup;
+Pastry, Tapestry, and CAN explore prefix, proximity, and coordinate-space
+routing~\cite{Chord,Kademlia,IPFS,Libp2p,Pastry,Tapestry,CAN}.  Rings' novelty
+is not another lookup metric; it is the separation between the circular owner
+law, DID/session authority, CRDT-style storage merge, and browser/native
+transport interpretation.
+
+Security work on DHTs shows why this separation must be explicit.  Secure
+routing, Sybil, and Eclipse attacks require admission, identifier assignment,
+neighbor-set constraints, auditing, or redundant routing beyond ordinary DHT
+maintenance~\cite{SitMorrisDHTSecurity,SecureRoutingOverlays,SybilDouceur,
+EclipseOverlay}.  Rings therefore states Sybil, Eclipse, anonymity, and DoS
+resistance as policy obligations, not as consequences of CorrectChord.
+
+Rings storage uses the join-semilattice CRDT case when merge is available and
+an explicit finalizer otherwise~\cite{ShapiroCRDT}.  WebRTC and WebAssembly are
+runtime carriers, not overlay algorithms; WebRTC measurement work also suggests
+that connection setup, NAT traversal, and payload throughput must be reported
+separately from DHT hop count~\cite{webrtc-standard,webassembly,
+WebRTCMeasurement}.
 
 \section{Conclusion}
 
-The paper's claim is the following structured object, not an informal bundle of
-network mechanisms:
+Rings should be read as a bounded theorem about an implemented algebraic object,
+not as an informal bundle of peer-to-peer mechanisms:
 
 \[
   \RingsObj=
@@ -1500,19 +1697,25 @@ network mechanisms:
    \mathsf{T}^{\mathcal{E}}_A,\Pi,\mathbb{G},\mathcal{X}).
 \]
 \[
-\begin{array}{rcl}
-\mathsf{Overlay}&=&\mathsf{CorrectChord}(R,N,r),\\
-\mathsf{Resource}&=&(X_\nu,H_\nu)\in\SetOverR,\\
-\mathsf{Placement}&=&\Omega_N(X_\nu,H_\nu),\\
-\mathsf{Transition}&=&\tau_\nu:S_\nu\times I_\nu\to Y_\nu,\\
-Y_\nu&=&\mathsf{T}^{\mathcal{E}_\nu}_{A_\nu}(S_\nu\times O_\nu),\\
-\mathsf{Crypto}&=&\mathbb{G}\lor\mathbb{F}_q,\quad
-  \mathsf{Crypto}\cap R=\varnothing,\\
-\mathsf{Evidence}&=&
-  \{\mathsf{scopedModels},\mathsf{traceReplay}\}\\
-&&\cup\{\mathsf{invariants},\mathsf{benchmarkObligations}\}.
-\end{array}
+\begin{aligned}
+\mathsf{Established}
+&=\mathsf{OwnerFunctor}\land\mathsf{CarrierSep}\\
+&\quad{}\land\mathsf{TypedEffects}\land\mathsf{ImplMap},\\
+\mathsf{ScopedEvidence}
+&=\mathsf{Explore}_{\Gamma}\land\mathsf{traceReplay}\\
+&\quad{}\land\mathsf{declared}(\Gamma),\\
+\mathsf{Obligation}
+&=\mathsf{wideAreaBenchmark}
+\cup\mathsf{adversarialLiveness}\\
+&\quad{}\cup\mathsf{fullReplicaRealization},\\
+\mathsf{NonClaim}&=\NonClaim .
+\end{aligned}
 \]
+The scientific contribution is the composition law and its claim ledger:
+CorrectChord supplies the overlay safety root, \(\Omega_N\) lifts resource
+namespaces into live owners, protocol morphisms preserve placement, and runtime
+effects remain typed.  The implementation evidence supports those claims only
+within the declared finite scopes and reported measurements.
 
 \bibliographystyle{IEEEtran}
 \bibliography{./cites}
