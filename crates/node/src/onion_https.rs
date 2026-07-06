@@ -13,7 +13,6 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -38,6 +37,7 @@ use crate::error::Result;
 use crate::extension::ext::Scope;
 use crate::onion::circuit::send_backward;
 use crate::onion::circuit::OnionCircuitHandler;
+use crate::onion::circuit::OnionCircuitId;
 use crate::onion::circuit::OnionCircuitPayload;
 use crate::onion::circuit::OnionClientReturn;
 use crate::onion::circuit::OnionHttpsRequest;
@@ -104,8 +104,7 @@ pub struct OnionHttpsClientResponse {
 #[derive(Default)]
 pub(crate) struct OnionHttpsRuntime {
     circuit_protocol_installed: AtomicBool,
-    next_request: AtomicU64,
-    pending: Mutex<HashMap<u64, PendingRequest>>,
+    pending: Mutex<HashMap<OnionCircuitId, PendingRequest>>,
     exit_policy: Mutex<Option<OnionExitPolicy>>,
     limiter: Arc<Mutex<ExitLimiter>>,
 }
@@ -187,30 +186,41 @@ impl OnionHttpsRuntime {
         &self,
         expected_return_peer: Did,
     ) -> Result<(
-        u64,
+        OnionCircuitId,
         oneshot::Receiver<std::result::Result<OnionHttpsClientResponse, String>>,
     )> {
-        let id = self.next_request.fetch_add(1, Ordering::Relaxed);
-        let (sender, receiver) = oneshot::channel();
-        self.pending
-            .lock()
-            .map_err(|_| Error::Lock)?
-            .insert(id, PendingRequest {
+        let mut pending = self.pending.lock().map_err(|_| Error::Lock)?;
+        for _ in 0..16 {
+            let id = OnionCircuitId::random();
+            if pending.contains_key(&id) {
+                continue;
+            }
+            let (sender, receiver) = oneshot::channel();
+            pending.insert(id, PendingRequest {
                 expected_return_peer,
                 sender,
             });
-        Ok((id, receiver))
+            return Ok((id, receiver));
+        }
+        Err(Error::OnionRouteError(
+            "failed to allocate unique browser onion circuit id".to_string(),
+        ))
     }
 
     /// Cancel a request that failed before it was sent.
-    pub(crate) fn cancel_request(&self, id: u64) {
+    pub(crate) fn cancel_request(&self, id: OnionCircuitId) {
         if let Ok(mut pending) = self.pending.lock() {
             pending.remove(&id);
         }
     }
 
     /// Complete a pending HTTPS request with a response.
-    pub(crate) fn complete_response(&self, from: Did, id: u64, response: OnionHttpsResponse) {
+    pub(crate) fn complete_response(
+        &self,
+        from: Did,
+        id: OnionCircuitId,
+        response: OnionHttpsResponse,
+    ) {
         let Some(pending) = self.take_pending(from, id) else {
             return;
         };
@@ -222,14 +232,14 @@ impl OnionHttpsRuntime {
     }
 
     /// Complete a pending HTTPS request with an error.
-    pub(crate) fn complete_error(&self, from: Did, id: u64, message: String) {
+    pub(crate) fn complete_error(&self, from: Did, id: OnionCircuitId, message: String) {
         let Some(pending) = self.take_pending(from, id) else {
             return;
         };
         let _ = pending.sender.send(Err(message));
     }
 
-    fn take_pending(&self, from: Did, id: u64) -> Option<PendingRequest> {
+    fn take_pending(&self, from: Did, id: OnionCircuitId) -> Option<PendingRequest> {
         let mut pending = self.pending.lock().ok()?;
         let request = pending.remove(&id)?;
         if request.expected_return_peer == from {
@@ -460,7 +470,7 @@ impl OnionCircuitHandler for BrowserOnionCircuitHandler {
         &self,
         scope: &Scope,
         _from: Did,
-        stream_id: u64,
+        circuit_id: OnionCircuitId,
         return_peer: Did,
         client: OnionClientReturn,
         payload: OnionCircuitPayload,
@@ -483,22 +493,22 @@ impl OnionCircuitHandler for BrowserOnionCircuitHandler {
                 return Ok(());
             }
         };
-        send_backward(scope, stream_id, return_peer, client, response).await
+        send_backward(scope, circuit_id, return_peer, client, response).await
     }
 
     async fn handle_client(
         &self,
         _scope: &Scope,
         from: Did,
-        stream_id: u64,
+        circuit_id: OnionCircuitId,
         payload: OnionCircuitPayload,
     ) -> Result<()> {
         match payload {
             OnionCircuitPayload::HttpsResponse(response) => {
-                self.https.complete_response(from, stream_id, response);
+                self.https.complete_response(from, circuit_id, response);
             }
             OnionCircuitPayload::HttpsError(message) => {
-                self.https.complete_error(from, stream_id, message);
+                self.https.complete_error(from, circuit_id, message);
             }
             _ => {}
         }

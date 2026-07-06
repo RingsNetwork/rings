@@ -96,6 +96,7 @@ subtle = "2.4.1"
 thiserror = "1"
 tracing = "0.1.37"
 url = { version = "2", features = ["serde"] }
+zeroize = "1.8.1"
 
 rings-derive = { workspace = true, optional = true, features = ["core_crate"] }
 tiny-keccak = { version = "2.0.1", features = ["keccak"] }

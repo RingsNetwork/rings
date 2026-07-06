@@ -42,6 +42,7 @@ use rand::RngCore;
 use serde::Deserialize;
 use serde::Serialize;
 use sha2::Sha256;
+use zeroize::Zeroizing;
 
 use crate::ecc::elgamal::ElGamal;
 use crate::ecc::elgamal::ElGamalPublicKey;
@@ -388,14 +389,14 @@ pub fn encrypt_aead_with_rng(
     recipient: PublicKey<33>,
     rng: &mut impl RngCore,
 ) -> Result<AeadCiphertext> {
-    let mut key_material = [0u8; AEAD_KEY_LEN];
-    rng.fill_bytes(&mut key_material);
-    let encrypted_key = encrypt_bytes_with_rng(&key_material, recipient, rng)?;
-    let key = derive_aead_key(&key_material, AeadErrorSide::Encrypt)?;
+    let mut key_material = Zeroizing::new([0u8; AEAD_KEY_LEN]);
+    rng.fill_bytes(key_material.as_mut_slice());
+    let encrypted_key = encrypt_bytes_with_rng(key_material.as_slice(), recipient, rng)?;
+    let key = derive_aead_key(key_material.as_slice(), AeadErrorSide::Encrypt)?;
     let mut nonce = [0u8; AEAD_NONCE_LEN];
     rng.fill_bytes(&mut nonce);
     let associated_data = aead_associated_data(&encrypted_key, aad)?;
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(key.as_slice()));
     let ciphertext = cipher
         .encrypt(Nonce::from_slice(&nonce), Payload {
             msg: plaintext,
@@ -424,10 +425,10 @@ pub fn decrypt_aead(
         )));
     }
 
-    let key_material = decrypt_bytes(&sealed.encrypted_key, recipient_secret)?;
-    let key = derive_aead_key(&key_material, AeadErrorSide::Decrypt)?;
+    let key_material = Zeroizing::new(decrypt_bytes(&sealed.encrypted_key, recipient_secret)?);
+    let key = derive_aead_key(key_material.as_slice(), AeadErrorSide::Decrypt)?;
     let associated_data = aead_associated_data(&sealed.encrypted_key, aad)?;
-    let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+    let cipher = ChaCha20Poly1305::new(Key::from_slice(key.as_slice()));
     cipher
         .decrypt(Nonce::from_slice(&sealed.nonce), Payload {
             msg: sealed.ciphertext.as_slice(),
@@ -442,7 +443,10 @@ enum AeadErrorSide {
     Decrypt,
 }
 
-fn derive_aead_key(key_material: &[u8], side: AeadErrorSide) -> Result<[u8; AEAD_KEY_LEN]> {
+fn derive_aead_key(
+    key_material: &[u8],
+    side: AeadErrorSide,
+) -> Result<Zeroizing<[u8; AEAD_KEY_LEN]>> {
     if key_material.len() != AEAD_KEY_LEN {
         return Err(match side {
             AeadErrorSide::Encrypt => Error::MessageEncryptionFailed(format!(
@@ -456,9 +460,9 @@ fn derive_aead_key(key_material: &[u8], side: AeadErrorSide) -> Result<[u8; AEAD
         });
     }
 
-    let mut key = [0u8; AEAD_KEY_LEN];
+    let mut key = Zeroizing::new([0u8; AEAD_KEY_LEN]);
     Hkdf::<Sha256>::new(Some(AEAD_HKDF_SALT), key_material)
-        .expand(AEAD_HKDF_INFO, &mut key)
+        .expand(AEAD_HKDF_INFO, key.as_mut_slice())
         .map_err(|_| match side {
             AeadErrorSide::Encrypt => {
                 Error::MessageEncryptionFailed("AEAD key derivation failed".to_string())

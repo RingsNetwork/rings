@@ -23,6 +23,7 @@ use crate::extension::ext::Scope;
 use crate::onion::circuit::encode_initial_forward;
 use crate::onion::circuit::send_backward;
 use crate::onion::circuit::OnionCircuitHandler;
+use crate::onion::circuit::OnionCircuitId;
 use crate::onion::circuit::OnionCircuitPayload;
 use crate::onion::circuit::OnionCircuitProtocol;
 use crate::onion::circuit::OnionCircuitShell;
@@ -90,25 +91,32 @@ impl OnionCircuitHandler for NativeOnionCircuitHandler {
         &self,
         scope: &Scope,
         from: Did,
-        stream_id: u64,
+        circuit_id: OnionCircuitId,
         return_peer: Did,
         client: OnionClientReturn,
         payload: OnionCircuitPayload,
     ) -> Result<()> {
         self.runtime
-            .handle_exit_payload(scope.clone(), from, stream_id, return_peer, client, payload)
+            .handle_exit_payload(
+                scope.clone(),
+                from,
+                circuit_id,
+                return_peer,
+                client,
+                payload,
+            )
             .await
     }
 
     async fn handle_client(
         &self,
-        scope: &Scope,
+        _scope: &Scope,
         from: Did,
-        stream_id: u64,
+        circuit_id: OnionCircuitId,
         payload: OnionCircuitPayload,
     ) -> Result<()> {
         self.runtime
-            .handle_client_payload(scope.did(), from, stream_id, payload)
+            .handle_client_payload(from, circuit_id, payload)
             .await
     }
 }
@@ -145,11 +153,11 @@ impl OnionTcpRuntime {
             .copied()
             .ok_or_else(|| Error::OnionRouteError("onion route has no hops".to_string()))?;
         let (tx, rx) = mpsc::channel(32);
-        let key = self.insert_client_stream(scope.did(), expected_return_peer, tx)?;
+        let key = self.insert_client_stream(expected_return_peer, tx)?;
         let (to, payload) = encode_initial_forward(
             self.client_return,
             &route,
-            key.stream_id,
+            key.circuit_id,
             OnionCircuitPayload::TcpOpen {
                 target: target.authority(),
             },
@@ -175,19 +183,24 @@ impl OnionTcpRuntime {
         self: &Arc<Self>,
         scope: Scope,
         from: Did,
-        stream_id: u64,
+        circuit_id: OnionCircuitId,
         return_peer: Did,
         client: OnionClientReturn,
         payload: OnionCircuitPayload,
     ) -> Result<()> {
-        let key = TcpStreamKey {
-            client: client.did,
-            stream_id,
-        };
+        let key = TcpStreamKey { circuit_id };
         match payload {
             OnionCircuitPayload::TcpOpen { target } => {
-                self.open_exit_stream(scope, key, stream_id, return_peer, client, from, target)
-                    .await
+                self.open_exit_stream(TcpExitOpen {
+                    scope,
+                    key,
+                    circuit_id,
+                    return_peer,
+                    client,
+                    expected_forward_peer: from,
+                    target,
+                })
+                .await
             }
             OnionCircuitPayload::TcpData { bytes } => {
                 self.send_exit_inbound(key, from, TcpInbound::Data(bytes))
@@ -203,7 +216,7 @@ impl OnionTcpRuntime {
             OnionCircuitPayload::HttpsRequest(_) => {
                 send_backward(
                     &scope,
-                    stream_id,
+                    circuit_id,
                     return_peer,
                     client,
                     OnionCircuitPayload::HttpsError(
@@ -218,15 +231,11 @@ impl OnionTcpRuntime {
 
     async fn handle_client_payload(
         self: &Arc<Self>,
-        local: Did,
         from: Did,
-        stream_id: u64,
+        circuit_id: OnionCircuitId,
         payload: OnionCircuitPayload,
     ) -> Result<()> {
-        let key = TcpStreamKey {
-            client: local,
-            stream_id,
-        };
+        let key = TcpStreamKey { circuit_id };
         match payload {
             OnionCircuitPayload::TcpData { bytes } => {
                 self.send_client_inbound(key, from, TcpInbound::Data(bytes))
@@ -247,20 +256,20 @@ impl OnionTcpRuntime {
         }
     }
 
-    async fn open_exit_stream(
-        self: &Arc<Self>,
-        scope: Scope,
-        key: TcpStreamKey,
-        stream_id: u64,
-        return_peer: Did,
-        client: OnionClientReturn,
-        expected_forward_peer: Did,
-        target: String,
-    ) -> Result<()> {
+    async fn open_exit_stream(self: &Arc<Self>, request: TcpExitOpen) -> Result<()> {
+        let TcpExitOpen {
+            scope,
+            key,
+            circuit_id,
+            return_peer,
+            client,
+            expected_forward_peer,
+            target,
+        } = request;
         let Some(policy) = &self.exit_policy else {
             return send_backward(
                 &scope,
-                stream_id,
+                circuit_id,
                 return_peer,
                 client,
                 OnionCircuitPayload::TcpError {
@@ -274,7 +283,7 @@ impl OnionTcpRuntime {
         if !policy.allows_target(&authority) {
             return send_backward(
                 &scope,
-                stream_id,
+                circuit_id,
                 return_peer,
                 client,
                 OnionCircuitPayload::TcpError {
@@ -288,7 +297,7 @@ impl OnionTcpRuntime {
             Err(error) => {
                 return send_backward(
                     &scope,
-                    stream_id,
+                    circuit_id,
                     return_peer,
                     client,
                     OnionCircuitPayload::TcpError {
@@ -304,7 +313,7 @@ impl OnionTcpRuntime {
                 drop(lease);
                 return send_backward(
                     &scope,
-                    stream_id,
+                    circuit_id,
                     return_peer,
                     client,
                     OnionCircuitPayload::TcpError {
@@ -320,7 +329,7 @@ impl OnionTcpRuntime {
                 drop(lease);
                 return send_backward(
                     &scope,
-                    stream_id,
+                    circuit_id,
                     return_peer,
                     client,
                     OnionCircuitPayload::TcpError {
@@ -342,7 +351,7 @@ impl OnionTcpRuntime {
             runtime: self.clone(),
             scope,
             key,
-            stream_id,
+            circuit_id,
             return_peer,
             client,
             stream,
@@ -354,15 +363,13 @@ impl OnionTcpRuntime {
 
     fn insert_client_stream(
         &self,
-        client: Did,
         expected_return_peer: Did,
         tx: mpsc::Sender<TcpInbound>,
     ) -> Result<TcpStreamKey> {
         let mut streams = self.client_streams.lock().map_err(|_| Error::Lock)?;
         for _ in 0..16 {
             let key = TcpStreamKey {
-                client,
-                stream_id: rand::random(),
+                circuit_id: OnionCircuitId::random(),
             };
             match streams.entry(key) {
                 Entry::Vacant(entry) => {
@@ -514,8 +521,17 @@ impl OnionTcpRuntime {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct TcpStreamKey {
-    client: Did,
-    stream_id: u64,
+    circuit_id: OnionCircuitId,
+}
+
+struct TcpExitOpen {
+    scope: Scope,
+    key: TcpStreamKey,
+    circuit_id: OnionCircuitId,
+    return_peer: Did,
+    client: OnionClientReturn,
+    expected_forward_peer: Did,
+    target: String,
 }
 
 struct ClientStream {
@@ -635,14 +651,14 @@ fn spawn_client_stream(
                 read_result = read.read(read_buf.as_mut_slice()), if state.can_read() => {
                     match read_result {
                         Ok(0) => {
-                            if send_client_payload(&scope, &route, client_return, key.stream_id, OnionCircuitPayload::TcpShutdown).await.is_err() {
+                            if send_client_payload(&scope, &route, client_return, key.circuit_id, OnionCircuitPayload::TcpShutdown).await.is_err() {
                                 break;
                             }
                             state.close_read();
                         }
                         Ok(n) => {
                             let bytes = Bytes::copy_from_slice(read_buf.get(..n).unwrap_or_default());
-                            if send_client_payload(&scope, &route, client_return, key.stream_id, OnionCircuitPayload::TcpData { bytes }).await.is_err() {
+                            if send_client_payload(&scope, &route, client_return, key.circuit_id, OnionCircuitPayload::TcpData { bytes }).await.is_err() {
                                 break;
                             }
                         }
@@ -678,7 +694,7 @@ fn spawn_client_stream(
             &scope,
             &route,
             client_return,
-            key.stream_id,
+            key.circuit_id,
             OnionCircuitPayload::TcpClose,
         )
         .await;
@@ -690,7 +706,7 @@ struct ExitStreamTask {
     runtime: Arc<OnionTcpRuntime>,
     scope: Scope,
     key: TcpStreamKey,
-    stream_id: u64,
+    circuit_id: OnionCircuitId,
     return_peer: Did,
     client: OnionClientReturn,
     stream: TcpStream,
@@ -704,7 +720,7 @@ fn spawn_exit_stream(task: ExitStreamTask) {
             runtime,
             scope,
             key,
-            stream_id,
+            circuit_id,
             return_peer,
             client,
             stream,
@@ -722,7 +738,7 @@ fn spawn_exit_stream(task: ExitStreamTask) {
                 read_result = read.read(read_buf.as_mut_slice()), if state.can_read() => {
                     match read_result {
                         Ok(0) => {
-                            if send_backward(&scope, stream_id, return_peer, client, OnionCircuitPayload::TcpShutdown).await.is_err() {
+                            if send_backward(&scope, circuit_id, return_peer, client, OnionCircuitPayload::TcpShutdown).await.is_err() {
                                 break;
                             }
                             state.close_read();
@@ -733,7 +749,7 @@ fn spawn_exit_stream(task: ExitStreamTask) {
                                 if runtime.record_exit_bytes(policy, bytes.len() as u64).is_err() {
                                     let _ = send_backward(
                                         &scope,
-                                        stream_id,
+                                        circuit_id,
                                         return_peer,
                                         client,
                                         OnionCircuitPayload::TcpError {
@@ -744,14 +760,14 @@ fn spawn_exit_stream(task: ExitStreamTask) {
                                     break;
                                 }
                             }
-                            if send_backward(&scope, stream_id, return_peer, client, OnionCircuitPayload::TcpData { bytes }).await.is_err() {
+                            if send_backward(&scope, circuit_id, return_peer, client, OnionCircuitPayload::TcpData { bytes }).await.is_err() {
                                 break;
                             }
                         }
                         Err(error) => {
                             let _ = send_backward(
                                 &scope,
-                                stream_id,
+                                circuit_id,
                                 return_peer,
                                 client,
                                 OnionCircuitPayload::TcpError {
@@ -773,7 +789,7 @@ fn spawn_exit_stream(task: ExitStreamTask) {
                                 if runtime.record_exit_bytes(policy, bytes.len() as u64).is_err() {
                                     let _ = send_backward(
                                         &scope,
-                                        stream_id,
+                                        circuit_id,
                                         return_peer,
                                         client,
                                         OnionCircuitPayload::TcpError {
@@ -805,7 +821,7 @@ fn spawn_exit_stream(task: ExitStreamTask) {
         }
         let _ = send_backward(
             &scope,
-            stream_id,
+            circuit_id,
             return_peer,
             client,
             OnionCircuitPayload::TcpClose,
@@ -820,10 +836,10 @@ async fn send_client_payload(
     scope: &Scope,
     route: &OnionRoute,
     client_return: OnionClientReturn,
-    stream_id: u64,
+    circuit_id: OnionCircuitId,
     payload: OnionCircuitPayload,
 ) -> Result<()> {
-    let (to, payload) = encode_initial_forward(client_return, route, stream_id, payload)?;
+    let (to, payload) = encode_initial_forward(client_return, route, circuit_id, payload)?;
     scope.send(to, payload).await
 }
 
@@ -874,11 +890,10 @@ mod tests {
     #[test]
     fn client_stream_accepts_only_expected_return_peer() -> Result<()> {
         let runtime = runtime();
-        let client = did();
         let expected = did();
         let attacker = did();
         let (tx, _rx) = mpsc::channel(1);
-        let key = runtime.insert_client_stream(client, expected, tx)?;
+        let key = runtime.insert_client_stream(expected, tx)?;
 
         assert!(runtime.client_inbound_sender(key, expected).is_ok());
         assert!(matches!(
