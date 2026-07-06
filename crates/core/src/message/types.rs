@@ -13,6 +13,7 @@ use crate::dht::entry::PlacedEntryOperation;
 use crate::dht::entry::PlacementMiss;
 use crate::dht::entry::SyncedEntryAck;
 use crate::dht::Did;
+use crate::dht::StorageSyncDelivery;
 use crate::dht::StorageSyncDestination;
 use crate::dht::TopoInfo;
 use crate::error::Error;
@@ -210,6 +211,15 @@ pub struct SyncEntriesWithSuccessor {
     pub destination: StorageSyncDestination,
     /// Entries to sync to the new successor, paired with their placement keys.
     pub data: Vec<PlacedEntry>,
+}
+
+impl SyncEntriesWithSuccessor {
+    /// Convert a lowered storage-sync delivery into the next hop and wire message.
+    pub(crate) fn from_delivery(delivery: StorageSyncDelivery) -> (Did, Self) {
+        let next = delivery.next();
+        let (destination, data) = delivery.into_message_parts();
+        (next, Self { destination, data })
+    }
 }
 
 /// MessageType used to acknowledge durable storage of synced entries.

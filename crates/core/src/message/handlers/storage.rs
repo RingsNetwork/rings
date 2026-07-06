@@ -197,34 +197,15 @@ async fn handle_placed_entry_operation(
 }
 
 /// Execute copy-only storage repair actions.
-#[cfg_attr(feature = "wasm", async_recursion(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_recursion)]
 pub(super) async fn handle_storage_repair_act(
     transport: Arc<SwarmTransport>,
     act: PeerRingAction,
 ) -> Result<()> {
-    match act {
-        PeerRingAction::RemoteAction(
-            target,
-            PeerRingRemoteAction::SyncEntriesWithSuccessor { route, data },
-        ) => {
-            let destination = route.destination(target);
-            transport
-                .send_message(
-                    Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor {
-                        destination,
-                        data,
-                    }),
-                    target,
-                )
-                .await?;
-        }
-        PeerRingAction::MultiActions(acts) => {
-            for act in acts {
-                handle_storage_repair_act(transport.clone(), act).await?;
-            }
-        }
-        act => finish_storage_action(act)?,
+    for delivery in act.storage_sync_deliveries()? {
+        let (next, msg) = SyncEntriesWithSuccessor::from_delivery(delivery);
+        transport
+            .send_message(Message::SyncEntriesWithSuccessor(msg), next)
+            .await?;
     }
     Ok(())
 }
@@ -1323,6 +1304,69 @@ mod test {
         assert_eq!(
             node.dht().storage.get(&placement_key.to_string()).await?,
             None
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sync_entries_handler_reports_persisted_entries() -> Result<()> {
+        let sender = prepare_node(SecretKey::random()).await;
+        let receiver = prepare_node(SecretKey::random()).await;
+        manually_establish_connection(&sender.swarm, &receiver.swarm).await;
+        wait_for_msgs([&sender, &receiver]).await;
+        assert_no_more_msg([&sender, &receiver]).await;
+        for successor in receiver.dht().successors().list()? {
+            receiver.dht().successors().remove(successor)?;
+        }
+        *receiver.dht().lock_predecessor()? = None;
+
+        let receiver_handler =
+            MessageHandler::new(receiver.swarm.transport.clone(), Arc::new(NoopCallback));
+        let placement_key = Did::from(100u32);
+        assert!(matches!(
+            receiver.dht().find_storage_owner(placement_key)?,
+            PeerRingAction::Some(owner) if owner == receiver.did()
+        ));
+        let entry = Entry::new(
+            Did::from(10u32),
+            vec!["handler acked".to_string().encode()?],
+            EntryKind::Data,
+        );
+        let stored_entry = entry.clone().try_into_storage_entry()?;
+        let sync_msg = SyncEntriesWithSuccessor {
+            destination: StorageSyncDestination::PhysicalOwner(receiver.did()),
+            data: vec![PlacedEntry::new(placement_key, entry.clone())],
+        };
+        let context = MessagePayload::new_send(
+            Message::SyncEntriesWithSuccessor(sync_msg.clone()),
+            sender.swarm.transport.session_sk(),
+            receiver.did(),
+            receiver.did(),
+        )?;
+
+        receiver_handler.handle(&context, &sync_msg).await?;
+
+        let payload = next_payload(&sender).await?;
+        match payload.transaction.data::<Message>()? {
+            Message::SyncEntriesWithSuccessorReport(report) => {
+                assert_eq!(report.acks, vec![SyncedEntryAck::new(
+                    placement_key,
+                    stored_entry.clone()
+                )]);
+            }
+            message => {
+                return Err(Error::InvalidMessage(format!(
+                    "expected SyncEntriesWithSuccessorReport, got {message:?}"
+                )))
+            }
+        }
+        assert_eq!(
+            receiver
+                .dht()
+                .storage
+                .get(&placement_key.to_string())
+                .await?,
+            Some(stored_entry)
         );
         Ok(())
     }

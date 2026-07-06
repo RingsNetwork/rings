@@ -21,9 +21,13 @@
 //! where those local views refine to the same successor relation.
 //!
 //! Liveness S4:
-//! In a quiescent window, if at least one placement copy of `e` remains at the
-//! start of an anti-entropy period, one `republish_local_entries` round
-//! delivers the entry's join state to every current owner in `place(id(e), N)`.
+//! In a quiescent window after local views refine to the same `storage_owner`
+//! relation, if at least one placement copy of `e` remains at the start of an
+//! anti-entropy period, one `republish_local_entries` round delivers the entry's
+//! join state to every refined current owner in `place(id(e), N)`.
+//! Before view refinement, republish targets the caller's local view; a receiver
+//! whose view disagrees may refuse the ack, preserving S1'' safety without
+//! proving one-round global progress.
 //!
 //! Safety:
 //! - S1 Additivity (#612): repair transitions in this module never call

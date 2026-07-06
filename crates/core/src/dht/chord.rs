@@ -219,6 +219,37 @@ impl StorageSyncRoute {
     }
 }
 
+/// Lowered storage-sync delivery ready for the message layer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StorageSyncDelivery {
+    next: Did,
+    destination: StorageSyncDestination,
+    data: Vec<PlacedEntry>,
+}
+
+impl StorageSyncDelivery {
+    fn from_route(next: Did, route: StorageSyncRoute, data: Vec<PlacedEntry>) -> Self {
+        // Invariant: `destination` is the unique wire interpretation of
+        // `(next, route)`. Message senders consume this lowered value instead of
+        // recomputing that relation at each transport boundary.
+        Self {
+            next,
+            destination: route.destination(next),
+            data,
+        }
+    }
+
+    /// Return the next physical relay hop for this delivery.
+    pub(crate) const fn next(&self) -> Did {
+        self.next
+    }
+
+    /// Consume this delivery into the wire destination and payload data.
+    pub(crate) fn into_message_parts(self) -> (StorageSyncDestination, Vec<PlacedEntry>) {
+        (self.destination, self.data)
+    }
+}
+
 pub(super) enum StorageSyncTarget {
     Local,
     Remote(StorageSyncDestination),
@@ -245,6 +276,33 @@ impl PeerRingAction {
             route: destination.route(),
             data,
         })
+    }
+
+    /// Lower this action tree into storage-sync deliveries.
+    pub(crate) fn storage_sync_deliveries(self) -> Result<Vec<StorageSyncDelivery>> {
+        let mut deliveries = Vec::new();
+        self.collect_storage_sync_deliveries(&mut deliveries)?;
+        Ok(deliveries)
+    }
+
+    fn collect_storage_sync_deliveries(
+        self,
+        deliveries: &mut Vec<StorageSyncDelivery>,
+    ) -> Result<()> {
+        match self {
+            Self::None => Ok(()),
+            Self::RemoteAction(next, RemoteAction::SyncEntriesWithSuccessor { route, data }) => {
+                deliveries.push(StorageSyncDelivery::from_route(next, route, data));
+                Ok(())
+            }
+            Self::MultiActions(actions) => {
+                for action in actions {
+                    action.collect_storage_sync_deliveries(deliveries)?;
+                }
+                Ok(())
+            }
+            action => Err(Error::unexpected_peer_ring_action(action)),
+        }
     }
 
     /// Returns `true` if the action is a [PeerRingAction::None] value.

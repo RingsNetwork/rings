@@ -23,6 +23,7 @@ pub use chord::EntryStorage;
 pub use chord::PeerRing;
 pub use chord::PeerRingAction;
 pub use chord::RemoteAction as PeerRingRemoteAction;
+pub(crate) use chord::StorageSyncDelivery;
 pub use chord::StorageSyncDestination;
 pub use chord::StorageSyncRoute;
 pub use chord::TopoInfo;

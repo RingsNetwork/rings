@@ -8,7 +8,6 @@ use crate::dht::successor::SuccessorReader;
 use crate::dht::types::ChordStorageRepair;
 use crate::dht::types::CorrectChord;
 use crate::dht::Chord;
-use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
@@ -74,39 +73,11 @@ impl Stabilizer {
         Ok(())
     }
 
-    fn collect_storage_repair_actions(
-        act: PeerRingAction,
-        out: &mut Vec<(Did, SyncEntriesWithSuccessor)>,
-    ) -> Result<()> {
-        match act {
-            PeerRingAction::None => Ok(()),
-            PeerRingAction::RemoteAction(
-                target,
-                PeerRingRemoteAction::SyncEntriesWithSuccessor { route, data },
-            ) => {
-                let destination = route.destination(target);
-                out.push((target, SyncEntriesWithSuccessor { destination, data }));
-                Ok(())
-            }
-            PeerRingAction::MultiActions(actions) => {
-                for action in actions {
-                    Self::collect_storage_repair_actions(action, out)?;
-                }
-                Ok(())
-            }
-            action => {
-                tracing::error!("Invalid storage repair action: {action:?}");
-                Err(crate::error::Error::unexpected_peer_ring_action(action))
-            }
-        }
-    }
-
     async fn handle_storage_repair_action(&self, act: PeerRingAction) -> Result<()> {
-        let mut messages = Vec::new();
-        Self::collect_storage_repair_actions(act, &mut messages)?;
-        for (destination, msg) in messages {
+        for delivery in act.storage_sync_deliveries()? {
+            let (next, msg) = SyncEntriesWithSuccessor::from_delivery(delivery);
             self.transport
-                .send_message(Message::SyncEntriesWithSuccessor(msg), destination)
+                .send_message(Message::SyncEntriesWithSuccessor(msg), next)
                 .await?;
         }
         Ok(())

@@ -2,10 +2,6 @@ use async_trait::async_trait;
 
 use crate::dht::Chord;
 use crate::dht::ChordStorageSync;
-use crate::dht::Did;
-use crate::dht::PeerRingAction;
-use crate::dht::PeerRingRemoteAction;
-use crate::error::Error;
 use crate::error::Result;
 use crate::message::effects::ConnectionFunctor;
 use crate::message::effects::MessageSendFunctor;
@@ -17,30 +13,6 @@ use crate::message::types::SyncEntriesWithSuccessor;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
-
-fn collect_sync_entries_actions(
-    act: PeerRingAction,
-    out: &mut Vec<(Did, SyncEntriesWithSuccessor)>,
-) -> Result<()> {
-    match act {
-        PeerRingAction::None => Ok(()),
-        PeerRingAction::RemoteAction(
-            target,
-            PeerRingRemoteAction::SyncEntriesWithSuccessor { route, data },
-        ) => {
-            let destination = route.destination(target);
-            out.push((target, SyncEntriesWithSuccessor { destination, data }));
-            Ok(())
-        }
-        PeerRingAction::MultiActions(actions) => {
-            for action in actions {
-                collect_sync_entries_actions(action, out)?;
-            }
-            Ok(())
-        }
-        action => Err(Error::unexpected_peer_ring_action(action)),
-    }
-}
 
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
@@ -69,14 +41,15 @@ impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
         self.run_effects([ConnectionFunctor::connect_dht_peer(msg.did).into()])
             .await?;
 
-        let mut sync_actions = Vec::new();
-        collect_sync_entries_actions(
-            self.dht.sync_entries_with_successor(msg.did).await?,
-            &mut sync_actions,
-        )?;
-        let effects = sync_actions
+        let deliveries = self
+            .dht
+            .sync_entries_with_successor(msg.did)
+            .await?
+            .storage_sync_deliveries()?;
+        let effects = deliveries
             .into_iter()
-            .map(|(next, msg)| {
+            .map(|delivery| {
+                let (next, msg) = SyncEntriesWithSuccessor::from_delivery(delivery);
                 MessageSendFunctor::send_message(Message::SyncEntriesWithSuccessor(msg), next)
                     .into()
             })
