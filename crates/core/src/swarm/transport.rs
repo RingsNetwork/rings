@@ -27,6 +27,7 @@ use rings_transport::core::transport::WebrtcConnectionState;
 use rings_transport::delivery::DeliveryFuture;
 use rings_transport::webrtc_config::WebrtcUdpPortRange;
 
+use self::storage_sync::StorageSyncAckMap;
 use crate::chunk::Chunk;
 use crate::chunk::ChunkList;
 use crate::chunk::Framing;
@@ -52,6 +53,8 @@ use crate::message::PayloadSender;
 use crate::session::SessionSk;
 use crate::swarm::callback::InnerSwarmCallback;
 
+mod storage_sync;
+
 const STORAGE_LOOKUP_OBSERVATION_TTL_MS: i64 = 30_000;
 /// Maximum number of read-repair miss observation buckets retained per transport.
 pub(crate) const STORAGE_LOOKUP_OBSERVATION_CAPACITY: usize = 1024;
@@ -72,6 +75,7 @@ pub struct SwarmTransport {
     storage_redundancy: u16,
     reassembly_limits: ReassemblyLimits,
     storage_lookup_observations: Mutex<StorageLookupObservationMap>,
+    pending_storage_sync_acks: Mutex<StorageSyncAckMap>,
     measured_disconnects: Mutex<BTreeSet<Did>>,
     measure: Option<MeasureImpl>,
 }
@@ -322,6 +326,7 @@ impl SwarmTransport {
             storage_redundancy: settings.storage_redundancy,
             reassembly_limits: settings.reassembly_limits,
             storage_lookup_observations: Mutex::new(BTreeMap::new()),
+            pending_storage_sync_acks: Mutex::new(BTreeMap::new()),
             measured_disconnects: Mutex::new(BTreeSet::new()),
             measure,
         }

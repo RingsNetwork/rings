@@ -75,10 +75,8 @@ impl Stabilizer {
 
     async fn handle_storage_repair_action(&self, act: PeerRingAction) -> Result<()> {
         for delivery in act.storage_sync_deliveries()? {
-            let (next, msg) = SyncEntriesWithSuccessor::from_delivery(delivery);
-            self.transport
-                .send_message(Message::SyncEntriesWithSuccessor(msg), next)
-                .await?;
+            let (_next, msg) = SyncEntriesWithSuccessor::from_delivery(delivery);
+            self.transport.send_storage_sync(msg).await?;
         }
         Ok(())
     }

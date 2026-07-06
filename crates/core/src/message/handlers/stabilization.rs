@@ -4,8 +4,8 @@ use crate::dht::Chord;
 use crate::dht::ChordStorageSync;
 use crate::error::Result;
 use crate::message::effects::ConnectionFunctor;
-use crate::message::effects::MessageSendFunctor;
 use crate::message::effects::PayloadRelayFunctor;
+use crate::message::effects::StorageSyncFunctor;
 use crate::message::types::Message;
 use crate::message::types::NotifyPredecessorReport;
 use crate::message::types::NotifyPredecessorSend;
@@ -46,14 +46,10 @@ impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
             .sync_entries_with_successor(msg.did)
             .await?
             .storage_sync_deliveries()?;
-        let effects = deliveries
-            .into_iter()
-            .map(|delivery| {
-                let (next, msg) = SyncEntriesWithSuccessor::from_delivery(delivery);
-                MessageSendFunctor::send_message(Message::SyncEntriesWithSuccessor(msg), next)
-                    .into()
-            })
-            .collect::<Vec<_>>();
+        let effects = deliveries.into_iter().map(|delivery| {
+            let (_next, msg) = SyncEntriesWithSuccessor::from_delivery(delivery);
+            StorageSyncFunctor::send_storage_sync(msg).into()
+        });
         self.run_effects(effects).await?;
 
         Ok(())
@@ -72,7 +68,9 @@ mod test {
     use crate::dht::entry::Entry;
     use crate::dht::entry::EntryKind;
     use crate::dht::entry::PlacedEntry;
+    use crate::dht::entry::SyncedEntryAck;
     use crate::dht::successor::SuccessorReader;
+    use crate::dht::PeerRingAction;
     use crate::dht::StorageSyncDestination;
     use crate::ecc::tests::gen_ordered_keys;
     use crate::ecc::SecretKey;
@@ -140,7 +138,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn notify_predecessor_report_keeps_unowned_sync_entries_when_predecessor_already_connected(
+    async fn notify_predecessor_report_acks_local_branch_when_predecessor_already_connected(
     ) -> Result<()> {
         let mut keys = gen_ordered_keys(3).into_iter();
         let key1 = next_generated_key(&mut keys)?;
@@ -163,6 +161,11 @@ mod test {
             .storage
             .put(&entry.did.to_string(), &entry)
             .await?;
+        let stored_entry = entry.clone().try_into_storage_entry()?;
+        assert!(matches!(
+            node2.dht().find_storage_owner(entry.did)?,
+            PeerRingAction::Some(witness) if witness == node1.did() && witness != node2.did()
+        ));
 
         let context_key = SecretKey::random();
         let context_session = SessionSk::new_with_seckey(&context_key)?;
@@ -221,8 +224,14 @@ mod test {
         };
 
         match payload.transaction.data::<Message>()? {
-            Message::SyncEntriesWithSuccessorReport(SyncEntriesWithSuccessorReport { acks }) => {
-                assert!(acks.is_empty());
+            Message::SyncEntriesWithSuccessorReport(SyncEntriesWithSuccessorReport {
+                acks,
+                ..
+            }) => {
+                assert_eq!(acks, vec![SyncedEntryAck::new(
+                    entry.did,
+                    stored_entry.clone()
+                )]);
             }
             message => {
                 return Err(Error::InvalidMessage(format!(
@@ -230,11 +239,11 @@ mod test {
                 )))
             }
         }
+        assert_eq!(node1.dht().storage.get(&entry.did.to_string()).await?, None);
         assert_eq!(
-            node1.dht().storage.get(&entry.did.to_string()).await?,
-            Some(entry.clone())
+            node2.dht().storage.get(&entry.did.to_string()).await?,
+            Some(stored_entry)
         );
-        assert_eq!(node2.dht().storage.get(&entry.did.to_string()).await?, None);
 
         Ok(())
     }

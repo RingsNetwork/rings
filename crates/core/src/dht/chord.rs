@@ -220,7 +220,7 @@ impl StorageSyncRoute {
 }
 
 /// Lowered storage-sync delivery ready for the message layer.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct StorageSyncDelivery {
     next: Did,
     destination: StorageSyncDestination,
@@ -515,9 +515,12 @@ impl PeerRing {
             }
         } else {
             match self.find_successor(placement_key)? {
-                PeerRingAction::Some(owner) if owner == self.did => Ok(StorageSyncTarget::Local),
-                PeerRingAction::Some(_)
-                | PeerRingAction::RemoteAction(_, RemoteAction::FindSuccessor(_)) => Ok(
+                // In non-virtual storage, `Some(_)` means this node's local
+                // Chord view has reached the terminal storage branch. The
+                // witness DID may be the successor for lookup fallback, not a
+                // remote owner that should receive this placement.
+                PeerRingAction::Some(_) => Ok(StorageSyncTarget::Local),
+                PeerRingAction::RemoteAction(_, RemoteAction::FindSuccessor(_)) => Ok(
                     StorageSyncTarget::Remote(StorageSyncDestination::PlacementKey(placement_key)),
                 ),
                 action => Err(Error::unexpected_peer_ring_action(action)),
@@ -556,8 +559,7 @@ impl PeerRing {
 
     fn next_hop_to_storage_placement(&self, key: Did) -> Result<Option<Did>> {
         match self.find_storage_owner(key)? {
-            PeerRingAction::Some(owner) if owner == self.did => Ok(None),
-            PeerRingAction::Some(next) => Ok(Some(next)),
+            PeerRingAction::Some(_) => Ok(None),
             PeerRingAction::RemoteAction(next, RemoteAction::FindSuccessor(_)) => Ok(Some(next)),
             action => Err(Error::unexpected_peer_ring_action(action)),
         }

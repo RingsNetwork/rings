@@ -225,8 +225,27 @@ impl SyncEntriesWithSuccessor {
 /// MessageType used to acknowledge durable storage of synced entries.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SyncEntriesWithSuccessorReport {
+    /// Original storage-sync destination semantics.
+    pub destination: StorageSyncDestination,
+    /// Physical receiver that produced this report.
+    pub receiver: Did,
     /// Placement keys and exact values durably persisted by the sync receiver.
     pub acks: Vec<SyncedEntryAck>,
+}
+
+impl SyncEntriesWithSuccessorReport {
+    /// Build a durable-storage acknowledgement report.
+    pub(crate) fn new(
+        destination: StorageSyncDestination,
+        receiver: Did,
+        acks: Vec<SyncedEntryAck>,
+    ) -> Self {
+        Self {
+            destination,
+            receiver,
+            acks,
+        }
+    }
 }
 
 /// MessageType use to customize message, will be handle by `custom_message` method.

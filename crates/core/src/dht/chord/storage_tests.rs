@@ -603,7 +603,7 @@ async fn periodic_republish_restores_missing_local_affine_replica() -> Result<()
 }
 
 #[tokio::test]
-async fn republish_remote_actions_preserve_affine_placement_keys() -> Result<()> {
+async fn republish_joins_local_branch_and_routes_remote_placement_keys() -> Result<()> {
     let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
     let successor = Did::from(100u32);
     node.successors().update(successor)?;
@@ -615,17 +615,19 @@ async fn republish_remote_actions_preserve_affine_placement_keys() -> Result<()>
 
     assert_eq!(
         action,
-        PeerRingAction::MultiActions(vec![
-            PeerRingAction::RemoteAction(first_key, RemoteAction::SyncEntriesWithSuccessor {
+        PeerRingAction::MultiActions(vec![PeerRingAction::RemoteAction(
+            second_key,
+            RemoteAction::SyncEntriesWithSuccessor {
                 route: StorageSyncRoute::PlacementKey,
-                data: vec![PlacedEntry::new(first_key, entry.clone())],
-            }),
-            PeerRingAction::RemoteAction(second_key, RemoteAction::SyncEntriesWithSuccessor {
-                route: StorageSyncRoute::PlacementKey,
-                data: vec![PlacedEntry::new(second_key, entry)],
-            })
-        ])
+                data: vec![PlacedEntry::new(second_key, entry.clone())],
+            }
+        )])
     );
+    assert_eq!(
+        node.storage.get(&first_key.to_string()).await?,
+        Some(entry.clone())
+    );
+    assert_eq!(node.storage.get(&second_key.to_string()).await?, None);
     Ok(())
 }
 

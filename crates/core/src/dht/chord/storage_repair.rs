@@ -5,26 +5,26 @@
 //! - `place(id(e), N) = [k_0, ..., k_{N-1}]`, computed by
 //!   [`Did::rotate_affine`].
 //! - `sigma_n[k]` is the [`Entry`] stored by node `n` under placement key `k`.
-//! - `succ(k)` is the owner returned by Chord routing for placement key `k`.
+//! - `local_branch(n, k, view)` is true when `find_successor(k)` evaluated by
+//!   node `n` under `view` returns `Some(_)`.
 //! - `vowner(k, view, cfg)` is the physical owner selected by storage virtual
 //!   positions derived from the authenticated owner set in `view`.
-//! - `storage_owner(k, view, cfg) = vowner(k, view, cfg)` when virtual storage is
-//!   enabled, otherwise `succ(k)`.
-//! - `owns(n, k, view, cfg) = storage_owner(k, view, cfg) == n`.
+//! - `accepts(n, k, view, cfg) = vowner(k, view, cfg) == n` when virtual storage
+//!   is enabled, otherwise `local_branch(n, k, view)`.
 //!
 //! Invariant REPLICATED(e, N):
-//! `forall k in place(id(e), N), sigma_{storage_owner(k, view, cfg)}[k] >=
-//! e_delta`, where `>=` is the partial order induced by
+//! `forall k in place(id(e), N), exists n. accepts(n, k, view_n, cfg) &&
+//! sigma_n[k] >= e_delta`, where `>=` is the partial order induced by
 //! [`crate::algebra::JoinSemilattice`].
-//! This is a view-relative invariant: every node evaluates `storage_owner` under
-//! its authenticated local view. Global convergence requires a quiescent window
-//! where those local views refine to the same successor relation.
+//! This is a view-relative invariant: every node evaluates `accepts` under its
+//! authenticated local view. Global convergence requires a quiescent window
+//! where those local views refine to the same acceptance relation.
 //!
 //! Liveness S4:
-//! In a quiescent window after local views refine to the same `storage_owner`
+//! In a quiescent window after local views refine to the same `accepts`
 //! relation, if at least one placement copy of `e` remains at the start of an
 //! anti-entropy period, one `republish_local_entries` round delivers the entry's
-//! join state to every refined current owner in `place(id(e), N)`.
+//! join state to every refined current accepting node in `place(id(e), N)`.
 //! Before view refinement, republish targets the caller's local view; a receiver
 //! whose view disagrees may refuse the ack, preserving S1'' safety without
 //! proving one-round global progress.
@@ -37,7 +37,7 @@
 //!   entries and retry in a later anti-entropy round.
 //! - S1'' View-relative handoff: for a sync message from sender `s` to receiver
 //!   `r`, an ack for key `k` can be emitted only after
-//!   `owns(r, k, view_r, cfg)` and `sigma_r[k] >= e_delta`. If
+//!   `accepts(r, k, view_r, cfg)` and `sigma_r[k] >= e_delta`. If
 //!   `view_s != view_r`, either `r` refuses the ack and `sigma_s[k]` remains, or
 //!   `r` accepts under `view_r` and at least one durable copy exists before `s`
 //!   can delete.
@@ -104,7 +104,7 @@ impl PeerRing {
         // view.
         // Post: true iff peer is observed in a routing position that can affect
         // storage responsibility: predecessor, successor list, finger table, or
-        // owner of some locally held affine placement key.
+        // successor witness for some locally held affine placement key.
         // Preservation S1: this predicate performs no storage writes/removes.
         if self.storage_virtual_owner_registered(peer)? {
             return Ok(true);
@@ -150,12 +150,12 @@ impl PeerRing {
         // Pre: placement_key belongs to place(id(entry), redundancy) for the
         // caller's anti-entropy or republish transition.
         // Post S1: no local key is removed.
-        // Post S3: if self owns placement_key, sigma_self[placement_key] is
-        // joined with entry after the transition; repeating the write preserves
-        // sigma by join idempotence.
-        // Post: if another node owns placement_key, the returned action carries
-        // PlacedEntry { key: placement_key, entry } so placement identity is not
-        // recomputed by the receiver.
+        // Post S3: if self accepts placement_key under the local view,
+        // sigma_self[placement_key] is joined with entry after the transition;
+        // repeating the write preserves sigma by join idempotence.
+        // Post: otherwise, the returned action carries PlacedEntry {
+        // key: placement_key, entry } so placement identity is not recomputed by
+        // the receiver.
         let placed = PlacedEntry::new(placement_key, entry.clone());
         match self.storage_sync_target(placement_key)? {
             StorageSyncTarget::Local => {
@@ -221,9 +221,9 @@ impl ChordStorageRepair<PeerRingAction> for PeerRing {
         // local_before[key]. This transition only emits join deliveries.
         // Post S3: repeating this transition produces the same sigma mapping as
         // one application because storage writes are Entry::join deliveries.
-        // Post S4: for every local entry e, a copy action exists for each key
-        // in place(id(e), redundancy) whose owner is not self; self-owned
-        // placements are written locally.
+        // Post S4: for every local entry e, each key in place(id(e),
+        // redundancy) is either joined locally when self accepts it or emitted
+        // as a copy action toward the local view's storage-sync destination.
         let mut actions = Vec::new();
         for (_, entry) in self.storage.get_all().await? {
             let action = self.republish_entry(entry, redundancy).await?;
