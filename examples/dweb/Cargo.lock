@@ -2498,7 +2498,7 @@ dependencies = [
 
 [[package]]
 name = "rings-core"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "ark-bls12-381",
  "ark-ec",
@@ -2557,7 +2557,7 @@ dependencies = [
 
 [[package]]
 name = "rings-derive"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2583,7 +2583,7 @@ dependencies = [
 
 [[package]]
 name = "rings-node"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "anyhow",
  "arrayref",
@@ -2627,7 +2627,7 @@ dependencies = [
 
 [[package]]
 name = "rings-rpc"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "async-trait",
  "base64 0.13.1",
@@ -2643,7 +2643,7 @@ dependencies = [
 
 [[package]]
 name = "rings-transport"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "async-trait",
  "bincode",
