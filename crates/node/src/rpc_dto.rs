@@ -80,7 +80,7 @@ fn onion_exit_transport_info(transport: OnionExitTransport) -> OnionExitTranspor
 
 fn onion_exit_service_info(service: OnionExitService) -> OnionExitServiceInfo {
     OnionExitServiceInfo {
-        name: service.name,
+        name: service.name.into(),
         transport: onion_exit_transport_info(service.transport),
     }
 }
@@ -112,11 +112,7 @@ pub(crate) fn onion_exit_descriptor_info(
         session_public_key: json_value(descriptor.session_public_key)?,
         node_type: online_node_type_info(descriptor.node_type),
         network_id: descriptor.network_id,
-        services: descriptor
-            .services
-            .into_iter()
-            .map(onion_exit_service_info)
-            .collect(),
+        services: vec![onion_exit_service_info(descriptor.service)],
         policy: onion_exit_policy_info(descriptor.policy),
         started_at_ms: descriptor_timestamp_ms(descriptor.started_at_ms)?,
         heartbeat_at_ms: descriptor_timestamp_ms(descriptor.heartbeat_at_ms)?,

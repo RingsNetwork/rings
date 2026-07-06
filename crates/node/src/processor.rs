@@ -874,7 +874,7 @@ impl Processor {
         };
 
         let service = service.trim();
-        let descriptors = OnionExitDescriptor::latest_valid_by_did(
+        let descriptors = OnionExitDescriptor::latest_valid_by_service_did(
             Self::onion_exit_descriptors_from_entry(&entry)
                 .into_iter()
                 .filter(|descriptor| descriptor.matches_network(self.swarm.network_id())),
@@ -1535,7 +1535,8 @@ mod test {
             3,
         )
         .advertise_onion_exit(true);
-        config.onion_exit_services = vec![OnionExitService::new("https", OnionExitTransport::Tcp)];
+        config.onion_exit_services =
+            vec![OnionExitService::new("https", OnionExitTransport::Tcp).expect("valid service")];
 
         assert!(matches!(
             ProcessorBuilder::from_config(&config),
@@ -1557,7 +1558,7 @@ mod test {
             3,
         )
         .advertise_onion_exit(true);
-        config.onion_exit_services = vec![OnionExitService::new("web", OnionExitTransport::Tcp)];
+        config.onion_exit_services = vec![OnionExitService::new("web", OnionExitTransport::Tcp)?];
         config.onion_exit_policy = onion_policy(&["example.com:443"], &[])?;
 
         assert!(ProcessorBuilder::from_config(&config).is_ok());
@@ -1798,7 +1799,7 @@ mod test {
     }
 
     #[tokio::test]
-    async fn onion_exit_lookup_applies_service_filter_after_latest_descriptor() -> Result<()> {
+    async fn onion_exit_lookup_preserves_distinct_services_for_same_did() -> Result<()> {
         let processor = prepare_processor().await;
         let exit = prepare_processor().await;
         let now_ms = get_epoch_ms();
@@ -1811,8 +1812,9 @@ mod test {
             ])?)
             .await?;
 
-        assert!(processor.lookup_onion_exits("web", false).await?.is_empty());
+        assert_eq!(processor.lookup_onion_exits("web", false).await?.len(), 1);
         assert_eq!(processor.lookup_onion_exits("ssh", false).await?.len(), 1);
+        assert_eq!(processor.lookup_onion_exits("", false).await?.len(), 2);
         Ok(())
     }
 
@@ -1889,7 +1891,7 @@ mod test {
         let exit = prepare_processor().await;
         let descriptor = onion_exit_descriptor_for_processor_with_service(
             &exit,
-            OnionExitService::new("https", OnionExitTransport::Tcp),
+            OnionExitService::new("https", OnionExitTransport::Tcp)?,
             get_epoch_ms(),
             {
                 let mut policy = onion_policy(&["example.com:443"], &[])?;
@@ -1924,7 +1926,7 @@ mod test {
         let exit = prepare_processor().await;
         let descriptor = onion_exit_descriptor_for_processor_with_service(
             &exit,
-            OnionExitService::new("https", OnionExitTransport::Tcp),
+            OnionExitService::new("https", OnionExitTransport::Tcp)?,
             get_epoch_ms(),
             {
                 let mut policy = onion_policy(&["example.com:443"], &[])?;
@@ -1948,8 +1950,8 @@ mod test {
 
         assert!(matches!(
             error,
-            Error::OnionRouteError(OnionRouteError::NoLiveExit { service })
-                if service == "https"
+            Error::OnionRouteError(OnionRouteError::NoExitWithTransport { service, transport })
+                if service == "https" && transport == OnionExitTransport::Https
         ));
         Ok(())
     }
@@ -1990,6 +1992,41 @@ mod test {
             .await?;
 
         assert_eq!(route.exit_did(), allowed_exit.did());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn onion_proxy_route_reports_policy_denied_target() -> Result<()> {
+        let processor = prepare_processor().await;
+        let denied_exit = prepare_processor().await;
+        let now_ms = get_epoch_ms();
+        let denied_descriptor =
+            onion_exit_descriptor_for_processor_with_policy(&denied_exit, "https", now_ms, {
+                let mut policy = onion_policy(&["other.example.com:443"], &[])?;
+                policy.max_circuits = 8;
+                policy.max_streams_per_circuit = 2;
+                policy.max_bytes_per_minute = 4096;
+                policy
+            })?;
+
+        processor
+            .storage_store(Processor::onion_exit_registry_entry(vec![
+                denied_descriptor,
+            ])?)
+            .await?;
+
+        let target = OnionProxyTarget::parse_authority("example.com:443")?;
+        let error = processor
+            .build_onion_proxy_route(OnionProxyConfig::https_proxy(1, false), target)
+            .await
+            .err()
+            .ok_or_else(|| Error::InvalidConfig("expected route failure".to_string()))?;
+
+        assert!(matches!(
+            error,
+            Error::OnionRouteError(OnionRouteError::NoExitAllowsTarget { service, target })
+                if service == "https" && target == "example.com:443"
+        ));
         Ok(())
     }
 
@@ -2280,7 +2317,7 @@ mod test {
             OnionExitService::new(
                 service,
                 OnionExitService::reserved_transport(service).unwrap_or(OnionExitTransport::Tcp),
-            ),
+            )?,
             now_ms,
             policy,
         )
@@ -2302,7 +2339,7 @@ mod test {
                 session_public_key: processor.session_sk.session_public_key(),
                 node_type: default_online_node_type(),
                 network_id: processor.swarm.network_id(),
-                services: vec![service],
+                service,
                 policy,
                 started_at_ms: now_ms,
                 heartbeat_at_ms: now_ms,

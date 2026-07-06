@@ -155,18 +155,33 @@ impl DhtRegistrationPublisher {
 
     /// Publish `value`, tombstoning older values previously published by this publisher.
     pub async fn publish(&self, context: &RegistrationContext<'_>, value: Encoded) -> Result<()> {
+        self.publish_many(context, std::iter::once(value)).await
+    }
+
+    /// Publish the current value set, tombstoning older values previously published by this publisher.
+    ///
+    /// Invariant: after a successful call, DHT data previously emitted by this publisher is exactly
+    /// `values`. Preservation: every stale local value is tombstoned after every current value is
+    /// touched under the same publisher serialization lock.
+    pub async fn publish_many(
+        &self,
+        context: &RegistrationContext<'_>,
+        values: impl IntoIterator<Item = Encoded>,
+    ) -> Result<()> {
+        let current_values = values.into_iter().collect::<BTreeSet<_>>();
         let mut published_values = self.published_values.lock().await;
         let stale_values = published_values
             .iter()
-            .filter(|published| *published != &value)
+            .filter(|published| !current_values.contains(*published))
             .cloned()
             .collect::<Vec<_>>();
 
-        context
-            .processor
-            .storage_touch_data(&self.topic, value.clone())
-            .await?;
-        published_values.insert(value);
+        for value in &current_values {
+            context
+                .processor
+                .storage_touch_data(&self.topic, value.clone())
+                .await?;
+        }
         for stale_value in stale_values {
             context
                 .processor
@@ -174,6 +189,7 @@ impl DhtRegistrationPublisher {
                 .await?;
             published_values.remove(&stale_value);
         }
+        *published_values = current_values;
         Ok(())
     }
 }

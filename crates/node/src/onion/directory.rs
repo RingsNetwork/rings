@@ -8,8 +8,10 @@ use super::OnionExitDescriptor;
 use super::OnionExitTarget;
 use super::OnionRoute;
 use super::OnionRouteCandidates;
+use super::OnionRouteError;
 use super::OnionRouteRequest;
 use super::SystemRouteEntropy;
+use crate::error::Error;
 use crate::error::Result;
 use crate::onion_proxy::OnionProxyConfig;
 use crate::onion_proxy::OnionProxyRoute;
@@ -57,16 +59,44 @@ pub(crate) async fn build_onion_proxy_route(
     let service = proxy.exit_service().to_string();
     let transport = proxy.exit_transport();
     let exit_target = OnionExitTarget::from_proxy_target(&target);
+    let service_exits = reader
+        .live_onion_exits("")
+        .await?
+        .into_iter()
+        .filter(|exit| exit.advertises_service_name(&service))
+        .collect::<Vec<_>>();
+    if service_exits.is_empty() {
+        return Err(Error::OnionRouteError(OnionRouteError::NoLiveExit {
+            service,
+        }));
+    }
+    let transport_exits = service_exits
+        .into_iter()
+        .filter(|exit| exit.offers_service_transport(&service, transport))
+        .collect::<Vec<_>>();
+    if transport_exits.is_empty() {
+        return Err(Error::OnionRouteError(
+            OnionRouteError::NoExitWithTransport { service, transport },
+        ));
+    }
+    let policy_exits = transport_exits
+        .into_iter()
+        .filter(|exit| exit.policy.allows_target(&exit_target))
+        .collect::<Vec<_>>();
+    if policy_exits.is_empty() {
+        return Err(Error::OnionRouteError(
+            OnionRouteError::NoExitAllowsTarget {
+                service,
+                target: exit_target.authority().to_string(),
+            },
+        ));
+    }
     let request = OnionRouteRequest {
         service: service.clone(),
         hop_count: proxy.hop_count,
         allow_short_paths: proxy.allow_short_paths,
     };
-    let route = build_filtered_onion_route(reader, request, |exit| {
-        exit.offers_service_transport(&service, transport)
-            && exit.policy.allows_target(&exit_target)
-    })
-    .await?;
+    let route = build_onion_route_from_exits(reader, request, policy_exits).await?;
 
     Ok(OnionProxyRoute {
         protocol: proxy.protocol,
@@ -81,12 +111,22 @@ async fn build_filtered_onion_route(
     exit_filter: impl Fn(&OnionExitDescriptor) -> bool,
 ) -> Result<OnionRoute> {
     let service = request.service.clone();
-    let online_nodes = reader.live_online_nodes().await?;
     let exits = reader
         .live_onion_exits(&service)
         .await?
         .into_iter()
-        .filter(exit_filter);
+        .filter(exit_filter)
+        .collect::<Vec<_>>();
+    build_onion_route_from_exits(reader, request, exits).await
+}
+
+async fn build_onion_route_from_exits(
+    reader: &impl OnionDirectoryReader,
+    request: OnionRouteRequest,
+    exits: Vec<OnionExitDescriptor>,
+) -> Result<OnionRoute> {
+    let service = request.service.clone();
+    let online_nodes = reader.live_online_nodes().await?;
     let candidates = OnionRouteCandidates::from_validated_descriptors(
         reader.local_did(),
         &service,

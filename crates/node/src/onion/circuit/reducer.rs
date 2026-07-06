@@ -35,13 +35,14 @@ pub(super) struct RelayReturnKey {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RelayReturnEntry {
     previous_hop: Did,
+    previous_circuit_id: OnionCircuitId,
     expires_at_ms: u128,
 }
 
 /// Stateful return-hop table for encrypted relay circuits.
 ///
-/// Invariant: every `(circuit_id, next_hop) -> previous_hop` entry represents exactly one
-/// live reverse edge learned from a prior forward relay action.
+/// Invariant: every `(next_edge_id, next_hop) -> (previous_edge_id, previous_hop)` entry
+/// represents exactly one live reverse edge learned from a prior forward relay action.
 /// Preservation: forward relay insertion purges expired entries before capacity checks and never
 /// rewrites a live key to a different previous hop; backward frames purge expired entries before
 /// lookup and refresh only the matched edge.
@@ -206,6 +207,7 @@ impl OnionCircuitReducer {
         match layer {
             OnionForwardLayer::Relay {
                 next_hop,
+                next_circuit_id,
                 remaining_hops,
                 inner,
             } => {
@@ -215,14 +217,15 @@ impl OnionCircuitReducer {
                     self.max_relay_circuits,
                     self.relay_return_ttl_ms,
                     RelayReturnKey {
-                        circuit_id,
+                        circuit_id: next_circuit_id,
                         next_hop,
                     },
                     from,
+                    circuit_id,
                     received_at_ms,
                 )?;
                 encode_wire_message(OnionWireMessage::Forward(OnionForwardFrame {
-                    circuit_id,
+                    circuit_id: next_circuit_id,
                     layer: inner,
                 }))
                 .map(|payload| OnionCircuitEffect::Send {
@@ -232,11 +235,17 @@ impl OnionCircuitReducer {
             }
             OnionForwardLayer::Exit {
                 client,
+                expires_at_ms,
                 forward_nonce,
                 payload,
             } => {
                 if !self.capabilities.permits_exit_layer() {
                     return Err(Error::NoPermission);
+                }
+                if expires_at_ms <= received_at_ms {
+                    return Err(Error::OnionRouteError(
+                        OnionRouteError::ForwardPayloadExpired,
+                    ));
                 }
                 Ok(OnionCircuitEffect::Exit {
                     from,
@@ -264,8 +273,12 @@ impl OnionCircuitReducer {
         };
         if let Some(entry) = state.relay_returns.get_mut(&key) {
             let previous_hop = entry.previous_hop;
+            let previous_circuit_id = entry.previous_circuit_id;
             entry.expires_at_ms = received_at_ms.saturating_add(self.relay_return_ttl_ms);
-            let payload = encode_wire_message(OnionWireMessage::Backward(frame))?;
+            let payload = encode_wire_message(OnionWireMessage::Backward(OnionBackwardFrame {
+                circuit_id: previous_circuit_id,
+                payload: frame.payload,
+            }))?;
             return Ok(OnionCircuitEffect::Send {
                 to: previous_hop,
                 payload,
@@ -304,13 +317,16 @@ pub(super) fn remember_return_hop(
     ttl_ms: u128,
     key: RelayReturnKey,
     previous_hop: Did,
+    previous_circuit_id: OnionCircuitId,
     now_ms: u128,
 ) -> Result<()> {
     purge_expired_return_hops(state, now_ms);
     let table_is_full = state.relay_returns.len() >= max_relay_circuits;
     match state.relay_returns.entry(key) {
         Entry::Occupied(mut entry) => {
-            if entry.get().previous_hop != previous_hop {
+            if entry.get().previous_hop != previous_hop
+                || entry.get().previous_circuit_id != previous_circuit_id
+            {
                 return Err(Error::OnionRouteError(OnionRouteError::ReturnEdgeConflict));
             }
             entry.get_mut().expires_at_ms = now_ms.saturating_add(ttl_ms);
@@ -321,6 +337,7 @@ pub(super) fn remember_return_hop(
             }
             entry.insert(RelayReturnEntry {
                 previous_hop,
+                previous_circuit_id,
                 expires_at_ms: now_ms.saturating_add(ttl_ms),
             });
         }

@@ -6,6 +6,7 @@ use rings_core::dht::Did;
 use serde::Deserialize;
 use serde::Serialize;
 
+use super::OnionExitTransport;
 use crate::error::Error;
 
 /// Local route/circuit failure before any user-facing rendering.
@@ -31,6 +32,20 @@ pub enum OnionRouteError {
     NoLiveExit {
         /// Requested service name.
         service: String,
+    },
+    /// Live exits advertise the service name but none use the required transport.
+    NoExitWithTransport {
+        /// Requested service name.
+        service: String,
+        /// Required transport class.
+        transport: OnionExitTransport,
+    },
+    /// Live exits advertise the service and transport, but no policy allows the target.
+    NoExitAllowsTarget {
+        /// Requested service name.
+        service: String,
+        /// Requested target authority.
+        target: String,
     },
     /// Route construction found duplicate DIDs.
     DuplicateRouteHops,
@@ -68,8 +83,14 @@ pub enum OnionRouteError {
     InvalidBackwardSignature,
     /// A forward nonce has already authorized an exit-side action.
     ForwardReplay,
+    /// A forward payload reached the exit after its authenticated expiry.
+    ForwardPayloadExpired,
     /// A backward nonce has already delivered a client-side action.
     BackwardReplay,
+    /// A backward payload carries a return id that does not belong to the local client state.
+    BackwardReturnIdMismatch,
+    /// A backward payload decoded to a shape that no client adapter may accept.
+    UnexpectedBackwardPayload,
     /// The runtime could not allocate a unique circuit id.
     CircuitIdAllocationFailed,
     /// A TCP open response channel closed before an answer.
@@ -118,6 +139,14 @@ impl fmt::Display for OnionRouteError {
             Self::NoLiveExit { service } => {
                 write!(f, "no live onion exit offers service {service:?}")
             }
+            Self::NoExitWithTransport { service, transport } => write!(
+                f,
+                "no live onion exit offers service {service:?} over {transport:?}"
+            ),
+            Self::NoExitAllowsTarget { service, target } => write!(
+                f,
+                "no live onion exit for service {service:?} allows target {target:?}"
+            ),
             Self::DuplicateRouteHops => f.write_str("onion route contains duplicate hops"),
             Self::ExitHopMismatch => {
                 f.write_str("onion route exit hop does not match exit descriptor")
@@ -157,7 +186,14 @@ impl fmt::Display for OnionRouteError {
                 f.write_str("invalid onion backward payload signature")
             }
             Self::ForwardReplay => f.write_str("replayed onion forward payload"),
+            Self::ForwardPayloadExpired => f.write_str("expired onion forward payload"),
             Self::BackwardReplay => f.write_str("replayed onion TCP backward payload"),
+            Self::BackwardReturnIdMismatch => {
+                f.write_str("onion backward payload return id mismatch")
+            }
+            Self::UnexpectedBackwardPayload => {
+                f.write_str("unexpected onion backward payload for client adapter")
+            }
             Self::CircuitIdAllocationFailed => {
                 f.write_str("failed to allocate unique onion circuit id")
             }
@@ -212,6 +248,7 @@ impl OnionExitFailure {
         match error {
             Error::NoPermission => Self::PermissionDenied,
             Error::OnionRouteError(OnionRouteError::ForwardReplay)
+            | Error::OnionRouteError(OnionRouteError::ForwardPayloadExpired)
             | Error::OnionRouteError(OnionRouteError::BackwardReplay) => Self::Replay,
             Error::OnionRouteError(OnionRouteError::DuplicateTcpOpen) => Self::DuplicateCircuit,
             _ => Self::Internal(error.to_string()),

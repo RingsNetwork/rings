@@ -7,6 +7,8 @@ use std::hash::Hash;
 use super::circuit::OnionBackwardNonce;
 use super::circuit::OnionCircuitId;
 use super::circuit::OnionForwardNonce;
+#[cfg(feature = "node")]
+use super::circuit::OnionReturnId;
 
 const ONION_REPLAY_TTL_MS: u128 = 120_000;
 const MAX_ONION_REPLAY_ENTRIES: usize = 4096;
@@ -29,15 +31,15 @@ impl OnionForwardReplayKey {
 #[cfg(feature = "node")]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct OnionBackwardReplayKey {
-    circuit_id: OnionCircuitId,
+    return_id: OnionReturnId,
     nonce: OnionBackwardNonce,
 }
 
 #[cfg(feature = "node")]
 impl OnionBackwardReplayKey {
-    /// Build a replay key from the circuit id and authenticated backward nonce.
-    pub(crate) const fn new(circuit_id: OnionCircuitId, nonce: OnionBackwardNonce) -> Self {
-        Self { circuit_id, nonce }
+    /// Build a replay key from the client/exit return id and authenticated backward nonce.
+    pub(crate) const fn new(return_id: OnionReturnId, nonce: OnionBackwardNonce) -> Self {
+        Self { return_id, nonce }
     }
 }
 

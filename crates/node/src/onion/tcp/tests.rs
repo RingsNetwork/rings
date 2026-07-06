@@ -24,7 +24,7 @@ fn exit_descriptor(session: &SessionSk) -> OnionExitDescriptor {
             session_public_key: session.session_public_key(),
             node_type: OnlineNodeType::Native,
             network_id: 1,
-            services: vec![OnionExitService::tcp()],
+            service: OnionExitService::tcp(),
             policy: OnionExitPolicy::default(),
             started_at_ms: 0,
             heartbeat_at_ms: 0,
@@ -41,11 +41,11 @@ fn runtime() -> OnionTcpRuntime {
 }
 
 fn dummy_authenticated_payload(
-    circuit_id: OnionCircuitId,
+    return_id: OnionReturnId,
     session: &SessionSk,
 ) -> OnionAuthenticatedPayload {
     OnionAuthenticatedPayload::new_signed(
-        circuit_id,
+        return_id,
         encode_tcp_payload(OnionTcpPayload::Close).expect("encode payload"),
         session,
     )
@@ -56,10 +56,11 @@ fn insert_test_client_stream(
     runtime: &OnionTcpRuntime,
     expected: Did,
     exit: OnionExitDescriptor,
+    return_id: OnionReturnId,
     tx: mpsc::Sender<TcpInbound>,
 ) -> Result<TcpStreamKey> {
     let (open_tx, _open_rx) = tokio::sync::oneshot::channel();
-    runtime.insert_client_stream(expected, exit, open_tx, tx)
+    runtime.insert_client_stream(expected, exit, return_id, open_tx, tx)
 }
 
 #[test]
@@ -94,7 +95,13 @@ fn client_stream_accepts_only_expected_return_peer() -> Result<()> {
     let attacker = did();
     let exit = session();
     let (tx, _rx) = mpsc::channel(1);
-    let key = insert_test_client_stream(&runtime, expected, exit_descriptor(&exit), tx)?;
+    let key = insert_test_client_stream(
+        &runtime,
+        expected,
+        exit_descriptor(&exit),
+        OnionReturnId::new([7; 16]),
+        tx,
+    )?;
 
     assert!(runtime.client_inbound_sender(key, expected).is_ok());
     assert!(matches!(
@@ -110,14 +117,21 @@ fn client_stream_rejects_payload_from_wrong_exit_session() -> Result<()> {
     let expected = did();
     let selected_exit = session();
     let wrong_exit = session();
+    let return_id = OnionReturnId::new([9; 16]);
     let (tx, _rx) = mpsc::channel(1);
-    let key = insert_test_client_stream(&runtime, expected, exit_descriptor(&selected_exit), tx)?;
+    let key = insert_test_client_stream(
+        &runtime,
+        expected,
+        exit_descriptor(&selected_exit),
+        return_id,
+        tx,
+    )?;
 
     assert!(matches!(
         runtime.verify_client_payload(
             key,
             expected,
-            dummy_authenticated_payload(key.circuit_id, &wrong_exit),
+            dummy_authenticated_payload(return_id, &wrong_exit),
         ),
         Err(Error::OnionRouteError(_))
     ));
@@ -129,9 +143,10 @@ fn client_stream_rejects_replayed_backward_nonce() -> Result<()> {
     let runtime = runtime();
     let expected = did();
     let exit = session();
+    let return_id = OnionReturnId::new([8; 16]);
     let (tx, _rx) = mpsc::channel(1);
-    let key = insert_test_client_stream(&runtime, expected, exit_descriptor(&exit), tx)?;
-    let payload = dummy_authenticated_payload(key.circuit_id, &exit);
+    let key = insert_test_client_stream(&runtime, expected, exit_descriptor(&exit), return_id, tx)?;
+    let payload = dummy_authenticated_payload(return_id, &exit);
 
     assert!(runtime
         .verify_client_payload(key, expected, payload.clone())

@@ -86,7 +86,6 @@ impl<H> OnionCircuitShell<H> {
     fn decrypt_client_payload(
         &self,
         from: Did,
-        circuit_id: OnionCircuitId,
         payload: &rings_core::ecc::elgamal::impls::secp256k1::AeadCiphertext,
     ) -> Result<Option<OnionAuthenticatedPayload>> {
         let received_at_ms = get_epoch_ms();
@@ -98,7 +97,7 @@ impl<H> OnionCircuitShell<H> {
             }
             Err(error) => return Err(error),
         }
-        match decrypt_client_payload(&self.session_sk, circuit_id, payload) {
+        match decrypt_client_payload(&self.session_sk, payload) {
             Ok(payload) => Ok(Some(payload)),
             Err(error) => {
                 drop_bad_crypto("client decrypt", error);
@@ -161,7 +160,7 @@ where
                 circuit_id,
                 payload,
             } => {
-                if let Some(payload) = self.decrypt_client_payload(from, circuit_id, &payload)? {
+                if let Some(payload) = self.decrypt_client_payload(from, &payload)? {
                     self.handler
                         .handle_client(scope, from, circuit_id, payload)
                         .await?;
@@ -177,7 +176,7 @@ where
 pub struct OnionCircuitExitFrame {
     /// Previous peer that delivered this exit frame.
     pub from: Did,
-    /// Public circuit id shared by all hops on this route.
+    /// Edge-local circuit id for the exit-to-return-peer edge.
     pub circuit_id: OnionCircuitId,
     /// Relay peer that should receive backward frames from the exit.
     pub return_peer: Did,

@@ -25,7 +25,7 @@ fn exit_descriptor(session: &SessionSk) -> OnionExitDescriptor {
             session_public_key: session.session_public_key(),
             node_type: OnlineNodeType::Browser,
             network_id: 1,
-            services: vec![OnionExitService::https()],
+            service: OnionExitService::https(),
             policy: OnionExitPolicy::default(),
             started_at_ms: 0,
             heartbeat_at_ms: 0,
@@ -38,11 +38,11 @@ fn exit_descriptor(session: &SessionSk) -> OnionExitDescriptor {
 }
 
 fn dummy_authenticated_payload(
-    circuit_id: OnionCircuitId,
+    return_id: OnionReturnId,
     session: &SessionSk,
 ) -> OnionAuthenticatedPayload {
     OnionAuthenticatedPayload::new_signed(
-        circuit_id,
+        return_id,
         encode_https_payload(OnionHttpsPayload::Error(OnionExitFailure::InvalidTarget(
             "wrong peer".to_string(),
         )))
@@ -149,8 +149,9 @@ fn checked_status_code_rejects_invalid_js_status_values() {
 fn cancel_request_removes_pending_request() {
     let runtime = OnionHttpsRuntime::new();
     let exit = session();
+    let return_id = OnionReturnId::new([3; 16]);
     let (id, _receiver) = runtime
-        .begin_request(did(), exit_descriptor(&exit))
+        .begin_request(did(), exit_descriptor(&exit), return_id)
         .unwrap();
 
     assert_eq!(runtime.pending_len(), 1);
@@ -164,11 +165,12 @@ fn pending_request_completes_only_from_expected_return_peer() {
     let expected = did();
     let other = did();
     let exit = session();
+    let return_id = OnionReturnId::new([1; 16]);
     let (id, receiver) = runtime
-        .begin_request(expected, exit_descriptor(&exit))
+        .begin_request(expected, exit_descriptor(&exit), return_id)
         .unwrap();
 
-    runtime.complete_payload(other, id, dummy_authenticated_payload(id, &exit));
+    runtime.complete_payload(other, id, dummy_authenticated_payload(return_id, &exit));
     assert_eq!(runtime.pending_len(), 1);
     drop(receiver);
     runtime.cancel_request(id);
@@ -180,14 +182,53 @@ fn pending_request_rejects_payload_from_wrong_exit_session() {
     let expected = did();
     let selected_exit = session();
     let wrong_exit = session();
+    let return_id = OnionReturnId::new([2; 16]);
     let (id, mut receiver) = runtime
-        .begin_request(expected, exit_descriptor(&selected_exit))
+        .begin_request(expected, exit_descriptor(&selected_exit), return_id)
         .unwrap();
 
-    runtime.complete_payload(expected, id, dummy_authenticated_payload(id, &wrong_exit));
+    runtime.complete_payload(
+        expected,
+        id,
+        dummy_authenticated_payload(return_id, &wrong_exit),
+    );
 
     assert_eq!(runtime.pending_len(), 0);
     assert!(matches!(receiver.try_recv(), Ok(Some(Err(_)))));
+}
+
+#[test]
+fn pending_request_reports_authenticated_request_as_unexpected_backward_payload() {
+    let runtime = OnionHttpsRuntime::new();
+    let expected = did();
+    let exit = session();
+    let return_id = OnionReturnId::new([4; 16]);
+    let (id, mut receiver) = runtime
+        .begin_request(expected, exit_descriptor(&exit), return_id)
+        .unwrap();
+    let request_payload = OnionHttpsPayload::Request(OnionHttpsRequest {
+        target: "example.com:443".to_string(),
+        method: "GET".to_string(),
+        path: "/".to_string(),
+        headers: Vec::new(),
+        body: Vec::new(),
+    });
+    let payload = OnionAuthenticatedPayload::new_signed(
+        return_id,
+        encode_https_payload(request_payload).unwrap(),
+        &exit,
+    )
+    .unwrap();
+
+    runtime.complete_payload(expected, id, payload);
+
+    assert_eq!(runtime.pending_len(), 0);
+    assert!(matches!(
+        receiver.try_recv(),
+        Ok(Some(Err(Error::OnionRouteError(
+            OnionRouteError::UnexpectedBackwardPayload
+        ))))
+    ));
 }
 
 #[test]

@@ -311,7 +311,7 @@ fn eligible_exits(
     service: &str,
     exits: impl IntoIterator<Item = OnionExitDescriptor>,
 ) -> Vec<OnionExitDescriptor> {
-    OnionExitDescriptor::latest_valid_by_did(exits, now_ms, false)
+    OnionExitDescriptor::latest_valid_by_service_did(exits, now_ms, false)
         .into_iter()
         .filter(|descriptor| descriptor.matches_network(network_id))
         .filter(|descriptor| descriptor.offers_service(service))

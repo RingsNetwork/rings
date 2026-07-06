@@ -10,15 +10,28 @@ use crate::online::OnlineNodeDescriptor;
 use crate::online::OnlineNodeDescriptorBody;
 
 fn service(name: &str) -> OnionExitService {
-    OnionExitService {
-        name: name.to_string(),
-        transport: OnionExitTransport::Tcp,
-    }
+    OnionExitService::new(name, OnionExitTransport::Tcp).expect("valid test service")
 }
 
 fn signed_exit_at(heartbeat_at_ms: u128, expires_at_ms: u128) -> Result<OnionExitDescriptor> {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).map_err(Error::CoreError)?;
+    signed_exit_for_session_at(
+        &session_sk,
+        service("web"),
+        heartbeat_at_ms,
+        expires_at_ms,
+        "test",
+    )
+}
+
+fn signed_exit_for_session_at(
+    session_sk: &SessionSk,
+    service: OnionExitService,
+    heartbeat_at_ms: u128,
+    expires_at_ms: u128,
+    version: &str,
+) -> Result<OnionExitDescriptor> {
     let did = session_sk.account_did();
     OnionExitDescriptor::new_signed(
         OnionExitDescriptorBody {
@@ -30,7 +43,7 @@ fn signed_exit_at(heartbeat_at_ms: u128, expires_at_ms: u128) -> Result<OnionExi
             session_public_key: session_sk.session_public_key(),
             node_type: OnlineNodeType::Native,
             network_id: 1,
-            services: vec![service("web")],
+            service,
             policy: OnionExitPolicy {
                 allowed_targets: vec![OnionExitTarget::parse("example.com:443")?],
                 denied_targets: vec![],
@@ -41,7 +54,7 @@ fn signed_exit_at(heartbeat_at_ms: u128, expires_at_ms: u128) -> Result<OnionExi
             started_at_ms: 1,
             heartbeat_at_ms,
             expires_at_ms,
-            version: "test".to_string(),
+            version: version.to_string(),
         },
         &session_sk,
     )
@@ -116,10 +129,23 @@ fn default_exit_services_include_native_tcp_only() {
 #[test]
 fn reserved_service_name_requires_reserved_transport_for_routes() {
     assert!(OnionExitService::https().matches_route_service("https"));
-    assert!(!OnionExitService::new("https", OnionExitTransport::Tcp).matches_route_service("https"));
-    assert!(
-        OnionExitService::new("custom", OnionExitTransport::Tcp).matches_route_service("custom")
-    );
+    assert!(!OnionExitService::new("https", OnionExitTransport::Tcp)
+        .expect("valid service")
+        .matches_route_service("https"));
+    assert!(OnionExitService::new("custom", OnionExitTransport::Tcp)
+        .expect("valid service")
+        .matches_route_service("custom"));
+}
+
+#[test]
+fn onion_exit_service_name_is_validated_and_canonicalized() -> Result<()> {
+    let service = OnionExitService::new("WeB-Api.1", OnionExitTransport::Tcp)?;
+
+    assert_eq!(service.name.as_str(), "web-api.1");
+    assert!(OnionExitService::new("", OnionExitTransport::Tcp).is_err());
+    assert!(OnionExitService::new(" web", OnionExitTransport::Tcp).is_err());
+    assert!(OnionExitService::new("web!", OnionExitTransport::Tcp).is_err());
+    Ok(())
 }
 
 #[test]
@@ -184,7 +210,7 @@ fn exit_descriptor_signature_covers_policy() -> Result<()> {
 }
 
 #[test]
-fn latest_valid_by_did_filters_expired_and_keeps_newest() -> Result<()> {
+fn latest_valid_by_service_did_filters_expired_and_keeps_newest() -> Result<()> {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).map_err(Error::CoreError)?;
     let did = session_sk.account_did();
@@ -200,7 +226,7 @@ fn latest_valid_by_did_filters_expired_and_keeps_newest() -> Result<()> {
             session_public_key: session_sk.session_public_key(),
             node_type: OnlineNodeType::Native,
             network_id: 1,
-            services: vec![service("web")],
+            service: service("web"),
             policy: OnionExitPolicy::default(),
             started_at_ms: 1,
             heartbeat_at_ms: 10,
@@ -217,7 +243,7 @@ fn latest_valid_by_did_filters_expired_and_keeps_newest() -> Result<()> {
             session_public_key: session_sk.session_public_key(),
             node_type: OnlineNodeType::Native,
             network_id: 1,
-            services: vec![service("web")],
+            service: service("web"),
             policy: OnionExitPolicy::default(),
             started_at_ms: 1,
             heartbeat_at_ms: 20,
@@ -230,7 +256,7 @@ fn latest_valid_by_did_filters_expired_and_keeps_newest() -> Result<()> {
     let other_live = signed_exit_at(25, 100)?;
     let expired = signed_exit_at(30, 40)?;
 
-    let descriptors = OnionExitDescriptor::latest_valid_by_did(
+    let descriptors = OnionExitDescriptor::latest_valid_by_service_did(
         vec![
             older.clone(),
             newer.clone(),
@@ -247,9 +273,50 @@ fn latest_valid_by_did_filters_expired_and_keeps_newest() -> Result<()> {
         .iter()
         .any(|descriptor| descriptor == &other_live));
 
-    let with_expired =
-        OnionExitDescriptor::latest_valid_by_did(vec![older, newer, other_live, expired], 50, true);
+    let with_expired = OnionExitDescriptor::latest_valid_by_service_did(
+        vec![older, newer, other_live, expired],
+        50,
+        true,
+    );
     assert_eq!(with_expired.len(), 3);
+    Ok(())
+}
+
+#[test]
+fn latest_valid_by_service_did_preserves_same_did_distinct_services() -> Result<()> {
+    let key = SecretKey::random();
+    let session_sk = SessionSk::new_with_seckey(&key).map_err(Error::CoreError)?;
+    let old_tcp =
+        signed_exit_for_session_at(&session_sk, OnionExitService::tcp(), 10, 100, "tcp-old")?;
+    let new_tcp =
+        signed_exit_for_session_at(&session_sk, OnionExitService::tcp(), 20, 100, "tcp-new")?;
+    let https =
+        signed_exit_for_session_at(&session_sk, OnionExitService::https(), 15, 100, "https")?;
+    let wrong_https_transport = signed_exit_for_session_at(
+        &session_sk,
+        OnionExitService::new("https", OnionExitTransport::Tcp)?,
+        25,
+        100,
+        "https-wrong-transport",
+    )?;
+
+    let descriptors = OnionExitDescriptor::latest_valid_by_service_did(
+        vec![
+            old_tcp,
+            new_tcp.clone(),
+            https.clone(),
+            wrong_https_transport.clone(),
+        ],
+        50,
+        false,
+    );
+
+    assert_eq!(descriptors.len(), 3);
+    assert!(descriptors.iter().any(|descriptor| descriptor == &new_tcp));
+    assert!(descriptors.iter().any(|descriptor| descriptor == &https));
+    assert!(descriptors
+        .iter()
+        .any(|descriptor| descriptor == &wrong_https_transport));
     Ok(())
 }
 

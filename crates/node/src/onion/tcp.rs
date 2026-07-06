@@ -36,6 +36,7 @@ use crate::onion::circuit::OnionCircuitProtocol;
 use crate::onion::circuit::OnionCircuitShell;
 use crate::onion::circuit::OnionClientReturn;
 use crate::onion::circuit::OnionForwardNonce;
+use crate::onion::circuit::OnionReturnId;
 use crate::onion::circuit::ONION_CIRCUIT_NAMESPACE;
 use crate::onion::exit_accounting::OnionExitAccounting;
 use crate::onion::exit_accounting::OnionExitLease;
@@ -200,7 +201,6 @@ impl OnionCircuitHandler for NativeOnionCircuitHandler {
 
 struct OnionTcpRuntime {
     session_sk: SessionSk,
-    client_return: OnionClientReturn,
     client_streams: Mutex<HashMap<TcpStreamKey, ClientStream>>,
     exit_streams: Mutex<HashMap<TcpStreamKey, ExitStream>>,
     forward_replays: Mutex<OnionForwardReplayCache>,
@@ -210,10 +210,8 @@ struct OnionTcpRuntime {
 
 impl OnionTcpRuntime {
     fn new(session_sk: SessionSk, exit_policy: Option<OnionExitPolicy>) -> Self {
-        let client_return = OnionClientReturn::new(session_sk.session_public_key());
         Self {
             session_sk,
-            client_return,
             client_streams: Mutex::new(HashMap::new()),
             exit_streams: Mutex::new(HashMap::new()),
             forward_replays: Mutex::new(OnionForwardReplayCache::default()),
@@ -230,11 +228,18 @@ impl OnionTcpRuntime {
     ) -> Result<NativeOnionOpenStream> {
         let expected_return_peer = route_first_hop(&route)?;
         let expected_exit = route.exit().clone();
+        let client_return = OnionClientReturn::new(self.session_sk.session_public_key());
         let (tx, rx) = mpsc::channel(32);
         let (open_tx, open_rx) = oneshot::channel();
-        let key = self.insert_client_stream(expected_return_peer, expected_exit, open_tx, tx)?;
+        let key = self.insert_client_stream(
+            expected_return_peer,
+            expected_exit,
+            client_return.return_id,
+            open_tx,
+            tx,
+        )?;
         let (to, payload) = encode_initial_forward(
-            self.client_return,
+            client_return,
             &route,
             key.circuit_id,
             encode_tcp_payload(OnionTcpPayload::Open {
@@ -251,7 +256,7 @@ impl OnionTcpRuntime {
                 scope,
                 key,
                 route,
-                client_return: self.client_return,
+                client_return,
                 rx,
             }),
             Ok(Ok(Err(failure))) => {
@@ -471,6 +476,7 @@ impl OnionTcpRuntime {
         &self,
         expected_return_peer: Did,
         expected_exit: OnionExitDescriptor,
+        return_id: OnionReturnId,
         open_ack: oneshot::Sender<std::result::Result<(), OnionExitFailure>>,
         tx: mpsc::Sender<TcpInbound>,
     ) -> Result<TcpStreamKey> {
@@ -484,6 +490,7 @@ impl OnionTcpRuntime {
                     entry.insert(ClientStream {
                         expected_return_peer,
                         expected_exit,
+                        return_id,
                         open_ack: Some(open_ack),
                         backward_replays: OnionBackwardReplayCache::default(),
                         tx,
@@ -567,7 +574,7 @@ impl OnionTcpRuntime {
         from: Did,
         payload: OnionAuthenticatedPayload,
     ) -> Result<OnionCircuitPayload> {
-        let expected_exit = {
+        let (expected_exit, return_id) = {
             let streams = self.client_streams.lock().map_err(|_| Error::Lock)?;
             let stream = streams
                 .get(&key)
@@ -580,10 +587,10 @@ impl OnionTcpRuntime {
                     },
                 ));
             }
-            stream.expected_exit.clone()
+            (stream.expected_exit.clone(), stream.return_id)
         };
-        let verified = payload.into_verified_payload(key.circuit_id, &expected_exit)?;
-        self.consume_backward_nonce(key, from, verified.nonce)?;
+        let verified = payload.into_verified_payload(return_id, &expected_exit)?;
+        self.consume_backward_nonce(key, from, verified.return_id, verified.nonce)?;
         Ok(verified.payload)
     }
 
@@ -591,6 +598,7 @@ impl OnionTcpRuntime {
         &self,
         key: TcpStreamKey,
         from: Did,
+        return_id: OnionReturnId,
         nonce: OnionBackwardNonce,
     ) -> Result<()> {
         let mut streams = self.client_streams.lock().map_err(|_| Error::Lock)?;
@@ -606,7 +614,7 @@ impl OnionTcpRuntime {
             ));
         }
         match stream.backward_replays.consume(
-            OnionBackwardReplayKey::new(key.circuit_id, nonce),
+            OnionBackwardReplayKey::new(return_id, nonce),
             rings_core::utils::get_epoch_ms(),
         ) {
             ReplayAdmission::Consumed => Ok(()),
@@ -735,6 +743,7 @@ async fn connect_exit_target(authority: &str) -> std::result::Result<TcpStream, 
 struct ClientStream {
     expected_return_peer: Did,
     expected_exit: OnionExitDescriptor,
+    return_id: OnionReturnId,
     open_ack: Option<oneshot::Sender<std::result::Result<(), OnionExitFailure>>>,
     backward_replays: OnionBackwardReplayCache,
     tx: mpsc::Sender<TcpInbound>,

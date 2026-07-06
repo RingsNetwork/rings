@@ -140,8 +140,13 @@ impl BrowserOnionProxy {
                 .await
                 .map_err(JsError::from)?;
             let first_hop = route_first_hop(&proxy_route.route).map_err(JsError::from)?;
+            let client_return = OnionClientReturn::new(p.session_sk().session_public_key());
             let (id, receiver) = runtime
-                .begin_request(first_hop, proxy_route.route.exit().clone())
+                .begin_request(
+                    first_hop,
+                    proxy_route.route.exit().clone(),
+                    client_return.return_id,
+                )
                 .map_err(JsError::from)?;
             let request_payload = match encode_https_payload(OnionHttpsPayload::Request(request)) {
                 Ok(payload) => payload,
@@ -151,7 +156,7 @@ impl BrowserOnionProxy {
                 }
             };
             let (to, payload) = match encode_initial_forward(
-                OnionClientReturn::new(p.session_sk().session_public_key()),
+                client_return,
                 &proxy_route.route,
                 id,
                 request_payload,

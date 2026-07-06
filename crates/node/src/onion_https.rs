@@ -41,6 +41,7 @@ use crate::onion::circuit::OnionCircuitHandler;
 use crate::onion::circuit::OnionCircuitId;
 use crate::onion::circuit::OnionCircuitPayload;
 use crate::onion::circuit::OnionForwardNonce;
+use crate::onion::circuit::OnionReturnId;
 use crate::onion::exit_accounting::OnionExitAccounting;
 use crate::onion::exit_accounting::OnionExitLease;
 use crate::onion::replay::OnionForwardReplayCache;
@@ -155,6 +156,7 @@ pub(crate) struct OnionHttpsRuntime {
 struct PendingRequest {
     expected_return_peer: Did,
     expected_exit: OnionExitDescriptor,
+    return_id: OnionReturnId,
     sender: oneshot::Sender<std::result::Result<OnionHttpsClientResponse, Error>>,
 }
 
@@ -176,6 +178,7 @@ impl OnionHttpsRuntime {
         &self,
         expected_return_peer: Did,
         expected_exit: OnionExitDescriptor,
+        return_id: OnionReturnId,
     ) -> Result<(
         OnionCircuitId,
         oneshot::Receiver<std::result::Result<OnionHttpsClientResponse, Error>>,
@@ -192,6 +195,7 @@ impl OnionHttpsRuntime {
                 PendingRequest {
                     expected_return_peer,
                     expected_exit,
+                    return_id,
                     sender,
                 },
             );
@@ -235,7 +239,11 @@ impl OnionHttpsRuntime {
                             failure,
                         ))));
             }
-            Ok(Some(OnionHttpsPayload::Request(_)) | None) => {}
+            Ok(Some(OnionHttpsPayload::Request(_)) | None) => {
+                let _ = pending.sender.send(Err(Error::OnionRouteError(
+                    OnionRouteError::UnexpectedBackwardPayload,
+                )));
+            }
             Err(error) => {
                 let _ = pending.sender.send(Err(error));
             }
@@ -254,7 +262,7 @@ impl OnionHttpsRuntime {
             pending.insert(id, request);
             return None;
         }
-        match payload.into_verified_payload(id, &request.expected_exit) {
+        match payload.into_verified_payload(request.return_id, &request.expected_exit) {
             Ok(verified) => Some((request, verified.payload)),
             Err(error) => {
                 let _ = request.sender.send(Err(error));

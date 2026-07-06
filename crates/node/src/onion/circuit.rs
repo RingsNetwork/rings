@@ -53,6 +53,7 @@ pub const MAX_ONION_CIRCUIT_HOPS: u8 = 8;
 
 pub(super) const MAX_ONION_RELAY_CIRCUITS: usize = 1024;
 pub(super) const ONION_RELAY_RETURN_TTL_MS: u128 = 120_000;
+pub(super) const ONION_FORWARD_PAYLOAD_TTL_MS: u128 = 120_000;
 pub(super) const ONION_CRYPTO_LIMIT_WINDOW_MS: u128 = 60_000;
 pub(super) const MAX_ONION_CRYPTO_OPS_PER_WINDOW: u32 = 4096;
 pub(super) const ONION_AEAD_NAMESPACE: &str = "rings-node:onion-circuit:v1";
@@ -87,12 +88,34 @@ impl OnionCircuitPayload {
 /// Client-decrypted backward payload plus the exit session proof that authenticated it.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct OnionAuthenticatedPayload {
+    /// Client/exit-only return id encrypted in the exit layer.
+    pub return_id: OnionReturnId,
     /// Random per-frame nonce signed by the exit and consumed by the client adapter.
     pub nonce: OnionBackwardNonce,
     /// Exit session signature over the backward payload transcript.
     pub authentication: MessageVerification,
     /// Application payload signed by the exit and encrypted to the client.
     pub payload: OnionCircuitPayload,
+}
+
+/// Client/exit-only id used to authenticate backward payloads.
+///
+/// This id is encrypted inside the exit layer and never appears as a relay edge header. Relays may
+/// rewrite [`OnionCircuitId`] while forwarding backward frames; the client adapter accepts a
+/// backward payload only when this signed return id matches its pending request or stream.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct OnionReturnId([u8; 16]);
+
+impl OnionReturnId {
+    /// Build a return id from random bytes.
+    pub const fn new(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+
+    /// Generate a random return id.
+    pub fn random() -> Self {
+        Self(rand::random())
+    }
 }
 
 /// Random nonce for one backward payload on a circuit.
@@ -130,6 +153,8 @@ impl OnionForwardNonce {
 /// Backward payload that has passed exit identity, signature, and freshness checks.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OnionVerifiedPayload {
+    /// Verified client/exit return id.
+    pub return_id: OnionReturnId,
     /// Random per-frame nonce to be consumed exactly once by the client adapter.
     pub nonce: OnionBackwardNonce,
     /// Verified application payload.
@@ -141,16 +166,36 @@ pub struct OnionVerifiedPayload {
 pub struct OnionClientReturn {
     /// Client session public key used for backward AEAD payloads.
     pub session_public_key: PublicKey<33>,
+    /// Client/exit-only id used to authenticate backward payloads.
+    pub return_id: OnionReturnId,
 }
 
 impl OnionClientReturn {
-    /// Build a client return descriptor.
-    pub const fn new(session_public_key: PublicKey<33>) -> Self {
-        Self { session_public_key }
+    /// Build a client return descriptor with a fresh return id.
+    pub fn new(session_public_key: PublicKey<33>) -> Self {
+        Self {
+            session_public_key,
+            return_id: OnionReturnId::random(),
+        }
+    }
+
+    /// Build a client return descriptor with an explicit return id.
+    pub const fn with_return_id(
+        session_public_key: PublicKey<33>,
+        return_id: OnionReturnId,
+    ) -> Self {
+        Self {
+            session_public_key,
+            return_id,
+        }
     }
 }
 
-/// Public unlinkable circuit correlation id.
+/// Edge-local circuit id.
+///
+/// Invariant: an [`OnionCircuitId`] identifies exactly one directed edge of one route. Relay layers
+/// carry the next edge id under AEAD; backward forwarding rewrites the header back to the previous
+/// edge id.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct OnionCircuitId([u8; 16]);
 
@@ -169,7 +214,7 @@ impl OnionCircuitId {
 /// Forward direction: client -> relays -> exit.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct OnionForwardFrame {
-    /// Random circuit correlation id.
+    /// Edge-local circuit id for the receiving hop.
     pub circuit_id: OnionCircuitId,
     /// AEAD-encrypted layer for the receiving hop.
     pub layer: AeadCiphertext,
@@ -178,7 +223,7 @@ pub struct OnionForwardFrame {
 /// Backward direction: exit -> relays -> client.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct OnionBackwardFrame {
-    /// Random circuit correlation id.
+    /// Edge-local circuit id for the receiving relay or client.
     pub circuit_id: OnionCircuitId,
     /// AEAD payload encrypted to the client session public key.
     pub payload: AeadCiphertext,
@@ -188,11 +233,13 @@ pub struct OnionBackwardFrame {
 pub(super) enum OnionForwardLayer {
     Relay {
         next_hop: Did,
+        next_circuit_id: OnionCircuitId,
         remaining_hops: u8,
         inner: AeadCiphertext,
     },
     Exit {
         client: OnionClientReturn,
+        expires_at_ms: u128,
         forward_nonce: OnionForwardNonce,
         payload: OnionCircuitPayload,
     },

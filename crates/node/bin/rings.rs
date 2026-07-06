@@ -110,10 +110,7 @@ fn parse_onion_exit_service(raw: &str) -> Result<OnionExitService, String> {
             ));
         }
     };
-    Ok(OnionExitService {
-        name: name.to_string(),
-        transport,
-    })
+    OnionExitService::new(name, transport).map_err(|error| error.to_string())
 }
 
 fn validate_native_onion_exit_services(services: &[OnionExitService]) -> anyhow::Result<()> {

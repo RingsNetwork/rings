@@ -119,6 +119,10 @@ pub struct SessionSkBuilder {
 /// To prove that the message was sent by the [Account] of [Session],
 /// we need to attach session and the signature signed by sk to the payload.
 ///
+/// Clone law: cloning a [`SessionSk`] duplicates the same in-memory signing and
+/// decryption authority. The clone preserves the account DID, session identity,
+/// and session public key; it does not mint, rotate, or narrow the capability.
+///
 /// SessionSk provide a `session` method to clone the session.
 /// SessionSk also provide `sign` method to sign a message.
 ///
@@ -451,6 +455,17 @@ mod test {
         let sm = SessionSk::new_with_seckey(&key).unwrap();
         let session = sm.session();
         assert!(session.verify_self().is_ok());
+    }
+
+    #[test]
+    pub fn session_sk_clone_preserves_authority_identity() {
+        let key = SecretKey::random();
+        let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+        let cloned = session_sk.clone();
+
+        assert_eq!(cloned.account_did(), session_sk.account_did());
+        assert_eq!(cloned.session(), session_sk.session());
+        assert_eq!(cloned.session_public_key(), session_sk.session_public_key());
     }
 
     #[test]
