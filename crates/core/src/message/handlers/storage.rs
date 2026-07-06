@@ -289,6 +289,10 @@ async fn persist_synced_entries(
 ) -> Result<Vec<SyncedEntryAck>> {
     let mut acks = Vec::with_capacity(msg.data.len());
     for placed in msg.data.iter() {
+        if !should_persist_synced_entry(&handler.dht, placed.key)? {
+            continue;
+        }
+
         let entry = placed.entry.clone().try_into_storage_entry()?;
         handler
             .dht
@@ -297,6 +301,18 @@ async fn persist_synced_entries(
         acks.push(SyncedEntryAck::new(placed.key, entry));
     }
     Ok(acks)
+}
+
+fn should_persist_synced_entry(dht: &PeerRing, placement: Did) -> Result<bool> {
+    if !dht.storage_virtual_nodes_enabled()? {
+        return Ok(true);
+    }
+
+    match dht.find_storage_owner(placement)? {
+        PeerRingAction::Some(owner) => Ok(owner == dht.did),
+        PeerRingAction::RemoteAction(_, PeerRingRemoteAction::FindSuccessor(_)) => Ok(false),
+        action => Err(Error::unexpected_peer_ring_action(action)),
+    }
 }
 
 fn next_hop_for_sync_entries(
@@ -529,6 +545,22 @@ mod test {
                 session_sk,
             )
             .dht_storage_redundancy(redundancy)
+            .dht_finger_table_size(8)
+            .build(),
+        );
+        Ok(Node::new(swarm))
+    }
+
+    fn prepare_node_with_virtual_nodes(key: SecretKey, positions_per_peer: u16) -> Result<Node> {
+        let session_sk = SessionSk::new_with_seckey(&key)?;
+        let swarm = Arc::new(
+            SwarmBuilder::new(
+                0,
+                "stun://stun.l.google.com:19302",
+                Box::new(MemStorage::new()),
+                session_sk,
+            )
+            .dht_virtual_nodes(positions_per_peer)
             .dht_finger_table_size(8)
             .build(),
         );
@@ -1190,6 +1222,82 @@ mod test {
                 .storage
                 .get(&placement_key.to_string())
                 .await?,
+            Some(stored_entry)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sync_entries_handler_skips_entries_owned_by_another_virtual_owner() -> Result<()> {
+        let mut keys = gen_ordered_keys(2).into_iter();
+        let sender = prepare_node_with_virtual_nodes(next_generated_key(&mut keys)?, 2)?;
+        let receiver = prepare_node_with_virtual_nodes(next_generated_key(&mut keys)?, 2)?;
+        manually_establish_connection(&sender.swarm, &receiver.swarm).await;
+        wait_for_msgs([&sender, &receiver]).await;
+        let _ = receiver.dht().join(sender.did())?;
+
+        let placement_key = receiver
+            .dht()
+            .storage_virtual_positions(sender.did())?
+            .into_iter()
+            .next()
+            .map(|position| position.vnode_did)
+            .ok_or_else(|| Error::InvalidMessage("expected sender virtual position".to_string()))?;
+        assert!(matches!(
+            receiver.dht().find_storage_owner(placement_key)?,
+            PeerRingAction::RemoteAction(owner, PeerRingRemoteAction::FindSuccessor(key))
+                if owner == sender.did() && key == placement_key
+        ));
+
+        let entry = Entry::new(
+            Did::from(10u32),
+            vec!["wrong owner".to_string().encode()?],
+            EntryKind::Data,
+        );
+        let stored_entry = entry.clone().try_into_storage_entry()?;
+        sender
+            .dht()
+            .storage
+            .put(&placement_key.to_string(), &stored_entry)
+            .await?;
+        let sync_msg = SyncEntriesWithSuccessor {
+            data: vec![PlacedEntry::new(placement_key, entry)],
+        };
+        let context = MessagePayload::new_send(
+            Message::SyncEntriesWithSuccessor(sync_msg.clone()),
+            sender.swarm.transport.session_sk(),
+            receiver.did(),
+            receiver.did(),
+        )?;
+        let receiver_handler =
+            MessageHandler::new(receiver.swarm.transport.clone(), Arc::new(NoopCallback));
+
+        receiver_handler.handle(&context, &sync_msg).await?;
+
+        assert_eq!(
+            receiver
+                .dht()
+                .storage
+                .get(&placement_key.to_string())
+                .await?,
+            None
+        );
+        let payload = next_payload(&sender).await?;
+        match payload.transaction.data::<Message>()? {
+            Message::SyncEntriesWithSuccessorReport(report) => {
+                assert!(report.acks.is_empty());
+                let sender_handler =
+                    MessageHandler::new(sender.swarm.transport.clone(), Arc::new(NoopCallback));
+                sender_handler.handle(&payload, &report).await?;
+            }
+            message => {
+                return Err(Error::InvalidMessage(format!(
+                    "expected SyncEntriesWithSuccessorReport, got {message:?}"
+                )))
+            }
+        }
+        assert_eq!(
+            sender.dht().storage.get(&placement_key.to_string()).await?,
             Some(stored_entry)
         );
         Ok(())
