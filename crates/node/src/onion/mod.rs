@@ -5,8 +5,8 @@
 //! remains the storage and discovery substrate, while exit policy is an
 //! application protocol decision.
 //!
-//! The current data plane selects route-aware circuits and exit policies. It does not yet provide
-//! layered onion encryption; see [`circuit::ONION_CIRCUIT_SECURITY`].
+//! The current data plane selects route-aware circuits and exit policies, with layered
+//! ElGamal-AEAD frames described by [`circuit::ONION_CIRCUIT_SECURITY`].
 
 use std::time::Duration;
 

@@ -103,22 +103,17 @@ pub enum OnionCircuitPayload {
     },
 }
 
-/// Client return identity and key encrypted into the exit layer.
+/// Client return key encrypted into the exit layer.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct OnionClientReturn {
-    /// Client DID.
-    pub did: Did,
     /// Client session public key used for backward AEAD payloads.
     pub session_public_key: PublicKey<33>,
 }
 
 impl OnionClientReturn {
     /// Build a client return descriptor.
-    pub const fn new(did: Did, session_public_key: PublicKey<33>) -> Self {
-        Self {
-            did,
-            session_public_key,
-        }
+    pub const fn new(session_public_key: PublicKey<33>) -> Self {
+        Self { session_public_key }
     }
 }
 
@@ -214,7 +209,7 @@ pub enum OnionCircuitEffect {
         circuit_id: OnionCircuitId,
         /// Immediate return peer.
         return_peer: Did,
-        /// Client return identity and key.
+        /// Client return key.
         client: OnionClientReturn,
         /// Application payload.
         payload: OnionCircuitPayload,
@@ -710,7 +705,7 @@ mod tests {
         let circuit_id = OnionCircuitId::new([9; 16]);
 
         let (to, payload) = encode_initial_forward(
-            OnionClientReturn::new(client.account_did(), client.session_public_key()),
+            OnionClientReturn::new(client.session_public_key()),
             &route,
             circuit_id,
             OnionCircuitPayload::HttpsError("probe".to_string()),
@@ -736,7 +731,7 @@ mod tests {
         let route = route(std::slice::from_ref(&relay), &exit);
         let circuit_id = OnionCircuitId::new([1; 16]);
         let (_, payload) = encode_initial_forward(
-            OnionClientReturn::new(client.account_did(), client.session_public_key()),
+            OnionClientReturn::new(client.session_public_key()),
             &route,
             circuit_id,
             OnionCircuitPayload::TcpShutdown,
@@ -768,7 +763,7 @@ mod tests {
         let route = route(std::slice::from_ref(&relay), &exit);
         let circuit_id = OnionCircuitId::new([2; 16]);
         let (_, payload) = encode_initial_forward(
-            OnionClientReturn::new(client.account_did(), client.session_public_key()),
+            OnionClientReturn::new(client.session_public_key()),
             &route,
             circuit_id,
             OnionCircuitPayload::TcpShutdown,

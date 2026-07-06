@@ -52,7 +52,7 @@ impl NativeOnionCircuitHandle {
         exit_policy: Option<OnionExitPolicy>,
     ) -> Result<Self> {
         let runtime = Arc::new(OnionTcpRuntime::new(
-            OnionClientReturn::new(session_sk.account_did(), session_sk.session_public_key()),
+            OnionClientReturn::new(session_sk.session_public_key()),
             exit_policy,
         ));
         extensions.register(
@@ -292,7 +292,7 @@ impl OnionTcpRuntime {
             )
             .await;
         }
-        let lease = match self.admit_exit_stream(policy, client.did, return_peer, 0) {
+        let lease = match self.admit_exit_stream(policy, circuit_id, return_peer, 0) {
             Ok(lease) => lease,
             Err(error) => {
                 return send_backward(
@@ -462,11 +462,11 @@ impl OnionTcpRuntime {
     fn admit_exit_stream(
         &self,
         policy: &OnionExitPolicy,
-        client: Did,
+        circuit_id: OnionCircuitId,
         return_peer: Did,
         bytes: u64,
     ) -> Result<TcpExitLease> {
-        let circuit = ExitCircuitKey::new(client, return_peer);
+        let circuit = ExitCircuitKey::new(circuit_id, return_peer);
         let mut limiter = self.limiter.lock().map_err(|_| Error::Lock)?;
         let active_streams = limiter
             .active_streams_by_circuit
@@ -597,14 +597,14 @@ struct TcpExitLimiter {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct ExitCircuitKey {
-    client: Did,
+    circuit_id: OnionCircuitId,
     return_peer: Did,
 }
 
 impl ExitCircuitKey {
-    const fn new(client: Did, return_peer: Did) -> Self {
+    const fn new(circuit_id: OnionCircuitId, return_peer: Did) -> Self {
         Self {
-            client,
+            circuit_id,
             return_peer,
         }
     }
@@ -867,7 +867,7 @@ mod tests {
 
     fn client_return() -> OnionClientReturn {
         let session_sk = SessionSk::new_with_seckey(&SecretKey::random()).expect("session key");
-        OnionClientReturn::new(session_sk.account_did(), session_sk.session_public_key())
+        OnionClientReturn::new(session_sk.session_public_key())
     }
 
     fn runtime() -> OnionTcpRuntime {
@@ -910,19 +910,43 @@ mod tests {
             max_streams_per_circuit: 1,
             ..OnionExitPolicy::default()
         };
-        let client = did();
+        let circuit_id = OnionCircuitId::new([1; 16]);
         let return_peer = did();
 
         let lease = runtime
-            .admit_exit_stream(&policy, client, return_peer, 0)
+            .admit_exit_stream(&policy, circuit_id, return_peer, 0)
             .expect("first stream admitted");
         assert!(matches!(
-            runtime.admit_exit_stream(&policy, client, return_peer, 0),
+            runtime.admit_exit_stream(&policy, circuit_id, return_peer, 0),
             Err(Error::NoPermission)
         ));
         drop(lease);
         assert!(runtime
-            .admit_exit_stream(&policy, client, return_peer, 0)
+            .admit_exit_stream(&policy, circuit_id, return_peer, 0)
+            .is_ok());
+    }
+
+    #[test]
+    fn exit_limiter_counts_distinct_circuit_ids() {
+        let runtime = runtime();
+        let policy = OnionExitPolicy {
+            max_circuits: 1,
+            ..OnionExitPolicy::default()
+        };
+        let return_peer = did();
+        let first = OnionCircuitId::new([1; 16]);
+        let second = OnionCircuitId::new([2; 16]);
+
+        let lease = runtime
+            .admit_exit_stream(&policy, first, return_peer, 0)
+            .expect("first circuit admitted");
+        assert!(matches!(
+            runtime.admit_exit_stream(&policy, second, return_peer, 0),
+            Err(Error::NoPermission)
+        ));
+        drop(lease);
+        assert!(runtime
+            .admit_exit_stream(&policy, second, return_peer, 0)
             .is_ok());
     }
 

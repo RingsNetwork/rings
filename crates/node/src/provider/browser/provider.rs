@@ -144,7 +144,7 @@ impl BrowserOnionProxy {
             })?;
             let (id, receiver) = runtime.begin_request(first_hop).map_err(JsError::from)?;
             let (to, payload) = match encode_initial_forward(
-                OnionClientReturn::new(p.did(), p.session_sk().session_public_key()),
+                OnionClientReturn::new(p.session_sk().session_public_key()),
                 &proxy_route.route,
                 id,
                 OnionCircuitPayload::HttpsRequest(request),
