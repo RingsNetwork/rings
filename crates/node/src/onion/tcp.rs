@@ -22,6 +22,7 @@ use crate::extension::ext::Extensions;
 use crate::extension::ext::Scope;
 use crate::onion::circuit::encode_initial_forward;
 use crate::onion::circuit::send_backward;
+use crate::onion::circuit::OnionCircuitCapabilities;
 use crate::onion::circuit::OnionCircuitHandler;
 use crate::onion::circuit::OnionCircuitId;
 use crate::onion::circuit::OnionCircuitPayload;
@@ -56,8 +57,9 @@ impl NativeOnionCircuitHandle {
             OnionClientReturn::new(session_sk.session_public_key()),
             exit_policy,
         ));
+        let capabilities = OnionCircuitCapabilities::from_registration(allow_relay, allow_exit);
         extensions.register(
-            OnionCircuitProtocol::new(session_sk.clone(), allow_relay, allow_exit),
+            OnionCircuitProtocol::new(capabilities),
             OnionCircuitShell::new(session_sk, NativeOnionCircuitHandler {
                 runtime: runtime.clone(),
             }),

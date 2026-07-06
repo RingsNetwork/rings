@@ -28,6 +28,7 @@ use wasm_bindgen_futures::future_to_promise;
 use wasm_bindgen_futures::JsFuture;
 
 use crate::onion::circuit::encode_initial_forward;
+use crate::onion::circuit::OnionCircuitCapabilities;
 use crate::onion::circuit::OnionCircuitPayload;
 use crate::onion::circuit::OnionCircuitProtocol;
 use crate::onion::circuit::OnionCircuitShell;
@@ -632,12 +633,12 @@ impl Provider {
                     "namespace {ONION_CIRCUIT_NAMESPACE:?} is already registered"
                 )));
             }
+            let capabilities = OnionCircuitCapabilities::from_registration(
+                self.processor.advertise_onion_relay(),
+                allow_exit,
+            );
             self.register_protocol(
-                OnionCircuitProtocol::new(
-                    self.processor.session_sk().clone(),
-                    self.processor.advertise_onion_relay(),
-                    allow_exit,
-                ),
+                OnionCircuitProtocol::new(capabilities),
                 OnionCircuitShell::new(
                     self.processor.session_sk().clone(),
                     BrowserOnionCircuitHandler::new(runtime.clone()),
