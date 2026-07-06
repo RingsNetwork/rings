@@ -22,6 +22,7 @@ use crate::dht::ChordStorage;
 use crate::dht::ChordStorageRepair;
 use crate::dht::ChordStorageSync;
 use crate::dht::Did;
+use crate::dht::StorageSyncDestination;
 use crate::dht::VirtualNodeConfig;
 use crate::error::Error;
 use crate::error::Result;
@@ -93,7 +94,11 @@ fn collect_sync_batches_into(
 ) -> Result<()> {
     match act {
         PeerRingAction::None => Ok(()),
-        PeerRingAction::RemoteAction(target, RemoteAction::SyncEntriesWithSuccessor(data)) => {
+        PeerRingAction::RemoteAction(
+            target,
+            RemoteAction::SyncEntriesWithSuccessor { destination, data },
+        ) => {
+            assert_eq!(target, destination.did());
             batches.push((target, data));
             Ok(())
         }
@@ -510,6 +515,7 @@ fn sync_entries_batch_wire_cost_matches_serialized_message_cost() -> Result<()> 
         ),
     ];
     let message = Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor {
+        destination: StorageSyncDestination::PhysicalOwner(Did::from(50u32)),
         data: entries.clone(),
     });
     let serialized_bytes = bincode::serialized_size(&message).map_err(Error::BincodeSerialize)?;
@@ -610,17 +616,14 @@ async fn republish_remote_actions_preserve_affine_placement_keys() -> Result<()>
     assert_eq!(
         action,
         PeerRingAction::MultiActions(vec![
-            PeerRingAction::RemoteAction(
-                first_key,
-                RemoteAction::SyncEntriesWithSuccessor(vec![PlacedEntry::new(
-                    first_key,
-                    entry.clone()
-                )])
-            ),
-            PeerRingAction::RemoteAction(
-                second_key,
-                RemoteAction::SyncEntriesWithSuccessor(vec![PlacedEntry::new(second_key, entry)])
-            )
+            PeerRingAction::RemoteAction(first_key, RemoteAction::SyncEntriesWithSuccessor {
+                destination: StorageSyncDestination::PlacementKey(first_key),
+                data: vec![PlacedEntry::new(first_key, entry.clone())],
+            }),
+            PeerRingAction::RemoteAction(second_key, RemoteAction::SyncEntriesWithSuccessor {
+                destination: StorageSyncDestination::PlacementKey(second_key),
+                data: vec![PlacedEntry::new(second_key, entry)],
+            })
         ])
     );
     Ok(())
@@ -719,7 +722,10 @@ async fn read_repair_uses_observed_remote_owner() -> Result<()> {
         action,
         PeerRingAction::MultiActions(vec![PeerRingAction::RemoteAction(
             owner,
-            RemoteAction::SyncEntriesWithSuccessor(vec![PlacedEntry::new(placement_key, entry)])
+            RemoteAction::SyncEntriesWithSuccessor {
+                destination: StorageSyncDestination::PhysicalOwner(owner),
+                data: vec![PlacedEntry::new(placement_key, entry)],
+            }
         )])
     );
     Ok(())

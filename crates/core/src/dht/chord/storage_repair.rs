@@ -6,10 +6,15 @@
 //!   [`Did::rotate_affine`].
 //! - `sigma_n[k]` is the [`Entry`] stored by node `n` under placement key `k`.
 //! - `succ(k)` is the owner returned by Chord routing for placement key `k`.
+//! - `vowner(k, view, cfg)` is the physical owner selected by storage virtual
+//!   positions derived from the authenticated owner set in `view`.
+//! - `storage_owner(k, view, cfg) = vowner(k, view, cfg)` when virtual storage is
+//!   enabled, otherwise `succ(k)`.
 //!
 //! Invariant REPLICATED(e, N):
-//! `forall k in place(id(e), N), sigma_{succ(k)}[k] >= e_delta`, where `>=`
-//! is the partial order induced by [`crate::algebra::JoinSemilattice`].
+//! `forall k in place(id(e), N), sigma_{storage_owner(k, view, cfg)}[k] >=
+//! e_delta`, where `>=` is the partial order induced by
+//! [`crate::algebra::JoinSemilattice`].
 //!
 //! Liveness S4:
 //! In a quiescent window, if at least one placement copy of `e` remains at the
@@ -19,6 +24,9 @@
 //! Safety:
 //! - S1 Additivity (#612): repair transitions in this module never call
 //!   `storage.remove`; they only deliver additional joins.
+//! - S1' Ownership validation: virtual-owner sync receivers ack only placements
+//!   they still own under their current `view`; stale senders keep unacked local
+//!   entries and retry in a later anti-entropy round.
 //! - S2' No-update-loss (#611/#614 cleanup): the only deletion transition is
 //!   `acknowledge_synced_entries`; the finite model
 //!   `storage_sync_model_preserves_no_update_loss` in `dht_stateright` checks
@@ -39,7 +47,7 @@ use async_trait::async_trait;
 
 use super::PeerRing;
 use super::PeerRingAction;
-use super::RemoteAction;
+use super::StorageSyncDestination;
 use super::StorageSyncTarget;
 use crate::dht::entry::Entry;
 use crate::dht::entry::PlacedEntry;
@@ -141,10 +149,9 @@ impl PeerRing {
                     .await?;
                 Ok(PeerRingAction::None)
             }
-            StorageSyncTarget::Remote(target) => Ok(PeerRingAction::RemoteAction(
-                target,
-                RemoteAction::SyncEntriesWithSuccessor(vec![placed]),
-            )),
+            StorageSyncTarget::Remote(destination) => {
+                Ok(PeerRingAction::sync_entries(destination, vec![placed]))
+            }
         }
     }
 
@@ -165,9 +172,9 @@ impl PeerRing {
             self.join_storage_entry(miss.key, entry.clone()).await?;
             Ok(PeerRingAction::None)
         } else {
-            Ok(PeerRingAction::RemoteAction(
-                miss.owner,
-                RemoteAction::SyncEntriesWithSuccessor(vec![placed]),
+            Ok(PeerRingAction::sync_entries(
+                StorageSyncDestination::PhysicalOwner(miss.owner),
+                vec![placed],
             ))
         }
     }

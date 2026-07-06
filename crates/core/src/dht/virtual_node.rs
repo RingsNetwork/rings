@@ -16,6 +16,9 @@ use crate::dht::Did;
 
 const VIRTUAL_NODE_DOMAIN: &[u8] = b"rings:vnode";
 
+/// Maximum virtual storage positions derived per physical owner.
+pub const MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER: u16 = 256;
+
 /// Configuration for storage virtual nodes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VirtualNodeConfig {
@@ -35,16 +38,31 @@ impl VirtualNodeConfig {
     }
 
     /// Build a virtual-node configuration.
+    ///
+    /// Post: `positions_per_owner <= MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER`.
     pub const fn new(network_id: u32, positions_per_owner: u16) -> Self {
         Self {
             network_id,
-            positions_per_owner,
+            positions_per_owner: Self::bounded_positions_per_owner(positions_per_owner),
         }
     }
 
     /// Returns whether this configuration enables virtual storage ownership.
     pub const fn is_enabled(self) -> bool {
         self.positions_per_owner > 0
+    }
+
+    /// Returns whether `positions_per_owner` is inside the configured cost bound.
+    pub const fn positions_per_owner_within_limit(positions_per_owner: u16) -> bool {
+        positions_per_owner <= MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER
+    }
+
+    const fn bounded_positions_per_owner(positions_per_owner: u16) -> u16 {
+        if positions_per_owner > MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER {
+            MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER
+        } else {
+            positions_per_owner
+        }
     }
 }
 
@@ -185,6 +203,17 @@ mod tests {
         assert_eq!(first, repeated);
         assert_ne!(first.vnode_did, owner);
         assert_ne!(first.vnode_did, other_network.vnode_did);
+    }
+
+    #[test]
+    fn virtual_node_config_caps_positions_at_cost_bound() {
+        let config =
+            VirtualNodeConfig::new(1, MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER.saturating_add(1));
+
+        assert_eq!(
+            config.positions_per_owner,
+            MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER
+        );
     }
 
     #[test]

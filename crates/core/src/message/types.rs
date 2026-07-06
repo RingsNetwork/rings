@@ -13,6 +13,7 @@ use crate::dht::entry::PlacedEntryOperation;
 use crate::dht::entry::PlacementMiss;
 use crate::dht::entry::SyncedEntryAck;
 use crate::dht::Did;
+use crate::dht::StorageSyncDestination;
 use crate::dht::TopoInfo;
 use crate::error::Error;
 use crate::error::Result;
@@ -205,6 +206,8 @@ impl FoundEntry {
 /// MessageType after `FindSuccessorSend` and syncing data.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SyncEntriesWithSuccessor {
+    /// Destination semantics used by relay nodes for this sync payload.
+    pub destination: StorageSyncDestination,
     /// Entries to sync to the new successor, paired with their placement keys.
     pub data: Vec<PlacedEntry>,
 }

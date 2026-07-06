@@ -5,7 +5,7 @@ use serde::Serialize;
 
 use super::PeerRing;
 use super::PeerRingAction;
-use super::RemoteAction;
+use super::StorageSyncDestination;
 use super::StorageSyncTarget;
 use crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD;
 use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
@@ -42,8 +42,10 @@ fn add_wire_cost(total: usize, next: usize) -> Result<usize> {
 }
 
 fn sync_entries_fixed_wire_cost() -> Result<usize> {
-    let empty_message =
-        Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor { data: Vec::new() });
+    let empty_message = Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor {
+        destination: StorageSyncDestination::PhysicalOwner(Did::from(0u32)),
+        data: Vec::new(),
+    });
     add_wire_cost(
         serialized_wire_size(&empty_message)?,
         SYNC_BATCH_ENVELOPE_HEADROOM_BYTES,
@@ -141,9 +143,9 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
         Ok(batches
             .into_iter()
             .map(|batch| {
-                PeerRingAction::RemoteAction(
-                    new_successor,
-                    RemoteAction::SyncEntriesWithSuccessor(batch),
+                PeerRingAction::sync_entries(
+                    StorageSyncDestination::PhysicalOwner(new_successor),
+                    batch,
                 )
             })
             .collect::<Vec<_>>()
@@ -177,7 +179,8 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
 impl PeerRing {
     async fn sync_entries_with_virtual_owners(&self) -> Result<PeerRingAction> {
         let all_items: Vec<(String, Entry)> = self.storage.get_all().await?;
-        let mut by_target = std::collections::BTreeMap::<Did, Vec<PlacedEntry>>::new();
+        let mut by_target =
+            std::collections::BTreeMap::<StorageSyncDestination, Vec<PlacedEntry>>::new();
 
         // Pre: storage virtual nodes are enabled and registered from
         // authenticated physical owner DIDs.
@@ -199,10 +202,7 @@ impl PeerRing {
         let mut actions = Vec::new();
         for (target, data) in by_target {
             for batch in sync_entries_batches(data, SYNC_BATCH_MAX_BYTES)? {
-                actions.push(PeerRingAction::RemoteAction(
-                    target,
-                    RemoteAction::SyncEntriesWithSuccessor(batch),
-                ));
+                actions.push(PeerRingAction::sync_entries(target, batch));
             }
         }
         Ok(actions.into())

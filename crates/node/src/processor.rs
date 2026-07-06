@@ -10,7 +10,9 @@ use futures::future::join_all;
 use rings_core::chunk::ReassemblyLimits;
 use rings_core::dht::Did;
 use rings_core::dht::EntryStorage;
+use rings_core::dht::VirtualNodeConfig;
 use rings_core::dht::DEFAULT_FINGER_TABLE_SIZE;
+use rings_core::dht::MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use rings_core::ecc::PublicKey;
 use rings_core::ecc::SecretKey;
 use rings_core::measure::MeasureImpl;
@@ -254,6 +256,16 @@ pub(crate) fn parse_webrtc_udp_port_range(
     }
 }
 
+fn validate_dht_virtual_nodes(positions_per_peer: u16) -> Result<()> {
+    if VirtualNodeConfig::positions_per_owner_within_limit(positions_per_peer) {
+        return Ok(());
+    }
+
+    Err(Error::InvalidConfig(format!(
+        "dht_virtual_nodes {positions_per_peer} exceeds maximum {MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER}"
+    )))
+}
+
 impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
     type Error = Error;
     fn try_from(ins: ProcessorConfig) -> Result<Self> {
@@ -279,6 +291,7 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
     fn try_from(ins: ProcessorConfigSerialized) -> Result<Self> {
         let webrtc_udp_port_range =
             parse_webrtc_udp_port_range(ins.webrtc_udp_port_min, ins.webrtc_udp_port_max)?;
+        validate_dht_virtual_nodes(ins.dht_virtual_nodes)?;
         let online_node_heartbeat_interval =
             Duration::from_secs(ins.online_node_heartbeat_interval_secs);
         let online_node_ttl = Duration::from_secs(ins.online_node_ttl_secs);
@@ -1028,6 +1041,26 @@ mod test {
         let builder = ProcessorBuilder::from_config(&config).unwrap();
 
         assert!(builder.advertise_presence);
+    }
+
+    #[test]
+    fn dht_virtual_nodes_rejects_values_above_cost_bound() {
+        let key = SecretKey::random();
+        let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+        let serialized = ProcessorConfigSerialized::new(
+            0,
+            "stun://stun.l.google.com:19302".to_string(),
+            session_sk.dump().unwrap(),
+            3,
+        )
+        .dht_virtual_nodes(MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER.saturating_add(1));
+
+        assert!(matches!(
+            ProcessorConfig::try_from(serialized),
+            Err(Error::InvalidConfig(message))
+                if message.contains("dht_virtual_nodes")
+                    && message.contains(&MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER.to_string())
+        ));
     }
 
     #[tokio::test]

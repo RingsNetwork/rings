@@ -23,6 +23,7 @@ pub use chord::EntryStorage;
 pub use chord::PeerRing;
 pub use chord::PeerRingAction;
 pub use chord::RemoteAction as PeerRingRemoteAction;
+pub use chord::StorageSyncDestination;
 pub use chord::TopoInfo;
 pub use did::Did;
 pub use finger::FingerTable;
@@ -40,6 +41,7 @@ pub use types::LiveDid;
 pub use virtual_node::StorageVirtualNodes;
 pub use virtual_node::VirtualNode;
 pub use virtual_node::VirtualNodeConfig;
+pub use virtual_node::MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 
 #[cfg(test)]
 pub mod tests {

@@ -5,6 +5,8 @@ use crate::prelude::SessionSk;
 use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
+
+#[cfg(feature = "snark")]
 pub mod snark;
 
 const TEST_DHT_FINGER_TABLE_SIZE: usize = 8;

@@ -115,12 +115,13 @@ pub enum RemoteAction {
     /// `did_a` is the remote recipient from [`PeerRingAction::RemoteAction`].
     /// This field is the predecessor DID announced in `NotifyPredecessorSend`.
     Notify(Did),
-    /// Copy placed entries to the storage destination represented by `did_a`.
-    ///
-    /// In successor hand-off, `did_a` is the new successor node. In repair and
-    /// republish, `did_a` is the placement key and the message layer routes it
-    /// to that key's current successor.
-    SyncEntriesWithSuccessor(Vec<PlacedEntry>),
+    /// Copy placed entries to one storage sync destination.
+    SyncEntriesWithSuccessor {
+        /// Destination routing semantics carried on the wire.
+        destination: StorageSyncDestination,
+        /// Entries to copy at their placement keys.
+        data: Vec<PlacedEntry>,
+    },
 
     /// Need `did_a` to find `did_b` then send back with `for connect` flag.
     FindSuccessorForConnect(Did),
@@ -150,9 +151,40 @@ pub struct TopoInfo {
     pub predecessor: Option<Did>,
 }
 
+/// Destination semantics for a storage sync hand-off.
+///
+/// Invariant: `RemoteAction::SyncEntriesWithSuccessor.destination.did()` is the
+/// relay destination carried by the outer [`PeerRingAction::RemoteAction`].
+///
+/// Routing law:
+/// - [`StorageSyncDestination::PhysicalOwner`] is routed as a node DID through
+///   physical Chord membership.
+/// - [`StorageSyncDestination::PlacementKey`] is routed through storage
+///   ownership for that placement key.
+///
+/// Safety: a physical-owner receiver still validates each placement before
+/// acking, so a stale sender cannot trigger local cleanup for a key the receiver
+/// does not own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+pub enum StorageSyncDestination {
+    /// Route to a physical node DID, then let the receiver validate entry ownership.
+    PhysicalOwner(Did),
+    /// Route through storage ownership for this placement key.
+    PlacementKey(Did),
+}
+
+impl StorageSyncDestination {
+    /// Return the DID placed in the relay destination.
+    pub fn did(self) -> Did {
+        match self {
+            Self::PhysicalOwner(did) | Self::PlacementKey(did) => did,
+        }
+    }
+}
+
 pub(super) enum StorageSyncTarget {
     Local,
-    Remote(Did),
+    Remote(StorageSyncDestination),
 }
 
 impl TryFrom<&PeerRing> for TopoInfo {
@@ -168,6 +200,16 @@ impl TryFrom<&PeerRing> for TopoInfo {
 }
 
 impl PeerRingAction {
+    pub(crate) fn sync_entries(
+        destination: StorageSyncDestination,
+        data: Vec<PlacedEntry>,
+    ) -> Self {
+        Self::RemoteAction(destination.did(), RemoteAction::SyncEntriesWithSuccessor {
+            destination,
+            data,
+        })
+    }
+
     /// Returns `true` if the action is a [PeerRingAction::None] value.
     pub fn is_none(&self) -> bool {
         if let Self::None = self {
@@ -338,6 +380,10 @@ impl PeerRing {
     fn storage_virtual_nodes(&self) -> Result<StorageVirtualNodes> {
         let state = self.topology_state()?;
         let mut owners = BTreeSet::new();
+        // Pre: `state` is this node's authenticated topology view.
+        // Post: the virtual-owner set is exactly the physical DIDs currently
+        // visible to storage routing: local, successors, predecessor, and
+        // fingers. It is an observed view, not a global registry.
         owners.insert(state.local);
         owners.extend(state.successors);
         owners.extend(state.predecessor);
@@ -368,17 +414,57 @@ impl PeerRing {
             if owner == self.did {
                 Ok(StorageSyncTarget::Local)
             } else {
-                Ok(StorageSyncTarget::Remote(owner))
+                Ok(StorageSyncTarget::Remote(
+                    StorageSyncDestination::PhysicalOwner(owner),
+                ))
             }
         } else {
             match self.find_successor(placement_key)? {
                 PeerRingAction::Some(owner) if owner == self.did => Ok(StorageSyncTarget::Local),
                 PeerRingAction::Some(_)
-                | PeerRingAction::RemoteAction(_, RemoteAction::FindSuccessor(_)) => {
-                    Ok(StorageSyncTarget::Remote(placement_key))
-                }
+                | PeerRingAction::RemoteAction(_, RemoteAction::FindSuccessor(_)) => Ok(
+                    StorageSyncTarget::Remote(StorageSyncDestination::PlacementKey(placement_key)),
+                ),
                 action => Err(Error::unexpected_peer_ring_action(action)),
             }
+        }
+    }
+
+    pub(crate) fn next_hop_for_storage_sync(
+        &self,
+        destination: StorageSyncDestination,
+    ) -> Result<Option<Did>> {
+        // Pre: destination.did() is the relay destination signed in the payload.
+        // Post: PhysicalOwner routes by physical membership; PlacementKey routes
+        // by storage ownership. The two relations are intentionally distinct.
+        match destination {
+            StorageSyncDestination::PhysicalOwner(owner) => self.next_hop_to_physical_owner(owner),
+            StorageSyncDestination::PlacementKey(key) => self.next_hop_to_storage_placement(key),
+        }
+    }
+
+    fn next_hop_to_physical_owner(&self, owner: Did) -> Result<Option<Did>> {
+        if owner == self.did {
+            return Ok(None);
+        }
+
+        match self.find_successor(owner)? {
+            // If this local view cannot prove a better physical next hop, try
+            // the target owner directly rather than accepting the payload as
+            // local work. Persisting happens only at relay destination.
+            PeerRingAction::Some(next) if next == self.did => Ok(Some(owner)),
+            PeerRingAction::Some(next) => Ok(Some(next)),
+            PeerRingAction::RemoteAction(next, RemoteAction::FindSuccessor(_)) => Ok(Some(next)),
+            action => Err(Error::unexpected_peer_ring_action(action)),
+        }
+    }
+
+    fn next_hop_to_storage_placement(&self, key: Did) -> Result<Option<Did>> {
+        match self.find_storage_owner(key)? {
+            PeerRingAction::Some(owner) if owner == self.did => Ok(None),
+            PeerRingAction::Some(next) => Ok(Some(next)),
+            PeerRingAction::RemoteAction(next, RemoteAction::FindSuccessor(_)) => Ok(Some(next)),
+            action => Err(Error::unexpected_peer_ring_action(action)),
         }
     }
 

@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 
-use crate::dht::entry::PlacedEntry;
 use crate::dht::Chord;
 use crate::dht::ChordStorageSync;
 use crate::dht::Did;
@@ -21,15 +20,18 @@ use crate::message::MessagePayload;
 
 fn collect_sync_entries_actions(
     act: PeerRingAction,
-    out: &mut Vec<(Did, Vec<PlacedEntry>)>,
+    out: &mut Vec<(Did, SyncEntriesWithSuccessor)>,
 ) -> Result<()> {
     match act {
         PeerRingAction::None => Ok(()),
         PeerRingAction::RemoteAction(
-            next,
-            PeerRingRemoteAction::SyncEntriesWithSuccessor(data),
+            _,
+            PeerRingRemoteAction::SyncEntriesWithSuccessor { destination, data },
         ) => {
-            out.push((next, data));
+            out.push((destination.did(), SyncEntriesWithSuccessor {
+                destination,
+                data,
+            }));
             Ok(())
         }
         PeerRingAction::MultiActions(actions) => {
@@ -76,12 +78,9 @@ impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
         )?;
         let effects = sync_actions
             .into_iter()
-            .map(|(next, data)| {
-                MessageSendFunctor::send_message(
-                    Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor { data }),
-                    next,
-                )
-                .into()
+            .map(|(next, msg)| {
+                MessageSendFunctor::send_message(Message::SyncEntriesWithSuccessor(msg), next)
+                    .into()
             })
             .collect::<Vec<_>>();
         self.run_effects(effects).await?;
@@ -104,6 +103,7 @@ mod test {
     use crate::dht::entry::PlacedEntry;
     use crate::dht::entry::SyncedEntryAck;
     use crate::dht::successor::SuccessorReader;
+    use crate::dht::StorageSyncDestination;
     use crate::ecc::tests::gen_ordered_keys;
     use crate::ecc::SecretKey;
     use crate::error::Error;
@@ -224,7 +224,11 @@ mod test {
         };
 
         match payload.transaction.data::<Message>()? {
-            Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor { data }) => {
+            Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor { destination, data }) => {
+                assert_eq!(
+                    destination,
+                    StorageSyncDestination::PhysicalOwner(node2.did())
+                );
                 assert_eq!(data, vec![PlacedEntry::new(entry.did, entry.clone())]);
             }
             message => {

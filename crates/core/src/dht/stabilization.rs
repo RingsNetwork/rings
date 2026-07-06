@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use rings_transport::core::transport::WebrtcConnectionState;
 
-use crate::dht::entry::PlacedEntry;
 use crate::dht::successor::SuccessorReader;
 use crate::dht::types::ChordStorageRepair;
 use crate::dht::types::CorrectChord;
@@ -77,15 +76,18 @@ impl Stabilizer {
 
     fn collect_storage_repair_actions(
         act: PeerRingAction,
-        out: &mut Vec<(Did, Vec<PlacedEntry>)>,
+        out: &mut Vec<(Did, SyncEntriesWithSuccessor)>,
     ) -> Result<()> {
         match act {
             PeerRingAction::None => Ok(()),
             PeerRingAction::RemoteAction(
-                destination,
-                PeerRingRemoteAction::SyncEntriesWithSuccessor(data),
+                _,
+                PeerRingRemoteAction::SyncEntriesWithSuccessor { destination, data },
             ) => {
-                out.push((destination, data));
+                out.push((destination.did(), SyncEntriesWithSuccessor {
+                    destination,
+                    data,
+                }));
                 Ok(())
             }
             PeerRingAction::MultiActions(actions) => {
@@ -104,12 +106,9 @@ impl Stabilizer {
     async fn handle_storage_repair_action(&self, act: PeerRingAction) -> Result<()> {
         let mut messages = Vec::new();
         Self::collect_storage_repair_actions(act, &mut messages)?;
-        for (destination, data) in messages {
+        for (destination, msg) in messages {
             self.transport
-                .send_message(
-                    Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor { data }),
-                    destination,
-                )
+                .send_message(Message::SyncEntriesWithSuccessor(msg), destination)
                 .await?;
         }
         Ok(())

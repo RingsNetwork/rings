@@ -204,13 +204,16 @@ pub(super) async fn handle_storage_repair_act(
 ) -> Result<()> {
     match act {
         PeerRingAction::RemoteAction(
-            destination,
-            PeerRingRemoteAction::SyncEntriesWithSuccessor(data),
+            _,
+            PeerRingRemoteAction::SyncEntriesWithSuccessor { destination, data },
         ) => {
             transport
                 .send_message(
-                    Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor { data }),
-                    destination,
+                    Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor {
+                        destination,
+                        data,
+                    }),
+                    destination.did(),
                 )
                 .await?;
         }
@@ -318,19 +321,20 @@ fn should_persist_synced_entry(dht: &PeerRing, placement: Did) -> Result<bool> {
 fn next_hop_for_sync_entries(
     handler: &MessageHandler,
     ctx: &MessagePayload,
+    msg: &SyncEntriesWithSuccessor,
 ) -> Result<Option<Did>> {
+    if msg.destination.did() != ctx.relay.destination {
+        return Err(Error::InvalidMessage(format!(
+            "sync destination {:?} does not match relay destination {}",
+            msg.destination, ctx.relay.destination
+        )));
+    }
+
     if ctx.is_relay_destination_for(handler.dht.did) {
         return Ok(None);
     }
 
-    match handler.dht.find_storage_owner(ctx.relay.destination)? {
-        PeerRingAction::Some(owner) if owner == handler.dht.did => Ok(None),
-        PeerRingAction::Some(next) => Ok(Some(next)),
-        PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessor(_)) => {
-            Ok(Some(next))
-        }
-        action => Err(Error::unexpected_peer_ring_action(action)),
-    }
+    handler.dht.next_hop_for_storage_sync(msg.destination)
 }
 
 async fn report_synced_entries(
@@ -466,7 +470,7 @@ impl HandleMsg<PlacedEntryOperation> for MessageHandler {
 impl HandleMsg<SyncEntriesWithSuccessor> for MessageHandler {
     // received remote sync entry request
     async fn handle(&self, ctx: &MessagePayload, msg: &SyncEntriesWithSuccessor) -> Result<()> {
-        if let Some(next) = next_hop_for_sync_entries(self, ctx)? {
+        if let Some(next) = next_hop_for_sync_entries(self, ctx, msg)? {
             return self
                 .run_effects([PayloadRelayFunctor::forward_payload(ctx, Some(next)).into()])
                 .await;
@@ -505,6 +509,7 @@ mod test {
     use crate::dht::successor::SuccessorReader;
     use crate::dht::successor::SuccessorWriter;
     use crate::dht::Chord;
+    use crate::dht::StorageSyncDestination;
     use crate::ecc::tests::gen_ordered_keys;
     use crate::ecc::SecretKey;
     use crate::message::Encoder;
@@ -584,6 +589,32 @@ mod test {
             }
         }
         owner.ok_or_else(|| Error::InvalidMessage("placement has no observed owner".to_string()))
+    }
+
+    fn physical_sync_route_next_hop(dht: &PeerRing, destination: Did) -> Result<Option<Did>> {
+        if destination == dht.did {
+            return Ok(None);
+        }
+
+        match dht.find_successor(destination)? {
+            PeerRingAction::Some(next) if next == dht.did => Ok(Some(destination)),
+            PeerRingAction::Some(next) => Ok(Some(next)),
+            PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessor(_)) => {
+                Ok(Some(next))
+            }
+            action => Err(Error::unexpected_peer_ring_action(action)),
+        }
+    }
+
+    fn storage_sync_route_next_hop(dht: &PeerRing, placement: Did) -> Result<Option<Did>> {
+        match dht.find_storage_owner(placement)? {
+            PeerRingAction::Some(owner) if owner == dht.did => Ok(None),
+            PeerRingAction::Some(next) => Ok(Some(next)),
+            PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessor(_)) => {
+                Ok(Some(next))
+            }
+            action => Err(Error::unexpected_peer_ring_action(action)),
+        }
     }
 
     fn split_redundant_entry(nodes: &[&Node]) -> Result<(Entry, Did, Did, usize, usize)> {
@@ -688,6 +719,7 @@ mod test {
 
         handler
             .handle(&context, &SyncEntriesWithSuccessor {
+                destination: StorageSyncDestination::PhysicalOwner(node.did()),
                 data: vec![PlacedEntry::new(placement_key, entry.clone())],
             })
             .await?;
@@ -726,6 +758,7 @@ mod test {
 
         handler
             .handle(&context, &SyncEntriesWithSuccessor {
+                destination: StorageSyncDestination::PhysicalOwner(node.did()),
                 data: vec![PlacedEntry::new(placement_key, entry)],
             })
             .await?;
@@ -765,6 +798,7 @@ mod test {
         );
         let stored_entry = entry.clone().try_into_storage_entry()?;
         let msg = SyncEntriesWithSuccessor {
+            destination: StorageSyncDestination::PlacementKey(placement_key),
             data: vec![PlacedEntry::new(placement_key, entry.clone())],
         };
         let context_key = SecretKey::random();
@@ -781,8 +815,9 @@ mod test {
         let forwarded = next_payload(&node2).await?;
         assert!(matches!(
             forwarded.transaction.data()?,
-            Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor { data })
-                if data == vec![PlacedEntry::new(placement_key, entry.clone())]
+            Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor { destination, data })
+                if destination == StorageSyncDestination::PlacementKey(placement_key)
+                    && data == vec![PlacedEntry::new(placement_key, entry.clone())]
         ));
         let ack = next_payload(&node1).await?;
         assert!(matches!(
@@ -1191,6 +1226,7 @@ mod test {
         );
         let stored_entry = entry.clone().try_into_storage_entry()?;
         let sync_msg = SyncEntriesWithSuccessor {
+            destination: StorageSyncDestination::PhysicalOwner(receiver.did()),
             data: vec![PlacedEntry::new(placement_key, entry.clone())],
         };
         let context = MessagePayload::new_send(
@@ -1261,6 +1297,7 @@ mod test {
             .put(&placement_key.to_string(), &stored_entry)
             .await?;
         let sync_msg = SyncEntriesWithSuccessor {
+            destination: StorageSyncDestination::PhysicalOwner(receiver.did()),
             data: vec![PlacedEntry::new(placement_key, entry)],
         };
         let context = MessagePayload::new_send(
@@ -1300,6 +1337,54 @@ mod test {
             sender.dht().storage.get(&placement_key.to_string()).await?,
             Some(stored_entry)
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sync_entries_physical_destination_routes_by_physical_did_not_storage_owner(
+    ) -> Result<()> {
+        let mut keys = gen_ordered_keys(6).into_iter();
+        let node = prepare_node_with_virtual_nodes(next_generated_key(&mut keys)?, 4)?;
+        let mut peers = Vec::new();
+        for _ in 0..5 {
+            peers.push(next_generated_key(&mut keys)?.address().into());
+        }
+        for peer in peers.iter().copied() {
+            let _ = node.dht().join(peer)?;
+        }
+
+        let dht = node.dht();
+        let mut witness = None;
+        for destination in peers {
+            let physical_next = physical_sync_route_next_hop(&dht, destination)?;
+            let storage_next = storage_sync_route_next_hop(&dht, destination)?;
+            if physical_next != storage_next {
+                witness = Some((destination, physical_next, storage_next));
+                break;
+            }
+        }
+        let Some((destination, physical_next, storage_next)) = witness else {
+            return Err(Error::InvalidMessage(
+                "expected physical and storage routes to diverge".to_string(),
+            ));
+        };
+
+        let msg = SyncEntriesWithSuccessor {
+            destination: StorageSyncDestination::PhysicalOwner(destination),
+            data: vec![],
+        };
+        let context = MessagePayload::new_send(
+            Message::SyncEntriesWithSuccessor(msg.clone()),
+            node.swarm.transport.session_sk(),
+            node.did(),
+            destination,
+        )?;
+        let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+
+        let next = next_hop_for_sync_entries(&handler, &context, &msg)?;
+
+        assert_eq!(next, physical_next);
+        assert_ne!(next, storage_next);
         Ok(())
     }
 
