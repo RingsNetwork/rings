@@ -205,7 +205,7 @@ async fn run_storage_repair_transport_effects(
     act: PeerRingAction,
 ) -> Result<()> {
     for delivery in act.storage_sync_deliveries()? {
-        let (_next, msg) = SyncEntriesWithSuccessor::from_delivery(delivery);
+        let msg = SyncEntriesWithSuccessor::from_delivery(delivery);
         transport.send_storage_sync(msg).await?;
     }
     Ok(())
@@ -220,7 +220,7 @@ pub(super) fn storage_sync_effects(act: PeerRingAction) -> Result<Vec<CoreEffect
     act.storage_sync_deliveries()?
         .into_iter()
         .map(|delivery| {
-            let (_next, msg) = SyncEntriesWithSuccessor::from_delivery(delivery);
+            let msg = SyncEntriesWithSuccessor::from_delivery(delivery);
             Ok(StorageSyncFunctor::send_storage_sync(msg).into())
         })
         .collect()

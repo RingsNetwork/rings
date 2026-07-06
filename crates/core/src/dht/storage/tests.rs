@@ -2,12 +2,12 @@ use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 
-use super::storage_sync::sync_entries_batch_wire_cost;
-use super::storage_sync::sync_entries_batches;
-use super::storage_sync::SYNC_BATCH_MAX_BYTES;
-use super::PeerRing;
-use super::PeerRingAction;
-use super::RemoteAction;
+use super::super::chord::PeerRing;
+use super::super::chord::PeerRingAction;
+use super::super::chord::RemoteAction;
+use super::sync::sync_entries_batch_wire_cost;
+use super::sync::sync_entries_batches;
+use super::sync::SYNC_BATCH_MAX_BYTES;
 use crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD;
 use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
 use crate::dht::entry::Entry;

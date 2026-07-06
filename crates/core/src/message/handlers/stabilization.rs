@@ -47,7 +47,7 @@ impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
             .await?
             .storage_sync_deliveries()?;
         let effects = deliveries.into_iter().map(|delivery| {
-            let (_next, msg) = SyncEntriesWithSuccessor::from_delivery(delivery);
+            let msg = SyncEntriesWithSuccessor::from_delivery(delivery);
             StorageSyncFunctor::send_storage_sync(msg).into()
         });
         self.run_effects(effects).await?;

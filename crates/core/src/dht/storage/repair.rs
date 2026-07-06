@@ -59,10 +59,10 @@
 
 use async_trait::async_trait;
 
-use super::PeerRing;
-use super::PeerRingAction;
 use super::StorageSyncDestination;
 use super::StorageSyncTarget;
+use crate::dht::chord::PeerRing;
+use crate::dht::chord::PeerRingAction;
 use crate::dht::entry::Entry;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::PlacementMiss;

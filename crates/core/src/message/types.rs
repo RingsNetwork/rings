@@ -214,11 +214,10 @@ pub struct SyncEntriesWithSuccessor {
 }
 
 impl SyncEntriesWithSuccessor {
-    /// Convert a lowered storage-sync delivery into the next hop and wire message.
-    pub(crate) fn from_delivery(delivery: StorageSyncDelivery) -> (Did, Self) {
-        let next = delivery.next();
+    /// Convert a lowered storage-sync delivery into the wire message.
+    pub(crate) fn from_delivery(delivery: StorageSyncDelivery) -> Self {
         let (destination, data) = delivery.into_message_parts();
-        (next, Self { destination, data })
+        Self { destination, data }
     }
 }
 

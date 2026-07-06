@@ -10,6 +10,7 @@ pub mod entry;
 /// Finger table for Rings
 pub mod finger;
 mod stabilization;
+mod storage;
 /// Subring model stored through DHT entries.
 pub mod subring;
 pub mod successor;
@@ -23,14 +24,14 @@ pub use chord::EntryStorage;
 pub use chord::PeerRing;
 pub use chord::PeerRingAction;
 pub use chord::RemoteAction as PeerRingRemoteAction;
-pub(crate) use chord::StorageSyncDelivery;
-pub use chord::StorageSyncDestination;
-pub use chord::StorageSyncRoute;
 pub use chord::TopoInfo;
 pub use did::Did;
 pub use finger::FingerTable;
 pub use finger::DEFAULT_FINGER_TABLE_SIZE;
 pub use stabilization::Stabilizer;
+pub(crate) use storage::StorageSyncDelivery;
+pub use storage::StorageSyncDestination;
+pub use storage::StorageSyncRoute;
 pub use successor::SuccessorReader;
 pub use successor::SuccessorWriter;
 pub use types::Chord;

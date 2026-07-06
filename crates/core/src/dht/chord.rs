@@ -1,6 +1,5 @@
 //! Chord algorithm implement.
 #![warn(missing_docs)]
-use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -18,6 +17,7 @@ use super::entry::PlacedEntry;
 use super::entry::PlacedEntryOperation;
 use super::entry::PlacementMiss;
 use super::finger::DEFAULT_FINGER_TABLE_SIZE;
+use super::storage::StorageSyncRoute;
 use super::successor::SuccessorSeq;
 use super::topology;
 use super::topology::FindSuccessorStep;
@@ -28,8 +28,6 @@ use super::types::Chord;
 use super::types::ChordStorage;
 use super::types::ChordStorageCache;
 use super::types::CorrectChord;
-use super::virtual_node::StorageVirtualNodes;
-use super::virtual_node::VirtualNode;
 use super::virtual_node::VirtualNodeConfig;
 use super::FingerTable;
 use crate::dht::Did;
@@ -151,110 +149,6 @@ pub struct TopoInfo {
     pub predecessor: Option<Did>,
 }
 
-/// Destination semantics for a storage sync hand-off.
-///
-/// Routing law:
-/// - [`StorageSyncDestination::PhysicalOwner`] is routed as a node DID through
-///   physical Chord membership.
-/// - [`StorageSyncDestination::PlacementKey`] is routed through storage
-///   ownership for that placement key.
-///
-/// Safety: a physical-owner receiver still validates each placement before
-/// acking, so a stale sender cannot trigger local cleanup for a key the receiver
-/// does not own.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
-pub enum StorageSyncDestination {
-    /// Route to a physical node DID, then let the receiver validate entry ownership.
-    PhysicalOwner(Did),
-    /// Route through storage ownership for this placement key.
-    PlacementKey(Did),
-}
-
-impl StorageSyncDestination {
-    /// Build a physical-owner sync destination.
-    pub const fn physical_owner(did: Did) -> Self {
-        Self::PhysicalOwner(did)
-    }
-
-    /// Build a placement-key sync destination.
-    pub const fn placement_key(did: Did) -> Self {
-        Self::PlacementKey(did)
-    }
-
-    /// Return the DID placed in the relay destination.
-    pub fn did(self) -> Did {
-        match self {
-            Self::PhysicalOwner(did) | Self::PlacementKey(did) => did,
-        }
-    }
-
-    /// Return the routing semantics for this destination.
-    pub const fn route(self) -> StorageSyncRoute {
-        match self {
-            Self::PhysicalOwner(_) => StorageSyncRoute::PhysicalOwner,
-            Self::PlacementKey(_) => StorageSyncRoute::PlacementKey,
-        }
-    }
-}
-
-/// Routing semantics for a storage sync hand-off.
-///
-/// The route is paired with the outer [`PeerRingAction::RemoteAction`] target,
-/// so the action tree carries the destination DID exactly once.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
-pub enum StorageSyncRoute {
-    /// Interpret the action target as a physical node DID.
-    PhysicalOwner,
-    /// Interpret the action target as a storage placement key.
-    PlacementKey,
-}
-
-impl StorageSyncRoute {
-    /// Combine this route with the action target DID to form a wire destination.
-    pub const fn destination(self, target: Did) -> StorageSyncDestination {
-        match self {
-            Self::PhysicalOwner => StorageSyncDestination::physical_owner(target),
-            Self::PlacementKey => StorageSyncDestination::placement_key(target),
-        }
-    }
-}
-
-/// Lowered storage-sync delivery ready for the message layer.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct StorageSyncDelivery {
-    next: Did,
-    destination: StorageSyncDestination,
-    data: Vec<PlacedEntry>,
-}
-
-impl StorageSyncDelivery {
-    fn from_route(next: Did, route: StorageSyncRoute, data: Vec<PlacedEntry>) -> Self {
-        // Invariant: `destination` is the unique wire interpretation of
-        // `(next, route)`. Message senders consume this lowered value instead of
-        // recomputing that relation at each transport boundary.
-        Self {
-            next,
-            destination: route.destination(next),
-            data,
-        }
-    }
-
-    /// Return the next physical relay hop for this delivery.
-    pub(crate) const fn next(&self) -> Did {
-        self.next
-    }
-
-    /// Consume this delivery into the wire destination and payload data.
-    pub(crate) fn into_message_parts(self) -> (StorageSyncDestination, Vec<PlacedEntry>) {
-        (self.destination, self.data)
-    }
-}
-
-pub(super) enum StorageSyncTarget {
-    Local,
-    Remote(StorageSyncDestination),
-}
-
 impl TryFrom<&PeerRing> for TopoInfo {
     type Error = Error;
     fn try_from(dht: &PeerRing) -> Result<TopoInfo> {
@@ -268,43 +162,6 @@ impl TryFrom<&PeerRing> for TopoInfo {
 }
 
 impl PeerRingAction {
-    pub(crate) fn sync_entries(
-        destination: StorageSyncDestination,
-        data: Vec<PlacedEntry>,
-    ) -> Self {
-        Self::RemoteAction(destination.did(), RemoteAction::SyncEntriesWithSuccessor {
-            route: destination.route(),
-            data,
-        })
-    }
-
-    /// Lower this action tree into storage-sync deliveries.
-    pub(crate) fn storage_sync_deliveries(self) -> Result<Vec<StorageSyncDelivery>> {
-        let mut deliveries = Vec::new();
-        self.collect_storage_sync_deliveries(&mut deliveries)?;
-        Ok(deliveries)
-    }
-
-    fn collect_storage_sync_deliveries(
-        self,
-        deliveries: &mut Vec<StorageSyncDelivery>,
-    ) -> Result<()> {
-        match self {
-            Self::None => Ok(()),
-            Self::RemoteAction(next, RemoteAction::SyncEntriesWithSuccessor { route, data }) => {
-                deliveries.push(StorageSyncDelivery::from_route(next, route, data));
-                Ok(())
-            }
-            Self::MultiActions(actions) => {
-                for action in actions {
-                    action.collect_storage_sync_deliveries(deliveries)?;
-                }
-                Ok(())
-            }
-            action => Err(Error::unexpected_peer_ring_action(action)),
-        }
-    }
-
     /// Returns `true` if the action is a [PeerRingAction::None] value.
     pub fn is_none(&self) -> bool {
         if let Self::None = self {
@@ -416,24 +273,6 @@ impl PeerRing {
         self.successor_seq.clone()
     }
 
-    /// Return whether the storage virtual-node registry is enabled.
-    pub fn storage_virtual_nodes_enabled(&self) -> Result<bool> {
-        Ok(self.storage_virtual_node_config.is_enabled())
-    }
-
-    /// Return virtual storage positions owned by `owner`.
-    pub fn storage_virtual_positions(&self, owner: Did) -> Result<Vec<VirtualNode>> {
-        Ok(self.storage_virtual_nodes()?.positions_for_owner(owner))
-    }
-
-    pub(super) fn storage_virtual_owner(&self, placement_key: Did) -> Result<Option<Did>> {
-        Ok(self.storage_virtual_nodes()?.owner_for_key(placement_key))
-    }
-
-    pub(super) fn storage_virtual_owner_registered(&self, owner: Did) -> Result<bool> {
-        Ok(self.storage_virtual_nodes()?.contains_owner(owner))
-    }
-
     /// Lock and return MutexGuard of finger table.
     pub fn lock_finger(&self) -> Result<MutexGuard<'_, FingerTable>> {
         self.finger.lock().map_err(|_| Error::DHTSyncLockError)
@@ -461,7 +300,7 @@ impl PeerRing {
         BiasId::new(self.did, did)
     }
 
-    fn topology_state(&self) -> Result<TopologyState> {
+    pub(super) fn topology_state(&self) -> Result<TopologyState> {
         let finger = self.lock_finger()?;
         Ok(TopologyState::new(
             self.did,
@@ -472,97 +311,8 @@ impl PeerRing {
         ))
     }
 
-    fn storage_virtual_nodes(&self) -> Result<StorageVirtualNodes> {
-        let state = self.topology_state()?;
-        let mut owners = BTreeSet::new();
-        // Pre: `state` is this node's authenticated topology view.
-        // Post: the virtual-owner set is exactly the physical DIDs currently
-        // visible to storage routing: local, successors, predecessor, and
-        // fingers. It is an observed view, not a global registry.
-        owners.insert(state.local);
-        owners.extend(state.successors);
-        owners.extend(state.predecessor);
-        owners.extend(state.fingers.into_iter().flatten());
-        Ok(StorageVirtualNodes::from_owners(
-            self.storage_virtual_node_config,
-            owners,
-        ))
-    }
-
-    pub(crate) fn find_storage_owner(&self, placement_key: Did) -> Result<PeerRingAction> {
-        if let Some(owner) = self.storage_virtual_owner(placement_key)? {
-            if owner == self.did {
-                Ok(PeerRingAction::Some(owner))
-            } else {
-                Ok(PeerRingAction::RemoteAction(
-                    owner,
-                    RemoteAction::FindSuccessor(placement_key),
-                ))
-            }
-        } else {
-            self.find_successor(placement_key)
-        }
-    }
-
-    pub(super) fn storage_sync_target(&self, placement_key: Did) -> Result<StorageSyncTarget> {
-        if let Some(owner) = self.storage_virtual_owner(placement_key)? {
-            if owner == self.did {
-                Ok(StorageSyncTarget::Local)
-            } else {
-                Ok(StorageSyncTarget::Remote(
-                    StorageSyncDestination::PhysicalOwner(owner),
-                ))
-            }
-        } else {
-            match self.find_successor(placement_key)? {
-                // In non-virtual storage, `Some(_)` means this node's local
-                // Chord view has reached the terminal storage branch. The
-                // witness DID may be the successor for lookup fallback, not a
-                // remote owner that should receive this placement.
-                PeerRingAction::Some(_) => Ok(StorageSyncTarget::Local),
-                PeerRingAction::RemoteAction(_, RemoteAction::FindSuccessor(_)) => Ok(
-                    StorageSyncTarget::Remote(StorageSyncDestination::PlacementKey(placement_key)),
-                ),
-                action => Err(Error::unexpected_peer_ring_action(action)),
-            }
-        }
-    }
-
-    pub(crate) fn next_hop_for_storage_sync(
-        &self,
-        destination: StorageSyncDestination,
-    ) -> Result<Option<Did>> {
-        // Pre: destination.did() is the relay destination signed in the payload.
-        // Post: PhysicalOwner routes by physical membership; PlacementKey routes
-        // by storage ownership. The two relations are intentionally distinct.
-        match destination {
-            StorageSyncDestination::PhysicalOwner(owner) => self.next_hop_to_physical_owner(owner),
-            StorageSyncDestination::PlacementKey(key) => self.next_hop_to_storage_placement(key),
-        }
-    }
-
-    fn next_hop_to_physical_owner(&self, owner: Did) -> Result<Option<Did>> {
-        if owner == self.did {
-            return Ok(None);
-        }
-
-        match self.find_successor(owner)? {
-            // If this local view cannot prove a better physical next hop, try
-            // the target owner directly rather than accepting the payload as
-            // local work. Persisting happens only at relay destination.
-            PeerRingAction::Some(next) if next == self.did => Ok(Some(owner)),
-            PeerRingAction::Some(next) => Ok(Some(next)),
-            PeerRingAction::RemoteAction(next, RemoteAction::FindSuccessor(_)) => Ok(Some(next)),
-            action => Err(Error::unexpected_peer_ring_action(action)),
-        }
-    }
-
-    fn next_hop_to_storage_placement(&self, key: Did) -> Result<Option<Did>> {
-        match self.find_storage_owner(key)? {
-            PeerRingAction::Some(_) => Ok(None),
-            PeerRingAction::RemoteAction(next, RemoteAction::FindSuccessor(_)) => Ok(Some(next)),
-            action => Err(Error::unexpected_peer_ring_action(action)),
-        }
+    pub(super) const fn storage_virtual_node_config(&self) -> VirtualNodeConfig {
+        self.storage_virtual_node_config
     }
 
     fn interpret_topology_state(&self, next: &TopologyState) -> Result<()> {
@@ -844,9 +594,6 @@ impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing 
     }
 }
 
-mod storage_repair;
-mod storage_sync;
-
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl ChordStorageCache<PeerRingAction> for PeerRing {
@@ -977,334 +724,5 @@ impl CorrectChord<PeerRingAction> for PeerRing {
 }
 
 #[cfg(all(not(feature = "wasm"), test))]
-mod storage_tests;
-
-#[cfg(all(not(feature = "wasm"), test))]
-mod tests {
-    //! test module
-    use std::str::FromStr;
-
-    use num_bigint::BigUint;
-
-    use super::*;
-    use crate::ecc::SecretKey;
-    use crate::tests::default::gen_sorted_dht;
-
-    #[tokio::test]
-    async fn test_chord_finger() -> Result<()> {
-        // Setup did a, b, c, d in a clockwise order.
-        let a = Did::from_str("0x00E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
-        let b = Did::from_str("0x119999cf1046e68e36E1aA2E0E07105eDDD1f08E").unwrap();
-        let c = Did::from_str("0xccffee254729296a45a3885639AC7E10F9d54979").unwrap();
-        let d = Did::from_str("0xffffee254729296a45a3885639AC7E10F9d54979").unwrap();
-
-        // This assertion tells you the order of a, b, c, d on the ring.
-        // Note that this vec only describes the order, not the absolute position.
-        // Since they are all on the ring, you cannot say a is the first element or d is
-        // the last. You can only describe their bias based on the same node and a
-        // clockwise order.
-        //
-        // a --> b --> c --> d
-        // ^                 |
-        // |-----------------|
-        //
-        let mut seq = vec![a, b, c, d];
-        seq.sort();
-        assert_eq!(seq, vec![a, b, c, d]);
-
-        // Setup node_a and ensure its successor sequence and finger table is empty.
-        let node_a = PeerRing::new_with_storage(a, 3, Box::new(MemStorage::new()));
-        assert!(node_a.successors().is_empty()?);
-        assert!(node_a.lock_finger()?.is_empty());
-
-        // Test a node won't set itself to successor sequence and finger table.
-        assert_eq!(node_a.join(a)?, PeerRingAction::None);
-        assert!(node_a.successors().is_empty()?);
-        assert!(node_a.lock_finger()?.is_empty());
-
-        // Test join ring with node_b.
-        // We don't need to setup node_b here, we just use its did.
-        let result = node_a.join(b)?;
-
-        // After join, node_a should ask node_b to find its successor on the ring for
-        // connecting.
-        assert_eq!(
-            result,
-            PeerRingAction::RemoteAction(b, RemoteAction::FindSuccessorForConnect(a))
-        );
-
-        // This assertion tells you the position of node_b on the ring.
-        // Hint: The Did type is a 160-bit unsigned integer.
-        assert!(BigUint::from(b) > BigUint::from(2u16).pow(156));
-        assert!(BigUint::from(b) < BigUint::from(2u16).pow(157));
-
-        // After join, the finger table of node_a should be like:
-        // [b] * 157 + [None] * 3
-        let mut expected_finger_list = std::iter::repeat_n(Some(b), 157).collect::<Vec<_>>();
-        expected_finger_list.extend(std::iter::repeat_n(None, 3));
-        assert_eq!(node_a.lock_finger()?.list(), &expected_finger_list);
-
-        // After join, the successor sequence of node_a should be [b].
-        assert_eq!(node_a.successors().list()?, vec![b]);
-
-        // Test repeated join.
-        node_a.join(b)?;
-        assert_eq!(node_a.lock_finger()?.list(), &expected_finger_list);
-        assert_eq!(node_a.successors().list()?, vec![b]);
-        node_a.join(b)?;
-        assert_eq!(node_a.lock_finger()?.list(), &expected_finger_list);
-        assert_eq!(node_a.successors().list()?, vec![b]);
-
-        // Test join ring with node_c.
-        // We don't need to setup node_c here, we just use its did.
-        let result = node_a.join(c)?;
-
-        // Again, after join, node_a should ask node_c to find its successor on the ring
-        // for connecting.
-        assert_eq!(
-            result,
-            PeerRingAction::RemoteAction(c, RemoteAction::FindSuccessorForConnect(a))
-        );
-
-        // This assertion tells you the position of node_c on the ring.
-        // Hint: The Did type is a 160-bit unsigned integer.
-        assert!(BigUint::from(c) > BigUint::from(2u16).pow(159));
-        assert!(BigUint::from(c) < BigUint::from(2u16).pow(160));
-
-        // After join, the finger table of node_a should be like:
-        // [b] * 157 + [c] * 3
-        let mut expected_finger_list = std::iter::repeat_n(Some(b), 157).collect::<Vec<_>>();
-        expected_finger_list.extend(std::iter::repeat_n(Some(c), 3));
-        assert_eq!(node_a.lock_finger()?.list(), &expected_finger_list);
-
-        // After join, the successor sequence of node_a should be [b, c].
-        // Because although node_b is closer to node_a, the sequence is not full.
-        assert_eq!(node_a.successors().list()?, vec![b, c]);
-
-        // When try to find_successor of node_d, node_a will send query to node_c.
-        assert_eq!(
-            node_a.find_successor(d).unwrap(),
-            PeerRingAction::RemoteAction(c, RemoteAction::FindSuccessor(d))
-        );
-        // When try to find_successor of node_c, node_a will send query to node_b.
-        assert_eq!(
-            node_a.find_successor(c).unwrap(),
-            PeerRingAction::RemoteAction(b, RemoteAction::FindSuccessor(c))
-        );
-
-        // Since the test above is clockwise, we need to test anti-clockwise situation.
-        let node_a = PeerRing::new_with_storage(a, 3, Box::new(MemStorage::new()));
-
-        // Test join ring with node_c.
-        assert_eq!(
-            node_a.join(c)?,
-            PeerRingAction::RemoteAction(c, RemoteAction::FindSuccessorForConnect(a))
-        );
-        let expected_finger_list = std::iter::repeat_n(Some(c), 160).collect::<Vec<_>>();
-        assert_eq!(node_a.lock_finger()?.list(), &expected_finger_list);
-        assert_eq!(node_a.successors().list()?, vec![c]);
-
-        // Test join ring with node_b.
-        assert_eq!(
-            node_a.join(b)?,
-            PeerRingAction::RemoteAction(b, RemoteAction::FindSuccessorForConnect(a))
-        );
-        let mut expected_finger_list = std::iter::repeat_n(Some(b), 157).collect::<Vec<_>>();
-        expected_finger_list.extend(std::iter::repeat_n(Some(c), 3));
-        assert_eq!(node_a.lock_finger()?.list(), &expected_finger_list);
-        assert_eq!(node_a.successors().list()?, vec![b, c]);
-
-        // Test join over half ring.
-        let node_d = PeerRing::new_with_storage(d, 1, Box::new(MemStorage::new()));
-        assert_eq!(
-            node_d.join(a)?,
-            PeerRingAction::RemoteAction(a, RemoteAction::FindSuccessorForConnect(d))
-        );
-
-        // This assertion tells you that node_a is over 2^151 far away from node_d.
-        // And node_a is also less than 2^152 far away from node_d.
-        assert!(d + Did::from(BigUint::from(2u16).pow(151)) < a);
-        assert!(d + Did::from(BigUint::from(2u16).pow(152)) > a);
-
-        // After join, the finger table of node_d should be like:
-        // [a] * 152 + [None] * 8
-        let mut expected_finger_list = std::iter::repeat_n(Some(a), 152).collect::<Vec<_>>();
-        expected_finger_list.extend(std::iter::repeat_n(None, 8));
-        assert_eq!(node_d.lock_finger()?.list(), &expected_finger_list);
-
-        // After join, the successor sequence of node_a should be [a].
-        assert_eq!(node_d.successors().list()?, vec![a]);
-
-        // Test join ring with node_b.
-        assert_eq!(
-            node_d.join(b)?,
-            PeerRingAction::RemoteAction(b, RemoteAction::FindSuccessorForConnect(d))
-        );
-
-        // This assertion tells you that node_b is over 2^156 far away from node_d.
-        // And node_b is also less than 2^157 far away from node_d.
-        assert!(d + Did::from(BigUint::from(2u16).pow(156)) < b);
-        assert!(d + Did::from(BigUint::from(2u16).pow(157)) > b);
-
-        // After join, the finger table of node_d should be like:
-        // [a] * 152 + [b] * 5 + [None] * 3
-        let mut expected_finger_list = std::iter::repeat_n(Some(a), 152).collect::<Vec<_>>();
-        expected_finger_list.extend(std::iter::repeat_n(Some(b), 5));
-        expected_finger_list.extend(std::iter::repeat_n(None, 3));
-        assert_eq!(node_d.lock_finger()?.list(), &expected_finger_list);
-
-        // Note the max successor sequence size of node_d is set to 1 when created.
-        // After join, the successor sequence of node_a should still be [a].
-        // Because node_a is closer to node_d, and the sequence is full.
-        assert_eq!(node_d.successors().list()?, vec![a]);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_two_node_finger() -> Result<()> {
-        let mut key1 = SecretKey::random();
-        let mut key2 = SecretKey::random();
-        if key1.address() > key2.address() {
-            (key1, key2) = (key2, key1)
-        }
-        let did1: Did = key1.address().into();
-        let did2: Did = key2.address().into();
-        let node1 = PeerRing::new_with_storage(did1, 3, Box::new(MemStorage::new()));
-        let node2 = PeerRing::new_with_storage(did2, 3, Box::new(MemStorage::new()));
-
-        node1.join(did2)?;
-        node2.join(did1)?;
-        assert!(node1.successors().list()?.contains(&did2));
-        assert!(node2.successors().list()?.contains(&did1));
-
-        assert!(
-            node1.lock_finger()?.contains(Some(did2)),
-            "did1:{did1:?}; did2:{did2:?}"
-        );
-        assert!(
-            node2.lock_finger()?.contains(Some(did1)),
-            "did1:{did1:?}; did2:{did2:?}"
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_two_node_finger_failed_case() -> Result<()> {
-        let did1 = Did::from_str("0x051cf4f8d020cb910474bef3e17f153fface2b5f").unwrap();
-        let did2 = Did::from_str("0x54baa7dc9e28f41da5d71af8fa6f2a302be1c1bf").unwrap();
-        let max = Did::from(BigUint::from(2u16).pow(160) - 1u16);
-        let zero = Did::from(BigUint::from(2u16).pow(160));
-
-        let node1 = PeerRing::new_with_storage(did1, 3, Box::new(MemStorage::new()));
-        let node2 = PeerRing::new_with_storage(did2, 3, Box::new(MemStorage::new()));
-
-        node1.join(did2)?;
-        node2.join(did1)?;
-        assert!(node1.successors().list()?.contains(&did2));
-        assert!(node2.successors().list()?.contains(&did1));
-        let pos_159 = did2 + Did::from(BigUint::from(2u16).pow(159));
-        assert!(pos_159 > did2);
-        assert!(pos_159 < max, "{pos_159:?};{max:?}");
-        let pos_160 = did2 + zero;
-        assert_eq!(pos_160, did2);
-        assert!(pos_160 > did1);
-
-        assert!(
-            node1.lock_finger()?.contains(Some(did2)),
-            "did1:{did1:?}; did2:{did2:?}"
-        );
-        assert!(
-            node2.lock_finger()?.contains(Some(did1)),
-            "did2:{did2:?} dont contains did1:{did1:?}"
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_correct_chord_stabilize_handles_empty_successor_info() -> Result<()> {
-        let did = Did::from_str("0x051cf4f8d020cb910474bef3e17f153fface2b5f").unwrap();
-        let node = PeerRing::new_with_storage(did, 3, Box::new(MemStorage::new()));
-
-        assert_eq!(
-            node.stabilize(TopoInfo {
-                successors: vec![],
-                predecessor: None,
-            })?,
-            PeerRingAction::MultiActions(vec![])
-        );
-
-        Ok(())
-    }
-
-    /// Test Correct Chord implementation
-    #[tokio::test]
-    async fn test_correct_chord_impl() -> Result<()> {
-        fn assert_successor(dht: &PeerRing, did: &Did) -> bool {
-            let succ_list = dht.successors();
-            succ_list.list().unwrap().contains(did)
-        }
-
-        /// check that two dht is mutual successors
-        fn check_is_mutual_successors(dht1: &PeerRing, dht2: &PeerRing) {
-            let succ_list_1 = dht1.successors();
-            let succ_list_2 = dht2.successors();
-            assert_eq!(succ_list_1.min().unwrap(), dht2.did);
-            assert_eq!(succ_list_2.min().unwrap(), dht1.did);
-        }
-
-        fn check_succ_is_including(dht: &PeerRing, dids: Vec<Did>) {
-            let succ_list = dht.successors();
-            for did in dids {
-                assert!(succ_list.list().unwrap().contains(&did));
-            }
-        }
-
-        let dhts = gen_sorted_dht(5);
-        let [n1, n2, n3, n4, n5] = dhts.as_slice() else {
-            panic!("wrong dhts length");
-        };
-        // we now have:
-        // n1 < n2 < n3 < n4
-
-        // n1 join n2
-        n1.join(n2.did).unwrap();
-        n2.join(n1.did).unwrap();
-        // for now n1, n2 are `mutual successors`.
-        check_is_mutual_successors(n1, n2);
-        // n1 join n3
-
-        n1.join(n3.did).unwrap();
-        n1.join(n4.did).unwrap();
-        // for now n1's successor should include n1 and n3
-        check_succ_is_including(n1, vec![n2.did, n3.did, n4.did]);
-
-        n1.join(n5.did).unwrap();
-        // n5 is not in n1's successor list
-        assert!(!assert_successor(n1, &n5.did));
-
-        #[allow(non_local_definitions)]
-        #[cfg_attr(feature = "wasm", async_trait(?Send))]
-        #[cfg_attr(not(feature = "wasm"), async_trait)]
-        impl LiveDid for Did {
-            async fn live(&self) -> bool {
-                true
-            }
-        }
-
-        if let PeerRingAction::MultiActions(rets) = n5.join_then_sync(n1.did).await.unwrap() {
-            for r in rets {
-                if let PeerRingAction::RemoteAction(t, _) = r {
-                    assert_eq!(t, n1.did.clone())
-                } else {
-                    panic!("wrong remote");
-                }
-            }
-        } else {
-            panic!("Wrong ret");
-        }
-        Ok(())
-    }
-}
+#[path = "chord_tests.rs"]
+mod tests;
