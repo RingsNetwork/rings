@@ -23,6 +23,7 @@
 \newtheorem{assumption}{Assumption}
 \newtheorem{proposition}{Proposition}
 \newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
 \newtheorem{invariant}{Invariant}
 \newtheorem{obligation}{Obligation}
 
@@ -250,88 +251,56 @@ c\in\mathsf{ClaimKind}.
 \]
 \end{definition}
 
-\begin{definition}[Contribution]
+\begin{definition}[Contribution boundary]
 \[
 \begin{aligned}
-\mathsf{Contribution}_{Rings}=\{&
-(R,\SetOverR,\Omega_N),\;
-\mathcal{R}_N,\;
-\mathsf{RepKey}^{\rho},\\
-&\mathsf{T}^{\mathcal{E}}_A,\;
-\mathsf{CarrierSep},\;
-\mathsf{Explore}_{\Gamma},\;
-\mathsf{Report}_{Rings}\}.
-\end{aligned}
-\]
-\[
 \mathsf{Reuse}_{Rings}
-=
-\{\mathsf{Chord},\mathsf{CorrectChord},\mathsf{DID},
-  \mathsf{WebRTC},\mathsf{CRDT}\}.
-\]
-\end{definition}
-
-\begin{proposition}[Main property boundary]
-\label{prop:main-boundary}
-Assume \(N\neq\varnothing\), the CorrectChord stable-base obligations for
-\(\mathcal{R}_N\), carrier separation, and typed protocol morphisms.  Write
-\(\Sigma_{\nu\mu}=(\sigma_X,\sigma_S,\sigma_I,\sigma_O,
-\sigma_{\mathcal{E}},\sigma_A^*)\) and
-\(\mathsf{PMor}_{\nu\mu}(\Sigma_{\nu\mu})\) for the laws of
-Definition~\ref{def:protocol-morphism}.  The main claim is:
-\[
-\begin{aligned}
-\mathsf{OwnerLaw}
-&\equiv
-\forall\nu\in\NS.\forall x\in X_\nu.\;
-P^N_\nu(x)=\operatorname{owner}_N(H_\nu(x))\in N,\\
-\mathsf{MorphLaw}
-&\equiv
-\forall\nu,\mu\in\NS.\forall\Sigma_{\nu\mu}.\\
-&\quad
-\mathsf{PMor}_{\nu\mu}(\Sigma_{\nu\mu})
-\Rightarrow P^N_\mu\circ\sigma_X=P^N_\nu,\\
-\mathsf{EffectLaw}
-&\equiv
-\forall\nu\in\NS.\forall s,i.\;\tau_\nu(s,i)\in Y_\nu,\\
-Y_\nu&=\mathsf{T}^{\mathcal{E}_\nu}_{A_\nu}(S_\nu\times O_\nu),\\
-\mathsf{LedgerLaw}
-&\equiv
-\forall c.\;c=\mathsf{Evidence}_{\Gamma}
-\Rightarrow \mathsf{finite}(\Gamma)\land\mathsf{declared}(\Gamma),\\
-\mathsf{Main}_{Rings}
-&\equiv
-\mathsf{OwnerLaw}\land\mathsf{MorphLaw}
-\land\mathsf{EffectLaw}\land\mathsf{LedgerLaw}.
+&=\{\mathsf{Chord},\mathsf{CorrectChord},\mathsf{DID},
+  \mathsf{WebRTC},\mathsf{CRDT}\},\\
+\mathsf{New}_{Rings}
+&=(\Omega_N,\mathsf{PMor},\mathsf{CarrierSep},
+  \mathsf{Ledger}_{\Gamma}).
 \end{aligned}
 \]
-It does not entail any \(c\in\NonClaim\):
 \[
-\forall c\in\NonClaim.\quad \mathsf{Main}_{Rings}\not\vdash c.
+\mathsf{Contribution}_{Rings}
+\equiv
+\mathsf{Reuse}_{Rings}
+\oplus
+\mathsf{New}_{Rings}
+\models
+\mathsf{Main}_{Rings}.
 \]
-\end{proposition}
+The formal content of \(\mathsf{Main}_{Rings}\) is
+Theorem~\ref{thm:carrier-separated-ownership}; all performance claims remain
+outside it unless admitted by the evidence ledger.
+\end{definition}
 
 \section{Algebraic System Model}
 
 \begin{assumption}[System and adversary scope]
 \[
 \begin{array}{rcl}
+\kappa&\in&\mathbb{N},\\
 \mathsf{fault}_{overlay}&=&\mathsf{fail\mbox{-}stop},\\
 \mathsf{Adv}_{net}&=&\{\mathsf{delay},\mathsf{drop},\mathsf{dup},
   \mathsf{reorder},\mathsf{replay}\},\\
 \mathsf{Adv}_{id}&=&\{\mathsf{manyDID},\mathsf{stolenSession},
   \mathsf{staleProof}\},\\
-\mathsf{Forge}_{\Pi}&=&\bot,\qquad \mathsf{Preimage}_{H}=\bot,\\
+\Pr[\mathsf{Forge}_{\Pi}(A,\kappa)]&\leq&\epsilon_{\Pi}(\kappa),\\
+\Pr[\mathsf{Preimage}_{H}(A,\kappa)]&\leq&\epsilon_{H}(\kappa),\\
+\epsilon_{\Pi},\epsilon_H&\in&\mathsf{negl},\\
 \mathsf{consensus}&\notin&\mathsf{Overlay},\\
 \mathsf{order}&=&\mathsf{SidecarWitness},\\
 \mathsf{crypto\_ops}&\cap&\mathsf{route\_ops}=\varnothing.
 \end{array}
 \]
 Thus CorrectChord is the safety root only for crash-scoped overlay maintenance.
-Byzantine routing, Eclipse resistance, Sybil resistance, anonymity, and
-denial-of-service resistance are not inherited from Chord; they must be
-discharged by admission, session typing, ranking, relay, quota, and measurement
-predicates at their own layers.
+Cryptographic claims are computational assumptions; compromised keys and
+Byzantine routing are adversarial cases.  Eclipse resistance, Sybil resistance,
+anonymity, and denial-of-service resistance must be discharged by admission,
+session typing, ranking, relay, quota, and measurement predicates at their own
+layers.
 \end{assumption}
 
 \begin{definition}[Identifier carrier]
@@ -697,21 +666,137 @@ H_\nu&:&X_\nu\to R,\\
 \[
   \Sigma:\mathcal{P}_\nu\to\mathcal{P}_\mu
   =
-  (\sigma_X,\sigma_S,\sigma_I,\sigma_O,\sigma_{\mathcal{E}},\sigma_A^*)
+  (\sigma_X,\sigma_S,\sigma_I,\sigma_O,
+   \sigma_{\mathcal{E}},\sigma_A,\sigma_A^*)
 \]
 \[
 \begin{array}{rcl}
+\sigma_X&:&X_\nu\to X_\mu,\qquad
+\sigma_S:S_\nu\to S_\mu,\\
+\sigma_I&:&I_\nu\to I_\mu,\qquad
+\sigma_O:O_\nu\to O_\mu,\\
+\sigma_{\mathcal{E}}&:&\mathcal{E}_\nu\to\mathcal{E}_\mu,\qquad
+\sigma_A:A_\nu\to A_\mu,\\
 \sigma_A^*&:&A_\nu^*\to A_\mu^*,\\
+\sigma_A^*(\epsilon)&=&\epsilon,\\
+\sigma_A^*(a\cdot\alpha)&=&\sigma_A(a)\cdot\sigma_A^*(\alpha),\\
 \sigma_A^*(\alpha\cdot\beta)&=&\sigma_A^*(\alpha)\cdot\sigma_A^*(\beta),\\
-H_\mu\circ\sigma_X&=&H_\nu,\\[4pt]
-  \mathsf{T}_{\sigma_A}^{\sigma_{\mathcal{E}}}
-    (\sigma_S\times\sigma_O)
-  \circ\tau_\nu
-  &=&
-  \tau_\mu\circ(\sigma_S\times\sigma_I).
+H_\mu\circ\sigma_X&=&H_\nu .
 \end{array}
 \]
+\[
+\begin{array}{rcl}
+\mathsf{T}_{\sigma_A}^{\sigma_{\mathcal{E}}}(e)
+&=&\sigma_{\mathcal{E}}(e),\\
+\mathsf{T}_{\sigma_A}^{\sigma_{\mathcal{E}}}(s,o,\alpha)
+&=&(\sigma_S(s),\sigma_O(o),\sigma_A^*(\alpha)),\\[3pt]
+\mathsf{T}_{\sigma_A}^{\sigma_{\mathcal{E}}}\circ\tau_\nu
+&=&
+\tau_\mu\circ(\sigma_S\times\sigma_I).
+\end{array}
+\]
+The predicate \(\mathsf{PMor}_{\nu\mu}(\Sigma)\) is the conjunction of these
+typing and preservation equations.
 \end{definition}
+
+\begin{lemma}[Owner totality]
+\label{lem:owner-totality}
+If \(1\le |N|<\infty\) and \(H_\nu:X_\nu\to R\), then
+\[
+  P_\nu^N=\operatorname{owner}_N\circ H_\nu:X_\nu\to N
+\]
+is total.
+\end{lemma}
+\begin{proof}
+\[
+  \forall k\in R.\quad
+  \operatorname{owner}_N(k)=\arg\min_{u\in N}\delta_k(u)\in N .
+\]
+Finite nonempty \(N\) gives existence; \(\delta_k:R\to\mathbb{N}\) gives a
+total order key.
+\end{proof}
+
+\begin{lemma}[Morphism preservation]
+\label{lem:morphism-preservation}
+\[
+\mathsf{PMor}_{\nu\mu}(\Sigma_{\nu\mu})
+\Rightarrow
+P_\mu^N\circ\sigma_X=P_\nu^N .
+\]
+\end{lemma}
+\begin{proof}
+\[
+P_\mu^N\circ\sigma_X
+=
+\operatorname{owner}_N\circ H_\mu\circ\sigma_X
+=
+\operatorname{owner}_N\circ H_\nu
+=
+P_\nu^N .
+\]
+\end{proof}
+
+\begin{lemma}[Effect confinement]
+\label{lem:effect-confinement}
+\[
+\forall\nu\in\NS.\forall s,i.\quad
+\tau_\nu(s,i)\in
+\mathsf{T}^{\mathcal{E}_\nu}_{A_\nu}(S_\nu\times O_\nu).
+\]
+Moreover, if \(\mathsf{emit}(\tau_\nu(s,i))\subseteq\mathsf{cap}\), then
+\[
+  I_X(\pi_A(\tau_\nu(s,i)))\in\mathsf{IO}
+  \quad\land\quad
+  a\notin\mathsf{cap}\Rightarrow I_X(a)=\mathsf{Reject}(a).
+\]
+\end{lemma}
+\begin{proof}
+The first formula is the type of \(\tau_\nu\).  The second is exactly the runtime
+confinement obligation for the interpreter \(I_X\).
+\end{proof}
+
+\begin{theorem}[Carrier-separated ownership theorem]
+\label{thm:carrier-separated-ownership}
+Assume \(1\le |N|<\infty\), CorrectChord stable-base obligations,
+carrier separation, and protocol morphisms satisfying
+Definition~\ref{def:protocol-morphism}.  Then
+\[
+\begin{aligned}
+\mathsf{OwnerLaw}
+&\equiv
+\forall\nu,x.\;P_\nu^N(x)=\operatorname{owner}_N(H_\nu(x))\in N,\\
+\mathsf{MorphLaw}
+&\equiv
+\forall\nu,\mu,\Sigma.\;
+\mathsf{PMor}_{\nu\mu}(\Sigma)
+\Rightarrow P_\mu^N\circ\sigma_X=P_\nu^N,\\
+\mathsf{EffectLaw}
+&\equiv
+\forall\nu,s,i.\;\tau_\nu(s,i)\in
+\mathsf{T}^{\mathcal{E}_\nu}_{A_\nu}(S_\nu\times O_\nu),\\
+\mathsf{LedgerLaw}
+&\equiv
+\forall c.\;c\in\mathsf{Evidence}_\Gamma
+\Rightarrow \mathsf{finite}(\Gamma)\land\mathsf{declared}(\Gamma),\\
+\mathsf{Main}_{Rings}
+&\equiv
+\mathsf{OwnerLaw}\land\mathsf{MorphLaw}
+\land\mathsf{EffectLaw}\land\mathsf{LedgerLaw}.
+\end{aligned}
+\]
+Furthermore,
+\[
+  \forall c\in\NonClaim.\quad \mathsf{Main}_{Rings}\not\vdash c .
+\]
+\end{theorem}
+\begin{proof}
+OwnerLaw is Lemma~\ref{lem:owner-totality}; MorphLaw is
+Lemma~\ref{lem:morphism-preservation}; EffectLaw is
+Lemma~\ref{lem:effect-confinement}.  LedgerLaw follows from the claim-ledger
+methodology.  \(\NonClaim\) is disjoint from
+\(\mathsf{Spec}\cup\mathsf{Impl}\cup\mathsf{Evidence}_\Gamma\); therefore no
+non-claim follows from the theorem.
+\end{proof}
 
 \section{Chord Overlay}
 
@@ -730,10 +815,13 @@ This section fixes Chord as the base protocol and CorrectChord as the maintenanc
 \[
 \begin{array}{rcl}
 S_n&=&(p_n,L_n,F_n,E_n),\\
+n&\in&N\subset R,\\
 p_n&\in&N\cup\{\bot\},\quad L_n\in N^{\le r},\\
 F_n&:&\{0,\ldots,159\}\rightharpoonup N.
 \end{array}
 \]
+The algorithms are written over identifiers \(n\in N\); an implementation node
+record \(\hat n\) is projected by \(\operatorname{id}(\hat n)=n\).
 \[
 \begin{array}{rcl}
 \mathsf{head}(\langle\rangle)&=&\bot,\\
@@ -758,14 +846,14 @@ Here \(\mathsf{ClosestPreceding}_S(n,k)=\bot\) when the displayed set is empty.
 \Function{BeginJoin}{$n, known$}
 \State $pred[n]\gets \bot$
 \If{$known=\bot$}
-  \State $succ[n]\gets \langle n.did\rangle$
+  \State $succ[n]\gets \langle n\rangle$
   \State \Return $Done$
 \EndIf
-\State \Return $Remote(known, FindSuccessor(n.did))$
+\State \Return $Remote(known, FindSuccessor(n))$
 \EndFunction
 \Function{InstallSuccessor}{$n, s$}
 \If{$s=\bot$}
-  \State \Return $Repair(DiscoverSuccessor(n.did))$
+  \State \Return $Repair(DiscoverSuccessor(n))$
 \EndIf
 \State $succ[n]\gets \mathsf{Normalize}_r(n,\langle s\rangle)$
 \State \Return $Remote(s, QuerySuccList)$
@@ -774,17 +862,17 @@ Here \(\mathsf{ClosestPreceding}_S(n,k)=\bot\) when the displayed set is empty.
 \State $succ[n]\gets \mathsf{Normalize}_r(n,\langle s\rangle\cdot list)$
 \State $h\gets head(succ[n])$
 \If{$h=\bot$}
-  \State \Return $Repair(DiscoverSuccessor(n.did))$
-\ElsIf{$h=n.did$}
+  \State \Return $Repair(DiscoverSuccessor(n))$
+\ElsIf{$h=n$}
   \State \Return $Done$
 \Else
-  \State $a\gets Remote(h, Notify(n.did))$
-  \State $b\gets Remote(h, SyncStorage(n.did))$
+  \State $a\gets Remote(h, Notify(n))$
+  \State $b\gets Remote(h, SyncStorage(n))$
   \State \Return $Multi(a,b)$
 \EndIf
 \EndFunction
 \Function{HandleNotify}{$n, q$}
-\If{$q\neq n.did \land (pred[n]=\bot \lor q\in(pred[n],n.did)_R)$}
+\If{$q\neq n \land (pred[n]=\bot \lor q\in(pred[n],n)_R)$}
   \State $pred[n]\gets q$
 \EndIf
 \State \Return $Noop$
@@ -797,19 +885,19 @@ Here \(\mathsf{ClosestPreceding}_S(n,k)=\bot\) when the displayed set is empty.
 \label{alg:lookup}
 \begin{algorithmic}[1]
 \Function{FindSuccessor}{$key, n$}
-\If{$key=n.did$}
-  \State \Return $Found(n.did)$
+\If{$key=n$}
+  \State \Return $Found(n)$
 \EndIf
 \State $s\gets head(succ[n])$
 \If{$s=\bot$}
-  \State \Return $Repair(QuerySuccList(n.did))$
-\ElsIf{$s=n.did$}
-  \State \Return $Found(n.did)$
-\ElsIf{$key\in(n.did,s]_R$}
+  \State \Return $Repair(QuerySuccList(n))$
+\ElsIf{$s=n$}
+  \State \Return $Found(n)$
+\ElsIf{$key\in(n,s]_R$}
   \State \Return $Found(s)$
 \EndIf
-\State $next\gets \mathsf{ClosestPreceding}_S(n.did,key)$
-\If{$next=\bot$ or $next=n.did$}
+\State $next\gets \mathsf{ClosestPreceding}_S(n,key)$
+\If{$next=\bot$ or $next=n$}
   \State $next\gets s$
 \EndIf
 \State \Return $Remote(next, FindSuccessor(key))$
@@ -845,8 +933,8 @@ Here \(\mathsf{ClosestPreceding}_S(n,k)=\bot\) when the displayed set is empty.
 \Function{BeginStabilize}{$n$}
 \State $s\gets head(succ[n])$
 \If{$s=\bot$}
-  \State \Return $Repair(DiscoverSuccessor(n.did))$
-\ElsIf{$s=n.did$}
+  \State \Return $Repair(DiscoverSuccessor(n))$
+\ElsIf{$s=n$}
   \State \Return $Noop$
 \Else
   \State \Return $Remote(s, QueryTopology)$
@@ -856,18 +944,18 @@ Here \(\mathsf{ClosestPreceding}_S(n,k)=\bot\) when the displayed set is empty.
 \State $actions\gets []$
 \State $s\gets head(succ[n])$
 \If{$s=\bot$}
-  \State \Return $Repair(DiscoverSuccessor(n.did))$
-\ElsIf{$s=n.did$}
+  \State \Return $Repair(DiscoverSuccessor(n))$
+\ElsIf{$s=n$}
   \State \Return $Noop$
 \EndIf
 \State $c\gets topo.pred$
-\If{$c\neq\bot$ and $c\neq n.did$ and $c\in(n.did,s)_R$}
+\If{$c\neq\bot$ and $c\neq n$ and $c\in(n,s)_R$}
   \State $succ[n]\gets \mathsf{Normalize}_r(n,\langle c\rangle\cdot succ[n])$
 \EndIf
 \State $succ[n]\gets \mathsf{Normalize}_r(n,succ[n]\cdot topo.succ)$
 \State $h\gets head(succ[n])$
-\If{$h\neq\bot$ and $h\neq n.did$}
-  \State $a\gets Remote(h, Notify(n.did))$
+\If{$h\neq\bot$ and $h\neq n$}
+  \State $a\gets Remote(h, Notify(n))$
   \State $b\gets Remote(h, QuerySuccList)$
   \State $actions\gets actions\cdot[a,b]$
 \EndIf
@@ -911,7 +999,7 @@ If Algorithm~\ref{alg:lookup} returns \(Found(s)\) by the interval test, then
 therefore \(\operatorname{owner}_N(k)=s\).  If it forwards, the chosen target is
 either the closest preceding finger/list entry or the first successor; in both
 cases it lies in \((n,k)_R\), so \(\delta_{next}(k)<\delta_n(k)\).  Finiteness of
-\(N\) gives termination.  The branches \(key=n.did\) and \(s=n.did\) discharge
+\(N\) gives termination.  The branches \(key=n\) and \(s=n\) discharge
 the singleton and exact-owner edge cases.  Repair branches are outside the
 steady-ring premise.
 \end{proof}
@@ -1282,18 +1370,37 @@ Privacy & route or relay observation & relay policy only; no anonymity theorem \
 \label{security-table}
 \end{table}
 
+\begin{definition}[Security and policy boundary]
+\[
+\begin{array}{rcl}
+\mathsf{P}_{adm}&:&X_D\times\mathsf{Epoch}\to\{\top,\bot\},\\
+\mathsf{P}_{rank}(q)&\Leftrightarrow&
+  \operatorname{RankValid}(q)\land weight(q)\leq W_{max},\\
+\mathsf{P}_{relay}(r)&\Leftrightarrow&
+  \operatorname{RelayValid}(r)\land
+  \operatorname{path}(r)\in\mathsf{AllowedRelay},\\
+\mathsf{P}_{quota}(u,e)&\Leftrightarrow&
+  \operatorname{use}(u,e)\leq \operatorname{limit}(u,e),\\
+z&=&(d,e,q,r,u),\\
+\mathsf{Policy}_{R}(z)&\Leftrightarrow&
+  \mathsf{P}_{adm}(d,e)\land\mathsf{P}_{rank}(q)\\
+&&{}\land\mathsf{P}_{relay}(r)\land\mathsf{P}_{quota}(u,e).
+\end{array}
+\]
 \[
 \begin{array}{rcl}
 \mathsf{Base}&\not\vdash&
-  \mathsf{SybilResist}\land\mathsf{EclipseResist}
-  \land\mathsf{Anon}\land\mathsf{DoSResist},\\
-\mathsf{SecClaim}&\Rightarrow&
-  \mathsf{SelfCertID}\land\mathsf{TypedSession}
-  \land\mathsf{ReplayReject}\\
-&&{}\land\mathsf{Adm}\land\mathsf{Rank}
-  \land\mathsf{Relay}\land\mathsf{Quota}.
+  \mathsf{SybilResist}\land\mathsf{EclipseResist}\\
+&&{}\land\mathsf{Anon}\land\mathsf{DoSResist},\\
+\mathsf{SecClaim}_{core}&\Rightarrow&
+  \mathsf{SelfCertID}\land\mathsf{TypedSession}\\
+&&{}\land\mathsf{ReplayReject},\\
+\mathsf{SecClaim}_{policy}&\Rightarrow&
+\forall z\in\mathsf{SecEvent}.\;\mathsf{Policy}_{R}(z),\\
+\mathsf{SecClaim}_{core}&\not\Rightarrow&\mathsf{SecClaim}_{policy}.
 \end{array}
 \]
+\end{definition}
 
 \begin{obligation}[Replay and session-confusion rejection]
 \[
@@ -1314,22 +1421,34 @@ seen'&=&seen\cup\{\operatorname{fid}(f)\},\\
 \section{Verification Evidence and Evaluation Scope}
 
 \[
-  \mathsf{Ledger}
-  =
-  \mathsf{Spec}
-  \uplus \mathsf{Evidence}_{\Gamma}
-  \uplus \mathsf{Baseline}_{C}
-  \uplus \mathsf{Runtime}_{R}.
+\begin{aligned}
+\mathsf{Ledger}
+&=
+\mathsf{Spec}\uplus \mathsf{Artifact}_{R}\\
+&\quad{}\uplus \mathsf{ReportedOnly}
+\uplus \mathsf{ExtBase}_{C}
+\uplus \mathsf{Obligation},\\
+\mathsf{Artifact}_{R}
+&=\mathsf{FiniteModel}\cup\mathsf{TraceReplay}
+\cup\mathsf{Tests}_{CI},\\
+\mathsf{PerfClaim}_{R}&\in\mathsf{Obligation}.
+\end{aligned}
 \]
-This section is an evidence ledger, not a performance claim.  The repository
-contains executable finite-scope evidence for overlay, storage, and message-flow
-obligations.  It does not yet contain a wide-area Rings benchmark, committed
-benchmark-table regeneration data, or committed seeds sufficient to regenerate
-the tables below.
+This section separates executable artifact evidence from reported coordinates.
+The repository contains finite-scope evidence for overlay, storage, and
+message-flow obligations.  It does not yet contain a wide-area Rings benchmark,
+committed benchmark-table regeneration data, or committed seeds sufficient to
+regenerate the tables below.
 \[
 \begin{array}{rcl}
-\mathsf{AdmittedEval}(d)&\Leftrightarrow&\mathsf{Regen}(d),\\
-\neg\mathsf{AdmittedEval}(d)&\Rightarrow&d\in\mathsf{ReportedOnly}.
+\mathsf{ProvFull}(d)&\Leftrightarrow&
+\mathsf{src}(d)\neq\bot\land\mathsf{rev}(d)\neq\bot\\
+&&{}\land\mathsf{cmd}(d)\neq\bot\land\mathsf{seed}(d)\neq\bot\\
+&&{}\land\mathsf{host}(d)\neq\bot,\\
+\mathsf{AdmittedEval}(d)&\Leftrightarrow&
+\mathsf{Regen}(d)\land\mathsf{ProvFull}(d),\\
+\neg\mathsf{AdmittedEval}(d)&\Rightarrow&
+d\in\mathsf{ReportedOnly}\cup\mathsf{ExtBase}_{C}.
 \end{array}
 \]
 
@@ -1415,26 +1534,26 @@ projections and equal observable abstract effect traces:
 
 \begin{table}[htbp]
 \centering
-\footnotesize
-\setlength{\tabcolsep}{2pt}
-\begin{tabular}{p{1.35cm}|p{2.65cm}|p{2.45cm}}
+\scriptsize
+\setlength{\tabcolsep}{2.5pt}
+\begin{tabular}{p{1.35cm}|p{2.45cm}|p{2.45cm}}
 \hline
 Artifact & Checked scope & Non-claim / limit \\ \hline
 Topology tests
-  & join, rectify, stabilize fixpoints on finite DID layouts
-  & not a parametric TLAPS proof \\
+  & join, rectify, stabilize fixpoints
+  & no parametric TLAPS proof \\
 Stateright
-  & predecessor update, bounded discovery abstraction, storage CRDT, handoff
-  & finite scoped models, not a live-network theorem \\
+  & predecessor, discovery, CRDT, handoff
+  & finite \(\Gamma\), no live-network theorem \\
 Trace replay
-  & deterministic delivery schedules over real routing code
-  & not an Internet latency benchmark \\
+  & deterministic routing schedules
+  & no Internet latency benchmark \\
 E2E tests
-  & signed direct-ElGamal frame order, final marker, and replay behavior
-  & not a symbolic cryptographic proof \\
+  & signed frames, ordering, replay
+  & no symbolic crypto proof \\
 CI witness
-  & build, test, lint, doc, release-package paths
-  & no benchmark-table regeneration job \\
+  & build, test, lint, doc, package
+  & no benchmark regeneration \\
 \hline
 \end{tabular}
 \caption{Verification evidence and explicit limits.  Entries are finite-scope
@@ -1465,8 +1584,9 @@ Only $hT_{hop}$ is Chord-comparable; the rest is Rings runtime overhead.
 M&\in&\{\mathsf{maintained},\mathsf{stale}\},\\
 \pi(d)&\in&\mathsf{Prov},\\
 \mathsf{Regen}(d)&\Rightarrow&
-\mathsf{src},\mathsf{rev},\mathsf{cmd}\neq\bot,\\
-&&\mathsf{seed},\mathsf{host}\neq\bot .
+\mathsf{src}(d)\neq\bot\land\mathsf{rev}(d)\neq\bot\\
+&&{}\land\mathsf{cmd}(d)\neq\bot\land\mathsf{seed}(d)\neq\bot\\
+&&{}\land\mathsf{host}(d)\neq\bot .
 \end{array}
 \]
 \[
@@ -1484,8 +1604,10 @@ h_C^r&=&h_C^f+1.
 \]
 \[
 \begin{array}{rcl}
-D_{reported}&=&D_C^{paper}\uplus D_C^{656}\uplus D_R^{docker},\\
-D_{admit}&=&\{d\in D_{reported}:\mathsf{AdmittedEval}(d)\},\\
+D_{external}&=&D_C^{paper},\\
+D_{reported}&=&D_C^{656}\uplus D_R^{docker},\\
+D_{all}&=&D_{external}\uplus D_{reported},\\
+D_{admit}&=&\{d\in D_{all}:\mathsf{AdmittedEval}(d)\},\\
 D_C^{paper}&=&\{C_{II},C_{III},C_{IV},C_{8},C_{9},C_{10}\},\\
 D_C^{656}&=&\{\mathsf{maintained},\mathsf{stale}\},\\
 D_R^{docker}&=&\{D_R^{conv},D_R^{tx}\}.
@@ -1495,14 +1617,17 @@ D_R^{docker}&=&\{D_R^{conv},D_R^{tx}\}.
 \begin{array}{rcl}
 D_C^{paper}&:&(N,r)=(1000,20),\\
 D_C^{656}&:&(N,r,m,L)=(1600,3,160,64),\\
-D_C^{paper}\cup D_C^{656}&\subset&\mathsf{Baseline}_{C},\\
-D_R^{docker}&\subset&\mathsf{Runtime}_{R},\\
+D_C^{paper}&\subset&\mathsf{ExtBase}_{C},\\
+D_C^{656}&\subset&\mathsf{ReportedOnly}\cap\mathsf{Baseline}_{C},\\
+D_R^{docker}&\subset&\mathsf{ReportedOnly}\cap\mathsf{Runtime}_{R},\\
 \mathsf{Baseline}_{C}\cap\mathsf{Runtime}_{R}&=&\varnothing .
 \end{array}
 \]
 Here \(D_C^{paper}\) is an external Chord-paper coordinate, \(D_C^{656}\) is a
 PR~656 Chord-only coordinate at Rings' current overlay parameters, and
-\(D_R^{docker}\) is reported Rings runtime evidence.  Unless
+\(D_R^{docker}\) is reported Rings runtime evidence.  The sets are disjoint by
+claim role: external baseline, reported Chord baseline, reported Rings runtime.
+Unless
 \(\mathsf{AdmittedEval}(d)\) holds, a tuple is a reported coordinate only; it is
 not used to prove \(\mathsf{Main}_{Rings}\).  Metrics are not pooled unless a
 Rings lookup benchmark with the same workload key \(\eta\) is added.
@@ -1601,6 +1726,20 @@ M=\mathsf{maintained}&\Rightarrow&\mathsf{Baseline}_{C}^{656}.
 \]
 A Rings performance claim must measure Rings under the reported build; a Chord
 baseline may only be cited as a baseline.
+\[
+\begin{array}{rcl}
+\mathsf{AdmitPerf}_{R}(\eta)&\Leftrightarrow&
+\exists D_R^{lookup}.\\
+&&{}\mathsf{AdmittedEval}(D_R^{lookup})\\
+&&{}\land workload(D_R^{lookup})=\eta\\
+&&{}\land metric(D_R^{lookup})\supseteq
+\{h,T_{hop},T_{conn},\\
+&&{}T_{crypto},T_{app},T_{witness}\},\\
+\neg\mathsf{AdmitPerf}_{R}(\eta)&\Rightarrow&
+\mathsf{PerfClaim}_{R}(\eta)\\
+&&{}\in\mathsf{Obligation}.
+\end{array}
+\]
 \end{obligation}
 
 \[
@@ -1633,10 +1772,12 @@ to Chord forwarding hops or timeout rates.
 \noindent\textbf{Artifact provenance.}
 \[
 \begin{array}{rcl}
-\mathsf{AdmittedEval}(d)&\Leftrightarrow&
+\mathsf{ProvFull}(d)&\Leftrightarrow&
 \mathsf{src}(d)\neq\bot\land\mathsf{rev}(d)\neq\bot\\
 &&{}\land\mathsf{cmd}(d)\neq\bot\land\mathsf{seed}(d)\neq\bot\\
-&&{}\land\mathsf{host}(d)\neq\bot .
+&&{}\land\mathsf{host}(d)\neq\bot,\\
+\mathsf{AdmittedEval}(d)&\Leftrightarrow&
+\mathsf{Regen}(d)\land\mathsf{ProvFull}(d).
 \end{array}
 \]
 No CI command currently regenerates Table~\ref{chord-paper-data-table},
@@ -1678,6 +1819,14 @@ neighbor-set constraints, auditing, or redundant routing beyond ordinary DHT
 maintenance~\cite{SitMorrisDHTSecurity,SecureRoutingOverlays,SybilDouceur,
 EclipseOverlay}.  Rings therefore states Sybil, Eclipse, anonymity, and DoS
 resistance as policy obligations, not as consequences of CorrectChord.
+
+Anonymity systems make traffic analysis a primary security objective.  Tor uses
+onion routing; Nym adds mix-network style privacy infrastructure
+\cite{TorNetwork,NymNetwork}.  Rings does not prove sender, receiver, or route
+unlinkability.  Its relay layer is only a typed transport policy:
+\[
+  \mathsf{P}_{relay}\not\Rightarrow\mathsf{Anon}.
+\]
 
 Rings storage uses the join-semilattice CRDT case when merge is available and
 an explicit finalizer otherwise~\cite{ShapiroCRDT}.  WebRTC and WebAssembly are
