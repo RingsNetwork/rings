@@ -1,8 +1,14 @@
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::BinaryHeap;
 use std::env;
 use std::time::Instant;
 
+use ethereum_types::H160;
+use rings_core::dht::Did;
+use rings_core::dht::StorageVirtualNodes;
+use rings_core::dht::VirtualNode;
+use rings_core::dht::VirtualNodeConfig;
 use serde_json::json;
 use serde_json::Value;
 
@@ -39,6 +45,7 @@ use support::RING_BITS;
 
 const LOOKUPS_PER_TABLE: usize = 10_000;
 const FIG10_LOOKUPS_PER_NODE: usize = 32;
+const FIG9_NETWORK_ID: u32 = 0x0653;
 const SIMULATOR_PATH: &str = "crates/core/benches/chord_paper_sim.rs";
 type PaperGenerator = fn() -> Result<Vec<Value>, BenchError>;
 
@@ -318,39 +325,46 @@ fn paper_fig_8() -> Result<Vec<Value>, BenchError> {
 fn paper_fig_9() -> Result<Vec<Value>, BenchError> {
     let real_nodes = 10_000usize;
     let key_count = 1_000_000usize;
+    let owners = deterministic_dids(real_nodes, 0x5000);
+    let owner_index = owners
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(index, owner)| (owner, index))
+        .collect::<BTreeMap<_, _>>();
     let mut rows = Vec::new();
 
-    for virtual_nodes_per_real in [1usize, 2, 5, 10, 20] {
-        let mut ids_by_real = Vec::with_capacity(real_nodes.saturating_mul(virtual_nodes_per_real));
-        for real in 0..real_nodes {
-            for vnode in 0..virtual_nodes_per_real {
-                let seed = 0x5000u64
-                    .wrapping_add((real as u64).wrapping_mul(1009))
-                    .wrapping_add(vnode as u64);
-                ids_by_real.push((splitmix64(seed), real));
-            }
-        }
-        ids_by_real.sort_by_key(|(node_id, real)| (*node_id, *real));
-        let virtual_ids = ids_by_real
-            .iter()
-            .map(|(node_id, _)| *node_id)
-            .collect::<Vec<_>>();
-        let virtual_counts = expected_key_counts(&virtual_ids, key_count);
+    for virtual_nodes_per_real in [1u16, 2, 5, 10, 20] {
+        let registry = StorageVirtualNodes::from_owners(
+            VirtualNodeConfig::new(FIG9_NETWORK_ID, virtual_nodes_per_real),
+            owners.iter().copied(),
+        );
+        let positions = registry.positions();
         let mut real_counts = vec![0usize; real_nodes];
-        for ((_, real), count) in ids_by_real.iter().zip(virtual_counts.iter().copied()) {
-            if let Some(slot) = real_counts.get_mut(*real) {
-                *slot = slot.saturating_add(count);
+        for key_index in 0..key_count {
+            let key = deterministic_did(0x5500u64.wrapping_add(key_index as u64));
+            let owner =
+                storage_owner_from_positions(&positions, key).ok_or(BenchError::EmptyActiveSet)?;
+            let index = owner_index
+                .get(&owner)
+                .copied()
+                .ok_or(BenchError::EmptyActiveSet)?;
+            if let Some(slot) = real_counts.get_mut(index) {
+                *slot = slot.saturating_add(1);
             }
         }
         rows.push(json!({
             "report": "chord_paper_sim",
             "paper_item": "fig_9",
             "scenario": "load_balance_virtual_nodes",
-            "runtime_support": "simulator_only",
+            "runtime_support": "rings_storage_virtual_nodes",
+            "virtual_node_scope": "storage_owner_selection",
+            "virtual_node_derivation": "rings_core::dht::StorageVirtualNodes",
+            "virtual_node_config_network_id": FIG9_NETWORK_ID,
             "real_node_count": real_nodes,
-            "ring_identifier_bits": RING_BITS,
+            "ring_identifier_bits": 160,
             "virtual_nodes_per_real": virtual_nodes_per_real,
-            "virtual_node_count": virtual_ids.len(),
+            "virtual_node_count": positions.len(),
             "key_count": key_count,
             "mean_keys_per_real_node": mean_usize(&real_counts),
             "keys_per_real_node_p1": percentile_usize(&real_counts, 1.0),
@@ -365,6 +379,43 @@ fn paper_fig_9() -> Result<Vec<Value>, BenchError> {
     }
 
     Ok(rows)
+}
+
+fn deterministic_dids(count: usize, seed: u64) -> Vec<Did> {
+    let mut dids = BTreeSet::new();
+    let mut cursor = seed;
+    while dids.len() < count {
+        cursor = cursor.wrapping_add(1);
+        let did = deterministic_did(cursor);
+        if did != Did::from(0u32) {
+            dids.insert(did);
+        }
+    }
+    dids.into_iter().collect()
+}
+
+fn deterministic_did(seed: u64) -> Did {
+    let mut bytes = [0u8; 20];
+    let mut cursor = seed;
+    for chunk in bytes.chunks_mut(8) {
+        cursor = cursor.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let word = splitmix64(cursor).to_be_bytes();
+        for (dst, src) in chunk.iter_mut().zip(word) {
+            *dst = src;
+        }
+    }
+    Did::from(H160::from(bytes))
+}
+
+fn storage_owner_from_positions(positions: &[VirtualNode], key: Did) -> Option<Did> {
+    if positions.is_empty() {
+        return None;
+    }
+    let index = positions.partition_point(|position| position.vnode_did < key);
+    positions
+        .get(index)
+        .or_else(|| positions.first())
+        .map(|position| position.owner_did)
 }
 
 fn paper_fig_10() -> Result<Vec<Value>, BenchError> {

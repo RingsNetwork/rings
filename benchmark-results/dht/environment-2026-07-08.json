@@ -1,0 +1,60 @@
+{
+  "collected_at_unix_ms": 1783443321000,
+  "commands": {
+    "chord_paper_sim": "cargo bench -p rings-core --bench chord_paper_sim --no-default-features --features dummy -- --include all > benchmark-results/dht/chord-paper-sim-2026-07-08.jsonl",
+    "chord_paper_fig_9_smoke": "cargo bench -p rings-core --bench chord_paper_sim --no-default-features --features dummy -- --include fig_9 > /tmp/chord-paper-fig9-2026-07-08.jsonl"
+  },
+  "git_branch": "codex/dht-benchmark-653",
+  "git_head_before_supplement": "92f3fdac0eb60c235dcb967415ac90dc82cd0885",
+  "git_head_before_supplement_short": "92f3fdac",
+  "rebased_onto_origin_master": "2adbefb8b13c330555fd2afa06b5ce459794688e",
+  "rebased_onto_origin_master_short": "2adbefb8",
+  "merged_prs": {
+    "660": {
+      "title": "Implement storage virtual nodes",
+      "state": "MERGED",
+      "url": "https://github.com/RyanKung/rings/pull/660",
+      "merged_at": "2026-07-07T16:44:14Z",
+      "merge_commit": "2adbefb8b13c330555fd2afa06b5ce459794688e"
+    }
+  },
+  "dht_finger_policy": "chord_wrapping",
+  "dht_maintenance_models": [
+    "instant_stale_snapshot",
+    "maintained_chord"
+  ],
+  "paper_sim_source": "crates/core/benches/chord_paper_sim.rs in current PR branch after rebasing on PR #660; Fig. 9 uses rings_core::dht::StorageVirtualNodes runtime storage-vnode derivation",
+  "virtual_nodes": {
+    "runtime_support": "rings_storage_virtual_nodes",
+    "scope": "storage_owner_selection",
+    "routing_virtual_nodes": false,
+    "network_id": 1619,
+    "positions_per_owner": [
+      1,
+      2,
+      5,
+      10,
+      20
+    ],
+    "real_node_count": 10000,
+    "key_count": 1000000,
+    "ring_identifier_bits": 160
+  },
+  "machine": {
+    "cpu_brand": "Apple M1 Max",
+    "machine": "arm64",
+    "memory_bytes": "68719476736",
+    "platform": "macOS Darwin 24.6.0 arm64"
+  },
+  "tools": {
+    "cargo": "cargo 1.94.1 (29ea6fb6a 2026-03-24)",
+    "docker": "Docker version 28.3.2, build 578ccf607d",
+    "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)"
+  },
+  "notes": [
+    "PR #660 implements storage-only virtual positions derived from physical owner DIDs; they are not independent signing identities and do not create routing/finger-table virtual peers.",
+    "chord-paper-sim-2026-07-08.jsonl maps the original Chord paper's numbered tables and data figures to local Rust rows.",
+    "Fig. 9 rows use runtime storage virtual-node derivation from rings_core::dht::StorageVirtualNodes over deterministic 160-bit Rings DIDs and placement keys.",
+    "Docker convergence and transport artifacts still use the 2026-07-05 rings-node-cluster image and were not recollected in this supplement."
+  ]
+}

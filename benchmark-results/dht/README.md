@@ -1,9 +1,11 @@
-# DHT Benchmark Artifacts - 2026-07-05
+# DHT Benchmark Artifacts - 2026-07-05 / 2026-07-08
 
 Commit: base Docker artifacts were collected from `2efb302bf92a7b383e10c3c6d17b0a7764b92579`;
 the dummy simulator JSONL was regenerated after applying the Chord wrapping
 finger fix tracked by issue #658 and adding the `maintained_chord`
 maintenance model in this PR branch.
+The 2026-07-08 `chord-paper-sim` artifact was regenerated after rebasing on
+PR #660 (`2adbefb8`), which added storage-only virtual nodes.
 Machine: Apple M1 Max, 68719476736 bytes RAM, macOS-15.6.1-arm64-arm-64bit-Mach-O
 Tools: `rustc 1.94.1 (e408947bf 2026-03-25)`, `cargo 1.94.1 (29ea6fb6a 2026-03-24)`, `Docker version 28.3.2, build 578ccf607d`
 Docker image: `rings-node-cluster:benchmark-artifacts-2efb302b` / `sha256:1c5d41481958e3fe0f403b53955831cbbd36d2041bf3954a34d71ad02b6a5b5a`
@@ -11,10 +13,12 @@ Docker image: `rings-node-cluster:benchmark-artifacts-2efb302b` / `sha256:1c5d41
 ## Files
 
 - `dummy-paper-scale-2026-07-05.jsonl`: Paper-scale Chord baseline from the dummy DHT simulator.
-- `chord-paper-sim-2026-07-05.jsonl`: Paper-aligned simulator rows for Chord Table II/III/IV and Fig. 8/9/10.
+- `chord-paper-sim-2026-07-08.jsonl`: Latest paper-aligned Rust bench rows for Chord Table II/III/IV and Fig. 8/9/10. Fig. 9 uses the merged Rings storage-vnode runtime API from PR #660.
+- `chord-paper-sim-2026-07-05.jsonl`: Historical paper-aligned rows before runtime storage-vnode support was merged.
 - `docker-convergence-16node-2026-07-05.jsonl`: Fresh 16-node ring Docker/WebRTC cluster samples from cluster-ready for about 5 minutes.
 - `docker-transport-16node-2026-07-05.jsonl`: Real WebRTC node-internal transport burst payload sweep on fixed node0 -> node1.
-- `environment-2026-07-05.json`: Machine, tool, image, commit, and command metadata.
+- `environment-2026-07-08.json`: Machine, tool, rebase, PR #660, and command metadata for the latest paper simulator artifact.
+- `environment-2026-07-05.json`: Machine, tool, image, commit, and command metadata for the original Docker and simulator artifacts.
 
 ## Commands
 
@@ -62,19 +66,22 @@ original Chord paper's Table II/III successor-list setting.
 - `chord_paper_sim`:
 
 ```sh
-cargo bench -p rings-core --bench chord_paper_sim --no-default-features --features dummy -- --include all > benchmark-results/dht/chord-paper-sim-2026-07-05.jsonl
+cargo bench -p rings-core --bench chord_paper_sim --no-default-features --features dummy -- --include all > benchmark-results/dht/chord-paper-sim-2026-07-08.jsonl
 ```
 
 ## Chord Paper Alignment
 
-`chord-paper-sim-2026-07-05.jsonl` is a simulator-only artifact for the
+`chord-paper-sim-2026-07-08.jsonl` is a Rust bench artifact for the
 original Chord paper's numbered tables and data figures. It exists so paper
-claims can be mapped one-to-one to a local artifact. It is not evidence that the
-Rings runtime implements every modeled feature.
+claims can be mapped one-to-one to a local artifact. Most rows are paper-model
+simulator rows; Fig. 9 now uses the merged Rings storage virtual-node runtime
+API for owner-position derivation.
 
 The paper-aligned simulator is implemented as a Rust cargo bench and emits
-`ring_identifier_bits=64`. Use `dummy-paper-scale-2026-07-05.jsonl` for the
-160-bit Rings DID baseline.
+`ring_identifier_bits=64` for pure paper-model rows. Fig. 9 emits
+`ring_identifier_bits=160` because it derives Rings `Did` storage virtual
+positions. Use `dummy-paper-scale-2026-07-05.jsonl` for the 160-bit Rings DID
+routing baseline.
 
 | paper item | original metric | artifact coverage |
 | --- | --- | --- |
@@ -83,13 +90,14 @@ The paper-aligned simulator is implemented as a Rust cargo bench and emits
 | Table III | lookups during stabilization, paired join/leave rates 0.05-0.40/s, `N~=1000`, `r=20` | `paper_item=table_iii`, event-driven dummy churn |
 | Table IV | lookup latency stretch, `N=2^16`, `s=1,2,4,8,16`, iterative/recursive, 3D/transit-stub | `paper_item=table_iv` |
 | Fig. 8 | consistent-hashing load balance, `10^4` nodes, `10^5..10^6` keys, 20 seeds | `paper_item=fig_8a` and `fig_8b` |
-| Fig. 9 | virtual nodes load balance, `10^4` real nodes, `10^6` keys, `r=1,2,5,10,20` virtual nodes | `paper_item=fig_9`, `runtime_support=simulator_only` |
+| Fig. 9 | virtual nodes load balance, `10^4` real nodes, `10^6` keys, `r=1,2,5,10,20` virtual nodes | `paper_item=fig_9`, `runtime_support=rings_storage_virtual_nodes`, `virtual_node_scope=storage_owner_selection` |
 | Fig. 10 | path length scaling, `N=2^k`, `k=3..14`, plus PDF at `k=12` | `paper_item=fig_10a` and `fig_10b` |
 
-Rings does not currently have Chord-style virtual nodes, meaning one physical
-node advertising multiple unrelated ring positions for ownership/routing. The
-old `VNode` terminology is storage-entry terminology, not this Chord feature.
-Issue #659 tracks the runtime design decision for real virtual-node support.
+PR #660 implements storage-only virtual positions derived from a physical
+owner DID. They are not independent signing identities and do not advertise
+separate routing/finger-table nodes. Therefore Fig. 9 now covers storage owner
+load balance, while lookup path length and routing convergence remain covered
+by the non-vnode Chord rows and Docker/WebRTC artifacts.
 
 ### Paper Simulator Highlights
 
@@ -134,15 +142,21 @@ Table IV, lookup stretch medians with p10/p90 in parentheses:
 | 8 | 4.86 (3.15, 9.08) | 2.82 (1.86, 5.36) | 7.37 (5.00, 10.00) | 4.18 (2.96, 5.46) |
 | 16 | 4.31 (2.80, 7.88) | 2.52 (1.71, 4.83) | 6.47 (4.46, 9.19) | 3.68 (2.68, 4.96) |
 
-Fig. 9, simulator-only virtual-node load balance:
+Fig. 9, Rings storage-vnode load balance:
 
-| virtual nodes / real node | mean keys | p1 | p99 | max |
-| ---: | ---: | ---: | ---: | ---: |
-| 1 | 100.0 | 1 | 478 | 866 |
-| 2 | 100.0 | 7 | 332 | 619 |
-| 5 | 100.0 | 25 | 235 | 374 |
-| 10 | 100.0 | 41 | 188 | 268 |
-| 20 | 100.0 | 56 | 159 | 227 |
+| virtual nodes / real node | virtual positions | mean keys | p1 | p99 | max |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 10000 | 100.0 | 0 | 457 | 1164 |
+| 2 | 20000 | 100.0 | 6 | 327 | 695 |
+| 5 | 50000 | 100.0 | 23 | 236 | 392 |
+| 10 | 100000 | 100.0 | 38 | 194 | 263 |
+| 20 | 200000 | 100.0 | 52 | 165 | 228 |
+
+The Fig. 9 rows use `StorageVirtualNodes::from_owners` with
+`VirtualNodeConfig::new(0x0653, r)` over 10,000 deterministic Rings DIDs and
+1,000,000 deterministic 160-bit placement keys. This is runtime storage-owner
+derivation, not full WebRTC node execution and not routing virtual-node
+advertisement.
 
 ## Dummy DHT Simulator
 
@@ -210,8 +224,10 @@ For 64 KiB payloads, `destination_received_delta` is larger than application mes
 
 ## Paper Use
 
-- Use `dummy-paper-scale-2026-07-05.jsonl` for the Chord baseline curves and tables.
+- Use `chord-paper-sim-2026-07-08.jsonl` for paper Table II/III/IV and Fig. 8/9/10 coverage.
+- Use `dummy-paper-scale-2026-07-05.jsonl` for the Rings 160-bit Chord routing baseline curves and tables.
 - Prefer the `maintained_chord` rows for comparisons against the original Chord paper.
 - Use `instant_stale_snapshot` rows only when discussing stale-state sensitivity after abrupt failure/churn without repair.
+- Use the Fig. 9 `rings_storage_virtual_nodes` rows for storage load-balance claims after PR #660.
 - Use Docker/WebRTC convergence and transport artifacts as Rings implementation evidence, not as the Chord theoretical baseline.
 - Do not collapse the fresh-cluster Docker convergence result into a steady-state lookup number. This run did not converge within the sampled window.
