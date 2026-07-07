@@ -84,6 +84,8 @@ with
 \begin{array}{rcl}
   R&=&\mathbb{Z}/2^{160}\mathbb{Z},\\
   \mathcal{R}_N&=&\text{Correct-Chord overlay object},\\
+  v_0&\in&\{1,\ldots,256\},\\
+  \operatorname{StoreOwner}^{v_0}_N:R\to N,\\
   \Omega_N(X,H)&=&(X,\operatorname{owner}_N\circ H),\\
   \tau_\nu&:&S_\nu\times I_\nu
     \to\mathsf{T}^{\mathcal{E}_\nu}_{A_\nu}(S_\nu\times O_\nu).
@@ -285,7 +287,9 @@ G_{id}\land G_{own}\land G_{io}\land G_{eff}\\
 \{\mathsf{Novel}(\mathsf{CRDT}),
 \mathsf{Novel}(\mathsf{Crypto})\}\\
 &\quad{}\cup
-\{\mathsf{ByzLive},\mathsf{Consensus},\mathsf{WANPerf}\}.
+\{\mathsf{ByzLive},\mathsf{Consensus},\mathsf{WANPerf}\}\\
+&\quad{}\cup
+\{\mathsf{FullVNodeRouting},\mathsf{VNodePerf}\}.
 \end{aligned}
 \]
 \end{definition}
@@ -300,7 +304,7 @@ Claim family & Ledger class & Anchor and scope \\ \hline
 \(\Omega_N,\mathsf{PMor}\) & \(\mathsf{Spec}\) & Definitions and Theorem~\ref{thm:carrier-separated-ownership} \\
 Chord state & \(\mathsf{Spec}\cup\mathsf{Ev}_{\Gamma}\) & Algorithms~\ref{alg:join}--\ref{alg:stabilize}; finite checks \\
 DID/session & \(\mathsf{Impl}\) & signed session and context predicates \\
-Affine storage & \(\mathsf{Impl}\cup\mathsf{Ev}_{\Gamma}\) & replica-key invariant and storage tests \\
+Storage VNs & \(\mathsf{Impl}\cup\mathsf{Ev}_{\Gamma}\) & affine keys, virtual owners, storage tests \\
 E2E frames & \(\mathsf{Impl}\cup\mathsf{Ev}_{\Gamma}\) & signed frame and receiver policy \\
 Chunking & \(\mathsf{Impl}\cup\mathsf{Ev}_{\Gamma}\) & Algorithm~\ref{alg:e2e_chunking}; bounded reassembly \\
 Deferred APIs & \(\mathsf{Spec}\cup\mathsf{Obligation}\) & mailbox, hidden descriptor, secret sharing \\
@@ -445,40 +449,63 @@ CorrectChord claims in this paper are stable-ring claims under
 initialization edge case, not evidence for \(r\) distinct live successors.
 \end{assumption}
 
-\begin{definition}[Affine replica set]
+\begin{definition}[Affine replica set and storage VNODE ownership]
+Write \(S^v_N=\operatorname{StoreOwner}^{v}_N\) and
+\(Q^{\rho,v}_N=\operatorname{RepOwner}^{\rho,v}_N\).
 \[
 \begin{array}{rcl}
 1\le\rho&\le&M,\\
+v_0&\in&\{1,\ldots,256\},\\
 \operatorname{repkey}^{\rho}_i(k)
   &=&(k+\left\lfloor M\cdot i/\rho\right\rfloor)\bmod M,\quad 0\le i<\rho,\\[4pt]
 \operatorname{RepKey}^{\rho}(k)
   &=&
   \langle \operatorname{repkey}^{\rho}_i(k):0\leq i<\rho\rangle,\\[4pt]
-\operatorname{RepOwner}^{\rho}_N(k)
+z^v_{n,i}&=&H(\mathtt{rings{:}vnode},net,n,i),\\
+\operatorname{vnode}^{v}_{net}(n,i)
+&=&z^v_{n,i},\\
+V^v_N&=&
+\{(n,z^v_{n,i}):n\in N,0\le i<v\},\\
+S^{0}_N(k)&=&\operatorname{owner}_N(k),\\
+y_k^v
+&=&
+\operatorname*{arg\,min}_{(n,z)\in V^v_N}\delta_k(z),\\
+S^{v}_N(k)
+&=&
+\pi_1 y_k^v\quad(v>0),\\
+r_i&=&\operatorname{repkey}^{\rho}_i(k),\\
+q_i
   &=&
-  \langle \operatorname{owner}_N(\operatorname{repkey}^{\rho}_i(k)):
-    0\leq i<\rho\rangle.
+  S^{v}_N(r_i),\\
+Q^{\rho,v}_N(k)
+  &=&
+  \langle q_i:0\leq i<\rho\rangle.
 \end{array}
 \]
 \[
 \begin{array}{rcl}
 P_k&=&\operatorname{set}(\operatorname{RepKey}^{\rho}(k)),\\
-O_k&=&\operatorname{set}(\operatorname{RepOwner}^{\rho}_N(k)),\\
+O_k&=&\operatorname{set}(Q^{\rho,v_0}_N(k)),\\
 |P_k|&=&\rho,\\
 1\le |O_k|&\leq&\min(\rho,|N|),\\
-\mathsf{collapse}_{N,\rho}(k)&\Leftrightarrow&|O_k|<\min(\rho,|N|).
+\mathsf{collapse}_{N,\rho,v_0}(k)&\Leftrightarrow&|O_k|<\min(\rho,|N|).
 \end{array}
 \]
-Replica keys specify intended placement cardinality; live owner images specify
-realizable redundancy under the current live topology.  CorrectChord successor
-lists remain the topology safety root.
+Replica keys specify intended placement cardinality; storage VNODE ownership
+maps each placement key to a physical owner through derived virtual positions.
+The paper's default storage mode has \(v_0>0\); \(v=0\) is the legacy off-switch.
+Virtual positions are not signing identities and do not own transport sessions.
+CorrectChord successor lists remain the topology safety root.
 \end{definition}
 
 \begin{definition}[Rings overlay model]
 \[
-  \mathcal{R}_N=
-  (R,N,\operatorname{owner}_N,\operatorname{pred}_N,
-   \operatorname{Succ}^r_N,\operatorname{RepOwner}^{\rho}_N,F,E),
+\begin{array}{rcl}
+  \mathcal{R}_N&=&
+  (R,N,\operatorname{owner}_N,\operatorname{pred}_N,\\
+  &&\operatorname{Succ}^r_N,\operatorname{StoreOwner}^{v_0}_N,\\
+  &&\operatorname{RepOwner}^{\rho,v_0}_N,F,E).
+\end{array}
 \]
 \[
 \begin{array}{rcl}
@@ -513,36 +540,39 @@ E&=&\prod_{\nu\in\NS}E_\nu,\\
 
 \begin{constraint}[Carrier separation]
 \label{constraint:carrier-separation}
+Write \(P_o=\mathsf{PlacementOps}\), \(C_o=\mathsf{CryptoOps}\), and
+\(R_o=\mathsf{RunOps}\).
 \[
 \begin{array}{rcl}
 \mathsf{PlacementOps}&=&
   \{0,+,-,\delta_a,(a,b]_R,(a,b)_R\}\\
 &&\cup\{\operatorname{owner}_N\}\\
 &&\cup\{\operatorname{RepKey}^{\rho}\}\\
-&&\cup\{\operatorname{RepOwner}^{\rho}_N\},\\
+&&\cup\{\mathsf{vnode},\mathsf{StoreOwner},\mathsf{RepOwner}\},\\
 \mathsf{CryptoOps}&=&
   \{\times,^{-1},\cdot_{scalar},\mathsf{interp}\}\\
 &&\cup\{\mathsf{pair},\mathsf{subgroup}\},\\
 \mathsf{TransportOps}&=&
   \{\mathsf{offer},\mathsf{answer},\mathsf{send},\mathsf{recv}\},\\
 \mathsf{EffectOps}&=&
-  \{\mathsf{emit},\mathsf{defer},\mathsf{store},\mathsf{load},
-    \mathsf{schedule}\},\\
+  \{\mathsf{emit},\mathsf{defer},\mathsf{store}\}\\
+&&\cup\{\mathsf{load},\mathsf{schedule}\},\\
 \mathsf{RunOps}&=&\mathsf{TransportOps}\cup\mathsf{EffectOps},\\
 \mathsf{Ops}&=&
-\mathsf{PlacementOps}\uplus\mathsf{CryptoOps}\uplus\mathsf{RunOps},\\
-\mathsf{PlacementOps}&\cap&\mathsf{CryptoOps}=\varnothing,\\
-\mathsf{PlacementOps}&\cap&\mathsf{RunOps}=\varnothing,\\
+\mathsf{PlacementOps}\uplus\mathsf{CryptoOps}\\
+&&{}\uplus\mathsf{RunOps},\\
+P_o\cap C_o&=&\varnothing,\\
+P_o\cap R_o&=&\varnothing,\\
 \mathsf{CryptoCarrier}&\in&\{\mathbb{F}_q,\mathbb{G},\mathbb{Z}_q\},\\
 \pi_R&:&\mathsf{Ops}\to\operatorname{End}(R),\\
-a\in\mathsf{PlacementOps}
+a\in P_o
 &\Rightarrow&
 \pi_R(a)\in\operatorname{End}(R),\\
-a\in\mathsf{CryptoOps}\cup\mathsf{RunOps}
+a\in C_o\cup R_o
 &\Rightarrow&
 \left\{\begin{array}{l}
 \pi_R(a)=\operatorname{id}_R,\\
-a\notin\mathsf{PlacementOps}.
+a\notin P_o.
 \end{array}\right.
 \end{array}
 \]
@@ -1307,13 +1337,13 @@ K^{impl}_{\nu,x}&\subseteq&R,\\
 \begin{obligation}[Replica realization]
 \[
 \begin{array}{rcl}
-O_{\nu,x}&=&\operatorname{set}(\operatorname{RepOwner}^{\rho}_N(H_\nu(x))),\\
+O_{\nu,x}&=&\operatorname{set}(\operatorname{RepOwner}^{\rho,v_0}_N(H_\nu(x))),\\
 L_{\nu,x}&=&|O_{\nu,x}|,\\
 \mathsf{FullRed}_{\nu,x}&\Leftrightarrow&L_{\nu,x}=\min(\rho,|N|),\\
 \mathsf{Collapse}_{\nu,x}&\Leftrightarrow&L_{\nu,x}<\min(\rho,|N|),\\
-\mathsf{LiveClaim}_{\nu,x}(\rho)&\Leftrightarrow&
+\mathsf{LiveClaim}_{\nu,x}(\rho,v_0)&\Leftrightarrow&
 \mathsf{Admit}_{R}(\mathsf{FullRed}_{\nu,x},\mathsf{Evidence}_{\Gamma}),\\
-\mathsf{LiveClaim}_{\nu,x}(\rho)&\Rightarrow&
+\mathsf{LiveClaim}_{\nu,x}(\rho,v_0)&\Rightarrow&
   \operatorname{Inv}_{place}\land\mathsf{FullRed}_{\nu,x},\\
 \mathsf{ReplicaGap}_{R}&=&
   \{(\nu,x):\mathsf{Collapse}_{\nu,x}\},\\
@@ -1323,6 +1353,9 @@ L_{\nu,x}&=&|O_{\nu,x}|,\\
 \]
 When \(|N|<\rho\), fewer than \(\rho\) distinct live owners is not collapse;
 collapse means fewer owners than the live topology can realize.
+For the paper default \(v_0>0\), \(O_{\nu,x}\) is the image of the storage
+VNODE owner map.  This is a placement claim, not a full routing-VNODE or
+load-balance theorem.
 \end{obligation}
 
 \begin{definition}[Mailbox]
@@ -1819,6 +1852,9 @@ Trace replay
 E2E tests
   & signed frames, ordering, replay
   & no symbolic crypto proof \\
+Storage VNODE
+  & owner derivation, route, sync, repair
+  & no full routing-VNODE or perf theorem \\
 CI witness
   & build, test, lint, doc, package
   & no benchmark regeneration \\
@@ -1851,6 +1887,12 @@ Symbol & Artifact anchor & Admission status \\ \hline
 \(\mathsf{ChunkImpl}\)
   & \texttt{chunk.rs}
   & bounded whole-message reassembly \\
+\(\mathsf{VNodeImpl}\)
+  & \texttt{virtual\_node.rs}
+  & storage owner derivation \\
+\(\mathsf{SyncImpl}\)
+  & \texttt{storage/*.rs}
+  & additive repair, guarded cleanup \\
 \hline
 \end{tabular}
 \caption{Artifact manifest for the current paper claim ledger.  Each row names
@@ -2122,10 +2164,11 @@ Therefore PR~656 maintained-Chord rows are useful comparison coordinates, but
 they are not admitted evidence for a Rings performance theorem in this revision.
 
 \noindent\textbf{Limitations.}
-The current artifact supports finite model/test evidence and reported baseline
-coordinates.  It does not yet support claims about wide-area latency, NAT
-population behavior, adversarial churn beyond the scoped models, symbolic
-cryptographic security, or steady-state Rings lookup performance.
+The current artifact supports finite model/test evidence, storage-VNODE
+implementation evidence, and reported baseline coordinates.  It does not yet
+support claims about wide-area latency, NAT population behavior, adversarial
+churn beyond the scoped models, symbolic cryptographic security, full routing
+VNODEs, VNODE load balance, or steady-state Rings lookup performance.
 
 \section{Related Work}
 
@@ -2193,18 +2236,22 @@ implementation, not as an informal bundle of peer-to-peer mechanisms:
 \mathsf{RepCoord}&=&
 D_C^{paper}\uplus D_C^{656}\uplus D_R^{docker},\\
 \mathsf{Obligation}&=&
-\mathsf{wideAreaBenchmark}\cup\mathsf{adversarialLiveness}\\
-&&{}\cup\mathsf{fullReplicaRealization},\\
+\mathsf{wideAreaBenchmark}\\
+&&{}\cup\mathsf{adversarialLiveness}\\
+&&{}\cup\mathsf{fullReplicaRealization}\\
+&&{}\cup\mathsf{VNodeLoadBenchmark},\\
 \mathsf{NonClaim}&=&\NonClaim .
 \end{array}
 \]
 The scientific contribution is the composition law and its claim ledger:
-CorrectChord supplies the overlay safety root, \(\Omega_N\) lifts resource
-namespaces into live owners, protocol morphisms preserve placement, and runtime
-effects remain typed.  \(\mathsf{Formalized}_{paper}\) is a theorem inside the
-stated model; \(\mathsf{LedgerRule}_{paper}\) is the admission rule for paper
-claims.  Implementation evidence supports only the entries
-admitted by Table~\ref{artifact-manifest-table}; coordinates in
+CorrectChord supplies the overlay safety root, storage VNODEs instantiate the
+default \(\operatorname{StoreOwner}^{v_0}_N\) placement map, \(\Omega_N\) lifts
+resource namespaces into live owners, protocol morphisms preserve placement, and
+runtime effects remain typed.  Virtual positions are storage coordinates, not
+authority principals or transport endpoints.  \(\mathsf{Formalized}_{paper}\)
+is a theorem inside the stated model; \(\mathsf{LedgerRule}_{paper}\) is the
+admission rule for paper claims.  Implementation evidence supports only the
+entries admitted by Table~\ref{artifact-manifest-table}; coordinates in
 Table~\ref{reported-coordinate-table} are not proof evidence.  Benchmark and
 security claims outside that ledger remain obligations.
 
