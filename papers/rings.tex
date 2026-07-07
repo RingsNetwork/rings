@@ -1916,6 +1916,9 @@ Symbol & Coordinate source & Ledger status \\ \hline
 \(D_R^{docker}\)
   & reported Docker/WebRTC run
   & \(\mathsf{ReportedOnly}\cap\mathsf{Runtime}_{R}\) \\
+\(D_R^{svnode}\)
+  & PR~656 storage-VNODE load rows
+  & \(\mathsf{ReportedOnly}\cap\mathsf{Runtime}_{R}\) \\
 \hline
 \end{tabular}
 \caption{Reported coordinate ledger.  These rows calibrate comparison or runtime
@@ -1968,7 +1971,7 @@ h_C^r&=&h_C^f+1.
 \[
 \begin{array}{rcl}
 D_{external}&=&D_C^{paper},\\
-D_{reported}&=&D_C^{656}\uplus D_R^{docker},\\
+D_{reported}&=&D_C^{656}\uplus D_R^{docker}\uplus D_R^{svnode},\\
 D_{all}&=&D_{external}\uplus D_{reported},\\
 D_{admit}&=&\{d\in D_{all}:\mathsf{AdmittedEval}(d)\},\\
 \mathcal{F}_{II}&=&\{0,.10,.20,.30,.40,.50\},\\
@@ -1979,7 +1982,8 @@ D_{maint}^{656}&=&\{stable,f_{.10},f_{.20},\gamma_{.05},\gamma_{.40}\},\\
 D_{stale}^{656}&=&\{f_{.10},f_{.20},\gamma_{.05},\gamma_{.40}\},\\
 D_C^{656}&=&(D_{maint}^{656}\times\{\mathsf{maintained}\})\\
 &&{}\uplus(D_{stale}^{656}\times\{\mathsf{stale}\}),\\
-D_R^{docker}&=&\{D_R^{conv},D_R^{tx}\}.
+D_R^{docker}&=&\{D_R^{conv},D_R^{tx}\},\\
+D_R^{svnode}&=&\{\ell_v:v\in\{1,2,5,10,20\}\}.
 \end{array}
 \]
 \[
@@ -1989,15 +1993,17 @@ D_C^{656}&:&(N,r,m,L)=(1600,3,160,64),\\
 D_C^{paper}&\subset&\mathsf{ExtBase}_{C},\\
 D_C^{656}&\subset&\mathsf{ReportedOnly}\cap\mathsf{Baseline}_{C},\\
 D_R^{docker}&\subset&\mathsf{ReportedOnly}\cap\mathsf{Runtime}_{R},\\
+D_R^{svnode}&\subset&\mathsf{ReportedOnly}\cap\mathsf{Runtime}_{R},\\
 \mathsf{Baseline}_{C}\cap\mathsf{Runtime}_{R}&=&\varnothing .
 \end{array}
 \]
 Here \(D_C^{paper}\) is an external Chord-paper coordinate, \(D_C^{656}\) is a
 PR~656 Chord-only coordinate at current Rings overlay parameters, and
-\(D_R^{docker}\) is reported Rings runtime evidence.  The sets are disjoint by
-claim role: external baseline, reported Chord baseline, reported Rings runtime.
-At this paper revision, \(D_C^{656}\) is not an artifact-ledger row because the
-paper branch records the numbers but does not admit a manifest row
+\(D_R^{docker}\) and \(D_R^{svnode}\) are reported Rings runtime evidence.  The
+sets are disjoint by claim role: external baseline, reported Chord baseline,
+reported Rings runtime.
+At this paper revision, PR~656 coordinates are not artifact-ledger rows because
+the paper branch records the numbers but does not admit a manifest row
 \((d,\mathsf{Ev}_{\Gamma},a,\sigma)\) with regeneration metadata.
 Unless
 \(\mathsf{AdmittedEval}(d)\) holds, a tuple is a reported coordinate only; it is
@@ -2080,6 +2086,39 @@ Thus stale rows explain sensitivity, not the maintained Chord baseline:
 \end{array}
 \]
 
+Table~\ref{storage-vnode-load-table} records the PR~656 storage-VNODE supplement
+after PR~660.  It uses the runtime \(\mathsf{StorageVirtualNodes}\) API for
+storage-owner selection over 160-bit Rings DIDs:
+\[
+\begin{array}{rcl}
+N_R,K,m,net&=&(10^4,10^6,160,1619),\\
+\ell_v&=&(N_R,K,m,net,v),\\
+\mathsf{scope}(\ell_v)&=&\mathsf{storage\_owner\_selection},\\
+\mathsf{routingVNode}(\ell_v)&=&\mathsf{false}.
+\end{array}
+\]
+
+\begin{table}[htbp]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{2pt}
+\begin{tabular}{c|c|c|c|c|c}
+\hline
+$v$ & $|V|$ & mean & p1 & p99 & max \\ \hline
+1 & 10000 & 100.0 & 0 & 457 & 1164 \\
+2 & 20000 & 100.0 & 6 & 327 & 695 \\
+5 & 50000 & 100.0 & 23 & 236 & 392 \\
+10 & 100000 & 100.0 & 38 & 194 & 263 \\
+20 & 200000 & 100.0 & 52 & 165 & 228 \\
+\hline
+\end{tabular}
+\caption{Reported storage-VNODE load-balance coordinates from PR~656
+(\texttt{chord-paper-sim-2026-07-08.jsonl}, commit \texttt{aa89fc4}).
+Rows use PR~660 runtime storage virtual-node derivation.  They are storage
+owner-placement data, not routing/finger VNODE data and not WebRTC execution.}
+\label{storage-vnode-load-table}
+\end{table}
+
 \begin{obligation}[Benchmark report]
 \[
 \begin{aligned}
@@ -2087,6 +2126,7 @@ Thus stale rows explain sensitivity, not the maintained Chord baseline:
   (&\mathsf{Baseline}_{C}^{paper},
     \mathsf{Baseline}_{C}^{656},\\
    &\mathsf{Runtime}_{R}^{docker},
+    \mathsf{Runtime}_{R}^{svnode},\\
     \mathsf{Prov},\mathsf{Limit}).
 \end{aligned}
 \]
@@ -2094,7 +2134,9 @@ Thus stale rows explain sensitivity, not the maintained Chord baseline:
 \begin{array}{rcl}
 \mathsf{ReportCmp}_{lookup}&=&B_C(\eta;D_C^{paper}\uplus D_C^{656}),\\
 \mathsf{Measure}_{runtime}&=&B_R^{docker}(\eta_R;D_R^{docker}),\\
-\mathsf{ReportCmp}_{lookup}&\not\equiv&\mathsf{Measure}_{runtime}.
+\mathsf{Measure}_{svnode}&=&B_R^{svnode}(\ell;D_R^{svnode}),\\
+\mathsf{ReportCmp}_{lookup}&\not\equiv&\mathsf{Measure}_{runtime},\\
+\mathsf{ReportCmp}_{lookup}&\not\equiv&\mathsf{Measure}_{svnode}.
 \end{array}
 \]
 A Rings performance claim must measure Rings under the reported build; a Chord
@@ -2159,16 +2201,18 @@ Chord forwarding hops or timeout rates.
 \end{array}
 \]
 No CI command currently regenerates Table~\ref{chord-paper-data-table},
-Table~\ref{rings-param-chord-data-table}, \(D_R^{conv}\), or \(D_R^{tx}\).
-Therefore PR~656 maintained-Chord rows are useful comparison coordinates, but
-they are not admitted evidence for a Rings performance theorem in this revision.
+Table~\ref{rings-param-chord-data-table}, Table~\ref{storage-vnode-load-table},
+\(D_R^{conv}\), or \(D_R^{tx}\).  Therefore PR~656 maintained-Chord and
+storage-VNODE rows are useful reported coordinates, but they are not admitted
+evidence for a Rings performance theorem in this revision.
 
 \noindent\textbf{Limitations.}
 The current artifact supports finite model/test evidence, storage-VNODE
-implementation evidence, and reported baseline coordinates.  It does not yet
-support claims about wide-area latency, NAT population behavior, adversarial
-churn beyond the scoped models, symbolic cryptographic security, full routing
-VNODEs, VNODE load balance, or steady-state Rings lookup performance.
+implementation evidence, reported storage-VNODE load-balance coordinates, and
+reported baseline coordinates.  It does not yet support claims about wide-area
+latency, NAT population behavior, adversarial churn beyond the scoped models,
+symbolic cryptographic security, full routing VNODEs, storage-VNODE runtime
+performance, or steady-state Rings lookup performance.
 
 \section{Related Work}
 
@@ -2234,12 +2278,13 @@ implementation, not as an informal bundle of peer-to-peer mechanisms:
 \{a:a\in\mathsf{Artifact}_{R}\\
 &&{}\land\mathsf{AdmittedArtifact}(a)\},\\
 \mathsf{RepCoord}&=&
-D_C^{paper}\uplus D_C^{656}\uplus D_R^{docker},\\
+D_C^{paper}\uplus D_C^{656}\uplus D_R^{docker}\\
+&&{}\uplus D_R^{svnode},\\
 \mathsf{Obligation}&=&
 \mathsf{wideAreaBenchmark}\\
 &&{}\cup\mathsf{adversarialLiveness}\\
 &&{}\cup\mathsf{fullReplicaRealization}\\
-&&{}\cup\mathsf{VNodeLoadBenchmark},\\
+&&{}\cup\mathsf{AdmittedStorageVNodeLoad},\\
 \mathsf{NonClaim}&=&\NonClaim .
 \end{array}
 \]
