@@ -221,9 +221,10 @@ G_{id}\land G_{own}\land G_{io}\land G_{eff}\\
 &=&
 \mathsf{Spec}\cup\mathsf{Impl}
 \cup\mathsf{Evidence}_{\Gamma}\cup\mathsf{Obligation},\\
+\mathsf{Ev}_{\Gamma}&=&\mathsf{Evidence}_{\Gamma},\\
 \mathsf{Admit}(c)
-&\Rightarrow&
-c\in\mathsf{ClaimKind}.
+&\Leftrightarrow&
+\exists k\in\mathsf{ClaimKind}.\ \mathsf{Admit}_{R}(c,k).
 \end{array}
 \]
 \end{definition}
@@ -251,6 +252,30 @@ c\in\mathsf{ClaimKind}.
 \end{aligned}
 \]
 \end{definition}
+
+\begin{table}[htbp]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{2.5pt}
+\begin{tabular}{p{1.8cm}|p{1.6cm}|p{3.4cm}}
+\hline
+Claim family & Ledger class & Carrier in this paper \\ \hline
+\(\Omega_N,\mathsf{PMor}\) & \(\mathsf{Spec}\) & Definitions and Theorem~\ref{thm:carrier-separated-ownership} \\
+Chord state & \(\mathsf{Spec}\cup\mathsf{Ev}_{\Gamma}\) & Algorithms~\ref{alg:join}--\ref{alg:stabilize}; finite checks \\
+DID/session & \(\mathsf{Impl}\) & signed session and context predicates \\
+Affine storage & \(\mathsf{Impl}\cup\mathsf{Ev}_{\Gamma}\) & replica-key invariant and storage tests \\
+E2E frames & \(\mathsf{Impl}\cup\mathsf{Ev}_{\Gamma}\) & signed frame and receiver policy \\
+Chunking & \(\mathsf{Impl}\cup\mathsf{Ev}_{\Gamma}\) & Algorithm~\ref{alg:e2e_chunking}; bounded reassembly \\
+Deferred APIs & \(\mathsf{Spec}\cup\mathsf{Obligation}\) & mailbox, hidden descriptor, secret sharing \\
+Wit/rank/sec. & \(\mathsf{Spec}\cup\mathsf{Obligation}\) & policy predicates, no global security theorem \\
+Benchmark rows & \(\mathsf{ReportedOnly}\) & baseline/runtime coordinates, not admitted eval \\
+\hline
+\end{tabular}
+\caption{Claim-ledger instantiation.  Rows inside \(\mathsf{ClaimKind}\) may be
+admitted at the listed classes; \(\mathsf{ReportedOnly}\) rows are coordinates,
+not claim evidence.}
+\label{claim-ledger-table}
+\end{table}
 
 \begin{definition}[Contribution boundary]
 \[
@@ -311,7 +336,8 @@ M&=&2^{160},\\
 R&=&\mathbb{Z}/M\mathbb{Z},\\
 \delta_a(x)&=&(x-a)\bmod M,\\
 (a,b]_R&=&\{x\in R:0<\delta_a(x)\leq\delta_a(b)\},\\
-\mathsf{RouteOps}_R&=&\{0,+,-,\delta_a,(\_,\_]_R\},\\
+(a,b)_R&=&\{x\in R:0<\delta_a(x)<\delta_a(b)\},\\
+\mathsf{RouteOps}_R&=&\{0,+,-,\delta_a,(\_,\_]_R,(\_,\_)_R\},\\
 \mathsf{Mult}_R&\notin&\mathsf{RouteOps}_R.
 \end{array}
 \]
@@ -461,6 +487,8 @@ Effects & writer monad over action lists \\
 \caption{Carrier boundaries in the Rings model}
 \label{carrier-table}
 \end{table}
+Table~\ref{carrier-table} is the carrier-level summary used by the separation
+constraint; it is not an additional security or performance claim.
 
 \section{Architecture As Interfaces}
 
@@ -807,6 +835,21 @@ Thus non-claims are excluded by the admission judgment; they are not proved
 unreachable by Theorem~\ref{thm:carrier-separated-ownership}.
 \end{constraint}
 
+\begin{proposition}[Claim-ledger soundness]
+\[
+\begin{array}{rcl}
+\mathsf{Admit}_{R}(c,k)&\Rightarrow&k\in\mathsf{ClaimKind},\\
+c\in\NonClaim&\Rightarrow&\neg\mathsf{Admit}(c),\\
+\mathsf{Admit}_{R}(c,\mathsf{Evidence}_{\Gamma})
+&\Rightarrow&\mathsf{finite}(\Gamma)\land\mathsf{declared}(\Gamma).
+\end{array}
+\]
+\end{proposition}
+\begin{proof}
+Immediate from Constraint~\ref{constraint:claim-ledger} and
+Table~\ref{claim-ledger-table}.
+\end{proof}
+
 \section{Chord Overlay}
 
 \[
@@ -934,6 +977,8 @@ Here \(\mathsf{ClosestPreceding}_S(n,k)=\bot\) when the displayed set is empty.
       \caption{Chord finger targets from node 1 in a 16-node ring}
       \label{lookup-figure}
 \end{figure}
+Figure~\ref{lookup-figure} illustrates finger targets only; lookup correctness is
+the interval invariant below.
 
 \begin{algorithm}[h]
 \caption{DHT Stabilization}
@@ -972,6 +1017,8 @@ Here \(\mathsf{ClosestPreceding}_S(n,k)=\bot\) when the displayed set is empty.
 \EndProcedure
 \end{algorithmic}
 \end{algorithm}
+Algorithm~\ref{alg:biasdid} fixes the notation for the biased circular order
+used by placement comparisons.
 
 \begin{invariant}[Ring fixpoint]
 \[
@@ -1109,10 +1156,14 @@ O_{\nu,x}&=&\operatorname{set}(\operatorname{RepOwner}^{\rho}_N(H_\nu(x))),\\
 L_{\nu,x}&=&|O_{\nu,x}|,\\
 \mathsf{FullRed}_{\nu,x}&\Leftrightarrow&L_{\nu,x}=\min(\rho,|N|),\\
 \mathsf{Collapse}_{\nu,x}&\Leftrightarrow&L_{\nu,x}<\min(\rho,|N|),\\
+\mathsf{LiveClaim}_{\nu,x}(\rho)&\Leftrightarrow&
+\mathsf{Admit}_{R}(\mathsf{FullRed}_{\nu,x},\mathsf{Evidence}_{\Gamma}),\\
 \mathsf{LiveClaim}_{\nu,x}(\rho)&\Rightarrow&
   \operatorname{Inv}_{place}\land\mathsf{FullRed}_{\nu,x},\\
-\mathsf{Report}_{Rings}&\ni&
-  |\{(\nu,x):\mathsf{Collapse}_{\nu,x}\}|.
+\mathsf{ReplicaGap}_{R}&=&
+  \{(\nu,x):\mathsf{Collapse}_{\nu,x}\},\\
+\mathsf{ReplicaGap}_{R}\neq\varnothing&\Rightarrow&
+\mathsf{fullReplicaRealization}\in\mathsf{Obligation}.
 \end{array}
 \]
 When \(|N|<\rho\), fewer than \(\rho\) distinct live owners is not collapse;
@@ -1120,6 +1171,9 @@ collapse means fewer owners than the live topology can realize.
 \end{obligation}
 
 \begin{definition}[Mailbox]
+\[
+  \mathsf{Class}(\mathsf{Mailbox})\subseteq\{\mathsf{Spec},\mathsf{Obligation}\}.
+\]
 \[
 \begin{array}{rcl}
 mbox(d,e)&=&H_M(\mathtt{rings.mailbox}\Vert d\Vert e),\\
@@ -1129,6 +1183,9 @@ entry_M&=&(\eta,exp,proof_s,dst,cipher).
 \end{definition}
 
 \begin{definition}[Hidden service descriptor]
+\[
+  \mathsf{Class}(\mathsf{HiddenDesc})\subseteq\{\mathsf{Spec},\mathsf{Obligation}\}.
+\]
 \[
 \begin{array}{rcl}
 h&=&(\nu,\rho,Intro,Relay,\\
@@ -1141,6 +1198,9 @@ h&=&(\nu,\rho,Intro,Relay,\\
 \end{definition}
 
 \begin{definition}[Subring]
+\[
+  \mathsf{Class}(\mathsf{Subring})=\mathsf{Impl}.
+\]
 \[
   \mathcal{S}_u=(u,N_u,\operatorname{owner}_{N_u},
   \operatorname{Succ}^{r_u}_{N_u},E_u)
@@ -1217,30 +1277,43 @@ part of the security boundary rather than as optional metadata.
 \]
 \[
 \begin{array}{rcl}
+\mathsf{pending}&:&\mathbb{N}\rightharpoonup\mathsf{Frame},\\
 \mathsf{NoFuture}_{\Delta}(seq)&\Leftrightarrow&
-  \neg\exists p\in pending.\;p>seq,\\
-\mathsf{Dup}_{\Delta}(seq)&\Leftrightarrow&
-  seq\in seen\cup pending,\\
-\mathsf{New}_{\Delta}(seq,last)&\Leftrightarrow&
-  seq\notin seen\cup pending\\
+  \neg\exists j\in\operatorname{dom}(pending).\;j>seq,\\
+\mathsf{Dup}_{\Delta}(f)&\Leftrightarrow&
+  seq(f)\in seen\\
+&&{}\lor pending(seq(f))=f,\\
+\mathsf{Conflict}_{\Delta}(f)&\Leftrightarrow&
+  seq(f)\in\operatorname{dom}(pending)\\
+&&{}\land pending(seq(f))\neq f,\\
+\mathsf{New}_{\Delta}(f)&\Leftrightarrow&
+  seq(f)\notin seen\cup\operatorname{dom}(pending)\\
 &&{}\land\neg closed\\
-&&{}\land seq-next\leq w\\
-&&{}\land(final=\bot\lor seq\leq final)\\
-&&{}\land(last\Rightarrow\mathsf{NoFuture}_{\Delta}(seq)),\\
+&&{}\land seq(f)-next\leq w\\
+&&{}\land(final=\bot\lor seq(f)\leq final)\\
+&&{}\land(last(f)\Rightarrow\mathsf{NoFuture}_{\Delta}(seq(f))),\\
 \operatorname{Accept}_{\Delta}(f)&\Leftrightarrow&
-  \operatorname{FrameValid}(f)
-  \land\mathsf{New}_{\Delta}(seq,last),\\
+  \operatorname{FrameValid}(f)\\
+&&{}\land\mathsf{New}_{\Delta}(f),\\
+\operatorname{Reject}_{\Delta}(f)&\Leftarrow&
+  \operatorname{FrameValid}(f)\\
+&&{}\land\mathsf{Conflict}_{\Delta}(f),\\
 \operatorname{DropDup}_{\Delta}(f)&\Leftrightarrow&
-  \operatorname{FrameValid}(f)
-  \land\mathsf{Dup}_{\Delta}(seq)
-  \land\mathsf{emit}=\epsilon.
+  \operatorname{FrameValid}(f)\\
+&&{}\land\mathsf{Dup}_{\Delta}(f)\\
+&&{}\land\mathsf{emit}=\epsilon.
 \end{array}
 \]
-Here \(w\) is receiver policy, not a signed wire field.  A duplicate frame may
-be valid, but it is not accepted as new input.
+Here \(w\) is receiver policy, not a signed wire field.  A byte-identical
+duplicate may be valid and dropped; a same-sequence different pending frame is
+rejected as equivocation.
 \end{definition}
 
 \begin{definition}[Secret sharing placement]
+\[
+  \mathsf{Class}(\mathsf{SecretSharing})
+  \subseteq\{\mathsf{Spec},\mathsf{Obligation}\}.
+\]
 \[
 \begin{array}{rcl}
 P&\in&\mathbb{F}_q[X],\\
@@ -1284,6 +1357,8 @@ The split vocabulary follows MSRP~\cite{RFC4975}.
 \EndProcedure
 \end{algorithmic}
 \end{algorithm}
+Algorithm~\ref{alg:e2e_chunking} gives the bounded split/reassembly shape; it
+does not claim MSRP interruption or interleaving semantics.
 
 \begin{invariant}[Chunk reassembly]
 \[
@@ -1300,6 +1375,10 @@ The split vocabulary follows MSRP~\cite{RFC4975}.
 \section{Ordering, Ranking, and Security}
 
 \begin{definition}[Sidecar witness]
+\[
+  \mathsf{Class}(\mathsf{SidecarWitness})
+  \subseteq\{\mathsf{Spec},\mathsf{Obligation}\}.
+\]
 \[
   w=(domain,root,height,time,finality).
 \]
@@ -1329,6 +1408,9 @@ The split vocabulary follows MSRP~\cite{RFC4975}.
 \end{definition}
 
 \begin{definition}[Ranking event]
+\[
+  \mathsf{Class}(\mathsf{Ranking})\subseteq\{\mathsf{Spec},\mathsf{Obligation}\}.
+\]
 \[
 \begin{aligned}
   q=(&subject,rater,behavior,\\
@@ -1378,6 +1460,8 @@ Privacy & route or relay observation & relay policy only; no anonymity theorem \
 \caption{Threat predicates and claim boundaries}
 \label{security-table}
 \end{table}
+Table~\ref{security-table} fixes the negative boundary: listed attacks are not
+discharged by the overlay theorem.
 
 \begin{definition}[Security and policy boundary]
 \[
@@ -1448,6 +1532,8 @@ seen'&=&seen\cup\{\operatorname{fid}(f)\},\\
 \mathsf{Artifact}_{R}
 &=\mathsf{FiniteModel}\cup\mathsf{TraceReplay}
 \cup\mathsf{Tests}_{CI},\\
+\mathsf{Manifest}_{R}
+&=\mathsf{Path}\times\mathsf{Scope}\times\mathsf{Status},\\
 \mathsf{PerfClaim}_{R}&\in\mathsf{Obligation}.
 \end{aligned}
 \]
@@ -1455,7 +1541,9 @@ This section separates executable artifact evidence from reported coordinates.
 The repository contains finite-scope evidence for overlay, storage, and
 message-flow obligations.  It does not yet contain a wide-area Rings benchmark,
 committed benchmark-table regeneration data, or committed seeds sufficient to
-regenerate the tables below.
+regenerate the tables below.  Tables~\ref{verification-table} and
+\ref{artifact-manifest-table} are therefore the artifact ledger, not a
+performance proof.
 \[
 \begin{array}{rcl}
 \mathsf{ProvFull}(d)&\Leftrightarrow&
@@ -1578,6 +1666,38 @@ implementation evidence; none is a wide-area Rings lookup benchmark.}
 \label{verification-table}
 \end{table}
 
+\begin{table}[htbp]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{2pt}
+\begin{tabular}{p{1.55cm}|p{2.25cm}|p{3.05cm}}
+\hline
+Symbol & Artifact anchor & Admission status \\ \hline
+\(\mathsf{FiniteModel}\)
+  & \texttt{dht\_stateright.rs}
+  & admitted only for finite \(\Gamma\) \\
+\(\mathsf{TraceReplay}\)
+  & \texttt{trace\_replay.rs}
+  & deterministic schedules \\
+\(\mathsf{Tests}_{CI}\)
+  & \texttt{qaci.yml}
+  & build/test witness, no benchmark regen \\
+\(\mathsf{FrameImpl}\)
+  & \texttt{message/e2e.rs}
+  & signed stream-frame behavior \\
+\(\mathsf{ChunkImpl}\)
+  & \texttt{chunk.rs}
+  & bounded whole-message reassembly \\
+\(\begin{array}{c}D_C^{656}\\D_R^{docker}\end{array}\)
+  & PR-reported coordinates
+  & \(\mathsf{ReportedOnly}\) until full provenance \\
+\hline
+\end{tabular}
+\caption{Artifact manifest for the current paper claim ledger.  Each row names
+the repository or PR anchor that can support an admitted finite-scope claim.}
+\label{artifact-manifest-table}
+\end{table}
+
 \begin{definition}[Latency decomposition]
 \[
   T_{total}
@@ -1652,8 +1772,9 @@ PR~656 Chord-only coordinate at Rings' current overlay parameters, and
 claim role: external baseline, reported Chord baseline, reported Rings runtime.
 Unless
 \(\mathsf{AdmittedEval}(d)\) holds, a tuple is a reported coordinate only; it is
-not used to prove \(\mathsf{Main}_{Rings}\).  Metrics are not pooled unless a
-Rings lookup benchmark with the same workload key \(\eta\) is added.
+not used to prove \(\mathsf{Core}_{Rings}\) or any Rings performance claim.
+Metrics are not pooled unless a Rings lookup benchmark with the same workload
+key \(\eta\) is added.
 \end{definition}
 
 Table~\ref{chord-paper-data-table} records the Chord-paper baseline coordinates
@@ -1865,7 +1986,8 @@ WebRTCMeasurement}.
 
 \section{Conclusion}
 
-Rings should be read as a bounded theorem about an implemented algebraic object,
+Rings should be read as a bounded theorem plus a claim ledger for an implemented
+algebraic object,
 not as an informal bundle of peer-to-peer mechanisms:
 
 \[
@@ -1876,11 +1998,10 @@ not as an informal bundle of peer-to-peer mechanisms:
 \[
 \begin{aligned}
 \mathsf{Established}
-&=\mathsf{OwnerFunctor}\land\mathsf{CarrierSep}\\
-&\quad{}\land\mathsf{TypedEffects}\land\mathsf{ImplMap},\\
+&=\mathsf{Core}_{Rings}\land\mathsf{LedgerDisc}_{Rings},\\
 \mathsf{ScopedEvidence}
-&=\mathsf{Explore}_{\Gamma}\land\mathsf{traceReplay}\\
-&\quad{}\land\mathsf{declared}(\Gamma),\\
+&=\mathsf{Manifest}_{R}\cap\mathsf{Artifact}_{R}\\
+&\quad{}\cap\{d:\mathsf{AdmittedEval}(d)\},\\
 \mathsf{Obligation}
 &=\mathsf{wideAreaBenchmark}
 \cup\mathsf{adversarialLiveness}\\
@@ -1891,8 +2012,9 @@ not as an informal bundle of peer-to-peer mechanisms:
 The scientific contribution is the composition law and its claim ledger:
 CorrectChord supplies the overlay safety root, \(\Omega_N\) lifts resource
 namespaces into live owners, protocol morphisms preserve placement, and runtime
-effects remain typed.  The implementation evidence supports those claims only
-within the declared finite scopes and reported measurements.
+effects remain typed.  Implementation evidence supports only the entries
+admitted by Table~\ref{artifact-manifest-table}; benchmark and security claims
+outside that ledger remain obligations.
 
 \bibliographystyle{IEEEtran}
 \bibliography{./cites}
