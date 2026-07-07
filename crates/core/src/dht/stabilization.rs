@@ -4,12 +4,10 @@ use std::sync::Arc;
 
 use rings_transport::core::transport::WebrtcConnectionState;
 
-use crate::dht::entry::PlacedEntry;
 use crate::dht::successor::SuccessorReader;
 use crate::dht::types::ChordStorageRepair;
 use crate::dht::types::CorrectChord;
 use crate::dht::Chord;
-use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
@@ -75,42 +73,10 @@ impl Stabilizer {
         Ok(())
     }
 
-    fn collect_storage_repair_actions(
-        act: PeerRingAction,
-        out: &mut Vec<(Did, Vec<PlacedEntry>)>,
-    ) -> Result<()> {
-        match act {
-            PeerRingAction::None => Ok(()),
-            PeerRingAction::RemoteAction(
-                destination,
-                PeerRingRemoteAction::SyncEntriesWithSuccessor(data),
-            ) => {
-                out.push((destination, data));
-                Ok(())
-            }
-            PeerRingAction::MultiActions(actions) => {
-                for action in actions {
-                    Self::collect_storage_repair_actions(action, out)?;
-                }
-                Ok(())
-            }
-            action => {
-                tracing::error!("Invalid storage repair action: {action:?}");
-                Err(crate::error::Error::unexpected_peer_ring_action(action))
-            }
-        }
-    }
-
     async fn handle_storage_repair_action(&self, act: PeerRingAction) -> Result<()> {
-        let mut messages = Vec::new();
-        Self::collect_storage_repair_actions(act, &mut messages)?;
-        for (destination, data) in messages {
-            self.transport
-                .send_message(
-                    Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor { data }),
-                    destination,
-                )
-                .await?;
+        for delivery in act.storage_sync_deliveries()? {
+            let msg = SyncEntriesWithSuccessor::from_delivery(delivery);
+            self.transport.send_storage_sync(msg).await?;
         }
         Ok(())
     }

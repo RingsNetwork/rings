@@ -187,7 +187,7 @@ impl Processor {
 
         let descriptors = Self::online_node_descriptors_from_entry(&entry)
             .into_iter()
-            .filter(|descriptor| descriptor.matches_network(self.swarm.network_id()));
+            .filter(|descriptor| descriptor.matches_dht_protocol(self.swarm.dht_protocol_mode()));
 
         Ok(OnlineNodeDescriptor::latest_valid_by_did(
             descriptors,

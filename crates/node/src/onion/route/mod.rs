@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use rings_core::dht::Did;
 use rings_core::ecc::PublicKey;
 use rings_core::measure::PeerQuality;
+use rings_core::message::DhtProtocolMode;
 
 use super::circuit::MAX_ONION_CIRCUIT_HOPS;
 use super::OnionExitDescriptor;
@@ -222,7 +223,7 @@ impl OnionRouteCandidates {
 /// in a descriptor from the exit registry.
 pub fn select_onion_route(
     local: Did,
-    network_id: u32,
+    dht_protocol: DhtProtocolMode,
     now_ms: u128,
     request: &OnionRouteRequest,
     online_nodes: impl IntoIterator<Item = OnlineNodeDescriptor>,
@@ -230,13 +231,18 @@ pub fn select_onion_route(
     qualities: impl IntoIterator<Item = (Did, PeerQuality)>,
 ) -> Result<OnionRoute> {
     let candidates = OnionRouteCandidates {
-        relays: eligible_relay_dids(network_id, now_ms, local, online_nodes)
+        relays: eligible_relay_dids(dht_protocol, now_ms, local, online_nodes)
             .into_iter()
             .collect(),
-        exits: eligible_exits(network_id, now_ms, request.service_name(), exits)
-            .into_iter()
-            .filter(|descriptor| descriptor.did != local)
-            .collect(),
+        exits: eligible_exits(
+            dht_protocol.network_id,
+            now_ms,
+            request.service_name(),
+            exits,
+        )
+        .into_iter()
+        .filter(|descriptor| descriptor.did != local)
+        .collect(),
     };
     select_onion_route_from_candidates(
         request,
@@ -358,14 +364,14 @@ fn eligible_exits(
 }
 
 fn eligible_relay_dids(
-    network_id: u32,
+    dht_protocol: DhtProtocolMode,
     now_ms: u128,
     local: Did,
     online_nodes: impl IntoIterator<Item = OnlineNodeDescriptor>,
 ) -> Vec<OnionRouteHop> {
     OnlineNodeDescriptor::latest_valid_by_did(online_nodes, now_ms, false)
         .into_iter()
-        .filter(|descriptor| descriptor.matches_network(network_id))
+        .filter(|descriptor| descriptor.matches_dht_protocol(dht_protocol))
         .filter(has_onion_relay_capability)
         .map(|descriptor| OnionRouteHop::new(descriptor.did, descriptor.session_public_key))
         .filter(|hop| hop.did != local)

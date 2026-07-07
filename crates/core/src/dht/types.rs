@@ -73,13 +73,17 @@ pub trait ChordStorage<Action, const REDUNDANT: u16>: Chord<Action> {
     async fn entry_operate(&self, op: EntryOperation) -> Result<Action>;
 }
 
-/// ChordStorageSync defines entry hand-off when successor ownership changes.
+/// ChordStorageSync defines storage hand-off triggered by ownership changes.
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 pub trait ChordStorageSync<Action>: Chord<Action> {
     /// When the successor of a node is updated, it needs to check if there are
     /// `Entry`s that are no longer between current node and `new_successor`,
     /// and copy them to the new successor.
+    ///
+    /// Mode law: with storage virtual nodes enabled, `new_successor` is only the
+    /// stabilization trigger. The copy target is the current
+    /// `storage_owner(k, view, cfg)` relation, not necessarily `new_successor`.
     ///
     /// Post: this only delivers entry joins. Local cleanup is performed by
     /// [`Self::acknowledge_synced_entries`] after the successor reports durable
@@ -114,7 +118,12 @@ pub trait ChordStorageRepair<Action>: Chord<Action> {
     /// Post: `misses.is_empty()` is a no-op. Non-empty repair emits copy-only
     /// actions for exactly the observed misses and performs no additional
     /// placement probing.
-    async fn read_repair_entry(&self, entry: Entry, misses: &[PlacementMiss]) -> Result<Action>;
+    async fn read_repair_entry(
+        &self,
+        entry: Entry,
+        misses: &[PlacementMiss],
+        redundancy: u16,
+    ) -> Result<Action>;
 }
 
 /// ChordStorageCache defines the basic API for getting and setting DHT cache storage.

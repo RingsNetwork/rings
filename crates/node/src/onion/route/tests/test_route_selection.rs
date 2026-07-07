@@ -3,9 +3,11 @@ use std::collections::VecDeque;
 use rings_core::ecc::SecretKey;
 use rings_core::error::Result as CoreResult;
 use rings_core::measure::PeerQuality;
+use rings_core::message::DhtProtocolMode;
 use rings_core::session::SessionSk;
 
 use super::super::*;
+use crate::consts::DATA_REDUNDANT;
 use crate::error::Error;
 use crate::error::Result;
 use crate::onion::OnionExitDescriptor;
@@ -79,6 +81,8 @@ fn online_node_at_with_capabilities(
             session_public_key: session_sk.session_public_key(),
             node_type: OnlineNodeType::Native,
             network_id: 1,
+            storage_redundancy: DATA_REDUNDANT,
+            dht_virtual_nodes: 0,
             capabilities,
             endpoint_hint: None,
             started_at_ms: 1,
@@ -100,6 +104,10 @@ fn route_request(
     allow_short_paths: bool,
 ) -> Result<OnionRouteRequest> {
     OnionRouteRequest::new(service, hop_count, allow_short_paths)
+}
+
+fn test_dht_protocol() -> DhtProtocolMode {
+    DhtProtocolMode::new(1, DATA_REDUNDANT, 0)
 }
 
 struct FixedEntropy {
@@ -134,7 +142,7 @@ fn route_builder_uses_presence_relays_and_exit_registry() -> Result<()> {
 
     let route = select_onion_route(
         local,
-        1,
+        test_dht_protocol(),
         50,
         &request,
         online,
@@ -155,7 +163,15 @@ fn route_builder_canonicalizes_service_before_constructing_route() -> Result<()>
     let exit = signed_exit_at(20, 100)?;
     let request = route_request("WeB", 1, false)?;
 
-    let route = select_onion_route(local, 1, 50, &request, Vec::new(), vec![exit], Vec::new())?;
+    let route = select_onion_route(
+        local,
+        test_dht_protocol(),
+        50,
+        &request,
+        Vec::new(),
+        vec![exit],
+        Vec::new(),
+    )?;
 
     assert_eq!(route.service(), "web");
     Ok(())
@@ -170,7 +186,7 @@ fn route_builder_rejects_too_short_production_route() -> Result<()> {
 
     let result = select_onion_route(
         local,
-        1,
+        test_dht_protocol(),
         50,
         &request,
         vec![online_node_at(&relay, 20, 100).map_err(Error::CoreError)?],
@@ -196,7 +212,7 @@ fn route_builder_rejects_nodes_without_relay_capability() -> Result<()> {
 
     let result = select_onion_route(
         local,
-        1,
+        test_dht_protocol(),
         50,
         &request,
         vec![online_node_at_with_capabilities(&relay, 20, 100, vec![]).map_err(Error::CoreError)?],

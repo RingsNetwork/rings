@@ -13,12 +13,45 @@ use crate::dht::entry::PlacedEntryOperation;
 use crate::dht::entry::PlacementMiss;
 use crate::dht::entry::SyncedEntryAck;
 use crate::dht::Did;
+use crate::dht::StorageSyncDelivery;
+use crate::dht::StorageSyncDestination;
+use crate::dht::StorageSyncPurpose;
 use crate::dht::TopoInfo;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::e2e::E2eHandshakeRequest;
 use crate::message::e2e::E2eHandshakeResponse;
 use crate::message::e2e::E2eStreamFrame;
+
+/// DHT protocol mode that must match before two peers join the same DHT.
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, Eq, PartialEq)]
+pub struct DhtProtocolMode {
+    /// The network_id is used to distinguish different networks.
+    /// Use 1 for main network.
+    pub network_id: u32,
+    /// Storage redundancy required by this DHT protocol mode.
+    pub storage_redundancy: u16,
+    /// Storage virtual-node positions required by this DHT protocol mode.
+    pub dht_virtual_nodes: u16,
+}
+
+impl DhtProtocolMode {
+    /// Build a DHT protocol mode descriptor.
+    pub const fn new(network_id: u32, storage_redundancy: u16, dht_virtual_nodes: u16) -> Self {
+        Self {
+            network_id,
+            storage_redundancy,
+            dht_virtual_nodes,
+        }
+    }
+
+    /// Return whether both descriptors name the same DHT protocol.
+    pub const fn matches(self, expected: Self) -> bool {
+        self.network_id == expected.network_id
+            && self.storage_redundancy == expected.storage_redundancy
+            && self.dht_virtual_nodes == expected.dht_virtual_nodes
+    }
+}
 
 /// The `Then` trait is used to associate a type with a "then" scenario.
 pub trait Then {
@@ -34,6 +67,26 @@ pub struct ConnectNodeSend {
     /// The network_id is used to distinguish different networks.
     /// Use 1 for main network.
     pub network_id: u32,
+    /// Storage redundancy required by this DHT protocol mode.
+    pub storage_redundancy: u16,
+    /// Storage virtual-node positions required by this DHT protocol mode.
+    pub dht_virtual_nodes: u16,
+}
+
+impl ConnectNodeSend {
+    /// Return the DHT protocol mode advertised by this offer.
+    pub const fn dht_protocol_mode(&self) -> DhtProtocolMode {
+        DhtProtocolMode::new(
+            self.network_id,
+            self.storage_redundancy,
+            self.dht_virtual_nodes,
+        )
+    }
+
+    /// Return whether this offer belongs to the receiver's DHT protocol mode.
+    pub const fn matches_dht_protocol(&self, expected: DhtProtocolMode) -> bool {
+        self.dht_protocol_mode().matches(expected)
+    }
 }
 
 /// MessageType report to origin with own transport_uuid and handshake_info.
@@ -41,6 +94,29 @@ pub struct ConnectNodeSend {
 pub struct ConnectNodeReport {
     /// sdp answer of webrtc
     pub sdp: String,
+    /// The network_id is used to distinguish different networks.
+    /// Use 1 for main network.
+    pub network_id: u32,
+    /// Storage redundancy required by this DHT protocol mode.
+    pub storage_redundancy: u16,
+    /// Storage virtual-node positions required by this DHT protocol mode.
+    pub dht_virtual_nodes: u16,
+}
+
+impl ConnectNodeReport {
+    /// Return the DHT protocol mode advertised by this answer.
+    pub const fn dht_protocol_mode(&self) -> DhtProtocolMode {
+        DhtProtocolMode::new(
+            self.network_id,
+            self.storage_redundancy,
+            self.dht_virtual_nodes,
+        )
+    }
+
+    /// Return whether this answer belongs to the initiator's DHT protocol mode.
+    pub const fn matches_dht_protocol(&self, expected: DhtProtocolMode) -> bool {
+        self.dht_protocol_mode().matches(expected)
+    }
 }
 
 /// MessageType use to find successor in a chord ring.
@@ -188,13 +264,17 @@ impl FoundEntry {
     /// Returns the single found entry carried by this response.
     ///
     /// Post: `Ok(None)` iff this is a miss-only response.
-    /// Post: `Ok(Some(_))` iff this response carries exactly one entry.
+    /// Post: `Ok(Some(_))` iff this response carries exactly one entry whose DID
+    /// equals [`Self::resource`].
     /// Error: more than one entry violates the `SearchEntry -> FoundEntry`
     /// single-resource response model.
     pub(crate) fn single_entry(&self) -> Result<Option<&Entry>> {
         match self.data.as_slice() {
             [] => Ok(None),
-            [entry] => Ok(Some(entry)),
+            [entry] if entry.did == self.resource => Ok(Some(entry)),
+            [_] => Err(Error::InvalidMessage(
+                "FoundEntry entry DID does not match searched resource".to_string(),
+            )),
             _ => Err(Error::InvalidMessage(
                 "FoundEntry carries more than one entry".to_string(),
             )),
@@ -205,15 +285,54 @@ impl FoundEntry {
 /// MessageType after `FindSuccessorSend` and syncing data.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SyncEntriesWithSuccessor {
+    /// Transition kind controlling whether reports may clean up sender storage.
+    pub purpose: StorageSyncPurpose,
+    /// Destination semantics used by relay nodes for this sync payload.
+    pub destination: StorageSyncDestination,
     /// Entries to sync to the new successor, paired with their placement keys.
     pub data: Vec<PlacedEntry>,
+}
+
+impl SyncEntriesWithSuccessor {
+    /// Convert a lowered storage-sync delivery into the wire message.
+    pub(crate) fn from_delivery(delivery: StorageSyncDelivery) -> Self {
+        let (purpose, destination, data) = delivery.into_message_parts();
+        Self {
+            purpose,
+            destination,
+            data,
+        }
+    }
 }
 
 /// MessageType used to acknowledge durable storage of synced entries.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SyncEntriesWithSuccessorReport {
+    /// Transition kind of the original sync payload.
+    pub purpose: StorageSyncPurpose,
+    /// Original storage-sync destination semantics.
+    pub destination: StorageSyncDestination,
+    /// Physical receiver that produced this report.
+    pub receiver: Did,
     /// Placement keys and exact values durably persisted by the sync receiver.
     pub acks: Vec<SyncedEntryAck>,
+}
+
+impl SyncEntriesWithSuccessorReport {
+    /// Build a durable-storage acknowledgement report.
+    pub(crate) fn new(
+        purpose: StorageSyncPurpose,
+        destination: StorageSyncDestination,
+        receiver: Did,
+        acks: Vec<SyncedEntryAck>,
+    ) -> Self {
+        Self {
+            purpose,
+            destination,
+            receiver,
+            acks,
+        }
+    }
 }
 
 /// MessageType use to customize message, will be handle by `custom_message` method.

@@ -166,14 +166,23 @@ pub(super) fn owns_all_placements(local: Did, successor: Did, placements: &[Did]
 }
 
 pub(super) async fn prepare_processor_with_network(network_id: u32) -> Processor {
+    prepare_processor_with_network_and_virtual_nodes(network_id, 0).await
+}
+
+pub(super) async fn prepare_processor_with_network_and_virtual_nodes(
+    network_id: u32,
+    dht_virtual_nodes: u16,
+) -> Processor {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).unwrap();
-    let config = ProcessorConfig::new(
+    let serialized = ProcessorConfigSerialized::new(
         network_id,
         "stun://stun.l.google.com:19302".to_string(),
-        session_sk,
+        session_sk.dump().unwrap(),
         3,
-    );
+    )
+    .dht_virtual_nodes(dht_virtual_nodes);
+    let config = ProcessorConfig::try_from(serialized).unwrap();
     let storage = Box::new(MemStorage::new());
 
     ProcessorBuilder::from_config(&config)
@@ -291,6 +300,8 @@ pub(super) fn online_relay_descriptor_for_processor(
             session_public_key: processor.session_sk.session_public_key(),
             node_type: default_online_node_type(),
             network_id: processor.swarm.network_id(),
+            storage_redundancy: processor.swarm.storage_redundancy(),
+            dht_virtual_nodes: processor.swarm.dht_virtual_nodes(),
             capabilities,
             endpoint_hint: None,
             started_at_ms: now_ms,
@@ -301,6 +312,14 @@ pub(super) fn online_relay_descriptor_for_processor(
         &processor.session_sk,
     )
     .map_err(Error::CoreError)
+}
+
+pub(super) fn mismatched_storage_redundancy(value: u16) -> u16 {
+    if value == u16::MAX {
+        value.saturating_sub(1)
+    } else {
+        value.saturating_add(1)
+    }
 }
 
 pub(super) async fn prepare_measured_processor() -> Processor {

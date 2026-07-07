@@ -3,12 +3,14 @@ use std::str::FromStr;
 use async_trait::async_trait;
 use serde::Serialize;
 
-use super::PeerRing;
-use super::PeerRingAction;
-use super::RemoteAction;
+use super::StorageSyncDestination;
+use super::StorageSyncPurpose;
+use super::StorageSyncTarget;
 use crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD;
 use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
 use crate::consts::TRANSPORT_MAX_SIZE;
+use crate::dht::chord::PeerRing;
+use crate::dht::chord::PeerRingAction;
 use crate::dht::entry::Entry;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
@@ -41,8 +43,11 @@ fn add_wire_cost(total: usize, next: usize) -> Result<usize> {
 }
 
 fn sync_entries_fixed_wire_cost() -> Result<usize> {
-    let empty_message =
-        Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor { data: Vec::new() });
+    let empty_message = Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor {
+        purpose: StorageSyncPurpose::OwnershipHandoff,
+        destination: StorageSyncDestination::PhysicalOwner(Did::from(0u32)),
+        data: Vec::new(),
+    });
     add_wire_cost(
         serialized_wire_size(&empty_message)?,
         SYNC_BATCH_ENVELOPE_HEADROOM_BYTES,
@@ -113,6 +118,10 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
     /// `Entry`s that are no longer between current node and `new_successor`,
     /// and copy them to the new successor.
     async fn sync_entries_with_successor(&self, new_successor: Did) -> Result<PeerRingAction> {
+        if self.storage_virtual_nodes_enabled()? {
+            return self.copy_entries_to_observed_virtual_storage_owners().await;
+        }
+
         let mut data = Vec::<PlacedEntry>::new();
         let all_items: Vec<(String, Entry)> = self.storage.get_all().await?;
 
@@ -125,10 +134,10 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
         // Preservation #611/#614: sync hand-off is join-before-ack-before-local
         // cleanup. acknowledge_synced_entries is the only local cleanup
         // transition and does not define storage convergence.
-        for (entry_key_str, entry) in all_items.iter() {
-            let entry_key = Did::from_str(entry_key_str)?;
+        for (entry_key_str, entry) in all_items {
+            let entry_key = Did::from_str(&entry_key_str)?;
             if self.bias(entry_key) > self.bias(new_successor) {
-                data.push(PlacedEntry::new(entry_key, entry.clone()));
+                data.push(PlacedEntry::new(entry_key, entry));
             }
         }
 
@@ -136,9 +145,9 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
         Ok(batches
             .into_iter()
             .map(|batch| {
-                PeerRingAction::RemoteAction(
-                    new_successor,
-                    RemoteAction::SyncEntriesWithSuccessor(batch),
+                PeerRingAction::sync_entries_for_handoff(
+                    StorageSyncDestination::PhysicalOwner(new_successor),
+                    batch,
                 )
             })
             .collect::<Vec<_>>()
@@ -166,5 +175,41 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
         }
 
         Ok(PeerRingAction::None)
+    }
+}
+
+impl PeerRing {
+    async fn copy_entries_to_observed_virtual_storage_owners(&self) -> Result<PeerRingAction> {
+        let all_items: Vec<(String, Entry)> = self.storage.get_all().await?;
+        let mut by_target =
+            std::collections::BTreeMap::<StorageSyncDestination, Vec<PlacedEntry>>::new();
+
+        // Pre: storage virtual nodes are enabled.
+        // Model: storage_sync_target computes ownership under this node's
+        // authenticated local topology view, not a globally complete membership
+        // relation.
+        // Post S1: local entries are retained without action; entries whose
+        // observed virtual owner is remote are emitted as additive anti-entropy
+        // copies to that physical owner.
+        // Preservation S1'': this transition cannot create a delete-capable
+        // report. Only non-virtual physical handoff has an ownership proof
+        // strong enough to permit source cleanup.
+        for (entry_key_str, entry) in all_items {
+            let entry_key = Did::from_str(&entry_key_str)?;
+            if let StorageSyncTarget::Remote(target) = self.storage_sync_target(entry_key)? {
+                by_target
+                    .entry(target)
+                    .or_default()
+                    .push(PlacedEntry::new(entry_key, entry));
+            }
+        }
+
+        let mut actions = Vec::new();
+        for (target, data) in by_target {
+            for batch in sync_entries_batches(data, SYNC_BATCH_MAX_BYTES)? {
+                actions.push(PeerRingAction::sync_entries_for_repair(target, batch));
+            }
+        }
+        Ok(actions.into())
     }
 }

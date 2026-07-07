@@ -133,7 +133,8 @@ impl MessageHandler {
                     .dht
                     .republish_local_entries(self.transport.storage_redundancy())
                     .await?;
-                storage::handle_storage_repair_act(self.transport.clone(), repair).await?;
+                self.run_effects(storage::storage_sync_effects(repair)?)
+                    .await?;
             }
         };
         Ok(())

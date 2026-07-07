@@ -5,11 +5,14 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 
 use super::*;
+use crate::dht::VirtualNodeConfig;
 use crate::dht::DEFAULT_FINGER_TABLE_SIZE;
+use crate::dht::MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use crate::ecc::SecretKey;
 use crate::measure::BehaviourJudgement;
 use crate::measure::Measure;
 use crate::storage::MemStorage;
+use crate::swarm::SwarmBuilder;
 
 #[derive(Default)]
 struct RecordingMeasure {
@@ -81,8 +84,71 @@ fn transport_with_measure(measure: MeasureImpl) -> Result<SwarmTransport> {
         session_sk,
         dht,
         Some(measure),
-        SwarmTransportSettings::new(1, ReassemblyLimits::production()),
+        SwarmTransportSettings::new(
+            1,
+            VirtualNodeConfig::disabled(),
+            ReassemblyLimits::production(),
+        ),
     ))
+}
+
+#[test]
+fn swarm_builder_normalizes_virtual_nodes_before_protocol_advertisement() -> Result<()> {
+    let key = SecretKey::random();
+    let session_sk = SessionSk::new_with_seckey(&key)?;
+    let requested = MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER.saturating_add(1);
+    let swarm = SwarmBuilder::new(7, "", Box::new(MemStorage::new()), session_sk)
+        .dht_virtual_nodes(requested)
+        .build();
+
+    assert_eq!(
+        swarm.dht_virtual_nodes(),
+        MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER
+    );
+    assert_eq!(
+        swarm.dht().storage_virtual_positions(swarm.did())?.len(),
+        usize::from(MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn connection_offer_protocol_mode_includes_storage_redundancy() -> Result<()> {
+    let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
+    let matching = ConnectNodeSend {
+        sdp: String::new(),
+        network_id: 0,
+        storage_redundancy: 1,
+        dht_virtual_nodes: 0,
+    };
+    let mismatched_redundancy = ConnectNodeSend {
+        storage_redundancy: 2,
+        ..matching.clone()
+    };
+
+    assert!(transport.accepts_connection_offer(&matching));
+    assert!(!transport.accepts_connection_offer(&mismatched_redundancy));
+    Ok(())
+}
+
+#[test]
+fn connection_answer_protocol_mode_includes_storage_redundancy() -> Result<()> {
+    let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
+    let matching = ConnectNodeReport {
+        sdp: String::new(),
+        network_id: 0,
+        storage_redundancy: 1,
+        dht_virtual_nodes: 0,
+    };
+    let mismatched_redundancy = ConnectNodeReport {
+        storage_redundancy: 2,
+        ..matching.clone()
+    };
+
+    assert!(transport.accepts_connection_answer(&matching));
+    assert!(!transport.accepts_connection_answer(&mismatched_redundancy));
+    Ok(())
 }
 
 #[tokio::test]

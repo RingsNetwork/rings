@@ -1,3 +1,5 @@
+use rings_core::dht::MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
+
 use super::common::*;
 use super::*;
 use crate::processor::config::parse_webrtc_udp_port_range;
@@ -119,6 +121,55 @@ fn presence_advertisement_is_enabled_by_default() {
     let builder = ProcessorBuilder::from_config(&config).unwrap();
 
     assert!(builder.advertise_presence);
+}
+
+#[test]
+fn dht_virtual_nodes_rejects_values_above_cost_bound() {
+    let key = SecretKey::random();
+    let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+    let serialized = ProcessorConfigSerialized::new(
+        0,
+        "stun://stun.l.google.com:19302".to_string(),
+        session_sk.dump().unwrap(),
+        3,
+    )
+    .dht_virtual_nodes(MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER.saturating_add(1));
+
+    assert!(matches!(
+        ProcessorConfig::try_from(serialized),
+        Err(Error::InvalidConfig(message))
+            if message.contains("dht_virtual_nodes")
+                && message.contains(&MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER.to_string())
+    ));
+}
+
+#[test]
+fn serialized_processor_config_requires_dht_virtual_nodes() {
+    let key = SecretKey::random();
+    let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+    let yaml = format!(
+        r#"
+network_id: 0
+ice_servers: stun://stun.l.google.com:19302
+external_address: null
+webrtc_udp_port_min: null
+webrtc_udp_port_max: null
+session_sk: "{}"
+stabilize_interval: 3
+online_node_heartbeat_interval_secs: 30
+online_node_ttl_secs: 60
+online_node_type: Native
+advertise_presence: true
+"#,
+        session_sk.dump().unwrap()
+    );
+
+    let result = serde_yaml::from_str::<ProcessorConfigSerialized>(&yaml);
+
+    assert!(matches!(
+        result,
+        Err(error) if error.to_string().contains("dht_virtual_nodes")
+    ));
 }
 
 #[test]

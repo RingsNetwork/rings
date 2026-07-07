@@ -7,6 +7,7 @@ use rings_core::ecc::VerificationPublicKey;
 use rings_core::error::Error;
 use rings_core::error::Result;
 use rings_core::message::Decoder;
+use rings_core::message::DhtProtocolMode;
 use rings_core::message::Encoded;
 use rings_core::message::Encoder;
 use rings_core::message::MessageVerification;
@@ -52,6 +53,10 @@ pub struct OnlineNodeDescriptorBody {
     pub node_type: OnlineNodeType,
     /// Network identifier.
     pub network_id: u32,
+    /// Storage redundancy required by this DHT protocol mode.
+    pub storage_redundancy: u16,
+    /// Storage virtual-node positions required by this DHT protocol mode.
+    pub dht_virtual_nodes: u16,
     /// Optional capability labels.
     pub capabilities: Vec<String>,
     /// Optional endpoint hint, controlled by node policy/configuration.
@@ -74,6 +79,8 @@ impl OnlineNodeDescriptorBody {
             session_public_key: &self.session_public_key,
             node_type: &self.node_type,
             network_id: self.network_id,
+            storage_redundancy: self.storage_redundancy,
+            dht_virtual_nodes: self.dht_virtual_nodes,
             capabilities: &self.capabilities,
             endpoint_hint: &self.endpoint_hint,
             started_at_ms: self.started_at_ms,
@@ -110,6 +117,8 @@ impl SignedDescriptorBody for OnlineNodeDescriptorBody {
             session_public_key: self.session_public_key,
             node_type: self.node_type,
             network_id: self.network_id,
+            storage_redundancy: self.storage_redundancy,
+            dht_virtual_nodes: self.dht_virtual_nodes,
             capabilities: self.capabilities,
             endpoint_hint: self.endpoint_hint,
             started_at_ms: self.started_at_ms,
@@ -128,6 +137,8 @@ struct OnlineNodeDescriptorBodyRef<'a> {
     session_public_key: &'a PublicKey<33>,
     node_type: &'a OnlineNodeType,
     network_id: u32,
+    storage_redundancy: u16,
+    dht_virtual_nodes: u16,
     capabilities: &'a [String],
     endpoint_hint: &'a Option<String>,
     started_at_ms: u128,
@@ -155,6 +166,10 @@ pub struct OnlineNodeDescriptor {
     pub node_type: OnlineNodeType,
     /// Network identifier.
     pub network_id: u32,
+    /// Storage redundancy required by this DHT protocol mode.
+    pub storage_redundancy: u16,
+    /// Storage virtual-node positions required by this DHT protocol mode.
+    pub dht_virtual_nodes: u16,
     /// Optional capability labels.
     pub capabilities: Vec<String>,
     /// Optional endpoint hint, controlled by node policy/configuration.
@@ -188,6 +203,8 @@ impl OnlineNodeDescriptor {
             session_public_key,
             node_type,
             network_id,
+            storage_redundancy,
+            dht_virtual_nodes,
             capabilities,
             endpoint_hint,
             started_at_ms,
@@ -203,6 +220,8 @@ impl OnlineNodeDescriptor {
             session_public_key,
             node_type,
             network_id: *network_id,
+            storage_redundancy: *storage_redundancy,
+            dht_virtual_nodes: *dht_virtual_nodes,
             capabilities,
             endpoint_hint,
             started_at_ms: *started_at_ms,
@@ -216,9 +235,18 @@ impl OnlineNodeDescriptor {
         self.body_ref().signing_data()
     }
 
-    /// Return whether this descriptor belongs to `network_id`.
-    pub const fn matches_network(&self, network_id: u32) -> bool {
-        self.network_id == network_id
+    /// Return this descriptor's DHT protocol mode.
+    pub const fn dht_protocol_mode(&self) -> DhtProtocolMode {
+        DhtProtocolMode::new(
+            self.network_id,
+            self.storage_redundancy,
+            self.dht_virtual_nodes,
+        )
+    }
+
+    /// Return whether this descriptor belongs to the local DHT protocol mode.
+    pub const fn matches_dht_protocol(&self, expected: DhtProtocolMode) -> bool {
+        self.dht_protocol_mode().matches(expected)
     }
 
     /// Verify the descriptor signature and DID/public-key binding.
@@ -307,6 +335,8 @@ mod tests {
                 session_public_key: session_sk.session_public_key(),
                 node_type: OnlineNodeType::Native,
                 network_id: 1,
+                storage_redundancy: 6,
+                dht_virtual_nodes: 0,
                 capabilities: vec![ONLINE_NODE_CAPABILITY_STORAGE.to_string()],
                 endpoint_hint: None,
                 started_at_ms: 10,
@@ -324,6 +354,9 @@ mod tests {
         assert!(descriptor.verify_signature());
 
         descriptor.node_type = OnlineNodeType::Browser;
+        assert!(!descriptor.verify_signature());
+        descriptor = descriptor_at(20, 30)?;
+        descriptor.storage_redundancy = 7;
         assert!(!descriptor.verify_signature());
         Ok(())
     }
@@ -353,6 +386,8 @@ mod tests {
                 session_public_key: session_sk.session_public_key(),
                 node_type: OnlineNodeType::Native,
                 network_id: 1,
+                storage_redundancy: 6,
+                dht_virtual_nodes: 0,
                 capabilities: vec![],
                 endpoint_hint: None,
                 started_at_ms: 1,
@@ -369,6 +404,8 @@ mod tests {
                 session_public_key: session_sk.session_public_key(),
                 node_type: OnlineNodeType::Native,
                 network_id: 1,
+                storage_redundancy: 6,
+                dht_virtual_nodes: 0,
                 capabilities: vec![],
                 endpoint_hint: None,
                 started_at_ms: 1,

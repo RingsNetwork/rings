@@ -103,9 +103,7 @@ impl PlacedEntryOperation {
     /// Return whether `placement` is in this entry's affine replica set.
     pub fn placement_belongs_to_entry(&self, redundancy: u16) -> Result<bool> {
         let entry_key = self.entry_key()?;
-        Ok(entry_key
-            .rotate_affine(redundancy)?
-            .contains(&self.placement))
+        placement_belongs_to_entry_key(entry_key, self.placement, redundancy)
     }
 
     /// Enforce that `placement` belongs to the operation's entry.
@@ -119,6 +117,10 @@ impl PlacedEntryOperation {
                 .to_string(),
         ))
     }
+}
+
+fn placement_belongs_to_entry_key(entry_key: Did, placement: Did, redundancy: u16) -> Result<bool> {
+    Ok(entry_key.rotate_affine(redundancy)?.contains(&placement))
 }
 
 /// A DHT storage entry with an [`EntryKind`] and a ring key represented as [`Did`].
@@ -163,6 +165,23 @@ impl PlacedEntry {
     /// Pair an entry value with the key where it is stored.
     pub fn new(key: Did, entry: Entry) -> Self {
         Self { key, entry }
+    }
+
+    /// Return whether `key` is in `entry.did`'s affine replica set.
+    pub fn placement_belongs_to_entry(&self, redundancy: u16) -> Result<bool> {
+        placement_belongs_to_entry_key(self.entry.did, self.key, redundancy)
+    }
+
+    /// Enforce that `key` belongs to `entry.did`'s affine replica set.
+    pub fn validate_placement(&self, redundancy: u16) -> Result<()> {
+        if self.placement_belongs_to_entry(redundancy)? {
+            return Ok(());
+        }
+
+        Err(Error::InvalidMessage(
+            "synced placed entry targets a placement outside the entry's affine replica set"
+                .to_string(),
+        ))
     }
 }
 

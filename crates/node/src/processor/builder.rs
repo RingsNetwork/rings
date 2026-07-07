@@ -15,6 +15,7 @@ pub struct ProcessorBuilder {
     pub(in crate::processor) online_node_ttl: Duration,
     pub(in crate::processor) online_node_type: OnlineNodeType,
     pub(in crate::processor) advertise_presence: bool,
+    pub(in crate::processor) dht_virtual_nodes: u16,
     pub(in crate::processor) advertise_onion_relay: bool,
     pub(in crate::processor) advertise_onion_exit: bool,
     pub(in crate::processor) onion_exit_heartbeat_interval: Duration,
@@ -66,6 +67,7 @@ impl ProcessorBuilder {
             online_node_ttl: config.online_node_ttl,
             online_node_type: config.online_node_type.clone(),
             advertise_presence: config.advertise_presence,
+            dht_virtual_nodes: config.dht_virtual_nodes,
             advertise_onion_relay: config.advertise_onion_relay,
             advertise_onion_exit: config.advertise_onion_exit,
             onion_exit_heartbeat_interval: config.onion_exit_heartbeat_interval,
@@ -93,6 +95,18 @@ impl ProcessorBuilder {
     /// Set the number of DHT finger-table slots for the processor's swarm.
     pub fn dht_finger_table_size(mut self, size: usize) -> Self {
         self.dht_finger_table_size = size;
+        self
+    }
+
+    /// Set storage-only virtual positions derived per physical peer.
+    ///
+    /// Serialized configs reject values above
+    /// [`rings_core::dht::MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER`]. This
+    /// builder setter is infallible for direct programmatic use; the core swarm
+    /// builder normalizes the value once before storage ownership and protocol
+    /// advertisement are created.
+    pub fn dht_virtual_nodes(mut self, positions_per_peer: u16) -> Self {
+        self.dht_virtual_nodes = positions_per_peer;
         self
     }
 
@@ -181,6 +195,7 @@ impl ProcessorBuilder {
             SwarmBuilder::new(self.network_id, &self.ice_servers, storage, self.session_sk);
         swarm_builder = swarm_builder.dht_storage_redundancy(DATA_REDUNDANT);
         swarm_builder = swarm_builder.dht_finger_table_size(self.dht_finger_table_size);
+        swarm_builder = swarm_builder.dht_virtual_nodes(self.dht_virtual_nodes);
         swarm_builder = swarm_builder.reassembly_limits(self.reassembly_limits);
 
         if let Some(external_address) = self.external_address {

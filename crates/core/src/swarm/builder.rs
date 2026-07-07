@@ -10,6 +10,7 @@ use rings_transport::webrtc_config::WebrtcUdpPortRange;
 use crate::chunk::ReassemblyLimits;
 use crate::dht::EntryStorage;
 use crate::dht::PeerRing;
+use crate::dht::VirtualNodeConfig;
 use crate::dht::DEFAULT_FINGER_TABLE_SIZE;
 use crate::measure::MeasureImpl;
 use crate::session::SessionSk;
@@ -32,6 +33,7 @@ pub struct SwarmBuilder {
     dht_succ_max: u8,
     dht_finger_table_size: usize,
     dht_storage_redundancy: u16,
+    dht_virtual_nodes: u16,
     reassembly_limits: ReassemblyLimits,
     dht_storage: EntryStorage,
     session_sk: SessionSk,
@@ -56,6 +58,7 @@ impl SwarmBuilder {
             dht_succ_max: 3,
             dht_finger_table_size: DEFAULT_FINGER_TABLE_SIZE,
             dht_storage_redundancy: 1,
+            dht_virtual_nodes: 0,
             reassembly_limits: ReassemblyLimits::production(),
             dht_storage,
             session_sk,
@@ -83,6 +86,17 @@ impl SwarmBuilder {
     /// Sets up the redundancy used by storage repair and anti-entropy.
     pub fn dht_storage_redundancy(mut self, redundancy: u16) -> Self {
         self.dht_storage_redundancy = redundancy;
+        self
+    }
+
+    /// Sets storage-only Chord virtual positions derived per physical peer.
+    ///
+    /// A value of zero disables virtual-node storage ownership. Values above
+    /// [`crate::dht::MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER`] are normalized
+    /// once during [`Self::build`]. The same bounded value is used for both
+    /// storage ownership and advertised protocol mode.
+    pub fn dht_virtual_nodes(mut self, positions_per_peer: u16) -> Self {
+        self.dht_virtual_nodes = positions_per_peer;
         self
     }
 
@@ -129,13 +143,18 @@ impl SwarmBuilder {
     /// Try build for `Swarm`.
     pub fn build(self) -> Swarm {
         let dht_did = self.session_sk.account_did();
+        let storage_virtual_node_config =
+            VirtualNodeConfig::new(self.network_id, self.dht_virtual_nodes);
 
-        let dht = Arc::new(PeerRing::new_with_storage_and_finger_table_size(
-            dht_did,
-            self.dht_succ_max,
-            self.dht_storage,
-            self.dht_finger_table_size,
-        ));
+        let dht = Arc::new(
+            PeerRing::new_with_storage_finger_table_size_and_virtual_nodes(
+                dht_did,
+                self.dht_succ_max,
+                self.dht_storage,
+                self.dht_finger_table_size,
+                storage_virtual_node_config,
+            ),
+        );
 
         let callback = RwLock::new(
             self.callback
@@ -152,7 +171,11 @@ impl SwarmBuilder {
             self.session_sk,
             dht.clone(),
             self.measure,
-            SwarmTransportSettings::new(self.dht_storage_redundancy, self.reassembly_limits),
+            SwarmTransportSettings::new(
+                self.dht_storage_redundancy,
+                storage_virtual_node_config,
+                self.reassembly_limits,
+            ),
         ));
 
         Swarm {

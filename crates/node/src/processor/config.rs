@@ -1,3 +1,6 @@
+use rings_core::dht::VirtualNodeConfig;
+use rings_core::dht::MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
+
 use super::*;
 
 /// ProcessorConfig is usually serialized as json or yaml.
@@ -28,6 +31,8 @@ pub struct ProcessorConfig {
     pub(in crate::processor) online_node_type: OnlineNodeType,
     /// Whether listen() advertises this node's presence.
     pub(in crate::processor) advertise_presence: bool,
+    /// Storage-only virtual positions derived per physical peer.
+    pub(in crate::processor) dht_virtual_nodes: u16,
     /// Whether this node advertises onion relay capability in the online-node registry.
     pub(in crate::processor) advertise_onion_relay: bool,
     /// Whether this node publishes an onion-exit descriptor.
@@ -65,6 +70,7 @@ impl ProcessorConfig {
             online_node_ttl: Duration::from_secs(default_online_node_ttl_secs()),
             online_node_type: default_online_node_type(),
             advertise_presence: default_advertise_presence(),
+            dht_virtual_nodes: 0,
             advertise_onion_relay: default_advertise_onion_relay(),
             advertise_onion_exit: default_advertise_onion_exit(),
             onion_exit_heartbeat_interval: Duration::from_secs(
@@ -98,6 +104,17 @@ impl ProcessorConfig {
     /// Sets whether listen() advertises this node as an onion relay.
     pub fn advertise_onion_relay(mut self, advertise: bool) -> Self {
         self.advertise_onion_relay = advertise;
+        self
+    }
+
+    /// Sets storage-only virtual positions derived per physical peer.
+    ///
+    /// Serialized configs reject values above
+    /// [`MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER`]. This setter is infallible
+    /// for direct programmatic use; the core swarm builder normalizes the value
+    /// once before storage ownership and protocol advertisement are created.
+    pub fn dht_virtual_nodes(mut self, positions_per_peer: u16) -> Self {
+        self.dht_virtual_nodes = positions_per_peer;
         self
     }
 
@@ -174,6 +191,8 @@ pub struct ProcessorConfigSerialized {
     /// Whether listen() advertises this node's presence.
     #[serde(default = "default_advertise_presence")]
     advertise_presence: bool,
+    /// Storage-only virtual positions derived per physical peer.
+    dht_virtual_nodes: u16,
     /// Whether listen() advertises onion relay capability.
     #[serde(default = "default_advertise_onion_relay")]
     advertise_onion_relay: bool,
@@ -214,6 +233,7 @@ impl ProcessorConfigSerialized {
             online_node_ttl_secs: default_online_node_ttl_secs(),
             online_node_type: default_online_node_type(),
             advertise_presence: default_advertise_presence(),
+            dht_virtual_nodes: 0,
             advertise_onion_relay: default_advertise_onion_relay(),
             advertise_onion_exit: default_advertise_onion_exit(),
             onion_exit_heartbeat_interval_secs: default_onion_exit_heartbeat_interval_secs(),
@@ -264,6 +284,17 @@ impl ProcessorConfigSerialized {
     /// Sets whether listen() advertises onion relay capability.
     pub fn advertise_onion_relay(mut self, advertise: bool) -> Self {
         self.advertise_onion_relay = advertise;
+        self
+    }
+
+    /// Sets storage-only virtual positions derived per physical peer.
+    ///
+    /// Serialized configs reject values above
+    /// [`MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER`]. This setter is infallible
+    /// for direct programmatic use; the core swarm builder normalizes the value
+    /// once before storage ownership and protocol advertisement are created.
+    pub fn dht_virtual_nodes(mut self, positions_per_peer: u16) -> Self {
+        self.dht_virtual_nodes = positions_per_peer;
         self
     }
 
@@ -325,6 +356,16 @@ pub(crate) fn parse_webrtc_udp_port_range(
     }
 }
 
+fn validate_dht_virtual_nodes(positions_per_peer: u16) -> Result<()> {
+    if VirtualNodeConfig::positions_per_owner_within_limit(positions_per_peer) {
+        return Ok(());
+    }
+
+    Err(Error::InvalidConfig(format!(
+        "dht_virtual_nodes {positions_per_peer} exceeds maximum {MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER}"
+    )))
+}
+
 pub(in crate::processor) fn validate_onion_role_config(
     advertise_presence: bool,
     advertise_onion_relay: bool,
@@ -375,6 +416,7 @@ impl TryFrom<ProcessorConfig> for ProcessorConfigSerialized {
             online_node_ttl_secs: ins.online_node_ttl.as_secs(),
             online_node_type: ins.online_node_type,
             advertise_presence: ins.advertise_presence,
+            dht_virtual_nodes: ins.dht_virtual_nodes,
             advertise_onion_relay: ins.advertise_onion_relay,
             advertise_onion_exit: ins.advertise_onion_exit,
             onion_exit_heartbeat_interval_secs: ins.onion_exit_heartbeat_interval.as_secs(),
@@ -390,6 +432,7 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
     fn try_from(ins: ProcessorConfigSerialized) -> Result<Self> {
         let webrtc_udp_port_range =
             parse_webrtc_udp_port_range(ins.webrtc_udp_port_min, ins.webrtc_udp_port_max)?;
+        validate_dht_virtual_nodes(ins.dht_virtual_nodes)?;
         let online_node_heartbeat_interval =
             Duration::from_secs(ins.online_node_heartbeat_interval_secs);
         let online_node_ttl = Duration::from_secs(ins.online_node_ttl_secs);
@@ -425,6 +468,7 @@ impl TryFrom<ProcessorConfigSerialized> for ProcessorConfig {
             online_node_ttl,
             online_node_type: ins.online_node_type,
             advertise_presence: ins.advertise_presence,
+            dht_virtual_nodes: ins.dht_virtual_nodes,
             advertise_onion_relay: ins.advertise_onion_relay,
             advertise_onion_exit: ins.advertise_onion_exit,
             onion_exit_heartbeat_interval,

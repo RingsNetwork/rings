@@ -27,6 +27,7 @@ use rings_transport::core::transport::WebrtcConnectionState;
 use rings_transport::delivery::DeliveryFuture;
 use rings_transport::webrtc_config::WebrtcUdpPortRange;
 
+use self::storage_sync::StorageSyncAckMap;
 use crate::chunk::Chunk;
 use crate::chunk::ChunkList;
 use crate::chunk::Framing;
@@ -37,6 +38,7 @@ use crate::dht::entry::PlacementMiss;
 use crate::dht::Did;
 use crate::dht::LiveDid;
 use crate::dht::PeerRing;
+use crate::dht::VirtualNodeConfig;
 use crate::error::Error;
 use crate::error::Result;
 use crate::measure::order_peers_by_quality;
@@ -46,11 +48,14 @@ use crate::measure::PeerMeasurement;
 use crate::measure::PeerQuality;
 use crate::message::ConnectNodeReport;
 use crate::message::ConnectNodeSend;
+use crate::message::DhtProtocolMode;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
 use crate::session::SessionSk;
 use crate::swarm::callback::InnerSwarmCallback;
+
+mod storage_sync;
 
 const STORAGE_LOOKUP_OBSERVATION_TTL_MS: i64 = 30_000;
 /// Maximum number of read-repair miss observation buckets retained per transport.
@@ -70,24 +75,32 @@ pub struct SwarmTransport {
     session_sk: SessionSk,
     pub(crate) dht: Arc<PeerRing>,
     storage_redundancy: u16,
+    dht_virtual_nodes: u16,
     reassembly_limits: ReassemblyLimits,
     storage_lookup_observations: Mutex<StorageLookupObservationMap>,
+    pending_storage_sync_acks: Mutex<StorageSyncAckMap>,
     measured_disconnects: Mutex<BTreeSet<Did>>,
     measure: Option<MeasureImpl>,
 }
 
-/// Runtime limits used by [`SwarmTransport`].
+/// Runtime settings used by [`SwarmTransport`].
 #[derive(Clone, Copy)]
 pub(crate) struct SwarmTransportSettings {
     storage_redundancy: u16,
+    dht_virtual_nodes: u16,
     reassembly_limits: ReassemblyLimits,
 }
 
 impl SwarmTransportSettings {
-    /// Build transport settings from storage repair redundancy and chunk reassembly limits.
-    pub(crate) fn new(storage_redundancy: u16, reassembly_limits: ReassemblyLimits) -> Self {
+    /// Build transport settings from DHT protocol parameters and chunk reassembly limits.
+    pub(crate) fn new(
+        storage_redundancy: u16,
+        storage_virtual_node_config: VirtualNodeConfig,
+        reassembly_limits: ReassemblyLimits,
+    ) -> Self {
         Self {
             storage_redundancy,
+            dht_virtual_nodes: storage_virtual_node_config.positions_per_owner(),
             reassembly_limits,
         }
     }
@@ -134,6 +147,15 @@ fn storage_lookup_observation_now_ms() -> i64 {
     Utc::now().timestamp_millis()
 }
 
+fn oldest_storage_lookup_observation_key(
+    observations: &StorageLookupObservationMap,
+) -> Option<StorageLookupObservationKey> {
+    observations
+        .iter()
+        .min_by_key(|(key, observation)| (observation.observed_at_ms, **key))
+        .map(|(key, _)| *key)
+}
+
 // Post: observations.len() <= STORAGE_LOOKUP_OBSERVATION_CAPACITY.
 // Post: forall bucket in observations,
 // now_ms.saturating_sub(bucket.observed_at_ms) <= STORAGE_LOOKUP_OBSERVATION_TTL_MS.
@@ -145,11 +167,16 @@ fn evict_storage_lookup_observations(observations: &mut StorageLookupObservation
     });
 
     while observations.len() > STORAGE_LOOKUP_OBSERVATION_CAPACITY {
-        let Some(stale_key) = observations
-            .iter()
-            .min_by_key(|(_, observation)| observation.observed_at_ms)
-            .map(|(key, _)| *key)
-        else {
+        let Some(stale_key) = oldest_storage_lookup_observation_key(observations) else {
+            break;
+        };
+        observations.remove(&stale_key);
+    }
+}
+
+fn reserve_storage_lookup_observation_slot(observations: &mut StorageLookupObservationMap) {
+    while observations.len() >= STORAGE_LOOKUP_OBSERVATION_CAPACITY {
+        let Some(stale_key) = oldest_storage_lookup_observation_key(observations) else {
             break;
         };
         observations.remove(&stale_key);
@@ -320,8 +347,10 @@ impl SwarmTransport {
             session_sk,
             dht,
             storage_redundancy: settings.storage_redundancy,
+            dht_virtual_nodes: settings.dht_virtual_nodes,
             reassembly_limits: settings.reassembly_limits,
             storage_lookup_observations: Mutex::new(BTreeMap::new()),
+            pending_storage_sync_acks: Mutex::new(BTreeMap::new()),
             measured_disconnects: Mutex::new(BTreeSet::new()),
             measure,
         }
@@ -330,6 +359,29 @@ impl SwarmTransport {
     /// Redundancy used by storage repair and anti-entropy.
     pub(crate) fn storage_redundancy(&self) -> u16 {
         self.storage_redundancy
+    }
+
+    /// Storage virtual-node positions required by this DHT protocol mode.
+    pub(crate) fn dht_virtual_nodes(&self) -> u16 {
+        self.dht_virtual_nodes
+    }
+
+    fn dht_protocol_mode(&self) -> DhtProtocolMode {
+        DhtProtocolMode::new(
+            self.network_id,
+            self.storage_redundancy,
+            self.dht_virtual_nodes,
+        )
+    }
+
+    /// Return whether an inbound connection offer matches this DHT protocol mode.
+    pub(crate) fn accepts_connection_offer(&self, offer: &ConnectNodeSend) -> bool {
+        offer.matches_dht_protocol(self.dht_protocol_mode())
+    }
+
+    /// Return whether an inbound connection answer matches this DHT protocol mode.
+    pub(crate) fn accepts_connection_answer(&self, answer: &ConnectNodeReport) -> bool {
+        answer.matches_dht_protocol(self.dht_protocol_mode())
     }
 
     /// Chunk reassembly limits enforced by inbound callbacks.
@@ -425,52 +477,97 @@ impl SwarmTransport {
 
     /// Ensure the storage API redundancy matches repair redundancy.
     pub(crate) fn ensure_storage_redundancy<const REDUNDANT: u16>(&self) -> Result<()> {
-        if self.storage_redundancy == REDUNDANT {
+        self.ensure_storage_redundancy_value(REDUNDANT)
+    }
+
+    /// Validate that a runtime storage message uses this transport's redundancy.
+    pub(crate) fn ensure_storage_redundancy_value(&self, redundancy: u16) -> Result<()> {
+        if self.storage_redundancy == redundancy {
             Ok(())
         } else {
             Err(Error::StorageRedundancyMismatch {
                 configured: self.storage_redundancy,
-                requested: REDUNDANT,
+                requested: redundancy,
             })
         }
     }
 
+    fn storage_lookup_observation_key(
+        &self,
+        resource: Did,
+        redundancy: u16,
+    ) -> Result<StorageLookupObservationKey> {
+        self.ensure_storage_redundancy_value(redundancy)?;
+        Ok(StorageLookupObservationKey {
+            resource,
+            redundancy,
+        })
+    }
+
     /// Start a fresh lookup round for `resource`.
     ///
-    /// This removes any previous miss observations for the same resource and
-    /// redundancy so targeted read-repair never drains misses from an older
-    /// lookup round.
+    /// This replaces any previous miss observations for the same resource and
+    /// redundancy with an empty local-authorized bucket. Inbound FoundEntry
+    /// messages may only add misses to an existing bucket, so remote peers cannot
+    /// create a new redundancy mode.
     ///
-    /// Post: no bucket exists for `(resource, redundancy)`.
+    /// Post: if capacity permits one active lookup, a bucket exists for
+    /// `(resource, redundancy)` and contains no misses.
     /// Preservation: eviction establishes the capacity and freshness invariants
-    /// before removing the lookup-round bucket.
+    /// before replacing the lookup-round bucket.
     pub(crate) fn start_storage_lookup(&self, resource: Did, redundancy: u16) -> Result<()> {
+        let key = self.storage_lookup_observation_key(resource, redundancy)?;
         let mut observations = self
             .storage_lookup_observations
             .lock()
             .map_err(|_| Error::DHTSyncLockError)?;
         let now = storage_lookup_observation_now_ms();
         evict_storage_lookup_observations(&mut observations, now);
-        observations.remove(&StorageLookupObservationKey {
-            resource,
-            redundancy,
+        reserve_storage_lookup_observation_slot(&mut observations);
+        observations.insert(key, StorageLookupObservation {
+            observed_at_ms: now,
+            misses: BTreeSet::new(),
         });
         Ok(())
+    }
+
+    /// Validate that a storage lookup response belongs to a local lookup round.
+    ///
+    /// Post: `Ok(())` proves a fresh bucket exists for `(resource, redundancy)`.
+    pub(crate) fn ensure_storage_lookup_active(
+        &self,
+        resource: Did,
+        redundancy: u16,
+    ) -> Result<()> {
+        let key = self.storage_lookup_observation_key(resource, redundancy)?;
+        let mut observations = self
+            .storage_lookup_observations
+            .lock()
+            .map_err(|_| Error::DHTSyncLockError)?;
+        let now = storage_lookup_observation_now_ms();
+        evict_storage_lookup_observations(&mut observations, now);
+        if observations.contains_key(&key) {
+            Ok(())
+        } else {
+            Err(Error::InvalidMessage(
+                "storage lookup response has no active local lookup".to_string(),
+            ))
+        }
     }
 
     /// Buffer placement misses observed by an in-flight storage lookup.
     ///
     /// Post: retained observation buckets satisfy the capacity and freshness
     /// invariants.
-    /// Post: if the `(resource, redundancy)` bucket survives capacity eviction,
-    /// it contains the supplied misses and its freshness witness is this call's
-    /// observation time.
+    /// Post: the supplied misses are appended only to a bucket previously created
+    /// by [`Self::start_storage_lookup`].
     pub(crate) fn observe_storage_misses(
         &self,
         resource: Did,
         redundancy: u16,
         misses: impl IntoIterator<Item = PlacementMiss>,
     ) -> Result<()> {
+        let key = self.storage_lookup_observation_key(resource, redundancy)?;
         let mut misses = misses.into_iter().peekable();
         if misses.peek().is_none() {
             return Ok(());
@@ -481,16 +578,11 @@ impl SwarmTransport {
             .map_err(|_| Error::DHTSyncLockError)?;
         let now = storage_lookup_observation_now_ms();
         evict_storage_lookup_observations(&mut observations, now);
-        let key = StorageLookupObservationKey {
-            resource,
-            redundancy,
+        let Some(observation) = observations.get_mut(&key) else {
+            return Err(Error::InvalidMessage(
+                "storage miss observation has no active local lookup".to_string(),
+            ));
         };
-        let observation = observations
-            .entry(key)
-            .or_insert_with(|| StorageLookupObservation {
-                observed_at_ms: now,
-                misses: BTreeSet::new(),
-            });
         observation.observed_at_ms = now;
         observation.misses.extend(misses);
         evict_storage_lookup_observations(&mut observations, now);
@@ -501,7 +593,8 @@ impl SwarmTransport {
     ///
     /// Post: returned misses come only from a bucket that survived freshness
     /// eviction at this call's observation time.
-    /// Post: no bucket remains for `(resource, redundancy)`.
+    /// Post: the bucket remains active with no buffered misses until TTL or a new
+    /// lookup round removes it.
     /// Preservation: eviction before drain prevents stale owners from driving
     /// late read-repair.
     pub(crate) fn take_storage_misses(
@@ -509,20 +602,21 @@ impl SwarmTransport {
         resource: Did,
         redundancy: u16,
     ) -> Result<Vec<PlacementMiss>> {
+        let key = self.storage_lookup_observation_key(resource, redundancy)?;
         let mut observations = self
             .storage_lookup_observations
             .lock()
             .map_err(|_| Error::DHTSyncLockError)?;
         let now = storage_lookup_observation_now_ms();
         evict_storage_lookup_observations(&mut observations, now);
-        let key = StorageLookupObservationKey {
-            resource,
-            redundancy,
+        let Some(observation) = observations.get_mut(&key) else {
+            return Err(Error::InvalidMessage(
+                "storage repair has no active local lookup".to_string(),
+            ));
         };
-        Ok(observations
-            .remove(&key)
-            .map(|observation| observation.misses.into_iter().collect())
-            .unwrap_or_default())
+        Ok(std::mem::take(&mut observation.misses)
+            .into_iter()
+            .collect())
     }
 
     #[cfg(all(test, not(feature = "wasm")))]
@@ -532,14 +626,12 @@ impl SwarmTransport {
         resource: Did,
         redundancy: u16,
     ) -> Result<()> {
+        let key = self.storage_lookup_observation_key(resource, redundancy)?;
         let mut observations = self
             .storage_lookup_observations
             .lock()
             .map_err(|_| Error::DHTSyncLockError)?;
-        if let Some(observation) = observations.get_mut(&StorageLookupObservationKey {
-            resource,
-            redundancy,
-        }) {
+        if let Some(observation) = observations.get_mut(&key) {
             observation.observed_at_ms = storage_lookup_observation_now_ms()
                 .saturating_sub(STORAGE_LOOKUP_OBSERVATION_TTL_MS + 1);
         }
@@ -680,6 +772,8 @@ impl SwarmTransport {
         let offer_msg = ConnectNodeSend {
             sdp: offer_str,
             network_id: self.network_id,
+            storage_redundancy: self.storage_redundancy,
+            dht_virtual_nodes: self.dht_virtual_nodes,
         };
 
         Ok(offer_msg)
@@ -692,6 +786,12 @@ impl SwarmTransport {
         callback: InnerSwarmCallback,
         offer_msg: &ConnectNodeSend,
     ) -> Result<ConnectNodeReport> {
+        if !self.accepts_connection_offer(offer_msg) {
+            return Err(Error::InvalidMessage(
+                "connection offer DHT protocol mismatch".to_string(),
+            ));
+        }
+
         let offer = serde_json::from_str(&offer_msg.sdp).map_err(Error::Deserialize)?;
 
         if let Some(swarm_conn) = self.get_connection(peer) {
@@ -728,7 +828,12 @@ impl SwarmTransport {
             .await
             .map_err(Error::Transport)?;
         let answer_str = serde_json::to_string(&answer).map_err(|_| Error::SerializeToString)?;
-        let answer_msg = ConnectNodeReport { sdp: answer_str };
+        let answer_msg = ConnectNodeReport {
+            sdp: answer_str,
+            network_id: self.network_id,
+            storage_redundancy: self.storage_redundancy,
+            dht_virtual_nodes: self.dht_virtual_nodes,
+        };
 
         Ok(answer_msg)
     }
@@ -739,6 +844,12 @@ impl SwarmTransport {
         peer: Did,
         answer_msg: &ConnectNodeReport,
     ) -> Result<()> {
+        if !self.accepts_connection_answer(answer_msg) {
+            return Err(Error::InvalidMessage(
+                "connection answer DHT protocol mismatch".to_string(),
+            ));
+        }
+
         let answer = serde_json::from_str(&answer_msg.sdp).map_err(Error::Deserialize)?;
 
         let conn = self

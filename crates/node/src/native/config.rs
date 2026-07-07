@@ -93,6 +93,7 @@ pub struct Config {
     pub onion_http_proxy_header_timeout_secs: u64,
     #[serde(default = "crate::onion::proxy::http::default_max_connect_connections")]
     pub onion_http_proxy_max_connections: usize,
+    pub dht_virtual_nodes: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_ip: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -141,7 +142,8 @@ impl TryFrom<Config> for ProcessorConfigSerialized {
         .onion_exit_heartbeat_interval_secs(config.onion_exit_heartbeat_interval_secs)
         .onion_exit_ttl_secs(config.onion_exit_ttl_secs)
         .onion_exit_services(config.onion_exit_services)
-        .onion_exit_policy(config.onion_exit_policy);
+        .onion_exit_policy(config.onion_exit_policy)
+        .dht_virtual_nodes(config.dht_virtual_nodes);
 
         cs = if let Some(ext_ip) = config.external_ip {
             cs.external_address(ext_ip)
@@ -203,6 +205,7 @@ impl Config {
                 crate::onion::proxy::http::default_connect_header_timeout_secs(),
             onion_http_proxy_max_connections:
                 crate::onion::proxy::http::default_max_connect_connections(),
+            dht_virtual_nodes: 0,
             external_ip: None,
             webrtc_udp_port_min: None,
             webrtc_udp_port_max: None,
@@ -266,7 +269,7 @@ mod tests {
     }
 
     #[test]
-    fn test_deserialization_with_missed_field() {
+    fn deserialization_defaults_online_registration_fields() {
         let yaml = r#"
 network_id: 1
 session_sk: session_sk
@@ -275,6 +278,7 @@ external_api_addr: 127.0.0.1:50001
 endpoint_url: http://127.0.0.1:50000
 ice_servers: stun://stun.l.google.com:19302
 stabilize_interval: 3
+dht_virtual_nodes: 0
 external_ip: null
 webrtc_udp_port_min: null
 webrtc_udp_port_max: null
@@ -306,6 +310,35 @@ measure_storage:
             cfg.onion_exit_services,
             crate::onion::default_onion_exit_services()
         );
+    }
+
+    #[test]
+    fn deserialization_requires_dht_virtual_nodes() {
+        let yaml = r#"
+network_id: 1
+session_sk: session_sk
+internal_api_port: 50000
+external_api_addr: 127.0.0.1:50001
+endpoint_url: http://127.0.0.1:50000
+ice_servers: stun://stun.l.google.com:19302
+stabilize_interval: 3
+external_ip: null
+webrtc_udp_port_min: null
+webrtc_udp_port_max: null
+data_storage:
+  path: /Users/foo/.rings/data
+  capacity: 200000000
+measure_storage:
+  path: /Users/foo/.rings/measure
+  capacity: 200000000
+"#;
+
+        let result = serde_yaml::from_str::<Config>(yaml);
+
+        assert!(matches!(
+            result,
+            Err(error) if error.to_string().contains("dht_virtual_nodes")
+        ));
     }
 
     #[test]

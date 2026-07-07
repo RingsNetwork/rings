@@ -118,6 +118,16 @@ impl<'a> RegistrationContext<'a> {
         self.processor.swarm.network_id()
     }
 
+    /// Return storage redundancy for the local DHT protocol mode.
+    pub fn storage_redundancy(&self) -> u16 {
+        self.processor.swarm.storage_redundancy()
+    }
+
+    /// Return storage virtual-node positions for the local DHT protocol mode.
+    pub fn dht_virtual_nodes(&self) -> u16 {
+        self.processor.swarm.dht_virtual_nodes()
+    }
+
     /// Return the account verification public key.
     pub fn account_verification_pubkey(&self) -> Result<VerificationPublicKey> {
         self.processor
@@ -281,6 +291,8 @@ impl OnlineNodeRegistration {
                 session_public_key: context.session_sk().session_public_key(),
                 node_type: self.node_type.clone(),
                 network_id: context.network_id(),
+                storage_redundancy: context.storage_redundancy(),
+                dht_virtual_nodes: context.dht_virtual_nodes(),
                 capabilities: self.capabilities(),
                 endpoint_hint: self.endpoint_hint.clone(),
                 started_at_ms: self.started_at_ms,
