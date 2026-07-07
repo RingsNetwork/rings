@@ -1,3 +1,4 @@
+use rings_core::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use rings_core::dht::MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 
 use super::common::*;
@@ -121,6 +122,10 @@ fn presence_advertisement_is_enabled_by_default() {
     let builder = ProcessorBuilder::from_config(&config).unwrap();
 
     assert!(builder.advertise_presence);
+    assert_eq!(
+        builder.dht_virtual_nodes,
+        DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER
+    );
 }
 
 #[test]
@@ -144,7 +149,7 @@ fn dht_virtual_nodes_rejects_values_above_cost_bound() {
 }
 
 #[test]
-fn serialized_processor_config_requires_dht_virtual_nodes() {
+fn serialized_processor_config_defaults_dht_virtual_nodes() {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).unwrap();
     let yaml = format!(
@@ -164,12 +169,14 @@ advertise_presence: true
         session_sk.dump().unwrap()
     );
 
-    let result = serde_yaml::from_str::<ProcessorConfigSerialized>(&yaml);
+    let serialized = serde_yaml::from_str::<ProcessorConfigSerialized>(&yaml).unwrap();
+    let config = ProcessorConfig::try_from(serialized).unwrap();
+    let builder = ProcessorBuilder::from_config(&config).unwrap();
 
-    assert!(matches!(
-        result,
-        Err(error) if error.to_string().contains("dht_virtual_nodes")
-    ));
+    assert_eq!(
+        builder.dht_virtual_nodes,
+        DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER
+    );
 }
 
 #[test]

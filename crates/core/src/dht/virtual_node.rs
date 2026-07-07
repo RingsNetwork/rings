@@ -13,11 +13,26 @@ use sha1::Sha1;
 
 use crate::dht::topology;
 use crate::dht::Did;
+use crate::dht::DEFAULT_FINGER_TABLE_SIZE;
 
 const VIRTUAL_NODE_DOMAIN: &[u8] = b"rings:vnode";
 
 /// Maximum virtual storage positions derived per physical owner.
 pub const MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER: u16 = 256;
+
+/// Default virtual storage positions derived per physical owner.
+///
+/// The Chord paper recommends mapping each real node to O(log N) virtual nodes.
+/// A joining node does not know the stable network size N before it enters the
+/// DHT, so Rings uses the Chord finger-table width as the network-wide default
+/// O(log N) operating point. Operators can still set this to zero to disable
+/// virtual storage ownership for a network.
+pub const DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER: u16 = DEFAULT_FINGER_TABLE_SIZE as u16;
+
+/// Return the default virtual storage positions derived per physical owner.
+pub const fn default_storage_virtual_positions_per_owner() -> u16 {
+    DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER
+}
 
 /// Configuration for storage virtual nodes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

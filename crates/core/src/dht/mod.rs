@@ -42,9 +42,11 @@ pub use types::ChordStorageRepair;
 pub use types::ChordStorageSync;
 pub use types::CorrectChord;
 pub use types::LiveDid;
+pub use virtual_node::default_storage_virtual_positions_per_owner;
 pub use virtual_node::StorageVirtualNodes;
 pub use virtual_node::VirtualNode;
 pub use virtual_node::VirtualNodeConfig;
+pub use virtual_node::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 pub use virtual_node::MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 
 #[cfg(test)]

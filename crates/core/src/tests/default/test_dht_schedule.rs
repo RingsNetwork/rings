@@ -308,6 +308,7 @@ mod tests {
         let swarm = Arc::new(
             SwarmBuilder::new(0, stun, storage, session_sk)
                 .dht_finger_table_size(SCHEDULE_FINGER_TABLE_SIZE)
+                .dht_virtual_nodes(0)
                 .build(),
         );
 

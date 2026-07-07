@@ -12,6 +12,7 @@ use crate::dht::EntryStorage;
 use crate::dht::PeerRing;
 use crate::dht::VirtualNodeConfig;
 use crate::dht::DEFAULT_FINGER_TABLE_SIZE;
+use crate::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use crate::measure::MeasureImpl;
 use crate::session::SessionSk;
 use crate::swarm::callback::SharedSwarmCallback;
@@ -58,7 +59,7 @@ impl SwarmBuilder {
             dht_succ_max: 3,
             dht_finger_table_size: DEFAULT_FINGER_TABLE_SIZE,
             dht_storage_redundancy: 1,
-            dht_virtual_nodes: 0,
+            dht_virtual_nodes: DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER,
             reassembly_limits: ReassemblyLimits::production(),
             dht_storage,
             session_sk,
@@ -91,6 +92,8 @@ impl SwarmBuilder {
 
     /// Sets storage-only Chord virtual positions derived per physical peer.
     ///
+    /// By default, Rings follows the Chord paper's O(log N) virtual-node
+    /// guidance through [`crate::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER`].
     /// A value of zero disables virtual-node storage ownership. Values above
     /// [`crate::dht::MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER`] are normalized
     /// once during [`Self::build`]. The same bounded value is used for both

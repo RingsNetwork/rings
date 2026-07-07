@@ -90,6 +90,7 @@ pub(super) fn prepare_node_with_storage_redundancy(
             session_sk,
         )
         .dht_storage_redundancy(redundancy)
+        .dht_virtual_nodes(0)
         .dht_finger_table_size(8)
         .build(),
     );

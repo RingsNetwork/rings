@@ -12,6 +12,8 @@ use crate::onion::OnionExitPolicy;
 use crate::onion::OnionExitService;
 use crate::onion::OnionServiceName;
 use crate::online::OnlineNodeType;
+use crate::prelude::rings_core::dht::default_storage_virtual_positions_per_owner;
+use crate::prelude::rings_core::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use crate::prelude::rings_core::ecc::SecretKey;
 use crate::prelude::SessionSk;
 use crate::processor::ProcessorConfig;
@@ -93,6 +95,7 @@ pub struct Config {
     pub onion_http_proxy_header_timeout_secs: u64,
     #[serde(default = "crate::onion::proxy::http::default_max_connect_connections")]
     pub onion_http_proxy_max_connections: usize,
+    #[serde(default = "default_storage_virtual_positions_per_owner")]
     pub dht_virtual_nodes: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_ip: Option<String>,
@@ -205,7 +208,7 @@ impl Config {
                 crate::onion::proxy::http::default_connect_header_timeout_secs(),
             onion_http_proxy_max_connections:
                 crate::onion::proxy::http::default_max_connect_connections(),
-            dht_virtual_nodes: 0,
+            dht_virtual_nodes: DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER,
             external_ip: None,
             webrtc_udp_port_min: None,
             webrtc_udp_port_max: None,
@@ -278,7 +281,6 @@ external_api_addr: 127.0.0.1:50001
 endpoint_url: http://127.0.0.1:50000
 ice_servers: stun://stun.l.google.com:19302
 stabilize_interval: 3
-dht_virtual_nodes: 0
 external_ip: null
 webrtc_udp_port_min: null
 webrtc_udp_port_max: null
@@ -291,6 +293,10 @@ measure_storage:
 "#;
         let cfg: Config = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(cfg.network_id, 1);
+        assert_eq!(
+            cfg.dht_virtual_nodes,
+            DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER
+        );
         assert!(cfg.advertise_presence);
         assert!(!cfg.advertise_onion_relay);
         assert!(!cfg.advertise_onion_exit);
@@ -313,7 +319,7 @@ measure_storage:
     }
 
     #[test]
-    fn deserialization_requires_dht_virtual_nodes() {
+    fn deserialization_preserves_explicit_disabled_dht_virtual_nodes() {
         let yaml = r#"
 network_id: 1
 session_sk: session_sk
@@ -322,6 +328,7 @@ external_api_addr: 127.0.0.1:50001
 endpoint_url: http://127.0.0.1:50000
 ice_servers: stun://stun.l.google.com:19302
 stabilize_interval: 3
+dht_virtual_nodes: 0
 external_ip: null
 webrtc_udp_port_min: null
 webrtc_udp_port_max: null
@@ -333,12 +340,9 @@ measure_storage:
   capacity: 200000000
 "#;
 
-        let result = serde_yaml::from_str::<Config>(yaml);
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
 
-        assert!(matches!(
-            result,
-            Err(error) if error.to_string().contains("dht_virtual_nodes")
-        ));
+        assert_eq!(cfg.dht_virtual_nodes, 0);
     }
 
     #[test]

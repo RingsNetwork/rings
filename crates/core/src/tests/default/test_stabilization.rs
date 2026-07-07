@@ -49,6 +49,7 @@ async fn stabilize_republishes_local_entries_to_missing_affine_owners() -> Resul
             session,
         )
         .dht_storage_redundancy(2)
+        .dht_virtual_nodes(0)
         .build(),
     );
     let node = Node::new(swarm);

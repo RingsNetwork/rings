@@ -1,4 +1,6 @@
+use rings_core::dht::default_storage_virtual_positions_per_owner;
 use rings_core::dht::VirtualNodeConfig;
+use rings_core::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use rings_core::dht::MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 
 use super::*;
@@ -70,7 +72,7 @@ impl ProcessorConfig {
             online_node_ttl: Duration::from_secs(default_online_node_ttl_secs()),
             online_node_type: default_online_node_type(),
             advertise_presence: default_advertise_presence(),
-            dht_virtual_nodes: 0,
+            dht_virtual_nodes: DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER,
             advertise_onion_relay: default_advertise_onion_relay(),
             advertise_onion_exit: default_advertise_onion_exit(),
             onion_exit_heartbeat_interval: Duration::from_secs(
@@ -192,6 +194,7 @@ pub struct ProcessorConfigSerialized {
     #[serde(default = "default_advertise_presence")]
     advertise_presence: bool,
     /// Storage-only virtual positions derived per physical peer.
+    #[serde(default = "default_storage_virtual_positions_per_owner")]
     dht_virtual_nodes: u16,
     /// Whether listen() advertises onion relay capability.
     #[serde(default = "default_advertise_onion_relay")]
@@ -233,7 +236,7 @@ impl ProcessorConfigSerialized {
             online_node_ttl_secs: default_online_node_ttl_secs(),
             online_node_type: default_online_node_type(),
             advertise_presence: default_advertise_presence(),
-            dht_virtual_nodes: 0,
+            dht_virtual_nodes: DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER,
             advertise_onion_relay: default_advertise_onion_relay(),
             advertise_onion_exit: default_advertise_onion_exit(),
             onion_exit_heartbeat_interval_secs: default_onion_exit_heartbeat_interval_secs(),

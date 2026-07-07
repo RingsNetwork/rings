@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use super::*;
 use crate::dht::VirtualNodeConfig;
 use crate::dht::DEFAULT_FINGER_TABLE_SIZE;
+use crate::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use crate::dht::MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use crate::ecc::SecretKey;
 use crate::measure::BehaviourJudgement;
@@ -90,6 +91,24 @@ fn transport_with_measure(measure: MeasureImpl) -> Result<SwarmTransport> {
             ReassemblyLimits::production(),
         ),
     ))
+}
+
+#[test]
+fn swarm_builder_uses_chord_virtual_node_default() -> Result<()> {
+    let key = SecretKey::random();
+    let session_sk = SessionSk::new_with_seckey(&key)?;
+    let swarm = SwarmBuilder::new(7, "", Box::new(MemStorage::new()), session_sk).build();
+
+    assert_eq!(
+        swarm.dht_virtual_nodes(),
+        DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER
+    );
+    assert_eq!(
+        swarm.dht().storage_virtual_positions(swarm.did())?.len(),
+        usize::from(DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER)
+    );
+
+    Ok(())
 }
 
 #[test]

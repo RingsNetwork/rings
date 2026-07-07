@@ -110,13 +110,25 @@ pub(super) async fn prepare_processor_with_identity_key_and_network(
     identity_key: SecretKey,
     network_id: u32,
 ) -> Processor {
+    prepare_processor_with_identity_key_network_and_virtual_nodes(identity_key, network_id, {
+        rings_core::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER
+    })
+    .await
+}
+
+pub(super) async fn prepare_processor_with_identity_key_network_and_virtual_nodes(
+    identity_key: SecretKey,
+    network_id: u32,
+    dht_virtual_nodes: u16,
+) -> Processor {
     let session_sk = SessionSk::new_with_seckey(&identity_key).unwrap();
     let config = ProcessorConfig::new(
         network_id,
         "stun://stun.l.google.com:19302".to_string(),
         session_sk,
         3,
-    );
+    )
+    .dht_virtual_nodes(dht_virtual_nodes);
     let storage = Box::new(MemStorage::new());
 
     ProcessorBuilder::from_config(&config)
@@ -149,9 +161,15 @@ pub(super) async fn prepare_online_node_registry_pair(
         }) else {
             continue;
         };
-        let publisher =
-            prepare_processor_with_identity_key_and_network(publisher_key, network_id).await;
-        let owner = prepare_processor_with_identity_key_and_network(owner_key, network_id).await;
+        let publisher = prepare_processor_with_identity_key_network_and_virtual_nodes(
+            publisher_key,
+            network_id,
+            0,
+        )
+        .await;
+        let owner =
+            prepare_processor_with_identity_key_network_and_virtual_nodes(owner_key, network_id, 0)
+                .await;
         return Ok((publisher, owner));
     }
     Err(Error::InvalidConfig(

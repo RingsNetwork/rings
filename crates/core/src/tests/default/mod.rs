@@ -129,6 +129,7 @@ pub async fn prepare_node(key: SecretKey) -> Node {
     let swarm = Arc::new(
         SwarmBuilder::new(0, stun, storage, session_sk)
             .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
+            .dht_virtual_nodes(0)
             .build(),
     );
 

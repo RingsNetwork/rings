@@ -49,6 +49,7 @@ async fn leave_dht_republishes_after_responsibility_peer_departure() -> Result<(
             session,
         )
         .dht_storage_redundancy(2)
+        .dht_virtual_nodes(0)
         .build(),
     );
     let node = Node::new(swarm);
@@ -196,6 +197,7 @@ async fn local_hit_read_repair_sends_no_search_for_unknown_replicas() -> Result<
             session,
         )
         .dht_storage_redundancy(2)
+        .dht_virtual_nodes(0)
         .build(),
     );
     let node = Node::new(swarm);
