@@ -101,7 +101,7 @@ impl MessageHandler {
 
     pub(crate) async fn join_dht(&self, peer: Did) -> Result<()> {
         // Default HMCC/Zave join path: maps to the JoinThenSync operation in
-        // the CorrectChord spec (see tests/default/dht_convergence.rs).
+        // the CorrectChord spec (see tests/default/test_dht_convergence.rs).
         let conn = self
             .transport
             .get_connection(peer)

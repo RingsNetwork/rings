@@ -1,6 +1,6 @@
 //! Mechanism two — model-checking stabilization with Stateright.
 //!
-//! `dht_convergence` pins the SAFETY fixpoint deterministically; here we
+//! `test_dht_convergence` pins the SAFETY fixpoint deterministically; here we
 //! exhaustively explore the *interleavings* of the stabilization protocol.
 //!
 //! Stateright requires `State: Clone + PartialEq + Hash`, which a live `PeerRing`
@@ -9,7 +9,7 @@
 //! `Did`-valued (DID, successors, predecessor, finger), so it round-trips
 //! losslessly to/from a real `PeerRing` (proven below), making real chord ops
 //! usable from a hashable model state. The models then use the `spec` operators
-//! (proven equal to production in `dht_convergence`) directly, which is far
+//! (proven equal to production in `test_dht_convergence`) directly, which is far
 //! cheaper for the checker to expand than a `DashMap`-backed `PeerRing` per step.
 //!
 //! Both stages are deliberately scoped (see each stage's SCOPE note); they test
@@ -49,8 +49,8 @@ use stateright::Checker;
 use stateright::Expectation;
 use stateright::Model;
 
-use super::dht_convergence::spec;
-use super::dht_convergence::K;
+use super::test_dht_convergence::spec;
+use super::test_dht_convergence::K;
 use crate::algebra::JoinSemilattice;
 use crate::consts::ENTRY_DATA_MAX_LEN;
 use crate::dht::entry::Entry;
@@ -355,7 +355,7 @@ struct DiscoveryNode {
 impl DiscoveryNode {
     /// The successor list `me` currently has, given its connected peers: the K
     /// nearest forward peers. Equals `PeerRing` after joining `connected` (the
-    /// `spec` operators are proven equal to production in `dht_convergence`);
+    /// `spec` operators are proven equal to production in `test_dht_convergence`);
     /// computed directly so the model checker can expand states cheaply.
     fn successors(&self, me: usize, connected: &BTreeSet<usize>) -> Vec<usize> {
         let mut v: Vec<usize> = connected.iter().copied().filter(|&c| c != me).collect();

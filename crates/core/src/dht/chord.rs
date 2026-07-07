@@ -676,7 +676,7 @@ impl CorrectChord<PeerRingAction> for PeerRing {
     /// Stabilize Operation:
     ///
     /// Mirrors the TLA+-style `CorrectStabilize` operator in
-    /// `tests/default/dht_convergence.rs`.
+    /// `tests/default/test_dht_convergence.rs`.
     /// The old head is captured before updating successors for the improved-successor
     /// query check; the remote successor list contributes `but_last`; and notify
     /// is emitted for the post-update head when that head is not self.

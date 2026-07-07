@@ -23,15 +23,15 @@ use crate::swarm::callback::SwarmCallback;
 use crate::swarm::Swarm;
 use crate::swarm::SwarmBuilder;
 
-mod dht_convergence;
+mod test_dht_convergence;
 // Uses the `stateright` model checker, which doesn't build for wasm32.
 #[cfg(not(target_family = "wasm"))]
-mod dht_stateright;
-mod dht_trace_replay;
+mod test_dht_stateright;
+mod test_dht_trace_replay;
 // Drives the dummy transport's controlled delivery queue (dummy-only).
-#[cfg(feature = "dummy")]
-mod dht_schedule;
 mod test_connection;
+#[cfg(feature = "dummy")]
+mod test_dht_schedule;
 // End-to-end chunking uses the dummy backend's `max_message_size` test hook.
 #[cfg(feature = "dummy")]
 mod test_chunk_e2e;

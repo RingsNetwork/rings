@@ -13,9 +13,9 @@
 //!
 //! Scope (narrow): this validates routing *correctness* only, on an
 //! already-converged ring. The other layers each cover a different thing:
-//!   * `dht_convergence` proves the deterministic safety FIXPOINT — the
+//!   * `test_dht_convergence` proves the deterministic safety FIXPOINT — the
 //!     converged state is correct, not that it is reached;
-//!   * `dht_schedule` drives the six clustered DIDs to that fixpoint
+//!   * `test_dht_schedule` drives the six clustered DIDs to that fixpoint
 //!     deterministically under representative controlled delivery orders (FIFO /
 //!     LIFO), replacing the old wall-clock-bounded flaky convergence test;
 //!   * the stage-2 Stateright model is an N=3 routing ABSTRACTION (no
@@ -27,9 +27,9 @@
 
 use num_bigint::BigUint;
 
-use super::dht_convergence::spec;
-use super::dht_convergence::Layout;
-use super::dht_convergence::K;
+use super::test_dht_convergence::spec;
+use super::test_dht_convergence::Layout;
+use super::test_dht_convergence::K;
 use crate::dht::Chord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
@@ -115,7 +115,7 @@ mod tests {
     /// From every origin, the real multi-hop `find_successor` resolves to the
     /// true successor — for arbitrary ring positions (midpoints between every
     /// pair of adjacent nodes, including the wrap gap), across the SAME
-    /// representative finger-table regimes `dht_convergence` uses: evenly spaced,
+    /// representative finger-table regimes `test_dht_convergence` uses: evenly spaced,
     /// `2^k`-aligned (fully populated), the clustered six production DIDs
     /// (collapsed fingers — the hard `closest_predecessor` branch), and the
     /// dyadic boundary. (Targets are strictly between nodes: for a target equal

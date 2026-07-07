@@ -8,7 +8,7 @@
 //! ordering here, so the result is fully deterministic — the *liveness* half
 //! (does the async protocol reach the fixpoint under arbitrary message
 //! interleavings?) is covered by the integration test (`test_stabilization_*`,
-//! which polls) and by the scoped StateRight models in `dht_stateright`.
+//! which polls) and by the scoped StateRight models in `test_dht_stateright`.
 //!
 //! ====================================================================
 //! FORMAL SPEC (TLA+) — the constraint these tests discharge.
@@ -219,7 +219,7 @@ fn did_pow(bit: usize) -> Did {
 /// A placement strategy for the DID set under test. This is the test abstraction:
 /// every layout yields a `Vec<Did>`, and the assertion is identical across all of
 /// them — only the ring structure changes, exercising different operator branches.
-/// Shared with `dht_trace_replay` so the real-routing test covers the same
+/// Shared with `test_dht_trace_replay` so the real-routing test covers the same
 /// representative finger-table regimes.
 pub(super) enum Layout {
     /// `n` evenly-spaced nodes. Smallest interesting rings / the base cases.

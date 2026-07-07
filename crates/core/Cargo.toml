@@ -134,6 +134,6 @@ wasm-bindgen-test = { workspace = true }
 
 [target.'cfg(not(target_family="wasm"))'.dev-dependencies]
 # Model checker — pulls getrandom/tiny_http, which don't build for wasm32, so
-# it (and the dht_stateright module that uses it) is non-wasm only.
+# it (and the test_dht_stateright module that uses it) is non-wasm only.
 stateright = "0.31.0"
 tokio = { version = "1.13.0", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }

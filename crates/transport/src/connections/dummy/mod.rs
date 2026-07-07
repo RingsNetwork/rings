@@ -69,7 +69,7 @@ thread_local! {
 /// Test-only controlled delivery scheduler. When enabled (per thread), dummy
 /// message/event delivery is queued instead of auto-dispatched, so a test can
 /// drive the exact ordering and deterministically explore the timing-state space
-/// (see `rings_core`'s `tests::default::dht_schedule`). Off by default; no effect
+/// (see `rings_core`'s `tests::default::test_dht_schedule`). Off by default; no effect
 /// on normal runs.
 pub mod controlled {
     use super::CONNS;

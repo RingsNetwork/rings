@@ -26,7 +26,7 @@ use crate::provider::Provider;
 use crate::tests::native::prepare_processor;
 
 mod common;
-mod config;
-mod network;
-mod onion;
-mod registry;
+mod test_config;
+mod test_network;
+mod test_onion;
+mod test_registry;

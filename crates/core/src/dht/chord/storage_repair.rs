@@ -21,7 +21,7 @@
 //!   `storage.remove`; they only deliver additional joins.
 //! - S2' No-update-loss (#611/#614 cleanup): the only deletion transition is
 //!   `acknowledge_synced_entries`; the finite model
-//!   `storage_sync_model_preserves_no_update_loss` in `dht_stateright` checks
+//!   `storage_sync_model_preserves_no_update_loss` in `test_dht_stateright` checks
 //!   that ack-delete removes a local value only when the receiver state contains
 //!   the same storage-canonical joined value.
 //! - S3 Idempotence: duplicate repair delivery is observationally equivalent to
