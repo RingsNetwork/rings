@@ -1,10 +1,13 @@
+#[cfg(feature = "node")]
 use std::sync::Arc;
+#[cfg(feature = "node")]
 use std::sync::Mutex;
 
 use rings_core::dht::Did;
 use rings_core::ecc::SecretKey;
 use rings_core::session::SessionSk;
 
+#[cfg(feature = "node")]
 use super::codec::encode_wire_message;
 use super::codec::OnionCircuitInput;
 use super::codec::OnionWireMessage;
@@ -18,9 +21,12 @@ use super::reducer::OnionCircuitReducer;
 use super::reducer::RelayReturnKey;
 use super::*;
 use crate::extension::ext::Ctx;
+#[cfg(feature = "node")]
 use crate::extension::ext::Extensions;
+#[cfg(feature = "node")]
 use crate::extension::ext::Interpret;
 use crate::extension::ext::Protocol;
+#[cfg(feature = "node")]
 use crate::extension::ext::Scope;
 use crate::extension::ext::Wire;
 use crate::onion::OnionExitDescriptor;
@@ -30,7 +36,9 @@ use crate::onion::OnionExitTransport;
 use crate::onion::OnionRoute;
 use crate::onion::OnionRouteHop;
 use crate::online::OnlineNodeType;
+#[cfg(feature = "node")]
 use crate::processor::ProcessorBuilder;
+#[cfg(feature = "node")]
 use crate::processor::ProcessorConfig;
 
 fn session() -> SessionSk {
@@ -92,6 +100,7 @@ fn decode_event(
         .expect("decode onion circuit event")
 }
 
+#[cfg(feature = "node")]
 fn test_scope(session_sk: SessionSk) -> Scope {
     let config = ProcessorConfig::new(1, String::new(), session_sk, 1);
     let processor = ProcessorBuilder::from_config(&config)
@@ -103,17 +112,20 @@ fn test_scope(session_sk: SessionSk) -> Scope {
     Scope::new(extensions.core(), ONION_CIRCUIT_NAMESPACE.to_string())
 }
 
+#[cfg(feature = "node")]
 #[derive(Clone, Default)]
 struct RecordingHandler {
     clients: Arc<Mutex<Vec<(Did, OnionCircuitId, OnionAuthenticatedPayload)>>>,
 }
 
+#[cfg(feature = "node")]
 impl RecordingHandler {
     fn take_clients(&self) -> Vec<(Did, OnionCircuitId, OnionAuthenticatedPayload)> {
         std::mem::take(&mut self.clients.lock().expect("recorded clients"))
     }
 }
 
+#[cfg(feature = "node")]
 #[cfg_attr(feature = "browser", async_trait::async_trait(?Send))]
 #[cfg_attr(not(feature = "browser"), async_trait::async_trait)]
 impl OnionCircuitHandler for RecordingHandler {
@@ -196,6 +208,7 @@ fn relay_layer_uses_distinct_next_edge_circuit_id() {
     assert_ne!(next_circuit_id, first_circuit_id);
 }
 
+#[cfg(feature = "node")]
 #[test]
 fn circuit_path_reuses_edge_ids_for_stream_payloads() {
     let client = session();
@@ -219,6 +232,7 @@ fn circuit_path_reuses_edge_ids_for_stream_payloads() {
     assert_eq!(first_next, second_next);
 }
 
+#[cfg(feature = "node")]
 fn relay_next_circuit_id(
     relay: &SessionSk,
     first_circuit_id: OnionCircuitId,
@@ -310,6 +324,7 @@ fn relay_forward_requires_opt_in_before_crypto_effect() {
     assert!(transition.effects.is_empty());
 }
 
+#[cfg(feature = "node")]
 #[tokio::test]
 async fn relay_capability_does_not_execute_exit_layer() {
     let client = session();
@@ -394,6 +409,7 @@ fn expired_exit_layer_emits_no_exit_effect() {
     assert!(transition.effects.is_empty());
 }
 
+#[cfg(feature = "node")]
 #[tokio::test]
 async fn relay_decrypts_one_layer_and_remembers_return_hop() {
     let client = session();
@@ -459,6 +475,7 @@ async fn relay_decrypts_one_layer_and_remembers_return_hop() {
     assert_eq!(transition.state.relay_return_count(), 1);
 }
 
+#[cfg(feature = "node")]
 #[tokio::test]
 async fn client_backward_payload_decryption_runs_in_shell_handler() {
     let client = session();

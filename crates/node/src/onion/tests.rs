@@ -58,7 +58,7 @@ fn signed_exit_for_session_at(
             expires_at_ms,
             version: version.to_string(),
         },
-        &session_sk,
+        session_sk,
     )
     .map_err(Error::CoreError)
 }

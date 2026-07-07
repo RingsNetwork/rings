@@ -55,7 +55,7 @@ pub fn encode_initial_forward(
 /// `first_circuit_id == edge_circuit_ids[0]`. Reusing one path for every payload in a stream
 /// preserves the exit-side stream key and refreshes the same relay return edges.
 #[cfg(feature = "node")]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) struct OnionCircuitPath {
     route: OnionRoute,
     first_circuit_id: OnionCircuitId,
