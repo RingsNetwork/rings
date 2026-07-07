@@ -113,12 +113,9 @@ impl NativeOnionCircuitHandle {
         let capabilities = OnionCircuitCapabilities::from_registration(allow_relay, allow_exit);
         extensions.register(
             OnionCircuitProtocol::new(capabilities),
-            OnionCircuitShell::new(
-                session_sk,
-                NativeOnionCircuitHandler {
-                    runtime: runtime.clone(),
-                },
-            ),
+            OnionCircuitShell::new(session_sk, NativeOnionCircuitHandler {
+                runtime: runtime.clone(),
+            }),
         )?;
         Ok(Self {
             runtime,

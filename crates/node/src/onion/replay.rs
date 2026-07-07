@@ -76,8 +76,7 @@ impl<K> Default for OnionReplayCache<K> {
 }
 
 impl<K> OnionReplayCache<K>
-where
-    K: Eq + Hash,
+where K: Eq + Hash
 {
     #[cfg(test)]
     fn with_limits(max_entries: usize, ttl_ms: u128) -> Self {

@@ -529,9 +529,7 @@ impl Serialize for ProcessorConfig {
 
 impl<'de> serde::de::Deserialize<'de> for ProcessorConfig {
     fn deserialize<D>(deserializer: D) -> core::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
+    where D: serde::Deserializer<'de> {
         match ProcessorConfigSerialized::deserialize(deserializer) {
             Ok(ins) => {
                 let cfg: ProcessorConfig = ins
@@ -688,9 +686,7 @@ impl ProcessorBuilder {
 
     /// Add a custom periodic registration task.
     pub fn registration_task<T>(mut self, task: T) -> Self
-    where
-        T: RegistrationTask + 'static,
-    {
+    where T: RegistrationTask + 'static {
         self.registration_tasks.push(Arc::new(task));
         self
     }
@@ -2755,12 +2751,9 @@ mod test {
         assert!(provider_measurement.evidence.sent >= 1);
 
         let rpc_value = provider
-            .request(
-                Method::PeerMeasurement,
-                PeerMeasurementRequest {
-                    did: p2.did().to_string(),
-                },
-            )
+            .request(Method::PeerMeasurement, PeerMeasurementRequest {
+                did: p2.did().to_string(),
+            })
             .await
             .unwrap();
         let rpc_measurement: PeerMeasurementResponse = serde_json::from_value(rpc_value).unwrap();

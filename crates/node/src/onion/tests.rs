@@ -68,12 +68,9 @@ fn online_node_at(
     heartbeat_at_ms: u128,
     expires_at_ms: u128,
 ) -> CoreResult<OnlineNodeDescriptor> {
-    online_node_at_with_capabilities(
-        session_sk,
-        heartbeat_at_ms,
-        expires_at_ms,
-        vec![ONION_RELAY_CAPABILITY.to_string()],
-    )
+    online_node_at_with_capabilities(session_sk, heartbeat_at_ms, expires_at_ms, vec![
+        ONION_RELAY_CAPABILITY.to_string(),
+    ])
 }
 
 fn online_node_at_with_capabilities(
