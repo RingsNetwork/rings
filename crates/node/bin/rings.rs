@@ -21,6 +21,7 @@ use rings_node::native::endpoint::run_internal_api;
 use rings_node::native::onion_http_proxy::run_onion_http_proxy;
 use rings_node::native::onion_http_proxy::OnionHttpProxyOptions;
 use rings_node::onion::tcp::NativeOnionCircuitHandle;
+use rings_node::onion::tcp::NativeOnionTcpExitConfig;
 use rings_node::onion::OnionExitService;
 use rings_node::onion::OnionExitTarget;
 use rings_node::onion::OnionExitTransport;
@@ -641,6 +642,7 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     let onion_session_sk = pc.session_sk();
     let advertise_onion_relay = c.advertise_onion_relay;
     let advertise_onion_exit = c.advertise_onion_exit;
+    let onion_exit_services = c.onion_exit_services.clone();
     let onion_exit_policy = c.onion_exit_policy.clone();
     let onion_http_proxy_addr = c.onion_http_proxy_addr.clone();
     let onion_http_proxy_hop_count = c.onion_http_proxy_hop_count;
@@ -684,11 +686,14 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     // registered interpreters.
     let _relay =
         rings_node::extension::protocols::relay::RelayHandle::install(&provider.extensions())?;
+    let onion_exit_config = advertise_onion_exit
+        .then(|| NativeOnionTcpExitConfig::new(onion_exit_services, onion_exit_policy.clone()))
+        .transpose()?;
     let onion = NativeOnionCircuitHandle::install(
         &provider.extensions(),
         onion_session_sk,
         advertise_onion_relay,
-        advertise_onion_exit.then_some(onion_exit_policy.clone()),
+        onion_exit_config,
     )?;
     // SNARK is a namespaced protocol now; register it so the daemon can prove/verify.
     #[cfg(feature = "snark")]

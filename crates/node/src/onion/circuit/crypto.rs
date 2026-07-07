@@ -30,6 +30,8 @@ use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionRoute;
 use crate::onion::OnionRouteError;
 use crate::onion::OnionRouteHop;
+#[cfg(feature = "node")]
+use crate::onion::OnionServiceName;
 
 /// Encode the first forward frame for `route`.
 ///
@@ -93,6 +95,11 @@ impl OnionCircuitPath {
             layer,
         };
         encode_wire_message(OnionWireMessage::Forward(frame)).map(|payload| (first, payload))
+    }
+
+    /// Return the canonical service selected by this path's route.
+    pub(crate) fn service_name(&self) -> &OnionServiceName {
+        self.route.service_name()
     }
 }
 

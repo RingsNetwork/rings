@@ -19,6 +19,7 @@ use crate::onion::circuit::OnionCircuitId;
 use crate::onion::circuit::OnionClientReturn;
 use crate::onion::exit_accounting::OnionExitLease;
 use crate::onion::OnionExitFailure;
+use crate::onion::OnionServiceName;
 
 pub(super) struct ExitStreamTask {
     pub(super) runtime: Arc<OnionTcpRuntime>,
@@ -27,6 +28,7 @@ pub(super) struct ExitStreamTask {
     pub(super) circuit_id: OnionCircuitId,
     pub(super) return_peer: Did,
     pub(super) client: OnionClientReturn,
+    pub(super) service: OnionServiceName,
     pub(super) stream: TcpStream,
     pub(super) rx: mpsc::Receiver<TcpInbound>,
     pub(super) lease: OnionExitLease,
@@ -38,6 +40,7 @@ struct ExitReturnPath {
     circuit_id: OnionCircuitId,
     return_peer: Did,
     client: OnionClientReturn,
+    service: OnionServiceName,
 }
 
 impl ExitReturnPath {
@@ -45,6 +48,7 @@ impl ExitReturnPath {
         send_tcp_backward(
             &self.scope,
             &self.runtime.session_sk,
+            &self.service,
             self.circuit_id,
             self.return_peer,
             self.client,
@@ -60,11 +64,11 @@ impl ExitReturnPath {
                 .await;
             return false;
         };
-        let rejected = self
-            .runtime
-            .exit_policy
-            .as_ref()
-            .is_some_and(|policy| self.runtime.record_exit_bytes(policy, bytes).is_err());
+        let rejected = self.runtime.exit_config.as_ref().is_some_and(|config| {
+            self.runtime
+                .record_exit_bytes(config.policy(), bytes)
+                .is_err()
+        });
         if rejected {
             let _ = self
                 .send(OnionTcpPayload::Error(OnionExitFailure::PermissionDenied))
@@ -86,6 +90,7 @@ async fn run_exit_stream(task: ExitStreamTask) {
         circuit_id,
         return_peer,
         client,
+        service,
         stream,
         mut rx,
         lease,
@@ -96,6 +101,7 @@ async fn run_exit_stream(task: ExitStreamTask) {
         circuit_id,
         return_peer,
         client,
+        service,
     };
     let (mut read, mut write) = stream.into_split();
     let mut read_buf = vec![0_u8; TCP_BUF];

@@ -3,6 +3,8 @@ use rings_core::ecc::SecretKey;
 use super::*;
 use crate::onion::OnionExitDescriptorBody;
 use crate::onion::OnionExitService;
+use crate::onion::OnionExitTransport;
+use crate::onion::OnionServiceName;
 use crate::online::OnlineNodeType;
 
 fn did() -> Did {
@@ -44,9 +46,17 @@ fn dummy_authenticated_payload(
     return_id: OnionReturnId,
     session: &SessionSk,
 ) -> OnionAuthenticatedPayload {
+    dummy_authenticated_payload_for_service(return_id, session, OnionServiceName::tcp())
+}
+
+fn dummy_authenticated_payload_for_service(
+    return_id: OnionReturnId,
+    session: &SessionSk,
+    service: OnionServiceName,
+) -> OnionAuthenticatedPayload {
     OnionAuthenticatedPayload::new_signed(
         return_id,
-        encode_tcp_payload(OnionTcpPayload::Close).expect("encode payload"),
+        encode_tcp_payload(&service, OnionTcpPayload::Close).expect("encode payload"),
         session,
     )
     .expect("signed payload")
@@ -59,8 +69,26 @@ fn insert_test_client_stream(
     return_id: OnionReturnId,
     tx: mpsc::Sender<TcpInbound>,
 ) -> Result<TcpStreamKey> {
+    insert_test_client_stream_for_service(
+        runtime,
+        OnionServiceName::tcp(),
+        expected,
+        exit,
+        return_id,
+        tx,
+    )
+}
+
+fn insert_test_client_stream_for_service(
+    runtime: &OnionTcpRuntime,
+    service: OnionServiceName,
+    expected: Did,
+    exit: OnionExitDescriptor,
+    return_id: OnionReturnId,
+    tx: mpsc::Sender<TcpInbound>,
+) -> Result<TcpStreamKey> {
     let (open_tx, _open_rx) = tokio::sync::oneshot::channel();
-    runtime.insert_client_stream(expected, exit, return_id, open_tx, tx)
+    runtime.insert_client_stream(service, expected, exit, return_id, open_tx, tx)
 }
 
 #[test]
@@ -173,6 +201,76 @@ fn exit_runtime_rejects_replayed_forward_nonce() -> Result<()> {
 }
 
 #[test]
+fn tcp_payload_uses_selected_route_service() -> Result<()> {
+    let service = OnionServiceName::parse("web")?;
+    let payload = encode_tcp_payload(&service, OnionTcpPayload::Close)?;
+
+    assert!(payload.is_service(&service));
+    assert!(!payload.is_service(&OnionServiceName::tcp()));
+    Ok(())
+}
+
+#[test]
+fn native_tcp_exit_config_rejects_empty_or_non_tcp_services() {
+    assert!(matches!(
+        NativeOnionTcpExitConfig::new(Vec::new(), OnionExitPolicy::default()),
+        Err(Error::InvalidConfig(_))
+    ));
+    assert!(matches!(
+        NativeOnionTcpExitConfig::new(vec![OnionExitService::https()], OnionExitPolicy::default()),
+        Err(Error::InvalidConfig(_))
+    ));
+}
+
+#[test]
+fn exit_runtime_accepts_only_installed_tcp_services() -> Result<()> {
+    let service = OnionServiceName::parse("web")?;
+    let config = NativeOnionTcpExitConfig::new(
+        vec![OnionExitService::new("web", OnionExitTransport::Tcp)?],
+        OnionExitPolicy::default(),
+    )?;
+    let runtime = OnionTcpRuntime::new(session(), Some(config));
+    let custom_payload = encode_tcp_payload(&service, OnionTcpPayload::Close)?;
+    let tcp_payload = encode_tcp_payload(&OnionServiceName::tcp(), OnionTcpPayload::Close)?;
+
+    assert!(matches!(
+        runtime.decode_exit_payload(custom_payload)?,
+        Some((accepted, OnionTcpPayload::Close)) if accepted == service
+    ));
+    assert!(runtime.decode_exit_payload(tcp_payload)?.is_none());
+    Ok(())
+}
+
+#[test]
+fn client_stream_rejects_backward_payload_for_wrong_service() -> Result<()> {
+    let runtime = runtime();
+    let expected = did();
+    let exit = session();
+    let return_id = OnionReturnId::new([10; 16]);
+    let (tx, _rx) = mpsc::channel(1);
+    let key = insert_test_client_stream_for_service(
+        &runtime,
+        OnionServiceName::parse("web")?,
+        expected,
+        exit_descriptor(&exit),
+        return_id,
+        tx,
+    )?;
+
+    assert!(matches!(
+        runtime.verify_client_payload(
+            key,
+            expected,
+            dummy_authenticated_payload_for_service(return_id, &exit, OnionServiceName::tcp()),
+        ),
+        Err(Error::OnionRouteError(
+            OnionRouteError::PayloadServiceMismatch { .. }
+        ))
+    ));
+    Ok(())
+}
+
+#[test]
 fn exit_limiter_enforces_streams_per_circuit() {
     let runtime = runtime();
     let policy = OnionExitPolicy {
@@ -205,9 +303,11 @@ fn exit_stream_rejects_duplicate_live_circuit() {
     let (first_tx, _first_rx) = mpsc::channel(1);
     let (second_tx, _second_rx) = mpsc::channel(1);
 
-    assert!(runtime.insert_exit_stream(key, expected, first_tx).is_ok());
+    assert!(runtime
+        .insert_exit_stream(key, OnionServiceName::tcp(), expected, first_tx)
+        .is_ok());
     assert!(matches!(
-        runtime.insert_exit_stream(key, expected, second_tx),
+        runtime.insert_exit_stream(key, OnionServiceName::tcp(), expected, second_tx),
         Err(Error::OnionRouteError(_))
     ));
 }
