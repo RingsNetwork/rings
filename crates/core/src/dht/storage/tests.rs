@@ -98,16 +98,21 @@ fn interval_key_with_virtual_successor(node: &PeerRing, owner: Did) -> Result<Di
         .ok_or_else(|| Error::InvalidMessage("missing virtual successor interval".to_string()))
 }
 
+struct ObservedStorageSyncMessage {
+    target: Did,
+    purpose: StorageSyncPurpose,
+    route: StorageSyncRoute,
+    data: Vec<PlacedEntry>,
+}
+
 fn collect_sync_batches(act: PeerRingAction) -> Result<Vec<(Did, Vec<PlacedEntry>)>> {
     Ok(collect_sync_messages(act)?
         .into_iter()
-        .map(|(target, _, _, data)| (target, data))
+        .map(|message| (message.target, message.data))
         .collect())
 }
 
-fn collect_sync_messages(
-    act: PeerRingAction,
-) -> Result<Vec<(Did, StorageSyncPurpose, StorageSyncRoute, Vec<PlacedEntry>)>> {
+fn collect_sync_messages(act: PeerRingAction) -> Result<Vec<ObservedStorageSyncMessage>> {
     let mut messages = Vec::new();
     collect_sync_messages_into(act, &mut messages)?;
     Ok(messages)
@@ -115,7 +120,7 @@ fn collect_sync_messages(
 
 fn collect_sync_messages_into(
     act: PeerRingAction,
-    messages: &mut Vec<(Did, StorageSyncPurpose, StorageSyncRoute, Vec<PlacedEntry>)>,
+    messages: &mut Vec<ObservedStorageSyncMessage>,
 ) -> Result<()> {
     match act {
         PeerRingAction::None => Ok(()),
@@ -127,7 +132,12 @@ fn collect_sync_messages_into(
                 data,
             },
         ) => {
-            messages.push((target, purpose, route, data));
+            messages.push(ObservedStorageSyncMessage {
+                target,
+                purpose,
+                route,
+                data,
+            });
             Ok(())
         }
         PeerRingAction::MultiActions(actions) => {
@@ -309,15 +319,15 @@ async fn virtual_storage_sync_copies_entries_to_observed_virtual_owner() -> Resu
         collect_sync_messages(node.sync_entries_with_successor(Did::from(99u32)).await?)?;
 
     assert_eq!(messages.len(), 1);
-    let Some((target, purpose, route, data)) = messages.into_iter().next() else {
+    let Some(message) = messages.into_iter().next() else {
         return Err(Error::InvalidMessage(
             "missing virtual sync batch".to_string(),
         ));
     };
-    assert_eq!(target, remote);
-    assert_eq!(purpose, StorageSyncPurpose::AdditiveRepair);
-    assert_eq!(route, StorageSyncRoute::PhysicalOwner);
-    assert_eq!(data, vec![PlacedEntry::new(placement, entry)]);
+    assert_eq!(message.target, remote);
+    assert_eq!(message.purpose, StorageSyncPurpose::AdditiveRepair);
+    assert_eq!(message.route, StorageSyncRoute::PhysicalOwner);
+    assert_eq!(message.data, vec![PlacedEntry::new(placement, entry)]);
     Ok(())
 }
 
