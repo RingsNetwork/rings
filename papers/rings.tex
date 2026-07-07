@@ -64,9 +64,9 @@ for Decentralized Identity and Resource Ownership}
 \parbox{0.90\textwidth}{%
 \centering\bfseries Abstract\\[0.5\baselineskip]%
 \normalfont
-Rings formalizes an implemented structured peer-to-peer network as a
-carrier-separated authority algebra.  The motivating failure mode is authority
-collapse:
+This paper presents Rings, an implemented structured peer-to-peer network, and
+specifies its authority boundary as a carrier-separated algebra.  The motivating
+failure mode is authority collapse:
 \[
   \mathsf{root}(id,data,route)
   \in\{\mathsf{server},\mathsf{dns},\mathsf{relay},\mathsf{platform}\}.
@@ -124,8 +124,8 @@ The contribution is the algebra and its claim ledger:
 
 Centralized platforms are efficient deployment mechanisms but poor authority
 carriers: identity, naming, storage, and traffic control collapse to service
-operators~\cite{Kshetri2013,Zissis2012,KshetriMurugesan2013}.  Rings studies
-the following algebraic question:
+operators~\cite{Kshetri2013,Zissis2012,KshetriMurugesan2013}.  This paper
+studies Rings through the following algebraic question:
 \[
 \begin{array}{rcl}
 \mathsf{Own}(d)&=&k_d,\\
@@ -2077,13 +2077,13 @@ Security work on DHTs shows why this separation must be explicit.  Secure
 routing, Sybil, and Eclipse attacks require admission, identifier assignment,
 neighbor-set constraints, auditing, or redundant routing beyond ordinary DHT
 maintenance~\cite{SitMorrisDHTSecurity,SecureRoutingOverlays,SybilDouceur,
-EclipseOverlay}.  Rings therefore states Sybil, Eclipse, anonymity, and DoS
-resistance as policy obligations, not as consequences of CorrectChord.
+EclipseOverlay}.  This paper therefore states Sybil, Eclipse, anonymity, and
+DoS resistance as policy obligations, not as consequences of CorrectChord.
 
 Anonymity systems make traffic analysis a primary security objective.  Tor uses
 onion routing; Nym adds mix-network style privacy infrastructure
-\cite{TorNetwork,NymNetwork}.  Rings does not prove sender, receiver, or route
-unlinkability.  Its relay layer is only a typed transport policy:
+\cite{TorNetwork,NymNetwork}.  This paper does not prove sender, receiver, or
+route unlinkability.  Rings' relay layer is only a typed transport policy:
 \[
   \mathsf{P}_{relay}\not\Rightarrow\mathsf{Anon}.
 \]
@@ -2097,9 +2097,8 @@ WebRTCMeasurement}.
 
 \section{Conclusion}
 
-Rings should be read as a bounded theorem plus a claim ledger for an implemented
-algebraic object,
-not as an informal bundle of peer-to-peer mechanisms:
+This paper should be read as a bounded theorem plus a claim ledger for the Rings
+implementation, not as an informal bundle of peer-to-peer mechanisms:
 
 \[
   \RingsObj=
