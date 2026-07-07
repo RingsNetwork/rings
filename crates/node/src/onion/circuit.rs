@@ -36,6 +36,9 @@ pub use shell::OnionCircuitExitFrame;
 pub use shell::OnionCircuitHandler;
 pub use shell::OnionCircuitShell;
 
+use super::OnionServiceName;
+use crate::error::Result;
+
 /// Namespace used by route-aware onion circuit messages.
 pub const ONION_CIRCUIT_NAMESPACE: &str = "onion-circuit";
 
@@ -66,24 +69,44 @@ pub(super) const ONION_AEAD_NAMESPACE: &str = "rings-node:onion-circuit:v1";
 /// adapters own their own payload algebra outside the encrypted circuit core.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct OnionCircuitPayload {
-    /// Application service label selected from the onion-exit registry.
-    pub service: String,
+    /// Canonical application service selected from the onion-exit registry.
+    pub service: OnionServiceName,
     /// Adapter-owned payload bytes.
     pub body: Bytes,
 }
 
 impl OnionCircuitPayload {
-    /// Build an opaque circuit payload for one application service.
-    pub fn new(service: impl Into<String>, body: impl Into<Bytes>) -> Self {
+    /// Build an opaque circuit payload for one already-validated application service.
+    pub fn new(service: OnionServiceName, body: impl Into<Bytes>) -> Self {
         Self {
-            service: service.into(),
+            service,
             body: body.into(),
         }
     }
 
-    /// Return whether this payload belongs to `service`.
-    pub fn is_service(&self, service: &str) -> bool {
-        self.service == service
+    /// Build an opaque circuit payload from an untrusted service string.
+    pub fn try_new(service: impl AsRef<str>, body: impl Into<Bytes>) -> Result<Self> {
+        Ok(Self::new(OnionServiceName::parse(service)?, body))
+    }
+
+    /// Return the canonical service selected by this payload.
+    pub fn service(&self) -> &str {
+        self.service.as_str()
+    }
+
+    /// Return the canonical service name selected by this payload.
+    pub fn service_name(&self) -> &OnionServiceName {
+        &self.service
+    }
+
+    /// Return whether this payload belongs to the already canonical `service`.
+    pub fn is_service(&self, service: &OnionServiceName) -> bool {
+        &self.service == service
+    }
+
+    /// Return whether this payload belongs to `service` after service-name canonicalization.
+    pub fn matches_service(&self, service: &str) -> bool {
+        self.service.matches(service)
     }
 }
 

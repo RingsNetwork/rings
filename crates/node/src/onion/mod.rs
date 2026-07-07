@@ -168,6 +168,16 @@ impl OnionServiceName {
         Ok(Self(trimmed.to_ascii_lowercase()))
     }
 
+    /// Return the standard browser HTTPS exit service name.
+    pub fn https() -> Self {
+        Self::static_name("https")
+    }
+
+    /// Return the standard native TCP exit service name.
+    pub fn tcp() -> Self {
+        Self::static_name("tcp")
+    }
+
     /// Build a trusted static service name.
     fn static_name(name: &'static str) -> Self {
         Self(name.to_string())
@@ -211,18 +221,12 @@ impl OnionExitService {
 
     /// Return the standard browser HTTPS exit service.
     pub fn https() -> Self {
-        Self::from_name(
-            OnionServiceName::static_name("https"),
-            OnionExitTransport::Https,
-        )
+        Self::from_name(OnionServiceName::https(), OnionExitTransport::Https)
     }
 
     /// Return the standard native TCP exit service.
     pub fn tcp() -> Self {
-        Self::from_name(
-            OnionServiceName::static_name("tcp"),
-            OnionExitTransport::Tcp,
-        )
+        Self::from_name(OnionServiceName::tcp(), OnionExitTransport::Tcp)
     }
 
     /// Return whether this service has the requested name.

@@ -35,6 +35,7 @@ use crate::onion::OnionExitService;
 use crate::onion::OnionExitTransport;
 use crate::onion::OnionRoute;
 use crate::onion::OnionRouteHop;
+use crate::onion::OnionServiceName;
 use crate::online::OnlineNodeType;
 #[cfg(feature = "node")]
 use crate::processor::ProcessorBuilder;
@@ -46,14 +47,22 @@ fn session() -> SessionSk {
 }
 
 fn test_payload(label: &str) -> OnionCircuitPayload {
-    OnionCircuitPayload::new("https", Bytes::copy_from_slice(label.as_bytes()))
+    OnionCircuitPayload::new(
+        OnionServiceName::https(),
+        Bytes::copy_from_slice(label.as_bytes()),
+    )
 }
 
 fn payload_for_service(service: &str, label: &str) -> OnionCircuitPayload {
-    OnionCircuitPayload::new(service, Bytes::copy_from_slice(label.as_bytes()))
+    OnionCircuitPayload::try_new(service, Bytes::copy_from_slice(label.as_bytes()))
+        .expect("valid payload service")
 }
 
 fn route(relays: &[SessionSk], exit_session: &SessionSk) -> OnionRoute {
+    route_for_service("https", relays, exit_session)
+}
+
+fn route_for_service(service: &str, relays: &[SessionSk], exit_session: &SessionSk) -> OnionRoute {
     let exit = exit_session.account_did();
     let public_key = exit_session
         .session()
@@ -82,7 +91,12 @@ fn route(relays: &[SessionSk], exit_session: &SessionSk) -> OnionRoute {
         exit_session,
     )
     .expect("signed exit");
-    OnionRoute::new("https".to_string(), encryption_hops, exit).expect("valid route")
+    OnionRoute::new(
+        OnionServiceName::parse(service).expect("valid route service"),
+        encryption_hops,
+        exit,
+    )
+    .expect("valid route")
 }
 
 fn decode_event(
@@ -265,7 +279,7 @@ fn route_constructor_rejects_mismatched_exit_hop() {
 
     assert!(matches!(
         OnionRoute::new(
-            route.service().to_string(),
+            route.service_name().clone(),
             encryption_hops,
             route.exit().clone(),
         ),
@@ -289,6 +303,23 @@ fn initial_forward_requires_route_payload_service_match() {
         ),
         Err(crate::error::Error::OnionRouteError(_))
     ));
+}
+
+#[test]
+fn initial_forward_accepts_canonical_payload_for_mixed_case_route_service() {
+    let client = session();
+    let exit = session();
+    let route = route_for_service("HTTPS", &[], &exit);
+    let circuit_id = OnionCircuitId::new([10; 16]);
+
+    let result = encode_initial_forward(
+        OnionClientReturn::new(client.session_public_key()),
+        &route,
+        circuit_id,
+        payload_for_service("https", "canonical-service"),
+    );
+
+    assert!(result.is_ok());
 }
 
 #[test]

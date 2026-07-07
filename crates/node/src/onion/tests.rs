@@ -101,6 +101,14 @@ fn node_key() -> CoreResult<SessionSk> {
     SessionSk::new_with_seckey(&SecretKey::random())
 }
 
+fn route_request(
+    service: &str,
+    hop_count: usize,
+    allow_short_paths: bool,
+) -> Result<OnionRouteRequest> {
+    OnionRouteRequest::new(service, hop_count, allow_short_paths)
+}
+
 struct FixedEntropy {
     values: VecDeque<u64>,
 }
@@ -366,11 +374,7 @@ fn route_builder_uses_presence_relays_and_exit_registry() -> Result<()> {
         online_node_at(&first_relay, 20, 100).map_err(Error::CoreError)?,
         online_node_at(&second_relay, 20, 100).map_err(Error::CoreError)?,
     ];
-    let request = OnionRouteRequest {
-        service: "web".to_string(),
-        hop_count: 3,
-        allow_short_paths: false,
-    };
+    let request = route_request("web", 3, false)?;
 
     let route = select_onion_route(
         local,
@@ -390,15 +394,23 @@ fn route_builder_uses_presence_relays_and_exit_registry() -> Result<()> {
 }
 
 #[test]
+fn route_builder_canonicalizes_service_before_constructing_route() -> Result<()> {
+    let local = node_key().map_err(Error::CoreError)?.account_did();
+    let exit = signed_exit_at(20, 100)?;
+    let request = route_request("WeB", 1, false)?;
+
+    let route = select_onion_route(local, 1, 50, &request, Vec::new(), vec![exit], Vec::new())?;
+
+    assert_eq!(route.service(), "web");
+    Ok(())
+}
+
+#[test]
 fn route_builder_rejects_too_short_production_route() -> Result<()> {
     let local = node_key().map_err(Error::CoreError)?.account_did();
     let relay = node_key().map_err(Error::CoreError)?;
     let exit = signed_exit_at(20, 100)?;
-    let request = OnionRouteRequest {
-        service: "web".to_string(),
-        hop_count: 3,
-        allow_short_paths: false,
-    };
+    let request = route_request("web", 3, false)?;
 
     let result = select_onion_route(
         local,
@@ -424,11 +436,7 @@ fn route_builder_rejects_nodes_without_relay_capability() -> Result<()> {
     let local = node_key().map_err(Error::CoreError)?.account_did();
     let relay = node_key().map_err(Error::CoreError)?;
     let exit = signed_exit_at(20, 100)?;
-    let request = OnionRouteRequest {
-        service: "web".to_string(),
-        hop_count: 2,
-        allow_short_paths: false,
-    };
+    let request = route_request("web", 2, false)?;
 
     let result = select_onion_route(
         local,
@@ -455,11 +463,7 @@ fn route_builder_samples_relays_by_quality_weight() -> Result<()> {
     let degraded = node_key().map_err(Error::CoreError)?;
     let healthy = node_key().map_err(Error::CoreError)?;
     let exit = signed_exit_at(20, 100)?;
-    let request = OnionRouteRequest {
-        service: "web".to_string(),
-        hop_count: 2,
-        allow_short_paths: false,
-    };
+    let request = route_request("web", 2, false)?;
     let candidates = OnionRouteCandidates {
         relays: vec![
             OnionRouteHop::new(degraded.account_did(), degraded.session_public_key()),
@@ -489,11 +493,7 @@ fn route_builder_entropy_can_select_second_unknown_relay() -> Result<()> {
     let first = node_key().map_err(Error::CoreError)?;
     let second = node_key().map_err(Error::CoreError)?;
     let exit = signed_exit_at(20, 100)?;
-    let request = OnionRouteRequest {
-        service: "web".to_string(),
-        hop_count: 2,
-        allow_short_paths: false,
-    };
+    let request = route_request("web", 2, false)?;
     let mut relay_hops = vec![
         OnionRouteHop::new(first.account_did(), first.session_public_key()),
         OnionRouteHop::new(second.account_did(), second.session_public_key()),

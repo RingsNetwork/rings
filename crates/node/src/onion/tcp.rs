@@ -80,12 +80,14 @@ enum OnionTcpPayload {
 
 fn encode_tcp_payload(payload: OnionTcpPayload) -> Result<OnionCircuitPayload> {
     bincode::serialize(&payload)
-        .map(|body| OnionCircuitPayload::new(ONION_PROXY_TCP_SERVICE, Bytes::from(body)))
+        .map(|body| {
+            OnionCircuitPayload::new(crate::onion::OnionServiceName::tcp(), Bytes::from(body))
+        })
         .map_err(|_| Error::EncodeError)
 }
 
 fn decode_tcp_payload(payload: OnionCircuitPayload) -> Result<Option<OnionTcpPayload>> {
-    if !payload.is_service(ONION_PROXY_TCP_SERVICE) {
+    if !payload.matches_service(ONION_PROXY_TCP_SERVICE) {
         return Ok(None);
     }
     bincode::deserialize(payload.body.as_ref())

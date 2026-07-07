@@ -421,10 +421,10 @@ struct OnionAeadDirectionContext {
 }
 
 fn validate_route_payload_service(route: &OnionRoute, payload: &OnionCircuitPayload) -> Result<()> {
-    if !payload.is_service(route.service()) {
+    if !payload.is_service(route.service_name()) {
         return Err(Error::OnionRouteError(
             OnionRouteError::PayloadServiceMismatch {
-                payload_service: payload.service.clone(),
+                payload_service: payload.service().to_string(),
                 route_service: route.service().to_string(),
             },
         ));

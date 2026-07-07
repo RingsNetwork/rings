@@ -92,12 +92,14 @@ pub(crate) enum OnionHttpsPayload {
 
 pub(crate) fn encode_https_payload(payload: OnionHttpsPayload) -> Result<OnionCircuitPayload> {
     bincode::serialize(&payload)
-        .map(|body| OnionCircuitPayload::new(ONION_PROXY_HTTPS_SERVICE, Bytes::from(body)))
+        .map(|body| {
+            OnionCircuitPayload::new(crate::onion::OnionServiceName::https(), Bytes::from(body))
+        })
         .map_err(|_| Error::EncodeError)
 }
 
 fn decode_https_payload(payload: OnionCircuitPayload) -> Result<Option<OnionHttpsPayload>> {
-    if !payload.is_service(ONION_PROXY_HTTPS_SERVICE) {
+    if !payload.matches_service(ONION_PROXY_HTTPS_SERVICE) {
         return Ok(None);
     }
     bincode::deserialize(payload.body.as_ref())
