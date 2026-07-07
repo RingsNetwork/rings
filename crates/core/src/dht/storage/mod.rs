@@ -225,11 +225,11 @@ impl PeerRing {
         Ok(self.storage_virtual_nodes()?.positions_for_owner(owner))
     }
 
-    pub(super) fn storage_virtual_owner(&self, placement_key: Did) -> Result<Option<Did>> {
+    pub(super) fn observed_storage_virtual_owner(&self, placement_key: Did) -> Result<Option<Did>> {
         Ok(self.storage_virtual_nodes()?.owner_for_key(placement_key))
     }
 
-    pub(super) fn storage_virtual_owner_registered(&self, owner: Did) -> Result<bool> {
+    pub(super) fn observed_storage_virtual_owner_registered(&self, owner: Did) -> Result<bool> {
         Ok(self.storage_virtual_nodes()?.contains_owner(owner))
     }
 
@@ -251,7 +251,7 @@ impl PeerRing {
     }
 
     pub(crate) fn find_storage_owner(&self, placement_key: Did) -> Result<PeerRingAction> {
-        if let Some(owner) = self.storage_virtual_owner(placement_key)? {
+        if let Some(owner) = self.observed_storage_virtual_owner(placement_key)? {
             if owner == self.did {
                 Ok(PeerRingAction::Some(owner))
             } else {
@@ -266,7 +266,7 @@ impl PeerRing {
     }
 
     pub(super) fn storage_sync_target(&self, placement_key: Did) -> Result<StorageSyncTarget> {
-        if let Some(owner) = self.storage_virtual_owner(placement_key)? {
+        if let Some(owner) = self.observed_storage_virtual_owner(placement_key)? {
             if owner == self.did {
                 Ok(StorageSyncTarget::Local)
             } else {

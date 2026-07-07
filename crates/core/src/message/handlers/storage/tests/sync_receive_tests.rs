@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::finish_storage_action;
+use super::super::finish_storage_action;
 use super::test_support::install_two_node_chord_view;
 use super::test_support::next_generated_key;
 use super::test_support::next_payload;

@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
+use super::super::ChordStorageInterface;
+use super::super::ChordStorageInterfaceCacheChecker;
 use super::test_support::next_generated_key;
 use super::test_support::next_payload;
 use super::test_support::non_affine_placement;
 use super::test_support::prepare_node_with_storage_redundancy;
 use super::test_support::split_redundant_entry;
 use super::test_support::NoopCallback;
-use super::ChordStorageInterface;
-use super::ChordStorageInterfaceCacheChecker;
 use crate::dht::entry::Entry;
 use crate::dht::entry::PlacedEntryOperation;
 use crate::dht::entry::PlacementMiss;
@@ -224,7 +224,7 @@ async fn local_hit_read_repair_sends_no_search_for_unknown_replicas() -> Result<
 
 #[tokio::test]
 async fn found_entry_repairs_buffered_misses_only() -> Result<()> {
-    let node = prepare_node(SecretKey::random()).await;
+    let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
     let entry = Entry::new(
         Did::from(10u32),
@@ -252,6 +252,7 @@ async fn found_entry_repairs_buffered_misses_only() -> Result<()> {
         node.did(),
         node.did(),
     )?;
+    node.swarm.transport.start_storage_lookup(entry.did, 2)?;
 
     handler
         .handle(&context, &FoundEntry {
@@ -328,11 +329,141 @@ async fn found_entry_rejects_multiple_entries() -> Result<()> {
 }
 
 #[tokio::test]
+async fn found_entry_rejects_redundancy_outside_local_protocol_mode() -> Result<()> {
+    let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
+    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let resource = Did::from(10u32);
+    let entry = Entry::new(
+        resource,
+        vec!["wrong redundancy".to_string().encode()?],
+        EntryKind::Data,
+    );
+    let context_key = SecretKey::random();
+    let context_session = SessionSk::new_with_seckey(&context_key)?;
+    let context = MessagePayload::new_send(
+        Message::FoundEntry(FoundEntry {
+            data: vec![entry.clone()],
+            misses: vec![],
+            resource,
+            redundancy: 3,
+        }),
+        &context_session,
+        node.did(),
+        node.did(),
+    )?;
+    node.swarm.transport.start_storage_lookup(resource, 2)?;
+
+    let result = handler
+        .handle(&context, &FoundEntry {
+            data: vec![entry],
+            misses: vec![],
+            resource,
+            redundancy: 3,
+        })
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(Error::StorageRedundancyMismatch {
+            configured: 2,
+            requested: 3
+        })
+    ));
+    assert_eq!(node.swarm.storage_check_cache(resource).await, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn found_entry_rejects_response_without_active_lookup() -> Result<()> {
+    let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
+    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let resource = Did::from(10u32);
+    let entry = Entry::new(
+        resource,
+        vec!["unsolicited".to_string().encode()?],
+        EntryKind::Data,
+    );
+    let context_key = SecretKey::random();
+    let context_session = SessionSk::new_with_seckey(&context_key)?;
+    let context = MessagePayload::new_send(
+        Message::FoundEntry(FoundEntry {
+            data: vec![entry.clone()],
+            misses: vec![],
+            resource,
+            redundancy: 2,
+        }),
+        &context_session,
+        node.did(),
+        node.did(),
+    )?;
+
+    let result = handler
+        .handle(&context, &FoundEntry {
+            data: vec![entry],
+            misses: vec![],
+            resource,
+            redundancy: 2,
+        })
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(Error::InvalidMessage(message)) if message.contains("no active local lookup")
+    ));
+    assert_eq!(node.swarm.storage_check_cache(resource).await, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn found_entry_rejects_resource_mismatch_without_cache_write() -> Result<()> {
+    let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
+    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let resource = Did::from(10u32);
+    let entry = Entry::new(
+        Did::from(11u32),
+        vec!["wrong resource".to_string().encode()?],
+        EntryKind::Data,
+    );
+    let context_key = SecretKey::random();
+    let context_session = SessionSk::new_with_seckey(&context_key)?;
+    let context = MessagePayload::new_send(
+        Message::FoundEntry(FoundEntry {
+            data: vec![entry.clone()],
+            misses: vec![],
+            resource,
+            redundancy: 2,
+        }),
+        &context_session,
+        node.did(),
+        node.did(),
+    )?;
+    node.swarm.transport.start_storage_lookup(resource, 2)?;
+
+    let result = handler
+        .handle(&context, &FoundEntry {
+            data: vec![entry.clone()],
+            misses: vec![],
+            resource,
+            redundancy: 2,
+        })
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(Error::InvalidMessage(message)) if message.contains("does not match searched resource")
+    ));
+    assert_eq!(node.swarm.storage_check_cache(entry.did).await, None);
+    assert_eq!(node.swarm.storage_check_cache(resource).await, None);
+    Ok(())
+}
+
+#[tokio::test]
 async fn storage_miss_observation_buffer_is_bounded() -> Result<()> {
-    let node = prepare_node(SecretKey::random()).await;
+    let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
     for index in 0..(STORAGE_LOOKUP_OBSERVATION_CAPACITY + 8) {
         let resource = Did::from((index + 1) as u32);
         let placement = Did::from((index + 10_000) as u32);
+        node.swarm.transport.start_storage_lookup(resource, 2)?;
         node.swarm
             .transport
             .observe_storage_misses(resource, 2, [PlacementMiss::new(placement, node.did())])?;
@@ -350,6 +481,7 @@ async fn storage_fetch_starts_fresh_observation_round() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
     let resource = Did::from(10u32);
     let placement = Did::from(100u32);
+    node.swarm.transport.start_storage_lookup(resource, 1)?;
     node.swarm
         .transport
         .observe_storage_misses(resource, 1, [PlacementMiss::new(placement, node.did())])?;
@@ -358,13 +490,13 @@ async fn storage_fetch_starts_fresh_observation_round() -> Result<()> {
     let misses = node.swarm.transport.take_storage_misses(resource, 1)?;
 
     assert!(misses.is_empty());
-    assert_eq!(node.swarm.transport.storage_lookup_observation_count()?, 0);
+    assert_eq!(node.swarm.transport.storage_lookup_observation_count()?, 1);
     Ok(())
 }
 
 #[tokio::test]
-async fn expired_storage_misses_do_not_trigger_late_repair() -> Result<()> {
-    let node = prepare_node(SecretKey::random()).await;
+async fn expired_storage_response_does_not_update_cache_or_repair() -> Result<()> {
+    let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
     let entry = Entry::new(
         Did::from(10u32),
@@ -390,6 +522,7 @@ async fn expired_storage_misses_do_not_trigger_late_repair() -> Result<()> {
         node.did(),
         node.did(),
     )?;
+    node.swarm.transport.start_storage_lookup(entry.did, 2)?;
 
     handler
         .handle(&context, &FoundEntry {
@@ -402,16 +535,20 @@ async fn expired_storage_misses_do_not_trigger_late_repair() -> Result<()> {
     node.swarm
         .transport
         .expire_storage_lookup_observation(entry.did, 2)?;
-    handler
+    let result = handler
         .handle(&context, &FoundEntry {
             data: vec![entry.clone()],
             misses: vec![],
             resource: entry.did,
             redundancy: 2,
         })
-        .await?;
+        .await;
 
-    assert_eq!(node.swarm.storage_check_cache(entry.did).await, Some(entry));
+    assert!(matches!(
+        result,
+        Err(Error::InvalidMessage(message)) if message.contains("no active local lookup")
+    ));
+    assert_eq!(node.swarm.storage_check_cache(entry.did).await, None);
     assert_eq!(
         node.dht().storage.get(&placement_key.to_string()).await?,
         None

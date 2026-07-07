@@ -9,6 +9,7 @@ use rings_core::ecc::VerificationPublicKey;
 use rings_core::error::Error;
 use rings_core::error::Result;
 use rings_core::message::Decoder;
+use rings_core::message::DhtProtocolMode;
 use rings_core::message::Encoded;
 use rings_core::message::Encoder;
 use rings_core::message::MessageVerification;
@@ -45,6 +46,8 @@ pub struct OnlineNodeDescriptorBody {
     pub node_type: OnlineNodeType,
     /// Network identifier.
     pub network_id: u32,
+    /// Storage redundancy required by this DHT protocol mode.
+    pub storage_redundancy: u16,
     /// Storage virtual-node positions required by this DHT protocol mode.
     pub dht_virtual_nodes: u16,
     /// Optional capability labels.
@@ -77,6 +80,7 @@ impl OnlineNodeDescriptorBody {
             public_key: &self.public_key,
             node_type: &self.node_type,
             network_id: self.network_id,
+            storage_redundancy: self.storage_redundancy,
             dht_virtual_nodes: self.dht_virtual_nodes,
             capabilities: &self.capabilities,
             endpoint_hint: &self.endpoint_hint,
@@ -98,6 +102,7 @@ struct OnlineNodeDescriptorBodyRef<'a> {
     public_key: &'a VerificationPublicKey,
     node_type: &'a OnlineNodeType,
     network_id: u32,
+    storage_redundancy: u16,
     dht_virtual_nodes: u16,
     capabilities: &'a [String],
     endpoint_hint: &'a Option<String>,
@@ -124,6 +129,8 @@ pub struct OnlineNodeDescriptor {
     pub node_type: OnlineNodeType,
     /// Network identifier.
     pub network_id: u32,
+    /// Storage redundancy required by this DHT protocol mode.
+    pub storage_redundancy: u16,
     /// Storage virtual-node positions required by this DHT protocol mode.
     pub dht_virtual_nodes: u16,
     /// Optional capability labels.
@@ -152,6 +159,7 @@ impl OnlineNodeDescriptor {
             public_key: body.public_key,
             node_type: body.node_type,
             network_id: body.network_id,
+            storage_redundancy: body.storage_redundancy,
             dht_virtual_nodes: body.dht_virtual_nodes,
             capabilities: body.capabilities,
             endpoint_hint: body.endpoint_hint,
@@ -169,6 +177,7 @@ impl OnlineNodeDescriptor {
             public_key,
             node_type,
             network_id,
+            storage_redundancy,
             dht_virtual_nodes,
             capabilities,
             endpoint_hint,
@@ -184,6 +193,7 @@ impl OnlineNodeDescriptor {
             public_key,
             node_type,
             network_id: *network_id,
+            storage_redundancy: *storage_redundancy,
             dht_virtual_nodes: *dht_virtual_nodes,
             capabilities,
             endpoint_hint,
@@ -198,9 +208,18 @@ impl OnlineNodeDescriptor {
         self.body_ref().signing_data()
     }
 
+    /// Return this descriptor's DHT protocol mode.
+    pub const fn dht_protocol_mode(&self) -> DhtProtocolMode {
+        DhtProtocolMode::new(
+            self.network_id,
+            self.storage_redundancy,
+            self.dht_virtual_nodes,
+        )
+    }
+
     /// Return whether this descriptor belongs to the local DHT protocol mode.
-    pub const fn matches_dht_protocol(&self, network_id: u32, dht_virtual_nodes: u16) -> bool {
-        self.network_id == network_id && self.dht_virtual_nodes == dht_virtual_nodes
+    pub const fn matches_dht_protocol(&self, expected: DhtProtocolMode) -> bool {
+        self.dht_protocol_mode().matches(expected)
     }
 
     /// Verify the descriptor signature and DID/public-key binding.
@@ -299,6 +318,7 @@ mod tests {
                 public_key: session_sk.session().account_verification_pubkey()?,
                 node_type: OnlineNodeType::Native,
                 network_id: 1,
+                storage_redundancy: 6,
                 dht_virtual_nodes: 0,
                 capabilities: vec![ONLINE_NODE_CAPABILITY_STORAGE.to_string()],
                 endpoint_hint: None,
@@ -317,6 +337,9 @@ mod tests {
         assert!(descriptor.verify_signature());
 
         descriptor.node_type = OnlineNodeType::Browser;
+        assert!(!descriptor.verify_signature());
+        descriptor = descriptor_at(20, 30)?;
+        descriptor.storage_redundancy = 7;
         assert!(!descriptor.verify_signature());
         Ok(())
     }
@@ -345,6 +368,7 @@ mod tests {
                 public_key: public_key.clone(),
                 node_type: OnlineNodeType::Native,
                 network_id: 1,
+                storage_redundancy: 6,
                 dht_virtual_nodes: 0,
                 capabilities: vec![],
                 endpoint_hint: None,
@@ -361,6 +385,7 @@ mod tests {
                 public_key,
                 node_type: OnlineNodeType::Native,
                 network_id: 1,
+                storage_redundancy: 6,
                 dht_virtual_nodes: 0,
                 capabilities: vec![],
                 endpoint_hint: None,

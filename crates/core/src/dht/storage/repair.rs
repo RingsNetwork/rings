@@ -7,10 +7,14 @@
 //! - `sigma_n[k]` is the [`Entry`] stored by node `n` under placement key `k`.
 //! - `local_branch(n, k, view)` is true when `find_successor(k)` evaluated by
 //!   node `n` under `view` returns `Some(_)`.
-//! - `vowner(k, view, cfg)` is the physical owner selected by storage virtual
+//! - `vhint(k, view, cfg)` is the physical owner selected by storage virtual
 //!   positions derived from the authenticated owner set in `view`.
-//! - `accepts(n, k, view, cfg) = vowner(k, view, cfg) == n` when virtual storage
+//! - `accepts(n, k, view, cfg) = vhint(k, view, cfg) == n` when virtual storage
 //!   is enabled, otherwise `local_branch(n, k, view)`.
+//! - `handoff_proof(s, r, k, view_s)` holds only for non-virtual physical Chord
+//!   handoff where sender `s` has a physical successor transition to receiver
+//!   `r`. A `vhint` is not a handoff proof because `view_s` may omit a physical
+//!   node that owns a closer virtual position.
 //!
 //! Invariant REPLICATED(e, N):
 //! `forall k in place(id(e), N), exists n. accepts(n, k, view_n, cfg) &&
@@ -18,29 +22,30 @@
 //! [`crate::algebra::JoinSemilattice`].
 //! This is a view-relative invariant: every node evaluates `accepts` under its
 //! authenticated local view. Global convergence requires a quiescent window
-//! where those local views refine to the same acceptance relation.
+//! where those local views refine to the same acceptance relation. Before that
+//! refinement, `vhint` is only a copy target, never a source-delete authority.
 //!
 //! Liveness S4:
 //! In a quiescent window after local views refine to the same `accepts`
 //! relation, if at least one placement copy of `e` remains at the start of an
 //! anti-entropy period, one `republish_local_entries` round delivers the entry's
 //! join state to every refined current accepting node in `place(id(e), N)`.
-//! Before view refinement, republish targets the caller's local view; a receiver
-//! whose view disagrees may refuse the ack, preserving S1'' safety without
-//! proving one-round global progress.
+//! Before view refinement, republish targets the caller's local view. A
+//! receiver whose view disagrees may refuse the copy, and an accepting receiver
+//! still cannot authorize source cleanup unless the sync purpose carries a
+//! non-virtual `handoff_proof`.
 //!
 //! Safety:
 //! - S1 Additivity (#612): repair transitions in this module never call
 //!   `storage.remove`; they only deliver additional joins.
-//! - S1' Ownership validation: virtual-owner sync receivers ack only placements
-//!   they still own under their current `view`; stale senders keep unacked local
-//!   entries and retry in a later anti-entropy round.
-//! - S1'' View-relative handoff: for a sync message from sender `s` to receiver
-//!   `r`, an ack for key `k` can be emitted only after
-//!   `accepts(r, k, view_r, cfg)` and `sigma_r[k] >= e_delta`. If
-//!   `view_s != view_r`, either `r` refuses the ack and `sigma_s[k]` remains, or
-//!   `r` accepts under `view_r` and at least one durable copy exists before `s`
-//!   can delete.
+//! - S1' Ownership validation: receivers persist only placements they accept
+//!   under their current `view`; stale senders keep local entries and retry in a
+//!   later anti-entropy round.
+//! - S1'' Cleanup authority: for a sync message from sender `s` to receiver
+//!   `r`, a delete-capable ack for key `k` can be emitted only after
+//!   `accepts(r, k, view_r, cfg)`, `sigma_r[k] >= e_delta`, and
+//!   `handoff_proof(s, r, k, view_s)`. Virtual-node copies never satisfy
+//!   `handoff_proof`, so a local virtual-owner hint cannot delete source data.
 //! - S2' No-update-loss (#611/#614 cleanup): the only deletion transition is
 //!   `acknowledge_synced_entries`; the finite model
 //!   `storage_sync_model_preserves_no_update_loss` in `dht_stateright` checks
@@ -107,7 +112,7 @@ impl PeerRing {
         // storage responsibility: predecessor, successor list, finger table, or
         // successor witness for some locally held affine placement key.
         // Preservation S1: this predicate performs no storage writes/removes.
-        if self.storage_virtual_owner_registered(peer)? {
+        if self.observed_storage_virtual_owner_registered(peer)? {
             return Ok(true);
         }
         if self

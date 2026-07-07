@@ -99,31 +99,40 @@ fn interval_key_with_virtual_successor(node: &PeerRing, owner: Did) -> Result<Di
 }
 
 fn collect_sync_batches(act: PeerRingAction) -> Result<Vec<(Did, Vec<PlacedEntry>)>> {
-    let mut batches = Vec::new();
-    collect_sync_batches_into(act, &mut batches)?;
-    Ok(batches)
+    Ok(collect_sync_messages(act)?
+        .into_iter()
+        .map(|(target, _, _, data)| (target, data))
+        .collect())
 }
 
-fn collect_sync_batches_into(
+fn collect_sync_messages(
     act: PeerRingAction,
-    batches: &mut Vec<(Did, Vec<PlacedEntry>)>,
+) -> Result<Vec<(Did, StorageSyncPurpose, StorageSyncRoute, Vec<PlacedEntry>)>> {
+    let mut messages = Vec::new();
+    collect_sync_messages_into(act, &mut messages)?;
+    Ok(messages)
+}
+
+fn collect_sync_messages_into(
+    act: PeerRingAction,
+    messages: &mut Vec<(Did, StorageSyncPurpose, StorageSyncRoute, Vec<PlacedEntry>)>,
 ) -> Result<()> {
     match act {
         PeerRingAction::None => Ok(()),
         PeerRingAction::RemoteAction(
             target,
             RemoteAction::SyncEntriesWithSuccessor {
-                purpose: _,
-                route: _,
+                purpose,
+                route,
                 data,
             },
         ) => {
-            batches.push((target, data));
+            messages.push((target, purpose, route, data));
             Ok(())
         }
         PeerRingAction::MultiActions(actions) => {
             for action in actions {
-                collect_sync_batches_into(action, batches)?;
+                collect_sync_messages_into(action, messages)?;
             }
             Ok(())
         }
@@ -281,7 +290,7 @@ async fn virtual_storage_owner_stores_local_position_locally() -> Result<()> {
 }
 
 #[tokio::test]
-async fn virtual_storage_sync_hands_entries_to_virtual_owner() -> Result<()> {
+async fn virtual_storage_sync_copies_entries_to_observed_virtual_owner() -> Result<()> {
     let local = Did::from(1u32);
     let remote = Did::from(2u32);
     let node = PeerRing::new_with_storage_finger_table_size_and_virtual_nodes(
@@ -296,15 +305,18 @@ async fn virtual_storage_sync_hands_entries_to_virtual_owner() -> Result<()> {
     let entry = data_entry_with_data(placement, "handoff");
     node.storage.put(&placement.to_string(), &entry).await?;
 
-    let batches = collect_sync_batches(node.sync_entries_with_successor(Did::from(99u32)).await?)?;
+    let messages =
+        collect_sync_messages(node.sync_entries_with_successor(Did::from(99u32)).await?)?;
 
-    assert_eq!(batches.len(), 1);
-    let Some((target, data)) = batches.into_iter().next() else {
+    assert_eq!(messages.len(), 1);
+    let Some((target, purpose, route, data)) = messages.into_iter().next() else {
         return Err(Error::InvalidMessage(
             "missing virtual sync batch".to_string(),
         ));
     };
     assert_eq!(target, remote);
+    assert_eq!(purpose, StorageSyncPurpose::AdditiveRepair);
+    assert_eq!(route, StorageSyncRoute::PhysicalOwner);
     assert_eq!(data, vec![PlacedEntry::new(placement, entry)]);
     Ok(())
 }

@@ -23,6 +23,7 @@ use crate::error::Result;
 use crate::inspect::ConnectionInspect;
 use crate::inspect::SwarmInspect;
 use crate::measure::PeerMeasurement;
+use crate::message::DhtProtocolMode;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
@@ -63,9 +64,23 @@ impl Swarm {
         self.transport.network_id
     }
 
+    /// Get the storage redundancy for this swarm's DHT protocol mode.
+    pub fn storage_redundancy(&self) -> u16 {
+        self.transport.storage_redundancy()
+    }
+
     /// Get the storage virtual-node positions for this swarm's DHT protocol mode.
     pub fn dht_virtual_nodes(&self) -> u16 {
         self.transport.dht_virtual_nodes()
+    }
+
+    /// Get this swarm's full DHT protocol mode descriptor.
+    pub fn dht_protocol_mode(&self) -> DhtProtocolMode {
+        DhtProtocolMode::new(
+            self.network_id(),
+            self.storage_redundancy(),
+            self.dht_virtual_nodes(),
+        )
     }
 
     /// Get DHT(Distributed Hash Table) of self.

@@ -1,8 +1,8 @@
+use super::super::ChordStorageInterface;
+use super::super::ChordStorageInterfaceCacheChecker;
 use super::test_support::assert_cached_data_values;
 use super::test_support::next_generated_key;
 use super::test_support::next_payload;
-use super::ChordStorageInterface;
-use super::ChordStorageInterfaceCacheChecker;
 use crate::dht::entry::Entry;
 use crate::dht::entry::PlacedEntryOperation;
 use crate::ecc::tests::gen_ordered_keys;

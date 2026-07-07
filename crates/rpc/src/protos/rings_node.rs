@@ -192,6 +192,7 @@ pub struct OnlineNodeDescriptorInfo {
     pub public_key: Value,
     pub node_type: OnlineNodeTypeInfo,
     pub network_id: u32,
+    pub storage_redundancy: u16,
     pub dht_virtual_nodes: u16,
     pub capabilities: Vec<String>,
     pub endpoint_hint: Option<String>,

@@ -488,7 +488,12 @@ impl HandleMsg<FoundEntry> for MessageHandler {
                 .run_effects([PayloadRelayFunctor::forward_payload(ctx, None).into()])
                 .await;
         }
+        // Pre: this node started a local lookup for (resource, redundancy).
+        // Preservation: all remote-controlled FoundEntry fields are validated
+        // before local_cache_put or read-repair can write storage state.
         let found_entry = msg.single_entry()?;
+        self.transport
+            .ensure_storage_lookup_active(msg.resource, msg.redundancy)?;
         self.transport.observe_storage_misses(
             msg.resource,
             msg.redundancy,
@@ -570,19 +575,4 @@ impl HandleMsg<SyncEntriesWithSuccessorReport> for MessageHandler {
 
 #[cfg(not(feature = "wasm"))]
 #[cfg(test)]
-mod api_tests;
-#[cfg(not(feature = "wasm"))]
-#[cfg(test)]
-mod repair_tests;
-#[cfg(not(feature = "wasm"))]
-#[cfg(test)]
-mod sync_ack_tests;
-#[cfg(not(feature = "wasm"))]
-#[cfg(test)]
-mod sync_receive_tests;
-#[cfg(not(feature = "wasm"))]
-#[cfg(test)]
-mod sync_report_tests;
-#[cfg(not(feature = "wasm"))]
-#[cfg(test)]
-mod test_support;
+mod tests;

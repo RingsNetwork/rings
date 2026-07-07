@@ -113,6 +113,44 @@ fn swarm_builder_normalizes_virtual_nodes_before_protocol_advertisement() -> Res
     Ok(())
 }
 
+#[test]
+fn connection_offer_protocol_mode_includes_storage_redundancy() -> Result<()> {
+    let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
+    let matching = ConnectNodeSend {
+        sdp: String::new(),
+        network_id: 0,
+        storage_redundancy: 1,
+        dht_virtual_nodes: 0,
+    };
+    let mismatched_redundancy = ConnectNodeSend {
+        storage_redundancy: 2,
+        ..matching.clone()
+    };
+
+    assert!(transport.accepts_connection_offer(&matching));
+    assert!(!transport.accepts_connection_offer(&mismatched_redundancy));
+    Ok(())
+}
+
+#[test]
+fn connection_answer_protocol_mode_includes_storage_redundancy() -> Result<()> {
+    let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
+    let matching = ConnectNodeReport {
+        sdp: String::new(),
+        network_id: 0,
+        storage_redundancy: 1,
+        dht_virtual_nodes: 0,
+    };
+    let mismatched_redundancy = ConnectNodeReport {
+        storage_redundancy: 2,
+        ..matching.clone()
+    };
+
+    assert!(transport.accepts_connection_answer(&matching));
+    assert!(!transport.accepts_connection_answer(&mismatched_redundancy));
+    Ok(())
+}
+
 #[tokio::test]
 async fn disconnected_observation_is_once_per_connection_epoch() -> Result<()> {
     let measure = Arc::new(RecordingMeasure::default());

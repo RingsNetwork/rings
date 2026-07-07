@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use super::next_hop_for_sync_entries;
-use super::persist_synced_entries;
+use super::super::next_hop_for_sync_entries;
+use super::super::persist_synced_entries;
 use super::test_support::next_generated_key;
 use super::test_support::next_payload;
 use super::test_support::next_payload_for_tx;

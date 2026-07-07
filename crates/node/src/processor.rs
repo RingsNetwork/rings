@@ -591,10 +591,7 @@ impl Processor {
 
         let descriptors = Self::online_node_descriptors_from_entry(&entry)
             .into_iter()
-            .filter(|descriptor| {
-                descriptor
-                    .matches_dht_protocol(self.swarm.network_id(), self.swarm.dht_virtual_nodes())
-            });
+            .filter(|descriptor| descriptor.matches_dht_protocol(self.swarm.dht_protocol_mode()));
 
         Ok(OnlineNodeDescriptor::latest_valid_by_did(
             descriptors,
@@ -1160,6 +1157,10 @@ advertise_presence: true
         assert_eq!(nodes[0].did, published.did);
         assert_eq!(nodes[0].network_id, processor.swarm.network_id());
         assert_eq!(
+            nodes[0].storage_redundancy,
+            processor.swarm.storage_redundancy()
+        );
+        assert_eq!(
             nodes[0].dht_virtual_nodes,
             processor.swarm.dht_virtual_nodes()
         );
@@ -1234,6 +1235,7 @@ advertise_presence: true
                     .map_err(Error::CoreError)?,
                 node_type: default_online_node_type(),
                 network_id: expired_processor.swarm.network_id(),
+                storage_redundancy: expired_processor.swarm.storage_redundancy(),
                 dht_virtual_nodes: expired_processor.swarm.dht_virtual_nodes(),
                 capabilities: OnlineNodeRegistration::capabilities(),
                 endpoint_hint: None,
@@ -1295,6 +1297,48 @@ advertise_presence: true
         let now_ms = get_epoch_ms();
         let local_descriptor = processor.online_node_descriptor_at(now_ms)?;
         let foreign_descriptor = foreign.online_node_descriptor_at(now_ms)?;
+
+        processor
+            .storage_store(Processor::online_node_registry_entry(vec![
+                local_descriptor.clone(),
+                foreign_descriptor,
+            ])?)
+            .await?;
+
+        let nodes = processor.lookup_online_nodes(true).await?;
+        assert_eq!(nodes, vec![local_descriptor]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn online_node_lookup_filters_other_storage_redundancy_modes() -> Result<()> {
+        let processor = prepare_processor_with_network(0).await;
+        let foreign = prepare_processor_with_network(0).await;
+        let now_ms = get_epoch_ms();
+        let local_descriptor = processor.online_node_descriptor_at(now_ms)?;
+        let foreign_descriptor = OnlineNodeDescriptor::new_signed(
+            OnlineNodeDescriptorBody {
+                did: foreign.did(),
+                public_key: foreign
+                    .swarm
+                    .account_verification_pubkey()
+                    .map_err(Error::CoreError)?,
+                node_type: default_online_node_type(),
+                network_id: foreign.swarm.network_id(),
+                storage_redundancy: mismatched_storage_redundancy(
+                    foreign.swarm.storage_redundancy(),
+                ),
+                dht_virtual_nodes: foreign.swarm.dht_virtual_nodes(),
+                capabilities: OnlineNodeRegistration::capabilities(),
+                endpoint_hint: None,
+                started_at_ms: now_ms,
+                heartbeat_at_ms: now_ms,
+                expires_at_ms: now_ms.saturating_add(60_000),
+                version: crate::util::build_version(),
+            },
+            &foreign.session_sk,
+        )
+        .map_err(Error::CoreError)?;
 
         processor
             .storage_store(Processor::online_node_registry_entry(vec![
@@ -1413,6 +1457,34 @@ advertise_presence: true
             result,
             Err(rings_core::error::Error::InvalidMessage(message))
                 if message.contains("DHT protocol mismatch")
+        ));
+    }
+
+    #[tokio::test]
+    async fn accept_answer_rejects_dht_virtual_node_mismatch() {
+        let _network_guard = network_test_guard().await;
+        let offerer = prepare_processor_with_network_and_virtual_nodes(0, 2).await;
+        let answerer = prepare_processor_with_network_and_virtual_nodes(0, 2).await;
+        let offer = offerer.swarm.create_offer(answerer.did()).await.unwrap();
+        let answer = answerer.swarm.answer_offer(offer).await.unwrap();
+        let Message::ConnectNodeReport(mut report) = answer.transaction.data().unwrap() else {
+            panic!("expected ConnectNodeReport");
+        };
+        report.dht_virtual_nodes = 3;
+        let mismatched_answer = MessagePayload::new_send(
+            Message::ConnectNodeReport(report),
+            &answerer.session_sk,
+            answerer.did(),
+            answerer.did(),
+        )
+        .unwrap();
+
+        let result = offerer.swarm.accept_answer(mismatched_answer).await;
+
+        assert!(matches!(
+            result,
+            Err(rings_core::error::Error::InvalidMessage(message))
+                if message.contains("answer DHT protocol mismatch")
         ));
     }
 
@@ -1588,6 +1660,14 @@ advertise_presence: true
             .dht_finger_table_size(8)
             .build()
             .unwrap()
+    }
+
+    fn mismatched_storage_redundancy(value: u16) -> u16 {
+        if value == u16::MAX {
+            value.saturating_sub(1)
+        } else {
+            value.saturating_add(1)
+        }
     }
 
     fn owns_entry_placement(processor: &Processor, placement_key: Did) -> Result<bool> {

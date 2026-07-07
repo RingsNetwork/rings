@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::time::timeout;
 use tokio::time::Duration;
 
-use super::ChordStorageInterfaceCacheChecker;
+use super::super::ChordStorageInterfaceCacheChecker;
 use crate::dht::entry::Entry;
 use crate::dht::successor::SuccessorWriter;
 use crate::dht::Chord;
