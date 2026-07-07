@@ -72,6 +72,7 @@ mod test {
     use crate::dht::successor::SuccessorReader;
     use crate::dht::PeerRingAction;
     use crate::dht::StorageSyncDestination;
+    use crate::dht::StorageSyncPurpose;
     use crate::ecc::tests::gen_ordered_keys;
     use crate::ecc::SecretKey;
     use crate::error::Error;
@@ -196,7 +197,12 @@ mod test {
         };
 
         match payload.transaction.data::<Message>()? {
-            Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor { destination, data }) => {
+            Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor {
+                purpose,
+                destination,
+                data,
+            }) => {
+                assert_eq!(purpose, StorageSyncPurpose::OwnershipHandoff);
                 assert_eq!(
                     destination,
                     StorageSyncDestination::PhysicalOwner(node2.did())
@@ -225,9 +231,11 @@ mod test {
 
         match payload.transaction.data::<Message>()? {
             Message::SyncEntriesWithSuccessorReport(SyncEntriesWithSuccessorReport {
+                purpose,
                 acks,
                 ..
             }) => {
+                assert_eq!(purpose, StorageSyncPurpose::OwnershipHandoff);
                 assert_eq!(acks, vec![SyncedEntryAck::new(
                     entry.did,
                     stored_entry.clone()

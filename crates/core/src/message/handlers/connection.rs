@@ -73,7 +73,7 @@ impl HandleMsg<QueryForTopoInfoReport> for MessageHandler {
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl HandleMsg<ConnectNodeSend> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &ConnectNodeSend) -> Result<()> {
-        if msg.network_id != self.transport.network_id {
+        if !self.transport.accepts_connection_offer(msg) {
             return Ok(());
         }
 

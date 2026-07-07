@@ -7,6 +7,7 @@ use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
 use crate::dht::Did;
 use crate::dht::StorageSyncDestination;
+use crate::dht::StorageSyncPurpose;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::Message;
@@ -21,6 +22,7 @@ pub(super) type StorageSyncAckMap = BTreeMap<uuid::Uuid, StorageSyncAckCapabilit
 
 pub(super) struct StorageSyncAckCapability {
     recorded_at_ms: i64,
+    purpose: StorageSyncPurpose,
     destination: StorageSyncDestination,
     receiver_proof: StorageSyncReceiverProof,
     expected_acks: Vec<SyncedEntryAck>,
@@ -106,7 +108,8 @@ impl SwarmTransport {
     /// Record the exact ack capability created by an outbound storage-sync payload.
     ///
     /// Pre: `tx_id` is the transaction id of the payload whose message data is
-    /// `SyncEntriesWithSuccessor { destination, data }`.
+    /// `SyncEntriesWithSuccessor { purpose, destination, data }`.
+    /// Pre: `purpose.permits_source_cleanup()`.
     /// Pre: `route_next_hop` is the `PeerRing::next_hop_for_storage_sync`
     /// result used as that payload's relay next-hop.
     /// Post: a later report for `tx_id` can delete local storage only if its
@@ -115,12 +118,19 @@ impl SwarmTransport {
     pub(crate) fn record_pending_storage_sync_ack(
         &self,
         tx_id: uuid::Uuid,
+        purpose: StorageSyncPurpose,
         destination: StorageSyncDestination,
         route_next_hop: Did,
         data: &[PlacedEntry],
     ) -> Result<()> {
+        if !purpose.permits_source_cleanup() {
+            return Err(Error::InvalidMessage(
+                "storage sync purpose does not permit pending cleanup ack".to_string(),
+            ));
+        }
         let capability = StorageSyncAckCapability {
             recorded_at_ms: storage_sync_ack_now_ms(),
+            purpose,
             destination,
             receiver_proof: StorageSyncReceiverProof::from_destination(destination, route_next_hop),
             expected_acks: expected_sync_acks(data)?,
@@ -158,6 +168,11 @@ impl SwarmTransport {
                 "storage sync report signer does not match receiver".to_string(),
             ));
         }
+        if !report.purpose.permits_source_cleanup() {
+            return Err(Error::InvalidMessage(
+                "storage sync report purpose does not permit source cleanup".to_string(),
+            ));
+        }
 
         let mut pending = self
             .pending_storage_sync_acks
@@ -168,6 +183,11 @@ impl SwarmTransport {
                 "storage sync report has no pending capability".to_string(),
             ));
         };
+        if capability.purpose != report.purpose {
+            return Err(Error::InvalidMessage(
+                "storage sync report purpose does not match pending sync".to_string(),
+            ));
+        }
         if capability.destination != report.destination {
             return Err(Error::InvalidMessage(
                 "storage sync report destination does not match pending sync".to_string(),
@@ -185,7 +205,7 @@ impl SwarmTransport {
         Ok(acks)
     }
 
-    /// Send a storage-sync payload and register the only ack values it may prove.
+    /// Send a storage-sync payload and register cleanup acks only for hand-off sync.
     pub(crate) async fn send_storage_sync(
         &self,
         msg: SyncEntriesWithSuccessor,
@@ -207,9 +227,20 @@ impl SwarmTransport {
             destination,
         )?;
         let tx_id = payload.transaction.tx_id;
-        self.record_pending_storage_sync_ack(tx_id, msg.destination, next_hop, &msg.data)?;
+        let records_cleanup_ack = msg.purpose.permits_source_cleanup();
+        if records_cleanup_ack {
+            self.record_pending_storage_sync_ack(
+                tx_id,
+                msg.purpose,
+                msg.destination,
+                next_hop,
+                &msg.data,
+            )?;
+        }
         if let Err(e) = self.send_payload(payload).await {
-            self.remove_pending_storage_sync_ack(tx_id);
+            if records_cleanup_ack {
+                self.remove_pending_storage_sync_ack(tx_id);
+            }
             return Err(e);
         }
         Ok(tx_id)

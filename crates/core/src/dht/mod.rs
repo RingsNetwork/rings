@@ -31,6 +31,7 @@ pub use finger::DEFAULT_FINGER_TABLE_SIZE;
 pub use stabilization::Stabilizer;
 pub(crate) use storage::StorageSyncDelivery;
 pub use storage::StorageSyncDestination;
+pub use storage::StorageSyncPurpose;
 pub use storage::StorageSyncRoute;
 pub use successor::SuccessorReader;
 pub use successor::SuccessorWriter;

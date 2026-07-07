@@ -92,8 +92,9 @@ impl SwarmBuilder {
     /// Sets storage-only Chord virtual positions derived per physical peer.
     ///
     /// A value of zero disables virtual-node storage ownership. Values above
-    /// [`crate::dht::MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER`] are capped by
-    /// [`VirtualNodeConfig::new`] because this builder is infallible.
+    /// [`crate::dht::MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER`] are normalized
+    /// once during [`Self::build`]. The same bounded value is used for both
+    /// storage ownership and advertised protocol mode.
     pub fn dht_virtual_nodes(mut self, positions_per_peer: u16) -> Self {
         self.dht_virtual_nodes = positions_per_peer;
         self
@@ -142,6 +143,8 @@ impl SwarmBuilder {
     /// Try build for `Swarm`.
     pub fn build(self) -> Swarm {
         let dht_did = self.session_sk.account_did();
+        let storage_virtual_node_config =
+            VirtualNodeConfig::new(self.network_id, self.dht_virtual_nodes);
 
         let dht = Arc::new(
             PeerRing::new_with_storage_finger_table_size_and_virtual_nodes(
@@ -149,7 +152,7 @@ impl SwarmBuilder {
                 self.dht_succ_max,
                 self.dht_storage,
                 self.dht_finger_table_size,
-                VirtualNodeConfig::new(self.network_id, self.dht_virtual_nodes),
+                storage_virtual_node_config,
             ),
         );
 
@@ -168,7 +171,11 @@ impl SwarmBuilder {
             self.session_sk,
             dht.clone(),
             self.measure,
-            SwarmTransportSettings::new(self.dht_storage_redundancy, self.reassembly_limits),
+            SwarmTransportSettings::new(
+                self.dht_storage_redundancy,
+                storage_virtual_node_config,
+                self.reassembly_limits,
+            ),
         ));
 
         Swarm {

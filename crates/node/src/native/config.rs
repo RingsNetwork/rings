@@ -66,7 +66,6 @@ pub struct Config {
     pub online_node_type: OnlineNodeType,
     #[serde(default = "crate::registration::default_advertise_presence")]
     pub advertise_presence: bool,
-    #[serde(default)]
     pub dht_virtual_nodes: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_ip: Option<String>,
@@ -222,7 +221,33 @@ mod tests {
     }
 
     #[test]
-    fn test_deserialization_with_missed_field() {
+    fn deserialization_defaults_online_registration_fields() {
+        let yaml = r#"
+network_id: 1
+session_sk: session_sk
+internal_api_port: 50000
+external_api_addr: 127.0.0.1:50001
+endpoint_url: http://127.0.0.1:50000
+ice_servers: stun://stun.l.google.com:19302
+stabilize_interval: 3
+dht_virtual_nodes: 0
+external_ip: null
+webrtc_udp_port_min: null
+webrtc_udp_port_max: null
+data_storage:
+  path: /Users/foo/.rings/data
+  capacity: 200000000
+measure_storage:
+  path: /Users/foo/.rings/measure
+  capacity: 200000000
+"#;
+        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.network_id, 1);
+        assert!(cfg.advertise_presence);
+    }
+
+    #[test]
+    fn deserialization_requires_dht_virtual_nodes() {
         let yaml = r#"
 network_id: 1
 session_sk: session_sk
@@ -241,9 +266,13 @@ measure_storage:
   path: /Users/foo/.rings/measure
   capacity: 200000000
 "#;
-        let cfg: Config = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(cfg.network_id, 1);
-        assert!(cfg.advertise_presence);
+
+        let result = serde_yaml::from_str::<Config>(yaml);
+
+        assert!(matches!(
+            result,
+            Err(error) if error.to_string().contains("dht_virtual_nodes")
+        ));
     }
 
     #[test]

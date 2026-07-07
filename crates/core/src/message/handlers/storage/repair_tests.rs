@@ -232,7 +232,12 @@ async fn found_entry_repairs_buffered_misses_only() -> Result<()> {
         EntryKind::Data,
     );
     let stored_entry = entry.clone().try_into_storage_entry()?;
-    let placement_key = Did::from(100u32);
+    let placement_key = entry
+        .did
+        .rotate_affine(2)?
+        .into_iter()
+        .nth(1)
+        .ok_or_else(|| Error::InvalidMessage("expected repair placement".to_string()))?;
     let unknown_key = Did::from(120u32);
     let context_key = SecretKey::random();
     let context_session = SessionSk::new_with_seckey(&context_key)?;
@@ -366,7 +371,12 @@ async fn expired_storage_misses_do_not_trigger_late_repair() -> Result<()> {
         vec!["fresh".to_string().encode()?],
         EntryKind::Data,
     );
-    let placement_key = Did::from(100u32);
+    let placement_key = entry
+        .did
+        .rotate_affine(2)?
+        .into_iter()
+        .nth(1)
+        .ok_or_else(|| Error::InvalidMessage("expected repair placement".to_string()))?;
     let context_key = SecretKey::random();
     let context_session = SessionSk::new_with_seckey(&context_key)?;
     let context = MessagePayload::new_send(

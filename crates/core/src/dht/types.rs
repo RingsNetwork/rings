@@ -118,7 +118,12 @@ pub trait ChordStorageRepair<Action>: Chord<Action> {
     /// Post: `misses.is_empty()` is a no-op. Non-empty repair emits copy-only
     /// actions for exactly the observed misses and performs no additional
     /// placement probing.
-    async fn read_repair_entry(&self, entry: Entry, misses: &[PlacementMiss]) -> Result<Action>;
+    async fn read_repair_entry(
+        &self,
+        entry: Entry,
+        misses: &[PlacementMiss],
+        redundancy: u16,
+    ) -> Result<Action>;
 }
 
 /// ChordStorageCache defines the basic API for getting and setting DHT cache storage.

@@ -52,10 +52,11 @@
 //!
 //! Read-repair:
 //! Given lookup observation `o : place(id(e), N) -> {Hit(e), Miss, Unknown}`,
-//! `repair_targets(o) = { k | o(k) = Miss }`. `read_repair_entry` copies only
-//! `repair_targets(o)` and does not evaluate `place` or `succ`. Transport keeps
-//! observations bounded by lookup round, TTL, and capacity, so a miss owner is
-//! a fresh lookup witness rather than persistent routing state.
+//! `repair_targets(o) = { k | o(k) = Miss }`. `read_repair_entry` validates
+//! `repair_targets(o) subseteq place(id(e), N)`, copies only those targets, and
+//! does not derive additional targets or evaluate `succ`. Transport keeps
+//! observations bounded by lookup round, TTL, and capacity, so a miss owner is a
+//! fresh lookup witness rather than persistent routing state.
 
 use async_trait::async_trait;
 
@@ -164,7 +165,9 @@ impl PeerRing {
                 Ok(PeerRingAction::None)
             }
             StorageSyncTarget::Remote(destination) => {
-                Ok(PeerRingAction::sync_entries(destination, vec![placed]))
+                Ok(PeerRingAction::sync_entries_for_repair(destination, vec![
+                    placed,
+                ]))
             }
         }
     }
@@ -173,20 +176,26 @@ impl PeerRing {
         &self,
         miss: PlacementMiss,
         entry: &Entry,
+        redundancy: u16,
     ) -> Result<PeerRingAction> {
         // Pre: miss was produced by entry_lookup/SearchEntry and is still
         // fresh under the transport observation TTL, so miss.owner was the
         // responsible owner for miss.key under the lookup's routing view.
+        // Pre: redundancy is the lookup redundancy used to produce the miss.
         // Post R1/R2: exactly miss.key is repaired; Hit and Unknown placements
         // are not touched by this transition.
-        // Post R4: this function performs no place()/succ() computation. It
-        // reuses the owner observed by lookup and emits only a copy action.
+        // Post R3: miss.key is proven to be in place(id(entry), redundancy)
+        // before any local write or remote copy action is emitted.
+        // Post R4: place(id(entry), redundancy) is used only as a membership
+        // predicate; this function does not derive new targets or recompute
+        // succ(miss.key). It reuses the owner observed by lookup.
         let placed = PlacedEntry::new(miss.key, entry.clone());
+        placed.validate_placement(redundancy)?;
         if miss.owner == self.did {
-            self.join_storage_entry(miss.key, entry.clone()).await?;
+            self.join_storage_entry(placed.key, placed.entry).await?;
             Ok(PeerRingAction::None)
         } else {
-            Ok(PeerRingAction::sync_entries(
+            Ok(PeerRingAction::sync_entries_for_repair(
                 StorageSyncDestination::PhysicalOwner(miss.owner),
                 vec![placed],
             ))
@@ -236,19 +245,25 @@ impl ChordStorageRepair<PeerRingAction> for PeerRing {
         &self,
         entry: Entry,
         misses: &[PlacementMiss],
+        redundancy: u16,
     ) -> Result<PeerRingAction> {
         // Pre: misses = repair_targets(o) for the lookup observation that found
         // entry, and each miss.owner was observed while querying miss.key.
+        // Pre: redundancy is the same redundancy that produced the lookup
+        // observation, so place(id(entry), redundancy) is the accepted replica set.
         // Post R1: emitted copy actions are in one-to-one correspondence with
         // misses whose owner is remote; self-owned misses are written locally.
         // Post R2/R3: Hit and Unknown placements are absent from misses, so no
         // action can target them. A local-hit short circuit has misses = [].
-        // Post R4: no placement vector or successor is recomputed here.
+        // Post R4: no successor is recomputed here. The placement vector is
+        // used only to validate observed misses, never to synthesize targets.
         // Preservation S1/S3: this transition never removes and duplicate copy
         // actions are duplicate Entry::join deliveries.
         let mut actions = Vec::new();
         for miss in misses.iter().copied() {
-            let action = self.copy_entry_to_observed_miss(miss, &entry).await?;
+            let action = self
+                .copy_entry_to_observed_miss(miss, &entry, redundancy)
+                .await?;
             push_action(&mut actions, action);
         }
         Ok(merge_actions(actions))

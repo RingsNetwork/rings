@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use serde::Serialize;
 
 use super::StorageSyncDestination;
+use super::StorageSyncPurpose;
 use super::StorageSyncTarget;
 use crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD;
 use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
@@ -43,6 +44,7 @@ fn add_wire_cost(total: usize, next: usize) -> Result<usize> {
 
 fn sync_entries_fixed_wire_cost() -> Result<usize> {
     let empty_message = Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor {
+        purpose: StorageSyncPurpose::OwnershipHandoff,
         destination: StorageSyncDestination::PhysicalOwner(Did::from(0u32)),
         data: Vec::new(),
     });
@@ -143,7 +145,7 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
         Ok(batches
             .into_iter()
             .map(|batch| {
-                PeerRingAction::sync_entries(
+                PeerRingAction::sync_entries_for_handoff(
                     StorageSyncDestination::PhysicalOwner(new_successor),
                     batch,
                 )
@@ -202,7 +204,7 @@ impl PeerRing {
         let mut actions = Vec::new();
         for (target, data) in by_target {
             for batch in sync_entries_batches(data, SYNC_BATCH_MAX_BYTES)? {
-                actions.push(PeerRingAction::sync_entries(target, batch));
+                actions.push(PeerRingAction::sync_entries_for_handoff(target, batch));
             }
         }
         Ok(actions.into())

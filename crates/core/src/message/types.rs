@@ -15,6 +15,7 @@ use crate::dht::entry::SyncedEntryAck;
 use crate::dht::Did;
 use crate::dht::StorageSyncDelivery;
 use crate::dht::StorageSyncDestination;
+use crate::dht::StorageSyncPurpose;
 use crate::dht::TopoInfo;
 use crate::error::Error;
 use crate::error::Result;
@@ -36,6 +37,15 @@ pub struct ConnectNodeSend {
     /// The network_id is used to distinguish different networks.
     /// Use 1 for main network.
     pub network_id: u32,
+    /// Storage virtual-node positions required by this DHT protocol mode.
+    pub dht_virtual_nodes: u16,
+}
+
+impl ConnectNodeSend {
+    /// Return whether this offer belongs to the receiver's DHT protocol mode.
+    pub const fn matches_dht_protocol(&self, network_id: u32, dht_virtual_nodes: u16) -> bool {
+        self.network_id == network_id && self.dht_virtual_nodes == dht_virtual_nodes
+    }
 }
 
 /// MessageType report to origin with own transport_uuid and handshake_info.
@@ -207,6 +217,8 @@ impl FoundEntry {
 /// MessageType after `FindSuccessorSend` and syncing data.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SyncEntriesWithSuccessor {
+    /// Transition kind controlling whether reports may clean up sender storage.
+    pub purpose: StorageSyncPurpose,
     /// Destination semantics used by relay nodes for this sync payload.
     pub destination: StorageSyncDestination,
     /// Entries to sync to the new successor, paired with their placement keys.
@@ -216,14 +228,20 @@ pub struct SyncEntriesWithSuccessor {
 impl SyncEntriesWithSuccessor {
     /// Convert a lowered storage-sync delivery into the wire message.
     pub(crate) fn from_delivery(delivery: StorageSyncDelivery) -> Self {
-        let (destination, data) = delivery.into_message_parts();
-        Self { destination, data }
+        let (purpose, destination, data) = delivery.into_message_parts();
+        Self {
+            purpose,
+            destination,
+            data,
+        }
     }
 }
 
 /// MessageType used to acknowledge durable storage of synced entries.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct SyncEntriesWithSuccessorReport {
+    /// Transition kind of the original sync payload.
+    pub purpose: StorageSyncPurpose,
     /// Original storage-sync destination semantics.
     pub destination: StorageSyncDestination,
     /// Physical receiver that produced this report.
@@ -235,11 +253,13 @@ pub struct SyncEntriesWithSuccessorReport {
 impl SyncEntriesWithSuccessorReport {
     /// Build a durable-storage acknowledgement report.
     pub(crate) fn new(
+        purpose: StorageSyncPurpose,
         destination: StorageSyncDestination,
         receiver: Did,
         acks: Vec<SyncedEntryAck>,
     ) -> Self {
         Self {
+            purpose,
             destination,
             receiver,
             acks,

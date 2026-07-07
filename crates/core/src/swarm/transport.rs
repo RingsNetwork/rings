@@ -38,6 +38,7 @@ use crate::dht::entry::PlacementMiss;
 use crate::dht::Did;
 use crate::dht::LiveDid;
 use crate::dht::PeerRing;
+use crate::dht::VirtualNodeConfig;
 use crate::error::Error;
 use crate::error::Result;
 use crate::measure::order_peers_by_quality;
@@ -73,6 +74,7 @@ pub struct SwarmTransport {
     session_sk: SessionSk,
     pub(crate) dht: Arc<PeerRing>,
     storage_redundancy: u16,
+    dht_virtual_nodes: u16,
     reassembly_limits: ReassemblyLimits,
     storage_lookup_observations: Mutex<StorageLookupObservationMap>,
     pending_storage_sync_acks: Mutex<StorageSyncAckMap>,
@@ -80,18 +82,24 @@ pub struct SwarmTransport {
     measure: Option<MeasureImpl>,
 }
 
-/// Runtime limits used by [`SwarmTransport`].
+/// Runtime settings used by [`SwarmTransport`].
 #[derive(Clone, Copy)]
 pub(crate) struct SwarmTransportSettings {
     storage_redundancy: u16,
+    dht_virtual_nodes: u16,
     reassembly_limits: ReassemblyLimits,
 }
 
 impl SwarmTransportSettings {
-    /// Build transport settings from storage repair redundancy and chunk reassembly limits.
-    pub(crate) fn new(storage_redundancy: u16, reassembly_limits: ReassemblyLimits) -> Self {
+    /// Build transport settings from DHT protocol parameters and chunk reassembly limits.
+    pub(crate) fn new(
+        storage_redundancy: u16,
+        storage_virtual_node_config: VirtualNodeConfig,
+        reassembly_limits: ReassemblyLimits,
+    ) -> Self {
         Self {
             storage_redundancy,
+            dht_virtual_nodes: storage_virtual_node_config.positions_per_owner(),
             reassembly_limits,
         }
     }
@@ -324,6 +332,7 @@ impl SwarmTransport {
             session_sk,
             dht,
             storage_redundancy: settings.storage_redundancy,
+            dht_virtual_nodes: settings.dht_virtual_nodes,
             reassembly_limits: settings.reassembly_limits,
             storage_lookup_observations: Mutex::new(BTreeMap::new()),
             pending_storage_sync_acks: Mutex::new(BTreeMap::new()),
@@ -335,6 +344,16 @@ impl SwarmTransport {
     /// Redundancy used by storage repair and anti-entropy.
     pub(crate) fn storage_redundancy(&self) -> u16 {
         self.storage_redundancy
+    }
+
+    /// Storage virtual-node positions required by this DHT protocol mode.
+    pub(crate) fn dht_virtual_nodes(&self) -> u16 {
+        self.dht_virtual_nodes
+    }
+
+    /// Return whether an inbound connection offer matches this DHT protocol mode.
+    pub(crate) fn accepts_connection_offer(&self, offer: &ConnectNodeSend) -> bool {
+        offer.matches_dht_protocol(self.network_id, self.dht_virtual_nodes)
     }
 
     /// Chunk reassembly limits enforced by inbound callbacks.
@@ -685,6 +704,7 @@ impl SwarmTransport {
         let offer_msg = ConnectNodeSend {
             sdp: offer_str,
             network_id: self.network_id,
+            dht_virtual_nodes: self.dht_virtual_nodes,
         };
 
         Ok(offer_msg)
@@ -697,6 +717,12 @@ impl SwarmTransport {
         callback: InnerSwarmCallback,
         offer_msg: &ConnectNodeSend,
     ) -> Result<ConnectNodeReport> {
+        if !self.accepts_connection_offer(offer_msg) {
+            return Err(Error::InvalidMessage(
+                "connection offer DHT protocol mismatch".to_string(),
+            ));
+        }
+
         let offer = serde_json::from_str(&offer_msg.sdp).map_err(Error::Deserialize)?;
 
         if let Some(swarm_conn) = self.get_connection(peer) {

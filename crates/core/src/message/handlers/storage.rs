@@ -17,6 +17,7 @@ use crate::dht::PeerRing;
 use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
 use crate::dht::StorageSyncDestination;
+use crate::dht::StorageSyncPurpose;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::effects::CoreEffect;
@@ -86,7 +87,10 @@ async fn repair_observed_storage_misses(
     redundancy: u16,
 ) -> Result<()> {
     let misses = transport.take_storage_misses(entry.did, redundancy)?;
-    let repair = transport.dht.read_repair_entry(entry, &misses).await?;
+    let repair = transport
+        .dht
+        .read_repair_entry(entry, &misses, redundancy)
+        .await?;
     run_storage_repair_transport_effects(transport, repair).await
 }
 
@@ -107,7 +111,7 @@ async fn handle_storage_fetch_act<const REDUNDANT: u16>(
             let misses = evidence.misses;
             let repair = transport
                 .dht
-                .read_repair_entry(evidence.entry, &misses)
+                .read_repair_entry(evidence.entry, &misses, REDUNDANT)
                 .await?;
             run_storage_repair_transport_effects(transport.clone(), repair).await?;
         }
@@ -289,17 +293,35 @@ async fn persist_synced_entries(
     handler: &MessageHandler,
     msg: &SyncEntriesWithSuccessor,
 ) -> Result<Vec<SyncedEntryAck>> {
+    // Preservation: batch validation is complete before the first storage
+    // effect. Invalid placement data cannot leave a partially-written batch.
+    let acks = accepted_synced_entry_acks(handler, msg)?;
+
+    for ack in acks.iter() {
+        handler
+            .dht
+            .join_storage_entry(ack.key, ack.entry.clone())
+            .await?;
+    }
+
+    Ok(acks)
+}
+
+fn accepted_synced_entry_acks(
+    handler: &MessageHandler,
+    msg: &SyncEntriesWithSuccessor,
+) -> Result<Vec<SyncedEntryAck>> {
+    // Pre: no storage write for this sync batch has happened.
+    // Post: every returned ack is locally routable and names an affine replica
+    // placement for the entry under the configured storage redundancy.
     let mut acks = Vec::with_capacity(msg.data.len());
     for placed in msg.data.iter() {
         if !should_persist_synced_entry(&handler.dht, msg.destination, placed.key)? {
             continue;
         }
 
+        placed.validate_placement(handler.transport.storage_redundancy())?;
         let entry = placed.entry.clone().try_into_storage_entry()?;
-        handler
-            .dht
-            .join_storage_entry(placed.key, entry.clone())
-            .await?;
         acks.push(SyncedEntryAck::new(placed.key, entry));
     }
     Ok(acks)
@@ -362,6 +384,7 @@ fn next_hop_for_sync_entries(
 async fn report_synced_entries(
     handler: &MessageHandler,
     ctx: &MessagePayload,
+    purpose: StorageSyncPurpose,
     destination: StorageSyncDestination,
     acks: Vec<SyncedEntryAck>,
 ) -> Result<()> {
@@ -369,6 +392,7 @@ async fn report_synced_entries(
         .run_effects([PayloadRelayFunctor::send_report_message(
             ctx,
             Message::SyncEntriesWithSuccessorReport(SyncEntriesWithSuccessorReport::new(
+                purpose,
                 destination,
                 handler.dht.did,
                 acks,
@@ -504,8 +528,12 @@ impl HandleMsg<SyncEntriesWithSuccessor> for MessageHandler {
         }
 
         let acks = persist_synced_entries(self, msg).await?;
-        if let Err(e) = report_synced_entries(self, ctx, msg.destination, acks).await {
-            tracing::warn!("Failed to report synced entries: {e:?}");
+        if msg.purpose.permits_source_cleanup() {
+            if let Err(e) =
+                report_synced_entries(self, ctx, msg.purpose, msg.destination, acks).await
+            {
+                tracing::warn!("Failed to report synced entries: {e:?}");
+            }
         }
         Ok(())
     }

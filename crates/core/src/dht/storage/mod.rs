@@ -23,6 +23,26 @@ use crate::error::Result;
 mod repair;
 mod sync;
 
+/// Storage-sync transition kind.
+///
+/// Cleanup law: only [`StorageSyncPurpose::OwnershipHandoff`] reports can prove
+/// source-side deletion. [`StorageSyncPurpose::AdditiveRepair`] is copy-only and
+/// must never create a delete-capable ack.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+pub enum StorageSyncPurpose {
+    /// Ownership changed and the sender may delete after a durable matching ack.
+    OwnershipHandoff,
+    /// Additive read-repair or anti-entropy copy.
+    AdditiveRepair,
+}
+
+impl StorageSyncPurpose {
+    /// Returns whether reports for this sync kind may drive source cleanup.
+    pub const fn permits_source_cleanup(self) -> bool {
+        matches!(self, Self::OwnershipHandoff)
+    }
+}
+
 /// Destination semantics for a storage sync hand-off.
 ///
 /// Routing law:
@@ -94,25 +114,34 @@ impl StorageSyncRoute {
 /// Lowered storage-sync delivery ready for the message layer.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct StorageSyncDelivery {
+    purpose: StorageSyncPurpose,
     destination: StorageSyncDestination,
     data: Vec<PlacedEntry>,
 }
 
 impl StorageSyncDelivery {
-    fn from_route(target: Did, route: StorageSyncRoute, data: Vec<PlacedEntry>) -> Self {
+    fn from_route(
+        purpose: StorageSyncPurpose,
+        target: Did,
+        route: StorageSyncRoute,
+        data: Vec<PlacedEntry>,
+    ) -> Self {
         // Invariant: `destination` is the unique wire interpretation of
         // `(target, route)`. Transport computes the physical next hop from the
         // destination at send time, so this lowered value does not pretend that
         // the action target is already a relay hop.
         Self {
+            purpose,
             destination: route.destination(target),
             data,
         }
     }
 
-    /// Consume this delivery into the wire destination and payload data.
-    pub(crate) fn into_message_parts(self) -> (StorageSyncDestination, Vec<PlacedEntry>) {
-        (self.destination, self.data)
+    /// Consume this delivery into the wire purpose, destination, and payload data.
+    pub(crate) fn into_message_parts(
+        self,
+    ) -> (StorageSyncPurpose, StorageSyncDestination, Vec<PlacedEntry>) {
+        (self.purpose, self.destination, self.data)
     }
 }
 
@@ -122,11 +151,27 @@ pub(super) enum StorageSyncTarget {
 }
 
 impl PeerRingAction {
-    pub(crate) fn sync_entries(
+    pub(crate) fn sync_entries_for_handoff(
+        destination: StorageSyncDestination,
+        data: Vec<PlacedEntry>,
+    ) -> Self {
+        Self::sync_entries(StorageSyncPurpose::OwnershipHandoff, destination, data)
+    }
+
+    pub(crate) fn sync_entries_for_repair(
+        destination: StorageSyncDestination,
+        data: Vec<PlacedEntry>,
+    ) -> Self {
+        Self::sync_entries(StorageSyncPurpose::AdditiveRepair, destination, data)
+    }
+
+    fn sync_entries(
+        purpose: StorageSyncPurpose,
         destination: StorageSyncDestination,
         data: Vec<PlacedEntry>,
     ) -> Self {
         Self::RemoteAction(destination.did(), RemoteAction::SyncEntriesWithSuccessor {
+            purpose,
             route: destination.route(),
             data,
         })
@@ -145,8 +190,17 @@ impl PeerRingAction {
     ) -> Result<()> {
         match self {
             Self::None => Ok(()),
-            Self::RemoteAction(target, RemoteAction::SyncEntriesWithSuccessor { route, data }) => {
-                deliveries.push(StorageSyncDelivery::from_route(target, route, data));
+            Self::RemoteAction(
+                target,
+                RemoteAction::SyncEntriesWithSuccessor {
+                    purpose,
+                    route,
+                    data,
+                },
+            ) => {
+                deliveries.push(StorageSyncDelivery::from_route(
+                    purpose, target, route, data,
+                ));
                 Ok(())
             }
             Self::MultiActions(actions) => {

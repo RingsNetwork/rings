@@ -477,6 +477,7 @@ impl<'handler> CoreEffectInterpreter<'handler> {
 mod tests {
     use super::*;
     use crate::dht::StorageSyncDestination;
+    use crate::dht::StorageSyncPurpose;
     use crate::ecc::SecretKey;
     use crate::message::types::QueryFor;
     use crate::session::SessionSk;
@@ -631,6 +632,7 @@ mod tests {
     fn storage_sync_effect_owns_sync_message() -> Result<()> {
         let destination = did();
         let msg = SyncEntriesWithSuccessor {
+            purpose: StorageSyncPurpose::OwnershipHandoff,
             destination: StorageSyncDestination::PhysicalOwner(destination),
             data: vec![],
         };

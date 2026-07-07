@@ -170,7 +170,6 @@ pub struct ProcessorConfigSerialized {
     #[serde(default = "default_advertise_presence")]
     advertise_presence: bool,
     /// Storage-only virtual positions derived per physical peer.
-    #[serde(default)]
     dht_virtual_nodes: u16,
 }
 
@@ -240,8 +239,8 @@ impl ProcessorConfigSerialized {
     ///
     /// Serialized configs reject values above
     /// [`MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER`]. This setter is infallible
-    /// and leaves final bounding to [`VirtualNodeConfig::new`] during swarm
-    /// construction.
+    /// for direct programmatic use; the core swarm builder normalizes the value
+    /// once before storage ownership and protocol advertisement are created.
     pub fn dht_virtual_nodes(mut self, positions_per_peer: u16) -> Self {
         self.dht_virtual_nodes = positions_per_peer;
         self
@@ -442,8 +441,9 @@ impl ProcessorBuilder {
     ///
     /// Serialized configs reject values above
     /// [`MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER`]. This builder setter is
-    /// infallible and leaves final bounding to [`VirtualNodeConfig::new`] during
-    /// swarm construction.
+    /// infallible for direct programmatic use; the core swarm builder
+    /// normalizes the value once before storage ownership and protocol
+    /// advertisement are created.
     pub fn dht_virtual_nodes(mut self, positions_per_peer: u16) -> Self {
         self.dht_virtual_nodes = positions_per_peer;
         self
@@ -591,7 +591,10 @@ impl Processor {
 
         let descriptors = Self::online_node_descriptors_from_entry(&entry)
             .into_iter()
-            .filter(|descriptor| descriptor.matches_network(self.swarm.network_id()));
+            .filter(|descriptor| {
+                descriptor
+                    .matches_dht_protocol(self.swarm.network_id(), self.swarm.dht_virtual_nodes())
+            });
 
         Ok(OnlineNodeDescriptor::latest_valid_by_did(
             descriptors,
@@ -1073,6 +1076,35 @@ mod test {
         ));
     }
 
+    #[test]
+    fn serialized_processor_config_requires_dht_virtual_nodes() {
+        let key = SecretKey::random();
+        let session_sk = SessionSk::new_with_seckey(&key).unwrap();
+        let yaml = format!(
+            r#"
+network_id: 0
+ice_servers: stun://stun.l.google.com:19302
+external_address: null
+webrtc_udp_port_min: null
+webrtc_udp_port_max: null
+session_sk: "{}"
+stabilize_interval: 3
+online_node_heartbeat_interval_secs: 30
+online_node_ttl_secs: 60
+online_node_type: Native
+advertise_presence: true
+"#,
+            session_sk.dump().unwrap()
+        );
+
+        let result = serde_yaml::from_str::<ProcessorConfigSerialized>(&yaml);
+
+        assert!(matches!(
+            result,
+            Err(error) if error.to_string().contains("dht_virtual_nodes")
+        ));
+    }
+
     #[tokio::test]
     async fn custom_registration_task_publishes_through_shared_dht_sink() -> Result<()> {
         let topic = "custom_registration_task";
@@ -1127,6 +1159,10 @@ mod test {
         assert_eq!(nodes[0].did, processor.did());
         assert_eq!(nodes[0].did, published.did);
         assert_eq!(nodes[0].network_id, processor.swarm.network_id());
+        assert_eq!(
+            nodes[0].dht_virtual_nodes,
+            processor.swarm.dht_virtual_nodes()
+        );
         assert!(nodes[0].verify_signature());
         assert!(!nodes[0].is_expired_at(get_epoch_ms()));
         Ok(())
@@ -1198,6 +1234,7 @@ mod test {
                     .map_err(Error::CoreError)?,
                 node_type: default_online_node_type(),
                 network_id: expired_processor.swarm.network_id(),
+                dht_virtual_nodes: expired_processor.swarm.dht_virtual_nodes(),
                 capabilities: OnlineNodeRegistration::capabilities(),
                 endpoint_hint: None,
                 started_at_ms: now_ms.saturating_sub(120_000),
@@ -1235,6 +1272,26 @@ mod test {
     async fn online_node_lookup_filters_other_network_descriptors() -> Result<()> {
         let processor = prepare_processor_with_network(0).await;
         let foreign = prepare_processor_with_network(1).await;
+        let now_ms = get_epoch_ms();
+        let local_descriptor = processor.online_node_descriptor_at(now_ms)?;
+        let foreign_descriptor = foreign.online_node_descriptor_at(now_ms)?;
+
+        processor
+            .storage_store(Processor::online_node_registry_entry(vec![
+                local_descriptor.clone(),
+                foreign_descriptor,
+            ])?)
+            .await?;
+
+        let nodes = processor.lookup_online_nodes(true).await?;
+        assert_eq!(nodes, vec![local_descriptor]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn online_node_lookup_filters_other_dht_virtual_node_modes() -> Result<()> {
+        let processor = prepare_processor_with_network_and_virtual_nodes(0, 2).await;
+        let foreign = prepare_processor_with_network_and_virtual_nodes(0, 3).await;
         let now_ms = get_epoch_ms();
         let local_descriptor = processor.online_node_descriptor_at(now_ms)?;
         let foreign_descriptor = foreign.online_node_descriptor_at(now_ms)?;
@@ -1341,6 +1398,22 @@ mod test {
         let conn_dids = processor.swarm.peers();
         assert_eq!(conn_dids.len(), 1);
         assert_eq!(conn_dids.first().unwrap().did, peer_did.to_string());
+    }
+
+    #[tokio::test]
+    async fn answer_offer_rejects_dht_virtual_node_mismatch() {
+        let _network_guard = network_test_guard().await;
+        let offerer = prepare_processor_with_network_and_virtual_nodes(0, 2).await;
+        let answerer = prepare_processor_with_network_and_virtual_nodes(0, 3).await;
+        let offer = offerer.swarm.create_offer(answerer.did()).await.unwrap();
+
+        let result = answerer.swarm.answer_offer(offer).await;
+
+        assert!(matches!(
+            result,
+            Err(rings_core::error::Error::InvalidMessage(message))
+                if message.contains("DHT protocol mismatch")
+        ));
     }
 
     struct SwarmCallbackInstance {
@@ -1490,14 +1563,23 @@ mod test {
     }
 
     async fn prepare_processor_with_network(network_id: u32) -> Processor {
+        prepare_processor_with_network_and_virtual_nodes(network_id, 0).await
+    }
+
+    async fn prepare_processor_with_network_and_virtual_nodes(
+        network_id: u32,
+        dht_virtual_nodes: u16,
+    ) -> Processor {
         let key = SecretKey::random();
         let session_sk = SessionSk::new_with_seckey(&key).unwrap();
-        let config = ProcessorConfig::new(
+        let serialized = ProcessorConfigSerialized::new(
             network_id,
             "stun://stun.l.google.com:19302".to_string(),
-            session_sk,
+            session_sk.dump().unwrap(),
             3,
-        );
+        )
+        .dht_virtual_nodes(dht_virtual_nodes);
+        let config = ProcessorConfig::try_from(serialized).unwrap();
         let storage = Box::new(MemStorage::new());
 
         ProcessorBuilder::from_config(&config)

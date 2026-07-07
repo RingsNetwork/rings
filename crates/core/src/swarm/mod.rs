@@ -63,6 +63,11 @@ impl Swarm {
         self.transport.network_id
     }
 
+    /// Get the storage virtual-node positions for this swarm's DHT protocol mode.
+    pub fn dht_virtual_nodes(&self) -> u16 {
+        self.transport.dht_virtual_nodes()
+    }
+
     /// Get DHT(Distributed Hash Table) of self.
     pub fn dht(&self) -> Arc<PeerRing> {
         self.dht.clone()

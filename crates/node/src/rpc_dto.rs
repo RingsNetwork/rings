@@ -38,6 +38,7 @@ pub(crate) fn online_node_descriptor_info(
         public_key: json_value(descriptor.public_key)?,
         node_type: online_node_type_info(descriptor.node_type),
         network_id: descriptor.network_id,
+        dht_virtual_nodes: descriptor.dht_virtual_nodes,
         capabilities: descriptor.capabilities,
         endpoint_hint: descriptor.endpoint_hint,
         started_at_ms: descriptor_timestamp_ms(descriptor.started_at_ms)?,

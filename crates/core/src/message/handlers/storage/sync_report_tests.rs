@@ -19,6 +19,7 @@ use crate::dht::Did;
 use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
 use crate::dht::StorageSyncDestination;
+use crate::dht::StorageSyncPurpose;
 use crate::ecc::tests::gen_ordered_keys;
 use crate::ecc::SecretKey;
 use crate::error::Error;
@@ -50,18 +51,19 @@ async fn sync_entries_handler_reports_persisted_entries() -> Result<()> {
 
     let receiver_handler =
         MessageHandler::new(receiver.swarm.transport.clone(), Arc::new(NoopCallback));
-    let placement_key = Did::from(100u32);
-    assert!(matches!(
-        receiver.dht().find_storage_owner(placement_key)?,
-        PeerRingAction::Some(owner) if owner == receiver.did()
-    ));
     let entry = Entry::new(
         Did::from(10u32),
         vec!["handler acked".to_string().encode()?],
         EntryKind::Data,
     );
+    let placement_key = entry.did;
+    assert!(matches!(
+        receiver.dht().find_storage_owner(placement_key)?,
+        PeerRingAction::Some(owner) if owner == receiver.did()
+    ));
     let stored_entry = entry.clone().try_into_storage_entry()?;
     let sync_msg = SyncEntriesWithSuccessor {
+        purpose: StorageSyncPurpose::OwnershipHandoff,
         destination: StorageSyncDestination::PhysicalOwner(receiver.did()),
         data: vec![PlacedEntry::new(placement_key, entry.clone())],
     };
@@ -103,14 +105,15 @@ async fn sync_entries_handler_reports_persisted_entries() -> Result<()> {
 async fn persist_synced_entries_returns_acks_for_owned_entries() -> Result<()> {
     let receiver = prepare_node(SecretKey::random()).await;
     let handler = MessageHandler::new(receiver.swarm.transport.clone(), Arc::new(NoopCallback));
-    let placement_key = Did::from(100u32);
     let entry = Entry::new(
         Did::from(10u32),
         vec!["acked".to_string().encode()?],
         EntryKind::Data,
     );
+    let placement_key = entry.did;
     let stored_entry = entry.clone().try_into_storage_entry()?;
     let sync_msg = SyncEntriesWithSuccessor {
+        purpose: StorageSyncPurpose::OwnershipHandoff,
         destination: StorageSyncDestination::PhysicalOwner(receiver.did()),
         data: vec![PlacedEntry::new(placement_key, entry.clone())],
     };
@@ -167,6 +170,7 @@ async fn sync_entries_handler_skips_entries_owned_by_another_virtual_owner() -> 
         .put(&placement_key.to_string(), &stored_entry)
         .await?;
     let sync_msg = SyncEntriesWithSuccessor {
+        purpose: StorageSyncPurpose::OwnershipHandoff,
         destination: StorageSyncDestination::PhysicalOwner(receiver.did()),
         data: vec![PlacedEntry::new(placement_key, entry)],
     };
@@ -178,6 +182,7 @@ async fn sync_entries_handler_skips_entries_owned_by_another_virtual_owner() -> 
     )?;
     sender.swarm.transport.record_pending_storage_sync_ack(
         context.transaction.tx_id,
+        sync_msg.purpose,
         sync_msg.destination,
         receiver.did(),
         &sync_msg.data,
@@ -243,6 +248,7 @@ async fn sync_entries_physical_destination_routes_by_physical_did_not_storage_ow
     };
 
     let msg = SyncEntriesWithSuccessor {
+        purpose: StorageSyncPurpose::OwnershipHandoff,
         destination: StorageSyncDestination::PhysicalOwner(destination),
         data: vec![],
     };

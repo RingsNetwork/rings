@@ -23,6 +23,7 @@ use crate::dht::ChordStorageRepair;
 use crate::dht::ChordStorageSync;
 use crate::dht::Did;
 use crate::dht::StorageSyncDestination;
+use crate::dht::StorageSyncPurpose;
 use crate::dht::StorageSyncRoute;
 use crate::dht::VirtualNodeConfig;
 use crate::error::Error;
@@ -57,6 +58,20 @@ fn first_two_affine_keys(did: Did) -> Result<(Did, Did)> {
         ));
     };
     Ok((first, second))
+}
+
+fn non_affine_placement(entry_key: Did, redundancy: u16) -> Result<Did> {
+    let placements = entry_key.rotate_affine(redundancy)?;
+    for attempt in 0..512 {
+        let candidate = Entry::gen_did(&format!("non-affine placement {attempt}"))?;
+        if !placements.contains(&candidate) {
+            return Ok(candidate);
+        }
+    }
+
+    Err(Error::InvalidMessage(
+        "could not sample non-affine placement".to_string(),
+    ))
 }
 
 fn first_virtual_position(node: &PeerRing, owner: Did) -> Result<Did> {
@@ -97,7 +112,11 @@ fn collect_sync_batches_into(
         PeerRingAction::None => Ok(()),
         PeerRingAction::RemoteAction(
             target,
-            RemoteAction::SyncEntriesWithSuccessor { route: _, data },
+            RemoteAction::SyncEntriesWithSuccessor {
+                purpose: _,
+                route: _,
+                data,
+            },
         ) => {
             batches.push((target, data));
             Ok(())
@@ -515,6 +534,7 @@ fn sync_entries_batch_wire_cost_matches_serialized_message_cost() -> Result<()> 
         ),
     ];
     let message = Message::SyncEntriesWithSuccessor(SyncEntriesWithSuccessor {
+        purpose: StorageSyncPurpose::OwnershipHandoff,
         destination: StorageSyncDestination::PhysicalOwner(Did::from(50u32)),
         data: entries.clone(),
     });
@@ -618,6 +638,7 @@ async fn republish_joins_local_branch_and_routes_remote_placement_keys() -> Resu
         PeerRingAction::MultiActions(vec![PeerRingAction::RemoteAction(
             second_key,
             RemoteAction::SyncEntriesWithSuccessor {
+                purpose: StorageSyncPurpose::AdditiveRepair,
                 route: StorageSyncRoute::PlacementKey,
                 data: vec![PlacedEntry::new(second_key, entry.clone())],
             }
@@ -636,7 +657,7 @@ async fn read_repair_is_noop_for_single_replica_storage() -> Result<()> {
     let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
     let entry = data_entry(Did::from(10u32));
 
-    let action = node.read_repair_entry(entry, &[]).await?;
+    let action = node.read_repair_entry(entry, &[], 1).await?;
 
     assert_eq!(action, PeerRingAction::None);
     assert_eq!(node.storage.count().await?, 0);
@@ -659,7 +680,7 @@ async fn local_hit_lookup_has_no_read_repair_targets() -> Result<()> {
         action => return Err(Error::unexpected_peer_ring_action(action)),
     };
     let repair = node
-        .read_repair_entry(evidence.entry.clone(), &evidence.misses)
+        .read_repair_entry(evidence.entry.clone(), &evidence.misses, 2)
         .await?;
 
     assert!(evidence.misses.is_empty());
@@ -690,7 +711,7 @@ async fn read_repair_targets_only_observed_missing_placements() -> Result<()> {
         action => return Err(Error::unexpected_peer_ring_action(action)),
     };
     let repair = node
-        .read_repair_entry(evidence.entry.clone(), &evidence.misses)
+        .read_repair_entry(evidence.entry.clone(), &evidence.misses, 3)
         .await?;
 
     assert_eq!(evidence.misses, vec![PlacementMiss::new(
@@ -713,11 +734,19 @@ async fn read_repair_targets_only_observed_missing_placements() -> Result<()> {
 async fn read_repair_uses_observed_remote_owner() -> Result<()> {
     let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
     let owner = Did::from(100u32);
-    let placement_key = Did::from(40u32);
     let entry = data_entry(Did::from(10u32));
+    let placement_key = *entry
+        .did
+        .rotate_affine(2)?
+        .get(1)
+        .ok_or_else(|| Error::InvalidMessage("expected second placement".to_string()))?;
 
     let action = node
-        .read_repair_entry(entry.clone(), &[PlacementMiss::new(placement_key, owner)])
+        .read_repair_entry(
+            entry.clone(),
+            &[PlacementMiss::new(placement_key, owner)],
+            2,
+        )
         .await?;
 
     assert_eq!(
@@ -725,10 +754,25 @@ async fn read_repair_uses_observed_remote_owner() -> Result<()> {
         PeerRingAction::MultiActions(vec![PeerRingAction::RemoteAction(
             owner,
             RemoteAction::SyncEntriesWithSuccessor {
+                purpose: StorageSyncPurpose::AdditiveRepair,
                 route: StorageSyncRoute::PhysicalOwner,
                 data: vec![PlacedEntry::new(placement_key, entry)],
             }
         )])
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_repair_rejects_non_affine_observed_miss() -> Result<()> {
+    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
+    let entry = data_entry(Did::from(10u32));
+    let miss = PlacementMiss::new(non_affine_placement(entry.did, 2)?, node.did);
+
+    let result = node.read_repair_entry(entry, &[miss], 2).await;
+
+    assert!(
+        matches!(result, Err(Error::InvalidMessage(message)) if message.contains("affine replica set"))
     );
     Ok(())
 }

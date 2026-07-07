@@ -8,6 +8,7 @@ use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
 use crate::dht::Did;
 use crate::dht::StorageSyncDestination;
+use crate::dht::StorageSyncPurpose;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
@@ -34,6 +35,7 @@ async fn sync_entries_report_handler_deletes_only_acked_keys() -> Result<()> {
     let acked_storage_entry = acked_entry.clone().try_into_storage_entry()?;
     let pending_entry = Entry::new(Did::from(20u32), vec![], EntryKind::Data);
     let sync_msg = SyncEntriesWithSuccessor {
+        purpose: StorageSyncPurpose::OwnershipHandoff,
         destination: StorageSyncDestination::PhysicalOwner(node.did()),
         data: vec![PlacedEntry::new(acked_key, acked_entry.clone())],
     };
@@ -45,6 +47,7 @@ async fn sync_entries_report_handler_deletes_only_acked_keys() -> Result<()> {
     )?;
     node.swarm.transport.record_pending_storage_sync_ack(
         request.transaction.tx_id,
+        sync_msg.purpose,
         sync_msg.destination,
         node.did(),
         &sync_msg.data,
@@ -58,9 +61,12 @@ async fn sync_entries_report_handler_deletes_only_acked_keys() -> Result<()> {
         .put(&pending_key.to_string(), &pending_entry)
         .await?;
 
-    let report = SyncEntriesWithSuccessorReport::new(sync_msg.destination, node.did(), vec![
-        SyncedEntryAck::new(acked_key, acked_storage_entry),
-    ]);
+    let report = SyncEntriesWithSuccessorReport::new(
+        sync_msg.purpose,
+        sync_msg.destination,
+        node.did(),
+        vec![SyncedEntryAck::new(acked_key, acked_storage_entry)],
+    );
     let context = storage_sync_report_payload(
         &request,
         report.clone(),
@@ -92,6 +98,7 @@ async fn sync_entries_report_handler_rejects_untracked_acks() -> Result<()> {
         .await?;
 
     let sync_msg = SyncEntriesWithSuccessor {
+        purpose: StorageSyncPurpose::OwnershipHandoff,
         destination: StorageSyncDestination::PhysicalOwner(node.did()),
         data: vec![PlacedEntry::new(acked_key, acked_entry.clone())],
     };
@@ -101,9 +108,12 @@ async fn sync_entries_report_handler_rejects_untracked_acks() -> Result<()> {
         node.did(),
         node.did(),
     )?;
-    let report = SyncEntriesWithSuccessorReport::new(sync_msg.destination, node.did(), vec![
-        SyncedEntryAck::new(acked_key, acked_storage_entry),
-    ]);
+    let report = SyncEntriesWithSuccessorReport::new(
+        sync_msg.purpose,
+        sync_msg.destination,
+        node.did(),
+        vec![SyncedEntryAck::new(acked_key, acked_storage_entry)],
+    );
     let context = storage_sync_report_payload(
         &request,
         report.clone(),
@@ -136,6 +146,7 @@ async fn sync_entries_report_handler_forwards_before_pending_capability_check() 
 
     let handler = MessageHandler::new(relay.swarm.transport.clone(), Arc::new(NoopCallback));
     let sync_msg = SyncEntriesWithSuccessor {
+        purpose: StorageSyncPurpose::OwnershipHandoff,
         destination: StorageSyncDestination::PhysicalOwner(receiver.did()),
         data: vec![],
     };
@@ -145,7 +156,12 @@ async fn sync_entries_report_handler_forwards_before_pending_capability_check() 
         receiver.did(),
         receiver.did(),
     )?;
-    let report = SyncEntriesWithSuccessorReport::new(sync_msg.destination, receiver.did(), vec![]);
+    let report = SyncEntriesWithSuccessorReport::new(
+        sync_msg.purpose,
+        sync_msg.destination,
+        receiver.did(),
+        vec![],
+    );
     let context = storage_sync_report_payload(
         &request,
         report.clone(),
@@ -159,6 +175,7 @@ async fn sync_entries_report_handler_forwards_before_pending_capability_check() 
     let forwarded = next_payload_for_tx(&sender, request.transaction.tx_id).await?;
     match forwarded.transaction.data::<Message>()? {
         Message::SyncEntriesWithSuccessorReport(forwarded_report) => {
+            assert_eq!(forwarded_report.purpose, report.purpose);
             assert_eq!(forwarded_report.destination, report.destination);
             assert_eq!(forwarded_report.receiver, report.receiver);
             assert_eq!(forwarded_report.acks, report.acks);
@@ -169,6 +186,39 @@ async fn sync_entries_report_handler_forwards_before_pending_capability_check() 
             )))
         }
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn additive_repair_sync_cannot_create_pending_cleanup_capability() -> Result<()> {
+    let node = prepare_node(SecretKey::random()).await;
+    let placement_key = Did::from(100u32);
+    let entry = Entry::new(Did::from(100u32), vec![], EntryKind::Data);
+    let sync_msg = SyncEntriesWithSuccessor {
+        purpose: StorageSyncPurpose::AdditiveRepair,
+        destination: StorageSyncDestination::PhysicalOwner(node.did()),
+        data: vec![PlacedEntry::new(placement_key, entry)],
+    };
+    let request = MessagePayload::new_send(
+        Message::SyncEntriesWithSuccessor(sync_msg.clone()),
+        node.swarm.transport.session_sk(),
+        node.did(),
+        node.did(),
+    )?;
+
+    let result = node.swarm.transport.record_pending_storage_sync_ack(
+        request.transaction.tx_id,
+        sync_msg.purpose,
+        sync_msg.destination,
+        node.did(),
+        &sync_msg.data,
+    );
+
+    assert!(matches!(
+        result,
+        Err(Error::InvalidMessage(message))
+            if message.contains("does not permit pending cleanup ack")
+    ));
     Ok(())
 }
 
@@ -187,6 +237,7 @@ async fn sync_entries_report_handler_rejects_wrong_physical_receiver() -> Result
         .await?;
 
     let sync_msg = SyncEntriesWithSuccessor {
+        purpose: StorageSyncPurpose::OwnershipHandoff,
         destination: StorageSyncDestination::PhysicalOwner(receiver.did()),
         data: vec![PlacedEntry::new(acked_key, acked_entry.clone())],
     };
@@ -198,13 +249,17 @@ async fn sync_entries_report_handler_rejects_wrong_physical_receiver() -> Result
     )?;
     sender.swarm.transport.record_pending_storage_sync_ack(
         request.transaction.tx_id,
+        sync_msg.purpose,
         sync_msg.destination,
         receiver.did(),
         &sync_msg.data,
     )?;
-    let report = SyncEntriesWithSuccessorReport::new(sync_msg.destination, sender.did(), vec![
-        SyncedEntryAck::new(acked_key, acked_storage_entry),
-    ]);
+    let report = SyncEntriesWithSuccessorReport::new(
+        sync_msg.purpose,
+        sync_msg.destination,
+        sender.did(),
+        vec![SyncedEntryAck::new(acked_key, acked_storage_entry)],
+    );
     let context = storage_sync_report_payload(
         &request,
         report.clone(),
@@ -242,6 +297,7 @@ async fn sync_entries_report_handler_rejects_unproven_placement_receiver() -> Re
         .await?;
 
     let sync_msg = SyncEntriesWithSuccessor {
+        purpose: StorageSyncPurpose::OwnershipHandoff,
         destination: StorageSyncDestination::PlacementKey(placement_key),
         data: vec![PlacedEntry::new(placement_key, acked_entry.clone())],
     };
@@ -253,14 +309,17 @@ async fn sync_entries_report_handler_rejects_unproven_placement_receiver() -> Re
     )?;
     sender.swarm.transport.record_pending_storage_sync_ack(
         request.transaction.tx_id,
+        sync_msg.purpose,
         sync_msg.destination,
         route_next_hop.did(),
         &sync_msg.data,
     )?;
-    let report =
-        SyncEntriesWithSuccessorReport::new(sync_msg.destination, final_receiver.did(), vec![
-            SyncedEntryAck::new(placement_key, acked_storage_entry),
-        ]);
+    let report = SyncEntriesWithSuccessorReport::new(
+        sync_msg.purpose,
+        sync_msg.destination,
+        final_receiver.did(),
+        vec![SyncedEntryAck::new(placement_key, acked_storage_entry)],
+    );
     let context = storage_sync_report_payload(
         &request,
         report.clone(),

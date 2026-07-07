@@ -17,6 +17,7 @@ use super::entry::PlacedEntry;
 use super::entry::PlacedEntryOperation;
 use super::entry::PlacementMiss;
 use super::finger::DEFAULT_FINGER_TABLE_SIZE;
+use super::storage::StorageSyncPurpose;
 use super::storage::StorageSyncRoute;
 use super::successor::SuccessorSeq;
 use super::topology;
@@ -115,6 +116,8 @@ pub enum RemoteAction {
     Notify(Did),
     /// Copy placed entries to one storage sync destination.
     SyncEntriesWithSuccessor {
+        /// Sync transition kind.
+        purpose: StorageSyncPurpose,
         /// Routing semantics for the outer [`PeerRingAction::RemoteAction`] target.
         route: StorageSyncRoute,
         /// Entries to copy at their placement keys.
