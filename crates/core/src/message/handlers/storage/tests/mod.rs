@@ -1,6 +1,6 @@
-mod api_tests;
-mod repair_tests;
-mod sync_ack_tests;
-mod sync_receive_tests;
-mod sync_report_tests;
+mod test_api;
+mod test_repair;
+mod test_storage_sync_report;
 mod test_support;
+mod test_sync_ack;
+mod test_sync_receive;
