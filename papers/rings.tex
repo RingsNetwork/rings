@@ -54,7 +54,7 @@
 }
 
 \author{Ryan~J.~Kung%
-\thanks{Ryan J. Kung can be reached at ryankung@ieee.org. Manuscript created February 8, 2023; last updated July 7, 2026.}}
+\thanks{Ryan J. Kung can be reached at ryankung@ieee.org. Manuscript created February 8, 2023; last updated July 8, 2026.}}
 \title{Rings: An Algebraic Structured Peer-to-Peer Network\\
 for Decentralized Identity and Resource Ownership}
 \date{}
@@ -114,6 +114,9 @@ ledger for which claims the paper admits:
 &\subseteq&\mathsf{Spec}\uplus\mathsf{Artifact}_{R},\\
 \mathsf{Eval}_{reported}
 &\subset&\mathsf{ReportedOnly},\\
+\mathsf{OnionImpl}_{R}&\in&\mathsf{Artifact}_{R},\\
+\mathsf{OnionImpl}_{R}&\not\Rightarrow&\mathsf{Anon},\\
+\mathsf{OnionImpl}_{R}&\not\Rightarrow&\mathsf{WANPerf},\\
 \mathsf{PerfClaim}_{R}&\in&\mathsf{Obligation}.
 \end{array}
 \]
@@ -289,6 +292,8 @@ G_{id}\land G_{own}\land G_{io}\land G_{eff}\\
 &\quad{}\cup
 \{\mathsf{ByzLive},\mathsf{Consensus},\mathsf{WANPerf}\}\\
 &\quad{}\cup
+\{\mathsf{Anon},\mathsf{Unlinkability},\mathsf{OnionPerf}\}\\
+&\quad{}\cup
 \{\mathsf{FullVNodeRouting},\mathsf{VNodePerf}\}.
 \end{aligned}
 \]
@@ -306,6 +311,7 @@ Chord state & \(\mathsf{Spec}\cup\mathsf{Ev}_{\Gamma}\) & Algorithms~\ref{alg:jo
 DID/session & \(\mathsf{Impl}\) & signed session and context predicates \\
 Storage VNs & \(\mathsf{Impl}\cup\mathsf{Ev}_{\Gamma}\) & affine keys, virtual owners, storage tests \\
 E2E frames & \(\mathsf{Impl}\cup\mathsf{Ev}_{\Gamma}\) & signed frame and receiver policy \\
+Onion circuits & \(\mathsf{Impl}\cup\mathsf{Ev}_{\Gamma}\) & exit registry, route builder, layered AEAD tests \\
 Chunking & \(\mathsf{Impl}\cup\mathsf{Ev}_{\Gamma}\) & Algorithm~\ref{alg:e2e_chunking}; bounded reassembly \\
 Deferred APIs & \(\mathsf{Spec}\cup\mathsf{Obligation}\) & mailbox, hidden descriptor, secret sharing \\
 Wit/rank/sec. & \(\mathsf{Spec}\cup\mathsf{Obligation}\) & policy predicates, no global security theorem \\
@@ -338,7 +344,8 @@ admitted only through an explicit ledger row \((c,k,a,\sigma)\);
 \begin{aligned}
 \mathsf{Reuse}_{Rings}
 &=\{\mathsf{Chord},\mathsf{CorrectChord},\mathsf{DID},
-  \mathsf{WebRTC},\mathsf{CRDT}\},\\
+  \mathsf{WebRTC},\\
+&\quad{}\mathsf{CRDT},\mathsf{OnionRouting}\},\\
 \mathsf{New}_{Rings}
 &=(\Omega_N,\mathsf{PMor},\mathsf{CarrierSep},
   \mathsf{LedgerDisc}_{Rings}).
@@ -1442,6 +1449,53 @@ ownership of the public key, stream identifiers, sequence numbers, and
 final-frame checks into the security boundary rather than treating them as
 optional metadata.
 
+\begin{definition}[Onion exit registry and circuit]
+\label{def:onion-circuit}
+\[
+  \mathsf{Class}(\mathsf{OnionImpl}_{R})
+  \subseteq\{\mathsf{Impl},\mathsf{Evidence}_{\Gamma}\}.
+\]
+\begingroup\small
+\[
+\begin{array}{rcl}
+\mathsf{Topic}_{onion}&=&\mathtt{onion\_exits},\\
+e&=&(d,k_d,s,nt,net,svc,\pi,t_0,t_h,t_x,\sigma),\\
+\operatorname{ExitOK}(e,t)&\Leftrightarrow&
+V(k_d,\sigma,e\setminus\sigma)=\top\\
+&&{}\land\operatorname{did}(k_d)=d
+\land t<t_x\\
+&&{}\land net=net_R\land svc\in\mathsf{Svc},\\
+q&=&(d,s),\\
+\operatorname{RelayOK}(q,t)&\Leftrightarrow&
+\operatorname{Online}(d,s,t)\\
+&&{}\land\mathtt{onion\mbox{-}relay}\in cap(d,t),\\
+\rho&=&(q_1,\ldots,q_{h-1},e),\quad 1\leq h\leq 8,\\
+h_0&=&3,\\
+\operatorname{RouteOK}(\rho,svc,t)&\Leftrightarrow&
+\operatorname{NoRepeat}(d(q_1),\ldots,d(e))\\
+&&{}\land\operatorname{ExitOK}(e,t)
+\land\operatorname{offers}(e,svc),\\
+L_h&=&\operatorname{AEAD}_{s(e)}(ret,svc,m),\\
+L_i&=&\operatorname{AEAD}_{s(q_i)}(d(q_{i+1}),cid_{i+1},\\
+&&{}L_{i+1}),\quad i<h,\\
+B_e&=&\operatorname{AEAD}_{s_{client}}(rid,m,\sigma_e).
+\end{array}
+\]
+\endgroup
+Here \(e\) is the signed onion-exit descriptor, \(q_i\) is a relay descriptor
+from live online-node presence, \(L_i\) is the forward layer, and \(B_e\) is a
+client-encrypted backward payload.  Definition~\ref{def:onion-circuit} is an
+implementation claim about directory, route construction, and encrypted
+forward/backward frames:
+\[
+\begin{array}{rcl}
+\mathsf{OnionImpl}_{R}&\not\Rightarrow&\mathsf{Anon},\\
+\mathsf{OnionImpl}_{R}&\not\Rightarrow&\mathsf{Unlinkability},\\
+\mathsf{OnionImpl}_{R}&\not\Rightarrow&\mathsf{DoSResist}.
+\end{array}
+\]
+\end{definition}
+
 \begin{definition}[Signed encrypted frame]
 \[
   f=(sid,seq,last,cipher,pk_s,\sigma_s).
@@ -1723,7 +1777,8 @@ seen'_{seq}&=&seen_{seq}\cup\{seq(f)\},\\
 \mathsf{Artifact}_{R}&=&
 \mathsf{FiniteModel}\cup\mathsf{TraceReplay}\\
 &&{}\cup\mathsf{Tests}_{CI}\\
-&&{}\cup\mathsf{FrameImpl}\cup\mathsf{ChunkImpl},\\
+&&{}\cup\mathsf{FrameImpl}\cup\mathsf{ChunkImpl}\\
+&&{}\cup\mathsf{OnionReg}\cup\mathsf{OnionCircuit},\\
 \mathsf{Manifest}_{R}&=&
 \mathsf{Path}\times\mathsf{Scope}\times\mathsf{Status},\\
 \mathsf{AdmittedArtifact}(a)&\Leftrightarrow&
@@ -1733,10 +1788,11 @@ a\in\mathsf{Artifact}_{R}\\
 \end{array}
 \]
 This section separates executable artifact evidence from reported coordinates.
-The repository contains finite-scope evidence for overlay, storage, and
-message-flow obligations.  It does not yet contain a wide-area Rings benchmark,
-or a paper-branch manifest entry with source revision, command, seed, and host
-metadata sufficient to regenerate the comparison tables below.
+The repository contains finite-scope evidence for overlay, storage, onion
+circuit, and message-flow obligations.  It does not yet contain a wide-area
+Rings benchmark, or a manifest entry on this paper branch with source revision,
+command, seed, and host metadata sufficient to regenerate the comparison tables
+below.
 Tables~\ref{verification-table} and
 \ref{artifact-manifest-table} are the artifact ledger; reported comparison
 coordinates are isolated in Table~\ref{reported-coordinate-table}.
@@ -1855,6 +1911,12 @@ E2E tests
 Storage VNODE
   & owner derivation, route, sync, repair
   & no full routing-VNODE or perf theorem \\
+Onion registry
+  & signed exits, live directory, route selection
+  & no hidden-service or anonymity theorem \\
+Onion circuit
+  & layered AEAD, relay/exit replay tests
+  & no traffic-analysis or DoS theorem \\
 CI witness
   & build, test, lint, doc, package
   & no benchmark regeneration \\
@@ -1890,6 +1952,12 @@ Symbol & Artifact anchor & Admission status \\ \hline
 \(\mathsf{VNodeImpl}\)
   & \texttt{virtual\_node.rs}
   & storage owner derivation \\
+\(\mathsf{OnionReg}\)
+  & \texttt{onion/mod.rs}, \texttt{route.rs}
+  & signed exit directory, route builder \\
+\(\mathsf{OnionCircuit}\)
+  & \texttt{circuit/*.rs}
+  & layered AEAD relay/exit behavior \\
 \(\mathsf{SyncImpl}\)
   & \texttt{storage/*.rs}
   & additive repair, guarded cleanup \\
@@ -2208,11 +2276,13 @@ evidence for a Rings performance theorem in this revision.
 
 \noindent\textbf{Limitations.}
 The current artifact supports finite model/test evidence, storage-VNODE
-implementation evidence, reported storage-VNODE load-balance coordinates, and
-reported baseline coordinates.  It does not yet support claims about wide-area
-latency, NAT population behavior, adversarial churn beyond the scoped models,
-symbolic cryptographic security, full routing VNODEs, storage-VNODE runtime
-performance, or steady-state Rings lookup performance.
+implementation evidence, onion exit/circuit implementation evidence, reported
+storage-VNODE load-balance coordinates, and reported baseline coordinates.  It
+does not yet support claims about wide-area latency, NAT population behavior,
+adversarial churn beyond the scoped models, symbolic cryptographic security,
+full routing VNODEs, storage-VNODE runtime performance, onion anonymity or
+traffic-analysis resistance, exit-abuse resistance, or steady-state Rings lookup
+performance.
 
 \section{Related Work}
 
@@ -2251,6 +2321,17 @@ onion routing; Nym adds mix-network style privacy infrastructure
 route unlinkability.  The Rings relay layer is only a typed transport policy:
 \[
   \mathsf{P}_{relay}\not\Rightarrow\mathsf{Anon}.
+\]
+The implementation nevertheless now includes an application-layer onion exit
+registry and route-aware circuit data plane:
+\[
+\begin{array}{rcl}
+\mathsf{OnionImpl}_{R}&=&
+\mathsf{ExitRegistry}\cup\mathsf{RouteBuilder}\\
+&&{}\cup\mathsf{LayeredAEAD},\\
+\mathsf{OnionImpl}_{R}&\not\Rightarrow&\mathsf{Anon},\\
+\mathsf{OnionImpl}_{R}&\not\Rightarrow&\mathsf{Unlinkability}.
+\end{array}
 \]
 
 The Rings storage layer uses the join-semilattice CRDT case when merge is
@@ -2291,10 +2372,12 @@ D_C^{paper}\uplus D_C^{656}\uplus D_R^{docker}\\
 The scientific contribution is the composition law and its claim ledger:
 CorrectChord supplies the overlay safety root, storage VNODEs instantiate the
 default \(\operatorname{StoreOwner}^{v_0}_N\) placement map, \(\Omega_N\) lifts
-resource namespaces into live owners, protocol morphisms preserve placement, and
-runtime effects remain typed.  Virtual positions are storage coordinates, not
-authority principals or transport endpoints.  \(\mathsf{Formalized}_{paper}\)
-is a theorem inside the stated model; \(\mathsf{LedgerRule}_{paper}\) is the
+resource namespaces into live owners, onion circuits instantiate a typed
+application data plane, protocol morphisms preserve placement, and runtime
+effects remain typed.  Virtual positions are storage coordinates, not authority
+principals or transport endpoints.  Onion routes are encrypted circuit
+coordinates, not anonymity proofs.  \(\mathsf{Formalized}_{paper}\) is a
+theorem inside the stated model; \(\mathsf{LedgerRule}_{paper}\) is the
 admission rule for paper claims.  Implementation evidence supports only the
 entries admitted by Table~\ref{artifact-manifest-table}; coordinates in
 Table~\ref{reported-coordinate-table} are not proof evidence.  Benchmark and
