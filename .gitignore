@@ -27,6 +27,7 @@ docs
 pkg/
 tmp/
 data/
+benchmark-results/
 nohup.out
 config.yaml
 
