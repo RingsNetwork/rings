@@ -42,7 +42,7 @@ pub struct Provider {
     handler: InternalRpcHandler,
     extensions: crate::extension::ext::Extensions,
     #[cfg(feature = "browser")]
-    onion_https_runtime: Arc<Mutex<Option<Arc<crate::onion_https::OnionHttpsRuntime>>>>,
+    onion_https_runtime: Arc<Mutex<Option<Arc<crate::onion::https::OnionHttpsRuntime>>>>,
 }
 
 /// Async signer, without Send required

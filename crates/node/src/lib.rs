@@ -9,9 +9,6 @@ pub mod measure;
 #[cfg(feature = "node")]
 pub mod native;
 pub mod onion;
-#[cfg(feature = "browser")]
-pub mod onion_https;
-pub mod onion_proxy;
 pub mod online;
 pub mod prelude;
 pub mod processor;

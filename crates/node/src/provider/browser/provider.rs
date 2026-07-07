@@ -34,14 +34,14 @@ use crate::onion::circuit::OnionCircuitProtocol;
 use crate::onion::circuit::OnionCircuitShell;
 use crate::onion::circuit::OnionClientReturn;
 use crate::onion::circuit::ONION_CIRCUIT_NAMESPACE;
+use crate::onion::https::client_request_from_url as onion_https_client_request_from_url;
+use crate::onion::https::encode_https_payload;
+use crate::onion::https::BrowserOnionCircuitHandler;
+use crate::onion::https::OnionHttpsClientRequest;
+use crate::onion::https::OnionHttpsPayload;
+use crate::onion::https::OnionHttpsRuntime;
+use crate::onion::proxy::OnionProxyConfig;
 use crate::onion::OnionExitPolicy;
-use crate::onion_https::client_request_from_url as onion_https_client_request_from_url;
-use crate::onion_https::encode_https_payload;
-use crate::onion_https::BrowserOnionCircuitHandler;
-use crate::onion_https::OnionHttpsClientRequest;
-use crate::onion_https::OnionHttpsPayload;
-use crate::onion_https::OnionHttpsRuntime;
-use crate::onion_proxy::OnionProxyConfig;
 use crate::processor::Processor;
 use crate::processor::ProcessorConfig;
 use crate::provider::AsyncSigner;
@@ -103,9 +103,9 @@ impl BrowserOnionProxy {
     /// Build a browser-compatible HTTPS onion proxy route for `target_authority` (`host:port`).
     pub fn route(&self, target_authority: String) -> js_sys::Promise {
         let p = self.processor.clone();
-        let config = self.config;
+        let config = self.config.clone();
         future_to_promise(async move {
-            let target = crate::onion_proxy::OnionProxyTarget::parse_authority(&target_authority)
+            let target = crate::onion::proxy::OnionProxyTarget::parse_authority(&target_authority)
                 .map_err(JsError::from)?;
             let route = p
                 .build_onion_proxy_route(config, target)
@@ -125,7 +125,7 @@ impl BrowserOnionProxy {
     /// `{ status, headers, body }`.
     pub fn request(&self, url: String, request: JsValue) -> js_sys::Promise {
         let p = self.processor.clone();
-        let config = self.config;
+        let config = self.config.clone();
         let runtime = self.runtime.clone();
         future_to_promise(async move {
             let request = if request.is_null() || request.is_undefined() {

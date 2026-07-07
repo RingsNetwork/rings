@@ -10,6 +10,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionExitService;
+use crate::onion::OnionServiceName;
 use crate::online::OnlineNodeType;
 use crate::prelude::rings_core::ecc::SecretKey;
 use crate::prelude::SessionSk;
@@ -82,10 +83,16 @@ pub struct Config {
     pub onion_exit_policy: OnionExitPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub onion_http_proxy_addr: Option<String>,
+    #[serde(default = "OnionServiceName::tcp")]
+    pub onion_http_proxy_service: OnionServiceName,
     #[serde(default)]
     pub onion_http_proxy_hop_count: usize,
     #[serde(default)]
     pub onion_http_proxy_allow_short_paths: bool,
+    #[serde(default = "crate::onion::proxy::http::default_connect_header_timeout_secs")]
+    pub onion_http_proxy_header_timeout_secs: u64,
+    #[serde(default = "crate::onion::proxy::http::default_max_connect_connections")]
+    pub onion_http_proxy_max_connections: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_ip: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -189,8 +196,13 @@ impl Config {
             onion_exit_services: crate::onion::default_onion_exit_services(),
             onion_exit_policy: crate::onion::default_onion_exit_policy(),
             onion_http_proxy_addr: None,
+            onion_http_proxy_service: OnionServiceName::tcp(),
             onion_http_proxy_hop_count: 0,
             onion_http_proxy_allow_short_paths: false,
+            onion_http_proxy_header_timeout_secs:
+                crate::onion::proxy::http::default_connect_header_timeout_secs(),
+            onion_http_proxy_max_connections:
+                crate::onion::proxy::http::default_max_connect_connections(),
             external_ip: None,
             webrtc_udp_port_min: None,
             webrtc_udp_port_max: None,
@@ -279,8 +291,17 @@ measure_storage:
         assert!(!cfg.advertise_onion_relay);
         assert!(!cfg.advertise_onion_exit);
         assert_eq!(cfg.onion_http_proxy_addr, None);
+        assert_eq!(cfg.onion_http_proxy_service, OnionServiceName::tcp());
         assert_eq!(cfg.onion_http_proxy_hop_count, 0);
         assert!(!cfg.onion_http_proxy_allow_short_paths);
+        assert_eq!(
+            cfg.onion_http_proxy_header_timeout_secs,
+            crate::onion::proxy::http::default_connect_header_timeout_secs()
+        );
+        assert_eq!(
+            cfg.onion_http_proxy_max_connections,
+            crate::onion::proxy::http::default_max_connect_connections()
+        );
         assert_eq!(
             cfg.onion_exit_services,
             crate::onion::default_onion_exit_services()

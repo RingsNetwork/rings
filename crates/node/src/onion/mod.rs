@@ -43,6 +43,9 @@ pub mod circuit;
 pub(crate) mod directory;
 pub(crate) mod exit_accounting;
 mod failure;
+#[cfg(feature = "browser")]
+pub mod https;
+pub mod proxy;
 pub(crate) mod replay;
 pub mod route;
 pub mod target;

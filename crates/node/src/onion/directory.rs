@@ -10,13 +10,12 @@ use super::OnionRoute;
 use super::OnionRouteCandidates;
 use super::OnionRouteError;
 use super::OnionRouteRequest;
-use super::OnionServiceName;
 use super::SystemRouteEntropy;
 use crate::error::Error;
 use crate::error::Result;
-use crate::onion_proxy::OnionProxyConfig;
-use crate::onion_proxy::OnionProxyRoute;
-use crate::onion_proxy::OnionProxyTarget;
+use crate::onion::proxy::OnionProxyConfig;
+use crate::onion::proxy::OnionProxyRoute;
+use crate::onion::proxy::OnionProxyTarget;
 use crate::online::OnlineNodeDescriptor;
 
 /// Read-only directory effects required by onion route construction.
@@ -53,7 +52,7 @@ pub(crate) async fn build_onion_proxy_route(
     proxy: OnionProxyConfig,
     target: OnionProxyTarget,
 ) -> Result<OnionProxyRoute> {
-    let service_name = OnionServiceName::parse(proxy.exit_service())?;
+    let service_name = proxy.exit_service_name().clone();
     let service = service_name.as_str().to_string();
     let transport = proxy.exit_transport();
     let exit_target = OnionExitTarget::from_proxy_target(&target);

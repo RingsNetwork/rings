@@ -8,9 +8,16 @@
 
 use rings_core::dht::Did;
 
+use crate::error::Error;
+use crate::error::Result;
+use crate::onion::OnionExitService;
 use crate::onion::OnionExitTransport;
 pub use crate::onion::OnionProxyTarget;
 use crate::onion::OnionRoute;
+use crate::onion::OnionServiceName;
+
+#[cfg(feature = "node")]
+pub mod http;
 
 /// Exit service used by native HTTP CONNECT/SOCKS-style byte tunnels.
 pub const ONION_PROXY_TCP_SERVICE: &str = "tcp";
@@ -43,16 +50,24 @@ impl OnionProxyProtocol {
             Self::HttpsProxy => OnionExitTransport::Https,
         }
     }
+
+    fn default_exit_service_name(self) -> OnionServiceName {
+        match self {
+            Self::TcpConnect => OnionServiceName::tcp(),
+            Self::HttpsProxy => OnionServiceName::https(),
+        }
+    }
 }
 
 /// Target-agnostic onion proxy configuration.
 ///
 /// A client owns one proxy configuration per ingress style, then resolves one route per target
 /// authority. This keeps browser proxy APIs from becoming one-off URL fetch wrappers.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OnionProxyConfig {
     /// Requested ingress protocol.
     pub protocol: OnionProxyProtocol,
+    service: OnionServiceName,
     /// Desired hop count including the exit. `0` uses [`crate::onion::DEFAULT_ONION_ROUTE_HOPS`].
     pub hop_count: usize,
     /// Whether route selection may use fewer hops when too few relays are live.
@@ -61,37 +76,83 @@ pub struct OnionProxyConfig {
 
 impl OnionProxyConfig {
     /// Create a proxy configuration for `protocol`.
-    pub const fn new(
-        protocol: OnionProxyProtocol,
-        hop_count: usize,
-        allow_short_paths: bool,
-    ) -> Self {
+    pub fn new(protocol: OnionProxyProtocol, hop_count: usize, allow_short_paths: bool) -> Self {
         Self {
             protocol,
+            service: protocol.default_exit_service_name(),
             hop_count,
             allow_short_paths,
         }
     }
 
+    /// Create a proxy configuration with an explicit exit service.
+    pub fn with_service(
+        protocol: OnionProxyProtocol,
+        service: OnionServiceName,
+        hop_count: usize,
+        allow_short_paths: bool,
+    ) -> Result<Self> {
+        validate_proxy_service(protocol, &service)?;
+        Ok(Self {
+            protocol,
+            service,
+            hop_count,
+            allow_short_paths,
+        })
+    }
+
     /// Create a native TCP CONNECT proxy configuration.
-    pub const fn tcp_connect(hop_count: usize, allow_short_paths: bool) -> Self {
+    pub fn tcp_connect(hop_count: usize, allow_short_paths: bool) -> Self {
         Self::new(OnionProxyProtocol::TcpConnect, hop_count, allow_short_paths)
     }
 
+    /// Create a native TCP CONNECT proxy configuration for a specific TCP exit service.
+    pub fn tcp_connect_service(
+        service: OnionServiceName,
+        hop_count: usize,
+        allow_short_paths: bool,
+    ) -> Result<Self> {
+        Self::with_service(
+            OnionProxyProtocol::TcpConnect,
+            service,
+            hop_count,
+            allow_short_paths,
+        )
+    }
+
     /// Create a browser-compatible HTTPS proxy configuration.
-    pub const fn https_proxy(hop_count: usize, allow_short_paths: bool) -> Self {
+    pub fn https_proxy(hop_count: usize, allow_short_paths: bool) -> Self {
         Self::new(OnionProxyProtocol::HttpsProxy, hop_count, allow_short_paths)
     }
 
     /// Return the onion-exit service name required by this proxy.
-    pub const fn exit_service(self) -> &'static str {
-        self.protocol.exit_service()
+    pub fn exit_service(&self) -> &str {
+        self.service.as_str()
+    }
+
+    /// Return the canonical onion-exit service required by this proxy.
+    pub fn exit_service_name(&self) -> &OnionServiceName {
+        &self.service
     }
 
     /// Return the onion-exit transport required by this proxy.
-    pub const fn exit_transport(self) -> OnionExitTransport {
+    pub fn exit_transport(&self) -> OnionExitTransport {
         self.protocol.exit_transport()
     }
+}
+
+fn validate_proxy_service(protocol: OnionProxyProtocol, service: &OnionServiceName) -> Result<()> {
+    if let Some(expected) = OnionExitService::reserved_transport(service.as_str()) {
+        if expected != protocol.exit_transport() {
+            return Err(Error::InvalidConfig(format!(
+                "onion proxy service {:?} requires {:?} transport, got {:?}",
+                service.as_str(),
+                expected,
+                protocol.exit_transport()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// A proxy route selected for a target.
@@ -112,8 +173,8 @@ impl OnionProxyRoute {
     }
 
     /// Return the exit service used for route selection.
-    pub const fn exit_service(&self) -> &'static str {
-        self.protocol.exit_service()
+    pub fn exit_service(&self) -> &str {
+        self.route.service()
     }
 
     /// Return the exit transport used for route selection.
@@ -150,6 +211,26 @@ mod tests {
         assert_eq!(proxy.exit_transport(), OnionExitTransport::Https);
         assert_eq!(proxy.hop_count, 3);
         assert!(!proxy.allow_short_paths);
+    }
+
+    #[test]
+    fn tcp_proxy_config_accepts_custom_tcp_service() -> Result<()> {
+        let service = OnionServiceName::parse("web")?;
+        let proxy = OnionProxyConfig::tcp_connect_service(service, 2, true)?;
+
+        assert_eq!(proxy.exit_service(), "web");
+        assert_eq!(proxy.exit_transport(), OnionExitTransport::Tcp);
+        assert_eq!(proxy.hop_count, 2);
+        assert!(proxy.allow_short_paths);
+        Ok(())
+    }
+
+    #[test]
+    fn proxy_config_rejects_reserved_service_transport_mismatch() {
+        assert!(matches!(
+            OnionProxyConfig::tcp_connect_service(OnionServiceName::https(), 1, false),
+            Err(Error::InvalidConfig(_))
+        ));
     }
 
     #[test]

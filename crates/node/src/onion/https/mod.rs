@@ -44,6 +44,8 @@ use crate::onion::circuit::OnionForwardNonce;
 use crate::onion::circuit::OnionReturnId;
 use crate::onion::exit_accounting::OnionExitAccounting;
 use crate::onion::exit_accounting::OnionExitLease;
+use crate::onion::proxy::OnionProxyTarget;
+use crate::onion::proxy::ONION_PROXY_HTTPS_SERVICE;
 use crate::onion::replay::OnionForwardReplayCache;
 use crate::onion::replay::OnionForwardReplayKey;
 use crate::onion::replay::ReplayAdmission;
@@ -52,8 +54,6 @@ use crate::onion::OnionExitFailure;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionExitTarget;
 use crate::onion::OnionRouteError;
-use crate::onion_proxy::OnionProxyTarget;
-use crate::onion_proxy::ONION_PROXY_HTTPS_SERVICE;
 
 const DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
 

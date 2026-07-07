@@ -426,3 +426,6 @@ fn parse_route_service(service: impl AsRef<str>) -> Result<OnionServiceName> {
     }
     OnionServiceName::parse(service)
 }
+
+#[cfg(test)]
+mod tests;

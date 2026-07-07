@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::ArgAction;
 use clap::Args;
@@ -18,13 +19,14 @@ use rings_node::native::cli::Client;
 use rings_node::native::config;
 use rings_node::native::endpoint::run_external_api;
 use rings_node::native::endpoint::run_internal_api;
-use rings_node::native::onion_http_proxy::run_onion_http_proxy;
-use rings_node::native::onion_http_proxy::OnionHttpProxyOptions;
+use rings_node::onion::proxy::http::run_onion_http_proxy;
+use rings_node::onion::proxy::http::OnionHttpProxyOptions;
 use rings_node::onion::tcp::NativeOnionCircuitHandle;
 use rings_node::onion::tcp::NativeOnionTcpExitConfig;
 use rings_node::onion::OnionExitService;
 use rings_node::onion::OnionExitTarget;
 use rings_node::onion::OnionExitTransport;
+use rings_node::onion::OnionServiceName;
 use rings_node::prelude::rings_core::chunk::ReassemblyLimits;
 use rings_node::prelude::rings_core::dht::Did;
 use rings_node::prelude::rings_core::ecc::SecretKey;
@@ -112,6 +114,10 @@ fn parse_onion_exit_service(raw: &str) -> Result<OnionExitService, String> {
         }
     };
     OnionExitService::new(name, transport).map_err(|error| error.to_string())
+}
+
+fn parse_onion_service_name(raw: &str) -> Result<OnionServiceName, String> {
+    OnionServiceName::parse(raw).map_err(|error| error.to_string())
 }
 
 fn validate_native_onion_exit_services(services: &[OnionExitService]) -> anyhow::Result<()> {
@@ -327,6 +333,14 @@ struct RunCommand {
 
     #[arg(
         long,
+        value_parser = parse_onion_service_name,
+        help = "TCP onion-exit service used by the local HTTP CONNECT proxy, e.g. tcp or web",
+        env
+    )]
+    pub onion_http_proxy_service: Option<OnionServiceName>,
+
+    #[arg(
+        long,
         help = "Desired hop count for the local onion HTTP proxy. 0 uses node default.",
         env
     )]
@@ -339,6 +353,20 @@ struct RunCommand {
         env
     )]
     pub onion_http_proxy_allow_short_paths: bool,
+
+    #[arg(
+        long,
+        help = "Maximum seconds to wait for one HTTP CONNECT header",
+        env
+    )]
+    pub onion_http_proxy_header_timeout_secs: Option<u64>,
+
+    #[arg(
+        long,
+        help = "Maximum concurrent local HTTP CONNECT proxy connections",
+        env
+    )]
+    pub onion_http_proxy_max_connections: Option<usize>,
 
     #[command(flatten)]
     config_args: ConfigArgs,
@@ -628,11 +656,20 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     if let Some(addr) = args.onion_http_proxy_addr {
         c.onion_http_proxy_addr = Some(addr);
     }
+    if let Some(service) = args.onion_http_proxy_service {
+        c.onion_http_proxy_service = service;
+    }
     if let Some(hop_count) = args.onion_http_proxy_hop_count {
         c.onion_http_proxy_hop_count = hop_count;
     }
     if args.onion_http_proxy_allow_short_paths {
         c.onion_http_proxy_allow_short_paths = true;
+    }
+    if let Some(timeout_secs) = args.onion_http_proxy_header_timeout_secs {
+        c.onion_http_proxy_header_timeout_secs = timeout_secs;
+    }
+    if let Some(max_connections) = args.onion_http_proxy_max_connections {
+        c.onion_http_proxy_max_connections = max_connections;
     }
     if c.advertise_onion_exit {
         validate_native_onion_exit_services(&c.onion_exit_services)?;
@@ -645,8 +682,11 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     let onion_exit_services = c.onion_exit_services.clone();
     let onion_exit_policy = c.onion_exit_policy.clone();
     let onion_http_proxy_addr = c.onion_http_proxy_addr.clone();
+    let onion_http_proxy_service = c.onion_http_proxy_service.clone();
     let onion_http_proxy_hop_count = c.onion_http_proxy_hop_count;
     let onion_http_proxy_allow_short_paths = c.onion_http_proxy_allow_short_paths;
+    let onion_http_proxy_header_timeout_secs = c.onion_http_proxy_header_timeout_secs;
+    let onion_http_proxy_max_connections = c.onion_http_proxy_max_connections;
 
     let (data_storage, measure_storage) = if let Some(storage_path) = args.storage_path {
         let storage_path = Path::new(&storage_path);
@@ -709,8 +749,11 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
         let onion_http_proxy_addr = onion_http_proxy_addr.parse::<SocketAddr>()?;
         let proxy_options = OnionHttpProxyOptions {
             listen_addr: onion_http_proxy_addr,
+            service: onion_http_proxy_service,
             hop_count: onion_http_proxy_hop_count,
             allow_short_paths: onion_http_proxy_allow_short_paths,
+            max_connections: onion_http_proxy_max_connections,
+            header_timeout: Duration::from_secs(onion_http_proxy_header_timeout_secs),
         };
         let _ = futures::join!(
             processor.listen(),
