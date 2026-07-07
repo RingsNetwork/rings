@@ -102,11 +102,14 @@ with
 &=&\mathsf{EvidenceScoped}_{\Gamma}\land\mathsf{LedgerDisc}_{Rings}.
 \end{array}
 \]
-The paper's formal contribution is the algebra and its claim ledger:
+This paper gives a bounded algebraic account of the implemented system and a
+ledger for which claims the paper admits:
 \[
 \begin{array}{rcl}
-\mathsf{Established}
-&=&\mathsf{Core}_{Rings}\land\mathsf{LedgerDisc}_{Rings},\\
+\mathsf{Formalized}_{paper}
+&=&\mathsf{Core}_{Rings},\\
+\mathsf{Admitted}_{paper}
+&\subseteq&\mathsf{Spec}\uplus\mathsf{Artifact}_{R},\\
 \mathsf{Eval}_{reported}
 &\subset&\mathsf{ReportedOnly},\\
 \mathsf{PerfClaim}_{R}&\in&\mathsf{Obligation}.
@@ -213,7 +216,7 @@ G_{eff}&=&\mathsf{TypedProtocolEffect},\\
 G_{cr}&=&\mathsf{CarrierCorrectCrypto},\\
 G_{rep}&=&\mathsf{BoundedRepairEvidence},\\
 G_{bd}&=&\mathsf{ExplicitClaimBoundary},\\
-\RingsObj&\models&
+G_*&=&
 G_{id}\land G_{own}\land G_{io}\land G_{eff}\\
 &&{}\land G_{cr}\land G_{rep}\land G_{bd}.
 \end{array}
@@ -237,9 +240,20 @@ G_{id}\land G_{own}\land G_{io}\land G_{eff}\\
 \mathsf{Spec}\cup\mathsf{Impl}
 \cup\mathsf{Evidence}_{\Gamma}\cup\mathsf{Obligation},\\
 \mathsf{Ev}_{\Gamma}&=&\mathsf{Evidence}_{\Gamma},\\
-\mathsf{Prop}_{R}&=&\operatorname{dom}(\mathsf{Ledger}_{R}),\\
+\mathsf{Anchor}&=&\mathsf{Label}\cup\mathsf{Path}\cup\mathsf{ArtifactId},\\
+\mathsf{Scope}&=&\mathsf{Finite}\cup\mathsf{AllModel}\cup\mathsf{Open},\\
+\mathsf{Ledger}_{R}
+&\subseteq&
+\mathsf{Prop}_{R}\times\mathsf{ClaimKind}\times\mathsf{Anchor}\times\mathsf{Scope},\\
+\mathsf{row}_{R}(c,k,a,\sigma)
+&\Leftrightarrow&
+(c,k,a,\sigma)\in\mathsf{Ledger}_{R},\\
+\mathsf{Prop}_{R}&=&\{c:\exists k,a,\sigma.\mathsf{row}_{R}(c,k,a,\sigma)\},\\
 \mathsf{Support}_{R}
 &:&\mathsf{Prop}_{R}\times\mathsf{ClaimKind}\to\{\top,\bot\},\\
+\mathsf{Support}_{R}(c,k)
+&\Leftrightarrow&
+\exists a,\sigma.\mathsf{row}_{R}(c,k,a,\sigma),\\
 \mathsf{Admit}(c)
 &\Leftrightarrow&
 \exists k\in\mathsf{ClaimKind}.\ \mathsf{Admit}_{R}(c,k).
@@ -280,9 +294,9 @@ G_{id}\land G_{own}\land G_{io}\land G_{eff}\\
 \centering
 \scriptsize
 \setlength{\tabcolsep}{2.5pt}
-\begin{tabular}{p{1.8cm}|p{1.6cm}|p{3.4cm}}
+\begin{tabular}{p{1.7cm}|p{1.55cm}|p{3.6cm}}
 \hline
-Claim family & Ledger class & Carrier in this paper \\ \hline
+Claim family & Ledger class & Anchor and scope \\ \hline
 \(\Omega_N,\mathsf{PMor}\) & \(\mathsf{Spec}\) & Definitions and Theorem~\ref{thm:carrier-separated-ownership} \\
 Chord state & \(\mathsf{Spec}\cup\mathsf{Ev}_{\Gamma}\) & Algorithms~\ref{alg:join}--\ref{alg:stabilize}; finite checks \\
 DID/session & \(\mathsf{Impl}\) & signed session and context predicates \\
@@ -291,14 +305,29 @@ E2E frames & \(\mathsf{Impl}\cup\mathsf{Ev}_{\Gamma}\) & signed frame and receiv
 Chunking & \(\mathsf{Impl}\cup\mathsf{Ev}_{\Gamma}\) & Algorithm~\ref{alg:e2e_chunking}; bounded reassembly \\
 Deferred APIs & \(\mathsf{Spec}\cup\mathsf{Obligation}\) & mailbox, hidden descriptor, secret sharing \\
 Wit/rank/sec. & \(\mathsf{Spec}\cup\mathsf{Obligation}\) & policy predicates, no global security theorem \\
-Benchmark rows & \(\mathsf{ReportedOnly}\) & baseline/runtime coordinates, not admitted eval \\
+Benchmark rows & \(\notin\mathsf{ClaimKind}\) & baseline/runtime coordinates, not admitted eval \\
 \hline
 \end{tabular}
 \caption{Claim-ledger instantiation.  Rows inside \(\mathsf{ClaimKind}\) may be
-admitted at the listed classes; \(\mathsf{ReportedOnly}\) rows are coordinates,
-not claim evidence.}
+admitted only through an explicit ledger row \((c,k,a,\sigma)\);
+\(\mathsf{ReportedOnly}\) rows are coordinates, not claim evidence.}
 \label{claim-ledger-table}
 \end{table}
+
+\[
+\begin{array}{rcl}
+\ell_{own}&=&(\mathsf{OwnerLaw},\mathsf{Spec},
+  \mathrm{Thm}\,\ref{thm:carrier-separated-ownership},\mathsf{AllModel}),\\
+\ell_{mor}&=&(\mathsf{MorphLaw},\mathsf{Spec},
+  \mathrm{Thm}\,\ref{thm:carrier-separated-ownership},\mathsf{AllModel}),\\
+\ell_{eff}&=&(\mathsf{EffectLaw},\mathsf{Spec},
+  \mathrm{Lem}\,\ref{lem:effect-confinement},\mathsf{AllModel}),\\
+\ell_{car}&=&(\mathsf{CarrierLaw},\mathsf{Spec},
+  \mathrm{Lem}\,\ref{lem:carrier-noninterference},\mathsf{AllModel}),\\
+\mathsf{Ledger}_{core}&=&\{\ell_{own},\ell_{mor},\ell_{eff},\ell_{car}\},\\
+\mathsf{Ledger}_{R}&\supseteq&\mathsf{Ledger}_{core}.
+\end{array}
+\]
 
 \begin{definition}[Contribution boundary]
 \[
@@ -313,16 +342,17 @@ not claim evidence.}
 \]
 \[
 \begin{aligned}
-\mathsf{Contribution}_{Rings}
-&\equiv
-\mathsf{Reuse}_{Rings}\oplus\mathsf{New}_{Rings}\\
-&\models
-\mathsf{Core}_{Rings}\land\mathsf{LedgerDisc}_{Rings}.
+\mathsf{Contribution}_{paper}
+&=(\mathsf{Reuse}_{Rings},\mathsf{New}_{Rings}),\\
+\mathsf{TheoremTarget}_{paper}
+&=\mathsf{Core}_{Rings},\\
+\mathsf{LedgerTarget}_{paper}
+&=\mathsf{LedgerDisc}_{Rings}.
 \end{aligned}
 \]
 The formal theorem is Theorem~\ref{thm:carrier-separated-ownership};
-\(\mathsf{LedgerDisc}_{Rings}\) is the admission discipline, not a performance
-theorem.
+\(\mathsf{LedgerDisc}_{Rings}\) is an admission discipline, not a semantic
+entailment from \(\mathsf{Reuse}_{Rings}\) and not a performance theorem.
 \end{definition}
 
 \section{Algebraic System Model}
@@ -493,11 +523,21 @@ E&=&\prod_{\nu\in\NS}E_\nu,\\
 \mathsf{CryptoOps}&=&
   \{\times,^{-1},\cdot_{scalar},\mathsf{interp}\}\\
 &&\cup\{\mathsf{pair},\mathsf{subgroup}\},\\
+\mathsf{TransportOps}&=&
+  \{\mathsf{offer},\mathsf{answer},\mathsf{send},\mathsf{recv}\},\\
+\mathsf{EffectOps}&=&
+  \{\mathsf{emit},\mathsf{defer},\mathsf{store},\mathsf{load},
+    \mathsf{schedule}\},\\
 \mathsf{RunOps}&=&\mathsf{TransportOps}\cup\mathsf{EffectOps},\\
+\mathsf{Ops}&=&
+\mathsf{PlacementOps}\uplus\mathsf{CryptoOps}\uplus\mathsf{RunOps},\\
 \mathsf{PlacementOps}&\cap&\mathsf{CryptoOps}=\varnothing,\\
 \mathsf{PlacementOps}&\cap&\mathsf{RunOps}=\varnothing,\\
 \mathsf{CryptoCarrier}&\in&\{\mathbb{F}_q,\mathbb{G},\mathbb{Z}_q\},\\
 \pi_R&:&\mathsf{Ops}\to\operatorname{End}(R),\\
+a\in\mathsf{PlacementOps}
+&\Rightarrow&
+\pi_R(a)\in\operatorname{End}(R),\\
 a\in\mathsf{CryptoOps}\cup\mathsf{RunOps}
 &\Rightarrow&
 \left\{\begin{array}{l}
@@ -507,6 +547,10 @@ a\notin\mathsf{PlacementOps}.
 \end{array}
 \]
 \end{constraint}
+Thus a concrete operation can affect placement only through a member of
+\(\mathsf{PlacementOps}\).  Transport, effect, and cryptographic operations may
+alter runtime state, payloads, or cryptographic carriers, but their induced
+endomorphism on \(R\) is the identity.
 
 \begin{table}[htbp]
 \centering
@@ -845,10 +889,27 @@ By Constraint~\ref{constraint:carrier-separation}, such \(a\) has
 =\operatorname{owner}_N\circ H\).
 \end{proof}
 
+\begin{definition}[Correct base predicate]
+\label{def:correct-base}
+\[
+\begin{array}{rcl}
+\mathsf{CorrectBase}(N,S)
+&\Rightarrow&
+\left\{\begin{array}{l}
+1\le |N|<\infty,\\
+\forall k\in R.\operatorname{owner}_N(k)\in N,\\
+\mathsf{CorrectChord}(N,S).
+\end{array}\right.
+\end{array}
+\]
+The theorem below uses only the displayed total-owner consequence.  The stronger
+steady-state lookup obligation is stated in the Chord section as
+\(\operatorname{Inv}_{ring}(N,S)\land\mathsf{FingerInv}(N,S)\).
+\end{definition}
+
 \begin{theorem}[Carrier-separated ownership theorem]
 \label{thm:carrier-separated-ownership}
-Assume \(1\le |N|<\infty\), CorrectChord stable-base obligations,
-carrier separation, and protocol morphisms satisfying
+Assume \(\mathsf{CorrectBase}(N,S)\), carrier separation, and protocol morphisms satisfying
 Definition~\ref{def:protocol-morphism}.  Then
 \[
 \begin{array}{rcl}
@@ -869,7 +930,8 @@ Definition~\ref{def:protocol-morphism}.  Then
 \]
 \end{theorem}
 \begin{proof}
-OwnerLaw is Lemma~\ref{lem:owner-totality}; MorphLaw is
+OwnerLaw follows from Definition~\ref{def:correct-base} and
+Lemma~\ref{lem:owner-totality}; MorphLaw is
 Lemma~\ref{lem:morphism-preservation}; EffectLaw is
 Lemma~\ref{lem:effect-confinement}; CarrierLaw is
 Lemma~\ref{lem:carrier-noninterference}.
@@ -880,21 +942,24 @@ Lemma~\ref{lem:carrier-noninterference}.
 \begingroup\small
 \[
 \begin{array}{rl}
-\mathsf{Admit}_{R}(c,k)\Rightarrow&
-k\in\mathsf{ClaimKind}\land\mathsf{Support}_{R}(c,k),\\
+\mathsf{Admit}_{R}(c,k)\Leftrightarrow&
+k\in\mathsf{ClaimKind}\land
+\exists a,\sigma.\mathsf{row}_{R}(c,k,a,\sigma),\\
 \mathsf{Admit}_{R}(c,\mathsf{Ev}_{\Gamma})\Rightarrow&
 \mathsf{finite}(\Gamma)\land\mathsf{declared}(\Gamma),\\
-\mathsf{Support}_{R}(c,\mathsf{Spec})\Rightarrow&
+\mathsf{row}_{R}(c,\mathsf{Spec},a,\sigma)\Rightarrow&
 c\in\left\{\begin{array}{l}
 \mathsf{OwnerLaw},\mathsf{MorphLaw},\\
 \mathsf{EffectLaw},\mathsf{CarrierLaw}
-\end{array}\right\},\\
-\mathsf{Support}_{R}(c,\mathsf{Impl})\Rightarrow&
-\mathsf{Anchor}_{R}(c)\in\mathsf{Manifest}_{R},\\
-\mathsf{Support}_{R}(c,\mathsf{Ev}_{\Gamma})\Rightarrow&
-\mathsf{Witness}_{R}(c,\Gamma),\\
-\mathsf{Support}_{R}(c,\mathsf{Obligation})\Rightarrow&
-c\in\mathsf{Obligation},\\
+\end{array}\right.\\
+&{}\land a\in\mathsf{Anchor},\\
+\mathsf{row}_{R}(c,\mathsf{Impl},a,\sigma)\Rightarrow&
+a\in\mathsf{Manifest}_{R},\\
+\mathsf{row}_{R}(c,\mathsf{Ev}_{\Gamma},a,\sigma)\Rightarrow&
+\mathsf{Witness}_{R}(c,\Gamma)\land a\in\mathsf{Manifest}_{R},\\
+\mathsf{row}_{R}(c,\mathsf{Obligation},a,\sigma)\Rightarrow&
+c\in\mathsf{Obligation}\land\sigma=\mathsf{Open},\\
+\multicolumn{2}{l}{\mathsf{ReportedOnly}\notin\mathsf{ClaimKind},}\\
 \mathsf{Reject}_{R}(c)\Leftrightarrow&c\in\NonClaim,\\
 \mathsf{Reject}_{R}(c)\Rightarrow&
 \neg\exists k.\;\mathsf{Admit}_{R}(c,k),\\
@@ -911,8 +976,12 @@ unreachable by Theorem~\ref{thm:carrier-separated-ownership}.
 \[
 \begin{array}{rl}
 \mathsf{Admit}_{R}(c,k)\Rightarrow&
-k\in\mathsf{ClaimKind}\land\mathsf{Support}_{R}(c,k),\\
+\exists a,\sigma.\mathsf{row}_{R}(c,k,a,\sigma),\\
+\mathsf{row}_{R}(c,k,a,\sigma)\Rightarrow&
+\mathsf{Support}_{R}(c,k),\\
 c\in\NonClaim\Rightarrow&\neg\mathsf{Admit}(c),\\
+\mathsf{ReportedOnly}\notin\mathsf{ClaimKind}\Rightarrow&
+\neg\mathsf{Admit}_{R}(c,\mathsf{ReportedOnly}),\\
 \mathsf{Admit}_{R}(c,\mathsf{Ev}_{\Gamma})
 \Rightarrow&
 \left\{\begin{array}{l}
@@ -923,8 +992,9 @@ c\in\NonClaim\Rightarrow&\neg\mathsf{Admit}(c),\\
 \]
 \end{proposition}
 \begin{proof}
-Immediate from Constraint~\ref{constraint:claim-ledger} and
-Table~\ref{claim-ledger-table}.
+The first and third lines are Constraint~\ref{constraint:claim-ledger}.  The
+second line unfolds the definition of \(\mathsf{Support}_{R}\).  The fourth line
+follows because admission quantifies only over \(\mathsf{ClaimKind}\).
 \end{proof}
 
 \section{Chord Overlay}
@@ -1632,8 +1702,9 @@ a\in\mathsf{Artifact}_{R}\\
 This section separates executable artifact evidence from reported coordinates.
 The repository contains finite-scope evidence for overlay, storage, and
 message-flow obligations.  It does not yet contain a wide-area Rings benchmark,
-committed benchmark-table regeneration data, or committed seeds sufficient to
-regenerate the tables below.  Tables~\ref{verification-table} and
+or a paper-branch manifest entry with source revision, command, seed, and host
+metadata sufficient to regenerate the comparison tables below.
+Tables~\ref{verification-table} and
 \ref{artifact-manifest-table} are the artifact ledger; reported comparison
 coordinates are isolated in Table~\ref{reported-coordinate-table}.
 \[
@@ -1883,6 +1954,9 @@ Here \(D_C^{paper}\) is an external Chord-paper coordinate, \(D_C^{656}\) is a
 PR~656 Chord-only coordinate at current Rings overlay parameters, and
 \(D_R^{docker}\) is reported Rings runtime evidence.  The sets are disjoint by
 claim role: external baseline, reported Chord baseline, reported Rings runtime.
+At this paper revision, \(D_C^{656}\) is not an artifact-ledger row because the
+paper branch records the numbers but does not admit a manifest row
+\((d,\mathsf{Ev}_{\Gamma},a,\sigma)\) with regeneration metadata.
 Unless
 \(\mathsf{AdmittedEval}(d)\) holds, a tuple is a reported coordinate only; it is
 not used to prove \(\mathsf{Core}_{Rings}\) or any Rings performance claim.
@@ -1951,8 +2025,8 @@ $f=.20$ & stale & $5.186/6.186$ & .969 & 1.890 & 314.7 \\
 \caption{Chord-only baselines at Rings parameters
 (\(N=1600,r=3,m=160,L=64\)).  Maintained rows are the baseline; stale rows are
 no-maintenance sensitivity.  These are PR~656 reported coordinates, not
-admitted current-artifact evidence until generator, revision, seed, command, and
-host are shipped.}
+admitted current-artifact evidence in this paper branch until generator,
+revision, seed, command, and host enter \(\mathsf{Manifest}_{R}\).}
 \label{rings-param-chord-data-table}
 \end{table}
 
@@ -2044,6 +2118,8 @@ Chord forwarding hops or timeout rates.
 \]
 No CI command currently regenerates Table~\ref{chord-paper-data-table},
 Table~\ref{rings-param-chord-data-table}, \(D_R^{conv}\), or \(D_R^{tx}\).
+Therefore PR~656 maintained-Chord rows are useful comparison coordinates, but
+they are not admitted evidence for a Rings performance theorem in this revision.
 
 \noindent\textbf{Limitations.}
 The current artifact supports finite model/test evidence and reported baseline
@@ -2109,8 +2185,8 @@ implementation, not as an informal bundle of peer-to-peer mechanisms:
 \]
 \[
 \begin{array}{rcl}
-\mathsf{Established}&=&
-\mathsf{Core}_{Rings}\land\mathsf{LedgerDisc}_{Rings},\\
+\mathsf{Formalized}_{paper}&=&\mathsf{Core}_{Rings},\\
+\mathsf{LedgerRule}_{paper}&=&\mathsf{LedgerDisc}_{Rings},\\
 \mathsf{ScopedEv}&=&
 \{a:a\in\mathsf{Artifact}_{R}\\
 &&{}\land\mathsf{AdmittedArtifact}(a)\},\\
@@ -2125,7 +2201,9 @@ D_C^{paper}\uplus D_C^{656}\uplus D_R^{docker},\\
 The scientific contribution is the composition law and its claim ledger:
 CorrectChord supplies the overlay safety root, \(\Omega_N\) lifts resource
 namespaces into live owners, protocol morphisms preserve placement, and runtime
-effects remain typed.  Implementation evidence supports only the entries
+effects remain typed.  \(\mathsf{Formalized}_{paper}\) is a theorem inside the
+stated model; \(\mathsf{LedgerRule}_{paper}\) is the admission rule for paper
+claims.  Implementation evidence supports only the entries
 admitted by Table~\ref{artifact-manifest-table}; coordinates in
 Table~\ref{reported-coordinate-table} are not proof evidence.  Benchmark and
 security claims outside that ledger remain obligations.
