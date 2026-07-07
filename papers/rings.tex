@@ -64,16 +64,16 @@ for Decentralized Identity and Resource Ownership}
 \parbox{0.90\textwidth}{%
 \centering\bfseries Abstract\\[0.5\baselineskip]%
 \normalfont
-Rings studies an implemented structured peer-to-peer network as an algebraic
-object for decentralized identity and resource ownership.  Its motivating
-failure mode is authority collapse:
+Rings formalizes an implemented structured peer-to-peer network as a
+carrier-separated authority algebra.  The motivating failure mode is authority
+collapse:
 \[
   \mathsf{root}(id,data,route)
   \in\{\mathsf{server},\mathsf{dns},\mathsf{relay},\mathsf{platform}\}.
 \]
-The paper does not claim a new DHT, DID method, WebRTC transport, or CRDT merge
-law.  Its claim is that these mechanisms can be composed through a
-carrier-separated ownership model:
+Given an overlay, namespaces, protocol effects, and cryptographic sessions,
+the problem is to construct a total owner map while preventing non-placement
+carriers from changing ownership:
 \[
   \RingsObj=
   (R,\mathcal{R}_N,\SetOverR,\Omega_N,
@@ -95,21 +95,22 @@ with
 &=&
 \mathsf{WellDef}(\Omega_N)
 \land\mathsf{CarrierSep}
-\land\mathsf{MorphismPreserve}\\
-&&{}\land\mathsf{EffectTyped},\\
+\land\mathsf{NonInterfere}\\
+&&{}\land\mathsf{MorphismPreserve}
+\land\mathsf{EffectTyped},\\
 \mathsf{Claim}_{ledger}
-&=&\mathsf{EvidenceScoped}_{\Gamma}\land\mathsf{LedgerDisc}_{Rings},\\
-\mathsf{CryptoCarrier}\cap R&=&\varnothing.
+&=&\mathsf{EvidenceScoped}_{\Gamma}\land\mathsf{LedgerDisc}_{Rings}.
 \end{array}
 \]
-Claims outside this boundary are stratified as
+The contribution is the algebra and its claim ledger:
 \[
-  \mathsf{Claim}
-  =
-  \mathsf{Spec}
-  \cup\mathsf{Impl}
-  \cup\mathsf{Evidence}_{\Gamma}
-  \cup\mathsf{Obligation}.
+\begin{array}{rcl}
+\mathsf{Established}
+&=&\mathsf{Core}_{Rings}\land\mathsf{LedgerDisc}_{Rings},\\
+\mathsf{Eval}_{reported}
+&\subset&\mathsf{ReportedOnly},\\
+\mathsf{PerfClaim}_{R}&\in&\mathsf{Obligation}.
+\end{array}
 \]
 }%
 \hfill\mbox{}%
@@ -123,8 +124,8 @@ Claims outside this boundary are stratified as
 
 Centralized platforms are efficient deployment mechanisms but poor authority
 carriers: identity, naming, storage, and traffic control collapse to service
-operators~\cite{Kshetri2013,Zissis2012,KshetriMurugesan2013}.  Rings asks a
-narrower question than how to design another overlay:
+operators~\cite{Kshetri2013,Zissis2012,KshetriMurugesan2013}.  Rings studies
+the following algebraic question:
 \[
 \begin{array}{rcl}
 \mathsf{Own}(d)&=&k_d,\\
@@ -132,7 +133,8 @@ narrower question than how to design another overlay:
 \mathsf{Run}(\mathcal{P}_\nu)&=&
   \tau_\nu:S_\nu\times I_\nu\to
   \mathsf{T}^{\mathcal{E}_\nu}_{A_\nu}(S_\nu\times O_\nu),\\
-\mathsf{RootOfAuthority}&\neq&\mathsf{ApplicationServer}.
+\mathsf{RootOfAuthority}&\neq&\mathsf{ApplicationServer},\\
+\mathsf{CryptoCarrier}\cap R&=&\varnothing .
 \end{array}
 \]
 
@@ -141,18 +143,22 @@ self-certifying identity; WebRTC and WebAssembly supply runtime interpretation;
 CRDTs supply one merge algebra.  None alone gives a typed law for owner,
 carrier, and evidence scope:
 \[
-\begin{array}{rcl}
+\begin{array}{rl}
 \mathsf{Chord}/\mathsf{CorrectChord}
-  &\Rightarrow&\mathsf{ringLookup}\not\Rightarrow\mathsf{resourceAuthority},\\
+  &\Rightarrow
+    \mathsf{ringLookup}\not\Rightarrow\mathsf{resourceAuthority},\\
 \mathsf{DID}
-  &\Rightarrow&\mathsf{keyBoundName}\not\Rightarrow\mathsf{overlayOwner},\\
+  &\Rightarrow
+    \mathsf{keyBoundName}\not\Rightarrow\mathsf{overlayOwner},\\
 \mathsf{WebRTC}
-  &\Rightarrow&\mathsf{browserTransport}\not\Rightarrow\mathsf{protocolLaw},\\
+  &\Rightarrow
+    \mathsf{browserTransport}\not\Rightarrow\mathsf{protocolLaw},\\
 \mathsf{CRDT}
-  &\Rightarrow&\mathsf{mergeLaw}\not\Rightarrow\mathsf{placementLaw}.
+  &\Rightarrow
+    \mathsf{mergeLaw}\not\Rightarrow\mathsf{placementLaw}.
 \end{array}
 \]
-The contribution is therefore an algebraic composition boundary.  The Chord
+The contribution is a composition theorem plus a ledger discipline.  The Chord
 identifier space is the additive cyclic group for placement and interval order;
 signatures, threshold schemes, encryption, and zero-knowledge protocols remain
 in their own fields or groups:
@@ -163,9 +169,15 @@ R&=&\mathbb{Z}/2^{160}\mathbb{Z},\\
 R\cap\mathsf{CC}&=&\varnothing.
 \end{array}
 \]
-This paper studies the algebra that makes the implementation coherent, then
-marks which claims are implemented, model checked in a finite scope, or still
-benchmark obligations.
+\[
+\begin{array}{rcl}
+C_1&=&\Omega_N:\SetOverR\to\mathbf{Set}/N,\\
+C_2&=&\mathsf{CarrierSep}\Rightarrow\mathsf{NonInterfere},\\
+C_3&=&\mathsf{Admit}_{R}(c,k)\Rightarrow\mathsf{Support}_{R}(c,k),\\
+C_4&=&\mathsf{ReportedOnly}\not\Rightarrow\mathsf{PerfClaim}_{R}.
+\end{array}
+\]
+These four claims define the paper's scientific unit.
 
 \section{Problem Statement and Design Goals}
 
@@ -173,18 +185,21 @@ Existing decentralized systems solve orthogonal subproblems.  The missing
 object is the commuting authority layer between identity, placement, execution,
 and evidence:
 \[
-\begin{array}{rcl}
-\mathcal{N}_R&=&\{(X_\nu,H_\nu)\}_\nu,\qquad
-\mathcal{P}_R=\{\mathcal{P}_\nu\}_\nu,\\
-\mathsf{Input}&=&(\Pi,\mathcal{R}_N,\mathcal{N}_R,\mathcal{P}_R,\mathcal{X}),\\
-\mathsf{Need}&=&
-  \mathsf{Owner}:X_\nu\to N
-  \quad\text{and}\quad
-  \mathsf{Run}:\mathcal{P}_\nu\to\mathsf{Effects},\\
-\mathsf{Forbidden}&=&
-  \mathsf{CryptoCarrier}=R
-  \;\lor\;
+\begin{array}{rl}
+\mathcal{N}_R=&\{(X_\nu,H_\nu)\}_\nu,\\
+\mathcal{P}_R=&\{\mathcal{P}_\nu\}_\nu,\\
+\mathsf{Input}=&(\Pi,\mathcal{R}_N,\mathcal{N}_R,
+  \mathcal{P}_R,\mathcal{X}),\\
+\mathsf{Need}=&
+  \left\{\begin{array}{l}
+  \mathsf{Owner}:X_\nu\to N,\\
+  \mathsf{Run}:\mathcal{P}_\nu\to\mathsf{Effects},
+  \end{array}\right.\\
+\mathsf{Forbidden}=&
+  \left\{\begin{array}{l}
+  \mathsf{CryptoCarrier}=R,\\
   \mathsf{Evidence}_{\Gamma}=\mathsf{UniversalClaim}.
+  \end{array}\right.
 \end{array}
 \]
 
@@ -222,6 +237,9 @@ G_{id}\land G_{own}\land G_{io}\land G_{eff}\\
 \mathsf{Spec}\cup\mathsf{Impl}
 \cup\mathsf{Evidence}_{\Gamma}\cup\mathsf{Obligation},\\
 \mathsf{Ev}_{\Gamma}&=&\mathsf{Evidence}_{\Gamma},\\
+\mathsf{Prop}_{R}&=&\operatorname{dom}(\mathsf{Ledger}_{R}),\\
+\mathsf{Support}_{R}
+&:&\mathsf{Prop}_{R}\times\mathsf{ClaimKind}\to\{\top,\bot\},\\
 \mathsf{Admit}(c)
 &\Leftrightarrow&
 \exists k\in\mathsf{ClaimKind}.\ \mathsf{Admit}_{R}(c,k).
@@ -245,8 +263,13 @@ G_{id}\land G_{own}\land G_{io}\land G_{eff}\\
 \[
 \begin{aligned}
 \NonClaim
-&=\mathsf{new}\{\mathsf{DHT},\mathsf{DID},\mathsf{WebRTC},
-\mathsf{CRDT},\mathsf{Crypto}\}\\
+&=\{\mathsf{Novel}(\mathsf{DHT}),
+\mathsf{Novel}(\mathsf{DID})\}\\
+&\quad{}\cup
+\{\mathsf{Novel}(\mathsf{WebRTC})\}\\
+&\quad{}\cup
+\{\mathsf{Novel}(\mathsf{CRDT}),
+\mathsf{Novel}(\mathsf{Crypto})\}\\
 &\quad{}\cup
 \{\mathsf{ByzLive},\mathsf{Consensus},\mathsf{WANPerf}\}.
 \end{aligned}
@@ -309,10 +332,16 @@ theorem.
 \begin{array}{rcl}
 \kappa&\in&\mathbb{N},\\
 \mathsf{fault}_{overlay}&=&\mathsf{fail\mbox{-}stop},\\
-\mathsf{Adv}_{net}&=&\{\mathsf{delay},\mathsf{drop},\mathsf{dup},
-  \mathsf{reorder},\mathsf{replay}\},\\
-\mathsf{Adv}_{id}&=&\{\mathsf{manyDID},\mathsf{stolenSession},
-  \mathsf{staleProof}\},\\
+\mathsf{Adv}_{net}&=&
+  \left\{\begin{array}{l}
+  \mathsf{delay},\mathsf{drop},\mathsf{dup},\\
+  \mathsf{reorder},\mathsf{replay}
+  \end{array}\right\},\\
+\mathsf{Adv}_{id}&=&
+  \left\{\begin{array}{l}
+  \mathsf{manyDID},\mathsf{stolenSession},\\
+  \mathsf{staleProof}
+  \end{array}\right\},\\
 \Pr[\mathsf{Forge}_{\Pi}(A,\kappa)]&\leq&\epsilon_{\Pi}(\kappa),\\
 \Pr[\mathsf{Preimage}_{H}(A,\kappa)]&\leq&\epsilon_{H}(\kappa),\\
 \epsilon_{\Pi},\epsilon_H&\in&\mathsf{negl},\\
@@ -453,18 +482,28 @@ E&=&\prod_{\nu\in\NS}E_\nu,\\
 \end{proof}
 
 \begin{constraint}[Carrier separation]
+\label{constraint:carrier-separation}
 \[
 \begin{array}{rcl}
 \mathsf{PlacementOps}&=&
-  \{0,+,-,\delta_a,(a,b]_R\}\\
+  \{0,+,-,\delta_a,(a,b]_R,(a,b)_R\}\\
 &&\cup\{\operatorname{owner}_N\}\\
-&&\cup\{\operatorname{RepKey}^{\rho},
-        \operatorname{RepOwner}^{\rho}_N\},\\
+&&\cup\{\operatorname{RepKey}^{\rho}\}\\
+&&\cup\{\operatorname{RepOwner}^{\rho}_N\},\\
 \mathsf{CryptoOps}&=&
   \{\times,^{-1},\cdot_{scalar},\mathsf{interp}\}\\
 &&\cup\{\mathsf{pair},\mathsf{subgroup}\},\\
+\mathsf{RunOps}&=&\mathsf{TransportOps}\cup\mathsf{EffectOps},\\
 \mathsf{PlacementOps}&\cap&\mathsf{CryptoOps}=\varnothing,\\
-\mathsf{CryptoCarrier}&\in&\{\mathbb{F}_q,\mathbb{G},\mathbb{Z}_q\}.
+\mathsf{PlacementOps}&\cap&\mathsf{RunOps}=\varnothing,\\
+\mathsf{CryptoCarrier}&\in&\{\mathbb{F}_q,\mathbb{G},\mathbb{Z}_q\},\\
+\pi_R&:&\mathsf{Ops}\to\operatorname{End}(R),\\
+a\in\mathsf{CryptoOps}\cup\mathsf{RunOps}
+&\Rightarrow&
+\left\{\begin{array}{l}
+\pi_R(a)=\operatorname{id}_R,\\
+a\notin\mathsf{PlacementOps}.
+\end{array}\right.
 \end{array}
 \]
 \end{constraint}
@@ -761,7 +800,7 @@ P_\mu^N\circ\sigma_X
 =
 \operatorname{owner}_N\circ H_\nu
 =
-P_\nu^N .
+P_\nu^N .\qedhere
 \]
 \end{proof}
 
@@ -784,64 +823,101 @@ The first formula is the type of \(\tau_\nu\).  The second is exactly the runtim
 confinement obligation for the interpreter \(I_X\).
 \end{proof}
 
+\begin{lemma}[Carrier non-interference]
+\label{lem:carrier-noninterference}
+\[
+\begin{array}{rcl}
+a&\in&\mathsf{CryptoOps}\cup\mathsf{RunOps}\\
+&\Rightarrow&
+\forall(X,H)\in\SetOverR.\\
+&&\left\{\begin{array}{l}
+\Omega_N(X,\pi_R(a)\circ H)=\Omega_N(X,H),\\
+\Omega_N(X,H)=(X,\operatorname{owner}_N\circ H).
+\end{array}\right.
+\end{array}
+\]
+\end{lemma}
+\begin{proof}
+By Constraint~\ref{constraint:carrier-separation}, such \(a\) has
+\(\pi_R(a)=\operatorname{id}_R\).  Hence
+\(\operatorname{owner}_N\circ\pi_R(a)\circ H
+=\operatorname{owner}_N\circ H\).
+\end{proof}
+
 \begin{theorem}[Carrier-separated ownership theorem]
 \label{thm:carrier-separated-ownership}
 Assume \(1\le |N|<\infty\), CorrectChord stable-base obligations,
 carrier separation, and protocol morphisms satisfying
 Definition~\ref{def:protocol-morphism}.  Then
 \[
-\begin{aligned}
-\mathsf{OwnerLaw}
-&\equiv
-\forall\nu,x.\;P_\nu^N(x)=\operatorname{owner}_N(H_\nu(x))\in N,\\
-\mathsf{MorphLaw}
-&\equiv
-\forall\nu,\mu,\Sigma.\;
-\mathsf{PMor}_{\nu\mu}(\Sigma)
+\begin{array}{rcl}
+\mathsf{OwnerLaw}&\equiv&\forall\nu,x.\\
+&&P_\nu^N(x)=\operatorname{owner}_N(H_\nu(x))\in N,\\
+\mathsf{MorphLaw}&\equiv&\forall\nu,\mu,\Sigma.\\
+&&\mathsf{PMor}_{\nu\mu}(\Sigma)
 \Rightarrow P_\mu^N\circ\sigma_X=P_\nu^N,\\
-\mathsf{EffectLaw}
-&\equiv
-\forall\nu,s,i.\;\tau_\nu(s,i)\in
+\mathsf{EffectLaw}&\equiv&\forall\nu,s,i.\\
+&&\tau_\nu(s,i)\in
 \mathsf{T}^{\mathcal{E}_\nu}_{A_\nu}(S_\nu\times O_\nu),\\
-\mathsf{Core}_{Rings}
-&\equiv
-\mathsf{OwnerLaw}\land\mathsf{MorphLaw}
-\land\mathsf{EffectLaw}.
-\end{aligned}
+\mathsf{CarrierLaw}&\equiv&\forall a\in\mathsf{CryptoOps}\cup\mathsf{RunOps}.\\
+&&\forall(X,H)\in\SetOverR.\\
+&&\Omega_N(X,\pi_R(a)\circ H)=\Omega_N(X,H),\\
+\mathsf{Core}_{Rings}&\equiv&\mathsf{OwnerLaw}\land\mathsf{MorphLaw}\\
+&&{}\land\mathsf{EffectLaw}\land\mathsf{CarrierLaw}.
+\end{array}
 \]
 \end{theorem}
 \begin{proof}
 OwnerLaw is Lemma~\ref{lem:owner-totality}; MorphLaw is
 Lemma~\ref{lem:morphism-preservation}; EffectLaw is
-Lemma~\ref{lem:effect-confinement}.
+Lemma~\ref{lem:effect-confinement}; CarrierLaw is
+Lemma~\ref{lem:carrier-noninterference}.
 \end{proof}
 
 \begin{constraint}[Claim ledger discipline]
 \label{constraint:claim-ledger}
+\begingroup\small
 \[
-\begin{array}{rcl}
-\mathsf{Admit}_{R}(c,k)&\Rightarrow&
-k\in\mathsf{ClaimKind},\\
-\mathsf{Admit}_{R}(c,\mathsf{Evidence}_{\Gamma})&\Rightarrow&
+\begin{array}{rl}
+\mathsf{Admit}_{R}(c,k)\Rightarrow&
+k\in\mathsf{ClaimKind}\land\mathsf{Support}_{R}(c,k),\\
+\mathsf{Admit}_{R}(c,\mathsf{Ev}_{\Gamma})\Rightarrow&
 \mathsf{finite}(\Gamma)\land\mathsf{declared}(\Gamma),\\
-\mathsf{Reject}_{R}(c)&\Leftrightarrow&c\in\NonClaim,\\
-\mathsf{Reject}_{R}(c)&\Rightarrow&
+\mathsf{Support}_{R}(c,\mathsf{Spec})\Rightarrow&
+c\in\left\{\begin{array}{l}
+\mathsf{OwnerLaw},\mathsf{MorphLaw},\\
+\mathsf{EffectLaw},\mathsf{CarrierLaw}
+\end{array}\right\},\\
+\mathsf{Support}_{R}(c,\mathsf{Impl})\Rightarrow&
+\mathsf{Anchor}_{R}(c)\in\mathsf{Manifest}_{R},\\
+\mathsf{Support}_{R}(c,\mathsf{Ev}_{\Gamma})\Rightarrow&
+\mathsf{Witness}_{R}(c,\Gamma),\\
+\mathsf{Support}_{R}(c,\mathsf{Obligation})\Rightarrow&
+c\in\mathsf{Obligation},\\
+\mathsf{Reject}_{R}(c)\Leftrightarrow&c\in\NonClaim,\\
+\mathsf{Reject}_{R}(c)\Rightarrow&
 \neg\exists k.\;\mathsf{Admit}_{R}(c,k),\\
 \mathsf{LedgerDisc}_{Rings}
-&=&\mathsf{Admit}_{R}\land\mathsf{Reject}_{R}.
+=&\mathsf{Admit}_{R}\land\mathsf{Reject}_{R}.
 \end{array}
 \]
+\endgroup
 Thus non-claims are excluded by the admission judgment; they are not proved
 unreachable by Theorem~\ref{thm:carrier-separated-ownership}.
 \end{constraint}
 
-\begin{proposition}[Claim-ledger soundness]
+\begin{proposition}[Claim-ledger admissibility]
 \[
-\begin{array}{rcl}
-\mathsf{Admit}_{R}(c,k)&\Rightarrow&k\in\mathsf{ClaimKind},\\
-c\in\NonClaim&\Rightarrow&\neg\mathsf{Admit}(c),\\
-\mathsf{Admit}_{R}(c,\mathsf{Evidence}_{\Gamma})
-&\Rightarrow&\mathsf{finite}(\Gamma)\land\mathsf{declared}(\Gamma).
+\begin{array}{rl}
+\mathsf{Admit}_{R}(c,k)\Rightarrow&
+k\in\mathsf{ClaimKind}\land\mathsf{Support}_{R}(c,k),\\
+c\in\NonClaim\Rightarrow&\neg\mathsf{Admit}(c),\\
+\mathsf{Admit}_{R}(c,\mathsf{Ev}_{\Gamma})
+\Rightarrow&
+\left\{\begin{array}{l}
+\mathsf{finite}(\Gamma),\\
+\mathsf{declared}(\Gamma).
+\end{array}\right.
 \end{array}
 \]
 \end{proposition}
@@ -882,8 +958,16 @@ record \(\hat n\) is projected by \(\operatorname{id}(\hat n)=n\).
 U_n(X)&=&\operatorname{uniq}(\operatorname{filter}_N(X)\cdot\operatorname{cw}_N(n)),\\
 \operatorname{target}_i(n)&=&n+2^i \bmod M,\\
 \operatorname{finger}_i(n)&=&\operatorname{owner}_N(\operatorname{target}_i(n)),\\
+\mathsf{FingerInv}(N,S)&\Leftrightarrow&
+\forall n\in N.\forall i<160.\\
+&&{}\left\{\begin{array}{l}
+F_n(i)\downarrow,\\
+F_n(i)=\operatorname{finger}_i(n).
+\end{array}\right.,\\
+\mathsf{RouteSet}_S(n)&=&
+  \operatorname{rng}(F_n)\cup\operatorname{set}(L_n),\\
 \mathsf{Cand}_S(n,k)&=&
-(\operatorname{rng}(F_n)\cup\operatorname{set}(L_n))\cap(n,k)_R,\\
+\mathsf{RouteSet}_S(n)\cap(n,k)_R,\\
 \mathsf{ClosestPreceding}_S(n,k)
 &=&\max_{\delta_n}\mathsf{Cand}_S(n,k).
 \end{array}
@@ -1273,7 +1357,7 @@ part of the security boundary rather than as optional metadata.
 
 \begin{definition}[Receiver sequence policy]
 \[
-  \Delta=(next,final,closed,pending,seen,w).
+  \Delta=(next,final,closed,pending,seen_{seq},seen_{fid},w).
 \]
 \[
 \begin{array}{rcl}
@@ -1281,13 +1365,15 @@ part of the security boundary rather than as optional metadata.
 \mathsf{NoFuture}_{\Delta}(seq)&\Leftrightarrow&
   \neg\exists j\in\operatorname{dom}(pending).\;j>seq,\\
 \mathsf{Dup}_{\Delta}(f)&\Leftrightarrow&
-  seq(f)\in seen\\
+  seq(f)\in seen_{seq}\\
+&&{}\lor \operatorname{fid}(f)\in seen_{fid}\\
 &&{}\lor pending(seq(f))=f,\\
 \mathsf{Conflict}_{\Delta}(f)&\Leftrightarrow&
   seq(f)\in\operatorname{dom}(pending)\\
 &&{}\land pending(seq(f))\neq f,\\
 \mathsf{New}_{\Delta}(f)&\Leftrightarrow&
-  seq(f)\notin seen\cup\operatorname{dom}(pending)\\
+  seq(f)\notin seen_{seq}\cup\operatorname{dom}(pending)\\
+&&{}\land \operatorname{fid}(f)\notin seen_{fid}\\
 &&{}\land\neg closed\\
 &&{}\land seq(f)-next\leq w\\
 &&{}\land(final=\bot\lor seq(f)\leq final)\\
@@ -1510,9 +1596,11 @@ z&=&(d,e,q,r,u),\\
 \operatorname{SessionValid}(sid(f))\\
 &&{}\land t<exp(sid(f))\\
 &&{}\land\operatorname{ctx}(f)=\operatorname{ctx}(sid(f))\\
-&&{}\land \operatorname{fid}(f)\notin seen,\\
-seen'&=&seen\cup\{\operatorname{fid}(f)\},\\
-\operatorname{emit}(f)&\Rightarrow&\operatorname{fid}(f)\in seen',\\
+&&{}\land \operatorname{fid}(f)\notin seen_{fid}\\
+&&{}\land seq(f)\notin seen_{seq},\\
+seen'_{fid}&=&seen_{fid}\cup\{\operatorname{fid}(f)\},\\
+seen'_{seq}&=&seen_{seq}\cup\{seq(f)\},\\
+\operatorname{emit}(f)&\Rightarrow&\operatorname{fid}(f)\in seen'_{fid},\\
 \operatorname{DropDup}_{\Delta}(f)&\Rightarrow&
   \mathsf{emit}=\epsilon .
 \end{array}
@@ -1522,28 +1610,30 @@ seen'&=&seen\cup\{\operatorname{fid}(f)\},\\
 \section{Verification Evidence and Evaluation Scope}
 
 \[
-\begin{aligned}
-\mathsf{Ledger}
-&=
-\mathsf{Spec}\uplus \mathsf{Artifact}_{R}\\
-&\quad{}\uplus \mathsf{ReportedOnly}
-\uplus \mathsf{ExtBase}_{C}
-\uplus \mathsf{Obligation},\\
-\mathsf{Artifact}_{R}
-&=\mathsf{FiniteModel}\cup\mathsf{TraceReplay}
-\cup\mathsf{Tests}_{CI},\\
-\mathsf{Manifest}_{R}
-&=\mathsf{Path}\times\mathsf{Scope}\times\mathsf{Status},\\
-\mathsf{PerfClaim}_{R}&\in\mathsf{Obligation}.
-\end{aligned}
+\begin{array}{rcl}
+\mathsf{Ledger}&=&
+\mathsf{Spec}\uplus\mathsf{Artifact}_{R}\\
+&&{}\uplus\mathsf{ReportedOnly}\uplus\mathsf{ExtBase}_{C}\\
+&&{}\uplus\mathsf{Obligation},\\
+\mathsf{Artifact}_{R}&=&
+\mathsf{FiniteModel}\cup\mathsf{TraceReplay}\\
+&&{}\cup\mathsf{Tests}_{CI}\\
+&&{}\cup\mathsf{FrameImpl}\cup\mathsf{ChunkImpl},\\
+\mathsf{Manifest}_{R}&=&
+\mathsf{Path}\times\mathsf{Scope}\times\mathsf{Status},\\
+\mathsf{AdmittedArtifact}(a)&\Leftrightarrow&
+a\in\mathsf{Artifact}_{R}\\
+&&{}\land\mathsf{Anchor}_{R}(a)\in\mathsf{Manifest}_{R},\\
+\mathsf{PerfClaim}_{R}&\in&\mathsf{Obligation}.
+\end{array}
 \]
 This section separates executable artifact evidence from reported coordinates.
 The repository contains finite-scope evidence for overlay, storage, and
 message-flow obligations.  It does not yet contain a wide-area Rings benchmark,
 committed benchmark-table regeneration data, or committed seeds sufficient to
 regenerate the tables below.  Tables~\ref{verification-table} and
-\ref{artifact-manifest-table} are therefore the artifact ledger, not a
-performance proof.
+\ref{artifact-manifest-table} are the artifact ledger; reported comparison
+coordinates are isolated in Table~\ref{reported-coordinate-table}.
 \[
 \begin{array}{rcl}
 \mathsf{ProvFull}(d)&\Leftrightarrow&
@@ -1688,14 +1778,34 @@ Symbol & Artifact anchor & Admission status \\ \hline
 \(\mathsf{ChunkImpl}\)
   & \texttt{chunk.rs}
   & bounded whole-message reassembly \\
-\(\begin{array}{c}D_C^{656}\\D_R^{docker}\end{array}\)
-  & PR-reported coordinates
-  & \(\mathsf{ReportedOnly}\) until full provenance \\
 \hline
 \end{tabular}
 \caption{Artifact manifest for the current paper claim ledger.  Each row names
-the repository or PR anchor that can support an admitted finite-scope claim.}
+the repository anchor that can support an admitted finite-scope claim.}
 \label{artifact-manifest-table}
+\end{table}
+
+\begin{table}[htbp]
+\centering
+\scriptsize
+\setlength{\tabcolsep}{2pt}
+\begin{tabular}{p{1.35cm}|p{2.55cm}|p{2.85cm}}
+\hline
+Symbol & Coordinate source & Ledger status \\ \hline
+\(D_C^{paper}\)
+  & Chord paper table
+  & \(\mathsf{ExtBase}_{C}\), external baseline \\
+\(D_C^{656}\)
+  & PR~656 Chord-only dummy benchmark
+  & \(\mathsf{ReportedOnly}\cap\mathsf{Baseline}_{C}\) \\
+\(D_R^{docker}\)
+  & reported Docker/WebRTC run
+  & \(\mathsf{ReportedOnly}\cap\mathsf{Runtime}_{R}\) \\
+\hline
+\end{tabular}
+\caption{Reported coordinate ledger.  These rows calibrate comparison or runtime
+context; they are not admitted artifact evidence until provenance is complete.}
+\label{reported-coordinate-table}
 \end{table}
 
 \begin{definition}[Latency decomposition]
@@ -1709,7 +1819,8 @@ the repository or PR anchor that can support an admitted finite-scope claim.}
   +T_{witness}.
 \]
 \[
-  h=O(\log |N|)\quad(F_n\text{ populated}).
+  h=O(\log |N|)
+  \quad(\operatorname{Inv}_{ring}(N,S)\land\mathsf{FingerInv}(N,S)).
 \]
 Only $hT_{hop}$ is Chord-comparable; the rest is Rings runtime overhead.
 \end{definition}
@@ -1996,25 +2107,27 @@ not as an informal bundle of peer-to-peer mechanisms:
    \mathsf{T}^{\mathcal{E}}_A,\Pi,\mathbb{G},\mathcal{X}).
 \]
 \[
-\begin{aligned}
-\mathsf{Established}
-&=\mathsf{Core}_{Rings}\land\mathsf{LedgerDisc}_{Rings},\\
-\mathsf{ScopedEvidence}
-&=\mathsf{Manifest}_{R}\cap\mathsf{Artifact}_{R}\\
-&\quad{}\cap\{d:\mathsf{AdmittedEval}(d)\},\\
-\mathsf{Obligation}
-&=\mathsf{wideAreaBenchmark}
-\cup\mathsf{adversarialLiveness}\\
-&\quad{}\cup\mathsf{fullReplicaRealization},\\
-\mathsf{NonClaim}&=\NonClaim .
-\end{aligned}
+\begin{array}{rcl}
+\mathsf{Established}&=&
+\mathsf{Core}_{Rings}\land\mathsf{LedgerDisc}_{Rings},\\
+\mathsf{ScopedEv}&=&
+\{a:a\in\mathsf{Artifact}_{R}\\
+&&{}\land\mathsf{AdmittedArtifact}(a)\},\\
+\mathsf{RepCoord}&=&
+D_C^{paper}\uplus D_C^{656}\uplus D_R^{docker},\\
+\mathsf{Obligation}&=&
+\mathsf{wideAreaBenchmark}\cup\mathsf{adversarialLiveness}\\
+&&{}\cup\mathsf{fullReplicaRealization},\\
+\mathsf{NonClaim}&=&\NonClaim .
+\end{array}
 \]
 The scientific contribution is the composition law and its claim ledger:
 CorrectChord supplies the overlay safety root, \(\Omega_N\) lifts resource
 namespaces into live owners, protocol morphisms preserve placement, and runtime
 effects remain typed.  Implementation evidence supports only the entries
-admitted by Table~\ref{artifact-manifest-table}; benchmark and security claims
-outside that ledger remain obligations.
+admitted by Table~\ref{artifact-manifest-table}; coordinates in
+Table~\ref{reported-coordinate-table} are not proof evidence.  Benchmark and
+security claims outside that ledger remain obligations.
 
 \bibliographystyle{IEEEtran}
 \bibliography{./cites}
