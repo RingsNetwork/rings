@@ -211,7 +211,7 @@ function watchNodeIconUntilSettled(): void {
       let snapshot: NodeSnapshot;
       try {
         snapshot = await refreshNodeIcon();
-      } catch (error: unknown) {
+      } catch (_error: unknown) {
         await setExtensionNodeBridgeIconState("disconnected");
         return;
       }

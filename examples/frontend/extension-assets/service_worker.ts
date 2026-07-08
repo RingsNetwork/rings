@@ -83,10 +83,7 @@ type SelectedProvider = {
  * Minimal EIP-1193 provider contract used inside injected page functions.
  */
 type RequestProvider = {
-  request(payload: {
-    readonly method: string;
-    readonly params?: readonly unknown[];
-  }): Promise<unknown>;
+  request(payload: { readonly method: string; readonly params?: readonly unknown[] }): Promise<unknown>;
 };
 
 /**
@@ -156,6 +153,14 @@ type PageResult<T> =
       readonly ok: false;
       readonly error: string;
     };
+
+/**
+ * Runtime message object shape after narrowing from an unknown value.
+ */
+type RuntimeMessageRecord = {
+  readonly type?: unknown;
+  readonly [key: string]: unknown;
+};
 
 const WALLET_CONNECT = "rings.wallet.connect";
 const WALLET_SIGN = "rings.wallet.sign";
@@ -303,13 +308,15 @@ async function ensureOffscreenDocument(): Promise<void> {
     return;
   }
   if (!creatingOffscreenDocument) {
-    creatingOffscreenDocument = chrome.offscreen.createDocument({
-      url: OFFSCREEN_DOCUMENT,
-      reasons: ["WEB_RTC"],
-      justification: "Keep the Rings browser node WebRTC transport alive while the side panel is closed.",
-    }).finally((): void => {
-      creatingOffscreenDocument = undefined;
-    });
+    creatingOffscreenDocument = chrome.offscreen
+      .createDocument({
+        url: OFFSCREEN_DOCUMENT,
+        reasons: ["WEB_RTC"],
+        justification: "Keep the Rings browser node WebRTC transport alive while the side panel is closed.",
+      })
+      .finally((): void => {
+        creatingOffscreenDocument = undefined;
+      });
   }
   await creatingOffscreenDocument;
 }
@@ -365,11 +372,7 @@ async function connectWallet(wallet: WalletKind): Promise<WalletConnectResult> {
  */
 async function signWithWallet(wallet: WalletKind, proof: string, account: string): Promise<WalletConnectResult> {
   if (wallet === "eip191" || wallet === "metamask") {
-    return executeInWalletTab(
-      signEip191InPage,
-      [proof, account],
-      selectedEip191Provider.tabId,
-    );
+    return executeInWalletTab(signEip191InPage, [proof, account], selectedEip191Provider.tabId);
   }
   return executeInActiveTab(signEd25519InPage, [proof]);
 }
@@ -422,7 +425,7 @@ async function executeInTab(
     throw new Error(walletInjectionError(tab, error));
   }
   const result = results[0]?.result;
-  if (!result || result.ok !== true) {
+  if (result?.ok !== true) {
     throw new Error(result?.error || "wallet bridge returned no result");
   }
   return result.value;
@@ -640,14 +643,14 @@ function providerSelection(message: WalletSelectProviderMessage): SelectedProvid
  * Narrows an unknown runtime message to an icon-state update.
  */
 function isIconSetMessage(message: unknown): message is IconSetMessage {
-  return isRecord(message) && message["type"] === ICON_SET;
+  return isRecord(message) && message.type === ICON_SET;
 }
 
 /**
  * Narrows an unknown runtime message to an offscreen creation request.
  */
 function isEnsureOffscreenMessage(message: unknown): message is EnsureOffscreenMessage {
-  return isRecord(message) && message["type"] === NODE_ENSURE_OFFSCREEN;
+  return isRecord(message) && message.type === NODE_ENSURE_OFFSCREEN;
 }
 
 /**
@@ -656,9 +659,7 @@ function isEnsureOffscreenMessage(message: unknown): message is EnsureOffscreenM
 function isWalletMessage(message: unknown): message is WalletMessage {
   return (
     isRecord(message) &&
-    (message["type"] === WALLET_CONNECT ||
-      message["type"] === WALLET_SIGN ||
-      message["type"] === WALLET_SELECT_PROVIDER)
+    (message.type === WALLET_CONNECT || message.type === WALLET_SIGN || message.type === WALLET_SELECT_PROVIDER)
   );
 }
 
@@ -698,7 +699,7 @@ function getTab(tabId: number): Promise<chrome.tabs.Tab> {
 /**
  * Narrows an unknown value to a non-null object record.
  */
-function isRecord(value: unknown): value is Record<string, unknown> {
+function isRecord(value: unknown): value is RuntimeMessageRecord {
   return typeof value === "object" && value !== null;
 }
 

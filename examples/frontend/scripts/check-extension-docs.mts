@@ -47,9 +47,7 @@ const missingDocs = (
 
 if (missingDocs.length > 0) {
   for (const missing of missingDocs) {
-    console.error(
-      `${missing.file}:${missing.line}:${missing.column}: missing JSDoc for ${missing.declaration}`,
-    );
+    console.error(`${missing.file}:${missing.line}:${missing.column}: missing JSDoc for ${missing.declaration}`);
   }
   process.exitCode = 1;
 }

@@ -5,13 +5,13 @@
  */
 
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
-import { readFile, mkdtemp, rm } from "node:fs/promises";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { type AddressInfo } from "node:net";
-import { chromium, type BrowserContext, type Page } from "playwright";
+import { type BrowserContext, chromium, type Page } from "playwright";
 
 /**
  * Wallet kinds exercised by the extension bridge fixture.
@@ -104,6 +104,7 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const projectRoot = frontendProjectRoot(scriptDir);
 const extensionPath = resolve(projectRoot, process.argv[2] ?? "dist-extension");
 const fixtureRoot = resolve(projectRoot, "test-pages");
+const { HEADLESS: headlessMode } = process.env;
 
 const server = await serveFixture(fixtureRoot);
 const userDataDir = await mkdtemp(join(tmpdir(), "rings-node-extension-"));
@@ -111,11 +112,8 @@ const userDataDir = await mkdtemp(join(tmpdir(), "rings-node-extension-"));
 let context: BrowserContext | undefined;
 try {
   context = await chromium.launchPersistentContext(userDataDir, {
-    headless: process.env["HEADLESS"] === "1",
-    args: [
-      `--disable-extensions-except=${extensionPath}`,
-      `--load-extension=${extensionPath}`,
-    ],
+    headless: headlessMode === "1",
+    args: [`--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`],
   });
 
   let serviceWorker = context.serviceWorkers()[0];
@@ -129,8 +127,12 @@ try {
 
   const extensionPage = await context.newPage();
   await extensionPage.goto(`chrome-extension://${extensionId}/index.html`);
-  await extensionPage.waitForFunction((): boolean => Boolean((globalThis as ExtensionPageGlobal).RingsExtensionWalletBridge));
-  await extensionPage.waitForFunction((): boolean => Boolean((globalThis as ExtensionPageGlobal).RingsExtensionNodeBridge));
+  await extensionPage.waitForFunction((): boolean =>
+    Boolean((globalThis as ExtensionPageGlobal).RingsExtensionWalletBridge),
+  );
+  await extensionPage.waitForFunction((): boolean =>
+    Boolean((globalThis as ExtensionPageGlobal).RingsExtensionNodeBridge),
+  );
 
   await fixturePage.bringToFront();
   await fixturePage.waitForTimeout(250);
@@ -163,8 +165,8 @@ try {
   assert.equal(nodeStart.value.starting, true);
   await waitForFixtureCall(fixturePage, "browser-selector", "eth_requestAccounts");
   assert.equal(await extensionPage.locator("#rings-extension-provider-chooser").count(), 0);
-  await extensionPage.evaluate((): Promise<unknown> =>
-    (globalThis as ExtensionPageGlobal).RingsExtensionNodeBridge.stop().catch((): null => null),
+  await extensionPage.evaluate(
+    (): Promise<unknown> => (globalThis as ExtensionPageGlobal).RingsExtensionNodeBridge.stop().catch((): null => null),
   );
   await clearFixtureCalls(fixturePage);
 
@@ -194,51 +196,47 @@ try {
   await fixturePage.bringToFront();
   await fixturePage.waitForTimeout(250);
   await chooseEip191Wallet(fixturePage, "metamask");
-  const eip191ConnectPromise = extensionPage.evaluate((): Promise<WalletConnectResult> =>
-    (globalThis as ExtensionPageGlobal).RingsExtensionWalletBridge.connect("eip191"),
+  const eip191ConnectPromise = extensionPage.evaluate(
+    (): Promise<WalletConnectResult> =>
+      (globalThis as ExtensionPageGlobal).RingsExtensionWalletBridge.connect("eip191"),
   );
   assert.equal(await fixturePage.locator("#rings-eip191-provider-chooser").count(), 0);
   const eip191Connect = await eip191ConnectPromise;
 
-  const eip191Sign = await extensionPage.evaluate((): Promise<WalletConnectResult> =>
-    (globalThis as ExtensionPageGlobal).RingsExtensionWalletBridge.sign(
-      "eip191",
-      "rings test proof",
-      "0x1234567890abcdef1234567890abcdef12345678",
-    ),
+  const eip191Sign = await extensionPage.evaluate(
+    (): Promise<WalletConnectResult> =>
+      (globalThis as ExtensionPageGlobal).RingsExtensionWalletBridge.sign(
+        "eip191",
+        "rings test proof",
+        "0x1234567890abcdef1234567890abcdef12345678",
+      ),
   );
 
-  const ed25519Connect = await extensionPage.evaluate((): Promise<WalletConnectResult> =>
-    (globalThis as ExtensionPageGlobal).RingsExtensionWalletBridge.connect("ed25519"),
+  const ed25519Connect = await extensionPage.evaluate(
+    (): Promise<WalletConnectResult> =>
+      (globalThis as ExtensionPageGlobal).RingsExtensionWalletBridge.connect("ed25519"),
   );
-  const ed25519Sign = await extensionPage.evaluate((): Promise<WalletConnectResult> =>
-    (globalThis as ExtensionPageGlobal).RingsExtensionWalletBridge.sign("ed25519", "rings test proof"),
+  const ed25519Sign = await extensionPage.evaluate(
+    (): Promise<WalletConnectResult> =>
+      (globalThis as ExtensionPageGlobal).RingsExtensionWalletBridge.sign("ed25519", "rings test proof"),
   );
 
   await fixturePage.bringToFront();
   await fixturePage.waitForTimeout(250);
   await chooseEip191Wallet(fixturePage, "metamask");
-  const legacyEip191ConnectPromise = extensionPage.evaluate((): Promise<WalletConnectResult> =>
-    (globalThis as ExtensionPageGlobal).RingsExtensionWalletBridge.connect("metamask"),
+  const legacyEip191ConnectPromise = extensionPage.evaluate(
+    (): Promise<WalletConnectResult> =>
+      (globalThis as ExtensionPageGlobal).RingsExtensionWalletBridge.connect("metamask"),
   );
   const legacyEip191Connect = await legacyEip191ConnectPromise;
 
-  assert.equal(
-    eip191Connect.account,
-    "0x1234567890abcdef1234567890abcdef12345678",
-  );
+  assert.equal(eip191Connect.account, "0x1234567890abcdef1234567890abcdef12345678");
   assert.equal(eip191Connect.accountType, "eip191");
   assert.equal(eip191Sign.signature, "0x00112233445566778899aabbccddeeff");
   assert.equal(ed25519Connect.account, "Bridge1111111111111111111111111111111111");
   assert.equal(ed25519Connect.accountType, "ed25519");
-  assert.equal(
-    legacyEip191Connect.account,
-    "0x1234567890abcdef1234567890abcdef12345678",
-  );
-  assert.deepEqual(
-    ed25519Sign.signature,
-    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
-  );
+  assert.equal(legacyEip191Connect.account, "0x1234567890abcdef1234567890abcdef12345678");
+  assert.deepEqual(ed25519Sign.signature, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
 
   const calls = await fixturePage.locator("#calls").textContent();
   assert.match(calls ?? "", /phantom-evm/);

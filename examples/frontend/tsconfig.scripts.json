@@ -7,7 +7,5 @@
     "outDir": ".generated/scripts",
     "types": ["node"]
   },
-  "include": [
-    "scripts/*.mts"
-  ]
+  "include": ["scripts/*.mts"]
 }

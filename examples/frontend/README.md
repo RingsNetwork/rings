@@ -11,9 +11,12 @@ no JavaScript source. Extension packaging uses strict TypeScript for the MV3
 service worker, wallet bridge, node bridge, and packaging scripts. The build emits
 the JavaScript files Chrome and Node load at runtime into ignored generated output
 directories; JavaScript is not checked in as source.
-The TypeScript build fails on type errors, explicit `any`, or missing JSDoc on
-file-level docs and top-level type, interface, function, class, or enum
-declarations.
+The TypeScript gate runs Biome plus `tsc`: Biome enforces formatting, import
+organization, `noExplicitAny`, unused-symbol checks, `noVar`, and no non-null
+assertions; `tsc` runs strict type checks with no implicit `any`, unchecked
+index access, unused locals/parameters, and no emit on error. The docs check
+also requires file-level docs and top-level type, interface, function, class, or
+enum declarations to have JSDoc.
 
 Styles are split under `src/styles/` by responsibility:
 

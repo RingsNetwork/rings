@@ -5,7 +5,7 @@
  */
 
 import { execFile } from "node:child_process";
-import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -111,21 +111,13 @@ await mkdir(extensionDist, { recursive: true });
 await cp(join(sourceRoot, jsFile), join(extensionDist, jsFile));
 await cp(join(sourceRoot, wasmFile), join(extensionDist, wasmFile));
 
-await writeFile(
-  join(extensionDist, "index.html"),
-  htmlShell(jsFile, wasmFile, { includeNodeBridge: true }),
-  "utf8",
-);
+await writeFile(join(extensionDist, "index.html"), htmlShell(jsFile, wasmFile, { includeNodeBridge: true }), "utf8");
 await writeFile(
   join(extensionDist, "offscreen.html"),
   htmlShell(jsFile, wasmFile, { includeNodeBridge: false }),
   "utf8",
 );
-await writeFile(
-  join(extensionDist, "bootstrap.js"),
-  bootstrapScript(jsFile, wasmFile),
-  "utf8",
-);
+await writeFile(join(extensionDist, "bootstrap.js"), bootstrapScript(jsFile, wasmFile), "utf8");
 await cp(join(extensionAssets, "wallet_bridge.js"), join(extensionDist, "wallet_bridge.js"));
 await cp(join(extensionAssets, "node_bridge.js"), join(extensionDist, "node_bridge.js"));
 await cp(join(extensionAssets, "service_worker.js"), join(extensionDist, "service_worker.js"));
@@ -152,11 +144,7 @@ function frontendProjectRoot(currentScriptDir: string): string {
 /**
  * Finds exactly one generated file matching a predicate.
  */
-function singleFile(
-  fileList: readonly string[],
-  predicate: (file: string) => boolean,
-  label: string,
-): string {
+function singleFile(fileList: readonly string[], predicate: (file: string) => boolean, label: string): string {
   const matches = fileList.filter(predicate);
   if (matches.length !== 1) {
     throw new Error(`Expected one ${label} in ${sourceRoot}, found ${matches.length}`);
@@ -271,7 +259,7 @@ function htmlShell(jsFileName: string, wasmFileName: string, options: HtmlShellO
   </head>
   <body>
     <script type="module" src="./wallet_bridge.js"></script>
-    ${options.includeNodeBridge ? '<script type="module" src="./node_bridge.js"></script>' : ''}
+    ${options.includeNodeBridge ? '<script type="module" src="./node_bridge.js"></script>' : ""}
     <script type="module" src="./bootstrap.js"></script>
   </body>
 </html>
