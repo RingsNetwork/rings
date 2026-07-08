@@ -5,7 +5,7 @@
  */
 
 import { readdir, readFile } from "node:fs/promises";
-import { dirname, extname, join, resolve } from "node:path";
+import { basename, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 
@@ -28,7 +28,7 @@ type SourceSet = {
 };
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
-const projectRoot = resolve(scriptDir, "..");
+const projectRoot = frontendProjectRoot(scriptDir);
 const sourceSets: readonly SourceSet[] = [
   {
     dir: join(projectRoot, "extension-assets"),
@@ -52,6 +52,17 @@ if (missingDocs.length > 0) {
     );
   }
   process.exitCode = 1;
+}
+
+/**
+ * Resolves the frontend project root from either source or generated script paths.
+ */
+function frontendProjectRoot(currentScriptDir: string): string {
+  const parentDir = dirname(currentScriptDir);
+  if (basename(parentDir) === ".generated") {
+    return resolve(parentDir, "..");
+  }
+  return resolve(currentScriptDir, "..");
 }
 
 /**

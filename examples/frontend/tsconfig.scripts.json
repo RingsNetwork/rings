@@ -3,6 +3,8 @@
   "compilerOptions": {
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
+    "rootDir": "scripts",
+    "outDir": ".generated/scripts",
     "types": ["node"]
   },
   "include": [

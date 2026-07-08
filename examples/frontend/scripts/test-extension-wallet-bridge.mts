@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import { readFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, extname, join, resolve } from "node:path";
+import { basename, dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type AddressInfo } from "node:net";
 import { chromium, type BrowserContext, type Page } from "playwright";
@@ -101,7 +101,7 @@ type FixtureCall = {
 };
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
-const projectRoot = resolve(scriptDir, "..");
+const projectRoot = frontendProjectRoot(scriptDir);
 const extensionPath = resolve(projectRoot, process.argv[2] ?? "dist-extension");
 const fixtureRoot = resolve(projectRoot, "test-pages");
 
@@ -250,6 +250,17 @@ try {
   await context?.close();
   await rm(userDataDir, { force: true, recursive: true });
   await new Promise<void>((resolveClose): void => server.close(resolveClose));
+}
+
+/**
+ * Resolves the frontend project root from either source or generated script paths.
+ */
+function frontendProjectRoot(currentScriptDir: string): string {
+  const parentDir = dirname(currentScriptDir);
+  if (basename(parentDir) === ".generated") {
+    return resolve(parentDir, "..");
+  }
+  return resolve(currentScriptDir, "..");
 }
 
 /**

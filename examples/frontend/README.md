@@ -8,8 +8,9 @@ dweb and proof workbench panels for operating a browser node from one screen.
 The implementation is Rust/Yew. Browser APIs for WebCrypto, MetaMask, and Phantom
 are called from Rust through `js_sys` and `wasm_bindgen`; the core application has
 no JavaScript source. Extension packaging uses strict TypeScript for the MV3
-service worker, wallet bridge, node bridge, and packaging scripts, then emits the
-JavaScript files Chrome and Node load at runtime.
+service worker, wallet bridge, node bridge, and packaging scripts. The build emits
+the JavaScript files Chrome and Node load at runtime into ignored generated output
+directories; JavaScript is not checked in as source.
 The TypeScript build fails on type errors, explicit `any`, or missing JSDoc on
 file-level docs and top-level type, interface, function, class, or enum
 declarations.
@@ -45,9 +46,9 @@ message workflows.
 
 ## Package as a Chrome Extension
 
-Build the same Yew/Wasm application with Trunk. The Trunk `post_build` hook
-first type-checks and compiles the extension TypeScript, then rewrites the web
-output into a Chrome Manifest V3 package after every build:
+Build the same Yew/Wasm application with Trunk. The Trunk `post_build` hook first
+type-checks and compiles the extension TypeScript into `.generated/`, then
+rewrites the web output into a Chrome Manifest V3 package after every build:
 
 ```sh
 cd examples/frontend

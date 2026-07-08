@@ -7,7 +7,7 @@
 import { execFile } from "node:child_process";
 import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
@@ -56,12 +56,12 @@ type ChromeManifest = {
 };
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
-const projectRoot = resolve(scriptDir, "..");
+const projectRoot = frontendProjectRoot(scriptDir);
 const sourceDist = resolve(projectRoot, process.argv[2] ?? "dist");
 const extensionDist = resolve(projectRoot, process.argv[3] ?? "dist-extension");
 const execFileAsync = promisify(execFile);
 const sourceIconSvg = join(projectRoot, "assets", "icons", "rings.svg");
-const extensionAssets = resolve(projectRoot, "extension-assets");
+const extensionAssets = resolve(projectRoot, ".generated", "extension-assets");
 
 const cargoToml = await readFile(join(projectRoot, "Cargo.toml"), "utf8");
 const crateVersion = cargoToml.match(/^version\s*=\s*"([^"]+)"/m)?.[1] ?? "0.1.0";
@@ -137,6 +137,17 @@ await writeFile(
 );
 
 console.log(`Packaged Chrome MV3 extension at ${extensionDist}`);
+
+/**
+ * Resolves the frontend project root from either source or generated script paths.
+ */
+function frontendProjectRoot(currentScriptDir: string): string {
+  const parentDir = dirname(currentScriptDir);
+  if (basename(parentDir) === ".generated") {
+    return resolve(parentDir, "..");
+  }
+  return resolve(currentScriptDir, "..");
+}
 
 /**
  * Finds exactly one generated file matching a predicate.

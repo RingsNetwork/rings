@@ -13,8 +13,8 @@
   "scripts": {
     "wasm_pack": "wasm-pack build crates/node --release --scope ringsnetwork -t web --no-default-features --features browser_default --features console_error_panic_hook",
     "prepare": "npm run wasm_pack && rm -rf dist && mkdir -p dist && cp crates/node/pkg/rings_node* ./dist && cp index.ts ./dist && tsc -p tsconfig.json",
-    "build:frontend-extension-scripts": "tsc -p examples/frontend/tsconfig.extension-assets.json && tsc -p examples/frontend/tsconfig.scripts.json && node examples/frontend/scripts/check-extension-docs.mjs && ! grep -R -nE '\\bany\\b' examples/frontend/extension-assets/*.ts examples/frontend/scripts/*.mts",
-    "test:frontend-extension-wallet": "npm run build:frontend-extension-scripts && node examples/frontend/scripts/package-extension.mjs && node examples/frontend/scripts/test-extension-wallet-bridge.mjs"
+    "build:frontend-extension-scripts": "rm -rf examples/frontend/.generated && tsc -p examples/frontend/tsconfig.extension-assets.json && tsc -p examples/frontend/tsconfig.scripts.json && node examples/frontend/.generated/scripts/check-extension-docs.mjs && ! grep -R -nE '\\bany\\b' examples/frontend/extension-assets/*.ts examples/frontend/scripts/*.mts",
+    "test:frontend-extension-wallet": "npm run build:frontend-extension-scripts && node examples/frontend/.generated/scripts/package-extension.mjs && node examples/frontend/.generated/scripts/test-extension-wallet-bridge.mjs"
   },
   "dependencies": {
     "circomlib": "^2.0.5"

@@ -6,7 +6,6 @@ watch = [
   "Cargo.toml",
   "Trunk.toml",
   "extension-assets/*.ts",
-  "scripts/package-extension.mjs",
   "scripts/package-extension.mts",
   "tsconfig.base.json",
   "tsconfig.extension-assets.json",
@@ -20,4 +19,4 @@ ignore = [
 [[hooks]]
 stage = "post_build"
 command = "sh"
-command_arguments = ["-c", "npm --prefix ../.. run build:frontend-extension-scripts && node scripts/package-extension.mjs"]
+command_arguments = ["-c", "npm --prefix ../.. run build:frontend-extension-scripts && node .generated/scripts/package-extension.mjs"]
