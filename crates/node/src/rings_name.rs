@@ -28,6 +28,7 @@ use crate::descriptor::encode_descriptor;
 use crate::error::Error;
 use crate::error::Result;
 use crate::onion::OnionExitTransport;
+use crate::onion::OnionServiceName;
 
 /// Pseudo-TLD served by the Rings overlay resolver.
 pub const RINGS_NAME_SUFFIX: &str = ".rings";
@@ -61,9 +62,11 @@ impl RingsName {
             )));
         }
 
-        let label = canonical
-            .strip_suffix(RINGS_NAME_SUFFIX)
-            .expect("suffix already checked");
+        let Some(label) = canonical.strip_suffix(RINGS_NAME_SUFFIX) else {
+            return Err(Error::InvalidRingsName(format!(
+                "name {name:?} must end with {RINGS_NAME_SUFFIX}"
+            )));
+        };
         validate_self_auth_label(label)?;
         Ok(Self(canonical))
     }
@@ -154,17 +157,27 @@ fn self_auth_label(owner_public_key: &VerificationPublicKey) -> String {
     let mut transcript = b"rings-name:v1\0".to_vec();
     transcript.extend_from_slice(&owner_public_key.transcript_bytes());
     let digest = keccak256(&transcript);
-    format!("r{}", lowercase_hex(&digest[..SELF_AUTH_LABEL_BYTES]))
+    format!(
+        "r{}",
+        lowercase_hex(digest.iter().take(SELF_AUTH_LABEL_BYTES).copied())
+    )
 }
 
-fn lowercase_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
+fn lowercase_hex(bytes: impl IntoIterator<Item = u8>) -> String {
+    let mut out = String::new();
     for byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
+        out.push(hex_char(byte >> 4));
+        out.push(hex_char(byte & 0x0f));
     }
     out
+}
+
+fn hex_char(nibble: u8) -> char {
+    match nibble {
+        0..=9 => char::from(b'0' + nibble),
+        10..=15 => char::from(b'a' + nibble - 10),
+        _ => '?',
+    }
 }
 
 /// Descriptor fields covered by the `.rings` name signature.
@@ -178,8 +191,8 @@ pub struct RingsNameRecordBody {
     pub target_did: Did,
     /// Session public key used by the target for encrypted overlay/onion setup.
     pub session_public_key: PublicKey<33>,
-    /// Application service name exposed by the target.
-    pub service: String,
+    /// Canonical application service name exposed by the target.
+    pub service: OnionServiceName,
     /// Transport class for the resolved service.
     pub transport: OnionExitTransport,
     /// Rings network identifier.
@@ -197,7 +210,7 @@ struct RingsNameRecordBodyRef<'a> {
     owner_public_key: &'a VerificationPublicKey,
     target_did: Did,
     session_public_key: &'a PublicKey<33>,
-    service: &'a str,
+    service: &'a OnionServiceName,
     transport: OnionExitTransport,
     network_id: u32,
     seq: u64,
@@ -212,7 +225,7 @@ impl RingsNameRecordBody {
             owner_public_key: &self.owner_public_key,
             target_did: self.target_did,
             session_public_key: &self.session_public_key,
-            service: self.service.as_str(),
+            service: &self.service,
             transport: self.transport,
             network_id: self.network_id,
             seq: self.seq,
@@ -228,11 +241,6 @@ impl RingsNameRecordBody {
         if !self.name.matches_owner(&self.owner_public_key) {
             return Err(Error::InvalidRingsName(
                 ".rings name does not match owner public key".to_string(),
-            ));
-        }
-        if self.service.trim().is_empty() || self.service.trim() != self.service {
-            return Err(Error::InvalidRingsName(
-                ".rings service must be non-empty and trimmed".to_string(),
             ));
         }
         Ok(())
@@ -252,8 +260,8 @@ pub struct RingsNameRecord {
     pub target_did: Did,
     /// Session public key used by the target for encrypted overlay/onion setup.
     pub session_public_key: PublicKey<33>,
-    /// Application service name exposed by the target.
-    pub service: String,
+    /// Canonical application service name exposed by the target.
+    pub service: OnionServiceName,
     /// Transport class for the resolved service.
     pub transport: OnionExitTransport,
     /// Rings network identifier.
@@ -299,7 +307,7 @@ impl RingsNameRecord {
             owner_public_key: &self.owner_public_key,
             target_did: self.target_did,
             session_public_key: &self.session_public_key,
-            service: self.service.as_str(),
+            service: &self.service,
             transport: self.transport,
             network_id: self.network_id,
             seq: self.seq,
@@ -428,7 +436,7 @@ mod tests {
             owner_public_key,
             target_did: session_sk.account_did(),
             session_public_key: session_sk.session_public_key(),
-            service: "web".to_string(),
+            service: OnionServiceName::tcp(),
             transport: OnionExitTransport::Tcp,
             network_id: 7,
             seq: 1,

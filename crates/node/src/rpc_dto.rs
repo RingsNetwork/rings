@@ -162,7 +162,7 @@ pub(crate) fn rings_name_record_info(record: RingsNameRecord) -> Result<RingsNam
         owner_public_key: json_value(record.owner_public_key)?,
         target_did: record.target_did.to_string(),
         session_public_key: json_value(record.session_public_key)?,
-        service: record.service,
+        service: record.service.into(),
         transport: onion_exit_transport_info(record.transport),
         network_id: record.network_id,
         seq: record.seq,

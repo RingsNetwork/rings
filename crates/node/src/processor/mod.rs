@@ -59,6 +59,7 @@ use crate::onion::OnionExitPolicy;
 use crate::onion::OnionExitRegistration;
 use crate::onion::OnionExitService;
 use crate::onion::OnionRoute;
+use crate::onion::OnionServiceName;
 use crate::onion::ONION_EXITS_TOPIC;
 use crate::onion::ONION_RELAY_CAPABILITY;
 use crate::online::OnlineNodeDescriptor;
@@ -286,13 +287,14 @@ impl Processor {
         } else {
             ttl_ms
         };
+        let service = OnionServiceName::parse(service)?;
         let record = RingsNameRecord::new_signed(
             RingsNameRecordBody {
                 name,
                 owner_public_key,
                 target_did: self.did(),
                 session_public_key: self.session_sk.session_public_key(),
-                service: service.to_string(),
+                service,
                 transport,
                 network_id: self.swarm.network_id(),
                 seq,

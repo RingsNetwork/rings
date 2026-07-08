@@ -292,7 +292,7 @@ fn rings_name_body(
         owner_public_key,
         target_did: processor.did(),
         session_public_key: processor.session_sk.session_public_key(),
-        service: "web".to_string(),
+        service: OnionServiceName::parse("web")?,
         transport: OnionExitTransport::Tcp,
         network_id,
         seq,
@@ -335,6 +335,18 @@ async fn rings_name_publish_rejects_human_alias_in_v1() {
             )
             .await,
         Err(Error::InvalidRingsName(_))
+    ));
+}
+
+#[tokio::test]
+async fn rings_name_publish_rejects_invalid_service_name() {
+    let processor = prepare_processor().await;
+
+    assert!(matches!(
+        processor
+            .publish_rings_name(None, "bad service", OnionExitTransport::Tcp, 60_000, 1)
+            .await,
+        Err(Error::InvalidConfig(_))
     ));
 }
 
