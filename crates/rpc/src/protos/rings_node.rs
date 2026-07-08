@@ -207,6 +207,17 @@ pub struct ResolveRingsNameResponse {
 }
 
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct BuildRingsNameRouteRequest {
+    pub name: String,
+    /// Desired hop count including the `.rings` target. `0` means node default.
+    #[serde(default)]
+    pub hop_count: u32,
+    /// Allow route selection to return fewer hops when too few relays are live.
+    #[serde(default)]
+    pub allow_short_paths: bool,
+}
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct LookupOnlineNodesRequest {
     #[serde(default)]
     pub include_expired: bool,

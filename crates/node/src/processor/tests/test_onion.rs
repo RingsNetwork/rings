@@ -1,5 +1,33 @@
 use super::common::*;
 use super::*;
+use crate::onion::OnionServiceName;
+
+fn rings_name_record_for_exit(
+    exit: &Processor,
+    service: &str,
+    transport: OnionExitTransport,
+    network_id: u32,
+    seq: u64,
+    expires_at_ms: u128,
+) -> Result<RingsNameRecord> {
+    let owner_public_key = exit
+        .session_sk
+        .session()
+        .account_verification_pubkey()
+        .map_err(Error::CoreError)?;
+    let body = RingsNameRecordBody {
+        name: RingsName::for_owner(&owner_public_key),
+        owner_public_key,
+        target_did: exit.did(),
+        session_public_key: exit.session_sk.session_public_key(),
+        service: OnionServiceName::parse(service)?,
+        transport,
+        network_id,
+        seq,
+        expires_at_ms,
+    };
+    RingsNameRecord::new_signed(body, &exit.session_sk).map_err(Error::CoreError)
+}
 
 #[tokio::test]
 async fn onion_exit_lookup_uses_dedicated_exit_registry() -> Result<()> {
@@ -47,6 +75,87 @@ async fn onion_exit_lookup_preserves_distinct_services_for_same_did() -> Result<
     assert_eq!(processor.lookup_onion_exits("web", false).await?.len(), 1);
     assert_eq!(processor.lookup_onion_exits("ssh", false).await?.len(), 1);
     assert_eq!(processor.lookup_onion_exits("", false).await?.len(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn rings_name_route_targets_resolved_live_exit_descriptor() -> Result<()> {
+    let processor = prepare_processor().await;
+    let exit = prepare_processor().await;
+    let now_ms = get_epoch_ms();
+    let exit_descriptor = onion_exit_descriptor_for_processor(&exit, "web", now_ms)?;
+    let record = rings_name_record_for_exit(
+        &exit,
+        "web",
+        OnionExitTransport::Tcp,
+        processor.swarm.network_id(),
+        1,
+        now_ms + 60_000,
+    )?;
+    let name = record.name.clone();
+
+    processor
+        .storage_store(entry::Entry::new(
+            name.dht_key(processor.swarm.network_id())?,
+            vec![record.encode().map_err(Error::CoreError)?],
+            entry::EntryKind::Data,
+        ))
+        .await?;
+    processor
+        .storage_store(Processor::onion_exit_registry_entry(vec![
+            exit_descriptor.clone()
+        ])?)
+        .await?;
+
+    let route = processor
+        .build_rings_name_route(name.as_str(), 1, false)
+        .await?;
+
+    assert_eq!(route.hops().len(), 1);
+    assert_eq!(route.exit_did(), exit.did());
+    assert_eq!(route.hops().last().copied(), Some(exit.did()));
+    assert_eq!(route.exit(), &exit_descriptor);
+    assert_eq!(route.service(), "web");
+    Ok(())
+}
+
+#[tokio::test]
+async fn rings_name_route_rejects_missing_target_exit_descriptor() -> Result<()> {
+    let processor = prepare_processor().await;
+    let exit = prepare_processor().await;
+    let now_ms = get_epoch_ms();
+    let record = rings_name_record_for_exit(
+        &exit,
+        "web",
+        OnionExitTransport::Tcp,
+        processor.swarm.network_id(),
+        1,
+        now_ms + 60_000,
+    )?;
+    let name = record.name.clone();
+
+    processor
+        .storage_store(entry::Entry::new(
+            name.dht_key(processor.swarm.network_id())?,
+            vec![record.encode().map_err(Error::CoreError)?],
+            entry::EntryKind::Data,
+        ))
+        .await?;
+
+    let error = processor
+        .build_rings_name_route(name.as_str(), 1, false)
+        .await
+        .err()
+        .ok_or_else(|| Error::InvalidConfig("expected route failure".to_string()))?;
+
+    assert!(matches!(
+        error,
+        Error::OnionRouteError(OnionRouteError::NoRingsNameTarget { name: failed_name, target, service, transport })
+            if failed_name == name.as_str()
+                && target == exit.did()
+                && service == "web"
+                && transport == OnionExitTransport::Tcp
+    ));
     Ok(())
 }
 

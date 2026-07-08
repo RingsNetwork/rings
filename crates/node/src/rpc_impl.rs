@@ -364,6 +364,20 @@ impl HandleRpc<ResolveRingsNameRequest, ResolveRingsNameResponse> for Processor 
 
 #[cfg_attr(feature = "browser", async_trait(?Send))]
 #[cfg_attr(not(feature = "browser"), async_trait)]
+impl HandleRpc<BuildRingsNameRouteRequest, BuildOnionRouteResponse> for Processor {
+    async fn handle_rpc(&self, req: BuildRingsNameRouteRequest) -> Result<BuildOnionRouteResponse> {
+        let hop_count = usize::try_from(req.hop_count)
+            .map_err(|_| Error::invalid_params("hop_count does not fit usize"))?;
+        let route = self
+            .build_rings_name_route(&req.name, hop_count, req.allow_short_paths)
+            .await
+            .map_err(Error::from)?;
+        crate::rpc_dto::onion_route_response(route).map_err(Error::from)
+    }
+}
+
+#[cfg_attr(feature = "browser", async_trait(?Send))]
+#[cfg_attr(not(feature = "browser"), async_trait)]
 impl HandleRpc<LookupOnlineNodesRequest, LookupOnlineNodesResponse> for Processor {
     async fn handle_rpc(&self, req: LookupOnlineNodesRequest) -> Result<LookupOnlineNodesResponse> {
         let nodes = self

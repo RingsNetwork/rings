@@ -17,6 +17,7 @@ use crate::onion::proxy::OnionProxyConfig;
 use crate::onion::proxy::OnionProxyRoute;
 use crate::onion::proxy::OnionProxyTarget;
 use crate::online::OnlineNodeDescriptor;
+use crate::rings_name::RingsNameRecord;
 
 /// Read-only directory effects required by onion route construction.
 #[cfg_attr(feature = "browser", async_trait::async_trait(?Send))]
@@ -100,6 +101,36 @@ pub(crate) async fn build_onion_proxy_route(
         target,
         route,
     })
+}
+
+/// Build an onion route to the live target descriptor authenticated by a `.rings` record.
+pub(crate) async fn build_rings_name_route(
+    reader: &impl OnionDirectoryReader,
+    record: RingsNameRecord,
+    hop_count: usize,
+    allow_short_paths: bool,
+) -> Result<OnionRoute> {
+    let request =
+        OnionRouteRequest::from_service_name(record.service.clone(), hop_count, allow_short_paths);
+    let exits = reader
+        .live_onion_exits(record.service.as_str())
+        .await?
+        .into_iter()
+        .filter(|exit| exit.did == record.target_did)
+        .filter(|exit| exit.session_public_key == record.session_public_key)
+        .filter(|exit| exit.matches_network(record.network_id))
+        .filter(|exit| exit.offers_service_transport(record.service.as_str(), record.transport))
+        .collect::<Vec<_>>();
+    if exits.is_empty() {
+        return Err(Error::OnionRouteError(OnionRouteError::NoRingsNameTarget {
+            name: record.name.to_string(),
+            target: record.target_did,
+            service: record.service.into(),
+            transport: record.transport,
+        }));
+    }
+
+    build_onion_route_from_exits(reader, request, exits).await
 }
 
 async fn build_filtered_onion_route(

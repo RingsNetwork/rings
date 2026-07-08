@@ -665,6 +665,24 @@ impl Provider {
             }
         })
     }
+
+    /// Build an onion route to a resolved `.rings` target.
+    pub fn build_rings_name_route(
+        &self,
+        name: String,
+        hop_count: usize,
+        allow_short_paths: bool,
+    ) -> js_sys::Promise {
+        let p = self.processor.clone();
+        future_to_promise(async move {
+            let route = p
+                .build_rings_name_route(name.as_str(), hop_count, allow_short_paths)
+                .await
+                .map_err(JsError::from)?;
+            let info = crate::rpc_dto::onion_route_response(route).map_err(JsError::from)?;
+            Ok(js_value::serialize(&info).map_err(JsError::from)?)
+        })
+    }
 }
 
 fn parse_onion_exit_transport(raw: &str) -> Result<OnionExitTransport, JsError> {

@@ -50,6 +50,7 @@ impl InternalRpcHandler {
             + HandleRpc<LookupServiceRequest, LookupServiceResponse>
             + HandleRpc<PublishRingsNameRequest, PublishRingsNameResponse>
             + HandleRpc<ResolveRingsNameRequest, ResolveRingsNameResponse>
+            + HandleRpc<BuildRingsNameRouteRequest, BuildOnionRouteResponse>
             + HandleRpc<LookupOnlineNodesRequest, LookupOnlineNodesResponse>
             + HandleRpc<LookupOnionExitsRequest, LookupOnionExitsResponse>
             + HandleRpc<BuildOnionRouteRequest, BuildOnionRouteResponse>
@@ -163,6 +164,12 @@ impl InternalRpcHandler {
             }
             Method::ResolveRingsName => {
                 let req = serde_json::from_value::<ResolveRingsNameRequest>(params)
+                    .map_err(|e| Error::invalid_params(e.to_string()))?;
+                let resp = processor.handle_rpc(req).await?;
+                serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))
+            }
+            Method::BuildRingsNameRoute => {
+                let req = serde_json::from_value::<BuildRingsNameRouteRequest>(params)
                     .map_err(|e| Error::invalid_params(e.to_string()))?;
                 let resp = processor.handle_rpc(req).await?;
                 serde_json::to_value(resp).map_err(|_| Error::new(ErrorCode::ParseError))

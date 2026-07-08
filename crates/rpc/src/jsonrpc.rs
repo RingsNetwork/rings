@@ -225,6 +225,14 @@ impl Client {
         self.call_method(Method::ResolveRingsName, req).await
     }
 
+    /// Builds an onion route to a resolved `.rings` target.
+    pub async fn build_rings_name_route(
+        &self,
+        req: &BuildRingsNameRouteRequest,
+    ) -> Result<BuildOnionRouteResponse> {
+        self.call_method(Method::BuildRingsNameRoute, req).await
+    }
+
     /// Looks up signed online-node descriptors.
     pub async fn lookup_online_nodes(
         &self,

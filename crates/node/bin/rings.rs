@@ -589,6 +589,7 @@ enum ServiceCommand {
     Lookup(ServiceLookupCommand),
     PublishRingsName(PublishRingsNameCommand),
     ResolveRingsName(ResolveRingsNameCommand),
+    BuildRingsNameRoute(BuildRingsNameRouteCommand),
 }
 
 #[derive(Args, Debug)]
@@ -641,6 +642,24 @@ struct ResolveRingsNameCommand {
 
     #[arg(long, default_value_t = false)]
     include_expired: bool,
+}
+
+#[derive(Args, Debug)]
+struct BuildRingsNameRouteCommand {
+    #[command(flatten)]
+    client_args: ClientArgs,
+
+    name: String,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Desired hop count including the .rings target; 0 uses node default"
+    )]
+    hop_count: u32,
+
+    #[arg(long, default_value_t = false)]
+    allow_short_paths: bool,
 }
 
 #[derive(Args, Debug)]
@@ -968,6 +987,15 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 .new_client()
                 .await?
                 .resolve_rings_name(args.name.as_str(), args.include_expired)
+                .await?
+                .display();
+            Ok(())
+        }
+        Command::Service(ServiceCommand::BuildRingsNameRoute(args)) => {
+            args.client_args
+                .new_client()
+                .await?
+                .build_rings_name_route(args.name.as_str(), args.hop_count, args.allow_short_paths)
                 .await?
                 .display();
             Ok(())

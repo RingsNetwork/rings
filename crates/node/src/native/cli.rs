@@ -227,6 +227,26 @@ impl Client {
         ClientOutput::ok(display, record)
     }
 
+    /// Builds an onion route to a resolved `.rings` target.
+    pub async fn build_rings_name_route(
+        &self,
+        name: &str,
+        hop_count: u32,
+        allow_short_paths: bool,
+    ) -> Output<BuildOnionRouteResponse> {
+        let route = self
+            .client
+            .build_rings_name_route(&BuildRingsNameRouteRequest {
+                name: name.to_string(),
+                hop_count,
+                allow_short_paths,
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+        let display = serde_json::to_string_pretty(&route).map_err(|e| anyhow::anyhow!("{}", e))?;
+        ClientOutput::ok(display, route)
+    }
+
     /// Publishes a message to the specified topic.
     pub async fn publish_message_to_topic(&self, topic: &str, data: &str) -> Output<()> {
         self.client

@@ -47,6 +47,17 @@ pub enum OnionRouteError {
         /// Requested target authority.
         target: String,
     },
+    /// A `.rings` name resolved but no live exit descriptor matched its signed target.
+    NoRingsNameTarget {
+        /// Resolved `.rings` name.
+        name: String,
+        /// Target DID signed by the name owner.
+        target: Did,
+        /// Requested service name.
+        service: String,
+        /// Required transport class.
+        transport: OnionExitTransport,
+    },
     /// Route construction found duplicate DIDs.
     DuplicateRouteHops,
     /// The selected exit descriptor does not match the final encrypted hop.
@@ -153,6 +164,15 @@ impl fmt::Display for OnionRouteError {
             Self::NoExitAllowsTarget { service, target } => write!(
                 f,
                 "no live onion exit for service {service:?} allows target {target:?}"
+            ),
+            Self::NoRingsNameTarget {
+                name,
+                target,
+                service,
+                transport,
+            } => write!(
+                f,
+                "resolved .rings name {name:?} points to {target}, but no live onion exit offers service {service:?} over {transport:?}"
             ),
             Self::DuplicateRouteHops => f.write_str("onion route contains duplicate hops"),
             Self::ExitHopMismatch => {

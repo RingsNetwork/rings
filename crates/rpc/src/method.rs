@@ -42,6 +42,8 @@ pub enum Method {
     PublishRingsName,
     /// Resolve a self-authenticating `.rings` name record
     ResolveRingsName,
+    /// Build an onion route to a resolved self-authenticating `.rings` name
+    BuildRingsNameRoute,
     /// Lookup online-node registry descriptors
     LookupOnlineNodes,
     /// Lookup application-layer onion exit descriptors
@@ -79,6 +81,7 @@ impl Method {
             Method::LookupService => "lookupService",
             Method::PublishRingsName => "publishRingsName",
             Method::ResolveRingsName => "resolveRingsName",
+            Method::BuildRingsNameRoute => "buildRingsNameRoute",
             Method::LookupOnlineNodes => "lookupOnlineNodes",
             Method::LookupOnionExits => "lookupOnionExits",
             Method::BuildOnionRoute => "buildOnionRoute",
@@ -119,6 +122,7 @@ impl TryFrom<&str> for Method {
             "lookupService" => Method::LookupService,
             "publishRingsName" => Method::PublishRingsName,
             "resolveRingsName" => Method::ResolveRingsName,
+            "buildRingsNameRoute" => Method::BuildRingsNameRoute,
             "lookupOnlineNodes" => Method::LookupOnlineNodes,
             "lookupOnionExits" => Method::LookupOnionExits,
             "buildOnionRoute" => Method::BuildOnionRoute,

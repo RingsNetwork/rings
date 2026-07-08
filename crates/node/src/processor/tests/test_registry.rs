@@ -393,7 +393,7 @@ async fn rings_name_resolve_filters_wrong_network_expired_and_stale_records() ->
     )
     .map_err(Error::CoreError)?;
     let expired = RingsNameRecord::new_signed(
-        rings_name_body(&processor, 0, 4, now_ms.saturating_sub(1))?,
+        rings_name_body(&processor, 0, 0, now_ms.saturating_sub(1))?,
         &processor.session_sk,
     )
     .map_err(Error::CoreError)?;

@@ -154,6 +154,8 @@ pub enum Error {
     OnionProxyIoError(String) = 1602,
     #[error("Invalid .rings name: {0}")]
     InvalidRingsName(String) = 1701,
+    #[error(".rings name not found: {0}")]
+    RingsNameNotFound(String) = 1702,
 }
 
 impl Error {

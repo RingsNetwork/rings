@@ -387,11 +387,7 @@ impl RingsNameRecord {
             if !record.matches_network(network_id) {
                 continue;
             }
-            if include_expired {
-                if !record.verify_signature() {
-                    continue;
-                }
-            } else if !record.is_live_at(now_ms) {
+            if !record.verify_signature() {
                 continue;
             }
             match latest.entry(record.name.clone()) {
@@ -409,7 +405,10 @@ impl RingsNameRecord {
                 }
             }
         }
-        latest.into_values().collect()
+        latest
+            .into_values()
+            .filter(|record| include_expired || !record.is_expired_at(now_ms))
+            .collect()
     }
 }
 
@@ -549,7 +548,7 @@ mod tests {
     }
 
     #[test]
-    fn latest_valid_record_filters_network_expiry_and_stale_seq() -> CoreResult<()> {
+    fn latest_valid_record_filters_network_and_stale_seq() -> CoreResult<()> {
         let session_sk = session();
         let now_ms = get_epoch_ms();
         let mut old = RingsNameRecord::new_signed(body_at(&session_sk, now_ms), &session_sk)?;
@@ -562,7 +561,7 @@ mod tests {
         foreign_body.seq = 3;
         let foreign = RingsNameRecord::new_signed(foreign_body, &session_sk)?;
         let mut expired_body = body_at(&session_sk, now_ms);
-        expired_body.seq = 4;
+        expired_body.seq = 0;
         expired_body.expires_at_ms = now_ms;
         let expired = RingsNameRecord::new_signed(expired_body, &session_sk)?;
 
@@ -574,6 +573,34 @@ mod tests {
         );
 
         assert_eq!(selected, vec![new]);
+        Ok(())
+    }
+
+    #[test]
+    fn expired_highest_seq_suppresses_lower_live_record() -> CoreResult<()> {
+        let session_sk = session();
+        let now_ms = get_epoch_ms();
+        let live_lower = RingsNameRecord::new_signed(body_at(&session_sk, now_ms), &session_sk)?;
+        let mut expired_higher_body = body_at(&session_sk, now_ms);
+        expired_higher_body.seq = live_lower.seq + 1;
+        expired_higher_body.expires_at_ms = now_ms;
+        let expired_higher = RingsNameRecord::new_signed(expired_higher_body, &session_sk)?;
+
+        let live_selected = RingsNameRecord::latest_valid_by_name(
+            vec![live_lower.clone(), expired_higher.clone()],
+            7,
+            now_ms,
+            false,
+        );
+        let expired_selected = RingsNameRecord::latest_valid_by_name(
+            vec![live_lower, expired_higher.clone()],
+            7,
+            now_ms,
+            true,
+        );
+
+        assert!(live_selected.is_empty());
+        assert_eq!(expired_selected, vec![expired_higher]);
         Ok(())
     }
 

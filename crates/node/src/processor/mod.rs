@@ -258,6 +258,20 @@ impl Processor {
         directory::build_onion_proxy_route(self, proxy, target).await
     }
 
+    /// Resolve a `.rings` name and build an onion route to its authenticated live target.
+    pub async fn build_rings_name_route(
+        &self,
+        name: &str,
+        hop_count: usize,
+        allow_short_paths: bool,
+    ) -> Result<OnionRoute> {
+        let record = self
+            .resolve_rings_name(name, false)
+            .await?
+            .ok_or_else(|| Error::RingsNameNotFound(name.to_string()))?;
+        directory::build_rings_name_route(self, record, hop_count, allow_short_paths).await
+    }
+
     /// Publish this node's self-authenticating `.rings` service record.
     pub async fn publish_rings_name(
         &self,
