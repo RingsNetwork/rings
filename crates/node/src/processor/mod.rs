@@ -287,6 +287,10 @@ impl Processor {
         } else {
             ttl_ms
         };
+        let expires_at_ms = now_ms.saturating_add(ttl_ms.into());
+        if u64::try_from(expires_at_ms).is_err() {
+            return Err(Error::InvalidData);
+        }
         let service = OnionServiceName::parse(service)?;
         let record = RingsNameRecord::new_signed(
             RingsNameRecordBody {
@@ -298,7 +302,7 @@ impl Processor {
                 transport,
                 network_id: self.swarm.network_id(),
                 seq,
-                expires_at_ms: now_ms.saturating_add(ttl_ms.into()),
+                expires_at_ms,
             },
             &self.session_sk,
         )

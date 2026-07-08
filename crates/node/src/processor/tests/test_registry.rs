@@ -351,6 +351,29 @@ async fn rings_name_publish_rejects_invalid_service_name() {
 }
 
 #[tokio::test]
+async fn rings_name_publish_rejects_unrepresentable_expiry_before_storage() -> Result<()> {
+    let processor = prepare_processor().await;
+    let owner_public_key = processor
+        .session_sk
+        .session()
+        .account_verification_pubkey()
+        .map_err(Error::CoreError)?;
+    let name = RingsName::for_owner(&owner_public_key);
+
+    assert!(matches!(
+        processor
+            .publish_rings_name(None, "web", OnionExitTransport::Tcp, u64::MAX, 1)
+            .await,
+        Err(Error::InvalidData)
+    ));
+    assert!(processor
+        .storage_check_cache(name.dht_key(processor.swarm.network_id())?)
+        .await
+        .is_none());
+    Ok(())
+}
+
+#[tokio::test]
 async fn rings_name_resolve_filters_wrong_network_expired_and_stale_records() -> Result<()> {
     let processor = prepare_processor_with_network(0).await;
     let now_ms = get_epoch_ms();
