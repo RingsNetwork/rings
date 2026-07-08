@@ -1,8 +1,8 @@
 //! Rings browser frontend.
 //!
-//! The app is implemented in Rust/Yew. Browser wallet and WebCrypto APIs are
-//! reached through `js_sys`/`wasm_bindgen`; there is no JavaScript or TypeScript
-//! application source in this example.
+//! The app is implemented in Rust/Yew. Browser wallet, WebCrypto, and extension
+//! APIs are reached through `js_sys`/`wasm_bindgen`; MV3 glue code is kept in
+//! strict TypeScript and compiled into ignored generated output.
 
 mod app;
 mod browser_api;
@@ -15,6 +15,7 @@ mod forms;
 mod generation;
 mod hex;
 mod node;
+mod onion;
 mod peer_sync;
 mod proof;
 mod styles;

@@ -21,6 +21,7 @@ const FIREFOX_EXTENSION_MANAGER_URL: &str = "about:debugging#/runtime/this-firef
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum Panel {
     Dweb,
+    Onion,
     Proof,
     Custom,
 }
@@ -29,6 +30,7 @@ impl Panel {
     fn label(self) -> &'static str {
         match self {
             Self::Dweb => "Dweb",
+            Self::Onion => "Onion Proxy",
             Self::Proof => "Proof",
             Self::Custom => "Custom",
         }
@@ -440,6 +442,7 @@ pub(crate) fn workbench_control(
     dialog_open: UseStateHandle<bool>,
     body: Html,
     available: bool,
+    extension_mode: bool,
 ) -> Html {
     let open_dialog = {
         let dialog_open = dialog_open.clone();
@@ -461,7 +464,7 @@ pub(crate) fn workbench_control(
     let button_title = if available {
         "WorkBench"
     } else {
-        "WorkBench is available in webpage mode"
+        "Start the node to use WorkBench"
     };
     html! {
         <div class="workbench-control">
@@ -492,7 +495,7 @@ pub(crate) fn workbench_control(
                                     </div>
                                     <button class="secondary dialog-close" onclick={close_dialog}>{ "Close" }</button>
                                 </header>
-                                { workspace_tabs(active, active_panel) }
+                                { workspace_tabs(active, active_panel, extension_mode) }
                                 <div class="dialog-body workbench-dialog-body">
                                     { body }
                                 </div>
@@ -573,14 +576,33 @@ pub(crate) fn network_stage(
     }
 }
 
-fn workspace_tabs(active: Panel, active_panel: UseStateHandle<Panel>) -> Html {
+fn workspace_tabs(
+    active: Panel,
+    active_panel: UseStateHandle<Panel>,
+    extension_mode: bool,
+) -> Html {
     html! {
         <nav class="workspace-tabs" aria-label="Node workspace">
-            { for [Panel::Dweb, Panel::Proof, Panel::Custom].into_iter().map(|panel| {
+            { for [Panel::Dweb, Panel::Onion, Panel::Proof, Panel::Custom].into_iter().map(|panel| {
                 let active_panel = active_panel.clone();
                 let class = if panel == active { "workspace-tab active" } else { "workspace-tab" };
+                let disabled = extension_mode && panel != Panel::Onion;
+                let title = if disabled {
+                    "This panel uses the page-local node; use Onion Proxy with the extension background node"
+                } else {
+                    panel.label()
+                };
                 html! {
-                    <button class={class} onclick={Callback::from(move |_| active_panel.set(panel))}>
+                    <button
+                        class={class}
+                        disabled={disabled}
+                        title={title}
+                        onclick={Callback::from(move |_| {
+                            if !disabled {
+                                active_panel.set(panel);
+                            }
+                        })}
+                    >
                         { panel.label() }
                     </button>
                 }

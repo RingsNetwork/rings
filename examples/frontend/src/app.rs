@@ -53,8 +53,8 @@ pub fn app() -> Html {
             extension::SETTING_WALLET_KIND,
             extension::LEGACY_SETTING_WALLET_KIND,
         )
-            .map(|value| WalletKind::from_value(&value))
-            .unwrap_or(WalletKind::WebCrypto)
+        .map(|value| WalletKind::from_value(&value))
+        .unwrap_or(WalletKind::WebCrypto)
     });
     let wallet_account = use_state(|| None::<WalletAccount>);
     let node_starting = use_state(|| false);
@@ -77,14 +77,14 @@ pub fn app() -> Html {
             extension::SETTING_ICE_SERVERS,
             extension::LEGACY_SETTING_ICE_SERVERS,
         )
-            .unwrap_or_else(|| "stun://stun.l.google.com:19302".to_string())
+        .unwrap_or_else(|| "stun://stun.l.google.com:19302".to_string())
     });
     let stabilize_interval = use_state(|| {
         extension::load_setting_with_legacy(
             extension::SETTING_STABILIZE_INTERVAL,
             extension::LEGACY_SETTING_STABILIZE_INTERVAL,
         )
-            .unwrap_or_else(|| "3".to_string())
+        .unwrap_or_else(|| "3".to_string())
     });
     let storage_name = use_state(|| {
         extension::load_setting_with_legacy(
@@ -107,7 +107,7 @@ pub fn app() -> Html {
             extension::SETTING_HTTP_ENDPOINT,
             extension::LEGACY_SETTING_HTTP_ENDPOINT,
         )
-            .unwrap_or_else(|| "http://127.0.0.1:50001".to_string())
+        .unwrap_or_else(|| "http://127.0.0.1:50001".to_string())
     });
     let sdp_remote_did = use_state(String::new);
     let generated_offer = use_state(String::new);
@@ -142,6 +142,17 @@ pub fn app() -> Html {
     let custom_peer = use_state(String::new);
     let custom_payload = use_state(|| "hello from Rings".to_string());
     let custom_events = use_state(Vec::<custom::CustomEvent>::new);
+
+    let onion_url = use_state(|| "https://example.com/".to_string());
+    let onion_method = use_state(|| "GET".to_string());
+    let onion_hop_count = use_state(|| "3".to_string());
+    let onion_allow_short_paths = use_state(|| true);
+    let onion_headers = use_state(String::new);
+    let onion_body = use_state(String::new);
+    let onion_route_result = use_state(String::new);
+    let onion_response_status = use_state(|| "idle".to_string());
+    let onion_response_headers = use_state(String::new);
+    let onion_response_body = use_state(String::new);
 
     let on_wallet_kind = {
         let wallet_kind = wallet_kind.clone();
@@ -593,6 +604,17 @@ pub fn app() -> Html {
         });
     }
 
+    let extension_mode = extension::extension_node_bridge().is_some();
+    {
+        let active_panel = active_panel.clone();
+        use_effect_with(extension_mode, move |extension_mode| {
+            if *extension_mode {
+                active_panel.set(Panel::Onion);
+            }
+            || {}
+        });
+    }
+
     let control_view = ControlView {
         wallet_kind: *wallet_kind,
         wallet_account: (*wallet_account).clone(),
@@ -650,6 +672,24 @@ pub fn app() -> Html {
                 status.clone(),
             ) }
         },
+        Panel::Onion => html! {
+            { workbench::onion_proxy_panel(
+                workbench::OnionProxyState {
+                    url: &onion_url,
+                    method: &onion_method,
+                    hop_count: &onion_hop_count,
+                    allow_short_paths: &onion_allow_short_paths,
+                    headers: &onion_headers,
+                    body: &onion_body,
+                    route_result: &onion_route_result,
+                    response_status: &onion_response_status,
+                    response_headers: &onion_response_headers,
+                    response_body: &onion_response_body,
+                },
+                node_ref.clone(),
+                status.clone(),
+            ) }
+        },
         Panel::Proof => html! {
             { workbench::proof_panel(
                 &prover_did,
@@ -671,13 +711,13 @@ pub fn app() -> Html {
             ) }
         },
     };
-    let extension_mode = extension::extension_node_bridge().is_some();
     let workbench_control = controls::workbench_control(
         *active_panel,
         active_panel.clone(),
         workbench_dialog_open.clone(),
         workbench_body,
-        !extension_mode,
+        true,
+        extension_mode,
     );
     let control_sidebar = controls::control_sidebar(
         control_view,

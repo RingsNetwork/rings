@@ -2,8 +2,9 @@
 
 Browser frontend for Rings. This replaces the historical browser connectivity
 example as the shared web and browser-extension app. The standalone `dweb` and
-`proof-demo` surfaces remain conceptually separate; this frontend only includes
-dweb and proof workbench panels for operating a browser node from one screen.
+`proof-demo` surfaces remain conceptually separate; this frontend includes dweb,
+onion proxy, proof, and custom-message workbench panels for operating a browser
+node from one screen.
 
 The implementation is Rust/Yew. Browser APIs for WebCrypto, MetaMask, and Phantom
 are called from Rust through `js_sys` and `wasm_bindgen`; the core application has
@@ -32,6 +33,7 @@ Styles are split under `src/styles/` by responsibility:
 - Connect by SDP offer/answer or by a seed node HTTP endpoint.
 - Render connected peers as a circular topology.
 - Host and fetch dweb pages over the `dweb` namespace.
+- Build HTTPS onion proxy routes and send HTTPS requests through onion exits.
 - Run the distributed SNARK proof workbench flow alongside the retained proof demo.
 - Register and send user custom namespace messages.
 
@@ -44,8 +46,8 @@ trunk serve --release true
 
 Then open the Trunk URL. The release profile avoids debug wasm-bindgen local
 limits from the proof stack while keeping the application source Rust/Yew-only.
-Start a node first, then use the tabs for connection, dweb, proof, and custom
-message workflows.
+Start a node first, then use the tabs for connection, dweb, onion proxy, proof,
+and custom-message workflows.
 
 ## Package as a Chrome Extension
 
@@ -64,11 +66,14 @@ The extension is written to `dist-extension/`. Load that directory from
 `chrome://extensions` with developer mode enabled. When Chrome already has this
 unpacked extension loaded, click Reload after each Trunk rebuild.
 
-The extension package differs from the web package in three ways:
+The extension package differs from the web package in several ways:
 
 - `manifest.json` declares a MV3 extension with a side panel and options page.
 - `host_permissions` covers ordinary `http`/`https` pages so the wallet bridge
   can reach wallet providers injected into the active tab.
+- The side panel talks to the retained offscreen node for onion proxy route and
+  request calls. This is an extension-owned proxy client, not a Chrome global
+  proxy setting or URL-hijacking layer.
 - `bootstrap.js` replaces Trunk's inline module script so extension CSP accepts
   the page.
 - `content_security_policy.extension_pages` allows packaged WebAssembly with

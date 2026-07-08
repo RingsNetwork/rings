@@ -5,14 +5,19 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use rings_node::extension::snark::ProofResult;
+use wasm_bindgen::JsCast;
+use web_sys::Event;
+use web_sys::HtmlInputElement;
 use yew::prelude::*;
 
 use crate::controls::metric;
 use crate::custom;
 use crate::dweb;
+use crate::extension;
 use crate::forms::text_input;
 use crate::forms::textarea;
 use crate::node::DemoNode;
+use crate::onion;
 use crate::proof;
 
 pub(crate) struct DwebState<'a> {
@@ -22,6 +27,19 @@ pub(crate) struct DwebState<'a> {
     pub(crate) fetch_peer: &'a UseStateHandle<String>,
     pub(crate) fetch_path: &'a UseStateHandle<String>,
     pub(crate) dweb_page: &'a UseStateHandle<String>,
+}
+
+pub(crate) struct OnionProxyState<'a> {
+    pub(crate) url: &'a UseStateHandle<String>,
+    pub(crate) method: &'a UseStateHandle<String>,
+    pub(crate) hop_count: &'a UseStateHandle<String>,
+    pub(crate) allow_short_paths: &'a UseStateHandle<bool>,
+    pub(crate) headers: &'a UseStateHandle<String>,
+    pub(crate) body: &'a UseStateHandle<String>,
+    pub(crate) route_result: &'a UseStateHandle<String>,
+    pub(crate) response_status: &'a UseStateHandle<String>,
+    pub(crate) response_headers: &'a UseStateHandle<String>,
+    pub(crate) response_body: &'a UseStateHandle<String>,
 }
 
 pub(crate) fn dweb_panel(
@@ -111,6 +129,162 @@ pub(crate) fn dweb_panel(
     }
 }
 
+pub(crate) fn onion_proxy_panel(
+    state: OnionProxyState<'_>,
+    node_ref: Rc<RefCell<Option<DemoNode>>>,
+    status: UseStateHandle<String>,
+) -> Html {
+    let on_route = {
+        let node_ref = node_ref.clone();
+        let url = state.url.clone();
+        let hop_count = state.hop_count.clone();
+        let allow_short_paths = state.allow_short_paths.clone();
+        let route_result = state.route_result.clone();
+        let response_status = state.response_status.clone();
+        let status = status.clone();
+        Callback::from(move |_| {
+            let options = match onion::OnionProxyOptions::from_input(
+                hop_count.as_str(),
+                *allow_short_paths,
+            ) {
+                Ok(options) => options,
+                Err(error) => {
+                    status.set(error);
+                    return;
+                }
+            };
+            let request = onion::OnionProxyRouteRequest {
+                url: (*url).trim().to_string(),
+                options,
+            };
+            let bridge = extension::extension_node_bridge();
+            let node = node_ref.borrow().clone();
+            let route_result = route_result.clone();
+            let response_status = response_status.clone();
+            let status = status.clone();
+            status.set("building onion route".to_string());
+            wasm_bindgen_futures::spawn_local(async move {
+                let result = if let Some(bridge) = bridge {
+                    extension::extension_onion_proxy_route(&bridge, request).await
+                } else if let Some(node) = node {
+                    onion::route(&node.provider, request).await
+                } else {
+                    Err("start the node first".to_string())
+                };
+                match result {
+                    Ok(route) => {
+                        let hop_count = route.hops.len();
+                        route_result.set(route.summary());
+                        response_status.set(format!("{hop_count} hops"));
+                        status.set("onion route built".to_string());
+                    }
+                    Err(error) => status.set(error),
+                }
+            });
+        })
+    };
+    let on_request = {
+        let node_ref = node_ref.clone();
+        let url = state.url.clone();
+        let method = state.method.clone();
+        let hop_count = state.hop_count.clone();
+        let allow_short_paths = state.allow_short_paths.clone();
+        let headers = state.headers.clone();
+        let body = state.body.clone();
+        let response_status = state.response_status.clone();
+        let response_headers = state.response_headers.clone();
+        let response_body = state.response_body.clone();
+        let route_result = state.route_result.clone();
+        let status = status.clone();
+        Callback::from(move |_| {
+            let options = match onion::OnionProxyOptions::from_input(
+                hop_count.as_str(),
+                *allow_short_paths,
+            ) {
+                Ok(options) => options,
+                Err(error) => {
+                    status.set(error);
+                    return;
+                }
+            };
+            let headers = match onion::parse_header_lines(headers.as_str()) {
+                Ok(headers) => headers,
+                Err(error) => {
+                    status.set(error);
+                    return;
+                }
+            };
+            let request = onion::OnionProxyHttpRequest {
+                url: (*url).trim().to_string(),
+                method: (*method).trim().to_string(),
+                headers,
+                body: (*body).as_bytes().to_vec(),
+                options,
+            };
+            let bridge = extension::extension_node_bridge();
+            let node = node_ref.borrow().clone();
+            let response_status = response_status.clone();
+            let response_headers = response_headers.clone();
+            let response_body = response_body.clone();
+            let route_result = route_result.clone();
+            let status = status.clone();
+            status.set("sending onion proxy request".to_string());
+            wasm_bindgen_futures::spawn_local(async move {
+                let result = if let Some(bridge) = bridge {
+                    extension::extension_onion_proxy_request(&bridge, request).await
+                } else if let Some(node) = node {
+                    onion::request(&node.provider, request).await
+                } else {
+                    Err("start the node first".to_string())
+                };
+                match result {
+                    Ok(response) => {
+                        response_status.set(response.status.to_string());
+                        response_headers.set(onion::format_headers(&response.headers));
+                        response_body.set(response.body);
+                        route_result.set("request completed through onion HTTPS proxy".to_string());
+                        status.set("onion proxy request completed".to_string());
+                    }
+                    Err(error) => status.set(error),
+                }
+            });
+        })
+    };
+
+    html! {
+        <section class="feature-panel" id="onion-proxy">
+            <div class="section-heading">
+                <p class="eyebrow">{ "Onion Proxy" }</p>
+                <h2>{ "Route HTTPS requests through an onion exit" }</h2>
+            </div>
+            <div class="workflow-grid">
+                <div class="tool-block">
+                    <h3>{ "Request" }</h3>
+                    { text_input("HTTPS URL", state.url.clone()) }
+                    { text_input("Method", state.method.clone()) }
+                    { text_input("Hop count", state.hop_count.clone()) }
+                    { allow_short_paths_control(state.allow_short_paths.clone()) }
+                    { textarea("Headers", state.headers.clone()) }
+                    { textarea("Body", state.body.clone()) }
+                    <div class="button-row">
+                        <button onclick={on_route}>{ "Build route" }</button>
+                        <button onclick={on_request}>{ "Send request" }</button>
+                    </div>
+                </div>
+                <div class="tool-block">
+                    <h3>{ "Result" }</h3>
+                    <div class="proof-states">
+                        { metric("HTTP", (**state.response_status).clone()) }
+                    </div>
+                    { readonly_output("Route", (**state.route_result).clone(), "No route built") }
+                    { readonly_output("Response headers", (**state.response_headers).clone(), "No response headers") }
+                    { readonly_output("Response body", (**state.response_body).clone(), "No response body") }
+                </div>
+            </div>
+        </section>
+    }
+}
+
 pub(crate) fn proof_panel(
     prover_did: &UseStateHandle<String>,
     r1cs_url: &UseStateHandle<String>,
@@ -162,6 +336,35 @@ pub(crate) fn proof_panel(
                 </div>
             </div>
         </section>
+    }
+}
+
+fn allow_short_paths_control(state: UseStateHandle<bool>) -> Html {
+    let onchange = {
+        let state = state.clone();
+        Callback::from(move |event: Event| {
+            if let Some(input) = event
+                .target()
+                .and_then(|target| target.dyn_into::<HtmlInputElement>().ok())
+            {
+                state.set(input.checked());
+            }
+        })
+    };
+    html! {
+        <label class="field checkbox-field">
+            <span>{ "Allow short paths" }</span>
+            <input type="checkbox" checked={*state} {onchange} />
+        </label>
+    }
+}
+
+fn readonly_output(label: &'static str, value: String, placeholder: &'static str) -> Html {
+    html! {
+        <label class="field payload-output">
+            <span>{ label }</span>
+            <textarea readonly=true value={value} placeholder={placeholder} />
+        </label>
     }
 }
 

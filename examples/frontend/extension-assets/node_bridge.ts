@@ -46,6 +46,30 @@ type NodeSettings = {
 };
 
 /**
+ * Route-selection options shared by extension-side onion proxy calls.
+ */
+type OnionProxyOptions = {
+  readonly hopCount: number;
+  readonly allowShortPaths: boolean;
+};
+
+/**
+ * Onion proxy route probe request.
+ */
+type OnionProxyRouteRequest = OnionProxyOptions & {
+  readonly url: string;
+};
+
+/**
+ * Onion proxy HTTPS request.
+ */
+type OnionProxyHttpRequest = OnionProxyRouteRequest & {
+  readonly method: string;
+  readonly headers: readonly (readonly [string, string])[];
+  readonly body: string;
+};
+
+/**
  * Optional global wallet bridge used to reset EIP-191 provider selection before node start.
  */
 type WalletBridgeGlobal = {
@@ -65,6 +89,8 @@ type NodeBridge = {
   createOffer(did: string): Promise<unknown>;
   answerOffer(offer: string): Promise<unknown>;
   acceptAnswer(answer: string): Promise<unknown>;
+  onionProxyRoute(request: OnionProxyRouteRequest): Promise<unknown>;
+  onionProxyRequest(request: OnionProxyHttpRequest): Promise<unknown>;
 };
 
 let startPromise: Promise<NodeSnapshot> | undefined;
@@ -314,6 +340,18 @@ const nodeBridge: NodeBridge = {
     return sendNodeMessage({
       type: "rings.node.acceptAnswer",
       answer,
+    });
+  },
+  onionProxyRoute(request: OnionProxyRouteRequest): Promise<unknown> {
+    return sendNodeMessage({
+      type: "rings.node.onionProxyRoute",
+      ...request,
+    });
+  },
+  onionProxyRequest(request: OnionProxyHttpRequest): Promise<unknown> {
+    return sendNodeMessage({
+      type: "rings.node.onionProxyRequest",
+      ...request,
     });
   },
 };

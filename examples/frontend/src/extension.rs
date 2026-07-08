@@ -36,6 +36,7 @@ use crate::node;
 use crate::node::DemoNode;
 use crate::node::NodeSettings;
 use crate::node::PeerView;
+use crate::onion;
 use crate::peer_sync;
 use crate::wallet;
 use crate::wallet::WalletAccount;
@@ -50,6 +51,8 @@ const EXTENSION_NODE_CONNECT_HTTP: &str = "rings.node.connectHttp";
 const EXTENSION_NODE_CREATE_OFFER: &str = "rings.node.createOffer";
 const EXTENSION_NODE_ANSWER_OFFER: &str = "rings.node.answerOffer";
 const EXTENSION_NODE_ACCEPT_ANSWER: &str = "rings.node.acceptAnswer";
+const EXTENSION_NODE_ONION_ROUTE: &str = "rings.node.onionProxyRoute";
+const EXTENSION_NODE_ONION_REQUEST: &str = "rings.node.onionProxyRequest";
 pub(crate) const SETTING_WALLET_KIND: &str = "rings.frontend.walletKind";
 pub(crate) const SETTING_NETWORK_ID: &str = "rings.frontend.networkId";
 pub(crate) const SETTING_ICE_SERVERS: &str = "rings.frontend.iceServers";
@@ -62,8 +65,7 @@ pub(crate) const SETTING_HTTP_ENDPOINT: &str = "rings.frontend.httpEndpoint";
 pub(crate) const LEGACY_SETTING_WALLET_KIND: &str = "rings.node-demo.walletKind";
 pub(crate) const LEGACY_SETTING_NETWORK_ID: &str = "rings.node-demo.networkId";
 pub(crate) const LEGACY_SETTING_ICE_SERVERS: &str = "rings.node-demo.iceServers";
-pub(crate) const LEGACY_SETTING_STABILIZE_INTERVAL: &str =
-    "rings.node-demo.stabilizeInterval";
+pub(crate) const LEGACY_SETTING_STABILIZE_INTERVAL: &str = "rings.node-demo.stabilizeInterval";
 pub(crate) const LEGACY_SETTING_STORAGE_NAME: &str = "rings.node-demo.storageName";
 pub(crate) const LEGACY_SETTING_SEED_URL: &str = "rings.node-demo.seedUrl";
 pub(crate) const LEGACY_SETTING_HTTP_ENDPOINT: &str = "rings.node-demo.httpEndpoint";
@@ -226,6 +228,8 @@ async fn handle_headless_node_message(
         EXTENSION_NODE_CREATE_OFFER => create_headless_offer(state, &message).await,
         EXTENSION_NODE_ANSWER_OFFER => answer_headless_offer(state, &message).await,
         EXTENSION_NODE_ACCEPT_ANSWER => accept_headless_answer(state, &message).await,
+        EXTENSION_NODE_ONION_ROUTE => route_headless_onion_proxy(state, &message).await,
+        EXTENSION_NODE_ONION_REQUEST => request_headless_onion_proxy(state, &message).await,
         _ => Err(format!("unknown node message type {message_type}")),
     }
 }
@@ -514,6 +518,28 @@ async fn accept_headless_answer(
         Some(handle.generation),
     )
     .await
+}
+
+async fn route_headless_onion_proxy(
+    state: Rc<RefCell<HeadlessNodeState>>,
+    message: &JsValue,
+) -> Result<JsValue, String> {
+    let handle = headless_demo_node(&state)?;
+    let request = onion::OnionProxyRouteRequest::from_js(message)?;
+    let route = onion::route(&handle.node.provider, request).await?;
+    ensure_headless_generation_current(&state, handle.generation)?;
+    route.to_js()
+}
+
+async fn request_headless_onion_proxy(
+    state: Rc<RefCell<HeadlessNodeState>>,
+    message: &JsValue,
+) -> Result<JsValue, String> {
+    let handle = headless_demo_node(&state)?;
+    let request = onion::OnionProxyHttpRequest::from_js(message)?;
+    let response = onion::request(&handle.node.provider, request).await?;
+    ensure_headless_generation_current(&state, handle.generation)?;
+    response.to_js()
 }
 
 fn headless_demo_node(state: &Rc<RefCell<HeadlessNodeState>>) -> Result<HeadlessDemoNode, String> {
@@ -904,6 +930,8 @@ pub(crate) fn extension_node_bridge() -> Option<JsValue> {
         || !is_callable(&bridge, "stop")
         || !is_callable(&bridge, "status")
         || !is_callable(&bridge, "connectHttp")
+        || !is_callable(&bridge, "onionProxyRoute")
+        || !is_callable(&bridge, "onionProxyRequest")
     {
         return None;
     }
@@ -965,6 +993,22 @@ pub(crate) async fn extension_node_accept_answer(
     let result =
         call_extension_bridge1(bridge, "acceptAnswer", &JsValue::from_str(&answer)).await?;
     parse_extension_node_snapshot(&result, bridge)
+}
+
+pub(crate) async fn extension_onion_proxy_route(
+    bridge: &JsValue,
+    request: onion::OnionProxyRouteRequest,
+) -> Result<onion::OnionProxyRoute, String> {
+    let result = call_extension_bridge1(bridge, "onionProxyRoute", &request.to_js()?).await?;
+    onion::OnionProxyRoute::from_js(&result)
+}
+
+pub(crate) async fn extension_onion_proxy_request(
+    bridge: &JsValue,
+    request: onion::OnionProxyHttpRequest,
+) -> Result<onion::OnionProxyResponse, String> {
+    let result = call_extension_bridge1(bridge, "onionProxyRequest", &request.to_js()?).await?;
+    onion::OnionProxyResponse::from_js(&result)
 }
 
 impl ExtensionStartSettings {
