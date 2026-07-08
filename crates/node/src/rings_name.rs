@@ -38,6 +38,11 @@ pub const RINGS_NAME_DHT_PREFIX: &str = "rings-name:v1";
 
 const RINGS_NAME_SCHEMA_VERSION: u16 = 1;
 const SELF_AUTH_LABEL_BYTES: usize = 20;
+const RINGS_NAME_MAX_EXPIRES_AT_MS: u128 = u64::MAX as u128;
+
+pub(crate) const fn rings_name_expiry_is_supported(expires_at_ms: u128) -> bool {
+    expires_at_ms <= RINGS_NAME_MAX_EXPIRES_AT_MS
+}
 
 /// Canonical `.rings` name.
 #[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
@@ -243,6 +248,9 @@ impl RingsNameRecordBody {
                 ".rings name does not match owner public key".to_string(),
             ));
         }
+        if !rings_name_expiry_is_supported(self.expires_at_ms) {
+            return Err(Error::InvalidData);
+        }
         Ok(())
     }
 }
@@ -329,14 +337,22 @@ impl RingsNameRecord {
         self.network_id == network_id
     }
 
+    /// Return whether this record's expiry fits the supported v1 wire timestamp range.
+    pub const fn has_supported_expiry(&self) -> bool {
+        rings_name_expiry_is_supported(self.expires_at_ms)
+    }
+
     /// Return whether this record is expired at `now_ms`.
     pub const fn is_expired_at(&self, now_ms: u128) -> bool {
         self.expires_at_ms <= now_ms
     }
 
-    /// Verify schema, self-auth name binding, owner signature, and session binding.
+    /// Verify schema, expiry range, self-auth name binding, owner signature, and session binding.
     pub fn verify_signature(&self) -> bool {
-        if !self.has_supported_schema() || !self.name.matches_owner(&self.owner_public_key) {
+        if !self.has_supported_schema()
+            || !self.has_supported_expiry()
+            || !self.name.matches_owner(&self.owner_public_key)
+        {
             return false;
         }
         if self.signature.session.account_did() != self.owner_public_key.did() {
@@ -444,6 +460,26 @@ mod tests {
         }
     }
 
+    fn signed_record_unchecked(
+        body: RingsNameRecordBody,
+        session_sk: &SessionSk,
+    ) -> CoreResult<RingsNameRecord> {
+        let signature = MessageVerification::new(&body.signing_data()?, session_sk)?;
+        Ok(RingsNameRecord {
+            schema_version: RINGS_NAME_SCHEMA_VERSION,
+            name: body.name,
+            owner_public_key: body.owner_public_key,
+            target_did: body.target_did,
+            session_public_key: body.session_public_key,
+            service: body.service,
+            transport: body.transport,
+            network_id: body.network_id,
+            seq: body.seq,
+            expires_at_ms: body.expires_at_ms,
+            signature,
+        })
+    }
+
     #[test]
     fn self_auth_name_round_trips_as_canonical_rings_name() -> Result<()> {
         let session_sk = session();
@@ -496,6 +532,23 @@ mod tests {
     }
 
     #[test]
+    fn record_rejects_unrepresentable_expiry() -> CoreResult<()> {
+        let session_sk = session();
+        let now_ms = get_epoch_ms();
+        let mut body = body_at(&session_sk, now_ms);
+        body.expires_at_ms = RINGS_NAME_MAX_EXPIRES_AT_MS + 1;
+
+        assert!(RingsNameRecord::new_signed(body.clone(), &session_sk).is_err());
+        let record = signed_record_unchecked(body, &session_sk)?;
+
+        assert!(record.has_supported_schema());
+        assert!(!record.has_supported_expiry());
+        assert!(!record.verify_signature());
+        assert!(!record.is_live_at(now_ms));
+        Ok(())
+    }
+
+    #[test]
     fn latest_valid_record_filters_network_expiry_and_stale_seq() -> CoreResult<()> {
         let session_sk = session();
         let now_ms = get_epoch_ms();
@@ -521,6 +574,23 @@ mod tests {
         );
 
         assert_eq!(selected, vec![new]);
+        Ok(())
+    }
+
+    #[test]
+    fn latest_valid_record_filters_unrepresentable_expiry() -> CoreResult<()> {
+        let session_sk = session();
+        let now_ms = get_epoch_ms();
+        let live = RingsNameRecord::new_signed(body_at(&session_sk, now_ms), &session_sk)?;
+        let mut oversized_body = body_at(&session_sk, now_ms);
+        oversized_body.seq = live.seq + 1;
+        oversized_body.expires_at_ms = RINGS_NAME_MAX_EXPIRES_AT_MS + 1;
+        let oversized = signed_record_unchecked(oversized_body, &session_sk)?;
+
+        let selected =
+            RingsNameRecord::latest_valid_by_name(vec![live.clone(), oversized], 7, now_ms, false);
+
+        assert_eq!(selected, vec![live]);
         Ok(())
     }
 }

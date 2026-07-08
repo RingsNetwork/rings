@@ -79,6 +79,7 @@ use crate::registration::validate_online_node_registration_timing;
 use crate::registration::OnlineNodeRegistration;
 use crate::registration::RegistrationContext;
 use crate::registration::RegistrationTask;
+use crate::rings_name::rings_name_expiry_is_supported;
 use crate::rings_name::RingsName;
 use crate::rings_name::RingsNameRecord;
 use crate::rings_name::RingsNameRecordBody;
@@ -288,7 +289,7 @@ impl Processor {
             ttl_ms
         };
         let expires_at_ms = now_ms.saturating_add(ttl_ms.into());
-        if u64::try_from(expires_at_ms).is_err() {
+        if !rings_name_expiry_is_supported(expires_at_ms) {
             return Err(Error::InvalidData);
         }
         let service = OnionServiceName::parse(service)?;
