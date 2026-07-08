@@ -50,3 +50,8 @@ pub use crate::online::ONLINE_NODE_CAPABILITY_STORAGE;
 pub use crate::registration::DhtRegistrationPublisher;
 pub use crate::registration::RegistrationContext;
 pub use crate::registration::RegistrationTask;
+pub use crate::rings_name::RingsName;
+pub use crate::rings_name::RingsNameRecord;
+pub use crate::rings_name::RingsNameRecordBody;
+pub use crate::rings_name::RINGS_NAME_DHT_PREFIX;
+pub use crate::rings_name::RINGS_NAME_SUFFIX;

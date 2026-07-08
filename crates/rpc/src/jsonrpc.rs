@@ -209,6 +209,22 @@ impl Client {
         self.call_method(Method::LookupService, req).await
     }
 
+    /// Publishes this node's self-authenticating `.rings` name record.
+    pub async fn publish_rings_name(
+        &self,
+        req: &PublishRingsNameRequest,
+    ) -> Result<PublishRingsNameResponse> {
+        self.call_method(Method::PublishRingsName, req).await
+    }
+
+    /// Resolves a self-authenticating `.rings` name record.
+    pub async fn resolve_rings_name(
+        &self,
+        req: &ResolveRingsNameRequest,
+    ) -> Result<ResolveRingsNameResponse> {
+        self.call_method(Method::ResolveRingsName, req).await
+    }
+
     /// Looks up signed online-node descriptors.
     pub async fn lookup_online_nodes(
         &self,

@@ -38,6 +38,10 @@ pub enum Method {
     RegisterService,
     /// Lookup service
     LookupService,
+    /// Publish a self-authenticating `.rings` name record
+    PublishRingsName,
+    /// Resolve a self-authenticating `.rings` name record
+    ResolveRingsName,
     /// Lookup online-node registry descriptors
     LookupOnlineNodes,
     /// Lookup application-layer onion exit descriptors
@@ -73,6 +77,8 @@ impl Method {
             Method::FetchTopicMessages => "fetchTopicMessages",
             Method::RegisterService => "registerService",
             Method::LookupService => "lookupService",
+            Method::PublishRingsName => "publishRingsName",
+            Method::ResolveRingsName => "resolveRingsName",
             Method::LookupOnlineNodes => "lookupOnlineNodes",
             Method::LookupOnionExits => "lookupOnionExits",
             Method::BuildOnionRoute => "buildOnionRoute",
@@ -111,6 +117,8 @@ impl TryFrom<&str> for Method {
             "fetchTopicMessages" => Method::FetchTopicMessages,
             "registerService" => Method::RegisterService,
             "lookupService" => Method::LookupService,
+            "publishRingsName" => Method::PublishRingsName,
+            "resolveRingsName" => Method::ResolveRingsName,
             "lookupOnlineNodes" => Method::LookupOnlineNodes,
             "lookupOnionExits" => Method::LookupOnionExits,
             "buildOnionRoute" => Method::BuildOnionRoute,

@@ -333,6 +333,37 @@ impl HandleRpc<LookupServiceRequest, LookupServiceResponse> for Processor {
 
 #[cfg_attr(feature = "browser", async_trait(?Send))]
 #[cfg_attr(not(feature = "browser"), async_trait)]
+impl HandleRpc<PublishRingsNameRequest, PublishRingsNameResponse> for Processor {
+    async fn handle_rpc(&self, req: PublishRingsNameRequest) -> Result<PublishRingsNameResponse> {
+        let transport = crate::rpc_dto::onion_exit_transport_from_info(req.transport);
+        let seq = if req.seq == 0 { 1 } else { req.seq };
+        let requested_name = (!req.name.trim().is_empty()).then_some(req.name.as_str());
+        let record = self
+            .publish_rings_name(requested_name, &req.service, transport, req.ttl_ms, seq)
+            .await
+            .map_err(Error::from)?;
+        Ok(PublishRingsNameResponse {
+            record: Some(crate::rpc_dto::rings_name_record_info(record)?),
+        })
+    }
+}
+
+#[cfg_attr(feature = "browser", async_trait(?Send))]
+#[cfg_attr(not(feature = "browser"), async_trait)]
+impl HandleRpc<ResolveRingsNameRequest, ResolveRingsNameResponse> for Processor {
+    async fn handle_rpc(&self, req: ResolveRingsNameRequest) -> Result<ResolveRingsNameResponse> {
+        let record = self
+            .resolve_rings_name(&req.name, req.include_expired)
+            .await
+            .map_err(Error::from)?
+            .map(crate::rpc_dto::rings_name_record_info)
+            .transpose()?;
+        Ok(ResolveRingsNameResponse { record })
+    }
+}
+
+#[cfg_attr(feature = "browser", async_trait(?Send))]
+#[cfg_attr(not(feature = "browser"), async_trait)]
 impl HandleRpc<LookupOnlineNodesRequest, LookupOnlineNodesResponse> for Processor {
     async fn handle_rpc(&self, req: LookupOnlineNodesRequest) -> Result<LookupOnlineNodesResponse> {
         let nodes = self

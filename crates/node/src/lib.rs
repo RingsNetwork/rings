@@ -14,6 +14,7 @@ pub mod prelude;
 pub mod processor;
 pub mod provider;
 pub mod registration;
+pub mod rings_name;
 mod rpc_dto;
 mod rpc_impl;
 pub mod seed;

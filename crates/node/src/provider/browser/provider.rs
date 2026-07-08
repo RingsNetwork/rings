@@ -42,6 +42,7 @@ use crate::onion::https::OnionHttpsPayload;
 use crate::onion::https::OnionHttpsRuntime;
 use crate::onion::proxy::OnionProxyConfig;
 use crate::onion::OnionExitPolicy;
+use crate::onion::OnionExitTransport;
 use crate::processor::Processor;
 use crate::processor::ProcessorConfig;
 use crate::provider::AsyncSigner;
@@ -622,6 +623,60 @@ impl Provider {
                 Ok(JsValue::from(js_sys::Array::new()))
             }
         })
+    }
+
+    /// Publish this node's self-authenticating `.rings` record.
+    pub fn publish_rings_name(
+        &self,
+        name: String,
+        service: String,
+        transport: String,
+        ttl_ms: u64,
+        seq: u64,
+    ) -> js_sys::Promise {
+        let p = self.processor.clone();
+        future_to_promise(async move {
+            let transport = parse_onion_exit_transport(&transport)?;
+            let requested_name = (!name.trim().is_empty()).then_some(name.as_str());
+            let record = p
+                .publish_rings_name(requested_name, service.as_str(), transport, ttl_ms, seq)
+                .await
+                .map_err(JsError::from)?;
+            let info = crate::rpc_dto::rings_name_record_info(record).map_err(JsError::from)?;
+            Ok(js_value::serialize(&info).map_err(JsError::from)?)
+        })
+    }
+
+    /// Resolve a self-authenticating `.rings` record.
+    pub fn resolve_rings_name(&self, name: String, include_expired: bool) -> js_sys::Promise {
+        let p = self.processor.clone();
+        future_to_promise(async move {
+            match p
+                .resolve_rings_name(name.as_str(), include_expired)
+                .await
+                .map_err(JsError::from)?
+            {
+                Some(record) => {
+                    let info =
+                        crate::rpc_dto::rings_name_record_info(record).map_err(JsError::from)?;
+                    Ok(js_value::serialize(&info).map_err(JsError::from)?)
+                }
+                None => Ok(JsValue::null()),
+            }
+        })
+    }
+}
+
+fn parse_onion_exit_transport(raw: &str) -> Result<OnionExitTransport, JsError> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "tcp" => Ok(OnionExitTransport::Tcp),
+        "udp" => Ok(OnionExitTransport::Udp),
+        "webtransport" | "web-transport" => Ok(OnionExitTransport::WebTransport),
+        "requestresponse" | "request-response" => Ok(OnionExitTransport::RequestResponse),
+        "https" => Ok(OnionExitTransport::Https),
+        other => Err(JsError::new(&format!(
+            "unsupported onion exit transport {other:?}; expected tcp, udp, webtransport, request-response, or https"
+        ))),
     }
 }
 

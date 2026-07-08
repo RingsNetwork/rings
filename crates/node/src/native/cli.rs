@@ -174,6 +174,59 @@ impl Client {
         ClientOutput::ok(dids.join("\n"), ())
     }
 
+    /// Publishes this node's self-authenticating `.rings` name record.
+    pub async fn publish_rings_name(
+        &self,
+        name: &str,
+        service: &str,
+        transport: OnionExitTransportInfo,
+        ttl_ms: u64,
+        seq: u64,
+    ) -> Output<RingsNameRecordInfo> {
+        let record = self
+            .client
+            .publish_rings_name(&PublishRingsNameRequest {
+                name: name.to_string(),
+                service: service.to_string(),
+                transport,
+                ttl_ms,
+                seq,
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?
+            .record
+            .ok_or_else(|| anyhow::anyhow!("publishRingsName response did not include record"))?;
+
+        let display =
+            serde_json::to_string_pretty(&record).map_err(|e| anyhow::anyhow!("{}", e))?;
+        ClientOutput::ok(display, record)
+    }
+
+    /// Resolves a self-authenticating `.rings` name record.
+    pub async fn resolve_rings_name(
+        &self,
+        name: &str,
+        include_expired: bool,
+    ) -> Output<Option<RingsNameRecordInfo>> {
+        let record = self
+            .client
+            .resolve_rings_name(&ResolveRingsNameRequest {
+                name: name.to_string(),
+                include_expired,
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?
+            .record;
+
+        let display = match record.as_ref() {
+            Some(record) => {
+                serde_json::to_string_pretty(record).map_err(|e| anyhow::anyhow!("{}", e))?
+            }
+            None => "null".to_string(),
+        };
+        ClientOutput::ok(display, record)
+    }
+
     /// Publishes a message to the specified topic.
     pub async fn publish_message_to_topic(&self, topic: &str, data: &str) -> Output<()> {
         self.client

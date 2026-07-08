@@ -37,6 +37,7 @@ use rings_node::processor::ProcessorConfig;
 use rings_node::provider::Provider;
 use rings_node::util::ensure_parent_dir;
 use rings_node::util::expand_home;
+use rings_rpc::protos::rings_node::OnionExitTransportInfo;
 use tokio::io;
 use tokio::io::AsyncBufReadExt;
 
@@ -118,6 +119,19 @@ fn parse_onion_exit_service(raw: &str) -> Result<OnionExitService, String> {
 
 fn parse_onion_service_name(raw: &str) -> Result<OnionServiceName, String> {
     OnionServiceName::parse(raw).map_err(|error| error.to_string())
+}
+
+fn parse_onion_exit_transport_info(raw: &str) -> Result<OnionExitTransportInfo, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "tcp" => Ok(OnionExitTransportInfo::Tcp),
+        "udp" => Ok(OnionExitTransportInfo::Udp),
+        "webtransport" | "web-transport" => Ok(OnionExitTransportInfo::WebTransport),
+        "requestresponse" | "request-response" => Ok(OnionExitTransportInfo::RequestResponse),
+        "https" => Ok(OnionExitTransportInfo::Https),
+        other => Err(format!(
+            "unsupported onion exit transport {other:?}; expected tcp, udp, webtransport, request-response, or https"
+        )),
+    }
 }
 
 fn validate_native_onion_exit_services(services: &[OnionExitService]) -> anyhow::Result<()> {
@@ -573,6 +587,8 @@ struct SendMessageCommand {
 enum ServiceCommand {
     Register(ServiceRegisterCommand),
     Lookup(ServiceLookupCommand),
+    PublishRingsName(PublishRingsNameCommand),
+    ResolveRingsName(ResolveRingsNameCommand),
 }
 
 #[derive(Args, Debug)]
@@ -589,6 +605,42 @@ struct ServiceLookupCommand {
     client_args: ClientArgs,
 
     name: String,
+}
+
+#[derive(Args, Debug)]
+struct PublishRingsNameCommand {
+    #[command(flatten)]
+    client_args: ClientArgs,
+
+    #[arg(long, default_value = "", help = "Optional .rings name to validate")]
+    name: String,
+
+    #[arg(long, default_value = "web", help = "Application service name")]
+    service: String,
+
+    #[arg(long, default_value = "tcp", value_parser = parse_onion_exit_transport_info)]
+    transport: OnionExitTransportInfo,
+
+    #[arg(
+        long,
+        default_value_t = 0,
+        help = "Record TTL in milliseconds; 0 uses node default"
+    )]
+    ttl_ms: u64,
+
+    #[arg(long, default_value_t = 1, help = "Monotonic record sequence")]
+    seq: u64,
+}
+
+#[derive(Args, Debug)]
+struct ResolveRingsNameCommand {
+    #[command(flatten)]
+    client_args: ClientArgs,
+
+    name: String,
+
+    #[arg(long, default_value_t = false)]
+    include_expired: bool,
 }
 
 #[derive(Args, Debug)]
@@ -892,6 +944,30 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 .new_client()
                 .await?
                 .lookup_service(args.name.as_str())
+                .await?
+                .display();
+            Ok(())
+        }
+        Command::Service(ServiceCommand::PublishRingsName(args)) => {
+            args.client_args
+                .new_client()
+                .await?
+                .publish_rings_name(
+                    args.name.as_str(),
+                    args.service.as_str(),
+                    args.transport,
+                    args.ttl_ms,
+                    args.seq,
+                )
+                .await?
+                .display();
+            Ok(())
+        }
+        Command::Service(ServiceCommand::ResolveRingsName(args)) => {
+            args.client_args
+                .new_client()
+                .await?
+                .resolve_rings_name(args.name.as_str(), args.include_expired)
                 .await?
                 .display();
             Ok(())

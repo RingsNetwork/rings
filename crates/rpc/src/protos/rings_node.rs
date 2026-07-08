@@ -172,6 +172,41 @@ pub struct LookupServiceResponse {
 }
 
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct PublishRingsNameRequest {
+    /// Optional name to validate. Empty means derive the self-authenticating name from this node.
+    #[serde(default)]
+    pub name: String,
+    /// Application service exposed by the resolved target.
+    pub service: String,
+    /// Transport class for the service.
+    #[serde(default)]
+    pub transport: OnionExitTransportInfo,
+    /// Record TTL in milliseconds. `0` means node default.
+    #[serde(default)]
+    pub ttl_ms: u64,
+    /// Monotonic record version.
+    #[serde(default)]
+    pub seq: u64,
+}
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct PublishRingsNameResponse {
+    pub record: Option<RingsNameRecordInfo>,
+}
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct ResolveRingsNameRequest {
+    pub name: String,
+    #[serde(default)]
+    pub include_expired: bool,
+}
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct ResolveRingsNameResponse {
+    pub record: Option<RingsNameRecordInfo>,
+}
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct LookupOnlineNodesRequest {
     #[serde(default)]
     pub include_expired: bool,
@@ -225,6 +260,24 @@ pub enum OnionExitTransportInfo {
 pub struct OnionExitServiceInfo {
     pub name: String,
     pub transport: OnionExitTransportInfo,
+}
+
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct RingsNameRecordInfo {
+    pub schema_version: u16,
+    pub name: String,
+    /// Owner verification public key encoded with the core serde shape.
+    pub owner_public_key: Value,
+    pub target_did: String,
+    /// Session encryption public key encoded with the core serde shape.
+    pub session_public_key: Value,
+    pub service: String,
+    pub transport: OnionExitTransportInfo,
+    pub network_id: u32,
+    pub seq: u64,
+    pub expires_at_ms: u64,
+    /// Record signature encoded with the core serde shape.
+    pub signature: Value,
 }
 
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]

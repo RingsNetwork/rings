@@ -78,6 +78,9 @@ use crate::registration::validate_online_node_registration_timing;
 use crate::registration::OnlineNodeRegistration;
 use crate::registration::RegistrationContext;
 use crate::registration::RegistrationTask;
+use crate::rings_name::RingsName;
+use crate::rings_name::RingsNameRecord;
+use crate::rings_name::RingsNameRecordBody;
 
 mod builder;
 mod config;
@@ -87,6 +90,9 @@ pub use builder::ProcessorBuilder;
 pub(crate) use config::parse_webrtc_udp_port_range;
 pub use config::ProcessorConfig;
 pub use config::ProcessorConfigSerialized;
+
+/// Default `.rings` name record TTL in milliseconds.
+pub const DEFAULT_RINGS_NAME_TTL_MS: u64 = 90_000;
 
 /// Processor for rings-node rpc server.
 ///
@@ -136,6 +142,14 @@ impl Processor {
 
     fn onion_exit_descriptors_from_entry(entry: &entry::Entry) -> Vec<OnionExitDescriptor> {
         OnionExitRegistration::descriptors_from_entry(entry)
+    }
+
+    fn rings_name_records_from_entry(entry: &entry::Entry) -> Vec<RingsNameRecord> {
+        entry
+            .data
+            .iter()
+            .filter_map(|value| value.decode::<RingsNameRecord>().ok())
+            .collect()
     }
 
     #[cfg(all(test, feature = "node"))]
@@ -240,6 +254,81 @@ impl Processor {
         target: OnionProxyTarget,
     ) -> Result<OnionProxyRoute> {
         directory::build_onion_proxy_route(self, proxy, target).await
+    }
+
+    /// Publish this node's self-authenticating `.rings` service record.
+    pub async fn publish_rings_name(
+        &self,
+        requested_name: Option<&str>,
+        service: &str,
+        transport: crate::onion::OnionExitTransport,
+        ttl_ms: u64,
+        seq: u64,
+    ) -> Result<RingsNameRecord> {
+        let owner_public_key = self
+            .session_sk
+            .session()
+            .account_verification_pubkey()
+            .map_err(Error::CoreError)?;
+        let name = RingsName::for_owner(&owner_public_key);
+        if let Some(requested_name) = requested_name.filter(|name| !name.trim().is_empty()) {
+            let requested_name = RingsName::parse(requested_name)?;
+            if requested_name != name {
+                return Err(Error::InvalidRingsName(
+                    "requested .rings name does not match this node's owner key".to_string(),
+                ));
+            }
+        }
+
+        let now_ms = get_epoch_ms();
+        let ttl_ms = if ttl_ms == 0 {
+            DEFAULT_RINGS_NAME_TTL_MS
+        } else {
+            ttl_ms
+        };
+        let record = RingsNameRecord::new_signed(
+            RingsNameRecordBody {
+                name,
+                owner_public_key,
+                target_did: self.did(),
+                session_public_key: self.session_sk.session_public_key(),
+                service: service.to_string(),
+                transport,
+                network_id: self.swarm.network_id(),
+                seq,
+                expires_at_ms: now_ms.saturating_add(ttl_ms.into()),
+            },
+            &self.session_sk,
+        )
+        .map_err(Error::CoreError)?;
+
+        let topic = record.name.dht_topic(record.network_id);
+        self.storage_touch_data(&topic, record.encode().map_err(Error::CoreError)?)
+            .await?;
+        Ok(record)
+    }
+
+    /// Resolve a self-authenticating `.rings` name from DHT storage.
+    pub async fn resolve_rings_name(
+        &self,
+        name: &str,
+        include_expired: bool,
+    ) -> Result<Option<RingsNameRecord>> {
+        let name = RingsName::parse(name)?;
+        let entry_key = name.dht_key(self.swarm.network_id())?;
+        self.storage_fetch(entry_key).await?;
+        let Some(entry) = self.storage_check_cache(entry_key).await else {
+            return Ok(None);
+        };
+
+        Ok(RingsNameRecord::latest_valid_by_name(
+            Self::rings_name_records_from_entry(&entry),
+            self.swarm.network_id(),
+            get_epoch_ms(),
+            include_expired,
+        )
+        .into_iter()
+        .find(|record| record.name == name))
     }
 
     async fn registration_task_daemon(&self, task: &dyn RegistrationTask) {

@@ -11,6 +11,7 @@ use rings_rpc::protos::rings_node::OnlineNodeDescriptorInfo;
 use rings_rpc::protos::rings_node::OnlineNodeTypeInfo;
 use rings_rpc::protos::rings_node::PeerMeasurementCountersInfo;
 use rings_rpc::protos::rings_node::PeerMeasurementInfo;
+use rings_rpc::protos::rings_node::RingsNameRecordInfo;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -23,6 +24,7 @@ use crate::onion::OnionExitTransport;
 use crate::onion::OnionRoute;
 use crate::online::OnlineNodeDescriptor;
 use crate::online::OnlineNodeType;
+use crate::rings_name::RingsNameRecord;
 
 fn json_value(value: impl Serialize) -> Result<Value> {
     serde_json::to_value(value).map_err(Error::SerdeJsonError)
@@ -70,13 +72,25 @@ pub(crate) fn online_node_descriptor_infos(
         .collect()
 }
 
-fn onion_exit_transport_info(transport: OnionExitTransport) -> OnionExitTransportInfo {
+pub(crate) fn onion_exit_transport_info(transport: OnionExitTransport) -> OnionExitTransportInfo {
     match transport {
         OnionExitTransport::Tcp => OnionExitTransportInfo::Tcp,
         OnionExitTransport::Udp => OnionExitTransportInfo::Udp,
         OnionExitTransport::WebTransport => OnionExitTransportInfo::WebTransport,
         OnionExitTransport::RequestResponse => OnionExitTransportInfo::RequestResponse,
         OnionExitTransport::Https => OnionExitTransportInfo::Https,
+    }
+}
+
+pub(crate) fn onion_exit_transport_from_info(
+    transport: OnionExitTransportInfo,
+) -> OnionExitTransport {
+    match transport {
+        OnionExitTransportInfo::Tcp => OnionExitTransport::Tcp,
+        OnionExitTransportInfo::Udp => OnionExitTransport::Udp,
+        OnionExitTransportInfo::WebTransport => OnionExitTransport::WebTransport,
+        OnionExitTransportInfo::RequestResponse => OnionExitTransport::RequestResponse,
+        OnionExitTransportInfo::Https => OnionExitTransport::Https,
     }
 }
 
@@ -138,6 +152,22 @@ pub(crate) fn onion_route_response(route: OnionRoute) -> Result<BuildOnionRouteR
         hops: route.hops().iter().map(|did| did.to_string()).collect(),
         service: route.service().to_string(),
         exit: onion_exit_descriptor_info(route.exit().clone())?,
+    })
+}
+
+pub(crate) fn rings_name_record_info(record: RingsNameRecord) -> Result<RingsNameRecordInfo> {
+    Ok(RingsNameRecordInfo {
+        schema_version: record.schema_version,
+        name: record.name.into(),
+        owner_public_key: json_value(record.owner_public_key)?,
+        target_did: record.target_did.to_string(),
+        session_public_key: json_value(record.session_public_key)?,
+        service: record.service,
+        transport: onion_exit_transport_info(record.transport),
+        network_id: record.network_id,
+        seq: record.seq,
+        expires_at_ms: descriptor_timestamp_ms(record.expires_at_ms)?,
+        signature: json_value(record.signature)?,
     })
 }
 

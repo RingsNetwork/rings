@@ -275,3 +275,112 @@ async fn online_node_registry_lists_multiple_nodes() -> Result<()> {
     assert!(nodes.iter().all(OnlineNodeDescriptor::verify_signature));
     Ok(())
 }
+
+fn rings_name_body(
+    processor: &Processor,
+    network_id: u32,
+    seq: u64,
+    expires_at_ms: u128,
+) -> Result<RingsNameRecordBody> {
+    let owner_public_key = processor
+        .session_sk
+        .session()
+        .account_verification_pubkey()
+        .map_err(Error::CoreError)?;
+    Ok(RingsNameRecordBody {
+        name: RingsName::for_owner(&owner_public_key),
+        owner_public_key,
+        target_did: processor.did(),
+        session_public_key: processor.session_sk.session_public_key(),
+        service: "web".to_string(),
+        transport: OnionExitTransport::Tcp,
+        network_id,
+        seq,
+        expires_at_ms,
+    })
+}
+
+#[tokio::test]
+async fn rings_name_publish_resolves_signed_self_record() -> Result<()> {
+    let processor = prepare_processor().await;
+    let published = processor
+        .publish_rings_name(None, "web", OnionExitTransport::Tcp, 60_000, 1)
+        .await?;
+
+    assert!(published.name.as_str().ends_with(RINGS_NAME_SUFFIX));
+    assert!(published.verify_signature());
+    assert_eq!(published.target_did, processor.did());
+
+    let resolved = processor
+        .resolve_rings_name(published.name.as_str(), false)
+        .await?
+        .expect("published .rings record should resolve");
+
+    assert_eq!(resolved, published);
+    Ok(())
+}
+
+#[tokio::test]
+async fn rings_name_publish_rejects_human_alias_in_v1() {
+    let processor = prepare_processor().await;
+
+    assert!(matches!(
+        processor
+            .publish_rings_name(
+                Some("alice.rings"),
+                "web",
+                OnionExitTransport::Tcp,
+                60_000,
+                1
+            )
+            .await,
+        Err(Error::InvalidRingsName(_))
+    ));
+}
+
+#[tokio::test]
+async fn rings_name_resolve_filters_wrong_network_expired_and_stale_records() -> Result<()> {
+    let processor = prepare_processor_with_network(0).await;
+    let now_ms = get_epoch_ms();
+    let old = RingsNameRecord::new_signed(
+        rings_name_body(&processor, 0, 1, now_ms + 60_000)?,
+        &processor.session_sk,
+    )
+    .map_err(Error::CoreError)?;
+    let new = RingsNameRecord::new_signed(
+        rings_name_body(&processor, 0, 2, now_ms + 60_000)?,
+        &processor.session_sk,
+    )
+    .map_err(Error::CoreError)?;
+    let foreign = RingsNameRecord::new_signed(
+        rings_name_body(&processor, 1, 3, now_ms + 60_000)?,
+        &processor.session_sk,
+    )
+    .map_err(Error::CoreError)?;
+    let expired = RingsNameRecord::new_signed(
+        rings_name_body(&processor, 0, 4, now_ms.saturating_sub(1))?,
+        &processor.session_sk,
+    )
+    .map_err(Error::CoreError)?;
+    let name = new.name.clone();
+    let data = vec![old, foreign, expired, new.clone()]
+        .into_iter()
+        .map(|record| record.encode().map_err(Error::CoreError))
+        .collect::<Result<Vec<_>>>()?;
+
+    processor
+        .storage_store(entry::Entry::new(
+            name.dht_key(processor.swarm.network_id())?,
+            data,
+            entry::EntryKind::Data,
+        ))
+        .await?;
+
+    let resolved = processor
+        .resolve_rings_name(name.as_str(), false)
+        .await?
+        .expect("latest live local-network .rings record should resolve");
+
+    assert_eq!(resolved, new);
+    Ok(())
+}

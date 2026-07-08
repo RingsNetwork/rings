@@ -152,6 +152,8 @@ pub enum Error {
     OnionRouteError(OnionRouteError) = 1601,
     #[error("Onion proxy IO error: {0}")]
     OnionProxyIoError(String) = 1602,
+    #[error("Invalid .rings name: {0}")]
+    InvalidRingsName(String) = 1701,
 }
 
 impl Error {
