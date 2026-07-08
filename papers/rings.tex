@@ -114,7 +114,8 @@ ledger for which claims the paper admits:
 &\subseteq&\mathsf{Spec}\uplus\mathsf{Artifact}_{R},\\
 \mathsf{Eval}_{reported}
 &\subset&\mathsf{ReportedOnly},\\
-\mathsf{OnionImpl}_{R}&\in&\mathsf{Artifact}_{R},\\
+\mathsf{OnionImpl}_{R}&=&\mathsf{OnionReg}\cup\mathsf{OnionCircuit},\\
+\mathsf{OnionImpl}_{R}&\subseteq&\mathsf{Artifact}_{R},\\
 \mathsf{OnionImpl}_{R}&\not\Rightarrow&\mathsf{Anon},\\
 \mathsf{OnionImpl}_{R}&\not\Rightarrow&\mathsf{WANPerf},\\
 \mathsf{PerfClaim}_{R}&\in&\mathsf{Obligation}.
@@ -1459,22 +1460,34 @@ optional metadata.
 \[
 \begin{array}{rcl}
 \mathsf{Topic}_{onion}&=&\mathtt{onion\_exits},\\
-e&=&(d,k_d,s,nt,net,svc,\pi,t_0,t_h,t_x,\sigma),\\
+e&=&(d,k_d,s,nt,net,svc,tr,\pi,\\
+&&{}t_0,t_h,t_x,\sigma),\\
+p&=&(svc,tr,\chi),\\
 \operatorname{ExitOK}(e,t)&\Leftrightarrow&
 V(k_d,\sigma,e\setminus\sigma)=\top\\
 &&{}\land\operatorname{did}(k_d)=d
 \land t<t_x\\
 &&{}\land net=net_R\land svc\in\mathsf{Svc},\\
+\operatorname{SvcOK}(e,svc)&\Leftrightarrow&
+\operatorname{offers}(e,svc),\\
+\operatorname{ProxyOK}(e,p)&\Leftrightarrow&
+\operatorname{SvcOK}(e,svc)\\
+&&{}\land\operatorname{transport}(e)=tr\\
+&&{}\land\operatorname{allows}(\pi(e),\chi),\\
 q&=&(d,s),\\
 \operatorname{RelayOK}(q,t)&\Leftrightarrow&
 \operatorname{Online}(d,s,t)\\
 &&{}\land\mathtt{onion\mbox{-}relay}\in cap(d,t),\\
-\rho&=&(q_1,\ldots,q_{h-1},e),\quad 1\leq h\leq 8,\\
+\rho&=&(q_1,\ldots,q_{h-1},e),\\
+&&{}1\leq h\leq 8,\\
 h_0&=&3,\\
 \operatorname{RouteOK}(\rho,svc,t)&\Leftrightarrow&
 \operatorname{NoRepeat}(d(q_1),\ldots,d(e))\\
 &&{}\land\operatorname{ExitOK}(e,t)
-\land\operatorname{offers}(e,svc),\\
+\land\operatorname{SvcOK}(e,svc),\\
+\operatorname{PRouteOK}(\rho,p,t)&\Leftrightarrow&
+\operatorname{RouteOK}(\rho,svc,t)\\
+&&{}\land\operatorname{ProxyOK}(e,p),\\
 L_h&=&\operatorname{AEAD}_{s(e)}(ret,svc,m),\\
 L_i&=&\operatorname{AEAD}_{s(q_i)}(d(q_{i+1}),cid_{i+1},\\
 &&{}L_{i+1}),\quad i<h,\\
@@ -1482,11 +1495,14 @@ B_e&=&\operatorname{AEAD}_{s_{client}}(rid,m,\sigma_e).
 \end{array}
 \]
 \endgroup
-Here \(e\) is the signed onion-exit descriptor, \(q_i\) is a relay descriptor
-from live online-node presence, \(L_i\) is the forward layer, and \(B_e\) is a
-client-encrypted backward payload.  Definition~\ref{def:onion-circuit} is an
-implementation claim about directory, route construction, and encrypted
-forward/backward frames:
+Here \(e\) is the signed onion-exit descriptor, \(\pi\) is its signed policy,
+\(p=(svc,tr,\chi)\) is a concrete proxy request, \(\chi\) is its target,
+\(q_i\) is a relay descriptor from live online-node presence, \(L_i\) is the
+forward layer, and \(B_e\) is a client-encrypted backward payload.
+\(\operatorname{RouteOK}\) is the service-route builder; \(\operatorname{PRouteOK}\)
+adds the implemented TCP/HTTPS transport and target-policy checks.
+Definition~\ref{def:onion-circuit} is an implementation claim about directory,
+route construction, and encrypted forward/backward frames:
 \[
 \begin{array}{rcl}
 \mathsf{OnionImpl}_{R}&\not\Rightarrow&\mathsf{Anon},\\
@@ -1778,7 +1794,9 @@ seen'_{seq}&=&seen_{seq}\cup\{seq(f)\},\\
 \mathsf{FiniteModel}\cup\mathsf{TraceReplay}\\
 &&{}\cup\mathsf{Tests}_{CI}\\
 &&{}\cup\mathsf{FrameImpl}\cup\mathsf{ChunkImpl}\\
+&&{}\cup\mathsf{VNodeImpl}\cup\mathsf{SyncImpl}\\
 &&{}\cup\mathsf{OnionReg}\cup\mathsf{OnionCircuit},\\
+\mathsf{OnionImpl}_{R}&=&\mathsf{OnionReg}\cup\mathsf{OnionCircuit},\\
 \mathsf{Manifest}_{R}&=&
 \mathsf{Path}\times\mathsf{Scope}\times\mathsf{Status},\\
 \mathsf{AdmittedArtifact}(a)&\Leftrightarrow&
@@ -2327,8 +2345,9 @@ registry and route-aware circuit data plane:
 \[
 \begin{array}{rcl}
 \mathsf{OnionImpl}_{R}&=&
-\mathsf{ExitRegistry}\cup\mathsf{RouteBuilder}\\
-&&{}\cup\mathsf{LayeredAEAD},\\
+\mathsf{OnionReg}\cup\mathsf{OnionCircuit},\\
+\mathsf{OnionReg}&=&\mathsf{ExitRegistry}\cup\mathsf{RouteBuilder},\\
+\mathsf{OnionCircuit}&=&\mathsf{LayeredAEAD},\\
 \mathsf{OnionImpl}_{R}&\not\Rightarrow&\mathsf{Anon},\\
 \mathsf{OnionImpl}_{R}&\not\Rightarrow&\mathsf{Unlinkability}.
 \end{array}
