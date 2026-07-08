@@ -1,13 +1,13 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/RyanKung/rings/master/assets/logo/rings_network_red.png">
-  <img alt="Rings Network" src="https://raw.githubusercontent.com/RyanKung/rings/master/assets/logo/rings_network_black.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/RingsNetwork/rings/master/assets/logo/rings_network_red.png">
+  <img alt="Rings Network" src="https://raw.githubusercontent.com/RingsNetwork/rings/master/assets/logo/rings_network_black.svg">
 </picture>
 
 
 Rings Core
 ===============
 
-[![rings-node](https://github.com/RyanKung/rings/actions/workflows/auto-release.yml/badge.svg)](https://github.com/RyanKung/rings/actions/workflows/auto-release.yml)
+[![rings-node](https://github.com/RingsNetwork/rings/actions/workflows/auto-release.yml/badge.svg)](https://github.com/RingsNetwork/rings/actions/workflows/auto-release.yml)
 [![cargo](https://img.shields.io/crates/v/rings-core.svg)](https://crates.io/crates/rings-node)
 [![docs](https://docs.rs/rings-core/badge.svg)](https://docs.rs/rings-node/latest/rings_node/)
 
@@ -36,7 +36,7 @@ Assuming Node A and Node B want to create a WebRTC connection, they would need t
 
 For native implementation, the transport layer is based on `webrtc.rs`, and for browser case, we implemented based on `web_sys` and `wasm_bindgen`.
 
-To check the implementation of transport layer: https://github.com/RyanKung/rings/tree/master/crates/transport
+To check the implementation of transport layer: https://github.com/RingsNetwork/rings/tree/master/crates/transport
 
 
 #### Network Layer

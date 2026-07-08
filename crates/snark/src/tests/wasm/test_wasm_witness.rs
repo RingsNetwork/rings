@@ -9,7 +9,7 @@ use crate::r1cs;
 pub async fn test_wasm_load_witness_remote() -> Result<()> {
     type F = <VestaEngine as Engine>::Base;
 
-    let url = "https://raw.githubusercontent.com/RyanKung/rings/master/crates/snark/src/tests/native/circoms/simple_bn256.wasm";
+    let url = "https://raw.githubusercontent.com/RingsNetwork/rings/master/crates/snark/src/tests/native/circoms/simple_bn256.wasm";
     let mut witness_calculator =
         r1cs::load_circom_witness_calculator(r1cs::Path::Remote(url.to_string()))
             .await

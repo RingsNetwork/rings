@@ -6,10 +6,10 @@
 Rings Network
 ===============
 
-[![rings-node](https://github.com/RyanKung/rings/actions/workflows/auto-release.yml/badge.svg)](https://github.com/RyanKung/rings/actions/workflows/auto-release.yml)
+[![rings-node](https://github.com/RingsNetwork/rings/actions/workflows/auto-release.yml/badge.svg)](https://github.com/RingsNetwork/rings/actions/workflows/auto-release.yml)
 [![cargo](https://img.shields.io/crates/v/rings-node.svg)](https://crates.io/crates/rings-node)
 [![docs](https://docs.rs/rings-node/badge.svg)](https://docs.rs/rings-node/latest/rings_node/)
-![GitHub](https://img.shields.io/github/license/RyanKung/rings)
+![GitHub](https://img.shields.io/github/license/RingsNetwork/rings)
 [![Sponsor](https://img.shields.io/badge/Sponsor-RingsNetwork-ea4aaa?logo=githubsponsors)](https://github.com/sponsors/RingsNetwork)
 
 **A peer-to-peer network for the sovereign age.**
@@ -41,8 +41,8 @@ If you cite Rings in academic or technical writing, use:
   title = {Rings: A peer-to-peer network for sovereign age},
   year = {2023},
   month = feb,
-  url = {https://github.com/RyanKung/rings/blob/master/papers/rings.pdf},
-  note = {Repository-owned whitepaper and LaTeX source: https://github.com/RyanKung/rings/tree/master/papers}
+  url = {https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf},
+  note = {Repository-owned whitepaper and LaTeX source: https://github.com/RingsNetwork/rings/tree/master/papers}
 }
 ```
 
@@ -90,7 +90,7 @@ cargo install rings-node
 Install the CLI from a local checkout:
 
 ```sh
-git clone git@github.com:RyanKung/rings.git
+git clone git@github.com:RingsNetwork/rings.git
 cd ./rings
 cargo install --path crates/node
 ```

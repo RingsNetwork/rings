@@ -8,7 +8,7 @@
   "license": "GPL-3.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/RyanKung/rings"
+    "url": "https://github.com/RingsNetwork/rings"
   },
   "scripts": {
     "wasm_pack": "wasm-pack build crates/node --release --scope ringsnetwork -t web --no-default-features --features browser_default --features console_error_panic_hook",

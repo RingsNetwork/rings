@@ -1,15 +1,15 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/RyanKung/rings/master/assets/logo/rings_network_red.png">
-  <img alt="Rings Network" src="https://raw.githubusercontent.com/RyanKung/rings/master/assets/logo/rings_network_black.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/RingsNetwork/rings/master/assets/logo/rings_network_red.png">
+  <img alt="Rings Network" src="https://raw.githubusercontent.com/RingsNetwork/rings/master/assets/logo/rings_network_black.svg">
 </picture>
 
 Rings Node (The node service of Rings Network)
 ===============
 
-[![rings-node](https://github.com/RyanKung/rings/actions/workflows/auto-release.yml/badge.svg)](https://github.com/RyanKung/rings/actions/workflows/auto-release.yml)
+[![rings-node](https://github.com/RingsNetwork/rings/actions/workflows/auto-release.yml/badge.svg)](https://github.com/RingsNetwork/rings/actions/workflows/auto-release.yml)
 [![cargo](https://img.shields.io/crates/v/rings-node.svg)](https://crates.io/crates/rings-node)
 [![docs](https://docs.rs/rings-node/badge.svg)](https://docs.rs/rings-node/latest/rings_node/)
-![GitHub](https://img.shields.io/github/license/RyanKung/rings)
+![GitHub](https://img.shields.io/github/license/RingsNetwork/rings)
 
 
 Rings is a structured peer-to-peer network implementation using WebRTC, Chord algorithm, and full WebAssembly (WASM) support.
@@ -33,9 +33,9 @@ cargo install rings-node
 To install rings-node from source, follow these steps:
 
 ```sh
-git clone git@github.com:RyanKung/rings.git
+git clone git@github.com:RingsNetwork/rings.git
 cd ./rings
-cargo install --path .
+cargo install --path crates/node
 ```
 
 ### Build for WebAssembly
