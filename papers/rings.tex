@@ -85,7 +85,8 @@ with
   R&=&\mathbb{Z}/2^{160}\mathbb{Z},\\
   \mathcal{R}_N&=&\text{Correct-Chord overlay object},\\
   v_0&\in&\{1,\ldots,256\},\\
-  \operatorname{StoreOwner}^{v_0}_N:R\to N,\\
+  \Theta&\subseteq&N,\qquad
+  \operatorname{StoreOwner}^{v_0}_{\Theta}:R\to\Theta,\\
   \Omega_N(X,H)&=&(X,\operatorname{owner}_N\circ H),\\
   \tau_\nu&:&S_\nu\times I_\nu
     \to\mathsf{T}^{\mathcal{E}_\nu}_{A_\nu}(S_\nu\times O_\nu).
@@ -458,12 +459,15 @@ initialization edge case, not evidence for \(r\) distinct live successors.
 \end{assumption}
 
 \begin{definition}[Affine replica set and storage VNODE ownership]
-Write \(S^v_N=\operatorname{StoreOwner}^{v}_N\) and
-\(Q^{\rho,v}_N=\operatorname{RepOwner}^{\rho,v}_N\).
+Write \(S^v_{\Theta}=\operatorname{StoreOwner}^{v}_{\Theta}\) and
+\(Q^{\rho,v}_{\Theta}=\operatorname{RepOwner}^{\rho,v}_{\Theta}\), where
+\(\Theta\subseteq N\) is the storage-owner view used for one owner decision.
 \[
 \begin{array}{rcl}
 1\le\rho&\le&M,\\
 v_0&\in&\{1,\ldots,256\},\\
+\Theta_n(t)&=&\{n\}\cup\operatorname{Succ}_n(t)\\
+&&{}\cup\operatorname{Pred}_n(t)\cup\operatorname{Finger}_n(t),\\
 \operatorname{repkey}^{\rho}_i(k)
   &=&(k+\left\lfloor M\cdot i/\rho\right\rfloor)\bmod M,\quad 0\le i<\rho,\\[4pt]
 \operatorname{RepKey}^{\rho}(k)
@@ -472,20 +476,20 @@ v_0&\in&\{1,\ldots,256\},\\
 z^v_{n,i}&=&H(\mathtt{rings{:}vnode},net,n,i),\\
 \operatorname{vnode}^{v}_{net}(n,i)
 &=&z^v_{n,i},\\
-V^v_N&=&
-\{(n,z^v_{n,i}):n\in N,0\le i<v\},\\
-S^{0}_N(k)&=&\operatorname{owner}_N(k),\\
+V^v_{\Theta}&=&
+\{(n,z^v_{n,i}):n\in\Theta,0\le i<v\},\\
+S^{0}_{\Theta}(k)&=&\operatorname{owner}_{\Theta}(k),\\
 y_k^v
 &=&
-\operatorname*{arg\,min}_{(n,z)\in V^v_N}\delta_k(z),\\
-S^{v}_N(k)
+\operatorname*{arg\,min}_{(n,z)\in V^v_{\Theta}}\delta_k(z),\\
+S^{v}_{\Theta}(k)
 &=&
 \pi_1 y_k^v\quad(v>0),\\
 r_i&=&\operatorname{repkey}^{\rho}_i(k),\\
 q_i
   &=&
-  S^{v}_N(r_i),\\
-Q^{\rho,v}_N(k)
+  S^{v}_{\Theta}(r_i),\\
+Q^{\rho,v}_{\Theta}(k)
   &=&
   \langle q_i:0\leq i<\rho\rangle.
 \end{array}
@@ -493,15 +497,18 @@ Q^{\rho,v}_N(k)
 \[
 \begin{array}{rcl}
 P_k&=&\operatorname{set}(\operatorname{RepKey}^{\rho}(k)),\\
-O_k&=&\operatorname{set}(Q^{\rho,v_0}_N(k)),\\
+O^\Theta_k&=&\operatorname{set}(Q^{\rho,v_0}_{\Theta}(k)),\\
 |P_k|&=&\rho,\\
-1\le |O_k|&\leq&\min(\rho,|N|),\\
-\mathsf{collapse}_{N,\rho,v_0}(k)&\Leftrightarrow&|O_k|<\min(\rho,|N|).
+1\le |O^\Theta_k|&\leq&\min(\rho,|\Theta|),\\
+\mathsf{collapse}_{\Theta,\rho,v_0}(k)
+&\Leftrightarrow&|O^\Theta_k|<\min(\rho,|\Theta|).
 \end{array}
 \]
 Replica keys specify intended placement cardinality; storage VNODE ownership
 maps each placement key to a physical owner through derived virtual positions.
 The paper's default storage mode has \(v_0>0\); \(v=0\) is the legacy off-switch.
+The implementation instantiates \(\Theta\) as \(\Theta_n(t)\), an authenticated
+local topology view; \(\Theta=N\) is an offline global-coordinate model.
 Virtual positions are not signing identities and do not own transport sessions.
 CorrectChord successor lists remain the topology safety root.
 \end{definition}
@@ -511,8 +518,8 @@ CorrectChord successor lists remain the topology safety root.
 \begin{array}{rcl}
   \mathcal{R}_N&=&
   (R,N,\operatorname{owner}_N,\operatorname{pred}_N,\\
-  &&\operatorname{Succ}^r_N,\operatorname{StoreOwner}^{v_0}_N,\\
-  &&\operatorname{RepOwner}^{\rho,v_0}_N,F,E).
+  &&\operatorname{Succ}^r_N,\operatorname{StoreOwner}^{v_0}_{\Theta},\\
+  &&\operatorname{RepOwner}^{\rho,v_0}_{\Theta},F,E).
 \end{array}
 \]
 \[
@@ -1345,25 +1352,34 @@ K^{impl}_{\nu,x}&\subseteq&R,\\
 \begin{obligation}[Replica realization]
 \[
 \begin{array}{rcl}
-O_{\nu,x}&=&\operatorname{set}(\operatorname{RepOwner}^{\rho,v_0}_N(H_\nu(x))),\\
-L_{\nu,x}&=&|O_{\nu,x}|,\\
-\mathsf{FullRed}_{\nu,x}&\Leftrightarrow&L_{\nu,x}=\min(\rho,|N|),\\
-\mathsf{Collapse}_{\nu,x}&\Leftrightarrow&L_{\nu,x}<\min(\rho,|N|),\\
-\mathsf{LiveClaim}_{\nu,x}(\rho,v_0)&\Leftrightarrow&
-\mathsf{Admit}_{R}(\mathsf{FullRed}_{\nu,x},\mathsf{Evidence}_{\Gamma}),\\
-\mathsf{LiveClaim}_{\nu,x}(\rho,v_0)&\Rightarrow&
-  \operatorname{Inv}_{place}\land\mathsf{FullRed}_{\nu,x},\\
-\mathsf{ReplicaGap}_{R}&=&
-  \{(\nu,x):\mathsf{Collapse}_{\nu,x}\},\\
-\mathsf{ReplicaGap}_{R}\neq\varnothing&\Rightarrow&
-\mathsf{fullReplicaRealization}\in\mathsf{Obligation}.
+\Theta&\in&\{\Theta_n(t),N\},\\
+O^\Theta_{\nu,x}&=&
+\operatorname{set}(Q^{\rho,v_0}_{\Theta}(H_\nu(x))),\\
+L^\Theta_{\nu,x}&=&|O^\Theta_{\nu,x}|,\\
+\mathsf{FR}^{\Theta}_{\nu,x}
+&\Leftrightarrow&L^\Theta_{\nu,x}=\min(\rho,|\Theta|),\\
+\mathsf{Col}^{\Theta}_{\nu,x}
+&\Leftrightarrow&L^\Theta_{\nu,x}<\min(\rho,|\Theta|),\\
+\mathsf{LC}^{\Theta}_{\nu,x}&\Leftrightarrow&
+\mathsf{Admit}_{R}(\mathsf{FR}^{\Theta}_{\nu,x},
+\mathsf{Evidence}_{\Gamma}),\\
+\mathsf{LC}^{\Theta}_{\nu,x}&\Rightarrow&
+  \operatorname{Inv}_{place}\land\mathsf{FR}^{\Theta}_{\nu,x},\\
+G_R^\Theta&=&
+  \{(\nu,x):\mathsf{Col}^{\Theta}_{\nu,x}\},\\
+G_R^\Theta\neq\varnothing&\Rightarrow&
+\mathsf{FullReplica}_{R}\in\mathsf{Obligation}.
 \end{array}
 \]
-When \(|N|<\rho\), fewer than \(\rho\) distinct live owners is not collapse;
-collapse means fewer owners than the live topology can realize.
-For the paper default \(v_0>0\), \(O_{\nu,x}\) is the image of the storage
-VNODE owner map.  This is a placement claim, not a full routing-VNODE or
-load-balance theorem.
+Here \(\mathsf{FR}\), \(\mathsf{Col}\), and \(\mathsf{LC}\) abbreviate full
+redundancy, collapse, and live claim; \(G_R^\Theta\) is the replica gap set and
+\(\mathsf{FullReplica}_{R}\) is the full-replica-realization obligation.  When
+\(|\Theta|<\rho\), fewer than \(\rho\) distinct owners is not collapse;
+collapse means fewer owners than the selected view can realize.  For runtime
+claims, \(\Theta=\Theta_n(t)\); reported coordinates may use \(\Theta=N\).
+For the paper default \(v_0>0\), \(O^\Theta_{\nu,x}\) is the image of the
+storage VNODE owner map.  This is a placement claim, not a full routing-VNODE
+or load-balance theorem.
 \end{obligation}
 
 \begin{definition}[Mailbox]
@@ -1395,7 +1411,7 @@ h&=&(\nu,\rho,Intro,Relay,\\
 
 \begin{definition}[Subring]
 \[
-  \mathsf{Class}(\mathsf{Subring})=\mathsf{Impl}.
+  \mathsf{Class}(\mathsf{Subring})=\{\mathsf{Impl}\}.
 \]
 \[
   \mathcal{S}_u=(u,N_u,\operatorname{owner}_{N_u},
@@ -1463,6 +1479,9 @@ optional metadata.
 e&=&(d,k_d,s,nt,net,svc,tr,\pi,\\
 &&{}t_0,t_h,t_x,\sigma),\\
 p&=&(svc,tr,\chi),\\
+\operatorname{svc}(p)&=&svc,\quad
+\operatorname{tr}(p)=tr,\quad
+\operatorname{target}(p)=\chi,\\
 \operatorname{ExitOK}(e,t)&\Leftrightarrow&
 V(k_d,\sigma,e\setminus\sigma)=\top\\
 &&{}\land\operatorname{did}(k_d)=d
@@ -1471,25 +1490,26 @@ V(k_d,\sigma,e\setminus\sigma)=\top\\
 \operatorname{SvcOK}(e,svc)&\Leftrightarrow&
 \operatorname{offers}(e,svc),\\
 \operatorname{ProxyOK}(e,p)&\Leftrightarrow&
-\operatorname{SvcOK}(e,svc)\\
-&&{}\land\operatorname{transport}(e)=tr\\
-&&{}\land\operatorname{allows}(\pi(e),\chi),\\
-q&=&(d,s),\\
-\operatorname{RelayOK}(q,t)&\Leftrightarrow&
+\operatorname{SvcOK}(e,\operatorname{svc}(p))\\
+&&{}\land\operatorname{transport}(e)=\operatorname{tr}(p)\\
+&&{}\land\operatorname{allows}(\pi(e),\operatorname{target}(p)),\\
+r_o&=&(d,s),\\
+\operatorname{RelayOK}(r_o,t)&\Leftrightarrow&
 \operatorname{Online}(d,s,t)\\
 &&{}\land\mathtt{onion\mbox{-}relay}\in cap(d,t),\\
-\rho&=&(q_1,\ldots,q_{h-1},e),\\
+\omega&=&(r_1,\ldots,r_h),\quad r_h=e,\\
 &&{}1\leq h\leq 8,\\
 h_0&=&3,\\
-\operatorname{RouteOK}(\rho,svc,t)&\Leftrightarrow&
-\operatorname{NoRepeat}(d(q_1),\ldots,d(e))\\
-&&{}\land\operatorname{ExitOK}(e,t)
-\land\operatorname{SvcOK}(e,svc),\\
-\operatorname{PRouteOK}(\rho,p,t)&\Leftrightarrow&
-\operatorname{RouteOK}(\rho,svc,t)\\
-&&{}\land\operatorname{ProxyOK}(e,p),\\
+\operatorname{exit}(\omega)&=&r_h,\\
+\operatorname{RouteOK}(\omega,svc,t)&\Leftrightarrow&
+\operatorname{NoRepeat}(d(r_1),\ldots,d(r_h))\\
+&&{}\land\operatorname{ExitOK}(\operatorname{exit}(\omega),t)\\
+&&{}\land\operatorname{SvcOK}(\operatorname{exit}(\omega),svc),\\
+\operatorname{PRouteOK}(\omega,p,t)&\Leftrightarrow&
+\operatorname{RouteOK}(\omega,\operatorname{svc}(p),t)\\
+&&{}\land\operatorname{ProxyOK}(\operatorname{exit}(\omega),p),\\
 L_h&=&\operatorname{AEAD}_{s(e)}(ret,svc,m),\\
-L_i&=&\operatorname{AEAD}_{s(q_i)}(d(q_{i+1}),cid_{i+1},\\
+L_i&=&\operatorname{AEAD}_{s(r_i)}(d(r_{i+1}),cid_{i+1},\\
 &&{}L_{i+1}),\quad i<h,\\
 B_e&=&\operatorname{AEAD}_{s_{client}}(rid,m,\sigma_e).
 \end{array}
@@ -1497,7 +1517,7 @@ B_e&=&\operatorname{AEAD}_{s_{client}}(rid,m,\sigma_e).
 \endgroup
 Here \(e\) is the signed onion-exit descriptor, \(\pi\) is its signed policy,
 \(p=(svc,tr,\chi)\) is a concrete proxy request, \(\chi\) is its target,
-\(q_i\) is a relay descriptor from live online-node presence, \(L_i\) is the
+\(r_i\) is a relay descriptor from live online-node presence, \(L_i\) is the
 forward layer, and \(B_e\) is a client-encrypted backward payload.
 \(\operatorname{RouteOK}\) is the service-route builder; \(\operatorname{PRouteOK}\)
 adds the implemented TCP/HTTPS transport and target-policy checks.
@@ -2046,11 +2066,13 @@ Only $hT_{hop}$ is Chord-comparable; the rest is Rings runtime overhead.
 F_C(\eta;D)&\subseteq&Q_C(\eta;D),\\
 \phi_C(\eta;D)&=&|F_C(\eta;D)|/|Q_C(\eta;D)|,\\
 ok_C(\eta;D)&=&1-\phi_C(\eta;D),\\
-\bar{to}_C(\eta;D)&=&|Q_C|^{-1}\sum_{q\in Q_C}to_C(q),\\
+\bar{to}_C(\eta;D)&=&
+|Q_C(\eta;D)|^{-1}\sum_{q\in Q_C(\eta;D)}to_C(q),\\
 B_C(\eta;D)&=&
   (\mathbb{E}[h_C^f\mid\eta,D],
-   \mathbb{E}[h_C^r\mid\eta,D],
-   \bar{to}_C,ok_C,\phi_C),\\
+   \mathbb{E}[h_C^r\mid\eta,D],\\
+&&{}\bar{to}_C(\eta;D),ok_C(\eta;D),\\
+&&{}\phi_C(\eta;D)),\\
 h_C^r&=&h_C^f+1.
 \end{array}
 \]
@@ -2069,7 +2091,8 @@ D_{stale}^{656}&=&\{f_{.10},f_{.20},\gamma_{.05},\gamma_{.40}\},\\
 D_C^{656}&=&(D_{maint}^{656}\times\{\mathsf{maintained}\})\\
 &&{}\uplus(D_{stale}^{656}\times\{\mathsf{stale}\}),\\
 D_R^{docker}&=&\{D_R^{conv},D_R^{tx}\},\\
-D_R^{svnode}&=&\{\ell_v:v\in\{1,2,5,10,20\}\}.
+D_R^{svnode}&=&\{\ell_v:v\in\{1,2,5,10,20\}\},\\
+\ell_{v_0}&\notin&D_R^{svnode}\quad(v_0=160).
 \end{array}
 \]
 \[
@@ -2173,16 +2196,21 @@ Thus stale rows explain sensitivity, not the maintained Chord baseline:
 \]
 
 Table~\ref{storage-vnode-load-table} records the PR~656 storage-VNODE supplement
-after PR~660.  It uses the runtime \(\mathsf{StorageVirtualNodes}\) API for
-storage-owner selection over 160-bit Rings DIDs:
+after PR~660.  It uses the runtime \(\mathsf{StorageVirtualNodes}\) derivation
+for global-coordinate storage-owner selection over 160-bit Rings DIDs:
 \[
 \begin{array}{rcl}
 N_R,K,m,net&=&(10^4,10^6,160,1619),\\
+\Theta&=&N_R,\\
 \ell_v&=&(N_R,K,m,net,v),\\
 \mathsf{scope}(\ell_v)&=&\mathsf{storage\_owner\_selection},\\
-\mathsf{routingVNode}(\ell_v)&=&\mathsf{false}.
+\mathsf{routingVNode}(\ell_v)&=&\mathsf{false},\\
+\mathsf{defaultRow}(\ell_v)&=&(v=160).
 \end{array}
 \]
+The reported rows are sensitivity coordinates for \(v\leq20\).  They are not
+runtime local-view evidence for \(\Theta_n(t)\), and they do not include the
+default \(v_0=160\) row.
 
 \begin{table}[htbp]
 \centering
@@ -2200,8 +2228,9 @@ $v$ & $|V|$ & mean & p1 & p99 & max \\ \hline
 \end{tabular}
 \caption{Reported storage-VNODE load-balance coordinates from PR~656
 (\texttt{chord-paper-sim-2026-07-08.jsonl}, commit \texttt{aa89fc4}).
-Rows use PR~660 runtime storage virtual-node derivation.  They are storage
-owner-placement data, not routing/finger VNODE data and not WebRTC execution.}
+Rows use PR~660 virtual-node derivation with \(\Theta=N_R\).  They are
+sensitivity data, not default \(v_0=160\), runtime local-view, routing/finger
+VNODE, or WebRTC execution evidence.}
 \label{storage-vnode-load-table}
 \end{table}
 
@@ -2383,17 +2412,19 @@ D_C^{paper}\uplus D_C^{656}\uplus D_R^{docker}\\
 \mathsf{Obligation}&=&
 \mathsf{wideAreaBenchmark}\\
 &&{}\cup\mathsf{adversarialLiveness}\\
-&&{}\cup\mathsf{fullReplicaRealization}\\
+&&{}\cup\mathsf{FullReplica}_{R}\\
 &&{}\cup\mathsf{AdmittedStorageVNodeLoad},\\
 \mathsf{NonClaim}&=&\NonClaim .
 \end{array}
 \]
 The scientific contribution is the composition law and its claim ledger:
 CorrectChord supplies the overlay safety root, storage VNODEs instantiate the
-default \(\operatorname{StoreOwner}^{v_0}_N\) placement map, \(\Omega_N\) lifts
+default \(\operatorname{StoreOwner}^{v_0}_{\Theta}\) placement map, \(\Omega_N\) lifts
 resource namespaces into live owners, onion circuits instantiate a typed
 application data plane, protocol morphisms preserve placement, and runtime
-effects remain typed.  Virtual positions are storage coordinates, not authority
+effects remain typed.  Runtime storage VNODE claims are parameterized by the
+local view \(\Theta_n(t)\); global-coordinate rows remain reported coordinates.
+Virtual positions are storage coordinates, not authority
 principals or transport endpoints.  Onion routes are encrypted circuit
 coordinates, not anonymity proofs.  \(\mathsf{Formalized}_{paper}\) is a
 theorem inside the stated model; \(\mathsf{LedgerRule}_{paper}\) is the
