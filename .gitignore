@@ -7,6 +7,9 @@ config*.yaml
 **/*.js
 !examples/frontend/extension-assets/
 !examples/frontend/extension-assets/*.js
+!examples/frontend/extension-assets/*.ts
+!examples/frontend/scripts/*.mjs
+!examples/frontend/scripts/*.mts
 .ipynb_checkpoints
 # Local environment configuration
 .envrc

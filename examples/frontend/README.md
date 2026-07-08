@@ -7,8 +7,12 @@ dweb and proof workbench panels for operating a browser node from one screen.
 
 The implementation is Rust/Yew. Browser APIs for WebCrypto, MetaMask, and Phantom
 are called from Rust through `js_sys` and `wasm_bindgen`; the core application has
-no JS or TS source. Extension packaging adds only the MV3 manifest, service worker,
-and wasm bootstrap files required by Chrome.
+no JavaScript source. Extension packaging uses strict TypeScript for the MV3
+service worker, wallet bridge, node bridge, and packaging scripts, then emits the
+JavaScript files Chrome and Node load at runtime.
+The TypeScript build fails on type errors, explicit `any`, or missing JSDoc on
+file-level docs and top-level type, interface, function, class, or enum
+declarations.
 
 Styles are split under `src/styles/` by responsibility:
 
@@ -42,10 +46,13 @@ message workflows.
 ## Package as a Chrome Extension
 
 Build the same Yew/Wasm application with Trunk. The Trunk `post_build` hook
-rewrites the web output into a Chrome Manifest V3 package after every build:
+first type-checks and compiles the extension TypeScript, then rewrites the web
+output into a Chrome Manifest V3 package after every build:
 
 ```sh
 cd examples/frontend
+npm --prefix ../.. install --ignore-scripts --package-lock=false
+npm --prefix ../.. run build:frontend-extension-scripts
 trunk build --release
 ```
 
@@ -92,9 +99,10 @@ cd examples/frontend
 cargo fmt --check
 cargo check --target wasm32-unknown-unknown
 cargo test --release --target wasm32-unknown-unknown
+npm --prefix ../.. install --ignore-scripts --package-lock=false
+npm --prefix ../.. run build:frontend-extension-scripts
 trunk build --release
 cd ../..
-npm install --ignore-scripts --package-lock=false
 npx playwright install chromium
 npm run test:frontend-extension-wallet
 ```
