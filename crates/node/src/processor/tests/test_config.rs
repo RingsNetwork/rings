@@ -287,7 +287,7 @@ fn https_onion_exit_config_uses_https_only_service() {
 }
 
 #[test]
-fn default_onion_exit_config_uses_native_tcp_service() {
+fn default_onion_exit_config_uses_native_tcp_backed_services() {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).unwrap();
     let config = ProcessorConfig::new(
@@ -300,11 +300,14 @@ fn default_onion_exit_config_uses_native_tcp_service() {
 
     assert!(config.advertise_onion_exit);
     assert_eq!(config.onion_exit_services, default_onion_exit_services());
-    assert_eq!(config.onion_exit_services, vec![OnionExitService::tcp()]);
+    assert_eq!(
+        config.onion_exit_services,
+        vec![OnionExitService::tcp(), OnionExitService::https()]
+    );
 }
 
 #[test]
-fn reserved_onion_exit_service_rejects_wrong_transport() {
+fn reserved_https_onion_exit_service_accepts_tcp_transport() -> Result<()> {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).unwrap();
     let mut config = ProcessorConfig::new(
@@ -316,14 +319,10 @@ fn reserved_onion_exit_service_rejects_wrong_transport() {
     .advertise_onion_exit(true);
     config.onion_exit_services =
         vec![OnionExitService::new("https", OnionExitTransport::Tcp).expect("valid service")];
+    config.onion_exit_policy = onion_policy(&["example.com:443"], &[])?;
 
-    assert!(matches!(
-        ProcessorBuilder::from_config(&config),
-        Err(Error::InvalidConfig(message))
-            if message.contains("https")
-                && message.contains("Https")
-                && message.contains("Tcp")
-    ));
+    assert!(ProcessorBuilder::from_config(&config).is_ok());
+    Ok(())
 }
 
 #[test]

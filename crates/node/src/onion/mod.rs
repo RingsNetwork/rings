@@ -43,7 +43,7 @@ pub mod circuit;
 pub(crate) mod directory;
 pub(crate) mod exit_accounting;
 mod failure;
-#[cfg(feature = "browser")]
+#[cfg(any(feature = "browser", feature = "node"))]
 pub mod https;
 pub mod proxy;
 pub(crate) mod replay;
@@ -67,7 +67,7 @@ pub use target::OnionProxyTarget;
 /// DHT topic used for application-layer onion exit descriptors.
 pub const ONION_EXITS_TOPIC: &str = "onion_exits";
 
-const ONION_EXIT_DESCRIPTOR_SCHEMA_VERSION: u16 = 2;
+pub(crate) const ONION_EXIT_DESCRIPTOR_SCHEMA_VERSION: u16 = 2;
 
 /// Capability label for nodes willing to relay onion cells.
 pub const ONION_RELAY_CAPABILITY: &str = "onion-relay";
@@ -96,11 +96,12 @@ pub(crate) const fn default_advertise_onion_exit() -> bool {
 }
 
 /// Default native exit services. It is only published when onion-exit advertisement is enabled.
+/// HTTPS is advertised as a TCP-backed service because HTTPS proxying ultimately tunnels TLS bytes.
 pub fn default_onion_exit_services() -> Vec<OnionExitService> {
-    vec![OnionExitService::tcp()]
+    vec![OnionExitService::tcp(), OnionExitService::https()]
 }
 
-/// Browser HTTPS-only onion-exit service set.
+/// Standard HTTPS-over-TCP onion-exit service set.
 pub fn https_onion_exit_services() -> Vec<OnionExitService> {
     vec![OnionExitService::https()]
 }
@@ -135,7 +136,10 @@ pub enum OnionExitTransport {
     WebTransport,
     /// Protocol-specific request/response service.
     RequestResponse,
-    /// Browser/application-layer HTTPS proxy service.
+    /// Legacy browser/application-layer HTTPS proxy marker.
+    ///
+    /// The reserved `https` service is TCP-backed; this variant remains for compatibility with
+    /// older serialized descriptors and explicit custom transports.
     Https,
 }
 
@@ -171,7 +175,7 @@ impl OnionServiceName {
         Ok(Self(trimmed.to_ascii_lowercase()))
     }
 
-    /// Return the standard browser HTTPS exit service name.
+    /// Return the standard HTTPS-over-TCP exit service name.
     pub fn https() -> Self {
         Self::static_name("https")
     }
@@ -222,9 +226,9 @@ impl OnionExitService {
         Self { name, transport }
     }
 
-    /// Return the standard browser HTTPS exit service.
+    /// Return the standard HTTPS-over-TCP exit service.
     pub fn https() -> Self {
-        Self::from_name(OnionServiceName::https(), OnionExitTransport::Https)
+        Self::from_name(OnionServiceName::https(), OnionExitTransport::Tcp)
     }
 
     /// Return the standard native TCP exit service.
@@ -245,7 +249,7 @@ impl OnionExitService {
     /// Return whether this service satisfies a route request for `service`.
     ///
     /// Built-in service names reserve their transport class. Custom service names remain
-    /// application-defined and match by name.
+    /// application-defined and match by name. HTTPS is a reserved TCP-backed service.
     pub fn matches_route_service(&self, service: &str) -> bool {
         match Self::reserved_transport(service) {
             Some(transport) => self.matches(service, transport),
@@ -258,7 +262,7 @@ impl OnionExitService {
         let service = OnionServiceName::parse(service).ok()?;
         match service.as_str() {
             "tcp" => Some(OnionExitTransport::Tcp),
-            "https" => Some(OnionExitTransport::Https),
+            "https" => Some(OnionExitTransport::Tcp),
             _ => None,
         }
     }

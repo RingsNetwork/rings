@@ -12,6 +12,7 @@ use crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD;
 use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
+use crate::dht::entry::EntryLookupKey;
 use crate::dht::entry::EntryOperation;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::PlacementMiss;
@@ -300,6 +301,39 @@ async fn virtual_storage_owner_stores_local_position_locally() -> Result<()> {
 }
 
 #[tokio::test]
+async fn local_fetch_falls_back_when_local_virtual_owner_has_no_entry() -> Result<()> {
+    let local = Did::from(1u32);
+    let remote = Did::from(2u32);
+    let node = PeerRing::new_with_storage_finger_table_size_and_virtual_nodes(
+        local,
+        3,
+        Box::new(MemStorage::new()),
+        8,
+        VirtualNodeConfig::new(7, 2),
+    );
+    let _ = node.join(remote)?;
+    let placement = first_virtual_position(&node, local)?;
+
+    let remote_lookup = <PeerRing as ChordStorage<_, 1>>::entry_lookup(&node, placement).await?;
+    assert_eq!(
+        remote_lookup,
+        PeerRingAction::MultiActions(vec![PeerRingAction::EntryMisses(vec![PlacementMiss::new(
+            placement, local
+        )])])
+    );
+
+    let local_fetch_lookup = node.entry_lookup_for_fetch::<1>(placement).await?;
+    assert_eq!(
+        local_fetch_lookup,
+        PeerRingAction::MultiActions(vec![PeerRingAction::RemoteAction(
+            remote,
+            RemoteAction::FindEntry(EntryLookupKey::new(placement, placement)),
+        )])
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn virtual_storage_sync_copies_entries_to_observed_virtual_owner() -> Result<()> {
     let local = Did::from(1u32);
     let remote = Did::from(2u32);
@@ -343,10 +377,10 @@ async fn sync_without_ack_retains_entry_for_next_handoff() -> Result<()> {
 
     let action = node.sync_entries_with_successor(new_successor).await?;
     let retried_action = node.sync_entries_with_successor(new_successor).await?;
-    let expected = vec![(new_successor, vec![PlacedEntry::new(
-        placement_key,
-        entry.clone(),
-    )])];
+    let expected = vec![(
+        new_successor,
+        vec![PlacedEntry::new(placement_key, entry.clone())],
+    )];
 
     assert_eq!(collect_sync_batches(action)?, expected);
     assert_eq!(collect_sync_batches(retried_action)?, expected);
@@ -736,9 +770,10 @@ async fn read_repair_targets_only_observed_missing_placements() -> Result<()> {
         .read_repair_entry(evidence.entry.clone(), &evidence.misses, 3)
         .await?;
 
-    assert_eq!(evidence.misses, vec![PlacementMiss::new(
-        first_key, node.did
-    )]);
+    assert_eq!(
+        evidence.misses,
+        vec![PlacementMiss::new(first_key, node.did)]
+    );
     assert_eq!(repair, PeerRingAction::None);
     assert_eq!(
         node.storage.get(&first_key.to_string()).await?,

@@ -20,7 +20,6 @@ const FIREFOX_EXTENSION_MANAGER_URL: &str = "about:debugging#/runtime/this-firef
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum Panel {
-    Dweb,
     Onion,
     Proof,
     Custom,
@@ -29,7 +28,6 @@ pub(crate) enum Panel {
 impl Panel {
     fn label(self) -> &'static str {
         match self {
-            Self::Dweb => "Dweb",
             Self::Onion => "Onion Proxy",
             Self::Proof => "Proof",
             Self::Custom => "Custom",
@@ -583,7 +581,7 @@ fn workspace_tabs(
 ) -> Html {
     html! {
         <nav class="workspace-tabs" aria-label="Node workspace">
-            { for [Panel::Dweb, Panel::Onion, Panel::Proof, Panel::Custom].into_iter().map(|panel| {
+            { for [Panel::Onion, Panel::Proof, Panel::Custom].into_iter().map(|panel| {
                 let active_panel = active_panel.clone();
                 let class = if panel == active { "workspace-tab active" } else { "workspace-tab" };
                 let disabled = extension_mode && panel != Panel::Onion;

@@ -16,7 +16,6 @@ use serde::Serialize;
 use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
-use wasm_bindgen_futures::JsFuture;
 use yew::Callback;
 
 /// Hosted path table.
@@ -65,20 +64,6 @@ pub fn register(
         .map_err(|error| format!("register dweb: {error:?}"))?;
     handler.forget();
     Ok(())
-}
-
-/// Fetch a path from a peer.
-pub async fn fetch(provider: Arc<Provider>, peer: String, path: String) -> Result<(), String> {
-    let bytes = serde_json::to_vec(&DwebMsg::Req { path })
-        .map_err(|error| format!("encode dweb: {error}"))?;
-    JsFuture::from(provider.send_message(
-        peer,
-        "dweb".to_string(),
-        Uint8Array::from(bytes.as_slice()),
-    ))
-    .await
-    .map(|_| ())
-    .map_err(|error| format!("send dweb request failed: {error:?}"))
 }
 
 fn handle(

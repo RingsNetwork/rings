@@ -216,8 +216,16 @@ fn native_tcp_exit_config_rejects_empty_or_non_tcp_services() {
         NativeOnionTcpExitConfig::new(Vec::new(), OnionExitPolicy::default()),
         Err(Error::InvalidConfig(_))
     ));
+    assert!(NativeOnionTcpExitConfig::new(
+        vec![OnionExitService::https()],
+        OnionExitPolicy::default()
+    )
+    .is_ok());
     assert!(matches!(
-        NativeOnionTcpExitConfig::new(vec![OnionExitService::https()], OnionExitPolicy::default()),
+        NativeOnionTcpExitConfig::new(
+            vec![OnionExitService::new("udp", OnionExitTransport::Udp).expect("valid service")],
+            OnionExitPolicy::default()
+        ),
         Err(Error::InvalidConfig(_))
     ));
 }

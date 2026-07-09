@@ -40,6 +40,8 @@ use crate::onion::circuit::OnionReturnId;
 use crate::onion::circuit::ONION_CIRCUIT_NAMESPACE;
 use crate::onion::exit_accounting::OnionExitAccounting;
 use crate::onion::exit_accounting::OnionExitLease;
+use crate::onion::https::try_handle_https_exit_payload;
+use crate::onion::https::OnionHttpsRuntime;
 use crate::onion::replay::OnionBackwardReplayCache;
 use crate::onion::replay::OnionBackwardReplayKey;
 use crate::onion::replay::OnionForwardReplayCache;
@@ -118,12 +120,24 @@ impl NativeOnionCircuitHandle {
     ) -> Result<Self> {
         let allow_exit = exit_config.is_some();
         let runtime = Arc::new(OnionTcpRuntime::new(session_sk.clone(), exit_config));
+        let https = Arc::new(OnionHttpsRuntime::new());
+        if let Some(config) = runtime.exit_config.as_ref() {
+            if config.allows_service(&OnionServiceName::https()) {
+                https.set_exit_policy(Some(config.policy().clone()));
+            }
+        }
         let capabilities = OnionCircuitCapabilities::from_registration(allow_relay, allow_exit);
+        let handler_session_sk = session_sk.clone();
         extensions.register(
             OnionCircuitProtocol::new(capabilities),
-            OnionCircuitShell::new(session_sk, NativeOnionCircuitHandler {
-                runtime: runtime.clone(),
-            }),
+            OnionCircuitShell::new(
+                session_sk,
+                NativeOnionCircuitHandler {
+                    runtime: runtime.clone(),
+                    https,
+                    session_sk: handler_session_sk,
+                },
+            ),
         )?;
         Ok(Self {
             runtime,
@@ -183,11 +197,21 @@ impl NativeOnionOpenStream {
 #[derive(Clone)]
 struct NativeOnionCircuitHandler {
     runtime: Arc<OnionTcpRuntime>,
+    https: Arc<OnionHttpsRuntime>,
+    session_sk: SessionSk,
 }
 
 #[async_trait::async_trait]
 impl OnionCircuitHandler for NativeOnionCircuitHandler {
     async fn handle_exit(&self, scope: &Scope, frame: OnionCircuitExitFrame) -> Result<()> {
+        if frame
+            .payload
+            .matches_service(crate::onion::proxy::ONION_PROXY_HTTPS_SERVICE)
+            && try_handle_https_exit_payload(&self.https, &self.session_sk, scope, frame.clone())
+                .await?
+        {
+            return Ok(());
+        }
         self.runtime.handle_exit_payload(scope.clone(), frame).await
     }
 
@@ -252,9 +276,12 @@ impl OnionTcpRuntime {
                 return Err(error);
             }
         };
-        let open_payload = match encode_tcp_payload(&service, OnionTcpPayload::Open {
-            target: target.authority(),
-        }) {
+        let open_payload = match encode_tcp_payload(
+            &service,
+            OnionTcpPayload::Open {
+                target: target.authority(),
+            },
+        ) {
             Ok(payload) => payload,
             Err(error) => {
                 self.remove_client_stream(key);

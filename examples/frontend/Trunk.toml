@@ -5,7 +5,7 @@ watch = [
   "assets",
   "Cargo.toml",
   "Trunk.toml",
-  "extension-assets/*.ts",
+  "extension-assets",
   "scripts/package-extension.mts",
   "tsconfig.base.json",
   "tsconfig.extension-assets.json",

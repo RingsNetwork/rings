@@ -106,10 +106,10 @@ fn parse_onion_exit_service(raw: &str) -> Result<OnionExitService, String> {
         "udp" => OnionExitTransport::Udp,
         "webtransport" | "web-transport" => OnionExitTransport::WebTransport,
         "requestresponse" | "request-response" => OnionExitTransport::RequestResponse,
-        "https" => OnionExitTransport::Https,
+        "https" => OnionExitTransport::Tcp,
         other => {
             return Err(format!(
-                "unsupported onion exit transport {other:?}; expected tcp, udp, webtransport, request-response, or https"
+                "unsupported onion exit transport {other:?}; expected tcp, udp, webtransport, request-response, or https (alias for tcp)"
             ));
         }
     };
@@ -124,7 +124,7 @@ fn validate_native_onion_exit_services(services: &[OnionExitService]) -> anyhow:
     for service in services {
         if service.transport != OnionExitTransport::Tcp {
             anyhow::bail!(
-                "native onion exits can serve only TCP transport; service {:?} uses {:?}. Use a browser node for HTTPS exits.",
+                "native onion exits can serve only TCP transport; service {:?} uses {:?}",
                 service.name,
                 service.transport
             );
@@ -286,7 +286,7 @@ struct RunCommand {
     #[arg(
         long,
         value_parser = parse_onion_exit_service,
-        help = "Exit service in name:transport form, e.g. https:https or web:tcp. May be repeated.",
+        help = "Exit service in name:transport form, e.g. https:tcp or web:tcp. May be repeated.",
         env
     )]
     pub onion_exit_service: Vec<OnionExitService>,

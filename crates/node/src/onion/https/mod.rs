@@ -1,34 +1,46 @@
 #![warn(missing_docs)]
-//! Browser HTTPS onion-exit request/response adapter.
+#![cfg_attr(all(feature = "node", not(feature = "browser")), allow(dead_code))]
+//! HTTPS onion-exit request/response adapter.
 //!
-//! This protocol is intentionally application-layer HTTPS. Browser exits cannot expose raw TCP,
-//! so a client sends an HTTPS request description over the route-aware onion circuit, the exit
-//! performs `fetch`, and the response is sent back over the circuit return path.
+//! This protocol is intentionally application-layer HTTPS. Clients can send an HTTPS request
+//! description over the route-aware onion circuit, the exit performs the request, and the response
+//! is sent back over the circuit return path.
 //!
 //! A browser page exit is constrained by the host browser's `fetch` capability: CORS, forbidden
 //! headers, credentials policy, and extension host permissions still apply. A full arbitrary HTTPS
 //! exit must run in a browser-extension or native context that grants those fetch permissions.
 
+#[cfg(all(not(feature = "node"), feature = "browser"))]
 use std::cell::RefCell;
 use std::collections::HashMap;
+#[cfg(all(not(feature = "node"), feature = "browser"))]
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::Mutex;
 
 use bytes::Bytes;
 use futures::channel::oneshot;
+#[cfg(all(not(feature = "node"), feature = "browser"))]
 use js_sys::Function;
+#[cfg(all(not(feature = "node"), feature = "browser"))]
 use js_sys::Object;
+#[cfg(all(not(feature = "node"), feature = "browser"))]
 use js_sys::Promise;
+#[cfg(all(not(feature = "node"), feature = "browser"))]
 use js_sys::Reflect;
+#[cfg(all(not(feature = "node"), feature = "browser"))]
 use js_sys::Uint8Array;
 use rings_core::dht::Did;
 use rings_core::session::SessionSk;
 use serde::Deserialize;
 use serde::Serialize;
+#[cfg(all(not(feature = "node"), feature = "browser"))]
 use wasm_bindgen::closure::Closure;
+#[cfg(all(not(feature = "node"), feature = "browser"))]
 use wasm_bindgen::JsCast;
+#[cfg(all(not(feature = "node"), feature = "browser"))]
 use wasm_bindgen::JsValue;
+#[cfg(all(not(feature = "node"), feature = "browser"))]
 use wasm_bindgen_futures::JsFuture;
 
 use crate::error::Error;
@@ -37,6 +49,7 @@ use crate::extension::ext::Scope;
 use crate::onion::circuit::send_backward;
 use crate::onion::circuit::OnionAuthenticatedPayload;
 use crate::onion::circuit::OnionCircuitExitFrame;
+#[cfg(feature = "browser")]
 use crate::onion::circuit::OnionCircuitHandler;
 use crate::onion::circuit::OnionCircuitId;
 use crate::onion::circuit::OnionCircuitPayload;
@@ -57,7 +70,7 @@ use crate::onion::OnionRouteError;
 
 const DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
 
-/// One browser HTTPS request executed by an HTTPS exit.
+/// One HTTPS request executed by an HTTPS exit.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct OnionHttpsRequest {
     /// Target authority (`host:port`).
@@ -72,7 +85,7 @@ pub struct OnionHttpsRequest {
     pub body: Vec<u8>,
 }
 
-/// One browser HTTPS response returned by an HTTPS exit.
+/// One HTTPS response returned by an HTTPS exit.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub struct OnionHttpsResponse {
     /// HTTP status code.
@@ -146,7 +159,7 @@ pub struct OnionHttpsClientResponse {
     pub body: Vec<u8>,
 }
 
-/// Shared runtime for the local browser HTTPS proxy protocol.
+/// Shared runtime for the local HTTPS proxy protocol.
 #[derive(Default)]
 pub(crate) struct OnionHttpsRuntime {
     pending: Mutex<HashMap<OnionCircuitId, PendingRequest>>,
@@ -192,12 +205,15 @@ impl OnionHttpsRuntime {
                 continue;
             }
             let (sender, receiver) = oneshot::channel();
-            pending.insert(id, PendingRequest {
-                expected_return_peer,
-                expected_exit,
-                return_id,
-                sender,
-            });
+            pending.insert(
+                id,
+                PendingRequest {
+                    expected_return_peer,
+                    expected_exit,
+                    return_id,
+                    sender,
+                },
+            );
             return Ok((id, receiver));
         }
         Err(Error::OnionRouteError(
@@ -450,11 +466,13 @@ fn url_path(suffix: &str) -> String {
 }
 
 /// Browser handler for HTTPS onion circuits.
+#[cfg(feature = "browser")]
 pub(crate) struct BrowserOnionCircuitHandler {
     https: Arc<OnionHttpsRuntime>,
     session_sk: SessionSk,
 }
 
+#[cfg(feature = "browser")]
 impl BrowserOnionCircuitHandler {
     /// Create a browser circuit handler backed by the HTTPS runtime.
     pub(crate) fn new(https: Arc<OnionHttpsRuntime>, session_sk: SessionSk) -> Self {
@@ -462,38 +480,12 @@ impl BrowserOnionCircuitHandler {
     }
 }
 
+#[cfg(feature = "browser")]
 #[async_trait::async_trait(?Send)]
 impl OnionCircuitHandler for BrowserOnionCircuitHandler {
     async fn handle_exit(&self, scope: &Scope, frame: OnionCircuitExitFrame) -> Result<()> {
-        let Some(payload) = decode_https_payload(frame.payload)? else {
-            return Ok(());
-        };
-        let response = match payload {
-            OnionHttpsPayload::Request(request) => {
-                match execute_exit_fetch(
-                    &self.https,
-                    &request,
-                    frame.circuit_id,
-                    frame.return_peer,
-                    frame.forward_nonce,
-                )
-                .await
-                {
-                    Ok(response) => OnionHttpsPayload::Response(response),
-                    Err(error) => OnionHttpsPayload::Error(OnionExitFailure::from_error(&error)),
-                }
-            }
-            OnionHttpsPayload::Response(_) | OnionHttpsPayload::Error(_) => return Ok(()),
-        };
-        send_backward(
-            scope,
-            &self.session_sk,
-            frame.circuit_id,
-            frame.return_peer,
-            frame.client,
-            encode_https_payload(response)?,
-        )
-        .await
+        let _ = try_handle_https_exit_payload(&self.https, &self.session_sk, scope, frame).await?;
+        Ok(())
     }
 
     async fn handle_client(
@@ -506,6 +498,51 @@ impl OnionCircuitHandler for BrowserOnionCircuitHandler {
         self.https.complete_payload(from, circuit_id, payload);
         Ok(())
     }
+}
+
+pub(crate) async fn try_handle_https_exit_payload(
+    runtime: &Arc<OnionHttpsRuntime>,
+    session_sk: &SessionSk,
+    scope: &Scope,
+    frame: OnionCircuitExitFrame,
+) -> Result<bool> {
+    if !frame.payload.matches_service(ONION_PROXY_HTTPS_SERVICE) {
+        return Ok(false);
+    }
+    let Some(payload) = (match decode_https_payload(frame.payload) {
+        Ok(payload) => payload,
+        Err(Error::DecodeError) => return Ok(false),
+        Err(error) => return Err(error),
+    }) else {
+        return Ok(false);
+    };
+    let response = match payload {
+        OnionHttpsPayload::Request(request) => {
+            match execute_exit_fetch(
+                runtime,
+                &request,
+                frame.circuit_id,
+                frame.return_peer,
+                frame.forward_nonce,
+            )
+            .await
+            {
+                Ok(response) => OnionHttpsPayload::Response(response),
+                Err(error) => OnionHttpsPayload::Error(OnionExitFailure::from_error(&error)),
+            }
+        }
+        OnionHttpsPayload::Response(_) | OnionHttpsPayload::Error(_) => return Ok(true),
+    };
+    send_backward(
+        scope,
+        session_sk,
+        frame.circuit_id,
+        frame.return_peer,
+        frame.client,
+        encode_https_payload(response)?,
+    )
+    .await?;
+    Ok(true)
 }
 
 pub(crate) async fn execute_exit_fetch(
@@ -535,7 +572,7 @@ pub(crate) async fn execute_exit_fetch(
         return Err(Error::NoPermission);
     }
     let url = format!("https://{}{}", authority, normalize_path(&request.path)?);
-    let response = browser_fetch(&url, request, body_limit).await?;
+    let response = execute_https_request(&url, request, body_limit).await?;
     runtime.record_exit_bytes(&policy, usize_to_u64(response.body.len())?)?;
     Ok(OnionHttpsResponse {
         status: response.status,
@@ -550,6 +587,80 @@ struct FetchResponse {
     body: Vec<u8>,
 }
 
+#[cfg(feature = "node")]
+async fn execute_https_request(
+    url: &str,
+    request: &OnionHttpsRequest,
+    max_body_bytes: u64,
+) -> Result<FetchResponse> {
+    native_fetch(url, request, max_body_bytes).await
+}
+
+#[cfg(all(not(feature = "node"), feature = "browser"))]
+async fn execute_https_request(
+    url: &str,
+    request: &OnionHttpsRequest,
+    max_body_bytes: u64,
+) -> Result<FetchResponse> {
+    browser_fetch(url, request, max_body_bytes).await
+}
+
+#[cfg(feature = "node")]
+async fn native_fetch(
+    url: &str,
+    request: &OnionHttpsRequest,
+    max_body_bytes: u64,
+) -> Result<FetchResponse> {
+    let method = reqwest::Method::from_bytes(normalize_method(&request.method).as_bytes())
+        .map_err(|error| Error::HttpRequestError(format!("invalid HTTPS proxy method: {error}")))?;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| Error::HttpRequestError(format!("build HTTPS proxy client: {error}")))?;
+    let mut builder = client.request(method, url);
+    for (name, value) in &request.headers {
+        builder = builder.header(name.as_str(), value.as_str());
+    }
+    if !request.body.is_empty() {
+        builder = builder.body(request.body.clone());
+    }
+    let mut response = builder
+        .send()
+        .await
+        .map_err(|error| Error::HttpRequestError(format!("native HTTPS proxy request: {error}")))?;
+    let status = response.status().as_u16();
+    let headers = response
+        .headers()
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_string(),
+                value.to_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect::<Vec<_>>();
+    reject_content_length_over_limit(&headers, max_body_bytes)?;
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| Error::HttpRequestError(format!("read HTTPS proxy response: {error}")))?
+    {
+        let body_len = usize_to_u64(body.len())?;
+        let chunk_len = usize_to_u64(chunk.len())?;
+        if max_body_bytes > 0 && body_len.saturating_add(chunk_len) > max_body_bytes {
+            return Err(Error::NoPermission);
+        }
+        body.extend_from_slice(chunk.as_ref());
+    }
+    Ok(FetchResponse {
+        status,
+        headers,
+        body,
+    })
+}
+
+#[cfg(all(not(feature = "node"), feature = "browser"))]
 async fn browser_fetch(
     url: &str,
     request: &OnionHttpsRequest,
@@ -587,6 +698,7 @@ async fn browser_fetch(
     })
 }
 
+#[cfg(all(not(feature = "node"), feature = "browser"))]
 fn fetch_init(request: &OnionHttpsRequest) -> Result<Object> {
     let init = Object::new();
     Reflect::set(
@@ -660,6 +772,7 @@ fn usize_to_u64(value: usize) -> Result<u64> {
     u64::try_from(value).map_err(|_| Error::InvalidData)
 }
 
+#[cfg(all(not(feature = "node"), feature = "browser"))]
 fn collect_headers(response: &JsValue) -> Result<Vec<(String, String)>> {
     let headers =
         Reflect::get(response, JsValue::from_str("headers").as_ref()).map_err(js_error)?;
@@ -702,6 +815,7 @@ fn reject_content_length_over_limit(
     Ok(())
 }
 
+#[cfg(all(not(feature = "node"), feature = "browser"))]
 async fn response_body(response: &JsValue, max_body_bytes: u64) -> Result<Vec<u8>> {
     let body = Reflect::get(response, JsValue::from_str("body").as_ref()).map_err(js_error)?;
     if body.is_null() || body.is_undefined() {
@@ -785,6 +899,7 @@ fn default_path() -> String {
     "/".to_string()
 }
 
+#[cfg(all(not(feature = "node"), feature = "browser"))]
 fn js_error(error: JsValue) -> Error {
     Error::JsError(format!("{error:?}"))
 }

@@ -63,13 +63,16 @@ fn normalizes_empty_request_defaults() {
     let target = OnionProxyTarget::parse_authority("Example.COM:443").unwrap();
     let wire = client_request_with_default_path(&target, request, default_path().as_str()).unwrap();
 
-    assert_eq!(wire, OnionHttpsRequest {
-        target: "example.com:443".to_string(),
-        method: "GET".to_string(),
-        path: "/".to_string(),
-        headers: Vec::new(),
-        body: Vec::new(),
-    });
+    assert_eq!(
+        wire,
+        OnionHttpsRequest {
+            target: "example.com:443".to_string(),
+            method: "GET".to_string(),
+            path: "/".to_string(),
+            headers: Vec::new(),
+            body: Vec::new(),
+        }
+    );
 }
 
 #[test]

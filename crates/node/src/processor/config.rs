@@ -89,7 +89,7 @@ impl ProcessorConfig {
         self.session_sk.clone()
     }
 
-    /// Enables HTTPS-only onion exit advertisement.
+    /// Enables only the standard HTTPS-over-TCP onion exit service.
     pub fn enable_https_onion_exit(mut self) -> Self {
         self.advertise_onion_exit = true;
         self.onion_exit_services = https_onion_exit_services();
@@ -139,16 +139,14 @@ impl ProcessorConfig {
         self
     }
 
-    /// Return the browser HTTPS onion-exit policy when this config advertises that service.
+    /// Return the HTTPS onion-exit policy when this config advertises that service.
     #[cfg(feature = "browser")]
     pub fn onion_https_exit_policy(&self) -> Option<OnionExitPolicy> {
         (self.advertise_onion_exit
-            && self.onion_exit_services.iter().any(|service| {
-                service.matches(
-                    ONION_PROXY_HTTPS_SERVICE,
-                    crate::onion::OnionExitTransport::Https,
-                )
-            }))
+            && self
+                .onion_exit_services
+                .iter()
+                .any(|service| service.matches_route_service(ONION_PROXY_HTTPS_SERVICE)))
         .then(|| self.onion_exit_policy.clone())
     }
 }
@@ -331,7 +329,7 @@ impl ProcessorConfigSerialized {
         self
     }
 
-    /// Enables HTTPS-only onion exit advertisement.
+    /// Enables only the standard HTTPS-over-TCP onion exit service.
     pub fn enable_https_onion_exit(mut self) -> Self {
         self.advertise_onion_exit = true;
         self.onion_exit_services = https_onion_exit_services();
@@ -497,7 +495,9 @@ impl Serialize for ProcessorConfig {
 
 impl<'de> serde::de::Deserialize<'de> for ProcessorConfig {
     fn deserialize<D>(deserializer: D) -> core::result::Result<Self, D::Error>
-    where D: serde::Deserializer<'de> {
+    where
+        D: serde::Deserializer<'de>,
+    {
         match ProcessorConfigSerialized::deserialize(deserializer) {
             Ok(ins) => {
                 let cfg: ProcessorConfig = ins

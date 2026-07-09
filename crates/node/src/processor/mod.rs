@@ -88,6 +88,24 @@ pub(crate) use config::parse_webrtc_udp_port_range;
 pub use config::ProcessorConfig;
 pub use config::ProcessorConfigSerialized;
 
+const DHT_LOOKUP_CACHE_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const DHT_LOOKUP_CACHE_POLL_ATTEMPTS: usize = 40;
+
+#[cfg(not(feature = "browser"))]
+async fn sleep_dht_lookup_poll_interval(interval: Duration) -> Result<()> {
+    futures_timer::Delay::new(interval).await;
+    Ok(())
+}
+
+#[cfg(feature = "browser")]
+async fn sleep_dht_lookup_poll_interval(interval: Duration) -> Result<()> {
+    let interval_ms = i32::try_from(interval.as_millis()).unwrap_or(i32::MAX);
+    rings_core::utils::js_utils::window_sleep(interval_ms)
+        .await
+        .map_err(|error| Error::JsError(format!("{error:?}")))?;
+    Ok(())
+}
+
 /// Processor for rings-node rpc server.
 ///
 /// Cloning shares the same node handle; publishes from any clone are serialized
@@ -180,8 +198,7 @@ impl Processor {
     ) -> Result<Vec<OnlineNodeDescriptor>> {
         let entry_key = entry::Entry::gen_did(ONLINE_NODES_TOPIC)?;
 
-        self.storage_fetch(entry_key).await?;
-        let Some(entry) = self.storage_check_cache(entry_key).await else {
+        let Some(entry) = self.fetch_storage_entry(entry_key).await? else {
             return Ok(vec![]);
         };
 
@@ -204,8 +221,7 @@ impl Processor {
     ) -> Result<Vec<OnionExitDescriptor>> {
         let entry_key = entry::Entry::gen_did(ONION_EXITS_TOPIC)?;
 
-        self.storage_fetch(entry_key).await?;
-        let Some(entry) = self.storage_check_cache(entry_key).await else {
+        let Some(entry) = self.fetch_storage_entry(entry_key).await? else {
             return Ok(vec![]);
         };
 
@@ -221,6 +237,20 @@ impl Processor {
         .filter(|descriptor| service.is_empty() || descriptor.offers_service(service));
 
         Ok(descriptors.collect())
+    }
+
+    async fn fetch_storage_entry(&self, entry_key: Did) -> Result<Option<entry::Entry>> {
+        self.storage_fetch(entry_key).await?;
+        for attempt in 0..DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
+            if let Some(entry) = self.storage_check_cache(entry_key).await {
+                return Ok(Some(entry));
+            }
+            if attempt + 1 == DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
+                break;
+            }
+            sleep_dht_lookup_poll_interval(DHT_LOOKUP_CACHE_POLL_INTERVAL).await?;
+        }
+        Ok(None)
     }
 
     /// Build an onion route from live presence descriptors and live exit descriptors.

@@ -31,7 +31,6 @@ use crate::wallet;
 use crate::wallet::WalletAccount;
 use crate::wallet::WalletKind;
 use crate::workbench;
-use crate::workbench::DwebState;
 
 #[derive(Clone, PartialEq)]
 struct SettingsSnapshot {
@@ -47,7 +46,7 @@ struct SettingsSnapshot {
 /// Rings browser frontend app.
 #[function_component(App)]
 pub fn app() -> Html {
-    let active_panel = use_state(|| Panel::Dweb);
+    let active_panel = use_state(|| Panel::Onion);
     let wallet_kind = use_state(|| {
         extension::load_setting_with_legacy(
             extension::SETTING_WALLET_KIND,
@@ -120,13 +119,6 @@ pub fn app() -> Html {
     let settings_dialog_open = use_state(|| false);
     let control_sidebar_collapsed = use_state(|| false);
     let workbench_dialog_open = use_state(|| false);
-
-    let host_path = use_state(|| "/".to_string());
-    let host_body = use_state(dweb::default_page);
-    let hosted_pages = use_state(|| vec![("/".to_string(), dweb::default_page())]);
-    let fetch_peer = use_state(String::new);
-    let fetch_path = use_state(|| "/".to_string());
-    let dweb_page = use_state(String::new);
 
     let prover_did = use_state(String::new);
     let r1cs_url = use_state(|| "http://127.0.0.1:8080/simple_bn256.r1cs".to_string());
@@ -226,7 +218,6 @@ pub fn app() -> Html {
         let stabilize_interval = stabilize_interval.clone();
         let storage_name = storage_name.clone();
         let seed_url = seed_url.clone();
-        let dweb_page = dweb_page.clone();
         let custom_events = custom_events.clone();
         let settings_dialog_open = settings_dialog_open.clone();
         Callback::from(move |_| {
@@ -244,7 +235,6 @@ pub fn app() -> Html {
             let stabilize_interval = (*stabilize_interval).clone();
             let storage_name = (*storage_name).clone();
             let seed_url = (*seed_url).trim().to_string();
-            let dweb_page = dweb_page.clone();
             let custom_events = custom_events.clone();
             let kind = *wallet_kind;
             let start_token = generation.bump();
@@ -368,12 +358,7 @@ pub fn app() -> Html {
                         "<h1>Rings node {my_did}</h1><p>Served by the Rings browser frontend.</p>"
                     ),
                 );
-                let on_dweb_response = {
-                    let dweb_page = dweb_page.clone();
-                    Callback::from(move |response: dweb::DwebResponse| {
-                        dweb_page.set(format!("<!-- {} -->\n{}", response.path, response.body));
-                    })
-                };
+                let on_dweb_response = Callback::from(|_: dweb::DwebResponse| {});
                 if let Err(error) = dweb::register(&built.provider, site.clone(), on_dweb_response)
                 {
                     built.stop();
@@ -657,21 +642,6 @@ pub fn app() -> Html {
         status.clone(),
     );
     let workbench_body = match *active_panel {
-        Panel::Dweb => html! {
-            { workbench::dweb_panel(
-                DwebState {
-                    host_path: &host_path,
-                    host_body: &host_body,
-                    hosted_pages: &hosted_pages,
-                    fetch_peer: &fetch_peer,
-                    fetch_path: &fetch_path,
-                    dweb_page: &dweb_page,
-                },
-                site.clone(),
-                node_ref.clone(),
-                status.clone(),
-            ) }
-        },
         Panel::Onion => html! {
             { workbench::onion_proxy_panel(
                 workbench::OnionProxyState {

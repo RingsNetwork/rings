@@ -1,9 +1,13 @@
-//! Workbench panels for dweb, proof, and custom messages.
+//! Workbench panels for onion proxy, proof, and custom messages.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::future::Future;
 use std::rc::Rc;
+use std::time::Duration;
 
+use futures::future::Either;
+use futures::FutureExt;
+use gloo_timers::future::sleep;
 use rings_node::extension::snark::ProofResult;
 use wasm_bindgen::JsCast;
 use web_sys::Event;
@@ -12,7 +16,6 @@ use yew::prelude::*;
 
 use crate::controls::metric;
 use crate::custom;
-use crate::dweb;
 use crate::extension;
 use crate::forms::text_input;
 use crate::forms::textarea;
@@ -20,14 +23,8 @@ use crate::node::DemoNode;
 use crate::onion;
 use crate::proof;
 
-pub(crate) struct DwebState<'a> {
-    pub(crate) host_path: &'a UseStateHandle<String>,
-    pub(crate) host_body: &'a UseStateHandle<String>,
-    pub(crate) hosted_pages: &'a UseStateHandle<Vec<(String, String)>>,
-    pub(crate) fetch_peer: &'a UseStateHandle<String>,
-    pub(crate) fetch_path: &'a UseStateHandle<String>,
-    pub(crate) dweb_page: &'a UseStateHandle<String>,
-}
+const ONION_ROUTE_TIMEOUT: Duration = Duration::from_secs(20);
+const ONION_REQUEST_TIMEOUT: Duration = Duration::from_secs(35);
 
 pub(crate) struct OnionProxyState<'a> {
     pub(crate) url: &'a UseStateHandle<String>,
@@ -40,93 +37,6 @@ pub(crate) struct OnionProxyState<'a> {
     pub(crate) response_status: &'a UseStateHandle<String>,
     pub(crate) response_headers: &'a UseStateHandle<String>,
     pub(crate) response_body: &'a UseStateHandle<String>,
-}
-
-pub(crate) fn dweb_panel(
-    state: DwebState<'_>,
-    site: Rc<RefCell<HashMap<String, String>>>,
-    node_ref: Rc<RefCell<Option<DemoNode>>>,
-    status: UseStateHandle<String>,
-) -> Html {
-    let on_save = {
-        let host_path = (*state.host_path).clone();
-        let host_body = (*state.host_body).clone();
-        let hosted_pages = (*state.hosted_pages).clone();
-        let site = site.clone();
-        let status = status.clone();
-        Callback::from(move |_| {
-            let path = (*host_path).trim().to_string();
-            if path.is_empty() {
-                status.set("path cannot be empty".to_string());
-                return;
-            }
-            site.borrow_mut().insert(path.clone(), (*host_body).clone());
-            let mut pages: Vec<_> = site
-                .borrow()
-                .iter()
-                .map(|(path, body)| (path.clone(), body.clone()))
-                .collect();
-            pages.sort_by(|a, b| a.0.cmp(&b.0));
-            hosted_pages.set(pages);
-            status.set(format!("hosting {path}"));
-        })
-    };
-    let on_fetch = {
-        let node_ref = node_ref.clone();
-        let peer = (*state.fetch_peer).clone();
-        let path = (*state.fetch_path).clone();
-        let status = status.clone();
-        Callback::from(move |_| {
-            let Some(node) = node_ref.borrow().clone() else {
-                status.set("start the node first".to_string());
-                return;
-            };
-            let peer = (*peer).trim().to_string();
-            let path = (*path).trim().to_string();
-            if peer.is_empty() || path.is_empty() {
-                status.set("enter peer DID and path".to_string());
-                return;
-            }
-            let status = status.clone();
-            wasm_bindgen_futures::spawn_local(async move {
-                match dweb::fetch(node.provider.clone(), peer, path).await {
-                    Ok(()) => status.set("dweb request sent".to_string()),
-                    Err(error) => status.set(error),
-                }
-            });
-        })
-    };
-    html! {
-        <section class="feature-panel" id="dweb">
-            <div class="section-heading">
-                <p class="eyebrow">{ "Dweb" }</p>
-                <h2>{ "Publish and resolve browser-hosted content" }</h2>
-            </div>
-            <div class="workflow-grid">
-                <div class="tool-block">
-                    <h3>{ "Publish" }</h3>
-                    { text_input("Path", (*state.host_path).clone()) }
-                    { textarea("HTML body", (*state.host_body).clone()) }
-                    <button onclick={on_save}>{ "Save hosted page" }</button>
-                    <div class="list">
-                        { for state.hosted_pages.iter().map(|(path, body)| html! {
-                            <div class="list-item">
-                                <div class="mono">{ path.clone() }</div>
-                                <div class="muted">{ format!("{} bytes", body.len()) }</div>
-                            </div>
-                        })}
-                    </div>
-                </div>
-                <div class="tool-block">
-                    <h3>{ "Resolve" }</h3>
-                    { text_input("Peer DID", (*state.fetch_peer).clone()) }
-                    { text_input("Path", (*state.fetch_path).clone()) }
-                    <button onclick={on_fetch}>{ "Fetch page" }</button>
-                    <iframe class="iframe" title="dweb page" sandbox="" srcdoc={(**state.dweb_page).clone()} />
-                </div>
-            </div>
-        </section>
-    }
 }
 
 pub(crate) fn onion_proxy_panel(
@@ -163,14 +73,20 @@ pub(crate) fn onion_proxy_panel(
             let response_status = response_status.clone();
             let status = status.clone();
             status.set("building onion route".to_string());
+            route_result.set("Building route...".to_string());
+            response_status.set("routing".to_string());
             wasm_bindgen_futures::spawn_local(async move {
-                let result = if let Some(bridge) = bridge {
-                    extension::extension_onion_proxy_route(&bridge, request).await
-                } else if let Some(node) = node {
-                    onion::route(&node.provider, request).await
-                } else {
-                    Err("start the node first".to_string())
-                };
+                let result =
+                    operation_timeout("onion route build", ONION_ROUTE_TIMEOUT, async move {
+                        if let Some(bridge) = bridge {
+                            extension::extension_onion_proxy_route(&bridge, request).await
+                        } else if let Some(node) = node {
+                            onion::route(&node.provider, request).await
+                        } else {
+                            Err("start the node first".to_string())
+                        }
+                    })
+                    .await;
                 match result {
                     Ok(route) => {
                         let hop_count = route.hops.len();
@@ -178,7 +94,11 @@ pub(crate) fn onion_proxy_panel(
                         response_status.set(format!("{hop_count} hops"));
                         status.set("onion route built".to_string());
                     }
-                    Err(error) => status.set(error),
+                    Err(error) => {
+                        route_result.set(error.clone());
+                        response_status.set("failed".to_string());
+                        status.set(error);
+                    }
                 }
             });
         })
@@ -229,14 +149,22 @@ pub(crate) fn onion_proxy_panel(
             let route_result = route_result.clone();
             let status = status.clone();
             status.set("sending onion proxy request".to_string());
+            response_status.set("sending".to_string());
+            response_headers.set(String::new());
+            response_body.set(String::new());
+            route_result.set("Sending request through onion HTTPS proxy...".to_string());
             wasm_bindgen_futures::spawn_local(async move {
-                let result = if let Some(bridge) = bridge {
-                    extension::extension_onion_proxy_request(&bridge, request).await
-                } else if let Some(node) = node {
-                    onion::request(&node.provider, request).await
-                } else {
-                    Err("start the node first".to_string())
-                };
+                let result =
+                    operation_timeout("onion proxy request", ONION_REQUEST_TIMEOUT, async move {
+                        if let Some(bridge) = bridge {
+                            extension::extension_onion_proxy_request(&bridge, request).await
+                        } else if let Some(node) = node {
+                            onion::request(&node.provider, request).await
+                        } else {
+                            Err("start the node first".to_string())
+                        }
+                    })
+                    .await;
                 match result {
                     Ok(response) => {
                         response_status.set(response.status.to_string());
@@ -245,7 +173,11 @@ pub(crate) fn onion_proxy_panel(
                         route_result.set("request completed through onion HTTPS proxy".to_string());
                         status.set("onion proxy request completed".to_string());
                     }
-                    Err(error) => status.set(error),
+                    Err(error) => {
+                        response_status.set("failed".to_string());
+                        response_body.set(error.clone());
+                        status.set(error);
+                    }
                 }
             });
         })
@@ -267,8 +199,8 @@ pub(crate) fn onion_proxy_panel(
                     { textarea("Headers", state.headers.clone()) }
                     { textarea("Body", state.body.clone()) }
                     <div class="button-row">
-                        <button onclick={on_route}>{ "Build route" }</button>
-                        <button onclick={on_request}>{ "Send request" }</button>
+                        <button type="button" onclick={on_route}>{ "Build route" }</button>
+                        <button type="button" onclick={on_request}>{ "Send request" }</button>
                     </div>
                 </div>
                 <div class="tool-block">
@@ -282,6 +214,23 @@ pub(crate) fn onion_proxy_panel(
                 </div>
             </div>
         </section>
+    }
+}
+
+async fn operation_timeout<T, F>(
+    label: &'static str,
+    timeout: Duration,
+    operation: F,
+) -> Result<T, String>
+where
+    F: Future<Output = Result<T, String>>,
+{
+    let operation = operation.fuse();
+    let timer = sleep(timeout).fuse();
+    futures::pin_mut!(operation, timer);
+    match futures::future::select(operation, timer).await {
+        Either::Left((result, _)) => result,
+        Either::Right((_, _)) => Err(format!("{label} timed out")),
     }
 }
 

@@ -58,15 +58,21 @@ fn signed_exit_for_session_at(
 }
 
 #[test]
-fn default_exit_services_include_native_tcp_only() {
-    assert_eq!(default_onion_exit_services(), vec![OnionExitService::tcp()]);
+fn default_exit_services_include_native_tcp_and_https() {
+    assert_eq!(
+        default_onion_exit_services(),
+        vec![OnionExitService::tcp(), OnionExitService::https()]
+    );
     assert_eq!(https_onion_exit_services(), vec![OnionExitService::https()]);
 }
 
 #[test]
 fn reserved_service_name_requires_reserved_transport_for_routes() {
     assert!(OnionExitService::https().matches_route_service("https"));
-    assert!(!OnionExitService::new("https", OnionExitTransport::Tcp)
+    assert!(OnionExitService::new("https", OnionExitTransport::Tcp)
+        .expect("valid service")
+        .matches_route_service("https"));
+    assert!(!OnionExitService::new("https", OnionExitTransport::Https)
         .expect("valid service")
         .matches_route_service("https"));
     assert!(OnionExitService::new("custom", OnionExitTransport::Tcp)
@@ -266,21 +272,16 @@ fn latest_valid_by_service_did_preserves_same_did_distinct_services() -> Result<
         signed_exit_for_session_at(&session_sk, OnionExitService::tcp(), 20, 100, "tcp-new")?;
     let https =
         signed_exit_for_session_at(&session_sk, OnionExitService::https(), 15, 100, "https")?;
-    let wrong_https_transport = signed_exit_for_session_at(
+    let custom = signed_exit_for_session_at(
         &session_sk,
-        OnionExitService::new("https", OnionExitTransport::Tcp)?,
+        OnionExitService::new("api", OnionExitTransport::Tcp)?,
         25,
         100,
-        "https-wrong-transport",
+        "api",
     )?;
 
     let descriptors = OnionExitDescriptor::latest_valid_by_service_did(
-        vec![
-            old_tcp,
-            new_tcp.clone(),
-            https.clone(),
-            wrong_https_transport.clone(),
-        ],
+        vec![old_tcp, new_tcp.clone(), https.clone(), custom.clone()],
         50,
         false,
     );
@@ -288,8 +289,6 @@ fn latest_valid_by_service_did_preserves_same_did_distinct_services() -> Result<
     assert_eq!(descriptors.len(), 3);
     assert!(descriptors.iter().any(|descriptor| descriptor == &new_tcp));
     assert!(descriptors.iter().any(|descriptor| descriptor == &https));
-    assert!(descriptors
-        .iter()
-        .any(|descriptor| descriptor == &wrong_https_transport));
+    assert!(descriptors.iter().any(|descriptor| descriptor == &custom));
     Ok(())
 }
