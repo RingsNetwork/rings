@@ -307,6 +307,7 @@ impl Processor {
             return Err(Error::InvalidData);
         }
         let service = OnionServiceName::parse(service)?;
+        let seq = if seq == 0 { 1 } else { seq };
         let record = RingsNameRecord::new_signed(
             RingsNameRecordBody {
                 name,

@@ -336,10 +336,9 @@ impl HandleRpc<LookupServiceRequest, LookupServiceResponse> for Processor {
 impl HandleRpc<PublishRingsNameRequest, PublishRingsNameResponse> for Processor {
     async fn handle_rpc(&self, req: PublishRingsNameRequest) -> Result<PublishRingsNameResponse> {
         let transport = crate::rpc_dto::onion_exit_transport_from_info(req.transport);
-        let seq = if req.seq == 0 { 1 } else { req.seq };
         let requested_name = (!req.name.trim().is_empty()).then_some(req.name.as_str());
         let record = self
-            .publish_rings_name(requested_name, &req.service, transport, req.ttl_ms, seq)
+            .publish_rings_name(requested_name, &req.service, transport, req.ttl_ms, req.seq)
             .await
             .map_err(Error::from)?;
         Ok(PublishRingsNameResponse {

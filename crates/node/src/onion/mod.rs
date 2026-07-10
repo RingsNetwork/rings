@@ -139,6 +139,22 @@ pub enum OnionExitTransport {
     Https,
 }
 
+impl OnionExitTransport {
+    /// Parse user-facing transport names used by CLI, RPC adapters, and browser bindings.
+    pub fn parse_user_input(raw: &str) -> Result<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "tcp" => Ok(Self::Tcp),
+            "udp" => Ok(Self::Udp),
+            "webtransport" | "web-transport" => Ok(Self::WebTransport),
+            "requestresponse" | "request-response" => Ok(Self::RequestResponse),
+            "https" => Ok(Self::Https),
+            other => Err(Error::InvalidConfig(format!(
+                "unsupported onion exit transport {other:?}; expected tcp, udp, webtransport, request-response, or https"
+            ))),
+        }
+    }
+}
+
 /// One named service offered by an onion exit.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct OnionExitService {

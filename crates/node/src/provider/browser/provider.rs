@@ -20,6 +20,7 @@ use rings_core::storage::idb::IdbStorage;
 use rings_core::utils::js_utils;
 use rings_core::utils::js_value;
 use rings_derive::wasm_export;
+use rings_rpc::method::Method;
 use rings_rpc::protos::rings_node::*;
 use wasm_bindgen;
 use wasm_bindgen::prelude::*;
@@ -634,33 +635,43 @@ impl Provider {
         ttl_ms: u64,
         seq: u64,
     ) -> js_sys::Promise {
-        let p = self.processor.clone();
+        let provider = self.clone();
         future_to_promise(async move {
-            let transport = parse_onion_exit_transport(&transport)?;
-            let requested_name = (!name.trim().is_empty()).then_some(name.as_str());
-            let record = p
-                .publish_rings_name(requested_name, service.as_str(), transport, ttl_ms, seq)
-                .await
-                .map_err(JsError::from)?;
-            let info = crate::rpc_dto::rings_name_record_info(record).map_err(JsError::from)?;
-            Ok(js_value::serialize(&info).map_err(JsError::from)?)
+            let transport = parse_onion_exit_transport_info(&transport)?;
+            let response: PublishRingsNameResponse = request_internal_typed(
+                provider,
+                Method::PublishRingsName,
+                PublishRingsNameRequest {
+                    name,
+                    service,
+                    transport,
+                    ttl_ms,
+                    seq,
+                },
+            )
+            .await?;
+            let record = response
+                .record
+                .ok_or_else(|| JsError::new("publishRingsName response did not include record"))?;
+            Ok(js_value::serialize(&record).map_err(JsError::from)?)
         })
     }
 
     /// Resolve a self-authenticating `.rings` record.
     pub fn resolve_rings_name(&self, name: String, include_expired: bool) -> js_sys::Promise {
-        let p = self.processor.clone();
+        let provider = self.clone();
         future_to_promise(async move {
-            match p
-                .resolve_rings_name(name.as_str(), include_expired)
-                .await
-                .map_err(JsError::from)?
-            {
-                Some(record) => {
-                    let info =
-                        crate::rpc_dto::rings_name_record_info(record).map_err(JsError::from)?;
-                    Ok(js_value::serialize(&info).map_err(JsError::from)?)
-                }
+            let response: ResolveRingsNameResponse = request_internal_typed(
+                provider,
+                Method::ResolveRingsName,
+                ResolveRingsNameRequest {
+                    name,
+                    include_expired,
+                },
+            )
+            .await?;
+            match response.record {
+                Some(record) => Ok(js_value::serialize(&record).map_err(JsError::from)?),
                 None => Ok(JsValue::null()),
             }
         })
@@ -673,29 +684,45 @@ impl Provider {
         hop_count: usize,
         allow_short_paths: bool,
     ) -> js_sys::Promise {
-        let p = self.processor.clone();
+        let provider = self.clone();
         future_to_promise(async move {
-            let route = p
-                .build_rings_name_route(name.as_str(), hop_count, allow_short_paths)
-                .await
-                .map_err(JsError::from)?;
-            let info = crate::rpc_dto::onion_route_response(route).map_err(JsError::from)?;
-            Ok(js_value::serialize(&info).map_err(JsError::from)?)
+            let hop_count =
+                u32::try_from(hop_count).map_err(|_| JsError::new("hop_count does not fit u32"))?;
+            let response: BuildOnionRouteResponse = request_internal_typed(
+                provider,
+                Method::BuildRingsNameRoute,
+                BuildRingsNameRouteRequest {
+                    name,
+                    hop_count,
+                    allow_short_paths,
+                },
+            )
+            .await?;
+            Ok(js_value::serialize(&response).map_err(JsError::from)?)
         })
     }
 }
 
-fn parse_onion_exit_transport(raw: &str) -> Result<OnionExitTransport, JsError> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "tcp" => Ok(OnionExitTransport::Tcp),
-        "udp" => Ok(OnionExitTransport::Udp),
-        "webtransport" | "web-transport" => Ok(OnionExitTransport::WebTransport),
-        "requestresponse" | "request-response" => Ok(OnionExitTransport::RequestResponse),
-        "https" => Ok(OnionExitTransport::Https),
-        other => Err(JsError::new(&format!(
-            "unsupported onion exit transport {other:?}; expected tcp, udp, webtransport, request-response, or https"
-        ))),
-    }
+async fn request_internal_typed<Req, Resp>(
+    provider: Provider,
+    method: Method,
+    request: Req,
+) -> Result<Resp, JsError>
+where
+    Req: serde::Serialize,
+    Resp: serde::de::DeserializeOwned,
+{
+    let params = serde_json::to_value(request).map_err(|error| JsError::new(&error.to_string()))?;
+    let response = provider
+        .request_internal(method.to_string(), params)
+        .await
+        .map_err(JsError::from)?;
+    serde_json::from_value(response).map_err(|error| JsError::new(&error.to_string()))
+}
+
+fn parse_onion_exit_transport_info(raw: &str) -> Result<OnionExitTransportInfo, JsError> {
+    let transport = OnionExitTransport::parse_user_input(raw).map_err(JsError::from)?;
+    Ok(crate::rpc_dto::onion_exit_transport_info(transport))
 }
 
 impl Provider {

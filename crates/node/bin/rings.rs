@@ -102,18 +102,8 @@ fn parse_onion_exit_service(raw: &str) -> Result<OnionExitService, String> {
     if name.is_empty() {
         return Err("onion exit service name must not be empty".to_string());
     }
-    let transport = match transport.trim().to_ascii_lowercase().as_str() {
-        "tcp" => OnionExitTransport::Tcp,
-        "udp" => OnionExitTransport::Udp,
-        "webtransport" | "web-transport" => OnionExitTransport::WebTransport,
-        "requestresponse" | "request-response" => OnionExitTransport::RequestResponse,
-        "https" => OnionExitTransport::Https,
-        other => {
-            return Err(format!(
-                "unsupported onion exit transport {other:?}; expected tcp, udp, webtransport, request-response, or https"
-            ));
-        }
-    };
+    let transport =
+        OnionExitTransport::parse_user_input(transport).map_err(|error| error.to_string())?;
     OnionExitService::new(name, transport).map_err(|error| error.to_string())
 }
 
@@ -122,16 +112,14 @@ fn parse_onion_service_name(raw: &str) -> Result<OnionServiceName, String> {
 }
 
 fn parse_onion_exit_transport_info(raw: &str) -> Result<OnionExitTransportInfo, String> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "tcp" => Ok(OnionExitTransportInfo::Tcp),
-        "udp" => Ok(OnionExitTransportInfo::Udp),
-        "webtransport" | "web-transport" => Ok(OnionExitTransportInfo::WebTransport),
-        "requestresponse" | "request-response" => Ok(OnionExitTransportInfo::RequestResponse),
-        "https" => Ok(OnionExitTransportInfo::Https),
-        other => Err(format!(
-            "unsupported onion exit transport {other:?}; expected tcp, udp, webtransport, request-response, or https"
-        )),
-    }
+    let transport = OnionExitTransport::parse_user_input(raw).map_err(|error| error.to_string())?;
+    Ok(match transport {
+        OnionExitTransport::Tcp => OnionExitTransportInfo::Tcp,
+        OnionExitTransport::Udp => OnionExitTransportInfo::Udp,
+        OnionExitTransport::WebTransport => OnionExitTransportInfo::WebTransport,
+        OnionExitTransport::RequestResponse => OnionExitTransportInfo::RequestResponse,
+        OnionExitTransport::Https => OnionExitTransportInfo::Https,
+    })
 }
 
 fn validate_native_onion_exit_services(services: &[OnionExitService]) -> anyhow::Result<()> {

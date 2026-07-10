@@ -1,3 +1,7 @@
+use rings_rpc::protos::rings_node::OnionExitTransportInfo;
+use rings_rpc::protos::rings_node::PublishRingsNameRequest;
+use rings_rpc::protos::rings_node::PublishRingsNameResponse;
+use rings_rpc::protos::rings_node::RingsNameRecordInfo;
 use rings_rpc::protos::rings_node::SendBackendMessageRequest;
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::*;
@@ -11,6 +15,46 @@ use crate::provider::browser;
 
 #[cfg(feature = "browser_chrome_test")]
 wasm_bindgen_test_configure!(run_in_browser);
+
+#[wasm_bindgen_test]
+async fn publish_rings_name_convenience_matches_rpc_request_defaults() {
+    let provider = new_provider().await;
+    let direct = JsFuture::from(provider.publish_rings_name(
+        "".to_string(),
+        "web".to_string(),
+        "tcp".to_string(),
+        60_000,
+        0,
+    ))
+    .await
+    .unwrap();
+    let direct = js_value::deserialize::<RingsNameRecordInfo>(direct).unwrap();
+    let request = PublishRingsNameRequest {
+        name: "".to_string(),
+        service: "web".to_string(),
+        transport: OnionExitTransportInfo::Tcp,
+        ttl_ms: 60_000,
+        seq: 0,
+    };
+    let rpc = JsFuture::from(provider.request(
+        "publishRingsName".to_string(),
+        js_value::serialize(&request).unwrap(),
+    ))
+    .await
+    .unwrap();
+    let rpc = js_value::deserialize::<PublishRingsNameResponse>(rpc)
+        .unwrap()
+        .record
+        .unwrap();
+
+    assert_eq!(direct.name, rpc.name);
+    assert_eq!(direct.target_did, rpc.target_did);
+    assert_eq!(direct.service, rpc.service);
+    assert_eq!(direct.transport, rpc.transport);
+    assert_eq!(direct.network_id, rpc.network_id);
+    assert_eq!(direct.seq, 1);
+    assert_eq!(rpc.seq, 1);
+}
 
 #[wasm_bindgen_test]
 async fn test_two_provider_connect_and_list() {

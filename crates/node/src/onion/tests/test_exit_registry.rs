@@ -64,6 +64,27 @@ fn default_exit_services_include_native_tcp_only() {
 }
 
 #[test]
+fn onion_exit_transport_user_input_is_shared_and_canonical() -> Result<()> {
+    assert_eq!(
+        OnionExitTransport::parse_user_input(" tcp ")?,
+        OnionExitTransport::Tcp
+    );
+    assert_eq!(
+        OnionExitTransport::parse_user_input("web-transport")?,
+        OnionExitTransport::WebTransport
+    );
+    assert_eq!(
+        OnionExitTransport::parse_user_input("requestresponse")?,
+        OnionExitTransport::RequestResponse
+    );
+    assert!(matches!(
+        OnionExitTransport::parse_user_input("smtp"),
+        Err(Error::InvalidConfig(_))
+    ));
+    Ok(())
+}
+
+#[test]
 fn reserved_service_name_requires_reserved_transport_for_routes() {
     assert!(OnionExitService::https().matches_route_service("https"));
     assert!(!OnionExitService::new("https", OnionExitTransport::Tcp)

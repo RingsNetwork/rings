@@ -321,6 +321,17 @@ async fn rings_name_publish_resolves_signed_self_record() -> Result<()> {
 }
 
 #[tokio::test]
+async fn rings_name_publish_defaults_zero_sequence_in_core() -> Result<()> {
+    let processor = prepare_processor().await;
+    let published = processor
+        .publish_rings_name(None, "web", OnionExitTransport::Tcp, 60_000, 0)
+        .await?;
+
+    assert_eq!(published.seq, 1);
+    Ok(())
+}
+
+#[tokio::test]
 async fn rings_name_publish_rejects_human_alias_in_v1() {
     let processor = prepare_processor().await;
 
