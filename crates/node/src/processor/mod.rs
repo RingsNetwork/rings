@@ -226,17 +226,21 @@ impl Processor {
         };
 
         let service = service.trim();
-        let descriptors = OnionExitDescriptor::latest_valid_by_service_did(
-            Self::onion_exit_descriptors_from_entry(&entry)
-                .into_iter()
-                .filter(|descriptor| descriptor.matches_network(self.swarm.network_id())),
-            get_epoch_ms(),
-            include_expired,
-        )
-        .into_iter()
-        .filter(|descriptor| service.is_empty() || descriptor.offers_service(service));
+        let exits = self.select_onion_exits_from_entry(&entry, service, include_expired);
+        if include_expired
+            || !exits.is_empty()
+            || !self.entry_has_expired_onion_exit_service(&entry, service)
+        {
+            return Ok(exits);
+        }
 
-        Ok(descriptors.collect())
+        let Some(refreshed_entry) = self
+            .fetch_storage_entry_after_cache_refresh(entry_key, &entry)
+            .await?
+        else {
+            return Ok(exits);
+        };
+        Ok(self.select_onion_exits_from_entry(&refreshed_entry, service, include_expired))
     }
 
     async fn fetch_storage_entry(&self, entry_key: Did) -> Result<Option<entry::Entry>> {
@@ -251,6 +255,54 @@ impl Processor {
             sleep_dht_lookup_poll_interval(DHT_LOOKUP_CACHE_POLL_INTERVAL).await?;
         }
         Ok(None)
+    }
+
+    fn select_onion_exits_from_entry(
+        &self,
+        entry: &entry::Entry,
+        service: &str,
+        include_expired: bool,
+    ) -> Vec<OnionExitDescriptor> {
+        OnionExitDescriptor::latest_valid_by_service_did(
+            Self::onion_exit_descriptors_from_entry(entry)
+                .into_iter()
+                .filter(|descriptor| descriptor.matches_network(self.swarm.network_id())),
+            get_epoch_ms(),
+            include_expired,
+        )
+        .into_iter()
+        .filter(|descriptor| service.is_empty() || descriptor.offers_service(service))
+        .collect()
+    }
+
+    fn entry_has_expired_onion_exit_service(&self, entry: &entry::Entry, service: &str) -> bool {
+        let now_ms = get_epoch_ms();
+        Self::onion_exit_descriptors_from_entry(entry)
+            .into_iter()
+            .filter(|descriptor| descriptor.matches_network(self.swarm.network_id()))
+            .any(|descriptor| {
+                (service.is_empty() || descriptor.offers_service(service))
+                    && descriptor.verify_signature()
+                    && descriptor.is_expired_at(now_ms)
+            })
+    }
+
+    async fn fetch_storage_entry_after_cache_refresh(
+        &self,
+        entry_key: Did,
+        previous_entry: &entry::Entry,
+    ) -> Result<Option<entry::Entry>> {
+        self.storage_fetch(entry_key).await?;
+        for _ in 0..DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
+            sleep_dht_lookup_poll_interval(DHT_LOOKUP_CACHE_POLL_INTERVAL).await?;
+            let Some(entry) = self.storage_check_cache(entry_key).await else {
+                continue;
+            };
+            if &entry != previous_entry {
+                return Ok(Some(entry));
+            }
+        }
+        Ok(self.storage_check_cache(entry_key).await)
     }
 
     /// Build an onion route from live presence descriptors and live exit descriptors.

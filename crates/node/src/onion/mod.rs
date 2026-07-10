@@ -293,13 +293,19 @@ pub struct OnionExitPolicy {
 pub struct OnionExitTarget(String);
 
 impl OnionExitTarget {
+    const WILDCARD_AUTHORITY: &'static str = "*:*";
+
     /// Parse and canonicalize an exit target authority.
     pub fn parse(target: impl AsRef<str>) -> Result<Self> {
-        OnionProxyTarget::parse_authority(target.as_ref())
+        let raw = target.as_ref().trim();
+        if raw == "*" || raw == Self::WILDCARD_AUTHORITY {
+            return Ok(Self(Self::WILDCARD_AUTHORITY.to_string()));
+        }
+        OnionProxyTarget::parse_authority(raw)
             .map(|target| Self(target.authority()))
             .map_err(|error| {
                 Error::InvalidConfig(format!(
-                    "invalid onion exit target {:?}; expected host:port: {error}",
+                    "invalid onion exit target {:?}; expected host:port or *:*: {error}",
                     target.as_ref()
                 ))
             })
@@ -313,6 +319,10 @@ impl OnionExitTarget {
     /// Build a policy target from an already-validated proxy target.
     pub fn from_proxy_target(target: &OnionProxyTarget) -> Self {
         Self(target.authority())
+    }
+
+    fn matches_target(&self, target: &Self) -> bool {
+        self.0 == Self::WILDCARD_AUTHORITY || self == target
     }
 }
 
@@ -371,11 +381,15 @@ impl OnionExitPolicy {
     }
 
     fn allows(&self, target: &OnionExitTarget) -> bool {
-        self.allowed_targets.iter().any(|allowed| allowed == target)
+        self.allowed_targets
+            .iter()
+            .any(|allowed| allowed.matches_target(target))
     }
 
     fn denies(&self, target: &OnionExitTarget) -> bool {
-        self.denied_targets.iter().any(|denied| denied == target)
+        self.denied_targets
+            .iter()
+            .any(|denied| denied.matches_target(target))
     }
 }
 

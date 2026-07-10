@@ -126,6 +126,23 @@ fn exit_policy_allow_list_controls_targets() -> Result<()> {
 }
 
 #[test]
+fn exit_policy_wildcard_allows_all_targets_with_specific_denies() -> Result<()> {
+    let policy = OnionExitPolicy::from_target_strings(
+        vec!["*:*".to_string()],
+        vec!["api.example.com:443".to_string()],
+    )?;
+    let google = OnionExitTarget::parse("google.com:443")?;
+    let example = OnionExitTarget::parse("example.com:8443")?;
+    let api = OnionExitTarget::parse("api.example.com:443")?;
+
+    assert!(!policy.is_closed());
+    assert!(policy.allows_target(&google));
+    assert!(policy.allows_target(&example));
+    assert!(!policy.allows_target(&api));
+    Ok(())
+}
+
+#[test]
 fn exit_policy_rejects_invalid_target_entries() {
     assert!(matches!(
         OnionExitPolicy::from_target_strings(vec!["example.com".to_string()], vec![]),

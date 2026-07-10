@@ -51,7 +51,7 @@ Useful environment variables:
 - `RINGS_ADVERTISE_ONION_RELAY`: publish relay capability from every node; default `true`
 - `RINGS_ADVERTISE_ONION_EXIT`: publish exit descriptors from every node; default `true`
 - `RINGS_ONION_EXIT_SERVICES`: comma-separated `name:transport` services; default `tcp:tcp,https:tcp`
-- `RINGS_ONION_EXIT_ALLOW_TARGETS`: comma-separated exit target allow-list; default `example.com:443`
+- `RINGS_ONION_EXIT_ALLOW_TARGETS`: comma-separated exit target allow-list; use `*:*` for all targets; default `*:*`
 - `RINGS_ONION_EXIT_DENY_TARGETS`: comma-separated exit target deny-list; default empty
 
 The reserved `https` onion service is TCP-backed. Native nodes advertising the default TCP exit services publish both `tcp:tcp` and `https:tcp`, which lets WorkBench build HTTPS onion proxy routes against the Docker cluster.

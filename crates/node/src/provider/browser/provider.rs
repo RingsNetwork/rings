@@ -29,6 +29,8 @@ use wasm_bindgen_futures;
 use wasm_bindgen_futures::future_to_promise;
 use wasm_bindgen_futures::JsFuture;
 
+use crate::error::Error;
+use crate::error::Result as NodeResult;
 use crate::measure::peer_quality_thresholds;
 use crate::onion::circuit::encode_initial_forward;
 use crate::onion::circuit::route_first_hop;
@@ -93,52 +95,122 @@ pub struct BrowserOnionProxy {
     directory_endpoint: Option<String>,
 }
 
-struct RemoteOnionDirectoryReader {
+#[derive(Clone)]
+enum BrowserOnionDirectorySource {
+    Local,
+    Remote { endpoint_url: String },
+}
+
+struct BrowserOnionDirectoryReader {
     processor: Arc<Processor>,
-    endpoint_url: String,
+    source: BrowserOnionDirectorySource,
+    direct_exit_only: bool,
+}
+
+impl BrowserOnionDirectoryReader {
+    fn local(processor: Arc<Processor>) -> Self {
+        Self {
+            processor,
+            source: BrowserOnionDirectorySource::Local,
+            direct_exit_only: false,
+        }
+    }
+
+    fn remote(processor: Arc<Processor>, endpoint_url: String) -> Self {
+        Self {
+            processor,
+            source: BrowserOnionDirectorySource::Remote { endpoint_url },
+            direct_exit_only: false,
+        }
+    }
+
+    fn with_direct_exit_only(&self) -> Self {
+        Self {
+            processor: self.processor.clone(),
+            source: self.source.clone(),
+            direct_exit_only: true,
+        }
+    }
+
+    fn direct_peer_dids(&self) -> BTreeSet<Did> {
+        let local = self.processor.did();
+        self.processor
+            .swarm
+            .peer_dids()
+            .into_iter()
+            .filter(|did| *did != local)
+            .collect()
+    }
+
+    fn route_first_hop_is_direct(&self, route: &OnionProxyRoute) -> NodeResult<bool> {
+        let first_hop = route_first_hop(&route.route)?;
+        Ok(first_hop != self.processor.did() && self.direct_peer_dids().contains(&first_hop))
+    }
+
+    async fn read_online_nodes(&self) -> NodeResult<Vec<OnlineNodeDescriptor>> {
+        match &self.source {
+            BrowserOnionDirectorySource::Local => self.processor.lookup_online_nodes(false).await,
+            BrowserOnionDirectorySource::Remote { endpoint_url } => {
+                let response = RpcClient::new(endpoint_url.as_str())
+                    .lookup_online_nodes(&LookupOnlineNodesRequest {
+                        include_expired: false,
+                    })
+                    .await
+                    .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
+                Ok(crate::rpc_dto::online_node_descriptors_from_infos(
+                    response.nodes,
+                ))
+            }
+        }
+    }
+
+    async fn read_onion_exits(&self, service: &str) -> NodeResult<Vec<OnionExitDescriptor>> {
+        match &self.source {
+            BrowserOnionDirectorySource::Local => {
+                self.processor.lookup_onion_exits(service, false).await
+            }
+            BrowserOnionDirectorySource::Remote { endpoint_url } => {
+                let response = RpcClient::new(endpoint_url.as_str())
+                    .lookup_onion_exits(&LookupOnionExitsRequest {
+                        service: service.to_string(),
+                        include_expired: false,
+                    })
+                    .await
+                    .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
+                Ok(crate::rpc_dto::onion_exit_descriptors_from_infos(
+                    response.exits,
+                ))
+            }
+        }
+    }
 }
 
 #[async_trait::async_trait(?Send)]
-impl OnionDirectoryReader for RemoteOnionDirectoryReader {
+impl OnionDirectoryReader for BrowserOnionDirectoryReader {
     fn local_did(&self) -> Did {
         self.processor.did()
     }
 
-    async fn live_online_nodes(&self) -> crate::error::Result<Vec<OnlineNodeDescriptor>> {
-        let response = RpcClient::new(self.endpoint_url.as_str())
-            .lookup_online_nodes(&LookupOnlineNodesRequest {
-                include_expired: false,
-            })
-            .await
-            .map_err(|error| crate::error::Error::RemoteRpcError(error.to_string()))?;
-        let direct_peers = self
-            .processor
-            .swarm
-            .peer_dids()
+    async fn live_online_nodes(&self) -> NodeResult<Vec<OnlineNodeDescriptor>> {
+        let direct_peers = self.direct_peer_dids();
+        Ok(self
+            .read_online_nodes()
+            .await?
             .into_iter()
-            .collect::<BTreeSet<_>>();
-        Ok(
-            crate::rpc_dto::online_node_descriptors_from_infos(response.nodes)
-                .into_iter()
-                .filter(|descriptor| direct_peers.contains(&descriptor.did))
-                .collect(),
-        )
+            .filter(|descriptor| direct_peers.contains(&descriptor.did))
+            .collect())
     }
 
-    async fn live_onion_exits(
-        &self,
-        service: &str,
-    ) -> crate::error::Result<Vec<OnionExitDescriptor>> {
-        let response = RpcClient::new(self.endpoint_url.as_str())
-            .lookup_onion_exits(&LookupOnionExitsRequest {
-                service: service.to_string(),
-                include_expired: false,
-            })
-            .await
-            .map_err(|error| crate::error::Error::RemoteRpcError(error.to_string()))?;
-        Ok(crate::rpc_dto::onion_exit_descriptors_from_infos(
-            response.exits,
-        ))
+    async fn live_onion_exits(&self, service: &str) -> NodeResult<Vec<OnionExitDescriptor>> {
+        let exits = self.read_onion_exits(service).await?;
+        if !self.direct_exit_only {
+            return Ok(exits);
+        }
+        let direct_peers = self.direct_peer_dids();
+        Ok(exits
+            .into_iter()
+            .filter(|descriptor| direct_peers.contains(&descriptor.did))
+            .collect())
     }
 
     async fn peer_qualities(&self) -> Vec<(Did, PeerQuality)> {
@@ -152,28 +224,46 @@ impl OnionDirectoryReader for RemoteOnionDirectoryReader {
     }
 }
 
+async fn build_browser_route_from_reader(
+    reader: &BrowserOnionDirectoryReader,
+    config: OnionProxyConfig,
+    target: OnionProxyTarget,
+) -> NodeResult<OnionProxyRoute> {
+    let route = directory::build_onion_proxy_route(reader, config.clone(), target.clone()).await?;
+    if reader.route_first_hop_is_direct(&route)? {
+        return Ok(route);
+    }
+
+    let direct_exit_reader = reader.with_direct_exit_only();
+    let route = directory::build_onion_proxy_route(&direct_exit_reader, config, target).await?;
+    if direct_exit_reader.route_first_hop_is_direct(&route)? {
+        return Ok(route);
+    }
+    Err(Error::InvalidData)
+}
+
 async fn build_browser_onion_proxy_route(
     processor: Arc<Processor>,
     config: OnionProxyConfig,
     target: OnionProxyTarget,
     directory_endpoint: Option<String>,
-) -> crate::error::Result<OnionProxyRoute> {
-    match processor
-        .build_onion_proxy_route(config.clone(), target.clone())
-        .await
-    {
-        Ok(route) => Ok(route),
-        Err(local_error) => {
-            let Some(endpoint_url) = directory_endpoint else {
-                return Err(local_error);
-            };
-            let reader = RemoteOnionDirectoryReader {
-                processor,
-                endpoint_url,
-            };
-            directory::build_onion_proxy_route(&reader, config, target).await
+) -> NodeResult<OnionProxyRoute> {
+    if let Some(endpoint_url) = directory_endpoint {
+        let remote_reader = BrowserOnionDirectoryReader::remote(processor.clone(), endpoint_url);
+        match build_browser_route_from_reader(&remote_reader, config.clone(), target.clone()).await
+        {
+            Ok(route) => return Ok(route),
+            Err(remote_error) => {
+                let local_reader = BrowserOnionDirectoryReader::local(processor);
+                return build_browser_route_from_reader(&local_reader, config, target)
+                    .await
+                    .map_err(|_| remote_error);
+            }
         }
     }
+
+    let local_reader = BrowserOnionDirectoryReader::local(processor);
+    build_browser_route_from_reader(&local_reader, config, target).await
 }
 
 #[wasm_export]
