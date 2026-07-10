@@ -375,6 +375,26 @@ impl RingsNameRecord {
         self.verify_signature() && !self.is_expired_at(now_ms)
     }
 
+    fn name_conflict_rank(&self) -> CoreResult<[u8; 32]> {
+        let encoded = encode_descriptor(self)?;
+        Ok(keccak256(encoded.as_bytes()))
+    }
+
+    fn supersedes_name_conflict(&self, current: &Self) -> bool {
+        if self.seq != current.seq {
+            return self.seq > current.seq;
+        }
+        if self.expires_at_ms != current.expires_at_ms {
+            return self.expires_at_ms > current.expires_at_ms;
+        }
+
+        match (self.name_conflict_rank(), current.name_conflict_rank()) {
+            (Ok(candidate), Ok(current)) => candidate > current,
+            (Ok(_), Err(_)) => true,
+            (Err(_), Ok(_)) | (Err(_), Err(_)) => false,
+        }
+    }
+
     /// Select the newest valid record per `.rings` name.
     pub fn latest_valid_by_name(
         records: impl IntoIterator<Item = Self>,
@@ -393,10 +413,7 @@ impl RingsNameRecord {
             match latest.entry(record.name.clone()) {
                 Entry::Occupied(mut entry) => {
                     let current = entry.get();
-                    if record.seq > current.seq
-                        || (record.seq == current.seq
-                            && record.expires_at_ms > current.expires_at_ms)
-                    {
+                    if record.supersedes_name_conflict(current) {
                         entry.insert(record);
                     }
                 }
@@ -601,6 +618,35 @@ mod tests {
 
         assert!(live_selected.is_empty());
         assert_eq!(expired_selected, vec![expired_higher]);
+        Ok(())
+    }
+
+    #[test]
+    fn equal_seq_and_expiry_conflicts_have_stable_winner() -> CoreResult<()> {
+        let owner = session();
+        let target = session();
+        let now_ms = get_epoch_ms();
+        let first = RingsNameRecord::new_signed(body_at(&owner, now_ms), &owner)?;
+        let mut second_body = body_at(&owner, now_ms);
+        second_body.target_did = target.account_did();
+        second_body.session_public_key = target.session_public_key();
+        let second = RingsNameRecord::new_signed(second_body, &owner)?;
+        let expected = if second.supersedes_name_conflict(&first) {
+            second.clone()
+        } else {
+            first.clone()
+        };
+
+        let forward = RingsNameRecord::latest_valid_by_name(
+            vec![first.clone(), second.clone()],
+            7,
+            now_ms,
+            false,
+        );
+        let reverse = RingsNameRecord::latest_valid_by_name(vec![second, first], 7, now_ms, false);
+
+        assert_eq!(forward, vec![expected.clone()]);
+        assert_eq!(reverse, vec![expected]);
         Ok(())
     }
 
