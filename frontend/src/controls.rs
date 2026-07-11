@@ -19,6 +19,21 @@ const CHROME_EXTENSION_MANAGER_URL: &str = "chrome://extensions/";
 const FIREFOX_EXTENSION_MANAGER_URL: &str = "about:debugging#/runtime/this-firefox";
 
 #[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum ShellPage {
+    Guide,
+    Console,
+}
+
+impl ShellPage {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Guide => "Guide",
+            Self::Console => "Console",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum Panel {
     Onion,
     Proof,
@@ -153,14 +168,110 @@ struct SettingsDialogView<'a> {
     close_dialog: Callback<MouseEvent>,
 }
 
-pub(crate) fn app_header() -> Html {
+pub(crate) fn app_header(active_page: ShellPage, page: UseStateHandle<ShellPage>) -> Html {
+    let header_class = if active_page == ShellPage::Guide {
+        "app-header landing-header"
+    } else {
+        "app-header"
+    };
+    let guide_class = header_page_class(active_page, ShellPage::Guide);
+    let console_class = header_page_class(active_page, ShellPage::Console);
+    let open_guide = {
+        let page = page.clone();
+        Callback::from(move |_| page.set(ShellPage::Guide))
+    };
+    let open_console = {
+        let page = page.clone();
+        Callback::from(move |_| page.set(ShellPage::Console))
+    };
+    if active_page == ShellPage::Guide {
+        return html! {
+            <header class={header_class}>
+                <div class="landing-header-brand" aria-label="Rings Network">
+                    <span class="landing-header-mark" aria-hidden="true">{ "R" }</span>
+                    <div>
+                        <strong>{ "Rings Network" }</strong>
+                        <span>{ "Browser-native P2P" }</span>
+                    </div>
+                </div>
+                <nav class="header-nav" aria-label="Primary">
+                    <button
+                        class={guide_class}
+                        type="button"
+                        aria-current="page"
+                        onclick={open_guide}
+                    >
+                        { ShellPage::Guide.label() }
+                    </button>
+                    <button
+                        class={console_class}
+                        type="button"
+                        aria-current="false"
+                        onclick={open_console}
+                    >
+                        { "WorkBench" }
+                    </button>
+                    <a
+                        class="header-github-link"
+                        href="https://github.com/RyanKung/rings"
+                        target="_blank"
+                        rel="noreferrer"
+                    >
+                        { "GitHub" }
+                    </a>
+                    <a
+                        class="header-github-link"
+                        href="https://github.com/RyanKung/rings/blob/master/papers/rings.pdf"
+                        target="_blank"
+                        rel="noreferrer"
+                    >
+                        { "Whitepaper" }
+                    </a>
+                </nav>
+            </header>
+        };
+    }
     html! {
-        <header class="app-header">
+        <header class={header_class}>
             <div>
                 <p class="eyebrow">{ "Browser node console" }</p>
                 <h1>{ "Rings" }</h1>
             </div>
+            <nav class="header-nav" aria-label="Primary">
+                <button
+                    class={guide_class}
+                    type="button"
+                    aria-current={if active_page == ShellPage::Guide { "page" } else { "false" }}
+                    onclick={open_guide}
+                >
+                    { ShellPage::Guide.label() }
+                </button>
+                <button
+                    class={console_class}
+                    type="button"
+                    aria-current={if active_page == ShellPage::Console { "page" } else { "false" }}
+                    onclick={open_console}
+                >
+                    { ShellPage::Console.label() }
+                </button>
+                <a
+                    class="header-github-link"
+                    href="https://github.com/RyanKung/rings"
+                    target="_blank"
+                    rel="noreferrer"
+                >
+                    { "GitHub" }
+                </a>
+            </nav>
         </header>
+    }
+}
+
+fn header_page_class(active: ShellPage, page: ShellPage) -> &'static str {
+    if active == page {
+        "header-nav-button active"
+    } else {
+        "header-nav-button"
     }
 }
 

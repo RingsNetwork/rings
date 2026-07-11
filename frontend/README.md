@@ -1,10 +1,10 @@
 # Rings Frontend
 
-Browser frontend for Rings. This replaces the historical browser connectivity
-example as the shared web and browser-extension app. The standalone `dweb` and
-`proof-demo` surfaces remain conceptually separate; this frontend includes dweb,
-onion proxy, proof, and custom-message workbench panels for operating a browser
-node from one screen.
+Repository-level browser frontend for Rings. This replaces the historical
+browser connectivity example as the shared landing guide, web app, and
+browser-extension package. The standalone `dweb` and `proof-demo` surfaces remain
+conceptually separate; this frontend includes onion proxy, proof, and
+custom-message workbench panels for operating a browser node from one screen.
 
 The implementation is Rust/Yew. Browser APIs for WebCrypto, MetaMask, and Phantom
 are called from Rust through `js_sys` and `wasm_bindgen`; the core application has
@@ -32,7 +32,7 @@ Styles are split under `src/styles/` by responsibility:
 - Start a browser Rings node with WebCrypto P-256, MetaMask EIP-191, or Phantom Ed25519.
 - Connect by SDP offer/answer or by a seed node HTTP endpoint.
 - Render connected peers as a circular topology.
-- Host and fetch dweb pages over the `dweb` namespace.
+- Present a landing guide with links into the node console and GitHub.
 - Build HTTPS onion proxy routes and send HTTPS requests through onion exits.
 - Run the distributed SNARK proof workbench flow alongside the retained proof demo.
 - Register and send user custom namespace messages.
@@ -40,14 +40,14 @@ Styles are split under `src/styles/` by responsibility:
 ## Run as a Web App
 
 ```sh
-cd examples/frontend
+cd frontend
 trunk serve --release true
 ```
 
 Then open the Trunk URL. The release profile avoids debug wasm-bindgen local
 limits from the proof stack while keeping the application source Rust/Yew-only.
-Start a node first, then use the tabs for connection, dweb, onion proxy, proof,
-and custom-message workflows.
+Use the guide as the landing page, then open the node console for connection,
+onion proxy, proof, and custom-message workflows.
 
 ## Package as a Chrome Extension
 
@@ -56,9 +56,9 @@ type-checks and compiles the extension TypeScript into `.generated/`, then
 rewrites the web output into a Chrome Manifest V3 package after every build:
 
 ```sh
-cd examples/frontend
-npm --prefix ../.. install --ignore-scripts --package-lock=false
-npm --prefix ../.. run build:frontend-extension-scripts
+cd frontend
+npm --prefix .. install --ignore-scripts --package-lock=false
+npm --prefix .. run build:frontend-extension-scripts
 trunk build --release
 ```
 
@@ -91,7 +91,7 @@ website, install the repository JavaScript dependencies and run the local
 fixture test after packaging the extension:
 
 ```sh
-cd ../..
+cd ..
 npm install --ignore-scripts --package-lock=false
 npx playwright install chromium
 npm run test:frontend-extension-wallet
@@ -104,14 +104,14 @@ Phantom bridge calls against mock providers in the current tab.
 ## Check
 
 ```sh
-cd examples/frontend
+cd frontend
 cargo fmt --check
 cargo check --target wasm32-unknown-unknown
 cargo test --release --target wasm32-unknown-unknown
-npm --prefix ../.. install --ignore-scripts --package-lock=false
-npm --prefix ../.. run build:frontend-extension-scripts
+npm --prefix .. install --ignore-scripts --package-lock=false
+npm --prefix .. run build:frontend-extension-scripts
 trunk build --release
-cd ../..
+cd ..
 npx playwright install chromium
 npm run test:frontend-extension-wallet
 ```

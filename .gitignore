@@ -36,7 +36,7 @@ dist-extension/
 node_modules/
 .playwright-cli/
 output/
-examples/frontend/.generated/
+frontend/.generated/
 
 # snark
 .!*

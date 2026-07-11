@@ -68,17 +68,17 @@ jobs:
 
       - name: Check Rings frontend
         run: cargo check --target=wasm32-unknown-unknown
-        working-directory: ./examples/frontend
+        working-directory: ./frontend
 
       - name: Run clippy for Rings frontend
         run: cargo clippy --target=wasm32-unknown-unknown --all-targets -- -D warnings
-        working-directory: ./examples/frontend
+        working-directory: ./frontend
 
       - name: Run Rings frontend tests
         uses: coactions/setup-xvfb@v1
         with:
           run: cargo test --release --target=wasm32-unknown-unknown
-          working-directory: ./examples/frontend
+          working-directory: ./frontend
 
       - name: Run dweb example browser tests
         uses: coactions/setup-xvfb@v1

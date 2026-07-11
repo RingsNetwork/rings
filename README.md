@@ -116,6 +116,13 @@ wasm-pack build --scope ringsnetwork -t web crates/node --no-default-features --
 rings --help
 ```
 
+## Frontend
+
+The browser and extension frontend lives in [`frontend`](./frontend). It is the
+user-facing Rings web surface for the landing guide, browser node console,
+onion proxy WorkBench, wallet login, SDP/HTTP connectivity, topology, proof
+workbench, and custom messages.
+
 ## Examples
 
 Runnable examples live in [`examples/`](./examples):
@@ -123,7 +130,6 @@ Runnable examples live in [`examples/`](./examples):
 | Example | What it shows |
 |---|---|
 | [`native`](./examples/native) | A minimal native node registering a custom namespaced protocol |
-| [`frontend`](./examples/frontend) | Browser frontend replacing the historical browser example: wallet login, SDP/HTTP connectivity, topology, dweb workbench, proof workbench, and custom messages |
 | [`relay`](./examples/relay) | TCP & UDP tunnels to a peer's service over the overlay (`tcp.rs` / `udp.rs`) |
 | [`snark`](./examples/snark) | Fold-scheme zkSNARK proving / verification |
 | [`proof-demo`](./examples/proof-demo) | A browser zk-proof app (Yew / Trunk) |
@@ -155,8 +161,8 @@ handler)`. See [`examples/relay`](./examples/relay) and
 | Resource | Link | Notes |
 |---|---|---|
 | Rings Whitepaper | [PDF](./papers/rings.pdf), [LaTeX source](./papers/rings.tex), [citation](#whitepaper) | Canonical protocol paper |
-| Browser frontend | [`examples/frontend`](./examples/frontend) | Web page and extension workflow |
-| Examples | [`examples/`](./examples) | Native, frontend, dweb, proof, relay, snark, and FFI examples |
+| Browser frontend | [`frontend`](./frontend) | Landing guide, web app, and extension workflow |
+| Examples | [`examples/`](./examples) | Native, dweb, proof, relay, snark, and FFI examples |
 
 ## Components
 

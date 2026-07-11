@@ -1,5 +1,7 @@
 //! Chord topology inference and rendering.
 
+use std::fmt::Write as _;
+
 use web_sys::MouseEvent;
 use yew::prelude::*;
 
@@ -9,10 +11,101 @@ use crate::node::PeerView;
 const CHORD_ID_BYTES: usize = 20;
 const CHORD_ID_BITS: usize = CHORD_ID_BYTES * 8;
 const CHORD_HEX_CHARS: usize = CHORD_ID_BYTES * 2;
+const GUIDE_PREVIEW_NODES: usize = 16;
 
 pub(crate) fn view(did: &str, peers: &[PeerView]) -> Html {
     html! {
         <Topology did={did.to_string()} peers={peers.to_vec()} />
+    }
+}
+
+pub(crate) fn guide_preview() -> Html {
+    let width = 420.0;
+    let height = 420.0;
+    let center_x = width / 2.0;
+    let center_y = height / 2.0;
+    let radius = 154.0;
+    let nodes = guide_preview_nodes(GUIDE_PREVIEW_NODES);
+    let successor_edges = inferred_successor_edges(nodes.len());
+    let finger_links = inferred_finger_links(&nodes)
+        .into_iter()
+        .filter(|edge| edge.source() % 8 == 0)
+        .collect::<Vec<_>>();
+    let outer_orbit = open_orbit_path(center_x, center_y, radius + 34.0);
+    let main_orbit = open_orbit_path(center_x, center_y, radius);
+    let inner_orbit = open_orbit_path(center_x, center_y, radius - 58.0);
+
+    html! {
+        <svg
+            class="topology chord-topology guide-topology-preview"
+            viewBox="0 0 420 420"
+            role="img"
+            aria-label="simulated Chord ring with 16 anonymous nodes"
+        >
+            <path class="orbit outer" d={outer_orbit} />
+            <path class="orbit" d={main_orbit.clone()} />
+            <path class="orbit inner" d={inner_orbit} />
+            <path class="scan" d={main_orbit} />
+            { for successor_edges.iter().filter_map(|edge| {
+                let (source, target) = edge.endpoints(&nodes)?;
+                let class = if edge.target == 0 { "ring-edge wrap" } else { "ring-edge" };
+                let flow_class = if edge.target == 0 { "data-flow ring-flow wrap" } else { "data-flow ring-flow" };
+                let path = ring_arc_path(center_x, center_y, radius, source.angle, target.angle);
+                let delay = format!(
+                    "animation-delay: -{}ms;",
+                    (edge.source * 47 + edge.target * 13) % 5600
+                );
+                Some(html! {
+                    <>
+                        <path class={class} d={path.clone()}>
+                            <title>{ "simulated successor link" }</title>
+                        </path>
+                        <path class={flow_class} d={path} style={delay} aria-hidden="true" />
+                    </>
+                })
+            })}
+            { for finger_links.iter().filter_map(|edge| {
+                let (source, target) = edge.endpoints(&nodes)?;
+                let tone = match edge.exponent {
+                    159 => "primary",
+                    158 => "local",
+                    _ => "remote",
+                };
+                let class = format!("finger-link {tone}");
+                let flow_class = format!("data-flow finger-flow {tone}");
+                let flow_delay = format!(
+                    "animation-delay: -{}ms;",
+                    (edge.source() * 311 + edge.target() * 43 + edge.exponent * 17) % 3600
+                );
+                let path = finger_curve_path(center_x, center_y, edge.exponent, source.angle, target.angle);
+                Some(html! {
+                    <>
+                        <path class={class} d={path.clone()}>
+                            <title>{ "simulated finger link" }</title>
+                        </path>
+                        <path class={flow_class} d={path} style={flow_delay} aria-hidden="true" />
+                    </>
+                })
+            })}
+            <circle class="id-space-core" cx={center_x.to_string()} cy={center_y.to_string()} r="48" />
+            <text class="core-label" x={center_x.to_string()} y={(center_y + 4.0).to_string()} text-anchor="middle">{ "RINGS" }</text>
+            { for nodes.iter().enumerate().map(|(index, node)| {
+                let (x, y) = polar_point(center_x, center_y, radius, node.angle);
+                let pulse_delay = format!("animation-delay: -{}ms;", (index * 37) % 2800);
+                html! {
+                    <g class="topology-node guide-preview-node">
+                        <title>{ "simulated anonymous node" }</title>
+                        <circle
+                            class={node_class(node)}
+                            cx={svg_num(x)}
+                            cy={svg_num(y)}
+                            r="5.4"
+                            style={pulse_delay}
+                        />
+                    </g>
+                }
+            })}
+        </svg>
     }
 }
 
@@ -264,6 +357,46 @@ fn chord_nodes(did: &str, peers: &[PeerView]) -> Vec<ChordNode> {
     }
     nodes.sort_by(|left, right| left.id.cmp(&right.id));
     nodes
+}
+
+fn guide_preview_nodes(node_count: usize) -> Vec<ChordNode> {
+    let count = node_count.max(1) as u128;
+    (0..node_count)
+        .map(|index| {
+            let id = guide_preview_id(index as u128, count);
+            ChordNode {
+                did: hex_did(&id),
+                state: "Connected".to_string(),
+                angle: chord_angle(&id),
+                id,
+                is_local: false,
+            }
+        })
+        .collect()
+}
+
+fn guide_preview_id(index: u128, count: u128) -> [u8; CHORD_ID_BYTES] {
+    let high = ((index << 64) / count) as u64;
+    let mut id = [0_u8; CHORD_ID_BYTES];
+    id[..8].copy_from_slice(&high.to_be_bytes());
+
+    let mut seed = high ^ 0x9e37_79b9_7f4a_7c15;
+    for byte in id.iter_mut().skip(8) {
+        seed ^= seed << 7;
+        seed ^= seed >> 9;
+        seed ^= seed << 8;
+        *byte = seed as u8;
+    }
+    id
+}
+
+fn hex_did(id: &[u8; CHORD_ID_BYTES]) -> String {
+    let mut did = String::with_capacity(CHORD_HEX_CHARS + 2);
+    did.push_str("0x");
+    for byte in id {
+        let _ = write!(did, "{byte:02x}");
+    }
+    did
 }
 
 fn inferred_successor_edges(node_count: usize) -> Vec<InferredEdge> {

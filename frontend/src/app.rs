@@ -17,6 +17,7 @@ use crate::controls::ControlView;
 use crate::controls::LaunchActions;
 use crate::controls::Panel;
 use crate::controls::SessionView;
+use crate::controls::ShellPage;
 use crate::custom;
 use crate::dweb;
 use crate::extension;
@@ -27,6 +28,7 @@ use crate::node::DemoNode;
 use crate::node::PeerView;
 use crate::peer_sync;
 use crate::styles;
+use crate::topology;
 use crate::wallet;
 use crate::wallet::WalletAccount;
 use crate::wallet::WalletKind;
@@ -46,6 +48,14 @@ struct SettingsSnapshot {
 /// Rings browser frontend app.
 #[function_component(App)]
 pub fn app() -> Html {
+    let active_page = use_state(|| {
+        if extension::extension_node_bridge().is_some() {
+            ShellPage::Console
+        } else {
+            ShellPage::Guide
+        }
+    });
+    let active_architecture_layer = use_state(|| 0_usize);
     let active_panel = use_state(|| Panel::Onion);
     let wallet_kind = use_state(|| {
         extension::load_setting_with_legacy(
@@ -697,11 +707,288 @@ pub fn app() -> Html {
         control_sidebar_collapsed.clone(),
     );
 
+    let header = controls::app_header(*active_page, active_page.clone());
+    if *active_page == ShellPage::Guide {
+        html! {
+            <main class="app-shell guide-shell">
+                <style>{ styles::app_css() }</style>
+                { header }
+                { guide_page(active_page.clone(), active_architecture_layer.clone()) }
+            </main>
+        }
+    } else {
+        html! {
+            <main class="app-shell topology-shell">
+                <style>{ styles::app_css() }</style>
+                { header }
+                { controls::network_stage(session_view, &status, link_control, control_sidebar) }
+            </main>
+        }
+    }
+}
+
+fn guide_page(
+    active_page: UseStateHandle<ShellPage>,
+    active_architecture_layer: UseStateHandle<usize>,
+) -> Html {
+    let open_console = {
+        let active_page = active_page.clone();
+        Callback::from(move |_| active_page.set(ShellPage::Console))
+    };
+    let selected_architecture_index =
+        (*active_architecture_layer).min(ARCHITECTURE_LAYERS.len() - 1);
+    let selected_architecture_layer = &ARCHITECTURE_LAYERS[selected_architecture_index];
     html! {
-        <main class="app-shell topology-shell">
-            <style>{ styles::APP_CSS }</style>
-            { controls::app_header() }
-            { controls::network_stage(session_view, &status, link_control, control_sidebar) }
-        </main>
+        <section class="guide-page" aria-labelledby="guide-title">
+            <section class="landing-hero">
+                <div class="landing-hero-copy">
+                    <p class="landing-kicker">{ "Rings Network" }</p>
+                    <h2 id="guide-title">{ "A peer-to-peer network for the sovereign age." }</h2>
+                    <p class="landing-lede">
+                        { "Rings is a browser-native, structured peer-to-peer network for applications that need their own network layer instead of a server-owned data path. Browser tabs and native daemons can join the same overlay, discover peers by DID, and exchange messages over direct WebRTC datachannels routed by a Chord DHT." }
+                    </p>
+                    <div class="landing-actions" aria-label="Primary actions">
+                        <button class="landing-primary-action" type="button" onclick={open_console.clone()}>
+                            { "Open WorkBench" }
+                        </button>
+                        <a
+                            class="landing-secondary-action"
+                            href="https://github.com/RyanKung/rings"
+                            target="_blank"
+                            rel="noreferrer"
+                        >
+                            { "GitHub" }
+                        </a>
+                        <a
+                            class="landing-secondary-action"
+                            href="https://github.com/RyanKung/rings/blob/master/papers/rings.pdf"
+                            target="_blank"
+                            rel="noreferrer"
+                        >
+                            { "Whitepaper" }
+                        </a>
+                    </div>
+                </div>
+                <div class="landing-visual" aria-label="Simulated Rings network topology">
+                    <div class="landing-topology-card">
+                        { topology::guide_preview() }
+                    </div>
+                </div>
+            </section>
+
+            <section class="landing-section landing-feature-section" aria-label="Features">
+                <div class="landing-section-heading">
+                    <p>{ "Features" }</p>
+                </div>
+                <div class="landing-feature-grid">
+                    { landing_feature("Browser-native peers", "Runs in browsers through WebAssembly and web_sys, and on native hosts through the same Rust node stack. WebRTC datachannels carry browser-to-browser and daemon traffic without an application server in the data path.") }
+                    { landing_feature("DID identity and cryptography", "Peers are addressed by decentralized identifiers backed by selectable signature schemes, including secp256k1, secp256r1, ed25519, BLS, and bip137.") }
+                    { landing_feature("Structured peer routing", "A Chord DHT provides successor and finger-table routing, DID lookup, message relay, stabilization, and network_id isolation for independent overlays.") }
+                    { landing_feature("Protocol runtime", "Application protocols are namespace-scoped. A pure step function owns state transitions while an Interpret shell performs side effects through a scoped capability.") }
+                </div>
+            </section>
+
+            <section class="landing-section landing-architecture" aria-labelledby="landing-architecture-title">
+                <div class="landing-section-heading">
+                    <p>{ "Architecture" }</p>
+                    <h2 id="landing-architecture-title">{ "Every layer is decentralized." }</h2>
+                    <p class="landing-section-lede">
+                        { "Rings maps applications, protocols, extension runtime, overlay routing, transport, and identity directly to repository crates and modules. Select a layer to inspect its role." }
+                    </p>
+                </div>
+                <div class="landing-architecture-grid">
+                    <div class="landing-layer-stack" aria-label="Rings architecture layers">
+                        { for ARCHITECTURE_LAYERS.iter().enumerate().map(|(index, layer)| {
+                            architecture_layer_tab(
+                                index,
+                                layer,
+                                index == selected_architecture_index,
+                                active_architecture_layer.clone(),
+                            )
+                        }) }
+                    </div>
+                    <aside class="landing-layer-detail" aria-live="polite" aria-label="Selected architecture layer">
+                        <div class="landing-layer-detail-heading">
+                            <span class="landing-layer-detail-index">{ selected_architecture_layer.index }</span>
+                            <div>
+                                <span class="landing-layer-label">{ selected_architecture_layer.label }</span>
+                                <h3>{ selected_architecture_layer.title }</h3>
+                            </div>
+                        </div>
+                        <p class="landing-layer-detail-summary">{ selected_architecture_layer.summary }</p>
+                        <p>{ selected_architecture_layer.detail }</p>
+                        <dl class="landing-layer-detail-list">
+                            <div>
+                                <dt>{ "Surface" }</dt>
+                                <dd>{ selected_architecture_layer.surface }</dd>
+                            </div>
+                            <div>
+                                <dt>{ "Contract" }</dt>
+                                <dd>{ selected_architecture_layer.contract }</dd>
+                            </div>
+                        </dl>
+                    </aside>
+                </div>
+            </section>
+
+            <section class="landing-section landing-runtime" aria-labelledby="landing-runtime-title">
+                <div class="landing-section-heading">
+                    <p>{ "Extending Rings" }</p>
+                    <h2 id="landing-runtime-title">{ "Pure protocol core, scoped interpreter shell." }</h2>
+                    <p class="landing-section-lede">
+                        { "The README's extension model is the landing page's developer contract: register a protocol, bind its interpreter, then route inbound envelopes by namespace." }
+                    </p>
+                </div>
+                <div class="landing-runtime-visual">
+                    <pre class="landing-code"><code>{ "provider.register_protocol(Echo, EchoShell)?;\nprovider.set_backend()?;\n\nlet relay = RelayHandle::install(&provider.extensions())?;\nrelay\n    .register_tcp_service(\"web\".into(), \"example.com:80\".parse()?)\n    .await?;\nrelay\n    .open_tcp_tunnel(local_addr, peer_did, \"web\".into())\n    .await?;" }</code></pre>
+                </div>
+            </section>
+
+            <section class="landing-section landing-examples" aria-labelledby="landing-examples-title">
+                <div class="landing-section-heading">
+                    <p>{ "Examples" }</p>
+                    <h2 id="landing-examples-title">{ "Runnable surfaces from the repository." }</h2>
+                </div>
+                <div class="landing-example-grid">
+                    { landing_link_card("native", "Start here for a minimal native node. It shows wallet setup, node bootstrapping, and registration of a custom namespaced protocol without browser-specific APIs.", "https://github.com/RyanKung/rings/tree/master/examples/native") }
+                    { landing_link_card("relay", "Open TCP and UDP tunnels through the overlay. This example is the practical path for exposing a peer service and carrying traffic without a public server hop.", "https://github.com/RyanKung/rings/tree/master/examples/relay") }
+                    { landing_link_card("snark", "Run fold-scheme zkSNARK proving and verification over the Rings protocol model. It demonstrates how proof workloads fit beside ordinary peer messages.", "https://github.com/RyanKung/rings/tree/master/examples/snark") }
+                    { landing_link_card("proof-demo", "Use the browser proof surface built with Yew and Trunk. It connects the frontend runtime to the proof flow so the browser can drive a live proving interaction.", "https://github.com/RyanKung/rings/tree/master/examples/proof-demo") }
+                    { landing_link_card("dweb", "Explore the decentralized-web application shape. It demonstrates how application content can be addressed through Rings instead of relying on a conventional hosted backend.", "https://github.com/RyanKung/rings/tree/master/examples/dweb") }
+                    { landing_link_card("ffi", "Drive a Rings node from another runtime through the C FFI. This is the integration point for embedding Rings into hosts that cannot call the Rust API directly.", "https://github.com/RyanKung/rings/tree/master/examples/ffi") }
+                </div>
+            </section>
+
+            <section class="landing-final" aria-label="Open Rings WorkBench">
+                <div>
+                    <p>{ "Frontend" }</p>
+                    <h2>{ "Use the browser and extension WorkBench for the live network surface." }</h2>
+                    <span>
+                        { "Wallet login, SDP/HTTP connectivity, topology inspection, onion proxy requests, proof tools, and custom messages live here." }
+                    </span>
+                </div>
+                <button class="landing-primary-action" type="button" onclick={open_console}>
+                    { "Open WorkBench" }
+                </button>
+            </section>
+        </section>
+    }
+}
+
+struct ArchitectureLayer {
+    index: &'static str,
+    label: &'static str,
+    role: &'static str,
+    title: &'static str,
+    summary: &'static str,
+    detail: &'static str,
+    surface: &'static str,
+    contract: &'static str,
+}
+
+const ARCHITECTURE_LAYERS: [ArchitectureLayer; 6] = [
+    ArchitectureLayer {
+        index: "01",
+        label: "applications",
+        role: "runs user-facing workflows.",
+        title: "dWeb, zk-proof demo, relay, custom apps",
+        summary: "Apps run over the protocol layer instead of a hosted backend data path.",
+        detail: "Application surfaces are repository examples and browser WorkBench panels. They compose wallet login, dWeb content, proof workflows, relay tunnels, and custom protocol messages on top of the same peer runtime. The application layer should read as product-facing behavior: it chooses what to ask the network to do, while the lower layers keep addressing, routing, and transport concerns out of the UI code.",
+        surface: "frontend WorkBench, examples/dweb, examples/snark, examples/relay",
+        contract: "Application code addresses peers and namespaces; it does not own overlay routing or transport setup.",
+    },
+    ArchitectureLayer {
+        index: "02",
+        label: "protocols",
+        role: "defines namespaced behavior.",
+        title: "relay, SNARK, echo, user namespaces",
+        summary: "Built-ins cover TCP/UDP relay and fold-scheme zkSNARK proving; user protocols are addressed by namespace.",
+        detail: "Protocols are registered behind stable namespaces. Built-in protocols cover relay and proving flows, while external applications can install their own protocol state machines without changing the overlay. This layer is the extension boundary: new behavior is added by registering a protocol and its interpreter, not by branching the node or adding a new transport path.",
+        surface: "protocol registry, relay handles, proof protocol, custom namespaces",
+        contract: "Every inbound envelope is dispatched by namespace before it reaches application-specific logic.",
+    },
+    ArchitectureLayer {
+        index: "03",
+        label: "runtime",
+        role: "executes protocol state.",
+        title: "pure Protocol::step plus Interpret shell",
+        summary: "Protocol logic stays pure while side effects are confined to namespace-scoped capabilities.",
+        detail: "The runtime keeps deterministic protocol transitions separate from IO. Pure step logic computes the next state and effects; the interpreter shell is the only place where scoped side effects are executed. This makes protocol behavior easier to test and reason about, because replayable state transitions are separated from browser APIs, native sockets, storage, and wallet interaction.",
+        surface: "Protocol::step, Interpret shell, provider extension hooks",
+        contract: "State transitions must be reproducible; IO must pass through explicit provider capabilities.",
+    },
+    ArchitectureLayer {
+        index: "04",
+        label: "overlay",
+        role: "routes peer messages.",
+        title: "Chord DHT routing",
+        summary: "Successor and finger tables route DID-addressed messages with stabilization and network isolation.",
+        detail: "The overlay maps DID identifiers into a Chord ring. Stabilization keeps successor context current, while finger links reduce lookup distance and keep routing independent of any central server. The overlay is responsible for peer discovery, message forwarding, and path selection; applications see a DID-addressed network rather than a set of manually managed connections.",
+        surface: "Chord identifiers, successor tables, finger routing, network_id isolation",
+        contract: "Routing chooses peer paths by identifier space, not by hosted origin or application server.",
+    },
+    ArchitectureLayer {
+        index: "05",
+        label: "transport",
+        role: "moves data between peers.",
+        title: "WebRTC datachannels",
+        summary: "Native and browser transports use STUN, ICE, and SDP to establish direct peer connections.",
+        detail: "Browser and native peers share the same transport shape. WebRTC handles NAT traversal through ICE and SDP exchange, then carries overlay messages through direct datachannels. This layer is deliberately narrow: it moves bytes between peers and reports connection state, while routing policy and protocol semantics remain above it.",
+        surface: "browser WebRTC, native WebRTC, STUN, SDP exchange",
+        contract: "Transport establishes peer connectivity; overlay and protocol layers decide what should be carried.",
+    },
+    ArchitectureLayer {
+        index: "06",
+        label: "identity",
+        role: "authenticates peers.",
+        title: "DID plus selectable signatures",
+        summary: "The network bridges browser, daemon, and wallet identity workflows without one key system.",
+        detail: "Identity is represented as DID-addressable cryptographic material. The implementation supports multiple signature families so browser wallets, native daemons, and tests can share a common addressing model. Higher layers can depend on stable peer identity without knowing whether the key came from WebCrypto, a wallet bridge, or a native node process.",
+        surface: "DID documents, wallet account selection, secp256k1, secp256r1, ed25519, BLS, bip137",
+        contract: "Peers authenticate as DIDs; higher layers should depend on identity abstractions rather than one wallet backend.",
+    },
+];
+
+fn landing_feature(title: &'static str, body: &'static str) -> Html {
+    html! {
+        <article class="landing-feature-card">
+            <h3>{ title }</h3>
+            <p>{ body }</p>
+        </article>
+    }
+}
+
+fn architecture_layer_tab(
+    index: usize,
+    layer: &ArchitectureLayer,
+    selected: bool,
+    active_architecture_layer: UseStateHandle<usize>,
+) -> Html {
+    let on_click = {
+        let active_architecture_layer = active_architecture_layer.clone();
+        Callback::from(move |_| active_architecture_layer.set(index))
+    };
+    let class = if selected {
+        "landing-layer active"
+    } else {
+        "landing-layer"
+    };
+    html! {
+        <button class={class} type="button" onclick={on_click} aria-pressed={selected.to_string()}>
+            <span class="landing-layer-index">{ layer.index }</span>
+            <div>
+                <h3>{ layer.label }</h3>
+                <p>{ layer.role }</p>
+            </div>
+        </button>
+    }
+}
+
+fn landing_link_card(title: &'static str, body: &'static str, href: &'static str) -> Html {
+    html! {
+        <a class="landing-example-card" href={href} target="_blank" rel="noreferrer">
+            <h3>{ title }</h3>
+            <p>{ body }</p>
+        </a>
     }
 }

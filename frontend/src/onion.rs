@@ -313,87 +313,6 @@ fn target_authority(url: &str) -> Result<String, String> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use js_sys::Array;
-    use js_sys::Object;
-    use wasm_bindgen::JsValue;
-    use wasm_bindgen_test::wasm_bindgen_test;
-
-    use super::target_authority;
-
-    #[wasm_bindgen_test]
-    fn target_authority_adds_default_https_port() {
-        assert_eq!(
-            target_authority("https://Example.COM/search?q=rust").as_deref(),
-            Ok("example.com:443")
-        );
-    }
-
-    #[wasm_bindgen_test]
-    fn target_authority_preserves_explicit_port() {
-        assert_eq!(
-            target_authority("https://Example.COM:8443/original").as_deref(),
-            Ok("example.com:8443")
-        );
-    }
-
-    #[wasm_bindgen_test]
-    fn route_roundtrip_keeps_extension_exit_parseable() {
-        let route = super::OnionProxyRoute {
-            service: "https".to_string(),
-            hops: vec!["did:ring:relay".to_string(), "did:ring:exit".to_string()],
-            exit: "did:ring:exit".to_string(),
-        };
-
-        let parsed = super::OnionProxyRoute::from_js(&route.to_js().unwrap()).unwrap();
-
-        assert_eq!(parsed, route);
-    }
-
-    #[wasm_bindgen_test]
-    fn route_from_js_accepts_legacy_exit_string() {
-        let route = Object::new();
-        super::js_set(&route, "service", &JsValue::from_str("https")).unwrap();
-        super::js_set(&route, "exit", &JsValue::from_str("did:ring:exit")).unwrap();
-        super::js_set(
-            &route,
-            "hops",
-            &super::string_array_js(&["did:ring:exit".to_string()]).into(),
-        )
-        .unwrap();
-
-        let parsed = super::OnionProxyRoute::from_js(&route.into()).unwrap();
-
-        assert_eq!(parsed.exit, "did:ring:exit");
-    }
-
-    #[wasm_bindgen_test]
-    fn response_roundtrip_keeps_extension_body_parseable() {
-        let response = super::OnionProxyResponse {
-            status: 200,
-            headers: vec![("content-type".to_string(), "text/plain".to_string())],
-            body: "hello through onion".to_string(),
-        };
-
-        let parsed = super::OnionProxyResponse::from_js(&response.to_js().unwrap()).unwrap();
-
-        assert_eq!(parsed, response);
-    }
-
-    #[wasm_bindgen_test]
-    fn response_from_js_accepts_legacy_body_string() {
-        let response = Object::new();
-        super::js_set(&response, "status", &JsValue::from_f64(200.0)).unwrap();
-        super::js_set(&response, "headers", &Array::new().into()).unwrap();
-        super::js_set(&response, "body", &JsValue::from_str("hello through onion")).unwrap();
-
-        let parsed = super::OnionProxyResponse::from_js(&response.into()).unwrap();
-
-        assert_eq!(parsed.body, "hello through onion");
-    }
-}
-
 fn optional_usize_field(
     object: &JsValue,
     field: &'static str,
@@ -500,7 +419,7 @@ fn parse_body_js(value: JsValue) -> Result<String, String> {
         let Some(byte) = array.get(index).as_f64() else {
             return Err("response body must contain bytes".to_string());
         };
-        if !byte.is_finite() || byte < 0.0 || byte > 255.0 || byte.fract() != 0.0 {
+        if !byte.is_finite() || !(0.0..=255.0).contains(&byte) || byte.fract() != 0.0 {
             return Err("response body contains an invalid byte".to_string());
         }
         body.push(byte as u8);
@@ -533,4 +452,95 @@ fn string_array_js(values: &[String]) -> Array {
         array.push(&JsValue::from_str(value));
     }
     array
+}
+
+#[cfg(test)]
+mod tests {
+    use js_sys::Array;
+    use js_sys::Object;
+    use wasm_bindgen::JsValue;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::target_authority;
+
+    #[wasm_bindgen_test]
+    fn target_authority_adds_default_https_port() {
+        assert_eq!(
+            target_authority("https://Example.COM/search?q=rust").as_deref(),
+            Ok("example.com:443")
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn target_authority_preserves_explicit_port() {
+        assert_eq!(
+            target_authority("https://Example.COM:8443/original").as_deref(),
+            Ok("example.com:8443")
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn route_roundtrip_keeps_extension_exit_parseable() {
+        let route = super::OnionProxyRoute {
+            service: "https".to_string(),
+            hops: vec!["did:ring:relay".to_string(), "did:ring:exit".to_string()],
+            exit: "did:ring:exit".to_string(),
+        };
+
+        let parsed = route
+            .to_js()
+            .and_then(|value| super::OnionProxyRoute::from_js(&value));
+
+        assert_eq!(parsed, Ok(route));
+    }
+
+    #[wasm_bindgen_test]
+    fn route_from_js_accepts_legacy_exit_string() {
+        let route = Object::new();
+        let set_route = super::js_set(&route, "service", &JsValue::from_str("https"))
+            .and_then(|()| super::js_set(&route, "exit", &JsValue::from_str("did:ring:exit")))
+            .and_then(|()| {
+                super::js_set(
+                    &route,
+                    "hops",
+                    &super::string_array_js(&["did:ring:exit".to_string()]).into(),
+                )
+            });
+        assert_eq!(set_route, Ok(()));
+
+        let parsed = super::OnionProxyRoute::from_js(&route.into()).map(|route| route.exit);
+
+        assert_eq!(parsed, Ok("did:ring:exit".to_string()));
+    }
+
+    #[wasm_bindgen_test]
+    fn response_roundtrip_keeps_extension_body_parseable() {
+        let response = super::OnionProxyResponse {
+            status: 200,
+            headers: vec![("content-type".to_string(), "text/plain".to_string())],
+            body: "hello through onion".to_string(),
+        };
+
+        let parsed = response
+            .to_js()
+            .and_then(|value| super::OnionProxyResponse::from_js(&value));
+
+        assert_eq!(parsed, Ok(response));
+    }
+
+    #[wasm_bindgen_test]
+    fn response_from_js_accepts_legacy_body_string() {
+        let response = Object::new();
+        let set_response = super::js_set(&response, "status", &JsValue::from_f64(200.0))
+            .and_then(|()| super::js_set(&response, "headers", &Array::new().into()))
+            .and_then(|()| {
+                super::js_set(&response, "body", &JsValue::from_str("hello through onion"))
+            });
+        assert_eq!(set_response, Ok(()));
+
+        let parsed =
+            super::OnionProxyResponse::from_js(&response.into()).map(|response| response.body);
+
+        assert_eq!(parsed, Ok("hello through onion".to_string()));
+    }
 }
