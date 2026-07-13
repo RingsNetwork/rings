@@ -24,11 +24,14 @@ wasm-bindgen-futures = "=0.4.71"
 web-sys = { version = "=0.3.98", features = [
     "Event",
     "EventTarget",
+    "History",
     "HtmlInputElement",
     "HtmlSelectElement",
     "HtmlTextAreaElement",
     "InputEvent",
+    "Location",
     "Url",
+    "Window",
 ] }
 yew = { version = "0.21", features = ["csr"] }
 

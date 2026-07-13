@@ -5,7 +5,11 @@ use std::time::Duration;
 use futures::FutureExt;
 use gloo_timers::callback::Interval;
 use gloo_timers::future::sleep;
+use wasm_bindgen::closure::Closure;
+use wasm_bindgen::JsCast;
+use wasm_bindgen::JsValue;
 use web_sys::Event;
+use web_sys::Window;
 use yew::prelude::*;
 
 use crate::connect;
@@ -28,7 +32,6 @@ use crate::node::DemoNode;
 use crate::node::PeerView;
 use crate::peer_sync;
 use crate::styles;
-use crate::topology;
 use crate::wallet;
 use crate::wallet::WalletAccount;
 use crate::wallet::WalletKind;
@@ -48,13 +51,7 @@ struct SettingsSnapshot {
 /// Rings browser frontend app.
 #[function_component(App)]
 pub fn app() -> Html {
-    let active_page = use_state(|| {
-        if extension::extension_node_bridge().is_some() {
-            ShellPage::Console
-        } else {
-            ShellPage::Guide
-        }
-    });
+    let active_page = use_state(initial_shell_page);
     let active_architecture_layer = use_state(|| 0_usize);
     let active_panel = use_state(|| Panel::Onion);
     let wallet_kind = use_state(|| {
@@ -610,6 +607,30 @@ pub fn app() -> Html {
         });
     }
 
+    {
+        let active_page = active_page.clone();
+        use_effect_with((), move |_| {
+            let listener = web_sys::window().map(|window| {
+                let page = active_page.clone();
+                let listener = Closure::<dyn FnMut(Event)>::wrap(Box::new(move |_| {
+                    page.set(current_shell_page());
+                }));
+                let callback = listener.as_ref().unchecked_ref();
+                let _ = window.add_event_listener_with_callback("popstate", callback);
+                let _ = window.add_event_listener_with_callback("hashchange", callback);
+                (window, listener)
+            });
+
+            move || {
+                if let Some((window, listener)) = listener {
+                    let callback = listener.as_ref().unchecked_ref();
+                    let _ = window.remove_event_listener_with_callback("popstate", callback);
+                    let _ = window.remove_event_listener_with_callback("hashchange", callback);
+                }
+            }
+        });
+    }
+
     let control_view = ControlView {
         wallet_kind: *wallet_kind,
         wallet_account: (*wallet_account).clone(),
@@ -695,6 +716,7 @@ pub fn app() -> Html {
         *active_panel,
         active_panel.clone(),
         workbench_dialog_open.clone(),
+        settings_dialog_open.clone(),
         workbench_body,
         true,
         extension_mode,
@@ -704,21 +726,37 @@ pub fn app() -> Html {
         launch_actions,
         workbench_control,
         settings_dialog_open.clone(),
+        workbench_dialog_open.clone(),
         control_sidebar_collapsed.clone(),
+        extension_mode,
     );
 
-    let header = controls::app_header(*active_page, active_page.clone());
-    if *active_page == ShellPage::Guide {
+    let navigate_page = {
+        let active_page = active_page.clone();
+        Callback::from(move |page| navigate_shell_page(page, &active_page))
+    };
+    let effective_page = if extension_mode {
+        ShellPage::Console
+    } else {
+        *active_page
+    };
+    let header = controls::app_header(effective_page, navigate_page.clone(), !extension_mode);
+    let topology_shell_class = if extension_mode {
+        "app-shell topology-shell extension-mode"
+    } else {
+        "app-shell topology-shell"
+    };
+    if effective_page == ShellPage::Guide {
         html! {
             <main class="app-shell guide-shell">
                 <style>{ styles::app_css() }</style>
                 { header }
-                { guide_page(active_page.clone(), active_architecture_layer.clone()) }
+                { guide_page(navigate_page.clone(), active_architecture_layer.clone()) }
             </main>
         }
     } else {
         html! {
-            <main class="app-shell topology-shell">
+            <main class={topology_shell_class}>
                 <style>{ styles::app_css() }</style>
                 { header }
                 { controls::network_stage(session_view, &status, link_control, control_sidebar) }
@@ -728,28 +766,28 @@ pub fn app() -> Html {
 }
 
 fn guide_page(
-    active_page: UseStateHandle<ShellPage>,
+    navigate_page: Callback<ShellPage>,
     active_architecture_layer: UseStateHandle<usize>,
 ) -> Html {
     let open_console = {
-        let active_page = active_page.clone();
-        Callback::from(move |_| active_page.set(ShellPage::Console))
+        let navigate_page = navigate_page.clone();
+        Callback::from(move |_| navigate_page.emit(ShellPage::Console))
     };
     let selected_architecture_index =
         (*active_architecture_layer).min(ARCHITECTURE_LAYERS.len() - 1);
     let selected_architecture_layer = &ARCHITECTURE_LAYERS[selected_architecture_index];
     html! {
         <section class="guide-page" aria-labelledby="guide-title">
-            <section class="landing-hero">
+            <section class="landing-hero" aria-labelledby="guide-title">
                 <div class="landing-hero-copy">
                     <p class="landing-kicker">{ "Rings Network" }</p>
-                    <h2 id="guide-title">{ "A peer-to-peer network for the sovereign age." }</h2>
+                    <h2 id="guide-title">{ "A P2P network for the sovereign age." }</h2>
                     <p class="landing-lede">
                         { "Rings is a browser-native, structured peer-to-peer network for applications that need their own network layer instead of a server-owned data path. Browser tabs and native daemons can join the same overlay, discover peers by DID, and exchange messages over direct WebRTC datachannels routed by a Chord DHT." }
                     </p>
                     <div class="landing-actions" aria-label="Primary actions">
                         <button class="landing-primary-action" type="button" onclick={open_console.clone()}>
-                            { "Open WorkBench" }
+                            { "Open Node" }
                         </button>
                         <a
                             class="landing-secondary-action"
@@ -769,11 +807,6 @@ fn guide_page(
                         </a>
                     </div>
                 </div>
-                <div class="landing-visual" aria-label="Simulated Rings network topology">
-                    <div class="landing-topology-card">
-                        { topology::guide_preview() }
-                    </div>
-                </div>
             </section>
 
             <section class="landing-section landing-feature-section" aria-label="Features">
@@ -781,10 +814,10 @@ fn guide_page(
                     <p>{ "Features" }</p>
                 </div>
                 <div class="landing-feature-grid">
-                    { landing_feature("Browser-native peers", "Runs in browsers through WebAssembly and web_sys, and on native hosts through the same Rust node stack. WebRTC datachannels carry browser-to-browser and daemon traffic without an application server in the data path.") }
-                    { landing_feature("DID identity and cryptography", "Peers are addressed by decentralized identifiers backed by selectable signature schemes, including secp256k1, secp256r1, ed25519, BLS, and bip137.") }
-                    { landing_feature("Structured peer routing", "A Chord DHT provides successor and finger-table routing, DID lookup, message relay, stabilization, and network_id isolation for independent overlays.") }
-                    { landing_feature("Protocol runtime", "Application protocols are namespace-scoped. A pure step function owns state transitions while an Interpret shell performs side effects through a scoped capability.") }
+                    { landing_feature("Browser-native peers", "Runs in browsers through WebAssembly and web_sys, and on native hosts through the same Rust node stack. WebRTC datachannels carry browser-to-browser and daemon traffic without an application server in the data path.", "assets/images/feature-network-background.png") }
+                    { landing_feature("DID identity and cryptography", "Peers are addressed by decentralized identifiers backed by selectable signature schemes, including secp256k1, secp256r1, ed25519, BLS, and bip137.", "assets/images/feature-did-identity.png") }
+                    { landing_feature("Structured peer routing", "A Chord DHT provides successor and finger-table routing, DID lookup, message relay, stabilization, and network_id isolation for independent overlays.", "assets/images/feature-peer-routing.png") }
+                    { landing_feature("Protocol runtime", "Application protocols are namespace-scoped. A pure step function owns state transitions while an Interpret shell performs side effects through a scoped capability.", "assets/images/feature-protocol-runtime.png") }
                 </div>
             </section>
 
@@ -815,15 +848,21 @@ fn guide_page(
                                 <h3>{ selected_architecture_layer.title }</h3>
                             </div>
                         </div>
-                        <p class="landing-layer-detail-summary">{ selected_architecture_layer.summary }</p>
-                        <p>{ selected_architecture_layer.detail }</p>
+                        <section class="landing-layer-detail-section">
+                            <span>{ "Summary" }</span>
+                            <p class="landing-layer-detail-summary">{ selected_architecture_layer.summary }</p>
+                        </section>
+                        <section class="landing-layer-detail-section">
+                            <span>{ "Responsibilities" }</span>
+                            <p>{ selected_architecture_layer.detail }</p>
+                        </section>
                         <dl class="landing-layer-detail-list">
                             <div>
-                                <dt>{ "Surface" }</dt>
+                                <dt>{ "Repository surface" }</dt>
                                 <dd>{ selected_architecture_layer.surface }</dd>
                             </div>
                             <div>
-                                <dt>{ "Contract" }</dt>
+                                <dt>{ "Contract / invariant" }</dt>
                                 <dd>{ selected_architecture_layer.contract }</dd>
                             </div>
                         </dl>
@@ -859,20 +898,94 @@ fn guide_page(
                 </div>
             </section>
 
-            <section class="landing-final" aria-label="Open Rings WorkBench">
+            <section class="landing-final" aria-label="Open Rings Node">
                 <div>
                     <p>{ "Frontend" }</p>
-                    <h2>{ "Use the browser and extension WorkBench for the live network surface." }</h2>
+                    <h2>{ "Use the browser node for the live network surface." }</h2>
                     <span>
                         { "Wallet login, SDP/HTTP connectivity, topology inspection, onion proxy requests, proof tools, and custom messages live here." }
                     </span>
                 </div>
                 <button class="landing-primary-action" type="button" onclick={open_console}>
-                    { "Open WorkBench" }
+                    { "Open Node" }
                 </button>
             </section>
         </section>
     }
+}
+
+fn initial_shell_page() -> ShellPage {
+    if extension::extension_node_bridge().is_some() {
+        return ShellPage::Console;
+    }
+    match routed_shell_page() {
+        Some(page) => page,
+        None => ShellPage::Guide,
+    }
+}
+
+fn current_shell_page() -> ShellPage {
+    if extension::extension_node_bridge().is_some() {
+        return ShellPage::Console;
+    }
+    routed_shell_page().unwrap_or(ShellPage::Guide)
+}
+
+fn routed_shell_page() -> Option<ShellPage> {
+    let hash = web_sys::window()?.location().hash().ok()?;
+    match hash.trim_start_matches('#').trim_start_matches('/') {
+        "" | "home" => Some(ShellPage::Guide),
+        "node" => Some(ShellPage::Console),
+        _ => None,
+    }
+}
+
+fn navigate_shell_page(page: ShellPage, active_page: &UseStateHandle<ShellPage>) {
+    if **active_page == page && routed_shell_page() == Some(page) {
+        return;
+    }
+    push_shell_page(page);
+    active_page.set(page);
+}
+
+fn push_shell_page(page: ShellPage) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(target) = shell_page_url(&window, page) else {
+        return;
+    };
+    if current_path_search_hash(&window) == Some(target.clone()) {
+        return;
+    }
+    let Ok(history) = window.history() else {
+        return;
+    };
+    let _ = history.push_state_with_url(&JsValue::NULL, "", Some(&target));
+}
+
+fn shell_page_url(window: &Window, page: ShellPage) -> Option<String> {
+    let location = window.location();
+    let mut target = location.pathname().ok()?;
+    if let Ok(search) = location.search() {
+        target.push_str(&search);
+    }
+    if page == ShellPage::Console {
+        target.push_str("#node");
+    }
+    Some(target)
+}
+
+fn current_path_search_hash(window: &Window) -> Option<String> {
+    let location = window.location();
+    let mut current = location.pathname().ok()?;
+    if let Ok(search) = location.search() {
+        current.push_str(&search);
+    }
+    if let Ok(hash) = location.hash() {
+        current.push_str(&hash);
+    }
+    Some(current)
 }
 
 struct ArchitectureLayer {
@@ -893,8 +1006,8 @@ const ARCHITECTURE_LAYERS: [ArchitectureLayer; 6] = [
         role: "runs user-facing workflows.",
         title: "dWeb, zk-proof demo, relay, custom apps",
         summary: "Apps run over the protocol layer instead of a hosted backend data path.",
-        detail: "Application surfaces are repository examples and browser WorkBench panels. They compose wallet login, dWeb content, proof workflows, relay tunnels, and custom protocol messages on top of the same peer runtime. The application layer should read as product-facing behavior: it chooses what to ask the network to do, while the lower layers keep addressing, routing, and transport concerns out of the UI code.",
-        surface: "frontend WorkBench, examples/dweb, examples/snark, examples/relay",
+        detail: "Application surfaces are repository examples and browser node panels. They compose wallet login, dWeb content, proof workflows, relay tunnels, and custom protocol messages on top of the same peer runtime. The application layer should read as product-facing behavior: it chooses what to ask the network to do, while the lower layers keep addressing, routing, and transport concerns out of the UI code.",
+        surface: "frontend Node page, examples/dweb, examples/snark, examples/relay",
         contract: "Application code addresses peers and namespaces; it does not own overlay routing or transport setup.",
     },
     ArchitectureLayer {
@@ -949,11 +1062,21 @@ const ARCHITECTURE_LAYERS: [ArchitectureLayer; 6] = [
     },
 ];
 
-fn landing_feature(title: &'static str, body: &'static str) -> Html {
+fn landing_feature(title: &'static str, body: &'static str, image_src: &'static str) -> Html {
     html! {
         <article class="landing-feature-card">
-            <h3>{ title }</h3>
-            <p>{ body }</p>
+            <img
+                class="landing-feature-illustration"
+                src={image_src}
+                alt=""
+                loading="lazy"
+                decoding="async"
+                aria-hidden="true"
+            />
+            <div class="landing-feature-copy">
+                <h3>{ title }</h3>
+                <p>{ body }</p>
+            </div>
         </article>
     }
 }

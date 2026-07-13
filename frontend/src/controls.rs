@@ -27,8 +27,8 @@ pub(crate) enum ShellPage {
 impl ShellPage {
     fn label(self) -> &'static str {
         match self {
-            Self::Guide => "Guide",
-            Self::Console => "Console",
+            Self::Guide => "Home",
+            Self::Console => "Node",
         }
     }
 }
@@ -168,37 +168,43 @@ struct SettingsDialogView<'a> {
     close_dialog: Callback<MouseEvent>,
 }
 
-pub(crate) fn app_header(active_page: ShellPage, page: UseStateHandle<ShellPage>) -> Html {
-    let header_class = if active_page == ShellPage::Guide {
-        "app-header landing-header"
-    } else {
-        "app-header"
-    };
+pub(crate) fn app_header(
+    active_page: ShellPage,
+    navigate_page: Callback<ShellPage>,
+    show_nav: bool,
+) -> Html {
     let guide_class = header_page_class(active_page, ShellPage::Guide);
     let console_class = header_page_class(active_page, ShellPage::Console);
     let open_guide = {
-        let page = page.clone();
-        Callback::from(move |_| page.set(ShellPage::Guide))
+        let navigate_page = navigate_page.clone();
+        Callback::from(move |_| navigate_page.emit(ShellPage::Guide))
     };
     let open_console = {
-        let page = page.clone();
-        Callback::from(move |_| page.set(ShellPage::Console))
+        let navigate_page = navigate_page.clone();
+        Callback::from(move |_| navigate_page.emit(ShellPage::Console))
     };
-    if active_page == ShellPage::Guide {
-        return html! {
-            <header class={header_class}>
-                <div class="landing-header-brand" aria-label="Rings Network">
-                    <span class="landing-header-mark" aria-hidden="true">{ "R" }</span>
-                    <div>
-                        <strong>{ "Rings Network" }</strong>
-                        <span>{ "Browser-native P2P" }</span>
-                    </div>
+    html! {
+        <header class="app-header landing-header">
+            <div class="landing-header-brand" aria-label="Rings Network">
+                <span class="landing-header-mark" aria-hidden="true">
+                    <img
+                        class="landing-header-logo"
+                        src="assets/icons/rings.svg"
+                        alt=""
+                        decoding="async"
+                    />
+                </span>
+                <div>
+                    <strong>{ "Rings Network" }</strong>
+                    <span>{ "Browser-native P2P" }</span>
                 </div>
+            </div>
+            if show_nav {
                 <nav class="header-nav" aria-label="Primary">
                     <button
                         class={guide_class}
                         type="button"
-                        aria-current="page"
+                        aria-current={if active_page == ShellPage::Guide { "page" } else { "false" }}
                         onclick={open_guide}
                     >
                         { ShellPage::Guide.label() }
@@ -206,10 +212,10 @@ pub(crate) fn app_header(active_page: ShellPage, page: UseStateHandle<ShellPage>
                     <button
                         class={console_class}
                         type="button"
-                        aria-current="false"
+                        aria-current={if active_page == ShellPage::Console { "page" } else { "false" }}
                         onclick={open_console}
                     >
-                        { "WorkBench" }
+                        { ShellPage::Console.label() }
                     </button>
                     <a
                         class="header-github-link"
@@ -228,41 +234,7 @@ pub(crate) fn app_header(active_page: ShellPage, page: UseStateHandle<ShellPage>
                         { "Whitepaper" }
                     </a>
                 </nav>
-            </header>
-        };
-    }
-    html! {
-        <header class={header_class}>
-            <div>
-                <p class="eyebrow">{ "Browser node console" }</p>
-                <h1>{ "Rings" }</h1>
-            </div>
-            <nav class="header-nav" aria-label="Primary">
-                <button
-                    class={guide_class}
-                    type="button"
-                    aria-current={if active_page == ShellPage::Guide { "page" } else { "false" }}
-                    onclick={open_guide}
-                >
-                    { ShellPage::Guide.label() }
-                </button>
-                <button
-                    class={console_class}
-                    type="button"
-                    aria-current={if active_page == ShellPage::Console { "page" } else { "false" }}
-                    onclick={open_console}
-                >
-                    { ShellPage::Console.label() }
-                </button>
-                <a
-                    class="header-github-link"
-                    href="https://github.com/RyanKung/rings"
-                    target="_blank"
-                    rel="noreferrer"
-                >
-                    { "GitHub" }
-                </a>
-            </nav>
+            }
         </header>
     }
 }
@@ -280,7 +252,9 @@ pub(crate) fn control_sidebar(
     actions: LaunchActions,
     workbench_control: Html,
     settings_dialog_open: UseStateHandle<bool>,
+    workbench_dialog_open: UseStateHandle<bool>,
     collapsed: UseStateHandle<bool>,
+    extension_mode: bool,
 ) -> Html {
     let did_value = if (**view.did).is_empty() {
         "not started".to_string()
@@ -348,7 +322,11 @@ pub(crate) fn control_sidebar(
     };
     let open_settings_dialog = {
         let settings_dialog_open = settings_dialog_open.clone();
-        Callback::from(move |_| settings_dialog_open.set(true))
+        let workbench_dialog_open = workbench_dialog_open.clone();
+        Callback::from(move |_| {
+            workbench_dialog_open.set(false);
+            settings_dialog_open.set(true);
+        })
     };
     let close_settings_dialog = {
         let settings_dialog_open = settings_dialog_open.clone();
@@ -358,30 +336,34 @@ pub(crate) fn control_sidebar(
         let collapsed = collapsed.clone();
         Callback::from(move |_| collapsed.set(!*collapsed))
     };
-    let sidebar_class = if *collapsed {
+    let sidebar_class = if extension_mode {
+        "control-sidebar extension-action-tabs"
+    } else if *collapsed {
         "control-sidebar collapsed"
     } else {
         "control-sidebar"
     };
     html! {
         <aside class={sidebar_class} aria-label="Node controls">
-            <button
-                class="sidebar-toggle"
-                type="button"
-                aria-label={if *collapsed { "Open controls" } else { "Collapse controls" }}
-                aria-expanded={(!*collapsed).to_string()}
-                aria-controls="node-control-sidebar-content"
-                title={if *collapsed { "Open controls" } else { "Collapse controls" }}
-                onclick={toggle_sidebar}
-            >
-                <span class="sidebar-toggle-icon" aria-hidden="true">
-                    { ui_icon(if *collapsed { UiIcon::PanelOpen } else { UiIcon::PanelClose }) }
-                </span>
-                <span class="sidebar-toggle-label">
-                    { if *collapsed { "Setup" } else { "Hide" } }
-                </span>
-            </button>
-            if !*collapsed {
+            if !extension_mode {
+                <button
+                    class="sidebar-toggle"
+                    type="button"
+                    aria-label={if *collapsed { "Open controls" } else { "Collapse controls" }}
+                    aria-expanded={(!*collapsed).to_string()}
+                    aria-controls="node-control-sidebar-content"
+                    title={if *collapsed { "Open controls" } else { "Collapse controls" }}
+                    onclick={toggle_sidebar}
+                >
+                    <span class="sidebar-toggle-icon" aria-hidden="true">
+                        { ui_icon(if *collapsed { UiIcon::PanelOpen } else { UiIcon::PanelClose }) }
+                    </span>
+                    <span class="sidebar-toggle-label">
+                        { if *collapsed { "Setup" } else { "Hide" } }
+                    </span>
+                </button>
+            }
+            if extension_mode || !*collapsed {
                 <div id="node-control-sidebar-content" class="sidebar-content sidebar-command-panel">
                     <div class="command-panel-header">
                         <div>
@@ -549,14 +531,17 @@ pub(crate) fn workbench_control(
     active: Panel,
     active_panel: UseStateHandle<Panel>,
     dialog_open: UseStateHandle<bool>,
+    settings_dialog_open: UseStateHandle<bool>,
     body: Html,
     available: bool,
     extension_mode: bool,
 ) -> Html {
     let open_dialog = {
         let dialog_open = dialog_open.clone();
+        let settings_dialog_open = settings_dialog_open.clone();
         Callback::from(move |_| {
             if available {
+                settings_dialog_open.set(false);
                 dialog_open.set(true);
             }
         })

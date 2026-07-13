@@ -110,6 +110,7 @@ await rm(extensionDist, { force: true, recursive: true });
 await mkdir(extensionDist, { recursive: true });
 await cp(join(sourceRoot, jsFile), join(extensionDist, jsFile));
 await cp(join(sourceRoot, wasmFile), join(extensionDist, wasmFile));
+await cp(join(projectRoot, "assets"), join(extensionDist, "assets"), { recursive: true });
 
 await writeFile(join(extensionDist, "index.html"), htmlShell(jsFile, wasmFile, { includeNodeBridge: true }), "utf8");
 await writeFile(
@@ -248,7 +249,7 @@ function htmlShell(jsFileName: string, wasmFileName: string, options: HtmlShellO
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Rings</title>
+    <title>Rings - A P2P network for the sovereign age</title>
     <link rel="icon" type="image/svg+xml" href="./icons/rings.svg" />
     <link rel="icon" type="image/png" sizes="16x16" href="./icons/rings-16.png" />
     <link rel="icon" type="image/png" sizes="32x32" href="./icons/rings-32.png" />
