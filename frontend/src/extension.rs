@@ -1,7 +1,9 @@
 //! Browser-extension runtime and side-panel bridge boundary.
 
 use std::cell::RefCell;
+use std::fmt;
 use std::future::Future;
+use std::num::ParseIntError;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -16,12 +18,8 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use yew::prelude::*;
 
-use crate::browser_api::await_js;
 use crate::browser_api::chrome_runtime_on_message;
 pub(crate) use crate::browser_api::copy_text_to_clipboard;
-use crate::browser_api::is_callable;
-use crate::browser_api::js_bool_field;
-use crate::browser_api::js_error_label;
 use crate::browser_api::js_method;
 use crate::browser_api::js_prop;
 use crate::browser_api::js_set;
@@ -31,7 +29,20 @@ pub(crate) use crate::browser_api::open_debug_url;
 pub(crate) use crate::browser_api::save_setting;
 use crate::custom;
 use crate::dweb;
-use crate::generation::GenerationToken;
+pub(crate) use crate::extension_bridge::apply_extension_snapshot;
+pub(crate) use crate::extension_bridge::extension_node_accept_answer;
+pub(crate) use crate::extension_bridge::extension_node_answer_offer;
+pub(crate) use crate::extension_bridge::extension_node_bridge;
+pub(crate) use crate::extension_bridge::extension_node_connect_http;
+pub(crate) use crate::extension_bridge::extension_node_create_offer;
+pub(crate) use crate::extension_bridge::extension_node_start;
+pub(crate) use crate::extension_bridge::extension_node_status;
+pub(crate) use crate::extension_bridge::extension_node_stop;
+pub(crate) use crate::extension_bridge::extension_onion_proxy_request;
+pub(crate) use crate::extension_bridge::extension_onion_proxy_route;
+pub(crate) use crate::extension_bridge::poll_extension_node_start;
+pub(crate) use crate::extension_bridge::ExtensionNodeSnapshot;
+pub(crate) use crate::extension_bridge::ExtensionStartSettings;
 use crate::node;
 use crate::node::DemoNode;
 use crate::node::NodeSettings;
@@ -42,7 +53,6 @@ use crate::wallet;
 use crate::wallet::WalletAccount;
 use crate::wallet::WalletKind;
 
-const EXTENSION_NODE_BRIDGE: &str = "RingsExtensionNodeBridge";
 const EXTENSION_NODE_TARGET: &str = "rings.node.offscreen";
 const EXTENSION_NODE_START: &str = "rings.node.start";
 const EXTENSION_NODE_STOP: &str = "rings.node.stop";
@@ -71,26 +81,6 @@ pub(crate) const LEGACY_SETTING_SEED_URL: &str = "rings.node-demo.seedUrl";
 pub(crate) const LEGACY_SETTING_HTTP_ENDPOINT: &str = "rings.node-demo.httpEndpoint";
 pub(crate) const WALLET_CONNECT_TIMEOUT: Duration = Duration::from_secs(45);
 pub(crate) const SESSION_AUTH_TIMEOUT: Duration = Duration::from_secs(60);
-const NODE_START_POLL_ATTEMPTS: usize = 240;
-const NODE_START_POLL_DELAY_MS: u64 = 750;
-
-pub(crate) struct ExtensionStartSettings {
-    pub(crate) network_id: String,
-    pub(crate) ice_servers: String,
-    pub(crate) stabilize_interval: String,
-    pub(crate) storage_name: String,
-    pub(crate) seed_url: String,
-}
-
-pub(crate) struct ExtensionNodeSnapshot {
-    pub(crate) online: bool,
-    pub(crate) starting: bool,
-    pub(crate) did: String,
-    pub(crate) peers: Vec<PeerView>,
-    pub(crate) wallet_account: Option<WalletAccount>,
-    pub(crate) message: String,
-    pub(crate) error: Option<String>,
-}
 
 pub(crate) fn load_setting_with_legacy(key: &str, legacy_key: &str) -> Option<String> {
     load_setting(key).or_else(|| {
@@ -189,21 +179,46 @@ pub(crate) fn node_settings(
     ice_servers: String,
     stabilize_interval: String,
     storage_name: String,
-) -> Result<NodeSettings, String> {
+) -> Result<NodeSettings, NodeSettingsError> {
     let network_id = network_id
         .trim()
         .parse::<u32>()
-        .map_err(|error| format!("invalid network id: {error}"))?;
+        .map_err(NodeSettingsError::NetworkId)?;
     let stabilize_interval = stabilize_interval
         .trim()
         .parse::<u64>()
-        .map_err(|error| format!("invalid stabilize interval: {error}"))?;
+        .map_err(NodeSettingsError::StabilizeInterval)?;
     Ok(NodeSettings {
         network_id,
         ice_servers,
         stabilize_interval,
         storage_name,
     })
+}
+
+#[derive(Debug)]
+pub(crate) enum NodeSettingsError {
+    NetworkId(ParseIntError),
+    StabilizeInterval(ParseIntError),
+}
+
+impl fmt::Display for NodeSettingsError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NetworkId(error) => write!(formatter, "invalid network id: {error}"),
+            Self::StabilizeInterval(error) => {
+                write!(formatter, "invalid stabilize interval: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for NodeSettingsError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::NetworkId(error) | Self::StabilizeInterval(error) => Some(error),
+        }
+    }
 }
 
 async fn handle_headless_node_message(
@@ -309,18 +324,8 @@ async fn start_headless_node_inner(
     wallet_kind: WalletKind,
     settings: ExtensionStartSettings,
 ) -> Result<String, String> {
-    let node_settings = node_settings(
-        settings.network_id,
-        settings.ice_servers,
-        settings.stabilize_interval,
-        settings.storage_name,
-    )?;
-    let account = operation_timeout(
-        "account authorization",
-        WALLET_CONNECT_TIMEOUT,
-        wallet::connect(wallet_kind),
-    )
-    .await?;
+    let node_settings = headless_node_settings(&settings)?;
+    let account = authorize_headless_account(wallet_kind).await?;
     if !headless_generation_current(&state, generation) {
         return Ok("background node start cancelled".to_string());
     }
@@ -331,12 +336,7 @@ async fn start_headless_node_inner(
         None,
         true,
     );
-    let built = operation_timeout(
-        "session authorization",
-        SESSION_AUTH_TIMEOUT,
-        node::build_node(&account, node_settings),
-    )
-    .await?;
+    let built = build_headless_node(&account, node_settings).await?;
     if !headless_generation_current(&state, generation) {
         built.stop();
         return Ok("background node start cancelled".to_string());
@@ -349,41 +349,86 @@ async fn start_headless_node_inner(
         true,
     );
     let my_did = built.provider.address();
-    let site = Rc::new(RefCell::new(dweb::default_site()));
-    site.borrow_mut().insert(
-        "/".to_string(),
-        format!("<h1>Rings node {my_did}</h1><p>Served by the extension background node.</p>"),
-    );
-    if let Err(error) = dweb::register(
-        &built.provider,
-        site,
-        Callback::from(|_: dweb::DwebResponse| {}),
-    ) {
+    if let Err(error) = register_headless_protocols(&built, &my_did) {
         built.stop();
         return Err(error);
-    }
-    let on_custom = Callback::from(|_: custom::CustomEvent| {});
-    for namespace in custom::DEMO_NAMESPACES {
-        if let Err(error) =
-            custom::register(&built.provider, namespace.to_string(), on_custom.clone())
-        {
-            built.stop();
-            return Err(error);
-        }
     }
     if !headless_generation_current(&state, generation) {
         built.stop();
         return Ok("background node start cancelled".to_string());
     }
 
-    {
-        let mut state = state.borrow_mut();
-        state.wallet_account = Some(account);
-        state.peers = Vec::new();
-        state.node = Some(built.clone());
-    }
+    install_headless_node(&state, account, &built);
+    connect_headless_seed(state, generation, built, settings.seed_url).await
+}
 
-    let seed_url = settings.seed_url.trim().to_string();
+fn headless_node_settings(settings: &ExtensionStartSettings) -> Result<NodeSettings, String> {
+    node_settings(
+        settings.network_id.clone(),
+        settings.ice_servers.clone(),
+        settings.stabilize_interval.clone(),
+        settings.storage_name.clone(),
+    )
+    .map_err(|error| error.to_string())
+}
+
+async fn authorize_headless_account(wallet_kind: WalletKind) -> Result<WalletAccount, String> {
+    operation_timeout(
+        "account authorization",
+        WALLET_CONNECT_TIMEOUT,
+        wallet::connect(wallet_kind),
+    )
+    .await
+}
+
+async fn build_headless_node(
+    account: &WalletAccount,
+    node_settings: NodeSettings,
+) -> Result<DemoNode, String> {
+    operation_timeout(
+        "session authorization",
+        SESSION_AUTH_TIMEOUT,
+        node::build_node(account, node_settings),
+    )
+    .await
+}
+
+fn register_headless_protocols(built: &DemoNode, my_did: &str) -> Result<(), String> {
+    let site = Rc::new(RefCell::new(dweb::default_site()));
+    site.borrow_mut().insert(
+        "/".to_string(),
+        format!("<h1>Rings node {my_did}</h1><p>Served by the extension background node.</p>"),
+    );
+    dweb::register(
+        &built.provider,
+        site,
+        Callback::from(|_: dweb::DwebResponse| {}),
+    )?;
+    let on_custom = Callback::from(|_: custom::CustomEvent| {});
+    for namespace in custom::DEMO_NAMESPACES {
+        custom::register(&built.provider, namespace.to_string(), on_custom.clone())?;
+    }
+    Ok(())
+}
+
+fn install_headless_node(
+    state: &Rc<RefCell<HeadlessNodeState>>,
+    account: WalletAccount,
+    built: &DemoNode,
+) {
+    let mut state = state.borrow_mut();
+    state.wallet_account = Some(account);
+    state.peers = Vec::new();
+    state.node = Some(built.clone());
+}
+
+async fn connect_headless_seed(
+    state: Rc<RefCell<HeadlessNodeState>>,
+    generation: u64,
+    built: DemoNode,
+    seed_url: String,
+) -> Result<String, String> {
+    let seed_url = seed_url.trim().to_string();
     if seed_url.is_empty() {
         return Ok("background node ready".to_string());
     }
@@ -842,275 +887,4 @@ fn runtime_response(response: Result<JsValue, String>) -> JsValue {
         }
     }
     object.into()
-}
-
-pub(crate) fn apply_extension_snapshot(
-    snapshot: ExtensionNodeSnapshot,
-    did: &UseStateHandle<String>,
-    peers: &UseStateHandle<Vec<PeerView>>,
-    wallet_account: &UseStateHandle<Option<WalletAccount>>,
-    node_starting: &UseStateHandle<bool>,
-    status: &UseStateHandle<String>,
-    token: &GenerationToken,
-) -> bool {
-    if !token.is_current() {
-        return false;
-    }
-    node_starting.set(snapshot.starting);
-    if snapshot.online {
-        did.set(snapshot.did);
-        peers.set(snapshot.peers);
-        wallet_account.set(snapshot.wallet_account);
-    }
-    status.set(snapshot.error.unwrap_or(snapshot.message));
-    true
-}
-
-pub(crate) async fn poll_extension_node_start(
-    bridge: &JsValue,
-    did: UseStateHandle<String>,
-    peers: UseStateHandle<Vec<PeerView>>,
-    wallet_account: UseStateHandle<Option<WalletAccount>>,
-    node_starting: UseStateHandle<bool>,
-    status: UseStateHandle<String>,
-    token: GenerationToken,
-) -> Result<(), String> {
-    let mut last_message = "background node starting".to_string();
-    for _attempt in 0..NODE_START_POLL_ATTEMPTS {
-        sleep(Duration::from_millis(NODE_START_POLL_DELAY_MS)).await;
-        if !token.is_current() {
-            return Ok(());
-        }
-        let snapshot = match extension_node_status(bridge).await {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                if token.is_current() {
-                    return Err(error);
-                }
-                return Ok(());
-            }
-        };
-        let message = snapshot
-            .error
-            .clone()
-            .unwrap_or_else(|| snapshot.message.clone());
-        last_message = message.clone();
-        let online = snapshot.online;
-        let starting = snapshot.starting;
-        let error = snapshot.error.clone();
-        if !apply_extension_snapshot(
-            snapshot,
-            &did,
-            &peers,
-            &wallet_account,
-            &node_starting,
-            &status,
-            &token,
-        ) {
-            return Ok(());
-        }
-        if online && !starting {
-            return Ok(());
-        }
-        if let Some(error) = error {
-            return Err(error);
-        }
-        if !online && !starting {
-            return Err(last_message);
-        }
-    }
-    Err(format!("node start timed out: {last_message}"))
-}
-
-pub(crate) fn extension_node_bridge() -> Option<JsValue> {
-    let bridge = Reflect::get(&js_sys::global(), &JsValue::from_str(EXTENSION_NODE_BRIDGE)).ok()?;
-    if bridge.is_null()
-        || bridge.is_undefined()
-        || !is_callable(&bridge, "start")
-        || !is_callable(&bridge, "stop")
-        || !is_callable(&bridge, "status")
-        || !is_callable(&bridge, "connectHttp")
-        || !is_callable(&bridge, "onionProxyRoute")
-        || !is_callable(&bridge, "onionProxyRequest")
-    {
-        return None;
-    }
-    Some(bridge)
-}
-
-pub(crate) async fn extension_node_start(
-    bridge: &JsValue,
-    kind: WalletKind,
-    settings: ExtensionStartSettings,
-) -> Result<ExtensionNodeSnapshot, String> {
-    let settings = settings.to_js(kind)?;
-    let result = call_extension_bridge1(bridge, "start", &settings).await?;
-    parse_extension_node_snapshot(&result, bridge)
-}
-
-pub(crate) async fn extension_node_status(
-    bridge: &JsValue,
-) -> Result<ExtensionNodeSnapshot, String> {
-    let result = call_extension_bridge0(bridge, "status").await?;
-    parse_extension_node_snapshot(&result, bridge)
-}
-
-pub(crate) async fn extension_node_stop(bridge: &JsValue) -> Result<String, String> {
-    let result = call_extension_bridge0(bridge, "stop").await?;
-    let snapshot = parse_extension_node_snapshot(&result, bridge)?;
-    Ok(snapshot.message)
-}
-
-pub(crate) async fn extension_node_connect_http(
-    bridge: &JsValue,
-    endpoint: String,
-) -> Result<ExtensionNodeSnapshot, String> {
-    let result =
-        call_extension_bridge1(bridge, "connectHttp", &JsValue::from_str(&endpoint)).await?;
-    parse_extension_node_snapshot(&result, bridge)
-}
-
-pub(crate) async fn extension_node_create_offer(
-    bridge: &JsValue,
-    did: String,
-) -> Result<String, String> {
-    let result = call_extension_bridge1(bridge, "createOffer", &JsValue::from_str(&did)).await?;
-    js_string_field(&result, "offer")
-}
-
-pub(crate) async fn extension_node_answer_offer(
-    bridge: &JsValue,
-    offer: String,
-) -> Result<String, String> {
-    let result = call_extension_bridge1(bridge, "answerOffer", &JsValue::from_str(&offer)).await?;
-    js_string_field(&result, "answer")
-}
-
-pub(crate) async fn extension_node_accept_answer(
-    bridge: &JsValue,
-    answer: String,
-) -> Result<ExtensionNodeSnapshot, String> {
-    let result =
-        call_extension_bridge1(bridge, "acceptAnswer", &JsValue::from_str(&answer)).await?;
-    parse_extension_node_snapshot(&result, bridge)
-}
-
-pub(crate) async fn extension_onion_proxy_route(
-    bridge: &JsValue,
-    request: onion::OnionProxyRouteRequest,
-) -> Result<onion::OnionProxyRoute, String> {
-    let result = call_extension_bridge1(bridge, "onionProxyRoute", &request.to_js()?).await?;
-    onion::OnionProxyRoute::from_js(&result)
-}
-
-pub(crate) async fn extension_onion_proxy_request(
-    bridge: &JsValue,
-    request: onion::OnionProxyHttpRequest,
-) -> Result<onion::OnionProxyResponse, String> {
-    let result = call_extension_bridge1(bridge, "onionProxyRequest", &request.to_js()?).await?;
-    onion::OnionProxyResponse::from_js(&result)
-}
-
-impl ExtensionStartSettings {
-    fn to_js(&self, kind: WalletKind) -> Result<JsValue, String> {
-        let object = Object::new();
-        js_set(&object, "walletKind", &JsValue::from_str(kind.value()))?;
-        js_set(&object, "networkId", &JsValue::from_str(&self.network_id))?;
-        js_set(&object, "iceServers", &JsValue::from_str(&self.ice_servers))?;
-        js_set(
-            &object,
-            "stabilizeInterval",
-            &JsValue::from_str(&self.stabilize_interval),
-        )?;
-        js_set(
-            &object,
-            "storageName",
-            &JsValue::from_str(&self.storage_name),
-        )?;
-        js_set(&object, "seedUrl", &JsValue::from_str(&self.seed_url))?;
-        Ok(object.into())
-    }
-}
-
-async fn call_extension_bridge0(bridge: &JsValue, method: &str) -> Result<JsValue, String> {
-    let value = js_method(bridge, method)?
-        .call0(bridge)
-        .map_err(|error| format!("{method} failed: {}", js_error_label(error)))?;
-    await_js(value).await
-}
-
-async fn call_extension_bridge1(
-    bridge: &JsValue,
-    method: &str,
-    arg: &JsValue,
-) -> Result<JsValue, String> {
-    let value = js_method(bridge, method)?
-        .call1(bridge, arg)
-        .map_err(|error| format!("{method} failed: {}", js_error_label(error)))?;
-    await_js(value).await
-}
-
-fn parse_extension_node_snapshot(
-    value: &JsValue,
-    bridge: &JsValue,
-) -> Result<ExtensionNodeSnapshot, String> {
-    let online = js_bool_field(value, "online").unwrap_or(false);
-    let starting = js_bool_field(value, "starting").unwrap_or(false);
-    let did = js_string_field(value, "did").unwrap_or_default();
-    let message = js_string_field(value, "message").unwrap_or_else(|_| {
-        if online {
-            "background node active".to_string()
-        } else {
-            "background node offline".to_string()
-        }
-    });
-    let error = js_string_field(value, "error").ok();
-    let peers = parse_peer_views(value)?;
-    let wallet_account = if online {
-        let account = js_string_field(value, "account").unwrap_or_default();
-        if account.is_empty() {
-            None
-        } else {
-            let kind = js_string_field(value, "walletKind")
-                .map(|value| WalletKind::from_value(&value))
-                .unwrap_or(WalletKind::WebCrypto);
-            let account_type =
-                js_string_field(value, "accountType").unwrap_or_else(|_| "unknown".to_string());
-            Some(WalletAccount::extension_view(
-                kind,
-                account,
-                account_type,
-                bridge.clone(),
-            ))
-        }
-    } else {
-        None
-    };
-    Ok(ExtensionNodeSnapshot {
-        online,
-        starting,
-        did,
-        peers,
-        wallet_account,
-        message,
-        error,
-    })
-}
-
-fn parse_peer_views(value: &JsValue) -> Result<Vec<PeerView>, String> {
-    let peers = js_prop(value, "peers").unwrap_or_else(|_| Array::new().into());
-    if !Array::is_array(&peers) {
-        return Ok(Vec::new());
-    }
-    let array = Array::from(&peers);
-    let mut out = Vec::with_capacity(array.length() as usize);
-    for index in 0..array.length() {
-        let peer = array.get(index);
-        let did = js_string_field(&peer, "did").unwrap_or_default();
-        let state = js_string_field(&peer, "state").unwrap_or_else(|_| "Unknown".to_string());
-        if let Some(peer) = PeerView::from_fields(did, state) {
-            out.push(peer);
-        }
-    }
-    Ok(out)
 }

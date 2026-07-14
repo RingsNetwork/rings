@@ -24,23 +24,19 @@ struct TopologyProps {
 
 #[function_component(Topology)]
 fn topology_component(props: &TopologyProps) -> Html {
-    let width = 420.0;
-    let height = 420.0;
-    let center_x = width / 2.0;
-    let center_y = height / 2.0;
-    let radius = 144.0;
-    let nodes = chord_nodes(&props.did, &props.peers);
-    let successor_edges = inferred_successor_edges(nodes.len());
-    let finger_links = inferred_finger_links(&nodes);
-    let local_context = local_chord_context(&nodes);
-    let outer_orbit = open_orbit_path(center_x, center_y, radius + 42.0);
-    let main_orbit = open_orbit_path(center_x, center_y, radius);
-    let inner_orbit = open_orbit_path(center_x, center_y, radius - 50.0);
-    let node_count = nodes.len();
-    let show_remote_labels = node_count <= 6;
+    let layout = TopologyLayout::new();
+    let model = TopologyModel::new(&props.did, &props.peers);
     let hovered_node = use_state(|| None::<String>);
     let pinned_node = use_state(|| None::<String>);
     let active_did = (*pinned_node).clone().or_else(|| (*hovered_node).clone());
+    let render = TopologyRenderState {
+        layout,
+        node_count: model.nodes.len(),
+        show_remote_labels: model.nodes.len() <= 6,
+        active_did,
+        hovered_node: hovered_node.clone(),
+        pinned_node: pinned_node.clone(),
+    };
     let clear_pinned = {
         let pinned_node = pinned_node.clone();
         Callback::from(move |_| pinned_node.set(None))
@@ -58,143 +54,319 @@ fn topology_component(props: &TopologyProps) -> Html {
             onclick={clear_pinned}
             onmouseleave={clear_hovered}
         >
-            <path class="orbit outer" d={outer_orbit} />
+            { topology_orbits(layout) }
+            { topology_caption(layout, model.nodes.len()) }
+            { successor_paths(layout, &model.nodes, &model.successor_edges) }
+            { finger_paths(layout, &model.nodes, &model.finger_links) }
+            { topology_core(layout) }
+            { local_context_labels(layout, model.local_context.as_ref()) }
+            { topology_nodes(&render, &model.nodes) }
+            { active_node_overlay(&render, &model.nodes) }
+            { empty_topology_label(layout, model.nodes.is_empty()) }
+        </svg>
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TopologyLayout {
+    center_x: f64,
+    center_y: f64,
+    radius: f64,
+}
+
+impl TopologyLayout {
+    fn new() -> Self {
+        let width = 420.0;
+        let height = 420.0;
+        Self {
+            center_x: width / 2.0,
+            center_y: height / 2.0,
+            radius: 144.0,
+        }
+    }
+
+    fn orbit(self, offset: f64) -> String {
+        open_orbit_path(self.center_x, self.center_y, self.radius + offset)
+    }
+}
+
+struct TopologyModel {
+    nodes: Vec<ChordNode>,
+    successor_edges: Vec<InferredEdge>,
+    finger_links: Vec<InferredFinger>,
+    local_context: Option<(String, String)>,
+}
+
+impl TopologyModel {
+    fn new(did: &str, peers: &[PeerView]) -> Self {
+        let nodes = chord_nodes(did, peers);
+        Self {
+            successor_edges: inferred_successor_edges(nodes.len()),
+            finger_links: inferred_finger_links(&nodes),
+            local_context: local_chord_context(&nodes),
+            nodes,
+        }
+    }
+}
+
+struct TopologyRenderState {
+    layout: TopologyLayout,
+    node_count: usize,
+    show_remote_labels: bool,
+    active_did: Option<String>,
+    hovered_node: UseStateHandle<Option<String>>,
+    pinned_node: UseStateHandle<Option<String>>,
+}
+
+fn topology_orbits(layout: TopologyLayout) -> Html {
+    let main_orbit = layout.orbit(0.0);
+    html! {
+        <>
+            <path class="orbit outer" d={layout.orbit(42.0)} />
             <path class="orbit" d={main_orbit.clone()} />
-            <path class="orbit inner" d={inner_orbit} />
+            <path class="orbit inner" d={layout.orbit(-50.0)} />
             <path class="scan" d={main_orbit} />
+        </>
+    }
+}
+
+fn topology_caption(layout: TopologyLayout, node_count: usize) -> Html {
+    html! {
+        <>
             <text class="topology-mode" x="20" y="30">{ "INFERRED CHORD RING" }</text>
             <text class="topology-count" x="20" y="48">{ format!("{node_count} visible IDs") }</text>
-            <text class="ring-zero" x={center_x.to_string()} y="31" text-anchor="middle">{ "0 / 2^160" }</text>
-            { for successor_edges.iter().filter_map(|edge| {
-                let (source, target) = edge.endpoints(&nodes)?;
-                let class = if edge.target == 0 { "ring-edge wrap" } else { "ring-edge" };
-                let flow_class = if edge.target == 0 { "data-flow ring-flow wrap" } else { "data-flow ring-flow" };
-                let path = ring_arc_path(center_x, center_y, radius, source.angle, target.angle);
-                Some(html! {
-                    <>
-                        <path class={class} d={path.clone()}>
-                            <title>{ format!("inferred successor: {} -> {}", source.did, target.did) }</title>
-                        </path>
-                        <path class={flow_class} d={path} aria-hidden="true" />
-                    </>
-                })
-            })}
-            { for finger_links.iter().filter_map(|edge| {
-                let (source, target) = edge.endpoints(&nodes)?;
-                let tone = if source.is_local {
-                    if edge.exponent == 159 { "primary" } else { "local" }
-                } else {
-                    "remote"
-                };
-                let class = format!("finger-link {tone}");
-                let flow_class = format!("data-flow finger-flow {tone}");
-                let flow_delay = format!(
-                    "animation-delay: -{}ms;",
-                    (edge.source() * 311 + edge.target() * 43 + edge.exponent * 17) % 3600
-                );
-                let path = finger_curve_path(center_x, center_y, edge.exponent, source.angle, target.angle);
-                Some(html! {
-                    <>
-                        <path class={class} d={path.clone()}>
-                            <title>{ format!("inferred finger 2^{}: {} -> {}", edge.exponent, source.did, target.did) }</title>
-                        </path>
-                        <path class={flow_class} d={path} style={flow_delay} aria-hidden="true" />
-                    </>
-                })
-            })}
-            <circle class="id-space-core" cx={center_x.to_string()} cy={center_y.to_string()} r="50" />
-            <text class="core-label" x={center_x.to_string()} y={(center_y + 4.0).to_string()} text-anchor="middle">{ "RINGS" }</text>
-            {
-                if let Some((predecessor, successor)) = local_context {
-                    html! {
-                        <>
-                            { ring_peer_label("predecessor-label", format!("PRED {predecessor}"), center_x, center_y, radius - 112.0) }
-                            { ring_peer_label("successor-label", format!("SUCC {successor}"), center_x, center_y, radius - 99.0) }
-                        </>
-                    }
-                } else {
-                    html! {}
-                }
-            }
-            { for nodes.iter().enumerate().map(|(index, node)| {
-                let (x, y) = polar_point(center_x, center_y, radius, node.angle);
-                let (label_x, label_y) = polar_point(center_x, center_y, radius + 31.0, node.angle);
-                let node_class = node_class(node);
-                let node_radius = node_radius(node, node_count);
-                let index_label = if node.is_local { "L".to_string() } else { (index + 1).to_string() };
-                let show_index = node.is_local || node_count <= 16;
-                let show_label = node.is_local || show_remote_labels;
-                let index_size = if node_count > 10 { "8" } else { "10" };
-                let is_active = active_did.as_ref().is_some_and(|active| active == &node.did);
-                let group_class = if is_active { "topology-node active" } else { "topology-node" };
-                let hover_did = node.did.clone();
-                let pin_did = node.did.clone();
-                let on_mouse_enter = {
-                    let hovered_node = hovered_node.clone();
-                    Callback::from(move |_| hovered_node.set(Some(hover_did.clone())))
-                };
-                let on_mouse_leave = {
-                    let hovered_node = hovered_node.clone();
-                    Callback::from(move |_| hovered_node.set(None))
-                };
-                let on_click = {
-                    let pinned_node = pinned_node.clone();
-                    Callback::from(move |event: MouseEvent| {
-                        event.stop_propagation();
-                        pinned_node.set(Some(pin_did.clone()));
-                    })
-                };
-                html! {
-                    <g
-                        class={group_class}
-                        onmouseenter={on_mouse_enter}
-                        onmouseleave={on_mouse_leave}
-                        onclick={on_click}
-                    >
-                        <title>{ format!("{} {}", node.state, node.did) }</title>
-                        <circle class={node_class} cx={svg_num(x)} cy={svg_num(y)} r={svg_num(node_radius)} />
-                        {
-                            if show_index {
-                                html! {
-                                    <text class="peer-index" x={svg_num(x)} y={svg_num(y + 3.5)} text-anchor="middle" font-size={index_size}>{ index_label }</text>
-                                }
-                            } else {
-                                html! {}
-                            }
-                        }
-                        {
-                            if show_label {
-                                html! {
-                                    <text class={if node.is_local { "node-id local-id" } else { "node-id" }} x={svg_num(label_x)} y={svg_num(label_y)} text-anchor="middle" font-size="9">
-                                        { short_did(&node.did) }
-                                    </text>
-                                }
-                            } else {
-                                html! {}
-                            }
-                        }
-                    </g>
-                }
-            })}
-            {
-                active_did
-                    .as_ref()
-                    .and_then(|did| nodes.iter().find(|node| &node.did == did))
-                    .map(|node| active_node_label(node, center_x, center_y, radius))
-                    .unwrap_or_else(|| html! {})
-            }
-            {
-                if nodes.is_empty() {
-                    html! {
-                        <text class="empty-node-label" x={center_x.to_string()} y={(center_y + radius + 38.0).to_string()} text-anchor="middle" font-size="11">
-                            { "waiting for peers" }
-                        </text>
-                    }
-                } else {
-                    html! {}
-                }
-            }
-        </svg>
+            <text class="ring-zero" x={layout.center_x.to_string()} y="31" text-anchor="middle">{ "0 / 2^160" }</text>
+        </>
+    }
+}
+
+fn successor_paths(layout: TopologyLayout, nodes: &[ChordNode], edges: &[InferredEdge]) -> Html {
+    html! {
+        { for edges.iter().filter_map(|edge| successor_path(layout, nodes, edge)) }
+    }
+}
+
+fn successor_path(
+    layout: TopologyLayout,
+    nodes: &[ChordNode],
+    edge: &InferredEdge,
+) -> Option<Html> {
+    let (source, target) = edge.endpoints(nodes)?;
+    let class = if edge.target == 0 {
+        "ring-edge wrap"
+    } else {
+        "ring-edge"
+    };
+    let flow_class = if edge.target == 0 {
+        "data-flow ring-flow wrap"
+    } else {
+        "data-flow ring-flow"
+    };
+    let path = ring_arc_path(
+        layout.center_x,
+        layout.center_y,
+        layout.radius,
+        source.angle,
+        target.angle,
+    );
+    Some(html! {
+        <>
+            <path class={class} d={path.clone()}>
+                <title>{ format!("inferred successor: {} -> {}", source.did, target.did) }</title>
+            </path>
+            <path class={flow_class} d={path} aria-hidden="true" />
+        </>
+    })
+}
+
+fn finger_paths(layout: TopologyLayout, nodes: &[ChordNode], edges: &[InferredFinger]) -> Html {
+    html! {
+        { for edges.iter().filter_map(|edge| finger_path(layout, nodes, edge)) }
+    }
+}
+
+fn finger_path(layout: TopologyLayout, nodes: &[ChordNode], edge: &InferredFinger) -> Option<Html> {
+    let (source, target) = edge.endpoints(nodes)?;
+    let tone = finger_tone(source, edge);
+    let class = format!("finger-link {tone}");
+    let flow_class = format!("data-flow finger-flow {tone}");
+    let flow_delay = finger_flow_delay(edge);
+    let path = finger_curve_path(
+        layout.center_x,
+        layout.center_y,
+        edge.exponent,
+        source.angle,
+        target.angle,
+    );
+    Some(html! {
+        <>
+            <path class={class} d={path.clone()}>
+                <title>{ format!("inferred finger 2^{}: {} -> {}", edge.exponent, source.did, target.did) }</title>
+            </path>
+            <path class={flow_class} d={path} style={flow_delay} aria-hidden="true" />
+        </>
+    })
+}
+
+fn finger_tone(source: &ChordNode, edge: &InferredFinger) -> &'static str {
+    if source.is_local {
+        if edge.exponent == 159 {
+            "primary"
+        } else {
+            "local"
+        }
+    } else {
+        "remote"
+    }
+}
+
+fn finger_flow_delay(edge: &InferredFinger) -> String {
+    format!(
+        "animation-delay: -{}ms;",
+        (edge.source() * 311 + edge.target() * 43 + edge.exponent * 17) % 3600
+    )
+}
+
+fn topology_core(layout: TopologyLayout) -> Html {
+    html! {
+        <>
+            <circle class="id-space-core" cx={layout.center_x.to_string()} cy={layout.center_y.to_string()} r="50" />
+            <text class="core-label" x={layout.center_x.to_string()} y={(layout.center_y + 4.0).to_string()} text-anchor="middle">{ "RINGS" }</text>
+        </>
+    }
+}
+
+fn local_context_labels(layout: TopologyLayout, local_context: Option<&(String, String)>) -> Html {
+    let Some((predecessor, successor)) = local_context else {
+        return html! {};
+    };
+    html! {
+        <>
+            { ring_peer_label("predecessor-label", format!("PRED {predecessor}"), layout.center_x, layout.center_y, layout.radius - 112.0) }
+            { ring_peer_label("successor-label", format!("SUCC {successor}"), layout.center_x, layout.center_y, layout.radius - 99.0) }
+        </>
+    }
+}
+
+fn topology_nodes(render: &TopologyRenderState, nodes: &[ChordNode]) -> Html {
+    html! {
+        { for nodes.iter().enumerate().map(|(index, node)| topology_node_group(render, index, node)) }
+    }
+}
+
+fn topology_node_group(render: &TopologyRenderState, index: usize, node: &ChordNode) -> Html {
+    let (x, y) = polar_point(
+        render.layout.center_x,
+        render.layout.center_y,
+        render.layout.radius,
+        node.angle,
+    );
+    let (label_x, label_y) = polar_point(
+        render.layout.center_x,
+        render.layout.center_y,
+        render.layout.radius + 31.0,
+        node.angle,
+    );
+    let active = render
+        .active_did
+        .as_ref()
+        .is_some_and(|active| active == &node.did);
+    let group_class = if active {
+        "topology-node active"
+    } else {
+        "topology-node"
+    };
+    html! {
+        <g
+            class={group_class}
+            onmouseenter={node_hover_callback(&render.hovered_node, node.did.clone())}
+            onmouseleave={clear_node_hover_callback(&render.hovered_node)}
+            onclick={pin_node_callback(&render.pinned_node, node.did.clone())}
+        >
+            <title>{ format!("{} {}", node.state, node.did) }</title>
+            <circle class={node_class(node)} cx={svg_num(x)} cy={svg_num(y)} r={svg_num(node_radius(node, render.node_count))} />
+            { node_index_label(node, index, render.node_count, x, y) }
+            { node_did_label(node, render.show_remote_labels, label_x, label_y) }
+        </g>
+    }
+}
+
+fn node_hover_callback(
+    hovered_node: &UseStateHandle<Option<String>>,
+    did: String,
+) -> Callback<MouseEvent> {
+    let hovered_node = hovered_node.clone();
+    Callback::from(move |_| hovered_node.set(Some(did.clone())))
+}
+
+fn clear_node_hover_callback(
+    hovered_node: &UseStateHandle<Option<String>>,
+) -> Callback<MouseEvent> {
+    let hovered_node = hovered_node.clone();
+    Callback::from(move |_| hovered_node.set(None))
+}
+
+fn pin_node_callback(
+    pinned_node: &UseStateHandle<Option<String>>,
+    did: String,
+) -> Callback<MouseEvent> {
+    let pinned_node = pinned_node.clone();
+    Callback::from(move |event: MouseEvent| {
+        event.stop_propagation();
+        pinned_node.set(Some(did.clone()));
+    })
+}
+
+fn node_index_label(node: &ChordNode, index: usize, node_count: usize, x: f64, y: f64) -> Html {
+    if !node.is_local && node_count > 16 {
+        return html! {};
+    }
+    let index_label = if node.is_local {
+        "L".to_string()
+    } else {
+        (index + 1).to_string()
+    };
+    let index_size = if node_count > 10 { "8" } else { "10" };
+    html! {
+        <text class="peer-index" x={svg_num(x)} y={svg_num(y + 3.5)} text-anchor="middle" font-size={index_size}>{ index_label }</text>
+    }
+}
+
+fn node_did_label(node: &ChordNode, show_remote_labels: bool, x: f64, y: f64) -> Html {
+    if !node.is_local && !show_remote_labels {
+        return html! {};
+    }
+    html! {
+        <text class={if node.is_local { "node-id local-id" } else { "node-id" }} x={svg_num(x)} y={svg_num(y)} text-anchor="middle" font-size="9">
+            { short_did(&node.did) }
+        </text>
+    }
+}
+
+fn active_node_overlay(render: &TopologyRenderState, nodes: &[ChordNode]) -> Html {
+    render
+        .active_did
+        .as_ref()
+        .and_then(|did| nodes.iter().find(|node| &node.did == did))
+        .map(|node| {
+            active_node_label(
+                node,
+                render.layout.center_x,
+                render.layout.center_y,
+                render.layout.radius,
+            )
+        })
+        .unwrap_or_else(|| html! {})
+}
+
+fn empty_topology_label(layout: TopologyLayout, empty: bool) -> Html {
+    if !empty {
+        return html! {};
+    }
+    html! {
+        <text class="empty-node-label" x={layout.center_x.to_string()} y={(layout.center_y + layout.radius + 38.0).to_string()} text-anchor="middle" font-size="11">
+            { "waiting for peers" }
+        </text>
     }
 }
 

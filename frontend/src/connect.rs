@@ -213,170 +213,40 @@ pub(crate) fn link_control(
     peers: UseStateHandle<Vec<PeerView>>,
     status: UseStateHandle<String>,
 ) -> Html {
-    let on_http_connect = {
-        let node_ref = node_ref.clone();
-        let generation = generation.clone();
-        let endpoint = (*state.http_endpoint).clone();
-        let peers = peers.clone();
-        let status = status.clone();
-        let link_dialog_open = (*state.link_dialog_open).clone();
-        Callback::from(move |_| {
-            let backend = match NodeBackend::current(&node_ref, &generation) {
-                Ok(backend) => backend,
-                Err(error) => {
-                    status.set(error);
-                    return;
-                }
-            };
-            let endpoint = match required_input((*endpoint).clone(), "enter a seed HTTP endpoint") {
-                Ok(endpoint) => endpoint,
-                Err(error) => {
-                    status.set(error);
-                    return;
-                }
-            };
-            let peers = peers.clone();
-            let status = status.clone();
-            let link_dialog_open = link_dialog_open.clone();
-            status.set(format!("connecting {endpoint}"));
-            wasm_bindgen_futures::spawn_local(async move {
-                match backend.connect_http(endpoint).await {
-                    Ok(update) => {
-                        link_dialog_open.set(false);
-                        update.apply(peers, status).await;
-                    }
-                    Err(error) => status.set(error),
-                }
-            });
-        })
-    };
-    let on_create_offer = {
-        let node_ref = node_ref.clone();
-        let generation = generation.clone();
-        let remote_did = (*state.sdp_remote_did).clone();
-        let generated_offer = (*state.generated_offer).clone();
-        let status = status.clone();
-        Callback::from(move |_| {
-            let backend = match NodeBackend::current(&node_ref, &generation) {
-                Ok(backend) => backend,
-                Err(error) => {
-                    status.set(error);
-                    return;
-                }
-            };
-            let remote_did = match required_input((*remote_did).clone(), "enter a remote DID") {
-                Ok(remote_did) => remote_did,
-                Err(error) => {
-                    status.set(error);
-                    return;
-                }
-            };
-            let generated_offer = generated_offer.clone();
-            let status = status.clone();
-            wasm_bindgen_futures::spawn_local(async move {
-                match backend.create_offer(remote_did).await {
-                    Ok(offer) => {
-                        generated_offer.set(offer);
-                        status.set("offer created".to_string());
-                    }
-                    Err(error) => status.set(error),
-                }
-            });
-        })
-    };
-    let on_answer_offer = {
-        let node_ref = node_ref.clone();
-        let generation = generation.clone();
-        let remote_offer = (*state.remote_offer).clone();
-        let generated_answer = (*state.generated_answer).clone();
-        let status = status.clone();
-        Callback::from(move |_| {
-            let backend = match NodeBackend::current(&node_ref, &generation) {
-                Ok(backend) => backend,
-                Err(error) => {
-                    status.set(error);
-                    return;
-                }
-            };
-            let offer = match required_input((*remote_offer).clone(), "paste an offer first") {
-                Ok(offer) => offer,
-                Err(error) => {
-                    status.set(error);
-                    return;
-                }
-            };
-            let generated_answer = generated_answer.clone();
-            let status = status.clone();
-            wasm_bindgen_futures::spawn_local(async move {
-                match backend.answer_offer(offer).await {
-                    Ok(answer) => {
-                        generated_answer.set(answer);
-                        status.set("answer created".to_string());
-                    }
-                    Err(error) => status.set(error),
-                }
-            });
-        })
-    };
-    let on_accept_answer = {
-        let node_ref = node_ref.clone();
-        let generation = generation.clone();
-        let remote_answer = (*state.remote_answer).clone();
-        let peers = peers.clone();
-        let status = status.clone();
-        let link_dialog_open = (*state.link_dialog_open).clone();
-        Callback::from(move |_| {
-            let backend = match NodeBackend::current(&node_ref, &generation) {
-                Ok(backend) => backend,
-                Err(error) => {
-                    status.set(error);
-                    return;
-                }
-            };
-            let answer = match required_input((*remote_answer).clone(), "paste an answer first") {
-                Ok(answer) => answer,
-                Err(error) => {
-                    status.set(error);
-                    return;
-                }
-            };
-            let peers = peers.clone();
-            let status = status.clone();
-            let link_dialog_open = link_dialog_open.clone();
-            wasm_bindgen_futures::spawn_local(async move {
-                match backend.accept_answer(answer).await {
-                    Ok(update) => {
-                        link_dialog_open.set(false);
-                        update.apply(peers, status).await;
-                    }
-                    Err(error) => status.set(error),
-                }
-            });
-        })
-    };
-    let set_initiator = {
-        let sdp_mode = (*state.sdp_mode).clone();
-        Callback::from(move |_| sdp_mode.set(SdpMode::Initiator))
-    };
-    let set_responder = {
-        let sdp_mode = (*state.sdp_mode).clone();
-        Callback::from(move |_| sdp_mode.set(SdpMode::Responder))
-    };
-    let open_dialog = {
-        let link_dialog_open = (*state.link_dialog_open).clone();
-        Callback::from(move |_| link_dialog_open.set(true))
-    };
-    let close_dialog = {
-        let link_dialog_open = (*state.link_dialog_open).clone();
-        Callback::from(move |_| link_dialog_open.set(false))
-    };
-    let set_manual_sdp = {
-        let link_tab = (*state.link_tab).clone();
-        Callback::from(move |_| link_tab.set(LinkTab::ManualSdp))
-    };
-    let set_http_endpoint = {
-        let link_tab = (*state.link_tab).clone();
-        Callback::from(move |_| link_tab.set(LinkTab::HttpEndpoint))
+    let open_dialog = link_dialog_callback(state.link_dialog_open, true);
+    let close_dialog = link_dialog_callback(state.link_dialog_open, false);
+    let actions = ConnectDialogActions {
+        set_manual_sdp: link_tab_callback(state.link_tab, LinkTab::ManualSdp),
+        set_http_endpoint: link_tab_callback(state.link_tab, LinkTab::HttpEndpoint),
+        set_initiator: sdp_mode_callback(state.sdp_mode, SdpMode::Initiator),
+        set_responder: sdp_mode_callback(state.sdp_mode, SdpMode::Responder),
+        close_dialog,
+        on_http_connect: http_connect_callback(
+            &state,
+            node_ref.clone(),
+            generation.clone(),
+            peers.clone(),
+            status.clone(),
+        ),
+        on_create_offer: create_offer_callback(
+            &state,
+            node_ref.clone(),
+            generation.clone(),
+            status.clone(),
+        ),
+        on_answer_offer: answer_offer_callback(
+            &state,
+            node_ref.clone(),
+            generation.clone(),
+            status.clone(),
+        ),
+        on_accept_answer: accept_answer_callback(
+            &state,
+            node_ref,
+            generation,
+            peers,
+            status.clone(),
+        ),
     };
 
     html! {
@@ -388,35 +258,176 @@ pub(crate) fn link_control(
             }
             {
                 if **state.link_dialog_open {
-                    connect_dialog(
-                        ConnectDialogView {
-                            active_tab: **state.link_tab,
-                            active_sdp_mode: **state.sdp_mode,
-                            http_endpoint: (*state.http_endpoint).clone(),
-                            sdp_remote_did: (*state.sdp_remote_did).clone(),
-                            generated_offer: (*state.generated_offer).clone(),
-                            remote_offer: (*state.remote_offer).clone(),
-                            generated_answer: (*state.generated_answer).clone(),
-                            remote_answer: (*state.remote_answer).clone(),
-                            status: status.clone(),
-                        },
-                        ConnectDialogActions {
-                            set_manual_sdp,
-                            set_http_endpoint,
-                            set_initiator,
-                            set_responder,
-                            close_dialog,
-                            on_http_connect,
-                            on_create_offer,
-                            on_answer_offer,
-                            on_accept_answer,
-                        },
-                    )
+                    connect_dialog(connect_dialog_view(&state, status), actions)
                 } else {
                     html! {}
                 }
             }
         </div>
+    }
+}
+
+fn http_connect_callback(
+    state: &ConnectState<'_>,
+    node_ref: Rc<RefCell<Option<DemoNode>>>,
+    generation: GenerationClock,
+    peers: UseStateHandle<Vec<PeerView>>,
+    status: UseStateHandle<String>,
+) -> Callback<MouseEvent> {
+    let endpoint = (*state.http_endpoint).clone();
+    let link_dialog_open = (*state.link_dialog_open).clone();
+    Callback::from(move |_| {
+        let backend = match NodeBackend::current(&node_ref, &generation) {
+            Ok(backend) => backend,
+            Err(error) => return status.set(error),
+        };
+        let endpoint = match required_input((*endpoint).clone(), "enter a seed HTTP endpoint") {
+            Ok(endpoint) => endpoint,
+            Err(error) => return status.set(error),
+        };
+        let peers = peers.clone();
+        let status = status.clone();
+        let link_dialog_open = link_dialog_open.clone();
+        status.set(format!("connecting {endpoint}"));
+        wasm_bindgen_futures::spawn_local(async move {
+            match backend.connect_http(endpoint).await {
+                Ok(update) => {
+                    link_dialog_open.set(false);
+                    update.apply(peers, status).await;
+                }
+                Err(error) => status.set(error),
+            }
+        });
+    })
+}
+
+fn create_offer_callback(
+    state: &ConnectState<'_>,
+    node_ref: Rc<RefCell<Option<DemoNode>>>,
+    generation: GenerationClock,
+    status: UseStateHandle<String>,
+) -> Callback<MouseEvent> {
+    let remote_did = (*state.sdp_remote_did).clone();
+    let generated_offer = (*state.generated_offer).clone();
+    Callback::from(move |_| {
+        let backend = match NodeBackend::current(&node_ref, &generation) {
+            Ok(backend) => backend,
+            Err(error) => return status.set(error),
+        };
+        let remote_did = match required_input((*remote_did).clone(), "enter a remote DID") {
+            Ok(remote_did) => remote_did,
+            Err(error) => return status.set(error),
+        };
+        let generated_offer = generated_offer.clone();
+        let status = status.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            match backend.create_offer(remote_did).await {
+                Ok(offer) => {
+                    generated_offer.set(offer);
+                    status.set("offer created".to_string());
+                }
+                Err(error) => status.set(error),
+            }
+        });
+    })
+}
+
+fn answer_offer_callback(
+    state: &ConnectState<'_>,
+    node_ref: Rc<RefCell<Option<DemoNode>>>,
+    generation: GenerationClock,
+    status: UseStateHandle<String>,
+) -> Callback<MouseEvent> {
+    let remote_offer = (*state.remote_offer).clone();
+    let generated_answer = (*state.generated_answer).clone();
+    Callback::from(move |_| {
+        let backend = match NodeBackend::current(&node_ref, &generation) {
+            Ok(backend) => backend,
+            Err(error) => return status.set(error),
+        };
+        let offer = match required_input((*remote_offer).clone(), "paste an offer first") {
+            Ok(offer) => offer,
+            Err(error) => return status.set(error),
+        };
+        let generated_answer = generated_answer.clone();
+        let status = status.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            match backend.answer_offer(offer).await {
+                Ok(answer) => {
+                    generated_answer.set(answer);
+                    status.set("answer created".to_string());
+                }
+                Err(error) => status.set(error),
+            }
+        });
+    })
+}
+
+fn accept_answer_callback(
+    state: &ConnectState<'_>,
+    node_ref: Rc<RefCell<Option<DemoNode>>>,
+    generation: GenerationClock,
+    peers: UseStateHandle<Vec<PeerView>>,
+    status: UseStateHandle<String>,
+) -> Callback<MouseEvent> {
+    let remote_answer = (*state.remote_answer).clone();
+    let link_dialog_open = (*state.link_dialog_open).clone();
+    Callback::from(move |_| {
+        let backend = match NodeBackend::current(&node_ref, &generation) {
+            Ok(backend) => backend,
+            Err(error) => return status.set(error),
+        };
+        let answer = match required_input((*remote_answer).clone(), "paste an answer first") {
+            Ok(answer) => answer,
+            Err(error) => return status.set(error),
+        };
+        let peers = peers.clone();
+        let status = status.clone();
+        let link_dialog_open = link_dialog_open.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            match backend.accept_answer(answer).await {
+                Ok(update) => {
+                    link_dialog_open.set(false);
+                    update.apply(peers, status).await;
+                }
+                Err(error) => status.set(error),
+            }
+        });
+    })
+}
+
+fn sdp_mode_callback(sdp_mode: &UseStateHandle<SdpMode>, mode: SdpMode) -> Callback<MouseEvent> {
+    let sdp_mode = sdp_mode.clone();
+    Callback::from(move |_| sdp_mode.set(mode))
+}
+
+fn link_dialog_callback(
+    link_dialog_open: &UseStateHandle<bool>,
+    open: bool,
+) -> Callback<MouseEvent> {
+    let link_dialog_open = link_dialog_open.clone();
+    Callback::from(move |_| link_dialog_open.set(open))
+}
+
+fn link_tab_callback(link_tab: &UseStateHandle<LinkTab>, tab: LinkTab) -> Callback<MouseEvent> {
+    let link_tab = link_tab.clone();
+    Callback::from(move |_| link_tab.set(tab))
+}
+
+fn connect_dialog_view(
+    state: &ConnectState<'_>,
+    status: UseStateHandle<String>,
+) -> ConnectDialogView {
+    ConnectDialogView {
+        active_tab: **state.link_tab,
+        active_sdp_mode: **state.sdp_mode,
+        http_endpoint: (*state.http_endpoint).clone(),
+        sdp_remote_did: (*state.sdp_remote_did).clone(),
+        generated_offer: (*state.generated_offer).clone(),
+        remote_offer: (*state.remote_offer).clone(),
+        generated_answer: (*state.generated_answer).clone(),
+        remote_answer: (*state.remote_answer).clone(),
+        status,
     }
 }
 

@@ -13,6 +13,9 @@ use crate::topology;
 use crate::wallet::WalletAccount;
 use crate::wallet::WalletKind;
 
+mod sidebar;
+pub(crate) use sidebar::control_sidebar;
+
 const CHROME_WEBRTC_DEBUG_URL: &str = "chrome://webrtc-internals/";
 const FIREFOX_WEBRTC_DEBUG_URL: &str = "about:webrtc";
 const CHROME_EXTENSION_MANAGER_URL: &str = "chrome://extensions/";
@@ -47,6 +50,19 @@ impl Panel {
             Self::Proof => "Proof",
             Self::Custom => "Custom",
         }
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum ActiveDialog {
+    None,
+    Settings,
+    Workbench,
+}
+
+impl ActiveDialog {
+    pub(crate) fn is_open(self) -> bool {
+        self != Self::None
     }
 }
 
@@ -247,219 +263,6 @@ fn header_page_class(active: ShellPage, page: ShellPage) -> &'static str {
     }
 }
 
-pub(crate) fn control_sidebar(
-    view: ControlView<'_>,
-    actions: LaunchActions,
-    workbench_control: Html,
-    settings_dialog_open: UseStateHandle<bool>,
-    workbench_dialog_open: UseStateHandle<bool>,
-    collapsed: UseStateHandle<bool>,
-    extension_mode: bool,
-) -> Html {
-    let did_value = if (**view.did).is_empty() {
-        "not started".to_string()
-    } else {
-        (**view.did).clone()
-    };
-    let can_copy_did = !(**view.did).is_empty();
-    let node_control_active = can_copy_did || view.node_starting;
-    let node_state = if can_copy_did {
-        "ready"
-    } else if view.node_starting {
-        "starting"
-    } else {
-        "offline"
-    };
-    let node_state_class = if can_copy_did {
-        "rail-state ready"
-    } else if view.node_starting {
-        "rail-state starting"
-    } else {
-        "rail-state"
-    };
-    let account_standard = view
-        .wallet_account
-        .as_ref()
-        .map(|account| account.kind.label().to_string())
-        .unwrap_or_else(|| "none".to_string());
-    let session_label = view
-        .wallet_account
-        .as_ref()
-        .map(|account| account.account_type.clone())
-        .unwrap_or_else(|| "not authorized".to_string());
-    let peer_summary = match view.peers.len() {
-        0 => "0 connected".to_string(),
-        1 => "1 connected".to_string(),
-        count => format!("{count} connected"),
-    };
-    let transport_state = if view.peers.is_empty() {
-        "standby".to_string()
-    } else {
-        "linked".to_string()
-    };
-    let rail_did = if can_copy_did {
-        topology::short_did((**view.did).as_str())
-    } else {
-        "not started".to_string()
-    };
-    let last_signal = (**view.status).clone();
-    let on_copy_did = copy_local_did_callback(view.did, view.status);
-    let node_action_label = if node_control_active { "Stop" } else { "Start" };
-    let node_action_icon = if node_control_active {
-        UiIcon::PowerOff
-    } else {
-        UiIcon::Power
-    };
-    let node_action = if node_control_active {
-        actions.on_disconnect.clone()
-    } else {
-        actions.on_start.clone()
-    };
-    let node_action_class = if node_control_active {
-        "secondary action-button command-button stop-button"
-    } else {
-        "link-open command-button start-button"
-    };
-    let open_settings_dialog = {
-        let settings_dialog_open = settings_dialog_open.clone();
-        let workbench_dialog_open = workbench_dialog_open.clone();
-        Callback::from(move |_| {
-            workbench_dialog_open.set(false);
-            settings_dialog_open.set(true);
-        })
-    };
-    let close_settings_dialog = {
-        let settings_dialog_open = settings_dialog_open.clone();
-        Callback::from(move |_| settings_dialog_open.set(false))
-    };
-    let toggle_sidebar = {
-        let collapsed = collapsed.clone();
-        Callback::from(move |_| collapsed.set(!*collapsed))
-    };
-    let sidebar_class = if extension_mode {
-        "control-sidebar extension-action-tabs"
-    } else if *collapsed {
-        "control-sidebar collapsed"
-    } else {
-        "control-sidebar"
-    };
-    html! {
-        <aside class={sidebar_class} aria-label="Node controls">
-            if !extension_mode {
-                <button
-                    class="sidebar-toggle"
-                    type="button"
-                    aria-label={if *collapsed { "Open controls" } else { "Collapse controls" }}
-                    aria-expanded={(!*collapsed).to_string()}
-                    aria-controls="node-control-sidebar-content"
-                    title={if *collapsed { "Open controls" } else { "Collapse controls" }}
-                    onclick={toggle_sidebar}
-                >
-                    <span class="sidebar-toggle-icon" aria-hidden="true">
-                        { ui_icon(if *collapsed { UiIcon::PanelOpen } else { UiIcon::PanelClose }) }
-                    </span>
-                    <span class="sidebar-toggle-label">
-                        { if *collapsed { "Setup" } else { "Hide" } }
-                    </span>
-                </button>
-            }
-            if extension_mode || !*collapsed {
-                <div id="node-control-sidebar-content" class="sidebar-content sidebar-command-panel">
-                    <div class="command-panel-header">
-                        <div>
-                            <p class="eyebrow">{ "Control" }</p>
-                            <h3>{ "Command deck" }</h3>
-                        </div>
-                        <span>{ "03" }</span>
-                    </div>
-                    <div class="command-grid">
-                        <button
-                            class={node_action_class}
-                            type="button"
-                            aria-label={node_action_label}
-                            title={node_action_label}
-                            onclick={node_action}
-                        >
-                            <span class="label-desktop">{ node_action_label }</span>
-                            <span class="label-mobile command-icon" aria-hidden="true">
-                                { ui_icon(node_action_icon) }
-                                <span class="command-caption">{ node_action_label }</span>
-                            </span>
-                        </button>
-                        { workbench_control }
-                        <button class="secondary action-button command-button settings-button" type="button" aria-label="Settings" title="Settings" onclick={open_settings_dialog}>
-                            <span class="label-desktop">{ "Settings" }</span>
-                            <span class="label-mobile command-icon" aria-hidden="true">
-                                { ui_icon(UiIcon::Sliders) }
-                                <span class="command-caption">{ "Settings" }</span>
-                            </span>
-                        </button>
-                    </div>
-                    <div class="rail-telemetry" aria-label="Node telemetry">
-                        <section class="rail-card">
-                            <div class="rail-card-header">
-                                <span>{ "Node" }</span>
-                                <strong class={node_state_class}>{ node_state }</strong>
-                            </div>
-                            { rail_row("Standard", account_standard) }
-                            { rail_row("Session", session_label) }
-                        </section>
-                        <section class="rail-card">
-                            <div class="rail-card-header">
-                                <span>{ "Identity" }</span>
-                                <button
-                                    class="copy-button rail-copy"
-                                    type="button"
-                                    disabled={!can_copy_did}
-                                    onclick={on_copy_did.clone()}
-                                >
-                                    { "Copy" }
-                                </button>
-                            </div>
-                            <code class="rail-did" title={did_value.clone()}>{ rail_did }</code>
-                        </section>
-                        <section class="rail-card">
-                            <div class="rail-card-header">
-                                <span>{ "Transport" }</span>
-                                <strong class="rail-state">{ transport_state }</strong>
-                            </div>
-                            { rail_row("Exchange", "SDP / HTTP".to_string()) }
-                            { rail_row("Peers", peer_summary) }
-                        </section>
-                        <section class="rail-card signal-card">
-                            <div class="rail-card-header">
-                                <span>{ "Last signal" }</span>
-                            </div>
-                            <p>{ last_signal }</p>
-                        </section>
-                    </div>
-                </div>
-            }
-            {
-                if *settings_dialog_open {
-                    settings_dialog(SettingsDialogView {
-                        wallet_kind: view.wallet_kind,
-                        actions,
-                        network_id: view.network_id,
-                        ice_servers: view.ice_servers,
-                        stabilize_interval: view.stabilize_interval,
-                        storage_name: view.storage_name,
-                        seed_url: view.seed_url,
-                        status: view.status,
-                        did_value,
-                        on_copy_did,
-                        can_copy_did,
-                        wallet_account: view.wallet_account,
-                        close_dialog: close_settings_dialog,
-                    })
-                } else {
-                    html! {}
-                }
-            }
-        </aside>
-    }
-}
-
 fn settings_dialog(view: SettingsDialogView<'_>) -> Html {
     let close_dialog = view.close_dialog;
     html! {
@@ -530,25 +333,22 @@ fn settings_dialog(view: SettingsDialogView<'_>) -> Html {
 pub(crate) fn workbench_control(
     active: Panel,
     active_panel: UseStateHandle<Panel>,
-    dialog_open: UseStateHandle<bool>,
-    settings_dialog_open: UseStateHandle<bool>,
+    active_dialog: UseStateHandle<ActiveDialog>,
     body: Html,
     available: bool,
     extension_mode: bool,
 ) -> Html {
     let open_dialog = {
-        let dialog_open = dialog_open.clone();
-        let settings_dialog_open = settings_dialog_open.clone();
+        let active_dialog = active_dialog.clone();
         Callback::from(move |_| {
             if available {
-                settings_dialog_open.set(false);
-                dialog_open.set(true);
+                active_dialog.set(ActiveDialog::Workbench);
             }
         })
     };
     let close_dialog = {
-        let dialog_open = dialog_open.clone();
-        Callback::from(move |_| dialog_open.set(false))
+        let active_dialog = active_dialog.clone();
+        Callback::from(move |_| active_dialog.set(ActiveDialog::None))
     };
     let button_class = if available {
         "secondary action-button command-button workbench-button"
@@ -577,7 +377,7 @@ pub(crate) fn workbench_control(
                 </span>
             </button>
             {
-                if available && *dialog_open {
+                if available && *active_dialog == ActiveDialog::Workbench {
                     html! {
                         <div class="modal-shell">
                             <button class="dialog-backdrop" aria-label="Close workbench" onclick={close_dialog.clone()}></button>
