@@ -1,5 +1,4 @@
 //! rings-node service run with `Swarm` and chord stabilization.
-#![warn(missing_docs)]
 mod http_error;
 mod ws;
 
@@ -23,7 +22,8 @@ use crate::processor::Processor;
 /// JSON-RPC state
 #[derive(Clone)]
 pub struct JsonRpcState<M>
-where M: jsonrpc_core::Middleware<Arc<Processor>>
+where
+    M: jsonrpc_core::Middleware<Arc<Processor>>,
 {
     processor: Arc<Processor>,
     io_handler: MetaIoHandler<Arc<Processor>, M>,

@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 
 //! Processor of rings-node rpc server.
 

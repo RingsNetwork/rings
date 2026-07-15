@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! Generic transport-relay protocol — one pure server-side state machine for TCP and UDP,
 //! native and browser.
 //!

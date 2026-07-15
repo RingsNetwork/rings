@@ -174,6 +174,7 @@ impl StartAction {
         match extension::extension_node_start(bridge, request.kind, settings).await {
             Ok(snapshot) => {
                 *self.node_ref.borrow_mut() = None;
+                super::clear_shell_dialog_route();
                 self.active_dialog.set(ActiveDialog::None);
                 if self.apply_extension_snapshot(snapshot, &token) {
                     self.poll_extension_node_start(bridge, token).await;
@@ -291,6 +292,7 @@ impl StartAction {
         self.did.set(my_did);
         self.wallet_account.set(Some(account));
         *self.node_ref.borrow_mut() = Some(built.clone());
+        super::clear_shell_dialog_route();
         self.active_dialog.set(ActiveDialog::None);
         self.node_starting.set(false);
         self.connect_seed_if_configured(built, seed_url, token)
@@ -457,6 +459,7 @@ impl DisconnectAction {
         self.generated_answer.set(String::new());
         self.remote_answer.set(String::new());
         self.link_dialog_open.set(false);
+        super::clear_shell_dialog_route();
         self.active_dialog.set(ActiveDialog::None);
     }
 }

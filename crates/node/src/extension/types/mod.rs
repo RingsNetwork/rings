@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 
 //! Backend message types.
 //!

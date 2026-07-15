@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! ffi Provider implementation
 //! =======================
 //! This module allows developers to integrate the provider with various programming languages,

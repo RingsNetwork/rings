@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! Echo protocol — the reference extension (pure [`Protocol`] + its [`Interpret`] shell).
 //!
 //! Demonstrates the model end to end: **stateful** (counts the messages seen), **typed**

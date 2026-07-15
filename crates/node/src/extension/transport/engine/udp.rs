@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! UDP instance of the relay: the listener (client side) and the per-flow datagram relay
 //! loops (server side, plus the client-side return path). UDP flows have no half-close.
 

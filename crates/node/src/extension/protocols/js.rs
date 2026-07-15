@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! JavaScript protocol adapter (browser).
 //!
 //! Bridges a JS handler into the same [`Protocol`] model so the browser sees the exact

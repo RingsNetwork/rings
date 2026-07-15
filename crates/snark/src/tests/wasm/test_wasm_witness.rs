@@ -11,13 +11,9 @@ pub async fn test_wasm_load_witness_remote() -> Result<()> {
 
     let url = "https://raw.githubusercontent.com/RingsNetwork/rings/master/crates/snark/src/tests/native/circoms/simple_bn256.wasm";
     let mut witness_calculator =
-        r1cs::load_circom_witness_calculator(r1cs::Path::Remote(url.to_string()))
-            .await
-            .unwrap();
+        r1cs::load_circom_witness_calculator(r1cs::Path::Remote(url.to_string())).await?;
     let input = vec![("step_in".to_string(), vec![F::from(4u64), F::from(2u64)])];
-    let witness = witness_calculator
-        .calculate_witness::<F>(input, true)
-        .unwrap();
-    assert_eq![witness[0], F::from(1u64)];
+    let witness = witness_calculator.calculate_witness::<F>(input, true)?;
+    assert_eq!(witness.first(), Some(&F::from(1u64)));
     Ok(())
 }

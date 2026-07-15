@@ -7,6 +7,7 @@ use super::settings_dialog;
 use super::ui_icon;
 use super::ActiveDialog;
 use super::ControlView;
+use super::DialogActions;
 use super::LaunchActions;
 use super::SettingsDialogView;
 use super::UiIcon;
@@ -50,20 +51,18 @@ pub(crate) fn control_sidebar(
     view: ControlView<'_>,
     actions: LaunchActions,
     workbench_control: Html,
-    active_dialog: UseStateHandle<ActiveDialog>,
+    active_dialog: ActiveDialog,
+    dialog_actions: DialogActions,
     collapsed: UseStateHandle<bool>,
     extension_mode: bool,
 ) -> Html {
     let derived = ControlSidebarDerived::from_view(&view);
     let on_copy_did = copy_local_did_callback(view.did, view.status);
     let open_settings_dialog = {
-        let active_dialog = active_dialog.clone();
-        Callback::from(move |_| active_dialog.set(ActiveDialog::Settings))
+        let open_dialog = dialog_actions.open.clone();
+        Callback::from(move |_| open_dialog.emit(ActiveDialog::Settings))
     };
-    let close_settings_dialog = {
-        let active_dialog = active_dialog.clone();
-        Callback::from(move |_| active_dialog.set(ActiveDialog::None))
-    };
+    let close_settings_dialog = dialog_actions.close.clone();
     let toggle_sidebar = {
         let collapsed = collapsed.clone();
         Callback::from(move |_| collapsed.set(!*collapsed))
@@ -77,7 +76,7 @@ pub(crate) fn control_sidebar(
             if extension_mode || !*collapsed {
                 { sidebar_content(&derived, &actions, workbench_control, open_settings_dialog, on_copy_did.clone()) }
             }
-            { settings_dialog_if_open(*active_dialog, &view, actions, &derived, on_copy_did, close_settings_dialog) }
+            { settings_dialog_if_open(active_dialog, &view, actions, &derived, on_copy_did, close_settings_dialog) }
         </aside>
     }
 }

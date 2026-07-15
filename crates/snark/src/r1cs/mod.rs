@@ -58,11 +58,10 @@ pub(crate) async fn fetch(url: &str) -> Result<Cursor<Vec<u8>>> {
 /// Fetch remote r1cs
 pub async fn load_r1cs_remote<F: PrimeField>(url: &str, format: Format) -> Result<R1CS<F>> {
     let data = fetch(url).await?;
-    let ret = match format {
+    match format {
         Format::Json => reader::load_r1cs_from_json::<F, Cursor<Vec<u8>>>(data),
         Format::Bin => reader::load_r1cs_from_bin::<F, Cursor<Vec<u8>>>(data),
-    };
-    Ok(ret)
+    }
 }
 
 /// Load local r1cs
@@ -70,11 +69,10 @@ pub fn load_r1cs_local<F: PrimeField>(
     path: impl AsRef<std::path::Path>,
     format: Format,
 ) -> Result<R1CS<F>> {
-    let ret = match format {
+    match format {
         Format::Json => reader::load_r1cs_from_json_file::<F>(path),
         Format::Bin => reader::load_r1cs_from_bin_file::<F>(path),
-    };
-    Ok(ret)
+    }
 }
 
 /// Load r1cs, the resource path can be remote local, and both bin and json are supported
@@ -90,9 +88,10 @@ pub async fn load_r1cs<F: PrimeField>(path: Path, format: Format) -> Result<R1CS
 pub async fn load_witness_remote<F: PrimeField>(url: &str, format: Format) -> Result<TyWitness<F>> {
     let data = fetch(url).await?;
     let ret = match format {
-        Format::Json => reader::load_witness_from_bin_reader::<F, Cursor<Vec<u8>>>(data)
+        Format::Json => reader::load_witness_from_json::<F, Cursor<Vec<u8>>>(data)
             .map_err(|e| Error::WitnessFailedOnLoad(e.to_string()))?,
-        Format::Bin => reader::load_witness_from_json::<F, Cursor<Vec<u8>>>(data),
+        Format::Bin => reader::load_witness_from_bin_reader::<F, Cursor<Vec<u8>>>(data)
+            .map_err(|e| Error::WitnessFailedOnLoad(e.to_string()))?,
     };
     Ok(ret)
 }
@@ -102,11 +101,10 @@ pub fn load_witness_local<F: PrimeField>(
     path: impl AsRef<std::path::Path>,
     format: Format,
 ) -> Result<TyWitness<F>> {
-    let ret = match format {
-        Format::Json => reader::load_witness_from_bin_file::<F>(path),
-        Format::Bin => reader::load_witness_from_json_file::<F>(path),
-    };
-    Ok(ret)
+    match format {
+        Format::Json => reader::load_witness_from_json_file::<F>(path),
+        Format::Bin => reader::load_witness_from_bin_file::<F>(path),
+    }
 }
 
 /// Load r1cs, the resource path can be remote local, and both bin and json are supported

@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! This module provide basic mechanism.
 
 pub mod ext;

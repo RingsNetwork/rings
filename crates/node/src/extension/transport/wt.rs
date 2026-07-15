@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! Browser transport-relay engine — the WebTransport endpoint.
 //!
 //! Browsers have no raw sockets, so the relay's local backend here is a *WebTransport*

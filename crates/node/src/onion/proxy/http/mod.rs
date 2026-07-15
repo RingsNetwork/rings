@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! Native HTTP CONNECT ingress for onion proxy clients.
 
 use std::net::SocketAddr;

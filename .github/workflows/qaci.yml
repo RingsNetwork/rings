@@ -101,8 +101,7 @@ jobs:
         run: cargo install trunk --locked
 
       - name: Build Rings frontend extension package
-        run: trunk build
-        working-directory: ./frontend
+        run: npm run package:frontend-extension
 
       - name: Check Rings frontend
         run: cargo check --target=wasm32-unknown-unknown

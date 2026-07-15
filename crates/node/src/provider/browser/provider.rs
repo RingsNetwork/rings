@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! Browser Provider implementation
 #![allow(non_snake_case, non_upper_case_globals, clippy::ptr_offset_with_cast)]
 use std::collections::BTreeSet;

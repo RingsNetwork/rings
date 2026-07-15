@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! Router + capability core.
 //!
 //! [`Extensions`] registers `(Protocol, Interpret)` pairs by namespace. Each interpreter is

@@ -17,8 +17,3 @@ ignore = [
   "dist",
   "dist-extension",
 ]
-
-[[hooks]]
-stage = "post_build"
-command = "sh"
-command_arguments = ["-c", "npm --prefix .. run build:frontend-extension-scripts && node .generated/scripts/package-extension.mjs"]

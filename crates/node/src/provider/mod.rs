@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! General Provider, this module provide Provider implementation for FFI and WASM
 
 use std::future::Future;

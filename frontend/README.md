@@ -51,15 +51,15 @@ onion proxy, proof, and custom-message workflows.
 
 ## Package as a Chrome Extension
 
-Build the same Yew/Wasm application with Trunk. The Trunk `post_build` hook first
-type-checks and compiles the extension TypeScript into `.generated/`, then
-rewrites the web output into a Chrome Manifest V3 package after every build:
+Package the same Yew/Wasm application with the explicit repository script. A
+plain `trunk build` or `trunk serve` remains a web-app build; extension
+packaging compiles the extension TypeScript into `.generated/`, builds the web
+output with Trunk, then rewrites it into a Chrome Manifest V3 package. Run from
+the repository root:
 
 ```sh
-cd frontend
-npm --prefix .. ci --ignore-scripts
-npm --prefix .. run build:frontend-extension-scripts
-trunk build --release
+npm ci --ignore-scripts
+npm run package:frontend-extension
 ```
 
 The extension is written to `dist-extension/`. Load that directory from
@@ -109,8 +109,7 @@ cargo fmt --check
 cargo check --target wasm32-unknown-unknown
 cargo test --release --target wasm32-unknown-unknown
 npm --prefix .. ci --ignore-scripts
-npm --prefix .. run build:frontend-extension-scripts
-trunk build --release
+npm --prefix .. run package:frontend-extension
 cd ..
 npx playwright install chromium
 npm run test:frontend-extension-wallet

@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! The pure core of an extension: the [`Protocol`] trait authors implement, its typed
 //! step algebra ([`Transition`]), and the decode boundary ([`Wire`] → `Event`).
 //!

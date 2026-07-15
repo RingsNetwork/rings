@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! [`SNARKTaskBuilder`] — loads an r1cs + witness calculator (local or remote), generates
 //! the recursive circuits, and assembles the per-curve [`SNARKProofTask`] (public params +
 //! initial fold).

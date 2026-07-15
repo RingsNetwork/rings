@@ -15,7 +15,9 @@
     "prepare": "npm run wasm_pack && rm -rf dist && mkdir -p dist && cp crates/node/pkg/rings_node* ./dist && cp index.ts ./dist && tsc -p tsconfig.json",
     "check:frontend-extension-scripts": "biome check frontend/extension-assets/*.ts frontend/scripts/*.mts frontend/tsconfig.base.json frontend/tsconfig.extension-assets.json frontend/tsconfig.scripts.json",
     "build:frontend-extension-scripts": "npm run check:frontend-extension-scripts && rm -rf frontend/.generated && tsc -p frontend/tsconfig.extension-assets.json && tsc -p frontend/tsconfig.scripts.json && node frontend/.generated/scripts/check-extension-docs.mjs",
-    "test:frontend-extension-wallet": "npm run build:frontend-extension-scripts && node frontend/.generated/scripts/package-extension.mjs && node frontend/.generated/scripts/test-extension-wallet-bridge.mjs"
+    "build:frontend-web": "cd frontend && NO_COLOR=true trunk build --release",
+    "package:frontend-extension": "npm run build:frontend-extension-scripts && cd frontend && NO_COLOR=true trunk build --release && cd .. && node frontend/.generated/scripts/package-extension.mjs",
+    "test:frontend-extension-wallet": "npm run package:frontend-extension && node frontend/.generated/scripts/test-extension-wallet-bridge.mjs"
   },
   "dependencies": {
     "circomlib": "^2.0.5"

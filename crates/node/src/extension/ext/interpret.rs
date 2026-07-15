@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! The imperative shell of an extension: [`Interpret`] runs a protocol's **own** effects.
 //!
 //! Each extension registers a `(Protocol, Interpret)` pair. The interpreter is the only

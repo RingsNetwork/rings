@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 
 //! This module implemented the `Measure` trait for swarm.
 

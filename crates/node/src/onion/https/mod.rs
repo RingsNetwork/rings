@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 #![cfg_attr(all(feature = "node", not(feature = "browser")), allow(dead_code))]
 //! HTTPS onion-exit request/response adapter.
 //!

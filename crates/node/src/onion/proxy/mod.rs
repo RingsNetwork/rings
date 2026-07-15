@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! Client-side onion proxy planning.
 //!
 //! This module is runtime-neutral: native can bind it to a local HTTP CONNECT listener, while

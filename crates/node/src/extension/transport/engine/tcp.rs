@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! TCP instance of the relay: the listener (client side) and the bidirectional
 //! byte-stream relay loop (server side), with true half-close and abrupt-close handling.
 

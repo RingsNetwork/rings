@@ -148,6 +148,12 @@ pub(crate) struct LaunchActions {
     pub(crate) on_disconnect: Callback<MouseEvent>,
 }
 
+#[derive(Clone)]
+pub(crate) struct DialogActions {
+    pub(crate) open: Callback<ActiveDialog>,
+    pub(crate) close: Callback<MouseEvent>,
+}
+
 pub(crate) struct ControlView<'a> {
     pub(crate) wallet_kind: WalletKind,
     pub(crate) wallet_account: Option<WalletAccount>,
@@ -333,23 +339,21 @@ fn settings_dialog(view: SettingsDialogView<'_>) -> Html {
 pub(crate) fn workbench_control(
     active: Panel,
     active_panel: UseStateHandle<Panel>,
-    active_dialog: UseStateHandle<ActiveDialog>,
+    active_dialog: ActiveDialog,
+    dialog_actions: DialogActions,
     body: Html,
     available: bool,
     extension_mode: bool,
 ) -> Html {
     let open_dialog = {
-        let active_dialog = active_dialog.clone();
+        let open_dialog = dialog_actions.open.clone();
         Callback::from(move |_| {
             if available {
-                active_dialog.set(ActiveDialog::Workbench);
+                open_dialog.emit(ActiveDialog::Workbench);
             }
         })
     };
-    let close_dialog = {
-        let active_dialog = active_dialog.clone();
-        Callback::from(move |_| active_dialog.set(ActiveDialog::None))
-    };
+    let close_dialog = dialog_actions.close.clone();
     let button_class = if available {
         "secondary action-button command-button workbench-button"
     } else {
@@ -377,7 +381,7 @@ pub(crate) fn workbench_control(
                 </span>
             </button>
             {
-                if available && *active_dialog == ActiveDialog::Workbench {
+                if available && active_dialog == ActiveDialog::Workbench {
                     html! {
                         <div class="modal-shell">
                             <button class="dialog-backdrop" aria-label="Close workbench" onclick={close_dialog.clone()}></button>

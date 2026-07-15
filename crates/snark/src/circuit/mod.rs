@@ -16,6 +16,7 @@ use nova_snark::traits::circuit::StepCircuit;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::error::Error;
 use crate::error::Result;
 use crate::r1cs::R1CS;
 use crate::witness::calculator::WitnessCalculator;
@@ -124,7 +125,9 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
     /// Generate iterator circuit list
     /// Which iterate inputs and generate circuit
     pub fn gen_circuit(&self, input: Input<F>, sanity_check: bool) -> Result<Circuit<F>>
-    where F: PrimeField {
+    where
+        F: PrimeField,
+    {
         let mut calc = self.calculator.borrow_mut();
         let witness: Vec<F> = calc.calculate_witness::<F>(input.to_vec(), sanity_check)?;
         let circom = Circuit::<F> {
@@ -146,7 +149,7 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
     where
         F: PrimeField,
     {
-        fn reshape<F: PrimeField>(input: &[(String, Vec<F>)], output: &[F]) -> Input<F> {
+        fn reshape<F: PrimeField>(input: &[(String, Vec<F>)], output: &[F]) -> Result<Input<F>> {
             let mut ret = vec![];
             let mut iter = output.iter();
 
@@ -154,15 +157,17 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
                 let size = vec.len();
                 let mut new_vec: Vec<F> = Vec::with_capacity(size);
                 for _ in 0..size {
-                    if let Some(item) = iter.next() {
-                        new_vec.push(*item);
-                    } else {
-                        panic!("Failed on reshape output {output:?} as input format {input:?}")
-                    }
+                    let item = iter.next().ok_or_else(|| {
+                        Error::InvalidDataWhenReadingR1CS(
+                            "recursive public output is shorter than public input shape"
+                                .to_string(),
+                        )
+                    })?;
+                    new_vec.push(*item);
                 }
                 ret.push((val.clone(), new_vec));
             }
-            ret.into()
+            Ok(ret.into())
         }
 
         let mut ret = vec![];
@@ -187,7 +192,7 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
                 witness: witness.clone(),
             };
             log::trace!("witness: {:?}, r1cs: {:?}", witness, self.r1cs);
-            latest_output = reshape(&public_input, &circom.get_public_outputs());
+            latest_output = reshape(&public_input, &circom.get_public_outputs())?;
             ret.push(circom);
         }
         Ok(ret)
@@ -205,7 +210,10 @@ impl<F: PrimeField> Circuit<F> {
         // witness: <1> <Outputs> <Inputs> <Auxs>
         // NOTE: assumes exactly half of the (public inputs + outputs) are outputs
         let output_count = (self.r1cs.num_inputs - 1) / 2;
-        self.witness[1..output_count + 1].to_vec()
+        self.witness
+            .get(1..output_count + 1)
+            .map(<[F]>::to_vec)
+            .unwrap_or_default()
     }
 
     /// get public inputs from witness
@@ -213,7 +221,10 @@ impl<F: PrimeField> Circuit<F> {
         // witness: <1> <Outputs> <Inputs> <Auxs>
         // NOTE: assumes exactly half of the (public inputs + outputs) are outputs
         let output_count = (self.r1cs.num_inputs - 1) / 2;
-        self.witness[1 + output_count..self.r1cs.num_inputs].to_vec()
+        self.witness
+            .get(1 + output_count..self.r1cs.num_inputs)
+            .map(<[F]>::to_vec)
+            .unwrap_or_default()
     }
 }
 
@@ -238,7 +249,7 @@ impl<F: PrimeField> StepCircuit<F> for Circuit<F> {
 
         for i in 1..self.r1cs.num_inputs {
             // Public inputs do not exist, so we alloc, and later enforce equality from z values
-            let f: F = self.witness[i];
+            let f = self.witness_value(i)?;
             let v = AllocatedNum::alloc(cs.namespace(|| format!("public_{i}")), || Ok(f))?;
 
             vars.push(v.clone());
@@ -249,7 +260,7 @@ impl<F: PrimeField> StepCircuit<F> for Circuit<F> {
         }
         for i in 0..self.r1cs.num_aux {
             // Private witness trace
-            let f: F = self.witness[i + self.r1cs.num_inputs];
+            let f = self.witness_value(i + self.r1cs.num_inputs)?;
             let v = AllocatedNum::alloc(cs.namespace(|| format!("aux_{i}")), || Ok(f))?;
             vars.push(v);
         }
@@ -259,7 +270,10 @@ impl<F: PrimeField> StepCircuit<F> for Circuit<F> {
                 LinearCombination::<F>::zero(),
                 |lc: LinearCombination<F>, (index, coeff)| {
                     lc + if *index > 0_usize {
-                        (*coeff, vars[*index - 1].get_variable())
+                        match vars.get(*index - 1) {
+                            Some(var) => (*coeff, var.get_variable()),
+                            None => (*coeff, CS::one()),
+                        }
                     } else {
                         (*coeff, CS::one())
                     }
@@ -277,14 +291,31 @@ impl<F: PrimeField> StepCircuit<F> for Circuit<F> {
         }
 
         for i in (pub_output_count + 1)..self.r1cs.num_inputs {
+            let Some(z_value) = z.get(i - 1 - pub_output_count) else {
+                return Err(SynthesisError::AssignmentMissing);
+            };
+            let Some(var) = vars.get(i - 1) else {
+                return Err(SynthesisError::AssignmentMissing);
+            };
+            let z_variable = z_value.get_variable();
+            let public_variable = var.get_variable();
             cs.enforce(
                 || format!("pub input enforce {i}"),
-                |lc| lc + z[i - 1 - pub_output_count].get_variable(),
+                |lc| lc + z_variable,
                 |lc| lc + CS::one(),
-                |lc| lc + vars[i - 1].get_variable(),
+                |lc| lc + public_variable,
             );
         }
 
         Ok(z_out)
+    }
+}
+
+impl<F: PrimeField> Circuit<F> {
+    fn witness_value(&self, index: usize) -> core::result::Result<F, SynthesisError> {
+        self.witness
+            .get(index)
+            .copied()
+            .ok_or(SynthesisError::AssignmentMissing)
     }
 }

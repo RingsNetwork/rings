@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! Application-layer circuit directory and route selection.
 //!
 //! This module deliberately sits in `rings-node`, not `rings-core`: Chord

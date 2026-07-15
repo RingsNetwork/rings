@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! Native transport-relay engine — the imperative shell that owns live sockets.
 //!
 //! The pure half of the relay is `Relay::step`; this is the side-effecting half (the relay

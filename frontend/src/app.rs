@@ -130,7 +130,7 @@ fn use_shell_state() -> ShellState {
         active_page: use_state(initial_shell_page),
         active_architecture_layer: use_state(|| 0_usize),
         active_panel: use_state(|| Panel::Onion),
-        active_dialog: use_state(|| ActiveDialog::None),
+        active_dialog: use_state(initial_shell_dialog),
         control_sidebar_collapsed: use_state(|| false),
     }
 }
@@ -279,7 +279,7 @@ pub fn app() -> Html {
     use_peer_refresh(&node);
     let extension_mode = extension::extension_node_bridge().is_some();
     use_extension_panel_reset(shell.active_panel.clone(), extension_mode);
-    use_shell_history(shell.active_page.clone());
+    use_shell_history(shell.active_page.clone(), shell.active_dialog.clone());
     render_app(AppRenderContext {
         shell: &shell,
         node: &node,
@@ -457,12 +457,18 @@ fn use_extension_panel_reset(active_panel: UseStateHandle<Panel>, extension_mode
 }
 
 #[hook]
-fn use_shell_history(active_page: UseStateHandle<ShellPage>) {
+fn use_shell_history(
+    active_page: UseStateHandle<ShellPage>,
+    active_dialog: UseStateHandle<ActiveDialog>,
+) {
     use_effect_with((), move |_| {
         let listener = web_sys::window().map(|window| {
             let page = active_page.clone();
+            let dialog = active_dialog.clone();
             let listener = Closure::<dyn FnMut(Event)>::wrap(Box::new(move |_| {
-                page.set(current_shell_page());
+                let route = current_shell_route();
+                page.set(route.page);
+                dialog.set(route.dialog);
             }));
             let callback = listener.as_ref().unchecked_ref();
             let _ = window.add_event_listener_with_callback("popstate", callback);
@@ -482,7 +488,7 @@ fn use_shell_history(active_page: UseStateHandle<ShellPage>) {
 
 fn render_app(ctx: AppRenderContext<'_>) -> Html {
     let effective_page = effective_shell_page(ctx.shell, ctx.extension_mode);
-    let navigate_page = navigate_page_callback(&ctx.shell.active_page);
+    let navigate_page = navigate_page_callback(ctx.shell);
     let header = controls::app_header(effective_page, navigate_page.clone(), !ctx.extension_mode);
     if effective_page == ShellPage::Guide {
         render_guide_shell(header, navigate_page, ctx.shell)
@@ -499,9 +505,25 @@ fn effective_shell_page(shell: &ShellState, extension_mode: bool) -> ShellPage {
     }
 }
 
-fn navigate_page_callback(active_page: &UseStateHandle<ShellPage>) -> Callback<ShellPage> {
-    let active_page = active_page.clone();
-    Callback::from(move |page| navigate_shell_page(page, &active_page))
+fn navigate_page_callback(shell: &ShellState) -> Callback<ShellPage> {
+    let active_page = shell.active_page.clone();
+    let active_dialog = shell.active_dialog.clone();
+    Callback::from(move |page| navigate_shell_page(page, &active_page, &active_dialog))
+}
+
+fn dialog_actions(shell: &ShellState) -> controls::DialogActions {
+    let open_page = shell.active_page.clone();
+    let open_dialog = shell.active_dialog.clone();
+    let close_page = shell.active_page.clone();
+    let close_dialog = shell.active_dialog.clone();
+    controls::DialogActions {
+        open: Callback::from(move |dialog| {
+            open_shell_dialog(dialog, &open_page, &open_dialog);
+        }),
+        close: Callback::from(move |_| {
+            close_shell_dialog(&close_page, &close_dialog);
+        }),
+    }
 }
 
 fn render_guide_shell(
@@ -521,10 +543,12 @@ fn render_guide_shell(
 fn render_console_shell(ctx: AppRenderContext<'_>, header: Html) -> Html {
     let link_control = render_link_control(ctx.node, ctx.link, ctx.shell);
     let workbench_body = render_workbench_body(&ctx);
+    let dialog_actions = dialog_actions(ctx.shell);
     let workbench_control = controls::workbench_control(
         *ctx.shell.active_panel,
         ctx.shell.active_panel.clone(),
-        ctx.shell.active_dialog.clone(),
+        *ctx.shell.active_dialog,
+        dialog_actions.clone(),
         workbench_body,
         true,
         ctx.extension_mode,
@@ -533,7 +557,8 @@ fn render_console_shell(ctx: AppRenderContext<'_>, header: Html) -> Html {
         control_view(ctx.node),
         ctx.launch_actions,
         workbench_control,
-        ctx.shell.active_dialog.clone(),
+        *ctx.shell.active_dialog,
+        dialog_actions,
         ctx.shell.control_sidebar_collapsed.clone(),
         ctx.extension_mode,
     );
@@ -660,65 +685,147 @@ fn render_custom_panel(node: &NodeState, custom_state: &CustomState) -> Html {
 }
 
 fn initial_shell_page() -> ShellPage {
-    if extension::extension_node_bridge().is_some() {
-        return ShellPage::Console;
-    }
-    match routed_shell_page() {
-        Some(page) => page,
-        None => ShellPage::Guide,
-    }
+    current_shell_route().page
 }
 
-fn current_shell_page() -> ShellPage {
-    if extension::extension_node_bridge().is_some() {
-        return ShellPage::Console;
-    }
-    routed_shell_page().unwrap_or(ShellPage::Guide)
+fn initial_shell_dialog() -> ActiveDialog {
+    current_shell_route().dialog
 }
 
-fn routed_shell_page() -> Option<ShellPage> {
+#[derive(Clone, Copy)]
+struct ShellRoute {
+    page: ShellPage,
+    dialog: ActiveDialog,
+}
+
+fn current_shell_route() -> ShellRoute {
+    let route = routed_shell_route();
+    if extension::extension_node_bridge().is_some() {
+        return ShellRoute {
+            page: ShellPage::Console,
+            dialog: route
+                .map(|route| route.dialog)
+                .unwrap_or(ActiveDialog::None),
+        };
+    }
+    route.unwrap_or(ShellRoute {
+        page: ShellPage::Guide,
+        dialog: ActiveDialog::None,
+    })
+}
+
+fn routed_shell_route() -> Option<ShellRoute> {
     let hash = web_sys::window()?.location().hash().ok()?;
     match hash.trim_start_matches('#').trim_start_matches('/') {
-        "" | "home" => Some(ShellPage::Guide),
-        "node" => Some(ShellPage::Console),
+        "" | "home" => Some(ShellRoute {
+            page: ShellPage::Guide,
+            dialog: ActiveDialog::None,
+        }),
+        "node" => Some(ShellRoute {
+            page: ShellPage::Console,
+            dialog: ActiveDialog::None,
+        }),
+        "node/settings" | "settings" => Some(ShellRoute {
+            page: ShellPage::Console,
+            dialog: ActiveDialog::Settings,
+        }),
+        "node/workbench" | "workbench" => Some(ShellRoute {
+            page: ShellPage::Console,
+            dialog: ActiveDialog::Workbench,
+        }),
         _ => None,
     }
 }
 
-fn navigate_shell_page(page: ShellPage, active_page: &UseStateHandle<ShellPage>) {
-    if **active_page == page && routed_shell_page() == Some(page) {
+fn navigate_shell_page(
+    page: ShellPage,
+    active_page: &UseStateHandle<ShellPage>,
+    active_dialog: &UseStateHandle<ActiveDialog>,
+) {
+    let route = current_shell_route();
+    if **active_page == page && route.page == page && route.dialog == ActiveDialog::None {
         return;
     }
-    push_shell_page(page);
+    write_shell_route(page, ActiveDialog::None, false);
     active_page.set(page);
+    active_dialog.set(ActiveDialog::None);
 }
 
-fn push_shell_page(page: ShellPage) {
+fn open_shell_dialog(
+    dialog: ActiveDialog,
+    active_page: &UseStateHandle<ShellPage>,
+    active_dialog: &UseStateHandle<ActiveDialog>,
+) {
+    if !dialog.is_open() {
+        close_shell_dialog(active_page, active_dialog);
+        return;
+    }
+    let replace = (**active_dialog).is_open();
+    write_shell_route(ShellPage::Console, dialog, replace);
+    active_page.set(ShellPage::Console);
+    active_dialog.set(dialog);
+}
+
+fn close_shell_dialog(
+    active_page: &UseStateHandle<ShellPage>,
+    active_dialog: &UseStateHandle<ActiveDialog>,
+) {
+    if !(**active_dialog).is_open() {
+        return;
+    }
+    let page = current_shell_route().page;
+    write_shell_route(page, ActiveDialog::None, true);
+    active_page.set(page);
+    active_dialog.set(ActiveDialog::None);
+}
+
+fn clear_shell_dialog_route() {
+    let route = current_shell_route();
+    if route.dialog.is_open() {
+        write_shell_route(route.page, ActiveDialog::None, true);
+    }
+}
+
+fn write_shell_route(page: ShellPage, dialog: ActiveDialog, replace: bool) {
     let Some(window) = web_sys::window() else {
         return;
     };
-    let Some(target) = shell_page_url(&window, page) else {
+    let Some(target) = shell_route_url(&window, page, dialog) else {
         return;
     };
-    if current_path_search_hash(&window) == Some(target.clone()) {
+    if !replace && current_path_search_hash(&window) == Some(target.clone()) {
         return;
     }
     let Ok(history) = window.history() else {
         return;
     };
-    let _ = history.push_state_with_url(&JsValue::NULL, "", Some(&target));
+    if replace {
+        let _ = history.replace_state_with_url(&JsValue::NULL, "", Some(&target));
+    } else {
+        let _ = history.push_state_with_url(&JsValue::NULL, "", Some(&target));
+    }
 }
 
-fn shell_page_url(window: &Window, page: ShellPage) -> Option<String> {
+fn shell_route_url(window: &Window, page: ShellPage, dialog: ActiveDialog) -> Option<String> {
     let location = window.location();
     let mut target = location.pathname().ok()?;
     if let Ok(search) = location.search() {
         target.push_str(&search);
     }
-    if page == ShellPage::Console {
-        target.push_str("#node");
+    if let Some(fragment) = shell_route_fragment(page, dialog) {
+        target.push('#');
+        target.push_str(fragment);
     }
     Some(target)
+}
+
+fn shell_route_fragment(page: ShellPage, dialog: ActiveDialog) -> Option<&'static str> {
+    match (page, dialog) {
+        (ShellPage::Guide, ActiveDialog::None) => None,
+        (ShellPage::Console, ActiveDialog::None) => Some("node"),
+        (_, ActiveDialog::Settings) => Some("node/settings"),
+        (_, ActiveDialog::Workbench) => Some("node/workbench"),
+    }
 }
 
 fn current_path_search_hash(window: &Window) -> Option<String> {
