@@ -54,7 +54,6 @@ jobs:
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
           rustup target add ${{ steps.target.outputs.target }} --toolchain "$RUST_TOOLCHAIN"
-          rustup default "$RUST_TOOLCHAIN"
 
       - name: Setup protoc
         uses: arduino/setup-protoc@v2.1.0
@@ -74,7 +73,7 @@ jobs:
 
       - name: Build
         run: |
-          cargo build -p rings-node --bin rings --features node --no-default-features --release --target ${{ steps.target.outputs.target }}
+          rustup run "$RUST_TOOLCHAIN" cargo build -p rings-node --bin rings --features node --no-default-features --release --target ${{ steps.target.outputs.target }}
 
       - name: Package
         if: ${{ inputs.publish_artifacts }}
@@ -112,7 +111,6 @@ jobs:
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
           rustup target add ${{ steps.target.outputs.target }} --toolchain "$RUST_TOOLCHAIN"
-          rustup default "$RUST_TOOLCHAIN"
 
       - name: Setup protoc
         uses: arduino/setup-protoc@v2.1.0
@@ -143,7 +141,7 @@ jobs:
 
       - name: Build
         run: |
-          cargo build -p rings-node --bin rings --features node --no-default-features --release --target ${{ steps.target.outputs.target }}
+          rustup run "$RUST_TOOLCHAIN" cargo build -p rings-node --bin rings --features node --no-default-features --release --target ${{ steps.target.outputs.target }}
 
       - name: Package
         if: ${{ inputs.publish_artifacts }}
