@@ -32,14 +32,22 @@ lazy_static::lazy_static! {
   };
 }
 
+/// Default Rings network identifier for native nodes.
 pub const DEFAULT_NETWORK_ID: u32 = 1;
+/// Default internal JSON-RPC API port.
 pub const DEFAULT_INTERNAL_API_PORT: u16 = 50000;
+/// Default external JSON-RPC listener address.
 pub const DEFAULT_EXTERNAL_API_ADDR: &str = "127.0.0.1:50001";
+/// Default internal endpoint URL used by CLI clients.
 pub const DEFAULT_ENDPOINT_URL: &str = "http://127.0.0.1:50000";
+/// Default WebRTC ICE server list.
 pub const DEFAULT_ICE_SERVERS: &str = "stun://stun.l.google.com:19302";
+/// Default Chord stabilization interval in seconds.
 pub const DEFAULT_STABILIZE_INTERVAL: u64 = 3;
+/// Default storage capacity in bytes for native storage backends.
 pub const DEFAULT_STORAGE_CAPACITY: u32 = 200000000;
 
+/// Builds the default storage path under the user home directory.
 pub fn get_storage_location<P>(prefix: P, path: P) -> String
 where P: AsRef<std::path::Path> {
     let home_dir = env::var_os("HOME").map(PathBuf::from);
@@ -50,60 +58,92 @@ where P: AsRef<std::path::Path> {
     storage_path.to_string_lossy().to_string()
 }
 
+/// Serializable native-node configuration.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
+    /// Rings network identifier this node joins.
     pub network_id: u32,
+    /// Deprecated ECDSA key field retained for backward-compatible config reads.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ecdsa_key: Option<SecretKey>,
+    /// Deprecated session manager field retained for backward-compatible config reads.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_manager: Option<String>,
+    /// Session secret key file path or legacy raw session key string.
     pub session_sk: Option<String>,
+    /// Internal JSON-RPC API port.
     pub internal_api_port: u16,
+    /// External JSON-RPC listener address.
     pub external_api_addr: String,
+    /// Internal endpoint URL used by local clients.
     pub endpoint_url: String,
+    /// WebRTC ICE server list.
     pub ice_servers: String,
+    /// Chord stabilization interval in seconds.
     pub stabilize_interval: u64,
+    /// Presence descriptor heartbeat interval in seconds.
     #[serde(default = "crate::registration::default_online_node_heartbeat_interval_secs")]
     pub online_node_heartbeat_interval_secs: u64,
+    /// Presence descriptor time-to-live in seconds.
     #[serde(default = "crate::registration::default_online_node_ttl_secs")]
     pub online_node_ttl_secs: u64,
+    /// Node type advertised in online-node descriptors.
     #[serde(default = "crate::registration::default_online_node_type")]
     pub online_node_type: OnlineNodeType,
+    /// Whether this node publishes online-node descriptors.
     #[serde(default = "crate::registration::default_advertise_presence")]
     pub advertise_presence: bool,
+    /// Whether this node advertises onion relay capability.
     #[serde(default = "crate::onion::default_advertise_onion_relay")]
     pub advertise_onion_relay: bool,
+    /// Whether this node advertises onion exit capability.
     #[serde(default = "crate::onion::default_advertise_onion_exit")]
     pub advertise_onion_exit: bool,
+    /// Onion-exit descriptor heartbeat interval in seconds.
     #[serde(default = "crate::onion::default_onion_exit_heartbeat_interval_secs")]
     pub onion_exit_heartbeat_interval_secs: u64,
+    /// Onion-exit descriptor time-to-live in seconds.
     #[serde(default = "crate::onion::default_onion_exit_ttl_secs")]
     pub onion_exit_ttl_secs: u64,
+    /// Onion-exit services this node can publish.
     #[serde(default = "crate::onion::default_onion_exit_services")]
     pub onion_exit_services: Vec<OnionExitService>,
+    /// Onion-exit target and resource policy.
     #[serde(default = "crate::onion::default_onion_exit_policy")]
     pub onion_exit_policy: OnionExitPolicy,
+    /// Optional local HTTP CONNECT proxy listener address.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub onion_http_proxy_addr: Option<String>,
+    /// Onion service name used by the HTTP CONNECT proxy.
     #[serde(default = "OnionServiceName::tcp")]
     pub onion_http_proxy_service: OnionServiceName,
+    /// Requested hop count for HTTP CONNECT proxy routes.
     #[serde(default)]
     pub onion_http_proxy_hop_count: usize,
+    /// Whether the HTTP CONNECT proxy may use shorter routes when needed.
     #[serde(default)]
     pub onion_http_proxy_allow_short_paths: bool,
+    /// Timeout for reading HTTP CONNECT headers in seconds.
     #[serde(default = "crate::onion::proxy::http::default_connect_header_timeout_secs")]
     pub onion_http_proxy_header_timeout_secs: u64,
+    /// Maximum simultaneous HTTP CONNECT proxy connections.
     #[serde(default = "crate::onion::proxy::http::default_max_connect_connections")]
     pub onion_http_proxy_max_connections: usize,
+    /// Virtual DHT positions per storage owner.
     #[serde(default = "default_storage_virtual_positions_per_owner")]
     pub dht_virtual_nodes: u16,
+    /// Optional externally reachable IP address hint.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub external_ip: Option<String>,
+    /// Optional lower bound for WebRTC UDP port allocation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub webrtc_udp_port_min: Option<u16>,
+    /// Optional upper bound for WebRTC UDP port allocation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub webrtc_udp_port_max: Option<u16>,
+    /// Persistent DHT data storage configuration.
     pub data_storage: StorageConfig,
+    /// Peer measurement storage configuration.
     pub measure_storage: StorageConfig,
 }
 
@@ -175,6 +215,7 @@ impl TryFrom<Config> for ProcessorConfig {
 }
 
 impl Config {
+    /// Creates a default native-node configuration using the supplied session key path.
     pub fn new<P>(session_sk: P) -> Self
     where P: AsRef<std::path::Path> {
         let session_sk = session_sk.as_ref().to_string_lossy().to_string();
@@ -217,6 +258,7 @@ impl Config {
         }
     }
 
+    /// Writes this configuration to a YAML file and returns the written path.
     pub fn write_fs<P>(&self, path: P) -> Result<String>
     where P: AsRef<std::path::Path> {
         let path = expand_home(path)?;
@@ -230,6 +272,7 @@ impl Config {
             .ok_or_else(|| Error::PathUtf8Error(path.display().to_string()))
     }
 
+    /// Reads a native-node configuration from a YAML file.
     pub fn read_fs<P>(path: P) -> Result<Config>
     where P: AsRef<std::path::Path> {
         let path = expand_home(path)?;
@@ -240,13 +283,17 @@ impl Config {
     }
 }
 
+/// Configuration for a node storage backend.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StorageConfig {
+    /// Storage directory path.
     pub path: String,
+    /// Storage capacity in bytes.
     pub capacity: u32,
 }
 
 impl StorageConfig {
+    /// Creates a storage configuration from a path and capacity.
     pub fn new(path: &str, capacity: u32) -> Self {
         Self {
             path: path.to_string(),

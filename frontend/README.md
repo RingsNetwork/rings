@@ -57,7 +57,7 @@ rewrites the web output into a Chrome Manifest V3 package after every build:
 
 ```sh
 cd frontend
-npm --prefix .. install --ignore-scripts --package-lock=false
+npm --prefix .. ci --ignore-scripts
 npm --prefix .. run build:frontend-extension-scripts
 trunk build --release
 ```
@@ -92,7 +92,7 @@ fixture test after packaging the extension:
 
 ```sh
 cd ..
-npm install --ignore-scripts --package-lock=false
+npm ci --ignore-scripts
 npx playwright install chromium
 npm run test:frontend-extension-wallet
 ```
@@ -108,7 +108,7 @@ cd frontend
 cargo fmt --check
 cargo check --target wasm32-unknown-unknown
 cargo test --release --target wasm32-unknown-unknown
-npm --prefix .. install --ignore-scripts --package-lock=false
+npm --prefix .. ci --ignore-scripts
 npm --prefix .. run build:frontend-extension-scripts
 trunk build --release
 cd ..

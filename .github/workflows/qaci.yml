@@ -87,10 +87,15 @@ jobs:
           node-version: 20
 
       - name: Install frontend extension script dependencies
-        run: npm install --ignore-scripts --package-lock=false
+        run: npm ci --ignore-scripts
 
       - name: Check frontend extension scripts
         run: npm run build:frontend-extension-scripts
+
+      - name: Install extension icon renderer
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y librsvg2-bin
 
       - name: Install Trunk
         run: cargo install trunk --locked

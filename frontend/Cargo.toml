@@ -38,6 +38,10 @@ yew = { version = "0.21", features = ["csr"] }
 [dev-dependencies]
 wasm-bindgen-test = "=0.3.71"
 
+[lints.rust]
+missing_docs = "deny"
+warnings = "deny"
+
 [lints.clippy]
 expect_used = "deny"
 indexing_slicing = "deny"

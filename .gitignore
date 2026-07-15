@@ -30,7 +30,6 @@ nohup.out
 config.yaml
 
 # wasm-pack related
-package-lock.json
 dist/
 dist-extension/
 node_modules/

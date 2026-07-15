@@ -45,6 +45,7 @@ impl Client {
         }
     }
 
+    /// Sends a typed JSON-RPC request and decodes the typed response body.
     pub async fn call_method<T>(&self, method: Method, req: &impl Serialize) -> Result<T>
     where T: DeserializeOwned {
         use jsonrpc_core::*;
@@ -140,14 +141,17 @@ impl Client {
         self.call_method(Method::ListPeers, req).await
     }
 
+    /// Creates a WebRTC offer for a manual peer handshake.
     pub async fn create_offer(&self, req: &CreateOfferRequest) -> Result<CreateOfferResponse> {
         self.call_method(Method::CreateOffer, req).await
     }
 
+    /// Answers a WebRTC offer with a local session description.
     pub async fn answer_offer(&self, req: &AnswerOfferRequest) -> Result<AnswerOfferResponse> {
         self.call_method(Method::AnswerOffer, req).await
     }
 
+    /// Accepts a WebRTC answer and completes the manual handshake.
     pub async fn accept_answer(&self, req: &AcceptAnswerRequest) -> Result<AcceptAnswerResponse> {
         self.call_method(Method::AcceptAnswer, req).await
     }
@@ -157,6 +161,7 @@ impl Client {
         self.call_method(Method::Disconnect, req).await
     }
 
+    /// Sends a namespace-scoped backend message to a destination DID.
     pub async fn send_backend_message(
         &self,
         req: &SendBackendMessageRequest,
@@ -164,6 +169,7 @@ impl Client {
         self.call_method(Method::SendBackendMessage, req).await
     }
 
+    /// Starts an end-to-end encrypted handshake with a destination DID.
     pub async fn send_e2e_handshake(
         &self,
         req: &SendE2eHandshakeRequest,
@@ -171,6 +177,7 @@ impl Client {
         self.call_method(Method::SendE2eHandshake, req).await
     }
 
+    /// Sends an encrypted end-to-end message stream to a destination DID.
     pub async fn send_e2e_message(
         &self,
         req: &SendE2eMessageRequest,
@@ -186,6 +193,7 @@ impl Client {
         self.call_method(Method::PublishMessageToTopic, req).await
     }
 
+    /// Fetches stored messages for a topic after the requested offset.
     pub async fn fetch_topic_messages(
         &self,
         req: &FetchTopicMessagesRequest,
@@ -254,6 +262,7 @@ impl Client {
         self.call_method(Method::ListPeerMeasurements, req).await
     }
 
+    /// Returns the DID of the local node.
     pub async fn node_did(&self, req: &NodeDidRequest) -> Result<NodeDidResponse> {
         self.call_method(Method::NodeDid, req).await
     }

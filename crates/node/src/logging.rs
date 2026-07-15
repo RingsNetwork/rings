@@ -16,14 +16,20 @@ pub use self::browser::init_logging;
 pub use self::node::init_logging;
 use crate::prelude::wasm_export;
 
+/// Logging verbosity accepted by native CLI and browser bindings.
 #[repr(C)]
 #[wasm_export]
 #[derive(ValueEnum, Debug, Clone)]
 pub enum LogLevel {
+    /// Debug-level diagnostic output.
     Debug,
+    /// Informational runtime output.
     Info,
+    /// Warning-level runtime output.
     Warn,
+    /// Error-level runtime output.
     Error,
+    /// Trace-level diagnostic output.
     Trace,
 }
 
@@ -140,6 +146,7 @@ pub mod node {
 
     use super::*;
 
+    /// Initializes native tracing and panic logging for the requested level.
     #[no_mangle]
     pub extern "C" fn init_logging(level: LogLevel) {
         set_panic_hook();
@@ -163,12 +170,14 @@ pub mod node {
 }
 
 #[cfg(feature = "browser")]
+/// Browser console logging configuration.
 pub mod browser {
     use tracing_wasm::ConsoleConfig;
     use tracing_wasm::WASMLayer;
     use tracing_wasm::WASMLayerConfigBuilder;
 
     use super::*;
+    /// Initializes browser console tracing and panic logging for the requested level.
     #[wasm_export]
     pub fn init_logging(level: LogLevel) {
         set_panic_hook();

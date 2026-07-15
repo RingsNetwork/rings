@@ -29,8 +29,6 @@ use wasmer::MemoryType;
 use wasmer::Module;
 use wasmer::RuntimeError;
 use wasmer::Store;
-#[cfg(feature = "llvm")]
-use wasmer_compiler_llvm::LLVM;
 
 use super::circom::Circom;
 use super::circom::Circom2;
@@ -134,14 +132,6 @@ impl WitnessCalculator {
 
     /// Creates a new `Store` for Wasm execution.
     pub fn new_store() -> Store {
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "llvm")] {
-                let compiler = LLVM::new();
-                let store = Store::new(compiler);
-            } else {
-
-            }
-        }
         Store::default()
     }
 

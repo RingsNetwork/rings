@@ -213,7 +213,7 @@ jobs:
 
       - name: Build
         run: |
-          npm install --ignore-scripts --package-lock=false
+          npm ci --ignore-scripts
           npm pack
 
       - name: Package

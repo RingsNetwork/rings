@@ -3,6 +3,7 @@
 //! The app is implemented in Rust/Yew. Browser wallet, WebCrypto, and extension
 //! APIs are reached through `js_sys`/`wasm_bindgen`; MV3 glue code is kept in
 //! strict TypeScript and compiled into ignored generated output.
+#![deny(missing_docs)]
 
 mod app;
 mod browser_api;

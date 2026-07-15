@@ -1,3 +1,5 @@
+//! Procedural macros shared by Rings crates.
+
 extern crate proc_macro;
 #[macro_use]
 extern crate quote;
@@ -30,12 +32,14 @@ pub fn wasm_export(attr: TokenStream, input: TokenStream) -> TokenStream {
     return input;
 }
 
+/// Derive measurement behavior forwarding implementations.
 #[proc_macro_derive(MeasureBehaviour)]
 pub fn impl_measure_behaviour(input: TokenStream) -> TokenStream {
     let ast = parse_macro_input!(input as DeriveInput);
     crate::derives::impl_measure_behaviour_traits(&ast).into()
 }
 
+/// Derive connection classification implementations.
 #[proc_macro_derive(JudgeConnection)]
 pub fn impl_judege_connection(input: TokenStream) -> TokenStream {
     let ast = parse_macro_input!(input as DeriveInput);
