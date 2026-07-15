@@ -11,6 +11,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: 1.94.0
   WASM_BINDGEN_TEST_TIMEOUT: 120
 
 permissions:
@@ -46,7 +47,11 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup rust toolchain
-        run: rustup show
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+          rustup target add wasm32-unknown-unknown
+          rustup show
 
       - uses: jetli/wasm-bindgen-action@v0.2.0
         with:
@@ -59,6 +64,17 @@ jobs:
 
       - name: Run clippy for core wasm
         run: cargo clippy -p rings-core --features wasm --no-deps --no-default-features --target=wasm32-unknown-unknown --tests -- -D warnings
+
+      - name: Run strict clippy for node browser lib
+        run: |
+          cargo clippy -p rings-node --features browser --no-deps --no-default-features --target=wasm32-unknown-unknown --lib -- \
+            -D warnings \
+            -D clippy::unwrap_used \
+            -D clippy::expect_used \
+            -D clippy::panic \
+            -D clippy::todo \
+            -D clippy::unimplemented \
+            -D clippy::indexing_slicing
 
       - name: Run clippy for node browser
         run: cargo clippy -p rings-node --features browser_default --no-deps --no-default-features --target=wasm32-unknown-unknown --tests -- -D warnings
@@ -75,6 +91,13 @@ jobs:
 
       - name: Check frontend extension scripts
         run: npm run build:frontend-extension-scripts
+
+      - name: Install Trunk
+        run: cargo install trunk --locked
+
+      - name: Build Rings frontend extension package
+        run: trunk build
+        working-directory: ./frontend
 
       - name: Check Rings frontend
         run: cargo check --target=wasm32-unknown-unknown
@@ -132,7 +155,10 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup rust toolchain
-        run: rustup show
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+          rustup show
 
       # If you need to reset the cache version, increment the number after `v`
       - uses: Swatinem/rust-cache@v2
@@ -167,7 +193,10 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup rust toolchain
-        run: rustup show
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+          rustup show
 
       # If you need to reset the cache version, increment the number after `v`
       - uses: Swatinem/rust-cache@v2
@@ -212,6 +241,8 @@ jobs:
 
       - name: Setup rust toolchain
         run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
           rustup install nightly
           rustup component add rustfmt --toolchain nightly
           rustup show
@@ -220,6 +251,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: static-v1
+
+      - name: Run strict clippy for node native lib
+        run: |
+          cargo clippy -p rings-node --no-default-features --features node --lib -- \
+            -D warnings \
+            -D clippy::unwrap_used \
+            -D clippy::expect_used \
+            -D clippy::panic \
+            -D clippy::todo \
+            -D clippy::unimplemented \
+            -D clippy::indexing_slicing
 
       - name: Run clippy
         run: cargo clippy --all --tests -- -D warnings

@@ -39,7 +39,7 @@ fn hero_section(open_console: Callback<MouseEvent>) -> Html {
                     </button>
                     <a
                         class="landing-secondary-action"
-                        href="https://github.com/RyanKung/rings"
+                        href="https://github.com/RingsNetwork/rings"
                         target="_blank"
                         rel="noreferrer"
                     >
@@ -47,7 +47,7 @@ fn hero_section(open_console: Callback<MouseEvent>) -> Html {
                     </a>
                     <a
                         class="landing-secondary-action"
-                        href="https://github.com/RyanKung/rings/blob/master/papers/rings.pdf"
+                        href="https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf"
                         target="_blank"
                         rel="noreferrer"
                     >
@@ -168,12 +168,12 @@ fn examples_section() -> Html {
                 <h2 id="landing-examples-title">{ "Runnable surfaces from the repository." }</h2>
             </div>
             <div class="landing-example-grid">
-                { landing_link_card("native", "Start here for a minimal native node. It shows wallet setup, node bootstrapping, and registration of a custom namespaced protocol without browser-specific APIs.", "https://github.com/RyanKung/rings/tree/master/examples/native") }
-                { landing_link_card("relay", "Open TCP and UDP tunnels through the overlay. This example is the practical path for exposing a peer service and carrying traffic without a public server hop.", "https://github.com/RyanKung/rings/tree/master/examples/relay") }
-                { landing_link_card("snark", "Run fold-scheme zkSNARK proving and verification over the Rings protocol model. It demonstrates how proof workloads fit beside ordinary peer messages.", "https://github.com/RyanKung/rings/tree/master/examples/snark") }
-                { landing_link_card("proof-demo", "Use the browser proof surface built with Yew and Trunk. It connects the frontend runtime to the proof flow so the browser can drive a live proving interaction.", "https://github.com/RyanKung/rings/tree/master/examples/proof-demo") }
-                { landing_link_card("dweb", "Explore the decentralized-web application shape. It demonstrates how application content can be addressed through Rings instead of relying on a conventional hosted backend.", "https://github.com/RyanKung/rings/tree/master/examples/dweb") }
-                { landing_link_card("ffi", "Drive a Rings node from another runtime through the C FFI. This is the integration point for embedding Rings into hosts that cannot call the Rust API directly.", "https://github.com/RyanKung/rings/tree/master/examples/ffi") }
+                { landing_link_card("native", "Start here for a minimal native node. It shows wallet setup, node bootstrapping, and registration of a custom namespaced protocol without browser-specific APIs.", "https://github.com/RingsNetwork/rings/tree/master/examples/native") }
+                { landing_link_card("relay", "Open TCP and UDP tunnels through the overlay. This example is the practical path for exposing a peer service and carrying traffic without a public server hop.", "https://github.com/RingsNetwork/rings/tree/master/examples/relay") }
+                { landing_link_card("snark", "Run fold-scheme zkSNARK proving and verification over the Rings protocol model. It demonstrates how proof workloads fit beside ordinary peer messages.", "https://github.com/RingsNetwork/rings/tree/master/examples/snark") }
+                { landing_link_card("proof-demo", "Use the browser proof surface built with Yew and Trunk. It connects the frontend runtime to the proof flow so the browser can drive a live proving interaction.", "https://github.com/RingsNetwork/rings/tree/master/examples/proof-demo") }
+                { landing_link_card("dweb", "Explore the decentralized-web application shape. It demonstrates how application content can be addressed through Rings instead of relying on a conventional hosted backend.", "https://github.com/RingsNetwork/rings/tree/master/examples/dweb") }
+                { landing_link_card("ffi", "Drive a Rings node from another runtime through the C FFI. This is the integration point for embedding Rings into hosts that cannot call the Rust API directly.", "https://github.com/RingsNetwork/rings/tree/master/examples/ffi") }
             </div>
         </section>
     }

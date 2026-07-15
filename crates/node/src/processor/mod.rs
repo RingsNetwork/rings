@@ -21,6 +21,7 @@ use rings_core::message::e2e::E2eHandshakeRequest;
 use rings_core::message::e2e::E2eHandshakeResponse;
 use rings_core::message::e2e::E2eStreamDecryptor;
 use rings_core::message::e2e::E2eStreamFrame;
+use rings_core::message::DhtProtocolMode;
 use rings_core::message::Encoded;
 use rings_core::message::Encoder;
 use rings_core::message::Message;
@@ -631,6 +632,10 @@ impl Processor {
 impl OnionDirectoryReader for Processor {
     fn local_did(&self) -> Did {
         self.did()
+    }
+
+    fn dht_protocol_mode(&self) -> DhtProtocolMode {
+        self.swarm.dht_protocol_mode()
     }
 
     async fn live_online_nodes(&self) -> Result<Vec<OnlineNodeDescriptor>> {

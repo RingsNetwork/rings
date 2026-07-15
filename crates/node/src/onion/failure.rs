@@ -42,6 +42,13 @@ pub enum OnionRouteError {
         /// Required transport class.
         transport: OnionExitTransport,
     },
+    /// Live exits advertise the service transport, but none can serve the requested proxy protocol.
+    NoExitForProxyProtocol {
+        /// Requested service name.
+        service: String,
+        /// Requested proxy protocol label.
+        protocol: String,
+    },
     /// Live exits advertise the service and transport, but no policy allows the target.
     NoExitAllowsTarget {
         /// Requested service name.
@@ -154,6 +161,10 @@ impl fmt::Display for OnionRouteError {
             Self::NoExitWithTransport { service, transport } => write!(
                 f,
                 "no live onion exit offers service {service:?} over {transport:?}"
+            ),
+            Self::NoExitForProxyProtocol { service, protocol } => write!(
+                f,
+                "no live onion exit offers service {service:?} for proxy protocol {protocol:?}"
             ),
             Self::NoExitAllowsTarget { service, target } => write!(
                 f,

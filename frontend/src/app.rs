@@ -331,20 +331,26 @@ fn use_extension_status(node: &NodeState) {
     let did = node.did.clone();
     let peers = node.peers.clone();
     let wallet_account = node.wallet_account.clone();
+    let node_starting = node.node_starting.clone();
     let status = node.status.clone();
+    let token = node.generation.token();
     use_effect_with((), move |_| {
         wasm_bindgen_futures::spawn_local(async move {
             let Some(bridge) = extension::extension_node_bridge() else {
                 return;
             };
             match extension::extension_node_status(&bridge).await {
-                Ok(snapshot) if snapshot.online => {
-                    did.set(snapshot.did);
-                    peers.set(snapshot.peers);
-                    wallet_account.set(snapshot.wallet_account);
-                    status.set("background node active".to_string());
+                Ok(snapshot) => {
+                    extension::apply_extension_snapshot(
+                        snapshot,
+                        &did,
+                        &peers,
+                        &wallet_account,
+                        &node_starting,
+                        &status,
+                        &token,
+                    );
                 }
-                Ok(_) => {}
                 Err(error) => status.set(format!("background status failed: {error}")),
             }
         });
@@ -359,6 +365,7 @@ fn use_peer_refresh(node: &NodeState) {
     let did = node.did.clone();
     let wallet_account = node.wallet_account.clone();
     let node_starting = node.node_starting.clone();
+    let status = node.status.clone();
     let node_online = !(*node.did).is_empty();
     use_effect_with(node_online, move |online| {
         let interval = if *online {
@@ -370,6 +377,7 @@ fn use_peer_refresh(node: &NodeState) {
                     did.clone(),
                     wallet_account.clone(),
                     node_starting.clone(),
+                    status.clone(),
                 );
             }))
         } else {
@@ -386,6 +394,7 @@ fn refresh_peer_snapshot(
     did: UseStateHandle<String>,
     wallet_account: UseStateHandle<Option<WalletAccount>>,
     node_starting: UseStateHandle<bool>,
+    status: UseStateHandle<String>,
 ) {
     if let Some(bridge) = extension::extension_node_bridge() {
         refresh_extension_snapshot(
@@ -395,6 +404,7 @@ fn refresh_peer_snapshot(
             did,
             wallet_account,
             node_starting,
+            status,
         );
         return;
     }
@@ -418,19 +428,20 @@ fn refresh_extension_snapshot(
     did: UseStateHandle<String>,
     wallet_account: UseStateHandle<Option<WalletAccount>>,
     node_starting: UseStateHandle<bool>,
+    status: UseStateHandle<String>,
 ) {
     let refresh_token = generation.token();
     wasm_bindgen_futures::spawn_local(async move {
         if let Ok(snapshot) = extension::extension_node_status(&bridge).await {
-            if !refresh_token.is_current() {
-                return;
-            }
-            if snapshot.online {
-                did.set(snapshot.did);
-                peers.set(snapshot.peers);
-                wallet_account.set(snapshot.wallet_account);
-            }
-            node_starting.set(snapshot.starting);
+            extension::apply_extension_snapshot(
+                snapshot,
+                &did,
+                &peers,
+                &wallet_account,
+                &node_starting,
+                &status,
+                &refresh_token,
+            );
         }
     });
 }

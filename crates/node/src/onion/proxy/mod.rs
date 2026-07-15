@@ -10,11 +10,13 @@ use rings_core::dht::Did;
 
 use crate::error::Error;
 use crate::error::Result;
+use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitService;
 use crate::onion::OnionExitTransport;
 pub use crate::onion::OnionProxyTarget;
 use crate::onion::OnionRoute;
 use crate::onion::OnionServiceName;
+use crate::online::OnlineNodeType;
 
 #[cfg(feature = "node")]
 pub mod http;
@@ -48,6 +50,14 @@ impl OnionProxyProtocol {
         match self {
             Self::TcpConnect => OnionExitTransport::Tcp,
             Self::HttpsProxy => OnionExitTransport::Tcp,
+        }
+    }
+
+    /// Return a stable diagnostic label for this proxy protocol.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::TcpConnect => "tcp-connect",
+            Self::HttpsProxy => "https-proxy",
         }
     }
 
@@ -139,9 +149,31 @@ impl OnionProxyConfig {
     pub fn exit_transport(&self) -> OnionExitTransport {
         self.protocol.exit_transport()
     }
+
+    pub(crate) fn accepts_exit_descriptor(&self, descriptor: &OnionExitDescriptor) -> bool {
+        match self.protocol {
+            OnionProxyProtocol::TcpConnect => {
+                descriptor.node_type == OnlineNodeType::Native
+                    && descriptor
+                        .service
+                        .matches(self.service.as_str(), OnionExitTransport::Tcp)
+            }
+            OnionProxyProtocol::HttpsProxy => {
+                self.service == OnionServiceName::https()
+                    && descriptor
+                        .offers_service_transport(self.service.as_str(), OnionExitTransport::Tcp)
+            }
+        }
+    }
 }
 
 fn validate_proxy_service(protocol: OnionProxyProtocol, service: &OnionServiceName) -> Result<()> {
+    if protocol == OnionProxyProtocol::HttpsProxy && service != &OnionServiceName::https() {
+        return Err(Error::InvalidConfig(format!(
+            "onion HTTPS proxy requires service {:?}",
+            OnionServiceName::https().as_str()
+        )));
+    }
     if let Some(expected) = OnionExitService::reserved_transport(service.as_str()) {
         if expected != protocol.exit_transport() {
             return Err(Error::InvalidConfig(format!(

@@ -280,6 +280,22 @@ pub(super) fn onion_exit_descriptor_for_processor_with_service(
     now_ms: u128,
     policy: OnionExitPolicy,
 ) -> Result<OnionExitDescriptor> {
+    onion_exit_descriptor_for_processor_with_node_type_service(
+        processor,
+        default_online_node_type(),
+        service,
+        now_ms,
+        policy,
+    )
+}
+
+pub(super) fn onion_exit_descriptor_for_processor_with_node_type_service(
+    processor: &Processor,
+    node_type: OnlineNodeType,
+    service: OnionExitService,
+    now_ms: u128,
+    policy: OnionExitPolicy,
+) -> Result<OnionExitDescriptor> {
     OnionExitDescriptor::new_signed(
         OnionExitDescriptorBody {
             did: processor.did(),
@@ -288,7 +304,7 @@ pub(super) fn onion_exit_descriptor_for_processor_with_service(
                 .account_verification_pubkey()
                 .map_err(Error::CoreError)?,
             session_public_key: processor.session_sk.session_public_key(),
-            node_type: default_online_node_type(),
+            node_type,
             network_id: processor.swarm.network_id(),
             service,
             policy,

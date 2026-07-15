@@ -21,11 +21,11 @@
     "circomlib": "^2.0.5"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.5.3",
-    "@types/chrome": "^0.1.1",
-    "@types/node": "^25.0.0",
+    "@biomejs/biome": "2.5.3",
+    "@types/chrome": "0.1.1",
+    "@types/node": "25.0.0",
     "playwright": "1.61.1",
-    "typescript": "^5.9.3"
+    "typescript": "5.9.3"
   },
   "files": [
     "dist/"

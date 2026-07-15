@@ -15,6 +15,7 @@ use js_sys::Uint8Array;
 use rings_core::dht::Did;
 use rings_core::ecc::PublicKey;
 use rings_core::measure::PeerQuality;
+use rings_core::message::DhtProtocolMode;
 use rings_core::prelude::entry;
 use rings_core::prelude::entry::Entry;
 use rings_core::storage::idb::IdbStorage;
@@ -179,6 +180,10 @@ impl BrowserOnionDirectoryReader {
 impl OnionDirectoryReader for BrowserOnionDirectoryReader {
     fn local_did(&self) -> Did {
         self.processor.did()
+    }
+
+    fn dht_protocol_mode(&self) -> DhtProtocolMode {
+        self.processor.swarm.dht_protocol_mode()
     }
 
     async fn live_online_nodes(&self) -> NodeResult<Vec<OnlineNodeDescriptor>> {

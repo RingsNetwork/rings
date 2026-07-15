@@ -235,7 +235,7 @@ pub(crate) fn app_header(
                     </button>
                     <a
                         class="header-github-link"
-                        href="https://github.com/RyanKung/rings"
+                        href="https://github.com/RingsNetwork/rings"
                         target="_blank"
                         rel="noreferrer"
                     >
@@ -243,7 +243,7 @@ pub(crate) fn app_header(
                     </a>
                     <a
                         class="header-github-link"
-                        href="https://github.com/RyanKung/rings/blob/master/papers/rings.pdf"
+                        href="https://github.com/RingsNetwork/rings/blob/master/papers/rings.pdf"
                         target="_blank"
                         rel="noreferrer"
                     >

@@ -62,6 +62,10 @@ pub(crate) fn apply_extension_snapshot(
         did.set(snapshot.did);
         peers.set(snapshot.peers);
         wallet_account.set(snapshot.wallet_account);
+    } else {
+        did.set(String::new());
+        peers.set(Vec::new());
+        wallet_account.set(None);
     }
     status.set(snapshot.error.unwrap_or(snapshot.message));
     true
