@@ -28,6 +28,8 @@ pub enum OnionRouteError {
         /// Requested hop count including the exit.
         hop_count: usize,
     },
+    /// Route construction could not select a first hop accepted by the caller.
+    NoPermittedFirstHop,
     /// No live exit descriptor offers the requested service.
     NoLiveExit {
         /// Requested service name.
@@ -142,6 +144,9 @@ impl fmt::Display for OnionRouteError {
             } => write!(f, "onion route hop count {hop_count} exceeds limit {max_hops}"),
             Self::NotEnoughRelays { hop_count } => {
                 write!(f, "not enough relay candidates for {hop_count}-hop onion route")
+            }
+            Self::NoPermittedFirstHop => {
+                f.write_str("no onion route has a permitted first hop")
             }
             Self::NoLiveExit { service } => {
                 write!(f, "no live onion exit offers service {service:?}")

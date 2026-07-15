@@ -258,6 +258,22 @@ pub(crate) fn select_onion_route_from_candidates(
     qualities: impl IntoIterator<Item = (Did, PeerQuality)>,
     entropy: &mut impl RouteEntropy,
 ) -> Result<OnionRoute> {
+    select_onion_route_from_candidates_with_first_hop(
+        request,
+        candidates,
+        qualities,
+        entropy,
+        |_| true,
+    )
+}
+
+pub(crate) fn select_onion_route_from_candidates_with_first_hop(
+    request: &OnionRouteRequest,
+    candidates: OnionRouteCandidates,
+    qualities: impl IntoIterator<Item = (Did, PeerQuality)>,
+    entropy: &mut impl RouteEntropy,
+    first_hop_permitted: impl Fn(Did) -> bool,
+) -> Result<OnionRoute> {
     let target_hop_count = request.target_hop_count();
     if target_hop_count == 0 || target_hop_count > usize::from(MAX_ONION_CIRCUIT_HOPS) {
         return Err(Error::OnionRouteError(
@@ -270,15 +286,24 @@ pub(crate) fn select_onion_route_from_candidates(
 
     let quality_by_did = qualities.into_iter().collect::<BTreeMap<_, _>>();
     let mut exit_candidates = candidates.exits;
-    let exit_dids = exit_candidates
-        .iter()
-        .map(|descriptor| descriptor.did)
-        .collect::<Vec<_>>();
+    let first_hop_permitted = &first_hop_permitted;
+    let first_hop_exit_only = target_hop_count == 1;
     let exit_index =
-        pick_weighted_index(&exit_dids, &quality_by_did, entropy).ok_or_else(|| {
-            Error::OnionRouteError(OnionRouteError::NoLiveExit {
-                service: request.service().to_string(),
-            })
+        pick_weighted_exit_index_where(&exit_candidates, &quality_by_did, entropy, |did| {
+            !first_hop_exit_only || first_hop_permitted(did)
+        })
+        .ok_or_else(|| {
+            if exit_candidates.is_empty() {
+                Error::OnionRouteError(OnionRouteError::NoLiveExit {
+                    service: request.service().to_string(),
+                })
+            } else if first_hop_exit_only {
+                Error::OnionRouteError(OnionRouteError::NoPermittedFirstHop)
+            } else {
+                Error::OnionRouteError(OnionRouteError::NoLiveExit {
+                    service: request.service().to_string(),
+                })
+            }
         })?;
     let exit = exit_candidates.remove(exit_index);
     let exit_did = exit.did;
@@ -290,12 +315,42 @@ pub(crate) fn select_onion_route_from_candidates(
         .collect::<Vec<_>>();
     let relay_hops_needed = target_hop_count.saturating_sub(1);
     let mut selected_relays = Vec::with_capacity(relay_hops_needed);
-    while selected_relays.len() < relay_hops_needed {
-        let Some(next_index) = pick_weighted_hop_index(&relay_candidates, &quality_by_did, entropy)
-        else {
-            break;
+    if relay_hops_needed > 0 {
+        let has_relay_candidates = !relay_candidates.is_empty();
+        let Some(first_index) = pick_weighted_hop_index_where(
+            &relay_candidates,
+            &quality_by_did,
+            entropy,
+            first_hop_permitted,
+        ) else {
+            if request.allow_short_paths {
+                return select_direct_exit_route(
+                    request,
+                    exit_candidates,
+                    exit,
+                    &quality_by_did,
+                    entropy,
+                    first_hop_permitted,
+                );
+            }
+            let error = if has_relay_candidates {
+                OnionRouteError::NoPermittedFirstHop
+            } else {
+                OnionRouteError::NotEnoughRelays {
+                    hop_count: target_hop_count,
+                }
+            };
+            return Err(Error::OnionRouteError(error));
         };
-        selected_relays.push(relay_candidates.remove(next_index));
+        selected_relays.push(relay_candidates.remove(first_index));
+        while selected_relays.len() < relay_hops_needed {
+            let Some(next_index) =
+                pick_weighted_hop_index(&relay_candidates, &quality_by_did, entropy)
+            else {
+                break;
+            };
+            selected_relays.push(relay_candidates.remove(next_index));
+        }
     }
 
     if selected_relays.len() < relay_hops_needed && !request.allow_short_paths {
@@ -309,13 +364,73 @@ pub(crate) fn select_onion_route_from_candidates(
     OnionRoute::new(request.service.clone(), encryption_hops, exit)
 }
 
+fn select_direct_exit_route(
+    request: &OnionRouteRequest,
+    mut remaining_exits: Vec<OnionExitDescriptor>,
+    selected_exit: OnionExitDescriptor,
+    quality_by_did: &BTreeMap<Did, PeerQuality>,
+    entropy: &mut impl RouteEntropy,
+    first_hop_permitted: &impl Fn(Did) -> bool,
+) -> Result<OnionRoute> {
+    remaining_exits.push(selected_exit);
+    let exit_index = pick_weighted_exit_index_where(
+        &remaining_exits,
+        quality_by_did,
+        entropy,
+        first_hop_permitted,
+    )
+    .ok_or(Error::OnionRouteError(OnionRouteError::NoPermittedFirstHop))?;
+    let exit = remaining_exits.remove(exit_index);
+    let encryption_hops = vec![OnionRouteHop::new(exit.did, exit.session_public_key)];
+    OnionRoute::new(request.service.clone(), encryption_hops, exit)
+}
+
 fn pick_weighted_hop_index(
     hops: &[OnionRouteHop],
     quality_by_did: &BTreeMap<Did, PeerQuality>,
     entropy: &mut impl RouteEntropy,
 ) -> Option<usize> {
-    let dids = hops.iter().map(|hop| hop.did).collect::<Vec<_>>();
-    pick_weighted_index(&dids, quality_by_did, entropy)
+    pick_weighted_hop_index_where(hops, quality_by_did, entropy, |_| true)
+}
+
+fn pick_weighted_hop_index_where(
+    hops: &[OnionRouteHop],
+    quality_by_did: &BTreeMap<Did, PeerQuality>,
+    entropy: &mut impl RouteEntropy,
+    permitted: impl Fn(Did) -> bool,
+) -> Option<usize> {
+    let eligible = hops
+        .iter()
+        .enumerate()
+        .filter_map(|(index, hop)| permitted(hop.did).then_some((index, hop.did)))
+        .collect::<Vec<_>>();
+    pick_weighted_candidate_index(eligible, quality_by_did, entropy)
+}
+
+fn pick_weighted_exit_index_where(
+    exits: &[OnionExitDescriptor],
+    quality_by_did: &BTreeMap<Did, PeerQuality>,
+    entropy: &mut impl RouteEntropy,
+    permitted: impl Fn(Did) -> bool,
+) -> Option<usize> {
+    let eligible = exits
+        .iter()
+        .enumerate()
+        .filter_map(|(index, descriptor)| {
+            permitted(descriptor.did).then_some((index, descriptor.did))
+        })
+        .collect::<Vec<_>>();
+    pick_weighted_candidate_index(eligible, quality_by_did, entropy)
+}
+
+fn pick_weighted_candidate_index(
+    eligible: Vec<(usize, Did)>,
+    quality_by_did: &BTreeMap<Did, PeerQuality>,
+    entropy: &mut impl RouteEntropy,
+) -> Option<usize> {
+    let dids = eligible.iter().map(|(_, did)| *did).collect::<Vec<_>>();
+    let selected = pick_weighted_index(&dids, quality_by_did, entropy)?;
+    eligible.into_iter().nth(selected).map(|(index, _)| index)
 }
 
 fn pick_weighted_index(

@@ -19,6 +19,8 @@ use crate::custom;
 use crate::extension;
 use crate::forms::text_input;
 use crate::forms::textarea;
+use crate::generation::GenerationClock;
+use crate::generation::GenerationToken;
 use crate::node::DemoNode;
 use crate::onion;
 use crate::proof;
@@ -29,6 +31,7 @@ const ONION_REQUEST_TIMEOUT: Duration = Duration::from_secs(35);
 struct OnionProxyBackend {
     bridge: Option<wasm_bindgen::JsValue>,
     node: Option<DemoNode>,
+    token: GenerationToken,
 }
 
 struct OnionRequestOutputs {
@@ -37,6 +40,7 @@ struct OnionRequestOutputs {
     response_body: UseStateHandle<String>,
     route_result: UseStateHandle<String>,
     status: UseStateHandle<String>,
+    token: GenerationToken,
 }
 
 pub(crate) struct OnionProxyState<'a> {
@@ -55,10 +59,16 @@ pub(crate) struct OnionProxyState<'a> {
 pub(crate) fn onion_proxy_panel(
     state: OnionProxyState<'_>,
     node_ref: Rc<RefCell<Option<DemoNode>>>,
+    generation: GenerationClock,
     status: UseStateHandle<String>,
 ) -> Html {
-    let on_route = onion_route_callback(&state, node_ref.clone(), status.clone());
-    let on_request = onion_request_callback(&state, node_ref, status);
+    let on_route = onion_route_callback(
+        &state,
+        node_ref.clone(),
+        generation.clone(),
+        status.clone(),
+    );
+    let on_request = onion_request_callback(&state, node_ref, generation, status);
 
     html! {
         <section class="feature-panel" id="onion-proxy">
@@ -77,6 +87,7 @@ pub(crate) fn onion_proxy_panel(
 fn onion_route_callback(
     state: &OnionProxyState<'_>,
     node_ref: Rc<RefCell<Option<DemoNode>>>,
+    generation: GenerationClock,
     status: UseStateHandle<String>,
 ) -> Callback<MouseEvent> {
     let url = state.url.clone();
@@ -97,8 +108,8 @@ fn onion_route_callback(
             url: (*url).trim().to_string(),
             options,
         };
-        let bridge = extension::extension_node_bridge();
-        let node = node_ref.borrow().clone();
+        let backend = OnionProxyBackend::current(&node_ref, &generation);
+        let token = backend.token.clone();
         let route_result = route_result.clone();
         let response_status = response_status.clone();
         let status = status.clone();
@@ -106,7 +117,10 @@ fn onion_route_callback(
         route_result.set("Building route...".to_string());
         response_status.set("routing".to_string());
         wasm_bindgen_futures::spawn_local(async move {
-            let result = build_onion_route(bridge, node, request).await;
+            let result = build_onion_route(backend, request).await;
+            if !token.is_current() {
+                return;
+            }
             match result {
                 Ok(route) => {
                     let hop_count = route.hops.len();
@@ -125,14 +139,13 @@ fn onion_route_callback(
 }
 
 async fn build_onion_route(
-    bridge: Option<wasm_bindgen::JsValue>,
-    node: Option<DemoNode>,
+    backend: OnionProxyBackend,
     request: onion::OnionProxyRouteRequest,
 ) -> Result<onion::OnionProxyRoute, String> {
     operation_timeout("onion route build", ONION_ROUTE_TIMEOUT, async move {
-        if let Some(bridge) = bridge {
+        if let Some(bridge) = backend.bridge {
             extension::extension_onion_proxy_route(&bridge, request).await
-        } else if let Some(node) = node {
+        } else if let Some(node) = backend.node {
             onion::route(&node.provider, request).await
         } else {
             Err("start the node first".to_string())
@@ -144,6 +157,7 @@ async fn build_onion_route(
 fn onion_request_callback(
     state: &OnionProxyState<'_>,
     node_ref: Rc<RefCell<Option<DemoNode>>>,
+    generation: GenerationClock,
     status: UseStateHandle<String>,
 ) -> Callback<MouseEvent> {
     let url = state.url.clone();
@@ -171,10 +185,8 @@ fn onion_request_callback(
                 return;
             }
         };
-        let backend = OnionProxyBackend {
-            bridge: extension::extension_node_bridge(),
-            node: node_ref.borrow().clone(),
-        };
+        let backend = OnionProxyBackend::current(&node_ref, &generation);
+        let token = backend.token.clone();
         prepare_onion_request_outputs(
             &status,
             &response_status,
@@ -191,9 +203,20 @@ fn onion_request_callback(
                 response_body: response_body.clone(),
                 route_result: route_result.clone(),
                 status: status.clone(),
+                token,
             },
         );
     })
+}
+
+impl OnionProxyBackend {
+    fn current(node_ref: &Rc<RefCell<Option<DemoNode>>>, generation: &GenerationClock) -> Self {
+        Self {
+            bridge: extension::extension_node_bridge(),
+            node: node_ref.borrow().clone(),
+            token: generation.token(),
+        }
+    }
 }
 
 fn onion_http_request(
@@ -236,6 +259,9 @@ fn spawn_onion_request(
 ) {
     wasm_bindgen_futures::spawn_local(async move {
         let result = send_onion_request(backend, request).await;
+        if !outputs.token.is_current() {
+            return;
+        }
         match result {
             Ok(response) => {
                 outputs.response_status.set(response.status.to_string());

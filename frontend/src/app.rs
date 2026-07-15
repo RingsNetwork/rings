@@ -621,6 +621,7 @@ fn render_onion_panel(node: &NodeState, onion: &OnionState) -> Html {
             response_body: &onion.response_body,
         },
         node.node_ref.clone(),
+        node.generation.clone(),
         node.status.clone(),
     )
 }

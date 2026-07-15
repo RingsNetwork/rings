@@ -170,12 +170,9 @@ async fn provider_exposes_sent_and_received_peer_measurements() {
     assert!(provider_measurement.evidence.sent >= 1);
 
     let rpc_value = provider
-        .request(
-            Method::PeerMeasurement,
-            PeerMeasurementRequest {
-                did: p2.did().to_string(),
-            },
-        )
+        .request(Method::PeerMeasurement, PeerMeasurementRequest {
+            did: p2.did().to_string(),
+        })
         .await
         .unwrap();
     let rpc_measurement: PeerMeasurementResponse = serde_json::from_value(rpc_value).unwrap();

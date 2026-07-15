@@ -63,12 +63,9 @@ fn online_node_at(
     heartbeat_at_ms: u128,
     expires_at_ms: u128,
 ) -> CoreResult<OnlineNodeDescriptor> {
-    online_node_at_with_capabilities(
-        session_sk,
-        heartbeat_at_ms,
-        expires_at_ms,
-        vec![ONION_RELAY_CAPABILITY.to_string()],
-    )
+    online_node_at_with_capabilities(session_sk, heartbeat_at_ms, expires_at_ms, vec![
+        ONION_RELAY_CAPABILITY.to_string(),
+    ])
 }
 
 fn online_node_at_with_capabilities(
@@ -233,6 +230,32 @@ fn route_builder_rejects_nodes_without_relay_capability() -> Result<()> {
 }
 
 #[test]
+fn route_builder_reports_no_live_exit_before_first_hop_filter() -> Result<()> {
+    let request = route_request("web", 1, false)?;
+    let candidates = OnionRouteCandidates {
+        relays: Vec::new(),
+        exits: Vec::new(),
+    };
+    let mut entropy = FixedEntropy::new([0]);
+
+    let result = select_onion_route_from_candidates_with_first_hop(
+        &request,
+        candidates,
+        Vec::new(),
+        &mut entropy,
+        |_| false,
+    );
+
+    assert!(matches!(
+        result,
+        Err(Error::OnionRouteError(OnionRouteError::NoLiveExit {
+            service
+        })) if service == "web"
+    ));
+    Ok(())
+}
+
+#[test]
 fn route_builder_samples_relays_by_quality_weight() -> Result<()> {
     let local = node_key().map_err(Error::CoreError)?.account_did();
     let degraded = node_key().map_err(Error::CoreError)?;
@@ -287,5 +310,94 @@ fn route_builder_entropy_can_select_second_unknown_relay() -> Result<()> {
     let route = select_onion_route_from_candidates(&request, candidates, Vec::new(), &mut entropy)?;
 
     assert_eq!(route.hops().first().copied(), Some(second_sorted));
+    Ok(())
+}
+
+#[test]
+fn route_builder_first_hop_filter_preserves_remote_later_relays() -> Result<()> {
+    let direct = node_key().map_err(Error::CoreError)?;
+    let remote = node_key().map_err(Error::CoreError)?;
+    let exit = signed_exit_at(20, 100)?;
+    let direct_did = direct.account_did();
+    let remote_did = remote.account_did();
+    let request = route_request("web", 3, false)?;
+    let candidates = OnionRouteCandidates {
+        relays: vec![
+            OnionRouteHop::new(remote_did, remote.session_public_key()),
+            OnionRouteHop::new(direct_did, direct.session_public_key()),
+        ],
+        exits: vec![exit],
+    };
+    let mut entropy = FixedEntropy::new([0, 0, 0]);
+
+    let route = select_onion_route_from_candidates_with_first_hop(
+        &request,
+        candidates,
+        Vec::new(),
+        &mut entropy,
+        |did| did == direct_did,
+    )?;
+
+    assert_eq!(route.hops().len(), 3);
+    assert_eq!(route.hops().first().copied(), Some(direct_did));
+    assert!(route.hops().contains(&remote_did));
+    Ok(())
+}
+
+#[test]
+fn route_builder_rejects_route_without_permitted_first_hop() -> Result<()> {
+    let permitted = node_key().map_err(Error::CoreError)?.account_did();
+    let remote = node_key().map_err(Error::CoreError)?;
+    let exit = signed_exit_at(20, 100)?;
+    let request = route_request("web", 2, false)?;
+    let candidates = OnionRouteCandidates {
+        relays: vec![OnionRouteHop::new(
+            remote.account_did(),
+            remote.session_public_key(),
+        )],
+        exits: vec![exit],
+    };
+    let mut entropy = FixedEntropy::new([0, 0]);
+
+    let result = select_onion_route_from_candidates_with_first_hop(
+        &request,
+        candidates,
+        Vec::new(),
+        &mut entropy,
+        |did| did == permitted,
+    );
+
+    assert!(matches!(
+        result,
+        Err(Error::OnionRouteError(OnionRouteError::NoPermittedFirstHop))
+    ));
+    Ok(())
+}
+
+#[test]
+fn route_builder_shortens_to_permitted_exit_when_no_first_relay_is_allowed() -> Result<()> {
+    let remote = node_key().map_err(Error::CoreError)?;
+    let exit = signed_exit_at(20, 100)?;
+    let exit_did = exit.did;
+    let request = route_request("web", 3, true)?;
+    let candidates = OnionRouteCandidates {
+        relays: vec![OnionRouteHop::new(
+            remote.account_did(),
+            remote.session_public_key(),
+        )],
+        exits: vec![exit],
+    };
+    let mut entropy = FixedEntropy::new([0, 0]);
+
+    let route = select_onion_route_from_candidates_with_first_hop(
+        &request,
+        candidates,
+        Vec::new(),
+        &mut entropy,
+        |did| did == exit_did,
+    )?;
+
+    assert_eq!(route.hops().len(), 1);
+    assert_eq!(route.hops().first().copied(), Some(exit_did));
     Ok(())
 }

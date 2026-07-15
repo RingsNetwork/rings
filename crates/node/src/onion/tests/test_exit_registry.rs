@@ -59,25 +59,41 @@ fn signed_exit_for_session_at(
 
 #[test]
 fn default_exit_services_include_native_tcp_and_https() {
-    assert_eq!(
-        default_onion_exit_services(),
-        vec![OnionExitService::tcp(), OnionExitService::https()]
-    );
+    assert_eq!(default_onion_exit_services(), vec![
+        OnionExitService::tcp(),
+        OnionExitService::https()
+    ]);
     assert_eq!(https_onion_exit_services(), vec![OnionExitService::https()]);
 }
 
 #[test]
-fn reserved_service_name_requires_reserved_transport_for_routes() {
+fn reserved_service_name_accepts_tcp_and_legacy_https_for_routes() {
     assert!(OnionExitService::https().matches_route_service("https"));
     assert!(OnionExitService::new("https", OnionExitTransport::Tcp)
         .expect("valid service")
         .matches_route_service("https"));
-    assert!(!OnionExitService::new("https", OnionExitTransport::Https)
+    assert!(OnionExitService::new("https", OnionExitTransport::Https)
         .expect("valid service")
         .matches_route_service("https"));
     assert!(OnionExitService::new("custom", OnionExitTransport::Tcp)
         .expect("valid service")
         .matches_route_service("custom"));
+}
+
+#[test]
+fn legacy_https_descriptor_satisfies_tcp_proxy_transport_filter() -> Result<()> {
+    let session = SessionSk::new_with_seckey(&SecretKey::random()).map_err(Error::CoreError)?;
+    let descriptor = signed_exit_for_session_at(
+        &session,
+        OnionExitService::new("https", OnionExitTransport::Https)?,
+        20,
+        100,
+        "legacy",
+    )?;
+
+    assert!(descriptor.offers_service("https"));
+    assert!(descriptor.offers_service_transport("https", OnionExitTransport::Tcp));
+    Ok(())
 }
 
 #[test]
@@ -127,10 +143,9 @@ fn exit_policy_allow_list_controls_targets() -> Result<()> {
 
 #[test]
 fn exit_policy_wildcard_allows_all_targets_with_specific_denies() -> Result<()> {
-    let policy = OnionExitPolicy::from_target_strings(
-        vec!["*:*".to_string()],
-        vec!["api.example.com:443".to_string()],
-    )?;
+    let policy = OnionExitPolicy::from_target_strings(vec!["*:*".to_string()], vec![
+        "api.example.com:443".to_string(),
+    ])?;
     let google = OnionExitTarget::parse("google.com:443")?;
     let example = OnionExitTarget::parse("example.com:8443")?;
     let api = OnionExitTarget::parse("api.example.com:443")?;

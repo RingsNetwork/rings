@@ -55,7 +55,7 @@ pub mod tcp;
 pub use failure::OnionExitFailure;
 pub use failure::OnionRouteError;
 pub use route::select_onion_route;
-pub(crate) use route::select_onion_route_from_candidates;
+pub(crate) use route::select_onion_route_from_candidates_with_first_hop;
 pub use route::OnionRoute;
 pub(crate) use route::OnionRouteCandidates;
 pub use route::OnionRouteHop;
@@ -249,12 +249,23 @@ impl OnionExitService {
     /// Return whether this service satisfies a route request for `service`.
     ///
     /// Built-in service names reserve their transport class. Custom service names remain
-    /// application-defined and match by name. HTTPS is a reserved TCP-backed service.
+    /// application-defined and match by name. HTTPS is a reserved TCP-backed service, while the
+    /// legacy `https`/`Https` pair remains readable for older descriptors.
     pub fn matches_route_service(&self, service: &str) -> bool {
         match Self::reserved_transport(service) {
-            Some(transport) => self.matches(service, transport),
+            Some(transport) => {
+                self.matches(service, transport) || self.matches_legacy_reserved_transport(service)
+            }
             None => self.has_name(service),
         }
+    }
+
+    fn matches_legacy_reserved_transport(&self, service: &str) -> bool {
+        OnionServiceName::parse(service).is_ok_and(|name| {
+            name == OnionServiceName::https()
+                && self.name == name
+                && self.transport == OnionExitTransport::Https
+        })
     }
 
     /// Return the reserved transport for a built-in service name.
@@ -607,6 +618,8 @@ impl OnionExitDescriptor {
     /// Return whether this descriptor offers `service` over `transport`.
     pub fn offers_service_transport(&self, service: &str, transport: OnionExitTransport) -> bool {
         self.service.matches(service, transport)
+            || (transport == OnionExitTransport::Tcp
+                && self.service.matches_legacy_reserved_transport(service))
     }
 
     /// Verify the descriptor signature and DID/public-key binding.

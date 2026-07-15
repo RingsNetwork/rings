@@ -142,9 +142,7 @@ impl ProcessorBuilder {
 
     /// Add a custom periodic registration task.
     pub fn registration_task<T>(mut self, task: T) -> Self
-    where
-        T: RegistrationTask + 'static,
-    {
+    where T: RegistrationTask + 'static {
         self.registration_tasks.push(Arc::new(task));
         self
     }

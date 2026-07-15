@@ -3,7 +3,7 @@
 use rings_core::dht::Did;
 use rings_core::measure::PeerQuality;
 
-use super::select_onion_route_from_candidates;
+use super::select_onion_route_from_candidates_with_first_hop;
 use super::OnionExitDescriptor;
 use super::OnionExitTarget;
 use super::OnionRoute;
@@ -52,6 +52,15 @@ pub(crate) async fn build_onion_proxy_route(
     proxy: OnionProxyConfig,
     target: OnionProxyTarget,
 ) -> Result<OnionProxyRoute> {
+    build_onion_proxy_route_with_first_hop(reader, proxy, target, |_| true).await
+}
+
+pub(crate) async fn build_onion_proxy_route_with_first_hop(
+    reader: &impl OnionDirectoryReader,
+    proxy: OnionProxyConfig,
+    target: OnionProxyTarget,
+    first_hop_permitted: impl Fn(Did) -> bool,
+) -> Result<OnionProxyRoute> {
     let service_name = proxy.exit_service_name().clone();
     let service = service_name.as_str().to_string();
     let transport = proxy.exit_transport();
@@ -93,7 +102,8 @@ pub(crate) async fn build_onion_proxy_route(
         proxy.hop_count,
         proxy.allow_short_paths,
     );
-    let route = build_onion_route_from_exits(reader, request, policy_exits).await?;
+    let route =
+        build_onion_route_from_exits(reader, request, policy_exits, first_hop_permitted).await?;
 
     Ok(OnionProxyRoute {
         protocol: proxy.protocol,
@@ -113,13 +123,14 @@ async fn build_filtered_onion_route(
         .into_iter()
         .filter(exit_filter)
         .collect::<Vec<_>>();
-    build_onion_route_from_exits(reader, request, exits).await
+    build_onion_route_from_exits(reader, request, exits, |_| true).await
 }
 
 async fn build_onion_route_from_exits(
     reader: &impl OnionDirectoryReader,
     request: OnionRouteRequest,
     exits: Vec<OnionExitDescriptor>,
+    first_hop_permitted: impl Fn(Did) -> bool,
 ) -> Result<OnionRoute> {
     let online_nodes = reader.live_online_nodes().await?;
     let candidates = OnionRouteCandidates::from_validated_descriptors(
@@ -128,10 +139,11 @@ async fn build_onion_route_from_exits(
         online_nodes,
         exits,
     );
-    select_onion_route_from_candidates(
+    select_onion_route_from_candidates_with_first_hop(
         &request,
         candidates,
         reader.peer_qualities().await,
         &mut SystemRouteEntropy::new(),
+        first_hop_permitted,
     )
 }

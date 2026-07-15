@@ -52,6 +52,7 @@ use crate::onion::proxy::OnionProxyRoute;
 use crate::onion::proxy::OnionProxyTarget;
 use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitPolicy;
+use crate::onion::OnionRouteError;
 use crate::online::OnlineNodeDescriptor;
 use crate::processor::Processor;
 use crate::processor::ProcessorConfig;
@@ -104,7 +105,6 @@ enum BrowserOnionDirectorySource {
 struct BrowserOnionDirectoryReader {
     processor: Arc<Processor>,
     source: BrowserOnionDirectorySource,
-    direct_exit_only: bool,
 }
 
 impl BrowserOnionDirectoryReader {
@@ -112,7 +112,6 @@ impl BrowserOnionDirectoryReader {
         Self {
             processor,
             source: BrowserOnionDirectorySource::Local,
-            direct_exit_only: false,
         }
     }
 
@@ -120,15 +119,6 @@ impl BrowserOnionDirectoryReader {
         Self {
             processor,
             source: BrowserOnionDirectorySource::Remote { endpoint_url },
-            direct_exit_only: false,
-        }
-    }
-
-    fn with_direct_exit_only(&self) -> Self {
-        Self {
-            processor: self.processor.clone(),
-            source: self.source.clone(),
-            direct_exit_only: true,
         }
     }
 
@@ -192,25 +182,11 @@ impl OnionDirectoryReader for BrowserOnionDirectoryReader {
     }
 
     async fn live_online_nodes(&self) -> NodeResult<Vec<OnlineNodeDescriptor>> {
-        let direct_peers = self.direct_peer_dids();
-        Ok(self
-            .read_online_nodes()
-            .await?
-            .into_iter()
-            .filter(|descriptor| direct_peers.contains(&descriptor.did))
-            .collect())
+        self.read_online_nodes().await
     }
 
     async fn live_onion_exits(&self, service: &str) -> NodeResult<Vec<OnionExitDescriptor>> {
-        let exits = self.read_onion_exits(service).await?;
-        if !self.direct_exit_only {
-            return Ok(exits);
-        }
-        let direct_peers = self.direct_peer_dids();
-        Ok(exits
-            .into_iter()
-            .filter(|descriptor| direct_peers.contains(&descriptor.did))
-            .collect())
+        self.read_onion_exits(service).await
     }
 
     async fn peer_qualities(&self) -> Vec<(Did, PeerQuality)> {
@@ -229,17 +205,16 @@ async fn build_browser_route_from_reader(
     config: OnionProxyConfig,
     target: OnionProxyTarget,
 ) -> NodeResult<OnionProxyRoute> {
-    let route = directory::build_onion_proxy_route(reader, config.clone(), target.clone()).await?;
+    let direct_peers = reader.direct_peer_dids();
+    let route =
+        directory::build_onion_proxy_route_with_first_hop(reader, config, target, move |did| {
+            direct_peers.contains(&did)
+        })
+        .await?;
     if reader.route_first_hop_is_direct(&route)? {
         return Ok(route);
     }
-
-    let direct_exit_reader = reader.with_direct_exit_only();
-    let route = directory::build_onion_proxy_route(&direct_exit_reader, config, target).await?;
-    if direct_exit_reader.route_first_hop_is_direct(&route)? {
-        return Ok(route);
-    }
-    Err(Error::InvalidData)
+    Err(Error::OnionRouteError(OnionRouteError::NoPermittedFirstHop))
 }
 
 async fn build_browser_onion_proxy_route(

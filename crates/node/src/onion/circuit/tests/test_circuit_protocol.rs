@@ -421,20 +421,17 @@ fn expired_exit_layer_emits_no_exit_effect() {
     let state = OnionCircuitState::default();
     let circuit_id = OnionCircuitId::new([8; 16]);
 
-    let transition = reducer.apply(
-        &state,
-        OnionCircuitInput::ForwardReady {
-            from: client.account_did(),
-            received_at_ms: 100,
-            circuit_id,
-            layer: OnionForwardLayer::Exit {
-                client: OnionClientReturn::new(client.session_public_key()),
-                expires_at_ms: 100,
-                forward_nonce: OnionForwardNonce::new([9; 16]),
-                payload: test_payload("expired"),
-            },
+    let transition = reducer.apply(&state, OnionCircuitInput::ForwardReady {
+        from: client.account_did(),
+        received_at_ms: 100,
+        circuit_id,
+        layer: OnionForwardLayer::Exit {
+            client: OnionClientReturn::new(client.session_public_key()),
+            expires_at_ms: 100,
+            forward_nonce: OnionForwardNonce::new([9; 16]),
+            payload: test_payload("expired"),
         },
-    );
+    });
 
     assert_eq!(transition.state, state);
     assert!(transition.effects.is_empty());

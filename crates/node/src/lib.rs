@@ -1,5 +1,14 @@
 #![doc = include_str!("../README.md")]
 #![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::unwrap_used
+    )
+)]
 pub mod consts;
 mod descriptor;
 pub mod error;
