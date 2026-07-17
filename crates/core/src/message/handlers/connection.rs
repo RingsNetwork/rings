@@ -165,10 +165,8 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
                     self.connect_dht_peer(msg.did).await?;
                 }
             }
-            FindSuccessorReportHandler::Connect => {
-                if msg.reports_remote_successor(self.dht.did) {
-                    self.connect_dht_peer(msg.did).await?;
-                }
+            FindSuccessorReportHandler::Connect if msg.reports_remote_successor(self.dht.did) => {
+                self.connect_dht_peer(msg.did).await?;
             }
             _ => {}
         }

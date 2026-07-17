@@ -29,7 +29,7 @@ permissions:
   contents: read
 
 env:
-  RUST_TOOLCHAIN: 1.94.0
+  RUST_TOOLCHAIN: 1.97.0
 
 jobs:
   build_macos:

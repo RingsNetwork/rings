@@ -28,6 +28,72 @@ pub struct R1CS<F: PrimeField> {
     pub constraints: Vec<Constraint<F>>,
 }
 
+impl<F: PrimeField> R1CS<F> {
+    /// Validate the R1CS shape and every constraint variable reference.
+    pub fn validate(&self) -> Result<()> {
+        let Some(total_from_parts) = self.num_inputs.checked_add(self.num_aux) else {
+            return Err(Error::InvalidR1CSShape {
+                num_inputs: self.num_inputs,
+                num_aux: self.num_aux,
+                num_variables: self.num_variables,
+            });
+        };
+        if self.num_inputs == 0 || self.num_variables == 0 || total_from_parts != self.num_variables
+        {
+            return Err(Error::InvalidR1CSShape {
+                num_inputs: self.num_inputs,
+                num_aux: self.num_aux,
+                num_variables: self.num_variables,
+            });
+        }
+        self.public_io_value_count()?;
+        for constraint in &self.constraints {
+            self.validate_constraint_part(&constraint.0)?;
+            self.validate_constraint_part(&constraint.1)?;
+            self.validate_constraint_part(&constraint.2)?;
+        }
+        Ok(())
+    }
+
+    /// Validate that a witness exactly matches the R1CS variable count.
+    pub fn validate_witness_len(&self, actual: usize) -> Result<()> {
+        self.validate()?;
+        if actual != self.num_variables {
+            return Err(Error::InvalidWitnessLength {
+                expected: self.num_variables,
+                actual,
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn public_io_value_count(&self) -> Result<usize> {
+        let Some(public_values) = self.num_inputs.checked_sub(1) else {
+            return Err(Error::InvalidR1CSPublicIoShape {
+                num_inputs: self.num_inputs,
+            });
+        };
+        if public_values % 2 != 0 {
+            return Err(Error::InvalidR1CSPublicIoShape {
+                num_inputs: self.num_inputs,
+            });
+        }
+        Ok(public_values / 2)
+    }
+
+    fn validate_constraint_part(&self, part: &[(usize, F)]) -> Result<()> {
+        for (index, _) in part {
+            if *index >= self.num_variables {
+                return Err(Error::InvalidR1CSVariableIndex {
+                    index: *index,
+                    num_variables: self.num_variables,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Path of a r1cs
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Path {
@@ -135,5 +201,52 @@ pub async fn load_circom_witness_calculator(path: Path) -> Result<WitnessCalcula
     match path {
         Path::Local(p) => load_circom_witness_calculator_local(p),
         Path::Remote(url) => load_circom_witness_calculator_remote(&url).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pasta_curves::Fp;
+
+    use super::*;
+
+    fn valid_r1cs() -> R1CS<Fp> {
+        R1CS {
+            num_inputs: 3,
+            num_aux: 1,
+            num_variables: 4,
+            constraints: vec![(vec![(1, Fp::from(1))], vec![], vec![(3, Fp::from(1))])],
+        }
+    }
+
+    #[test]
+    fn r1cs_validate_accepts_declared_variable_range() -> Result<()> {
+        valid_r1cs().validate()
+    }
+
+    #[test]
+    fn r1cs_validate_rejects_constraint_index_outside_variable_range() {
+        let mut r1cs = valid_r1cs();
+        r1cs.constraints = vec![(vec![(4, Fp::from(1))], vec![], vec![])];
+
+        assert!(matches!(
+            r1cs.validate(),
+            Err(Error::InvalidR1CSVariableIndex {
+                index: 4,
+                num_variables: 4
+            })
+        ));
+    }
+
+    #[test]
+    fn r1cs_validate_rejects_public_io_that_cannot_split_evenly() {
+        let mut r1cs = valid_r1cs();
+        r1cs.num_inputs = 4;
+        r1cs.num_aux = 0;
+
+        assert!(matches!(
+            r1cs.validate(),
+            Err(Error::InvalidR1CSPublicIoShape { num_inputs: 4 })
+        ));
     }
 }

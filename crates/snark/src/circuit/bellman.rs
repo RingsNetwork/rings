@@ -13,8 +13,7 @@ use crate::prelude::bellman::Variable;
 /// <https://github.com/fluidex/plonkit/blob/master/src/circom_circuit.rs>
 /// aux bias and input map are removed
 impl<E: Engine> bellman::Circuit<E> for Circuit<E::Fr>
-where
-    E::Fr: ff::PrimeField,
+where E::Fr: ff::PrimeField
 {
     //noinspection RsBorrowChecker
     fn synthesize<CS: ConstraintSystem<E>>(self, cs: &mut CS) -> Result<(), SynthesisError> {
@@ -35,32 +34,52 @@ where
             cs.alloc(|| format!("aux {i}"), || Ok(f))?;
         }
 
-        let make_index = |index| {
-            if index < self.r1cs.num_inputs {
-                Index::Input(index)
-            } else {
-                Index::Aux(index - self.r1cs.num_inputs)
-            }
-        };
-        let make_lc = |lc_data: Vec<(usize, E::Fr)>| {
-            lc_data.iter().fold(
-                LinearCombination::<E>::zero(),
-                |lc: LinearCombination<E>, (index, coeff)| {
-                    lc + (*coeff, Variable::new_unchecked(make_index(*index)))
-                },
-            )
-        };
         for (i, constraint) in self.r1cs.constraints.iter().enumerate() {
             // 0 * LC = 0 must be ignored
             if !((constraint.0.is_empty() || constraint.1.is_empty()) && constraint.2.is_empty()) {
+                let a = bellman_linear_combination::<E>(&self.r1cs, &constraint.0)?;
+                let b = bellman_linear_combination::<E>(&self.r1cs, &constraint.1)?;
+                let c = bellman_linear_combination::<E>(&self.r1cs, &constraint.2)?;
                 cs.enforce(
                     || format!("{i}"),
-                    |_| make_lc(constraint.0.clone()),
-                    |_| make_lc(constraint.1.clone()),
-                    |_| make_lc(constraint.2.clone()),
+                    |_| a.clone(),
+                    |_| b.clone(),
+                    |_| c.clone(),
                 );
             }
         }
         Ok(())
+    }
+}
+
+fn bellman_linear_combination<E: Engine>(
+    r1cs: &crate::r1cs::R1CS<E::Fr>,
+    lc_data: &[(usize, E::Fr)],
+) -> Result<LinearCombination<E>, SynthesisError>
+where
+    E::Fr: ff::PrimeField,
+{
+    let mut lc = LinearCombination::<E>::zero();
+    for (index, coeff) in lc_data {
+        let variable_index = checked_bellman_index(r1cs, *index)?;
+        // Pre: checked_bellman_index proves that the wire index belongs to the
+        // R1CS variable range. bellman exposes only new_unchecked for this type.
+        let variable = Variable::new_unchecked(variable_index);
+        lc = lc + (*coeff, variable);
+    }
+    Ok(lc)
+}
+
+fn checked_bellman_index<F: ff::PrimeField>(
+    r1cs: &crate::r1cs::R1CS<F>,
+    index: usize,
+) -> Result<Index, SynthesisError> {
+    if index >= r1cs.num_variables {
+        return Err(SynthesisError::AssignmentMissing);
+    }
+    if index < r1cs.num_inputs {
+        Ok(Index::Input(index))
+    } else {
+        Ok(Index::Aux(index - r1cs.num_inputs))
     }
 }

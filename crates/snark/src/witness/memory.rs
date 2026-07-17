@@ -88,7 +88,8 @@ impl SafeMemory {
     /// Allocates a U32 in memory
     pub fn alloc_u32(&mut self, store: &impl AsStoreRef) -> Result<u32> {
         let p = self.free_pos(store)?;
-        self.set_free_pos(store, p + 8)?;
+        let next = checked_u32_add(p, 8)?;
+        self.set_free_pos(store, next)?;
         Ok(p)
     }
 
@@ -122,7 +123,13 @@ impl SafeMemory {
     /// Allocates `self.n32 * 4 + 8` bytes in the memory
     pub fn alloc_fr(&mut self, store: &impl AsStoreRef) -> Result<u32> {
         let p = self.free_pos(store)?;
-        self.set_free_pos(store, p + self.n32 as u32 * 4 + 8)?;
+        let n32 = u32::try_from(self.n32).map_err(|_| memory_offset_overflow_error(p, self.n32))?;
+        let field_width = n32
+            .checked_mul(4)
+            .and_then(|width| width.checked_add(8))
+            .ok_or_else(|| memory_offset_overflow_error(p, self.n32))?;
+        let next = checked_u32_add(p, field_width)?;
+        self.set_free_pos(store, next)?;
         Ok(p)
     }
 
@@ -150,7 +157,8 @@ impl SafeMemory {
             .ok_or_else(|| memory_bounds_error(ptr, 8, view.len()))?;
 
         if tag & 0x80 != 0 {
-            let num = self.read_big(store, ptr + 8)?;
+            let value_offset = checked_offset(ptr, 8)?;
+            let num = self.read_big(store, value_offset)?;
             Ok(from_vec_u32(u256_to_vec_u32(num)))
         } else {
             Ok(F::from(u64::from(self.read_u32(store, ptr)?)))
@@ -167,14 +175,14 @@ impl SafeMemory {
         }
         let num = u32::from_le_bytes(low);
         self.write_u32(store, ptr, num)?;
-        self.write_u32(store, ptr + 4, 0)?;
+        self.write_u32(store, checked_offset(ptr, 4)?, 0)?;
         Ok(())
     }
 
     fn write_long_normal(&mut self, store: &impl AsStoreRef, ptr: usize, fr: U256) -> Result<()> {
         self.write_u32(store, ptr, 0)?;
-        self.write_u32(store, ptr + 4, i32::MIN as u32)?; // 0x80000000
-        self.write_big(store, ptr + 8, fr)?;
+        self.write_u32(store, checked_offset(ptr, 4)?, i32::MIN as u32)?; // 0x80000000
+        self.write_big(store, checked_offset(ptr, 8)?, fr)?;
         Ok(())
     }
 
@@ -213,6 +221,28 @@ fn checked_range(len: usize, ptr: usize, width: usize) -> Result<std::ops::Range
         return Err(memory_bounds_error(ptr, width, len));
     }
     Ok(ptr..end)
+}
+
+fn checked_offset(ptr: usize, offset: usize) -> Result<usize> {
+    ptr.checked_add(offset).ok_or_else(|| {
+        Error::WitnessWasmMemoryError(format!(
+            "memory offset overflow: ptr={ptr}, offset={offset}"
+        ))
+    })
+}
+
+fn checked_u32_add(ptr: u32, width: u32) -> Result<u32> {
+    ptr.checked_add(width).ok_or_else(|| {
+        Error::WitnessWasmMemoryError(format!(
+            "memory allocation overflow: ptr={ptr}, width={width}"
+        ))
+    })
+}
+
+fn memory_offset_overflow_error(ptr: u32, width: usize) -> Error {
+    Error::WitnessWasmMemoryError(format!(
+        "memory allocation width overflow: ptr={ptr}, width={width}"
+    ))
 }
 
 fn memory_bounds_error(ptr: usize, width: usize, len: usize) -> Error {

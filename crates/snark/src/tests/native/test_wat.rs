@@ -39,7 +39,12 @@ fn wat_module_missing_required_export_returns_typed_error(
     )?;
     let store = WitnessCalculator::new_store();
     let module = wasmer::Module::from_binary(&store, &wasm)?;
-    let error = WitnessCalculator::from_module(module, store).unwrap_err();
+    let error = match WitnessCalculator::from_module(module, store) {
+        Ok(_) => {
+            return Err("expected missing getFrLen export to fail".into());
+        }
+        Err(error) => error,
+    };
 
     assert!(
         matches!(&error, Error::WitnessMissingExport(name) if name == "getFrLen"),
@@ -61,7 +66,12 @@ fn wat_module_unsupported_circom_version_returns_typed_error(
     )?;
     let store = WitnessCalculator::new_store();
     let module = wasmer::Module::from_binary(&store, &wasm)?;
-    let error = WitnessCalculator::from_module(module, store).unwrap_err();
+    let error = match WitnessCalculator::from_module(module, store) {
+        Ok(_) => {
+            return Err("expected unsupported Circom version to fail".into());
+        }
+        Err(error) => error,
+    };
 
     assert!(
         matches!(error, Error::WitnessUnsupportedCircomVersion(3)),
@@ -71,8 +81,14 @@ fn wat_module_unsupported_circom_version_returns_typed_error(
 }
 
 #[test]
-fn u256_from_vec_u32_rejects_invalid_word_count() {
-    let error = u256_from_vec_u32(&[1, 2, 3]).unwrap_err();
+fn u256_from_vec_u32_rejects_invalid_word_count(
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let error = match u256_from_vec_u32(&[1, 2, 3]) {
+        Ok(_) => {
+            return Err("expected invalid U256 word count to fail".into());
+        }
+        Err(error) => error,
+    };
 
     assert!(
         matches!(error, Error::WitnessInvalidU256WordLength {
@@ -81,4 +97,5 @@ fn u256_from_vec_u32_rejects_invalid_word_count() {
         }),
         "{error:?}"
     );
+    Ok(())
 }

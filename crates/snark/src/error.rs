@@ -60,6 +60,40 @@ pub enum Error {
     /// Invalid data when reading header
     #[error("Invalid data: {0}")]
     InvalidDataWhenReadingR1CS(String),
+    /// R1CS variable counts do not describe one constant, public wires, and auxiliary wires.
+    #[error(
+        "Invalid R1CS shape: num_inputs={num_inputs}, num_aux={num_aux}, num_variables={num_variables}"
+    )]
+    InvalidR1CSShape {
+        /// Number of public input wires, including the constant-one wire.
+        num_inputs: usize,
+        /// Number of auxiliary witness wires.
+        num_aux: usize,
+        /// Number of total wires declared by the R1CS.
+        num_variables: usize,
+    },
+    /// R1CS public inputs and outputs cannot be split into equal recursive state vectors.
+    #[error("Invalid R1CS public IO shape: num_inputs={num_inputs}")]
+    InvalidR1CSPublicIoShape {
+        /// Number of public input wires, including the constant-one wire.
+        num_inputs: usize,
+    },
+    /// A constraint references a wire outside the declared R1CS variable range.
+    #[error("Invalid R1CS variable index: index={index}, num_variables={num_variables}")]
+    InvalidR1CSVariableIndex {
+        /// Referenced wire index.
+        index: usize,
+        /// Number of total wires declared by the R1CS.
+        num_variables: usize,
+    },
+    /// Witness length does not match the declared R1CS variable count.
+    #[error("Invalid witness length: expected={expected}, actual={actual}")]
+    InvalidWitnessLength {
+        /// Expected witness length from the R1CS variable count.
+        expected: usize,
+        /// Actual witness length.
+        actual: usize,
+    },
     /// Io Error
     #[error("IO error: {0}")]
     IOError(#[from] std::io::Error),

@@ -74,9 +74,7 @@ pub fn build_version() -> String {
 /// Expand path with "~" to absolute path.
 #[cfg(feature = "node")]
 pub fn expand_home<P>(path: P) -> Result<std::path::PathBuf, Error>
-where
-    P: AsRef<std::path::Path>,
-{
+where P: AsRef<std::path::Path> {
     let Ok(stripped) = path.as_ref().strip_prefix("~") else {
         return Ok(path.as_ref().to_path_buf());
     };
@@ -93,9 +91,7 @@ where
 /// Create parent directory of a path if not exists.
 #[cfg(feature = "node")]
 pub fn ensure_parent_dir<P>(path: P) -> Result<(), Error>
-where
-    P: AsRef<std::path::Path>,
-{
+where P: AsRef<std::path::Path> {
     let path = expand_home(path)?;
     let parent = path.parent().ok_or(Error::ParentDirError)?;
     if !parent.is_dir() {
@@ -120,9 +116,7 @@ pub mod loader {
     pub trait ResourceLoader {
         /// Load config from local file or remote url.
         async fn load(source: &str) -> anyhow::Result<Self>
-        where
-            Self: Sized + DeserializeOwned,
-        {
+        where Self: Sized + DeserializeOwned {
             let url = Url::parse(source).map_err(|e| anyhow::anyhow!("{}", e))?;
 
             if let Ok(path) = url.to_file_path() {

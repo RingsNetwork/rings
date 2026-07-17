@@ -25,7 +25,7 @@ fn test_map_array_to_input() {
     let js_code_body = "return [['foo', [BigInt(2), BigInt(3)]], ['bar', [BigInt(4)]]]";
     let func = js_sys::Function::new_no_args(js_code_body);
     let array = js_sys::Array::from(&func.call0(&JsValue::NULL).unwrap());
-    let _input = Input::from_array(array, SupportedPrimeField::Pallas);
+    assert!(Input::from_array(array, SupportedPrimeField::Pallas).is_ok());
 }
 
 #[wasm_bindgen_test]

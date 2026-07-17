@@ -346,7 +346,7 @@ fn route_builder_samples_relays_by_quality_weight() -> Result<()> {
         ],
         exits: vec![exit],
     };
-    let mut entropy = FixedEntropy::new([0, 1]);
+    let mut entropy = FixedEntropy::new([1, 0]);
 
     let route = select_onion_route_from_candidates(
         &request,
@@ -382,7 +382,7 @@ fn route_builder_entropy_can_select_second_unknown_relay() -> Result<()> {
         relays: relay_hops,
         exits: vec![exit],
     };
-    let mut entropy = FixedEntropy::new([0, 4]);
+    let mut entropy = FixedEntropy::new([4, 0]);
 
     let route = select_onion_route_from_candidates(&request, candidates, Vec::new(), &mut entropy)?;
 

@@ -1,4 +1,3 @@
-
 //! Processor of rings-node rpc server.
 
 use std::str::FromStr;

@@ -354,12 +354,14 @@ pub fn load_r1cs_from_bin<Fr: PrimeField, R: Read + Seek>(reader: R) -> Result<R
     let num_aux = num_variables.checked_sub(num_inputs).ok_or_else(|| {
         Error::InvalidDataWhenReadingR1CS("R1CS input count exceeds variable count".to_string())
     })?;
-    Ok(R1CS {
+    let r1cs = R1CS {
         num_aux,
         num_inputs,
         num_variables,
         constraints: file.constraints,
-    })
+    };
+    r1cs.validate()?;
+    Ok(r1cs)
 }
 
 /// load r1cs file by filename with autodetect encoding (bin or json)
@@ -417,12 +419,14 @@ pub fn load_r1cs_from_json<Fr: PrimeField, R: Read>(reader: R) -> Result<R1CS<Fr
         ));
     }
 
-    Ok(R1CS {
+    let r1cs = R1CS {
         num_inputs,
         num_aux,
         num_variables: circuit_json.num_variables,
         constraints,
-    })
+    };
+    r1cs.validate()?;
+    Ok(r1cs)
 }
 
 fn constraint_part(

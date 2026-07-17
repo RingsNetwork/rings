@@ -1,4 +1,3 @@
-
 //! This module implemented the `Measure` trait for swarm.
 
 use std::sync::Arc;

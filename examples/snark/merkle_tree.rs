@@ -52,7 +52,7 @@ pub async fn merkle_tree_path_proof() -> ExampleResult<()> {
     let start = Instant::now();
 
     let circuit_0 = circuit_generator.gen_circuit(input_0.clone(), true)?;
-    let first_input = circuit_0.get_public_inputs();
+    let first_input = circuit_0.get_public_inputs()?;
 
     let recursive_circuits = circuit_generator.gen_recursive_circuit(
         input_0.clone(),

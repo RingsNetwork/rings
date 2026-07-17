@@ -264,25 +264,21 @@ pub fn bigint_to_field(v: js_sys::BigInt, field: SupportedPrimeField) -> Result<
 #[wasm_bindgen]
 impl Input {
     /// Convert [["foo", [BigInt(2), BigInt(3)]], ["bar", [BigInt(4), BigInt(5)]]] to Input with given field
-    pub fn from_array(input: js_sys::Array, field: SupportedPrimeField) -> Input {
-        let data: Vec<(String, Vec<Field>)> = input
+    pub fn from_array(input: js_sys::Array, field: SupportedPrimeField) -> Result<Input> {
+        let data = input
             .into_iter()
             .map(|s| {
                 let last = js_sys::Array::from(&s);
-                let p = last
-                    .get(0)
-                    .as_string()
-                    .expect("first argument should be string like");
-                let v: Vec<Field> = js_sys::Array::from(&last.get(1))
+                let p = last.get(0).as_string().ok_or_else(|| {
+                    Error::JsError("SNARK input name must be a string".to_string())
+                })?;
+                let v = js_sys::Array::from(&last.get(1))
                     .into_iter()
-                    .map(|p| {
-                        bigint_to_field(p.into(), field.clone())
-                            .expect("failed to cover bigint to field")
-                    })
-                    .collect();
-                (p, v)
+                    .map(|p| bigint_to_field(p.into(), field.clone()))
+                    .collect::<Result<Vec<_>>>()?;
+                Ok((p, v))
             })
-            .collect();
-        Input(data)
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Input(data))
     }
 }
