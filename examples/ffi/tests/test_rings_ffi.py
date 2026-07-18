@@ -108,6 +108,34 @@ def test_request_reports_null_ffi_return_as_runtime_error():
         module.request(runtime, provider_storage[0], "nodeInfo", {})
 
 
+def test_create_provider_reports_null_provider_ptr_as_runtime_error():
+    module = load_example_module()
+    ffi = module.build_ffi()
+
+    class Rings:
+        Debug = 0
+
+        def init_logging(self, level):
+            pass
+
+        def new_provider_with_callback(
+            self,
+            network_id,
+            ice_server,
+            stabilize_interval,
+            account,
+            account_type,
+            signer,
+        ):
+            return ffi.new("struct ProviderPtr *")[0]
+
+    runtime = module.FfiRuntime(ffi=ffi, rings=Rings())
+    account = Web3().eth.account.create()
+
+    with pytest.raises(RuntimeError, match="rings provider creation failed"):
+        module.create_provider(runtime, account)
+
+
 @pytest.fixture(scope="module")
 def ffi_runtime():
     module = load_example_module()
