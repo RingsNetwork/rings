@@ -14,7 +14,7 @@ No changes, simply releasing pre-release as full release.
 * MSRV has been bumped to `1.61`
 * Warnings have been fixed, including `clippy::pedantic` lints
 * CI has been converted to GitHub actions, and testing infrastructure significantly simplified.
-* Automatic nightly detection has been removed, use the `nightly` feature for improved diagnostics at the cost of stablity.
+* Automatic nightly detection has been removed, use the `nightly` feature for improved diagnostics at the cost of stability.
 
 # v1.0.4 (2020-7-31)
 
