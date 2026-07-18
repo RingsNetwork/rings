@@ -1,11 +1,12 @@
-use rings_core::ecc::SecretKey;
-use rings_core::session::SessionSk;
 #[cfg(feature = "node")]
 use std::sync::atomic::AtomicU64;
 #[cfg(feature = "node")]
 use std::sync::atomic::Ordering;
 #[cfg(feature = "node")]
 use std::time::Duration;
+
+use rings_core::ecc::SecretKey;
+use rings_core::session::SessionSk;
 #[cfg(feature = "node")]
 use tokio::io::AsyncReadExt;
 #[cfg(feature = "node")]

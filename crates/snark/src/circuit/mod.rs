@@ -104,13 +104,10 @@ pub struct Circuit<F: PrimeField> {
 }
 
 impl<'de, F> Deserialize<'de> for Circuit<F>
-where
-    F: PrimeField + Deserialize<'de>,
+where F: PrimeField + Deserialize<'de>
 {
     fn deserialize<D>(deserializer: D) -> core::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
+    where D: Deserializer<'de> {
         #[derive(Deserialize)]
         #[serde(bound(deserialize = "F: Deserialize<'de>"))]
         struct CircuitData<F: PrimeField> {
@@ -406,8 +403,8 @@ mod tests {
         )
         .map_err(|error| error.to_string())?;
         let encoded = serde_json::to_string(&circuit).map_err(|error| error.to_string())?;
-        let decoded = serde_json::from_str::<Circuit<Fp>>(&encoded)
-            .map_err(|error| error.to_string())?;
+        let decoded =
+            serde_json::from_str::<Circuit<Fp>>(&encoded).map_err(|error| error.to_string())?;
         let outputs = decoded
             .get_public_outputs()
             .map_err(|error| error.to_string())?;
