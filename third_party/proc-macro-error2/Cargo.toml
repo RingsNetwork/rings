@@ -60,17 +60,17 @@ version = "1"
 version = "1"
 
 [dependencies.syn]
-version = "2"
-optional = true
 default-features = false
+optional = true
+version = "2"
 
 [dev-dependencies.syn]
-version = "2"
 features = ["full"]
+version = "2"
 
 [dev-dependencies.trybuild]
-version = "1.0.99"
 features = ["diff"]
+version = "1.0.99"
 
 [features]
 default = ["syn-error"]
