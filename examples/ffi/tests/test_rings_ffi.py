@@ -93,6 +93,21 @@ def test_signer_writes_a_65_byte_signature():
     assert any(signature)
 
 
+def test_request_reports_null_ffi_return_as_runtime_error():
+    module = load_example_module()
+    ffi = module.build_ffi()
+    provider_storage = ffi.new("struct ProviderPtr *")
+
+    class Rings:
+        def request(self, provider, method, data):
+            return ffi.NULL
+
+    runtime = module.FfiRuntime(ffi=ffi, rings=Rings())
+
+    with pytest.raises(RuntimeError, match=r"rings request 'nodeInfo' failed"):
+        module.request(runtime, provider_storage[0], "nodeInfo", {})
+
+
 @pytest.fixture(scope="module")
 def ffi_runtime():
     module = load_example_module()

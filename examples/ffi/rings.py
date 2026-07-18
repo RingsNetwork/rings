@@ -136,6 +136,8 @@ def request(runtime: FfiRuntime, provider: ProviderHandle | Any, method: str, da
     c_data = runtime.ffi.new("char[]", data.encode())
     c_method = runtime.ffi.new("char[]", method.encode())
     ret = runtime.rings.request(runtime.ffi.addressof(provider_value), c_method, c_data)
+    if ret == runtime.ffi.NULL:
+        raise RuntimeError(f"rings request {method!r} failed")
     return runtime.ffi.string(ret)
 
 
