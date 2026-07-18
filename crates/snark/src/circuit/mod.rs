@@ -248,50 +248,6 @@ impl<F: PrimeField> Circuit<F> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use pasta_curves::Fp;
-
-    use super::*;
-
-    #[test]
-    fn circuit_deserialization_rejects_invalid_r1cs_shape() {
-        let value = serde_json::json!({
-            "r1cs": {
-                "num_inputs": 0,
-                "num_aux": 0,
-                "num_variables": 0,
-                "constraints": []
-            },
-            "witness": []
-        });
-
-        let result = serde_json::from_value::<Circuit<Fp>>(value);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn circuit_serialization_round_trip_preserves_validated_shape() {
-        let circuit = Circuit::try_new(
-            Arc::new(R1CS {
-                num_inputs: 3,
-                num_aux: 1,
-                num_variables: 4,
-                constraints: Vec::new(),
-            }),
-            vec![Fp::from(1); 4],
-        )
-        .expect("valid circuit");
-        let encoded = serde_json::to_string(&circuit).expect("serialize circuit");
-        let decoded = serde_json::from_str::<Circuit<Fp>>(&encoded).expect("deserialize circuit");
-
-        assert_eq!(
-            decoded.get_public_outputs().expect("public outputs"),
-            vec![Fp::from(1)]
-        );
-    }
-}
-
 /// Implement StepCircuit for our Circuit
 /// Reference work: Nota-Scotia :: CircomCircuit
 /// `<https://github.com/nalinbhardwaj/Nova-Scotia/blob/main/src/circom/circuit.rs>`
@@ -412,4 +368,51 @@ where
         lc = lc + term;
     }
     Ok(lc)
+}
+
+#[cfg(test)]
+mod tests {
+    use pasta_curves::Fp;
+
+    use super::*;
+
+    #[test]
+    fn circuit_deserialization_rejects_invalid_r1cs_shape() {
+        let value = serde_json::json!({
+            "r1cs": {
+                "num_inputs": 0,
+                "num_aux": 0,
+                "num_variables": 0,
+                "constraints": []
+            },
+            "witness": []
+        });
+
+        let result = serde_json::from_value::<Circuit<Fp>>(value);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn circuit_serialization_round_trip_preserves_validated_shape(
+    ) -> std::result::Result<(), String> {
+        let circuit = Circuit::try_new(
+            Arc::new(R1CS {
+                num_inputs: 3,
+                num_aux: 1,
+                num_variables: 4,
+                constraints: Vec::new(),
+            }),
+            vec![Fp::from(1); 4],
+        )
+        .map_err(|error| error.to_string())?;
+        let encoded = serde_json::to_string(&circuit).map_err(|error| error.to_string())?;
+        let decoded = serde_json::from_str::<Circuit<Fp>>(&encoded)
+            .map_err(|error| error.to_string())?;
+        let outputs = decoded
+            .get_public_outputs()
+            .map_err(|error| error.to_string())?;
+
+        assert_eq!(outputs, vec![Fp::from(1)]);
+        Ok(())
+    }
 }
