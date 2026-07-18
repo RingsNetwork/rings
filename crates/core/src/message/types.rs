@@ -1,4 +1,4 @@
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 //! This module defines various message structures in the Rings network.
 //! Most of the messages follow the Ping/Pong pattern, where there is a one-to-one correspondence between them,
 //! such as xxxSend and xxxReport messages.

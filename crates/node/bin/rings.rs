@@ -1,3 +1,5 @@
+//! Rings native node command-line entrypoint.
+
 use std::net::SocketAddr;
 use std::path::Path;
 use std::str::FromStr;

@@ -1,4 +1,4 @@
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 
 //! Algebraic structure traits shared by DHT identifiers and elliptic-curve
 //! groups.

@@ -1,5 +1,5 @@
 //! Chord algorithm implement.
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;

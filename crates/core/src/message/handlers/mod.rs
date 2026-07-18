@@ -1,4 +1,4 @@
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 //! This module implemented message handler of rings network.
 
 use std::sync::Arc;

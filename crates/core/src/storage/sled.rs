@@ -1,4 +1,4 @@
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 
 //! Persistence Storage for default, use `sled` as backend db.
 

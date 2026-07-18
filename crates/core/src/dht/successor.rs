@@ -1,4 +1,4 @@
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 //! Successor Sequence for PeerRing
 use std::sync::Arc;
 use std::sync::RwLock;

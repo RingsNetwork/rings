@@ -1,4 +1,4 @@
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 //! Message framing / chunking. A message larger than the connection's negotiated
 //! `max_message_size` is split into MTU-sized [`Chunk`]s on the sender and reassembled on the
 //! receiver.

@@ -1,4 +1,4 @@
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 //! Chord-style virtual positions for storage ownership.
 //!
 //! These positions are not independent signing identities. They are derived

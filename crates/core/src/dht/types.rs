@@ -1,5 +1,5 @@
 //! DHT types about `Storage` and `PeerRing`.
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 use async_trait::async_trait;
 
 use super::chord::TopoInfo;

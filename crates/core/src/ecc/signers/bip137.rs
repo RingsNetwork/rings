@@ -84,6 +84,7 @@ fn varint_buf_num(n: u64) -> Vec<u8> {
     }
 }
 
+/// Compute the BIP-137 double-SHA-256 message hash with the Bitcoin magic prefix.
 pub fn magic_hash(msg: &[u8]) -> [u8; 32] {
     let magic_bytes = "Bitcoin Signed Message:\n".as_bytes();
     let mut buf = Vec::new();

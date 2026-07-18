@@ -1,6 +1,6 @@
 //! This module provide the `Measure` struct and its implementations.
 //! It is used to assess the reliability of remote peers.
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 use std::sync::Arc;
 
 use async_trait::async_trait;

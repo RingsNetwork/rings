@@ -66,14 +66,14 @@ pub fn sign(sec: SecretKey, hash: &[u8; 32]) -> Result<[u8; 64]> {
     Ok(sig_bytes)
 }
 
-// Prefix with magic string
+/// Prefix a message with the Rings secp256r1 signing domain string.
 pub fn magic_prefix(msg: &[u8]) -> Vec<u8> {
     let mut prefix_msg = format!("\x19Rings Signed Message:\n{}", msg.len()).into_bytes();
     prefix_msg.extend_from_slice(msg);
     prefix_msg.to_vec()
 }
 
-// Hash function with `SHA-256`
+/// Hash a Rings-prefixed message with SHA-256.
 pub fn hash(msg: &[u8]) -> [u8; 32] {
     let prefix_msg = magic_prefix(msg);
     let hash = Sha256::digest(prefix_msg);

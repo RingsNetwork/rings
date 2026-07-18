@@ -1,4 +1,4 @@
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 //! This module provider [SwarmBuilder] and it's interface for
 //! [Swarm]
 

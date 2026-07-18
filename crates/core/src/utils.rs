@@ -39,6 +39,7 @@ pub mod js_value {
 }
 
 #[cfg(feature = "wasm")]
+/// Helpers for adapting JavaScript functions into async Rust callbacks.
 pub mod js_func {
     /// This macro will generate a wrapper for mapping a js_sys::Function with type fn(T, T, T, T) -> Promise<()>
     /// to native function
@@ -103,8 +104,9 @@ pub mod js_func {
     #[macro_export]
     macro_rules! of {
 	($func: ident, $($name:ident: $type: ident),+$(,)?) => {
+            #[doc = "Wrap a JavaScript function in an async Rust callback."]
 	    pub fn $func<'a, 'b: 'a, $($type: TryInto<wasm_bindgen::JsValue> + Clone),+>(
-		func: &js_sys::Function,
+	        func: &js_sys::Function,
 	    ) -> Box<dyn Fn($($type),+) -> std::pin::Pin<Box<dyn std::future::Future<Output = $crate::error::Result<()>> + 'b>>>
 	    where  $($type::Error: std::fmt::Debug),+,
 		$($type: 'b),+
@@ -144,6 +146,7 @@ pub mod js_func {
 }
 
 #[cfg(feature = "wasm")]
+/// Browser and worker utility functions for wasm runtimes.
 pub mod js_utils {
     use std::future::Future;
 
@@ -151,13 +154,18 @@ pub mod js_utils {
     use wasm_bindgen::JsCast;
     use wasm_bindgen::JsValue;
 
+    /// JavaScript global scope variants supported by Rings wasm utilities.
     pub enum Global {
+        /// Browser window global scope.
         Window(web_sys::Window),
+        /// Dedicated or shared worker global scope.
         WorkerGlobal(web_sys::WorkerGlobalScope),
+        /// Service worker global scope.
         ServiceWorkerGlobal(web_sys::ServiceWorkerGlobalScope),
     }
 
     impl Global {
+        /// Schedule a zero-argument timeout callback on this global scope.
         pub fn set_timeout_0(
             &self,
             callback: &js_sys::Function,
@@ -177,6 +185,7 @@ pub mod js_utils {
         }
     }
 
+    /// Detect the current JavaScript global scope.
     pub fn global() -> Option<Global> {
         let obj = JsValue::from(js_sys::global());
         if obj.has_type::<web_sys::Window>() {
@@ -206,7 +215,9 @@ pub mod js_utils {
     }
 
     fn schedule_sleep<F>(resolve: js_sys::Function, reject: js_sys::Function, schedule: F)
-    where F: FnOnce(&js_sys::Function) -> Result<i32, JsValue> {
+    where
+        F: FnOnce(&js_sys::Function) -> Result<i32, JsValue>,
+    {
         let func = Closure::once_into_js(move || {
             resolve_sleep(&resolve);
         });
@@ -217,6 +228,7 @@ pub mod js_utils {
         }
     }
 
+    /// Return a JavaScript future that resolves after `millis` milliseconds.
     pub fn window_sleep(millis: i32) -> wasm_bindgen_futures::JsFuture {
         let promise = match global() {
             None => js_sys::Promise::reject(&JsValue::from_str("No global scope for window_sleep")),

@@ -18,6 +18,7 @@ use crate::error::Result;
 pub mod elgamal;
 pub mod group;
 pub mod keys;
+/// Signature schemes used by DID identity and provider login.
 pub mod signers;
 mod types;
 use elliptic_curve::generic_array::typenum::U32;
@@ -61,6 +62,7 @@ pub fn keccak256(bytes: &[u8]) -> [u8; 32] {
 }
 
 impl HashStr {
+    /// Create a hash string wrapper from an existing string value.
     pub fn new<T: Into<String>>(s: T) -> Self {
         HashStr(s.into())
     }
@@ -72,6 +74,7 @@ impl HashStr {
         HashStr(hex::encode(hasher.finalize()))
     }
 
+    /// Return the wrapped hash string.
     pub fn inner(&self) -> String {
         self.0.clone()
     }
@@ -207,7 +210,8 @@ impl From<SecretKey> for PublicKey<33> {
 }
 
 impl<T> From<T> for HashStr
-where T: Into<String>
+where
+    T: Into<String>,
 {
     fn from(s: T) -> Self {
         let inputs = s.into();
@@ -248,21 +252,27 @@ impl<'de> serde::de::Visitor<'de> for SecretKeyVisitor {
         formatter.write_str("SecretKey deserializer")
     }
     fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
-    where E: serde::de::Error {
+    where
+        E: serde::de::Error,
+    {
         SecretKey::from_str(value).map_err(|e| serde::de::Error::custom(e))
     }
 }
 
 impl<'de> Deserialize<'de> for SecretKey {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where D: serde::Deserializer<'de> {
+    where
+        D: serde::Deserializer<'de>,
+    {
         deserializer.deserialize_str(SecretKeyVisitor)
     }
 }
 
 impl Serialize for SecretKey {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
-    where S: serde::Serializer {
+    where
+        S: serde::Serializer,
+    {
         serializer.serialize_str(self.to_string().as_str())
     }
 }
@@ -287,24 +297,29 @@ fn secret_key_address(secret_key: &SecretKey) -> PublicKeyAddress {
 }
 
 impl SecretKey {
+    /// Generate a random secp256k1 secret key.
     pub fn random() -> Self {
         let mut rng = Hc128Rng::from_entropy();
         Self(libsecp256k1::SecretKey::random(&mut rng))
     }
 
+    /// Derive the Ethereum-style address for this secret key.
     pub fn address(&self) -> PublicKeyAddress {
         secret_key_address(self)
     }
 
+    /// Sign a UTF-8 message after hashing it with Keccak-256.
     pub fn sign(&self, message: &str) -> SigBytes {
         self.sign_raw(message.as_bytes())
     }
 
+    /// Sign raw message bytes after hashing them with Keccak-256.
     pub fn sign_raw(&self, message: &[u8]) -> SigBytes {
         let message_hash = keccak256(message);
         self.sign_hash(&message_hash)
     }
 
+    /// Sign an already computed 32-byte message hash.
     pub fn sign_hash(&self, message_hash: &[u8; 32]) -> SigBytes {
         let (signature, recover_id) =
             libsecp256k1::sign(&libsecp256k1::Message::parse(message_hash), self);
@@ -315,16 +330,19 @@ impl SecretKey {
         sig_bytes
     }
 
+    /// Derive the compressed public key for this secret key.
     pub fn pubkey(&self) -> PublicKey<33> {
         libsecp256k1::PublicKey::from_secret_key(&(*self).into()).into()
     }
 
+    /// Serialize this secret key into its 32-byte representation.
     pub fn ser(&self) -> [u8; 32] {
         self.0.serialize()
     }
 }
 
 impl PublicKey<33> {
+    /// Derive the Ethereum-style address for this public key.
     pub fn address(&self) -> PublicKeyAddress {
         public_key_address(self)
     }
@@ -332,7 +350,9 @@ impl PublicKey<33> {
 
 /// Recover PublicKey from RawMessage using signature.
 pub fn recover<S>(message: &[u8], signature: S) -> Result<PublicKey<33>>
-where S: AsRef<[u8]> {
+where
+    S: AsRef<[u8]>,
+{
     let sig_bytes: SigBytes = signature.as_ref().try_into()?;
     let message_hash: [u8; 32] = keccak256(message);
     recover_hash(&message_hash, &sig_bytes)
@@ -354,7 +374,7 @@ pub fn recover_hash(message_hash: &[u8; 32], sig: &[u8; 65]) -> Result<PublicKey
 }
 
 #[cfg(test)]
-pub mod tests {
+pub(crate) mod tests {
     use hex::FromHex;
 
     use super::*;
@@ -416,7 +436,7 @@ pub mod tests {
         assert_eq!(pubkey1, pubkey2);
     }
 
-    pub fn gen_ordered_keys(n: usize) -> Vec<SecretKey> {
+    pub(crate) fn gen_ordered_keys(n: usize) -> Vec<SecretKey> {
         let mut keys = Vec::from_iter(std::iter::repeat_with(SecretKey::random).take(n));
         keys.sort_by(|a, b| {
             if a.address() < b.address() {

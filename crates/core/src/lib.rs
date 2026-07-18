@@ -58,6 +58,7 @@
 //! ```shell
 //! cargo build -p rings-core --target=wasm32-unknown-unknown --features wasm --no-default-features
 //! ```
+#![deny(missing_docs)]
 #![cfg_attr(target_arch = "wasm32", allow(clippy::arc_with_non_send_sync))]
 #![cfg_attr(
     test,
@@ -86,5 +87,6 @@ pub use async_trait::async_trait;
 pub use futures;
 pub mod chunk;
 pub mod consts;
+/// Read-only inspection snapshots for runtime diagnostics.
 pub mod inspect;
 pub mod measure;

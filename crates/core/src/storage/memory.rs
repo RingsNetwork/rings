@@ -4,16 +4,20 @@ use dashmap::DashMap;
 use crate::error::Result;
 use crate::storage::KvStorageInterface;
 
+/// In-memory storage implementation backed by a concurrent map.
 #[derive(Debug, Default)]
 pub struct MemStorage<V>
-where V: Clone
+where
+    V: Clone,
 {
     table: DashMap<String, V>,
 }
 
 impl<V> MemStorage<V>
-where V: Clone
+where
+    V: Clone,
 {
+    /// Create an empty memory storage table.
     pub fn new() -> Self {
         Self {
             table: DashMap::default(),
@@ -24,7 +28,8 @@ where V: Clone
 #[cfg_attr(feature = "wasm", async_trait(?Send))]
 #[cfg_attr(not(feature = "wasm"), async_trait)]
 impl<V> KvStorageInterface<V> for MemStorage<V>
-where V: Clone + Send + Sync
+where
+    V: Clone + Send + Sync,
 {
     async fn get(&self, key: &str) -> Result<Option<V>> {
         Ok(self.table.get(&key.to_string()).map(|v| v.value().clone()))
