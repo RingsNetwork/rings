@@ -78,6 +78,16 @@ pub enum Error {
         /// Number of public input wires, including the constant-one wire.
         num_inputs: usize,
     },
+    /// Circom public input and output counts are not equal for recursive use.
+    #[error(
+        "Invalid recursive R1CS public IO shape: public_inputs={public_inputs}, public_outputs={public_outputs}"
+    )]
+    InvalidR1CSRecursiveIoShape {
+        /// Number of public input wires declared by Circom.
+        public_inputs: usize,
+        /// Number of public output wires declared by Circom.
+        public_outputs: usize,
+    },
     /// A constraint references a wire outside the declared R1CS variable range.
     #[error("Invalid R1CS variable index: index={index}, num_variables={num_variables}")]
     InvalidR1CSVariableIndex {

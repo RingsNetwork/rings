@@ -434,7 +434,7 @@ fn chord_nodes(did: &str, peers: &[PeerView]) -> Vec<ChordNode> {
             });
         }
     }
-    nodes.sort_by(|left, right| left.id.cmp(&right.id));
+    nodes.sort_by_key(|node| node.id);
     nodes
 }
 

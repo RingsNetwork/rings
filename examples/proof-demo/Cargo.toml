@@ -24,3 +24,6 @@ yew = { version = "0.21", features = ["csr"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "=0.3.71"
+
+[patch.crates-io]
+proc-macro-error2 = { path = "../../third_party/proc-macro-error2" }

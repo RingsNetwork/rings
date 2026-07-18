@@ -346,10 +346,28 @@ fn section_meta(
     Ok((offset, size))
 }
 
+fn recursive_num_inputs(public_inputs: usize, public_outputs: usize) -> Result<usize> {
+    if public_inputs != public_outputs {
+        return Err(Error::InvalidR1CSRecursiveIoShape {
+            public_inputs,
+            public_outputs,
+        });
+    }
+    public_inputs
+        .checked_add(public_outputs)
+        .and_then(|public_values| public_values.checked_add(1))
+        .ok_or_else(|| {
+            Error::InvalidDataWhenReadingR1CS("R1CS public IO count overflows".to_string())
+        })
+}
+
 /// load r1cs from bin by a reader
 pub fn load_r1cs_from_bin<Fr: PrimeField, R: Read + Seek>(reader: R) -> Result<R1CS<Fr>> {
     let file = from_reader(reader)?;
-    let num_inputs = (1 + file.header.n_pub_in + file.header.n_pub_out) as usize;
+    let num_inputs = recursive_num_inputs(
+        file.header.n_pub_in as usize,
+        file.header.n_pub_out as usize,
+    )?;
     let num_variables = file.header.n_wires as usize;
     let num_aux = num_variables.checked_sub(num_inputs).ok_or_else(|| {
         Error::InvalidDataWhenReadingR1CS("R1CS input count exceeds variable count".to_string())
@@ -384,7 +402,7 @@ pub fn load_r1cs_from_json<Fr: PrimeField, R: Read>(reader: R) -> Result<R1CS<Fr
     let circuit_json: CircuitJson = serde_json::from_reader(reader)
         .map_err(|error| Error::InvalidDataWhenReadingR1CS(error.to_string()))?;
 
-    let num_inputs = circuit_json.num_inputs + circuit_json.num_outputs + 1;
+    let num_inputs = recursive_num_inputs(circuit_json.num_inputs, circuit_json.num_outputs)?;
     let num_aux = circuit_json
         .num_variables
         .checked_sub(num_inputs)
@@ -439,4 +457,52 @@ fn constraint_part(
             index + 1
         ))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use pasta_curves::Fp;
+
+    use super::*;
+
+    fn r1cs_json(public_inputs: usize, public_outputs: usize) -> String {
+        format!(
+            r#"{{
+                "constraints": [],
+                "nPubInputs": {public_inputs},
+                "nOutputs": {public_outputs},
+                "nVars": 5
+            }}"#
+        )
+    }
+
+    #[test]
+    fn json_reader_rejects_more_recursive_outputs_than_inputs() {
+        let source = r1cs_json(1, 3);
+        let error = load_r1cs_from_json::<Fp, _>(Cursor::new(source.as_bytes()));
+
+        assert!(matches!(
+            error,
+            Err(Error::InvalidR1CSRecursiveIoShape {
+                public_inputs: 1,
+                public_outputs: 3,
+            })
+        ));
+    }
+
+    #[test]
+    fn json_reader_rejects_more_recursive_inputs_than_outputs() {
+        let source = r1cs_json(3, 1);
+        let error = load_r1cs_from_json::<Fp, _>(Cursor::new(source.as_bytes()));
+
+        assert!(matches!(
+            error,
+            Err(Error::InvalidR1CSRecursiveIoShape {
+                public_inputs: 3,
+                public_outputs: 1,
+            })
+        ));
+    }
 }

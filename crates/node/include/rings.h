@@ -24,7 +24,8 @@ void init_logging(enum LogLevel level);
  * # Safety
  *
  * `provider_ptr` must point to a ProviderPtr returned by
- * `new_provider_with_callback`.
+ * `new_provider_with_callback`. Invalid provider pointers are logged and
+ * ignored.
  */
 void listen(const struct ProviderPtr *provider_ptr);
 
@@ -35,7 +36,8 @@ void listen(const struct ProviderPtr *provider_ptr);
  *
  * `provider_ptr` must point to a ProviderPtr returned by
  * `new_provider_with_callback`; `method` and `params` must be valid
- * null-terminated UTF-8 strings.
+ * null-terminated UTF-8 strings. Returns NULL when request validation or
+ * execution fails.
  */
 const char *request(const struct ProviderPtr *provider_ptr,
                     const char *method,
@@ -47,7 +49,8 @@ const char *request(const struct ProviderPtr *provider_ptr,
  * # Safety
  *
  * String pointers must be valid null-terminated UTF-8 strings. The signer must
- * write exactly 65 signature bytes into the provided output buffer.
+ * write exactly 65 signature bytes into the provided output buffer. Returns a
+ * ProviderPtr with NULL fields when provider creation fails.
  */
 struct ProviderPtr new_provider_with_callback(uint32_t network_id,
                                               const char *ice_server,
