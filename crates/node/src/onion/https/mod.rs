@@ -16,9 +16,15 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::Mutex;
+#[cfg(feature = "node")]
+use std::time::Duration;
 
 use bytes::Bytes;
 use futures::channel::oneshot;
+#[cfg(all(not(feature = "node"), feature = "browser"))]
+use futures::future::Either;
+#[cfg(all(not(feature = "node"), feature = "browser"))]
+use futures::FutureExt;
 #[cfg(all(not(feature = "node"), feature = "browser"))]
 use js_sys::Function;
 #[cfg(all(not(feature = "node"), feature = "browser"))]
@@ -31,6 +37,8 @@ use js_sys::Reflect;
 use js_sys::Uint8Array;
 use rings_core::dht::Did;
 use rings_core::session::SessionSk;
+#[cfg(all(not(feature = "node"), feature = "browser"))]
+use rings_core::utils::js_utils;
 use serde::Deserialize;
 use serde::Serialize;
 #[cfg(all(not(feature = "node"), feature = "browser"))]
@@ -41,6 +49,8 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 #[cfg(all(not(feature = "node"), feature = "browser"))]
 use wasm_bindgen_futures::JsFuture;
+#[cfg(all(not(feature = "node"), feature = "browser"))]
+use web_sys::AbortController;
 
 use crate::error::Error;
 use crate::error::Result;
@@ -68,6 +78,10 @@ use crate::onion::OnionExitTarget;
 use crate::onion::OnionRouteError;
 
 const DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
+#[cfg(feature = "node")]
+const HTTPS_EXIT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(all(not(feature = "node"), feature = "browser"))]
+const HTTPS_EXIT_REQUEST_TIMEOUT_MS: i32 = 30_000;
 
 /// One HTTPS request executed by an HTTPS exit.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -568,8 +582,7 @@ pub(crate) async fn execute_exit_fetch(
         return Err(Error::NoPermission);
     }
     let url = format!("https://{}{}", authority, normalize_path(&request.path)?);
-    let response = execute_https_request(&url, request, body_limit).await?;
-    runtime.record_exit_bytes(&policy, usize_to_u64(response.body.len())?)?;
+    let response = execute_https_request(&url, request, body_limit, runtime, &policy).await?;
     Ok(OnionHttpsResponse {
         status: response.status,
         headers: response.headers,
@@ -588,8 +601,10 @@ async fn execute_https_request(
     url: &str,
     request: &OnionHttpsRequest,
     max_body_bytes: u64,
+    runtime: &OnionHttpsRuntime,
+    policy: &OnionExitPolicy,
 ) -> Result<FetchResponse> {
-    native_fetch(url, request, max_body_bytes).await
+    native_fetch(url, request, max_body_bytes, runtime, policy).await
 }
 
 #[cfg(all(not(feature = "node"), feature = "browser"))]
@@ -597,8 +612,10 @@ async fn execute_https_request(
     url: &str,
     request: &OnionHttpsRequest,
     max_body_bytes: u64,
+    runtime: &OnionHttpsRuntime,
+    policy: &OnionExitPolicy,
 ) -> Result<FetchResponse> {
-    browser_fetch(url, request, max_body_bytes).await
+    browser_fetch(url, request, max_body_bytes, runtime, policy).await
 }
 
 #[cfg(feature = "node")]
@@ -606,11 +623,41 @@ async fn native_fetch(
     url: &str,
     request: &OnionHttpsRequest,
     max_body_bytes: u64,
+    runtime: &OnionHttpsRuntime,
+    policy: &OnionExitPolicy,
+) -> Result<FetchResponse> {
+    native_fetch_with_timeout(
+        url,
+        request,
+        max_body_bytes,
+        HTTPS_EXIT_REQUEST_TIMEOUT,
+        |bytes| runtime.record_exit_bytes(policy, bytes),
+    )
+    .await
+}
+
+#[cfg(feature = "node")]
+fn native_http_error(context: &str, error: reqwest::Error) -> Error {
+    if error.is_timeout() {
+        Error::HttpRequestError(format!("{context}: timed out"))
+    } else {
+        Error::HttpRequestError(format!("{context}: {error}"))
+    }
+}
+
+#[cfg(feature = "node")]
+async fn native_fetch_with_timeout(
+    url: &str,
+    request: &OnionHttpsRequest,
+    max_body_bytes: u64,
+    timeout: Duration,
+    record_bytes: impl Fn(u64) -> Result<()>,
 ) -> Result<FetchResponse> {
     let method = reqwest::Method::from_bytes(normalize_method(&request.method).as_bytes())
         .map_err(|error| Error::HttpRequestError(format!("invalid HTTPS proxy method: {error}")))?;
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .timeout(timeout)
         .build()
         .map_err(|error| Error::HttpRequestError(format!("build HTTPS proxy client: {error}")))?;
     let mut builder = client.request(method, url);
@@ -623,7 +670,7 @@ async fn native_fetch(
     let mut response = builder
         .send()
         .await
-        .map_err(|error| Error::HttpRequestError(format!("native HTTPS proxy request: {error}")))?;
+        .map_err(|error| native_http_error("native HTTPS proxy request", error))?;
     let status = response.status().as_u16();
     let headers = response
         .headers()
@@ -640,13 +687,14 @@ async fn native_fetch(
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|error| Error::HttpRequestError(format!("read HTTPS proxy response: {error}")))?
+        .map_err(|error| native_http_error("read HTTPS proxy response", error))?
     {
         let body_len = usize_to_u64(body.len())?;
         let chunk_len = usize_to_u64(chunk.len())?;
         if max_body_bytes > 0 && body_len.saturating_add(chunk_len) > max_body_bytes {
             return Err(Error::NoPermission);
         }
+        record_bytes(chunk_len)?;
         body.extend_from_slice(chunk.as_ref());
     }
     Ok(FetchResponse {
@@ -661,41 +709,59 @@ async fn browser_fetch(
     url: &str,
     request: &OnionHttpsRequest,
     max_body_bytes: u64,
+    runtime: &OnionHttpsRuntime,
+    policy: &OnionExitPolicy,
 ) -> Result<FetchResponse> {
     let global = js_sys::global();
     let fetch = Reflect::get(global.as_ref(), JsValue::from_str("fetch").as_ref())
         .map_err(js_error)?
         .dyn_into::<Function>()
         .map_err(js_error)?;
-    let init = fetch_init(request)?;
-    let response = JsFuture::from(Promise::from(
-        fetch
-            .call2(
-                global.as_ref(),
-                JsValue::from_str(url).as_ref(),
-                init.as_ref(),
-            )
-            .map_err(js_error)?,
-    ))
-    .await
-    .map_err(js_error)?;
-    let status = Reflect::get(response.as_ref(), JsValue::from_str("status").as_ref())
-        .map_err(js_error)?
-        .as_f64()
-        .ok_or_else(|| Error::HttpRequestError("fetch response status is not numeric".to_string()))
-        .and_then(checked_status_code)?;
-    let headers = collect_headers(&response)?;
-    reject_content_length_over_limit(&headers, max_body_bytes)?;
-    let body = response_body(&response, max_body_bytes).await?;
-    Ok(FetchResponse {
-        status,
-        headers,
-        body,
-    })
+    let controller = AbortController::new().map_err(js_error)?;
+    let signal = controller.signal();
+    let init = fetch_init(request, signal.as_ref())?;
+    let promise = fetch
+        .call2(
+            global.as_ref(),
+            JsValue::from_str(url).as_ref(),
+            init.as_ref(),
+        )
+        .map_err(js_error)?;
+    let fetch_task = async move {
+        let response = JsFuture::from(Promise::from(promise))
+            .await
+            .map_err(js_error)?;
+        let status = Reflect::get(response.as_ref(), JsValue::from_str("status").as_ref())
+            .map_err(js_error)?
+            .as_f64()
+            .ok_or_else(|| {
+                Error::HttpRequestError("fetch response status is not numeric".to_string())
+            })
+            .and_then(checked_status_code)?;
+        let headers = collect_headers(&response)?;
+        reject_content_length_over_limit(&headers, max_body_bytes)?;
+        let body = response_body(&response, max_body_bytes, runtime, policy).await?;
+        Ok::<FetchResponse, Error>(FetchResponse {
+            status,
+            headers,
+            body,
+        })
+    };
+    let timeout = js_utils::window_sleep(HTTPS_EXIT_REQUEST_TIMEOUT_MS).fuse();
+    futures::pin_mut!(fetch_task, timeout);
+    match futures::future::select(fetch_task, timeout).await {
+        Either::Left((result, _)) => result,
+        Either::Right((_, _)) => {
+            controller.abort();
+            Err(Error::HttpRequestError(
+                "browser HTTPS proxy request timed out".to_string(),
+            ))
+        }
+    }
 }
 
 #[cfg(all(not(feature = "node"), feature = "browser"))]
-fn fetch_init(request: &OnionHttpsRequest) -> Result<Object> {
+fn fetch_init(request: &OnionHttpsRequest, signal: &JsValue) -> Result<Object> {
     let init = Object::new();
     Reflect::set(
         init.as_ref(),
@@ -736,6 +802,7 @@ fn fetch_init(request: &OnionHttpsRequest) -> Result<Object> {
         JsValue::from_str("error").as_ref(),
     )
     .map_err(js_error)?;
+    Reflect::set(init.as_ref(), JsValue::from_str("signal").as_ref(), signal).map_err(js_error)?;
     if !request.body.is_empty() {
         let body = Uint8Array::from(request.body.as_slice());
         Reflect::set(
@@ -812,7 +879,12 @@ fn reject_content_length_over_limit(
 }
 
 #[cfg(all(not(feature = "node"), feature = "browser"))]
-async fn response_body(response: &JsValue, max_body_bytes: u64) -> Result<Vec<u8>> {
+async fn response_body(
+    response: &JsValue,
+    max_body_bytes: u64,
+    runtime: &OnionHttpsRuntime,
+    policy: &OnionExitPolicy,
+) -> Result<Vec<u8>> {
     let body = Reflect::get(response, JsValue::from_str("body").as_ref()).map_err(js_error)?;
     if body.is_null() || body.is_undefined() {
         return Ok(Vec::new());
@@ -852,10 +924,16 @@ async fn response_body(response: &JsValue, max_body_bytes: u64) -> Result<Vec<u8
         let body_len = usize_to_u64(body.len())?;
         let bytes_len = usize_to_u64(bytes.len())?;
         if max_body_bytes > 0 && body_len.saturating_add(bytes_len) > max_body_bytes {
-            if let Some(cancel) = cancel {
+            if let Some(cancel) = &cancel {
                 let _ = cancel.call0(reader.as_ref());
             }
             return Err(Error::NoPermission);
+        }
+        if let Err(error) = runtime.record_exit_bytes(policy, bytes_len) {
+            if let Some(cancel) = &cancel {
+                let _ = cancel.call0(reader.as_ref());
+            }
+            return Err(error);
         }
         body.extend_from_slice(bytes.as_slice());
     }

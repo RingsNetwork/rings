@@ -139,6 +139,8 @@ web-sys = { version = "0.3.64", optional = true, features = [
     "ReadableStreamReadResult",
     "WritableStream",
     "WritableStreamDefaultWriter",
+    "AbortController",
+    "AbortSignal",
 ] }
 [dev-dependencies]
 fluvio-wasm-timer = "0.2.5"

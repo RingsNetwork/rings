@@ -15,6 +15,7 @@ use bellpepper_core::SynthesisError;
 use ff::PrimeField;
 use nova_snark::traits::circuit::StepCircuit;
 use serde::Deserialize;
+use serde::Deserializer;
 use serde::Serialize;
 
 use crate::error::Error;
@@ -96,10 +97,30 @@ impl<F: PrimeField> From<Vec<(String, Vec<F>)>> for Input<F> {
 }
 
 /// Circuit
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Clone, Debug)]
 pub struct Circuit<F: PrimeField> {
     r1cs: Arc<R1CS<F>>,
     witness: Vec<F>,
+}
+
+impl<'de, F> Deserialize<'de> for Circuit<F>
+where
+    F: PrimeField + Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> core::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(bound(deserialize = "F: Deserialize<'de>"))]
+        struct CircuitData<F: PrimeField> {
+            r1cs: Arc<R1CS<F>>,
+            witness: Vec<F>,
+        }
+
+        let data = CircuitData::deserialize(deserializer)?;
+        Self::try_new(data.r1cs, data.witness).map_err(serde::de::Error::custom)
+    }
 }
 
 impl<F: PrimeField> AsRef<Circuit<F>> for &Circuit<F> {
@@ -192,11 +213,6 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
 }
 
 impl<F: PrimeField> Circuit<F> {
-    /// Create a new instance without validating witness shape.
-    pub fn new(r1cs: Arc<R1CS<F>>, witness: Vec<F>) -> Self {
-        Self { r1cs, witness }
-    }
-
     /// Create a new instance after validating the R1CS and witness shape.
     pub fn try_new(r1cs: Arc<R1CS<F>>, witness: Vec<F>) -> Result<Self> {
         r1cs.validate_witness_len(witness.len())?;
@@ -229,6 +245,50 @@ impl<F: PrimeField> Circuit<F> {
                 expected: range.end,
                 actual: self.witness.len(),
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use pasta_curves::Fp;
+
+    use super::*;
+
+    #[test]
+    fn circuit_deserialization_rejects_invalid_r1cs_shape() {
+        let value = serde_json::json!({
+            "r1cs": {
+                "num_inputs": 0,
+                "num_aux": 0,
+                "num_variables": 0,
+                "constraints": []
+            },
+            "witness": []
+        });
+
+        let result = serde_json::from_value::<Circuit<Fp>>(value);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn circuit_serialization_round_trip_preserves_validated_shape() {
+        let circuit = Circuit::try_new(
+            Arc::new(R1CS {
+                num_inputs: 3,
+                num_aux: 1,
+                num_variables: 4,
+                constraints: Vec::new(),
+            }),
+            vec![Fp::from(1); 4],
+        )
+        .expect("valid circuit");
+        let encoded = serde_json::to_string(&circuit).expect("serialize circuit");
+        let decoded = serde_json::from_str::<Circuit<Fp>>(&encoded).expect("deserialize circuit");
+
+        assert_eq!(
+            decoded.get_public_outputs().expect("public outputs"),
+            vec![Fp::from(1)]
+        );
     }
 }
 
