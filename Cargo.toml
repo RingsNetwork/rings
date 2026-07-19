@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/*", "examples/native", "examples/relay", "examples/snark"]
+exclude = ["third_party/proc-macro-error2"]
 
 [workspace.package]
 version = "0.14.0"
@@ -26,7 +27,11 @@ wasm-bindgen-macro-support = "0.2.121"
 wasm-bindgen-test = "0.3.71"
 webrtc = { version = "0.17.1" }
 
+[patch.crates-io]
+proc-macro-error2 = { path = "third_party/proc-macro-error2" }
+
 [workspace.lints.rust]
+missing_docs = "deny"
 warnings = "deny"
 
 [workspace.lints.clippy]

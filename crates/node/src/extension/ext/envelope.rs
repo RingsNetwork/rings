@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! Wire envelope — the namespaced message carried over the P2P transport.
 
 use bytes::Bytes;

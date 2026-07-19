@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! Built-in protocol extensions.
 //!
 //! Each built-in is a `(Protocol, Interpret)` pair registered under its namespace. The

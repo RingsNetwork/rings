@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! Application-layer circuit directory and route selection.
 //!
 //! This module deliberately sits in `rings-node`, not `rings-core`: Chord
@@ -43,7 +42,7 @@ pub mod circuit;
 pub(crate) mod directory;
 pub(crate) mod exit_accounting;
 mod failure;
-#[cfg(feature = "browser")]
+#[cfg(any(feature = "browser", feature = "node"))]
 pub mod https;
 pub mod proxy;
 pub(crate) mod replay;
@@ -55,7 +54,7 @@ pub mod tcp;
 pub use failure::OnionExitFailure;
 pub use failure::OnionRouteError;
 pub use route::select_onion_route;
-pub(crate) use route::select_onion_route_from_candidates;
+pub(crate) use route::select_onion_route_from_candidates_with_first_hop;
 pub use route::OnionRoute;
 pub(crate) use route::OnionRouteCandidates;
 pub use route::OnionRouteHop;
@@ -67,7 +66,7 @@ pub use target::OnionProxyTarget;
 /// DHT topic used for application-layer onion exit descriptors.
 pub const ONION_EXITS_TOPIC: &str = "onion_exits";
 
-const ONION_EXIT_DESCRIPTOR_SCHEMA_VERSION: u16 = 2;
+pub(crate) const ONION_EXIT_DESCRIPTOR_SCHEMA_VERSION: u16 = 2;
 
 /// Capability label for nodes willing to relay onion cells.
 pub const ONION_RELAY_CAPABILITY: &str = "onion-relay";
@@ -96,11 +95,12 @@ pub(crate) const fn default_advertise_onion_exit() -> bool {
 }
 
 /// Default native exit services. It is only published when onion-exit advertisement is enabled.
+/// HTTPS is advertised as a TCP-backed service because HTTPS proxying ultimately tunnels TLS bytes.
 pub fn default_onion_exit_services() -> Vec<OnionExitService> {
-    vec![OnionExitService::tcp()]
+    vec![OnionExitService::tcp(), OnionExitService::https()]
 }
 
-/// Browser HTTPS-only onion-exit service set.
+/// Standard HTTPS-over-TCP onion-exit service set.
 pub fn https_onion_exit_services() -> Vec<OnionExitService> {
     vec![OnionExitService::https()]
 }
@@ -135,7 +135,10 @@ pub enum OnionExitTransport {
     WebTransport,
     /// Protocol-specific request/response service.
     RequestResponse,
-    /// Browser/application-layer HTTPS proxy service.
+    /// Legacy browser/application-layer HTTPS proxy marker.
+    ///
+    /// The reserved `https` service is TCP-backed; this variant remains for compatibility with
+    /// older serialized descriptors and explicit custom transports.
     Https,
 }
 
@@ -171,7 +174,7 @@ impl OnionServiceName {
         Ok(Self(trimmed.to_ascii_lowercase()))
     }
 
-    /// Return the standard browser HTTPS exit service name.
+    /// Return the standard HTTPS-over-TCP exit service name.
     pub fn https() -> Self {
         Self::static_name("https")
     }
@@ -222,9 +225,9 @@ impl OnionExitService {
         Self { name, transport }
     }
 
-    /// Return the standard browser HTTPS exit service.
+    /// Return the standard HTTPS-over-TCP exit service.
     pub fn https() -> Self {
-        Self::from_name(OnionServiceName::https(), OnionExitTransport::Https)
+        Self::from_name(OnionServiceName::https(), OnionExitTransport::Tcp)
     }
 
     /// Return the standard native TCP exit service.
@@ -245,12 +248,23 @@ impl OnionExitService {
     /// Return whether this service satisfies a route request for `service`.
     ///
     /// Built-in service names reserve their transport class. Custom service names remain
-    /// application-defined and match by name.
+    /// application-defined and match by name. HTTPS is a reserved TCP-backed service, while the
+    /// legacy `https`/`Https` pair remains readable for older descriptors.
     pub fn matches_route_service(&self, service: &str) -> bool {
         match Self::reserved_transport(service) {
-            Some(transport) => self.matches(service, transport),
+            Some(transport) => {
+                self.matches(service, transport) || self.matches_legacy_reserved_transport(service)
+            }
             None => self.has_name(service),
         }
+    }
+
+    fn matches_legacy_reserved_transport(&self, service: &str) -> bool {
+        OnionServiceName::parse(service).is_ok_and(|name| {
+            name == OnionServiceName::https()
+                && self.name == name
+                && self.transport == OnionExitTransport::Https
+        })
     }
 
     /// Return the reserved transport for a built-in service name.
@@ -258,7 +272,7 @@ impl OnionExitService {
         let service = OnionServiceName::parse(service).ok()?;
         match service.as_str() {
             "tcp" => Some(OnionExitTransport::Tcp),
-            "https" => Some(OnionExitTransport::Https),
+            "https" => Some(OnionExitTransport::Tcp),
             _ => None,
         }
     }
@@ -289,13 +303,19 @@ pub struct OnionExitPolicy {
 pub struct OnionExitTarget(String);
 
 impl OnionExitTarget {
+    const WILDCARD_AUTHORITY: &'static str = "*:*";
+
     /// Parse and canonicalize an exit target authority.
     pub fn parse(target: impl AsRef<str>) -> Result<Self> {
-        OnionProxyTarget::parse_authority(target.as_ref())
+        let raw = target.as_ref().trim();
+        if raw == "*" || raw == Self::WILDCARD_AUTHORITY {
+            return Ok(Self(Self::WILDCARD_AUTHORITY.to_string()));
+        }
+        OnionProxyTarget::parse_authority(raw)
             .map(|target| Self(target.authority()))
             .map_err(|error| {
                 Error::InvalidConfig(format!(
-                    "invalid onion exit target {:?}; expected host:port: {error}",
+                    "invalid onion exit target {:?}; expected host:port or *:*: {error}",
                     target.as_ref()
                 ))
             })
@@ -309,6 +329,10 @@ impl OnionExitTarget {
     /// Build a policy target from an already-validated proxy target.
     pub fn from_proxy_target(target: &OnionProxyTarget) -> Self {
         Self(target.authority())
+    }
+
+    fn matches_target(&self, target: &Self) -> bool {
+        self.0 == Self::WILDCARD_AUTHORITY || self == target
     }
 }
 
@@ -367,11 +391,15 @@ impl OnionExitPolicy {
     }
 
     fn allows(&self, target: &OnionExitTarget) -> bool {
-        self.allowed_targets.iter().any(|allowed| allowed == target)
+        self.allowed_targets
+            .iter()
+            .any(|allowed| allowed.matches_target(target))
     }
 
     fn denies(&self, target: &OnionExitTarget) -> bool {
-        self.denied_targets.iter().any(|denied| denied == target)
+        self.denied_targets
+            .iter()
+            .any(|denied| denied.matches_target(target))
     }
 }
 
@@ -589,6 +617,8 @@ impl OnionExitDescriptor {
     /// Return whether this descriptor offers `service` over `transport`.
     pub fn offers_service_transport(&self, service: &str, transport: OnionExitTransport) -> bool {
         self.service.matches(service, transport)
+            || (transport == OnionExitTransport::Tcp
+                && self.service.matches_legacy_reserved_transport(service))
     }
 
     /// Verify the descriptor signature and DID/public-key binding.

@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! Node-layer DHT registration tasks.
 //!
 //! A registration task is a periodic node-side publisher. The task decides what

@@ -2,7 +2,7 @@
 
 This native example registers the `example` namespace, connects to a seed node over HTTP, and sends
 a message to a destination DID. It is intended to interoperate with
-[`examples/frontend`](../frontend).
+[`frontend`](../../frontend).
 
 ## Run with the browser frontend
 

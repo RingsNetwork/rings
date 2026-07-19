@@ -10,7 +10,11 @@ TOPOLOGY="${RINGS_CONNECT_TOPOLOGY:-ring}"
 BASE_INTERNAL_PORT="${RINGS_BASE_INTERNAL_PORT:-50000}"
 BASE_EXTERNAL_PORT="${RINGS_BASE_EXTERNAL_PORT:-51000}"
 NETWORK_ID="${RINGS_NETWORK_ID:-1}"
-ICE_SERVERS="${RINGS_ICE_SERVERS:-stun://stun.l.google.com:19302}"
+if [[ -v RINGS_ICE_SERVERS ]]; then
+    ICE_SERVERS="$RINGS_ICE_SERVERS"
+else
+    ICE_SERVERS="stun://stun.l.google.com:19302"
+fi
 STABILIZE_INTERVAL="${RINGS_STABILIZE_INTERVAL:-3}"
 SESSION_TTL_SECONDS="${RINGS_SESSION_TTL_SECONDS:-2592000}"
 READY_RETRIES="${RINGS_READY_RETRIES:-60}"
@@ -20,6 +24,11 @@ RUNTIME="${RINGS_RUNTIME:-current-thread}"
 WEBRTC_UDP_PORT_MIN="${RINGS_WEBRTC_UDP_PORT_MIN:-}"
 WEBRTC_UDP_PORT_MAX="${RINGS_WEBRTC_UDP_PORT_MAX:-}"
 STORAGE_CAPACITY="${RINGS_STORAGE_CAPACITY:-200000000}"
+ADVERTISE_ONION_RELAY="${RINGS_ADVERTISE_ONION_RELAY:-true}"
+ADVERTISE_ONION_EXIT="${RINGS_ADVERTISE_ONION_EXIT:-true}"
+ONION_EXIT_SERVICES="${RINGS_ONION_EXIT_SERVICES:-tcp:tcp,https:tcp}"
+ONION_EXIT_ALLOW_TARGETS="${RINGS_ONION_EXIT_ALLOW_TARGETS:-*:*}"
+ONION_EXIT_DENY_TARGETS="${RINGS_ONION_EXIT_DENY_TARGETS:-}"
 
 if [[ $# -gt 0 ]]; then
     exec "$@"
@@ -41,16 +50,91 @@ is_true() {
     esac
 }
 
+bool_literal() {
+    local name="$1"
+    local value="$2"
+    case "${value,,}" in
+        1|true|yes|y|on) printf 'true' ;;
+        0|false|no|n|off) printf 'false' ;;
+        *) die "$name must be a boolean, got '$value'" ;;
+    esac
+}
+
 require_uint() {
     local name="$1"
     local value="$2"
     [[ "$value" =~ ^[0-9]+$ ]] || die "$name must be a non-negative integer, got '$value'"
 }
 
+trim() {
+    local value="$1"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    printf '%s' "$value"
+}
+
 yaml_quote() {
     local value="$1"
     value="${value//\'/\'\'}"
     printf "'%s'" "$value"
+}
+
+canonical_onion_transport() {
+    local raw="${1,,}"
+    case "$raw" in
+        tcp|https) printf 'Tcp' ;;
+        udp) printf 'Udp' ;;
+        webtransport|web-transport) printf 'WebTransport' ;;
+        requestresponse|request-response) printf 'RequestResponse' ;;
+        *) die "unsupported onion exit transport '$1'; expected tcp, udp, webtransport, request-response, or https (alias for tcp)" ;;
+    esac
+}
+
+write_yaml_csv_items() {
+    local indent="$1"
+    local csv="$2"
+    local prefix=""
+    local any=false
+    local item=""
+    local old_ifs="$IFS"
+    prefix="$(printf "%${indent}s" "")"
+    IFS=','
+    for item in $csv; do
+        item="$(trim "$item")"
+        [[ -z "$item" ]] && continue
+        printf '%s- %s\n' "$prefix" "$(yaml_quote "$item")"
+        any=true
+    done
+    IFS="$old_ifs"
+    [[ "$any" == true ]]
+}
+
+write_onion_exit_services_yaml() {
+    local csv="$1"
+    local any=false
+    local entry=""
+    local name=""
+    local transport=""
+    local old_ifs="$IFS"
+    IFS=','
+    for entry in $csv; do
+        entry="$(trim "$entry")"
+        [[ -z "$entry" ]] && continue
+        if [[ "$entry" == *:* ]]; then
+            name="$(trim "${entry%%:*}")"
+            transport="$(trim "${entry#*:}")"
+        else
+            name="$entry"
+            transport="$entry"
+        fi
+        [[ -n "$name" ]] || die "onion exit service name must not be empty"
+        transport="$(canonical_onion_transport "$transport")"
+        printf '  - name: %s\n' "$(yaml_quote "$name")"
+        printf '    transport: %s\n' "$transport"
+        any=true
+    done
+    IFS="$old_ifs"
+    [[ "$any" == true ]] || die "RINGS_ONION_EXIT_SERVICES must include at least one service when RINGS_ADVERTISE_ONION_EXIT is true"
 }
 
 normalize_private_key() {
@@ -76,9 +160,15 @@ require_uint RINGS_SESSION_TTL_SECONDS "$SESSION_TTL_SECONDS"
 require_uint RINGS_READY_RETRIES "$READY_RETRIES"
 require_uint RINGS_READY_SLEEP_SECONDS "$READY_SLEEP_SECONDS"
 require_uint RINGS_STORAGE_CAPACITY "$STORAGE_CAPACITY"
+ADVERTISE_ONION_RELAY="$(bool_literal RINGS_ADVERTISE_ONION_RELAY "$ADVERTISE_ONION_RELAY")"
+ADVERTISE_ONION_EXIT="$(bool_literal RINGS_ADVERTISE_ONION_EXIT "$ADVERTISE_ONION_EXIT")"
 
 if (( NODE_COUNT < 1 )); then
     die "RINGS_NODE_COUNT must be at least 1"
+fi
+
+if [[ "$ADVERTISE_ONION_EXIT" == "true" ]] && [[ -z "$(trim "$ONION_EXIT_ALLOW_TARGETS")" ]]; then
+    die "RINGS_ONION_EXIT_ALLOW_TARGETS must include at least one target when RINGS_ADVERTISE_ONION_EXIT is true"
 fi
 
 internal_last_port=$((BASE_INTERNAL_PORT + NODE_COUNT - 1))
@@ -207,6 +297,26 @@ write_config() {
         printf 'endpoint_url: %s\n' "$(yaml_quote "http://127.0.0.1:$internal_port")"
         printf 'ice_servers: %s\n' "$(yaml_quote "$ICE_SERVERS")"
         printf 'stabilize_interval: %s\n' "$STABILIZE_INTERVAL"
+        printf 'advertise_onion_relay: %s\n' "$ADVERTISE_ONION_RELAY"
+        printf 'advertise_onion_exit: %s\n' "$ADVERTISE_ONION_EXIT"
+        if [[ "$ADVERTISE_ONION_EXIT" == "true" ]]; then
+            printf 'onion_exit_services:\n'
+            write_onion_exit_services_yaml "$ONION_EXIT_SERVICES"
+            printf 'onion_exit_policy:\n'
+            printf '  allowed_targets:\n'
+            write_yaml_csv_items 4 "$ONION_EXIT_ALLOW_TARGETS" \
+                || die "RINGS_ONION_EXIT_ALLOW_TARGETS must include at least one target when RINGS_ADVERTISE_ONION_EXIT is true"
+            if [[ -n "$(trim "$ONION_EXIT_DENY_TARGETS")" ]]; then
+                printf '  denied_targets:\n'
+                write_yaml_csv_items 4 "$ONION_EXIT_DENY_TARGETS" \
+                    || die "RINGS_ONION_EXIT_DENY_TARGETS did not contain any valid target"
+            else
+                printf '  denied_targets: []\n'
+            fi
+            printf '  max_circuits: 0\n'
+            printf '  max_streams_per_circuit: 0\n'
+            printf '  max_bytes_per_minute: 0\n'
+        fi
         printf 'external_ip: null\n'
         if [[ -n "$WEBRTC_UDP_PORT_MIN" || -n "$WEBRTC_UDP_PORT_MAX" ]]; then
             [[ -n "$WEBRTC_UDP_PORT_MIN" && -n "$WEBRTC_UDP_PORT_MAX" ]] \
@@ -288,7 +398,7 @@ connect_pair() {
     return "$status"
 }
 
-log "starting $NODE_COUNT Rings node(s): topology=$TOPOLOGY, internal=$BASE_INTERNAL_PORT+, external=$BASE_EXTERNAL_PORT+"
+log "starting $NODE_COUNT Rings node(s): topology=$TOPOLOGY, internal=$BASE_INTERNAL_PORT+, external=$BASE_EXTERNAL_PORT+, onion_relay=$ADVERTISE_ONION_RELAY, onion_exit=$ADVERTISE_ONION_EXIT"
 
 for i in $(seq 0 $((NODE_COUNT - 1))); do
     internal_port=$((BASE_INTERNAL_PORT + i))

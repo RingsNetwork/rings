@@ -9,6 +9,7 @@ use crate::error::Error;
 /// A list contains SeedPeer.
 #[derive(Deserialize, Serialize, Debug)]
 pub struct Seed {
+    /// Peers loaded from seed configuration.
     pub peers: Vec<SeedPeer>,
 }
 
@@ -39,6 +40,7 @@ impl TryFrom<ConnectWithSeedRequest> for Seed {
 }
 
 impl Seed {
+    /// Converts this seed list into the RPC request used by `connectWithSeed`.
     pub fn into_connect_with_seed_request(self) -> ConnectWithSeedRequest {
         let mut peers = Vec::new();
 

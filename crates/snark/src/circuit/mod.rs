@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::iter::Iterator;
 use std::ops::Deref;
 use std::ops::DerefMut;
+use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -14,8 +15,10 @@ use bellpepper_core::SynthesisError;
 use ff::PrimeField;
 use nova_snark::traits::circuit::StepCircuit;
 use serde::Deserialize;
+use serde::Deserializer;
 use serde::Serialize;
 
+use crate::error::Error;
 use crate::error::Result;
 use crate::r1cs::R1CS;
 use crate::witness::calculator::WitnessCalculator;
@@ -94,10 +97,27 @@ impl<F: PrimeField> From<Vec<(String, Vec<F>)>> for Input<F> {
 }
 
 /// Circuit
-#[derive(Serialize, Deserialize, Clone, Debug)]
+#[derive(Serialize, Clone, Debug)]
 pub struct Circuit<F: PrimeField> {
     r1cs: Arc<R1CS<F>>,
     witness: Vec<F>,
+}
+
+impl<'de, F> Deserialize<'de> for Circuit<F>
+where F: PrimeField + Deserialize<'de>
+{
+    fn deserialize<D>(deserializer: D) -> core::result::Result<Self, D::Error>
+    where D: Deserializer<'de> {
+        #[derive(Deserialize)]
+        #[serde(bound(deserialize = "F: Deserialize<'de>"))]
+        struct CircuitData<F: PrimeField> {
+            r1cs: Arc<R1CS<F>>,
+            witness: Vec<F>,
+        }
+
+        let data = CircuitData::deserialize(deserializer)?;
+        Self::try_new(data.r1cs, data.witness).map_err(serde::de::Error::custom)
+    }
 }
 
 impl<F: PrimeField> AsRef<Circuit<F>> for &Circuit<F> {
@@ -127,11 +147,7 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
     where F: PrimeField {
         let mut calc = self.calculator.borrow_mut();
         let witness: Vec<F> = calc.calculate_witness::<F>(input.to_vec(), sanity_check)?;
-        let circom = Circuit::<F> {
-            r1cs: self.r1cs.clone(),
-            witness,
-        };
-        Ok(circom)
+        Circuit::<F>::try_new(self.r1cs.clone(), witness)
     }
 
     /// Generate recursive circuit list
@@ -146,7 +162,7 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
     where
         F: PrimeField,
     {
-        fn reshape<F: PrimeField>(input: &[(String, Vec<F>)], output: &[F]) -> Input<F> {
+        fn reshape<F: PrimeField>(input: &[(String, Vec<F>)], output: &[F]) -> Result<Input<F>> {
             let mut ret = vec![];
             let mut iter = output.iter();
 
@@ -154,15 +170,17 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
                 let size = vec.len();
                 let mut new_vec: Vec<F> = Vec::with_capacity(size);
                 for _ in 0..size {
-                    if let Some(item) = iter.next() {
-                        new_vec.push(*item);
-                    } else {
-                        panic!("Failed on reshape output {output:?} as input format {input:?}")
-                    }
+                    let item = iter.next().ok_or_else(|| {
+                        Error::InvalidDataWhenReadingR1CS(
+                            "recursive public output is shorter than public input shape"
+                                .to_string(),
+                        )
+                    })?;
+                    new_vec.push(*item);
                 }
                 ret.push((val.clone(), new_vec));
             }
-            ret.into()
+            Ok(ret.into())
         }
 
         let mut ret = vec![];
@@ -182,12 +200,9 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
                 }
                 calc.calculate_witness::<F>(input.to_vec(), sanity_check)?
             };
-            let circom = Circuit::<F> {
-                r1cs: self.r1cs.clone(),
-                witness: witness.clone(),
-            };
+            let circom = Circuit::<F>::try_new(self.r1cs.clone(), witness.clone())?;
             log::trace!("witness: {:?}, r1cs: {:?}", witness, self.r1cs);
-            latest_output = reshape(&public_input, &circom.get_public_outputs());
+            latest_output = reshape(&public_input, &circom.get_public_outputs()?)?;
             ret.push(circom);
         }
         Ok(ret)
@@ -195,25 +210,38 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
 }
 
 impl<F: PrimeField> Circuit<F> {
-    /// Create a new instance
-    pub fn new(r1cs: Arc<R1CS<F>>, witness: Vec<F>) -> Self {
-        Self { r1cs, witness }
+    /// Create a new instance after validating the R1CS and witness shape.
+    pub fn try_new(r1cs: Arc<R1CS<F>>, witness: Vec<F>) -> Result<Self> {
+        r1cs.validate_witness_len(witness.len())?;
+        Ok(Self { r1cs, witness })
     }
 
     /// get public outputs from witness
-    pub fn get_public_outputs(&self) -> Vec<F> {
+    pub fn get_public_outputs(&self) -> Result<Vec<F>> {
         // witness: <1> <Outputs> <Inputs> <Auxs>
         // NOTE: assumes exactly half of the (public inputs + outputs) are outputs
-        let output_count = (self.r1cs.num_inputs - 1) / 2;
-        self.witness[1..output_count + 1].to_vec()
+        let range = self.public_output_range()?;
+        self.witness
+            .get(range.clone())
+            .map(<[F]>::to_vec)
+            .ok_or(Error::InvalidWitnessLength {
+                expected: range.end,
+                actual: self.witness.len(),
+            })
     }
 
     /// get public inputs from witness
-    pub fn get_public_inputs(&self) -> Vec<F> {
+    pub fn get_public_inputs(&self) -> Result<Vec<F>> {
         // witness: <1> <Outputs> <Inputs> <Auxs>
         // NOTE: assumes exactly half of the (public inputs + outputs) are outputs
-        let output_count = (self.r1cs.num_inputs - 1) / 2;
-        self.witness[1 + output_count..self.r1cs.num_inputs].to_vec()
+        let range = self.public_input_range()?;
+        self.witness
+            .get(range.clone())
+            .map(<[F]>::to_vec)
+            .ok_or(Error::InvalidWitnessLength {
+                expected: range.end,
+                actual: self.witness.len(),
+            })
     }
 }
 
@@ -234,11 +262,13 @@ impl<F: PrimeField> StepCircuit<F> for Circuit<F> {
     ) -> core::result::Result<Vec<AllocatedNum<F>>, SynthesisError> {
         let mut vars: Vec<AllocatedNum<F>> = vec![];
         let mut z_out: Vec<AllocatedNum<F>> = vec![];
-        let pub_output_count = (self.r1cs.num_inputs - 1) / 2;
+        let pub_output_count = self
+            .public_output_count()
+            .map_err(|_| SynthesisError::AssignmentMissing)?;
 
         for i in 1..self.r1cs.num_inputs {
             // Public inputs do not exist, so we alloc, and later enforce equality from z values
-            let f: F = self.witness[i];
+            let f = self.witness_value(i)?;
             let v = AllocatedNum::alloc(cs.namespace(|| format!("public_{i}")), || Ok(f))?;
 
             vars.push(v.clone());
@@ -249,42 +279,137 @@ impl<F: PrimeField> StepCircuit<F> for Circuit<F> {
         }
         for i in 0..self.r1cs.num_aux {
             // Private witness trace
-            let f: F = self.witness[i + self.r1cs.num_inputs];
+            let f = self.witness_value(i + self.r1cs.num_inputs)?;
             let v = AllocatedNum::alloc(cs.namespace(|| format!("aux_{i}")), || Ok(f))?;
             vars.push(v);
         }
 
-        let make_lc = |lc_data: Vec<(usize, F)>| {
-            let res = lc_data.iter().fold(
-                LinearCombination::<F>::zero(),
-                |lc: LinearCombination<F>, (index, coeff)| {
-                    lc + if *index > 0_usize {
-                        (*coeff, vars[*index - 1].get_variable())
-                    } else {
-                        (*coeff, CS::one())
-                    }
-                },
-            );
-            res
-        };
         for (i, constraint) in self.r1cs.constraints.iter().enumerate() {
+            let a = bellpepper_linear_combination::<CS, F>(&vars, &constraint.0)?;
+            let b = bellpepper_linear_combination::<CS, F>(&vars, &constraint.1)?;
+            let c = bellpepper_linear_combination::<CS, F>(&vars, &constraint.2)?;
             cs.enforce(
                 || format!("constraint {i}"),
-                |_| make_lc(constraint.0.clone()),
-                |_| make_lc(constraint.1.clone()),
-                |_| make_lc(constraint.2.clone()),
+                |_| a.clone(),
+                |_| b.clone(),
+                |_| c.clone(),
             );
         }
 
         for i in (pub_output_count + 1)..self.r1cs.num_inputs {
+            let Some(z_value) = z.get(i - 1 - pub_output_count) else {
+                return Err(SynthesisError::AssignmentMissing);
+            };
+            let Some(var) = vars.get(i - 1) else {
+                return Err(SynthesisError::AssignmentMissing);
+            };
+            let z_variable = z_value.get_variable();
+            let public_variable = var.get_variable();
             cs.enforce(
                 || format!("pub input enforce {i}"),
-                |lc| lc + z[i - 1 - pub_output_count].get_variable(),
+                |lc| lc + z_variable,
                 |lc| lc + CS::one(),
-                |lc| lc + vars[i - 1].get_variable(),
+                |lc| lc + public_variable,
             );
         }
 
         Ok(z_out)
+    }
+}
+
+impl<F: PrimeField> Circuit<F> {
+    fn witness_value(&self, index: usize) -> core::result::Result<F, SynthesisError> {
+        self.witness
+            .get(index)
+            .copied()
+            .ok_or(SynthesisError::AssignmentMissing)
+    }
+
+    fn public_output_count(&self) -> Result<usize> {
+        self.r1cs.validate_witness_len(self.witness.len())?;
+        self.r1cs.public_io_value_count()
+    }
+
+    fn public_output_range(&self) -> Result<Range<usize>> {
+        let output_count = self.public_output_count()?;
+        Ok(1..output_count + 1)
+    }
+
+    fn public_input_range(&self) -> Result<Range<usize>> {
+        let output_count = self.public_output_count()?;
+        Ok(1 + output_count..self.r1cs.num_inputs)
+    }
+}
+
+pub(super) fn bellpepper_linear_combination<CS, F>(
+    vars: &[AllocatedNum<F>],
+    lc_data: &[(usize, F)],
+) -> core::result::Result<LinearCombination<F>, SynthesisError>
+where
+    CS: ConstraintSystem<F>,
+    F: PrimeField,
+{
+    let mut lc = LinearCombination::<F>::zero();
+    for (index, coeff) in lc_data {
+        let term = if *index == 0 {
+            (*coeff, CS::one())
+        } else {
+            let variable_index = index
+                .checked_sub(1)
+                .ok_or(SynthesisError::AssignmentMissing)?;
+            let var = vars
+                .get(variable_index)
+                .ok_or(SynthesisError::AssignmentMissing)?;
+            (*coeff, var.get_variable())
+        };
+        lc = lc + term;
+    }
+    Ok(lc)
+}
+
+#[cfg(test)]
+mod tests {
+    use pasta_curves::Fp;
+
+    use super::*;
+
+    #[test]
+    fn circuit_deserialization_rejects_invalid_r1cs_shape() {
+        let value = serde_json::json!({
+            "r1cs": {
+                "num_inputs": 0,
+                "num_aux": 0,
+                "num_variables": 0,
+                "constraints": []
+            },
+            "witness": []
+        });
+
+        let result = serde_json::from_value::<Circuit<Fp>>(value);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn circuit_serialization_round_trip_preserves_validated_shape(
+    ) -> std::result::Result<(), String> {
+        let circuit = Circuit::try_new(
+            Arc::new(R1CS {
+                num_inputs: 3,
+                num_aux: 1,
+                num_variables: 4,
+                constraints: Vec::new(),
+            }),
+            vec![Fp::from(1); 4],
+        )
+        .map_err(|error| error.to_string())?;
+        let encoded = serde_json::to_string(&circuit).map_err(|error| error.to_string())?;
+        let decoded =
+            serde_json::from_str::<Circuit<Fp>>(&encoded).map_err(|error| error.to_string())?;
+        let outputs = decoded
+            .get_public_outputs()
+            .map_err(|error| error.to_string())?;
+
+        assert_eq!(outputs, vec![Fp::from(1)]);
+        Ok(())
     }
 }

@@ -127,7 +127,6 @@ impl OnionExitAccounting {
     }
 
     /// Return bytes still available in the current per-minute window.
-    #[cfg(feature = "browser")]
     pub(crate) fn remaining_bytes(&self, policy: &OnionExitPolicy) -> Result<Option<u64>> {
         if policy.max_bytes_per_minute == 0 {
             return Ok(None);

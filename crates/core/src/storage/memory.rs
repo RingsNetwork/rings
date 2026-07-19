@@ -4,6 +4,7 @@ use dashmap::DashMap;
 use crate::error::Result;
 use crate::storage::KvStorageInterface;
 
+/// In-memory storage implementation backed by a concurrent map.
 #[derive(Debug, Default)]
 pub struct MemStorage<V>
 where V: Clone
@@ -14,6 +15,7 @@ where V: Clone
 impl<V> MemStorage<V>
 where V: Clone
 {
+    /// Create an empty memory storage table.
     pub fn new() -> Self {
         Self {
             table: DashMap::default(),

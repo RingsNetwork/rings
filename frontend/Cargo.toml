@@ -1,0 +1,54 @@
+[package]
+name = "rings-frontend"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0"
+publish = false
+
+# Wasm/Yew app for both web and Chrome MV3 extension packaging. The empty
+# workspace avoids feature unification with native examples while this app uses
+# browser_default.
+[workspace]
+
+[dependencies]
+base58 = "0.2"
+base64 = "0.22"
+futures = "0.3"
+gloo-timers = { version = "0.3", features = ["futures"] }
+js-sys = "=0.3.98"
+rings-node = { path = "../crates/node", default-features = false, features = ["browser_default"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+wasm-bindgen = "=0.2.121"
+wasm-bindgen-futures = "=0.4.71"
+web-sys = { version = "=0.3.98", features = [
+    "Event",
+    "EventTarget",
+    "History",
+    "HtmlInputElement",
+    "HtmlSelectElement",
+    "HtmlTextAreaElement",
+    "InputEvent",
+    "Location",
+    "Url",
+    "Window",
+] }
+yew = { version = "0.21", features = ["csr"] }
+
+[dev-dependencies]
+wasm-bindgen-test = "=0.3.71"
+
+[patch.crates-io]
+proc-macro-error2 = { path = "../third_party/proc-macro-error2" }
+
+[lints.rust]
+missing_docs = "deny"
+warnings = "deny"
+
+[lints.clippy]
+expect_used = "deny"
+indexing_slicing = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unwrap_used = "deny"

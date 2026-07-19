@@ -12,6 +12,7 @@ use crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD;
 use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
+use crate::dht::entry::EntryLookupKey;
 use crate::dht::entry::EntryOperation;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::PlacementMiss;
@@ -296,6 +297,39 @@ async fn virtual_storage_owner_stores_local_position_locally() -> Result<()> {
 
     assert_eq!(act, PeerRingAction::None);
     assert!(node.storage.get(&placement.to_string()).await?.is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn local_fetch_falls_back_when_local_virtual_owner_has_no_entry() -> Result<()> {
+    let local = Did::from(1u32);
+    let remote = Did::from(2u32);
+    let node = PeerRing::new_with_storage_finger_table_size_and_virtual_nodes(
+        local,
+        3,
+        Box::new(MemStorage::new()),
+        8,
+        VirtualNodeConfig::new(7, 2),
+    );
+    let _ = node.join(remote)?;
+    let placement = first_virtual_position(&node, local)?;
+
+    let remote_lookup = <PeerRing as ChordStorage<_, 1>>::entry_lookup(&node, placement).await?;
+    assert_eq!(
+        remote_lookup,
+        PeerRingAction::MultiActions(vec![PeerRingAction::EntryMisses(vec![PlacementMiss::new(
+            placement, local
+        )])])
+    );
+
+    let local_fetch_lookup = node.entry_lookup_for_fetch::<1>(placement).await?;
+    assert_eq!(
+        local_fetch_lookup,
+        PeerRingAction::MultiActions(vec![PeerRingAction::RemoteAction(
+            remote,
+            RemoteAction::FindEntry(EntryLookupKey::new(placement, placement)),
+        )])
+    );
     Ok(())
 }
 

@@ -1,4 +1,4 @@
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 //! Pure topology transition model for Chord.
 //!
 //! This module is the production home of the algebraic operators previously

@@ -7,35 +7,51 @@ use crate::dht::PeerRing;
 use crate::dht::SuccessorReader;
 use crate::swarm::Swarm;
 
+/// Full runtime inspection snapshot for a swarm.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SwarmInspect {
+    /// Active peer connections known by the swarm.
     pub peers: Vec<ConnectionInspect>,
+    /// DHT routing state for the local peer.
     pub dht: DHTInspect,
+    /// Persistent DHT storage contents.
     pub persistence_storage: StorageInspect,
+    /// Cache DHT storage contents.
     pub cache_storage: StorageInspect,
 }
 
+/// Inspection snapshot for a single peer connection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConnectionInspect {
+    /// Remote DID as a display string.
     pub did: String,
+    /// Connection state as a display string.
     pub state: String,
 }
 
+/// Inspection snapshot for local DHT routing state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DHTInspect {
+    /// Local node DID.
     pub did: String,
+    /// Current successor list.
     pub successors: Vec<String>,
     #[serde(default)]
+    /// Current predecessor, when known.
     pub predecessor: Option<String>,
+    /// Compressed finger table ranges with optional DID values.
     pub finger_table: Vec<(Option<String>, u64, u64)>,
 }
 
+/// Inspection snapshot for key value storage contents.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StorageInspect {
+    /// Stored entries as `(key, entry)` pairs.
     pub items: Vec<(String, Entry)>,
 }
 
 impl SwarmInspect {
+    /// Build a full inspection snapshot from `swarm`.
     pub async fn inspect(swarm: &Swarm) -> Self {
         let dht = DHTInspect::inspect(&swarm.dht());
         let peers = swarm.peers();
@@ -52,6 +68,7 @@ impl SwarmInspect {
 }
 
 impl DHTInspect {
+    /// Build a DHT inspection snapshot from a peer ring.
     pub fn inspect(dht: &PeerRing) -> Self {
         let did = dht.did.to_string();
         let successors = {
@@ -90,6 +107,7 @@ impl DHTInspect {
 }
 
 impl StorageInspect {
+    /// Build a storage inspection snapshot from an entry storage handle.
     pub async fn inspect_kv_storage(storage: &EntryStorage) -> Self {
         Self {
             items: storage
@@ -102,6 +120,7 @@ impl StorageInspect {
     }
 }
 
+/// Compress equal adjacent iterator values into inclusive index ranges.
 pub fn compress_iter<T>(iter: impl Iterator<Item = T>) -> Vec<(T, u64, u64)>
 where T: PartialEq {
     let mut result = vec![];

@@ -1,3 +1,5 @@
+//! Build-time metadata generation for the rings-node crate.
+
 #[cfg(feature = "ffi")]
 extern crate cbindgen;
 use std::process::Command;

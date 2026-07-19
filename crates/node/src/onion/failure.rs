@@ -28,6 +28,8 @@ pub enum OnionRouteError {
         /// Requested hop count including the exit.
         hop_count: usize,
     },
+    /// Route construction could not select a first hop accepted by the caller.
+    NoPermittedFirstHop,
     /// No live exit descriptor offers the requested service.
     NoLiveExit {
         /// Requested service name.
@@ -39,6 +41,13 @@ pub enum OnionRouteError {
         service: String,
         /// Required transport class.
         transport: OnionExitTransport,
+    },
+    /// Live exits advertise the service transport, but none can serve the requested proxy protocol.
+    NoExitForProxyProtocol {
+        /// Requested service name.
+        service: String,
+        /// Requested proxy protocol label.
+        protocol: String,
     },
     /// Live exits advertise the service and transport, but no policy allows the target.
     NoExitAllowsTarget {
@@ -143,12 +152,19 @@ impl fmt::Display for OnionRouteError {
             Self::NotEnoughRelays { hop_count } => {
                 write!(f, "not enough relay candidates for {hop_count}-hop onion route")
             }
+            Self::NoPermittedFirstHop => {
+                f.write_str("no onion route has a permitted first hop")
+            }
             Self::NoLiveExit { service } => {
                 write!(f, "no live onion exit offers service {service:?}")
             }
             Self::NoExitWithTransport { service, transport } => write!(
                 f,
                 "no live onion exit offers service {service:?} over {transport:?}"
+            ),
+            Self::NoExitForProxyProtocol { service, protocol } => write!(
+                f,
+                "no live onion exit offers service {service:?} for proxy protocol {protocol:?}"
             ),
             Self::NoExitAllowsTarget { service, target } => write!(
                 f,

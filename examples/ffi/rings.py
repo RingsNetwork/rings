@@ -129,6 +129,10 @@ def _provider_value(provider: ProviderHandle | Any):
     return provider
 
 
+def _provider_has_null_field(runtime: FfiRuntime, provider: Any) -> bool:
+    return provider.provider == runtime.ffi.NULL or provider.runtime == runtime.ffi.NULL
+
+
 def request(runtime: FfiRuntime, provider: ProviderHandle | Any, method: str, data: Any) -> bytes:
     if not isinstance(data, str):
         data = json.dumps(data)
@@ -136,6 +140,8 @@ def request(runtime: FfiRuntime, provider: ProviderHandle | Any, method: str, da
     c_data = runtime.ffi.new("char[]", data.encode())
     c_method = runtime.ffi.new("char[]", method.encode())
     ret = runtime.rings.request(runtime.ffi.addressof(provider_value), c_method, c_data)
+    if ret == runtime.ffi.NULL:
+        raise RuntimeError(f"rings request {method!r} failed")
     return runtime.ffi.string(ret)
 
 
@@ -162,6 +168,8 @@ def create_provider(
         "eip191".encode(),
         signer,
     )
+    if _provider_has_null_field(runtime, provider):
+        raise RuntimeError("rings provider creation failed")
     runtime.rings.listen(runtime.ffi.addressof(provider))
     return ProviderHandle(provider=provider, signer=signer)
 

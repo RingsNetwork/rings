@@ -17,12 +17,13 @@ cargo test -p rings-snark-example
 ElGamal E2E stream round trip. `rings-relay-example` includes deterministic
 local TCP/UDP echo tests in addition to overlay relay tests.
 
-Run the standalone wasm/Yew browser frontend from its own workspace:
+The browser frontend moved to the repository-level [`frontend`](../frontend)
+workspace because it also serves the landing guide and Chrome extension package:
 
 ```bash
-cd examples/frontend && cargo check --target wasm32-unknown-unknown
-cd examples/frontend && cargo test --release --target wasm32-unknown-unknown
-cd examples/frontend && trunk serve --release true
+cd ../frontend && cargo check --target wasm32-unknown-unknown
+cd ../frontend && cargo test --release --target wasm32-unknown-unknown
+cd ../frontend && trunk serve --release true
 ```
 
 Run the standalone dweb and proof wasm/Yew demos from their own workspaces:

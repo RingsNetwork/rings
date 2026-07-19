@@ -1,5 +1,4 @@
 //! rings-node service run with `Swarm` and chord stabilization.
-#![warn(missing_docs)]
 mod http_error;
 mod ws;
 

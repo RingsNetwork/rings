@@ -1,10 +1,10 @@
 //! implement bellpepper proof system for circuit
 
+use super::bellpepper_linear_combination;
 use super::Circuit;
 use crate::prelude::bellpepper;
 use crate::prelude::bellpepper::num::AllocatedNum;
 use crate::prelude::bellpepper::ConstraintSystem;
-use crate::prelude::bellpepper::LinearCombination;
 use crate::prelude::bellpepper::SynthesisError;
 use crate::prelude::ff::PrimeField;
 
@@ -14,7 +14,11 @@ impl<F: PrimeField> bellpepper::Circuit<F> for Circuit<F> {
         let mut vars: Vec<AllocatedNum<F>> = vec![];
 
         for i in 1..self.r1cs.num_inputs {
-            let f: F = self.witness[i];
+            let f = self
+                .witness
+                .get(i)
+                .copied()
+                .ok_or(SynthesisError::AssignmentMissing)?;
             let v = AllocatedNum::alloc(cs.namespace(|| format!("public_{i}")), || Ok(f))?;
 
             vars.push(v);
@@ -22,31 +26,24 @@ impl<F: PrimeField> bellpepper::Circuit<F> for Circuit<F> {
 
         for i in 0..self.r1cs.num_aux {
             // Private witness trace
-            let f: F = self.witness[i + self.r1cs.num_inputs];
+            let f = self
+                .witness
+                .get(i + self.r1cs.num_inputs)
+                .copied()
+                .ok_or(SynthesisError::AssignmentMissing)?;
             let v = AllocatedNum::alloc(cs.namespace(|| format!("aux_{i}")), || Ok(f))?;
             vars.push(v);
         }
 
-        let make_lc = |lc_data: Vec<(usize, F)>| {
-            let res = lc_data.iter().fold(
-                LinearCombination::<F>::zero(),
-                |lc: LinearCombination<F>, (index, coeff)| {
-                    lc + if *index > 0 {
-                        (*coeff, vars[*index - 1].get_variable())
-                    } else {
-                        (*coeff, CS::one())
-                    }
-                },
-            );
-            res
-        };
-
         for (i, constraint) in self.r1cs.constraints.iter().enumerate() {
+            let a = bellpepper_linear_combination::<CS, F>(&vars, &constraint.0)?;
+            let b = bellpepper_linear_combination::<CS, F>(&vars, &constraint.1)?;
+            let c = bellpepper_linear_combination::<CS, F>(&vars, &constraint.2)?;
             cs.enforce(
                 || format!("constraint {i}"),
-                |_| make_lc(constraint.0.clone()),
-                |_| make_lc(constraint.1.clone()),
-                |_| make_lc(constraint.2.clone()),
+                |_| a.clone(),
+                |_| b.clone(),
+                |_| c.clone(),
             );
         }
 

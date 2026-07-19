@@ -1,4 +1,4 @@
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 
 use std::io::Write;
 use std::sync::Arc;

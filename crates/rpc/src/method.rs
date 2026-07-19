@@ -1,5 +1,4 @@
 //! Rpc methods.
-#![warn(missing_docs)]
 
 use super::error::Error;
 use super::error::Result;

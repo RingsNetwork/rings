@@ -1,5 +1,3 @@
-#![warn(missing_docs)]
-
 //! RPC handler for both feature=browser and feature=node.
 //! We support handling the RPC request in either native or browser environment by `InternalRpcHandler` and `ExternalRpcHandler` from rings_rpc crate.
 //! For the native environment, we use jsonrpc_core to handle requests.

@@ -1,5 +1,6 @@
 use super::common::*;
 use super::*;
+use crate::onion::OnionServiceName;
 
 #[tokio::test]
 async fn onion_exit_lookup_uses_dedicated_exit_registry() -> Result<()> {
@@ -117,7 +118,7 @@ async fn onion_proxy_route_uses_protocol_service_class() -> Result<()> {
 }
 
 #[tokio::test]
-async fn onion_route_rejects_reserved_service_with_wrong_transport() -> Result<()> {
+async fn onion_route_accepts_https_service_over_tcp_transport() -> Result<()> {
     let processor = prepare_processor().await;
     let exit = prepare_processor().await;
     let descriptor = onion_exit_descriptor_for_processor_with_service(
@@ -137,22 +138,17 @@ async fn onion_route_rejects_reserved_service_with_wrong_transport() -> Result<(
         .storage_store(Processor::onion_exit_registry_entry(vec![descriptor])?)
         .await?;
 
-    let error = processor
+    let route = processor
         .build_onion_route("https".to_string(), 1, false)
-        .await
-        .err()
-        .ok_or_else(|| Error::InvalidConfig("expected route failure".to_string()))?;
+        .await?;
 
-    assert!(matches!(
-        error,
-        Error::OnionRouteError(OnionRouteError::NoLiveExit { service })
-            if service == "https"
-    ));
+    assert_eq!(route.exit_did(), exit.did());
+    assert_eq!(route.service(), "https");
     Ok(())
 }
 
 #[tokio::test]
-async fn onion_proxy_route_rejects_reserved_service_with_wrong_transport() -> Result<()> {
+async fn onion_proxy_route_accepts_https_service_over_tcp_transport() -> Result<()> {
     let processor = prepare_processor().await;
     let exit = prepare_processor().await;
     let descriptor = onion_exit_descriptor_for_processor_with_service(
@@ -173,16 +169,52 @@ async fn onion_proxy_route_rejects_reserved_service_with_wrong_transport() -> Re
         .await?;
 
     let target = OnionProxyTarget::parse_authority("example.com:443")?;
-    let error = processor
+    let route = processor
         .build_onion_proxy_route(OnionProxyConfig::https_proxy(1, false), target)
+        .await?;
+
+    assert_eq!(route.exit_did(), exit.did());
+    assert_eq!(route.exit_service(), "https");
+    assert_eq!(route.exit_transport(), OnionExitTransport::Tcp);
+    Ok(())
+}
+
+#[tokio::test]
+async fn tcp_connect_route_rejects_browser_https_exit_descriptor() -> Result<()> {
+    let processor = prepare_processor().await;
+    let browser_exit = prepare_processor().await;
+    let descriptor = onion_exit_descriptor_for_processor_with_node_type_service(
+        &browser_exit,
+        OnlineNodeType::Browser,
+        OnionExitService::https(),
+        get_epoch_ms(),
+        {
+            let mut policy = onion_policy(&["example.com:443"], &[])?;
+            policy.max_circuits = 8;
+            policy.max_streams_per_circuit = 2;
+            policy.max_bytes_per_minute = 4096;
+            policy
+        },
+    )?;
+
+    processor
+        .storage_store(Processor::onion_exit_registry_entry(vec![descriptor])?)
+        .await?;
+
+    let target = OnionProxyTarget::parse_authority("example.com:443")?;
+    let error = processor
+        .build_onion_proxy_route(
+            OnionProxyConfig::tcp_connect_service(OnionServiceName::https(), 1, false)?,
+            target,
+        )
         .await
         .err()
         .ok_or_else(|| Error::InvalidConfig("expected route failure".to_string()))?;
 
     assert!(matches!(
         error,
-        Error::OnionRouteError(OnionRouteError::NoExitWithTransport { service, transport })
-            if service == "https" && transport == OnionExitTransport::Https
+        Error::OnionRouteError(OnionRouteError::NoExitForProxyProtocol { service, protocol })
+            if service == "https" && protocol == "tcp-connect"
     ));
     Ok(())
 }

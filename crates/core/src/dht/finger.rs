@@ -1,6 +1,6 @@
 //! FingerTable
 
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 
 use derivative::Derivative;
 use serde::Deserialize;

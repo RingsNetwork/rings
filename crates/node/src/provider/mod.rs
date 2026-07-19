@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! General Provider, this module provide Provider implementation for FFI and WASM
 
 use std::future::Future;
@@ -43,6 +42,8 @@ pub struct Provider {
     extensions: crate::extension::ext::Extensions,
     #[cfg(feature = "browser")]
     onion_https_runtime: Arc<Mutex<Option<Arc<crate::onion::https::OnionHttpsRuntime>>>>,
+    #[cfg(feature = "browser")]
+    onion_directory_endpoint: Arc<Mutex<Option<String>>>,
 }
 
 /// Async signer, without Send required
@@ -73,6 +74,8 @@ impl Provider {
             extensions,
             #[cfg(feature = "browser")]
             onion_https_runtime: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "browser")]
+            onion_directory_endpoint: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -149,6 +152,8 @@ impl Provider {
             extensions,
             #[cfg(feature = "browser")]
             onion_https_runtime: Arc::new(Mutex::new(None)),
+            #[cfg(feature = "browser")]
+            onion_directory_endpoint: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -247,10 +252,18 @@ impl Provider {
         params: serde_json::Value,
     ) -> Result<serde_json::Value> {
         tracing::debug!("request {}", method);
-        self.handler
+        #[cfg(feature = "browser")]
+        let onion_directory_endpoint = onion_directory_endpoint_from_rpc(method.as_str(), &params);
+        let result = self
+            .handler
             .handle_request(self.processor.clone(), method, params)
             .await
-            .map_err(Error::InternalRpcError)
+            .map_err(Error::InternalRpcError)?;
+        #[cfg(feature = "browser")]
+        if let Some(endpoint) = onion_directory_endpoint {
+            self.set_onion_directory_endpoint(Some(endpoint))?;
+        }
+        Ok(result)
     }
 }
 
@@ -274,5 +287,37 @@ impl Provider {
     /// This is a long-running task; do not await completion as a readiness signal.
     pub async fn listen(&self) {
         self.processor.listen().await;
+    }
+}
+
+#[cfg(feature = "browser")]
+fn onion_directory_endpoint_from_rpc(method: &str, params: &serde_json::Value) -> Option<String> {
+    if !matches!(method, "connectPeerViaHttp" | "ConnectPeerViaHttp") {
+        return None;
+    }
+    params
+        .get("url")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+#[cfg(feature = "browser")]
+impl Provider {
+    pub(crate) fn set_onion_directory_endpoint(&self, endpoint: Option<String>) -> Result<()> {
+        let mut slot = self
+            .onion_directory_endpoint
+            .lock()
+            .map_err(|_| Error::Lock)?;
+        *slot = endpoint;
+        Ok(())
+    }
+
+    pub(crate) fn onion_directory_endpoint(&self) -> Result<Option<String>> {
+        self.onion_directory_endpoint
+            .lock()
+            .map(|slot| slot.clone())
+            .map_err(|_| Error::Lock)
     }
 }

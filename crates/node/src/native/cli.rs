@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! # ring-node-client
 //!
 //! ring-node-client is a command-line tool for interacting with the Ring Node backend API. It allows users to establish WebRTC connections with remote peers, send and receive messages, and publish and subscribe to topics.

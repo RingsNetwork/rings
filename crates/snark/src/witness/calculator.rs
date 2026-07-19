@@ -29,8 +29,6 @@ use wasmer::MemoryType;
 use wasmer::Module;
 use wasmer::RuntimeError;
 use wasmer::Store;
-#[cfg(feature = "llvm")]
-use wasmer_compiler_llvm::LLVM;
 
 use super::circom::Circom;
 use super::circom::Circom2;
@@ -134,14 +132,6 @@ impl WitnessCalculator {
 
     /// Creates a new `Store` for Wasm execution.
     pub fn new_store() -> Store {
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "llvm")] {
-                let compiler = LLVM::new();
-                let store = Store::new(compiler);
-            } else {
-
-            }
-        }
         Store::default()
     }
 
@@ -190,9 +180,9 @@ impl WitnessCalculator {
             let mut safe_memory = SafeMemory::new(memory, n32 as usize, U256::ZERO);
             instance.get_raw_prime(&mut store)?;
             let mut arr = vec![0; n32 as usize];
-            for i in 0..n32 {
-                let res = instance.read_shared_rw_memory(&mut store, i)?;
-                arr[i as usize] = res;
+            for (i, slot) in arr.iter_mut().enumerate() {
+                let res = instance.read_shared_rw_memory(&mut store, i as u32)?;
+                *slot = res;
             }
             let prime = u256_from_vec_u32(&arr)?;
 
@@ -218,7 +208,7 @@ impl WitnessCalculator {
             let n32 = (instance.get_fr_len(&mut store)? >> 2) - 2;
             let mut safe_memory = SafeMemory::new(memory, n32 as usize, U256::ZERO);
             let ptr = instance.get_ptr_raw_prime(&mut store)?;
-            let prime = safe_memory.read_big(&store, ptr as usize);
+            let prime = safe_memory.read_big(&store, ptr as usize)?;
 
             let n64 = ((prime.bits() - 1) / 64 + 1) as u32;
             safe_memory.prime = prime;
@@ -264,9 +254,9 @@ impl WitnessCalculator {
     ) -> Result<Vec<F>> {
         self.instance.init(&mut self.store, sanity_check)?;
 
-        let old_mem_free_pos = self.memory.free_pos(&self.store);
-        let p_sig_offset = self.memory.alloc_u32(&self.store);
-        let p_fr = self.memory.alloc_fr(&self.store);
+        let old_mem_free_pos = self.memory.free_pos(&self.store)?;
+        let p_sig_offset = self.memory.alloc_u32(&self.store)?;
+        let p_fr = self.memory.alloc_fr(&self.store)?;
 
         // allocate the inputs
         for (name, values) in input {
@@ -275,7 +265,7 @@ impl WitnessCalculator {
             self.instance
                 .get_signal_offset32(&mut self.store, p_sig_offset, 0, msb, lsb)?;
 
-            let sig_offset = self.memory.read_u32(&self.store, p_sig_offset as usize) as usize;
+            let sig_offset = self.memory.read_u32(&self.store, p_sig_offset as usize)? as usize;
 
             for (i, value) in values.into_iter().enumerate() {
                 let value = u256_from_vec_u32(&to_vec_u32(value))?;
@@ -290,11 +280,11 @@ impl WitnessCalculator {
         let n_vars = self.instance.get_n_vars(&mut self.store)?;
         for i in 0..n_vars {
             let ptr = self.instance.get_ptr_witness(&mut self.store, i)? as usize;
-            let el = self.memory.read_fr(&self.store, ptr);
+            let el = self.memory.read_fr(&self.store, ptr)?;
             w.push(el);
         }
 
-        self.memory.set_free_pos(&self.store, old_mem_free_pos);
+        self.memory.set_free_pos(&self.store, old_mem_free_pos)?;
 
         Ok(w)
     }
@@ -315,8 +305,14 @@ impl WitnessCalculator {
             for (i, value) in values.into_iter().enumerate() {
                 let f_arr = to_vec_u32(value);
                 for j in 0..n32 {
+                    let Some(word) = f_arr.get(j as usize) else {
+                        return Err(Error::WitnessInvalidU256WordLength {
+                            expected: n32 as usize,
+                            actual: f_arr.len(),
+                        });
+                    };
                     self.instance
-                        .write_shared_rw_memory(&mut self.store, j, f_arr[j as usize])?;
+                        .write_shared_rw_memory(&mut self.store, j, *word)?;
                 }
                 self.instance
                     .set_input_signal(&mut self.store, msb, lsb, i as u32)?;
@@ -329,9 +325,10 @@ impl WitnessCalculator {
         for i in 0..witness_size {
             self.instance.get_witness(&mut self.store, i)?;
             let mut arr = vec![0; n32 as usize];
-            for j in 0..n32 {
-                arr[(n32 as usize) - 1 - (j as usize)] =
-                    self.instance.read_shared_rw_memory(&mut self.store, j)?;
+            for (j, slot) in arr.iter_mut().rev().enumerate() {
+                *slot = self
+                    .instance
+                    .read_shared_rw_memory(&mut self.store, j as u32)?;
             }
             w.push(from_vec_u32(arr));
         }
@@ -348,7 +345,18 @@ impl WitnessCalculator {
         let view = self.memory.view(store);
         let bytes = unsafe { view.data_unchecked() };
 
-        let arr = bytes[ptr..ptr + len as usize].to_vec();
+        let end = ptr
+            .checked_add(len as usize)
+            .ok_or_else(|| Error::WitnessWasmMemoryError("witness buffer overflow".to_string()))?;
+        let arr = bytes
+            .get(ptr..end)
+            .ok_or_else(|| {
+                Error::WitnessWasmMemoryError(format!(
+                    "witness buffer out of bounds: ptr={ptr}, len={len}, memory={}",
+                    bytes.len()
+                ))
+            })?
+            .to_vec();
 
         Ok(arr)
     }

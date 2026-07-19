@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! Unified, effect-separated protocol abstraction shared by `native` and `browser`.
 //!
 //! Design: *functional core, imperative shell*. A protocol author writes only a **pure**

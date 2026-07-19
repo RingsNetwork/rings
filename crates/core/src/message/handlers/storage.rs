@@ -1,4 +1,4 @@
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 
 use std::sync::Arc;
 
@@ -420,8 +420,10 @@ impl<const REDUNDANT: u16> ChordStorageInterface<REDUNDANT> for Swarm {
         self.transport.ensure_storage_redundancy::<REDUNDANT>()?;
         self.transport.start_storage_lookup(entry_key, REDUNDANT)?;
         // If peer found that data is on it's localstore, copy it to the cache
-        let act =
-            <PeerRing as ChordStorage<_, REDUNDANT>>::entry_lookup(&self.dht, entry_key).await?;
+        let act = self
+            .dht
+            .entry_lookup_for_fetch::<REDUNDANT>(entry_key)
+            .await?;
         handle_storage_fetch_act::<REDUNDANT>(self.transport.clone(), entry_key, act).await?;
         Ok(())
     }

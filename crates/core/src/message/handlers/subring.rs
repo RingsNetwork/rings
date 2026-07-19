@@ -1,4 +1,4 @@
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 use async_trait::async_trait;
 
 use super::storage::handle_storage_store_act;

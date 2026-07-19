@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! The SNARK extension: the pure [`SnarkProtocol`] router and its `SnarkShell`
 //! interpreter, which owns the task store and runs the proving/verification crypto.
 //!

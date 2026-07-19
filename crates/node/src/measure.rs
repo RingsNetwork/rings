@@ -1,5 +1,3 @@
-#![warn(missing_docs)]
-
 //! This module implemented the `Measure` trait for swarm.
 
 use std::sync::Arc;

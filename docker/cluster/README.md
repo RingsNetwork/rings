@@ -1,6 +1,6 @@
 # Rings Multi-Node Cluster Image
 
-This image runs N native `rings` daemon processes in one container, generates per-node session keys from external private keys, waits for every HTTP API to become ready, then connects the nodes.
+This image runs N native `rings` daemon processes in one container, generates per-node session keys from external private keys, waits for every HTTP API to become ready, then connects the nodes. It is a demo/test cluster, so onion relay and onion exit advertisement are enabled by default.
 
 Build from the repository root:
 
@@ -46,8 +46,15 @@ Useful environment variables:
 - `RINGS_BASE_INTERNAL_PORT`: first loopback JSON-RPC port; default `50000`
 - `RINGS_BASE_EXTERNAL_PORT`: first externally bound JSON-RPC port; default `51000`
 - `RINGS_CLUSTER_DIR`: config, logs, storage, and session key directory; default `/var/lib/rings-cluster`
-- `RINGS_ICE_SERVERS`: ICE server list passed to every node
+- `RINGS_ICE_SERVERS`: ICE server list passed to every node; set it to an empty string to run without ICE servers
 - `RINGS_RUNTIME`: Tokio runtime flavor for each node process; default `current-thread`
+- `RINGS_ADVERTISE_ONION_RELAY`: publish relay capability from every node; default `true`
+- `RINGS_ADVERTISE_ONION_EXIT`: publish exit descriptors from every node; default `true`
+- `RINGS_ONION_EXIT_SERVICES`: comma-separated `name:transport` services; default `tcp:tcp,https:tcp`
+- `RINGS_ONION_EXIT_ALLOW_TARGETS`: comma-separated exit target allow-list; use `*:*` for all targets; default `*:*`
+- `RINGS_ONION_EXIT_DENY_TARGETS`: comma-separated exit target deny-list; default empty
+
+The reserved `https` onion service is TCP-backed. Native nodes advertising the default TCP exit services publish both `tcp:tcp` and `https:tcp`, which lets WorkBench build HTTPS onion proxy routes against the Docker cluster.
 
 Topology modes:
 

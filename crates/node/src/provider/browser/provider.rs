@@ -1,12 +1,11 @@
-#![warn(missing_docs)]
 //! Browser Provider implementation
 #![allow(non_snake_case, non_upper_case_globals, clippy::ptr_offset_with_cast)]
+use std::collections::BTreeSet;
 use std::convert::TryFrom;
 use std::future::Future;
 use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
-use std::time::Duration;
 
 use futures::future::Either;
 use futures::FutureExt;
@@ -14,12 +13,15 @@ use js_sys;
 use js_sys::Uint8Array;
 use rings_core::dht::Did;
 use rings_core::ecc::PublicKey;
+use rings_core::measure::PeerQuality;
+use rings_core::message::DhtProtocolMode;
 use rings_core::prelude::entry;
 use rings_core::prelude::entry::Entry;
 use rings_core::storage::idb::IdbStorage;
 use rings_core::utils::js_utils;
 use rings_core::utils::js_value;
 use rings_derive::wasm_export;
+use rings_rpc::jsonrpc::Client as RpcClient;
 use rings_rpc::protos::rings_node::*;
 use wasm_bindgen;
 use wasm_bindgen::prelude::*;
@@ -27,6 +29,9 @@ use wasm_bindgen_futures;
 use wasm_bindgen_futures::future_to_promise;
 use wasm_bindgen_futures::JsFuture;
 
+use crate::error::Error;
+use crate::error::Result as NodeResult;
+use crate::measure::peer_quality_thresholds;
 use crate::onion::circuit::encode_initial_forward;
 use crate::onion::circuit::route_first_hop;
 use crate::onion::circuit::OnionCircuitCapabilities;
@@ -34,6 +39,8 @@ use crate::onion::circuit::OnionCircuitProtocol;
 use crate::onion::circuit::OnionCircuitShell;
 use crate::onion::circuit::OnionClientReturn;
 use crate::onion::circuit::ONION_CIRCUIT_NAMESPACE;
+use crate::onion::directory;
+use crate::onion::directory::OnionDirectoryReader;
 use crate::onion::https::client_request_from_url as onion_https_client_request_from_url;
 use crate::onion::https::encode_https_payload;
 use crate::onion::https::BrowserOnionCircuitHandler;
@@ -41,7 +48,12 @@ use crate::onion::https::OnionHttpsClientRequest;
 use crate::onion::https::OnionHttpsPayload;
 use crate::onion::https::OnionHttpsRuntime;
 use crate::onion::proxy::OnionProxyConfig;
+use crate::onion::proxy::OnionProxyRoute;
+use crate::onion::proxy::OnionProxyTarget;
+use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitPolicy;
+use crate::onion::OnionRouteError;
+use crate::online::OnlineNodeDescriptor;
 use crate::processor::Processor;
 use crate::processor::ProcessorConfig;
 use crate::provider::AsyncSigner;
@@ -81,6 +93,156 @@ pub struct BrowserOnionProxy {
     processor: Arc<Processor>,
     config: OnionProxyConfig,
     runtime: Arc<OnionHttpsRuntime>,
+    directory_endpoint: Option<String>,
+}
+
+#[derive(Clone)]
+enum BrowserOnionDirectorySource {
+    Local,
+    Remote { endpoint_url: String },
+}
+
+struct BrowserOnionDirectoryReader {
+    processor: Arc<Processor>,
+    source: BrowserOnionDirectorySource,
+}
+
+impl BrowserOnionDirectoryReader {
+    fn local(processor: Arc<Processor>) -> Self {
+        Self {
+            processor,
+            source: BrowserOnionDirectorySource::Local,
+        }
+    }
+
+    fn remote(processor: Arc<Processor>, endpoint_url: String) -> Self {
+        Self {
+            processor,
+            source: BrowserOnionDirectorySource::Remote { endpoint_url },
+        }
+    }
+
+    fn direct_peer_dids(&self) -> BTreeSet<Did> {
+        let local = self.processor.did();
+        self.processor
+            .swarm
+            .peer_dids()
+            .into_iter()
+            .filter(|did| *did != local)
+            .collect()
+    }
+
+    fn route_first_hop_is_direct(&self, route: &OnionProxyRoute) -> NodeResult<bool> {
+        let first_hop = route_first_hop(&route.route)?;
+        Ok(first_hop != self.processor.did() && self.direct_peer_dids().contains(&first_hop))
+    }
+
+    async fn read_online_nodes(&self) -> NodeResult<Vec<OnlineNodeDescriptor>> {
+        match &self.source {
+            BrowserOnionDirectorySource::Local => self.processor.lookup_online_nodes(false).await,
+            BrowserOnionDirectorySource::Remote { endpoint_url } => {
+                let response = RpcClient::new(endpoint_url.as_str())
+                    .lookup_online_nodes(&LookupOnlineNodesRequest {
+                        include_expired: false,
+                    })
+                    .await
+                    .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
+                Ok(crate::rpc_dto::online_node_descriptors_from_infos(
+                    response.nodes,
+                ))
+            }
+        }
+    }
+
+    async fn read_onion_exits(&self, service: &str) -> NodeResult<Vec<OnionExitDescriptor>> {
+        match &self.source {
+            BrowserOnionDirectorySource::Local => {
+                self.processor.lookup_onion_exits(service, false).await
+            }
+            BrowserOnionDirectorySource::Remote { endpoint_url } => {
+                let response = RpcClient::new(endpoint_url.as_str())
+                    .lookup_onion_exits(&LookupOnionExitsRequest {
+                        service: service.to_string(),
+                        include_expired: false,
+                    })
+                    .await
+                    .map_err(|error| Error::RemoteRpcError(error.to_string()))?;
+                Ok(crate::rpc_dto::onion_exit_descriptors_from_infos(
+                    response.exits,
+                ))
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl OnionDirectoryReader for BrowserOnionDirectoryReader {
+    fn local_did(&self) -> Did {
+        self.processor.did()
+    }
+
+    fn dht_protocol_mode(&self) -> DhtProtocolMode {
+        self.processor.swarm.dht_protocol_mode()
+    }
+
+    async fn live_online_nodes(&self) -> NodeResult<Vec<OnlineNodeDescriptor>> {
+        self.read_online_nodes().await
+    }
+
+    async fn live_onion_exits(&self, service: &str) -> NodeResult<Vec<OnionExitDescriptor>> {
+        self.read_onion_exits(service).await
+    }
+
+    async fn peer_qualities(&self) -> Vec<(Did, PeerQuality)> {
+        let thresholds = peer_quality_thresholds();
+        self.processor
+            .peer_measurements()
+            .await
+            .into_iter()
+            .map(|measurement| (measurement.did, measurement.evidence.classify(thresholds)))
+            .collect()
+    }
+}
+
+async fn build_browser_route_from_reader(
+    reader: &BrowserOnionDirectoryReader,
+    config: OnionProxyConfig,
+    target: OnionProxyTarget,
+) -> NodeResult<OnionProxyRoute> {
+    let direct_peers = reader.direct_peer_dids();
+    let route =
+        directory::build_onion_proxy_route_with_first_hop(reader, config, target, move |did| {
+            direct_peers.contains(&did)
+        })
+        .await?;
+    if reader.route_first_hop_is_direct(&route)? {
+        return Ok(route);
+    }
+    Err(Error::OnionRouteError(OnionRouteError::NoPermittedFirstHop))
+}
+
+async fn build_browser_onion_proxy_route(
+    processor: Arc<Processor>,
+    config: OnionProxyConfig,
+    target: OnionProxyTarget,
+    directory_endpoint: Option<String>,
+) -> NodeResult<OnionProxyRoute> {
+    if let Some(endpoint_url) = directory_endpoint {
+        let remote_reader = BrowserOnionDirectoryReader::remote(processor.clone(), endpoint_url);
+        match build_browser_route_from_reader(&remote_reader, config.clone(), target.clone()).await
+        {
+            Ok(route) => return Ok(route),
+            Err(remote_error) => {
+                let local_reader = BrowserOnionDirectoryReader::local(processor);
+                return build_browser_route_from_reader(&local_reader, config, target)
+                    .await
+                    .map_err(|_| remote_error);
+            }
+        }
+    }
+
+    let local_reader = BrowserOnionDirectoryReader::local(processor);
+    build_browser_route_from_reader(&local_reader, config, target).await
 }
 
 #[wasm_export]
@@ -100,15 +262,15 @@ impl BrowserOnionProxy {
         self.config.allow_short_paths
     }
 
-    /// Build a browser-compatible HTTPS onion proxy route for `target_authority` (`host:port`).
+    /// Build an HTTPS-over-TCP onion proxy route for `target_authority` (`host:port`).
     pub fn route(&self, target_authority: String) -> js_sys::Promise {
         let p = self.processor.clone();
         let config = self.config.clone();
+        let directory_endpoint = self.directory_endpoint.clone();
         future_to_promise(async move {
-            let target = crate::onion::proxy::OnionProxyTarget::parse_authority(&target_authority)
-                .map_err(JsError::from)?;
-            let route = p
-                .build_onion_proxy_route(config, target)
+            let target =
+                OnionProxyTarget::parse_authority(&target_authority).map_err(JsError::from)?;
+            let route = build_browser_onion_proxy_route(p, config, target, directory_endpoint)
                 .await
                 .map_err(JsError::from)?;
             let response =
@@ -127,6 +289,7 @@ impl BrowserOnionProxy {
         let p = self.processor.clone();
         let config = self.config.clone();
         let runtime = self.runtime.clone();
+        let directory_endpoint = self.directory_endpoint.clone();
         future_to_promise(async move {
             let request = if request.is_null() || request.is_undefined() {
                 OnionHttpsClientRequest::default()
@@ -135,10 +298,14 @@ impl BrowserOnionProxy {
             };
             let (target, request) = onion_https_client_request_from_url(url.as_str(), request)
                 .map_err(JsError::from)?;
-            let proxy_route = p
-                .build_onion_proxy_route(config, target.clone())
-                .await
-                .map_err(JsError::from)?;
+            let proxy_route = build_browser_onion_proxy_route(
+                p.clone(),
+                config,
+                target.clone(),
+                directory_endpoint,
+            )
+            .await
+            .map_err(JsError::from)?;
             let first_hop = route_first_hop(&proxy_route.route).map_err(JsError::from)?;
             let client_return = OnionClientReturn::new(p.session_sk().session_public_key());
             let (id, receiver) = runtime
@@ -174,7 +341,7 @@ impl BrowserOnionProxy {
                 return Err(JsValue::from(JsError::from(error)));
             }
             let response = receiver.fuse();
-            let timeout = futures_timer::Delay::new(Duration::from_secs(30)).fuse();
+            let timeout = js_utils::window_sleep(30_000).fuse();
             futures::pin_mut!(response, timeout);
             match futures::future::select(response, timeout).await {
                 Either::Left((result, _)) => match result {
@@ -443,10 +610,21 @@ impl Provider {
     /// connect peer with remote jsonrpc server url
     pub fn connect_peer_via_http(&self, remote_url: String) -> js_sys::Promise {
         log::debug!("remote_url: {remote_url}");
-        match js_value::serialize(&ConnectPeerViaHttpRequest { url: remote_url }) {
-            Ok(request) => self.request("ConnectPeerViaHttp".to_string(), request),
-            Err(error) => js_sys::Promise::reject(&JsValue::from(JsError::from(error))),
-        }
+        let provider = self.clone();
+        future_to_promise(async move {
+            let params = serde_json::to_value(ConnectPeerViaHttpRequest {
+                url: remote_url.clone(),
+            })
+            .map_err(JsError::from)?;
+            let ret = provider
+                .request_internal("connectPeerViaHttp".to_string(), params)
+                .await
+                .map_err(JsError::from)?;
+            provider
+                .set_onion_directory_endpoint(Some(remote_url))
+                .map_err(JsError::from)?;
+            Ok(js_value::serialize(&ret).map_err(JsError::from)?)
+        })
     }
 
     /// connect peer with web3 address
@@ -533,7 +711,7 @@ impl Provider {
         })
     }
 
-    /// Create a browser-compatible HTTPS onion proxy.
+    /// Create a browser adapter for the standard HTTPS-over-TCP onion proxy service.
     ///
     /// The returned proxy is not bound to a URL; call [`BrowserOnionProxy::request`] with a full
     /// `https://` URL to send through the selected exit.
@@ -549,6 +727,7 @@ impl Provider {
             processor: self.processor.clone(),
             config: OnionProxyConfig::https_proxy(hop_count, allow_short_paths),
             runtime,
+            directory_endpoint: self.onion_directory_endpoint().map_err(JsError::from)?,
         })
     }
 

@@ -1,5 +1,18 @@
+#[cfg(feature = "node")]
+use std::sync::atomic::AtomicU64;
+#[cfg(feature = "node")]
+use std::sync::atomic::Ordering;
+#[cfg(feature = "node")]
+use std::time::Duration;
+
 use rings_core::ecc::SecretKey;
 use rings_core::session::SessionSk;
+#[cfg(feature = "node")]
+use tokio::io::AsyncReadExt;
+#[cfg(feature = "node")]
+use tokio::io::AsyncWriteExt;
+#[cfg(feature = "node")]
+use tokio::net::TcpListener;
 
 use super::super::*;
 use crate::onion::OnionExitDescriptorBody;
@@ -306,6 +319,82 @@ fn exit_limiter_counts_distinct_circuit_ids() {
     assert!(runtime
         .admit_exit_request(&policy, second, return_peer, 0)
         .is_ok());
+}
+
+#[cfg(feature = "node")]
+#[tokio::test]
+async fn native_fetch_times_out_stalled_response() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (_stream, _) = listener.accept().await.unwrap();
+        std::future::pending::<()>().await;
+    });
+    let request = OnionHttpsRequest {
+        target: format!("{address}"),
+        method: "GET".to_string(),
+        path: "/".to_string(),
+        headers: Vec::new(),
+        body: Vec::new(),
+    };
+
+    let result = native_fetch_with_timeout(
+        &format!("http://{address}/"),
+        &request,
+        DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES,
+        Duration::from_millis(25),
+        |_| Ok(()),
+    )
+    .await;
+
+    server.abort();
+    assert!(
+        matches!(result, Err(Error::HttpRequestError(message)) if message.contains("timed out"))
+    );
+}
+
+#[cfg(feature = "node")]
+#[tokio::test]
+async fn native_fetch_records_response_bytes_as_chunks_arrive() {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0_u8; 1024];
+        let _ = stream.read(&mut request).await.unwrap();
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n2\r\nde\r\n0\r\n\r\n",
+            )
+            .await
+            .unwrap();
+    });
+    let request = OnionHttpsRequest {
+        target: format!("{address}"),
+        method: "GET".to_string(),
+        path: "/".to_string(),
+        headers: Vec::new(),
+        body: Vec::new(),
+    };
+    let recorded = std::sync::Arc::new(AtomicU64::new(0));
+    let recorded_for_fetch = recorded.clone();
+
+    let response = native_fetch_with_timeout(
+        &format!("http://{address}/"),
+        &request,
+        DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES,
+        Duration::from_secs(1),
+        move |bytes| {
+            recorded_for_fetch.fetch_add(bytes, Ordering::SeqCst);
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+
+    server.await.unwrap();
+    assert_eq!(response.body, b"abcde");
+    assert_eq!(recorded.load(Ordering::SeqCst), 5);
 }
 
 #[test]

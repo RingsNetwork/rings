@@ -80,7 +80,7 @@ fn route_for_service(service: &str, relays: &[SessionSk], exit_session: &Session
             session_public_key: exit_session.session_public_key(),
             node_type: OnlineNodeType::Native,
             network_id: 1,
-            service: OnionExitService::new("https", OnionExitTransport::Https)
+            service: OnionExitService::new("https", OnionExitTransport::Tcp)
                 .expect("valid test service"),
             policy: Default::default(),
             started_at_ms: 0,

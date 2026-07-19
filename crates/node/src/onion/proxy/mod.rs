@@ -1,20 +1,21 @@
-#![warn(missing_docs)]
 //! Client-side onion proxy planning.
 //!
 //! This module is runtime-neutral: native can bind it to a local HTTP CONNECT listener, while
-//! browser callers can use the same target and service mapping before handing bytes to a
-//! browser-specific HTTPS data plane. A proxy configuration is target-agnostic; each request
-//! supplies its own target authority.
+//! browser callers can use the same target and service mapping before handing requests to a
+//! browser-specific adapter. A proxy configuration is target-agnostic; each request supplies its
+//! own target authority.
 
 use rings_core::dht::Did;
 
 use crate::error::Error;
 use crate::error::Result;
+use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitService;
 use crate::onion::OnionExitTransport;
 pub use crate::onion::OnionProxyTarget;
 use crate::onion::OnionRoute;
 use crate::onion::OnionServiceName;
+use crate::online::OnlineNodeType;
 
 #[cfg(feature = "node")]
 pub mod http;
@@ -22,7 +23,7 @@ pub mod http;
 /// Exit service used by native HTTP CONNECT/SOCKS-style byte tunnels.
 pub const ONION_PROXY_TCP_SERVICE: &str = "tcp";
 
-/// Exit service used by browser/application-layer HTTPS proxying.
+/// Exit service used by HTTPS proxying over a TCP-backed onion exit.
 pub const ONION_PROXY_HTTPS_SERVICE: &str = "https";
 
 /// Proxy protocol requested by the client ingress.
@@ -30,7 +31,7 @@ pub const ONION_PROXY_HTTPS_SERVICE: &str = "https";
 pub enum OnionProxyProtocol {
     /// HTTP CONNECT, SOCKS CONNECT, or any other byte tunnel. Requires a native TCP exit.
     TcpConnect,
-    /// Application-layer HTTPS proxying. This is the browser-compatible mode.
+    /// HTTPS proxying over the reserved TCP-backed `https` service.
     HttpsProxy,
 }
 
@@ -47,7 +48,15 @@ impl OnionProxyProtocol {
     pub const fn exit_transport(self) -> OnionExitTransport {
         match self {
             Self::TcpConnect => OnionExitTransport::Tcp,
-            Self::HttpsProxy => OnionExitTransport::Https,
+            Self::HttpsProxy => OnionExitTransport::Tcp,
+        }
+    }
+
+    /// Return a stable diagnostic label for this proxy protocol.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::TcpConnect => "tcp-connect",
+            Self::HttpsProxy => "https-proxy",
         }
     }
 
@@ -120,7 +129,7 @@ impl OnionProxyConfig {
         )
     }
 
-    /// Create a browser-compatible HTTPS proxy configuration.
+    /// Create an HTTPS proxy configuration.
     pub fn https_proxy(hop_count: usize, allow_short_paths: bool) -> Self {
         Self::new(OnionProxyProtocol::HttpsProxy, hop_count, allow_short_paths)
     }
@@ -139,9 +148,31 @@ impl OnionProxyConfig {
     pub fn exit_transport(&self) -> OnionExitTransport {
         self.protocol.exit_transport()
     }
+
+    pub(crate) fn accepts_exit_descriptor(&self, descriptor: &OnionExitDescriptor) -> bool {
+        match self.protocol {
+            OnionProxyProtocol::TcpConnect => {
+                descriptor.node_type == OnlineNodeType::Native
+                    && descriptor
+                        .service
+                        .matches(self.service.as_str(), OnionExitTransport::Tcp)
+            }
+            OnionProxyProtocol::HttpsProxy => {
+                self.service == OnionServiceName::https()
+                    && descriptor
+                        .offers_service_transport(self.service.as_str(), OnionExitTransport::Tcp)
+            }
+        }
+    }
 }
 
 fn validate_proxy_service(protocol: OnionProxyProtocol, service: &OnionServiceName) -> Result<()> {
+    if protocol == OnionProxyProtocol::HttpsProxy && service != &OnionServiceName::https() {
+        return Err(Error::InvalidConfig(format!(
+            "onion HTTPS proxy requires service {:?}",
+            OnionServiceName::https().as_str()
+        )));
+    }
     if let Some(expected) = OnionExitService::reserved_transport(service.as_str()) {
         if expected != protocol.exit_transport() {
             return Err(Error::InvalidConfig(format!(
@@ -199,7 +230,7 @@ mod tests {
         );
         assert_eq!(
             OnionProxyProtocol::HttpsProxy.exit_transport(),
-            OnionExitTransport::Https
+            OnionExitTransport::Tcp
         );
     }
 
@@ -208,7 +239,7 @@ mod tests {
         let proxy = OnionProxyConfig::https_proxy(3, false);
 
         assert_eq!(proxy.exit_service(), "https");
-        assert_eq!(proxy.exit_transport(), OnionExitTransport::Https);
+        assert_eq!(proxy.exit_transport(), OnionExitTransport::Tcp);
         assert_eq!(proxy.hop_count, 3);
         assert!(!proxy.allow_short_paths);
     }
@@ -226,11 +257,12 @@ mod tests {
     }
 
     #[test]
-    fn proxy_config_rejects_reserved_service_transport_mismatch() {
-        assert!(matches!(
-            OnionProxyConfig::tcp_connect_service(OnionServiceName::https(), 1, false),
-            Err(Error::InvalidConfig(_))
-        ));
+    fn tcp_proxy_config_accepts_https_tcp_service() -> Result<()> {
+        let proxy = OnionProxyConfig::tcp_connect_service(OnionServiceName::https(), 1, false)?;
+
+        assert_eq!(proxy.exit_service(), "https");
+        assert_eq!(proxy.exit_transport(), OnionExitTransport::Tcp);
+        Ok(())
     }
 
     #[test]

@@ -170,7 +170,9 @@ pub fn verify(msgs: &[&[u8]], sig: &Signature, pks: &[PublicKey<48>]) -> Result<
     verify_hash(hashes.as_slice(), sig, pks)
 }
 
-// Aggregate signatures by multiplying them together. Calculated by signature = \sum_{i = 0}^n signature_i.
+/// Aggregate signatures by multiplying them together.
+///
+/// Calculated by `signature = sum_{i = 0}^n signature_i`.
 pub fn aggregate(signatures: &[Signature]) -> Result<Signature> {
     signatures
         .iter()

@@ -1,5 +1,3 @@
-#![warn(missing_docs)]
-
 //! Backend message types.
 //!
 //! The old closed `BackendMessage` enum and its `MessageHandler` dispatch have been

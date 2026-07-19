@@ -1,4 +1,10 @@
+//! JSON-RPC DTO conversion layer.
+//!
+//! The DTO structs preserve the old generated protobuf shape for JSON-RPC
+//! compatibility while keeping the public JSON-RPC contract documented.
+
 pub mod rings_node;
+/// JSON-RPC request dispatch helpers for internal and external APIs.
 pub mod rings_node_handler;
 
 use rings_core::inspect::ConnectionInspect;

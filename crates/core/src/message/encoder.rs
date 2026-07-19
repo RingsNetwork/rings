@@ -8,18 +8,24 @@ use serde::Serialize;
 use crate::error::Error;
 use crate::error::Result;
 
+/// Encodes values into the base58-check wire representation.
 pub trait Encoder {
+    /// Encode this value into an [`Encoded`] wrapper.
     fn encode(&self) -> Result<Encoded>;
 }
 
+/// Decodes values from the base58-check wire representation.
 pub trait Decoder: Sized {
+    /// Decode `Self` from an [`Encoded`] wrapper.
     fn from_encoded(encoded: &Encoded) -> Result<Self>;
 }
 
+/// Base58-check encoded message data.
 #[derive(Deserialize, Serialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Encoded(String);
 
 impl Encoded {
+    /// Borrow the encoded string value.
     pub fn value(&self) -> &String {
         &self.0
     }
@@ -122,10 +128,12 @@ impl TryFrom<Vec<u8>> for Encoded {
 }
 
 impl Encoded {
+    /// Create an [`Encoded`] value from a string that is already encoded.
     pub fn from_encoded_str(str: &str) -> Self {
         Self(str.to_owned())
     }
 
+    /// Decode this value into a target type implementing [`Decoder`].
     pub fn decode<T>(&self) -> Result<T>
     where T: Decoder {
         T::from_encoded(self)

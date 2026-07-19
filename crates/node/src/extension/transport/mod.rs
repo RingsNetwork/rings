@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! Transport relay — one abstraction for TCP, HTTP and (future) UDP.
 //!
 //! # Why these are *not* three protocols

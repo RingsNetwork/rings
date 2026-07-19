@@ -12,144 +12,217 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[non_exhaustive]
 #[repr(u32)]
 pub enum Error {
+    /// Connecting to a remote JSON-RPC server failed.
     #[error("Connect remote rpc server failed: {0}.")]
     RemoteRpcError(String) = 100,
+    /// A remote JSON-RPC error did not match a known local variant.
     #[error("Unknown rpc error.")]
     UnknownRpcError = 101,
+    /// The internal JSON-RPC dispatcher returned an error.
     #[error("Internal rpc services error: {0}.")]
     InternalRpcError(#[from] jsonrpc_core::Error) = 102,
+    /// UUID parsing or formatting failed.
     #[error("Uuid error: {0}")]
     UuidError(#[from] uuid::Error) = 103,
+    /// The requested connection does not exist in the local swarm.
     #[error("Connection not found.")]
     ConnectionNotFound = 203,
+    /// Opening a new connection through the core swarm failed.
     #[error("Create connection error: {0}.")]
     NewConnectionError(rings_core::error::Error) = 204,
+    /// Closing an existing connection through the core swarm failed.
     #[error("Close connection error: {0}.")]
     CloseConnectionError(rings_core::error::Error) = 205,
+    /// The supplied connection identifier is malformed or unknown.
     #[error("Invalid connection id.")]
     InvalidConnectionId = 206,
+    /// Creating WebRTC offer data failed.
     #[error("Create offer info failed: {0}.")]
     CreateOffer(rings_core::error::Error) = 207,
+    /// Creating WebRTC answer data failed.
     #[error("Answer offer info failed: {0}.")]
     AnswerOffer(rings_core::error::Error) = 208,
+    /// Accepting WebRTC answer data failed.
     #[error("Accept answer info failed: {0}.")]
     AcceptAnswer(rings_core::error::Error) = 209,
+    /// Decoding structured data failed.
     #[error("Decode error.")]
     DecodeError = 300,
+    /// Encoding structured data failed.
     #[error("Encode error.")]
     EncodeError = 301,
+    /// Compiling a WASM artifact failed.
     #[error("WASM compile error: {0}")]
     WasmCompileError(String) = 400,
+    /// Acquiring the WASM backend-message lock failed.
     #[error("BackendMessage RwLock Error")]
     WasmBackendMessageRwLockError = 401,
+    /// Instantiating a WASM module failed.
     #[error("WASM instantiation error.")]
     WasmInstantiationError = 402,
+    /// Resolving a required WASM export failed.
     #[error("WASM export error.")]
     WasmExportError = 403,
+    /// Executing WASM code returned a runtime error.
     #[error("WASM runtime error: {0}")]
     WasmRuntimeError(String) = 404,
+    /// Acquiring the WASM global memory lock failed.
     #[error("WASM global memory mutex error.")]
     WasmGlobalMemoryLockError = 405,
+    /// Loading a WASM input file failed.
     #[error("WASM failed to load file.")]
     WasmFailedToLoadFile = 406,
+    /// Parsing or validating a DID failed.
     #[error("Invalid did: {0}")]
     InvalidDid(String) = 500,
+    /// The requested JSON-RPC method is not supported.
     #[error("Invalid method.")]
     InvalidMethod = 501,
+    /// A core internal operation failed.
     #[error("Internal error: {0}.")]
     InternalError(rings_core::error::Error) = 502,
+    /// The caller is not authorized to perform the requested action.
     #[error("No Permission")]
     NoPermission = 504,
+    /// Connecting to a peer failed.
     #[error("Connect error, {0}")]
     ConnectError(rings_core::error::Error) = 600,
+    /// Sending a peer message failed.
     #[error("Send message error: {0}")]
     SendMessage(rings_core::error::Error) = 601,
+    /// Applying a DHT entry action failed.
     #[error("entry action error: {0}")]
     EntryError(rings_core::error::Error) = 603,
+    /// Registering a service descriptor failed.
     #[error("service register action error: {0}")]
     ServiceRegisterError(rings_core::error::Error) = 604,
+    /// JavaScript host code returned an error.
     #[error("JsError: {0}")]
     JsError(String) = 700,
+    /// A protocol message failed validation.
     #[error("Invalid message")]
     InvalidMessage = 800,
+    /// An HTTP proxy request failed validation.
     #[error("Invalid http request: {0}")]
     HttpRequestError(String) = 801,
+    /// Input data failed semantic validation.
     #[error("Invalid data")]
     InvalidData = 802,
+    /// A service name or service descriptor is invalid.
     #[error("Invalid service")]
     InvalidService = 803,
+    /// A network address is invalid.
     #[error("Invalid address")]
     InvalidAddress = 804,
+    /// Authentication payload data is invalid.
     #[error("Invalid auth data")]
     InvalidAuthData = 805,
+    /// Request headers are missing required values or contain invalid values.
     #[error("invalid headers")]
     InvalidHeaders = 806,
+    /// Persistent or cache storage returned an error.
     #[error("Storage Error: {0}")]
     Storage(rings_core::error::Error) = 807,
+    /// Swarm state management returned an error.
     #[error("Swarm Error: {0}")]
     Swarm(rings_core::error::Error) = 808,
+    /// The requested logging level is not supported.
     #[error("Invalid logging level: {0}")]
     InvalidLoggingLevel(String) = 809,
+    /// The configured WebRTC UDP port range is invalid.
     #[error("Invalid WebRTC UDP port range: {0}")]
     InvalidWebrtcUdpPortRange(#[from] rings_transport::webrtc_config::WebrtcUdpPortRangeError) =
         810,
+    /// Only one side of the WebRTC UDP port range was configured.
     #[error("Both webrtc_udp_port_min and webrtc_udp_port_max must be set together: min={min:?}, max={max:?}")]
-    IncompleteWebrtcUdpPortRange { min: Option<u16>, max: Option<u16> } = 811,
+    IncompleteWebrtcUdpPortRange {
+        /// Configured lower UDP port bound.
+        min: Option<u16>,
+        /// Configured upper UDP port bound.
+        max: Option<u16>,
+    } = 811,
+    /// The node configuration is structurally invalid.
     #[error("Invalid configuration: {0}")]
     InvalidConfig(String) = 812,
+    /// Creating a file on disk failed.
     #[error("Create File Error: {0}")]
     CreateFileError(String) = 900,
+    /// Opening a file on disk failed.
     #[error("Open File Error: {0}")]
     OpenFileError(String) = 901,
+    /// Acquiring a synchronization lock failed.
     #[error("Acquire lock failed")]
     Lock = 902,
+    /// The process home directory could not be resolved.
     #[error("Cannot find home directory")]
     HomeDirError = 903,
+    /// The parent directory of a path could not be resolved.
     #[error("Cannot find parent directory")]
     ParentDirError = 904,
+    /// A filesystem path cannot be represented as UTF-8.
     #[error("Path is not valid UTF-8: {0}")]
     PathUtf8Error(String) = 905,
+    /// JSON serialization or deserialization failed.
     #[error("Serde json error: {0}")]
     SerdeJsonError(#[from] serde_json::Error) = 1000,
+    /// YAML serialization or deserialization failed.
     #[error("Serde yaml error: {0}")]
     SerdeYamlError(#[from] serde_yaml::Error) = 1001,
+    /// Cryptographic verification failed.
     #[error("verify error: {0}")]
     VerifyError(String) = 1002,
+    /// A rings-core operation returned an error.
     #[error("Core error: {0}")]
     CoreError(#[from] rings_core::error::Error) = 1102,
+    /// An external signer returned an error.
     #[error("External singer error: {0}")]
     ExternalError(String) = 1202,
+    /// An FFI string contained an interior nul byte.
     #[error("An error indicating that an interior nul byte was found: {0}")]
     FFINulError(#[from] std::ffi::NulError) = 1203,
+    /// Converting an FFI C string to UTF-8 failed.
     #[error("Failed to convert CStr to String: {0}")]
     FFICStrError(#[from] std::str::Utf8Error) = 1204,
+    /// An FFI pointer argument was null.
     #[error("An error indicating that a ptr is null")]
     FFINulPtrError = 1205,
+    /// Converting owned FFI bytes to UTF-8 failed.
     #[error("Failed to convert bytes to String: {0}")]
     FFIFromUtf8Error(#[from] std::string::FromUtf8Error) = 1206,
+    /// The SNARK subsystem returned an error.
     #[cfg(feature = "snark")]
     #[error("Snark error: {0}")]
     RingsSNARKError(#[from] rings_snark::error::Error) = 1400,
+    /// The requested SNARK curve does not match the task.
     #[error("Snark curve not match")]
     SNARKCurveNotMatch() = 1401,
+    /// Handling a SNARK protocol message failed.
     #[error("Snark handle message error: {0}")]
     SNARKHandleMessage(String) = 1402,
+    /// A SNARK field value belongs to the wrong field.
     #[error("Wrong field, should be {0}")]
     SNARKWrongField(String) = 1403,
+    /// Converting a JavaScript bigint into a prime-field element was out of range.
     #[cfg(feature = "browser")]
     #[error("range error when covering js_sys::BigInt to PrimeField: {0}")]
     SNARKFFRangeError(String) = 1404,
+    /// Converting a JavaScript bigint produced an empty representation.
     #[cfg(feature = "browser")]
     #[error("Failed to load bigint to repr string, it's empty")]
     SNARKBigIntValueEmpty() = 1405,
+    /// Loading a string as a prime-field element failed.
     #[error("Failed to load string to PrimeField")]
     FailedToLoadFF() = 1406,
+    /// A protocol backend returned an error.
     #[error("Extend Backend Error {0}")]
     BackendError(String) = 1501,
+    /// An extension runtime returned an error.
     #[error("Extension error: {0}")]
     ExtensionError(String) = 1502,
+    /// Onion route construction or validation failed.
     #[error("Onion route error: {0}")]
     OnionRouteError(OnionRouteError) = 1601,
+    /// Onion proxy I/O failed.
     #[error("Onion proxy IO error: {0}")]
     OnionProxyIoError(String) = 1602,
 }
@@ -168,6 +241,7 @@ impl Error {
         unsafe { *<*const _>::from(self).cast::<u32>() }
     }
 
+    /// Returns the stable numeric error code for JSON-RPC error conversion.
     pub fn code(&self) -> u32 {
         self.discriminant()
     }

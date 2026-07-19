@@ -1,9 +1,12 @@
 //! Constant variables.
 ///
-/// default ttl in ms
+/// Default DHT entry time-to-live in milliseconds.
 pub const DEFAULT_TTL_MS: u64 = 600 * 1000;
+/// Maximum accepted DHT entry time-to-live in milliseconds.
 pub const MAX_TTL_MS: u64 = DEFAULT_TTL_MS * 10;
+/// Accepted timestamp drift in milliseconds.
 pub const TS_OFFSET_TOLERANCE_MS: u128 = 3000;
+/// Default session time-to-live in milliseconds.
 pub const DEFAULT_SESSION_TTL_MS: u64 = 30 * 24 * 3600 * 1000;
 /// 60k
 pub const TRANSPORT_MTU: usize = 60000;

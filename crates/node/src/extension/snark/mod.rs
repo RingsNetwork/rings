@@ -370,7 +370,7 @@ where
         self.snark.fold_all(&self.pp, &self.circuits)?;
         if check {
             let steps = self.circuits.len();
-            let first_input = self.circuits.first().unwrap().get_public_inputs();
+            let first_input = self.first_circuit()?.get_public_inputs()?;
             self.snark
                 .verify(&self.pp, steps, first_input, vec![E2::Scalar::from(0)])?;
         }
@@ -423,13 +423,19 @@ where
         vk: impl AsRef<VerifierKey<E1, E2, S1, S2>>,
     ) -> Result<(Vec<E1::Scalar>, Vec<E2::Scalar>)> {
         let steps = self.circuits.len();
-        let first_input = self.circuits.first().unwrap().get_public_inputs();
+        let first_input = self.first_circuit()?.get_public_inputs()?;
         Ok(SNARK::<E1, E2>::compress_verify(
             proof,
             vk,
             steps,
             first_input,
         )?)
+    }
+
+    fn first_circuit(&self) -> Result<&circuit::Circuit<E1::Scalar>> {
+        self.circuits
+            .first()
+            .ok_or_else(|| Error::SNARKHandleMessage("empty SNARK circuit list".to_string()))
     }
 }
 

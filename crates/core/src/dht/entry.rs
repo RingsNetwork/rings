@@ -1,4 +1,4 @@
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::str::FromStr;

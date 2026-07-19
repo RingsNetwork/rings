@@ -13,14 +13,21 @@
   "scripts": {
     "wasm_pack": "wasm-pack build crates/node --release --scope ringsnetwork -t web --no-default-features --features browser_default --features console_error_panic_hook",
     "prepare": "npm run wasm_pack && rm -rf dist && mkdir -p dist && cp crates/node/pkg/rings_node* ./dist && cp index.ts ./dist && tsc -p tsconfig.json",
-    "test:frontend-extension-wallet": "node examples/frontend/scripts/test-extension-wallet-bridge.mjs"
+    "check:frontend-extension-scripts": "biome check frontend/extension-assets/*.ts frontend/scripts/*.mts frontend/tsconfig.base.json frontend/tsconfig.extension-assets.json frontend/tsconfig.scripts.json",
+    "build:frontend-extension-scripts": "npm run check:frontend-extension-scripts && rm -rf frontend/.generated && tsc -p frontend/tsconfig.extension-assets.json && tsc -p frontend/tsconfig.scripts.json && node frontend/.generated/scripts/check-extension-docs.mjs",
+    "build:frontend-web": "cd frontend && NO_COLOR=true trunk build --release",
+    "package:frontend-extension": "npm run build:frontend-extension-scripts && cd frontend && NO_COLOR=true trunk build --release && cd .. && node frontend/.generated/scripts/package-extension.mjs",
+    "test:frontend-extension-wallet": "npm run package:frontend-extension && node frontend/.generated/scripts/test-extension-wallet-bridge.mjs"
   },
   "dependencies": {
     "circomlib": "^2.0.5"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.3",
+    "@types/chrome": "0.1.1",
+    "@types/node": "25.0.0",
     "playwright": "1.61.1",
-    "typescript": "^5.9.3"
+    "typescript": "5.9.3"
   },
   "files": [
     "dist/"

@@ -1,6 +1,7 @@
 ## https://taplo.tamasfe.dev/configuration/#configuration-file
 
 include = ["**/Cargo.toml"]
+exclude = ["target/**"]
 
 [formatting]
 # Align consecutive entries vertically.

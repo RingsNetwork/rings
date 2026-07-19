@@ -18,6 +18,7 @@ use crate::error::Result;
 pub mod elgamal;
 pub mod group;
 pub mod keys;
+/// Signature schemes used by DID identity and provider login.
 pub mod signers;
 mod types;
 use elliptic_curve::generic_array::typenum::U32;
@@ -61,6 +62,7 @@ pub fn keccak256(bytes: &[u8]) -> [u8; 32] {
 }
 
 impl HashStr {
+    /// Create a hash string wrapper from an existing string value.
     pub fn new<T: Into<String>>(s: T) -> Self {
         HashStr(s.into())
     }
@@ -72,6 +74,7 @@ impl HashStr {
         HashStr(hex::encode(hasher.finalize()))
     }
 
+    /// Return the wrapped hash string.
     pub fn inner(&self) -> String {
         self.0.clone()
     }
@@ -287,24 +290,29 @@ fn secret_key_address(secret_key: &SecretKey) -> PublicKeyAddress {
 }
 
 impl SecretKey {
+    /// Generate a random secp256k1 secret key.
     pub fn random() -> Self {
         let mut rng = Hc128Rng::from_entropy();
         Self(libsecp256k1::SecretKey::random(&mut rng))
     }
 
+    /// Derive the Ethereum-style address for this secret key.
     pub fn address(&self) -> PublicKeyAddress {
         secret_key_address(self)
     }
 
+    /// Sign a UTF-8 message after hashing it with Keccak-256.
     pub fn sign(&self, message: &str) -> SigBytes {
         self.sign_raw(message.as_bytes())
     }
 
+    /// Sign raw message bytes after hashing them with Keccak-256.
     pub fn sign_raw(&self, message: &[u8]) -> SigBytes {
         let message_hash = keccak256(message);
         self.sign_hash(&message_hash)
     }
 
+    /// Sign an already computed 32-byte message hash.
     pub fn sign_hash(&self, message_hash: &[u8; 32]) -> SigBytes {
         let (signature, recover_id) =
             libsecp256k1::sign(&libsecp256k1::Message::parse(message_hash), self);
@@ -315,16 +323,19 @@ impl SecretKey {
         sig_bytes
     }
 
+    /// Derive the compressed public key for this secret key.
     pub fn pubkey(&self) -> PublicKey<33> {
         libsecp256k1::PublicKey::from_secret_key(&(*self).into()).into()
     }
 
+    /// Serialize this secret key into its 32-byte representation.
     pub fn ser(&self) -> [u8; 32] {
         self.0.serialize()
     }
 }
 
 impl PublicKey<33> {
+    /// Derive the Ethereum-style address for this public key.
     pub fn address(&self) -> PublicKeyAddress {
         public_key_address(self)
     }
@@ -354,7 +365,7 @@ pub fn recover_hash(message_hash: &[u8; 32], sig: &[u8; 65]) -> Result<PublicKey
 }
 
 #[cfg(test)]
-pub mod tests {
+pub(crate) mod tests {
     use hex::FromHex;
 
     use super::*;
@@ -416,7 +427,7 @@ pub mod tests {
         assert_eq!(pubkey1, pubkey2);
     }
 
-    pub fn gen_ordered_keys(n: usize) -> Vec<SecretKey> {
+    pub(crate) fn gen_ordered_keys(n: usize) -> Vec<SecretKey> {
         let mut keys = Vec::from_iter(std::iter::repeat_with(SecretKey::random).take(n));
         keys.sort_by(|a, b| {
             if a.address() < b.address() {

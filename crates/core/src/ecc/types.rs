@@ -1,4 +1,4 @@
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 
 use serde::Deserialize;
 use serde::Serialize;

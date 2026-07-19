@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! Signed online-node descriptors stored in the DHT.
 
 use rings_core::dht::Did;

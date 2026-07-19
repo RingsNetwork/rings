@@ -1,5 +1,5 @@
 //! Chord algorithm implement.
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -474,14 +474,20 @@ impl Chord<PeerRingAction> for PeerRing {
     }
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
-impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing {
-    /// Look up an [`Entry`] by its ring key.
-    /// Always finds resource by finger table, ignoring the local cache.
-    /// If the `entry_key` is between current node and its successor, its resource should be
-    /// stored in current node.
-    async fn entry_lookup(&self, entry_key: Did) -> Result<PeerRingAction> {
+impl PeerRing {
+    fn storage_fetch_fallback_successor(&self) -> Result<Option<Did>> {
+        Ok(self
+            .topology_state()?
+            .successors
+            .into_iter()
+            .find(|successor| *successor != self.did))
+    }
+
+    async fn entry_lookup_inner<const REDUNDANT: u16>(
+        &self,
+        entry_key: Did,
+        fallback_on_local_virtual_miss: bool,
+    ) -> Result<PeerRingAction> {
         let mut ret = vec![];
         let mut misses = vec![];
         // Pre: REDUNDANT > 0, enforced by rotate_affine.
@@ -510,8 +516,22 @@ impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing 
                             // If cannot find and has successor, try to query it from successor.
                             // This is useful when the node is just joined and has not stabilized yet.
                             if succ == self.did {
-                                misses.push(PlacementMiss::new(placement_key, succ));
-                                Ok(PeerRingAction::None)
+                                if fallback_on_local_virtual_miss
+                                    && self.storage_virtual_nodes_enabled()?
+                                {
+                                    if let Some(next) = self.storage_fetch_fallback_successor()? {
+                                        Ok(PeerRingAction::RemoteAction(
+                                            next,
+                                            RemoteAction::FindEntry(query),
+                                        ))
+                                    } else {
+                                        misses.push(PlacementMiss::new(placement_key, succ));
+                                        Ok(PeerRingAction::None)
+                                    }
+                                } else {
+                                    misses.push(PlacementMiss::new(placement_key, succ));
+                                    Ok(PeerRingAction::None)
+                                }
                             } else {
                                 Ok(PeerRingAction::RemoteAction(
                                     succ,
@@ -546,6 +566,33 @@ impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing 
             ret.push(PeerRingAction::EntryMisses(misses));
         }
         Ok(ret.into())
+    }
+
+    /// Look up an [`Entry`] for a local storage fetch.
+    ///
+    /// A fresh node with storage virtual nodes enabled can observe itself as the
+    /// owner for an existing placement before sync has copied historical data
+    /// locally. Local fetches may ask a known successor for that placement so
+    /// read repair can converge instead of treating the fresh local miss as
+    /// authoritative. Remote `SearchEntry` handling uses [`ChordStorage`] and
+    /// intentionally does not enable this fallback.
+    pub(crate) async fn entry_lookup_for_fetch<const REDUNDANT: u16>(
+        &self,
+        entry_key: Did,
+    ) -> Result<PeerRingAction> {
+        self.entry_lookup_inner::<REDUNDANT>(entry_key, true).await
+    }
+}
+
+#[cfg_attr(feature = "wasm", async_trait(?Send))]
+#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing {
+    /// Look up an [`Entry`] by its ring key.
+    /// Always finds resource by finger table, ignoring the local cache.
+    /// If the `entry_key` is between current node and its successor, its resource should be
+    /// stored in current node.
+    async fn entry_lookup(&self, entry_key: Did) -> Result<PeerRingAction> {
+        self.entry_lookup_inner::<REDUNDANT>(entry_key, false).await
     }
 
     /// Handle [EntryOperation] if the target entry between current node and the

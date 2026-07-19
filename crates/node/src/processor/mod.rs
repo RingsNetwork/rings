@@ -1,5 +1,3 @@
-#![warn(missing_docs)]
-
 //! Processor of rings-node rpc server.
 
 use std::str::FromStr;
@@ -21,6 +19,7 @@ use rings_core::message::e2e::E2eHandshakeRequest;
 use rings_core::message::e2e::E2eHandshakeResponse;
 use rings_core::message::e2e::E2eStreamDecryptor;
 use rings_core::message::e2e::E2eStreamFrame;
+use rings_core::message::DhtProtocolMode;
 use rings_core::message::Encoded;
 use rings_core::message::Encoder;
 use rings_core::message::Message;
@@ -87,6 +86,24 @@ pub use builder::ProcessorBuilder;
 pub(crate) use config::parse_webrtc_udp_port_range;
 pub use config::ProcessorConfig;
 pub use config::ProcessorConfigSerialized;
+
+const DHT_LOOKUP_CACHE_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const DHT_LOOKUP_CACHE_POLL_ATTEMPTS: usize = 40;
+
+#[cfg(not(feature = "browser"))]
+async fn sleep_dht_lookup_poll_interval(interval: Duration) -> Result<()> {
+    futures_timer::Delay::new(interval).await;
+    Ok(())
+}
+
+#[cfg(feature = "browser")]
+async fn sleep_dht_lookup_poll_interval(interval: Duration) -> Result<()> {
+    let interval_ms = i32::try_from(interval.as_millis()).unwrap_or(i32::MAX);
+    rings_core::utils::js_utils::window_sleep(interval_ms)
+        .await
+        .map_err(|error| Error::JsError(format!("{error:?}")))?;
+    Ok(())
+}
 
 /// Processor for rings-node rpc server.
 ///
@@ -180,8 +197,7 @@ impl Processor {
     ) -> Result<Vec<OnlineNodeDescriptor>> {
         let entry_key = entry::Entry::gen_did(ONLINE_NODES_TOPIC)?;
 
-        self.storage_fetch(entry_key).await?;
-        let Some(entry) = self.storage_check_cache(entry_key).await else {
+        let Some(entry) = self.fetch_storage_entry(entry_key).await? else {
             return Ok(vec![]);
         };
 
@@ -204,23 +220,88 @@ impl Processor {
     ) -> Result<Vec<OnionExitDescriptor>> {
         let entry_key = entry::Entry::gen_did(ONION_EXITS_TOPIC)?;
 
-        self.storage_fetch(entry_key).await?;
-        let Some(entry) = self.storage_check_cache(entry_key).await else {
+        let Some(entry) = self.fetch_storage_entry(entry_key).await? else {
             return Ok(vec![]);
         };
 
         let service = service.trim();
-        let descriptors = OnionExitDescriptor::latest_valid_by_service_did(
-            Self::onion_exit_descriptors_from_entry(&entry)
+        let exits = self.select_onion_exits_from_entry(&entry, service, include_expired);
+        if include_expired
+            || !exits.is_empty()
+            || !self.entry_has_expired_onion_exit_service(&entry, service)
+        {
+            return Ok(exits);
+        }
+
+        let Some(refreshed_entry) = self
+            .fetch_storage_entry_after_cache_refresh(entry_key, &entry)
+            .await?
+        else {
+            return Ok(exits);
+        };
+        Ok(self.select_onion_exits_from_entry(&refreshed_entry, service, include_expired))
+    }
+
+    async fn fetch_storage_entry(&self, entry_key: Did) -> Result<Option<entry::Entry>> {
+        self.storage_fetch(entry_key).await?;
+        for attempt in 0..DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
+            if let Some(entry) = self.storage_check_cache(entry_key).await {
+                return Ok(Some(entry));
+            }
+            if attempt + 1 == DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
+                break;
+            }
+            sleep_dht_lookup_poll_interval(DHT_LOOKUP_CACHE_POLL_INTERVAL).await?;
+        }
+        Ok(None)
+    }
+
+    fn select_onion_exits_from_entry(
+        &self,
+        entry: &entry::Entry,
+        service: &str,
+        include_expired: bool,
+    ) -> Vec<OnionExitDescriptor> {
+        OnionExitDescriptor::latest_valid_by_service_did(
+            Self::onion_exit_descriptors_from_entry(entry)
                 .into_iter()
                 .filter(|descriptor| descriptor.matches_network(self.swarm.network_id())),
             get_epoch_ms(),
             include_expired,
         )
         .into_iter()
-        .filter(|descriptor| service.is_empty() || descriptor.offers_service(service));
+        .filter(|descriptor| service.is_empty() || descriptor.offers_service(service))
+        .collect()
+    }
 
-        Ok(descriptors.collect())
+    fn entry_has_expired_onion_exit_service(&self, entry: &entry::Entry, service: &str) -> bool {
+        let now_ms = get_epoch_ms();
+        Self::onion_exit_descriptors_from_entry(entry)
+            .into_iter()
+            .filter(|descriptor| descriptor.matches_network(self.swarm.network_id()))
+            .any(|descriptor| {
+                (service.is_empty() || descriptor.offers_service(service))
+                    && descriptor.verify_signature()
+                    && descriptor.is_expired_at(now_ms)
+            })
+    }
+
+    async fn fetch_storage_entry_after_cache_refresh(
+        &self,
+        entry_key: Did,
+        previous_entry: &entry::Entry,
+    ) -> Result<Option<entry::Entry>> {
+        self.storage_fetch(entry_key).await?;
+        for _ in 0..DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
+            sleep_dht_lookup_poll_interval(DHT_LOOKUP_CACHE_POLL_INTERVAL).await?;
+            let Some(entry) = self.storage_check_cache(entry_key).await else {
+                continue;
+            };
+            if &entry != previous_entry {
+                return Ok(Some(entry));
+            }
+        }
+        Ok(self.storage_check_cache(entry_key).await)
     }
 
     /// Build an onion route from live presence descriptors and live exit descriptors.
@@ -549,6 +630,10 @@ impl Processor {
 impl OnionDirectoryReader for Processor {
     fn local_did(&self) -> Did {
         self.did()
+    }
+
+    fn dht_protocol_mode(&self) -> DhtProtocolMode {
+        self.swarm.dht_protocol_mode()
     }
 
     async fn live_online_nodes(&self) -> Result<Vec<OnlineNodeDescriptor>> {

@@ -1,4 +1,3 @@
-#![warn(missing_docs)]
 //! ffi Provider implementation
 //! =======================
 //! This module allows developers to integrate the provider with various programming languages,
@@ -41,6 +40,7 @@ use std::error::Error as StdError;
 use std::ffi::c_char;
 use std::ffi::CStr;
 use std::ffi::CString;
+use std::ptr;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -62,6 +62,8 @@ use crate::error::Result;
 use crate::extension::Backend;
 
 type FfiE2eInbox = Mutex<Vec<FfiE2eEvent>>;
+
+const FFI_SIGNATURE_LEN: usize = 65;
 
 static FFI_E2E_INBOXES: OnceLock<Mutex<HashMap<usize, Arc<FfiE2eInbox>>>> = OnceLock::new();
 
@@ -186,6 +188,15 @@ pub struct ProviderPtr {
     runtime: *const Runtime,
 }
 
+impl ProviderPtr {
+    const fn null() -> Self {
+        Self {
+            provider: ptr::null(),
+            runtime: ptr::null(),
+        }
+    }
+}
+
 /// Provider with runtime
 /// cbindgen:field-names=[]
 pub(crate) struct ProviderWithRuntime {
@@ -197,8 +208,8 @@ impl ProviderWithRuntime {
     /// Create a new instance of ProviderWithRuntime
     pub fn new(p: Arc<Provider>, r: Arc<Runtime>) -> Self {
         Self {
-            provider: p.clone(),
-            runtime: r.clone(),
+            provider: p,
+            runtime: r,
         }
     }
 }
@@ -214,6 +225,9 @@ impl ProviderWithRuntime {
         }
 
         let provider_ptr: &ProviderPtr = unsafe { &*ptr };
+        if provider_ptr.provider.is_null() || provider_ptr.runtime.is_null() {
+            return Err(Error::FFINulPtrError);
+        }
         let provider: ProviderWithRuntime = provider_ptr.into();
         // Avoid release here
         provider.check_arc();
@@ -292,8 +306,13 @@ impl From<&ProviderWithRuntime> for ProviderPtr {
 /// Listen function accept a ProviderPtr and will unsafety cast it into Arc based Provider
 #[no_mangle]
 pub extern "C" fn listen(provider_ptr: *const ProviderPtr) {
-    let provider: ProviderWithRuntime =
-        ProviderWithRuntime::from_raw(provider_ptr).expect("Provider ptr is invalid");
+    let provider: ProviderWithRuntime = match ProviderWithRuntime::from_raw(provider_ptr) {
+        Ok(provider) => provider,
+        Err(error) => {
+            tracing::error!("FFI listen failed: {error}");
+            return;
+        }
+    };
     std::thread::spawn(move || {
         provider.runtime.block_on(async {
             provider.provider.processor.listen().await;
@@ -340,7 +359,7 @@ pub extern "C" fn request(
         Ok(r) => r,
         Err(e) => {
             tracing::error!("FFI Request failed, cause by: {:?}", e);
-            panic!("FFI: Failed on request {e:#}")
+            ptr::null()
         }
     }
 }
@@ -368,28 +387,26 @@ pub unsafe extern "C" fn new_provider_with_callback(
         signer: extern "C" fn(*const c_char, *mut c_char) -> (),
     ) -> impl Fn(String) -> Vec<u8> {
         move |data: String| -> Vec<u8> {
-            let c_data = CString::new(data).expect("Failed to convert String to CString");
-            // 64 bytes sig + \0 here
-            let mut sig = Vec::<u8>::with_capacity(65);
-            let sig_ptr = sig.as_mut_ptr() as *mut c_char;
+            let c_data = match CString::new(data) {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::error!("FFI signer input contains nul byte: {error}");
+                    return Vec::new();
+                }
+            };
+            let mut sig = [0_u8; FFI_SIGNATURE_LEN];
+            let sig_ptr = sig.as_mut_ptr().cast::<c_char>();
             signer(c_data.as_ptr(), sig_ptr);
-
-            let c_ret = c_char_to_bytes(sig_ptr, 65).expect("Failed to convert c char to [u8]");
-            let c_ret_len = c_ret.len();
-            assert!(
-                c_ret.len() == 65,
-                "sig length({c_ret_len} < 64) is invalid: {c_ret:?}"
-            );
-            c_ret
+            sig.to_vec()
         }
     }
 
-    let provider: Provider = match (|| -> Result<Provider> {
+    match (|| -> Result<ProviderPtr> {
         let ice: String = c_char_to_string(ice_server)?;
         let acc: String = c_char_to_string(account)?;
         let acc_ty: String = c_char_to_string(account_type)?;
 
-        executor::block_on(Provider::new_provider_internal(
+        let provider = executor::block_on(Provider::new_provider_internal(
             network_id,
             ice,
             stabilize_interval,
@@ -398,38 +415,32 @@ pub unsafe extern "C" fn new_provider_with_callback(
             Signer::Sync(Box::new(wrapped_signer(signer))),
             None,
             None,
-        ))
-    })() {
-        Ok(r) => r,
-        Err(e) => {
-            panic!("Failed on create new provider {e:#}")
-        }
-    };
-    let runtime = Arc::new(Runtime::new().expect("Failed to create runtime"));
-    let provider = Arc::new(provider.clone());
-    let backend = Backend::new(provider.clone());
-    let e2e_events = Arc::new(Mutex::new(Vec::new()));
-    let callback = FfiBackend::new(backend, e2e_events.clone());
+        ))?;
+        let runtime = Arc::new(Runtime::new().map_err(|error| {
+            Error::ExtensionError(format!("failed to create runtime: {error}"))
+        })?);
+        let provider = Arc::new(provider);
+        let backend = Backend::new(provider.clone());
+        let e2e_events = Arc::new(Mutex::new(Vec::new()));
+        let callback = FfiBackend::new(backend, e2e_events.clone());
 
-    provider
-        .set_swarm_callback_internal(Arc::new(callback))
-        .expect("Failed to set callback");
-    register_ffi_e2e_inbox(&provider, e2e_events).expect("Failed to register FFI E2E inbox");
-    let ret: ProviderPtr = (&ProviderWithRuntime::new(provider.clone(), runtime.clone())).into();
-    ret
+        provider.set_swarm_callback_internal(Arc::new(callback))?;
+        register_ffi_e2e_inbox(&provider, e2e_events)?;
+        Ok((&ProviderWithRuntime::new(provider.clone(), runtime.clone())).into())
+    })() {
+        Ok(provider_ptr) => provider_ptr,
+        Err(error) => {
+            tracing::error!("FFI provider creation failed: {error}");
+            ProviderPtr::null()
+        }
+    }
 }
 
 fn c_char_to_string(ptr: *const c_char) -> Result<String> {
-    let c_str: &CStr = unsafe { CStr::from_ptr(ptr) };
-    // Drop none utf8 sym here.
-    String::from_utf8(c_str.to_owned().into()).map_err(Error::FFIFromUtf8Error)
-}
-
-fn c_char_to_bytes(ptr: *const c_char, len: usize) -> Result<Vec<u8>> {
-    // Check point here.
     if ptr.is_null() {
         return Err(Error::FFINulPtrError);
     }
-    let c_bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len) };
-    Ok(c_bytes.to_vec())
+    let c_str: &CStr = unsafe { CStr::from_ptr(ptr) };
+    // Drop none utf8 sym here.
+    String::from_utf8(c_str.to_owned().into()).map_err(Error::FFIFromUtf8Error)
 }

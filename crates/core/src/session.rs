@@ -1,4 +1,4 @@
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 //! Understanding Abstract Account and Session keypair in Rings Network
 //!
 //! Rings network offers a unique mechanism to bolster security and abstract the user's keypair through a feature known as session keypair.

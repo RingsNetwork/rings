@@ -1,10 +1,10 @@
-#![warn(missing_docs)]
 //! [`SNARKTaskBuilder`] — loads an r1cs + witness calculator (local or remote), generates
 //! the recursive circuits, and assembles the per-curve [`SNARKProofTask`] (public params +
 //! initial fold).
 
 use rings_derive::wasm_export;
 use rings_snark::circuit;
+use rings_snark::prelude::ff::PrimeField;
 use rings_snark::prelude::nova::provider;
 use rings_snark::prelude::nova::provider::hyperkzg;
 use rings_snark::prelude::nova::provider::ipa_pc;
@@ -20,6 +20,7 @@ use super::FieldEnum;
 use super::Input;
 use super::SNARKGenerator;
 use super::SupportedPrimeField;
+use crate::error::Error;
 use crate::error::Result;
 use crate::extension::types::snark::SNARKProofTask;
 
@@ -140,46 +141,12 @@ impl SNARKTaskBuilder {
             CircuitGenerator::Vesta(g) => {
                 type F = <provider::VestaEngine as Engine>::Scalar;
 
-                let input: circuit::Input<F> = public_input
-                    .into_iter()
-                    .map(|(s, v)| {
-                        (
-                            s,
-                            v.into_iter()
-                                .map(|inp| {
-                                    if let FieldEnum::Vesta(x) = inp.value {
-                                        x
-                                    } else {
-                                        panic!("Wrong curve, expect Vesta")
-                                    }
-                                })
-                                .collect(),
-                        )
-                    })
-                    .collect::<Vec<(String, Vec<F>)>>()
-                    .into();
+                let input = convert_input(public_input, vesta_field)?;
 
                 let private_inputs: Vec<circuit::Input<F>> = private_inputs
                     .into_iter()
-                    .map(|inp| {
-                        inp.into_iter()
-                            .map(|(s, v)| {
-                                let fields: Vec<F> = v
-                                    .into_iter()
-                                    .map(|inp| {
-                                        if let FieldEnum::Vesta(x) = inp.value {
-                                            x
-                                        } else {
-                                            panic!("Wrong curve, expect Vesta")
-                                        }
-                                    })
-                                    .collect();
-                                (s, fields)
-                            })
-                            .collect::<Vec<(String, Vec<F>)>>()
-                            .into()
-                    })
-                    .collect();
+                    .map(|input| convert_input(input, vesta_field))
+                    .collect::<Result<Vec<_>>>()?;
 
                 let circuits = g
                     .gen_recursive_circuit(input, private_inputs, round, true)?
@@ -193,46 +160,12 @@ impl SNARKTaskBuilder {
             CircuitGenerator::Pallas(g) => {
                 type F = <provider::PallasEngine as Engine>::Scalar;
 
-                let input: circuit::Input<F> = public_input
-                    .into_iter()
-                    .map(|(s, v)| {
-                        (
-                            s,
-                            v.into_iter()
-                                .map(|inp| {
-                                    if let FieldEnum::Pallas(x) = inp.value {
-                                        x
-                                    } else {
-                                        panic!("Wrong curve, expect pallas")
-                                    }
-                                })
-                                .collect(),
-                        )
-                    })
-                    .collect::<Vec<(String, Vec<F>)>>()
-                    .into();
+                let input = convert_input(public_input, pallas_field)?;
 
                 let private_inputs: Vec<circuit::Input<F>> = private_inputs
                     .into_iter()
-                    .map(|inp| {
-                        inp.into_iter()
-                            .map(|(s, v)| {
-                                let fields: Vec<F> = v
-                                    .into_iter()
-                                    .map(|inp| {
-                                        if let FieldEnum::Pallas(x) = inp.value {
-                                            x
-                                        } else {
-                                            panic!("Wrong curve, expect Vesta")
-                                        }
-                                    })
-                                    .collect();
-                                (s, fields)
-                            })
-                            .collect::<Vec<(String, Vec<F>)>>()
-                            .into()
-                    })
-                    .collect();
+                    .map(|input| convert_input(input, pallas_field))
+                    .collect::<Result<Vec<_>>>()?;
 
                 let circuits = g
                     .gen_recursive_circuit(input, private_inputs, round, true)?
@@ -246,46 +179,12 @@ impl SNARKTaskBuilder {
             CircuitGenerator::Bn256KZG(g) => {
                 type F = <provider::Bn256EngineKZG as Engine>::Scalar;
 
-                let input: circuit::Input<F> = public_input
-                    .into_iter()
-                    .map(|(s, v)| {
-                        (
-                            s,
-                            v.into_iter()
-                                .map(|inp| {
-                                    if let FieldEnum::Bn256KZG(x) = inp.value {
-                                        x
-                                    } else {
-                                        panic!("Wrong curve, expect bn256")
-                                    }
-                                })
-                                .collect(),
-                        )
-                    })
-                    .collect::<Vec<(String, Vec<F>)>>()
-                    .into();
+                let input = convert_input(public_input, bn256_kzg_field)?;
 
                 let private_inputs: Vec<circuit::Input<F>> = private_inputs
                     .into_iter()
-                    .map(|inp| {
-                        inp.into_iter()
-                            .map(|(s, v)| {
-                                let fields: Vec<F> = v
-                                    .into_iter()
-                                    .map(|inp| {
-                                        if let FieldEnum::Bn256KZG(x) = inp.value {
-                                            x
-                                        } else {
-                                            panic!("Wrong curve, expect bn256")
-                                        }
-                                    })
-                                    .collect();
-                                (s, fields)
-                            })
-                            .collect::<Vec<(String, Vec<F>)>>()
-                            .into()
-                    })
-                    .collect();
+                    .map(|input| convert_input(input, bn256_kzg_field))
+                    .collect::<Result<Vec<_>>>()?;
 
                 let circuits = g
                     .gen_recursive_circuit(input, private_inputs, round, true)?
@@ -303,7 +202,10 @@ impl SNARKTaskBuilder {
 impl SNARKTaskBuilder {
     /// Generate proof task
     pub fn gen_proof_task(circuits: Vec<Circuit>) -> Result<SNARKProofTask> {
-        let task = match &circuits[0].inner {
+        let first = circuits
+            .first()
+            .ok_or_else(|| Error::SNARKHandleMessage("empty SNARK circuit list".to_string()))?;
+        let task = match &first.inner {
             CircuitEnum::Vesta(_) => {
                 type E1 = provider::VestaEngine;
                 type E2 = provider::PallasEngine;
@@ -315,15 +217,16 @@ impl SNARKTaskBuilder {
                     .into_iter()
                     .map(|circ| {
                         if let CircuitEnum::Vesta(c) = circ.inner {
-                            c
+                            Ok(c)
                         } else {
-                            panic!("Wrong curve, expect vesta")
+                            Err(Error::SNARKCurveNotMatch())
                         }
                     })
-                    .collect();
-                let inputs = circuits[0].get_public_inputs();
-                let pp = SNARK::<E1, E2>::gen_pp::<S1, S2>(circuits[0].clone())?;
-                let snark = SNARK::<E1, E2>::new(&circuits[0], &pp, &inputs, &vec![
+                    .collect::<Result<Vec<_>>>()?;
+                let first = first_generated_circuit(&circuits)?;
+                let inputs = first.get_public_inputs()?;
+                let pp = SNARK::<E1, E2>::gen_pp::<S1, S2>(first.clone())?;
+                let snark = SNARK::<E1, E2>::new(first, &pp, &inputs, &vec![
                     <E2 as Engine>::Scalar::from(0),
                 ])?;
 
@@ -344,15 +247,16 @@ impl SNARKTaskBuilder {
                     .into_iter()
                     .map(|circ| {
                         if let CircuitEnum::Pallas(c) = circ.inner {
-                            c
+                            Ok(c)
                         } else {
-                            panic!("Wrong curve, expect vesta")
+                            Err(Error::SNARKCurveNotMatch())
                         }
                     })
-                    .collect();
-                let inputs = circuits[0].get_public_inputs();
-                let pp = SNARK::<E1, E2>::gen_pp::<S1, S2>(circuits[0].clone())?;
-                let snark = SNARK::<E1, E2>::new(&circuits[0], &pp, &inputs, &vec![
+                    .collect::<Result<Vec<_>>>()?;
+                let first = first_generated_circuit(&circuits)?;
+                let inputs = first.get_public_inputs()?;
+                let pp = SNARK::<E1, E2>::gen_pp::<S1, S2>(first.clone())?;
+                let snark = SNARK::<E1, E2>::new(first, &pp, &inputs, &vec![
                     <E2 as Engine>::Scalar::from(0),
                 ])?;
                 SNARKProofTask::PallasVasta(SNARKGenerator {
@@ -372,15 +276,16 @@ impl SNARKTaskBuilder {
                     .into_iter()
                     .map(|circ| {
                         if let CircuitEnum::Bn256KZG(c) = circ.inner {
-                            c
+                            Ok(c)
                         } else {
-                            panic!("Wrong curve, expect vesta")
+                            Err(Error::SNARKCurveNotMatch())
                         }
                     })
-                    .collect();
-                let inputs = circuits[0].get_public_inputs();
-                let pp = SNARK::<E1, E2>::gen_pp::<S1, S2>(circuits[0].clone())?;
-                let snark = SNARK::<E1, E2>::new(&circuits[0], &pp, &inputs, &vec![
+                    .collect::<Result<Vec<_>>>()?;
+                let first = first_generated_circuit(&circuits)?;
+                let inputs = first.get_public_inputs()?;
+                let pp = SNARK::<E1, E2>::gen_pp::<S1, S2>(first.clone())?;
+                let snark = SNARK::<E1, E2>::new(first, &pp, &inputs, &vec![
                     <E2 as Engine>::Scalar::from(0),
                 ])?;
                 SNARKProofTask::Bn256KZGGrumpkin(SNARKGenerator {
@@ -391,5 +296,51 @@ impl SNARKTaskBuilder {
             }
         };
         Ok(task)
+    }
+}
+
+fn first_generated_circuit<F: PrimeField>(
+    circuits: &[circuit::Circuit<F>],
+) -> Result<&circuit::Circuit<F>> {
+    circuits
+        .first()
+        .ok_or_else(|| Error::SNARKHandleMessage("empty generated SNARK circuit list".to_string()))
+}
+
+fn convert_input<F: PrimeField>(
+    input: Input,
+    field: fn(FieldEnum) -> Result<F>,
+) -> Result<circuit::Input<F>> {
+    input
+        .into_iter()
+        .map(|(name, fields)| {
+            let fields = fields
+                .into_iter()
+                .map(|field_value| field(field_value.value))
+                .collect::<Result<Vec<_>>>()?;
+            Ok((name, fields))
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(Into::into)
+}
+
+fn vesta_field(field: FieldEnum) -> Result<<provider::VestaEngine as Engine>::Scalar> {
+    match field {
+        FieldEnum::Vesta(value) => Ok(value),
+        _ => Err(Error::SNARKCurveNotMatch()),
+    }
+}
+
+fn pallas_field(field: FieldEnum) -> Result<<provider::PallasEngine as Engine>::Scalar> {
+    match field {
+        FieldEnum::Pallas(value) => Ok(value),
+        _ => Err(Error::SNARKCurveNotMatch()),
+    }
+}
+
+fn bn256_kzg_field(field: FieldEnum) -> Result<<provider::Bn256EngineKZG as Engine>::Scalar> {
+    match field {
+        FieldEnum::Bn256KZG(value) => Ok(value),
+        _ => Err(Error::SNARKCurveNotMatch()),
     }
 }

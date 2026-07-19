@@ -27,7 +27,6 @@ use byteorder::LittleEndian;
 use byteorder::ReadBytesExt;
 use crypto_bigint::U256;
 use ff::PrimeField;
-use itertools::Itertools;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -76,7 +75,7 @@ pub struct R1CSFile<F: PrimeField> {
 }
 
 /// load witness file by filename with autodetect encoding (bin or json).
-pub fn load_witness_from_file<Fr: PrimeField>(filename: impl AsRef<Path>) -> Vec<Fr> {
+pub fn load_witness_from_file<Fr: PrimeField>(filename: impl AsRef<Path>) -> Result<Vec<Fr>> {
     if filename.as_ref().ends_with("json") {
         load_witness_from_json_file::<Fr>(filename)
     } else {
@@ -85,13 +84,9 @@ pub fn load_witness_from_file<Fr: PrimeField>(filename: impl AsRef<Path>) -> Vec
 }
 
 /// load witness from bin file by filename
-pub fn load_witness_from_bin_file<Fr: PrimeField>(filename: impl AsRef<Path>) -> Vec<Fr> {
-    let reader = OpenOptions::new()
-        .read(true)
-        .open(filename)
-        .expect("unable to open.");
+pub fn load_witness_from_bin_file<Fr: PrimeField>(filename: impl AsRef<Path>) -> Result<Vec<Fr>> {
+    let reader = OpenOptions::new().read(true).open(filename)?;
     load_witness_from_bin_reader::<Fr, BufReader<File>>(BufReader::new(reader))
-        .expect("read witness failed")
 }
 
 /// load witness from u8 array by a reader
@@ -149,30 +144,30 @@ pub fn load_witness_from_bin_reader<Fr: PrimeField, R: Read>(mut reader: R) -> R
 }
 
 /// load witness from json file by filename
-pub fn load_witness_from_json_file<Fr: PrimeField>(filename: impl AsRef<Path>) -> Vec<Fr> {
-    let reader = OpenOptions::new()
-        .read(true)
-        .open(filename)
-        .expect("unable to open.");
+pub fn load_witness_from_json_file<Fr: PrimeField>(filename: impl AsRef<Path>) -> Result<Vec<Fr>> {
+    let reader = OpenOptions::new().read(true).open(filename)?;
     load_witness_from_json::<Fr, BufReader<File>>(BufReader::new(reader))
 }
 
 /// load witness from json by a reader
-pub fn load_witness_from_json<Fr: PrimeField, R: Read>(reader: R) -> Vec<Fr> {
-    let witness: Vec<String> = serde_json::from_reader(reader).expect("unable to read.");
+pub fn load_witness_from_json<Fr: PrimeField, R: Read>(reader: R) -> Result<Vec<Fr>> {
+    let witness: Vec<String> = serde_json::from_reader(reader)
+        .map_err(|error| Error::WitnessFailedOnLoad(error.to_string()))?;
     witness
         .into_iter()
-        .map(|x| Fr::from_str_vartime(&x).unwrap())
-        .collect::<Vec<Fr>>()
+        .map(|value| parse_field::<Fr>(&value))
+        .collect::<Result<Vec<Fr>>>()
 }
 
 /// load r1cs from bin file by filename
-pub fn load_r1cs_from_bin_file<F: PrimeField>(filename: impl AsRef<Path>) -> R1CS<F> {
-    let reader = OpenOptions::new()
-        .read(true)
-        .open(filename.as_ref())
-        .unwrap_or_else(|_| panic!("unable to open {:?}", filename.as_ref()));
+pub fn load_r1cs_from_bin_file<F: PrimeField>(filename: impl AsRef<Path>) -> Result<R1CS<F>> {
+    let reader = OpenOptions::new().read(true).open(filename.as_ref())?;
     load_r1cs_from_bin(BufReader::new(reader))
+}
+
+fn parse_field<Fr: PrimeField>(value: &str) -> Result<Fr> {
+    Fr::from_str_vartime(value)
+        .ok_or_else(|| Error::InvalidDataWhenReadingR1CS(format!("invalid field element {value}")))
 }
 
 fn read_field<R: Read, Fr: PrimeField>(mut reader: R) -> Result<Fr> {
@@ -201,8 +196,9 @@ fn read_header<R: Read>(mut reader: R, size: u64, expected_prime: &str) -> Resul
     reader.read_exact(&mut prime_size)?;
     let prime = U256::from_le_slice(&prime_size);
     let prime = &prime.to_string().to_ascii_lowercase();
+    let expected_prime = expected_prime.strip_prefix("0x").unwrap_or(expected_prime);
 
-    if prime != &expected_prime[2..] {
+    if prime != expected_prime {
         // get rid of '0x' in the front
         return Err(Error::InvalidDataWhenReadingR1CS(format!("Mismatched prime field. Expected {expected_prime}, read {prime} in the header instead.")));
     }
@@ -261,7 +257,7 @@ fn read_map<R: Read>(mut reader: R, size: u64, header: &Header) -> Result<Vec<u6
     for _ in 0..header.n_wires {
         vec.push(reader.read_u64::<LittleEndian>()?);
     }
-    if vec[0] != 0 {
+    if vec.first() != Some(&0) {
         return Err(Error::InvalidDataWhenReadingR1CS(
             "Wire 0 should always be mapped to 0".to_string(),
         ));
@@ -306,12 +302,9 @@ fn from_reader<Fr: PrimeField, R: Read + Seek>(mut reader: R) -> Result<R1CSFile
     let constraint_type = 2;
     let wire2label_type = 3;
 
-    reader.seek(SeekFrom::Start(*section_offsets.get(&header_type).unwrap()))?;
-    let header = read_header(
-        &mut reader,
-        *section_sizes.get(&header_type).unwrap(),
-        Fr::MODULUS,
-    )?;
+    let (header_offset, header_size) = section_meta(&section_offsets, &section_sizes, header_type)?;
+    reader.seek(SeekFrom::Start(header_offset))?;
+    let header = read_header(&mut reader, header_size, Fr::MODULUS)?;
     if header.field_size != 32 {
         return Err(Error::InvalidDataWhenReadingR1CS(
             "This parser only supports 32-byte fields".to_string(),
@@ -321,23 +314,15 @@ fn from_reader<Fr: PrimeField, R: Read + Seek>(mut reader: R) -> Result<R1CSFile
     //     return Err(Error::new(ErrorKind::InvalidData, "This parser only supports bn256".to_string()));
     // }
 
-    reader.seek(SeekFrom::Start(
-        *section_offsets.get(&constraint_type).unwrap(),
-    ))?;
-    let constraints = read_constraints::<&mut R, Fr>(
-        &mut reader,
-        *section_sizes.get(&constraint_type).unwrap(),
-        &header,
-    )?;
+    let (constraint_offset, constraint_size) =
+        section_meta(&section_offsets, &section_sizes, constraint_type)?;
+    reader.seek(SeekFrom::Start(constraint_offset))?;
+    let constraints = read_constraints::<&mut R, Fr>(&mut reader, constraint_size, &header)?;
 
-    reader.seek(SeekFrom::Start(
-        *section_offsets.get(&wire2label_type).unwrap(),
-    ))?;
-    let wire_mapping = read_map(
-        &mut reader,
-        *section_sizes.get(&wire2label_type).unwrap(),
-        &header,
-    )?;
+    let (wire_mapping_offset, wire_mapping_size) =
+        section_meta(&section_offsets, &section_sizes, wire2label_type)?;
+    reader.seek(SeekFrom::Start(wire_mapping_offset))?;
+    let wire_mapping = read_map(&mut reader, wire_mapping_size, &header)?;
 
     Ok(R1CSFile {
         version,
@@ -347,22 +332,58 @@ fn from_reader<Fr: PrimeField, R: Read + Seek>(mut reader: R) -> Result<R1CSFile
     })
 }
 
+fn section_meta(
+    section_offsets: &HashMap<u32, u64>,
+    section_sizes: &HashMap<u32, u64>,
+    section_type: u32,
+) -> Result<(u64, u64)> {
+    let offset = *section_offsets.get(&section_type).ok_or_else(|| {
+        Error::InvalidDataWhenReadingR1CS(format!("missing R1CS section {section_type}"))
+    })?;
+    let size = *section_sizes.get(&section_type).ok_or_else(|| {
+        Error::InvalidDataWhenReadingR1CS(format!("missing R1CS section size {section_type}"))
+    })?;
+    Ok((offset, size))
+}
+
+fn recursive_num_inputs(public_inputs: usize, public_outputs: usize) -> Result<usize> {
+    if public_inputs != public_outputs {
+        return Err(Error::InvalidR1CSRecursiveIoShape {
+            public_inputs,
+            public_outputs,
+        });
+    }
+    public_inputs
+        .checked_add(public_outputs)
+        .and_then(|public_values| public_values.checked_add(1))
+        .ok_or_else(|| {
+            Error::InvalidDataWhenReadingR1CS("R1CS public IO count overflows".to_string())
+        })
+}
+
 /// load r1cs from bin by a reader
-pub fn load_r1cs_from_bin<Fr: PrimeField, R: Read + Seek>(reader: R) -> R1CS<Fr> {
-    let file = from_reader(reader).expect("unable to read.");
-    let num_inputs = (1 + file.header.n_pub_in + file.header.n_pub_out) as usize;
+pub fn load_r1cs_from_bin<Fr: PrimeField, R: Read + Seek>(reader: R) -> Result<R1CS<Fr>> {
+    let file = from_reader(reader)?;
+    let num_inputs = recursive_num_inputs(
+        file.header.n_pub_in as usize,
+        file.header.n_pub_out as usize,
+    )?;
     let num_variables = file.header.n_wires as usize;
-    let num_aux = num_variables - num_inputs;
-    R1CS {
+    let num_aux = num_variables.checked_sub(num_inputs).ok_or_else(|| {
+        Error::InvalidDataWhenReadingR1CS("R1CS input count exceeds variable count".to_string())
+    })?;
+    let r1cs = R1CS {
         num_aux,
         num_inputs,
         num_variables,
         constraints: file.constraints,
-    }
+    };
+    r1cs.validate()?;
+    Ok(r1cs)
 }
 
 /// load r1cs file by filename with autodetect encoding (bin or json)
-pub fn load_r1cs<Fr: PrimeField>(filename: impl AsRef<Path>) -> R1CS<Fr> {
+pub fn load_r1cs<Fr: PrimeField>(filename: impl AsRef<Path>) -> Result<R1CS<Fr>> {
     if filename.as_ref().ends_with("json") {
         load_r1cs_from_json_file(filename)
     } else {
@@ -371,43 +392,117 @@ pub fn load_r1cs<Fr: PrimeField>(filename: impl AsRef<Path>) -> R1CS<Fr> {
 }
 
 /// load r1cs from json file by filename
-pub fn load_r1cs_from_json_file<Fr: PrimeField>(filename: impl AsRef<Path>) -> R1CS<Fr> {
-    let reader = OpenOptions::new()
-        .read(true)
-        .open(filename)
-        .expect("unable to open.");
+pub fn load_r1cs_from_json_file<Fr: PrimeField>(filename: impl AsRef<Path>) -> Result<R1CS<Fr>> {
+    let reader = OpenOptions::new().read(true).open(filename)?;
     load_r1cs_from_json(BufReader::new(reader))
 }
 
 /// load r1cs from json by a reader
-pub fn load_r1cs_from_json<Fr: PrimeField, R: Read>(reader: R) -> R1CS<Fr> {
-    let circuit_json: CircuitJson = serde_json::from_reader(reader).expect("unable to read.");
+pub fn load_r1cs_from_json<Fr: PrimeField, R: Read>(reader: R) -> Result<R1CS<Fr>> {
+    let circuit_json: CircuitJson = serde_json::from_reader(reader)
+        .map_err(|error| Error::InvalidDataWhenReadingR1CS(error.to_string()))?;
 
-    let num_inputs = circuit_json.num_inputs + circuit_json.num_outputs + 1;
-    let num_aux = circuit_json.num_variables - num_inputs;
+    let num_inputs = recursive_num_inputs(circuit_json.num_inputs, circuit_json.num_outputs)?;
+    let num_aux = circuit_json
+        .num_variables
+        .checked_sub(num_inputs)
+        .ok_or_else(|| {
+            Error::InvalidDataWhenReadingR1CS(
+                "R1CS JSON input count exceeds variable count".to_string(),
+            )
+        })?;
 
-    let convert_constraint = |lc: &BTreeMap<String, String>| {
+    let convert_constraint = |lc: &BTreeMap<String, String>| -> Result<Vec<(usize, Fr)>> {
         lc.iter()
-            .map(|(index, coeff)| (index.parse().unwrap(), Fr::from_str_vartime(coeff).unwrap()))
-            .collect_vec()
+            .map(|(index, coeff)| {
+                let index = index.parse().map_err(|error| {
+                    Error::InvalidDataWhenReadingR1CS(format!(
+                        "invalid R1CS constraint index {index}: {error}"
+                    ))
+                })?;
+                Ok((index, parse_field::<Fr>(coeff)?))
+            })
+            .collect::<Result<Vec<_>>>()
     };
 
-    let constraints = circuit_json
-        .constraints
-        .iter()
-        .map(|c| {
-            (
-                convert_constraint(&c[0]),
-                convert_constraint(&c[1]),
-                convert_constraint(&c[2]),
-            )
-        })
-        .collect_vec();
+    let mut constraints = Vec::with_capacity(circuit_json.constraints.len());
+    for constraint in &circuit_json.constraints {
+        let a = constraint_part(constraint, 0)?;
+        let b = constraint_part(constraint, 1)?;
+        let c = constraint_part(constraint, 2)?;
+        constraints.push((
+            convert_constraint(a)?,
+            convert_constraint(b)?,
+            convert_constraint(c)?,
+        ));
+    }
 
-    R1CS {
+    let r1cs = R1CS {
         num_inputs,
         num_aux,
         num_variables: circuit_json.num_variables,
         constraints,
+    };
+    r1cs.validate()?;
+    Ok(r1cs)
+}
+
+fn constraint_part(
+    constraint: &[BTreeMap<String, String>],
+    index: usize,
+) -> Result<&BTreeMap<String, String>> {
+    constraint.get(index).ok_or_else(|| {
+        Error::InvalidDataWhenReadingR1CS(format!(
+            "R1CS JSON constraint has fewer than {} parts",
+            index + 1
+        ))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use pasta_curves::Fp;
+
+    use super::*;
+
+    fn r1cs_json(public_inputs: usize, public_outputs: usize) -> String {
+        format!(
+            r#"{{
+                "constraints": [],
+                "nPubInputs": {public_inputs},
+                "nOutputs": {public_outputs},
+                "nVars": 5
+            }}"#
+        )
+    }
+
+    #[test]
+    fn json_reader_rejects_more_recursive_outputs_than_inputs() {
+        let source = r1cs_json(1, 3);
+        let error = load_r1cs_from_json::<Fp, _>(Cursor::new(source.as_bytes()));
+
+        assert!(matches!(
+            error,
+            Err(Error::InvalidR1CSRecursiveIoShape {
+                public_inputs: 1,
+                public_outputs: 3,
+            })
+        ));
+    }
+
+    #[test]
+    fn json_reader_rejects_more_recursive_inputs_than_outputs() {
+        let source = r1cs_json(3, 1);
+        let error = load_r1cs_from_json::<Fp, _>(Cursor::new(source.as_bytes()));
+
+        assert!(matches!(
+            error,
+            Err(Error::InvalidR1CSRecursiveIoShape {
+                public_inputs: 3,
+                public_outputs: 1,
+            })
+        ));
     }
 }

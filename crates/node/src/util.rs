@@ -1,5 +1,4 @@
 //! Utilities for configuration and build.
-#![warn(missing_docs)]
 
 use std::io::Read;
 

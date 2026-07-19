@@ -28,6 +28,9 @@ on:
 permissions:
   contents: read
 
+env:
+  RUST_TOOLCHAIN: 1.97.0
+
 jobs:
   build_macos:
     name: build macos version binary
@@ -49,7 +52,8 @@ jobs:
 
       - name: Add target
         run: |
-          rustup target add ${{ steps.target.outputs.target }}
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup target add ${{ steps.target.outputs.target }} --toolchain "$RUST_TOOLCHAIN"
 
       - name: Setup protoc
         uses: arduino/setup-protoc@v2.1.0
@@ -69,7 +73,7 @@ jobs:
 
       - name: Build
         run: |
-          cargo build -p rings-node --bin rings --features node --no-default-features --release --target ${{ steps.target.outputs.target }}
+          rustup run "$RUST_TOOLCHAIN" cargo build -p rings-node --bin rings --features node --no-default-features --release --target ${{ steps.target.outputs.target }}
 
       - name: Package
         if: ${{ inputs.publish_artifacts }}
@@ -105,7 +109,8 @@ jobs:
 
       - name: Add target
         run: |
-          rustup target add ${{ steps.target.outputs.target }}
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup target add ${{ steps.target.outputs.target }} --toolchain "$RUST_TOOLCHAIN"
 
       - name: Setup protoc
         uses: arduino/setup-protoc@v2.1.0
@@ -136,7 +141,7 @@ jobs:
 
       - name: Build
         run: |
-          cargo build -p rings-node --bin rings --features node --no-default-features --release --target ${{ steps.target.outputs.target }}
+          rustup run "$RUST_TOOLCHAIN" cargo build -p rings-node --bin rings --features node --no-default-features --release --target ${{ steps.target.outputs.target }}
 
       - name: Package
         if: ${{ inputs.publish_artifacts }}
@@ -175,7 +180,9 @@ jobs:
 
       - name: Add target
         run: |
-          rustup target add ${{ steps.target.outputs.target }}
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup target add ${{ steps.target.outputs.target }} --toolchain "$RUST_TOOLCHAIN"
+          rustup default "$RUST_TOOLCHAIN"
 
       - uses: jetli/wasm-bindgen-action@v0.2.0
         with:
@@ -206,7 +213,8 @@ jobs:
 
       - name: Build
         run: |
-          npm install && npm pack
+          npm ci --ignore-scripts
+          npm pack
 
       - name: Package
         if: ${{ inputs.publish_artifacts }}
