@@ -5,6 +5,7 @@ use std::sync::Mutex;
 use async_trait::async_trait;
 
 use super::*;
+use crate::dht::successor::SuccessorReader;
 use crate::dht::VirtualNodeConfig;
 use crate::dht::DEFAULT_FINGER_TABLE_SIZE;
 use crate::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
@@ -13,6 +14,8 @@ use crate::ecc::SecretKey;
 use crate::measure::BehaviourJudgement;
 use crate::measure::Measure;
 use crate::storage::MemStorage;
+use crate::swarm::callback::InnerSwarmCallback;
+use crate::swarm::callback::SwarmCallback;
 use crate::swarm::SwarmBuilder;
 
 #[derive(Default)]
@@ -69,6 +72,11 @@ impl BehaviourJudgement for RecordingMeasure {
         true
     }
 }
+
+struct NoopSwarmCallback;
+
+#[async_trait]
+impl SwarmCallback for NoopSwarmCallback {}
 
 fn transport_with_measure(measure: MeasureImpl) -> Result<SwarmTransport> {
     let key = SecretKey::random();
@@ -129,6 +137,93 @@ fn swarm_builder_normalizes_virtual_nodes_before_protocol_advertisement() -> Res
         usize::from(MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER)
     );
 
+    Ok(())
+}
+
+#[test]
+fn pending_peer_pool_is_bounded_and_rejects_duplicate_peers() -> Result<()> {
+    let mut pool = PendingPeerPool::<2>::new();
+    let now = Instant::now();
+    let peer_a = SecretKey::random().address().into();
+    let peer_b = SecretKey::random().address().into();
+    let peer_c = SecretKey::random().address().into();
+
+    let attempt_a = pool.reserve(peer_a, now)?;
+    assert!(matches!(
+        pool.reserve(peer_a, now),
+        Err(Error::AlreadyConnected)
+    ));
+    let _attempt_b = pool.reserve(peer_b, now)?;
+    assert!(matches!(
+        pool.reserve(peer_c, now),
+        Err(Error::PendingConnectionCapacityExceeded { capacity: 2 })
+    ));
+    assert_eq!(pool.len(), 2);
+
+    assert!(pool.remove(attempt_a));
+    assert_eq!(pool.len(), 1);
+    assert!(pool.reserve(peer_c, now).is_ok());
+    Ok(())
+}
+
+#[test]
+fn stale_pending_callback_cannot_remove_a_replacement_attempt() -> Result<()> {
+    let mut pool = PendingPeerPool::<1>::new();
+    let now = Instant::now();
+    let peer = SecretKey::random().address().into();
+
+    let old_attempt = pool.reserve(peer, now)?;
+    assert!(pool.remove(old_attempt));
+    let current_attempt = pool.reserve(peer, now)?;
+
+    assert!(!pool.remove(old_attempt));
+    assert!(pool.contains(peer));
+    assert!(pool.remove(current_attempt));
+    Ok(())
+}
+
+#[test]
+fn pending_peer_pool_expires_unopened_handshakes() -> Result<()> {
+    let mut pool = PendingPeerPool::<1>::new();
+    let now = Instant::now();
+    let peer = SecretKey::random().address().into();
+    let attempt = pool.reserve(peer, now)?;
+
+    let expired = pool.expire(now + PENDING_CONNECTION_TIMEOUT);
+    assert_eq!(expired, vec![attempt]);
+    assert_eq!(pool.len(), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn admitted_peer_cannot_be_replaced_by_a_pending_handshake() -> Result<()> {
+    let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
+    let peer = SecretKey::random().address().into();
+    let attempt = transport.reserve_pending_connection(peer).await?;
+
+    assert!(transport.promote_pending_connection(attempt)?);
+    assert!(matches!(
+        transport.reserve_pending_connection(peer).await,
+        Err(Error::AlreadyConnected)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn pending_offer_is_not_routable_or_visible_to_dht() -> Result<()> {
+    let transport = Arc::new(transport_with_measure(Arc::new(
+        RecordingMeasure::default(),
+    ))?);
+    let peer = SecretKey::random().address().into();
+    let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
+
+    let _offer = transport.prepare_connection_offer(peer, callback).await?;
+
+    assert!(transport.get_connection(peer).is_none());
+    assert_eq!(transport.pending_connection_count()?, 1);
+    assert!(!transport.dht.successors().contains(&peer)?);
+
+    transport.disconnect(peer).await?;
     Ok(())
 }
 

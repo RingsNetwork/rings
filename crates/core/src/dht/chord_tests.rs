@@ -304,8 +304,8 @@ async fn test_correct_chord_impl() -> Result<()> {
     assert!(!assert_successor(n1, &n5.did));
 
     #[allow(non_local_definitions)]
-    #[cfg_attr(feature = "wasm", async_trait(?Send))]
-    #[cfg_attr(not(feature = "wasm"), async_trait)]
+    #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+    #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
     impl LiveDid for Did {
         async fn live(&self) -> bool {
             true

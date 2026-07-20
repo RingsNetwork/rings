@@ -128,9 +128,10 @@ impl Swarm {
         self.transport.disconnect(peer).await
     }
 
-    /// Connect a given Did. If the did is already connected, return directly,
-    /// else try prepare offer and establish connection by dht.
-    /// This function may returns a pending connection or connected connection.
+    /// Start a non-routable handshake with a peer.
+    ///
+    /// The peer becomes visible through the connection inspection APIs only
+    /// after its data channel opens and the swarm admits it to the DHT.
     pub async fn connect(&self, peer: Did) -> Result<()> {
         if peer == self.did() {
             return Err(Error::ShouldNotConnectSelf);
@@ -143,7 +144,15 @@ impl Swarm {
         self.transport.send_message(msg, destination).await
     }
 
-    /// List peers and their connection status.
+    /// Send a message directly to an already connected peer, without a Chord lookup.
+    ///
+    /// This preserves an application protocol's explicit next-hop selection. Callers must
+    /// ensure the destination has an active direct transport connection.
+    pub async fn send_direct_message(&self, msg: Message, destination: Did) -> Result<uuid::Uuid> {
+        self.transport.send_direct_message(msg, destination).await
+    }
+
+    /// List active, routable peers and their connection status.
     pub fn peers(&self) -> Vec<ConnectionInspect> {
         self.transport
             .get_connections()
@@ -155,8 +164,13 @@ impl Swarm {
             .collect()
     }
 
-    /// List peer DIDs known to the transport.
+    /// List DIDs with active, routable transport connections.
     pub fn peer_dids(&self) -> Vec<Did> {
+        self.transport.get_connection_ids()
+    }
+
+    /// List DIDs whose direct WebRTC transport connection is active.
+    pub fn connected_peer_dids(&self) -> Vec<Did> {
         self.transport.get_connection_ids()
     }
 

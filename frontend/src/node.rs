@@ -14,11 +14,14 @@ use rings_node::prelude::rings_core::storage::idb::IdbStorage;
 use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
 use rings_node::provider::Provider;
+use rings_webview::Result as WebviewResult;
+use rings_webview::WebviewError;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::spawn_local;
 use wasm_bindgen_futures::JsFuture;
 
 use crate::wallet::WalletAccount;
+use crate::webview::WebviewNode;
 
 /// A browser Rings node with all demo protocols installed.
 #[derive(Clone)]
@@ -27,6 +30,8 @@ pub struct DemoNode {
     pub provider: Arc<Provider>,
     /// SNARK behaviour and task store.
     pub snark: SNARKBehaviour,
+    /// Controlled webview gateway attached to this browser node when its host origin is HTTP(S).
+    pub webview: Option<WebviewNode>,
     listen_abort: AbortHandle,
 }
 
@@ -34,6 +39,16 @@ impl DemoNode {
     /// Stop the background listen/stabilize loop started for this demo node.
     pub fn stop(&self) {
         self.listen_abort.abort();
+    }
+
+    /// Return the controlled webview gateway attached to this browser node.
+    pub fn webview(&self) -> WebviewResult<WebviewNode> {
+        self.webview.clone().ok_or_else(|| {
+            WebviewError::Browser(
+                "webview requires an HTTP(S) frontend origin; it is unavailable in this host"
+                    .to_string(),
+            )
+        })
     }
 }
 
@@ -133,6 +148,8 @@ pub async fn build_node(
     snark
         .register(&provider)
         .map_err(|error| format!("register snark protocol: {error}"))?;
+    let webview = WebviewNode::for_current_window(provider.clone())
+        .map_err(|error| format!("initialize webview: {error}"))?;
 
     let (listen_abort, listen_registration) = AbortHandle::new_pair();
     spawn_local(async move {
@@ -142,6 +159,7 @@ pub async fn build_node(
     Ok(DemoNode {
         provider,
         snark,
+        webview,
         listen_abort,
     })
 }

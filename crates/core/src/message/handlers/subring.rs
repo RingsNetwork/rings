@@ -9,15 +9,15 @@ use crate::prelude::entry::EntryOperation;
 use crate::swarm::Swarm;
 
 /// SubringInterface should imply necessary operator for DHT Subring
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait SubringInterface<const REDUNDANT: u16> {
     /// join a subring
     async fn subring_join(&self, name: &str) -> Result<()>;
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl<const REDUNDANT: u16> SubringInterface<REDUNDANT> for Swarm {
     /// add did into current chord subring.
     /// send direct message with `JoinSubring` type, which will handled by `next` node.

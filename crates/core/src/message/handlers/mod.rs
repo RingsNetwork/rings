@@ -47,8 +47,8 @@ pub struct MessageHandler {
 }
 
 /// Generic trait for handle message ,inspired by Actor-Model.
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait HandleMsg<T> {
     /// Message handler.
     async fn handle(&self, ctx: &MessagePayload, msg: &T) -> Result<()>;
@@ -117,26 +117,23 @@ impl MessageHandler {
     }
 
     pub(crate) async fn leave_dht(&self, peer: Did) -> Result<()> {
-        if self
-            .transport
-            .get_and_check_connection(peer)
-            .await
-            .is_none()
-        {
-            let should_repair = self
-                .dht
-                .peer_may_share_storage_responsibility(peer, self.transport.storage_redundancy())
-                .await?;
+        let should_repair = self
+            .dht
+            .peer_may_share_storage_responsibility(peer, self.transport.storage_redundancy())
+            .await?;
+        if self.transport.is_admitted_connection(peer) {
+            self.transport.disconnect(peer).await?;
+        } else {
             self.dht.remove(peer)?;
-            if should_repair {
-                let repair = self
-                    .dht
-                    .republish_local_entries(self.transport.storage_redundancy())
-                    .await?;
-                self.run_effects(storage::storage_sync_effects(repair)?)
-                    .await?;
-            }
-        };
+        }
+        if should_repair {
+            let repair = self
+                .dht
+                .republish_local_entries(self.transport.storage_redundancy())
+                .await?;
+            self.run_effects(storage::storage_sync_effects(repair)?)
+                .await?;
+        }
         Ok(())
     }
 
@@ -194,8 +191,8 @@ impl MessageHandler {
         Ok(())
     }
 
-    #[cfg_attr(feature = "wasm", async_recursion(?Send))]
-    #[cfg_attr(not(feature = "wasm"), async_recursion)]
+    #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_recursion(?Send))]
+    #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_recursion)]
     pub(crate) async fn handle_dht_events(&self, act: &PeerRingAction) -> Result<()> {
         if matches!(act, PeerRingAction::MultiActions(_)) {
             let mut effects = Vec::new();

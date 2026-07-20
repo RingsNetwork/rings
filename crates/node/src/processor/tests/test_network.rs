@@ -119,6 +119,30 @@ async fn test_processor_handshake_msg() {
 }
 
 #[tokio::test]
+async fn test_processor_direct_message_reaches_connected_peer() {
+    let _network_guard = network_test_guard().await;
+    let callback1 = test_callback();
+    let callback2 = test_callback();
+    let p1 = prepare_processor().await;
+    let p2 = prepare_processor().await;
+
+    p1.swarm.set_callback(callback1.clone()).unwrap();
+    p2.swarm.set_callback(callback2.clone()).unwrap();
+    connect_processors(&p1, &p2, &callback1, &callback2).await;
+
+    p1.send_direct_message(p2.did(), b"direct-message")
+        .await
+        .unwrap();
+
+    let received = wait_for_inbound_message(
+        &callback2,
+        |message| matches!(message, Message::CustomMessage(custom) if custom.0 == b"direct-message"),
+    )
+    .await;
+    assert!(matches!(received, Message::CustomMessage(_)));
+}
+
+#[tokio::test]
 async fn peer_measurement_is_absent_without_measure_or_observation() {
     let unmeasured = prepare_processor_with_identity_key(SecretKey::random()).await;
     let unseen_did = SecretKey::random().address().into();
@@ -170,9 +194,12 @@ async fn provider_exposes_sent_and_received_peer_measurements() {
     assert!(provider_measurement.evidence.sent >= 1);
 
     let rpc_value = provider
-        .request(Method::PeerMeasurement, PeerMeasurementRequest {
-            did: p2.did().to_string(),
-        })
+        .request(
+            Method::PeerMeasurement,
+            PeerMeasurementRequest {
+                did: p2.did().to_string(),
+            },
+        )
         .await
         .unwrap();
     let rpc_measurement: PeerMeasurementResponse = serde_json::from_value(rpc_value).unwrap();

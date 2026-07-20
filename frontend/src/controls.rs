@@ -25,6 +25,7 @@ const FIREFOX_EXTENSION_MANAGER_URL: &str = "about:debugging#/runtime/this-firef
 pub(crate) enum ShellPage {
     Guide,
     Console,
+    Webview,
 }
 
 impl ShellPage {
@@ -32,6 +33,7 @@ impl ShellPage {
         match self {
             Self::Guide => "Home",
             Self::Console => "Node",
+            Self::Webview => "WebView",
         }
     }
 }
@@ -71,6 +73,7 @@ enum UiIcon {
     Power,
     PowerOff,
     Terminal,
+    Globe,
     Sliders,
     PanelOpen,
     PanelClose,
@@ -96,6 +99,14 @@ fn ui_icon(icon: UiIcon) -> Html {
                 <rect x="4.5" y="5" width="15" height="14" rx="2.2" />
                 <path d="M8 10l2.6 2L8 14" />
                 <path d="M13 15h3.5" />
+            </>
+        },
+        UiIcon::Globe => html! {
+            <>
+                <circle cx="12" cy="12" r="8" />
+                <path d="M4 12h16" />
+                <path d="M12 4c2.1 2.2 3.2 4.9 3.2 8S14.1 17.8 12 20" />
+                <path d="M12 4C9.9 6.2 8.8 8.9 8.8 12s1.1 5.8 3.2 8" />
             </>
         },
         UiIcon::Sliders => html! {
@@ -172,6 +183,31 @@ pub(crate) struct SessionView<'a> {
     pub(crate) wallet_account: Option<WalletAccount>,
     pub(crate) did: &'a UseStateHandle<String>,
     pub(crate) peers: &'a UseStateHandle<Vec<PeerView>>,
+}
+
+/// Render the Node-only entry point for the controlled browser WebView.
+pub(crate) fn webview_control(ready: bool, on_open: Callback<MouseEvent>) -> Html {
+    let title = if ready {
+        "Open WebView"
+    } else {
+        "WebView is available after the local node gateway is ready"
+    };
+    html! {
+        <button
+            class="secondary action-button command-button webview-button"
+            type="button"
+            aria-label="Open WebView"
+            title={title}
+            disabled={!ready}
+            onclick={on_open}
+        >
+            <span class="label-desktop">{ "WebView" }</span>
+            <span class="label-mobile command-icon" aria-hidden="true">
+                { ui_icon(UiIcon::Globe) }
+                <span class="command-caption">{ "WebView" }</span>
+            </span>
+        </button>
+    }
 }
 
 struct SettingsDialogView<'a> {

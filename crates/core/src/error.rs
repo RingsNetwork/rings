@@ -268,6 +268,17 @@ pub enum Error {
     #[error("Found existing transport when answer offer from remote node")]
     AlreadyConnected,
 
+    /// Pending WebRTC connection capacity {capacity} is exhausted
+    #[error("Pending WebRTC connection capacity {capacity} is exhausted")]
+    PendingConnectionCapacityExceeded {
+        /// Maximum number of concurrent pending peers.
+        capacity: usize,
+    },
+
+    /// Failed to access the swarm connection lifecycle state
+    #[error("Failed to access the swarm connection lifecycle state")]
+    SwarmConnectionLifecycleLock,
+
     /// You should not connect to yourself
     #[error("You should not connect to yourself")]
     ShouldNotConnectSelf,
@@ -369,7 +380,7 @@ pub enum Error {
     #[error("Invalid entry kind")]
     InvalidEntryKind,
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
     /// RTC new peer connection failed
     #[error("RTC new peer connection failed")]
     RTCPeerConnectionCreateFailed(#[source] webrtc::Error),
@@ -378,22 +389,22 @@ pub enum Error {
     #[error("RTC peer_connection not establish")]
     RTCPeerConnectionNotEstablish,
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
     /// RTC peer_connection fail to create offer
     #[error("RTC peer_connection fail to create offer")]
     RTCPeerConnectionCreateOfferFailed(#[source] webrtc::Error),
 
-    #[cfg(feature = "wasm")]
+    #[cfg(all(feature = "wasm", target_family = "wasm"))]
     /// RTC peer_connection fail to create offer
     #[error("RTC peer_connection fail to create offer")]
     RTCPeerConnectionCreateOfferFailed(String),
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
     /// RTC peer_connection fail to create answer
     #[error("RTC peer_connection fail to create answer")]
     RTCPeerConnectionCreateAnswerFailed(#[source] webrtc::Error),
 
-    #[cfg(feature = "wasm")]
+    #[cfg(all(feature = "wasm", target_family = "wasm"))]
     /// RTC peer_connection fail to create answer
     #[error("RTC peer_connection fail to create answer")]
     RTCPeerConnectionCreateAnswerFailed(String),
@@ -402,12 +413,12 @@ pub enum Error {
     #[error("DataChannel message size not match, {0} < {1}")]
     RTCDataChannelMessageIncomplete(usize, usize),
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
     /// DataChannel send text message failed
     #[error("DataChannel send text message failed")]
     RTCDataChannelSendTextFailed(#[source] webrtc::Error),
 
-    #[cfg(feature = "wasm")]
+    #[cfg(all(feature = "wasm", target_family = "wasm"))]
     /// DataChannel send text message failed, {0}
     #[error("DataChannel send text message failed, {0}")]
     RTCDataChannelSendTextFailed(String),
@@ -420,37 +431,37 @@ pub enum Error {
     #[error("DataChannel state not open")]
     RTCDataChannelStateNotOpen,
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
     /// RTC peer_connection add ice candidate error
     #[error("RTC peer_connection add ice candidate error")]
     RTCPeerConnectionAddIceCandidateError(#[source] webrtc::Error),
 
-    #[cfg(feature = "wasm")]
+    #[cfg(all(feature = "wasm", target_family = "wasm"))]
     /// RTC peer_connection add ice candidate error
     #[error("RTC peer_connection add ice candidate error")]
     RTCPeerConnectionAddIceCandidateError(String),
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
     /// RTC peer_connection set local description failed
     #[error("RTC peer_connection set local description failed")]
     RTCPeerConnectionSetLocalDescFailed(#[source] webrtc::Error),
 
-    #[cfg(feature = "wasm")]
+    #[cfg(all(feature = "wasm", target_family = "wasm"))]
     /// RTC peer_connection set local description failed
     #[error("RTC peer_connection set local description failed")]
     RTCPeerConnectionSetLocalDescFailed(String),
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
     /// RTC peer_connection set remote description failed
     #[error("RTC peer_connection set remote description failed")]
     RTCPeerConnectionSetRemoteDescFailed(#[source] webrtc::Error),
 
-    #[cfg(feature = "wasm")]
+    #[cfg(all(feature = "wasm", target_family = "wasm"))]
     /// RTC peer_connection set remote description failed
     #[error("RTC peer_connection set remote description failed")]
     RTCPeerConnectionSetRemoteDescFailed(String),
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
     /// RTC peer_connection failed to close it
     #[error("RTC peer_connection failed to close it")]
     RTCPeerConnectionCloseFailed(#[source] webrtc::Error),
@@ -507,7 +518,7 @@ pub enum Error {
     #[error("Only SEND message can reset destination")]
     ResetDestinationNeedSend,
 
-    #[cfg(feature = "wasm")]
+    #[cfg(all(feature = "wasm", target_family = "wasm"))]
     /// IndexedDB error, {0}
     #[error("IndexedDB error, {0}")]
     IDBError(rexie::Error),
@@ -516,7 +527,7 @@ pub enum Error {
     #[error("Invalid capacity value")]
     InvalidCapacity,
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
     /// Sled error, {0}
     #[error("Sled error, {0}")]
     SledError(sled::Error),
@@ -561,22 +572,22 @@ pub enum Error {
     #[error("Peer's negotiated max_message_size {0} is too small to carry even one chunk")]
     PeerMaxMessageSizeTooSmall(usize),
 
-    #[cfg(feature = "wasm")]
+    #[cfg(all(feature = "wasm", target_family = "wasm"))]
     /// Cannot get property {0} from JsValue
     #[error("Cannot get property {0} from JsValue")]
     FailedOnGetProperty(String),
 
-    #[cfg(feature = "wasm")]
+    #[cfg(all(feature = "wasm", target_family = "wasm"))]
     /// Cannot set property {0} from JsValue
     #[error("Cannot set property {0} from JsValue")]
     FailedOnSetProperty(String),
 
-    #[cfg(feature = "wasm")]
+    #[cfg(all(feature = "wasm", target_family = "wasm"))]
     /// Error on ser/der JsValue
     #[error("Error on ser/der JsValue")]
     SerdeWasmBindgenError(#[from] serde_wasm_bindgen::Error),
 
-    #[cfg(feature = "wasm")]
+    #[cfg(all(feature = "wasm", target_family = "wasm"))]
     /// Error create RTC connection: {0}
     #[error("Error create RTC connection: {0}")]
     CreateConnectionError(String),
@@ -600,14 +611,14 @@ impl Error {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
 impl From<Error> for wasm_bindgen::JsValue {
     fn from(err: Error) -> Self {
         wasm_bindgen::JsValue::from_str(&err.to_string())
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
 impl From<js_sys::Error> for Error {
     fn from(err: js_sys::Error) -> Self {
         Error::JsError(err.to_string().into())

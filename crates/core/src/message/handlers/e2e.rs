@@ -50,8 +50,8 @@ fn e2e_handshake_response_effect<'payload>(
     .into())
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<E2eHandshakeRequest> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &E2eHandshakeRequest) -> Result<()> {
         run_e2e_local_or_forward(self, ctx, || {
@@ -66,8 +66,8 @@ impl HandleMsg<E2eHandshakeRequest> for MessageHandler {
     }
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<E2eHandshakeResponse> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &E2eHandshakeResponse) -> Result<()> {
         run_e2e_local_or_forward(self, ctx, || {
@@ -78,8 +78,8 @@ impl HandleMsg<E2eHandshakeResponse> for MessageHandler {
     }
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<E2eStreamFrame> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &E2eStreamFrame) -> Result<()> {
         run_e2e_local_or_forward(self, ctx, || {

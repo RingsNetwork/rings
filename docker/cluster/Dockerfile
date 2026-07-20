@@ -6,6 +6,7 @@ WORKDIR /src
 COPY Cargo.lock Cargo.toml README.md rust-toolchain.toml ./
 COPY crates ./crates
 COPY examples ./examples
+COPY third_party ./third_party
 
 RUN cargo build -p rings-node --bin rings --features node --no-default-features --release
 

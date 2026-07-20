@@ -54,7 +54,7 @@ impl<C> Pool<C> {
     }
 }
 
-#[cfg(not(feature = "web-sys-webrtc"))]
+#[cfg(not(all(feature = "web-sys-webrtc", target_family = "wasm")))]
 impl<C, S> Pool<C>
 where
     C: ConnectionInterface<Error = Error, Sdp = S> + Send + Sync,
@@ -103,7 +103,7 @@ where
     }
 }
 
-#[cfg(feature = "web-sys-webrtc")]
+#[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
 impl<C, S> Pool<C>
 where
     C: ConnectionInterface<Error = Error, Sdp = S>,

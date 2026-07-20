@@ -327,5 +327,5 @@ impl PeerRing {
     }
 }
 
-#[cfg(all(not(feature = "wasm"), test))]
+#[cfg(all(not(all(feature = "wasm", target_family = "wasm")), test))]
 mod tests;

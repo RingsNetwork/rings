@@ -13,12 +13,15 @@ publish = false
 [dependencies]
 base58 = "0.2"
 base64 = "0.22"
+async-trait = "0.1"
 futures = "0.3"
 gloo-timers = { version = "0.3", features = ["futures"] }
 js-sys = "=0.3.98"
 rings-node = { path = "../crates/node", default-features = false, features = ["browser_default"] }
+rings-webview = { path = "../crates/webview", features = ["browser"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+url = "2"
 wasm-bindgen = "=0.2.121"
 wasm-bindgen-futures = "=0.4.71"
 web-sys = { version = "=0.3.98", features = [
@@ -30,6 +33,7 @@ web-sys = { version = "=0.3.98", features = [
     "HtmlTextAreaElement",
     "InputEvent",
     "Location",
+    "SubmitEvent",
     "Url",
     "Window",
 ] }

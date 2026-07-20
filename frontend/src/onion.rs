@@ -70,8 +70,8 @@ pub(crate) struct OnionProxyResponse {
     pub(crate) status: u16,
     /// Response headers.
     pub(crate) headers: Vec<(String, String)>,
-    /// Lossy UTF-8 response body for the demo panel.
-    pub(crate) body: String,
+    /// Exact response body bytes returned by the onion exit.
+    pub(crate) body: Vec<u8>,
 }
 
 impl Default for OnionProxyOptions {
@@ -231,8 +231,13 @@ impl OnionProxyResponse {
             &JsValue::from_f64(f64::from(self.status)),
         )?;
         js_set(&object, "headers", &headers_js(&self.headers).into())?;
-        js_set(&object, "body", &body_js(self.body.as_bytes()).into())?;
+        js_set(&object, "body", &body_js(&self.body).into())?;
         Ok(object.into())
+    }
+
+    /// Return a lossy UTF-8 representation for text-only UI output.
+    pub(crate) fn body_text(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
     }
 }
 
@@ -404,14 +409,14 @@ fn parse_route_exit_js(value: &JsValue) -> Result<String, String> {
     js_string_field(value, "did")
 }
 
-fn parse_body_js(value: JsValue) -> Result<String, String> {
+fn parse_body_js(value: JsValue) -> Result<Vec<u8>, String> {
     if let Some(body) = value.as_string() {
-        return Ok(body);
+        return Ok(body.into_bytes());
     }
     if let Ok(bytes) = value.clone().dyn_into::<Uint8Array>() {
         let mut body = vec![0; bytes.length() as usize];
         bytes.copy_to(body.as_mut_slice());
-        return Ok(String::from_utf8_lossy(&body).into_owned());
+        return Ok(body);
     }
     let array = Array::from(&value);
     let mut body = Vec::new();
@@ -424,7 +429,7 @@ fn parse_body_js(value: JsValue) -> Result<String, String> {
         }
         body.push(byte as u8);
     }
-    Ok(String::from_utf8_lossy(&body).into_owned())
+    Ok(body)
 }
 
 fn headers_js(headers: &[(String, String)]) -> Array {
@@ -518,7 +523,22 @@ mod tests {
         let response = super::OnionProxyResponse {
             status: 200,
             headers: vec![("content-type".to_string(), "text/plain".to_string())],
-            body: "hello through onion".to_string(),
+            body: b"hello through onion".to_vec(),
+        };
+
+        let parsed = response
+            .to_js()
+            .and_then(|value| super::OnionProxyResponse::from_js(&value));
+
+        assert_eq!(parsed, Ok(response));
+    }
+
+    #[wasm_bindgen_test]
+    fn response_roundtrip_preserves_binary_body_bytes() {
+        let response = super::OnionProxyResponse {
+            status: 200,
+            headers: vec![("content-type".to_string(), "image/png".to_string())],
+            body: vec![0xff, 0x00, 0x80],
         };
 
         let parsed = response
@@ -538,8 +558,8 @@ mod tests {
             });
         assert_eq!(set_response, Ok(()));
 
-        let parsed =
-            super::OnionProxyResponse::from_js(&response.into()).map(|response| response.body);
+        let parsed = super::OnionProxyResponse::from_js(&response.into())
+            .map(|response| response.body_text());
 
         assert_eq!(parsed, Ok("hello through onion".to_string()));
     }

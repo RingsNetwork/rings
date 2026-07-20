@@ -394,6 +394,21 @@ impl Processor {
             .map_err(Error::SendMessage)
     }
 
+    /// Send a custom message to an already connected peer without Chord routing.
+    ///
+    /// Protocols with their own authenticated hop selection, such as onion circuits, use this
+    /// to keep the core transport from replacing their selected next hop.
+    pub async fn send_direct_message(&self, destination: Did, msg: &[u8]) -> Result<uuid::Uuid> {
+        tracing::info!("send_direct_message, message size: {:?}", msg.len());
+
+        let msg = Message::custom(msg).map_err(Error::SendMessage)?;
+
+        self.swarm
+            .send_direct_message(msg, destination)
+            .await
+            .map_err(Error::SendMessage)
+    }
+
     /// Send an E2E handshake request to a DID.
     ///
     /// The negotiated key is the peer's account/identity secp256k1 key, not
@@ -526,6 +541,18 @@ impl Processor {
     ) -> Result<uuid::Uuid> {
         let msg_bytes = envelope.encode()?;
         self.send_message(destination, &msg_bytes).await
+    }
+
+    /// Send a namespaced envelope directly to an already connected peer.
+    ///
+    /// This bypasses Chord routing while retaining the normal custom-message envelope codec.
+    pub async fn send_direct_envelope(
+        &self,
+        destination: Did,
+        envelope: &crate::extension::ext::Envelope,
+    ) -> Result<uuid::Uuid> {
+        let msg_bytes = envelope.encode()?;
+        self.send_direct_message(destination, &msg_bytes).await
     }
 
     /// check local cache of dht

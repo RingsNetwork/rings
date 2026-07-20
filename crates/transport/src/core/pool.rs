@@ -109,9 +109,12 @@ impl<T: Clone> RoundRobin<T> for RoundRobinPool<T> {
 /// Extends `RoundRobin` with functionality for asynchronous message transmission, leveraging the pooled
 /// resources for communication. It's adaptable to various messaging patterns and data types, specified
 /// by the generic `Message` associated type.
-#[cfg_attr(any(feature = "web-sys-webrtc", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(any(all(feature = "web-sys-webrtc", target_family = "wasm"), target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(
-    not(any(feature = "web-sys-webrtc", target_family = "wasm")),
+    not(any(
+        all(feature = "web-sys-webrtc", target_family = "wasm"),
+        target_family = "wasm"
+    )),
     async_trait
 )]
 pub trait MessageSenderPool<T>: RoundRobin<T> {

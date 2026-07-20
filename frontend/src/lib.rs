@@ -24,7 +24,12 @@ mod proof;
 mod styles;
 mod topology;
 mod wallet;
+pub mod webview;
+mod webview_ui;
 mod workbench;
+
+/// Browser Rings node API.
+pub use node::DemoNode;
 
 /// Mount the Yew app.
 pub fn run() {

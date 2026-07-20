@@ -92,7 +92,8 @@ impl Stabilizer {
 
     /// Clean unavailable connections in transport.
     pub async fn clean_unavailable_connections(&self) -> Result<()> {
-        let conns = self.transport.get_connections();
+        self.transport.expire_pending_connections().await?;
+        let conns = self.transport.admitted_connections();
 
         for (did, conn) in conns.into_iter() {
             // Only terminal states are cleaned. `Disconnected` is transient: ICE
@@ -199,7 +200,7 @@ impl Stabilizer {
     }
 }
 
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 mod stabilizer {
     use std::sync::Arc;
     use std::time::Duration;
@@ -228,7 +229,7 @@ mod stabilizer {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
 mod stabilizer {
     use std::sync::Arc;
     use std::time::Duration;

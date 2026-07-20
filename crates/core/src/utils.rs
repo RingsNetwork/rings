@@ -5,7 +5,7 @@ pub fn get_epoch_ms() -> u128 {
     Utc::now().timestamp_millis() as u128
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
 /// Toolset for wasm
 pub mod js_value {
     use serde::de::DeserializeOwned;
@@ -38,7 +38,7 @@ pub mod js_value {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
 /// Helpers for adapting JavaScript functions into async Rust callbacks.
 pub mod js_func {
     /// This macro will generate a wrapper for mapping a js_sys::Function with type fn(T, T, T, T) -> Promise<()>
@@ -145,7 +145,7 @@ pub mod js_func {
     of!(of4, a: T0, b: T1, c: T2, d: T3);
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
 /// Browser and worker utility functions for wasm runtimes.
 pub mod js_utils {
     use std::future::Future;

@@ -83,8 +83,11 @@ pub fn effective_max_message_size(remote_sdp: &str) -> usize {
 
 /// The [ConnectionInterface] trait defines how to
 /// make webrtc ice handshake with a remote peer and then send data channel message to it.
-#[cfg_attr(feature = "web-sys-webrtc", async_trait(?Send))]
-#[cfg_attr(not(feature = "web-sys-webrtc"), async_trait)]
+#[cfg_attr(all(feature = "web-sys-webrtc", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(
+    not(all(feature = "web-sys-webrtc", target_family = "wasm")),
+    async_trait
+)]
 pub trait ConnectionInterface {
     /// Sdp is used to expose local and remote session descriptions when handshaking.
     type Sdp: Serialize + DeserializeOwned;
@@ -133,8 +136,11 @@ pub trait ConnectionInterface {
 /// This trait specifies how to management [ConnectionInterface] objects.
 /// Each platform must implement this trait for its own connection implementation.
 /// See [connections](crate::connections) module for examples.
-#[cfg_attr(feature = "web-sys-webrtc", async_trait(?Send))]
-#[cfg_attr(not(feature = "web-sys-webrtc"), async_trait)]
+#[cfg_attr(all(feature = "web-sys-webrtc", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(
+    not(all(feature = "web-sys-webrtc", target_family = "wasm")),
+    async_trait
+)]
 pub trait TransportInterface {
     /// The connection type that is created by this trait.
     type Connection: ConnectionInterface<Error = Self::Error>;
@@ -170,12 +176,12 @@ pub trait TransportInterface {
 }
 
 /// Used to store a boxed [TransportInterface] trait object.
-#[cfg(not(feature = "web-sys-webrtc"))]
+#[cfg(not(all(feature = "web-sys-webrtc", target_family = "wasm")))]
 pub type BoxedTransport<C, E> =
     Box<dyn TransportInterface<Connection = C, Error = E> + Send + Sync>;
 
 /// Used to store a boxed [TransportInterface] trait object.
-#[cfg(feature = "web-sys-webrtc")]
+#[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
 pub type BoxedTransport<C, E> = Box<dyn TransportInterface<Connection = C, Error = E>>;
 
 #[cfg(test)]

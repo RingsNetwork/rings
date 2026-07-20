@@ -9,6 +9,9 @@ use crate::node::PeerView;
 const CHORD_ID_BYTES: usize = 20;
 const CHORD_ID_BITS: usize = CHORD_ID_BYTES * 8;
 const CHORD_HEX_CHARS: usize = CHORD_ID_BYTES * 2;
+const ACTIVE_DID_LINE_LENGTH: usize = 21;
+const ACTIVE_DID_LABEL_WIDTH: f64 = 176.0;
+const ACTIVE_DID_LABEL_HEIGHT: f64 = 42.0;
 
 pub(crate) fn view(did: &str, peers: &[PeerView]) -> Html {
     html! {
@@ -26,24 +29,17 @@ struct TopologyProps {
 fn topology_component(props: &TopologyProps) -> Html {
     let layout = TopologyLayout::new();
     let model = TopologyModel::new(&props.did, &props.peers);
-    let hovered_node = use_state(|| None::<String>);
     let pinned_node = use_state(|| None::<String>);
-    let active_did = (*pinned_node).clone().or_else(|| (*hovered_node).clone());
     let render = TopologyRenderState {
         layout,
         node_count: model.nodes.len(),
         show_remote_labels: model.nodes.len() <= 6,
-        active_did,
-        hovered_node: hovered_node.clone(),
+        active_did: (*pinned_node).clone(),
         pinned_node: pinned_node.clone(),
     };
     let clear_pinned = {
         let pinned_node = pinned_node.clone();
         Callback::from(move |_| pinned_node.set(None))
-    };
-    let clear_hovered = {
-        let hovered_node = hovered_node.clone();
-        Callback::from(move |_| hovered_node.set(None))
     };
     html! {
         <svg
@@ -52,7 +48,6 @@ fn topology_component(props: &TopologyProps) -> Html {
             role="img"
             aria-label="inferred Chord identifier ring"
             onclick={clear_pinned}
-            onmouseleave={clear_hovered}
         >
             { topology_orbits(layout) }
             { topology_caption(layout, model.nodes.len()) }
@@ -114,7 +109,6 @@ struct TopologyRenderState {
     node_count: usize,
     show_remote_labels: bool,
     active_did: Option<String>,
-    hovered_node: UseStateHandle<Option<String>>,
     pinned_node: UseStateHandle<Option<String>>,
 }
 
@@ -267,6 +261,7 @@ fn topology_node_group(render: &TopologyRenderState, index: usize, node: &ChordN
         render.layout.radius + 31.0,
         node.angle,
     );
+    let radius = node_radius(node, render.node_count);
     let active = render
         .active_did
         .as_ref()
@@ -279,31 +274,16 @@ fn topology_node_group(render: &TopologyRenderState, index: usize, node: &ChordN
     html! {
         <g
             class={group_class}
-            onmouseenter={node_hover_callback(&render.hovered_node, node.did.clone())}
-            onmouseleave={clear_node_hover_callback(&render.hovered_node)}
             onclick={pin_node_callback(&render.pinned_node, node.did.clone())}
         >
-            <title>{ format!("{} {}", node.state, node.did) }</title>
-            <circle class={node_class(node)} cx={svg_num(x)} cy={svg_num(y)} r={svg_num(node_radius(node, render.node_count))} />
+            { active.then(|| html! {
+                <circle class="active-node-halo" cx={svg_num(x)} cy={svg_num(y)} r={svg_num(radius + 3.0)} pointer-events="none" />
+            }) }
+            <circle class={node_class(node)} cx={svg_num(x)} cy={svg_num(y)} r={svg_num(radius)} />
             { node_index_label(node, index, render.node_count, x, y) }
             { node_did_label(node, render.show_remote_labels, label_x, label_y) }
         </g>
     }
-}
-
-fn node_hover_callback(
-    hovered_node: &UseStateHandle<Option<String>>,
-    did: String,
-) -> Callback<MouseEvent> {
-    let hovered_node = hovered_node.clone();
-    Callback::from(move |_| hovered_node.set(Some(did.clone())))
-}
-
-fn clear_node_hover_callback(
-    hovered_node: &UseStateHandle<Option<String>>,
-) -> Callback<MouseEvent> {
-    let hovered_node = hovered_node.clone();
-    Callback::from(move |_| hovered_node.set(None))
 }
 
 fn pin_node_callback(
@@ -313,8 +293,16 @@ fn pin_node_callback(
     let pinned_node = pinned_node.clone();
     Callback::from(move |event: MouseEvent| {
         event.stop_propagation();
-        pinned_node.set(Some(did.clone()));
+        pinned_node.set(toggle_pinned_did(&pinned_node, &did));
     })
+}
+
+fn toggle_pinned_did(current: &Option<String>, did: &str) -> Option<String> {
+    if current.as_deref() == Some(did) {
+        None
+    } else {
+        Some(did.to_string())
+    }
 }
 
 fn node_index_label(node: &ChordNode, index: usize, node_count: usize, x: f64, y: f64) -> Html {
@@ -354,6 +342,7 @@ fn active_node_overlay(render: &TopologyRenderState, nodes: &[ChordNode]) -> Htm
                 render.layout.center_x,
                 render.layout.center_y,
                 render.layout.radius,
+                render.node_count,
             )
         })
         .unwrap_or_else(|| html! {})
@@ -507,12 +496,12 @@ fn node_class(node: &ChordNode) -> &'static str {
 
 fn node_radius(node: &ChordNode, node_count: usize) -> f64 {
     if node.is_local {
-        return if node_count > 16 { 24.0 } else { 28.0 };
+        return if node_count > 16 { 14.0 } else { 18.0 };
     }
     match node_count {
-        0..=8 => 21.0,
-        9..=16 => 15.0,
-        _ => 10.0,
+        0..=8 => 16.0,
+        9..=16 => 12.0,
+        _ => 8.0,
     }
 }
 
@@ -699,40 +688,69 @@ fn ring_peer_label(
     }
 }
 
-fn active_node_label(node: &ChordNode, center_x: f64, center_y: f64, radius: f64) -> Html {
+fn active_node_label(
+    node: &ChordNode,
+    center_x: f64,
+    center_y: f64,
+    radius: f64,
+    node_count: usize,
+) -> Html {
     let (node_x, node_y) = polar_point(center_x, center_y, radius, node.angle);
-    let (raw_x, raw_y) = polar_point(center_x, center_y, radius + 64.0, node.angle);
-    let readout_width = (node.did.chars().count() as f64 * 5.2 + 20.0).clamp(180.0, 340.0);
-    let readout_x =
-        (raw_x - readout_width / 2.0).clamp(18.0, center_x * 2.0 - readout_width - 18.0);
-    let label_x = readout_x + readout_width / 2.0;
-    let label_y = raw_y.clamp(66.0, center_y * 2.0 - 62.0);
+    let node_radius = node_radius(node, node_count);
+    let label_above = node_y >= center_y;
+    let label_x = (node_x - ACTIVE_DID_LABEL_WIDTH / 2.0)
+        .clamp(8.0, center_x * 2.0 - ACTIVE_DID_LABEL_WIDTH - 8.0);
+    let preferred_y = if label_above {
+        node_y - node_radius - ACTIVE_DID_LABEL_HEIGHT - 12.0
+    } else {
+        node_y + node_radius + 12.0
+    };
+    let label_y = preferred_y.clamp(8.0, center_y * 2.0 - ACTIVE_DID_LABEL_HEIGHT - 8.0);
+    let pointer_y = if label_above {
+        label_y + ACTIVE_DID_LABEL_HEIGHT
+    } else {
+        label_y
+    };
+    let pointer_start_y = if label_above {
+        node_y - node_radius
+    } else {
+        node_y + node_radius
+    };
+    let pointer_x = node_x.clamp(label_x + 10.0, label_x + ACTIVE_DID_LABEL_WIDTH - 10.0);
+    let (first_line, second_line) = split_did_label(&node.did);
 
     html! {
         <g class="active-node-readout" pointer-events="none">
             <line
                 class="active-node-pointer"
                 x1={svg_num(node_x)}
-                y1={svg_num(node_y)}
-                x2={svg_num(label_x)}
-                y2={svg_num(label_y)}
+                y1={svg_num(pointer_start_y)}
+                x2={svg_num(pointer_x)}
+                y2={svg_num(pointer_y)}
             />
             <rect
                 class="active-node-frame"
-                x={svg_num(readout_x)}
-                y={svg_num(label_y - 13.0)}
-                width={svg_num(readout_width)}
-                height="22"
-                rx="4"
-            />
-            <text
-                class="active-node-id"
                 x={svg_num(label_x)}
                 y={svg_num(label_y)}
-                text-anchor="middle"
-            >
-                { node.did.clone() }
+                width={svg_num(ACTIVE_DID_LABEL_WIDTH)}
+                height={svg_num(ACTIVE_DID_LABEL_HEIGHT)}
+                rx="4"
+            />
+            <text class="active-node-caption" x={svg_num(label_x + 8.0)} y={svg_num(label_y + 11.0)}>
+                { "DID" }
             </text>
+            <text
+                class="active-node-id"
+                x={svg_num(label_x + 8.0)}
+                y={svg_num(label_y + 24.0)}
+            >
+                { first_line }
+            </text>
+            { (!second_line.is_empty()).then(|| html! {
+                <text class="active-node-id" x={svg_num(label_x + 8.0)} y={svg_num(label_y + 35.0)}>
+                    { second_line }
+                </text>
+            }) }
         </g>
     }
 }
@@ -791,6 +809,12 @@ pub(crate) fn short_did(did: &str) -> String {
     format!("{prefix}...{suffix}")
 }
 
+fn split_did_label(did: &str) -> (String, String) {
+    let mut chars = did.chars();
+    let first_line: String = chars.by_ref().take(ACTIVE_DID_LINE_LENGTH).collect();
+    (first_line, chars.collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -833,6 +857,25 @@ mod tests {
         assert!(did_identifier("0x123").is_none());
         assert!(did_identifier("0x00zz").is_none());
         assert!(did_identifier("").is_none());
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn did_readout_preserves_the_full_identifier() {
+        let did = "0x0123456789abcdef0123456789abcdef01234567";
+        let (first_line, second_line) = split_did_label(did);
+
+        assert_eq!(first_line.chars().count(), ACTIVE_DID_LINE_LENGTH);
+        assert_eq!(format!("{first_line}{second_line}"), did);
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn selected_node_click_toggles_the_readout() {
+        let did = "0x0123456789abcdef";
+
+        assert_eq!(toggle_pinned_did(&None, did), Some(did.to_string()));
+        assert_eq!(toggle_pinned_did(&Some(did.to_string()), did), None,);
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]

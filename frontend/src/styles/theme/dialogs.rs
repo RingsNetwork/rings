@@ -1,7 +1,15 @@
 use super::{rule, Theme};
 
 pub(super) fn append(css: &mut String, theme: Theme) {
-    rule(css, ".topology-shell .dialog-backdrop", &[("background", "linear-gradient(90deg, rgba(122, 87, 46, 0.05) 1px, transparent 1px), linear-gradient(180deg, rgba(122, 87, 46, 0.045) 1px, transparent 1px), rgba(49, 39, 24, 0.36)")]);
+    rule(
+        css,
+        ".topology-shell .dialog-backdrop,.topology-shell .dialog-backdrop:hover,.topology-shell .dialog-backdrop:focus-visible",
+        &[
+            ("background", "rgba(17, 24, 39, 0.38)"),
+            ("border-color", "transparent"),
+            ("color", "transparent"),
+        ],
+    );
     rule(
         css,
         ".topology-shell .link-dialog",

@@ -160,8 +160,8 @@ fn placed_entries_by_key(entries: impl IntoIterator<Item = PlacedEntry>) -> BTre
 
 struct FailingGetStorageFixture;
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl KvStorageInterface<Entry> for FailingGetStorageFixture {
     // Test-only fixture for the read-error boundary. Browser/localStorage
     // adapters are production storage implementations and are cfg-excluded here.

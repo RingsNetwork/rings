@@ -8,11 +8,11 @@ use async_trait::async_trait;
 use crate::dht::Did;
 
 /// Type of Measure, see [Measure].
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 pub type MeasureImpl = Arc<dyn BehaviourJudgement + Send + Sync>;
 
 /// Type of Measure, see [crate::measure::Measure].
-#[cfg(feature = "wasm")]
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
 pub type MeasureImpl = Arc<dyn BehaviourJudgement>;
 
 /// The tag of counters in measure.
@@ -216,8 +216,8 @@ pub fn order_peers_by_quality(
 /// `Measure` is used to assess the reliability of peers by counting their behaviour.
 /// It currently count the number of sent and received messages in a given period (1 hour).
 /// The method [Measure::incr] should be called in the proper places.
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait Measure {
     /// `incr` increments the counter of the given peer.
     async fn incr(&self, did: Did, counter: MeasureCounter);
@@ -226,8 +226,8 @@ pub trait Measure {
 }
 
 /// `BehaviourJudgement` classifies local evidence about a peer.
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait BehaviourJudgement: Measure {
     /// Classify local peer quality for DHT connection scheduling.
     ///
@@ -246,8 +246,8 @@ pub trait BehaviourJudgement: Measure {
 /// `ConnectBehaviour` trait offers a default implementation for the `good` method, providing a judgement
 /// based on a node's behavior in establishing connections.
 /// The "goodness" of a node is measured by comparing disconnection counts against a given threshold.
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait ConnectBehaviour<const THRESHOLD: u64>: Measure {
     /// This asynchronous method returns a boolean indicating whether the node identified by `did` has a satisfactory connection behavior.
     async fn good(&self, did: Did) -> bool {
@@ -266,8 +266,8 @@ pub trait ConnectBehaviour<const THRESHOLD: u64>: Measure {
 /// `MessageSendBehaviour` trait provides a default implementation for the `good` method, judging a node's
 /// behavior based on its message sending capabilities.
 /// The "goodness" of a node is measured by comparing the sent and failed-to-send counts against a given threshold.
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait MessageSendBehaviour<const THRESHOLD: u64>: Measure {
     /// This asynchronous method returns a boolean indicating whether the node identified by `did` has a satisfactory message sending behavior.
     async fn good(&self, did: Did) -> bool {
@@ -279,8 +279,8 @@ pub trait MessageSendBehaviour<const THRESHOLD: u64>: Measure {
 /// `MessageRecvBehaviour` trait provides a default implementation for the `good` method, assessing a node's
 /// behavior based on its message receiving capabilities.
 /// The "goodness" of a node is measured by comparing the received and failed-to-receive counts against a given threshold.
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait MessageRecvBehaviour<const THRESHOLD: u64>: Measure {
     /// This asynchronous method returns a boolean indicating whether the node identified by `did` has a satisfactory message receiving behavior.
     async fn good(&self, did: Did) -> bool {

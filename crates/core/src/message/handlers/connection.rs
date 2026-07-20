@@ -2,6 +2,7 @@ use async_trait::async_trait;
 
 use crate::dht::types::Chord;
 use crate::dht::types::CorrectChord;
+use crate::dht::Did;
 use crate::dht::PeerRingAction;
 use crate::dht::TopoInfo;
 use crate::error::Error;
@@ -21,9 +22,25 @@ use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 
+fn confirmed_topology(info: &TopoInfo, is_active: impl Fn(Did) -> bool) -> TopoInfo {
+    TopoInfo {
+        successors: info
+            .successors
+            .iter()
+            .copied()
+            .filter(|peer| is_active(*peer))
+            .collect(),
+        predecessor: info.predecessor.filter(|peer| is_active(*peer)),
+    }
+}
+
+fn topology_has_confirmed_peer(info: &TopoInfo) -> bool {
+    info.predecessor.is_some() || !info.successors.is_empty()
+}
+
 /// QueryForTopoInfoSend is direct message
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<QueryForTopoInfoSend> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &QueryForTopoInfoSend) -> Result<()> {
         let info: TopoInfo = TopoInfo::try_from(self.dht.as_ref())?;
@@ -40,8 +57,8 @@ impl HandleMsg<QueryForTopoInfoSend> for MessageHandler {
 }
 
 /// Try join received node into DHT after received from TopoInfo.
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<QueryForTopoInfoReport> for MessageHandler {
     async fn handle(&self, _ctx: &MessagePayload, msg: &QueryForTopoInfoReport) -> Result<()> {
         match msg.then {
@@ -53,24 +70,30 @@ impl HandleMsg<QueryForTopoInfoReport> for MessageHandler {
                 }
             }
             <QueryForTopoInfoReport as Then>::Then::Stabilization => {
-                // Establish stabilization-learned candidates first so the
-                // resulting Notify/Query actions can usually send immediately.
+                // Candidates begin as non-routable pending handshakes. Only
+                // peers whose data channel has opened may enter the DHT view.
                 let candidates = msg
                     .info
                     .predecessor
                     .into_iter()
                     .chain(msg.info.successors.iter().copied());
                 self.connect_dht_peers(candidates).await?;
-                let ev = self.dht.stabilize(msg.info.clone())?;
-                self.handle_dht_events(&ev).await?;
+
+                let confirmed = confirmed_topology(&msg.info, |peer| {
+                    self.transport.get_connection(peer).is_some()
+                });
+                if topology_has_confirmed_peer(&confirmed) {
+                    let ev = self.dht.stabilize(confirmed)?;
+                    self.handle_dht_events(&ev).await?;
+                }
             }
         }
         Ok(())
     }
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<ConnectNodeSend> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &ConnectNodeSend) -> Result<()> {
         if !self.transport.accepts_connection_offer(msg) {
@@ -99,8 +122,8 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
     }
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<ConnectNodeReport> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &ConnectNodeReport) -> Result<()> {
         if ctx.should_forward_from(self.dht.did) {
@@ -114,8 +137,8 @@ impl HandleMsg<ConnectNodeReport> for MessageHandler {
     }
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<FindSuccessorSend> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &FindSuccessorSend) -> Result<()> {
         match self.dht.find_successor(msg.did)? {
@@ -148,8 +171,8 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
     }
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<FindSuccessorReport> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &FindSuccessorReport) -> Result<()> {
         if ctx.should_forward_from(self.dht.did) {
@@ -160,8 +183,9 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
 
         match &msg.handler {
             FindSuccessorReportHandler::FixFingerTable { index } => {
-                self.dht.apply_fixed_finger(*index, msg.did)?;
-                if msg.reports_remote_successor(self.dht.did) {
+                if self.transport.get_connection(msg.did).is_some() {
+                    self.dht.apply_fixed_finger(*index, msg.did)?;
+                } else if msg.reports_remote_successor(self.dht.did) {
                     self.connect_dht_peer(msg.did).await?;
                 }
             }
@@ -175,7 +199,7 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
     }
 }
 
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 #[cfg(test)]
 pub mod tests {
     //! tests
@@ -191,6 +215,24 @@ pub mod tests {
     use crate::tests::default::wait_for_msgs;
     use crate::tests::default::Node;
     use crate::tests::manually_establish_connection;
+
+    #[test]
+    fn topology_report_keeps_only_confirmed_peers() {
+        let active = SecretKey::random().address().into();
+        let pending_successor = SecretKey::random().address().into();
+        let pending_predecessor = SecretKey::random().address().into();
+        let confirmed = confirmed_topology(
+            &TopoInfo {
+                successors: vec![active, pending_successor],
+                predecessor: Some(pending_predecessor),
+            },
+            |peer| peer == active,
+        );
+
+        assert_eq!(confirmed.successors, vec![active]);
+        assert_eq!(confirmed.predecessor, None);
+        assert!(topology_has_confirmed_peer(&confirmed));
+    }
 
     // node1.key < node2.key < node3.key
     //
@@ -631,12 +673,16 @@ pub mod tests {
 
         node1.assert_transports(vec![]);
         node2.assert_transports(vec![]);
-        {
+
+        wait_until("both sides to remove each other from DHT fingers", || {
             let finger1 = node1.dht().lock_finger()?.clone().clone_finger();
             let finger2 = node2.dht().lock_finger()?.clone().clone_finger();
-            assert!(finger1.into_iter().all(|x| x.is_none()));
-            assert!(finger2.into_iter().all(|x| x.is_none()));
-        }
+            Ok(
+                finger1.into_iter().all(|x| x.is_none())
+                    && finger2.into_iter().all(|x| x.is_none()),
+            )
+        })
+        .await?;
 
         Ok(())
     }

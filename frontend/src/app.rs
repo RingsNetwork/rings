@@ -34,6 +34,8 @@ use crate::node::PeerView;
 use crate::styles;
 use crate::wallet::WalletAccount;
 use crate::wallet::WalletKind;
+use crate::webview;
+use crate::webview_ui;
 use crate::workbench;
 
 mod actions;
@@ -72,6 +74,7 @@ struct NodeState {
     storage_name: UseStateHandle<String>,
     peers: UseStateHandle<Vec<PeerView>>,
     seed_url: UseStateHandle<String>,
+    webview_ready: UseStateHandle<bool>,
 }
 
 struct LinkState {
@@ -184,6 +187,7 @@ fn use_node_state() -> NodeState {
             )
             .unwrap_or_default()
         }),
+        webview_ready: use_state(|| false),
     }
 }
 
@@ -488,6 +492,9 @@ fn use_shell_history(
 
 fn render_app(ctx: AppRenderContext<'_>) -> Html {
     let effective_page = effective_shell_page(ctx.shell, ctx.extension_mode);
+    if effective_page == ShellPage::Webview {
+        return html! { <webview_ui::WebviewShell /> };
+    }
     let navigate_page = navigate_page_callback(ctx.shell);
     let header = controls::app_header(effective_page, navigate_page.clone(), !ctx.extension_mode);
     if effective_page == ShellPage::Guide {
@@ -553,10 +560,23 @@ fn render_console_shell(ctx: AppRenderContext<'_>, header: Html) -> Html {
         true,
         ctx.extension_mode,
     );
+    let webview_control = (!ctx.extension_mode).then(|| {
+        let status = ctx.node.status.clone();
+        let ready = *ctx.node.webview_ready;
+        controls::webview_control(
+            ready,
+            Callback::from(move |_| {
+                if let Err(error) = webview::open_webview_popup() {
+                    status.set(format!("open webview: {error}"));
+                }
+            }),
+        )
+    });
     let control_sidebar = controls::control_sidebar(
         control_view(ctx.node),
         ctx.launch_actions,
         workbench_control,
+        webview_control,
         *ctx.shell.active_dialog,
         dialog_actions,
         ctx.shell.control_sidebar_collapsed.clone(),
@@ -725,6 +745,10 @@ fn routed_shell_route() -> Option<ShellRoute> {
             page: ShellPage::Console,
             dialog: ActiveDialog::None,
         }),
+        "webview" => Some(ShellRoute {
+            page: ShellPage::Webview,
+            dialog: ActiveDialog::None,
+        }),
         "node/settings" | "settings" => Some(ShellRoute {
             page: ShellPage::Console,
             dialog: ActiveDialog::Settings,
@@ -823,6 +847,7 @@ fn shell_route_fragment(page: ShellPage, dialog: ActiveDialog) -> Option<&'stati
     match (page, dialog) {
         (ShellPage::Guide, ActiveDialog::None) => None,
         (ShellPage::Console, ActiveDialog::None) => Some("node"),
+        (ShellPage::Webview, ActiveDialog::None) => Some("webview"),
         (_, ActiveDialog::Settings) => Some("node/settings"),
         (_, ActiveDialog::Workbench) => Some("node/workbench"),
     }

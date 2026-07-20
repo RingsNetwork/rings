@@ -16,12 +16,15 @@
   border: 0;
   border-radius: 0;
   padding: 0;
-  background:
-    linear-gradient(90deg, rgba(0, 229, 255, 0.06) 1px, transparent 1px),
-    linear-gradient(180deg, rgba(84, 255, 208, 0.045) 1px, transparent 1px),
-    rgba(0, 0, 0, 0.72);
-  background-size: 32px 32px, 32px 32px, auto;
+  background: rgba(17, 24, 39, 0.38);
   box-shadow: none;
+}
+
+.dialog-backdrop:hover,
+.dialog-backdrop:focus-visible {
+  background: rgba(17, 24, 39, 0.38);
+  border-color: transparent;
+  color: transparent;
 }
 
 .link-dialog {
@@ -44,8 +47,9 @@
 }
 
 .setup-dialog {
-  width: min(820px, calc(100vw - 48px));
-  height: min(480px, calc(100dvh - 48px));
+  width: 1120px;
+  max-width: calc(100vw - 48px);
+  height: min(680px, calc(100dvh - 48px));
   grid-template-rows: auto minmax(0, 1fr);
 }
 
@@ -79,14 +83,14 @@
   display: grid;
   min-width: 0;
   min-height: 100%;
-  grid-template-columns: minmax(210px, 0.72fr) minmax(280px, 1fr) minmax(220px, 0.82fr);
+  grid-template-columns: minmax(200px, 0.82fr) minmax(320px, 1.45fr) minmax(200px, 0.88fr);
   grid-template-rows: minmax(min-content, 1fr);
-  gap: 10px;
+  gap: 14px;
   align-items: stretch;
 }
 
 .setup-grid .node-control-group {
-  padding: 0 10px;
+  padding: 0 14px;
   overflow: hidden;
 }
 

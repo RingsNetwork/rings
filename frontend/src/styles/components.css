@@ -43,8 +43,14 @@
 }
 
 .debug-action-row button {
+  min-width: 0;
   min-height: 30px;
   padding: 5px 8px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 1.15;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .field span,
@@ -565,6 +571,334 @@ code {
   border-color: rgba(255, 203, 107, 0.42);
   background: rgba(255, 203, 107, 0.08);
   color: var(--amber);
+}
+
+.webview-shell {
+  display: grid;
+  width: 100vw;
+  height: 100dvh;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr);
+  background: #f3ead8;
+  color: #111827;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  overflow: hidden;
+}
+
+.webview-shell.debug-open {
+  grid-template-rows: auto minmax(0, 1fr) minmax(180px, 30dvh);
+}
+
+.webview-toolbar {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: auto minmax(260px, 1fr) minmax(150px, 0.36fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 9px 12px;
+  border-bottom: 1px solid #ddccb0;
+  background: #fffaf0;
+  box-shadow: 0 1px 2px rgba(112, 84, 48, 0.08);
+}
+
+.webview-brand,
+.webview-controls,
+.webview-address-form {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+}
+
+.webview-brand {
+  min-width: 150px;
+  gap: 7px;
+  color: #111827;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.82rem;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.webview-brand img {
+  width: 26px;
+  height: 26px;
+  padding: 3px;
+  border-radius: 6px;
+  background: #111827;
+}
+
+.webview-controls {
+  gap: 5px;
+}
+
+.webview-icon-button,
+.webview-go-button {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid #d9c5a6;
+  border-radius: 6px;
+  background: #fffaf0;
+  color: #374151;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.92rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.webview-icon-button:hover:not(:disabled),
+.webview-go-button:hover {
+  border-color: #111827;
+  background: #111827;
+  color: #fff;
+}
+
+.webview-icon-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.webview-address-form {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+}
+
+.webview-address-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.webview-address {
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  padding: 5px 9px;
+  border: 1px solid #d9c5a6;
+  border-radius: 6px;
+  background: #fffdf8;
+  color: #111827;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.78rem;
+  line-height: 1.1;
+}
+
+.webview-address:focus {
+  border-color: #b42318;
+  outline: 3px solid rgba(180, 35, 24, 0.12);
+}
+
+.webview-status {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: #6f6252;
+  font-size: 0.7rem;
+  font-weight: 650;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.webview-close-button {
+  color: #b42318;
+}
+
+.webview-debug-button,
+.webview-debug-clear,
+.webview-debug-tab {
+  min-height: 32px;
+  padding: 5px 9px;
+  border: 1px solid #d9c5a6;
+  border-radius: 6px;
+  background: #fffaf0;
+  color: #374151;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.68rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.webview-debug-button:hover,
+.webview-debug-button.active,
+.webview-debug-clear:hover,
+.webview-debug-tab:hover,
+.webview-debug-tab.active {
+  border-color: #111827;
+  background: #111827;
+  color: #fff;
+}
+
+.webview-viewport {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  background: #fffaf0;
+}
+
+.webview-frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
+}
+
+.webview-debug-panel {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr);
+  border-top: 1px solid #ddccb0;
+  background: #fffaf0;
+}
+
+.webview-debug-header {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #eadcc5;
+}
+
+.webview-debug-header .eyebrow {
+  margin: 0 0 1px;
+  color: #b42318;
+  font-size: 0.58rem;
+}
+
+.webview-debug-header h2 {
+  margin: 0;
+  color: #111827;
+  font-size: 0.82rem;
+  line-height: 1.1;
+}
+
+.webview-debug-tabs {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.webview-debug-tab {
+  min-height: 26px;
+  padding: 4px 7px;
+  font-size: 0.62rem;
+}
+
+.webview-debug-log,
+.webview-debug-network {
+  min-width: 0;
+  min-height: 0;
+  padding: 7px 12px 10px;
+  overflow: auto;
+}
+
+.webview-debug-entry,
+.webview-debug-empty {
+  display: grid;
+  min-width: 0;
+  margin: 0;
+  padding: 3px 0;
+  grid-template-columns: 86px 66px minmax(0, 1fr);
+  gap: 8px;
+  border-bottom: 1px solid rgba(221, 204, 176, 0.48);
+  color: #4b5563;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.68rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.webview-debug-entry time,
+.webview-debug-scope {
+  color: #82725f;
+}
+
+.webview-debug-scope {
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.webview-debug-entry.error {
+  color: #b42318;
+}
+
+.webview-debug-empty {
+  display: block;
+  border-bottom: 0;
+  color: #82725f;
+}
+
+.webview-resource-row {
+  display: grid;
+  min-width: 710px;
+  padding: 4px 0;
+  grid-template-columns: 54px 62px 100px 92px minmax(260px, 1fr) 72px;
+  gap: 8px;
+  border-bottom: 1px solid rgba(221, 204, 176, 0.48);
+  color: #4b5563;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.67rem;
+  line-height: 1.35;
+}
+
+.webview-resource-heading {
+  position: sticky;
+  top: -7px;
+  z-index: 1;
+  padding-top: 5px;
+  background: #fffaf0;
+  color: #82725f;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.webview-resource-target {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.webview-resource-row.resource-failed {
+  color: #b42318;
+}
+
+.webview-resource-row.resource-completed span:nth-child(2) {
+  color: #247556;
+  font-weight: 800;
+}
+
+.webview-empty-state {
+  display: grid;
+  width: min(460px, calc(100% - 32px));
+  gap: 7px;
+  margin: 12vh auto 0;
+  padding: 18px;
+  border: 1px solid #ddccb0;
+  border-radius: 8px;
+  background: #fffaf0;
+  box-shadow: 0 1px 2px rgba(112, 84, 48, 0.08);
+}
+
+.webview-empty-state strong {
+  color: #111827;
+  font-size: 0.92rem;
+}
+
+.webview-empty-state span {
+  color: #6f6252;
+  font-size: 0.78rem;
+  line-height: 1.45;
 }
 
 .rail-telemetry {

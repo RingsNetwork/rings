@@ -20,8 +20,8 @@ pub(crate) fn custom_message_effects<'payload>(
     }
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<CustomMessage> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, _: &CustomMessage) -> Result<()> {
         self.run_effects(custom_message_effects(self.dht.did, ctx))

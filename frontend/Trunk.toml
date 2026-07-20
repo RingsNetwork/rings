@@ -3,6 +3,7 @@ watch = [
   "index.html",
   "src",
   "assets",
+  "rings-webview-service-worker.js",
   "Cargo.toml",
   "Trunk.toml",
   "extension-assets",

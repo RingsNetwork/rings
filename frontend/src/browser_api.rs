@@ -69,6 +69,36 @@ pub(crate) async fn open_debug_url(url: &str) -> Result<(), String> {
     }
 }
 
+/// Open the application-owned WebView shell in a named browser popup.
+///
+/// The caller supplies no remote target here: remote addresses are entered only inside the
+/// controlled shell and become `/webview/` paths before an iframe receives them.
+pub(crate) fn open_webview_popup() -> Result<(), String> {
+    let window = web_sys::window().ok_or_else(|| "window unavailable".to_string())?;
+    let location = window.location();
+    let mut url = location.origin().map_err(js_error_label)?;
+    url.push_str(location.pathname().map_err(js_error_label)?.as_str());
+    if let Ok(search) = location.search() {
+        url.push_str(search.as_str());
+    }
+    url.push_str("#webview");
+
+    let window_value: JsValue = window.into();
+    let open = js_method(&window_value, "open")?;
+    let opened = open
+        .call3(
+            &window_value,
+            &JsValue::from_str(url.as_str()),
+            &JsValue::from_str("rings-webview"),
+            &JsValue::from_str("popup=yes,width=1280,height=860,noopener"),
+        )
+        .map_err(js_error_label)?;
+    if opened.is_null() || opened.is_undefined() {
+        return Err("browser blocked the WebView popup".to_string());
+    }
+    Ok(())
+}
+
 async fn open_debug_url_with_extension_tabs(namespace: &str, url: &str) -> Result<(), String> {
     let extension_api =
         Reflect::get(&js_sys::global(), &JsValue::from_str(namespace)).map_err(js_error_label)?;

@@ -42,12 +42,12 @@ use crate::storage::MemStorage;
 
 /// `EntryStorage` is the type accepted by `PeerRing::new_with_storage`.
 /// It's used to store [Entry]s in a storage media provided by user.
-#[cfg(feature = "wasm")]
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
 pub type EntryStorage = Box<dyn KvStorageInterface<Entry>>;
 
 /// `EntryStorage` is the type accepted by `PeerRing::new_with_storage`.
 /// It's used to store [Entry]s in a storage media provided by user.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 pub type EntryStorage = Box<dyn KvStorageInterface<Entry> + Send + Sync>;
 
 /// PeerRing is used to help a node interact with other nodes.
@@ -584,8 +584,8 @@ impl PeerRing {
     }
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing {
     /// Look up an [`Entry`] by its ring key.
     /// Always finds resource by finger table, ignoring the local cache.
@@ -644,8 +644,8 @@ impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing 
     }
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl ChordStorageCache<PeerRingAction> for PeerRing {
     /// Cache fetched `entry` locally.
     async fn local_cache_put(&self, entry: Entry) -> Result<()> {
@@ -658,8 +658,8 @@ impl ChordStorageCache<PeerRingAction> for PeerRing {
     }
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl CorrectChord<PeerRingAction> for PeerRing {
     /// When Chord have a new successor, ask the new successor for successor list
     async fn update_successor(&self, did: impl LiveDid) -> Result<PeerRingAction> {
@@ -773,6 +773,6 @@ impl CorrectChord<PeerRingAction> for PeerRing {
     }
 }
 
-#[cfg(all(not(feature = "wasm"), test))]
+#[cfg(all(not(all(feature = "wasm", target_family = "wasm")), test))]
 #[path = "chord_tests.rs"]
 mod tests;

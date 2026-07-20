@@ -6,6 +6,9 @@ config*.yaml
 **/*.ipynb
 **/*.js
 **/*.mjs
+!frontend/assets/webview-host.js
+!frontend/rings-webview-service-worker.js
+frontend/dist-e2e/
 .ipynb_checkpoints
 # Local environment configuration
 .envrc

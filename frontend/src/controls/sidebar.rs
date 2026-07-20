@@ -51,6 +51,7 @@ pub(crate) fn control_sidebar(
     view: ControlView<'_>,
     actions: LaunchActions,
     workbench_control: Html,
+    webview_control: Option<Html>,
     active_dialog: ActiveDialog,
     dialog_actions: DialogActions,
     collapsed: UseStateHandle<bool>,
@@ -74,7 +75,14 @@ pub(crate) fn control_sidebar(
                 { sidebar_toggle_button(*collapsed, toggle_sidebar) }
             }
             if extension_mode || !*collapsed {
-                { sidebar_content(&derived, &actions, workbench_control, open_settings_dialog, on_copy_did.clone()) }
+                { sidebar_content(
+                    &derived,
+                    &actions,
+                    workbench_control,
+                    webview_control,
+                    open_settings_dialog,
+                    on_copy_did.clone(),
+                ) }
             }
             { settings_dialog_if_open(active_dialog, &view, actions, &derived, on_copy_did, close_settings_dialog) }
         </aside>
@@ -180,15 +188,17 @@ fn sidebar_content(
     derived: &ControlSidebarDerived,
     actions: &LaunchActions,
     workbench_control: Html,
+    webview_control: Option<Html>,
     open_settings_dialog: Callback<MouseEvent>,
     on_copy_did: Callback<MouseEvent>,
 ) -> Html {
     html! {
         <div id="node-control-sidebar-content" class="sidebar-content sidebar-command-panel">
-            { command_panel_header() }
+            { command_panel_header(webview_control.is_some()) }
             <div class="command-grid">
                 { node_action_button(derived, actions) }
                 { workbench_control }
+                { webview_control }
                 { settings_button(open_settings_dialog) }
             </div>
             { rail_telemetry(derived, on_copy_did) }
@@ -196,14 +206,14 @@ fn sidebar_content(
     }
 }
 
-fn command_panel_header() -> Html {
+fn command_panel_header(has_webview: bool) -> Html {
     html! {
         <div class="command-panel-header">
             <div>
                 <p class="eyebrow">{ "Control" }</p>
                 <h3>{ "Command deck" }</h3>
             </div>
-            <span>{ "03" }</span>
+            <span>{ if has_webview { "04" } else { "03" } }</span>
         </div>
     }
 }

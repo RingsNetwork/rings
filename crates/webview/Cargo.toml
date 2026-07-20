@@ -1,0 +1,35 @@
+[package]
+name = "rings-webview"
+description = "Reusable Rings webview gateway primitives for onion-backed browsing."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+browser = [
+    "dep:js-sys",
+    "dep:serde-wasm-bindgen",
+    "dep:wasm-bindgen",
+    "dep:wasm-bindgen-futures",
+]
+
+[dependencies]
+async-trait = { workspace = true }
+js-sys = { workspace = true, optional = true }
+lol_html = "3"
+percent-encoding = "2"
+serde = { version = "1.0.136", features = ["derive"] }
+serde-wasm-bindgen = { workspace = true, optional = true }
+thiserror = "1"
+url = { version = "2", features = ["serde"] }
+wasm-bindgen = { workspace = true, optional = true }
+wasm-bindgen-futures = { workspace = true, optional = true }
+
+[dev-dependencies]
+futures = { version = "0.3.21", features = ["executor"] }
+
+[lints]
+workspace = true

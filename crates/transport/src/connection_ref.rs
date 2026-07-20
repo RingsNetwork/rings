@@ -49,7 +49,7 @@ impl<C> ConnectionRef<C> {
     }
 }
 
-#[cfg(feature = "web-sys-webrtc")]
+#[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
 #[async_trait(?Send)]
 impl<C, S> ConnectionInterface for ConnectionRef<C>
 where
@@ -110,7 +110,7 @@ where
     }
 }
 
-#[cfg(not(feature = "web-sys-webrtc"))]
+#[cfg(not(all(feature = "web-sys-webrtc", target_family = "wasm")))]
 #[async_trait]
 impl<C, S> ConnectionInterface for ConnectionRef<C>
 where
@@ -181,8 +181,11 @@ mod tests {
     #[derive(Debug)]
     struct Mock;
 
-    #[cfg_attr(feature = "web-sys-webrtc", async_trait(?Send))]
-    #[cfg_attr(not(feature = "web-sys-webrtc"), async_trait)]
+    #[cfg_attr(all(feature = "web-sys-webrtc", target_family = "wasm"), async_trait(?Send))]
+    #[cfg_attr(
+        not(all(feature = "web-sys-webrtc", target_family = "wasm")),
+        async_trait
+    )]
     impl ConnectionInterface for Mock {
         type Sdp = String;
         type Error = Error;

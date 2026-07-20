@@ -62,12 +62,8 @@ pub(crate) fn onion_proxy_panel(
     generation: GenerationClock,
     status: UseStateHandle<String>,
 ) -> Html {
-    let on_route = onion_route_callback(
-        &state,
-        node_ref.clone(),
-        generation.clone(),
-        status.clone(),
-    );
+    let on_route =
+        onion_route_callback(&state, node_ref.clone(), generation.clone(), status.clone());
     let on_request = onion_request_callback(&state, node_ref, generation, status);
 
     html! {
@@ -268,7 +264,7 @@ fn spawn_onion_request(
                 outputs
                     .response_headers
                     .set(onion::format_headers(&response.headers));
-                outputs.response_body.set(response.body);
+                outputs.response_body.set(response.body_text());
                 outputs
                     .route_result
                     .set("request completed through onion HTTPS proxy".to_string());

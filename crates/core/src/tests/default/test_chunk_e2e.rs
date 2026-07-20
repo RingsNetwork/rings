@@ -4,10 +4,12 @@
 //! just the pure `WireReserves::plan` decision.
 
 use rings_transport::connections::dummy_controlled;
+use rings_transport::core::transport::WebrtcConnectionState;
 
 use crate::ecc::SecretKey;
 use crate::message::Message;
 use crate::tests::default::prepare_node;
+use crate::tests::default::wait_for_connection_state;
 use crate::tests::manually_establish_connection;
 
 /// Read inbound messages on `node` until a `CustomMessage` arrives (skipping DHT bookkeeping), or
@@ -29,6 +31,12 @@ async fn large_message_is_chunked_and_reassembled() {
     let node1 = prepare_node(key1).await;
     let node2 = prepare_node(key2).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
+    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected)
+        .await
+        .unwrap();
+    wait_for_connection_state(&node2, node1.did(), WebrtcConnectionState::Connected)
+        .await
+        .unwrap();
 
     // Force a small negotiated limit so the payload below must be chunked. Set it *after* the
     // handshake so the connect offer/answer themselves are unaffected.
@@ -60,6 +68,12 @@ async fn negotiated_size_too_small_errors_without_partial_send() {
     let node1 = prepare_node(key1).await;
     let node2 = prepare_node(key2).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
+    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected)
+        .await
+        .unwrap();
+    wait_for_connection_state(&node2, node1.did(), WebrtcConnectionState::Connected)
+        .await
+        .unwrap();
 
     // Below `chunk_overhead + MIN_CHUNK_DATA`: no usable chunk size exists, so framing must reject
     // *before* any chunk is sent (the `None` is returned ahead of the send loop).

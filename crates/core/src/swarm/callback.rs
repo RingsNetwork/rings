@@ -13,16 +13,17 @@ use crate::message::Message;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
+use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 
 type CallbackError = Box<dyn std::error::Error>;
 
 /// The [InnerSwarmCallback] will accept shared [SwarmCallback] trait object.
-#[cfg(feature = "wasm")]
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
 pub type SharedSwarmCallback = Arc<dyn SwarmCallback>;
 
 /// The [InnerSwarmCallback] will accept shared [SwarmCallback] trait object.
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 pub type SharedSwarmCallback = Arc<dyn SwarmCallback + Send + Sync>;
 
 /// Used to notify the application of events that occur in the swarm.
@@ -39,8 +40,8 @@ pub enum SwarmEvent {
 }
 
 /// Any object that implements this trait can be used as a callback for the swarm.
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait SwarmCallback {
     /// This method is invoked when a new message is received and before handling.
     async fn on_validate(&self, _payload: &MessagePayload) -> Result<(), CallbackError> {
@@ -65,6 +66,7 @@ pub struct InnerSwarmCallback {
     message_handler: MessageHandler,
     callback: SharedSwarmCallback,
     reassembler: FuturesMutex<MessageReassembler>,
+    pending_attempt: Option<PendingConnectionAttempt>,
 }
 
 impl InnerSwarmCallback {
@@ -77,7 +79,36 @@ impl InnerSwarmCallback {
             message_handler,
             callback,
             reassembler: FuturesMutex::new(reassembler),
+            pending_attempt: None,
         }
+    }
+
+    /// Bind this callback to the pending handshake that created its transport.
+    pub(crate) fn with_pending_connection_attempt(
+        mut self,
+        pending_attempt: PendingConnectionAttempt,
+    ) -> Self {
+        self.pending_attempt = Some(pending_attempt);
+        self
+    }
+
+    async fn admit_pending_connection(&self, did: Did) -> Result<bool, CallbackError> {
+        let Some(attempt) = self.pending_attempt else {
+            return Ok(false);
+        };
+        if !self.transport.promote_pending_connection(attempt)? {
+            return Ok(false);
+        }
+
+        self.transport.record_peer_connected(did).await;
+        self.message_handler.join_dht(did).await?;
+        self.callback
+            .on_event(&SwarmEvent::ConnectionStateChange {
+                peer: did,
+                state: WebrtcConnectionState::Connected,
+            })
+            .await?;
+        Ok(true)
     }
 
     async fn handle_payload(
@@ -150,8 +181,8 @@ impl InnerSwarmCallback {
     }
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl TransportCallback for InnerSwarmCallback {
     async fn on_message(&self, cid: &str, msg: &[u8]) -> Result<(), CallbackError> {
         let peer = Did::from_str(cid).ok();
@@ -193,9 +224,22 @@ impl TransportCallback for InnerSwarmCallback {
         };
 
         match s {
-            // `Failed` and `Closed` are terminal states, so we remove the peer
-            // from the DHT here.
+            // ICE `Connected` is not enough for routing: admission happens only
+            // after the data channel opens, because that is the first point at
+            // which payload transport is actually usable.
+            WebrtcConnectionState::Connected => {}
+            // `Failed` and `Closed` are terminal states. Pending handshakes are
+            // discarded without touching the DHT; active peers leave it.
             WebrtcConnectionState::Failed | WebrtcConnectionState::Closed => {
+                if let Some(attempt) = self.pending_attempt {
+                    if self.transport.cancel_pending_connection(attempt).await? {
+                        self.transport.record_peer_disconnected(did).await;
+                        return Ok(());
+                    }
+                }
+                if !self.transport.is_admitted_connection(did) {
+                    return Ok(());
+                }
                 self.transport.record_peer_disconnected(did).await;
                 self.message_handler.leave_dht(did).await?;
             }
@@ -212,9 +256,8 @@ impl TransportCallback for InnerSwarmCallback {
             _ => {}
         };
 
-        // Should use the `on_data_channel_open` function to notify the Connected state.
-        // It prevents users from blocking the channel creation while
-        // waiting for data channel opening in send_message.
+        // Data-channel admission emits the application-level Connected event.
+        // Other state changes are passed through directly.
         if s != WebrtcConnectionState::Connected {
             self.callback
                 .on_event(&SwarmEvent::ConnectionStateChange {
@@ -233,18 +276,11 @@ impl TransportCallback for InnerSwarmCallback {
             return Ok(());
         };
 
-        self.transport.record_peer_connected(did).await;
-        self.message_handler.join_dht(did).await?;
-
-        // Notify Connected state here instead of on_peer_connection_state_change.
-        // It prevents users from blocking the channel creation while
-        // waiting for data channel opening in send_message.
-        self.callback
-            .on_event(&SwarmEvent::ConnectionStateChange {
-                peer: did,
-                state: WebrtcConnectionState::Connected,
-            })
-            .await
+        if !self.admit_pending_connection(did).await? && !self.transport.is_admitted_connection(did)
+        {
+            tracing::debug!("ignoring late data-channel open for {did}");
+        }
+        Ok(())
     }
 
     async fn on_data_channel_close(&self, cid: &str) -> Result<(), CallbackError> {
@@ -258,6 +294,15 @@ impl TransportCallback for InnerSwarmCallback {
         // instead of waiting for the ICE state to reach `Failed`. This is the
         // graceful counterpart to a local `disconnect()`: the remote learns of
         // it promptly without relying on the transient `Disconnected` state.
+        if let Some(attempt) = self.pending_attempt {
+            if self.transport.cancel_pending_connection(attempt).await? {
+                self.transport.record_peer_disconnected(did).await;
+                return Ok(());
+            }
+        }
+        if !self.transport.is_admitted_connection(did) {
+            return Ok(());
+        }
         self.transport.record_peer_disconnected(did).await;
         self.message_handler.leave_dht(did).await?;
         Ok(())

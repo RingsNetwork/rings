@@ -451,6 +451,12 @@ impl<'handler> CoreEffectInterpreter<'handler> {
                 );
                 match self.transport.connect(peer, callback).await {
                     Ok(()) | Err(Error::AlreadyConnected) => Ok(()),
+                    Err(Error::PendingConnectionCapacityExceeded { capacity }) => {
+                        tracing::debug!(
+                            "pending connection pool is full ({capacity}); skipping DHT candidate {peer}"
+                        );
+                        Ok(())
+                    }
                     Err(e) => Err(e),
                 }
             }

@@ -222,8 +222,8 @@ impl PeerRing {
     }
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl ChordStorageRepair<PeerRingAction> for PeerRing {
     async fn republish_local_entries(&self, redundancy: u16) -> Result<PeerRingAction> {
         if redundancy <= 1 {

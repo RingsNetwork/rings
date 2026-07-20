@@ -285,8 +285,8 @@ impl Decoder for MessagePayload {
 }
 
 /// Trait of PayloadSender
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait PayloadSender {
     /// Get the session sk
     fn session_sk(&self) -> &SessionSk;

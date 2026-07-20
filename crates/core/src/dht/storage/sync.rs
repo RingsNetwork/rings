@@ -58,7 +58,7 @@ fn placed_entry_wire_cost(placed: &PlacedEntry) -> Result<usize> {
     serialized_wire_size(placed)
 }
 
-#[cfg(all(test, not(feature = "wasm")))]
+#[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
 pub(super) fn sync_entries_batch_wire_cost(data: &[PlacedEntry]) -> Result<usize> {
     let mut cost = sync_entries_fixed_wire_cost()?;
     for placed in data {
@@ -111,8 +111,8 @@ pub(super) fn sync_entries_batches(
     Ok(batches)
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl ChordStorageSync<PeerRingAction> for PeerRing {
     /// When the successor of a node is updated, it needs to check if there are
     /// `Entry`s that are no longer between current node and `new_successor`,

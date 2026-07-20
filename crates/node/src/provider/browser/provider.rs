@@ -126,7 +126,7 @@ impl BrowserOnionDirectoryReader {
         let local = self.processor.did();
         self.processor
             .swarm
-            .peer_dids()
+            .connected_peer_dids()
             .into_iter()
             .filter(|did| *did != local)
             .collect()
@@ -336,7 +336,7 @@ impl BrowserOnionProxy {
             };
             let envelope =
                 crate::extension::ext::Envelope::new(ONION_CIRCUIT_NAMESPACE.to_string(), payload);
-            if let Err(error) = p.send_envelope(to, &envelope).await {
+            if let Err(error) = p.send_direct_envelope(to, &envelope).await {
                 runtime.cancel_request(id);
                 return Err(JsValue::from(JsError::from(error)));
             }

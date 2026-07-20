@@ -1,11 +1,14 @@
 //! Module of MemStorage and PersistenceStorage
 
-#[cfg(feature = "wasm")]
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
 /// IndexedDB-backed storage for browser runtimes.
 pub mod idb;
 /// In-memory key value storage.
 pub mod memory;
-#[cfg(all(not(feature = "wasm"), not(feature = "dummy")))]
+#[cfg(all(
+    not(all(feature = "wasm", target_family = "wasm")),
+    not(feature = "dummy")
+))]
 /// Sled-backed persistent storage for native runtimes.
 pub mod sled;
 
@@ -15,8 +18,8 @@ use crate::error::Result;
 pub use crate::storage::memory::MemStorage;
 
 /// Key value storage interface
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait KvStorageInterface<V> {
     /// Get a cache entry by `key`.
     async fn get(&self, key: &str) -> Result<Option<V>>;

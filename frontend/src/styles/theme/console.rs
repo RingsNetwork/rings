@@ -106,6 +106,11 @@ fn append_console_stage(css: &mut String) {
     rule(css, ".topology-shell .network-stage", &[("background", "linear-gradient(90deg, rgba(243, 234, 216, 0.44) 0%, rgba(243, 234, 216, 0.28) 46%, rgba(243, 234, 216, 0.08) 100%), linear-gradient(180deg, rgba(255, 250, 240, 0.3), rgba(255, 246, 230, 0.18)), url(\"assets/images/rings-market-hero.png\") center / cover no-repeat"), ("backdrop-filter", "blur(2px)")]);
     rule(
         css,
+        ".topology-shell .network-stage:has(.modal-shell)",
+        &[("backdrop-filter", "none")],
+    );
+    rule(
+        css,
         ".topology-shell.extension-mode",
         &[("padding-bottom", "calc(84px + env(safe-area-inset-bottom))")],
     );
@@ -131,7 +136,7 @@ fn append_console_controls(css: &mut String, theme: Theme) {
 fn append_form_controls(css: &mut String, theme: Theme) {
     rule(
         css,
-        ".topology-shell button:not(.header-nav-button)",
+        ".topology-shell button:not(.header-nav-button):not(.dialog-backdrop)",
         &[
             ("border-color", theme.line_strong),
             ("border-radius", "8px"),
@@ -142,7 +147,7 @@ fn append_form_controls(css: &mut String, theme: Theme) {
     );
     rule(
         css,
-        ".topology-shell button:not(.header-nav-button):hover",
+        ".topology-shell button:not(.header-nav-button):not(.dialog-backdrop):hover",
         &[
             ("border-color", "#111827"),
             ("background", "#111827"),
