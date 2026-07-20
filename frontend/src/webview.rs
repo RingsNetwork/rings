@@ -930,3 +930,6 @@ mod tests {
         assert!(!is_http_origin("null"));
     }
 }
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod onion_browser_tests;

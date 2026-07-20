@@ -63,8 +63,21 @@ trait MeasureClock: Send + Sync {
 struct SystemMeasureClock;
 
 impl MeasureClock for SystemMeasureClock {
+    #[cfg(not(all(feature = "browser", target_family = "wasm")))]
     fn now(&self) -> DateTime<Utc> {
         Utc::now()
+    }
+
+    #[cfg(all(feature = "browser", target_family = "wasm"))]
+    fn now(&self) -> DateTime<Utc> {
+        let now = js_sys::Date::now();
+        if !now.is_finite() {
+            return DateTime::UNIX_EPOCH;
+        }
+        match DateTime::from_timestamp_millis(now as i64) {
+            Some(value) => value,
+            None => DateTime::UNIX_EPOCH,
+        }
     }
 }
 

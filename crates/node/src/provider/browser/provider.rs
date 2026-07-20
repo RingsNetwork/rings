@@ -506,6 +506,24 @@ impl Provider {
         })
     }
 
+    /// Install the browser HTTPS onion-exit protocol handler with an explicit target policy.
+    ///
+    /// This updates the local exit handler used by incoming onion HTTPS requests. Discovery still
+    /// comes from the provider's processor configuration, so nodes that should be routeable exits
+    /// must also be constructed with HTTPS onion-exit advertisement enabled.
+    pub fn install_onion_https_exit(
+        &self,
+        allowed_targets: Vec<String>,
+        denied_targets: Vec<String>,
+    ) -> Result<(), JsError> {
+        let policy = OnionExitPolicy::from_target_strings(allowed_targets, denied_targets)
+            .map_err(JsError::from)?;
+        policy.validate_targets().map_err(JsError::from)?;
+        self.install_onion_https_protocol(Some(policy))
+            .map(|_| ())
+            .map_err(JsError::from)
+    }
+
     /// Create new provider instance with serialized config (yaml/json)
     pub fn new_provider_with_serialized_config(config: String) -> js_sys::Promise {
         future_to_promise(async move {

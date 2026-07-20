@@ -35,7 +35,7 @@ struct DataStruct<T> {
 impl<T> DataStruct<T> {
     /// Create a `DataStruct` instance by key and data
     pub fn new(key: &str, data: T) -> Self {
-        let time_now = chrono::Utc::now().timestamp_millis();
+        let time_now = crate::utils::get_epoch_ms_i64();
         Self {
             key: key.to_owned(),
             last_visit_time: time_now,
@@ -54,7 +54,7 @@ pub(crate) fn next_visit_time_after(previous: i64, now: i64) -> i64 {
 }
 
 fn next_visit_time(previous: i64) -> i64 {
-    next_visit_time_after(previous, chrono::Utc::now().timestamp_millis())
+    next_visit_time_after(previous, crate::utils::get_epoch_ms_i64())
 }
 
 /// StorageInstance struct

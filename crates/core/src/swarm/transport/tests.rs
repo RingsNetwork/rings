@@ -143,7 +143,7 @@ fn swarm_builder_normalizes_virtual_nodes_before_protocol_advertisement() -> Res
 #[test]
 fn pending_peer_pool_is_bounded_and_rejects_duplicate_peers() -> Result<()> {
     let mut pool = PendingPeerPool::<2>::new();
-    let now = Instant::now();
+    let now = 1_000;
     let peer_a = SecretKey::random().address().into();
     let peer_b = SecretKey::random().address().into();
     let peer_c = SecretKey::random().address().into();
@@ -169,7 +169,7 @@ fn pending_peer_pool_is_bounded_and_rejects_duplicate_peers() -> Result<()> {
 #[test]
 fn stale_pending_callback_cannot_remove_a_replacement_attempt() -> Result<()> {
     let mut pool = PendingPeerPool::<1>::new();
-    let now = Instant::now();
+    let now = 1_000;
     let peer = SecretKey::random().address().into();
 
     let old_attempt = pool.reserve(peer, now)?;
@@ -185,11 +185,11 @@ fn stale_pending_callback_cannot_remove_a_replacement_attempt() -> Result<()> {
 #[test]
 fn pending_peer_pool_expires_unopened_handshakes() -> Result<()> {
     let mut pool = PendingPeerPool::<1>::new();
-    let now = Instant::now();
+    let now = 1_000;
     let peer = SecretKey::random().address().into();
     let attempt = pool.reserve(peer, now)?;
 
-    let expired = pool.expire(now + PENDING_CONNECTION_TIMEOUT);
+    let expired = pool.expire(now + PENDING_CONNECTION_TIMEOUT_MS);
     assert_eq!(expired, vec![attempt]);
     assert_eq!(pool.len(), 0);
     Ok(())

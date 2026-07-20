@@ -1,7 +1,5 @@
 use std::collections::BTreeMap;
 
-use chrono::Utc;
-
 use super::SwarmTransport;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
@@ -15,6 +13,7 @@ use crate::message::MessagePayload;
 use crate::message::PayloadSender;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::message::SyncEntriesWithSuccessorReport;
+use crate::utils::get_epoch_ms_i64;
 
 const STORAGE_SYNC_ACK_CAPACITY: usize = 1024;
 
@@ -54,7 +53,7 @@ impl StorageSyncReceiverProof {
 }
 
 fn storage_sync_ack_now_ms() -> i64 {
-    Utc::now().timestamp_millis()
+    get_epoch_ms_i64()
 }
 
 fn expected_sync_acks(data: &[PlacedEntry]) -> Result<Vec<SyncedEntryAck>> {

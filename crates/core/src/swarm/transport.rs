@@ -2,12 +2,9 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::Duration;
-use std::time::Instant;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use chrono::Utc;
 use rings_transport::connection_ref::ConnectionRef;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 pub use rings_transport::connections::DummyConnection as ConnectionOwner;
@@ -61,6 +58,7 @@ use crate::message::MessagePayload;
 use crate::message::PayloadSender;
 use crate::session::SessionSk;
 use crate::swarm::callback::InnerSwarmCallback;
+use crate::utils::get_epoch_ms_i64;
 
 mod storage_sync;
 
@@ -71,7 +69,7 @@ pub(crate) const STORAGE_LOOKUP_OBSERVATION_CAPACITY: usize = 1024;
 /// Maximum number of peers that may be handshaking before a data channel opens.
 pub(crate) const DEFAULT_PENDING_CONNECTION_CAPACITY: usize = 32;
 
-const PENDING_CONNECTION_TIMEOUT: Duration = Duration::from_secs(15);
+const PENDING_CONNECTION_TIMEOUT_MS: i64 = 15_000;
 
 /// Identifies one pending handshake for a peer.
 ///
@@ -87,7 +85,7 @@ pub(crate) struct PendingConnectionAttempt {
 #[derive(Debug)]
 struct PendingPeer {
     generation: u64,
-    admitted_at: Instant,
+    admitted_at_ms: i64,
 }
 
 /// Bounded, non-routable handshakes owned by the swarm lifecycle.
@@ -107,7 +105,7 @@ impl<const MAX_PENDING: usize> PendingPeerPool<MAX_PENDING> {
         }
     }
 
-    fn reserve(&mut self, peer: Did, now: Instant) -> Result<PendingConnectionAttempt> {
+    fn reserve(&mut self, peer: Did, now_ms: i64) -> Result<PendingConnectionAttempt> {
         if self.peers.contains_key(&peer) {
             return Err(Error::AlreadyConnected);
         }
@@ -124,7 +122,7 @@ impl<const MAX_PENDING: usize> PendingPeerPool<MAX_PENDING> {
         };
         self.peers.insert(peer, PendingPeer {
             generation: attempt.generation,
-            admitted_at: now,
+            admitted_at_ms: now_ms,
         });
         Ok(attempt)
     }
@@ -144,18 +142,18 @@ impl<const MAX_PENDING: usize> PendingPeerPool<MAX_PENDING> {
         true
     }
 
-    fn expire(&mut self, now: Instant) -> Vec<PendingConnectionAttempt> {
-        let expired =
-            self.peers
-                .iter()
-                .filter_map(|(peer, pending)| {
-                    (now.duration_since(pending.admitted_at) >= PENDING_CONNECTION_TIMEOUT)
-                        .then_some(PendingConnectionAttempt {
-                            peer: *peer,
-                            generation: pending.generation,
-                        })
-                })
-                .collect::<Vec<_>>();
+    fn expire(&mut self, now_ms: i64) -> Vec<PendingConnectionAttempt> {
+        let expired = self
+            .peers
+            .iter()
+            .filter_map(|(peer, pending)| {
+                (now_ms.saturating_sub(pending.admitted_at_ms) >= PENDING_CONNECTION_TIMEOUT_MS)
+                    .then_some(PendingConnectionAttempt {
+                        peer: *peer,
+                        generation: pending.generation,
+                    })
+            })
+            .collect::<Vec<_>>();
         for attempt in &expired {
             self.peers.remove(&attempt.peer);
         }
@@ -253,7 +251,7 @@ struct StorageLookupObservation {
 }
 
 fn storage_lookup_observation_now_ms() -> i64 {
-    Utc::now().timestamp_millis()
+    get_epoch_ms_i64()
 }
 
 fn oldest_storage_lookup_observation_key(
@@ -825,7 +823,7 @@ impl SwarmTransport {
         if self.is_admitted_connection(peer) {
             return Err(Error::AlreadyConnected);
         }
-        self.pending_peers()?.reserve(peer, Instant::now())
+        self.pending_peers()?.reserve(peer, get_epoch_ms_i64())
     }
 
     fn pending_attempt(&self, peer: Did) -> Result<Option<PendingConnectionAttempt>> {
@@ -889,7 +887,7 @@ impl SwarmTransport {
     /// These peers have never entered the DHT, so expiry only releases the
     /// transport object; it deliberately performs no topology mutation.
     pub(crate) async fn expire_pending_connections(&self) -> Result<()> {
-        let expired = self.pending_peers()?.expire(Instant::now());
+        let expired = self.pending_peers()?.expire(get_epoch_ms_i64());
         for attempt in expired {
             tracing::warn!("pending connection to {} timed out", attempt.peer);
             self.transport
