@@ -201,7 +201,7 @@ pub struct SwarmTransport {
     active_peers: Mutex<BTreeSet<Did>>,
     storage_lookup_observations: Mutex<StorageLookupObservationMap>,
     pending_storage_sync_acks: Mutex<StorageSyncAckMap>,
-    measured_disconnects: Mutex<BTreeSet<Did>>,
+    measured_disconnects: Mutex<BTreeMap<Did, i64>>,
     measure: Option<MeasureImpl>,
 }
 
@@ -475,7 +475,7 @@ impl SwarmTransport {
             active_peers: Mutex::new(BTreeSet::new()),
             storage_lookup_observations: Mutex::new(BTreeMap::new()),
             pending_storage_sync_acks: Mutex::new(BTreeMap::new()),
-            measured_disconnects: Mutex::new(BTreeSet::new()),
+            measured_disconnects: Mutex::new(BTreeMap::new()),
             measure,
         }
     }
@@ -536,8 +536,9 @@ impl SwarmTransport {
     /// Invariant: for one connection epoch, at most one `Disconnected` counter is
     /// recorded. `record_peer_connected` starts a new epoch by clearing the marker.
     pub(crate) async fn record_peer_disconnected(&self, peer: Did) {
+        let now_ms = get_epoch_ms_i64();
         let should_record = match self.measured_disconnects.lock() {
-            Ok(mut measured) => measured.insert(peer),
+            Ok(mut measured) => measured.insert(peer, now_ms).is_none(),
             Err(_) => {
                 tracing::warn!("Failed to update disconnect epoch for disconnected peer {peer}");
                 true
@@ -547,6 +548,14 @@ impl SwarmTransport {
             self.record_peer_measurement(peer, MeasureCounter::Disconnected)
                 .await;
         }
+    }
+
+    /// Return the first time this peer left the usable connection epoch.
+    pub(crate) fn peer_disconnected_since_ms(&self, peer: Did) -> Option<i64> {
+        self.measured_disconnects
+            .lock()
+            .ok()
+            .and_then(|measured| measured.get(&peer).copied())
     }
 
     /// Record that a payload from `peer` was accepted and verified by the swarm.
@@ -973,6 +982,11 @@ impl SwarmTransport {
             .collect()
     }
 
+    /// Return admitted DIDs, even if their raw transport object has already gone away.
+    pub(crate) fn admitted_connection_ids(&self) -> Vec<Did> {
+        self.active_peer_ids()
+    }
+
     /// Get DIDs of active, routable connections.
     pub fn get_connection_ids(&self) -> Vec<Did> {
         self.get_connections()
@@ -1008,10 +1022,21 @@ impl SwarmTransport {
 
         tracing::info!("removing {peer} from DHT");
         self.dht.remove(peer)?;
-        self.transport
-            .close_connection(&peer.to_string())
-            .await
-            .map_err(|e| e.into())
+        self.close_connection_for_disconnect(peer).await
+    }
+
+    async fn close_connection_for_disconnect(&self, peer: Did) -> Result<()> {
+        match self.transport.close_connection(&peer.to_string()).await {
+            Ok(()) => Ok(()),
+            Err(rings_transport::error::Error::ConnectionNotFound(_)) => {
+                tracing::warn!(
+                    peer = %peer,
+                    "connection was already absent while disconnecting admitted peer"
+                );
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Connect a given Did. If the did is already connected, return Err,

@@ -52,8 +52,19 @@ impl Measure for RecordingMeasure {
         }
     }
 
-    async fn get_count(&self, _did: Did, _counter: MeasureCounter) -> u64 {
-        0
+    async fn get_count(&self, did: Did, counter: MeasureCounter) -> u64 {
+        match self.counters.lock() {
+            Ok(counters) => counters
+                .iter()
+                .filter(|(observed_did, observed_counter)| {
+                    *observed_did == did && *observed_counter == counter
+                })
+                .count() as u64,
+            Err(_) => {
+                tracing::error!("RecordingMeasure counters mutex is poisoned");
+                0
+            }
+        }
     }
 }
 
@@ -326,8 +337,11 @@ async fn disconnected_observation_is_once_per_connection_epoch() -> Result<()> {
 
     transport.record_peer_disconnected(peer).await;
     transport.record_peer_disconnected(peer).await;
+    assert!(transport.peer_disconnected_since_ms(peer).is_some());
     transport.record_peer_connected(peer).await;
+    assert!(transport.peer_disconnected_since_ms(peer).is_none());
     transport.record_peer_disconnected(peer).await;
+    assert!(transport.peer_disconnected_since_ms(peer).is_some());
 
     assert_eq!(
         measure.snapshot_counters()?.as_slice(),

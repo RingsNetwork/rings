@@ -1,5 +1,7 @@
 //! Stabilization run daemons to maintain dht.
 
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,6 +23,8 @@ use crate::dht::PeerRingRemoteAction;
 use crate::dht::TopoInfo;
 use crate::error::Error;
 use crate::error::Result;
+use crate::measure::PeerMeasurement;
+use crate::measure::PeerQualityThresholds;
 use crate::message::FindSuccessorReportHandler;
 use crate::message::FindSuccessorSend;
 use crate::message::FindSuccessorThen;
@@ -31,8 +35,78 @@ use crate::message::PayloadSender;
 use crate::message::QueryForTopoInfoSend;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::swarm::transport::SwarmTransport;
+use crate::utils::get_epoch_ms_i64;
 
 const STABILIZATION_STEP_TIMEOUT: Duration = Duration::from_secs(30);
+const DISCONNECTED_CONNECTION_GRACE_MS: i64 = 30_000;
+const DHT_TOPOLOGY_EVICTION_THRESHOLDS: PeerQualityThresholds =
+    PeerQualityThresholds::new(3, 10, 10);
+
+#[derive(Clone, Copy, Debug)]
+enum TopologyPeerRemovalReason {
+    NoAdmittedTransport,
+    MissingTransportObject,
+    TerminalTransport(WebrtcConnectionState),
+    DisconnectedGraceElapsed {
+        disconnected_for_ms: i64,
+        grace_ms: i64,
+    },
+    LocalFailureLimit(PeerMeasurement),
+}
+
+impl TopologyPeerRemovalReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::NoAdmittedTransport => "no_admitted_transport",
+            Self::MissingTransportObject => "missing_transport_object",
+            Self::TerminalTransport(_) => "terminal_transport",
+            Self::DisconnectedGraceElapsed { .. } => "disconnected_grace_elapsed",
+            Self::LocalFailureLimit(_) => "local_failure_limit",
+        }
+    }
+
+    const fn transport_state(self) -> Option<WebrtcConnectionState> {
+        match self {
+            Self::TerminalTransport(state) => Some(state),
+            _ => None,
+        }
+    }
+
+    const fn disconnected_for_ms(self) -> Option<i64> {
+        match self {
+            Self::DisconnectedGraceElapsed {
+                disconnected_for_ms,
+                ..
+            } => Some(disconnected_for_ms),
+            _ => None,
+        }
+    }
+
+    const fn disconnected_grace_ms(self) -> Option<i64> {
+        match self {
+            Self::DisconnectedGraceElapsed { grace_ms, .. } => Some(grace_ms),
+            _ => None,
+        }
+    }
+
+    const fn measurement(self) -> Option<PeerMeasurement> {
+        match self {
+            Self::LocalFailureLimit(measurement) => Some(measurement),
+            _ => None,
+        }
+    }
+
+    const fn should_disconnect_transport(self) -> bool {
+        !matches!(self, Self::NoAdmittedTransport)
+    }
+}
+
+const fn is_terminal_transport_state(state: WebrtcConnectionState) -> bool {
+    matches!(
+        state,
+        WebrtcConnectionState::Failed | WebrtcConnectionState::Closed
+    )
+}
 
 /// The stabilization runner.
 #[derive(Clone)]
@@ -248,63 +322,178 @@ impl Stabilizer {
     /// Clean unavailable connections in transport.
     pub async fn clean_unavailable_connections(&self) -> Result<()> {
         self.transport.expire_pending_connections().await?;
-        let conns = self.transport.admitted_connections();
+        let admitted_states = self.admitted_connection_states();
+        let topology_peers = self.dht_topology_peers()?;
+        let mut candidates = topology_peers;
+        candidates.extend(self.transport.admitted_connection_ids());
+        let now_ms = get_epoch_ms_i64();
 
-        for (did, conn) in conns.into_iter() {
-            let state = conn.webrtc_connection_state();
-            // Only terminal states are cleaned. `Disconnected` is transient: ICE
-            // can recover from it, so tearing it down here (the stabilizer runs
-            // every few seconds) would kill connections during a brief blip
-            // before WebRTC self-heals. This mirrors the swarm callback, which
-            // also only leaves the DHT on `Failed`/`Closed`.
-            if matches!(
-                state,
-                WebrtcConnectionState::Failed | WebrtcConnectionState::Closed
-            ) {
-                tracing::info!(
-                    target: "rings_core::dht::stabilization",
-                    local = %self.dht.did,
-                    peer = %did,
-                    state = ?state,
-                    "STABILIZATION clean_unavailable selected terminal transport"
-                );
-                let should_repair = self
-                    .dht
-                    .peer_may_share_storage_responsibility(did, self.transport.storage_redundancy())
-                    .await?;
-                tracing::debug!(
-                    target: "rings_core::dht::stabilization",
-                    local = %self.dht.did,
-                    peer = %did,
-                    state = ?state,
-                    should_repair,
-                    "STABILIZATION clean_unavailable disconnect start"
-                );
-                self.transport.disconnect(did).await?;
-                tracing::debug!(
-                    target: "rings_core::dht::stabilization",
-                    local = %self.dht.did,
-                    peer = %did,
-                    state = ?state,
-                    should_repair,
-                    "STABILIZATION clean_unavailable disconnect complete"
-                );
-                if should_repair {
-                    tracing::debug!(
-                        target: "rings_core::dht::stabilization",
-                        local = %self.dht.did,
-                        peer = %did,
-                        "STABILIZATION clean_unavailable repair start"
-                    );
-                    self.repair_storage().await?;
-                    tracing::debug!(
-                        target: "rings_core::dht::stabilization",
-                        local = %self.dht.did,
-                        peer = %did,
-                        "STABILIZATION clean_unavailable repair complete"
-                    );
+        for did in candidates {
+            let admitted = self.transport.is_admitted_connection(did);
+            let transport_state = admitted_states.get(&did).copied();
+            if let Some(reason) = self
+                .topology_peer_removal_reason(did, admitted, transport_state, now_ms)
+                .await
+            {
+                self.remove_unavailable_peer(did, reason).await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn admitted_connection_states(&self) -> BTreeMap<Did, WebrtcConnectionState> {
+        self.transport
+            .admitted_connections()
+            .into_iter()
+            .map(|(did, conn)| (did, conn.webrtc_connection_state()))
+            .collect()
+    }
+
+    fn dht_topology_peers(&self) -> Result<BTreeSet<Did>> {
+        let mut peers = BTreeSet::new();
+
+        for did in self.dht.successors().list()? {
+            if did != self.dht.did {
+                peers.insert(did);
+            }
+        }
+
+        if let Some(predecessor) = *self.dht.lock_predecessor()? {
+            if predecessor != self.dht.did {
+                peers.insert(predecessor);
+            }
+        }
+
+        {
+            let finger = self.dht.lock_finger()?;
+            for did in finger.list().iter().flatten().copied() {
+                if did != self.dht.did {
+                    peers.insert(did);
                 }
             }
+        }
+
+        Ok(peers)
+    }
+
+    async fn topology_peer_removal_reason(
+        &self,
+        did: Did,
+        admitted: bool,
+        transport_state: Option<WebrtcConnectionState>,
+        now_ms: i64,
+    ) -> Option<TopologyPeerRemovalReason> {
+        if !admitted {
+            return Some(TopologyPeerRemovalReason::NoAdmittedTransport);
+        }
+
+        let Some(state) = transport_state else {
+            return Some(TopologyPeerRemovalReason::MissingTransportObject);
+        };
+
+        if is_terminal_transport_state(state) {
+            return Some(TopologyPeerRemovalReason::TerminalTransport(state));
+        }
+
+        if let Some(measurement) = self.transport.peer_measurement(did).await {
+            if measurement
+                .evidence
+                .reaches_failure_limit(DHT_TOPOLOGY_EVICTION_THRESHOLDS)
+            {
+                return Some(TopologyPeerRemovalReason::LocalFailureLimit(
+                    measurement,
+                ));
+            }
+        }
+
+        if matches!(state, WebrtcConnectionState::Disconnected) {
+            if let Some(disconnected_since_ms) = self.transport.peer_disconnected_since_ms(did) {
+                let disconnected_for_ms = now_ms.saturating_sub(disconnected_since_ms);
+                if disconnected_for_ms >= DISCONNECTED_CONNECTION_GRACE_MS {
+                    return Some(TopologyPeerRemovalReason::DisconnectedGraceElapsed {
+                        disconnected_for_ms,
+                        grace_ms: DISCONNECTED_CONNECTION_GRACE_MS,
+                    });
+                }
+            }
+        }
+
+        None
+    }
+
+    async fn remove_unavailable_peer(
+        &self,
+        did: Did,
+        reason: TopologyPeerRemovalReason,
+    ) -> Result<()> {
+        let should_repair = self
+            .dht
+            .peer_may_share_storage_responsibility(did, self.transport.storage_redundancy())
+            .await?;
+        tracing::info!(
+            target: "rings_core::dht::stabilization",
+            local = %self.dht.did,
+            peer = %did,
+            reason = reason.as_str(),
+            state = ?reason.transport_state(),
+            disconnected_for_ms = ?reason.disconnected_for_ms(),
+            disconnected_grace_ms = ?reason.disconnected_grace_ms(),
+            measurement = ?reason.measurement(),
+            should_repair,
+            "STABILIZATION clean_unavailable selected peer"
+        );
+
+        if reason.should_disconnect_transport() {
+            tracing::debug!(
+                target: "rings_core::dht::stabilization",
+                local = %self.dht.did,
+                peer = %did,
+                reason = reason.as_str(),
+                "STABILIZATION clean_unavailable disconnect start"
+            );
+            self.transport.disconnect(did).await?;
+            tracing::debug!(
+                target: "rings_core::dht::stabilization",
+                local = %self.dht.did,
+                peer = %did,
+                reason = reason.as_str(),
+                "STABILIZATION clean_unavailable disconnect complete"
+            );
+        } else {
+            tracing::debug!(
+                target: "rings_core::dht::stabilization",
+                local = %self.dht.did,
+                peer = %did,
+                reason = reason.as_str(),
+                "STABILIZATION clean_unavailable topology remove start"
+            );
+            self.dht.remove(did)?;
+            tracing::debug!(
+                target: "rings_core::dht::stabilization",
+                local = %self.dht.did,
+                peer = %did,
+                reason = reason.as_str(),
+                "STABILIZATION clean_unavailable topology remove complete"
+            );
+        }
+
+        if should_repair {
+            tracing::debug!(
+                target: "rings_core::dht::stabilization",
+                local = %self.dht.did,
+                peer = %did,
+                reason = reason.as_str(),
+                "STABILIZATION clean_unavailable repair start"
+            );
+            self.repair_storage().await?;
+            tracing::debug!(
+                target: "rings_core::dht::stabilization",
+                local = %self.dht.did,
+                peer = %did,
+                reason = reason.as_str(),
+                "STABILIZATION clean_unavailable repair complete"
+            );
         }
 
         Ok(())

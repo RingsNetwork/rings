@@ -1,11 +1,24 @@
 use std::sync::Arc;
+use std::sync::Mutex;
+
+use async_trait::async_trait;
 
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
+use crate::dht::successor::SuccessorReader;
+use crate::dht::successor::SuccessorWriter;
+use crate::dht::Did;
 use crate::ecc::SecretKey;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::error::Error;
 use crate::error::Result;
+use crate::measure::BehaviourJudgement;
+use crate::measure::Measure;
+use crate::measure::MeasureCounter;
+use crate::measure::MeasureImpl;
+use crate::measure::PeerQuality;
+use crate::measure::PeerQualityEvidence;
+use crate::measure::PeerQualityThresholds;
 use crate::session::SessionSk;
 use crate::storage::MemStorage;
 use crate::swarm::SwarmBuilder;
@@ -20,6 +33,49 @@ use rings_transport::connections::dummy_controlled;
 use tokio::time::timeout;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use tokio::time::Duration;
+
+#[derive(Default)]
+struct CountingMeasure {
+    counters: Mutex<Vec<(Did, MeasureCounter)>>,
+}
+
+#[async_trait]
+impl Measure for CountingMeasure {
+    async fn incr(&self, did: Did, counter: MeasureCounter) {
+        match self.counters.lock() {
+            Ok(mut counters) => counters.push((did, counter)),
+            Err(_) => tracing::error!("CountingMeasure counters mutex is poisoned"),
+        }
+    }
+
+    async fn get_count(&self, did: Did, counter: MeasureCounter) -> u64 {
+        match self.counters.lock() {
+            Ok(counters) => counters
+                .iter()
+                .filter(|(observed_did, observed_counter)| {
+                    *observed_did == did && *observed_counter == counter
+                })
+                .count() as u64,
+            Err(_) => {
+                tracing::error!("CountingMeasure counters mutex is poisoned");
+                0
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl BehaviourJudgement for CountingMeasure {
+    async fn quality(&self, did: Did) -> PeerQuality {
+        PeerQualityEvidence::from_measure(self, did)
+            .await
+            .classify(PeerQualityThresholds::new(3, 10, 10))
+    }
+
+    async fn good(&self, did: Did) -> bool {
+        self.quality(did).await != PeerQuality::Degraded
+    }
+}
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 struct PendingDataChannelWaitGuard;
@@ -37,6 +93,23 @@ impl Drop for PendingDataChannelWaitGuard {
     fn drop(&mut self) {
         dummy_controlled::set_wait_for_data_channel_open_pending(false);
     }
+}
+
+fn prepare_node_with_measure(key: SecretKey, measure: MeasureImpl) -> Result<Node> {
+    let session = SessionSk::new_with_seckey(&key)?;
+    let swarm = Arc::new(
+        SwarmBuilder::new(
+            0,
+            "stun://stun.l.google.com:19302",
+            Box::new(MemStorage::new()),
+            session,
+        )
+        .dht_finger_table_size(super::TEST_DHT_FINGER_TABLE_SIZE)
+        .dht_virtual_nodes(0)
+        .measure(measure)
+        .build(),
+    );
+    Ok(Node::new(swarm))
 }
 
 #[tokio::test]
@@ -113,6 +186,84 @@ async fn stabilize_step_timeout_bounds_wedged_data_channel_wait() -> Result<()> 
     )
     .await
     .map_err(|_| Error::PromiseStateTimeout)??;
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn clean_unavailable_connections_removes_stale_topology_peer() -> Result<()> {
+    let node = prepare_node(SecretKey::random()).await;
+    let stale = SecretKey::random().address().into();
+
+    node.dht().successors().extend(&[stale])?;
+    *node.dht().lock_predecessor()? = Some(stale);
+    {
+        let dht = node.dht();
+        let mut finger = dht.lock_finger()?;
+        finger.set(0, stale);
+        finger.set(3, stale);
+    }
+
+    assert!(node.dht().successors().contains(&stale)?);
+    assert_eq!(*node.dht().lock_predecessor()?, Some(stale));
+    assert!(node.dht().lock_finger()?.contains(Some(stale)));
+    assert!(!node.swarm.transport.is_admitted_connection(stale));
+
+    node.swarm
+        .stabilizer()
+        .clean_unavailable_connections()
+        .await?;
+
+    assert!(!node.dht().successors().contains(&stale)?);
+    assert_eq!(*node.dht().lock_predecessor()?, None);
+    assert!(!node.dht().lock_finger()?.contains(Some(stale)));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn clean_unavailable_connections_removes_degraded_admitted_peer() -> Result<()> {
+    let measure = Arc::new(CountingMeasure::default());
+    let measure_impl: MeasureImpl = measure.clone();
+    let node1 = prepare_node_with_measure(SecretKey::random(), measure_impl)?;
+    let node2 = prepare_node(SecretKey::random()).await;
+
+    manually_establish_connection(&node1.swarm, &node2.swarm).await;
+    wait_for_successor(&node1, node2.did()).await?;
+
+    node1.dht().successors().extend(&[node2.did()])?;
+    *node1.dht().lock_predecessor()? = Some(node2.did());
+    {
+        let dht = node1.dht();
+        let mut finger = dht.lock_finger()?;
+        finger.set(0, node2.did());
+        finger.set(3, node2.did());
+    }
+
+    for _ in 0..10 {
+        node1
+            .swarm
+            .transport
+            .record_peer_message_send_failed(node2.did())
+            .await;
+    }
+    assert_eq!(
+        measure
+            .get_count(node2.did(), MeasureCounter::FailedToSend)
+            .await,
+        10
+    );
+
+    node1
+        .swarm
+        .stabilizer()
+        .clean_unavailable_connections()
+        .await?;
+
+    assert!(node1.swarm.transport.get_connection(node2.did()).is_none());
+    assert!(!node1.dht().successors().contains(&node2.did())?);
+    assert_eq!(*node1.dht().lock_predecessor()?, None);
+    assert!(!node1.dht().lock_finger()?.contains(Some(node2.did())));
 
     Ok(())
 }
