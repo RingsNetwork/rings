@@ -320,6 +320,20 @@ impl Stabilizer {
     }
 
     /// Clean unavailable connections in transport.
+    ///
+    /// State relation:
+    /// - `TopologyPeer(n, p)` iff `p` appears in `n`'s successor list,
+    ///   predecessor slot, or finger table.
+    /// - `Routable(n, p)` iff `p` has an admitted local transport whose raw
+    ///   connection object is non-terminal.
+    /// - `Evictable(n, p)` iff `p` has no admitted transport, has no raw
+    ///   connection object, is terminal, stayed disconnected past grace, or has
+    ///   reached the local failure-evidence limit.
+    ///
+    /// Post: after this step returns `Ok`, every observed local
+    /// `TopologyPeer(n, p) ∪ AdmittedPeer(n, p)` that was `Evictable(n, p)` at
+    /// the step's snapshot time has been removed through `PeerRing::remove`, so
+    /// successor, predecessor, and finger state are cleaned together.
     pub async fn clean_unavailable_connections(&self) -> Result<()> {
         self.transport.expire_pending_connections().await?;
         let admitted_states = self.admitted_connection_states();
