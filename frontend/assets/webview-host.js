@@ -5,7 +5,7 @@
   let registrationPromise;
   const debugEntries = [];
 
-  function recordDebug(scope, message, level = "info", resource = undefined) {
+  function recordDebug(scope, message, level = "info", resource = undefined, broadcast = true, onion = undefined) {
     const entry = {
       at: new Date().toISOString(),
       scope,
@@ -15,10 +15,27 @@
     if (resource) {
       entry.resource = resource;
     }
+    if (onion) {
+      entry.onion = onion;
+    }
     debugEntries.push(entry);
     if (debugEntries.length > 200) {
       debugEntries.splice(0, debugEntries.length - 200);
     }
+    if (broadcast) {
+      broadcastDebugEntry(entry);
+    }
+  }
+
+  function broadcastDebugEntry(entry) {
+    const worker = navigator.serviceWorker?.controller;
+    if (!worker) {
+      return;
+    }
+    worker.postMessage({
+      type: "rings-webview-debug-entry",
+      entry,
+    });
   }
 
   function ensureServiceWorkerSupport() {
@@ -121,6 +138,8 @@
         message.message || "unknown event",
         message.level || "info",
         message.resource,
+        false,
+        message.onion,
       );
       return;
     }

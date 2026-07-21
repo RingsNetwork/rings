@@ -737,25 +737,38 @@ fn open_detected_debug_callback(
     status: UseStateHandle<String>,
 ) -> Callback<MouseEvent> {
     Callback::from(move |_| {
-        let status = status.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            let browser = detect_browser();
-            let Some(url) = debug_url(browser, target) else {
-                status.set(format!(
-                    "cannot detect supported browser for {}",
-                    target.label()
-                ));
-                return;
-            };
-            match extension::open_debug_url(url).await {
-                Ok(()) => status.set(format!("opened {} {}", browser.label(), target.label())),
-                Err(error) => status.set(format!(
-                    "open {} {} failed: {error}",
-                    browser.label(),
-                    target.label()
-                )),
+        let browser = detect_browser();
+        let Some(url) = debug_url(browser, target) else {
+            status.set(format!(
+                "cannot detect supported browser for {}",
+                target.label()
+            ));
+            return;
+        };
+        match extension::open_debug_url(url) {
+            Ok(extension::DebugUrlOpenResult::Opened) => {
+                status.set(format!("opened {} {}", browser.label(), target.label()));
             }
-        });
+            Ok(extension::DebugUrlOpenResult::CopiedInternalUrl) => {
+                status.set(format!(
+                    "{} blocks direct {} links from webpages; URL copied, paste it into the address bar",
+                    browser.label(),
+                    target.label(),
+                ));
+            }
+            Ok(extension::DebugUrlOpenResult::ManualInternalUrl) => {
+                status.set(format!(
+                    "{} blocks direct {} links from webpages; paste {url} into the address bar",
+                    browser.label(),
+                    target.label(),
+                ));
+            }
+            Err(error) => status.set(format!(
+                "open {} {} failed: {error}",
+                browser.label(),
+                target.label()
+            )),
+        }
     })
 }
 

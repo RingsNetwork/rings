@@ -7,6 +7,7 @@ config*.yaml
 **/*.js
 **/*.mjs
 !frontend/assets/webview-host.js
+!frontend/assets/webview-overlay.js
 !frontend/rings-webview-service-worker.js
 frontend/dist-e2e/
 .ipynb_checkpoints

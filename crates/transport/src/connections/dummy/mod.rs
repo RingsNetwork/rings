@@ -64,6 +64,12 @@ thread_local! {
     /// through `do_send_payload` and exercise real reassembly. Thread-local for the same isolation
     /// reason as the controlled queue.
     static MAX_MESSAGE_SIZE: Cell<usize> = const { Cell::new(0) };
+    /// Test-only per-thread override for the next lifecycle callback's cid. This lets dummy tests
+    /// exercise malformed transport events without changing the production callback path.
+    static NEXT_CALLBACK_CID: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// Test-only per-thread switch that makes `webrtc_wait_for_data_channel_open` stay pending.
+    /// This models a lifecycle notifier/callback wedge after a connection was already admitted.
+    static WAIT_FOR_DATA_CHANNEL_OPEN_PENDING: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Test-only controlled delivery scheduler. When enabled (per thread), dummy
@@ -76,6 +82,8 @@ pub mod controlled {
     use super::CONTROLLED;
     use super::DELIVERY;
     use super::MAX_MESSAGE_SIZE;
+    use super::NEXT_CALLBACK_CID;
+    use super::WAIT_FOR_DATA_CHANNEL_OPEN_PENDING;
 
     /// Turn the controlled scheduler on/off for the current thread. Turning it
     /// off clears this thread's queue.
@@ -83,6 +91,10 @@ pub mod controlled {
         CONTROLLED.with(|c| c.set(on));
         if !on {
             DELIVERY.with(|q| q.borrow_mut().clear());
+            NEXT_CALLBACK_CID.with(|next| {
+                *next.borrow_mut() = None;
+            });
+            WAIT_FOR_DATA_CHANNEL_OPEN_PENDING.with(|pending| pending.set(false));
         }
     }
 
@@ -90,6 +102,21 @@ pub mod controlled {
     /// restores the default). Lets a test drive the chunked send path and reassembly end to end.
     pub fn set_max_message_size(n: usize) {
         MAX_MESSAGE_SIZE.with(|m| m.set(n));
+    }
+
+    /// Test hook: rewrite the next queued lifecycle callback to use `cid`.
+    ///
+    /// This applies only to peer-state and data-channel events delivered through
+    /// [`deliver`]. Message events keep their real connection id.
+    pub fn set_next_callback_cid(cid: impl Into<String>) {
+        NEXT_CALLBACK_CID.with(|next| {
+            *next.borrow_mut() = Some(cid.into());
+        });
+    }
+
+    /// Test hook: force `webrtc_wait_for_data_channel_open` on this thread to never complete.
+    pub fn set_wait_for_data_channel_open_pending(on: bool) {
+        WAIT_FOR_DATA_CHANNEL_OPEN_PENDING.with(|pending| pending.set(on));
     }
 
     /// Test hook: number of data-channel messages `send_message` has dispatched on this thread.
@@ -113,22 +140,58 @@ pub mod controlled {
     /// index is out of range or the target connection is gone.
     pub async fn deliver(index: usize) -> bool {
         let entry = DELIVERY.with(|q| q.borrow_mut().remove(index));
-        let Some((rand_id, event)) = entry else {
+        let Some((rand_id, mut event)) = entry else {
             return false;
         };
         let Some(conn) = CONNS.get(&rand_id).map(|c| c.clone()) else {
             return false;
         };
+        if event.is_lifecycle_event() {
+            if let Some(cid) = NEXT_CALLBACK_CID.with(|next| next.borrow_mut().take()) {
+                event.set_callback_cid(cid);
+            }
+        }
         conn.handle_event(event).await;
         true
+    }
+
+    /// Deliver the next queued data-channel-open event with a rewritten callback cid.
+    pub async fn deliver_next_data_channel_open_with_cid(cid: impl Into<String>) -> bool {
+        let index = DELIVERY.with(|q| {
+            q.borrow()
+                .iter()
+                .position(|(_, event)| matches!(event, super::Event::DataChannelOpen(_)))
+        });
+        let Some(index) = index else {
+            return false;
+        };
+        set_next_callback_cid(cid);
+        deliver(index).await
     }
 }
 
 enum Event {
-    PeerConnectionStateChange(WebrtcConnectionState),
-    DataChannelOpen,
-    DataChannelClose,
+    PeerConnectionStateChange(WebrtcConnectionState, Option<String>),
+    DataChannelOpen(Option<String>),
+    DataChannelClose(Option<String>),
     Message(Bytes),
+}
+
+impl Event {
+    fn is_lifecycle_event(&self) -> bool {
+        !matches!(self, Self::Message(_))
+    }
+
+    fn set_callback_cid(&mut self, cid: String) {
+        match self {
+            Self::PeerConnectionStateChange(_, callback_cid)
+            | Self::DataChannelOpen(callback_cid)
+            | Self::DataChannelClose(callback_cid) => {
+                *callback_cid = Some(cid);
+            }
+            Self::Message(_) => {}
+        }
+    }
 }
 
 /// A dummy connection for local testing.
@@ -182,11 +245,29 @@ impl DummyConnection {
 
     async fn handle_event(&self, event: Event) {
         match event {
-            Event::PeerConnectionStateChange(state) => {
-                self.callback.on_peer_connection_state_change(state).await
+            Event::PeerConnectionStateChange(state, callback_cid) => {
+                if let Some(cid) = callback_cid {
+                    self.callback
+                        .on_peer_connection_state_change_with_cid(&cid, state)
+                        .await;
+                } else {
+                    self.callback.on_peer_connection_state_change(state).await;
+                }
             }
-            Event::DataChannelOpen => self.callback.on_data_channel_open().await,
-            Event::DataChannelClose => self.callback.on_data_channel_close().await,
+            Event::DataChannelOpen(callback_cid) => {
+                if let Some(cid) = callback_cid {
+                    self.callback.on_data_channel_open_with_cid(&cid).await;
+                } else {
+                    self.callback.on_data_channel_open().await;
+                }
+            }
+            Event::DataChannelClose(callback_cid) => {
+                if let Some(cid) = callback_cid {
+                    self.callback.on_data_channel_close_with_cid(&cid).await;
+                } else {
+                    self.callback.on_data_channel_close().await;
+                }
+            }
             Event::Message(data) => {
                 if SEND_MESSAGE_DELAY && !CONTROLLED.with(|c| c.get()) {
                     random_delay().await;
@@ -241,17 +322,17 @@ impl DummyConnection {
             *webrtc_connection_state = state;
         }
 
-        self.dispatch(Event::PeerConnectionStateChange(state));
+        self.dispatch(Event::PeerConnectionStateChange(state, None));
 
         if state == WebrtcConnectionState::Connected {
-            self.dispatch(Event::DataChannelOpen);
+            self.dispatch(Event::DataChannelOpen(None));
         }
 
         if matches!(
             state,
             WebrtcConnectionState::Closed | WebrtcConnectionState::Disconnected
         ) {
-            self.dispatch(Event::DataChannelClose);
+            self.dispatch(Event::DataChannelClose(None));
         }
     }
 }
@@ -342,6 +423,9 @@ impl ConnectionInterface for DummyConnection {
     }
 
     async fn webrtc_wait_for_data_channel_open(&self) -> Result<()> {
+        if WAIT_FOR_DATA_CHANNEL_OPEN_PENDING.with(|pending| pending.get()) {
+            std::future::pending::<()>().await;
+        }
         // Will pass if the state is connecting to prevent release connection in the `test_handshake_on_both_sides` test.
         // The connecting state means an offer is answered but not accepted by the other side.
         if matches!(

@@ -27,6 +27,7 @@ use crate::browser_api::js_string_field;
 pub(crate) use crate::browser_api::load_setting;
 pub(crate) use crate::browser_api::open_debug_url;
 pub(crate) use crate::browser_api::save_setting;
+pub(crate) use crate::browser_api::DebugUrlOpenResult;
 use crate::custom;
 use crate::dweb;
 pub(crate) use crate::extension_bridge::apply_extension_snapshot;

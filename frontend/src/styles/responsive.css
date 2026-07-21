@@ -353,57 +353,6 @@
   }
 }
 
-@media (max-width: 780px) {
-  .webview-toolbar {
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    grid-template-areas:
-      "brand brand close"
-      "address address address"
-      "status status status";
-  }
-
-  .webview-brand {
-    grid-area: brand;
-  }
-
-  .webview-address-form {
-    grid-area: address;
-  }
-
-  .webview-status {
-    grid-area: status;
-  }
-
-  .webview-close-button {
-    grid-area: close;
-    justify-self: end;
-  }
-
-}
-
-@media (max-width: 520px) {
-  .webview-shell.debug-open {
-    grid-template-rows: auto minmax(0, 1fr) minmax(170px, 34dvh);
-  }
-
-  .webview-debug-header {
-    flex-wrap: wrap;
-    gap: 7px;
-  }
-
-  .webview-debug-tabs {
-    order: 3;
-    width: 100%;
-    margin-left: 0;
-  }
-
-  .webview-debug-entry {
-    grid-template-columns: 74px 54px minmax(0, 1fr);
-    gap: 6px;
-    font-size: 0.62rem;
-  }
-}
-
 @media (max-width: 520px) {
   h1 {
     font-size: 1rem;

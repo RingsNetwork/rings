@@ -37,148 +37,22 @@ use crate::onion;
 
 const GATEWAY_PREFIX: &str = "/webview/";
 const MAX_CONCURRENT_GATEWAY_REQUESTS: usize = 6;
-const WEBVIEW_DEBUG_OVERLAY: &str = r#"
+const WEBVIEW_OVERLAY_LOADER: &str = r#"
 (() => {
   "use strict";
 
   const marker = "__ringsWebviewDebugOverlay";
-  if (globalThis[marker]?.mounted?.()) return;
-
-  const state = {
-    entries: [],
-    log: undefined,
-    network: undefined,
-    panel: undefined,
-    view: "log",
-  };
-  const maxEntries = 200;
-
-  function resourceLine(resource) {
-    const status = resource.status == null ? "pending" : String(resource.status);
-    return `#${resource.requestId} ${status} ${resource.kind} ${resource.method} ${resource.phase} ${resource.target} ${resource.durationMs} ms`;
+  if (globalThis[marker]?.installed) {
+    globalThis[marker].mount?.();
+    return;
   }
+  if (document.querySelector("script[data-rings-webview-overlay-loader]")) return;
 
-  function render() {
-    const container = state.view === "network" ? state.network : state.log;
-    if (!container) return;
-    container.replaceChildren();
-    const entries = state.view === "network"
-      ? [...new Map(state.entries.filter((entry) => entry.resource).map((entry) => [entry.resource.requestId, entry])).values()]
-      : state.entries;
-    if (entries.length === 0) {
-      const empty = document.createElement("p");
-      empty.textContent = "Waiting for gateway activity";
-      container.append(empty);
-      return;
-    }
-    for (const entry of entries) {
-      const row = document.createElement("p");
-      row.className = entry.level === "error" ? "error" : "";
-      const time = String(entry.at || "").split("T")[1]?.replace("Z", "").slice(0, 12) || "";
-      row.textContent = state.view === "network" && entry.resource
-        ? resourceLine(entry.resource)
-        : `${time} [${entry.scope || "worker"}] ${entry.message || "unknown event"}`;
-      container.append(row);
-    }
-    container.scrollTop = container.scrollHeight;
-  }
-
-  function record(scope, message, level = "info", resource = undefined) {
-    const entry = { at: new Date().toISOString(), scope, message, level };
-    if (resource) entry.resource = resource;
-    state.entries.push(entry);
-    if (state.entries.length > maxEntries) state.entries.splice(0, state.entries.length - maxEntries);
-    render();
-  }
-
-  function selectView(view) {
-    state.view = view;
-    state.log.hidden = view !== "log";
-    state.network.hidden = view !== "network";
-    state.panel.querySelector("[data-view=log]").dataset.active = String(view === "log");
-    state.panel.querySelector("[data-view=network]").dataset.active = String(view === "network");
-    render();
-  }
-
-  function mount() {
-    const host = document.createElement("div");
-    host.id = "rings-webview-debug-overlay";
-    const root = host.attachShadow({ mode: "open" });
-    root.innerHTML = `
-      <style>
-        :host { all: initial; }
-        #controls { position: fixed; right: 92px; bottom: 16px; z-index: 2147483647; display: flex; gap: 5px; }
-        #controls button { display: grid; width: 34px; height: 34px; min-height: 34px; padding: 0; place-items: center; }
-        #toggle { position: fixed; right: 16px; bottom: 16px; z-index: 2147483647; min-width: 68px; min-height: 34px; border: 1px solid #1d2939; border-radius: 5px; background: #111827; color: #fffaf0; font: 700 12px/1 ui-monospace, SFMono-Regular, Menlo, monospace; cursor: pointer; }
-        #panel { position: fixed; right: 16px; bottom: 58px; z-index: 2147483647; display: grid; width: min(760px, calc(100vw - 32px)); max-height: min(42vh, 360px); grid-template-rows: auto minmax(0, 1fr); border: 1px solid #1d2939; border-radius: 5px; background: #fffaf0; color: #111827; box-shadow: 0 12px 30px rgba(17, 24, 39, 0.25); overflow: hidden; font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; }
-        #bar { display: flex; align-items: center; gap: 5px; padding: 7px; border-bottom: 1px solid #d9c5a6; background: #f7eddc; }
-        button { min-height: 27px; padding: 4px 8px; border: 1px solid #d9c5a6; border-radius: 4px; background: #fffaf0; color: #374151; font: inherit; font-weight: 700; cursor: pointer; }
-        button[data-active=true] { border-color: #111827; background: #111827; color: #fff; }
-        #clear { margin-left: auto; }
-        .content { min-height: 0; margin: 0; padding: 7px 9px; overflow: auto; background: #fffdf8; }
-        p { margin: 0 0 5px; overflow-wrap: anywhere; white-space: pre-wrap; }
-        p.error { color: #b42318; }
-      </style>
-      <div id="controls" role="toolbar" aria-label="WebView navigation">
-        <button id="back" type="button" aria-label="Back" title="Back">&lt;</button>
-        <button id="forward" type="button" aria-label="Forward" title="Forward">&gt;</button>
-        <button id="reload" type="button" aria-label="Reload" title="Reload">&#x21bb;</button>
-      </div>
-      <button id="toggle" type="button" aria-expanded="false">Debug</button>
-      <section id="panel" aria-label="Rings WebView gateway debug log" hidden>
-        <div id="bar">
-          <button type="button" data-view="log" data-active="true">Logs</button>
-          <button type="button" data-view="network" data-active="false">Network</button>
-          <button id="clear" type="button">Clear</button>
-        </div>
-        <div id="log" class="content" role="log" aria-live="polite"></div>
-        <div id="network" class="content" role="table" hidden></div>
-      </section>`;
-    const panel = root.getElementById("panel");
-    const toggle = root.getElementById("toggle");
-    const back = root.getElementById("back");
-    const forward = root.getElementById("forward");
-    const reload = root.getElementById("reload");
-    const log = root.getElementById("log");
-    const network = root.getElementById("network");
-    if (!panel || !toggle || !back || !forward || !reload || !log || !network) return;
-    state.panel = panel;
-    state.log = log;
-    state.network = network;
-    toggle.addEventListener("click", () => {
-      panel.hidden = !panel.hidden;
-      toggle.setAttribute("aria-expanded", String(!panel.hidden));
-      if (!panel.hidden) render();
-    });
-    back.addEventListener("click", () => history.back());
-    forward.addEventListener("click", () => history.forward());
-    reload.addEventListener("click", () => location.reload());
-    root.querySelector("[data-view=log]").addEventListener("click", () => selectView("log"));
-    root.querySelector("[data-view=network]").addEventListener("click", () => selectView("network"));
-    root.getElementById("clear").addEventListener("click", () => {
-      state.entries.splice(0, state.entries.length);
-      render();
-    });
-    document.documentElement.append(host);
-    record("overlay", "Debug listener ready");
-  }
-
-  globalThis[marker] = {
-    record,
-    mounted: () => Boolean(document.getElementById("rings-webview-debug-overlay")),
-  };
-  navigator.serviceWorker?.addEventListener("message", (event) => {
-    const entry = event.data;
-    if (entry?.type === "rings-webview-debug") {
-      record(entry.scope || "worker", entry.message || "unknown event", entry.level || "info", entry.resource);
-    }
-  });
-  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", mount, { once: true });
-  else mount();
-  navigator.serviceWorker?.ready.then((registration) => {
-    const worker = navigator.serviceWorker.controller || registration.active;
-    worker?.postMessage({ type: "rings-webview-debug-register" });
-  }).catch(() => record("overlay", "Service Worker debug listener unavailable", "error"));
+  const script = document.createElement("script");
+  script.src = "/assets/webview-overlay.js";
+  script.async = false;
+  script.dataset.ringsWebviewOverlayLoader = "";
+  (document.head || document.documentElement).append(script);
 })();
 "#;
 
@@ -189,13 +63,6 @@ thread_local! {
 struct BrowserGatewayBinding {
     // This closure must outlive every Service Worker request sent to the active node.
     _handler: Closure<dyn FnMut(JsValue) -> Promise>,
-}
-
-/// Encode an HTTP(S) address into the application-controlled gateway path.
-pub(crate) fn controlled_gateway_path(input: &str) -> Result<String, String> {
-    let target = TargetUrl::parse(input).map_err(|error| error.to_string())?;
-    let prefix = GatewayPrefix::new(GATEWAY_PREFIX).map_err(|error| error.to_string())?;
-    Ok(prefix.encode(target.as_url()))
 }
 
 /// Open the local WebView popup without ever passing it a remote URL.
@@ -246,16 +113,6 @@ pub(crate) async fn register_browser_gateway() -> Result<(), String> {
     Ok(())
 }
 
-/// Ensure that the popup is controlled by the same-origin Service Worker.
-pub(crate) async fn prepare_browser_gateway() -> Result<(), String> {
-    let bridge = crate::browser_api::js_global_prop("RingsWebviewHost")?;
-    let ready = crate::browser_api::js_call0(&bridge, "ensureReady")?;
-    let _ready = crate::browser_api::await_js(ready).await?;
-    let debug = crate::browser_api::js_call0(&bridge, "enableDebug")?;
-    let _debug = crate::browser_api::await_js(debug).await?;
-    Ok(())
-}
-
 async fn dispatch_browser_request(gateway: WebviewNode, request: JsValue) -> JsValue {
     let request = match browser_host_request(&request) {
         Ok(request) => request,
@@ -272,7 +129,7 @@ async fn dispatch_browser_request(gateway: WebviewNode, request: JsValue) -> JsV
             browser_failure(403, format!("rejected: {reason:?}"))
         }
         Err(WebviewError::Cors(error)) => browser_failure(403, format!("CORS rejected: {error}")),
-        Err(error) => browser_failure(502, format!("gateway transport: {error}")),
+        Err(error) => browser_transport_failure(error),
     }
 }
 
@@ -410,12 +267,115 @@ fn browser_redirect(location: &str) -> JsValue {
 }
 
 fn browser_failure(status: u16, error: String) -> JsValue {
+    browser_failure_with(
+        status,
+        default_failure_code(status),
+        default_failure_summary(status),
+        error,
+    )
+}
+
+fn browser_failure_with(
+    status: u16,
+    code: &'static str,
+    summary: &'static str,
+    error: String,
+) -> JsValue {
     let value = Object::new();
     let _ok = crate::browser_api::js_set(&value, "ok", &JsValue::FALSE);
     let _status =
         crate::browser_api::js_set(&value, "status", &JsValue::from_f64(f64::from(status)));
+    let _code = crate::browser_api::js_set(&value, "errorCode", &JsValue::from_str(code));
+    let _summary = crate::browser_api::js_set(&value, "errorSummary", &JsValue::from_str(summary));
     let _error = crate::browser_api::js_set(&value, "error", &JsValue::from_str(error.as_str()));
     value.into()
+}
+
+fn browser_transport_failure(error: WebviewError) -> JsValue {
+    let (failure, message) = match error {
+        WebviewError::Transport(message) => (
+            classify_transport_failure(&message),
+            format!("gateway transport failed: {message}"),
+        ),
+        other => (
+            BrowserFailureKind::GatewayTransport,
+            format!("gateway transport failed: {other}"),
+        ),
+    };
+    browser_failure_with(failure.status(), failure.code(), failure.summary(), message)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BrowserFailureKind {
+    GatewayTransport,
+    OnionExitUnavailable,
+    OnionRouteUnavailable,
+}
+
+impl BrowserFailureKind {
+    fn status(self) -> u16 {
+        match self {
+            Self::GatewayTransport => 502,
+            Self::OnionExitUnavailable | Self::OnionRouteUnavailable => 503,
+        }
+    }
+
+    fn code(self) -> &'static str {
+        match self {
+            Self::GatewayTransport => "gateway_transport_failed",
+            Self::OnionExitUnavailable => "onion_exit_unavailable",
+            Self::OnionRouteUnavailable => "onion_route_unavailable",
+        }
+    }
+
+    fn summary(self) -> &'static str {
+        match self {
+            Self::GatewayTransport => "Gateway transport failed.",
+            Self::OnionExitUnavailable => "No live HTTPS onion exit is available.",
+            Self::OnionRouteUnavailable => {
+                "No onion route is currently available for the requested target."
+            }
+        }
+    }
+}
+
+fn classify_transport_failure(message: &str) -> BrowserFailureKind {
+    if message.contains("no live onion exit offers service \"https\"") {
+        BrowserFailureKind::OnionExitUnavailable
+    } else if [
+        "no live onion exit",
+        "not enough relay candidates",
+        "no onion route has a permitted first hop",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+    {
+        BrowserFailureKind::OnionRouteUnavailable
+    } else {
+        BrowserFailureKind::GatewayTransport
+    }
+}
+
+fn default_failure_code(status: u16) -> &'static str {
+    match status {
+        400 => "invalid_webview_request",
+        403 => "webview_request_rejected",
+        404 => "controlled_asset_not_found",
+        502 => "gateway_transport_failed",
+        503 => "gateway_unavailable",
+        _ => "gateway_request_failed",
+    }
+}
+
+fn default_failure_summary(status: u16) -> &'static str {
+    match status {
+        400 => "Invalid WebView request.",
+        403 => "The WebView gateway rejected this request.",
+        404 => "The requested controlled asset was not found.",
+        502 => "Gateway transport failed.",
+        503 => "Gateway service is unavailable.",
+        _ => "Gateway request failed.",
+    }
 }
 
 /// A browser request captured by the Rings-controlled WebView host.
@@ -629,8 +589,7 @@ struct WebviewGatewayHost<T> {
 }
 
 impl<T> WebviewGatewayHost<T>
-where
-    T: GatewayTransport,
+where T: GatewayTransport
 {
     async fn handle(&self, request: WebviewHostRequest) -> WebviewResult<WebviewHostOutcome> {
         match self.policy.route(
@@ -720,20 +679,27 @@ struct OnionGatewayTransport {
 #[async_trait(?Send)]
 impl GatewayTransport for OnionGatewayTransport {
     async fn send(&self, request: GatewayRequest) -> WebviewResult<GatewayResponse> {
-        let response = onion::request(
-            &self.provider,
-            onion::OnionProxyHttpRequest {
-                url: request.target.to_string(),
-                method: request.method,
-                headers: request
-                    .headers
-                    .into_iter()
-                    .map(|header| (header.name, header.value))
-                    .collect(),
-                body: request.body,
-                options: onion::OnionProxyOptions::default(),
-            },
-        )
+        let options = onion::OnionProxyOptions::default();
+        if should_trace_onion_route(request.kind) {
+            trace_onion_route(
+                &self.provider,
+                request.target.as_str(),
+                request.kind,
+                options,
+            )
+            .await;
+        }
+        let response = onion::request(&self.provider, onion::OnionProxyHttpRequest {
+            url: request.target.to_string(),
+            method: request.method,
+            headers: request
+                .headers
+                .into_iter()
+                .map(|header| (header.name, header.value))
+                .collect(),
+            body: request.body,
+            options,
+        })
         .await
         .map_err(WebviewError::Transport)?;
         let headers = response
@@ -745,9 +711,108 @@ impl GatewayTransport for OnionGatewayTransport {
     }
 }
 
+fn should_trace_onion_route(kind: GatewayRequestKind) -> bool {
+    matches!(
+        kind,
+        GatewayRequestKind::Navigation | GatewayRequestKind::Fetch | GatewayRequestKind::Xhr
+    )
+}
+
+async fn trace_onion_route(
+    provider: &Arc<Provider>,
+    target: &str,
+    kind: GatewayRequestKind,
+    options: onion::OnionProxyOptions,
+) {
+    let started = js_sys::Date::now();
+    let result = onion::route(provider, onion::OnionProxyRouteRequest {
+        url: target.to_string(),
+        options,
+    })
+    .await;
+    let duration = (js_sys::Date::now() - started).max(0.0).round();
+    match result {
+        Ok(route) => emit_onion_debug(
+            "route selected",
+            "info",
+            target,
+            kind,
+            Some(&route),
+            None,
+            duration,
+        ),
+        Err(error) => emit_onion_debug(
+            error.as_str(),
+            "error",
+            target,
+            kind,
+            None,
+            Some(error.as_str()),
+            duration,
+        ),
+    }
+}
+
+fn emit_onion_debug(
+    message: &str,
+    level: &str,
+    target: &str,
+    kind: GatewayRequestKind,
+    route: Option<&onion::OnionProxyRoute>,
+    error: Option<&str>,
+    duration_ms: f64,
+) {
+    let Ok(bridge) = crate::browser_api::js_global_prop("RingsWebviewHost") else {
+        return;
+    };
+    let Ok(record) = crate::browser_api::js_method(&bridge, "recordDebugEntry") else {
+        return;
+    };
+    let onion = Object::new();
+    let _ = crate::browser_api::js_set(&onion, "target", &JsValue::from_str(target));
+    let _ =
+        crate::browser_api::js_set(&onion, "kind", &JsValue::from_str(gateway_kind_label(kind)));
+    let _ = crate::browser_api::js_set(&onion, "durationMs", &JsValue::from_f64(duration_ms));
+    if let Some(route) = route {
+        let hops = Array::new();
+        for hop in route.hops.iter() {
+            hops.push(&JsValue::from_str(hop));
+        }
+        let _ = crate::browser_api::js_set(&onion, "phase", &JsValue::from_str("selected"));
+        let _ = crate::browser_api::js_set(&onion, "service", &JsValue::from_str(&route.service));
+        let _ = crate::browser_api::js_set(&onion, "exit", &JsValue::from_str(&route.exit));
+        let _ = crate::browser_api::js_set(&onion, "hops", &hops.into());
+    } else {
+        let _ = crate::browser_api::js_set(&onion, "phase", &JsValue::from_str("failed"));
+        let _ = crate::browser_api::js_set(&onion, "service", &JsValue::from_str("https"));
+        let _ = crate::browser_api::js_set(&onion, "hops", &Array::new().into());
+    }
+    if let Some(error) = error {
+        let _ = crate::browser_api::js_set(&onion, "error", &JsValue::from_str(error));
+    }
+
+    let args = Array::new();
+    args.push(&JsValue::from_str("onion"));
+    args.push(&JsValue::from_str(message));
+    args.push(&JsValue::from_str(level));
+    args.push(&JsValue::UNDEFINED);
+    args.push(&JsValue::from_bool(true));
+    args.push(onion.as_ref());
+    let _ = Reflect::apply(&record, &bridge, &args);
+}
+
+fn gateway_kind_label(kind: GatewayRequestKind) -> &'static str {
+    match kind {
+        GatewayRequestKind::Navigation => "navigation",
+        GatewayRequestKind::Subresource => "subresource",
+        GatewayRequestKind::Fetch => "fetch",
+        GatewayRequestKind::Xhr => "xhr",
+    }
+}
+
 fn webview_bootstrap(target: &Url) -> String {
     format!(
-        "{}\n{WEBVIEW_DEBUG_OVERLAY}",
+        "{}\n{WEBVIEW_OVERLAY_LOADER}",
         bootstrap_script(GATEWAY_PREFIX, target)
     )
 }
@@ -879,10 +944,10 @@ mod tests {
         assert_eq!(sent_request.target.as_str(), target.as_url().as_str());
         assert_eq!(sent_request.method, "POST");
         assert_eq!(sent_request.body, vec![0x00, 0xff]);
-        assert_eq!(
-            sent_request.headers,
-            vec![GatewayHeader::new("accept", "text/html")?]
-        );
+        assert_eq!(sent_request.headers, vec![GatewayHeader::new(
+            "accept",
+            "text/html"
+        )?]);
         Ok(())
     }
 
@@ -910,15 +975,31 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn popup_addresses_only_produce_controlled_gateway_paths() -> WebviewResult<()> {
-        let path = controlled_gateway_path("https://example.test/docs/?q=1")
+    fn onion_route_unavailable_is_reported_without_wasm_stack() -> WebviewResult<()> {
+        let response = browser_transport_failure(WebviewError::Transport(
+            "onion proxy request failed: Onion route error: no live onion exit offers service \"https\""
+                .to_string(),
+        ));
+
+        let status = crate::browser_api::js_prop(&response, "status")
+            .map_err(WebviewError::Browser)?
+            .as_f64()
+            .ok_or_else(|| WebviewError::Browser("failure status was not numeric".to_string()))?;
+        let error = crate::browser_api::js_string_field(&response, "error")
+            .map_err(WebviewError::Browser)?;
+        let code = crate::browser_api::js_string_field(&response, "errorCode")
+            .map_err(WebviewError::Browser)?;
+        let summary = crate::browser_api::js_string_field(&response, "errorSummary")
             .map_err(WebviewError::Browser)?;
 
+        assert_eq!(status, 503.0);
+        assert_eq!(code, "onion_exit_unavailable");
+        assert_eq!(summary, "No live HTTPS onion exit is available.");
         assert_eq!(
-            path,
-            "/webview/https%3A%2F%2Fexample%2Etest%2Fdocs%2F%3Fq%3D1"
+            error,
+            "gateway transport failed: onion proxy request failed: Onion route error: no live onion exit offers service \"https\""
         );
-        assert!(controlled_gateway_path("file:///tmp/page.html").is_err());
+        assert!(!error.contains("wasm-function"));
         Ok(())
     }
 

@@ -59,12 +59,26 @@ async fn online_node_type_is_configurable() {
 
 #[tokio::test]
 async fn test_processor_create_offer() {
-    let peer_did = SecretKey::random().address().into();
-    let processor = prepare_processor().await;
-    processor.swarm.create_offer(peer_did).await.unwrap();
-    let conn_dids = processor.swarm.peers();
+    let _network_guard = network_test_guard().await;
+    let callback1 = test_callback();
+    let callback2 = test_callback();
+    let p1 = prepare_processor().await;
+    let p2 = prepare_processor().await;
+
+    p1.swarm.set_callback(callback1.clone()).unwrap();
+    p2.swarm.set_callback(callback2.clone()).unwrap();
+
+    let offer = p1.swarm.create_offer(p2.did()).await.unwrap();
+    assert!(p1.swarm.peers().is_empty());
+
+    let answer = p2.swarm.answer_offer(offer).await.unwrap();
+    p1.swarm.accept_answer(answer).await.unwrap();
+    wait_processors_connected(&p1, &p2, &callback1, &callback2).await;
+
+    let conn_dids = p1.swarm.peers();
     assert_eq!(conn_dids.len(), 1);
-    assert_eq!(conn_dids.first().unwrap().did, peer_did.to_string());
+    assert_eq!(conn_dids.first().unwrap().did, p2.did().to_string());
+    assert_eq!(conn_dids.first().unwrap().state, "Connected");
 }
 
 #[tokio::test]
@@ -83,15 +97,7 @@ async fn test_processor_handshake_msg() {
     let did2 = p2.did();
 
     let offer = p1.swarm.create_offer(p2.did()).await.unwrap();
-    assert_eq!(
-        p1.swarm
-            .peers()
-            .into_iter()
-            .find(|peer| peer.did == p2.did().to_string())
-            .unwrap()
-            .state,
-        "New"
-    );
+    assert!(p1.swarm.peers().is_empty());
 
     let answer = p2.swarm.answer_offer(offer).await.unwrap();
     p1.swarm.accept_answer(answer).await.unwrap();
@@ -194,12 +200,9 @@ async fn provider_exposes_sent_and_received_peer_measurements() {
     assert!(provider_measurement.evidence.sent >= 1);
 
     let rpc_value = provider
-        .request(
-            Method::PeerMeasurement,
-            PeerMeasurementRequest {
-                did: p2.did().to_string(),
-            },
-        )
+        .request(Method::PeerMeasurement, PeerMeasurementRequest {
+            did: p2.did().to_string(),
+        })
         .await
         .unwrap();
     let rpc_measurement: PeerMeasurementResponse = serde_json::from_value(rpc_value).unwrap();

@@ -142,6 +142,7 @@ pub fn set_panic_hook() {
 pub mod node {
     use tracing_subscriber::filter;
     use tracing_subscriber::fmt;
+    use tracing_subscriber::EnvFilter;
     use tracing_subscriber::Layer;
 
     use super::*;
@@ -153,12 +154,23 @@ pub mod node {
 
         let subscriber = Registry::default();
         let level_filter = filter::LevelFilter::from_level(level.into());
+        let filter = match std::env::var("RINGS_LOG_FILTER") {
+            Ok(spec) if !spec.trim().is_empty() => EnvFilter::try_new(spec.trim())
+                .unwrap_or_else(|err| {
+                    eprintln!(
+                        "invalid RINGS_LOG_FILTER '{}': {}; falling back to {}",
+                        spec, err, level_filter
+                    );
+                    EnvFilter::new(level_filter.to_string())
+                }),
+            _ => EnvFilter::new(level_filter.to_string()),
+        };
 
         // Stderr
         let subscriber = subscriber.with(
             fmt::layer()
                 .with_writer(std::io::stderr)
-                .with_filter(level_filter),
+                .with_filter(filter),
         );
         // Enable log compatible layer to convert log record to tracing span.
         // We will ignore any errors that returned by this functions.

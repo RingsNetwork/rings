@@ -5,6 +5,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::future::join_all;
+use futures::future::select;
+use futures::future::Either;
+use futures::FutureExt;
 use rings_core::chunk::ReassemblyLimits;
 use rings_core::dht::Did;
 use rings_core::dht::EntryStorage;
@@ -89,6 +92,7 @@ pub use config::ProcessorConfigSerialized;
 
 const DHT_LOOKUP_CACHE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DHT_LOOKUP_CACHE_POLL_ATTEMPTS: usize = 40;
+const MAX_REGISTRATION_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[cfg(not(feature = "browser"))]
 async fn sleep_dht_lookup_poll_interval(interval: Duration) -> Result<()> {
@@ -103,6 +107,14 @@ async fn sleep_dht_lookup_poll_interval(interval: Duration) -> Result<()> {
         .await
         .map_err(|error| Error::JsError(format!("{error:?}")))?;
     Ok(())
+}
+
+fn registration_attempt_timeout(interval: Duration) -> Duration {
+    if interval.is_zero() || interval > MAX_REGISTRATION_ATTEMPT_TIMEOUT {
+        MAX_REGISTRATION_ATTEMPT_TIMEOUT
+    } else {
+        interval
+    }
 }
 
 /// Processor for rings-node rpc server.
@@ -323,9 +335,32 @@ impl Processor {
         directory::build_onion_proxy_route(self, proxy, target).await
     }
 
+    async fn run_registration_once_with_timeout(
+        &self,
+        task: &dyn RegistrationTask,
+        timeout: Duration,
+    ) -> Result<()> {
+        let context = self.registration_context();
+        let registration = task.register_once(&context).fuse();
+        let timeout_timer = sleep_registration_interval(timeout).fuse();
+        futures::pin_mut!(registration, timeout_timer);
+
+        match select(registration, timeout_timer).await {
+            Either::Left((result, _)) => result,
+            Either::Right((timer_result, _)) => {
+                timer_result?;
+                Err(Error::RegistrationTimeout {
+                    task: task.name(),
+                    timeout,
+                })
+            }
+        }
+    }
+
     async fn registration_task_daemon(&self, task: &dyn RegistrationTask) {
         loop {
-            if let Err(error) = task.register_once(&self.registration_context()).await {
+            let timeout = registration_attempt_timeout(task.interval());
+            if let Err(error) = self.run_registration_once_with_timeout(task, timeout).await {
                 tracing::warn!("Failed to run {} registration task: {error:?}", task.name());
             }
             if let Err(error) = sleep_registration_interval(task.interval()).await {

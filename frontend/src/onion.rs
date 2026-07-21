@@ -278,7 +278,12 @@ pub(crate) async fn route(
     let target_authority = target_authority(&request.url)?;
     let proxy = provider
         .onion_https_proxy(request.options.hop_count, request.options.allow_short_paths)
-        .map_err(|error| format!("create onion proxy failed: {error:?}"))?;
+        .map_err(|error| {
+            format!(
+                "create onion proxy failed: {}",
+                js_error_label(error.into())
+            )
+        })?;
     let value = JsFuture::from(proxy.route(target_authority))
         .await
         .map_err(|error| format!("build onion route failed: {}", js_error_label(error)))?;
@@ -293,7 +298,12 @@ pub(crate) async fn request(
     target_authority(&request.url)?;
     let proxy = provider
         .onion_https_proxy(request.options.hop_count, request.options.allow_short_paths)
-        .map_err(|error| format!("create onion proxy failed: {error:?}"))?;
+        .map_err(|error| {
+            format!(
+                "create onion proxy failed: {}",
+                js_error_label(error.into())
+            )
+        })?;
     let value = JsFuture::from(proxy.request(request.url.clone(), request.client_request_js()?))
         .await
         .map_err(|error| format!("onion proxy request failed: {}", js_error_label(error)))?;

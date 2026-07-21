@@ -18,6 +18,19 @@ self.addEventListener("activate", (event) => {
 self.addEventListener("message", (event) => {
   const clientId = event.source?.id;
   const reply = event.ports?.[0];
+  if (event.data?.type === "rings-webview-debug-entry" && event.data.entry) {
+    const entry = event.data.entry;
+    void emitDebug(
+      entry.scope || "host",
+      entry.message || "unknown event",
+      entry.level || "info",
+      entry.resource,
+      entry.at,
+      entry.onion,
+    );
+    reply?.postMessage({ ok: true });
+    return;
+  }
   if (event.data?.type === "rings-webview-host-register" && typeof clientId === "string" && clientId) {
     updateGatewayHost(clientId);
     void emitDebug("worker", "Updated local Rings node gateway host");
@@ -69,7 +82,12 @@ async function handleGatewayFetch(event) {
       "error",
       503,
     );
-    return gatewayFailure(503, "Start a local Rings node before opening WebView.");
+    return gatewayFailure(
+      503,
+      "Start a local Rings node before opening WebView.",
+      "Local Rings node gateway is unavailable.",
+      "local_gateway_unavailable",
+    );
   }
   await emitResourceDebug(
     requestId,
@@ -90,7 +108,12 @@ async function handleGatewayFetch(event) {
       "error",
       status,
     );
-    return gatewayFailure(response?.status || 502, response?.error || "gateway request failed");
+    return gatewayFailure(
+      response?.status || 502,
+      response?.error || "gateway request failed",
+      response?.errorSummary,
+      response?.errorCode,
+    );
   }
   try {
     const headers = new Headers();
@@ -120,7 +143,12 @@ async function handleGatewayFetch(event) {
       "error",
       502,
     );
-    return gatewayFailure(502, `invalid gateway response: ${String(error)}`);
+    return gatewayFailure(
+      502,
+      `invalid gateway response: ${String(error)}`,
+      "The local gateway returned an invalid response.",
+      "invalid_gateway_response",
+    );
   }
 }
 
@@ -143,16 +171,19 @@ async function emitResourceDebug(requestId, request, startedAt, phase, message, 
   await emitDebug("worker", message, level, resource);
 }
 
-async function emitDebug(scope, message, level = "info", resource = undefined) {
+async function emitDebug(scope, message, level = "info", resource = undefined, at = undefined, onion = undefined) {
   const entry = {
     type: "rings-webview-debug",
-    at: new Date().toISOString(),
+    at: at || new Date().toISOString(),
     scope,
     message,
     level,
   };
   if (resource) {
     entry.resource = resource;
+  }
+  if (onion) {
+    entry.onion = onion;
   }
   debugHistory.push(entry);
   if (debugHistory.length > 200) {
@@ -342,8 +373,13 @@ function requestGatewayResponse(host, request) {
   });
 }
 
-function gatewayFailure(status, message) {
-  return new Response(gatewayFailureDocument(status, message), {
+function gatewayFailure(status, message, summary = undefined, code = undefined) {
+  return new Response(gatewayFailureDocument(
+    status,
+    gatewayFailureSummary(message),
+    gatewayFailureReason(status, message, summary),
+    code || gatewayFailureCode(status),
+  ), {
     status,
     headers: {
       "content-type": "text/html; charset=utf-8",
@@ -353,70 +389,89 @@ function gatewayFailure(status, message) {
   });
 }
 
-function gatewayFailureDocument(status, message) {
-  const detail = JSON.stringify(String(message)).replace(/</g, "\\u003c");
+function gatewayFailureSummary(message) {
+  let text = String(message || "gateway request failed").trim();
+  text = text.replace(
+    /^gateway transport:\s+gateway transport failed:/,
+    "gateway transport failed:",
+  );
+  text = text.replace(
+    /JsValue\(Error: ([^\n)]*)[\s\S]*\)/,
+    "Error: $1",
+  );
+  const firstLine = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean);
+  return firstLine || "gateway request failed";
+}
+
+function gatewayFailureReason(status, message, summary) {
+  const cleanSummary = String(summary || "").trim();
+  if (cleanSummary) return cleanSummary;
+  const detail = gatewayFailureSummary(message);
+  if (status === 503 && detail.includes("no live onion exit offers service \"https\"")) {
+    return "No live HTTPS onion exit is available.";
+  }
+  if (status === 503 && detail.includes("no live onion exit")) {
+    return "No live onion exit is available for this request.";
+  }
+  if (status === 503 && detail.includes("Start a local Rings node")) {
+    return "Local Rings node gateway is unavailable.";
+  }
+  if (status === 502) return "Gateway transport failed.";
+  return "Gateway request failed.";
+}
+
+function gatewayFailureCode(status) {
+  if (status === 400) return "invalid_webview_request";
+  if (status === 403) return "webview_request_rejected";
+  if (status === 404) return "controlled_asset_not_found";
+  if (status === 502) return "gateway_transport_failed";
+  if (status === 503) return "gateway_unavailable";
+  return "gateway_request_failed";
+}
+
+function gatewayFailureDocument(status, message, reason, code) {
+  const detail = escapeHtml(message);
+  const summary = escapeHtml(reason);
+  const reasonCode = escapeHtml(code);
+  const statusText = escapeHtml(status);
   return `<!doctype html>
+<html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Rings gateway failure ${status}</title>
+<title>Rings gateway failure ${statusText}</title>
 <style>
-  body { margin: 0; background: #fffaf0; color: #111827; font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
-  main { max-width: 900px; margin: 48px auto; padding: 0 20px; }
-  h1 { margin: 0 0 12px; font-size: 22px; }
-  pre { margin: 0; padding: 14px; border: 1px solid #d9c5a6; border-radius: 5px; background: #fffdf8; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
-  #debug { margin-top: 16px; border: 1px solid #d9c5a6; border-radius: 5px; overflow: hidden; }
-  #debug summary { padding: 9px 12px; cursor: pointer; font-weight: 700; }
-  #events { max-height: 320px; margin: 0; padding: 10px 12px; border-top: 1px solid #d9c5a6; overflow: auto; background: #111827; color: #f8fafc; white-space: pre-wrap; overflow-wrap: anywhere; }
-  #events p { margin: 0 0 6px; }
-  #events p.error { color: #fca5a5; }
-  #controls { position: fixed; right: 16px; bottom: 16px; display: flex; gap: 5px; }
-  #controls button { display: grid; width: 36px; height: 36px; padding: 0; place-items: center; border: 1px solid #1d2939; border-radius: 5px; background: #111827; color: #fffaf0; font: 700 16px/1 ui-monospace, SFMono-Regular, Menlo, monospace; cursor: pointer; }
-  #controls button:last-child { width: auto; min-width: 68px; padding: 0 10px; font-size: 12px; }
+  body { margin: 0; min-height: 100vh; background: #fffaf0; color: #111827; font: 14px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+  main { min-height: 100vh; box-sizing: border-box; display: grid; place-items: center; padding: 24px; }
+  [data-rings-webview-failure] { width: min(760px, 100%); }
+  h1 { margin: 0 0 8px; font-size: 20px; line-height: 1.2; }
+  p { margin: 0; color: #6b5f50; }
+  code { display: inline-block; margin-right: 8px; padding: 2px 6px; border: 1px solid #d9c5a6; border-radius: 4px; background: #fffdf8; color: #374151; font-weight: 800; }
 </style>
+<body>
 <main>
-  <h1>Rings gateway failure ${status}</h1>
-  <pre id="failure"></pre>
-  <details id="debug"><summary>Gateway events</summary><div id="events" role="log" aria-live="polite"></div></details>
+  <section
+    data-rings-webview-failure="true"
+    data-rings-webview-failure-status="${statusText}"
+    data-rings-webview-failure-code="${reasonCode}"
+    data-rings-webview-failure-summary="${summary}"
+    data-rings-webview-failure-detail="${detail}"
+  >
+    <h1>Rings gateway failure ${statusText}</h1>
+    <p><code>${reasonCode}</code>${summary}</p>
+  </section>
 </main>
-<div id="controls" role="toolbar" aria-label="WebView navigation">
-  <button id="back" type="button" aria-label="Back" title="Back">&lt;</button>
-  <button id="forward" type="button" aria-label="Forward" title="Forward">&gt;</button>
-  <button id="reload" type="button" aria-label="Reload" title="Reload">&#x21bb;</button>
-  <button id="debug-toggle" type="button" aria-expanded="false">Debug</button>
-</div>
-<script>
-(() => {
-  const detail = ${detail};
-  const failure = document.getElementById("failure");
-  const events = document.getElementById("events");
-  const debug = document.getElementById("debug");
-  const debugToggle = document.getElementById("debug-toggle");
-  failure.textContent = detail;
-  function append(entry) {
-    const row = document.createElement("p");
-    row.className = entry.level === "error" ? "error" : "";
-    const resource = entry.resource;
-    const progress = resource
-      ? " #" + resource.requestId + " " + (resource.status == null ? "pending" : resource.status) + " " + resource.kind + " " + resource.method + " " + resource.phase + " " + resource.target + " " + resource.durationMs + " ms"
-      : "";
-    row.textContent = "[" + (entry.scope || "worker") + "] " + (entry.message || "unknown event") + progress;
-    events.append(row);
-    events.scrollTop = events.scrollHeight;
-  }
-  document.getElementById("back").addEventListener("click", () => history.back());
-  document.getElementById("forward").addEventListener("click", () => history.forward());
-  document.getElementById("reload").addEventListener("click", () => location.reload());
-  debugToggle.addEventListener("click", () => {
-    debug.open = !debug.open;
-    debugToggle.setAttribute("aria-expanded", String(debug.open));
-  });
-  navigator.serviceWorker?.addEventListener("message", (event) => {
-    if (event.data?.type === "rings-webview-debug") append(event.data);
-  });
-  navigator.serviceWorker?.ready.then((registration) => {
-    const worker = navigator.serviceWorker.controller || registration.active;
-    worker?.postMessage({ type: "rings-webview-debug-register" });
-  }).catch(() => append({ scope: "overlay", message: "Service Worker debug listener unavailable", level: "error" }));
-})();
-</script>`;
+<script src="/assets/webview-overlay.js"></script>
+</body>
+</html>`;
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }

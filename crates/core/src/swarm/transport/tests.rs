@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use rings_transport::core::callback::TransportCallback;
 
 use super::*;
 use crate::dht::successor::SuccessorReader;
@@ -227,6 +228,58 @@ async fn pending_offer_is_not_routable_or_visible_to_dht() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn local_did_lifecycle_callbacks_are_ignored() -> Result<()> {
+    let transport = Arc::new(transport_with_measure(Arc::new(
+        RecordingMeasure::default(),
+    ))?);
+    let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
+    let local_cid = transport.dht.did.to_string();
+
+    callback
+        .on_data_channel_open(&local_cid)
+        .await
+        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+    callback
+        .on_peer_connection_state_change(&local_cid, WebrtcConnectionState::Closed)
+        .await
+        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+    callback
+        .on_data_channel_close(&local_cid)
+        .await
+        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+
+    assert_eq!(transport.pending_connection_count()?, 0);
+    assert!(transport.get_connection(transport.dht.did).is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn mismatched_pending_callback_cancels_attempt_without_admission() -> Result<()> {
+    let transport = Arc::new(transport_with_measure(Arc::new(
+        RecordingMeasure::default(),
+    ))?);
+    let peer = SecretKey::random().address().into();
+    let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
+    let (attempt, _offer) = transport
+        .prepare_connection_offer_with_attempt(peer, callback)
+        .await?;
+    let mismatched_callback =
+        InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback))
+            .with_pending_connection_attempt(attempt);
+    let local_cid = transport.dht.did.to_string();
+
+    mismatched_callback
+        .on_data_channel_open(&local_cid)
+        .await
+        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+
+    assert_eq!(transport.pending_connection_count()?, 0);
+    assert!(transport.get_connection(peer).is_none());
+    assert!(transport.get_connection(transport.dht.did).is_none());
+    Ok(())
+}
+
 #[test]
 fn connection_offer_protocol_mode_includes_storage_redundancy() -> Result<()> {
     let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
@@ -276,11 +329,14 @@ async fn disconnected_observation_is_once_per_connection_epoch() -> Result<()> {
     transport.record_peer_connected(peer).await;
     transport.record_peer_disconnected(peer).await;
 
-    assert_eq!(measure.snapshot_counters()?.as_slice(), &[
-        (peer, MeasureCounter::Disconnected),
-        (peer, MeasureCounter::Connect),
-        (peer, MeasureCounter::Disconnected),
-    ]);
+    assert_eq!(
+        measure.snapshot_counters()?.as_slice(),
+        &[
+            (peer, MeasureCounter::Disconnected),
+            (peer, MeasureCounter::Connect),
+            (peer, MeasureCounter::Disconnected),
+        ]
+    );
 
     Ok(())
 }

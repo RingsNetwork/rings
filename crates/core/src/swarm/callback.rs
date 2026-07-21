@@ -96,6 +96,14 @@ impl InnerSwarmCallback {
         let Some(attempt) = self.pending_attempt else {
             return Ok(false);
         };
+        if attempt.peer() != did {
+            tracing::warn!(
+                "ignoring data-channel open for {did}; pending attempt belongs to {}",
+                attempt.peer()
+            );
+            self.transport.cancel_pending_connection(attempt).await?;
+            return Ok(false);
+        }
         if !self.transport.promote_pending_connection(attempt)? {
             return Ok(false);
         }
@@ -108,6 +116,37 @@ impl InnerSwarmCallback {
                 state: WebrtcConnectionState::Connected,
             })
             .await?;
+        Ok(true)
+    }
+
+    fn is_local_did_event(&self, did: Did, operation: &str) -> bool {
+        if did != self.transport.dht.did {
+            return false;
+        }
+        tracing::warn!("ignoring {operation} for local DID {did}");
+        true
+    }
+
+    async fn cancel_mismatched_pending_connection(
+        &self,
+        did: Did,
+        operation: &str,
+    ) -> Result<bool, CallbackError> {
+        let Some(attempt) = self.pending_attempt else {
+            return Ok(false);
+        };
+        if attempt.peer() == did {
+            return Ok(false);
+        }
+        tracing::warn!(
+            "ignoring {operation} for {did}; pending attempt belongs to {}",
+            attempt.peer()
+        );
+        if self.transport.cancel_pending_connection(attempt).await? {
+            self.transport
+                .record_peer_disconnected(attempt.peer())
+                .await;
+        }
         Ok(true)
     }
 
@@ -222,6 +261,15 @@ impl TransportCallback for InnerSwarmCallback {
             tracing::warn!("on_peer_connection_state_change parse did failed: {}", cid);
             return Ok(());
         };
+        if self
+            .cancel_mismatched_pending_connection(did, "connection state change")
+            .await?
+        {
+            return Ok(());
+        }
+        if self.is_local_did_event(did, "connection state change") {
+            return Ok(());
+        }
 
         match s {
             // ICE `Connected` is not enough for routing: admission happens only
@@ -275,6 +323,15 @@ impl TransportCallback for InnerSwarmCallback {
             tracing::warn!("on_data_channel_open parse did failed: {}", cid);
             return Ok(());
         };
+        if self
+            .cancel_mismatched_pending_connection(did, "data-channel open")
+            .await?
+        {
+            return Ok(());
+        }
+        if self.is_local_did_event(did, "data-channel open") {
+            return Ok(());
+        }
 
         if !self.admit_pending_connection(did).await? && !self.transport.is_admitted_connection(did)
         {
@@ -288,6 +345,15 @@ impl TransportCallback for InnerSwarmCallback {
             tracing::warn!("on_data_channel_close parse did failed: {}", cid);
             return Ok(());
         };
+        if self
+            .cancel_mismatched_pending_connection(did, "data-channel close")
+            .await?
+        {
+            return Ok(());
+        }
+        if self.is_local_did_event(did, "data-channel close") {
+            return Ok(());
+        }
 
         // The data channel closing is a reliable signal that the peer is gone
         // (e.g. it closed the connection), so tear the connection down now

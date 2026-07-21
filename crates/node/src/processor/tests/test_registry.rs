@@ -1,6 +1,42 @@
 use super::common::*;
 use super::*;
 
+struct HangingRegistration;
+
+#[async_trait]
+impl RegistrationTask for HangingRegistration {
+    fn name(&self) -> &'static str {
+        "hanging-test"
+    }
+
+    fn interval(&self) -> Duration {
+        Duration::from_millis(20)
+    }
+
+    async fn register_once(&self, _context: &RegistrationContext<'_>) -> Result<()> {
+        futures::future::pending().await
+    }
+}
+
+#[tokio::test]
+async fn registration_attempt_timeout_returns_instead_of_hanging() -> Result<()> {
+    let processor = prepare_processor().await;
+    let task = HangingRegistration;
+    let timeout = Duration::from_millis(20);
+    let result = processor
+        .run_registration_once_with_timeout(&task, timeout)
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(Error::RegistrationTimeout {
+            task: "hanging-test",
+            timeout: observed_timeout,
+        }) if observed_timeout == timeout
+    ));
+    Ok(())
+}
+
 #[tokio::test]
 async fn custom_registration_task_publishes_through_shared_dht_sink() -> Result<()> {
     let topic = "custom_registration_task";

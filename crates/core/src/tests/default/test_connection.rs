@@ -1,5 +1,9 @@
+#[cfg(feature = "dummy")]
+use rings_transport::connections::dummy_controlled;
 use rings_transport::core::transport::WebrtcConnectionState;
 
+#[cfg(feature = "dummy")]
+use crate::dht::successor::SuccessorReader;
 use crate::ecc::tests::gen_ordered_keys;
 use crate::ecc::SecretKey;
 use crate::tests::default::assert_no_more_msg;
@@ -112,4 +116,39 @@ async fn test_handshake_on_both_sides(key1: SecretKey, key2: SecretKey, key3: Se
             .webrtc_connection_state(),
         WebrtcConnectionState::Connected,
     )
+}
+
+#[cfg(feature = "dummy")]
+#[tokio::test]
+async fn dummy_mismatched_data_channel_open_does_not_admit_peer() {
+    dummy_controlled::enable(true);
+
+    let keys = gen_ordered_keys(2);
+    let node1 = prepare_node(keys[0]).await;
+    let node2 = prepare_node(keys[1]).await;
+
+    let offer = node1.swarm.create_offer(node2.did()).await.unwrap();
+    assert!(node1.swarm.transport.get_connection(node2.did()).is_none());
+    assert_eq!(node1.swarm.transport.pending_connection_count().unwrap(), 1);
+
+    let answer = node2.swarm.answer_offer(offer).await.unwrap();
+    node1.swarm.accept_answer(answer).await.unwrap();
+
+    assert!(
+        dummy_controlled::deliver_next_data_channel_open_with_cid(node1.did().to_string()).await
+    );
+
+    assert_eq!(node1.swarm.transport.pending_connection_count().unwrap(), 0);
+    assert!(node1.swarm.transport.get_connection(node2.did()).is_none());
+    assert!(node1.swarm.transport.get_connection(node1.did()).is_none());
+    assert!(!node1
+        .dht()
+        .successors()
+        .list()
+        .unwrap()
+        .contains(&node2.did()));
+
+    _ = node1.swarm.disconnect(node2.did()).await;
+    _ = node2.swarm.disconnect(node1.did()).await;
+    dummy_controlled::enable(false);
 }

@@ -2,9 +2,14 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use futures::future::FutureExt;
+use futures::pin_mut;
+use futures::select;
+use futures_timer::Delay;
 use rings_transport::connection_ref::ConnectionRef;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 pub use rings_transport::connections::DummyConnection as ConnectionOwner;
@@ -69,7 +74,8 @@ pub(crate) const STORAGE_LOOKUP_OBSERVATION_CAPACITY: usize = 1024;
 /// Maximum number of peers that may be handshaking before a data channel opens.
 pub(crate) const DEFAULT_PENDING_CONNECTION_CAPACITY: usize = 32;
 
-const PENDING_CONNECTION_TIMEOUT_MS: i64 = 15_000;
+const PENDING_CONNECTION_TIMEOUT_MS: i64 = 180_000;
+const DATA_CHANNEL_OPEN_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Identifies one pending handshake for a peer.
 ///
@@ -80,6 +86,12 @@ const PENDING_CONNECTION_TIMEOUT_MS: i64 = 15_000;
 pub(crate) struct PendingConnectionAttempt {
     peer: Did,
     generation: u64,
+}
+
+impl PendingConnectionAttempt {
+    pub(crate) fn peer(self) -> Did {
+        self.peer
+    }
 }
 
 #[derive(Debug)]
@@ -120,10 +132,13 @@ impl<const MAX_PENDING: usize> PendingPeerPool<MAX_PENDING> {
             peer,
             generation: self.next_generation,
         };
-        self.peers.insert(peer, PendingPeer {
-            generation: attempt.generation,
-            admitted_at_ms: now_ms,
-        });
+        self.peers.insert(
+            peer,
+            PendingPeer {
+                generation: attempt.generation,
+                admitted_at_ms: now_ms,
+            },
+        );
         Ok(attempt)
     }
 
@@ -633,10 +648,13 @@ impl SwarmTransport {
         let now = storage_lookup_observation_now_ms();
         evict_storage_lookup_observations(&mut observations, now);
         reserve_storage_lookup_observation_slot(&mut observations);
-        observations.insert(key, StorageLookupObservation {
-            observed_at_ms: now,
-            misses: BTreeSet::new(),
-        });
+        observations.insert(
+            key,
+            StorageLookupObservation {
+                observed_at_ms: now,
+                misses: BTreeSet::new(),
+            },
+        );
         Ok(())
     }
 
@@ -1028,19 +1046,71 @@ impl SwarmTransport {
     /// See more information about [rings_transport::core::transport::WebrtcConnectionState].
     /// See also method webrtc_wait_for_data_channel_open [rings_transport::core::transport::ConnectionInterface].
     pub async fn get_and_check_connection(&self, peer: Did) -> Option<SwarmConnection> {
+        self.get_and_check_connection_with_timeout(peer, DATA_CHANNEL_OPEN_TIMEOUT)
+            .await
+    }
+
+    pub(crate) async fn get_and_check_connection_with_timeout(
+        &self,
+        peer: Did,
+        wait_timeout: Duration,
+    ) -> Option<SwarmConnection> {
         let conn = self.get_connection(peer)?;
 
-        if let Err(e) = conn.connection.webrtc_wait_for_data_channel_open().await {
+        let initial_state = conn.webrtc_connection_state();
+        tracing::debug!(
+            target: "rings_core::transport::data_channel",
+            local = %self.dht.did,
+            peer = %peer,
+            state = ?initial_state,
+            timeout_ms = wait_timeout.as_millis(),
+            "waiting for active connection data channel"
+        );
+
+        let failure = {
+            let wait_for_open = conn.connection.webrtc_wait_for_data_channel_open().fuse();
+            let timeout = Delay::new(wait_timeout).fuse();
+            pin_mut!(wait_for_open, timeout);
+
+            select! {
+                result = wait_for_open => result.err().map(|e| format!("transport_wait_failed: {e:?}")),
+                _ = timeout => Some("data_channel_open_wait_timeout".to_string()),
+            }
+        };
+
+        if let Some(reason) = failure {
+            let final_state = conn.webrtc_connection_state();
             tracing::warn!(
-                "[get_and_check_connection] connection {peer} data channel not open, will be dropped, reason: {e:?}"
+                target: "rings_core::transport::data_channel",
+                local = %self.dht.did,
+                peer = %peer,
+                initial_state = ?initial_state,
+                final_state = ?final_state,
+                timeout_ms = wait_timeout.as_millis(),
+                reason = %reason,
+                "[get_and_check_connection] connection data channel not open, will be dropped"
             );
 
             if let Err(e) = self.disconnect(peer).await {
-                tracing::error!("Failed on close connection {peer}: {e:?}");
+                tracing::error!(
+                    target: "rings_core::transport::data_channel",
+                    local = %self.dht.did,
+                    peer = %peer,
+                    reason = %reason,
+                    "failed to close connection after data-channel wait failure: {e:?}"
+                );
             }
 
             return None;
         };
+
+        tracing::debug!(
+            target: "rings_core::transport::data_channel",
+            local = %self.dht.did,
+            peer = %peer,
+            state = ?conn.webrtc_connection_state(),
+            "active connection data channel is open"
+        );
 
         Some(conn)
     }

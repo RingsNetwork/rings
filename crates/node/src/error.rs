@@ -144,6 +144,14 @@ pub enum Error {
     /// The node configuration is structurally invalid.
     #[error("Invalid configuration: {0}")]
     InvalidConfig(String) = 812,
+    /// A periodic registration heartbeat did not complete before its deadline.
+    #[error("{task} registration task timed out after {timeout:?}")]
+    RegistrationTimeout {
+        /// Stable task name.
+        task: &'static str,
+        /// Deadline used for this registration attempt.
+        timeout: std::time::Duration,
+    } = 813,
     /// Creating a file on disk failed.
     #[error("Create File Error: {0}")]
     CreateFileError(String) = 900,
