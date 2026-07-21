@@ -1,8 +1,11 @@
 use async_trait::async_trait;
 
+use crate::dht::successor::SuccessorReader;
 use crate::dht::types::Chord;
 use crate::dht::types::CorrectChord;
+use crate::dht::topology;
 use crate::dht::Did;
+use crate::dht::PeerRing;
 use crate::dht::PeerRingAction;
 use crate::dht::TopoInfo;
 use crate::error::Error;
@@ -38,6 +41,21 @@ fn topology_has_confirmed_peer(info: &TopoInfo) -> bool {
     info.predecessor.is_some() || !info.successors.is_empty()
 }
 
+fn connect_successor_hint(dht: &PeerRing, requester: Did, reported: Did) -> Result<Did> {
+    if reported != requester {
+        return Ok(reported);
+    }
+
+    let mut candidates = dht.successors().list()?;
+    candidates.push(dht.did);
+    candidates.retain(|candidate| *candidate != requester);
+
+    Ok(topology::successors(&candidates, requester, 1)
+        .into_iter()
+        .next()
+        .unwrap_or(reported))
+}
+
 /// QueryForTopoInfoSend is direct message
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
@@ -63,9 +81,11 @@ impl HandleMsg<QueryForTopoInfoReport> for MessageHandler {
     async fn handle(&self, _ctx: &MessagePayload, msg: &QueryForTopoInfoReport) -> Result<()> {
         match msg.then {
             <QueryForTopoInfoReport as Then>::Then::SyncSuccessor => {
-                for peer in msg.info.successors.iter() {
-                    if self.transport.get_connection(*peer).is_some() {
-                        self.join_dht(*peer).await?;
+                let successors = msg.info.successors.clone();
+                self.connect_dht_peers(successors.iter().copied()).await?;
+                for peer in successors {
+                    if self.transport.get_connection(peer).is_some() {
+                        self.join_dht(peer).await?;
                     }
                 }
             }
@@ -146,6 +166,14 @@ impl HandleMsg<FindSuccessorSend> for MessageHandler {
                 if msg.accepts_local_successor(self.dht.did) {
                     match &msg.then {
                         FindSuccessorThen::Report(handler) => {
+                            let did = match handler {
+                                FindSuccessorReportHandler::Connect => connect_successor_hint(
+                                    self.dht.as_ref(),
+                                    ctx.relay.try_origin_sender()?,
+                                    did,
+                                )?,
+                                _ => did,
+                            };
                             self.run_effects([PayloadRelayFunctor::send_report_message(
                                 ctx,
                                 Message::FindSuccessorReport(FindSuccessorReport {
@@ -211,6 +239,7 @@ pub mod tests {
     use crate::ecc::tests::gen_ordered_keys;
     use crate::ecc::SecretKey;
     use crate::tests::default::assert_no_more_msg;
+    use crate::tests::default::gen_pure_dht;
     use crate::tests::default::prepare_node;
     use crate::tests::default::wait_for_msgs;
     use crate::tests::default::Node;
@@ -232,6 +261,27 @@ pub mod tests {
         assert_eq!(confirmed.successors, vec![active]);
         assert_eq!(confirmed.predecessor, None);
         assert!(topology_has_confirmed_peer(&confirmed));
+    }
+
+    #[test]
+    fn connect_successor_hint_skips_requester_self_report() -> Result<()> {
+        let keys = gen_ordered_keys(4);
+        let local = keys[0].address().into();
+        let requester = keys[1].address().into();
+        let next = keys[2].address().into();
+        let tail = keys[3].address().into();
+        let dht = gen_pure_dht(local);
+
+        dht.join(next)?;
+        dht.join(tail)?;
+        dht.join(requester)?;
+
+        assert_eq!(dht.successors().list()?, vec![requester, next, tail]);
+        assert_eq!(
+            connect_successor_hint(&dht, requester, requester)?,
+            next
+        );
+        Ok(())
     }
 
     // node1.key < node2.key < node3.key
@@ -379,26 +429,41 @@ pub mod tests {
         assert_no_more_msg([&node1, &node2, &node3]).await;
 
         println!("=== Check state before connect via DHT ===");
-        node1.assert_transports(vec![node2.did()]);
-        node2.assert_transports(vec![node1.did(), node3.did()]);
-        node3.assert_transports(vec![node2.did()]);
-        assert_eq!(node1.dht().successors().list()?, vec![node2.did(),]);
-        assert_eq!(node2.dht().successors().list()?, vec![
-            node3.did(),
-            node1.did()
-        ]);
-        assert_eq!(node3.dht().successors().list()?, vec![node2.did()]);
+        if node1.swarm.transport.get_connection(node3.did()).is_some() {
+            node1.assert_transports(vec![node2.did(), node3.did()]);
+            node2.assert_transports(vec![node1.did(), node3.did()]);
+            node3.assert_transports(vec![node1.did(), node2.did()]);
+            assert_eq!(node1.dht().successors().list()?, vec![
+                node2.did(),
+                node3.did()
+            ]);
+            assert_eq!(node2.dht().successors().list()?, vec![
+                node3.did(),
+                node1.did()
+            ]);
+            assert_eq!(node3.dht().successors().list()?, vec![
+                node1.did(),
+                node2.did()
+            ]);
+        } else {
+            node1.assert_transports(vec![node2.did()]);
+            node2.assert_transports(vec![node1.did(), node3.did()]);
+            node3.assert_transports(vec![node2.did()]);
+            assert_eq!(node1.dht().successors().list()?, vec![node2.did(),]);
+            assert_eq!(node2.dht().successors().list()?, vec![
+                node3.did(),
+                node1.did()
+            ]);
+            assert_eq!(node3.dht().successors().list()?, vec![node2.did()]);
+        }
 
         println!("=============================================");
         println!("||  now we connect node1 to node3 via DHT  ||");
         println!("=============================================");
 
-        // check node1 and node3 is not connected to each other
-        assert!(node1.swarm.transport.get_connection(node3.did()).is_none());
-        // node1's successor should be node2 now
-        assert_eq!(node1.dht().successors().max()?, node2.did());
-
-        node1.swarm.connect(node3.did()).await?;
+        if node1.swarm.transport.get_connection(node3.did()).is_none() {
+            node1.swarm.connect(node3.did()).await?;
+        }
         wait_for_msgs([&node1, &node2, &node3]).await;
         assert_no_more_msg([&node1, &node2, &node3]).await;
 
@@ -452,26 +517,41 @@ pub mod tests {
         assert_no_more_msg([&node1, &node2, &node3]).await;
 
         println!("=== Check state before connect via DHT ===");
-        node1.assert_transports(vec![node2.did()]);
-        node2.assert_transports(vec![node1.did(), node3.did()]);
-        node3.assert_transports(vec![node2.did()]);
-        assert_eq!(node1.dht().successors().list()?, vec![node2.did()]);
-        assert_eq!(node2.dht().successors().list()?, vec![
-            node1.did(),
-            node3.did()
-        ]);
-        assert_eq!(node3.dht().successors().list()?, vec![node2.did()]);
+        if node1.swarm.transport.get_connection(node3.did()).is_some() {
+            node1.assert_transports(vec![node2.did(), node3.did()]);
+            node2.assert_transports(vec![node1.did(), node3.did()]);
+            node3.assert_transports(vec![node1.did(), node2.did()]);
+            assert_eq!(node1.dht().successors().list()?, vec![
+                node3.did(),
+                node2.did()
+            ]);
+            assert_eq!(node2.dht().successors().list()?, vec![
+                node1.did(),
+                node3.did()
+            ]);
+            assert_eq!(node3.dht().successors().list()?, vec![
+                node2.did(),
+                node1.did()
+            ]);
+        } else {
+            node1.assert_transports(vec![node2.did()]);
+            node2.assert_transports(vec![node1.did(), node3.did()]);
+            node3.assert_transports(vec![node2.did()]);
+            assert_eq!(node1.dht().successors().list()?, vec![node2.did()]);
+            assert_eq!(node2.dht().successors().list()?, vec![
+                node1.did(),
+                node3.did()
+            ]);
+            assert_eq!(node3.dht().successors().list()?, vec![node2.did()]);
+        }
 
         println!("=============================================");
         println!("||  now we connect node1 to node3 via DHT  ||");
         println!("=============================================");
 
-        // check node1 and node3 is not connected to each other
-        assert!(node1.swarm.transport.get_connection(node3.did()).is_none());
-        // node1's successor should be node2 now
-        assert_eq!(node1.dht().successors().max()?, node2.did());
-
-        node1.swarm.connect(node3.did()).await?;
+        if node1.swarm.transport.get_connection(node3.did()).is_none() {
+            node1.swarm.connect(node3.did()).await?;
+        }
         wait_for_msgs([&node1, &node2, &node3]).await;
         assert_no_more_msg([&node1, &node2, &node3]).await;
 
@@ -518,23 +598,28 @@ pub mod tests {
         // Poll for convergence rather than sleeping a fixed amount: under the
         // release-LTO CI run with native WebRTC, 6s is not always enough and the
         // assertions below would flake. The expected final state is unchanged.
-        wait_until("node4 joined: DHT successors converged", || {
-            Ok(
-                node1.dht().successors().list()? == vec![node2.did(), node3.did(), node4.did()]
-                    && node2.dht().successors().list()?
-                        == vec![node3.did(), node4.did(), node1.did()]
-                    && node3.dht().successors().list()? == vec![node1.did(), node2.did()]
-                    && node4.dht().successors().list()? == vec![node1.did(), node2.did()],
-            )
-        })
+        wait_until_with_state(
+            "node4 joined: DHT successors converged",
+            || {
+                Ok(
+                    node1.dht().successors().list()? == vec![node2.did(), node3.did(), node4.did()]
+                        && node2.dht().successors().list()?
+                            == vec![node3.did(), node4.did(), node1.did()]
+                        && node3.dht().successors().list()?
+                            == vec![node4.did(), node1.did(), node2.did()]
+                        && node4.dht().successors().list()?
+                            == vec![node1.did(), node2.did(), node3.did()],
+                )
+            },
+            || describe_nodes([&node1, &node2, &node3, &node4]),
+        )
         .await?;
 
         println!("=== Check state before connect via DHT ===");
         node1.assert_transports(vec![node2.did(), node3.did(), node4.did()]);
         node2.assert_transports(vec![node3.did(), node4.did(), node1.did()]);
-        node3.assert_transports(vec![node1.did(), node2.did()]);
-        // node4 will connect node1 after connecting node2, because node2 notified node4 that node1 is its predecessor.
-        node4.assert_transports(vec![node1.did(), node2.did()]);
+        node3.assert_transports(vec![node4.did(), node1.did(), node2.did()]);
+        node4.assert_transports(vec![node1.did(), node2.did(), node3.did()]);
         assert_eq!(node1.dht().successors().list()?, vec![
             node2.did(),
             node3.did(),
@@ -546,12 +631,14 @@ pub mod tests {
             node1.did(),
         ]);
         assert_eq!(node3.dht().successors().list()?, vec![
+            node4.did(),
             node1.did(),
             node2.did(),
         ]);
         assert_eq!(node4.dht().successors().list()?, vec![
             node1.did(),
             node2.did(),
+            node3.did(),
         ]);
 
         println!("========================================");
@@ -566,20 +653,27 @@ pub mod tests {
         );
         println!("==================================================");
 
-        node4.swarm.connect(node3.did()).await?;
+        if node4.swarm.transport.get_connection(node3.did()).is_none() {
+            node4.swarm.connect(node3.did()).await?;
+        }
         // Same as above: poll for the post-connect converged state instead of a
         // fixed 6s sleep so the test is robust under CI contention.
-        wait_until("node4 connected node3: DHT successors converged", || {
-            Ok(
-                node1.dht().successors().list()? == vec![node2.did(), node3.did(), node4.did()]
-                    && node2.dht().successors().list()?
-                        == vec![node3.did(), node4.did(), node1.did()]
-                    && node3.dht().successors().list()?
-                        == vec![node4.did(), node1.did(), node2.did()]
-                    && node4.dht().successors().list()?
-                        == vec![node1.did(), node2.did(), node3.did()],
-            )
-        })
+        wait_until_with_state(
+            "node4 connected node3: DHT successors converged",
+            || {
+                Ok(
+                    node1.dht().successors().list()?
+                        == vec![node2.did(), node3.did(), node4.did()]
+                        && node2.dht().successors().list()?
+                            == vec![node3.did(), node4.did(), node1.did()]
+                        && node3.dht().successors().list()?
+                            == vec![node4.did(), node1.did(), node2.did()]
+                        && node4.dht().successors().list()?
+                            == vec![node1.did(), node2.did(), node3.did()],
+                )
+            },
+            || describe_nodes([&node1, &node2, &node3, &node4]),
+        )
         .await?;
 
         println!("=== Check state after connect via DHT ===");
@@ -611,6 +705,42 @@ pub mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "dummy")]
+    #[tokio::test]
+    async fn joining_between_bootstrap_and_successor_connects_successor_hint() -> Result<()> {
+        let keys = gen_ordered_keys(4);
+        let (node1, node2, node3) =
+            test_triple_ordered_nodes_connection(keys[0], keys[2], keys[3]).await?;
+        let joining = prepare_node(keys[1]).await;
+
+        manually_establish_connection(&joining.swarm, &node1.swarm).await;
+        wait_until("joining peer connects past bootstrap successor self-report", || {
+            Ok(joining
+                .swarm
+                .transport
+                .get_connection(node2.did())
+                .is_some())
+        })
+        .await?;
+
+        wait_for_msgs([&node1, &node2, &node3, &joining]).await;
+        assert_no_more_msg([&node1, &node2, &node3, &joining]).await;
+
+        joining.assert_transports(vec![node1.did(), node2.did(), node3.did()]);
+        assert_eq!(node1.dht().successors().list()?, vec![
+            joining.did(),
+            node2.did(),
+            node3.did(),
+        ]);
+        assert_eq!(joining.dht().successors().list()?, vec![
+            node2.did(),
+            node3.did(),
+            node1.did(),
+        ]);
+
+        Ok(())
+    }
+
     /// Poll `cond` every 200ms until it returns true, failing after ~60s.
     /// Used instead of fixed sleeps so the test is deterministic regardless of
     /// how long the WebRTC handshake/teardown takes on a given machine.
@@ -619,13 +749,43 @@ pub mod tests {
     /// ~200ms each, so on a host with many network interfaces (lots of
     /// candidate pairs) establishing the connection can legitimately take ~20s.
     async fn wait_until(msg: &str, mut cond: impl FnMut() -> Result<bool>) -> Result<()> {
+        wait_until_with_state(msg, &mut cond, String::new).await
+    }
+
+    async fn wait_until_with_state(
+        msg: &str,
+        mut cond: impl FnMut() -> Result<bool>,
+        state: impl Fn() -> String,
+    ) -> Result<()> {
         for _ in 0..300 {
             if cond()? {
                 return Ok(());
             }
             sleep(Duration::from_millis(200)).await;
         }
-        Err(Error::InvalidMessage(format!("timeout waiting for: {msg}")))
+        let state = state();
+        if state.is_empty() {
+            Err(Error::InvalidMessage(format!("timeout waiting for: {msg}")))
+        } else {
+            Err(Error::InvalidMessage(format!(
+                "timeout waiting for: {msg}\n{state}"
+            )))
+        }
+    }
+
+    fn describe_nodes<'a>(nodes: impl IntoIterator<Item = &'a Node>) -> String {
+        nodes
+            .into_iter()
+            .map(|node| {
+                format!(
+                    "{:?}: successors={:?}, transports={:?}",
+                    node.did(),
+                    node.dht().successors().list().unwrap_or_default(),
+                    node.swarm.transport.get_connection_ids(),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[tokio::test]

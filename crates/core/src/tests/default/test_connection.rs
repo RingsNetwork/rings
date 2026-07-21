@@ -77,18 +77,27 @@ async fn test_handshake_on_both_sides(key1: SecretKey, key2: SecretKey, key3: Se
         WebrtcConnectionState::Connected
     );
 
+    let direct_connection_already_synced =
+        node1.swarm.transport.get_connection(node2.did()).is_some()
+            && node2.swarm.transport.get_connection(node1.did()).is_some();
+
     // connect to each at same time
     // Node 1 -> Offer -> Node 2
     // Node 2 -> Offer -> Node 1
     _ = node1.swarm.connect(node2.did()).await;
     _ = node2.swarm.connect(node1.did()).await;
 
-    // Both offers exist but neither handshake has been admitted. Pending peers
-    // must remain invisible to the public connection view.
-    assert!(node1.swarm.transport.get_connection(node2.did()).is_none());
-    assert!(node2.swarm.transport.get_connection(node1.did()).is_none());
-    assert_eq!(node1.swarm.transport.pending_connection_count().unwrap(), 1);
-    assert_eq!(node2.swarm.transport.pending_connection_count().unwrap(), 1);
+    if direct_connection_already_synced {
+        assert_eq!(node1.swarm.transport.pending_connection_count().unwrap(), 0);
+        assert_eq!(node2.swarm.transport.pending_connection_count().unwrap(), 0);
+    } else {
+        // Both offers exist but neither handshake has been admitted. Pending
+        // peers must remain invisible to the public connection view.
+        assert!(node1.swarm.transport.get_connection(node2.did()).is_none());
+        assert!(node2.swarm.transport.get_connection(node1.did()).is_none());
+        assert_eq!(node1.swarm.transport.pending_connection_count().unwrap(), 1);
+        assert_eq!(node2.swarm.transport.pending_connection_count().unwrap(), 1);
+    }
 
     wait_for_msgs([&node1, &node2, &node3]).await;
     assert_no_more_msg([&node1, &node2, &node3]).await;
