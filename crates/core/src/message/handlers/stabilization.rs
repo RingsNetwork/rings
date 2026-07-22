@@ -2,6 +2,7 @@ use async_trait::async_trait;
 
 use crate::dht::Chord;
 use crate::dht::ChordStorageSync;
+use crate::error::Error;
 use crate::error::Result;
 use crate::message::effects::ConnectionFunctor;
 use crate::message::effects::PayloadRelayFunctor;
@@ -18,9 +19,16 @@ use crate::message::MessagePayload;
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<NotifyPredecessorSend> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &NotifyPredecessorSend) -> Result<()> {
-        let predecessor = self.dht.notify(msg.did)?;
+        if ctx.should_forward_from(self.dht.did) {
+            return self
+                .run_effects([PayloadRelayFunctor::forward_payload(ctx, None).into()])
+                .await;
+        }
 
-        if predecessor != ctx.relay.try_origin_sender()? {
+        let origin = self.admitted_notify_predecessor_origin(ctx, msg)?;
+        let predecessor = self.dht.notify(origin)?;
+
+        if predecessor != origin {
             return self
                 .run_effects([PayloadRelayFunctor::send_report_message(
                     ctx,
@@ -31,6 +39,28 @@ impl HandleMsg<NotifyPredecessorSend> for MessageHandler {
         }
 
         Ok(())
+    }
+}
+
+impl MessageHandler {
+    fn admitted_notify_predecessor_origin(
+        &self,
+        ctx: &MessagePayload,
+        msg: &NotifyPredecessorSend,
+    ) -> Result<crate::dht::Did> {
+        let origin = ctx.relay.try_origin_sender()?;
+        if msg.did != origin {
+            return Err(Error::InvalidMessage(format!(
+                "notify predecessor DID {} does not match relay origin {}",
+                msg.did, origin
+            )));
+        }
+        if !self.transport.is_admitted_connection(origin) {
+            return Err(Error::InvalidMessage(format!(
+                "notify predecessor origin {origin} is not an admitted connection"
+            )));
+        }
+        Ok(origin)
     }
 }
 
@@ -90,9 +120,62 @@ mod test {
 
     impl SwarmCallback for NoopCallback {}
 
+    fn notify_context(origin: &SecretKey, destination: crate::dht::Did) -> Result<MessagePayload> {
+        let session = SessionSk::new_with_seckey(origin)?;
+        MessagePayload::new_send(
+            Message::custom(b"notify predecessor context")?,
+            &session,
+            destination,
+            destination,
+        )
+    }
+
     fn next_generated_key(keys: &mut impl Iterator<Item = SecretKey>) -> Result<SecretKey> {
         keys.next()
             .ok_or_else(|| Error::InvalidMessage("expected generated key".to_string()))
+    }
+
+    #[tokio::test]
+    async fn notify_predecessor_rejects_origin_mismatch_without_mutating_topology() -> Result<()> {
+        let node = prepare_node(SecretKey::random()).await;
+        let origin = SecretKey::random();
+        let spoofed = SecretKey::random().address().into();
+        let context = notify_context(&origin, node.did())?;
+        let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+
+        let result = handler
+            .handle(&context, &NotifyPredecessorSend { did: spoofed })
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(Error::InvalidMessage(message))
+                if message.contains("does not match relay origin")
+        ));
+        assert_eq!(*node.dht().lock_predecessor()?, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn notify_predecessor_rejects_unadmitted_origin_without_mutating_topology() -> Result<()>
+    {
+        let node = prepare_node(SecretKey::random()).await;
+        let origin = SecretKey::random();
+        let origin_did = origin.address().into();
+        let context = notify_context(&origin, node.did())?;
+        let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+
+        let result = handler
+            .handle(&context, &NotifyPredecessorSend { did: origin_did })
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(Error::InvalidMessage(message))
+                if message.contains("not an admitted connection")
+        ));
+        assert_eq!(*node.dht().lock_predecessor()?, None);
+        Ok(())
     }
 
     #[tokio::test]

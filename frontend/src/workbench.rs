@@ -142,7 +142,9 @@ async fn build_onion_route(
         if let Some(bridge) = backend.bridge {
             extension::extension_onion_proxy_route(&bridge, request).await
         } else if let Some(node) = backend.node {
-            onion::route(&node.provider, request).await
+            onion::route(&node.provider, request)
+                .await
+                .map_err(|error| error.to_string())
         } else {
             Err("start the node first".to_string())
         }
@@ -289,7 +291,9 @@ async fn send_onion_request(
         if let Some(bridge) = backend.bridge {
             extension::extension_onion_proxy_request(&bridge, request).await
         } else if let Some(node) = backend.node {
-            onion::request(&node.provider, request).await
+            onion::request(&node.provider, request)
+                .await
+                .map_err(|error| error.to_string())
         } else {
             Err("start the node first".to_string())
         }

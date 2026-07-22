@@ -1,9 +1,9 @@
 use async_trait::async_trait;
 
 use crate::dht::successor::SuccessorReader;
+use crate::dht::topology;
 use crate::dht::types::Chord;
 use crate::dht::types::CorrectChord;
-use crate::dht::topology;
 use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::dht::PeerRingAction;
@@ -277,10 +277,7 @@ pub mod tests {
         dht.join(requester)?;
 
         assert_eq!(dht.successors().list()?, vec![requester, next, tail]);
-        assert_eq!(
-            connect_successor_hint(&dht, requester, requester)?,
-            next
-        );
+        assert_eq!(connect_successor_hint(&dht, requester, requester)?, next);
         Ok(())
     }
 
@@ -662,8 +659,7 @@ pub mod tests {
             "node4 connected node3: DHT successors converged",
             || {
                 Ok(
-                    node1.dht().successors().list()?
-                        == vec![node2.did(), node3.did(), node4.did()]
+                    node1.dht().successors().list()? == vec![node2.did(), node3.did(), node4.did()]
                         && node2.dht().successors().list()?
                             == vec![node3.did(), node4.did(), node1.did()]
                         && node3.dht().successors().list()?
@@ -714,13 +710,16 @@ pub mod tests {
         let joining = prepare_node(keys[1]).await;
 
         manually_establish_connection(&joining.swarm, &node1.swarm).await;
-        wait_until("joining peer connects past bootstrap successor self-report", || {
-            Ok(joining
-                .swarm
-                .transport
-                .get_connection(node2.did())
-                .is_some())
-        })
+        wait_until(
+            "joining peer connects past bootstrap successor self-report",
+            || {
+                Ok(joining
+                    .swarm
+                    .transport
+                    .get_connection(node2.did())
+                    .is_some())
+            },
+        )
         .await?;
 
         wait_for_msgs([&node1, &node2, &node3, &joining]).await;

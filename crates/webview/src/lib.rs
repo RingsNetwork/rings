@@ -1,4 +1,4 @@
-#![warn(missing_docs)]
+#![deny(missing_docs)]
 //! Rings webview gateway primitives.
 //!
 //! This crate owns the reusable, UI-independent pieces required to serve remote
@@ -32,12 +32,14 @@ pub mod types;
 /// Target URL encoding and gateway route helpers.
 pub mod url;
 
+/// Browser runtime bootstrap helpers.
 #[cfg(feature = "browser")]
 pub mod browser;
 
 pub use cookie::CookieJar;
 pub use cors::preflight_request;
 pub use cors::validate_response;
+pub use error::GatewayFailure;
 pub use error::Result;
 pub use error::WebviewError;
 pub use header::HeaderPolicy;

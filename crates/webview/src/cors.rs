@@ -209,9 +209,10 @@ fn header_has_token(response: &GatewayResponse, name: &str, expected: &str) -> b
 
 #[cfg(test)]
 mod tests {
+    use url::Url;
+
     use super::*;
     use crate::types::GatewayRequestKind;
-    use url::Url;
 
     fn request(credentials: GatewayCredentials) -> Result<GatewayRequest> {
         Ok(GatewayRequest::new(

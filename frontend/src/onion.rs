@@ -1,5 +1,6 @@
 //! Onion proxy helpers for the browser frontend.
 
+use std::fmt;
 use std::sync::Arc;
 
 use js_sys::Array;
@@ -72,6 +73,69 @@ pub(crate) struct OnionProxyResponse {
     pub(crate) headers: Vec<(String, String)>,
     /// Exact response body bytes returned by the onion exit.
     pub(crate) body: Vec<u8>,
+}
+
+/// Stable class for onion proxy failures that cross the JS promise boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OnionProxyFailureKind {
+    /// The proxy failed before selecting a more specific route state.
+    Generic,
+    /// The route builder found no live exit for the requested HTTPS service.
+    ExitUnavailable,
+    /// The route builder found exits or relays, but no usable route.
+    RouteUnavailable,
+    /// The selected onion request did not complete before its deadline.
+    RequestTimedOut,
+}
+
+/// Onion proxy error with a stable failure class and a diagnostic message.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OnionProxyError {
+    kind: OnionProxyFailureKind,
+    message: String,
+}
+
+impl OnionProxyError {
+    /// Build a generic onion proxy error.
+    pub(crate) fn generic(message: impl Into<String>) -> Self {
+        Self {
+            kind: OnionProxyFailureKind::Generic,
+            message: message.into(),
+        }
+    }
+
+    /// Build an onion proxy error whose kind is derived once at the JS boundary.
+    pub(crate) fn classified(message: impl Into<String>) -> Self {
+        let message = message.into();
+        Self {
+            kind: classify_onion_proxy_failure(&message),
+            message,
+        }
+    }
+
+    /// Stable class for browser-facing failure handling.
+    pub(crate) fn kind(&self) -> OnionProxyFailureKind {
+        self.kind
+    }
+
+    /// Diagnostic message for logs and UI text.
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for OnionProxyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for OnionProxyError {}
+
+impl From<String> for OnionProxyError {
+    fn from(message: String) -> Self {
+        Self::generic(message)
+    }
 }
 
 impl Default for OnionProxyOptions {
@@ -274,40 +338,71 @@ pub(crate) fn format_headers(headers: &[(String, String)]) -> String {
 pub(crate) async fn route(
     provider: &Arc<Provider>,
     request: OnionProxyRouteRequest,
-) -> Result<OnionProxyRoute, String> {
+) -> Result<OnionProxyRoute, OnionProxyError> {
     let target_authority = target_authority(&request.url)?;
     let proxy = provider
         .onion_https_proxy(request.options.hop_count, request.options.allow_short_paths)
         .map_err(|error| {
-            format!(
+            OnionProxyError::generic(format!(
                 "create onion proxy failed: {}",
                 js_error_label(error.into())
-            )
+            ))
         })?;
     let value = JsFuture::from(proxy.route(target_authority))
         .await
-        .map_err(|error| format!("build onion route failed: {}", js_error_label(error)))?;
-    OnionProxyRoute::from_js(&value)
+        .map_err(|error| {
+            OnionProxyError::classified(format!(
+                "build onion route failed: {}",
+                js_error_label(error)
+            ))
+        })?;
+    OnionProxyRoute::from_js(&value).map_err(OnionProxyError::generic)
 }
 
 /// Send one HTTPS request through an onion proxy.
 pub(crate) async fn request(
     provider: &Arc<Provider>,
     request: OnionProxyHttpRequest,
-) -> Result<OnionProxyResponse, String> {
+) -> Result<OnionProxyResponse, OnionProxyError> {
     target_authority(&request.url)?;
     let proxy = provider
         .onion_https_proxy(request.options.hop_count, request.options.allow_short_paths)
         .map_err(|error| {
-            format!(
+            OnionProxyError::generic(format!(
                 "create onion proxy failed: {}",
                 js_error_label(error.into())
-            )
+            ))
         })?;
     let value = JsFuture::from(proxy.request(request.url.clone(), request.client_request_js()?))
         .await
-        .map_err(|error| format!("onion proxy request failed: {}", js_error_label(error)))?;
-    OnionProxyResponse::from_js(&value)
+        .map_err(|error| {
+            OnionProxyError::classified(format!(
+                "onion proxy request failed: {}",
+                js_error_label(error)
+            ))
+        })?;
+    OnionProxyResponse::from_js(&value).map_err(OnionProxyError::generic)
+}
+
+fn classify_onion_proxy_failure(message: &str) -> OnionProxyFailureKind {
+    if message.contains("no live onion exit offers service \"https\"") {
+        OnionProxyFailureKind::ExitUnavailable
+    } else if [
+        "no live onion exit",
+        "not enough relay candidates",
+        "no onion route has a permitted first hop",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle))
+    {
+        OnionProxyFailureKind::RouteUnavailable
+    } else if message.contains("onion HTTPS proxy request timed out")
+        || message.contains("browser HTTPS proxy request timed out")
+    {
+        OnionProxyFailureKind::RequestTimedOut
+    } else {
+        OnionProxyFailureKind::Generic
+    }
 }
 
 fn target_authority(url: &str) -> Result<String, String> {

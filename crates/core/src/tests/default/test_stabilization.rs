@@ -2,6 +2,12 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use rings_transport::connections::dummy_controlled;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use tokio::time::timeout;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use tokio::time::Duration;
 
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
@@ -27,12 +33,6 @@ use crate::tests::default::wait_for_predecessor;
 use crate::tests::default::wait_for_successor;
 use crate::tests::default::Node;
 use crate::tests::manually_establish_connection;
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-use rings_transport::connections::dummy_controlled;
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-use tokio::time::timeout;
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-use tokio::time::Duration;
 
 #[derive(Default)]
 struct CountingMeasure {

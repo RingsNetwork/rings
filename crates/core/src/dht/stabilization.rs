@@ -149,9 +149,7 @@ impl Stabilizer {
     }
 
     async fn run_step<F>(&self, step: &'static str, timeout: Duration, future: F)
-    where
-        F: Future<Output = Result<()>>,
-    {
+    where F: Future<Output = Result<()>> {
         tracing::debug!(
             target: "rings_core::dht::stabilization",
             local = %self.dht.did,
@@ -415,9 +413,7 @@ impl Stabilizer {
                 .evidence
                 .reaches_failure_limit(DHT_TOPOLOGY_EVICTION_THRESHOLDS)
             {
-                return Some(TopologyPeerRemovalReason::LocalFailureLimit(
-                    measurement,
-                ));
+                return Some(TopologyPeerRemovalReason::LocalFailureLimit(measurement));
             }
         }
 

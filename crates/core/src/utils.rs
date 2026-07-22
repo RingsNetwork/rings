@@ -20,10 +20,7 @@ pub fn get_epoch_ms() -> u128 {
 }
 
 pub(crate) fn get_epoch_ms_i64() -> i64 {
-    match i64::try_from(get_epoch_ms()) {
-        Ok(value) => value,
-        Err(_) => i64::MAX,
-    }
+    i64::try_from(get_epoch_ms()).unwrap_or(i64::MAX)
 }
 
 #[cfg(all(feature = "wasm", target_family = "wasm"))]

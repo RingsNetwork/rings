@@ -15,6 +15,7 @@ use js_sys::Uint8Array;
 use rings_node::provider::Provider;
 use rings_webview::browser::bootstrap_script;
 use rings_webview::ConcurrentWebviewGateway;
+use rings_webview::GatewayFailure;
 use rings_webview::GatewayCredentials;
 use rings_webview::GatewayHeader;
 use rings_webview::GatewayPrefix;
@@ -277,8 +278,8 @@ fn browser_failure(status: u16, error: String) -> JsValue {
 
 fn browser_failure_with(
     status: u16,
-    code: &'static str,
-    summary: &'static str,
+    code: &str,
+    summary: &str,
     error: String,
 ) -> JsValue {
     let value = Object::new();
@@ -292,17 +293,26 @@ fn browser_failure_with(
 }
 
 fn browser_transport_failure(error: WebviewError) -> JsValue {
-    let (failure, message) = match error {
-        WebviewError::Transport(message) => (
-            classify_transport_failure(&message),
+    match error {
+        WebviewError::GatewayFailure(failure) => browser_failure_with(
+            failure.status(),
+            failure.code(),
+            failure.summary(),
+            failure.detail().to_string(),
+        ),
+        WebviewError::Transport(message) => browser_failure_with(
+            BrowserFailureKind::GatewayTransport.status(),
+            BrowserFailureKind::GatewayTransport.code(),
+            BrowserFailureKind::GatewayTransport.summary(),
             format!("gateway transport failed: {message}"),
         ),
-        other => (
-            BrowserFailureKind::GatewayTransport,
+        other => browser_failure_with(
+            BrowserFailureKind::GatewayTransport.status(),
+            BrowserFailureKind::GatewayTransport.code(),
+            BrowserFailureKind::GatewayTransport.summary(),
             format!("gateway transport failed: {other}"),
         ),
-    };
-    browser_failure_with(failure.status(), failure.code(), failure.summary(), message)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -310,6 +320,7 @@ enum BrowserFailureKind {
     GatewayTransport,
     OnionExitUnavailable,
     OnionRouteUnavailable,
+    OnionRequestTimedOut,
 }
 
 impl BrowserFailureKind {
@@ -317,6 +328,7 @@ impl BrowserFailureKind {
         match self {
             Self::GatewayTransport => 502,
             Self::OnionExitUnavailable | Self::OnionRouteUnavailable => 503,
+            Self::OnionRequestTimedOut => 504,
         }
     }
 
@@ -325,6 +337,7 @@ impl BrowserFailureKind {
             Self::GatewayTransport => "gateway_transport_failed",
             Self::OnionExitUnavailable => "onion_exit_unavailable",
             Self::OnionRouteUnavailable => "onion_route_unavailable",
+            Self::OnionRequestTimedOut => "onion_request_timed_out",
         }
     }
 
@@ -335,25 +348,24 @@ impl BrowserFailureKind {
             Self::OnionRouteUnavailable => {
                 "No onion route is currently available for the requested target."
             }
+            Self::OnionRequestTimedOut => "Onion HTTPS proxy request timed out.",
         }
     }
 }
 
-fn classify_transport_failure(message: &str) -> BrowserFailureKind {
-    if message.contains("no live onion exit offers service \"https\"") {
-        BrowserFailureKind::OnionExitUnavailable
-    } else if [
-        "no live onion exit",
-        "not enough relay candidates",
-        "no onion route has a permitted first hop",
-    ]
-    .iter()
-    .any(|needle| message.contains(needle))
-    {
-        BrowserFailureKind::OnionRouteUnavailable
-    } else {
-        BrowserFailureKind::GatewayTransport
-    }
+fn onion_gateway_failure(error: onion::OnionProxyError) -> WebviewError {
+    let failure = match error.kind() {
+        onion::OnionProxyFailureKind::Generic => BrowserFailureKind::GatewayTransport,
+        onion::OnionProxyFailureKind::ExitUnavailable => BrowserFailureKind::OnionExitUnavailable,
+        onion::OnionProxyFailureKind::RouteUnavailable => BrowserFailureKind::OnionRouteUnavailable,
+        onion::OnionProxyFailureKind::RequestTimedOut => BrowserFailureKind::OnionRequestTimedOut,
+    };
+    WebviewError::GatewayFailure(GatewayFailure::new(
+        failure.status(),
+        failure.code(),
+        failure.summary(),
+        format!("gateway transport failed: {}", error.message()),
+    ))
 }
 
 fn default_failure_code(status: u16) -> &'static str {
@@ -701,7 +713,7 @@ impl GatewayTransport for OnionGatewayTransport {
             options,
         })
         .await
-        .map_err(WebviewError::Transport)?;
+        .map_err(onion_gateway_failure)?;
         let headers = response
             .headers
             .into_iter()
@@ -742,12 +754,12 @@ async fn trace_onion_route(
             duration,
         ),
         Err(error) => emit_onion_debug(
-            error.as_str(),
+            error.message(),
             "error",
             target,
             kind,
             None,
-            Some(error.as_str()),
+            Some(error.message()),
             duration,
         ),
     }
@@ -822,195 +834,7 @@ fn is_http_origin(origin: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::cell::RefCell;
-    use std::rc::Rc;
-
-    use wasm_bindgen_test::wasm_bindgen_test;
-
-    use super::*;
-
-    type RecordedRequests = Rc<RefCell<Vec<GatewayRequest>>>;
-    type FixtureHost = WebviewGatewayHost<FixtureTransport>;
-
-    struct FixtureTransport {
-        requests: RecordedRequests,
-    }
-
-    impl FixtureTransport {
-        fn new(requests: RecordedRequests) -> Self {
-            Self { requests }
-        }
-    }
-
-    #[async_trait(?Send)]
-    impl GatewayTransport for FixtureTransport {
-        async fn send(&self, request: GatewayRequest) -> WebviewResult<GatewayResponse> {
-            self.requests.borrow_mut().push(request);
-            let request =
-                self.requests.borrow().last().cloned().ok_or_else(|| {
-                    WebviewError::Transport("missing fixture request".to_string())
-                })?;
-            let mut headers = vec![GatewayHeader::new("content-type", "text/html")?];
-            if let Some(source) = request.source_origin {
-                headers.push(GatewayHeader::new(
-                    "access-control-allow-origin",
-                    source.origin().ascii_serialization(),
-                )?);
-            }
-            GatewayResponse::new(200, headers, b"<img src=\"/asset.png\">".to_vec())
-        }
-    }
-
-    fn fixture_host() -> WebviewResult<(FixtureHost, RecordedRequests)> {
-        let prefix = GatewayPrefix::new(GATEWAY_PREFIX)?;
-        let policy = GatewayRoutePolicy::new(
-            TargetUrl::parse("https://frontend.rings.test/")?.into_url(),
-            prefix.clone(),
-        )?;
-        let requests = Rc::new(RefCell::new(Vec::new()));
-        let host = WebviewGatewayHost {
-            policy,
-            gateway: ConcurrentWebviewGateway::new(prefix, FixtureTransport::new(requests.clone()))
-                .with_target_bootstrap(webview_bootstrap),
-            limiter: GatewayRequestLimiter::new(MAX_CONCURRENT_GATEWAY_REQUESTS),
-        };
-        Ok((host, requests))
-    }
-
-    #[wasm_bindgen_test]
-    fn browser_request_allows_source_free_subresources() -> WebviewResult<()> {
-        let value = Object::new();
-        crate::browser_api::js_set(
-            &value,
-            "requested",
-            &JsValue::from_str("https://static.example.test/site.css"),
-        )
-        .map_err(WebviewError::Browser)?;
-        crate::browser_api::js_set(&value, "method", &JsValue::from_str("GET"))
-            .map_err(WebviewError::Browser)?;
-        crate::browser_api::js_set(&value, "kind", &JsValue::from_str("subresource"))
-            .map_err(WebviewError::Browser)?;
-
-        let request = browser_host_request(&value.into()).map_err(WebviewError::Browser)?;
-
-        assert_eq!(request.kind, GatewayRequestKind::Subresource);
-        assert!(request.source_target.is_none());
-        Ok(())
-    }
-
-    #[wasm_bindgen_test]
-    fn host_redirects_then_serves_a_gateway_document_through_its_transport() -> WebviewResult<()> {
-        let (host, requests) = fixture_host()?;
-        let target = TargetUrl::parse("https://example.test/docs/index.html")?;
-        let headers = vec![GatewayHeader::new("accept", "text/html")?];
-        let body = vec![0x00, 0xff];
-        let redirect =
-            futures::executor::block_on(host.handle(WebviewHostRequest::navigation_with_payload(
-                target.clone(),
-                "POST",
-                headers.clone(),
-                body.clone(),
-            )))?;
-        let WebviewHostOutcome::Redirect(gateway_url) = redirect else {
-            return Err(WebviewError::Transport(
-                "navigation did not redirect to gateway".to_string(),
-            ));
-        };
-
-        let response =
-            futures::executor::block_on(host.handle(WebviewHostRequest::navigation_with_payload(
-                TargetUrl::parse(gateway_url.as_str())?,
-                "POST",
-                headers,
-                body,
-            )))?;
-        let WebviewHostOutcome::Response(response) = response else {
-            return Err(WebviewError::Transport(
-                "gateway document was not served".to_string(),
-            ));
-        };
-        let body = String::from_utf8(response.body)
-            .map_err(|error| WebviewError::Transport(error.to_string()))?;
-
-        assert!(body.contains("data-rings-webview-bootstrap"));
-        assert!(body.contains("/webview/https%3A%2F%2Fexample%2Etest%2Fasset%2Epng"));
-        assert_eq!(requests.borrow().len(), 1);
-        let sent_request = requests
-            .borrow()
-            .first()
-            .cloned()
-            .ok_or_else(|| WebviewError::Transport("missing gateway request".to_string()))?;
-        assert_eq!(sent_request.target.as_str(), target.as_url().as_str());
-        assert_eq!(sent_request.method, "POST");
-        assert_eq!(sent_request.body, vec![0x00, 0xff]);
-        assert_eq!(sent_request.headers, vec![GatewayHeader::new(
-            "accept",
-            "text/html"
-        )?]);
-        Ok(())
-    }
-
-    #[wasm_bindgen_test]
-    fn host_serves_cross_target_runtime_reads_when_upstream_allows_cors() -> WebviewResult<()> {
-        let (host, requests) = fixture_host()?;
-        let source = TargetUrl::parse("https://app.example.test/index.html")?;
-        let target = TargetUrl::parse("https://bank.example.test/account")?;
-
-        let outcome = futures::executor::block_on(host.handle(WebviewHostRequest::fetch(
-            target,
-            source.clone(),
-            "GET",
-            Vec::new(),
-            Vec::new(),
-        )))?;
-
-        assert!(matches!(outcome, WebviewHostOutcome::Response(_)));
-        let request =
-            requests.borrow().first().cloned().ok_or_else(|| {
-                WebviewError::Transport("missing cross-origin request".to_string())
-            })?;
-        assert_eq!(request.source_origin.as_ref(), Some(source.as_url()));
-        Ok(())
-    }
-
-    #[wasm_bindgen_test]
-    fn onion_route_unavailable_is_reported_without_wasm_stack() -> WebviewResult<()> {
-        let response = browser_transport_failure(WebviewError::Transport(
-            "onion proxy request failed: Onion route error: no live onion exit offers service \"https\""
-                .to_string(),
-        ));
-
-        let status = crate::browser_api::js_prop(&response, "status")
-            .map_err(WebviewError::Browser)?
-            .as_f64()
-            .ok_or_else(|| WebviewError::Browser("failure status was not numeric".to_string()))?;
-        let error = crate::browser_api::js_string_field(&response, "error")
-            .map_err(WebviewError::Browser)?;
-        let code = crate::browser_api::js_string_field(&response, "errorCode")
-            .map_err(WebviewError::Browser)?;
-        let summary = crate::browser_api::js_string_field(&response, "errorSummary")
-            .map_err(WebviewError::Browser)?;
-
-        assert_eq!(status, 503.0);
-        assert_eq!(code, "onion_exit_unavailable");
-        assert_eq!(summary, "No live HTTPS onion exit is available.");
-        assert_eq!(
-            error,
-            "gateway transport failed: onion proxy request failed: Onion route error: no live onion exit offers service \"https\""
-        );
-        assert!(!error.contains("wasm-function"));
-        Ok(())
-    }
-
-    #[wasm_bindgen_test]
-    fn http_origin_predicate_excludes_extension_and_file_hosts() {
-        assert!(is_http_origin("https://frontend.rings.test"));
-        assert!(is_http_origin("http://127.0.0.1:8080"));
-        assert!(!is_http_origin("chrome-extension://rings"));
-        assert!(!is_http_origin("null"));
-    }
-}
+mod tests;
 
 #[cfg(all(test, target_arch = "wasm32"))]
 mod onion_browser_tests;

@@ -572,7 +572,9 @@ async fn route_headless_onion_proxy(
 ) -> Result<JsValue, String> {
     let handle = headless_demo_node(&state)?;
     let request = onion::OnionProxyRouteRequest::from_js(message)?;
-    let route = onion::route(&handle.node.provider, request).await?;
+    let route = onion::route(&handle.node.provider, request)
+        .await
+        .map_err(|error| error.to_string())?;
     ensure_headless_generation_current(&state, handle.generation)?;
     route.to_js()
 }
@@ -583,7 +585,9 @@ async fn request_headless_onion_proxy(
 ) -> Result<JsValue, String> {
     let handle = headless_demo_node(&state)?;
     let request = onion::OnionProxyHttpRequest::from_js(message)?;
-    let response = onion::request(&handle.node.provider, request).await?;
+    let response = onion::request(&handle.node.provider, request)
+        .await
+        .map_err(|error| error.to_string())?;
     ensure_headless_generation_current(&state, handle.generation)?;
     response.to_js()
 }
