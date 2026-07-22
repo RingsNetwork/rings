@@ -13,7 +13,8 @@ use crate::prelude::bellman::Variable;
 /// <https://github.com/fluidex/plonkit/blob/master/src/circom_circuit.rs>
 /// aux bias and input map are removed
 impl<E: Engine> bellman::Circuit<E> for Circuit<E::Fr>
-where E::Fr: ff::PrimeField
+where
+    E::Fr: ff::PrimeField,
 {
     //noinspection RsBorrowChecker
     fn synthesize<CS: ConstraintSystem<E>>(self, cs: &mut CS) -> Result<(), SynthesisError> {

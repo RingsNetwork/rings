@@ -179,11 +179,7 @@ impl DhtRegistrationPublisher {
     ) -> Result<()> {
         let current_values = values.into_iter().collect::<BTreeSet<_>>();
         let mut published_values = self.published_values.lock().await;
-        let stale_values = published_values
-            .iter()
-            .filter(|published| !current_values.contains(*published))
-            .cloned()
-            .collect::<Vec<_>>();
+        let stale_values = begin_registration_publish(&mut published_values, &current_values);
 
         for value in &current_values {
             context
@@ -198,9 +194,32 @@ impl DhtRegistrationPublisher {
                 .await?;
             published_values.remove(&stale_value);
         }
-        *published_values = current_values;
+        finish_registration_publish(&mut published_values, current_values);
         Ok(())
     }
+}
+
+fn begin_registration_publish(
+    published_values: &mut BTreeSet<Encoded>,
+    current_values: &BTreeSet<Encoded>,
+) -> Vec<Encoded> {
+    let stale_values = published_values
+        .iter()
+        .filter(|published| !current_values.contains(*published))
+        .cloned()
+        .collect::<Vec<_>>();
+    // Invariant: every value whose touch may have reached storage is remembered
+    // before the first await. If the publish future is later cancelled by an
+    // attempt timeout, the next attempt can still tombstone the value.
+    published_values.extend(current_values.iter().cloned());
+    stale_values
+}
+
+fn finish_registration_publish(
+    published_values: &mut BTreeSet<Encoded>,
+    current_values: BTreeSet<Encoded>,
+) {
+    *published_values = current_values;
 }
 
 /// Periodic node-layer registration.
@@ -341,5 +360,90 @@ impl RegistrationTask for OnlineNodeRegistration {
 
     async fn register_once(&self, context: &RegistrationContext<'_>) -> Result<()> {
         self.publish_descriptor(context).await.map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use rings_core::message::Encoded;
+
+    use super::*;
+
+    fn encoded(value: &str) -> Encoded {
+        value.into()
+    }
+
+    fn encoded_subset(mask: u8) -> BTreeSet<Encoded> {
+        ["a", "b", "c"]
+            .into_iter()
+            .enumerate()
+            .filter_map(|(bit, value)| (mask & (1 << bit) != 0).then(|| encoded(value)))
+            .collect()
+    }
+
+    #[test]
+    fn registration_publish_remembers_attempted_values_before_effects() {
+        let old = encoded("old");
+        let attempted = encoded("attempted");
+        let current = BTreeSet::from([attempted.clone()]);
+        let mut known = BTreeSet::from([old.clone()]);
+
+        let stale = begin_registration_publish(&mut known, &current);
+
+        assert_eq!(stale, vec![old.clone()]);
+        assert_eq!(known, BTreeSet::from([old, attempted]));
+    }
+
+    #[test]
+    fn registration_publish_retry_tombstones_values_from_cancelled_attempts() {
+        let old = encoded("old");
+        let cancelled = encoded("cancelled");
+        let replacement = encoded("replacement");
+        let mut known = BTreeSet::from([old.clone()]);
+
+        let cancelled_current = BTreeSet::from([cancelled.clone()]);
+        let _ = begin_registration_publish(&mut known, &cancelled_current);
+        let replacement_current = BTreeSet::from([replacement.clone()]);
+        let stale = begin_registration_publish(&mut known, &replacement_current);
+
+        assert_eq!(
+            stale.into_iter().collect::<BTreeSet<_>>(),
+            BTreeSet::from([old, cancelled])
+        );
+        assert!(known.contains(&replacement));
+        finish_registration_publish(&mut known, replacement_current.clone());
+        assert_eq!(known, replacement_current);
+    }
+
+    #[test]
+    fn registration_publish_begin_finish_preserve_known_set_law() {
+        for old_mask in 0..8 {
+            for current_mask in 0..8 {
+                for replacement_mask in 0..8 {
+                    let old = encoded_subset(old_mask);
+                    let current = encoded_subset(current_mask);
+                    let replacement = encoded_subset(replacement_mask);
+                    let mut known = old.clone();
+
+                    let _ = begin_registration_publish(&mut known, &current);
+                    let attempted = old.union(&current).cloned().collect::<BTreeSet<_>>();
+                    assert_eq!(known, attempted);
+
+                    let stale = begin_registration_publish(&mut known, &replacement)
+                        .into_iter()
+                        .collect::<BTreeSet<_>>();
+                    let expected_stale = attempted
+                        .difference(&replacement)
+                        .cloned()
+                        .collect::<BTreeSet<_>>();
+                    assert_eq!(stale, expected_stale);
+
+                    finish_registration_publish(&mut known, replacement.clone());
+                    assert_eq!(known, replacement);
+                }
+            }
+        }
     }
 }

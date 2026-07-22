@@ -88,20 +88,28 @@ pub(super) async fn relay_tcp(task: RelayTask, stream: TcpStream) {
             loop {
                 match local_read.read(buf.as_mut_slice()).await {
                     Ok(0) => {
-                        let _ = send_frame(&scope, peer, Frame::Shutdown {
-                            session,
-                            from_opener,
-                        })
+                        let _ = send_frame(
+                            &scope,
+                            peer,
+                            Frame::Shutdown {
+                                session,
+                                from_opener,
+                            },
+                        )
                         .await;
                         break;
                     }
                     Ok(n) => {
                         let bytes = Bytes::copy_from_slice(buf.get(..n).unwrap_or_default());
-                        if send_frame(&scope, peer, Frame::Data {
-                            session,
-                            from_opener,
-                            bytes,
-                        })
+                        if send_frame(
+                            &scope,
+                            peer,
+                            Frame::Data {
+                                session,
+                                from_opener,
+                                bytes,
+                            },
+                        )
                         .await
                         .is_err()
                         {
@@ -148,10 +156,14 @@ pub(super) async fn relay_tcp(task: RelayTask, stream: TcpStream) {
     // reuse of the key) — which `Untrack`s it from the pure state. Only tell the peer if we
     // were still the current owner; a stale task must not Close the peer's reused session.
     if sessions.close_if_current(&scope, &key, generation).await {
-        let _ = send_frame(&scope, peer, Frame::Close {
-            session,
-            from_opener,
-        })
+        let _ = send_frame(
+            &scope,
+            peer,
+            Frame::Close {
+                session,
+                from_opener,
+            },
+        )
         .await;
     }
 }

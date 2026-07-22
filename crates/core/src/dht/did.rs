@@ -604,12 +604,15 @@ mod tests {
         let did = Did::from(10u32);
         let affine_dids = did.rotate_affine(4)?;
         assert_eq!(affine_dids.len(), 4);
-        assert_eq!(affine_dids, vec![
-            did.rotate(0),
-            did.rotate(90),
-            did.rotate(180),
-            did.rotate(270)
-        ]);
+        assert_eq!(
+            affine_dids,
+            vec![
+                did.rotate(0),
+                did.rotate(90),
+                did.rotate(180),
+                did.rotate(270)
+            ]
+        );
         Ok(())
     }
 

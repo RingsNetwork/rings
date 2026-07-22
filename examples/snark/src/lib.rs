@@ -136,13 +136,17 @@ pub fn first_recursive_circuit<T>(circuits: &[T]) -> ExampleResult<&T> {
 
 /// Public input used by the simple BN256 example.
 pub fn simple_bn256_initial_input<F>() -> Input<F>
-where F: PrimeField + From<u64> {
+where
+    F: PrimeField + From<u64>,
+{
     vec![("step_in".to_string(), vec![F::from(4u64), F::from(2u64)])].into()
 }
 
 /// Private inputs used by the simple BN256 recursive example.
 pub fn simple_bn256_private_inputs<F>() -> Vec<Input<F>>
-where F: PrimeField + From<u64> {
+where
+    F: PrimeField + From<u64>,
+{
     vec![
         vec![("adder".to_string(), vec![F::from(1u64)])].into(),
         vec![("adder".to_string(), vec![F::from(42u64)])].into(),
@@ -204,13 +208,17 @@ pub async fn simple_bn256_one_step_prove_verify() -> ExampleResult<()> {
 
 /// Public input used by the Merkle-tree example.
 pub fn merkle_tree_initial_input<F>() -> Input<F>
-where F: PrimeField + From<u64> {
+where
+    F: PrimeField + From<u64>,
+{
     vec![("leaf".to_string(), vec![F::from(42u64)])].into()
 }
 
 /// Private path inputs used by the Merkle-tree example.
 pub fn merkle_tree_private_inputs<F>() -> Vec<Input<F>>
-where F: PrimeField + From<u64> {
+where
+    F: PrimeField + From<u64>,
+{
     vec![
         vec![("path".to_string(), vec![F::from(1u64), F::from(0u64)])].into(),
         vec![("path".to_string(), vec![F::from(42u64), F::from(1u64)])].into(),
@@ -239,10 +247,13 @@ mod tests {
         let initial = simple_bn256_initial_input::<Bn256TestField>();
         let private = simple_bn256_private_inputs::<Bn256TestField>();
 
-        assert_eq!(initial.input.as_slice(), [("step_in".to_string(), vec![
-            Bn256TestField::from(4u64),
-            Bn256TestField::from(2u64)
-        ])]);
+        assert_eq!(
+            initial.input.as_slice(),
+            [(
+                "step_in".to_string(),
+                vec![Bn256TestField::from(4u64), Bn256TestField::from(2u64)]
+            )]
+        );
         assert_eq!(private.len(), 3);
         assert!(private
             .iter()
@@ -261,9 +272,10 @@ mod tests {
         let initial = merkle_tree_initial_input::<MerkleTreeTestField>();
         let private = merkle_tree_private_inputs::<MerkleTreeTestField>();
 
-        assert_eq!(initial.input.as_slice(), [("leaf".to_string(), vec![
-            MerkleTreeTestField::from(42u64)
-        ])]);
+        assert_eq!(
+            initial.input.as_slice(),
+            [("leaf".to_string(), vec![MerkleTreeTestField::from(42u64)])]
+        );
         assert_eq!(private.len(), 3);
         assert!(private.iter().all(
             |input| matches!(input.input.as_slice(), [(name, path)] if name == "path" && path.len() == 2)

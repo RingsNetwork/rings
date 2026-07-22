@@ -8,6 +8,8 @@ use std::sync::Mutex;
 
 use rings_core::dht::Did;
 use rings_core::dht::EntryStorage;
+#[cfg(feature = "node")]
+use rings_core::lifecycle::StopToken;
 use rings_core::measure::PeerMeasurement;
 use rings_core::session::SessionSkBuilder;
 use rings_core::storage::MemStorage;
@@ -287,6 +289,13 @@ impl Provider {
     /// This is a long-running task; do not await completion as a readiness signal.
     pub async fn listen(&self) {
         self.processor.listen().await;
+    }
+
+    /// Listen for messages until `stop` requests cooperative shutdown.
+    ///
+    /// This is a long-running task; do not await completion as a readiness signal.
+    pub async fn listen_with(&self, stop: StopToken) {
+        self.processor.listen_with(stop).await;
     }
 }
 

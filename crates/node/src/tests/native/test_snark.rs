@@ -12,10 +12,13 @@ pub async fn test_gen_proof_and_verify() {
     .await
     .unwrap();
     type F = crate::extension::snark::Field;
-    let input: Input = vec![("step_in".to_string(), vec![
-        F::from_u64(4u64, SupportedPrimeField::Vesta),
-        F::from_u64(2u64, SupportedPrimeField::Vesta),
-    ])]
+    let input: Input = vec![(
+        "step_in".to_string(),
+        vec![
+            F::from_u64(4u64, SupportedPrimeField::Vesta),
+            F::from_u64(2u64, SupportedPrimeField::Vesta),
+        ],
+    )]
     .into();
     let circuits = snark_task_builder.gen_circuits(input, vec![], 5).unwrap();
     assert_eq!(circuits.len(), 5);

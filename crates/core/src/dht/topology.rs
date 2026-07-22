@@ -527,19 +527,17 @@ mod tests {
         );
 
         assert_eq!(next.state.successors, vec![peer]);
-        assert_eq!(next.state.fingers, vec![
-            Some(peer),
-            Some(peer),
-            Some(peer),
-            Some(peer),
-            None
-        ]);
-        assert_eq!(next.actions, vec![
-            TopologyAction::FindSuccessorForConnect {
+        assert_eq!(
+            next.state.fingers,
+            vec![Some(peer), Some(peer), Some(peer), Some(peer), None]
+        );
+        assert_eq!(
+            next.actions,
+            vec![TopologyAction::FindSuccessorForConnect {
                 next: peer,
                 did: local
-            }
-        ]);
+            }]
+        );
     }
 
     #[test]
@@ -626,11 +624,14 @@ mod tests {
         );
 
         assert_eq!(next.state.fix_finger_index, 3);
-        assert_eq!(next.actions, vec![TopologyAction::FindSuccessorForFix {
-            next: next_hop,
-            did: Did::power_of_two(3),
-            index: 3
-        }]);
+        assert_eq!(
+            next.actions,
+            vec![TopologyAction::FindSuccessorForFix {
+                next: next_hop,
+                did: Did::power_of_two(3),
+                index: 3
+            }]
+        );
     }
 
     #[test]
@@ -651,11 +652,14 @@ mod tests {
         );
 
         assert_eq!(next.state.fix_finger_index, 3);
-        assert_eq!(next.actions, vec![TopologyAction::FindSuccessorForFix {
-            next: next_hop,
-            did: local + Did::power_of_two(3),
-            index: 3
-        }]);
+        assert_eq!(
+            next.actions,
+            vec![TopologyAction::FindSuccessorForFix {
+                next: next_hop,
+                did: local + Did::power_of_two(3),
+                index: 3
+            }]
+        );
     }
 
     #[test]

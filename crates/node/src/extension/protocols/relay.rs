@@ -219,7 +219,8 @@ impl<T> Relay<T> {
 }
 
 impl<T> Protocol for Relay<T>
-where T: Clone + DeserializeOwned + Serialize + MaybeSend + 'static
+where
+    T: Clone + DeserializeOwned + Serialize + MaybeSend + 'static,
 {
     type State = RelayState<T>;
     type Event = RelayEvent<T>;
@@ -299,11 +300,14 @@ fn step_command<T: Clone>(
             // A locally-accepted tunnel: we are the initiator.
             let key = SessionKey::new(peer, namespace, session, Initiator::Local);
             next.sessions.insert(key.clone());
-            Transition::with(next, vec![RelayEffect::OpenAccepted {
-                token,
-                key,
-                service,
-            }])
+            Transition::with(
+                next,
+                vec![RelayEffect::OpenAccepted {
+                    token,
+                    key,
+                    service,
+                }],
+            )
         }
         RelayCommand::Untrack {
             peer,
@@ -340,12 +344,15 @@ fn step_frame<T: Clone>(
                     next.sessions.insert(key.clone());
                     Transition::with(next, vec![RelayEffect::Connect { key, target, kind }])
                 }
-                None => Transition::with(state.clone(), vec![RelayEffect::SendClose {
-                    to: from,
-                    session,
-                    // The peer opened it (unknown service); we did not.
-                    from_opener: false,
-                }]),
+                None => Transition::with(
+                    state.clone(),
+                    vec![RelayEffect::SendClose {
+                        to: from,
+                        session,
+                        // The peer opened it (unknown service); we did not.
+                        from_opener: false,
+                    }],
+                ),
             }
         }
         // Data/Shutdown/Close are guarded on the authoritative session set: the *reducer*
@@ -651,7 +658,9 @@ impl RelayHandle {
 /// scope's own namespace (provenance = self).
 #[cfg(any(feature = "node", feature = "browser"))]
 async fn register_service<T>(scope: &Scope, name: String, target: T) -> crate::error::Result<()>
-where T: Serialize {
+where
+    T: Serialize,
+{
     let command = RelayCommand::RegisterService { name, target };
     let payload = bincode::serialize(&command).map_err(|_| crate::error::Error::EncodeError)?;
     scope.inject(Bytes::from(payload)).await
@@ -918,10 +927,14 @@ mod tests {
     #[test]
     fn register_service_via_self_command_then_open_connects() {
         let relay = Relay::tcp(HashMap::new());
-        let registered = step_command(&relay, &relay.init(), &RelayCommand::RegisterService {
-            name: "web".to_string(),
-            target: web_addr(),
-        });
+        let registered = step_command(
+            &relay,
+            &relay.init(),
+            &RelayCommand::RegisterService {
+                name: "web".to_string(),
+                target: web_addr(),
+            },
+        );
         assert!(registered.effects.is_empty());
         let t = step_frame(&relay, &registered.state, peer_a(), &open(1, "web"));
         match t.effects.as_slice() {
@@ -935,11 +948,15 @@ mod tests {
         let relay = web_relay();
         // A client-side accept is fed back as `Accepted{token}`. The core mints the session id
         // (0 on fresh state, initiator Local) and replies OpenAccepted with that minted key.
-        let accepted = step_command(&relay, &relay.init(), &RelayCommand::Accepted {
-            token: 42,
-            peer: peer_a(),
-            service: "web".to_string(),
-        });
+        let accepted = step_command(
+            &relay,
+            &relay.init(),
+            &RelayCommand::Accepted {
+                token: 42,
+                peer: peer_a(),
+                service: "web".to_string(),
+            },
+        );
         let key = SessionKey::new(peer_a(), super::TCP, SessionId(0), Initiator::Local);
         match accepted.effects.as_slice() {
             [RelayEffect::OpenAccepted {
@@ -955,11 +972,15 @@ mod tests {
         }
         assert!(accepted.state.sessions.contains(&key));
 
-        let untracked = step_command(&relay, &accepted.state, &RelayCommand::Untrack {
-            peer: peer_a(),
-            session: SessionId(0),
-            initiator: Initiator::Local,
-        });
+        let untracked = step_command(
+            &relay,
+            &accepted.state,
+            &RelayCommand::Untrack {
+                peer: peer_a(),
+                session: SessionId(0),
+                initiator: Initiator::Local,
+            },
+        );
         assert!(untracked.effects.is_empty());
         assert!(!untracked.state.sessions.contains(&key));
     }
@@ -992,11 +1013,15 @@ mod tests {
         // and a locally-accepted (Local) session must be distinct keys.
         let relay = web_relay();
         let opened = step_frame(&relay, &relay.init(), peer_a(), &open(0, "web"));
-        let accepted = step_command(&relay, &opened.state, &RelayCommand::Accepted {
-            token: 1,
-            peer: peer_a(),
-            service: "web".to_string(),
-        });
+        let accepted = step_command(
+            &relay,
+            &opened.state,
+            &RelayCommand::Accepted {
+                token: 1,
+                peer: peer_a(),
+                service: "web".to_string(),
+            },
+        );
         let remote = SessionKey::new(peer_a(), super::TCP, SessionId(0), Initiator::Remote);
         let local = SessionKey::new(peer_a(), super::TCP, SessionId(0), Initiator::Local);
         assert_ne!(remote, local);
@@ -1074,9 +1099,10 @@ mod tests {
                     if model.contains(&key) {
                         assert!(t.effects.is_empty(), "duplicate Open must emit nothing");
                     } else {
-                        assert!(matches!(t.effects.as_slice(), [
-                            RelayEffect::Connect { .. }
-                        ]));
+                        assert!(matches!(
+                            t.effects.as_slice(),
+                            [RelayEffect::Connect { .. }]
+                        ));
                         model.insert(key.clone());
                     }
                     t
@@ -1086,9 +1112,10 @@ mod tests {
                     if model.contains(&key) {
                         assert!(t.effects.is_empty());
                     } else {
-                        assert!(matches!(t.effects.as_slice(), [
-                            RelayEffect::SendClose { .. }
-                        ]));
+                        assert!(matches!(
+                            t.effects.as_slice(),
+                            [RelayEffect::SendClose { .. }]
+                        ));
                     }
                     t
                 }

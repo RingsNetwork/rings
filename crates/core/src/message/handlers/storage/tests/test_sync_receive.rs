@@ -85,11 +85,14 @@ async fn sync_entries_handler_stores_entry_at_placement_key() -> Result<()> {
     )?;
 
     handler
-        .handle(&context, &SyncEntriesWithSuccessor {
-            purpose: StorageSyncPurpose::OwnershipHandoff,
-            destination: StorageSyncDestination::PhysicalOwner(node.did()),
-            data: vec![PlacedEntry::new(placement_key, entry.clone())],
-        })
+        .handle(
+            &context,
+            &SyncEntriesWithSuccessor {
+                purpose: StorageSyncPurpose::OwnershipHandoff,
+                destination: StorageSyncDestination::PhysicalOwner(node.did()),
+                data: vec![PlacedEntry::new(placement_key, entry.clone())],
+            },
+        )
         .await?;
 
     assert_eq!(
@@ -125,11 +128,14 @@ async fn sync_entries_handler_caps_inbound_entry_payloads() -> Result<()> {
     )?;
 
     handler
-        .handle(&context, &SyncEntriesWithSuccessor {
-            purpose: StorageSyncPurpose::OwnershipHandoff,
-            destination: StorageSyncDestination::PhysicalOwner(node.did()),
-            data: vec![PlacedEntry::new(placement_key, entry)],
-        })
+        .handle(
+            &context,
+            &SyncEntriesWithSuccessor {
+                purpose: StorageSyncPurpose::OwnershipHandoff,
+                destination: StorageSyncDestination::PhysicalOwner(node.did()),
+                data: vec![PlacedEntry::new(placement_key, entry)],
+            },
+        )
         .await?;
 
     let stored = node
@@ -175,14 +181,17 @@ async fn sync_entries_handler_rejects_non_affine_placement_before_writing() -> R
     )?;
 
     let result = handler
-        .handle(&context, &SyncEntriesWithSuccessor {
-            purpose: StorageSyncPurpose::OwnershipHandoff,
-            destination: StorageSyncDestination::PhysicalOwner(node.did()),
-            data: vec![
-                PlacedEntry::new(valid_placement, valid_entry),
-                PlacedEntry::new(invalid_placement, invalid_entry),
-            ],
-        })
+        .handle(
+            &context,
+            &SyncEntriesWithSuccessor {
+                purpose: StorageSyncPurpose::OwnershipHandoff,
+                destination: StorageSyncDestination::PhysicalOwner(node.did()),
+                data: vec![
+                    PlacedEntry::new(valid_placement, valid_entry),
+                    PlacedEntry::new(invalid_placement, invalid_entry),
+                ],
+            },
+        )
         .await;
 
     assert!(matches!(result, Err(Error::InvalidMessage(_))));

@@ -14,6 +14,7 @@ use rings_core::dht::EntryStorage;
 use rings_core::dht::DEFAULT_FINGER_TABLE_SIZE;
 use rings_core::ecc::PublicKey;
 use rings_core::ecc::SecretKey;
+use rings_core::lifecycle::StopToken;
 use rings_core::measure::MeasureImpl;
 use rings_core::measure::PeerMeasurement;
 use rings_core::measure::PeerQuality;
@@ -357,11 +358,17 @@ impl Processor {
         }
     }
 
-    async fn registration_task_daemon(&self, task: &dyn RegistrationTask) {
+    async fn registration_task_daemon_with(&self, task: &dyn RegistrationTask, stop: StopToken) {
         loop {
+            if stop.should_stop() {
+                return;
+            }
             let timeout = registration_attempt_timeout(task.interval());
             if let Err(error) = self.run_registration_once_with_timeout(task, timeout).await {
                 tracing::warn!("Failed to run {} registration task: {error:?}", task.name());
+            }
+            if stop.should_stop() {
+                return;
             }
             if let Err(error) = sleep_registration_interval(task.interval()).await {
                 tracing::warn!(
@@ -373,11 +380,11 @@ impl Processor {
         }
     }
 
-    async fn registration_daemons(&self) {
+    async fn registration_daemons_with(&self, stop: StopToken) {
         join_all(
             self.registration_tasks
                 .iter()
-                .map(|task| self.registration_task_daemon(task.as_ref())),
+                .map(|task| self.registration_task_daemon_with(task.as_ref(), stop.clone())),
         )
         .await;
     }
@@ -386,14 +393,24 @@ impl Processor {
     ///
     /// This is a long-running task; do not await completion as a readiness signal.
     pub async fn listen(&self) {
+        self.listen_with(StopToken::never()).await;
+    }
+
+    /// Run stabilization and node registration tasks until `stop` asks them to exit.
+    ///
+    /// The shutdown is cooperative: it waits for the current stabilization or
+    /// registration operation to finish before returning. This avoids dropping
+    /// browser IndexedDB request futures while their JavaScript callbacks are
+    /// still pending.
+    pub async fn listen_with(&self, stop: StopToken) {
         let stabilizer = self.swarm.stabilizer();
         let stabilizer = Arc::new(stabilizer);
         if self.registration_tasks.is_empty() {
-            stabilizer.wait(self.stabilize_interval).await;
+            stabilizer.wait_with(self.stabilize_interval, stop).await;
         } else {
             let _ = futures::future::join(
-                stabilizer.wait(self.stabilize_interval),
-                self.registration_daemons(),
+                stabilizer.wait_with(self.stabilize_interval, stop.clone()),
+                self.registration_daemons_with(stop),
             )
             .await;
         }

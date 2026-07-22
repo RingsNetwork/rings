@@ -110,7 +110,8 @@ impl<H> OnionCircuitShell<H> {
 #[cfg_attr(feature = "browser", async_trait::async_trait(?Send))]
 #[cfg_attr(not(feature = "browser"), async_trait::async_trait)]
 impl<H> Interpret for OnionCircuitShell<H>
-where H: OnionCircuitHandler + crate::extension::ext::MaybeSend + 'static
+where
+    H: OnionCircuitHandler + crate::extension::ext::MaybeSend + 'static,
 {
     type Effect = OnionCircuitEffect;
 
@@ -140,14 +141,17 @@ where H: OnionCircuitHandler + crate::extension::ext::MaybeSend + 'static
                 payload,
             } => {
                 self.handler
-                    .handle_exit(scope, OnionCircuitExitFrame {
-                        from,
-                        circuit_id,
-                        return_peer,
-                        client,
-                        forward_nonce,
-                        payload,
-                    })
+                    .handle_exit(
+                        scope,
+                        OnionCircuitExitFrame {
+                            from,
+                            circuit_id,
+                            return_peer,
+                            client,
+                            forward_nonce,
+                            payload,
+                        },
+                    )
                     .await?;
                 Ok(Vec::new())
             }

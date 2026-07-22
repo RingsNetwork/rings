@@ -4,6 +4,7 @@
 //! storage-specific ownership on top of that topology: affine replica
 //! placement, storage virtual-node ownership, read repair, and sync hand-off.
 
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
 use serde::Deserialize;
@@ -120,6 +121,18 @@ pub(crate) struct StorageSyncDelivery {
 }
 
 impl StorageSyncDelivery {
+    fn from_parts(
+        purpose: StorageSyncPurpose,
+        destination: StorageSyncDestination,
+        data: Vec<PlacedEntry>,
+    ) -> Self {
+        Self {
+            purpose,
+            destination,
+            data,
+        }
+    }
+
     fn from_route(
         purpose: StorageSyncPurpose,
         target: Did,
@@ -170,17 +183,47 @@ impl PeerRingAction {
         destination: StorageSyncDestination,
         data: Vec<PlacedEntry>,
     ) -> Self {
-        Self::RemoteAction(destination.did(), RemoteAction::SyncEntriesWithSuccessor {
-            purpose,
-            route: destination.route(),
-            data,
-        })
+        Self::RemoteAction(
+            destination.did(),
+            RemoteAction::SyncEntriesWithSuccessor {
+                purpose,
+                route: destination.route(),
+                data,
+            },
+        )
     }
 
     /// Lower this action tree into storage-sync deliveries.
     pub(crate) fn storage_sync_deliveries(self) -> Result<Vec<StorageSyncDelivery>> {
         let mut deliveries = Vec::new();
         self.collect_storage_sync_deliveries(&mut deliveries)?;
+        Ok(deliveries)
+    }
+
+    /// Lower this action tree into storage-sync deliveries, merging delivery
+    /// leaves that share the same wire purpose and destination.
+    ///
+    /// Safety law: coalescing is restricted to identical `(purpose,
+    /// destination)` pairs. `PlacementKey` destinations therefore keep their
+    /// placement identity, and physical-owner batches still let the receiver
+    /// validate each placement independently before acking.
+    pub(crate) fn coalesced_storage_sync_deliveries(self) -> Result<Vec<StorageSyncDelivery>> {
+        let mut by_route =
+            BTreeMap::<(StorageSyncPurpose, StorageSyncDestination), Vec<PlacedEntry>>::new();
+        for delivery in self.storage_sync_deliveries()? {
+            let (purpose, destination, data) = delivery.into_message_parts();
+            by_route
+                .entry((purpose, destination))
+                .or_default()
+                .extend(data);
+        }
+
+        let mut deliveries = Vec::new();
+        for ((purpose, destination), data) in by_route {
+            for batch in sync::sync_entries_batches(data, sync::SYNC_BATCH_MAX_BYTES)? {
+                deliveries.push(StorageSyncDelivery::from_parts(purpose, destination, batch));
+            }
+        }
         Ok(deliveries)
     }
 
@@ -300,6 +343,43 @@ impl PeerRing {
             StorageSyncDestination::PhysicalOwner(owner) => self.next_hop_to_physical_owner(owner),
             StorageSyncDestination::PlacementKey(key) => self.next_hop_to_storage_placement(key),
         }
+    }
+
+    pub(crate) fn observed_storage_sync_physical_owner(
+        &self,
+        destination: StorageSyncDestination,
+    ) -> Result<Option<Did>> {
+        // Pre: `destination` is the wire-level storage sync destination.
+        // Post: `Some(owner)` names the physical receiver currently observed by
+        // the local storage-routing model. Placement-key routes without a
+        // virtual owner do not expose a final physical owner locally, so only
+        // the next hop can be guarded at this boundary.
+        match destination {
+            StorageSyncDestination::PhysicalOwner(owner) => Ok(Some(owner)),
+            StorageSyncDestination::PlacementKey(key) => self.observed_storage_virtual_owner(key),
+        }
+    }
+
+    fn observed_physical_peer_registered(&self, peer: Did) -> Result<bool> {
+        let state = self.topology_state()?;
+        Ok(peer == state.local
+            || state.successors.contains(&peer)
+            || state.predecessor == Some(peer)
+            || state.fingers.into_iter().flatten().any(|did| did == peer))
+    }
+
+    pub(crate) fn storage_sync_route_still_permits(
+        &self,
+        destination: StorageSyncDestination,
+        next_hop: Did,
+    ) -> Result<bool> {
+        if let StorageSyncDestination::PhysicalOwner(owner) = destination {
+            if !self.observed_physical_peer_registered(owner)? {
+                return Ok(false);
+            }
+        }
+
+        Ok(self.next_hop_for_storage_sync(destination)? == Some(next_hop))
     }
 
     fn next_hop_to_physical_owner(&self, owner: Did) -> Result<Option<Did>> {

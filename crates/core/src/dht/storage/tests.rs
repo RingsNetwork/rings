@@ -158,6 +158,70 @@ fn placed_entries_by_key(entries: impl IntoIterator<Item = PlacedEntry>) -> BTre
         .collect()
 }
 
+#[test]
+fn coalesced_storage_sync_deliveries_merge_identical_physical_destinations() -> Result<()> {
+    let owner = Did::from(50u32);
+    let first = PlacedEntry::new(Did::from(100u32), data_entry(Did::from(10u32)));
+    let second = PlacedEntry::new(Did::from(120u32), data_entry(Did::from(20u32)));
+    let action = PeerRingAction::MultiActions(vec![
+        PeerRingAction::sync_entries_for_repair(
+            StorageSyncDestination::PhysicalOwner(owner),
+            vec![first.clone()],
+        ),
+        PeerRingAction::sync_entries_for_repair(
+            StorageSyncDestination::PhysicalOwner(owner),
+            vec![second.clone()],
+        ),
+    ]);
+
+    let deliveries = action.coalesced_storage_sync_deliveries()?;
+
+    assert_eq!(deliveries.len(), 1);
+    let (purpose, destination, data) = deliveries
+        .into_iter()
+        .next()
+        .expect("coalesced delivery")
+        .into_message_parts();
+    assert_eq!(purpose, StorageSyncPurpose::AdditiveRepair);
+    assert_eq!(destination, StorageSyncDestination::PhysicalOwner(owner));
+    assert_eq!(data, vec![first, second]);
+    Ok(())
+}
+
+#[test]
+fn coalesced_storage_sync_deliveries_keep_placement_destinations_separate() -> Result<()> {
+    let first_key = Did::from(100u32);
+    let second_key = Did::from(120u32);
+    let first = PlacedEntry::new(first_key, data_entry(Did::from(10u32)));
+    let second = PlacedEntry::new(second_key, data_entry(Did::from(20u32)));
+    let action = PeerRingAction::MultiActions(vec![
+        PeerRingAction::sync_entries_for_repair(
+            StorageSyncDestination::PlacementKey(first_key),
+            vec![first],
+        ),
+        PeerRingAction::sync_entries_for_repair(
+            StorageSyncDestination::PlacementKey(second_key),
+            vec![second],
+        ),
+    ]);
+
+    let deliveries = action.coalesced_storage_sync_deliveries()?;
+
+    assert_eq!(deliveries.len(), 2);
+    let destinations = deliveries
+        .into_iter()
+        .map(|delivery| delivery.into_message_parts().1)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        destinations,
+        vec![
+            StorageSyncDestination::PlacementKey(first_key),
+            StorageSyncDestination::PlacementKey(second_key),
+        ]
+    );
+    Ok(())
+}
+
 struct FailingGetStorageFixture;
 
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
@@ -365,6 +429,55 @@ async fn virtual_storage_sync_copies_entries_to_observed_virtual_owner() -> Resu
     Ok(())
 }
 
+#[test]
+fn virtual_storage_sync_route_is_cancelled_when_owner_leaves_topology() -> Result<()> {
+    let local = Did::from(1u32);
+    let remote = Did::from(2u32);
+    let node = PeerRing::new_with_storage_finger_table_size_and_virtual_nodes(
+        local,
+        3,
+        Box::new(MemStorage::new()),
+        8,
+        VirtualNodeConfig::new(7, 2),
+    );
+    let _ = node.join(remote)?;
+    let destination = StorageSyncDestination::PhysicalOwner(remote);
+
+    assert!(node.storage_sync_route_still_permits(destination, remote)?);
+
+    node.remove(remote)?;
+
+    assert!(!node.storage_sync_route_still_permits(destination, remote)?);
+    Ok(())
+}
+
+#[test]
+fn placement_key_destination_exposes_observed_virtual_owner() -> Result<()> {
+    let local = Did::from(1u32);
+    let remote = Did::from(2u32);
+    let node = PeerRing::new_with_storage_finger_table_size_and_virtual_nodes(
+        local,
+        3,
+        Box::new(MemStorage::new()),
+        8,
+        VirtualNodeConfig::new(7, 2),
+    );
+    let _ = node.join(remote)?;
+    let placement = first_virtual_position(&node, remote)?;
+
+    assert_eq!(
+        node.observed_storage_sync_physical_owner(StorageSyncDestination::PlacementKey(placement))?,
+        Some(remote)
+    );
+
+    node.remove(remote)?;
+
+    let owner_after_removal =
+        node.observed_storage_sync_physical_owner(StorageSyncDestination::PlacementKey(placement))?;
+    assert_ne!(owner_after_removal, Some(remote));
+    Ok(())
+}
+
 #[tokio::test]
 async fn sync_without_ack_retains_entry_for_next_handoff() -> Result<()> {
     let node_did = Did::from(0u32);
@@ -377,10 +490,10 @@ async fn sync_without_ack_retains_entry_for_next_handoff() -> Result<()> {
 
     let action = node.sync_entries_with_successor(new_successor).await?;
     let retried_action = node.sync_entries_with_successor(new_successor).await?;
-    let expected = vec![(new_successor, vec![PlacedEntry::new(
-        placement_key,
-        entry.clone(),
-    )])];
+    let expected = vec![(
+        new_successor,
+        vec![PlacedEntry::new(placement_key, entry.clone())],
+    )];
 
     assert_eq!(collect_sync_batches(action)?, expected);
     assert_eq!(collect_sync_batches(retried_action)?, expected);
@@ -770,9 +883,10 @@ async fn read_repair_targets_only_observed_missing_placements() -> Result<()> {
         .read_repair_entry(evidence.entry.clone(), &evidence.misses, 3)
         .await?;
 
-    assert_eq!(evidence.misses, vec![PlacementMiss::new(
-        first_key, node.did
-    )]);
+    assert_eq!(
+        evidence.misses,
+        vec![PlacementMiss::new(first_key, node.did)]
+    );
     assert_eq!(repair, PeerRingAction::None);
     assert_eq!(
         node.storage.get(&first_key.to_string()).await?,

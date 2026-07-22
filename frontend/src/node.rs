@@ -2,13 +2,12 @@
 
 use std::sync::Arc;
 
-use futures::future::AbortHandle;
-use futures::future::Abortable;
 use js_sys::Array;
 use js_sys::Object;
 use js_sys::Reflect;
 use js_sys::Uint8Array;
 use rings_node::extension::snark::SNARKBehaviour;
+use rings_node::prelude::StopSource;
 use rings_node::prelude::rings_core::session::SessionSkBuilder;
 use rings_node::prelude::rings_core::storage::idb::IdbStorage;
 use rings_node::processor::ProcessorBuilder;
@@ -32,13 +31,13 @@ pub struct DemoNode {
     pub snark: SNARKBehaviour,
     /// Controlled webview gateway attached to this browser node when its host origin is HTTP(S).
     pub webview: Option<WebviewNode>,
-    listen_abort: AbortHandle,
+    listen_stop: StopSource,
 }
 
 impl DemoNode {
     /// Stop the background listen/stabilize loop started for this demo node.
     pub fn stop(&self) {
-        self.listen_abort.abort();
+        self.listen_stop.request_stop();
     }
 
     /// Return the controlled webview gateway attached to this browser node.
@@ -151,16 +150,17 @@ pub async fn build_node(
     let webview = WebviewNode::for_current_window(provider.clone())
         .map_err(|error| format!("initialize webview: {error}"))?;
 
-    let (listen_abort, listen_registration) = AbortHandle::new_pair();
+    let listen_stop = StopSource::new();
+    let listen_token = listen_stop.token();
     spawn_local(async move {
-        let _result = Abortable::new(listening.listen(), listen_registration).await;
+        listening.listen_with(listen_token).await;
     });
 
     Ok(DemoNode {
         provider,
         snark,
         webview,
-        listen_abort,
+        listen_stop,
     })
 }
 

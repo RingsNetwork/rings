@@ -71,10 +71,13 @@ impl Protocol for Echo {
 
     /// Pure. `step (Ctx n, Echoed{from,p}) = ((n+1), [Reply to=from p])`.
     fn step(&self, ctx: Ctx<'_, u64>, event: Echoed) -> Transition<u64, EchoEffect> {
-        Transition::with(ctx.state + 1, vec![EchoEffect::Reply {
-            to: event.from,
-            payload: event.payload,
-        }])
+        Transition::with(
+            ctx.state + 1,
+            vec![EchoEffect::Reply {
+                to: event.from,
+                payload: event.payload,
+            }],
+        )
     }
 }
 

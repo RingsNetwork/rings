@@ -104,10 +104,13 @@ pub struct Circuit<F: PrimeField> {
 }
 
 impl<'de, F> Deserialize<'de> for Circuit<F>
-where F: PrimeField + Deserialize<'de>
+where
+    F: PrimeField + Deserialize<'de>,
 {
     fn deserialize<D>(deserializer: D) -> core::result::Result<Self, D::Error>
-    where D: Deserializer<'de> {
+    where
+        D: Deserializer<'de>,
+    {
         #[derive(Deserialize)]
         #[serde(bound(deserialize = "F: Deserialize<'de>"))]
         struct CircuitData<F: PrimeField> {
@@ -144,7 +147,9 @@ impl<F: PrimeField> WasmCircuitGenerator<F> {
     /// Generate iterator circuit list
     /// Which iterate inputs and generate circuit
     pub fn gen_circuit(&self, input: Input<F>, sanity_check: bool) -> Result<Circuit<F>>
-    where F: PrimeField {
+    where
+        F: PrimeField,
+    {
         let mut calc = self.calculator.borrow_mut();
         let witness: Vec<F> = calc.calculate_witness::<F>(input.to_vec(), sanity_check)?;
         Circuit::<F>::try_new(self.r1cs.clone(), witness)

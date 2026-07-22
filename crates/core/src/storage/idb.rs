@@ -155,7 +155,8 @@ impl IdbStorage {
 
 #[async_trait(?Send)]
 impl<V> KvStorageInterface<V> for IdbStorage
-where V: DeserializeOwned + Serialize + Sized
+where
+    V: DeserializeOwned + Serialize + Sized,
 {
     async fn get(&self, key: &str) -> Result<Option<V>> {
         let (tx, store) = self.get_tx_store(TransactionMode::ReadWrite)?;

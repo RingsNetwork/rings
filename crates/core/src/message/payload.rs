@@ -39,7 +39,9 @@ pub fn encode_data_gzip(data: &Bytes, level: u8) -> Result<Bytes> {
 
 /// Serializes the given data using JSON and compresses it with gzip using the specified compression level.
 pub fn gzip_data<T>(data: &T, level: u8) -> Result<Bytes>
-where T: Serialize {
+where
+    T: Serialize,
+{
     let json_bytes = serde_json::to_vec(data).map_err(|_| Error::SerializeToString)?;
     encode_data_gzip(&json_bytes.into(), level)
 }
@@ -56,7 +58,9 @@ pub fn decode_gzip_data(data: &Bytes) -> Result<Bytes> {
 
 /// From gzip data to deserialized
 pub fn from_gzipped_data<T>(data: &Bytes) -> Result<T>
-where T: DeserializeOwned {
+where
+    T: DeserializeOwned,
+{
     let data = decode_gzip_data(data)?;
     let m = serde_json::from_slice(&data).map_err(Error::Deserialize)?;
     Ok(m)
@@ -171,7 +175,9 @@ impl Transaction {
 
     /// Deserializes the data field into a `T` instance.
     pub fn data<T>(&self) -> Result<T>
-    where T: DeserializeOwned {
+    where
+        T: DeserializeOwned,
+    {
         bincode::deserialize(&self.data).map_err(Error::BincodeDeserialize)
     }
 }
@@ -369,7 +375,9 @@ pub trait PayloadSender {
 
     /// Send a message to a specified destination.
     async fn send_message<T>(&self, msg: T, destination: Did) -> Result<uuid::Uuid>
-    where T: Serialize + Send {
+    where
+        T: Serialize + Send,
+    {
         let next_hop = self.infer_next_hop(destination, None)?;
         self.send_message_by_hop(msg, destination, next_hop).await
     }
@@ -391,14 +399,18 @@ pub trait PayloadSender {
 
     /// Send a direct message to a specified destination.
     async fn send_direct_message<T>(&self, msg: T, destination: Did) -> Result<uuid::Uuid>
-    where T: Serialize + Send {
+    where
+        T: Serialize + Send,
+    {
         self.send_message_by_hop(msg, destination, destination)
             .await
     }
 
     /// Send a report message to a specified destination.
     async fn send_report_message<T>(&self, payload: &MessagePayload, msg: T) -> Result<()>
-    where T: Serialize + Send {
+    where
+        T: Serialize + Send,
+    {
         let policy = payload.transaction.report_return;
         // Keep this send-boundary check even though transaction verification
         // enforces the same authorization when the request is received.
@@ -475,7 +487,9 @@ pub mod test {
     }
 
     pub fn new_payload<T>(data: T, next_hop: Did) -> MessagePayload
-    where T: Serialize + DeserializeOwned {
+    where
+        T: Serialize + DeserializeOwned,
+    {
         let key = SecretKey::random();
         let destination = SecretKey::random().address().into();
         let session_sk = SessionSk::new_with_seckey(&key).unwrap();

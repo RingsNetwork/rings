@@ -23,6 +23,10 @@ docs
 # Tests
 *.log
 
+# Local scripts are allowed in the worktree but should not be added accidentally.
+scripts/*
+!scripts/cargo-publish-crates.sh
+
 # OS related
 ### MacOS ###
 .DS_Store

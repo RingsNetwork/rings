@@ -191,6 +191,8 @@ impl InnerSwarmCallback {
             Message::NotifyPredecessorReport(ref msg) => {
                 self.message_handler.handle(payload, msg).await
             }
+            Message::PeerLivenessProbe(ref msg) => self.message_handler.handle(payload, msg).await,
+            Message::PeerLivenessReport(ref msg) => self.message_handler.handle(payload, msg).await,
             Message::SearchEntry(ref msg) => self.message_handler.handle(payload, msg).await,
             Message::FoundEntry(ref msg) => self.message_handler.handle(payload, msg).await,
             Message::SyncEntriesWithSuccessor(ref msg) => {

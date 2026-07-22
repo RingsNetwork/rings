@@ -218,12 +218,15 @@ impl OnionHttpsRuntime {
                 continue;
             }
             let (sender, receiver) = oneshot::channel();
-            pending.insert(id, PendingRequest {
-                expected_return_peer,
-                expected_exit,
-                return_id,
-                sender,
-            });
+            pending.insert(
+                id,
+                PendingRequest {
+                    expected_return_peer,
+                    expected_exit,
+                    return_id,
+                    sender,
+                },
+            );
             return Ok((id, receiver));
         }
         Err(Error::OnionRouteError(

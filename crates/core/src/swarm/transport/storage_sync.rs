@@ -4,6 +4,8 @@ use super::SwarmTransport;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
 use crate::dht::Did;
+use crate::dht::PeerRingAction;
+use crate::dht::PeerRingRemoteAction;
 use crate::dht::StorageSyncDestination;
 use crate::dht::StorageSyncPurpose;
 use crate::error::Error;
@@ -86,6 +88,16 @@ fn validate_report_acks(
     Ok(())
 }
 
+fn storage_sync_destination_accepts_placement(
+    destination: StorageSyncDestination,
+    placement: Did,
+) -> bool {
+    match destination {
+        StorageSyncDestination::PhysicalOwner(_) => true,
+        StorageSyncDestination::PlacementKey(key) => key == placement,
+    }
+}
+
 // Post: pending.len() < STORAGE_SYNC_ACK_CAPACITY.
 // Preservation: evicting an old pending capability before inserting a new one
 // can only make that old report fail validation; it cannot make an unproven
@@ -104,6 +116,26 @@ fn evict_storage_sync_acks(pending: &mut StorageSyncAckMap) {
 }
 
 impl SwarmTransport {
+    async fn apply_local_storage_sync(&self, msg: &SyncEntriesWithSuccessor) -> Result<()> {
+        for placed in msg.data.iter() {
+            if !storage_sync_destination_accepts_placement(msg.destination, placed.key) {
+                continue;
+            }
+
+            match self.dht.find_storage_owner(placed.key)? {
+                PeerRingAction::Some(_) => {
+                    placed.validate_placement(self.storage_redundancy())?;
+                    self.dht
+                        .join_storage_entry(placed.key, placed.entry.clone())
+                        .await?;
+                }
+                PeerRingAction::RemoteAction(_, PeerRingRemoteAction::FindSuccessor(_)) => {}
+                action => return Err(Error::unexpected_peer_ring_action(action)),
+            }
+        }
+        Ok(())
+    }
+
     /// Record the exact ack capability created by an outbound storage-sync payload.
     ///
     /// Pre: `tx_id` is the transaction id of the payload whose message data is
@@ -210,15 +242,14 @@ impl SwarmTransport {
         msg: SyncEntriesWithSuccessor,
     ) -> Result<uuid::Uuid> {
         let destination = msg.destination.did();
-        let next_hop = self
-            .dht
-            .next_hop_for_storage_sync(msg.destination)?
-            .ok_or_else(|| {
-                Error::InvalidMessage(
-                    "storage sync destination resolves to local branch at send boundary"
-                        .to_string(),
-                )
-            })?;
+        let Some(next_hop) = self.dht.next_hop_for_storage_sync(msg.destination)? else {
+            self.apply_local_storage_sync(&msg).await?;
+            return Ok(uuid::Uuid::new_v4());
+        };
+        if next_hop == self.dht.did {
+            self.apply_local_storage_sync(&msg).await?;
+            return Ok(uuid::Uuid::new_v4());
+        }
         let payload = MessagePayload::new_send(
             Message::SyncEntriesWithSuccessor(msg.clone()),
             self.session_sk(),

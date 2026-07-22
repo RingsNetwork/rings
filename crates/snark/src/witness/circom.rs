@@ -219,12 +219,15 @@ impl CircomBase for Wasm {
         hash_lsb: u32,
     ) -> Result<()> {
         let func = self.func("getSignalOffset32")?;
-        func.call(store, &[
-            p_sig_offset.into(),
-            component.into(),
-            hash_msb.into(),
-            hash_lsb.into(),
-        ])?;
+        func.call(
+            store,
+            &[
+                p_sig_offset.into(),
+                component.into(),
+                hash_msb.into(),
+                hash_lsb.into(),
+            ],
+        )?;
 
         Ok(())
     }
@@ -238,12 +241,10 @@ impl CircomBase for Wasm {
         p_val: u32,
     ) -> Result<()> {
         let func = self.func("setSignal")?;
-        func.call(store, &[
-            c_idx.into(),
-            component.into(),
-            signal.into(),
-            p_val.into(),
-        ])?;
+        func.call(
+            store,
+            &[c_idx.into(), component.into(), signal.into(), p_val.into()],
+        )?;
 
         Ok(())
     }

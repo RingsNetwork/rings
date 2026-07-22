@@ -23,6 +23,21 @@ pub(crate) fn get_epoch_ms_i64() -> i64 {
     i64::try_from(get_epoch_ms()).unwrap_or(i64::MAX)
 }
 
+/// Sleep for `duration` on the active runtime.
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+pub(crate) async fn sleep(duration: std::time::Duration) {
+    futures_timer::Delay::new(duration).await;
+}
+
+/// Sleep for `duration` on the JavaScript event loop.
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+pub(crate) async fn sleep(duration: std::time::Duration) {
+    let millis = i32::try_from(duration.as_millis()).unwrap_or(i32::MAX);
+    if let Err(error) = js_utils::window_sleep(millis).await {
+        tracing::error!("failed to wait for timeout: {:?}", error);
+    }
+}
+
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 /// Toolset for wasm
 pub mod js_value {
@@ -233,7 +248,9 @@ pub mod js_utils {
     }
 
     fn schedule_sleep<F>(resolve: js_sys::Function, reject: js_sys::Function, schedule: F)
-    where F: FnOnce(&js_sys::Function) -> Result<i32, JsValue> {
+    where
+        F: FnOnce(&js_sys::Function) -> Result<i32, JsValue>,
+    {
         let func = Closure::once_into_js(move || {
             resolve_sleep(&resolve);
         });

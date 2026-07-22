@@ -16,6 +16,8 @@ use crate::message::types::ConnectNodeSend;
 use crate::message::types::FindSuccessorReport;
 use crate::message::types::FindSuccessorSend;
 use crate::message::types::Message;
+use crate::message::types::PeerLivenessProbe;
+use crate::message::types::PeerLivenessReport;
 use crate::message::types::QueryForTopoInfoReport;
 use crate::message::types::QueryForTopoInfoSend;
 use crate::message::types::Then;
@@ -54,6 +56,35 @@ fn connect_successor_hint(dht: &PeerRing, requester: Did, reported: Did) -> Resu
         .into_iter()
         .next()
         .unwrap_or(reported))
+}
+
+/// PeerLivenessProbe is a direct overlay liveness probe.
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
+impl HandleMsg<PeerLivenessProbe> for MessageHandler {
+    async fn handle(&self, ctx: &MessagePayload, msg: &PeerLivenessProbe) -> Result<()> {
+        if ctx.should_forward_from(self.dht.did) {
+            return self
+                .run_effects([PayloadRelayFunctor::forward_payload(ctx, None).into()])
+                .await;
+        }
+
+        self.run_effects([PayloadRelayFunctor::send_report_message(
+            ctx,
+            Message::PeerLivenessReport(msg.resp()),
+        )
+        .into()])
+            .await
+    }
+}
+
+/// PeerLivenessReport is handled by the callback's verified-inbound liveness update.
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
+impl HandleMsg<PeerLivenessReport> for MessageHandler {
+    async fn handle(&self, _ctx: &MessagePayload, _msg: &PeerLivenessReport) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// QueryForTopoInfoSend is direct message
@@ -117,21 +148,66 @@ impl HandleMsg<QueryForTopoInfoReport> for MessageHandler {
 impl HandleMsg<ConnectNodeSend> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &ConnectNodeSend) -> Result<()> {
         if !self.transport.accepts_connection_offer(msg) {
+            tracing::warn!(
+                local = %self.dht.did,
+                tx_id = %ctx.transaction.tx_id,
+                origin = ?ctx.relay.try_origin_sender().ok(),
+                relay_destination = %ctx.relay.destination,
+                transaction_destination = %ctx.transaction.destination,
+                mode = ?msg.dht_protocol_mode(),
+                "CONNECT_NODE offer rejected by DHT protocol mismatch"
+            );
             return Ok(());
         }
 
         if ctx.should_forward_from(self.dht.did) {
+            tracing::info!(
+                local = %self.dht.did,
+                tx_id = %ctx.transaction.tx_id,
+                origin = ?ctx.relay.try_origin_sender().ok(),
+                next_hop = %ctx.relay.next_hop,
+                relay_destination = %ctx.relay.destination,
+                transaction_destination = %ctx.transaction.destination,
+                sdp_bytes = msg.sdp.len(),
+                "CONNECT_NODE offer forward"
+            );
             self.run_effects([PayloadRelayFunctor::forward_payload(ctx, None).into()])
                 .await
         } else {
-            let answer = self
+            let peer = ctx.relay.try_origin_sender()?;
+            tracing::info!(
+                local = %self.dht.did,
+                peer = %peer,
+                tx_id = %ctx.transaction.tx_id,
+                sdp_bytes = msg.sdp.len(),
+                "CONNECT_NODE offer answer start"
+            );
+            let answer = match self
                 .transport
-                .answer_remote_connection(
-                    ctx.relay.try_origin_sender()?,
-                    self.inner_callback(),
-                    msg,
-                )
-                .await?;
+                .answer_remote_connection(peer, self.inner_callback(), msg)
+                .await
+            {
+                Ok(answer) => {
+                    tracing::info!(
+                        local = %self.dht.did,
+                        peer = %peer,
+                        tx_id = %ctx.transaction.tx_id,
+                        sdp_bytes = answer.sdp.len(),
+                        "CONNECT_NODE offer answer complete"
+                    );
+                    answer
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        local = %self.dht.did,
+                        peer = %peer,
+                        tx_id = %ctx.transaction.tx_id,
+                        error = ?error,
+                        "CONNECT_NODE offer answer failed"
+                    );
+                    return Err(error);
+                }
+            };
             self.run_effects([PayloadRelayFunctor::send_report_message(
                 ctx,
                 Message::ConnectNodeReport(answer),
@@ -147,12 +223,48 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
 impl HandleMsg<ConnectNodeReport> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &ConnectNodeReport) -> Result<()> {
         if ctx.should_forward_from(self.dht.did) {
+            tracing::info!(
+                local = %self.dht.did,
+                tx_id = %ctx.transaction.tx_id,
+                origin = ?ctx.relay.try_origin_sender().ok(),
+                next_hop = %ctx.relay.next_hop,
+                relay_destination = %ctx.relay.destination,
+                transaction_destination = %ctx.transaction.destination,
+                sdp_bytes = msg.sdp.len(),
+                "CONNECT_NODE answer forward"
+            );
             self.run_effects([PayloadRelayFunctor::forward_payload(ctx, None).into()])
                 .await
         } else {
-            self.transport
-                .accept_remote_connection(ctx.relay.try_origin_sender()?, msg)
-                .await
+            let peer = ctx.relay.try_origin_sender()?;
+            tracing::info!(
+                local = %self.dht.did,
+                peer = %peer,
+                tx_id = %ctx.transaction.tx_id,
+                sdp_bytes = msg.sdp.len(),
+                "CONNECT_NODE answer accept start"
+            );
+            match self.transport.accept_remote_connection(peer, msg).await {
+                Ok(()) => {
+                    tracing::info!(
+                        local = %self.dht.did,
+                        peer = %peer,
+                        tx_id = %ctx.transaction.tx_id,
+                        "CONNECT_NODE answer accept complete"
+                    );
+                    Ok(())
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        local = %self.dht.did,
+                        peer = %peer,
+                        tx_id = %ctx.transaction.tx_id,
+                        error = ?error,
+                        "CONNECT_NODE answer accept failed"
+                    );
+                    Err(error)
+                }
+            }
         }
     }
 }
@@ -430,27 +542,27 @@ pub mod tests {
             node1.assert_transports(vec![node2.did(), node3.did()]);
             node2.assert_transports(vec![node1.did(), node3.did()]);
             node3.assert_transports(vec![node1.did(), node2.did()]);
-            assert_eq!(node1.dht().successors().list()?, vec![
-                node2.did(),
-                node3.did()
-            ]);
-            assert_eq!(node2.dht().successors().list()?, vec![
-                node3.did(),
-                node1.did()
-            ]);
-            assert_eq!(node3.dht().successors().list()?, vec![
-                node1.did(),
-                node2.did()
-            ]);
+            assert_eq!(
+                node1.dht().successors().list()?,
+                vec![node2.did(), node3.did()]
+            );
+            assert_eq!(
+                node2.dht().successors().list()?,
+                vec![node3.did(), node1.did()]
+            );
+            assert_eq!(
+                node3.dht().successors().list()?,
+                vec![node1.did(), node2.did()]
+            );
         } else {
             node1.assert_transports(vec![node2.did()]);
             node2.assert_transports(vec![node1.did(), node3.did()]);
             node3.assert_transports(vec![node2.did()]);
             assert_eq!(node1.dht().successors().list()?, vec![node2.did(),]);
-            assert_eq!(node2.dht().successors().list()?, vec![
-                node3.did(),
-                node1.did()
-            ]);
+            assert_eq!(
+                node2.dht().successors().list()?,
+                vec![node3.did(), node1.did()]
+            );
             assert_eq!(node3.dht().successors().list()?, vec![node2.did()]);
         }
 
@@ -468,18 +580,18 @@ pub mod tests {
         node1.assert_transports(vec![node2.did(), node3.did()]);
         node2.assert_transports(vec![node1.did(), node3.did()]);
         node3.assert_transports(vec![node1.did(), node2.did()]);
-        assert_eq!(node1.dht().successors().list()?, vec![
-            node2.did(),
-            node3.did()
-        ]);
-        assert_eq!(node2.dht().successors().list()?, vec![
-            node3.did(),
-            node1.did()
-        ]);
-        assert_eq!(node3.dht().successors().list()?, vec![
-            node1.did(),
-            node2.did()
-        ]);
+        assert_eq!(
+            node1.dht().successors().list()?,
+            vec![node2.did(), node3.did()]
+        );
+        assert_eq!(
+            node2.dht().successors().list()?,
+            vec![node3.did(), node1.did()]
+        );
+        assert_eq!(
+            node3.dht().successors().list()?,
+            vec![node1.did(), node2.did()]
+        );
 
         Ok((node1, node2, node3))
     }
@@ -518,27 +630,27 @@ pub mod tests {
             node1.assert_transports(vec![node2.did(), node3.did()]);
             node2.assert_transports(vec![node1.did(), node3.did()]);
             node3.assert_transports(vec![node1.did(), node2.did()]);
-            assert_eq!(node1.dht().successors().list()?, vec![
-                node3.did(),
-                node2.did()
-            ]);
-            assert_eq!(node2.dht().successors().list()?, vec![
-                node1.did(),
-                node3.did()
-            ]);
-            assert_eq!(node3.dht().successors().list()?, vec![
-                node2.did(),
-                node1.did()
-            ]);
+            assert_eq!(
+                node1.dht().successors().list()?,
+                vec![node3.did(), node2.did()]
+            );
+            assert_eq!(
+                node2.dht().successors().list()?,
+                vec![node1.did(), node3.did()]
+            );
+            assert_eq!(
+                node3.dht().successors().list()?,
+                vec![node2.did(), node1.did()]
+            );
         } else {
             node1.assert_transports(vec![node2.did()]);
             node2.assert_transports(vec![node1.did(), node3.did()]);
             node3.assert_transports(vec![node2.did()]);
             assert_eq!(node1.dht().successors().list()?, vec![node2.did()]);
-            assert_eq!(node2.dht().successors().list()?, vec![
-                node1.did(),
-                node3.did()
-            ]);
+            assert_eq!(
+                node2.dht().successors().list()?,
+                vec![node1.did(), node3.did()]
+            );
             assert_eq!(node3.dht().successors().list()?, vec![node2.did()]);
         }
 
@@ -556,18 +668,18 @@ pub mod tests {
         node1.assert_transports(vec![node2.did(), node3.did()]);
         node2.assert_transports(vec![node1.did(), node3.did()]);
         node3.assert_transports(vec![node1.did(), node2.did()]);
-        assert_eq!(node1.dht().successors().list()?, vec![
-            node3.did(),
-            node2.did()
-        ]);
-        assert_eq!(node2.dht().successors().list()?, vec![
-            node1.did(),
-            node3.did()
-        ]);
-        assert_eq!(node3.dht().successors().list()?, vec![
-            node2.did(),
-            node1.did()
-        ]);
+        assert_eq!(
+            node1.dht().successors().list()?,
+            vec![node3.did(), node2.did()]
+        );
+        assert_eq!(
+            node2.dht().successors().list()?,
+            vec![node1.did(), node3.did()]
+        );
+        assert_eq!(
+            node3.dht().successors().list()?,
+            vec![node2.did(), node1.did()]
+        );
 
         Ok((node1, node2, node3))
     }
@@ -617,26 +729,22 @@ pub mod tests {
         node2.assert_transports(vec![node3.did(), node4.did(), node1.did()]);
         node3.assert_transports(vec![node4.did(), node1.did(), node2.did()]);
         node4.assert_transports(vec![node1.did(), node2.did(), node3.did()]);
-        assert_eq!(node1.dht().successors().list()?, vec![
-            node2.did(),
-            node3.did(),
-            node4.did(),
-        ]);
-        assert_eq!(node2.dht().successors().list()?, vec![
-            node3.did(),
-            node4.did(),
-            node1.did(),
-        ]);
-        assert_eq!(node3.dht().successors().list()?, vec![
-            node4.did(),
-            node1.did(),
-            node2.did(),
-        ]);
-        assert_eq!(node4.dht().successors().list()?, vec![
-            node1.did(),
-            node2.did(),
-            node3.did(),
-        ]);
+        assert_eq!(
+            node1.dht().successors().list()?,
+            vec![node2.did(), node3.did(), node4.did(),]
+        );
+        assert_eq!(
+            node2.dht().successors().list()?,
+            vec![node3.did(), node4.did(), node1.did(),]
+        );
+        assert_eq!(
+            node3.dht().successors().list()?,
+            vec![node4.did(), node1.did(), node2.did(),]
+        );
+        assert_eq!(
+            node4.dht().successors().list()?,
+            vec![node1.did(), node2.did(), node3.did(),]
+        );
 
         println!("========================================");
         println!("| test node4 connect node3 via dht     |");
@@ -677,26 +785,22 @@ pub mod tests {
         node2.assert_transports(vec![node3.did(), node4.did(), node1.did()]);
         node3.assert_transports(vec![node4.did(), node1.did(), node2.did()]);
         node4.assert_transports(vec![node1.did(), node2.did(), node3.did()]);
-        assert_eq!(node1.dht().successors().list()?, vec![
-            node2.did(),
-            node3.did(),
-            node4.did()
-        ]);
-        assert_eq!(node2.dht().successors().list()?, vec![
-            node3.did(),
-            node4.did(),
-            node1.did(),
-        ]);
-        assert_eq!(node3.dht().successors().list()?, vec![
-            node4.did(),
-            node1.did(),
-            node2.did(),
-        ]);
-        assert_eq!(node4.dht().successors().list()?, vec![
-            node1.did(),
-            node2.did(),
-            node3.did(),
-        ]);
+        assert_eq!(
+            node1.dht().successors().list()?,
+            vec![node2.did(), node3.did(), node4.did()]
+        );
+        assert_eq!(
+            node2.dht().successors().list()?,
+            vec![node3.did(), node4.did(), node1.did(),]
+        );
+        assert_eq!(
+            node3.dht().successors().list()?,
+            vec![node4.did(), node1.did(), node2.did(),]
+        );
+        assert_eq!(
+            node4.dht().successors().list()?,
+            vec![node1.did(), node2.did(), node3.did(),]
+        );
 
         Ok(())
     }
@@ -726,16 +830,14 @@ pub mod tests {
         assert_no_more_msg([&node1, &node2, &node3, &joining]).await;
 
         joining.assert_transports(vec![node1.did(), node2.did(), node3.did()]);
-        assert_eq!(node1.dht().successors().list()?, vec![
-            joining.did(),
-            node2.did(),
-            node3.did(),
-        ]);
-        assert_eq!(joining.dht().successors().list()?, vec![
-            node2.did(),
-            node3.did(),
-            node1.did(),
-        ]);
+        assert_eq!(
+            node1.dht().successors().list()?,
+            vec![joining.did(), node2.did(), node3.did(),]
+        );
+        assert_eq!(
+            joining.dht().successors().list()?,
+            vec![node2.did(), node3.did(), node1.did(),]
+        );
 
         Ok(())
     }

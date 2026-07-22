@@ -89,10 +89,12 @@ pub async fn test_calcu_sha256_recursive_snark() -> Result<()> {
     print_mem_status(Some("after gen pp"));
     let first_recursive = first_circuit(&recursive_circuits)?;
     let first_public_inputs = first_recursive.get_public_inputs()?;
-    let mut rec_snark =
-        snark::SNARK::<E1, E2>::new(first_recursive, &pp, &first_public_inputs, &vec![F2::from(
-            0,
-        )])?;
+    let mut rec_snark = snark::SNARK::<E1, E2>::new(
+        first_recursive,
+        &pp,
+        &first_public_inputs,
+        &vec![F2::from(0)],
+    )?;
     print_mem_status(Some("after gen recursive snark"));
     for c in recursive_circuits {
         rec_snark.foldr(&pp, &c)?;
@@ -121,9 +123,12 @@ pub async fn test_calcu_sha256_recursive_snark() -> Result<()> {
         rec_snark.foldr(&pp, &c)?;
     }
     print_mem_status(Some("after foldr circuits"));
-    let (_z0, _) = rec_snark.verify(&pp, round + round2, &input_inner.clone(), &vec![F2::from(
-        0,
-    )])?;
+    let (_z0, _) = rec_snark.verify(
+        &pp,
+        round + round2,
+        &input_inner.clone(),
+        &vec![F2::from(0)],
+    )?;
     print_mem_status(Some("after verify"));
     Ok(())
 }
@@ -174,25 +179,32 @@ pub async fn test_calcu_bn256_recursive_snark_with_private_input() -> Result<()>
     let pp = snark::SNARK::<E1, E2>::gen_pp::<S1, S2>(circuit_0.clone())?;
     let first_recursive = first_circuit(&recursive_circuits)?;
     let first_public_inputs = first_recursive.get_public_inputs()?;
-    let mut rec_snark_iter =
-        snark::SNARK::<E1, E2>::new(first_recursive, &pp, &first_public_inputs, vec![F2::from(
-            0,
-        )])?;
+    let mut rec_snark_iter = snark::SNARK::<E1, E2>::new(
+        first_recursive,
+        &pp,
+        &first_public_inputs,
+        vec![F2::from(0)],
+    )?;
 
     for c in recursive_circuits {
         rec_snark_iter.foldr(&pp, &c)?;
     }
-    rec_snark_iter.verify(&pp, 3, &vec![F1::from(4u64), F1::from(2u64)], &vec![
-        F2::from(0),
-    ])?;
+    rec_snark_iter.verify(
+        &pp,
+        3,
+        &vec![F1::from(4u64), F1::from(2u64)],
+        &vec![F2::from(0)],
+    )?;
     println!("success on create recursive snark");
     let (pk, vk) = snark::SNARK::<E1, E2>::compress_setup::<S1, S2>(&pp)?;
 
     let compress_snark = rec_snark_iter.compress_prove::<S1, S2>(&pp, &pk)?;
-    let ret = snark::SNARK::<E1, E2>::compress_verify::<S1, S2>(compress_snark, &vk, 3, &vec![
-        F1::from(4u64),
-        F1::from(2u64),
-    ]);
+    let ret = snark::SNARK::<E1, E2>::compress_verify::<S1, S2>(
+        compress_snark,
+        &vk,
+        3,
+        &vec![F1::from(4u64), F1::from(2u64)],
+    );
     assert!(ret.is_ok());
     Ok(())
 }

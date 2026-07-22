@@ -202,7 +202,9 @@ fn pending_peer_pool_expires_unopened_handshakes() -> Result<()> {
     let attempt = pool.reserve(peer, now)?;
 
     let expired = pool.expire(now + PENDING_CONNECTION_TIMEOUT_MS);
-    assert_eq!(expired, vec![attempt]);
+    assert_eq!(expired.len(), 1);
+    assert_eq!(expired[0].attempt, attempt);
+    assert_eq!(expired[0].age_ms, PENDING_CONNECTION_TIMEOUT_MS);
     assert_eq!(pool.len(), 0);
     Ok(())
 }

@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -6,6 +7,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use tokio::sync::mpsc;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
@@ -65,6 +67,101 @@ const DELIVERY_POLL_INTERVAL: Duration = Duration::from_millis(300);
 /// (which yields) in the other, making an earlier future resolve against a
 /// later message's bytes.
 type TrackedChannel = (Arc<RTCDataChannel>, Arc<AtomicU64>, Arc<Mutex<()>>);
+
+fn sdp_candidate_count(sdp: &str) -> usize {
+    sdp.lines()
+        .filter(|line| line.starts_with("a=candidate:"))
+        .count()
+}
+
+fn external_address_candidates(external_address: Option<&str>) -> Vec<String> {
+    let Some(external_address) = external_address else {
+        return Vec::new();
+    };
+
+    let mut candidates = Vec::new();
+    for candidate in external_address.split(',') {
+        let candidate = candidate.trim();
+        if candidate.is_empty() || candidates.iter().any(|seen| seen == candidate) {
+            continue;
+        }
+        candidates.push(candidate.to_string());
+    }
+    candidates
+}
+
+fn is_loopback_address(candidate: &str) -> bool {
+    candidate
+        .parse::<IpAddr>()
+        .map(|addr| addr.is_loopback())
+        .unwrap_or(false)
+}
+
+fn nat_1to1_host_candidates(candidates: &[String]) -> Vec<String> {
+    candidates
+        .iter()
+        .filter(|candidate| !is_loopback_address(candidate))
+        .cloned()
+        .collect()
+}
+
+fn sdp_extra_host_candidates(candidates: &[String]) -> Vec<String> {
+    candidates
+        .iter()
+        .filter(|candidate| is_loopback_address(candidate))
+        .cloned()
+        .collect()
+}
+
+fn duplicate_host_candidate_line(line: &str, extra_addresses: &[String]) -> Vec<String> {
+    if !line.starts_with("a=candidate:") {
+        return Vec::new();
+    }
+
+    let fields = line.split_whitespace().collect::<Vec<_>>();
+    if fields.len() < 8 || fields[6] != "typ" || fields[7] != "host" {
+        return Vec::new();
+    }
+
+    extra_addresses
+        .iter()
+        .filter(|candidate| candidate.as_str() != fields[4])
+        .map(|candidate| {
+            let mut duplicate = fields
+                .iter()
+                .map(|field| field.to_string())
+                .collect::<Vec<_>>();
+            duplicate[4] = candidate.clone();
+            duplicate.join(" ")
+        })
+        .collect()
+}
+
+fn append_sdp_extra_host_candidates(sdp: String, extra_addresses: &[String]) -> String {
+    if extra_addresses.is_empty() {
+        return sdp;
+    }
+
+    let mut output = String::with_capacity(sdp.len());
+    for segment in sdp.split_inclusive('\n') {
+        output.push_str(segment);
+
+        let line = segment.trim_end_matches(['\r', '\n']);
+        let line_ending = if segment.ends_with("\r\n") {
+            "\r\n"
+        } else if segment.ends_with('\n') {
+            "\n"
+        } else {
+            ""
+        };
+        for duplicate in duplicate_host_candidate_line(line, extra_addresses) {
+            output.push_str(&duplicate);
+            output.push_str(line_ending);
+        }
+    }
+
+    output
+}
 
 /// Build the future that resolves once the message ending at `end_offset` on
 /// this channel has been flushed to the wire, or errors if the channel closes
@@ -131,6 +228,7 @@ pub struct WebrtcConnection {
     webrtc_data_channel: Arc<RoundRobinPool<TrackedChannel>>,
     webrtc_data_channel_state_notifier: Notifier,
     cancel_token: CancellationToken,
+    sdp_extra_host_candidates: Vec<String>,
     /// Negotiated SCTP `max_message_size` (RFC 8841), parsed from the remote SDP at handshake.
     /// `0` means not yet negotiated. webrtc-rs exposes no getter, so we track it ourselves.
     remote_max_message_size: Arc<AtomicUsize>,
@@ -150,18 +248,22 @@ impl WebrtcConnection {
         webrtc_conn: RTCPeerConnection,
         webrtc_data_channel: Arc<RoundRobinPool<TrackedChannel>>,
         webrtc_data_channel_state_notifier: Notifier,
+        sdp_extra_host_candidates: Vec<String>,
     ) -> Self {
         Self {
             webrtc_conn,
             webrtc_data_channel,
             webrtc_data_channel_state_notifier,
             cancel_token: CancellationToken::new(),
+            sdp_extra_host_candidates,
             remote_max_message_size: Arc::new(AtomicUsize::new(0)),
         }
     }
 
-    async fn webrtc_gather(&self) -> Result<String> {
-        let mut gathering_complete_promise = self.webrtc_conn.gathering_complete_promise().await;
+    async fn webrtc_gather(
+        &self,
+        mut gathering_complete_promise: mpsc::Receiver<()>,
+    ) -> Result<String> {
         let gathering_complete_promise_with_timeout = tokio::time::timeout(
             std::time::Duration::from_secs(WEBRTC_GATHER_TIMEOUT.into()),
             gathering_complete_promise.recv(),
@@ -171,17 +273,40 @@ impl WebrtcConnection {
             _ = self.cancel_token.cancelled() => {
                 return Err(Error::WebrtcLocalSdpGenerationError("Local connection closed".to_string()))
             }
-            _ = gathering_complete_promise_with_timeout => {}
+            result = gathering_complete_promise_with_timeout => {
+                if result.is_err() {
+                    return Err(Error::WebrtcLocalSdpGenerationError(format!(
+                        "Webrtc gathering is not completed in {WEBRTC_GATHER_TIMEOUT} seconds"
+                    )));
+                }
+            }
         }
 
-        Ok(self
+        let sdp = self
             .webrtc_conn
             .local_description()
             .await
             .ok_or(Error::WebrtcLocalSdpGenerationError(
                 "Failed to get local description".to_string(),
             ))?
-            .sdp)
+            .sdp;
+        let sdp = append_sdp_extra_host_candidates(sdp, &self.sdp_extra_host_candidates);
+
+        let candidate_count = sdp_candidate_count(&sdp);
+        if candidate_count == 0 {
+            tracing::warn!(
+                sdp_bytes = sdp.len(),
+                "WebRTC local SDP has no ICE candidates after gathering"
+            );
+        } else {
+            tracing::debug!(
+                sdp_bytes = sdp.len(),
+                candidate_count,
+                "WebRTC ICE gathering complete"
+            );
+        }
+
+        Ok(sdp)
     }
 }
 
@@ -258,11 +383,12 @@ impl ConnectionInterface for WebrtcConnection {
 
     async fn webrtc_create_offer(&self) -> Result<Self::Sdp> {
         let setting_offer = self.webrtc_conn.create_offer(None).await?;
+        let gathering_complete_promise = self.webrtc_conn.gathering_complete_promise().await;
         self.webrtc_conn
             .set_local_description(setting_offer.clone())
             .await?;
 
-        self.webrtc_gather().await
+        self.webrtc_gather(gathering_complete_promise).await
     }
 
     async fn webrtc_answer_offer(&self, offer: Self::Sdp) -> Result<Self::Sdp> {
@@ -275,10 +401,11 @@ impl ConnectionInterface for WebrtcConnection {
         self.webrtc_conn.set_remote_description(offer).await?;
 
         let answer = self.webrtc_conn.create_answer(None).await?;
+        let gathering_complete_promise = self.webrtc_conn.gathering_complete_promise().await;
         self.webrtc_conn
             .set_local_description(answer.clone())
             .await?;
-        let local_sdp = self.webrtc_gather().await?;
+        let local_sdp = self.webrtc_gather(gathering_complete_promise).await?;
 
         self.remote_max_message_size
             .store(negotiated_max_message_size, Ordering::SeqCst);
@@ -359,12 +486,24 @@ impl TransportInterface for WebrtcTransport {
 
         let mut setting = webrtc::api::setting_engine::SettingEngine::default();
         set_udp_network_range(&mut setting, self.udp_port_range)?;
-        if let Some(ref addr) = self.external_address {
-            tracing::debug!("setting external ip {:?}", addr);
-            setting.set_nat_1to1_ips(vec![addr.to_string()], RTCIceCandidateType::Host);
+        let external_addresses = external_address_candidates(self.external_address.as_deref());
+        let nat_host_candidates = nat_1to1_host_candidates(&external_addresses);
+        let sdp_extra_host_candidates = sdp_extra_host_candidates(&external_addresses);
+        if nat_host_candidates.is_empty() {
             setting.set_ice_multicast_dns_mode(MulticastDnsMode::Disabled);
         } else {
+            tracing::debug!(
+                external_addresses = ?nat_host_candidates,
+                "setting external WebRTC host candidates"
+            );
+            setting.set_nat_1to1_ips(nat_host_candidates, RTCIceCandidateType::Host);
             setting.set_ice_multicast_dns_mode(MulticastDnsMode::Disabled);
+        }
+        if !sdp_extra_host_candidates.is_empty() {
+            tracing::debug!(
+                extra_host_candidates = ?sdp_extra_host_candidates,
+                "will append SDP-only WebRTC host candidates"
+            );
         }
 
         let webrtc_api = webrtc::api::APIBuilder::new()
@@ -392,16 +531,25 @@ impl TransportInterface for WebrtcTransport {
             let d_label = d.label();
             let d_id = d.id();
             tracing::debug!("New DataChannel {d_label} {d_id}");
-            // Open/close are detected on the channels we create (the pool, wired
-            // below); a received channel only carries inbound messages. Wiring
-            // open/close here too would fire on_data_channel_open twice (created
-            // + received) and churn join_dht.
+            // Open is admitted on channels we create (the pool, wired below).
+            // Close must also be observed on received channels: the answerer may
+            // never see close on its locally-created channels when the initiator's
+            // channels are the ones carrying traffic.
+            let on_close_inner_cb = data_channel_inner_cb.clone();
+            d.on_close(Box::new(move || {
+                let cb = on_close_inner_cb.clone();
+                Box::pin(async move {
+                    cb.on_data_channel_close().await;
+                })
+            }));
+
             let on_message_inner_cb = data_channel_inner_cb.clone();
             d.on_message(Box::new(move |msg: DataChannelMessage| {
                 tracing::debug!(
-                    "Received DataChannelMessage from {}: {:?}",
-                    on_message_inner_cb.cid,
-                    msg
+                    peer = %on_message_inner_cb.cid,
+                    is_string = msg.is_string,
+                    bytes = msg.data.len(),
+                    "Received DataChannelMessage"
                 );
 
                 let inner_cb = on_message_inner_cb.clone();
@@ -474,6 +622,7 @@ impl TransportInterface for WebrtcTransport {
             webrtc_conn,
             channel_pool,
             webrtc_data_channel_state_notifier,
+            sdp_extra_host_candidates,
         );
 
         self.pool.safely_insert(cid, conn)?;
@@ -560,5 +709,45 @@ mod tests {
         let transport = WebrtcTransport::new("", None, Some(range));
 
         assert_eq!(transport.udp_port_range, Some(range));
+    }
+
+    #[test]
+    fn external_address_candidates_split_trim_and_deduplicate() {
+        let candidates = external_address_candidates(Some(" 127.0.0.1, 192.168.215.2,127.0.0.1, "));
+
+        assert_eq!(
+            candidates,
+            vec!["127.0.0.1".to_string(), "192.168.215.2".to_string()]
+        );
+    }
+
+    #[test]
+    fn external_address_candidates_ignore_blank_config() {
+        assert!(external_address_candidates(Some("  ,  ")).is_empty());
+        assert!(external_address_candidates(None).is_empty());
+    }
+
+    #[test]
+    fn loopback_external_addresses_are_sdp_only_candidates() {
+        let candidates = vec!["127.0.0.1".to_string(), "192.168.215.2".to_string()];
+
+        assert_eq!(nat_1to1_host_candidates(&candidates), vec!["192.168.215.2"]);
+        assert_eq!(sdp_extra_host_candidates(&candidates), vec!["127.0.0.1"]);
+    }
+
+    #[test]
+    fn append_sdp_extra_host_candidates_duplicates_host_candidates() {
+        let sdp = "v=0\r\n\
+a=candidate:1 1 udp 2130706431 192.168.215.2 49160 typ host\r\n\
+a=end-of-candidates\r\n"
+            .to_string();
+
+        let rewritten = append_sdp_extra_host_candidates(sdp, &["127.0.0.1".to_string()]);
+
+        assert!(rewritten.contains(
+            "a=candidate:1 1 udp 2130706431 192.168.215.2 49160 typ host\r\n\
+a=candidate:1 1 udp 2130706431 127.0.0.1 49160 typ host\r\n"
+        ));
+        assert!(rewritten.ends_with("a=end-of-candidates\r\n"));
     }
 }

@@ -305,11 +305,15 @@ impl TransportSessions {
                 }
                 // Forward the first datagram that triggered this flow.
                 let from_opener = opened_by_us(&key);
-                let _ = send_frame(&scope, key.peer, Frame::Data {
-                    session: key.session,
-                    from_opener,
-                    bytes: first,
-                })
+                let _ = send_frame(
+                    &scope,
+                    key.peer,
+                    Frame::Data {
+                        session: key.session,
+                        from_opener,
+                        bytes: first,
+                    },
+                )
                 .await;
             }
         }
@@ -352,12 +356,15 @@ impl TransportSessions {
         let (outbound, outbound_rx) = mpsc::channel::<Outbound>(1024);
         let cancel = CancellationToken::new();
         let generation = self.generations.fetch_add(1, Ordering::Relaxed);
-        self.insert(key, SessionHandle {
-            outbound,
-            cancel: cancel.clone(),
-            src,
-            generation,
-        });
+        self.insert(
+            key,
+            SessionHandle {
+                outbound,
+                cancel: cancel.clone(),
+                src,
+                generation,
+            },
+        );
         (outbound_rx, cancel, generation)
     }
 
@@ -423,10 +430,14 @@ impl RelayTask {
             .close_if_current(&self.scope, &self.key, self.generation)
             .await
         {
-            let _ = send_frame(&self.scope, self.key.peer, Frame::Close {
-                session: self.key.session,
-                from_opener: opened_by_us(&self.key),
-            })
+            let _ = send_frame(
+                &self.scope,
+                self.key.peer,
+                Frame::Close {
+                    session: self.key.session,
+                    from_opener: opened_by_us(&self.key),
+                },
+            )
             .await;
         }
     }
@@ -439,10 +450,14 @@ fn opened_by_us(key: &SessionKey) -> bool {
 
 /// Send `Frame::Open` to the session's peer (client side, on a new local connection/flow).
 async fn open(scope: &Scope, key: &SessionKey, service: &str) -> Result<()> {
-    send_frame(scope, key.peer, Frame::Open {
-        session: key.session,
-        service: service.to_string(),
-    })
+    send_frame(
+        scope,
+        key.peer,
+        Frame::Open {
+            session: key.session,
+            service: service.to_string(),
+        },
+    )
     .await
 }
 

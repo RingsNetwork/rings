@@ -208,7 +208,7 @@ async fn run_storage_repair_transport_effects(
     transport: Arc<SwarmTransport>,
     act: PeerRingAction,
 ) -> Result<()> {
-    for delivery in act.storage_sync_deliveries()? {
+    for delivery in act.coalesced_storage_sync_deliveries()? {
         let msg = SyncEntriesWithSuccessor::from_delivery(delivery);
         transport.send_storage_sync(msg).await?;
     }
@@ -221,7 +221,7 @@ async fn run_storage_repair_transport_effects(
 /// exactly; the transport interpreter chooses the storage route and records the
 /// ack capability at the effect boundary.
 pub(super) fn storage_sync_effects(act: PeerRingAction) -> Result<Vec<CoreEffect<'static>>> {
-    act.storage_sync_deliveries()?
+    act.coalesced_storage_sync_deliveries()?
         .into_iter()
         .map(|delivery| {
             let msg = SyncEntriesWithSuccessor::from_delivery(delivery);

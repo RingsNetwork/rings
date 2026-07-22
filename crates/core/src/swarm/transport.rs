@@ -8,7 +8,6 @@ use bytes::Bytes;
 use futures::future::FutureExt;
 use futures::pin_mut;
 use futures::select;
-use futures_timer::Delay;
 use rings_transport::connection_ref::ConnectionRef;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 pub use rings_transport::connections::DummyConnection as ConnectionOwner;
@@ -61,16 +60,24 @@ use crate::message::PayloadSender;
 use crate::session::SessionSk;
 use crate::swarm::callback::InnerSwarmCallback;
 use crate::utils::get_epoch_ms_i64;
+use crate::utils::sleep;
 
 mod delivery;
+mod liveness;
 mod pending;
 mod storage_lookup;
 mod storage_sync;
 
 use self::delivery::frame_chunk;
 use self::delivery::record_measurement;
+use self::delivery::send_data_with_timeout;
 use self::delivery::spawn_chunked_send;
 use self::delivery::spawn_delivery;
+use self::delivery::ChunkSendPermit;
+use self::liveness::PeerLivenessMap;
+pub(crate) use self::liveness::PEER_LIVENESS_IDLE_MS;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::liveness::PEER_LIVENESS_TIMEOUT_MS;
 pub(crate) use self::pending::PendingConnectionAttempt;
 use self::pending::PendingPeerPool;
 pub(crate) use self::pending::DEFAULT_PENDING_CONNECTION_CAPACITY;
@@ -82,6 +89,38 @@ pub(crate) use self::storage_lookup::STORAGE_LOOKUP_OBSERVATION_CAPACITY;
 
 const DATA_CHANNEL_OPEN_TIMEOUT: Duration = Duration::from_secs(8);
 
+fn message_kind(message: &Message) -> &'static str {
+    match message {
+        Message::ConnectNodeSend(_) => "ConnectNodeSend",
+        Message::ConnectNodeReport(_) => "ConnectNodeReport",
+        Message::FindSuccessorSend(_) => "FindSuccessorSend",
+        Message::FindSuccessorReport(_) => "FindSuccessorReport",
+        Message::NotifyPredecessorSend(_) => "NotifyPredecessorSend",
+        Message::NotifyPredecessorReport(_) => "NotifyPredecessorReport",
+        Message::PeerLivenessProbe(_) => "PeerLivenessProbe",
+        Message::PeerLivenessReport(_) => "PeerLivenessReport",
+        Message::SearchEntry(_) => "SearchEntry",
+        Message::FoundEntry(_) => "FoundEntry",
+        Message::OperateEntry(_) => "OperateEntry",
+        Message::SyncEntriesWithSuccessor(_) => "SyncEntriesWithSuccessor",
+        Message::SyncEntriesWithSuccessorReport(_) => "SyncEntriesWithSuccessorReport",
+        Message::CustomMessage(_) => "CustomMessage",
+        Message::E2eHandshakeRequest(_) => "E2eHandshakeRequest",
+        Message::E2eHandshakeResponse(_) => "E2eHandshakeResponse",
+        Message::E2eStreamFrame(_) => "E2eStreamFrame",
+        Message::QueryForTopoInfoSend(_) => "QueryForTopoInfoSend",
+        Message::QueryForTopoInfoReport(_) => "QueryForTopoInfoReport",
+        Message::Chunk(_) => "Chunk",
+    }
+}
+
+fn payload_message_kind(payload: &MessagePayload) -> &'static str {
+    match payload.transaction.data::<Message>() {
+        Ok(message) => message_kind(&message),
+        Err(_) => "Unknown",
+    }
+}
+
 pub struct SwarmTransport {
     pub(crate) network_id: u32,
     transport: Transport,
@@ -92,6 +131,7 @@ pub struct SwarmTransport {
     reassembly_limits: ReassemblyLimits,
     pending_peers: Mutex<PendingPeerPool<DEFAULT_PENDING_CONNECTION_CAPACITY>>,
     active_peers: Mutex<BTreeMap<Did, u64>>,
+    peer_liveness: Mutex<PeerLivenessMap>,
     storage_lookup_observations: Mutex<StorageLookupObservationMap>,
     pending_storage_sync_acks: Mutex<StorageSyncAckMap>,
     measured_disconnects: Mutex<BTreeMap<Did, i64>>,
@@ -176,6 +216,7 @@ impl SwarmTransport {
             reassembly_limits: settings.reassembly_limits,
             pending_peers: Mutex::new(PendingPeerPool::new()),
             active_peers: Mutex::new(BTreeMap::new()),
+            peer_liveness: Mutex::new(PeerLivenessMap::new()),
             storage_lookup_observations: Mutex::new(BTreeMap::new()),
             pending_storage_sync_acks: Mutex::new(BTreeMap::new()),
             measured_disconnects: Mutex::new(BTreeMap::new()),
@@ -222,6 +263,7 @@ impl SwarmTransport {
 
     /// Record that `peer` reached an open data channel.
     pub(crate) async fn record_peer_connected(&self, peer: Did) {
+        self.mark_peer_liveness_connected(peer);
         match self.measured_disconnects.lock() {
             Ok(mut measured) => {
                 measured.remove(&peer);
@@ -263,6 +305,7 @@ impl SwarmTransport {
 
     /// Record that a payload from `peer` was accepted and verified by the swarm.
     pub(crate) async fn record_peer_message_received(&self, peer: Did) {
+        self.mark_peer_liveness_inbound(peer);
         self.record_peer_measurement(peer, MeasureCounter::Received)
             .await;
     }
@@ -434,13 +477,42 @@ impl SwarmTransport {
                 return Err(e);
             }
         };
-        if let Err(error) = self
+        let sdp_len = offer_msg.sdp.len();
+        tracing::info!(
+            target: "rings_core::swarm::transport::handshake",
+            local = %self.dht.did,
+            peer = %peer,
+            generation = attempt.generation,
+            sdp_bytes = sdp_len,
+            "connection offer send start"
+        );
+        match self
             .send_message(Message::ConnectNodeSend(offer_msg), peer)
             .await
         {
-            self.abandon_pending_connection(attempt, "sending connection offer")
-                .await;
-            return Err(error);
+            Ok(tx_id) => {
+                tracing::info!(
+                    target: "rings_core::swarm::transport::handshake",
+                    local = %self.dht.did,
+                    peer = %peer,
+                    generation = attempt.generation,
+                    tx_id = %tx_id,
+                    "connection offer send complete"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "rings_core::swarm::transport::handshake",
+                    local = %self.dht.did,
+                    peer = %peer,
+                    generation = attempt.generation,
+                    error = ?error,
+                    "connection offer send failed"
+                );
+                self.abandon_pending_connection(attempt, "sending connection offer")
+                    .await;
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -475,7 +547,7 @@ impl SwarmTransport {
 
         let failure = {
             let wait_for_open = conn.connection.webrtc_wait_for_data_channel_open().fuse();
-            let timeout = Delay::new(wait_timeout).fuse();
+            let timeout = sleep(wait_timeout).fuse();
             pin_mut!(wait_for_open, timeout);
 
             select! {
@@ -546,14 +618,39 @@ impl SwarmTransport {
             return Err(Error::SwarmMissTransport(peer));
         };
 
+        tracing::info!(
+            target: "rings_core::swarm::transport::handshake",
+            local = %self.dht.did,
+            peer = %peer,
+            generation = attempt.generation,
+            state = ?conn.webrtc_connection_state(),
+            "connection offer create start"
+        );
         let offer = match conn.connection.webrtc_create_offer().await {
             Ok(offer) => offer,
             Err(error) => {
+                tracing::warn!(
+                    target: "rings_core::swarm::transport::handshake",
+                    local = %self.dht.did,
+                    peer = %peer,
+                    generation = attempt.generation,
+                    error = ?error,
+                    "connection offer create failed"
+                );
                 self.abandon_pending_connection(attempt, "creating connection offer")
                     .await;
                 return Err(Error::Transport(error));
             }
         };
+        tracing::info!(
+            target: "rings_core::swarm::transport::handshake",
+            local = %self.dht.did,
+            peer = %peer,
+            generation = attempt.generation,
+            sdp_bytes = offer.len(),
+            state = ?conn.webrtc_connection_state(),
+            "connection offer create complete"
+        );
         let offer_str = match serde_json::to_string(&offer) {
             Ok(offer) => offer,
             Err(_) => {
@@ -585,7 +682,7 @@ impl SwarmTransport {
             ));
         }
 
-        let offer = serde_json::from_str(&offer_msg.sdp).map_err(Error::Deserialize)?;
+        let offer: String = serde_json::from_str(&offer_msg.sdp).map_err(Error::Deserialize)?;
 
         self.expire_pending_connections().await?;
         if self.is_active_connection(peer) {
@@ -632,14 +729,40 @@ impl SwarmTransport {
             return Err(Error::SwarmMissTransport(peer));
         };
 
+        tracing::info!(
+            target: "rings_core::swarm::transport::handshake",
+            local = %self.dht.did,
+            peer = %peer,
+            generation = attempt.generation,
+            offer_sdp_bytes = offer.len(),
+            state = ?conn.webrtc_connection_state(),
+            "connection answer create start"
+        );
         let answer = match conn.connection.webrtc_answer_offer(offer).await {
             Ok(answer) => answer,
             Err(error) => {
+                tracing::warn!(
+                    target: "rings_core::swarm::transport::handshake",
+                    local = %self.dht.did,
+                    peer = %peer,
+                    generation = attempt.generation,
+                    error = ?error,
+                    "connection answer create failed"
+                );
                 self.abandon_pending_connection(attempt, "creating connection answer")
                     .await;
                 return Err(Error::Transport(error));
             }
         };
+        tracing::info!(
+            target: "rings_core::swarm::transport::handshake",
+            local = %self.dht.did,
+            peer = %peer,
+            generation = attempt.generation,
+            answer_sdp_bytes = answer.len(),
+            state = ?conn.webrtc_connection_state(),
+            "connection answer create complete"
+        );
         let answer_str = match serde_json::to_string(&answer) {
             Ok(answer) => answer,
             Err(_) => {
@@ -670,7 +793,7 @@ impl SwarmTransport {
             ));
         }
 
-        let answer = serde_json::from_str(&answer_msg.sdp).map_err(Error::Deserialize)?;
+        let answer: String = serde_json::from_str(&answer_msg.sdp).map_err(Error::Deserialize)?;
 
         if !self.is_pending_connection(peer)? {
             return Err(Error::SwarmMissTransport(peer));
@@ -679,14 +802,39 @@ impl SwarmTransport {
         let conn = self
             .get_raw_connection(peer)
             .ok_or(Error::SwarmMissTransport(peer))?;
+        let attempt = self.pending_attempt(peer)?;
+        tracing::info!(
+            target: "rings_core::swarm::transport::handshake",
+            local = %self.dht.did,
+            peer = %peer,
+            generation = ?attempt.map(|attempt| attempt.generation),
+            answer_sdp_bytes = answer.len(),
+            state = ?conn.webrtc_connection_state(),
+            "connection answer accept start"
+        );
         if let Err(error) = conn.connection.webrtc_accept_answer(answer).await {
             let attempt = self.pending_attempt(peer)?;
             if let Some(attempt) = attempt {
                 self.abandon_pending_connection(attempt, "accepting connection answer")
                     .await;
             }
+            tracing::warn!(
+                target: "rings_core::swarm::transport::handshake",
+                local = %self.dht.did,
+                peer = %peer,
+                error = ?error,
+                "connection answer accept failed"
+            );
             return Err(Error::Transport(error));
         }
+        tracing::info!(
+            target: "rings_core::swarm::transport::handshake",
+            local = %self.dht.did,
+            peer = %peer,
+            generation = ?attempt.map(|attempt| attempt.generation),
+            state = ?conn.webrtc_connection_state(),
+            "connection answer accept complete"
+        );
 
         Ok(())
     }
@@ -735,33 +883,52 @@ impl PayloadSender for SwarmTransport {
             return Err(Error::SwarmMissDidInTable(did));
         };
 
-        tracing::debug!(
-            "Try send {:?}, to node {:?}",
-            payload.clone(),
-            payload.relay.next_hop,
-        );
-
+        let message_kind = payload_message_kind(&payload);
+        let tx_id = payload.transaction.tx_id;
+        let destination = payload.transaction.destination;
+        let relay_destination = payload.relay.destination;
+        let next_hop = payload.relay.next_hop;
         let data = payload.to_bincode()?;
         if data.len() > TRANSPORT_MAX_SIZE {
-            tracing::error!("Message is too large: {:?}", payload);
+            tracing::error!(
+                local = %self.dht.did,
+                next_hop = %next_hop,
+                destination = %destination,
+                relay_destination = %relay_destination,
+                tx_id = %tx_id,
+                message_kind,
+                bytes = data.len(),
+                max_bytes = TRANSPORT_MAX_SIZE,
+                "message payload is too large"
+            );
             return Err(Error::MessageTooLarge(data.len()));
         }
 
         // The chunk-vs-whole decision is the pure `WireReserves::plan`, against this connection's
         // negotiated `max_message_size`; this block is only the effectful shell carrying it out.
-        // `None` means the peer's limit is too small to carry even one useful chunk — a real failure
-        // we surface (before sending anything) rather than fragmenting into a flood of near-empty
-        // chunks. Both arms are **fire-and-forget**: `send_message` returns once the bytes are
-        // accepted into the send buffer, not once they flush — a whole message hands its
-        // `DeliveryFuture` to the runtime, and a chunked message is driven by one bounded background
-        // task (one chunk in flight; see `run_chunked_send`), so a large payload never blocks the
-        // caller's path while keeping memory and the runtime task count bounded.
+        // `None` means the peer's limit is too small to carry even one useful chunk. Send admission is
+        // bounded because a WebRTC data-channel queue under backpressure can otherwise leave this
+        // future pending until the caller's outer timeout fires without a transport-level reason.
         let Some(plan) = WireReserves::PRODUCTION.plan(data.len(), conn.max_message_size()) else {
             self.record_peer_message_send_failed(did).await;
             return Err(Error::PeerMaxMessageSizeTooSmall(conn.max_message_size()));
         };
+        tracing::debug!(
+            local = %self.dht.did,
+            next_hop = %next_hop,
+            destination = %destination,
+            relay_destination = %relay_destination,
+            tx_id = %tx_id,
+            message_kind,
+            bytes = data.len(),
+            max_message_size = conn.max_message_size(),
+            framing = ?plan,
+            "send payload start"
+        );
+        let chunk_send_permit = ChunkSendPermit::for_payload(self.dht.clone(), did, &payload);
         match plan {
-            Framing::Whole => match conn.send_data(data).await {
+            Framing::Whole => match send_data_with_timeout(&conn, data, did, "whole_message").await
+            {
                 Ok(delivery) => spawn_delivery(delivery, did, self.measure.clone()),
                 Err(e) => {
                     self.record_peer_message_send_failed(did).await;
@@ -777,7 +944,7 @@ impl PayloadSender for SwarmTransport {
                 let mut chunks = ChunkList::stream(data, chunk_size);
                 if let Some(first) = chunks.next() {
                     let first = frame_chunk(&self.session_sk, did, first)?;
-                    match conn.send_data(first).await {
+                    match send_data_with_timeout(&conn, first, did, "chunked_first").await {
                         Ok(first_delivery) => {
                             spawn_chunked_send(
                                 conn,
@@ -785,6 +952,7 @@ impl PayloadSender for SwarmTransport {
                                 first_delivery,
                                 self.session_sk.clone(),
                                 did,
+                                chunk_send_permit,
                                 self.measure.clone(),
                             );
                         }
@@ -798,9 +966,13 @@ impl PayloadSender for SwarmTransport {
         }
 
         tracing::debug!(
-            "Sent {:?}, to node {:?}",
-            payload.clone(),
-            payload.relay.next_hop,
+            local = %self.dht.did,
+            next_hop = %next_hop,
+            destination = %destination,
+            relay_destination = %relay_destination,
+            tx_id = %tx_id,
+            message_kind,
+            "send payload accepted"
         );
 
         Ok(())

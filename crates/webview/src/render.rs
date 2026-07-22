@@ -42,7 +42,8 @@ pub struct WebviewRenderer<T> {
 }
 
 impl<T> WebviewRenderer<T>
-where T: GatewayTransport
+where
+    T: GatewayTransport,
 {
     /// Build a renderer around an existing gateway.
     pub fn new(gateway: WebviewGateway<T>) -> Self {

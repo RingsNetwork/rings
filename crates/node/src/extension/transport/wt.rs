@@ -134,10 +134,14 @@ impl WtSessions {
                 // Drop the opening slot and tell the peer — but only if we are still its owner
                 // (a peer Close during the handshake already tore it down and told the peer).
                 if self.close_if_current(&scope, &key, generation).await {
-                    let _ = send_frame(&scope, key.peer, Frame::Close {
-                        session: key.session,
-                        from_opener: matches!(key.initiator, Initiator::Local),
-                    })
+                    let _ = send_frame(
+                        &scope,
+                        key.peer,
+                        Frame::Close {
+                            session: key.session,
+                            from_opener: matches!(key.initiator, Initiator::Local),
+                        },
+                    )
                     .await;
                 }
             }
@@ -203,10 +207,13 @@ impl WtSessions {
     /// generation. The mirror of native's pre-dial `register`.
     fn open_slot(&self, key: SessionKey) -> u64 {
         let generation = self.generations.fetch_add(1, Ordering::Relaxed);
-        self.insert(key, SessionHandle::Opening {
-            queue: Vec::new(),
-            generation,
-        });
+        self.insert(
+            key,
+            SessionHandle::Opening {
+                queue: Vec::new(),
+                generation,
+            },
+        );
         generation
     }
 
@@ -249,11 +256,14 @@ impl WtSessions {
                 }
             }
         }
-        map.insert(key.clone(), SessionHandle::Ready {
-            writer,
-            transport,
-            generation,
-        });
+        map.insert(
+            key.clone(),
+            SessionHandle::Ready {
+                writer,
+                transport,
+                generation,
+            },
+        );
         true
     }
 
@@ -320,11 +330,15 @@ impl WtSessions {
                     Err(_) => break,
                 };
                 let bytes = Bytes::from(Uint8Array::new(&value).to_vec());
-                if send_frame(&scope, peer, Frame::Data {
-                    session,
-                    from_opener,
-                    bytes,
-                })
+                if send_frame(
+                    &scope,
+                    peer,
+                    Frame::Data {
+                        session,
+                        from_opener,
+                        bytes,
+                    },
+                )
                 .await
                 .is_err()
                 {
@@ -334,10 +348,14 @@ impl WtSessions {
             // Generation-checked teardown: only Close the peer if we were still the current
             // owner, so a stale read loop never tears down a reopened session.
             if sessions.close_if_current(&scope, &key, generation).await {
-                let _ = send_frame(&scope, peer, Frame::Close {
-                    session,
-                    from_opener,
-                })
+                let _ = send_frame(
+                    &scope,
+                    peer,
+                    Frame::Close {
+                        session,
+                        from_opener,
+                    },
+                )
                 .await;
             }
         });

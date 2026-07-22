@@ -79,10 +79,10 @@ async fn sync_entries_handler_reports_persisted_entries() -> Result<()> {
     let payload = next_payload(&sender).await?;
     match payload.transaction.data::<Message>()? {
         Message::SyncEntriesWithSuccessorReport(report) => {
-            assert_eq!(report.acks, vec![SyncedEntryAck::new(
-                placement_key,
-                stored_entry.clone()
-            )]);
+            assert_eq!(
+                report.acks,
+                vec![SyncedEntryAck::new(placement_key, stored_entry.clone())]
+            );
         }
         message => {
             return Err(Error::InvalidMessage(format!(
@@ -120,10 +120,10 @@ async fn persist_synced_entries_returns_acks_for_owned_entries() -> Result<()> {
 
     let acks = persist_synced_entries(&handler, &sync_msg).await?;
 
-    assert_eq!(acks, vec![SyncedEntryAck::new(
-        placement_key,
-        stored_entry.clone()
-    )]);
+    assert_eq!(
+        acks,
+        vec![SyncedEntryAck::new(placement_key, stored_entry.clone())]
+    );
     assert_eq!(
         receiver
             .dht()

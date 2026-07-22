@@ -68,7 +68,8 @@ pub struct PanicLocation {
 }
 
 impl<'a, T> From<T> for PanicLocation
-where T: Into<Location<'a>>
+where
+    T: Into<Location<'a>>,
 {
     fn from(lo: T) -> Self {
         let lo: Location = lo.into();
@@ -89,7 +90,8 @@ pub struct PanicData<'a> {
 }
 
 impl<'a, T> From<T> for PanicData<'a>
-where T: Into<&'a PanicHookInfo<'a>>
+where
+    T: Into<&'a PanicHookInfo<'a>>,
 {
     fn from(panic: T) -> PanicData<'a> {
         let panic = panic.into();

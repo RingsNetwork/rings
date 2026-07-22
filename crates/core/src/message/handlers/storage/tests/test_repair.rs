@@ -257,20 +257,26 @@ async fn found_entry_repairs_buffered_misses_only() -> Result<()> {
     node.swarm.transport.start_storage_lookup(entry.did, 2)?;
 
     handler
-        .handle(&context, &FoundEntry {
-            data: vec![],
-            misses: vec![PlacementMiss::new(placement_key, node.did())],
-            resource: entry.did,
-            redundancy: 2,
-        })
+        .handle(
+            &context,
+            &FoundEntry {
+                data: vec![],
+                misses: vec![PlacementMiss::new(placement_key, node.did())],
+                resource: entry.did,
+                redundancy: 2,
+            },
+        )
         .await?;
     handler
-        .handle(&context, &FoundEntry {
-            data: vec![entry.clone()],
-            misses: vec![],
-            resource: entry.did,
-            redundancy: 2,
-        })
+        .handle(
+            &context,
+            &FoundEntry {
+                data: vec![entry.clone()],
+                misses: vec![],
+                resource: entry.did,
+                redundancy: 2,
+            },
+        )
         .await?;
 
     assert_eq!(
@@ -314,12 +320,15 @@ async fn found_entry_rejects_multiple_entries() -> Result<()> {
     )?;
 
     let result = handler
-        .handle(&context, &FoundEntry {
-            data: vec![first, second],
-            misses: vec![],
-            resource,
-            redundancy: 2,
-        })
+        .handle(
+            &context,
+            &FoundEntry {
+                data: vec![first, second],
+                misses: vec![],
+                resource,
+                redundancy: 2,
+            },
+        )
         .await;
 
     assert!(
@@ -356,12 +365,15 @@ async fn found_entry_rejects_redundancy_outside_local_protocol_mode() -> Result<
     node.swarm.transport.start_storage_lookup(resource, 2)?;
 
     let result = handler
-        .handle(&context, &FoundEntry {
-            data: vec![entry],
-            misses: vec![],
-            resource,
-            redundancy: 3,
-        })
+        .handle(
+            &context,
+            &FoundEntry {
+                data: vec![entry],
+                misses: vec![],
+                resource,
+                redundancy: 3,
+            },
+        )
         .await;
 
     assert!(matches!(
@@ -400,12 +412,15 @@ async fn found_entry_rejects_response_without_active_lookup() -> Result<()> {
     )?;
 
     let result = handler
-        .handle(&context, &FoundEntry {
-            data: vec![entry],
-            misses: vec![],
-            resource,
-            redundancy: 2,
-        })
+        .handle(
+            &context,
+            &FoundEntry {
+                data: vec![entry],
+                misses: vec![],
+                resource,
+                redundancy: 2,
+            },
+        )
         .await;
 
     assert!(matches!(
@@ -442,12 +457,15 @@ async fn found_entry_rejects_resource_mismatch_without_cache_write() -> Result<(
     node.swarm.transport.start_storage_lookup(resource, 2)?;
 
     let result = handler
-        .handle(&context, &FoundEntry {
-            data: vec![entry.clone()],
-            misses: vec![],
-            resource,
-            redundancy: 2,
-        })
+        .handle(
+            &context,
+            &FoundEntry {
+                data: vec![entry.clone()],
+                misses: vec![],
+                resource,
+                redundancy: 2,
+            },
+        )
         .await;
 
     assert!(matches!(
@@ -466,9 +484,11 @@ async fn storage_miss_observation_buffer_is_bounded() -> Result<()> {
         let resource = Did::from((index + 1) as u32);
         let placement = Did::from((index + 10_000) as u32);
         node.swarm.transport.start_storage_lookup(resource, 2)?;
-        node.swarm
-            .transport
-            .observe_storage_misses(resource, 2, [PlacementMiss::new(placement, node.did())])?;
+        node.swarm.transport.observe_storage_misses(
+            resource,
+            2,
+            [PlacementMiss::new(placement, node.did())],
+        )?;
     }
 
     assert!(
@@ -484,9 +504,11 @@ async fn storage_fetch_starts_fresh_observation_round() -> Result<()> {
     let resource = Did::from(10u32);
     let placement = Did::from(100u32);
     node.swarm.transport.start_storage_lookup(resource, 1)?;
-    node.swarm
-        .transport
-        .observe_storage_misses(resource, 1, [PlacementMiss::new(placement, node.did())])?;
+    node.swarm.transport.observe_storage_misses(
+        resource,
+        1,
+        [PlacementMiss::new(placement, node.did())],
+    )?;
 
     node.swarm.transport.start_storage_lookup(resource, 1)?;
     let misses = node.swarm.transport.take_storage_misses(resource, 1)?;
@@ -527,23 +549,29 @@ async fn expired_storage_response_does_not_update_cache_or_repair() -> Result<()
     node.swarm.transport.start_storage_lookup(entry.did, 2)?;
 
     handler
-        .handle(&context, &FoundEntry {
-            data: vec![],
-            misses: vec![PlacementMiss::new(placement_key, node.did())],
-            resource: entry.did,
-            redundancy: 2,
-        })
+        .handle(
+            &context,
+            &FoundEntry {
+                data: vec![],
+                misses: vec![PlacementMiss::new(placement_key, node.did())],
+                resource: entry.did,
+                redundancy: 2,
+            },
+        )
         .await?;
     node.swarm
         .transport
         .expire_storage_lookup_observation(entry.did, 2)?;
     let result = handler
-        .handle(&context, &FoundEntry {
-            data: vec![entry.clone()],
-            misses: vec![],
-            resource: entry.did,
-            redundancy: 2,
-        })
+        .handle(
+            &context,
+            &FoundEntry {
+                data: vec![entry.clone()],
+                misses: vec![],
+                resource: entry.did,
+                redundancy: 2,
+            },
+        )
         .await;
 
     assert!(matches!(

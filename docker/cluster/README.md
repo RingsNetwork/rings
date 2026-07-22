@@ -18,6 +18,21 @@ docker run --rm \
   rings-node-cluster
 ```
 
+Run a browser-reachable cluster with one published JSON-RPC ingress and a fixed
+native WebRTC UDP range:
+
+```sh
+docker run --rm \
+  -e RINGS_NODE_COUNT=3 \
+  -e RINGS_ALLOW_RANDOM_KEYS=true \
+  -e RINGS_EXTERNAL_IP=127.0.0.1 \
+  -e RINGS_WEBRTC_UDP_PORT_MIN=49160 \
+  -e RINGS_WEBRTC_UDP_PORT_MAX=49220 \
+  -p 51000:51000/tcp \
+  -p 49160-49220:49160-49220/udp \
+  rings-node-cluster
+```
+
 Run with externally supplied keys:
 
 ```sh
@@ -48,6 +63,9 @@ Useful environment variables:
 - `RINGS_CLUSTER_DIR`: config, logs, storage, and session key directory; default `/var/lib/rings-cluster`
 - `RINGS_ICE_SERVERS`: ICE server list passed to every node; set it to an empty string to run without ICE servers
 - `RINGS_RUNTIME`: Tokio runtime flavor for each node process; default `current-thread`
+- `RINGS_EXTERNAL_IP`: optional native WebRTC NAT 1:1 IP advertised in ICE host candidates; default unset. For browser testing from the Docker host, use `127.0.0.1`.
+- `RINGS_EXTERNAL_IP_APPEND_CONTAINER_IP`: when `RINGS_EXTERNAL_IP` is set, also advertise the container IP so nodes inside the same container can still connect to each other; default `true`
+- `RINGS_WEBRTC_UDP_PORT_MIN` and `RINGS_WEBRTC_UDP_PORT_MAX`: optional fixed native WebRTC UDP port range; publish the same range with `/udp` when browser peers must establish data channels to non-ingress nodes
 - `RINGS_ADVERTISE_ONION_RELAY`: publish relay capability from every node; default `true`
 - `RINGS_ADVERTISE_ONION_EXIT`: publish exit descriptors from every node; default `true`
 - `RINGS_ONION_EXIT_SERVICES`: comma-separated `name:transport` services; default `tcp:tcp,https:tcp`

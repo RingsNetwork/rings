@@ -572,6 +572,21 @@ pub enum Error {
     #[error("Peer's negotiated max_message_size {0} is too small to carry even one chunk")]
     PeerMaxMessageSizeTooSmall(usize),
 
+    /// Timed out while waiting for the data-channel send queue to accept bytes
+    #[error(
+        "Timed out after {timeout_ms}ms waiting for data-channel send queue to accept {bytes} bytes for {peer} during {context}"
+    )]
+    DataChannelSendQueueTimeout {
+        /// Peer whose data-channel send queue did not accept the bytes.
+        peer: crate::dht::Did,
+        /// Timeout budget in milliseconds.
+        timeout_ms: u128,
+        /// Serialized bytes that were waiting to be accepted.
+        bytes: usize,
+        /// Send context used for diagnostics.
+        context: &'static str,
+    },
+
     #[cfg(all(feature = "wasm", target_family = "wasm"))]
     /// Cannot get property {0} from JsValue
     #[error("Cannot get property {0} from JsValue")]

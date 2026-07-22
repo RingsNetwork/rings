@@ -387,10 +387,21 @@ impl TransportInterface for WebSysWebrtcTransport {
             let d = ev.channel();
             let d_label = d.label();
             tracing::debug!("New DataChannel {d_label}");
-            // Open/close are detected on the channels we create (the pool, wired
-            // below); a received channel only carries inbound messages. Wiring
-            // open/close here too would fire on_data_channel_open twice (created
-            // + received) and churn join_dht.
+            // Open is admitted on channels we create (the pool, wired below).
+            // Close must also be observed on received channels: the answerer may
+            // never see close on its locally-created channels when the initiator's
+            // channels are the ones carrying traffic.
+            let on_close_inner_cb = data_channel_inner_cb.clone();
+            let on_close = Box::new(move || {
+                let cb = on_close_inner_cb.clone();
+                spawn_local(async move {
+                    cb.on_data_channel_close().await;
+                });
+            });
+            let c = Closure::wrap(on_close as Box<dyn FnMut()>);
+            d.set_onclose(Some(c.as_ref().unchecked_ref()));
+            c.forget();
+
             let on_message_inner_cb = data_channel_inner_cb.clone();
             let on_message = Box::new(move |ev: MessageEvent| {
                 let data = ev.data();
@@ -425,9 +436,9 @@ impl TransportInterface for WebSysWebrtcTransport {
                     }
 
                     tracing::debug!(
-                        "Received DataChannelMessage from {}: {:?}",
-                        inner_cb.cid,
-                        data
+                        peer = %inner_cb.cid,
+                        bytes = msg.len(),
+                        "Received DataChannelMessage"
                     );
 
                     inner_cb.on_message(&msg.into()).await;

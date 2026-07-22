@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 
-FROM rust:1.94-trixie AS builder
+FROM rust:1.97-trixie AS builder
 
 WORKDIR /src
 COPY Cargo.lock Cargo.toml README.md rust-toolchain.toml ./

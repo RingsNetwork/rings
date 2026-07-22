@@ -39,6 +39,12 @@ pub(super) struct PendingPeer {
     admitted_at_ms: i64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ExpiredPendingPeer {
+    pub(super) attempt: PendingConnectionAttempt,
+    pub(super) age_ms: i64,
+}
+
 /// Bounded, non-routable handshakes owned by the swarm lifecycle.
 ///
 /// The pool deliberately has no DHT reference: a peer is visible to Chord
@@ -96,20 +102,23 @@ impl<const MAX_PENDING: usize> PendingPeerPool<MAX_PENDING> {
         true
     }
 
-    pub(super) fn expire(&mut self, now_ms: i64) -> Vec<PendingConnectionAttempt> {
+    pub(super) fn expire(&mut self, now_ms: i64) -> Vec<ExpiredPendingPeer> {
         let expired = self
             .peers
             .iter()
             .filter_map(|(peer, pending)| {
-                (now_ms.saturating_sub(pending.admitted_at_ms) >= PENDING_CONNECTION_TIMEOUT_MS)
-                    .then_some(PendingConnectionAttempt {
+                let age_ms = now_ms.saturating_sub(pending.admitted_at_ms);
+                (age_ms >= PENDING_CONNECTION_TIMEOUT_MS).then_some(ExpiredPendingPeer {
+                    attempt: PendingConnectionAttempt {
                         peer: *peer,
                         generation: pending.generation,
-                    })
+                    },
+                    age_ms,
+                })
             })
             .collect::<Vec<_>>();
-        for attempt in &expired {
-            self.peers.remove(&attempt.peer);
+        for expired in &expired {
+            self.peers.remove(&expired.attempt.peer);
         }
         expired
     }
@@ -200,7 +209,16 @@ impl SwarmTransport {
         if self.is_admitted_connection(peer) {
             return Err(Error::AlreadyConnected);
         }
-        self.pending_peers()?.reserve(peer, get_epoch_ms_i64())
+        let attempt = self.pending_peers()?.reserve(peer, get_epoch_ms_i64())?;
+        tracing::info!(
+            target: "rings_core::swarm::transport::handshake",
+            local = %self.dht.did,
+            peer = %peer,
+            generation = attempt.generation,
+            pending_timeout_ms = PENDING_CONNECTION_TIMEOUT_MS,
+            "pending connection reserved"
+        );
+        Ok(attempt)
     }
 
     pub(super) fn pending_attempt(&self, peer: Did) -> Result<Option<PendingConnectionAttempt>> {
@@ -225,6 +243,13 @@ impl SwarmTransport {
         drop(pending);
         self.active_peers()?
             .insert(attempt.peer, attempt.generation);
+        tracing::info!(
+            target: "rings_core::swarm::transport::handshake",
+            local = %self.dht.did,
+            peer = %attempt.peer,
+            generation = attempt.generation,
+            "pending connection promoted"
+        );
         Ok(true)
     }
 
@@ -236,7 +261,11 @@ impl SwarmTransport {
     }
 
     pub(super) fn retire_active_connection(&self, peer: Did) -> Result<bool> {
-        Ok(self.active_peers()?.remove(&peer).is_some())
+        let removed = self.active_peers()?.remove(&peer).is_some();
+        if removed {
+            self.remove_peer_liveness(peer)?;
+        }
+        Ok(removed)
     }
 
     /// Cancel a current pending handshake and release its non-routable transport object.
@@ -247,6 +276,13 @@ impl SwarmTransport {
         if !self.retire_pending_connection(attempt)? {
             return Ok(false);
         }
+        tracing::info!(
+            target: "rings_core::swarm::transport::handshake",
+            local = %self.dht.did,
+            peer = %attempt.peer,
+            generation = attempt.generation,
+            "pending connection cancelled"
+        );
         self.transport
             .close_connection(&attempt.peer.to_string())
             .await
@@ -273,8 +309,21 @@ impl SwarmTransport {
     /// transport object; it deliberately performs no topology mutation.
     pub(crate) async fn expire_pending_connections(&self) -> Result<()> {
         let expired = self.pending_peers()?.expire(get_epoch_ms_i64());
-        for attempt in expired {
-            tracing::warn!("pending connection to {} timed out", attempt.peer);
+        for expired in expired {
+            let attempt = expired.attempt;
+            let state = self
+                .get_raw_connection(attempt.peer)
+                .map(|conn| conn.webrtc_connection_state());
+            tracing::warn!(
+                target: "rings_core::swarm::transport::handshake",
+                local = %self.dht.did,
+                peer = %attempt.peer,
+                generation = attempt.generation,
+                age_ms = expired.age_ms,
+                timeout_ms = PENDING_CONNECTION_TIMEOUT_MS,
+                state = ?state,
+                "pending connection timed out before data-channel open"
+            );
             self.transport
                 .close_connection(&attempt.peer.to_string())
                 .await
@@ -290,6 +339,13 @@ impl SwarmTransport {
         callback: InnerSwarmCallback,
     ) -> Result<()> {
         let cid = attempt.peer.to_string();
+        tracing::info!(
+            target: "rings_core::swarm::transport::handshake",
+            local = %self.dht.did,
+            peer = %attempt.peer,
+            generation = attempt.generation,
+            "creating pending transport connection"
+        );
         if let Err(error) = self
             .transport
             .new_connection(&cid, Box::new(callback))
@@ -298,6 +354,13 @@ impl SwarmTransport {
             let _ = self.retire_pending_connection(attempt);
             return Err(Error::Transport(error));
         }
+        tracing::info!(
+            target: "rings_core::swarm::transport::handshake",
+            local = %self.dht.did,
+            peer = %attempt.peer,
+            generation = attempt.generation,
+            "pending transport connection created"
+        );
         Ok(())
     }
 

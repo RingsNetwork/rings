@@ -137,7 +137,8 @@ impl GatewayResponsePolicy {
 }
 
 impl<T> WebviewGateway<T>
-where T: GatewayTransport
+where
+    T: GatewayTransport,
 {
     /// Build a webview gateway around `transport`.
     pub fn new(prefix: GatewayPrefix, transport: T) -> Self {
@@ -222,7 +223,8 @@ where T: GatewayTransport
 }
 
 impl<T> ConcurrentWebviewGateway<T>
-where T: GatewayTransport
+where
+    T: GatewayTransport,
 {
     /// Build a concurrent webview gateway around `transport`.
     pub fn new(prefix: GatewayPrefix, transport: T) -> Self {

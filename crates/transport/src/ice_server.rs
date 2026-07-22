@@ -53,6 +53,11 @@ impl IceServer {
     feature = "web-sys-webrtc"
 ))]
 pub(crate) fn parse_ice_servers_or_warn(config: &str, transport: &str) -> Vec<IceServer> {
+    let config = config.trim();
+    if config.is_empty() {
+        return Vec::new();
+    }
+
     match IceServer::vec_from_str(config) {
         Ok(ice_servers) => ice_servers,
         Err(error) => {
@@ -112,7 +117,7 @@ impl FromStr for IceServer {
 mod test {
     use std::str::FromStr;
 
-    use super::IceServer;
+    use super::*;
 
     #[test]
     fn test_parsing() {
@@ -150,5 +155,16 @@ mod test {
     fn parsing_rejects_missing_host() {
         let parsed = IceServer::from_str("stun:///missing-host");
         assert!(parsed.is_err());
+    }
+
+    #[cfg(any(
+        feature = "dummy",
+        feature = "native-webrtc",
+        feature = "web-sys-webrtc"
+    ))]
+    #[test]
+    fn blank_ice_server_config_means_no_servers() {
+        assert!(parse_ice_servers_or_warn("", "test").is_empty());
+        assert!(parse_ice_servers_or_warn("   ", "test").is_empty());
     }
 }

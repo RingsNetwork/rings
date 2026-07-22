@@ -300,10 +300,10 @@ fn default_onion_exit_config_uses_native_tcp_backed_services() {
 
     assert!(config.advertise_onion_exit);
     assert_eq!(config.onion_exit_services, default_onion_exit_services());
-    assert_eq!(config.onion_exit_services, vec![
-        OnionExitService::tcp(),
-        OnionExitService::https()
-    ]);
+    assert_eq!(
+        config.onion_exit_services,
+        vec![OnionExitService::tcp(), OnionExitService::https()]
+    );
 }
 
 #[test]

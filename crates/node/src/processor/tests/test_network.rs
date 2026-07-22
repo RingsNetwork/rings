@@ -2,6 +2,20 @@ use super::common::*;
 use super::*;
 
 #[tokio::test]
+async fn listen_with_pre_stopped_token_returns_before_first_tick() {
+    let processor = prepare_processor().await;
+    let stop = StopSource::new();
+    stop.request_stop();
+
+    tokio::time::timeout(
+        Duration::from_millis(100),
+        processor.listen_with(stop.token()),
+    )
+    .await
+    .expect("pre-stopped listen token should exit before the first stabilization tick");
+}
+
+#[tokio::test]
 async fn online_node_registry_lists_two_publishers_over_network() -> Result<()> {
     let _network_guard = network_test_guard().await;
     let (publisher, owner) = prepare_online_node_registry_pair(42).await?;
@@ -200,9 +214,12 @@ async fn provider_exposes_sent_and_received_peer_measurements() {
     assert!(provider_measurement.evidence.sent >= 1);
 
     let rpc_value = provider
-        .request(Method::PeerMeasurement, PeerMeasurementRequest {
-            did: p2.did().to_string(),
-        })
+        .request(
+            Method::PeerMeasurement,
+            PeerMeasurementRequest {
+                did: p2.did().to_string(),
+            },
+        )
         .await
         .unwrap();
     let rpc_measurement: PeerMeasurementResponse = serde_json::from_value(rpc_value).unwrap();

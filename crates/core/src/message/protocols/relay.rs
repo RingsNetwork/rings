@@ -194,7 +194,9 @@ impl MessageRelay {
 const INFINITE_LOOP_TOLERANCE: usize = 3;
 
 fn has_infinite_loop<T>(path: &[T]) -> bool
-where T: PartialEq {
+where
+    T: PartialEq,
+{
     // Invariant: a relay loop is witnessed by a non-empty suffix period P such
     // that the final path segment is P repeated INFINITE_LOOP_TOLERANCE times.
     for period in 1..=path.len() / INFINITE_LOOP_TOLERANCE {

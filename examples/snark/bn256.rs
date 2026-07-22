@@ -66,18 +66,23 @@ async fn main() -> ExampleResult<()> {
     for c in recursive_circuits {
         rec_snark_iter.foldr(&pp, &c)?;
     }
-    rec_snark_iter.verify(&pp, 3, &vec![F1::from(4u64), F1::from(2u64)], &vec![
-        F2::from(0),
-    ])?;
+    rec_snark_iter.verify(
+        &pp,
+        3,
+        &vec![F1::from(4u64), F1::from(2u64)],
+        &vec![F2::from(0)],
+    )?;
     println!("success on create recursive snark");
     let (pk, vk) = snark::SNARK::<E1, E2>::compress_setup::<S1, S2>(&pp)?;
 
     let compress_snark = rec_snark_iter.compress_prove::<S1, S2>(&pp, &pk)?;
     let compress_snark_ref = Rc::new(compress_snark);
-    snark::SNARK::<E1, E2>::compress_verify::<S1, S2>(compress_snark_ref, &vk, 3, &vec![
-        F1::from(4u64),
-        F1::from(2u64),
-    ])?;
+    snark::SNARK::<E1, E2>::compress_verify::<S1, S2>(
+        compress_snark_ref,
+        &vk,
+        3,
+        &vec![F1::from(4u64), F1::from(2u64)],
+    )?;
 
     Ok(())
 }

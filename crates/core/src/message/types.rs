@@ -170,6 +170,29 @@ pub struct NotifyPredecessorReport {
     pub did: Did,
 }
 
+/// Overlay liveness probe sent to an admitted peer.
+#[derive(Debug, Deserialize, Serialize, Copy, Clone)]
+pub struct PeerLivenessProbe {
+    /// Sender-local timestamp for logging and correlation.
+    pub sent_at_ms: i64,
+}
+
+/// Overlay liveness report sent in response to [`PeerLivenessProbe`].
+#[derive(Debug, Deserialize, Serialize, Copy, Clone)]
+pub struct PeerLivenessReport {
+    /// Sender-local timestamp copied from the probe.
+    pub sent_at_ms: i64,
+}
+
+impl PeerLivenessProbe {
+    /// Build a response that proves the receiver processed this probe.
+    pub const fn resp(self) -> PeerLivenessReport {
+        PeerLivenessReport {
+            sent_at_ms: self.sent_at_ms,
+        }
+    }
+}
+
 /// The reason of query successor's TopoInfo
 #[derive(Debug, Deserialize, Serialize, Copy, Clone)]
 pub enum QueryFor {
@@ -380,6 +403,10 @@ pub enum Message {
     NotifyPredecessorSend(NotifyPredecessorSend),
     /// Response of NotifyPredecessorSend
     NotifyPredecessorReport(NotifyPredecessorReport),
+    /// Overlay liveness probe.
+    PeerLivenessProbe(PeerLivenessProbe),
+    /// Overlay liveness probe response.
+    PeerLivenessReport(PeerLivenessReport),
     /// Remote message for searching an entry.
     SearchEntry(SearchEntry),
     /// Response when entries are found.

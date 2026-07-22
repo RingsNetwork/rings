@@ -72,9 +72,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("===> request ConnectPeerViaHttp api...");
     let resp: ConnectPeerViaHttpResponse = serde_json::from_value(
         provider
-            .request(Method::ConnectPeerViaHttp, ConnectPeerViaHttpRequest {
-                url: args.seed_url,
-            })
+            .request(
+                Method::ConnectPeerViaHttp,
+                ConnectPeerViaHttpRequest { url: args.seed_url },
+            )
             .await?,
     )?;
     println!("<=== ConnectPeerViaHttpResponse: {resp:?}");

@@ -6,6 +6,8 @@ pub use rings_derive::wasm_export;
 pub use self::rings_core::chunk;
 pub use self::rings_core::dht::PeerRing;
 pub use self::rings_core::ecc::SecretKey;
+pub use self::rings_core::lifecycle::StopSource;
+pub use self::rings_core::lifecycle::StopToken;
 pub use self::rings_core::measure::PeerMeasurement;
 pub use self::rings_core::message::CustomMessage;
 pub use self::rings_core::message::Message;

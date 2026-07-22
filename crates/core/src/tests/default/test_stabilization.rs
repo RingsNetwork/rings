@@ -14,8 +14,8 @@ use crate::dht::entry::EntryKind;
 use crate::dht::successor::SuccessorReader;
 use crate::dht::successor::SuccessorWriter;
 use crate::dht::Did;
+use crate::dht::PeerRingAction;
 use crate::ecc::SecretKey;
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::error::Error;
 use crate::error::Result;
 use crate::measure::BehaviourJudgement;
@@ -27,12 +27,17 @@ use crate::measure::PeerQualityEvidence;
 use crate::measure::PeerQualityThresholds;
 use crate::session::SessionSk;
 use crate::storage::MemStorage;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use crate::swarm::transport::PEER_LIVENESS_TIMEOUT_MS;
 use crate::swarm::SwarmBuilder;
+use crate::tests::default::assert_no_more_msg;
 use crate::tests::default::prepare_node;
+use crate::tests::default::wait_for_msgs;
 use crate::tests::default::wait_for_predecessor;
 use crate::tests::default::wait_for_successor;
 use crate::tests::default::Node;
 use crate::tests::manually_establish_connection;
+use crate::utils::get_epoch_ms_i64;
 
 #[derive(Default)]
 struct CountingMeasure {
@@ -95,6 +100,24 @@ impl Drop for PendingDataChannelWaitGuard {
     }
 }
 
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+struct DropMessagesGuard;
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+impl DropMessagesGuard {
+    fn new() -> Self {
+        dummy_controlled::set_drop_messages(true);
+        Self
+    }
+}
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+impl Drop for DropMessagesGuard {
+    fn drop(&mut self) {
+        dummy_controlled::set_drop_messages(false);
+    }
+}
+
 fn prepare_node_with_measure(key: SecretKey, measure: MeasureImpl) -> Result<Node> {
     let session = SessionSk::new_with_seckey(&key)?;
     let swarm = Arc::new(
@@ -110,6 +133,42 @@ fn prepare_node_with_measure(key: SecretKey, measure: MeasureImpl) -> Result<Nod
         .build(),
     );
     Ok(Node::new(swarm))
+}
+
+fn prepare_repair_node(key: SecretKey) -> Result<Node> {
+    let session = SessionSk::new_with_seckey(&key)?;
+    let swarm = Arc::new(
+        SwarmBuilder::new(
+            0,
+            "stun://stun.l.google.com:19302",
+            Box::new(MemStorage::new()),
+            session,
+        )
+        .dht_finger_table_size(super::TEST_DHT_FINGER_TABLE_SIZE)
+        .dht_storage_redundancy(2)
+        .dht_virtual_nodes(0)
+        .build(),
+    );
+    Ok(Node::new(swarm))
+}
+
+fn entry_with_remote_repair_placement(node: &Node) -> Result<(Entry, Did)> {
+    for attempt in 0..1024 {
+        let resource = Entry::gen_did(&format!("fresh repair candidate {attempt}"))?;
+        let entry = Entry::new(resource, vec![], EntryKind::Data);
+        for placement in entry.did.rotate_affine(2)? {
+            if matches!(
+                node.dht().find_storage_owner(placement)?,
+                PeerRingAction::RemoteAction(_, _)
+            ) {
+                return Ok((entry, placement));
+            }
+        }
+    }
+
+    Err(Error::InvalidMessage(
+        "could not sample remote repair placement".to_string(),
+    ))
 }
 
 #[tokio::test]
@@ -186,6 +245,45 @@ async fn stabilize_step_timeout_bounds_wedged_data_channel_wait() -> Result<()> 
     )
     .await
     .map_err(|_| Error::PromiseStateTimeout)??;
+
+    Ok(())
+}
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+#[tokio::test]
+async fn clean_unavailable_connections_removes_silent_connected_peer() -> Result<()> {
+    let node1 = prepare_node(SecretKey::random()).await;
+    let node2 = prepare_node(SecretKey::random()).await;
+
+    manually_establish_connection(&node1.swarm, &node2.swarm).await;
+    wait_for_successor(&node1, node2.did()).await?;
+
+    node1.dht().successors().extend(&[node2.did()])?;
+    *node1.dht().lock_predecessor()? = Some(node2.did());
+    {
+        let dht = node1.dht();
+        let mut finger = dht.lock_finger()?;
+        finger.set(0, node2.did());
+        finger.set(3, node2.did());
+    }
+
+    let stale_probe_sent_at = get_epoch_ms_i64() - PEER_LIVENESS_TIMEOUT_MS - 1;
+    node1
+        .swarm
+        .transport
+        .force_peer_liveness_probe_sent_at(node2.did(), stale_probe_sent_at)?;
+
+    let _drop_messages = DropMessagesGuard::new();
+    node1
+        .swarm
+        .stabilizer()
+        .clean_unavailable_connections()
+        .await?;
+
+    assert!(node1.swarm.transport.get_connection(node2.did()).is_none());
+    assert!(!node1.dht().successors().contains(&node2.did())?);
+    assert_eq!(*node1.dht().lock_predecessor()?, None);
+    assert!(!node1.dht().lock_finger()?.contains(Some(node2.did())));
 
     Ok(())
 }
@@ -299,6 +397,50 @@ async fn stabilize_republishes_local_entries_to_missing_affine_owners() -> Resul
             .get(&placement_keys[1].to_string())
             .await?,
         Some(entry)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn repair_storage_defers_sync_to_fresh_next_hop() -> Result<()> {
+    let mut key1 = SecretKey::random();
+    let mut key2 = SecretKey::random();
+    if key1.address() < key2.address() {
+        (key1, key2) = (key2, key1)
+    }
+    let node1 = prepare_repair_node(key1)?;
+    let node2 = prepare_repair_node(key2)?;
+    manually_establish_connection(&node1.swarm, &node2.swarm).await;
+
+    wait_for_successor(&node1, node2.did()).await?;
+    wait_for_msgs([&node1, &node2]).await;
+    let connected_for_ms = node1
+        .swarm
+        .transport
+        .peer_connected_for_ms(node2.did(), get_epoch_ms_i64())?
+        .ok_or_else(|| Error::InvalidMessage("missing peer admission age".to_string()))?;
+    assert!(
+        connected_for_ms < 30_000,
+        "test must exercise a fresh connection; observed age {connected_for_ms}ms"
+    );
+
+    let (entry, remote_placement) = entry_with_remote_repair_placement(&node1)?;
+    node1
+        .dht()
+        .storage
+        .put(&entry.did.to_string(), &entry)
+        .await?;
+
+    node1.swarm.stabilizer().repair_storage().await?;
+
+    assert_no_more_msg([&node2]).await;
+    assert_eq!(
+        node2
+            .dht()
+            .storage
+            .get(&remote_placement.to_string())
+            .await?,
+        None
     );
     Ok(())
 }

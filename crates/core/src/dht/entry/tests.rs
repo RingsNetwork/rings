@@ -163,10 +163,10 @@ fn entry_join_is_strongly_eventually_consistent_for_data_deltas() -> Result<()> 
 
     assert_eq!(forward, reverse);
     assert_eq!(forward, duplicated);
-    assert_eq!(decode_entry_data(&forward)?, vec![
-        String::from("b"),
-        String::from("a")
-    ]);
+    assert_eq!(
+        decode_entry_data(&forward)?,
+        vec![String::from("b"), String::from("a")]
+    );
     Ok(())
 }
 
@@ -362,10 +362,10 @@ fn extend_appends_data_for_same_entry() -> Result<()> {
     let entry = data_entry("topic", "first")?;
     let other = data_entry("topic", "second")?;
     let updated = entry.extend(other, actor())?;
-    assert_eq!(decode_entry_data(&updated)?, vec![
-        String::from("first"),
-        String::from("second")
-    ]);
+    assert_eq!(
+        decode_entry_data(&updated)?,
+        vec![String::from("first"), String::from("second")]
+    );
     Ok(())
 }
 
@@ -422,11 +422,10 @@ fn touch_moves_existing_items_to_end_once() -> Result<()> {
         .extend(data_entry("topic", "c")?, actor())?;
     let touched = data_entry("topic", "b")?;
     let updated = entry.touch(touched, actor())?;
-    assert_eq!(decode_entry_data(&updated)?, vec![
-        String::from("a"),
-        String::from("c"),
-        String::from("b")
-    ]);
+    assert_eq!(
+        decode_entry_data(&updated)?,
+        vec![String::from("a"), String::from("c"), String::from("b")]
+    );
     Ok(())
 }
 
@@ -457,9 +456,10 @@ fn relay_tombstone_removes_observed_message_by_join() -> Result<()> {
 
     assert_eq!(decode_entry_data(&removed)?, vec![String::from("second")]);
     let joined_with_stale_add = removed.join(first)?;
-    assert_eq!(decode_entry_data(&joined_with_stale_add)?, vec![
-        String::from("second")
-    ]);
+    assert_eq!(
+        decode_entry_data(&joined_with_stale_add)?,
+        vec![String::from("second")]
+    );
     Ok(())
 }
 
@@ -475,9 +475,10 @@ fn data_tombstone_removes_observed_payload_by_join() -> Result<()> {
 
     assert_eq!(decode_entry_data(&removed)?, vec![String::from("second")]);
     let joined_with_stale_add = removed.join(first)?;
-    assert_eq!(decode_entry_data(&joined_with_stale_add)?, vec![
-        String::from("second")
-    ]);
+    assert_eq!(
+        decode_entry_data(&joined_with_stale_add)?,
+        vec![String::from("second")]
+    );
     Ok(())
 }
 

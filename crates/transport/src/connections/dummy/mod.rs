@@ -70,6 +70,15 @@ thread_local! {
     /// Test-only per-thread switch that makes `webrtc_wait_for_data_channel_open` stay pending.
     /// This models a lifecycle notifier/callback wedge after a connection was already admitted.
     static WAIT_FOR_DATA_CHANNEL_OPEN_PENDING: Cell<bool> = const { Cell::new(false) };
+    /// Test-only per-thread switch that makes `send_message` stay pending after
+    /// the data channel is already open.
+    static SEND_MESSAGE_PENDING: Cell<bool> = const { Cell::new(false) };
+    /// Test-only per-thread threshold that makes `send_message` stay pending after
+    /// this many messages have already been dispatched.
+    static SEND_MESSAGE_PENDING_AFTER_SENT_COUNT: Cell<Option<usize>> = const { Cell::new(None) };
+    /// Test-only per-thread switch that makes `send_message` report local success
+    /// without dispatching the message to the remote callback.
+    static DROP_MESSAGES: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Test-only controlled delivery scheduler. When enabled (per thread), dummy
@@ -81,8 +90,11 @@ pub mod controlled {
     use super::CONNS;
     use super::CONTROLLED;
     use super::DELIVERY;
+    use super::DROP_MESSAGES;
     use super::MAX_MESSAGE_SIZE;
     use super::NEXT_CALLBACK_CID;
+    use super::SEND_MESSAGE_PENDING;
+    use super::SEND_MESSAGE_PENDING_AFTER_SENT_COUNT;
     use super::WAIT_FOR_DATA_CHANNEL_OPEN_PENDING;
 
     /// Turn the controlled scheduler on/off for the current thread. Turning it
@@ -95,6 +107,9 @@ pub mod controlled {
                 *next.borrow_mut() = None;
             });
             WAIT_FOR_DATA_CHANNEL_OPEN_PENDING.with(|pending| pending.set(false));
+            SEND_MESSAGE_PENDING.with(|pending| pending.set(false));
+            SEND_MESSAGE_PENDING_AFTER_SENT_COUNT.with(|threshold| threshold.set(None));
+            DROP_MESSAGES.with(|drop| drop.set(false));
         }
     }
 
@@ -117,6 +132,24 @@ pub mod controlled {
     /// Test hook: force `webrtc_wait_for_data_channel_open` on this thread to never complete.
     pub fn set_wait_for_data_channel_open_pending(on: bool) {
         WAIT_FOR_DATA_CHANNEL_OPEN_PENDING.with(|pending| pending.set(on));
+    }
+
+    /// Test hook: force `send_message` to stay pending after the data channel is open.
+    pub fn set_send_message_pending(on: bool) {
+        SEND_MESSAGE_PENDING.with(|pending| pending.set(on));
+    }
+
+    /// Test hook: force `send_message` to stay pending once this thread has already dispatched
+    /// `threshold` messages. `None` disables the hook.
+    pub fn set_send_message_pending_after_sent_count(threshold: Option<usize>) {
+        SEND_MESSAGE_PENDING_AFTER_SENT_COUNT.with(|pending_after| pending_after.set(threshold));
+    }
+
+    /// Test hook: make dummy sends disappear while still returning a successful
+    /// local send. This models a silent remote failure where the local data
+    /// channel remains open and `Connected`.
+    pub fn set_drop_messages(on: bool) {
+        DROP_MESSAGES.with(|drop| drop.set(on));
     }
 
     /// Test hook: number of data-channel messages `send_message` has dispatched on this thread.
@@ -357,9 +390,22 @@ impl ConnectionInterface for DummyConnection {
 
     async fn send_message(&self, msg: TransportMessage) -> Result<DeliveryFuture> {
         self.webrtc_wait_for_data_channel_open().await?;
+        if SEND_MESSAGE_PENDING.with(|pending| pending.get())
+            || SEND_MESSAGE_PENDING_AFTER_SENT_COUNT.with(|threshold| {
+                threshold
+                    .get()
+                    .map(|count| SENT_COUNT.with(|sent| sent.get()) >= count)
+                    .unwrap_or(false)
+            })
+        {
+            std::future::pending::<()>().await;
+        }
         SENT_COUNT.with(|c| c.set(c.get() + 1));
 
         let data = bincode::serialize(&msg).map(Bytes::from)?;
+        if DROP_MESSAGES.with(|drop| drop.get()) {
+            return Ok(Box::pin(async { Ok(()) }));
+        }
         // The remote connection may have been torn down between the data
         // channel check and here (the dummy analogue of sending on a channel
         // that just closed). Mimic a real transport: fail gracefully instead of

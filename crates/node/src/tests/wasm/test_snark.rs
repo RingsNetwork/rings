@@ -43,10 +43,13 @@ async fn test_send_snark_backend_message() {
     .await
     .unwrap();
     type F = crate::extension::snark::Field;
-    let input: Input = vec![("step_in".to_string(), vec![
-        F::from_u64(4u64, SupportedPrimeField::Vesta),
-        F::from_u64(2u64, SupportedPrimeField::Vesta),
-    ])]
+    let input: Input = vec![(
+        "step_in".to_string(),
+        vec![
+            F::from_u64(4u64, SupportedPrimeField::Vesta),
+            F::from_u64(2u64, SupportedPrimeField::Vesta),
+        ],
+    )]
     .into();
     console_log!("gen circuit");
     let circuits = snark_task_builder.gen_circuits(input, vec![], 5).unwrap();
