@@ -1,7 +1,6 @@
 //! Onion proxy helpers for the browser frontend.
 
 use std::fmt;
-use std::sync::Arc;
 
 use js_sys::Array;
 use js_sys::Object;
@@ -336,7 +335,7 @@ pub(crate) fn format_headers(headers: &[(String, String)]) -> String {
 
 /// Build a route through an HTTPS onion exit.
 pub(crate) async fn route(
-    provider: &Arc<Provider>,
+    provider: &Provider,
     request: OnionProxyRouteRequest,
 ) -> Result<OnionProxyRoute, OnionProxyError> {
     let target_authority = target_authority(&request.url)?;
@@ -361,7 +360,7 @@ pub(crate) async fn route(
 
 /// Send one HTTPS request through an onion proxy.
 pub(crate) async fn request(
-    provider: &Arc<Provider>,
+    provider: &Provider,
     request: OnionProxyHttpRequest,
 ) -> Result<OnionProxyResponse, OnionProxyError> {
     target_authority(&request.url)?;

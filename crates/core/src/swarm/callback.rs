@@ -150,6 +150,27 @@ impl InnerSwarmCallback {
         Ok(true)
     }
 
+    async fn handle_pending_terminal_event(
+        &self,
+        did: Did,
+        operation: &str,
+    ) -> Result<bool, CallbackError> {
+        let Some(attempt) = self.pending_attempt else {
+            return Ok(false);
+        };
+        if self.transport.cancel_pending_connection(attempt).await? {
+            self.transport.record_peer_disconnected(did).await;
+            return Ok(true);
+        }
+        if self.transport.is_admitted_connection_attempt(attempt) {
+            return Ok(false);
+        }
+        tracing::debug!(
+            "ignoring late {operation} for {did}; pending attempt belongs to generation already superseded"
+        );
+        Ok(true)
+    }
+
     async fn handle_payload(
         &self,
         cid: &str,
@@ -279,11 +300,11 @@ impl TransportCallback for InnerSwarmCallback {
             // `Failed` and `Closed` are terminal states. Pending handshakes are
             // discarded without touching the DHT; active peers leave it.
             WebrtcConnectionState::Failed | WebrtcConnectionState::Closed => {
-                if let Some(attempt) = self.pending_attempt {
-                    if self.transport.cancel_pending_connection(attempt).await? {
-                        self.transport.record_peer_disconnected(did).await;
-                        return Ok(());
-                    }
+                if self
+                    .handle_pending_terminal_event(did, "connection terminal state")
+                    .await?
+                {
+                    return Ok(());
                 }
                 if !self.transport.is_admitted_connection(did) {
                     return Ok(());
@@ -360,11 +381,11 @@ impl TransportCallback for InnerSwarmCallback {
         // instead of waiting for the ICE state to reach `Failed`. This is the
         // graceful counterpart to a local `disconnect()`: the remote learns of
         // it promptly without relying on the transient `Disconnected` state.
-        if let Some(attempt) = self.pending_attempt {
-            if self.transport.cancel_pending_connection(attempt).await? {
-                self.transport.record_peer_disconnected(did).await;
-                return Ok(());
-            }
+        if self
+            .handle_pending_terminal_event(did, "data-channel close")
+            .await?
+        {
+            return Ok(());
         }
         if !self.transport.is_admitted_connection(did) {
             return Ok(());

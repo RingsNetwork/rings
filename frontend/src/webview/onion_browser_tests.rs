@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::rc::Rc;
 
 use js_sys::Object;
 use js_sys::Reflect;
@@ -8,6 +8,7 @@ use rings_node::prelude::rings_core::prelude::uuid;
 use rings_node::prelude::rings_core::session::SessionSk;
 use rings_node::prelude::rings_core::storage::idb::IdbStorage;
 use rings_node::prelude::rings_core::utils::js_utils::window_sleep;
+use rings_node::processor::Processor;
 use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
 use rings_node::provider::Provider;
@@ -148,7 +149,7 @@ async fn run_browser_onion_webview_flow() -> WebviewResult<()> {
 async fn browser_provider(
     storage_name: &str,
     exit_target: Option<&str>,
-) -> WebviewResult<Arc<Provider>> {
+) -> WebviewResult<Rc<Provider>> {
     let session_sk = SessionSk::new_with_seckey(&SecretKey::random()).map_err(|error| {
         WebviewError::Transport(format!("build browser session key: {error:?}"))
     })?;
@@ -174,7 +175,7 @@ async fn browser_provider(
         .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
         .build()
         .map_err(|error| WebviewError::Transport(format!("build processor: {error:?}")))?;
-    let provider = Arc::new(Provider::from_processor(Arc::new(processor)));
+    let provider = Rc::new(provider_from_processor(processor));
     provider
         .set_backend()
         .map_err(|error| WebviewError::Transport(format!("install backend: {error:?}")))?;
@@ -188,10 +189,15 @@ async fn browser_provider(
     Ok(provider)
 }
 
-async fn connect_browser_providers(
-    client: &Arc<Provider>,
-    exit: &Arc<Provider>,
-) -> WebviewResult<()> {
+#[expect(
+    clippy::arc_with_non_send_sync,
+    reason = "Provider::from_processor requires Arc<Processor>; this browser-only test stores Provider in Rc after the API boundary"
+)]
+fn provider_from_processor(processor: Processor) -> Provider {
+    Provider::from_processor(std::sync::Arc::new(processor))
+}
+
+async fn connect_browser_providers(client: &Provider, exit: &Provider) -> WebviewResult<()> {
     let offer = string_field(
         &rpc(
             client,
@@ -214,7 +220,7 @@ async fn connect_browser_providers(
     Ok(())
 }
 
-async fn rpc(provider: &Arc<Provider>, method: &str, params: JsValue) -> WebviewResult<JsValue> {
+async fn rpc(provider: &Provider, method: &str, params: JsValue) -> WebviewResult<JsValue> {
     JsFuture::from(provider.request(method.to_string(), params))
         .await
         .map_err(js_webview_error)
@@ -233,7 +239,7 @@ fn object(pairs: &[(&str, &str)]) -> JsValue {
 }
 
 fn string_field(value: &JsValue, field: &str) -> WebviewResult<String> {
-    Reflect::get(value.as_ref(), JsValue::from_str(field).as_ref())
+    Reflect::get(value, &JsValue::from_str(field))
         .map_err(js_webview_error)?
         .as_string()
         .ok_or_else(|| WebviewError::Browser(format!("missing string field {field:?}")))

@@ -15,8 +15,8 @@ use js_sys::Uint8Array;
 use rings_node::provider::Provider;
 use rings_webview::browser::bootstrap_script;
 use rings_webview::ConcurrentWebviewGateway;
-use rings_webview::GatewayFailure;
 use rings_webview::GatewayCredentials;
+use rings_webview::GatewayFailure;
 use rings_webview::GatewayHeader;
 use rings_webview::GatewayPrefix;
 use rings_webview::GatewayRequest;
@@ -58,7 +58,7 @@ const WEBVIEW_OVERLAY_LOADER: &str = r#"
 "#;
 
 thread_local! {
-    static BROWSER_GATEWAY: RefCell<Option<BrowserGatewayBinding>> = RefCell::new(None);
+    static BROWSER_GATEWAY: RefCell<Option<BrowserGatewayBinding>> = const { RefCell::new(None) };
 }
 
 struct BrowserGatewayBinding {
@@ -276,12 +276,7 @@ fn browser_failure(status: u16, error: String) -> JsValue {
     )
 }
 
-fn browser_failure_with(
-    status: u16,
-    code: &str,
-    summary: &str,
-    error: String,
-) -> JsValue {
+fn browser_failure_with(status: u16, code: &str, summary: &str, error: String) -> JsValue {
     let value = Object::new();
     let _ok = crate::browser_api::js_set(&value, "ok", &JsValue::FALSE);
     let _status =
@@ -571,7 +566,7 @@ impl WebviewNode {
         }
         let controlled_origin = TargetUrl::parse(&format!("{}/", origin.trim_end_matches('/')))
             .map_err(|error| WebviewError::Browser(format!("parse frontend origin: {error}")))?;
-        Self::new(provider, controlled_origin).map(Some)
+        Self::new(Rc::new((*provider).clone()), controlled_origin).map(Some)
     }
 
     /// Handle a browser request after the host has captured it before connection dispatch.
@@ -579,7 +574,7 @@ impl WebviewNode {
         self.host.handle(request).await
     }
 
-    fn new(provider: Arc<Provider>, controlled_origin: TargetUrl) -> WebviewResult<Self> {
+    fn new(provider: Rc<Provider>, controlled_origin: TargetUrl) -> WebviewResult<Self> {
         let prefix = GatewayPrefix::new(GATEWAY_PREFIX)?;
         let policy = GatewayRoutePolicy::new(controlled_origin.into_url(), prefix.clone())?;
         let gateway = ConcurrentWebviewGateway::new(prefix, OnionGatewayTransport { provider })
@@ -601,7 +596,8 @@ struct WebviewGatewayHost<T> {
 }
 
 impl<T> WebviewGatewayHost<T>
-where T: GatewayTransport
+where
+    T: GatewayTransport,
 {
     async fn handle(&self, request: WebviewHostRequest) -> WebviewResult<WebviewHostOutcome> {
         match self.policy.route(
@@ -685,7 +681,7 @@ impl Drop for GatewayRequestPermit {
 }
 
 struct OnionGatewayTransport {
-    provider: Arc<Provider>,
+    provider: Rc<Provider>,
 }
 
 #[async_trait(?Send)]
@@ -701,17 +697,20 @@ impl GatewayTransport for OnionGatewayTransport {
             )
             .await;
         }
-        let response = onion::request(&self.provider, onion::OnionProxyHttpRequest {
-            url: request.target.to_string(),
-            method: request.method,
-            headers: request
-                .headers
-                .into_iter()
-                .map(|header| (header.name, header.value))
-                .collect(),
-            body: request.body,
-            options,
-        })
+        let response = onion::request(
+            &self.provider,
+            onion::OnionProxyHttpRequest {
+                url: request.target.to_string(),
+                method: request.method,
+                headers: request
+                    .headers
+                    .into_iter()
+                    .map(|header| (header.name, header.value))
+                    .collect(),
+                body: request.body,
+                options,
+            },
+        )
         .await
         .map_err(onion_gateway_failure)?;
         let headers = response
@@ -731,16 +730,19 @@ fn should_trace_onion_route(kind: GatewayRequestKind) -> bool {
 }
 
 async fn trace_onion_route(
-    provider: &Arc<Provider>,
+    provider: &Provider,
     target: &str,
     kind: GatewayRequestKind,
     options: onion::OnionProxyOptions,
 ) {
     let started = js_sys::Date::now();
-    let result = onion::route(provider, onion::OnionProxyRouteRequest {
-        url: target.to_string(),
-        options,
-    })
+    let result = onion::route(
+        provider,
+        onion::OnionProxyRouteRequest {
+            url: target.to_string(),
+            options,
+        },
+    )
     .await;
     let duration = (js_sys::Date::now() - started).max(0.0).round();
     match result {

@@ -15,6 +15,7 @@ use crate::wallet::WalletKind;
 
 mod sidebar;
 pub(crate) use sidebar::control_sidebar;
+pub(crate) use sidebar::ControlSidebarShell;
 
 const CHROME_WEBRTC_DEBUG_URL: &str = "chrome://webrtc-internals/";
 const FIREFOX_WEBRTC_DEBUG_URL: &str = "about:webrtc";

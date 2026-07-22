@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 
 use rings_transport::core::transport::TransportInterface;
 use rings_transport::core::transport::WebrtcConnectionState;
@@ -72,10 +71,13 @@ impl<const MAX_PENDING: usize> PendingPeerPool<MAX_PENDING> {
             peer,
             generation: self.next_generation,
         };
-        self.peers.insert(peer, PendingPeer {
-            generation: attempt.generation,
-            admitted_at_ms: now_ms,
-        });
+        self.peers.insert(
+            peer,
+            PendingPeer {
+                generation: attempt.generation,
+                admitted_at_ms: now_ms,
+            },
+        );
         Ok(attempt)
     }
 
@@ -128,7 +130,7 @@ impl SwarmTransport {
             .map_err(|_| Error::SwarmConnectionLifecycleLock)
     }
 
-    pub(super) fn active_peers(&self) -> Result<std::sync::MutexGuard<'_, BTreeSet<Did>>> {
+    pub(super) fn active_peers(&self) -> Result<std::sync::MutexGuard<'_, BTreeMap<Did, u64>>> {
         self.active_peers
             .lock()
             .map_err(|_| Error::SwarmConnectionLifecycleLock)
@@ -155,7 +157,17 @@ impl SwarmTransport {
     /// even after WebRTC reports `Closed`.
     pub(crate) fn is_admitted_connection(&self, peer: Did) -> bool {
         self.active_peers()
-            .map(|active| active.contains(&peer))
+            .map(|active| active.contains_key(&peer))
+            .unwrap_or(false)
+    }
+
+    /// Return whether `attempt` owns the current active slot for its peer.
+    ///
+    /// Invariant: a terminal callback may remove an active peer only when its
+    /// generation equals the generation admitted by data-channel open.
+    pub(crate) fn is_admitted_connection_attempt(&self, attempt: PendingConnectionAttempt) -> bool {
+        self.active_peers()
+            .map(|active| active.get(&attempt.peer).copied() == Some(attempt.generation))
             .unwrap_or(false)
     }
 
@@ -211,16 +223,20 @@ impl SwarmTransport {
             return Ok(false);
         }
         drop(pending);
-        self.active_peers()?.insert(attempt.peer);
+        self.active_peers()?
+            .insert(attempt.peer, attempt.generation);
         Ok(true)
     }
 
-    fn retire_pending_connection(&self, attempt: PendingConnectionAttempt) -> Result<bool> {
+    pub(super) fn retire_pending_connection(
+        &self,
+        attempt: PendingConnectionAttempt,
+    ) -> Result<bool> {
         Ok(self.pending_peers()?.remove(attempt))
     }
 
     pub(super) fn retire_active_connection(&self, peer: Did) -> Result<bool> {
-        Ok(self.active_peers()?.remove(&peer))
+        Ok(self.active_peers()?.remove(&peer).is_some())
     }
 
     /// Cancel a current pending handshake and release its non-routable transport object.
@@ -288,5 +304,187 @@ impl SwarmTransport {
     #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
     pub(crate) fn pending_connection_count(&self) -> Result<usize> {
         Ok(self.pending_peers()?.len())
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_model {
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum PeerLifecycle {
+        Absent,
+        Pending(u64),
+        Active(u64),
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum CallbackGeneration {
+        Current,
+        Previous,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum LifecycleAction {
+        Replacement,
+        Open(CallbackGeneration),
+        Close(CallbackGeneration),
+        Failed(CallbackGeneration),
+        Timeout,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct LifecycleModel {
+        peer: PeerLifecycle,
+        next_generation: u64,
+        previous_generation: Option<u64>,
+        dht_member: bool,
+        transport_slot: bool,
+    }
+
+    impl Default for LifecycleModel {
+        fn default() -> Self {
+            Self {
+                peer: PeerLifecycle::Absent,
+                next_generation: 0,
+                previous_generation: None,
+                dht_member: false,
+                transport_slot: false,
+            }
+        }
+    }
+
+    impl LifecycleModel {
+        fn apply(mut self, action: LifecycleAction) -> Self {
+            match action {
+                LifecycleAction::Replacement => self.replace_pending(),
+                LifecycleAction::Open(callback) => self.open(callback),
+                LifecycleAction::Close(callback) | LifecycleAction::Failed(callback) => {
+                    self.terminal(callback)
+                }
+                LifecycleAction::Timeout => self.timeout(),
+            }
+            self
+        }
+
+        fn replace_pending(&mut self) {
+            if let PeerLifecycle::Active(_) = self.peer {
+                return;
+            }
+            self.remember_current_generation();
+            self.next_generation = self.next_generation.saturating_add(1);
+            self.peer = PeerLifecycle::Pending(self.next_generation);
+            self.dht_member = false;
+            self.transport_slot = true;
+        }
+
+        fn open(&mut self, callback: CallbackGeneration) {
+            let Some(callback_generation) = self.callback_generation(callback) else {
+                return;
+            };
+            if self.peer == PeerLifecycle::Pending(callback_generation) {
+                self.peer = PeerLifecycle::Active(callback_generation);
+                self.dht_member = true;
+                self.transport_slot = true;
+            }
+        }
+
+        fn terminal(&mut self, callback: CallbackGeneration) {
+            let Some(callback_generation) = self.callback_generation(callback) else {
+                return;
+            };
+            if self.generation_matches_live_slot(callback_generation) {
+                self.previous_generation = Some(callback_generation);
+                self.peer = PeerLifecycle::Absent;
+                self.dht_member = false;
+                self.transport_slot = false;
+            }
+        }
+
+        fn timeout(&mut self) {
+            if let PeerLifecycle::Pending(generation) = self.peer {
+                self.previous_generation = Some(generation);
+                self.peer = PeerLifecycle::Absent;
+                self.dht_member = false;
+                self.transport_slot = false;
+            }
+        }
+
+        fn callback_generation(self, callback: CallbackGeneration) -> Option<u64> {
+            match callback {
+                CallbackGeneration::Current => self.current_generation(),
+                CallbackGeneration::Previous => self.previous_generation,
+            }
+        }
+
+        fn current_generation(self) -> Option<u64> {
+            match self.peer {
+                PeerLifecycle::Absent => None,
+                PeerLifecycle::Pending(generation) | PeerLifecycle::Active(generation) => {
+                    Some(generation)
+                }
+            }
+        }
+
+        fn remember_current_generation(&mut self) {
+            if let Some(generation) = self.current_generation() {
+                self.previous_generation = Some(generation);
+            }
+        }
+
+        fn generation_matches_live_slot(self, generation: u64) -> bool {
+            matches!(
+                self.peer,
+                PeerLifecycle::Pending(current) | PeerLifecycle::Active(current) if current == generation
+            )
+        }
+
+        fn assert_invariants(self) {
+            // Invariant: Pending(g) is a physical transport slot only; it is not a Chord member.
+            if matches!(self.peer, PeerLifecycle::Pending(_)) {
+                assert!(
+                    !self.dht_member,
+                    "pending peers must never be routable: {self:?}"
+                );
+            }
+            assert_eq!(
+                self.dht_member,
+                matches!(self.peer, PeerLifecycle::Active(_)),
+                "only admitted active peers may appear in DHT membership: {self:?}"
+            );
+            assert_eq!(
+                self.transport_slot,
+                matches!(
+                    self.peer,
+                    PeerLifecycle::Pending(_) | PeerLifecycle::Active(_)
+                ),
+                "terminal and expiry transitions must remove the transport slot: {self:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pending_admission_model_preserves_generation_and_routing_invariants() {
+        const MAX_DEPTH: usize = 4;
+        let actions = [
+            LifecycleAction::Replacement,
+            LifecycleAction::Open(CallbackGeneration::Current),
+            LifecycleAction::Open(CallbackGeneration::Previous),
+            LifecycleAction::Close(CallbackGeneration::Current),
+            LifecycleAction::Close(CallbackGeneration::Previous),
+            LifecycleAction::Failed(CallbackGeneration::Current),
+            LifecycleAction::Failed(CallbackGeneration::Previous),
+            LifecycleAction::Timeout,
+        ];
+
+        explore(LifecycleModel::default(), &actions, MAX_DEPTH);
+    }
+
+    fn explore(model: LifecycleModel, actions: &[LifecycleAction], remaining_depth: usize) {
+        model.assert_invariants();
+        if remaining_depth == 0 {
+            return;
+        }
+        for action in actions.iter().copied() {
+            explore(model.apply(action), actions, remaining_depth - 1);
+        }
     }
 }

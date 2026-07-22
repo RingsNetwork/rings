@@ -575,12 +575,14 @@ fn render_console_shell(ctx: AppRenderContext<'_>, header: Html) -> Html {
     let control_sidebar = controls::control_sidebar(
         control_view(ctx.node),
         ctx.launch_actions,
-        workbench_control,
-        webview_control,
-        *ctx.shell.active_dialog,
-        dialog_actions,
-        ctx.shell.control_sidebar_collapsed.clone(),
-        ctx.extension_mode,
+        controls::ControlSidebarShell {
+            workbench_control,
+            webview_control,
+            active_dialog: *ctx.shell.active_dialog,
+            dialog_actions,
+            collapsed: ctx.shell.control_sidebar_collapsed.clone(),
+            extension_mode: ctx.extension_mode,
+        },
     );
     let shell_class = console_shell_class(ctx.extension_mode);
     html! {

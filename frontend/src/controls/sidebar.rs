@@ -47,44 +47,48 @@ impl ControlSidebarDerived {
     }
 }
 
+pub(crate) struct ControlSidebarShell {
+    pub(crate) workbench_control: Html,
+    pub(crate) webview_control: Option<Html>,
+    pub(crate) active_dialog: ActiveDialog,
+    pub(crate) dialog_actions: DialogActions,
+    pub(crate) collapsed: UseStateHandle<bool>,
+    pub(crate) extension_mode: bool,
+}
+
 pub(crate) fn control_sidebar(
     view: ControlView<'_>,
     actions: LaunchActions,
-    workbench_control: Html,
-    webview_control: Option<Html>,
-    active_dialog: ActiveDialog,
-    dialog_actions: DialogActions,
-    collapsed: UseStateHandle<bool>,
-    extension_mode: bool,
+    shell: ControlSidebarShell,
 ) -> Html {
     let derived = ControlSidebarDerived::from_view(&view);
     let on_copy_did = copy_local_did_callback(view.did, view.status);
     let open_settings_dialog = {
-        let open_dialog = dialog_actions.open.clone();
+        let open_dialog = shell.dialog_actions.open.clone();
         Callback::from(move |_| open_dialog.emit(ActiveDialog::Settings))
     };
-    let close_settings_dialog = dialog_actions.close.clone();
+    let close_settings_dialog = shell.dialog_actions.close.clone();
     let toggle_sidebar = {
-        let collapsed = collapsed.clone();
+        let collapsed = shell.collapsed.clone();
         Callback::from(move |_| collapsed.set(!*collapsed))
     };
-    let sidebar_class = control_sidebar_class(extension_mode, *collapsed);
+    let sidebar_class = control_sidebar_class(shell.extension_mode, *shell.collapsed);
     html! {
         <aside class={sidebar_class} aria-label="Node controls">
-            if !extension_mode {
-                { sidebar_toggle_button(*collapsed, toggle_sidebar) }
+            if !shell.extension_mode {
+                { sidebar_toggle_button(*shell.collapsed, toggle_sidebar) }
             }
-            if extension_mode || !*collapsed {
+            if shell.extension_mode || !*shell.collapsed {
                 { sidebar_content(
                     &derived,
                     &actions,
-                    workbench_control,
-                    webview_control,
+                    shell.workbench_control,
+                    shell.webview_control,
                     open_settings_dialog,
                     on_copy_did.clone(),
                 ) }
             }
-            { settings_dialog_if_open(active_dialog, &view, actions, &derived, on_copy_did, close_settings_dialog) }
+            { settings_dialog_if_open(shell.active_dialog, &view, actions, &derived, on_copy_did, close_settings_dialog) }
         </aside>
     }
 }

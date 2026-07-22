@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -92,7 +91,7 @@ pub struct SwarmTransport {
     dht_virtual_nodes: u16,
     reassembly_limits: ReassemblyLimits,
     pending_peers: Mutex<PendingPeerPool<DEFAULT_PENDING_CONNECTION_CAPACITY>>,
-    active_peers: Mutex<BTreeSet<Did>>,
+    active_peers: Mutex<BTreeMap<Did, u64>>,
     storage_lookup_observations: Mutex<StorageLookupObservationMap>,
     pending_storage_sync_acks: Mutex<StorageSyncAckMap>,
     measured_disconnects: Mutex<BTreeMap<Did, i64>>,
@@ -176,7 +175,7 @@ impl SwarmTransport {
             dht_virtual_nodes: settings.dht_virtual_nodes,
             reassembly_limits: settings.reassembly_limits,
             pending_peers: Mutex::new(PendingPeerPool::new()),
-            active_peers: Mutex::new(BTreeSet::new()),
+            active_peers: Mutex::new(BTreeMap::new()),
             storage_lookup_observations: Mutex::new(BTreeMap::new()),
             pending_storage_sync_acks: Mutex::new(BTreeMap::new()),
             measured_disconnects: Mutex::new(BTreeMap::new()),
@@ -352,7 +351,7 @@ impl SwarmTransport {
 
     fn active_peer_ids(&self) -> Vec<Did> {
         self.active_peers()
-            .map(|active| active.iter().copied().collect())
+            .map(|active| active.keys().copied().collect())
             .unwrap_or_default()
     }
 

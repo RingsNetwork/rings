@@ -63,7 +63,27 @@ async function handleGatewayFetch(event) {
   const requestId = nextRequestId;
   nextRequestId += 1;
   const startedAt = performance.now();
-  const request = await serializeRequest(event);
+  let request;
+  try {
+    request = await serializeRequest(event);
+  } catch (error) {
+    request = debugRequestForFailure(event.request);
+    await emitResourceDebug(
+      requestId,
+      request,
+      startedAt,
+      "failed",
+      `#${requestId} rejected malformed gateway request: ${errorMessage(error)}`,
+      "error",
+      400,
+    );
+    return gatewayFailure(
+      400,
+      errorMessage(error),
+      "Malformed Rings WebView gateway request.",
+      "invalid_gateway_request",
+    );
+  }
   await emitResourceDebug(
     requestId,
     request,
@@ -300,6 +320,7 @@ function queryGatewayHost(client) {
 async function serializeRequest(event) {
   const request = event.request;
   const sourceTarget = await sourceTargetForClient(event.clientId);
+  const kind = requestKind(request);
   const body = request.method === "GET" || request.method === "HEAD"
     ? undefined
     : await request.clone().arrayBuffer();
@@ -312,7 +333,19 @@ async function serializeRequest(event) {
       .filter(([name]) => name.toLowerCase() !== "x-rings-webview-kind")
       .map(([name, value]) => ({ name, value })),
     body,
-    kind: requestKind(request),
+    kind,
+  };
+}
+
+function debugRequestForFailure(request) {
+  return {
+    requested: request.url,
+    sourceTarget: undefined,
+    method: request.method || "GET",
+    credentials: request.credentials,
+    headers: [],
+    body: undefined,
+    kind: "invalid",
   };
 }
 
@@ -340,18 +373,49 @@ async function sourceTargetForClient(clientId) {
 }
 
 function requestKind(request) {
-  const taggedKind = request.headers.get("x-rings-webview-kind");
-  if (taggedKind === "fetch" || taggedKind === "xhr" || taggedKind === "navigation") {
-    return taggedKind;
+  if (isNavigationRequest(request)) {
+    return "navigation";
   }
-  if (
+  const taggedKind = runtimeKindTag(request);
+  if (isRuntimeReadableRequest(request)) {
+    return taggedKind || "fetch";
+  }
+  if (taggedKind) {
+    throw new Error(`X-Rings-Webview-Kind is only valid for runtime requests, got ${taggedKind}`);
+  }
+  return "subresource";
+}
+
+function isNavigationRequest(request) {
+  return (
     request.mode === "navigate"
     || request.destination === "document"
     || request.destination === "iframe"
-  ) {
-    return "navigation";
+  );
+}
+
+function isRuntimeReadableRequest(request) {
+  return !request.destination;
+}
+
+function runtimeKindTag(request) {
+  const rawKind = request.headers.get("x-rings-webview-kind");
+  if (rawKind == null) {
+    return undefined;
   }
-  return "subresource";
+  const values = rawKind.split(",").map((value) => value.trim()).filter(Boolean);
+  if (values.length !== 1 || !isRuntimeKind(values[0])) {
+    throw new Error(`invalid X-Rings-Webview-Kind: ${rawKind}`);
+  }
+  return values[0];
+}
+
+function isRuntimeKind(kind) {
+  return kind === "fetch" || kind === "xhr";
+}
+
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function requestGatewayResponse(host, request) {

@@ -291,6 +291,30 @@ async fn mismatched_pending_callback_cancels_attempt_without_admission() -> Resu
     Ok(())
 }
 
+#[tokio::test]
+async fn late_terminal_callback_cannot_remove_replacement_active_slot() -> Result<()> {
+    let transport = Arc::new(transport_with_measure(Arc::new(
+        RecordingMeasure::default(),
+    ))?);
+    let peer = SecretKey::random().address().into();
+    let old_attempt = transport.reserve_pending_connection(peer).await?;
+    assert!(transport.retire_pending_connection(old_attempt)?);
+    let current_attempt = transport.reserve_pending_connection(peer).await?;
+    assert!(transport.promote_pending_connection(current_attempt)?);
+    let late_callback =
+        InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback))
+            .with_pending_connection_attempt(old_attempt);
+
+    late_callback
+        .on_peer_connection_state_change(&peer.to_string(), WebrtcConnectionState::Closed)
+        .await
+        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+
+    assert!(transport.is_admitted_connection_attempt(current_attempt));
+    assert_eq!(transport.admitted_connection_ids(), vec![peer]);
+    Ok(())
+}
+
 #[test]
 fn connection_offer_protocol_mode_includes_storage_redundancy() -> Result<()> {
     let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
@@ -343,11 +367,14 @@ async fn disconnected_observation_is_once_per_connection_epoch() -> Result<()> {
     transport.record_peer_disconnected(peer).await;
     assert!(transport.peer_disconnected_since_ms(peer).is_some());
 
-    assert_eq!(measure.snapshot_counters()?.as_slice(), &[
-        (peer, MeasureCounter::Disconnected),
-        (peer, MeasureCounter::Connect),
-        (peer, MeasureCounter::Disconnected),
-    ]);
+    assert_eq!(
+        measure.snapshot_counters()?.as_slice(),
+        &[
+            (peer, MeasureCounter::Disconnected),
+            (peer, MeasureCounter::Connect),
+            (peer, MeasureCounter::Disconnected),
+        ]
+    );
 
     Ok(())
 }
