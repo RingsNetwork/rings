@@ -114,9 +114,7 @@ impl PeerMeasurement {
     /// Returns `None` when no counter has ever been recorded for `did`; absence
     /// is distinct from an observed peer with non-zero counters.
     pub async fn from_measure<M>(measure: &M, did: Did) -> Option<Self>
-    where
-        M: Measure + ?Sized,
-    {
+    where M: Measure + ?Sized {
         let evidence = PeerQualityEvidence::from_measure(measure, did).await;
         if evidence.is_unobserved() {
             return None;
@@ -148,9 +146,7 @@ impl PeerQualityEvidence {
 
     /// Read all counters for `did` from a measurement implementation.
     pub async fn from_measure<M>(measure: &M, did: Did) -> Self
-    where
-        M: Measure + ?Sized,
-    {
+    where M: Measure + ?Sized {
         Self {
             connected: measure.get_count(did, MeasureCounter::Connect).await,
             disconnected: measure.get_count(did, MeasureCounter::Disconnected).await,

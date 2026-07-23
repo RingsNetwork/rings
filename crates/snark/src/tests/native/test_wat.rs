@@ -91,13 +91,10 @@ fn u256_from_vec_u32_rejects_invalid_word_count(
     };
 
     assert!(
-        matches!(
-            error,
-            Error::WitnessInvalidU256WordLength {
-                expected: 8,
-                actual: 3
-            }
-        ),
+        matches!(error, Error::WitnessInvalidU256WordLength {
+            expected: 8,
+            actual: 3
+        }),
         "{error:?}"
     );
     Ok(())

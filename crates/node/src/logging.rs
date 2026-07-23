@@ -10,7 +10,7 @@ use tracing_log::LogTracer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Registry;
 
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 pub use self::browser::init_logging;
 #[cfg(feature = "node")]
 pub use self::node::init_logging;
@@ -68,8 +68,7 @@ pub struct PanicLocation {
 }
 
 impl<'a, T> From<T> for PanicLocation
-where
-    T: Into<Location<'a>>,
+where T: Into<Location<'a>>
 {
     fn from(lo: T) -> Self {
         let lo: Location = lo.into();
@@ -90,8 +89,7 @@ pub struct PanicData<'a> {
 }
 
 impl<'a, T> From<T> for PanicData<'a>
-where
-    T: Into<&'a PanicHookInfo<'a>>,
+where T: Into<&'a PanicHookInfo<'a>>
 {
     fn from(panic: T) -> PanicData<'a> {
         let panic = panic.into();
@@ -184,7 +182,7 @@ pub mod node {
     }
 }
 
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 /// Browser console logging configuration.
 pub mod browser {
     use tracing_wasm::ConsoleConfig;

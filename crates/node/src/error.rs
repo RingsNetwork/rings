@@ -211,11 +211,11 @@ pub enum Error {
     #[error("Wrong field, should be {0}")]
     SNARKWrongField(String) = 1403,
     /// Converting a JavaScript bigint into a prime-field element was out of range.
-    #[cfg(feature = "browser")]
+    #[cfg(all(feature = "browser", target_family = "wasm"))]
     #[error("range error when covering js_sys::BigInt to PrimeField: {0}")]
     SNARKFFRangeError(String) = 1404,
     /// Converting a JavaScript bigint produced an empty representation.
-    #[cfg(feature = "browser")]
+    #[cfg(all(feature = "browser", target_family = "wasm"))]
     #[error("Failed to load bigint to repr string, it's empty")]
     SNARKBigIntValueEmpty() = 1405,
     /// Loading a string as a prime-field element failed.
@@ -277,7 +277,7 @@ impl From<rings_rpc::error::Error> for Error {
     }
 }
 
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 impl From<Error> for wasm_bindgen::JsValue {
     fn from(err: Error) -> Self {
         wasm_bindgen::JsValue::from_str(&err.to_string())

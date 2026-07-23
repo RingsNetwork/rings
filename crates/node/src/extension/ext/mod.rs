@@ -55,12 +55,12 @@ pub use registry::Scope;
 ///
 /// Lets the pure-core types be written once; the `Send`-ness divergence (browser futures
 /// are not `Send`) is confined here. `∀ T` on browser; `Send + Sync` elsewhere.
-#[cfg(not(feature = "browser"))]
+#[cfg(not(all(feature = "browser", target_family = "wasm")))]
 pub trait MaybeSend: Send + Sync {}
-#[cfg(not(feature = "browser"))]
+#[cfg(not(all(feature = "browser", target_family = "wasm")))]
 impl<T: Send + Sync> MaybeSend for T {}
 /// Auto-trait bound that is `Send + Sync` on native and empty on browser.
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 pub trait MaybeSend {}
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 impl<T> MaybeSend for T {}

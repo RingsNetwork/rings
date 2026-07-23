@@ -186,7 +186,10 @@ impl Client {
     }
 
     /// Subscribes to the specified topic and returns a stream of messages published to the topic.
-    pub async fn subscribe_topic<'a, 'b>(&'a self, topic: String) -> impl Stream<Item = String> + 'b
+    pub async fn subscribe_topic<'a, 'b>(
+        &'a self,
+        topic: String,
+    ) -> impl Stream<Item = String> + 'b
     where
         'a: 'b,
     {

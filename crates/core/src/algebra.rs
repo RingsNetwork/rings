@@ -187,8 +187,7 @@ pub trait Field: CommutativeRing {
 ///
 /// Law: `a * Scalar::one() == a`.
 pub trait Module<Scalar>: AbelianGroup + Mul<Scalar, Output = Self>
-where
-    Scalar: CommutativeRing,
+where Scalar: CommutativeRing
 {
 }
 
@@ -200,9 +199,7 @@ where
 /// explain why the laws hold for the whole carrier.
 #[cfg(test)]
 pub fn assert_abelian_group_laws<T>(values: &[T])
-where
-    T: AbelianGroup + Clone + Eq + Debug,
-{
+where T: AbelianGroup + Clone + Eq + Debug {
     for a in values {
         assert_eq!(a.clone() + T::zero(), *a);
         assert_eq!(T::zero() + a.clone(), *a);
@@ -231,9 +228,7 @@ where
 /// order, with any duplication.
 #[cfg(test)]
 pub fn assert_join_semilattice_laws<T>(values: &[T])
-where
-    T: JoinSemilattice + Clone + Eq + Debug,
-{
+where T: JoinSemilattice + Clone + Eq + Debug {
     for a in values {
         assert_eq!(a.clone().join(a.clone()), *a);
 
@@ -256,9 +251,7 @@ where
 /// bound for each schedule.
 #[cfg(test)]
 pub fn assert_strong_eventual_consistency<T>(base: T, deltas: &[T])
-where
-    T: JoinSemilattice + Clone + Eq + Debug,
-{
+where T: JoinSemilattice + Clone + Eq + Debug {
     let forward = deltas
         .iter()
         .cloned()
@@ -287,9 +280,7 @@ where
 /// distributivity on the same sample.
 #[cfg(test)]
 pub fn assert_commutative_ring_laws<T>(values: &[T])
-where
-    T: CommutativeRing + Clone + Eq + Debug,
-{
+where T: CommutativeRing + Clone + Eq + Debug {
     assert_abelian_group_laws(values);
 
     for a in values {
@@ -321,9 +312,7 @@ where
 /// and every sampled non-zero value has a two-sided inverse.
 #[cfg(test)]
 pub fn assert_field_laws<T>(values: &[T])
-where
-    T: Field + Clone + Eq + Debug,
-{
+where T: Field + Clone + Eq + Debug {
     assert_commutative_ring_laws(values);
     assert_ne!(T::zero(), T::one());
 

@@ -398,13 +398,10 @@ pub fn encrypt_aead_with_rng(
     let associated_data = aead_associated_data(&encrypted_key, aad)?;
     let cipher = ChaCha20Poly1305::new(Key::from_slice(key.as_slice()));
     let ciphertext = cipher
-        .encrypt(
-            Nonce::from_slice(&nonce),
-            Payload {
-                msg: plaintext,
-                aad: associated_data.as_slice(),
-            },
-        )
+        .encrypt(Nonce::from_slice(&nonce), Payload {
+            msg: plaintext,
+            aad: associated_data.as_slice(),
+        })
         .map_err(|_| Error::MessageEncryptionFailed("AEAD seal failed".to_string()))?;
 
     Ok(AeadCiphertext {
@@ -433,13 +430,10 @@ pub fn decrypt_aead(
     let associated_data = aead_associated_data(&sealed.encrypted_key, aad)?;
     let cipher = ChaCha20Poly1305::new(Key::from_slice(key.as_slice()));
     cipher
-        .decrypt(
-            Nonce::from_slice(&sealed.nonce),
-            Payload {
-                msg: sealed.ciphertext.as_slice(),
-                aad: associated_data.as_slice(),
-            },
-        )
+        .decrypt(Nonce::from_slice(&sealed.nonce), Payload {
+            msg: sealed.ciphertext.as_slice(),
+            aad: associated_data.as_slice(),
+        })
         .map_err(|_| Error::MessageDecryptionFailed("AEAD open failed".to_string()))
 }
 

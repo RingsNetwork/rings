@@ -119,20 +119,30 @@ fn duplicate_host_candidate_line(line: &str, extra_addresses: &[String]) -> Vec<
     }
 
     let fields = line.split_whitespace().collect::<Vec<_>>();
-    if fields.len() < 8 || fields[6] != "typ" || fields[7] != "host" {
+    let Some(address) = fields.get(4) else {
+        return Vec::new();
+    };
+    let Some(candidate_type_marker) = fields.get(6) else {
+        return Vec::new();
+    };
+    let Some(candidate_type) = fields.get(7) else {
+        return Vec::new();
+    };
+    if *candidate_type_marker != "typ" || *candidate_type != "host" {
         return Vec::new();
     }
 
     extra_addresses
         .iter()
-        .filter(|candidate| candidate.as_str() != fields[4])
-        .map(|candidate| {
+        .filter(|candidate| candidate.as_str() != *address)
+        .filter_map(|candidate| {
             let mut duplicate = fields
                 .iter()
                 .map(|field| field.to_string())
                 .collect::<Vec<_>>();
-            duplicate[4] = candidate.clone();
-            duplicate.join(" ")
+            let address_slot = duplicate.get_mut(4)?;
+            *address_slot = candidate.clone();
+            Some(duplicate.join(" "))
         })
         .collect()
 }
@@ -372,6 +382,10 @@ impl ConnectionInterface for WebrtcConnection {
         self.webrtc_conn.connection_state().into()
     }
 
+    fn data_channel_is_open(&self) -> Result<bool> {
+        self.webrtc_data_channel.all_ready()
+    }
+
     fn max_message_size(&self) -> usize {
         // The value negotiated from the remote SDP at handshake; `0` = not yet negotiated, so
         // fall back to the interop default.
@@ -434,7 +448,7 @@ impl ConnectionInterface for WebrtcConnection {
             return Err(Error::DataChannelOpen("Connection unavailable".to_string()));
         }
 
-        if self.webrtc_data_channel.all_ready()? {
+        if self.data_channel_is_open()? {
             return Ok(());
         }
 
@@ -442,7 +456,7 @@ impl ConnectionInterface for WebrtcConnection {
             .set_timeout(WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT);
         self.webrtc_data_channel_state_notifier.clone().await;
 
-        if self.webrtc_data_channel.all_ready()? {
+        if self.data_channel_is_open()? {
             return Ok(());
         } else {
             return Err(Error::DataChannelOpen(format!(
@@ -715,10 +729,10 @@ mod tests {
     fn external_address_candidates_split_trim_and_deduplicate() {
         let candidates = external_address_candidates(Some(" 127.0.0.1, 192.168.215.2,127.0.0.1, "));
 
-        assert_eq!(
-            candidates,
-            vec!["127.0.0.1".to_string(), "192.168.215.2".to_string()]
-        );
+        assert_eq!(candidates, vec![
+            "127.0.0.1".to_string(),
+            "192.168.215.2".to_string()
+        ]);
     }
 
     #[test]

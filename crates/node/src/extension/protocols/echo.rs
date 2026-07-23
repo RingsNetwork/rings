@@ -71,13 +71,10 @@ impl Protocol for Echo {
 
     /// Pure. `step (Ctx n, Echoed{from,p}) = ((n+1), [Reply to=from p])`.
     fn step(&self, ctx: Ctx<'_, u64>, event: Echoed) -> Transition<u64, EchoEffect> {
-        Transition::with(
-            ctx.state + 1,
-            vec![EchoEffect::Reply {
-                to: event.from,
-                payload: event.payload,
-            }],
-        )
+        Transition::with(ctx.state + 1, vec![EchoEffect::Reply {
+            to: event.from,
+            payload: event.payload,
+        }])
     }
 }
 
@@ -85,8 +82,11 @@ impl Protocol for Echo {
 #[derive(Default)]
 pub struct EchoShell;
 
-#[cfg_attr(feature = "browser", async_trait::async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait::async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait::async_trait(?Send))]
+#[cfg_attr(
+    not(all(feature = "browser", target_family = "wasm")),
+    async_trait::async_trait
+)]
 impl Interpret for EchoShell {
     type Effect = EchoEffect;
 

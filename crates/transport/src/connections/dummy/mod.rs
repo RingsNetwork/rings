@@ -428,6 +428,17 @@ impl ConnectionInterface for DummyConnection {
         *self.connection_state()
     }
 
+    fn data_channel_is_open(&self) -> Result<bool> {
+        // Dummy handshakes use `Connecting` for the interval after an offer is
+        // answered but before the opposite side has accepted the answer. Tests
+        // can deliver a data-channel-open callback in that interval to model
+        // browser timing where SCTP opens before ICE reaches `Connected`.
+        Ok(matches!(
+            self.webrtc_connection_state(),
+            WebrtcConnectionState::Connected | WebrtcConnectionState::Connecting
+        ))
+    }
+
     fn max_message_size(&self) -> usize {
         match MAX_MESSAGE_SIZE.with(|m| m.get()) {
             0 => MAX_DATA_CHANNEL_MESSAGE_SIZE,
@@ -472,12 +483,7 @@ impl ConnectionInterface for DummyConnection {
         if WAIT_FOR_DATA_CHANNEL_OPEN_PENDING.with(|pending| pending.get()) {
             std::future::pending::<()>().await;
         }
-        // Will pass if the state is connecting to prevent release connection in the `test_handshake_on_both_sides` test.
-        // The connecting state means an offer is answered but not accepted by the other side.
-        if matches!(
-            self.webrtc_connection_state(),
-            WebrtcConnectionState::Connected | WebrtcConnectionState::Connecting
-        ) {
+        if self.data_channel_is_open()? {
             Ok(())
         } else {
             Err(Error::DataChannelOpen(

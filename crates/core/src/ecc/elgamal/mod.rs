@@ -98,8 +98,7 @@ pub struct ElGamalKeyPair<Element: CyclicModule> {
 pub struct ElGamal<Element>(PhantomData<Element>);
 
 impl<Element> ElGamalPublicKey<Element>
-where
-    Element: CyclicModule,
+where Element: CyclicModule
 {
     /// Build a public key from an existing group element.
     pub fn from_element(element: Element) -> Self {
@@ -118,8 +117,7 @@ where
 }
 
 impl<Element> Clone for ElGamalPublicKey<Element>
-where
-    Element: CyclicModule + Clone,
+where Element: CyclicModule + Clone
 {
     fn clone(&self) -> Self {
         Self::from_element(self.element.clone())
@@ -127,8 +125,7 @@ where
 }
 
 impl<Element> ElGamalSecretKey<Element>
-where
-    Element: CyclicModule,
+where Element: CyclicModule
 {
     /// Build a secret key from an existing scalar.
     pub fn from_scalar(scalar: Element::Scalar) -> Self {
@@ -162,8 +159,7 @@ where
 }
 
 impl<Element> ElGamalKeyPair<Element>
-where
-    Element: CyclicModule,
+where Element: CyclicModule
 {
     /// Borrow the public key.
     pub fn public_key(&self) -> &ElGamalPublicKey<Element> {
@@ -177,8 +173,7 @@ where
 }
 
 impl<Element> ElGamalSecretKey<Element>
-where
-    Element: CyclicModule,
+where Element: CyclicModule
 {
     /// Generate a fresh non-zero ElGamal secret scalar from an explicit RNG.
     pub fn random_with_rng(rng: &mut impl RngCore) -> Self {
@@ -192,8 +187,7 @@ where
 }
 
 impl<Element> ElGamalKeyPair<Element>
-where
-    Element: CyclicModule,
+where Element: CyclicModule
 {
     /// Generate a fresh ElGamal key pair from an explicit RNG.
     pub fn random_with_rng(rng: &mut impl RngCore) -> Self {

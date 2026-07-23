@@ -54,7 +54,7 @@ use crate::onion::https_onion_exit_services;
 use crate::onion::proxy::OnionProxyConfig;
 use crate::onion::proxy::OnionProxyRoute;
 use crate::onion::proxy::OnionProxyTarget;
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 use crate::onion::proxy::ONION_PROXY_HTTPS_SERVICE;
 use crate::onion::validate_onion_exit_registration_timing;
 use crate::onion::OnionExitDescriptor;
@@ -95,13 +95,13 @@ const DHT_LOOKUP_CACHE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DHT_LOOKUP_CACHE_POLL_ATTEMPTS: usize = 40;
 const MAX_REGISTRATION_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(10);
 
-#[cfg(not(feature = "browser"))]
+#[cfg(not(all(feature = "browser", target_family = "wasm")))]
 async fn sleep_dht_lookup_poll_interval(interval: Duration) -> Result<()> {
     futures_timer::Delay::new(interval).await;
     Ok(())
 }
 
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 async fn sleep_dht_lookup_poll_interval(interval: Duration) -> Result<()> {
     let interval_ms = i32::try_from(interval.as_millis()).unwrap_or(i32::MAX);
     rings_core::utils::js_utils::window_sleep(interval_ms)
@@ -130,7 +130,7 @@ pub struct Processor {
     session_sk: SessionSk,
     stabilize_interval: Duration,
     online_node_registration: OnlineNodeRegistration,
-    #[cfg(feature = "browser")]
+    #[cfg(all(feature = "browser", target_family = "wasm"))]
     advertise_onion_relay: bool,
     registration_tasks: Vec<Arc<dyn RegistrationTask>>,
 }
@@ -145,7 +145,7 @@ impl Processor {
         &self.session_sk
     }
 
-    #[cfg(feature = "browser")]
+    #[cfg(all(feature = "browser", target_family = "wasm"))]
     pub(crate) fn advertise_onion_relay(&self) -> bool {
         self.advertise_onion_relay
     }
@@ -421,9 +421,14 @@ impl Processor {
     /// 1. PeerA has a connection with PeerB.
     /// 2. PeerC has a connection with PeerB.
     /// 3. PeerC can connect PeerA with PeerA's web3 address.
+    ///
+    /// This operation is idempotent: if topology convergence already produced
+    /// the direct connection, the requested connection is satisfied.
     pub async fn connect_with_did(&self, did: Did) -> Result<()> {
-        self.swarm.connect(did).await.map_err(Error::ConnectError)?;
-        Ok(())
+        match self.swarm.connect(did).await {
+            Ok(()) | Err(rings_core::error::Error::AlreadyConnected) => Ok(()),
+            Err(error) => Err(Error::ConnectError(error)),
+        }
     }
 
     /// Disconnect a peer with web3 did.
@@ -704,8 +709,11 @@ impl Processor {
     }
 }
 
-#[cfg_attr(feature = "browser", async_trait::async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait::async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait::async_trait(?Send))]
+#[cfg_attr(
+    not(all(feature = "browser", target_family = "wasm")),
+    async_trait::async_trait
+)]
 impl OnionDirectoryReader for Processor {
     fn local_did(&self) -> Did {
         self.did()

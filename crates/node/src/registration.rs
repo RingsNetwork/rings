@@ -48,11 +48,14 @@ pub(crate) fn default_online_node_type() -> OnlineNodeType {
     {
         OnlineNodeType::Ffi
     }
-    #[cfg(all(not(feature = "ffi"), feature = "browser"))]
+    #[cfg(all(not(feature = "ffi"), feature = "browser", target_family = "wasm"))]
     {
         OnlineNodeType::Browser
     }
-    #[cfg(all(not(feature = "ffi"), not(feature = "browser")))]
+    #[cfg(all(
+        not(feature = "ffi"),
+        not(all(feature = "browser", target_family = "wasm"))
+    ))]
     {
         OnlineNodeType::Native
     }
@@ -77,7 +80,7 @@ pub(crate) fn validate_online_node_registration_timing(
     Ok(())
 }
 
-#[cfg(not(feature = "browser"))]
+#[cfg(not(all(feature = "browser", target_family = "wasm")))]
 pub(crate) async fn sleep_registration_interval(interval: Duration) -> Result<()> {
     // Native timers are infallible; the Result keeps the daemon shape shared
     // with the wasm arm, where browser timer setup can fail.
@@ -85,7 +88,7 @@ pub(crate) async fn sleep_registration_interval(interval: Duration) -> Result<()
     Ok(())
 }
 
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 pub(crate) async fn sleep_registration_interval(interval: Duration) -> Result<()> {
     let interval_ms = i32::try_from(interval.as_millis()).unwrap_or(i32::MAX);
     rings_core::utils::js_utils::window_sleep(interval_ms)
@@ -223,8 +226,8 @@ fn finish_registration_publish(
 }
 
 /// Periodic node-layer registration.
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
 pub trait RegistrationTask: MaybeSend {
     /// Stable name used in logs.
     fn name(&self) -> &'static str;
@@ -347,8 +350,8 @@ impl OnlineNodeRegistration {
     }
 }
 
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
 impl RegistrationTask for OnlineNodeRegistration {
     fn name(&self) -> &'static str {
         "online-node"
@@ -379,7 +382,8 @@ mod tests {
         ["a", "b", "c"]
             .into_iter()
             .enumerate()
-            .filter_map(|(bit, value)| (mask & (1 << bit) != 0).then(|| encoded(value)))
+            .filter(|(bit, _value)| mask & (1 << bit) != 0)
+            .map(|(_bit, value)| encoded(value))
             .collect()
     }
 

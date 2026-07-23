@@ -24,9 +24,7 @@ impl SledStorage {
     /// * cap: max_size in bytes
     /// * path: db file location
     pub async fn new_with_cap_and_path<P>(cap: u32, path: P) -> Result<Self>
-    where
-        P: AsRef<std::path::Path>,
-    {
+    where P: AsRef<std::path::Path> {
         let db = sled::Config::new()
             .path(path.as_ref())
             .mode(sled::Mode::HighThroughput)
@@ -43,8 +41,7 @@ impl SledStorage {
 
 #[async_trait]
 impl<V> KvStorageInterface<V> for SledStorage
-where
-    V: Serialize + DeserializeOwned + Sync,
+where V: Serialize + DeserializeOwned + Sync
 {
     async fn get(&self, key: &str) -> Result<Option<V>> {
         let v = self.db.get(key).map_err(Error::SledError)?;

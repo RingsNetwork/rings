@@ -271,10 +271,12 @@ impl From<DhtActionFunctor> for PeerRingAction {
             DhtActionFunctor::FindSuccessorForConnect { next, did } => {
                 Self::RemoteAction(next, PeerRingRemoteAction::FindSuccessorForConnect(did))
             }
-            DhtActionFunctor::FindSuccessorForFix { next, did, index } => Self::RemoteAction(
-                next,
-                PeerRingRemoteAction::FindSuccessorForFix { did, index },
-            ),
+            DhtActionFunctor::FindSuccessorForFix { next, did, index } => {
+                Self::RemoteAction(next, PeerRingRemoteAction::FindSuccessorForFix {
+                    did,
+                    index,
+                })
+            }
             DhtActionFunctor::QueryForSuccessorList { successor } => {
                 Self::RemoteAction(successor, PeerRingRemoteAction::QueryForSuccessorList)
             }
@@ -724,10 +726,10 @@ mod tests {
         let index = 11;
 
         let effect = single_effect(lower_dht_action(
-            &PeerRingAction::RemoteAction(
-                next,
-                PeerRingRemoteAction::FindSuccessorForFix { did: target, index },
-            ),
+            &PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessorForFix {
+                did: target,
+                index,
+            }),
             |_| true,
         ))?;
 

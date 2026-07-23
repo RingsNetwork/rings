@@ -77,13 +77,10 @@ impl<const MAX_PENDING: usize> PendingPeerPool<MAX_PENDING> {
             peer,
             generation: self.next_generation,
         };
-        self.peers.insert(
-            peer,
-            PendingPeer {
-                generation: attempt.generation,
-                admitted_at_ms: now_ms,
-            },
-        );
+        self.peers.insert(peer, PendingPeer {
+            generation: attempt.generation,
+            admitted_at_ms: now_ms,
+        });
         Ok(attempt)
     }
 
@@ -433,7 +430,7 @@ mod lifecycle_model {
                 return;
             }
             self.remember_current_generation();
-            self.next_generation = self.next_generation.saturating_add(1);
+            self.next_generation = self.next_generation.wrapping_add(1);
             self.peer = PeerLifecycle::Pending(self.next_generation);
             self.dht_member = false;
             self.transport_slot = true;
@@ -539,6 +536,19 @@ mod lifecycle_model {
         ];
 
         explore(LifecycleModel::default(), &actions, MAX_DEPTH);
+    }
+
+    #[test]
+    fn pending_admission_model_matches_wrapping_generation_boundary() {
+        let model = LifecycleModel {
+            next_generation: u64::MAX,
+            ..LifecycleModel::default()
+        }
+        .apply(LifecycleAction::Replacement);
+
+        assert_eq!(model.peer, PeerLifecycle::Pending(0));
+        assert_eq!(model.next_generation, 0);
+        model.assert_invariants();
     }
 
     fn explore(model: LifecycleModel, actions: &[LifecycleAction], remaining_depth: usize) {

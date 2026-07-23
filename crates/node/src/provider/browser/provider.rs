@@ -13,6 +13,7 @@ use js_sys;
 use js_sys::Uint8Array;
 use rings_core::dht::Did;
 use rings_core::ecc::PublicKey;
+use rings_core::lifecycle::StopSource;
 use rings_core::measure::PeerQuality;
 use rings_core::message::DhtProtocolMode;
 use rings_core::prelude::entry;
@@ -80,6 +81,34 @@ impl ProviderRef {
     /// get wrapped arc, this is useful for wasm case
     pub fn inner(&self) -> Arc<Provider> {
         self.inner.clone()
+    }
+}
+
+/// Browser listener lifecycle handle returned by [`Provider::listen`].
+#[derive(Clone)]
+#[wasm_export]
+pub struct ProviderListener {
+    stop: StopSource,
+    task: js_sys::Promise,
+}
+
+#[wasm_export]
+impl ProviderListener {
+    /// Request cooperative shutdown for the listener task.
+    pub fn stop(&self) {
+        self.stop.request_stop();
+    }
+
+    /// Return whether shutdown was requested through this handle.
+    pub fn is_stopped(&self) -> bool {
+        self.stop.is_stop_requested()
+    }
+
+    /// Return the underlying listener task promise.
+    ///
+    /// It resolves only after [`ProviderListener::stop`] requests cooperative shutdown.
+    pub fn task(&self) -> js_sys::Promise {
+        self.task.clone()
     }
 }
 
@@ -612,17 +641,18 @@ impl Provider {
         })
     }
 
-    /// Start the long-running listener.
-    ///
-    /// The returned Promise is not a readiness barrier and does not resolve
-    /// during normal operation.
-    pub fn listen(&self) -> js_sys::Promise {
+    /// Start the long-running listener and return its lifecycle handle.
+    pub fn listen(&self) -> ProviderListener {
         let p = self.processor.clone();
+        let stop = StopSource::new();
+        let token = stop.token();
 
-        future_to_promise(async move {
-            p.listen().await;
+        let task = future_to_promise(async move {
+            p.listen_with(token).await;
             Ok(JsValue::null())
-        })
+        });
+
+        ProviderListener { stop, task }
     }
 
     /// connect peer with remote jsonrpc server url

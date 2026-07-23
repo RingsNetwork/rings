@@ -17,8 +17,11 @@ use crate::error::Result;
 /// namespace nor a remote `from`. A hard failure is an `Err`. Defined per-effect outcomes (e.g.
 /// "addressed no live session") are the extension's own concern and surfaced however it likes
 /// (its own return shapes / tests), not a core enum.
-#[cfg_attr(feature = "browser", async_trait::async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait::async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait::async_trait(?Send))]
+#[cfg_attr(
+    not(all(feature = "browser", target_family = "wasm")),
+    async_trait::async_trait
+)]
 pub trait Interpret {
     /// The effect algebra this shell interprets — the same as its protocol's `Effect`.
     type Effect;

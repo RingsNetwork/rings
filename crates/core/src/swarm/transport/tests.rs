@@ -242,6 +242,45 @@ async fn pending_offer_is_not_routable_or_visible_to_dht() -> Result<()> {
 }
 
 #[tokio::test]
+async fn data_channel_open_admits_successor_before_ice_connected() -> Result<()> {
+    let transport = Arc::new(transport_with_measure(Arc::new(
+        RecordingMeasure::default(),
+    ))?);
+    let peer = SecretKey::random().address().into();
+    let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
+    let (attempt, _offer) = transport
+        .prepare_connection_offer_with_attempt(peer, callback)
+        .await?;
+    let connection = transport
+        .get_raw_connection(peer)
+        .ok_or(Error::SwarmMissTransport(peer))?;
+
+    connection
+        .connection
+        .webrtc_answer_offer("remote-dummy-connection".to_string())
+        .await
+        .map_err(Error::Transport)?;
+    assert_eq!(
+        connection.webrtc_connection_state(),
+        WebrtcConnectionState::Connecting
+    );
+    assert!(connection.connection.data_channel_is_open()?);
+
+    let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback))
+        .with_pending_connection_attempt(attempt);
+    callback
+        .on_data_channel_open(&peer.to_string())
+        .await
+        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+
+    assert!(transport.is_admitted_connection(peer));
+    assert!(transport.dht.successors().contains(&peer)?);
+
+    transport.disconnect(peer).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn local_did_lifecycle_callbacks_are_ignored() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
@@ -369,14 +408,11 @@ async fn disconnected_observation_is_once_per_connection_epoch() -> Result<()> {
     transport.record_peer_disconnected(peer).await;
     assert!(transport.peer_disconnected_since_ms(peer).is_some());
 
-    assert_eq!(
-        measure.snapshot_counters()?.as_slice(),
-        &[
-            (peer, MeasureCounter::Disconnected),
-            (peer, MeasureCounter::Connect),
-            (peer, MeasureCounter::Disconnected),
-        ]
-    );
+    assert_eq!(measure.snapshot_counters()?.as_slice(), &[
+        (peer, MeasureCounter::Disconnected),
+        (peer, MeasureCounter::Connect),
+        (peer, MeasureCounter::Disconnected),
+    ]);
 
     Ok(())
 }

@@ -135,9 +135,7 @@ impl Encoded {
 
     /// Decode this value into a target type implementing [`Decoder`].
     pub fn decode<T>(&self) -> Result<T>
-    where
-        T: Decoder,
-    {
+    where T: Decoder {
         T::from_encoded(self)
     }
 }

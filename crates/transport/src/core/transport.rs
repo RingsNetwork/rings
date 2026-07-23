@@ -107,6 +107,14 @@ pub trait ConnectionInterface {
     /// Get current webrtc connection state.
     fn webrtc_connection_state(&self) -> WebrtcConnectionState;
 
+    /// Return whether every data channel used by this connection is currently open.
+    ///
+    /// This is the routability predicate. ICE may still report `Connecting`
+    /// when the SCTP data channels have already opened, so callers that need to
+    /// decide whether payload transport is usable should check this method
+    /// rather than requiring [`WebrtcConnectionState::Connected`].
+    fn data_channel_is_open(&self) -> Result<bool, Self::Error>;
+
     /// The maximum size, in bytes, of one message this connection can send — the channel's
     /// negotiated SCTP / data-channel `max_message_size`, capped at
     /// [`MAX_DATA_CHANNEL_MESSAGE_SIZE`] for cross-peer interop. A caller must keep every sent

@@ -69,6 +69,14 @@ where
             .unwrap_or(WebrtcConnectionState::Closed)
     }
 
+    fn data_channel_is_open(&self) -> Result<bool> {
+        match self.upgrade() {
+            Ok(c) => c.data_channel_is_open(),
+            Err(Error::ConnectionReleased(_)) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
     // On a released reference this reports the interop default rather than an error, by deliberate
     // design: `ConnectionInterface::max_message_size` returns `usize` (it feeds the framing
     // planner), and threading a `Result` through it and every backend for this one edge would add
@@ -128,6 +136,14 @@ where
         self.upgrade()
             .map(|c| c.webrtc_connection_state())
             .unwrap_or(WebrtcConnectionState::Closed)
+    }
+
+    fn data_channel_is_open(&self) -> Result<bool> {
+        match self.upgrade() {
+            Ok(c) => c.data_channel_is_open(),
+            Err(Error::ConnectionReleased(_)) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     // On a released reference this reports the interop default rather than an error, by deliberate
@@ -198,6 +214,9 @@ mod tests {
             unreachable!("a released ref must fail before reaching the inner connection")
         }
         fn webrtc_connection_state(&self) -> WebrtcConnectionState {
+            unreachable!()
+        }
+        fn data_channel_is_open(&self) -> Result<bool> {
             unreachable!()
         }
         async fn get_stats(&self) -> Vec<String> {

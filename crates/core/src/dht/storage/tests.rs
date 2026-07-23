@@ -212,13 +212,10 @@ fn coalesced_storage_sync_deliveries_keep_placement_destinations_separate() -> R
         .into_iter()
         .map(|delivery| delivery.into_message_parts().1)
         .collect::<Vec<_>>();
-    assert_eq!(
-        destinations,
-        vec![
-            StorageSyncDestination::PlacementKey(first_key),
-            StorageSyncDestination::PlacementKey(second_key),
-        ]
-    );
+    assert_eq!(destinations, vec![
+        StorageSyncDestination::PlacementKey(first_key),
+        StorageSyncDestination::PlacementKey(second_key),
+    ]);
     Ok(())
 }
 
@@ -490,10 +487,10 @@ async fn sync_without_ack_retains_entry_for_next_handoff() -> Result<()> {
 
     let action = node.sync_entries_with_successor(new_successor).await?;
     let retried_action = node.sync_entries_with_successor(new_successor).await?;
-    let expected = vec![(
-        new_successor,
-        vec![PlacedEntry::new(placement_key, entry.clone())],
-    )];
+    let expected = vec![(new_successor, vec![PlacedEntry::new(
+        placement_key,
+        entry.clone(),
+    )])];
 
     assert_eq!(collect_sync_batches(action)?, expected);
     assert_eq!(collect_sync_batches(retried_action)?, expected);
@@ -883,10 +880,9 @@ async fn read_repair_targets_only_observed_missing_placements() -> Result<()> {
         .read_repair_entry(evidence.entry.clone(), &evidence.misses, 3)
         .await?;
 
-    assert_eq!(
-        evidence.misses,
-        vec![PlacementMiss::new(first_key, node.did)]
-    );
+    assert_eq!(evidence.misses, vec![PlacementMiss::new(
+        first_key, node.did
+    )]);
     assert_eq!(repair, PeerRingAction::None);
     assert_eq!(
         node.storage.get(&first_key.to_string()).await?,

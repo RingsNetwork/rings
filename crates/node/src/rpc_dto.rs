@@ -1,17 +1,17 @@
 //! Conversions from node/core domain values to RPC wire DTOs.
 
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 use std::str::FromStr;
 
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 use rings_core::dht::Did;
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 use rings_core::ecc::PublicKey;
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 use rings_core::ecc::VerificationPublicKey;
 use rings_core::measure::PeerMeasurement;
 use rings_core::measure::PeerQualityEvidence;
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 use rings_core::message::MessageVerification;
 use rings_rpc::protos::rings_node::BuildOnionRouteResponse;
 use rings_rpc::protos::rings_node::OnionExitDescriptorInfo;
@@ -22,7 +22,7 @@ use rings_rpc::protos::rings_node::OnlineNodeDescriptorInfo;
 use rings_rpc::protos::rings_node::OnlineNodeTypeInfo;
 use rings_rpc::protos::rings_node::PeerMeasurementCountersInfo;
 use rings_rpc::protos::rings_node::PeerMeasurementInfo;
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
@@ -32,7 +32,7 @@ use crate::error::Result;
 use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionExitService;
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 use crate::onion::OnionExitTarget;
 use crate::onion::OnionExitTransport;
 use crate::onion::OnionRoute;
@@ -43,12 +43,12 @@ fn json_value(value: impl Serialize) -> Result<Value> {
     serde_json::to_value(value).map_err(Error::SerdeJsonError)
 }
 
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 fn from_json_value<T: DeserializeOwned>(value: Value) -> Result<T> {
     serde_json::from_value(value).map_err(Error::SerdeJsonError)
 }
 
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 fn did_from_string(value: &str) -> Result<Did> {
     Did::from_str(value).map_err(Error::CoreError)
 }
@@ -61,7 +61,7 @@ fn online_node_type_info(node_type: OnlineNodeType) -> OnlineNodeTypeInfo {
     }
 }
 
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 fn online_node_type_from_info(node_type: OnlineNodeTypeInfo) -> OnlineNodeType {
     match node_type {
         OnlineNodeTypeInfo::Browser => OnlineNodeType::Browser,
@@ -114,7 +114,7 @@ fn onion_exit_transport_info(transport: OnionExitTransport) -> OnionExitTranspor
     }
 }
 
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 fn onion_exit_transport_from_info(transport: OnionExitTransportInfo) -> OnionExitTransport {
     match transport {
         OnionExitTransportInfo::Tcp => OnionExitTransport::Tcp,
@@ -132,7 +132,7 @@ fn onion_exit_service_info(service: OnionExitService) -> OnionExitServiceInfo {
     }
 }
 
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 fn onion_exit_service_from_info(service: OnionExitServiceInfo) -> Result<OnionExitService> {
     OnionExitService::new(
         service.name.as_str(),
@@ -158,7 +158,7 @@ fn onion_exit_policy_info(policy: OnionExitPolicy) -> OnionExitPolicyInfo {
     }
 }
 
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 fn onion_exit_policy_from_info(policy: OnionExitPolicyInfo) -> Result<OnionExitPolicy> {
     Ok(OnionExitPolicy {
         allowed_targets: policy
@@ -205,7 +205,7 @@ pub(crate) fn onion_exit_descriptor_infos(
         .collect()
 }
 
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 pub(crate) fn online_node_descriptor_from_info(
     descriptor: OnlineNodeDescriptorInfo,
 ) -> Result<OnlineNodeDescriptor> {
@@ -227,7 +227,7 @@ pub(crate) fn online_node_descriptor_from_info(
     })
 }
 
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 pub(crate) fn online_node_descriptors_from_infos(
     descriptors: impl IntoIterator<Item = OnlineNodeDescriptorInfo>,
 ) -> Vec<OnlineNodeDescriptor> {
@@ -238,7 +238,7 @@ pub(crate) fn online_node_descriptors_from_infos(
         .collect()
 }
 
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 pub(crate) fn onion_exit_descriptors_from_info(
     descriptor: OnionExitDescriptorInfo,
 ) -> Result<Vec<OnionExitDescriptor>> {
@@ -277,7 +277,7 @@ pub(crate) fn onion_exit_descriptors_from_info(
         .collect())
 }
 
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 pub(crate) fn onion_exit_descriptors_from_infos(
     descriptors: impl IntoIterator<Item = OnionExitDescriptorInfo>,
 ) -> Vec<OnionExitDescriptor> {

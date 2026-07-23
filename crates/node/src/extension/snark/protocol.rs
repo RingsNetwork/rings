@@ -134,33 +134,26 @@ impl Protocol for SnarkProtocol {
                 task_id,
                 reply_to,
                 verify_task,
-            }) => Transition::with(
-                (),
-                vec![SnarkEffect::SendTask {
-                    to: reply_to,
-                    msg: SNARKTaskMessage {
-                        task_id,
-                        task: SNARKTask::SNARKVerify(verify_task),
-                    },
-                }],
-            ),
+            }) => Transition::with((), vec![SnarkEffect::SendTask {
+                to: reply_to,
+                msg: SNARKTaskMessage {
+                    task_id,
+                    task: SNARKTask::SNARKVerify(verify_task),
+                },
+            }]),
             SnarkEvent::Result(ComputeResult::Verified { .. }) => Transition::pure(()),
             SnarkEvent::Task { from, msg } => match msg.task {
-                SNARKTask::SNARKProof(task) => Transition::with(
-                    (),
-                    vec![SnarkEffect::Prove {
-                        task_id: msg.task_id,
-                        reply_to: from,
-                        task,
-                    }],
-                ),
-                SNARKTask::SNARKVerify(verify_task) => Transition::with(
-                    (),
-                    vec![SnarkEffect::Verify {
+                SNARKTask::SNARKProof(task) => Transition::with((), vec![SnarkEffect::Prove {
+                    task_id: msg.task_id,
+                    reply_to: from,
+                    task,
+                }]),
+                SNARKTask::SNARKVerify(verify_task) => {
+                    Transition::with((), vec![SnarkEffect::Verify {
                         task_id: msg.task_id,
                         verify_task,
-                    }],
-                ),
+                    }])
+                }
             },
         }
     }
@@ -185,8 +178,11 @@ impl SnarkShell {
     }
 }
 
-#[cfg_attr(feature = "browser", async_trait::async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait::async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait::async_trait(?Send))]
+#[cfg_attr(
+    not(all(feature = "browser", target_family = "wasm")),
+    async_trait::async_trait
+)]
 impl Interpret for SnarkShell {
     type Effect = SnarkEffect;
 

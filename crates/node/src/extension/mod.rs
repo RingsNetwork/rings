@@ -38,8 +38,8 @@ impl Backend {
     }
 }
 
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
 impl SwarmCallback for Backend {
     async fn on_inbound(&self, payload: &MessagePayload) -> Result<(), Box<dyn std::error::Error>> {
         let data: Message = payload.transaction.data()?;

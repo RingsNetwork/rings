@@ -140,7 +140,7 @@ impl ProcessorConfig {
     }
 
     /// Return the HTTPS onion-exit policy when this config advertises that service.
-    #[cfg(feature = "browser")]
+    #[cfg(all(feature = "browser", target_family = "wasm"))]
     pub fn onion_https_exit_policy(&self) -> Option<OnionExitPolicy> {
         (self.advertise_onion_exit
             && self
@@ -495,9 +495,7 @@ impl Serialize for ProcessorConfig {
 
 impl<'de> serde::de::Deserialize<'de> for ProcessorConfig {
     fn deserialize<D>(deserializer: D) -> core::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
+    where D: serde::Deserializer<'de> {
         match ProcessorConfigSerialized::deserialize(deserializer) {
             Ok(ins) => {
                 let cfg: ProcessorConfig = ins

@@ -42,7 +42,7 @@ pub mod circuit;
 pub(crate) mod directory;
 pub(crate) mod exit_accounting;
 mod failure;
-#[cfg(any(feature = "browser", feature = "node"))]
+#[cfg(any(feature = "node", all(feature = "browser", target_family = "wasm")))]
 pub mod https;
 pub mod proxy;
 pub(crate) mod replay;
@@ -860,8 +860,8 @@ impl OnionExitRegistration {
     }
 }
 
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
 impl RegistrationTask for OnionExitRegistration {
     fn name(&self) -> &'static str {
         "onion-exit"

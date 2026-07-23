@@ -183,14 +183,11 @@ impl PeerRingAction {
         destination: StorageSyncDestination,
         data: Vec<PlacedEntry>,
     ) -> Self {
-        Self::RemoteAction(
-            destination.did(),
-            RemoteAction::SyncEntriesWithSuccessor {
-                purpose,
-                route: destination.route(),
-                data,
-            },
-        )
+        Self::RemoteAction(destination.did(), RemoteAction::SyncEntriesWithSuccessor {
+            purpose,
+            route: destination.route(),
+            data,
+        })
     }
 
     /// Lower this action tree into storage-sync deliveries.

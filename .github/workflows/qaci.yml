@@ -267,6 +267,9 @@ jobs:
             -D clippy::unimplemented \
             -D clippy::indexing_slicing
 
+      - name: Check node native with browser feature enabled
+        run: cargo check -p rings-node --all-features
+
       - name: Run clippy
         run: cargo clippy --all --tests -- -D warnings
 

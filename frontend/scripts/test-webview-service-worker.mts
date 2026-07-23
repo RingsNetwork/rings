@@ -63,7 +63,7 @@ const context: ServiceWorkerTestContext = {
     addEventListener() {},
   },
 };
-context.globalThis = context;
+context["globalThis"] = context;
 
 vm.runInNewContext(`${serviceWorkerSource}\nglobalThis.__ringsWebviewServiceWorkerTest = { requestKind };`, context, {
   filename: serviceWorkerPath,

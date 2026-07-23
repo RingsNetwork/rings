@@ -36,18 +36,21 @@ use crate::processor::Processor;
 const MAX_FIXPOINT_STEPS: u32 = 1024;
 
 /// Type-erased handler stored in the registry: native is `Send + Sync`, browser not.
-#[cfg(not(feature = "browser"))]
+#[cfg(not(all(feature = "browser", target_family = "wasm")))]
 pub(crate) type DynHandler = dyn Handler + Send + Sync;
 /// Type-erased handler stored in the registry.
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 pub(crate) type DynHandler = dyn Handler;
 
 type HandlerMap = RwLock<HashMap<String, Arc<DynHandler>>>;
 
 /// Erased, runtime-facing handler — the router-internal ABI. Implemented once, generically, by
 /// `Runner`; protocol authors never name it (they write `Protocol` + `Interpret`).
-#[cfg_attr(feature = "browser", async_trait::async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait::async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait::async_trait(?Send))]
+#[cfg_attr(
+    not(all(feature = "browser", target_family = "wasm")),
+    async_trait::async_trait
+)]
 pub(crate) trait Handler {
     /// Decode → step (pure, committed) → run the protocol's effects, returning re-injected
     /// messages. `handle : (from, payload) → IO [Inbound]`.
@@ -188,8 +191,11 @@ struct Runner<P: Protocol, I> {
     state: Mutex<P::State>,
 }
 
-#[cfg_attr(feature = "browser", async_trait::async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait::async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait::async_trait(?Send))]
+#[cfg_attr(
+    not(all(feature = "browser", target_family = "wasm")),
+    async_trait::async_trait
+)]
 impl<P, I> Handler for Runner<P, I>
 where
     P: Protocol + MaybeSend + 'static,

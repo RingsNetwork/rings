@@ -130,14 +130,11 @@ impl NativeOnionCircuitHandle {
         let handler_session_sk = session_sk.clone();
         extensions.register(
             OnionCircuitProtocol::new(capabilities),
-            OnionCircuitShell::new(
-                session_sk,
-                NativeOnionCircuitHandler {
-                    runtime: runtime.clone(),
-                    https,
-                    session_sk: handler_session_sk,
-                },
-            ),
+            OnionCircuitShell::new(session_sk, NativeOnionCircuitHandler {
+                runtime: runtime.clone(),
+                https,
+                session_sk: handler_session_sk,
+            }),
         )?;
         Ok(Self {
             runtime,
@@ -276,12 +273,9 @@ impl OnionTcpRuntime {
                 return Err(error);
             }
         };
-        let open_payload = match encode_tcp_payload(
-            &service,
-            OnionTcpPayload::Open {
-                target: target.authority(),
-            },
-        ) {
+        let open_payload = match encode_tcp_payload(&service, OnionTcpPayload::Open {
+            target: target.authority(),
+        }) {
             Ok(payload) => payload,
             Err(error) => {
                 self.remove_client_stream(key);

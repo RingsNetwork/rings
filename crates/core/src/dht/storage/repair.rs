@@ -169,10 +169,11 @@ impl PeerRing {
                     .await?;
                 Ok(PeerRingAction::None)
             }
-            StorageSyncTarget::Remote(destination) => Ok(PeerRingAction::sync_entries_for_repair(
-                destination,
-                vec![placed],
-            )),
+            StorageSyncTarget::Remote(destination) => {
+                Ok(PeerRingAction::sync_entries_for_repair(destination, vec![
+                    placed,
+                ]))
+            }
         }
     }
 

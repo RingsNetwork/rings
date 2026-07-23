@@ -56,7 +56,7 @@
 // API. Reachable in-crate by the relay extension only.
 #[cfg(feature = "node")]
 pub(crate) mod engine;
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 pub(crate) mod wt;
 
 use bytes::Bytes;

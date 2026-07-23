@@ -473,6 +473,16 @@ impl SwarmTransport {
             Ok(offer) => offer,
             Err(Error::AlreadyConnected) => return Err(Error::AlreadyConnected),
             Err(e) => {
+                if self.get_connection(peer).is_some() {
+                    tracing::info!(
+                        target: "rings_core::swarm::transport::handshake",
+                        local = %self.dht.did,
+                        peer = %peer,
+                        error = ?e,
+                        "connection request satisfied by concurrent handshake"
+                    );
+                    return Ok(());
+                }
                 self.record_peer_message_send_failed(peer).await;
                 return Err(e);
             }
@@ -511,6 +521,17 @@ impl SwarmTransport {
                 );
                 self.abandon_pending_connection(attempt, "sending connection offer")
                     .await;
+                if self.get_connection(peer).is_some() {
+                    tracing::info!(
+                        target: "rings_core::swarm::transport::handshake",
+                        local = %self.dht.did,
+                        peer = %peer,
+                        generation = attempt.generation,
+                        error = ?error,
+                        "connection offer send failure satisfied by concurrent handshake"
+                    );
+                    return Ok(());
+                }
                 return Err(error);
             }
         }
@@ -983,7 +1004,17 @@ impl PayloadSender for SwarmTransport {
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl LiveDid for SwarmConnection {
     async fn live(&self) -> bool {
-        self.webrtc_connection_state() == WebrtcConnectionState::Connected
+        match self.connection.data_channel_is_open() {
+            Ok(open) => open,
+            Err(error) => {
+                tracing::debug!(
+                    peer = %self.peer,
+                    error = ?error,
+                    "failed to inspect data-channel liveness"
+                );
+                false
+            }
+        }
     }
 }
 

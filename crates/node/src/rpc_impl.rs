@@ -27,8 +27,8 @@ use crate::error::Error as ServerError;
 use crate::processor::Processor;
 use crate::seed::Seed;
 
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
 impl HandleRpc<ConnectPeerViaHttpRequest, ConnectPeerViaHttpResponse> for Processor {
     async fn handle_rpc(
         &self,
@@ -59,8 +59,8 @@ impl HandleRpc<ConnectPeerViaHttpRequest, ConnectPeerViaHttpResponse> for Proces
     }
 }
 
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
 impl HandleRpc<ConnectWithDidRequest, ConnectWithDidResponse> for Processor {
     async fn handle_rpc(&self, req: ConnectWithDidRequest) -> Result<ConnectWithDidResponse> {
         let did = s2d(&req.did)?;
@@ -69,8 +69,8 @@ impl HandleRpc<ConnectWithDidRequest, ConnectWithDidResponse> for Processor {
     }
 }
 
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
 impl HandleRpc<ConnectWithSeedRequest, ConnectWithSeedResponse> for Processor {
     async fn handle_rpc(&self, req: ConnectWithSeedRequest) -> Result<ConnectWithSeedResponse> {
         let seed: Seed = Seed::try_from(req)?;
@@ -100,8 +100,8 @@ impl HandleRpc<ConnectWithSeedRequest, ConnectWithSeedResponse> for Processor {
     }
 }
 
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
 impl HandleRpc<ListPeersRequest, ListPeersResponse> for Processor {
     async fn handle_rpc(&self, _req: ListPeersRequest) -> Result<ListPeersResponse> {
         let peers = self
@@ -114,8 +114,8 @@ impl HandleRpc<ListPeersRequest, ListPeersResponse> for Processor {
     }
 }
 
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
 impl HandleRpc<CreateOfferRequest, CreateOfferResponse> for Processor {
     async fn handle_rpc(&self, req: CreateOfferRequest) -> Result<CreateOfferResponse> {
         let did = s2d(&req.did)?;
@@ -136,8 +136,8 @@ impl HandleRpc<CreateOfferRequest, CreateOfferResponse> for Processor {
     }
 }
 
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
 impl HandleRpc<AnswerOfferRequest, AnswerOfferResponse> for Processor {
     async fn handle_rpc(&self, req: AnswerOfferRequest) -> Result<AnswerOfferResponse> {
         if req.offer.is_empty() {
@@ -166,8 +166,8 @@ impl HandleRpc<AnswerOfferRequest, AnswerOfferResponse> for Processor {
     }
 }
 
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
 impl HandleRpc<AcceptAnswerRequest, AcceptAnswerResponse> for Processor {
     async fn handle_rpc(&self, req: AcceptAnswerRequest) -> Result<AcceptAnswerResponse> {
         if req.answer.is_empty() {
@@ -188,8 +188,8 @@ impl HandleRpc<AcceptAnswerRequest, AcceptAnswerResponse> for Processor {
     }
 }
 
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
 impl HandleRpc<DisconnectRequest, DisconnectResponse> for Processor {
     async fn handle_rpc(&self, req: DisconnectRequest) -> Result<DisconnectResponse> {
         let did = s2d(&req.did)?;
@@ -198,8 +198,8 @@ impl HandleRpc<DisconnectRequest, DisconnectResponse> for Processor {
     }
 }
 
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
 impl HandleRpc<SendBackendMessageRequest, SendBackendMessageResponse> for Processor {
     async fn handle_rpc(
         &self,
@@ -215,8 +215,8 @@ impl HandleRpc<SendBackendMessageRequest, SendBackendMessageResponse> for Proces
     }
 }
 
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
 impl HandleRpc<SendE2eHandshakeRequest, SendE2eHandshakeResponse> for Processor {
     async fn handle_rpc(&self, req: SendE2eHandshakeRequest) -> Result<SendE2eHandshakeResponse> {
         let destination = s2d(&req.destination_did)?;
@@ -227,8 +227,8 @@ impl HandleRpc<SendE2eHandshakeRequest, SendE2eHandshakeResponse> for Processor 
     }
 }
 
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
 impl HandleRpc<SendE2eMessageRequest, SendE2eMessageResponse> for Processor {
     async fn handle_rpc(&self, req: SendE2eMessageRequest) -> Result<SendE2eMessageResponse> {
         let destination = s2d(&req.destination_did)?;
@@ -250,8 +250,8 @@ impl HandleRpc<SendE2eMessageRequest, SendE2eMessageResponse> for Processor {
     }
 }
 
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
 impl HandleRpc<PublishMessageToTopicRequest, PublishMessageToTopicResponse> for Processor {
     async fn handle_rpc(
         &self,
@@ -266,8 +266,8 @@ impl HandleRpc<PublishMessageToTopicRequest, PublishMessageToTopicResponse> for 
     }
 }
 
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
 impl HandleRpc<FetchTopicMessagesRequest, FetchTopicMessagesResponse> for Processor {
     async fn handle_rpc(
         &self,
@@ -295,8 +295,8 @@ impl HandleRpc<FetchTopicMessagesRequest, FetchTopicMessagesResponse> for Proces
     }
 }
 
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
 impl HandleRpc<RegisterServiceRequest, RegisterServiceResponse> for Processor {
     async fn handle_rpc(&self, req: RegisterServiceRequest) -> Result<RegisterServiceResponse> {
         self.register_service(&req.name).await?;
@@ -304,8 +304,8 @@ impl HandleRpc<RegisterServiceRequest, RegisterServiceResponse> for Processor {
     }
 }
 
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
 impl HandleRpc<LookupServiceRequest, LookupServiceResponse> for Processor {
     async fn handle_rpc(&self, req: LookupServiceRequest) -> Result<LookupServiceResponse> {
         let entry_key = Entry::gen_did(&req.name)
@@ -329,8 +329,8 @@ impl HandleRpc<LookupServiceRequest, LookupServiceResponse> for Processor {
     }
 }
 
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
 impl HandleRpc<LookupOnlineNodesRequest, LookupOnlineNodesResponse> for Processor {
     async fn handle_rpc(&self, req: LookupOnlineNodesRequest) -> Result<LookupOnlineNodesResponse> {
         let nodes = self
@@ -343,8 +343,8 @@ impl HandleRpc<LookupOnlineNodesRequest, LookupOnlineNodesResponse> for Processo
     }
 }
 
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
 impl HandleRpc<LookupOnionExitsRequest, LookupOnionExitsResponse> for Processor {
     async fn handle_rpc(&self, req: LookupOnionExitsRequest) -> Result<LookupOnionExitsResponse> {
         let exits = self
@@ -357,8 +357,8 @@ impl HandleRpc<LookupOnionExitsRequest, LookupOnionExitsResponse> for Processor 
     }
 }
 
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
 impl HandleRpc<BuildOnionRouteRequest, BuildOnionRouteResponse> for Processor {
     async fn handle_rpc(&self, req: BuildOnionRouteRequest) -> Result<BuildOnionRouteResponse> {
         let route = self
@@ -369,8 +369,8 @@ impl HandleRpc<BuildOnionRouteRequest, BuildOnionRouteResponse> for Processor {
     }
 }
 
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
 impl HandleRpc<NodeInfoRequest, NodeInfoResponse> for Processor {
     async fn handle_rpc(&self, _req: NodeInfoRequest) -> Result<NodeInfoResponse> {
         self.get_node_info()
@@ -379,8 +379,8 @@ impl HandleRpc<NodeInfoRequest, NodeInfoResponse> for Processor {
     }
 }
 
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
 impl HandleRpc<PeerMeasurementRequest, PeerMeasurementResponse> for Processor {
     async fn handle_rpc(&self, req: PeerMeasurementRequest) -> Result<PeerMeasurementResponse> {
         let did = s2d(&req.did)?;
@@ -392,8 +392,8 @@ impl HandleRpc<PeerMeasurementRequest, PeerMeasurementResponse> for Processor {
     }
 }
 
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
 impl HandleRpc<ListPeerMeasurementsRequest, ListPeerMeasurementsResponse> for Processor {
     async fn handle_rpc(
         &self,
@@ -405,8 +405,8 @@ impl HandleRpc<ListPeerMeasurementsRequest, ListPeerMeasurementsResponse> for Pr
     }
 }
 
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
 impl HandleRpc<NodeDidRequest, NodeDidResponse> for Processor {
     async fn handle_rpc(&self, _req: NodeDidRequest) -> Result<NodeDidResponse> {
         let did = self.did();

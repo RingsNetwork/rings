@@ -122,9 +122,7 @@ impl StorageInspect {
 
 /// Compress equal adjacent iterator values into inclusive index ranges.
 pub fn compress_iter<T>(iter: impl Iterator<Item = T>) -> Vec<(T, u64, u64)>
-where
-    T: PartialEq,
-{
+where T: PartialEq {
     let mut result = vec![];
     let mut start = 0u64;
     let mut count = 0u64;

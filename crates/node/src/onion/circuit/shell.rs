@@ -107,11 +107,13 @@ impl<H> OnionCircuitShell<H> {
     }
 }
 
-#[cfg_attr(feature = "browser", async_trait::async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait::async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait::async_trait(?Send))]
+#[cfg_attr(
+    not(all(feature = "browser", target_family = "wasm")),
+    async_trait::async_trait
+)]
 impl<H> Interpret for OnionCircuitShell<H>
-where
-    H: OnionCircuitHandler + crate::extension::ext::MaybeSend + 'static,
+where H: OnionCircuitHandler + crate::extension::ext::MaybeSend + 'static
 {
     type Effect = OnionCircuitEffect;
 
@@ -141,17 +143,14 @@ where
                 payload,
             } => {
                 self.handler
-                    .handle_exit(
-                        scope,
-                        OnionCircuitExitFrame {
-                            from,
-                            circuit_id,
-                            return_peer,
-                            client,
-                            forward_nonce,
-                            payload,
-                        },
-                    )
+                    .handle_exit(scope, OnionCircuitExitFrame {
+                        from,
+                        circuit_id,
+                        return_peer,
+                        client,
+                        forward_nonce,
+                        payload,
+                    })
                     .await?;
                 Ok(Vec::new())
             }
@@ -189,8 +188,11 @@ pub struct OnionCircuitExitFrame {
 }
 
 /// Runtime-specific circuit handling.
-#[cfg_attr(feature = "browser", async_trait::async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait::async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait::async_trait(?Send))]
+#[cfg_attr(
+    not(all(feature = "browser", target_family = "wasm")),
+    async_trait::async_trait
+)]
 pub trait OnionCircuitHandler {
     /// Handle a frame that reached this node as the exit.
     async fn handle_exit(&self, scope: &Scope, frame: OnionCircuitExitFrame) -> Result<()>;

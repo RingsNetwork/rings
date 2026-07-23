@@ -232,19 +232,16 @@ mod tests {
     #[test]
     fn lex_splits_type_and_value_and_drops_junk() {
         let lines: Vec<Line> = lex("v=0\r\na=sendrecv\r\n\r\nnonsense\r\n").collect();
-        assert_eq!(
-            lines,
-            vec![
-                Line {
-                    kind: 'v',
-                    value: "0"
-                },
-                Line {
-                    kind: 'a',
-                    value: "sendrecv"
-                },
-            ]
-        );
+        assert_eq!(lines, vec![
+            Line {
+                kind: 'v',
+                value: "0"
+            },
+            Line {
+                kind: 'a',
+                value: "sendrecv"
+            },
+        ]);
     }
 
     #[test]
@@ -272,26 +269,20 @@ mod tests {
                    a=max-message-size:65536\r\n";
         let ast = parse(sdp);
         // the pre-`m=` attribute is session-level (and `group:…` parses as a key:value pair)
-        assert_eq!(
-            ast.session_attrs,
-            vec![Attribute::Pair {
-                key: "group",
-                value: "BUNDLE 0"
-            }]
-        );
+        assert_eq!(ast.session_attrs, vec![Attribute::Pair {
+            key: "group",
+            value: "BUNDLE 0"
+        }]);
         // the post-`m=` attribute is media-level under the data-channel section
         assert_eq!(ast.media.len(), 1);
         assert_eq!(
             ast.media[0].media,
             "application 9 UDP/DTLS/SCTP webrtc-datachannel"
         );
-        assert_eq!(
-            ast.media[0].attrs,
-            vec![Attribute::Pair {
-                key: "max-message-size",
-                value: "65536"
-            }]
-        );
+        assert_eq!(ast.media[0].attrs, vec![Attribute::Pair {
+            key: "max-message-size",
+            value: "65536"
+        }]);
     }
 
     #[test]

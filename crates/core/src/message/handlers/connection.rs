@@ -542,27 +542,27 @@ pub mod tests {
             node1.assert_transports(vec![node2.did(), node3.did()]);
             node2.assert_transports(vec![node1.did(), node3.did()]);
             node3.assert_transports(vec![node1.did(), node2.did()]);
-            assert_eq!(
-                node1.dht().successors().list()?,
-                vec![node2.did(), node3.did()]
-            );
-            assert_eq!(
-                node2.dht().successors().list()?,
-                vec![node3.did(), node1.did()]
-            );
-            assert_eq!(
-                node3.dht().successors().list()?,
-                vec![node1.did(), node2.did()]
-            );
+            assert_eq!(node1.dht().successors().list()?, vec![
+                node2.did(),
+                node3.did()
+            ]);
+            assert_eq!(node2.dht().successors().list()?, vec![
+                node3.did(),
+                node1.did()
+            ]);
+            assert_eq!(node3.dht().successors().list()?, vec![
+                node1.did(),
+                node2.did()
+            ]);
         } else {
             node1.assert_transports(vec![node2.did()]);
             node2.assert_transports(vec![node1.did(), node3.did()]);
             node3.assert_transports(vec![node2.did()]);
             assert_eq!(node1.dht().successors().list()?, vec![node2.did(),]);
-            assert_eq!(
-                node2.dht().successors().list()?,
-                vec![node3.did(), node1.did()]
-            );
+            assert_eq!(node2.dht().successors().list()?, vec![
+                node3.did(),
+                node1.did()
+            ]);
             assert_eq!(node3.dht().successors().list()?, vec![node2.did()]);
         }
 
@@ -580,18 +580,18 @@ pub mod tests {
         node1.assert_transports(vec![node2.did(), node3.did()]);
         node2.assert_transports(vec![node1.did(), node3.did()]);
         node3.assert_transports(vec![node1.did(), node2.did()]);
-        assert_eq!(
-            node1.dht().successors().list()?,
-            vec![node2.did(), node3.did()]
-        );
-        assert_eq!(
-            node2.dht().successors().list()?,
-            vec![node3.did(), node1.did()]
-        );
-        assert_eq!(
-            node3.dht().successors().list()?,
-            vec![node1.did(), node2.did()]
-        );
+        assert_eq!(node1.dht().successors().list()?, vec![
+            node2.did(),
+            node3.did()
+        ]);
+        assert_eq!(node2.dht().successors().list()?, vec![
+            node3.did(),
+            node1.did()
+        ]);
+        assert_eq!(node3.dht().successors().list()?, vec![
+            node1.did(),
+            node2.did()
+        ]);
 
         Ok((node1, node2, node3))
     }
@@ -630,27 +630,27 @@ pub mod tests {
             node1.assert_transports(vec![node2.did(), node3.did()]);
             node2.assert_transports(vec![node1.did(), node3.did()]);
             node3.assert_transports(vec![node1.did(), node2.did()]);
-            assert_eq!(
-                node1.dht().successors().list()?,
-                vec![node3.did(), node2.did()]
-            );
-            assert_eq!(
-                node2.dht().successors().list()?,
-                vec![node1.did(), node3.did()]
-            );
-            assert_eq!(
-                node3.dht().successors().list()?,
-                vec![node2.did(), node1.did()]
-            );
+            assert_eq!(node1.dht().successors().list()?, vec![
+                node3.did(),
+                node2.did()
+            ]);
+            assert_eq!(node2.dht().successors().list()?, vec![
+                node1.did(),
+                node3.did()
+            ]);
+            assert_eq!(node3.dht().successors().list()?, vec![
+                node2.did(),
+                node1.did()
+            ]);
         } else {
             node1.assert_transports(vec![node2.did()]);
             node2.assert_transports(vec![node1.did(), node3.did()]);
             node3.assert_transports(vec![node2.did()]);
             assert_eq!(node1.dht().successors().list()?, vec![node2.did()]);
-            assert_eq!(
-                node2.dht().successors().list()?,
-                vec![node1.did(), node3.did()]
-            );
+            assert_eq!(node2.dht().successors().list()?, vec![
+                node1.did(),
+                node3.did()
+            ]);
             assert_eq!(node3.dht().successors().list()?, vec![node2.did()]);
         }
 
@@ -668,18 +668,18 @@ pub mod tests {
         node1.assert_transports(vec![node2.did(), node3.did()]);
         node2.assert_transports(vec![node1.did(), node3.did()]);
         node3.assert_transports(vec![node1.did(), node2.did()]);
-        assert_eq!(
-            node1.dht().successors().list()?,
-            vec![node3.did(), node2.did()]
-        );
-        assert_eq!(
-            node2.dht().successors().list()?,
-            vec![node1.did(), node3.did()]
-        );
-        assert_eq!(
-            node3.dht().successors().list()?,
-            vec![node2.did(), node1.did()]
-        );
+        assert_eq!(node1.dht().successors().list()?, vec![
+            node3.did(),
+            node2.did()
+        ]);
+        assert_eq!(node2.dht().successors().list()?, vec![
+            node1.did(),
+            node3.did()
+        ]);
+        assert_eq!(node3.dht().successors().list()?, vec![
+            node2.did(),
+            node1.did()
+        ]);
 
         Ok((node1, node2, node3))
     }
@@ -729,22 +729,26 @@ pub mod tests {
         node2.assert_transports(vec![node3.did(), node4.did(), node1.did()]);
         node3.assert_transports(vec![node4.did(), node1.did(), node2.did()]);
         node4.assert_transports(vec![node1.did(), node2.did(), node3.did()]);
-        assert_eq!(
-            node1.dht().successors().list()?,
-            vec![node2.did(), node3.did(), node4.did(),]
-        );
-        assert_eq!(
-            node2.dht().successors().list()?,
-            vec![node3.did(), node4.did(), node1.did(),]
-        );
-        assert_eq!(
-            node3.dht().successors().list()?,
-            vec![node4.did(), node1.did(), node2.did(),]
-        );
-        assert_eq!(
-            node4.dht().successors().list()?,
-            vec![node1.did(), node2.did(), node3.did(),]
-        );
+        assert_eq!(node1.dht().successors().list()?, vec![
+            node2.did(),
+            node3.did(),
+            node4.did(),
+        ]);
+        assert_eq!(node2.dht().successors().list()?, vec![
+            node3.did(),
+            node4.did(),
+            node1.did(),
+        ]);
+        assert_eq!(node3.dht().successors().list()?, vec![
+            node4.did(),
+            node1.did(),
+            node2.did(),
+        ]);
+        assert_eq!(node4.dht().successors().list()?, vec![
+            node1.did(),
+            node2.did(),
+            node3.did(),
+        ]);
 
         println!("========================================");
         println!("| test node4 connect node3 via dht     |");
@@ -785,22 +789,26 @@ pub mod tests {
         node2.assert_transports(vec![node3.did(), node4.did(), node1.did()]);
         node3.assert_transports(vec![node4.did(), node1.did(), node2.did()]);
         node4.assert_transports(vec![node1.did(), node2.did(), node3.did()]);
-        assert_eq!(
-            node1.dht().successors().list()?,
-            vec![node2.did(), node3.did(), node4.did()]
-        );
-        assert_eq!(
-            node2.dht().successors().list()?,
-            vec![node3.did(), node4.did(), node1.did(),]
-        );
-        assert_eq!(
-            node3.dht().successors().list()?,
-            vec![node4.did(), node1.did(), node2.did(),]
-        );
-        assert_eq!(
-            node4.dht().successors().list()?,
-            vec![node1.did(), node2.did(), node3.did(),]
-        );
+        assert_eq!(node1.dht().successors().list()?, vec![
+            node2.did(),
+            node3.did(),
+            node4.did()
+        ]);
+        assert_eq!(node2.dht().successors().list()?, vec![
+            node3.did(),
+            node4.did(),
+            node1.did(),
+        ]);
+        assert_eq!(node3.dht().successors().list()?, vec![
+            node4.did(),
+            node1.did(),
+            node2.did(),
+        ]);
+        assert_eq!(node4.dht().successors().list()?, vec![
+            node1.did(),
+            node2.did(),
+            node3.did(),
+        ]);
 
         Ok(())
     }
@@ -830,14 +838,16 @@ pub mod tests {
         assert_no_more_msg([&node1, &node2, &node3, &joining]).await;
 
         joining.assert_transports(vec![node1.did(), node2.did(), node3.did()]);
-        assert_eq!(
-            node1.dht().successors().list()?,
-            vec![joining.did(), node2.did(), node3.did(),]
-        );
-        assert_eq!(
-            joining.dht().successors().list()?,
-            vec![node2.did(), node3.did(), node1.did(),]
-        );
+        assert_eq!(node1.dht().successors().list()?, vec![
+            joining.did(),
+            node2.did(),
+            node3.did(),
+        ]);
+        assert_eq!(joining.dht().successors().list()?, vec![
+            node2.did(),
+            node3.did(),
+            node1.did(),
+        ]);
 
         Ok(())
     }

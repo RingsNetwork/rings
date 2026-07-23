@@ -49,15 +49,11 @@ impl TransportSessions {
                         let bytes = Bytes::copy_from_slice(buf.get(..n).unwrap_or_default());
                         match self.udp_flow(&src) {
                             Some(key) => {
-                                let _ = send_frame(
-                                    &scope,
-                                    key.peer,
-                                    Frame::Data {
-                                        session: key.session,
-                                        from_opener: super::opened_by_us(&key),
-                                        bytes,
-                                    },
-                                )
+                                let _ = send_frame(&scope, key.peer, Frame::Data {
+                                    session: key.session,
+                                    from_opener: super::opened_by_us(&key),
+                                    bytes,
+                                })
                                 .await;
                             }
                             None => {
@@ -130,14 +126,10 @@ pub(super) async fn relay_udp_connected(task: RelayTask, socket: UdpSocket) {
     }
     // Only tell the peer if we were still the current owner (stale task stays silent).
     if sessions.close_if_current(&scope, &key, generation).await {
-        let _ = send_frame(
-            &scope,
-            peer,
-            Frame::Close {
-                session,
-                from_opener,
-            },
-        )
+        let _ = send_frame(&scope, peer, Frame::Close {
+            session,
+            from_opener,
+        })
         .await;
     }
 }

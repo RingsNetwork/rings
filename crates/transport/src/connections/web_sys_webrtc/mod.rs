@@ -219,6 +219,10 @@ impl ConnectionInterface for WebSysWebrtcConnection {
         self.webrtc_conn.connection_state().into()
     }
 
+    fn data_channel_is_open(&self) -> Result<bool> {
+        self.webrtc_data_channel.all_ready()
+    }
+
     fn max_message_size(&self) -> usize {
         // The value negotiated from the remote SDP at handshake; `0` = not yet negotiated, so
         // fall back to the interop default. Same parsing as native (consistent behaviour).
@@ -316,7 +320,7 @@ impl ConnectionInterface for WebSysWebrtcConnection {
             return Err(Error::DataChannelOpen("Connection unavailable".to_string()));
         }
 
-        if self.webrtc_data_channel.all_ready()? {
+        if self.data_channel_is_open()? {
             return Ok(());
         }
 
@@ -324,7 +328,7 @@ impl ConnectionInterface for WebSysWebrtcConnection {
             .set_timeout(WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT);
         self.webrtc_data_channel_state_notifier.clone().await;
 
-        if self.webrtc_data_channel.all_ready()? {
+        if self.data_channel_is_open()? {
             return Ok(());
         } else {
             return Err(Error::DataChannelOpen(format!(

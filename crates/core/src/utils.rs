@@ -248,9 +248,7 @@ pub mod js_utils {
     }
 
     fn schedule_sleep<F>(resolve: js_sys::Function, reject: js_sys::Function, schedule: F)
-    where
-        F: FnOnce(&js_sys::Function) -> Result<i32, JsValue>,
-    {
+    where F: FnOnce(&js_sys::Function) -> Result<i32, JsValue> {
         let func = Closure::once_into_js(move || {
             resolve_sleep(&resolve);
         });

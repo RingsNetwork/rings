@@ -105,13 +105,10 @@ impl SwarmTransport {
         let now = storage_lookup_observation_now_ms();
         evict_storage_lookup_observations(&mut observations, now);
         reserve_storage_lookup_observation_slot(&mut observations);
-        observations.insert(
-            key,
-            StorageLookupObservation {
-                observed_at_ms: now,
-                misses: BTreeSet::new(),
-            },
-        );
+        observations.insert(key, StorageLookupObservation {
+            observed_at_ms: now,
+            misses: BTreeSet::new(),
+        });
         Ok(())
     }
 
