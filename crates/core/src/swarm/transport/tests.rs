@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -14,6 +16,7 @@ use crate::dht::MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use crate::ecc::SecretKey;
 use crate::measure::BehaviourJudgement;
 use crate::measure::Measure;
+use crate::message::MessagePayload;
 use crate::storage::MemStorage;
 use crate::swarm::callback::InnerSwarmCallback;
 use crate::swarm::callback::SwarmCallback;
@@ -89,6 +92,41 @@ struct NoopSwarmCallback;
 
 #[async_trait]
 impl SwarmCallback for NoopSwarmCallback {}
+
+#[derive(Default)]
+struct CountingSwarmCallback {
+    validates: AtomicUsize,
+    inbounds: AtomicUsize,
+}
+
+impl CountingSwarmCallback {
+    fn validates(&self) -> usize {
+        self.validates.load(Ordering::SeqCst)
+    }
+
+    fn inbounds(&self) -> usize {
+        self.inbounds.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl SwarmCallback for CountingSwarmCallback {
+    async fn on_validate(
+        &self,
+        _payload: &MessagePayload,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        self.validates.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn on_inbound(
+        &self,
+        _payload: &MessagePayload,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        self.inbounds.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
 
 fn transport_with_measure(measure: MeasureImpl) -> Result<SwarmTransport> {
     let key = SecretKey::random();
@@ -275,6 +313,59 @@ async fn data_channel_open_admits_successor_before_ice_connected() -> Result<()>
 
     assert!(transport.is_admitted_connection(peer));
     assert!(transport.dht.successors().contains(&peer)?);
+
+    transport.disconnect(peer).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn pending_callback_messages_do_not_dispatch_before_admission() -> Result<()> {
+    let measure = Arc::new(RecordingMeasure::default());
+    let transport = Arc::new(transport_with_measure(measure.clone())?);
+    let peer_key = SecretKey::random();
+    let peer = peer_key.address().into();
+    let peer_session = SessionSk::new_with_seckey(&peer_key)?;
+    let app_callback = Arc::new(CountingSwarmCallback::default());
+    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
+    let (attempt, _offer) = transport
+        .prepare_connection_offer_with_attempt(peer, offer_callback)
+        .await?;
+    let pending_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone())
+        .with_pending_connection_attempt(attempt);
+    let payload = MessagePayload::new_send(
+        Message::custom(b"message-before-admission")?,
+        &peer_session,
+        transport.dht.did,
+        transport.dht.did,
+    )?;
+    let bytes = payload.to_bincode()?;
+
+    pending_callback
+        .on_message(&peer.to_string(), &bytes)
+        .await
+        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+
+    assert_eq!(app_callback.validates(), 0);
+    assert_eq!(app_callback.inbounds(), 0);
+    assert_eq!(measure.snapshot_counters()?, Vec::new());
+    assert!(!transport.dht.successors().contains(&peer)?);
+
+    pending_callback
+        .on_data_channel_open(&peer.to_string())
+        .await
+        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+    pending_callback
+        .on_message(&peer.to_string(), &bytes)
+        .await
+        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+
+    assert_eq!(app_callback.validates(), 1);
+    assert_eq!(app_callback.inbounds(), 1);
+    assert_eq!(measure.snapshot_counters()?.as_slice(), &[
+        (peer, MeasureCounter::Connect),
+        (peer, MeasureCounter::Received),
+    ]);
+    assert!(transport.is_admitted_connection(peer));
 
     transport.disconnect(peer).await?;
     Ok(())

@@ -327,6 +327,9 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
                     self.dht.apply_fixed_finger(*index, msg.did)?;
                 } else if msg.reports_remote_successor(self.dht.did) {
                     self.connect_dht_peer(msg.did).await?;
+                    if self.transport.get_connection(msg.did).is_some() {
+                        self.dht.apply_fixed_finger(*index, msg.did)?;
+                    }
                 }
             }
             FindSuccessorReportHandler::Connect if msg.reports_remote_successor(self.dht.did) => {

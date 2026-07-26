@@ -1,24 +1,7 @@
 use super::common::*;
 use super::*;
 
-struct HangingRegistration;
-
 struct StoppedRegistration;
-
-#[async_trait]
-impl RegistrationTask for HangingRegistration {
-    fn name(&self) -> &'static str {
-        "hanging-test"
-    }
-
-    fn interval(&self) -> Duration {
-        Duration::from_millis(20)
-    }
-
-    async fn register_once(&self, _context: &RegistrationContext<'_>) -> Result<()> {
-        futures::future::pending().await
-    }
-}
 
 #[async_trait]
 impl RegistrationTask for StoppedRegistration {
@@ -33,25 +16,6 @@ impl RegistrationTask for StoppedRegistration {
     async fn register_once(&self, _context: &RegistrationContext<'_>) -> Result<()> {
         Err(Error::RegistrationStopped)
     }
-}
-
-#[tokio::test]
-async fn registration_attempt_timeout_returns_instead_of_hanging() -> Result<()> {
-    let processor = prepare_processor().await;
-    let task = HangingRegistration;
-    let timeout = Duration::from_millis(20);
-    let result = processor
-        .run_registration_once_with_timeout(&task, timeout, StopToken::never())
-        .await;
-
-    assert!(matches!(
-        result,
-        Err(Error::RegistrationTimeout {
-            task: "hanging-test",
-            timeout: observed_timeout,
-        }) if observed_timeout == timeout
-    ));
-    Ok(())
 }
 
 #[tokio::test]

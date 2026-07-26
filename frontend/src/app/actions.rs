@@ -295,7 +295,7 @@ impl StartAction {
             built.stop();
             return;
         }
-        self.did.set(my_did);
+        self.did.set(my_did.clone());
         self.wallet_account.set(Some(account));
         *self.node_ref.borrow_mut() = Some(built.clone());
         let webview_ready = match webview::install_browser_gateway(built.webview.clone()) {
@@ -306,12 +306,28 @@ impl StartAction {
                 false
             }
         };
+        if !token.is_current() {
+            self.discard_stale_local_node(&built, my_did.as_str());
+            return;
+        }
         self.webview_ready.set(webview_ready);
         super::clear_shell_dialog_route();
         self.active_dialog.set(ActiveDialog::None);
         self.node_starting.set(false);
         self.connect_seed_if_configured(built, seed_url, token)
             .await;
+    }
+
+    fn discard_stale_local_node(&self, built: &DemoNode, did: &str) {
+        built.stop();
+        let mut node_ref = self.node_ref.borrow_mut();
+        if node_ref
+            .as_ref()
+            .is_some_and(|node| node.provider.address() == did)
+        {
+            *node_ref = None;
+            webview::clear_browser_gateway();
+        }
     }
 
     fn register_local_protocols(&self, built: &DemoNode, my_did: &str) -> Result<(), String> {

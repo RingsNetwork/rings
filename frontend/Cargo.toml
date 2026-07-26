@@ -11,9 +11,9 @@ publish = false
 [workspace]
 
 [dependencies]
+async-trait = "0.1"
 base58 = "0.2"
 base64 = "0.22"
-async-trait = "0.1"
 futures = "0.3"
 gloo-timers = { version = "0.3", features = ["futures"] }
 js-sys = "=0.3.98"

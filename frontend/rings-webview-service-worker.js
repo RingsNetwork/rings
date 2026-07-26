@@ -5,7 +5,9 @@ const requestTimeoutMs = 30_000;
 const webviewOverlayScriptPath = "/assets/webview-overlay.js";
 const webviewOverlayScriptTag = `<script src="${webviewOverlayScriptPath}"></script>`;
 const gatewayContentSecurityPolicy = "default-src 'self' data: blob:; base-uri 'self'; connect-src 'self'; font-src 'self' data:; form-action 'self'; frame-src 'self' data: blob:; img-src 'self' data: blob:; media-src 'self' data: blob:; object-src 'self'; script-src 'self' data: 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; style-src 'self' data: 'unsafe-inline'; worker-src 'none'";
+const minimumGatewayHostCapabilityLength = 32;
 let gatewayHostClientId = null;
+let gatewayHostCapability = null;
 const debugClientIds = new Set();
 const debugHistory = [];
 let nextRequestId = 1;
@@ -35,9 +37,16 @@ self.addEventListener("message", (event) => {
     return;
   }
   if (event.data?.type === "rings-webview-host-register" && typeof clientId === "string" && clientId) {
-    updateGatewayHost(clientId);
-    void emitDebug("worker", "Updated local Rings node gateway host");
-    reply?.postMessage({ ok: true });
+    const registration = registerGatewayHostClient(clientId, event.data.capability).then(async (ok) => {
+      if (ok) {
+        await emitDebug("worker", "Updated local Rings node gateway host");
+        reply?.postMessage({ ok: true });
+      } else {
+        await emitDebug("worker", "Rejected untrusted Rings node gateway host registration", "warning");
+        reply?.postMessage({ ok: false, error: "untrusted gateway host registration" });
+      }
+    });
+    event.waitUntil?.(registration);
     return;
   }
   if (event.data?.type === "rings-webview-debug-register" && typeof clientId === "string" && clientId) {
@@ -194,11 +203,11 @@ function controlledNavigationBody(request, status, headers, body) {
   if (contentType && !contentType.includes("text/html") && !contentType.includes("application/xhtml+xml")) {
     return body;
   }
+  prepareControlledNavigationHeaders(headers);
   const text = decodeUtf8(bytes);
   if (!text || !looksLikeHtml(text)) {
     return body;
   }
-  prepareControlledNavigationHeaders(headers);
   const injected = injectWebviewOverlay(text);
   if (injected === text) {
     return body;
@@ -239,7 +248,7 @@ function decodeUtf8(bytes) {
 }
 
 function looksLikeHtml(text) {
-  return /^\s*(?:<!doctype\s+html\b|<html\b|<head\b|<body\b)/i.test(text);
+  return /^\uFEFF?\s*(?:<!--[\s\S]*?-->\s*)*(?:<!doctype\s+html\b|<html\b|<head\b|<body\b)/i.test(text);
 }
 
 function injectWebviewOverlay(html) {
@@ -337,29 +346,7 @@ function requestedTarget(url) {
 }
 
 async function gatewayHostClient() {
-  const registered = await registeredGatewayHostClient();
-  if (registered) {
-    return registered;
-  }
-  const candidateClients = await self.clients.matchAll({
-    type: "window",
-    includeUncontrolled: true,
-  });
-  if (candidateClients.length === 0) {
-    return undefined;
-  }
-  const discovered = await Promise.all(
-    candidateClients.map(async (client) => ({
-      client,
-      ready: await queryGatewayHost(client),
-    })),
-  );
-  const host = discovered.find(({ ready }) => ready)?.client;
-  if (!host) {
-    return undefined;
-  }
-  updateGatewayHost(host.id);
-  return host;
+  return registeredGatewayHostClient();
 }
 
 async function registeredGatewayHostClient() {
@@ -367,33 +354,46 @@ async function registeredGatewayHostClient() {
     return undefined;
   }
   const client = await self.clients.get(gatewayHostClientId);
-  if (!client) {
+  if (!client || !isTrustedGatewayHostUrl(client.url)) {
     gatewayHostClientId = null;
+    gatewayHostCapability = null;
+    return undefined;
   }
   return client;
 }
 
-function updateGatewayHost(clientId) {
+async function registerGatewayHostClient(clientId, capability) {
+  if (!isValidGatewayHostCapability(capability)) {
+    return false;
+  }
+  const client = await self.clients.get(clientId);
+  if (!client || !isTrustedGatewayHostUrl(client.url)) {
+    return false;
+  }
+  if (gatewayHostCapability && gatewayHostCapability !== capability) {
+    return false;
+  }
   gatewayHostClientId = clientId;
+  gatewayHostCapability = capability;
+  return true;
 }
 
-function queryGatewayHost(client) {
-  return new Promise((resolve) => {
-    const channel = new MessageChannel();
-    const timeout = globalThis.setTimeout(() => {
-      channel.port1.close();
-      resolve(false);
-    }, 500);
-    channel.port1.onmessage = (event) => {
-      globalThis.clearTimeout(timeout);
-      channel.port1.close();
-      resolve(Boolean(event.data?.ready));
-    };
-    client.postMessage(
-      { type: "rings-webview-gateway-host-query" },
-      [channel.port2],
-    );
-  });
+function isValidGatewayHostCapability(capability) {
+  return typeof capability === "string" && capability.length >= minimumGatewayHostCapabilityLength;
+}
+
+function isTrustedGatewayHostUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.origin === self.location.origin && !parsed.pathname.startsWith(gatewayPrefix);
+  } catch (_error) {
+    return false;
+  }
+}
+
+function resetGatewayHostForTest() {
+  gatewayHostClientId = null;
+  gatewayHostCapability = null;
 }
 
 async function serializeRequest(event) {

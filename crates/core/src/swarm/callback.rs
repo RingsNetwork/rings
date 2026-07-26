@@ -150,6 +150,35 @@ impl InnerSwarmCallback {
         Ok(true)
     }
 
+    async fn pending_connection_allows_message(
+        &self,
+        peer: Option<Did>,
+    ) -> Result<bool, CallbackError> {
+        let Some(attempt) = self.pending_attempt else {
+            return Ok(true);
+        };
+        let Some(peer) = peer else {
+            tracing::warn!(
+                "ignoring message from unparsable peer; pending attempt belongs to {}",
+                attempt.peer()
+            );
+            return Ok(false);
+        };
+        if attempt.peer() != peer {
+            tracing::warn!(
+                "ignoring message from {peer}; pending attempt belongs to {}",
+                attempt.peer()
+            );
+            self.transport.cancel_pending_connection(attempt).await?;
+            return Ok(false);
+        }
+        if !self.transport.is_admitted_connection_attempt(attempt) {
+            tracing::debug!("ignoring message from {peer}; pending connection is not admitted yet");
+            return Ok(false);
+        }
+        Ok(true)
+    }
+
     async fn handle_pending_terminal_event(
         &self,
         did: Did,
@@ -248,6 +277,9 @@ impl InnerSwarmCallback {
 impl TransportCallback for InnerSwarmCallback {
     async fn on_message(&self, cid: &str, msg: &[u8]) -> Result<(), CallbackError> {
         let peer = Did::from_str(cid).ok();
+        if !self.pending_connection_allows_message(peer).await? {
+            return Ok(());
+        }
         let payload = match MessagePayload::from_bincode(msg) {
             Ok(payload) => payload,
             Err(e) => {

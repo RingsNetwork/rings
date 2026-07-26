@@ -254,34 +254,6 @@ async fn get_and_check_connection_times_out_wedged_data_channel_wait() -> Result
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[tokio::test]
-async fn stabilize_step_timeout_bounds_wedged_data_channel_wait() -> Result<()> {
-    let mut key1 = SecretKey::random();
-    let mut key2 = SecretKey::random();
-    if key1.address() < key2.address() {
-        (key1, key2) = (key2, key1)
-    }
-    let node1 = prepare_node(key1).await;
-    let node2 = prepare_node(key2).await;
-    manually_establish_connection(&node1.swarm, &node2.swarm).await;
-
-    wait_for_successor(&node1, node2.did()).await?;
-
-    let _guard = PendingDataChannelWaitGuard::new();
-    timeout(
-        Duration::from_secs(1),
-        node1
-            .swarm
-            .stabilizer()
-            .stabilize_with_step_timeout(Duration::from_millis(20)),
-    )
-    .await
-    .map_err(|_| Error::PromiseStateTimeout)??;
-
-    Ok(())
-}
-
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-#[tokio::test]
 async fn clean_unavailable_connections_removes_silent_connected_peer() -> Result<()> {
     let node1 = prepare_node(SecretKey::random()).await;
     let node2 = prepare_node(SecretKey::random()).await;

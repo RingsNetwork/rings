@@ -1,3 +1,6 @@
+use std::time::Duration;
+use std::time::SystemTime;
+
 use url::Url;
 
 use crate::error::Result;
@@ -11,6 +14,7 @@ struct StoredCookie {
     host_only: bool,
     path: String,
     secure: bool,
+    expires_at: Option<SystemTime>,
 }
 
 /// Virtual cookie jar keyed by target origin/domain/path.
@@ -53,7 +57,10 @@ impl CookieJar {
             host_only: true,
             path: default_cookie_path(origin.path()),
             secure: false,
+            expires_at: None,
         };
+        let mut delete_cookie = false;
+        let mut saw_max_age = false;
 
         for part in parts {
             let lower = part.to_ascii_lowercase();
@@ -71,6 +78,28 @@ impl CookieJar {
                     } else {
                         "/".to_string()
                     };
+                } else if key.eq_ignore_ascii_case("max-age") {
+                    saw_max_age = true;
+                    if let Ok(seconds) = value.trim().parse::<i64>() {
+                        if seconds <= 0 {
+                            delete_cookie = true;
+                            cookie.expires_at = None;
+                        } else if let Some(expires_at) =
+                            SystemTime::now().checked_add(Duration::from_secs(seconds as u64))
+                        {
+                            delete_cookie = false;
+                            cookie.expires_at = Some(expires_at);
+                        }
+                    }
+                } else if key.eq_ignore_ascii_case("expires") && !saw_max_age {
+                    if let Ok(expires_at) = httpdate::parse_http_date(value.trim()) {
+                        if expires_at <= SystemTime::now() {
+                            delete_cookie = true;
+                            cookie.expires_at = None;
+                        } else {
+                            cookie.expires_at = Some(expires_at);
+                        }
+                    }
                 }
             }
         }
@@ -80,6 +109,9 @@ impl CookieJar {
                 && existing.domain == cookie.domain
                 && existing.path == cookie.path)
         });
+        if delete_cookie {
+            return Ok(());
+        }
         self.cookies.push(cookie);
         Ok(())
     }
@@ -89,11 +121,13 @@ impl CookieJar {
         let host = target.host_str()?.to_ascii_lowercase();
         let path = target.path();
         let secure_request = target.scheme() == "https";
+        let now = SystemTime::now();
         let pairs: Vec<String> = self
             .cookies
             .iter()
             .filter(|cookie| {
-                (!cookie.secure || secure_request)
+                !cookie_expired(cookie, now)
+                    && (!cookie.secure || secure_request)
                     && domain_matches(cookie, &host)
                     && path_matches(cookie.path.as_str(), path)
             })
@@ -108,7 +142,11 @@ impl CookieJar {
 
     /// Return the number of cookies currently stored.
     pub fn len(&self) -> usize {
-        self.cookies.len()
+        let now = SystemTime::now();
+        self.cookies
+            .iter()
+            .filter(|cookie| !cookie_expired(cookie, now))
+            .count()
     }
 
     /// Return true when no cookies are stored.
@@ -122,6 +160,12 @@ fn domain_matches(cookie: &StoredCookie, host: &str) -> bool {
         return cookie.domain == host;
     }
     host == cookie.domain || host.ends_with(format!(".{}", cookie.domain).as_str())
+}
+
+fn cookie_expired(cookie: &StoredCookie, now: SystemTime) -> bool {
+    cookie
+        .expires_at
+        .is_some_and(|expires_at| expires_at <= now)
 }
 
 fn path_matches(cookie_path: &str, request_path: &str) -> bool {
@@ -220,6 +264,37 @@ mod tests {
 
         assert_eq!(jar.cookie_header(&inside).as_deref(), Some("sid=one"));
         assert_eq!(jar.cookie_header(&sibling), None);
+        Ok(())
+    }
+
+    #[test]
+    fn cookie_max_age_zero_deletes_existing_cookie() -> Result<()> {
+        let mut jar = CookieJar::new();
+        let origin = Url::parse("https://example.com/app/index.html")?;
+
+        jar.store_set_cookie(&origin, "sid=one; Path=/app")?;
+        jar.store_set_cookie(&origin, "sid=gone; Path=/app; Max-Age=0")?;
+
+        let target = Url::parse("https://example.com/app/page")?;
+        assert_eq!(jar.cookie_header(&target), None);
+        assert!(jar.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn cookie_past_expires_deletes_existing_cookie() -> Result<()> {
+        let mut jar = CookieJar::new();
+        let origin = Url::parse("https://example.com/app/index.html")?;
+
+        jar.store_set_cookie(&origin, "sid=one; Path=/app")?;
+        jar.store_set_cookie(
+            &origin,
+            "sid=gone; Path=/app; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
+        )?;
+
+        let target = Url::parse("https://example.com/app/page")?;
+        assert_eq!(jar.cookie_header(&target), None);
+        assert!(jar.is_empty());
         Ok(())
     }
 }

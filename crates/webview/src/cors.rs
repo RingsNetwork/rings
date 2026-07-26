@@ -9,6 +9,16 @@ use crate::types::GatewayHeader;
 use crate::types::GatewayRequest;
 use crate::types::GatewayResponse;
 
+const SAFE_RESPONSE_HEADERS: &[&str] = &[
+    "cache-control",
+    "content-language",
+    "content-length",
+    "content-type",
+    "expires",
+    "last-modified",
+    "pragma",
+];
+
 /// Build an upstream CORS preflight request when `request` requires one.
 pub fn preflight_request(request: &GatewayRequest) -> Result<Option<GatewayRequest>> {
     if !request.is_cross_origin_runtime_request() || !requires_preflight(request) {
@@ -49,6 +59,26 @@ pub fn validate_response(request: &GatewayRequest, response: &GatewayResponse) -
         ));
     }
     Ok(())
+}
+
+/// Filter response headers visible to a cross-origin runtime caller.
+///
+/// The Service Worker returns responses from the controlled origin, so the
+/// browser's native CORS header visibility rules would otherwise be bypassed.
+pub fn filter_exposed_response_headers(
+    request: &GatewayRequest,
+    mut response: GatewayResponse,
+) -> GatewayResponse {
+    if !request.is_cross_origin_runtime_request() {
+        return response;
+    }
+    let exposed = exposed_response_headers(request, &response);
+    response.headers.retain(|header| {
+        let name = header.name.to_ascii_lowercase();
+        !is_gateway_internal_response_header(name.as_str())
+            && (is_safelisted_response_header(name.as_str()) || exposed.contains(name.as_str()))
+    });
+    response
 }
 
 /// Validate a CORS preflight response before forwarding the actual runtime request.
@@ -164,6 +194,38 @@ fn is_safelisted_header(header: &GatewayHeader) -> bool {
     )
 }
 
+fn is_safelisted_response_header(name: &str) -> bool {
+    SAFE_RESPONSE_HEADERS
+        .iter()
+        .any(|candidate| name.eq_ignore_ascii_case(candidate))
+}
+
+fn exposed_response_headers(
+    request: &GatewayRequest,
+    response: &GatewayResponse,
+) -> BTreeSet<String> {
+    let exposes_all = request.credentials != GatewayCredentials::Include
+        && header_values(response, "access-control-expose-headers")
+            .flat_map(|value| value.split(','))
+            .any(|value| value.trim() == "*");
+    if exposes_all {
+        return response
+            .headers
+            .iter()
+            .map(|header| header.name.to_ascii_lowercase())
+            .collect();
+    }
+    header_values(response, "access-control-expose-headers")
+        .flat_map(|value| value.split(','))
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+fn is_gateway_internal_response_header(name: &str) -> bool {
+    matches!(name, "content-security-policy")
+}
+
 fn source_origin(request: &GatewayRequest) -> Result<String> {
     request
         .source_origin
@@ -274,5 +336,38 @@ mod tests {
         )?;
 
         validate_response(&request, &response)
+    }
+
+    #[test]
+    fn cross_origin_runtime_response_headers_are_filtered_to_cors_visibility() -> Result<()> {
+        let request = GatewayRequest::fetch(Url::parse("https://api.example.test/data")?, "GET")
+            .with_source_origin(Url::parse("https://app.example.test/page")?);
+        let response = GatewayResponse::new(
+            200,
+            vec![
+                GatewayHeader::new("Access-Control-Allow-Origin", "https://app.example.test")?,
+                GatewayHeader::new("Access-Control-Expose-Headers", "X-Visible")?,
+                GatewayHeader::new("Content-Type", "application/json")?,
+                GatewayHeader::new("Content-Security-Policy", "default-src 'self'")?,
+                GatewayHeader::new("X-Visible", "ok")?,
+                GatewayHeader::new("X-Secret", "hidden")?,
+            ],
+            Vec::new(),
+        )?;
+
+        let filtered = filter_exposed_response_headers(&request, response);
+        let names = filtered
+            .headers
+            .iter()
+            .map(|header| header.name.to_ascii_lowercase())
+            .collect::<BTreeSet<_>>();
+
+        assert!(names.contains("content-type"));
+        assert!(names.contains("x-visible"));
+        assert!(!names.contains("x-secret"));
+        assert!(!names.contains("access-control-allow-origin"));
+        assert!(!names.contains("access-control-expose-headers"));
+        assert!(!names.contains("content-security-policy"));
+        Ok(())
     }
 }

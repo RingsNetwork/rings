@@ -216,6 +216,7 @@ impl Stabilizer {
 
     async fn run_step<F>(&self, step: &'static str, timeout: Duration, future: F)
     where F: Future<Output = Result<()>> {
+        let started_at_ms = get_epoch_ms_i64();
         tracing::debug!(
             target: "rings_core::dht::stabilization",
             local = %self.dht.did,
@@ -224,27 +225,32 @@ impl Stabilizer {
             "STABILIZATION step start"
         );
 
-        let result = {
-            let future = future.fuse();
-            let timer = sleep(timeout).fuse();
-            pin_mut!(future, timer);
-
-            select! {
-                result = future => Some(result),
-                _ = timer => None,
-            }
+        let future = future.fuse();
+        let timer = sleep(timeout).fuse();
+        pin_mut!(future, timer);
+        let (result, timed_out) = select! {
+            result = future => (result, false),
+            _ = timer => {
+                self.log_step_timeout(step, timeout, elapsed_since_ms(started_at_ms));
+                (future.await, true)
+            },
         };
 
         match result {
-            Some(Ok(())) => {
+            Ok(()) => {
+                let elapsed_ms = elapsed_since_ms(started_at_ms);
+                if !timed_out && u128::try_from(elapsed_ms).unwrap_or(0) > timeout.as_millis() {
+                    self.log_step_timeout(step, timeout, elapsed_ms);
+                }
                 tracing::debug!(
                     target: "rings_core::dht::stabilization",
                     local = %self.dht.did,
                     step,
+                    elapsed_ms,
                     "STABILIZATION step end"
                 );
             }
-            Some(Err(e)) => {
+            Err(e) => {
                 tracing::error!(
                     target: "rings_core::dht::stabilization",
                     local = %self.dht.did,
@@ -253,11 +259,10 @@ impl Stabilizer {
                     "STABILIZATION step failed"
                 );
             }
-            None => self.log_step_timeout(step, timeout),
         }
     }
 
-    fn log_step_timeout(&self, step: &'static str, timeout: Duration) {
+    fn log_step_timeout(&self, step: &'static str, timeout: Duration, elapsed_ms: i64) {
         let topology = TopoInfo::try_from(self.dht.as_ref()).ok();
         let mut connections: Vec<(Did, WebrtcConnectionState)> = self
             .transport
@@ -272,10 +277,11 @@ impl Stabilizer {
             local = %self.dht.did,
             step,
             timeout_ms = timeout.as_millis(),
-            reason = "stabilization_step_future_pending",
+            elapsed_ms,
+            reason = "stabilization_step_overran_deadline",
             topology = ?topology,
             connections = ?connections,
-            "STABILIZATION step timed out"
+            "STABILIZATION step exceeded timeout"
         );
     }
 
@@ -989,6 +995,10 @@ impl Stabilizer {
         }
         Ok(())
     }
+}
+
+fn elapsed_since_ms(started_at_ms: i64) -> i64 {
+    get_epoch_ms_i64().saturating_sub(started_at_ms).max(0)
 }
 
 mod stabilizer {

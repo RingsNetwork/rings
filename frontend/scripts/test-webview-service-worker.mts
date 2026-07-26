@@ -38,7 +38,19 @@ type ServiceWorkerTestApi = {
     headers: Headers,
     body: Uint8Array | null,
   ) => Uint8Array | null;
+  readonly gatewayHostClient: () => Promise<ServiceWorkerClientFixture | undefined>;
+  readonly registerGatewayHostClient: (clientId: string, capability: string) => Promise<boolean>;
+  readonly resetGatewayHostForTest: () => void;
   readonly requestKind: (request: RequestKindFixture) => string;
+};
+
+/**
+ * Minimal Client shape consumed by gateway host registration.
+ */
+type ServiceWorkerClientFixture = {
+  readonly id: string;
+  readonly url: string;
+  readonly postMessage: () => void;
 };
 
 /**
@@ -48,6 +60,10 @@ type ServiceWorkerTestContext = Record<string, unknown> & {
   self: {
     readonly location: URL;
     addEventListener: () => void;
+    clients: {
+      get: (clientId: string) => Promise<ServiceWorkerClientFixture | undefined>;
+      matchAll: () => Promise<ServiceWorkerClientFixture[]>;
+    };
   };
   __ringsWebviewServiceWorkerTest?: ServiceWorkerTestApi;
 };
@@ -56,6 +72,7 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const projectRoot = frontendProjectRoot(scriptDir);
 const serviceWorkerPath = resolve(projectRoot, "rings-webview-service-worker.js");
 const serviceWorkerSource = await readFile(serviceWorkerPath, "utf8");
+const clientsById = new Map<string, ServiceWorkerClientFixture>();
 const context: ServiceWorkerTestContext = {
   console,
   Headers,
@@ -71,13 +88,17 @@ const context: ServiceWorkerTestContext = {
   self: {
     location: new URL("http://127.0.0.1:8080/"),
     addEventListener() {},
+    clients: {
+      get: async (clientId) => clientsById.get(clientId),
+      matchAll: async () => [...clientsById.values()],
+    },
   },
 };
 const globalThisKey = "globalThis";
 context[globalThisKey] = context;
 
 vm.runInNewContext(
-  `${serviceWorkerSource}\nglobalThis.__ringsWebviewServiceWorkerTest = { controlledNavigationBody, requestKind };`,
+  `${serviceWorkerSource}\nglobalThis.__ringsWebviewServiceWorkerTest = { controlledNavigationBody, gatewayHostClient, registerGatewayHostClient, resetGatewayHostForTest, requestKind };`,
   context,
   {
     filename: serviceWorkerPath,
@@ -86,7 +107,8 @@ vm.runInNewContext(
 
 const serviceWorkerApi = context.__ringsWebviewServiceWorkerTest;
 assert(serviceWorkerApi, "service worker test API was not exported");
-const { controlledNavigationBody, requestKind } = serviceWorkerApi;
+const { controlledNavigationBody, gatewayHostClient, registerGatewayHostClient, resetGatewayHostForTest, requestKind } =
+  serviceWorkerApi;
 
 /**
  * Resolves the frontend project root from either source or generated script paths.
@@ -182,7 +204,64 @@ assert.throws(
 }
 
 {
+  const headers = new Headers({
+    "content-length": "42",
+    "content-security-policy": "default-src 'none'",
+    "content-type": "text/html",
+  });
+  const body = controlledNavigationBody(
+    { kind: "navigation" },
+    200,
+    headers,
+    bytes("\uFEFF<!-- leading comment --><html><head><title>Target</title></head><body>ok</body></html>"),
+  );
+  const html = text(body);
+  assert.match(html, /<script src="\/assets\/webview-overlay\.js"><\/script><\/head>/);
+  assert.equal(headers.has("content-length"), false);
+  assert.match(headers.get("content-security-policy") ?? "", /script-src 'self'/);
+}
+
+{
+  const headers = new Headers({
+    "content-length": "42",
+    "content-security-policy": "default-src 'none'",
+    "content-type": "text/html",
+  });
+  const body = controlledNavigationBody({ kind: "navigation" }, 200, headers, bytes("<!-- comment-only fixture -->"));
+  assert.equal(text(body), "<!-- comment-only fixture -->");
+  assert.equal(headers.has("content-length"), false);
+  assert.match(headers.get("content-security-policy") ?? "", /script-src 'self'/);
+}
+
+{
   const css = bytes("body { color: red; }");
   const body = controlledNavigationBody({ kind: "subresource" }, 200, new Headers({ "content-type": "text/css" }), css);
   assert.equal(body, css);
+}
+
+{
+  resetGatewayHostForTest();
+  clientsById.clear();
+  clientsById.set("host", {
+    id: "host",
+    url: "http://127.0.0.1:8080/#node",
+    postMessage() {},
+  });
+  clientsById.set("hostile", {
+    id: "hostile",
+    url: "http://127.0.0.1:8080/webview/https%3A%2F%2Fexample.test%2F",
+    postMessage() {},
+  });
+  const hostCapability = "h".repeat(32);
+  const hostileCapability = "x".repeat(32);
+
+  assert.equal(await gatewayHostClient(), undefined);
+  assert.equal(await registerGatewayHostClient("hostile", hostileCapability), false);
+  assert.equal(await gatewayHostClient(), undefined);
+  assert.equal(await registerGatewayHostClient("host", "short"), false);
+  assert.equal(await registerGatewayHostClient("host", hostCapability), true);
+  assert.equal((await gatewayHostClient())?.id, "host");
+  assert.equal(await registerGatewayHostClient("hostile", hostileCapability), false);
+  assert.equal(await registerGatewayHostClient("host", hostileCapability), false);
+  assert.equal((await gatewayHostClient())?.id, "host");
 }

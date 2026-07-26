@@ -18,6 +18,7 @@ browser = [
 
 [dependencies]
 async-trait = { workspace = true }
+httpdate = "1"
 js-sys = { workspace = true, optional = true }
 lol_html = "3"
 percent-encoding = "2"

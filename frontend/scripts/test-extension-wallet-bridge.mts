@@ -146,7 +146,7 @@ try {
           walletKind: "eip191",
           networkId: "1",
           iceServers: "stun://stun.l.google.com:19302",
-          stabilizeInterval: "15",
+          stabilizeInterval: "1",
           storageName: "rings-frontend-wallet-fixture",
           seedUrl: "",
         }),

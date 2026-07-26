@@ -127,6 +127,12 @@ impl<const MAX_PENDING: usize> PendingPeerPool<MAX_PENDING> {
 }
 
 impl SwarmTransport {
+    fn connection_lifecycle(&self) -> Result<std::sync::MutexGuard<'_, ()>> {
+        self.connection_lifecycle
+            .lock()
+            .map_err(|_| Error::SwarmConnectionLifecycleLock)
+    }
+
     fn pending_peers(
         &self,
     ) -> Result<std::sync::MutexGuard<'_, PendingPeerPool<DEFAULT_PENDING_CONNECTION_CAPACITY>>>
@@ -200,10 +206,11 @@ impl SwarmTransport {
         if peer == self.dht.did {
             return Err(Error::ShouldNotConnectSelf);
         }
+        let _lifecycle = self.connection_lifecycle()?;
         // A peer keeps its active slot through transient WebRTC state changes
         // until its terminal callback removes it from the DHT. Do not admit a
         // second pending handshake for that DID during this interval.
-        if self.is_admitted_connection(peer) {
+        if self.active_peers()?.contains_key(&peer) {
             return Err(Error::AlreadyConnected);
         }
         let attempt = self.pending_peers()?.reserve(peer, get_epoch_ms_i64())?;
@@ -233,6 +240,7 @@ impl SwarmTransport {
         &self,
         attempt: PendingConnectionAttempt,
     ) -> Result<bool> {
+        let _lifecycle = self.connection_lifecycle()?;
         let mut pending = self.pending_peers()?;
         if !pending.remove(attempt) {
             return Ok(false);
@@ -254,10 +262,12 @@ impl SwarmTransport {
         &self,
         attempt: PendingConnectionAttempt,
     ) -> Result<bool> {
+        let _lifecycle = self.connection_lifecycle()?;
         Ok(self.pending_peers()?.remove(attempt))
     }
 
     pub(super) fn retire_active_connection(&self, peer: Did) -> Result<bool> {
+        let _lifecycle = self.connection_lifecycle()?;
         let removed = self.active_peers()?.remove(&peer).is_some();
         if removed {
             self.remove_peer_liveness(peer)?;
@@ -305,7 +315,10 @@ impl SwarmTransport {
     /// These peers have never entered the DHT, so expiry only releases the
     /// transport object; it deliberately performs no topology mutation.
     pub(crate) async fn expire_pending_connections(&self) -> Result<()> {
-        let expired = self.pending_peers()?.expire(get_epoch_ms_i64());
+        let expired = {
+            let _lifecycle = self.connection_lifecycle()?;
+            self.pending_peers()?.expire(get_epoch_ms_i64())
+        };
         for expired in expired {
             let attempt = expired.attempt;
             let state = self

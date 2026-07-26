@@ -92,12 +92,14 @@ impl GatewayResponsePolicy {
 
     fn finish_response(
         &self,
-        target: &url::Url,
+        request: &GatewayRequest,
         response: GatewayResponse,
     ) -> Result<GatewayResponse> {
-        let mut response = self.header_policy.normalize_response(target, response)?;
-        response.body = self.rewrite_body(target, &response)?;
-        Ok(response)
+        let mut response = self
+            .header_policy
+            .normalize_response(&request.target, response)?;
+        response.body = self.rewrite_body(&request.target, &response)?;
+        Ok(cors::filter_exposed_response_headers(request, response))
     }
 
     fn rewrite_body(&self, target: &url::Url, response: &GatewayResponse) -> Result<Vec<u8>> {
@@ -192,7 +194,7 @@ where T: GatewayTransport
             self.policy
                 .store_response_cookies(&mut self.cookies, &target, &response)?;
         }
-        self.policy.finish_response(&target, response)
+        self.policy.finish_response(&cors_request, response)
     }
 
     /// Build a typed request from a controlled-origin gateway path.
@@ -272,7 +274,7 @@ where T: GatewayTransport
             self.policy
                 .store_response_cookies(&mut cookies, &target, &response)?;
         }
-        self.policy.finish_response(&target, response)
+        self.policy.finish_response(&cors_request, response)
     }
 
     /// Build a typed request from a controlled-origin gateway path.

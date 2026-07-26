@@ -2,8 +2,18 @@
   "use strict";
 
   const workerUrl = "/rings-webview-service-worker.js?gateway-host-protocol=4";
+  const gatewayHostCapability = createGatewayHostCapability();
   let registrationPromise;
   const debugEntries = [];
+
+  function createGatewayHostCapability() {
+    if (typeof globalThis.crypto?.getRandomValues !== "function") {
+      return "";
+    }
+    const values = new Uint8Array(32);
+    globalThis.crypto.getRandomValues(values);
+    return Array.from(values, (value) => value.toString(16).padStart(2, "0")).join("");
+  }
 
   function recordDebug(scope, message, level = "info", resource = undefined, broadcast = true, onion = undefined) {
     const entry = {
@@ -89,7 +99,10 @@
     if (!worker) {
       throw new Error("Service Worker has no active controller");
     }
-    await postWorkerMessage(worker, { type: "rings-webview-host-register" });
+    await postWorkerMessage(worker, {
+      type: "rings-webview-host-register",
+      capability: gatewayHostCapability,
+    });
     recordDebug("host", "Registered the local Rings node as gateway host");
   }
 
@@ -145,10 +158,13 @@
     }
     if (message?.type === "rings-webview-gateway-host-query") {
       const ready = typeof globalThis.RingsWebviewGateway?.handle === "function";
-      event.ports?.[0]?.postMessage({ ready });
+      event.ports?.[0]?.postMessage({ ready, capability: gatewayHostCapability });
       const worker = navigator.serviceWorker.controller;
       if (ready && worker) {
-        void postWorkerMessage(worker, { type: "rings-webview-host-register" })
+        void postWorkerMessage(worker, {
+          type: "rings-webview-host-register",
+          capability: gatewayHostCapability,
+        })
           .then(() => recordDebug("host", "Restored the local Rings node gateway host"));
       }
       return;

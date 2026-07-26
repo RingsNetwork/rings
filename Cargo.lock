@@ -4656,6 +4656,7 @@ version = "0.15.0"
 dependencies = [
  "async-trait",
  "futures",
+ "httpdate",
  "js-sys",
  "lol_html",
  "percent-encoding",

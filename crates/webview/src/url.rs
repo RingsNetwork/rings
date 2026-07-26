@@ -45,7 +45,11 @@ impl GatewayPrefix {
     /// Build a gateway prefix such as `/webview/`.
     pub fn new(prefix: impl Into<String>) -> Result<Self> {
         let mut prefix = prefix.into();
-        if !prefix.starts_with('/') || prefix.contains('?') || prefix.contains('#') {
+        if !prefix.starts_with('/')
+            || prefix.starts_with("//")
+            || prefix.contains('?')
+            || prefix.contains('#')
+        {
             return Err(WebviewError::InvalidGatewayPrefix(prefix));
         }
         if !prefix.ends_with('/') {
@@ -136,6 +140,27 @@ mod tests {
             TargetUrl::parse("file:///tmp/index.html"),
             Err(WebviewError::UnsupportedScheme(_))
         ));
+    }
+
+    #[test]
+    fn gateway_rejects_network_path_prefixes() {
+        assert!(matches!(
+            GatewayPrefix::new("//attacker.example/"),
+            Err(WebviewError::InvalidGatewayPrefix(_))
+        ));
+    }
+
+    #[test]
+    fn gateway_url_stays_on_gateway_origin_after_join() -> Result<()> {
+        let origin = Url::parse("https://rings.local/")?;
+        let prefix = GatewayPrefix::new("/webview/")?;
+        let target = TargetUrl::parse("https://example.com/")?;
+
+        let gateway_url = origin.join(&prefix.encode(target.as_url()))?;
+
+        assert_eq!(gateway_url.origin(), origin.origin());
+        assert_eq!(prefix.decode_path(gateway_url.path())?, target);
+        Ok(())
     }
 
     #[test]
