@@ -7,6 +7,7 @@ use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use futures::channel::oneshot;
 use futures::future::Either;
 use futures::FutureExt;
 use js_sys;
@@ -91,6 +92,7 @@ impl ProviderRef {
 #[wasm_export]
 pub struct ProviderListener {
     stop: StopSource,
+    started: js_sys::Promise,
     task: js_sys::Promise,
 }
 
@@ -104,6 +106,11 @@ impl ProviderListener {
     /// Return whether shutdown was requested through this handle.
     pub fn is_stopped(&self) -> bool {
         self.stop.is_stop_requested()
+    }
+
+    /// Return a promise that resolves once the listener task enters its run loop.
+    pub fn started(&self) -> js_sys::Promise {
+        self.started.clone()
     }
 
     /// Return the underlying listener task promise.
@@ -671,13 +678,26 @@ impl Provider {
         let p = self.processor.clone();
         let stop = StopSource::new();
         let token = stop.token();
+        let (started_sender, started_receiver) = oneshot::channel::<()>();
+
+        let started = future_to_promise(async move {
+            started_receiver
+                .await
+                .map_err(|_| JsError::new("provider listener exited before start"))?;
+            Ok(JsValue::null())
+        });
 
         let task = future_to_promise(async move {
+            let _sent = started_sender.send(());
             p.listen_with(token).await;
             Ok(JsValue::null())
         });
 
-        ProviderListener { stop, task }
+        ProviderListener {
+            stop,
+            started,
+            task,
+        }
     }
 
     /// connect peer with remote jsonrpc server url
