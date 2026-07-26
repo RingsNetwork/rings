@@ -168,9 +168,7 @@ fn use_node_state() -> NodeState {
                 "stun://stun.l.google.com:19302",
             )
         }),
-        stabilize_interval: use_state(|| {
-            load_stabilize_interval_setting_or_default()
-        }),
+        stabilize_interval: use_state(load_stabilize_interval_setting_or_default),
         storage_name: use_state(|| {
             load_setting_or_default(
                 extension::SETTING_STORAGE_NAME,

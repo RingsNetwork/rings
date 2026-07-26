@@ -157,6 +157,7 @@ fn prepare_repair_node(key: SecretKey) -> Result<Node> {
     prepare_repair_node_with_optional_measure(key, None)
 }
 
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 fn prepare_repair_node_with_measure(key: SecretKey, measure: MeasureImpl) -> Result<Node> {
     prepare_repair_node_with_optional_measure(key, Some(measure))
 }

@@ -49,9 +49,7 @@ pub const DEFAULT_STORAGE_CAPACITY: u32 = 200000000;
 
 /// Builds the default storage path under the user home directory.
 pub fn get_storage_location<P>(prefix: P, path: P) -> String
-where
-    P: AsRef<std::path::Path>,
-{
+where P: AsRef<std::path::Path> {
     let home_dir = env::var_os("HOME").map(PathBuf::from);
     let storage_path = match home_dir {
         Some(dir) => dir.join(prefix).join(path),
@@ -219,9 +217,7 @@ impl TryFrom<Config> for ProcessorConfig {
 impl Config {
     /// Creates a default native-node configuration using the supplied session key path.
     pub fn new<P>(session_sk: P) -> Self
-    where
-        P: AsRef<std::path::Path>,
-    {
+    where P: AsRef<std::path::Path> {
         let session_sk = session_sk.as_ref().to_string_lossy().to_string();
         Self {
             network_id: DEFAULT_NETWORK_ID,
@@ -264,9 +260,7 @@ impl Config {
 
     /// Writes this configuration to a YAML file and returns the written path.
     pub fn write_fs<P>(&self, path: P) -> Result<String>
-    where
-        P: AsRef<std::path::Path>,
-    {
+    where P: AsRef<std::path::Path> {
         let path = expand_home(path)?;
         ensure_parent_dir(&path)?;
         let f =
@@ -280,9 +274,7 @@ impl Config {
 
     /// Reads a native-node configuration from a YAML file.
     pub fn read_fs<P>(path: P) -> Result<Config>
-    where
-        P: AsRef<std::path::Path>,
-    {
+    where P: AsRef<std::path::Path> {
         let path = expand_home(path)?;
         tracing::debug!("Read config from: {:?}", path);
         let f = fs::File::open(path).map_err(|e| Error::OpenFileError(e.to_string()))?;

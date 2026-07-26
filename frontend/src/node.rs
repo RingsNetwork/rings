@@ -254,3 +254,60 @@ fn get_string(value: &JsValue, field: &str) -> Result<String, String> {
         .as_string()
         .ok_or_else(|| format!("missing string field {field}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use rings_node::prelude::rings_core::ecc::SecretKey;
+    use rings_node::prelude::rings_core::prelude::uuid;
+    use rings_node::prelude::rings_core::session::SessionSk;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::*;
+
+    const TEST_NETWORK_ID: u32 = 665;
+    const TEST_ICE_SERVERS: &str = "stun://stun.l.google.com:19302";
+
+    #[wasm_bindgen_test(async)]
+    async fn demo_node_stop_settles_provider_listener_task() {
+        let result = run_demo_node_stop_settles_provider_listener_task().await;
+        assert!(
+            result.is_ok(),
+            "DemoNode::stop did not settle ProviderListener task: {result:?}"
+        );
+    }
+
+    // Mirrors the browser-only `DemoNode` ownership boundary from `build_node`.
+    #[allow(clippy::arc_with_non_send_sync)]
+    async fn run_demo_node_stop_settles_provider_listener_task() -> Result<(), String> {
+        let key = SecretKey::random();
+        let session_sk = SessionSk::new_with_seckey(&key)
+            .map_err(|error| format!("session key rejected: {error}"))?;
+        let config =
+            ProcessorConfig::new(TEST_NETWORK_ID, TEST_ICE_SERVERS.to_string(), session_sk, 0);
+        let storage_name = format!(
+            "rings-frontend-listener-{}",
+            uuid::Uuid::new_v4().to_simple()
+        );
+        let provider = Arc::new(
+            Provider::new_browser_provider_with_storage(config, storage_name)
+                .await
+                .map_err(|error| format!("build provider: {error}"))?,
+        );
+        let listener = provider.listen();
+        let node = DemoNode {
+            provider,
+            snark: SNARKBehaviour::default(),
+            webview: None,
+            listener,
+        };
+        let task = node.listener.task();
+
+        assert!(!node.listener.is_stopped());
+        node.stop();
+        assert!(node.listener.is_stopped());
+        JsFuture::from(task)
+            .await
+            .map(|_| ())
+            .map_err(crate::browser_api::js_error_label)
+    }
+}

@@ -73,7 +73,8 @@ const context: ServiceWorkerTestContext = {
     addEventListener() {},
   },
 };
-context.globalThis = context;
+const globalThisKey = "globalThis";
+context[globalThisKey] = context;
 
 vm.runInNewContext(
   `${serviceWorkerSource}\nglobalThis.__ringsWebviewServiceWorkerTest = { controlledNavigationBody, requestKind };`,

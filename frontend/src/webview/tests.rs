@@ -22,10 +22,12 @@ impl FixtureTransport {
 impl GatewayTransport for FixtureTransport {
     async fn send(&self, request: GatewayRequest) -> WebviewResult<GatewayResponse> {
         self.requests.borrow_mut().push(request);
-        let request =
-            self.requests.borrow().last().cloned().ok_or_else(|| {
-                WebviewError::Transport("missing fixture request".to_string())
-            })?;
+        let request = self
+            .requests
+            .borrow()
+            .last()
+            .cloned()
+            .ok_or_else(|| WebviewError::Transport("missing fixture request".to_string()))?;
         let mut headers = vec![GatewayHeader::new("content-type", "text/html")?];
         if let Some(source) = request.source_origin {
             headers.push(GatewayHeader::new(
@@ -120,13 +122,10 @@ fn host_redirects_then_serves_a_gateway_document_through_its_transport() -> Webv
     assert_eq!(sent_request.target.as_str(), target.as_url().as_str());
     assert_eq!(sent_request.method, "POST");
     assert_eq!(sent_request.body, vec![0x00, 0xff]);
-    assert_eq!(
-        sent_request.headers,
-        vec![
-            GatewayHeader::new("accept", "text/html")?,
-            GatewayHeader::new("Accept-Encoding", "identity")?,
-        ]
-    );
+    assert_eq!(sent_request.headers, vec![
+        GatewayHeader::new("accept", "text/html")?,
+        GatewayHeader::new("Accept-Encoding", "identity")?,
+    ]);
     Ok(())
 }
 
@@ -135,20 +134,26 @@ fn host_serves_cross_target_runtime_reads_when_upstream_allows_cors() -> Webview
     let (host, requests) = fixture_host()?;
     let source = TargetUrl::parse("https://app.example.test/index.html")?;
     let target = TargetUrl::parse("https://bank.example.test/account")?;
+    let gateway_target = TargetUrl::parse(host.policy.gateway_url(target.as_url())?.as_str())?;
 
     let outcome = futures::executor::block_on(host.handle(WebviewHostRequest::fetch(
-        target,
+        gateway_target,
         source.clone(),
         "GET",
         Vec::new(),
         Vec::new(),
     )))?;
 
-    assert!(matches!(outcome, WebviewHostOutcome::Response(_)));
-    let request =
-        requests.borrow().first().cloned().ok_or_else(|| {
-            WebviewError::Transport("missing cross-origin request".to_string())
-        })?;
+    let WebviewHostOutcome::Response(_) = outcome else {
+        return Err(WebviewError::Transport(format!(
+            "runtime fetch did not serve through gateway: {outcome:?}"
+        )));
+    };
+    let request = requests
+        .borrow()
+        .first()
+        .cloned()
+        .ok_or_else(|| WebviewError::Transport("missing cross-origin request".to_string()))?;
     assert_eq!(request.source_origin.as_ref(), Some(source.as_url()));
     Ok(())
 }
@@ -166,8 +171,8 @@ fn onion_route_unavailable_is_reported_without_wasm_stack() -> WebviewResult<()>
         .map_err(WebviewError::Browser)?
         .as_f64()
         .ok_or_else(|| WebviewError::Browser("failure status was not numeric".to_string()))?;
-    let error = crate::browser_api::js_string_field(&response, "error")
-        .map_err(WebviewError::Browser)?;
+    let error =
+        crate::browser_api::js_string_field(&response, "error").map_err(WebviewError::Browser)?;
     let code = crate::browser_api::js_string_field(&response, "errorCode")
         .map_err(WebviewError::Browser)?;
     let summary = crate::browser_api::js_string_field(&response, "errorSummary")

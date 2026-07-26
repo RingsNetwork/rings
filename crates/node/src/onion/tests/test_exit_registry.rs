@@ -59,10 +59,10 @@ fn signed_exit_for_session_at(
 
 #[test]
 fn default_exit_services_include_native_tcp_and_https() {
-    assert_eq!(
-        default_onion_exit_services(),
-        vec![OnionExitService::tcp(), OnionExitService::https()]
-    );
+    assert_eq!(default_onion_exit_services(), vec![
+        OnionExitService::tcp(),
+        OnionExitService::https()
+    ]);
     assert_eq!(https_onion_exit_services(), vec![OnionExitService::https()]);
 }
 
@@ -143,10 +143,9 @@ fn exit_policy_allow_list_controls_targets() -> Result<()> {
 
 #[test]
 fn exit_policy_wildcard_allows_all_targets_with_specific_denies() -> Result<()> {
-    let policy = OnionExitPolicy::from_target_strings(
-        vec!["*:*".to_string()],
-        vec!["api.example.com:443".to_string()],
-    )?;
+    let policy = OnionExitPolicy::from_target_strings(vec!["*:*".to_string()], vec![
+        "api.example.com:443".to_string(),
+    ])?;
     let google = OnionExitTarget::parse("google.com:443")?;
     let example = OnionExitTarget::parse("example.com:8443")?;
     let api = OnionExitTarget::parse("api.example.com:443")?;

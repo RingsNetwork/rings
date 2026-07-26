@@ -33,8 +33,8 @@ use wasm_bindgen_futures::JsFuture;
 
 use crate::error::Error;
 use crate::error::Result as NodeResult;
-use crate::measure::MeasureStorage;
 use crate::measure::peer_quality_thresholds;
+use crate::measure::MeasureStorage;
 use crate::onion::circuit::encode_initial_forward;
 use crate::onion::circuit::route_first_hop;
 use crate::onion::circuit::OnionCircuitCapabilities;
@@ -471,12 +471,9 @@ impl Provider {
         let measure_storage =
             open_browser_measure_storage(&format!("{storage_name}/measure")).await;
 
-        let provider = Self::new_provider_with_storage_internal(
-            config,
-            entry_storage,
-            measure_storage,
-        )
-        .await?;
+        let provider =
+            Self::new_provider_with_storage_internal(config, entry_storage, measure_storage)
+                .await?;
         provider.set_backend()?;
         if let Some(policy) = onion_https_exit_policy {
             provider.install_onion_https_protocol(Some(policy))?;

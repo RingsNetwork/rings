@@ -31,25 +31,22 @@ try {
     timeout: 1000,
   });
 
-  const earlyState = await page.evaluate(() => ({
-    bodyText: document.body?.textContent || "",
-    loading: {
-      busy: document
-        .getElementById("rings-webview-debug-overlay")
-        ?.shadowRoot?.getElementById("address-form")
-        ?.getAttribute("aria-busy"),
-      loading: document.getElementById("rings-webview-debug-overlay")?.shadowRoot?.getElementById("address-form")
-        ?.dataset.loading,
-      trackHidden: (
-        document.getElementById("rings-webview-debug-overlay")?.shadowRoot?.getElementById("loading-track") as
-          | HTMLElement
-          | null
-          | undefined
-      )?.hidden,
-    },
-    mounted: Boolean(document.getElementById("rings-webview-debug-overlay")),
-    readyState: document.readyState,
-  }));
+  const earlyState = await page.evaluate(() => {
+    const loadingKey = "loading";
+    const overlay = document.getElementById("rings-webview-debug-overlay");
+    const addressForm = overlay?.shadowRoot?.getElementById("address-form");
+    const loadingTrack = overlay?.shadowRoot?.getElementById("loading-track") as HTMLElement | null | undefined;
+    return {
+      bodyText: document.body?.textContent || "",
+      loading: {
+        busy: addressForm?.getAttribute("aria-busy"),
+        loading: addressForm?.dataset[loadingKey],
+        trackHidden: loadingTrack?.hidden,
+      },
+      mounted: Boolean(overlay),
+      readyState: document.readyState,
+    };
+  });
   assert.equal(earlyState.mounted, true);
   assert.equal(earlyState.readyState, "loading");
   assert.equal(earlyState.bodyText.includes("late body"), false);
@@ -61,26 +58,26 @@ try {
 
   serverState.finish();
   await page.locator("#late-body").waitFor({ state: "attached", timeout: 2000 });
-  await page.waitForFunction(
-    () =>
-      document.getElementById("rings-webview-debug-overlay")?.shadowRoot?.getElementById("address-form")?.dataset
-        .loading === "false",
-  );
+  await page.waitForFunction(() => {
+    const loadingKey = "loading";
+    return (
+      document.getElementById("rings-webview-debug-overlay")?.shadowRoot?.getElementById("address-form")?.dataset[
+        loadingKey
+      ] === "false"
+    );
+  });
   const bodyPadding = await page.evaluate(() => document.body?.style.paddingTop || "");
-  const finalLoading = await page.evaluate(() => ({
-    busy: document
-      .getElementById("rings-webview-debug-overlay")
-      ?.shadowRoot?.getElementById("address-form")
-      ?.getAttribute("aria-busy"),
-    loading: document.getElementById("rings-webview-debug-overlay")?.shadowRoot?.getElementById("address-form")?.dataset
-      .loading,
-    trackHidden: (
-      document.getElementById("rings-webview-debug-overlay")?.shadowRoot?.getElementById("loading-track") as
-        | HTMLElement
-        | null
-        | undefined
-    )?.hidden,
-  }));
+  const finalLoading = await page.evaluate(() => {
+    const loadingKey = "loading";
+    const overlay = document.getElementById("rings-webview-debug-overlay");
+    const addressForm = overlay?.shadowRoot?.getElementById("address-form");
+    const loadingTrack = overlay?.shadowRoot?.getElementById("loading-track") as HTMLElement | null | undefined;
+    return {
+      busy: addressForm?.getAttribute("aria-busy"),
+      loading: addressForm?.dataset[loadingKey],
+      trackHidden: loadingTrack?.hidden,
+    };
+  });
   assert.match(bodyPadding, /46px/);
   assert.deepEqual(finalLoading, {
     busy: "false",
