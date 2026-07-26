@@ -114,7 +114,8 @@ pub(crate) fn open_webview_popup() -> Result<(), String> {
     if opened.is_null() || opened.is_undefined() {
         return Err("browser blocked the WebView popup".to_string());
     }
-    let _opener_cleared = Reflect::set(&opened, &JsValue::from_str("opener"), &JsValue::NULL);
+    // The trusted `#webview` shell uses opener only for a one-shot MessageChannel debug
+    // capability handoff, then `assets/webview-host.js` clears it before remote navigation.
     Ok(())
 }
 

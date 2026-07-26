@@ -317,7 +317,7 @@ async function debugClients() {
   const clientsById = new Map();
   for (const clientId of debugClientIds) {
     const client = await self.clients.get(clientId);
-    if (client && isTrustedGatewayHostUrl(client.url)) {
+    if (client && isSameOriginClientUrl(client.url)) {
       clientsById.set(client.id, client);
     } else {
       debugClientIds.delete(clientId);
@@ -370,8 +370,11 @@ async function registerGatewayHostClient(clientId, capability) {
 }
 
 async function registerDebugClient(clientId, capability) {
-  const client = await trustedCapabilityClient(clientId, capability);
-  if (!client) {
+  if (!hasGatewayHostCapability(clientId, capability)) {
+    return false;
+  }
+  const client = await self.clients.get(clientId);
+  if (!client || !isTrustedGatewayHostUrl(client.url)) {
     return false;
   }
   debugClientIds.add(clientId);
@@ -382,19 +385,27 @@ async function registerDebugClient(clientId, capability) {
 }
 
 async function acceptDebugEntry(clientId, capability) {
-  return Boolean(await trustedCapabilityClient(clientId, capability));
+  if (!hasGatewayHostCapability(clientId, capability)) {
+    return false;
+  }
+  const host = await registeredGatewayHostClient();
+  return host?.id === clientId;
 }
 
-async function trustedCapabilityClient(clientId, capability) {
-  if (typeof clientId !== "string" || !clientId || !gatewayHostCapability || capability !== gatewayHostCapability) {
-    return undefined;
-  }
-  const client = await self.clients.get(clientId);
-  return client && isTrustedGatewayHostUrl(client.url) ? client : undefined;
+function hasGatewayHostCapability(clientId, capability) {
+  return typeof clientId === "string" && Boolean(clientId) && Boolean(gatewayHostCapability) && capability === gatewayHostCapability;
 }
 
 function isValidGatewayHostCapability(capability) {
   return typeof capability === "string" && capability.length >= minimumGatewayHostCapabilityLength;
+}
+
+function isSameOriginClientUrl(url) {
+  try {
+    return new URL(url).origin === self.location.origin;
+  } catch (_error) {
+    return false;
+  }
 }
 
 function isTrustedGatewayHostUrl(url) {

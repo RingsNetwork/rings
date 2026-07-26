@@ -1,9 +1,14 @@
 (() => {
   "use strict";
 
+  const gatewayPrefix = "/webview/";
   const workerUrl = "/rings-webview-service-worker.js?gateway-host-protocol=4";
+  const debugCapabilityRequestType = "rings-webview-debug-capability-request";
+  const debugCapabilityResponseType = "rings-webview-debug-capability-response";
   const gatewayHostCapability = createGatewayHostCapability();
+  let ownsGatewayHost = false;
   let registrationPromise;
+  let popupDebugCapabilityPromise;
   const debugEntries = [];
 
   function createGatewayHostCapability() {
@@ -38,6 +43,9 @@
   }
 
   function broadcastDebugEntry(entry) {
+    if (!ownsGatewayHost) {
+      return;
+    }
     const worker = navigator.serviceWorker?.controller;
     if (!worker) {
       return;
@@ -86,6 +94,85 @@
     return registrationPromise;
   }
 
+  function currentOrigin() {
+    return globalThis.location?.origin || "";
+  }
+
+  function sameOriginUrl(value) {
+    try {
+      const parsed = new URL(value);
+      return parsed.origin === currentOrigin() ? parsed : undefined;
+    } catch (_error) {
+      return undefined;
+    }
+  }
+
+  function isTrustedWebviewShellUrl(value) {
+    const parsed = sameOriginUrl(value);
+    return Boolean(parsed && !parsed.pathname.startsWith(gatewayPrefix) && parsed.hash.startsWith("#webview"));
+  }
+
+  function isWebviewShell() {
+    return isTrustedWebviewShellUrl(globalThis.location?.href || "");
+  }
+
+  function isTrustedWebviewShellWindow(source) {
+    if (!source || source === globalThis) {
+      return false;
+    }
+    try {
+      return isTrustedWebviewShellUrl(source.location.href);
+    } catch (_error) {
+      return false;
+    }
+  }
+
+  function clearPopupOpener() {
+    if (!isWebviewShell() || !globalThis.opener) {
+      return;
+    }
+    try {
+      globalThis.opener = null;
+    } catch (_error) {}
+  }
+
+  function requestDebugCapabilityFromOpener() {
+    if (!isWebviewShell() || !globalThis.opener || typeof MessageChannel !== "function") {
+      return Promise.resolve(undefined);
+    }
+    if (popupDebugCapabilityPromise) {
+      return popupDebugCapabilityPromise;
+    }
+    popupDebugCapabilityPromise = new Promise((resolve) => {
+      const channel = new MessageChannel();
+      const finish = (capability) => {
+        globalThis.clearTimeout(timeout);
+        channel.port1.close();
+        clearPopupOpener();
+        resolve(capability);
+      };
+      const timeout = globalThis.setTimeout(() => finish(undefined), 500);
+      channel.port1.onmessage = (event) => {
+        const capability = event.data?.capability;
+        if (event.data?.type === debugCapabilityResponseType && typeof capability === "string" && capability.length >= 32) {
+          finish(capability);
+          return;
+        }
+        finish(undefined);
+      };
+      try {
+        globalThis.opener.postMessage({ type: debugCapabilityRequestType }, currentOrigin(), [channel.port2]);
+      } catch (_error) {
+        finish(undefined);
+      }
+    });
+    return popupDebugCapabilityPromise;
+  }
+
+  async function debugCapability() {
+    return (await requestDebugCapabilityFromOpener()) || gatewayHostCapability;
+  }
+
   async function ensureReady() {
     const activeRegistration = await registration();
     await navigator.serviceWorker.ready;
@@ -100,11 +187,16 @@
     if (!worker) {
       throw new Error("Service Worker has no active controller");
     }
-    await postWorkerMessage(worker, {
+    const acknowledged = await postWorkerMessage(worker, {
       type: "rings-webview-host-register",
       capability: gatewayHostCapability,
     });
-    recordDebug("host", "Registered the local Rings node as gateway host");
+    ownsGatewayHost = Boolean(acknowledged);
+    if (acknowledged) {
+      recordDebug("host", "Registered the local Rings node as gateway host");
+      return;
+    }
+    recordDebug("host", "Service Worker rejected gateway host registration", "warning");
   }
 
   async function enableDebug() {
@@ -113,9 +205,10 @@
     if (!worker) {
       throw new Error("Service Worker has no active controller");
     }
+    const capability = await debugCapability();
     const acknowledged = await postWorkerMessage(worker, {
       type: "rings-webview-debug-register",
-      capability: gatewayHostCapability,
+      capability,
     });
     if (!acknowledged) {
       recordDebug("popup", "Service Worker did not acknowledge debug registration; continuing");
@@ -147,6 +240,23 @@
     debugEntries.splice(0, debugEntries.length);
   }
 
+  globalThis.addEventListener("message", (event) => {
+    const message = event.data;
+    if (message?.type !== debugCapabilityRequestType) {
+      return;
+    }
+    const reply = event.ports?.[0];
+    if (event.origin !== currentOrigin() || !reply || !isTrustedWebviewShellWindow(event.source)) {
+      reply?.postMessage({ type: debugCapabilityResponseType, ok: false });
+      return;
+    }
+    reply.postMessage({
+      type: debugCapabilityResponseType,
+      ok: true,
+      capability: gatewayHostCapability,
+    });
+  });
+
   navigator.serviceWorker?.addEventListener("message", (event) => {
     const message = event.data;
     if (message?.type === "rings-webview-debug") {
@@ -168,8 +278,12 @@
         void postWorkerMessage(worker, {
           type: "rings-webview-host-register",
           capability: gatewayHostCapability,
-        })
-          .then(() => recordDebug("host", "Restored the local Rings node gateway host"));
+        }).then((acknowledged) => {
+          ownsGatewayHost = Boolean(acknowledged);
+          if (acknowledged) {
+            recordDebug("host", "Restored the local Rings node gateway host");
+          }
+        });
       }
       return;
     }

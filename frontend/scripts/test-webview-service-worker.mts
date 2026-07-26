@@ -80,9 +80,41 @@ type ServiceWorkerTestContext = Record<string, unknown> & {
   __ringsWebviewServiceWorkerTest?: ServiceWorkerTestApi;
 };
 
+/**
+ * Minimal host-asset message event shape used to validate opener handoff.
+ */
+type HostAssetMessageEventFixture = {
+  readonly data?: unknown;
+  readonly origin: string;
+  readonly source?: {
+    readonly location: {
+      readonly href: string;
+    };
+  };
+  readonly ports?: Array<{ postMessage: (message: unknown) => void }>;
+};
+
+/**
+ * VM global shape needed to load the host asset without a browser.
+ */
+type HostAssetTestContext = Record<string, unknown> & {
+  readonly location: URL;
+  readonly navigator: {
+    readonly serviceWorker: {
+      readonly addEventListener: (type: string, listener: (event: unknown) => void) => void;
+    };
+  };
+  readonly crypto: {
+    readonly getRandomValues: (values: Uint8Array) => Uint8Array;
+  };
+  readonly addEventListener: (type: string, listener: (event: HostAssetMessageEventFixture) => void) => void;
+};
+
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const projectRoot = frontendProjectRoot(scriptDir);
+const hostAssetPath = resolve(projectRoot, "assets", "webview-host.js");
 const serviceWorkerPath = resolve(projectRoot, "rings-webview-service-worker.js");
+const hostAssetSource = await readFile(hostAssetPath, "utf8");
 const serviceWorkerSource = await readFile(serviceWorkerPath, "utf8");
 const clientsById = new Map<string, ServiceWorkerClientFixture>();
 const messageListeners: Array<(event: ServiceWorkerMessageEventFixture) => void> = [];
@@ -205,6 +237,82 @@ async function dispatchMessage(clientId: string, data: unknown): Promise<unknown
   return responses;
 }
 
+/**
+ * Sends one synthetic opener handoff request into the host asset VM.
+ */
+function requestHostDebugCapability(sourceUrl: string, origin = "http://127.0.0.1:8080"): unknown[] {
+  const listeners: Array<(event: HostAssetMessageEventFixture) => void> = [];
+  const context: HostAssetTestContext = {
+    console,
+    URL,
+    Uint8Array,
+    clearTimeout,
+    setTimeout,
+    location: new URL("http://127.0.0.1:8080/#node"),
+    navigator: {
+      serviceWorker: {
+        addEventListener() {},
+      },
+    },
+    crypto: {
+      getRandomValues(values) {
+        values.fill(0x7b);
+        return values;
+      },
+    },
+    addEventListener(type, listener) {
+      if (type === "message") {
+        listeners.push(listener);
+      }
+    },
+  };
+  context[globalThisKey] = context;
+  vm.runInNewContext(hostAssetSource, context, {
+    filename: hostAssetPath,
+  });
+
+  const responses: unknown[] = [];
+  for (const listener of listeners) {
+    listener({
+      data: { type: "rings-webview-debug-capability-request" },
+      origin,
+      source: {
+        location: {
+          href: sourceUrl,
+        },
+      },
+      ports: [
+        {
+          postMessage(message) {
+            responses.push(message);
+          },
+        },
+      ],
+    });
+  }
+  return responses;
+}
+
+{
+  const trustedResponses = requestHostDebugCapability("http://127.0.0.1:8080/#webview");
+  assert.equal(trustedResponses.length, 1);
+  const response = trustedResponses[0] as {
+    readonly capability?: string;
+    readonly ok?: boolean;
+    readonly type?: string;
+  };
+  assert.equal(response.type, "rings-webview-debug-capability-response");
+  assert.equal(response.ok, true);
+  assert.equal(response.capability?.length, 64);
+
+  assertJsonEqual(requestHostDebugCapability("http://127.0.0.1:8080/webview/https%3A%2F%2Fexample.test%2F"), [
+    { type: "rings-webview-debug-capability-response", ok: false },
+  ]);
+  assertJsonEqual(requestHostDebugCapability("https://attacker.example/#webview", "https://attacker.example"), [
+    { type: "rings-webview-debug-capability-response", ok: false },
+  ]);
+}
+
 assert.equal(requestKind(request({ mode: "navigate", destination: "document" })), "navigation");
 assert.equal(requestKind(request({ destination: "style" })), "subresource");
 assert.equal(requestKind(request()), "fetch");
@@ -301,12 +409,20 @@ assert.throws(
   resetGatewayHostForTest();
   clientsById.clear();
   const hostMessages: unknown[] = [];
+  const popupMessages: unknown[] = [];
   const hostileMessages: unknown[] = [];
   clientsById.set("host", {
     id: "host",
     url: "http://127.0.0.1:8080/#node",
     postMessage(message) {
       hostMessages.push(message);
+    },
+  });
+  clientsById.set("popup", {
+    id: "popup",
+    url: "http://127.0.0.1:8080/#webview",
+    postMessage(message) {
+      popupMessages.push(message);
     },
   });
   clientsById.set("hostile", {
@@ -343,8 +459,23 @@ assert.throws(
     }),
     [{ ok: false, error: "untrusted debug client registration" }],
   );
-  assert.equal(await registerDebugClient("host", hostileCapability), false);
-  assert.equal(await registerDebugClient("host", hostCapability), true);
+  assert.equal(await registerDebugClient("popup", hostileCapability), false);
+  assert.equal(await registerDebugClient("popup", hostCapability), true);
+  clientsById.set("popup", {
+    id: "popup",
+    url: "http://127.0.0.1:8080/webview/https%3A%2F%2Ftrusted.example%2F",
+    postMessage(message) {
+      popupMessages.push(message);
+    },
+  });
+  assertJsonEqual(
+    await dispatchMessage("popup", {
+      type: "rings-webview-debug-entry",
+      capability: hostCapability,
+      entry: { scope: "popup", message: "forged request https://secret.test/" },
+    }),
+    [{ ok: false, error: "untrusted debug entry" }],
+  );
   assertJsonEqual(
     await dispatchMessage("hostile", {
       type: "rings-webview-debug-entry",
@@ -355,8 +486,9 @@ assert.throws(
   );
   await emitDebug("worker", "post-registration secret");
   assert.equal(hostileMessages.length, 0);
-  assert.ok(hostMessages.length >= 2);
-  assert.match(JSON.stringify(hostMessages), /pre-registration secret/);
-  assert.match(JSON.stringify(hostMessages), /post-registration secret/);
-  assert.doesNotMatch(JSON.stringify(hostMessages), /secret\.test/);
+  assert.equal(hostMessages.length, 0);
+  assert.ok(popupMessages.length >= 2);
+  assert.match(JSON.stringify(popupMessages), /pre-registration secret/);
+  assert.match(JSON.stringify(popupMessages), /post-registration secret/);
+  assert.doesNotMatch(JSON.stringify(popupMessages), /secret\.test/);
 }
