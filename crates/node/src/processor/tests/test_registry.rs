@@ -3,6 +3,8 @@ use super::*;
 
 struct HangingRegistration;
 
+struct StoppedRegistration;
+
 #[async_trait]
 impl RegistrationTask for HangingRegistration {
     fn name(&self) -> &'static str {
@@ -15,6 +17,21 @@ impl RegistrationTask for HangingRegistration {
 
     async fn register_once(&self, _context: &RegistrationContext<'_>) -> Result<()> {
         futures::future::pending().await
+    }
+}
+
+#[async_trait]
+impl RegistrationTask for StoppedRegistration {
+    fn name(&self) -> &'static str {
+        "stopped-test"
+    }
+
+    fn interval(&self) -> Duration {
+        Duration::from_millis(20)
+    }
+
+    async fn register_once(&self, _context: &RegistrationContext<'_>) -> Result<()> {
+        Err(Error::RegistrationStopped)
     }
 }
 
@@ -35,6 +52,19 @@ async fn registration_attempt_timeout_returns_instead_of_hanging() -> Result<()>
         }) if observed_timeout == timeout
     ));
     Ok(())
+}
+
+#[tokio::test]
+async fn registration_daemon_treats_expected_stop_as_terminal() {
+    let processor = prepare_processor().await;
+    let task = StoppedRegistration;
+
+    tokio::time::timeout(
+        Duration::from_millis(100),
+        processor.registration_task_daemon_with(&task, StopToken::never()),
+    )
+    .await
+    .expect("RegistrationStopped should terminate the registration daemon");
 }
 
 #[tokio::test]

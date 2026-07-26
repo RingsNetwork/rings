@@ -405,6 +405,13 @@ impl Processor {
                 .run_registration_once_with_timeout(task, timeout, stop.clone())
                 .await
             {
+                if matches!(error, Error::RegistrationStopped) {
+                    tracing::debug!(
+                        "Stopping {} registration task after cooperative stop",
+                        task.name()
+                    );
+                    return;
+                }
                 tracing::warn!("Failed to run {} registration task: {error:?}", task.name());
             }
             if stop.should_stop() {
