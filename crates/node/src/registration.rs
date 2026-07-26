@@ -14,6 +14,7 @@ use rings_core::dht::Did;
 use rings_core::ecc::VerificationPublicKey;
 use rings_core::message::Encoded;
 use rings_core::message::Encoder;
+use rings_core::prelude::entry;
 use rings_core::session::SessionSk;
 use rings_core::utils::get_epoch_ms;
 
@@ -180,9 +181,45 @@ impl DhtRegistrationPublisher {
         context: &RegistrationContext<'_>,
         values: impl IntoIterator<Item = Encoded>,
     ) -> Result<()> {
+        self.publish_many_with_replacement(context, values, false, |_| false)
+            .await
+    }
+
+    /// Publish the current value set, tombstoning older observed values with the same registry key.
+    ///
+    /// Invariant: registry topics are keyed presence sets, not append-only heartbeat logs.
+    /// Preservation: every observed value replaced by the current publish is tombstoned after the
+    /// replacement value has been touched, while unrelated publisher keys stay joinable.
+    pub async fn publish_many_replacing(
+        &self,
+        context: &RegistrationContext<'_>,
+        values: impl IntoIterator<Item = Encoded>,
+        replaces_observed_value: impl Fn(&Encoded) -> bool,
+    ) -> Result<()> {
+        self.publish_many_with_replacement(context, values, true, replaces_observed_value)
+            .await
+    }
+
+    async fn publish_many_with_replacement(
+        &self,
+        context: &RegistrationContext<'_>,
+        values: impl IntoIterator<Item = Encoded>,
+        load_observed_values: bool,
+        replaces_observed_value: impl Fn(&Encoded) -> bool,
+    ) -> Result<()> {
         let current_values = values.into_iter().collect::<BTreeSet<_>>();
         let mut published_values = self.published_values.lock().await;
-        let stale_values = begin_registration_publish(&mut published_values, &current_values);
+        let observed_values = if load_observed_values {
+            self.observed_registry_values(context).await?
+        } else {
+            vec![]
+        };
+        let stale_values = begin_registration_publish(
+            &mut published_values,
+            &current_values,
+            observed_values,
+            replaces_observed_value,
+        );
 
         for value in &current_values {
             context
@@ -200,22 +237,41 @@ impl DhtRegistrationPublisher {
         finish_registration_publish(&mut published_values, current_values);
         Ok(())
     }
+
+    async fn observed_registry_values(
+        &self,
+        context: &RegistrationContext<'_>,
+    ) -> Result<Vec<Encoded>> {
+        let entry_key = entry::Entry::gen_did(&self.topic)?;
+        let Some(entry) = context.processor.fetch_storage_entry(entry_key).await? else {
+            return Ok(vec![]);
+        };
+        Ok(entry.data)
+    }
 }
 
 fn begin_registration_publish(
     published_values: &mut BTreeSet<Encoded>,
     current_values: &BTreeSet<Encoded>,
+    observed_values: Vec<Encoded>,
+    replaces_observed_value: impl Fn(&Encoded) -> bool,
 ) -> Vec<Encoded> {
-    let stale_values = published_values
+    let mut stale_values = published_values
         .iter()
         .filter(|published| !current_values.contains(*published))
         .cloned()
-        .collect::<Vec<_>>();
+        .collect::<BTreeSet<_>>();
+    stale_values.extend(
+        observed_values
+            .into_iter()
+            .filter(|observed| !current_values.contains(observed))
+            .filter(replaces_observed_value),
+    );
     // Invariant: every value whose touch may have reached storage is remembered
     // before the first await. If the publish future is later cancelled by an
     // attempt timeout, the next attempt can still tombstone the value.
     published_values.extend(current_values.iter().cloned());
-    stale_values
+    stale_values.into_iter().collect()
 }
 
 fn finish_registration_publish(
@@ -334,7 +390,13 @@ impl OnlineNodeRegistration {
         let now_ms = get_epoch_ms();
         let descriptor = self.descriptor_at(context, now_ms)?;
         let encoded = descriptor.encode().map_err(Error::CoreError)?;
-        self.publisher.publish(context, encoded).await?;
+        self.publisher
+            .publish_many_replacing(context, std::iter::once(encoded), |observed| {
+                observed
+                    .decode::<OnlineNodeDescriptor>()
+                    .is_ok_and(|descriptor| descriptor.did == context.did())
+            })
+            .await?;
         Ok(descriptor)
     }
 
@@ -394,7 +456,7 @@ mod tests {
         let current = BTreeSet::from([attempted.clone()]);
         let mut known = BTreeSet::from([old.clone()]);
 
-        let stale = begin_registration_publish(&mut known, &current);
+        let stale = begin_registration_publish(&mut known, &current, vec![], |_| false);
 
         assert_eq!(stale, vec![old.clone()]);
         assert_eq!(known, BTreeSet::from([old, attempted]));
@@ -408,9 +470,9 @@ mod tests {
         let mut known = BTreeSet::from([old.clone()]);
 
         let cancelled_current = BTreeSet::from([cancelled.clone()]);
-        let _ = begin_registration_publish(&mut known, &cancelled_current);
+        let _ = begin_registration_publish(&mut known, &cancelled_current, vec![], |_| false);
         let replacement_current = BTreeSet::from([replacement.clone()]);
-        let stale = begin_registration_publish(&mut known, &replacement_current);
+        let stale = begin_registration_publish(&mut known, &replacement_current, vec![], |_| false);
 
         assert_eq!(
             stale.into_iter().collect::<BTreeSet<_>>(),
@@ -431,13 +493,14 @@ mod tests {
                     let replacement = encoded_subset(replacement_mask);
                     let mut known = old.clone();
 
-                    let _ = begin_registration_publish(&mut known, &current);
+                    let _ = begin_registration_publish(&mut known, &current, vec![], |_| false);
                     let attempted = old.union(&current).cloned().collect::<BTreeSet<_>>();
                     assert_eq!(known, attempted);
 
-                    let stale = begin_registration_publish(&mut known, &replacement)
-                        .into_iter()
-                        .collect::<BTreeSet<_>>();
+                    let stale =
+                        begin_registration_publish(&mut known, &replacement, vec![], |_| false)
+                            .into_iter()
+                            .collect::<BTreeSet<_>>();
                     let expected_stale = attempted
                         .difference(&replacement)
                         .cloned()
@@ -449,5 +512,23 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn registration_publish_tombstones_matching_observed_values() {
+        let current = BTreeSet::from([encoded("self-new")]);
+        let observed_self_old = encoded("self-old");
+        let observed_other = encoded("other");
+        let mut known = BTreeSet::new();
+
+        let stale = begin_registration_publish(
+            &mut known,
+            &current,
+            vec![observed_self_old.clone(), observed_other],
+            |observed| observed == &observed_self_old,
+        );
+
+        assert_eq!(stale, vec![observed_self_old]);
+        assert_eq!(known, current);
     }
 }

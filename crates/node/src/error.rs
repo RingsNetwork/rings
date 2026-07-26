@@ -152,6 +152,14 @@ pub enum Error {
         /// Deadline used for this registration attempt.
         timeout: std::time::Duration,
     } = 813,
+    /// Opening browser IndexedDB-backed provider storage failed.
+    #[error("Open browser storage \"{name}\" failed: {source}")]
+    BrowserStorageOpen {
+        /// IndexedDB database and object-store name requested by the browser provider.
+        name: String,
+        /// Storage backend error returned while opening the database.
+        source: rings_core::error::Error,
+    } = 814,
     /// Creating a file on disk failed.
     #[error("Create File Error: {0}")]
     CreateFileError(String) = 900,

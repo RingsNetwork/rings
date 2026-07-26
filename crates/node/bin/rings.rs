@@ -223,7 +223,7 @@ struct RunCommand {
 
     #[arg(
         long,
-        help = "Stabilization interval in seconds. If not provided, use stabilize_interval in config file or 3",
+        help = "Stabilization interval in seconds. If not provided, use stabilize_interval in config file or 15",
         env
     )]
     pub stabilize_interval: Option<u64>,

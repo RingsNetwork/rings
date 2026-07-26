@@ -214,7 +214,9 @@ impl Stabilizer {
     }
 
     async fn run_step<F>(&self, step: &'static str, timeout: Duration, future: F)
-    where F: Future<Output = Result<()>> {
+    where
+        F: Future<Output = Result<()>>,
+    {
         tracing::debug!(
             target: "rings_core::dht::stabilization",
             local = %self.dht.did,
@@ -357,6 +359,22 @@ impl Stabilizer {
                     entries,
                         "STABILIZATION storage repair send complete"
                 ),
+                Err(e) if e.is_data_channel_backpressure() => {
+                    deferred = deferred.saturating_add(1);
+                    tracing::warn!(
+                        target: "rings_core::dht::stabilization",
+                        local = %self.dht.did,
+                        purpose = ?purpose,
+                        destination = ?destination,
+                        destination_did = %destination_did,
+                        next_hop = ?next_hop,
+                        next_hop_state = ?next_hop_state,
+                        entries,
+                        error = ?e,
+                        "STABILIZATION storage repair deferred by data-channel backpressure"
+                    );
+                    continue;
+                }
                 Err(e) => {
                     tracing::error!(
                         target: "rings_core::dht::stabilization",
@@ -756,13 +774,16 @@ impl Stabilizer {
                     );
                 }
                 Err(error) => {
-                    self.transport.record_peer_message_send_failed(peer).await;
+                    if error.records_peer_send_failure() {
+                        self.transport.record_peer_message_send_failed(peer).await;
+                    }
                     tracing::warn!(
                         target: "rings_core::dht::stabilization",
                         local = %self.dht.did,
                         peer = %peer,
                         state = ?state,
                         error = ?error,
+                        records_peer_failure = error.records_peer_send_failure(),
                         "STABILIZATION peer liveness probe send failed"
                     );
                 }

@@ -332,7 +332,11 @@ fn playwright_browser_renders_gateway_fixture_without_direct_remote_requests() -
     let log = FixtureLog::default();
     let prefix = GatewayPrefix::new("/webview/")?;
     let target = TargetUrl::parse("https://example.test/docs/index.html")?;
-    let bootstrap = bootstrap_script(prefix.as_str(), target.as_url());
+    let bootstrap = format!(
+        "{}\n{}",
+        bootstrap_script(prefix.as_str(), target.as_url()),
+        fixture_overlay_loader()
+    );
     let gateway = WebviewGateway::new(prefix.clone(), BrowserFixtureTransport::new(log.clone()))
         .with_bootstrap_script(bootstrap);
     let server = BrowserFixtureServer::start(prefix.clone(), gateway)?;
@@ -593,11 +597,14 @@ const pageUrl = {page_url:?};
     const dynamicPing = document.querySelector("#dynamic-ping-link");
     const namespaceImage = document.querySelector("#namespace-image");
     const refreshFrame = document.querySelector("#refresh-navigation-srcdoc");
+    const overlayScript = document.querySelector("script[data-rings-webview-overlay-loader]");
     const backgroundImage = (selector) => {{
       const element = document.querySelector(selector);
       return element ? getComputedStyle(element).backgroundImage : "";
     }};
     return {{
+      overlayMounted: Boolean(document.querySelector("#rings-webview-debug-overlay")),
+      overlayScriptSrc: overlayScript?.src || "",
       titleText: title?.textContent,
       titleColor: title ? getComputedStyle(title).color : "",
       fetchText: document.querySelector("#fetch-result")?.textContent,
@@ -677,6 +684,9 @@ const pageUrl = {page_url:?};
   if (result.titleText !== "Rings WebView Fixture") {{
     throw new Error(`page title did not render: ${{JSON.stringify(result)}}`);
   }}
+  if (!result.overlayMounted || !result.overlayScriptSrc.endsWith("/assets/webview-overlay.js")) {{
+    throw new Error(`webview overlay did not mount from local asset: ${{JSON.stringify(result)}}`);
+  }}
   if (result.titleColor !== "rgb(1, 2, 3)") {{
     throw new Error(`stylesheet did not apply: ${{JSON.stringify(result)}}`);
   }}
@@ -741,6 +751,19 @@ const pageUrl = {page_url:?};
         )));
     }
     Ok(())
+}
+
+fn fixture_overlay_loader() -> &'static str {
+    r#"
+(() => {
+  if (globalThis.__ringsWebviewGateway?.loadLocalScript?.("/assets/webview-overlay.js", "data-rings-webview-overlay-loader")) return;
+  const script = document.createElement("script");
+  script.src = "/assets/webview-overlay.js";
+  script.async = false;
+  script.dataset.ringsWebviewOverlayLoader = "";
+  (document.head || document.documentElement).append(script);
+})();
+"#
 }
 
 fn playwright_available() -> Result<bool> {

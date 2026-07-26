@@ -952,7 +952,9 @@ impl PayloadSender for SwarmTransport {
             {
                 Ok(delivery) => spawn_delivery(delivery, did, self.measure.clone()),
                 Err(e) => {
-                    self.record_peer_message_send_failed(did).await;
+                    if e.records_peer_send_failure() {
+                        self.record_peer_message_send_failed(did).await;
+                    }
                     return Err(e);
                 }
             },
@@ -978,7 +980,9 @@ impl PayloadSender for SwarmTransport {
                             );
                         }
                         Err(e) => {
-                            self.record_peer_message_send_failed(did).await;
+                            if e.records_peer_send_failure() {
+                                self.record_peer_message_send_failed(did).await;
+                            }
                             return Err(e);
                         }
                     }

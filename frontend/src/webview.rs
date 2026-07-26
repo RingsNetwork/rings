@@ -36,7 +36,7 @@ use wasm_bindgen_futures::future_to_promise;
 
 use crate::onion;
 
-const GATEWAY_PREFIX: &str = "/webview/";
+pub(crate) const GATEWAY_PREFIX: &str = "/webview/";
 const MAX_CONCURRENT_GATEWAY_REQUESTS: usize = 6;
 const WEBVIEW_OVERLAY_LOADER: &str = r#"
 (() => {
@@ -48,6 +48,7 @@ const WEBVIEW_OVERLAY_LOADER: &str = r#"
     return;
   }
   if (document.querySelector("script[data-rings-webview-overlay-loader]")) return;
+  if (globalThis.__ringsWebviewGateway?.loadLocalScript?.("/assets/webview-overlay.js", "data-rings-webview-overlay-loader")) return;
 
   const script = document.createElement("script");
   script.src = "/assets/webview-overlay.js";

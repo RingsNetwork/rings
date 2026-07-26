@@ -340,7 +340,9 @@ async fn run_chunked_send(
             ChunkSendProgress::Ready(Ok(delivery)) => delivery,
             ChunkSendProgress::Ready(Err(e)) => {
                 tracing::warn!("Chunked send to {did} stopped: {e}");
-                record_measurement(measure, did, MeasureCounter::FailedToSend).await;
+                if e.records_peer_send_failure() {
+                    record_measurement(measure, did, MeasureCounter::FailedToSend).await;
+                }
                 return;
             }
             ChunkSendProgress::Cancelled(reason) => {

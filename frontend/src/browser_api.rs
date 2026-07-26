@@ -87,10 +87,10 @@ pub(crate) fn open_debug_url(url: &str) -> Result<DebugUrlOpenResult, String> {
     open_debug_url_with_window(url).map(|_| DebugUrlOpenResult::Opened)
 }
 
-/// Open the application-owned WebView shell in a named browser popup.
+/// Open the application-owned WebView shell in a browser popup.
 ///
 /// The caller supplies no remote target here: remote addresses are entered only inside the
-/// controlled shell and become `/webview/` paths before an iframe receives them.
+/// controlled shell and become `/webview/` paths before the top-level document receives them.
 pub(crate) fn open_webview_popup() -> Result<(), String> {
     let window = web_sys::window().ok_or_else(|| "window unavailable".to_string())?;
     let location = window.location();
@@ -108,12 +108,13 @@ pub(crate) fn open_webview_popup() -> Result<(), String> {
             &window_value,
             &JsValue::from_str(url.as_str()),
             &JsValue::from_str("rings-webview"),
-            &JsValue::from_str("popup=yes,width=1280,height=860,noopener"),
+            &JsValue::from_str("popup=yes,width=1280,height=860"),
         )
         .map_err(js_error_label)?;
     if opened.is_null() || opened.is_undefined() {
         return Err("browser blocked the WebView popup".to_string());
     }
+    let _opener_cleared = Reflect::set(&opened, &JsValue::from_str("opener"), &JsValue::NULL);
     Ok(())
 }
 

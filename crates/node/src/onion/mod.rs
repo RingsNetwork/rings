@@ -822,7 +822,13 @@ impl OnionExitRegistration {
             .iter()
             .map(|descriptor| descriptor.encode().map_err(Error::CoreError))
             .collect::<Result<Vec<_>>>()?;
-        self.publisher.publish_many(context, encoded).await?;
+        self.publisher
+            .publish_many_replacing(context, encoded, |observed| {
+                observed
+                    .decode::<OnionExitDescriptor>()
+                    .is_ok_and(|descriptor| descriptor.did == context.did())
+            })
+            .await?;
         Ok(descriptors)
     }
 

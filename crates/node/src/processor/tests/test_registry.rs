@@ -156,6 +156,125 @@ async fn online_node_concurrent_publish_keeps_one_self_record() -> Result<()> {
 }
 
 #[tokio::test]
+async fn online_node_publish_replaces_observed_self_records() -> Result<()> {
+    let processor = prepare_processor().await;
+    let other = prepare_processor().await;
+    let now_ms = get_epoch_ms();
+    let stale_self = processor.online_node_descriptor_at(now_ms.saturating_sub(30_000))?;
+    let other_descriptor = other.online_node_descriptor_at(now_ms)?;
+
+    processor
+        .storage_store(Processor::online_node_registry_entry(vec![
+            stale_self,
+            other_descriptor.clone(),
+        ])?)
+        .await?;
+
+    let published = processor.publish_online_node_descriptor().await?;
+    let entry_key = entry::Entry::gen_did(ONLINE_NODES_TOPIC)?;
+    processor.storage_fetch(entry_key).await?;
+    let entry = processor
+        .storage_check_cache(entry_key)
+        .await
+        .expect("online node registry entry should be cached after publish");
+    let stored = Processor::online_node_descriptors_from_entry(&entry);
+
+    assert_eq!(stored.len(), 2);
+    assert_eq!(
+        stored
+            .iter()
+            .filter(|descriptor| descriptor.did == processor.did())
+            .count(),
+        1
+    );
+    assert!(stored.iter().any(|descriptor| descriptor == &published));
+    assert!(stored
+        .iter()
+        .any(|descriptor| descriptor == &other_descriptor));
+    Ok(())
+}
+
+#[tokio::test]
+async fn onion_exit_publish_replaces_observed_self_records() -> Result<()> {
+    let processor = prepare_processor().await;
+    let other = prepare_processor().await;
+    let now_ms = get_epoch_ms();
+    let mut policy = onion_policy(&["example.com:443"], &[])?;
+    policy.max_circuits = 8;
+    policy.max_streams_per_circuit = 2;
+    policy.max_bytes_per_minute = 4096;
+    let stale_tcp = onion_exit_descriptor_for_processor_with_service(
+        &processor,
+        OnionExitService::tcp(),
+        now_ms.saturating_sub(30_000),
+        policy.clone(),
+    )?;
+    let stale_https = onion_exit_descriptor_for_processor_with_service(
+        &processor,
+        OnionExitService::https(),
+        now_ms.saturating_sub(20_000),
+        policy.clone(),
+    )?;
+    let stale_api = onion_exit_descriptor_for_processor_with_service(
+        &processor,
+        OnionExitService::new("api", OnionExitTransport::Tcp)?,
+        now_ms.saturating_sub(10_000),
+        policy.clone(),
+    )?;
+    let other_https = onion_exit_descriptor_for_processor_with_service(
+        &other,
+        OnionExitService::https(),
+        now_ms,
+        policy.clone(),
+    )?;
+
+    processor
+        .storage_store(Processor::onion_exit_registry_entry(vec![
+            stale_tcp,
+            stale_https,
+            stale_api,
+            other_https.clone(),
+        ])?)
+        .await?;
+
+    let registration = OnionExitRegistration::new(
+        Duration::from_secs(30),
+        Duration::from_secs(90),
+        default_online_node_type(),
+        vec![OnionExitService::https()],
+        policy,
+    );
+    let published = registration
+        .publish_descriptors(&processor.registration_context())
+        .await?;
+    let published_descriptor = published
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::InvalidConfig("expected one onion-exit descriptor".to_string()))?;
+    let entry_key = entry::Entry::gen_did(ONION_EXITS_TOPIC)?;
+    processor.storage_fetch(entry_key).await?;
+    let entry = processor
+        .storage_check_cache(entry_key)
+        .await
+        .expect("onion exit registry entry should be cached after publish");
+    let stored = Processor::onion_exit_descriptors_from_entry(&entry);
+
+    assert_eq!(stored.len(), 2);
+    assert_eq!(
+        stored
+            .iter()
+            .filter(|descriptor| descriptor.did == processor.did())
+            .count(),
+        1
+    );
+    assert!(stored
+        .iter()
+        .any(|descriptor| descriptor == &published_descriptor));
+    assert!(stored.iter().any(|descriptor| descriptor == &other_https));
+    Ok(())
+}
+
+#[tokio::test]
 async fn online_node_lookup_filters_expired_descriptors_by_default() -> Result<()> {
     let processor = prepare_processor().await;
     let expired_processor = prepare_processor().await;

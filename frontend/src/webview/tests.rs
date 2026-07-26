@@ -109,6 +109,7 @@ fn host_redirects_then_serves_a_gateway_document_through_its_transport() -> Webv
         .map_err(|error| WebviewError::Transport(error.to_string()))?;
 
     assert!(body.contains("data-rings-webview-bootstrap"));
+    assert!(body.contains("/assets/webview-overlay.js"));
     assert!(body.contains("/webview/https%3A%2F%2Fexample%2Etest%2Fasset%2Epng"));
     assert_eq!(requests.borrow().len(), 1);
     let sent_request = requests
@@ -119,10 +120,13 @@ fn host_redirects_then_serves_a_gateway_document_through_its_transport() -> Webv
     assert_eq!(sent_request.target.as_str(), target.as_url().as_str());
     assert_eq!(sent_request.method, "POST");
     assert_eq!(sent_request.body, vec![0x00, 0xff]);
-    assert_eq!(sent_request.headers, vec![GatewayHeader::new(
-        "accept",
-        "text/html"
-    )?]);
+    assert_eq!(
+        sent_request.headers,
+        vec![
+            GatewayHeader::new("accept", "text/html")?,
+            GatewayHeader::new("Accept-Encoding", "identity")?,
+        ]
+    );
     Ok(())
 }
 

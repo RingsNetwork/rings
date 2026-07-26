@@ -13,11 +13,15 @@
     network: undefined,
     onion: undefined,
     panel: undefined,
+    addressForm: undefined,
+    loadingTrack: undefined,
     view: "log",
     levelFilter: "all",
     textFilter: "",
+    loading: false,
     originalBodyPaddingTop: undefined,
     originalBodyPaddingBottom: undefined,
+    bodySpacingScheduled: false,
   };
 
   function isWebviewContext() {
@@ -184,6 +188,26 @@
     container.scrollTop = container.scrollHeight;
   }
 
+  function setLoading(loading) {
+    state.loading = Boolean(loading);
+    if (!state.addressForm) return;
+    state.addressForm.dataset.loading = String(state.loading);
+    state.addressForm.setAttribute("aria-busy", String(state.loading));
+    if (state.loadingTrack) state.loadingTrack.hidden = !state.loading;
+  }
+
+  function syncDocumentLoading() {
+    if (document.readyState === "complete") {
+      setLoading(false);
+      return;
+    }
+    setLoading(true);
+    globalThis.addEventListener("load", () => setLoading(false), { once: true });
+    globalThis.addEventListener("pageshow", () => {
+      if (document.readyState === "complete") setLoading(false);
+    }, { once: true });
+  }
+
   function record(scope, message, level = "info", resource = undefined, onion = undefined, at = undefined) {
     const entry = { at: at || new Date().toISOString(), scope, message, level };
     if (resource) entry.resource = resource;
@@ -260,7 +284,10 @@
   }
 
   function applyBodySpacing() {
-    if (!document.body) return;
+    if (!document.body) {
+      scheduleBodySpacing();
+      return;
+    }
     if (state.originalBodyPaddingTop === undefined) {
       state.originalBodyPaddingTop = getComputedStyle(document.body).paddingTop || "0px";
       state.originalBodyPaddingBottom = getComputedStyle(document.body).paddingBottom || "0px";
@@ -273,6 +300,29 @@
     } else {
       document.body.style.paddingBottom = state.originalBodyPaddingBottom;
     }
+  }
+
+  function scheduleBodySpacing() {
+    if (state.bodySpacingScheduled || document.body) return;
+    state.bodySpacingScheduled = true;
+    const retry = () => {
+      state.bodySpacingScheduled = false;
+      applyBodySpacing();
+    };
+    if (typeof MutationObserver === "function" && document.documentElement) {
+      const observer = new MutationObserver(() => {
+        if (!document.body) return;
+        observer.disconnect();
+        retry();
+      });
+      observer.observe(document.documentElement, { childList: true });
+      document.addEventListener("DOMContentLoaded", () => {
+        observer.disconnect();
+        retry();
+      }, { once: true });
+      return;
+    }
+    document.addEventListener("DOMContentLoaded", retry, { once: true });
   }
 
   async function prepareGatewayForNavigation() {
@@ -293,11 +343,13 @@
       return;
     }
     record("overlay", "Connecting through the local Rings gateway");
+    setLoading(true);
     try {
       await prepareGatewayForNavigation();
       record("overlay", "Request sent to the local Rings gateway");
       location.href = path;
     } catch (error) {
+      setLoading(false);
       record("overlay", `gateway unavailable: ${String(error)}`, "error");
     }
   }
@@ -393,12 +445,17 @@
         :host { all: initial; }
         #toolbar { position: fixed; inset: 0 0 auto 0; z-index: 2147483647; display: grid; min-width: 0; min-height: 46px; box-sizing: border-box; grid-template-columns: auto minmax(0, 1fr) auto; gap: 7px; align-items: center; padding: 6px 8px; border-bottom: 1px solid #ddccb0; background: #fffaf0; color: #111827; box-shadow: 0 1px 4px rgba(17, 24, 39, 0.16); font: 12px/1 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
         #controls { display: flex; min-width: 0; gap: 5px; }
-        #address-form { display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
-        #address { width: 100%; min-width: 0; height: 32px; box-sizing: border-box; padding: 5px 9px; border: 1px solid #d9c5a6; border-radius: 5px; background: #fffdf8; color: #111827; font: 12px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; }
+        #address-form { position: relative; display: grid; min-width: 0; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
+        #address { grid-column: 1; grid-row: 1; width: 100%; min-width: 0; height: 32px; box-sizing: border-box; padding: 5px 9px; border: 1px solid #d9c5a6; border-radius: 5px; background: #fffdf8; color: #111827; font: 12px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; }
         #address:focus { border-color: #b42318; outline: 3px solid rgba(180, 35, 24, 0.12); }
+        #address-form[data-loading=true] #address { border-color: #8ab4f8; box-shadow: inset 0 -2px 0 rgba(26, 115, 232, 0.18); }
+        #loading-track { position: relative; z-index: 2; grid-column: 1; grid-row: 1; align-self: end; height: 2px; margin: 0 2px 2px; overflow: hidden; border-radius: 999px; pointer-events: none; }
+        #loading-track[hidden] { display: none; }
+        #loading-bar { position: absolute; inset: 0 auto 0 0; width: 42%; border-radius: inherit; background: linear-gradient(90deg, #1a73e8, #34a853); transform: translateX(-120%); animation: rings-webview-loading 1.15s cubic-bezier(.4, 0, .2, 1) infinite; }
+        @keyframes rings-webview-loading { 0% { transform: translateX(-120%) scaleX(.65); } 45% { transform: translateX(72%) scaleX(1); } 100% { transform: translateX(250%) scaleX(.75); } }
         #toolbar button { display: grid; min-width: 34px; height: 32px; min-height: 32px; box-sizing: border-box; place-items: center; padding: 0 9px; border: 1px solid #d9c5a6; border-radius: 5px; background: #fffaf0; color: #374151; font: 800 12px/1 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; cursor: pointer; }
         #toolbar button:hover, #toolbar button[data-active=true] { border-color: #111827; background: #111827; color: #fff; }
-        #go { min-width: 38px; }
+        #go { grid-column: 2; grid-row: 1; min-width: 38px; }
         #toggle { min-width: 34px; padding: 0; }
         #panel { position: fixed; inset: auto 0 0 0; z-index: 2147483647; display: grid; width: 100vw; height: 300px; max-height: 45vh; box-sizing: border-box; grid-template-rows: auto minmax(0, 1fr); border-top: 1px solid #dadce0; background: #fff; color: #202124; box-shadow: 0 -1px 3px rgba(60, 64, 67, 0.22); overflow: hidden; font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; }
         #panel[hidden] { display: none; }
@@ -442,6 +499,7 @@
         </div>
         <form id="address-form">
           <input id="address" aria-label="Address" autocomplete="off" spellcheck="false" />
+          <span id="loading-track" aria-hidden="true" hidden><span id="loading-bar"></span></span>
           <button id="go" type="submit" aria-label="Open address" title="Open address">&gt;</button>
         </form>
         <button id="toggle" type="button" aria-label="Debug" title="Debug" aria-expanded="false">
@@ -477,22 +535,34 @@
     const reload = root.getElementById("reload");
     const addressForm = root.getElementById("address-form");
     const address = root.getElementById("address");
+    const loadingTrack = root.getElementById("loading-track");
     const log = root.getElementById("log");
     const network = root.getElementById("network");
     const onion = root.getElementById("onion");
     const levelFilter = root.getElementById("level-filter");
     const textFilter = root.getElementById("text-filter");
     const clear = root.getElementById("clear");
-    if (!panel || !toggle || !back || !forward || !reload || !addressForm || !address || !log || !network || !onion || !levelFilter || !textFilter || !clear) return;
+    if (!panel || !toggle || !back || !forward || !reload || !addressForm || !address || !loadingTrack || !log || !network || !onion || !levelFilter || !textFilter || !clear) return;
     state.panel = panel;
+    state.addressForm = addressForm;
+    state.loadingTrack = loadingTrack;
     state.log = log;
     state.network = network;
     state.onion = onion;
     address.value = initialTargetText();
     toggle.addEventListener("click", () => setDebugOpen(panel.hidden));
-    back.addEventListener("click", () => history.back());
-    forward.addEventListener("click", () => history.forward());
-    reload.addEventListener("click", () => location.reload());
+    back.addEventListener("click", () => {
+      setLoading(true);
+      history.back();
+    });
+    forward.addEventListener("click", () => {
+      setLoading(true);
+      history.forward();
+    });
+    reload.addEventListener("click", () => {
+      setLoading(true);
+      location.reload();
+    });
     addressForm.addEventListener("submit", (event) => {
       event.preventDefault();
       void openAddress(address.value);
@@ -516,6 +586,7 @@
     applyBodySpacing();
     installConsoleCapture();
     requestDebugRegistration();
+    syncDocumentLoading();
     record("overlay", "Debug listener ready");
     appendFailureEntry();
     maybeReloadColdGatewayFallback();
@@ -523,11 +594,11 @@
 
   function onContextMaybeChanged() {
     if (!isWebviewContext()) return;
-    if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", mount, { once: true });
-    } else {
+    if (document.documentElement) {
       mount();
+      return;
     }
+    document.addEventListener("DOMContentLoaded", mount, { once: true });
   }
 
   globalThis[marker] = {

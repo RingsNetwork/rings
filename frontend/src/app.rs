@@ -40,6 +40,9 @@ use crate::workbench;
 
 mod actions;
 
+const DEFAULT_STABILIZE_INTERVAL_SECONDS: &str = "15";
+const LEGACY_DEFAULT_STABILIZE_INTERVAL_SECONDS: &str = "3";
+
 #[derive(Clone, PartialEq)]
 struct SettingsSnapshot {
     wallet_kind: String,
@@ -166,11 +169,7 @@ fn use_node_state() -> NodeState {
             )
         }),
         stabilize_interval: use_state(|| {
-            load_setting_or_default(
-                extension::SETTING_STABILIZE_INTERVAL,
-                extension::LEGACY_SETTING_STABILIZE_INTERVAL,
-                "3",
-            )
+            load_stabilize_interval_setting_or_default()
         }),
         storage_name: use_state(|| {
             load_setting_or_default(
@@ -264,6 +263,23 @@ fn initial_wallet_kind() -> WalletKind {
 
 fn load_setting_or_default(key: &str, legacy_key: &str, default: &'static str) -> String {
     extension::load_setting_with_legacy(key, legacy_key).unwrap_or_else(|| default.to_string())
+}
+
+fn load_stabilize_interval_setting_or_default() -> String {
+    match extension::load_setting_with_legacy(
+        extension::SETTING_STABILIZE_INTERVAL,
+        extension::LEGACY_SETTING_STABILIZE_INTERVAL,
+    ) {
+        Some(value) if value.trim() == LEGACY_DEFAULT_STABILIZE_INTERVAL_SECONDS => {
+            extension::save_setting(
+                extension::SETTING_STABILIZE_INTERVAL,
+                DEFAULT_STABILIZE_INTERVAL_SECONDS,
+            );
+            DEFAULT_STABILIZE_INTERVAL_SECONDS.to_string()
+        }
+        Some(value) => value,
+        None => DEFAULT_STABILIZE_INTERVAL_SECONDS.to_string(),
+    }
 }
 
 /// Rings browser frontend app.
@@ -737,7 +753,23 @@ fn current_shell_route() -> ShellRoute {
 }
 
 fn routed_shell_route() -> Option<ShellRoute> {
-    let hash = web_sys::window()?.location().hash().ok()?;
+    let location = web_sys::window()?.location();
+    let pathname = location.pathname().ok()?;
+    if is_webview_path(pathname.as_str()) {
+        return Some(ShellRoute {
+            page: ShellPage::Webview,
+            dialog: ActiveDialog::None,
+        });
+    }
+    let hash = location.hash().ok()?;
+    route_for_hash(hash.as_str())
+}
+
+fn is_webview_path(pathname: &str) -> bool {
+    pathname == "/webview" || pathname.starts_with(webview::GATEWAY_PREFIX)
+}
+
+fn route_for_hash(hash: &str) -> Option<ShellRoute> {
     match hash.trim_start_matches('#').trim_start_matches('/') {
         "" | "home" => Some(ShellRoute {
             page: ShellPage::Guide,

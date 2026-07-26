@@ -32,6 +32,12 @@ type RequestKindFixtureOptions = {
  * Service-worker symbols exported only inside this test VM.
  */
 type ServiceWorkerTestApi = {
+  readonly controlledNavigationBody: (
+    request: { readonly kind: string },
+    status: number,
+    headers: Headers,
+    body: Uint8Array | null,
+  ) => Uint8Array | null;
   readonly requestKind: (request: RequestKindFixture) => string;
 };
 
@@ -53,8 +59,12 @@ const serviceWorkerSource = await readFile(serviceWorkerPath, "utf8");
 const context: ServiceWorkerTestContext = {
   console,
   Headers,
+  ArrayBuffer,
   URL,
+  TextDecoder,
+  TextEncoder,
   Response,
+  Uint8Array,
   performance,
   setTimeout,
   clearTimeout,
@@ -63,15 +73,19 @@ const context: ServiceWorkerTestContext = {
     addEventListener() {},
   },
 };
-context["globalThis"] = context;
+context.globalThis = context;
 
-vm.runInNewContext(`${serviceWorkerSource}\nglobalThis.__ringsWebviewServiceWorkerTest = { requestKind };`, context, {
-  filename: serviceWorkerPath,
-});
+vm.runInNewContext(
+  `${serviceWorkerSource}\nglobalThis.__ringsWebviewServiceWorkerTest = { controlledNavigationBody, requestKind };`,
+  context,
+  {
+    filename: serviceWorkerPath,
+  },
+);
 
 const serviceWorkerApi = context.__ringsWebviewServiceWorkerTest;
 assert(serviceWorkerApi, "service worker test API was not exported");
-const { requestKind } = serviceWorkerApi;
+const { controlledNavigationBody, requestKind } = serviceWorkerApi;
 
 /**
  * Resolves the frontend project root from either source or generated script paths.
@@ -95,6 +109,21 @@ function request(options: RequestKindFixtureOptions = {}): RequestKindFixture {
   };
 }
 
+/**
+ * Encodes one UTF-8 body for service-worker response mutation tests.
+ */
+function bytes(value: string): Uint8Array {
+  return new TextEncoder().encode(value);
+}
+
+/**
+ * Decodes one UTF-8 body produced by the service worker.
+ */
+function text(value: Uint8Array | null): string {
+  assert(value, "expected response body bytes");
+  return new TextDecoder().decode(value);
+}
+
 assert.equal(requestKind(request({ mode: "navigate", destination: "document" })), "navigation");
 assert.equal(requestKind(request({ destination: "style" })), "subresource");
 assert.equal(requestKind(request()), "fetch");
@@ -112,3 +141,47 @@ assert.throws(
   () => requestKind(request({ headers: { "X-Rings-Webview-Kind": "xhr, xhr" } })),
   /invalid X-Rings-Webview-Kind/,
 );
+
+{
+  const headers = new Headers({
+    "content-encoding": "gzip",
+    "content-length": "42",
+    "content-security-policy": "default-src 'none'",
+    "content-security-policy-report-only": "default-src 'none'",
+    "content-type": "text/html; charset=utf-8",
+    "x-frame-options": "DENY",
+  });
+  const body = controlledNavigationBody(
+    { kind: "navigation" },
+    200,
+    headers,
+    bytes("<!doctype html><html><head><title>Target</title></head><body>ok</body></html>"),
+  );
+  const html = text(body);
+  assert.match(html, /<script src="\/assets\/webview-overlay\.js"><\/script><\/head>/);
+  assert.equal(headers.has("content-length"), false);
+  assert.equal(headers.has("content-encoding"), false);
+  assert.equal(headers.has("content-security-policy-report-only"), false);
+  assert.equal(headers.has("x-frame-options"), false);
+  assert.match(headers.get("content-security-policy") ?? "", /script-src 'self'/);
+}
+
+{
+  const html =
+    '<!doctype html><html><head><script src="/assets/webview-overlay.js"></script></head><body>ok</body></html>';
+  const headers = new Headers({
+    "content-length": "42",
+    "content-security-policy": "default-src 'none'",
+    "content-type": "text/html",
+  });
+  const body = controlledNavigationBody({ kind: "navigation" }, 200, headers, bytes(html));
+  assert.equal(text(body), html);
+  assert.equal(headers.has("content-length"), false);
+  assert.match(headers.get("content-security-policy") ?? "", /script-src 'self'/);
+}
+
+{
+  const css = bytes("body { color: red; }");
+  const body = controlledNavigationBody({ kind: "subresource" }, 200, new Headers({ "content-type": "text/css" }), css);
+  assert.equal(body, css);
+}

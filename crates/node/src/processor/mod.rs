@@ -255,7 +255,7 @@ impl Processor {
         Ok(self.select_onion_exits_from_entry(&refreshed_entry, service, include_expired))
     }
 
-    async fn fetch_storage_entry(&self, entry_key: Did) -> Result<Option<entry::Entry>> {
+    pub(crate) async fn fetch_storage_entry(&self, entry_key: Did) -> Result<Option<entry::Entry>> {
         self.storage_fetch(entry_key).await?;
         for attempt in 0..DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
             if let Some(entry) = self.storage_check_cache(entry_key).await {

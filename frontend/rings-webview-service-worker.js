@@ -2,6 +2,9 @@
 
 const gatewayPrefix = "/webview/";
 const requestTimeoutMs = 30_000;
+const webviewOverlayScriptPath = "/assets/webview-overlay.js";
+const webviewOverlayScriptTag = `<script src="${webviewOverlayScriptPath}"></script>`;
+const gatewayContentSecurityPolicy = "default-src 'self' data: blob:; base-uri 'self'; connect-src 'self'; font-src 'self' data:; form-action 'self'; frame-src 'self' data: blob:; img-src 'self' data: blob:; media-src 'self' data: blob:; object-src 'self'; script-src 'self' data: 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; style-src 'self' data: 'unsafe-inline'; worker-src 'none'";
 let gatewayHostClientId = null;
 const debugClientIds = new Set();
 const debugHistory = [];
@@ -149,7 +152,10 @@ async function handleGatewayFetch(event) {
       "info",
       response.status,
     );
-    return new Response(responseMustNotHaveBody(response.status) ? null : response.body || null, {
+    const body = responseMustNotHaveBody(response.status)
+      ? null
+      : controlledNavigationBody(request, response.status, headers, response.body || null);
+    return new Response(body, {
       status: response.status,
       headers,
     });
@@ -174,6 +180,79 @@ async function handleGatewayFetch(event) {
 
 function responseMustNotHaveBody(status) {
   return status === 204 || status === 205 || status === 304;
+}
+
+function controlledNavigationBody(request, status, headers, body) {
+  if (request.kind !== "navigation" || !body || status < 200 || status >= 300) {
+    return body;
+  }
+  const bytes = bodyBytes(body);
+  if (!bytes) {
+    return body;
+  }
+  const contentType = (headers.get("content-type") || "").toLowerCase();
+  if (contentType && !contentType.includes("text/html") && !contentType.includes("application/xhtml+xml")) {
+    return body;
+  }
+  const text = decodeUtf8(bytes);
+  if (!text || !looksLikeHtml(text)) {
+    return body;
+  }
+  prepareControlledNavigationHeaders(headers);
+  const injected = injectWebviewOverlay(text);
+  if (injected === text) {
+    return body;
+  }
+  return new TextEncoder().encode(injected);
+}
+
+function prepareControlledNavigationHeaders(headers) {
+  headers.delete("content-length");
+  headers.delete("content-encoding");
+  headers.delete("content-security-policy-report-only");
+  headers.delete("x-frame-options");
+  headers.set("content-security-policy", gatewayContentSecurityPolicy);
+}
+
+function bodyBytes(body) {
+  if (body instanceof Uint8Array) {
+    return body;
+  }
+  if (body instanceof ArrayBuffer) {
+    return new Uint8Array(body);
+  }
+  if (ArrayBuffer.isView(body)) {
+    return new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+  }
+  if (typeof body === "string") {
+    return new TextEncoder().encode(body);
+  }
+  return undefined;
+}
+
+function decodeUtf8(bytes) {
+  try {
+    return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+  } catch (_error) {
+    return "";
+  }
+}
+
+function looksLikeHtml(text) {
+  return /^\s*(?:<!doctype\s+html\b|<html\b|<head\b|<body\b)/i.test(text);
+}
+
+function injectWebviewOverlay(html) {
+  if (html.includes(webviewOverlayScriptPath)) {
+    return html;
+  }
+  if (/<\/head\s*>/i.test(html)) {
+    return html.replace(/<\/head\s*>/i, `${webviewOverlayScriptTag}</head>`);
+  }
+  if (/<body\b[^>]*>/i.test(html)) {
+    return html.replace(/<body\b[^>]*>/i, (bodyTag) => `${bodyTag}${webviewOverlayScriptTag}`);
+  }
+  return `${html}\n${webviewOverlayScriptTag}`;
 }
 
 async function emitResourceDebug(requestId, request, startedAt, phase, message, level = "info", status = undefined) {

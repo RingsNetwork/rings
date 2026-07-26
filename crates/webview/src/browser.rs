@@ -15,6 +15,7 @@ pub fn bootstrap_script(gateway_prefix: &str, document_url: &Url) -> String {
   const prefix = {prefix:?};
   const targetBase = {target_base:?};
   const marker = "{marker}";
+  const controlledAssetPaths = new Set(["/assets/webview-overlay.js"]);
   const urlAttributes = new Set(["href", "src", "action", "poster", "data", "cite", "formaction", "manifest", "xlink:href"]);
   const srcsetAttributes = new Set(["srcset", "imagesrcset"]);
   const styleProxies = new WeakMap();
@@ -61,9 +62,23 @@ pub fn bootstrap_script(gateway_prefix: &str, document_url: &Url) -> String {
     const lower = String(value).trim().toLowerCase();
     return !lower || ["javascript:", "mailto:", "tel:", "data:", "blob:", "about:"].some((scheme) => lower.startsWith(scheme));
   }}
+  function controlledAssetPath(input) {{
+    const text = String(input);
+    const origin = globalThis.location?.origin;
+    if (!origin) return undefined;
+    try {{
+      const url = new URL(text, origin);
+      if (controlledAssetPaths.has(url.pathname)) {{
+        return `${{url.pathname}}${{url.search}}${{url.hash}}`;
+      }}
+    }} catch (_error) {{}}
+    return undefined;
+  }}
   function encodeTarget(input, base = resolveTargetBase()) {{
     const text = String(input);
     if (isUnrewritableTarget(text)) return text;
+    const controlled = controlledAssetPath(text);
+    if (controlled) return controlled;
     const gatewayPath = gatewayPathFromText(text);
     if (gatewayPath) return gatewayPath;
     const url = new URL(text, base);
@@ -520,6 +535,20 @@ pub fn bootstrap_script(gateway_prefix: &str, document_url: &Url) -> String {
     }};
   }}
   const nativeSetAttribute = globalThis.Element?.prototype?.setAttribute;
+  function loadLocalScript(path, markerAttribute) {{
+    const script = globalThis.document?.createElement?.("script");
+    if (!script) return false;
+    script.async = false;
+    if (nativeSetAttribute) {{
+      nativeSetAttribute.call(script, "src", path);
+      if (markerAttribute) nativeSetAttribute.call(script, markerAttribute, "");
+    }} else {{
+      script.src = path;
+      if (markerAttribute) script.setAttribute?.(markerAttribute, "");
+    }}
+    (globalThis.document?.head || globalThis.document?.documentElement)?.append?.(script);
+    return true;
+  }}
   if (nativeSetAttribute) {{
     globalThis.Element.prototype.setAttribute = function(name, value) {{
       const lower = String(name).toLowerCase();
@@ -592,6 +621,7 @@ pub fn bootstrap_script(gateway_prefix: &str, document_url: &Url) -> String {
   patchUrlProperty("HTMLEmbedElement", "src");
   patchUrlProperty("HTMLObjectElement", "data");
   gatewayState.prefix = prefix;
+  gatewayState.loadLocalScript = loadLocalScript;
 }})();"#,
         prefix = gateway_prefix,
         target_base = document_url.as_str(),

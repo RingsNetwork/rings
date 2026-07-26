@@ -26,6 +26,10 @@ impl HeaderPolicy {
         request
             .headers
             .retain(|header| !should_strip_request_header(header.name.as_str()));
+        request.headers.push(GatewayHeader {
+            name: "Accept-Encoding".to_string(),
+            value: "identity".to_string(),
+        });
         if let Some(source_origin) = request.source_origin.as_ref() {
             request.headers.push(GatewayHeader {
                 name: "Origin".to_string(),
@@ -100,6 +104,8 @@ fn should_strip_request_header(name: &str) -> bool {
 fn should_strip_response_header(name: &str) -> bool {
     const STRIPPED: &[&str] = &[
         "connection",
+        "content-encoding",
+        "content-length",
         "keep-alive",
         "proxy-authenticate",
         "proxy-authorization",
@@ -152,6 +158,40 @@ mod tests {
     }
 
     #[test]
+    fn response_policy_strips_headers_invalidated_by_gateway_rewrites() -> Result<()> {
+        let target = Url::parse("https://example.com/app/page")?;
+        let policy = HeaderPolicy::new(GatewayPrefix::new("/webview/")?);
+        let response = GatewayResponse::new(
+            200,
+            vec![
+                GatewayHeader::new("Content-Encoding", "gzip")?,
+                GatewayHeader::new("Content-Length", "128")?,
+                GatewayHeader::new("Content-Type", "text/html")?,
+                GatewayHeader::new("X-Frame-Options", "DENY")?,
+            ],
+            Vec::new(),
+        )?;
+
+        let normalized = policy.normalize_response(&target, response)?;
+
+        assert!(normalized.headers.iter().all(|header| {
+            !matches!(
+                header.name.to_ascii_lowercase().as_str(),
+                "content-encoding" | "content-length" | "x-frame-options"
+            )
+        }));
+        assert!(normalized
+            .headers
+            .iter()
+            .any(|header| header.name_eq("content-type") && header.value == "text/html"));
+        assert!(normalized.headers.iter().any(|header| {
+            header.name_eq("content-security-policy")
+                && header.value == GATEWAY_CONTENT_SECURITY_POLICY
+        }));
+        Ok(())
+    }
+
+    #[test]
     fn refresh_header_rewrites_to_gateway_url() -> Result<()> {
         let target = Url::parse("https://example.com/app/page")?;
         let policy = HeaderPolicy::new(GatewayPrefix::new("/webview/")?);
@@ -190,6 +230,7 @@ mod tests {
                 GatewayHeader::new("Referer", "http://127.0.0.1:3000/webview/x")?,
                 GatewayHeader::new("Sec-Fetch-Dest", "document")?,
                 GatewayHeader::new("Cookie", "caller=leak")?,
+                GatewayHeader::new("Accept-Encoding", "gzip")?,
                 GatewayHeader::new("Accept", "text/html")?,
                 GatewayHeader::new("X-App-Trace", "kept")?,
             ],
@@ -209,6 +250,9 @@ mod tests {
             .headers
             .iter()
             .any(|header| header.name_eq("accept") && header.value == "text/html"));
+        assert!(normalized.headers.iter().any(|header| {
+            header.name_eq("accept-encoding") && header.value.eq_ignore_ascii_case("identity")
+        }));
         assert!(normalized
             .headers
             .iter()

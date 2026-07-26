@@ -80,9 +80,12 @@ fn online_node_at(
     heartbeat_at_ms: u128,
     expires_at_ms: u128,
 ) -> CoreResult<OnlineNodeDescriptor> {
-    online_node_at_with_capabilities(session_sk, heartbeat_at_ms, expires_at_ms, vec![
-        ONION_RELAY_CAPABILITY.to_string(),
-    ])
+    online_node_at_with_capabilities(
+        session_sk,
+        heartbeat_at_ms,
+        expires_at_ms,
+        vec![ONION_RELAY_CAPABILITY.to_string()],
+    )
 }
 
 fn online_node_at_with_capabilities(
@@ -240,12 +243,14 @@ fn directory_candidates_reject_foreign_network_descriptors() -> Result<()> {
         test_dht_protocol(),
         50,
         route_request("web", 1, false)?.service_name(),
-        vec![
-            online_node_at_with_network_and_capabilities(&relay, 2, 20, 100, vec![
-                ONION_RELAY_CAPABILITY.to_string(),
-            ])
-            .map_err(Error::CoreError)?,
-        ],
+        vec![online_node_at_with_network_and_capabilities(
+            &relay,
+            2,
+            20,
+            100,
+            vec![ONION_RELAY_CAPABILITY.to_string()],
+        )
+        .map_err(Error::CoreError)?],
         vec![exit],
     );
 

@@ -95,6 +95,25 @@ fn handle_connection(
         .set_nonblocking(false)
         .map_err(|error| WebviewError::Transport(error.to_string()))?;
     let request = read_http_request(stream)?;
+    if request.path == "/assets/webview-overlay.js" {
+        return write_http_response(
+            stream,
+            &GatewayResponse::new(
+                200,
+                vec![GatewayHeader::new(
+                    "Content-Type",
+                    "application/javascript; charset=utf-8",
+                )?],
+                br#"
+globalThis.__ringsWebviewDebugOverlay = { installed: true };
+document.documentElement.appendChild(Object.assign(document.createElement("div"), {
+  id: "rings-webview-debug-overlay",
+}));
+"#
+                .to_vec(),
+            )?,
+        );
+    }
     if !request.path.starts_with(prefix.as_str()) {
         return write_http_response(
             stream,

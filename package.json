@@ -4,7 +4,7 @@
     "RND <dev@ringsnetwork.io>"
   ],
   "description": "Rings is a structured peer-to-peer network implementation using WebRTC, Chord algorithm, and full WebAssembly (WASM) support.\n",
-  "version": "0.13.0",
+  "version": "1.0.0",
   "license": "GPL-3.0",
   "repository": {
     "type": "git",
@@ -18,7 +18,8 @@
     "build:frontend-web": "cd frontend && NO_COLOR=true trunk build --release",
     "package:frontend-extension": "npm run build:frontend-extension-scripts && cd frontend && NO_COLOR=true trunk build --release && cd .. && node frontend/.generated/scripts/package-extension.mjs",
     "test:frontend-extension-wallet": "npm run package:frontend-extension && node frontend/.generated/scripts/test-extension-wallet-bridge.mjs",
-    "test:frontend-webview-service-worker": "node --experimental-strip-types frontend/scripts/test-webview-service-worker.mts"
+    "test:frontend-webview-service-worker": "node --experimental-strip-types frontend/scripts/test-webview-service-worker.mts",
+    "test:frontend-webview-overlay": "node --experimental-strip-types frontend/scripts/test-webview-overlay.mts"
   },
   "dependencies": {
     "circomlib": "^2.0.5"

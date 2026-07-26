@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const workerUrl = "/rings-webview-service-worker.js?gateway-host-protocol=3";
+  const workerUrl = "/rings-webview-service-worker.js?gateway-host-protocol=4";
   let registrationPromise;
   const debugEntries = [];
 

@@ -33,7 +33,7 @@ use super::GATEWAY_PREFIX;
 const TEST_DHT_FINGER_TABLE_SIZE: usize = 8;
 const TEST_NETWORK_ID: u32 = 665;
 const TEST_ICE_SERVERS: &str = "stun://stun.l.google.com:19302";
-const TEST_STABILIZE_INTERVAL_SECS: u64 = 3;
+const TEST_STABILIZE_INTERVAL_SECS: u64 = 15;
 const FIXTURE_AUTHORITY: &str = "fixture.rings.test:443";
 const FIXTURE_INDEX: &str = "https://fixture.rings.test/index.html";
 const FIXTURE_CSS: &str = "https://fixture.rings.test/site.css";

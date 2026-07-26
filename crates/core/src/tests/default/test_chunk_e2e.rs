@@ -248,9 +248,11 @@ async fn spawned_storage_sync_tail_cancelled_by_route_disappear_does_not_degrade
 
 #[tokio::test]
 async fn send_queue_backpressure_returns_transport_timeout() {
+    let measure = Arc::new(CountingMeasure::default());
+    let measure_impl: MeasureImpl = measure.clone();
     let key1 = SecretKey::random();
     let key2 = SecretKey::random();
-    let node1 = prepare_node(key1).await;
+    let node1 = prepare_node_with_measure(key1, measure_impl).unwrap();
     let node2 = prepare_node(key2).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
     wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected)
@@ -260,6 +262,7 @@ async fn send_queue_backpressure_returns_transport_timeout() {
         .await
         .unwrap();
 
+    let failed_before = measure.count(node2.did(), MeasureCounter::FailedToSend);
     let _guard = PendingSendGuard::new();
     let err = node1
         .swarm
@@ -273,6 +276,11 @@ async fn send_queue_backpressure_returns_transport_timeout() {
             crate::error::Error::DataChannelSendQueueTimeout { peer, .. } if peer == node2.did()
         ),
         "expected DataChannelSendQueueTimeout, got {err:?}"
+    );
+    assert_eq!(
+        measure.count(node2.did(), MeasureCounter::FailedToSend),
+        failed_before,
+        "data-channel queue backpressure is local admission pressure, not peer failure"
     );
 }
 

@@ -152,6 +152,12 @@ impl PeerLivenessMap {
         liveness.mark_probe_sent(sent_at_ms);
         self.peers.insert(peer, liveness);
     }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    fn force_connected_at(&mut self, peer: Did, generation: u64, connected_at_ms: i64) {
+        self.peers
+            .insert(peer, PeerLiveness::new(generation, connected_at_ms));
+    }
 }
 
 /// Peer liveness expiry evidence.
@@ -267,6 +273,16 @@ impl SwarmTransport {
         };
         self.peer_liveness()?
             .force_probe_sent_at(peer, generation, sent_at_ms);
+        Ok(())
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) fn force_peer_connected_at(&self, peer: Did, connected_at_ms: i64) -> Result<()> {
+        let Some(generation) = self.active_generation(peer)? else {
+            return Ok(());
+        };
+        self.peer_liveness()?
+            .force_connected_at(peer, generation, connected_at_ms);
         Ok(())
     }
 }

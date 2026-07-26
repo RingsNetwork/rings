@@ -7,16 +7,13 @@ use js_sys::Object;
 use js_sys::Reflect;
 use js_sys::Uint8Array;
 use rings_node::extension::snark::SNARKBehaviour;
-use rings_node::prelude::StopSource;
 use rings_node::prelude::rings_core::session::SessionSkBuilder;
-use rings_node::prelude::rings_core::storage::idb::IdbStorage;
-use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
+use rings_node::provider::browser::ProviderListener;
 use rings_node::provider::Provider;
 use rings_webview::Result as WebviewResult;
 use rings_webview::WebviewError;
 use wasm_bindgen::JsValue;
-use wasm_bindgen_futures::spawn_local;
 use wasm_bindgen_futures::JsFuture;
 
 use crate::wallet::WalletAccount;
@@ -31,13 +28,13 @@ pub struct DemoNode {
     pub snark: SNARKBehaviour,
     /// Controlled webview gateway attached to this browser node when its host origin is HTTP(S).
     pub webview: Option<WebviewNode>,
-    listen_stop: StopSource,
+    listener: ProviderListener,
 }
 
 impl DemoNode {
     /// Stop the background listen/stabilize loop started for this demo node.
     pub fn stop(&self) {
-        self.listen_stop.request_stop();
+        self.listener.stop();
     }
 
     /// Return the controlled webview gateway attached to this browser node.
@@ -125,23 +122,11 @@ pub async fn build_node(
         session_sk,
         settings.stabilize_interval,
     );
-    let storage = Box::new(
-        IdbStorage::new_with_cap_and_name(50_000, &settings.storage_name)
+    let provider = Arc::new(
+        Provider::new_browser_provider_with_storage(config, settings.storage_name)
             .await
-            .map_err(|error| format!("idb storage: {error}"))?,
+            .map_err(|error| format!("build provider: {error}"))?,
     );
-    let processor = Arc::new(
-        ProcessorBuilder::from_config(&config)
-            .map_err(|error| format!("processor builder: {error}"))?
-            .storage(storage)
-            .build()
-            .map_err(|error| format!("build processor: {error}"))?,
-    );
-    let listening = processor.clone();
-    let provider = Arc::new(Provider::from_processor(processor));
-    provider
-        .set_backend()
-        .map_err(|error| format!("install backend: {error}"))?;
 
     let snark = SNARKBehaviour::default();
     snark
@@ -149,18 +134,13 @@ pub async fn build_node(
         .map_err(|error| format!("register snark protocol: {error}"))?;
     let webview = WebviewNode::for_current_window(provider.clone())
         .map_err(|error| format!("initialize webview: {error}"))?;
-
-    let listen_stop = StopSource::new();
-    let listen_token = listen_stop.token();
-    spawn_local(async move {
-        listening.listen_with(listen_token).await;
-    });
+    let listener = provider.listen();
 
     Ok(DemoNode {
         provider,
         snark,
         webview,
-        listen_stop,
+        listener,
     })
 }
 

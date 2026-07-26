@@ -12,6 +12,7 @@ use futures::FutureExt;
 use js_sys;
 use js_sys::Uint8Array;
 use rings_core::dht::Did;
+use rings_core::dht::EntryStorage;
 use rings_core::ecc::PublicKey;
 use rings_core::lifecycle::StopSource;
 use rings_core::measure::PeerQuality;
@@ -32,6 +33,7 @@ use wasm_bindgen_futures::JsFuture;
 
 use crate::error::Error;
 use crate::error::Result as NodeResult;
+use crate::measure::MeasureStorage;
 use crate::measure::peer_quality_thresholds;
 use crate::onion::circuit::encode_initial_forward;
 use crate::onion::circuit::route_first_hop;
@@ -416,6 +418,73 @@ fn wrapped_signer(signer: js_sys::Function) -> AsyncSigner {
     )
 }
 
+async fn open_browser_entry_storage(storage_name: &str) -> NodeResult<EntryStorage> {
+    IdbStorage::new_with_cap_and_name(50000, storage_name)
+        .await
+        .map(|storage| Box::new(storage) as EntryStorage)
+        .map_err(|source| Error::BrowserStorageOpen {
+            name: storage_name.to_string(),
+            source,
+        })
+}
+
+async fn open_browser_entry_storage_or_memory(storage_name: &str) -> Option<EntryStorage> {
+    match open_browser_entry_storage(storage_name).await {
+        Ok(storage) => Some(storage),
+        Err(error) => {
+            tracing::warn!(
+                storage_name = %storage_name,
+                error = %error,
+                "browser entry IndexedDB unavailable; falling back to in-memory entry storage"
+            );
+            None
+        }
+    }
+}
+
+async fn open_browser_measure_storage(storage_name: &str) -> Option<MeasureStorage> {
+    match IdbStorage::new_with_cap_and_name(50000, storage_name).await {
+        Ok(storage) => Some(Box::new(storage) as MeasureStorage),
+        Err(source) => {
+            tracing::warn!(
+                storage_name = %storage_name,
+                error = %source,
+                "browser measurement IndexedDB unavailable; falling back to in-memory measurement storage"
+            );
+            None
+        }
+    }
+}
+
+impl Provider {
+    /// Create a browser provider backed by IndexedDB storage and install its default backend.
+    ///
+    /// This is the Rust-side constructor for browser frontends. It keeps provider ownership as the
+    /// lifecycle boundary while reusing the same storage, backend, and onion-protocol setup as the
+    /// wasm-exported constructors.
+    pub async fn new_browser_provider_with_storage(
+        config: ProcessorConfig,
+        storage_name: String,
+    ) -> NodeResult<Self> {
+        let onion_https_exit_policy = config.onion_https_exit_policy();
+        let entry_storage = open_browser_entry_storage_or_memory(&storage_name).await;
+        let measure_storage =
+            open_browser_measure_storage(&format!("{storage_name}/measure")).await;
+
+        let provider = Self::new_provider_with_storage_internal(
+            config,
+            entry_storage,
+            measure_storage,
+        )
+        .await?;
+        provider.set_backend()?;
+        if let Some(policy) = onion_https_exit_policy {
+            provider.install_onion_https_protocol(Some(policy))?;
+        }
+        Ok(provider)
+    }
+}
+
 #[wasm_export]
 impl Provider {
     /// make provider as an As arc ref
@@ -448,17 +517,8 @@ impl Provider {
         future_to_promise(async move {
             let signer = wrapped_signer(signer);
 
-            let entry_storage = Box::new(
-                IdbStorage::new_with_cap_and_name(50000, "rings-node")
-                    .await
-                    .map_err(JsError::from)?,
-            );
-
-            let measure_storage = Box::new(
-                IdbStorage::new_with_cap_and_name(50000, "rings-node/measure")
-                    .await
-                    .map_err(JsError::from)?,
-            );
+            let entry_storage = open_browser_entry_storage_or_memory("rings-node").await;
+            let measure_storage = open_browser_measure_storage("rings-node/measure").await;
 
             let provider = Provider::new_provider_internal(
                 network_id,
@@ -467,8 +527,8 @@ impl Provider {
                 account,
                 account_type,
                 Signer::Async(Box::new(signer)),
-                Some(entry_storage),
-                Some(measure_storage),
+                entry_storage,
+                measure_storage,
             )
             .await?;
 
@@ -496,17 +556,8 @@ impl Provider {
                 .map_err(JsError::from)?;
             policy.validate_targets().map_err(JsError::from)?;
 
-            let entry_storage = Box::new(
-                IdbStorage::new_with_cap_and_name(50000, "rings-node")
-                    .await
-                    .map_err(JsError::from)?,
-            );
-
-            let measure_storage = Box::new(
-                IdbStorage::new_with_cap_and_name(50000, "rings-node/measure")
-                    .await
-                    .map_err(JsError::from)?,
-            );
+            let entry_storage = open_browser_entry_storage_or_memory("rings-node").await;
+            let measure_storage = open_browser_measure_storage("rings-node/measure").await;
 
             let config_policy = policy.clone();
             let provider = Provider::new_provider_internal_with_config(
@@ -516,8 +567,8 @@ impl Provider {
                 account,
                 account_type,
                 Signer::Async(Box::new(signer)),
-                Some(entry_storage),
-                Some(measure_storage),
+                entry_storage,
+                measure_storage,
                 move |config| {
                     config
                         .enable_https_onion_exit()
@@ -578,32 +629,9 @@ impl Provider {
         storage_name: String,
     ) -> js_sys::Promise {
         future_to_promise(async move {
-            let onion_https_exit_policy = config.onion_https_exit_policy();
-            let entry_storage = Box::new(
-                IdbStorage::new_with_cap_and_name(50000, &storage_name)
-                    .await
-                    .map_err(JsError::from)?,
-            );
-
-            let measure_storage = Box::new(
-                IdbStorage::new_with_cap_and_name(50000, &format!("{storage_name}/measure"))
-                    .await
-                    .map_err(JsError::from)?,
-            );
-
-            let provider = Self::new_provider_with_storage_internal(
-                config,
-                Some(entry_storage),
-                Some(measure_storage),
-            )
-            .await
-            .map_err(JsError::from)?;
-            provider.set_backend().map_err(JsError::from)?;
-            if let Some(policy) = onion_https_exit_policy {
-                provider
-                    .install_onion_https_protocol(Some(policy))
-                    .map_err(JsError::from)?;
-            }
+            let provider = Self::new_browser_provider_with_storage(config, storage_name)
+                .await
+                .map_err(JsError::from)?;
             Ok(JsValue::from(provider))
         })
     }

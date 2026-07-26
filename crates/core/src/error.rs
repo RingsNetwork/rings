@@ -624,6 +624,18 @@ impl Error {
     pub(crate) fn unexpected_peer_ring_action(action: crate::dht::PeerRingAction) -> Self {
         Self::PeerRingUnexpectedAction(Box::new(action))
     }
+
+    /// True when a send failed because the local data-channel write queue did not accept bytes
+    /// before the bounded admission timeout. This is a local backpressure signal, not evidence
+    /// that the remote peer is unreachable or malicious.
+    pub(crate) const fn is_data_channel_backpressure(&self) -> bool {
+        matches!(self, Self::DataChannelSendQueueTimeout { .. })
+    }
+
+    /// Whether this error should degrade peer quality through `FailedToSend`.
+    pub(crate) const fn records_peer_send_failure(&self) -> bool {
+        !self.is_data_channel_backpressure()
+    }
 }
 
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
