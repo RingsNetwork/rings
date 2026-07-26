@@ -32,6 +32,11 @@ pub struct DemoNode {
 }
 
 impl DemoNode {
+    /// Return true when both handles refer to the same browser provider instance.
+    pub(crate) fn same_provider_instance(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.provider, &other.provider)
+    }
+
     /// Stop the background listen/stabilize loop started for this demo node.
     pub fn stop(&self) {
         self.listener.stop();
@@ -286,7 +291,68 @@ mod tests {
     #[allow(clippy::arc_with_non_send_sync)]
     async fn run_demo_node_stop_settles_provider_listener_task() -> Result<(), String> {
         let key = SecretKey::random();
-        let session_sk = SessionSk::new_with_seckey(&key)
+        let node = build_test_demo_node(&key).await?;
+        let started = node.listener.started();
+        let task = node.listener.task();
+
+        assert!(!node.listener.is_stopped());
+        await_promise_with_timeout(
+            started,
+            LISTENER_START_TIMEOUT_MS,
+            "ProviderListener did not start",
+        )
+        .await?;
+        sleep(Duration::from_millis(20)).await;
+        assert!(!node.listener.is_stopped());
+        node.stop();
+        assert!(node.listener.is_stopped());
+        await_promise_with_timeout(
+            task,
+            LISTENER_SETTLE_TIMEOUT_MS,
+            "ProviderListener task did not settle",
+        )
+        .await
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn demo_node_identity_distinguishes_same_wallet_restarts() {
+        let result = run_demo_node_identity_distinguishes_same_wallet_restarts().await;
+        assert!(
+            result.is_ok(),
+            "DemoNode identity should not collapse same-wallet restarts: {result:?}"
+        );
+    }
+
+    #[allow(clippy::arc_with_non_send_sync)]
+    async fn run_demo_node_identity_distinguishes_same_wallet_restarts() -> Result<(), String> {
+        let key = SecretKey::random();
+        let first = build_test_demo_node(&key).await?;
+        let second = build_test_demo_node(&key).await?;
+
+        assert_eq!(first.provider.address(), second.provider.address());
+        assert!(first.same_provider_instance(&first.clone()));
+        assert!(!first.same_provider_instance(&second));
+
+        first.stop();
+        second.stop();
+        await_promise_with_timeout(
+            first.listener.task(),
+            LISTENER_SETTLE_TIMEOUT_MS,
+            "first ProviderListener task did not settle",
+        )
+        .await?;
+        await_promise_with_timeout(
+            second.listener.task(),
+            LISTENER_SETTLE_TIMEOUT_MS,
+            "second ProviderListener task did not settle",
+        )
+        .await
+    }
+
+    // Mirrors the browser-only `DemoNode` ownership boundary from `build_node`.
+    #[allow(clippy::arc_with_non_send_sync)]
+    async fn build_test_demo_node(key: &SecretKey) -> Result<DemoNode, String> {
+        let session_sk = SessionSk::new_with_seckey(key)
             .map_err(|error| format!("session key rejected: {error}"))?;
         let config =
             ProcessorConfig::new(TEST_NETWORK_ID, TEST_ICE_SERVERS.to_string(), session_sk, 0);
@@ -306,25 +372,7 @@ mod tests {
             webview: None,
             listener,
         };
-        let started = node.listener.started();
-        let task = node.listener.task();
-
-        assert!(!node.listener.is_stopped());
-        await_promise_with_timeout(
-            started,
-            LISTENER_START_TIMEOUT_MS,
-            "ProviderListener did not start",
-        )
-        .await?;
-        assert!(!node.listener.is_stopped());
-        node.stop();
-        assert!(node.listener.is_stopped());
-        await_promise_with_timeout(
-            task,
-            LISTENER_SETTLE_TIMEOUT_MS,
-            "ProviderListener task did not settle",
-        )
-        .await
+        Ok(node)
     }
 
     async fn await_promise_with_timeout(

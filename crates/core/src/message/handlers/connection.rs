@@ -329,6 +329,13 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
                     self.connect_dht_peer(msg.did).await?;
                     if self.transport.get_connection(msg.did).is_some() {
                         self.dht.apply_fixed_finger(*index, msg.did)?;
+                    } else if let Some(attempt) = self.transport.pending_attempt(msg.did)? {
+                        self.transport
+                            .queue_pending_finger_update(attempt, *index)?;
+                    } else if self.transport.get_connection(msg.did).is_some() {
+                        // `pending_attempt` synchronizes with admission; the peer may become active
+                        // while that call waits on the lifecycle lock.
+                        self.dht.apply_fixed_finger(*index, msg.did)?;
                     }
                 }
             }

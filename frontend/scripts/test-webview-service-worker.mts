@@ -38,7 +38,9 @@ type ServiceWorkerTestApi = {
     headers: Headers,
     body: Uint8Array | null,
   ) => Uint8Array | null;
+  readonly emitDebug: (scope: string, message: string, level?: string) => Promise<void>;
   readonly gatewayHostClient: () => Promise<ServiceWorkerClientFixture | undefined>;
+  readonly registerDebugClient: (clientId: string, capability: string) => Promise<boolean>;
   readonly registerGatewayHostClient: (clientId: string, capability: string) => Promise<boolean>;
   readonly resetGatewayHostForTest: () => void;
   readonly requestKind: (request: RequestKindFixture) => string;
@@ -50,7 +52,17 @@ type ServiceWorkerTestApi = {
 type ServiceWorkerClientFixture = {
   readonly id: string;
   readonly url: string;
-  readonly postMessage: () => void;
+  readonly postMessage: (message: unknown) => void;
+};
+
+/**
+ * Minimal message event shape used to drive the service worker registration handlers.
+ */
+type ServiceWorkerMessageEventFixture = {
+  readonly source?: { readonly id?: string };
+  readonly data?: unknown;
+  readonly ports?: Array<{ postMessage: (message: unknown) => void }>;
+  waitUntil?: (promise: Promise<unknown>) => void;
 };
 
 /**
@@ -59,7 +71,7 @@ type ServiceWorkerClientFixture = {
 type ServiceWorkerTestContext = Record<string, unknown> & {
   self: {
     readonly location: URL;
-    addEventListener: () => void;
+    addEventListener: (type: string, listener: (event: ServiceWorkerMessageEventFixture) => void) => void;
     clients: {
       get: (clientId: string) => Promise<ServiceWorkerClientFixture | undefined>;
       matchAll: () => Promise<ServiceWorkerClientFixture[]>;
@@ -73,6 +85,7 @@ const projectRoot = frontendProjectRoot(scriptDir);
 const serviceWorkerPath = resolve(projectRoot, "rings-webview-service-worker.js");
 const serviceWorkerSource = await readFile(serviceWorkerPath, "utf8");
 const clientsById = new Map<string, ServiceWorkerClientFixture>();
+const messageListeners: Array<(event: ServiceWorkerMessageEventFixture) => void> = [];
 const context: ServiceWorkerTestContext = {
   console,
   Headers,
@@ -87,7 +100,11 @@ const context: ServiceWorkerTestContext = {
   clearTimeout,
   self: {
     location: new URL("http://127.0.0.1:8080/"),
-    addEventListener() {},
+    addEventListener(type, listener) {
+      if (type === "message") {
+        messageListeners.push(listener);
+      }
+    },
     clients: {
       get: async (clientId) => clientsById.get(clientId),
       matchAll: async () => [...clientsById.values()],
@@ -98,7 +115,7 @@ const globalThisKey = "globalThis";
 context[globalThisKey] = context;
 
 vm.runInNewContext(
-  `${serviceWorkerSource}\nglobalThis.__ringsWebviewServiceWorkerTest = { controlledNavigationBody, gatewayHostClient, registerGatewayHostClient, resetGatewayHostForTest, requestKind };`,
+  `${serviceWorkerSource}\nglobalThis.__ringsWebviewServiceWorkerTest = { controlledNavigationBody, emitDebug, gatewayHostClient, registerDebugClient, registerGatewayHostClient, resetGatewayHostForTest, requestKind };`,
   context,
   {
     filename: serviceWorkerPath,
@@ -107,8 +124,15 @@ vm.runInNewContext(
 
 const serviceWorkerApi = context.__ringsWebviewServiceWorkerTest;
 assert(serviceWorkerApi, "service worker test API was not exported");
-const { controlledNavigationBody, gatewayHostClient, registerGatewayHostClient, resetGatewayHostForTest, requestKind } =
-  serviceWorkerApi;
+const {
+  controlledNavigationBody,
+  emitDebug,
+  gatewayHostClient,
+  registerDebugClient,
+  registerGatewayHostClient,
+  resetGatewayHostForTest,
+  requestKind,
+} = serviceWorkerApi;
 
 /**
  * Resolves the frontend project root from either source or generated script paths.
@@ -145,6 +169,40 @@ function bytes(value: string): Uint8Array {
 function text(value: Uint8Array | null): string {
   assert(value, "expected response body bytes");
   return new TextDecoder().decode(value);
+}
+
+/**
+ * Compares service-worker responses after crossing the VM realm boundary.
+ */
+function assertJsonEqual(actual: unknown, expected: unknown): void {
+  assert.equal(JSON.stringify(actual), JSON.stringify(expected));
+}
+
+/**
+ * Delivers one synthetic message event to every service-worker message listener.
+ */
+async function dispatchMessage(clientId: string, data: unknown): Promise<unknown[]> {
+  const responses: unknown[] = [];
+  const waits: Array<Promise<unknown>> = [];
+  const event: ServiceWorkerMessageEventFixture = {
+    source: { id: clientId },
+    data,
+    ports: [
+      {
+        postMessage(message) {
+          responses.push(message);
+        },
+      },
+    ],
+    waitUntil(promise) {
+      waits.push(promise);
+    },
+  };
+  for (const listener of messageListeners) {
+    listener(event);
+  }
+  await Promise.all(waits);
+  return responses;
 }
 
 assert.equal(requestKind(request({ mode: "navigate", destination: "document" })), "navigation");
@@ -242,21 +300,33 @@ assert.throws(
 {
   resetGatewayHostForTest();
   clientsById.clear();
+  const hostMessages: unknown[] = [];
+  const hostileMessages: unknown[] = [];
   clientsById.set("host", {
     id: "host",
     url: "http://127.0.0.1:8080/#node",
-    postMessage() {},
+    postMessage(message) {
+      hostMessages.push(message);
+    },
   });
   clientsById.set("hostile", {
     id: "hostile",
     url: "http://127.0.0.1:8080/webview/https%3A%2F%2Fexample.test%2F",
-    postMessage() {},
+    postMessage(message) {
+      hostileMessages.push(message);
+    },
   });
   const hostCapability = "h".repeat(32);
   const hostileCapability = "x".repeat(32);
 
   assert.equal(await gatewayHostClient(), undefined);
-  assert.equal(await registerGatewayHostClient("hostile", hostileCapability), false);
+  assertJsonEqual(
+    await dispatchMessage("hostile", {
+      type: "rings-webview-host-register",
+      capability: hostileCapability,
+    }),
+    [{ ok: false, error: "untrusted gateway host registration" }],
+  );
   assert.equal(await gatewayHostClient(), undefined);
   assert.equal(await registerGatewayHostClient("host", "short"), false);
   assert.equal(await registerGatewayHostClient("host", hostCapability), true);
@@ -264,4 +334,29 @@ assert.throws(
   assert.equal(await registerGatewayHostClient("hostile", hostileCapability), false);
   assert.equal(await registerGatewayHostClient("host", hostileCapability), false);
   assert.equal((await gatewayHostClient())?.id, "host");
+
+  await emitDebug("worker", "pre-registration secret");
+  assertJsonEqual(
+    await dispatchMessage("hostile", {
+      type: "rings-webview-debug-register",
+      capability: hostCapability,
+    }),
+    [{ ok: false, error: "untrusted debug client registration" }],
+  );
+  assert.equal(await registerDebugClient("host", hostileCapability), false);
+  assert.equal(await registerDebugClient("host", hostCapability), true);
+  assertJsonEqual(
+    await dispatchMessage("hostile", {
+      type: "rings-webview-debug-entry",
+      capability: hostCapability,
+      entry: { scope: "hostile", message: "stolen request https://secret.test/" },
+    }),
+    [{ ok: false, error: "untrusted debug entry" }],
+  );
+  await emitDebug("worker", "post-registration secret");
+  assert.equal(hostileMessages.length, 0);
+  assert.ok(hostMessages.length >= 2);
+  assert.match(JSON.stringify(hostMessages), /pre-registration secret/);
+  assert.match(JSON.stringify(hostMessages), /post-registration secret/);
+  assert.doesNotMatch(JSON.stringify(hostMessages), /secret\.test/);
 }

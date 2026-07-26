@@ -110,6 +110,9 @@ impl InnerSwarmCallback {
 
         self.transport.record_peer_connected(did).await;
         self.message_handler.join_dht(did).await?;
+        for index in self.transport.take_pending_finger_updates(attempt)? {
+            self.transport.dht.apply_fixed_finger(index, did)?;
+        }
         self.callback
             .on_event(&SwarmEvent::ConnectionStateChange {
                 peer: did,

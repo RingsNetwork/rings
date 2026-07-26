@@ -24,16 +24,24 @@ self.addEventListener("message", (event) => {
   const clientId = event.source?.id;
   const reply = event.ports?.[0];
   if (event.data?.type === "rings-webview-debug-entry" && event.data.entry) {
-    const entry = event.data.entry;
-    void emitDebug(
-      entry.scope || "host",
-      entry.message || "unknown event",
-      entry.level || "info",
-      entry.resource,
-      entry.at,
-      entry.onion,
-    );
-    reply?.postMessage({ ok: true });
+    const publish = acceptDebugEntry(clientId, event.data.capability).then(async (ok) => {
+      if (!ok) {
+        await emitDebug("worker", "Rejected untrusted debug entry", "warning");
+        reply?.postMessage({ ok: false, error: "untrusted debug entry" });
+        return;
+      }
+      const entry = event.data.entry;
+      await emitDebug(
+        entry.scope || "host",
+        entry.message || "unknown event",
+        entry.level || "info",
+        entry.resource,
+        entry.at,
+        entry.onion,
+      );
+      reply?.postMessage({ ok: true });
+    });
+    event.waitUntil?.(publish);
     return;
   }
   if (event.data?.type === "rings-webview-host-register" && typeof clientId === "string" && clientId) {
@@ -50,14 +58,16 @@ self.addEventListener("message", (event) => {
     return;
   }
   if (event.data?.type === "rings-webview-debug-register" && typeof clientId === "string" && clientId) {
-    debugClientIds.add(clientId);
-    void self.clients.get(clientId).then(async (client) => {
-      for (const entry of debugHistory) {
-        client?.postMessage(entry);
+    const registration = registerDebugClient(clientId, event.data.capability).then(async (ok) => {
+      if (ok) {
+        await emitDebug("worker", "Registered popup debug client");
+        reply?.postMessage({ ok: true });
+      } else {
+        await emitDebug("worker", "Rejected untrusted debug client registration", "warning");
+        reply?.postMessage({ ok: false, error: "untrusted debug client registration" });
       }
-      await emitDebug("worker", "Registered popup debug client");
     });
-    reply?.postMessage({ ok: true });
+    event.waitUntil?.(registration);
     return;
   }
   reply?.postMessage({ ok: false, error: "unsupported gateway registration" });
@@ -307,32 +317,13 @@ async function debugClients() {
   const clientsById = new Map();
   for (const clientId of debugClientIds) {
     const client = await self.clients.get(clientId);
-    if (client) {
+    if (client && isTrustedGatewayHostUrl(client.url)) {
       clientsById.set(client.id, client);
     } else {
       debugClientIds.delete(clientId);
     }
   }
-  const candidates = await self.clients.matchAll({
-    type: "window",
-    includeUncontrolled: true,
-  });
-  for (const client of candidates) {
-    if (isWebviewPopup(client.url)) {
-      debugClientIds.add(client.id);
-      clientsById.set(client.id, client);
-    }
-  }
   return [...clientsById.values()];
-}
-
-function isWebviewPopup(url) {
-  try {
-    const parsed = new URL(url);
-    return parsed.hash.startsWith("#webview") || parsed.pathname.startsWith(gatewayPrefix);
-  } catch (_error) {
-    return false;
-  }
 }
 
 function requestedTarget(url) {
@@ -378,6 +369,30 @@ async function registerGatewayHostClient(clientId, capability) {
   return true;
 }
 
+async function registerDebugClient(clientId, capability) {
+  const client = await trustedCapabilityClient(clientId, capability);
+  if (!client) {
+    return false;
+  }
+  debugClientIds.add(clientId);
+  for (const entry of debugHistory) {
+    client.postMessage(entry);
+  }
+  return true;
+}
+
+async function acceptDebugEntry(clientId, capability) {
+  return Boolean(await trustedCapabilityClient(clientId, capability));
+}
+
+async function trustedCapabilityClient(clientId, capability) {
+  if (typeof clientId !== "string" || !clientId || !gatewayHostCapability || capability !== gatewayHostCapability) {
+    return undefined;
+  }
+  const client = await self.clients.get(clientId);
+  return client && isTrustedGatewayHostUrl(client.url) ? client : undefined;
+}
+
 function isValidGatewayHostCapability(capability) {
   return typeof capability === "string" && capability.length >= minimumGatewayHostCapabilityLength;
 }
@@ -394,6 +409,8 @@ function isTrustedGatewayHostUrl(url) {
 function resetGatewayHostForTest() {
   gatewayHostClientId = null;
   gatewayHostCapability = null;
+  debugClientIds.clear();
+  debugHistory.splice(0, debugHistory.length);
 }
 
 async function serializeRequest(event) {

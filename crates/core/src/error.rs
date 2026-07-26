@@ -275,6 +275,10 @@ pub enum Error {
         capacity: usize,
     },
 
+    /// Pending WebRTC connection generation id space is exhausted.
+    #[error("Pending WebRTC connection generation is exhausted")]
+    PendingConnectionGenerationExhausted,
+
     /// Failed to access the swarm connection lifecycle state
     #[error("Failed to access the swarm connection lifecycle state")]
     SwarmConnectionLifecycleLock,

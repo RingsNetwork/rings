@@ -262,6 +262,29 @@ async fn admitted_peer_cannot_be_replaced_by_a_pending_handshake() -> Result<()>
 }
 
 #[tokio::test]
+async fn pending_promotion_gap_is_covered_by_lifecycle_lock() -> Result<()> {
+    let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
+    let peer = SecretKey::random().address().into();
+    let attempt = transport.reserve_pending_connection(peer).await?;
+    let mut observed_gap = false;
+
+    assert!(
+        transport.promote_pending_connection_with_gap_observer_for_test(attempt, |transport| {
+            observed_gap = true;
+            assert!(transport.connection_lifecycle.try_lock().is_err());
+        },)?
+    );
+
+    assert!(observed_gap);
+    assert!(transport.is_admitted_connection_attempt(attempt));
+    assert!(matches!(
+        transport.reserve_pending_connection(peer).await,
+        Err(Error::AlreadyConnected)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn pending_offer_is_not_routable_or_visible_to_dht() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
@@ -276,6 +299,50 @@ async fn pending_offer_is_not_routable_or_visible_to_dht() -> Result<()> {
     assert!(!transport.dht.successors().contains(&peer)?);
 
     transport.disconnect(peer).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn pending_finger_update_is_applied_when_attempt_is_admitted() -> Result<()> {
+    let transport = Arc::new(transport_with_measure(Arc::new(
+        RecordingMeasure::default(),
+    ))?);
+    let peer = SecretKey::random().address().into();
+    let finger_index = 3;
+    let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
+    let (attempt, _offer) = transport
+        .prepare_connection_offer_with_attempt(peer, callback)
+        .await?;
+
+    transport.queue_pending_finger_update(attempt, finger_index)?;
+    assert_eq!(transport.dht.lock_finger()?.get(finger_index), None);
+
+    let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback))
+        .with_pending_connection_attempt(attempt);
+    callback
+        .on_data_channel_open(&peer.to_string())
+        .await
+        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+
+    assert_eq!(transport.dht.lock_finger()?.get(finger_index), Some(peer));
+    assert!(transport.is_admitted_connection(peer));
+
+    transport.disconnect(peer).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn pending_finger_update_applies_if_admission_wins_queue_race() -> Result<()> {
+    let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
+    let peer = SecretKey::random().address().into();
+    let finger_index = 4;
+    let attempt = transport.reserve_pending_connection(peer).await?;
+
+    assert!(transport.promote_pending_connection(attempt)?);
+    transport.queue_pending_finger_update(attempt, finger_index)?;
+
+    assert_eq!(transport.dht.lock_finger()?.get(finger_index), Some(peer));
+    assert!(transport.is_admitted_connection(peer));
     Ok(())
 }
 

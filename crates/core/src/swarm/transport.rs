@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -132,6 +133,7 @@ pub struct SwarmTransport {
     connection_lifecycle: Mutex<()>,
     pending_peers: Mutex<PendingPeerPool<DEFAULT_PENDING_CONNECTION_CAPACITY>>,
     active_peers: Mutex<BTreeMap<Did, u64>>,
+    pending_finger_updates: Mutex<BTreeMap<PendingConnectionAttempt, BTreeSet<usize>>>,
     peer_liveness: Mutex<PeerLivenessMap>,
     storage_lookup_observations: Mutex<StorageLookupObservationMap>,
     pending_storage_sync_acks: Mutex<StorageSyncAckMap>,
@@ -218,6 +220,7 @@ impl SwarmTransport {
             connection_lifecycle: Mutex::new(()),
             pending_peers: Mutex::new(PendingPeerPool::new()),
             active_peers: Mutex::new(BTreeMap::new()),
+            pending_finger_updates: Mutex::new(BTreeMap::new()),
             peer_liveness: Mutex::new(PeerLivenessMap::new()),
             storage_lookup_observations: Mutex::new(BTreeMap::new()),
             pending_storage_sync_acks: Mutex::new(BTreeMap::new()),

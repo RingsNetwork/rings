@@ -44,6 +44,7 @@
     }
     worker.postMessage({
       type: "rings-webview-debug-entry",
+      capability: gatewayHostCapability,
       entry,
     });
   }
@@ -112,7 +113,10 @@
     if (!worker) {
       throw new Error("Service Worker has no active controller");
     }
-    const acknowledged = await postWorkerMessage(worker, { type: "rings-webview-debug-register" });
+    const acknowledged = await postWorkerMessage(worker, {
+      type: "rings-webview-debug-register",
+      capability: gatewayHostCapability,
+    });
     if (!acknowledged) {
       recordDebug("popup", "Service Worker did not acknowledge debug registration; continuing");
     }

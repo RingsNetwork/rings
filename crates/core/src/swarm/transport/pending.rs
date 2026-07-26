@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use rings_transport::core::transport::TransportInterface;
 use rings_transport::core::transport::WebrtcConnectionState;
@@ -21,7 +22,7 @@ pub(super) const PENDING_CONNECTION_TIMEOUT_MS: i64 = 180_000;
 /// A peer can have a replacement handshake after a timeout. Callbacks carry
 /// this token so a late callback from the replaced connection cannot promote
 /// the newer handshake into the active routing set.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct PendingConnectionAttempt {
     pub(super) peer: Did,
     pub(super) generation: u64,
@@ -33,7 +34,7 @@ impl PendingConnectionAttempt {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(super) struct PendingPeer {
     generation: u64,
     admitted_at_ms: i64,
@@ -49,6 +50,7 @@ pub(super) struct ExpiredPendingPeer {
 ///
 /// The pool deliberately has no DHT reference: a peer is visible to Chord
 /// only after its data channel opens and the matching attempt is promoted.
+#[derive(Clone, Debug)]
 pub(super) struct PendingPeerPool<const MAX_PENDING: usize> {
     next_generation: u64,
     peers: BTreeMap<Did, PendingPeer>,
@@ -72,7 +74,10 @@ impl<const MAX_PENDING: usize> PendingPeerPool<MAX_PENDING> {
             });
         }
 
-        self.next_generation = self.next_generation.wrapping_add(1);
+        self.next_generation = self
+            .next_generation
+            .checked_add(1)
+            .ok_or(Error::PendingConnectionGenerationExhausted)?;
         let attempt = PendingConnectionAttempt {
             peer,
             generation: self.next_generation,
@@ -97,6 +102,11 @@ impl<const MAX_PENDING: usize> PendingPeerPool<MAX_PENDING> {
         }
         self.peers.remove(&attempt.peer);
         true
+    }
+
+    #[cfg(test)]
+    fn set_next_generation_for_test(&mut self, next_generation: u64) {
+        self.next_generation = next_generation;
     }
 
     pub(super) fn expire(&mut self, now_ms: i64) -> Vec<ExpiredPendingPeer> {
@@ -144,6 +154,15 @@ impl SwarmTransport {
 
     pub(super) fn active_peers(&self) -> Result<std::sync::MutexGuard<'_, BTreeMap<Did, u64>>> {
         self.active_peers
+            .lock()
+            .map_err(|_| Error::SwarmConnectionLifecycleLock)
+    }
+
+    fn pending_finger_updates(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, BTreeMap<PendingConnectionAttempt, BTreeSet<usize>>>>
+    {
+        self.pending_finger_updates
             .lock()
             .map_err(|_| Error::SwarmConnectionLifecycleLock)
     }
@@ -225,7 +244,8 @@ impl SwarmTransport {
         Ok(attempt)
     }
 
-    pub(super) fn pending_attempt(&self, peer: Did) -> Result<Option<PendingConnectionAttempt>> {
+    pub(crate) fn pending_attempt(&self, peer: Did) -> Result<Option<PendingConnectionAttempt>> {
+        let _lifecycle = self.connection_lifecycle()?;
         let pending = self.pending_peers()?;
         Ok(pending
             .peers
@@ -240,14 +260,25 @@ impl SwarmTransport {
         &self,
         attempt: PendingConnectionAttempt,
     ) -> Result<bool> {
+        self.promote_pending_connection_with_gap_observer(attempt, |_| {})
+    }
+
+    fn promote_pending_connection_with_gap_observer(
+        &self,
+        attempt: PendingConnectionAttempt,
+        observe_gap: impl FnOnce(&Self),
+    ) -> Result<bool> {
         let _lifecycle = self.connection_lifecycle()?;
         let mut pending = self.pending_peers()?;
         if !pending.remove(attempt) {
             return Ok(false);
         }
-        drop(pending);
+        // The lifecycle lock spans the pending->active transition. A concurrent
+        // reserve cannot observe this DID as absent between the two maps.
+        observe_gap(self);
         self.active_peers()?
             .insert(attempt.peer, attempt.generation);
+        drop(pending);
         tracing::info!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
@@ -258,21 +289,74 @@ impl SwarmTransport {
         Ok(true)
     }
 
+    #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
+    pub(crate) fn promote_pending_connection_with_gap_observer_for_test(
+        &self,
+        attempt: PendingConnectionAttempt,
+        observe_gap: impl FnOnce(&Self),
+    ) -> Result<bool> {
+        self.promote_pending_connection_with_gap_observer(attempt, observe_gap)
+    }
+
     pub(super) fn retire_pending_connection(
         &self,
         attempt: PendingConnectionAttempt,
     ) -> Result<bool> {
         let _lifecycle = self.connection_lifecycle()?;
-        Ok(self.pending_peers()?.remove(attempt))
+        let removed = self.pending_peers()?.remove(attempt);
+        if removed {
+            self.pending_finger_updates()?.remove(&attempt);
+        }
+        Ok(removed)
     }
 
     pub(super) fn retire_active_connection(&self, peer: Did) -> Result<bool> {
         let _lifecycle = self.connection_lifecycle()?;
         let removed = self.active_peers()?.remove(&peer).is_some();
         if removed {
+            self.pending_finger_updates()?
+                .retain(|attempt, _| attempt.peer != peer);
             self.remove_peer_liveness(peer)?;
         }
         Ok(removed)
+    }
+
+    /// Preserve a finger-table continuation until the matching pending attempt is admitted.
+    pub(crate) fn queue_pending_finger_update(
+        &self,
+        attempt: PendingConnectionAttempt,
+        index: usize,
+    ) -> Result<()> {
+        let _lifecycle = self.connection_lifecycle()?;
+        if self
+            .pending_peers()?
+            .peers
+            .get(&attempt.peer)
+            .is_some_and(|pending| pending.generation == attempt.generation)
+        {
+            self.pending_finger_updates()?
+                .entry(attempt)
+                .or_default()
+                .insert(index);
+            return Ok(());
+        }
+        if self.active_peers()?.get(&attempt.peer).copied() == Some(attempt.generation) {
+            self.dht.apply_fixed_finger(index, attempt.peer)?;
+        }
+        Ok(())
+    }
+
+    /// Consume finger-table continuations owned by the admitted pending attempt.
+    pub(crate) fn take_pending_finger_updates(
+        &self,
+        attempt: PendingConnectionAttempt,
+    ) -> Result<Vec<usize>> {
+        Ok(self
+            .pending_finger_updates()?
+            .remove(&attempt)
+            .unwrap_or_default()
+            .into_iter()
+            .collect())
     }
 
     /// Cancel a current pending handshake and release its non-routable transport object.
@@ -317,7 +401,11 @@ impl SwarmTransport {
     pub(crate) async fn expire_pending_connections(&self) -> Result<()> {
         let expired = {
             let _lifecycle = self.connection_lifecycle()?;
-            self.pending_peers()?.expire(get_epoch_ms_i64())
+            let expired = self.pending_peers()?.expire(get_epoch_ms_i64());
+            for expired in &expired {
+                self.pending_finger_updates()?.remove(&expired.attempt);
+            }
+            expired
         };
         for expired in expired {
             let attempt = expired.attempt;
@@ -382,6 +470,11 @@ impl SwarmTransport {
 
 #[cfg(test)]
 mod lifecycle_model {
+    use std::collections::BTreeMap;
+
+    use super::*;
+    use crate::ecc::SecretKey;
+
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum PeerLifecycle {
         Absent,
@@ -397,7 +490,7 @@ mod lifecycle_model {
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum LifecycleAction {
-        Replacement,
+        Reserve,
         Open(CallbackGeneration),
         Close(CallbackGeneration),
         Failed(CallbackGeneration),
@@ -405,12 +498,19 @@ mod lifecycle_model {
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct LifecycleView {
+        peer: PeerLifecycle,
+        dht_member: bool,
+        transport_slot: bool,
+        generation_exhausted: bool,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     struct LifecycleModel {
         peer: PeerLifecycle,
         next_generation: u64,
         previous_generation: Option<u64>,
-        dht_member: bool,
-        transport_slot: bool,
+        generation_exhausted: bool,
     }
 
     impl Default for LifecycleModel {
@@ -419,8 +519,7 @@ mod lifecycle_model {
                 peer: PeerLifecycle::Absent,
                 next_generation: 0,
                 previous_generation: None,
-                dht_member: false,
-                transport_slot: false,
+                generation_exhausted: false,
             }
         }
     }
@@ -428,7 +527,7 @@ mod lifecycle_model {
     impl LifecycleModel {
         fn apply(mut self, action: LifecycleAction) -> Self {
             match action {
-                LifecycleAction::Replacement => self.replace_pending(),
+                LifecycleAction::Reserve => self.reserve(),
                 LifecycleAction::Open(callback) => self.open(callback),
                 LifecycleAction::Close(callback) | LifecycleAction::Failed(callback) => {
                     self.terminal(callback)
@@ -438,15 +537,16 @@ mod lifecycle_model {
             self
         }
 
-        fn replace_pending(&mut self) {
-            if let PeerLifecycle::Active(_) = self.peer {
+        fn reserve(&mut self) {
+            if !matches!(self.peer, PeerLifecycle::Absent) {
                 return;
             }
-            self.remember_current_generation();
-            self.next_generation = self.next_generation.wrapping_add(1);
-            self.peer = PeerLifecycle::Pending(self.next_generation);
-            self.dht_member = false;
-            self.transport_slot = true;
+            let Some(next_generation) = self.next_generation.checked_add(1) else {
+                self.generation_exhausted = true;
+                return;
+            };
+            self.next_generation = next_generation;
+            self.peer = PeerLifecycle::Pending(next_generation);
         }
 
         fn open(&mut self, callback: CallbackGeneration) {
@@ -455,8 +555,6 @@ mod lifecycle_model {
             };
             if self.peer == PeerLifecycle::Pending(callback_generation) {
                 self.peer = PeerLifecycle::Active(callback_generation);
-                self.dht_member = true;
-                self.transport_slot = true;
             }
         }
 
@@ -467,8 +565,6 @@ mod lifecycle_model {
             if self.generation_matches_live_slot(callback_generation) {
                 self.previous_generation = Some(callback_generation);
                 self.peer = PeerLifecycle::Absent;
-                self.dht_member = false;
-                self.transport_slot = false;
             }
         }
 
@@ -476,8 +572,6 @@ mod lifecycle_model {
             if let PeerLifecycle::Pending(generation) = self.peer {
                 self.previous_generation = Some(generation);
                 self.peer = PeerLifecycle::Absent;
-                self.dht_member = false;
-                self.transport_slot = false;
             }
         }
 
@@ -497,12 +591,6 @@ mod lifecycle_model {
             }
         }
 
-        fn remember_current_generation(&mut self) {
-            if let Some(generation) = self.current_generation() {
-                self.previous_generation = Some(generation);
-            }
-        }
-
         fn generation_matches_live_slot(self, generation: u64) -> bool {
             matches!(
                 self.peer,
@@ -510,6 +598,162 @@ mod lifecycle_model {
             )
         }
 
+        fn view(self) -> LifecycleView {
+            LifecycleView {
+                peer: self.peer,
+                dht_member: matches!(self.peer, PeerLifecycle::Active(_)),
+                transport_slot: matches!(
+                    self.peer,
+                    PeerLifecycle::Pending(_) | PeerLifecycle::Active(_)
+                ),
+                generation_exhausted: self.generation_exhausted,
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct LifecycleImplementation {
+        peer: Did,
+        pending: PendingPeerPool<1>,
+        active: BTreeMap<Did, u64>,
+        previous_attempt: Option<PendingConnectionAttempt>,
+        current_attempt: Option<PendingConnectionAttempt>,
+        dht_member: bool,
+        transport_slot: bool,
+        generation_exhausted: bool,
+        now_ms: i64,
+    }
+
+    impl LifecycleImplementation {
+        fn new(peer: Did) -> Self {
+            Self {
+                peer,
+                pending: PendingPeerPool::new(),
+                active: BTreeMap::new(),
+                previous_attempt: None,
+                current_attempt: None,
+                dht_member: false,
+                transport_slot: false,
+                generation_exhausted: false,
+                now_ms: 0,
+            }
+        }
+
+        fn with_next_generation(peer: Did, next_generation: u64) -> Self {
+            let mut this = Self::new(peer);
+            this.pending.set_next_generation_for_test(next_generation);
+            this
+        }
+
+        fn apply(mut self, action: LifecycleAction) -> Self {
+            match action {
+                LifecycleAction::Reserve => self.reserve(),
+                LifecycleAction::Open(callback) => self.open(callback),
+                LifecycleAction::Close(callback) | LifecycleAction::Failed(callback) => {
+                    self.terminal(callback)
+                }
+                LifecycleAction::Timeout => self.timeout(),
+            }
+            self
+        }
+
+        fn reserve(&mut self) {
+            if self.pending.contains(self.peer) || self.active.contains_key(&self.peer) {
+                return;
+            }
+            match self.pending.reserve(self.peer, self.now_ms) {
+                Ok(attempt) => {
+                    self.current_attempt = Some(attempt);
+                    self.transport_slot = true;
+                    self.dht_member = false;
+                    self.now_ms += 1;
+                }
+                Err(Error::PendingConnectionGenerationExhausted) => {
+                    self.generation_exhausted = true;
+                }
+                Err(error) => panic!("unexpected pending reserve error: {error:?}"),
+            }
+        }
+
+        fn open(&mut self, callback: CallbackGeneration) {
+            let Some(attempt) = self.callback_attempt(callback) else {
+                return;
+            };
+            if !self.pending.remove(attempt) {
+                return;
+            }
+            self.active.insert(attempt.peer, attempt.generation);
+            self.dht_member = true;
+            self.transport_slot = true;
+        }
+
+        fn terminal(&mut self, callback: CallbackGeneration) {
+            let Some(attempt) = self.callback_attempt(callback) else {
+                return;
+            };
+            let removed_pending = self.pending.remove(attempt);
+            let removed_active = self
+                .active
+                .get(&attempt.peer)
+                .copied()
+                .is_some_and(|generation| generation == attempt.generation);
+            if !removed_pending && !removed_active {
+                return;
+            }
+            if removed_active {
+                self.active.remove(&attempt.peer);
+            }
+            self.previous_attempt = Some(attempt);
+            if self.current_attempt == Some(attempt) {
+                self.current_attempt = None;
+            }
+            self.dht_member = false;
+            self.transport_slot = false;
+        }
+
+        fn timeout(&mut self) {
+            let expired = self
+                .pending
+                .expire(self.now_ms + PENDING_CONNECTION_TIMEOUT_MS);
+            let Some(expired) = expired.into_iter().next() else {
+                return;
+            };
+            self.previous_attempt = Some(expired.attempt);
+            if self.current_attempt == Some(expired.attempt) {
+                self.current_attempt = None;
+            }
+            self.dht_member = false;
+            self.transport_slot = false;
+        }
+
+        fn callback_attempt(
+            &self,
+            callback: CallbackGeneration,
+        ) -> Option<PendingConnectionAttempt> {
+            match callback {
+                CallbackGeneration::Current => self.current_attempt,
+                CallbackGeneration::Previous => self.previous_attempt,
+            }
+        }
+
+        fn view(&self) -> LifecycleView {
+            let peer = if let Some(generation) = self.active.get(&self.peer).copied() {
+                PeerLifecycle::Active(generation)
+            } else if let Some(pending) = self.pending.peers.get(&self.peer) {
+                PeerLifecycle::Pending(pending.generation)
+            } else {
+                PeerLifecycle::Absent
+            };
+            LifecycleView {
+                peer,
+                dht_member: self.dht_member,
+                transport_slot: self.transport_slot,
+                generation_exhausted: self.generation_exhausted,
+            }
+        }
+    }
+
+    impl LifecycleView {
         fn assert_invariants(self) {
             // Invariant: Pending(g) is a physical transport slot only; it is not a Chord member.
             if matches!(self.peer, PeerLifecycle::Pending(_)) {
@@ -536,9 +780,9 @@ mod lifecycle_model {
 
     #[test]
     fn pending_admission_model_preserves_generation_and_routing_invariants() {
-        const MAX_DEPTH: usize = 4;
+        const MAX_DEPTH: usize = 5;
         let actions = [
-            LifecycleAction::Replacement,
+            LifecycleAction::Reserve,
             LifecycleAction::Open(CallbackGeneration::Current),
             LifecycleAction::Open(CallbackGeneration::Previous),
             LifecycleAction::Close(CallbackGeneration::Current),
@@ -547,30 +791,51 @@ mod lifecycle_model {
             LifecycleAction::Failed(CallbackGeneration::Previous),
             LifecycleAction::Timeout,
         ];
+        let peer = SecretKey::random().address().into();
 
-        explore(LifecycleModel::default(), &actions, MAX_DEPTH);
+        explore(
+            LifecycleModel::default(),
+            LifecycleImplementation::new(peer),
+            &actions,
+            MAX_DEPTH,
+        );
     }
 
     #[test]
-    fn pending_admission_model_matches_wrapping_generation_boundary() {
+    fn pending_admission_model_and_pool_reject_generation_exhaustion_without_reuse() {
+        let peer = SecretKey::random().address().into();
         let model = LifecycleModel {
             next_generation: u64::MAX,
             ..LifecycleModel::default()
         }
-        .apply(LifecycleAction::Replacement);
+        .apply(LifecycleAction::Reserve);
+        let implementation = LifecycleImplementation::with_next_generation(peer, u64::MAX)
+            .apply(LifecycleAction::Reserve);
 
-        assert_eq!(model.peer, PeerLifecycle::Pending(0));
-        assert_eq!(model.next_generation, 0);
-        model.assert_invariants();
+        assert_eq!(model.view(), implementation.view());
+        assert_eq!(model.view().peer, PeerLifecycle::Absent);
+        assert!(model.view().generation_exhausted);
+        model.view().assert_invariants();
     }
 
-    fn explore(model: LifecycleModel, actions: &[LifecycleAction], remaining_depth: usize) {
-        model.assert_invariants();
+    fn explore(
+        model: LifecycleModel,
+        implementation: LifecycleImplementation,
+        actions: &[LifecycleAction],
+        remaining_depth: usize,
+    ) {
+        assert_eq!(model.view(), implementation.view());
+        model.view().assert_invariants();
         if remaining_depth == 0 {
             return;
         }
         for action in actions.iter().copied() {
-            explore(model.apply(action), actions, remaining_depth - 1);
+            explore(
+                model.apply(action),
+                implementation.clone().apply(action),
+                actions,
+                remaining_depth - 1,
+            );
         }
     }
 }

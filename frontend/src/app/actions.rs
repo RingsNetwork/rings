@@ -307,7 +307,7 @@ impl StartAction {
             }
         };
         if !token.is_current() {
-            self.discard_stale_local_node(&built, my_did.as_str());
+            self.discard_stale_local_node(&built);
             return;
         }
         self.webview_ready.set(webview_ready);
@@ -318,12 +318,12 @@ impl StartAction {
             .await;
     }
 
-    fn discard_stale_local_node(&self, built: &DemoNode, did: &str) {
+    fn discard_stale_local_node(&self, built: &DemoNode) {
         built.stop();
         let mut node_ref = self.node_ref.borrow_mut();
         if node_ref
             .as_ref()
-            .is_some_and(|node| node.provider.address() == did)
+            .is_some_and(|node| node.same_provider_instance(built))
         {
             *node_ref = None;
             webview::clear_browser_gateway();
