@@ -1,6 +1,9 @@
 use super::common::*;
 use super::*;
 
+const LISTENER_START_YIELD: Duration = Duration::from_millis(100);
+const LISTENER_STOP_TIMEOUT: Duration = Duration::from_secs(2);
+
 #[tokio::test]
 async fn listen_with_pre_stopped_token_returns_before_first_tick() {
     let processor = prepare_processor().await;
@@ -28,6 +31,24 @@ async fn provider_listen_with_pre_stopped_token_returns_before_first_tick() {
     )
     .await
     .expect("pre-stopped provider listen token should exit before the first stabilization tick");
+}
+
+#[tokio::test]
+async fn provider_listen_with_started_token_returns_after_stop() {
+    let processor = prepare_processor().await;
+    let provider = Provider::from_processor(Arc::new(processor));
+    let stop = StopSource::new();
+    let listen = provider.listen_with(stop.token());
+    let stopper = async {
+        tokio::time::sleep(LISTENER_START_YIELD).await;
+        stop.request_stop();
+    };
+
+    tokio::time::timeout(LISTENER_STOP_TIMEOUT, async {
+        futures::join!(listen, stopper);
+    })
+    .await
+    .expect("started provider listen token should exit after stop");
 }
 
 #[tokio::test]

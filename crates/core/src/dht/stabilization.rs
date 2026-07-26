@@ -44,6 +44,7 @@ use crate::utils::get_epoch_ms_i64;
 use crate::utils::sleep;
 
 const STABILIZATION_STEP_TIMEOUT: Duration = Duration::from_secs(30);
+const STABILIZATION_STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DISCONNECTED_CONNECTION_GRACE_MS: i64 = 30_000;
 pub(crate) const STORAGE_REPAIR_MAX_DELIVERIES_PER_STEP: usize = 64;
 pub(crate) const STORAGE_REPAIR_FRESH_CONNECTION_GRACE_MS: i64 = 30_000;
@@ -1012,8 +1013,7 @@ mod stabilizer {
                 if stop.should_stop() {
                     return;
                 }
-                sleep(interval).await;
-                if stop.should_stop() {
+                if !sleep_until_next_tick_or_stop(interval, &stop).await {
                     return;
                 }
                 self.stabilize()
@@ -1021,5 +1021,18 @@ mod stabilizer {
                     .unwrap_or_else(|e| tracing::error!("failed to stabilize {:?}", e));
             }
         }
+    }
+
+    async fn sleep_until_next_tick_or_stop(interval: Duration, stop: &StopToken) -> bool {
+        let mut remaining = interval;
+        while !remaining.is_zero() {
+            if stop.should_stop() {
+                return false;
+            }
+            let step = std::cmp::min(remaining, STABILIZATION_STOP_POLL_INTERVAL);
+            sleep(step).await;
+            remaining = remaining.saturating_sub(step);
+        }
+        !stop.should_stop()
     }
 }

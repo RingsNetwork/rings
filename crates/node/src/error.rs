@@ -160,6 +160,9 @@ pub enum Error {
         /// Storage backend error returned while opening the database.
         source: rings_core::error::Error,
     } = 814,
+    /// A periodic registration task observed a cooperative stop request.
+    #[error("registration task stopped")]
+    RegistrationStopped = 815,
     /// Creating a file on disk failed.
     #[error("Create File Error: {0}")]
     CreateFileError(String) = 900,

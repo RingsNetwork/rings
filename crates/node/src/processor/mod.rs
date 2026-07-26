@@ -94,6 +94,7 @@ pub use config::ProcessorConfigSerialized;
 const DHT_LOOKUP_CACHE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DHT_LOOKUP_CACHE_POLL_ATTEMPTS: usize = 40;
 const MAX_REGISTRATION_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(10);
+const REGISTRATION_STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[cfg(not(all(feature = "browser", target_family = "wasm")))]
 async fn sleep_dht_lookup_poll_interval(interval: Duration) -> Result<()> {
@@ -116,6 +117,22 @@ fn registration_attempt_timeout(interval: Duration) -> Duration {
     } else {
         interval
     }
+}
+
+async fn sleep_registration_interval_with_stop(
+    interval: Duration,
+    stop: &StopToken,
+) -> Result<bool> {
+    let mut remaining = interval;
+    while !remaining.is_zero() {
+        if stop.should_stop() {
+            return Ok(false);
+        }
+        let step = std::cmp::min(remaining, REGISTRATION_STOP_POLL_INTERVAL);
+        sleep_registration_interval(step).await?;
+        remaining = remaining.saturating_sub(step);
+    }
+    Ok(!stop.should_stop())
 }
 
 /// Processor for rings-node rpc server.
@@ -152,6 +169,10 @@ impl Processor {
 
     fn registration_context(&self) -> RegistrationContext<'_> {
         RegistrationContext::new(self)
+    }
+
+    fn registration_context_with_stop(&self, stop: StopToken) -> RegistrationContext<'_> {
+        RegistrationContext::new_with_stop(self, stop)
     }
 
     #[cfg(all(test, feature = "node"))]
@@ -256,8 +277,23 @@ impl Processor {
     }
 
     pub(crate) async fn fetch_storage_entry(&self, entry_key: Did) -> Result<Option<entry::Entry>> {
+        let stop = StopToken::never();
+        self.fetch_storage_entry_with_stop(entry_key, &stop).await
+    }
+
+    pub(crate) async fn fetch_storage_entry_with_stop(
+        &self,
+        entry_key: Did,
+        stop: &StopToken,
+    ) -> Result<Option<entry::Entry>> {
+        if stop.should_stop() {
+            return Err(Error::RegistrationStopped);
+        }
         self.storage_fetch(entry_key).await?;
         for attempt in 0..DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
+            if stop.should_stop() {
+                return Err(Error::RegistrationStopped);
+            }
             if let Some(entry) = self.storage_check_cache(entry_key).await {
                 return Ok(Some(entry));
             }
@@ -340,8 +376,9 @@ impl Processor {
         &self,
         task: &dyn RegistrationTask,
         timeout: Duration,
+        stop: StopToken,
     ) -> Result<()> {
-        let context = self.registration_context();
+        let context = self.registration_context_with_stop(stop);
         let registration = task.register_once(&context).fuse();
         let timeout_timer = sleep_registration_interval(timeout).fuse();
         futures::pin_mut!(registration, timeout_timer);
@@ -364,18 +401,25 @@ impl Processor {
                 return;
             }
             let timeout = registration_attempt_timeout(task.interval());
-            if let Err(error) = self.run_registration_once_with_timeout(task, timeout).await {
+            if let Err(error) = self
+                .run_registration_once_with_timeout(task, timeout, stop.clone())
+                .await
+            {
                 tracing::warn!("Failed to run {} registration task: {error:?}", task.name());
             }
             if stop.should_stop() {
                 return;
             }
-            if let Err(error) = sleep_registration_interval(task.interval()).await {
-                tracing::warn!(
-                    "Stopping {} registration task after timer error: {error:?}",
-                    task.name()
-                );
-                return;
+            match sleep_registration_interval_with_stop(task.interval(), &stop).await {
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(error) => {
+                    tracing::warn!(
+                        "Stopping {} registration task after timer error: {error:?}",
+                        task.name()
+                    );
+                    return;
+                }
             }
         }
     }

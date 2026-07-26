@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use futures::lock::Mutex as AsyncMutex;
 use rings_core::dht::Did;
 use rings_core::ecc::VerificationPublicKey;
+use rings_core::lifecycle::StopToken;
 use rings_core::message::Encoded;
 use rings_core::message::Encoder;
 use rings_core::prelude::entry;
@@ -104,11 +105,28 @@ pub(crate) async fn sleep_registration_interval(interval: Duration) -> Result<()
 /// registry needs. The task does not own the processor.
 pub struct RegistrationContext<'a> {
     processor: &'a Processor,
+    stop: StopToken,
 }
 
 impl<'a> RegistrationContext<'a> {
-    pub(crate) const fn new(processor: &'a Processor) -> Self {
-        Self { processor }
+    pub(crate) fn new(processor: &'a Processor) -> Self {
+        Self::new_with_stop(processor, StopToken::never())
+    }
+
+    pub(crate) const fn new_with_stop(processor: &'a Processor, stop: StopToken) -> Self {
+        Self { processor, stop }
+    }
+
+    /// Return whether the owning registration daemon has requested shutdown.
+    pub fn should_stop(&self) -> bool {
+        self.stop.should_stop()
+    }
+
+    pub(crate) fn ensure_running(&self) -> Result<()> {
+        if self.should_stop() {
+            return Err(Error::RegistrationStopped);
+        }
+        Ok(())
     }
 
     /// Return the local node DID.
@@ -142,6 +160,12 @@ impl<'a> RegistrationContext<'a> {
     /// Return the local session signing key.
     pub fn session_sk(&self) -> &SessionSk {
         self.processor.session_sk()
+    }
+
+    pub(crate) async fn fetch_storage_entry(&self, entry_key: Did) -> Result<Option<entry::Entry>> {
+        self.processor
+            .fetch_storage_entry_with_stop(entry_key, &self.stop)
+            .await
     }
 }
 
@@ -209,6 +233,7 @@ impl DhtRegistrationPublisher {
     ) -> Result<()> {
         let current_values = values.into_iter().collect::<BTreeSet<_>>();
         let mut published_values = self.published_values.lock().await;
+        context.ensure_running()?;
         let observed_values = if load_observed_values {
             self.observed_registry_values(context).await?
         } else {
@@ -222,12 +247,14 @@ impl DhtRegistrationPublisher {
         );
 
         for value in &current_values {
+            context.ensure_running()?;
             context
                 .processor
                 .storage_touch_data(&self.topic, value.clone())
                 .await?;
         }
         for stale_value in stale_values {
+            context.ensure_running()?;
             context
                 .processor
                 .storage_tombstone_data(&self.topic, stale_value.clone())
@@ -243,7 +270,7 @@ impl DhtRegistrationPublisher {
         context: &RegistrationContext<'_>,
     ) -> Result<Vec<Encoded>> {
         let entry_key = entry::Entry::gen_did(&self.topic)?;
-        let Some(entry) = context.processor.fetch_storage_entry(entry_key).await? else {
+        let Some(entry) = context.fetch_storage_entry(entry_key).await? else {
             return Ok(vec![]);
         };
         Ok(entry.data)

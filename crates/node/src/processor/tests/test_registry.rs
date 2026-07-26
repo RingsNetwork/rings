@@ -24,7 +24,7 @@ async fn registration_attempt_timeout_returns_instead_of_hanging() -> Result<()>
     let task = HangingRegistration;
     let timeout = Duration::from_millis(20);
     let result = processor
-        .run_registration_once_with_timeout(&task, timeout)
+        .run_registration_once_with_timeout(&task, timeout, StopToken::never())
         .await;
 
     assert!(matches!(

@@ -257,6 +257,10 @@ fn get_string(value: &JsValue, field: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use futures::FutureExt;
+    use gloo_timers::future::sleep;
     use rings_node::prelude::rings_core::ecc::SecretKey;
     use rings_node::prelude::rings_core::prelude::uuid;
     use rings_node::prelude::rings_core::session::SessionSk;
@@ -266,6 +270,8 @@ mod tests {
 
     const TEST_NETWORK_ID: u32 = 665;
     const TEST_ICE_SERVERS: &str = "stun://stun.l.google.com:19302";
+    const LISTENER_START_YIELD_MS: u64 = 1;
+    const LISTENER_SETTLE_TIMEOUT_MS: u64 = 2_000;
 
     #[wasm_bindgen_test(async)]
     async fn demo_node_stop_settles_provider_listener_task() {
@@ -303,11 +309,32 @@ mod tests {
         let task = node.listener.task();
 
         assert!(!node.listener.is_stopped());
+        sleep(Duration::from_millis(LISTENER_START_YIELD_MS)).await;
+        assert!(!node.listener.is_stopped());
         node.stop();
         assert!(node.listener.is_stopped());
-        JsFuture::from(task)
-            .await
-            .map(|_| ())
-            .map_err(crate::browser_api::js_error_label)
+        await_listener_task_with_timeout(task).await
+    }
+
+    async fn await_listener_task_with_timeout(task: js_sys::Promise) -> Result<(), String> {
+        let listener = JsFuture::from(task)
+            .map(|result| {
+                result
+                    .map(|_| ())
+                    .map_err(crate::browser_api::js_error_label)
+            })
+            .fuse();
+        let timeout = sleep(Duration::from_millis(LISTENER_SETTLE_TIMEOUT_MS))
+            .map(|_| {
+                Err(format!(
+                    "ProviderListener task did not settle within {LISTENER_SETTLE_TIMEOUT_MS}ms"
+                ))
+            })
+            .fuse();
+        futures::pin_mut!(listener, timeout);
+        futures::select! {
+            result = listener => result,
+            result = timeout => result,
+        }
     }
 }
