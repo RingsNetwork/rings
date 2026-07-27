@@ -61,6 +61,7 @@ let gatewayHostClientId = null;
 let gatewayHostCapability = null;
 const trustedShellClientIds = new Set();
 const trustedHostClientIds = new Set();
+const trustedDebugClientIds = new Set();
 const clientSourceTargets = new Map();
 const debugClientScopes = new Map();
 const debugHistory = [];
@@ -455,6 +456,7 @@ async function registerDebugClient(clientId, capability) {
   }
   const scope = debugClientRegistrationScope(clientId, client, capability);
   if (scope !== false) {
+    trustedDebugClientIds.add(clientId);
     debugClientScopes.set(clientId, scope);
     replayDebugHistory(client, scope);
     return true;
@@ -510,21 +512,71 @@ function debugClientRegistrationScope(clientId, client, capability) {
     && clientFramePermitsDebugRegistration(client)
     && isTrustedDebugClientUrl(client.url)
   ) {
-    return null;
+    return shellDebugScope();
+  }
+  const target = targetFromGatewayUrl(client.url);
+  if (
+    trustedDebugClientIds.has(clientId)
+    && target
+    && clientFramePermitsDebugRegistration(client)
+  ) {
+    return targetDebugScope(target);
   }
   return false;
 }
 
 function debugScopeStillValid(clientId, client, scope) {
-  return scope === null
-    && isTrustedShellClient(clientId)
-    && clientFramePermitsDebugRegistration(client)
-    && isTrustedDebugClientUrl(client.url);
+  if (!trustedDebugClientIds.has(clientId) || !clientFramePermitsDebugRegistration(client)) {
+    return false;
+  }
+  if (scope?.kind === "shell") {
+    return isTrustedShellClient(clientId) && isTrustedDebugClientUrl(client.url);
+  }
+  if (scope?.kind === "target") {
+    const target = targetFromGatewayUrl(client.url);
+    return Boolean(target && sameTargetUrl(target, scope.target));
+  }
+  return false;
 }
 
 function debugScopeAllowsEntry(scope, entry) {
-  void entry;
-  return scope === null;
+  if (scope?.kind === "shell") {
+    return true;
+  }
+  if (scope?.kind === "target") {
+    return debugEntryMatchesTargetScope(entry, scope.target);
+  }
+  return false;
+}
+
+function shellDebugScope() {
+  return { kind: "shell" };
+}
+
+function targetDebugScope(target) {
+  return { kind: "target", target };
+}
+
+function debugEntryMatchesTargetScope(entry, target) {
+  const payload = entry?.resource || entry?.onion;
+  if (!payload) {
+    return false;
+  }
+  if (payload.sourceTarget) {
+    return sameTargetUrl(payload.sourceTarget, target);
+  }
+  if (payload.target && payload.kind === "navigation") {
+    return sameTargetUrl(payload.target, target);
+  }
+  return false;
+}
+
+function sameTargetUrl(left, right) {
+  try {
+    return new URL(left).href === new URL(right).href;
+  } catch (_error) {
+    return false;
+  }
 }
 
 function replayDebugHistory(client, scope) {
@@ -559,6 +611,7 @@ function resetGatewayHostForTest() {
   gatewayHostCapability = null;
   trustedShellClientIds.clear();
   trustedHostClientIds.clear();
+  trustedDebugClientIds.clear();
   clientSourceTargets.clear();
   debugClientScopes.clear();
   debugHistory.splice(0, debugHistory.length);
@@ -605,12 +658,18 @@ async function sourceTargetForClient(clientId) {
   if (!client) {
     clientSourceTargets.delete(clientId);
     debugClientScopes.delete(clientId);
+    trustedDebugClientIds.delete(clientId);
     return undefined;
   }
   const currentTarget = targetFromGatewayUrl(client.url);
   if (!currentTarget) {
     clientSourceTargets.delete(clientId);
-    debugClientScopes.delete(clientId);
+    if (trustedDebugClientIds.has(clientId) && isTrustedDebugClientUrl(client.url)) {
+      debugClientScopes.set(clientId, shellDebugScope());
+    } else {
+      debugClientScopes.delete(clientId);
+      trustedDebugClientIds.delete(clientId);
+    }
     return undefined;
   }
   const previousTarget = clientSourceTargets.get(clientId);
@@ -618,7 +677,11 @@ async function sourceTargetForClient(clientId) {
     clientSourceTargets.set(clientId, currentTarget);
     trustedShellClientIds.delete(clientId);
     trustedHostClientIds.delete(clientId);
-    debugClientScopes.delete(clientId);
+    if (trustedDebugClientIds.has(clientId)) {
+      debugClientScopes.set(clientId, targetDebugScope(currentTarget));
+    } else {
+      debugClientScopes.delete(clientId);
+    }
   }
   return currentTarget;
 }
@@ -632,7 +695,7 @@ function rememberNavigationClientTarget(event, request) {
     return false;
   }
   let remembered = false;
-  if (rememberClientSourceTarget(event.resultingClientId, sourceTarget)) {
+  if (rememberClientSourceTarget(event.resultingClientId, sourceTarget, event.clientId)) {
     remembered = true;
   }
   if (!remembered && request.topLevelNavigation) {
@@ -646,7 +709,7 @@ function rememberShellNavigationClient(event, url) {
     return false;
   }
   let remembered = false;
-  if (rememberTrustedShellClient(event.resultingClientId)) {
+  if (rememberTrustedShellClient(event.resultingClientId, event.clientId)) {
     remembered = true;
   }
   if (!remembered) {
@@ -662,14 +725,19 @@ function rememberClientSourceTargetForTest(clientId, sourceTarget) {
   return rememberClientSourceTarget(clientId, sourceTarget);
 }
 
-function rememberClientSourceTarget(clientId, sourceTarget) {
+function rememberClientSourceTarget(clientId, sourceTarget, debugTrustSourceClientId = clientId) {
   if (typeof clientId !== "string" || !clientId || typeof sourceTarget !== "string" || !sourceTarget) {
     return false;
   }
   clientSourceTargets.set(clientId, sourceTarget);
   trustedShellClientIds.delete(clientId);
   trustedHostClientIds.delete(clientId);
-  debugClientScopes.delete(clientId);
+  if (trustedDebugClientIds.has(clientId) || trustedDebugClientIds.has(debugTrustSourceClientId)) {
+    trustedDebugClientIds.add(clientId);
+    debugClientScopes.set(clientId, targetDebugScope(sourceTarget));
+  } else {
+    debugClientScopes.delete(clientId);
+  }
   return true;
 }
 
@@ -680,12 +748,16 @@ function rememberTrustedShellClientForTest(clientId) {
   return rememberTrustedShellClient(clientId);
 }
 
-function rememberTrustedShellClient(clientId) {
+function rememberTrustedShellClient(clientId, debugTrustSourceClientId = clientId) {
   if (typeof clientId !== "string" || !clientId) {
     return false;
   }
   trustedShellClientIds.add(clientId);
   clientSourceTargets.delete(clientId);
+  if (trustedDebugClientIds.has(clientId) || trustedDebugClientIds.has(debugTrustSourceClientId)) {
+    trustedDebugClientIds.add(clientId);
+    debugClientScopes.set(clientId, shellDebugScope());
+  }
   return true;
 }
 

@@ -639,6 +639,7 @@ assert.throws(
   assert.equal(await registerDebugClient("popup", hostileCapability), false);
   assert.equal(await registerDebugClient("popup", hostCapability), true);
   await emitDebug("worker", "trusted-shell secret");
+  assert.equal(await sourceTargetForClient("popup"), undefined);
   const popupMessageCountBeforeNavigation = popupMessages.length;
   assert.equal(rememberClientSourceTargetForTest("popup", "https://trusted.example/"), true);
   clientsById.set("popup", {
@@ -649,6 +650,7 @@ assert.throws(
       popupMessages.push(message);
     },
   });
+  assert.equal(await registerDebugClient("popup"), true);
   const postNavigationMessages: unknown[] = [];
   clientsById.set("popup-gateway", {
     id: "popup-gateway",
@@ -736,12 +738,17 @@ assert.throws(
   assert.equal(hostileMessages.length, 0);
   assert.equal(hostMessages.length, 0);
   assert.ok(popupMessages.length >= 2);
-  assert.equal(popupMessages.length, popupMessageCountBeforeNavigation);
+  assert.ok(popupMessages.length > popupMessageCountBeforeNavigation);
   assert.equal(postNavigationMessages.length, 0);
   assert.match(JSON.stringify(popupMessages), /pre-registration secret/);
   assert.match(JSON.stringify(popupMessages), /trusted-shell secret/);
-  assert.doesNotMatch(JSON.stringify(popupMessages), /trusted navigation/);
-  assert.doesNotMatch(JSON.stringify(popupMessages), /post-registration secret/);
+  assert.match(JSON.stringify(popupMessages), /trusted navigation/);
+  assert.match(JSON.stringify(popupMessages), /post-registration secret/);
+  assert.match(JSON.stringify(popupMessages), /trusted onion route/);
+  assert.doesNotMatch(JSON.stringify(popupMessages), /cross-target secret/);
+  assert.doesNotMatch(JSON.stringify(popupMessages), /other onion route/);
+  assert.doesNotMatch(JSON.stringify(popupMessages), /target-overlap secret/);
+  assert.doesNotMatch(JSON.stringify(popupMessages), /onion target-overlap route/);
   assert.doesNotMatch(JSON.stringify(postNavigationMessages), /trusted navigation/);
   assert.doesNotMatch(JSON.stringify(postNavigationMessages), /post-registration secret/);
   assert.doesNotMatch(JSON.stringify(postNavigationMessages), /trusted onion route/);
@@ -752,6 +759,80 @@ assert.throws(
   assert.doesNotMatch(JSON.stringify(popupMessages), /secret\.test/);
   assert.doesNotMatch(JSON.stringify(postNavigationMessages), /secret\.test/);
   assert.doesNotMatch(JSON.stringify(postNavigationMessages), new RegExp(hostCapability));
+}
+
+{
+  resetGatewayHostForTest();
+  clientsById.clear();
+  const sourceMessages: unknown[] = [];
+  const resultMessages: unknown[] = [];
+  const hostCapability = "h".repeat(32);
+  clientsById.set("host", {
+    id: "host",
+    url: "http://127.0.0.1:8080/#node",
+    frameType: "top-level",
+    postMessage() {},
+  });
+  clientsById.set("popup-source", {
+    id: "popup-source",
+    url: "http://127.0.0.1:8080/#webview",
+    frameType: "auxiliary",
+    postMessage(message) {
+      sourceMessages.push(message);
+    },
+  });
+  clientsById.set("popup-result", {
+    id: "popup-result",
+    url: "http://127.0.0.1:8080/webview/https%3A%2F%2Fresult.example%2F",
+    frameType: "auxiliary",
+    postMessage(message) {
+      resultMessages.push(message);
+    },
+  });
+
+  assert.equal(rememberTrustedShellClientForTest("popup-source"), true);
+  assert.equal(await registerGatewayHostClient("host", hostCapability), true);
+  assert.equal(await registerDebugClient("popup-source", hostCapability), true);
+  await emitDebug("worker", "source shell only");
+  assert.equal(await sourceTargetForClient("popup-source"), undefined);
+  assert.equal(
+    rememberNavigationClientTarget(
+      {
+        clientId: "popup-source",
+        resultingClientId: "popup-result",
+      },
+      {
+        kind: "navigation",
+        requested: "http://127.0.0.1:8080/webview/https%3A%2F%2Fresult.example%2F",
+        topLevelNavigation: true,
+      },
+    ),
+    true,
+  );
+  assert.equal(await registerDebugClient("popup-result"), true);
+  await emitDebug("worker", "result navigation", "info", {
+    requestId: "result-navigation",
+    target: "https://result.example/",
+    method: "GET",
+    kind: "navigation",
+    phase: "completed",
+    durationMs: 5,
+    status: 200,
+  });
+  await emitDebug("worker", "unrelated result", "info", {
+    requestId: "unrelated-result",
+    target: "https://other.example/",
+    method: "GET",
+    kind: "navigation",
+    phase: "completed",
+    durationMs: 5,
+    status: 200,
+  });
+
+  assert.match(JSON.stringify(sourceMessages), /source shell only/);
+  assert.match(JSON.stringify(resultMessages), /result navigation/);
+  assert.doesNotMatch(JSON.stringify(resultMessages), /source shell only/);
+  assert.doesNotMatch(JSON.stringify(resultMessages), /unrelated result/);
 }
 
 {
