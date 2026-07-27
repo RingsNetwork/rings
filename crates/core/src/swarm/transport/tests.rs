@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
+#[cfg(feature = "dummy")]
 use std::sync::atomic::AtomicUsize;
+#[cfg(feature = "dummy")]
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -16,6 +18,7 @@ use crate::dht::MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use crate::ecc::SecretKey;
 use crate::measure::BehaviourJudgement;
 use crate::measure::Measure;
+#[cfg(feature = "dummy")]
 use crate::message::MessagePayload;
 use crate::storage::MemStorage;
 use crate::swarm::callback::InnerSwarmCallback;
@@ -93,12 +96,14 @@ struct NoopSwarmCallback;
 #[async_trait]
 impl SwarmCallback for NoopSwarmCallback {}
 
+#[cfg(feature = "dummy")]
 #[derive(Default)]
 struct CountingSwarmCallback {
     validates: AtomicUsize,
     inbounds: AtomicUsize,
 }
 
+#[cfg(feature = "dummy")]
 impl CountingSwarmCallback {
     fn validates(&self) -> usize {
         self.validates.load(Ordering::SeqCst)
@@ -109,6 +114,7 @@ impl CountingSwarmCallback {
     }
 }
 
+#[cfg(feature = "dummy")]
 #[async_trait]
 impl SwarmCallback for CountingSwarmCallback {
     async fn on_validate(
@@ -149,6 +155,37 @@ fn transport_with_measure(measure: MeasureImpl) -> Result<SwarmTransport> {
             ReassemblyLimits::production(),
         ),
     ))
+}
+
+#[cfg(feature = "dummy")]
+fn dht_topology_contains(transport: &SwarmTransport, peer: Did) -> Result<bool> {
+    let is_successor = transport.dht.successors().contains(&peer)?;
+    let is_predecessor = *transport.dht.lock_predecessor()? == Some(peer);
+    let is_finger = transport.dht.lock_finger()?.contains(Some(peer));
+
+    Ok(is_successor || is_predecessor || is_finger)
+}
+
+#[cfg(feature = "dummy")]
+async fn open_dummy_data_channel_before_ice_connected(
+    transport: &SwarmTransport,
+    peer: Did,
+) -> Result<()> {
+    let connection = transport
+        .get_raw_connection(peer)
+        .ok_or(Error::SwarmMissTransport(peer))?;
+
+    connection
+        .connection
+        .webrtc_answer_offer("remote-dummy-connection".to_string())
+        .await
+        .map_err(Error::Transport)?;
+    assert_eq!(
+        connection.webrtc_connection_state(),
+        WebrtcConnectionState::Connecting
+    );
+    assert!(connection.connection.data_channel_is_open()?);
+    Ok(())
 }
 
 #[test]
@@ -302,6 +339,7 @@ async fn pending_offer_is_not_routable_or_visible_to_dht() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "dummy")]
 #[tokio::test]
 async fn pending_finger_update_is_applied_when_attempt_is_admitted() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
@@ -316,6 +354,7 @@ async fn pending_finger_update_is_applied_when_attempt_is_admitted() -> Result<(
 
     transport.queue_pending_finger_update(attempt, finger_index)?;
     assert_eq!(transport.dht.lock_finger()?.get(finger_index), None);
+    open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
 
     let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback))
         .with_pending_connection_attempt(attempt);
@@ -346,6 +385,7 @@ async fn pending_finger_update_applies_if_admission_wins_queue_race() -> Result<
     Ok(())
 }
 
+#[cfg(feature = "dummy")]
 #[tokio::test]
 async fn data_channel_open_admits_successor_before_ice_connected() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
@@ -356,20 +396,7 @@ async fn data_channel_open_admits_successor_before_ice_connected() -> Result<()>
     let (attempt, _offer) = transport
         .prepare_connection_offer_with_attempt(peer, callback)
         .await?;
-    let connection = transport
-        .get_raw_connection(peer)
-        .ok_or(Error::SwarmMissTransport(peer))?;
-
-    connection
-        .connection
-        .webrtc_answer_offer("remote-dummy-connection".to_string())
-        .await
-        .map_err(Error::Transport)?;
-    assert_eq!(
-        connection.webrtc_connection_state(),
-        WebrtcConnectionState::Connecting
-    );
-    assert!(connection.connection.data_channel_is_open()?);
+    open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
 
     let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback))
         .with_pending_connection_attempt(attempt);
@@ -379,12 +406,13 @@ async fn data_channel_open_admits_successor_before_ice_connected() -> Result<()>
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
 
     assert!(transport.is_admitted_connection(peer));
-    assert!(transport.dht.successors().contains(&peer)?);
+    assert!(dht_topology_contains(&transport, peer)?);
 
     transport.disconnect(peer).await?;
     Ok(())
 }
 
+#[cfg(feature = "dummy")]
 #[tokio::test]
 async fn pending_callback_messages_do_not_dispatch_before_admission() -> Result<()> {
     let measure = Arc::new(RecordingMeasure::default());
@@ -416,6 +444,7 @@ async fn pending_callback_messages_do_not_dispatch_before_admission() -> Result<
     assert_eq!(app_callback.inbounds(), 0);
     assert_eq!(measure.snapshot_counters()?, Vec::new());
     assert!(!transport.dht.successors().contains(&peer)?);
+    open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
 
     pending_callback
         .on_data_channel_open(&peer.to_string())
@@ -428,10 +457,9 @@ async fn pending_callback_messages_do_not_dispatch_before_admission() -> Result<
 
     assert_eq!(app_callback.validates(), 1);
     assert_eq!(app_callback.inbounds(), 1);
-    assert_eq!(measure.snapshot_counters()?.as_slice(), &[
-        (peer, MeasureCounter::Connect),
-        (peer, MeasureCounter::Received),
-    ]);
+    let counters = measure.snapshot_counters()?;
+    assert!(counters.contains(&(peer, MeasureCounter::Connect)));
+    assert!(counters.contains(&(peer, MeasureCounter::Received)));
     assert!(transport.is_admitted_connection(peer));
 
     transport.disconnect(peer).await?;

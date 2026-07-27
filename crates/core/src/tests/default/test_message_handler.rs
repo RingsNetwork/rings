@@ -19,6 +19,7 @@ use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
 use crate::ecc::tests::gen_ordered_keys;
 use crate::ecc::SecretKey;
+use crate::error::Error;
 use crate::error::Result;
 use crate::message;
 use crate::message::Encoder;
@@ -213,7 +214,10 @@ async fn test_handle_connect_node() -> Result<()> {
     // node1 may already have connected node3 while syncing successor-list
     // candidates. If not, ask DHT to connect it through node2.
     if node1.swarm.transport.get_connection(node3.did()).is_none() {
-        node1.swarm.connect(node3.did()).await.unwrap();
+        match node1.swarm.connect(node3.did()).await {
+            Ok(()) | Err(Error::AlreadyConnected) => {}
+            Err(error) => return Err(error),
+        }
     }
     wait_for_connection_state(&node1, node3.did(), WebrtcConnectionState::Connected).await?;
 

@@ -353,6 +353,7 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
 #[cfg(test)]
 pub mod tests {
     //! tests
+    use rings_transport::core::transport::WebrtcConnectionState;
     use tokio::time::sleep;
     use tokio::time::Duration;
 
@@ -363,7 +364,9 @@ pub mod tests {
     use crate::tests::default::assert_no_more_msg;
     use crate::tests::default::gen_pure_dht;
     use crate::tests::default::prepare_node;
+    use crate::tests::default::wait_for_connection_state;
     use crate::tests::default::wait_for_msgs;
+    use crate::tests::default::wait_for_successor;
     use crate::tests::default::Node;
     use crate::tests::manually_establish_connection;
 
@@ -400,6 +403,46 @@ pub mod tests {
 
         assert_eq!(dht.successors().list()?, vec![requester, next, tail]);
         assert_eq!(connect_successor_hint(&dht, requester, requester)?, next);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn sync_successor_report_connects_advertised_successor() -> Result<()> {
+        let keys = gen_ordered_keys(3);
+        let node1 = prepare_node(keys[0]).await;
+        let node2 = prepare_node(keys[1]).await;
+        let node3 = prepare_node(keys[2]).await;
+
+        manually_establish_connection(&node1.swarm, &node2.swarm).await;
+        wait_for_msgs([&node1, &node2, &node3]).await;
+        manually_establish_connection(&node2.swarm, &node3.swarm).await;
+        wait_for_msgs([&node1, &node2, &node3]).await;
+
+        if node1.swarm.transport.get_connection(node3.did()).is_some() {
+            node1.swarm.disconnect(node3.did()).await?;
+            wait_for_msgs([&node1, &node2, &node3]).await;
+        }
+        assert!(node1.swarm.transport.get_connection(node3.did()).is_none());
+        assert!(!node1.dht().successors().contains(&node3.did())?);
+
+        node2
+            .swarm
+            .send_direct_message(
+                Message::QueryForTopoInfoReport(QueryForTopoInfoReport {
+                    info: TopoInfo {
+                        successors: vec![node3.did()],
+                        predecessor: None,
+                    },
+                    then: <QueryForTopoInfoReport as Then>::Then::SyncSuccessor,
+                }),
+                node1.did(),
+            )
+            .await?;
+
+        wait_for_connection_state(&node1, node3.did(), WebrtcConnectionState::Connected).await?;
+        wait_for_successor(&node1, node3.did()).await?;
+        wait_for_msgs([&node1, &node2, &node3]).await;
+        assert_no_more_msg([&node1, &node2, &node3]).await;
         Ok(())
     }
 

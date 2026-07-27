@@ -14,6 +14,7 @@ use super::MessagePayload;
 use crate::dht::ChordStorageRepair;
 use crate::dht::CorrectChord;
 use crate::dht::Did;
+use crate::dht::LiveDid;
 use crate::dht::PeerRing;
 use crate::dht::PeerRingAction;
 use crate::error::Error;
@@ -44,6 +45,26 @@ pub struct MessageHandler {
     transport: Arc<SwarmTransport>,
     dht: Arc<PeerRing>,
     swarm_callback: SharedSwarmCallback,
+}
+
+#[derive(Clone)]
+struct AdmittedPeer {
+    transport: Arc<SwarmTransport>,
+    did: Did,
+}
+
+impl From<AdmittedPeer> for Did {
+    fn from(peer: AdmittedPeer) -> Self {
+        peer.did
+    }
+}
+
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
+impl LiveDid for AdmittedPeer {
+    async fn live(&self) -> bool {
+        self.transport.get_connection(self.did).is_some()
+    }
 }
 
 /// Generic trait for handle message ,inspired by Actor-Model.
@@ -102,11 +123,16 @@ impl MessageHandler {
     pub(crate) async fn join_dht(&self, peer: Did) -> Result<()> {
         // Default HMCC/Zave join path: maps to the JoinThenSync operation in
         // the CorrectChord spec (see tests/default/test_dht_convergence.rs).
-        let conn = self
-            .transport
-            .get_connection(peer)
-            .ok_or(Error::SwarmMissDidInTable(peer))?;
-        let dht_ev = self.dht.join_then_sync(conn).await?;
+        if self.transport.get_connection(peer).is_none() {
+            return Err(Error::SwarmMissDidInTable(peer));
+        }
+        let dht_ev = self
+            .dht
+            .join_then_sync(AdmittedPeer {
+                transport: Arc::clone(&self.transport),
+                did: peer,
+            })
+            .await?;
         // The local join has completed. Follow-up convergence messages are
         // best-effort: a peer can churn before these sends complete, and that
         // must not suppress the application-level Connected event.

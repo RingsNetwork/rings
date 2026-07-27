@@ -1,5 +1,6 @@
 use std::time::Duration;
 use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 
 use url::Url;
 
@@ -14,7 +15,7 @@ struct StoredCookie {
     host_only: bool,
     path: String,
     secure: bool,
-    expires_at: Option<SystemTime>,
+    expires_at: Option<i64>,
 }
 
 /// Virtual cookie jar keyed by target origin/domain/path.
@@ -84,16 +85,16 @@ impl CookieJar {
                         if seconds <= 0 {
                             delete_cookie = true;
                             cookie.expires_at = None;
-                        } else if let Some(expires_at) =
-                            SystemTime::now().checked_add(Duration::from_secs(seconds as u64))
-                        {
+                        } else {
                             delete_cookie = false;
-                            cookie.expires_at = Some(expires_at);
+                            cookie.expires_at =
+                                Some(current_time_millis().saturating_add(max_age_millis(seconds)));
                         }
                     }
                 } else if key.eq_ignore_ascii_case("expires") && !saw_max_age {
                     if let Ok(expires_at) = httpdate::parse_http_date(value.trim()) {
-                        if expires_at <= SystemTime::now() {
+                        let expires_at = system_time_millis(expires_at);
+                        if expires_at <= current_time_millis() {
                             delete_cookie = true;
                             cookie.expires_at = None;
                         } else {
@@ -121,7 +122,7 @@ impl CookieJar {
         let host = target.host_str()?.to_ascii_lowercase();
         let path = target.path();
         let secure_request = target.scheme() == "https";
-        let now = SystemTime::now();
+        let now = current_time_millis();
         let pairs: Vec<String> = self
             .cookies
             .iter()
@@ -142,7 +143,7 @@ impl CookieJar {
 
     /// Return the number of cookies currently stored.
     pub fn len(&self) -> usize {
-        let now = SystemTime::now();
+        let now = current_time_millis();
         self.cookies
             .iter()
             .filter(|cookie| !cookie_expired(cookie, now))
@@ -151,7 +152,7 @@ impl CookieJar {
 
     /// Return true when no cookies are stored.
     pub fn is_empty(&self) -> bool {
-        self.cookies.is_empty()
+        self.len() == 0
     }
 }
 
@@ -162,10 +163,45 @@ fn domain_matches(cookie: &StoredCookie, host: &str) -> bool {
     host == cookie.domain || host.ends_with(format!(".{}", cookie.domain).as_str())
 }
 
-fn cookie_expired(cookie: &StoredCookie, now: SystemTime) -> bool {
+fn cookie_expired(cookie: &StoredCookie, now: i64) -> bool {
     cookie
         .expires_at
         .is_some_and(|expires_at| expires_at <= now)
+}
+
+fn max_age_millis(seconds: i64) -> i64 {
+    seconds.saturating_mul(1_000)
+}
+
+#[cfg(all(target_family = "wasm", feature = "browser"))]
+fn current_time_millis() -> i64 {
+    js_sys::Date::now() as i64
+}
+
+#[cfg(all(target_family = "wasm", not(feature = "browser")))]
+fn current_time_millis() -> i64 {
+    0
+}
+
+#[cfg(not(target_family = "wasm"))]
+fn current_time_millis() -> i64 {
+    system_time_millis(SystemTime::now())
+}
+
+fn system_time_millis(time: SystemTime) -> i64 {
+    let Ok(duration) = time.duration_since(UNIX_EPOCH) else {
+        return 0;
+    };
+    duration_millis(duration)
+}
+
+fn duration_millis(duration: Duration) -> i64 {
+    let millis = duration.as_millis();
+    if millis > i64::MAX as u128 {
+        i64::MAX
+    } else {
+        millis as i64
+    }
 }
 
 fn path_matches(cookie_path: &str, request_path: &str) -> bool {

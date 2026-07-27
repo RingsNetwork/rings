@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use rings_webview::CookieJar;
 use wasm_bindgen_test::wasm_bindgen_test;
 
 use super::*;
@@ -155,6 +156,29 @@ fn host_serves_cross_target_runtime_reads_when_upstream_allows_cors() -> Webview
         .cloned()
         .ok_or_else(|| WebviewError::Transport("missing cross-origin request".to_string()))?;
     assert_eq!(request.source_origin.as_ref(), Some(source.as_url()));
+    Ok(())
+}
+
+#[wasm_bindgen_test]
+fn browser_cookie_expiry_uses_browser_safe_clock() -> WebviewResult<()> {
+    let mut jar = CookieJar::new();
+    let origin = Url::parse("https://example.test/app/index.html")?;
+    let target = Url::parse("https://example.test/app/page")?;
+
+    jar.store_set_cookie(&origin, "sid=one; Path=/app; Max-Age=60")?;
+    assert_eq!(jar.cookie_header(&target).as_deref(), Some("sid=one"));
+
+    jar.store_set_cookie(&origin, "sid=gone; Path=/app; Max-Age=0")?;
+    assert_eq!(jar.cookie_header(&target), None);
+    assert!(jar.is_empty());
+
+    jar.store_set_cookie(&origin, "sid=one; Path=/app")?;
+    jar.store_set_cookie(
+        &origin,
+        "sid=gone; Path=/app; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
+    )?;
+    assert_eq!(jar.cookie_header(&target), None);
+    assert!(jar.is_empty());
     Ok(())
 }
 
