@@ -158,15 +158,6 @@ fn transport_with_measure(measure: MeasureImpl) -> Result<SwarmTransport> {
 }
 
 #[cfg(feature = "dummy")]
-fn dht_topology_contains(transport: &SwarmTransport, peer: Did) -> Result<bool> {
-    let is_successor = transport.dht.successors().contains(&peer)?;
-    let is_predecessor = *transport.dht.lock_predecessor()? == Some(peer);
-    let is_finger = transport.dht.lock_finger()?.contains(Some(peer));
-
-    Ok(is_successor || is_predecessor || is_finger)
-}
-
-#[cfg(feature = "dummy")]
 async fn open_dummy_data_channel_before_ice_connected(
     transport: &SwarmTransport,
     peer: Did,
@@ -406,7 +397,10 @@ async fn data_channel_open_admits_successor_before_ice_connected() -> Result<()>
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
 
     assert!(transport.is_admitted_connection(peer));
-    assert!(dht_topology_contains(&transport, peer)?);
+    assert!(
+        transport.dht.successors().contains(&peer)?,
+        "opened data channel must promote the advertised peer into DHT successors"
+    );
 
     transport.disconnect(peer).await?;
     Ok(())

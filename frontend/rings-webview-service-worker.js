@@ -9,7 +9,6 @@ const minimumGatewayHostCapabilityLength = 32;
 let gatewayHostClientId = null;
 let gatewayHostCapability = null;
 const debugClientIds = new Set();
-const pendingDebugClientIds = new Set();
 const debugHistory = [];
 let nextRequestId = 1;
 
@@ -89,7 +88,6 @@ async function handleGatewayFetch(event) {
   let request;
   try {
     request = await serializeRequest(event);
-    preserveDebugClientForNavigation(request, event.clientId, event.resultingClientId);
   } catch (error) {
     request = debugRequestForFailure(event.request);
     await emitResourceDebug(
@@ -319,39 +317,13 @@ async function debugClients() {
   const clientsById = new Map();
   for (const clientId of debugClientIds) {
     const client = await self.clients.get(clientId);
-    if (client && isSameOriginClientUrl(client.url)) {
-      pendingDebugClientIds.delete(clientId);
+    if (client && isTrustedGatewayHostUrl(client.url)) {
       clientsById.set(client.id, client);
-    } else if (client || !pendingDebugClientIds.has(clientId)) {
+    } else {
       debugClientIds.delete(clientId);
-      pendingDebugClientIds.delete(clientId);
     }
   }
   return [...clientsById.values()];
-}
-
-function preserveDebugClientForNavigation(request, clientId, resultingClientId) {
-  if (request.kind !== "navigation") {
-    return false;
-  }
-  if (typeof clientId !== "string" || !clientId || !debugClientIds.has(clientId)) {
-    return false;
-  }
-  if (typeof resultingClientId !== "string" || !resultingClientId || resultingClientId === clientId) {
-    return false;
-  }
-  debugClientIds.add(resultingClientId);
-  pendingDebugClientIds.add(resultingClientId);
-  const cleanup = globalThis.setTimeout(() => {
-    if (!pendingDebugClientIds.delete(resultingClientId)) {
-      return;
-    }
-    debugClientIds.delete(resultingClientId);
-  }, requestTimeoutMs);
-  if (typeof cleanup?.unref === "function") {
-    cleanup.unref();
-  }
-  return true;
 }
 
 function requestedTarget(url) {
@@ -428,14 +400,6 @@ function isValidGatewayHostCapability(capability) {
   return typeof capability === "string" && capability.length >= minimumGatewayHostCapabilityLength;
 }
 
-function isSameOriginClientUrl(url) {
-  try {
-    return new URL(url).origin === self.location.origin;
-  } catch (_error) {
-    return false;
-  }
-}
-
 function isTrustedGatewayHostUrl(url) {
   try {
     const parsed = new URL(url);
@@ -449,7 +413,6 @@ function resetGatewayHostForTest() {
   gatewayHostClientId = null;
   gatewayHostCapability = null;
   debugClientIds.clear();
-  pendingDebugClientIds.clear();
   debugHistory.splice(0, debugHistory.length);
 }
 

@@ -40,11 +40,6 @@ type ServiceWorkerTestApi = {
   ) => Uint8Array | null;
   readonly emitDebug: (scope: string, message: string, level?: string) => Promise<void>;
   readonly gatewayHostClient: () => Promise<ServiceWorkerClientFixture | undefined>;
-  readonly preserveDebugClientForNavigation: (
-    request: { readonly kind: string },
-    clientId: string | undefined,
-    resultingClientId: string | undefined,
-  ) => boolean;
   readonly registerDebugClient: (clientId: string, capability: string) => Promise<boolean>;
   readonly registerGatewayHostClient: (clientId: string, capability: string) => Promise<boolean>;
   readonly resetGatewayHostForTest: () => void;
@@ -152,7 +147,7 @@ const globalThisKey = "globalThis";
 context[globalThisKey] = context;
 
 vm.runInNewContext(
-  `${serviceWorkerSource}\nglobalThis.__ringsWebviewServiceWorkerTest = { controlledNavigationBody, emitDebug, gatewayHostClient, preserveDebugClientForNavigation, registerDebugClient, registerGatewayHostClient, resetGatewayHostForTest, requestKind };`,
+  `${serviceWorkerSource}\nglobalThis.__ringsWebviewServiceWorkerTest = { controlledNavigationBody, emitDebug, gatewayHostClient, registerDebugClient, registerGatewayHostClient, resetGatewayHostForTest, requestKind };`,
   context,
   {
     filename: serviceWorkerPath,
@@ -165,7 +160,6 @@ const {
   controlledNavigationBody,
   emitDebug,
   gatewayHostClient,
-  preserveDebugClientForNavigation,
   registerDebugClient,
   registerGatewayHostClient,
   resetGatewayHostForTest,
@@ -467,6 +461,8 @@ assert.throws(
   );
   assert.equal(await registerDebugClient("popup", hostileCapability), false);
   assert.equal(await registerDebugClient("popup", hostCapability), true);
+  await emitDebug("worker", "trusted-shell secret");
+  const popupMessageCountBeforeNavigation = popupMessages.length;
   clientsById.set("popup", {
     id: "popup",
     url: "http://127.0.0.1:8080/webview/https%3A%2F%2Ftrusted.example%2F",
@@ -475,9 +471,6 @@ assert.throws(
     },
   });
   const postNavigationMessages: unknown[] = [];
-  assert.equal(preserveDebugClientForNavigation({ kind: "fetch" }, "popup", "popup-gateway"), false);
-  assert.equal(preserveDebugClientForNavigation({ kind: "navigation" }, "hostile", "hostile-gateway"), false);
-  assert.equal(preserveDebugClientForNavigation({ kind: "navigation" }, "popup", "popup-gateway"), true);
   clientsById.set("popup-gateway", {
     id: "popup-gateway",
     url: "http://127.0.0.1:8080/webview/https%3A%2F%2Ftrusted.example%2F",
@@ -485,6 +478,7 @@ assert.throws(
       postNavigationMessages.push(message);
     },
   });
+  assert.equal(await registerDebugClient("popup-gateway", hostCapability), false);
   assertJsonEqual(
     await dispatchMessage("popup", {
       type: "rings-webview-debug-entry",
@@ -505,10 +499,12 @@ assert.throws(
   assert.equal(hostileMessages.length, 0);
   assert.equal(hostMessages.length, 0);
   assert.ok(popupMessages.length >= 2);
-  assert.ok(postNavigationMessages.length >= 1);
+  assert.equal(popupMessages.length, popupMessageCountBeforeNavigation);
+  assert.equal(postNavigationMessages.length, 0);
   assert.match(JSON.stringify(popupMessages), /pre-registration secret/);
-  assert.match(JSON.stringify(popupMessages), /post-registration secret/);
-  assert.match(JSON.stringify(postNavigationMessages), /post-registration secret/);
+  assert.match(JSON.stringify(popupMessages), /trusted-shell secret/);
+  assert.doesNotMatch(JSON.stringify(popupMessages), /post-registration secret/);
+  assert.doesNotMatch(JSON.stringify(postNavigationMessages), /post-registration secret/);
   assert.doesNotMatch(JSON.stringify(popupMessages), /secret\.test/);
   assert.doesNotMatch(JSON.stringify(postNavigationMessages), /secret\.test/);
 }
