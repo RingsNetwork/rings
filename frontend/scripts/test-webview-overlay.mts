@@ -26,10 +26,18 @@ try {
   await page.goto(`http://127.0.0.1:${serverState.port}/webview/${target}`, {
     waitUntil: "commit",
   });
-  await page.locator("#rings-webview-debug-overlay").waitFor({
-    state: "attached",
-    timeout: 1000,
-  });
+  await page.waitForFunction(
+    () => {
+      const webviewGlobal = globalThis as typeof globalThis & {
+        __ringsWebviewDebugOverlay?: unknown;
+      };
+      return Boolean(
+        webviewGlobal.__ringsWebviewDebugOverlay && document.getElementById("rings-webview-debug-overlay"),
+      );
+    },
+    undefined,
+    { timeout: 5000 },
+  );
 
   const earlyState = await page.evaluate(() => {
     const loadingKey = "loading";

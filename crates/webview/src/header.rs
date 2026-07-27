@@ -30,7 +30,10 @@ impl HeaderPolicy {
             name: "Accept-Encoding".to_string(),
             value: "identity".to_string(),
         });
-        if let Some(source_origin) = request.source_origin.as_ref() {
+        if should_send_virtual_origin(&request) {
+            let Some(source_origin) = request.source_origin.as_ref() else {
+                return request;
+            };
             request.headers.push(GatewayHeader {
                 name: "Origin".to_string(),
                 value: source_origin.origin().ascii_serialization(),
@@ -99,6 +102,10 @@ fn should_strip_request_header(name: &str) -> bool {
                 | "upgrade"
                 | "via"
         )
+}
+
+fn should_send_virtual_origin(request: &GatewayRequest) -> bool {
+    request.is_cross_origin_runtime_request()
 }
 
 fn should_strip_response_header(name: &str) -> bool {
@@ -237,7 +244,9 @@ mod tests {
             body: Vec::new(),
             kind: GatewayRequestKind::Navigation,
             source_origin: None,
+            source_target: None,
             credentials: crate::types::GatewayCredentials::SameOrigin,
+            top_level_navigation: true,
         };
 
         let normalized = policy.normalize_request(request);
@@ -257,6 +266,22 @@ mod tests {
             .headers
             .iter()
             .any(|header| header.name_eq("x-app-trace") && header.value == "kept"));
+        Ok(())
+    }
+
+    #[test]
+    fn request_policy_does_not_synthesize_origin_for_subresources() -> Result<()> {
+        let target = Url::parse("https://cdn.example.test/app.js")?;
+        let policy = HeaderPolicy::new(GatewayPrefix::new("/webview/")?);
+        let request = GatewayRequest::subresource(target)
+            .with_source_origin(Url::parse("https://app.example.test/page")?);
+
+        let normalized = policy.normalize_request(request);
+
+        assert!(normalized
+            .headers
+            .iter()
+            .all(|header| !header.name_eq("origin")));
         Ok(())
     }
 }

@@ -587,7 +587,7 @@
     installConsoleCapture();
     requestDebugRegistration();
     syncDocumentLoading();
-    record("overlay", "Debug listener ready");
+    record("overlay", "Debug panel ready");
     appendFailureEntry();
     maybeReloadColdGatewayFallback();
   }

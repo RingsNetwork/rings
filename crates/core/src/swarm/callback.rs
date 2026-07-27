@@ -109,17 +109,86 @@ impl InnerSwarmCallback {
         }
 
         self.transport.record_peer_connected(did).await;
+        if !self.transport.is_admitted_connection_attempt(attempt) {
+            tracing::debug!(
+                "aborting data-channel admission for {did}; connection was retired while recording connect"
+            );
+            return Ok(false);
+        }
         self.message_handler.join_dht(did).await?;
+        if !self.transport.is_admitted_connection_attempt(attempt) {
+            tracing::debug!(
+                "undoing DHT admission for {did}; connection was retired while joining DHT"
+            );
+            self.message_handler.leave_dht(did).await?;
+            return Ok(false);
+        }
         for index in self.transport.take_pending_finger_updates(attempt)? {
             self.transport.dht.apply_fixed_finger(index, did)?;
         }
+        if !self.transport.is_admitted_connection_attempt(attempt) {
+            tracing::debug!(
+                "aborting connected event for {did}; connection was retired after DHT admission"
+            );
+            self.message_handler.leave_dht(did).await?;
+            return Ok(false);
+        }
+        self.emit_connected_event_for_attempt(did, attempt).await
+    }
+
+    async fn emit_connected_event_for_attempt(
+        &self,
+        did: Did,
+        attempt: PendingConnectionAttempt,
+    ) -> Result<bool, CallbackError> {
+        let delivery = self.transport.swarm_event_delivery_lock(did);
+        let result = async {
+            let _delivery = delivery.lock().await;
+            if !self.transport.is_admitted_connection_attempt(attempt) {
+                tracing::debug!("suppressing connected event for {did}; connection was retired before event delivery");
+                return Ok(false);
+            }
+            self.emit_connection_state_change_unlocked(did, WebrtcConnectionState::Connected)
+                .await?;
+            Ok(true)
+        }
+        .await;
+        self.transport
+            .prune_swarm_event_delivery_lock(did, &delivery);
+        result
+    }
+
+    async fn emit_connection_state_change(
+        &self,
+        did: Did,
+        state: WebrtcConnectionState,
+    ) -> Result<(), CallbackError> {
+        let delivery = self.transport.swarm_event_delivery_lock(did);
+        let result = async {
+            let _delivery = delivery.lock().await;
+            self.emit_connection_state_change_unlocked(did, state).await
+        }
+        .await;
+        self.transport
+            .prune_swarm_event_delivery_lock(did, &delivery);
+        result
+    }
+
+    async fn emit_connection_state_change_unlocked(
+        &self,
+        did: Did,
+        state: WebrtcConnectionState,
+    ) -> Result<(), CallbackError> {
         self.callback
-            .on_event(&SwarmEvent::ConnectionStateChange {
-                peer: did,
-                state: WebrtcConnectionState::Connected,
-            })
-            .await?;
-        Ok(true)
+            .on_event(&SwarmEvent::ConnectionStateChange { peer: did, state })
+            .await
+    }
+
+    fn pending_disconnected_before_admission(&self, did: Did) -> bool {
+        let Some(attempt) = self.pending_attempt else {
+            return false;
+        };
+        attempt.peer() == did && !self.transport.is_admitted_connection_attempt(attempt)
     }
 
     fn is_local_did_event(&self, did: Did, operation: &str) -> bool {
@@ -356,6 +425,12 @@ impl TransportCallback for InnerSwarmCallback {
             // with no reconnect path. We leave it alone: it will either recover,
             // or degrade to `Failed`, which is handled above.
             WebrtcConnectionState::Disconnected => {
+                if self.pending_disconnected_before_admission(did) {
+                    tracing::debug!(
+                        "ignoring pre-admission disconnected state for pending connection {did}"
+                    );
+                    return Ok(());
+                }
                 self.transport.record_peer_disconnected(did).await;
                 tracing::info!("Connection to {did} is disconnected, waiting for recovery");
             }
@@ -365,12 +440,7 @@ impl TransportCallback for InnerSwarmCallback {
         // Data-channel admission emits the application-level Connected event.
         // Other state changes are passed through directly.
         if s != WebrtcConnectionState::Connected {
-            self.callback
-                .on_event(&SwarmEvent::ConnectionStateChange {
-                    peer: did,
-                    state: s,
-                })
-                .await?
+            self.emit_connection_state_change(did, s).await?
         }
 
         Ok(())

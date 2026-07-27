@@ -28,6 +28,8 @@ use crate::measure::PeerQualityThresholds;
 use crate::session::SessionSk;
 use crate::storage::MemStorage;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use crate::swarm::transport::PEER_LIVENESS_IDLE_MS;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::swarm::transport::PEER_LIVENESS_TIMEOUT_MS;
 use crate::swarm::SwarmBuilder;
 use crate::tests::default::assert_no_more_msg;
@@ -249,6 +251,37 @@ async fn get_and_check_connection_times_out_wedged_data_channel_wait() -> Result
     .map_err(|_| Error::PromiseStateTimeout)?;
 
     assert!(conn.is_none());
+    Ok(())
+}
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+#[tokio::test]
+async fn liveness_probe_backpressure_does_not_degrade_peer() -> Result<()> {
+    let measure = Arc::new(CountingMeasure::default());
+    let measure_impl: MeasureImpl = measure.clone();
+    let node1 = prepare_node_with_measure(SecretKey::random(), measure_impl)?;
+    let node2 = prepare_node(SecretKey::random()).await;
+
+    manually_establish_connection(&node1.swarm, &node2.swarm).await;
+    wait_for_successor(&node1, node2.did()).await?;
+    node1
+        .swarm
+        .transport
+        .force_peer_connected_at(node2.did(), get_epoch_ms_i64() - PEER_LIVENESS_IDLE_MS - 1)?;
+
+    let _pending_send = PendingSendGuard::new();
+    node1
+        .swarm
+        .stabilizer()
+        .stabilize_with_step_timeout(Duration::from_secs(1))
+        .await?;
+
+    assert_eq!(
+        measure
+            .get_count(node2.did(), MeasureCounter::FailedToSend)
+            .await,
+        0
+    );
     Ok(())
 }
 

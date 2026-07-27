@@ -22,6 +22,7 @@ httpdate = "1"
 js-sys = { workspace = true, optional = true }
 lol_html = "3"
 percent-encoding = "2"
+psl = "2"
 serde = { version = "1.0.136", features = ["derive"] }
 serde-wasm-bindgen = { workspace = true, optional = true }
 thiserror = "1"

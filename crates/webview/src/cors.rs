@@ -108,8 +108,10 @@ pub fn validate_preflight_response(
         .map(|value| value.trim().to_ascii_lowercase())
         .collect::<BTreeSet<_>>();
     let requested_headers = non_safelisted_headers(request);
+    let wildcard_allows_headers =
+        request.credentials != GatewayCredentials::Include && allowed_headers.contains("*");
     if !requested_headers.is_empty()
-        && !allowed_headers.contains("*")
+        && !wildcard_allows_headers
         && !requested_headers
             .iter()
             .all(|header| allowed_headers.contains(header))
@@ -336,6 +338,27 @@ mod tests {
         )?;
 
         validate_response(&request, &response)
+    }
+
+    #[test]
+    fn credentialed_preflight_treats_allow_headers_wildcard_as_literal() -> Result<()> {
+        let request = request(GatewayCredentials::Include)?;
+        let response = GatewayResponse::new(
+            200,
+            vec![
+                GatewayHeader::new("Access-Control-Allow-Origin", "https://app.example.test")?,
+                GatewayHeader::new("Access-Control-Allow-Credentials", "true")?,
+                GatewayHeader::new("Access-Control-Allow-Methods", "PATCH")?,
+                GatewayHeader::new("Access-Control-Allow-Headers", "*")?,
+            ],
+            Vec::new(),
+        )?;
+
+        assert!(matches!(
+            validate_preflight_response(&request, &response),
+            Err(WebviewError::Cors(_))
+        ));
+        Ok(())
     }
 
     #[test]

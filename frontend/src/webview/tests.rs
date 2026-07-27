@@ -50,7 +50,7 @@ fn fixture_host() -> WebviewResult<(FixtureHost, RecordedRequests)> {
     let host = WebviewGatewayHost {
         policy,
         gateway: ConcurrentWebviewGateway::new(prefix, FixtureTransport::new(requests.clone()))
-            .with_target_bootstrap(webview_bootstrap),
+            .with_request_bootstrap(webview_bootstrap),
         limiter: GatewayRequestLimiter::new(MAX_CONCURRENT_GATEWAY_REQUESTS),
     };
     Ok((host, requests))
@@ -131,9 +131,41 @@ fn host_redirects_then_serves_a_gateway_document_through_its_transport() -> Webv
 }
 
 #[wasm_bindgen_test]
+fn iframe_navigation_gets_bootstrap_without_webview_overlay() -> WebviewResult<()> {
+    let (host, requests) = fixture_host()?;
+    let target = TargetUrl::parse("https://frame.example.test/nested.html")?;
+    let gateway_target = TargetUrl::parse(host.policy.gateway_url(target.as_url())?.as_str())?;
+
+    let response = futures::executor::block_on(host.handle(
+        WebviewHostRequest::navigation_with_payload(gateway_target, "GET", Vec::new(), Vec::new())
+            .with_top_level_navigation(false),
+    ))?;
+    let WebviewHostOutcome::Response(response) = response else {
+        return Err(WebviewError::Transport(
+            "iframe gateway document was not served".to_string(),
+        ));
+    };
+    let body = String::from_utf8(response.body)
+        .map_err(|error| WebviewError::Transport(error.to_string()))?;
+
+    assert!(body.contains("data-rings-webview-bootstrap"));
+    assert!(!body.contains("/assets/webview-overlay.js"));
+    assert!(body.contains("/webview/https%3A%2F%2Fframe%2Eexample%2Etest%2Fasset%2Epng"));
+    assert_eq!(requests.borrow().len(), 1);
+    let sent_request = requests
+        .borrow()
+        .first()
+        .cloned()
+        .ok_or_else(|| WebviewError::Transport("missing iframe gateway request".to_string()))?;
+    assert_eq!(sent_request.target.as_str(), target.as_url().as_str());
+    assert!(!sent_request.top_level_navigation);
+    Ok(())
+}
+
+#[wasm_bindgen_test]
 fn host_serves_cross_target_runtime_reads_when_upstream_allows_cors() -> WebviewResult<()> {
     let (host, requests) = fixture_host()?;
-    let source = TargetUrl::parse("https://app.example.test/index.html")?;
+    let source = TargetUrl::parse("https://app.example.test/index.html?q=1#section")?;
     let target = TargetUrl::parse("https://bank.example.test/account")?;
     let gateway_target = TargetUrl::parse(host.policy.gateway_url(target.as_url())?.as_str())?;
 
@@ -155,7 +187,10 @@ fn host_serves_cross_target_runtime_reads_when_upstream_allows_cors() -> Webview
         .first()
         .cloned()
         .ok_or_else(|| WebviewError::Transport("missing cross-origin request".to_string()))?;
-    assert_eq!(request.source_origin.as_ref(), Some(source.as_url()));
+    assert_eq!(
+        request.source_origin.as_ref().map(Url::as_str),
+        Some("https://app.example.test/")
+    );
     Ok(())
 }
 

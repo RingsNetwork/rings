@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use crate::cookie::CookieJar;
 use crate::cors;
 use crate::error::Result;
+use crate::error::WebviewError;
 use crate::header::HeaderPolicy;
 use crate::rewrite::RewriteContext;
 use crate::types::GatewayHeader;
@@ -47,6 +48,7 @@ struct GatewayResponsePolicy {
 enum BootstrapScript {
     Static(String),
     PerTarget(fn(&url::Url) -> String),
+    PerRequest(fn(&GatewayRequest) -> String),
 }
 
 impl GatewayResponsePolicy {
@@ -63,9 +65,13 @@ impl GatewayResponsePolicy {
         cookies: &CookieJar,
         request: GatewayRequest,
     ) -> Result<GatewayRequest> {
+        let request = request.normalize_source_origin();
+        if request.lacks_runtime_source_origin() {
+            return Err(WebviewError::MissingRuntimeSourceOrigin);
+        }
         let mut request = self.header_policy.normalize_request(request);
         if request.allows_target_cookies() {
-            if let Some(cookie_header) = cookies.cookie_header(&request.target) {
+            if let Some(cookie_header) = cookies.cookie_header_for_request(&request) {
                 request
                     .headers
                     .push(GatewayHeader::new("Cookie", cookie_header)?);
@@ -98,11 +104,15 @@ impl GatewayResponsePolicy {
         let mut response = self
             .header_policy
             .normalize_response(&request.target, response)?;
-        response.body = self.rewrite_body(&request.target, &response)?;
+        response.body = self.rewrite_body(request, &response)?;
         Ok(cors::filter_exposed_response_headers(request, response))
     }
 
-    fn rewrite_body(&self, target: &url::Url, response: &GatewayResponse) -> Result<Vec<u8>> {
+    fn rewrite_body(
+        &self,
+        request: &GatewayRequest,
+        response: &GatewayResponse,
+    ) -> Result<Vec<u8>> {
         let Some(content_type) = response
             .headers
             .iter()
@@ -117,8 +127,8 @@ impl GatewayResponsePolicy {
         let Ok(text) = std::str::from_utf8(response.body.as_slice()) else {
             return Ok(response.body.clone());
         };
-        let mut ctx = RewriteContext::new(self.prefix.clone(), target.clone());
-        if let Some(script) = self.bootstrap_for(target) {
+        let mut ctx = RewriteContext::new(self.prefix.clone(), request.target.clone());
+        if let Some(script) = self.bootstrap_for(request) {
             ctx = ctx.with_bootstrap_script(script);
         }
         let rewritten = if content_type.contains("text/html") {
@@ -129,10 +139,11 @@ impl GatewayResponsePolicy {
         Ok(rewritten.into_bytes())
     }
 
-    fn bootstrap_for(&self, target: &url::Url) -> Option<String> {
+    fn bootstrap_for(&self, request: &GatewayRequest) -> Option<String> {
         match &self.bootstrap_script {
             Some(BootstrapScript::Static(script)) => Some(script.clone()),
-            Some(BootstrapScript::PerTarget(build)) => Some(build(target)),
+            Some(BootstrapScript::PerTarget(build)) => Some(build(&request.target)),
+            Some(BootstrapScript::PerRequest(build)) => Some(build(request)),
             None => None,
         }
     }
@@ -168,6 +179,12 @@ where T: GatewayTransport
     /// rewritten, so navigating between targets cannot retain an earlier page's base URL.
     pub fn with_target_bootstrap(mut self, script: fn(&url::Url) -> String) -> Self {
         self.policy.bootstrap_script = Some(BootstrapScript::PerTarget(script));
+        self
+    }
+
+    /// Attach a runtime bootstrap factory evaluated against each rendered gateway request.
+    pub fn with_request_bootstrap(mut self, script: fn(&GatewayRequest) -> String) -> Self {
+        self.policy.bootstrap_script = Some(BootstrapScript::PerRequest(script));
         self
     }
 
@@ -207,8 +224,9 @@ where T: GatewayTransport
         Ok(match kind {
             GatewayRequestKind::Navigation => GatewayRequest::navigation(target),
             GatewayRequestKind::Subresource => GatewayRequest::subresource(target),
-            GatewayRequestKind::Fetch => GatewayRequest::fetch(target, "GET"),
-            GatewayRequestKind::Xhr => GatewayRequest::xhr(target, "GET"),
+            GatewayRequestKind::Fetch | GatewayRequestKind::Xhr => {
+                return Err(WebviewError::MissingRuntimeSourceOrigin)
+            }
         })
     }
 
@@ -252,6 +270,12 @@ where T: GatewayTransport
         self
     }
 
+    /// Attach a runtime bootstrap factory evaluated against each rendered gateway request.
+    pub fn with_request_bootstrap(mut self, script: fn(&GatewayRequest) -> String) -> Self {
+        self.policy.bootstrap_script = Some(BootstrapScript::PerRequest(script));
+        self
+    }
+
     /// Send one request without holding the virtual-cookie lock during upstream I/O.
     pub async fn send(&self, request: GatewayRequest) -> Result<GatewayResponse> {
         let cors_request = request.clone();
@@ -287,8 +311,9 @@ where T: GatewayTransport
         Ok(match kind {
             GatewayRequestKind::Navigation => GatewayRequest::navigation(target),
             GatewayRequestKind::Subresource => GatewayRequest::subresource(target),
-            GatewayRequestKind::Fetch => GatewayRequest::fetch(target, "GET"),
-            GatewayRequestKind::Xhr => GatewayRequest::xhr(target, "GET"),
+            GatewayRequestKind::Fetch | GatewayRequestKind::Xhr => {
+                return Err(WebviewError::MissingRuntimeSourceOrigin)
+            }
         })
     }
 
@@ -319,6 +344,7 @@ mod tests {
     use futures::executor::LocalPool;
     use futures::stream::StreamExt;
     use futures::task::LocalSpawnExt;
+    use url::Url;
 
     use super::*;
     use crate::types::GatewayCredentials;
@@ -359,7 +385,9 @@ mod tests {
             body: Vec::new(),
             kind: GatewayRequestKind::Navigation,
             source_origin: None,
+            source_target: None,
             credentials: GatewayCredentials::SameOrigin,
+            top_level_navigation: true,
         };
 
         let response = futures::executor::block_on(gateway.send(request))?;
@@ -380,6 +408,13 @@ mod tests {
         format!("globalThis.__ringsTarget = {:?};", target.as_str())
     }
 
+    fn request_bootstrap(request: &GatewayRequest) -> String {
+        format!(
+            "globalThis.__ringsTopLevelNavigation = {};",
+            request.top_level_navigation
+        )
+    }
+
     #[test]
     fn per_target_bootstrap_tracks_each_navigated_document() -> Result<()> {
         let mut gateway = WebviewGateway::new(GatewayPrefix::new("/webview/")?, StaticTransport)
@@ -398,6 +433,41 @@ mod tests {
         assert!(!first_body.contains("https://two.example.test/second"));
         assert!(second_body.contains("https://two.example.test/second"));
         assert!(!second_body.contains("https://one.example.test/first"));
+        Ok(())
+    }
+
+    #[test]
+    fn per_request_bootstrap_tracks_navigation_context() -> Result<()> {
+        let mut gateway = WebviewGateway::new(GatewayPrefix::new("/webview/")?, StaticTransport)
+            .with_request_bootstrap(request_bootstrap);
+        let target = TargetUrl::parse("https://frame.example.test/nested")?.into_url();
+        let request = GatewayRequest::navigation(target).with_top_level_navigation(false);
+
+        let response = futures::executor::block_on(gateway.send(request))?;
+        let body = String::from_utf8(response.body)
+            .map_err(|error| WebviewError::Transport(error.to_string()))?;
+
+        assert!(body.contains("globalThis.__ringsTopLevelNavigation = false;"));
+        Ok(())
+    }
+
+    #[test]
+    fn source_free_runtime_gateway_requests_are_rejected() -> Result<()> {
+        let target = TargetUrl::parse("https://api.example.test/data")?.into_url();
+        let mut gateway = WebviewGateway::new(GatewayPrefix::new("/webview/")?, StaticTransport);
+
+        let send = futures::executor::block_on(gateway.send(GatewayRequest::fetch(target, "GET")));
+        assert!(matches!(
+            send,
+            Err(WebviewError::MissingRuntimeSourceOrigin)
+        ));
+        assert!(matches!(
+            gateway.request_from_gateway_path(
+                "/webview/https%3A%2F%2Fapi%2Eexample%2Etest%2Fdata",
+                GatewayRequestKind::Fetch,
+            ),
+            Err(WebviewError::MissingRuntimeSourceOrigin)
+        ));
         Ok(())
     }
 
@@ -475,6 +545,9 @@ mod tests {
         futures::executor::block_on(
             gateway.send(
                 GatewayRequest::fetch(fetch_target, "GET")
+                    .with_source_origin(
+                        TargetUrl::parse("https://example.com/index.html")?.into_url(),
+                    )
                     .with_header(GatewayHeader::new("Cookie", "caller=leak")?),
             ),
         )?;
@@ -491,6 +564,37 @@ mod tests {
             .collect();
 
         assert_eq!(cookies, vec!["sid=one"]);
+        Ok(())
+    }
+
+    #[test]
+    fn gateway_normalizes_direct_struct_source_origin_before_transport() -> Result<()> {
+        let transport = RecordingTransport::new();
+        let request = GatewayRequest {
+            target: TargetUrl::parse("https://app.example.test:8443/data")?.into_url(),
+            method: "GET".to_string(),
+            headers: Vec::new(),
+            body: Vec::new(),
+            kind: GatewayRequestKind::Fetch,
+            source_origin: Some(Url::parse(
+                "https://user:pass@app.example.test:8443/page?q=1#section",
+            )?),
+            source_target: None,
+            credentials: GatewayCredentials::SameOrigin,
+            top_level_navigation: false,
+        };
+        let mut gateway = WebviewGateway::new(GatewayPrefix::new("/webview/")?, transport);
+
+        futures::executor::block_on(gateway.send(request))?;
+
+        let requests = gateway.transport.requests.borrow();
+        let first = requests
+            .first()
+            .ok_or_else(|| WebviewError::Transport("missing request".to_string()))?;
+        assert_eq!(
+            first.source_origin.as_ref().map(Url::as_str),
+            Some("https://app.example.test:8443/")
+        );
         Ok(())
     }
 

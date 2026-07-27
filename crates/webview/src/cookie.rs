@@ -2,10 +2,13 @@ use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use url::Host;
 use url::Url;
 
 use crate::error::Result;
 use crate::error::WebviewError;
+use crate::types::GatewayRequest;
+use crate::types::GatewayRequestKind;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct StoredCookie {
@@ -16,6 +19,14 @@ struct StoredCookie {
     path: String,
     secure: bool,
     expires_at: Option<i64>,
+    same_site: SameSite,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SameSite {
+    Strict,
+    Lax,
+    None,
 }
 
 /// Virtual cookie jar keyed by target origin/domain/path.
@@ -59,6 +70,7 @@ impl CookieJar {
             path: default_cookie_path(origin.path()),
             secure: false,
             expires_at: None,
+            same_site: SameSite::Lax,
         };
         let mut delete_cookie = false;
         let mut saw_max_age = false;
@@ -101,10 +113,20 @@ impl CookieJar {
                             cookie.expires_at = Some(expires_at);
                         }
                     }
+                } else if key.eq_ignore_ascii_case("samesite") {
+                    match value.trim().to_ascii_lowercase().as_str() {
+                        "strict" => cookie.same_site = SameSite::Strict,
+                        "lax" => cookie.same_site = SameSite::Lax,
+                        "none" => cookie.same_site = SameSite::None,
+                        _ => {}
+                    }
                 }
             }
         }
 
+        if !delete_cookie && cookie.same_site == SameSite::None && !cookie.secure {
+            return Ok(());
+        }
         self.cookies.retain(|existing| {
             !(existing.name == cookie.name
                 && existing.domain == cookie.domain
@@ -119,6 +141,28 @@ impl CookieJar {
 
     /// Build a `Cookie` request header for `target`, if any jar entries match.
     pub fn cookie_header(&self, target: &Url) -> Option<String> {
+        self.cookie_header_matching(target, None, "GET", true, GatewayRequestKind::Navigation)
+    }
+
+    /// Build a `Cookie` request header for one normalized gateway request.
+    pub fn cookie_header_for_request(&self, request: &GatewayRequest) -> Option<String> {
+        self.cookie_header_matching(
+            &request.target,
+            request.source_origin.as_ref(),
+            request.method.as_str(),
+            request.top_level_navigation,
+            request.kind,
+        )
+    }
+
+    fn cookie_header_matching(
+        &self,
+        target: &Url,
+        source: Option<&Url>,
+        method: &str,
+        top_level_navigation: bool,
+        kind: GatewayRequestKind,
+    ) -> Option<String> {
         let host = target.host_str()?.to_ascii_lowercase();
         let path = target.path();
         let secure_request = target.scheme() == "https";
@@ -131,6 +175,14 @@ impl CookieJar {
                     && (!cookie.secure || secure_request)
                     && domain_matches(cookie, &host)
                     && path_matches(cookie.path.as_str(), path)
+                    && same_site_allows_cookie(
+                        cookie,
+                        source,
+                        target,
+                        method,
+                        top_level_navigation,
+                        kind,
+                    )
             })
             .map(|cookie| format!("{}={}", cookie.name, cookie.value))
             .collect();
@@ -167,6 +219,62 @@ fn cookie_expired(cookie: &StoredCookie, now: i64) -> bool {
     cookie
         .expires_at
         .is_some_and(|expires_at| expires_at <= now)
+}
+
+fn same_site_allows_cookie(
+    cookie: &StoredCookie,
+    source: Option<&Url>,
+    target: &Url,
+    method: &str,
+    top_level_navigation: bool,
+    kind: GatewayRequestKind,
+) -> bool {
+    if cookie.same_site == SameSite::None {
+        return true;
+    }
+    if let Some(source) = source {
+        if same_site(source, target) {
+            return true;
+        }
+    } else {
+        return kind == GatewayRequestKind::Navigation && top_level_navigation;
+    }
+    cookie.same_site == SameSite::Lax
+        && top_level_navigation
+        && kind == GatewayRequestKind::Navigation
+        && is_safe_navigation_method(method)
+}
+
+fn same_site(source: &Url, target: &Url) -> bool {
+    source.scheme() == target.scheme()
+        && site_for_same_site(source)
+            .zip(site_for_same_site(target))
+            .is_some_and(|(source, target)| source.eq_ignore_ascii_case(target.as_str()))
+}
+
+fn site_for_same_site(url: &Url) -> Option<String> {
+    match url.host()? {
+        Host::Domain(host) => domain_site_for_same_site(host),
+        Host::Ipv4(host) => Some(host.to_string()),
+        Host::Ipv6(host) => Some(host.to_string()),
+    }
+}
+
+fn domain_site_for_same_site(host: &str) -> Option<String> {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty() {
+        return None;
+    }
+    let registrable_domain = psl::domain_str(host.as_str()).unwrap_or(host.as_str());
+    Some(
+        registrable_domain
+            .trim_end_matches('.')
+            .to_ascii_lowercase(),
+    )
+}
+
+fn is_safe_navigation_method(method: &str) -> bool {
+    matches!(method.to_ascii_uppercase().as_str(), "GET" | "HEAD")
 }
 
 fn max_age_millis(seconds: i64) -> i64 {
@@ -331,6 +439,165 @@ mod tests {
         let target = Url::parse("https://example.com/app/page")?;
         assert_eq!(jar.cookie_header(&target), None);
         assert!(jar.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn strict_cookie_is_not_sent_for_cross_site_subresource() -> Result<()> {
+        let mut jar = CookieJar::new();
+        let origin = Url::parse("https://auth.example.test/app/index.html")?;
+        jar.store_set_cookie(&origin, "sid=strict; Path=/; SameSite=Strict; Secure")?;
+
+        let request = crate::types::GatewayRequest::subresource(Url::parse(
+            "https://auth.example.test/app/script.js",
+        )?)
+        .with_source_origin(Url::parse("https://shop.example.net/page")?);
+
+        assert_eq!(jar.cookie_header_for_request(&request), None);
+        Ok(())
+    }
+
+    #[test]
+    fn strict_cookie_is_sent_for_same_site_subdomain_subresource() -> Result<()> {
+        let mut jar = CookieJar::new();
+        let origin = Url::parse("https://auth.example.com/app/index.html")?;
+        jar.store_set_cookie(&origin, "sid=strict; Path=/; SameSite=Strict; Secure")?;
+
+        let request = crate::types::GatewayRequest::subresource(Url::parse(
+            "https://auth.example.com/app/script.js",
+        )?)
+        .with_source_origin(Url::parse("https://shop.example.com/page")?);
+
+        assert_eq!(
+            jar.cookie_header_for_request(&request).as_deref(),
+            Some("sid=strict")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn strict_cookie_is_not_sent_between_public_suffix_siblings() -> Result<()> {
+        let mut jar = CookieJar::new();
+        let origin = Url::parse("https://owner.github.io/app/index.html")?;
+        jar.store_set_cookie(&origin, "sid=strict; Path=/; SameSite=Strict; Secure")?;
+
+        let request = crate::types::GatewayRequest::subresource(Url::parse(
+            "https://owner.github.io/app/script.js",
+        )?)
+        .with_source_origin(Url::parse("https://attacker.github.io/page")?);
+
+        assert_eq!(jar.cookie_header_for_request(&request), None);
+        Ok(())
+    }
+
+    #[test]
+    fn strict_cookie_ip_sources_use_exact_host_site() -> Result<()> {
+        let mut jar = CookieJar::new();
+        let origin = Url::parse("https://127.0.0.1/app/index.html")?;
+        jar.store_set_cookie(&origin, "sid=strict; Path=/; SameSite=Strict; Secure")?;
+        let same_ip = crate::types::GatewayRequest::subresource(Url::parse(
+            "https://127.0.0.1/app/script.js",
+        )?)
+        .with_source_origin(Url::parse("https://127.0.0.1/page")?);
+        let cross_ip = crate::types::GatewayRequest::subresource(Url::parse(
+            "https://127.0.0.1/app/script.js",
+        )?)
+        .with_source_origin(Url::parse("https://127.0.0.2/page")?);
+
+        assert_eq!(
+            jar.cookie_header_for_request(&same_ip).as_deref(),
+            Some("sid=strict")
+        );
+        assert_eq!(jar.cookie_header_for_request(&cross_ip), None);
+        Ok(())
+    }
+
+    #[test]
+    fn strict_and_lax_cookies_are_not_sent_without_subresource_source_context() -> Result<()> {
+        let mut jar = CookieJar::new();
+        let origin = Url::parse("https://auth.example.test/app/index.html")?;
+        jar.store_set_cookie(&origin, "strict=one; Path=/; SameSite=Strict; Secure")?;
+        jar.store_set_cookie(&origin, "lax=one; Path=/; SameSite=Lax; Secure")?;
+        jar.store_set_cookie(&origin, "none=one; Path=/; SameSite=None; Secure")?;
+
+        let request = crate::types::GatewayRequest::subresource(Url::parse(
+            "https://auth.example.test/app/script.js",
+        )?);
+
+        assert_eq!(
+            jar.cookie_header_for_request(&request).as_deref(),
+            Some("none=one")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn lax_cookie_is_only_sent_on_safe_cross_site_top_level_navigation() -> Result<()> {
+        let mut jar = CookieJar::new();
+        let origin = Url::parse("https://auth.example.test/app/index.html")?;
+        jar.store_set_cookie(&origin, "sid=lax; Path=/; SameSite=Lax; Secure")?;
+
+        let source = Url::parse("https://shop.example.net/page")?;
+        let safe_top_level = crate::types::GatewayRequest::navigation(Url::parse(
+            "https://auth.example.test/app/page",
+        )?)
+        .with_source_origin(source.clone())
+        .with_top_level_navigation(true);
+        let unsafe_top_level = crate::types::GatewayRequest::navigation(Url::parse(
+            "https://auth.example.test/app/delete",
+        )?)
+        .with_source_origin(source.clone())
+        .with_top_level_navigation(true)
+        .with_body("delete")
+        .with_header(crate::types::GatewayHeader::new(
+            "Content-Type",
+            "text/plain",
+        )?);
+        let unsafe_top_level = crate::types::GatewayRequest {
+            method: "POST".to_string(),
+            ..unsafe_top_level
+        };
+        let iframe_navigation = crate::types::GatewayRequest::navigation(Url::parse(
+            "https://auth.example.test/app/frame",
+        )?)
+        .with_source_origin(source)
+        .with_top_level_navigation(false);
+
+        assert_eq!(
+            jar.cookie_header_for_request(&safe_top_level).as_deref(),
+            Some("sid=lax")
+        );
+        assert_eq!(jar.cookie_header_for_request(&unsafe_top_level), None);
+        assert_eq!(jar.cookie_header_for_request(&iframe_navigation), None);
+        Ok(())
+    }
+
+    #[test]
+    fn samesite_none_requires_secure_and_allows_cross_site_subresource() -> Result<()> {
+        let mut jar = CookieJar::new();
+        let origin = Url::parse("https://auth.example.test/app/index.html")?;
+
+        jar.store_set_cookie(&origin, "keep=old; Path=/")?;
+        jar.store_set_cookie(&origin, "keep=new; Path=/; SameSite=None")?;
+        assert_eq!(
+            jar.cookie_header(&Url::parse("https://auth.example.test/app/page")?)
+                .as_deref(),
+            Some("keep=old")
+        );
+
+        jar.store_set_cookie(&origin, "bad=none; Path=/; SameSite=None")?;
+        assert_eq!(jar.len(), 1);
+
+        jar.store_set_cookie(&origin, "sid=none; Path=/; SameSite=None; Secure")?;
+        let request = crate::types::GatewayRequest::subresource(Url::parse(
+            "https://auth.example.test/app/script.js",
+        )?)
+        .with_source_origin(Url::parse("https://shop.example.net/page")?);
+
+        assert_eq!(
+            jar.cookie_header_for_request(&request).as_deref(),
+            Some("sid=none")
+        );
         Ok(())
     }
 }

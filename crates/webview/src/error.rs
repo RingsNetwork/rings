@@ -89,6 +89,9 @@ pub enum WebviewError {
     /// A cross-origin runtime response did not satisfy the virtual CORS policy.
     #[error("CORS policy error: {0}")]
     Cors(String),
+    /// A runtime fetch or XHR was built without trusted source context.
+    #[error("runtime gateway request requires a trusted source origin")]
+    MissingRuntimeSourceOrigin,
     /// A transport adapter returned stable browser-facing failure metadata.
     #[error("{0}")]
     GatewayFailure(GatewayFailure),

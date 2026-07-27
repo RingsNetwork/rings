@@ -181,20 +181,18 @@ fn webview_gateway_renders_and_routes_page_flow() -> Result<()> {
     let fetch_path = required_runtime_gateway_url(&prefix, target.as_url(), "/api/data")?;
     assert!(fetch_path.starts_with(prefix.as_str()));
     assert!(!fetch_path.starts_with("https://"));
-    let fetch_response = futures::executor::block_on(
-        renderer
-            .gateway_mut()
-            .send_gateway_path(&fetch_path, GatewayRequestKind::Fetch),
-    )?;
+    let fetch_target = prefix.decode_path(&fetch_path)?.into_url();
+    let fetch_response = futures::executor::block_on(renderer.gateway_mut().send(
+        GatewayRequest::fetch(fetch_target, "GET").with_source_origin(target.as_url().clone()),
+    ))?;
     assert_eq!(utf8_body(fetch_response)?, r#"{"ok":true}"#);
 
     let runtime_base = Url::parse("https://example.test/assets/")?;
     let xhr_path = required_runtime_gateway_url(&prefix, &runtime_base, "forms/submit")?;
-    let mut xhr_request = renderer
-        .gateway()
-        .request_from_gateway_path(&xhr_path, GatewayRequestKind::Xhr)?;
-    xhr_request.method = "POST".to_string();
-    xhr_request.body = b"name=value".to_vec();
+    let xhr_target = prefix.decode_path(&xhr_path)?.into_url();
+    let xhr_request = GatewayRequest::xhr(xhr_target, "POST")
+        .with_source_origin(target.as_url().clone())
+        .with_body(b"name=value".to_vec());
     let xhr_response = futures::executor::block_on(renderer.gateway_mut().send(xhr_request))?;
     assert_eq!(xhr_response.status, 204);
 

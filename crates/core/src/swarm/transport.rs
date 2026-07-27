@@ -2,13 +2,9 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use futures::future::FutureExt;
-use futures::pin_mut;
-use futures::select;
 use rings_transport::connection_ref::ConnectionRef;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 pub use rings_transport::connections::DummyConnection as ConnectionOwner;
@@ -61,9 +57,10 @@ use crate::message::PayloadSender;
 use crate::session::SessionSk;
 use crate::swarm::callback::InnerSwarmCallback;
 use crate::utils::get_epoch_ms_i64;
-use crate::utils::sleep;
 
+mod connection;
 mod delivery;
+mod event_delivery;
 mod liveness;
 mod pending;
 mod storage_lookup;
@@ -75,6 +72,8 @@ use self::delivery::send_data_with_timeout;
 use self::delivery::spawn_chunked_send;
 use self::delivery::spawn_delivery;
 use self::delivery::ChunkSendPermit;
+use self::event_delivery::SwarmEventDeliveryLock;
+use self::event_delivery::SwarmEventDeliveryLocks;
 use self::liveness::PeerLivenessMap;
 pub(crate) use self::liveness::PEER_LIVENESS_IDLE_MS;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -87,8 +86,6 @@ use self::pending::PENDING_CONNECTION_TIMEOUT_MS;
 use self::storage_lookup::StorageLookupObservationMap;
 #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
 pub(crate) use self::storage_lookup::STORAGE_LOOKUP_OBSERVATION_CAPACITY;
-
-const DATA_CHANNEL_OPEN_TIMEOUT: Duration = Duration::from_secs(8);
 
 fn message_kind(message: &Message) -> &'static str {
     match message {
@@ -131,6 +128,7 @@ pub struct SwarmTransport {
     dht_virtual_nodes: u16,
     reassembly_limits: ReassemblyLimits,
     connection_lifecycle: Mutex<()>,
+    swarm_event_delivery: SwarmEventDeliveryLocks,
     pending_peers: Mutex<PendingPeerPool<DEFAULT_PENDING_CONNECTION_CAPACITY>>,
     active_peers: Mutex<BTreeMap<Did, u64>>,
     pending_finger_updates: Mutex<BTreeMap<PendingConnectionAttempt, BTreeSet<usize>>>,
@@ -218,6 +216,7 @@ impl SwarmTransport {
             dht_virtual_nodes: settings.dht_virtual_nodes,
             reassembly_limits: settings.reassembly_limits,
             connection_lifecycle: Mutex::new(()),
+            swarm_event_delivery: SwarmEventDeliveryLocks::new(),
             pending_peers: Mutex::new(PendingPeerPool::new()),
             active_peers: Mutex::new(BTreeMap::new()),
             pending_finger_updates: Mutex::new(BTreeMap::new()),
@@ -264,6 +263,30 @@ impl SwarmTransport {
 
     async fn record_peer_measurement(&self, peer: Did, counter: MeasureCounter) {
         record_measurement(self.measure.clone(), peer, counter).await;
+    }
+
+    pub(crate) fn swarm_event_delivery_lock(&self, peer: Did) -> SwarmEventDeliveryLock {
+        self.swarm_event_delivery.lock(peer)
+    }
+
+    pub(crate) fn prune_swarm_event_delivery_lock(
+        &self,
+        peer: Did,
+        delivery: &SwarmEventDeliveryLock,
+    ) {
+        self.swarm_event_delivery
+            .prune(peer, delivery, self.connection_epoch_exists(peer));
+    }
+
+    fn connection_epoch_exists(&self, peer: Did) -> bool {
+        self.active_peers()
+            .map(|active| active.contains_key(&peer))
+            .unwrap_or(false)
+            || self
+                .pending_peers
+                .lock()
+                .map(|pending| pending.contains(peer))
+                .unwrap_or(false)
     }
 
     /// Record that `peer` reached an open data channel.
@@ -376,98 +399,6 @@ impl SwarmTransport {
         }
     }
 
-    /// Get an active, routable connection by DID.
-    ///
-    /// Pending and terminal physical transports are intentionally invisible here.
-    /// Get an active, routable connection by DID.
-    pub fn get_connection(&self, peer: Did) -> Option<SwarmConnection> {
-        self.is_active_connection(peer)
-            .then(|| self.get_raw_connection(peer))
-            .flatten()
-    }
-
-    /// Get all active, routable transport connections.
-    pub fn get_connections(&self) -> Vec<(Did, SwarmConnection)> {
-        self.active_peer_ids()
-            .into_iter()
-            .filter_map(|peer| {
-                self.get_connection(peer)
-                    .map(|connection| (peer, connection))
-            })
-            .collect()
-    }
-
-    fn active_peer_ids(&self) -> Vec<Did> {
-        self.active_peers()
-            .map(|active| active.keys().copied().collect())
-            .unwrap_or_default()
-    }
-
-    /// Return admitted transports, including a terminal connection that still
-    /// needs lifecycle cleanup. This is deliberately internal: callers outside
-    /// the swarm only observe routable connections through [`Self::get_connections`].
-    pub(crate) fn admitted_connections(&self) -> Vec<(Did, SwarmConnection)> {
-        self.active_peer_ids()
-            .into_iter()
-            .filter_map(|peer| {
-                self.get_raw_connection(peer)
-                    .map(|connection| (peer, connection))
-            })
-            .collect()
-    }
-
-    /// Return admitted DIDs, even if their raw transport object has already gone away.
-    pub(crate) fn admitted_connection_ids(&self) -> Vec<Did> {
-        self.active_peer_ids()
-    }
-
-    /// Get DIDs of active, routable connections.
-    pub fn get_connection_ids(&self) -> Vec<Did> {
-        self.get_connections()
-            .into_iter()
-            .map(|(peer, _)| peer)
-            .collect()
-    }
-
-    /// Disconnect a connection.
-    ///
-    /// Pending connections are never represented in the DHT, so cancelling one
-    /// only closes its transport object. Active connections leave the DHT before
-    /// the underlying WebRTC object is released.
-    pub async fn disconnect(&self, peer: Did) -> Result<()> {
-        if let Some(attempt) = self.pending_attempt(peer)? {
-            self.cancel_pending_connection(attempt).await?;
-            return Ok(());
-        }
-
-        let was_active = self.retire_active_connection(peer)?;
-        if !was_active {
-            self.transport
-                .close_connection(&peer.to_string())
-                .await
-                .map_err(Error::Transport)?;
-            return Ok(());
-        }
-
-        tracing::info!("removing {peer} from DHT");
-        self.dht.remove(peer)?;
-        self.close_connection_for_disconnect(peer).await
-    }
-
-    async fn close_connection_for_disconnect(&self, peer: Did) -> Result<()> {
-        match self.transport.close_connection(&peer.to_string()).await {
-            Ok(()) => Ok(()),
-            Err(rings_transport::error::Error::ConnectionNotFound(_)) => {
-                tracing::warn!(
-                    peer = %peer,
-                    "connection was already absent while disconnecting admitted peer"
-                );
-                Ok(())
-            }
-            Err(error) => Err(error.into()),
-        }
-    }
-
     /// Connect a given Did. If the did is already connected, return Err,
     /// else try prepare offer and establish connection by dht.
     pub async fn connect(&self, peer: Did, callback: InnerSwarmCallback) -> Result<()> {
@@ -541,82 +472,6 @@ impl SwarmTransport {
             }
         }
         Ok(())
-    }
-
-    /// Get an active connection by DID and verify that its data channel remains open.
-    /// This method will return None if the connection is not active.
-    /// It can wait for a transiently disconnected active connection to recover,
-    /// but pending handshakes never reach this path.
-    /// See more information about [rings_transport::core::transport::WebrtcConnectionState].
-    /// See also method webrtc_wait_for_data_channel_open [rings_transport::core::transport::ConnectionInterface].
-    pub async fn get_and_check_connection(&self, peer: Did) -> Option<SwarmConnection> {
-        self.get_and_check_connection_with_timeout(peer, DATA_CHANNEL_OPEN_TIMEOUT)
-            .await
-    }
-
-    pub(crate) async fn get_and_check_connection_with_timeout(
-        &self,
-        peer: Did,
-        wait_timeout: Duration,
-    ) -> Option<SwarmConnection> {
-        let conn = self.get_connection(peer)?;
-
-        let initial_state = conn.webrtc_connection_state();
-        tracing::debug!(
-            target: "rings_core::transport::data_channel",
-            local = %self.dht.did,
-            peer = %peer,
-            state = ?initial_state,
-            timeout_ms = wait_timeout.as_millis(),
-            "waiting for active connection data channel"
-        );
-
-        let failure = {
-            let wait_for_open = conn.connection.webrtc_wait_for_data_channel_open().fuse();
-            let timeout = sleep(wait_timeout).fuse();
-            pin_mut!(wait_for_open, timeout);
-
-            select! {
-                result = wait_for_open => result.err().map(|e| format!("transport_wait_failed: {e:?}")),
-                _ = timeout => Some("data_channel_open_wait_timeout".to_string()),
-            }
-        };
-
-        if let Some(reason) = failure {
-            let final_state = conn.webrtc_connection_state();
-            tracing::warn!(
-                target: "rings_core::transport::data_channel",
-                local = %self.dht.did,
-                peer = %peer,
-                initial_state = ?initial_state,
-                final_state = ?final_state,
-                timeout_ms = wait_timeout.as_millis(),
-                reason = %reason,
-                "[get_and_check_connection] connection data channel not open, will be dropped"
-            );
-
-            if let Err(e) = self.disconnect(peer).await {
-                tracing::error!(
-                    target: "rings_core::transport::data_channel",
-                    local = %self.dht.did,
-                    peer = %peer,
-                    reason = %reason,
-                    "failed to close connection after data-channel wait failure: {e:?}"
-                );
-            }
-
-            return None;
-        };
-
-        tracing::debug!(
-            target: "rings_core::transport::data_channel",
-            local = %self.dht.did,
-            peer = %peer,
-            state = ?conn.webrtc_connection_state(),
-            "active connection data channel is open"
-        );
-
-        Some(conn)
     }
 
     /// Create new connection and its offer.

@@ -8,6 +8,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use url::Url;
+
 use super::*;
 
 pub(super) struct BrowserFixtureServer {
@@ -129,12 +131,38 @@ document.documentElement.appendChild(Object.assign(document.createElement("div")
     let mut gateway = gateway.lock().map_err(|_| {
         WebviewError::Transport("browser fixture gateway lock poisoned".to_string())
     })?;
-    let mut gateway_request = gateway.request_from_gateway_path(request.path.as_str(), kind)?;
+    let mut gateway_request =
+        gateway_request_from_http(prefix, request.path.as_str(), kind, &request.headers)?;
     gateway_request.method = request.method;
     gateway_request.headers = request.headers;
     gateway_request.body = request.body;
     let response = futures::executor::block_on(gateway.send(gateway_request))?;
     write_http_response(stream, &response)
+}
+
+fn gateway_request_from_http(
+    prefix: &GatewayPrefix,
+    path: &str,
+    kind: GatewayRequestKind,
+    headers: &[GatewayHeader],
+) -> Result<GatewayRequest> {
+    let target = prefix.decode_path(path)?.into_url();
+    Ok(match kind {
+        GatewayRequestKind::Navigation => GatewayRequest::navigation(target),
+        GatewayRequestKind::Subresource => GatewayRequest::subresource(target),
+        GatewayRequestKind::Fetch => GatewayRequest::fetch(target, "GET")
+            .with_source_origin(runtime_source_from_referer(prefix, headers)?),
+        GatewayRequestKind::Xhr => GatewayRequest::xhr(target, "GET")
+            .with_source_origin(runtime_source_from_referer(prefix, headers)?),
+    })
+}
+
+fn runtime_source_from_referer(prefix: &GatewayPrefix, headers: &[GatewayHeader]) -> Result<Url> {
+    let source = header_value(headers, "referer")
+        .or_else(|| header_value(headers, "ping-from"))
+        .ok_or(WebviewError::MissingRuntimeSourceOrigin)?;
+    let source_url = Url::parse(source)?;
+    Ok(prefix.decode_path(source_url.path())?.into_url())
 }
 
 fn write_fixture_error(stream: &mut TcpStream, error: WebviewError) {

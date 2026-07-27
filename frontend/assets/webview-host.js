@@ -194,9 +194,10 @@
     ownsGatewayHost = Boolean(acknowledged);
     if (acknowledged) {
       recordDebug("host", "Registered the local Rings node as gateway host");
-      return;
+      return true;
     }
     recordDebug("host", "Service Worker rejected gateway host registration", "warning");
+    throw new Error("Service Worker rejected gateway host registration");
   }
 
   async function enableDebug() {
@@ -282,6 +283,8 @@
           ownsGatewayHost = Boolean(acknowledged);
           if (acknowledged) {
             recordDebug("host", "Restored the local Rings node gateway host");
+          } else {
+            recordDebug("host", "Service Worker rejected restored gateway host registration", "warning");
           }
         });
       }
@@ -300,6 +303,8 @@
       port.postMessage({
         ok: false,
         status: 503,
+        errorCode: "local_gateway_unavailable",
+        errorSummary: "Local Rings node gateway is unavailable.",
         error: "the local Rings node gateway is unavailable",
       });
       return;
@@ -319,6 +324,8 @@
         port.postMessage({
           ok: false,
           status: 502,
+          errorCode: "gateway_transport_failed",
+          errorSummary: "Gateway transport failed.",
           error: String(error),
         });
       });

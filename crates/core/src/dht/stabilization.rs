@@ -779,9 +779,6 @@ impl Stabilizer {
                     );
                 }
                 Err(error) => {
-                    if error.records_peer_send_failure() {
-                        self.transport.record_peer_message_send_failed(peer).await;
-                    }
                     tracing::warn!(
                         target: "rings_core::dht::stabilization",
                         local = %self.dht.did,

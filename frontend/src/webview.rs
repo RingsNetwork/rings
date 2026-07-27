@@ -111,7 +111,10 @@ pub(crate) fn clear_browser_gateway() {
 pub(crate) async fn register_browser_gateway() -> Result<(), String> {
     let bridge = crate::browser_api::js_global_prop("RingsWebviewHost")?;
     let registered = crate::browser_api::js_call0(&bridge, "registerGatewayHost")?;
-    let _ready = crate::browser_api::await_js(registered).await?;
+    let ready = crate::browser_api::await_js(registered).await?;
+    if ready.as_bool() == Some(false) {
+        return Err("Service Worker rejected gateway host registration".to_string());
+    }
     Ok(())
 }
 
@@ -145,10 +148,15 @@ fn browser_host_request(value: &JsValue) -> Result<WebviewHostRequest, String> {
     let headers = browser_headers(value)?;
     let body = browser_body(value)?;
     let credentials = browser_credentials(value)?;
-    let request = match crate::browser_api::js_string_field(value, "kind")?.as_str() {
+    let kind = crate::browser_api::js_string_field(value, "kind")?;
+    let top_level_navigation = crate::browser_api::js_bool_field(value, "topLevelNavigation")
+        .unwrap_or(kind == "navigation");
+    let request = match kind.as_str() {
         "navigation" => Ok(WebviewHostRequest::navigation_with_payload(
             requested, method, headers, body,
-        )),
+        )
+        .with_source_target(source_target)
+        .with_top_level_navigation(top_level_navigation)),
         "subresource" => Ok(WebviewHostRequest::subresource(
             requested,
             source_target,
@@ -396,6 +404,7 @@ pub struct WebviewHostRequest {
     body: Vec<u8>,
     kind: GatewayRequestKind,
     credentials: GatewayCredentials,
+    top_level_navigation: bool,
 }
 
 impl WebviewHostRequest {
@@ -419,6 +428,7 @@ impl WebviewHostRequest {
             body,
             GatewayRequestKind::Navigation,
         )
+        .with_top_level_navigation(true)
     }
 
     /// Build a static subresource request with its captured HTTP payload.
@@ -437,6 +447,7 @@ impl WebviewHostRequest {
             body,
             GatewayRequestKind::Subresource,
         )
+        .with_top_level_navigation(false)
     }
 
     /// Build a runtime fetch request with the trusted initiating page target.
@@ -491,6 +502,7 @@ impl WebviewHostRequest {
             body,
             kind,
             credentials: GatewayCredentials::SameOrigin,
+            top_level_navigation: kind == GatewayRequestKind::Navigation,
         }
     }
 
@@ -510,17 +522,19 @@ impl WebviewHostRequest {
         self
     }
 
+    fn with_source_target(mut self, source_target: Option<TargetUrl>) -> Self {
+        self.source_target = source_target;
+        self
+    }
+
+    fn with_top_level_navigation(mut self, top_level_navigation: bool) -> Self {
+        self.top_level_navigation = top_level_navigation;
+        self
+    }
+
     fn into_gateway_request(self, target: TargetUrl) -> GatewayRequest {
-        let source_origin = matches!(
-            self.kind,
-            GatewayRequestKind::Fetch | GatewayRequestKind::Xhr
-        )
-        .then(|| {
-            self.source_target
-                .as_ref()
-                .map(|source| source.as_url().clone())
-        })
-        .flatten();
+        let source_origin = self.source_target.as_ref().map(target_origin);
+        let source_target = self.source_target.map(TargetUrl::into_url);
         GatewayRequest {
             target: target.into_url(),
             method: self.method,
@@ -528,9 +542,21 @@ impl WebviewHostRequest {
             body: self.body,
             kind: self.kind,
             source_origin,
+            source_target,
             credentials: self.credentials,
+            top_level_navigation: self.top_level_navigation,
         }
     }
+}
+
+fn target_origin(target: &TargetUrl) -> Url {
+    let mut origin = target.as_url().clone();
+    let _ = origin.set_username("");
+    let _ = origin.set_password(None);
+    origin.set_path("/");
+    origin.set_query(None);
+    origin.set_fragment(None);
+    origin
 }
 
 /// The only actions a controlled WebView host may take for one captured request.
@@ -579,7 +605,7 @@ impl WebviewNode {
         let prefix = GatewayPrefix::new(GATEWAY_PREFIX)?;
         let policy = GatewayRoutePolicy::new(controlled_origin.into_url(), prefix.clone())?;
         let gateway = ConcurrentWebviewGateway::new(prefix, OnionGatewayTransport { provider })
-            .with_target_bootstrap(webview_bootstrap);
+            .with_request_bootstrap(webview_bootstrap);
         Ok(Self {
             host: Rc::new(WebviewGatewayHost {
                 policy,
@@ -693,6 +719,7 @@ impl GatewayTransport for OnionGatewayTransport {
             trace_onion_route(
                 &self.provider,
                 request.target.as_str(),
+                request.source_target.as_ref().map(Url::as_str),
                 request.kind,
                 options,
             )
@@ -733,6 +760,7 @@ fn should_trace_onion_route(kind: GatewayRequestKind) -> bool {
 async fn trace_onion_route(
     provider: &Provider,
     target: &str,
+    source_target: Option<&str>,
     kind: GatewayRequestKind,
     options: onion::OnionProxyOptions,
 ) {
@@ -751,6 +779,7 @@ async fn trace_onion_route(
             "route selected",
             "info",
             target,
+            source_target,
             kind,
             Some(&route),
             None,
@@ -760,6 +789,7 @@ async fn trace_onion_route(
             error.message(),
             "error",
             target,
+            source_target,
             kind,
             None,
             Some(error.message()),
@@ -772,6 +802,7 @@ fn emit_onion_debug(
     message: &str,
     level: &str,
     target: &str,
+    source_target: Option<&str>,
     kind: GatewayRequestKind,
     route: Option<&onion::OnionProxyRoute>,
     error: Option<&str>,
@@ -785,6 +816,10 @@ fn emit_onion_debug(
     };
     let onion = Object::new();
     let _ = crate::browser_api::js_set(&onion, "target", &JsValue::from_str(target));
+    if let Some(source_target) = source_target {
+        let _ =
+            crate::browser_api::js_set(&onion, "sourceTarget", &JsValue::from_str(source_target));
+    }
     let _ =
         crate::browser_api::js_set(&onion, "kind", &JsValue::from_str(gateway_kind_label(kind)));
     let _ = crate::browser_api::js_set(&onion, "durationMs", &JsValue::from_f64(duration_ms));
@@ -825,11 +860,13 @@ fn gateway_kind_label(kind: GatewayRequestKind) -> &'static str {
     }
 }
 
-fn webview_bootstrap(target: &Url) -> String {
-    format!(
-        "{}\n{WEBVIEW_OVERLAY_LOADER}",
-        bootstrap_script(GATEWAY_PREFIX, target)
-    )
+fn webview_bootstrap(request: &GatewayRequest) -> String {
+    let bootstrap = bootstrap_script(GATEWAY_PREFIX, &request.target);
+    if request.top_level_navigation {
+        format!("{bootstrap}\n{WEBVIEW_OVERLAY_LOADER}")
+    } else {
+        bootstrap
+    }
 }
 
 fn is_http_origin(origin: &str) -> bool {
