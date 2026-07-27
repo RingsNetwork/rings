@@ -481,6 +481,35 @@ assert.throws(
     { kind: "navigation" },
     200,
     headers,
+    bytes(
+      "<!doctype html><!-- attacker marker: data-rings-webview-history-guard /assets/webview-overlay.js --><html><head><title>Target</title></head><body>ok</body></html>",
+    ),
+  );
+  const html = text(body);
+  const guardIndex = html.indexOf("<script data-rings-webview-history-guard>");
+  const attackerMarkerIndex = html.indexOf("attacker marker");
+  const overlayIndex = html.lastIndexOf('<script src="/assets/webview-overlay.js"></script>');
+  assert.ok(guardIndex >= 0);
+  assert.ok(attackerMarkerIndex >= 0);
+  assert.ok(overlayIndex > attackerMarkerIndex);
+  const historyCalls = runHistoryGuard(
+    html,
+    "http://127.0.0.1:8080/webview/https%3A%2F%2Ftrusted.example%2Fdocs%2Findex.html",
+  );
+  assert.equal(historyCalls[0]?.[3], "/webview/https%3A%2F%2Ftrusted.example%2Fsearch%3Fq%3Dtest");
+  assert.equal(headers.has("content-length"), false);
+}
+
+{
+  const headers = new Headers({
+    "content-length": "42",
+    "content-security-policy": "default-src 'none'",
+    "content-type": "text/html",
+  });
+  const body = controlledNavigationBody(
+    { kind: "navigation" },
+    200,
+    headers,
     bytes("\uFEFF<!-- leading comment --><html><head><title>Target</title></head><body>ok</body></html>"),
   );
   const html = text(body);

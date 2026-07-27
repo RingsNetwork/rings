@@ -320,9 +320,6 @@ function looksLikeHtml(text) {
 
 function injectWebviewOverlay(html) {
   const guarded = injectWebviewHistoryGuard(html);
-  if (guarded.includes(webviewOverlayScriptPath)) {
-    return guarded;
-  }
   if (/<\/head\s*>/i.test(guarded)) {
     return guarded.replace(/<\/head\s*>/i, `${webviewOverlayScriptTag}</head>`);
   }
@@ -340,9 +337,6 @@ function injectControlledNavigationScripts(html, includeOverlay) {
 }
 
 function injectWebviewHistoryGuard(html) {
-  if (html.includes(webviewHistoryGuardMarker)) {
-    return html;
-  }
   const leading = /^\uFEFF?\s*(?:(?:<!--[\s\S]*?-->)\s*)*(?:<!doctype\s+html\b[^>]*>\s*)?/i.exec(html);
   const index = leading ? leading[0].length : 0;
   return `${html.slice(0, index)}${webviewHistoryGuardScriptTag}${html.slice(index)}`;

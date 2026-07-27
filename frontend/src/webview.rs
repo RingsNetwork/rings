@@ -757,6 +757,17 @@ fn should_trace_onion_route(kind: GatewayRequestKind) -> bool {
     )
 }
 
+struct OnionDebugEvent<'a> {
+    message: &'a str,
+    level: &'a str,
+    target: &'a str,
+    source_target: Option<&'a str>,
+    kind: GatewayRequestKind,
+    route: Option<&'a onion::OnionProxyRoute>,
+    error: Option<&'a str>,
+    duration_ms: f64,
+}
+
 async fn trace_onion_route(
     provider: &Provider,
     target: &str,
@@ -775,39 +786,30 @@ async fn trace_onion_route(
     .await;
     let duration = (js_sys::Date::now() - started).max(0.0).round();
     match result {
-        Ok(route) => emit_onion_debug(
-            "route selected",
-            "info",
+        Ok(route) => emit_onion_debug(OnionDebugEvent {
+            message: "route selected",
+            level: "info",
             target,
             source_target,
             kind,
-            Some(&route),
-            None,
-            duration,
-        ),
-        Err(error) => emit_onion_debug(
-            error.message(),
-            "error",
+            route: Some(&route),
+            error: None,
+            duration_ms: duration,
+        }),
+        Err(error) => emit_onion_debug(OnionDebugEvent {
+            message: error.message(),
+            level: "error",
             target,
             source_target,
             kind,
-            None,
-            Some(error.message()),
-            duration,
-        ),
+            route: None,
+            error: Some(error.message()),
+            duration_ms: duration,
+        }),
     }
 }
 
-fn emit_onion_debug(
-    message: &str,
-    level: &str,
-    target: &str,
-    source_target: Option<&str>,
-    kind: GatewayRequestKind,
-    route: Option<&onion::OnionProxyRoute>,
-    error: Option<&str>,
-    duration_ms: f64,
-) {
+fn emit_onion_debug(event: OnionDebugEvent<'_>) {
     let Ok(bridge) = crate::browser_api::js_global_prop("RingsWebviewHost") else {
         return;
     };
@@ -815,15 +817,22 @@ fn emit_onion_debug(
         return;
     };
     let onion = Object::new();
-    let _ = crate::browser_api::js_set(&onion, "target", &JsValue::from_str(target));
-    if let Some(source_target) = source_target {
+    let _ = crate::browser_api::js_set(&onion, "target", &JsValue::from_str(event.target));
+    if let Some(source_target) = event.source_target {
         let _ =
             crate::browser_api::js_set(&onion, "sourceTarget", &JsValue::from_str(source_target));
     }
-    let _ =
-        crate::browser_api::js_set(&onion, "kind", &JsValue::from_str(gateway_kind_label(kind)));
-    let _ = crate::browser_api::js_set(&onion, "durationMs", &JsValue::from_f64(duration_ms));
-    if let Some(route) = route {
+    let _ = crate::browser_api::js_set(
+        &onion,
+        "kind",
+        &JsValue::from_str(gateway_kind_label(event.kind)),
+    );
+    let _ = crate::browser_api::js_set(
+        &onion,
+        "durationMs",
+        &JsValue::from_f64(event.duration_ms),
+    );
+    if let Some(route) = event.route {
         let hops = Array::new();
         for hop in route.hops.iter() {
             hops.push(&JsValue::from_str(hop));
@@ -837,14 +846,14 @@ fn emit_onion_debug(
         let _ = crate::browser_api::js_set(&onion, "service", &JsValue::from_str("https"));
         let _ = crate::browser_api::js_set(&onion, "hops", &Array::new().into());
     }
-    if let Some(error) = error {
+    if let Some(error) = event.error {
         let _ = crate::browser_api::js_set(&onion, "error", &JsValue::from_str(error));
     }
 
     let args = Array::new();
     args.push(&JsValue::from_str("onion"));
-    args.push(&JsValue::from_str(message));
-    args.push(&JsValue::from_str(level));
+    args.push(&JsValue::from_str(event.message));
+    args.push(&JsValue::from_str(event.level));
     args.push(&JsValue::UNDEFINED);
     args.push(&JsValue::from_bool(true));
     args.push(onion.as_ref());
