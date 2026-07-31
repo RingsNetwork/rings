@@ -24,10 +24,10 @@ use crate::message::MessagePayload;
 
 mod topology_view;
 
-#[cfg(test)]
+#[cfg(all(test, not(target_family = "wasm")))]
 use topology_view::confirmed_topology;
 use topology_view::connect_successor_hint;
-#[cfg(test)]
+#[cfg(all(test, not(target_family = "wasm")))]
 use topology_view::topology_has_confirmed_peer;
 
 /// PeerLivenessProbe is a direct overlay liveness probe.

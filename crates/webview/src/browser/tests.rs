@@ -42,10 +42,10 @@ fn onion_https_request_preserves_path_headers_and_body() -> Result<()> {
 
     assert_eq!(onion_request.method, "POST");
     assert_eq!(onion_request.path, "/forms/submit?draft=1");
-    assert_eq!(
-        onion_request.headers,
-        vec![("X-Requested-With", "XMLHttpRequest")]
-    );
+    assert_eq!(onion_request.headers, vec![(
+        "X-Requested-With",
+        "XMLHttpRequest"
+    )]);
     assert_eq!(onion_request.body, b"name=value");
     Ok(())
 }
