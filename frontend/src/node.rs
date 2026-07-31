@@ -18,6 +18,7 @@ use wasm_bindgen_futures::JsFuture;
 
 use crate::wallet::WalletAccount;
 use crate::webview::WebviewNode;
+use crate::webview::WebviewOnionSettings;
 
 /// A browser Rings node with all demo protocols installed.
 #[derive(Clone)]
@@ -102,6 +103,8 @@ pub struct NodeSettings {
     pub stabilize_interval: u64,
     /// IndexedDB storage namespace.
     pub storage_name: String,
+    /// Runtime WebView onion routing settings.
+    pub webview_onion_settings: WebviewOnionSettings,
 }
 
 /// Build a browser provider from a wallet-authorized session key.
@@ -137,8 +140,9 @@ pub async fn build_node(
     snark
         .register(&provider)
         .map_err(|error| format!("register snark protocol: {error}"))?;
-    let webview = WebviewNode::for_current_window(provider.clone())
-        .map_err(|error| format!("initialize webview: {error}"))?;
+    let webview =
+        WebviewNode::for_current_window(provider.clone(), settings.webview_onion_settings)
+            .map_err(|error| format!("initialize webview: {error}"))?;
     let listener = provider.listen();
 
     Ok(DemoNode {

@@ -48,9 +48,9 @@ impl IceServer {
 
 /// Parse ICE servers, log invalid configuration, and continue without servers.
 #[cfg(any(
-    feature = "dummy",
-    feature = "native-webrtc",
-    feature = "web-sys-webrtc"
+    all(feature = "dummy", not(target_family = "wasm")),
+    all(feature = "native-webrtc", not(target_family = "wasm")),
+    all(feature = "web-sys-webrtc", target_family = "wasm"),
 ))]
 pub(crate) fn parse_ice_servers_or_warn(config: &str, transport: &str) -> Vec<IceServer> {
     let config = config.trim();
@@ -158,9 +158,9 @@ mod test {
     }
 
     #[cfg(any(
-        feature = "dummy",
-        feature = "native-webrtc",
-        feature = "web-sys-webrtc"
+        all(feature = "dummy", not(target_family = "wasm")),
+        all(feature = "native-webrtc", not(target_family = "wasm")),
+        all(feature = "web-sys-webrtc", target_family = "wasm"),
     ))]
     #[test]
     fn blank_ice_server_config_means_no_servers() {

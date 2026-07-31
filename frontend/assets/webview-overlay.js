@@ -340,6 +340,7 @@
       path = gatewayPath(address);
     } catch (error) {
       record("overlay", String(error), "error");
+      setDebugOpen(true);
       return;
     }
     record("overlay", "Connecting through the local Rings gateway");
@@ -351,6 +352,7 @@
     } catch (error) {
       setLoading(false);
       record("overlay", `gateway unavailable: ${String(error)}`, "error");
+      setDebugOpen(true);
     }
   }
 

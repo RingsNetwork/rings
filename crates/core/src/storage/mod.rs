@@ -5,10 +5,7 @@
 pub mod idb;
 /// In-memory key value storage.
 pub mod memory;
-#[cfg(all(
-    not(all(feature = "wasm", target_family = "wasm")),
-    not(feature = "dummy")
-))]
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 /// Sled-backed persistent storage for native runtimes.
 pub mod sled;
 

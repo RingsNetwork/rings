@@ -13,6 +13,7 @@ use crate::message::Message;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
+use crate::swarm::transport::ConnectionEventDisposition;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 
@@ -104,33 +105,29 @@ impl InnerSwarmCallback {
             self.transport.cancel_pending_connection(attempt).await?;
             return Ok(false);
         }
-        if !self.transport.promote_pending_connection(attempt)? {
+        if !self.transport.begin_connection_admission(attempt)? {
             return Ok(false);
         }
 
-        self.transport.record_peer_connected(did).await;
-        if !self.transport.is_admitted_connection_attempt(attempt) {
-            tracing::debug!(
-                "aborting data-channel admission for {did}; connection was retired while recording connect"
-            );
-            return Ok(false);
+        match self.message_handler.admit_dht_attempt(attempt).await {
+            Ok(true) => {}
+            Ok(false) => return Ok(false),
+            Err(error) => {
+                if let Err(cleanup_error) = self.transport.cancel_pending_connection(attempt).await
+                {
+                    tracing::warn!(
+                        peer = %did,
+                        generation = attempt.generation(),
+                        error = ?cleanup_error,
+                        "failed to close connection after admission error"
+                    );
+                }
+                return Err(error.into());
+            }
         }
-        self.message_handler.join_dht(did).await?;
+
+        self.transport.record_peer_connected(attempt).await;
         if !self.transport.is_admitted_connection_attempt(attempt) {
-            tracing::debug!(
-                "undoing DHT admission for {did}; connection was retired while joining DHT"
-            );
-            self.message_handler.leave_dht(did).await?;
-            return Ok(false);
-        }
-        for index in self.transport.take_pending_finger_updates(attempt)? {
-            self.transport.dht.apply_fixed_finger(index, did)?;
-        }
-        if !self.transport.is_admitted_connection_attempt(attempt) {
-            tracing::debug!(
-                "aborting connected event for {did}; connection was retired after DHT admission"
-            );
-            self.message_handler.leave_dht(did).await?;
             return Ok(false);
         }
         self.emit_connected_event_for_attempt(did, attempt).await
@@ -162,10 +159,26 @@ impl InnerSwarmCallback {
         &self,
         did: Did,
         state: WebrtcConnectionState,
+        attempt: Option<PendingConnectionAttempt>,
     ) -> Result<(), CallbackError> {
         let delivery = self.transport.swarm_event_delivery_lock(did);
         let result = async {
             let _delivery = delivery.lock().await;
+            if let Some(attempt) = attempt {
+                match self.transport.connection_event_disposition(attempt)? {
+                    ConnectionEventDisposition::Deliver => {}
+                    ConnectionEventDisposition::Suppress { active } => {
+                        tracing::debug!(
+                            peer = %did,
+                            generation = attempt.generation(),
+                            active_generation = active.generation(),
+                            state = ?state,
+                            "suppressing connection event from superseded generation"
+                        );
+                        return Ok(());
+                    }
+                }
+            }
             self.emit_connection_state_change_unlocked(did, state).await
         }
         .await;
@@ -215,9 +228,7 @@ impl InnerSwarmCallback {
             attempt.peer()
         );
         if self.transport.cancel_pending_connection(attempt).await? {
-            self.transport
-                .record_peer_disconnected(attempt.peer())
-                .await;
+            self.transport.record_peer_disconnected(attempt).await;
         }
         Ok(true)
     }
@@ -260,7 +271,7 @@ impl InnerSwarmCallback {
             return Ok(false);
         };
         if self.transport.cancel_pending_connection(attempt).await? {
-            self.transport.record_peer_disconnected(did).await;
+            self.transport.record_peer_disconnected(attempt).await;
             return Ok(true);
         }
         if self.transport.is_admitted_connection_attempt(attempt) {
@@ -372,8 +383,10 @@ impl TransportCallback for InnerSwarmCallback {
             }
             return Err("Cannot verify msg or it's expired".into());
         }
-        if let Some(peer) = peer {
-            self.transport.record_peer_message_received(peer).await;
+        if let (Some(peer), Some(attempt)) = (peer, self.pending_attempt) {
+            if attempt.peer() == peer {
+                self.transport.record_peer_message_received(attempt).await;
+            }
         }
         self.callback.on_validate(&payload).await?;
         self.handle_payload(cid, &payload).await
@@ -412,11 +425,15 @@ impl TransportCallback for InnerSwarmCallback {
                 {
                     return Ok(());
                 }
-                if !self.transport.is_admitted_connection(did) {
+                let Some(attempt) = self.pending_attempt else {
+                    tracing::warn!("ignoring unbound terminal connection event for {did}");
+                    return Ok(());
+                };
+                if !self.transport.is_admitted_connection_attempt(attempt) {
                     return Ok(());
                 }
-                self.transport.record_peer_disconnected(did).await;
-                self.message_handler.leave_dht(did).await?;
+                self.transport.record_peer_disconnected(attempt).await;
+                self.message_handler.leave_dht_attempt(attempt).await?;
             }
             // `Disconnected` is a transient ICE state that frequently recovers
             // back to `Connected` on its own (e.g. a brief network blip or ICE
@@ -431,7 +448,11 @@ impl TransportCallback for InnerSwarmCallback {
                     );
                     return Ok(());
                 }
-                self.transport.record_peer_disconnected(did).await;
+                let Some(attempt) = self.pending_attempt else {
+                    tracing::warn!("ignoring unbound disconnected connection event for {did}");
+                    return Ok(());
+                };
+                self.transport.record_peer_disconnected(attempt).await;
                 tracing::info!("Connection to {did} is disconnected, waiting for recovery");
             }
             _ => {}
@@ -440,7 +461,8 @@ impl TransportCallback for InnerSwarmCallback {
         // Data-channel admission emits the application-level Connected event.
         // Other state changes are passed through directly.
         if s != WebrtcConnectionState::Connected {
-            self.emit_connection_state_change(did, s).await?
+            self.emit_connection_state_change(did, s, self.pending_attempt)
+                .await?
         }
 
         Ok(())
@@ -494,11 +516,15 @@ impl TransportCallback for InnerSwarmCallback {
         {
             return Ok(());
         }
-        if !self.transport.is_admitted_connection(did) {
+        let Some(attempt) = self.pending_attempt else {
+            tracing::warn!("ignoring unbound data-channel close for {did}");
+            return Ok(());
+        };
+        if !self.transport.is_admitted_connection_attempt(attempt) {
             return Ok(());
         }
-        self.transport.record_peer_disconnected(did).await;
-        self.message_handler.leave_dht(did).await?;
+        self.transport.record_peer_disconnected(attempt).await;
+        self.message_handler.leave_dht_attempt(attempt).await?;
         Ok(())
     }
 }

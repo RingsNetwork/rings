@@ -5,6 +5,8 @@ use async_trait::async_trait;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use rings_transport::connections::dummy_controlled;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use rings_transport::core::transport::WebrtcConnectionState;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use tokio::time::timeout;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use tokio::time::Duration;
@@ -15,6 +17,7 @@ use crate::dht::successor::SuccessorReader;
 use crate::dht::successor::SuccessorWriter;
 use crate::dht::Did;
 use crate::dht::PeerRingAction;
+use crate::dht::StorageRepairOutcome;
 use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
@@ -40,6 +43,8 @@ use crate::tests::default::wait_for_successor;
 use crate::tests::default::Node;
 use crate::tests::manually_establish_connection;
 use crate::utils::get_epoch_ms_i64;
+
+mod storage_repair_tests;
 
 #[derive(Default)]
 struct CountingMeasure {
@@ -204,6 +209,30 @@ fn entry_with_remote_repair_placement(node: &Node) -> Result<(Entry, Did)> {
     ))
 }
 
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub(super) fn replace_observed_topology(
+    node: &Node,
+    successors: &[Did],
+    predecessor: Option<Did>,
+    fingers: &[(usize, Did)],
+) -> Result<()> {
+    let successor_seq = node.dht().successors();
+    for did in successor_seq.list()? {
+        successor_seq.remove(did)?;
+    }
+    successor_seq.extend(successors)?;
+    *node.dht().lock_predecessor()? = predecessor;
+    {
+        let dht = node.dht();
+        let mut finger = dht.lock_finger()?;
+        finger.reset_finger();
+        for (index, did) in fingers {
+            finger.set(*index, *did);
+        }
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_stabilization_once() -> Result<()> {
     let mut key1 = SecretKey::random();
@@ -245,12 +274,49 @@ async fn get_and_check_connection_times_out_wedged_data_channel_wait() -> Result
         node1
             .swarm
             .transport
-            .get_and_check_connection_with_timeout(node2.did(), Duration::from_millis(20)),
+            .get_and_check_send_connection_with_timeout(node2.did(), Duration::from_millis(20)),
     )
     .await
     .map_err(|_| Error::PromiseStateTimeout)?;
 
     assert!(conn.is_none());
+    assert!(!node1.swarm.transport.is_admitted_connection(node2.did()));
+    assert!(!node1.dht().successors().contains(&node2.did())?);
+    Ok(())
+}
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+#[tokio::test]
+async fn get_and_check_connection_waits_for_disconnected_open_transport() -> Result<()> {
+    let node1 = prepare_node(SecretKey::random()).await;
+    let node2 = prepare_node(SecretKey::random()).await;
+    manually_establish_connection(&node1.swarm, &node2.swarm).await;
+    wait_for_successor(&node1, node2.did()).await?;
+    node1
+        .swarm
+        .transport
+        .force_peer_connection_state_without_callback(
+            node2.did(),
+            WebrtcConnectionState::Disconnected,
+        )?;
+    node1
+        .swarm
+        .transport
+        .force_peer_data_channel_open_without_callback(node2.did(), Some(true))?;
+
+    let conn = timeout(
+        Duration::from_secs(1),
+        node1
+            .swarm
+            .transport
+            .get_and_check_send_connection_with_timeout(node2.did(), Duration::from_millis(20)),
+    )
+    .await
+    .map_err(|_| Error::PromiseStateTimeout)?;
+
+    assert!(conn.is_none());
+    assert!(!node1.swarm.transport.is_admitted_connection(node2.did()));
+    assert!(!node1.dht().successors().contains(&node2.did())?);
     Ok(())
 }
 
@@ -320,6 +386,330 @@ async fn clean_unavailable_connections_removes_silent_connected_peer() -> Result
     assert!(!node1.dht().successors().contains(&node2.did())?);
     assert_eq!(*node1.dht().lock_predecessor()?, None);
     assert!(!node1.dht().lock_finger()?.contains(Some(node2.did())));
+
+    Ok(())
+}
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+#[tokio::test]
+async fn clean_unavailable_connections_observes_disconnected_peer_without_callback() -> Result<()> {
+    let node1 = prepare_node(SecretKey::random()).await;
+    let node2 = prepare_node(SecretKey::random()).await;
+
+    manually_establish_connection(&node1.swarm, &node2.swarm).await;
+    wait_for_successor(&node1, node2.did()).await?;
+
+    node1.dht().successors().extend(&[node2.did()])?;
+    *node1.dht().lock_predecessor()? = Some(node2.did());
+    {
+        let dht = node1.dht();
+        let mut finger = dht.lock_finger()?;
+        finger.set(0, node2.did());
+        finger.set(3, node2.did());
+    }
+
+    node1
+        .swarm
+        .transport
+        .force_peer_connection_state_without_callback(
+            node2.did(),
+            WebrtcConnectionState::Disconnected,
+        )?;
+
+    assert_eq!(
+        node1
+            .swarm
+            .transport
+            .peer_disconnected_since_ms(node2.did()),
+        None
+    );
+
+    node1
+        .swarm
+        .stabilizer()
+        .clean_unavailable_connections()
+        .await?;
+
+    assert!(node1.swarm.transport.is_admitted_connection(node2.did()));
+    assert!(node1.dht().successors().contains(&node2.did())?);
+    assert_eq!(*node1.dht().lock_predecessor()?, Some(node2.did()));
+    assert!(node1.dht().lock_finger()?.contains(Some(node2.did())));
+    assert!(node1
+        .swarm
+        .transport
+        .peer_disconnected_since_ms(node2.did())
+        .is_some());
+
+    node1
+        .swarm
+        .transport
+        .force_peer_disconnected_since_ms(node2.did(), get_epoch_ms_i64().saturating_sub(60_000))?;
+
+    node1
+        .swarm
+        .stabilizer()
+        .clean_unavailable_connections()
+        .await?;
+
+    assert!(!node1.swarm.transport.is_admitted_connection(node2.did()));
+    assert!(node1.swarm.transport.get_connection(node2.did()).is_none());
+    assert!(!node1.dht().successors().contains(&node2.did())?);
+    assert_eq!(*node1.dht().lock_predecessor()?, None);
+    assert!(!node1.dht().lock_finger()?.contains(Some(node2.did())));
+
+    Ok(())
+}
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+#[tokio::test]
+async fn clean_unavailable_connections_fails_over_to_live_successor_tail() -> Result<()> {
+    let node1 = prepare_node(SecretKey::random()).await;
+    let node2 = prepare_node(SecretKey::random()).await;
+    let node3 = prepare_node(SecretKey::random()).await;
+
+    manually_establish_connection(&node1.swarm, &node2.swarm).await;
+    manually_establish_connection(&node1.swarm, &node3.swarm).await;
+    wait_for_msgs([&node1, &node2, &node3]).await;
+
+    replace_observed_topology(&node1, &[node2.did(), node3.did()], None, &[])?;
+    let successors = node1.dht().successors().list()?;
+    assert_eq!(successors.len(), 2);
+    let disconnected_head = successors[0];
+    let live_tail = successors[1];
+
+    node1
+        .swarm
+        .transport
+        .force_peer_connection_state_without_callback(
+            disconnected_head,
+            WebrtcConnectionState::Disconnected,
+        )?;
+
+    node1
+        .swarm
+        .stabilizer()
+        .clean_unavailable_connections()
+        .await?;
+
+    assert!(!node1
+        .swarm
+        .transport
+        .is_admitted_connection(disconnected_head));
+    assert!(node1
+        .swarm
+        .transport
+        .get_connection(disconnected_head)
+        .is_none());
+    assert!(!node1.dht().successors().contains(&disconnected_head)?);
+    assert!(node1.dht().successors().contains(&live_tail)?);
+    assert_eq!(
+        node1.dht().successors().get(0)?,
+        live_tail,
+        "successor tail must become the new head"
+    );
+    assert_eq!(
+        node1
+            .swarm
+            .transport
+            .get_connection(live_tail)
+            .map(|conn| conn.webrtc_connection_state()),
+        Some(WebrtcConnectionState::Connected)
+    );
+
+    Ok(())
+}
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+#[tokio::test]
+async fn clean_unavailable_connections_prunes_disconnected_non_head_slots() -> Result<()> {
+    let node1 = prepare_node(SecretKey::random()).await;
+    let node2 = prepare_node(SecretKey::random()).await;
+    let node3 = prepare_node(SecretKey::random()).await;
+
+    manually_establish_connection(&node1.swarm, &node2.swarm).await;
+    manually_establish_connection(&node1.swarm, &node3.swarm).await;
+    wait_for_msgs([&node1, &node2, &node3]).await;
+
+    replace_observed_topology(&node1, &[node2.did(), node3.did()], None, &[])?;
+    let successors = node1.dht().successors().list()?;
+    assert_eq!(successors.len(), 2);
+    let live_head = successors[0];
+    let disconnected_tail = successors[1];
+    replace_observed_topology(
+        &node1,
+        &[live_head, disconnected_tail],
+        Some(disconnected_tail),
+        &[(0, disconnected_tail), (3, disconnected_tail)],
+    )?;
+
+    node1
+        .swarm
+        .transport
+        .force_peer_connection_state_without_callback(
+            disconnected_tail,
+            WebrtcConnectionState::Disconnected,
+        )?;
+
+    node1
+        .swarm
+        .stabilizer()
+        .clean_unavailable_connections()
+        .await?;
+
+    assert!(node1.swarm.transport.is_admitted_connection(live_head));
+    assert!(node1
+        .swarm
+        .transport
+        .is_admitted_connection(disconnected_tail));
+    assert!(node1.dht().successors().contains(&live_head)?);
+    assert!(!node1.dht().successors().contains(&disconnected_tail)?);
+    assert_eq!(*node1.dht().lock_predecessor()?, None);
+    assert!(!node1.dht().lock_finger()?.contains(Some(disconnected_tail)));
+    assert_eq!(
+        node1
+            .swarm
+            .transport
+            .admitted_connection(disconnected_tail)?
+            .map(|conn| conn.webrtc_connection_state()),
+        Some(WebrtcConnectionState::Disconnected),
+        "topology prune must not close a transiently disconnected transport"
+    );
+    assert!(node1
+        .swarm
+        .transport
+        .get_connection(disconnected_tail)
+        .is_none());
+
+    Ok(())
+}
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+#[tokio::test]
+async fn clean_unavailable_connections_does_not_fail_over_to_disconnected_finger() -> Result<()> {
+    let node1 = prepare_node(SecretKey::random()).await;
+    let node2 = prepare_node(SecretKey::random()).await;
+    let node3 = prepare_node(SecretKey::random()).await;
+
+    manually_establish_connection(&node1.swarm, &node2.swarm).await;
+    manually_establish_connection(&node1.swarm, &node3.swarm).await;
+    wait_for_msgs([&node1, &node2, &node3]).await;
+
+    replace_observed_topology(&node1, &[node2.did()], Some(node2.did()), &[
+        (0, node3.did()),
+        (3, node3.did()),
+    ])?;
+
+    node1
+        .swarm
+        .transport
+        .force_peer_connection_state_without_callback(
+            node2.did(),
+            WebrtcConnectionState::Disconnected,
+        )?;
+    node1
+        .swarm
+        .transport
+        .force_peer_connection_state_without_callback(
+            node3.did(),
+            WebrtcConnectionState::Disconnected,
+        )?;
+    node1
+        .swarm
+        .transport
+        .force_peer_data_channel_open_without_callback(node3.did(), Some(true))?;
+
+    node1
+        .swarm
+        .stabilizer()
+        .clean_unavailable_connections()
+        .await?;
+
+    assert!(node1.swarm.transport.is_admitted_connection(node2.did()));
+    assert!(node1.dht().successors().contains(&node2.did())?);
+    assert!(!node1.dht().successors().contains(&node3.did())?);
+    assert_eq!(*node1.dht().lock_predecessor()?, Some(node2.did()));
+    assert!(!node1.dht().lock_finger()?.contains(Some(node3.did())));
+    assert_eq!(
+        node1
+            .swarm
+            .transport
+            .admitted_connection(node2.did())?
+            .map(|conn| conn.webrtc_connection_state()),
+        Some(WebrtcConnectionState::Disconnected),
+        "head successor must wait for grace when every fallback is also bad"
+    );
+    assert_eq!(
+        node1
+            .swarm
+            .transport
+            .admitted_connection(node3.did())?
+            .map(|conn| conn.webrtc_connection_state()),
+        Some(WebrtcConnectionState::Disconnected),
+        "bad finger is pruned from topology before transport grace closes it"
+    );
+    assert!(node1.swarm.transport.get_connection(node2.did()).is_none());
+    assert!(node1.swarm.transport.get_connection(node3.did()).is_none());
+
+    Ok(())
+}
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+#[tokio::test]
+async fn clean_unavailable_connections_prunes_disconnected_finger() -> Result<()> {
+    let node1 = prepare_node(SecretKey::random()).await;
+    let node2 = prepare_node(SecretKey::random()).await;
+
+    manually_establish_connection(&node1.swarm, &node2.swarm).await;
+    wait_for_msgs([&node1, &node2]).await;
+
+    replace_observed_topology(&node1, &[], None, &[(0, node2.did()), (3, node2.did())])?;
+
+    node1
+        .swarm
+        .transport
+        .force_peer_connection_state_without_callback(
+            node2.did(),
+            WebrtcConnectionState::Disconnected,
+        )?;
+
+    node1
+        .swarm
+        .stabilizer()
+        .clean_unavailable_connections()
+        .await?;
+
+    assert!(node1.swarm.transport.is_admitted_connection(node2.did()));
+    assert_eq!(
+        node1
+            .swarm
+            .transport
+            .admitted_connection(node2.did())?
+            .map(|conn| conn.webrtc_connection_state()),
+        Some(WebrtcConnectionState::Disconnected)
+    );
+    assert!(node1.swarm.transport.get_connection(node2.did()).is_none());
+    assert!(!node1.dht().successors().contains(&node2.did())?);
+    assert_eq!(*node1.dht().lock_predecessor()?, None);
+    assert!(!node1.dht().lock_finger()?.contains(Some(node2.did())));
+    assert!(node1
+        .swarm
+        .transport
+        .peer_disconnected_since_ms(node2.did())
+        .is_some());
+
+    node1
+        .swarm
+        .transport
+        .force_peer_disconnected_since_ms(node2.did(), get_epoch_ms_i64().saturating_sub(60_000))?;
+
+    node1
+        .swarm
+        .stabilizer()
+        .clean_unavailable_connections()
+        .await?;
+
+    assert!(!node1.swarm.transport.is_admitted_connection(node2.did()));
+    assert!(node1.swarm.transport.get_connection(node2.did()).is_none());
 
     Ok(())
 }
@@ -399,160 +789,6 @@ async fn clean_unavailable_connections_removes_degraded_admitted_peer() -> Resul
     assert_eq!(*node1.dht().lock_predecessor()?, None);
     assert!(!node1.dht().lock_finger()?.contains(Some(node2.did())));
 
-    Ok(())
-}
-
-#[tokio::test]
-async fn stabilize_republishes_local_entries_to_missing_affine_owners() -> Result<()> {
-    let key = SecretKey::random();
-    let session = SessionSk::new_with_seckey(&key)?;
-    let swarm = Arc::new(
-        SwarmBuilder::new(
-            0,
-            "stun://stun.l.google.com:19302",
-            Box::new(MemStorage::new()),
-            session,
-        )
-        .dht_storage_redundancy(2)
-        .dht_virtual_nodes(0)
-        .build(),
-    );
-    let node = Node::new(swarm);
-    let entry = Entry::new(key.address().into(), vec![], EntryKind::Data);
-    let placement_keys = entry.did.rotate_affine(2)?;
-    node.dht()
-        .storage
-        .put(&placement_keys[0].to_string(), &entry)
-        .await?;
-
-    node.swarm.stabilizer().stabilize().await?;
-
-    assert_eq!(
-        node.dht()
-            .storage
-            .get(&placement_keys[1].to_string())
-            .await?,
-        Some(entry)
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn repair_storage_defers_sync_to_fresh_next_hop() -> Result<()> {
-    let mut key1 = SecretKey::random();
-    let mut key2 = SecretKey::random();
-    if key1.address() < key2.address() {
-        (key1, key2) = (key2, key1)
-    }
-    let node1 = prepare_repair_node(key1)?;
-    let node2 = prepare_repair_node(key2)?;
-    manually_establish_connection(&node1.swarm, &node2.swarm).await;
-
-    wait_for_successor(&node1, node2.did()).await?;
-    wait_for_msgs([&node1, &node2]).await;
-    let connected_for_ms = node1
-        .swarm
-        .transport
-        .peer_connected_for_ms(node2.did(), get_epoch_ms_i64())?
-        .ok_or_else(|| Error::InvalidMessage("missing peer admission age".to_string()))?;
-    assert!(
-        connected_for_ms < 30_000,
-        "test must exercise a fresh connection; observed age {connected_for_ms}ms"
-    );
-
-    let (entry, remote_placement) = entry_with_remote_repair_placement(&node1)?;
-    node1
-        .dht()
-        .storage
-        .put(&entry.did.to_string(), &entry)
-        .await?;
-
-    node1.swarm.stabilizer().repair_storage().await?;
-
-    assert_no_more_msg([&node2]).await;
-    assert_eq!(
-        node2
-            .dht()
-            .storage
-            .get(&remote_placement.to_string())
-            .await?,
-        None
-    );
-    Ok(())
-}
-
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-#[tokio::test]
-async fn repair_storage_backpressure_defers_without_degrading_or_removing_peer() -> Result<()> {
-    let measure = Arc::new(CountingMeasure::default());
-    let measure_impl: MeasureImpl = measure.clone();
-    let mut key1 = SecretKey::random();
-    let mut key2 = SecretKey::random();
-    if key1.address() < key2.address() {
-        (key1, key2) = (key2, key1)
-    }
-    let node1 = prepare_repair_node_with_measure(key1, measure_impl)?;
-    let node2 = prepare_repair_node(key2)?;
-    manually_establish_connection(&node1.swarm, &node2.swarm).await;
-
-    wait_for_successor(&node1, node2.did()).await?;
-    wait_for_msgs([&node1, &node2]).await;
-    node1
-        .swarm
-        .transport
-        .force_peer_connected_at(node2.did(), get_epoch_ms_i64() - 31_000)?;
-
-    node1.dht().successors().extend(&[node2.did()])?;
-    *node1.dht().lock_predecessor()? = Some(node2.did());
-    {
-        let dht = node1.dht();
-        let mut finger = dht.lock_finger()?;
-        finger.set(0, node2.did());
-        finger.set(3, node2.did());
-    }
-
-    let (entry, remote_placement) = entry_with_remote_repair_placement(&node1)?;
-    node1
-        .dht()
-        .storage
-        .put(&entry.did.to_string(), &entry)
-        .await?;
-
-    let _pending_send = PendingSendGuard::new();
-    node1.swarm.stabilizer().repair_storage().await?;
-
-    assert_no_more_msg([&node2]).await;
-    assert_eq!(
-        node2
-            .dht()
-            .storage
-            .get(&remote_placement.to_string())
-            .await?,
-        None
-    );
-    assert_eq!(
-        measure
-            .get_count(node2.did(), MeasureCounter::FailedToSend)
-            .await,
-        0
-    );
-
-    node1
-        .swarm
-        .stabilizer()
-        .clean_unavailable_connections()
-        .await?;
-
-    assert!(node1.swarm.transport.get_connection(node2.did()).is_some());
-    assert!(node1.dht().successors().contains(&node2.did())?);
-    assert_eq!(*node1.dht().lock_predecessor()?, Some(node2.did()));
-    assert!(node1.dht().lock_finger()?.contains(Some(node2.did())));
-    assert_eq!(
-        measure
-            .get_count(node2.did(), MeasureCounter::FailedToSend)
-            .await,
-        0
-    );
     Ok(())
 }
 

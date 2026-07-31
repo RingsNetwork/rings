@@ -20,9 +20,7 @@ use crate::dht::StorageSyncDestination;
 use crate::dht::StorageSyncPurpose;
 use crate::error::Error;
 use crate::error::Result;
-use crate::message::effects::CoreEffect;
 use crate::message::effects::PayloadRelayFunctor;
-use crate::message::effects::StorageSyncFunctor;
 use crate::message::types::FoundEntry;
 use crate::message::types::Message;
 use crate::message::types::SearchEntry;
@@ -210,24 +208,11 @@ async fn run_storage_repair_transport_effects(
 ) -> Result<()> {
     for delivery in act.coalesced_storage_sync_deliveries()? {
         let msg = SyncEntriesWithSuccessor::from_delivery(delivery);
-        transport.send_storage_sync(msg).await?;
+        transport
+            .send_storage_sync_or_defer(msg, "storage_repair")
+            .await?;
     }
     Ok(())
-}
-
-/// Lower copy-only storage repair actions emitted inside message handlers.
-///
-/// Law: lowering a storage-sync delivery preserves its destination and payload
-/// exactly; the transport interpreter chooses the storage route and records the
-/// ack capability at the effect boundary.
-pub(super) fn storage_sync_effects(act: PeerRingAction) -> Result<Vec<CoreEffect<'static>>> {
-    act.coalesced_storage_sync_deliveries()?
-        .into_iter()
-        .map(|delivery| {
-            let msg = SyncEntriesWithSuccessor::from_delivery(delivery);
-            Ok(StorageSyncFunctor::send_storage_sync(msg).into())
-        })
-        .collect()
 }
 
 /// Execute storage search actions emitted by inbound message handlers.

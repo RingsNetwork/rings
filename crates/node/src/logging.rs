@@ -13,7 +13,7 @@ use tracing_subscriber::Registry;
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 pub use self::browser::init_logging;
 #[cfg(feature = "node")]
-pub use self::node::init_logging;
+pub use self::node::rings_node_init_logging as init_logging;
 use crate::prelude::wasm_export;
 
 /// Logging verbosity accepted by native CLI and browser bindings.
@@ -149,7 +149,7 @@ pub mod node {
 
     /// Initializes native tracing and panic logging for the requested level.
     #[no_mangle]
-    pub extern "C" fn init_logging(level: LogLevel) {
+    pub extern "C" fn rings_node_init_logging(level: LogLevel) {
         set_panic_hook();
 
         let subscriber = Registry::default();

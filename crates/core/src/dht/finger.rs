@@ -83,27 +83,7 @@ impl FingerTable {
 
     /// remove a node from dht finger table
     pub fn remove(&mut self, did: Did) {
-        let indexes: Vec<usize> = self
-            .finger
-            .iter()
-            .enumerate()
-            .filter(|(_, &x)| x == Some(did))
-            .map(|(id, _)| id)
-            .collect();
-
-        if let (Some(first_idx), Some(last_idx)) =
-            (indexes.first().copied(), indexes.last().copied())
-        {
-            let end_idx = last_idx + 1;
-
-            // Update to the next did of last equaled did in finger table.
-            // If cannot get that, use None.
-            let fix_id = self.finger.get(end_idx).copied().flatten();
-
-            for idx in first_idx..end_idx {
-                self.write_slot(idx, fix_id);
-            }
-        }
+        self.finger = crate::dht::topology::remove_finger_peer(&self.finger, did);
     }
 
     /// Join FingerTable
@@ -411,6 +391,22 @@ mod test {
             Some(did1),
             Some(did2),
             Some(did3),
+            Some(did4),
+            None
+        ]);
+
+        // A partially repaired table may contain non-contiguous runs for one
+        // peer. Removing it must not erase the valid slots between those runs.
+        table.reset_finger();
+        table.set(0, did1);
+        table.set(1, did2);
+        table.set(2, did1);
+        table.set(3, did4);
+        table.remove(did1);
+        assert_eq!(table.finger, [
+            Some(did2),
+            Some(did2),
+            Some(did4),
             Some(did4),
             None
         ]);

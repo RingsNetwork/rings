@@ -13,6 +13,8 @@ pub fn bootstrap_script(gateway_prefix: &str, document_url: &Url) -> String {
     format!(
         r#"(function() {{
   const prefix = {prefix:?};
+  const runtimePrefix = `${{prefix.replace(/\/$/, "")}}-runtime/`;
+  const runtimeTargetHeader = "X-Rings-Webview-Target";
   const targetBase = {target_base:?};
   const marker = "{marker}";
   const controlledAssetPaths = new Set(["/assets/webview-overlay.js"]);
@@ -24,6 +26,7 @@ pub fn bootstrap_script(gateway_prefix: &str, document_url: &Url) -> String {
     return;
   }}
   const gatewayState = {{ targetBase }};
+  let nextRuntimeRequestId = 1;
   globalThis[marker] = gatewayState;
   function gatewayPathFromText(input) {{
     const text = String(input);
@@ -83,6 +86,18 @@ pub fn bootstrap_script(gateway_prefix: &str, document_url: &Url) -> String {
     if (gatewayPath) return gatewayPath;
     const url = new URL(text, base);
     return prefix + encodeURIComponent(url.href);
+  }}
+  function runtimeGatewayPath() {{
+    const id = nextRuntimeRequestId++;
+    return `${{runtimePrefix}}${{Date.now().toString(36)}}-${{id.toString(36)}}`;
+  }}
+  function runtimeGatewayRequest(input) {{
+    const rewritten = encodeTarget(input);
+    const target = decodeGatewayTarget(rewritten);
+    if (!target || !gatewayPathFromText(rewritten)?.startsWith(prefix)) {{
+      return {{ url: rewritten, target: undefined }};
+    }}
+    return {{ url: runtimeGatewayPath(), target }};
   }}
   function requestShellNavigation(input) {{
     void input;
@@ -500,10 +515,14 @@ pub fn bootstrap_script(gateway_prefix: &str, document_url: &Url) -> String {
   const nativeFetch = globalThis.fetch?.bind(globalThis);
   if (nativeFetch) {{
     globalThis.fetch = function(input, init) {{
-      const next = input instanceof Request ? new Request(encodeTarget(input.url), input) : encodeTarget(input);
+      const runtime = runtimeGatewayRequest(input instanceof Request ? input.url : input);
+      const next = input instanceof Request ? new Request(runtime.url, input) : runtime.url;
       try {{
         const headers = new Headers(init?.headers || (input instanceof Request ? next.headers : undefined));
-        headers.set("X-Rings-Webview-Kind", "fetch");
+        if (runtime.target) {{
+          headers.set("X-Rings-Webview-Kind", "fetch");
+          headers.set(runtimeTargetHeader, runtime.target);
+        }}
         return nativeFetch(next, {{ ...init, headers }});
       }} catch (_error) {{
         return nativeFetch(next, init);
@@ -516,9 +535,17 @@ pub fn bootstrap_script(gateway_prefix: &str, document_url: &Url) -> String {
       const xhr = new NativeXHR();
       const open = xhr.open;
       xhr.open = function(method, url, async, user, password) {{
-        const result = open.call(xhr, method, encodeTarget(url), async, user, password);
+        const runtime = runtimeGatewayRequest(url);
+        if (async === false && runtime.target) {{
+          reportFormNavigation(`Blocked synchronous XMLHttpRequest to ${{runtime.target}}`);
+          throw new TypeError("Synchronous XMLHttpRequest is blocked by Rings WebView");
+        }}
+        const result = open.call(xhr, method, runtime.url, async, user, password);
         try {{
-          xhr.setRequestHeader("X-Rings-Webview-Kind", "xhr");
+          if (runtime.target) {{
+            xhr.setRequestHeader("X-Rings-Webview-Kind", "xhr");
+            xhr.setRequestHeader(runtimeTargetHeader, runtime.target);
+          }}
         }} catch (_error) {{}}
         return result;
       }};

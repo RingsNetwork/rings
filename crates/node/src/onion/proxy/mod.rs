@@ -152,10 +152,12 @@ impl OnionProxyConfig {
     pub(crate) fn accepts_exit_descriptor(&self, descriptor: &OnionExitDescriptor) -> bool {
         match self.protocol {
             OnionProxyProtocol::TcpConnect => {
-                descriptor.node_type == OnlineNodeType::Native
-                    && descriptor
-                        .service
-                        .matches(self.service.as_str(), OnionExitTransport::Tcp)
+                matches!(
+                    descriptor.node_type,
+                    OnlineNodeType::Native | OnlineNodeType::Ffi
+                ) && descriptor
+                    .service
+                    .matches(self.service.as_str(), OnionExitTransport::Tcp)
             }
             OnionProxyProtocol::HttpsProxy => {
                 self.service == OnionServiceName::https()

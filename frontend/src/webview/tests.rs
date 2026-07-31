@@ -1,6 +1,10 @@
 use std::cell::RefCell;
+use std::future::Future;
 use std::rc::Rc;
+use std::task::Context;
+use std::task::Poll;
 
+use futures::task::noop_waker;
 use rings_webview::CookieJar;
 use wasm_bindgen_test::wasm_bindgen_test;
 
@@ -54,6 +58,42 @@ fn fixture_host() -> WebviewResult<(FixtureHost, RecordedRequests)> {
         limiter: GatewayRequestLimiter::new(MAX_CONCURRENT_GATEWAY_REQUESTS),
     };
     Ok((host, requests))
+}
+
+#[wasm_bindgen_test]
+fn webview_onion_settings_requires_explicit_short_path_opt_in() {
+    let settings = WebviewOnionSettings::default();
+    assert!(!settings.options().allow_short_paths);
+
+    settings.set_allow_short_paths(true);
+
+    assert!(settings.options().allow_short_paths);
+}
+
+#[wasm_bindgen_test]
+fn browser_gateway_request_ids_are_positive_safe_integers() {
+    assert_eq!(browser_request_id(&JsValue::from_f64(7.0)), Ok(7));
+    assert!(browser_request_id(&JsValue::from_f64(0.0)).is_err());
+    assert!(browser_request_id(&JsValue::from_f64(1.5)).is_err());
+    assert!(browser_request_id(&JsValue::from_str("7")).is_err());
+}
+
+#[wasm_bindgen_test]
+fn cancelled_woken_gateway_waiter_returns_its_transferred_permit() {
+    let limiter = GatewayRequestLimiter::new(1);
+    let active = futures::executor::block_on(limiter.acquire());
+    let waiting_limiter = limiter.clone();
+    let mut waiting = Box::pin(waiting_limiter.acquire());
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+
+    assert!(matches!(waiting.as_mut().poll(&mut context), Poll::Pending));
+    drop(active);
+    drop(waiting);
+
+    let state = limiter.state.borrow();
+    assert_eq!(state.available, 1);
+    assert!(state.waiters.is_empty());
 }
 
 #[wasm_bindgen_test]
@@ -112,7 +152,7 @@ fn host_redirects_then_serves_a_gateway_document_through_its_transport() -> Webv
         .map_err(|error| WebviewError::Transport(error.to_string()))?;
 
     assert!(body.contains("data-rings-webview-bootstrap"));
-    assert!(body.contains("/assets/webview-overlay.js"));
+    assert!(body.contains("data-rings-webview-overlay-loader"));
     assert!(body.contains("/webview/https%3A%2F%2Fexample%2Etest%2Fasset%2Epng"));
     assert_eq!(requests.borrow().len(), 1);
     let sent_request = requests
@@ -136,10 +176,17 @@ fn iframe_navigation_gets_bootstrap_without_webview_overlay() -> WebviewResult<(
     let target = TargetUrl::parse("https://frame.example.test/nested.html")?;
     let gateway_target = TargetUrl::parse(host.policy.gateway_url(target.as_url())?.as_str())?;
 
-    let response = futures::executor::block_on(host.handle(
-        WebviewHostRequest::navigation_with_payload(gateway_target, "GET", Vec::new(), Vec::new())
+    let response = futures::executor::block_on(
+        host.handle(
+            WebviewHostRequest::navigation_with_payload(
+                gateway_target,
+                "GET",
+                Vec::new(),
+                Vec::new(),
+            )
             .with_top_level_navigation(false),
-    ))?;
+        ),
+    )?;
     let WebviewHostOutcome::Response(response) = response else {
         return Err(WebviewError::Transport(
             "iframe gateway document was not served".to_string(),
@@ -149,7 +196,7 @@ fn iframe_navigation_gets_bootstrap_without_webview_overlay() -> WebviewResult<(
         .map_err(|error| WebviewError::Transport(error.to_string()))?;
 
     assert!(body.contains("data-rings-webview-bootstrap"));
-    assert!(!body.contains("/assets/webview-overlay.js"));
+    assert!(!body.contains("data-rings-webview-overlay-loader"));
     assert!(body.contains("/webview/https%3A%2F%2Fframe%2Eexample%2Etest%2Fasset%2Epng"));
     assert_eq!(requests.borrow().len(), 1);
     let sent_request = requests

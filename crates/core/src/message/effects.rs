@@ -461,7 +461,9 @@ impl<'handler> CoreEffectInterpreter<'handler> {
                 }
             }
             CoreEffect::StorageSync(StorageSyncFunctor::SendStorageSync { msg }) => {
-                self.transport.send_storage_sync(msg).await?;
+                self.transport
+                    .send_storage_sync_or_defer(msg, "core_effect")
+                    .await?;
                 Ok(())
             }
         }

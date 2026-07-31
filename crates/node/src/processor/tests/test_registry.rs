@@ -156,11 +156,14 @@ async fn online_node_publish_replaces_observed_self_records() -> Result<()> {
     let now_ms = get_epoch_ms();
     let stale_self = processor.online_node_descriptor_at(now_ms.saturating_sub(30_000))?;
     let other_descriptor = other.online_node_descriptor_at(now_ms)?;
+    let expired_other = other.online_node_descriptor_at(now_ms.saturating_sub(120_000))?;
+    assert!(expired_other.is_expired_at(now_ms));
 
     processor
         .storage_store(Processor::online_node_registry_entry(vec![
             stale_self,
             other_descriptor.clone(),
+            expired_other,
         ])?)
         .await?;
 
@@ -221,6 +224,13 @@ async fn onion_exit_publish_replaces_observed_self_records() -> Result<()> {
         now_ms,
         policy.clone(),
     )?;
+    let expired_other_https = onion_exit_descriptor_for_processor_with_service(
+        &other,
+        OnionExitService::https(),
+        now_ms.saturating_sub(120_000),
+        policy.clone(),
+    )?;
+    assert!(expired_other_https.is_expired_at(now_ms));
 
     processor
         .storage_store(Processor::onion_exit_registry_entry(vec![
@@ -228,6 +238,7 @@ async fn onion_exit_publish_replaces_observed_self_records() -> Result<()> {
             stale_https,
             stale_api,
             other_https.clone(),
+            expired_other_https,
         ])?)
         .await?;
 

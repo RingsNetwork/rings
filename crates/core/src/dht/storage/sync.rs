@@ -1,6 +1,7 @@
 use std::str::FromStr;
 
 use async_trait::async_trait;
+use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 use serde::Serialize;
 
 use super::StorageSyncDestination;
@@ -8,7 +9,6 @@ use super::StorageSyncPurpose;
 use super::StorageSyncTarget;
 use crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD;
 use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
-use crate::consts::TRANSPORT_MAX_SIZE;
 use crate::dht::chord::PeerRing;
 use crate::dht::chord::PeerRingAction;
 use crate::dht::entry::Entry;
@@ -23,10 +23,10 @@ use crate::message::types::SyncEntriesWithSuccessor;
 
 /// Maximum wire budget for one `SyncEntriesWithSuccessor` hand-off batch.
 ///
-/// This is deliberately far below `TRANSPORT_MAX_SIZE` so stabilization does
-/// not create a single all-or-nothing serialized message. The batch cost also
+/// This stays below one interoperable WebRTC data-channel frame so storage
+/// anti-entropy cannot monopolize the chunk sender. The batch cost also
 /// reserves the payload/chunk envelope bytes below.
-pub(crate) const SYNC_BATCH_MAX_BYTES: usize = TRANSPORT_MAX_SIZE / 32;
+pub(crate) const SYNC_BATCH_MAX_BYTES: usize = MAX_DATA_CHANNEL_MESSAGE_SIZE / 4;
 
 const SYNC_BATCH_ENVELOPE_HEADROOM_BYTES: usize =
     MAX_CHUNK_ENVELOPE_OVERHEAD + TRANSPORT_CUSTOM_OVERHEAD;

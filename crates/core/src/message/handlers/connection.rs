@@ -1,11 +1,6 @@
 use async_trait::async_trait;
 
-use crate::dht::successor::SuccessorReader;
-use crate::dht::topology;
 use crate::dht::types::Chord;
-use crate::dht::types::CorrectChord;
-use crate::dht::Did;
-use crate::dht::PeerRing;
 use crate::dht::PeerRingAction;
 use crate::dht::TopoInfo;
 use crate::error::Error;
@@ -27,36 +22,13 @@ use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 
-fn confirmed_topology(info: &TopoInfo, is_active: impl Fn(Did) -> bool) -> TopoInfo {
-    TopoInfo {
-        successors: info
-            .successors
-            .iter()
-            .copied()
-            .filter(|peer| is_active(*peer))
-            .collect(),
-        predecessor: info.predecessor.filter(|peer| is_active(*peer)),
-    }
-}
+mod topology_view;
 
-fn topology_has_confirmed_peer(info: &TopoInfo) -> bool {
-    info.predecessor.is_some() || !info.successors.is_empty()
-}
-
-fn connect_successor_hint(dht: &PeerRing, requester: Did, reported: Did) -> Result<Did> {
-    if reported != requester {
-        return Ok(reported);
-    }
-
-    let mut candidates = dht.successors().list()?;
-    candidates.push(dht.did);
-    candidates.retain(|candidate| *candidate != requester);
-
-    Ok(topology::successors(&candidates, requester, 1)
-        .into_iter()
-        .next()
-        .unwrap_or(reported))
-}
+#[cfg(test)]
+use topology_view::confirmed_topology;
+use topology_view::connect_successor_hint;
+#[cfg(test)]
+use topology_view::topology_has_confirmed_peer;
 
 /// PeerLivenessProbe is a direct overlay liveness probe.
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
@@ -130,11 +102,7 @@ impl HandleMsg<QueryForTopoInfoReport> for MessageHandler {
                     .chain(msg.info.successors.iter().copied());
                 self.connect_dht_peers(candidates).await?;
 
-                let confirmed = confirmed_topology(&msg.info, |peer| {
-                    self.transport.get_connection(peer).is_some()
-                });
-                if topology_has_confirmed_peer(&confirmed) {
-                    let ev = self.dht.stabilize(confirmed)?;
+                if let Some(ev) = self.transport.stabilize_routable_topology(&msg.info)? {
                     self.handle_dht_events(&ev).await?;
                 }
             }
@@ -323,20 +291,10 @@ impl HandleMsg<FindSuccessorReport> for MessageHandler {
 
         match &msg.handler {
             FindSuccessorReportHandler::FixFingerTable { index } => {
-                if self.transport.get_connection(msg.did).is_some() {
-                    self.dht.apply_fixed_finger(*index, msg.did)?;
-                } else if msg.reports_remote_successor(self.dht.did) {
+                let disposition = self.transport.record_finger_candidate(msg.did, *index)?;
+                if disposition.needs_connection() && msg.reports_remote_successor(self.dht.did) {
                     self.connect_dht_peer(msg.did).await?;
-                    if self.transport.get_connection(msg.did).is_some() {
-                        self.dht.apply_fixed_finger(*index, msg.did)?;
-                    } else if let Some(attempt) = self.transport.pending_attempt(msg.did)? {
-                        self.transport
-                            .queue_pending_finger_update(attempt, *index)?;
-                    } else if self.transport.get_connection(msg.did).is_some() {
-                        // `pending_attempt` synchronizes with admission; the peer may become active
-                        // while that call waits on the lifecycle lock.
-                        self.dht.apply_fixed_finger(*index, msg.did)?;
-                    }
+                    let _ = self.transport.record_finger_candidate(msg.did, *index)?;
                 }
             }
             FindSuccessorReportHandler::Connect if msg.reports_remote_successor(self.dht.did) => {

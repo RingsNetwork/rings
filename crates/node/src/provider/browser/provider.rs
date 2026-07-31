@@ -8,8 +8,6 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use futures::channel::oneshot;
-use futures::future::Either;
-use futures::FutureExt;
 use js_sys;
 use js_sys::Uint8Array;
 use rings_core::dht::Did;
@@ -36,20 +34,16 @@ use crate::error::Error;
 use crate::error::Result as NodeResult;
 use crate::measure::peer_quality_thresholds;
 use crate::measure::MeasureStorage;
-use crate::onion::circuit::encode_initial_forward;
 use crate::onion::circuit::route_first_hop;
 use crate::onion::circuit::OnionCircuitCapabilities;
 use crate::onion::circuit::OnionCircuitProtocol;
 use crate::onion::circuit::OnionCircuitShell;
-use crate::onion::circuit::OnionClientReturn;
 use crate::onion::circuit::ONION_CIRCUIT_NAMESPACE;
 use crate::onion::directory;
 use crate::onion::directory::OnionDirectoryReader;
-use crate::onion::https::client_request_from_url as onion_https_client_request_from_url;
-use crate::onion::https::encode_https_payload;
 use crate::onion::https::BrowserOnionCircuitHandler;
 use crate::onion::https::OnionHttpsClientRequest;
-use crate::onion::https::OnionHttpsPayload;
+use crate::onion::https::OnionHttpsClientResponse;
 use crate::onion::https::OnionHttpsRuntime;
 use crate::onion::proxy::OnionProxyConfig;
 use crate::onion::proxy::OnionProxyRoute;
@@ -63,6 +57,8 @@ use crate::processor::ProcessorConfig;
 use crate::provider::AsyncSigner;
 use crate::provider::Provider;
 use crate::provider::Signer;
+
+mod onion_proxy;
 
 /// AddressType enum contains `DEFAULT` and `ED25519`.
 #[wasm_export]
@@ -132,6 +128,14 @@ pub struct BrowserOnionProxy {
     config: OnionProxyConfig,
     runtime: Arc<OnionHttpsRuntime>,
     directory_endpoint: Option<String>,
+}
+
+/// Typed response from a cancellable browser onion HTTPS request.
+pub struct BrowserOnionProxyResponse {
+    /// HTTP response returned by the selected onion exit.
+    pub response: OnionHttpsClientResponse,
+    /// Onion route used for the request.
+    pub route: OnionProxyRoute,
 }
 
 #[derive(Clone)]
@@ -324,76 +328,23 @@ impl BrowserOnionProxy {
     /// `headers`, `body`, and `path` override fields. The returned Promise resolves to
     /// `{ status, headers, body }`.
     pub fn request(&self, url: String, request: JsValue) -> js_sys::Promise {
-        let p = self.processor.clone();
-        let config = self.config.clone();
-        let runtime = self.runtime.clone();
-        let directory_endpoint = self.directory_endpoint.clone();
+        let proxy = self.clone();
         future_to_promise(async move {
             let request = if request.is_null() || request.is_undefined() {
                 OnionHttpsClientRequest::default()
             } else {
                 js_value::deserialize::<OnionHttpsClientRequest>(request).map_err(JsError::from)?
             };
-            let (target, request) = onion_https_client_request_from_url(url.as_str(), request)
+            let response = proxy
+                .request_http(url.as_str(), request)
+                .await
                 .map_err(JsError::from)?;
-            let proxy_route = build_browser_onion_proxy_route(
-                p.clone(),
-                config,
-                target.clone(),
-                directory_endpoint,
-            )
-            .await
-            .map_err(JsError::from)?;
-            let first_hop = route_first_hop(&proxy_route.route).map_err(JsError::from)?;
-            let client_return = OnionClientReturn::new(p.session_sk().session_public_key());
-            let (id, receiver) = runtime
-                .begin_request(
-                    first_hop,
-                    proxy_route.route.exit().clone(),
-                    client_return.return_id,
-                )
+            let route_response = crate::rpc_dto::onion_route_response(response.route.route)
                 .map_err(JsError::from)?;
-            let request_payload = match encode_https_payload(OnionHttpsPayload::Request(request)) {
-                Ok(payload) => payload,
-                Err(error) => {
-                    runtime.cancel_request(id);
-                    return Err(JsValue::from(JsError::from(error)));
-                }
-            };
-            let (to, payload) = match encode_initial_forward(
-                client_return,
-                &proxy_route.route,
-                id,
-                request_payload,
-            ) {
-                Ok(encoded) => encoded,
-                Err(error) => {
-                    runtime.cancel_request(id);
-                    return Err(JsValue::from(JsError::from(error)));
-                }
-            };
-            let envelope =
-                crate::extension::ext::Envelope::new(ONION_CIRCUIT_NAMESPACE.to_string(), payload);
-            if let Err(error) = p.send_direct_envelope(to, &envelope).await {
-                runtime.cancel_request(id);
-                return Err(JsValue::from(JsError::from(error)));
-            }
-            let response = receiver.fuse();
-            let timeout = js_utils::window_sleep(30_000).fuse();
-            futures::pin_mut!(response, timeout);
-            match futures::future::select(response, timeout).await {
-                Either::Left((result, _)) => match result {
-                    Ok(Ok(response)) => Ok(js_value::serialize(&response).map_err(JsError::from)?),
-                    Ok(Err(error)) => Err(JsValue::from(JsError::from(error))),
-                    Err(_) => Err(JsValue::from_str(
-                        "onion HTTPS proxy response channel closed",
-                    )),
-                },
-                Either::Right((_, _)) => {
-                    runtime.cancel_request(id);
-                    Err(JsValue::from_str("onion HTTPS proxy request timed out"))
-                }
-            }
+            let route_value = js_value::serialize(&route_response).map_err(JsError::from)?;
+            let value = js_value::serialize(&response.response).map_err(JsError::from)?;
+            js_sys::Reflect::set(&value, &JsValue::from_str("route"), &route_value)?;
+            Ok(value)
         })
     }
 }

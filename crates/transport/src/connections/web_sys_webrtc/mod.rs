@@ -34,6 +34,9 @@ use crate::core::pool::RoundRobinPool;
 use crate::core::pool::StatusPool;
 use crate::core::transport::effective_max_message_size;
 use crate::core::transport::ConnectionInterface;
+use crate::core::transport::ConnectionStateCell;
+use crate::core::transport::ConnectionStateSnapshot;
+use crate::core::transport::SendPermit;
 use crate::core::transport::TransportInterface;
 use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
@@ -94,7 +97,11 @@ fn delivery_future(
 #[async_trait(?Send)]
 impl MessageSenderPool<TrackedChannel> for RoundRobinPool<TrackedChannel> {
     type Message = TransportMessage;
-    async fn send(&self, msg: TransportMessage) -> Result<DeliveryFuture> {
+    async fn send_with_permit(
+        &self,
+        msg: TransportMessage,
+        permit: SendPermit,
+    ) -> Result<DeliveryFuture> {
         let (channel, enqueued) = self.select()?;
         let data = bincode::serialize(&msg)?;
         // `send_with_u8_array` is synchronous, so there's no interleaving to
@@ -102,6 +109,9 @@ impl MessageSenderPool<TrackedChannel> for RoundRobinPool<TrackedChannel> {
         // first would, on a rejected send, leave the counter ahead of the bytes
         // actually buffered, making earlier messages' delivery futures resolve
         // early on phantom bytes (`enqueued_total - buffered_amount`).
+        if !permit.allows() {
+            return Err(Error::SendPermitRevoked);
+        }
         if let Err(e) = channel
             .send_with_u8_array(&data)
             .map_err(Error::WebSysWebrtc)
@@ -129,6 +139,7 @@ pub struct WebSysWebrtcConnection {
     // `?Send`), so the channel pool is never shared across threads.
     webrtc_data_channel: Rc<RoundRobinPool<TrackedChannel>>,
     webrtc_data_channel_state_notifier: Notifier,
+    connection_state: ConnectionStateCell,
     /// Negotiated SCTP `max_message_size` (RFC 8841), parsed from the remote SDP at handshake.
     /// `0` means not yet negotiated. Parsed identically to native for consistent behaviour.
     remote_max_message_size: Arc<AtomicUsize>,
@@ -146,11 +157,13 @@ impl WebSysWebrtcConnection {
         webrtc_conn: RtcPeerConnection,
         webrtc_data_channel: Rc<RoundRobinPool<TrackedChannel>>,
         webrtc_data_channel_state_notifier: Notifier,
+        connection_state: ConnectionStateCell,
     ) -> Self {
         Self {
             webrtc_conn,
             webrtc_data_channel,
             webrtc_data_channel_state_notifier,
+            connection_state,
             remote_max_message_size: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -210,17 +223,25 @@ impl ConnectionInterface for WebSysWebrtcConnection {
     type Sdp = String;
     type Error = Error;
 
-    async fn send_message(&self, msg: TransportMessage) -> Result<DeliveryFuture> {
+    async fn send_message_with_permit(
+        &self,
+        msg: TransportMessage,
+        permit: SendPermit,
+    ) -> Result<DeliveryFuture> {
         self.webrtc_wait_for_data_channel_open().await?;
-        self.webrtc_data_channel.send(msg).await
+        self.webrtc_data_channel.send_with_permit(msg, permit).await
     }
 
     fn webrtc_connection_state(&self) -> WebrtcConnectionState {
-        self.webrtc_conn.connection_state().into()
+        self.connection_state.snapshot().webrtc()
+    }
+
+    fn connection_state_snapshot(&self) -> ConnectionStateSnapshot {
+        self.connection_state.snapshot()
     }
 
     fn data_channel_is_open(&self) -> Result<bool> {
-        self.webrtc_data_channel.all_ready()
+        Ok(self.connection_state.snapshot().data_channel_open())
     }
 
     fn max_message_size(&self) -> usize {
@@ -338,9 +359,138 @@ impl ConnectionInterface for WebSysWebrtcConnection {
     }
 
     async fn close(&self) -> Result<()> {
+        self.connection_state.close();
         self.webrtc_conn.close();
         Ok(())
     }
+}
+
+async fn decode_data_channel_message(data: JsValue) -> Result<Option<Vec<u8>>> {
+    let message = if data.has_type::<web_sys::Blob>() {
+        let blob: web_sys::Blob = data.into();
+        if blob.size() == 0f64 {
+            return Ok(None);
+        }
+        let buffer = JsFuture::from(blob.array_buffer())
+            .await
+            .map_err(Error::WebSysWebrtc)?;
+        js_sys::Uint8Array::new(&buffer).to_vec()
+    } else {
+        js_sys::Uint8Array::new(data.as_ref()).to_vec()
+    };
+
+    Ok((!message.is_empty()).then_some(message))
+}
+
+fn wire_received_data_channels(
+    webrtc_conn: &RtcPeerConnection,
+    inner_cb: Rc<InnerTransportCallback>,
+) {
+    // Inbound channels carry messages only. One remote-created channel closing
+    // does not prove the SCTP association is gone; outbound-pool state owns
+    // readiness and emits the terminal data-channel callback when all close.
+    let on_data_channel = Box::new(move |event: RtcDataChannelEvent| {
+        let channel = event.channel();
+        tracing::debug!(label = channel.label(), "new received data channel");
+
+        let message_cb = inner_cb.clone();
+        let on_message = Closure::wrap(Box::new(move |event: MessageEvent| {
+            let cb = message_cb.clone();
+            spawn_local(async move {
+                match decode_data_channel_message(event.data()).await {
+                    Ok(Some(message)) => {
+                        tracing::debug!(
+                            peer = %cb.cid,
+                            bytes = message.len(),
+                            "received data-channel message"
+                        );
+                        cb.on_message(&message.into()).await;
+                    }
+                    Ok(None) => {
+                        tracing::debug!(peer = %cb.cid, "received empty data-channel message");
+                    }
+                    Err(error) => {
+                        tracing::error!(peer = %cb.cid, %error, "failed to decode data-channel message");
+                    }
+                }
+            });
+        }) as Box<dyn FnMut(MessageEvent)>);
+        channel.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+        on_message.forget();
+    });
+
+    let callback = Closure::wrap(on_data_channel as Box<dyn FnMut(RtcDataChannelEvent)>);
+    webrtc_conn.set_ondatachannel(Some(callback.as_ref().unchecked_ref()));
+    callback.forget();
+}
+
+fn wire_peer_connection_state(
+    webrtc_conn: &RtcPeerConnection,
+    inner_cb: Rc<InnerTransportCallback>,
+    connection_state: ConnectionStateCell,
+) {
+    let state_source = webrtc_conn.clone();
+    let on_state_change = Closure::wrap(Box::new(move |_| {
+        let state_change = state_source.connection_state().into();
+        tracing::debug!("peer connection state changed: {state_change:?}");
+        connection_state.observe_webrtc(state_change);
+        let cb = inner_cb.clone();
+        spawn_local(async move { cb.on_peer_connection_state_change(state_change).await });
+    }) as Box<dyn FnMut(web_sys::Event)>);
+    webrtc_conn.set_onconnectionstatechange(Some(on_state_change.as_ref().unchecked_ref()));
+    on_state_change.forget();
+}
+
+fn create_outbound_data_channels(
+    webrtc_conn: &RtcPeerConnection,
+    channel_pool: &Rc<RoundRobinPool<TrackedChannel>>,
+    inner_cb: &Rc<InnerTransportCallback>,
+    connection_state: &ConnectionStateCell,
+) -> Result<()> {
+    for index in 0..DATA_CHANNEL_POOL_SIZE {
+        let channel = webrtc_conn.create_data_channel(&format!("rings_data_channel_{index}"));
+        let open_pool = channel_pool.clone();
+        let open_cb = inner_cb.clone();
+        let open_state = connection_state.clone();
+        let on_open = Closure::wrap(Box::new(move || {
+            let all_ready = matches!(open_pool.all_ready(), Ok(true));
+            if all_ready {
+                open_state.observe_outbound_data_channels(true);
+            }
+            let cb = open_cb.clone();
+            spawn_local(async move {
+                if all_ready {
+                    cb.on_data_channel_open().await;
+                }
+            });
+        }) as Box<dyn FnMut()>);
+        channel.set_onopen(Some(on_open.as_ref().unchecked_ref()));
+        on_open.forget();
+
+        let close_pool = channel_pool.clone();
+        let close_cb = inner_cb.clone();
+        let close_state = connection_state.clone();
+        let on_close = Closure::wrap(Box::new(move || {
+            close_state.observe_outbound_data_channels(false);
+            let all_closed = matches!(
+                close_pool.all(|(candidate, _)| {
+                    candidate.ready_state() == RtcDataChannelState::Closed
+                }),
+                Ok(true)
+            );
+            let cb = close_cb.clone();
+            spawn_local(async move {
+                if all_closed {
+                    cb.on_data_channel_close().await;
+                }
+            });
+        }) as Box<dyn FnMut()>);
+        channel.set_onclose(Some(on_close.as_ref().unchecked_ref()));
+        on_close.forget();
+
+        channel_pool.push((channel, Arc::new(AtomicU64::new(0))))?;
+    }
+    Ok(())
 }
 
 #[async_trait(?Send)]
@@ -348,14 +498,13 @@ impl TransportInterface for WebSysWebrtcTransport {
     type Connection = WebSysWebrtcConnection;
     type Error = Error;
 
-    async fn new_connection(&self, cid: &str, callback: BoxedTransportCallback) -> Result<()> {
+    async fn new_connection(
+        &self,
+        cid: &str,
+        callback: BoxedTransportCallback,
+    ) -> Result<ConnectionRef<Self::Connection>> {
         if let Ok(existed_conn) = self.pool.connection(cid) {
-            if matches!(
-                existed_conn.webrtc_connection_state(),
-                WebrtcConnectionState::New
-                    | WebrtcConnectionState::Connecting
-                    | WebrtcConnectionState::Connected
-            ) {
+            if existed_conn.webrtc_connection_state().occupies_peer_slot() {
                 return Err(Error::ConnectionAlreadyExists(cid.to_string()));
             }
         }
@@ -378,148 +527,22 @@ impl TransportInterface for WebSysWebrtcTransport {
         // Set callbacks
         //
         let webrtc_data_channel_state_notifier = Notifier::default();
+        let connection_state = ConnectionStateCell::new();
         let inner_cb = Rc::new(InnerTransportCallback::new(
             cid,
             callback,
             webrtc_data_channel_state_notifier.clone(),
         ));
 
-        let data_channel_inner_cb = inner_cb.clone();
         let channel_pool = Rc::new(RoundRobinPool::default());
-
-        let on_data_channel = Box::new(move |ev: RtcDataChannelEvent| {
-            let d = ev.channel();
-            let d_label = d.label();
-            tracing::debug!("New DataChannel {d_label}");
-            // Open is admitted on channels we create (the pool, wired below).
-            // Close must also be observed on received channels: the answerer may
-            // never see close on its locally-created channels when the initiator's
-            // channels are the ones carrying traffic.
-            let on_close_inner_cb = data_channel_inner_cb.clone();
-            let on_close = Box::new(move || {
-                let cb = on_close_inner_cb.clone();
-                spawn_local(async move {
-                    cb.on_data_channel_close().await;
-                });
-            });
-            let c = Closure::wrap(on_close as Box<dyn FnMut()>);
-            d.set_onclose(Some(c.as_ref().unchecked_ref()));
-            c.forget();
-
-            let on_message_inner_cb = data_channel_inner_cb.clone();
-            let on_message = Box::new(move |ev: MessageEvent| {
-                let data = ev.data();
-
-                let inner_cb = on_message_inner_cb.clone();
-
-                spawn_local(async move {
-                    let msg = if data.has_type::<web_sys::Blob>() {
-                        let data: web_sys::Blob = data.clone().into();
-                        if data.size() == 0f64 {
-                            return;
-                        }
-                        let data_buffer =
-                            match wasm_bindgen_futures::JsFuture::from(data.array_buffer()).await {
-                                Ok(data_buffer) => data_buffer,
-                                Err(error) => {
-                                    tracing::error!(
-                                        "Failed to read array_buffer from Blob, {:?}",
-                                        error
-                                    );
-                                    return;
-                                }
-                            };
-                        js_sys::Uint8Array::new(&data_buffer).to_vec()
-                    } else {
-                        js_sys::Uint8Array::new(data.as_ref()).to_vec()
-                    };
-
-                    if msg.is_empty() {
-                        tracing::debug!("Received empty DataChannelMessage from {}", inner_cb.cid);
-                        return;
-                    }
-
-                    tracing::debug!(
-                        peer = %inner_cb.cid,
-                        bytes = msg.len(),
-                        "Received DataChannelMessage"
-                    );
-
-                    inner_cb.on_message(&msg.into()).await;
-                })
-            });
-
-            let c = Closure::wrap(on_message as Box<dyn FnMut(MessageEvent)>);
-            d.set_onmessage(Some(c.as_ref().unchecked_ref()));
-            c.forget();
-        });
-
-        let peer_connection_state_change_inner_cb = inner_cb.clone();
-        let peer_connection_state_change_webrtc_conn = webrtc_conn.clone();
-        let on_peer_connection_state_change = Box::new(move |_| {
-            let s = peer_connection_state_change_webrtc_conn.connection_state();
-            tracing::debug!("Peer Connection State has changed: {s:?}");
-
-            let inner_cb = peer_connection_state_change_inner_cb.clone();
-
-            spawn_local(async move {
-                inner_cb.on_peer_connection_state_change(s.into()).await;
-            })
-        });
-
-        let c = Closure::wrap(on_data_channel as Box<dyn FnMut(RtcDataChannelEvent)>);
-        webrtc_conn.set_ondatachannel(Some(c.as_ref().unchecked_ref()));
-        c.forget();
-
-        let c = Closure::wrap(on_peer_connection_state_change as Box<dyn FnMut(web_sys::Event)>);
-        webrtc_conn.set_onconnectionstatechange(Some(c.as_ref().unchecked_ref()));
-        c.forget();
-
-        //
-        // Create data channel
-        //
         // Wire open/close on the channels this side creates (the pool), not only
         // on received channels: a received channel's `onopen` can be missed if
         // it opens before the handler is registered, so `on_data_channel_open`
         // (and thus `join_dht`) would never fire. Created channels are wired
         // before they can open, so this is reliable.
-        for i in 0..DATA_CHANNEL_POOL_SIZE {
-            let ch = webrtc_conn.create_data_channel(&format!("rings_data_channel_{i}"));
-
-            let on_open_pool = channel_pool.clone();
-            let on_open_cb = inner_cb.clone();
-            let on_open = Box::new(move || {
-                let pool = on_open_pool.clone();
-                let cb = on_open_cb.clone();
-                spawn_local(async move {
-                    if let Ok(true) = pool.all_ready() {
-                        cb.on_data_channel_open().await;
-                    }
-                });
-            });
-            let c = Closure::wrap(on_open as Box<dyn FnMut()>);
-            ch.set_onopen(Some(c.as_ref().unchecked_ref()));
-            c.forget();
-
-            let on_close_pool = channel_pool.clone();
-            let on_close_cb = inner_cb.clone();
-            let on_close = Box::new(move || {
-                let pool = on_close_pool.clone();
-                let cb = on_close_cb.clone();
-                spawn_local(async move {
-                    if let Ok(true) =
-                        pool.all(|(c, _)| c.ready_state() == RtcDataChannelState::Closed)
-                    {
-                        cb.on_data_channel_close().await;
-                    }
-                });
-            });
-            let c = Closure::wrap(on_close as Box<dyn FnMut()>);
-            ch.set_onclose(Some(c.as_ref().unchecked_ref()));
-            c.forget();
-
-            channel_pool.push((ch, Arc::new(AtomicU64::new(0))))?;
-        }
+        wire_received_data_channels(&webrtc_conn, inner_cb.clone());
+        wire_peer_connection_state(&webrtc_conn, inner_cb.clone(), connection_state.clone());
+        create_outbound_data_channels(&webrtc_conn, &channel_pool, &inner_cb, &connection_state)?;
 
         //
         // Construct the Connection
@@ -528,14 +551,21 @@ impl TransportInterface for WebSysWebrtcTransport {
             webrtc_conn,
             channel_pool,
             webrtc_data_channel_state_notifier,
+            connection_state,
         );
 
-        self.pool.safely_insert(cid, conn)?;
-        Ok(())
+        self.pool.safely_insert(cid, conn).await
     }
 
     async fn close_connection(&self, cid: &str) -> Result<()> {
         self.pool.safely_remove(cid).await
+    }
+
+    async fn close_connection_if_current(
+        &self,
+        connection: &ConnectionRef<Self::Connection>,
+    ) -> Result<bool> {
+        self.pool.safely_remove_if_current(connection).await
     }
 
     fn connection(&self, cid: &str) -> Result<ConnectionRef<Self::Connection>> {

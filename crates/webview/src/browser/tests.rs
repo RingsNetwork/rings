@@ -59,6 +59,7 @@ fn bootstrap_executes_runtime_routing_in_javascript() -> Result<()> {
     let program = format!(
         r#"
 const calls = [];
+const runtimePrefix = "/webview-runtime/";
 function assert(condition, message) {{
   if (!condition) throw new Error(message);
 }}
@@ -70,6 +71,9 @@ operation();
 threw = true;
   }}
   if (!threw) throw new Error(message);
+}}
+function header(init, name) {{
+  return init?.headers?.get?.(name) || init?.headers?.get?.(name.toLowerCase());
 }}
 class Request {{
   constructor(input, init) {{
@@ -83,6 +87,9 @@ globalThis.fetch = function(input, init) {{
   return "fetch-result";
 }};
 class XMLHttpRequest {{
+  setRequestHeader(name, value) {{
+calls.push(["xhr-header", name, value]);
+  }}
   open(method, url, async, user, password) {{
 calls.push(["xhr", method, url, async, user, password]);
 return "xhr-result";
@@ -183,6 +190,8 @@ await fetch("/api/data");
 await fetch(new Request("forms/submit"), {{ method: "POST" }});
 const xhr = new globalThis.XMLHttpRequest();
 xhr.open("POST", "forms/x", true);
+const syncXhr = new globalThis.XMLHttpRequest();
+assertThrows(() => syncXhr.open("GET", "forms/sync", false), "synchronous gateway XHR was not blocked");
 assertThrows(() => new globalThis.WebSocket("/socket"), "WebSocket was not blocked");
 assertThrows(() => new globalThis.EventSource("events"), "EventSource was not blocked");
 const beaconResult = navigator.sendBeacon("/beacon", "payload");
@@ -207,9 +216,11 @@ const submitEvent = {{
 }};
 for (const listener of submitListeners) listener(submitEvent);
 const actual = JSON.stringify(calls);
-assert(calls.some((call) => call[0] === "fetch" && call[1] === gateway("https://example.test/api/data")), "fetch URL was not rewritten: " + actual);
-assert(calls.some((call) => call[0] === "fetch" && call[1] === gateway("https://example.test/docs/forms/submit")), "Request URL was not rewritten: " + actual);
-assert(calls.some((call) => call[0] === "xhr" && call[2] === gateway("https://example.test/docs/forms/x")), "XHR URL was not rewritten: " + actual);
+assert(calls.some((call) => call[0] === "fetch" && String(call[1]).startsWith(runtimePrefix) && header(call[2], "X-Rings-Webview-Target") === "https://example.test/api/data"), "fetch URL was not routed through runtime gateway: " + actual);
+assert(calls.some((call) => call[0] === "fetch" && String(call[1]).startsWith(runtimePrefix) && header(call[2], "X-Rings-Webview-Target") === "https://example.test/docs/forms/submit"), "Request URL was not routed through runtime gateway: " + actual);
+assert(calls.some((call) => call[0] === "xhr" && String(call[2]).startsWith(runtimePrefix)), "XHR URL was not routed through runtime gateway: " + actual);
+assert(calls.some((call) => call[0] === "xhr-header" && call[1] === "X-Rings-Webview-Target" && call[2] === "https://example.test/docs/forms/x"), "XHR target header was not set: " + actual);
+assert(!calls.some((call) => call[0] === "xhr" && String(call[2]).includes("forms%2Fsync")), "synchronous XHR reached native transport: " + actual);
 assert(!calls.some((call) => ["websocket", "eventsource", "beacon", "worker", "sharedworker"].includes(call[0])), "unsupported native entrypoint was called: " + actual);
 assert(calls.some((call) => call[0] === "attribute" && call[1] === "src" && call[2] === gateway("https://example.test/docs/image.png")), "setAttribute src was not rewritten: " + actual);
 assert(calls.some((call) => call[0] === "attribute" && call[1] === "srcset" && call[2].includes(gateway("https://example.test/docs/small.png")) && call[2].includes(gateway("https://example.test/big.png"))), "setAttribute srcset was not rewritten: " + actual);
@@ -246,9 +257,13 @@ fn bootstrap_runtime_urls_follow_rewritten_base_href() -> Result<()> {
     let program = format!(
         r#"
 const calls = [];
+const runtimePrefix = "/webview-runtime/";
 const gateway = (url) => "/webview/" + encodeURIComponent(url);
 function assert(condition, message) {{
   if (!condition) throw new Error(message);
+}}
+function header(init, name) {{
+  return init?.headers?.get?.(name) || init?.headers?.get?.(name.toLowerCase());
 }}
 Object.defineProperty(globalThis, "location", {{
   value: {{
@@ -281,6 +296,9 @@ globalThis.fetch = function(input, init) {{
   return "fetch-result";
 }};
 class XMLHttpRequest {{
+  setRequestHeader(name, value) {{
+calls.push(["xhr-header", name, value]);
+  }}
   open(method, url, async, user, password) {{
 calls.push(["xhr", method, url, async, user, password]);
   }}
@@ -308,11 +326,12 @@ const image = new globalThis.HTMLImageElement();
 image.src = "property.png";
 const alreadyGateway = await fetch("http://127.0.0.1:3000" + gateway("https://example.test/kept"));
 const actual = JSON.stringify(calls);
-assert(calls.some((call) => call[0] === "fetch" && call[1] === gateway("https://example.test/assets/api/data")), "fetch did not use base href: " + actual);
-assert(calls.some((call) => call[0] === "xhr" && call[2] === gateway("https://example.test/assets/forms/submit")), "XHR did not use base href: " + actual);
+assert(calls.some((call) => call[0] === "fetch" && String(call[1]).startsWith(runtimePrefix) && header(call[2], "X-Rings-Webview-Target") === "https://example.test/assets/api/data"), "fetch did not use base href: " + actual);
+assert(calls.some((call) => call[0] === "xhr" && String(call[2]).startsWith(runtimePrefix)), "XHR did not use base href: " + actual);
+assert(calls.some((call) => call[0] === "xhr-header" && call[1] === "X-Rings-Webview-Target" && call[2] === "https://example.test/assets/forms/submit"), "XHR target header did not use base href: " + actual);
 assert(calls.some((call) => call[0] === "attribute" && call[1] === "src" && call[2] === gateway("https://example.test/assets/image.png")), "setAttribute did not use base href: " + actual);
 assert(calls.some((call) => call[0] === "property" && call[1] === "img.src" && call[2] === gateway("https://example.test/assets/property.png")), "property setter did not use base href: " + actual);
-assert(calls.some((call) => call[0] === "fetch" && call[1] === gateway("https://example.test/kept")), "same-origin gateway URL was encoded again: " + actual);
+assert(calls.some((call) => call[0] === "fetch" && String(call[1]).startsWith(runtimePrefix) && header(call[2], "X-Rings-Webview-Target") === "https://example.test/kept"), "same-origin gateway URL was encoded again: " + actual);
 "#,
         script = script
     );

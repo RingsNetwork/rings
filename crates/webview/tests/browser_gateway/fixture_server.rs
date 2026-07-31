@@ -116,7 +116,14 @@ document.documentElement.appendChild(Object.assign(document.createElement("div")
             )?,
         );
     }
-    if !request.path.starts_with(prefix.as_str()) {
+    let runtime_prefix = runtime_prefix(prefix);
+    let gateway_path = if request.path.starts_with(prefix.as_str()) {
+        request.path.clone()
+    } else if request.path.starts_with(runtime_prefix.as_str()) {
+        let target = header_value(&request.headers, "x-rings-webview-target")
+            .ok_or_else(|| WebviewError::InvalidGatewayUrl(request.path.clone()))?;
+        prefix.encode(TargetUrl::parse(target)?.as_url())
+    } else {
         return write_http_response(
             stream,
             &GatewayResponse::new(
@@ -125,14 +132,14 @@ document.documentElement.appendChild(Object.assign(document.createElement("div")
                 b"not found".to_vec(),
             )?,
         );
-    }
+    };
 
     let kind = gateway_request_kind(&request);
     let mut gateway = gateway.lock().map_err(|_| {
         WebviewError::Transport("browser fixture gateway lock poisoned".to_string())
     })?;
     let mut gateway_request =
-        gateway_request_from_http(prefix, request.path.as_str(), kind, &request.headers)?;
+        gateway_request_from_http(prefix, gateway_path.as_str(), kind, &request.headers)?;
     gateway_request.method = request.method;
     gateway_request.headers = request.headers;
     gateway_request.body = request.body;
@@ -280,6 +287,7 @@ fn gateway_request_kind(request: &HttpRequest) -> GatewayRequestKind {
     if let Some(kind) = header_value(&request.headers, "x-rings-webview-kind") {
         return match kind {
             "fetch" => GatewayRequestKind::Fetch,
+            "xhr" => GatewayRequestKind::Xhr,
             "navigation" => GatewayRequestKind::Navigation,
             _ => GatewayRequestKind::Subresource,
         };
@@ -291,6 +299,10 @@ fn gateway_request_kind(request: &HttpRequest) -> GatewayRequestKind {
         Some("document") => GatewayRequestKind::Navigation,
         _ => GatewayRequestKind::Subresource,
     }
+}
+
+fn runtime_prefix(prefix: &GatewayPrefix) -> String {
+    format!("{}-runtime/", prefix.as_str().trim_end_matches('/'))
 }
 
 fn write_http_response(stream: &mut TcpStream, response: &GatewayResponse) -> Result<()> {

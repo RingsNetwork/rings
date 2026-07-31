@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 
-use crate::dht::Chord;
 use crate::dht::ChordStorageSync;
 use crate::error::Error;
 use crate::error::Result;
@@ -25,8 +24,10 @@ impl HandleMsg<NotifyPredecessorSend> for MessageHandler {
                 .await;
         }
 
-        let origin = self.admitted_notify_predecessor_origin(ctx, msg)?;
-        let predecessor = self.dht.notify(origin)?;
+        let origin = self.verified_notify_predecessor_origin(ctx, msg)?;
+        let Some(predecessor) = self.transport.notify_admitted_predecessor(origin)? else {
+            return Err(Error::NotifyPredecessorOriginNotAdmitted { origin });
+        };
 
         if predecessor != origin {
             return self
@@ -43,22 +44,17 @@ impl HandleMsg<NotifyPredecessorSend> for MessageHandler {
 }
 
 impl MessageHandler {
-    fn admitted_notify_predecessor_origin(
+    fn verified_notify_predecessor_origin(
         &self,
         ctx: &MessagePayload,
         msg: &NotifyPredecessorSend,
     ) -> Result<crate::dht::Did> {
         let origin = ctx.relay.try_origin_sender()?;
         if msg.did != origin {
-            return Err(Error::InvalidMessage(format!(
-                "notify predecessor DID {} does not match relay origin {}",
-                msg.did, origin
-            )));
-        }
-        if !self.transport.is_admitted_connection(origin) {
-            return Err(Error::InvalidMessage(format!(
-                "notify predecessor origin {origin} is not an admitted connection"
-            )));
+            return Err(Error::NotifyPredecessorOriginMismatch {
+                claimed: msg.did,
+                origin,
+            });
         }
         Ok(origin)
     }
@@ -149,8 +145,10 @@ mod test {
 
         assert!(matches!(
             result,
-            Err(Error::InvalidMessage(message))
-                if message.contains("does not match relay origin")
+            Err(Error::NotifyPredecessorOriginMismatch {
+                claimed,
+                origin: observed_origin,
+            }) if claimed == spoofed && observed_origin == origin.address().into()
         ));
         assert_eq!(*node.dht().lock_predecessor()?, None);
         Ok(())
@@ -171,8 +169,8 @@ mod test {
 
         assert!(matches!(
             result,
-            Err(Error::InvalidMessage(message))
-                if message.contains("not an admitted connection")
+            Err(Error::NotifyPredecessorOriginNotAdmitted { origin })
+                if origin == origin_did
         ));
         assert_eq!(*node.dht().lock_predecessor()?, None);
         Ok(())

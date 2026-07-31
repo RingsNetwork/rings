@@ -4,6 +4,12 @@
 //! There is also a [TransportInterface] trait, which is used to specify the management of all
 //! [ConnectionInterface] objects.
 
+use std::sync::Arc;
+#[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
+use std::sync::Mutex;
+#[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
+use std::sync::MutexGuard;
+
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -20,6 +26,73 @@ pub enum TransportMessage {
     /// The custom message is sent by an external invoker and
     /// should be handled by the on_message callback.
     Custom(Vec<u8>),
+}
+
+#[cfg(target_family = "wasm")]
+type SendPermitPredicate = dyn Fn() -> bool;
+#[cfg(not(target_family = "wasm"))]
+type SendPermitPredicate = dyn Fn() -> bool + Send + Sync;
+
+/// A one-send predicate checked at the backend's final cancellable send-admission boundary.
+///
+/// The permit is intentionally not `Clone`: one constructed value authorizes at
+/// most one call to [`ConnectionInterface::send_message_with_permit`]. Returning
+/// `false` means the higher-level condition that authorized the send no longer
+/// holds, so the backend must not start its send primitive. Once the predicate
+/// returns `true`, the higher layer treats that send as linearized even if the
+/// backend future still waits for internal queue capacity.
+pub struct SendPermit {
+    predicate: Arc<SendPermitPredicate>,
+}
+
+impl SendPermit {
+    /// Construct a send permit for a single-threaded wasm transport.
+    #[cfg(target_family = "wasm")]
+    pub fn new(predicate: impl Fn() -> bool + 'static) -> Self {
+        Self {
+            predicate: Arc::new(predicate),
+        }
+    }
+
+    /// Construct a send permit for a native transport.
+    #[cfg(not(target_family = "wasm"))]
+    pub fn new(predicate: impl Fn() -> bool + Send + Sync + 'static) -> Self {
+        Self {
+            predicate: Arc::new(predicate),
+        }
+    }
+
+    /// Construct an unconditional permit for direct low-level transport users.
+    pub fn always() -> Self {
+        Self::new(|| true)
+    }
+
+    /// Evaluate this permit exactly where a backend is about to start its send.
+    pub fn allows(&self) -> bool {
+        (self.predicate)()
+    }
+}
+
+#[cfg(test)]
+mod send_permit_tests {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    use super::SendPermit;
+
+    #[test]
+    fn send_permit_observes_revocation_at_evaluation_time() {
+        let admitted = Arc::new(AtomicBool::new(true));
+        let permit = SendPermit::new({
+            let admitted = Arc::clone(&admitted);
+            move || admitted.load(Ordering::SeqCst)
+        });
+
+        assert!(permit.allows());
+        admitted.store(false, Ordering::SeqCst);
+        assert!(!permit.allows());
+    }
 }
 
 /// The state of the WebRTC connection.
@@ -58,6 +131,125 @@ pub enum WebrtcConnectionState {
     /// WebrtcConnectionState::Closed indicates the peer connection is closed
     /// and the isClosed member variable of PeerConnection is true.
     Closed,
+}
+
+impl WebrtcConnectionState {
+    pub(crate) const fn occupies_peer_slot(self) -> bool {
+        matches!(self, Self::New | Self::Connecting | Self::Connected)
+    }
+}
+
+/// One coherent observation of the transport state used for routability.
+///
+/// The WebRTC and data-channel components are updated through one state cell,
+/// so consumers never need to reconstruct this product from independent reads.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct ConnectionStateSnapshot {
+    webrtc: WebrtcConnectionState,
+    data_channel_open: bool,
+}
+
+impl ConnectionStateSnapshot {
+    /// Construct one transport-state observation.
+    pub const fn new(webrtc: WebrtcConnectionState, data_channel_open: bool) -> Self {
+        Self {
+            webrtc,
+            data_channel_open,
+        }
+    }
+
+    /// Return the WebRTC peer-connection state.
+    pub const fn webrtc(self) -> WebrtcConnectionState {
+        self.webrtc
+    }
+
+    /// Return whether every outbound data channel is open.
+    pub const fn data_channel_open(self) -> bool {
+        self.data_channel_open
+    }
+
+    #[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
+    fn apply(self, event: ConnectionStateEvent) -> Self {
+        match event {
+            ConnectionStateEvent::Close => Self::new(WebrtcConnectionState::Closed, false),
+            ConnectionStateEvent::OutboundDataChannels(_)
+                if matches!(
+                    self.webrtc,
+                    WebrtcConnectionState::Failed | WebrtcConnectionState::Closed
+                ) =>
+            {
+                self
+            }
+            ConnectionStateEvent::OutboundDataChannels(open) => Self::new(self.webrtc, open),
+            ConnectionStateEvent::Webrtc(_) if self.webrtc == WebrtcConnectionState::Closed => self,
+            ConnectionStateEvent::Webrtc(WebrtcConnectionState::Closed) => {
+                Self::new(WebrtcConnectionState::Closed, false)
+            }
+            ConnectionStateEvent::Webrtc(_) if self.webrtc == WebrtcConnectionState::Failed => self,
+            ConnectionStateEvent::Webrtc(WebrtcConnectionState::Failed) => {
+                Self::new(WebrtcConnectionState::Failed, false)
+            }
+            ConnectionStateEvent::Webrtc(next) => Self::new(next, self.data_channel_open),
+        }
+    }
+}
+
+#[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
+#[derive(Clone, Copy)]
+enum ConnectionStateEvent {
+    Webrtc(WebrtcConnectionState),
+    OutboundDataChannels(bool),
+    Close,
+}
+
+/// Shared event-maintained transport state for concrete backends.
+///
+/// Clone law: every clone references the same state cell; cloning does not
+/// duplicate protocol state. `Closed` is absorbing, and terminal states can
+/// never retain or regain an open data channel.
+#[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
+#[derive(Clone)]
+pub(crate) struct ConnectionStateCell {
+    state: Arc<Mutex<ConnectionStateSnapshot>>,
+}
+
+#[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
+impl ConnectionStateCell {
+    pub(crate) fn new() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(ConnectionStateSnapshot::new(
+                WebrtcConnectionState::New,
+                false,
+            ))),
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, ConnectionStateSnapshot> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn apply(&self, event: ConnectionStateEvent) {
+        let mut state = self.lock();
+        *state = state.apply(event);
+    }
+
+    pub(crate) fn observe_webrtc(&self, state: WebrtcConnectionState) {
+        self.apply(ConnectionStateEvent::Webrtc(state));
+    }
+
+    pub(crate) fn observe_outbound_data_channels(&self, open: bool) {
+        self.apply(ConnectionStateEvent::OutboundDataChannels(open));
+    }
+
+    pub(crate) fn close(&self) {
+        self.apply(ConnectionStateEvent::Close);
+    }
+
+    pub(crate) fn snapshot(&self) -> ConnectionStateSnapshot {
+        *self.lock()
+    }
 }
 
 /// Interop ceiling for a single data-channel message, in bytes — RFC 8841's default
@@ -102,17 +294,30 @@ pub trait ConnectionInterface {
     /// if the channel closed while the bytes were still buffered. Callers that
     /// don't care can drop it; callers that do can spawn it (see
     /// [crate::delivery]).
-    async fn send_message(&self, msg: TransportMessage) -> Result<DeliveryFuture, Self::Error>;
+    async fn send_message(&self, msg: TransportMessage) -> Result<DeliveryFuture, Self::Error> {
+        self.send_message_with_permit(msg, SendPermit::always())
+            .await
+    }
+
+    /// Send only if `permit` holds at the final cancellable backend boundary.
+    async fn send_message_with_permit(
+        &self,
+        msg: TransportMessage,
+        permit: SendPermit,
+    ) -> Result<DeliveryFuture, Self::Error>;
 
     /// Get current webrtc connection state.
     fn webrtc_connection_state(&self) -> WebrtcConnectionState;
 
+    /// Return one coherent WebRTC/data-channel product-state observation.
+    fn connection_state_snapshot(&self) -> ConnectionStateSnapshot;
+
     /// Return whether every data channel used by this connection is currently open.
     ///
-    /// This is the routability predicate. ICE may still report `Connecting`
-    /// when the SCTP data channels have already opened, so callers that need to
-    /// decide whether payload transport is usable should check this method
-    /// rather than requiring [`WebrtcConnectionState::Connected`].
+    /// This is one component of routability, not the complete predicate. ICE
+    /// may still report `Connecting` when SCTP has opened, while
+    /// `Disconnected + Open` must not be treated as ready. Callers must classify
+    /// the WebRTC/data-channel product state according to their protocol model.
     fn data_channel_is_open(&self) -> Result<bool, Self::Error>;
 
     /// The maximum size, in bytes, of one message this connection can send — the channel's
@@ -158,20 +363,29 @@ pub trait TransportInterface {
 
     /// Used to create a new connection and register it in the transport.
     ///
-    /// To avoid memory leak, this function will not return a connection object.
-    /// Instead, user should use `connection` method of to get a [ConnectionRef](crate::connection_ref::ConnectionRef)
-    /// after creation.
+    /// The returned weak reference identifies the exact physical connection
+    /// inserted by this call. Callers must retain that identity across
+    /// asynchronous cleanup instead of resolving the connection id again.
     ///
     /// See [connections](crate::connections) module for examples.
     async fn new_connection(
         &self,
         cid: &str,
         callback: BoxedTransportCallback,
-    ) -> Result<(), Self::Error>;
+    ) -> Result<ConnectionRef<Self::Connection>, Self::Error>;
 
     /// This method closes and releases the connection from transport.
     /// All references to this cid, created by `get_connection`, will be released.
     async fn close_connection(&self, cid: &str) -> Result<(), Self::Error>;
+
+    /// Close `connection` only if it still owns its connection-id slot.
+    ///
+    /// This is the cleanup boundary for asynchronous work that may finish after
+    /// another physical connection has replaced the observed connection.
+    async fn close_connection_if_current(
+        &self,
+        connection: &ConnectionRef<Self::Connection>,
+    ) -> Result<bool, Self::Error>;
 
     /// Get a reference of the connection by its id.
     fn connection(&self, cid: &str) -> Result<ConnectionRef<Self::Connection>, Self::Error>;
@@ -197,6 +411,11 @@ mod tests {
     // SDP parsing (including section semantics) is tested in `crate::core::sdp`; these cover the
     // policy `effective_*` layers on top of it (default / no-limit / cap).
     use super::effective_max_message_size;
+    #[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
+    use super::ConnectionStateCell;
+    #[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
+    use super::ConnectionStateSnapshot;
+    use super::WebrtcConnectionState;
     use super::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 
     /// A data-channel SDP advertising `max-message-size:<value>` in the right media section.
@@ -243,6 +462,83 @@ mod tests {
         assert_eq!(
             effective_max_message_size(&sdp_with("65536")),
             MAX_DATA_CHANNEL_MESSAGE_SIZE
+        );
+    }
+
+    #[test]
+    fn only_negotiating_or_connected_states_occupy_the_peer_slot() {
+        let cases = [
+            (WebrtcConnectionState::Unspecified, false),
+            (WebrtcConnectionState::New, true),
+            (WebrtcConnectionState::Connecting, true),
+            (WebrtcConnectionState::Connected, true),
+            (WebrtcConnectionState::Disconnected, false),
+            (WebrtcConnectionState::Failed, false),
+            (WebrtcConnectionState::Closed, false),
+        ];
+
+        for (state, expected) in cases {
+            assert_eq!(state.occupies_peer_slot(), expected, "state: {state:?}");
+        }
+    }
+
+    #[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
+    #[test]
+    fn connection_state_cell_projects_each_complete_observed_state() {
+        let state = ConnectionStateCell::new();
+        assert_eq!(
+            state.snapshot(),
+            ConnectionStateSnapshot::new(WebrtcConnectionState::New, false)
+        );
+
+        state.observe_outbound_data_channels(true);
+        assert_eq!(
+            state.snapshot(),
+            ConnectionStateSnapshot::new(WebrtcConnectionState::New, true)
+        );
+
+        state.observe_webrtc(WebrtcConnectionState::Connected);
+        assert_eq!(
+            state.snapshot(),
+            ConnectionStateSnapshot::new(WebrtcConnectionState::Connected, true)
+        );
+
+        state.close();
+        assert_eq!(
+            state.snapshot(),
+            ConnectionStateSnapshot::new(WebrtcConnectionState::Closed, false)
+        );
+        state.observe_outbound_data_channels(true);
+        state.observe_webrtc(WebrtcConnectionState::Connected);
+        assert_eq!(
+            state.snapshot(),
+            ConnectionStateSnapshot::new(WebrtcConnectionState::Closed, false),
+            "late transport events cannot reopen a locally closed state"
+        );
+    }
+
+    #[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
+    #[test]
+    fn failed_state_rejects_late_open_and_can_only_advance_to_closed() {
+        let state = ConnectionStateCell::new();
+        state.observe_outbound_data_channels(true);
+        state.observe_webrtc(WebrtcConnectionState::Failed);
+        assert_eq!(
+            state.snapshot(),
+            ConnectionStateSnapshot::new(WebrtcConnectionState::Failed, false)
+        );
+
+        state.observe_outbound_data_channels(true);
+        state.observe_webrtc(WebrtcConnectionState::Connected);
+        assert_eq!(
+            state.snapshot(),
+            ConnectionStateSnapshot::new(WebrtcConnectionState::Failed, false)
+        );
+
+        state.observe_webrtc(WebrtcConnectionState::Closed);
+        assert_eq!(
+            state.snapshot(),
+            ConnectionStateSnapshot::new(WebrtcConnectionState::Closed, false)
         );
     }
 }

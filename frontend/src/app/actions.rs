@@ -44,6 +44,8 @@ struct StartAction {
     ice_servers: UseStateHandle<String>,
     stabilize_interval: UseStateHandle<String>,
     storage_name: UseStateHandle<String>,
+    webview_allow_short_paths: UseStateHandle<bool>,
+    webview_onion_settings: webview::WebviewOnionSettings,
     seed_url: UseStateHandle<String>,
     custom_events: UseStateHandle<Vec<custom::CustomEvent>>,
     active_dialog: UseStateHandle<ActiveDialog>,
@@ -56,6 +58,7 @@ struct StartRequest {
     ice_servers: String,
     stabilize_interval: String,
     storage_name: String,
+    webview_allow_short_paths: bool,
     seed_url: String,
 }
 
@@ -98,6 +101,8 @@ pub(super) fn launch_actions(
         ice_servers: node.ice_servers.clone(),
         stabilize_interval: node.stabilize_interval.clone(),
         storage_name: node.storage_name.clone(),
+        webview_allow_short_paths: node.webview_allow_short_paths.clone(),
+        webview_onion_settings: node.webview_onion_settings.clone(),
         seed_url: node.seed_url.clone(),
         webview_ready: node.webview_ready.clone(),
         custom_events: custom_state.events.clone(),
@@ -152,6 +157,7 @@ impl StartAction {
             ice_servers: (*self.ice_servers).clone(),
             stabilize_interval: (*self.stabilize_interval).clone(),
             storage_name: (*self.storage_name).clone(),
+            webview_allow_short_paths: *self.webview_allow_short_paths,
             seed_url: (*self.seed_url).trim().to_string(),
         }
     }
@@ -175,6 +181,7 @@ impl StartAction {
             ice_servers: request.ice_servers,
             stabilize_interval: request.stabilize_interval,
             storage_name: request.storage_name,
+            webview_allow_short_paths: request.webview_allow_short_paths,
             seed_url: request.seed_url,
         };
         match extension::extension_node_start(bridge, request.kind, settings).await {
@@ -207,11 +214,14 @@ impl StartAction {
     }
 
     async fn start_local_node(self, request: StartRequest, token: GenerationToken) {
+        self.webview_onion_settings
+            .set_allow_short_paths(request.webview_allow_short_paths);
         let settings = match extension::node_settings(
             request.network_id,
             request.ice_servers,
             request.stabilize_interval,
             request.storage_name,
+            self.webview_onion_settings.clone(),
         ) {
             Ok(settings) => settings,
             Err(error) => {
@@ -299,7 +309,13 @@ impl StartAction {
         self.wallet_account.set(Some(account));
         *self.node_ref.borrow_mut() = Some(built.clone());
         let webview_ready = match webview::install_browser_gateway(built.webview.clone()) {
-            Ok(true) => webview::register_browser_gateway().await.is_ok(),
+            Ok(true) => match webview::register_browser_gateway().await {
+                Ok(()) => true,
+                Err(error) => {
+                    self.status.set(format!("webview gateway: {error}"));
+                    false
+                }
+            },
             Ok(false) => false,
             Err(error) => {
                 self.status.set(format!("webview gateway: {error}"));

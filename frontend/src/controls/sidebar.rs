@@ -351,6 +351,7 @@ fn settings_dialog_if_open(
         ice_servers: view.ice_servers,
         stabilize_interval: view.stabilize_interval,
         storage_name: view.storage_name,
+        webview_allow_short_paths: view.webview_allow_short_paths,
         seed_url: view.seed_url,
         status: view.status,
         did_value: derived.did_value.clone(),

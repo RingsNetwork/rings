@@ -17,6 +17,7 @@ use crate::dht::entry::EntryOperation;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::PlacementMiss;
 use crate::dht::entry::SyncedEntryAck;
+use crate::dht::stabilization::STORAGE_REPAIR_MAX_DELIVERIES_PER_STEP;
 use crate::dht::successor::SuccessorWriter;
 use crate::dht::Chord;
 use crate::dht::ChordStorage;
@@ -33,6 +34,8 @@ use crate::message::types::Message;
 use crate::message::types::SyncEntriesWithSuccessor;
 use crate::storage::KvStorageInterface;
 use crate::storage::MemStorage;
+
+mod repair;
 
 fn data_entry(did: Did) -> Entry {
     Entry::new(did, vec![], EntryKind::Data)
@@ -217,6 +220,34 @@ fn coalesced_storage_sync_deliveries_keep_placement_destinations_separate() -> R
         StorageSyncDestination::PlacementKey(second_key),
     ]);
     Ok(())
+}
+
+#[test]
+fn repair_cursor_identity_ignores_entry_iteration_order() {
+    let destination = StorageSyncDestination::PhysicalOwner(Did::from(50u32));
+    let first = PlacedEntry::new(Did::from(100u32), data_entry(Did::from(10u32)));
+    let second = PlacedEntry::new(Did::from(120u32), data_entry(Did::from(20u32)));
+    let forward = super::StorageSyncDelivery::from_parts(
+        StorageSyncPurpose::AdditiveRepair,
+        destination,
+        vec![first.clone(), second.clone()],
+    );
+    let reverse = super::StorageSyncDelivery::from_parts(
+        StorageSyncPurpose::AdditiveRepair,
+        destination,
+        vec![second, first],
+    );
+
+    assert_eq!(forward.cursor_key(), reverse.cursor_key());
+}
+
+#[test]
+fn repair_phase_admits_one_bounded_storage_sync_batch() {
+    let frame_bytes = rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
+
+    assert_eq!(SYNC_BATCH_MAX_BYTES, frame_bytes / 4);
+    assert_eq!(STORAGE_REPAIR_MAX_DELIVERIES_PER_STEP, 1);
+    assert!(SYNC_BATCH_MAX_BYTES <= frame_bytes);
 }
 
 struct FailingGetStorageFixture;
@@ -427,9 +458,10 @@ async fn virtual_storage_sync_copies_entries_to_observed_virtual_owner() -> Resu
 }
 
 #[test]
-fn virtual_storage_sync_route_is_cancelled_when_owner_leaves_topology() -> Result<()> {
+fn physical_owner_route_permits_a_nonlocal_owner_through_the_current_next_hop() -> Result<()> {
     let local = Did::from(1u32);
-    let remote = Did::from(2u32);
+    let next_hop = Did::from(10u32);
+    let remote_owner = Did::from(5u32);
     let node = PeerRing::new_with_storage_finger_table_size_and_virtual_nodes(
         local,
         3,
@@ -437,21 +469,71 @@ fn virtual_storage_sync_route_is_cancelled_when_owner_leaves_topology() -> Resul
         8,
         VirtualNodeConfig::new(7, 2),
     );
-    let _ = node.join(remote)?;
-    let destination = StorageSyncDestination::PhysicalOwner(remote);
+    let _ = node.join(next_hop)?;
+    let destination = StorageSyncDestination::PhysicalOwner(remote_owner);
 
-    assert!(node.storage_sync_route_still_permits(destination, remote)?);
-
-    node.remove(remote)?;
-
-    assert!(!node.storage_sync_route_still_permits(destination, remote)?);
+    assert_eq!(node.next_hop_for_storage_sync(destination)?, Some(next_hop));
+    assert!(node.storage_sync_route_still_permits(destination, next_hop)?);
     Ok(())
 }
 
 #[test]
-fn placement_key_destination_exposes_observed_virtual_owner() -> Result<()> {
+fn physical_owner_route_cancels_when_its_direct_next_hop_leaves_topology() -> Result<()> {
     let local = Did::from(1u32);
-    let remote = Did::from(2u32);
+    let remote_owner = Did::from(2u32);
+    let node = PeerRing::new_with_storage_finger_table_size_and_virtual_nodes(
+        local,
+        3,
+        Box::new(MemStorage::new()),
+        8,
+        VirtualNodeConfig::new(7, 2),
+    );
+    let _ = node.join(remote_owner)?;
+    let destination = StorageSyncDestination::PhysicalOwner(remote_owner);
+
+    assert!(node.storage_sync_route_still_permits(destination, remote_owner)?);
+
+    node.remove(remote_owner)?;
+
+    assert!(!node.storage_sync_route_still_permits(destination, remote_owner)?);
+    Ok(())
+}
+
+#[test]
+fn physical_owner_route_cancels_when_its_next_hop_changes() -> Result<()> {
+    let local = Did::from(1u32);
+    let old_next_hop = Did::from(20u32);
+    let new_next_hop = Did::from(5u32);
+    let node = PeerRing::new_with_storage_finger_table_size_and_virtual_nodes(
+        local,
+        3,
+        Box::new(MemStorage::new()),
+        8,
+        VirtualNodeConfig::new(7, 2),
+    );
+    let _ = node.join(old_next_hop)?;
+    let destination = StorageSyncDestination::PhysicalOwner(old_next_hop);
+
+    assert_eq!(
+        node.next_hop_for_storage_sync(destination)?,
+        Some(old_next_hop)
+    );
+    assert!(node.storage_sync_route_still_permits(destination, old_next_hop)?);
+
+    let _ = node.join(new_next_hop)?;
+
+    assert_eq!(
+        node.next_hop_for_storage_sync(destination)?,
+        Some(new_next_hop)
+    );
+    assert!(!node.storage_sync_route_still_permits(destination, old_next_hop)?);
+    Ok(())
+}
+
+#[test]
+fn placement_key_route_uses_one_virtual_owner_topology_snapshot() -> Result<()> {
+    let local = Did::from(1u32);
+    let remote = Did::from(10u32);
     let node = PeerRing::new_with_storage_finger_table_size_and_virtual_nodes(
         local,
         3,
@@ -460,18 +542,16 @@ fn placement_key_destination_exposes_observed_virtual_owner() -> Result<()> {
         VirtualNodeConfig::new(7, 2),
     );
     let _ = node.join(remote)?;
-    let placement = first_virtual_position(&node, remote)?;
+    let placement_key = node
+        .storage_virtual_positions(remote)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::InvalidMessage("missing remote virtual position".to_string()))?
+        .vnode_did;
+    let destination = StorageSyncDestination::PlacementKey(placement_key);
 
-    assert_eq!(
-        node.observed_storage_sync_physical_owner(StorageSyncDestination::PlacementKey(placement))?,
-        Some(remote)
-    );
-
-    node.remove(remote)?;
-
-    let owner_after_removal =
-        node.observed_storage_sync_physical_owner(StorageSyncDestination::PlacementKey(placement))?;
-    assert_ne!(owner_after_removal, Some(remote));
+    assert_eq!(node.next_hop_for_storage_sync(destination)?, Some(remote));
+    assert!(node.storage_sync_route_still_permits(destination, remote)?);
     Ok(())
 }
 
@@ -764,181 +844,5 @@ async fn sync_batch_ack_deletes_acked_batch_and_retries_unacked_batches() -> Res
             .filter(|placed| !acked_batch.iter().any(|acked| acked.key == placed.key)),
     );
     assert_eq!(retried_entries, expected_remaining);
-    Ok(())
-}
-
-#[tokio::test]
-async fn periodic_republish_restores_missing_local_affine_replica() -> Result<()> {
-    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
-    let entry = data_entry(Did::from(10u32));
-    let (first_key, second_key) = first_two_affine_keys(entry.did)?;
-    node.storage.put(&first_key.to_string(), &entry).await?;
-
-    let action = node.republish_local_entries(2).await?;
-
-    assert_eq!(action, PeerRingAction::None);
-    assert_eq!(
-        node.storage.get(&first_key.to_string()).await?,
-        Some(entry.clone())
-    );
-    assert_eq!(
-        node.storage.get(&second_key.to_string()).await?,
-        Some(entry)
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn republish_joins_local_branch_and_routes_remote_placement_keys() -> Result<()> {
-    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
-    let successor = Did::from(100u32);
-    node.successors().update(successor)?;
-    let entry = data_entry(Did::from(10u32));
-    let (first_key, second_key) = first_two_affine_keys(entry.did)?;
-    node.storage.put(&entry.did.to_string(), &entry).await?;
-
-    let action = node.republish_local_entries(2).await?;
-
-    assert_eq!(
-        action,
-        PeerRingAction::MultiActions(vec![PeerRingAction::RemoteAction(
-            second_key,
-            RemoteAction::SyncEntriesWithSuccessor {
-                purpose: StorageSyncPurpose::AdditiveRepair,
-                route: StorageSyncRoute::PlacementKey,
-                data: vec![PlacedEntry::new(second_key, entry.clone())],
-            }
-        )])
-    );
-    assert_eq!(
-        node.storage.get(&first_key.to_string()).await?,
-        Some(entry.clone())
-    );
-    assert_eq!(node.storage.get(&second_key.to_string()).await?, None);
-    Ok(())
-}
-
-#[tokio::test]
-async fn read_repair_is_noop_for_single_replica_storage() -> Result<()> {
-    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
-    let entry = data_entry(Did::from(10u32));
-
-    let action = node.read_repair_entry(entry, &[], 1).await?;
-
-    assert_eq!(action, PeerRingAction::None);
-    assert_eq!(node.storage.count().await?, 0);
-    Ok(())
-}
-
-#[tokio::test]
-async fn local_hit_lookup_has_no_read_repair_targets() -> Result<()> {
-    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
-    let entry = data_entry(Did::from(10u32));
-    let mut placement_keys = entry.did.rotate_affine(2)?.into_iter();
-    let first_key = placement_keys
-        .next()
-        .ok_or_else(|| Error::InvalidMessage("expected first placement".to_string()))?;
-    node.storage.put(&first_key.to_string(), &entry).await?;
-
-    let action = <PeerRing as ChordStorage<_, 2>>::entry_lookup(&node, entry.did).await?;
-    let evidence = match action {
-        PeerRingAction::SomeEntry(evidence) => evidence,
-        action => return Err(Error::unexpected_peer_ring_action(action)),
-    };
-    let repair = node
-        .read_repair_entry(evidence.entry.clone(), &evidence.misses, 2)
-        .await?;
-
-    assert!(evidence.misses.is_empty());
-    assert_eq!(repair, PeerRingAction::None);
-    assert_eq!(node.storage.count().await?, 1);
-    Ok(())
-}
-
-#[tokio::test]
-async fn read_repair_targets_only_observed_missing_placements() -> Result<()> {
-    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
-    let entry = data_entry(Did::from(10u32));
-    let placement_keys = entry.did.rotate_affine(3)?;
-    let first_key = *placement_keys
-        .first()
-        .ok_or_else(|| Error::InvalidMessage("expected first placement".to_string()))?;
-    let second_key = *placement_keys
-        .get(1)
-        .ok_or_else(|| Error::InvalidMessage("expected second placement".to_string()))?;
-    let third_key = *placement_keys
-        .get(2)
-        .ok_or_else(|| Error::InvalidMessage("expected third placement".to_string()))?;
-    node.storage.put(&second_key.to_string(), &entry).await?;
-
-    let action = <PeerRing as ChordStorage<_, 3>>::entry_lookup(&node, entry.did).await?;
-    let evidence = match action {
-        PeerRingAction::SomeEntry(evidence) => evidence,
-        action => return Err(Error::unexpected_peer_ring_action(action)),
-    };
-    let repair = node
-        .read_repair_entry(evidence.entry.clone(), &evidence.misses, 3)
-        .await?;
-
-    assert_eq!(evidence.misses, vec![PlacementMiss::new(
-        first_key, node.did
-    )]);
-    assert_eq!(repair, PeerRingAction::None);
-    assert_eq!(
-        node.storage.get(&first_key.to_string()).await?,
-        Some(entry.clone())
-    );
-    assert_eq!(
-        node.storage.get(&second_key.to_string()).await?,
-        Some(entry)
-    );
-    assert_eq!(node.storage.get(&third_key.to_string()).await?, None);
-    Ok(())
-}
-
-#[tokio::test]
-async fn read_repair_uses_observed_remote_owner() -> Result<()> {
-    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
-    let owner = Did::from(100u32);
-    let entry = data_entry(Did::from(10u32));
-    let placement_key = *entry
-        .did
-        .rotate_affine(2)?
-        .get(1)
-        .ok_or_else(|| Error::InvalidMessage("expected second placement".to_string()))?;
-
-    let action = node
-        .read_repair_entry(
-            entry.clone(),
-            &[PlacementMiss::new(placement_key, owner)],
-            2,
-        )
-        .await?;
-
-    assert_eq!(
-        action,
-        PeerRingAction::MultiActions(vec![PeerRingAction::RemoteAction(
-            owner,
-            RemoteAction::SyncEntriesWithSuccessor {
-                purpose: StorageSyncPurpose::AdditiveRepair,
-                route: StorageSyncRoute::PhysicalOwner,
-                data: vec![PlacedEntry::new(placement_key, entry)],
-            }
-        )])
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn read_repair_rejects_non_affine_observed_miss() -> Result<()> {
-    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
-    let entry = data_entry(Did::from(10u32));
-    let miss = PlacementMiss::new(non_affine_placement(entry.did, 2)?, node.did);
-
-    let result = node.read_repair_entry(entry, &[miss], 2).await;
-
-    assert!(
-        matches!(result, Err(Error::InvalidMessage(message)) if message.contains("affine replica set"))
-    );
     Ok(())
 }

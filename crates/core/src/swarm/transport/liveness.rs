@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
 use std::sync::MutexGuard;
 
+use super::pending::ActiveConnectionSet;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
+use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 use crate::utils::get_epoch_ms_i64;
 
@@ -19,6 +21,21 @@ struct PeerLiveness {
     last_inbound_ms: i64,
     last_probe_ms: Option<i64>,
     unanswered_probe_since_ms: Option<i64>,
+}
+
+#[derive(Clone, Copy)]
+enum PeerLivenessObservation {
+    Connected,
+    Inbound,
+}
+
+impl PeerLivenessObservation {
+    fn apply(self, liveness: &mut PeerLivenessMap, peer: Did, generation: u64, now_ms: i64) {
+        match self {
+            Self::Connected => liveness.mark_connected(peer, generation, now_ms),
+            Self::Inbound => liveness.mark_inbound(peer, generation, now_ms),
+        }
+    }
 }
 
 impl PeerLiveness {
@@ -95,29 +112,37 @@ impl PeerLivenessMap {
         }
     }
 
-    fn remove(&mut self, peer: Did) {
+    pub(super) fn remove(&mut self, peer: Did) {
         self.peers.remove(&peer);
     }
 
-    fn retain_active(&mut self, active: &BTreeMap<Did, u64>) {
+    fn retain_active(&mut self, active: &ActiveConnectionSet) {
         self.peers.retain(|peer, liveness| {
             active
-                .get(peer)
-                .is_some_and(|generation| *generation == liveness.generation)
+                .attempt(*peer)
+                .is_some_and(|attempt| attempt.generation == liveness.generation)
         });
     }
 
-    fn probe_candidates(&mut self, active: &BTreeMap<Did, u64>, now_ms: i64) -> Vec<Did> {
+    fn probe_candidates(
+        &mut self,
+        active: &ActiveConnectionSet,
+        now_ms: i64,
+    ) -> Vec<PendingConnectionAttempt> {
         self.retain_active(active);
-        for (peer, generation) in active {
+        for attempt in active.iter() {
             self.peers
-                .entry(*peer)
-                .or_insert_with(|| PeerLiveness::new(*generation, now_ms));
+                .entry(attempt.peer)
+                .or_insert_with(|| PeerLiveness::new(attempt.generation, now_ms));
         }
 
-        self.peers
+        active
             .iter()
-            .filter_map(|(peer, liveness)| liveness.should_probe(now_ms).then_some(*peer))
+            .filter(|attempt| {
+                self.peers
+                    .get(&attempt.peer)
+                    .is_some_and(|liveness| liveness.should_probe(now_ms))
+            })
             .collect()
     }
 
@@ -170,96 +195,118 @@ pub(crate) struct PeerLivenessExpiry {
 }
 
 impl SwarmTransport {
-    fn peer_liveness(&self) -> Result<MutexGuard<'_, PeerLivenessMap>> {
+    pub(super) fn peer_liveness(&self) -> Result<MutexGuard<'_, PeerLivenessMap>> {
         self.peer_liveness
             .lock()
             .map_err(|_| Error::SwarmConnectionLifecycleLock)
     }
 
-    fn active_generations(&self) -> Result<BTreeMap<Did, u64>> {
-        Ok(self.active_peers()?.clone())
-    }
-
-    fn active_generation(&self, peer: Did) -> Result<Option<u64>> {
-        Ok(self.active_peers()?.get(&peer).copied())
-    }
-
-    pub(crate) fn mark_peer_liveness_connected(&self, peer: Did) {
+    fn observe_peer_liveness(
+        &self,
+        attempt: PendingConnectionAttempt,
+        observation: PeerLivenessObservation,
+        before_update: impl FnOnce(),
+    ) -> Result<()> {
         let now_ms = get_epoch_ms_i64();
-        let generation = match self.active_generation(peer) {
-            Ok(Some(generation)) => generation,
-            Ok(None) => return,
-            Err(error) => {
-                tracing::warn!(
-                    "failed to read active generation for connected peer {peer}: {error}"
-                );
-                return;
+        self.with_connection_lifecycle(|| {
+            if !self.owns_active_slot(attempt)? {
+                return Ok(());
             }
-        };
-        if let Err(error) = self
-            .peer_liveness()
-            .map(|mut liveness| liveness.mark_connected(peer, generation, now_ms))
+            before_update();
+            let mut liveness = self.peer_liveness()?;
+            observation.apply(&mut liveness, attempt.peer, attempt.generation, now_ms);
+            Ok(())
+        })
+    }
+
+    pub(crate) fn mark_peer_liveness_connected(&self, attempt: PendingConnectionAttempt) {
+        if let Err(error) =
+            self.observe_peer_liveness(attempt, PeerLivenessObservation::Connected, || {})
         {
-            tracing::warn!("failed to mark liveness for connected peer {peer}: {error}");
+            tracing::warn!(
+                "failed to mark liveness for connected peer {} generation {}: {error}",
+                attempt.peer,
+                attempt.generation
+            );
         }
     }
 
-    pub(crate) fn mark_peer_liveness_inbound(&self, peer: Did) {
-        let now_ms = get_epoch_ms_i64();
-        let generation = match self.active_generation(peer) {
-            Ok(Some(generation)) => generation,
-            Ok(None) => return,
-            Err(error) => {
-                tracing::warn!("failed to read active generation for inbound peer {peer}: {error}");
-                return;
-            }
-        };
-        if let Err(error) = self
-            .peer_liveness()
-            .map(|mut liveness| liveness.mark_inbound(peer, generation, now_ms))
+    pub(crate) fn mark_peer_liveness_inbound(&self, attempt: PendingConnectionAttempt) {
+        if let Err(error) =
+            self.observe_peer_liveness(attempt, PeerLivenessObservation::Inbound, || {})
         {
-            tracing::warn!("failed to mark liveness for inbound peer {peer}: {error}");
+            tracing::warn!(
+                "failed to mark liveness for inbound peer {} generation {}: {error}",
+                attempt.peer,
+                attempt.generation
+            );
         }
     }
 
-    pub(crate) fn remove_peer_liveness(&self, peer: Did) -> Result<()> {
-        self.peer_liveness()?.remove(peer);
-        Ok(())
+    pub(crate) fn liveness_probe_candidates(
+        &self,
+        now_ms: i64,
+    ) -> Result<Vec<PendingConnectionAttempt>> {
+        self.with_connection_lifecycle(|| {
+            let active = self.active_connections()?;
+            Ok(self.peer_liveness()?.probe_candidates(&active, now_ms))
+        })
     }
 
-    pub(crate) fn liveness_probe_candidates(&self, now_ms: i64) -> Result<Vec<Did>> {
-        let active = self.active_generations()?;
-        Ok(self.peer_liveness()?.probe_candidates(&active, now_ms))
-    }
-
-    pub(crate) fn record_peer_liveness_probe_sent(&self, peer: Did, now_ms: i64) -> Result<()> {
-        let Some(generation) = self.active_generation(peer)? else {
-            return Ok(());
-        };
-        self.peer_liveness()?
-            .mark_probe_sent(peer, generation, now_ms);
-        Ok(())
+    pub(crate) fn record_peer_liveness_probe_sent(
+        &self,
+        attempt: PendingConnectionAttempt,
+        now_ms: i64,
+    ) -> Result<()> {
+        self.with_connection_lifecycle(|| {
+            if !self.owns_active_slot(attempt)? {
+                return Ok(());
+            }
+            self.peer_liveness()?
+                .mark_probe_sent(attempt.peer, attempt.generation, now_ms);
+            Ok(())
+        })
     }
 
     pub(crate) fn peer_liveness_expiry(
         &self,
-        peer: Did,
+        attempt: PendingConnectionAttempt,
         now_ms: i64,
     ) -> Result<Option<PeerLivenessExpiry>> {
-        let Some(generation) = self.active_generation(peer)? else {
-            return Ok(None);
-        };
-        Ok(self.peer_liveness()?.expiry(peer, generation, now_ms))
+        self.with_connection_lifecycle(|| {
+            if !self.owns_active_slot(attempt)? {
+                return Ok(None);
+            }
+            Ok(self
+                .peer_liveness()?
+                .expiry(attempt.peer, attempt.generation, now_ms))
+        })
     }
 
     /// Return how long an admitted peer has owned its current active generation.
     pub(crate) fn peer_connected_for_ms(&self, peer: Did, now_ms: i64) -> Result<Option<i64>> {
-        let Some(generation) = self.active_generation(peer)? else {
-            return Ok(None);
-        };
-        Ok(self
-            .peer_liveness()?
-            .connected_for_ms(peer, generation, now_ms))
+        self.with_connection_lifecycle(|| {
+            let Some(attempt) = self.active_attempt(peer)? else {
+                return Ok(None);
+            };
+            Ok(self
+                .peer_liveness()?
+                .connected_for_ms(peer, attempt.generation, now_ms))
+        })
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) fn mark_peer_liveness_connected_with_observer_for_test(
+        &self,
+        attempt: PendingConnectionAttempt,
+        before_update: impl FnOnce(),
+    ) -> Result<()> {
+        self.observe_peer_liveness(attempt, PeerLivenessObservation::Connected, before_update)
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) fn peer_liveness_count_for_test(&self) -> Result<usize> {
+        self.with_connection_lifecycle(|| Ok(self.peer_liveness()?.peers.len()))
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -268,21 +315,25 @@ impl SwarmTransport {
         peer: Did,
         sent_at_ms: i64,
     ) -> Result<()> {
-        let Some(generation) = self.active_generation(peer)? else {
-            return Ok(());
-        };
-        self.peer_liveness()?
-            .force_probe_sent_at(peer, generation, sent_at_ms);
-        Ok(())
+        self.with_connection_lifecycle(|| {
+            let Some(attempt) = self.active_attempt(peer)? else {
+                return Ok(());
+            };
+            self.peer_liveness()?
+                .force_probe_sent_at(peer, attempt.generation, sent_at_ms);
+            Ok(())
+        })
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn force_peer_connected_at(&self, peer: Did, connected_at_ms: i64) -> Result<()> {
-        let Some(generation) = self.active_generation(peer)? else {
-            return Ok(());
-        };
-        self.peer_liveness()?
-            .force_connected_at(peer, generation, connected_at_ms);
-        Ok(())
+        self.with_connection_lifecycle(|| {
+            let Some(attempt) = self.active_attempt(peer)? else {
+                return Ok(());
+            };
+            self.peer_liveness()?
+                .force_connected_at(peer, attempt.generation, connected_at_ms);
+            Ok(())
+        })
     }
 }

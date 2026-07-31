@@ -4,7 +4,6 @@ use serde::Serialize;
 use crate::dht::entry::Entry;
 use crate::dht::EntryStorage;
 use crate::dht::PeerRing;
-use crate::dht::SuccessorReader;
 use crate::swarm::Swarm;
 
 /// Full runtime inspection snapshot for a swarm.
@@ -71,31 +70,32 @@ impl DHTInspect {
     /// Build a DHT inspection snapshot from a peer ring.
     pub fn inspect(dht: &PeerRing) -> Self {
         let did = dht.did.to_string();
-        let successors = {
-            dht.successors()
-                .list()
-                .unwrap_or_default()
-                .into_iter()
-                .map(|s| s.to_string())
-                .collect()
-        };
-
-        let predecessor = {
-            dht.lock_predecessor()
-                .map(|x| *x)
-                .ok()
-                .flatten()
-                .map(|x| x.to_string())
-        };
-
-        let finger_table = {
-            dht.lock_finger()
-                .map(|ft| {
-                    let finger = ft.list().iter().map(|x| x.map(|did| did.to_string()));
-                    compress_iter(finger)
-                })
-                .unwrap_or_default()
-        };
+        let topology = dht.topology_state().ok();
+        let successors = topology
+            .as_ref()
+            .map(|state| {
+                state
+                    .successors
+                    .iter()
+                    .copied()
+                    .map(|s| s.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let predecessor = topology
+            .as_ref()
+            .and_then(|state| state.predecessor)
+            .map(|predecessor| predecessor.to_string());
+        let finger_table = topology
+            .map(|state| {
+                compress_iter(
+                    state
+                        .fingers
+                        .into_iter()
+                        .map(|finger| finger.map(|did| did.to_string())),
+                )
+            })
+            .unwrap_or_default();
 
         Self {
             did,

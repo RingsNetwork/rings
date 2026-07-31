@@ -1,5 +1,6 @@
 //! Frontend host adapter for the reusable Rings webview gateway.
 
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
@@ -9,7 +10,6 @@ use async_trait::async_trait;
 use futures::channel::oneshot;
 use js_sys::Array;
 use js_sys::Object;
-use js_sys::Promise;
 use js_sys::Reflect;
 use js_sys::Uint8Array;
 use rings_node::provider::Provider;
@@ -30,11 +30,17 @@ use rings_webview::Result as WebviewResult;
 use rings_webview::TargetUrl;
 use rings_webview::WebviewError;
 use url::Url;
-use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsValue;
-use wasm_bindgen_futures::future_to_promise;
 
 use crate::onion;
+
+mod browser_gateway;
+#[cfg(test)]
+use self::browser_gateway::browser_request_id;
+pub(crate) use self::browser_gateway::clear_browser_gateway;
+pub(crate) use self::browser_gateway::install_browser_gateway;
+pub(crate) use self::browser_gateway::open_webview_popup;
+pub(crate) use self::browser_gateway::register_browser_gateway;
 
 pub(crate) const GATEWAY_PREFIX: &str = "/webview/";
 const MAX_CONCURRENT_GATEWAY_REQUESTS: usize = 6;
@@ -58,64 +64,37 @@ const WEBVIEW_OVERLAY_LOADER: &str = r#"
 })();
 "#;
 
-thread_local! {
-    static BROWSER_GATEWAY: RefCell<Option<BrowserGatewayBinding>> = const { RefCell::new(None) };
+/// Runtime onion routing settings shared by the local node and WebView gateway.
+#[derive(Clone)]
+pub struct WebviewOnionSettings {
+    allow_short_paths: Rc<Cell<bool>>,
 }
 
-struct BrowserGatewayBinding {
-    // This closure must outlive every Service Worker request sent to the active node.
-    _handler: Closure<dyn FnMut(JsValue) -> Promise>,
-}
-
-/// Open the local WebView popup without ever passing it a remote URL.
-pub(crate) fn open_webview_popup() -> Result<(), String> {
-    crate::browser_api::open_webview_popup()
-}
-
-/// Install the current node as the only Service Worker gateway executor.
-pub(crate) fn install_browser_gateway(gateway: Option<WebviewNode>) -> Result<bool, String> {
-    clear_browser_gateway();
-    let Some(gateway) = gateway else {
-        return Ok(false);
-    };
-    let handler = Closure::wrap(Box::new(move |request: JsValue| {
-        let gateway = gateway.clone();
-        future_to_promise(async move {
-            Ok::<JsValue, JsValue>(dispatch_browser_request(gateway, request).await)
-        })
-    }) as Box<dyn FnMut(JsValue) -> Promise>);
-    let bridge = Object::new();
-    crate::browser_api::js_set(&bridge, "handle", handler.as_ref())?;
-    Reflect::set(
-        &js_sys::global(),
-        &JsValue::from_str("RingsWebviewGateway"),
-        bridge.as_ref(),
-    )
-    .map_err(crate::browser_api::js_error_label)?;
-    BROWSER_GATEWAY.with(|slot| {
-        *slot.borrow_mut() = Some(BrowserGatewayBinding { _handler: handler });
-    });
-    Ok(true)
-}
-
-/// Remove the browser host binding when the local node stops.
-pub(crate) fn clear_browser_gateway() {
-    BROWSER_GATEWAY.with(|slot| {
-        *slot.borrow_mut() = None;
-    });
-    let _deleted =
-        Reflect::delete_property(&js_sys::global(), &JsValue::from_str("RingsWebviewGateway"));
-}
-
-/// Register the active application page as the Service Worker's gateway host.
-pub(crate) async fn register_browser_gateway() -> Result<(), String> {
-    let bridge = crate::browser_api::js_global_prop("RingsWebviewHost")?;
-    let registered = crate::browser_api::js_call0(&bridge, "registerGatewayHost")?;
-    let ready = crate::browser_api::await_js(registered).await?;
-    if ready.as_bool() == Some(false) {
-        return Err("Service Worker rejected gateway host registration".to_string());
+impl WebviewOnionSettings {
+    /// Build settings with the current short-path opt-in state.
+    pub fn new(allow_short_paths: bool) -> Self {
+        Self {
+            allow_short_paths: Rc::new(Cell::new(allow_short_paths)),
+        }
     }
-    Ok(())
+
+    /// Update whether the WebView may use fewer onion hops than requested.
+    pub(crate) fn set_allow_short_paths(&self, allow_short_paths: bool) {
+        self.allow_short_paths.set(allow_short_paths);
+    }
+
+    fn options(&self) -> onion::OnionProxyOptions {
+        onion::OnionProxyOptions {
+            allow_short_paths: self.allow_short_paths.get(),
+            ..onion::OnionProxyOptions::default()
+        }
+    }
+}
+
+impl Default for WebviewOnionSettings {
+    fn default() -> Self {
+        Self::new(false)
+    }
 }
 
 async fn dispatch_browser_request(gateway: WebviewNode, request: JsValue) -> JsValue {
@@ -582,7 +561,10 @@ pub struct WebviewNode {
 
 impl WebviewNode {
     /// Attach a WebView gateway when the current page has an HTTP(S) controlled origin.
-    pub fn for_current_window(provider: Arc<Provider>) -> WebviewResult<Option<Self>> {
+    pub(crate) fn for_current_window(
+        provider: Arc<Provider>,
+        onion_settings: WebviewOnionSettings,
+    ) -> WebviewResult<Option<Self>> {
         let origin = web_sys::window()
             .ok_or_else(|| WebviewError::Browser("browser window is unavailable".to_string()))?
             .location()
@@ -593,7 +575,12 @@ impl WebviewNode {
         }
         let controlled_origin = TargetUrl::parse(&format!("{}/", origin.trim_end_matches('/')))
             .map_err(|error| WebviewError::Browser(format!("parse frontend origin: {error}")))?;
-        Self::new(Rc::new((*provider).clone()), controlled_origin).map(Some)
+        Self::new(
+            Rc::new((*provider).clone()),
+            controlled_origin,
+            onion_settings,
+        )
+        .map(Some)
     }
 
     /// Handle a browser request after the host has captured it before connection dispatch.
@@ -601,11 +588,18 @@ impl WebviewNode {
         self.host.handle(request).await
     }
 
-    fn new(provider: Rc<Provider>, controlled_origin: TargetUrl) -> WebviewResult<Self> {
+    fn new(
+        provider: Rc<Provider>,
+        controlled_origin: TargetUrl,
+        onion_settings: WebviewOnionSettings,
+    ) -> WebviewResult<Self> {
         let prefix = GatewayPrefix::new(GATEWAY_PREFIX)?;
         let policy = GatewayRoutePolicy::new(controlled_origin.into_url(), prefix.clone())?;
-        let gateway = ConcurrentWebviewGateway::new(prefix, OnionGatewayTransport { provider })
-            .with_request_bootstrap(webview_bootstrap);
+        let gateway = ConcurrentWebviewGateway::new(prefix, OnionGatewayTransport {
+            provider,
+            onion_settings,
+        })
+        .with_request_bootstrap(webview_bootstrap);
         Ok(Self {
             host: Rc::new(WebviewGatewayHost {
                 policy,
@@ -623,8 +617,7 @@ struct WebviewGatewayHost<T> {
 }
 
 impl<T> WebviewGatewayHost<T>
-where
-    T: GatewayTransport,
+where T: GatewayTransport
 {
     async fn handle(&self, request: WebviewHostRequest) -> WebviewResult<WebviewHostOutcome> {
         match self.policy.route(
@@ -653,7 +646,40 @@ struct GatewayRequestLimiter {
 
 struct GatewayRequestLimiterState {
     available: usize,
-    waiters: VecDeque<oneshot::Sender<()>>,
+    next_waiter_id: u64,
+    waiters: VecDeque<GatewayRequestWaiter>,
+}
+
+struct GatewayRequestWaiter {
+    id: u64,
+    granted: Rc<Cell<bool>>,
+    sender: oneshot::Sender<()>,
+}
+
+struct GatewayRequestWaiterGuard {
+    limiter: GatewayRequestLimiter,
+    id: u64,
+    granted: Rc<Cell<bool>>,
+    armed: bool,
+}
+
+impl GatewayRequestWaiterGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for GatewayRequestWaiterGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if self.granted.get() {
+            self.limiter.release();
+        } else {
+            self.limiter.cancel_waiter(self.id);
+        }
+    }
 }
 
 impl GatewayRequestLimiter {
@@ -661,37 +687,66 @@ impl GatewayRequestLimiter {
         Self {
             state: Rc::new(RefCell::new(GatewayRequestLimiterState {
                 available: maximum,
+                next_waiter_id: 1,
                 waiters: VecDeque::new(),
             })),
         }
     }
 
     async fn acquire(&self) -> GatewayRequestPermit {
-        let receiver = {
-            let mut state = self.state.borrow_mut();
-            if state.available > 0 {
-                state.available -= 1;
-                None
-            } else {
-                let (sender, receiver) = oneshot::channel();
-                state.waiters.push_back(sender);
-                Some(receiver)
+        loop {
+            let waiting = {
+                let mut state = self.state.borrow_mut();
+                if state.available > 0 {
+                    state.available -= 1;
+                    None
+                } else {
+                    let id = state.next_waiter_id;
+                    state.next_waiter_id = state.next_waiter_id.wrapping_add(1).max(1);
+                    let granted = Rc::new(Cell::new(false));
+                    let (sender, receiver) = oneshot::channel();
+                    state.waiters.push_back(GatewayRequestWaiter {
+                        id,
+                        granted: granted.clone(),
+                        sender,
+                    });
+                    Some((receiver, GatewayRequestWaiterGuard {
+                        limiter: self.clone(),
+                        id,
+                        granted,
+                        armed: true,
+                    }))
+                }
+            };
+            let Some((receiver, mut guard)) = waiting else {
+                return GatewayRequestPermit {
+                    limiter: self.clone(),
+                };
+            };
+            if receiver.await.is_ok() {
+                guard.disarm();
+                return GatewayRequestPermit {
+                    limiter: self.clone(),
+                };
             }
-        };
-        if let Some(receiver) = receiver {
-            let _ = receiver.await;
         }
-        GatewayRequestPermit {
-            limiter: self.clone(),
-        }
+    }
+
+    fn cancel_waiter(&self, id: u64) {
+        self.state
+            .borrow_mut()
+            .waiters
+            .retain(|waiter| waiter.id != id);
     }
 
     fn release(&self) {
         let mut state = self.state.borrow_mut();
         while let Some(waiter) = state.waiters.pop_front() {
-            if waiter.send(()).is_ok() {
+            waiter.granted.set(true);
+            if waiter.sender.send(()).is_ok() {
                 return;
             }
+            waiter.granted.set(false);
         }
         state.available += 1;
     }
@@ -709,38 +764,65 @@ impl Drop for GatewayRequestPermit {
 
 struct OnionGatewayTransport {
     provider: Rc<Provider>,
+    onion_settings: WebviewOnionSettings,
 }
 
 #[async_trait(?Send)]
 impl GatewayTransport for OnionGatewayTransport {
     async fn send(&self, request: GatewayRequest) -> WebviewResult<GatewayResponse> {
-        let options = onion::OnionProxyOptions::default();
-        if should_trace_onion_route(request.kind) {
-            trace_onion_route(
-                &self.provider,
-                request.target.as_str(),
-                request.source_target.as_ref().map(Url::as_str),
-                request.kind,
-                options,
-            )
-            .await;
-        }
-        let response = onion::request(
-            &self.provider,
-            onion::OnionProxyHttpRequest {
-                url: request.target.to_string(),
-                method: request.method,
-                headers: request
-                    .headers
-                    .into_iter()
-                    .map(|header| (header.name, header.value))
-                    .collect(),
-                body: request.body,
-                options,
-            },
-        )
-        .await
-        .map_err(onion_gateway_failure)?;
+        let options = self.onion_settings.options();
+        let should_trace = should_trace_onion_route(request.kind);
+        let debug_target = request.target.to_string();
+        let debug_source_target = request.source_target.as_ref().map(Url::to_string);
+        let debug_kind = request.kind;
+        let started = js_sys::Date::now();
+        let response_result = onion::request(&self.provider, onion::OnionProxyHttpRequest {
+            url: debug_target.clone(),
+            method: request.method,
+            headers: request
+                .headers
+                .into_iter()
+                .map(|header| (header.name, header.value))
+                .collect(),
+            body: request.body,
+            options,
+        })
+        .await;
+        let duration_ms = (js_sys::Date::now() - started).max(0.0).round();
+        let response = match response_result {
+            Ok(response) => {
+                if should_trace {
+                    if let Some(route) = response.route.as_ref() {
+                        emit_onion_debug(OnionDebugEvent {
+                            message: "route selected",
+                            level: "info",
+                            target: debug_target.as_str(),
+                            source_target: debug_source_target.as_deref(),
+                            kind: debug_kind,
+                            route: Some(route),
+                            error: None,
+                            duration_ms,
+                        });
+                    }
+                }
+                response
+            }
+            Err(error) => {
+                if should_trace {
+                    emit_onion_debug(OnionDebugEvent {
+                        message: error.message(),
+                        level: "error",
+                        target: debug_target.as_str(),
+                        source_target: debug_source_target.as_deref(),
+                        kind: debug_kind,
+                        route: None,
+                        error: Some(error.message()),
+                        duration_ms,
+                    });
+                }
+                return Err(onion_gateway_failure(error));
+            }
+        };
         let headers = response
             .headers
             .into_iter()
@@ -768,47 +850,6 @@ struct OnionDebugEvent<'a> {
     duration_ms: f64,
 }
 
-async fn trace_onion_route(
-    provider: &Provider,
-    target: &str,
-    source_target: Option<&str>,
-    kind: GatewayRequestKind,
-    options: onion::OnionProxyOptions,
-) {
-    let started = js_sys::Date::now();
-    let result = onion::route(
-        provider,
-        onion::OnionProxyRouteRequest {
-            url: target.to_string(),
-            options,
-        },
-    )
-    .await;
-    let duration = (js_sys::Date::now() - started).max(0.0).round();
-    match result {
-        Ok(route) => emit_onion_debug(OnionDebugEvent {
-            message: "route selected",
-            level: "info",
-            target,
-            source_target,
-            kind,
-            route: Some(&route),
-            error: None,
-            duration_ms: duration,
-        }),
-        Err(error) => emit_onion_debug(OnionDebugEvent {
-            message: error.message(),
-            level: "error",
-            target,
-            source_target,
-            kind,
-            route: None,
-            error: Some(error.message()),
-            duration_ms: duration,
-        }),
-    }
-}
-
 fn emit_onion_debug(event: OnionDebugEvent<'_>) {
     let Ok(bridge) = crate::browser_api::js_global_prop("RingsWebviewHost") else {
         return;
@@ -827,11 +868,7 @@ fn emit_onion_debug(event: OnionDebugEvent<'_>) {
         "kind",
         &JsValue::from_str(gateway_kind_label(event.kind)),
     );
-    let _ = crate::browser_api::js_set(
-        &onion,
-        "durationMs",
-        &JsValue::from_f64(event.duration_ms),
-    );
+    let _ = crate::browser_api::js_set(&onion, "durationMs", &JsValue::from_f64(event.duration_ms));
     if let Some(route) = event.route {
         let hops = Array::new();
         for hop in route.hops.iter() {

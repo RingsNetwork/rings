@@ -58,6 +58,7 @@ use wasm_bindgen_futures::JsFuture;
 #[cfg(all(not(feature = "node"), feature = "browser", target_family = "wasm"))]
 use web_sys::AbortController;
 
+use self::pending::PendingOnionHttpsRequest;
 use crate::error::Error;
 use crate::error::Result;
 use crate::extension::ext::Scope;
@@ -209,14 +210,11 @@ impl OnionHttpsRuntime {
 
     /// Begin a client request expected to complete from the immediate return peer.
     pub(crate) fn begin_request(
-        &self,
+        self: &Arc<Self>,
         expected_return_peer: Did,
         expected_exit: OnionExitDescriptor,
         return_id: OnionReturnId,
-    ) -> Result<(
-        OnionCircuitId,
-        oneshot::Receiver<std::result::Result<OnionHttpsClientResponse, Error>>,
-    )> {
+    ) -> Result<PendingOnionHttpsRequest> {
         let mut pending = self.pending.lock().map_err(|_| Error::Lock)?;
         for _ in 0..16 {
             let id = OnionCircuitId::random();
@@ -230,15 +228,14 @@ impl OnionHttpsRuntime {
                 return_id,
                 sender,
             });
-            return Ok((id, receiver));
+            return Ok(PendingOnionHttpsRequest::new(self.clone(), id, receiver));
         }
         Err(Error::OnionRouteError(
             OnionRouteError::CircuitIdAllocationFailed,
         ))
     }
 
-    /// Cancel a request that failed before it was sent.
-    pub(crate) fn cancel_request(&self, id: OnionCircuitId) {
+    fn cancel_request(&self, id: OnionCircuitId) {
         if let Ok(mut pending) = self.pending.lock() {
             pending.remove(&id);
         }
@@ -347,7 +344,7 @@ impl OnionHttpsRuntime {
     }
 
     #[cfg(test)]
-    fn pending_len(&self) -> usize {
+    pub(crate) fn pending_len(&self) -> usize {
         self.pending
             .lock()
             .map(|pending| pending.len())
@@ -986,3 +983,5 @@ fn js_error(error: JsValue) -> Error {
 
 #[cfg(test)]
 mod tests;
+
+mod pending;

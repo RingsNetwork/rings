@@ -37,6 +37,8 @@ mod test_dht_schedule;
 mod test_chunk_e2e;
 mod test_message_handler;
 mod test_stabilization;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+mod test_stabilization_failover;
 
 const TEST_DHT_FINGER_TABLE_SIZE: usize = 8;
 const TEST_WAIT_TIMEOUT: Duration = Duration::from_secs(5);

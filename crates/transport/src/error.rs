@@ -52,6 +52,10 @@ pub enum Error {
     #[error("Message was not delivered: {0}")]
     MessageNotDelivered(String),
 
+    /// The higher-level authorization was revoked before backend send admission.
+    #[error("Send permit was revoked before transport send admission")]
+    SendPermitRevoked,
+
     /// WebRTC local SDP generation error: {0}
     #[error("WebRTC local SDP generation error: {0}")]
     WebrtcLocalSdpGenerationError(String),

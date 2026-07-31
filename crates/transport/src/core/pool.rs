@@ -12,6 +12,7 @@ use std::sync::RwLock;
 
 use async_trait::async_trait;
 
+use crate::core::transport::SendPermit;
 use crate::error::Error;
 use crate::error::Result;
 
@@ -125,15 +126,12 @@ pub trait MessageSenderPool<T>: RoundRobin<T> {
     /// with a wide variety of message types, making the pool versatile and adaptable to different
     /// communication needs and protocols.
     type Message;
-    /// Asynchronously sends a message using one of the resources in the pool.
-    ///
-    /// A generic method accommodating different message types, facilitating their transmission
-    /// through the pool's resources selected in a round-robin manner. It underscores the pool's
-    /// versatility in handling diverse communication scenarios.
-    ///
-    /// Returns a [crate::delivery::DeliveryFuture] resolving to whether the
-    /// message was eventually flushed to the wire or lost.
-    async fn send(&self, msg: Self::Message) -> Result<crate::delivery::DeliveryFuture>;
+    /// Send only if `permit` holds after any pool-local serialization lock is acquired.
+    async fn send_with_permit(
+        &self,
+        msg: Self::Message,
+        permit: SendPermit,
+    ) -> Result<crate::delivery::DeliveryFuture>;
 }
 
 /// A trait for assessing the readiness of all resources in a pool.

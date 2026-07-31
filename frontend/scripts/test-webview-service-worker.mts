@@ -1,158 +1,43 @@
 #!/usr/bin/env node
 
-/**
- * Runs unit checks for the Rings WebView service-worker request classifier.
- */
+/** Runs unit checks for the Rings WebView service-worker request classifier. */
 
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import vm from "node:vm";
+import { MessageChannel } from "node:worker_threads";
 
-/**
- * Minimal request shape consumed by the service worker's request-kind classifier.
- */
-type RequestKindFixture = {
-  readonly headers: Headers;
-  readonly mode: string;
-  readonly destination: string;
-};
-
-/**
- * Options used to build one request-kind fixture.
- */
-type RequestKindFixtureOptions = {
-  readonly headers?: HeadersInit;
-  readonly mode?: string;
-  readonly destination?: string;
-};
-
-/**
- * Service-worker symbols exported only inside this test VM.
- */
-type ServiceWorkerTestApi = {
-  readonly controlledNavigationBody: (
-    request: { readonly kind: string; readonly topLevelNavigation?: boolean },
-    status: number,
-    headers: Headers,
-    body: Uint8Array | null,
-  ) => Uint8Array | null;
-  readonly emitDebug: (
-    scope: string,
-    message: string,
-    level?: string,
-    resource?: unknown,
-    at?: string,
-    onion?: unknown,
-  ) => Promise<void>;
-  readonly gatewayFailureDocument: (status: number, message: string, reason: string, code: string) => string;
-  readonly gatewayHostClient: () => Promise<ServiceWorkerClientFixture | undefined>;
-  readonly rememberNavigationClientTarget: (
-    event: ServiceWorkerNavigationEventFixture,
-    request: ServiceWorkerNavigationRequestFixture,
-  ) => boolean;
-  readonly rememberClientSourceTargetForTest: (clientId: string, sourceTarget: string) => boolean;
-  readonly rememberTrustedShellClientForTest: (clientId: string) => boolean;
-  readonly registerDebugClient: (clientId: string, capability?: string) => Promise<boolean>;
-  readonly registerGatewayHostClient: (clientId: string, capability: string) => Promise<boolean>;
-  readonly resetGatewayHostForTest: () => void;
-  readonly requestKind: (request: RequestKindFixture) => string;
-  readonly sourceTargetForClient: (clientId: string | undefined) => Promise<string | undefined>;
-};
-
-/**
- * Minimal Client shape consumed by gateway host registration.
- */
-type ServiceWorkerClientFixture = {
-  readonly id: string;
-  readonly url: string;
-  readonly frameType: "auxiliary" | "top-level" | "nested" | "none";
-  readonly postMessage: (message: unknown) => void;
-};
-
-/**
- * Minimal FetchEvent client identity shape used by navigation source-target tests.
- */
-type ServiceWorkerNavigationEventFixture = {
-  readonly clientId?: string;
-  readonly resultingClientId?: string;
-};
-
-/**
- * Minimal serialized navigation request shape consumed by source-target tracking.
- */
-type ServiceWorkerNavigationRequestFixture = {
-  readonly kind: string;
-  readonly requested: string;
-  readonly topLevelNavigation?: boolean;
-};
-
-/**
- * Minimal message event shape used to drive the service worker registration handlers.
- */
-type ServiceWorkerMessageEventFixture = {
-  readonly source?: { readonly id?: string };
-  readonly data?: unknown;
-  readonly ports?: Array<{ postMessage: (message: unknown) => void }>;
-  waitUntil?: (promise: Promise<unknown>) => void;
-};
-
-/**
- * VM global shape needed to load the service worker without a browser.
- */
-type ServiceWorkerTestContext = Record<string, unknown> & {
-  self: {
-    readonly location: URL;
-    addEventListener: (type: string, listener: (event: ServiceWorkerMessageEventFixture) => void) => void;
-    clients: {
-      get: (clientId: string) => Promise<ServiceWorkerClientFixture | undefined>;
-      matchAll: () => Promise<ServiceWorkerClientFixture[]>;
-    };
-  };
-  __ringsWebviewServiceWorkerTest?: ServiceWorkerTestApi;
-};
-
-/**
- * Minimal host-asset message event shape used to validate opener handoff.
- */
-type HostAssetMessageEventFixture = {
-  readonly data?: unknown;
-  readonly origin: string;
-  readonly source?: {
-    readonly location: {
-      readonly href: string;
-    };
-  };
-  readonly ports?: Array<{ postMessage: (message: unknown) => void }>;
-};
-
-/**
- * VM global shape needed to load the host asset without a browser.
- */
-type HostAssetTestContext = Record<string, unknown> & {
-  readonly location: URL;
-  readonly navigator: {
-    readonly serviceWorker: {
-      readonly addEventListener: (type: string, listener: (event: unknown) => void) => void;
-    };
-  };
-  readonly crypto: {
-    readonly getRandomValues: (values: Uint8Array) => Uint8Array;
-  };
-  readonly addEventListener: (type: string, listener: (event: HostAssetMessageEventFixture) => void) => void;
-};
+import { verifyWebviewHostAsset } from "./test-webview-host.mjs";
+import {
+  assertJsonEqual,
+  bytes,
+  captureTimeoutCallbacks,
+  frontendProjectRoot,
+  gatewayFetchEvent,
+  request,
+  runtimeGatewayFetchEvent,
+  type ServiceWorkerClientFixture,
+  type ServiceWorkerMessageEventFixture,
+  type ServiceWorkerTestContext,
+  text,
+} from "./webview-service-worker-fixtures.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const projectRoot = frontendProjectRoot(scriptDir);
 const hostAssetPath = resolve(projectRoot, "assets", "webview-host.js");
+const workerResponseAssetPath = resolve(projectRoot, "assets", "webview-worker-response.js");
 const serviceWorkerPath = resolve(projectRoot, "rings-webview-service-worker.js");
 const hostAssetSource = await readFile(hostAssetPath, "utf8");
+const workerResponseAssetSource = await readFile(workerResponseAssetPath, "utf8");
 const serviceWorkerSource = await readFile(serviceWorkerPath, "utf8");
 const clientsById = new Map<string, ServiceWorkerClientFixture>();
 const messageListeners: Array<(event: ServiceWorkerMessageEventFixture) => void> = [];
-const context: ServiceWorkerTestContext = {
+let context: ServiceWorkerTestContext;
+context = {
   console,
+  AbortController,
   Headers,
   ArrayBuffer,
   URL,
@@ -160,9 +45,18 @@ const context: ServiceWorkerTestContext = {
   TextEncoder,
   Response,
   Uint8Array,
+  MessageChannel,
   performance,
   setTimeout,
   clearTimeout,
+  importScripts(...urls) {
+    for (const url of urls) {
+      assert.equal(new URL(url, "http://127.0.0.1:8080/").pathname, "/assets/webview-worker-response.js");
+      vm.runInContext(workerResponseAssetSource, context, {
+        filename: workerResponseAssetPath,
+      });
+    }
+  },
   self: {
     location: new URL("http://127.0.0.1:8080/"),
     addEventListener(type, listener) {
@@ -178,9 +72,10 @@ const context: ServiceWorkerTestContext = {
 };
 const globalThisKey = "globalThis";
 context[globalThisKey] = context;
+vm.createContext(context);
 
-vm.runInNewContext(
-  `${serviceWorkerSource}\nglobalThis.__ringsWebviewServiceWorkerTest = { controlledNavigationBody, emitDebug, gatewayFailureDocument, gatewayHostClient, rememberNavigationClientTarget, rememberClientSourceTargetForTest, rememberTrustedShellClientForTest, registerDebugClient, registerGatewayHostClient, resetGatewayHostForTest, requestKind, sourceTargetForClient };`,
+vm.runInContext(
+  `${serviceWorkerSource}\nglobalThis.__ringsWebviewServiceWorkerTest = { controlledNavigationBody, emitDebug, gatewayFailureDocument, gatewayHostClient, handleGatewayFetch, handleGatewayFetchWithTimeout, rememberNavigationClientTarget, rememberClientSourceTargetForTest, rememberTrustedShellClientForTest, registerDebugClient, registerGatewayHostClient, requestGatewayResponse, resetGatewayHostForTest, requestKind, sourceTargetForClient };`,
   context,
   {
     filename: serviceWorkerPath,
@@ -194,59 +89,18 @@ const {
   emitDebug,
   gatewayFailureDocument,
   gatewayHostClient,
+  handleGatewayFetch,
+  handleGatewayFetchWithTimeout,
   rememberNavigationClientTarget,
   rememberClientSourceTargetForTest,
   rememberTrustedShellClientForTest,
   registerDebugClient,
   registerGatewayHostClient,
+  requestGatewayResponse,
   resetGatewayHostForTest,
   requestKind,
   sourceTargetForClient,
 } = serviceWorkerApi;
-
-/**
- * Resolves the frontend project root from either source or generated script paths.
- */
-function frontendProjectRoot(currentScriptDir: string): string {
-  const parentDir = dirname(currentScriptDir);
-  if (parentDir.endsWith("/.generated")) {
-    return resolve(parentDir, "..");
-  }
-  return resolve(currentScriptDir, "..");
-}
-
-/**
- * Builds the minimum request object needed by `requestKind`.
- */
-function request(options: RequestKindFixtureOptions = {}): RequestKindFixture {
-  return {
-    headers: new Headers(options.headers),
-    mode: options.mode ?? "cors",
-    destination: options.destination ?? "",
-  };
-}
-
-/**
- * Encodes one UTF-8 body for service-worker response mutation tests.
- */
-function bytes(value: string): Uint8Array {
-  return new TextEncoder().encode(value);
-}
-
-/**
- * Decodes one UTF-8 body produced by the service worker.
- */
-function text(value: Uint8Array | null): string {
-  assert(value, "expected response body bytes");
-  return new TextDecoder().decode(value);
-}
-
-/**
- * Compares service-worker responses after crossing the VM realm boundary.
- */
-function assertJsonEqual(actual: unknown, expected: unknown): void {
-  assert.equal(JSON.stringify(actual), JSON.stringify(expected));
-}
 
 /**
  * Runs the injected history guard in a small browser-like VM.
@@ -318,81 +172,7 @@ async function dispatchMessage(clientId: string, data: unknown): Promise<unknown
   return responses;
 }
 
-/**
- * Sends one synthetic opener handoff request into the host asset VM.
- */
-function requestHostDebugCapability(sourceUrl: string, origin = "http://127.0.0.1:8080"): unknown[] {
-  const listeners: Array<(event: HostAssetMessageEventFixture) => void> = [];
-  const context: HostAssetTestContext = {
-    console,
-    URL,
-    Uint8Array,
-    clearTimeout,
-    setTimeout,
-    location: new URL("http://127.0.0.1:8080/#node"),
-    navigator: {
-      serviceWorker: {
-        addEventListener() {},
-      },
-    },
-    crypto: {
-      getRandomValues(values) {
-        values.fill(0x7b);
-        return values;
-      },
-    },
-    addEventListener(type, listener) {
-      if (type === "message") {
-        listeners.push(listener);
-      }
-    },
-  };
-  context[globalThisKey] = context;
-  vm.runInNewContext(hostAssetSource, context, {
-    filename: hostAssetPath,
-  });
-
-  const responses: unknown[] = [];
-  for (const listener of listeners) {
-    listener({
-      data: { type: "rings-webview-debug-capability-request" },
-      origin,
-      source: {
-        location: {
-          href: sourceUrl,
-        },
-      },
-      ports: [
-        {
-          postMessage(message) {
-            responses.push(message);
-          },
-        },
-      ],
-    });
-  }
-  return responses;
-}
-
-{
-  const trustedResponses = requestHostDebugCapability("http://127.0.0.1:8080/#webview");
-  assert.equal(trustedResponses.length, 1);
-  const response = trustedResponses[0] as {
-    readonly capability?: string;
-    readonly ok?: boolean;
-    readonly type?: string;
-  };
-  assert.equal(response.type, "rings-webview-debug-capability-response");
-  assert.equal(response.ok, true);
-  assert.equal(response.capability?.length, 64);
-
-  assertJsonEqual(requestHostDebugCapability("http://127.0.0.1:8080/webview/https%3A%2F%2Fexample.test%2F"), [
-    { type: "rings-webview-debug-capability-response", ok: false },
-  ]);
-  assertJsonEqual(requestHostDebugCapability("https://attacker.example/#webview", "https://attacker.example"), [
-    { type: "rings-webview-debug-capability-response", ok: false },
-  ]);
-}
+await verifyWebviewHostAsset(hostAssetSource, hostAssetPath);
 
 assert.equal(requestKind(request({ mode: "navigate", destination: "document" })), "navigation");
 assert.equal(requestKind(request({ destination: "style" })), "subresource");
@@ -576,6 +356,235 @@ assert.throws(
   assert.doesNotMatch(html, /<h1\b/i);
   assert.doesNotMatch(html, /<main\b/i);
   assert.doesNotMatch(html, /<p\b/i);
+}
+
+{
+  resetGatewayHostForTest();
+  clientsById.clear();
+  const hostCapability = "h".repeat(32);
+  const hostRequests: unknown[] = [];
+  clientsById.set("host", {
+    id: "host",
+    url: "http://127.0.0.1:8080/#node",
+    frameType: "top-level",
+    postMessage(message, transfer) {
+      hostRequests.push(message);
+      const reply = transfer?.[0] as { postMessage?: (response: unknown) => void } | undefined;
+      reply?.postMessage?.({
+        ok: true,
+        status: 200,
+        headers: [{ name: "content-type", value: "text/html" }],
+        body: bytes("<!doctype html><html><head><title>OK</title></head><body>ok</body></html>"),
+      });
+    },
+  });
+  clientsById.set("hung-debug", {
+    id: "hung-debug",
+    url: "http://127.0.0.1:8080/#webview",
+    frameType: "auxiliary",
+    postMessage() {},
+  });
+  assert.equal(await registerGatewayHostClient("host", hostCapability), true);
+  assert.equal(rememberTrustedShellClientForTest("hung-debug"), true);
+  assert.equal(await registerDebugClient("hung-debug", hostCapability), true);
+
+  const originalGet = context.self.clients.get;
+  context.self.clients.get = (clientId) => {
+    if (clientId === "hung-debug") {
+      return new Promise<ServiceWorkerClientFixture | undefined>(() => {});
+    }
+    return originalGet(clientId);
+  };
+  try {
+    const response = await handleGatewayFetch(gatewayFetchEvent("https://example.test/"), 700, performance.now());
+    assert.equal(response.status, 200);
+    assert.equal(hostRequests.length, 1);
+    const html = await response.text();
+    assert.match(html, /data-rings-webview-history-guard/);
+    assert.match(html, /\/assets\/webview-overlay\.js/);
+  } finally {
+    context.self.clients.get = originalGet;
+  }
+}
+
+{
+  const timers = captureTimeoutCallbacks(context);
+  const messages: unknown[] = [];
+  const host: ServiceWorkerClientFixture = {
+    id: "host",
+    url: "http://127.0.0.1:8080/#node",
+    frameType: "top-level",
+    postMessage(message) {
+      messages.push(message);
+    },
+  };
+  try {
+    const responsePromise = requestGatewayResponse(host, { kind: "navigation", method: "GET" }, 702);
+    assertJsonEqual(messages, [
+      {
+        type: "rings-webview-gateway-request",
+        requestId: 702,
+        request: { kind: "navigation", method: "GET" },
+      },
+    ]);
+    const timeoutCallback = timers.callbacks[0];
+    assert(timeoutCallback, "gateway response timeout was not scheduled");
+    timeoutCallback();
+    const response = await responsePromise;
+    assert.equal(response.status, 504);
+    assert.equal(response.errorCode, "local_gateway_timeout");
+    assertJsonEqual(messages[1], {
+      type: "rings-webview-gateway-cancel",
+      requestId: 702,
+    });
+  } finally {
+    timers.restore();
+  }
+}
+
+{
+  resetGatewayHostForTest();
+  clientsById.clear();
+  const timers = captureTimeoutCallbacks(context);
+  const hostMessages: unknown[] = [];
+  const hostCapability = "u".repeat(32);
+  clientsById.set("host", {
+    id: "host",
+    url: "http://127.0.0.1:8080/#node",
+    frameType: "top-level",
+    postMessage(message) {
+      hostMessages.push(message);
+    },
+  });
+  assert.equal(await registerGatewayHostClient("host", hostCapability), true);
+  try {
+    const responsePromise = handleGatewayFetchWithTimeout(gatewayFetchEvent("https://dispatched-timeout.example/"));
+    while (hostMessages.length === 0) {
+      await Promise.resolve();
+    }
+    assert.equal(timers.callbacks.length, 2);
+    const deadline = timers.callbacks[0];
+    assert(deadline, "Service Worker deadline was not scheduled");
+    deadline();
+    const response = await responsePromise;
+    assert.equal(response.status, 504);
+    assertJsonEqual(
+      hostMessages.map((message) => (message as { readonly type?: string }).type),
+      ["rings-webview-gateway-request", "rings-webview-gateway-cancel"],
+    );
+  } finally {
+    timers.restore();
+  }
+}
+
+{
+  resetGatewayHostForTest();
+  clientsById.clear();
+  const hostCapability = "r".repeat(32);
+  const longTarget = `https://example.test/async/hpba?payload=${"x".repeat(10_000)}`;
+  const hostRequests: unknown[] = [];
+  clientsById.set("host", {
+    id: "host",
+    url: "http://127.0.0.1:8080/#node",
+    frameType: "top-level",
+    postMessage(message, transfer) {
+      hostRequests.push(message);
+      const reply = transfer?.[0] as { postMessage?: (response: unknown) => void } | undefined;
+      reply?.postMessage?.({
+        ok: true,
+        status: 204,
+        headers: [],
+        body: null,
+      });
+    },
+  });
+  clientsById.set("target-page", {
+    id: "target-page",
+    url: "http://127.0.0.1:8080/webview/https%3A%2F%2Fexample.test%2F",
+    frameType: "top-level",
+    postMessage() {},
+  });
+  assert.equal(await registerGatewayHostClient("host", hostCapability), true);
+  assert.equal(rememberClientSourceTargetForTest("target-page", "https://example.test/"), true);
+
+  const response = await handleGatewayFetch(runtimeGatewayFetchEvent(longTarget), 701, performance.now());
+  assert.equal(response.status, 204);
+  assert.equal(hostRequests.length, 1);
+  const requestMessage = hostRequests[0] as {
+    readonly request?: {
+      readonly body?: ArrayBuffer;
+      readonly credentials?: string;
+      readonly headers?: Array<{ readonly name: string; readonly value: string }>;
+      readonly kind?: string;
+      readonly method?: string;
+      readonly requested?: string;
+      readonly sourceTarget?: string;
+    };
+  };
+  const request = requestMessage.request;
+  assert(request, "host did not receive a gateway request");
+  assert.equal(request.requested, `http://127.0.0.1:8080/webview/${encodeURIComponent(longTarget)}`);
+  assert.equal(request.sourceTarget, "https://example.test/");
+  assert.equal(request.kind, "xhr");
+  assert.equal(request.method, "POST");
+  assert.equal(request.credentials, "include");
+  assertJsonEqual(request.headers, [{ name: "x-target-header", value: "kept" }]);
+  assert.equal(new TextDecoder().decode(request.body), "runtime body");
+}
+
+{
+  resetGatewayHostForTest();
+  clientsById.clear();
+  const timers = captureTimeoutCallbacks(context);
+  const hostMessages: unknown[] = [];
+  const hostCapability = "t".repeat(32);
+  clientsById.set("host", {
+    id: "host",
+    url: "http://127.0.0.1:8080/#node",
+    frameType: "top-level",
+    postMessage(message) {
+      hostMessages.push(message);
+    },
+  });
+  clientsById.set("target-page", {
+    id: "target-page",
+    url: "http://127.0.0.1:8080/webview/https%3A%2F%2Ftimeout.example%2F",
+    frameType: "top-level",
+    postMessage() {},
+  });
+  assert.equal(await registerGatewayHostClient("host", hostCapability), true);
+  assert.equal(rememberClientSourceTargetForTest("target-page", "https://timeout.example/"), true);
+  let resolveBody: ((body: ArrayBuffer) => void) | undefined;
+  const body = new Promise<ArrayBuffer>((resolve) => {
+    resolveBody = resolve;
+  });
+  const baseEvent = runtimeGatewayFetchEvent("https://timeout.example/search");
+  const delayedPostEvent = {
+    ...baseEvent,
+    request: {
+      ...baseEvent.request,
+      clone: () => ({
+        arrayBuffer: () => body,
+      }),
+    },
+  };
+  try {
+    const responsePromise = handleGatewayFetchWithTimeout(delayedPostEvent);
+    const timeoutCallback = timers.callbacks[0];
+    assert(timeoutCallback, "Service Worker deadline was not scheduled");
+    timeoutCallback();
+    const response = await responsePromise;
+    assert.equal(response.status, 504);
+    const html = await response.text();
+    assert.match(html, /data-rings-webview-failure-code="local_gateway_timeout"/);
+    assert(resolveBody, "delayed request body resolver was not installed");
+    resolveBody(new ArrayBuffer(0));
+    await Promise.resolve();
+    await Promise.resolve();
+    assertJsonEqual(hostMessages, []);
+  } finally {
+    timers.restore();
+  }
 }
 
 {

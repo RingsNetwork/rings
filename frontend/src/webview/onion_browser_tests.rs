@@ -28,6 +28,7 @@ use wasm_bindgen_test::wasm_bindgen_test;
 use super::WebviewHostOutcome;
 use super::WebviewHostRequest;
 use super::WebviewNode;
+use super::WebviewOnionSettings;
 use super::GATEWAY_PREFIX;
 
 const TEST_DHT_FINGER_TABLE_SIZE: usize = 8;
@@ -79,7 +80,11 @@ async fn run_browser_onion_webview_flow() -> WebviewResult<()> {
     connect_browser_providers(&client, &exit).await?;
     window_sleep(1_000).await.map_err(js_webview_error)?;
 
-    let node = WebviewNode::new(client, controlled_origin()?)?;
+    let node = WebviewNode::new(
+        client,
+        controlled_origin()?,
+        WebviewOnionSettings::new(true),
+    )?;
     let index_target = TargetUrl::parse(FIXTURE_INDEX)?;
     let index = retry_gateway_navigation(&node, &index_target).await?;
     expect_status(&index, "index navigation", 200)?;

@@ -32,6 +32,7 @@ pub(crate) struct ExtensionStartSettings {
     pub(crate) ice_servers: String,
     pub(crate) stabilize_interval: String,
     pub(crate) storage_name: String,
+    pub(crate) webview_allow_short_paths: bool,
     pub(crate) seed_url: String,
 }
 
@@ -231,6 +232,11 @@ impl ExtensionStartSettings {
             &object,
             "storageName",
             &JsValue::from_str(&self.storage_name),
+        )?;
+        js_set(
+            &object,
+            "webviewAllowShortPaths",
+            &JsValue::from_bool(self.webview_allow_short_paths),
         )?;
         js_set(&object, "seedUrl", &JsValue::from_str(&self.seed_url))?;
         Ok(object.into())

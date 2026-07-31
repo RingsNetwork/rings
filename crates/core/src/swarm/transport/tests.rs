@@ -13,8 +13,13 @@ use rings_transport::core::callback::TransportCallback;
 #[cfg(feature = "dummy")]
 use tokio::sync::Notify;
 
+use super::pending::ConnectionLifecycleRegistry;
+#[cfg(feature = "dummy")]
+use super::pending::FingerUpdateDisposition;
 use super::*;
 use crate::dht::successor::SuccessorReader;
+#[cfg(feature = "dummy")]
+use crate::dht::Chord;
 use crate::dht::VirtualNodeConfig;
 use crate::dht::DEFAULT_FINGER_TABLE_SIZE;
 use crate::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
@@ -22,7 +27,6 @@ use crate::dht::MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use crate::ecc::SecretKey;
 use crate::measure::BehaviourJudgement;
 use crate::measure::Measure;
-#[cfg(feature = "dummy")]
 use crate::message::MessagePayload;
 use crate::storage::MemStorage;
 use crate::swarm::callback::InnerSwarmCallback;
@@ -30,6 +34,13 @@ use crate::swarm::callback::SwarmCallback;
 #[cfg(feature = "dummy")]
 use crate::swarm::callback::SwarmEvent;
 use crate::swarm::SwarmBuilder;
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+mod finger;
+mod lifecycle;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+mod readiness;
+mod retirement;
 
 #[derive(Default)]
 struct RecordingMeasure {
@@ -293,9 +304,8 @@ impl SwarmCallback for BlockingEventSwarmCallback {
     }
 }
 
-fn transport_with_measure(measure: MeasureImpl) -> Result<SwarmTransport> {
-    let key = SecretKey::random();
-    let session_sk = SessionSk::new_with_seckey(&key)?;
+fn transport_with_key_and_measure(key: &SecretKey, measure: MeasureImpl) -> Result<SwarmTransport> {
+    let session_sk = SessionSk::new_with_seckey(key)?;
     let dht = Arc::new(PeerRing::new_with_storage_and_finger_table_size(
         session_sk.account_did(),
         3,
@@ -314,6 +324,10 @@ fn transport_with_measure(measure: MeasureImpl) -> Result<SwarmTransport> {
             ReassemblyLimits::production(),
         ),
     ))
+}
+
+fn transport_with_measure(measure: MeasureImpl) -> Result<SwarmTransport> {
+    transport_with_key_and_measure(&SecretKey::random(), measure)
 }
 
 #[cfg(feature = "dummy")]
@@ -377,161 +391,34 @@ fn swarm_builder_normalizes_virtual_nodes_before_protocol_advertisement() -> Res
     Ok(())
 }
 
-#[test]
-fn pending_peer_pool_is_bounded_and_rejects_duplicate_peers() -> Result<()> {
-    let mut pool = PendingPeerPool::<2>::new();
-    let now = 1_000;
-    let peer_a = SecretKey::random().address().into();
-    let peer_b = SecretKey::random().address().into();
-    let peer_c = SecretKey::random().address().into();
-
-    let attempt_a = pool.reserve(peer_a, now)?;
-    assert!(matches!(
-        pool.reserve(peer_a, now),
-        Err(Error::AlreadyConnected)
-    ));
-    let _attempt_b = pool.reserve(peer_b, now)?;
-    assert!(matches!(
-        pool.reserve(peer_c, now),
-        Err(Error::PendingConnectionCapacityExceeded { capacity: 2 })
-    ));
-    assert_eq!(pool.len(), 2);
-
-    assert!(pool.remove(attempt_a));
-    assert_eq!(pool.len(), 1);
-    assert!(pool.reserve(peer_c, now).is_ok());
-    Ok(())
-}
-
-#[test]
-fn stale_pending_callback_cannot_remove_a_replacement_attempt() -> Result<()> {
-    let mut pool = PendingPeerPool::<1>::new();
-    let now = 1_000;
-    let peer = SecretKey::random().address().into();
-
-    let old_attempt = pool.reserve(peer, now)?;
-    assert!(pool.remove(old_attempt));
-    let current_attempt = pool.reserve(peer, now)?;
-
-    assert!(!pool.remove(old_attempt));
-    assert!(pool.contains(peer));
-    assert!(pool.remove(current_attempt));
-    Ok(())
-}
-
-#[test]
-fn pending_peer_pool_expires_unopened_handshakes() -> Result<()> {
-    let mut pool = PendingPeerPool::<1>::new();
-    let now = 1_000;
-    let peer = SecretKey::random().address().into();
-    let attempt = pool.reserve(peer, now)?;
-
-    let expired = pool.expire(now + PENDING_CONNECTION_TIMEOUT_MS);
-    assert_eq!(expired.len(), 1);
-    assert_eq!(expired[0].attempt, attempt);
-    assert_eq!(expired[0].age_ms, PENDING_CONNECTION_TIMEOUT_MS);
-    assert_eq!(pool.len(), 0);
-    Ok(())
-}
-
-#[tokio::test]
-async fn admitted_peer_cannot_be_replaced_by_a_pending_handshake() -> Result<()> {
-    let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
-    let peer = SecretKey::random().address().into();
-    let attempt = transport.reserve_pending_connection(peer).await?;
-
-    assert!(transport.promote_pending_connection(attempt)?);
-    assert!(matches!(
-        transport.reserve_pending_connection(peer).await,
-        Err(Error::AlreadyConnected)
-    ));
-    Ok(())
-}
-
-#[tokio::test]
-async fn pending_promotion_gap_is_covered_by_lifecycle_lock() -> Result<()> {
-    let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
-    let peer = SecretKey::random().address().into();
-    let attempt = transport.reserve_pending_connection(peer).await?;
-    let mut observed_gap = false;
-
-    assert!(
-        transport.promote_pending_connection_with_gap_observer_for_test(attempt, |transport| {
-            observed_gap = true;
-            assert!(transport.connection_lifecycle.try_lock().is_err());
-        },)?
-    );
-
-    assert!(observed_gap);
-    assert!(transport.is_admitted_connection_attempt(attempt));
-    assert!(matches!(
-        transport.reserve_pending_connection(peer).await,
-        Err(Error::AlreadyConnected)
-    ));
-    Ok(())
-}
-
-#[tokio::test]
-async fn pending_offer_is_not_routable_or_visible_to_dht() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
-    let peer = SecretKey::random().address().into();
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
-
-    let _offer = transport.prepare_connection_offer(peer, callback).await?;
-
-    assert!(transport.get_connection(peer).is_none());
-    assert_eq!(transport.pending_connection_count()?, 1);
-    assert!(!transport.dht.successors().contains(&peer)?);
-
-    transport.disconnect(peer).await?;
-    Ok(())
-}
-
 #[cfg(feature = "dummy")]
 #[tokio::test]
-async fn pending_finger_update_is_applied_when_attempt_is_admitted() -> Result<()> {
+async fn successor_failover_considers_active_peer_outside_topology_hints() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
-    let peer = SecretKey::random().address().into();
-    let finger_index = 3;
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
-    let (attempt, _offer) = transport
-        .prepare_connection_offer_with_attempt(peer, callback)
-        .await?;
+    let removed = SecretKey::random().address().into();
+    let replacement = SecretKey::random().address().into();
 
-    transport.queue_pending_finger_update(attempt, finger_index)?;
-    assert_eq!(transport.dht.lock_finger()?.get(finger_index), None);
-    open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
+    for peer in [removed, replacement] {
+        let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
+        let (attempt, _offer) = transport
+            .prepare_connection_offer_with_attempt(peer, callback)
+            .await?;
+        open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
+        assert!(transport.activate_connection_for_test(attempt)?);
+    }
+    transport.dht.join(removed)?;
+    assert_eq!(transport.dht.successors().list()?, vec![removed]);
+    assert!(!transport.dht.lock_finger()?.contains(Some(replacement)));
 
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback))
-        .with_pending_connection_attempt(attempt);
-    callback
-        .on_data_channel_open(&peer.to_string())
-        .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+    assert_eq!(
+        transport.live_successor_fallback(removed)?,
+        Some(replacement)
+    );
 
-    assert_eq!(transport.dht.lock_finger()?.get(finger_index), Some(peer));
-    assert!(transport.is_admitted_connection(peer));
-
-    transport.disconnect(peer).await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn pending_finger_update_applies_if_admission_wins_queue_race() -> Result<()> {
-    let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
-    let peer = SecretKey::random().address().into();
-    let finger_index = 4;
-    let attempt = transport.reserve_pending_connection(peer).await?;
-
-    assert!(transport.promote_pending_connection(attempt)?);
-    transport.queue_pending_finger_update(attempt, finger_index)?;
-
-    assert_eq!(transport.dht.lock_finger()?.get(finger_index), Some(peer));
-    assert!(transport.is_admitted_connection(peer));
+    transport.disconnect(removed).await?;
+    transport.disconnect(replacement).await?;
     Ok(())
 }
 
@@ -556,6 +443,7 @@ async fn data_channel_open_admits_successor_before_ice_connected() -> Result<()>
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
 
     assert!(transport.is_admitted_connection(peer));
+    assert!(transport.get_connection(peer).is_some());
     assert!(
         transport.dht.successors().contains(&peer)?,
         "opened data channel must promote the advertised peer into DHT successors"
@@ -895,7 +783,7 @@ async fn late_terminal_callback_cannot_remove_replacement_active_slot() -> Resul
     let old_attempt = transport.reserve_pending_connection(peer).await?;
     assert!(transport.retire_pending_connection(old_attempt)?);
     let current_attempt = transport.reserve_pending_connection(peer).await?;
-    assert!(transport.promote_pending_connection(current_attempt)?);
+    assert!(transport.activate_connection_for_test(current_attempt)?);
     let late_callback =
         InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback))
             .with_pending_connection_attempt(old_attempt);
@@ -952,14 +840,16 @@ fn connection_answer_protocol_mode_includes_storage_redundancy() -> Result<()> {
 async fn disconnected_observation_is_once_per_connection_epoch() -> Result<()> {
     let measure = Arc::new(RecordingMeasure::default());
     let transport = transport_with_measure(measure.clone())?;
-    let peer = SecretKey::random().address().into();
+    let peer: Did = SecretKey::random().address().into();
+    let attempt = transport.reserve_pending_connection(peer).await?;
+    assert!(transport.activate_connection_for_test(attempt)?);
 
-    transport.record_peer_disconnected(peer).await;
-    transport.record_peer_disconnected(peer).await;
+    transport.record_peer_disconnected(attempt).await;
+    transport.record_peer_disconnected(attempt).await;
     assert!(transport.peer_disconnected_since_ms(peer).is_some());
-    transport.record_peer_connected(peer).await;
+    transport.record_peer_connected(attempt).await;
     assert!(transport.peer_disconnected_since_ms(peer).is_none());
-    transport.record_peer_disconnected(peer).await;
+    transport.record_peer_disconnected(attempt).await;
     assert!(transport.peer_disconnected_since_ms(peer).is_some());
 
     assert_eq!(measure.snapshot_counters()?.as_slice(), &[
@@ -987,5 +877,24 @@ async fn dht_candidate_order_uses_peer_quality_without_dropping_candidates() -> 
 
     assert_eq!(ordered, vec![healthy, unknown, degraded]);
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn malformed_outbound_payload_is_rejected_before_connection_admission() -> Result<()> {
+    let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
+    let peer = SecretKey::random().address().into();
+    let mut payload = MessagePayload::new_send(
+        Message::custom(b"malformed outbound payload")?,
+        &transport.session_sk,
+        peer,
+        peer,
+    )?;
+    payload.transaction.data = vec![0xff];
+
+    assert!(matches!(
+        transport.send_payload(payload).await,
+        Err(Error::BincodeDeserialize(_))
+    ));
     Ok(())
 }

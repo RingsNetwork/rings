@@ -1,6 +1,8 @@
 //! Control sidebar, settings dialog, and shell UI.
 
+use wasm_bindgen::JsCast;
 use web_sys::Event;
+use web_sys::HtmlInputElement;
 use web_sys::MouseEvent;
 use yew::prelude::*;
 
@@ -177,6 +179,7 @@ pub(crate) struct ControlView<'a> {
     pub(crate) ice_servers: &'a UseStateHandle<String>,
     pub(crate) stabilize_interval: &'a UseStateHandle<String>,
     pub(crate) storage_name: &'a UseStateHandle<String>,
+    pub(crate) webview_allow_short_paths: &'a UseStateHandle<bool>,
     pub(crate) seed_url: &'a UseStateHandle<String>,
 }
 
@@ -187,11 +190,15 @@ pub(crate) struct SessionView<'a> {
 }
 
 /// Render the Node-only entry point for the controlled browser WebView.
-pub(crate) fn webview_control(ready: bool, on_open: Callback<MouseEvent>) -> Html {
+pub(crate) fn webview_control(
+    ready: bool,
+    unavailable_reason: String,
+    on_open: Callback<MouseEvent>,
+) -> Html {
     let title = if ready {
-        "Open WebView"
+        "Open WebView".to_string()
     } else {
-        "WebView is available after the local node gateway is ready"
+        unavailable_reason
     };
     html! {
         <button
@@ -218,6 +225,7 @@ struct SettingsDialogView<'a> {
     ice_servers: &'a UseStateHandle<String>,
     stabilize_interval: &'a UseStateHandle<String>,
     storage_name: &'a UseStateHandle<String>,
+    webview_allow_short_paths: &'a UseStateHandle<bool>,
     seed_url: &'a UseStateHandle<String>,
     status: &'a UseStateHandle<String>,
     did_value: String,
@@ -346,6 +354,7 @@ fn settings_dialog(view: SettingsDialogView<'_>) -> Html {
                                     view.ice_servers,
                                     view.stabilize_interval,
                                     view.storage_name,
+                                    view.webview_allow_short_paths,
                                     view.seed_url,
                                     view.status,
                                 ) }
@@ -671,6 +680,7 @@ fn settings_controls(
     ice_servers: &UseStateHandle<String>,
     stabilize_interval: &UseStateHandle<String>,
     storage_name: &UseStateHandle<String>,
+    webview_allow_short_paths: &UseStateHandle<bool>,
     seed_url: &UseStateHandle<String>,
     status: &UseStateHandle<String>,
 ) -> Html {
@@ -681,8 +691,29 @@ fn settings_controls(
             { text_input("ICE servers", ice_servers.clone()) }
             { text_input("Stabilize interval seconds", stabilize_interval.clone()) }
             { text_input("IndexedDB storage", storage_name.clone()) }
+            { webview_short_paths_control(webview_allow_short_paths.clone()) }
             { webrtc_debug_controls(status) }
         </>
+    }
+}
+
+fn webview_short_paths_control(state: UseStateHandle<bool>) -> Html {
+    let onchange = {
+        let state = state.clone();
+        Callback::from(move |event: Event| {
+            if let Some(input) = event
+                .target()
+                .and_then(|target| target.dyn_into::<HtmlInputElement>().ok())
+            {
+                state.set(input.checked());
+            }
+        })
+    };
+    html! {
+        <label class="field checkbox-field">
+            <span>{ "Allow short WebView onion paths" }</span>
+            <input type="checkbox" checked={*state} {onchange} />
+        </label>
     }
 }
 

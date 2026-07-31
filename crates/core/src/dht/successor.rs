@@ -47,7 +47,8 @@ pub trait SuccessorReader {
 }
 
 /// Interface for writing to a `SuccessorSeq`
-pub trait SuccessorWriter {
+#[cfg(test)]
+pub(crate) trait SuccessorWriter {
     /// Update a successor in the sequence
     fn update(&self, successor: Did) -> Result<Option<Did>>;
     /// Extend the sequence with a list of successors
@@ -81,6 +82,20 @@ impl SuccessorSeq {
     /// Maximum number of successors retained by this sequence.
     pub fn capacity(&self) -> usize {
         self.max.into()
+    }
+
+    /// Replace the complete successor state with one normalized sequence.
+    pub(crate) fn replace_state(&self, successors: &[Did]) -> Result<()> {
+        let mut next = successors.to_vec();
+        next.retain(|did| *did != self.did);
+        next.sort(self.did);
+        next.dedup();
+        next.truncate(self.max.into());
+        *self
+            .successors
+            .write()
+            .map_err(|_| Error::FailedToWriteSuccessors)? = next;
+        Ok(())
     }
 
     /// Check if a node should be inserted into the sequence.
@@ -171,6 +186,7 @@ impl SuccessorReader for SuccessorSeq {
 }
 
 /// Implementation of `SuccessorWriter` for `SuccessorSeq`
+#[cfg(test)]
 impl SuccessorWriter for SuccessorSeq {
     /// Update the successors list by adding a new successor, sorting the list, and truncating if necessary
     fn update(&self, successor: Did) -> Result<Option<Did>> {

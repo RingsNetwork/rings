@@ -16,7 +16,7 @@ typedef struct ProviderPtr {
   const void *runtime;
 } ProviderPtr;
 
-void init_logging(enum LogLevel level);
+void rings_node_init_logging(enum LogLevel level);
 
 /**
  * Start message listening and stabilization.
@@ -24,10 +24,10 @@ void init_logging(enum LogLevel level);
  * # Safety
  *
  * `provider_ptr` must point to a ProviderPtr returned by
- * `new_provider_with_callback`. Invalid provider pointers are logged and
+ * `rings_node_new_provider_with_callback`. Invalid provider pointers are logged and
  * ignored.
  */
-void listen(const struct ProviderPtr *provider_ptr);
+void rings_node_listen(const struct ProviderPtr *provider_ptr);
 
 /**
  * Request internal rpc api.
@@ -35,13 +35,13 @@ void listen(const struct ProviderPtr *provider_ptr);
  * # Safety
  *
  * `provider_ptr` must point to a ProviderPtr returned by
- * `new_provider_with_callback`; `method` and `params` must be valid
+ * `rings_node_new_provider_with_callback`; `method` and `params` must be valid
  * null-terminated UTF-8 strings. Returns NULL when request validation or
  * execution fails.
  */
-const char *request(const struct ProviderPtr *provider_ptr,
-                    const char *method,
-                    const char *params);
+const char *rings_node_request(const struct ProviderPtr *provider_ptr,
+                               const char *method,
+                               const char *params);
 
 /**
  * Craft a new Provider with signer.
@@ -52,11 +52,11 @@ const char *request(const struct ProviderPtr *provider_ptr,
  * write exactly 65 signature bytes into the provided output buffer. Returns a
  * ProviderPtr with NULL fields when provider creation fails.
  */
-struct ProviderPtr new_provider_with_callback(uint32_t network_id,
-                                              const char *ice_server,
-                                              uint64_t stabilize_interval,
-                                              const char *account,
-                                              const char *account_type,
-                                              void (*signer)(const char *, char *));
+struct ProviderPtr rings_node_new_provider_with_callback(uint32_t network_id,
+                                                         const char *ice_server,
+                                                         uint64_t stabilize_interval,
+                                                         const char *account,
+                                                         const char *account_type,
+                                                         void (*signer)(const char *, char *));
 
 #endif

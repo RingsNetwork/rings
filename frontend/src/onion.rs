@@ -5,6 +5,7 @@ use std::fmt;
 use js_sys::Array;
 use js_sys::Object;
 use js_sys::Uint8Array;
+use rings_node::onion::https::OnionHttpsClientRequest;
 use rings_node::provider::Provider;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
@@ -72,6 +73,8 @@ pub(crate) struct OnionProxyResponse {
     pub(crate) headers: Vec<(String, String)>,
     /// Exact response body bytes returned by the onion exit.
     pub(crate) body: Vec<u8>,
+    /// Actual onion route used by the request, when returned by the browser provider.
+    pub(crate) route: Option<OnionProxyRoute>,
 }
 
 /// Stable class for onion proxy failures that cross the JS promise boundary.
@@ -141,7 +144,7 @@ impl Default for OnionProxyOptions {
     fn default() -> Self {
         Self {
             hop_count: DEFAULT_HOP_COUNT,
-            allow_short_paths: true,
+            allow_short_paths: false,
         }
     }
 }
@@ -164,7 +167,7 @@ impl OnionProxyOptions {
     fn from_js(message: &JsValue) -> Result<Self, String> {
         Ok(Self {
             hop_count: optional_usize_field(message, "hopCount", DEFAULT_HOP_COUNT)?,
-            allow_short_paths: js_bool_field(message, "allowShortPaths").unwrap_or(true),
+            allow_short_paths: js_bool_field(message, "allowShortPaths").unwrap_or(false),
         })
     }
 
@@ -229,12 +232,13 @@ impl OnionProxyHttpRequest {
         Ok(object.into())
     }
 
-    fn client_request_js(&self) -> Result<JsValue, String> {
-        let object = Object::new();
-        js_set(&object, "method", &JsValue::from_str(&self.method))?;
-        js_set(&object, "headers", &headers_js(&self.headers).into())?;
-        js_set(&object, "body", &body_js(&self.body).into())?;
-        Ok(object.into())
+    fn client_request(&self) -> OnionHttpsClientRequest {
+        OnionHttpsClientRequest {
+            method: self.method.clone(),
+            path: None,
+            headers: self.headers.clone(),
+            body: self.body.clone(),
+        }
     }
 }
 
@@ -282,6 +286,7 @@ impl OnionProxyResponse {
             status: parse_status(js_prop(value, "status")?)?,
             headers: parse_headers_js(js_prop(value, "headers")?)?,
             body: parse_body_js(js_prop(value, "body")?)?,
+            route: optional_route_js(js_prop(value, "route")?)?,
         })
     }
 
@@ -295,6 +300,9 @@ impl OnionProxyResponse {
         )?;
         js_set(&object, "headers", &headers_js(&self.headers).into())?;
         js_set(&object, "body", &body_js(&self.body).into())?;
+        if let Some(route) = &self.route {
+            js_set(&object, "route", &route.to_js()?)?;
+        }
         Ok(object.into())
     }
 
@@ -372,15 +380,28 @@ pub(crate) async fn request(
                 js_error_label(error.into())
             ))
         })?;
-    let value = JsFuture::from(proxy.request(request.url.clone(), request.client_request_js()?))
+    let response = proxy
+        .request_http(request.url.as_str(), request.client_request())
         .await
         .map_err(|error| {
-            OnionProxyError::classified(format!(
-                "onion proxy request failed: {}",
-                js_error_label(error)
-            ))
+            OnionProxyError::classified(format!("onion proxy request failed: {}", error))
         })?;
-    OnionProxyResponse::from_js(&value).map_err(OnionProxyError::generic)
+    Ok(OnionProxyResponse {
+        status: response.response.status,
+        headers: response.response.headers,
+        body: response.response.body,
+        route: Some(OnionProxyRoute {
+            service: response.route.exit_service().to_string(),
+            hops: response
+                .route
+                .route
+                .hops()
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            exit: response.route.exit_did().to_string(),
+        }),
+    })
 }
 
 fn classify_onion_proxy_failure(message: &str) -> OnionProxyFailureKind {
@@ -441,6 +462,13 @@ fn optional_usize_field(
         return Err(format!("{field} is too large"));
     }
     Ok(number as usize)
+}
+
+fn optional_route_js(value: JsValue) -> Result<Option<OnionProxyRoute>, String> {
+    if value.is_null() || value.is_undefined() {
+        return Ok(None);
+    }
+    OnionProxyRoute::from_js(&value).map(Some)
 }
 
 fn required_string_field(
@@ -571,6 +599,59 @@ mod tests {
     use wasm_bindgen_test::wasm_bindgen_test;
 
     use super::target_authority;
+    use super::OnionProxyHttpRequest;
+    use super::OnionProxyOptions;
+    use super::OnionProxyRouteRequest;
+
+    #[wasm_bindgen_test]
+    fn onion_proxy_options_default_requires_full_paths() {
+        assert_eq!(OnionProxyOptions::default(), OnionProxyOptions {
+            hop_count: super::DEFAULT_HOP_COUNT,
+            allow_short_paths: false,
+        });
+    }
+
+    #[wasm_bindgen_test]
+    fn route_request_from_js_requires_explicit_short_path_opt_in() {
+        let message = Object::new();
+        assert_eq!(
+            super::js_set(&message, "url", &JsValue::from_str("https://example.com/")),
+            Ok(())
+        );
+
+        let parsed =
+            OnionProxyRouteRequest::from_js(&message.into()).map(|request| request.options);
+
+        assert_eq!(
+            parsed,
+            Ok(OnionProxyOptions {
+                hop_count: super::DEFAULT_HOP_COUNT,
+                allow_short_paths: false,
+            })
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn http_request_from_js_allows_explicit_short_path_opt_in() {
+        let message = Object::new();
+        let set_message =
+            super::js_set(&message, "url", &JsValue::from_str("https://example.com/"))
+                .and_then(|()| super::js_set(&message, "method", &JsValue::from_str("GET")))
+                .and_then(|()| super::js_set(&message, "headers", &Array::new().into()))
+                .and_then(|()| super::js_set(&message, "body", &JsValue::from_str("")))
+                .and_then(|()| super::js_set(&message, "allowShortPaths", &JsValue::TRUE));
+        assert_eq!(set_message, Ok(()));
+
+        let parsed = OnionProxyHttpRequest::from_js(&message.into()).map(|request| request.options);
+
+        assert_eq!(
+            parsed,
+            Ok(OnionProxyOptions {
+                hop_count: super::DEFAULT_HOP_COUNT,
+                allow_short_paths: true,
+            })
+        );
+    }
 
     #[wasm_bindgen_test]
     fn target_authority_adds_default_https_port() {
@@ -628,6 +709,7 @@ mod tests {
             status: 200,
             headers: vec![("content-type".to_string(), "text/plain".to_string())],
             body: b"hello through onion".to_vec(),
+            route: None,
         };
 
         let parsed = response
@@ -643,6 +725,7 @@ mod tests {
             status: 200,
             headers: vec![("content-type".to_string(), "image/png".to_string())],
             body: vec![0xff, 0x00, 0x80],
+            route: None,
         };
 
         let parsed = response

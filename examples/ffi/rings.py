@@ -139,7 +139,9 @@ def request(runtime: FfiRuntime, provider: ProviderHandle | Any, method: str, da
     provider_value = _provider_value(provider)
     c_data = runtime.ffi.new("char[]", data.encode())
     c_method = runtime.ffi.new("char[]", method.encode())
-    ret = runtime.rings.request(runtime.ffi.addressof(provider_value), c_method, c_data)
+    ret = runtime.rings.rings_node_request(
+        runtime.ffi.addressof(provider_value), c_method, c_data
+    )
     if ret == runtime.ffi.NULL:
         raise RuntimeError(f"rings request {method!r} failed")
     return runtime.ffi.string(ret)
@@ -158,9 +160,9 @@ def create_provider(
 ) -> ProviderHandle:
     # Inbound messages are routed to namespaced protocols by the extension registry;
     # the old per-variant C message callbacks have been removed.
-    runtime.rings.init_logging(runtime.rings.Debug)
+    runtime.rings.rings_node_init_logging(runtime.rings.Debug)
     signer = gen_signer(runtime.ffi, acc)
-    provider = runtime.rings.new_provider_with_callback(
+    provider = runtime.rings.rings_node_new_provider_with_callback(
         network_id,
         ice_server.encode(),
         stabilize_interval,
@@ -170,7 +172,7 @@ def create_provider(
     )
     if _provider_has_null_field(runtime, provider):
         raise RuntimeError("rings provider creation failed")
-    runtime.rings.listen(runtime.ffi.addressof(provider))
+    runtime.rings.rings_node_listen(runtime.ffi.addressof(provider))
     return ProviderHandle(provider=provider, signer=signer)
 
 

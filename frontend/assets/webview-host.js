@@ -1,8 +1,6 @@
 (() => {
-  "use strict";
-
   const gatewayPrefix = "/webview/";
-  const workerUrl = "/rings-webview-service-worker.js?gateway-host-protocol=4";
+  const workerUrl = "/rings-webview-service-worker.js?gateway-host-protocol=5";
   const debugCapabilityRequestType = "rings-webview-debug-capability-request";
   const debugCapabilityResponseType = "rings-webview-debug-capability-response";
   const gatewayHostCapability = createGatewayHostCapability();
@@ -10,6 +8,7 @@
   let registrationPromise;
   let popupDebugCapabilityPromise;
   const debugEntries = [];
+  const pendingGatewayRequests = new Map();
 
   function createGatewayHostCapability() {
     if (typeof globalThis.crypto?.getRandomValues !== "function") {
@@ -154,7 +153,11 @@
       const timeout = globalThis.setTimeout(() => finish(undefined), 500);
       channel.port1.onmessage = (event) => {
         const capability = event.data?.capability;
-        if (event.data?.type === debugCapabilityResponseType && typeof capability === "string" && capability.length >= 32) {
+        if (
+          event.data?.type === debugCapabilityResponseType &&
+          typeof capability === "string" &&
+          capability.length >= 32
+        ) {
           finish(capability);
           return;
         }
@@ -290,11 +293,34 @@
       }
       return;
     }
+    if (message?.type === "rings-webview-gateway-cancel") {
+      const requestId = message.requestId;
+      if (!Number.isSafeInteger(requestId) || requestId <= 0) {
+        return;
+      }
+      if (!pendingGatewayRequests.delete(requestId)) {
+        return;
+      }
+      globalThis.RingsWebviewGateway?.cancel?.(requestId);
+      recordDebug("host", `Cancelled timed out gateway request #${requestId}`, "warning");
+      return;
+    }
     if (message?.type !== "rings-webview-gateway-request") {
       return;
     }
     const port = event.ports?.[0];
     if (!port) {
+      return;
+    }
+    const requestId = message.requestId;
+    if (!Number.isSafeInteger(requestId) || requestId <= 0) {
+      port.postMessage({
+        ok: false,
+        status: 400,
+        errorCode: "invalid_gateway_request",
+        errorSummary: "Malformed Rings WebView gateway request.",
+        error: "gateway request id is invalid",
+      });
       return;
     }
     const handler = globalThis.RingsWebviewGateway?.handle;
@@ -309,17 +335,41 @@
       });
       return;
     }
-    recordDebug("host", `Received ${message.request.kind} ${message.request.method} request`);
-    Promise.resolve(handler(message.request))
+    const previousPort = pendingGatewayRequests.get(requestId);
+    if (previousPort) {
+      pendingGatewayRequests.delete(requestId);
+      globalThis.RingsWebviewGateway?.cancel?.(requestId);
+    }
+    pendingGatewayRequests.set(requestId, port);
+    const takePendingPort = () => {
+      if (pendingGatewayRequests.get(requestId) !== port) {
+        return false;
+      }
+      pendingGatewayRequests.delete(requestId);
+      return true;
+    };
+    recordDebug("host", `Received #${requestId} ${message.request.kind} ${message.request.method} request`);
+    Promise.resolve()
+      .then(() => handler(message.request, requestId))
       .then((response) => {
+        if (!takePendingPort()) {
+          return;
+        }
         if (response?.ok) {
-          recordDebug("host", `Returned gateway response ${response.status}`);
+          recordDebug("host", `Returned #${requestId} gateway response ${response.status}`);
         } else {
-          recordDebug("host", `Gateway response ${response?.status || 502}: ${response?.error || "unknown error"}`, "error");
+          recordDebug(
+            "host",
+            `Gateway response #${requestId} ${response?.status || 502}: ${response?.error || "unknown error"}`,
+            "error",
+          );
         }
         port.postMessage(response);
       })
       .catch((error) => {
+        if (!takePendingPort()) {
+          return;
+        }
         recordDebug("host", `Gateway handler failed: ${String(error)}`, "error");
         port.postMessage({
           ok: false,

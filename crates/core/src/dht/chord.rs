@@ -22,9 +22,11 @@ use super::storage::StorageSyncRoute;
 use super::successor::SuccessorSeq;
 use super::topology;
 use super::topology::FindSuccessorStep;
+use super::topology::SuccessorRemoval;
 use super::topology::TopologyAction;
 use super::topology::TopologyEvent;
 use super::topology::TopologyState;
+use super::topology::TopologyStep;
 use super::types::Chord;
 use super::types::ChordStorage;
 use super::types::ChordStorageCache;
@@ -34,7 +36,6 @@ use super::FingerTable;
 use crate::dht::Did;
 use crate::dht::LiveDid;
 use crate::dht::SuccessorReader;
-use crate::dht::SuccessorWriter;
 use crate::error::Error;
 use crate::error::Result;
 use crate::storage::KvStorageInterface;
@@ -59,19 +60,21 @@ pub struct PeerRing {
     /// The did of current node.
     pub did: Did,
     /// [FingerTable] help node to find successor quickly.
-    pub finger: Arc<Mutex<FingerTable>>,
+    finger: Arc<Mutex<FingerTable>>,
     /// The next node on the ring.
     /// The [SuccessorSeq] may contain multiple node dids for fault tolerance.
     /// The min did should be same as the first element in finger table.
-    pub successor_seq: SuccessorSeq,
+    successor_seq: SuccessorSeq,
     /// The did of previous node on the ring.
-    pub predecessor: Arc<Mutex<Option<Did>>>,
+    predecessor: Arc<Mutex<Option<Did>>>,
     /// Local storage for [ChordStorage].
     pub storage: EntryStorage,
     /// Local cache for [ChordStorage].
     pub cache: EntryStorage,
     /// Storage-only virtual ownership configuration.
     storage_virtual_node_config: VirtualNodeConfig,
+    /// Serializes the mutable shell around the pure topology transition.
+    topology_transition: Mutex<()>,
 }
 
 /// Type alias is just for making the code easy to read.
@@ -152,14 +155,33 @@ pub struct TopoInfo {
     pub predecessor: Option<Did>,
 }
 
+impl TopoInfo {
+    /// Retain only peers supported by the caller's current routing evidence.
+    pub(crate) fn confirmed_by(&self, mut is_routable: impl FnMut(Did) -> bool) -> Self {
+        Self {
+            successors: self
+                .successors
+                .iter()
+                .copied()
+                .filter(|peer| is_routable(*peer))
+                .collect(),
+            predecessor: self.predecessor.filter(|peer| is_routable(*peer)),
+        }
+    }
+
+    /// Return whether any reported topology position survived confirmation.
+    pub(crate) fn has_confirmed_peer(&self) -> bool {
+        self.predecessor.is_some() || !self.successors.is_empty()
+    }
+}
+
 impl TryFrom<&PeerRing> for TopoInfo {
     type Error = Error;
     fn try_from(dht: &PeerRing) -> Result<TopoInfo> {
-        let successors = dht.successors().list()?;
-        let predecessor = *dht.lock_predecessor()?;
+        let state = dht.topology_state()?;
         Ok(TopoInfo {
-            successors,
-            predecessor,
+            successors: state.successors,
+            predecessor: state.predecessor,
         })
     }
 }
@@ -261,6 +283,7 @@ impl PeerRing {
             storage,
             cache: Box::new(MemStorage::new()),
             storage_virtual_node_config: virtual_nodes,
+            topology_transition: Mutex::new(()),
             did,
         }
     }
@@ -276,26 +299,43 @@ impl PeerRing {
         self.successor_seq.clone()
     }
 
-    /// Lock and return MutexGuard of finger table.
-    pub fn lock_finger(&self) -> Result<MutexGuard<'_, FingerTable>> {
+    fn lock_finger_state(&self) -> Result<MutexGuard<'_, FingerTable>> {
         self.finger.lock().map_err(|_| Error::DHTSyncLockError)
     }
 
-    /// Lock and return MutexGuard of predecessor.
-    pub fn lock_predecessor(&self) -> Result<MutexGuard<'_, Option<Did>>> {
+    fn lock_predecessor_state(&self) -> Result<MutexGuard<'_, Option<Did>>> {
         self.predecessor.lock().map_err(|_| Error::DHTSyncLockError)
     }
 
-    /// Remove a node from finger table.
-    /// Also remove it from successor sequence.
-    /// If successor_seq become empty, try setting the closest node to it.
+    #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
+    pub(crate) fn lock_finger(&self) -> Result<MutexGuard<'_, FingerTable>> {
+        self.lock_finger_state()
+    }
+
+    #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
+    pub(crate) fn lock_predecessor(&self) -> Result<MutexGuard<'_, Option<Did>>> {
+        self.lock_predecessor_state()
+    }
+
+    /// Remove a node from finger, predecessor, and successor state.
     pub fn remove(&self, did: Did) -> Result<()> {
-        let next = topology::step(
-            &self.topology_state()?,
-            TopologyEvent::Remove { peer: did },
-            self.successors().capacity(),
-        );
-        self.interpret_topology_state(&next.state)
+        self.remove_with_successor_evidence(did, SuccessorRemoval::Preserve)
+    }
+
+    /// Remove an unavailable node using transport-validated successor evidence.
+    ///
+    /// Post: validated replacements become the complete successor list; an
+    /// unavailable head leaves no unverified successor claim behind.
+    pub(crate) fn remove_unavailable(&self, did: Did, replacements: Vec<Did>) -> Result<()> {
+        self.remove_with_successor_evidence(did, SuccessorRemoval::ReplaceWith(replacements))
+    }
+
+    fn remove_with_successor_evidence(&self, did: Did, successor: SuccessorRemoval) -> Result<()> {
+        self.transition_topology(TopologyEvent::Remove {
+            peer: did,
+            successor,
+        })
+        .map(|_| ())
     }
 
     /// Calculate bias of the Did on the ring.
@@ -303,12 +343,35 @@ impl PeerRing {
         BiasId::new(self.did, did)
     }
 
-    pub(super) fn topology_state(&self) -> Result<TopologyState> {
-        let finger = self.lock_finger()?;
+    pub(crate) fn topology_state(&self) -> Result<TopologyState> {
+        self.with_topology_state(Clone::clone)
+    }
+
+    /// Evaluate a pure observation while no topology transition can cross it.
+    ///
+    /// The supplied state is a value snapshot. The transition lock remains
+    /// held through `observe`, so a caller may linearize another synchronous
+    /// predicate against exactly that topology state.
+    pub(crate) fn with_topology_state<T>(
+        &self,
+        observe: impl FnOnce(&TopologyState) -> T,
+    ) -> Result<T> {
+        let _transition = self
+            .topology_transition
+            .lock()
+            .map_err(|_| Error::DHTSyncLockError)?;
+        let state = self.topology_state_unlocked()?;
+        Ok(observe(&state))
+    }
+
+    fn topology_state_unlocked(&self) -> Result<TopologyState> {
+        let successors = self.successor_seq.list()?;
+        let predecessor = *self.lock_predecessor_state()?;
+        let finger = self.lock_finger_state()?;
         Ok(TopologyState::new(
             self.did,
-            self.successors().list()?,
-            *self.lock_predecessor()?,
+            successors,
+            predecessor,
             finger.list().clone(),
             finger.fix_finger_index(),
         ))
@@ -318,15 +381,33 @@ impl PeerRing {
         self.storage_virtual_node_config
     }
 
-    fn interpret_topology_state(&self, next: &TopologyState) -> Result<()> {
-        let successors = self.successors();
-        for did in successors.list()? {
-            successors.remove(did)?;
-        }
-        successors.extend(&next.successors)?;
-        *self.lock_predecessor()? = next.predecessor;
-        self.lock_finger()?
-            .replace_state(&next.fingers, next.fix_finger_index);
+    fn transition_topology(&self, event: TopologyEvent) -> Result<TopologyStep> {
+        self.transition_topology_with_observer(event, |_| {})
+    }
+
+    fn transition_topology_with_observer(
+        &self,
+        event: TopologyEvent,
+        observe_snapshot: impl FnOnce(&TopologyState),
+    ) -> Result<TopologyStep> {
+        let _transition = self
+            .topology_transition
+            .lock()
+            .map_err(|_| Error::DHTSyncLockError)?;
+        let current = self.topology_state_unlocked()?;
+        observe_snapshot(&current);
+        let next = topology::step(&current, event, self.successor_seq.capacity());
+        self.interpret_topology_state_unlocked(&next.state)?;
+        Ok(next)
+    }
+
+    fn interpret_topology_state_unlocked(&self, next: &TopologyState) -> Result<()> {
+        // Acquire every fallible component guard before mutating any component.
+        let mut predecessor = self.lock_predecessor_state()?;
+        let mut finger = self.lock_finger_state()?;
+        self.successor_seq.replace_state(&next.successors)?;
+        *predecessor = next.predecessor;
+        finger.replace_state(&next.fingers, next.fix_finger_index);
         Ok(())
     }
 
@@ -370,12 +451,21 @@ impl PeerRing {
 
     /// Apply a reported finger successor through the pure topology transition.
     pub(crate) fn apply_fixed_finger(&self, index: usize, successor: Did) -> Result<()> {
-        let next = topology::step(
-            &self.topology_state()?,
-            TopologyEvent::ApplyFinger { index, successor },
-            self.successors().capacity(),
-        );
-        self.interpret_topology_state(&next.state)
+        self.transition_topology(TopologyEvent::ApplyFinger { index, successor })
+            .map(|_| ())
+    }
+
+    /// Atomically admit one transport-validated peer into every local topology projection.
+    pub(crate) fn admit_connected(
+        &self,
+        peer: Did,
+        fixed_fingers: Vec<usize>,
+    ) -> Result<PeerRingAction> {
+        let next = self.transition_topology(TopologyEvent::Admit {
+            peer,
+            fixed_fingers,
+        })?;
+        Ok(self.topology_multi_actions(next.actions))
     }
 
     /// Join an incoming replicated entry delta into local storage.
@@ -405,12 +495,7 @@ impl Chord<PeerRingAction> for PeerRing {
     /// The caller will send it to the node identified by `did`, and let the node find
     /// the successor of current node and make current node connect to that successor.
     fn join(&self, did: Did) -> Result<PeerRingAction> {
-        let next = topology::step(
-            &self.topology_state()?,
-            TopologyEvent::Join { peer: did },
-            self.successors().capacity(),
-        );
-        self.interpret_topology_state(&next.state)?;
+        let next = self.transition_topology(TopologyEvent::Join { peer: did })?;
         Ok(self.topology_leaf_actions(next.actions))
     }
 
@@ -448,15 +533,10 @@ impl Chord<PeerRingAction> for PeerRing {
     /// If that node is closer to current node or current node has no predecessor, set it to the did.
     /// This method will return current predecessor after setting.
     fn notify(&self, did: Did) -> Result<Did> {
-        let next = topology::step(
-            &self.topology_state()?,
-            TopologyEvent::Notify { predecessor: did },
-            self.successors().capacity(),
-        );
+        let next = self.transition_topology(TopologyEvent::Notify { predecessor: did })?;
         let Some(predecessor) = next.state.predecessor else {
             return Err(Error::PeerRingInvalidAction);
         };
-        self.interpret_topology_state(&next.state)?;
         Ok(predecessor)
     }
 
@@ -464,12 +544,7 @@ impl Chord<PeerRingAction> for PeerRing {
     /// According to the paper, this method should be called periodically.
     /// According to the paper, only one finger should be fixed at a time.
     fn fix_fingers(&self) -> Result<PeerRingAction> {
-        let next = topology::step(
-            &self.topology_state()?,
-            TopologyEvent::FixFinger,
-            self.successors().capacity(),
-        );
-        self.interpret_topology_state(&next.state)?;
+        let next = self.transition_topology(TopologyEvent::FixFinger)?;
         Ok(self.topology_leaf_actions(next.actions))
     }
 }
@@ -670,14 +745,9 @@ impl CorrectChord<PeerRingAction> for PeerRing {
                 RemoteAction::TryConnect,
             ));
         }
-        let next = topology::step(
-            &self.topology_state()?,
-            TopologyEvent::UpdateSuccessor {
-                successor: did.into(),
-            },
-            self.successors().capacity(),
-        );
-        self.interpret_topology_state(&next.state)?;
+        let next = self.transition_topology(TopologyEvent::UpdateSuccessor {
+            successor: did.into(),
+        })?;
         Ok(self.topology_leaf_actions(next.actions))
     }
 
@@ -700,15 +770,7 @@ impl CorrectChord<PeerRingAction> for PeerRing {
         if !is_live {
             return Ok(PeerRingAction::None);
         }
-        let mut ret: Vec<PeerRingAction> = vec![];
-        let succ_act = self.update_successor(did.clone()).await?;
-        if succ_act.is_remote() {
-            ret.push(succ_act)
-        }
-        let join_act = self.join(did.into())?;
-        ret.push(join_act);
-
-        Ok(PeerRingAction::MultiActions(ret))
+        self.admit_connected(did.into(), Vec::new())
     }
 
     /// HMCC/Zave Rectify operation.
@@ -724,12 +786,8 @@ impl CorrectChord<PeerRingAction> for PeerRing {
         // unchanged. Delegating to Chord::notify is exactly this predecessor
         // choice rule; Rectify discards the returned predecessor because it
         // emits no follow-up action.
-        let next = topology::step(
-            &self.topology_state()?,
-            TopologyEvent::Notify { predecessor: pred },
-            self.successors().capacity(),
-        );
-        self.interpret_topology_state(&next.state)
+        self.transition_topology(TopologyEvent::Notify { predecessor: pred })
+            .map(|_| ())
     }
 
     /// Pre-Stabilize Operation:
@@ -755,15 +813,10 @@ impl CorrectChord<PeerRingAction> for PeerRing {
     /// query check; the remote successor list contributes `but_last`; and notify
     /// is emitted for the post-update head when that head is not self.
     fn stabilize(&self, info: TopoInfo) -> Result<PeerRingAction> {
-        let next = topology::step(
-            &self.topology_state()?,
-            TopologyEvent::Stabilize {
-                successors: info.successors,
-                predecessor: info.predecessor,
-            },
-            self.successors().capacity(),
-        );
-        self.interpret_topology_state(&next.state)?;
+        let next = self.transition_topology(TopologyEvent::Stabilize {
+            successors: info.successors,
+            predecessor: info.predecessor,
+        })?;
         Ok(self.topology_multi_actions(next.actions))
     }
 

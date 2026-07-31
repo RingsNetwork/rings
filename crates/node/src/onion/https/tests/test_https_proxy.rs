@@ -155,47 +155,52 @@ fn checked_status_code_rejects_invalid_js_status_values() {
     ));
 }
 
-#[test]
-fn cancel_request_removes_pending_request() {
-    let runtime = OnionHttpsRuntime::new();
+#[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
+#[cfg_attr(not(target_family = "wasm"), test)]
+fn dropping_pending_request_future_removes_waiting_circuit() {
+    let runtime = Arc::new(OnionHttpsRuntime::new());
     let exit = session();
     let return_id = OnionReturnId::new([3; 16]);
-    let (id, _receiver) = runtime
+    let pending_request = runtime
         .begin_request(did(), exit_descriptor(&exit), return_id)
         .unwrap();
+    let mut pending_request = Box::pin(pending_request);
+    let mut context = std::task::Context::from_waker(futures::task::noop_waker_ref());
 
     assert_eq!(runtime.pending_len(), 1);
-    runtime.cancel_request(id);
+    assert!(std::future::Future::poll(pending_request.as_mut(), &mut context).is_pending());
+    drop(pending_request);
     assert_eq!(runtime.pending_len(), 0);
 }
 
 #[test]
 fn pending_request_completes_only_from_expected_return_peer() {
-    let runtime = OnionHttpsRuntime::new();
+    let runtime = Arc::new(OnionHttpsRuntime::new());
     let expected = did();
     let other = did();
     let exit = session();
     let return_id = OnionReturnId::new([1; 16]);
-    let (id, receiver) = runtime
+    let pending_request = runtime
         .begin_request(expected, exit_descriptor(&exit), return_id)
         .unwrap();
+    let id = pending_request.id();
 
     runtime.complete_payload(other, id, dummy_authenticated_payload(return_id, &exit));
     assert_eq!(runtime.pending_len(), 1);
-    drop(receiver);
-    runtime.cancel_request(id);
+    drop(pending_request);
 }
 
 #[test]
 fn pending_request_rejects_payload_from_wrong_exit_session() {
-    let runtime = OnionHttpsRuntime::new();
+    let runtime = Arc::new(OnionHttpsRuntime::new());
     let expected = did();
     let selected_exit = session();
     let wrong_exit = session();
     let return_id = OnionReturnId::new([2; 16]);
-    let (id, mut receiver) = runtime
+    let mut pending_request = runtime
         .begin_request(expected, exit_descriptor(&selected_exit), return_id)
         .unwrap();
+    let id = pending_request.id();
 
     runtime.complete_payload(
         expected,
@@ -204,18 +209,19 @@ fn pending_request_rejects_payload_from_wrong_exit_session() {
     );
 
     assert_eq!(runtime.pending_len(), 0);
-    assert!(matches!(receiver.try_recv(), Ok(Some(Err(_)))));
+    assert!(matches!(pending_request.try_recv(), Ok(Some(Err(_)))));
 }
 
 #[test]
 fn pending_request_reports_authenticated_request_as_unexpected_backward_payload() {
-    let runtime = OnionHttpsRuntime::new();
+    let runtime = Arc::new(OnionHttpsRuntime::new());
     let expected = did();
     let exit = session();
     let return_id = OnionReturnId::new([4; 16]);
-    let (id, mut receiver) = runtime
+    let mut pending_request = runtime
         .begin_request(expected, exit_descriptor(&exit), return_id)
         .unwrap();
+    let id = pending_request.id();
     let request_payload = OnionHttpsPayload::Request(OnionHttpsRequest {
         target: "example.com:443".to_string(),
         method: "GET".to_string(),
@@ -234,7 +240,7 @@ fn pending_request_reports_authenticated_request_as_unexpected_backward_payload(
 
     assert_eq!(runtime.pending_len(), 0);
     assert!(matches!(
-        receiver.try_recv(),
+        pending_request.try_recv(),
         Ok(Some(Err(Error::OnionRouteError(
             OnionRouteError::UnexpectedBackwardPayload
         ))))

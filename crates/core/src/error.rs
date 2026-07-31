@@ -279,6 +279,31 @@ pub enum Error {
     #[error("Pending WebRTC connection generation is exhausted")]
     PendingConnectionGenerationExhausted,
 
+    /// Connection attempt {generation} for {peer} was replaced before setup completed.
+    #[error("Connection attempt {generation} for {peer} was superseded")]
+    ConnectionAttemptSuperseded {
+        /// Peer whose connection generation changed.
+        peer: crate::dht::Did,
+        /// Generation that no longer owns the peer slot.
+        generation: u64,
+    },
+
+    /// A predecessor notification claims a DID different from its signed origin.
+    #[error("Notify predecessor DID {claimed} does not match relay origin {origin}")]
+    NotifyPredecessorOriginMismatch {
+        /// DID claimed by the notification body.
+        claimed: crate::dht::Did,
+        /// DID authenticated by the signed relay origin.
+        origin: crate::dht::Did,
+    },
+
+    /// A predecessor notification originated from a peer without an admitted connection.
+    #[error("Notify predecessor origin {origin} is not an admitted connection")]
+    NotifyPredecessorOriginNotAdmitted {
+        /// Authenticated origin that has no admitted connection generation.
+        origin: crate::dht::Did,
+    },
+
     /// Failed to access the swarm connection lifecycle state
     #[error("Failed to access the swarm connection lifecycle state")]
     SwarmConnectionLifecycleLock,
@@ -434,6 +459,15 @@ pub enum Error {
     /// DataChannel state not open
     #[error("DataChannel state not open")]
     RTCDataChannelStateNotOpen,
+
+    /// The observed WebRTC/data-channel product state cannot make progress.
+    #[error("Transport not ready: state {state:?}, data channel open: {data_channel_open}")]
+    TransportNotReady {
+        /// Observed WebRTC peer-connection state.
+        state: rings_transport::core::transport::WebrtcConnectionState,
+        /// Whether every transport data channel reported open.
+        data_channel_open: bool,
+    },
 
     #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
     /// RTC peer_connection add ice candidate error
@@ -636,9 +670,33 @@ impl Error {
         matches!(self, Self::DataChannelSendQueueTimeout { .. })
     }
 
+    /// Whether a data-plane send should be retried from freshly computed topology.
+    pub(crate) const fn is_deferrable_data_plane_send(&self) -> bool {
+        self.is_data_channel_backpressure()
+            || matches!(
+                self,
+                Self::ConnectionAttemptSuperseded { .. }
+                    | Self::RTCDataChannelStateNotOpen
+                    | Self::TransportNotReady { .. }
+                    | Self::SwarmMissDidInTable(_)
+                    | Self::Transport(rings_transport::error::Error::SendPermitRevoked)
+            )
+    }
+
     /// Whether this error should degrade peer quality through `FailedToSend`.
     pub(crate) const fn records_peer_send_failure(&self) -> bool {
-        !self.is_data_channel_backpressure()
+        match self {
+            Self::ConnectionAttemptSuperseded { .. } | Self::DataChannelSendQueueTimeout { .. } => {
+                false
+            }
+            Self::Transport(rings_transport::error::Error::SendPermitRevoked) => false,
+            Self::TransportNotReady { state, .. } => matches!(
+                state,
+                rings_transport::core::transport::WebrtcConnectionState::Failed
+                    | rings_transport::core::transport::WebrtcConnectionState::Closed
+            ),
+            _ => true,
+        }
     }
 }
 

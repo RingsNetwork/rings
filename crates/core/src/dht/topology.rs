@@ -84,10 +84,19 @@ pub enum TopologyEvent {
         /// Peer learned by the local node.
         peer: Did,
     },
+    /// Atomically admit a transport-validated peer and its pending finger continuations.
+    Admit {
+        /// Peer whose data channel is open.
+        peer: Did,
+        /// Finger slots whose lookup completed while the peer was handshaking.
+        fixed_fingers: Vec<usize>,
+    },
     /// A peer is removed from successor, predecessor, and finger state.
     Remove {
         /// Peer that left or failed.
         peer: Did,
+        /// Successor-list transition justified by the caller's evidence.
+        successor: SuccessorRemoval,
     },
     /// A successor candidate was accepted by the liveness/interpreter boundary.
     UpdateSuccessor {
@@ -116,6 +125,18 @@ pub enum TopologyEvent {
         /// Successor reported for that slot.
         successor: Did,
     },
+}
+
+/// Successor-list evidence attached to a peer-removal transition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SuccessorRemoval {
+    /// Preserve surviving successor-list entries for an ordinary leave.
+    Preserve,
+    /// Replace an unavailable head with exactly these transport-validated peers.
+    ///
+    /// An empty list clears every successor claim. The transition normalizes
+    /// ordering, uniqueness, self references, and capacity.
+    ReplaceWith(Vec<Did>),
 }
 
 /// Pure topology side effect emitted by a transition.
@@ -228,20 +249,25 @@ fn finger_join(local: Did, current: &[Option<Did>], peer: Did) -> Vec<Option<Did
         .collect()
 }
 
-fn finger_remove(current: &[Option<Did>], peer: Did) -> Vec<Option<Did>> {
+/// Remove `peer` from every finger slot without erasing valid slots between
+/// non-contiguous runs. Each removed run inherits its immediate following hint.
+pub(crate) fn remove_finger_peer(current: &[Option<Did>], peer: Did) -> Vec<Option<Did>> {
     let mut next = current.to_vec();
-    let indexes = next
-        .iter()
-        .enumerate()
-        .filter(|(_, did)| **did == Some(peer))
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
-    let (Some(first), Some(last)) = (indexes.first().copied(), indexes.last().copied()) else {
-        return next;
-    };
-    let replacement = next.get(last.saturating_add(1)).copied().flatten();
-    for slot in next.iter_mut().take(last.saturating_add(1)).skip(first) {
-        *slot = replacement;
+    let mut index = 0;
+    while index < next.len() {
+        if next.get(index).copied().flatten() != Some(peer) {
+            index = index.saturating_add(1);
+            continue;
+        }
+
+        let run_start = index;
+        while next.get(index).copied().flatten() == Some(peer) {
+            index = index.saturating_add(1);
+        }
+        let replacement = next.get(index).copied().flatten();
+        for slot in next.iter_mut().take(index).skip(run_start) {
+            *slot = replacement;
+        }
     }
     next
 }
@@ -349,18 +375,65 @@ fn step_join(state: &TopologyState, peer: Did, capacity: usize) -> TopologyStep 
     }
 }
 
-fn step_remove(state: &TopologyState, peer: Did, capacity: usize) -> TopologyStep {
+fn step_admit(
+    state: &TopologyState,
+    peer: Did,
+    fixed_fingers: &[usize],
+    capacity: usize,
+) -> TopologyStep {
+    if peer == state.local {
+        return TopologyStep {
+            state: state.clone(),
+            actions: Vec::new(),
+        };
+    }
+
+    let successors = update_successors(state.local, &state.successors, peer, capacity);
+    let inserted = !state.successors.contains(&peer) && successors.contains(&peer);
+    let mut fingers = finger_join(state.local, &state.fingers, peer);
+    for index in fixed_fingers {
+        fingers = finger_set(state.local, &fingers, *index, peer);
+    }
+
+    let mut actions = Vec::new();
+    if inserted {
+        actions.push(TopologyAction::QuerySuccessorList(peer));
+    }
+    actions.push(TopologyAction::FindSuccessorForConnect {
+        next: peer,
+        did: state.local,
+    });
+    TopologyStep {
+        state: TopologyState {
+            successors,
+            fingers,
+            ..state.clone()
+        },
+        actions,
+    }
+}
+
+fn step_remove(
+    state: &TopologyState,
+    peer: Did,
+    successor: SuccessorRemoval,
+    capacity: usize,
+) -> TopologyStep {
+    let removed_head = state.successors.first().copied() == Some(peer);
     let mut next_successors = state
         .successors
         .iter()
         .copied()
         .filter(|&did| did != peer)
         .collect::<Vec<_>>();
-    let fingers = finger_remove(&state.fingers, peer);
-    if next_successors.is_empty() {
-        if let Some(first_finger) = fingers.iter().flatten().copied().next() {
-            next_successors =
-                update_successors(state.local, &next_successors, first_finger, capacity);
+    let fingers = remove_finger_peer(&state.fingers, peer);
+    if removed_head {
+        match successor {
+            SuccessorRemoval::Preserve => {}
+            SuccessorRemoval::ReplaceWith(mut validated) => {
+                validated.retain(|candidate| *candidate != peer);
+                next_successors = sorted_successors(validated, state.local, capacity);
+            }
         }
     }
     TopologyStep {
@@ -425,7 +498,11 @@ fn step_fix_finger(state: &TopologyState) -> TopologyStep {
 pub fn step(state: &TopologyState, event: TopologyEvent, capacity: usize) -> TopologyStep {
     match event {
         TopologyEvent::Join { peer } => step_join(state, peer, capacity),
-        TopologyEvent::Remove { peer } => step_remove(state, peer, capacity),
+        TopologyEvent::Admit {
+            peer,
+            fixed_fingers,
+        } => step_admit(state, peer, &fixed_fingers, capacity),
+        TopologyEvent::Remove { peer, successor } => step_remove(state, peer, successor, capacity),
         TopologyEvent::UpdateSuccessor { successor } => {
             step_update_successor(state, successor, capacity)
         }
@@ -583,7 +660,10 @@ mod tests {
                 vec![Some(peer), Some(peer)],
                 0,
             ),
-            TopologyEvent::Remove { peer },
+            TopologyEvent::Remove {
+                peer,
+                successor: SuccessorRemoval::Preserve,
+            },
             DEFAULT_SUCCESSOR_CAPACITY,
         );
 
@@ -591,6 +671,152 @@ mod tests {
         assert_eq!(next.state.predecessor, None);
         assert_eq!(next.state.fingers, vec![None, None]);
         assert!(next.actions.is_empty());
+    }
+
+    #[test]
+    fn ordinary_remove_does_not_promote_an_unverified_finger() {
+        let local = did(0);
+        let removed = did(8);
+        let fallback = did(16);
+        let next = step(
+            &state(
+                local,
+                vec![removed],
+                None,
+                vec![Some(removed), None, Some(fallback)],
+                0,
+            ),
+            TopologyEvent::Remove {
+                peer: removed,
+                successor: SuccessorRemoval::Preserve,
+            },
+            DEFAULT_SUCCESSOR_CAPACITY,
+        );
+
+        assert!(next.state.successors.is_empty());
+        assert_eq!(next.state.fingers, vec![None, None, Some(fallback)]);
+        assert!(next.actions.is_empty());
+    }
+
+    #[test]
+    fn remove_step_preserves_valid_slots_between_noncontiguous_peer_runs() {
+        let local = did(0);
+        let removed = did(8);
+        let middle = did(16);
+        let tail = did(32);
+        let next = step(
+            &state(
+                local,
+                vec![removed],
+                None,
+                vec![Some(removed), Some(middle), Some(removed), Some(tail)],
+                0,
+            ),
+            TopologyEvent::Remove {
+                peer: removed,
+                successor: SuccessorRemoval::Preserve,
+            },
+            DEFAULT_SUCCESSOR_CAPACITY,
+        );
+
+        assert_eq!(next.state.fingers, vec![
+            Some(middle),
+            Some(middle),
+            Some(tail),
+            Some(tail)
+        ]);
+    }
+
+    #[test]
+    fn unavailable_head_without_live_fallback_clears_unverified_successor_tail() {
+        let local = did(0);
+        let removed = did(8);
+        let unverified = did(12);
+        let next = step(
+            &state(
+                local,
+                vec![removed, unverified],
+                None,
+                vec![Some(unverified)],
+                0,
+            ),
+            TopologyEvent::Remove {
+                peer: removed,
+                successor: SuccessorRemoval::ReplaceWith(Vec::new()),
+            },
+            DEFAULT_SUCCESSOR_CAPACITY,
+        );
+
+        assert!(next.state.successors.is_empty());
+        assert_eq!(next.state.fingers, vec![Some(unverified)]);
+        assert!(next.actions.is_empty());
+    }
+
+    #[test]
+    fn remove_step_replaces_unavailable_head_with_validated_successors_only() {
+        let local = did(0);
+        let removed = did(8);
+        let unverified = did(12);
+        let fallback = did(16);
+        let verified_tail = did(24);
+        let next = step(
+            &state(
+                local,
+                vec![removed, unverified, fallback, verified_tail],
+                None,
+                vec![Some(unverified), Some(fallback), Some(verified_tail)],
+                0,
+            ),
+            TopologyEvent::Remove {
+                peer: removed,
+                successor: SuccessorRemoval::ReplaceWith(vec![
+                    removed,
+                    verified_tail,
+                    fallback,
+                    fallback,
+                    local,
+                ]),
+            },
+            DEFAULT_SUCCESSOR_CAPACITY,
+        );
+
+        assert_eq!(next.state.successors, vec![fallback, verified_tail]);
+        assert_eq!(next.state.fingers, vec![
+            Some(unverified),
+            Some(fallback),
+            Some(verified_tail)
+        ]);
+        assert!(next.actions.is_empty());
+    }
+
+    #[test]
+    fn admit_step_commits_join_and_pending_fingers_in_one_state() {
+        let local = did(0);
+        let peer = did(16);
+        let next = step(
+            &state(local, Vec::new(), None, vec![None; 5], 0),
+            TopologyEvent::Admit {
+                peer,
+                fixed_fingers: vec![4],
+            },
+            DEFAULT_SUCCESSOR_CAPACITY,
+        );
+
+        assert_eq!(next.state.successors, vec![peer]);
+        assert_eq!(next.state.fingers, vec![
+            Some(peer),
+            Some(peer),
+            Some(peer),
+            Some(peer),
+            Some(peer)
+        ]);
+        assert_eq!(next.actions, vec![
+            TopologyAction::QuerySuccessorList(peer),
+            TopologyAction::FindSuccessorForConnect {
+                next: peer,
+                did: local
+            }
+        ]);
     }
 
     #[test]

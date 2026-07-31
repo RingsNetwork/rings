@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use super::delivery::SendCompletionOutcome;
 use super::SwarmTransport;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
@@ -33,6 +34,18 @@ pub(super) struct StorageSyncAckCapability {
 enum StorageSyncReceiverProof {
     PhysicalOwner(Did),
     StorageRouteNextHop(Did),
+}
+
+#[derive(Clone, Copy)]
+enum StorageSyncCompletion {
+    Detached,
+    Tracked,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum TrackedStorageSyncOutcome {
+    Delivered(uuid::Uuid),
+    Deferred,
 }
 
 impl StorageSyncReceiverProof {
@@ -236,19 +249,19 @@ impl SwarmTransport {
         Ok(acks)
     }
 
-    /// Send a storage-sync payload and register cleanup acks only for hand-off sync.
-    pub(crate) async fn send_storage_sync(
+    async fn send_storage_sync_with_completion(
         &self,
         msg: SyncEntriesWithSuccessor,
-    ) -> Result<uuid::Uuid> {
+        completion: StorageSyncCompletion,
+    ) -> Result<(uuid::Uuid, SendCompletionOutcome)> {
         let destination = msg.destination.did();
         let Some(next_hop) = self.dht.next_hop_for_storage_sync(msg.destination)? else {
             self.apply_local_storage_sync(&msg).await?;
-            return Ok(uuid::Uuid::new_v4());
+            return Ok((uuid::Uuid::new_v4(), SendCompletionOutcome::Succeeded));
         };
         if next_hop == self.dht.did {
             self.apply_local_storage_sync(&msg).await?;
-            return Ok(uuid::Uuid::new_v4());
+            return Ok((uuid::Uuid::new_v4(), SendCompletionOutcome::Succeeded));
         }
         let payload = MessagePayload::new_send(
             Message::SyncEntriesWithSuccessor(msg.clone()),
@@ -267,12 +280,105 @@ impl SwarmTransport {
                 &msg.data,
             )?;
         }
-        if let Err(e) = self.send_payload(payload).await {
-            if records_cleanup_ack {
-                self.remove_pending_storage_sync_ack(tx_id);
+        let send_outcome = match completion {
+            StorageSyncCompletion::Detached => {
+                self.send_payload_detached_with_outcome(payload).await
             }
-            return Err(e);
+            StorageSyncCompletion::Tracked => self.send_payload_tracked(payload).await,
+        };
+        match send_outcome {
+            Ok(SendCompletionOutcome::Succeeded) => Ok((tx_id, SendCompletionOutcome::Succeeded)),
+            Ok(SendCompletionOutcome::Cancelled) => {
+                if records_cleanup_ack {
+                    self.remove_pending_storage_sync_ack(tx_id);
+                }
+                Ok((tx_id, SendCompletionOutcome::Cancelled))
+            }
+            Err(error) => {
+                if records_cleanup_ack {
+                    self.remove_pending_storage_sync_ack(tx_id);
+                }
+                if error.is_deferrable_data_plane_send() {
+                    Ok((tx_id, SendCompletionOutcome::Cancelled))
+                } else {
+                    Err(error)
+                }
+            }
         }
-        Ok(tx_id)
+    }
+
+    /// Send a storage-sync payload and register cleanup acks only for hand-off sync.
+    ///
+    /// `Ok(None)` means the data-plane admission or tracked delivery was
+    /// cancelled, so maintenance must recompute and retry from current topology.
+    pub(crate) async fn send_storage_sync(
+        &self,
+        msg: SyncEntriesWithSuccessor,
+    ) -> Result<Option<uuid::Uuid>> {
+        match self
+            .send_storage_sync_with_completion(msg, StorageSyncCompletion::Detached)
+            .await?
+        {
+            (tx_id, SendCompletionOutcome::Succeeded) => Ok(Some(tx_id)),
+            (_, SendCompletionOutcome::Cancelled) => Ok(None),
+        }
+    }
+
+    /// Send storage repair and wait until every frame has completed or cancelled.
+    pub(crate) async fn send_storage_sync_tracked(
+        &self,
+        msg: SyncEntriesWithSuccessor,
+    ) -> Result<TrackedStorageSyncOutcome> {
+        match self
+            .send_storage_sync_with_completion(msg, StorageSyncCompletion::Tracked)
+            .await?
+        {
+            (tx_id, SendCompletionOutcome::Succeeded) => {
+                Ok(TrackedStorageSyncOutcome::Delivered(tx_id))
+            }
+            (_, SendCompletionOutcome::Cancelled) => Ok(TrackedStorageSyncOutcome::Deferred),
+        }
+    }
+
+    /// Send storage sync as a deferrable data-plane effect.
+    ///
+    /// Backpressure, connection replacement, transport readiness loss, or a
+    /// vanished route means this anti-entropy payload was not accepted. These
+    /// are not DHT safety failures and may not bubble through message callbacks
+    /// as failed control-plane events.
+    pub(crate) async fn send_storage_sync_or_defer(
+        &self,
+        msg: SyncEntriesWithSuccessor,
+        context: &'static str,
+    ) -> Result<Option<uuid::Uuid>> {
+        let purpose = msg.purpose;
+        let destination = msg.destination;
+        let destination_did = destination.did();
+        let entries = msg.data.len();
+        let next_hop = self
+            .dht
+            .next_hop_for_storage_sync(destination)
+            .ok()
+            .flatten();
+        let next_hop_state = next_hop
+            .and_then(|did| self.get_connection(did))
+            .map(|conn| conn.webrtc_connection_state());
+
+        let outcome = self.send_storage_sync(msg).await?;
+        if outcome.is_none() {
+            tracing::warn!(
+                target: "rings_core::storage_sync",
+                local = %self.dht.did,
+                context,
+                purpose = ?purpose,
+                destination = ?destination,
+                destination_did = %destination_did,
+                next_hop = ?next_hop,
+                next_hop_state = ?next_hop_state,
+                entries,
+                "storage sync data-plane send cancelled and deferred"
+            );
+        }
+        Ok(outcome)
     }
 }

@@ -421,7 +421,10 @@ impl OnlineNodeRegistration {
             .publish_many_replacing(context, std::iter::once(encoded), |observed| {
                 observed
                     .decode::<OnlineNodeDescriptor>()
-                    .is_ok_and(|descriptor| descriptor.did == context.did())
+                    .is_ok_and(|descriptor| {
+                        descriptor.did == context.did()
+                            || (descriptor.verify_signature() && descriptor.is_expired_at(now_ms))
+                    })
             })
             .await?;
         Ok(descriptor)

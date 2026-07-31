@@ -8,6 +8,8 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use crate::core::transport::ConnectionInterface;
+use crate::core::transport::ConnectionStateSnapshot;
+use crate::core::transport::SendPermit;
 use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
 use crate::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
@@ -47,6 +49,34 @@ impl<C> ConnectionRef<C> {
             None => Err(Error::ConnectionReleased(self.cid.clone())),
         }
     }
+
+    pub(crate) fn cid(&self) -> &str {
+        &self.cid
+    }
+
+    pub(crate) fn points_to(&self, connection: &Arc<C>) -> bool {
+        self.conn.ptr_eq(&Arc::downgrade(connection))
+    }
+}
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+impl ConnectionRef<crate::connections::DummyConnection> {
+    /// Test hook: force a dummy connection state without dispatching lifecycle callbacks.
+    pub fn force_dummy_webrtc_connection_state_without_callback(
+        &self,
+        state: WebrtcConnectionState,
+    ) -> Result<()> {
+        self.upgrade()?
+            .force_webrtc_connection_state_without_callback(state);
+        Ok(())
+    }
+
+    /// Test hook: override dummy data-channel readiness without dispatching callbacks.
+    pub fn force_dummy_data_channel_open_without_callback(&self, open: Option<bool>) -> Result<()> {
+        self.upgrade()?
+            .force_data_channel_open_without_callback(open);
+        Ok(())
+    }
 }
 
 #[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
@@ -63,10 +93,27 @@ where
         self.upgrade()?.send_message(msg).await
     }
 
+    async fn send_message_with_permit(
+        &self,
+        msg: TransportMessage,
+        permit: SendPermit,
+    ) -> Result<DeliveryFuture> {
+        self.upgrade()?.send_message_with_permit(msg, permit).await
+    }
+
     fn webrtc_connection_state(&self) -> WebrtcConnectionState {
         self.upgrade()
             .map(|c| c.webrtc_connection_state())
             .unwrap_or(WebrtcConnectionState::Closed)
+    }
+
+    fn connection_state_snapshot(&self) -> ConnectionStateSnapshot {
+        self.upgrade()
+            .map(|connection| connection.connection_state_snapshot())
+            .unwrap_or(ConnectionStateSnapshot::new(
+                WebrtcConnectionState::Closed,
+                false,
+            ))
     }
 
     fn data_channel_is_open(&self) -> Result<bool> {
@@ -132,10 +179,27 @@ where
         self.upgrade()?.send_message(msg).await
     }
 
+    async fn send_message_with_permit(
+        &self,
+        msg: TransportMessage,
+        permit: SendPermit,
+    ) -> Result<DeliveryFuture> {
+        self.upgrade()?.send_message_with_permit(msg, permit).await
+    }
+
     fn webrtc_connection_state(&self) -> WebrtcConnectionState {
         self.upgrade()
             .map(|c| c.webrtc_connection_state())
             .unwrap_or(WebrtcConnectionState::Closed)
+    }
+
+    fn connection_state_snapshot(&self) -> ConnectionStateSnapshot {
+        self.upgrade()
+            .map(|connection| connection.connection_state_snapshot())
+            .unwrap_or(ConnectionStateSnapshot::new(
+                WebrtcConnectionState::Closed,
+                false,
+            ))
     }
 
     fn data_channel_is_open(&self) -> Result<bool> {
@@ -213,7 +277,17 @@ mod tests {
         async fn send_message(&self, _: TransportMessage) -> Result<DeliveryFuture> {
             unreachable!("a released ref must fail before reaching the inner connection")
         }
+        async fn send_message_with_permit(
+            &self,
+            _: TransportMessage,
+            _: SendPermit,
+        ) -> Result<DeliveryFuture> {
+            unreachable!("a released ref must fail before reaching the inner connection")
+        }
         fn webrtc_connection_state(&self) -> WebrtcConnectionState {
+            unreachable!()
+        }
+        fn connection_state_snapshot(&self) -> ConnectionStateSnapshot {
             unreachable!()
         }
         fn data_channel_is_open(&self) -> Result<bool> {

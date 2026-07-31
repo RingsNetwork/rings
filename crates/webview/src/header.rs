@@ -101,6 +101,8 @@ fn should_strip_request_header(name: &str) -> bool {
                 | "transfer-encoding"
                 | "upgrade"
                 | "via"
+                | "x-rings-webview-kind"
+                | "x-rings-webview-target"
         )
 }
 
@@ -238,6 +240,8 @@ mod tests {
                 GatewayHeader::new("Sec-Fetch-Dest", "document")?,
                 GatewayHeader::new("Cookie", "caller=leak")?,
                 GatewayHeader::new("Accept-Encoding", "gzip")?,
+                GatewayHeader::new("X-Rings-Webview-Kind", "fetch")?,
+                GatewayHeader::new("X-Rings-Webview-Target", "https://example.com/app/page")?,
                 GatewayHeader::new("Accept", "text/html")?,
                 GatewayHeader::new("X-App-Trace", "kept")?,
             ],
@@ -253,7 +257,13 @@ mod tests {
 
         assert!(normalized.headers.iter().all(|header| !matches!(
             header.name.to_ascii_lowercase().as_str(),
-            "host" | "origin" | "referer" | "sec-fetch-dest" | "cookie"
+            "host"
+                | "origin"
+                | "referer"
+                | "sec-fetch-dest"
+                | "cookie"
+                | "x-rings-webview-kind"
+                | "x-rings-webview-target"
         )));
         assert!(normalized
             .headers

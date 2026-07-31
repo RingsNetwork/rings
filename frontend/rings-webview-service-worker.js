@@ -1,7 +1,16 @@
 "use strict";
 
+importScripts("/assets/webview-worker-response.js?gateway-response-protocol=1");
+
+const {
+  gatewayFailure,
+  gatewayFailureDocument,
+} = self.RingsWebviewWorkerResponse;
 const gatewayPrefix = "/webview/";
+const runtimeGatewayPrefix = `${gatewayPrefix.replace(/\/$/, "")}-runtime/`;
+const runtimeTargetHeader = "x-rings-webview-target";
 const requestTimeoutMs = 30_000;
+const gatewayFetchDeadlineMs = requestTimeoutMs + 1_000;
 const webviewOverlayScriptPath = "/assets/webview-overlay.js";
 const webviewHistoryGuardMarker = "data-rings-webview-history-guard";
 const webviewHistoryGuardScriptTag = `<script ${webviewHistoryGuardMarker}>(() => {
@@ -79,14 +88,14 @@ self.addEventListener("message", (event) => {
   const clientId = event.source?.id;
   const reply = event.ports?.[0];
   if (event.data?.type === "rings-webview-debug-entry" && event.data.entry) {
-    const publish = acceptDebugEntry(clientId, event.data.capability).then(async (ok) => {
+    const publish = acceptDebugEntry(clientId, event.data.capability).then((ok) => {
       if (!ok) {
-        await emitDebug("worker", "Rejected untrusted debug entry", "warning");
+        queueDebug("worker", "Rejected untrusted debug entry", "warning");
         reply?.postMessage({ ok: false, error: "untrusted debug entry" });
         return;
       }
       const entry = event.data.entry;
-      await emitDebug(
+      queueDebug(
         entry.scope || "host",
         entry.message || "unknown event",
         entry.level || "info",
@@ -100,12 +109,12 @@ self.addEventListener("message", (event) => {
     return;
   }
   if (event.data?.type === "rings-webview-host-register" && typeof clientId === "string" && clientId) {
-    const registration = registerGatewayHostClient(clientId, event.data.capability).then(async (ok) => {
+    const registration = registerGatewayHostClient(clientId, event.data.capability).then((ok) => {
       if (ok) {
-        await emitDebug("worker", "Updated local Rings node gateway host");
+        queueDebug("worker", "Updated local Rings node gateway host");
         reply?.postMessage({ ok: true });
       } else {
-        await emitDebug("worker", "Rejected untrusted Rings node gateway host registration", "warning");
+        queueDebug("worker", "Rejected untrusted Rings node gateway host registration", "warning");
         reply?.postMessage({ ok: false, error: "untrusted gateway host registration" });
       }
     });
@@ -113,12 +122,12 @@ self.addEventListener("message", (event) => {
     return;
   }
   if (event.data?.type === "rings-webview-debug-register" && typeof clientId === "string" && clientId) {
-    const registration = registerDebugClient(clientId, event.data.capability).then(async (ok) => {
+    const registration = registerDebugClient(clientId, event.data.capability).then((ok) => {
       if (ok) {
-        await emitDebug("worker", "Registered WebView debug client");
+        queueDebug("worker", "Registered WebView debug client");
         reply?.postMessage({ ok: true });
       } else {
-        await emitDebug("worker", "Rejected untrusted debug client registration", "warning");
+        queueDebug("worker", "Rejected untrusted debug client registration", "warning");
         reply?.postMessage({ ok: false, error: "untrusted debug client registration" });
       }
     });
@@ -130,24 +139,60 @@ self.addEventListener("message", (event) => {
 
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
-  if (url.origin !== self.location.origin || !url.pathname.startsWith(gatewayPrefix)) {
+  if (url.origin !== self.location.origin || !isGatewayControlledPathname(url.pathname)) {
     rememberShellNavigationClient(event, url);
     return;
   }
-  event.respondWith(handleGatewayFetch(event));
+  event.respondWith(handleGatewayFetchWithTimeout(event));
 });
 
-async function handleGatewayFetch(event) {
+function handleGatewayFetchWithTimeout(event) {
   const requestId = nextRequestId;
   nextRequestId += 1;
   const startedAt = performance.now();
+  const controller = new AbortController();
+  let timeout;
+  let settled = false;
+  const timeoutResponse = new Promise((resolve) => {
+    timeout = globalThis.setTimeout(() => {
+      if (settled) return;
+      controller.abort();
+      const request = debugRequestForFailure(event.request);
+      emitResourceDebug(
+        requestId,
+        request,
+        startedAt,
+        "failed",
+        `#${requestId} gateway request exceeded the Service Worker deadline`,
+        "error",
+        504,
+      );
+      resolve(gatewayDeadlineFailure());
+    }, gatewayFetchDeadlineMs);
+  });
+  return Promise.race([
+    handleGatewayFetch(event, requestId, startedAt, controller.signal),
+    timeoutResponse,
+  ]).finally(() => {
+    settled = true;
+    globalThis.clearTimeout(timeout);
+  });
+}
+
+async function handleGatewayFetch(event, requestId, startedAt, signal = undefined) {
   let request;
   try {
-    request = await serializeRequest(event);
+    request = await serializeRequest(event, signal);
+    if (signal?.aborted) {
+      return gatewayDeadlineFailure();
+    }
     rememberNavigationClientTarget(event, request);
   } catch (error) {
+    if (error === gatewayRequestCancelled) {
+      return gatewayDeadlineFailure();
+    }
     request = debugRequestForFailure(event.request);
-    await emitResourceDebug(
+    emitResourceDebug(
       requestId,
       request,
       startedAt,
@@ -163,7 +208,7 @@ async function handleGatewayFetch(event) {
       "invalid_gateway_request",
     );
   }
-  await emitResourceDebug(
+  emitResourceDebug(
     requestId,
     request,
     startedAt,
@@ -171,8 +216,11 @@ async function handleGatewayFetch(event) {
     `#${requestId} intercepted ${request.kind} ${request.method} ${requestedTarget(request.requested)} (mode=${event.request.mode}, destination=${event.request.destination || "none"})`,
   );
   const host = await gatewayHostClient();
+  if (signal?.aborted) {
+    return gatewayDeadlineFailure();
+  }
   if (!host) {
-    await emitResourceDebug(
+    emitResourceDebug(
       requestId,
       request,
       startedAt,
@@ -188,17 +236,20 @@ async function handleGatewayFetch(event) {
       "local_gateway_unavailable",
     );
   }
-  await emitResourceDebug(
+  emitResourceDebug(
     requestId,
     request,
     startedAt,
     "dispatched",
     `#${requestId} Request sent to the local Rings gateway`,
   );
-  const response = await requestGatewayResponse(host, request);
+  const response = await requestGatewayResponse(host, request, requestId, signal);
+  if (signal?.aborted) {
+    return gatewayDeadlineFailure();
+  }
   if (!response?.ok) {
     const status = response?.status || 502;
-    await emitResourceDebug(
+    emitResourceDebug(
       requestId,
       request,
       startedAt,
@@ -219,7 +270,7 @@ async function handleGatewayFetch(event) {
     for (const header of response.headers || []) {
       headers.append(header.name, header.value);
     }
-    await emitResourceDebug(
+    emitResourceDebug(
       requestId,
       request,
       startedAt,
@@ -236,7 +287,7 @@ async function handleGatewayFetch(event) {
       headers,
     });
   } catch (error) {
-    await emitResourceDebug(
+    emitResourceDebug(
       requestId,
       request,
       startedAt,
@@ -253,6 +304,17 @@ async function handleGatewayFetch(event) {
     );
   }
 }
+
+function gatewayDeadlineFailure() {
+  return gatewayFailure(
+    504,
+    "local Rings node gateway timed out before the Service Worker completed request handling",
+    "Local Rings node gateway timed out.",
+    "local_gateway_timeout",
+  );
+}
+
+const gatewayRequestCancelled = Object.freeze({});
 
 function responseMustNotHaveBody(status) {
   return status === 204 || status === 205 || status === 304;
@@ -342,7 +404,7 @@ function injectWebviewHistoryGuard(html) {
   return `${html.slice(0, index)}${webviewHistoryGuardScriptTag}${html.slice(index)}`;
 }
 
-async function emitResourceDebug(requestId, request, startedAt, phase, message, level = "info", status = undefined) {
+function emitResourceDebug(requestId, request, startedAt, phase, message, level = "info", status = undefined) {
   const resource = {
     requestId,
     target: requestedTarget(request.requested),
@@ -355,7 +417,13 @@ async function emitResourceDebug(requestId, request, startedAt, phase, message, 
   if (status !== undefined) {
     resource.status = status;
   }
-  await emitDebug("worker", message, level, resource);
+  queueDebug("worker", message, level, resource);
+}
+
+function queueDebug(scope, message, level = "info", resource = undefined, at = undefined, onion = undefined) {
+  void emitDebug(scope, message, level, resource, at, onion).catch((error) => {
+    console.warn("Rings WebView debug delivery failed", error);
+  });
 }
 
 async function emitDebug(scope, message, level = "info", resource = undefined, at = undefined, onion = undefined) {
@@ -398,13 +466,7 @@ async function debugClientsForEntry(entry) {
 }
 
 function requestedTarget(url) {
-  const path = new URL(url).pathname;
-  const encoded = path.slice(gatewayPrefix.length);
-  try {
-    return encoded ? decodeURIComponent(encoded) : url;
-  } catch (_error) {
-    return url;
-  }
+  return targetFromGatewayUrl(url) || url;
 }
 
 async function gatewayHostClient() {
@@ -593,7 +655,7 @@ function isTrustedShellUrl(url, hashPrefix) {
   try {
     const parsed = new URL(url);
     return parsed.origin === self.location.origin
-      && !parsed.pathname.startsWith(gatewayPrefix)
+      && !isGatewayControlledPathname(parsed.pathname)
       && parsed.hash.startsWith(hashPrefix);
   } catch (_error) {
     return false;
@@ -611,30 +673,46 @@ function resetGatewayHostForTest() {
   debugHistory.splice(0, debugHistory.length);
 }
 
-async function serializeRequest(event) {
+async function serializeRequest(event, signal = undefined) {
   const request = event.request;
   const sourceTarget = await sourceTargetForClient(event.clientId);
+  throwIfGatewayRequestCancelled(signal);
   const kind = requestKind(request);
+  const runtimeTarget = runtimeGatewayTarget(request);
   const body = request.method === "GET" || request.method === "HEAD"
     ? undefined
     : await request.clone().arrayBuffer();
+  throwIfGatewayRequestCancelled(signal);
   return {
-    requested: request.url,
+    requested: runtimeTarget ? controlledGatewayUrl(runtimeTarget) : request.url,
     sourceTarget,
     method: request.method,
     credentials: request.credentials,
     topLevelNavigation: isTopLevelNavigationRequest(request),
     headers: [...request.headers]
-      .filter(([name]) => name.toLowerCase() !== "x-rings-webview-kind")
+      .filter(([name]) => !isRuntimeControlHeader(name))
       .map(([name, value]) => ({ name, value })),
     body,
     kind,
   };
 }
 
+function throwIfGatewayRequestCancelled(signal) {
+  if (signal?.aborted) {
+    throw gatewayRequestCancelled;
+  }
+}
+
 function debugRequestForFailure(request) {
+  let requested = request.url;
+  try {
+    const runtimeTarget = runtimeGatewayTarget(request);
+    if (runtimeTarget) {
+      requested = controlledGatewayUrl(runtimeTarget);
+    }
+  } catch (_error) {}
   return {
-    requested: request.url,
+    requested,
     sourceTarget: undefined,
     method: request.method || "GET",
     credentials: request.credentials,
@@ -699,7 +777,7 @@ function rememberNavigationClientTarget(event, request) {
 }
 
 function rememberShellNavigationClient(event, url) {
-  if (url.origin !== self.location.origin || url.pathname.startsWith(gatewayPrefix) || !isTopLevelNavigationRequest(event.request)) {
+  if (url.origin !== self.location.origin || isGatewayControlledPathname(url.pathname) || !isTopLevelNavigationRequest(event.request)) {
     return false;
   }
   let remembered = false;
@@ -753,6 +831,41 @@ function rememberTrustedShellClient(clientId, debugTrustSourceClientId = clientI
     debugClientScopes.set(clientId, shellDebugScope());
   }
   return true;
+}
+
+function isGatewayControlledPathname(pathname) {
+  return pathname.startsWith(gatewayPrefix) || pathname.startsWith(runtimeGatewayPrefix);
+}
+
+function runtimeGatewayTarget(request) {
+  const url = new URL(request.url);
+  if (url.origin !== self.location.origin || !url.pathname.startsWith(runtimeGatewayPrefix)) {
+    return undefined;
+  }
+  const rawTarget = request.headers.get(runtimeTargetHeader);
+  if (!rawTarget) {
+    throw new Error("missing X-Rings-Webview-Target");
+  }
+  let target;
+  try {
+    target = new URL(rawTarget);
+  } catch (_error) {
+    throw new Error("invalid X-Rings-Webview-Target");
+  }
+  if (target.protocol !== "http:" && target.protocol !== "https:") {
+    throw new Error(`unsupported X-Rings-Webview-Target scheme: ${target.protocol.replace(/:$/, "")}`);
+  }
+  return target.href;
+}
+
+function controlledGatewayUrl(target) {
+  const url = new URL(target);
+  return new URL(`${gatewayPrefix}${encodeURIComponent(url.href)}`, self.location.origin).href;
+}
+
+function isRuntimeControlHeader(name) {
+  const lower = name.toLowerCase();
+  return lower === "x-rings-webview-kind" || lower === runtimeTargetHeader;
 }
 
 function targetFromGatewayUrl(value) {
@@ -826,122 +939,48 @@ function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
-function requestGatewayResponse(host, request) {
+function requestGatewayResponse(host, request, requestId, signal = undefined) {
   return new Promise((resolve) => {
     const channel = new MessageChannel();
-    const timeout = globalThis.setTimeout(() => {
+    let settled = false;
+    let timeout;
+    const finish = (response, cancelHost) => {
+      if (settled) return;
+      settled = true;
+      globalThis.clearTimeout(timeout);
+      signal?.removeEventListener("abort", cancel);
       channel.port1.close();
-      resolve({
+      if (cancelHost) {
+        host.postMessage({
+          type: "rings-webview-gateway-cancel",
+          requestId,
+        });
+      }
+      resolve(response);
+    };
+    const cancel = () => {
+      finish({
         ok: false,
         status: 504,
         errorCode: "local_gateway_timeout",
         errorSummary: "Local Rings node gateway timed out.",
         error: "local Rings node gateway timed out",
-      });
+      }, true);
+    };
+    if (signal?.aborted) {
+      cancel();
+      return;
+    }
+    signal?.addEventListener("abort", cancel, { once: true });
+    timeout = globalThis.setTimeout(() => {
+      cancel();
     }, requestTimeoutMs);
     channel.port1.onmessage = (event) => {
-      globalThis.clearTimeout(timeout);
-      channel.port1.close();
-      resolve(event.data);
+      finish(event.data, false);
     };
     host.postMessage(
-      { type: "rings-webview-gateway-request", request },
+      { type: "rings-webview-gateway-request", requestId, request },
       [channel.port2],
     );
   });
-}
-
-function gatewayFailure(status, message, summary = undefined, code = undefined) {
-  return new Response(gatewayFailureDocument(
-    status,
-    gatewayFailureSummary(message),
-    gatewayFailureReason(status, message, summary),
-    code || gatewayFailureCode(status),
-  ), {
-    status,
-    headers: {
-      "content-type": "text/html; charset=utf-8",
-      "cache-control": "no-store",
-      "referrer-policy": "no-referrer",
-    },
-  });
-}
-
-function gatewayFailureSummary(message) {
-  let text = String(message || "gateway request failed").trim();
-  text = text.replace(
-    /^gateway transport:\s+gateway transport failed:/,
-    "gateway transport failed:",
-  );
-  text = text.replace(
-    /JsValue\(Error: ([^\n)]*)[\s\S]*\)/,
-    "Error: $1",
-  );
-  const firstLine = text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .find(Boolean);
-  return firstLine || "gateway request failed";
-}
-
-function gatewayFailureReason(status, message, summary) {
-  const cleanSummary = String(summary || "").trim();
-  if (cleanSummary) return cleanSummary;
-  const detail = gatewayFailureSummary(message);
-  if (status === 503 && detail.includes("no live onion exit offers service \"https\"")) {
-    return "No live HTTPS onion exit is available.";
-  }
-  if (status === 503 && detail.includes("no live onion exit")) {
-    return "No live onion exit is available for this request.";
-  }
-  if (status === 503 && detail.includes("Start a local Rings node")) {
-    return "Local Rings node gateway is unavailable.";
-  }
-  if (status === 502) return "Gateway transport failed.";
-  if (status === 504) return "Gateway request timed out.";
-  return "Gateway request failed.";
-}
-
-function gatewayFailureCode(status) {
-  if (status === 400) return "invalid_webview_request";
-  if (status === 403) return "webview_request_rejected";
-  if (status === 404) return "controlled_asset_not_found";
-  if (status === 502) return "gateway_transport_failed";
-  if (status === 503) return "gateway_unavailable";
-  if (status === 504) return "gateway_timeout";
-  return "gateway_request_failed";
-}
-
-function gatewayFailureDocument(status, message, reason, code) {
-  const detail = escapeHtml(message);
-  const summary = escapeHtml(reason);
-  const reasonCode = escapeHtml(code);
-  const statusText = escapeHtml(status);
-  return `<!doctype html>
-<html lang="en">
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Rings gateway failure ${statusText}</title>
-<style>
-  body { margin: 0; min-height: 100vh; background: #fffaf0; }
-</style>
-<body>
-<template
-  data-rings-webview-failure="true"
-  data-rings-webview-failure-status="${statusText}"
-  data-rings-webview-failure-code="${reasonCode}"
-  data-rings-webview-failure-summary="${summary}"
-  data-rings-webview-failure-detail="${detail}"
-></template>
-<script src="/assets/webview-overlay.js"></script>
-</body>
-</html>`;
-}
-
-function escapeHtml(value) {
-  return String(value)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
 }

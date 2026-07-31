@@ -20,6 +20,7 @@ use yew::prelude::*;
 
 use crate::browser_api::chrome_runtime_on_message;
 pub(crate) use crate::browser_api::copy_text_to_clipboard;
+use crate::browser_api::js_bool_field;
 use crate::browser_api::js_method;
 use crate::browser_api::js_prop;
 use crate::browser_api::js_set;
@@ -53,6 +54,7 @@ use crate::peer_sync;
 use crate::wallet;
 use crate::wallet::WalletAccount;
 use crate::wallet::WalletKind;
+use crate::webview::WebviewOnionSettings;
 
 const EXTENSION_NODE_TARGET: &str = "rings.node.offscreen";
 const EXTENSION_NODE_START: &str = "rings.node.start";
@@ -69,6 +71,7 @@ pub(crate) const SETTING_NETWORK_ID: &str = "rings.frontend.networkId";
 pub(crate) const SETTING_ICE_SERVERS: &str = "rings.frontend.iceServers";
 pub(crate) const SETTING_STABILIZE_INTERVAL: &str = "rings.frontend.stabilizeInterval";
 pub(crate) const SETTING_STORAGE_NAME: &str = "rings.frontend.storageName";
+pub(crate) const SETTING_WEBVIEW_ALLOW_SHORT_PATHS: &str = "rings.frontend.webviewAllowShortPaths";
 pub(crate) const SETTING_SEED_URL: &str = "rings.frontend.seedUrl";
 pub(crate) const SETTING_HTTP_ENDPOINT: &str = "rings.frontend.httpEndpoint";
 
@@ -180,6 +183,7 @@ pub(crate) fn node_settings(
     ice_servers: String,
     stabilize_interval: String,
     storage_name: String,
+    webview_onion_settings: WebviewOnionSettings,
 ) -> Result<NodeSettings, NodeSettingsError> {
     let network_id = network_id
         .trim()
@@ -194,6 +198,7 @@ pub(crate) fn node_settings(
         ice_servers,
         stabilize_interval,
         storage_name,
+        webview_onion_settings,
     })
 }
 
@@ -369,6 +374,7 @@ fn headless_node_settings(settings: &ExtensionStartSettings) -> Result<NodeSetti
         settings.ice_servers.clone(),
         settings.stabilize_interval.clone(),
         settings.storage_name.clone(),
+        WebviewOnionSettings::new(settings.webview_allow_short_paths),
     )
     .map_err(|error| error.to_string())
 }
@@ -871,6 +877,7 @@ fn extension_start_settings_from_js(value: &JsValue) -> ExtensionStartSettings {
             .unwrap_or_else(|_| "3".to_string()),
         storage_name: js_string_field(value, "storageName")
             .unwrap_or_else(|_| "rings-frontend".to_string()),
+        webview_allow_short_paths: js_bool_field(value, "webviewAllowShortPaths").unwrap_or(false),
         seed_url: js_string_field(value, "seedUrl").unwrap_or_default(),
     }
 }

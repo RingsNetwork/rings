@@ -11,16 +11,14 @@ use super::effects::ConnectionFunctor;
 use super::effects::CoreEffect;
 use super::effects::CoreEffectInterpreter;
 use super::MessagePayload;
-use crate::dht::ChordStorageRepair;
-use crate::dht::CorrectChord;
 use crate::dht::Did;
-use crate::dht::LiveDid;
 use crate::dht::PeerRing;
 use crate::dht::PeerRingAction;
 use crate::error::Error;
 use crate::error::Result;
 use crate::swarm::callback::InnerSwarmCallback;
 use crate::swarm::callback::SharedSwarmCallback;
+use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 
 /// Operator and Handler for Connection
@@ -45,26 +43,6 @@ pub struct MessageHandler {
     transport: Arc<SwarmTransport>,
     dht: Arc<PeerRing>,
     swarm_callback: SharedSwarmCallback,
-}
-
-#[derive(Clone)]
-struct AdmittedPeer {
-    transport: Arc<SwarmTransport>,
-    did: Did,
-}
-
-impl From<AdmittedPeer> for Did {
-    fn from(peer: AdmittedPeer) -> Self {
-        peer.did
-    }
-}
-
-#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
-#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
-impl LiveDid for AdmittedPeer {
-    async fn live(&self) -> bool {
-        self.transport.get_connection(self.did).is_some()
-    }
 }
 
 /// Generic trait for handle message ,inspired by Actor-Model.
@@ -123,16 +101,9 @@ impl MessageHandler {
     pub(crate) async fn join_dht(&self, peer: Did) -> Result<()> {
         // Default HMCC/Zave join path: maps to the JoinThenSync operation in
         // the CorrectChord spec (see tests/default/test_dht_convergence.rs).
-        if self.transport.get_connection(peer).is_none() {
+        let Some(dht_ev) = self.transport.join_routable_peer(peer)? else {
             return Err(Error::SwarmMissDidInTable(peer));
-        }
-        let dht_ev = self
-            .dht
-            .join_then_sync(AdmittedPeer {
-                transport: Arc::clone(&self.transport),
-                did: peer,
-            })
-            .await?;
+        };
         // The local join has completed. Follow-up convergence messages are
         // best-effort: a peer can churn before these sends complete, and that
         // must not suppress the application-level Connected event.
@@ -142,23 +113,54 @@ impl MessageHandler {
         Ok(())
     }
 
+    pub(crate) async fn admit_dht_attempt(
+        &self,
+        attempt: PendingConnectionAttempt,
+    ) -> Result<bool> {
+        let Some(dht_ev) = self.transport.commit_connection_admission(attempt)? else {
+            return Ok(false);
+        };
+        // Local topology and lifecycle state are committed together. Remote
+        // convergence remains best-effort because the peer may churn immediately.
+        if let Err(error) = self.handle_dht_events(&dht_ev).await {
+            tracing::warn!(
+                peer = %attempt.peer(),
+                generation = attempt.generation(),
+                error = ?error,
+                "failed to handle DHT events after connection admission"
+            );
+        }
+        Ok(true)
+    }
+
+    pub(crate) async fn leave_dht_attempt(&self, attempt: PendingConnectionAttempt) -> Result<()> {
+        let should_repair = self
+            .dht
+            .peer_may_share_storage_responsibility(
+                attempt.peer(),
+                self.transport.storage_redundancy(),
+            )
+            .await?;
+        let removed = if self.transport.disconnect_attempt(attempt).await? {
+            true
+        } else {
+            self.transport.remove_retired_attempt_topology(attempt)?
+        };
+        if removed && should_repair {
+            self.transport.request_storage_repair();
+        }
+        Ok(())
+    }
+
+    #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
     pub(crate) async fn leave_dht(&self, peer: Did) -> Result<()> {
         let should_repair = self
             .dht
             .peer_may_share_storage_responsibility(peer, self.transport.storage_redundancy())
             .await?;
-        if self.transport.is_admitted_connection(peer) {
-            self.transport.disconnect(peer).await?;
-        } else {
-            self.dht.remove(peer)?;
-        }
+        self.dht.remove(peer)?;
         if should_repair {
-            let repair = self
-                .dht
-                .republish_local_entries(self.transport.storage_redundancy())
-                .await?;
-            self.run_effects(storage::storage_sync_effects(repair)?)
-                .await?;
+            self.transport.request_storage_repair();
         }
         Ok(())
     }
