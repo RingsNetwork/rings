@@ -408,6 +408,25 @@ assert.throws(
 }
 
 {
+  // A reclaimed worker has no durable popup-to-host proof. It must not bind a
+  // gateway request to any currently open #node page merely to recover state.
+  resetGatewayHostForTest();
+  clientsById.clear();
+  const hostMessages: unknown[] = [];
+  clientsById.set("unassociated-host", {
+    id: "unassociated-host",
+    url: "http://127.0.0.1:8080/#node",
+    frameType: "top-level",
+    postMessage(message) {
+      hostMessages.push(message);
+    },
+  });
+
+  assert.equal(await gatewayHostClient(), undefined);
+  assertJsonEqual(hostMessages, []);
+}
+
+{
   const timers = captureTimeoutCallbacks(context);
   const messages: unknown[] = [];
   const host: ServiceWorkerClientFixture = {
@@ -665,6 +684,9 @@ assert.throws(
   assert.equal(await registerGatewayHostClient("hostile", hostileCapability), false);
   assert.equal(await registerGatewayHostClient("host", hostileCapability), false);
   assert.equal((await gatewayHostClient())?.id, "host");
+  // Cold-start discovery probes are intentionally benign, but this block
+  // below verifies that no debug payload is delivered to the host.
+  hostMessages.length = 0;
 
   await emitDebug("worker", "pre-registration secret");
   assertJsonEqual(

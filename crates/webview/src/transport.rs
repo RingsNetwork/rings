@@ -124,14 +124,17 @@ impl GatewayResponsePolicy {
         if !(content_type.contains("text/html") || content_type.contains("text/css")) {
             return Ok(response.body.clone());
         }
-        let Ok(text) = std::str::from_utf8(response.body.as_slice()) else {
-            return Ok(response.body.clone());
-        };
+        let is_html = content_type.contains("text/html");
+        let text = std::str::from_utf8(response.body.as_slice()).map_err(|_| {
+            // Rewriting is the boundary that keeps navigable text on the controlled origin.
+            // Passing an undecodable document through would bypass that boundary.
+            WebviewError::UnrewritableTextEncoding { content_type }
+        })?;
         let mut ctx = RewriteContext::new(self.prefix.clone(), request.target.clone());
         if let Some(script) = self.bootstrap_for(request) {
             ctx = ctx.with_bootstrap_script(script);
         }
-        let rewritten = if content_type.contains("text/html") {
+        let rewritten = if is_html {
             ctx.rewrite_html(text)?
         } else {
             ctx.rewrite_css(text)?
@@ -401,6 +404,43 @@ mod tests {
             .headers
             .iter()
             .any(|header| header.name_eq("set-cookie")));
+        Ok(())
+    }
+
+    struct InvalidUtf8TextTransport(&'static str);
+
+    #[async_trait(?Send)]
+    impl GatewayTransport for InvalidUtf8TextTransport {
+        async fn send(&self, _request: GatewayRequest) -> Result<GatewayResponse> {
+            GatewayResponse::new(
+                200,
+                vec![GatewayHeader::new("Content-Type", self.0)?],
+                vec![b'<', 0xff, b'>'],
+            )
+        }
+    }
+
+    #[test]
+    fn gateway_rejects_non_utf8_rewritable_documents() -> Result<()> {
+        let target = TargetUrl::parse("https://example.com/index.html")?.into_url();
+        for content_type in [
+            "text/html; charset=iso-8859-1",
+            "text/css; charset=iso-8859-1",
+        ] {
+            let mut gateway = WebviewGateway::new(
+                GatewayPrefix::new("/webview/")?,
+                InvalidUtf8TextTransport(content_type),
+            );
+            let result = futures::executor::block_on(
+                gateway.send(GatewayRequest::navigation(target.clone())),
+            );
+
+            assert!(matches!(
+                result,
+                Err(WebviewError::UnrewritableTextEncoding { content_type: actual })
+                    if actual == content_type
+            ));
+        }
         Ok(())
     }
 

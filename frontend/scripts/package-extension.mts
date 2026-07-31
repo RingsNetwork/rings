@@ -5,7 +5,7 @@
  */
 
 import { execFile } from "node:child_process";
-import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -111,6 +111,11 @@ await mkdir(extensionDist, { recursive: true });
 await cp(join(sourceRoot, jsFile), join(extensionDist, jsFile));
 await cp(join(sourceRoot, wasmFile), join(extensionDist, wasmFile));
 await cp(join(projectRoot, "assets"), join(extensionDist, "assets"), { recursive: true });
+await Promise.all([
+  rm(join(extensionDist, "assets", "webview-host.js")),
+  rm(join(extensionDist, "assets", "webview-overlay.js")),
+  rm(join(extensionDist, "assets", "webview-worker-response.js")),
+]);
 
 await writeFile(join(extensionDist, "index.html"), htmlShell(jsFile, wasmFile, { includeNodeBridge: true }), "utf8");
 await writeFile(
@@ -128,6 +133,7 @@ await writeFile(
   `${JSON.stringify(manifest(extensionVersion), null, 2)}\n`,
   "utf8",
 );
+await verifyExtensionOmitsWebviewGatewayAssets();
 
 console.log(`Packaged Chrome MV3 extension at ${extensionDist}`);
 
@@ -140,6 +146,31 @@ function frontendProjectRoot(currentScriptDir: string): string {
     return resolve(parentDir, "..");
   }
   return resolve(currentScriptDir, "..");
+}
+
+/**
+ * The WebView gateway requires a Service Worker controlling an HTTP(S) frontend origin.
+ * Chrome extension pages cannot provide that controller, and extension mode deliberately
+ * disables WebView. Keep its browser-only runtime out of the MV3 artifact.
+ */
+async function verifyExtensionOmitsWebviewGatewayAssets(): Promise<void> {
+  const excludedFiles = [
+    "rings-webview-service-worker.js",
+    join("assets", "webview-host.js"),
+    join("assets", "webview-overlay.js"),
+    join("assets", "webview-worker-response.js"),
+  ];
+  await Promise.all(
+    excludedFiles.map(async (file: string): Promise<void> => {
+      const found = await access(join(extensionDist, file)).then(
+        (): boolean => true,
+        (): boolean => false,
+      );
+      if (found) {
+        throw new Error(`Packaged extension must not include browser-only WebView asset: ${file}`);
+      }
+    }),
+  );
 }
 
 /**

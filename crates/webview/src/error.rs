@@ -101,6 +101,12 @@ pub enum WebviewError {
     /// A gateway response could not be rendered as a page.
     #[error("webview render failed: {0}")]
     Render(String),
+    /// An HTML or CSS response cannot be safely rewritten because it is not UTF-8.
+    #[error("cannot safely rewrite {content_type:?} response as UTF-8")]
+    UnrewritableTextEncoding {
+        /// Upstream response media type that requires rewriting.
+        content_type: String,
+    },
     /// Browser integration failed.
     #[cfg(feature = "browser")]
     #[error("browser integration failed: {0}")]

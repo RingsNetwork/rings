@@ -1,5 +1,6 @@
 //! Browser-facing webview helpers.
 
+use serde::Serialize;
 use url::Url;
 
 use crate::error::Result;
@@ -7,6 +8,30 @@ use crate::url::GatewayPrefix;
 
 /// JavaScript bootstrap template marker used by tests and consumers.
 pub const BOOTSTRAP_MARKER: &str = "__ringsWebviewGateway";
+
+/// Serialized shape accepted by the browser onion HTTPS client.
+#[derive(Serialize)]
+struct OnionHttpsRequest<'a> {
+    method: &'a str,
+    path: String,
+    headers: Vec<(&'a str, &'a str)>,
+    body: &'a [u8],
+}
+
+impl<'a> From<&'a crate::types::GatewayRequest> for OnionHttpsRequest<'a> {
+    fn from(request: &'a crate::types::GatewayRequest) -> Self {
+        Self {
+            method: request.method.as_str(),
+            path: request.path_and_query(),
+            headers: request
+                .headers
+                .iter()
+                .map(|header| (header.name.as_str(), header.value.as_str()))
+                .collect(),
+            body: request.body.as_slice(),
+        }
+    }
+}
 
 /// Build a small runtime that routes browser-created URLs through the gateway prefix.
 pub fn bootstrap_script(gateway_prefix: &str, document_url: &Url) -> String {
@@ -530,26 +555,22 @@ pub fn bootstrap_script(gateway_prefix: &str, document_url: &Url) -> String {
     }};
   }}
   const NativeXHR = globalThis.XMLHttpRequest;
-  if (NativeXHR) {{
-    globalThis.XMLHttpRequest = function() {{
-      const xhr = new NativeXHR();
-      const open = xhr.open;
-      xhr.open = function(method, url, async, user, password) {{
+  const nativeXhrOpen = NativeXHR?.prototype?.open;
+  if (typeof nativeXhrOpen === "function") {{
+    NativeXHR.prototype.open = function(method, url, async, user, password) {{
         const runtime = runtimeGatewayRequest(url);
         if (async === false && runtime.target) {{
           reportFormNavigation(`Blocked synchronous XMLHttpRequest to ${{runtime.target}}`);
           throw new TypeError("Synchronous XMLHttpRequest is blocked by Rings WebView");
         }}
-        const result = open.call(xhr, method, runtime.url, async, user, password);
+        const result = nativeXhrOpen.call(this, method, runtime.url, async, user, password);
         try {{
           if (runtime.target) {{
-            xhr.setRequestHeader("X-Rings-Webview-Kind", "xhr");
-            xhr.setRequestHeader(runtimeTargetHeader, runtime.target);
+            this.setRequestHeader("X-Rings-Webview-Kind", "xhr");
+            this.setRequestHeader(runtimeTargetHeader, runtime.target);
           }}
         }} catch (_error) {{}}
         return result;
-      }};
-      return xhr;
     }};
   }}
   blockUnsupportedConstructor("WebSocket");
@@ -675,6 +696,7 @@ mod wasm {
     use wasm_bindgen::JsValue;
     use wasm_bindgen_futures::JsFuture;
 
+    use super::OnionHttpsRequest;
     use crate::error::Result;
     use crate::error::WebviewError;
     use crate::transport::GatewayTransport;
@@ -700,7 +722,8 @@ mod wasm {
                 .map_err(|error| WebviewError::Browser(format!("{error:?}")))?
                 .dyn_into::<Function>()
                 .map_err(|_| WebviewError::Browser("proxy.request is not callable".to_string()))?;
-            let request_value = serde_wasm_bindgen::to_value(&request)
+            let onion_request = OnionHttpsRequest::from(&request);
+            let request_value = serde_wasm_bindgen::to_value(&onion_request)
                 .map_err(|error| WebviewError::Browser(error.to_string()))?;
             let value = method
                 .call2(

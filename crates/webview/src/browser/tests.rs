@@ -1,5 +1,7 @@
 use super::*;
 use crate::error::WebviewError;
+use crate::types::GatewayHeader;
+use crate::types::GatewayRequest;
 
 #[test]
 fn bootstrap_hooks_browser_network_entrypoints() -> Result<()> {
@@ -24,6 +26,27 @@ fn bootstrap_hooks_browser_network_entrypoints() -> Result<()> {
     assert!(script.contains("HTMLBaseElement"));
     assert!(script.contains("setAttribute"));
     assert!(script.contains("encodeURIComponent"));
+    Ok(())
+}
+
+#[test]
+fn onion_https_request_preserves_path_headers_and_body() -> Result<()> {
+    let request = GatewayRequest::xhr(
+        Url::parse("https://example.test:8443/forms/submit?draft=1")?,
+        "POST",
+    )
+    .with_header(GatewayHeader::new("X-Requested-With", "XMLHttpRequest")?)
+    .with_body(b"name=value".to_vec());
+
+    let onion_request = OnionHttpsRequest::from(&request);
+
+    assert_eq!(onion_request.method, "POST");
+    assert_eq!(onion_request.path, "/forms/submit?draft=1");
+    assert_eq!(
+        onion_request.headers,
+        vec![("X-Requested-With", "XMLHttpRequest")]
+    );
+    assert_eq!(onion_request.body, b"name=value");
     Ok(())
 }
 
@@ -87,6 +110,7 @@ globalThis.fetch = function(input, init) {{
   return "fetch-result";
 }};
 class XMLHttpRequest {{
+  static DONE = 4;
   setRequestHeader(name, value) {{
 calls.push(["xhr-header", name, value]);
   }}
@@ -189,6 +213,9 @@ const gateway = (url) => "/webview/" + encodeURIComponent(url);
 await fetch("/api/data");
 await fetch(new Request("forms/submit"), {{ method: "POST" }});
 const xhr = new globalThis.XMLHttpRequest();
+assert(xhr instanceof XMLHttpRequest, "XHR constructor identity was not preserved");
+assert(globalThis.XMLHttpRequest === XMLHttpRequest, "XHR constructor was replaced");
+assert(globalThis.XMLHttpRequest.DONE === 4, "XHR static constants were not preserved");
 xhr.open("POST", "forms/x", true);
 const syncXhr = new globalThis.XMLHttpRequest();
 assertThrows(() => syncXhr.open("GET", "forms/sync", false), "synchronous gateway XHR was not blocked");
