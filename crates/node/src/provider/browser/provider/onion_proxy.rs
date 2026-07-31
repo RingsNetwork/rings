@@ -14,8 +14,26 @@ use crate::onion::circuit::ONION_CIRCUIT_NAMESPACE;
 use crate::onion::https::encode_https_payload;
 use crate::onion::https::OnionHttpsClientRequest;
 use crate::onion::https::OnionHttpsPayload;
+use crate::onion::proxy::OnionProxyRoute;
+use crate::onion::proxy::OnionProxyTarget;
 
 impl BrowserOnionProxy {
+    async fn build_route(&self, target: OnionProxyTarget) -> NodeResult<OnionProxyRoute> {
+        build_browser_onion_proxy_route(
+            self.processor.clone(),
+            self.config.clone(),
+            target,
+            self.directory_endpoint.clone(),
+        )
+        .await
+    }
+
+    /// Build one typed HTTPS onion route without crossing a JavaScript promise boundary.
+    pub async fn route_http(&self, target_authority: &str) -> NodeResult<OnionProxyRoute> {
+        let target = OnionProxyTarget::parse_authority(target_authority)?;
+        self.build_route(target).await
+    }
+
     /// Send one typed HTTPS request through this proxy.
     ///
     /// Dropping the returned future cancels its pending circuit immediately. Browser frontends
@@ -26,13 +44,7 @@ impl BrowserOnionProxy {
         request: OnionHttpsClientRequest,
     ) -> NodeResult<BrowserOnionProxyResponse> {
         let (target, request) = crate::onion::https::client_request_from_url(url, request)?;
-        let proxy_route = build_browser_onion_proxy_route(
-            self.processor.clone(),
-            self.config.clone(),
-            target,
-            self.directory_endpoint.clone(),
-        )
-        .await?;
+        let proxy_route = self.build_route(target).await?;
         let first_hop = route_first_hop(&proxy_route.route)?;
         let client_return =
             OnionClientReturn::new(self.processor.session_sk().session_public_key());
@@ -62,9 +74,7 @@ impl BrowserOnionProxy {
                 }
             },
             Either::Right((_, _)) => {
-                return Err(Error::HttpRequestError(
-                    "onion HTTPS proxy request timed out".to_string(),
-                ));
+                return Err(Error::OnionProxyRequestTimedOut);
             }
         };
         Ok(BrowserOnionProxyResponse {

@@ -284,69 +284,45 @@ fn browser_transport_failure(error: WebviewError) -> JsValue {
             failure.detail().to_string(),
         ),
         WebviewError::Transport(message) => browser_failure_with(
-            BrowserFailureKind::GatewayTransport.status(),
-            BrowserFailureKind::GatewayTransport.code(),
-            BrowserFailureKind::GatewayTransport.summary(),
+            502,
+            "gateway_transport_failed",
+            "Gateway transport failed.",
             format!("gateway transport failed: {message}"),
         ),
         other => browser_failure_with(
-            BrowserFailureKind::GatewayTransport.status(),
-            BrowserFailureKind::GatewayTransport.code(),
-            BrowserFailureKind::GatewayTransport.summary(),
+            502,
+            "gateway_transport_failed",
+            "Gateway transport failed.",
             format!("gateway transport failed: {other}"),
         ),
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum BrowserFailureKind {
-    GatewayTransport,
-    OnionExitUnavailable,
-    OnionRouteUnavailable,
-    OnionRequestTimedOut,
-}
-
-impl BrowserFailureKind {
-    fn status(self) -> u16 {
-        match self {
-            Self::GatewayTransport => 502,
-            Self::OnionExitUnavailable | Self::OnionRouteUnavailable => 503,
-            Self::OnionRequestTimedOut => 504,
-        }
-    }
-
-    fn code(self) -> &'static str {
-        match self {
-            Self::GatewayTransport => "gateway_transport_failed",
-            Self::OnionExitUnavailable => "onion_exit_unavailable",
-            Self::OnionRouteUnavailable => "onion_route_unavailable",
-            Self::OnionRequestTimedOut => "onion_request_timed_out",
-        }
-    }
-
-    fn summary(self) -> &'static str {
-        match self {
-            Self::GatewayTransport => "Gateway transport failed.",
-            Self::OnionExitUnavailable => "No live HTTPS onion exit is available.",
-            Self::OnionRouteUnavailable => {
-                "No onion route is currently available for the requested target."
-            }
-            Self::OnionRequestTimedOut => "Onion HTTPS proxy request timed out.",
-        }
-    }
-}
-
 fn onion_gateway_failure(error: onion::OnionProxyError) -> WebviewError {
-    let failure = match error.kind() {
-        onion::OnionProxyFailureKind::Generic => BrowserFailureKind::GatewayTransport,
-        onion::OnionProxyFailureKind::ExitUnavailable => BrowserFailureKind::OnionExitUnavailable,
-        onion::OnionProxyFailureKind::RouteUnavailable => BrowserFailureKind::OnionRouteUnavailable,
-        onion::OnionProxyFailureKind::RequestTimedOut => BrowserFailureKind::OnionRequestTimedOut,
+    let (status, code, summary) = match error.kind() {
+        onion::OnionProxyFailureKind::Generic => {
+            (502, "gateway_transport_failed", "Gateway transport failed.")
+        }
+        onion::OnionProxyFailureKind::ExitUnavailable => (
+            503,
+            "onion_exit_unavailable",
+            "No live HTTPS onion exit is available.",
+        ),
+        onion::OnionProxyFailureKind::RouteUnavailable => (
+            503,
+            "onion_route_unavailable",
+            "No onion route is currently available for the requested target.",
+        ),
+        onion::OnionProxyFailureKind::RequestTimedOut => (
+            504,
+            "onion_request_timed_out",
+            "Onion HTTPS proxy request timed out.",
+        ),
     };
     WebviewError::GatewayFailure(GatewayFailure::new(
-        failure.status(),
-        failure.code(),
-        failure.summary(),
+        status,
+        code,
+        summary,
         format!("gateway transport failed: {}", error.message()),
     ))
 }

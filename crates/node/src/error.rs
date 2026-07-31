@@ -236,6 +236,9 @@ pub enum Error {
     /// Onion proxy I/O failed.
     #[error("Onion proxy IO error: {0}")]
     OnionProxyIoError(String) = 1602,
+    /// A local onion proxy request did not complete before its deadline.
+    #[error("Onion proxy request timed out")]
+    OnionProxyRequestTimedOut = 1603,
 }
 
 impl Error {

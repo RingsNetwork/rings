@@ -3,9 +3,7 @@ use async_trait::async_trait;
 use crate::dht::ChordStorageSync;
 use crate::error::Error;
 use crate::error::Result;
-use crate::message::effects::ConnectionFunctor;
-use crate::message::effects::PayloadRelayFunctor;
-use crate::message::effects::StorageSyncFunctor;
+use crate::message::effects::CoreEffect;
 use crate::message::types::Message;
 use crate::message::types::NotifyPredecessorReport;
 use crate::message::types::NotifyPredecessorSend;
@@ -20,7 +18,7 @@ impl HandleMsg<NotifyPredecessorSend> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &NotifyPredecessorSend) -> Result<()> {
         if ctx.should_forward_from(self.dht.did) {
             return self
-                .run_effects([PayloadRelayFunctor::forward_payload(ctx, None).into()])
+                .run_effects([CoreEffect::forward_payload(ctx, None)])
                 .await;
         }
 
@@ -31,11 +29,10 @@ impl HandleMsg<NotifyPredecessorSend> for MessageHandler {
 
         if predecessor != origin {
             return self
-                .run_effects([PayloadRelayFunctor::send_report_message(
+                .run_effects([CoreEffect::send_report_message(
                     ctx,
                     Message::NotifyPredecessorReport(NotifyPredecessorReport { did: predecessor }),
-                )
-                .into()])
+                )])
                 .await;
         }
 
@@ -64,7 +61,7 @@ impl MessageHandler {
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
     async fn handle(&self, _ctx: &MessagePayload, msg: &NotifyPredecessorReport) -> Result<()> {
-        self.run_effects([ConnectionFunctor::connect_dht_peer(msg.did).into()])
+        self.run_effects([CoreEffect::connect_dht_peer(msg.did)])
             .await?;
 
         let deliveries = self
@@ -74,7 +71,7 @@ impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
             .coalesced_storage_sync_deliveries()?;
         let effects = deliveries.into_iter().map(|delivery| {
             let msg = SyncEntriesWithSuccessor::from_delivery(delivery);
-            StorageSyncFunctor::send_storage_sync(msg).into()
+            CoreEffect::send_storage_sync(msg)
         });
         self.run_effects(effects).await?;
 

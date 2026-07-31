@@ -5,11 +5,13 @@ use std::fmt;
 use js_sys::Array;
 use js_sys::Object;
 use js_sys::Uint8Array;
+use rings_node::error::Error as NodeError;
 use rings_node::onion::https::OnionHttpsClientRequest;
+use rings_node::onion::proxy::OnionProxyRoute as NodeOnionProxyRoute;
+use rings_node::onion::OnionRouteError;
 use rings_node::provider::Provider;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
-use wasm_bindgen_futures::JsFuture;
 use web_sys::Url;
 
 use crate::browser_api::js_bool_field;
@@ -106,15 +108,6 @@ impl OnionProxyError {
         }
     }
 
-    /// Build an onion proxy error whose kind is derived once at the JS boundary.
-    pub(crate) fn classified(message: impl Into<String>) -> Self {
-        let message = message.into();
-        Self {
-            kind: classify_onion_proxy_failure(&message),
-            message,
-        }
-    }
-
     /// Stable class for browser-facing failure handling.
     pub(crate) fn kind(&self) -> OnionProxyFailureKind {
         self.kind
@@ -137,6 +130,29 @@ impl std::error::Error for OnionProxyError {}
 impl From<String> for OnionProxyError {
     fn from(message: String) -> Self {
         Self::generic(message)
+    }
+}
+
+impl From<NodeError> for OnionProxyError {
+    fn from(error: NodeError) -> Self {
+        let kind = match &error {
+            NodeError::OnionRouteError(OnionRouteError::NoLiveExit { .. }) => {
+                OnionProxyFailureKind::ExitUnavailable
+            }
+            NodeError::OnionRouteError(
+                OnionRouteError::NotEnoughRelays { .. }
+                | OnionRouteError::NoPermittedFirstHop
+                | OnionRouteError::NoExitWithTransport { .. }
+                | OnionRouteError::NoExitForProxyProtocol { .. }
+                | OnionRouteError::NoExitAllowsTarget { .. },
+            ) => OnionProxyFailureKind::RouteUnavailable,
+            NodeError::OnionProxyRequestTimedOut => OnionProxyFailureKind::RequestTimedOut,
+            _ => OnionProxyFailureKind::Generic,
+        };
+        Self {
+            kind,
+            message: error.to_string(),
+        }
     }
 }
 
@@ -355,15 +371,11 @@ pub(crate) async fn route(
                 js_error_label(error.into())
             ))
         })?;
-    let value = JsFuture::from(proxy.route(target_authority))
+    let route = proxy
+        .route_http(&target_authority)
         .await
-        .map_err(|error| {
-            OnionProxyError::classified(format!(
-                "build onion route failed: {}",
-                js_error_label(error)
-            ))
-        })?;
-    OnionProxyRoute::from_js(&value).map_err(OnionProxyError::generic)
+        .map_err(OnionProxyError::from)?;
+    Ok(display_route(&route))
 }
 
 /// Send one HTTPS request through an onion proxy.
@@ -383,45 +395,20 @@ pub(crate) async fn request(
     let response = proxy
         .request_http(request.url.as_str(), request.client_request())
         .await
-        .map_err(|error| {
-            OnionProxyError::classified(format!("onion proxy request failed: {}", error))
-        })?;
+        .map_err(OnionProxyError::from)?;
     Ok(OnionProxyResponse {
         status: response.response.status,
         headers: response.response.headers,
         body: response.response.body,
-        route: Some(OnionProxyRoute {
-            service: response.route.exit_service().to_string(),
-            hops: response
-                .route
-                .route
-                .hops()
-                .iter()
-                .map(ToString::to_string)
-                .collect(),
-            exit: response.route.exit_did().to_string(),
-        }),
+        route: Some(display_route(&response.route)),
     })
 }
 
-fn classify_onion_proxy_failure(message: &str) -> OnionProxyFailureKind {
-    if message.contains("no live onion exit offers service \"https\"") {
-        OnionProxyFailureKind::ExitUnavailable
-    } else if [
-        "no live onion exit",
-        "not enough relay candidates",
-        "no onion route has a permitted first hop",
-    ]
-    .iter()
-    .any(|needle| message.contains(needle))
-    {
-        OnionProxyFailureKind::RouteUnavailable
-    } else if message.contains("onion HTTPS proxy request timed out")
-        || message.contains("browser HTTPS proxy request timed out")
-    {
-        OnionProxyFailureKind::RequestTimedOut
-    } else {
-        OnionProxyFailureKind::Generic
+fn display_route(route: &NodeOnionProxyRoute) -> OnionProxyRoute {
+    OnionProxyRoute {
+        service: route.exit_service().to_string(),
+        hops: route.route.hops().iter().map(ToString::to_string).collect(),
+        exit: route.exit_did().to_string(),
     }
 }
 
@@ -599,6 +586,8 @@ mod tests {
     use wasm_bindgen_test::wasm_bindgen_test;
 
     use super::target_authority;
+    use super::OnionProxyError;
+    use super::OnionProxyFailureKind;
     use super::OnionProxyHttpRequest;
     use super::OnionProxyOptions;
     use super::OnionProxyRouteRequest;
@@ -667,6 +656,23 @@ mod tests {
             target_authority("https://Example.COM:8443/original").as_deref(),
             Ok("example.com:8443")
         );
+    }
+
+    #[wasm_bindgen_test]
+    fn typed_node_errors_preserve_browser_failure_kind() {
+        let exit = OnionProxyError::from(super::NodeError::OnionRouteError(
+            super::OnionRouteError::NoLiveExit {
+                service: "https".to_string(),
+            },
+        ));
+        let route = OnionProxyError::from(super::NodeError::OnionRouteError(
+            super::OnionRouteError::NotEnoughRelays { hop_count: 3 },
+        ));
+        let timeout = OnionProxyError::from(super::NodeError::OnionProxyRequestTimedOut);
+
+        assert_eq!(exit.kind(), OnionProxyFailureKind::ExitUnavailable);
+        assert_eq!(route.kind(), OnionProxyFailureKind::RouteUnavailable);
+        assert_eq!(timeout.kind(), OnionProxyFailureKind::RequestTimedOut);
     }
 
     #[wasm_bindgen_test]

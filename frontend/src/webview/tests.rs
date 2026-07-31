@@ -267,10 +267,10 @@ fn browser_cookie_expiry_uses_browser_safe_clock() -> WebviewResult<()> {
 #[wasm_bindgen_test]
 fn onion_route_unavailable_is_reported_without_wasm_stack() -> WebviewResult<()> {
     let response = browser_transport_failure(onion_gateway_failure(
-        onion::OnionProxyError::classified(
-        "onion proxy request failed: Onion route error: no live onion exit offers service \"https\""
-            .to_string(),
-        ),
+        rings_node::error::Error::OnionRouteError(rings_node::onion::OnionRouteError::NoLiveExit {
+            service: "https".to_string(),
+        })
+        .into(),
     ));
 
     let status = crate::browser_api::js_prop(&response, "status")
@@ -289,7 +289,7 @@ fn onion_route_unavailable_is_reported_without_wasm_stack() -> WebviewResult<()>
     assert_eq!(summary, "No live HTTPS onion exit is available.");
     assert_eq!(
         error,
-        "gateway transport failed: onion proxy request failed: Onion route error: no live onion exit offers service \"https\""
+        "gateway transport failed: Onion route error: no live onion exit offers service \"https\""
     );
     assert!(!error.contains("wasm-function"));
     Ok(())

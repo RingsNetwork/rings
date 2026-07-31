@@ -5,8 +5,6 @@ use crate::message::e2e::E2eHandshakeRequest;
 use crate::message::e2e::E2eHandshakeResponse;
 use crate::message::e2e::E2eStreamFrame;
 use crate::message::effects::CoreEffect;
-use crate::message::effects::MessageSendFunctor;
-use crate::message::effects::PayloadRelayFunctor;
 use crate::message::HandleMsg;
 use crate::message::Message;
 use crate::message::MessageHandler;
@@ -19,7 +17,7 @@ fn e2e_local_or_forward_effects<'payload>(
     ctx: &'payload MessagePayload,
 ) -> Option<CoreEffect<'payload>> {
     if ctx.should_forward_from(local) {
-        Some(PayloadRelayFunctor::forward_payload(ctx, None).into())
+        Some(CoreEffect::forward_payload(ctx, None))
     } else {
         None
     }
@@ -43,11 +41,10 @@ fn e2e_handshake_response_effect<'payload>(
     responder_public_key: crate::ecc::PublicKey<33>,
 ) -> Result<CoreEffect<'payload>> {
     msg.verify_requester(ctx.signer())?;
-    Ok(MessageSendFunctor::send_message(
+    Ok(CoreEffect::send_message(
         Message::E2eHandshakeResponse(E2eHandshakeResponse::new(responder_public_key)),
         ctx.signer(),
-    )
-    .into())
+    ))
 }
 
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
@@ -148,7 +145,7 @@ mod tests {
         let effect = e2e_handshake_response_effect(&payload, &request, responder.pubkey())?;
 
         match effect {
-            CoreEffect::Message(MessageSendFunctor::SendMessage { msg, destination }) => {
+            CoreEffect::SendMessage { msg, destination } => {
                 assert_eq!(destination, requester.address().into());
                 match *msg {
                     Message::E2eHandshakeResponse(response) => {
@@ -194,10 +191,10 @@ mod tests {
             .ok_or_else(|| Error::InvalidMessage("expected ForwardPayload effect".to_string()))?;
 
         match effect {
-            CoreEffect::Payload(PayloadRelayFunctor::ForwardPayload {
+            CoreEffect::ForwardPayload {
                 payload: forwarded,
                 next_hop,
-            }) => {
+            } => {
                 assert!(std::ptr::eq(forwarded, &payload));
                 assert_eq!(next_hop, None);
             }

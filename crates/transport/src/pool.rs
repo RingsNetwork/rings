@@ -15,6 +15,7 @@ use crate::core::transport::ConnectionStateSnapshot;
 use crate::core::transport::WebrtcConnectionState;
 use crate::error::Error;
 use crate::error::Result;
+use crate::PlatformSendSync;
 
 /// [Pool] manages all the connections for each peer.
 pub struct Pool<C> {
@@ -103,10 +104,9 @@ impl<C> Pool<C> {
     }
 }
 
-#[cfg(not(all(feature = "web-sys-webrtc", target_family = "wasm")))]
 impl<C, S> Pool<C>
 where
-    C: ConnectionInterface<Error = Error, Sdp = S> + Send + Sync,
+    C: ConnectionInterface<Error = Error, Sdp = S> + PlatformSendSync,
     S: Serialize + DeserializeOwned + Send + Sync + 'static,
 {
     /// The `safely_insert` method is used to insert a connection into the pool.
@@ -391,70 +391,5 @@ mod tests {
             Err(Error::ConnectionNotFound(_))
         ));
         Ok(())
-    }
-}
-
-#[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
-impl<C, S> Pool<C>
-where
-    C: ConnectionInterface<Error = Error, Sdp = S>,
-    S: Serialize + DeserializeOwned + Send + Sync + 'static,
-{
-    /// The `safely_insert` method is used to insert a connection into the pool.
-    /// It ensures that the connection is not inserted twice in concurrent scenarios.
-    ///
-    /// The implementation of match statement refers to Entry::insert in dashmap.
-    /// An extra check is added to see if the connection is already connected.
-    /// See also: https://docs.rs/dashmap/latest/dashmap/mapref/entry/enum.Entry.html#method.insert
-    pub async fn safely_insert(&self, cid: &str, conn: C) -> Result<ConnectionRef<C>> {
-        let insertion = self.insert_if_replaceable(cid, conn, |current| {
-            current.webrtc_connection_state().occupies_peer_slot()
-        });
-        match insertion {
-            PoolInsertion::Inserted {
-                connection,
-                retired,
-            } => {
-                if let Some(retired) = retired {
-                    if let Err(error) = retired.close().await {
-                        tracing::warn!(
-                            connection_id = cid,
-                            error = ?error,
-                            "failed to close replaced transport connection"
-                        );
-                    }
-                }
-                Ok(connection)
-            }
-            PoolInsertion::Rejected { candidate, error } => {
-                if let Err(close_error) = candidate.close().await {
-                    tracing::warn!(
-                        connection_id = cid,
-                        error = ?close_error,
-                        "failed to close rejected transport connection"
-                    );
-                }
-                Err(error)
-            }
-        }
-    }
-
-    /// This method closes and releases the connection from pool.
-    /// All references to this cid, created by `get_connection`, will be released.
-    /// The [ConnectionInterface] methods of them will return [Error::ConnectionReleased].
-    pub async fn safely_remove(&self, cid: &str) -> Result<()> {
-        let Some((_, conn)) = self.connections.remove(cid) else {
-            return Err(Error::ConnectionNotFound(cid.to_string()));
-        };
-        conn.close().await
-    }
-
-    /// Remove and close `expected` only while it still owns its pool slot.
-    pub async fn safely_remove_if_current(&self, expected: &ConnectionRef<C>) -> Result<bool> {
-        let Some(conn) = self.take_if_current(expected) else {
-            return Ok(false);
-        };
-        conn.close().await?;
-        Ok(true)
     }
 }

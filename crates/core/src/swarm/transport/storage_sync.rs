@@ -26,14 +26,8 @@ pub(super) struct StorageSyncAckCapability {
     recorded_at_ms: i64,
     purpose: StorageSyncPurpose,
     destination: StorageSyncDestination,
-    receiver_proof: StorageSyncReceiverProof,
+    expected_receiver: Did,
     expected_acks: Vec<SyncedEntryAck>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum StorageSyncReceiverProof {
-    PhysicalOwner(Did),
-    StorageRouteNextHop(Did),
 }
 
 #[derive(Clone, Copy)]
@@ -48,22 +42,13 @@ pub(crate) enum TrackedStorageSyncOutcome {
     Deferred,
 }
 
-impl StorageSyncReceiverProof {
-    // Invariant: this proof records exactly the receiver identity the sender can
-    // justify at send time. PhysicalOwner is a final identity. PlacementKey is
-    // only the storage-route next hop visible from the sender; reports from
-    // farther nodes are not allowed to delete local storage at this boundary.
-    fn from_destination(destination: StorageSyncDestination, route_next_hop: Did) -> Self {
-        match destination {
-            StorageSyncDestination::PhysicalOwner(owner) => Self::PhysicalOwner(owner),
-            StorageSyncDestination::PlacementKey(_) => Self::StorageRouteNextHop(route_next_hop),
-        }
-    }
-
-    fn permits(self, receiver: Did) -> bool {
-        match self {
-            Self::PhysicalOwner(owner) | Self::StorageRouteNextHop(owner) => owner == receiver,
-        }
+// Invariant: physical-owner sync proves the final owner identity. Placement-key
+// sync proves only the next hop visible from the sender, so a farther receiver
+// cannot use its report to delete local storage.
+fn expected_storage_sync_receiver(destination: StorageSyncDestination, route_next_hop: Did) -> Did {
+    match destination {
+        StorageSyncDestination::PhysicalOwner(owner) => owner,
+        StorageSyncDestination::PlacementKey(_) => route_next_hop,
     }
 }
 
@@ -176,7 +161,7 @@ impl SwarmTransport {
             recorded_at_ms: storage_sync_ack_now_ms(),
             purpose,
             destination,
-            receiver_proof: StorageSyncReceiverProof::from_destination(destination, route_next_hop),
+            expected_receiver: expected_storage_sync_receiver(destination, route_next_hop),
             expected_acks: expected_sync_acks(data)?,
         };
         let mut pending = self
@@ -237,7 +222,7 @@ impl SwarmTransport {
                 "storage sync report destination does not match pending sync".to_string(),
             ));
         }
-        if !capability.receiver_proof.permits(signer) {
+        if capability.expected_receiver != signer {
             return Err(Error::InvalidMessage(
                 "storage sync report receiver does not match pending sync".to_string(),
             ));

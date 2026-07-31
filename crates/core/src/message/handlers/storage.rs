@@ -20,7 +20,7 @@ use crate::dht::StorageSyncDestination;
 use crate::dht::StorageSyncPurpose;
 use crate::error::Error;
 use crate::error::Result;
-use crate::message::effects::PayloadRelayFunctor;
+use crate::message::effects::CoreEffect;
 use crate::message::types::FoundEntry;
 use crate::message::types::Message;
 use crate::message::types::SearchEntry;
@@ -75,7 +75,7 @@ async fn reset_storage_relay_destination(
     next: Did,
 ) -> Result<()> {
     handler
-        .run_effects([PayloadRelayFunctor::reset_destination(ctx, next).into()])
+        .run_effects([CoreEffect::reset_destination(ctx, next)])
         .await
 }
 
@@ -228,7 +228,7 @@ async fn handle_storage_search_act(
     match act {
         PeerRingAction::SomeEntry(evidence) => {
             handler
-                .run_effects([PayloadRelayFunctor::send_report_message(
+                .run_effects([CoreEffect::send_report_message(
                     ctx,
                     Message::FoundEntry(FoundEntry {
                         data: vec![evidence.entry],
@@ -236,13 +236,12 @@ async fn handle_storage_search_act(
                         resource,
                         redundancy,
                     }),
-                )
-                .into()])
+                )])
                 .await
         }
         PeerRingAction::EntryMisses(misses) => {
             handler
-                .run_effects([PayloadRelayFunctor::send_report_message(
+                .run_effects([CoreEffect::send_report_message(
                     ctx,
                     Message::FoundEntry(FoundEntry {
                         data: vec![],
@@ -250,8 +249,7 @@ async fn handle_storage_search_act(
                         resource,
                         redundancy,
                     }),
-                )
-                .into()])
+                )])
                 .await
         }
         PeerRingAction::RemoteAction(next, _) => {
@@ -374,7 +372,7 @@ async fn report_synced_entries(
     acks: Vec<SyncedEntryAck>,
 ) -> Result<()> {
     handler
-        .run_effects([PayloadRelayFunctor::send_report_message(
+        .run_effects([CoreEffect::send_report_message(
             ctx,
             Message::SyncEntriesWithSuccessorReport(SyncEntriesWithSuccessorReport::new(
                 purpose,
@@ -382,8 +380,7 @@ async fn report_synced_entries(
                 handler.dht.did,
                 acks,
             )),
-        )
-        .into()])
+        )])
         .await
 }
 
@@ -472,7 +469,7 @@ impl HandleMsg<FoundEntry> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &FoundEntry) -> Result<()> {
         if ctx.should_forward_from(self.dht.did) {
             return self
-                .run_effects([PayloadRelayFunctor::forward_payload(ctx, None).into()])
+                .run_effects([CoreEffect::forward_payload(ctx, None)])
                 .await;
         }
         // Pre: this node started a local lookup for (resource, redundancy).
@@ -515,7 +512,7 @@ impl HandleMsg<SyncEntriesWithSuccessor> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &SyncEntriesWithSuccessor) -> Result<()> {
         if let Some(next) = next_hop_for_sync_entries(self, ctx, msg)? {
             return self
-                .run_effects([PayloadRelayFunctor::forward_payload(ctx, Some(next)).into()])
+                .run_effects([CoreEffect::forward_payload(ctx, Some(next))])
                 .await;
         }
 
@@ -541,7 +538,7 @@ impl HandleMsg<SyncEntriesWithSuccessorReport> for MessageHandler {
     ) -> Result<()> {
         if ctx.should_forward_from(self.dht.did) {
             return self
-                .run_effects([PayloadRelayFunctor::forward_payload(ctx, None).into()])
+                .run_effects([CoreEffect::forward_payload(ctx, None)])
                 .await;
         }
 

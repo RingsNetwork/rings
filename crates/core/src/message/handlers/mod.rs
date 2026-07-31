@@ -3,11 +3,9 @@
 
 use std::sync::Arc;
 
-use async_recursion::async_recursion;
 use async_trait::async_trait;
 
 use super::effects::lower_dht_action;
-use super::effects::ConnectionFunctor;
 use super::effects::CoreEffect;
 use super::effects::CoreEffectInterpreter;
 use super::MessagePayload;
@@ -83,8 +81,7 @@ impl MessageHandler {
     /// as success so concurrent DHT actions racing through `MultiActions` do not
     /// fail the whole handler.
     pub(crate) async fn connect_dht_peer(&self, peer: Did) -> Result<()> {
-        self.run_effects([ConnectionFunctor::connect_dht_peer(peer).into()])
-            .await
+        self.run_effects([CoreEffect::connect_dht_peer(peer)]).await
     }
 
     /// Idempotently establish DHT-driven transport connections in local quality order.
@@ -193,7 +190,7 @@ impl MessageHandler {
         let mut other_effects = Vec::new();
         for effect in effects {
             match effect {
-                CoreEffect::Connection(ConnectionFunctor::ConnectDhtPeer { peer }) => {
+                CoreEffect::ConnectDhtPeer { peer } => {
                     connection_peers.push(peer);
                 }
                 effect => other_effects.push(effect),
@@ -219,8 +216,6 @@ impl MessageHandler {
         Ok(())
     }
 
-    #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_recursion(?Send))]
-    #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_recursion)]
     pub(crate) async fn handle_dht_events(&self, act: &PeerRingAction) -> Result<()> {
         if matches!(act, PeerRingAction::MultiActions(_)) {
             let mut effects = Vec::new();

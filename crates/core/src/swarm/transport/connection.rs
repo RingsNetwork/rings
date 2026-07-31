@@ -35,21 +35,12 @@ enum DhtPeerRemoval {
 /// Proof that one physical connection belongs to the current admitted
 /// generation for its peer.
 ///
-/// The value is intentionally not `Clone`: one send workflow owns one
-/// capability and revalidates it before every asynchronous progression.
+/// Clone law: clones identify the same physical connection generation. They do
+/// not authorize sends by possession; every asynchronous progression
+/// revalidates the generation through [`Self::ensure_current`] or
+/// [`Self::with_current`].
+#[derive(Clone)]
 pub(crate) struct AdmittedConnection {
-    attempt: PendingConnectionAttempt,
-    connection: SwarmConnection,
-    lifecycle_boundary: ConnectionLifecycleBoundary,
-    lifecycles: SharedConnectionLifecycles,
-}
-
-/// Final-admission checker for a generation-bound connection.
-///
-/// This value is intentionally not `Clone`. Repeated evaluation is harmless:
-/// it does not authorize a send by possession, but revalidates logical
-/// ownership while holding the same boundary used by admission and retirement.
-pub(crate) struct ConnectionSendAdmission {
     attempt: PendingConnectionAttempt,
     connection: SwarmConnection,
     lifecycle_boundary: ConnectionLifecycleBoundary,
@@ -94,17 +85,6 @@ impl AdmittedConnection {
         })
     }
 
-    pub(crate) fn send_admission(&self) -> ConnectionSendAdmission {
-        ConnectionSendAdmission {
-            attempt: self.attempt,
-            connection: self.connection.clone(),
-            lifecycle_boundary: self.lifecycle_boundary.clone(),
-            lifecycles: Arc::clone(&self.lifecycles),
-        }
-    }
-}
-
-impl ConnectionSendAdmission {
     /// Evaluate `condition` while this connection generation cannot be retired.
     ///
     /// `Ok(Some(value))` proves that `attempt` was active throughout

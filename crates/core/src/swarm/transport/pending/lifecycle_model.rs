@@ -128,8 +128,7 @@ enum LifecycleAction {
     Reserve,
     BeginAdmission(CallbackGeneration),
     CommitAdmission(CallbackGeneration),
-    Close(CallbackGeneration),
-    Failed(CallbackGeneration),
+    Terminal(CallbackGeneration),
     Timeout,
 }
 
@@ -166,9 +165,7 @@ impl LifecycleModel {
             LifecycleAction::Reserve => self.reserve(),
             LifecycleAction::BeginAdmission(callback) => self.begin_admission(callback),
             LifecycleAction::CommitAdmission(callback) => self.commit_admission(callback),
-            LifecycleAction::Close(callback) | LifecycleAction::Failed(callback) => {
-                self.terminal(callback)
-            }
+            LifecycleAction::Terminal(callback) => self.terminal(callback),
             LifecycleAction::Timeout => self.timeout(),
         }
         self
@@ -299,9 +296,7 @@ impl LifecycleImplementation {
             LifecycleAction::Reserve => self.reserve(),
             LifecycleAction::BeginAdmission(callback) => self.begin_admission(callback),
             LifecycleAction::CommitAdmission(callback) => self.commit_admission(callback),
-            LifecycleAction::Close(callback) | LifecycleAction::Failed(callback) => {
-                self.terminal(callback)
-            }
+            LifecycleAction::Terminal(callback) => self.terminal(callback),
             LifecycleAction::Timeout => self.timeout(),
         }
         self
@@ -439,10 +434,8 @@ fn pending_admission_model_preserves_generation_and_routing_invariants() {
         LifecycleAction::BeginAdmission(CallbackGeneration::Previous),
         LifecycleAction::CommitAdmission(CallbackGeneration::Current),
         LifecycleAction::CommitAdmission(CallbackGeneration::Previous),
-        LifecycleAction::Close(CallbackGeneration::Current),
-        LifecycleAction::Close(CallbackGeneration::Previous),
-        LifecycleAction::Failed(CallbackGeneration::Current),
-        LifecycleAction::Failed(CallbackGeneration::Previous),
+        LifecycleAction::Terminal(CallbackGeneration::Current),
+        LifecycleAction::Terminal(CallbackGeneration::Previous),
         LifecycleAction::Timeout,
     ];
     let peer = SecretKey::random().address().into();

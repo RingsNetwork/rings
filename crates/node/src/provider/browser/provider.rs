@@ -306,13 +306,10 @@ impl BrowserOnionProxy {
 
     /// Build an HTTPS-over-TCP onion proxy route for `target_authority` (`host:port`).
     pub fn route(&self, target_authority: String) -> js_sys::Promise {
-        let p = self.processor.clone();
-        let config = self.config.clone();
-        let directory_endpoint = self.directory_endpoint.clone();
+        let proxy = self.clone();
         future_to_promise(async move {
-            let target =
-                OnionProxyTarget::parse_authority(&target_authority).map_err(JsError::from)?;
-            let route = build_browser_onion_proxy_route(p, config, target, directory_endpoint)
+            let route = proxy
+                .route_http(&target_authority)
                 .await
                 .map_err(JsError::from)?;
             let response =

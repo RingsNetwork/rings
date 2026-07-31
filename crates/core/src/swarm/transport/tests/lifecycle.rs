@@ -361,7 +361,7 @@ async fn final_send_admission_serializes_generation_route_and_readiness() -> Res
     let admitted = transport
         .admitted_send_connection(peer)?
         .ok_or(Error::SwarmMissTransport(peer))?;
-    let admission = admitted.send_admission();
+    let admission = admitted;
     let dht = Arc::clone(&transport.dht);
     let entered = Arc::new(std::sync::Barrier::new(2));
     let release = Arc::new(std::sync::Barrier::new(2));

@@ -200,7 +200,7 @@ pub(super) async fn send_data_with_timeout(
     context: &'static str,
 ) -> ChunkSendProgress<Result<DeliveryFuture>> {
     let bytes = data.len();
-    let admission = admitted.send_admission();
+    let admission = admitted.clone();
     let route = permit.clone();
     let send_permit = SendPermit::new(move || {
         admission
