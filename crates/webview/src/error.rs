@@ -3,6 +3,82 @@ use thiserror::Error;
 /// Result type used by the webview gateway.
 pub type Result<T> = std::result::Result<T, WebviewError>;
 
+/// Closed causes for a virtual CORS policy rejection.
+///
+/// The policy does not retain upstream headers or origins in its domain error:
+/// they are untrusted input and are only useful when an adapter renders a
+/// diagnostic.  Callers can instead branch on the policy fact directly.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum CorsFailure {
+    /// A cross-origin runtime request did not identify its controlled source.
+    #[error("cross-origin request has no trusted source origin")]
+    MissingTrustedSourceOrigin,
+    /// The upstream response did not allow the controlled source origin.
+    #[error("response does not allow the controlled source origin")]
+    OriginNotAllowed,
+    /// A credentialed response omitted `Access-Control-Allow-Credentials: true`.
+    #[error("credentialed response lacks Access-Control-Allow-Credentials: true")]
+    CredentialsNotAllowed,
+    /// A preflight response used a non-success HTTP status.
+    #[error("preflight returned HTTP {status}")]
+    PreflightStatus {
+        /// HTTP status returned by the preflight response.
+        status: u16,
+    },
+    /// A preflight response omitted the requested method.
+    #[error("preflight does not allow the requested method")]
+    PreflightMethodNotAllowed,
+    /// A preflight response omitted one or more requested headers.
+    #[error("preflight does not allow every requested header")]
+    PreflightHeadersNotAllowed,
+    /// A credentialed preflight omitted `Access-Control-Allow-Credentials: true`.
+    #[error("credentialed preflight lacks Access-Control-Allow-Credentials: true")]
+    PreflightCredentialsNotAllowed,
+}
+
+/// Closed causes raised by the virtual cookie jar.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum CookieFailure {
+    /// The cookie origin has no host component.
+    #[error("cookie origin host is empty")]
+    MissingOriginHost,
+    /// The upstream emitted an empty `Set-Cookie` value.
+    #[error("empty Set-Cookie")]
+    EmptySetCookie,
+    /// The leading `name=value` pair in `Set-Cookie` was malformed.
+    #[error("invalid Set-Cookie pair")]
+    InvalidNameValue,
+    /// The leading `Set-Cookie` name was empty.
+    #[error("cookie name is empty")]
+    EmptyName,
+    /// The shared virtual cookie jar lock was poisoned.
+    #[error("virtual cookie jar lock is poisoned")]
+    JarLockPoisoned,
+}
+
+/// Closed causes internal to request-session transport orchestration.
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum TransportFailure {
+    /// A prepared request session was sent more than once.
+    #[error("gateway request session was sent twice")]
+    RequestSessionSentTwice,
+    /// A concrete transport adapter failed after policy admission.
+    #[error("{detail}")]
+    Adapter {
+        /// Adapter diagnostic rendered only at an error-reporting boundary.
+        detail: String,
+    },
+}
+
+impl TransportFailure {
+    /// Wrap an adapter diagnostic in the generic closed transport failure class.
+    pub fn adapter(detail: impl Into<String>) -> Self {
+        Self::Adapter {
+            detail: detail.into(),
+        }
+    }
+}
+
 /// Closed set of browser-facing gateway failure classes.
 ///
 /// Each variant owns the public HTTP projection and short summary.  Rendering
@@ -102,7 +178,10 @@ impl std::fmt::Display for GatewayFailure {
 
 #[cfg(test)]
 mod tests {
+    use super::CookieFailure;
+    use super::CorsFailure;
     use super::GatewayFailureCode;
+    use super::TransportFailure;
 
     #[test]
     fn gateway_failure_codes_have_exhaustive_http_ui_projections() {
@@ -138,6 +217,75 @@ mod tests {
             assert_eq!(code.summary(), summary);
         }
     }
+
+    #[test]
+    fn cors_failure_renders_only_after_the_closed_policy_fact_is_selected() {
+        let projections = [
+            (
+                CorsFailure::MissingTrustedSourceOrigin,
+                "cross-origin request has no trusted source origin",
+            ),
+            (
+                CorsFailure::OriginNotAllowed,
+                "response does not allow the controlled source origin",
+            ),
+            (
+                CorsFailure::CredentialsNotAllowed,
+                "credentialed response lacks Access-Control-Allow-Credentials: true",
+            ),
+            (
+                CorsFailure::PreflightStatus { status: 418 },
+                "preflight returned HTTP 418",
+            ),
+            (
+                CorsFailure::PreflightMethodNotAllowed,
+                "preflight does not allow the requested method",
+            ),
+            (
+                CorsFailure::PreflightHeadersNotAllowed,
+                "preflight does not allow every requested header",
+            ),
+            (
+                CorsFailure::PreflightCredentialsNotAllowed,
+                "credentialed preflight lacks Access-Control-Allow-Credentials: true",
+            ),
+        ];
+        for (failure, rendered) in projections {
+            assert_eq!(failure.to_string(), rendered);
+        }
+    }
+
+    #[test]
+    fn cookie_failure_renders_only_after_the_closed_policy_fact_is_selected() {
+        let projections = [
+            (
+                CookieFailure::MissingOriginHost,
+                "cookie origin host is empty",
+            ),
+            (CookieFailure::EmptySetCookie, "empty Set-Cookie"),
+            (CookieFailure::InvalidNameValue, "invalid Set-Cookie pair"),
+            (CookieFailure::EmptyName, "cookie name is empty"),
+            (
+                CookieFailure::JarLockPoisoned,
+                "virtual cookie jar lock is poisoned",
+            ),
+        ];
+        for (failure, rendered) in projections {
+            assert_eq!(failure.to_string(), rendered);
+        }
+    }
+
+    #[test]
+    fn transport_failure_class_is_closed_before_an_adapter_renders_detail() {
+        assert_eq!(
+            TransportFailure::RequestSessionSentTwice.to_string(),
+            "gateway request session was sent twice"
+        );
+        assert_eq!(
+            TransportFailure::adapter("fixture transport stopped").to_string(),
+            "fixture transport stopped"
+        );
+    }
 }
 
 /// Errors raised while normalizing, rewriting, or forwarding gateway traffic.
@@ -166,10 +314,10 @@ pub enum WebviewError {
     Header(String),
     /// Cookie parsing or matching failed.
     #[error("cookie policy error: {0}")]
-    Cookie(String),
+    Cookie(#[from] CookieFailure),
     /// A cross-origin runtime response did not satisfy the virtual CORS policy.
     #[error("CORS policy error: {0}")]
-    Cors(String),
+    Cors(#[from] CorsFailure),
     /// A runtime fetch or XHR was built without trusted source context.
     #[error("runtime gateway request requires a trusted source origin")]
     MissingRuntimeSourceOrigin,
@@ -178,7 +326,7 @@ pub enum WebviewError {
     GatewayFailure(GatewayFailure),
     /// The pluggable transport failed.
     #[error("gateway transport failed: {0}")]
-    Transport(String),
+    Transport(#[from] TransportFailure),
     /// A gateway response could not be rendered as a page.
     #[error("webview render failed: {0}")]
     Render(String),
@@ -192,4 +340,11 @@ pub enum WebviewError {
     #[cfg(feature = "browser")]
     #[error("browser integration failed: {0}")]
     Browser(String),
+}
+
+impl WebviewError {
+    /// Build a generic typed transport failure from an adapter diagnostic.
+    pub fn transport(detail: impl Into<String>) -> Self {
+        TransportFailure::adapter(detail).into()
+    }
 }

@@ -5,8 +5,8 @@ use std::time::UNIX_EPOCH;
 use url::Host;
 use url::Url;
 
+use crate::error::CookieFailure;
 use crate::error::Result;
-use crate::error::WebviewError;
 use crate::types::GatewayRequest;
 use crate::types::GatewayRequestKind;
 
@@ -41,33 +41,24 @@ impl CookieJar {
         Self::default()
     }
 
-    /// Store one upstream `Set-Cookie` header for `origin`.
-    pub fn store_set_cookie(&mut self, origin: &Url, set_cookie: &str) -> Result<()> {
-        self.store_set_cookie_at(origin, set_cookie, current_time_millis())
-    }
-
     /// Store one upstream `Set-Cookie` header for `origin` at `now` milliseconds since Unix epoch.
     ///
     /// The supplied instant is used for `Max-Age` and `Expires` decisions, so callers that own a
     /// clock can replay cookie transitions without reading ambient time.
     pub fn store_set_cookie_at(&mut self, origin: &Url, set_cookie: &str, now: i64) -> Result<()> {
         let Some(host) = origin.host_str() else {
-            return Err(WebviewError::Cookie(
-                "cookie origin host is empty".to_string(),
-            ));
+            return Err(CookieFailure::MissingOriginHost.into());
         };
         let mut parts = set_cookie.split(';').map(str::trim);
         let Some(name_value) = parts.next() else {
-            return Err(WebviewError::Cookie("empty Set-Cookie".to_string()));
+            return Err(CookieFailure::EmptySetCookie.into());
         };
         let Some((name, value)) = name_value.split_once('=') else {
-            return Err(WebviewError::Cookie(format!(
-                "invalid Set-Cookie pair {name_value:?}"
-            )));
+            return Err(CookieFailure::InvalidNameValue.into());
         };
         let name = name.trim();
         if name.is_empty() {
-            return Err(WebviewError::Cookie("cookie name is empty".to_string()));
+            return Err(CookieFailure::EmptyName.into());
         }
 
         let mut cookie = StoredCookie {
@@ -146,11 +137,6 @@ impl CookieJar {
         Ok(())
     }
 
-    /// Build a `Cookie` request header for `target`, if any jar entries match.
-    pub fn cookie_header(&self, target: &Url) -> Option<String> {
-        self.cookie_header_at(target, current_time_millis())
-    }
-
     /// Build a `Cookie` request header for `target` at `now` milliseconds since Unix epoch.
     pub fn cookie_header_at(&self, target: &Url, now: i64) -> Option<String> {
         self.cookie_header_matching(
@@ -161,11 +147,6 @@ impl CookieJar {
             GatewayRequestKind::Navigation,
             now,
         )
-    }
-
-    /// Build a `Cookie` request header for one normalized gateway request.
-    pub fn cookie_header_for_request(&self, request: &GatewayRequest) -> Option<String> {
-        self.cookie_header_for_request_at(request, current_time_millis())
     }
 
     /// Build a `Cookie` request header for one normalized gateway request at `now` milliseconds
@@ -223,11 +204,6 @@ impl CookieJar {
         }
     }
 
-    /// Return the number of cookies currently stored.
-    pub fn len(&self) -> usize {
-        self.len_at(current_time_millis())
-    }
-
     /// Return the number of unexpired cookies at `now` milliseconds since Unix epoch.
     pub fn len_at(&self, now: i64) -> usize {
         self.cookies
@@ -236,14 +212,32 @@ impl CookieJar {
             .count()
     }
 
-    /// Return true when no cookies are stored.
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-
     /// Return true when no unexpired cookies exist at `now` milliseconds since Unix epoch.
     pub fn is_empty_at(&self, now: i64) -> bool {
         self.len_at(now) == 0
+    }
+}
+
+#[cfg(test)]
+impl CookieJar {
+    pub(crate) fn store_set_cookie(&mut self, origin: &Url, set_cookie: &str) -> Result<()> {
+        self.store_set_cookie_at(origin, set_cookie, 0)
+    }
+
+    pub(crate) fn cookie_header(&self, target: &Url) -> Option<String> {
+        self.cookie_header_at(target, 0)
+    }
+
+    pub(crate) fn cookie_header_for_request(&self, request: &GatewayRequest) -> Option<String> {
+        self.cookie_header_for_request_at(request, 0)
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.len_at(0)
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.is_empty_at(0)
     }
 }
 
@@ -318,21 +312,6 @@ fn is_safe_navigation_method(method: &str) -> bool {
 
 fn max_age_millis(seconds: i64) -> i64 {
     seconds.saturating_mul(1_000)
-}
-
-#[cfg(all(target_family = "wasm", feature = "browser"))]
-fn current_time_millis() -> i64 {
-    js_sys::Date::now() as i64
-}
-
-#[cfg(all(target_family = "wasm", not(feature = "browser")))]
-fn current_time_millis() -> i64 {
-    0
-}
-
-#[cfg(not(target_family = "wasm"))]
-fn current_time_millis() -> i64 {
-    system_time_millis(SystemTime::now())
 }
 
 fn system_time_millis(time: SystemTime) -> i64 {

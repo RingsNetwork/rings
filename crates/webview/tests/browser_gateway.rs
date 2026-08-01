@@ -39,7 +39,7 @@ impl FixtureLog {
         self.requests
             .lock()
             .map(|requests| requests.clone())
-            .map_err(|_| WebviewError::Transport("fixture log lock poisoned".to_string()))
+            .map_err(|_| WebviewError::transport("fixture log lock poisoned".to_string()))
     }
 }
 
@@ -320,7 +320,7 @@ impl GatewayTransport for BrowserFixtureTransport {
                 Vec::new(),
                 b"<!doctype html><title>window open</title>".to_vec(),
             ),
-            other => Err(WebviewError::Transport(format!(
+            other => Err(WebviewError::transport(format!(
                 "unexpected browser fixture request {other}"
             ))),
         }
@@ -787,7 +787,7 @@ fn assert_recorded_target(
     if found {
         Ok(())
     } else {
-        Err(WebviewError::Transport(format!(
+        Err(WebviewError::transport(format!(
             "missing recorded {kind:?} {method} request to {target}"
         )))
     }

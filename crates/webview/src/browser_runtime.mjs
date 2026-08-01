@@ -4,8 +4,6 @@
   const runtimePrefix = `${prefix.replace(/\/$/, "")}-runtime/`;
   const runtimeTargetHeader = "X-Rings-Webview-Target";
   const controlledAssetPaths = new Set(["/assets/webview-overlay.js"]);
-  const urlAttributes = new Set(["href", "src", "action", "poster", "data", "cite", "formaction", "manifest", "xlink:href"]);
-  const srcsetAttributes = new Set(["srcset", "imagesrcset"]);
   const styleProxies = new WeakMap();
   const nativeSetAttribute = globalThis.Element?.prototype?.setAttribute;
   if (globalThis[marker]) {
@@ -15,28 +13,15 @@
   const gatewayState = { targetBase };
   let nextRuntimeRequestId = 1;
   globalThis[marker] = gatewayState;
-  function gatewayPathFromText(input) {
-    const text = String(input);
-    if (text.startsWith(prefix)) return text;
-    try {
-      const url = new URL(text);
-      if (globalThis.location?.origin && url.origin === globalThis.location.origin && url.pathname.startsWith(prefix)) {
-        return `${url.pathname}${url.search}${url.hash}`;
-      }
-    } catch (_error) {}
-    return undefined;
-  }
-  function decodeGatewayTarget(input) {
-    const path = gatewayPathFromText(input);
-    if (!path?.startsWith(prefix)) return undefined;
-    const encoded = path.slice(prefix.length);
-    if (!encoded) return undefined;
-    try {
-      return decodeURIComponent(encoded);
-    } catch (_error) {
-      return undefined;
-    }
-  }
+  const transforms = globalThis.__ringsWebviewTransforms;
+  if (!transforms) return;
+  const urlTransformer = transforms.createUrlTransformer({
+    prefix,
+    targetBase,
+    locationOrigin: globalThis.location?.origin,
+    controlledAssetPaths,
+  });
+  const { decodeGatewayTarget, gatewayPath: gatewayPathFromText } = urlTransformer;
   function resolveTargetBase() {
     const rawBase = globalThis.document?.querySelector?.("base[href]")?.getAttribute?.("href");
     if (!rawBase) return gatewayState.targetBase;
@@ -48,31 +33,8 @@
       return gatewayState.targetBase;
     }
   }
-  function isUnrewritableTarget(value) {
-    const lower = String(value).trim().toLowerCase();
-    return !lower || ["javascript:", "mailto:", "tel:", "data:", "blob:", "about:"].some((scheme) => lower.startsWith(scheme));
-  }
-  function controlledAssetPath(input) {
-    const text = String(input);
-    const origin = globalThis.location?.origin;
-    if (!origin) return undefined;
-    try {
-      const url = new URL(text, origin);
-      if (controlledAssetPaths.has(url.pathname)) {
-        return `${url.pathname}${url.search}${url.hash}`;
-      }
-    } catch (_error) {}
-    return undefined;
-  }
   function encodeTarget(input, base = resolveTargetBase()) {
-    const text = String(input);
-    if (isUnrewritableTarget(text)) return text;
-    const controlled = controlledAssetPath(text);
-    if (controlled) return controlled;
-    const gatewayPath = gatewayPathFromText(text);
-    if (gatewayPath) return gatewayPath;
-    const url = new URL(text, base);
-    return prefix + encodeURIComponent(url.href);
+    return urlTransformer.encodeTarget(input, base);
   }
   function runtimeGatewayPath() {
     const id = nextRuntimeRequestId++;
@@ -96,65 +58,16 @@
     } catch (_error) {}
   }
   function encodeUrlList(input, base) {
-    return String(input).trim().split(/\s+/).filter(Boolean).map((value) => encodeTarget(value, base)).join(" ");
-  }
-  // Pure transform: tokenize candidates before rewriting their URLs.
-  function parseSrcsetCandidates(input) {
-    const text = String(input);
-    const candidates = [];
-    let cursor = 0;
-    while (cursor < text.length) {
-      while (cursor < text.length && /[\t\n\f\r ,]/.test(text[cursor])) cursor += 1;
-      const urlStart = cursor;
-      while (cursor < text.length && !/[\t\n\f\r ]/.test(text[cursor])) cursor += 1;
-      let url = text.slice(urlStart, cursor);
-      if (url.endsWith(",")) {
-        url = url.replace(/,+$/, "");
-        if (url) candidates.push({ url, descriptor: "" });
-        continue;
-      }
-      while (cursor < text.length && /[\t\n\f\r ]/.test(text[cursor])) cursor += 1;
-      const descriptorStart = cursor;
-      while (cursor < text.length && text[cursor] !== ",") cursor += 1;
-      const descriptor = text.slice(descriptorStart, cursor).trim();
-      if (url) candidates.push({ url, descriptor });
-      if (text[cursor] === ",") cursor += 1;
-    }
-    return candidates;
+    return transforms.encodeUrlList(input, base, encodeTarget);
   }
   function encodeSrcset(input, base) {
-    return parseSrcsetCandidates(input).map(({ url, descriptor }) => {
-      const rewritten = encodeTarget(url, base);
-      return descriptor ? `${rewritten} ${descriptor}` : rewritten;
-    }).join(", ");
+    return transforms.encodeSrcset(input, base, encodeTarget);
   }
   function encodeCssText(input) {
-    const imports = String(input).replace(/(@import\s+)(['"])([^'"]+)\2/gi, function(match, importPrefix, quote, value) {
-      try {
-        return `${importPrefix}${quote}${encodeTarget(value)}${quote}`;
-      } catch (_error) {
-        return match;
-      }
-    });
-    return imports.replace(/url\(\s*(['"]?)(.*?)\1\s*\)/gi, function(match, quote, value) {
-      try {
-        const rewritten = encodeTarget(value);
-        const delimiter = quote || "";
-        return `url(${delimiter}${rewritten}${delimiter})`;
-      } catch (_error) {
-        return match;
-      }
-    });
+    return transforms.encodeCssText(input, encodeTarget);
   }
   function encodeRefreshText(input) {
-    return String(input).replace(/(\burl\s*=\s*)(['"]?)([^'"]+)\2/i, function(match, prefixText, quote, value) {
-      try {
-        const delimiter = quote || "";
-        return `${prefixText}${delimiter}${encodeTarget(value.trim())}${delimiter}`;
-      } catch (_error) {
-        return match;
-      }
-    });
+    return transforms.encodeRefreshText(input, encodeTarget);
   }
   function setRawAttribute(element, name, value) {
     if (nativeSetAttribute) return nativeSetAttribute.call(element, name, value);
@@ -231,12 +144,14 @@
     return template.innerHTML;
   }
   function encodeAttribute(name, value, base) {
-    const lower = String(name).toLowerCase();
-    if (lower === "srcdoc") return encodeSrcdoc(value);
-    if (lower === "style") return encodeCssText(value);
-    if (lower === "ping") return encodeUrlList(value, base);
-    if (urlAttributes.has(lower)) return encodeTarget(value, base);
-    if (srcsetAttributes.has(lower)) return encodeSrcset(value, base);
+    switch (transforms.htmlAttributeKind(name)) {
+      case "srcdoc": return encodeSrcdoc(value);
+      case "style": return encodeCssText(value);
+      case "url-list": return encodeUrlList(value, base);
+      case "url": return encodeTarget(value, base);
+      case "srcset": return encodeSrcset(value, base);
+      default: break;
+    }
     return value;
   }
   function isMetaRefreshElement(element) {

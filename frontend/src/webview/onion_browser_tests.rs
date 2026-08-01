@@ -156,7 +156,7 @@ async fn browser_provider(
     exit_target: Option<&str>,
 ) -> WebviewResult<Rc<Provider>> {
     let session_sk = SessionSk::new_with_seckey(&SecretKey::random()).map_err(|error| {
-        WebviewError::Transport(format!("build browser session key: {error:?}"))
+        WebviewError::transport(format!("build browser session key: {error:?}"))
     })?;
     let mut config = ProcessorConfig::new(
         TEST_NETWORK_ID,
@@ -166,29 +166,29 @@ async fn browser_provider(
     );
     if let Some(target) = exit_target {
         let policy = OnionExitPolicy::from_target_strings(vec![target.to_string()], Vec::new())
-            .map_err(|error| WebviewError::Transport(format!("build exit policy: {error:?}")))?;
+            .map_err(|error| WebviewError::transport(format!("build exit policy: {error:?}")))?;
         config = config.enable_https_onion_exit().onion_exit_policy(policy);
     }
     let storage = Box::new(
         IdbStorage::new_with_cap_and_name(50_000, storage_name)
             .await
-            .map_err(|error| WebviewError::Transport(format!("open idb storage: {error:?}")))?,
+            .map_err(|error| WebviewError::transport(format!("open idb storage: {error:?}")))?,
     );
     let processor = ProcessorBuilder::from_config(&config)
-        .map_err(|error| WebviewError::Transport(format!("build processor config: {error:?}")))?
+        .map_err(|error| WebviewError::transport(format!("build processor config: {error:?}")))?
         .storage(storage)
         .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
         .build()
-        .map_err(|error| WebviewError::Transport(format!("build processor: {error:?}")))?;
+        .map_err(|error| WebviewError::transport(format!("build processor: {error:?}")))?;
     let provider = Rc::new(provider_from_processor(processor));
     provider
         .set_backend()
-        .map_err(|error| WebviewError::Transport(format!("install backend: {error:?}")))?;
+        .map_err(|error| WebviewError::transport(format!("install backend: {error:?}")))?;
     if let Some(target) = exit_target {
         provider
             .install_onion_https_exit(vec![target.to_string()], Vec::new())
             .map_err(|error| {
-                WebviewError::Transport(format!("install onion HTTPS exit: {error:?}"))
+                WebviewError::transport(format!("install onion HTTPS exit: {error:?}"))
             })?;
     }
     Ok(provider)
@@ -264,7 +264,7 @@ async fn retry_gateway_navigation(
             }
         }
     }
-    Err(WebviewError::Transport(format!(
+    Err(WebviewError::transport(format!(
         "gateway navigation did not find a browser onion exit: {}",
         last_error.unwrap_or_else(|| "no attempt was made".to_string())
     )))
@@ -278,7 +278,7 @@ async fn gateway_navigation(
         .handle(WebviewHostRequest::navigation(target.clone()))
         .await?;
     let WebviewHostOutcome::Redirect(gateway_url) = redirect else {
-        return Err(WebviewError::Transport(
+        return Err(WebviewError::transport(
             "external navigation did not redirect to the controlled gateway".to_string(),
         ));
     };
@@ -296,7 +296,7 @@ fn expect_response(
 ) -> WebviewResult<GatewayResponse> {
     match outcome {
         WebviewHostOutcome::Response(response) => Ok(response),
-        other => Err(WebviewError::Transport(format!(
+        other => Err(WebviewError::transport(format!(
             "{context} returned {other:?}, expected response"
         ))),
     }
@@ -310,7 +310,7 @@ fn expect_status(
     if response.status == expected {
         Ok(())
     } else {
-        Err(WebviewError::Transport(format!(
+        Err(WebviewError::transport(format!(
             "{context} returned status {}, expected {expected}",
             response.status
         )))
@@ -348,14 +348,14 @@ fn gateway_path(target: &str) -> WebviewResult<String> {
 
 fn utf8_body(response: GatewayResponse) -> WebviewResult<String> {
     String::from_utf8(response.body)
-        .map_err(|error| WebviewError::Transport(format!("response was not UTF-8: {error}")))
+        .map_err(|error| WebviewError::transport(format!("response was not UTF-8: {error}")))
 }
 
 fn assert_contains(value: &str, expected: &str) -> WebviewResult<()> {
     if value.contains(expected) {
         Ok(())
     } else {
-        Err(WebviewError::Transport(format!(
+        Err(WebviewError::transport(format!(
             "expected {expected:?} inside {value:?}"
         )))
     }
@@ -375,7 +375,7 @@ fn assert_fetch_call(
     }) {
         Ok(())
     } else {
-        Err(WebviewError::Transport(format!(
+        Err(WebviewError::transport(format!(
             "missing exit fetch call {method} {url}; calls: {calls:?}"
         )))
     }
@@ -397,7 +397,7 @@ fn fetch_calls() -> WebviewResult<Vec<FetchCall>> {
         .as_string()
         .ok_or_else(|| WebviewError::Browser("fetch log was not a string".to_string()))?;
     serde_json::from_str(text.as_str())
-        .map_err(|error| WebviewError::Transport(format!("parse fetch log: {error}")))
+        .map_err(|error| WebviewError::transport(format!("parse fetch log: {error}")))
 }
 
 fn install_mock_exit_fetch() -> WebviewResult<()> {

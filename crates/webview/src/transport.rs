@@ -1,4 +1,8 @@
 use std::sync::Mutex;
+#[cfg(not(all(target_family = "wasm", feature = "browser")))]
+use std::time::SystemTime;
+#[cfg(not(all(target_family = "wasm", feature = "browser")))]
+use std::time::UNIX_EPOCH;
 
 use async_trait::async_trait;
 
@@ -64,10 +68,11 @@ impl GatewayRequestSession {
         policy: &GatewayResponsePolicy,
         cookies: &CookieJar,
         request: GatewayRequest,
+        now: i64,
     ) -> Result<Self> {
         let cors_request = request.clone();
         let preflight = cors::preflight_request(&request)?;
-        let request = policy.prepare_request(cookies, request)?;
+        let request = policy.prepare_request(cookies, request, now)?;
         let target = request.target.clone();
         let stores_cookies = request.allows_target_cookies();
 
@@ -93,9 +98,10 @@ impl GatewayRequestSession {
             let response = transport.send(preflight).await?;
             cors::validate_preflight_response(&self.cors_request, &response)?;
         }
-        let request = self.request.take().ok_or_else(|| {
-            WebviewError::Transport("gateway request session was sent twice".to_string())
-        })?;
+        let request = self
+            .request
+            .take()
+            .ok_or(crate::error::TransportFailure::RequestSessionSentTwice)?;
         let response = transport.send(request).await?;
         cors::validate_response(&self.cors_request, &response)?;
         Ok(response)
@@ -106,9 +112,10 @@ impl GatewayRequestSession {
         policy: &GatewayResponsePolicy,
         cookies: &mut CookieJar,
         response: &GatewayResponse,
+        now: i64,
     ) -> Result<()> {
         if self.stores_cookies {
-            policy.store_response_cookies(cookies, &self.target, response)?;
+            policy.store_response_cookies(cookies, &self.target, response, now)?;
         }
         Ok(())
     }
@@ -141,6 +148,7 @@ impl GatewayResponsePolicy {
         &self,
         cookies: &CookieJar,
         request: GatewayRequest,
+        now: i64,
     ) -> Result<GatewayRequest> {
         let request = request.normalize_source_origin();
         if request.lacks_runtime_source_origin() {
@@ -148,7 +156,7 @@ impl GatewayResponsePolicy {
         }
         let mut request = self.header_policy.normalize_request(request);
         if request.allows_target_cookies() {
-            if let Some(cookie_header) = cookies.cookie_header_for_request(&request) {
+            if let Some(cookie_header) = cookies.cookie_header_for_request_at(&request, now) {
                 request
                     .headers
                     .push(GatewayHeader::new("Cookie", cookie_header)?);
@@ -162,13 +170,14 @@ impl GatewayResponsePolicy {
         cookies: &mut CookieJar,
         target: &url::Url,
         response: &GatewayResponse,
+        now: i64,
     ) -> Result<()> {
         for header in response
             .headers
             .iter()
             .filter(|header| header.name_eq("set-cookie"))
         {
-            cookies.store_set_cookie(target, header.value.as_str())?;
+            cookies.store_set_cookie_at(target, header.value.as_str(), now)?;
         }
         Ok(())
     }
@@ -275,9 +284,12 @@ where T: GatewayTransport
 
     /// Send one request through the gateway policy stack.
     pub async fn send(&mut self, request: GatewayRequest) -> Result<GatewayResponse> {
-        let mut session = GatewayRequestSession::prepare(&self.policy, &self.cookies, request)?;
+        let prepare_now = current_time_millis();
+        let mut session =
+            GatewayRequestSession::prepare(&self.policy, &self.cookies, request, prepare_now)?;
         let response = session.send(&self.policy, &self.transport).await?;
-        session.commit_response_cookies(&self.policy, &mut self.cookies, &response)?;
+        let commit_now = current_time_millis();
+        session.commit_response_cookies(&self.policy, &mut self.cookies, &response, commit_now)?;
         session.finish(&self.policy, response)
     }
 
@@ -346,13 +358,15 @@ where T: GatewayTransport
     /// Send one request without holding the virtual-cookie lock during upstream I/O.
     pub async fn send(&self, request: GatewayRequest) -> Result<GatewayResponse> {
         let mut session = {
+            let prepare_now = current_time_millis();
             let cookies = self.lock_cookies()?;
-            GatewayRequestSession::prepare(&self.policy, &cookies, request)?
+            GatewayRequestSession::prepare(&self.policy, &cookies, request, prepare_now)?
         };
         let response = session.send(&self.policy, &self.transport).await?;
         {
+            let commit_now = current_time_millis();
             let mut cookies = self.lock_cookies()?;
-            session.commit_response_cookies(&self.policy, &mut cookies, &response)?;
+            session.commit_response_cookies(&self.policy, &mut cookies, &response, commit_now)?;
         }
         session.finish(&self.policy, response)
     }
@@ -384,9 +398,34 @@ where T: GatewayTransport
     }
 
     fn lock_cookies(&self) -> Result<std::sync::MutexGuard<'_, CookieJar>> {
-        self.cookies.lock().map_err(|_| {
-            crate::error::WebviewError::Cookie("virtual cookie jar lock is poisoned".to_string())
-        })
+        self.cookies
+            .lock()
+            .map_err(|_| crate::error::CookieFailure::JarLockPoisoned.into())
+    }
+}
+
+fn current_time_millis() -> i64 {
+    #[cfg(all(target_family = "wasm", feature = "browser"))]
+    {
+        js_sys::Date::now() as i64
+    }
+
+    #[cfg(not(all(target_family = "wasm", feature = "browser")))]
+    {
+        system_time_millis(SystemTime::now())
+    }
+}
+
+#[cfg(not(all(target_family = "wasm", feature = "browser")))]
+fn system_time_millis(time: SystemTime) -> i64 {
+    let Ok(duration) = time.duration_since(UNIX_EPOCH) else {
+        return 0;
+    };
+    let millis = duration.as_millis();
+    if millis > i64::MAX as u128 {
+        i64::MAX
+    } else {
+        millis as i64
     }
 }
 
@@ -448,7 +487,7 @@ mod tests {
 
         let response = futures::executor::block_on(gateway.send(request))?;
         let body = String::from_utf8(response.body)
-            .map_err(|error| WebviewError::Transport(error.to_string()))?;
+            .map_err(|error| WebviewError::transport(error.to_string()))?;
 
         assert!(body.contains("/webview/https%3A%2F%2Fexample%2Ecom%2Fasset%2Epng"));
         assert!(body.contains("data-rings-webview-bootstrap"));
@@ -518,9 +557,9 @@ mod tests {
         let first = futures::executor::block_on(gateway.send(GatewayRequest::navigation(first)))?;
         let second = futures::executor::block_on(gateway.send(GatewayRequest::navigation(second)))?;
         let first_body = String::from_utf8(first.body)
-            .map_err(|error| WebviewError::Transport(error.to_string()))?;
+            .map_err(|error| WebviewError::transport(error.to_string()))?;
         let second_body = String::from_utf8(second.body)
-            .map_err(|error| WebviewError::Transport(error.to_string()))?;
+            .map_err(|error| WebviewError::transport(error.to_string()))?;
 
         assert!(first_body.contains("https://one.example.test/first"));
         assert!(!first_body.contains("https://two.example.test/second"));
@@ -538,7 +577,7 @@ mod tests {
 
         let response = futures::executor::block_on(gateway.send(request))?;
         let body = String::from_utf8(response.body)
-            .map_err(|error| WebviewError::Transport(error.to_string()))?;
+            .map_err(|error| WebviewError::transport(error.to_string()))?;
 
         assert!(body.contains("globalThis.__ringsTopLevelNavigation = false;"));
         Ok(())
@@ -589,7 +628,7 @@ mod tests {
         let response =
             futures::executor::block_on(gateway.send(GatewayRequest::navigation(target)))?;
         let body = String::from_utf8(response.body)
-            .map_err(|error| WebviewError::Transport(error.to_string()))?;
+            .map_err(|error| WebviewError::transport(error.to_string()))?;
 
         assert!(body.contains("<p>ok</p>"));
         assert!(gateway.cookies().is_empty());
@@ -648,7 +687,7 @@ mod tests {
         let requests = gateway.transport.requests.borrow();
         let second = requests
             .get(1)
-            .ok_or_else(|| WebviewError::Transport("missing second request".to_string()))?;
+            .ok_or_else(|| WebviewError::transport("missing second request".to_string()))?;
         let cookies: Vec<&str> = second
             .headers
             .iter()
@@ -683,7 +722,7 @@ mod tests {
         let requests = gateway.transport.requests.borrow();
         let first = requests
             .first()
-            .ok_or_else(|| WebviewError::Transport("missing request".to_string()))?;
+            .ok_or_else(|| WebviewError::transport("missing request".to_string()))?;
         assert_eq!(
             first.source_origin.as_ref().map(Url::as_str),
             Some("https://app.example.test:8443/")
@@ -714,7 +753,7 @@ mod tests {
         let requests = gateway.transport.requests.borrow();
         let first = requests
             .first()
-            .ok_or_else(|| WebviewError::Transport("missing first request".to_string()))?;
+            .ok_or_else(|| WebviewError::transport("missing first request".to_string()))?;
         assert!(first.headers.iter().all(|header| {
             !header.name_eq("host")
                 && !header.name_eq("origin")
@@ -773,7 +812,7 @@ mod tests {
         assert_eq!(requests.len(), 2);
         let preflight = requests
             .first()
-            .ok_or_else(|| WebviewError::Transport("missing CORS preflight".to_string()))?;
+            .ok_or_else(|| WebviewError::transport("missing CORS preflight".to_string()))?;
         assert_eq!(preflight.method, "OPTIONS");
         assert!(preflight.headers.iter().any(|header| {
             header.name_eq("origin") && header.value == "https://app.example.test"
@@ -783,7 +822,7 @@ mod tests {
         }));
         let actual = requests
             .get(1)
-            .ok_or_else(|| WebviewError::Transport("missing CORS runtime request".to_string()))?;
+            .ok_or_else(|| WebviewError::transport("missing CORS runtime request".to_string()))?;
         assert_eq!(actual.method, "PATCH");
         assert!(actual.headers.iter().any(|header| {
             header.name_eq("origin") && header.value == "https://app.example.test"
@@ -865,7 +904,7 @@ mod tests {
         assert_eq!(single_cookie_count, concurrent_cookie_count);
         assert_eq!(single_cookie_count, 1);
         let final_request = single_requests.last().ok_or_else(|| {
-            WebviewError::Transport("parity transport did not receive final request".to_string())
+            WebviewError::transport("parity transport did not receive final request".to_string())
         })?;
         assert!(final_request
             .headers
@@ -890,10 +929,10 @@ mod tests {
                     .borrow_mut()
                     .take()
                     .ok_or_else(|| {
-                        WebviewError::Transport("slow request was released twice".to_string())
+                        WebviewError::transport("slow request was released twice".to_string())
                     })?;
                 receiver.await.map_err(|_| {
-                    WebviewError::Transport("slow request release channel was dropped".to_string())
+                    WebviewError::transport("slow request release channel was dropped".to_string())
                 })?;
             }
             GatewayResponse::new(
@@ -928,7 +967,7 @@ mod tests {
                 let _ = slow_result_sender
                     .send(slow_gateway.send(GatewayRequest::navigation(slow)).await);
             })
-            .map_err(|error| WebviewError::Transport(error.to_string()))?;
+            .map_err(|error| WebviewError::transport(error.to_string()))?;
         assert_eq!(
             pool.run_until(started_receiver.next()),
             Some("/slow".to_string())
@@ -940,18 +979,18 @@ mod tests {
                 let _ = fast_result_sender
                     .send(fast_gateway.send(GatewayRequest::subresource(fast)).await);
             })
-            .map_err(|error| WebviewError::Transport(error.to_string()))?;
+            .map_err(|error| WebviewError::transport(error.to_string()))?;
         let fast_response = pool
             .run_until(fast_result_receiver)
-            .map_err(|_| WebviewError::Transport("fast resource task was dropped".to_string()))??;
+            .map_err(|_| WebviewError::transport("fast resource task was dropped".to_string()))??;
         assert_eq!(fast_response.body, b"/fast");
 
         release_slow_sender.send(()).map_err(|_| {
-            WebviewError::Transport("slow resource task stopped waiting unexpectedly".to_string())
+            WebviewError::transport("slow resource task stopped waiting unexpectedly".to_string())
         })?;
         let slow_response = pool
             .run_until(slow_result_receiver)
-            .map_err(|_| WebviewError::Transport("slow resource task was dropped".to_string()))??;
+            .map_err(|_| WebviewError::transport("slow resource task was dropped".to_string()))??;
         assert_eq!(slow_response.body, b"/slow");
         Ok(())
     }

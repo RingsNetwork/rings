@@ -24,13 +24,13 @@ impl BrowserFixtureServer {
         gateway: WebviewGateway<BrowserFixtureTransport>,
     ) -> Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")
-            .map_err(|error| WebviewError::Transport(error.to_string()))?;
+            .map_err(|error| WebviewError::transport(error.to_string()))?;
         listener
             .set_nonblocking(true)
-            .map_err(|error| WebviewError::Transport(error.to_string()))?;
+            .map_err(|error| WebviewError::transport(error.to_string()))?;
         let addr = listener
             .local_addr()
-            .map_err(|error| WebviewError::Transport(error.to_string()))?;
+            .map_err(|error| WebviewError::transport(error.to_string()))?;
         let shutdown = Arc::new(AtomicBool::new(false));
         let thread_shutdown = Arc::clone(&shutdown);
         let gateway = Arc::new(Mutex::new(gateway));
@@ -52,7 +52,7 @@ impl BrowserFixtureServer {
         let _ = TcpStream::connect(self.addr);
         if let Some(handle) = self.handle.take() {
             handle.join().map_err(|_| {
-                WebviewError::Transport("browser fixture server panicked".to_string())
+                WebviewError::transport("browser fixture server panicked".to_string())
             })??;
         }
         Ok(())
@@ -82,7 +82,7 @@ fn serve_gateway(
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(Duration::from_millis(5));
             }
-            Err(error) => return Err(WebviewError::Transport(error.to_string())),
+            Err(error) => return Err(WebviewError::transport(error.to_string())),
         }
     }
     Ok(())
@@ -95,7 +95,7 @@ fn handle_connection(
 ) -> Result<()> {
     stream
         .set_nonblocking(false)
-        .map_err(|error| WebviewError::Transport(error.to_string()))?;
+        .map_err(|error| WebviewError::transport(error.to_string()))?;
     let request = read_http_request(stream)?;
     if request.path == "/assets/webview-overlay.js" {
         return write_http_response(
@@ -136,7 +136,7 @@ document.documentElement.appendChild(Object.assign(document.createElement("div")
 
     let kind = gateway_request_kind(&request);
     let mut gateway = gateway.lock().map_err(|_| {
-        WebviewError::Transport("browser fixture gateway lock poisoned".to_string())
+        WebviewError::transport("browser fixture gateway lock poisoned".to_string())
     })?;
     let mut gateway_request =
         gateway_request_from_http(prefix, gateway_path.as_str(), kind, &request.headers)?;
@@ -193,20 +193,20 @@ struct HttpRequest {
 fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
-        .map_err(|error| WebviewError::Transport(error.to_string()))?;
+        .map_err(|error| WebviewError::transport(error.to_string()))?;
     let mut buffer = Vec::new();
     let header_end = loop {
         let mut chunk = [0_u8; 1024];
         let read = stream
             .read(&mut chunk)
-            .map_err(|error| WebviewError::Transport(error.to_string()))?;
+            .map_err(|error| WebviewError::transport(error.to_string()))?;
         if read == 0 {
-            return Err(WebviewError::Transport(
+            return Err(WebviewError::transport(
                 "connection closed before request headers".to_string(),
             ));
         }
         let Some(bytes) = chunk.get(..read) else {
-            return Err(WebviewError::Transport("invalid read size".to_string()));
+            return Err(WebviewError::transport("invalid read size".to_string()));
         };
         buffer.extend_from_slice(bytes);
         if let Some(index) = find_bytes(buffer.as_slice(), b"\r\n\r\n") {
@@ -215,24 +215,24 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
     };
     let body_start = header_end
         .checked_add(4)
-        .ok_or_else(|| WebviewError::Transport("request header offset overflow".to_string()))?;
+        .ok_or_else(|| WebviewError::transport("request header offset overflow".to_string()))?;
     let header_bytes = buffer
         .get(..header_end)
-        .ok_or_else(|| WebviewError::Transport("invalid request header slice".to_string()))?;
+        .ok_or_else(|| WebviewError::transport("invalid request header slice".to_string()))?;
     let header_text = std::str::from_utf8(header_bytes)
-        .map_err(|error| WebviewError::Transport(error.to_string()))?;
+        .map_err(|error| WebviewError::transport(error.to_string()))?;
     let mut lines = header_text.split("\r\n");
     let request_line = lines
         .next()
-        .ok_or_else(|| WebviewError::Transport("missing request line".to_string()))?;
+        .ok_or_else(|| WebviewError::transport("missing request line".to_string()))?;
     let mut request_parts = request_line.split_whitespace();
     let method = request_parts
         .next()
-        .ok_or_else(|| WebviewError::Transport("missing request method".to_string()))?
+        .ok_or_else(|| WebviewError::transport("missing request method".to_string()))?
         .to_string();
     let path = request_parts
         .next()
-        .ok_or_else(|| WebviewError::Transport("missing request path".to_string()))?
+        .ok_or_else(|| WebviewError::transport("missing request path".to_string()))?
         .to_string();
     let mut headers = Vec::new();
     let mut content_length = 0_usize;
@@ -244,31 +244,31 @@ fn read_http_request(stream: &mut TcpStream) -> Result<HttpRequest> {
         if name.eq_ignore_ascii_case("content-length") {
             content_length = trimmed_value
                 .parse::<usize>()
-                .map_err(|error| WebviewError::Transport(error.to_string()))?;
+                .map_err(|error| WebviewError::transport(error.to_string()))?;
         }
         headers.push(GatewayHeader::new(name, trimmed_value)?);
     }
     let total_len = body_start
         .checked_add(content_length)
-        .ok_or_else(|| WebviewError::Transport("request body offset overflow".to_string()))?;
+        .ok_or_else(|| WebviewError::transport("request body offset overflow".to_string()))?;
     while buffer.len() < total_len {
         let mut chunk = [0_u8; 1024];
         let read = stream
             .read(&mut chunk)
-            .map_err(|error| WebviewError::Transport(error.to_string()))?;
+            .map_err(|error| WebviewError::transport(error.to_string()))?;
         if read == 0 {
-            return Err(WebviewError::Transport(
+            return Err(WebviewError::transport(
                 "connection closed before request body".to_string(),
             ));
         }
         let Some(bytes) = chunk.get(..read) else {
-            return Err(WebviewError::Transport("invalid read size".to_string()));
+            return Err(WebviewError::transport("invalid read size".to_string()));
         };
         buffer.extend_from_slice(bytes);
     }
     let body = buffer
         .get(body_start..total_len)
-        .ok_or_else(|| WebviewError::Transport("invalid request body slice".to_string()))?
+        .ok_or_else(|| WebviewError::transport("invalid request body slice".to_string()))?
         .to_vec();
     Ok(HttpRequest {
         method,
@@ -328,7 +328,7 @@ fn write_http_response(stream: &mut TcpStream, response: &GatewayResponse) -> Re
     stream
         .write_all(head.as_bytes())
         .and_then(|_| stream.write_all(response.body.as_slice()))
-        .map_err(|error| WebviewError::Transport(error.to_string()))
+        .map_err(|error| WebviewError::transport(error.to_string()))
 }
 
 fn header_value<'a>(headers: &'a [GatewayHeader], name: &str) -> Option<&'a str> {

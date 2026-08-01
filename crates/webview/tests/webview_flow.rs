@@ -101,7 +101,7 @@ impl GatewayTransport for FixtureTransport {
                 vec![GatewayHeader::new("Location", "/login")?],
                 Vec::new(),
             ),
-            other => Err(WebviewError::Transport(format!(
+            other => Err(WebviewError::transport(format!(
                 "unexpected fixture request {other}"
             ))),
         }

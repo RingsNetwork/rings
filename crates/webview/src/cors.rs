@@ -2,7 +2,9 @@
 
 use std::collections::BTreeSet;
 
+use crate::error::CorsFailure;
 use crate::error::Result;
+#[cfg(test)]
 use crate::error::WebviewError;
 use crate::types::GatewayCredentials;
 use crate::types::GatewayHeader;
@@ -24,9 +26,10 @@ pub fn preflight_request(request: &GatewayRequest) -> Result<Option<GatewayReque
     if !request.is_cross_origin_runtime_request() || !requires_preflight(request) {
         return Ok(None);
     }
-    let source_origin = request.source_origin.clone().ok_or_else(|| {
-        WebviewError::Cors("cross-origin request has no trusted source origin".to_string())
-    })?;
+    let source_origin = request
+        .source_origin
+        .clone()
+        .ok_or(CorsFailure::MissingTrustedSourceOrigin)?;
     let mut preflight = GatewayRequest::new(request.target.clone(), "OPTIONS", request.kind)
         .with_source_origin(source_origin)
         .with_credentials(GatewayCredentials::Omit)
@@ -54,9 +57,7 @@ pub fn validate_response(request: &GatewayRequest, response: &GatewayResponse) -
     if request.credentials == GatewayCredentials::Include
         && !header_has_token(response, "access-control-allow-credentials", "true")
     {
-        return Err(WebviewError::Cors(
-            "credentialed response lacks Access-Control-Allow-Credentials: true".to_string(),
-        ));
+        return Err(CorsFailure::CredentialsNotAllowed.into());
     }
     Ok(())
 }
@@ -87,10 +88,10 @@ pub fn validate_preflight_response(
     response: &GatewayResponse,
 ) -> Result<()> {
     if !(200..300).contains(&response.status) {
-        return Err(WebviewError::Cors(format!(
-            "preflight returned HTTP {}",
-            response.status
-        )));
+        return Err(CorsFailure::PreflightStatus {
+            status: response.status,
+        }
+        .into());
     }
     let source_origin = source_origin(request)?;
     validate_allowed_origin(response, source_origin, request.credentials)?;
@@ -98,10 +99,7 @@ pub fn validate_preflight_response(
         .flat_map(|value| value.split(','))
         .any(|value| value.trim().eq_ignore_ascii_case(request.method.as_str()));
     if !method_allowed {
-        return Err(WebviewError::Cors(format!(
-            "preflight does not allow method {}",
-            request.method
-        )));
+        return Err(CorsFailure::PreflightMethodNotAllowed.into());
     }
     let allowed_headers = header_values(response, "access-control-allow-headers")
         .flat_map(|value| value.split(','))
@@ -116,16 +114,12 @@ pub fn validate_preflight_response(
             .iter()
             .all(|header| allowed_headers.contains(header))
     {
-        return Err(WebviewError::Cors(
-            "preflight does not allow every requested header".to_string(),
-        ));
+        return Err(CorsFailure::PreflightHeadersNotAllowed.into());
     }
     if request.credentials == GatewayCredentials::Include
         && !header_has_token(response, "access-control-allow-credentials", "true")
     {
-        return Err(WebviewError::Cors(
-            "credentialed preflight lacks Access-Control-Allow-Credentials: true".to_string(),
-        ));
+        return Err(CorsFailure::PreflightCredentialsNotAllowed.into());
     }
     Ok(())
 }
@@ -233,9 +227,7 @@ fn source_origin(request: &GatewayRequest) -> Result<String> {
         .source_origin
         .as_ref()
         .map(|source| source.origin().ascii_serialization())
-        .ok_or_else(|| {
-            WebviewError::Cors("cross-origin request has no trusted source origin".to_string())
-        })
+        .ok_or(CorsFailure::MissingTrustedSourceOrigin.into())
 }
 
 fn validate_allowed_origin(
@@ -250,9 +242,7 @@ fn validate_allowed_origin(
     if allowed {
         Ok(())
     } else {
-        Err(WebviewError::Cors(format!(
-            "response does not allow origin {source_origin}"
-        )))
+        Err(CorsFailure::OriginNotAllowed.into())
     }
 }
 
@@ -294,9 +284,8 @@ mod tests {
     #[test]
     fn preflight_contains_virtual_origin_method_and_headers() -> Result<()> {
         let request = request(GatewayCredentials::SameOrigin)?;
-        let preflight = preflight_request(&request)?.ok_or_else(|| {
-            WebviewError::Cors("expected cross-origin request to require preflight".to_string())
-        })?;
+        let preflight =
+            preflight_request(&request)?.ok_or(CorsFailure::PreflightMethodNotAllowed)?;
 
         assert_eq!(preflight.method, "OPTIONS");
         assert_eq!(preflight.credentials, GatewayCredentials::Omit);

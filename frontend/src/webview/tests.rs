@@ -32,7 +32,7 @@ impl GatewayTransport for FixtureTransport {
             .borrow()
             .last()
             .cloned()
-            .ok_or_else(|| WebviewError::Transport("missing fixture request".to_string()))?;
+            .ok_or_else(|| WebviewError::transport("missing fixture request".to_string()))?;
         let mut headers = vec![GatewayHeader::new("content-type", "text/html")?];
         if let Some(source) = request.source_origin {
             headers.push(GatewayHeader::new(
@@ -131,7 +131,7 @@ fn host_redirects_then_serves_a_gateway_document_through_its_transport() -> Webv
             body.clone(),
         )))?;
     let WebviewHostOutcome::Redirect(gateway_url) = redirect else {
-        return Err(WebviewError::Transport(
+        return Err(WebviewError::transport(
             "navigation did not redirect to gateway".to_string(),
         ));
     };
@@ -144,12 +144,12 @@ fn host_redirects_then_serves_a_gateway_document_through_its_transport() -> Webv
             body,
         )))?;
     let WebviewHostOutcome::Response(response) = response else {
-        return Err(WebviewError::Transport(
+        return Err(WebviewError::transport(
             "gateway document was not served".to_string(),
         ));
     };
     let body = String::from_utf8(response.body)
-        .map_err(|error| WebviewError::Transport(error.to_string()))?;
+        .map_err(|error| WebviewError::transport(error.to_string()))?;
 
     assert!(body.contains("data-rings-webview-bootstrap"));
     assert!(body.contains("data-rings-webview-overlay-loader"));
@@ -159,7 +159,7 @@ fn host_redirects_then_serves_a_gateway_document_through_its_transport() -> Webv
         .borrow()
         .first()
         .cloned()
-        .ok_or_else(|| WebviewError::Transport("missing gateway request".to_string()))?;
+        .ok_or_else(|| WebviewError::transport("missing gateway request".to_string()))?;
     assert_eq!(sent_request.target.as_str(), target.as_url().as_str());
     assert_eq!(sent_request.method, "POST");
     assert_eq!(sent_request.body, vec![0x00, 0xff]);
@@ -188,12 +188,12 @@ fn iframe_navigation_gets_bootstrap_without_webview_overlay() -> WebviewResult<(
         ),
     )?;
     let WebviewHostOutcome::Response(response) = response else {
-        return Err(WebviewError::Transport(
+        return Err(WebviewError::transport(
             "iframe gateway document was not served".to_string(),
         ));
     };
     let body = String::from_utf8(response.body)
-        .map_err(|error| WebviewError::Transport(error.to_string()))?;
+        .map_err(|error| WebviewError::transport(error.to_string()))?;
 
     assert!(body.contains("data-rings-webview-bootstrap"));
     assert!(!body.contains("data-rings-webview-overlay-loader"));
@@ -203,7 +203,7 @@ fn iframe_navigation_gets_bootstrap_without_webview_overlay() -> WebviewResult<(
         .borrow()
         .first()
         .cloned()
-        .ok_or_else(|| WebviewError::Transport("missing iframe gateway request".to_string()))?;
+        .ok_or_else(|| WebviewError::transport("missing iframe gateway request".to_string()))?;
     assert_eq!(sent_request.target.as_str(), target.as_url().as_str());
     assert!(!sent_request.top_level_navigation);
     Ok(())
@@ -225,7 +225,7 @@ fn host_serves_cross_target_runtime_reads_when_upstream_allows_cors() -> Webview
     )))?;
 
     let WebviewHostOutcome::Response(_) = outcome else {
-        return Err(WebviewError::Transport(format!(
+        return Err(WebviewError::transport(format!(
             "runtime fetch did not serve through gateway: {outcome:?}"
         )));
     };
@@ -233,7 +233,7 @@ fn host_serves_cross_target_runtime_reads_when_upstream_allows_cors() -> Webview
         .borrow()
         .first()
         .cloned()
-        .ok_or_else(|| WebviewError::Transport("missing cross-origin request".to_string()))?;
+        .ok_or_else(|| WebviewError::transport("missing cross-origin request".to_string()))?;
     assert_eq!(
         request.source_origin.as_ref().map(Url::as_str),
         Some("https://app.example.test/")
@@ -242,25 +242,40 @@ fn host_serves_cross_target_runtime_reads_when_upstream_allows_cors() -> Webview
 }
 
 #[wasm_bindgen_test]
-fn browser_cookie_expiry_uses_browser_safe_clock() -> WebviewResult<()> {
+fn browser_cookie_expiry_sequence_uses_explicit_clock() -> WebviewResult<()> {
     let mut jar = CookieJar::new();
     let origin = Url::parse("https://example.test/app/index.html")?;
     let target = Url::parse("https://example.test/app/page")?;
+    let now = 1_000;
 
-    jar.store_set_cookie(&origin, "sid=one; Path=/app; Max-Age=60")?;
-    assert_eq!(jar.cookie_header(&target).as_deref(), Some("sid=one"));
+    jar.store_set_cookie_at(&origin, "sid=one; Path=/app; Max-Age=2", now)?;
+    assert_eq!(
+        jar.cookie_header_at(&target, now + 1_999).as_deref(),
+        Some("sid=one")
+    );
+    assert_eq!(jar.len_at(now + 1_999), 1);
+    assert_eq!(jar.cookie_header_at(&target, now + 2_000), None);
+    assert_eq!(jar.len_at(now + 2_000), 0);
 
-    jar.store_set_cookie(&origin, "sid=gone; Path=/app; Max-Age=0")?;
-    assert_eq!(jar.cookie_header(&target), None);
-    assert!(jar.is_empty());
+    jar.store_set_cookie_at(&origin, "sid=old; Path=/app", now)?;
+    jar.store_set_cookie_at(&origin, "sid=new; Path=/app", now)?;
+    assert_eq!(
+        jar.cookie_header_at(&target, now).as_deref(),
+        Some("sid=new")
+    );
 
-    jar.store_set_cookie(&origin, "sid=one; Path=/app")?;
-    jar.store_set_cookie(
+    jar.store_set_cookie_at(&origin, "sid=gone; Path=/app; Max-Age=0", now)?;
+    assert_eq!(jar.cookie_header_at(&target, now), None);
+    assert!(jar.is_empty_at(now));
+
+    jar.store_set_cookie_at(&origin, "sid=one; Path=/app", now)?;
+    jar.store_set_cookie_at(
         &origin,
         "sid=gone; Path=/app; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
+        now,
     )?;
-    assert_eq!(jar.cookie_header(&target), None);
-    assert!(jar.is_empty());
+    assert_eq!(jar.cookie_header_at(&target, now), None);
+    assert!(jar.is_empty_at(now));
     Ok(())
 }
 

@@ -10,6 +10,7 @@ use crate::url::GatewayPrefix;
 pub const BOOTSTRAP_MARKER: &str = "__ringsWebviewGateway";
 
 const BROWSER_RUNTIME: &str = include_str!("browser_runtime.mjs");
+const BROWSER_TRANSFORMS: &str = include_str!("browser_runtime_transforms.mjs");
 
 /// Typed configuration consumed by the browser runtime asset.
 #[derive(Serialize)]
@@ -61,6 +62,8 @@ pub fn bootstrap_script(gateway_prefix: &str, document_url: &Url) -> String {
     let mut script = String::from("globalThis.__ringsWebviewBootstrapConfig=");
     script.push_str(&config);
     script.push_str(";\n");
+    script.push_str(BROWSER_TRANSFORMS);
+    script.push('\n');
     script.push_str(BROWSER_RUNTIME);
     script
 }

@@ -284,11 +284,11 @@ fn browser_transport_failure(error: WebviewError) -> JsValue {
             failure.summary(),
             failure.detail().to_string(),
         ),
-        WebviewError::Transport(message) => browser_failure_with(
+        WebviewError::Transport(failure) => browser_failure_with(
             502,
             "gateway_transport_failed",
             "Gateway transport failed.",
-            format!("gateway transport failed: {message}"),
+            format!("gateway transport failed: {failure}"),
         ),
         other => browser_failure_with(
             502,

@@ -7,6 +7,8 @@ config*.yaml
 **/*.js
 **/*.mjs
 !crates/webview/src/browser_runtime.mjs
+!crates/webview/src/browser_runtime_transforms.mjs
+!crates/webview/src/browser_runtime_transforms.test.mjs
 !frontend/assets/webview-host.js
 !frontend/assets/webview-overlay.js
 !frontend/assets/webview-worker-response.js
