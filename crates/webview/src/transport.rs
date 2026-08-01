@@ -45,6 +45,83 @@ struct GatewayResponsePolicy {
     bootstrap_script: Option<BootstrapScript>,
 }
 
+/// One request after its cookie-dependent preparation and before its cookie-dependent commit.
+///
+/// The session keeps the two synchronization points explicit: a caller prepares it while it can
+/// read the virtual jar, then commits response cookies after transport I/O. Everything between
+/// those points is independent of jar ownership and is therefore shared by both gateway
+/// adapters.
+struct GatewayRequestSession {
+    cors_request: GatewayRequest,
+    request: Option<GatewayRequest>,
+    preflight: Option<GatewayRequest>,
+    target: url::Url,
+    stores_cookies: bool,
+}
+
+impl GatewayRequestSession {
+    fn prepare(
+        policy: &GatewayResponsePolicy,
+        cookies: &CookieJar,
+        request: GatewayRequest,
+    ) -> Result<Self> {
+        let cors_request = request.clone();
+        let preflight = cors::preflight_request(&request)?;
+        let request = policy.prepare_request(cookies, request)?;
+        let target = request.target.clone();
+        let stores_cookies = request.allows_target_cookies();
+
+        Ok(Self {
+            cors_request,
+            request: Some(request),
+            preflight,
+            target,
+            stores_cookies,
+        })
+    }
+
+    async fn send<T>(
+        &mut self,
+        policy: &GatewayResponsePolicy,
+        transport: &T,
+    ) -> Result<GatewayResponse>
+    where
+        T: GatewayTransport,
+    {
+        if let Some(preflight) = self.preflight.take() {
+            let preflight = policy.header_policy.normalize_request(preflight);
+            let response = transport.send(preflight).await?;
+            cors::validate_preflight_response(&self.cors_request, &response)?;
+        }
+        let request = self.request.take().ok_or_else(|| {
+            WebviewError::Transport("gateway request session was sent twice".to_string())
+        })?;
+        let response = transport.send(request).await?;
+        cors::validate_response(&self.cors_request, &response)?;
+        Ok(response)
+    }
+
+    fn commit_response_cookies(
+        &self,
+        policy: &GatewayResponsePolicy,
+        cookies: &mut CookieJar,
+        response: &GatewayResponse,
+    ) -> Result<()> {
+        if self.stores_cookies {
+            policy.store_response_cookies(cookies, &self.target, response)?;
+        }
+        Ok(())
+    }
+
+    fn finish(
+        &self,
+        policy: &GatewayResponsePolicy,
+        response: GatewayResponse,
+    ) -> Result<GatewayResponse> {
+        policy.finish_response(&self.cors_request, response)
+    }
+}
+
 enum BootstrapScript {
     Static(String),
     PerTarget(fn(&url::Url) -> String),
@@ -198,23 +275,10 @@ where T: GatewayTransport
 
     /// Send one request through the gateway policy stack.
     pub async fn send(&mut self, request: GatewayRequest) -> Result<GatewayResponse> {
-        let cors_request = request.clone();
-        let preflight = cors::preflight_request(&request)?;
-        let request = self.policy.prepare_request(&self.cookies, request)?;
-        if let Some(preflight) = preflight {
-            let preflight = self.policy.header_policy.normalize_request(preflight);
-            let response = self.transport.send(preflight).await?;
-            cors::validate_preflight_response(&cors_request, &response)?;
-        }
-        let target = request.target.clone();
-        let stores_cookies = request.allows_target_cookies();
-        let response = self.transport.send(request).await?;
-        cors::validate_response(&cors_request, &response)?;
-        if stores_cookies {
-            self.policy
-                .store_response_cookies(&mut self.cookies, &target, &response)?;
-        }
-        self.policy.finish_response(&cors_request, response)
+        let mut session = GatewayRequestSession::prepare(&self.policy, &self.cookies, request)?;
+        let response = session.send(&self.policy, &self.transport).await?;
+        session.commit_response_cookies(&self.policy, &mut self.cookies, &response)?;
+        session.finish(&self.policy, response)
     }
 
     /// Build a typed request from a controlled-origin gateway path.
@@ -281,27 +345,16 @@ where T: GatewayTransport
 
     /// Send one request without holding the virtual-cookie lock during upstream I/O.
     pub async fn send(&self, request: GatewayRequest) -> Result<GatewayResponse> {
-        let cors_request = request.clone();
-        let preflight = cors::preflight_request(&request)?;
-        let request = {
+        let mut session = {
             let cookies = self.lock_cookies()?;
-            self.policy.prepare_request(&cookies, request)?
+            GatewayRequestSession::prepare(&self.policy, &cookies, request)?
         };
-        if let Some(preflight) = preflight {
-            let preflight = self.policy.header_policy.normalize_request(preflight);
-            let response = self.transport.send(preflight).await?;
-            cors::validate_preflight_response(&cors_request, &response)?;
-        }
-        let target = request.target.clone();
-        let stores_cookies = request.allows_target_cookies();
-        let response = self.transport.send(request).await?;
-        cors::validate_response(&cors_request, &response)?;
-        if stores_cookies {
+        let response = session.send(&self.policy, &self.transport).await?;
+        {
             let mut cookies = self.lock_cookies()?;
-            self.policy
-                .store_response_cookies(&mut cookies, &target, &response)?;
+            session.commit_response_cookies(&self.policy, &mut cookies, &response)?;
         }
-        self.policy.finish_response(&cors_request, response)
+        session.finish(&self.policy, response)
     }
 
     /// Build a typed request from a controlled-origin gateway path.
@@ -735,6 +788,89 @@ mod tests {
         assert!(actual.headers.iter().any(|header| {
             header.name_eq("origin") && header.value == "https://app.example.test"
         }));
+        Ok(())
+    }
+
+    struct ParityTransport {
+        requests: RefCell<Vec<GatewayRequest>>,
+    }
+
+    impl ParityTransport {
+        fn new() -> Self {
+            Self {
+                requests: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait(?Send)]
+    impl GatewayTransport for ParityTransport {
+        async fn send(&self, request: GatewayRequest) -> Result<GatewayResponse> {
+            let is_preflight = request.method == "OPTIONS";
+            self.requests.borrow_mut().push(request);
+            let mut headers = vec![GatewayHeader::new(
+                "Access-Control-Allow-Origin",
+                "https://app.example.test",
+            )?];
+            if is_preflight {
+                headers.push(GatewayHeader::new("Access-Control-Allow-Methods", "PATCH")?);
+                headers.push(GatewayHeader::new(
+                    "Access-Control-Allow-Headers",
+                    "x-requested-with",
+                )?);
+            } else {
+                headers.push(GatewayHeader::new("Set-Cookie", "sid=one; Path=/")?);
+            }
+            GatewayResponse::new(200, headers, b"parity response".to_vec())
+        }
+    }
+
+    fn parity_request_sequence() -> Result<Vec<GatewayRequest>> {
+        let app = TargetUrl::parse("https://app.example.test/page")?.into_url();
+        let api = TargetUrl::parse("https://api.example.test/data")?.into_url();
+        Ok(vec![
+            GatewayRequest::navigation(app.clone()),
+            GatewayRequest::fetch(api, "PATCH")
+                .with_source_origin(app.clone())
+                .with_header(GatewayHeader::new("X-Requested-With", "Rings")?),
+            GatewayRequest::fetch(app, "GET").with_source_origin(
+                TargetUrl::parse("https://app.example.test/other-page")?.into_url(),
+            ),
+        ])
+    }
+
+    #[test]
+    fn gateway_adapters_share_cookie_cors_and_response_policy() -> Result<()> {
+        let prefix = GatewayPrefix::new("/webview/")?;
+        let mut single = WebviewGateway::new(prefix.clone(), ParityTransport::new());
+        let concurrent = ConcurrentWebviewGateway::new(prefix, ParityTransport::new());
+        let requests = parity_request_sequence()?;
+
+        let mut single_responses = Vec::new();
+        for request in requests.clone() {
+            single_responses.push(futures::executor::block_on(single.send(request))?);
+        }
+        let single_requests = single.transport.requests.borrow().clone();
+        let single_cookie_count = single.cookies().len();
+
+        let mut concurrent_responses = Vec::new();
+        for request in requests {
+            concurrent_responses.push(futures::executor::block_on(concurrent.send(request))?);
+        }
+        let concurrent_requests = concurrent.transport.requests.borrow().clone();
+        let concurrent_cookie_count = concurrent.lock_cookies()?.len();
+
+        assert_eq!(single_requests, concurrent_requests);
+        assert_eq!(single_responses, concurrent_responses);
+        assert_eq!(single_cookie_count, concurrent_cookie_count);
+        assert_eq!(single_cookie_count, 1);
+        let final_request = single_requests.last().ok_or_else(|| {
+            WebviewError::Transport("parity transport did not receive final request".to_string())
+        })?;
+        assert!(final_request
+            .headers
+            .iter()
+            .any(|header| header.name_eq("cookie") && header.value == "sid=one"));
         Ok(())
     }
 

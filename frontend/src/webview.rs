@@ -17,6 +17,7 @@ use rings_webview::browser::bootstrap_script;
 use rings_webview::ConcurrentWebviewGateway;
 use rings_webview::GatewayCredentials;
 use rings_webview::GatewayFailure;
+use rings_webview::GatewayFailureCode;
 use rings_webview::GatewayHeader;
 use rings_webview::GatewayPrefix;
 use rings_webview::GatewayRequest;
@@ -299,30 +300,14 @@ fn browser_transport_failure(error: WebviewError) -> JsValue {
 }
 
 fn onion_gateway_failure(error: onion::OnionProxyError) -> WebviewError {
-    let (status, code, summary) = match error.kind() {
-        onion::OnionProxyFailureKind::Generic => {
-            (502, "gateway_transport_failed", "Gateway transport failed.")
-        }
-        onion::OnionProxyFailureKind::ExitUnavailable => (
-            503,
-            "onion_exit_unavailable",
-            "No live HTTPS onion exit is available.",
-        ),
-        onion::OnionProxyFailureKind::RouteUnavailable => (
-            503,
-            "onion_route_unavailable",
-            "No onion route is currently available for the requested target.",
-        ),
-        onion::OnionProxyFailureKind::RequestTimedOut => (
-            504,
-            "onion_request_timed_out",
-            "Onion HTTPS proxy request timed out.",
-        ),
+    let code = match error.kind() {
+        onion::OnionProxyFailureKind::Generic => GatewayFailureCode::GatewayTransportFailed,
+        onion::OnionProxyFailureKind::ExitUnavailable => GatewayFailureCode::OnionExitUnavailable,
+        onion::OnionProxyFailureKind::RouteUnavailable => GatewayFailureCode::OnionRouteUnavailable,
+        onion::OnionProxyFailureKind::RequestTimedOut => GatewayFailureCode::OnionRequestTimedOut,
     };
     WebviewError::GatewayFailure(GatewayFailure::new(
-        status,
         code,
-        summary,
         format!("gateway transport failed: {}", error.message()),
     ))
 }

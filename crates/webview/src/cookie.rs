@@ -43,6 +43,14 @@ impl CookieJar {
 
     /// Store one upstream `Set-Cookie` header for `origin`.
     pub fn store_set_cookie(&mut self, origin: &Url, set_cookie: &str) -> Result<()> {
+        self.store_set_cookie_at(origin, set_cookie, current_time_millis())
+    }
+
+    /// Store one upstream `Set-Cookie` header for `origin` at `now` milliseconds since Unix epoch.
+    ///
+    /// The supplied instant is used for `Max-Age` and `Expires` decisions, so callers that own a
+    /// clock can replay cookie transitions without reading ambient time.
+    pub fn store_set_cookie_at(&mut self, origin: &Url, set_cookie: &str, now: i64) -> Result<()> {
         let Some(host) = origin.host_str() else {
             return Err(WebviewError::Cookie(
                 "cookie origin host is empty".to_string(),
@@ -99,14 +107,13 @@ impl CookieJar {
                             cookie.expires_at = None;
                         } else {
                             delete_cookie = false;
-                            cookie.expires_at =
-                                Some(current_time_millis().saturating_add(max_age_millis(seconds)));
+                            cookie.expires_at = Some(now.saturating_add(max_age_millis(seconds)));
                         }
                     }
                 } else if key.eq_ignore_ascii_case("expires") && !saw_max_age {
                     if let Ok(expires_at) = httpdate::parse_http_date(value.trim()) {
                         let expires_at = system_time_millis(expires_at);
-                        if expires_at <= current_time_millis() {
+                        if expires_at <= now {
                             delete_cookie = true;
                             cookie.expires_at = None;
                         } else {
@@ -141,17 +148,40 @@ impl CookieJar {
 
     /// Build a `Cookie` request header for `target`, if any jar entries match.
     pub fn cookie_header(&self, target: &Url) -> Option<String> {
-        self.cookie_header_matching(target, None, "GET", true, GatewayRequestKind::Navigation)
+        self.cookie_header_at(target, current_time_millis())
+    }
+
+    /// Build a `Cookie` request header for `target` at `now` milliseconds since Unix epoch.
+    pub fn cookie_header_at(&self, target: &Url, now: i64) -> Option<String> {
+        self.cookie_header_matching(
+            target,
+            None,
+            "GET",
+            true,
+            GatewayRequestKind::Navigation,
+            now,
+        )
     }
 
     /// Build a `Cookie` request header for one normalized gateway request.
     pub fn cookie_header_for_request(&self, request: &GatewayRequest) -> Option<String> {
+        self.cookie_header_for_request_at(request, current_time_millis())
+    }
+
+    /// Build a `Cookie` request header for one normalized gateway request at `now` milliseconds
+    /// since Unix epoch.
+    pub fn cookie_header_for_request_at(
+        &self,
+        request: &GatewayRequest,
+        now: i64,
+    ) -> Option<String> {
         self.cookie_header_matching(
             &request.target,
             request.source_origin.as_ref(),
             request.method.as_str(),
             request.top_level_navigation,
             request.kind,
+            now,
         )
     }
 
@@ -162,11 +192,11 @@ impl CookieJar {
         method: &str,
         top_level_navigation: bool,
         kind: GatewayRequestKind,
+        now: i64,
     ) -> Option<String> {
         let host = target.host_str()?.to_ascii_lowercase();
         let path = target.path();
         let secure_request = target.scheme() == "https";
-        let now = current_time_millis();
         let pairs: Vec<String> = self
             .cookies
             .iter()
@@ -195,7 +225,11 @@ impl CookieJar {
 
     /// Return the number of cookies currently stored.
     pub fn len(&self) -> usize {
-        let now = current_time_millis();
+        self.len_at(current_time_millis())
+    }
+
+    /// Return the number of unexpired cookies at `now` milliseconds since Unix epoch.
+    pub fn len_at(&self, now: i64) -> usize {
         self.cookies
             .iter()
             .filter(|cookie| !cookie_expired(cookie, now))
@@ -205,6 +239,11 @@ impl CookieJar {
     /// Return true when no cookies are stored.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Return true when no unexpired cookies exist at `now` milliseconds since Unix epoch.
+    pub fn is_empty_at(&self, now: i64) -> bool {
+        self.len_at(now) == 0
     }
 }
 
@@ -439,6 +478,45 @@ mod tests {
         let target = Url::parse("https://example.com/app/page")?;
         assert_eq!(jar.cookie_header(&target), None);
         assert!(jar.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn max_age_expiry_is_visible_until_its_exact_boundary() -> Result<()> {
+        let mut jar = CookieJar::new();
+        let origin = Url::parse("https://example.com/app/index.html")?;
+        let target = Url::parse("https://example.com/app/page")?;
+
+        jar.store_set_cookie_at(&origin, "sid=one; Path=/app; Max-Age=2", 1_000)?;
+
+        assert_eq!(
+            jar.cookie_header_at(&target, 2_999).as_deref(),
+            Some("sid=one")
+        );
+        assert_eq!(jar.len_at(2_999), 1);
+        assert_eq!(jar.cookie_header_at(&target, 3_000), None);
+        assert_eq!(jar.len_at(3_000), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn replacement_and_deletion_are_replayable_at_one_instant() -> Result<()> {
+        let mut jar = CookieJar::new();
+        let origin = Url::parse("https://example.com/app/index.html")?;
+        let target = Url::parse("https://example.com/app/page")?;
+        let now = 1_000;
+
+        jar.store_set_cookie_at(&origin, "sid=old; Path=/app", now)?;
+        jar.store_set_cookie_at(&origin, "sid=new; Path=/app", now)?;
+        assert_eq!(
+            jar.cookie_header_at(&target, now).as_deref(),
+            Some("sid=new")
+        );
+        assert_eq!(jar.len_at(now), 1);
+
+        jar.store_set_cookie_at(&origin, "sid=gone; Path=/app; Max-Age=0", now)?;
+        assert_eq!(jar.cookie_header_at(&target, now), None);
+        assert!(jar.is_empty_at(now));
         Ok(())
     }
 

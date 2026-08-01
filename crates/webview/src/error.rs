@@ -3,6 +3,56 @@ use thiserror::Error;
 /// Result type used by the webview gateway.
 pub type Result<T> = std::result::Result<T, WebviewError>;
 
+/// Closed set of browser-facing gateway failure classes.
+///
+/// Each variant owns the public HTTP projection and short summary.  Rendering
+/// adapters may turn the variant into a string code, but cannot publish an
+/// unrecognised code or a mismatched status.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GatewayFailureCode {
+    /// The upstream gateway transport failed.
+    GatewayTransportFailed,
+    /// No live onion HTTPS exit is available.
+    OnionExitUnavailable,
+    /// No onion route exists for the requested target.
+    OnionRouteUnavailable,
+    /// The onion HTTPS request timed out.
+    OnionRequestTimedOut,
+}
+
+impl GatewayFailureCode {
+    /// Stable browser-visible error code.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::GatewayTransportFailed => "gateway_transport_failed",
+            Self::OnionExitUnavailable => "onion_exit_unavailable",
+            Self::OnionRouteUnavailable => "onion_route_unavailable",
+            Self::OnionRequestTimedOut => "onion_request_timed_out",
+        }
+    }
+
+    /// HTTP status associated with this failure class.
+    pub const fn status(self) -> u16 {
+        match self {
+            Self::GatewayTransportFailed => 502,
+            Self::OnionExitUnavailable | Self::OnionRouteUnavailable => 503,
+            Self::OnionRequestTimedOut => 504,
+        }
+    }
+
+    /// Short user-facing failure summary.
+    pub const fn summary(self) -> &'static str {
+        match self {
+            Self::GatewayTransportFailed => "Gateway transport failed.",
+            Self::OnionExitUnavailable => "No live HTTPS onion exit is available.",
+            Self::OnionRouteUnavailable => {
+                "No onion route is currently available for the requested target."
+            }
+            Self::OnionRequestTimedOut => "Onion HTTPS proxy request timed out.",
+        }
+    }
+}
+
 /// Stable browser-facing failure metadata for one gateway request.
 ///
 /// This is the typed boundary between a transport adapter and browser UI. The
@@ -10,41 +60,32 @@ pub type Result<T> = std::result::Result<T, WebviewError>;
 /// human-readable `detail` message.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GatewayFailure {
-    status: u16,
-    code: String,
-    summary: String,
+    code: GatewayFailureCode,
     detail: String,
 }
 
 impl GatewayFailure {
-    /// Build gateway failure metadata.
-    pub fn new(
-        status: u16,
-        code: impl Into<String>,
-        summary: impl Into<String>,
-        detail: impl Into<String>,
-    ) -> Self {
+    /// Build gateway failure metadata from a closed public failure class.
+    pub fn new(code: GatewayFailureCode, detail: impl Into<String>) -> Self {
         Self {
-            status,
-            code: code.into(),
-            summary: summary.into(),
+            code,
             detail: detail.into(),
         }
     }
 
     /// HTTP status to return from the controlled gateway route.
     pub fn status(&self) -> u16 {
-        self.status
+        self.code.status()
     }
 
     /// Stable machine-readable failure code.
     pub fn code(&self) -> &str {
-        &self.code
+        self.code.as_str()
     }
 
     /// Short user-facing failure summary.
     pub fn summary(&self) -> &str {
-        &self.summary
+        self.code.summary()
     }
 
     /// Detailed diagnostic message for the debug console.
@@ -56,6 +97,46 @@ impl GatewayFailure {
 impl std::fmt::Display for GatewayFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.detail)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::GatewayFailureCode;
+
+    #[test]
+    fn gateway_failure_codes_have_exhaustive_http_ui_projections() {
+        let projections = [
+            (
+                GatewayFailureCode::GatewayTransportFailed,
+                502,
+                "gateway_transport_failed",
+                "Gateway transport failed.",
+            ),
+            (
+                GatewayFailureCode::OnionExitUnavailable,
+                503,
+                "onion_exit_unavailable",
+                "No live HTTPS onion exit is available.",
+            ),
+            (
+                GatewayFailureCode::OnionRouteUnavailable,
+                503,
+                "onion_route_unavailable",
+                "No onion route is currently available for the requested target.",
+            ),
+            (
+                GatewayFailureCode::OnionRequestTimedOut,
+                504,
+                "onion_request_timed_out",
+                "Onion HTTPS proxy request timed out.",
+            ),
+        ];
+        for (code, status, name, summary) in projections {
+            assert_eq!(code.status(), status);
+            assert_eq!(code.as_str(), name);
+            assert_eq!(code.summary(), summary);
+        }
     }
 }
 

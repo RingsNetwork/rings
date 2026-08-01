@@ -40,6 +40,7 @@ pub use cookie::CookieJar;
 pub use cors::preflight_request;
 pub use cors::validate_response;
 pub use error::GatewayFailure;
+pub use error::GatewayFailureCode;
 pub use error::Result;
 pub use error::WebviewError;
 pub use header::HeaderPolicy;

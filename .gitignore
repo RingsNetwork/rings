@@ -6,6 +6,7 @@ config*.yaml
 **/*.ipynb
 **/*.js
 **/*.mjs
+!crates/webview/src/browser_runtime.mjs
 !frontend/assets/webview-host.js
 !frontend/assets/webview-overlay.js
 !frontend/assets/webview-worker-response.js

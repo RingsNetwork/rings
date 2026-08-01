@@ -4679,6 +4679,7 @@ dependencies = [
  "psl",
  "serde",
  "serde-wasm-bindgen",
+ "serde_json",
  "thiserror 1.0.69",
  "url",
  "wasm-bindgen",
