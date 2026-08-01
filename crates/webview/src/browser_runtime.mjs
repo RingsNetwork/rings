@@ -98,7 +98,7 @@
   function encodeUrlList(input, base) {
     return String(input).trim().split(/\s+/).filter(Boolean).map((value) => encodeTarget(value, base)).join(" ");
   }
-  // Pure transform: commas inside a data URL are URL data, not candidate separators.
+  // Pure transform: tokenize candidates before rewriting their URLs.
   function parseSrcsetCandidates(input) {
     const text = String(input);
     const candidates = [];
@@ -106,11 +106,13 @@
     while (cursor < text.length) {
       while (cursor < text.length && /[\t\n\f\r ,]/.test(text[cursor])) cursor += 1;
       const urlStart = cursor;
-      while (cursor < text.length && !/[\t\n\f\r ]/.test(text[cursor])) {
-        if (text[cursor] === "," && !text.slice(urlStart, cursor).toLowerCase().startsWith("data:")) break;
-        cursor += 1;
+      while (cursor < text.length && !/[\t\n\f\r ]/.test(text[cursor])) cursor += 1;
+      let url = text.slice(urlStart, cursor);
+      if (url.endsWith(",")) {
+        url = url.replace(/,+$/, "");
+        if (url) candidates.push({ url, descriptor: "" });
+        continue;
       }
-      const url = text.slice(urlStart, cursor);
       while (cursor < text.length && /[\t\n\f\r ]/.test(text[cursor])) cursor += 1;
       const descriptorStart = cursor;
       while (cursor < text.length && text[cursor] !== ",") cursor += 1;

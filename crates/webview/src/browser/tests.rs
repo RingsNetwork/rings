@@ -229,6 +229,8 @@ const element = new Element();
 element.setAttribute("src", "image.png");
 element.setAttribute("srcset", "small.png 1x, /big.png 2x");
 element.setAttribute("srcset", "data:image/svg+xml,%3Csvg%3E,%3C/svg%3E 1x, /data-fallback.png 2x");
+element.setAttribute("srcset", "data:image/svg+xml,%3Csvg%3E,%3C/svg%3E, /next.png 2x");
+element.setAttribute("srcset", "first.png 1x,,, /consecutive.png 2x");
 element.setAttribute("aria-label", "unchanged");
 const image = new globalThis.HTMLImageElement();
 image.src = "property.png";
@@ -253,6 +255,8 @@ assert(!calls.some((call) => ["websocket", "eventsource", "beacon", "worker", "s
 assert(calls.some((call) => call[0] === "attribute" && call[1] === "src" && call[2] === gateway("https://example.test/docs/image.png")), "setAttribute src was not rewritten: " + actual);
 assert(calls.some((call) => call[0] === "attribute" && call[1] === "srcset" && call[2].includes(gateway("https://example.test/docs/small.png")) && call[2].includes(gateway("https://example.test/big.png"))), "setAttribute srcset was not rewritten: " + actual);
 assert(calls.some((call) => call[0] === "attribute" && call[1] === "srcset" && call[2].includes("data:image/svg+xml,%3Csvg%3E,%3C/svg%3E 1x") && call[2].includes(gateway("https://example.test/data-fallback.png"))), "data URL srcset candidate was split at its payload comma: " + actual);
+assert(calls.some((call) => call[0] === "attribute" && call[1] === "srcset" && call[2].includes("data:image/svg+xml,%3Csvg%3E,%3C/svg%3E") && call[2].includes(gateway("https://example.test/next.png"))), "descriptor-less data URL swallowed the next srcset candidate: " + actual);
+assert(calls.some((call) => call[0] === "attribute" && call[1] === "srcset" && call[2].includes(gateway("https://example.test/docs/first.png")) && call[2].includes(gateway("https://example.test/consecutive.png"))), "consecutive srcset separators dropped a candidate: " + actual);
 assert(calls.some((call) => call[0] === "attribute" && call[1] === "aria-label" && call[2] === "unchanged"), "non-URL attribute changed: " + actual);
 assert(calls.some((call) => call[0] === "property" && call[1] === "img.src" && call[2] === gateway("https://example.test/docs/property.png")), "img.src property was not rewritten: " + actual);
 assert(calls.some((call) => call[0] === "property" && call[1] === "img.srcset" && call[2].includes(gateway("https://example.test/docs/property-small.png")) && call[2].includes(gateway("https://example.test/property-big.png"))), "img.srcset property was not rewritten: " + actual);
