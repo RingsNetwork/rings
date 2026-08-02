@@ -16,6 +16,7 @@ use std::sync::Mutex;
 use std::sync::RwLock;
 
 use bytes::Bytes;
+use futures::lock::Mutex as AsyncMutex;
 use rings_core::dht::Did;
 
 use super::Ctx;
@@ -189,6 +190,7 @@ struct Runner<P: Protocol, I> {
     protocol: P,
     interpret: I,
     state: Mutex<P::State>,
+    transition_gate: AsyncMutex<()>,
 }
 
 #[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait::async_trait(?Send))]
@@ -204,6 +206,12 @@ where
     I: Interpret<Effect = P::Effect> + MaybeSend + 'static,
 {
     async fn handle(&self, core: &Core, from: Did, payload: Bytes) -> Result<Vec<Inbound>> {
+        // The transition gate establishes the protocol's linearization order before either the
+        // decode boundary, state commit, or effects can begin. Holding it through interpretation
+        // preserves: commit(A) < commit(B) => effects(A) complete before effects(B) begin.
+        // The state mutex itself remains synchronous and never crosses an await.
+        let _transition_turn = self.transition_gate.lock().await;
+
         // Boundary: decode raw bytes to a typed event. An undecodable/foreign message is an
         // explicit drop here, not a silent `Transition::pure` deep in `step`.
         let event = match self.protocol.decode(Wire {
@@ -236,7 +244,9 @@ where
             effects
         };
 
-        // Impure region (lock released): run the protocol's own effects via its interpreter,
+        // Impure region: the state lock is released, while the transition gate keeps this
+        // protocol's effect trace in the same order as its committed state trace.
+        // Run the protocol's own effects via its interpreter,
         // handing it only a namespace-scoped capability. Each payload it returns is re-injected
         // into *this* namespace with `from = this node` — the router fixes the provenance, so a
         // shell cannot forge a target namespace or a remote `from`.
@@ -332,6 +342,7 @@ impl Extensions {
                     protocol,
                     interpret,
                     state,
+                    transition_gate: AsyncMutex::new(()),
                 });
                 (namespace, runner)
             })
@@ -370,6 +381,7 @@ impl Extensions {
             protocol,
             interpret,
             state,
+            transition_gate: AsyncMutex::new(()),
         });
         let mut handlers = self.core.handlers.write().map_err(|_| Error::Lock)?;
         if !replace && handlers.contains_key(&namespace) {
@@ -397,5 +409,132 @@ impl Extensions {
     /// [`Core::dispatch`].
     pub(crate) async fn dispatch(&self, from: Did, envelope: Envelope) -> Result<()> {
         self.core.dispatch(from, envelope).await
+    }
+}
+
+#[cfg(all(test, feature = "node"))]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use rings_core::ecc::SecretKey;
+    use rings_core::session::SessionSk;
+    use tokio::sync::Notify;
+
+    use super::*;
+    use crate::processor::ProcessorBuilder;
+    use crate::processor::ProcessorConfig;
+
+    struct OrderedProtocol;
+
+    impl Protocol for OrderedProtocol {
+        type State = u8;
+        type Event = u8;
+        type Effect = u8;
+
+        fn namespace(&self) -> &str {
+            "ordered-effects"
+        }
+
+        fn init(&self) -> Self::State {
+            0
+        }
+
+        fn decode(&self, wire: Wire<'_>) -> std::result::Result<Self::Event, Reject> {
+            wire.payload
+                .first()
+                .copied()
+                .ok_or_else(|| Reject("missing effect value".to_string()))
+        }
+
+        fn step(
+            &self,
+            ctx: Ctx<'_, Self::State>,
+            event: Self::Event,
+        ) -> Transition<Self::State, Self::Effect> {
+            Transition::with(ctx.state.saturating_add(1), vec![event])
+        }
+    }
+
+    #[derive(Default)]
+    struct BlockingOrderedInterpreter {
+        first_effect_started: Notify,
+        release_first_effect: Notify,
+        observed: Mutex<Vec<u8>>,
+    }
+
+    #[async_trait]
+    impl Interpret for Arc<BlockingOrderedInterpreter> {
+        type Effect = u8;
+
+        async fn run(&self, _scope: &Scope, effect: Self::Effect) -> Result<Vec<Bytes>> {
+            if effect == 1 {
+                self.first_effect_started.notify_one();
+                self.release_first_effect.notified().await;
+            }
+            self.observed.lock().map_err(|_| Error::Lock)?.push(effect);
+            Ok(Vec::new())
+        }
+    }
+
+    fn extensions() -> Result<Extensions> {
+        let session = SessionSk::new_with_seckey(&SecretKey::random())?;
+        let config = ProcessorConfig::new(1, String::new(), session, 1);
+        let processor = ProcessorBuilder::from_config(&config)?
+            .advertise_presence(false)
+            .build()?;
+        Ok(Extensions::new(Arc::new(processor)))
+    }
+
+    #[tokio::test]
+    async fn committed_transitions_execute_effects_in_commit_order() -> Result<()> {
+        // Invariant: while A's effect is blocked, B cannot commit or emit; releasing A
+        // produces the unique effect trace [A, B] for the protocol's state-transition order.
+        let extensions = extensions()?;
+        let interpreter = Arc::new(BlockingOrderedInterpreter::default());
+        extensions.register(OrderedProtocol, Arc::clone(&interpreter))?;
+        let from = extensions.core().did();
+
+        let first_extensions = extensions.clone();
+        let first = tokio::spawn(async move {
+            first_extensions
+                .dispatch(
+                    from,
+                    Envelope::new("ordered-effects", Bytes::from_static(&[1])),
+                )
+                .await
+        });
+        interpreter.first_effect_started.notified().await;
+
+        let second_extensions = extensions.clone();
+        let second = tokio::spawn(async move {
+            second_extensions
+                .dispatch(
+                    from,
+                    Envelope::new("ordered-effects", Bytes::from_static(&[2])),
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(!second.is_finished());
+        assert!(interpreter
+            .observed
+            .lock()
+            .map_err(|_| Error::Lock)?
+            .is_empty());
+
+        interpreter.release_first_effect.notify_one();
+        first
+            .await
+            .map_err(|error| Error::ExtensionError(error.to_string()))??;
+        second
+            .await
+            .map_err(|error| Error::ExtensionError(error.to_string()))??;
+        assert_eq!(
+            *interpreter.observed.lock().map_err(|_| Error::Lock)?,
+            vec![1, 2]
+        );
+        Ok(())
     }
 }

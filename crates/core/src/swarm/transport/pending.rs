@@ -4,6 +4,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use rings_transport::core::transport::TransportInterface;
+#[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
+use tokio::sync::Notify;
 mod registry;
 
 pub(super) use registry::ActiveConnectionSet;
@@ -52,6 +54,41 @@ impl ConnectionLifecycleBoundary {
     #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
     pub(super) fn is_held_for_test(&self) -> bool {
         self.inner.try_lock().is_err()
+    }
+}
+
+/// Test-only asynchronous control point for a synchronous lifecycle transition.
+///
+/// The lifecycle mutex remains synchronous in production. The transition runs on
+/// a blocking worker, while the test observes and releases the critical section
+/// through async notifications.
+#[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
+#[derive(Clone)]
+pub(crate) struct LifecycleTransitionGate {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+#[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
+impl LifecycleTransitionGate {
+    pub(crate) fn new() -> Self {
+        Self {
+            entered: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+        }
+    }
+
+    pub(crate) async fn wait_until_entered(&self) {
+        self.entered.notified().await;
+    }
+
+    pub(crate) fn release(&self) {
+        self.release.notify_one();
+    }
+
+    fn hold_transition(&self) {
+        self.entered.notify_one();
+        futures::executor::block_on(self.release.notified());
     }
 }
 
@@ -269,6 +306,16 @@ impl SwarmTransport {
         &self,
         peer: Did,
     ) -> Result<PendingConnectionAttempt> {
+        self.reserve_pending_connection_with_observer(peer, || {})
+            .await
+    }
+
+    async fn reserve_pending_connection_with_observer(
+        &self,
+        peer: Did,
+        observe_before_lifecycle_lock: impl FnOnce(),
+    ) -> Result<PendingConnectionAttempt> {
+        observe_before_lifecycle_lock();
         self.expire_pending_connections().await?;
         if peer == self.dht.did {
             return Err(Error::ShouldNotConnectSelf);
@@ -284,6 +331,16 @@ impl SwarmTransport {
             "pending connection reserved"
         );
         Ok(attempt)
+    }
+
+    #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
+    pub(crate) async fn reserve_pending_connection_with_observer_for_test(
+        &self,
+        peer: Did,
+        observe_before_lifecycle_lock: impl FnOnce(),
+    ) -> Result<PendingConnectionAttempt> {
+        self.reserve_pending_connection_with_observer(peer, observe_before_lifecycle_lock)
+            .await
     }
 
     #[cfg(all(test, feature = "dummy"))]
@@ -409,6 +466,19 @@ impl SwarmTransport {
         }
         observe_transition(self);
         Ok(true)
+    }
+
+    /// Run a synchronous promotion on a blocking worker and expose an async
+    /// test gate while the lifecycle mutex is held.
+    #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
+    pub(crate) fn activate_connection_with_gate_for_test(
+        self: Arc<Self>,
+        attempt: PendingConnectionAttempt,
+        gate: LifecycleTransitionGate,
+    ) -> tokio::task::JoinHandle<Result<bool>> {
+        tokio::task::spawn_blocking(move || {
+            self.activate_connection_with_observer_for_test(attempt, |_| gate.hold_transition())
+        })
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]

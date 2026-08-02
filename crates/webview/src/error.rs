@@ -59,6 +59,9 @@ pub enum CookieFailure {
 /// Closed causes internal to request-session transport orchestration.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum TransportFailure {
+    /// This target has no ambient clock for the convenience gateway API.
+    #[error("gateway clock is unavailable on this target")]
+    ClockUnavailable,
     /// A prepared request session was sent more than once.
     #[error("gateway request session was sent twice")]
     RequestSessionSentTwice,

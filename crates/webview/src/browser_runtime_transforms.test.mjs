@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import "./browser_runtime_transforms.mjs";
 
@@ -14,40 +15,7 @@ const urls = transforms.createUrlTransformer({
 });
 
 test("srcset tokenizer preserves candidate boundaries", () => {
-  const cases = [
-    {
-      name: "data URL with descriptor",
-      input: "data:image/svg+xml,%3Csvg%3E,%3C/svg%3E 1x, /next.png 2x",
-      candidates: [
-        { url: "data:image/svg+xml,%3Csvg%3E,%3C/svg%3E", descriptor: "1x" },
-        { url: "/next.png", descriptor: "2x" },
-      ],
-    },
-    {
-      name: "descriptor-less data URL",
-      input: "data:image/svg+xml,%3Csvg%3E,%3C/svg%3E, /next.png 2x",
-      candidates: [
-        { url: "data:image/svg+xml,%3Csvg%3E,%3C/svg%3E", descriptor: "" },
-        { url: "/next.png", descriptor: "2x" },
-      ],
-    },
-    {
-      name: "consecutive separators and whitespace",
-      input: "  first.png 1x,,,\n /next.png 2x  ",
-      candidates: [
-        { url: "first.png", descriptor: "1x" },
-        { url: "/next.png", descriptor: "2x" },
-      ],
-    },
-    {
-      name: "quoted and escaped URLs",
-      input: '"quoted image.png" 640w, escaped\\,image.png 2x',
-      candidates: [
-        { url: "quoted image.png", descriptor: "640w" },
-        { url: "escaped,image.png", descriptor: "2x" },
-      ],
-    },
-  ];
+  const cases = JSON.parse(readFileSync(new URL("./srcset_contract.json", import.meta.url)));
   for (const fixture of cases) {
     assert.deepEqual(transforms.parseSrcsetCandidates(fixture.input), fixture.candidates, fixture.name);
   }

@@ -247,15 +247,8 @@ fn is_srcset_attribute(name: &str) -> bool {
 
 fn rewrite_srcset_value(value: &str, state: &HtmlRewriteState<'_>) -> Result<String> {
     let mut out = Vec::new();
-    for candidate in value.split(',') {
-        let trimmed = candidate.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let mut parts = trimmed.splitn(2, char::is_whitespace);
-        let url = parts.next().unwrap_or_default();
-        let descriptor = parts.next().unwrap_or_default().trim();
-        let rewritten = state.rewrite_url(url)?.unwrap_or_else(|| url.to_string());
+    for SrcsetCandidate { url, descriptor } in parse_srcset_candidates(value) {
+        let rewritten = state.rewrite_url(&url)?.unwrap_or(url);
         if descriptor.is_empty() {
             out.push(rewritten);
         } else {
@@ -263,6 +256,138 @@ fn rewrite_srcset_value(value: &str, state: &HtmlRewriteState<'_>) -> Result<Str
         }
     }
     Ok(out.join(", "))
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct SrcsetCandidate {
+    url: String,
+    descriptor: String,
+}
+
+/// Tokenize `srcset` candidates using the HTML URL-token boundary rule.
+///
+/// Law: a comma terminates a descriptor-less URL only when it is trailing in
+/// its non-whitespace URL token. Commas inside `data:` payloads remain data.
+/// Quoted and escaped URL tokens preserve their candidate boundary before
+/// normalization. The browser runtime verifies this same contract from
+/// `srcset_contract.json`.
+fn parse_srcset_candidates(input: &str) -> Vec<SrcsetCandidate> {
+    let mut candidates = Vec::new();
+    let mut cursor = 0_usize;
+
+    while cursor < input.len() {
+        cursor = skip_srcset_separators(input, cursor);
+        if cursor == input.len() {
+            break;
+        }
+        let url_start = cursor;
+        cursor = scan_srcset_url_token(input, cursor);
+        let url_end = cursor;
+        if url_start == url_end {
+            continue;
+        }
+        if input[..url_end].ends_with(',') {
+            let url = normalize_srcset_url(input[url_start..url_end].trim_end_matches(','));
+            if !url.is_empty() {
+                candidates.push(SrcsetCandidate {
+                    url,
+                    descriptor: String::new(),
+                });
+            }
+            continue;
+        }
+
+        cursor = skip_srcset_whitespace(input, cursor);
+        let descriptor_start = cursor;
+        cursor = scan_srcset_descriptor(input, cursor);
+        let url = normalize_srcset_url(&input[url_start..url_end]);
+        if !url.is_empty() {
+            candidates.push(SrcsetCandidate {
+                url,
+                descriptor: input[descriptor_start..cursor].trim().to_string(),
+            });
+        }
+        if input[cursor..].starts_with(',') {
+            cursor += 1;
+        }
+    }
+
+    candidates
+}
+
+fn skip_srcset_separators(input: &str, mut cursor: usize) -> usize {
+    while let Some(character) = input[cursor..].chars().next() {
+        if !matches!(character, '\t' | '\n' | '\x0c' | '\r' | ' ' | ',') {
+            break;
+        }
+        cursor += character.len_utf8();
+    }
+    cursor
+}
+
+fn skip_srcset_whitespace(input: &str, mut cursor: usize) -> usize {
+    while let Some(character) = input[cursor..].chars().next() {
+        if !matches!(character, '\t' | '\n' | '\x0c' | '\r' | ' ') {
+            break;
+        }
+        cursor += character.len_utf8();
+    }
+    cursor
+}
+
+fn scan_srcset_url_token(input: &str, mut cursor: usize) -> usize {
+    let mut quote = None;
+    let mut escaped = false;
+    while let Some(character) = input[cursor..].chars().next() {
+        if escaped {
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if quote.is_some_and(|quoted| quoted == character) {
+            quote = None;
+        } else if quote.is_none() && matches!(character, '\'' | '"') {
+            quote = Some(character);
+        } else if quote.is_none() && matches!(character, '\t' | '\n' | '\x0c' | '\r' | ' ') {
+            break;
+        }
+        cursor += character.len_utf8();
+    }
+    cursor
+}
+
+fn scan_srcset_descriptor(input: &str, mut cursor: usize) -> usize {
+    while let Some(character) = input[cursor..].chars().next() {
+        if character == ',' {
+            break;
+        }
+        cursor += character.len_utf8();
+    }
+    cursor
+}
+
+fn normalize_srcset_url(url: &str) -> String {
+    let unquoted = match (url.chars().next(), url.chars().next_back()) {
+        (Some('"'), Some('"')) | (Some('\''), Some('\'')) if url.len() >= 2 => {
+            &url[1..url.len() - 1]
+        }
+        _ => url,
+    };
+    let mut normalized = String::new();
+    let mut escaped = false;
+    for character in unquoted.chars() {
+        if escaped {
+            normalized.push(character);
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else {
+            normalized.push(character);
+        }
+    }
+    if escaped {
+        normalized.push('\\');
+    }
+    normalized
 }
 
 /// Rewrite a space-separated HTML URL list, such as an anchor `ping` value.
@@ -499,6 +624,8 @@ fn bootstrap_tag(script: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use serde::Deserialize;
+
     use super::*;
     use crate::url::GatewayPrefix;
     use crate::url::TargetUrl;
@@ -522,6 +649,54 @@ mod tests {
         assert!(rewritten.contains("/webview/https%3A%2F%2Fexample%2Ecom%2Fsubmit"));
         assert!(rewritten.contains("1x"));
         assert!(rewritten.contains("2x"));
+        Ok(())
+    }
+
+    #[test]
+    fn html_srcset_tokenizer_preserves_data_url_and_candidate_boundaries() -> Result<()> {
+        let ctx = context()?;
+        let html = r#"<img srcset="data:image/svg+xml,%3Csvg%3E,%3C/svg%3E, /next.png 2x"><img srcset="first.png 1x,,, /last.png 2x">"#;
+
+        let rewritten = ctx.rewrite_html(html)?;
+
+        assert!(rewritten.contains("data:image/svg+xml,%3Csvg%3E,%3C/svg%3E"));
+        assert!(rewritten.contains("/webview/https%3A%2F%2Fexample%2Ecom%2Fnext%2Epng 2x"));
+        assert!(rewritten.contains("/webview/https%3A%2F%2Fexample%2Ecom%2Fapp%2Ffirst%2Epng 1x"));
+        assert!(rewritten.contains("/webview/https%3A%2F%2Fexample%2Ecom%2Flast%2Epng 2x"));
+        Ok(())
+    }
+
+    #[derive(Deserialize)]
+    struct SrcsetContractCase {
+        name: String,
+        input: String,
+        candidates: Vec<SrcsetContractCandidate>,
+    }
+
+    #[derive(Deserialize)]
+    struct SrcsetContractCandidate {
+        url: String,
+        descriptor: String,
+    }
+
+    #[test]
+    fn html_srcset_tokenizer_obeys_shared_runtime_contract() -> Result<()> {
+        let cases: Vec<SrcsetContractCase> =
+            serde_json::from_str(include_str!("srcset_contract.json")).map_err(|error| {
+                WebviewError::transport(format!("invalid shared srcset contract: {error}"))
+            })?;
+        for case in cases {
+            let actual = parse_srcset_candidates(&case.input);
+            let expected = case
+                .candidates
+                .into_iter()
+                .map(|candidate| SrcsetCandidate {
+                    url: candidate.url,
+                    descriptor: candidate.descriptor,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected, "{}", case.name);
+        }
         Ok(())
     }
 

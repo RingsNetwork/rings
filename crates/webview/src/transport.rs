@@ -1,7 +1,7 @@
 use std::sync::Mutex;
-#[cfg(not(all(target_family = "wasm", feature = "browser")))]
+#[cfg(not(target_family = "wasm"))]
 use std::time::SystemTime;
-#[cfg(not(all(target_family = "wasm", feature = "browser")))]
+#[cfg(not(target_family = "wasm"))]
 use std::time::UNIX_EPOCH;
 
 use async_trait::async_trait;
@@ -284,11 +284,11 @@ where T: GatewayTransport
 
     /// Send one request through the gateway policy stack.
     pub async fn send(&mut self, request: GatewayRequest) -> Result<GatewayResponse> {
-        let prepare_now = current_time_millis();
+        let prepare_now = current_time_millis()?;
         let mut session =
             GatewayRequestSession::prepare(&self.policy, &self.cookies, request, prepare_now)?;
         let response = session.send(&self.policy, &self.transport).await?;
-        let commit_now = current_time_millis();
+        let commit_now = current_time_millis()?;
         session.commit_response_cookies(&self.policy, &mut self.cookies, &response, commit_now)?;
         session.finish(&self.policy, response)
     }
@@ -358,13 +358,13 @@ where T: GatewayTransport
     /// Send one request without holding the virtual-cookie lock during upstream I/O.
     pub async fn send(&self, request: GatewayRequest) -> Result<GatewayResponse> {
         let mut session = {
-            let prepare_now = current_time_millis();
+            let prepare_now = current_time_millis()?;
             let cookies = self.lock_cookies()?;
             GatewayRequestSession::prepare(&self.policy, &cookies, request, prepare_now)?
         };
         let response = session.send(&self.policy, &self.transport).await?;
         {
-            let commit_now = current_time_millis();
+            let commit_now = current_time_millis()?;
             let mut cookies = self.lock_cookies()?;
             session.commit_response_cookies(&self.policy, &mut cookies, &response, commit_now)?;
         }
@@ -404,19 +404,24 @@ where T: GatewayTransport
     }
 }
 
-fn current_time_millis() -> i64 {
+fn current_time_millis() -> Result<i64> {
     #[cfg(all(target_family = "wasm", feature = "browser"))]
     {
-        js_sys::Date::now() as i64
+        Ok(js_sys::Date::now() as i64)
     }
 
-    #[cfg(not(all(target_family = "wasm", feature = "browser")))]
+    #[cfg(all(target_family = "wasm", not(feature = "browser")))]
     {
-        system_time_millis(SystemTime::now())
+        Err(crate::error::TransportFailure::ClockUnavailable.into())
+    }
+
+    #[cfg(not(target_family = "wasm"))]
+    {
+        Ok(system_time_millis(SystemTime::now()))
     }
 }
 
-#[cfg(not(all(target_family = "wasm", feature = "browser")))]
+#[cfg(not(target_family = "wasm"))]
 fn system_time_millis(time: SystemTime) -> i64 {
     let Ok(duration) = time.duration_since(UNIX_EPOCH) else {
         return 0;
@@ -466,6 +471,21 @@ mod tests {
                 br#"<img src="/asset.png">"#.to_vec(),
             )
         }
+    }
+
+    #[cfg(all(target_family = "wasm", not(feature = "browser")))]
+    #[test]
+    fn wasm_without_browser_reports_clock_unavailable_before_transport_io() -> Result<()> {
+        let mut gateway = WebviewGateway::new(GatewayPrefix::new("/webview/")?, StaticTransport);
+        let request = GatewayRequest::navigation(Url::parse("https://example.test/")?);
+
+        assert!(matches!(
+            futures::executor::block_on(gateway.send(request)),
+            Err(WebviewError::Transport(
+                crate::error::TransportFailure::ClockUnavailable
+            ))
+        ));
+        Ok(())
     }
 
     #[test]
@@ -916,12 +936,14 @@ mod tests {
     struct SlowFirstTransport {
         started: mpsc::UnboundedSender<String>,
         release_slow_request: RefCell<Option<oneshot::Receiver<()>>>,
+        requests: RefCell<Vec<GatewayRequest>>,
     }
 
     #[async_trait(?Send)]
     impl GatewayTransport for SlowFirstTransport {
         async fn send(&self, request: GatewayRequest) -> Result<GatewayResponse> {
             let path = request.target.path().to_string();
+            self.requests.borrow_mut().push(request);
             let _ = self.started.unbounded_send(path.clone());
             if path == "/slow" {
                 let receiver = self
@@ -937,14 +959,18 @@ mod tests {
             }
             GatewayResponse::new(
                 200,
-                vec![GatewayHeader::new("content-type", "text/plain")?],
+                vec![
+                    GatewayHeader::new("content-type", "text/plain")?,
+                    GatewayHeader::new("set-cookie", format!("sid={}; Path=/", &path[1..]))?,
+                ],
                 path.into_bytes(),
             )
         }
     }
 
     #[test]
-    fn concurrent_gateway_allows_fast_resource_while_slow_resource_waits() -> Result<()> {
+    fn concurrent_gateway_cookie_commits_follow_response_order_without_prepare_leakage(
+    ) -> Result<()> {
         let (started_sender, mut started_receiver) = mpsc::unbounded();
         let (release_slow_sender, release_slow_receiver) = oneshot::channel();
         let gateway = Rc::new(ConcurrentWebviewGateway::new(
@@ -952,6 +978,7 @@ mod tests {
             SlowFirstTransport {
                 started: started_sender,
                 release_slow_request: RefCell::new(Some(release_slow_receiver)),
+                requests: RefCell::new(Vec::new()),
             },
         ));
         let slow = TargetUrl::parse("https://example.test/slow")?.into_url();
@@ -974,16 +1001,26 @@ mod tests {
         );
 
         let fast_gateway = Rc::clone(&gateway);
+        let fast_request = fast.clone();
         spawner
             .spawn_local(async move {
-                let _ = fast_result_sender
-                    .send(fast_gateway.send(GatewayRequest::subresource(fast)).await);
+                let _ = fast_result_sender.send(
+                    fast_gateway
+                        .send(GatewayRequest::subresource(fast_request))
+                        .await,
+                );
             })
             .map_err(|error| WebviewError::transport(error.to_string()))?;
         let fast_response = pool
             .run_until(fast_result_receiver)
             .map_err(|_| WebviewError::transport("fast resource task was dropped".to_string()))??;
         assert_eq!(fast_response.body, b"/fast");
+        assert!(gateway.transport.requests.borrow().iter().all(|request| {
+            !request
+                .headers
+                .iter()
+                .any(|header| header.name_eq("cookie"))
+        }));
 
         release_slow_sender.send(()).map_err(|_| {
             WebviewError::transport("slow resource task stopped waiting unexpectedly".to_string())
@@ -992,6 +1029,25 @@ mod tests {
             .run_until(slow_result_receiver)
             .map_err(|_| WebviewError::transport("slow resource task was dropped".to_string()))??;
         assert_eq!(slow_response.body, b"/slow");
+        assert_eq!(
+            gateway.lock_cookies()?.cookie_header(&fast).as_deref(),
+            Some("sid=slow")
+        );
+
+        let after = TargetUrl::parse("https://example.test/after")?.into_url();
+        let after_response = pool.run_until(gateway.send(GatewayRequest::navigation(after)))?;
+        assert_eq!(after_response.body, b"/after");
+        let after_request = gateway
+            .transport
+            .requests
+            .borrow()
+            .last()
+            .cloned()
+            .ok_or_else(|| WebviewError::transport("missing post-commit request".to_string()))?;
+        assert!(after_request
+            .headers
+            .iter()
+            .any(|header| header.name_eq("cookie") && header.value == "sid=slow"));
         Ok(())
     }
 }
