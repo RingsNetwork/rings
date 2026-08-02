@@ -48,6 +48,7 @@ pub use protocol::Reject;
 pub use protocol::Transition;
 pub use protocol::Wire;
 pub(crate) use registry::Core;
+pub use registry::EffectScope;
 pub use registry::Extensions;
 pub use registry::Scope;
 

@@ -41,6 +41,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::extension::ext::Ctx;
+use crate::extension::ext::EffectScope;
 use crate::extension::ext::Interpret;
 use crate::extension::ext::MaybeSend;
 use crate::extension::ext::Protocol;
@@ -434,14 +435,14 @@ impl Interpret for NativeRelay {
 
     async fn run(
         &self,
-        scope: &Scope,
+        scope: &EffectScope,
         effect: RelayEffect<std::net::SocketAddr>,
     ) -> crate::error::Result<Vec<Bytes>> {
         match effect {
             RelayEffect::Connect { key, target, kind } => {
                 self.engine
                     .clone()
-                    .connect(scope.clone(), key, target, kind)
+                    .connect(scope.lifecycle(), key, target, kind)
                     .await;
             }
             RelayEffect::Write { key, bytes } => {
@@ -451,7 +452,7 @@ impl Interpret for NativeRelay {
                 self.engine.shutdown(&key).await;
             }
             RelayEffect::Close { key } => {
-                self.engine.close(scope, &key).await;
+                self.engine.close_for_effect(&key).await;
             }
             RelayEffect::SendClose {
                 to,
@@ -465,14 +466,31 @@ impl Interpret for NativeRelay {
                 key,
                 service,
             } => {
-                self.engine
+                let feedback = self
+                    .engine
                     .clone()
-                    .bind_accepted(scope.clone(), token, key, service)
+                    .bind_accepted(scope.lifecycle(), token, key, service)
                     .await;
+                return feedback
+                    .map(untrack_feedback::<std::net::SocketAddr>)
+                    .transpose()
+                    .map(|feedback| feedback.into_iter().collect());
             }
         }
         Ok(Vec::new())
     }
+}
+
+/// Encode an engine teardown as the relay's synchronous, ordered feedback path.
+fn untrack_feedback<T: Serialize>(key: SessionKey) -> crate::error::Result<Bytes> {
+    let command = RelayCommand::<T>::Untrack {
+        peer: key.peer,
+        session: key.session,
+        initiator: key.initiator,
+    };
+    bincode::serialize(&command)
+        .map(Bytes::from)
+        .map_err(|_| crate::error::Error::EncodeError)
 }
 
 // ── Browser interpreter (WebTransport) ────────────────────────────────────────────────
@@ -498,15 +516,20 @@ impl Interpret for WtRelay {
 
     async fn run(
         &self,
-        scope: &Scope,
+        scope: &EffectScope,
         effect: RelayEffect<String>,
     ) -> crate::error::Result<Vec<Bytes>> {
         match effect {
             RelayEffect::Connect { key, target, kind } => {
-                self.engine
+                let feedback = self
+                    .engine
                     .clone()
-                    .connect(scope.clone(), key, target, kind)
+                    .connect(scope.lifecycle(), key, target, kind)
                     .await;
+                return feedback
+                    .map(untrack_feedback::<String>)
+                    .transpose()
+                    .map(|feedback| feedback.into_iter().collect());
             }
             RelayEffect::Write { key, bytes } => {
                 self.engine.write(&key, bytes).await;
@@ -515,7 +538,7 @@ impl Interpret for WtRelay {
                 self.engine.shutdown(&key).await;
             }
             RelayEffect::Close { key } => {
-                self.engine.close(scope, &key).await;
+                self.engine.close_for_effect(&key).await;
             }
             RelayEffect::SendClose {
                 to,

@@ -22,6 +22,8 @@ use super::super::reducer::RelayReturnKey;
 use super::super::*;
 use crate::extension::ext::Ctx;
 #[cfg(feature = "node")]
+use crate::extension::ext::EffectScope;
+#[cfg(feature = "node")]
 use crate::extension::ext::Extensions;
 #[cfg(feature = "node")]
 use crate::extension::ext::Interpret;
@@ -115,7 +117,7 @@ fn decode_event(
 }
 
 #[cfg(feature = "node")]
-fn test_scope(session_sk: SessionSk) -> Scope {
+fn test_scope(session_sk: SessionSk) -> EffectScope {
     let config = ProcessorConfig::new(1, String::new(), session_sk, 1);
     let processor = ProcessorBuilder::from_config(&config)
         .expect("processor builder")
@@ -123,7 +125,10 @@ fn test_scope(session_sk: SessionSk) -> Scope {
         .build()
         .expect("processor");
     let extensions = Extensions::new(Arc::new(processor));
-    Scope::new(extensions.core(), ONION_CIRCUIT_NAMESPACE.to_string())
+    EffectScope::new(Scope::new(
+        extensions.core(),
+        ONION_CIRCUIT_NAMESPACE.to_string(),
+    ))
 }
 
 #[cfg(feature = "node")]

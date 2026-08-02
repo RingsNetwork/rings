@@ -2,13 +2,14 @@
 //!
 //! Each extension registers a `(Protocol, Interpret)` pair. The interpreter is the only
 //! place IO happens for that extension; it is handed a **namespace-scoped** capability
-//! ([`Scope`](super::Scope)) — overlay `send`, `did`, and self-`inject`, all confined to the
+//! ([`EffectScope`](super::EffectScope)) — overlay `send` and `did`, confined to the
 //! interpreter's own namespace. An extension that owns OS resources (e.g. the relay's sockets)
-//! keeps them inside its interpreter, so the core never depends on transport internals.
+//! receives a lifecycle scope explicitly for its long-lived tasks, so the core never depends on
+//! transport internals.
 
 use bytes::Bytes;
 
-use super::Scope;
+use super::EffectScope;
 use crate::error::Result;
 
 /// Runs the effects produced by a protocol's pure `step`. `run` returns the payloads to
@@ -28,5 +29,10 @@ pub trait Interpret {
 
     /// Run one effect against the scoped capability, returning self-injected payloads (each
     /// re-decoded by this same protocol).
-    async fn run(&self, scope: &Scope, effect: Self::Effect) -> Result<Vec<Bytes>>;
+    ///
+    /// The state transition is committed before this method starts. Effects are attempted in
+    /// their transition order; an `Err` stops the current transition's remaining effects and
+    /// does not roll state back. A protocol that needs retry or compensation therefore models it
+    /// as a later typed event/transition, rather than relying on an interpreter retry.
+    async fn run(&self, scope: &EffectScope, effect: Self::Effect) -> Result<Vec<Bytes>>;
 }

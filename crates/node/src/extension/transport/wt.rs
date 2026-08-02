@@ -112,7 +112,7 @@ impl WtSessions {
         key: SessionKey,
         url: String,
         kind: TransportKind,
-    ) {
+    ) -> Option<SessionKey> {
         debug_assert_eq!(
             scope.namespace(),
             key.namespace.as_str(),
@@ -128,17 +128,21 @@ impl WtSessions {
                 } else {
                     transport.close();
                 }
+                None
             }
             Err(e) => {
                 tracing::error!("WebTransport connect to {url} failed: {e:?}");
                 // Drop the opening slot and tell the peer — but only if we are still its owner
                 // (a peer Close during the handshake already tore it down and told the peer).
-                if self.close_if_current(&scope, &key, generation).await {
+                if self.close_if_current_for_effect(&key, generation).await {
                     let _ = send_frame(&scope, key.peer, Frame::Close {
                         session: key.session,
                         from_opener: matches!(key.initiator, Initiator::Local),
                     })
                     .await;
+                    Some(key)
+                } else {
+                    None
                 }
             }
         }
@@ -162,11 +166,13 @@ impl WtSessions {
         }
     }
 
-    /// Close and drop the **current** session for `key` (peer `Close` path: the reducer
-    /// already removed it). Injects `Untrack` exactly once — only on actual removal.
-    pub async fn close(&self, scope: &Scope, key: &SessionKey) {
+    /// Release a session while applying a `Close` effect.
+    ///
+    /// The reducer already forgot this key, so this path deliberately does not self-inject an
+    /// `Untrack` event into the active effect turn.
+    pub async fn close_for_effect(&self, key: &SessionKey) {
         let removed = self.map.lock().ok().and_then(|mut map| map.remove(key));
-        self.finish_close(scope, key, removed).await;
+        self.finish_close_without_feedback(removed).await;
     }
 
     /// Close a session **only if** its handle still has `generation` (ABA safety). Returns
@@ -179,6 +185,16 @@ impl WtSessions {
                 .flatten()
         });
         self.finish_close(scope, key, removed).await
+    }
+
+    async fn close_if_current_for_effect(&self, key: &SessionKey, generation: u64) -> bool {
+        let removed = self.map.lock().ok().and_then(|mut map| {
+            let current = map.get(key).map(SessionHandle::generation);
+            (current == Some(generation))
+                .then(|| map.remove(key))
+                .flatten()
+        });
+        self.finish_close_without_feedback(removed).await
     }
 
     /// Shared teardown tail: close the WebTransport (only a `Ready` slot owns one) and
@@ -196,6 +212,16 @@ impl WtSessions {
             transport.close();
         }
         inject_untrack(scope, key).await;
+        true
+    }
+
+    async fn finish_close_without_feedback(&self, removed: Option<SessionHandle>) -> bool {
+        let Some(handle) = removed else {
+            return false;
+        };
+        if let SessionHandle::Ready { transport, .. } = handle {
+            transport.close();
+        }
         true
     }
 

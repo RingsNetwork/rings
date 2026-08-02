@@ -221,12 +221,13 @@ impl TransportSessions {
         }
     }
 
-    /// Fully close and drop the **current** session for `key`, then feed the teardown back to
-    /// the pure protocol as an `Untrack`. Used for a peer `Close` (the reducer already removed
-    /// the key, so the current handle is the one to drop). Injects exactly once.
-    pub async fn close(&self, scope: &Scope, key: &SessionKey) {
+    /// Release a session while applying a `Close` effect.
+    ///
+    /// The pure reducer has already removed `key` for this effect, so feeding `Untrack` back is
+    /// redundant and would recursively enter the currently active ordered effect turn.
+    pub async fn close_for_effect(&self, key: &SessionKey) {
         let removed = self.map.lock().ok().and_then(|mut map| map.remove(key));
-        self.finish_close(scope, key, removed).await;
+        self.finish_close_without_feedback(removed).await;
     }
 
     /// Close a session **only if** its handle still has `generation` — so a slow old relay
@@ -235,13 +236,27 @@ impl TransportSessions {
     /// must therefore *also* not send the peer a `Close` (which would tear down the peer's
     /// reused session).
     async fn close_if_current(&self, scope: &Scope, key: &SessionKey, generation: u64) -> bool {
-        let removed = self.map.lock().ok().and_then(|mut map| {
-            let current = map.get(key).map(|h| h.generation);
+        let removed = self.remove_if_current(key, generation);
+        self.finish_close(scope, key, removed).await
+    }
+
+    /// Remove the current handle without feeding an event back to the pure relay.
+    ///
+    /// This is used only while interpreting `OpenAccepted`: its `Untrack` feedback must be
+    /// returned through [`Interpret::run`] rather than recursively dispatching under the
+    /// runner's ordered effect turn.
+    async fn close_if_current_for_effect(&self, key: &SessionKey, generation: u64) -> bool {
+        self.finish_close_without_feedback(self.remove_if_current(key, generation))
+            .await
+    }
+
+    fn remove_if_current(&self, key: &SessionKey, generation: u64) -> Option<SessionHandle> {
+        self.map.lock().ok().and_then(|mut map| {
+            let current = map.get(key).map(|handle| handle.generation);
             (current == Some(generation))
                 .then(|| map.remove(key))
                 .flatten()
-        });
-        self.finish_close(scope, key, removed).await
+        })
     }
 
     /// Shared teardown tail: cancel the task, drop the UDP cache entry, and `Untrack` — but
@@ -265,6 +280,23 @@ impl TransportSessions {
         true
     }
 
+    /// Shared resource cleanup for a synchronous interpreter feedback path.
+    ///
+    /// Post: if this returns `true`, the OS resource is gone and the caller owns the matching
+    /// `RelayCommand::Untrack` feedback obligation.
+    async fn finish_close_without_feedback(&self, removed: Option<SessionHandle>) -> bool {
+        let Some(handle) = removed else {
+            return false;
+        };
+        handle.cancel.cancel();
+        if let Some(src) = handle.src {
+            if let Ok(mut flows) = self.udp_flows.lock() {
+                flows.remove(&src);
+            }
+        }
+        true
+    }
+
     /// Bind a pending accepted connection/flow (engine-local `token`) to the session `key`
     /// the pure relay just minted (the `OpenAccepted` effect): register the handle, send
     /// `Frame::Open`, and start relaying. The engine never chose the id — it only reported
@@ -275,21 +307,20 @@ impl TransportSessions {
         token: u64,
         key: SessionKey,
         service: String,
-    ) {
+    ) -> Option<SessionKey> {
         debug_assert_eq!(
             scope.namespace(),
             key.namespace.as_str(),
             "relay engine bound a session under a foreign namespace scope"
         );
         let Some(pending) = self.pending.lock().ok().and_then(|mut p| p.remove(&token)) else {
-            return; // listener gone or token already consumed
+            return None; // listener gone or token already consumed
         };
         match pending {
             Pending::Tcp(stream) => {
                 let task = RelayTask::register(self.clone(), scope.clone(), key.clone());
                 if open(&scope, &key, service.as_str()).await.is_err() {
-                    task.refuse().await;
-                    return;
+                    return task.refuse_for_effect().await.then_some(key);
                 }
                 tokio::spawn(async move { tcp::relay_tcp(task, stream).await });
             }
@@ -300,8 +331,10 @@ impl TransportSessions {
                 }
                 udp::spawn_udp_sendto(socket, src, outbound_rx, cancel);
                 if open(&scope, &key, service.as_str()).await.is_err() {
-                    self.close_if_current(&scope, &key, generation).await;
-                    return;
+                    return self
+                        .close_if_current_for_effect(&key, generation)
+                        .await
+                        .then_some(key);
                 }
                 // Forward the first datagram that triggered this flow.
                 let from_opener = opened_by_us(&key);
@@ -313,6 +346,7 @@ impl TransportSessions {
                 .await;
             }
         }
+        None
     }
 
     /// Look up the live session for a UDP source (fast-path data plane; the cache is populated
@@ -429,6 +463,16 @@ impl RelayTask {
             })
             .await;
         }
+    }
+
+    /// Drop a just-created session while an interpreter is still executing its effect.
+    ///
+    /// The caller returns `Untrack` as synchronous feedback, so this must not call
+    /// [`Scope::inject`] and recursively wait for the active ordered effect turn.
+    async fn refuse_for_effect(self) -> bool {
+        self.sessions
+            .close_if_current_for_effect(&self.key, self.generation)
+            .await
     }
 }
 

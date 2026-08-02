@@ -184,6 +184,44 @@ impl Scope {
     }
 }
 
+/// Capability available while an interpreter applies one committed effect.
+///
+/// It can send overlay messages and return synchronous feedback, but cannot re-enter its own
+/// reducer. Long-lived engines receive a [`Scope`] explicitly through
+/// [`EffectScope::lifecycle`], making that handoff visible at the effect boundary.
+pub struct EffectScope {
+    scope: Scope,
+}
+
+impl EffectScope {
+    pub(crate) fn new(scope: Scope) -> Self {
+        Self { scope }
+    }
+
+    /// This node's DID.
+    pub fn did(&self) -> Did {
+        self.scope.did()
+    }
+
+    /// The namespace this effect is confined to.
+    pub fn namespace(&self) -> &str {
+        self.scope.namespace()
+    }
+
+    /// Put a message on the overlay under this effect's namespace.
+    pub async fn send(&self, to: Did, payload: Bytes) -> Result<()> {
+        self.scope.send(to, payload).await
+    }
+
+    /// Hand the lifecycle capability to an explicitly long-lived engine task.
+    ///
+    /// The interpreter itself must return same-turn feedback from [`Interpret::run`], rather
+    /// than await [`Scope::inject`] while the ordered effect turn is active.
+    pub(crate) fn lifecycle(&self) -> Scope {
+        self.scope.clone()
+    }
+}
+
 /// Adapter binding a pure [`Protocol`] to its [`Interpret`] shell and owned state; erased to
 /// [`Handler`]. Protocol authors never write this.
 struct Runner<P: Protocol, I> {
@@ -191,6 +229,8 @@ struct Runner<P: Protocol, I> {
     interpret: I,
     state: Mutex<P::State>,
     transition_gate: AsyncMutex<()>,
+    #[cfg(all(test, feature = "node"))]
+    after_decode_for_test: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 #[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait::async_trait(?Send))]
@@ -206,12 +246,6 @@ where
     I: Interpret<Effect = P::Effect> + MaybeSend + 'static,
 {
     async fn handle(&self, core: &Core, from: Did, payload: Bytes) -> Result<Vec<Inbound>> {
-        // The transition gate establishes the protocol's linearization order before either the
-        // decode boundary, state commit, or effects can begin. Holding it through interpretation
-        // preserves: commit(A) < commit(B) => effects(A) complete before effects(B) begin.
-        // The state mutex itself remains synchronous and never crosses an await.
-        let _transition_turn = self.transition_gate.lock().await;
-
         // Boundary: decode raw bytes to a typed event. An undecodable/foreign message is an
         // explicit drop here, not a silent `Transition::pure` deep in `step`.
         let event = match self.protocol.decode(Wire {
@@ -226,10 +260,22 @@ where
             }
         };
 
+        #[cfg(all(test, feature = "node"))]
+        if let Some(observe) = self.after_decode_for_test.as_ref() {
+            observe();
+        }
+
+        // The transition gate establishes the protocol's linearization order for state commit
+        // and its resulting effect trace. Decode remains outside that order: it has no state or
+        // effects by contract. Holding the gate through interpretation preserves:
+        // commit(A) < commit(B) => applying A's effects ends before applying B's effects begins.
+        // The state mutex itself remains synchronous and never crosses an await.
+        let _transition_turn = self.transition_gate.lock().await;
+
         // Pure region: a brief *synchronous* critical section — read state, run `step`,
         // commit next state. No `.await` inside, so the std `Mutex` is correct and the state
         // fold stays serial per protocol (state-machine semantics, not a limitation;
-        // different protocols and all effects below run concurrently). The commit is the
+        // different protocols remain concurrent). The commit is the
         // logical transition point; effect failures that matter come back as events.
         let effects = {
             let mut guard = self.state.lock().map_err(|_| Error::Lock)?;
@@ -251,7 +297,7 @@ where
         // into *this* namespace with `from = this node` — the router fixes the provenance, so a
         // shell cannot forge a target namespace or a remote `from`.
         let namespace = self.protocol.namespace().to_string();
-        let scope = Scope::new(core.clone(), namespace.clone());
+        let scope = EffectScope::new(Scope::new(core.clone(), namespace.clone()));
         let mut reinjected = Vec::new();
         for effect in effects {
             for payload in self.interpret.run(&scope, effect).await? {
@@ -343,6 +389,8 @@ impl Extensions {
                     interpret,
                     state,
                     transition_gate: AsyncMutex::new(()),
+                    #[cfg(all(test, feature = "node"))]
+                    after_decode_for_test: None,
                 });
                 (namespace, runner)
             })
@@ -382,6 +430,8 @@ impl Extensions {
             interpret,
             state,
             transition_gate: AsyncMutex::new(()),
+            #[cfg(all(test, feature = "node"))]
+            after_decode_for_test: None,
         });
         let mut handlers = self.core.handlers.write().map_err(|_| Error::Lock)?;
         if !replace && handlers.contains_key(&namespace) {
@@ -442,10 +492,12 @@ mod tests {
         }
 
         fn decode(&self, wire: Wire<'_>) -> std::result::Result<Self::Event, Reject> {
-            wire.payload
+            let event = wire
+                .payload
                 .first()
                 .copied()
-                .ok_or_else(|| Reject("missing effect value".to_string()))
+                .ok_or_else(|| Reject("missing effect value".to_string()))?;
+            Ok(event)
         }
 
         fn step(
@@ -468,12 +520,32 @@ mod tests {
     impl Interpret for Arc<BlockingOrderedInterpreter> {
         type Effect = u8;
 
-        async fn run(&self, _scope: &Scope, effect: Self::Effect) -> Result<Vec<Bytes>> {
+        async fn run(&self, _scope: &EffectScope, effect: Self::Effect) -> Result<Vec<Bytes>> {
             if effect == 1 {
                 self.first_effect_started.notify_one();
                 self.release_first_effect.notified().await;
             }
             self.observed.lock().map_err(|_| Error::Lock)?.push(effect);
+            Ok(Vec::new())
+        }
+    }
+
+    #[derive(Default)]
+    struct FailingOrderedInterpreter {
+        observed: Mutex<Vec<u8>>,
+    }
+
+    #[async_trait]
+    impl Interpret for Arc<FailingOrderedInterpreter> {
+        type Effect = u8;
+
+        async fn run(&self, _scope: &EffectScope, effect: Self::Effect) -> Result<Vec<Bytes>> {
+            self.observed.lock().map_err(|_| Error::Lock)?.push(effect);
+            if effect == 1 {
+                return Err(Error::ExtensionError(
+                    "intentional effect failure".to_string(),
+                ));
+            }
             Ok(Vec::new())
         }
     }
@@ -493,7 +565,24 @@ mod tests {
         // produces the unique effect trace [A, B] for the protocol's state-transition order.
         let extensions = extensions()?;
         let interpreter = Arc::new(BlockingOrderedInterpreter::default());
-        extensions.register(OrderedProtocol, Arc::clone(&interpreter))?;
+        let second_decoded = Arc::new(Notify::new());
+        let observer = {
+            let second_decoded = Arc::clone(&second_decoded);
+            Arc::new(move || second_decoded.notify_one()) as Arc<dyn Fn() + Send + Sync>
+        };
+        let runner: Arc<DynHandler> = Arc::new(Runner {
+            protocol: OrderedProtocol,
+            interpret: Arc::clone(&interpreter),
+            state: Mutex::new(0),
+            transition_gate: AsyncMutex::new(()),
+            after_decode_for_test: Some(observer),
+        });
+        extensions
+            .core
+            .handlers
+            .write()
+            .map_err(|_| Error::Lock)?
+            .insert("ordered-effects".to_string(), runner);
         let from = extensions.core().did();
 
         let first_extensions = extensions.clone();
@@ -506,6 +595,8 @@ mod tests {
                 .await
         });
         interpreter.first_effect_started.notified().await;
+        // Consume A's decode observation before using the next one as the witness for B.
+        second_decoded.notified().await;
 
         let second_extensions = extensions.clone();
         let second = tokio::spawn(async move {
@@ -516,7 +607,7 @@ mod tests {
                 )
                 .await
         });
-        tokio::task::yield_now().await;
+        second_decoded.notified().await;
         assert!(!second.is_finished());
         assert!(interpreter
             .observed
@@ -531,6 +622,36 @@ mod tests {
         second
             .await
             .map_err(|error| Error::ExtensionError(error.to_string()))??;
+        assert_eq!(
+            *interpreter.observed.lock().map_err(|_| Error::Lock)?,
+            vec![1, 2]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_effect_releases_ordered_turn_for_later_transition() -> Result<()> {
+        // Law: failure is an outcome of the committed transition, not a leaked gate. The next
+        // transition can run after the failed application has ended.
+        let extensions = extensions()?;
+        let interpreter = Arc::new(FailingOrderedInterpreter::default());
+        extensions.register(OrderedProtocol, Arc::clone(&interpreter))?;
+        let from = extensions.core().did();
+
+        let failed = extensions
+            .dispatch(
+                from,
+                Envelope::new("ordered-effects", Bytes::from_static(&[1])),
+            )
+            .await;
+        assert!(matches!(failed, Err(Error::ExtensionError(_))));
+        extensions
+            .dispatch(
+                from,
+                Envelope::new("ordered-effects", Bytes::from_static(&[2])),
+            )
+            .await?;
+
         assert_eq!(
             *interpreter.observed.lock().map_err(|_| Error::Lock)?,
             vec![1, 2]

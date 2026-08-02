@@ -16,6 +16,7 @@ use super::OnionClientReturn;
 use super::OnionForwardNonce;
 use crate::error::Error;
 use crate::error::Result;
+use crate::extension::ext::EffectScope;
 use crate::extension::ext::Interpret;
 use crate::extension::ext::Scope;
 
@@ -117,7 +118,7 @@ where H: OnionCircuitHandler + crate::extension::ext::MaybeSend + 'static
 {
     type Effect = OnionCircuitEffect;
 
-    async fn run(&self, scope: &Scope, effect: OnionCircuitEffect) -> Result<Vec<Bytes>> {
+    async fn run(&self, scope: &EffectScope, effect: OnionCircuitEffect) -> Result<Vec<Bytes>> {
         match effect {
             OnionCircuitEffect::DecryptForward {
                 from,
@@ -142,8 +143,9 @@ where H: OnionCircuitHandler + crate::extension::ext::MaybeSend + 'static
                 forward_nonce,
                 payload,
             } => {
+                let lifecycle = scope.lifecycle();
                 self.handler
-                    .handle_exit(scope, OnionCircuitExitFrame {
+                    .handle_exit(&lifecycle, OnionCircuitExitFrame {
                         from,
                         circuit_id,
                         return_peer,
@@ -160,8 +162,9 @@ where H: OnionCircuitHandler + crate::extension::ext::MaybeSend + 'static
                 payload,
             } => {
                 if let Some(payload) = self.decrypt_client_payload(from, &payload)? {
+                    let lifecycle = scope.lifecycle();
                     self.handler
-                        .handle_client(scope, from, circuit_id, payload)
+                        .handle_client(&lifecycle, from, circuit_id, payload)
                         .await?;
                 }
                 Ok(Vec::new())

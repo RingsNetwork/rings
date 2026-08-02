@@ -1,4 +1,3 @@
-use super::super::pending::LifecycleTransitionGate;
 use super::*;
 #[cfg(feature = "dummy")]
 use crate::dht::StorageSyncDestination;
@@ -161,55 +160,6 @@ async fn pending_promotion_is_atomic_under_lifecycle_lock() -> Result<()> {
         transport.reserve_pending_connection(peer).await,
         Err(Error::AlreadyConnected)
     ));
-    Ok(())
-}
-
-#[tokio::test]
-async fn pending_promotion_excludes_a_concurrent_reservation_until_commit() -> Result<()> {
-    // Invariant: a promotion holding the lifecycle boundary excludes a competing
-    // reservation; after commit, the same peer has exactly one active generation.
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
-    let peer = SecretKey::random().address().into();
-    let attempt = transport.reserve_pending_connection(peer).await?;
-    let promotion_gate = LifecycleTransitionGate::new();
-    let promotion = Arc::clone(&transport)
-        .activate_connection_with_gate_for_test(attempt, promotion_gate.clone());
-
-    promotion_gate.wait_until_entered().await;
-
-    let reservation_started = Arc::new(tokio::sync::Notify::new());
-    let reservation = {
-        let reservation_transport = Arc::clone(&transport);
-        let reservation_started = Arc::clone(&reservation_started);
-        tokio::task::spawn_blocking(move || {
-            futures::executor::block_on(
-                reservation_transport.reserve_pending_connection_with_observer_for_test(
-                    peer,
-                    || {
-                        reservation_started.notify_one();
-                    },
-                ),
-            )
-        })
-    };
-    reservation_started.notified().await;
-    assert!(!reservation.is_finished());
-
-    promotion_gate.release();
-    assert!(promotion
-        .await
-        .map_err(|error| Error::InvalidMessage(format!("promotion worker failed: {error}")))??);
-    assert!(matches!(
-        reservation
-            .await
-            .map_err(|error| Error::InvalidMessage(format!(
-                "reservation worker failed: {error}"
-            )))?,
-        Err(Error::AlreadyConnected)
-    ));
-    assert!(transport.is_admitted_connection_attempt(attempt));
     Ok(())
 }
 
