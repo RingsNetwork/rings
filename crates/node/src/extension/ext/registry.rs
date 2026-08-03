@@ -234,6 +234,8 @@ struct Runner<P: Protocol, I> {
     after_decode_for_test: Option<Arc<dyn Fn() + Send + Sync>>,
     #[cfg(all(test, feature = "node"))]
     after_commit_for_test: Option<Arc<dyn Fn() + Send + Sync>>,
+    #[cfg(all(test, feature = "node"))]
+    before_gate_wait_for_test: Option<Arc<dyn Fn(bool) + Send + Sync>>,
 }
 
 #[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait::async_trait(?Send))]
@@ -273,6 +275,12 @@ where
         // effects by contract. Holding the gate through interpretation preserves:
         // commit(A) < commit(B) => applying A's effects ends before applying B's effects begins.
         // The state mutex itself remains synchronous and never crosses an await.
+        #[cfg(all(test, feature = "node"))]
+        if let Some(observe) = self.before_gate_wait_for_test.as_ref() {
+            // Witness the real synchronization boundary: false means this task could acquire
+            // the gate immediately; true means another transition owns it at this exact point.
+            observe(self.transition_gate.try_lock().is_none());
+        }
         let _transition_turn = self.transition_gate.lock().await;
 
         // Impure region: the state lock is released, while the transition gate keeps this
@@ -413,6 +421,8 @@ impl Extensions {
                     after_decode_for_test: None,
                     #[cfg(all(test, feature = "node"))]
                     after_commit_for_test: None,
+                    #[cfg(all(test, feature = "node"))]
+                    before_gate_wait_for_test: None,
                 });
                 (namespace, runner)
             })
@@ -456,6 +466,8 @@ impl Extensions {
             after_decode_for_test: None,
             #[cfg(all(test, feature = "node"))]
             after_commit_for_test: None,
+            #[cfg(all(test, feature = "node"))]
+            before_gate_wait_for_test: None,
         });
         let mut handlers = self.core.handlers.write().map_err(|_| Error::Lock)?;
         if !replace && handlers.contains_key(&namespace) {
@@ -642,10 +654,18 @@ mod tests {
         // produces the unique effect trace [A, B] for the protocol's state-transition order.
         let extensions = extensions()?;
         let interpreter = Arc::new(BlockingOrderedInterpreter::default());
-        let second_decoded = Arc::new(Notify::new());
-        let observer = {
-            let second_decoded = Arc::clone(&second_decoded);
-            Arc::new(move || second_decoded.notify_one()) as Arc<dyn Fn() + Send + Sync>
+        let gate_wait = Arc::new(Notify::new());
+        let gate_contention = Arc::new(Mutex::new(Vec::new()));
+        let gate_observer = {
+            let gate_wait = Arc::clone(&gate_wait);
+            let gate_contention = Arc::clone(&gate_contention);
+            Arc::new(move |contended| {
+                gate_contention
+                    .lock()
+                    .expect("test gate witness lock")
+                    .push(contended);
+                gate_wait.notify_one();
+            }) as Arc<dyn Fn(bool) + Send + Sync>
         };
         let committed = Arc::new(Mutex::new(0_u8));
         let commit_observer = {
@@ -659,8 +679,9 @@ mod tests {
             interpret: Arc::clone(&interpreter),
             state: Mutex::new(0),
             transition_gate: AsyncMutex::new(()),
-            after_decode_for_test: Some(observer),
+            after_decode_for_test: None,
             after_commit_for_test: Some(commit_observer),
+            before_gate_wait_for_test: Some(gate_observer),
         });
         extensions
             .core
@@ -680,8 +701,7 @@ mod tests {
                 .await
         });
         interpreter.first_effect_started.notified().await;
-        // Consume A's decode observation before using the next one as the witness for B.
-        second_decoded.notified().await;
+        gate_wait.notified().await;
 
         let second_extensions = extensions.clone();
         let second = tokio::spawn(async move {
@@ -692,7 +712,10 @@ mod tests {
                 )
                 .await
         });
-        second_decoded.notified().await;
+        gate_wait.notified().await;
+        assert_eq!(*gate_contention.lock().map_err(|_| Error::Lock)?, vec![
+            false, true
+        ]);
         assert!(!second.is_finished());
         assert!(interpreter
             .observed
@@ -772,6 +795,7 @@ mod tests {
             transition_gate: AsyncMutex::new(()),
             after_decode_for_test: Some(observer),
             after_commit_for_test: None,
+            before_gate_wait_for_test: None,
         });
         extensions
             .core
