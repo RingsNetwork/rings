@@ -666,6 +666,20 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn html_srcset_rewrites_quoted_and_escaped_candidates() -> Result<()> {
+        let ctx = context()?;
+        let html = r#"<img srcset='"quoted image.png" 640w, escaped\,image.png 2x'>"#;
+
+        let rewritten = ctx.rewrite_html(html)?;
+
+        assert!(rewritten
+            .contains("/webview/https%3A%2F%2Fexample%2Ecom%2Fapp%2Fquoted%2520image%2Epng 640w"));
+        assert!(rewritten
+            .contains("/webview/https%3A%2F%2Fexample%2Ecom%2Fapp%2Fescaped%2Cimage%2Epng 2x"));
+        Ok(())
+    }
+
     #[derive(Deserialize)]
     struct SrcsetContractCase {
         name: String,

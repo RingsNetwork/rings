@@ -21,6 +21,17 @@ test("srcset tokenizer preserves candidate boundaries", () => {
   }
 });
 
+test("srcset encoder rewrites quoted and escaped candidates", () => {
+  assert.equal(
+    transforms.encodeSrcset(
+      '"quoted image.png" 640w, escaped\\,image.png 2x',
+      base,
+      urls.encodeTarget,
+    ),
+    `${gateway("https://example.test/docs/quoted%20image.png")} 640w, ${gateway("https://example.test/docs/escaped,image.png")} 2x`,
+  );
+});
+
 test("pure transforms retain safe schemes and rewrite HTTP candidates", () => {
   const encoded = transforms.encodeSrcset(
     "data:image/png;base64,AAAA 1x, javascript:alert(1) 2x, image.png 3x",

@@ -142,24 +142,76 @@ async fn admitted_peer_cannot_be_replaced_by_a_pending_handshake() -> Result<()>
 
 #[tokio::test]
 async fn pending_promotion_is_atomic_under_lifecycle_lock() -> Result<()> {
-    let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
+    let transport = Arc::new(transport_with_measure(Arc::new(
+        RecordingMeasure::default(),
+    ))?);
     let peer = SecretKey::random().address().into();
     let attempt = transport.reserve_pending_connection(peer).await?;
-    let mut observed_transition = false;
+    let promotion_entered = Arc::new(std::sync::Barrier::new(2));
+    let release_promotion = Arc::new(std::sync::Barrier::new(2));
+    let reservation_prepared = Arc::new(std::sync::Barrier::new(2));
+    let release_reservation_commit = Arc::new(std::sync::Barrier::new(2));
+    let (reservation_contended_tx, reservation_contended_rx) = std::sync::mpsc::sync_channel(0);
+    let (reservation_done_tx, reservation_done_rx) = std::sync::mpsc::channel();
+    let reservation_transport = Arc::clone(&transport);
+    let reservation_prepared_thread = Arc::clone(&reservation_prepared);
+    let release_reservation_commit_thread = Arc::clone(&release_reservation_commit);
+    let reservation = std::thread::spawn(move || {
+        let result = futures::executor::block_on(
+            reservation_transport.reserve_pending_connection_with_observer_for_test(
+                peer,
+                || {
+                    reservation_prepared_thread.wait();
+                    release_reservation_commit_thread.wait();
+                },
+                || {
+                    let _ = reservation_contended_tx.send(
+                        reservation_transport
+                            .connection_lifecycle
+                            .is_held_for_test(),
+                    );
+                },
+            ),
+        );
+        let _ = reservation_done_tx.send(());
+        result
+    });
 
-    assert!(
-        transport.activate_connection_with_observer_for_test(attempt, |transport| {
-            observed_transition = true;
+    // The reservation has completed its asynchronous cleanup. Only then start promotion and
+    // hold the shared boundary; releasing this barrier makes the reservation attempt its real
+    // commit lock, rather than merely racing before cleanup.
+    reservation_prepared.wait();
+    let promotion_transport = Arc::clone(&transport);
+    let promotion_entered_thread = Arc::clone(&promotion_entered);
+    let release_promotion_thread = Arc::clone(&release_promotion);
+    let promotion = std::thread::spawn(move || {
+        promotion_transport.activate_connection_with_observer_for_test(attempt, |transport| {
             assert!(transport.connection_lifecycle.is_held_for_test());
-        },)?
-    );
-
-    assert!(observed_transition);
-    assert!(transport.is_admitted_connection_attempt(attempt));
+            promotion_entered_thread.wait();
+            release_promotion_thread.wait();
+        })
+    });
+    promotion_entered.wait();
+    release_reservation_commit.wait();
+    assert!(reservation_contended_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .map_err(|error| Error::InvalidMessage(format!("reservation did not contend: {error}")))?);
     assert!(matches!(
-        transport.reserve_pending_connection(peer).await,
+        reservation_done_rx.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Empty)
+    ));
+
+    release_promotion.wait();
+    assert!(promotion
+        .join()
+        .map_err(|_| Error::InvalidMessage("promotion thread panicked".to_string()))??);
+    assert!(matches!(
+        reservation
+            .join()
+            .map_err(|_| Error::InvalidMessage("reservation thread panicked".to_string()))?,
         Err(Error::AlreadyConnected)
     ));
+    assert!(transport.is_admitted_connection_attempt(attempt));
     Ok(())
 }
 

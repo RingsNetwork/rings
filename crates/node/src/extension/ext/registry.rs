@@ -174,9 +174,10 @@ impl Scope {
     /// `pub(crate)`: this is the **long-lived lifecycle sink** for an extension's own engine
     /// (e.g. the relay's spawned socket tasks reporting `Accepted`/`Untrack` later), and it
     /// starts a **fresh** [`dispatch`](Core::dispatch) fixpoint with its own
-    /// `MAX_FIXPOINT_STEPS` budget — it is *not* part of the bounded re-injection fixpoint that
+    /// `MAX_FIXPOINT_STEPS` budget — it is *not* part of the bounded feedback fixpoint that
     /// drives a single inbound. The synchronous per-effect feedback path is the `Vec<Bytes>`
-    /// returned from [`Interpret::run`], which the router re-injects within the current budget.
+    /// returned from [`Interpret::run`], which the runner reduces within its current ordered
+    /// turn and budget.
     /// A third-party shell therefore gets only that bounded return path, never this re-entrant
     /// sink, so it cannot recurse `inject` to escape the budget.
     pub(crate) async fn inject(&self, payload: Bytes) -> Result<()> {
@@ -272,43 +273,55 @@ where
         // The state mutex itself remains synchronous and never crosses an await.
         let _transition_turn = self.transition_gate.lock().await;
 
-        // Pure region: a brief *synchronous* critical section — read state, run `step`,
-        // commit next state. No `.await` inside, so the std `Mutex` is correct and the state
-        // fold stays serial per protocol (state-machine semantics, not a limitation;
-        // different protocols remain concurrent). The commit is the
-        // logical transition point; effect failures that matter come back as events.
-        let effects = {
-            let mut guard = self.state.lock().map_err(|_| Error::Lock)?;
-            let Transition { state, effects } = self.protocol.step(
-                Ctx {
-                    did: core.did(),
-                    state: guard.deref(),
-                },
-                event,
-            );
-            *guard = state;
-            effects
-        };
-
         // Impure region: the state lock is released, while the transition gate keeps this
-        // protocol's effect trace in the same order as its committed state trace.
-        // Run the protocol's own effects via its interpreter,
-        // handing it only a namespace-scoped capability. Each payload it returns is re-injected
-        // into *this* namespace with `from = this node` — the router fixes the provenance, so a
-        // shell cannot forge a target namespace or a remote `from`.
+        // protocol's effect trace and synchronous feedback fixpoint in commit order. Returned
+        // payloads are reduced before this turn releases the gate, so a later inbound cannot
+        // observe state that predates an effect's own feedback.
         let namespace = self.protocol.namespace().to_string();
         let scope = EffectScope::new(Scope::new(core.clone(), namespace.clone()));
-        let mut reinjected = Vec::new();
-        for effect in effects {
-            for payload in self.interpret.run(&scope, effect).await? {
-                reinjected.push(Inbound {
-                    namespace: namespace.clone(),
-                    from: core.did(),
-                    payload,
-                });
+        let mut feedback = VecDeque::new();
+        feedback.push_back(event);
+        let mut feedback_budget = MAX_FIXPOINT_STEPS;
+        while let Some(event) = feedback.pop_front() {
+            if feedback_budget == 0 {
+                return Err(Error::ExtensionError(format!(
+                    "feedback fixpoint budget ({MAX_FIXPOINT_STEPS}) exhausted on {namespace:?}"
+                )));
+            }
+            feedback_budget -= 1;
+
+            // Pure region: a brief synchronous state fold. No await crosses `state`; the
+            // feedback queue makes every same-turn effect result part of this fold before a
+            // competing inbound can begin its own transition.
+            let effects = {
+                let mut guard = self.state.lock().map_err(|_| Error::Lock)?;
+                let Transition { state, effects } = self.protocol.step(
+                    Ctx {
+                        did: core.did(),
+                        state: guard.deref(),
+                    },
+                    event,
+                );
+                *guard = state;
+                effects
+            };
+
+            for effect in effects {
+                for payload in self.interpret.run(&scope, effect).await? {
+                    match self.protocol.decode(Wire {
+                        from: core.did(),
+                        me: core.did(),
+                        payload: payload.as_ref(),
+                    }) {
+                        Ok(event) => feedback.push_back(event),
+                        Err(Reject(why)) => {
+                            tracing::debug!("drop feedback on {}: {why}", self.protocol.namespace())
+                        }
+                    }
+                }
             }
         }
-        Ok(reinjected)
+        Ok(Vec::new())
     }
 }
 
@@ -464,6 +477,8 @@ impl Extensions {
 
 #[cfg(all(test, feature = "node"))]
 mod tests {
+    use std::collections::HashMap;
+    use std::net::SocketAddr;
     use std::sync::Arc;
     use std::sync::Mutex;
 
@@ -473,6 +488,12 @@ mod tests {
     use tokio::sync::Notify;
 
     use super::*;
+    use crate::extension::protocols::relay::Relay;
+    use crate::extension::protocols::relay::RelayCommand;
+    use crate::extension::protocols::relay::RelayEffect;
+    use crate::extension::protocols::relay::TCP;
+    use crate::extension::transport::Frame;
+    use crate::extension::transport::SessionId;
     use crate::processor::ProcessorBuilder;
     use crate::processor::ProcessorConfig;
 
@@ -527,6 +548,51 @@ mod tests {
             }
             self.observed.lock().map_err(|_| Error::Lock)?.push(effect);
             Ok(Vec::new())
+        }
+    }
+
+    #[derive(Default)]
+    struct RelayFeedbackInterpreter {
+        first_effect_started: Notify,
+        release_first_effect: Notify,
+        first_connect_seen: Mutex<bool>,
+        observed_connects: Mutex<Vec<SessionId>>,
+    }
+
+    #[async_trait]
+    impl Interpret for Arc<RelayFeedbackInterpreter> {
+        type Effect = RelayEffect<SocketAddr>;
+
+        async fn run(&self, _scope: &EffectScope, effect: Self::Effect) -> Result<Vec<Bytes>> {
+            match effect {
+                RelayEffect::Connect { key, .. } => {
+                    let first_connect = {
+                        let mut seen = self.first_connect_seen.lock().map_err(|_| Error::Lock)?;
+                        let first_connect = !*seen;
+                        *seen = true;
+                        first_connect
+                    };
+                    if first_connect {
+                        self.first_effect_started.notify_one();
+                        self.release_first_effect.notified().await;
+                        let feedback = RelayCommand::<SocketAddr>::Untrack {
+                            peer: key.peer,
+                            session: key.session,
+                            initiator: key.initiator,
+                        };
+                        return bincode::serialize(&feedback)
+                            .map(Bytes::from)
+                            .map(|payload| vec![payload])
+                            .map_err(|_| Error::EncodeError);
+                    }
+                    self.observed_connects
+                        .lock()
+                        .map_err(|_| Error::Lock)?
+                        .push(key.session);
+                    Ok(Vec::new())
+                }
+                _ => Ok(Vec::new()),
+            }
         }
     }
 
@@ -655,6 +721,85 @@ mod tests {
         assert_eq!(
             *interpreter.observed.lock().map_err(|_| Error::Lock)?,
             vec![1, 2]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn returned_feedback_precedes_a_waiting_transition() -> Result<()> {
+        // Invariant: the first inbound Open returns a real RelayCommand::Untrack feedback before
+        // a duplicate Open may inspect relay state. Therefore the duplicate is accepted and emits
+        // its own Connect; the old queue-after-gate implementation dropped it as a live duplicate.
+        let extensions = extensions()?;
+        let interpreter = Arc::new(RelayFeedbackInterpreter::default());
+        let decoded = Arc::new(Notify::new());
+        let observer = {
+            let decoded = Arc::clone(&decoded);
+            Arc::new(move || decoded.notify_one()) as Arc<dyn Fn() + Send + Sync>
+        };
+        let protocol = Relay::tcp(HashMap::from([(
+            "web".to_string(),
+            "127.0.0.1:80"
+                .parse::<SocketAddr>()
+                .map_err(|error| Error::ExtensionError(error.to_string()))?,
+        )]));
+        let state = protocol.init();
+        let runner: Arc<DynHandler> = Arc::new(Runner {
+            protocol,
+            interpret: Arc::clone(&interpreter),
+            state: Mutex::new(state),
+            transition_gate: AsyncMutex::new(()),
+            after_decode_for_test: Some(observer),
+        });
+        extensions
+            .core
+            .handlers
+            .write()
+            .map_err(|_| Error::Lock)?
+            .insert(TCP.to_string(), runner);
+        let from: Did = SecretKey::random().address().into();
+        let open = bincode::serialize(&Frame::Open {
+            session: SessionId(0),
+            service: "web".to_string(),
+        })
+        .map(Bytes::from)
+        .map_err(|_| Error::EncodeError)?;
+        let first_open = open.clone();
+
+        let first_extensions = extensions.clone();
+        let first = tokio::spawn(async move {
+            first_extensions
+                .dispatch(from, Envelope::new(TCP, first_open))
+                .await
+        });
+        interpreter.first_effect_started.notified().await;
+        decoded.notified().await;
+
+        let second_extensions = extensions.clone();
+        let second = tokio::spawn(async move {
+            second_extensions
+                .dispatch(from, Envelope::new(TCP, open))
+                .await
+        });
+        decoded.notified().await;
+        assert!(!second.is_finished());
+
+        interpreter.release_first_effect.notify_one();
+        let timeout = std::time::Duration::from_secs(1);
+        tokio::time::timeout(timeout, first)
+            .await
+            .map_err(|_| Error::ExtensionError("first feedback turn timed out".to_string()))?
+            .map_err(|error| Error::ExtensionError(error.to_string()))??;
+        tokio::time::timeout(timeout, second)
+            .await
+            .map_err(|_| Error::ExtensionError("second feedback turn timed out".to_string()))?
+            .map_err(|error| Error::ExtensionError(error.to_string()))??;
+        assert_eq!(
+            *interpreter
+                .observed_connects
+                .lock()
+                .map_err(|_| Error::Lock)?,
+            vec![SessionId(0)]
         );
         Ok(())
     }

@@ -269,20 +269,29 @@ impl SwarmTransport {
         &self,
         peer: Did,
     ) -> Result<PendingConnectionAttempt> {
-        self.reserve_pending_connection_with_observer(peer, || {})
-            .await
+        self.prepare_pending_reservation(peer).await?;
+        self.commit_pending_reservation(peer)
     }
 
-    async fn reserve_pending_connection_with_observer(
-        &self,
-        peer: Did,
-        observe_before_lifecycle_lock: impl FnOnce(),
-    ) -> Result<PendingConnectionAttempt> {
+    /// Validate a reservation and expire stale lifecycle records before its commit.
+    ///
+    /// Separation law: validation is pure; expiry and commit are separate lifecycle mutations,
+    /// each serialized by the shared boundary without holding a synchronous lock across await.
+    async fn prepare_pending_reservation(&self, peer: Did) -> Result<()> {
+        self.validate_pending_reservation(peer)?;
+        self.expire_pending_connections().await
+    }
+
+    /// Pure precondition for reserving a remote peer.
+    fn validate_pending_reservation(&self, peer: Did) -> Result<()> {
         if peer == self.dht.did {
             return Err(Error::ShouldNotConnectSelf);
         }
-        observe_before_lifecycle_lock();
-        self.expire_pending_connections().await?;
+        Ok(())
+    }
+
+    /// Commit one previously prepared reservation under the lifecycle boundary.
+    fn commit_pending_reservation(&self, peer: Did) -> Result<PendingConnectionAttempt> {
         let _lifecycle = self.connection_lifecycle()?;
         let attempt = self.peer_lifecycles()?.reserve(peer, get_epoch_ms_i64())?;
         tracing::info!(
@@ -294,6 +303,19 @@ impl SwarmTransport {
             "pending connection reserved"
         );
         Ok(attempt)
+    }
+
+    #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
+    pub(crate) async fn reserve_pending_connection_with_observer_for_test(
+        &self,
+        peer: Did,
+        observe_after_prepare: impl FnOnce(),
+        observe_before_commit: impl FnOnce(),
+    ) -> Result<PendingConnectionAttempt> {
+        self.prepare_pending_reservation(peer).await?;
+        observe_after_prepare();
+        observe_before_commit();
+        self.commit_pending_reservation(peer)
     }
 
     #[cfg(all(test, feature = "dummy"))]

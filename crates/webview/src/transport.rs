@@ -969,8 +969,8 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_gateway_cookie_commits_follow_response_order_without_prepare_leakage(
-    ) -> Result<()> {
+    fn concurrent_gateway_cookie_commits_follow_response_order_and_source_visibility() -> Result<()>
+    {
         let (started_sender, mut started_receiver) = mpsc::unbounded();
         let (release_slow_sender, release_slow_receiver) = oneshot::channel();
         let gateway = Rc::new(ConcurrentWebviewGateway::new(
@@ -1021,6 +1021,53 @@ mod tests {
                 .iter()
                 .any(|header| header.name_eq("cookie"))
         }));
+
+        // The fast response has committed while the first request remains in flight, so a
+        // same-site intermediate request must observe it before the slow response can overwrite
+        // it. This makes response-order visibility observable, rather than inferring it from the
+        // final jar alone.
+        let same_site_read = TargetUrl::parse("https://example.test/read-same-site")?.into_url();
+        let same_site_response = pool.run_until(
+            gateway.send(
+                GatewayRequest::subresource(same_site_read.clone())
+                    .with_source_origin(Url::parse("https://example.test/page")?),
+            ),
+        )?;
+        assert_eq!(same_site_response.body, b"/read-same-site");
+        let same_site_request = gateway
+            .transport
+            .requests
+            .borrow()
+            .last()
+            .cloned()
+            .ok_or_else(|| WebviewError::transport("missing same-site read".to_string()))?;
+        assert!(same_site_request
+            .headers
+            .iter()
+            .any(|header| header.name_eq("cookie") && header.value == "sid=fast"));
+
+        // A cross-site subresource shares the target host but not the source origin. Its Lax
+        // cookie view must remain empty; otherwise a request prepared from another controlled
+        // page could leak the intermediate session.
+        let cross_site_read = TargetUrl::parse("https://example.test/read-cross-site")?.into_url();
+        let cross_site_response = pool.run_until(
+            gateway.send(
+                GatewayRequest::subresource(cross_site_read)
+                    .with_source_origin(Url::parse("https://attacker.example/page")?),
+            ),
+        )?;
+        assert_eq!(cross_site_response.body, b"/read-cross-site");
+        let cross_site_request = gateway
+            .transport
+            .requests
+            .borrow()
+            .last()
+            .cloned()
+            .ok_or_else(|| WebviewError::transport("missing cross-site read".to_string()))?;
+        assert!(!cross_site_request
+            .headers
+            .iter()
+            .any(|header| header.name_eq("cookie")));
 
         release_slow_sender.send(()).map_err(|_| {
             WebviewError::transport("slow resource task stopped waiting unexpectedly".to_string())
