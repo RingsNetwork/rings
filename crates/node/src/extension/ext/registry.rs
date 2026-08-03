@@ -232,6 +232,8 @@ struct Runner<P: Protocol, I> {
     transition_gate: AsyncMutex<()>,
     #[cfg(all(test, feature = "node"))]
     after_decode_for_test: Option<Arc<dyn Fn() + Send + Sync>>,
+    #[cfg(all(test, feature = "node"))]
+    after_commit_for_test: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 #[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait::async_trait(?Send))]
@@ -305,6 +307,11 @@ where
                 *guard = state;
                 effects
             };
+
+            #[cfg(all(test, feature = "node"))]
+            if let Some(observe) = self.after_commit_for_test.as_ref() {
+                observe();
+            }
 
             for effect in effects {
                 for payload in self.interpret.run(&scope, effect).await? {
@@ -404,6 +411,8 @@ impl Extensions {
                     transition_gate: AsyncMutex::new(()),
                     #[cfg(all(test, feature = "node"))]
                     after_decode_for_test: None,
+                    #[cfg(all(test, feature = "node"))]
+                    after_commit_for_test: None,
                 });
                 (namespace, runner)
             })
@@ -445,6 +454,8 @@ impl Extensions {
             transition_gate: AsyncMutex::new(()),
             #[cfg(all(test, feature = "node"))]
             after_decode_for_test: None,
+            #[cfg(all(test, feature = "node"))]
+            after_commit_for_test: None,
         });
         let mut handlers = self.core.handlers.write().map_err(|_| Error::Lock)?;
         if !replace && handlers.contains_key(&namespace) {
@@ -636,12 +647,20 @@ mod tests {
             let second_decoded = Arc::clone(&second_decoded);
             Arc::new(move || second_decoded.notify_one()) as Arc<dyn Fn() + Send + Sync>
         };
+        let committed = Arc::new(Mutex::new(0_u8));
+        let commit_observer = {
+            let committed = Arc::clone(&committed);
+            Arc::new(move || {
+                *committed.lock().expect("test commit witness lock") += 1;
+            }) as Arc<dyn Fn() + Send + Sync>
+        };
         let runner: Arc<DynHandler> = Arc::new(Runner {
             protocol: OrderedProtocol,
             interpret: Arc::clone(&interpreter),
             state: Mutex::new(0),
             transition_gate: AsyncMutex::new(()),
             after_decode_for_test: Some(observer),
+            after_commit_for_test: Some(commit_observer),
         });
         extensions
             .core
@@ -680,6 +699,7 @@ mod tests {
             .lock()
             .map_err(|_| Error::Lock)?
             .is_empty());
+        assert_eq!(*committed.lock().map_err(|_| Error::Lock)?, 1);
 
         interpreter.release_first_effect.notify_one();
         first
@@ -688,6 +708,7 @@ mod tests {
         second
             .await
             .map_err(|error| Error::ExtensionError(error.to_string()))??;
+        assert_eq!(*committed.lock().map_err(|_| Error::Lock)?, 2);
         assert_eq!(
             *interpreter.observed.lock().map_err(|_| Error::Lock)?,
             vec![1, 2]
@@ -750,6 +771,7 @@ mod tests {
             state: Mutex::new(state),
             transition_gate: AsyncMutex::new(()),
             after_decode_for_test: Some(observer),
+            after_commit_for_test: None,
         });
         extensions
             .core

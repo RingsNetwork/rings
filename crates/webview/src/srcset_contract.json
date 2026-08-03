@@ -2,6 +2,8 @@
   {
     "name": "data URL with descriptor",
     "input": "data:image/svg+xml,%3Csvg%3E,%3C/svg%3E 1x, /next.png 2x",
+    "js_output": "data:image/svg+xml,%3Csvg%3E,%3C/svg%3E 1x, /webview/https%3A%2F%2Fexample.test%2Fnext.png 2x",
+    "rust_output": "data:image/svg+xml,%3Csvg%3E,%3C/svg%3E 1x, /webview/https%3A%2F%2Fexample%2Ecom%2Fnext%2Epng 2x",
     "candidates": [
       { "url": "data:image/svg+xml,%3Csvg%3E,%3C/svg%3E", "descriptor": "1x" },
       { "url": "/next.png", "descriptor": "2x" }
@@ -10,6 +12,8 @@
   {
     "name": "descriptor-less data URL",
     "input": "data:image/svg+xml,%3Csvg%3E,%3C/svg%3E, /next.png 2x",
+    "js_output": "data:image/svg+xml,%3Csvg%3E,%3C/svg%3E, /webview/https%3A%2F%2Fexample.test%2Fnext.png 2x",
+    "rust_output": "data:image/svg+xml,%3Csvg%3E,%3C/svg%3E, /webview/https%3A%2F%2Fexample%2Ecom%2Fnext%2Epng 2x",
     "candidates": [
       { "url": "data:image/svg+xml,%3Csvg%3E,%3C/svg%3E", "descriptor": "" },
       { "url": "/next.png", "descriptor": "2x" }
@@ -18,6 +22,8 @@
   {
     "name": "consecutive separators and whitespace",
     "input": "  first.png 1x,,,\n /next.png 2x  ",
+    "js_output": "/webview/https%3A%2F%2Fexample.test%2Fdocs%2Ffirst.png 1x, /webview/https%3A%2F%2Fexample.test%2Fnext.png 2x",
+    "rust_output": "/webview/https%3A%2F%2Fexample%2Ecom%2Fapp%2Ffirst%2Epng 1x, /webview/https%3A%2F%2Fexample%2Ecom%2Fnext%2Epng 2x",
     "candidates": [
       { "url": "first.png", "descriptor": "1x" },
       { "url": "/next.png", "descriptor": "2x" }
@@ -26,6 +32,8 @@
   {
     "name": "quoted and escaped URLs",
     "input": "\"quoted image.png\" 640w, escaped\\,image.png 2x",
+    "js_output": "/webview/https%3A%2F%2Fexample.test%2Fdocs%2Fquoted%2520image.png 640w, /webview/https%3A%2F%2Fexample.test%2Fdocs%2Fescaped%2Cimage.png 2x",
+    "rust_output": "/webview/https%3A%2F%2Fexample%2Ecom%2Fapp%2Fquoted%2520image%2Epng 640w, /webview/https%3A%2F%2Fexample%2Ecom%2Fapp%2Fescaped%2Cimage%2Epng 2x",
     "candidates": [
       { "url": "quoted image.png", "descriptor": "640w" },
       { "url": "escaped,image.png", "descriptor": "2x" }

@@ -18,18 +18,12 @@ test("srcset tokenizer preserves candidate boundaries", () => {
   const cases = JSON.parse(readFileSync(new URL("./srcset_contract.json", import.meta.url)));
   for (const fixture of cases) {
     assert.deepEqual(transforms.parseSrcsetCandidates(fixture.input), fixture.candidates, fixture.name);
+    assert.equal(
+      transforms.encodeSrcset(fixture.input, base, urls.encodeTarget),
+      fixture.js_output,
+      `${fixture.name} rewrite output`,
+    );
   }
-});
-
-test("srcset encoder rewrites quoted and escaped candidates", () => {
-  assert.equal(
-    transforms.encodeSrcset(
-      '"quoted image.png" 640w, escaped\\,image.png 2x',
-      base,
-      urls.encodeTarget,
-    ),
-    `${gateway("https://example.test/docs/quoted%20image.png")} 640w, ${gateway("https://example.test/docs/escaped,image.png")} 2x`,
-  );
 });
 
 test("pure transforms retain safe schemes and rewrite HTTP candidates", () => {

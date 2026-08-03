@@ -933,28 +933,31 @@ mod tests {
         Ok(())
     }
 
-    struct SlowFirstTransport {
+    struct DelayedCookieTransport {
         started: mpsc::UnboundedSender<String>,
-        release_slow_request: RefCell<Option<oneshot::Receiver<()>>>,
+        delayed_path: String,
+        release_delayed_request: RefCell<Option<oneshot::Receiver<()>>>,
         requests: RefCell<Vec<GatewayRequest>>,
     }
 
     #[async_trait(?Send)]
-    impl GatewayTransport for SlowFirstTransport {
+    impl GatewayTransport for DelayedCookieTransport {
         async fn send(&self, request: GatewayRequest) -> Result<GatewayResponse> {
             let path = request.target.path().to_string();
             self.requests.borrow_mut().push(request);
             let _ = self.started.unbounded_send(path.clone());
-            if path == "/slow" {
+            if path == self.delayed_path {
                 let receiver = self
-                    .release_slow_request
+                    .release_delayed_request
                     .borrow_mut()
                     .take()
                     .ok_or_else(|| {
-                        WebviewError::transport("slow request was released twice".to_string())
+                        WebviewError::transport("delayed request was released twice".to_string())
                     })?;
                 receiver.await.map_err(|_| {
-                    WebviewError::transport("slow request release channel was dropped".to_string())
+                    WebviewError::transport(
+                        "delayed request release channel was dropped".to_string(),
+                    )
                 })?;
             }
             GatewayResponse::new(
@@ -975,9 +978,10 @@ mod tests {
         let (release_slow_sender, release_slow_receiver) = oneshot::channel();
         let gateway = Rc::new(ConcurrentWebviewGateway::new(
             GatewayPrefix::new("/webview/")?,
-            SlowFirstTransport {
+            DelayedCookieTransport {
                 started: started_sender,
-                release_slow_request: RefCell::new(Some(release_slow_receiver)),
+                delayed_path: "/slow".to_string(),
+                release_delayed_request: RefCell::new(Some(release_slow_receiver)),
                 requests: RefCell::new(Vec::new()),
             },
         ));
@@ -1095,6 +1099,93 @@ mod tests {
             .headers
             .iter()
             .any(|header| header.name_eq("cookie") && header.value == "sid=slow"));
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_gateway_cookie_commits_in_mirror_response_order() -> Result<()> {
+        let (started_sender, mut started_receiver) = mpsc::unbounded();
+        let (release_fast_sender, release_fast_receiver) = oneshot::channel();
+        let gateway = Rc::new(ConcurrentWebviewGateway::new(
+            GatewayPrefix::new("/webview/")?,
+            DelayedCookieTransport {
+                started: started_sender,
+                delayed_path: "/fast".to_string(),
+                release_delayed_request: RefCell::new(Some(release_fast_receiver)),
+                requests: RefCell::new(Vec::new()),
+            },
+        ));
+        let slow = TargetUrl::parse("https://example.test/slow")?.into_url();
+        let fast = TargetUrl::parse("https://example.test/fast")?.into_url();
+        let same_site_source = Url::parse("https://example.test/page")?;
+        let (fast_result_sender, fast_result_receiver) = oneshot::channel();
+        let (slow_result_sender, slow_result_receiver) = oneshot::channel();
+        let mut pool = LocalPool::new();
+        let spawner = pool.spawner();
+
+        let fast_gateway = Rc::clone(&gateway);
+        spawner
+            .spawn_local(async move {
+                let _ = fast_result_sender
+                    .send(fast_gateway.send(GatewayRequest::navigation(fast)).await);
+            })
+            .map_err(|error| WebviewError::transport(error.to_string()))?;
+        assert_eq!(
+            pool.run_until(started_receiver.next()),
+            Some("/fast".to_string())
+        );
+
+        let slow_gateway = Rc::clone(&gateway);
+        let slow_request = slow.clone();
+        let slow_source = same_site_source.clone();
+        spawner
+            .spawn_local(async move {
+                let _ = slow_result_sender.send(
+                    slow_gateway
+                        .send(
+                            GatewayRequest::subresource(slow_request)
+                                .with_source_origin(slow_source),
+                        )
+                        .await,
+                );
+            })
+            .map_err(|error| WebviewError::transport(error.to_string()))?;
+        let slow_response = pool
+            .run_until(slow_result_receiver)
+            .map_err(|_| WebviewError::transport("slow resource task was dropped".to_string()))??;
+        assert_eq!(slow_response.body, b"/slow");
+
+        let intermediate = TargetUrl::parse("https://example.test/intermediate")?.into_url();
+        let intermediate_response = pool.run_until(
+            gateway.send(
+                GatewayRequest::subresource(intermediate)
+                    .with_source_origin(Url::parse(same_site_source.as_str())?),
+            ),
+        )?;
+        assert_eq!(intermediate_response.body, b"/intermediate");
+        let intermediate_request = gateway
+            .transport
+            .requests
+            .borrow()
+            .last()
+            .cloned()
+            .ok_or_else(|| WebviewError::transport("missing intermediate read".to_string()))?;
+        assert!(intermediate_request
+            .headers
+            .iter()
+            .any(|header| header.name_eq("cookie") && header.value == "sid=slow"));
+
+        release_fast_sender.send(()).map_err(|_| {
+            WebviewError::transport("fast resource task stopped waiting unexpectedly".to_string())
+        })?;
+        let fast_response = pool
+            .run_until(fast_result_receiver)
+            .map_err(|_| WebviewError::transport("fast resource task was dropped".to_string()))??;
+        assert_eq!(fast_response.body, b"/fast");
+        assert_eq!(
+            gateway.lock_cookies()?.cookie_header(&slow).as_deref(),
+            Some("sid=fast")
+        );
         Ok(())
     }
 }
