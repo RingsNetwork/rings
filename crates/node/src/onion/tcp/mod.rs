@@ -48,11 +48,9 @@ use crate::onion::replay::OnionForwardReplayPartitions;
 use crate::onion::replay::OnionSequenceWindow;
 use crate::onion::replay::ReplayAdmission;
 use crate::onion::replay::SequenceAdmission;
-use crate::onion::target::resolve_public_target;
 use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitFailure;
 use crate::onion::OnionExitPolicy;
-use crate::onion::OnionExitTarget;
 use crate::onion::OnionProxyTarget;
 use crate::onion::OnionRoute;
 use crate::onion::OnionRouteError;
@@ -70,13 +68,15 @@ use client::TcpBackwardRoute;
 pub use config::NativeOnionTcpExitConfig;
 #[cfg(test)]
 use duplex::TcpDuplexState;
+use exit::admit_exit_target;
+use exit::connect_exit_target;
+use exit::open_response_deadline;
 use exit::spawn_exit_stream;
 use exit::ExitStreamTask;
 use inbound::TcpInbound;
 
 const TCP_BUF: usize = 30_000;
 const TCP_OPEN_TIMEOUT_SECS: u64 = 30;
-const TCP_OPEN_RESPONSE_QUANTUM_MS: u128 = 250;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 enum OnionTcpPayload {
@@ -929,58 +929,6 @@ struct TcpExitOpen {
     expected_forward_peer: Did,
     service: OnionServiceName,
     target: String,
-}
-
-fn open_response_deadline(opened_at: Instant, now: Instant) -> Instant {
-    let elapsed_ms = now.saturating_duration_since(opened_at).as_millis();
-    let quanta = elapsed_ms
-        .saturating_add(TCP_OPEN_RESPONSE_QUANTUM_MS - 1)
-        .checked_div(TCP_OPEN_RESPONSE_QUANTUM_MS)
-        .unwrap_or(1)
-        .max(1);
-    let deadline_ms =
-        u64::try_from(quanta.saturating_mul(TCP_OPEN_RESPONSE_QUANTUM_MS)).unwrap_or(u64::MAX);
-    opened_at
-        .checked_add(Duration::from_millis(deadline_ms))
-        .unwrap_or(now)
-}
-
-fn admit_exit_target(
-    policy: &OnionExitPolicy,
-    target: &str,
-) -> std::result::Result<OnionProxyTarget, OnionExitFailure> {
-    let target = OnionProxyTarget::parse_authority(target)
-        .map_err(|error| OnionExitFailure::InvalidTarget(error.to_string()))?;
-    let exit_target = OnionExitTarget::from_proxy_target(&target);
-    if !policy.allows_target(&exit_target) {
-        return Err(OnionExitFailure::PermissionDenied);
-    }
-    Ok(target)
-}
-
-async fn connect_exit_target(
-    target: &OnionProxyTarget,
-) -> std::result::Result<TcpStream, OnionExitFailure> {
-    let authority = target.authority();
-    let addresses = resolve_public_target(target).await.map_err(|error| {
-        tracing::warn!(target = authority, %error, "rejected or failed to resolve onion TCP exit target");
-        if matches!(error, Error::NoPermission) {
-            OnionExitFailure::PermissionDenied
-        } else {
-            OnionExitFailure::ResolveTarget
-        }
-    })?;
-    let mut last_error = None;
-    for address in addresses {
-        match TcpStream::connect(address).await {
-            Ok(stream) => return Ok(stream),
-            Err(error) => last_error = Some(error),
-        }
-    }
-    if let Some(error) = last_error {
-        tracing::warn!(target = authority, %error, "failed to connect onion TCP exit target");
-    }
-    Err(OnionExitFailure::ConnectTarget)
 }
 
 // Invariant: each sequence in `backward_sequences` has already produced at most one

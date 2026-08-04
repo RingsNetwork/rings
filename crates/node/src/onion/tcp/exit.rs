@@ -1,9 +1,11 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use rings_core::dht::Did;
 use rings_core::ecc::PublicKey;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 
 use super::inbound::TcpInbound;
 use super::pump::pump_tcp_duplex;
@@ -16,8 +18,66 @@ use crate::extension::ext::Scope;
 use crate::onion::circuit::OnionCircuitId;
 use crate::onion::circuit::OnionClientReturn;
 use crate::onion::exit_accounting::OnionExitLease;
+use crate::onion::target::resolve_public_target;
 use crate::onion::OnionExitFailure;
+use crate::onion::OnionExitPolicy;
+use crate::onion::OnionExitTarget;
+use crate::onion::OnionProxyTarget;
 use crate::onion::OnionServiceName;
+
+const TCP_OPEN_RESPONSE_QUANTUM_MS: u128 = 250;
+
+pub(super) fn open_response_deadline(opened_at: Instant, now: Instant) -> Instant {
+    let elapsed_ms = now.saturating_duration_since(opened_at).as_millis();
+    let quanta = elapsed_ms
+        .saturating_add(TCP_OPEN_RESPONSE_QUANTUM_MS - 1)
+        .checked_div(TCP_OPEN_RESPONSE_QUANTUM_MS)
+        .unwrap_or(1)
+        .max(1);
+    let deadline_ms =
+        u64::try_from(quanta.saturating_mul(TCP_OPEN_RESPONSE_QUANTUM_MS)).unwrap_or(u64::MAX);
+    opened_at
+        .checked_add(Duration::from_millis(deadline_ms))
+        .unwrap_or(now)
+}
+
+pub(super) fn admit_exit_target(
+    policy: &OnionExitPolicy,
+    target: &str,
+) -> std::result::Result<OnionProxyTarget, OnionExitFailure> {
+    let target = OnionProxyTarget::parse_authority(target)
+        .map_err(|error| OnionExitFailure::InvalidTarget(error.to_string()))?;
+    let exit_target = OnionExitTarget::from_proxy_target(&target);
+    if !policy.allows_target(&exit_target) {
+        return Err(OnionExitFailure::PermissionDenied);
+    }
+    Ok(target)
+}
+
+pub(super) async fn connect_exit_target(
+    target: &OnionProxyTarget,
+) -> std::result::Result<TcpStream, OnionExitFailure> {
+    let authority = target.authority();
+    let addresses = resolve_public_target(target).await.map_err(|error| {
+        tracing::warn!(target = authority, %error, "rejected or failed to resolve onion TCP exit target");
+        if matches!(error, crate::error::Error::NoPermission) {
+            OnionExitFailure::PermissionDenied
+        } else {
+            OnionExitFailure::ResolveTarget
+        }
+    })?;
+    let mut last_error = None;
+    for address in addresses {
+        match TcpStream::connect(address).await {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    if let Some(error) = last_error {
+        tracing::warn!(target = authority, %error, "failed to connect onion TCP exit target");
+    }
+    Err(OnionExitFailure::ConnectTarget)
+}
 
 pub(super) struct ExitStreamTask {
     pub(super) runtime: Arc<OnionTcpRuntime>,
