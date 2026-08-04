@@ -38,6 +38,9 @@ pub(crate) enum ReplayAdmission {
 }
 
 /// Admission result for a fixed-memory monotonic sequence window.
+///
+/// `Duplicate` and `Stale` are distinct state facts even though both are rejected at the wire
+/// boundary: the TCP adapter records which replay-window relation caused the rejection.
 #[cfg(feature = "node")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SequenceAdmission {

@@ -923,4 +923,71 @@ mod tests {
         hook.release();
         Ok(())
     }
+
+    #[tokio::test]
+    async fn saturated_peer_control_lane_does_not_block_another_peer() -> Result<()> {
+        let extensions = extensions()?;
+        let hook = Arc::new(ControlSendTestHook::default());
+        let interpreter = NativeRelay::new_with_control_send_test_hook(
+            Arc::new(TransportSessions::new()),
+            Arc::clone(&hook),
+        );
+        let blocked_peer: Did = SecretKey::random().address().into();
+        let independent_peer: Did = SecretKey::random().address().into();
+        let effect_scope = EffectScope::new(Scope::new(extensions.core(), TCP.to_string()));
+
+        interpreter
+            .run(&effect_scope, RelayEffect::SendClose {
+                to: blocked_peer,
+                session: SessionId(0),
+                from_opener: false,
+            })
+            .await?;
+        tokio::time::timeout(std::time::Duration::from_secs(1), hook.wait_until_blocked())
+            .await
+            .map_err(|_| {
+                Error::ExtensionError("first peer control lane did not block".to_string())
+            })?;
+
+        let mut saturated = false;
+        for session in 1..=8 {
+            let result = interpreter
+                .run(&effect_scope, RelayEffect::SendClose {
+                    to: blocked_peer,
+                    session: SessionId(session),
+                    from_opener: false,
+                })
+                .await;
+            if result.is_err() {
+                saturated = true;
+                break;
+            }
+        }
+        assert!(saturated, "the blocked peer must have a finite lane budget");
+
+        interpreter
+            .run(&effect_scope, RelayEffect::SendClose {
+                to: independent_peer,
+                session: SessionId(9),
+                from_opener: false,
+            })
+            .await?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            hook.wait_until_completed(independent_peer),
+        )
+        .await
+        .map_err(|_| {
+            Error::ExtensionError("independent peer control lane was blocked".to_string())
+        })??;
+
+        hook.release();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            hook.wait_until_completed(blocked_peer),
+        )
+        .await
+        .map_err(|_| Error::ExtensionError("blocked peer lane did not resume".to_string()))??;
+        Ok(())
+    }
 }

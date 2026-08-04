@@ -138,7 +138,7 @@ pub(crate) fn validate_public_ip_literal(target: &OnionProxyTarget) -> Result<()
 /// carrier-grade NAT, documentation, benchmarking, multicast, reserved,
 /// transition, and address-translation prefixes are all rejected. IPv4 values
 /// embedded in IPv6 are classified by their IPv4 address.
-pub(crate) const fn is_public_exit_ip(address: IpAddr) -> bool {
+const fn is_public_exit_ip(address: IpAddr) -> bool {
     match address {
         IpAddr::V4(address) => is_public_exit_ipv4(address.octets()),
         IpAddr::V6(address) => {

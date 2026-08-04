@@ -61,10 +61,12 @@ mod config;
 mod duplex;
 mod exit;
 mod inbound;
+mod pump;
 
 use client::spawn_client_stream;
 use client::TcpBackwardRoute;
 pub use config::NativeOnionTcpExitConfig;
+#[cfg(test)]
 use duplex::TcpDuplexState;
 use exit::spawn_exit_stream;
 use exit::ExitStreamTask;
@@ -766,7 +768,20 @@ impl OnionTcpRuntime {
         }
         match stream.backward_sequences.consume(sequence.value()) {
             SequenceAdmission::Consumed => Ok(()),
-            SequenceAdmission::Duplicate | SequenceAdmission::Stale => {
+            SequenceAdmission::Duplicate => {
+                tracing::debug!(
+                    ?key,
+                    sequence = sequence.value(),
+                    "duplicate onion TCP backward sequence"
+                );
+                Err(Error::OnionRouteError(OnionRouteError::BackwardReplay))
+            }
+            SequenceAdmission::Stale => {
+                tracing::debug!(
+                    ?key,
+                    sequence = sequence.value(),
+                    "stale onion TCP backward sequence"
+                );
                 Err(Error::OnionRouteError(OnionRouteError::BackwardReplay))
             }
         }
@@ -826,7 +841,20 @@ impl OnionTcpRuntime {
         }
         match stream.forward_sequences.consume(sequence.value()) {
             SequenceAdmission::Consumed => {}
-            SequenceAdmission::Duplicate | SequenceAdmission::Stale => {
+            SequenceAdmission::Duplicate => {
+                tracing::debug!(
+                    ?key,
+                    sequence = sequence.value(),
+                    "duplicate onion TCP forward sequence"
+                );
+                return Err(Error::OnionRouteError(OnionRouteError::ForwardReplay));
+            }
+            SequenceAdmission::Stale => {
+                tracing::debug!(
+                    ?key,
+                    sequence = sequence.value(),
+                    "stale onion TCP forward sequence"
+                );
                 return Err(Error::OnionRouteError(OnionRouteError::ForwardReplay));
             }
         }

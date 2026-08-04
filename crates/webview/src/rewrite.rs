@@ -4,6 +4,7 @@ use std::error::Error;
 
 use lol_html::element;
 use lol_html::end;
+use lol_html::errors::RewritingError;
 use lol_html::html_content::ContentType;
 use lol_html::html_content::Element;
 use lol_html::html_content::TextChunk;
@@ -21,7 +22,6 @@ mod budget;
 mod srcset;
 
 use self::budget::bounded_value;
-use self::budget::map_html_rewrite_error;
 use self::budget::response_body_too_large;
 use self::budget::BoundedString;
 use self::srcset::visit_srcset_candidates;
@@ -160,6 +160,18 @@ impl RewriteContext {
     fn rewrite_url(&self, value: &str) -> Result<Option<String>> {
         self.gateway_prefix
             .rewrite_url_value(&self.document_url, value)
+    }
+}
+
+/// Preserve typed handler failures while projecting parser/serializer failures into the WebView
+/// rendering error algebra. This belongs to the HTML adapter, not the pure output-budget module.
+fn map_html_rewrite_error(error: RewritingError) -> WebviewError {
+    match error {
+        RewritingError::ContentHandlerError(source) => match source.downcast::<WebviewError>() {
+            Ok(error) => *error,
+            Err(source) => WebviewError::Render(format!("HTML rewrite handler failed: {source}")),
+        },
+        error => WebviewError::Render(format!("HTML rewrite failed: {error}")),
     }
 }
 

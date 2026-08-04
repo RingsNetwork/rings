@@ -1,7 +1,21 @@
-use tokio::io::AsyncReadExt;
-use tokio::io::AsyncWriteExt;
-
 use super::*;
+
+struct ClientReturnPath {
+    scope: Scope,
+    path: OnionCircuitPath,
+    client_return: OnionClientReturn,
+}
+
+#[async_trait::async_trait]
+impl pump::TcpDuplexEffects for ClientReturnPath {
+    async fn send(&mut self, payload: OnionTcpPayload) -> Result<()> {
+        send_client_payload(&self.scope, &self.path, self.client_return, payload).await
+    }
+
+    fn remote_failed(&mut self, failure: &OnionExitFailure) {
+        tracing::warn!("onion TCP client stream failed: {failure}");
+    }
+}
 
 pub(super) fn spawn_client_stream(
     runtime: Arc<OnionTcpRuntime>,
@@ -10,66 +24,15 @@ pub(super) fn spawn_client_stream(
     stream: TcpStream,
     path: OnionCircuitPath,
     client_return: OnionClientReturn,
-    mut rx: mpsc::Receiver<TcpInbound>,
+    rx: mpsc::Receiver<TcpInbound>,
 ) {
     tokio::spawn(async move {
-        let (mut read, mut write) = stream.into_split();
-        let mut read_buf = vec![0_u8; TCP_BUF];
-        let mut state = TcpDuplexState::open();
-        loop {
-            if state.is_closed() {
-                break;
-            }
-            tokio::select! {
-                read_result = read.read(read_buf.as_mut_slice()), if state.can_read() => {
-                    match read_result {
-                        Ok(0) => {
-                            if send_client_payload(&scope, &path, client_return, OnionTcpPayload::Shutdown).await.is_err() {
-                                break;
-                            }
-                            state.close_read();
-                        }
-                        Ok(n) => {
-                            let bytes = Bytes::copy_from_slice(read_buf.get(..n).unwrap_or_default());
-                            if send_client_payload(&scope, &path, client_return, OnionTcpPayload::Data { bytes }).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-                inbound = rx.recv() => {
-                    match inbound {
-                        Some(TcpInbound::Data(bytes)) => {
-                            if !state.can_write() {
-                                continue;
-                            }
-                            if write.write_all(bytes.as_ref()).await.is_err() {
-                                break;
-                            }
-                        }
-                        Some(TcpInbound::Shutdown) => {
-                            if state.can_write() {
-                                let _ = write.shutdown().await;
-                                state.close_write();
-                            }
-                        }
-                        Some(TcpInbound::Close) | None => {
-                            state.observe_remote_terminal();
-                            break;
-                        }
-                        Some(TcpInbound::Error(message)) => {
-                            tracing::warn!("onion TCP client stream failed: {message}");
-                            state.observe_remote_terminal();
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        if state.should_announce_terminal() {
-            let _ = send_client_payload(&scope, &path, client_return, OnionTcpPayload::Close).await;
-        }
+        let mut return_path = ClientReturnPath {
+            scope,
+            path,
+            client_return,
+        };
+        pump::pump_tcp_duplex(stream, rx, &mut return_path).await;
         runtime.remove_client_stream(key);
     });
 }

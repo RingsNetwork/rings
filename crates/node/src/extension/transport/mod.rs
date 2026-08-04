@@ -70,12 +70,10 @@ use serde::Serialize;
 /// Allocate one counter value without ever wrapping back to a live ABA-equivalent value.
 pub(crate) fn allocate_non_reusing(counter: &AtomicU64) -> Option<u64> {
     counter
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, checked_add_one)
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            value.checked_add(1)
+        })
         .ok()
-}
-
-fn checked_add_one(value: u64) -> Option<u64> {
-    value.checked_add(1)
 }
 
 /// Identifier of a relayed session/flow (a virtual circuit ↔ local socket pairing).

@@ -1,7 +1,5 @@
 //! Pure output-budget algebra shared by HTML and CSS rewriting.
 
-use lol_html::errors::RewritingError;
-
 use crate::error::Result;
 use crate::error::TransportFailure;
 use crate::error::WebviewError;
@@ -44,16 +42,6 @@ impl BoundedString {
 
 pub(super) fn response_body_too_large(actual: usize, limit: usize) -> WebviewError {
     TransportFailure::ResponseBodyTooLarge { actual, limit }.into()
-}
-
-pub(super) fn map_html_rewrite_error(error: RewritingError) -> WebviewError {
-    match error {
-        RewritingError::ContentHandlerError(source) => match source.downcast::<WebviewError>() {
-            Ok(error) => *error,
-            Err(source) => WebviewError::Render(format!("HTML rewrite handler failed: {source}")),
-        },
-        error => WebviewError::Render(format!("HTML rewrite failed: {error}")),
-    }
 }
 
 pub(super) fn bounded_value(value: String, limit: usize) -> Result<String> {
