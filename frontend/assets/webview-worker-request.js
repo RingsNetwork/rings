@@ -46,9 +46,7 @@
         if (result.done) {
           break;
         }
-        const chunk = result.value instanceof Uint8Array
-          ? result.value
-          : new Uint8Array(result.value);
+        const chunk = byteView(result.value);
         if (chunk.byteLength > gatewayRequestBodyLimitBytes - total) {
           void reader.cancel("Rings gateway request body limit exceeded");
           throw new GatewayRequestBodyTooLarge(
@@ -70,6 +68,16 @@
       offset += chunk.byteLength;
     }
     return body.buffer;
+  }
+
+  function byteView(value) {
+    if (value instanceof Uint8Array) {
+      return value;
+    }
+    if (ArrayBuffer.isView(value)) {
+      return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+    }
+    return new Uint8Array(value);
   }
 
   function rejectOversizedDeclaredBody(rawLength) {

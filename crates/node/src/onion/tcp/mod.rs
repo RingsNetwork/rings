@@ -459,8 +459,8 @@ impl OnionTcpRuntime {
         }
         let policy = exit_config.policy();
 
-        let authority = match admit_exit_target(policy, &request.target) {
-            Ok(authority) => authority,
+        let target = match admit_exit_target(policy, &request.target) {
+            Ok(target) => target,
             Err(failure) => return self.reject_exit_open(&request, failure).await,
         };
         let (rx, lease) = match self.reserve_exit_stream(&request, policy) {
@@ -474,7 +474,7 @@ impl OnionTcpRuntime {
 
         let stream = match timeout(
             Duration::from_secs(TCP_OPEN_TIMEOUT_SECS),
-            connect_exit_target(&authority),
+            connect_exit_target(&target),
         )
         .await
         {
@@ -892,21 +892,21 @@ struct TcpExitOpen {
 fn admit_exit_target(
     policy: &OnionExitPolicy,
     target: &str,
-) -> std::result::Result<String, OnionExitFailure> {
+) -> std::result::Result<OnionProxyTarget, OnionExitFailure> {
     let target = OnionProxyTarget::parse_authority(target)
         .map_err(|error| OnionExitFailure::InvalidTarget(error.to_string()))?;
-    let authority = target.authority();
     let exit_target = OnionExitTarget::from_proxy_target(&target);
     if !policy.allows_target(&exit_target) {
         return Err(OnionExitFailure::PermissionDenied);
     }
-    Ok(authority)
+    Ok(target)
 }
 
-async fn connect_exit_target(authority: &str) -> std::result::Result<TcpStream, OnionExitFailure> {
-    let target = OnionProxyTarget::parse_authority(authority)
-        .map_err(|error| OnionExitFailure::InvalidTarget(error.to_string()))?;
-    let addresses = resolve_public_target(&target).await.map_err(|error| {
+async fn connect_exit_target(
+    target: &OnionProxyTarget,
+) -> std::result::Result<TcpStream, OnionExitFailure> {
+    let authority = target.authority();
+    let addresses = resolve_public_target(target).await.map_err(|error| {
         tracing::warn!(target = authority, %error, "rejected or failed to resolve onion TCP exit target");
         if matches!(error, Error::NoPermission) {
             OnionExitFailure::PermissionDenied

@@ -2,7 +2,7 @@
   "use strict";
 
   const webviewHistoryGuardMarker = "data-rings-webview-history-guard";
-  const webviewHistoryGuardScriptTag = `<script ${webviewHistoryGuardMarker}>(() => {
+  const webviewHistoryGuardSource = `(() => {
     "use strict";
     if (globalThis.__ringsWebviewHistoryGuard) return;
     Object.defineProperty(globalThis, "__ringsWebviewHistoryGuard", { value: true });
@@ -51,31 +51,51 @@
     }
     guardHistoryMethod("pushState");
     guardHistoryMethod("replaceState");
-  })();</script>`;
+  })();`;
 
-  function injectWebviewOverlay(html, overlayScriptPath) {
+  function webviewHistoryGuardScriptTag(xmlDocument) {
+    const source = xmlDocument
+      ? `<![CDATA[\n${webviewHistoryGuardSource.split("]]>").join("]]]]><![CDATA[>")}\n]]>`
+      : webviewHistoryGuardSource;
+    return `<script ${webviewHistoryGuardMarker}>${source}</script>`;
+  }
+
+  function injectWebviewOverlay(html, overlayScriptPath, xmlDocument) {
     const webviewOverlayScriptTag = `<script src="${overlayScriptPath}"></script>`;
-    const guarded = injectWebviewHistoryGuard(html);
+    const guarded = injectWebviewHistoryGuard(html, xmlDocument);
     if (/<\/head\s*>/i.test(guarded)) {
       return guarded.replace(/<\/head\s*>/i, `${webviewOverlayScriptTag}</head>`);
+    }
+    if (xmlDocument && /<\/body\s*>/i.test(guarded)) {
+      return guarded.replace(/<\/body\s*>/i, `${webviewOverlayScriptTag}</body>`);
     }
     if (/<body\b[^>]*>/i.test(guarded)) {
       return guarded.replace(/<body\b[^>]*>/i, (bodyTag) => `${bodyTag}${webviewOverlayScriptTag}`);
     }
-    return `${guarded}\n${webviewOverlayScriptTag}`;
+    return xmlDocument ? guarded : `${guarded}\n${webviewOverlayScriptTag}`;
   }
 
-  function injectControlledNavigationScripts(html, includeOverlay, overlayScriptPath) {
+  function injectControlledNavigationScripts(html, includeOverlay, overlayScriptPath, xmlDocument = false) {
     if (includeOverlay) {
-      return injectWebviewOverlay(html, overlayScriptPath);
+      return injectWebviewOverlay(html, overlayScriptPath, xmlDocument);
     }
-    return injectWebviewHistoryGuard(html);
+    return injectWebviewHistoryGuard(html, xmlDocument);
   }
 
-  function injectWebviewHistoryGuard(html) {
+  function injectWebviewHistoryGuard(html, xmlDocument) {
+    const scriptTag = webviewHistoryGuardScriptTag(xmlDocument);
+    if (xmlDocument) {
+      if (/<head\b[^>]*>/i.test(html)) {
+        return html.replace(/<head\b[^>]*>/i, (headTag) => `${headTag}${scriptTag}`);
+      }
+      if (/<body\b[^>]*>/i.test(html)) {
+        return html.replace(/<body\b[^>]*>/i, (bodyTag) => `${bodyTag}${scriptTag}`);
+      }
+      return html;
+    }
     const leading = /^\uFEFF?\s*(?:(?:<!--[\s\S]*?-->)\s*)*(?:<!doctype\s+html\b[^>]*>\s*)?/i.exec(html);
     const index = leading ? leading[0].length : 0;
-    return `${html.slice(0, index)}${webviewHistoryGuardScriptTag}${html.slice(index)}`;
+    return `${html.slice(0, index)}${scriptTag}${html.slice(index)}`;
   }
 
   function sameTargetUrl(left, right) {

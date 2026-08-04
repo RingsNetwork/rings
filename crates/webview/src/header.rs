@@ -175,6 +175,14 @@ mod tests {
     }
 
     #[test]
+    fn gateway_sandbox_intentionally_creates_an_opaque_origin() {
+        let policy = gateway_content_security_policy();
+        assert!(policy.starts_with("sandbox "));
+        assert!(policy.contains("allow-scripts"));
+        assert!(!policy.contains("allow-same-origin"));
+    }
+
+    #[test]
     fn response_policy_strips_headers_invalidated_by_gateway_rewrites() -> Result<()> {
         let target = Url::parse("https://example.com/app/page")?;
         let policy = HeaderPolicy::new(GatewayPrefix::new("/webview/")?);

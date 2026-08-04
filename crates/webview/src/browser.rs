@@ -52,7 +52,12 @@ impl<'a> OnionHttpsRequest<'a> {
     }
 }
 
-/// Build a small runtime that routes browser-created URLs through the gateway prefix.
+/// Build a runtime that rewrites browser-created URLs through the gateway prefix.
+///
+/// DOM URL rewriting remains useful in opaque-origin sandboxed documents. Dynamic `fetch` and
+/// `XMLHttpRequest` routing additionally requires a trusted host bridge; an opaque document is
+/// not controlled by the Service Worker that served its gateway URL. See the crate-level
+/// opaque-origin deployment boundary.
 pub fn bootstrap_script(gateway_prefix: &str, document_url: &Url) -> String {
     let config = BrowserBootstrapConfig {
         prefix: gateway_prefix,

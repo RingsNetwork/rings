@@ -66,6 +66,25 @@ export async function runStaticServiceWorkerTests({
       workerRequestApi.isGatewayRequestBodyTooLarge,
     );
 
+    const storage = Uint8Array.from([0x10, 0x20, 0x30, 0x40, 0x50, 0x60]);
+    const view = new Uint16Array(storage.buffer, 2, 2);
+    const viewRequest = {
+      method: "POST",
+      headers: new Headers(),
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(view);
+          controller.close();
+        },
+      }),
+    } as unknown as Parameters<typeof workerRequestApi.readGatewayRequestBody>[0];
+    const viewed = await workerRequestApi.readGatewayRequestBody(viewRequest);
+    assert.deepEqual(
+      Array.from(new Uint8Array(viewed ?? new ArrayBuffer(0))),
+      Array.from(new Uint8Array(view.buffer, view.byteOffset, view.byteLength)),
+      "typed-array chunks must preserve their byte window rather than re-encode elements",
+    );
+
     let cancelled = false;
     const controller = new AbortController();
     const pending = workerRequestApi.readGatewayRequestBody(
@@ -180,6 +199,49 @@ export async function runStaticServiceWorkerTests({
   {
     const headers = new Headers({
       "content-length": "42",
+      "content-type": "application/xhtml+xml; charset=utf-8",
+    });
+    const body = controlledNavigationBody(
+      { kind: "navigation" },
+      200,
+      headers,
+      bytes(
+        '<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>Target</title></head><body>ok</body></html>',
+      ),
+    );
+    const xhtml = text(body);
+    const script = xhtml.match(/<script data-rings-webview-history-guard>([\s\S]*?)<\/script>/)?.[1];
+    assert(script, "XHTML history guard was not injected");
+    assert.match(script, /^<!\[CDATA\[/);
+    assert.match(script, /\]\]>$/);
+    assert.match(script, /&&/);
+    assert.ok(xhtml.indexOf("<?xml") < xhtml.indexOf("<html"));
+    assert.ok(xhtml.indexOf("<html") < xhtml.indexOf("data-rings-webview-history-guard"));
+    assert.ok(xhtml.indexOf("data-rings-webview-history-guard") < xhtml.indexOf("</head>"));
+    assert.equal(headers.has("content-length"), false);
+  }
+
+  {
+    const headers = new Headers({ "content-type": "application/xhtml+xml" });
+    const body = controlledNavigationBody(
+      { kind: "navigation" },
+      200,
+      headers,
+      bytes('<html xmlns="http://www.w3.org/1999/xhtml"><body>headless</body></html>'),
+    );
+    const xhtml = text(body);
+    const history = xhtml.indexOf("data-rings-webview-history-guard");
+    const overlay = xhtml.indexOf('src="/assets/webview-overlay.js"');
+    const bodyEnd = xhtml.indexOf("</body>");
+    assert.ok(history > xhtml.indexOf("<body"));
+    assert.ok(history < overlay);
+    assert.ok(overlay < bodyEnd);
+    assert.ok(xhtml.trimEnd().endsWith("</html>"));
+  }
+
+  {
+    const headers = new Headers({
+      "content-length": "42",
       "content-security-policy": "default-src 'none'",
       "content-type": "image/svg+xml",
       "x-frame-options": "DENY",
@@ -191,6 +253,18 @@ export async function runStaticServiceWorkerTests({
     assert.equal(headers.has("x-frame-options"), false);
     assert.match(headers.get("content-security-policy") ?? "", /^sandbox /);
     assert.doesNotMatch(headers.get("content-security-policy") ?? "", /allow-same-origin/);
+    assert.equal(headers.get("x-content-type-options"), "nosniff");
+  }
+
+  {
+    const headers = new Headers({
+      "content-length": "42",
+      "content-type": "text/plain; charset=utf-8",
+    });
+    const plain = bytes("<html><head></head><body>declared inert</body></html>");
+    const body = controlledNavigationBody({ kind: "navigation" }, 200, headers, plain);
+    assert.equal(body, plain);
+    assert.doesNotMatch(text(body), /data-rings-webview-history-guard/);
     assert.equal(headers.get("x-content-type-options"), "nosniff");
   }
 

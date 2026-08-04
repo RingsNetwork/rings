@@ -240,10 +240,8 @@ impl GatewayResponsePolicy {
             .iter()
             .find(|header| header.name_eq("content-type"))
             .map(|header| normalize_media_type(header.value.as_str()));
-        let rewrite_kind = content_type
-            .as_deref()
-            .and_then(rewrite_kind_for_media_type)
-            .or_else(|| sniff_active_document(response.body.as_slice()));
+        let rewrite_kind =
+            rewrite_kind_for_response(content_type.as_deref(), response.body.as_slice());
         let Some(rewrite_kind) = rewrite_kind else {
             if request.kind == GatewayRequestKind::Navigation
                 && !content_type
@@ -262,10 +260,21 @@ impl GatewayResponsePolicy {
         })?;
         let mut ctx = RewriteContext::new(self.prefix.clone(), request.target.clone());
         if let Some(script) = self.bootstrap_for(request) {
-            ctx = ctx.with_bootstrap_script(script);
+            match rewrite_kind {
+                RewriteKind::Html => ctx = ctx.with_bootstrap_script(script),
+                RewriteKind::Xhtml => {
+                    ctx = ctx.with_xhtml_bootstrap_script(script);
+                }
+                // The HTML bootstrap assumes a Document/HTMLElement surface. SVG navigation is
+                // still statically rewritten and sandboxed, but receives no incompatible HTML
+                // runtime injection.
+                RewriteKind::Svg | RewriteKind::Css => {}
+            }
         }
         let rewritten = match rewrite_kind {
-            RewriteKind::Html => ctx.rewrite_html_with_limit(text, MAX_GATEWAY_BODY_BYTES)?,
+            RewriteKind::Html | RewriteKind::Xhtml | RewriteKind::Svg => {
+                ctx.rewrite_html_with_limit(text, MAX_GATEWAY_BODY_BYTES)?
+            }
             RewriteKind::Css => ctx.rewrite_css_with_limit(text, MAX_GATEWAY_BODY_BYTES)?,
         };
         Ok(rewritten.into_bytes())
@@ -284,6 +293,8 @@ impl GatewayResponsePolicy {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RewriteKind {
     Html,
+    Xhtml,
+    Svg,
     Css,
 }
 
@@ -323,31 +334,49 @@ fn normalize_media_type(value: &str) -> String {
 
 fn rewrite_kind_for_media_type(media_type: &str) -> Option<RewriteKind> {
     match media_type {
-        "text/html" | "application/xhtml+xml" | "image/svg+xml" => Some(RewriteKind::Html),
+        "text/html" => Some(RewriteKind::Html),
+        "application/xhtml+xml" => Some(RewriteKind::Xhtml),
+        "image/svg+xml" => Some(RewriteKind::Svg),
         "text/css" => Some(RewriteKind::Css),
         _ => None,
     }
 }
 
+/// Classify a body at the declared-media boundary.
+///
+/// `HeaderPolicy` emits `X-Content-Type-Options: nosniff`, so an explicit media type is
+/// authoritative: declared inert data must never become active merely because its bytes begin
+/// with `<`. Sniffing is reserved for an absent declaration, where rewriting is the only safe
+/// way to admit a body that proves an active-document prefix.
+fn rewrite_kind_for_response(content_type: Option<&str>, body: &[u8]) -> Option<RewriteKind> {
+    match content_type {
+        Some(media_type) => rewrite_kind_for_media_type(media_type),
+        None => sniff_active_document(body),
+    }
+}
+
 fn is_inert_navigation_media_type(media_type: &str) -> bool {
-    matches!(
-        media_type,
-        "text/plain"
-            | "application/json"
-            | "application/pdf"
-            | "image/avif"
-            | "image/bmp"
-            | "image/gif"
-            | "image/jpeg"
-            | "image/png"
-            | "image/webp"
-            | "image/x-icon"
-            | "audio/mpeg"
-            | "audio/ogg"
-            | "video/mp4"
-            | "video/ogg"
-            | "video/webm"
-    )
+    media_type.starts_with("text/")
+        || media_type == "application/xml"
+        || media_type.ends_with("+xml")
+        || media_type == "application/json"
+        || media_type.ends_with("+json")
+        || matches!(
+            media_type,
+            "application/pdf"
+                | "image/avif"
+                | "image/bmp"
+                | "image/gif"
+                | "image/jpeg"
+                | "image/png"
+                | "image/webp"
+                | "image/x-icon"
+                | "audio/mpeg"
+                | "audio/ogg"
+                | "video/mp4"
+                | "video/ogg"
+                | "video/webm"
+        )
 }
 
 fn sniff_active_document(body: &[u8]) -> Option<RewriteKind> {

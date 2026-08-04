@@ -56,6 +56,16 @@ pub trait SwarmCallback {
     }
 
     /// This method is invoked after the Swarm handling.
+    ///
+    /// Connection events for one peer have an **ordered-start** contract when delivered by the
+    /// swarm: `start(A) < start(B)` in transport order. A callback releases that ordering turn
+    /// after its first poll, so `A` and `B` may remain suspended concurrently and completion is
+    /// not serialized. Events for different peers are unordered.
+    ///
+    /// Implementations must publish any state that later same-peer callbacks need before their
+    /// first suspension point. Work after an `.await` must tolerate overlap; callers that need
+    /// completion ordering should add an application-owned sequencer instead of relying on the
+    /// swarm delivery turn.
     async fn on_event(&self, _event: &SwarmEvent) -> Result<(), CallbackError> {
         Ok(())
     }

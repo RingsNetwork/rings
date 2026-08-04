@@ -13,7 +13,6 @@ use tokio_util::sync::CancellationToken;
 use super::inject_accepted;
 use super::send_frame;
 use super::Outbound;
-use super::Pending;
 use super::RelayTask;
 use super::TransportSessions;
 use super::UDP_BUF;
@@ -57,11 +56,9 @@ impl TransportSessions {
                                 .await;
                             }
                             None => {
-                                if let Some(token) = self.stash_pending(Pending::Udp {
-                                    socket: socket.clone(),
-                                    src,
-                                    first: bytes,
-                                }) {
+                                if let Some(token) =
+                                    self.reserve_pending_udp(socket.clone(), src, bytes)
+                                {
                                     if inject_accepted(&scope, token, peer, service.clone())
                                         .await
                                         .is_err()

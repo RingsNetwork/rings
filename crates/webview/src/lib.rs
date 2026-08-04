@@ -6,10 +6,20 @@
 //! requests and responses, header policy, virtual cookies, response rewriting,
 //! and a pluggable transport boundary.
 //!
-//! `browser` bootstrap hooks preserve ordinary page behavior, but a WebView host
-//! must apply [`GatewayRoutePolicy`] before opening a browser connection. That
-//! trusted boundary redirects navigation, rejects cross-target runtime reads,
-//! and keeps direct remote traffic out of the browser network stack.
+//! A WebView host must apply [`GatewayRoutePolicy`] before opening a browser connection. That
+//! trusted boundary redirects navigation, rejects cross-target runtime reads, and keeps direct
+//! remote traffic out of the browser network stack.
+//!
+//! ## Opaque-origin deployment boundary
+//!
+//! Production navigation responses deliberately use CSP `sandbox` without
+//! `allow-same-origin`. The resulting document has an opaque origin and is not a controlled
+//! Service Worker client, so page-authored `fetch` and `XMLHttpRequest` cannot use the worker's
+//! runtime gateway route. The production target set is therefore static and server-rendered
+//! pages plus rewritten subresources. The `browser` bootstrap's dynamic-request adapters are
+//! reusable only in a host that provides a separate trusted runtime-request bridge. Adding
+//! `allow-same-origin` is not a compatibility fix: combined with `allow-scripts`, it would remove
+//! the isolation boundary from same-origin gateway documents.
 
 /// Virtual cookie jar for target-origin cookies.
 pub mod cookie;

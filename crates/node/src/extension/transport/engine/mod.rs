@@ -112,6 +112,35 @@ enum Pending {
     },
 }
 
+/// Native UDP source lifecycle. Only `Active` is visible to the local→peer fast path.
+///
+/// ```text
+/// Vacant --reserve(token)--> Pending(token) --bind(key)--> Opening(key)
+/// Opening(key) --Open + first Data enqueued, generation current--> Active(key)
+/// Pending --inject failure--> Vacant
+/// Opening|Active --session teardown--> Vacant
+/// ```
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum UdpFlowState {
+    Pending(u64),
+    Opening(SessionKey),
+    Active(SessionKey),
+}
+
+impl UdpFlowState {
+    fn has_pending_token(&self, token: u64) -> bool {
+        matches!(self, Self::Pending(actual) if *actual == token)
+    }
+
+    fn is_opening(&self, key: &SessionKey) -> bool {
+        matches!(self, Self::Opening(actual) if actual == key)
+    }
+
+    fn belongs_to(&self, key: &SessionKey) -> bool {
+        matches!(self, Self::Opening(actual) | Self::Active(actual) if actual == key)
+    }
+}
+
 /// Shared resource tables for the relay. The engine **mints nothing about protocol identity**
 /// (no session ids, no routing): it allocates engine-local `token`s for pending accepts and
 /// holds caches that are populated by the pure relay's effects.
@@ -120,16 +149,15 @@ enum Pending {
 ///   opener `SessionId` is not a valid key — keying by the authenticated `peer` is what makes
 ///   a frame unable to address another peer's session.
 /// - `pending`: accepted-but-not-yet-bound connections/flows, keyed by engine-local token.
-/// - `udp_flows`: `src → SessionKey` fast-path cache for the UDP data plane, populated by
-///   [`bind_accepted`](TransportSessions::bind_accepted) — a projection of the core's decision,
-///   never an independent source of identity.
+/// - `udp_flows`: `src → Pending | Opening | Active` projection. It suppresses duplicate accepts
+///   while the core mints a key, and exposes a fast-path key only after `Frame::Open` is admitted.
 #[derive(Default)]
 pub(crate) struct TransportSessions {
     map: Mutex<HashMap<SessionKey, SessionHandle>>,
     tokens: AtomicU64,
     generations: AtomicU64,
     pending: Mutex<HashMap<u64, Pending>>,
-    udp_flows: Mutex<HashMap<SocketAddr, SessionKey>>,
+    udp_flows: Mutex<HashMap<SocketAddr, UdpFlowState>>,
 }
 
 impl TransportSessions {
@@ -148,7 +176,7 @@ impl TransportSessions {
     /// `namespace`. The session handle is registered *before* the (async) dial, so
     /// `Data` arriving during connect is buffered rather than dropped. On failure a
     /// `Frame::Close` is sent and the session removed.
-    pub async fn connect(
+    pub fn connect(
         self: Arc<Self>,
         scope: Scope,
         key: SessionKey,
@@ -231,7 +259,7 @@ impl TransportSessions {
     /// redundant and would recursively enter the currently active ordered effect turn.
     pub fn close_for_effect(&self, key: &SessionKey) {
         let removed = self.map.lock().ok().and_then(|mut map| map.remove(key));
-        self.finish_close_without_feedback(removed);
+        self.finish_close_without_feedback(key, removed);
     }
 
     /// Close a session **only if** its handle still has `generation` — so a slow old relay
@@ -242,15 +270,6 @@ impl TransportSessions {
     async fn close_if_current(&self, scope: &Scope, key: &SessionKey, generation: u64) -> bool {
         let removed = self.remove_if_current(key, generation);
         self.finish_close(scope, key, removed).await
-    }
-
-    /// Remove the current handle without feeding an event back to the pure relay.
-    ///
-    /// This is used only while interpreting `OpenAccepted`: its `Untrack` feedback must be
-    /// returned through [`Interpret::run`] rather than recursively dispatching under the
-    /// runner's ordered effect turn.
-    fn close_if_current_for_effect(&self, key: &SessionKey, generation: u64) -> bool {
-        self.finish_close_without_feedback(self.remove_if_current(key, generation))
     }
 
     fn remove_if_current(&self, key: &SessionKey, generation: u64) -> Option<SessionHandle> {
@@ -275,9 +294,7 @@ impl TransportSessions {
         };
         handle.cancel.cancel();
         if let Some(src) = handle.src {
-            if let Ok(mut flows) = self.udp_flows.lock() {
-                flows.remove(&src);
-            }
+            self.remove_udp_flow_for_key(src, key);
         }
         inject_untrack(scope, key).await;
         true
@@ -287,24 +304,28 @@ impl TransportSessions {
     ///
     /// Post: if this returns `true`, the OS resource is gone and the caller owns the matching
     /// `RelayCommand::Untrack` feedback obligation.
-    fn finish_close_without_feedback(&self, removed: Option<SessionHandle>) -> bool {
+    fn finish_close_without_feedback(
+        &self,
+        key: &SessionKey,
+        removed: Option<SessionHandle>,
+    ) -> bool {
         let Some(handle) = removed else {
             return false;
         };
         handle.cancel.cancel();
         if let Some(src) = handle.src {
-            if let Ok(mut flows) = self.udp_flows.lock() {
-                flows.remove(&src);
-            }
+            self.remove_udp_flow_for_key(src, key);
         }
         true
     }
 
     /// Bind a pending accepted connection/flow (engine-local `token`) to the session `key`
-    /// the pure relay just minted (the `OpenAccepted` effect): register the handle, send
-    /// `Frame::Open`, and start relaying. The engine never chose the id — it only reported
-    /// the raw accept and now executes the core's decision.
-    pub async fn bind_accepted(
+    /// the pure relay just minted (the `OpenAccepted` effect).
+    ///
+    /// Registration is synchronous and returns any immediate `Untrack` obligation to the active
+    /// reducer turn. The peer-facing `Open` and subsequent relay run on a lifecycle task, so a
+    /// peer-controlled data-channel send cannot suspend the namespace transition gate.
+    pub fn bind_accepted(
         self: Arc<Self>,
         scope: Scope,
         token: u64,
@@ -317,7 +338,8 @@ impl TransportSessions {
             "relay engine bound a session under a foreign namespace scope"
         );
         let Some(pending) = self.pending.lock().ok().and_then(|mut p| p.remove(&token)) else {
-            return None; // listener gone or token already consumed
+            // The reducer already recorded `key`; synchronously return its cleanup obligation.
+            return Some(key);
         };
         match pending {
             Pending::Tcp(stream) => {
@@ -325,33 +347,72 @@ impl TransportSessions {
                 else {
                     return Some(key);
                 };
-                if open(&scope, &key, service.as_str()).await.is_err() {
-                    return task.refuse_for_effect().then_some(key);
-                }
-                tokio::spawn(async move { tcp::relay_tcp(task, stream).await });
+                tokio::spawn(async move {
+                    if open(&task.scope, &task.key, service.as_str())
+                        .await
+                        .is_err()
+                    {
+                        task.refuse().await;
+                        return;
+                    }
+                    match task.sessions.current_generation(&task.key) {
+                        Some(generation) if generation == task.generation => {
+                            tcp::relay_tcp(task, stream).await;
+                        }
+                        None => cancel_open(&task.scope, &task.key).await,
+                        Some(_) => {}
+                    }
+                });
             }
             Pending::Udp { socket, src, first } => {
+                if !self.promote_udp_flow(src, token, &key) {
+                    return Some(key);
+                }
                 let Some((outbound_rx, cancel, generation)) = self.register(key.clone(), Some(src))
                 else {
+                    self.remove_udp_flow_for_key(src, &key);
                     return Some(key);
                 };
-                if let Ok(mut flows) = self.udp_flows.lock() {
-                    flows.insert(src, key.clone());
-                }
                 udp::spawn_udp_sendto(socket, src, outbound_rx, cancel);
-                if open(&scope, &key, service.as_str()).await.is_err() {
-                    return self
-                        .close_if_current_for_effect(&key, generation)
-                        .then_some(key);
-                }
-                // Forward the first datagram that triggered this flow.
-                let from_opener = opened_by_us(&key);
-                let _ = send_frame(&scope, key.peer, Frame::Data {
-                    session: key.session,
-                    from_opener,
-                    bytes: first,
-                })
-                .await;
+                tokio::spawn(async move {
+                    if open(&scope, &key, service.as_str()).await.is_err() {
+                        if self.close_if_current(&scope, &key, generation).await {
+                            let _ = send_frame(&scope, key.peer, Frame::Close {
+                                session: key.session,
+                                from_opener: opened_by_us(&key),
+                            })
+                            .await;
+                        }
+                        return;
+                    }
+                    match self.current_generation(&key) {
+                        Some(current) if current == generation => {}
+                        None => {
+                            cancel_open(&scope, &key).await;
+                            return;
+                        }
+                        Some(_) => return,
+                    }
+                    // Preserve local receive order: keep the fast path closed until both Open and
+                    // the first datagram have been admitted to the peer connection.
+                    let from_opener = opened_by_us(&key);
+                    if send_frame(&scope, key.peer, Frame::Data {
+                        session: key.session,
+                        from_opener,
+                        bytes: first,
+                    })
+                    .await
+                    .is_err()
+                    {
+                        self.close_if_current(&scope, &key, generation).await;
+                        return;
+                    }
+                    if !self.activate_udp_flow(src, &key)
+                        && self.close_if_current(&scope, &key, generation).await
+                    {
+                        cancel_open(&scope, &key).await;
+                    }
+                });
             }
         }
         None
@@ -360,8 +421,86 @@ impl TransportSessions {
     /// Look up the live session for a UDP source (fast-path data plane; the cache is populated
     /// by [`bind_accepted`](TransportSessions::bind_accepted)).
     fn udp_flow(&self, src: &SocketAddr) -> Option<SessionKey> {
-        let key = self.udp_flows.lock().ok()?.get(src).cloned()?;
-        self.is_live(&key).then_some(key)
+        let key = match self.udp_flows.lock().ok()?.get(src) {
+            Some(UdpFlowState::Active(key)) => key.clone(),
+            Some(UdpFlowState::Pending(_) | UdpFlowState::Opening(_)) | None => return None,
+        };
+        if self.is_live(&key) {
+            return Some(key);
+        }
+        self.remove_udp_flow_for_key(*src, &key);
+        None
+    }
+
+    /// Reserve a UDP source and its pending token atomically. A second datagram for the same
+    /// source is deliberately dropped until the first flow becomes active; it cannot create a
+    /// second core session or overtake that flow's `Open`.
+    fn reserve_pending_udp(
+        &self,
+        socket: Arc<UdpSocket>,
+        src: SocketAddr,
+        first: Bytes,
+    ) -> Option<u64> {
+        let mut flows = self.udp_flows.lock().ok()?;
+        if flows.contains_key(&src) {
+            return None;
+        }
+        let mut pending_accepts = self.pending.lock().ok()?;
+        if pending_accepts.len() >= MAX_PENDING_ACCEPTS {
+            return None;
+        }
+        let token = self.next_token()?;
+        pending_accepts.insert(token, Pending::Udp { socket, src, first });
+        flows.insert(src, UdpFlowState::Pending(token));
+        Some(token)
+    }
+
+    fn promote_udp_flow(&self, src: SocketAddr, token: u64, key: &SessionKey) -> bool {
+        let Ok(mut flows) = self.udp_flows.lock() else {
+            return false;
+        };
+        let Some(state) = flows.get_mut(&src) else {
+            return false;
+        };
+        if !state.has_pending_token(token) {
+            return false;
+        }
+        *state = UdpFlowState::Opening(key.clone());
+        true
+    }
+
+    fn activate_udp_flow(&self, src: SocketAddr, key: &SessionKey) -> bool {
+        let Ok(mut flows) = self.udp_flows.lock() else {
+            return false;
+        };
+        let Some(state) = flows.get_mut(&src) else {
+            return false;
+        };
+        if !state.is_opening(key) {
+            return false;
+        }
+        *state = UdpFlowState::Active(key.clone());
+        true
+    }
+
+    fn remove_udp_flow_for_token(&self, src: SocketAddr, token: u64) {
+        if let Ok(mut flows) = self.udp_flows.lock() {
+            let remove = flows
+                .get(&src)
+                .is_some_and(|state| state.has_pending_token(token));
+            if remove {
+                flows.remove(&src);
+            }
+        }
+    }
+
+    fn remove_udp_flow_for_key(&self, src: SocketAddr, key: &SessionKey) {
+        if let Ok(mut flows) = self.udp_flows.lock() {
+            let remove = flows.get(&src).is_some_and(|state| state.belongs_to(key));
+            if remove {
+                flows.remove(&src);
+            }
+        }
     }
 
     /// Stash a pending accept under a fresh engine-local token (for the round-trip to the
@@ -380,8 +519,13 @@ impl TransportSessions {
     /// `Accepted` inject — decode reject, dispatch error — can't leak the resource.
     /// A no-op once `bind_accepted` has consumed the token.
     fn evict_pending(&self, token: u64) {
-        if let Ok(mut pending) = self.pending.lock() {
-            pending.remove(&token);
+        let removed = self
+            .pending
+            .lock()
+            .ok()
+            .and_then(|mut pending| pending.remove(&token));
+        if let Some(Pending::Udp { src, .. }) = removed {
+            self.remove_udp_flow_for_token(src, token);
         }
     }
 
@@ -419,6 +563,13 @@ impl TransportSessions {
         })
     }
 
+    fn current_generation(&self, key: &SessionKey) -> Option<u64> {
+        self.map
+            .lock()
+            .ok()
+            .and_then(|map| map.get(key).map(|handle| handle.generation))
+    }
+
     /// Imperative admission boundary for the bounded peer→local queue.
     ///
     /// Post: [`EffectEnqueue::Failed`] means this effect removed the exact generation whose
@@ -431,7 +582,8 @@ impl TransportSessions {
         match sender.try_send(outbound) {
             Ok(()) => EffectEnqueue::Enqueued,
             Err(_) => {
-                if self.finish_close_without_feedback(self.remove_if_current(key, generation)) {
+                if self.finish_close_without_feedback(key, self.remove_if_current(key, generation))
+                {
                     EffectEnqueue::Failed
                 } else {
                     EffectEnqueue::Enqueued
@@ -502,15 +654,6 @@ impl RelayTask {
             .await;
         }
     }
-
-    /// Drop a just-created session while an interpreter is still executing its effect.
-    ///
-    /// The caller returns `Untrack` as synchronous feedback, so this must not call
-    /// [`Scope::inject`] and recursively wait for the active ordered effect turn.
-    fn refuse_for_effect(self) -> bool {
-        self.sessions
-            .close_if_current_for_effect(&self.key, self.generation)
-    }
 }
 
 /// Whether *this node* opened the session (sets `Frame::from_opener` on outbound frames).
@@ -525,6 +668,16 @@ async fn open(scope: &Scope, key: &SessionKey, service: &str) -> Result<()> {
         service: service.to_string(),
     })
     .await
+}
+
+/// Compensate an `Open` that reached the transport after its local generation was removed.
+/// The send happens after `Open` admission, so the per-connection FIFO observes Open → Close.
+async fn cancel_open(scope: &Scope, key: &SessionKey) {
+    let _ = send_frame(scope, key.peer, Frame::Close {
+        session: key.session,
+        from_opener: opened_by_us(key),
+    })
+    .await;
 }
 
 /// Send a [`Frame`] to `peer` over the overlay, under the scope's own namespace.
@@ -639,5 +792,59 @@ mod tests {
                 .len(),
             MAX_PENDING_ACCEPTS
         );
+    }
+
+    #[tokio::test]
+    async fn udp_source_is_unique_and_invisible_until_open_admission() {
+        let sessions = TransportSessions::new();
+        let socket = Arc::new(
+            UdpSocket::bind("127.0.0.1:0")
+                .await
+                .expect("bind test UDP socket"),
+        );
+        let src = SocketAddr::from(([127, 0, 0, 1], 12_345));
+        let token = sessions
+            .reserve_pending_udp(Arc::clone(&socket), src, Bytes::from_static(b"first"))
+            .expect("reserve first UDP source");
+
+        assert!(sessions
+            .reserve_pending_udp(socket, src, Bytes::from_static(b"overtaking"))
+            .is_none());
+        assert_eq!(sessions.pending.lock().expect("pending table").len(), 1);
+        assert_eq!(sessions.udp_flow(&src), None);
+
+        let pending = sessions
+            .pending
+            .lock()
+            .expect("pending table")
+            .remove(&token);
+        assert!(matches!(pending, Some(Pending::Udp { .. })));
+        let key = SessionKey::new(Did::from(8_u32), "udp", SessionId(12), Initiator::Local);
+        assert!(sessions.promote_udp_flow(src, token, &key));
+        assert!(sessions.register(key.clone(), Some(src)).is_some());
+        assert_eq!(sessions.udp_flow(&src), None);
+
+        assert!(sessions.activate_udp_flow(src, &key));
+        assert_eq!(sessions.udp_flow(&src), Some(key));
+    }
+
+    #[tokio::test]
+    async fn failed_udp_accept_releases_its_source_reservation() {
+        let sessions = TransportSessions::new();
+        let socket = Arc::new(
+            UdpSocket::bind("127.0.0.1:0")
+                .await
+                .expect("bind test UDP socket"),
+        );
+        let src = SocketAddr::from(([127, 0, 0, 1], 12_346));
+        let token = sessions
+            .reserve_pending_udp(Arc::clone(&socket), src, Bytes::new())
+            .expect("reserve first UDP source");
+
+        sessions.evict_pending(token);
+
+        assert!(sessions
+            .reserve_pending_udp(socket, src, Bytes::new())
+            .is_some());
     }
 }

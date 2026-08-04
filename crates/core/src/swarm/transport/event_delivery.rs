@@ -36,6 +36,24 @@ struct SwarmEventDeliverySequence {
     state: Mutex<DeliverySequenceState>,
 }
 
+// Ordered-start state relation (TLA-style, stated beside its executable refinement):
+//
+// Variables:
+//   queue \in Seq(Turn), started \subseteq Turn, cancelled \subseteq Turn
+// Init:
+//   queue = << >> /\ started = {} /\ cancelled = {}
+// Acquire(t):
+//   queue' = Append(queue, t); t may start iff Head(queue') = t
+// FirstPoll(t):
+//   started' = started \cup {t}; queue' = Remove(queue, t); the new head is signalled
+// Cancel(t):
+//   cancelled' = cancelled \cup {t}; queue' = Remove(queue, t)
+//   if t was the head, the new head is signalled
+// Safety:
+//   for enqueue order a < b, b \in started => a \in started \cup cancelled
+//   and no application future owns the sequence capability after its first poll.
+// Progress assumes a signalled head is eventually polled or cancelled.
+
 #[derive(Default)]
 struct DeliverySequenceState {
     queue: VecDeque<Arc<DeliveryTurnNode>>,

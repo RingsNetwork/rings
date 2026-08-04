@@ -79,6 +79,17 @@ The extension package differs from the web package in several ways:
 - `content_security_policy.extension_pages` allows packaged WebAssembly with
   `wasm-unsafe-eval`.
 
+### WebView target boundary
+
+Proxied target documents are rendered with CSP `sandbox` and deliberately do not receive
+`allow-same-origin`. This keeps target script in an opaque origin even though the response URL is
+extension-owned. It also means that the target document is not controlled by the extension's
+Service Worker: page-authored `fetch` and `XMLHttpRequest` cannot reach the worker-only runtime
+gateway route. The supported production target set is static or server-rendered HTML/XHTML plus
+rewritten subresources. Supporting AJAX/SPAs requires a separate capability-authenticated host
+bridge; adding `allow-same-origin` would collapse the isolation boundary and is not an acceptable
+compatibility shortcut.
+
 WebCrypto P-256 is the primary supported account provider in the extension page.
 MetaMask and Phantom use an extension wallet bridge: the extension asks Chrome to
 inject a short-lived wallet request into the current active `http`/`https` tab's

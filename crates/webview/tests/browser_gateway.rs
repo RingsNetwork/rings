@@ -97,25 +97,36 @@ impl GatewayTransport for BrowserFixtureTransport {
     </form>
     <script>
       async function runFixture() {
-        const fetchResponse = await fetch("/api/data", {
-          headers: { "X-Rings-Webview-Kind": "fetch" }
-        });
-        const fetchJson = await fetchResponse.json();
-        document.querySelector("#fetch-result").textContent = fetchJson.message;
-
-        const baseFetchResponse = await fetch("runtime-base.json", {
-          headers: { "X-Rings-Webview-Kind": "fetch" }
-        });
-        const baseFetchJson = await baseFetchResponse.json();
-        document.querySelector("#base-fetch-result").textContent = baseFetchJson.message;
-
-        const xhr = new XMLHttpRequest();
-        xhr.open("POST", "forms/submit");
-        xhr.setRequestHeader("X-Requested-With", "XMLHttpRequest");
-        xhr.onload = () => {
-          document.querySelector("#xhr-result").textContent = xhr.responseText;
+        const expectFetchBlocked = async (input, init) => {
+          try {
+            await fetch(input, init);
+            return "unexpected success";
+          } catch (_error) {
+            return "blocked";
+          }
         };
-        xhr.send("name=value");
+        document.querySelector("#fetch-result").textContent = await expectFetchBlocked(
+          "/api/data",
+          { headers: { "X-Rings-Webview-Kind": "fetch" } },
+        );
+        document.querySelector("#base-fetch-result").textContent = await expectFetchBlocked(
+          "runtime-base.json",
+          { headers: { "X-Rings-Webview-Kind": "fetch" } },
+        );
+
+        document.querySelector("#xhr-result").textContent = await new Promise((resolve) => {
+          const xhr = new XMLHttpRequest();
+          xhr.open("POST", "forms/submit");
+          xhr.setRequestHeader("X-Requested-With", "XMLHttpRequest");
+          xhr.onload = () => resolve("unexpected success");
+          xhr.onerror = () => resolve("blocked");
+          xhr.onabort = () => resolve("blocked");
+          try {
+            xhr.send("name=value");
+          } catch (_error) {
+            resolve("blocked");
+          }
+        });
 
         const dynamicImage = document.createElement("img");
         dynamicImage.id = "dynamic-image";
@@ -271,30 +282,6 @@ impl GatewayTransport for BrowserFixtureTransport {
             | "https://example.test/assets/namespace-image.png" => {
                 response(200, "image/png", Vec::new(), ONE_PIXEL_PNG.to_vec())
             }
-            "https://example.test/api/data" => response(
-                200,
-                "application/json",
-                Vec::new(),
-                br#"{"message":"fetch ok"}"#.to_vec(),
-            ),
-            "https://example.test/assets/runtime-base.json" => response(
-                200,
-                "application/json",
-                Vec::new(),
-                br#"{"message":"base fetch ok"}"#.to_vec(),
-            ),
-            "https://example.test/assets/srcdoc-fetch.json" => response(
-                200,
-                "application/json",
-                Vec::new(),
-                br#"{"message":"srcdoc fetch ok"}"#.to_vec(),
-            ),
-            "https://example.test/assets/forms/submit" => response(
-                200,
-                "text/plain; charset=utf-8",
-                Vec::new(),
-                b"xhr ok".to_vec(),
-            ),
             "https://example.test/assets/form-result.html?q=test" => response(
                 200,
                 "text/html; charset=utf-8",
@@ -375,24 +362,6 @@ fn playwright_browser_renders_gateway_fixture_without_direct_remote_requests() -
     )?;
     assert_recorded_target(
         &requests,
-        GatewayRequestKind::Fetch,
-        "GET",
-        "https://example.test/api/data",
-    )?;
-    assert_recorded_target(
-        &requests,
-        GatewayRequestKind::Fetch,
-        "GET",
-        "https://example.test/assets/runtime-base.json",
-    )?;
-    assert_recorded_target(
-        &requests,
-        GatewayRequestKind::Xhr,
-        "POST",
-        "https://example.test/assets/forms/submit",
-    )?;
-    assert_recorded_target(
-        &requests,
         GatewayRequestKind::Navigation,
         "GET",
         "https://example.test/assets/form-result.html?q=test",
@@ -415,12 +384,19 @@ fn playwright_browser_renders_gateway_fixture_without_direct_remote_requests() -
         "GET",
         "https://example.test/assets/srcdoc-attr-image.png",
     )?;
-    assert_recorded_target(
-        &requests,
-        GatewayRequestKind::Fetch,
-        "GET",
+    for blocked_target in [
+        "https://example.test/api/data",
+        "https://example.test/assets/runtime-base.json",
+        "https://example.test/assets/forms/submit",
         "https://example.test/assets/srcdoc-fetch.json",
-    )?;
+    ] {
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.target.as_str() != blocked_target),
+            "opaque-origin dynamic request reached target transport: {blocked_target}"
+        );
+    }
     for target in [
         "https://example.test/assets/dynamic-html-image.png",
         "https://example.test/assets/dynamic-html-bg.png",
@@ -502,34 +478,24 @@ const pageUrl = {page_url:?};
   await page.goto(pageUrl, {{ waitUntil: "domcontentloaded" }});
   try {{
   await page.waitForFunction(() => {{
-    const srcdocFrame = document.querySelector("#dynamic-srcdoc");
-    const srcdocDoc = srcdocFrame?.contentDocument;
-    const srcdocAttrFrame = document.querySelector("#dynamic-srcdoc-attr");
-    const srcdocAttrDoc = srcdocAttrFrame?.contentDocument;
-    const documentWriteFrame = document.querySelector("#document-write-srcdoc");
-    const documentWriteDoc = documentWriteFrame?.contentDocument;
-    const refreshFrame = document.querySelector("#refresh-navigation-srcdoc");
-    const refreshDoc = refreshFrame?.contentDocument;
     const hasGatewayBackground = (selector) => {{
       const element = document.querySelector(selector);
       return Boolean(element && getComputedStyle(element).backgroundImage.includes("/webview/"));
     }};
-    return document.querySelector("#fetch-result")?.textContent === "fetch ok"
-      && document.querySelector("#base-fetch-result")?.textContent === "base fetch ok"
-      && document.querySelector("#xhr-result")?.textContent === "xhr ok"
+    return document.querySelector("#fetch-result")?.textContent === "blocked"
+      && document.querySelector("#base-fetch-result")?.textContent === "blocked"
+      && document.querySelector("#xhr-result")?.textContent === "blocked"
       && document.querySelector("#static-image")?.complete
       && document.querySelector("#base-image")?.complete
       && document.querySelector("#dynamic-image")?.complete
-      && srcdocDoc?.querySelector("#srcdoc-image")?.complete
-      && srcdocDoc?.body?.dataset?.srcdocFetch === "srcdoc fetch ok"
-      && !srcdocDoc?.body?.dataset?.srcdocError
-      && srcdocAttrDoc?.querySelector("#srcdoc-attr-image")?.complete
       && document.querySelector("#dynamic-html-image")?.complete
       && document.querySelector("#adjacent-html-image")?.complete
       && document.querySelector("#outer-html-image")?.complete
       && document.querySelector("#namespace-image")?.complete
-      && documentWriteDoc?.querySelector("#document-write-image")?.complete
-      && refreshDoc?.title === "refresh navigation"
+      && document.querySelector("#dynamic-srcdoc")
+      && document.querySelector("#dynamic-srcdoc-attr")
+      && document.querySelector("#document-write-srcdoc")
+      && document.querySelector("#refresh-navigation-srcdoc")
       && hasGatewayBackground("#dynamic-html-bg")
       && hasGatewayBackground("#dynamic-css-bg")
       && hasGatewayBackground("#dynamic-import-bg")
@@ -539,16 +505,9 @@ const pageUrl = {page_url:?};
   }}, null, {{ timeout: 10000 }});
   }} catch (error) {{
     const diagnostic = await page.evaluate(() => {{
-      const frameState = (selector) => {{
-        const frame = document.querySelector(selector);
-        return {{
-          url: frame?.contentWindow?.location?.href || "",
-          title: frame?.contentDocument?.title || ""
-        }};
-      }};
       return {{
         fixtureError: document.body.dataset.fixtureError || "",
-        refresh: frameState("#refresh-navigation-srcdoc"),
+        refreshFramePresent: Boolean(document.querySelector("#refresh-navigation-srcdoc")),
         namespaceImage: document.querySelector("#namespace-image")?.src || ""
       }};
     }});
@@ -587,20 +546,11 @@ const pageUrl = {page_url:?};
     const dynamicImage = document.querySelector("#dynamic-image");
     const styleBg = document.querySelector("#style-bg");
     const importedBg = document.querySelector("#imported-bg");
-    const srcdocFrame = document.querySelector("#dynamic-srcdoc");
-    const srcdocDoc = srcdocFrame?.contentDocument;
-    const srcdocImage = srcdocDoc?.querySelector("#srcdoc-image");
-    const srcdocAttrFrame = document.querySelector("#dynamic-srcdoc-attr");
-    const srcdocAttrDoc = srcdocAttrFrame?.contentDocument;
-    const srcdocAttrImage = srcdocAttrDoc?.querySelector("#srcdoc-attr-image");
-    const documentWriteFrame = document.querySelector("#document-write-srcdoc");
-    const documentWriteImage = documentWriteFrame?.contentDocument?.querySelector("#document-write-image");
     const dynamicHtmlImage = document.querySelector("#dynamic-html-image");
     const adjacentHtmlImage = document.querySelector("#adjacent-html-image");
     const outerHtmlImage = document.querySelector("#outer-html-image");
     const dynamicPing = document.querySelector("#dynamic-ping-link");
     const namespaceImage = document.querySelector("#namespace-image");
-    const refreshFrame = document.querySelector("#refresh-navigation-srcdoc");
     const overlayScript = document.querySelector("script[data-rings-webview-overlay-loader]");
     const backgroundImage = (selector) => {{
       const element = document.querySelector(selector);
@@ -629,8 +579,6 @@ const pageUrl = {page_url:?};
       adjacentHtmlImageComplete: Boolean(adjacentHtmlImage?.complete),
       outerHtmlImageSrc: outerHtmlImage?.src,
       outerHtmlImageComplete: Boolean(outerHtmlImage?.complete),
-      documentWriteImageSrc: documentWriteImage?.src,
-      documentWriteImageComplete: Boolean(documentWriteImage?.complete),
       dynamicHtmlBgImage: backgroundImage("#dynamic-html-bg"),
       dynamicCssBgImage: backgroundImage("#dynamic-css-bg"),
       dynamicImportBgImage: backgroundImage("#dynamic-import-bg"),
@@ -640,13 +588,6 @@ const pageUrl = {page_url:?};
       dynamicPingHref: dynamicPing?.href,
       dynamicPingValue: dynamicPing?.getAttribute("ping"),
       namespaceImageSrc: namespaceImage?.src,
-      refreshFrameUrl: refreshFrame?.contentWindow?.location?.href || "",
-      srcdocImageSrc: srcdocImage?.src,
-      srcdocImageComplete: Boolean(srcdocImage?.complete),
-      srcdocFetchText: srcdocDoc?.body?.dataset?.srcdocFetch || "",
-      srcdocError: srcdocDoc?.body?.dataset?.srcdocError || "",
-      srcdocAttrImageSrc: srcdocAttrImage?.src,
-      srcdocAttrImageComplete: Boolean(srcdocAttrImage?.complete),
       fixtureError: document.body.dataset.fixtureError || ""
     }};
   }});
@@ -675,12 +616,14 @@ const pageUrl = {page_url:?};
       return false;
     }}
   }});
-  const failuresWithoutFavicon = failures.filter((failure) => !failure.includes("/favicon.ico"));
+  const unexpectedFailures = failures.filter((failure) =>
+    !failure.includes("/favicon.ico") && !failure.includes("/webview-runtime/")
+  );
   if (directRemoteRequests.length > 0) {{
     throw new Error(`direct remote requests escaped gateway: ${{directRemoteRequests.join(", ")}}`);
   }}
-  if (failuresWithoutFavicon.length > 0) {{
-    throw new Error(`browser request failures: ${{failuresWithoutFavicon.join(", ")}}`);
+  if (unexpectedFailures.length > 0) {{
+    throw new Error(`browser request failures: ${{unexpectedFailures.join(", ")}}`);
   }}
   if (result.fixtureError) {{
     throw new Error(`page fixture error: ${{result.fixtureError}}`);
@@ -694,25 +637,16 @@ const pageUrl = {page_url:?};
   if (result.titleColor !== "rgb(1, 2, 3)") {{
     throw new Error(`stylesheet did not apply: ${{JSON.stringify(result)}}`);
   }}
-  if (result.fetchText !== "fetch ok" || result.xhrText !== "xhr ok") {{
-    throw new Error(`dynamic requests did not complete: ${{JSON.stringify(result)}}`);
+  if (result.fetchText !== "blocked" || result.xhrText !== "blocked") {{
+    throw new Error(`opaque document unexpectedly completed a dynamic request: ${{JSON.stringify(result)}}`);
   }}
-  if (result.baseFetchText !== "base fetch ok") {{
-    throw new Error(`base-relative fetch did not complete: ${{JSON.stringify(result)}}`);
-  }}
-  if (result.srcdocError) {{
-    throw new Error(`srcdoc fixture error: ${{result.srcdocError}} ${{JSON.stringify(result)}}`);
-  }}
-  if (result.srcdocFetchText !== "srcdoc fetch ok") {{
-    throw new Error(`srcdoc fetch did not complete: ${{JSON.stringify(result)}}`);
+  if (result.baseFetchText !== "blocked") {{
+    throw new Error(`opaque document unexpectedly completed a base-relative fetch: ${{JSON.stringify(result)}}`);
   }}
   if (!result.staticImageSrc.includes("/webview/") || !result.baseImageSrc.includes("/webview/") || !result.dynamicImageSrc.includes("/webview/")) {{
     throw new Error(`image URLs did not stay on gateway: ${{JSON.stringify(result)}}`);
   }}
-  if (!result.srcdocImageSrc.includes("/webview/") || !result.srcdocAttrImageSrc.includes("/webview/")) {{
-    throw new Error(`srcdoc image URLs did not stay on gateway: ${{JSON.stringify(result)}}`);
-  }}
-  if (!result.dynamicHtmlImageSrc.includes("/webview/") || !result.adjacentHtmlImageSrc.includes("/webview/") || !result.outerHtmlImageSrc.includes("/webview/") || !result.documentWriteImageSrc.includes("/webview/")) {{
+  if (!result.dynamicHtmlImageSrc.includes("/webview/") || !result.adjacentHtmlImageSrc.includes("/webview/") || !result.outerHtmlImageSrc.includes("/webview/")) {{
     throw new Error(`runtime HTML URLs did not stay on gateway: ${{JSON.stringify(result)}}`);
   }}
   if (!result.namespaceImageSrc.includes("/webview/")) {{
@@ -729,9 +663,6 @@ const pageUrl = {page_url:?};
   }}
   if (!result.dynamicPingHref.includes("/webview/") || !result.dynamicPingValue.includes("/webview/")) {{
     throw new Error(`dynamic ping URLs did not stay on gateway: ${{JSON.stringify(result)}}`);
-  }}
-  if (!result.refreshFrameUrl.includes("/webview/")) {{
-    throw new Error(`runtime refresh navigation did not stay on gateway: ${{JSON.stringify(result)}}`);
   }}
   }} finally {{
   await browser.close();

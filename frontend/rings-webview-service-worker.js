@@ -303,18 +303,20 @@ function controlledNavigationBody(request, status, headers, body) {
   if (!bytes) {
     return body;
   }
-  const contentType = (headers.get("content-type") || "").toLowerCase();
-  if (contentType && !contentType.includes("text/html") && !contentType.includes("application/xhtml+xml")) {
+  const mediaType = (headers.get("content-type") || "").split(";", 1)[0].trim().toLowerCase();
+  if (mediaType && mediaType !== "text/html" && mediaType !== "application/xhtml+xml") {
     return body;
   }
   const text = decodeUtf8(bytes);
-  if (!text || !looksLikeHtml(text)) {
+  const xmlDocument = mediaType === "application/xhtml+xml";
+  if (!text || !looksLikeHtml(text, xmlDocument)) {
     return body;
   }
   const injected = injectControlledNavigationScripts(
     text,
     request.topLevelNavigation !== false,
     webviewOverlayScriptPath,
+    xmlDocument,
   );
   if (injected === text) {
     return body;
@@ -355,8 +357,12 @@ function decodeUtf8(bytes) {
   }
 }
 
-function looksLikeHtml(text) {
-  return /^\uFEFF?\s*(?:<!--[\s\S]*?-->\s*)*(?:<!doctype\s+html\b|<html\b|<head\b|<body\b)/i.test(text);
+function looksLikeHtml(text, xmlDocument) {
+  const xmlDeclaration = xmlDocument ? "(?:<\\?xml[\\s\\S]*?\\?>\\s*)?" : "";
+  return new RegExp(
+    `^\\uFEFF?\\s*${xmlDeclaration}(?:<!--[\\s\\S]*?-->\\s*)*(?:<!doctype\\s+html\\b|<html\\b|<head\\b|<body\\b)`,
+    "i",
+  ).test(text);
 }
 
 function emitResourceDebug(requestId, request, startedAt, phase, message, level = "info", status = undefined) {

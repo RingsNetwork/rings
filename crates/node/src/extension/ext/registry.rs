@@ -511,12 +511,17 @@ mod tests {
     use tokio::sync::Notify;
 
     use super::*;
+    use crate::extension::protocols::relay::ControlSendTestHook;
+    use crate::extension::protocols::relay::NativeRelay;
     use crate::extension::protocols::relay::Relay;
     use crate::extension::protocols::relay::RelayCommand;
     use crate::extension::protocols::relay::RelayEffect;
     use crate::extension::protocols::relay::TCP;
+    use crate::extension::transport::engine::TransportSessions;
     use crate::extension::transport::Frame;
+    use crate::extension::transport::Initiator;
     use crate::extension::transport::SessionId;
+    use crate::extension::transport::SessionKey;
     use crate::processor::ProcessorBuilder;
     use crate::processor::ProcessorConfig;
 
@@ -847,6 +852,75 @@ mod tests {
                 .map_err(|_| Error::Lock)?,
             vec![SessionId(0)]
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_open_accepted_resource_returns_synchronous_untrack() -> Result<()> {
+        let extensions = extensions()?;
+        let effect_scope = EffectScope::new(Scope::new(extensions.core(), TCP.to_string()));
+        let interpreter = NativeRelay::new(Arc::new(TransportSessions::new()));
+        let peer: Did = SecretKey::random().address().into();
+        let key = SessionKey::new(peer, TCP, SessionId(9), Initiator::Local);
+
+        let feedback = interpreter
+            .run(&effect_scope, RelayEffect::OpenAccepted {
+                token: 77,
+                key: key.clone(),
+                service: "missing-pending-resource".to_string(),
+            })
+            .await?;
+
+        assert_eq!(feedback.len(), 1);
+        assert!(matches!(
+            bincode::deserialize::<RelayCommand<SocketAddr>>(feedback[0].as_ref()),
+            Ok(RelayCommand::Untrack {
+                peer: actual_peer,
+                session: SessionId(9),
+                initiator: Initiator::Local,
+            }) if actual_peer == peer
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn terminal_relay_control_effect_does_not_await_overlay_send() -> Result<()> {
+        let extensions = extensions()?;
+        let hook = Arc::new(ControlSendTestHook::default());
+        let interpreter = Arc::new(NativeRelay::new_with_control_send_test_hook(
+            Arc::new(TransportSessions::new()),
+            Arc::clone(&hook),
+        ));
+        let peer: Did = SecretKey::random().address().into();
+        let core = extensions.core();
+        let application = tokio::spawn(async move {
+            let effect_scope = EffectScope::new(Scope::new(core, TCP.to_string()));
+            interpreter
+                .run(&effect_scope, RelayEffect::SendClose {
+                    to: peer,
+                    session: SessionId(5),
+                    from_opener: false,
+                })
+                .await
+        });
+
+        // Await a real outbox-worker suspension before observing completion. The interpreter
+        // must already have returned; otherwise this join times out deterministically while the
+        // hook remains held.
+        tokio::time::timeout(std::time::Duration::from_secs(1), hook.wait_until_blocked())
+            .await
+            .map_err(|_| {
+                Error::ExtensionError("control outbox did not reach test gate".to_string())
+            })?;
+        let applied = tokio::time::timeout(std::time::Duration::from_secs(1), application)
+            .await
+            .map_err(|_| {
+                Error::ExtensionError("terminal control effect held the gate".to_string())
+            })?
+            .map_err(|error| Error::ExtensionError(error.to_string()))??;
+
+        assert!(applied.is_empty());
+        hook.release();
         Ok(())
     }
 }

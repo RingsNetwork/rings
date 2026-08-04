@@ -33,6 +33,14 @@ pub struct RewriteContext {
     gateway_prefix: GatewayPrefix,
     document_url: Url,
     bootstrap_script: Option<String>,
+    bootstrap_serialization: BootstrapSerialization,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum BootstrapSerialization {
+    #[default]
+    Html,
+    Xhtml,
 }
 
 impl RewriteContext {
@@ -42,12 +50,22 @@ impl RewriteContext {
             gateway_prefix,
             document_url,
             bootstrap_script: None,
+            bootstrap_serialization: BootstrapSerialization::Html,
         }
     }
 
     /// Attach a bootstrap runtime script to inject into HTML documents.
     pub fn with_bootstrap_script(mut self, script: impl Into<String>) -> Self {
         self.bootstrap_script = Some(script.into());
+        self.bootstrap_serialization = BootstrapSerialization::Html;
+        self
+    }
+
+    /// Attach a bootstrap runtime to an XHTML document without permitting a second-root
+    /// fallback. The raw script remains available to nested HTML `srcdoc` rewrites.
+    pub(crate) fn with_xhtml_bootstrap_script(mut self, script: impl Into<String>) -> Self {
+        self.bootstrap_script = Some(script.into());
+        self.bootstrap_serialization = BootstrapSerialization::Xhtml;
         self
     }
 
@@ -60,8 +78,10 @@ impl RewriteContext {
         let bootstrap = self
             .bootstrap_script
             .as_ref()
-            .map(|script| bootstrap_tag(script));
+            .map(|script| bootstrap_tag(script, self.bootstrap_serialization));
         let injected = Cell::new(bootstrap.is_none());
+        let allow_document_fallback = self.bootstrap_serialization == BootstrapSerialization::Html;
+        let inject_into_body = self.bootstrap_serialization == BootstrapSerialization::Xhtml;
         let html_state = HtmlRewriteState::new(
             &self.gateway_prefix,
             self.document_url.clone(),
@@ -74,7 +94,9 @@ impl RewriteContext {
                 rewrite_html_element(element, &html_state)?;
                 if !injected.get() {
                     if let Some(tag) = bootstrap.as_deref() {
-                        if element.tag_name().eq_ignore_ascii_case("head") {
+                        if element.tag_name().eq_ignore_ascii_case("head")
+                            || (inject_into_body && element.tag_name().eq_ignore_ascii_case("body"))
+                        {
                             element.prepend(tag, ContentType::Html);
                             injected.set(true);
                         } else if element.tag_name().eq_ignore_ascii_case("script") {
@@ -90,7 +112,7 @@ impl RewriteContext {
                 Ok(())
             }))
             .append_document_content_handler(end!(|end| {
-                if !injected.get() {
+                if allow_document_fallback && !injected.get() {
                     if let Some(tag) = bootstrap.as_deref() {
                         end.append(tag, ContentType::Html);
                         injected.set(true);
@@ -602,8 +624,15 @@ fn split_at_checked(input: &str, index: usize) -> Result<(&str, &str)> {
     Ok((before, after))
 }
 
-fn bootstrap_tag(script: &str) -> String {
-    format!("<script data-rings-webview-bootstrap>{script}</script>")
+fn bootstrap_tag(script: &str, serialization: BootstrapSerialization) -> String {
+    let source = match serialization {
+        BootstrapSerialization::Html => script.to_string(),
+        BootstrapSerialization::Xhtml => {
+            let escaped = script.replace("]]>", "]]]]><![CDATA[>");
+            format!("<![CDATA[\n{escaped}\n]]>")
+        }
+    };
+    format!("<script data-rings-webview-bootstrap>{source}</script>")
 }
 
 #[cfg(test)]

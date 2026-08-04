@@ -15,6 +15,8 @@ use crate::types::GatewayRequestKind;
 use crate::url::TargetUrl;
 use crate::WebviewError;
 
+mod xhtml;
+
 struct StaticTransport;
 
 #[async_trait(?Send)]
@@ -148,7 +150,7 @@ impl GatewayTransport for DocumentTransport {
 }
 
 #[test]
-fn active_navigation_documents_are_rewritten_independent_of_media_type_claim() -> Result<()> {
+fn declared_active_and_undeclared_active_navigation_documents_are_rewritten() -> Result<()> {
     let target = TargetUrl::parse("https://example.com/index")?.into_url();
     for (content_type, body) in [
         (
@@ -162,10 +164,6 @@ fn active_navigation_documents_are_rewritten_independent_of_media_type_claim() -
         (
             None,
             br#"<!-- prefix --><html><img src="/missing.png"></html>"#.as_slice(),
-        ),
-        (
-            Some("image/png"),
-            br#"<html><img src="/mismatched.png"></html>"#.as_slice(),
         ),
     ] {
         let mut gateway =
@@ -182,6 +180,34 @@ fn active_navigation_documents_are_rewritten_independent_of_media_type_claim() -
                 .map_err(|error| WebviewError::transport(error.to_string()))?
                 .contains("/webview/"),
             "active document was not rewritten for {content_type:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn declared_inert_navigation_bodies_are_not_activated_by_markup_bytes() -> Result<()> {
+    let target = TargetUrl::parse("https://example.com/index")?.into_url();
+    for content_type in [
+        "text/plain",
+        "text/xml",
+        "application/xml",
+        "application/problem+json",
+        "image/png",
+    ] {
+        let body = br#"<html><script>globalThis.activated = true</script></html>"#.to_vec();
+        let mut gateway =
+            WebviewGateway::new(GatewayPrefix::new("/webview/")?, DocumentTransport {
+                content_type: Some(content_type),
+                body: body.clone(),
+            });
+
+        let response =
+            futures::executor::block_on(gateway.send(GatewayRequest::navigation(target.clone())))?;
+
+        assert_eq!(
+            response.body, body,
+            "declared {content_type} must stay inert"
         );
     }
     Ok(())

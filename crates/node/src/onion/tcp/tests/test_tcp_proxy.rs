@@ -42,6 +42,20 @@ fn runtime() -> OnionTcpRuntime {
     OnionTcpRuntime::new(session(), None)
 }
 
+#[test]
+fn exit_target_admission_returns_the_canonical_parsed_target() -> Result<()> {
+    let policy =
+        OnionExitPolicy::from_target_strings(vec!["example.com:443".to_string()], Vec::new())?;
+
+    let target = admit_exit_target(&policy, " Example.COM.:443 ")
+        .map_err(|failure| Error::InvalidConfig(format!("unexpected rejection: {failure:?}")))?;
+
+    assert_eq!(target.host(), "example.com");
+    assert_eq!(target.port(), 443);
+    assert_eq!(target.authority(), "example.com:443");
+    Ok(())
+}
+
 fn dummy_authenticated_payload(
     return_id: OnionReturnId,
     session: &SessionSk,

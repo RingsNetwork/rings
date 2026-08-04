@@ -17,13 +17,13 @@
 //! emit an effect only for a session in `sessions` (the engine never adjudicates liveness).
 //!
 //! ```text
-//!   S = (services : Name ⇀ T,  sessions : ℘ SessionKey,  next : ℕ)
+//!   S = (services : Name ⇀ T, sessions : ℘ SessionKey, next : ℕ)
 //!   k = (from, namespace, session, init)        init = Remote if from_opener else Local
 //!   step (Command(Register n t))                ↦ (S[services∪{n↦t}], ε)
 //!   step (Command(Accepted tok peer svc))       ↦ (S[sessions∪{kₗ}, next+1], [OpenAccepted tok kₗ svc])
 //!                                                   where kₗ=(peer,ns,next,Local)   ← core mints the id
 //!   step (Command(Untrack k))                   ↦ (S[sessions∖{k}], ε)
-//!   step (Frame(from, Open s n)) | k∈sessions   ↦ (S, ε)                            (duplicate)
+//!   step (Frame(from, Open s n)) | k∈sessions   ↦ (S, ε)                  (live duplicate)
 //!                                | n∈services    ↦ (S∪{k}, [Connect k t kind])
 //!                                | otherwise     ↦ (S, [SendClose s])
 //!   step (Frame(from, Data s b)) | k∈sessions∖shutdown ↦ (S, [Write k b]) else (S, ε)
@@ -44,7 +44,9 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::extension::ext::Ctx;
+#[cfg(any(feature = "node", all(feature = "browser", target_family = "wasm")))]
 use crate::extension::ext::EffectScope;
+#[cfg(any(feature = "node", all(feature = "browser", target_family = "wasm")))]
 use crate::extension::ext::Interpret;
 use crate::extension::ext::MaybeSend;
 use crate::extension::ext::Protocol;
@@ -59,6 +61,17 @@ use crate::extension::transport::SessionId;
 use crate::extension::transport::SessionKey;
 use crate::extension::transport::TransportKind;
 
+#[cfg(any(feature = "node", all(feature = "browser", target_family = "wasm")))]
+mod control_outbox;
+#[cfg(any(feature = "node", all(feature = "browser", target_family = "wasm")))]
+use self::control_outbox::ControlOutbox;
+#[cfg(all(
+    test,
+    feature = "node",
+    not(all(feature = "browser", target_family = "wasm"))
+))]
+pub(crate) use self::control_outbox::ControlSendTestHook;
+
 /// Namespace for the TCP relay.
 pub const TCP: &str = "tcp";
 /// Namespace for the UDP relay.
@@ -69,7 +82,6 @@ pub const UDP: &str = "udp";
 pub(crate) const MAX_RELAY_SESSIONS: usize = 1_024;
 /// A single authenticated peer cannot consume the entire relay-session budget.
 pub(crate) const MAX_RELAY_SESSIONS_PER_PEER: usize = 64;
-
 /// A local control command, re-injected by the provider (provenance = self; never sent by
 /// peers). Generic over the service target `T`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -193,18 +205,26 @@ pub enum RelayEffect<T> {
     },
 }
 
-/// Relay state: the service registry and the set of open (server-side, remote-opened)
-/// sessions. The live OS/WebTransport resources are the interpreter's engine table; this is
-/// the protocol's view used for owner-rejection and duplicate-`Open` rejection.
+/// Relay state: the service registry and the set of live sessions in both directions. The live
+/// OS/WebTransport resources are the interpreter's engine table; this is the protocol's view
+/// used for admission, ownership checks, and duplicate-`Open` rejection.
 #[derive(Clone)]
 pub struct RelayState<T> {
     services: Arc<HashMap<String, T>>,
-    sessions: HashSet<SessionKey>,
+    /// Persistent live-session index. Cloning a pure state for a data-frame transition is O(1);
+    /// session lifecycle steps copy on write.
+    sessions: Arc<HashSet<SessionKey>>,
+    /// Exact cached cardinality of `sessions` projected by authenticated peer.
+    ///
+    /// Invariant: `session_counts[p] = |{ k \in sessions : k.peer = p }|`; zero entries are
+    /// absent. Keeping the projection in the pure state makes admission O(1) without giving the
+    /// interpreter a second source of truth.
+    session_counts: Arc<HashMap<Did, usize>>,
     /// TCP sessions whose peer-to-local direction consumed its affine FIN.
     ///
     /// Invariant: `peer_shutdown` is a subset of `sessions`. The reverse direction remains live
     /// until `Close`, but no later peer `Data` can escape the pure reducer into a backend writer.
-    peer_shutdown: HashSet<SessionKey>,
+    peer_shutdown: Arc<HashSet<SessionKey>>,
     /// Monotonic allocator for client-side session ids. Lives in the **pure** state so the
     /// core (not the engine) mints session identities — `Event → step → Effect` is the sole
     /// authority for both the session set and its ids.
@@ -215,8 +235,9 @@ impl<T> Default for RelayState<T> {
     fn default() -> Self {
         Self {
             services: Arc::new(HashMap::new()),
-            sessions: HashSet::new(),
-            peer_shutdown: HashSet::new(),
+            sessions: Arc::new(HashSet::new()),
+            session_counts: Arc::new(HashMap::new()),
+            peer_shutdown: Arc::new(HashSet::new()),
             next_session: 0,
         }
     }
@@ -225,23 +246,31 @@ impl<T> Default for RelayState<T> {
 impl<T> RelayState<T> {
     fn can_admit_session(&self, key: &SessionKey) -> bool {
         self.sessions.len() < MAX_RELAY_SESSIONS
-            && self
-                .sessions
-                .iter()
-                .filter(|session| session.peer == key.peer)
-                .take(MAX_RELAY_SESSIONS_PER_PEER)
-                .count()
+            && self.session_counts.get(&key.peer).copied().unwrap_or(0)
                 < MAX_RELAY_SESSIONS_PER_PEER
     }
 
-    fn insert_session(&mut self, key: SessionKey) {
-        self.peer_shutdown.remove(&key);
-        self.sessions.insert(key);
+    fn insert_session(&mut self, key: SessionKey) -> bool {
+        if self.sessions.contains(&key) {
+            return false;
+        }
+        Arc::make_mut(&mut self.peer_shutdown).remove(&key);
+        if !increment_peer_count(Arc::make_mut(&mut self.session_counts), key.peer) {
+            return false;
+        }
+        Arc::make_mut(&mut self.sessions).insert(key)
     }
 
     fn remove_session(&mut self, key: &SessionKey) -> bool {
-        self.peer_shutdown.remove(key);
-        self.sessions.remove(key)
+        if !self.sessions.contains(key) {
+            return false;
+        }
+        Arc::make_mut(&mut self.peer_shutdown).remove(key);
+        let removed = Arc::make_mut(&mut self.sessions).remove(key);
+        if removed {
+            decrement_peer_count(Arc::make_mut(&mut self.session_counts), key.peer);
+        }
+        removed
     }
 
     fn peer_can_send(&self, key: &SessionKey) -> bool {
@@ -252,7 +281,39 @@ impl<T> RelayState<T> {
     fn shutdown_peer(&mut self, key: &SessionKey, kind: TransportKind) -> bool {
         kind == TransportKind::Tcp
             && self.sessions.contains(key)
-            && self.peer_shutdown.insert(key.clone())
+            && !self.peer_shutdown.contains(key)
+            && Arc::make_mut(&mut self.peer_shutdown).insert(key.clone())
+    }
+}
+
+fn increment_peer_count(counts: &mut HashMap<Did, usize>, peer: Did) -> bool {
+    let count = counts.entry(peer).or_default();
+    let Some(next) = count.checked_add(1) else {
+        debug_assert!(false, "count projection overflow for peer {peer}");
+        return false;
+    };
+    *count = next;
+    true
+}
+
+fn decrement_peer_count(counts: &mut HashMap<Did, usize>, peer: Did) {
+    let remove = match counts.get_mut(&peer) {
+        Some(count) if *count > 1 => {
+            *count -= 1;
+            false
+        }
+        Some(1) => true,
+        Some(_) => {
+            debug_assert!(false, "count projection is zero for peer {peer}");
+            false
+        }
+        None => {
+            debug_assert!(false, "count projection missing peer {peer}");
+            false
+        }
+    };
+    if remove {
+        counts.remove(&peer);
     }
 }
 
@@ -298,8 +359,9 @@ where T: Clone + DeserializeOwned + Serialize + MaybeSend + 'static
     fn init(&self) -> RelayState<T> {
         RelayState {
             services: Arc::new(self.config.clone()),
-            sessions: HashSet::new(),
-            peer_shutdown: HashSet::new(),
+            sessions: Arc::new(HashSet::new()),
+            session_counts: Arc::new(HashMap::new()),
+            peer_shutdown: Arc::new(HashSet::new()),
             next_session: 0,
         }
     }
@@ -371,7 +433,9 @@ fn step_command<T: Clone>(
             };
             next.next_session = next_session;
             // A locally-accepted tunnel: we are the initiator.
-            next.insert_session(key.clone());
+            if !next.insert_session(key.clone()) {
+                return Transition::with(next, vec![RelayEffect::RejectAccepted { token }]);
+            }
             Transition::with(next, vec![RelayEffect::OpenAccepted {
                 token,
                 key,
@@ -417,7 +481,9 @@ fn step_frame<T: Clone>(
         // `Open` is always sent by the opener, so from our side the peer is the initiator.
         Frame::Open { session, service } => {
             let key = SessionKey::new(from, namespace, session, Initiator::Remote);
-            // Reject a duplicate/retried Open for a session this peer already holds open.
+            // A duplicate for a live session is silent. Rejected opens are not retained in pure
+            // state: the bounded interpreter outbox owns control-plane resource admission, so a
+            // historical failure cannot permanently consume protocol capacity.
             if state.sessions.contains(&key) {
                 return Transition::pure(state.clone());
             }
@@ -425,13 +491,15 @@ fn step_frame<T: Clone>(
                 Some(target) => {
                     let mut next = state.clone();
                     if !next.can_admit_session(&key) {
-                        return rejected_open(next, from, session);
+                        return rejected_open(next, key);
                     }
                     let target = target.clone();
-                    next.insert_session(key.clone());
+                    if !next.insert_session(key.clone()) {
+                        return rejected_open(next, key);
+                    }
                     Transition::with(next, vec![RelayEffect::Connect { key, target, kind }])
                 }
-                None => rejected_open(state.clone(), from, session),
+                None => rejected_open(state.clone(), key),
             }
         }
         // Data/Shutdown/Close are guarded on the authoritative session set: the *reducer*
@@ -477,15 +545,14 @@ fn step_frame<T: Clone>(
     }
 }
 
-/// Reject a peer-opened session without allocating reducer or interpreter state.
+/// Reject a peer-opened session without allocating live-session or interpreter state.
 fn rejected_open<T>(
     state: RelayState<T>,
-    peer: Did,
-    session: SessionId,
+    key: SessionKey,
 ) -> Transition<RelayState<T>, RelayEffect<T>> {
     Transition::with(state, vec![RelayEffect::SendClose {
-        to: peer,
-        session,
+        to: key.peer,
+        session: key.session,
         // The peer opened it; this endpoint did not.
         from_opener: false,
     }])
@@ -518,13 +585,28 @@ pub(crate) fn close_frame(session: SessionId, from_opener: bool) -> Bytes {
 #[cfg(feature = "node")]
 pub(crate) struct NativeRelay {
     engine: Arc<crate::extension::transport::engine::TransportSessions>,
+    control_outbox: ControlOutbox,
 }
 
 #[cfg(feature = "node")]
 impl NativeRelay {
     /// Build over a shared engine.
     pub(crate) fn new(engine: Arc<crate::extension::transport::engine::TransportSessions>) -> Self {
-        Self { engine }
+        Self {
+            engine,
+            control_outbox: ControlOutbox::default(),
+        }
+    }
+
+    #[cfg(all(test, not(all(feature = "browser", target_family = "wasm"))))]
+    pub(crate) fn new_with_control_send_test_hook(
+        engine: Arc<crate::extension::transport::engine::TransportSessions>,
+        hook: Arc<ControlSendTestHook>,
+    ) -> Self {
+        Self {
+            engine,
+            control_outbox: ControlOutbox::with_test_hook(hook),
+        }
     }
 }
 
@@ -540,11 +622,10 @@ impl Interpret for NativeRelay {
     ) -> crate::error::Result<Vec<Bytes>> {
         match effect {
             RelayEffect::Connect { key, target, kind } => {
-                let admission = self
-                    .engine
-                    .clone()
-                    .connect(scope.lifecycle(), key.clone(), target, kind)
-                    .await;
+                let admission =
+                    self.engine
+                        .clone()
+                        .connect(scope.lifecycle(), key.clone(), target, kind);
                 return enqueue_feedback::<std::net::SocketAddr>(key, admission);
             }
             RelayEffect::Write { key, bytes } => {
@@ -563,18 +644,21 @@ impl Interpret for NativeRelay {
                 session,
                 from_opener,
             } => {
-                scope.send(to, close_frame(session, from_opener)).await?;
+                self.control_outbox.enqueue(
+                    scope.lifecycle(),
+                    to,
+                    close_frame(session, from_opener),
+                )?;
             }
             RelayEffect::OpenAccepted {
                 token,
                 key,
                 service,
             } => {
-                let feedback = self
-                    .engine
-                    .clone()
-                    .bind_accepted(scope.lifecycle(), token, key, service)
-                    .await;
+                let feedback =
+                    self.engine
+                        .clone()
+                        .bind_accepted(scope.lifecycle(), token, key, service);
                 return feedback
                     .map(untrack_feedback::<std::net::SocketAddr>)
                     .transpose()
@@ -631,13 +715,17 @@ fn enqueue_feedback<T: Serialize>(
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 pub(crate) struct WtRelay {
     engine: Arc<crate::extension::transport::wt::WtSessions>,
+    control_outbox: ControlOutbox,
 }
 
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 impl WtRelay {
     /// Build over a shared WebTransport engine.
     pub(crate) fn new(engine: Arc<crate::extension::transport::wt::WtSessions>) -> Self {
-        Self { engine }
+        Self {
+            engine,
+            control_outbox: ControlOutbox::default(),
+        }
     }
 }
 
@@ -675,7 +763,11 @@ impl Interpret for WtRelay {
                 session,
                 from_opener,
             } => {
-                scope.send(to, close_frame(session, from_opener)).await?;
+                self.control_outbox.enqueue(
+                    scope.lifecycle(),
+                    to,
+                    close_frame(session, from_opener),
+                )?;
             }
             // The browser relay is server-side only (no local listener), so it never reports
             // an `Accepted` and thus never receives `OpenAccepted`.
@@ -813,12 +905,10 @@ where T: Serialize {
     scope.inject(Bytes::from(payload)).await
 }
 
-/// Client-facing handle to the browser relay extension's live WebTransport engine: register
-/// local WebTransport-backed services. The browser relay is server-side only (no local
-/// listener), so it has no tunnel-open surface. Cloneable. See the native [`RelayHandle`].
-/// Holds the two per-namespace scoped capabilities (`tcp` / `udp`). The browser relay is
-/// server-side only (no local listener), so this handle just registers services. See the
-/// native [`RelayHandle`].
+/// Client-facing handle to the browser relay extension's live WebTransport engine. It owns the
+/// two per-namespace scoped capabilities (`tcp` / `udp`) and registers services, but exposes no
+/// tunnel-open surface because the browser relay is server-side only. Cloneable; see the native
+/// [`RelayHandle`].
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 #[derive(Clone)]
 pub struct RelayHandle {

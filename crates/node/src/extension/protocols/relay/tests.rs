@@ -151,7 +151,7 @@ fn duplicate_open_for_a_live_session_is_rejected() {
 }
 
 #[test]
-fn open_unknown_service_closes_and_records_nothing() {
+fn open_unknown_service_emits_a_retryable_terminal_response() {
     let relay = web_relay();
     let t = step_frame(&relay, &relay.init(), peer_a(), &open(7, "ssh"));
     match t.effects.as_slice() {
@@ -167,6 +167,12 @@ fn open_unknown_service_closes_and_records_nothing() {
         other => panic!("expected one SendClose, got {other:?}"),
     }
     assert!(t.state.sessions.is_empty());
+
+    let duplicate = step_frame(&relay, &t.state, peer_a(), &open(7, "ssh"));
+    assert!(matches!(duplicate.effects.as_slice(), [
+        RelayEffect::SendClose { .. }
+    ]));
+    assert!(duplicate.state.sessions.is_empty());
 }
 
 #[test]
@@ -174,7 +180,7 @@ fn per_peer_session_budget_rejects_only_the_saturated_peer() {
     let relay = web_relay();
     let mut state = relay.init();
     for session in 0..MAX_RELAY_SESSIONS_PER_PEER as u64 {
-        state.insert_session(rkey(peer_a(), session));
+        assert!(state.insert_session(rkey(peer_a(), session)));
     }
 
     let rejected = step_frame(
@@ -202,7 +208,7 @@ fn global_session_budget_rejects_without_allocating_state() {
     for index in 0..MAX_RELAY_SESSIONS {
         let peer = Did::from(10_u32 + (index / MAX_RELAY_SESSIONS_PER_PEER) as u32);
         let session = (index % MAX_RELAY_SESSIONS_PER_PEER) as u64;
-        state.insert_session(rkey(peer, session));
+        assert!(state.insert_session(rkey(peer, session)));
     }
     assert_eq!(state.sessions.len(), MAX_RELAY_SESSIONS);
 
@@ -226,6 +232,18 @@ fn data_writes_to_a_live_keyed_session() {
         }
         other => panic!("expected one Write, got {other:?}"),
     }
+    assert!(std::sync::Arc::ptr_eq(
+        &opened.state.sessions,
+        &t.state.sessions
+    ));
+    assert!(std::sync::Arc::ptr_eq(
+        &opened.state.session_counts,
+        &t.state.session_counts
+    ));
+    assert!(std::sync::Arc::ptr_eq(
+        &opened.state.peer_shutdown,
+        &t.state.peer_shutdown
+    ));
 }
 
 #[test]
@@ -471,7 +489,7 @@ fn lifecycle_property_state_never_diverges_from_model() {
             0 => {
                 let t = step_frame(&relay, &state, peer, &open(session, "web"));
                 if model.contains(&key) {
-                    assert!(t.effects.is_empty(), "duplicate Open must emit nothing");
+                    assert!(t.effects.is_empty(), "live Open must emit nothing");
                 } else {
                     assert!(matches!(t.effects.as_slice(), [
                         RelayEffect::Connect { .. }
@@ -522,9 +540,15 @@ fn lifecycle_property_state_never_diverges_from_model() {
         };
         state = transition.state;
         assert_eq!(
-            state.sessions, model,
+            state.sessions.as_ref(),
+            &model,
             "State.sessions diverged from the model"
         );
+        let projected_session_counts = model.iter().fold(HashMap::new(), |mut counts, key| {
+            *counts.entry(key.peer).or_insert(0) += 1;
+            counts
+        });
+        assert_eq!(state.session_counts.as_ref(), &projected_session_counts);
     }
 }
 
@@ -629,7 +653,7 @@ fn accepted_session_obeys_the_same_per_peer_budget() {
     let relay = web_relay();
     let mut state = relay.init();
     for session in 0..MAX_RELAY_SESSIONS_PER_PEER as u64 {
-        state.insert_session(rkey(peer_a(), session));
+        assert!(state.insert_session(rkey(peer_a(), session)));
     }
 
     let transition = step_command(&relay, &state, &RelayCommand::Accepted {
@@ -744,7 +768,8 @@ fn engine_model_stays_consistent_with_step_under_interleaving() {
         // The pure session set and the engine's live keys must agree at every step.
         let live: HashSet<SessionKey> = eng.map.keys().cloned().collect();
         assert_eq!(
-            state.sessions, live,
+            state.sessions.as_ref(),
+            &live,
             "pure state diverged from the engine model"
         );
     }
