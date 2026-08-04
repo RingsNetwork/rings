@@ -366,6 +366,12 @@ pub enum WebviewError {
         /// Upstream response media type that requires rewriting.
         content_type: String,
     },
+    /// Nested `srcdoc` rewriting reached the explicit recursion bound.
+    #[error("nested srcdoc depth exceeds limit {max_depth}")]
+    SrcdocNestingLimit {
+        /// Maximum nested `srcdoc` documents accepted by the rewriter.
+        max_depth: u8,
+    },
     /// A top-level response has no media type that the gateway can safely rewrite or pass through.
     #[error("unsafe navigation response media type {content_type:?}")]
     UnsafeNavigationMediaType {

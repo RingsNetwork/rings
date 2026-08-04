@@ -13,6 +13,8 @@ use std::sync::Mutex;
 use bytes::Bytes;
 use rings_core::dht::Did;
 
+use crate::error::OnionQueueAdmissionReason;
+use crate::error::OnionQueueKind;
 use crate::extension::ext::Scope;
 use crate::extension::transport::platform::spawn_detached;
 
@@ -137,38 +139,21 @@ struct ControlBudget {
     by_peer: HashMap<Did, usize>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ControlAdmissionError {
-    GlobalFull,
-    PeerFull,
-    CounterOverflow,
-}
-
-impl ControlAdmissionError {
-    const fn reason(self) -> &'static str {
-        match self {
-            Self::GlobalFull => "global control-send budget is full",
-            Self::PeerFull => "per-peer control-send budget is full",
-            Self::CounterOverflow => "control-send counter overflowed",
-        }
-    }
-}
-
 impl ControlBudget {
-    fn reserve(&mut self, peer: Did) -> Result<(), ControlAdmissionError> {
+    fn reserve(&mut self, peer: Did) -> Result<(), OnionQueueAdmissionReason> {
         let peer_pending = self.by_peer.get(&peer).copied().unwrap_or_default();
         let next_peer = peer_pending
             .checked_add(1)
-            .ok_or(ControlAdmissionError::CounterOverflow)?;
+            .ok_or(OnionQueueAdmissionReason::CounterOverflow)?;
         let next_pending = self
             .pending
             .checked_add(1)
-            .ok_or(ControlAdmissionError::CounterOverflow)?;
+            .ok_or(OnionQueueAdmissionReason::CounterOverflow)?;
         if next_pending > MAX_PENDING_RELAY_CONTROL_SENDS {
-            return Err(ControlAdmissionError::GlobalFull);
+            return Err(OnionQueueAdmissionReason::GlobalFull);
         }
         if next_peer > MAX_PENDING_RELAY_CONTROL_SENDS_PER_PEER {
-            return Err(ControlAdmissionError::PeerFull);
+            return Err(OnionQueueAdmissionReason::PeerFull);
         }
         self.pending = next_pending;
         self.by_peer.insert(peer, next_peer);
@@ -204,7 +189,7 @@ impl ControlPermit {
     fn acquire(budget: Arc<Mutex<ControlBudget>>, peer: Did) -> crate::error::Result<Self> {
         lock_state(budget.as_ref())?
             .reserve(peer)
-            .map_err(|error| capacity_error(peer, error.reason()))?;
+            .map_err(|reason| capacity_error(peer, reason))?;
         Ok(Self { budget, peer })
     }
 }
@@ -259,15 +244,15 @@ impl ControlOutbox {
 }
 
 fn lock_state<T>(slot: &Mutex<T>) -> crate::error::Result<std::sync::MutexGuard<'_, T>> {
-    slot.lock().map_err(|_| {
-        crate::error::Error::ExtensionError("relay control outbox lock is poisoned".to_string())
-    })
+    slot.lock().map_err(|_| crate::error::Error::Lock)
 }
 
-fn capacity_error(peer: Did, reason: &str) -> crate::error::Error {
-    crate::error::Error::ExtensionError(format!(
-        "relay terminal control outbox rejected frame for {peer}: {reason}"
-    ))
+fn capacity_error(peer: Did, reason: OnionQueueAdmissionReason) -> crate::error::Error {
+    crate::error::Error::OnionQueueAdmission {
+        queue: OnionQueueKind::RelayControl,
+        peer,
+        reason,
+    }
 }
 
 #[cfg(test)]
@@ -282,11 +267,11 @@ mod tests {
         for _ in 0..MAX_PENDING_RELAY_CONTROL_SENDS_PER_PEER {
             budget
                 .reserve(busy_peer)
-                .map_err(|error| capacity_error(busy_peer, error.reason()))?;
+                .map_err(|reason| capacity_error(busy_peer, reason))?;
         }
         assert_eq!(
             budget.reserve(busy_peer),
-            Err(ControlAdmissionError::PeerFull)
+            Err(OnionQueueAdmissionReason::PeerFull)
         );
         assert_eq!(budget.reserve(other_peer), Ok(()));
         assert!(budget.release(other_peer));
@@ -306,7 +291,7 @@ mod tests {
         let recovering_peer = Did::from(100_u32);
         assert_eq!(
             budget.reserve(recovering_peer),
-            Err(ControlAdmissionError::GlobalFull)
+            Err(OnionQueueAdmissionReason::GlobalFull)
         );
         assert!(budget.release(Did::from(1_u32)));
         assert_eq!(budget.reserve(recovering_peer), Ok(()));

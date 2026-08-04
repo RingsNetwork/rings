@@ -1,4 +1,7 @@
+use rings_core::ecc::PublicKey;
+
 use super::*;
+use crate::onion::circuit::OnionBackwardPath;
 
 struct ClientReturnPath {
     scope: Scope,
@@ -54,6 +57,7 @@ pub(super) struct TcpBackwardRoute<'route> {
     pub(super) service: &'route OnionServiceName,
     pub(super) circuit_id: OnionCircuitId,
     pub(super) return_peer: Did,
+    pub(super) return_session_public_key: PublicKey<33>,
     pub(super) client: OnionClientReturn,
 }
 
@@ -66,9 +70,12 @@ impl TcpBackwardRoute<'_> {
         send_backward(
             self.scope,
             self.signer,
-            self.circuit_id,
-            self.return_peer,
-            self.client,
+            OnionBackwardPath::new(
+                self.circuit_id,
+                self.return_peer,
+                self.return_session_public_key,
+                self.client,
+            ),
             sequence,
             encode_tcp_payload(self.service, payload)?,
         )

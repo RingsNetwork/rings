@@ -164,6 +164,7 @@ pub(crate) type OnionForwardReplayCache = OnionReplayCache<OnionForwardReplayKey
 struct OnionForwardReplayPartition {
     cache: OnionForwardReplayCache,
     expires_at_ms: u128,
+    last_activity_ms: u128,
 }
 
 impl OnionForwardReplayPartition {
@@ -173,6 +174,7 @@ impl OnionForwardReplayPartition {
             self.expires_at_ms = self
                 .expires_at_ms
                 .max(now_ms.saturating_add(self.cache.ttl_ms));
+            self.last_activity_ms = now_ms;
         }
         admission
     }
@@ -207,8 +209,9 @@ struct ReplayOwner {
 /// `max_entries_per_peer` entries, so total replay memory is bounded by their product. A busy
 /// authenticated peer can exhaust only its own entry budget. `owners` is the global uniqueness
 /// witness: one live `(circuit_id, nonce)` belongs to exactly one peer partition, so changing the
-/// immediate relay cannot replay an exit effect. Expired peer metadata is scanned only when
-/// admitting a new peer at the global partition bound.
+/// immediate relay cannot replay an exit effect. At the peer-partition bound the least-recently
+/// active partition is evicted, but its live owner witnesses remain until expiry; rotating cheap
+/// identities therefore cannot exclude a new honest peer or make an evicted nonce replayable.
 pub(crate) struct OnionForwardReplayPartitions {
     peers: HashMap<Did, OnionForwardReplayPartition>,
     owners: HashMap<OnionForwardReplayKey, ReplayOwner>,
@@ -251,18 +254,26 @@ impl OnionForwardReplayPartitions {
         if self.max_peers == 0 || self.max_entries_per_peer == 0 {
             return ReplayAdmission::Full;
         }
+        self.purge_expired_owners(now_ms);
         self.purge_peer(peer, now_ms);
         if let Some(owner) = self.owners.get(&key).copied() {
             if owner.expires_at_ms > now_ms {
                 return ReplayAdmission::Duplicate;
             }
+            self.owners.remove(&key);
             self.purge_peer(owner.peer, now_ms);
+        }
+        // Admission rejection is atomic: a full owner-witness budget must not evict a live peer
+        // partition when no successor state can be committed.
+        let max_owner_entries = self.max_peers.saturating_mul(self.max_entries_per_peer);
+        if self.owners.len() >= max_owner_entries {
+            return ReplayAdmission::Full;
         }
         if !self.peers.contains_key(&peer) && self.peers.len() >= self.max_peers {
             self.purge_expired_peers(now_ms);
         }
         if !self.peers.contains_key(&peer) && self.peers.len() >= self.max_peers {
-            return ReplayAdmission::Full;
+            self.evict_least_recently_active_peer();
         }
         let partition = self
             .peers
@@ -270,6 +281,7 @@ impl OnionForwardReplayPartitions {
             .or_insert_with(|| OnionForwardReplayPartition {
                 cache: OnionReplayCache::with_limits(self.max_entries_per_peer, self.ttl_ms),
                 expires_at_ms: 0,
+                last_activity_ms: now_ms,
             });
         let admission = partition.consume(key, now_ms);
         if admission == ReplayAdmission::Consumed {
@@ -312,6 +324,21 @@ impl OnionForwardReplayPartitions {
             .collect::<Vec<_>>();
         for peer in expired_peers {
             self.purge_peer(peer, now_ms);
+        }
+    }
+
+    fn purge_expired_owners(&mut self, now_ms: u128) {
+        self.owners.retain(|_, owner| owner.expires_at_ms > now_ms);
+    }
+
+    fn evict_least_recently_active_peer(&mut self) {
+        let oldest = self
+            .peers
+            .iter()
+            .min_by_key(|(peer, partition)| (partition.last_activity_ms, **peer))
+            .map(|(peer, _)| *peer);
+        if let Some(peer) = oldest {
+            self.peers.remove(&peer);
         }
     }
 }
@@ -359,20 +386,26 @@ mod tests {
     }
 
     #[test]
-    fn replay_partitions_bound_total_peer_metadata() {
+    fn replay_partitions_evict_lru_peer_without_reopening_consumed_nonce() {
         let mut partitions = OnionForwardReplayPartitions::with_limits(1, 2, 10);
         let first_peer = peer();
         let second_peer = peer();
+        let first_key = forward_key(1);
 
         assert_eq!(
-            partitions.consume(first_peer, forward_key(1), 0),
+            partitions.consume(first_peer, first_key, 0),
             ReplayAdmission::Consumed
         );
         assert_eq!(
             partitions.consume(second_peer, forward_key(2), 1),
-            ReplayAdmission::Full
+            ReplayAdmission::Consumed
         );
         assert_eq!(partitions.peers.len(), 1);
+        assert!(partitions.peers.contains_key(&second_peer));
+        assert_eq!(
+            partitions.consume(first_peer, first_key, 2),
+            ReplayAdmission::Duplicate
+        );
     }
 
     #[test]
@@ -443,6 +476,29 @@ mod tests {
             assert!(partitions.peers.is_empty());
             assert!(partitions.owners.is_empty());
         }
+    }
+
+    #[test]
+    fn live_owner_witnesses_bound_identity_rotation_memory() {
+        let mut partitions = OnionForwardReplayPartitions::with_limits(1, 2, 10);
+        let first_peer = peer();
+        let second_peer = peer();
+        let third_peer = peer();
+
+        assert_eq!(
+            partitions.consume(first_peer, forward_key(1), 0),
+            ReplayAdmission::Consumed
+        );
+        assert_eq!(
+            partitions.consume(second_peer, forward_key(2), 1),
+            ReplayAdmission::Consumed
+        );
+        assert_eq!(
+            partitions.consume(third_peer, forward_key(3), 2),
+            ReplayAdmission::Full
+        );
+        assert_eq!(partitions.owners.len(), 2);
+        assert_eq!(partitions.peers.len(), 1);
     }
 
     #[test]

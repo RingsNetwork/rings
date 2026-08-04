@@ -9,17 +9,22 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use bytes::Bytes;
 use rings_core::dht::Did;
 
 use crate::error::Error;
+use crate::error::OnionQueueAdmissionReason;
+use crate::error::OnionQueueKind;
 use crate::error::Result;
 use crate::extension::ext::Scope;
 use crate::extension::transport::platform::spawn_detached;
 
 const MAX_PENDING_ONION_SENDS: usize = 1_024;
 const MAX_PENDING_ONION_SENDS_PER_PEER: usize = 128;
+const MIN_ONION_SEND_JITTER_MS: u64 = 5;
+const ONION_SEND_JITTER_SPAN_MS: u64 = 21;
 
 struct OverlaySend {
     scope: Scope,
@@ -45,19 +50,16 @@ impl<T> Default for OrderedSendState<T> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SendAdmissionError {
-    GlobalFull,
-    PeerFull,
-    CounterOverflow,
-}
-
 impl<T> OrderedSendState<T> {
     /// Reserve one frame and return whether its peer needs a new drain task.
     ///
     /// Invariant: `pending` equals queued frames plus one for every in-flight lane. No lane has
     /// more than one in-flight frame, which is the serialization witness for per-peer order.
-    fn enqueue(&mut self, peer: Did, item: T) -> std::result::Result<bool, SendAdmissionError> {
+    fn enqueue(
+        &mut self,
+        peer: Did,
+        item: T,
+    ) -> std::result::Result<bool, OnionQueueAdmissionReason> {
         let peer_pending = self
             .lanes
             .get(&peer)
@@ -65,16 +67,16 @@ impl<T> OrderedSendState<T> {
             .unwrap_or_default();
         let next_peer = peer_pending
             .checked_add(1)
-            .ok_or(SendAdmissionError::CounterOverflow)?;
+            .ok_or(OnionQueueAdmissionReason::CounterOverflow)?;
         let next_pending = self
             .pending
             .checked_add(1)
-            .ok_or(SendAdmissionError::CounterOverflow)?;
+            .ok_or(OnionQueueAdmissionReason::CounterOverflow)?;
         if next_pending > MAX_PENDING_ONION_SENDS {
-            return Err(SendAdmissionError::GlobalFull);
+            return Err(OnionQueueAdmissionReason::GlobalFull);
         }
         if next_peer > MAX_PENDING_ONION_SENDS_PER_PEER {
-            return Err(SendAdmissionError::PeerFull);
+            return Err(OnionQueueAdmissionReason::PeerFull);
         }
         self.pending = next_pending;
         match self.lanes.entry(peer) {
@@ -172,6 +174,10 @@ async fn drain_peer(
             tracing::debug!(%peer, "onion send outbox lost drain ownership");
             return;
         };
+        // One lane owns FIFO order, so bounded random delay changes only observable timing, never
+        // the state-machine order. It weakens immediate one-for-one correlation without holding
+        // the protocol transition gate or creating unbounded cover traffic.
+        futures_timer::Delay::new(onion_send_jitter(rand::random())).await;
         #[cfg(all(test, rings_native))]
         if let Some(hook) = test_hook.as_ref() {
             hook.before_send(&send.payload).await;
@@ -190,10 +196,16 @@ async fn drain_peer(
     }
 }
 
-fn capacity_error(peer: Did, reason: SendAdmissionError) -> Error {
-    Error::ExtensionError(format!(
-        "ordered onion send queue rejected peer {peer}: {reason:?}"
-    ))
+const fn onion_send_jitter(sample: u8) -> Duration {
+    Duration::from_millis(MIN_ONION_SEND_JITTER_MS + (sample as u64 % ONION_SEND_JITTER_SPAN_MS))
+}
+
+fn capacity_error(peer: Did, reason: OnionQueueAdmissionReason) -> Error {
+    Error::OnionQueueAdmission {
+        queue: OnionQueueKind::CircuitData,
+        peer,
+        reason,
+    }
 }
 
 fn lock<T>(state: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>> {
@@ -302,7 +314,10 @@ mod tests {
         for value in 0..MAX_PENDING_ONION_SENDS_PER_PEER {
             assert!(state.enqueue(peer, value).is_ok());
         }
-        assert_eq!(state.enqueue(peer, 200), Err(SendAdmissionError::PeerFull));
+        assert_eq!(
+            state.enqueue(peer, 200),
+            Err(OnionQueueAdmissionReason::PeerFull)
+        );
         assert_eq!(state.enqueue(other, 201), Ok(true));
     }
 
@@ -319,7 +334,7 @@ mod tests {
         assert_eq!(state.pending, MAX_PENDING_ONION_SENDS);
         assert_eq!(
             state.enqueue(recovering_peer, 1),
-            Err(SendAdmissionError::GlobalFull)
+            Err(OnionQueueAdmissionReason::GlobalFull)
         );
         let first = Did::from(1_u32);
         assert!(state.take_next(first).is_some());

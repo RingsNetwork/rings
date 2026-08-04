@@ -13,11 +13,12 @@ use rings_core::session::SessionSk;
 use rings_core::utils::get_epoch_ms;
 use serde::Serialize;
 
-use super::codec::encode_wire_message;
+use super::cell::seal_message;
 use super::codec::OnionWireMessage;
 use super::OnionAuthenticatedPayload;
 use super::OnionBackwardFrame;
 use super::OnionBackwardNonce;
+use super::OnionBackwardPath;
 use super::OnionBackwardSequence;
 use super::OnionCircuitId;
 use super::OnionCircuitPayload;
@@ -29,6 +30,7 @@ use super::OnionForwardSequence;
 use super::OnionReturnId;
 use super::OnionVerifiedPayload;
 use super::ONION_AEAD_NAMESPACE;
+use super::ONION_FORWARD_EXPIRY_QUANTUM_MS;
 use super::ONION_FORWARD_PAYLOAD_TTL_MS;
 use crate::error::Error;
 use crate::error::Result;
@@ -61,7 +63,12 @@ pub fn encode_initial_forward(
         payload,
     )?;
     let frame = OnionForwardFrame { circuit_id, layer };
-    encode_wire_message(OnionWireMessage::Forward(frame)).map(|payload| (first, payload))
+    let recipient = route
+        .encryption_hops()
+        .first()
+        .map(|hop| hop.session_public_key)
+        .ok_or_else(|| Error::OnionRouteError(OnionRouteError::RouteHasNoHops))?;
+    seal_message(&OnionWireMessage::Forward(frame), recipient, None).map(|payload| (first, payload))
 }
 
 /// Stable edge-id plan for a long-lived onion circuit.
@@ -117,7 +124,14 @@ impl OnionCircuitPath {
             circuit_id: self.first_circuit_id,
             layer,
         };
-        encode_wire_message(OnionWireMessage::Forward(frame)).map(|payload| (first, payload))
+        let recipient = self
+            .route
+            .encryption_hops()
+            .first()
+            .map(|hop| hop.session_public_key)
+            .ok_or_else(|| Error::OnionRouteError(OnionRouteError::RouteHasNoHops))?;
+        seal_message(&OnionWireMessage::Forward(frame), recipient, None)
+            .map(|payload| (first, payload))
     }
 
     /// Return the canonical service selected by this path's route.
@@ -142,24 +156,26 @@ pub fn route_first_hop(route: &OnionRoute) -> Result<Did> {
 pub async fn send_backward(
     scope: &Scope,
     signer: &SessionSk,
-    circuit_id: OnionCircuitId,
-    return_peer: Did,
-    client: OnionClientReturn,
+    path: OnionBackwardPath,
     sequence: OnionBackwardSequence,
     payload: OnionCircuitPayload,
 ) -> Result<()> {
     let frame = OnionBackwardFrame {
-        circuit_id,
+        circuit_id: path.circuit_id,
         payload: encrypt_client_payload_at_sequence(
-            client.return_id,
+            path.client.return_id,
             sequence,
             payload,
-            client.session_public_key,
+            path.client.session_public_key,
             signer,
         )?,
     };
-    let payload = encode_wire_message(OnionWireMessage::Backward(frame))?;
-    scope.send(return_peer, payload).await
+    let payload = seal_message(
+        &OnionWireMessage::Backward(frame),
+        path.return_session_public_key,
+        None,
+    )?;
+    scope.send(path.return_peer, payload).await
 }
 
 fn build_forward_layers(
@@ -191,14 +207,20 @@ fn build_forward_layers_with_ids(
             },
         ));
     }
-    let expires_at_ms = get_epoch_ms().saturating_add(ONION_FORWARD_PAYLOAD_TTL_MS);
+    let expires_at_ms = quantized_forward_expiry(get_epoch_ms());
     let exit_circuit_id = *circuit_ids
         .last()
         .ok_or_else(|| Error::OnionRouteError(OnionRouteError::RouteHasNoHops))?;
+    let exit_return_session_public_key = hops
+        .iter()
+        .rev()
+        .nth(1)
+        .map_or(client.session_public_key, |hop| hop.session_public_key);
     let mut layer = encrypt_forward_layer(
         exit_circuit_id,
         OnionForwardLayer::Exit {
             client,
+            return_session_public_key: exit_return_session_public_key,
             expires_at_ms,
             forward_nonce: OnionForwardNonce::random(),
             forward_sequence: sequence,
@@ -211,7 +233,7 @@ fn build_forward_layers_with_ids(
         let next_index = index.saturating_add(1);
         let next_hop = hops
             .get(next_index)
-            .map(|next| next.did)
+            .copied()
             .ok_or_else(|| Error::OnionRouteError(OnionRouteError::MissingNextHop))?;
         let current_circuit_id = circuit_ids
             .get(index)
@@ -221,24 +243,39 @@ fn build_forward_layers_with_ids(
             .get(next_index)
             .copied()
             .ok_or_else(|| Error::OnionRouteError(OnionRouteError::MissingNextHop))?;
-        let remaining_hops = u8::try_from(hops.len().saturating_sub(index + 1)).map_err(|_| {
-            Error::OnionRouteError(OnionRouteError::HopCountOutOfBounds {
-                hop_count: hops.len(),
-                max_hops: super::MAX_ONION_CIRCUIT_HOPS,
-            })
-        })?;
         layer = encrypt_forward_layer(
             current_circuit_id,
             OnionForwardLayer::Relay {
-                next_hop,
+                next_hop: next_hop.did,
                 next_circuit_id,
-                remaining_hops,
+                next_session_public_key: next_hop.session_public_key,
+                return_session_public_key: if index == 0 {
+                    client.session_public_key
+                } else {
+                    hops.get(index.saturating_sub(1))
+                        .map(|previous| previous.session_public_key)
+                        .ok_or_else(|| Error::OnionRouteError(OnionRouteError::MissingNextHop))?
+                },
                 inner: layer,
             },
             hop.session_public_key,
         )?;
     }
     Ok(layer)
+}
+
+/// Quantize authenticated expiry to a coarse wall-clock boundary.
+///
+/// Law: every timestamp in one quantum maps to the same advertised boundary, so exit validation
+/// retains a finite TTL while the encrypted layer does not preserve byte-accurate client clock
+/// skew. Saturation remains fail-closed at the maximum representable instant.
+fn quantized_forward_expiry(now_ms: u128) -> u128 {
+    let deadline = now_ms.saturating_add(ONION_FORWARD_PAYLOAD_TTL_MS);
+    deadline
+        .saturating_add(ONION_FORWARD_EXPIRY_QUANTUM_MS - 1)
+        .checked_div(ONION_FORWARD_EXPIRY_QUANTUM_MS)
+        .and_then(|bucket| bucket.checked_mul(ONION_FORWARD_EXPIRY_QUANTUM_MS))
+        .unwrap_or(u128::MAX)
 }
 
 fn edge_circuit_ids(
@@ -310,6 +347,9 @@ pub(super) fn encrypt_client_payload_at_sequence(
     let authenticated =
         OnionAuthenticatedPayload::new_signed_at_sequence(return_id, sequence, payload, signer)?;
     let plaintext = bincode::serialize(&authenticated).map_err(|_| Error::EncodeError)?;
+    // The outer hop cell authenticates the edge-local circuit and direction. This inner payload
+    // deliberately remains stable while relays rewrite edge ids; its signed transcript binds the
+    // client-only return id, nonce, monotonic sequence, exit session key, and payload bytes.
     let aad = backward_aead_context()?;
     let mut rng = rand::thread_rng();
     encrypt_aead_with_rng(&plaintext, &aad, recipient, &mut rng).map_err(Error::CoreError)

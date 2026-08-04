@@ -12,7 +12,13 @@ use rings_core::ecc::SecretKey;
 use rings_core::session::SessionSk;
 
 #[cfg(rings_native)]
-use super::super::codec::encode_wire_message;
+use super::super::cell::encode_message;
+use super::super::cell::open_cell;
+#[cfg(rings_native)]
+use super::super::cell::seal_encoded_message;
+#[cfg(rings_native)]
+use super::super::cell::seal_message;
+use super::super::cell::OnionWireCell;
 use super::super::codec::OnionCircuitInput;
 use super::super::codec::OnionWireMessage;
 use super::super::crypto::decrypt_client_payload;
@@ -22,6 +28,7 @@ use super::super::limiter::OnionCryptoLimiter;
 use super::super::protocol::OnionCircuitCapabilities;
 use super::super::reducer::remember_return_hop;
 use super::super::reducer::OnionCircuitReducer;
+use super::super::reducer::RelayReturnEdge;
 use super::super::reducer::RelayReturnKey;
 #[cfg(rings_native)]
 use super::super::send_outbox::OnionSendTestHook;
@@ -52,6 +59,24 @@ use crate::processor::ProcessorConfig;
 
 fn session() -> SessionSk {
     SessionSk::new_with_seckey(&SecretKey::random()).expect("session key")
+}
+
+fn open_wire(recipient: &SessionSk, payload: &[u8]) -> OnionWireMessage {
+    let cell = bincode::deserialize::<OnionWireCell>(payload).expect("decode encrypted cell");
+    open_cell(recipient, cell.bucket, &cell.sealed).expect("open encrypted cell")
+}
+
+fn return_edge(
+    key: RelayReturnKey,
+    previous: &SessionSk,
+    previous_circuit_id: OnionCircuitId,
+) -> RelayReturnEdge {
+    RelayReturnEdge {
+        key,
+        previous_hop: previous.account_did(),
+        previous_circuit_id,
+        previous_session_public_key: previous.session_public_key(),
+    }
 }
 
 fn test_payload(label: &str) -> OnionCircuitPayload {
@@ -135,6 +160,56 @@ fn test_scope(session_sk: SessionSk) -> EffectScope {
         extensions.core(),
         ONION_CIRCUIT_NAMESPACE.to_string(),
     ))
+}
+
+#[cfg(rings_native)]
+async fn peel_forward_cell(
+    protocol: &OnionCircuitProtocol,
+    shell: &OnionCircuitShell<RecordingHandler>,
+    scope: &EffectScope,
+    state: &OnionCircuitState,
+    from: Did,
+    me: Did,
+    payload: &Bytes,
+) -> crate::extension::ext::Transition<OnionCircuitState, OnionCircuitEffect> {
+    let observed = protocol.step(
+        Ctx { did: me, state },
+        decode_event(protocol, from, me, payload),
+    );
+    let [decrypt_cell] = observed.effects.as_slice() else {
+        panic!("expected cell decrypt effect");
+    };
+    let local = shell
+        .run(scope, decrypt_cell.clone())
+        .await
+        .expect("decrypt cell");
+    let [local] = local.as_slice() else {
+        panic!("expected opened cell reinjection");
+    };
+    let opened = protocol.step(
+        Ctx {
+            did: me,
+            state: &observed.state,
+        },
+        decode_event(protocol, me, me, local),
+    );
+    let [decrypt_layer] = opened.effects.as_slice() else {
+        panic!("expected forward-layer decrypt effect");
+    };
+    let local = shell
+        .run(scope, decrypt_layer.clone())
+        .await
+        .expect("decrypt forward layer");
+    let [local] = local.as_slice() else {
+        panic!("expected decrypted layer reinjection");
+    };
+    protocol.step(
+        Ctx {
+            did: me,
+            state: &opened.state,
+        },
+        decode_event(protocol, me, me, local),
+    )
 }
 
 #[cfg(rings_native)]
@@ -239,7 +314,7 @@ fn initial_forward_targets_first_hop_and_hides_payload() {
         test_payload("probe"),
     )
     .expect("encode initial route");
-    let decoded = bincode::deserialize::<OnionWireMessage>(&payload).expect("decode initial route");
+    let decoded = open_wire(&first, &payload);
 
     assert_eq!(to, first.account_did());
     let OnionWireMessage::Forward(frame) = decoded else {
@@ -264,9 +339,7 @@ fn relay_layer_uses_distinct_next_edge_circuit_id() {
         test_payload("probe"),
     )
     .expect("encode initial route");
-    let OnionWireMessage::Forward(frame) =
-        bincode::deserialize::<OnionWireMessage>(&payload).expect("decode initial route")
-    else {
+    let OnionWireMessage::Forward(frame) = open_wire(&first, &payload) else {
         panic!("expected forward frame");
     };
     let OnionForwardLayer::Relay {
@@ -309,9 +382,7 @@ fn relay_next_circuit_id(
     first_circuit_id: OnionCircuitId,
     payload: &Bytes,
 ) -> OnionCircuitId {
-    let OnionWireMessage::Forward(frame) =
-        bincode::deserialize::<OnionWireMessage>(payload).expect("decode forward frame")
-    else {
+    let OnionWireMessage::Forward(frame) = open_wire(relay, payload) else {
         panic!("expected forward frame");
     };
     assert_eq!(frame.circuit_id, first_circuit_id);
@@ -380,7 +451,7 @@ fn initial_forward_accepts_canonical_payload_for_mixed_case_route_service() {
 }
 
 #[test]
-fn relay_forward_requires_opt_in_before_crypto_effect() {
+fn hidden_cell_direction_defers_relay_capability_check_until_after_cell_decrypt() {
     let client = session();
     let relay = session();
     let exit = session();
@@ -409,6 +480,27 @@ fn relay_forward_requires_opt_in_before_crypto_effect() {
         event,
     );
 
+    assert!(matches!(transition.effects.as_slice(), [
+        OnionCircuitEffect::DecryptCell { .. }
+    ]));
+
+    let cell = bincode::deserialize::<OnionWireCell>(&payload).expect("decode encrypted cell");
+    let message = open_cell(&relay, cell.bucket, &cell.sealed).expect("open encrypted cell");
+    let event = super::super::codec::OnionCircuitEvent {
+        input: OnionCircuitInput::CellReady {
+            from: client.account_did(),
+            received_at_ms: 1,
+            bucket: cell.bucket,
+            message,
+        },
+    };
+    let transition = protocol.step(
+        Ctx {
+            did: relay.account_did(),
+            state: &transition.state,
+        },
+        event,
+    );
     assert!(transition.effects.is_empty());
 }
 
@@ -467,6 +559,30 @@ async fn relay_capability_does_not_execute_exit_layer() {
         },
         event,
     );
+    let [effect] = transition.effects.as_slice() else {
+        panic!("expected forward-layer decrypt effect");
+    };
+    assert!(matches!(effect, OnionCircuitEffect::DecryptForward { .. }));
+    let reinjected = shell
+        .run(&scope, effect.clone())
+        .await
+        .expect("decrypt exit layer");
+    let [local_payload] = reinjected.as_slice() else {
+        panic!("expected decrypted forward layer");
+    };
+    let event = decode_event(
+        &protocol,
+        relay.account_did(),
+        relay.account_did(),
+        local_payload,
+    );
+    let transition = protocol.step(
+        Ctx {
+            did: relay.account_did(),
+            state: &transition.state,
+        },
+        event,
+    );
 
     assert!(transition.effects.is_empty());
 }
@@ -483,6 +599,7 @@ async fn exit_effect_releases_transition_turn_before_adapter_io_completes() {
         from: client.account_did(),
         circuit_id: OnionCircuitId::new([27; 16]),
         return_peer: client.account_did(),
+        return_session_public_key: client.session_public_key(),
         client: OnionClientReturn::new(client.session_public_key()),
         forward_nonce: OnionForwardNonce::new([28; 16]),
         forward_sequence: OnionForwardSequence::FIRST,
@@ -504,19 +621,36 @@ async fn exit_effect_releases_transition_turn_before_adapter_io_completes() {
 #[tokio::test]
 async fn send_effect_releases_transition_turn_and_preserves_peer_order() {
     let local = session();
-    let peer = session().account_did();
+    let peer = session();
     let hook = Arc::new(OnionSendTestHook::default());
     let shell = OnionCircuitShell::new_with_send_test_hook(
         local.clone(),
         RecordingHandler::default(),
         Arc::clone(&hook),
     );
-    let scope = test_scope(local);
+    let scope = test_scope(local.clone());
 
-    for payload in [Bytes::from_static(b"first"), Bytes::from_static(b"second")] {
+    let messages = [1_u8, 2_u8].map(|tag| {
+        OnionWireMessage::Backward(OnionBackwardFrame {
+            circuit_id: OnionCircuitId::new([tag; 16]),
+            payload: encrypt_client_payload(
+                OnionReturnId::new([tag; 16]),
+                test_payload("ordered"),
+                local.session_public_key(),
+                &local,
+            )
+            .expect("encrypt ordered fixture"),
+        })
+    });
+    for message in &messages {
         tokio::time::timeout(
             std::time::Duration::from_millis(100),
-            shell.run(&scope, OnionCircuitEffect::Send { to: peer, payload }),
+            shell.run(&scope, OnionCircuitEffect::SealAndSend {
+                to: peer.account_did(),
+                recipient: peer.session_public_key(),
+                bucket: OnionCellBucket::KiB4,
+                encoded_message: encode_message(message).expect("encode ordered fixture"),
+            }),
         )
         .await
         .expect("send interpretation must only enqueue")
@@ -534,10 +668,11 @@ async fn send_effect_releases_transition_turn_and_preserves_peer_order() {
             .await
             .expect("ordered drain completed")
             .expect("observed sends");
-    assert_eq!(observed, vec![
-        Bytes::from_static(b"first"),
-        Bytes::from_static(b"second")
-    ]);
+    let observed = observed
+        .iter()
+        .map(|payload| open_wire(&peer, payload))
+        .collect::<Vec<_>>();
+    assert_eq!(observed, messages);
 }
 
 #[test]
@@ -550,9 +685,11 @@ fn expired_exit_layer_emits_no_exit_effect() {
     let transition = reducer.apply(&state, OnionCircuitInput::ForwardReady {
         from: client.account_did(),
         received_at_ms: 100,
+        bucket: OnionCellBucket::KiB4,
         circuit_id,
         layer: OnionForwardLayer::Exit {
             client: OnionClientReturn::new(client.session_public_key()),
+            return_session_public_key: client.session_public_key(),
             expires_at_ms: 100,
             forward_nonce: OnionForwardNonce::new([9; 16]),
             forward_sequence: OnionForwardSequence::FIRST,
@@ -621,13 +758,128 @@ async fn relay_decrypts_one_layer_and_remembers_return_hop() {
         },
         event,
     );
+    let [effect] = transition.effects.as_slice() else {
+        panic!("expected forward-layer decrypt effect");
+    };
+    let reinjected = shell
+        .run(&scope, effect.clone())
+        .await
+        .expect("decrypt relay layer");
+    let [local_payload] = reinjected.as_slice() else {
+        panic!("expected decrypted relay layer");
+    };
+    let event = decode_event(
+        &protocol,
+        relay.account_did(),
+        relay.account_did(),
+        local_payload,
+    );
+    let transition = protocol.step(
+        Ctx {
+            did: relay.account_did(),
+            state: &transition.state,
+        },
+        event,
+    );
 
-    assert_eq!(transition.effects.len(), 1);
     assert!(matches!(
         transition.effects.as_slice(),
-        [OnionCircuitEffect::Send { to, .. }] if *to == exit.account_did()
+        [OnionCircuitEffect::SealAndSend { to, .. }] if *to == exit.account_did()
     ));
     assert_eq!(transition.state.relay_return_count(), 1);
+}
+
+#[cfg(rings_native)]
+#[tokio::test]
+async fn two_relays_peel_fixed_size_cells_through_the_exit_reducer_and_shell() {
+    let client = session();
+    let first = session();
+    let second = session();
+    let exit = session();
+    let route = route(&[first.clone(), second.clone()], &exit);
+    let expected = test_payload("multi-hop-fixed-cell");
+    let (first_peer, first_payload) = encode_initial_forward(
+        OnionClientReturn::new(client.session_public_key()),
+        &route,
+        OnionCircuitId::new([31; 16]),
+        expected.clone(),
+    )
+    .expect("encode multi-hop route");
+    assert_eq!(first_peer, first.account_did());
+
+    let first_protocol = OnionCircuitProtocol::new(OnionCircuitCapabilities::relay());
+    let first_shell = OnionCircuitShell::new(first.clone(), RecordingHandler::default());
+    let first_scope = test_scope(first.clone());
+    let first_transition = peel_forward_cell(
+        &first_protocol,
+        &first_shell,
+        &first_scope,
+        &first_protocol.init(),
+        client.account_did(),
+        first.account_did(),
+        &first_payload,
+    )
+    .await;
+    let [OnionCircuitEffect::SealAndSend {
+        to,
+        recipient,
+        bucket,
+        encoded_message,
+    }] = first_transition.effects.as_slice()
+    else {
+        panic!("first relay must emit one padded next-hop cell");
+    };
+    assert_eq!(*to, second.account_did());
+    let second_payload = seal_encoded_message(encoded_message, *recipient, Some(*bucket))
+        .expect("seal second-hop cell");
+    assert_eq!(first_payload.len(), second_payload.len());
+
+    let second_protocol = OnionCircuitProtocol::new(OnionCircuitCapabilities::relay());
+    let second_shell = OnionCircuitShell::new(second.clone(), RecordingHandler::default());
+    let second_scope = test_scope(second.clone());
+    let second_transition = peel_forward_cell(
+        &second_protocol,
+        &second_shell,
+        &second_scope,
+        &second_protocol.init(),
+        first.account_did(),
+        second.account_did(),
+        &second_payload,
+    )
+    .await;
+    let [OnionCircuitEffect::SealAndSend {
+        to,
+        recipient,
+        bucket,
+        encoded_message,
+    }] = second_transition.effects.as_slice()
+    else {
+        panic!("second relay must emit one padded exit cell");
+    };
+    assert_eq!(*to, exit.account_did());
+    let exit_payload =
+        seal_encoded_message(encoded_message, *recipient, Some(*bucket)).expect("seal exit cell");
+    assert_eq!(first_payload.len(), exit_payload.len());
+
+    let exit_protocol = OnionCircuitProtocol::new(OnionCircuitCapabilities::exit());
+    let exit_shell = OnionCircuitShell::new(exit.clone(), RecordingHandler::default());
+    let exit_scope = test_scope(exit.clone());
+    let exit_transition = peel_forward_cell(
+        &exit_protocol,
+        &exit_shell,
+        &exit_scope,
+        &exit_protocol.init(),
+        second.account_did(),
+        exit.account_did(),
+        &exit_payload,
+    )
+    .await;
+    assert!(matches!(
+        exit_transition.effects.as_slice(),
+        [OnionCircuitEffect::Exit { payload, .. }] if payload == &expected
+    ));
+    assert_eq!(first_transition.state.relay_return_count(), 1);
+    assert_eq!(second_transition.state.relay_return_count(), 1);
 }
 
 #[cfg(rings_native)]
@@ -654,7 +906,12 @@ async fn client_backward_payload_decryption_runs_in_shell_handler() {
         )
         .expect("encrypt backward"),
     };
-    let payload = encode_wire_message(OnionWireMessage::Backward(frame)).expect("encode backward");
+    let payload = seal_message(
+        &OnionWireMessage::Backward(frame),
+        client.session_public_key(),
+        None,
+    )
+    .expect("encode backward cell");
     let event = decode_event(
         &protocol,
         exit.account_did(),
@@ -737,9 +994,7 @@ fn relay_return_table_evicts_expired_entries() {
         &mut state,
         1,
         10,
-        first,
-        previous.account_did(),
-        previous_circuit_id,
+        return_edge(first, &previous, previous_circuit_id),
         100,
     )
     .expect("first return hop");
@@ -747,9 +1002,7 @@ fn relay_return_table_evicts_expired_entries() {
         &mut state,
         1,
         10,
-        second,
-        previous.account_did(),
-        previous_circuit_id,
+        return_edge(second, &previous, previous_circuit_id),
         105,
     )
     .is_err());
@@ -758,13 +1011,60 @@ fn relay_return_table_evicts_expired_entries() {
         &mut state,
         1,
         10,
-        second,
-        previous.account_did(),
-        previous_circuit_id,
+        return_edge(second, &previous, previous_circuit_id),
         111,
     )
     .expect("expired entry evicted");
     assert_eq!(state.relay_return_count(), 1);
+}
+
+#[test]
+fn backward_cell_after_return_expiry_is_never_forwarded() {
+    let client = session();
+    let next = session();
+    let mut state = OnionCircuitState::default();
+    let next_circuit_id = OnionCircuitId::new([41; 16]);
+    remember_return_hop(
+        &mut state,
+        8,
+        10,
+        return_edge(
+            RelayReturnKey {
+                circuit_id: next_circuit_id,
+                next_hop: next.account_did(),
+            },
+            &client,
+            OnionCircuitId::new([42; 16]),
+        ),
+        100,
+    )
+    .expect("remember live return edge");
+    let backward = OnionWireMessage::Backward(OnionBackwardFrame {
+        circuit_id: next_circuit_id,
+        payload: encrypt_client_payload(
+            OnionReturnId::new([43; 16]),
+            test_payload("expired-return"),
+            client.session_public_key(),
+            &next,
+        )
+        .expect("encrypt backward fixture"),
+    });
+    let reducer = OnionCircuitReducer::new(OnionCircuitCapabilities::relay());
+    let transition = reducer.apply(&state, OnionCircuitInput::CellReady {
+        from: next.account_did(),
+        received_at_ms: 111,
+        bucket: OnionCellBucket::KiB4,
+        message: backward,
+    });
+
+    assert_eq!(transition.state.relay_return_count(), 0);
+    assert!(matches!(transition.effects.as_slice(), [
+        OnionCircuitEffect::DecryptClient { .. }
+    ]));
+    assert!(!transition
+        .effects
+        .iter()
+        .any(|effect| matches!(effect, OnionCircuitEffect::SealAndSend { .. })));
 }
 
 #[test]
@@ -783,9 +1083,7 @@ fn relay_return_table_rejects_live_edge_overwrite() {
         &mut state,
         8,
         10,
-        key,
-        previous.account_did(),
-        previous_circuit_id,
+        return_edge(key, &previous, previous_circuit_id),
         100,
     )
     .expect("first return hop");
@@ -795,9 +1093,7 @@ fn relay_return_table_rejects_live_edge_overwrite() {
             &mut state,
             8,
             10,
-            key,
-            attacker_previous.account_did(),
-            previous_circuit_id,
+            return_edge(key, &attacker_previous, previous_circuit_id),
             101,
         ),
         Err(crate::error::Error::OnionRouteError(_))
@@ -817,12 +1113,14 @@ fn relay_return_table_preserves_capacity_for_other_authenticated_peers() {
             &mut state,
             32,
             100,
-            RelayReturnKey {
-                circuit_id: OnionCircuitId::new([circuit_byte; 16]),
-                next_hop: next.account_did(),
-            },
-            first_peer.account_did(),
-            OnionCircuitId::new([circuit_byte + 10; 16]),
+            return_edge(
+                RelayReturnKey {
+                    circuit_id: OnionCircuitId::new([circuit_byte; 16]),
+                    next_hop: next.account_did(),
+                },
+                &first_peer,
+                OnionCircuitId::new([circuit_byte + 10; 16]),
+            ),
             1,
         )
         .expect("first peer's bounded share");
@@ -833,12 +1131,14 @@ fn relay_return_table_preserves_capacity_for_other_authenticated_peers() {
             &mut state,
             32,
             100,
-            RelayReturnKey {
-                circuit_id: OnionCircuitId::new([3; 16]),
-                next_hop: next.account_did(),
-            },
-            first_peer.account_did(),
-            OnionCircuitId::new([13; 16]),
+            return_edge(
+                RelayReturnKey {
+                    circuit_id: OnionCircuitId::new([3; 16]),
+                    next_hop: next.account_did(),
+                },
+                &first_peer,
+                OnionCircuitId::new([13; 16]),
+            ),
             1,
         ),
         Err(crate::error::Error::OnionRouteError(
@@ -849,12 +1149,14 @@ fn relay_return_table_preserves_capacity_for_other_authenticated_peers() {
         &mut state,
         32,
         100,
-        RelayReturnKey {
-            circuit_id: OnionCircuitId::new([4; 16]),
-            next_hop: next.account_did(),
-        },
-        second_peer.account_did(),
-        OnionCircuitId::new([14; 16]),
+        return_edge(
+            RelayReturnKey {
+                circuit_id: OnionCircuitId::new([4; 16]),
+                next_hop: next.account_did(),
+            },
+            &second_peer,
+            OnionCircuitId::new([14; 16]),
+        ),
         1,
     )
     .expect("another peer retains capacity");
@@ -890,9 +1192,7 @@ fn aead_context_binds_direction_and_circuit_id() {
         test_payload("tcp-shutdown"),
     )
     .expect("encode forward");
-    let OnionWireMessage::Forward(frame) =
-        bincode::deserialize::<OnionWireMessage>(&forward_payload).expect("decode forward")
-    else {
+    let OnionWireMessage::Forward(frame) = open_wire(&exit, &forward_payload) else {
         panic!("expected forward frame");
     };
 

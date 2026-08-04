@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use rings_core::dht::Did;
+use rings_core::ecc::PublicKey;
 use rings_core::session::SessionSk;
 use serde::Deserialize;
 use serde::Serialize;
@@ -15,6 +16,7 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
+use tokio::time::Instant;
 
 use crate::error::Error;
 use crate::error::Result;
@@ -74,6 +76,7 @@ use inbound::TcpInbound;
 
 const TCP_BUF: usize = 30_000;
 const TCP_OPEN_TIMEOUT_SECS: u64 = 30;
+const TCP_OPEN_RESPONSE_QUANTUM_MS: u128 = 250;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 enum OnionTcpPayload {
@@ -343,9 +346,11 @@ impl OnionTcpRuntime {
                 self.consume_forward_nonce(frame.from, frame.circuit_id, frame.forward_nonce)?;
                 self.open_exit_stream(TcpExitOpen {
                     scope,
+                    opened_at: Instant::now(),
                     key,
                     circuit_id: frame.circuit_id,
                     return_peer: frame.return_peer,
+                    return_session_public_key: frame.return_session_public_key,
                     client: frame.client,
                     expected_forward_peer: frame.from,
                     service,
@@ -504,6 +509,7 @@ impl OnionTcpRuntime {
             key,
             circuit_id,
             return_peer,
+            return_session_public_key,
             client,
             service,
             ..
@@ -514,6 +520,7 @@ impl OnionTcpRuntime {
             key,
             circuit_id,
             return_peer,
+            return_session_public_key,
             client,
             service,
             stream,
@@ -548,12 +555,17 @@ impl OnionTcpRuntime {
         sequence: OnionBackwardSequence,
         payload: OnionTcpPayload,
     ) -> Result<()> {
+        // Resolve/connect results in the same quantum share one response deadline. The state and
+        // result algebra remain unchanged while remote clients lose byte-accurate resolver and
+        // target-connect timing.
+        tokio::time::sleep_until(open_response_deadline(request.opened_at, Instant::now())).await;
         TcpBackwardRoute {
             scope: &request.scope,
             signer: &self.session_sk,
             service: &request.service,
             circuit_id: request.circuit_id,
             return_peer: request.return_peer,
+            return_session_public_key: request.return_session_public_key,
             client: request.client,
         }
         .send(sequence, payload)
@@ -908,13 +920,29 @@ struct TcpStreamKey {
 
 struct TcpExitOpen {
     scope: Scope,
+    opened_at: Instant,
     key: TcpStreamKey,
     circuit_id: OnionCircuitId,
     return_peer: Did,
+    return_session_public_key: PublicKey<33>,
     client: OnionClientReturn,
     expected_forward_peer: Did,
     service: OnionServiceName,
     target: String,
+}
+
+fn open_response_deadline(opened_at: Instant, now: Instant) -> Instant {
+    let elapsed_ms = now.saturating_duration_since(opened_at).as_millis();
+    let quanta = elapsed_ms
+        .saturating_add(TCP_OPEN_RESPONSE_QUANTUM_MS - 1)
+        .checked_div(TCP_OPEN_RESPONSE_QUANTUM_MS)
+        .unwrap_or(1)
+        .max(1);
+    let deadline_ms =
+        u64::try_from(quanta.saturating_mul(TCP_OPEN_RESPONSE_QUANTUM_MS)).unwrap_or(u64::MAX);
+    opened_at
+        .checked_add(Duration::from_millis(deadline_ms))
+        .unwrap_or(now)
 }
 
 fn admit_exit_target(

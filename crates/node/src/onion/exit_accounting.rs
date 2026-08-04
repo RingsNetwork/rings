@@ -12,11 +12,14 @@ use crate::error::Result;
 
 const EXIT_LIMIT_WINDOW_MS: u128 = 60_000;
 const HARD_MAX_ACTIVE_CIRCUITS: u32 = 1_024;
+const HARD_MAX_CIRCUITS_PER_RETURN_PEER: u32 = 64;
 const HARD_MAX_STREAMS_PER_CIRCUIT: u32 = 64;
 
 /// Shared accounting gate for onion exits.
 ///
 /// Invariant: `active_circuits == count({ circuit | active_streams_by_circuit[circuit] > 0 })`.
+/// Invariant: for every `peer`, `active_circuits_by_peer[peer]` equals the number of live circuit
+/// keys whose `return_peer == peer`, and never exceeds [`HARD_MAX_CIRCUITS_PER_RETURN_PEER`].
 /// Invariant: `bytes_this_window <= policy.max_bytes_per_minute` whenever that policy field is
 /// non-zero.
 /// Preservation: `admit` intersects advertised limits with hard implementation ceilings, then
@@ -33,6 +36,7 @@ pub(crate) struct OnionExitAccounting {
 #[derive(Default)]
 struct ExitLimiter {
     active_circuits: u32,
+    active_circuits_by_peer: HashMap<Did, u32>,
     active_streams_by_circuit: HashMap<ExitCircuitKey, u32>,
     window_start_ms: u128,
     bytes_this_window: u64,
@@ -49,6 +53,7 @@ struct ExitCircuitKey {
 struct AdmitCommit {
     circuit: ExitCircuitKey,
     active_circuits: u32,
+    active_peer_circuits: u32,
     active_streams: u32,
     bytes_this_window: Option<u64>,
 }
@@ -77,6 +82,10 @@ impl Drop for OnionExitLease {
                 } else {
                     limiter.active_streams_by_circuit.remove(&self.circuit);
                     limiter.active_circuits = limiter.active_circuits.saturating_sub(1);
+                    decrement_peer_circuits(
+                        &mut limiter.active_circuits_by_peer,
+                        self.circuit.return_peer,
+                    );
                 }
             }
         }
@@ -156,6 +165,14 @@ impl ExitLimiter {
         if active_streams == 0 && self.active_circuits >= max_circuits {
             return Err(Error::NoPermission);
         }
+        let peer_circuits = self
+            .active_circuits_by_peer
+            .get(&circuit.return_peer)
+            .copied()
+            .unwrap_or_default();
+        if active_streams == 0 && peer_circuits >= HARD_MAX_CIRCUITS_PER_RETURN_PEER {
+            return Err(Error::NoPermission);
+        }
         let active_streams = active_streams.checked_add(1).ok_or(Error::NoPermission)?;
         let active_circuits = if active_streams == 1 {
             self.active_circuits
@@ -164,9 +181,15 @@ impl ExitLimiter {
         } else {
             self.active_circuits
         };
+        let active_peer_circuits = if active_streams == 1 {
+            peer_circuits.checked_add(1).ok_or(Error::NoPermission)?
+        } else {
+            peer_circuits
+        };
         Ok(AdmitCommit {
             circuit,
             active_circuits,
+            active_peer_circuits,
             active_streams,
             bytes_this_window: self.next_recorded_bytes(policy, bytes)?,
         })
@@ -174,6 +197,8 @@ impl ExitLimiter {
 
     fn apply_admission(&mut self, commit: AdmitCommit) {
         self.active_circuits = commit.active_circuits;
+        self.active_circuits_by_peer
+            .insert(commit.circuit.return_peer, commit.active_peer_circuits);
         self.active_streams_by_circuit
             .insert(commit.circuit, commit.active_streams);
         if let Some(bytes_this_window) = commit.bytes_this_window {
@@ -203,6 +228,16 @@ impl ExitLimiter {
     }
 }
 
+fn decrement_peer_circuits(active_by_peer: &mut HashMap<Did, u32>, peer: Did) {
+    match active_by_peer.get_mut(&peer) {
+        Some(count) if *count > 1 => *count -= 1,
+        Some(_) => {
+            active_by_peer.remove(&peer);
+        }
+        None => {}
+    }
+}
+
 /// `0` means the descriptor did not choose a smaller limit; it never disables the hard bound.
 const fn effective_limit(requested: u32, hard_limit: u32) -> u32 {
     if requested == 0 || requested > hard_limit {
@@ -221,6 +256,7 @@ mod tests {
     use super::ExitLimiter;
     use super::OnionExitAccounting;
     use super::HARD_MAX_ACTIVE_CIRCUITS;
+    use super::HARD_MAX_CIRCUITS_PER_RETURN_PEER;
     use super::HARD_MAX_STREAMS_PER_CIRCUIT;
     use crate::onion::circuit::OnionCircuitId;
     use crate::onion::OnionExitPolicy;
@@ -253,11 +289,16 @@ mod tests {
             .decide_admission(&policy, circuit.clone(), 7)
             .expect("pure admission decision");
         assert_eq!(limiter.active_circuits, 0);
+        assert!(limiter.active_circuits_by_peer.is_empty());
         assert!(limiter.active_streams_by_circuit.is_empty());
         assert_eq!(limiter.bytes_this_window, 0);
 
         limiter.apply_admission(commit);
         assert_eq!(limiter.active_circuits, 1);
+        assert_eq!(
+            limiter.active_circuits_by_peer.get(&circuit.return_peer),
+            Some(&1)
+        );
         assert_eq!(limiter.active_streams_by_circuit.get(&circuit), Some(&1));
         assert_eq!(limiter.bytes_this_window, 7);
         assert!(limiter.decide_admission(&policy, circuit, 4).is_err());
@@ -285,10 +326,10 @@ mod tests {
     fn unspecified_circuit_limit_is_still_bounded() {
         let accounting = OnionExitAccounting::default();
         let policy = OnionExitPolicy::default();
-        let peer = Did::from(8_u32);
         let mut leases = Vec::new();
         for index in 0..HARD_MAX_ACTIVE_CIRCUITS {
             let circuit = OnionCircuitId::new(u128::from(index).to_be_bytes());
+            let peer = Did::from(index.saturating_add(1));
             let admitted = accounting.admit(&policy, circuit, peer, 0);
             assert!(admitted.is_ok());
             if let Ok(lease) = admitted {
@@ -296,7 +337,37 @@ mod tests {
             }
         }
         let overflow = OnionCircuitId::new(u128::from(HARD_MAX_ACTIVE_CIRCUITS).to_be_bytes());
-        assert!(accounting.admit(&policy, overflow, peer, 0).is_err());
+        assert!(accounting
+            .admit(&policy, overflow, Did::from(u32::MAX), 0)
+            .is_err());
         assert_eq!(leases.len(), HARD_MAX_ACTIVE_CIRCUITS as usize);
+    }
+
+    #[test]
+    fn one_return_peer_cannot_pin_the_global_exit_circuit_budget() {
+        let accounting = OnionExitAccounting::default();
+        let policy = OnionExitPolicy::default();
+        let peer = Did::from(8_u32);
+        let mut leases = Vec::new();
+
+        for index in 0..HARD_MAX_CIRCUITS_PER_RETURN_PEER {
+            let circuit = OnionCircuitId::new(u128::from(index).to_be_bytes());
+            leases.push(
+                accounting
+                    .admit(&policy, circuit, peer, 0)
+                    .expect("peer circuit inside its share"),
+            );
+        }
+        let overflow =
+            OnionCircuitId::new(u128::from(HARD_MAX_CIRCUITS_PER_RETURN_PEER).to_be_bytes());
+        assert!(accounting.admit(&policy, overflow, peer, 0).is_err());
+
+        let other = Did::from(9_u32);
+        let other_lease = accounting
+            .admit(&policy, overflow, other, 0)
+            .expect("another peer retains an exit share");
+        drop(other_lease);
+        drop(leases.pop());
+        assert!(accounting.admit(&policy, overflow, peer, 0).is_ok());
     }
 }

@@ -291,7 +291,9 @@ mod tests {
     fn target_authority_rejects_missing_port() {
         assert!(matches!(
             OnionProxyTarget::parse_authority("example.com"),
-            Err(Error::HttpRequestError(_))
+            Err(Error::OnionProxyTarget(
+                crate::onion::OnionProxyTargetError::MissingPort
+            ))
         ));
     }
 }

@@ -86,7 +86,7 @@ context[globalThisKey] = context;
 vm.createContext(context);
 
 vm.runInContext(
-  `${serviceWorkerSource}\nglobalThis.__ringsWebviewServiceWorkerTest = { controlledNavigationBody, emitDebug, gatewayContentSecurityPolicy, gatewayFailureDocument, gatewayHostClient, handleGatewayFetch, handleGatewayFetchWithTimeout, pruneTrackedClientState, rememberNavigationClientTarget, rememberShellNavigationClient, rememberClientSourceTargetForTest, rememberTrustedShellClientForTest, registerDebugClient, registerGatewayHostClient, requestGatewayResponse, resetGatewayHostForTest, requestKind, sourceTargetForClient };`,
+  `${serviceWorkerSource}\nglobalThis.__ringsWebviewServiceWorkerTest = { acquireGatewayBodyPermit, controlledNavigationBody, emitDebug, gatewayContentSecurityPolicy, gatewayFailureDocument, gatewayHostClient, handleGatewayFetch, handleGatewayFetchWithTimeout, pruneTrackedClientState, rememberNavigationClientTarget, rememberShellNavigationClient, rememberClientSourceTargetForTest, rememberTrustedShellClientForTest, registerDebugClient, registerGatewayHostClient, requestGatewayResponse, resetGatewayHostForTest, requestKind, sourceTargetForClient };`,
   context,
   {
     filename: serviceWorkerPath,
@@ -96,6 +96,7 @@ vm.runInContext(
 const serviceWorkerApi = context.__ringsWebviewServiceWorkerTest;
 assert(serviceWorkerApi, "service worker test API was not exported");
 const {
+  acquireGatewayBodyPermit,
   emitDebug,
   gatewayHostClient,
   handleGatewayFetch,
@@ -125,6 +126,24 @@ await runStaticServiceWorkerTests({
   hostAssetSource,
   workerRequestApi,
 });
+
+{
+  const held = await Promise.all(Array.from({ length: 6 }, () => acquireGatewayBodyPermit()));
+  const queued = Array.from({ length: 32 }, () => acquireGatewayBodyPermit());
+  await assert.rejects(
+    acquireGatewayBodyPermit(),
+    (error) => typeof error === "object",
+    "the thirty-ninth retained request must fail before reading its body",
+  );
+  const firstRelease = held.shift();
+  assert(firstRelease, "one active body permit must exist");
+  firstRelease();
+  for (const permit of queued) {
+    const release = await permit;
+    release();
+  }
+  for (const release of held) release();
+}
 
 /**
  * Delivers one synthetic message event to every service-worker message listener.

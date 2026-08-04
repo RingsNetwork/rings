@@ -103,7 +103,6 @@ struct GatewayRequestSession {
     cors_request: GatewayRequest,
     request: Option<GatewayRequest>,
     preflight: Option<GatewayRequest>,
-    target: url::Url,
     stores_cookies: bool,
 }
 
@@ -115,17 +114,18 @@ impl GatewayRequestSession {
         now: i64,
     ) -> Result<Self> {
         validate_request_body_size(&request)?;
+        let request = policy.prepare_request(cookies, request, now)?;
+        // CORS is evaluated against the privacy-normalized request actually sent upstream. Thus
+        // a dropped fingerprint header neither triggers a phantom preflight nor appears in the
+        // preflight's requested-header set.
         let cors_request = request.clone();
         let preflight = cors::preflight_request(&request)?;
-        let request = policy.prepare_request(cookies, request, now)?;
-        let target = request.target.clone();
         let stores_cookies = request.allows_target_cookies();
 
         Ok(Self {
             cors_request,
             request: Some(request),
             preflight,
-            target,
             stores_cookies,
         })
     }
@@ -166,7 +166,7 @@ impl GatewayRequestSession {
         now: i64,
     ) -> Result<()> {
         if self.stores_cookies {
-            policy.store_response_cookies(cookies, &self.target, response, now)?;
+            policy.store_response_cookies(cookies, &self.cors_request, response, now)?;
         }
         Ok(())
     }
@@ -221,7 +221,7 @@ impl GatewayResponsePolicy {
     fn store_response_cookies(
         &self,
         cookies: &mut CookieJar,
-        target: &url::Url,
+        request: &GatewayRequest,
         response: &GatewayResponse,
         now: i64,
     ) -> Result<()> {
@@ -230,7 +230,7 @@ impl GatewayResponsePolicy {
             .iter()
             .filter(|header| header.name_eq("set-cookie"))
         {
-            cookies.store_set_cookie_at(target, header.value.as_str(), now)?;
+            cookies.store_set_cookie_for_request_at(request, header.value.as_str(), now)?;
         }
         Ok(())
     }

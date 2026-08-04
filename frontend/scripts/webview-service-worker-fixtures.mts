@@ -65,6 +65,7 @@ export type ServiceWorkerMessageEventFixture = {
 
 /** Service-worker symbols exported only inside the test VM. */
 export type ServiceWorkerTestApi = {
+  readonly acquireGatewayBodyPermit: (signal?: AbortSignal) => Promise<() => void>;
   readonly gatewayContentSecurityPolicy: string;
   readonly controlledNavigationBody: (
     request: { readonly kind: string; readonly topLevelNavigation?: boolean },

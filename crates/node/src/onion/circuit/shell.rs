@@ -2,9 +2,12 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use rings_core::dht::Did;
+use rings_core::ecc::PublicKey;
 use rings_core::session::SessionSk;
 use rings_core::utils::get_epoch_ms;
 
+use super::cell::open_cell;
+use super::cell::seal_encoded_message;
 use super::codec::encode_local_message;
 use super::codec::OnionLocalMessage;
 use super::crypto::decrypt_client_payload;
@@ -14,6 +17,7 @@ use super::send_outbox::OnionSendOutbox;
 #[cfg(all(test, rings_native))]
 use super::send_outbox::OnionSendTestHook;
 use super::OnionAuthenticatedPayload;
+use super::OnionCellBucket;
 use super::OnionCircuitEffect;
 use super::OnionCircuitId;
 use super::OnionCircuitPayload;
@@ -64,13 +68,45 @@ impl<H> OnionCircuitShell<H> {
         self.crypto_gate.admit(from, now_ms)
     }
 
+    fn decrypt_cell_reinject(
+        &self,
+        from: Did,
+        bucket: OnionCellBucket,
+        sealed: &rings_core::ecc::elgamal::impls::secp256k1::AeadCiphertext,
+    ) -> Result<Option<Bytes>> {
+        let received_at_ms = get_epoch_ms();
+        match self.admit_crypto(from, received_at_ms) {
+            Ok(()) => {}
+            Err(Error::NoPermission) => {
+                drop_bad_crypto("forward admission denied", Error::NoPermission);
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        }
+        let message = match open_cell(&self.session_sk, bucket, sealed) {
+            Ok(message) => message,
+            Err(error) => {
+                drop_bad_crypto("cell decrypt", error);
+                return Ok(None);
+            }
+        };
+        encode_local_message(OnionLocalMessage::CellReady {
+            from,
+            received_at_ms,
+            bucket,
+            message,
+        })
+        .map(Some)
+    }
+
     fn decrypt_forward_reinject(
         &self,
         from: Did,
+        received_at_ms: u128,
+        bucket: OnionCellBucket,
         circuit_id: OnionCircuitId,
         payload: &rings_core::ecc::elgamal::impls::secp256k1::AeadCiphertext,
     ) -> Result<Option<Bytes>> {
-        let received_at_ms = get_epoch_ms();
         match self.admit_crypto(from, received_at_ms) {
             Ok(()) => {}
             Err(Error::NoPermission) => {
@@ -89,22 +125,11 @@ impl<H> OnionCircuitShell<H> {
         encode_local_message(OnionLocalMessage::ForwardReady {
             from,
             received_at_ms,
+            bucket,
             circuit_id,
             layer,
         })
         .map(Some)
-    }
-
-    fn timestamp_backward_reinject(
-        &self,
-        from: Did,
-        frame: super::OnionBackwardFrame,
-    ) -> Result<Bytes> {
-        encode_local_message(OnionLocalMessage::BackwardReady {
-            from,
-            received_at_ms: get_epoch_ms(),
-            frame,
-        })
     }
 
     fn decrypt_client_payload(
@@ -140,18 +165,31 @@ where H: OnionCircuitHandler + crate::extension::ext::MaybeSend + 'static
 
     async fn run(&self, scope: &EffectScope, effect: OnionCircuitEffect) -> Result<Vec<Bytes>> {
         match effect {
+            OnionCircuitEffect::DecryptCell {
+                from,
+                bucket,
+                sealed,
+            } => Ok(self
+                .decrypt_cell_reinject(from, bucket, &sealed)?
+                .into_iter()
+                .collect()),
             OnionCircuitEffect::DecryptForward {
                 from,
+                received_at_ms,
+                bucket,
                 circuit_id,
                 payload,
             } => Ok(self
-                .decrypt_forward_reinject(from, circuit_id, &payload)?
+                .decrypt_forward_reinject(from, received_at_ms, bucket, circuit_id, &payload)?
                 .into_iter()
                 .collect()),
-            OnionCircuitEffect::TimestampBackward { from, frame } => self
-                .timestamp_backward_reinject(from, frame)
-                .map(|payload| vec![payload]),
-            OnionCircuitEffect::Send { to, payload } => {
+            OnionCircuitEffect::SealAndSend {
+                to,
+                recipient,
+                bucket,
+                encoded_message,
+            } => {
+                let payload = seal_encoded_message(&encoded_message, recipient, Some(bucket))?;
                 self.send_outbox.enqueue(scope.lifecycle(), to, payload)?;
                 Ok(Vec::new())
             }
@@ -159,6 +197,7 @@ where H: OnionCircuitHandler + crate::extension::ext::MaybeSend + 'static
                 from,
                 circuit_id,
                 return_peer,
+                return_session_public_key,
                 client,
                 forward_nonce,
                 forward_sequence,
@@ -172,6 +211,7 @@ where H: OnionCircuitHandler + crate::extension::ext::MaybeSend + 'static
                             from,
                             circuit_id,
                             return_peer,
+                            return_session_public_key,
                             client,
                             forward_nonce,
                             forward_sequence,
@@ -210,6 +250,8 @@ pub struct OnionCircuitExitFrame {
     pub circuit_id: OnionCircuitId,
     /// Relay peer that should receive backward frames from the exit.
     pub return_peer: Did,
+    /// Session key of the immediate return peer used to encrypt the first backward cell.
+    pub return_session_public_key: PublicKey<33>,
     /// Client return key encrypted into the exit layer.
     pub client: OnionClientReturn,
     /// One-shot replay token consumed by `Open`/HTTPS exit operations before side effects.

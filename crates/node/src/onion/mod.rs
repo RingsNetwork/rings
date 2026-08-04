@@ -62,6 +62,7 @@ pub use route::OnionRouteRequest;
 pub(crate) use route::SystemRouteEntropy;
 pub use route::DEFAULT_ONION_ROUTE_HOPS;
 pub use target::OnionProxyTarget;
+pub use target::OnionProxyTargetError;
 
 /// DHT topic used for application-layer onion exit descriptors.
 pub const ONION_EXITS_TOPIC: &str = "onion_exits";

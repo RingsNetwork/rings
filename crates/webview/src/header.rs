@@ -43,7 +43,11 @@ impl HeaderPolicy {
     pub fn normalize_request(&self, mut request: GatewayRequest) -> GatewayRequest {
         request
             .headers
-            .retain(|header| !should_strip_request_header(header.name.as_str()));
+            .retain(|header| should_forward_request_header(header.name.as_str()));
+        request.headers.push(GatewayHeader {
+            name: "Accept".to_string(),
+            value: "*/*".to_string(),
+        });
         request.headers.push(GatewayHeader {
             name: "Accept-Encoding".to_string(),
             value: "identity".to_string(),
@@ -109,31 +113,27 @@ fn classify_response_header(
     Ok(HeaderAction::Keep(header))
 }
 
-fn should_strip_request_header(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    lower.starts_with("sec-fetch-")
-        || matches!(
-            lower.as_str(),
-            "accept-encoding"
-                | "connection"
-                | "content-length"
-                | "cookie"
-                | "expect"
-                | "host"
-                | "keep-alive"
-                | "origin"
-                | "proxy-authenticate"
-                | "proxy-authorization"
-                | "proxy-connection"
-                | "referer"
-                | "te"
-                | "trailer"
-                | "transfer-encoding"
-                | "upgrade"
-                | "via"
-                | "x-rings-webview-kind"
-                | "x-rings-webview-target"
-        )
+/// Request metadata is an anonymity boundary, so forwarding is a closed allowlist. Browser and
+/// locale fingerprints (`Accept-Language`, `DNT`, client hints, fetch metadata, and arbitrary
+/// page headers) never reach the exit origin. `Accept` and `Accept-Encoding` are added separately
+/// with canonical values.
+fn should_forward_request_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "access-control-request-headers"
+            | "access-control-request-method"
+            | "authorization"
+            | "cache-control"
+            | "content-language"
+            | "content-type"
+            | "if-match"
+            | "if-modified-since"
+            | "if-none-match"
+            | "if-range"
+            | "if-unmodified-since"
+            | "pragma"
+            | "range"
+    )
 }
 
 fn should_send_virtual_origin(request: &GatewayRequest) -> bool {
@@ -198,6 +198,42 @@ mod tests {
             )?,
             HeaderAction::Keep(header) if header.name_eq("content-type")
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn request_header_allowlist_removes_browser_fingerprints_and_normalizes_accept() -> Result<()> {
+        let policy = HeaderPolicy::new(GatewayPrefix::new("/webview/")?);
+        let mut request = GatewayRequest::navigation(Url::parse("https://example.com/")?);
+        request.headers = vec![
+            GatewayHeader::new("Accept", "text/html,application/xhtml+xml")?,
+            GatewayHeader::new("Accept-Language", "en-US,fr;q=0.7")?,
+            GatewayHeader::new("DNT", "1")?,
+            GatewayHeader::new("Sec-CH-UA", "fingerprint")?,
+            GatewayHeader::new("X-Page-Fingerprint", "unique")?,
+            GatewayHeader::new("Range", "bytes=0-99")?,
+        ];
+
+        let normalized = policy.normalize_request(request);
+        assert_eq!(
+            normalized
+                .headers
+                .iter()
+                .filter(|header| header.name_eq("accept"))
+                .map(|header| header.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["*/*"]
+        );
+        assert!(normalized
+            .headers
+            .iter()
+            .any(|header| header.name_eq("range")));
+        for denied in ["accept-language", "dnt", "sec-ch-ua", "x-page-fingerprint"] {
+            assert!(!normalized
+                .headers
+                .iter()
+                .any(|header| header.name_eq(denied)));
+        }
         Ok(())
     }
 
@@ -347,14 +383,14 @@ mod tests {
         assert!(normalized
             .headers
             .iter()
-            .any(|header| header.name_eq("accept") && header.value == "text/html"));
+            .any(|header| header.name_eq("accept") && header.value == "*/*"));
         assert!(normalized.headers.iter().any(|header| {
             header.name_eq("accept-encoding") && header.value.eq_ignore_ascii_case("identity")
         }));
         assert!(normalized
             .headers
             .iter()
-            .any(|header| header.name_eq("x-app-trace") && header.value == "kept"));
+            .all(|header| !header.name_eq("x-app-trace")));
         Ok(())
     }
 

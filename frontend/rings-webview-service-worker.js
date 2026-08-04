@@ -20,6 +20,8 @@ const gatewayContentSecurityPolicy =
   "sandbox allow-scripts allow-forms allow-popups allow-downloads; default-src 'self' data: blob:; base-uri 'self'; connect-src 'self'; font-src 'self' data:; form-action 'self'; frame-src 'self' data: blob:; img-src 'self' data: blob:; media-src 'self' data: blob:; object-src 'self'; script-src 'self' data: 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; style-src 'self' data: 'unsafe-inline'; worker-src 'none'";
 const minimumGatewayHostCapabilityLength = 32;
 const clientStatePruneInterval = 64;
+const maxActiveGatewayBodies = 6;
+const maxQueuedGatewayBodies = 32;
 let gatewayHostClientId = null;
 let gatewayHostCapability = null;
 const trustedShellClientIds = new Set();
@@ -30,6 +32,8 @@ const debugClientScopes = new Map();
 const debugHistory = [];
 let nextRequestId = 1;
 let requestsUntilClientStatePrune = clientStatePruneInterval;
+let activeGatewayBodies = 0;
+const queuedGatewayBodies = [];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(self.skipWaiting());
@@ -151,6 +155,31 @@ function handleGatewayFetchWithTimeout(event) {
 }
 
 async function handleGatewayFetch(event, requestId, startedAt, signal = undefined) {
+  let release;
+  try {
+    release = await acquireGatewayBodyPermit(signal);
+  } catch (error) {
+    if (error === gatewayRequestCancelled) {
+      return gatewayDeadlineFailure();
+    }
+    if (error === gatewayBodyAdmissionFull) {
+      return gatewayFailure(
+        503,
+        "local Rings gateway request admission is full",
+        "Local Rings gateway is busy. Try again shortly.",
+        "gateway_request_admission_full",
+      );
+    }
+    throw error;
+  }
+  try {
+    return await handleAdmittedGatewayFetch(event, requestId, startedAt, signal);
+  } finally {
+    release();
+  }
+}
+
+async function handleAdmittedGatewayFetch(event, requestId, startedAt, signal = undefined) {
   await maybePruneTrackedClientState();
   let request;
   try {
@@ -288,6 +317,49 @@ function gatewayDeadlineFailure() {
 }
 
 const gatewayRequestCancelled = Object.freeze({});
+const gatewayBodyAdmissionFull = Object.freeze({});
+
+function acquireGatewayBodyPermit(signal = undefined) {
+  if (signal?.aborted) {
+    return Promise.reject(gatewayRequestCancelled);
+  }
+  if (activeGatewayBodies < maxActiveGatewayBodies) {
+    activeGatewayBodies += 1;
+    return Promise.resolve(gatewayBodyPermitRelease());
+  }
+  if (queuedGatewayBodies.length >= maxQueuedGatewayBodies) {
+    return Promise.reject(gatewayBodyAdmissionFull);
+  }
+  return new Promise((resolve, reject) => {
+    const waiter = { resolve, reject, signal, abort: undefined };
+    waiter.abort = () => {
+      const index = queuedGatewayBodies.indexOf(waiter);
+      if (index >= 0) queuedGatewayBodies.splice(index, 1);
+      reject(gatewayRequestCancelled);
+    };
+    signal?.addEventListener("abort", waiter.abort, { once: true });
+    queuedGatewayBodies.push(waiter);
+  });
+}
+
+function gatewayBodyPermitRelease() {
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    while (queuedGatewayBodies.length > 0) {
+      const waiter = queuedGatewayBodies.shift();
+      waiter.signal?.removeEventListener("abort", waiter.abort);
+      if (waiter.signal?.aborted) {
+        waiter.reject(gatewayRequestCancelled);
+        continue;
+      }
+      waiter.resolve(gatewayBodyPermitRelease());
+      return;
+    }
+    activeGatewayBodies = Math.max(0, activeGatewayBodies - 1);
+  };
+}
 
 function responseMustNotHaveBody(status) {
   return status === 204 || status === 205 || status === 304;

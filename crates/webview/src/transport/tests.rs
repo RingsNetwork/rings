@@ -570,7 +570,7 @@ fn gateway_strips_controlled_origin_headers_before_transport() -> Result<()> {
     assert!(first
         .headers
         .iter()
-        .any(|header| header.name_eq("accept") && header.value == "text/html"));
+        .any(|header| header.name_eq("accept") && header.value == "*/*"));
     Ok(())
 }
 

@@ -12,6 +12,7 @@ use crate::types::GatewayRequestKind;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct StoredCookie {
+    partition: CookiePartitionKey,
     name: String,
     value: String,
     domain: String,
@@ -24,6 +25,7 @@ struct StoredCookie {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct CookieKey {
+    partition: CookiePartitionKey,
     name: String,
     domain: String,
     path: String,
@@ -32,6 +34,7 @@ struct CookieKey {
 impl StoredCookie {
     fn key(&self) -> CookieKey {
         CookieKey {
+            partition: self.partition.clone(),
             name: self.name.clone(),
             domain: self.domain.clone(),
             path: self.path.clone(),
@@ -41,9 +44,16 @@ impl StoredCookie {
 
 impl CookieKey {
     fn matches(&self, cookie: &StoredCookie) -> bool {
-        self.name == cookie.name && self.domain == cookie.domain && self.path == cookie.path
+        self.partition == cookie.partition
+            && self.name == cookie.name
+            && self.domain == cookie.domain
+            && self.path == cookie.path
     }
 }
+
+/// Schemeful top-level site that partitions third-party cookie state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CookiePartitionKey(String);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SameSite {
@@ -59,7 +69,16 @@ enum SetCookieOutcome {
     Upsert(StoredCookie),
 }
 
-/// Virtual cookie jar keyed by target origin/domain/path.
+struct CookieRequestContext<'a> {
+    target: &'a Url,
+    partition: CookiePartitionKey,
+    source: Option<&'a Url>,
+    method: &'a str,
+    top_level_navigation: bool,
+    kind: GatewayRequestKind,
+}
+
+/// Virtual cookie jar double-keyed by top-level site and target origin/domain/path.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CookieJar {
     cookies: Vec<StoredCookie>,
@@ -76,7 +95,29 @@ impl CookieJar {
     /// The supplied instant is used for `Max-Age` and `Expires` decisions, so callers that own a
     /// clock can replay cookie transitions without reading ambient time.
     pub fn store_set_cookie_at(&mut self, origin: &Url, set_cookie: &str, now: i64) -> Result<()> {
-        let outcome = evaluate_set_cookie(origin, set_cookie, now)?;
+        let partition = cookie_partition_for_url(origin)?;
+        self.store_set_cookie_in_partition_at(partition, origin, set_cookie, now)
+    }
+
+    /// Store one upstream `Set-Cookie` under the request's schemeful top-level site.
+    pub fn store_set_cookie_for_request_at(
+        &mut self,
+        request: &GatewayRequest,
+        set_cookie: &str,
+        now: i64,
+    ) -> Result<()> {
+        let partition = cookie_partition_for_request(request)?;
+        self.store_set_cookie_in_partition_at(partition, &request.target, set_cookie, now)
+    }
+
+    fn store_set_cookie_in_partition_at(
+        &mut self,
+        partition: CookiePartitionKey,
+        origin: &Url,
+        set_cookie: &str,
+        now: i64,
+    ) -> Result<()> {
+        let outcome = evaluate_set_cookie(partition, origin, set_cookie, now)?;
         match outcome {
             SetCookieOutcome::Ignore => {}
             SetCookieOutcome::Remove(key) => self.remove_cookie(&key),
@@ -95,11 +136,14 @@ impl CookieJar {
     /// Build a `Cookie` request header for `target` at `now` milliseconds since Unix epoch.
     pub fn cookie_header_at(&self, target: &Url, now: i64) -> Option<String> {
         self.cookie_header_matching(
-            target,
-            None,
-            "GET",
-            true,
-            GatewayRequestKind::Navigation,
+            CookieRequestContext {
+                target,
+                partition: cookie_partition_for_url(target).ok()?,
+                source: None,
+                method: "GET",
+                top_level_navigation: true,
+                kind: GatewayRequestKind::Navigation,
+            },
             now,
         )
     }
@@ -111,43 +155,44 @@ impl CookieJar {
         request: &GatewayRequest,
         now: i64,
     ) -> Option<String> {
+        let partition = cookie_partition_for_request(request).ok()?;
         self.cookie_header_matching(
-            &request.target,
-            request.source_origin.as_ref(),
-            request.method.as_str(),
-            request.top_level_navigation,
-            request.kind,
+            CookieRequestContext {
+                target: &request.target,
+                partition,
+                source: request.source_origin.as_ref(),
+                method: request.method.as_str(),
+                top_level_navigation: request.top_level_navigation,
+                kind: request.kind,
+            },
             now,
         )
     }
 
     fn cookie_header_matching(
         &self,
-        target: &Url,
-        source: Option<&Url>,
-        method: &str,
-        top_level_navigation: bool,
-        kind: GatewayRequestKind,
+        context: CookieRequestContext<'_>,
         now: i64,
     ) -> Option<String> {
-        let host = target.host_str()?.to_ascii_lowercase();
-        let path = target.path();
-        let secure_request = target.scheme() == "https";
+        let host = context.target.host_str()?.to_ascii_lowercase();
+        let path = context.target.path();
+        let secure_request = context.target.scheme() == "https";
         let pairs: Vec<String> = self
             .cookies
             .iter()
             .filter(|cookie| {
                 !cookie_expired(cookie, now)
+                    && cookie.partition == context.partition
                     && (!cookie.secure || secure_request)
                     && domain_matches(cookie, &host)
                     && path_matches(cookie.path.as_str(), path)
                     && same_site_allows_cookie(
                         cookie,
-                        source,
-                        target,
-                        method,
-                        top_level_navigation,
-                        kind,
+                        context.source,
+                        context.target,
+                        context.method,
+                        context.top_level_navigation,
+                        context.kind,
                     )
             })
             .map(|cookie| format!("{}={}", cookie.name, cookie.value))
@@ -173,7 +218,12 @@ impl CookieJar {
     }
 }
 
-fn evaluate_set_cookie(origin: &Url, set_cookie: &str, now: i64) -> Result<SetCookieOutcome> {
+fn evaluate_set_cookie(
+    partition: CookiePartitionKey,
+    origin: &Url,
+    set_cookie: &str,
+    now: i64,
+) -> Result<SetCookieOutcome> {
     let Some(host) = origin.host_str() else {
         return Err(CookieFailure::MissingOriginHost.into());
     };
@@ -190,6 +240,7 @@ fn evaluate_set_cookie(origin: &Url, set_cookie: &str, now: i64) -> Result<SetCo
     }
 
     let mut cookie = StoredCookie {
+        partition,
         name: name.to_string(),
         value: value.trim().to_string(),
         domain: host.to_ascii_lowercase(),
@@ -335,6 +386,21 @@ fn site_for_same_site(url: &Url) -> Option<String> {
     }
 }
 
+fn cookie_partition_for_request(request: &GatewayRequest) -> Result<CookiePartitionKey> {
+    let top_level =
+        if request.kind == GatewayRequestKind::Navigation && request.top_level_navigation {
+            &request.target
+        } else {
+            request.source_origin.as_ref().unwrap_or(&request.target)
+        };
+    cookie_partition_for_url(top_level)
+}
+
+fn cookie_partition_for_url(url: &Url) -> Result<CookiePartitionKey> {
+    let site = site_for_same_site(url).ok_or(CookieFailure::MissingOriginHost)?;
+    Ok(CookiePartitionKey(format!("{}://{site}", url.scheme())))
+}
+
 fn domain_site_for_same_site(host: &str) -> Option<String> {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
     if host.is_empty() {
@@ -407,19 +473,39 @@ mod tests {
         let origin = Url::parse("https://example.com/app/index.html")?;
 
         assert!(matches!(
-            evaluate_set_cookie(&origin, "sid=one; Domain=example.com", 1_000)?,
+            evaluate_set_cookie(
+                cookie_partition_for_url(&origin)?,
+                &origin,
+                "sid=one; Domain=example.com",
+                1_000,
+            )?,
             SetCookieOutcome::Ignore
         ));
         assert!(matches!(
-            evaluate_set_cookie(&origin, "sid=one; SameSite=None", 1_000)?,
+            evaluate_set_cookie(
+                cookie_partition_for_url(&origin)?,
+                &origin,
+                "sid=one; SameSite=None",
+                1_000,
+            )?,
             SetCookieOutcome::Ignore
         ));
         assert!(matches!(
-            evaluate_set_cookie(&origin, "sid=gone; Path=/app; Max-Age=0", 1_000)?,
+            evaluate_set_cookie(
+                cookie_partition_for_url(&origin)?,
+                &origin,
+                "sid=gone; Path=/app; Max-Age=0",
+                1_000,
+            )?,
             SetCookieOutcome::Remove(key) if key.path == "/app"
         ));
         assert!(matches!(
-            evaluate_set_cookie(&origin, "sid=one; Path=/app; Max-Age=2", 1_000)?,
+            evaluate_set_cookie(
+                cookie_partition_for_url(&origin)?,
+                &origin,
+                "sid=one; Path=/app; Max-Age=2",
+                1_000,
+            )?,
             SetCookieOutcome::Upsert(cookie) if cookie.expires_at == Some(3_000)
         ));
         Ok(())
@@ -442,7 +528,44 @@ mod tests {
         );
 
         let insecure = Url::parse("http://example.com/app/page")?;
-        assert_eq!(jar.cookie_header(&insecure).as_deref(), Some("theme=dark"));
+        assert_eq!(jar.cookie_header(&insecure), None);
+        Ok(())
+    }
+
+    #[test]
+    fn third_party_cookies_are_partitioned_by_schemeful_top_level_site() -> Result<()> {
+        let mut jar = CookieJar::new();
+        let tracker = Url::parse("https://tracker.example/pixel")?;
+        let under_news =
+            GatewayRequest::new(tracker.clone(), "GET", GatewayRequestKind::Subresource)
+                .with_source_origin(Url::parse("https://news.example/")?);
+        let under_shop = GatewayRequest::new(tracker, "GET", GatewayRequestKind::Subresource)
+            .with_source_origin(Url::parse("https://shop.example/")?);
+
+        jar.store_set_cookie_for_request_at(
+            &under_news,
+            "id=news; Path=/; SameSite=None; Secure",
+            0,
+        )?;
+        assert_eq!(
+            jar.cookie_header_for_request_at(&under_news, 0).as_deref(),
+            Some("id=news")
+        );
+        assert_eq!(jar.cookie_header_for_request_at(&under_shop, 0), None);
+
+        jar.store_set_cookie_for_request_at(
+            &under_shop,
+            "id=shop; Path=/; SameSite=None; Secure",
+            0,
+        )?;
+        assert_eq!(
+            jar.cookie_header_for_request_at(&under_news, 0).as_deref(),
+            Some("id=news")
+        );
+        assert_eq!(
+            jar.cookie_header_for_request_at(&under_shop, 0).as_deref(),
+            Some("id=shop")
+        );
         Ok(())
     }
 
@@ -743,11 +866,15 @@ mod tests {
         jar.store_set_cookie(&origin, "bad=none; Path=/; SameSite=None")?;
         assert_eq!(jar.len(), 1);
 
-        jar.store_set_cookie(&origin, "sid=none; Path=/; SameSite=None; Secure")?;
         let request = crate::types::GatewayRequest::subresource(Url::parse(
             "https://auth.example.test/app/script.js",
         )?)
         .with_source_origin(Url::parse("https://shop.example.net/page")?);
+        jar.store_set_cookie_for_request_at(
+            &request,
+            "sid=none; Path=/; SameSite=None; Secure",
+            0,
+        )?;
 
         assert_eq!(
             jar.cookie_header_for_request(&request).as_deref(),

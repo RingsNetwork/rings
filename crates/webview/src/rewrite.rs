@@ -27,6 +27,8 @@ use self::budget::BoundedString;
 use self::srcset::visit_srcset_candidates;
 use self::srcset::SrcsetCandidate;
 
+const MAX_SRCDOC_NESTING_DEPTH: u8 = 8;
+
 /// Context required to rewrite one target document or stylesheet.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RewriteContext {
@@ -34,6 +36,7 @@ pub struct RewriteContext {
     document_url: Url,
     bootstrap_script: Option<String>,
     bootstrap_serialization: BootstrapSerialization,
+    srcdoc_depth: u8,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -51,6 +54,7 @@ impl RewriteContext {
             document_url,
             bootstrap_script: None,
             bootstrap_serialization: BootstrapSerialization::Html,
+            srcdoc_depth: 0,
         }
     }
 
@@ -87,6 +91,7 @@ impl RewriteContext {
             self.document_url.clone(),
             self.bootstrap_script.as_deref(),
             limit,
+            self.srcdoc_depth,
         );
         let style_text = RefCell::new(String::new());
         let settings = RewriteStrSettings::new()
@@ -181,6 +186,7 @@ struct HtmlRewriteState<'a> {
     base_href_seen: Cell<bool>,
     bootstrap_script: Option<&'a str>,
     output_limit: usize,
+    srcdoc_depth: u8,
 }
 
 impl<'a> HtmlRewriteState<'a> {
@@ -189,6 +195,7 @@ impl<'a> HtmlRewriteState<'a> {
         document_url: Url,
         bootstrap_script: Option<&'a str>,
         output_limit: usize,
+        srcdoc_depth: u8,
     ) -> Self {
         Self {
             gateway_prefix,
@@ -196,6 +203,7 @@ impl<'a> HtmlRewriteState<'a> {
             base_href_seen: Cell::new(false),
             bootstrap_script,
             output_limit,
+            srcdoc_depth,
         }
     }
 
@@ -226,8 +234,14 @@ impl<'a> HtmlRewriteState<'a> {
     }
 
     fn rewrite_srcdoc(&self, html: &str) -> Result<String> {
+        if self.srcdoc_depth >= MAX_SRCDOC_NESTING_DEPTH {
+            return Err(WebviewError::SrcdocNestingLimit {
+                max_depth: MAX_SRCDOC_NESTING_DEPTH,
+            });
+        }
         let base = self.current_base.borrow().clone();
         let mut context = RewriteContext::new(self.gateway_prefix.clone(), base);
+        context.srcdoc_depth = self.srcdoc_depth + 1;
         if let Some(script) = self.bootstrap_script {
             context = context.with_bootstrap_script(script);
         }
@@ -842,6 +856,24 @@ mod tests {
         assert!(rewritten.contains("data-rings-webview-bootstrap"));
         assert_absent(&rewritten, "https://example.test/x.png");
         assert_absent(&rewritten, "href=\"next.html\"");
+        Ok(())
+    }
+
+    #[test]
+    fn html_rejects_srcdoc_nesting_beyond_the_explicit_bound() -> Result<()> {
+        let ctx = context()?;
+        let mut html = "<p>leaf</p>".to_string();
+        for _ in 0..=MAX_SRCDOC_NESTING_DEPTH {
+            let escaped = html.replace('&', "&amp;").replace('"', "&quot;");
+            html = format!(r#"<iframe srcdoc="{escaped}"></iframe>"#);
+        }
+
+        assert!(matches!(
+            ctx.rewrite_html(&html),
+            Err(WebviewError::SrcdocNestingLimit {
+                max_depth: MAX_SRCDOC_NESTING_DEPTH
+            })
+        ));
         Ok(())
     }
 

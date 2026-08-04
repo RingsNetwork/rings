@@ -65,6 +65,7 @@ use crate::error::Result;
 use crate::extension::ext::Scope;
 use crate::onion::circuit::send_backward;
 use crate::onion::circuit::OnionAuthenticatedPayload;
+use crate::onion::circuit::OnionBackwardPath;
 use crate::onion::circuit::OnionBackwardSequence;
 use crate::onion::circuit::OnionCircuitExitFrame;
 #[cfg(rings_browser)]
@@ -559,9 +560,12 @@ pub(crate) async fn try_handle_https_exit_payload(
     send_backward(
         scope,
         session_sk,
-        frame.circuit_id,
-        frame.return_peer,
-        frame.client,
+        OnionBackwardPath::new(
+            frame.circuit_id,
+            frame.return_peer,
+            frame.return_session_public_key,
+            frame.client,
+        ),
         OnionBackwardSequence::FIRST,
         encode_https_payload(response)?,
     )

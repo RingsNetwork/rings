@@ -1,6 +1,29 @@
 //! A bunch of wrap errors.
+use rings_core::dht::Did;
+
+use crate::onion::OnionProxyTargetError;
 use crate::onion::OnionRouteError;
 use crate::prelude::rings_core;
+
+/// Bounded onion/relay queue whose admission failed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OnionQueueKind {
+    /// Terminal relay-control sends.
+    RelayControl,
+    /// Onion data-plane sends.
+    CircuitData,
+}
+
+/// Algebraic reason a bounded onion/relay queue rejected one item.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OnionQueueAdmissionReason {
+    /// The queue-wide bound was reached.
+    GlobalFull,
+    /// One peer reached its isolated share.
+    PeerFull,
+    /// A resource counter could not represent its successor.
+    CounterOverflow,
+}
 
 /// A wrap `Result` contains custom errors.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -239,6 +262,33 @@ pub enum Error {
     /// A local onion proxy request did not complete before its deadline.
     #[error("Onion proxy request timed out")]
     OnionProxyRequestTimedOut = 1603,
+    /// A bounded onion or relay send queue rejected one item.
+    #[error("{queue:?} queue rejected peer {peer}: {reason:?}")]
+    OnionQueueAdmission {
+        /// Queue whose bound was reached.
+        queue: OnionQueueKind,
+        /// Peer whose item was rejected.
+        peer: Did,
+        /// Exact admission relation that failed.
+        reason: OnionQueueAdmissionReason,
+    } = 1604,
+    /// An onion proxy authority failed closed parsing.
+    #[error("Invalid onion proxy target: {0}")]
+    OnionProxyTarget(#[from] OnionProxyTargetError) = 1605,
+    /// Runtime DNS resolution of an admitted onion target failed.
+    #[error("Failed to resolve onion target {authority:?}: {source}")]
+    OnionTargetResolve {
+        /// Canonical target authority.
+        authority: String,
+        /// Resolver I/O failure.
+        source: std::io::Error,
+    } = 1606,
+    /// Runtime DNS resolution returned no addresses.
+    #[error("Onion target {authority:?} resolved no addresses")]
+    OnionTargetResolvedEmpty {
+        /// Canonical target authority.
+        authority: String,
+    } = 1607,
 }
 
 impl Error {

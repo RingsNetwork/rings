@@ -78,13 +78,10 @@ pub enum OnionRouteError {
         /// Number of edge ids carried by the circuit path.
         edge_count: usize,
     },
-    /// A relay layer carries an invalid hop budget.
-    InvalidRelayHopBudget {
-        /// Remaining encrypted hops claimed by the relay layer.
-        remaining_hops: u8,
-        /// Maximum relay hop budget accepted by this node.
-        max_hops: u8,
-    },
+    /// A message cannot fit in the largest supported encrypted cell class.
+    CellPayloadTooLarge,
+    /// A decrypted encrypted cell has an invalid length or internal framing.
+    InvalidCell,
     /// A live relay return edge already belongs to another previous hop.
     ReturnEdgeConflict,
     /// The relay return table is full.
@@ -198,13 +195,10 @@ impl fmt::Display for OnionRouteError {
                 f,
                 "onion circuit path has {edge_count} edge ids for {hop_count} route hops"
             ),
-            Self::InvalidRelayHopBudget {
-                remaining_hops,
-                max_hops,
-            } => write!(
-                f,
-                "invalid onion relay hop budget {remaining_hops}; maximum is {max_hops}"
-            ),
+            Self::CellPayloadTooLarge => {
+                f.write_str("onion message exceeds the largest encrypted cell class")
+            }
+            Self::InvalidCell => f.write_str("invalid encrypted onion cell"),
             Self::ReturnEdgeConflict => {
                 f.write_str("onion relay return edge already belongs to another previous hop")
             }
