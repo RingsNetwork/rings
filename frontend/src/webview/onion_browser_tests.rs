@@ -35,11 +35,11 @@ const TEST_DHT_FINGER_TABLE_SIZE: usize = 8;
 const TEST_NETWORK_ID: u32 = 665;
 const TEST_ICE_SERVERS: &str = "stun://stun.l.google.com:19302";
 const TEST_STABILIZE_INTERVAL_SECS: u64 = 15;
-const FIXTURE_AUTHORITY: &str = "fixture.rings.test:443";
-const FIXTURE_INDEX: &str = "https://fixture.rings.test/index.html";
-const FIXTURE_CSS: &str = "https://fixture.rings.test/site.css";
-const FIXTURE_API: &str = "https://fixture.rings.test/api/data";
-const FIXTURE_SUBMIT: &str = "https://fixture.rings.test/forms/submit";
+// Invariant: browser onion exits admit only public IP literals because the browser fetch adapter
+// cannot pin a hostname to a previously validated DNS result. The mocked fetch boundary prevents
+// this fixture address from reaching the network while preserving the production admission model.
+const FIXTURE_HOST: &str = "1.1.1.1";
+const FIXTURE_ORIGIN_GLOBAL: &str = "__ringsWebviewOnionFixtureOrigin";
 
 #[derive(Debug, Deserialize)]
 struct FetchCall {
@@ -65,6 +65,11 @@ async fn webview_node_fetches_page_resources_through_browser_onion_exit() {
 
 async fn run_browser_onion_webview_flow() -> WebviewResult<()> {
     let storage_suffix = uuid::Uuid::new_v4().to_simple().to_string();
+    let fixture_authority = fixture_authority();
+    let fixture_index = fixture_url("/index.html");
+    let fixture_css = fixture_url("/site.css");
+    let fixture_api = fixture_url("/api/data");
+    let fixture_submit = fixture_url("/forms/submit");
     let client = browser_provider(
         &format!("rings-webview-onion-client-{storage_suffix}"),
         None,
@@ -72,7 +77,7 @@ async fn run_browser_onion_webview_flow() -> WebviewResult<()> {
     .await?;
     let exit = browser_provider(
         &format!("rings-webview-onion-exit-{storage_suffix}"),
-        Some(FIXTURE_AUTHORITY),
+        Some(fixture_authority.as_str()),
     )
     .await?;
     let _client_listener = client.listen();
@@ -85,21 +90,21 @@ async fn run_browser_onion_webview_flow() -> WebviewResult<()> {
         controlled_origin()?,
         WebviewOnionSettings::new(true),
     )?;
-    let index_target = TargetUrl::parse(FIXTURE_INDEX)?;
+    let index_target = TargetUrl::parse(fixture_index.as_str())?;
     let index = retry_gateway_navigation(&node, &index_target).await?;
     expect_status(&index, "index navigation", 200)?;
     let index_body = utf8_body(index)?;
     assert_contains(&index_body, "Rings Onion Fixture")?;
     assert_contains(&index_body, BOOTSTRAP_MARKER)?;
-    assert_contains(&index_body, gateway_path(FIXTURE_CSS)?.as_str())?;
+    assert_contains(&index_body, gateway_path(fixture_css.as_str())?.as_str())?;
     assert_contains(
         &index_body,
-        gateway_path("https://fixture.rings.test/hero.png")?.as_str(),
+        gateway_path(fixture_url("/hero.png").as_str())?.as_str(),
     )?;
 
     let css = expect_response(
         node.handle(WebviewHostRequest::subresource(
-            controlled_gateway_target(FIXTURE_CSS)?,
+            controlled_gateway_target(fixture_css.as_str())?,
             Some(index_target.clone()),
             "GET",
             Vec::new(),
@@ -112,12 +117,12 @@ async fn run_browser_onion_webview_flow() -> WebviewResult<()> {
     let css_body = utf8_body(css)?;
     assert_contains(
         &css_body,
-        gateway_path("https://fixture.rings.test/bg.png")?.as_str(),
+        gateway_path(fixture_url("/bg.png").as_str())?.as_str(),
     )?;
 
     let api = expect_response(
         node.handle(WebviewHostRequest::fetch(
-            controlled_gateway_target(FIXTURE_API)?,
+            controlled_gateway_target(fixture_api.as_str())?,
             index_target.clone(),
             "GET",
             vec![GatewayHeader::new("accept", "application/json")?],
@@ -131,7 +136,7 @@ async fn run_browser_onion_webview_flow() -> WebviewResult<()> {
 
     let submit = expect_response(
         node.handle(WebviewHostRequest::xhr(
-            controlled_gateway_target(FIXTURE_SUBMIT)?,
+            controlled_gateway_target(fixture_submit.as_str())?,
             index_target,
             "POST",
             vec![GatewayHeader::new("content-type", "text/plain")?],
@@ -144,11 +149,23 @@ async fn run_browser_onion_webview_flow() -> WebviewResult<()> {
     assert_contains(&utf8_body(submit)?, "name=value")?;
 
     let calls = fetch_calls()?;
-    assert_fetch_call(&calls, FIXTURE_INDEX, "GET", None)?;
-    assert_fetch_call(&calls, FIXTURE_CSS, "GET", None)?;
-    assert_fetch_call(&calls, FIXTURE_API, "GET", None)?;
-    assert_fetch_call(&calls, FIXTURE_SUBMIT, "POST", Some("name=value"))?;
+    assert_fetch_call(&calls, fixture_index.as_str(), "GET", None)?;
+    assert_fetch_call(&calls, fixture_css.as_str(), "GET", None)?;
+    assert_fetch_call(&calls, fixture_api.as_str(), "GET", None)?;
+    assert_fetch_call(&calls, fixture_submit.as_str(), "POST", Some("name=value"))?;
     Ok(())
+}
+
+fn fixture_origin() -> String {
+    format!("https://{FIXTURE_HOST}")
+}
+
+fn fixture_authority() -> String {
+    format!("{FIXTURE_HOST}:443")
+}
+
+fn fixture_url(path: &str) -> String {
+    format!("{}{path}", fixture_origin())
 }
 
 async fn browser_provider(
@@ -401,10 +418,19 @@ fn fetch_calls() -> WebviewResult<Vec<FetchCall>> {
 }
 
 fn install_mock_exit_fetch() -> WebviewResult<()> {
-    js_sys::eval(
+    let global = js_sys::global();
+    Reflect::set(
+        global.as_ref(),
+        JsValue::from_str(FIXTURE_ORIGIN_GLOBAL).as_ref(),
+        JsValue::from_str(fixture_origin().as_str()).as_ref(),
+    )
+    .map_err(js_webview_error)?;
+    let installed = js_sys::eval(
         r#"
 (() => {
   const original = globalThis.fetch;
+  const fixtureOrigin = globalThis.__ringsWebviewOnionFixtureOrigin;
+  if (!fixtureOrigin) throw new Error("missing browser onion fixture origin");
   globalThis.__ringsWebviewOriginalFetch = original;
   globalThis.__ringsWebviewOnionFetchLog = [];
   const decodeBody = (body) => {
@@ -424,7 +450,7 @@ fn install_mock_exit_fetch() -> WebviewResult<()> {
     let status = 200;
     let contentType = "text/plain; charset=utf-8";
     let responseBody = "";
-    if (parsed.origin !== "https://fixture.rings.test") {
+    if (parsed.origin !== fixtureOrigin) {
       status = 404;
       responseBody = `unexpected fixture target ${url}`;
     } else if (parsed.pathname === "/index.html") {
@@ -466,7 +492,14 @@ fn install_mock_exit_fetch() -> WebviewResult<()> {
 "#,
     )
     .map(|_| ())
-    .map_err(js_webview_error)
+    .map_err(js_webview_error);
+    if installed.is_err() {
+        let _deleted = Reflect::delete_property(
+            global.as_ref(),
+            JsValue::from_str(FIXTURE_ORIGIN_GLOBAL).as_ref(),
+        );
+    }
+    installed
 }
 
 fn restore_mock_exit_fetch() -> WebviewResult<()> {
@@ -477,6 +510,8 @@ fn restore_mock_exit_fetch() -> WebviewResult<()> {
     globalThis.fetch = globalThis.__ringsWebviewOriginalFetch;
     delete globalThis.__ringsWebviewOriginalFetch;
   }
+  delete globalThis.__ringsWebviewOnionFetchLog;
+  delete globalThis.__ringsWebviewOnionFixtureOrigin;
 })();
 "#,
     )
