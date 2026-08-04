@@ -38,9 +38,7 @@ export type ServiceWorkerFetchEventFixture = {
     readonly mode: string;
     readonly destination: string;
     readonly headers: Headers;
-    clone: () => {
-      arrayBuffer: () => Promise<ArrayBuffer>;
-    };
+    readonly body: ReadableStream<Uint8Array> | null;
   };
 };
 
@@ -67,6 +65,7 @@ export type ServiceWorkerMessageEventFixture = {
 
 /** Service-worker symbols exported only inside the test VM. */
 export type ServiceWorkerTestApi = {
+  readonly gatewayContentSecurityPolicy: string;
   readonly controlledNavigationBody: (
     request: { readonly kind: string; readonly topLevelNavigation?: boolean },
     status: number,
@@ -89,9 +88,18 @@ export type ServiceWorkerTestApi = {
     startedAt: number,
   ) => Promise<Response>;
   readonly handleGatewayFetchWithTimeout: (event: ServiceWorkerFetchEventFixture) => Promise<Response>;
+  readonly pruneTrackedClientState: () => Promise<void>;
   readonly rememberNavigationClientTarget: (
     event: ServiceWorkerNavigationEventFixture,
     request: ServiceWorkerNavigationRequestFixture,
+  ) => boolean;
+  readonly rememberShellNavigationClient: (
+    event: {
+      readonly clientId?: string;
+      readonly resultingClientId?: string;
+      readonly request: { readonly mode: string; readonly destination: string };
+    },
+    url: URL,
   ) => boolean;
   readonly rememberClientSourceTargetForTest: (clientId: string, sourceTarget: string) => boolean;
   readonly rememberTrustedShellClientForTest: (clientId: string) => boolean;
@@ -184,9 +192,7 @@ export function gatewayFetchEvent(target = "https://example.test/"): ServiceWork
       mode: "navigate",
       destination: "document",
       headers: new Headers(),
-      clone: () => ({
-        arrayBuffer: async () => new ArrayBuffer(0),
-      }),
+      body: null,
     },
   };
 }
@@ -207,15 +213,19 @@ export function runtimeGatewayFetchEvent(target = "https://example.test/api"): S
         "X-Rings-Webview-Target": target,
         "X-Target-Header": "kept",
       }),
-      clone: () => ({
-        arrayBuffer: async () => {
-          const copy = new ArrayBuffer(body.byteLength);
-          new Uint8Array(copy).set(body);
-          return copy;
-        },
-      }),
+      body: byteStream(body),
     },
   };
+}
+
+/** Return one request body stream owned by the fixture request. */
+function byteStream(body: Uint8Array): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(body.slice());
+      controller.close();
+    },
+  });
 }
 
 /** Decode one UTF-8 body produced by the service worker. */

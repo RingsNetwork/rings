@@ -25,7 +25,11 @@ impl FixtureTransport {
 
 #[async_trait(?Send)]
 impl GatewayTransport for FixtureTransport {
-    async fn send(&self, request: GatewayRequest) -> WebviewResult<GatewayResponse> {
+    async fn send(
+        &self,
+        request: GatewayRequest,
+        _body_limit: rings_webview::GatewayResponseBodyLimit,
+    ) -> WebviewResult<GatewayResponse> {
         self.requests.borrow_mut().push(request);
         let request = self
             .requests
@@ -55,7 +59,10 @@ fn fixture_host() -> WebviewResult<(FixtureHost, RecordedRequests)> {
         policy,
         gateway: ConcurrentWebviewGateway::new(prefix, FixtureTransport::new(requests.clone()))
             .with_request_bootstrap(webview_bootstrap),
-        limiter: GatewayRequestLimiter::new(MAX_CONCURRENT_GATEWAY_REQUESTS),
+        limiter: GatewayRequestLimiter::new(
+            MAX_CONCURRENT_GATEWAY_REQUESTS,
+            MAX_QUEUED_GATEWAY_REQUESTS,
+        ),
     };
     Ok((host, requests))
 }
@@ -80,8 +87,12 @@ fn browser_gateway_request_ids_are_positive_safe_integers() {
 
 #[wasm_bindgen_test]
 fn cancelled_woken_gateway_waiter_returns_its_transferred_permit() {
-    let limiter = GatewayRequestLimiter::new(1);
+    let limiter = GatewayRequestLimiter::new(1, 1);
     let active = futures::executor::block_on(limiter.acquire());
+    assert!(active.is_ok(), "the first permit must be admitted");
+    let Some(active) = active.ok() else {
+        return;
+    };
     let waiting_limiter = limiter.clone();
     let mut waiting = Box::pin(waiting_limiter.acquire());
     let waker = noop_waker();
@@ -91,6 +102,33 @@ fn cancelled_woken_gateway_waiter_returns_its_transferred_permit() {
     drop(active);
     drop(waiting);
 
+    let state = limiter.state.borrow();
+    assert_eq!(state.available, 1);
+    assert!(state.waiters.is_empty());
+}
+
+#[wasm_bindgen_test]
+fn gateway_waiter_queue_fails_closed_at_its_bound() {
+    let limiter = GatewayRequestLimiter::new(1, 1);
+    let active = futures::executor::block_on(limiter.acquire());
+    assert!(active.is_ok(), "the active permit must be admitted");
+    let Some(active) = active.ok() else {
+        return;
+    };
+    let waiting_limiter = limiter.clone();
+    let mut waiting = Box::pin(waiting_limiter.acquire());
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    assert!(matches!(waiting.as_mut().poll(&mut context), Poll::Pending));
+
+    assert!(matches!(
+        futures::executor::block_on(limiter.acquire()),
+        Err(GatewayRequestAdmissionError::QueueFull)
+    ));
+    assert_eq!(limiter.state.borrow().waiters.len(), 1);
+
+    drop(waiting);
+    drop(active);
     let state = limiter.state.borrow();
     assert_eq!(state.available, 1);
     assert!(state.waiters.is_empty());

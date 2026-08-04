@@ -104,7 +104,11 @@ mod tests {
 
     #[async_trait(?Send)]
     impl GatewayTransport for FixtureTransport {
-        async fn send(&self, request: GatewayRequest) -> Result<GatewayResponse> {
+        async fn send(
+            &self,
+            request: GatewayRequest,
+            _body_limit: crate::transport::GatewayResponseBodyLimit,
+        ) -> Result<GatewayResponse> {
             self.requests.borrow_mut().push(request);
             GatewayResponse::new(
                 200,

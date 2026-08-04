@@ -91,8 +91,8 @@ impl CookieJar {
                         "/".to_string()
                     };
                 } else if key.eq_ignore_ascii_case("max-age") {
-                    saw_max_age = true;
                     if let Ok(seconds) = value.trim().parse::<i64>() {
+                        saw_max_age = true;
                         if seconds <= 0 {
                             delete_cookie = true;
                             cookie.expires_at = None;
@@ -352,7 +352,7 @@ fn default_cookie_path(path: &str) -> String {
     if prefix.is_empty() {
         "/".to_string()
     } else {
-        format!("{prefix}/")
+        prefix.to_string()
     }
 }
 
@@ -457,6 +457,39 @@ mod tests {
         let target = Url::parse("https://example.com/app/page")?;
         assert_eq!(jar.cookie_header(&target), None);
         assert!(jar.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_max_age_does_not_suppress_valid_expires() -> Result<()> {
+        let mut jar = CookieJar::new();
+        let origin = Url::parse("https://example.com/app/index.html")?;
+
+        jar.store_set_cookie_at(
+            &origin,
+            "sid=one; Max-Age=not-a-number; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
+            1_000,
+        )?;
+
+        assert!(jar.is_empty_at(1_000));
+        Ok(())
+    }
+
+    #[test]
+    fn default_cookie_path_uses_directory_without_trailing_slash() -> Result<()> {
+        let mut jar = CookieJar::new();
+        let origin = Url::parse("https://example.com/app/index.html")?;
+        jar.store_set_cookie(&origin, "sid=one")?;
+
+        assert_eq!(
+            jar.cookie_header(&Url::parse("https://example.com/app/page")?)
+                .as_deref(),
+            Some("sid=one")
+        );
+        assert_eq!(
+            jar.cookie_header(&Url::parse("https://example.com/application")?),
+            None
+        );
         Ok(())
     }
 

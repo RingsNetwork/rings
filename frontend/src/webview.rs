@@ -45,6 +45,7 @@ pub(crate) use self::browser_gateway::register_browser_gateway;
 
 pub(crate) const GATEWAY_PREFIX: &str = "/webview/";
 const MAX_CONCURRENT_GATEWAY_REQUESTS: usize = 6;
+const MAX_QUEUED_GATEWAY_REQUESTS: usize = 32;
 const WEBVIEW_OVERLAY_LOADER: &str = r#"
 (() => {
   "use strict";
@@ -565,7 +566,10 @@ impl WebviewNode {
             host: Rc::new(WebviewGatewayHost {
                 policy,
                 gateway,
-                limiter: GatewayRequestLimiter::new(MAX_CONCURRENT_GATEWAY_REQUESTS),
+                limiter: GatewayRequestLimiter::new(
+                    MAX_CONCURRENT_GATEWAY_REQUESTS,
+                    MAX_QUEUED_GATEWAY_REQUESTS,
+                ),
             }),
         })
     }
@@ -589,7 +593,12 @@ where T: GatewayTransport
             GatewayRoute::AllowControlled => Ok(WebviewHostOutcome::AllowControlled),
             GatewayRoute::Redirect(location) => Ok(WebviewHostOutcome::Redirect(location)),
             GatewayRoute::Serve(target) => {
-                let _permit = self.limiter.acquire().await;
+                let _permit = self.limiter.acquire().await.map_err(|error| {
+                    WebviewError::GatewayFailure(GatewayFailure::new(
+                        GatewayFailureCode::GatewayOverloaded,
+                        error.to_string(),
+                    ))
+                })?;
                 self.gateway
                     .send(request.into_gateway_request(target))
                     .await
@@ -607,19 +616,32 @@ struct GatewayRequestLimiter {
 
 struct GatewayRequestLimiterState {
     available: usize,
-    next_waiter_id: u64,
+    maximum_waiters: usize,
     waiters: VecDeque<GatewayRequestWaiter>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GatewayRequestAdmissionError {
+    QueueFull,
+}
+
+impl std::fmt::Display for GatewayRequestAdmissionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::QueueFull => formatter.write_str("local gateway admission queue is full"),
+        }
+    }
+}
+
 struct GatewayRequestWaiter {
-    id: u64,
+    owner: Rc<()>,
     granted: Rc<Cell<bool>>,
     sender: oneshot::Sender<()>,
 }
 
 struct GatewayRequestWaiterGuard {
     limiter: GatewayRequestLimiter,
-    id: u64,
+    owner: Rc<()>,
     granted: Rc<Cell<bool>>,
     armed: bool,
 }
@@ -638,66 +660,67 @@ impl Drop for GatewayRequestWaiterGuard {
         if self.granted.get() {
             self.limiter.release();
         } else {
-            self.limiter.cancel_waiter(self.id);
+            self.limiter.cancel_waiter(&self.owner);
         }
     }
 }
 
 impl GatewayRequestLimiter {
-    fn new(maximum: usize) -> Self {
+    fn new(maximum: usize, maximum_waiters: usize) -> Self {
         Self {
             state: Rc::new(RefCell::new(GatewayRequestLimiterState {
                 available: maximum,
-                next_waiter_id: 1,
+                maximum_waiters,
                 waiters: VecDeque::new(),
             })),
         }
     }
 
-    async fn acquire(&self) -> GatewayRequestPermit {
+    async fn acquire(&self) -> Result<GatewayRequestPermit, GatewayRequestAdmissionError> {
         loop {
             let waiting = {
                 let mut state = self.state.borrow_mut();
                 if state.available > 0 {
                     state.available -= 1;
-                    None
+                    Ok(None)
+                } else if state.waiters.len() >= state.maximum_waiters {
+                    Err(GatewayRequestAdmissionError::QueueFull)
                 } else {
-                    let id = state.next_waiter_id;
-                    state.next_waiter_id = state.next_waiter_id.wrapping_add(1).max(1);
+                    let owner = Rc::new(());
                     let granted = Rc::new(Cell::new(false));
                     let (sender, receiver) = oneshot::channel();
                     state.waiters.push_back(GatewayRequestWaiter {
-                        id,
+                        owner: owner.clone(),
                         granted: granted.clone(),
                         sender,
                     });
-                    Some((receiver, GatewayRequestWaiterGuard {
+                    Ok(Some((receiver, GatewayRequestWaiterGuard {
                         limiter: self.clone(),
-                        id,
+                        owner,
                         granted,
                         armed: true,
-                    }))
+                    })))
                 }
-            };
+            }?;
             let Some((receiver, mut guard)) = waiting else {
-                return GatewayRequestPermit {
+                return Ok(GatewayRequestPermit {
                     limiter: self.clone(),
-                };
+                });
             };
             if receiver.await.is_ok() {
                 guard.disarm();
-                return GatewayRequestPermit {
+                return Ok(GatewayRequestPermit {
                     limiter: self.clone(),
-                };
+                });
             }
         }
     }
 
-    fn cancel_waiter(&self, id: u64) {
+    fn cancel_waiter(&self, owner: &Rc<()>) {
         self.state
             .borrow_mut()
             .waiters
-            .retain(|waiter| waiter.id != id);
+            .retain(|waiter| !Rc::ptr_eq(&waiter.owner, owner));
     }
 
     fn release(&self) {
@@ -730,13 +753,22 @@ struct OnionGatewayTransport {
 
 #[async_trait(?Send)]
 impl GatewayTransport for OnionGatewayTransport {
-    async fn send(&self, request: GatewayRequest) -> WebviewResult<GatewayResponse> {
+    async fn send(
+        &self,
+        request: GatewayRequest,
+        body_limit: rings_webview::GatewayResponseBodyLimit,
+    ) -> WebviewResult<GatewayResponse> {
         let options = self.onion_settings.options();
         let should_trace = should_trace_onion_route(request.kind);
         let debug_target = request.target.to_string();
         let debug_source_target = request.source_target.as_ref().map(Url::to_string);
         let debug_kind = request.kind;
         let started = js_sys::Date::now();
+        debug_assert_eq!(
+            body_limit,
+            rings_webview::GatewayResponseBodyLimit::DEFAULT,
+            "the Rings onion transport enforces the gateway's fixed 8 MiB streaming limit"
+        );
         let response_result = onion::request(&self.provider, onion::OnionProxyHttpRequest {
             url: debug_target.clone(),
             method: request.method,

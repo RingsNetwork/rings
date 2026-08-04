@@ -65,6 +65,22 @@ pub enum TransportFailure {
     /// A prepared request session was sent more than once.
     #[error("gateway request session was sent twice")]
     RequestSessionSentTwice,
+    /// A caller request exceeds the bounded gateway body budget.
+    #[error("gateway request body has {actual} bytes, exceeding the {limit}-byte limit")]
+    RequestBodyTooLarge {
+        /// Body length supplied by the caller.
+        actual: usize,
+        /// Maximum request body length accepted by the gateway.
+        limit: usize,
+    },
+    /// A transport response exceeds the bounded gateway body budget.
+    #[error("gateway response body has {actual} bytes, exceeding the {limit}-byte limit")]
+    ResponseBodyTooLarge {
+        /// Body length returned by the transport.
+        actual: usize,
+        /// Maximum body length accepted by the gateway.
+        limit: usize,
+    },
     /// A concrete transport adapter failed after policy admission.
     #[error("{detail}")]
     Adapter {
@@ -91,6 +107,8 @@ impl TransportFailure {
 pub enum GatewayFailureCode {
     /// The upstream gateway transport failed.
     GatewayTransportFailed,
+    /// The local gateway's bounded admission queue is full.
+    GatewayOverloaded,
     /// No live onion HTTPS exit is available.
     OnionExitUnavailable,
     /// No onion route exists for the requested target.
@@ -104,6 +122,7 @@ impl GatewayFailureCode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::GatewayTransportFailed => "gateway_transport_failed",
+            Self::GatewayOverloaded => "gateway_overloaded",
             Self::OnionExitUnavailable => "onion_exit_unavailable",
             Self::OnionRouteUnavailable => "onion_route_unavailable",
             Self::OnionRequestTimedOut => "onion_request_timed_out",
@@ -114,6 +133,7 @@ impl GatewayFailureCode {
     pub const fn status(self) -> u16 {
         match self {
             Self::GatewayTransportFailed => 502,
+            Self::GatewayOverloaded => 503,
             Self::OnionExitUnavailable | Self::OnionRouteUnavailable => 503,
             Self::OnionRequestTimedOut => 504,
         }
@@ -123,6 +143,7 @@ impl GatewayFailureCode {
     pub const fn summary(self) -> &'static str {
         match self {
             Self::GatewayTransportFailed => "Gateway transport failed.",
+            Self::GatewayOverloaded => "The local gateway is overloaded.",
             Self::OnionExitUnavailable => "No live HTTPS onion exit is available.",
             Self::OnionRouteUnavailable => {
                 "No onion route is currently available for the requested target."
@@ -194,6 +215,12 @@ mod tests {
                 502,
                 "gateway_transport_failed",
                 "Gateway transport failed.",
+            ),
+            (
+                GatewayFailureCode::GatewayOverloaded,
+                503,
+                "gateway_overloaded",
+                "The local gateway is overloaded.",
             ),
             (
                 GatewayFailureCode::OnionExitUnavailable,
@@ -338,6 +365,12 @@ pub enum WebviewError {
     UnrewritableTextEncoding {
         /// Upstream response media type that requires rewriting.
         content_type: String,
+    },
+    /// A top-level response has no media type that the gateway can safely rewrite or pass through.
+    #[error("unsafe navigation response media type {content_type:?}")]
+    UnsafeNavigationMediaType {
+        /// Normalized upstream media type, or `None` when the header was absent.
+        content_type: Option<String>,
     },
     /// Browser integration failed.
     #[cfg(feature = "browser")]

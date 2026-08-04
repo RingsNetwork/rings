@@ -89,6 +89,8 @@ pub enum OnionRouteError {
     ReturnEdgeConflict,
     /// The relay return table is full.
     RelayTableFull,
+    /// One authenticated previous hop exhausted its share of the relay return table.
+    RelayPeerTableFull,
     /// A backward payload signer is not the selected exit DID.
     BackwardSignerMismatch,
     /// A backward payload signer account key is not the selected exit key.
@@ -101,8 +103,10 @@ pub enum OnionRouteError {
     ForwardReplay,
     /// A forward payload reached the exit after its authenticated expiry.
     ForwardPayloadExpired,
-    /// A backward nonce has already delivered a client-side action.
+    /// A backward sequence number has already delivered a client-side action.
     BackwardReplay,
+    /// A circuit direction exhausted its monotonic sequence space.
+    SequenceExhausted,
     /// A backward payload carries a return id that does not belong to the local client state.
     BackwardReturnIdMismatch,
     /// A backward payload decoded to a shape that no client adapter may accept.
@@ -117,6 +121,8 @@ pub enum OnionRouteError {
     UnknownTcpStream,
     /// A TCP stream channel has already closed.
     TcpStreamClosed,
+    /// A TCP stream's bounded inbound queue cannot accept another frame.
+    TcpStreamBackpressure,
     /// A duplicate TCP open targeted a live circuit.
     DuplicateTcpOpen,
     /// A received TCP return peer differs from the selected route peer.
@@ -203,6 +209,9 @@ impl fmt::Display for OnionRouteError {
                 f.write_str("onion relay return edge already belongs to another previous hop")
             }
             Self::RelayTableFull => f.write_str("onion relay circuit table is full"),
+            Self::RelayPeerTableFull => {
+                f.write_str("onion relay circuit table quota for previous hop is full")
+            }
             Self::BackwardSignerMismatch => {
                 f.write_str("onion backward payload signer is not the selected exit")
             }
@@ -218,6 +227,7 @@ impl fmt::Display for OnionRouteError {
             Self::ForwardReplay => f.write_str("replayed onion forward payload"),
             Self::ForwardPayloadExpired => f.write_str("expired onion forward payload"),
             Self::BackwardReplay => f.write_str("replayed onion TCP backward payload"),
+            Self::SequenceExhausted => f.write_str("onion circuit sequence exhausted"),
             Self::BackwardReturnIdMismatch => {
                 f.write_str("onion backward payload return id mismatch")
             }
@@ -233,6 +243,9 @@ impl fmt::Display for OnionRouteError {
             Self::TcpOpenTimedOut => f.write_str("onion TCP open timed out"),
             Self::UnknownTcpStream => f.write_str("unknown onion TCP stream"),
             Self::TcpStreamClosed => f.write_str("onion TCP stream is closed"),
+            Self::TcpStreamBackpressure => {
+                f.write_str("onion TCP stream inbound queue is saturated")
+            }
             Self::DuplicateTcpOpen => f.write_str("duplicate onion TCP open for live circuit"),
             Self::UnexpectedTcpReturnPeer { expected, actual } => write!(
                 f,
@@ -257,11 +270,11 @@ pub enum OnionExitFailure {
     /// The exit policy or local limiter denied the operation.
     PermissionDenied,
     /// The target name could not be resolved.
-    ResolveTarget(String),
+    ResolveTarget,
     /// The exit could not connect to the target.
-    ConnectTarget(String),
+    ConnectTarget,
     /// The exit failed while reading from the target.
-    ReadTarget(String),
+    ReadTarget,
     /// The exit rejected a replayed payload.
     Replay,
     /// The client supplied a malformed target for this exit protocol.
@@ -269,7 +282,7 @@ pub enum OnionExitFailure {
     /// The exit rejected a duplicate live circuit.
     DuplicateCircuit,
     /// The exit hit a local internal failure while answering the request.
-    Internal(String),
+    Internal,
 }
 
 impl OnionExitFailure {
@@ -281,7 +294,7 @@ impl OnionExitFailure {
             | Error::OnionRouteError(OnionRouteError::ForwardPayloadExpired)
             | Error::OnionRouteError(OnionRouteError::BackwardReplay) => Self::Replay,
             Error::OnionRouteError(OnionRouteError::DuplicateTcpOpen) => Self::DuplicateCircuit,
-            _ => Self::Internal(error.to_string()),
+            _ => Self::Internal,
         }
     }
 }
@@ -291,13 +304,32 @@ impl fmt::Display for OnionExitFailure {
         match self {
             Self::ExitUnavailable => f.write_str("onion exit service is not enabled locally"),
             Self::PermissionDenied => Error::NoPermission.fmt(f),
-            Self::ResolveTarget(message)
-            | Self::ConnectTarget(message)
-            | Self::ReadTarget(message)
-            | Self::InvalidTarget(message)
-            | Self::Internal(message) => f.write_str(message),
+            Self::ResolveTarget => f.write_str("onion exit could not resolve target"),
+            Self::ConnectTarget => f.write_str("onion exit could not connect to target"),
+            Self::ReadTarget => f.write_str("onion exit could not read target"),
+            Self::InvalidTarget(message) => f.write_str(message),
             Self::Replay => f.write_str("replayed onion payload"),
             Self::DuplicateCircuit => f.write_str("duplicate onion TCP open for live circuit"),
+            Self::Internal => f.write_str("onion exit internal failure"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OnionExitFailure;
+    use crate::error::Error;
+
+    #[test]
+    fn wire_internal_failure_does_not_expose_local_diagnostic() {
+        let diagnostic = "secret local filesystem and resolver detail";
+        let failure = OnionExitFailure::from_error(&Error::InvalidConfig(diagnostic.to_string()));
+        let encoded = bincode::serialize(&failure).expect("encode wire failure");
+
+        assert_eq!(failure, OnionExitFailure::Internal);
+        assert!(!failure.to_string().contains(diagnostic));
+        assert!(!encoded
+            .windows(diagnostic.len())
+            .any(|window| window == diagnostic.as_bytes()));
     }
 }

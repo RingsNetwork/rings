@@ -117,6 +117,73 @@ fn tcp_duplex_state_suppresses_terminal_after_remote_close() {
 }
 
 #[test]
+fn saturated_client_inbound_queue_closes_stream_without_waiting() -> Result<()> {
+    let runtime = runtime();
+    let expected = did();
+    let exit = session();
+    let (tx, _rx) = mpsc::channel(1);
+    let key = insert_test_client_stream(
+        &runtime,
+        expected,
+        exit_descriptor(&exit),
+        OnionReturnId::new([21; 16]),
+        tx,
+    )?;
+
+    runtime.send_client_inbound(key, expected, TcpInbound::Shutdown)?;
+    assert!(matches!(
+        runtime.send_client_inbound(key, expected, TcpInbound::Close),
+        Err(Error::OnionRouteError(
+            OnionRouteError::TcpStreamBackpressure
+        ))
+    ));
+    assert!(!runtime
+        .client_streams
+        .lock()
+        .map_err(|_| Error::Lock)?
+        .contains_key(&key));
+    Ok(())
+}
+
+#[test]
+fn saturated_exit_inbound_queue_closes_stream_without_waiting() -> Result<()> {
+    let runtime = runtime();
+    let peer = did();
+    let service = OnionServiceName::tcp();
+    let key = TcpStreamKey {
+        circuit_id: OnionCircuitId::new([22; 16]),
+    };
+    let (tx, _rx) = mpsc::channel(1);
+    runtime.insert_exit_stream(key, service.clone(), peer, tx)?;
+
+    runtime.send_exit_inbound(
+        key,
+        peer,
+        &service,
+        OnionForwardSequence::new(1),
+        TcpInbound::Shutdown,
+    )?;
+    assert!(matches!(
+        runtime.send_exit_inbound(
+            key,
+            peer,
+            &service,
+            OnionForwardSequence::new(2),
+            TcpInbound::Close,
+        ),
+        Err(Error::OnionRouteError(
+            OnionRouteError::TcpStreamBackpressure
+        ))
+    ));
+    assert!(!runtime
+        .exit_streams
+        .lock()
+        .map_err(|_| Error::Lock)?
+        .contains_key(&key));
+    Ok(())
+}
+
+#[test]
 fn client_stream_accepts_only_expected_return_peer() -> Result<()> {
     let runtime = runtime();
     let expected = did();
@@ -189,13 +256,86 @@ fn client_stream_rejects_replayed_backward_nonce() -> Result<()> {
 #[test]
 fn exit_runtime_rejects_replayed_forward_nonce() -> Result<()> {
     let runtime = runtime();
+    let peer = Did::from(99_u32);
     let circuit_id = OnionCircuitId::new([1; 16]);
     let nonce = OnionForwardNonce::new([2; 16]);
 
-    assert!(runtime.consume_forward_nonce(circuit_id, nonce).is_ok());
+    assert!(runtime
+        .consume_forward_nonce(peer, circuit_id, nonce)
+        .is_ok());
     assert!(matches!(
-        runtime.consume_forward_nonce(circuit_id, nonce),
+        runtime.consume_forward_nonce(peer, circuit_id, nonce),
         Err(Error::OnionRouteError(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn busy_forward_stream_uses_constant_memory_sequence_window() -> Result<()> {
+    let runtime = runtime();
+    let peer = Did::from(101_u32);
+    let service = OnionServiceName::tcp();
+    let key = TcpStreamKey {
+        circuit_id: OnionCircuitId::new([7; 16]),
+    };
+    let (tx, _rx) = mpsc::channel(1);
+    runtime.insert_exit_stream(key, service.clone(), peer, tx)?;
+
+    for sequence in 1..=10_000 {
+        runtime.exit_inbound_sender(key, peer, &service, OnionForwardSequence::new(sequence))?;
+    }
+    assert!(matches!(
+        runtime.exit_inbound_sender(key, peer, &service, OnionForwardSequence::new(10_000)),
+        Err(Error::OnionRouteError(OnionRouteError::ForwardReplay))
+    ));
+    Ok(())
+}
+
+#[test]
+fn one_peers_open_replay_partition_cannot_fill_another_peers_partition() -> Result<()> {
+    let runtime = runtime();
+    let busy_peer = Did::from(102_u32);
+    let other_peer = Did::from(103_u32);
+    let nonce = OnionForwardNonce::new([9; 16]);
+
+    for value in 0_u128..4096 {
+        runtime.consume_forward_nonce(
+            busy_peer,
+            OnionCircuitId::new(value.to_le_bytes()),
+            nonce,
+        )?;
+    }
+    assert!(matches!(
+        runtime.consume_forward_nonce(
+            busy_peer,
+            OnionCircuitId::new(4096_u128.to_le_bytes()),
+            nonce,
+        ),
+        Err(Error::NoPermission)
+    ));
+    runtime.consume_forward_nonce(
+        other_peer,
+        OnionCircuitId::new(4096_u128.to_le_bytes()),
+        nonce,
+    )?;
+    Ok(())
+}
+
+#[test]
+fn busy_backward_stream_uses_constant_memory_sequence_window() -> Result<()> {
+    let runtime = runtime();
+    let expected = Did::from(104_u32);
+    let exit = session();
+    let return_id = OnionReturnId::new([10; 16]);
+    let (tx, _rx) = mpsc::channel(1);
+    let key = insert_test_client_stream(&runtime, expected, exit_descriptor(&exit), return_id, tx)?;
+
+    for sequence in 0..10_000 {
+        runtime.consume_backward_sequence(key, expected, OnionBackwardSequence::new(sequence))?;
+    }
+    assert!(matches!(
+        runtime.consume_backward_sequence(key, expected, OnionBackwardSequence::new(9_999),),
+        Err(Error::OnionRouteError(OnionRouteError::BackwardReplay))
     ));
     Ok(())
 }

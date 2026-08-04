@@ -5,6 +5,8 @@ config*.yaml
 **/*.rs.bk
 **/*.ipynb
 **/*.js
+!frontend/assets/webview-worker-navigation.js
+!frontend/assets/webview-worker-request.js
 **/*.mjs
 !crates/webview/src/browser_runtime.mjs
 !crates/webview/src/browser_runtime_transforms.mjs

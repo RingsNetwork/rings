@@ -11,14 +11,17 @@ use crate::error::Error;
 use crate::error::Result;
 
 const EXIT_LIMIT_WINDOW_MS: u128 = 60_000;
+const HARD_MAX_ACTIVE_CIRCUITS: u32 = 1_024;
+const HARD_MAX_STREAMS_PER_CIRCUIT: u32 = 64;
 
 /// Shared accounting gate for onion exits.
 ///
 /// Invariant: `active_circuits == count({ circuit | active_streams_by_circuit[circuit] > 0 })`.
 /// Invariant: `bytes_this_window <= policy.max_bytes_per_minute` whenever that policy field is
 /// non-zero.
-/// Preservation: `admit` checks active counters and byte budget under one lock before committing any
-/// stream/circuit increment; dropping the returned lease decrements the same circuit key;
+/// Preservation: `admit` intersects advertised limits with hard implementation ceilings, then
+/// checks active counters and byte budget under one lock before committing any stream/circuit
+/// increment; dropping the returned lease decrements the same circuit key;
 /// `record_bytes` resets stale windows before adding.
 /// Post: `remaining_bytes` returns the exact bytes that may still be recorded in the current window,
 /// or `None` when the byte policy is unlimited.
@@ -88,13 +91,13 @@ impl OnionExitAccounting {
             .get(&circuit)
             .copied()
             .unwrap_or_default();
-        if policy.max_streams_per_circuit > 0 && active_streams >= policy.max_streams_per_circuit {
+        let max_streams =
+            effective_limit(policy.max_streams_per_circuit, HARD_MAX_STREAMS_PER_CIRCUIT);
+        if active_streams >= max_streams {
             return Err(Error::NoPermission);
         }
-        if active_streams == 0
-            && policy.max_circuits > 0
-            && limiter.active_circuits >= policy.max_circuits
-        {
+        let max_circuits = effective_limit(policy.max_circuits, HARD_MAX_ACTIVE_CIRCUITS);
+        if active_streams == 0 && limiter.active_circuits >= max_circuits {
             return Err(Error::NoPermission);
         }
         let next_bytes = limiter.next_recorded_bytes(policy, bytes)?;
@@ -141,6 +144,15 @@ impl OnionExitAccounting {
     }
 }
 
+/// `0` means the descriptor did not choose a smaller limit; it never disables the hard bound.
+const fn effective_limit(requested: u32, hard_limit: u32) -> u32 {
+    if requested == 0 || requested > hard_limit {
+        hard_limit
+    } else {
+        requested
+    }
+}
+
 impl ExitLimiter {
     fn refresh_byte_window(&mut self, now_ms: u128) {
         if now_ms.saturating_sub(self.window_start_ms) >= EXIT_LIMIT_WINDOW_MS {
@@ -158,5 +170,67 @@ impl ExitLimiter {
             return Err(Error::NoPermission);
         }
         Ok(Some(next))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rings_core::dht::Did;
+
+    use super::effective_limit;
+    use super::OnionExitAccounting;
+    use super::HARD_MAX_ACTIVE_CIRCUITS;
+    use super::HARD_MAX_STREAMS_PER_CIRCUIT;
+    use crate::onion::circuit::OnionCircuitId;
+    use crate::onion::OnionExitPolicy;
+
+    #[test]
+    fn unspecified_or_excessive_policy_uses_hard_resource_limits() {
+        assert_eq!(
+            effective_limit(0, HARD_MAX_ACTIVE_CIRCUITS),
+            HARD_MAX_ACTIVE_CIRCUITS
+        );
+        assert_eq!(effective_limit(7, HARD_MAX_ACTIVE_CIRCUITS), 7);
+        assert_eq!(
+            effective_limit(u32::MAX, HARD_MAX_ACTIVE_CIRCUITS),
+            HARD_MAX_ACTIVE_CIRCUITS
+        );
+    }
+
+    #[test]
+    fn unspecified_stream_limit_is_still_bounded() {
+        let accounting = OnionExitAccounting::default();
+        let policy = OnionExitPolicy::default();
+        let circuit = OnionCircuitId::random();
+        let peer = Did::from(7_u32);
+        let mut leases = Vec::new();
+        for _ in 0..HARD_MAX_STREAMS_PER_CIRCUIT {
+            let admitted = accounting.admit(&policy, circuit, peer, 0);
+            assert!(admitted.is_ok());
+            if let Ok(lease) = admitted {
+                leases.push(lease);
+            }
+        }
+        assert!(accounting.admit(&policy, circuit, peer, 0).is_err());
+        assert_eq!(leases.len(), HARD_MAX_STREAMS_PER_CIRCUIT as usize);
+    }
+
+    #[test]
+    fn unspecified_circuit_limit_is_still_bounded() {
+        let accounting = OnionExitAccounting::default();
+        let policy = OnionExitPolicy::default();
+        let peer = Did::from(8_u32);
+        let mut leases = Vec::new();
+        for index in 0..HARD_MAX_ACTIVE_CIRCUITS {
+            let circuit = OnionCircuitId::new(u128::from(index).to_be_bytes());
+            let admitted = accounting.admit(&policy, circuit, peer, 0);
+            assert!(admitted.is_ok());
+            if let Ok(lease) = admitted {
+                leases.push(lease);
+            }
+        }
+        let overflow = OnionCircuitId::new(u128::from(HARD_MAX_ACTIVE_CIRCUITS).to_be_bytes());
+        assert!(accounting.admit(&policy, overflow, peer, 0).is_err());
+        assert_eq!(leases.len(), HARD_MAX_ACTIVE_CIRCUITS as usize);
     }
 }

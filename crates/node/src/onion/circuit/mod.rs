@@ -115,8 +115,10 @@ impl OnionCircuitPayload {
 pub struct OnionAuthenticatedPayload {
     /// Client/exit-only return id encrypted in the exit layer.
     pub return_id: OnionReturnId,
-    /// Random per-frame nonce signed by the exit and consumed by the client adapter.
+    /// Random transcript nonce signed by the exit for ciphertext and signature freshness.
     pub nonce: OnionBackwardNonce,
+    /// Monotonic sequence in the exit-to-client direction for this circuit.
+    pub sequence: OnionBackwardSequence,
     /// Exit session signature over the backward payload transcript.
     pub authentication: MessageVerification,
     /// Application payload signed by the exit and encrypted to the client.
@@ -159,6 +161,25 @@ impl OnionBackwardNonce {
     }
 }
 
+/// Monotonic exit-to-client sequence number within one circuit.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct OnionBackwardSequence(u64);
+
+impl OnionBackwardSequence {
+    /// First sequence in a circuit direction.
+    pub const FIRST: Self = Self(0);
+
+    /// Build a sequence from its wire value.
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Return the wire-order value.
+    pub const fn value(self) -> u64 {
+        self.0
+    }
+}
+
 /// Random nonce for one forward exit payload on a circuit.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub struct OnionForwardNonce([u8; 16]);
@@ -175,13 +196,34 @@ impl OnionForwardNonce {
     }
 }
 
+/// Monotonic client-to-exit sequence number within one circuit.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct OnionForwardSequence(u64);
+
+impl OnionForwardSequence {
+    /// First sequence in a circuit direction.
+    pub const FIRST: Self = Self(0);
+
+    /// Build a sequence from its wire value.
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Return the wire-order value.
+    pub const fn value(self) -> u64 {
+        self.0
+    }
+}
+
 /// Backward payload that has passed exit identity, signature, and freshness checks.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OnionVerifiedPayload {
     /// Verified client/exit return id.
     pub return_id: OnionReturnId,
-    /// Random per-frame nonce to be consumed exactly once by the client adapter.
+    /// Authenticated transcript nonce; replay admission is carried by `sequence`.
     pub nonce: OnionBackwardNonce,
+    /// Verified monotonic backward sequence.
+    pub sequence: OnionBackwardSequence,
     /// Verified application payload.
     pub payload: OnionCircuitPayload,
 }
@@ -266,6 +308,7 @@ pub(super) enum OnionForwardLayer {
         client: OnionClientReturn,
         expires_at_ms: u128,
         forward_nonce: OnionForwardNonce,
+        forward_sequence: OnionForwardSequence,
         payload: OnionCircuitPayload,
     },
 }

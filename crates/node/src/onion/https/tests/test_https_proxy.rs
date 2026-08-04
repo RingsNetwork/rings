@@ -136,6 +136,10 @@ fn default_body_limit_applies_when_policy_is_unlimited() {
         DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES
     );
     assert_eq!(https_response_body_limit(Some(7)), 7);
+    assert_eq!(
+        https_response_body_limit(Some(DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES + 1)),
+        DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES
+    );
 }
 
 #[test]
@@ -250,12 +254,15 @@ fn pending_request_reports_authenticated_request_as_unexpected_backward_payload(
 #[test]
 fn forward_nonce_is_consumed_once_for_https_exit_requests() {
     let runtime = OnionHttpsRuntime::new();
+    let peer = Did::from(99_u32);
     let circuit_id = OnionCircuitId::new([1; 16]);
     let nonce = OnionForwardNonce::new([2; 16]);
 
-    assert!(runtime.consume_forward_nonce(circuit_id, nonce).is_ok());
+    assert!(runtime
+        .consume_forward_nonce(peer, circuit_id, nonce)
+        .is_ok());
     assert!(matches!(
-        runtime.consume_forward_nonce(circuit_id, nonce),
+        runtime.consume_forward_nonce(peer, circuit_id, nonce),
         Err(Error::OnionRouteError(_))
     ));
 }
@@ -349,6 +356,7 @@ async fn native_fetch_times_out_stalled_response() {
         &request,
         DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES,
         Duration::from_millis(25),
+        None,
         |_| Ok(()),
     )
     .await;
@@ -390,6 +398,7 @@ async fn native_fetch_records_response_bytes_as_chunks_arrive() {
         &request,
         DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES,
         Duration::from_secs(1),
+        None,
         move |bytes| {
             recorded_for_fetch.fetch_add(bytes, Ordering::SeqCst);
             Ok(())

@@ -18,11 +18,38 @@ use crate::types::GatewayRequestKind;
 use crate::types::GatewayResponse;
 use crate::url::GatewayPrefix;
 
+const MAX_GATEWAY_BODY_BYTES: usize = 8 * 1024 * 1024;
+
+/// Maximum response body a gateway transport may retain for one request.
+///
+/// The value is passed into the transport boundary so streaming adapters can stop reading before
+/// allocating an oversized body. The gateway validates the returned value again as a defense
+/// against adapters that violate the contract.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GatewayResponseBodyLimit(usize);
+
+impl GatewayResponseBodyLimit {
+    /// Standard body budget enforced by the webview gateway.
+    pub const DEFAULT: Self = Self(MAX_GATEWAY_BODY_BYTES);
+
+    /// Return the maximum retained body bytes.
+    pub const fn bytes(self) -> usize {
+        self.0
+    }
+}
+
 /// Pluggable transport for normalized webview gateway requests.
 #[async_trait(?Send)]
 pub trait GatewayTransport {
     /// Send `request` through the concrete transport and return a raw response.
-    async fn send(&self, request: GatewayRequest) -> Result<GatewayResponse>;
+    ///
+    /// Implementations must stop reading before retaining more than `body_limit` bytes. Returning
+    /// a larger owned body is a contract violation and is rejected by the gateway as a fallback.
+    async fn send(
+        &self,
+        request: GatewayRequest,
+        body_limit: GatewayResponseBodyLimit,
+    ) -> Result<GatewayResponse>;
 }
 
 /// Policy wrapper that applies cookies, header policy, and body rewriting around a transport.
@@ -70,6 +97,7 @@ impl GatewayRequestSession {
         request: GatewayRequest,
         now: i64,
     ) -> Result<Self> {
+        validate_request_body_size(&request)?;
         let cors_request = request.clone();
         let preflight = cors::preflight_request(&request)?;
         let request = policy.prepare_request(cookies, request, now)?;
@@ -95,14 +123,20 @@ impl GatewayRequestSession {
     {
         if let Some(preflight) = self.preflight.take() {
             let preflight = policy.header_policy.normalize_request(preflight);
-            let response = transport.send(preflight).await?;
+            let response = transport
+                .send(preflight, GatewayResponseBodyLimit::DEFAULT)
+                .await?;
+            validate_response_body_size(&response, GatewayResponseBodyLimit::DEFAULT)?;
             cors::validate_preflight_response(&self.cors_request, &response)?;
         }
         let request = self
             .request
             .take()
             .ok_or(crate::error::TransportFailure::RequestSessionSentTwice)?;
-        let response = transport.send(request).await?;
+        let response = transport
+            .send(request, GatewayResponseBodyLimit::DEFAULT)
+            .await?;
+        validate_response_body_size(&response, GatewayResponseBodyLimit::DEFAULT)?;
         cors::validate_response(&self.cors_request, &response)?;
         Ok(response)
     }
@@ -125,7 +159,9 @@ impl GatewayRequestSession {
         policy: &GatewayResponsePolicy,
         response: GatewayResponse,
     ) -> Result<GatewayResponse> {
-        policy.finish_response(&self.cors_request, response)
+        let response = policy.finish_response(&self.cors_request, response)?;
+        validate_response_body_size(&response, GatewayResponseBodyLimit::DEFAULT)?;
+        Ok(response)
     }
 }
 
@@ -199,18 +235,26 @@ impl GatewayResponsePolicy {
         request: &GatewayRequest,
         response: &GatewayResponse,
     ) -> Result<Vec<u8>> {
-        let Some(content_type) = response
+        let content_type = response
             .headers
             .iter()
             .find(|header| header.name_eq("content-type"))
-            .map(|header| header.value.to_ascii_lowercase())
-        else {
+            .map(|header| normalize_media_type(header.value.as_str()));
+        let rewrite_kind = content_type
+            .as_deref()
+            .and_then(rewrite_kind_for_media_type)
+            .or_else(|| sniff_active_document(response.body.as_slice()));
+        let Some(rewrite_kind) = rewrite_kind else {
+            if request.kind == GatewayRequestKind::Navigation
+                && !content_type
+                    .as_deref()
+                    .is_some_and(is_inert_navigation_media_type)
+            {
+                return Err(WebviewError::UnsafeNavigationMediaType { content_type });
+            }
             return Ok(response.body.clone());
         };
-        if !(content_type.contains("text/html") || content_type.contains("text/css")) {
-            return Ok(response.body.clone());
-        }
-        let is_html = content_type.contains("text/html");
+        let content_type = content_type.unwrap_or_else(|| "sniffed active document".to_string());
         let text = std::str::from_utf8(response.body.as_slice()).map_err(|_| {
             // Rewriting is the boundary that keeps navigable text on the controlled origin.
             // Passing an undecodable document through would bypass that boundary.
@@ -220,10 +264,9 @@ impl GatewayResponsePolicy {
         if let Some(script) = self.bootstrap_for(request) {
             ctx = ctx.with_bootstrap_script(script);
         }
-        let rewritten = if is_html {
-            ctx.rewrite_html(text)?
-        } else {
-            ctx.rewrite_css(text)?
+        let rewritten = match rewrite_kind {
+            RewriteKind::Html => ctx.rewrite_html_with_limit(text, MAX_GATEWAY_BODY_BYTES)?,
+            RewriteKind::Css => ctx.rewrite_css_with_limit(text, MAX_GATEWAY_BODY_BYTES)?,
         };
         Ok(rewritten.into_bytes())
     }
@@ -238,6 +281,150 @@ impl GatewayResponsePolicy {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RewriteKind {
+    Html,
+    Css,
+}
+
+fn validate_response_body_size(
+    response: &GatewayResponse,
+    body_limit: GatewayResponseBodyLimit,
+) -> Result<()> {
+    if response.body.len() > body_limit.bytes() {
+        return Err(crate::error::TransportFailure::ResponseBodyTooLarge {
+            actual: response.body.len(),
+            limit: body_limit.bytes(),
+        }
+        .into());
+    }
+    Ok(())
+}
+
+fn validate_request_body_size(request: &GatewayRequest) -> Result<()> {
+    if request.body.len() > MAX_GATEWAY_BODY_BYTES {
+        return Err(crate::error::TransportFailure::RequestBodyTooLarge {
+            actual: request.body.len(),
+            limit: MAX_GATEWAY_BODY_BYTES,
+        }
+        .into());
+    }
+    Ok(())
+}
+
+fn normalize_media_type(value: &str) -> String {
+    value
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn rewrite_kind_for_media_type(media_type: &str) -> Option<RewriteKind> {
+    match media_type {
+        "text/html" | "application/xhtml+xml" | "image/svg+xml" => Some(RewriteKind::Html),
+        "text/css" => Some(RewriteKind::Css),
+        _ => None,
+    }
+}
+
+fn is_inert_navigation_media_type(media_type: &str) -> bool {
+    matches!(
+        media_type,
+        "text/plain"
+            | "application/json"
+            | "application/pdf"
+            | "image/avif"
+            | "image/bmp"
+            | "image/gif"
+            | "image/jpeg"
+            | "image/png"
+            | "image/webp"
+            | "image/x-icon"
+            | "audio/mpeg"
+            | "audio/ogg"
+            | "video/mp4"
+            | "video/ogg"
+            | "video/webm"
+    )
+}
+
+fn sniff_active_document(body: &[u8]) -> Option<RewriteKind> {
+    const SNIFF_PREFIX_BYTES: usize = 4096;
+    let prefix_len = body.len().min(SNIFF_PREFIX_BYTES);
+    let prefix_bytes = body.get(..prefix_len).unwrap_or(body);
+    // HTML's active marker is ASCII-compatible. Lossy decoding of a bounded prefix avoids
+    // treating an unrelated invalid byte later in the body as evidence that the prefix is inert;
+    // the full UTF-8 proof is still required before rewriting.
+    let text = String::from_utf8_lossy(prefix_bytes);
+    let lowered = text
+        .trim_start_matches('\u{feff}')
+        .trim_start()
+        .to_ascii_lowercase();
+    let mut prefix = lowered.as_str();
+    while let Some(comment) = prefix.strip_prefix("<!--") {
+        let (_, tail) = comment.split_once("-->")?;
+        prefix = tail.trim_start();
+    }
+    if prefix.starts_with('<') {
+        Some(RewriteKind::Html)
+    } else {
+        None
+    }
+}
+
+// These two adapters differ only in cookie ownership and the resulting `send` receiver. Keep the
+// policy-facing API generated from one definition so adding a bootstrap or path rule cannot drift
+// between the serialized and concurrent shells.
+macro_rules! impl_gateway_policy_api {
+    ($gateway:ident) => {
+        impl<T> $gateway<T> {
+            /// Return the controlled-origin gateway prefix.
+            pub fn prefix(&self) -> &GatewayPrefix {
+                &self.policy.prefix
+            }
+
+            /// Attach a runtime bootstrap script that is injected into rendered HTML.
+            pub fn with_bootstrap_script(mut self, script: impl Into<String>) -> Self {
+                self.policy.bootstrap_script = Some(BootstrapScript::Static(script.into()));
+                self
+            }
+
+            /// Attach a runtime bootstrap factory evaluated for each rendered target page.
+            pub fn with_target_bootstrap(mut self, script: fn(&url::Url) -> String) -> Self {
+                self.policy.bootstrap_script = Some(BootstrapScript::PerTarget(script));
+                self
+            }
+
+            /// Attach a runtime bootstrap factory evaluated against each rendered request.
+            pub fn with_request_bootstrap(mut self, script: fn(&GatewayRequest) -> String) -> Self {
+                self.policy.bootstrap_script = Some(BootstrapScript::PerRequest(script));
+                self
+            }
+
+            /// Build a typed request from a controlled-origin gateway path.
+            pub fn request_from_gateway_path(
+                &self,
+                path: &str,
+                kind: GatewayRequestKind,
+            ) -> Result<GatewayRequest> {
+                let target = self.policy.prefix.decode_path(path)?.into_url();
+                Ok(match kind {
+                    GatewayRequestKind::Navigation => GatewayRequest::navigation(target),
+                    GatewayRequestKind::Subresource => GatewayRequest::subresource(target),
+                    GatewayRequestKind::Fetch | GatewayRequestKind::Xhr => {
+                        return Err(WebviewError::MissingRuntimeSourceOrigin);
+                    }
+                })
+            }
+        }
+    };
+}
+
+impl_gateway_policy_api!(WebviewGateway);
+impl_gateway_policy_api!(ConcurrentWebviewGateway);
+
 impl<T> WebviewGateway<T>
 where T: GatewayTransport
 {
@@ -248,33 +435,6 @@ where T: GatewayTransport
             transport,
             cookies: CookieJar::new(),
         }
-    }
-
-    /// Return the controlled-origin gateway prefix.
-    pub fn prefix(&self) -> &GatewayPrefix {
-        &self.policy.prefix
-    }
-
-    /// Attach a runtime bootstrap script that is injected into rendered HTML.
-    pub fn with_bootstrap_script(mut self, script: impl Into<String>) -> Self {
-        self.policy.bootstrap_script = Some(BootstrapScript::Static(script.into()));
-        self
-    }
-
-    /// Attach a runtime bootstrap factory evaluated for each rendered target page.
-    ///
-    /// Use this when the bootstrap resolves relative runtime URLs against the target document.
-    /// The factory is evaluated after the upstream response is received and before its HTML is
-    /// rewritten, so navigating between targets cannot retain an earlier page's base URL.
-    pub fn with_target_bootstrap(mut self, script: fn(&url::Url) -> String) -> Self {
-        self.policy.bootstrap_script = Some(BootstrapScript::PerTarget(script));
-        self
-    }
-
-    /// Attach a runtime bootstrap factory evaluated against each rendered gateway request.
-    pub fn with_request_bootstrap(mut self, script: fn(&GatewayRequest) -> String) -> Self {
-        self.policy.bootstrap_script = Some(BootstrapScript::PerRequest(script));
-        self
     }
 
     /// Access the virtual cookie jar.
@@ -291,22 +451,6 @@ where T: GatewayTransport
         let commit_now = current_time_millis()?;
         session.commit_response_cookies(&self.policy, &mut self.cookies, &response, commit_now)?;
         session.finish(&self.policy, response)
-    }
-
-    /// Build a typed request from a controlled-origin gateway path.
-    pub fn request_from_gateway_path(
-        &self,
-        path: &str,
-        kind: GatewayRequestKind,
-    ) -> Result<GatewayRequest> {
-        let target = self.policy.prefix.decode_path(path)?.into_url();
-        Ok(match kind {
-            GatewayRequestKind::Navigation => GatewayRequest::navigation(target),
-            GatewayRequestKind::Subresource => GatewayRequest::subresource(target),
-            GatewayRequestKind::Fetch | GatewayRequestKind::Xhr => {
-                return Err(WebviewError::MissingRuntimeSourceOrigin)
-            }
-        })
     }
 
     /// Send one request addressed by a controlled-origin gateway path.
@@ -332,29 +476,6 @@ where T: GatewayTransport
         }
     }
 
-    /// Return the controlled-origin gateway prefix.
-    pub fn prefix(&self) -> &GatewayPrefix {
-        &self.policy.prefix
-    }
-
-    /// Attach a runtime bootstrap script that is injected into rendered HTML.
-    pub fn with_bootstrap_script(mut self, script: impl Into<String>) -> Self {
-        self.policy.bootstrap_script = Some(BootstrapScript::Static(script.into()));
-        self
-    }
-
-    /// Attach a runtime bootstrap factory evaluated for each rendered target page.
-    pub fn with_target_bootstrap(mut self, script: fn(&url::Url) -> String) -> Self {
-        self.policy.bootstrap_script = Some(BootstrapScript::PerTarget(script));
-        self
-    }
-
-    /// Attach a runtime bootstrap factory evaluated against each rendered gateway request.
-    pub fn with_request_bootstrap(mut self, script: fn(&GatewayRequest) -> String) -> Self {
-        self.policy.bootstrap_script = Some(BootstrapScript::PerRequest(script));
-        self
-    }
-
     /// Send one request without holding the virtual-cookie lock during upstream I/O.
     pub async fn send(&self, request: GatewayRequest) -> Result<GatewayResponse> {
         let mut session = {
@@ -369,22 +490,6 @@ where T: GatewayTransport
             session.commit_response_cookies(&self.policy, &mut cookies, &response, commit_now)?;
         }
         session.finish(&self.policy, response)
-    }
-
-    /// Build a typed request from a controlled-origin gateway path.
-    pub fn request_from_gateway_path(
-        &self,
-        path: &str,
-        kind: GatewayRequestKind,
-    ) -> Result<GatewayRequest> {
-        let target = self.policy.prefix.decode_path(path)?.into_url();
-        Ok(match kind {
-            GatewayRequestKind::Navigation => GatewayRequest::navigation(target),
-            GatewayRequestKind::Subresource => GatewayRequest::subresource(target),
-            GatewayRequestKind::Fetch | GatewayRequestKind::Xhr => {
-                return Err(WebviewError::MissingRuntimeSourceOrigin)
-            }
-        })
     }
 
     /// Send one request addressed by a controlled-origin gateway path.
@@ -435,757 +540,4 @@ fn system_time_millis(time: SystemTime) -> i64 {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::cell::RefCell;
-    use std::rc::Rc;
-
-    use futures::channel::mpsc;
-    use futures::channel::oneshot;
-    use futures::executor::LocalPool;
-    use futures::stream::StreamExt;
-    use futures::task::LocalSpawnExt;
-    use url::Url;
-
-    use super::*;
-    use crate::types::GatewayCredentials;
-    use crate::types::GatewayRequest;
-    use crate::types::GatewayRequestKind;
-    use crate::url::TargetUrl;
-    use crate::WebviewError;
-
-    struct StaticTransport;
-
-    #[async_trait(?Send)]
-    impl GatewayTransport for StaticTransport {
-        async fn send(&self, request: GatewayRequest) -> Result<GatewayResponse> {
-            assert!(request
-                .headers
-                .iter()
-                .all(|header| !header.name_eq("cookie")));
-            GatewayResponse::new(
-                200,
-                vec![
-                    GatewayHeader::new("Content-Type", "text/html")?,
-                    GatewayHeader::new("Set-Cookie", "sid=one; Path=/")?,
-                ],
-                br#"<img src="/asset.png">"#.to_vec(),
-            )
-        }
-    }
-
-    #[cfg(all(target_family = "wasm", not(feature = "browser")))]
-    #[test]
-    fn wasm_without_browser_reports_clock_unavailable_before_transport_io() -> Result<()> {
-        let mut gateway = WebviewGateway::new(GatewayPrefix::new("/webview/")?, StaticTransport);
-        let request = GatewayRequest::navigation(Url::parse("https://example.test/")?);
-
-        assert!(matches!(
-            futures::executor::block_on(gateway.send(request)),
-            Err(WebviewError::Transport(
-                crate::error::TransportFailure::ClockUnavailable
-            ))
-        ));
-        Ok(())
-    }
-
-    #[test]
-    fn gateway_rewrites_html_and_stores_cookies() -> Result<()> {
-        let target = TargetUrl::parse("https://example.com/index.html")?.into_url();
-        let mut gateway = WebviewGateway::new(GatewayPrefix::new("/webview/")?, StaticTransport)
-            .with_bootstrap_script("globalThis.__rings = true;");
-        let request = GatewayRequest {
-            target,
-            method: "GET".to_string(),
-            headers: Vec::new(),
-            body: Vec::new(),
-            kind: GatewayRequestKind::Navigation,
-            source_origin: None,
-            source_target: None,
-            credentials: GatewayCredentials::SameOrigin,
-            top_level_navigation: true,
-        };
-
-        let response = futures::executor::block_on(gateway.send(request))?;
-        let body = String::from_utf8(response.body)
-            .map_err(|error| WebviewError::transport(error.to_string()))?;
-
-        assert!(body.contains("/webview/https%3A%2F%2Fexample%2Ecom%2Fasset%2Epng"));
-        assert!(body.contains("data-rings-webview-bootstrap"));
-        assert_eq!(gateway.cookies().len(), 1);
-        assert!(!response
-            .headers
-            .iter()
-            .any(|header| header.name_eq("set-cookie")));
-        Ok(())
-    }
-
-    struct InvalidUtf8TextTransport(&'static str);
-
-    #[async_trait(?Send)]
-    impl GatewayTransport for InvalidUtf8TextTransport {
-        async fn send(&self, _request: GatewayRequest) -> Result<GatewayResponse> {
-            GatewayResponse::new(
-                200,
-                vec![GatewayHeader::new("Content-Type", self.0)?],
-                vec![b'<', 0xff, b'>'],
-            )
-        }
-    }
-
-    #[test]
-    fn gateway_rejects_non_utf8_rewritable_documents() -> Result<()> {
-        let target = TargetUrl::parse("https://example.com/index.html")?.into_url();
-        for content_type in [
-            "text/html; charset=iso-8859-1",
-            "text/css; charset=iso-8859-1",
-        ] {
-            let mut gateway = WebviewGateway::new(
-                GatewayPrefix::new("/webview/")?,
-                InvalidUtf8TextTransport(content_type),
-            );
-            let result = futures::executor::block_on(
-                gateway.send(GatewayRequest::navigation(target.clone())),
-            );
-
-            assert!(matches!(
-                result,
-                Err(WebviewError::UnrewritableTextEncoding { content_type: actual })
-                    if actual == content_type
-            ));
-        }
-        Ok(())
-    }
-
-    fn target_bootstrap(target: &url::Url) -> String {
-        format!("globalThis.__ringsTarget = {:?};", target.as_str())
-    }
-
-    fn request_bootstrap(request: &GatewayRequest) -> String {
-        format!(
-            "globalThis.__ringsTopLevelNavigation = {};",
-            request.top_level_navigation
-        )
-    }
-
-    #[test]
-    fn per_target_bootstrap_tracks_each_navigated_document() -> Result<()> {
-        let mut gateway = WebviewGateway::new(GatewayPrefix::new("/webview/")?, StaticTransport)
-            .with_target_bootstrap(target_bootstrap);
-        let first = TargetUrl::parse("https://one.example.test/first")?.into_url();
-        let second = TargetUrl::parse("https://two.example.test/second")?.into_url();
-
-        let first = futures::executor::block_on(gateway.send(GatewayRequest::navigation(first)))?;
-        let second = futures::executor::block_on(gateway.send(GatewayRequest::navigation(second)))?;
-        let first_body = String::from_utf8(first.body)
-            .map_err(|error| WebviewError::transport(error.to_string()))?;
-        let second_body = String::from_utf8(second.body)
-            .map_err(|error| WebviewError::transport(error.to_string()))?;
-
-        assert!(first_body.contains("https://one.example.test/first"));
-        assert!(!first_body.contains("https://two.example.test/second"));
-        assert!(second_body.contains("https://two.example.test/second"));
-        assert!(!second_body.contains("https://one.example.test/first"));
-        Ok(())
-    }
-
-    #[test]
-    fn per_request_bootstrap_tracks_navigation_context() -> Result<()> {
-        let mut gateway = WebviewGateway::new(GatewayPrefix::new("/webview/")?, StaticTransport)
-            .with_request_bootstrap(request_bootstrap);
-        let target = TargetUrl::parse("https://frame.example.test/nested")?.into_url();
-        let request = GatewayRequest::navigation(target).with_top_level_navigation(false);
-
-        let response = futures::executor::block_on(gateway.send(request))?;
-        let body = String::from_utf8(response.body)
-            .map_err(|error| WebviewError::transport(error.to_string()))?;
-
-        assert!(body.contains("globalThis.__ringsTopLevelNavigation = false;"));
-        Ok(())
-    }
-
-    #[test]
-    fn source_free_runtime_gateway_requests_are_rejected() -> Result<()> {
-        let target = TargetUrl::parse("https://api.example.test/data")?.into_url();
-        let mut gateway = WebviewGateway::new(GatewayPrefix::new("/webview/")?, StaticTransport);
-
-        let send = futures::executor::block_on(gateway.send(GatewayRequest::fetch(target, "GET")));
-        assert!(matches!(
-            send,
-            Err(WebviewError::MissingRuntimeSourceOrigin)
-        ));
-        assert!(matches!(
-            gateway.request_from_gateway_path(
-                "/webview/https%3A%2F%2Fapi%2Eexample%2Etest%2Fdata",
-                GatewayRequestKind::Fetch,
-            ),
-            Err(WebviewError::MissingRuntimeSourceOrigin)
-        ));
-        Ok(())
-    }
-
-    struct DomainCookieTransport;
-
-    #[async_trait(?Send)]
-    impl GatewayTransport for DomainCookieTransport {
-        async fn send(&self, _request: GatewayRequest) -> Result<GatewayResponse> {
-            GatewayResponse::new(
-                200,
-                vec![
-                    GatewayHeader::new("Content-Type", "text/html")?,
-                    GatewayHeader::new("Set-Cookie", "sid=domain; Domain=example.com; Path=/")?,
-                ],
-                br#"<p>ok</p>"#.to_vec(),
-            )
-        }
-    }
-
-    #[test]
-    fn gateway_ignores_domain_cookie_without_failing_response() -> Result<()> {
-        let target = TargetUrl::parse("https://example.com/index.html")?.into_url();
-        let mut gateway =
-            WebviewGateway::new(GatewayPrefix::new("/webview/")?, DomainCookieTransport);
-
-        let response =
-            futures::executor::block_on(gateway.send(GatewayRequest::navigation(target)))?;
-        let body = String::from_utf8(response.body)
-            .map_err(|error| WebviewError::transport(error.to_string()))?;
-
-        assert!(body.contains("<p>ok</p>"));
-        assert!(gateway.cookies().is_empty());
-        assert!(!response
-            .headers
-            .iter()
-            .any(|header| header.name_eq("set-cookie")));
-        Ok(())
-    }
-
-    struct RecordingTransport {
-        requests: std::cell::RefCell<Vec<GatewayRequest>>,
-    }
-
-    impl RecordingTransport {
-        fn new() -> Self {
-            Self {
-                requests: std::cell::RefCell::new(Vec::new()),
-            }
-        }
-    }
-
-    #[async_trait(?Send)]
-    impl GatewayTransport for RecordingTransport {
-        async fn send(&self, request: GatewayRequest) -> Result<GatewayResponse> {
-            self.requests.borrow_mut().push(request);
-            GatewayResponse::new(
-                200,
-                vec![
-                    GatewayHeader::new("Content-Type", "application/json")?,
-                    GatewayHeader::new("Set-Cookie", "sid=one; Path=/")?,
-                ],
-                br#"{}"#.to_vec(),
-            )
-        }
-    }
-
-    #[test]
-    fn gateway_replaces_caller_cookie_header_with_virtual_target_cookie() -> Result<()> {
-        let transport = RecordingTransport::new();
-        let target = TargetUrl::parse("https://example.com/index.html")?.into_url();
-        let fetch_target = TargetUrl::parse("https://example.com/api")?.into_url();
-        let mut gateway = WebviewGateway::new(GatewayPrefix::new("/webview/")?, transport);
-
-        futures::executor::block_on(gateway.send(GatewayRequest::navigation(target)))?;
-        futures::executor::block_on(
-            gateway.send(
-                GatewayRequest::fetch(fetch_target, "GET")
-                    .with_source_origin(
-                        TargetUrl::parse("https://example.com/index.html")?.into_url(),
-                    )
-                    .with_header(GatewayHeader::new("Cookie", "caller=leak")?),
-            ),
-        )?;
-
-        let requests = gateway.transport.requests.borrow();
-        let second = requests
-            .get(1)
-            .ok_or_else(|| WebviewError::transport("missing second request".to_string()))?;
-        let cookies: Vec<&str> = second
-            .headers
-            .iter()
-            .filter(|header| header.name_eq("cookie"))
-            .map(|header| header.value.as_str())
-            .collect();
-
-        assert_eq!(cookies, vec!["sid=one"]);
-        Ok(())
-    }
-
-    #[test]
-    fn gateway_normalizes_direct_struct_source_origin_before_transport() -> Result<()> {
-        let transport = RecordingTransport::new();
-        let request = GatewayRequest {
-            target: TargetUrl::parse("https://app.example.test:8443/data")?.into_url(),
-            method: "GET".to_string(),
-            headers: Vec::new(),
-            body: Vec::new(),
-            kind: GatewayRequestKind::Fetch,
-            source_origin: Some(Url::parse(
-                "https://user:pass@app.example.test:8443/page?q=1#section",
-            )?),
-            source_target: None,
-            credentials: GatewayCredentials::SameOrigin,
-            top_level_navigation: false,
-        };
-        let mut gateway = WebviewGateway::new(GatewayPrefix::new("/webview/")?, transport);
-
-        futures::executor::block_on(gateway.send(request))?;
-
-        let requests = gateway.transport.requests.borrow();
-        let first = requests
-            .first()
-            .ok_or_else(|| WebviewError::transport("missing request".to_string()))?;
-        assert_eq!(
-            first.source_origin.as_ref().map(Url::as_str),
-            Some("https://app.example.test:8443/")
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn gateway_strips_controlled_origin_headers_before_transport() -> Result<()> {
-        let transport = RecordingTransport::new();
-        let target = TargetUrl::parse("https://example.com/index.html")?.into_url();
-        let mut gateway = WebviewGateway::new(GatewayPrefix::new("/webview/")?, transport);
-
-        futures::executor::block_on(
-            gateway.send(
-                GatewayRequest::navigation(target)
-                    .with_header(GatewayHeader::new("Host", "127.0.0.1:3000")?)
-                    .with_header(GatewayHeader::new("Origin", "http://127.0.0.1:3000")?)
-                    .with_header(GatewayHeader::new(
-                        "Referer",
-                        "http://127.0.0.1:3000/webview/target",
-                    )?)
-                    .with_header(GatewayHeader::new("Sec-Fetch-Dest", "document")?)
-                    .with_header(GatewayHeader::new("Accept", "text/html")?),
-            ),
-        )?;
-
-        let requests = gateway.transport.requests.borrow();
-        let first = requests
-            .first()
-            .ok_or_else(|| WebviewError::transport("missing first request".to_string()))?;
-        assert!(first.headers.iter().all(|header| {
-            !header.name_eq("host")
-                && !header.name_eq("origin")
-                && !header.name_eq("referer")
-                && !header.name_eq("sec-fetch-dest")
-        }));
-        assert!(first
-            .headers
-            .iter()
-            .any(|header| header.name_eq("accept") && header.value == "text/html"));
-        Ok(())
-    }
-
-    struct CorsRecordingTransport {
-        requests: std::cell::RefCell<Vec<GatewayRequest>>,
-    }
-
-    #[async_trait(?Send)]
-    impl GatewayTransport for CorsRecordingTransport {
-        async fn send(&self, request: GatewayRequest) -> Result<GatewayResponse> {
-            let is_preflight = request.method == "OPTIONS";
-            self.requests.borrow_mut().push(request);
-            let mut headers = vec![GatewayHeader::new(
-                "Access-Control-Allow-Origin",
-                "https://app.example.test",
-            )?];
-            if is_preflight {
-                headers.push(GatewayHeader::new("Access-Control-Allow-Methods", "PATCH")?);
-                headers.push(GatewayHeader::new(
-                    "Access-Control-Allow-Headers",
-                    "x-requested-with",
-                )?);
-            }
-            GatewayResponse::new(200, headers, b"cors response".to_vec())
-        }
-    }
-
-    #[test]
-    fn gateway_forwards_cross_origin_runtime_requests_after_virtual_cors_preflight() -> Result<()> {
-        let target = TargetUrl::parse("https://api.example.test/data")?.into_url();
-        let source = TargetUrl::parse("https://app.example.test/page")?.into_url();
-        let transport = CorsRecordingTransport {
-            requests: std::cell::RefCell::new(Vec::new()),
-        };
-        let mut gateway = WebviewGateway::new(GatewayPrefix::new("/webview/")?, transport);
-        let response = futures::executor::block_on(
-            gateway.send(
-                GatewayRequest::fetch(target, "PATCH")
-                    .with_source_origin(source)
-                    .with_header(GatewayHeader::new("X-Requested-With", "Rings")?),
-            ),
-        )?;
-
-        assert_eq!(response.body, b"cors response");
-        let requests = gateway.transport.requests.borrow();
-        assert_eq!(requests.len(), 2);
-        let preflight = requests
-            .first()
-            .ok_or_else(|| WebviewError::transport("missing CORS preflight".to_string()))?;
-        assert_eq!(preflight.method, "OPTIONS");
-        assert!(preflight.headers.iter().any(|header| {
-            header.name_eq("origin") && header.value == "https://app.example.test"
-        }));
-        assert!(preflight.headers.iter().any(|header| {
-            header.name_eq("access-control-request-method") && header.value == "PATCH"
-        }));
-        let actual = requests
-            .get(1)
-            .ok_or_else(|| WebviewError::transport("missing CORS runtime request".to_string()))?;
-        assert_eq!(actual.method, "PATCH");
-        assert!(actual.headers.iter().any(|header| {
-            header.name_eq("origin") && header.value == "https://app.example.test"
-        }));
-        Ok(())
-    }
-
-    struct ParityTransport {
-        requests: RefCell<Vec<GatewayRequest>>,
-    }
-
-    impl ParityTransport {
-        fn new() -> Self {
-            Self {
-                requests: RefCell::new(Vec::new()),
-            }
-        }
-    }
-
-    #[async_trait(?Send)]
-    impl GatewayTransport for ParityTransport {
-        async fn send(&self, request: GatewayRequest) -> Result<GatewayResponse> {
-            let is_preflight = request.method == "OPTIONS";
-            self.requests.borrow_mut().push(request);
-            let mut headers = vec![GatewayHeader::new(
-                "Access-Control-Allow-Origin",
-                "https://app.example.test",
-            )?];
-            if is_preflight {
-                headers.push(GatewayHeader::new("Access-Control-Allow-Methods", "PATCH")?);
-                headers.push(GatewayHeader::new(
-                    "Access-Control-Allow-Headers",
-                    "x-requested-with",
-                )?);
-            } else {
-                headers.push(GatewayHeader::new("Set-Cookie", "sid=one; Path=/")?);
-            }
-            GatewayResponse::new(200, headers, b"parity response".to_vec())
-        }
-    }
-
-    fn parity_request_sequence() -> Result<Vec<GatewayRequest>> {
-        let app = TargetUrl::parse("https://app.example.test/page")?.into_url();
-        let api = TargetUrl::parse("https://api.example.test/data")?.into_url();
-        Ok(vec![
-            GatewayRequest::navigation(app.clone()),
-            GatewayRequest::fetch(api, "PATCH")
-                .with_source_origin(app.clone())
-                .with_header(GatewayHeader::new("X-Requested-With", "Rings")?),
-            GatewayRequest::fetch(app, "GET").with_source_origin(
-                TargetUrl::parse("https://app.example.test/other-page")?.into_url(),
-            ),
-        ])
-    }
-
-    #[test]
-    fn gateway_adapters_share_cookie_cors_and_response_policy() -> Result<()> {
-        let prefix = GatewayPrefix::new("/webview/")?;
-        let mut single = WebviewGateway::new(prefix.clone(), ParityTransport::new());
-        let concurrent = ConcurrentWebviewGateway::new(prefix, ParityTransport::new());
-        let requests = parity_request_sequence()?;
-
-        let mut single_responses = Vec::new();
-        for request in requests.clone() {
-            single_responses.push(futures::executor::block_on(single.send(request))?);
-        }
-        let single_requests = single.transport.requests.borrow().clone();
-        let single_cookie_count = single.cookies().len();
-
-        let mut concurrent_responses = Vec::new();
-        for request in requests {
-            concurrent_responses.push(futures::executor::block_on(concurrent.send(request))?);
-        }
-        let concurrent_requests = concurrent.transport.requests.borrow().clone();
-        let concurrent_cookie_count = concurrent.lock_cookies()?.len();
-
-        assert_eq!(single_requests, concurrent_requests);
-        assert_eq!(single_responses, concurrent_responses);
-        assert_eq!(single_cookie_count, concurrent_cookie_count);
-        assert_eq!(single_cookie_count, 1);
-        let final_request = single_requests.last().ok_or_else(|| {
-            WebviewError::transport("parity transport did not receive final request".to_string())
-        })?;
-        assert!(final_request
-            .headers
-            .iter()
-            .any(|header| header.name_eq("cookie") && header.value == "sid=one"));
-        Ok(())
-    }
-
-    struct DelayedCookieTransport {
-        started: mpsc::UnboundedSender<String>,
-        delayed_path: String,
-        release_delayed_request: RefCell<Option<oneshot::Receiver<()>>>,
-        requests: RefCell<Vec<GatewayRequest>>,
-    }
-
-    #[async_trait(?Send)]
-    impl GatewayTransport for DelayedCookieTransport {
-        async fn send(&self, request: GatewayRequest) -> Result<GatewayResponse> {
-            let path = request.target.path().to_string();
-            self.requests.borrow_mut().push(request);
-            let _ = self.started.unbounded_send(path.clone());
-            if path == self.delayed_path {
-                let receiver = self
-                    .release_delayed_request
-                    .borrow_mut()
-                    .take()
-                    .ok_or_else(|| {
-                        WebviewError::transport("delayed request was released twice".to_string())
-                    })?;
-                receiver.await.map_err(|_| {
-                    WebviewError::transport(
-                        "delayed request release channel was dropped".to_string(),
-                    )
-                })?;
-            }
-            GatewayResponse::new(
-                200,
-                vec![
-                    GatewayHeader::new("content-type", "text/plain")?,
-                    GatewayHeader::new("set-cookie", format!("sid={}; Path=/", &path[1..]))?,
-                ],
-                path.into_bytes(),
-            )
-        }
-    }
-
-    #[test]
-    fn concurrent_gateway_cookie_commits_follow_response_order_and_source_visibility() -> Result<()>
-    {
-        let (started_sender, mut started_receiver) = mpsc::unbounded();
-        let (release_slow_sender, release_slow_receiver) = oneshot::channel();
-        let gateway = Rc::new(ConcurrentWebviewGateway::new(
-            GatewayPrefix::new("/webview/")?,
-            DelayedCookieTransport {
-                started: started_sender,
-                delayed_path: "/slow".to_string(),
-                release_delayed_request: RefCell::new(Some(release_slow_receiver)),
-                requests: RefCell::new(Vec::new()),
-            },
-        ));
-        let slow = TargetUrl::parse("https://example.test/slow")?.into_url();
-        let fast = TargetUrl::parse("https://example.test/fast")?.into_url();
-        let (slow_result_sender, slow_result_receiver) = oneshot::channel();
-        let (fast_result_sender, fast_result_receiver) = oneshot::channel();
-        let mut pool = LocalPool::new();
-        let spawner = pool.spawner();
-
-        let slow_gateway = Rc::clone(&gateway);
-        spawner
-            .spawn_local(async move {
-                let _ = slow_result_sender
-                    .send(slow_gateway.send(GatewayRequest::navigation(slow)).await);
-            })
-            .map_err(|error| WebviewError::transport(error.to_string()))?;
-        assert_eq!(
-            pool.run_until(started_receiver.next()),
-            Some("/slow".to_string())
-        );
-
-        let fast_gateway = Rc::clone(&gateway);
-        let fast_request = fast.clone();
-        spawner
-            .spawn_local(async move {
-                let _ = fast_result_sender.send(
-                    fast_gateway
-                        .send(GatewayRequest::subresource(fast_request))
-                        .await,
-                );
-            })
-            .map_err(|error| WebviewError::transport(error.to_string()))?;
-        let fast_response = pool
-            .run_until(fast_result_receiver)
-            .map_err(|_| WebviewError::transport("fast resource task was dropped".to_string()))??;
-        assert_eq!(fast_response.body, b"/fast");
-        assert!(gateway.transport.requests.borrow().iter().all(|request| {
-            !request
-                .headers
-                .iter()
-                .any(|header| header.name_eq("cookie"))
-        }));
-
-        // The fast response has committed while the first request remains in flight, so a
-        // same-site intermediate request must observe it before the slow response can overwrite
-        // it. This makes response-order visibility observable, rather than inferring it from the
-        // final jar alone.
-        let same_site_read = TargetUrl::parse("https://example.test/read-same-site")?.into_url();
-        let same_site_response = pool.run_until(
-            gateway.send(
-                GatewayRequest::subresource(same_site_read.clone())
-                    .with_source_origin(Url::parse("https://example.test/page")?),
-            ),
-        )?;
-        assert_eq!(same_site_response.body, b"/read-same-site");
-        let same_site_request = gateway
-            .transport
-            .requests
-            .borrow()
-            .last()
-            .cloned()
-            .ok_or_else(|| WebviewError::transport("missing same-site read".to_string()))?;
-        assert!(same_site_request
-            .headers
-            .iter()
-            .any(|header| header.name_eq("cookie") && header.value == "sid=fast"));
-
-        // A cross-site subresource shares the target host but not the source origin. Its Lax
-        // cookie view must remain empty; otherwise a request prepared from another controlled
-        // page could leak the intermediate session.
-        let cross_site_read = TargetUrl::parse("https://example.test/read-cross-site")?.into_url();
-        let cross_site_response = pool.run_until(
-            gateway.send(
-                GatewayRequest::subresource(cross_site_read)
-                    .with_source_origin(Url::parse("https://attacker.example/page")?),
-            ),
-        )?;
-        assert_eq!(cross_site_response.body, b"/read-cross-site");
-        let cross_site_request = gateway
-            .transport
-            .requests
-            .borrow()
-            .last()
-            .cloned()
-            .ok_or_else(|| WebviewError::transport("missing cross-site read".to_string()))?;
-        assert!(!cross_site_request
-            .headers
-            .iter()
-            .any(|header| header.name_eq("cookie")));
-
-        release_slow_sender.send(()).map_err(|_| {
-            WebviewError::transport("slow resource task stopped waiting unexpectedly".to_string())
-        })?;
-        let slow_response = pool
-            .run_until(slow_result_receiver)
-            .map_err(|_| WebviewError::transport("slow resource task was dropped".to_string()))??;
-        assert_eq!(slow_response.body, b"/slow");
-        assert_eq!(
-            gateway.lock_cookies()?.cookie_header(&fast).as_deref(),
-            Some("sid=slow")
-        );
-
-        let after = TargetUrl::parse("https://example.test/after")?.into_url();
-        let after_response = pool.run_until(gateway.send(GatewayRequest::navigation(after)))?;
-        assert_eq!(after_response.body, b"/after");
-        let after_request = gateway
-            .transport
-            .requests
-            .borrow()
-            .last()
-            .cloned()
-            .ok_or_else(|| WebviewError::transport("missing post-commit request".to_string()))?;
-        assert!(after_request
-            .headers
-            .iter()
-            .any(|header| header.name_eq("cookie") && header.value == "sid=slow"));
-        Ok(())
-    }
-
-    #[test]
-    fn concurrent_gateway_cookie_commits_in_mirror_response_order() -> Result<()> {
-        let (started_sender, mut started_receiver) = mpsc::unbounded();
-        let (release_fast_sender, release_fast_receiver) = oneshot::channel();
-        let gateway = Rc::new(ConcurrentWebviewGateway::new(
-            GatewayPrefix::new("/webview/")?,
-            DelayedCookieTransport {
-                started: started_sender,
-                delayed_path: "/fast".to_string(),
-                release_delayed_request: RefCell::new(Some(release_fast_receiver)),
-                requests: RefCell::new(Vec::new()),
-            },
-        ));
-        let slow = TargetUrl::parse("https://example.test/slow")?.into_url();
-        let fast = TargetUrl::parse("https://example.test/fast")?.into_url();
-        let same_site_source = Url::parse("https://example.test/page")?;
-        let (fast_result_sender, fast_result_receiver) = oneshot::channel();
-        let (slow_result_sender, slow_result_receiver) = oneshot::channel();
-        let mut pool = LocalPool::new();
-        let spawner = pool.spawner();
-
-        let fast_gateway = Rc::clone(&gateway);
-        spawner
-            .spawn_local(async move {
-                let _ = fast_result_sender
-                    .send(fast_gateway.send(GatewayRequest::navigation(fast)).await);
-            })
-            .map_err(|error| WebviewError::transport(error.to_string()))?;
-        assert_eq!(
-            pool.run_until(started_receiver.next()),
-            Some("/fast".to_string())
-        );
-
-        let slow_gateway = Rc::clone(&gateway);
-        let slow_request = slow.clone();
-        let slow_source = same_site_source.clone();
-        spawner
-            .spawn_local(async move {
-                let _ = slow_result_sender.send(
-                    slow_gateway
-                        .send(
-                            GatewayRequest::subresource(slow_request)
-                                .with_source_origin(slow_source),
-                        )
-                        .await,
-                );
-            })
-            .map_err(|error| WebviewError::transport(error.to_string()))?;
-        let slow_response = pool
-            .run_until(slow_result_receiver)
-            .map_err(|_| WebviewError::transport("slow resource task was dropped".to_string()))??;
-        assert_eq!(slow_response.body, b"/slow");
-
-        let intermediate = TargetUrl::parse("https://example.test/intermediate")?.into_url();
-        let intermediate_response = pool.run_until(
-            gateway.send(
-                GatewayRequest::subresource(intermediate)
-                    .with_source_origin(Url::parse(same_site_source.as_str())?),
-            ),
-        )?;
-        assert_eq!(intermediate_response.body, b"/intermediate");
-        let intermediate_request = gateway
-            .transport
-            .requests
-            .borrow()
-            .last()
-            .cloned()
-            .ok_or_else(|| WebviewError::transport("missing intermediate read".to_string()))?;
-        assert!(intermediate_request
-            .headers
-            .iter()
-            .any(|header| header.name_eq("cookie") && header.value == "sid=slow"));
-
-        release_fast_sender.send(()).map_err(|_| {
-            WebviewError::transport("fast resource task stopped waiting unexpectedly".to_string())
-        })?;
-        let fast_response = pool
-            .run_until(fast_result_receiver)
-            .map_err(|_| WebviewError::transport("fast resource task was dropped".to_string()))??;
-        assert_eq!(fast_response.body, b"/fast");
-        assert_eq!(
-            gateway.lock_cookies()?.cookie_header(&slow).as_deref(),
-            Some("sid=fast")
-        );
-        Ok(())
-    }
-}
+mod tests;

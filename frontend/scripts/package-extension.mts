@@ -114,6 +114,8 @@ await cp(join(projectRoot, "assets"), join(extensionDist, "assets"), { recursive
 await Promise.all([
   rm(join(extensionDist, "assets", "webview-host.js")),
   rm(join(extensionDist, "assets", "webview-overlay.js")),
+  rm(join(extensionDist, "assets", "webview-worker-navigation.js")),
+  rm(join(extensionDist, "assets", "webview-worker-request.js")),
   rm(join(extensionDist, "assets", "webview-worker-response.js")),
 ]);
 
@@ -158,6 +160,8 @@ async function verifyExtensionOmitsWebviewGatewayAssets(): Promise<void> {
     "rings-webview-service-worker.js",
     join("assets", "webview-host.js"),
     join("assets", "webview-overlay.js"),
+    join("assets", "webview-worker-navigation.js"),
+    join("assets", "webview-worker-request.js"),
     join("assets", "webview-worker-response.js"),
   ];
   await Promise.all(

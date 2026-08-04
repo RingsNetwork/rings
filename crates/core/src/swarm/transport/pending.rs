@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -26,6 +25,10 @@ pub(super) const PENDING_CONNECTION_TIMEOUT_MS: i64 = 180_000;
 
 pub(super) type SharedConnectionLifecycles =
     Arc<Mutex<ConnectionLifecycleRegistry<DEFAULT_PENDING_CONNECTION_CAPACITY>>>;
+pub(super) type PendingFingerUpdates =
+    BTreeMap<PendingConnectionAttempt, BTreeMap<usize, Option<Did>>>;
+type PendingFingerUpdatesGuard<'transport> =
+    std::sync::MutexGuard<'transport, PendingFingerUpdates>;
 
 /// Shared serialization boundary for logical connection ownership.
 ///
@@ -209,10 +212,7 @@ impl SwarmTransport {
         Ok(self.peer_lifecycles()?.active_connections())
     }
 
-    fn pending_finger_updates(
-        &self,
-    ) -> Result<std::sync::MutexGuard<'_, BTreeMap<PendingConnectionAttempt, BTreeSet<usize>>>>
-    {
+    fn pending_finger_updates(&self) -> Result<PendingFingerUpdatesGuard<'_>> {
         self.pending_finger_updates
             .lock()
             .map_err(|_| Error::SwarmConnectionLifecycleLock)
@@ -487,7 +487,17 @@ impl SwarmTransport {
         let mut pending_finger_updates = self.pending_finger_updates()?;
         let fixed_fingers = pending_finger_updates
             .get(&attempt)
-            .map(|indexes| indexes.iter().copied().collect())
+            .map(|updates| {
+                updates
+                    .iter()
+                    .map(
+                        |(index, expected)| crate::dht::topology::ConditionalFingerUpdate {
+                            index: *index,
+                            expected: *expected,
+                        },
+                    )
+                    .collect()
+            })
             .unwrap_or_default();
         let action = self.dht.admit_connected(attempt.peer, fixed_fingers)?;
 
@@ -532,13 +542,18 @@ impl SwarmTransport {
         // `active` while the action validates a successor fallback against it.
         let mut pending_finger_updates = self.pending_finger_updates()?;
         let mut peer_liveness = self.peer_liveness()?;
+        let mut measured_disconnects = self
+            .measured_disconnects
+            .lock()
+            .map_err(|_| Error::SwarmConnectionLifecycleLock)?;
         let result = action(&active)?;
 
         // These mutations are infallible after the DHT action commits. If the
-        // action fails, all three guards drop without changing local state.
+        // action fails, all four guards drop without changing local state.
         lifecycles.remove_active(attempt);
         pending_finger_updates.retain(|pending, _| pending.peer != attempt.peer);
         peer_liveness.remove(attempt.peer);
+        measured_disconnects.remove(&attempt.peer);
         Ok(Some(result))
     }
 
@@ -566,10 +581,18 @@ impl SwarmTransport {
         match finger_candidate_admission(lifecycle, is_routable) {
             FingerCandidateAdmission::Queue(current) => {
                 observe_admission();
+                let expected = self
+                    .dht
+                    .topology_state()?
+                    .fingers
+                    .get(index)
+                    .copied()
+                    .flatten();
                 self.pending_finger_updates()?
                     .entry(current)
                     .or_default()
-                    .insert(index);
+                    .entry(index)
+                    .or_insert(expected);
                 Ok(FingerUpdateDisposition::Queued)
             }
             FingerCandidateAdmission::Apply => {

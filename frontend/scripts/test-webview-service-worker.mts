@@ -9,29 +9,33 @@ import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 import { MessageChannel } from "node:worker_threads";
 
-import { verifyWebviewHostAsset } from "./test-webview-host.mjs";
+import { runStaticServiceWorkerTests, type WorkerRequestApi } from "./test-webview-service-worker-static.mjs";
 import {
   assertJsonEqual,
   bytes,
   captureTimeoutCallbacks,
   frontendProjectRoot,
   gatewayFetchEvent,
-  request,
   runtimeGatewayFetchEvent,
   type ServiceWorkerClientFixture,
   type ServiceWorkerMessageEventFixture,
   type ServiceWorkerTestContext,
-  text,
 } from "./webview-service-worker-fixtures.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const projectRoot = frontendProjectRoot(scriptDir);
 const hostAssetPath = resolve(projectRoot, "assets", "webview-host.js");
 const workerResponseAssetPath = resolve(projectRoot, "assets", "webview-worker-response.js");
+const workerNavigationAssetPath = resolve(projectRoot, "assets", "webview-worker-navigation.js");
+const workerRequestAssetPath = resolve(projectRoot, "assets", "webview-worker-request.js");
 const serviceWorkerPath = resolve(projectRoot, "rings-webview-service-worker.js");
+const canonicalGatewayCspPath = resolve(projectRoot, "..", "crates", "webview", "gateway-content-security-policy.txt");
 const hostAssetSource = await readFile(hostAssetPath, "utf8");
 const workerResponseAssetSource = await readFile(workerResponseAssetPath, "utf8");
+const workerNavigationAssetSource = await readFile(workerNavigationAssetPath, "utf8");
+const workerRequestAssetSource = await readFile(workerRequestAssetPath, "utf8");
 const serviceWorkerSource = await readFile(serviceWorkerPath, "utf8");
+const canonicalGatewayCsp = (await readFile(canonicalGatewayCspPath, "utf8")).trimEnd();
 const clientsById = new Map<string, ServiceWorkerClientFixture>();
 const messageListeners: Array<(event: ServiceWorkerMessageEventFixture) => void> = [];
 let context: ServiceWorkerTestContext;
@@ -45,16 +49,23 @@ context = {
   TextEncoder,
   Response,
   Uint8Array,
+  ReadableStream,
   MessageChannel,
   performance,
   setTimeout,
   clearTimeout,
   importScripts(...urls) {
     for (const url of urls) {
-      assert.equal(new URL(url, "http://127.0.0.1:8080/").pathname, "/assets/webview-worker-response.js");
-      vm.runInContext(workerResponseAssetSource, context, {
-        filename: workerResponseAssetPath,
-      });
+      const pathname = new URL(url, "http://127.0.0.1:8080/").pathname;
+      const [source, filename] =
+        pathname === "/assets/webview-worker-response.js"
+          ? [workerResponseAssetSource, workerResponseAssetPath]
+          : pathname === "/assets/webview-worker-navigation.js"
+            ? [workerNavigationAssetSource, workerNavigationAssetPath]
+            : pathname === "/assets/webview-worker-request.js"
+              ? [workerRequestAssetSource, workerRequestAssetPath]
+              : assert.fail(`unexpected Service Worker import: ${pathname}`);
+      vm.runInContext(source, context, { filename });
     }
   },
   self: {
@@ -75,7 +86,7 @@ context[globalThisKey] = context;
 vm.createContext(context);
 
 vm.runInContext(
-  `${serviceWorkerSource}\nglobalThis.__ringsWebviewServiceWorkerTest = { controlledNavigationBody, emitDebug, gatewayFailureDocument, gatewayHostClient, handleGatewayFetch, handleGatewayFetchWithTimeout, rememberNavigationClientTarget, rememberClientSourceTargetForTest, rememberTrustedShellClientForTest, registerDebugClient, registerGatewayHostClient, requestGatewayResponse, resetGatewayHostForTest, requestKind, sourceTargetForClient };`,
+  `${serviceWorkerSource}\nglobalThis.__ringsWebviewServiceWorkerTest = { controlledNavigationBody, emitDebug, gatewayContentSecurityPolicy, gatewayFailureDocument, gatewayHostClient, handleGatewayFetch, handleGatewayFetchWithTimeout, pruneTrackedClientState, rememberNavigationClientTarget, rememberShellNavigationClient, rememberClientSourceTargetForTest, rememberTrustedShellClientForTest, registerDebugClient, registerGatewayHostClient, requestGatewayResponse, resetGatewayHostForTest, requestKind, sourceTargetForClient };`,
   context,
   {
     filename: serviceWorkerPath,
@@ -85,65 +96,35 @@ vm.runInContext(
 const serviceWorkerApi = context.__ringsWebviewServiceWorkerTest;
 assert(serviceWorkerApi, "service worker test API was not exported");
 const {
-  controlledNavigationBody,
   emitDebug,
-  gatewayFailureDocument,
   gatewayHostClient,
   handleGatewayFetch,
   handleGatewayFetchWithTimeout,
+  pruneTrackedClientState,
   rememberNavigationClientTarget,
+  rememberShellNavigationClient,
   rememberClientSourceTargetForTest,
   rememberTrustedShellClientForTest,
   registerDebugClient,
   registerGatewayHostClient,
   requestGatewayResponse,
   resetGatewayHostForTest,
-  requestKind,
   sourceTargetForClient,
 } = serviceWorkerApi;
-
-/**
- * Runs the injected history guard in a small browser-like VM.
- */
-function runHistoryGuard(html: string, locationHref: string): unknown[][] {
-  const script = html.match(/<script data-rings-webview-history-guard>([\s\S]*?)<\/script>/)?.[1];
-  assert(script, "history guard script was not injected");
-  const calls: unknown[][] = [];
-  class HistoryFixture {
-    pushState(...args: unknown[]): void {
-      calls.push(["pushState", ...args]);
-    }
-
-    replaceState(...args: unknown[]): void {
-      calls.push(["replaceState", ...args]);
-    }
+const workerRequestApi = (
+  context.self as unknown as {
+    readonly RingsWebviewWorkerRequest: WorkerRequestApi;
   }
-  const historyContext: Record<string, unknown> = {
-    calls,
-    DOMException,
-    History: HistoryFixture,
-    history: new HistoryFixture(),
-    location: new URL(locationHref),
-    Object,
-    Reflect,
-    URL,
-  };
-  historyContext[globalThisKey] = historyContext;
-  vm.runInNewContext(script, historyContext, {
-    filename: "rings-webview-history-guard.js",
-  });
-  vm.runInNewContext(
-    `
-      history.pushState({ page: "search" }, "", "/search?q=test");
-      history.replaceState({ page: "hash" }, "", "/#node");
-    `,
-    historyContext,
-    {
-      filename: "rings-webview-history-guard-fixture.js",
-    },
-  );
-  return calls;
-}
+).RingsWebviewWorkerRequest;
+
+await runStaticServiceWorkerTests({
+  api: serviceWorkerApi,
+  canonicalGatewayCsp,
+  globalThisKey,
+  hostAssetPath,
+  hostAssetSource,
+  workerRequestApi,
+});
 
 /**
  * Delivers one synthetic message event to every service-worker message listener.
@@ -171,193 +152,6 @@ async function dispatchMessage(clientId: string, data: unknown): Promise<unknown
   await Promise.all(waits);
   return responses;
 }
-
-await verifyWebviewHostAsset(hostAssetSource, hostAssetPath);
-
-assert.equal(requestKind(request({ mode: "navigate", destination: "document" })), "navigation");
-assert.equal(requestKind(request({ destination: "style" })), "subresource");
-assert.equal(requestKind(request()), "fetch");
-assert.equal(requestKind(request({ headers: { "X-Rings-Webview-Kind": "fetch" } })), "fetch");
-assert.equal(requestKind(request({ headers: { "X-Rings-Webview-Kind": "xhr" } })), "xhr");
-assert.throws(
-  () => requestKind(request({ headers: { "X-Rings-Webview-Kind": "xhr, subresource" } })),
-  /invalid X-Rings-Webview-Kind/,
-);
-assert.throws(
-  () => requestKind(request({ headers: { "X-Rings-Webview-Kind": "subresource" } })),
-  /invalid X-Rings-Webview-Kind/,
-);
-assert.throws(
-  () => requestKind(request({ headers: { "X-Rings-Webview-Kind": "xhr, xhr" } })),
-  /invalid X-Rings-Webview-Kind/,
-);
-
-{
-  const headers = new Headers({
-    "content-encoding": "gzip",
-    "content-length": "42",
-    "content-security-policy": "default-src 'none'",
-    "content-security-policy-report-only": "default-src 'none'",
-    "content-type": "text/html; charset=utf-8",
-    "x-frame-options": "DENY",
-  });
-  const body = controlledNavigationBody(
-    { kind: "navigation" },
-    200,
-    headers,
-    bytes("<!doctype html><html><head><title>Target</title></head><body>ok</body></html>"),
-  );
-  const html = text(body);
-  assert.match(html, /data-rings-webview-history-guard/);
-  assert.match(html, /<script src="\/assets\/webview-overlay\.js"><\/script><\/head>/);
-  assert.equal(headers.has("content-length"), false);
-  assert.equal(headers.has("content-encoding"), false);
-  assert.equal(headers.has("content-security-policy-report-only"), false);
-  assert.equal(headers.has("x-frame-options"), false);
-  assert.match(headers.get("content-security-policy") ?? "", /script-src 'self'/);
-}
-
-{
-  const headers = new Headers({
-    "content-length": "42",
-    "content-type": "text/html",
-  });
-  const body = controlledNavigationBody(
-    { kind: "navigation", topLevelNavigation: false },
-    200,
-    headers,
-    bytes("<!doctype html><html><head><title>Frame</title></head><body>ok</body></html>"),
-  );
-  const html = text(body);
-  assert.match(html, /data-rings-webview-history-guard/);
-  assert.doesNotMatch(html, /\/assets\/webview-overlay\.js/);
-  assert.equal(headers.has("content-length"), false);
-  assert.match(headers.get("content-security-policy") ?? "", /script-src 'self'/);
-}
-
-{
-  const html =
-    '<!doctype html><html><head><script src="/assets/webview-overlay.js"></script></head><body>ok</body></html>';
-  const headers = new Headers({
-    "content-length": "42",
-    "content-security-policy": "default-src 'none'",
-    "content-type": "text/html",
-  });
-  const body = controlledNavigationBody({ kind: "navigation" }, 200, headers, bytes(html));
-  const injected = text(body);
-  assert.match(injected, /data-rings-webview-history-guard/);
-  assert.match(injected, /<script src="\/assets\/webview-overlay\.js"><\/script><\/head>/);
-  assert.equal(headers.has("content-length"), false);
-  assert.match(headers.get("content-security-policy") ?? "", /script-src 'self'/);
-}
-
-{
-  const headers = new Headers({
-    "content-length": "42",
-    "content-security-policy": "default-src 'none'",
-    "content-type": "text/html",
-  });
-  const body = controlledNavigationBody(
-    { kind: "navigation" },
-    200,
-    headers,
-    bytes(
-      "<!doctype html><!-- attacker marker: data-rings-webview-history-guard /assets/webview-overlay.js --><html><head><title>Target</title></head><body>ok</body></html>",
-    ),
-  );
-  const html = text(body);
-  const guardIndex = html.indexOf("<script data-rings-webview-history-guard>");
-  const attackerMarkerIndex = html.indexOf("attacker marker");
-  const overlayIndex = html.lastIndexOf('<script src="/assets/webview-overlay.js"></script>');
-  assert.ok(guardIndex >= 0);
-  assert.ok(attackerMarkerIndex >= 0);
-  assert.ok(overlayIndex > attackerMarkerIndex);
-  const historyCalls = runHistoryGuard(
-    html,
-    "http://127.0.0.1:8080/webview/https%3A%2F%2Ftrusted.example%2Fdocs%2Findex.html",
-  );
-  assert.equal(historyCalls[0]?.[3], "/webview/https%3A%2F%2Ftrusted.example%2Fsearch%3Fq%3Dtest");
-  assert.equal(headers.has("content-length"), false);
-}
-
-{
-  const headers = new Headers({
-    "content-length": "42",
-    "content-security-policy": "default-src 'none'",
-    "content-type": "text/html",
-  });
-  const body = controlledNavigationBody(
-    { kind: "navigation" },
-    200,
-    headers,
-    bytes("\uFEFF<!-- leading comment --><html><head><title>Target</title></head><body>ok</body></html>"),
-  );
-  const html = text(body);
-  assert.match(html, /<script src="\/assets\/webview-overlay\.js"><\/script><\/head>/);
-  assert.equal(headers.has("content-length"), false);
-  assert.match(headers.get("content-security-policy") ?? "", /script-src 'self'/);
-}
-
-{
-  const headers = new Headers({
-    "content-length": "42",
-    "content-security-policy": "default-src 'none'",
-    "content-type": "text/html",
-  });
-  const body = controlledNavigationBody({ kind: "navigation" }, 200, headers, bytes("<!-- comment-only fixture -->"));
-  assert.equal(text(body), "<!-- comment-only fixture -->");
-  assert.equal(headers.has("content-length"), false);
-  assert.match(headers.get("content-security-policy") ?? "", /script-src 'self'/);
-}
-
-{
-  const headers = new Headers({
-    "content-type": "text/html",
-  });
-  const body = controlledNavigationBody(
-    { kind: "navigation" },
-    200,
-    headers,
-    bytes(
-      '<!doctype html><html><head><script data-attacker>history.replaceState(null, "", "/#node")</script></head><body>ok</body></html>',
-    ),
-  );
-  const html = text(body);
-  const guardIndex = html.indexOf("data-rings-webview-history-guard");
-  const attackerIndex = html.indexOf("data-attacker");
-  assert.ok(guardIndex >= 0);
-  assert.ok(attackerIndex >= 0);
-  assert.ok(guardIndex < attackerIndex);
-  const historyCalls = runHistoryGuard(
-    html,
-    "http://127.0.0.1:8080/webview/https%3A%2F%2Ftrusted.example%2Fdocs%2Findex.html",
-  );
-  assert.equal(historyCalls[0]?.[0], "pushState");
-  assert.equal(historyCalls[0]?.[3], "/webview/https%3A%2F%2Ftrusted.example%2Fsearch%3Fq%3Dtest");
-  assert.equal(historyCalls[1]?.[0], "replaceState");
-  assert.equal(historyCalls[1]?.[3], "/webview/https%3A%2F%2Ftrusted.example%2F%23node");
-}
-
-{
-  const css = bytes("body { color: red; }");
-  const body = controlledNavigationBody({ kind: "subresource" }, 200, new Headers({ "content-type": "text/css" }), css);
-  assert.equal(body, css);
-}
-
-{
-  const html = gatewayFailureDocument(
-    503,
-    'gateway transport failed: no live onion exit offers service "https"',
-    "No live HTTPS onion exit is available.",
-    "onion_exit_unavailable",
-  );
-  assert.match(html, /<template[\s\S]*data-rings-webview-failure="true"/);
-  assert.match(html, /data-rings-webview-failure-code="onion_exit_unavailable"/);
-  assert.doesNotMatch(html, /<h1\b/i);
-  assert.doesNotMatch(html, /<main\b/i);
-  assert.doesNotMatch(html, /<p\b/i);
-}
-
 {
   resetGatewayHostForTest();
   clientsById.clear();
@@ -384,6 +178,7 @@ assert.throws(
     frameType: "auxiliary",
     postMessage() {},
   });
+  assert.equal(rememberTrustedShellClientForTest("host"), true);
   assert.equal(await registerGatewayHostClient("host", hostCapability), true);
   assert.equal(rememberTrustedShellClientForTest("hung-debug"), true);
   assert.equal(await registerDebugClient("hung-debug", hostCapability), true);
@@ -424,6 +219,92 @@ assert.throws(
 
   assert.equal(await gatewayHostClient(), undefined);
   assertJsonEqual(hostMessages, []);
+}
+
+{
+  resetGatewayHostForTest();
+  clientsById.clear();
+  const firstCapability = "a".repeat(32);
+  clientsById.set("departed-host", {
+    id: "departed-host",
+    url: "http://127.0.0.1:8080/#node",
+    frameType: "top-level",
+    postMessage() {},
+  });
+  assert.equal(rememberTrustedShellClientForTest("departed-host"), true);
+  assert.equal(await registerGatewayHostClient("departed-host", firstCapability), true);
+  clientsById.clear();
+  await pruneTrackedClientState();
+  assert.equal(await gatewayHostClient(), undefined);
+
+  const replacementCapability = "b".repeat(32);
+  clientsById.set("replacement-host", {
+    id: "replacement-host",
+    url: "http://127.0.0.1:8080/#node",
+    frameType: "top-level",
+    postMessage() {},
+  });
+  assert.equal(rememberTrustedShellClientForTest("replacement-host"), true);
+  assert.equal(await registerGatewayHostClient("replacement-host", replacementCapability), true);
+}
+
+{
+  resetGatewayHostForTest();
+  clientsById.clear();
+  const hostCapability = "e".repeat(32);
+  clientsById.set("host", {
+    id: "host",
+    url: "http://127.0.0.1:8080/#node",
+    frameType: "top-level",
+    postMessage() {},
+  });
+  assert.equal(rememberTrustedShellClientForTest("host"), true);
+  assert.equal(await registerGatewayHostClient("host", hostCapability), true);
+  const originalGet = context.self.clients.get;
+  context.self.clients.get = async () => {
+    throw new Error("backend-secret-detail");
+  };
+  try {
+    const response = await handleGatewayFetchWithTimeout(gatewayFetchEvent("https://example.test/"));
+    assert.equal(response.status, 502);
+    const html = await response.text();
+    assert.match(html, /data-rings-webview-failure-code="gateway_internal_failure"/);
+    assert.doesNotMatch(html, /backend-secret-detail/);
+  } finally {
+    context.self.clients.get = originalGet;
+  }
+}
+
+{
+  resetGatewayHostForTest();
+  clientsById.clear();
+  const hostCapability = "i".repeat(32);
+  clientsById.set("host", {
+    id: "host",
+    url: "http://127.0.0.1:8080/#node",
+    frameType: "top-level",
+    postMessage(_message, transfer) {
+      const reply = transfer?.[0] as { postMessage?: (response: unknown) => void } | undefined;
+      reply?.postMessage?.({
+        ok: true,
+        status: 200,
+        headers: [{ name: "backend-secret-header\nname", value: "hidden" }],
+        body: bytes("ok"),
+      });
+    },
+  });
+  assert.equal(rememberTrustedShellClientForTest("host"), true);
+  assert.equal(await registerGatewayHostClient("host", hostCapability), true);
+
+  const response = await handleGatewayFetch(
+    gatewayFetchEvent("https://invalid-response.example/"),
+    703,
+    performance.now(),
+  );
+  assert.equal(response.status, 502);
+  const html = await response.text();
+  assert.match(html, /data-rings-webview-failure-code="invalid_gateway_response"/);
+  assert.doesNotMatch(html, /backend-secret-header/);
 }
 
 {
@@ -475,6 +356,7 @@ assert.throws(
       hostMessages.push(message);
     },
   });
+  assert.equal(rememberTrustedShellClientForTest("host"), true);
   assert.equal(await registerGatewayHostClient("host", hostCapability), true);
   try {
     const responsePromise = handleGatewayFetchWithTimeout(gatewayFetchEvent("https://dispatched-timeout.example/"));
@@ -523,6 +405,7 @@ assert.throws(
     frameType: "top-level",
     postMessage() {},
   });
+  assert.equal(rememberTrustedShellClientForTest("host"), true);
   assert.equal(await registerGatewayHostClient("host", hostCapability), true);
   assert.equal(rememberClientSourceTargetForTest("target-page", "https://example.test/"), true);
 
@@ -549,6 +432,13 @@ assert.throws(
   assert.equal(request.credentials, "include");
   assertJsonEqual(request.headers, [{ name: "x-target-header", value: "kept" }]);
   assert.equal(new TextDecoder().decode(request.body), "runtime body");
+
+  const oversized = runtimeGatewayFetchEvent("https://example.test/upload");
+  oversized.request.headers.set("content-length", String(workerRequestApi.gatewayRequestBodyLimitBytes + 1));
+  const rejected = await handleGatewayFetch(oversized, 702, performance.now());
+  assert.equal(rejected.status, 413);
+  assert.match(await rejected.text(), /data-rings-webview-failure-code="gateway_request_body_too_large"/);
+  assert.equal(hostRequests.length, 1, "oversized bodies must be rejected before host dispatch");
 }
 
 {
@@ -571,33 +461,43 @@ assert.throws(
     frameType: "top-level",
     postMessage() {},
   });
+  assert.equal(rememberTrustedShellClientForTest("host"), true);
   assert.equal(await registerGatewayHostClient("host", hostCapability), true);
   assert.equal(rememberClientSourceTargetForTest("target-page", "https://timeout.example/"), true);
-  let resolveBody: ((body: ArrayBuffer) => void) | undefined;
-  const body = new Promise<ArrayBuffer>((resolve) => {
-    resolveBody = resolve;
-  });
+  let bodyStarted = false;
+  let bodyCancelled = false;
   const baseEvent = runtimeGatewayFetchEvent("https://timeout.example/search");
   const delayedPostEvent = {
     ...baseEvent,
     request: {
       ...baseEvent.request,
-      clone: () => ({
-        arrayBuffer: () => body,
-      }),
+      get body() {
+        return new ReadableStream<Uint8Array>({
+          start() {
+            bodyStarted = true;
+          },
+          cancel() {
+            bodyCancelled = true;
+          },
+        });
+      },
     },
   };
   try {
     const responsePromise = handleGatewayFetchWithTimeout(delayedPostEvent);
     const timeoutCallback = timers.callbacks[0];
     assert(timeoutCallback, "Service Worker deadline was not scheduled");
+    for (let turn = 0; turn < 8 && !bodyStarted; turn += 1) {
+      await Promise.resolve();
+    }
+    assert.equal(bodyStarted, true, "request body read did not start");
     timeoutCallback();
     const response = await responsePromise;
     assert.equal(response.status, 504);
     const html = await response.text();
     assert.match(html, /data-rings-webview-failure-code="local_gateway_timeout"/);
-    assert(resolveBody, "delayed request body resolver was not installed");
-    resolveBody(new ArrayBuffer(0));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(bodyCancelled, true);
     await Promise.resolve();
     await Promise.resolve();
     assertJsonEqual(hostMessages, []);
@@ -645,24 +545,43 @@ assert.throws(
     postMessage() {},
   });
   assert.equal(rememberClientSourceTargetForTest("forged-source", "https://original.test/"), true);
-  assert.equal(await sourceTargetForClient("forged-source"), "https://victim.test/");
+  assert.equal(await sourceTargetForClient("forged-source"), undefined);
+  clientsById.set("history-source", {
+    id: "history-source",
+    url: "http://127.0.0.1:8080/webview/https%3A%2F%2Foriginal.test%2Fnext%3Fpage%3D2",
+    frameType: "top-level",
+    postMessage() {},
+  });
+  assert.equal(rememberClientSourceTargetForTest("history-source", "https://original.test/start"), true);
+  assert.equal(await sourceTargetForClient("history-source"), "https://original.test/next?page=2");
   clientsById.set("recovered-source", {
     id: "recovered-source",
     url: "http://127.0.0.1:8080/webview/https%3A%2F%2Frecovered.test%2Fpage",
     frameType: "top-level",
     postMessage() {},
   });
-  assert.equal(await sourceTargetForClient("recovered-source"), "https://recovered.test/page");
+  assert.equal(await sourceTargetForClient("recovered-source"), undefined);
   const hostCapability = "h".repeat(32);
   const hostileCapability = "x".repeat(32);
 
   assert.equal(await gatewayHostClient(), undefined);
   assert.equal(await registerGatewayHostClient("host", "short"), false);
+  assert.equal(await registerGatewayHostClient("host", hostCapability), false);
+  assert.equal(rememberTrustedShellClientForTest("host"), true);
   assert.equal(await registerGatewayHostClient("host", hostCapability), true);
   assert.equal((await gatewayHostClient())?.id, "host");
 
   resetGatewayHostForTest();
   assert.equal(rememberTrustedShellClientForTest("popup"), true);
+  clientsById.set("hostile", {
+    id: "hostile",
+    url: "http://127.0.0.1:8080/#node",
+    frameType: "top-level",
+    postMessage(message) {
+      hostileMessages.push(message);
+    },
+  });
+  assert.equal(await registerGatewayHostClient("hostile", hostileCapability), false);
   assertJsonEqual(
     await dispatchMessage("hostile", {
       type: "rings-webview-host-register",
@@ -671,6 +590,17 @@ assert.throws(
     [{ ok: false, error: "untrusted gateway host registration" }],
   );
   assert.equal(await gatewayHostClient(), undefined);
+  assert.equal(await registerGatewayHostClient("host", hostCapability), false);
+  assert.equal(
+    rememberShellNavigationClient(
+      {
+        resultingClientId: "host",
+        request: { mode: "navigate", destination: "document" },
+      },
+      new URL("http://127.0.0.1:8080/"),
+    ),
+    true,
+  );
   assert.equal(await registerGatewayHostClient("host", hostCapability), true);
   assert.equal((await gatewayHostClient())?.id, "host");
   clientsById.set("hostile", {
@@ -684,6 +614,24 @@ assert.throws(
   assert.equal(await registerGatewayHostClient("hostile", hostileCapability), false);
   assert.equal(await registerGatewayHostClient("host", hostileCapability), false);
   assert.equal((await gatewayHostClient())?.id, "host");
+
+  clientsById.set("hostile-path", {
+    id: "hostile-path",
+    url: "http://127.0.0.1:8080/#node",
+    frameType: "top-level",
+    postMessage() {},
+  });
+  assert.equal(
+    rememberShellNavigationClient(
+      {
+        resultingClientId: "hostile-path",
+        request: { mode: "navigate", destination: "document" },
+      },
+      new URL("http://127.0.0.1:8080/untrusted-page"),
+    ),
+    false,
+  );
+  assert.equal(await registerGatewayHostClient("hostile-path", hostCapability), false);
   // Cold-start discovery probes are intentionally benign, but this block
   // below verifies that no debug payload is delivered to the host.
   hostMessages.length = 0;
@@ -851,6 +799,7 @@ assert.throws(
   });
 
   assert.equal(rememberTrustedShellClientForTest("popup-source"), true);
+  assert.equal(rememberTrustedShellClientForTest("host"), true);
   assert.equal(await registerGatewayHostClient("host", hostCapability), true);
   assert.equal(await registerDebugClient("popup-source", hostCapability), true);
   await emitDebug("worker", "source shell only");
@@ -933,6 +882,23 @@ assert.throws(
     },
   });
 
+  assertJsonEqual(
+    await dispatchMessage("cold-shell-host", {
+      type: "rings-webview-host-register",
+      capability: "c".repeat(32),
+    }),
+    [{ ok: false, error: "untrusted gateway host registration" }],
+  );
+  assert.equal(
+    rememberShellNavigationClient(
+      {
+        resultingClientId: "cold-shell-host",
+        request: { mode: "navigate", destination: "document" },
+      },
+      new URL("http://127.0.0.1:8080/"),
+    ),
+    true,
+  );
   assertJsonEqual(
     await dispatchMessage("cold-shell-host", {
       type: "rings-webview-host-register",

@@ -46,7 +46,6 @@ mod udp;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -63,6 +62,8 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::extension::ext::Scope;
 use crate::extension::protocols::relay::RelayCommand;
+use crate::extension::transport::allocate_non_reusing;
+use crate::extension::transport::EffectEnqueue;
 use crate::extension::transport::Frame;
 use crate::extension::transport::Initiator;
 use crate::extension::transport::SessionKey;
@@ -74,6 +75,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const TCP_BUF: usize = 30_000;
 /// Local UDP datagram buffer (one datagram per frame; larger is truncated, v1).
 const UDP_BUF: usize = 65_536;
+/// Accepted local resources awaiting the reducer's session-id decision.
+const MAX_PENDING_ACCEPTS: usize = 128;
 
 /// Something to deliver to a session's local socket (peer → local direction).
 enum Outbound {
@@ -137,8 +140,8 @@ impl TransportSessions {
 
     /// Allocate a fresh engine-local token for a pending accept (not a session id — the core
     /// mints session ids).
-    fn next_token(&self) -> u64 {
-        self.tokens.fetch_add(1, Ordering::Relaxed)
+    fn next_token(&self) -> Option<u64> {
+        allocate_non_reusing(&self.tokens)
     }
 
     /// Server side. Open a local backend for `session` and relay to `peer` under
@@ -151,13 +154,15 @@ impl TransportSessions {
         key: SessionKey,
         addr: SocketAddr,
         kind: TransportKind,
-    ) {
+    ) -> EffectEnqueue {
         debug_assert_eq!(
             scope.namespace(),
             key.namespace.as_str(),
             "relay engine acted with a scope outside the session's namespace"
         );
-        let task = RelayTask::register(self.clone(), scope, key);
+        let Some(task) = RelayTask::register(self.clone(), scope, key) else {
+            return EffectEnqueue::Failed;
+        };
         tokio::spawn(async move {
             match kind {
                 TransportKind::Tcp => {
@@ -172,6 +177,7 @@ impl TransportSessions {
                 },
             }
         });
+        EffectEnqueue::Enqueued
     }
 
     /// Client side. Bind a local listener; per accepted TCP connection / new UDP
@@ -206,28 +212,26 @@ impl TransportSessions {
         }
     }
 
-    /// Deliver peer bytes to a session's local socket. Unknown sessions are dropped — and a
-    /// non-owner peer's key never resolves, so it cannot write to a session it does not own.
-    pub async fn write(&self, key: &SessionKey, bytes: Bytes) {
-        if let Some(tx) = self.sender(key) {
-            let _ = tx.send(Outbound::Data(bytes)).await;
-        }
+    /// Enqueue peer bytes without waiting for local-socket backpressure. Returns whether the
+    /// pure relay must forget the session. A full channel is a terminal local resource failure:
+    /// removing it bounds memory and prevents one stalled socket from holding the namespace's
+    /// ordered transition gate.
+    pub fn write(&self, key: &SessionKey, bytes: Bytes) -> EffectEnqueue {
+        self.enqueue_for_effect(key, Outbound::Data(bytes))
     }
 
     /// Half-close a session's local write side (peer sent FIN).
-    pub async fn shutdown(&self, key: &SessionKey) {
-        if let Some(tx) = self.sender(key) {
-            let _ = tx.send(Outbound::Shutdown).await;
-        }
+    pub fn shutdown(&self, key: &SessionKey) -> EffectEnqueue {
+        self.enqueue_for_effect(key, Outbound::Shutdown)
     }
 
     /// Release a session while applying a `Close` effect.
     ///
     /// The pure reducer has already removed `key` for this effect, so feeding `Untrack` back is
     /// redundant and would recursively enter the currently active ordered effect turn.
-    pub async fn close_for_effect(&self, key: &SessionKey) {
+    pub fn close_for_effect(&self, key: &SessionKey) {
         let removed = self.map.lock().ok().and_then(|mut map| map.remove(key));
-        self.finish_close_without_feedback(removed).await;
+        self.finish_close_without_feedback(removed);
     }
 
     /// Close a session **only if** its handle still has `generation` — so a slow old relay
@@ -245,9 +249,8 @@ impl TransportSessions {
     /// This is used only while interpreting `OpenAccepted`: its `Untrack` feedback must be
     /// returned through [`Interpret::run`] rather than recursively dispatching under the
     /// runner's ordered effect turn.
-    async fn close_if_current_for_effect(&self, key: &SessionKey, generation: u64) -> bool {
+    fn close_if_current_for_effect(&self, key: &SessionKey, generation: u64) -> bool {
         self.finish_close_without_feedback(self.remove_if_current(key, generation))
-            .await
     }
 
     fn remove_if_current(&self, key: &SessionKey, generation: u64) -> Option<SessionHandle> {
@@ -284,7 +287,7 @@ impl TransportSessions {
     ///
     /// Post: if this returns `true`, the OS resource is gone and the caller owns the matching
     /// `RelayCommand::Untrack` feedback obligation.
-    async fn finish_close_without_feedback(&self, removed: Option<SessionHandle>) -> bool {
+    fn finish_close_without_feedback(&self, removed: Option<SessionHandle>) -> bool {
         let Some(handle) = removed else {
             return false;
         };
@@ -318,14 +321,20 @@ impl TransportSessions {
         };
         match pending {
             Pending::Tcp(stream) => {
-                let task = RelayTask::register(self.clone(), scope.clone(), key.clone());
+                let Some(task) = RelayTask::register(self.clone(), scope.clone(), key.clone())
+                else {
+                    return Some(key);
+                };
                 if open(&scope, &key, service.as_str()).await.is_err() {
-                    return task.refuse_for_effect().await.then_some(key);
+                    return task.refuse_for_effect().then_some(key);
                 }
                 tokio::spawn(async move { tcp::relay_tcp(task, stream).await });
             }
             Pending::Udp { socket, src, first } => {
-                let (outbound_rx, cancel, generation) = self.register(key.clone(), Some(src));
+                let Some((outbound_rx, cancel, generation)) = self.register(key.clone(), Some(src))
+                else {
+                    return Some(key);
+                };
                 if let Ok(mut flows) = self.udp_flows.lock() {
                     flows.insert(src, key.clone());
                 }
@@ -333,7 +342,6 @@ impl TransportSessions {
                 if open(&scope, &key, service.as_str()).await.is_err() {
                     return self
                         .close_if_current_for_effect(&key, generation)
-                        .await
                         .then_some(key);
                 }
                 // Forward the first datagram that triggered this flow.
@@ -359,8 +367,12 @@ impl TransportSessions {
     /// Stash a pending accept under a fresh engine-local token (for the round-trip to the
     /// core, which mints the id and replies with `OpenAccepted`).
     fn stash_pending(&self, pending: Pending) -> Option<u64> {
-        let token = self.next_token();
-        self.pending.lock().ok()?.insert(token, pending);
+        let mut pending_accepts = self.pending.lock().ok()?;
+        if pending_accepts.len() >= MAX_PENDING_ACCEPTS {
+            return None;
+        }
+        let token = self.next_token()?;
+        pending_accepts.insert(token, pending);
         Some(token)
     }
 
@@ -373,6 +385,11 @@ impl TransportSessions {
         }
     }
 
+    /// Release a local accept rejected synchronously by the pure relay allocator.
+    pub(crate) fn evict_pending_for_effect(&self, token: u64) {
+        self.evict_pending(token);
+    }
+
     // ── shared ───────────────────────────────────────────────────────────────────
 
     /// Create a session's channel + cancel token and record its handle, returning the
@@ -382,24 +399,45 @@ impl TransportSessions {
         &self,
         key: SessionKey,
         src: Option<SocketAddr>,
-    ) -> (mpsc::Receiver<Outbound>, CancellationToken, u64) {
+    ) -> Option<(mpsc::Receiver<Outbound>, CancellationToken, u64)> {
         let (outbound, outbound_rx) = mpsc::channel::<Outbound>(1024);
         let cancel = CancellationToken::new();
-        let generation = self.generations.fetch_add(1, Ordering::Relaxed);
+        let generation = allocate_non_reusing(&self.generations)?;
         self.insert(key, SessionHandle {
             outbound,
             cancel: cancel.clone(),
             src,
             generation,
         });
-        (outbound_rx, cancel, generation)
+        Some((outbound_rx, cancel, generation))
     }
 
-    fn sender(&self, key: &SessionKey) -> Option<mpsc::Sender<Outbound>> {
-        self.map
-            .lock()
-            .ok()
-            .and_then(|map| map.get(key).map(|handle| handle.outbound.clone()))
+    fn sender(&self, key: &SessionKey) -> Option<(mpsc::Sender<Outbound>, u64)> {
+        self.map.lock().ok().and_then(|map| {
+            map.get(key)
+                .map(|handle| (handle.outbound.clone(), handle.generation))
+        })
+    }
+
+    /// Imperative admission boundary for the bounded peer→local queue.
+    ///
+    /// Post: [`EffectEnqueue::Failed`] means this effect removed the exact generation whose
+    /// queue rejected the operation; [`EffectEnqueue::Missing`] means no generation existed.
+    /// An ABA-replaced generation is never removed.
+    fn enqueue_for_effect(&self, key: &SessionKey, outbound: Outbound) -> EffectEnqueue {
+        let Some((sender, generation)) = self.sender(key) else {
+            return EffectEnqueue::Missing;
+        };
+        match sender.try_send(outbound) {
+            Ok(()) => EffectEnqueue::Enqueued,
+            Err(_) => {
+                if self.finish_close_without_feedback(self.remove_if_current(key, generation)) {
+                    EffectEnqueue::Failed
+                } else {
+                    EffectEnqueue::Enqueued
+                }
+            }
+        }
     }
 
     /// Whether a session is currently live (registered in the table). Used by the UDP
@@ -437,16 +475,16 @@ struct RelayTask {
 
 impl RelayTask {
     /// Register a fresh session channel on the engine and capture the routing identity.
-    fn register(sessions: Arc<TransportSessions>, scope: Scope, key: SessionKey) -> Self {
-        let (outbound_rx, cancel, generation) = sessions.register(key.clone(), None);
-        Self {
+    fn register(sessions: Arc<TransportSessions>, scope: Scope, key: SessionKey) -> Option<Self> {
+        let (outbound_rx, cancel, generation) = sessions.register(key.clone(), None)?;
+        Some(Self {
             sessions,
             scope,
             key,
             outbound_rx,
             cancel,
             generation,
-        }
+        })
     }
 
     /// Connect failed: drop the pre-registered session (which `Untrack`s it) and tell the peer
@@ -469,10 +507,9 @@ impl RelayTask {
     ///
     /// The caller returns `Untrack` as synchronous feedback, so this must not call
     /// [`Scope::inject`] and recursively wait for the active ordered effect turn.
-    async fn refuse_for_effect(self) -> bool {
+    fn refuse_for_effect(self) -> bool {
         self.sessions
             .close_if_current_for_effect(&self.key, self.generation)
-            .await
     }
 }
 
@@ -524,5 +561,83 @@ async fn inject_untrack(scope: &Scope, key: &SessionKey) {
                  this (now dropped) session"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+
+    use bytes::Bytes;
+    use rings_core::dht::Did;
+    use tokio::net::UdpSocket;
+
+    use super::Pending;
+    use super::TransportSessions;
+    use super::MAX_PENDING_ACCEPTS;
+    use crate::extension::transport::EffectEnqueue;
+    use crate::extension::transport::Initiator;
+    use crate::extension::transport::SessionId;
+    use crate::extension::transport::SessionKey;
+
+    #[test]
+    fn saturated_local_queue_fails_closed_without_waiting() {
+        let sessions = TransportSessions::new();
+        let key = SessionKey::new(Did::from(7_u32), "tcp", SessionId(11), Initiator::Remote);
+        let registration = sessions.register(key.clone(), None);
+        assert!(registration.is_some());
+
+        for _ in 0..1024 {
+            assert_eq!(
+                sessions.write(&key, Bytes::from_static(b"x")),
+                EffectEnqueue::Enqueued
+            );
+        }
+        assert_eq!(
+            sessions.write(&key, Bytes::from_static(b"overflow")),
+            EffectEnqueue::Failed
+        );
+        assert!(!sessions.is_live(&key));
+        assert_eq!(
+            sessions.write(&key, Bytes::from_static(b"stale")),
+            EffectEnqueue::Missing
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_accept_table_rejects_above_its_hard_bound() {
+        let sessions = TransportSessions::new();
+        let socket = Arc::new(
+            UdpSocket::bind("127.0.0.1:0")
+                .await
+                .expect("bind test UDP socket"),
+        );
+        for index in 0..MAX_PENDING_ACCEPTS {
+            let src = SocketAddr::from(([127, 0, 0, 1], 10_000 + index as u16));
+            assert!(sessions
+                .stash_pending(Pending::Udp {
+                    socket: Arc::clone(&socket),
+                    src,
+                    first: Bytes::new(),
+                })
+                .is_some());
+        }
+
+        assert!(sessions
+            .stash_pending(Pending::Udp {
+                socket,
+                src: SocketAddr::from(([127, 0, 0, 1], 20_000)),
+                first: Bytes::new(),
+            })
+            .is_none());
+        assert_eq!(
+            sessions
+                .pending
+                .lock()
+                .expect("pending table remains readable")
+                .len(),
+            MAX_PENDING_ACCEPTS
+        );
     }
 }

@@ -7,7 +7,9 @@ use crate::types::GatewayRequest;
 use crate::types::GatewayResponse;
 use crate::url::GatewayPrefix;
 
-const GATEWAY_CONTENT_SECURITY_POLICY: &str = "default-src 'self' data: blob:; base-uri 'self'; connect-src 'self'; font-src 'self' data:; form-action 'self'; frame-src 'self' data: blob:; img-src 'self' data: blob:; media-src 'self' data: blob:; object-src 'self'; script-src 'self' data: 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; style-src 'self' data: 'unsafe-inline'; worker-src 'none'";
+fn gateway_content_security_policy() -> &'static str {
+    include_str!("../gateway-content-security-policy.txt").trim_end()
+}
 
 /// Header policy for controlled webview documents.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -73,8 +75,9 @@ impl HeaderPolicy {
         }
         headers.push(GatewayHeader::new(
             "Content-Security-Policy",
-            GATEWAY_CONTENT_SECURITY_POLICY,
+            gateway_content_security_policy(),
         )?);
+        headers.push(GatewayHeader::new("X-Content-Type-Options", "nosniff")?);
         GatewayResponse::new(response.status, headers, response.body)
     }
 }
@@ -154,14 +157,19 @@ mod tests {
 
         let normalized = policy.normalize_response(&target, response)?;
 
-        assert_eq!(normalized.headers.len(), 3);
+        assert_eq!(normalized.headers.len(), 4);
         assert!(normalized
             .headers
             .iter()
             .any(|header| { header.name_eq("location") && header.value.starts_with("/webview/") }));
         assert!(normalized.headers.iter().any(|header| {
             header.name_eq("content-security-policy")
-                && header.value == GATEWAY_CONTENT_SECURITY_POLICY
+                && header.value == gateway_content_security_policy()
+        }));
+        assert!(gateway_content_security_policy().starts_with("sandbox "));
+        assert!(!gateway_content_security_policy().contains("allow-same-origin"));
+        assert!(normalized.headers.iter().any(|header| {
+            header.name_eq("x-content-type-options") && header.value == "nosniff"
         }));
         Ok(())
     }
@@ -195,7 +203,10 @@ mod tests {
             .any(|header| header.name_eq("content-type") && header.value == "text/html"));
         assert!(normalized.headers.iter().any(|header| {
             header.name_eq("content-security-policy")
-                && header.value == GATEWAY_CONTENT_SECURITY_POLICY
+                && header.value == gateway_content_security_policy()
+        }));
+        assert!(normalized.headers.iter().any(|header| {
+            header.name_eq("x-content-type-options") && header.value == "nosniff"
         }));
         Ok(())
     }

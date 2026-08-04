@@ -1,3 +1,6 @@
+use std::future::Future;
+use std::sync::Arc;
+
 use bytes::Bytes;
 use rings_core::dht::Did;
 use rings_core::session::SessionSk;
@@ -14,6 +17,7 @@ use super::OnionCircuitId;
 use super::OnionCircuitPayload;
 use super::OnionClientReturn;
 use super::OnionForwardNonce;
+use super::OnionForwardSequence;
 use crate::error::Error;
 use crate::error::Result;
 use crate::extension::ext::EffectScope;
@@ -24,7 +28,7 @@ use crate::extension::ext::Scope;
 pub struct OnionCircuitShell<H> {
     session_sk: SessionSk,
     crypto_gate: OnionCryptoGate,
-    handler: H,
+    handler: Arc<H>,
 }
 
 impl<H> OnionCircuitShell<H> {
@@ -33,7 +37,7 @@ impl<H> OnionCircuitShell<H> {
         Self {
             session_sk,
             crypto_gate: OnionCryptoGate::default(),
-            handler,
+            handler: Arc::new(handler),
         }
     }
 
@@ -141,19 +145,27 @@ where H: OnionCircuitHandler + crate::extension::ext::MaybeSend + 'static
                 return_peer,
                 client,
                 forward_nonce,
+                forward_sequence,
                 payload,
             } => {
                 let lifecycle = scope.lifecycle();
-                self.handler
-                    .handle_exit(&lifecycle, OnionCircuitExitFrame {
-                        from,
-                        circuit_id,
-                        return_peer,
-                        client,
-                        forward_nonce,
-                        payload,
-                    })
-                    .await?;
+                let handler = Arc::clone(&self.handler);
+                spawn_exit_task(async move {
+                    let result = handler
+                        .handle_exit(&lifecycle, OnionCircuitExitFrame {
+                            from,
+                            circuit_id,
+                            return_peer,
+                            client,
+                            forward_nonce,
+                            forward_sequence,
+                            payload,
+                        })
+                        .await;
+                    if let Err(error) = result {
+                        tracing::warn!(%error, "onion exit effect failed");
+                    }
+                });
                 Ok(Vec::new())
             }
             OnionCircuitEffect::DecryptClient {
@@ -184,8 +196,10 @@ pub struct OnionCircuitExitFrame {
     pub return_peer: Did,
     /// Client return key encrypted into the exit layer.
     pub client: OnionClientReturn,
-    /// Exit-layer nonce consumed once by the adapter before side effects.
+    /// One-shot replay token consumed by `Open`/HTTPS exit operations before side effects.
     pub forward_nonce: OnionForwardNonce,
+    /// Monotonic client-to-exit sequence within this circuit.
+    pub forward_sequence: OnionForwardSequence,
     /// Adapter payload carried by the exit layer.
     pub payload: OnionCircuitPayload,
 }
@@ -212,4 +226,22 @@ pub trait OnionCircuitHandler {
 
 fn drop_bad_crypto(context: &str, error: Error) {
     tracing::debug!("drop onion circuit message after {context}: {error}");
+}
+
+/// Spawn an exit adapter future outside the extension transition turn.
+///
+/// Invariant: `Interpret::run(Exit)` never holds the namespace transition gate while DNS,
+/// socket, or HTTP effects are pending. The owned lifecycle scope confines the detached task
+/// to the same extension namespace.
+#[cfg(not(all(feature = "browser", target_family = "wasm")))]
+fn spawn_exit_task<F>(future: F)
+where F: Future<Output = ()> + Send + 'static {
+    tokio::spawn(future);
+}
+
+/// Browser counterpart of [`spawn_exit_task`].
+#[cfg(all(feature = "browser", target_family = "wasm"))]
+fn spawn_exit_task<F>(future: F)
+where F: Future<Output = ()> + 'static {
+    wasm_bindgen_futures::spawn_local(future);
 }

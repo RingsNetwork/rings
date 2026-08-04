@@ -115,6 +115,32 @@ async fn retirement_serializes_with_liveness_generation_updates() -> Result<()> 
     Ok(())
 }
 
+#[cfg(feature = "dummy")]
+#[tokio::test]
+async fn retirement_clears_disconnect_epoch_for_departed_peer() -> Result<()> {
+    let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
+    let peer = SecretKey::random().address().into();
+    let attempt = transport.reserve_pending_connection(peer).await?;
+    assert!(transport.activate_connection_for_test(attempt)?);
+    transport.force_peer_disconnected_since_ms(peer, 1)?;
+    assert!(transport
+        .measured_disconnects
+        .lock()
+        .map_err(|_| Error::SwarmConnectionLifecycleLock)?
+        .contains_key(&peer));
+
+    assert_eq!(
+        transport.retire_active_connection_with(attempt, |_| Ok(()))?,
+        Some(())
+    );
+    assert!(!transport
+        .measured_disconnects
+        .lock()
+        .map_err(|_| Error::SwarmConnectionLifecycleLock)?
+        .contains_key(&peer));
+    Ok(())
+}
+
 #[tokio::test]
 async fn failed_dht_retirement_preserves_active_peer_state() -> Result<()> {
     let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
@@ -128,7 +154,7 @@ async fn failed_dht_retirement_preserves_active_peer_state() -> Result<()> {
         .map_err(|_| Error::SwarmConnectionLifecycleLock)?
         .entry(attempt)
         .or_default()
-        .insert(3);
+        .insert(3, None);
 
     let result = transport.retire_active_connection_with(attempt, |_| -> Result<()> {
         Err(Error::InvalidMessage(

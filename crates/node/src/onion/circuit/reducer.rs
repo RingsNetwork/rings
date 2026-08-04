@@ -18,6 +18,7 @@ use super::OnionClientReturn;
 use super::OnionForwardFrame;
 use super::OnionForwardLayer;
 use super::OnionForwardNonce;
+use super::OnionForwardSequence;
 use super::MAX_ONION_CIRCUIT_HOPS;
 use super::MAX_ONION_RELAY_CIRCUITS;
 use super::ONION_RELAY_RETURN_TTL_MS;
@@ -96,8 +97,10 @@ pub enum OnionCircuitEffect {
         return_peer: Did,
         /// Client return key.
         client: OnionClientReturn,
-        /// Random per-frame nonce consumed by the exit adapter.
+        /// Replay token consumed by one-shot exit operations; stream frames use `forward_sequence`.
         forward_nonce: OnionForwardNonce,
+        /// Monotonic client-to-exit sequence within this circuit.
+        forward_sequence: OnionForwardSequence,
         /// Application payload.
         payload: OnionCircuitPayload,
     },
@@ -237,6 +240,7 @@ impl OnionCircuitReducer {
                 client,
                 expires_at_ms,
                 forward_nonce,
+                forward_sequence,
                 payload,
             } => {
                 if !self.capabilities.permits_exit_layer() {
@@ -253,6 +257,7 @@ impl OnionCircuitReducer {
                     return_peer: from,
                     client,
                     forward_nonce,
+                    forward_sequence,
                     payload,
                 })
             }
@@ -322,6 +327,12 @@ pub(super) fn remember_return_hop(
 ) -> Result<()> {
     purge_expired_return_hops(state, now_ms);
     let table_is_full = state.relay_returns.len() >= max_relay_circuits;
+    let peer_table_is_full = state
+        .relay_returns
+        .values()
+        .filter(|entry| entry.previous_hop == previous_hop)
+        .count()
+        >= max_relay_circuits_per_peer(max_relay_circuits);
     match state.relay_returns.entry(key) {
         Entry::Occupied(mut entry) => {
             if entry.get().previous_hop != previous_hop
@@ -335,6 +346,9 @@ pub(super) fn remember_return_hop(
             if table_is_full {
                 return Err(Error::OnionRouteError(OnionRouteError::RelayTableFull));
             }
+            if peer_table_is_full {
+                return Err(Error::OnionRouteError(OnionRouteError::RelayPeerTableFull));
+            }
             entry.insert(RelayReturnEntry {
                 previous_hop,
                 previous_circuit_id,
@@ -343,6 +357,13 @@ pub(super) fn remember_return_hop(
         }
     }
     Ok(())
+}
+
+/// Reserve at most one sixteenth of the global relay-return capacity for any
+/// authenticated previous hop. Therefore one peer cannot exclude honest peers
+/// while the global table has free entries.
+const fn max_relay_circuits_per_peer(max_relay_circuits: usize) -> usize {
+    max_relay_circuits.div_ceil(16)
 }
 
 fn purge_expired_return_hops(state: &mut OnionCircuitState, now_ms: u128) {

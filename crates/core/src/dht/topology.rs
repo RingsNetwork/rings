@@ -89,7 +89,7 @@ pub enum TopologyEvent {
         /// Peer whose data channel is open.
         peer: Did,
         /// Finger slots whose lookup completed while the peer was handshaking.
-        fixed_fingers: Vec<usize>,
+        fixed_fingers: Vec<ConditionalFingerUpdate>,
     },
     /// A peer is removed from successor, predecessor, and finger state.
     Remove {
@@ -125,6 +125,16 @@ pub enum TopologyEvent {
         /// Successor reported for that slot.
         successor: Did,
     },
+}
+
+/// A deferred finger update that may commit only if its source slot has not
+/// changed since the lookup result was queued.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConditionalFingerUpdate {
+    /// Finger slot returned by the lookup.
+    pub index: usize,
+    /// Slot value observed when the update was deferred.
+    pub expected: Option<Did>,
 }
 
 /// Successor-list evidence attached to a peer-removal transition.
@@ -378,7 +388,7 @@ fn step_join(state: &TopologyState, peer: Did, capacity: usize) -> TopologyStep 
 fn step_admit(
     state: &TopologyState,
     peer: Did,
-    fixed_fingers: &[usize],
+    fixed_fingers: &[ConditionalFingerUpdate],
     capacity: usize,
 ) -> TopologyStep {
     if peer == state.local {
@@ -391,8 +401,10 @@ fn step_admit(
     let successors = update_successors(state.local, &state.successors, peer, capacity);
     let inserted = !state.successors.contains(&peer) && successors.contains(&peer);
     let mut fingers = finger_join(state.local, &state.fingers, peer);
-    for index in fixed_fingers {
-        fingers = finger_set(state.local, &fingers, *index, peer);
+    for update in fixed_fingers {
+        if state.fingers.get(update.index).copied().flatten() == update.expected {
+            fingers = finger_set(state.local, &fingers, update.index, peer);
+        }
     }
 
     let mut actions = Vec::new();
@@ -797,7 +809,10 @@ mod tests {
             &state(local, Vec::new(), None, vec![None; 5], 0),
             TopologyEvent::Admit {
                 peer,
-                fixed_fingers: vec![4],
+                fixed_fingers: vec![ConditionalFingerUpdate {
+                    index: 4,
+                    expected: None,
+                }],
             },
             DEFAULT_SUCCESSOR_CAPACITY,
         );
@@ -817,6 +832,26 @@ mod tests {
                 did: local
             }
         ]);
+    }
+
+    #[test]
+    fn admit_step_does_not_overwrite_finger_changed_after_update_was_deferred() {
+        let local = did(0);
+        let fresher = did(8);
+        let peer = did(16);
+        let next = step(
+            &state(local, vec![fresher], None, vec![Some(fresher); 5], 0),
+            TopologyEvent::Admit {
+                peer,
+                fixed_fingers: vec![ConditionalFingerUpdate {
+                    index: 4,
+                    expected: None,
+                }],
+            },
+            DEFAULT_SUCCESSOR_CAPACITY,
+        );
+
+        assert_eq!(next.state.fingers[4], Some(fresher));
     }
 
     #[test]

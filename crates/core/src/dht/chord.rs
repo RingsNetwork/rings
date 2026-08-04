@@ -459,7 +459,7 @@ impl PeerRing {
     pub(crate) fn admit_connected(
         &self,
         peer: Did,
-        fixed_fingers: Vec<usize>,
+        fixed_fingers: Vec<topology::ConditionalFingerUpdate>,
     ) -> Result<PeerRingAction> {
         let next = self.transition_topology(TopologyEvent::Admit {
             peer,

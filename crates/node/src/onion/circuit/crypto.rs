@@ -1,3 +1,8 @@
+#[cfg(feature = "node")]
+use std::sync::atomic::AtomicU64;
+#[cfg(feature = "node")]
+use std::sync::atomic::Ordering;
+
 use bytes::Bytes;
 use rings_core::dht::Did;
 use rings_core::ecc::elgamal::impls::secp256k1::encrypt_aead_with_rng;
@@ -13,12 +18,14 @@ use super::codec::OnionWireMessage;
 use super::OnionAuthenticatedPayload;
 use super::OnionBackwardFrame;
 use super::OnionBackwardNonce;
+use super::OnionBackwardSequence;
 use super::OnionCircuitId;
 use super::OnionCircuitPayload;
 use super::OnionClientReturn;
 use super::OnionForwardFrame;
 use super::OnionForwardLayer;
 use super::OnionForwardNonce;
+use super::OnionForwardSequence;
 use super::OnionReturnId;
 use super::OnionVerifiedPayload;
 use super::ONION_AEAD_NAMESPACE;
@@ -46,7 +53,13 @@ pub fn encode_initial_forward(
 ) -> Result<(Did, Bytes)> {
     validate_route_payload_service(route, &payload)?;
     let first = route_first_hop(route)?;
-    let layer = build_forward_layers(client, route.encryption_hops(), circuit_id, payload)?;
+    let layer = build_forward_layers(
+        client,
+        route.encryption_hops(),
+        circuit_id,
+        OnionForwardSequence::FIRST,
+        payload,
+    )?;
     let frame = OnionForwardFrame { circuit_id, layer };
     encode_wire_message(OnionWireMessage::Forward(frame)).map(|payload| (first, payload))
 }
@@ -57,11 +70,12 @@ pub fn encode_initial_forward(
 /// `first_circuit_id == edge_circuit_ids[0]`. Reusing one path for every payload in a stream
 /// preserves the exit-side stream key and refreshes the same relay return edges.
 #[cfg(feature = "node")]
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug)]
 pub(crate) struct OnionCircuitPath {
     route: OnionRoute,
     first_circuit_id: OnionCircuitId,
     edge_circuit_ids: Vec<OnionCircuitId>,
+    next_forward_sequence: AtomicU64,
 }
 
 #[cfg(feature = "node")]
@@ -73,6 +87,7 @@ impl OnionCircuitPath {
             route,
             first_circuit_id,
             edge_circuit_ids,
+            next_forward_sequence: AtomicU64::new(0),
         })
     }
 
@@ -83,11 +98,19 @@ impl OnionCircuitPath {
         payload: OnionCircuitPayload,
     ) -> Result<(Did, Bytes)> {
         validate_route_payload_service(&self.route, &payload)?;
+        let sequence = self
+            .next_forward_sequence
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .map(OnionForwardSequence::new)
+            .map_err(|_| Error::OnionRouteError(OnionRouteError::SequenceExhausted))?;
         let first = route_first_hop(&self.route)?;
         let layer = build_forward_layers_with_ids(
             client,
             self.route.encryption_hops(),
             self.edge_circuit_ids.as_slice(),
+            sequence,
             payload,
         )?;
         let frame = OnionForwardFrame {
@@ -122,12 +145,14 @@ pub async fn send_backward(
     circuit_id: OnionCircuitId,
     return_peer: Did,
     client: OnionClientReturn,
+    sequence: OnionBackwardSequence,
     payload: OnionCircuitPayload,
 ) -> Result<()> {
     let frame = OnionBackwardFrame {
         circuit_id,
-        payload: encrypt_client_payload(
+        payload: encrypt_client_payload_at_sequence(
             client.return_id,
+            sequence,
             payload,
             client.session_public_key,
             signer,
@@ -141,16 +166,18 @@ fn build_forward_layers(
     client: OnionClientReturn,
     hops: &[OnionRouteHop],
     first_circuit_id: OnionCircuitId,
+    sequence: OnionForwardSequence,
     payload: OnionCircuitPayload,
 ) -> Result<AeadCiphertext> {
     let circuit_ids = edge_circuit_ids(hops.len(), first_circuit_id)?;
-    build_forward_layers_with_ids(client, hops, circuit_ids.as_slice(), payload)
+    build_forward_layers_with_ids(client, hops, circuit_ids.as_slice(), sequence, payload)
 }
 
 fn build_forward_layers_with_ids(
     client: OnionClientReturn,
     hops: &[OnionRouteHop],
     circuit_ids: &[OnionCircuitId],
+    sequence: OnionForwardSequence,
     payload: OnionCircuitPayload,
 ) -> Result<AeadCiphertext> {
     let Some(exit) = hops.last().copied() else {
@@ -174,6 +201,7 @@ fn build_forward_layers_with_ids(
             client,
             expires_at_ms,
             forward_nonce: OnionForwardNonce::random(),
+            forward_sequence: sequence,
             payload,
         },
         exit.session_public_key,
@@ -256,13 +284,31 @@ pub(super) fn decrypt_forward_layer(
     bincode::deserialize(&plaintext).map_err(|_| Error::DecodeError)
 }
 
+#[cfg(test)]
 pub(super) fn encrypt_client_payload(
     return_id: OnionReturnId,
     payload: OnionCircuitPayload,
     recipient: PublicKey<33>,
     signer: &SessionSk,
 ) -> Result<AeadCiphertext> {
-    let authenticated = OnionAuthenticatedPayload::new_signed(return_id, payload, signer)?;
+    encrypt_client_payload_at_sequence(
+        return_id,
+        OnionBackwardSequence::FIRST,
+        payload,
+        recipient,
+        signer,
+    )
+}
+
+pub(super) fn encrypt_client_payload_at_sequence(
+    return_id: OnionReturnId,
+    sequence: OnionBackwardSequence,
+    payload: OnionCircuitPayload,
+    recipient: PublicKey<33>,
+    signer: &SessionSk,
+) -> Result<AeadCiphertext> {
+    let authenticated =
+        OnionAuthenticatedPayload::new_signed_at_sequence(return_id, sequence, payload, signer)?;
     let plaintext = bincode::serialize(&authenticated).map_err(|_| Error::EncodeError)?;
     let aad = backward_aead_context()?;
     let mut rng = rand::thread_rng();
@@ -287,11 +333,22 @@ impl OnionAuthenticatedPayload {
         payload: OnionCircuitPayload,
         signer: &SessionSk,
     ) -> Result<Self> {
+        Self::new_signed_at_sequence(return_id, OnionBackwardSequence::FIRST, payload, signer)
+    }
+
+    /// Sign one backward payload at a caller-owned monotonic circuit sequence.
+    pub fn new_signed_at_sequence(
+        return_id: OnionReturnId,
+        sequence: OnionBackwardSequence,
+        payload: OnionCircuitPayload,
+        signer: &SessionSk,
+    ) -> Result<Self> {
         let nonce = OnionBackwardNonce::random();
         let authentication = MessageVerification::new(
             &backward_payload_authentication_data(
                 return_id,
                 nonce,
+                sequence,
                 signer.session_public_key(),
                 &payload,
             )?,
@@ -301,6 +358,7 @@ impl OnionAuthenticatedPayload {
         Ok(Self {
             return_id,
             nonce,
+            sequence,
             authentication,
             payload,
         })
@@ -345,6 +403,7 @@ impl OnionAuthenticatedPayload {
         let data = backward_payload_authentication_data(
             return_id,
             self.nonce,
+            self.sequence,
             expected_exit.session_public_key,
             &self.payload,
         )?;
@@ -356,6 +415,7 @@ impl OnionAuthenticatedPayload {
         Ok(OnionVerifiedPayload {
             return_id: self.return_id,
             nonce: self.nonce,
+            sequence: self.sequence,
             payload: self.payload,
         })
     }
@@ -374,6 +434,7 @@ struct OnionBackwardAuthenticationData<'a> {
     direction: OnionAeadDirection,
     return_id: OnionReturnId,
     nonce: OnionBackwardNonce,
+    sequence: OnionBackwardSequence,
     exit_session_public_key: PublicKey<33>,
     payload: &'a OnionCircuitPayload,
 }
@@ -407,6 +468,7 @@ fn backward_aead_context() -> Result<Vec<u8>> {
 fn backward_payload_authentication_data(
     return_id: OnionReturnId,
     nonce: OnionBackwardNonce,
+    sequence: OnionBackwardSequence,
     exit_session_public_key: PublicKey<33>,
     payload: &OnionCircuitPayload,
 ) -> Result<Vec<u8>> {
@@ -415,6 +477,7 @@ fn backward_payload_authentication_data(
         direction: OnionAeadDirection::Backward,
         return_id,
         nonce,
+        sequence,
         exit_session_public_key,
         payload,
     })

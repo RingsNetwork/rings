@@ -1,4 +1,8 @@
 #[cfg(feature = "node")]
+use std::sync::atomic::AtomicBool;
+#[cfg(feature = "node")]
+use std::sync::atomic::Ordering;
+#[cfg(feature = "node")]
 use std::sync::Arc;
 #[cfg(feature = "node")]
 use std::sync::Mutex;
@@ -170,6 +174,52 @@ impl OnionCircuitHandler for RecordingHandler {
             .lock()
             .map_err(|_| crate::error::Error::Lock)?
             .push((from, circuit_id, payload));
+        Ok(())
+    }
+}
+
+#[cfg(feature = "node")]
+#[derive(Clone, Default)]
+struct BlockingExitHandler {
+    started: Arc<AtomicBool>,
+    started_notify: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(feature = "node")]
+impl BlockingExitHandler {
+    async fn wait_until_started(&self) {
+        while !self.started.load(Ordering::SeqCst) {
+            self.started_notify.notified().await;
+        }
+    }
+
+    fn release(&self) {
+        self.release.notify_one();
+    }
+}
+
+#[cfg(feature = "node")]
+#[async_trait::async_trait]
+impl OnionCircuitHandler for BlockingExitHandler {
+    async fn handle_exit(
+        &self,
+        _scope: &Scope,
+        _frame: OnionCircuitExitFrame,
+    ) -> crate::error::Result<()> {
+        self.started.store(true, Ordering::SeqCst);
+        self.started_notify.notify_waiters();
+        self.release.notified().await;
+        Ok(())
+    }
+
+    async fn handle_client(
+        &self,
+        _scope: &Scope,
+        _from: Did,
+        _circuit_id: OnionCircuitId,
+        _payload: OnionAuthenticatedPayload,
+    ) -> crate::error::Result<()> {
         Ok(())
     }
 }
@@ -422,6 +472,35 @@ async fn relay_capability_does_not_execute_exit_layer() {
     assert!(transition.effects.is_empty());
 }
 
+#[cfg(feature = "node")]
+#[tokio::test]
+async fn exit_effect_releases_transition_turn_before_adapter_io_completes() {
+    let client = session();
+    let exit = session();
+    let handler = BlockingExitHandler::default();
+    let shell = OnionCircuitShell::new(exit.clone(), handler.clone());
+    let scope = test_scope(exit.clone());
+    let effect = OnionCircuitEffect::Exit {
+        from: client.account_did(),
+        circuit_id: OnionCircuitId::new([27; 16]),
+        return_peer: client.account_did(),
+        client: OnionClientReturn::new(client.session_public_key()),
+        forward_nonce: OnionForwardNonce::new([28; 16]),
+        forward_sequence: OnionForwardSequence::FIRST,
+        payload: test_payload("blocking-exit"),
+    };
+
+    tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        shell.run(&scope, effect),
+    )
+    .await
+    .expect("exit interpretation must not await adapter I/O")
+    .expect("spawn exit adapter");
+    handler.wait_until_started().await;
+    handler.release();
+}
+
 #[test]
 fn expired_exit_layer_emits_no_exit_effect() {
     let client = session();
@@ -437,6 +516,7 @@ fn expired_exit_layer_emits_no_exit_effect() {
             client: OnionClientReturn::new(client.session_public_key()),
             expires_at_ms: 100,
             forward_nonce: OnionForwardNonce::new([9; 16]),
+            forward_sequence: OnionForwardSequence::FIRST,
             payload: test_payload("expired"),
         },
     });
@@ -684,6 +764,61 @@ fn relay_return_table_rejects_live_edge_overwrite() {
         Err(crate::error::Error::OnionRouteError(_))
     ));
     assert_eq!(state.relay_return_count(), 1);
+}
+
+#[test]
+fn relay_return_table_preserves_capacity_for_other_authenticated_peers() {
+    let first_peer = session();
+    let second_peer = session();
+    let next = session();
+    let mut state = OnionCircuitState::default();
+
+    for circuit_byte in [1, 2] {
+        remember_return_hop(
+            &mut state,
+            32,
+            100,
+            RelayReturnKey {
+                circuit_id: OnionCircuitId::new([circuit_byte; 16]),
+                next_hop: next.account_did(),
+            },
+            first_peer.account_did(),
+            OnionCircuitId::new([circuit_byte + 10; 16]),
+            1,
+        )
+        .expect("first peer's bounded share");
+    }
+
+    assert!(matches!(
+        remember_return_hop(
+            &mut state,
+            32,
+            100,
+            RelayReturnKey {
+                circuit_id: OnionCircuitId::new([3; 16]),
+                next_hop: next.account_did(),
+            },
+            first_peer.account_did(),
+            OnionCircuitId::new([13; 16]),
+            1,
+        ),
+        Err(crate::error::Error::OnionRouteError(
+            crate::onion::OnionRouteError::RelayPeerTableFull
+        ))
+    ));
+    remember_return_hop(
+        &mut state,
+        32,
+        100,
+        RelayReturnKey {
+            circuit_id: OnionCircuitId::new([4; 16]),
+            next_hop: next.account_did(),
+        },
+        second_peer.account_did(),
+        OnionCircuitId::new([14; 16]),
+        1,
+    )
+    .expect("another peer retains capacity");
 }
 
 #[test]

@@ -308,24 +308,22 @@ impl StartAction {
         self.did.set(my_did.clone());
         self.wallet_account.set(Some(account));
         *self.node_ref.borrow_mut() = Some(built.clone());
-        let webview_ready = match webview::install_browser_gateway(built.webview.clone()) {
-            Ok(true) => match webview::register_browser_gateway().await {
-                Ok(()) => true,
-                Err(error) => {
-                    self.status.set(format!("webview gateway: {error}"));
-                    false
-                }
-            },
-            Ok(false) => false,
-            Err(error) => {
-                self.status.set(format!("webview gateway: {error}"));
-                false
-            }
+        let webview_result = match webview::install_browser_gateway(built.webview.clone()) {
+            Ok(true) => webview::register_browser_gateway().await.map(|()| true),
+            Ok(false) => Ok(false),
+            Err(error) => Err(error),
         };
         if !token.is_current() {
             self.discard_stale_local_node(&built);
             return;
         }
+        let webview_ready = match webview_result {
+            Ok(ready) => ready,
+            Err(error) => {
+                self.status.set(format!("webview gateway: {error}"));
+                false
+            }
+        };
         self.webview_ready.set(webview_ready);
         super::clear_shell_dialog_route();
         self.active_dialog.set(ActiveDialog::None);

@@ -54,6 +54,7 @@ pub use route::GatewayRoute;
 pub use route::GatewayRoutePolicy;
 pub use route::GatewayRouteRejection;
 pub use transport::ConcurrentWebviewGateway;
+pub use transport::GatewayResponseBodyLimit;
 pub use transport::GatewayTransport;
 pub use transport::WebviewGateway;
 pub use types::GatewayCredentials;

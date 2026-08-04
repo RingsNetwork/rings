@@ -7,15 +7,25 @@ use lol_html::end;
 use lol_html::html_content::ContentType;
 use lol_html::html_content::Element;
 use lol_html::html_content::TextChunk;
-use lol_html::rewrite_str;
 use lol_html::text;
 use lol_html::HandlerTypes;
+use lol_html::HtmlRewriter;
 use lol_html::RewriteStrSettings;
 use url::Url;
 
 use crate::error::Result;
 use crate::error::WebviewError;
 use crate::url::GatewayPrefix;
+
+mod budget;
+mod srcset;
+
+use self::budget::bounded_value;
+use self::budget::map_html_rewrite_error;
+use self::budget::response_body_too_large;
+use self::budget::BoundedString;
+use self::srcset::visit_srcset_candidates;
+use self::srcset::SrcsetCandidate;
 
 /// Context required to rewrite one target document or stylesheet.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -43,6 +53,10 @@ impl RewriteContext {
 
     /// Rewrite one HTML document body.
     pub fn rewrite_html(&self, html: &str) -> Result<String> {
+        self.rewrite_html_with_limit(html, usize::MAX)
+    }
+
+    pub(crate) fn rewrite_html_with_limit(&self, html: &str, limit: usize) -> Result<String> {
         let bootstrap = self
             .bootstrap_script
             .as_ref()
@@ -52,47 +66,73 @@ impl RewriteContext {
             &self.gateway_prefix,
             self.document_url.clone(),
             self.bootstrap_script.as_deref(),
+            limit,
         );
         let style_text = RefCell::new(String::new());
-        rewrite_str(
-            html,
-            RewriteStrSettings::new()
-                .append_element_content_handler(element!("*", |element| {
-                    rewrite_html_element(element, &html_state)?;
-                    if !injected.get() {
-                        if let Some(tag) = bootstrap.as_deref() {
-                            if element.tag_name().eq_ignore_ascii_case("head") {
-                                element.prepend(tag, ContentType::Html);
-                                injected.set(true);
-                            } else if element.tag_name().eq_ignore_ascii_case("script") {
-                                element.before(tag, ContentType::Html);
-                                injected.set(true);
-                            }
-                        }
-                    }
-                    Ok(())
-                }))
-                .append_element_content_handler(text!("style", |text| {
-                    rewrite_style_text(text, &html_state, &style_text)?;
-                    Ok(())
-                }))
-                .append_document_content_handler(end!(|end| {
-                    if !injected.get() {
-                        if let Some(tag) = bootstrap.as_deref() {
-                            end.append(tag, ContentType::Html);
+        let settings = RewriteStrSettings::new()
+            .append_element_content_handler(element!("*", |element| {
+                rewrite_html_element(element, &html_state)?;
+                if !injected.get() {
+                    if let Some(tag) = bootstrap.as_deref() {
+                        if element.tag_name().eq_ignore_ascii_case("head") {
+                            element.prepend(tag, ContentType::Html);
+                            injected.set(true);
+                        } else if element.tag_name().eq_ignore_ascii_case("script") {
+                            element.before(tag, ContentType::Html);
                             injected.set(true);
                         }
                     }
-                    Ok(())
-                })),
-        )
-        .map_err(|error| WebviewError::Render(format!("HTML rewrite failed: {error}")))
+                }
+                Ok(())
+            }))
+            .append_element_content_handler(text!("style", |text| {
+                rewrite_style_text(text, &html_state, &style_text)?;
+                Ok(())
+            }))
+            .append_document_content_handler(end!(|end| {
+                if !injected.get() {
+                    if let Some(tag) = bootstrap.as_deref() {
+                        end.append(tag, ContentType::Html);
+                        injected.set(true);
+                    }
+                }
+                Ok(())
+            }));
+        let mut output = Vec::with_capacity(html.len().min(limit));
+        let mut overflow_actual = None;
+        {
+            let mut rewriter = HtmlRewriter::new(settings.into(), |chunk: &[u8]| {
+                if overflow_actual.is_some() {
+                    return;
+                }
+                let actual = output.len().saturating_add(chunk.len());
+                if actual > limit {
+                    overflow_actual = Some(actual);
+                } else {
+                    output.extend_from_slice(chunk);
+                }
+            });
+            rewriter
+                .write(html.as_bytes())
+                .and_then(|()| rewriter.end())
+                .map_err(map_html_rewrite_error)?;
+        }
+        if let Some(actual) = overflow_actual {
+            return Err(response_body_too_large(actual, limit));
+        }
+        String::from_utf8(output).map_err(|error| {
+            WebviewError::Render(format!("HTML rewrite emitted invalid UTF-8: {error}"))
+        })
     }
 
     /// Rewrite one CSS stylesheet body.
     pub fn rewrite_css(&self, css: &str) -> Result<String> {
-        let imports = rewrite_css_imports(css, self)?;
-        rewrite_css_urls(&imports, self)
+        self.rewrite_css_with_limit(css, usize::MAX)
+    }
+
+    pub(crate) fn rewrite_css_with_limit(&self, css: &str, limit: usize) -> Result<String> {
+        let imports = rewrite_css_imports(css, self, limit)?;
+        rewrite_css_urls(&imports, self, limit)
     }
 
     fn rewrite_url(&self, value: &str) -> Result<Option<String>> {
@@ -106,6 +146,7 @@ struct HtmlRewriteState<'a> {
     current_base: RefCell<Url>,
     base_href_seen: Cell<bool>,
     bootstrap_script: Option<&'a str>,
+    output_limit: usize,
 }
 
 impl<'a> HtmlRewriteState<'a> {
@@ -113,18 +154,23 @@ impl<'a> HtmlRewriteState<'a> {
         gateway_prefix: &'a GatewayPrefix,
         document_url: Url,
         bootstrap_script: Option<&'a str>,
+        output_limit: usize,
     ) -> Self {
         Self {
             gateway_prefix,
             current_base: RefCell::new(document_url),
             base_href_seen: Cell::new(false),
             bootstrap_script,
+            output_limit,
         }
     }
 
     fn rewrite_url(&self, value: &str) -> Result<Option<String>> {
         let base = self.current_base.borrow();
-        self.gateway_prefix.rewrite_url_value(&base, value)
+        self.gateway_prefix
+            .rewrite_url_value(&base, value)?
+            .map(|rewritten| bounded_value(rewritten, self.output_limit))
+            .transpose()
     }
 
     fn rewrite_base_href(&self, value: &str) -> Result<Option<String>> {
@@ -136,12 +182,13 @@ impl<'a> HtmlRewriteState<'a> {
             self.current_base.replace(target.clone());
             self.base_href_seen.set(true);
         }
-        Ok(Some(self.gateway_prefix.encode(&target)))
+        bounded_value(self.gateway_prefix.encode(&target), self.output_limit).map(Some)
     }
 
     fn rewrite_css(&self, css: &str) -> Result<String> {
         let base = self.current_base.borrow().clone();
-        RewriteContext::new(self.gateway_prefix.clone(), base).rewrite_css(css)
+        RewriteContext::new(self.gateway_prefix.clone(), base)
+            .rewrite_css_with_limit(css, self.output_limit)
     }
 
     fn rewrite_srcdoc(&self, html: &str) -> Result<String> {
@@ -150,12 +197,15 @@ impl<'a> HtmlRewriteState<'a> {
         if let Some(script) = self.bootstrap_script {
             context = context.with_bootstrap_script(script);
         }
-        context.rewrite_html(decode_srcdoc_attribute_value(html).as_str())
+        context.rewrite_html_with_limit(
+            decode_srcdoc_attribute_value(html).as_str(),
+            self.output_limit,
+        )
     }
 
     fn rewrite_refresh(&self, value: &str) -> Result<String> {
         let base = self.current_base.borrow();
-        rewrite_refresh_value(value, &base, self.gateway_prefix)
+        rewrite_refresh_value_with_limit(value, &base, self.gateway_prefix, self.output_limit)
     }
 }
 
@@ -246,192 +296,114 @@ fn is_srcset_attribute(name: &str) -> bool {
 }
 
 fn rewrite_srcset_value(value: &str, state: &HtmlRewriteState<'_>) -> Result<String> {
-    let mut out = Vec::new();
-    for SrcsetCandidate { url, descriptor } in parse_srcset_candidates(value) {
+    let mut out = BoundedString::new(value.len(), state.output_limit);
+    let mut first = true;
+    visit_srcset_candidates(value, |SrcsetCandidate { url, descriptor }| {
         let rewritten = state.rewrite_url(&url)?.unwrap_or(url);
-        if descriptor.is_empty() {
-            out.push(rewritten);
-        } else {
-            out.push(format!("{rewritten} {descriptor}"));
+        if !first {
+            out.push_str(", ")?;
         }
-    }
-    Ok(out.join(", "))
-}
-
-#[derive(Debug, Eq, PartialEq)]
-struct SrcsetCandidate {
-    url: String,
-    descriptor: String,
-}
-
-/// Tokenize `srcset` candidates using the HTML URL-token boundary rule.
-///
-/// Law: a comma terminates a descriptor-less URL only when it is trailing in
-/// its non-whitespace URL token. Commas inside `data:` payloads remain data.
-/// Quoted and escaped URL tokens preserve their candidate boundary before
-/// normalization. The browser runtime verifies this same contract from
-/// `srcset_contract.json`.
-fn parse_srcset_candidates(input: &str) -> Vec<SrcsetCandidate> {
-    let mut candidates = Vec::new();
-    let mut cursor = 0_usize;
-
-    while cursor < input.len() {
-        cursor = skip_srcset_separators(input, cursor);
-        if cursor == input.len() {
-            break;
+        first = false;
+        out.push_str(&rewritten)?;
+        if !descriptor.is_empty() {
+            out.push(' ')?;
+            out.push_str(&descriptor)?;
         }
-        let url_start = cursor;
-        cursor = scan_srcset_url_token(input, cursor);
-        let url_end = cursor;
-        if url_start == url_end {
-            continue;
-        }
-        if input[..url_end].ends_with(',') {
-            let url = normalize_srcset_url(input[url_start..url_end].trim_end_matches(','));
-            if !url.is_empty() {
-                candidates.push(SrcsetCandidate {
-                    url,
-                    descriptor: String::new(),
-                });
-            }
-            continue;
-        }
-
-        cursor = skip_srcset_whitespace(input, cursor);
-        let descriptor_start = cursor;
-        cursor = scan_srcset_descriptor(input, cursor);
-        let url = normalize_srcset_url(&input[url_start..url_end]);
-        if !url.is_empty() {
-            candidates.push(SrcsetCandidate {
-                url,
-                descriptor: input[descriptor_start..cursor].trim().to_string(),
-            });
-        }
-        if input[cursor..].starts_with(',') {
-            cursor += 1;
-        }
-    }
-
-    candidates
-}
-
-fn skip_srcset_separators(input: &str, mut cursor: usize) -> usize {
-    while let Some(character) = input[cursor..].chars().next() {
-        if !matches!(character, '\t' | '\n' | '\x0c' | '\r' | ' ' | ',') {
-            break;
-        }
-        cursor += character.len_utf8();
-    }
-    cursor
-}
-
-fn skip_srcset_whitespace(input: &str, mut cursor: usize) -> usize {
-    while let Some(character) = input[cursor..].chars().next() {
-        if !matches!(character, '\t' | '\n' | '\x0c' | '\r' | ' ') {
-            break;
-        }
-        cursor += character.len_utf8();
-    }
-    cursor
-}
-
-fn scan_srcset_url_token(input: &str, mut cursor: usize) -> usize {
-    let mut quote = None;
-    let mut escaped = false;
-    while let Some(character) = input[cursor..].chars().next() {
-        if escaped {
-            escaped = false;
-        } else if character == '\\' {
-            escaped = true;
-        } else if quote.is_some_and(|quoted| quoted == character) {
-            quote = None;
-        } else if quote.is_none() && matches!(character, '\'' | '"') {
-            quote = Some(character);
-        } else if quote.is_none() && matches!(character, '\t' | '\n' | '\x0c' | '\r' | ' ') {
-            break;
-        }
-        cursor += character.len_utf8();
-    }
-    cursor
-}
-
-fn scan_srcset_descriptor(input: &str, mut cursor: usize) -> usize {
-    while let Some(character) = input[cursor..].chars().next() {
-        if character == ',' {
-            break;
-        }
-        cursor += character.len_utf8();
-    }
-    cursor
-}
-
-fn normalize_srcset_url(url: &str) -> String {
-    let unquoted = match (url.chars().next(), url.chars().next_back()) {
-        (Some('"'), Some('"')) | (Some('\''), Some('\'')) if url.len() >= 2 => {
-            &url[1..url.len() - 1]
-        }
-        _ => url,
-    };
-    let mut normalized = String::new();
-    let mut escaped = false;
-    for character in unquoted.chars() {
-        if escaped {
-            normalized.push(character);
-            escaped = false;
-        } else if character == '\\' {
-            escaped = true;
-        } else {
-            normalized.push(character);
-        }
-    }
-    if escaped {
-        normalized.push('\\');
-    }
-    normalized
+        Ok(())
+    })?;
+    Ok(out.finish())
 }
 
 /// Rewrite a space-separated HTML URL list, such as an anchor `ping` value.
 fn rewrite_url_list_value(value: &str, state: &HtmlRewriteState<'_>) -> Result<String> {
-    let mut rewritten = Vec::new();
+    let mut rewritten = BoundedString::new(value.len(), state.output_limit);
+    let mut first = true;
     for candidate in value.split_whitespace() {
-        rewritten.push(
-            state
-                .rewrite_url(candidate)?
-                .unwrap_or_else(|| candidate.to_string()),
-        );
+        if !first {
+            rewritten.push(' ')?;
+        }
+        first = false;
+        let candidate = state
+            .rewrite_url(candidate)?
+            .unwrap_or_else(|| candidate.to_string());
+        rewritten.push_str(&candidate)?;
     }
-    Ok(rewritten.join(" "))
+    Ok(rewritten.finish())
 }
 
-fn rewrite_css_urls(input: &str, ctx: &RewriteContext) -> Result<String> {
-    let mut output = String::with_capacity(input.len());
+fn rewrite_css_urls(input: &str, ctx: &RewriteContext, limit: usize) -> Result<String> {
+    let mut output = BoundedString::new(input.len(), limit);
     let mut rest = input;
     while let Some(index) = find_ascii_case_insensitive(rest, "url(") {
         let (before, after_url) = split_at_checked(rest, index)?;
         let (url_token, after_open) = split_at_checked(after_url, "url(".len())?;
-        output.push_str(before);
-        output.push_str(url_token);
-        let Some((raw_value, tail)) = after_open.split_once(')') else {
-            output.push_str(after_open);
-            return Ok(output);
+        output.push_str(before)?;
+        output.push_str(url_token)?;
+        let close_index = match find_css_url_end(after_open) {
+            CssUrlEnd::Close(index) => index,
+            CssUrlEnd::Nested(index) => {
+                let (malformed, nested) = split_at_checked(after_open, index)?;
+                output.push_str(malformed)?;
+                rest = nested;
+                continue;
+            }
+            CssUrlEnd::Missing => {
+                output.push_str(after_open)?;
+                return Ok(output.finish());
+            }
         };
+        let (raw_value, close_and_tail) = split_at_checked(after_open, close_index)?;
+        let (_, tail) = split_at_checked(close_and_tail, ')'.len_utf8())?;
         let (quote, value) = trim_css_url(raw_value);
         if let Some(rewritten) = ctx.rewrite_url(value)? {
             if let Some(quote) = quote {
-                output.push(quote);
-                output.push_str(rewritten.as_str());
-                output.push(quote);
+                output.push(quote)?;
+                output.push_str(rewritten.as_str())?;
+                output.push(quote)?;
             } else {
-                output.push_str(rewritten.as_str());
+                output.push_str(rewritten.as_str())?;
             }
         } else {
-            output.push_str(raw_value);
+            output.push_str(raw_value)?;
         }
-        output.push(')');
+        output.push(')')?;
         rest = tail;
     }
-    output.push_str(rest);
-    Ok(output)
+    output.push_str(rest)?;
+    Ok(output.finish())
+}
+
+enum CssUrlEnd {
+    Close(usize),
+    Nested(usize),
+    Missing,
+}
+
+fn find_css_url_end(input: &str) -> CssUrlEnd {
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, character) in input.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if character == '\\' {
+            escaped = true;
+        } else if quote.is_some_and(|expected| expected == character) {
+            quote = None;
+        } else if quote.is_none() && matches!(character, '\'' | '"') {
+            quote = Some(character);
+        } else if quote.is_none() && character == ')' {
+            return CssUrlEnd::Close(index);
+        } else if quote.is_none()
+            && index > 0
+            && input.get(index..).is_some_and(|tail| {
+                tail.get(..4)
+                    .is_some_and(|token| token.eq_ignore_ascii_case("url("))
+            })
+        {
+            return CssUrlEnd::Nested(index);
+        }
+    }
+    CssUrlEnd::Missing
 }
 
 fn trim_css_url(raw_value: &str) -> (Option<char>, &str) {
@@ -451,20 +423,20 @@ fn trim_css_url(raw_value: &str) -> (Option<char>, &str) {
     }
 }
 
-fn rewrite_css_imports(input: &str, ctx: &RewriteContext) -> Result<String> {
-    let mut output = String::with_capacity(input.len());
+fn rewrite_css_imports(input: &str, ctx: &RewriteContext, limit: usize) -> Result<String> {
+    let mut output = BoundedString::new(input.len(), limit);
     let mut rest = input;
     while let Some(index) = find_ascii_case_insensitive(rest, "@import") {
         let (before, after_import) = split_at_checked(rest, index)?;
         let (import_token, after_token) = split_at_checked(after_import, "@import".len())?;
-        output.push_str(before);
-        output.push_str(import_token);
+        output.push_str(before)?;
+        output.push_str(import_token)?;
         let whitespace_len = after_token
             .bytes()
             .take_while(u8::is_ascii_whitespace)
             .count();
         let (whitespace, after_whitespace) = split_at_checked(after_token, whitespace_len)?;
-        output.push_str(whitespace);
+        output.push_str(whitespace)?;
         let Some(quote) = after_whitespace
             .chars()
             .next()
@@ -474,25 +446,25 @@ fn rewrite_css_imports(input: &str, ctx: &RewriteContext) -> Result<String> {
             continue;
         };
         let Some(after_quote) = after_whitespace.strip_prefix(quote) else {
-            output.push_str(after_whitespace);
-            return Ok(output);
+            output.push_str(after_whitespace)?;
+            return Ok(output.finish());
         };
         let Some((value, tail)) = after_quote.split_once(quote) else {
-            output.push(quote);
-            output.push_str(after_quote);
-            return Ok(output);
+            output.push(quote)?;
+            output.push_str(after_quote)?;
+            return Ok(output.finish());
         };
-        output.push(quote);
+        output.push(quote)?;
         if let Some(rewritten) = ctx.rewrite_url(value)? {
-            output.push_str(rewritten.as_str());
+            output.push_str(rewritten.as_str())?;
         } else {
-            output.push_str(value);
+            output.push_str(value)?;
         }
-        output.push(quote);
+        output.push(quote)?;
         rest = tail;
     }
-    output.push_str(rest);
-    Ok(output)
+    output.push_str(rest)?;
+    Ok(output.finish())
 }
 
 /// Rewrite a Refresh header or meta refresh content value through the gateway.
@@ -500,6 +472,15 @@ pub(crate) fn rewrite_refresh_value(
     value: &str,
     base_url: &Url,
     gateway_prefix: &GatewayPrefix,
+) -> Result<String> {
+    rewrite_refresh_value_with_limit(value, base_url, gateway_prefix, usize::MAX)
+}
+
+fn rewrite_refresh_value_with_limit(
+    value: &str,
+    base_url: &Url,
+    gateway_prefix: &GatewayPrefix,
+    limit: usize,
 ) -> Result<String> {
     let Some(url_index) = find_refresh_url_key(value) else {
         return Ok(value.to_string());
@@ -524,21 +505,21 @@ pub(crate) fn rewrite_refresh_value(
         return Ok(value.to_string());
     };
 
-    let mut output = String::with_capacity(value.len() + rewritten.len());
-    output.push_str(before_url);
-    output.push_str(url_token);
-    output.push_str(whitespace);
-    output.push('=');
-    output.push_str(value_whitespace);
+    let mut output = BoundedString::new(value.len(), limit);
+    output.push_str(before_url)?;
+    output.push_str(url_token)?;
+    output.push_str(whitespace)?;
+    output.push('=')?;
+    output.push_str(value_whitespace)?;
     if let Some(quote) = quote {
-        output.push(quote);
-        output.push_str(rewritten.as_str());
-        output.push(quote);
+        output.push(quote)?;
+        output.push_str(rewritten.as_str())?;
+        output.push(quote)?;
     } else {
-        output.push_str(rewritten.as_str());
+        output.push_str(rewritten.as_str())?;
     }
-    output.push_str(suffix);
-    Ok(output)
+    output.push_str(suffix)?;
+    Ok(output.finish())
 }
 
 fn find_refresh_url_key(value: &str) -> Option<usize> {
@@ -599,9 +580,12 @@ fn decode_srcdoc_attribute_value(value: &str) -> String {
 }
 
 fn find_ascii_case_insensitive(input: &str, pattern: &str) -> Option<usize> {
+    let pattern = pattern.as_bytes();
+    (!pattern.is_empty()).then_some(())?;
     input
-        .to_ascii_lowercase()
-        .find(pattern.to_ascii_lowercase().as_str())
+        .as_bytes()
+        .windows(pattern.len())
+        .position(|candidate| candidate.eq_ignore_ascii_case(pattern))
 }
 
 fn split_at_checked(input: &str, index: usize) -> Result<(&str, &str)> {
@@ -687,7 +671,11 @@ mod tests {
                 WebviewError::transport(format!("invalid shared srcset contract: {error}"))
             })?;
         for case in cases {
-            let actual = parse_srcset_candidates(&case.input);
+            let mut actual = Vec::new();
+            visit_srcset_candidates(&case.input, |candidate| {
+                actual.push(candidate);
+                Ok(())
+            })?;
             let expected = case
                 .candidates
                 .into_iter()
@@ -720,6 +708,23 @@ mod tests {
             rewritten.contains("/webview/https%3A%2F%2Fexample%2Ecom%2Fapp%2Ftheme%2Fbase%2Ecss")
         );
         assert!(rewritten.contains("/webview/https%3A%2F%2Fexample%2Ecom%2Fassets%2Fbg%2Epng"));
+        Ok(())
+    }
+
+    #[test]
+    fn bounded_rewriters_preserve_typed_overflow_for_css_and_html_attributes() -> Result<()> {
+        let ctx = context()?;
+        for result in [
+            ctx.rewrite_css_with_limit("a { background: url('/large.png'); }", 16),
+            ctx.rewrite_html_with_limit("<img srcset='/one.png 1x, /two.png 2x'>", 24),
+        ] {
+            assert!(matches!(
+                result,
+                Err(WebviewError::Transport(
+                    crate::error::TransportFailure::ResponseBodyTooLarge { .. }
+                ))
+            ));
+        }
         Ok(())
     }
 
@@ -849,6 +854,30 @@ mod tests {
         );
         assert!(rewritten.contains("/webview/https%3A%2F%2Fexample%2Ecom%2Fapp%2Fextra%2Ecss"));
         assert!(rewritten.contains("/webview/https%3A%2F%2Fexample%2Ecom%2Fassets%2Fbg%2Epng"));
+        Ok(())
+    }
+
+    #[test]
+    fn css_url_scanner_preserves_quoted_parentheses_and_rewrites_later_urls() -> Result<()> {
+        let ctx = context()?;
+        let css = r#".a { background: url("a)b.png"); } .b { background: url(/later.png); }"#;
+
+        let rewritten = ctx.rewrite_css(css)?;
+
+        assert!(rewritten.contains("/webview/https%3A%2F%2Fexample%2Ecom%2Fapp%2Fa%29b%2Epng"));
+        assert!(rewritten.contains("/webview/https%3A%2F%2Fexample%2Ecom%2Flater%2Epng"));
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_css_url_does_not_suppress_later_independent_rewrite() -> Result<()> {
+        let ctx = context()?;
+        let css = ".broken { background: url('unterminated'; } .ok { mask: URL(/later.svg); }";
+
+        let rewritten = ctx.rewrite_css(css)?;
+
+        assert!(rewritten.contains("url('unterminated'"));
+        assert!(rewritten.contains("/webview/https%3A%2F%2Fexample%2Ecom%2Flater%2Esvg"));
         Ok(())
     }
 

@@ -6,6 +6,7 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -173,7 +174,8 @@ impl<'a> RegistrationContext<'a> {
 #[derive(Clone, Debug)]
 pub struct DhtRegistrationPublisher {
     topic: String,
-    published_values: Arc<AsyncMutex<BTreeSet<Encoded>>>,
+    publish_gate: Arc<AsyncMutex<()>>,
+    published_values: Arc<Mutex<BTreeSet<Encoded>>>,
 }
 
 impl DhtRegistrationPublisher {
@@ -181,7 +183,8 @@ impl DhtRegistrationPublisher {
     pub fn new(topic: impl Into<String>) -> Self {
         Self {
             topic: topic.into(),
-            published_values: Arc::new(AsyncMutex::new(BTreeSet::new())),
+            publish_gate: Arc::new(AsyncMutex::new(())),
+            published_values: Arc::new(Mutex::new(BTreeSet::new())),
         }
     }
 
@@ -232,19 +235,24 @@ impl DhtRegistrationPublisher {
         replaces_observed_value: impl Fn(&Encoded) -> bool,
     ) -> Result<()> {
         let current_values = values.into_iter().collect::<BTreeSet<_>>();
-        let mut published_values = self.published_values.lock().await;
+        // This capability serializes the effect trace. The published-value state has a separate
+        // synchronous mutex whose guard is never carried across an external await.
+        let _publish_turn = self.publish_gate.lock().await;
         context.ensure_running()?;
         let observed_values = if load_observed_values {
             self.observed_registry_values(context).await?
         } else {
             vec![]
         };
-        let stale_values = begin_registration_publish(
-            &mut published_values,
-            &current_values,
-            observed_values,
-            replaces_observed_value,
-        );
+        let stale_values = {
+            let mut published_values = self.published_values.lock().map_err(|_| Error::Lock)?;
+            begin_registration_publish(
+                &mut published_values,
+                &current_values,
+                observed_values,
+                replaces_observed_value,
+            )
+        };
 
         for value in &current_values {
             context.ensure_running()?;
@@ -259,9 +267,15 @@ impl DhtRegistrationPublisher {
                 .processor
                 .storage_tombstone_data(&self.topic, stale_value.clone())
                 .await?;
-            published_values.remove(&stale_value);
+            self.published_values
+                .lock()
+                .map_err(|_| Error::Lock)?
+                .remove(&stale_value);
         }
-        finish_registration_publish(&mut published_values, current_values);
+        {
+            let mut published_values = self.published_values.lock().map_err(|_| Error::Lock)?;
+            finish_registration_publish(&mut published_values, current_values);
+        }
         Ok(())
     }
 

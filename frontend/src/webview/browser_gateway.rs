@@ -1,4 +1,3 @@
-use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -37,7 +36,7 @@ impl Drop for BrowserGatewayBinding {
 }
 
 struct PendingBrowserGatewayRequest {
-    generation: u64,
+    owner: Rc<()>,
     abort: AbortHandle,
 }
 
@@ -53,9 +52,7 @@ pub(crate) fn install_browser_gateway(gateway: Option<WebviewNode>) -> Result<bo
         return Ok(false);
     };
     let pending = Rc::new(RefCell::new(BTreeMap::new()));
-    let next_generation = Rc::new(Cell::new(0u64));
     let handler_pending = pending.clone();
-    let handler_generation = next_generation.clone();
     let handler = Closure::wrap(Box::new(move |request: JsValue, request_id: JsValue| {
         let gateway = gateway.clone();
         let request_id = match browser_request_id(&request_id) {
@@ -71,14 +68,15 @@ pub(crate) fn install_browser_gateway(gateway: Option<WebviewNode>) -> Result<bo
                 });
             }
         };
-        let generation = handler_generation.get().wrapping_add(1).max(1);
-        handler_generation.set(generation);
+        // Allocation identity is the ownership witness. It cannot be reused while this future
+        // retains it, unlike a finite integer generation that can eventually wrap.
+        let owner = Rc::new(());
         let (abort, registration) = AbortHandle::new_pair();
         if let Some(previous) =
             handler_pending
                 .borrow_mut()
                 .insert(request_id, PendingBrowserGatewayRequest {
-                    generation,
+                    owner: owner.clone(),
                     abort,
                 })
         {
@@ -97,7 +95,10 @@ pub(crate) fn install_browser_gateway(gateway: Option<WebviewNode>) -> Result<bo
                     )
                 });
             let mut pending = request_pending.borrow_mut();
-            if pending.get(&request_id).map(|request| request.generation) == Some(generation) {
+            if pending
+                .get(&request_id)
+                .is_some_and(|request| Rc::ptr_eq(&request.owner, &owner))
+            {
                 pending.remove(&request_id);
             }
             Ok::<JsValue, JsValue>(response)

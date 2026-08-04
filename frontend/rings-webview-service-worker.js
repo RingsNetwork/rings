@@ -1,71 +1,25 @@
 "use strict";
 
-importScripts("/assets/webview-worker-response.js?gateway-response-protocol=1");
+importScripts(
+  "/assets/webview-worker-response.js?gateway-response-protocol=1",
+  "/assets/webview-worker-navigation.js?gateway-navigation-protocol=1",
+  "/assets/webview-worker-request.js?gateway-request-protocol=1",
+);
 
-const {
-  gatewayFailure,
-  gatewayFailureDocument,
-} = self.RingsWebviewWorkerResponse;
+const { gatewayFailure, gatewayFailureDocument } = self.RingsWebviewWorkerResponse;
+const { injectControlledNavigationScripts, isTrustedShellEntrypoint, sameTargetOrigin, sameTargetUrl } =
+  self.RingsWebviewWorkerNavigation;
+const { isGatewayRequestBodyTooLarge, readGatewayRequestBody } = self.RingsWebviewWorkerRequest;
 const gatewayPrefix = "/webview/";
 const runtimeGatewayPrefix = `${gatewayPrefix.replace(/\/$/, "")}-runtime/`;
 const runtimeTargetHeader = "x-rings-webview-target";
 const requestTimeoutMs = 30_000;
 const gatewayFetchDeadlineMs = requestTimeoutMs + 1_000;
 const webviewOverlayScriptPath = "/assets/webview-overlay.js";
-const webviewHistoryGuardMarker = "data-rings-webview-history-guard";
-const webviewHistoryGuardScriptTag = `<script ${webviewHistoryGuardMarker}>(() => {
-  "use strict";
-  if (globalThis.__ringsWebviewHistoryGuard) return;
-  Object.defineProperty(globalThis, "__ringsWebviewHistoryGuard", { value: true });
-  const gatewayPrefix = "/webview/";
-  function currentTargetUrl() {
-    if (!location.pathname.startsWith(gatewayPrefix)) return undefined;
-    const encoded = location.pathname.slice(gatewayPrefix.length);
-    if (!encoded) return undefined;
-    try {
-      const target = new URL(decodeURIComponent(encoded));
-      if (location.search) {
-        const extra = location.search.slice(1);
-        target.search = target.search ? target.search + "&" + extra : "?" + extra;
-      }
-      if (!target.hash && location.hash) target.hash = location.hash;
-      return target;
-    } catch (_error) {
-      return undefined;
-    }
-  }
-  function controlledGatewayUrl(target) {
-    return gatewayPrefix + encodeURIComponent(target.href);
-  }
-  function rewrittenHistoryUrl(value) {
-    const currentTarget = currentTargetUrl();
-    if (!currentTarget) return value;
-    const target = new URL(value, currentTarget.href);
-    if (target.origin !== currentTarget.origin) {
-      throw new DOMException("Rings WebView blocks history navigation outside the current target origin.", "SecurityError");
-    }
-    return controlledGatewayUrl(target);
-  }
-  function guardHistoryMethod(method) {
-    const original = History.prototype[method];
-    if (typeof original !== "function") return;
-    Object.defineProperty(History.prototype, method, {
-      value(state, title, url) {
-        if (arguments.length >= 3 && url != null) {
-          return Reflect.apply(original, this, [state, title, rewrittenHistoryUrl(url)]);
-        }
-        return Reflect.apply(original, this, arguments);
-      },
-      configurable: false,
-      writable: false,
-    });
-  }
-  guardHistoryMethod("pushState");
-  guardHistoryMethod("replaceState");
-})();</script>`;
-const webviewOverlayScriptTag = `<script src="${webviewOverlayScriptPath}"></script>`;
-const gatewayContentSecurityPolicy = "default-src 'self' data: blob:; base-uri 'self'; connect-src 'self'; font-src 'self' data:; form-action 'self'; frame-src 'self' data: blob:; img-src 'self' data: blob:; media-src 'self' data: blob:; object-src 'self'; script-src 'self' data: 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; style-src 'self' data: 'unsafe-inline'; worker-src 'none'";
+const gatewayContentSecurityPolicy =
+  "sandbox allow-scripts allow-forms allow-popups allow-downloads; default-src 'self' data: blob:; base-uri 'self'; connect-src 'self'; font-src 'self' data:; form-action 'self'; frame-src 'self' data: blob:; img-src 'self' data: blob:; media-src 'self' data: blob:; object-src 'self'; script-src 'self' data: 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; style-src 'self' data: 'unsafe-inline'; worker-src 'none'";
 const minimumGatewayHostCapabilityLength = 32;
+const clientStatePruneInterval = 64;
 let gatewayHostClientId = null;
 let gatewayHostCapability = null;
 const trustedShellClientIds = new Set();
@@ -75,6 +29,7 @@ const clientSourceTargets = new Map();
 const debugClientScopes = new Map();
 const debugHistory = [];
 let nextRequestId = 1;
+let requestsUntilClientStatePrune = clientStatePruneInterval;
 
 self.addEventListener("install", (event) => {
   event.waitUntil(self.skipWaiting());
@@ -170,16 +125,33 @@ function handleGatewayFetchWithTimeout(event) {
       resolve(gatewayDeadlineFailure());
     }, gatewayFetchDeadlineMs);
   });
-  return Promise.race([
-    handleGatewayFetch(event, requestId, startedAt, controller.signal),
-    timeoutResponse,
-  ]).finally(() => {
-    settled = true;
-    globalThis.clearTimeout(timeout);
-  });
+  return Promise.race([handleGatewayFetch(event, requestId, startedAt, controller.signal), timeoutResponse])
+    .catch((error) => {
+      const request = debugRequestForFailure(event.request);
+      emitResourceDebug(
+        requestId,
+        request,
+        startedAt,
+        "failed",
+        `#${requestId} unexpected Service Worker failure: ${errorMessage(error)}`,
+        "error",
+        502,
+      );
+      return gatewayFailure(
+        502,
+        "local Rings gateway request failed",
+        "Local Rings node gateway request failed.",
+        "gateway_internal_failure",
+      );
+    })
+    .finally(() => {
+      settled = true;
+      globalThis.clearTimeout(timeout);
+    });
 }
 
 async function handleGatewayFetch(event, requestId, startedAt, signal = undefined) {
+  await maybePruneTrackedClientState();
   let request;
   try {
     request = await serializeRequest(event, signal);
@@ -192,21 +164,22 @@ async function handleGatewayFetch(event, requestId, startedAt, signal = undefine
       return gatewayDeadlineFailure();
     }
     request = debugRequestForFailure(event.request);
+    const bodyTooLarge = isGatewayRequestBodyTooLarge(error);
+    const status = bodyTooLarge ? 413 : 400;
+    const summary = bodyTooLarge
+      ? "Rings WebView request body is too large."
+      : "Malformed Rings WebView gateway request.";
+    const code = bodyTooLarge ? "gateway_request_body_too_large" : "invalid_gateway_request";
     emitResourceDebug(
       requestId,
       request,
       startedAt,
       "failed",
-      `#${requestId} rejected malformed gateway request: ${errorMessage(error)}`,
+      `#${requestId} rejected gateway request: ${errorMessage(error)}`,
       "error",
-      400,
+      status,
     );
-    return gatewayFailure(
-      400,
-      errorMessage(error),
-      "Malformed Rings WebView gateway request.",
-      "invalid_gateway_request",
-    );
+    return gatewayFailure(status, errorMessage(error), summary, code);
   }
   emitResourceDebug(
     requestId,
@@ -298,7 +271,7 @@ async function handleGatewayFetch(event, requestId, startedAt, signal = undefine
     );
     return gatewayFailure(
       502,
-      `invalid gateway response: ${String(error)}`,
+      "local Rings gateway returned an invalid response",
       "The local gateway returned an invalid response.",
       "invalid_gateway_response",
     );
@@ -321,9 +294,11 @@ function responseMustNotHaveBody(status) {
 }
 
 function controlledNavigationBody(request, status, headers, body) {
-  if (request.kind !== "navigation" || !body || status < 200 || status >= 300) {
+  if (request.kind !== "navigation" || status < 200 || status >= 300) {
     return body;
   }
+  prepareControlledNavigationHeaders(headers);
+  if (!body) return body;
   const bytes = bodyBytes(body);
   if (!bytes) {
     return body;
@@ -332,12 +307,15 @@ function controlledNavigationBody(request, status, headers, body) {
   if (contentType && !contentType.includes("text/html") && !contentType.includes("application/xhtml+xml")) {
     return body;
   }
-  prepareControlledNavigationHeaders(headers);
   const text = decodeUtf8(bytes);
   if (!text || !looksLikeHtml(text)) {
     return body;
   }
-  const injected = injectControlledNavigationScripts(text, request.topLevelNavigation !== false);
+  const injected = injectControlledNavigationScripts(
+    text,
+    request.topLevelNavigation !== false,
+    webviewOverlayScriptPath,
+  );
   if (injected === text) {
     return body;
   }
@@ -350,6 +328,7 @@ function prepareControlledNavigationHeaders(headers) {
   headers.delete("content-security-policy-report-only");
   headers.delete("x-frame-options");
   headers.set("content-security-policy", gatewayContentSecurityPolicy);
+  headers.set("x-content-type-options", "nosniff");
 }
 
 function bodyBytes(body) {
@@ -378,30 +357,6 @@ function decodeUtf8(bytes) {
 
 function looksLikeHtml(text) {
   return /^\uFEFF?\s*(?:<!--[\s\S]*?-->\s*)*(?:<!doctype\s+html\b|<html\b|<head\b|<body\b)/i.test(text);
-}
-
-function injectWebviewOverlay(html) {
-  const guarded = injectWebviewHistoryGuard(html);
-  if (/<\/head\s*>/i.test(guarded)) {
-    return guarded.replace(/<\/head\s*>/i, `${webviewOverlayScriptTag}</head>`);
-  }
-  if (/<body\b[^>]*>/i.test(guarded)) {
-    return guarded.replace(/<body\b[^>]*>/i, (bodyTag) => `${bodyTag}${webviewOverlayScriptTag}`);
-  }
-  return `${guarded}\n${webviewOverlayScriptTag}`;
-}
-
-function injectControlledNavigationScripts(html, includeOverlay) {
-  if (includeOverlay) {
-    return injectWebviewOverlay(html);
-  }
-  return injectWebviewHistoryGuard(html);
-}
-
-function injectWebviewHistoryGuard(html) {
-  const leading = /^\uFEFF?\s*(?:(?:<!--[\s\S]*?-->)\s*)*(?:<!doctype\s+html\b[^>]*>\s*)?/i.exec(html);
-  const index = leading ? leading[0].length : 0;
-  return `${html.slice(0, index)}${webviewHistoryGuardScriptTag}${html.slice(index)}`;
 }
 
 function emitResourceDebug(requestId, request, startedAt, phase, message, level = "info", status = undefined) {
@@ -445,9 +400,7 @@ async function emitDebug(scope, message, level = "info", resource = undefined, a
     debugHistory.splice(0, debugHistory.length - 200);
   }
   const clients = await debugClientsForEntry(entry);
-  await Promise.all(
-    clients.map((client) => client.postMessage(entry)),
-  );
+  await Promise.all(clients.map((client) => client.postMessage(entry)));
 }
 
 async function debugClientsForEntry(entry) {
@@ -497,7 +450,6 @@ async function registerGatewayHostClient(clientId, capability) {
   if (gatewayHostCapability && gatewayHostCapability !== capability) {
     return false;
   }
-  trustedShellClientIds.add(clientId);
   clientSourceTargets.delete(clientId);
   trustedHostClientIds.add(clientId);
   gatewayHostClientId = clientId;
@@ -529,7 +481,12 @@ async function acceptDebugEntry(clientId, capability) {
 }
 
 function hasGatewayHostCapability(clientId, capability) {
-  return typeof clientId === "string" && Boolean(clientId) && Boolean(gatewayHostCapability) && capability === gatewayHostCapability;
+  return (
+    typeof clientId === "string" &&
+    Boolean(clientId) &&
+    Boolean(gatewayHostCapability) &&
+    capability === gatewayHostCapability
+  );
 }
 
 function isValidGatewayHostCapability(capability) {
@@ -537,10 +494,12 @@ function isValidGatewayHostCapability(capability) {
 }
 
 function isTrustedGatewayHostClient(clientId, client) {
-  return trustedHostClientIds.has(clientId)
-    && isTrustedShellClient(clientId)
-    && clientFramePermitsGatewayHostRegistration(client)
-    && isTrustedGatewayHostUrl(client.url);
+  return (
+    trustedHostClientIds.has(clientId) &&
+    isTrustedShellClient(clientId) &&
+    clientFramePermitsGatewayHostRegistration(client) &&
+    isTrustedGatewayHostUrl(client.url)
+  );
 }
 
 function isTrustedShellClient(clientId) {
@@ -548,9 +507,13 @@ function isTrustedShellClient(clientId) {
 }
 
 function isTrustedGatewayHostRegistrationClient(clientId, client) {
-  return !clientSourceTargets.has(clientId)
-    && clientFramePermitsGatewayHostRegistration(client)
-    && isTrustedGatewayHostUrl(client.url);
+  // A location-shaped URL is not authority: a controlled target document can rewrite history.
+  // Registration requires a shell-navigation witness created by this worker's fetch boundary.
+  return (
+    isTrustedShellClient(clientId) &&
+    clientFramePermitsGatewayHostRegistration(client) &&
+    isTrustedGatewayHostUrl(client.url)
+  );
 }
 
 function clientFramePermitsGatewayHostRegistration(client) {
@@ -563,19 +526,15 @@ function clientFramePermitsDebugRegistration(client) {
 
 function debugClientRegistrationScope(clientId, client, capability) {
   if (
-    hasGatewayHostCapability(clientId, capability)
-    && isTrustedShellClient(clientId)
-    && clientFramePermitsDebugRegistration(client)
-    && isTrustedDebugClientUrl(client.url)
+    hasGatewayHostCapability(clientId, capability) &&
+    isTrustedShellClient(clientId) &&
+    clientFramePermitsDebugRegistration(client) &&
+    isTrustedDebugClientUrl(client.url)
   ) {
     return shellDebugScope();
   }
   const target = targetFromGatewayUrl(client.url);
-  if (
-    trustedDebugClientIds.has(clientId)
-    && target
-    && clientFramePermitsDebugRegistration(client)
-  ) {
+  if (trustedDebugClientIds.has(clientId) && target && clientFramePermitsDebugRegistration(client)) {
     return targetDebugScope(target);
   }
   return false;
@@ -627,14 +586,6 @@ function debugEntryMatchesTargetScope(entry, target) {
   return false;
 }
 
-function sameTargetUrl(left, right) {
-  try {
-    return new URL(left).href === new URL(right).href;
-  } catch (_error) {
-    return false;
-  }
-}
-
 function replayDebugHistory(client, scope) {
   for (const entry of debugHistory) {
     if (debugScopeAllowsEntry(scope, entry)) {
@@ -654,9 +605,11 @@ function isTrustedDebugClientUrl(url) {
 function isTrustedShellUrl(url, hashPrefix) {
   try {
     const parsed = new URL(url);
-    return parsed.origin === self.location.origin
-      && !isGatewayControlledPathname(parsed.pathname)
-      && parsed.hash.startsWith(hashPrefix);
+    return (
+      parsed.origin === self.location.origin &&
+      isTrustedShellEntrypoint(parsed.pathname) &&
+      parsed.hash.startsWith(hashPrefix)
+    );
   } catch (_error) {
     return false;
   }
@@ -671,6 +624,50 @@ function resetGatewayHostForTest() {
   clientSourceTargets.clear();
   debugClientScopes.clear();
   debugHistory.splice(0, debugHistory.length);
+  requestsUntilClientStatePrune = clientStatePruneInterval;
+}
+
+async function maybePruneTrackedClientState() {
+  requestsUntilClientStatePrune -= 1;
+  if (requestsUntilClientStatePrune > 0) {
+    return;
+  }
+  requestsUntilClientStatePrune = clientStatePruneInterval;
+  try {
+    await pruneTrackedClientState();
+  } catch (error) {
+    queueDebug("worker", `Could not prune stale Service Worker client state: ${errorMessage(error)}`, "warning");
+  }
+}
+
+async function pruneTrackedClientState() {
+  const clients = await self.clients.matchAll({
+    includeUncontrolled: true,
+    type: "window",
+  });
+  const liveClientIds = new Set(clients.map((client) => client.id));
+  for (const clientId of trackedClientIds()) {
+    if (liveClientIds.has(clientId)) continue;
+    trustedShellClientIds.delete(clientId);
+    trustedHostClientIds.delete(clientId);
+    trustedDebugClientIds.delete(clientId);
+    clientSourceTargets.delete(clientId);
+    debugClientScopes.delete(clientId);
+  }
+  if (gatewayHostClientId && !liveClientIds.has(gatewayHostClientId)) {
+    gatewayHostClientId = null;
+    gatewayHostCapability = null;
+  }
+}
+
+function trackedClientIds() {
+  return new Set([
+    ...trustedShellClientIds,
+    ...trustedHostClientIds,
+    ...trustedDebugClientIds,
+    ...clientSourceTargets.keys(),
+    ...debugClientScopes.keys(),
+  ]);
 }
 
 async function serializeRequest(event, signal = undefined) {
@@ -679,9 +676,7 @@ async function serializeRequest(event, signal = undefined) {
   throwIfGatewayRequestCancelled(signal);
   const kind = requestKind(request);
   const runtimeTarget = runtimeGatewayTarget(request);
-  const body = request.method === "GET" || request.method === "HEAD"
-    ? undefined
-    : await request.clone().arrayBuffer();
+  const body = await readGatewayRequestBody(request, signal);
   throwIfGatewayRequestCancelled(signal);
   return {
     requested: runtimeTarget ? controlledGatewayUrl(runtimeTarget) : request.url,
@@ -745,15 +740,16 @@ async function sourceTargetForClient(clientId) {
     return undefined;
   }
   const previousTarget = clientSourceTargets.get(clientId);
-  if (previousTarget !== currentTarget) {
-    clientSourceTargets.set(clientId, currentTarget);
+  // Authority comes only from a navigation event observed by this worker. History may refine
+  // the path/query/fragment, but it cannot change the witnessed virtual origin. After a worker
+  // restart no witness exists, and a cross-origin URL mutation must fail closed.
+  if (!previousTarget || !sameTargetOrigin(previousTarget, currentTarget)) {
+    clientSourceTargets.delete(clientId);
     trustedShellClientIds.delete(clientId);
     trustedHostClientIds.delete(clientId);
-    if (trustedDebugClientIds.has(clientId)) {
-      debugClientScopes.set(clientId, targetDebugScope(currentTarget));
-    } else {
-      debugClientScopes.delete(clientId);
-    }
+    trustedDebugClientIds.delete(clientId);
+    debugClientScopes.delete(clientId);
+    return undefined;
   }
   return currentTarget;
 }
@@ -777,7 +773,11 @@ function rememberNavigationClientTarget(event, request) {
 }
 
 function rememberShellNavigationClient(event, url) {
-  if (url.origin !== self.location.origin || isGatewayControlledPathname(url.pathname) || !isTopLevelNavigationRequest(event.request)) {
+  if (
+    url.origin !== self.location.origin ||
+    !isTrustedShellEntrypoint(url.pathname) ||
+    !isTopLevelNavigationRequest(event.request)
+  ) {
     return false;
   }
   let remembered = false;
@@ -908,11 +908,7 @@ function requestKind(request) {
 }
 
 function isNavigationRequest(request) {
-  return (
-    request.mode === "navigate"
-    || request.destination === "document"
-    || request.destination === "iframe"
-  );
+  return request.mode === "navigate" || request.destination === "document" || request.destination === "iframe";
 }
 
 function isRuntimeReadableRequest(request) {
@@ -924,7 +920,10 @@ function runtimeKindTag(request) {
   if (rawKind == null) {
     return undefined;
   }
-  const values = rawKind.split(",").map((value) => value.trim()).filter(Boolean);
+  const values = rawKind
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
   if (values.length !== 1 || !isRuntimeKind(values[0])) {
     throw new Error(`invalid X-Rings-Webview-Kind: ${rawKind}`);
   }
@@ -959,13 +958,16 @@ function requestGatewayResponse(host, request, requestId, signal = undefined) {
       resolve(response);
     };
     const cancel = () => {
-      finish({
-        ok: false,
-        status: 504,
-        errorCode: "local_gateway_timeout",
-        errorSummary: "Local Rings node gateway timed out.",
-        error: "local Rings node gateway timed out",
-      }, true);
+      finish(
+        {
+          ok: false,
+          status: 504,
+          errorCode: "local_gateway_timeout",
+          errorSummary: "Local Rings node gateway timed out.",
+          error: "local Rings node gateway timed out",
+        },
+        true,
+      );
     };
     if (signal?.aborted) {
       cancel();
@@ -978,9 +980,6 @@ function requestGatewayResponse(host, request, requestId, signal = undefined) {
     channel.port1.onmessage = (event) => {
       finish(event.data, false);
     };
-    host.postMessage(
-      { type: "rings-webview-gateway-request", requestId, request },
-      [channel.port2],
-    );
+    host.postMessage({ type: "rings-webview-gateway-request", requestId, request }, [channel.port2]);
   });
 }

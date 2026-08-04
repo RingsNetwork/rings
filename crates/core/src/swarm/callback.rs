@@ -140,13 +140,17 @@ impl InnerSwarmCallback {
     ) -> Result<bool, CallbackError> {
         let delivery = self.transport.swarm_event_delivery_lock(did);
         let result = async {
-            let _delivery = delivery.lock().await;
+            let delivery_turn = delivery.acquire().await;
             if !self.transport.is_admitted_connection_attempt(attempt) {
                 tracing::debug!("suppressing connected event for {did}; connection was retired before event delivery");
                 return Ok(false);
             }
-            self.emit_connection_state_change_unlocked(did, WebrtcConnectionState::Connected)
-                .await?;
+            self.emit_connection_state_change_after_ordered_start(
+                delivery_turn,
+                did,
+                WebrtcConnectionState::Connected,
+            )
+            .await?;
             Ok(true)
         }
         .await;
@@ -163,7 +167,7 @@ impl InnerSwarmCallback {
     ) -> Result<(), CallbackError> {
         let delivery = self.transport.swarm_event_delivery_lock(did);
         let result = async {
-            let _delivery = delivery.lock().await;
+            let delivery_turn = delivery.acquire().await;
             if let Some(attempt) = attempt {
                 match self.transport.connection_event_disposition(attempt)? {
                     ConnectionEventDisposition::Deliver => {}
@@ -179,7 +183,8 @@ impl InnerSwarmCallback {
                     }
                 }
             }
-            self.emit_connection_state_change_unlocked(did, state).await
+            self.emit_connection_state_change_after_ordered_start(delivery_turn, did, state)
+                .await
         }
         .await;
         self.transport
@@ -187,13 +192,15 @@ impl InnerSwarmCallback {
         result
     }
 
-    async fn emit_connection_state_change_unlocked(
+    async fn emit_connection_state_change_after_ordered_start(
         &self,
+        delivery_turn: crate::swarm::transport::SwarmEventDeliveryTurn,
         did: Did,
         state: WebrtcConnectionState,
     ) -> Result<(), CallbackError> {
-        self.callback
-            .on_event(&SwarmEvent::ConnectionStateChange { peer: did, state })
+        let event = SwarmEvent::ConnectionStateChange { peer: did, state };
+        delivery_turn
+            .poll_once_then_release(self.callback.on_event(&event))
             .await
     }
 

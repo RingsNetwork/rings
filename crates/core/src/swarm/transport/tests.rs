@@ -291,14 +291,14 @@ impl SwarmCallback for BlockingEventSwarmCallback {
         event: &SwarmEvent,
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let SwarmEvent::ConnectionStateChange { peer, state } = event;
+        match self.events.lock() {
+            Ok(mut events) => events.push((*peer, *state)),
+            Err(_) => tracing::error!("BlockingEventSwarmCallback events mutex is poisoned"),
+        }
         if *state == WebrtcConnectionState::Connected && self.blocks_connected_peer(*peer) {
             self.connected_started.store(true, Ordering::SeqCst);
             self.connected_started_notify.notify_waiters();
             self.release_connected.notified().await;
-        }
-        match self.events.lock() {
-            Ok(mut events) => events.push((*peer, *state)),
-            Err(_) => tracing::error!("BlockingEventSwarmCallback events mutex is poisoned"),
         }
         Ok(())
     }
@@ -597,7 +597,7 @@ async fn terminal_event_during_pending_admission_prevents_late_dht_join() -> Res
 
 #[cfg(feature = "dummy")]
 #[tokio::test]
-async fn terminal_event_waits_for_started_connected_event_delivery() -> Result<()> {
+async fn terminal_event_starts_in_order_without_waiting_for_connected_callback() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
@@ -632,20 +632,21 @@ async fn terminal_event_waits_for_started_connected_event_delivery() -> Result<(
             .map_err(|error| Error::InvalidMessage(error.to_string()))
     });
 
-    tokio::task::yield_now().await;
-    assert_eq!(
-        connected_and_closed_events(app_callback.events()?),
-        Vec::new()
-    );
+    tokio::time::timeout(std::time::Duration::from_secs(1), terminal)
+        .await
+        .map_err(|_| {
+            Error::InvalidMessage("terminal event was blocked by application callback".to_string())
+        })?
+        .map_err(|error| Error::InvalidMessage(error.to_string()))??;
+    assert_eq!(connected_and_closed_events(app_callback.events()?), vec![
+        WebrtcConnectionState::Connected,
+        WebrtcConnectionState::Closed
+    ]);
     app_callback.release_connected_event();
 
     opening
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))??;
-    terminal
-        .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))??;
-
     assert_eq!(connected_and_closed_events(app_callback.events()?), vec![
         WebrtcConnectionState::Connected,
         WebrtcConnectionState::Closed

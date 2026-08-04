@@ -18,6 +18,8 @@
 #[cfg(all(not(feature = "node"), feature = "browser", target_family = "wasm"))]
 use std::cell::RefCell;
 use std::collections::HashMap;
+#[cfg(feature = "node")]
+use std::net::SocketAddr;
 #[cfg(all(not(feature = "node"), feature = "browser", target_family = "wasm"))]
 use std::rc::Rc;
 use std::sync::Arc;
@@ -58,26 +60,40 @@ use wasm_bindgen_futures::JsFuture;
 #[cfg(all(not(feature = "node"), feature = "browser", target_family = "wasm"))]
 use web_sys::AbortController;
 
+#[cfg(any(
+    test,
+    all(not(feature = "node"), feature = "browser", target_family = "wasm")
+))]
+use self::limits::checked_status_code;
+use self::limits::https_response_body_limit;
+use self::limits::reject_content_length_over_limit;
+use self::limits::usize_to_u64;
 use self::pending::PendingOnionHttpsRequest;
 use crate::error::Error;
 use crate::error::Result;
 use crate::extension::ext::Scope;
 use crate::onion::circuit::send_backward;
 use crate::onion::circuit::OnionAuthenticatedPayload;
+use crate::onion::circuit::OnionBackwardSequence;
 use crate::onion::circuit::OnionCircuitExitFrame;
 #[cfg(all(feature = "browser", target_family = "wasm"))]
 use crate::onion::circuit::OnionCircuitHandler;
 use crate::onion::circuit::OnionCircuitId;
 use crate::onion::circuit::OnionCircuitPayload;
 use crate::onion::circuit::OnionForwardNonce;
+use crate::onion::circuit::OnionForwardSequence;
 use crate::onion::circuit::OnionReturnId;
 use crate::onion::exit_accounting::OnionExitAccounting;
 use crate::onion::exit_accounting::OnionExitLease;
 use crate::onion::proxy::OnionProxyTarget;
 use crate::onion::proxy::ONION_PROXY_HTTPS_SERVICE;
-use crate::onion::replay::OnionForwardReplayCache;
 use crate::onion::replay::OnionForwardReplayKey;
+use crate::onion::replay::OnionForwardReplayPartitions;
 use crate::onion::replay::ReplayAdmission;
+#[cfg(feature = "node")]
+use crate::onion::target::resolve_public_target;
+#[cfg(all(not(feature = "node"), feature = "browser", target_family = "wasm"))]
+use crate::onion::target::validate_public_ip_literal;
 use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitFailure;
 use crate::onion::OnionExitPolicy;
@@ -184,7 +200,7 @@ pub struct OnionHttpsClientResponse {
 pub(crate) struct OnionHttpsRuntime {
     pending: Mutex<HashMap<OnionCircuitId, PendingRequest>>,
     exit_policy: Mutex<Option<OnionExitPolicy>>,
-    forward_replays: Mutex<OnionForwardReplayCache>,
+    forward_replays: Mutex<OnionForwardReplayPartitions>,
     accounting: OnionExitAccounting,
 }
 
@@ -327,11 +343,13 @@ impl OnionHttpsRuntime {
 
     fn consume_forward_nonce(
         &self,
+        from: Did,
         circuit_id: OnionCircuitId,
         nonce: OnionForwardNonce,
     ) -> Result<()> {
         let mut replays = self.forward_replays.lock().map_err(|_| Error::Lock)?;
         match replays.consume(
+            from,
             OnionForwardReplayKey::new(circuit_id, nonce),
             rings_core::utils::get_epoch_ms(),
         ) {
@@ -537,6 +555,7 @@ pub(crate) async fn try_handle_https_exit_payload(
                 frame.circuit_id,
                 frame.return_peer,
                 frame.forward_nonce,
+                frame.forward_sequence,
             )
             .await
             {
@@ -552,6 +571,7 @@ pub(crate) async fn try_handle_https_exit_payload(
         frame.circuit_id,
         frame.return_peer,
         frame.client,
+        OnionBackwardSequence::FIRST,
         encode_https_payload(response)?,
     )
     .await?;
@@ -564,8 +584,12 @@ pub(crate) async fn execute_exit_fetch(
     circuit_id: OnionCircuitId,
     return_peer: Did,
     forward_nonce: OnionForwardNonce,
+    forward_sequence: OnionForwardSequence,
 ) -> Result<OnionHttpsResponse> {
-    runtime.consume_forward_nonce(circuit_id, forward_nonce)?;
+    if forward_sequence != OnionForwardSequence::FIRST {
+        return Err(Error::OnionRouteError(OnionRouteError::ForwardReplay));
+    }
+    runtime.consume_forward_nonce(return_peer, circuit_id, forward_nonce)?;
     let target = OnionProxyTarget::parse_authority(&request.target)?;
     let authority = target.authority();
     let exit_target = OnionExitTarget::from_proxy_target(&target);
@@ -585,7 +609,8 @@ pub(crate) async fn execute_exit_fetch(
         return Err(Error::NoPermission);
     }
     let url = format!("https://{}{}", authority, normalize_path(&request.path)?);
-    let response = execute_https_request(&url, request, body_limit, runtime, &policy).await?;
+    let response =
+        execute_https_request(&url, &target, request, body_limit, runtime, &policy).await?;
     Ok(OnionHttpsResponse {
         status: response.status,
         headers: response.headers,
@@ -602,38 +627,44 @@ struct FetchResponse {
 #[cfg(feature = "node")]
 async fn execute_https_request(
     url: &str,
+    target: &OnionProxyTarget,
     request: &OnionHttpsRequest,
     max_body_bytes: u64,
     runtime: &OnionHttpsRuntime,
     policy: &OnionExitPolicy,
 ) -> Result<FetchResponse> {
-    native_fetch(url, request, max_body_bytes, runtime, policy).await
+    native_fetch(url, target, request, max_body_bytes, runtime, policy).await
 }
 
 #[cfg(all(not(feature = "node"), feature = "browser", target_family = "wasm"))]
 async fn execute_https_request(
     url: &str,
+    target: &OnionProxyTarget,
     request: &OnionHttpsRequest,
     max_body_bytes: u64,
     runtime: &OnionHttpsRuntime,
     policy: &OnionExitPolicy,
 ) -> Result<FetchResponse> {
+    validate_public_ip_literal(target)?;
     browser_fetch(url, request, max_body_bytes, runtime, policy).await
 }
 
 #[cfg(feature = "node")]
 async fn native_fetch(
     url: &str,
+    target: &OnionProxyTarget,
     request: &OnionHttpsRequest,
     max_body_bytes: u64,
     runtime: &OnionHttpsRuntime,
     policy: &OnionExitPolicy,
 ) -> Result<FetchResponse> {
+    let addresses = resolve_public_target(target).await?;
     native_fetch_with_timeout(
         url,
         request,
         max_body_bytes,
         HTTPS_EXIT_REQUEST_TIMEOUT,
+        Some((target.host(), addresses.as_slice())),
         |bytes| runtime.record_exit_bytes(policy, bytes),
     )
     .await
@@ -654,13 +685,18 @@ async fn native_fetch_with_timeout(
     request: &OnionHttpsRequest,
     max_body_bytes: u64,
     timeout: Duration,
+    pinned_resolution: Option<(&str, &[SocketAddr])>,
     record_bytes: impl Fn(u64) -> Result<()>,
 ) -> Result<FetchResponse> {
     let method = reqwest::Method::from_bytes(normalize_method(&request.method).as_bytes())
         .map_err(|error| Error::HttpRequestError(format!("invalid HTTPS proxy method: {error}")))?;
-    let client = reqwest::Client::builder()
+    let mut client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(timeout)
+        .timeout(timeout);
+    if let Some((host, addresses)) = pinned_resolution {
+        client = client.resolve_to_addrs(host, addresses);
+    }
+    let client = client
         .build()
         .map_err(|error| Error::HttpRequestError(format!("build HTTPS proxy client: {error}")))?;
     let mut builder = client.request(method, url);
@@ -818,26 +854,6 @@ fn fetch_init(request: &OnionHttpsRequest, signal: &JsValue) -> Result<Object> {
     Ok(init)
 }
 
-fn https_response_body_limit(remaining_policy_bytes: Option<u64>) -> u64 {
-    remaining_policy_bytes.unwrap_or(DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES)
-}
-
-fn checked_status_code(status: f64) -> Result<u16> {
-    if !status.is_finite() || status.fract() != 0.0 || !(100.0..=999.0).contains(&status) {
-        return Err(Error::HttpRequestError(format!(
-            "fetch response status is not a valid HTTP status: {status:?}"
-        )));
-    }
-    status
-        .to_string()
-        .parse::<u16>()
-        .map_err(|_| Error::HttpRequestError(format!("invalid fetch response status {status:?}")))
-}
-
-fn usize_to_u64(value: usize) -> Result<u64> {
-    u64::try_from(value).map_err(|_| Error::InvalidData)
-}
-
 #[cfg(all(not(feature = "node"), feature = "browser", target_family = "wasm"))]
 fn collect_headers(response: &JsValue) -> Result<Vec<(String, String)>> {
     let headers =
@@ -859,26 +875,6 @@ fn collect_headers(response: &JsValue) -> Result<Vec<(String, String)>> {
     drop(callback);
     let collected = pairs.borrow().clone();
     Ok(collected)
-}
-
-fn reject_content_length_over_limit(
-    headers: &[(String, String)],
-    max_body_bytes: u64,
-) -> Result<()> {
-    if max_body_bytes == 0 {
-        return Ok(());
-    }
-    let Some(length) = headers
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-        .and_then(|(_, value)| value.parse::<u64>().ok())
-    else {
-        return Ok(());
-    };
-    if length > max_body_bytes {
-        return Err(Error::NoPermission);
-    }
-    Ok(())
 }
 
 #[cfg(all(not(feature = "node"), feature = "browser", target_family = "wasm"))]
@@ -984,4 +980,5 @@ fn js_error(error: JsValue) -> Error {
 #[cfg(test)]
 mod tests;
 
+mod limits;
 mod pending;

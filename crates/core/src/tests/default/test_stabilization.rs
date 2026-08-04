@@ -190,22 +190,32 @@ fn prepare_repair_node_with_optional_measure(
     Ok(Node::new(swarm))
 }
 
-fn entry_with_remote_repair_placement(node: &Node) -> Result<(Entry, Did)> {
-    for attempt in 0..1024 {
-        let resource = Entry::gen_did(&format!("fresh repair candidate {attempt}"))?;
-        let entry = Entry::new(resource, vec![], EntryKind::Data);
-        for placement in entry.did.rotate_affine(2)? {
-            if matches!(
-                node.dht().find_storage_owner(placement)?,
-                PeerRingAction::RemoteAction(_, _)
-            ) {
-                return Ok((entry, placement));
-            }
-        }
+fn repair_test_keys() -> Result<(SecretKey, SecretKey)> {
+    let mut first =
+        SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")?;
+    let mut second =
+        SecretKey::try_from("1f9275dbafdfba81942eb3330b07f38cbee4ebb86bdc2174af9648d5f5509a54")?;
+    if first.address() < second.address() {
+        (first, second) = (second, first);
     }
+    Ok((first, second))
+}
 
+fn entry_for_remote_repair_placement(node: &Node, successor: Did) -> Result<(Entry, Did)> {
+    // The first key clockwise after the known successor is outside the local successor interval,
+    // hence requires the remote continuation branch. Fixed node identities make this witness
+    // deterministic; there is no probabilistic hash search in the test precondition.
+    let placement = successor + Did::from(1_u32);
+    if matches!(
+        node.dht().find_storage_owner(placement)?,
+        PeerRingAction::RemoteAction(_, _)
+    ) {
+        // `rotate_affine(n)[0] = self`, so choosing the witnessed placement as the entry key
+        // deterministically makes it one of the repair placements for every non-zero redundancy.
+        return Ok((Entry::new(placement, vec![], EntryKind::Data), placement));
+    }
     Err(Error::InvalidMessage(
-        "could not sample remote repair placement".to_string(),
+        "remote repair fixture DID did not route remotely".to_string(),
     ))
 }
 

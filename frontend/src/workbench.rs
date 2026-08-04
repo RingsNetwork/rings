@@ -192,18 +192,14 @@ fn onion_request_callback(
             &response_body,
             &route_result,
         );
-        spawn_onion_request(
-            backend,
-            request,
-            OnionRequestOutputs {
-                response_status: response_status.clone(),
-                response_headers: response_headers.clone(),
-                response_body: response_body.clone(),
-                route_result: route_result.clone(),
-                status: status.clone(),
-                token,
-            },
-        );
+        spawn_onion_request(backend, request, OnionRequestOutputs {
+            response_status: response_status.clone(),
+            response_headers: response_headers.clone(),
+            response_body: response_body.clone(),
+            route_result: route_result.clone(),
+            status: status.clone(),
+            token,
+        });
     })
 }
 

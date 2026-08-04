@@ -9,9 +9,9 @@ use tokio::sync::mpsc;
 
 use super::duplex::TcpDuplexState;
 use super::inbound::TcpInbound;
-use super::send_tcp_backward;
 use super::OnionTcpPayload;
 use super::OnionTcpRuntime;
+use super::TcpBackwardRoute;
 use super::TcpStreamKey;
 use super::TCP_BUF;
 use crate::extension::ext::Scope;
@@ -45,15 +45,18 @@ struct ExitReturnPath {
 
 impl ExitReturnPath {
     async fn send(&self, payload: OnionTcpPayload) -> crate::error::Result<()> {
-        send_tcp_backward(
-            &self.scope,
-            &self.runtime.session_sk,
-            &self.service,
-            self.circuit_id,
-            self.return_peer,
-            self.client,
-            payload,
-        )
+        let sequence = self.runtime.next_backward_sequence(TcpStreamKey {
+            circuit_id: self.circuit_id,
+        })?;
+        TcpBackwardRoute {
+            scope: &self.scope,
+            signer: &self.runtime.session_sk,
+            service: &self.service,
+            circuit_id: self.circuit_id,
+            return_peer: self.return_peer,
+            client: self.client,
+        }
+        .send(sequence, payload)
         .await
     }
 
@@ -129,10 +132,9 @@ async fn run_exit_stream(task: ExitStreamTask) {
                         }
                     }
                     Err(error) => {
+                        tracing::warn!(%error, "failed to read onion TCP exit target");
                         let _ = return_path
-                            .send(OnionTcpPayload::Error(OnionExitFailure::ReadTarget(format!(
-                                "read onion TCP target: {error}"
-                            ))))
+                            .send(OnionTcpPayload::Error(OnionExitFailure::ReadTarget))
                             .await;
                         break;
                     }

@@ -1,5 +1,4 @@
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -73,6 +72,7 @@ pub(crate) use self::delivery::DATA_CHANNEL_SEND_ACCEPT_BUDGET;
 use self::event_delivery::PeerOperationLocks;
 use self::event_delivery::SwarmEventDeliveryLock;
 use self::event_delivery::SwarmEventDeliveryLocks;
+pub(crate) use self::event_delivery::SwarmEventDeliveryTurn;
 use self::liveness::PeerLivenessMap;
 pub(crate) use self::liveness::PEER_LIVENESS_IDLE_MS;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -80,6 +80,7 @@ pub(crate) use self::liveness::PEER_LIVENESS_TIMEOUT_MS;
 pub(crate) use self::pending::ConnectionEventDisposition;
 use self::pending::ConnectionLifecycleBoundary;
 pub(crate) use self::pending::PendingConnectionAttempt;
+use self::pending::PendingFingerUpdates;
 use self::pending::RawConnectionOwner;
 use self::pending::SharedConnectionLifecycles;
 #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
@@ -102,7 +103,7 @@ pub struct SwarmTransport {
     swarm_event_delivery: SwarmEventDeliveryLocks,
     connection_creation: PeerOperationLocks,
     peer_lifecycles: SharedConnectionLifecycles,
-    pending_finger_updates: Mutex<BTreeMap<PendingConnectionAttempt, BTreeSet<usize>>>,
+    pending_finger_updates: Mutex<PendingFingerUpdates>,
     peer_liveness: Mutex<PeerLivenessMap>,
     storage_lookup_observations: Mutex<StorageLookupObservationMap>,
     pending_storage_sync_acks: Mutex<StorageSyncAckMap>,

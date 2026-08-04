@@ -55,7 +55,11 @@ impl BrowserFixtureTransport {
 
 #[async_trait(?Send)]
 impl GatewayTransport for BrowserFixtureTransport {
-    async fn send(&self, request: GatewayRequest) -> Result<GatewayResponse> {
+    async fn send(
+        &self,
+        request: GatewayRequest,
+        _body_limit: rings_webview::GatewayResponseBodyLimit,
+    ) -> Result<GatewayResponse> {
         let target = request.target.clone();
         self.log.push(request);
 

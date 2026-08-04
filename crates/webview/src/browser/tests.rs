@@ -38,7 +38,10 @@ fn onion_https_request_preserves_path_headers_and_body() -> Result<()> {
     .with_header(GatewayHeader::new("X-Requested-With", "XMLHttpRequest")?)
     .with_body(b"name=value".to_vec());
 
-    let onion_request = OnionHttpsRequest::from(&request);
+    let onion_request = OnionHttpsRequest::new(
+        &request,
+        crate::transport::GatewayResponseBodyLimit::DEFAULT,
+    );
 
     assert_eq!(onion_request.method, "POST");
     assert_eq!(onion_request.path, "/forms/submit?draft=1");
@@ -47,6 +50,10 @@ fn onion_https_request_preserves_path_headers_and_body() -> Result<()> {
         "XMLHttpRequest"
     )]);
     assert_eq!(onion_request.body, b"name=value");
+    assert_eq!(
+        onion_request.max_response_body_bytes,
+        crate::transport::GatewayResponseBodyLimit::DEFAULT.bytes()
+    );
     Ok(())
 }
 

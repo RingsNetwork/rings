@@ -188,8 +188,8 @@ impl Scope {
 /// Capability available while an interpreter applies one committed effect.
 ///
 /// It can send overlay messages and return synchronous feedback, but cannot re-enter its own
-/// reducer. Long-lived engines receive a [`Scope`] explicitly through
-/// [`EffectScope::lifecycle`], making that handoff visible at the effect boundary.
+/// reducer. Long-lived engines receive a [`Scope`] explicitly through the crate-private
+/// `EffectScope::lifecycle` handoff, making ownership visible at the effect boundary.
 pub struct EffectScope {
     scope: Scope,
 }

@@ -7,10 +7,10 @@ use rings_core::message::e2e;
 use rings_core::session::SessionSk;
 use rings_core::session::SessionSkBuilder;
 use rings_node::extension::ext::Ctx;
+use rings_node::extension::ext::EffectScope;
 use rings_node::extension::ext::Interpret;
 use rings_node::extension::ext::Protocol;
 use rings_node::extension::ext::Reject;
-use rings_node::extension::ext::Scope;
 use rings_node::extension::ext::Transition;
 use rings_node::extension::ext::Wire;
 use rings_rpc::protos::rings_node::PeerInfo;
@@ -106,7 +106,7 @@ impl Interpret for ExampleShell {
 
     async fn run(
         &self,
-        _scope: &Scope,
+        _scope: &EffectScope,
         effect: ExampleEffect,
     ) -> rings_node::error::Result<Vec<Bytes>> {
         match effect {

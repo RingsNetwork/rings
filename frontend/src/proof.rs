@@ -15,13 +15,10 @@ use crate::node::DemoNode;
 
 /// Public input for the bundled `simple_bn256` circuit.
 pub fn sample_input() -> Input {
-    vec![(
-        "step_in".to_string(),
-        vec![
-            Field::from_u64(4, SupportedPrimeField::Vesta),
-            Field::from_u64(2, SupportedPrimeField::Vesta),
-        ],
-    )]
+    vec![("step_in".to_string(), vec![
+        Field::from_u64(4, SupportedPrimeField::Vesta),
+        Field::from_u64(2, SupportedPrimeField::Vesta),
+    ])]
     .into()
 }
 

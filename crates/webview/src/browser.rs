@@ -29,11 +29,15 @@ struct OnionHttpsRequest<'a> {
     path: String,
     headers: Vec<(&'a str, &'a str)>,
     body: &'a [u8],
+    max_response_body_bytes: usize,
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
-impl<'a> From<&'a crate::types::GatewayRequest> for OnionHttpsRequest<'a> {
-    fn from(request: &'a crate::types::GatewayRequest) -> Self {
+impl<'a> OnionHttpsRequest<'a> {
+    fn new(
+        request: &'a crate::types::GatewayRequest,
+        body_limit: crate::transport::GatewayResponseBodyLimit,
+    ) -> Self {
         Self {
             method: request.method.as_str(),
             path: request.path_and_query(),
@@ -43,6 +47,7 @@ impl<'a> From<&'a crate::types::GatewayRequest> for OnionHttpsRequest<'a> {
                 .map(|header| (header.name.as_str(), header.value.as_str()))
                 .collect(),
             body: request.body.as_slice(),
+            max_response_body_bytes: body_limit.bytes(),
         }
     }
 }
@@ -90,6 +95,7 @@ mod wasm {
     use super::OnionHttpsRequest;
     use crate::error::Result;
     use crate::error::WebviewError;
+    use crate::transport::GatewayResponseBodyLimit;
     use crate::transport::GatewayTransport;
     use crate::types::GatewayRequest;
     use crate::types::GatewayResponse;
@@ -108,12 +114,16 @@ mod wasm {
 
     #[async_trait(?Send)]
     impl GatewayTransport for OnionProxyJsTransport {
-        async fn send(&self, request: GatewayRequest) -> Result<GatewayResponse> {
+        async fn send(
+            &self,
+            request: GatewayRequest,
+            body_limit: GatewayResponseBodyLimit,
+        ) -> Result<GatewayResponse> {
             let method = Reflect::get(&self.proxy, &JsValue::from_str("request"))
                 .map_err(|error| WebviewError::Browser(format!("{error:?}")))?
                 .dyn_into::<Function>()
                 .map_err(|_| WebviewError::Browser("proxy.request is not callable".to_string()))?;
-            let onion_request = OnionHttpsRequest::from(&request);
+            let onion_request = OnionHttpsRequest::new(&request, body_limit);
             let request_value = serde_wasm_bindgen::to_value(&onion_request)
                 .map_err(|error| WebviewError::Browser(error.to_string()))?;
             let value = method
@@ -126,8 +136,16 @@ mod wasm {
             let response = JsFuture::from(Promise::from(value))
                 .await
                 .map_err(|error| WebviewError::Browser(format!("{error:?}")))?;
-            serde_wasm_bindgen::from_value(response)
-                .map_err(|error| WebviewError::Browser(error.to_string()))
+            let response: GatewayResponse = serde_wasm_bindgen::from_value(response)
+                .map_err(|error| WebviewError::Browser(error.to_string()))?;
+            if response.body.len() > body_limit.bytes() {
+                return Err(crate::error::TransportFailure::ResponseBodyTooLarge {
+                    actual: response.body.len(),
+                    limit: body_limit.bytes(),
+                }
+                .into());
+            }
+            Ok(response)
         }
     }
 

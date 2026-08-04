@@ -37,11 +37,7 @@ async fn stabilize_republishes_local_entries_to_missing_affine_owners() -> Resul
 
 #[tokio::test]
 async fn repair_storage_defers_sync_to_fresh_next_hop() -> Result<()> {
-    let mut key1 = SecretKey::random();
-    let mut key2 = SecretKey::random();
-    if key1.address() < key2.address() {
-        (key1, key2) = (key2, key1)
-    }
+    let (key1, key2) = repair_test_keys()?;
     let node1 = prepare_repair_node(key1)?;
     let node2 = prepare_repair_node(key2)?;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
@@ -58,7 +54,7 @@ async fn repair_storage_defers_sync_to_fresh_next_hop() -> Result<()> {
         "test must exercise a fresh connection; observed age {connected_for_ms}ms"
     );
 
-    let (entry, remote_placement) = entry_with_remote_repair_placement(&node1)?;
+    let (entry, remote_placement) = entry_for_remote_repair_placement(&node1, node2.did())?;
     node1
         .dht()
         .storage
@@ -85,11 +81,7 @@ async fn repair_storage_defers_sync_to_fresh_next_hop() -> Result<()> {
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[tokio::test]
 async fn repair_storage_defers_disconnected_open_transport_without_sending() -> Result<()> {
-    let mut key1 = SecretKey::random();
-    let mut key2 = SecretKey::random();
-    if key1.address() < key2.address() {
-        (key1, key2) = (key2, key1)
-    }
+    let (key1, key2) = repair_test_keys()?;
     let node1 = prepare_repair_node(key1)?;
     let node2 = prepare_repair_node(key2)?;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
@@ -100,7 +92,7 @@ async fn repair_storage_defers_disconnected_open_transport_without_sending() -> 
         .transport
         .force_peer_connected_at(node2.did(), get_epoch_ms_i64() - 31_000)?;
 
-    let (entry, remote_placement) = entry_with_remote_repair_placement(&node1)?;
+    let (entry, remote_placement) = entry_for_remote_repair_placement(&node1, node2.did())?;
     node1
         .dht()
         .storage
@@ -145,11 +137,7 @@ async fn repair_storage_defers_disconnected_open_transport_without_sending() -> 
 async fn repair_storage_backpressure_defers_without_degrading_or_removing_peer() -> Result<()> {
     let measure = Arc::new(CountingMeasure::default());
     let measure_impl: MeasureImpl = measure.clone();
-    let mut key1 = SecretKey::random();
-    let mut key2 = SecretKey::random();
-    if key1.address() < key2.address() {
-        (key1, key2) = (key2, key1)
-    }
+    let (key1, key2) = repair_test_keys()?;
     let node1 = prepare_repair_node_with_measure(key1, measure_impl)?;
     let node2 = prepare_repair_node(key2)?;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
@@ -170,7 +158,7 @@ async fn repair_storage_backpressure_defers_without_degrading_or_removing_peer()
         finger.set(3, node2.did());
     }
 
-    let (entry, remote_placement) = entry_with_remote_repair_placement(&node1)?;
+    let (entry, remote_placement) = entry_for_remote_repair_placement(&node1, node2.did())?;
     node1
         .dht()
         .storage
