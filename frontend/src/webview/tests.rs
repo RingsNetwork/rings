@@ -202,7 +202,7 @@ fn host_redirects_then_serves_a_gateway_document_through_its_transport() -> Webv
     assert_eq!(sent_request.method, "POST");
     assert_eq!(sent_request.body, vec![0x00, 0xff]);
     assert_eq!(sent_request.headers, vec![
-        GatewayHeader::new("accept", "text/html")?,
+        GatewayHeader::new("Accept", "*/*")?,
         GatewayHeader::new("Accept-Encoding", "identity")?,
     ]);
     Ok(())
