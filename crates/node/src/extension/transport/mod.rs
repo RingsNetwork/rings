@@ -54,18 +54,25 @@
 
 // The relay's imperative resource tables are private to the relay interpreter — not a public
 // API. Reachable in-crate by the relay extension only.
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 pub(crate) mod engine;
-#[cfg(all(feature = "browser", target_family = "wasm"))]
+pub(crate) mod platform;
+#[cfg(rings_browser)]
 pub(crate) mod wt;
 
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+#[cfg(rings_native)]
+use std::time::Duration;
 
 use bytes::Bytes;
 use rings_core::dht::Did;
 use serde::Deserialize;
 use serde::Serialize;
+
+/// Maximum silence before an abandoned local socket/flow is reclaimed.
+#[cfg(rings_native)]
+pub(crate) const RELAY_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 /// Allocate one counter value without ever wrapping back to a live ABA-equivalent value.
 pub(crate) fn allocate_non_reusing(counter: &AtomicU64) -> Option<u64> {
@@ -112,11 +119,11 @@ pub(crate) enum EffectEnqueue {
 }
 
 /// Maximum number of ordered peer-to-local operations retained by a browser transport session.
-#[cfg(any(test, all(feature = "browser", target_family = "wasm")))]
+#[cfg(any(test, rings_browser))]
 pub(crate) const MAX_OUTBOUND_QUEUE_OPS: usize = 1024;
 
 /// Maximum aggregate payload retained by a browser transport session.
-#[cfg(any(test, all(feature = "browser", target_family = "wasm")))]
+#[cfg(any(test, rings_browser))]
 pub(crate) const MAX_OUTBOUND_QUEUE_BYTES: usize = 8 * 1024 * 1024;
 
 /// Pure resource account for a browser transport's deferred operation trace.
@@ -124,7 +131,7 @@ pub(crate) const MAX_OUTBOUND_QUEUE_BYTES: usize = 8 * 1024 * 1024;
 /// Invariant: `operations <= MAX_OUTBOUND_QUEUE_OPS` and
 /// `data_bytes <= MAX_OUTBOUND_QUEUE_BYTES` after every successful reservation.
 #[derive(Default)]
-#[cfg(any(test, all(feature = "browser", target_family = "wasm")))]
+#[cfg(any(test, rings_browser))]
 pub(crate) struct OutboundQueueBudget {
     operations: usize,
     data_bytes: usize,
@@ -132,7 +139,7 @@ pub(crate) struct OutboundQueueBudget {
 
 /// Pure ownership state for the single browser writer-drain task.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-#[cfg(any(test, all(feature = "browser", target_family = "wasm")))]
+#[cfg(any(test, rings_browser))]
 pub(crate) enum OutboundDrainState {
     /// No task owns the queue; the next successful enqueue must start one.
     #[default]
@@ -141,7 +148,7 @@ pub(crate) enum OutboundDrainState {
     Active,
 }
 
-#[cfg(any(test, all(feature = "browser", target_family = "wasm")))]
+#[cfg(any(test, rings_browser))]
 impl OutboundDrainState {
     /// Claim an idle queue. Returns whether the caller acquired drain ownership.
     pub(crate) fn claim(&mut self) -> bool {
@@ -160,7 +167,7 @@ impl OutboundDrainState {
     }
 }
 
-#[cfg(any(test, all(feature = "browser", target_family = "wasm")))]
+#[cfg(any(test, rings_browser))]
 impl OutboundQueueBudget {
     /// Reserve one operation carrying `data_bytes`, or leave the budget unchanged.
     pub(crate) fn try_reserve(&mut self, data_bytes: usize) -> bool {

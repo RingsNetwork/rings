@@ -44,6 +44,15 @@ struct ExitCircuitKey {
     return_peer: Did,
 }
 
+/// Pure successor selected by exit admission before any limiter state is mutated.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AdmitCommit {
+    circuit: ExitCircuitKey,
+    active_circuits: u32,
+    active_streams: u32,
+    bytes_this_window: Option<u64>,
+}
+
 impl ExitCircuitKey {
     const fn new(circuit_id: OnionCircuitId, return_peer: Did) -> Self {
         Self {
@@ -86,30 +95,8 @@ impl OnionExitAccounting {
         let circuit = ExitCircuitKey::new(circuit_id, return_peer);
         let mut limiter = self.limiter.lock().map_err(|_| Error::Lock)?;
         limiter.refresh_byte_window(get_epoch_ms());
-        let active_streams = limiter
-            .active_streams_by_circuit
-            .get(&circuit)
-            .copied()
-            .unwrap_or_default();
-        let max_streams =
-            effective_limit(policy.max_streams_per_circuit, HARD_MAX_STREAMS_PER_CIRCUIT);
-        if active_streams >= max_streams {
-            return Err(Error::NoPermission);
-        }
-        let max_circuits = effective_limit(policy.max_circuits, HARD_MAX_ACTIVE_CIRCUITS);
-        if active_streams == 0 && limiter.active_circuits >= max_circuits {
-            return Err(Error::NoPermission);
-        }
-        let next_bytes = limiter.next_recorded_bytes(policy, bytes)?;
-        if active_streams == 0 {
-            limiter.active_circuits = limiter.active_circuits.saturating_add(1);
-        }
-        limiter
-            .active_streams_by_circuit
-            .insert(circuit.clone(), active_streams.saturating_add(1));
-        if let Some(next_bytes) = next_bytes {
-            limiter.bytes_this_window = next_bytes;
-        }
+        let commit = limiter.decide_admission(policy, circuit.clone(), bytes)?;
+        limiter.apply_admission(commit);
         Ok(OnionExitLease {
             limiter: self.limiter.clone(),
             circuit,
@@ -144,16 +131,56 @@ impl OnionExitAccounting {
     }
 }
 
-/// `0` means the descriptor did not choose a smaller limit; it never disables the hard bound.
-const fn effective_limit(requested: u32, hard_limit: u32) -> u32 {
-    if requested == 0 || requested > hard_limit {
-        hard_limit
-    } else {
-        requested
-    }
-}
-
 impl ExitLimiter {
+    /// Decide admission from an immutable snapshot.
+    ///
+    /// Post: `Err` leaves the snapshot unchanged; `Ok(commit)` contains every field needed by
+    /// [`Self::apply_admission`] and cannot partially update the coupled resource counters.
+    fn decide_admission(
+        &self,
+        policy: &OnionExitPolicy,
+        circuit: ExitCircuitKey,
+        bytes: u64,
+    ) -> Result<AdmitCommit> {
+        let active_streams = self
+            .active_streams_by_circuit
+            .get(&circuit)
+            .copied()
+            .unwrap_or_default();
+        let max_streams =
+            effective_limit(policy.max_streams_per_circuit, HARD_MAX_STREAMS_PER_CIRCUIT);
+        if active_streams >= max_streams {
+            return Err(Error::NoPermission);
+        }
+        let max_circuits = effective_limit(policy.max_circuits, HARD_MAX_ACTIVE_CIRCUITS);
+        if active_streams == 0 && self.active_circuits >= max_circuits {
+            return Err(Error::NoPermission);
+        }
+        let active_streams = active_streams.checked_add(1).ok_or(Error::NoPermission)?;
+        let active_circuits = if active_streams == 1 {
+            self.active_circuits
+                .checked_add(1)
+                .ok_or(Error::NoPermission)?
+        } else {
+            self.active_circuits
+        };
+        Ok(AdmitCommit {
+            circuit,
+            active_circuits,
+            active_streams,
+            bytes_this_window: self.next_recorded_bytes(policy, bytes)?,
+        })
+    }
+
+    fn apply_admission(&mut self, commit: AdmitCommit) {
+        self.active_circuits = commit.active_circuits;
+        self.active_streams_by_circuit
+            .insert(commit.circuit, commit.active_streams);
+        if let Some(bytes_this_window) = commit.bytes_this_window {
+            self.bytes_this_window = bytes_this_window;
+        }
+    }
+
     fn refresh_byte_window(&mut self, now_ms: u128) {
         if now_ms.saturating_sub(self.window_start_ms) >= EXIT_LIMIT_WINDOW_MS {
             self.window_start_ms = now_ms;
@@ -165,11 +192,23 @@ impl ExitLimiter {
         if policy.max_bytes_per_minute == 0 || bytes == 0 {
             return Ok(None);
         }
-        let next = self.bytes_this_window.saturating_add(bytes);
+        let next = self
+            .bytes_this_window
+            .checked_add(bytes)
+            .ok_or(Error::NoPermission)?;
         if next > policy.max_bytes_per_minute {
             return Err(Error::NoPermission);
         }
         Ok(Some(next))
+    }
+}
+
+/// `0` means the descriptor did not choose a smaller limit; it never disables the hard bound.
+const fn effective_limit(requested: u32, hard_limit: u32) -> u32 {
+    if requested == 0 || requested > hard_limit {
+        hard_limit
+    } else {
+        requested
     }
 }
 
@@ -178,6 +217,8 @@ mod tests {
     use rings_core::dht::Did;
 
     use super::effective_limit;
+    use super::ExitCircuitKey;
+    use super::ExitLimiter;
     use super::OnionExitAccounting;
     use super::HARD_MAX_ACTIVE_CIRCUITS;
     use super::HARD_MAX_STREAMS_PER_CIRCUIT;
@@ -195,6 +236,31 @@ mod tests {
             effective_limit(u32::MAX, HARD_MAX_ACTIVE_CIRCUITS),
             HARD_MAX_ACTIVE_CIRCUITS
         );
+    }
+
+    #[test]
+    fn admission_decision_does_not_mutate_limiter_before_commit() {
+        let mut limiter = ExitLimiter::default();
+        let circuit = ExitCircuitKey::new(OnionCircuitId::new([1; 16]), Did::from(9_u32));
+        let policy = OnionExitPolicy {
+            max_circuits: 1,
+            max_streams_per_circuit: 2,
+            max_bytes_per_minute: 10,
+            ..OnionExitPolicy::default()
+        };
+
+        let commit = limiter
+            .decide_admission(&policy, circuit.clone(), 7)
+            .expect("pure admission decision");
+        assert_eq!(limiter.active_circuits, 0);
+        assert!(limiter.active_streams_by_circuit.is_empty());
+        assert_eq!(limiter.bytes_this_window, 0);
+
+        limiter.apply_admission(commit);
+        assert_eq!(limiter.active_circuits, 1);
+        assert_eq!(limiter.active_streams_by_circuit.get(&circuit), Some(&1));
+        assert_eq!(limiter.bytes_this_window, 7);
+        assert!(limiter.decide_admission(&policy, circuit, 4).is_err());
     }
 
     #[test]

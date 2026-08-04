@@ -35,7 +35,7 @@ type TaskId = uuid::Uuid;
 /// Namespace under which SNARK proof/verify tasks travel.
 pub const NAMESPACE: &str = "snark";
 
-#[cfg(all(feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 pub mod browser;
 mod builder;
 mod protocol;

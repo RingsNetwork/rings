@@ -21,11 +21,8 @@ use crate::onion::proxy::OnionProxyTarget;
 use crate::online::OnlineNodeDescriptor;
 
 /// Read-only directory effects required by onion route construction.
-#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait::async_trait(?Send))]
-#[cfg_attr(
-    not(all(feature = "browser", target_family = "wasm")),
-    async_trait::async_trait
-)]
+#[cfg_attr(rings_browser, async_trait::async_trait(?Send))]
+#[cfg_attr(rings_native, async_trait::async_trait)]
 pub(crate) trait OnionDirectoryReader {
     /// Return the local DID that must not appear as a selected relay.
     fn local_did(&self) -> Did;

@@ -1,10 +1,10 @@
 //! Target authority parsing shared by onion policy and proxy adapters.
 
 use std::net::IpAddr;
-#[cfg(feature = "node")]
+#[cfg(any(test, rings_native))]
 use std::net::SocketAddr;
 
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 use tokio::net::lookup_host;
 
 use crate::error::Error;
@@ -86,7 +86,7 @@ impl OnionProxyTarget {
 /// addresses. Callers must connect to one of the returned socket addresses,
 /// rather than resolving the hostname again, so a DNS rebinding cannot change
 /// the destination after this admission decision.
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 pub(crate) async fn resolve_public_target(target: &OnionProxyTarget) -> Result<Vec<SocketAddr>> {
     let addresses = lookup_host((target.host(), target.port()))
         .await
@@ -95,31 +95,51 @@ pub(crate) async fn resolve_public_target(target: &OnionProxyTarget) -> Result<V
                 "resolve onion exit target {:?}: {error}",
                 target.authority()
             ))
-        })?;
-    let mut saw_address = false;
-    let mut public_addresses = Vec::new();
-    for address in addresses {
-        saw_address = true;
-        if is_public_exit_ip(address.ip()) && !public_addresses.contains(&address) {
-            public_addresses.push(address);
-        }
-    }
-    if !public_addresses.is_empty() {
-        return Ok(public_addresses);
-    }
-    if saw_address {
-        Err(Error::NoPermission)
-    } else {
-        Err(Error::InvalidConfig(format!(
+        })?
+        .collect::<Vec<_>>();
+    match select_public_exit_addresses(addresses) {
+        PublicAddressSelection::Public(addresses) => Ok(addresses),
+        PublicAddressSelection::Denied => Err(Error::NoPermission),
+        PublicAddressSelection::Empty => Err(Error::InvalidConfig(format!(
             "onion exit target {:?} resolved empty",
             target.authority()
-        )))
+        ))),
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg(any(test, rings_native))]
+enum PublicAddressSelection {
+    Empty,
+    Denied,
+    Public(Vec<SocketAddr>),
+}
+
+/// Select a stable, de-duplicated public projection from one DNS result snapshot.
+#[cfg(any(test, rings_native))]
+fn select_public_exit_addresses(addresses: Vec<SocketAddr>) -> PublicAddressSelection {
+    if addresses.is_empty() {
+        return PublicAddressSelection::Empty;
+    }
+    let public = addresses
+        .into_iter()
+        .filter(|address| is_public_exit_ip(address.ip()))
+        .fold(Vec::new(), |mut selected, address| {
+            if !selected.contains(&address) {
+                selected.push(address);
+            }
+            selected
+        });
+    if public.is_empty() {
+        PublicAddressSelection::Denied
+    } else {
+        PublicAddressSelection::Public(public)
     }
 }
 
 /// Browser exits cannot pin a hostname to the address admitted by this node.
 /// Only a public literal address is therefore safe in that environment.
-#[cfg(all(not(feature = "node"), feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 pub(crate) fn validate_public_ip_literal(target: &OnionProxyTarget) -> Result<()> {
     let address = target
         .host()
@@ -225,14 +245,36 @@ fn normalize_host(host: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use std::net::IpAddr;
+    use std::net::SocketAddr;
 
     use super::is_public_exit_ip;
-    #[cfg(feature = "node")]
+    #[cfg(rings_native)]
     use super::resolve_public_target;
-    #[cfg(feature = "node")]
+    use super::select_public_exit_addresses;
+    #[cfg(rings_native)]
     use super::OnionProxyTarget;
-    #[cfg(feature = "node")]
+    use super::PublicAddressSelection;
+    #[cfg(rings_native)]
     use crate::error::Error;
+
+    #[test]
+    fn public_address_selection_distinguishes_empty_denied_and_deduplicated_public() {
+        let denied: SocketAddr = "127.0.0.1:443".parse().expect("denied address");
+        let public: SocketAddr = "8.8.8.8:443".parse().expect("public address");
+
+        assert_eq!(
+            select_public_exit_addresses(Vec::new()),
+            PublicAddressSelection::Empty
+        );
+        assert_eq!(
+            select_public_exit_addresses(vec![denied]),
+            PublicAddressSelection::Denied
+        );
+        assert_eq!(
+            select_public_exit_addresses(vec![denied, public, public]),
+            PublicAddressSelection::Public(vec![public])
+        );
+    }
 
     #[test]
     fn exit_address_predicate_rejects_internal_and_special_destinations() {
@@ -277,7 +319,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "node")]
+    #[cfg(rings_native)]
     #[tokio::test]
     async fn resolver_rejects_loopback_before_any_exit_connection() {
         let target =

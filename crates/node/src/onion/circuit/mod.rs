@@ -10,6 +10,7 @@ mod crypto;
 mod limiter;
 mod protocol;
 mod reducer;
+mod send_outbox;
 mod shell;
 
 #[cfg(test)]
@@ -20,7 +21,7 @@ pub use codec::OnionCircuitEvent;
 pub use crypto::encode_initial_forward;
 pub use crypto::route_first_hop;
 pub use crypto::send_backward;
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 pub(crate) use crypto::OnionCircuitPath;
 pub use protocol::OnionCircuitCapabilities;
 pub use protocol::OnionCircuitProtocol;

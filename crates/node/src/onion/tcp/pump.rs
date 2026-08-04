@@ -11,6 +11,7 @@ use super::inbound::TcpInbound;
 use super::OnionTcpPayload;
 use super::TCP_BUF;
 use crate::error::Result;
+use crate::extension::transport::RELAY_IDLE_TIMEOUT;
 use crate::onion::OnionExitFailure;
 
 /// Direction-specific effects around the shared TCP duplex state machine.
@@ -37,20 +38,34 @@ pub(super) trait TcpDuplexEffects: Send {
 /// capability, and a remote terminal consumes both without echoing another terminal frame.
 pub(super) async fn pump_tcp_duplex<E>(
     stream: TcpStream,
+    inbound: mpsc::Receiver<TcpInbound>,
+    effects: &mut E,
+) where
+    E: TcpDuplexEffects,
+{
+    pump_tcp_duplex_with_idle(stream, inbound, effects, RELAY_IDLE_TIMEOUT).await;
+}
+
+async fn pump_tcp_duplex_with_idle<E>(
+    stream: TcpStream,
     mut inbound: mpsc::Receiver<TcpInbound>,
     effects: &mut E,
+    idle_timeout: std::time::Duration,
 ) where
     E: TcpDuplexEffects,
 {
     let (mut read, mut write) = stream.into_split();
     let mut read_buf = vec![0_u8; TCP_BUF];
     let mut state = TcpDuplexState::open();
+    let idle = tokio::time::sleep(idle_timeout);
+    tokio::pin!(idle);
     loop {
         if state.is_closed() {
             break;
         }
         tokio::select! {
             read_result = read.read(read_buf.as_mut_slice()), if state.can_read() => {
+                idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
                 match read_result {
                     Ok(0) => {
                         if effects.send(OnionTcpPayload::Shutdown).await.is_err() {
@@ -79,6 +94,7 @@ pub(super) async fn pump_tcp_duplex<E>(
                 }
             }
             message = inbound.recv() => {
+                idle.as_mut().reset(tokio::time::Instant::now() + idle_timeout);
                 match message {
                     Some(TcpInbound::Data(bytes)) => {
                         if !state.can_write() {
@@ -107,6 +123,7 @@ pub(super) async fn pump_tcp_duplex<E>(
                     }
                 }
             }
+            _ = &mut idle => break,
         }
     }
     if state.should_announce_terminal() {
@@ -267,6 +284,31 @@ mod tests {
             .lock()
             .map_err(|_| Error::Lock)?
             .is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn idle_stream_is_reclaimed_and_announces_close() -> Result<()> {
+        let (_client, server) = connected_pair().await?;
+        let (_inbound_tx, inbound_rx) = mpsc::channel(1);
+        let recorded = Arc::new(RecordedEffects::default());
+        let task_recorded = Arc::clone(&recorded);
+        let pump = tokio::spawn(async move {
+            let mut route = RecordingRoute {
+                effects: task_recorded,
+            };
+            pump_tcp_duplex_with_idle(server, inbound_rx, &mut route, Duration::from_millis(20))
+                .await;
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), pump)
+            .await
+            .map_err(|_| Error::ExtensionError("idle TCP pump was not reclaimed".to_string()))?
+            .map_err(|error| Error::ExtensionError(error.to_string()))?;
+        assert!(matches!(
+            recorded.payloads.lock().map_err(|_| Error::Lock)?.last(),
+            Some(OnionTcpPayload::Close)
+        ));
         Ok(())
     }
 

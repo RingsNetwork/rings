@@ -22,11 +22,41 @@ struct StoredCookie {
     same_site: SameSite,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CookieKey {
+    name: String,
+    domain: String,
+    path: String,
+}
+
+impl StoredCookie {
+    fn key(&self) -> CookieKey {
+        CookieKey {
+            name: self.name.clone(),
+            domain: self.domain.clone(),
+            path: self.path.clone(),
+        }
+    }
+}
+
+impl CookieKey {
+    fn matches(&self, cookie: &StoredCookie) -> bool {
+        self.name == cookie.name && self.domain == cookie.domain && self.path == cookie.path
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SameSite {
     Strict,
     Lax,
     None,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SetCookieOutcome {
+    Ignore,
+    Remove(CookieKey),
+    Upsert(StoredCookie),
 }
 
 /// Virtual cookie jar keyed by target origin/domain/path.
@@ -46,95 +76,20 @@ impl CookieJar {
     /// The supplied instant is used for `Max-Age` and `Expires` decisions, so callers that own a
     /// clock can replay cookie transitions without reading ambient time.
     pub fn store_set_cookie_at(&mut self, origin: &Url, set_cookie: &str, now: i64) -> Result<()> {
-        let Some(host) = origin.host_str() else {
-            return Err(CookieFailure::MissingOriginHost.into());
-        };
-        let mut parts = set_cookie.split(';').map(str::trim);
-        let Some(name_value) = parts.next() else {
-            return Err(CookieFailure::EmptySetCookie.into());
-        };
-        let Some((name, value)) = name_value.split_once('=') else {
-            return Err(CookieFailure::InvalidNameValue.into());
-        };
-        let name = name.trim();
-        if name.is_empty() {
-            return Err(CookieFailure::EmptyName.into());
-        }
-
-        let mut cookie = StoredCookie {
-            name: name.to_string(),
-            value: value.trim().to_string(),
-            domain: host.to_ascii_lowercase(),
-            host_only: true,
-            path: default_cookie_path(origin.path()),
-            secure: false,
-            expires_at: None,
-            same_site: SameSite::Lax,
-        };
-        let mut delete_cookie = false;
-        let mut saw_max_age = false;
-
-        for part in parts {
-            let lower = part.to_ascii_lowercase();
-            if lower == "secure" {
-                cookie.secure = true;
-                continue;
-            }
-            if let Some((key, value)) = part.split_once('=') {
-                if key.eq_ignore_ascii_case("domain") {
-                    return Ok(());
-                } else if key.eq_ignore_ascii_case("path") {
-                    let path = value.trim();
-                    cookie.path = if path.starts_with('/') {
-                        path.to_string()
-                    } else {
-                        "/".to_string()
-                    };
-                } else if key.eq_ignore_ascii_case("max-age") {
-                    if let Ok(seconds) = value.trim().parse::<i64>() {
-                        saw_max_age = true;
-                        if seconds <= 0 {
-                            delete_cookie = true;
-                            cookie.expires_at = None;
-                        } else {
-                            delete_cookie = false;
-                            cookie.expires_at = Some(now.saturating_add(max_age_millis(seconds)));
-                        }
-                    }
-                } else if key.eq_ignore_ascii_case("expires") && !saw_max_age {
-                    if let Ok(expires_at) = httpdate::parse_http_date(value.trim()) {
-                        let expires_at = system_time_millis(expires_at);
-                        if expires_at <= now {
-                            delete_cookie = true;
-                            cookie.expires_at = None;
-                        } else {
-                            cookie.expires_at = Some(expires_at);
-                        }
-                    }
-                } else if key.eq_ignore_ascii_case("samesite") {
-                    match value.trim().to_ascii_lowercase().as_str() {
-                        "strict" => cookie.same_site = SameSite::Strict,
-                        "lax" => cookie.same_site = SameSite::Lax,
-                        "none" => cookie.same_site = SameSite::None,
-                        _ => {}
-                    }
-                }
+        let outcome = evaluate_set_cookie(origin, set_cookie, now)?;
+        match outcome {
+            SetCookieOutcome::Ignore => {}
+            SetCookieOutcome::Remove(key) => self.remove_cookie(&key),
+            SetCookieOutcome::Upsert(cookie) => {
+                self.remove_cookie(&cookie.key());
+                self.cookies.push(cookie);
             }
         }
-
-        if !delete_cookie && cookie.same_site == SameSite::None && !cookie.secure {
-            return Ok(());
-        }
-        self.cookies.retain(|existing| {
-            !(existing.name == cookie.name
-                && existing.domain == cookie.domain
-                && existing.path == cookie.path)
-        });
-        if delete_cookie {
-            return Ok(());
-        }
-        self.cookies.push(cookie);
         Ok(())
+    }
+
+    fn remove_cookie(&mut self, key: &CookieKey) {
+        self.cookies.retain(|cookie| !key.matches(cookie));
     }
 
     /// Build a `Cookie` request header for `target` at `now` milliseconds since Unix epoch.
@@ -216,6 +171,93 @@ impl CookieJar {
     pub fn is_empty_at(&self, now: i64) -> bool {
         self.len_at(now) == 0
     }
+}
+
+fn evaluate_set_cookie(origin: &Url, set_cookie: &str, now: i64) -> Result<SetCookieOutcome> {
+    let Some(host) = origin.host_str() else {
+        return Err(CookieFailure::MissingOriginHost.into());
+    };
+    let mut parts = set_cookie.split(';').map(str::trim);
+    let Some(name_value) = parts.next() else {
+        return Err(CookieFailure::EmptySetCookie.into());
+    };
+    let Some((name, value)) = name_value.split_once('=') else {
+        return Err(CookieFailure::InvalidNameValue.into());
+    };
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(CookieFailure::EmptyName.into());
+    }
+
+    let mut cookie = StoredCookie {
+        name: name.to_string(),
+        value: value.trim().to_string(),
+        domain: host.to_ascii_lowercase(),
+        host_only: true,
+        path: default_cookie_path(origin.path()),
+        secure: false,
+        expires_at: None,
+        same_site: SameSite::Lax,
+    };
+    let mut delete_cookie = false;
+    let mut saw_max_age = false;
+
+    for part in parts {
+        let lower = part.to_ascii_lowercase();
+        if lower == "secure" {
+            cookie.secure = true;
+            continue;
+        }
+        if let Some((key, value)) = part.split_once('=') {
+            if key.eq_ignore_ascii_case("domain") {
+                return Ok(SetCookieOutcome::Ignore);
+            } else if key.eq_ignore_ascii_case("path") {
+                let path = value.trim();
+                cookie.path = if path.starts_with('/') {
+                    path.to_string()
+                } else {
+                    "/".to_string()
+                };
+            } else if key.eq_ignore_ascii_case("max-age") {
+                if let Ok(seconds) = value.trim().parse::<i64>() {
+                    saw_max_age = true;
+                    if seconds <= 0 {
+                        delete_cookie = true;
+                        cookie.expires_at = None;
+                    } else {
+                        delete_cookie = false;
+                        cookie.expires_at = Some(now.saturating_add(max_age_millis(seconds)));
+                    }
+                }
+            } else if key.eq_ignore_ascii_case("expires") && !saw_max_age {
+                if let Ok(expires_at) = httpdate::parse_http_date(value.trim()) {
+                    let expires_at = system_time_millis(expires_at);
+                    if expires_at <= now {
+                        delete_cookie = true;
+                        cookie.expires_at = None;
+                    } else {
+                        cookie.expires_at = Some(expires_at);
+                    }
+                }
+            } else if key.eq_ignore_ascii_case("samesite") {
+                match value.trim().to_ascii_lowercase().as_str() {
+                    "strict" => cookie.same_site = SameSite::Strict,
+                    "lax" => cookie.same_site = SameSite::Lax,
+                    "none" => cookie.same_site = SameSite::None,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    if !delete_cookie && cookie.same_site == SameSite::None && !cookie.secure {
+        return Ok(SetCookieOutcome::Ignore);
+    }
+    Ok(if delete_cookie {
+        SetCookieOutcome::Remove(cookie.key())
+    } else {
+        SetCookieOutcome::Upsert(cookie)
+    })
 }
 
 #[cfg(test)]
@@ -359,6 +401,29 @@ fn default_cookie_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn set_cookie_evaluation_is_a_pure_total_decision() -> Result<()> {
+        let origin = Url::parse("https://example.com/app/index.html")?;
+
+        assert!(matches!(
+            evaluate_set_cookie(&origin, "sid=one; Domain=example.com", 1_000)?,
+            SetCookieOutcome::Ignore
+        ));
+        assert!(matches!(
+            evaluate_set_cookie(&origin, "sid=one; SameSite=None", 1_000)?,
+            SetCookieOutcome::Ignore
+        ));
+        assert!(matches!(
+            evaluate_set_cookie(&origin, "sid=gone; Path=/app; Max-Age=0", 1_000)?,
+            SetCookieOutcome::Remove(key) if key.path == "/app"
+        ));
+        assert!(matches!(
+            evaluate_set_cookie(&origin, "sid=one; Path=/app; Max-Age=2", 1_000)?,
+            SetCookieOutcome::Upsert(cookie) if cookie.expires_at == Some(3_000)
+        ));
+        Ok(())
+    }
 
     #[test]
     fn cookie_matching_respects_host_only_path_and_secure() -> Result<()> {

@@ -1,6 +1,6 @@
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 use std::sync::atomic::AtomicU64;
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 use std::sync::atomic::Ordering;
 
 use bytes::Bytes;
@@ -37,7 +37,7 @@ use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionRoute;
 use crate::onion::OnionRouteError;
 use crate::onion::OnionRouteHop;
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 use crate::onion::OnionServiceName;
 
 /// Encode the first forward frame for `route`.
@@ -69,7 +69,7 @@ pub fn encode_initial_forward(
 /// Invariant: `edge_circuit_ids.len() == route.encryption_hops().len()` and
 /// `first_circuit_id == edge_circuit_ids[0]`. Reusing one path for every payload in a stream
 /// preserves the exit-side stream key and refreshes the same relay return edges.
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 #[derive(Debug)]
 pub(crate) struct OnionCircuitPath {
     route: OnionRoute,
@@ -78,7 +78,7 @@ pub(crate) struct OnionCircuitPath {
     next_forward_sequence: AtomicU64,
 }
 
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 impl OnionCircuitPath {
     /// Build a stable circuit path for one route.
     pub(crate) fn new(route: OnionRoute, first_circuit_id: OnionCircuitId) -> Result<Self> {

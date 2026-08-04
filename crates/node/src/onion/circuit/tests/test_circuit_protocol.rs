@@ -1,17 +1,17 @@
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 use std::sync::atomic::AtomicBool;
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 use std::sync::atomic::Ordering;
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 use std::sync::Arc;
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 use std::sync::Mutex;
 
 use rings_core::dht::Did;
 use rings_core::ecc::SecretKey;
 use rings_core::session::SessionSk;
 
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 use super::super::codec::encode_wire_message;
 use super::super::codec::OnionCircuitInput;
 use super::super::codec::OnionWireMessage;
@@ -23,16 +23,18 @@ use super::super::protocol::OnionCircuitCapabilities;
 use super::super::reducer::remember_return_hop;
 use super::super::reducer::OnionCircuitReducer;
 use super::super::reducer::RelayReturnKey;
+#[cfg(rings_native)]
+use super::super::send_outbox::OnionSendTestHook;
 use super::super::*;
 use crate::extension::ext::Ctx;
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 use crate::extension::ext::EffectScope;
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 use crate::extension::ext::Extensions;
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 use crate::extension::ext::Interpret;
 use crate::extension::ext::Protocol;
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 use crate::extension::ext::Scope;
 use crate::extension::ext::Wire;
 use crate::onion::OnionExitDescriptor;
@@ -43,9 +45,9 @@ use crate::onion::OnionRoute;
 use crate::onion::OnionRouteHop;
 use crate::onion::OnionServiceName;
 use crate::online::OnlineNodeType;
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 use crate::processor::ProcessorBuilder;
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 use crate::processor::ProcessorConfig;
 
 fn session() -> SessionSk {
@@ -120,7 +122,7 @@ fn decode_event(
         .expect("decode onion circuit event")
 }
 
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 fn test_scope(session_sk: SessionSk) -> EffectScope {
     let config = ProcessorConfig::new(1, String::new(), session_sk, 1);
     let processor = ProcessorBuilder::from_config(&config)
@@ -135,25 +137,22 @@ fn test_scope(session_sk: SessionSk) -> EffectScope {
     ))
 }
 
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 #[derive(Clone, Default)]
 struct RecordingHandler {
     clients: Arc<Mutex<Vec<(Did, OnionCircuitId, OnionAuthenticatedPayload)>>>,
 }
 
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 impl RecordingHandler {
     fn take_clients(&self) -> Vec<(Did, OnionCircuitId, OnionAuthenticatedPayload)> {
         std::mem::take(&mut self.clients.lock().expect("recorded clients"))
     }
 }
 
-#[cfg(feature = "node")]
-#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait::async_trait(?Send))]
-#[cfg_attr(
-    not(all(feature = "browser", target_family = "wasm")),
-    async_trait::async_trait
-)]
+#[cfg(rings_native)]
+#[cfg_attr(rings_browser, async_trait::async_trait(?Send))]
+#[cfg_attr(rings_native, async_trait::async_trait)]
 impl OnionCircuitHandler for RecordingHandler {
     async fn handle_exit(
         &self,
@@ -178,7 +177,7 @@ impl OnionCircuitHandler for RecordingHandler {
     }
 }
 
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 #[derive(Clone, Default)]
 struct BlockingExitHandler {
     started: Arc<AtomicBool>,
@@ -186,7 +185,7 @@ struct BlockingExitHandler {
     release: Arc<tokio::sync::Notify>,
 }
 
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 impl BlockingExitHandler {
     async fn wait_until_started(&self) {
         while !self.started.load(Ordering::SeqCst) {
@@ -199,7 +198,7 @@ impl BlockingExitHandler {
     }
 }
 
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 #[async_trait::async_trait]
 impl OnionCircuitHandler for BlockingExitHandler {
     async fn handle_exit(
@@ -280,7 +279,7 @@ fn relay_layer_uses_distinct_next_edge_circuit_id() {
     assert_ne!(next_circuit_id, first_circuit_id);
 }
 
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 #[test]
 fn circuit_path_reuses_edge_ids_for_stream_payloads() {
     let client = session();
@@ -304,7 +303,7 @@ fn circuit_path_reuses_edge_ids_for_stream_payloads() {
     assert_eq!(first_next, second_next);
 }
 
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 fn relay_next_circuit_id(
     relay: &SessionSk,
     first_circuit_id: OnionCircuitId,
@@ -413,7 +412,7 @@ fn relay_forward_requires_opt_in_before_crypto_effect() {
     assert!(transition.effects.is_empty());
 }
 
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 #[tokio::test]
 async fn relay_capability_does_not_execute_exit_layer() {
     let client = session();
@@ -472,7 +471,7 @@ async fn relay_capability_does_not_execute_exit_layer() {
     assert!(transition.effects.is_empty());
 }
 
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 #[tokio::test]
 async fn exit_effect_releases_transition_turn_before_adapter_io_completes() {
     let client = session();
@@ -501,6 +500,46 @@ async fn exit_effect_releases_transition_turn_before_adapter_io_completes() {
     handler.release();
 }
 
+#[cfg(rings_native)]
+#[tokio::test]
+async fn send_effect_releases_transition_turn_and_preserves_peer_order() {
+    let local = session();
+    let peer = session().account_did();
+    let hook = Arc::new(OnionSendTestHook::default());
+    let shell = OnionCircuitShell::new_with_send_test_hook(
+        local.clone(),
+        RecordingHandler::default(),
+        Arc::clone(&hook),
+    );
+    let scope = test_scope(local);
+
+    for payload in [Bytes::from_static(b"first"), Bytes::from_static(b"second")] {
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            shell.run(&scope, OnionCircuitEffect::Send { to: peer, payload }),
+        )
+        .await
+        .expect("send interpretation must only enqueue")
+        .expect("enqueue ordered send");
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(1), hook.wait_until_blocked())
+        .await
+        .expect("first overlay send reached blocking hook");
+    tokio::task::yield_now().await;
+    assert!(hook.observed().expect("observed sends").is_empty());
+
+    hook.release();
+    let observed =
+        tokio::time::timeout(std::time::Duration::from_secs(1), hook.wait_for_observed(2))
+            .await
+            .expect("ordered drain completed")
+            .expect("observed sends");
+    assert_eq!(observed, vec![
+        Bytes::from_static(b"first"),
+        Bytes::from_static(b"second")
+    ]);
+}
+
 #[test]
 fn expired_exit_layer_emits_no_exit_effect() {
     let client = session();
@@ -525,7 +564,7 @@ fn expired_exit_layer_emits_no_exit_effect() {
     assert!(transition.effects.is_empty());
 }
 
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 #[tokio::test]
 async fn relay_decrypts_one_layer_and_remembers_return_hop() {
     let client = session();
@@ -591,7 +630,7 @@ async fn relay_decrypts_one_layer_and_remembers_return_hop() {
     assert_eq!(transition.state.relay_return_count(), 1);
 }
 
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 #[tokio::test]
 async fn client_backward_payload_decryption_runs_in_shell_handler() {
     let client = session();

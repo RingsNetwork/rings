@@ -22,7 +22,7 @@ struct BrowserBootstrapConfig<'a> {
 }
 
 /// Serialized shape accepted by the browser onion HTTPS client.
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(any(target_family = "wasm", test))]
 #[derive(Serialize)]
 struct OnionHttpsRequest<'a> {
     method: &'a str,
@@ -32,7 +32,7 @@ struct OnionHttpsRequest<'a> {
     max_response_body_bytes: usize,
 }
 
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(any(target_family = "wasm", test))]
 impl<'a> OnionHttpsRequest<'a> {
     fn new(
         request: &'a crate::types::GatewayRequest,
@@ -87,7 +87,7 @@ pub fn runtime_gateway_url(
     gateway_prefix.rewrite_url_value(document_url, input)
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(target_family = "wasm")]
 mod wasm {
     use async_trait::async_trait;
     use js_sys::Function;
@@ -157,7 +157,7 @@ mod wasm {
     pub use OnionProxyJsTransport as JsOnionProxyTransport;
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(target_family = "wasm")]
 pub use wasm::JsOnionProxyTransport;
 
 #[cfg(test)]

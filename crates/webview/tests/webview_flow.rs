@@ -46,7 +46,8 @@ impl FixtureTransport {
     }
 }
 
-#[async_trait(?Send)]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl GatewayTransport for FixtureTransport {
     async fn send(
         &self,

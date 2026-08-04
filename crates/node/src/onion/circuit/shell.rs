@@ -1,4 +1,3 @@
-use std::future::Future;
 use std::sync::Arc;
 
 use bytes::Bytes;
@@ -11,6 +10,9 @@ use super::codec::OnionLocalMessage;
 use super::crypto::decrypt_client_payload;
 use super::crypto::decrypt_forward_layer;
 use super::limiter::OnionCryptoGate;
+use super::send_outbox::OnionSendOutbox;
+#[cfg(all(test, rings_native))]
+use super::send_outbox::OnionSendTestHook;
 use super::OnionAuthenticatedPayload;
 use super::OnionCircuitEffect;
 use super::OnionCircuitId;
@@ -23,11 +25,13 @@ use crate::error::Result;
 use crate::extension::ext::EffectScope;
 use crate::extension::ext::Interpret;
 use crate::extension::ext::Scope;
+use crate::extension::transport::platform::spawn_detached;
 
 /// Interpreter for route-aware circuit effects.
 pub struct OnionCircuitShell<H> {
     session_sk: SessionSk,
     crypto_gate: OnionCryptoGate,
+    send_outbox: OnionSendOutbox,
     handler: Arc<H>,
 }
 
@@ -37,6 +41,21 @@ impl<H> OnionCircuitShell<H> {
         Self {
             session_sk,
             crypto_gate: OnionCryptoGate::default(),
+            send_outbox: OnionSendOutbox::default(),
+            handler: Arc::new(handler),
+        }
+    }
+
+    #[cfg(all(test, rings_native))]
+    pub(super) fn new_with_send_test_hook(
+        session_sk: SessionSk,
+        handler: H,
+        test_hook: Arc<OnionSendTestHook>,
+    ) -> Self {
+        Self {
+            session_sk,
+            crypto_gate: OnionCryptoGate::default(),
+            send_outbox: OnionSendOutbox::with_test_hook(test_hook),
             handler: Arc::new(handler),
         }
     }
@@ -112,11 +131,8 @@ impl<H> OnionCircuitShell<H> {
     }
 }
 
-#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait::async_trait(?Send))]
-#[cfg_attr(
-    not(all(feature = "browser", target_family = "wasm")),
-    async_trait::async_trait
-)]
+#[cfg_attr(rings_browser, async_trait::async_trait(?Send))]
+#[cfg_attr(rings_native, async_trait::async_trait)]
 impl<H> Interpret for OnionCircuitShell<H>
 where H: OnionCircuitHandler + crate::extension::ext::MaybeSend + 'static
 {
@@ -136,7 +152,7 @@ where H: OnionCircuitHandler + crate::extension::ext::MaybeSend + 'static
                 .timestamp_backward_reinject(from, frame)
                 .map(|payload| vec![payload]),
             OnionCircuitEffect::Send { to, payload } => {
-                scope.send(to, payload).await?;
+                self.send_outbox.enqueue(scope.lifecycle(), to, payload)?;
                 Ok(Vec::new())
             }
             OnionCircuitEffect::Exit {
@@ -150,7 +166,7 @@ where H: OnionCircuitHandler + crate::extension::ext::MaybeSend + 'static
             } => {
                 let lifecycle = scope.lifecycle();
                 let handler = Arc::clone(&self.handler);
-                spawn_exit_task(async move {
+                spawn_detached(async move {
                     let result = handler
                         .handle_exit(&lifecycle, OnionCircuitExitFrame {
                             from,
@@ -205,11 +221,8 @@ pub struct OnionCircuitExitFrame {
 }
 
 /// Runtime-specific circuit handling.
-#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait::async_trait(?Send))]
-#[cfg_attr(
-    not(all(feature = "browser", target_family = "wasm")),
-    async_trait::async_trait
-)]
+#[cfg_attr(rings_browser, async_trait::async_trait(?Send))]
+#[cfg_attr(rings_native, async_trait::async_trait)]
 pub trait OnionCircuitHandler {
     /// Handle a frame that reached this node as the exit.
     async fn handle_exit(&self, scope: &Scope, frame: OnionCircuitExitFrame) -> Result<()>;
@@ -226,22 +239,4 @@ pub trait OnionCircuitHandler {
 
 fn drop_bad_crypto(context: &str, error: Error) {
     tracing::debug!("drop onion circuit message after {context}: {error}");
-}
-
-/// Spawn an exit adapter future outside the extension transition turn.
-///
-/// Invariant: `Interpret::run(Exit)` never holds the namespace transition gate while DNS,
-/// socket, or HTTP effects are pending. The owned lifecycle scope confines the detached task
-/// to the same extension namespace.
-#[cfg(not(all(feature = "browser", target_family = "wasm")))]
-fn spawn_exit_task<F>(future: F)
-where F: Future<Output = ()> + Send + 'static {
-    tokio::spawn(future);
-}
-
-/// Browser counterpart of [`spawn_exit_task`].
-#[cfg(all(feature = "browser", target_family = "wasm"))]
-fn spawn_exit_task<F>(future: F)
-where F: Future<Output = ()> + 'static {
-    wasm_bindgen_futures::spawn_local(future);
 }

@@ -30,7 +30,6 @@ use js_sys::Uint8Array;
 use rings_core::dht::Did;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
-use wasm_bindgen_futures::spawn_local;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::ReadableStream;
 use web_sys::ReadableStreamDefaultReader;
@@ -43,6 +42,7 @@ use crate::error::Result;
 use crate::extension::ext::Scope;
 use crate::extension::protocols::relay::RelayCommand;
 use crate::extension::transport::allocate_non_reusing;
+use crate::extension::transport::platform::spawn_detached;
 use crate::extension::transport::EffectEnqueue;
 use crate::extension::transport::Frame;
 use crate::extension::transport::Initiator;
@@ -148,7 +148,7 @@ impl WtSessions {
         let Some(generation) = self.open_slot(key.clone()) else {
             return EffectEnqueue::Failed;
         };
-        spawn_local(async move {
+        spawn_detached(async move {
             self.finish_connect(scope, key, url, kind, generation).await;
         });
         EffectEnqueue::Enqueued
@@ -363,7 +363,7 @@ impl WtSessions {
     /// blocking an extension transition or being misclassified as a permanent failure.
     fn spawn_writer_loop(self: &Arc<Self>, scope: Scope, key: SessionKey, generation: u64) {
         let sessions = self.clone();
-        spawn_local(async move {
+        spawn_detached(async move {
             loop {
                 let (writer, op) = match sessions.take_ready_outbound(&key, generation) {
                     OutboundDrainStep::Operation(writer, op) => (writer, op),
@@ -451,7 +451,7 @@ impl WtSessions {
         generation: u64,
     ) {
         let sessions = self.clone();
-        spawn_local(async move {
+        spawn_detached(async move {
             let peer = key.peer;
             let session = key.session;
             let from_opener = matches!(key.initiator, Initiator::Local);

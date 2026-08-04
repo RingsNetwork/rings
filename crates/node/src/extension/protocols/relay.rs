@@ -44,9 +44,9 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::extension::ext::Ctx;
-#[cfg(any(feature = "node", all(feature = "browser", target_family = "wasm")))]
+#[cfg(any(rings_native, rings_browser))]
 use crate::extension::ext::EffectScope;
-#[cfg(any(feature = "node", all(feature = "browser", target_family = "wasm")))]
+#[cfg(any(rings_native, rings_browser))]
 use crate::extension::ext::Interpret;
 use crate::extension::ext::MaybeSend;
 use crate::extension::ext::Protocol;
@@ -61,15 +61,11 @@ use crate::extension::transport::SessionId;
 use crate::extension::transport::SessionKey;
 use crate::extension::transport::TransportKind;
 
-#[cfg(any(feature = "node", all(feature = "browser", target_family = "wasm")))]
+#[cfg(any(rings_native, rings_browser))]
 mod control_outbox;
-#[cfg(any(feature = "node", all(feature = "browser", target_family = "wasm")))]
+#[cfg(any(rings_native, rings_browser))]
 use self::control_outbox::ControlOutbox;
-#[cfg(all(
-    test,
-    feature = "node",
-    not(all(feature = "browser", target_family = "wasm"))
-))]
+#[cfg(all(test, rings_native))]
 pub(crate) use self::control_outbox::ControlSendTestHook;
 
 /// Namespace for the TCP relay.
@@ -569,12 +565,14 @@ fn opener_to_initiator(from_opener: bool) -> Initiator {
 
 /// Encode a `Frame::Close` as bytes for an overlay send. `from_opener` is whether *we* (the
 /// sender of this close) opened the session.
-pub(crate) fn close_frame(session: SessionId, from_opener: bool) -> Bytes {
+pub(crate) fn close_frame(session: SessionId, from_opener: bool) -> crate::error::Result<Bytes> {
     let frame = Frame::Close {
         session,
         from_opener,
     };
-    Bytes::from(bincode::serialize(&frame).unwrap_or_default())
+    bincode::serialize(&frame)
+        .map(Bytes::from)
+        .map_err(|_| crate::error::Error::EncodeError)
 }
 
 // ── Native interpreter (OS sockets) ───────────────────────────────────────────────────
@@ -582,13 +580,13 @@ pub(crate) fn close_frame(session: SessionId, from_opener: bool) -> Bytes {
 /// Native relay interpreter: runs [`RelayEffect`]s over the OS-socket engine it owns. The
 /// engine uses the namespace-scoped [`Scope`] capability for both overlay sends and lifecycle
 /// feedback (`Accepted`/`Untrack`), so the engine has no `Processor` of its own.
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 pub(crate) struct NativeRelay {
     engine: Arc<crate::extension::transport::engine::TransportSessions>,
     control_outbox: ControlOutbox,
 }
 
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 impl NativeRelay {
     /// Build over a shared engine.
     pub(crate) fn new(engine: Arc<crate::extension::transport::engine::TransportSessions>) -> Self {
@@ -598,7 +596,7 @@ impl NativeRelay {
         }
     }
 
-    #[cfg(all(test, not(all(feature = "browser", target_family = "wasm"))))]
+    #[cfg(all(test, rings_native))]
     pub(crate) fn new_with_control_send_test_hook(
         engine: Arc<crate::extension::transport::engine::TransportSessions>,
         hook: Arc<ControlSendTestHook>,
@@ -610,7 +608,7 @@ impl NativeRelay {
     }
 }
 
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 #[async_trait::async_trait]
 impl Interpret for NativeRelay {
     type Effect = RelayEffect<std::net::SocketAddr>;
@@ -647,7 +645,7 @@ impl Interpret for NativeRelay {
                 self.control_outbox.enqueue(
                     scope.lifecycle(),
                     to,
-                    close_frame(session, from_opener),
+                    close_frame(session, from_opener)?,
                 )?;
             }
             RelayEffect::OpenAccepted {
@@ -712,13 +710,13 @@ fn enqueue_feedback<T: Serialize>(
 // ── Browser interpreter (WebTransport) ────────────────────────────────────────────────
 
 /// Browser relay interpreter: runs [`RelayEffect`]s over the WebTransport engine it owns.
-#[cfg(all(feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 pub(crate) struct WtRelay {
     engine: Arc<crate::extension::transport::wt::WtSessions>,
     control_outbox: ControlOutbox,
 }
 
-#[cfg(all(feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 impl WtRelay {
     /// Build over a shared WebTransport engine.
     pub(crate) fn new(engine: Arc<crate::extension::transport::wt::WtSessions>) -> Self {
@@ -729,7 +727,7 @@ impl WtRelay {
     }
 }
 
-#[cfg(all(feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 #[async_trait::async_trait(?Send)]
 impl Interpret for WtRelay {
     type Effect = RelayEffect<String>;
@@ -766,7 +764,7 @@ impl Interpret for WtRelay {
                 self.control_outbox.enqueue(
                     scope.lifecycle(),
                     to,
-                    close_frame(session, from_opener),
+                    close_frame(session, from_opener)?,
                 )?;
             }
             // The browser relay is server-side only (no local listener), so it never reports
@@ -791,7 +789,7 @@ impl Interpret for WtRelay {
 /// Cloneable; every clone drives the same shared engine and pure [`Relay`] state.
 /// Holds the two per-namespace scoped capabilities (`tcp` / `udp`); each method picks one and
 /// can only act within it, so the handle cannot address an arbitrary namespace even internally.
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 #[derive(Clone)]
 pub struct RelayHandle {
     engine: Arc<crate::extension::transport::engine::TransportSessions>,
@@ -799,7 +797,7 @@ pub struct RelayHandle {
     udp: Scope,
 }
 
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 impl RelayHandle {
     /// Install the relay into an extension registry: register the TCP and UDP interpreters
     /// over a fresh, relay-owned OS-socket engine and return the client handle. Errors if the
@@ -897,7 +895,7 @@ impl RelayHandle {
 
 /// Map a service `name` → `target` by self-injecting a `RegisterService` command into the
 /// scope's own namespace (provenance = self).
-#[cfg(any(feature = "node", all(feature = "browser", target_family = "wasm")))]
+#[cfg(any(rings_native, rings_browser))]
 async fn register_service<T>(scope: &Scope, name: String, target: T) -> crate::error::Result<()>
 where T: Serialize {
     let command = RelayCommand::RegisterService { name, target };
@@ -909,14 +907,14 @@ where T: Serialize {
 /// two per-namespace scoped capabilities (`tcp` / `udp`) and registers services, but exposes no
 /// tunnel-open surface because the browser relay is server-side only. Cloneable; see the native
 /// [`RelayHandle`].
-#[cfg(all(feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 #[derive(Clone)]
 pub struct RelayHandle {
     tcp: Scope,
     udp: Scope,
 }
 
-#[cfg(all(feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 impl RelayHandle {
     /// Install the browser relay into an extension registry: register the TCP and UDP
     /// interpreters over a fresh, relay-owned WebTransport engine and return the client handle.

@@ -178,11 +178,8 @@ impl SnarkShell {
     }
 }
 
-#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait::async_trait(?Send))]
-#[cfg_attr(
-    not(all(feature = "browser", target_family = "wasm")),
-    async_trait::async_trait
-)]
+#[cfg_attr(rings_browser, async_trait::async_trait(?Send))]
+#[cfg_attr(rings_native, async_trait::async_trait)]
 impl Interpret for SnarkShell {
     type Effect = SnarkEffect;
 

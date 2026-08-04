@@ -1,5 +1,5 @@
-use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Mutex;
 
 use futures::channel::mpsc;
 use futures::channel::oneshot;
@@ -17,9 +17,28 @@ use crate::WebviewError;
 
 mod xhtml;
 
+trait TestMutex<T> {
+    fn test_lock(&self) -> Result<std::sync::MutexGuard<'_, T>>;
+}
+
+impl<T> TestMutex<T> for Mutex<T> {
+    fn test_lock(&self) -> Result<std::sync::MutexGuard<'_, T>> {
+        self.lock()
+            .map_err(|_| WebviewError::transport("test transport lock poisoned".to_string()))
+    }
+}
+
 struct StaticTransport;
 
-#[async_trait(?Send)]
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn native_gateway_transport_preserves_send_and_sync_bounds() {
+    fn assert_send_sync<T: GatewayTransport + Send + Sync>() {}
+    assert_send_sync::<StaticTransport>();
+}
+
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl GatewayTransport for StaticTransport {
     async fn send(
         &self,
@@ -89,7 +108,8 @@ fn gateway_rewrites_html_and_stores_cookies() -> Result<()> {
 
 struct InvalidUtf8TextTransport(&'static str);
 
-#[async_trait(?Send)]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl GatewayTransport for InvalidUtf8TextTransport {
     async fn send(
         &self,
@@ -132,7 +152,8 @@ struct DocumentTransport {
     body: Vec<u8>,
 }
 
-#[async_trait(?Send)]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl GatewayTransport for DocumentTransport {
     async fn send(
         &self,
@@ -385,7 +406,8 @@ fn source_free_runtime_gateway_requests_are_rejected() -> Result<()> {
 
 struct DomainCookieTransport;
 
-#[async_trait(?Send)]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl GatewayTransport for DomainCookieTransport {
     async fn send(
         &self,
@@ -422,25 +444,26 @@ fn gateway_ignores_domain_cookie_without_failing_response() -> Result<()> {
 }
 
 struct RecordingTransport {
-    requests: std::cell::RefCell<Vec<GatewayRequest>>,
+    requests: Mutex<Vec<GatewayRequest>>,
 }
 
 impl RecordingTransport {
     fn new() -> Self {
         Self {
-            requests: std::cell::RefCell::new(Vec::new()),
+            requests: Mutex::new(Vec::new()),
         }
     }
 }
 
-#[async_trait(?Send)]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl GatewayTransport for RecordingTransport {
     async fn send(
         &self,
         request: GatewayRequest,
         _body_limit: GatewayResponseBodyLimit,
     ) -> Result<GatewayResponse> {
-        self.requests.borrow_mut().push(request);
+        self.requests.test_lock()?.push(request);
         GatewayResponse::new(
             200,
             vec![
@@ -468,7 +491,7 @@ fn gateway_replaces_caller_cookie_header_with_virtual_target_cookie() -> Result<
         ),
     )?;
 
-    let requests = gateway.transport.requests.borrow();
+    let requests = gateway.transport.requests.test_lock()?;
     let second = requests
         .get(1)
         .ok_or_else(|| WebviewError::transport("missing second request".to_string()))?;
@@ -503,7 +526,7 @@ fn gateway_normalizes_direct_struct_source_origin_before_transport() -> Result<(
 
     futures::executor::block_on(gateway.send(request))?;
 
-    let requests = gateway.transport.requests.borrow();
+    let requests = gateway.transport.requests.test_lock()?;
     let first = requests
         .first()
         .ok_or_else(|| WebviewError::transport("missing request".to_string()))?;
@@ -534,7 +557,7 @@ fn gateway_strips_controlled_origin_headers_before_transport() -> Result<()> {
         ),
     )?;
 
-    let requests = gateway.transport.requests.borrow();
+    let requests = gateway.transport.requests.test_lock()?;
     let first = requests
         .first()
         .ok_or_else(|| WebviewError::transport("missing first request".to_string()))?;
@@ -552,10 +575,11 @@ fn gateway_strips_controlled_origin_headers_before_transport() -> Result<()> {
 }
 
 struct CorsRecordingTransport {
-    requests: std::cell::RefCell<Vec<GatewayRequest>>,
+    requests: Mutex<Vec<GatewayRequest>>,
 }
 
-#[async_trait(?Send)]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl GatewayTransport for CorsRecordingTransport {
     async fn send(
         &self,
@@ -563,7 +587,7 @@ impl GatewayTransport for CorsRecordingTransport {
         _body_limit: GatewayResponseBodyLimit,
     ) -> Result<GatewayResponse> {
         let is_preflight = request.method == "OPTIONS";
-        self.requests.borrow_mut().push(request);
+        self.requests.test_lock()?.push(request);
         let mut headers = vec![
             GatewayHeader::new("Access-Control-Allow-Origin", "https://app.example.test")?,
             GatewayHeader::new("Content-Type", "text/plain")?,
@@ -584,7 +608,7 @@ fn gateway_forwards_cross_origin_runtime_requests_after_virtual_cors_preflight()
     let target = TargetUrl::parse("https://api.example.test/data")?.into_url();
     let source = TargetUrl::parse("https://app.example.test/page")?.into_url();
     let transport = CorsRecordingTransport {
-        requests: std::cell::RefCell::new(Vec::new()),
+        requests: Mutex::new(Vec::new()),
     };
     let mut gateway = WebviewGateway::new(GatewayPrefix::new("/webview/")?, transport);
     let response = futures::executor::block_on(
@@ -596,7 +620,7 @@ fn gateway_forwards_cross_origin_runtime_requests_after_virtual_cors_preflight()
     )?;
 
     assert_eq!(response.body, b"cors response");
-    let requests = gateway.transport.requests.borrow();
+    let requests = gateway.transport.requests.test_lock()?;
     assert_eq!(requests.len(), 2);
     let preflight = requests
         .first()
@@ -621,18 +645,19 @@ fn gateway_forwards_cross_origin_runtime_requests_after_virtual_cors_preflight()
 }
 
 struct ParityTransport {
-    requests: RefCell<Vec<GatewayRequest>>,
+    requests: Mutex<Vec<GatewayRequest>>,
 }
 
 impl ParityTransport {
     fn new() -> Self {
         Self {
-            requests: RefCell::new(Vec::new()),
+            requests: Mutex::new(Vec::new()),
         }
     }
 }
 
-#[async_trait(?Send)]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl GatewayTransport for ParityTransport {
     async fn send(
         &self,
@@ -640,7 +665,7 @@ impl GatewayTransport for ParityTransport {
         _body_limit: GatewayResponseBodyLimit,
     ) -> Result<GatewayResponse> {
         let is_preflight = request.method == "OPTIONS";
-        self.requests.borrow_mut().push(request);
+        self.requests.test_lock()?.push(request);
         let mut headers = vec![
             GatewayHeader::new("Access-Control-Allow-Origin", "https://app.example.test")?,
             GatewayHeader::new("Content-Type", "text/plain")?,
@@ -683,14 +708,14 @@ fn gateway_adapters_share_cookie_cors_and_response_policy() -> Result<()> {
     for request in requests.clone() {
         single_responses.push(futures::executor::block_on(single.send(request))?);
     }
-    let single_requests = single.transport.requests.borrow().clone();
+    let single_requests = single.transport.requests.test_lock()?.clone();
     let single_cookie_count = single.cookies().len();
 
     let mut concurrent_responses = Vec::new();
     for request in requests {
         concurrent_responses.push(futures::executor::block_on(concurrent.send(request))?);
     }
-    let concurrent_requests = concurrent.transport.requests.borrow().clone();
+    let concurrent_requests = concurrent.transport.requests.test_lock()?.clone();
     let concurrent_cookie_count = concurrent.lock_cookies()?.len();
 
     assert_eq!(single_requests, concurrent_requests);
@@ -710,11 +735,12 @@ fn gateway_adapters_share_cookie_cors_and_response_policy() -> Result<()> {
 struct DelayedCookieTransport {
     started: mpsc::UnboundedSender<String>,
     delayed_path: String,
-    release_delayed_request: RefCell<Option<oneshot::Receiver<()>>>,
-    requests: RefCell<Vec<GatewayRequest>>,
+    release_delayed_request: Mutex<Option<oneshot::Receiver<()>>>,
+    requests: Mutex<Vec<GatewayRequest>>,
 }
 
-#[async_trait(?Send)]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl GatewayTransport for DelayedCookieTransport {
     async fn send(
         &self,
@@ -722,12 +748,12 @@ impl GatewayTransport for DelayedCookieTransport {
         _body_limit: GatewayResponseBodyLimit,
     ) -> Result<GatewayResponse> {
         let path = request.target.path().to_string();
-        self.requests.borrow_mut().push(request);
+        self.requests.test_lock()?.push(request);
         let _ = self.started.unbounded_send(path.clone());
         if path == self.delayed_path {
             let receiver = self
                 .release_delayed_request
-                .borrow_mut()
+                .test_lock()?
                 .take()
                 .ok_or_else(|| {
                     WebviewError::transport("delayed request was released twice".to_string())
@@ -756,8 +782,8 @@ fn concurrent_gateway_cookie_commits_follow_response_order_and_source_visibility
         DelayedCookieTransport {
             started: started_sender,
             delayed_path: "/slow".to_string(),
-            release_delayed_request: RefCell::new(Some(release_slow_receiver)),
-            requests: RefCell::new(Vec::new()),
+            release_delayed_request: Mutex::new(Some(release_slow_receiver)),
+            requests: Mutex::new(Vec::new()),
         },
     ));
     let slow = TargetUrl::parse("https://example.test/slow")?.into_url();
@@ -794,12 +820,17 @@ fn concurrent_gateway_cookie_commits_follow_response_order_and_source_visibility
         .run_until(fast_result_receiver)
         .map_err(|_| WebviewError::transport("fast resource task was dropped".to_string()))??;
     assert_eq!(fast_response.body, b"/fast");
-    assert!(gateway.transport.requests.borrow().iter().all(|request| {
-        !request
-            .headers
-            .iter()
-            .any(|header| header.name_eq("cookie"))
-    }));
+    assert!(gateway
+        .transport
+        .requests
+        .test_lock()?
+        .iter()
+        .all(|request| {
+            !request
+                .headers
+                .iter()
+                .any(|header| header.name_eq("cookie"))
+        }));
 
     // The fast response has committed while the first request remains in flight, so a
     // same-site intermediate request must observe it before the slow response can overwrite
@@ -816,7 +847,7 @@ fn concurrent_gateway_cookie_commits_follow_response_order_and_source_visibility
     let same_site_request = gateway
         .transport
         .requests
-        .borrow()
+        .test_lock()?
         .last()
         .cloned()
         .ok_or_else(|| WebviewError::transport("missing same-site read".to_string()))?;
@@ -839,7 +870,7 @@ fn concurrent_gateway_cookie_commits_follow_response_order_and_source_visibility
     let cross_site_request = gateway
         .transport
         .requests
-        .borrow()
+        .test_lock()?
         .last()
         .cloned()
         .ok_or_else(|| WebviewError::transport("missing cross-site read".to_string()))?;
@@ -866,7 +897,7 @@ fn concurrent_gateway_cookie_commits_follow_response_order_and_source_visibility
     let after_request = gateway
         .transport
         .requests
-        .borrow()
+        .test_lock()?
         .last()
         .cloned()
         .ok_or_else(|| WebviewError::transport("missing post-commit request".to_string()))?;
@@ -886,8 +917,8 @@ fn concurrent_gateway_cookie_commits_in_mirror_response_order() -> Result<()> {
         DelayedCookieTransport {
             started: started_sender,
             delayed_path: "/fast".to_string(),
-            release_delayed_request: RefCell::new(Some(release_fast_receiver)),
-            requests: RefCell::new(Vec::new()),
+            release_delayed_request: Mutex::new(Some(release_fast_receiver)),
+            requests: Mutex::new(Vec::new()),
         },
     ));
     let slow = TargetUrl::parse("https://example.test/slow")?.into_url();
@@ -938,7 +969,7 @@ fn concurrent_gateway_cookie_commits_in_mirror_response_order() -> Result<()> {
     let intermediate_request = gateway
         .transport
         .requests
-        .borrow()
+        .test_lock()?
         .last()
         .cloned()
         .ok_or_else(|| WebviewError::transport("missing intermediate read".to_string()))?;

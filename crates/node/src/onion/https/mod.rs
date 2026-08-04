@@ -1,10 +1,4 @@
-#![cfg_attr(
-    all(
-        feature = "node",
-        not(all(feature = "browser", target_family = "wasm"))
-    ),
-    allow(dead_code)
-)]
+#![cfg_attr(rings_native, allow(dead_code))]
 //! HTTPS onion-exit request/response adapter.
 //!
 //! This protocol is intentionally application-layer HTTPS. Clients can send an HTTPS request
@@ -15,55 +9,52 @@
 //! headers, credentials policy, and extension host permissions still apply. A full arbitrary HTTPS
 //! exit must run in a browser-extension or native context that grants those fetch permissions.
 
-#[cfg(all(not(feature = "node"), feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 use std::cell::RefCell;
 use std::collections::HashMap;
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 use std::net::SocketAddr;
-#[cfg(all(not(feature = "node"), feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::Mutex;
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 use std::time::Duration;
 
 use bytes::Bytes;
 use futures::channel::oneshot;
-#[cfg(all(not(feature = "node"), feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 use futures::future::Either;
-#[cfg(all(not(feature = "node"), feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 use futures::FutureExt;
-#[cfg(all(not(feature = "node"), feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 use js_sys::Function;
-#[cfg(all(not(feature = "node"), feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 use js_sys::Object;
-#[cfg(all(not(feature = "node"), feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 use js_sys::Promise;
-#[cfg(all(not(feature = "node"), feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 use js_sys::Reflect;
-#[cfg(all(not(feature = "node"), feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 use js_sys::Uint8Array;
 use rings_core::dht::Did;
 use rings_core::session::SessionSk;
-#[cfg(all(not(feature = "node"), feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 use rings_core::utils::js_utils;
 use serde::Deserialize;
 use serde::Serialize;
-#[cfg(all(not(feature = "node"), feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 use wasm_bindgen::closure::Closure;
-#[cfg(all(not(feature = "node"), feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 use wasm_bindgen::JsCast;
-#[cfg(all(not(feature = "node"), feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 use wasm_bindgen::JsValue;
-#[cfg(all(not(feature = "node"), feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 use wasm_bindgen_futures::JsFuture;
-#[cfg(all(not(feature = "node"), feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 use web_sys::AbortController;
 
-#[cfg(any(
-    test,
-    all(not(feature = "node"), feature = "browser", target_family = "wasm")
-))]
+#[cfg(any(test, rings_browser))]
 use self::limits::checked_status_code;
 use self::limits::https_response_body_limit;
 use self::limits::reject_content_length_over_limit;
@@ -76,7 +67,7 @@ use crate::onion::circuit::send_backward;
 use crate::onion::circuit::OnionAuthenticatedPayload;
 use crate::onion::circuit::OnionBackwardSequence;
 use crate::onion::circuit::OnionCircuitExitFrame;
-#[cfg(all(feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 use crate::onion::circuit::OnionCircuitHandler;
 use crate::onion::circuit::OnionCircuitId;
 use crate::onion::circuit::OnionCircuitPayload;
@@ -90,9 +81,9 @@ use crate::onion::proxy::ONION_PROXY_HTTPS_SERVICE;
 use crate::onion::replay::OnionForwardReplayKey;
 use crate::onion::replay::OnionForwardReplayPartitions;
 use crate::onion::replay::ReplayAdmission;
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 use crate::onion::target::resolve_public_target;
-#[cfg(all(not(feature = "node"), feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 use crate::onion::target::validate_public_ip_literal;
 use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitFailure;
@@ -101,9 +92,9 @@ use crate::onion::OnionExitTarget;
 use crate::onion::OnionRouteError;
 
 const DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 const HTTPS_EXIT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-#[cfg(all(not(feature = "node"), feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 const HTTPS_EXIT_REQUEST_TIMEOUT_MS: i32 = 30_000;
 
 /// One HTTPS request executed by an HTTPS exit.
@@ -497,13 +488,13 @@ fn url_path(suffix: &str) -> String {
 }
 
 /// Browser handler for HTTPS onion circuits.
-#[cfg(all(feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 pub(crate) struct BrowserOnionCircuitHandler {
     https: Arc<OnionHttpsRuntime>,
     session_sk: SessionSk,
 }
 
-#[cfg(all(feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 impl BrowserOnionCircuitHandler {
     /// Create a browser circuit handler backed by the HTTPS runtime.
     pub(crate) fn new(https: Arc<OnionHttpsRuntime>, session_sk: SessionSk) -> Self {
@@ -511,7 +502,7 @@ impl BrowserOnionCircuitHandler {
     }
 }
 
-#[cfg(all(feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 #[async_trait::async_trait(?Send)]
 impl OnionCircuitHandler for BrowserOnionCircuitHandler {
     async fn handle_exit(&self, scope: &Scope, frame: OnionCircuitExitFrame) -> Result<()> {
@@ -624,7 +615,7 @@ struct FetchResponse {
     body: Vec<u8>,
 }
 
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 async fn execute_https_request(
     url: &str,
     target: &OnionProxyTarget,
@@ -636,7 +627,7 @@ async fn execute_https_request(
     native_fetch(url, target, request, max_body_bytes, runtime, policy).await
 }
 
-#[cfg(all(not(feature = "node"), feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 async fn execute_https_request(
     url: &str,
     target: &OnionProxyTarget,
@@ -649,7 +640,7 @@ async fn execute_https_request(
     browser_fetch(url, request, max_body_bytes, runtime, policy).await
 }
 
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 async fn native_fetch(
     url: &str,
     target: &OnionProxyTarget,
@@ -670,7 +661,7 @@ async fn native_fetch(
     .await
 }
 
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 fn native_http_error(context: &str, error: reqwest::Error) -> Error {
     if error.is_timeout() {
         Error::HttpRequestError(format!("{context}: timed out"))
@@ -679,7 +670,7 @@ fn native_http_error(context: &str, error: reqwest::Error) -> Error {
     }
 }
 
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 async fn native_fetch_with_timeout(
     url: &str,
     request: &OnionHttpsRequest,
@@ -743,7 +734,7 @@ async fn native_fetch_with_timeout(
     })
 }
 
-#[cfg(all(not(feature = "node"), feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 async fn browser_fetch(
     url: &str,
     request: &OnionHttpsRequest,
@@ -799,7 +790,7 @@ async fn browser_fetch(
     }
 }
 
-#[cfg(all(not(feature = "node"), feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 fn fetch_init(request: &OnionHttpsRequest, signal: &JsValue) -> Result<Object> {
     let init = Object::new();
     Reflect::set(
@@ -854,7 +845,7 @@ fn fetch_init(request: &OnionHttpsRequest, signal: &JsValue) -> Result<Object> {
     Ok(init)
 }
 
-#[cfg(all(not(feature = "node"), feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 fn collect_headers(response: &JsValue) -> Result<Vec<(String, String)>> {
     let headers =
         Reflect::get(response, JsValue::from_str("headers").as_ref()).map_err(js_error)?;
@@ -877,7 +868,7 @@ fn collect_headers(response: &JsValue) -> Result<Vec<(String, String)>> {
     Ok(collected)
 }
 
-#[cfg(all(not(feature = "node"), feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 async fn response_body(
     response: &JsValue,
     max_body_bytes: u64,
@@ -972,7 +963,7 @@ fn default_path() -> String {
     "/".to_string()
 }
 
-#[cfg(all(not(feature = "node"), feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 fn js_error(error: JsValue) -> Error {
     Error::JsError(format!("{error:?}"))
 }

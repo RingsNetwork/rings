@@ -37,21 +37,18 @@ use crate::processor::Processor;
 const MAX_FIXPOINT_STEPS: u32 = 1024;
 
 /// Type-erased handler stored in the registry: native is `Send + Sync`, browser not.
-#[cfg(not(all(feature = "browser", target_family = "wasm")))]
+#[cfg(rings_native)]
 pub(crate) type DynHandler = dyn Handler + Send + Sync;
 /// Type-erased handler stored in the registry.
-#[cfg(all(feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 pub(crate) type DynHandler = dyn Handler;
 
 type HandlerMap = RwLock<HashMap<String, Arc<DynHandler>>>;
 
 /// Erased, runtime-facing handler — the router-internal ABI. Implemented once, generically, by
 /// `Runner`; protocol authors never name it (they write `Protocol` + `Interpret`).
-#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait::async_trait(?Send))]
-#[cfg_attr(
-    not(all(feature = "browser", target_family = "wasm")),
-    async_trait::async_trait
-)]
+#[cfg_attr(rings_browser, async_trait::async_trait(?Send))]
+#[cfg_attr(rings_native, async_trait::async_trait)]
 pub(crate) trait Handler {
     /// Decode → step (pure, committed) → run the protocol's effects, returning re-injected
     /// messages. `handle : (from, payload) → IO [Inbound]`.
@@ -230,19 +227,16 @@ struct Runner<P: Protocol, I> {
     interpret: I,
     state: Mutex<P::State>,
     transition_gate: AsyncMutex<()>,
-    #[cfg(all(test, feature = "node"))]
+    #[cfg(all(test, rings_native))]
     after_decode_for_test: Option<Arc<dyn Fn() + Send + Sync>>,
-    #[cfg(all(test, feature = "node"))]
+    #[cfg(all(test, rings_native))]
     after_commit_for_test: Option<Arc<dyn Fn() + Send + Sync>>,
-    #[cfg(all(test, feature = "node"))]
+    #[cfg(all(test, rings_native))]
     before_gate_wait_for_test: Option<Arc<dyn Fn(bool) + Send + Sync>>,
 }
 
-#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait::async_trait(?Send))]
-#[cfg_attr(
-    not(all(feature = "browser", target_family = "wasm")),
-    async_trait::async_trait
-)]
+#[cfg_attr(rings_browser, async_trait::async_trait(?Send))]
+#[cfg_attr(rings_native, async_trait::async_trait)]
 impl<P, I> Handler for Runner<P, I>
 where
     P: Protocol + MaybeSend + 'static,
@@ -265,7 +259,7 @@ where
             }
         };
 
-        #[cfg(all(test, feature = "node"))]
+        #[cfg(all(test, rings_native))]
         if let Some(observe) = self.after_decode_for_test.as_ref() {
             observe();
         }
@@ -275,7 +269,7 @@ where
         // effects by contract. Holding the gate through interpretation preserves:
         // commit(A) < commit(B) => applying A's effects ends before applying B's effects begins.
         // The state mutex itself remains synchronous and never crosses an await.
-        #[cfg(all(test, feature = "node"))]
+        #[cfg(all(test, rings_native))]
         if let Some(observe) = self.before_gate_wait_for_test.as_ref() {
             // Witness the real synchronization boundary: false means this task could acquire
             // the gate immediately; true means another transition owns it at this exact point.
@@ -316,7 +310,7 @@ where
                 effects
             };
 
-            #[cfg(all(test, feature = "node"))]
+            #[cfg(all(test, rings_native))]
             if let Some(observe) = self.after_commit_for_test.as_ref() {
                 observe();
             }
@@ -417,11 +411,11 @@ impl Extensions {
                     interpret,
                     state,
                     transition_gate: AsyncMutex::new(()),
-                    #[cfg(all(test, feature = "node"))]
+                    #[cfg(all(test, rings_native))]
                     after_decode_for_test: None,
-                    #[cfg(all(test, feature = "node"))]
+                    #[cfg(all(test, rings_native))]
                     after_commit_for_test: None,
-                    #[cfg(all(test, feature = "node"))]
+                    #[cfg(all(test, rings_native))]
                     before_gate_wait_for_test: None,
                 });
                 (namespace, runner)
@@ -462,11 +456,11 @@ impl Extensions {
             interpret,
             state,
             transition_gate: AsyncMutex::new(()),
-            #[cfg(all(test, feature = "node"))]
+            #[cfg(all(test, rings_native))]
             after_decode_for_test: None,
-            #[cfg(all(test, feature = "node"))]
+            #[cfg(all(test, rings_native))]
             after_commit_for_test: None,
-            #[cfg(all(test, feature = "node"))]
+            #[cfg(all(test, rings_native))]
             before_gate_wait_for_test: None,
         });
         let mut handlers = self.core.handlers.write().map_err(|_| Error::Lock)?;
@@ -498,7 +492,7 @@ impl Extensions {
     }
 }
 
-#[cfg(all(test, feature = "node"))]
+#[cfg(all(test, rings_native))]
 mod tests {
     use std::collections::HashMap;
     use std::net::SocketAddr;

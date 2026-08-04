@@ -36,9 +36,8 @@
 //!
 //! ## v1 limits
 //!
-//! A relayed datagram must fit one overlay message (`UDP_BUF`; larger is truncated);
-//! UDP flows are not yet idle-GC'd; reliable-tunnelled UDP does not preserve native
-//! loss/reorder semantics.
+//! A relayed datagram must fit one overlay message (`UDP_BUF`; larger is truncated).
+//! Reliable-tunnelled UDP does not preserve native loss/reorder semantics.
 
 mod tcp;
 mod udp;
@@ -63,6 +62,7 @@ use crate::error::Result;
 use crate::extension::ext::Scope;
 use crate::extension::protocols::relay::RelayCommand;
 use crate::extension::transport::allocate_non_reusing;
+use crate::extension::transport::platform::spawn_detached;
 use crate::extension::transport::EffectEnqueue;
 use crate::extension::transport::Frame;
 use crate::extension::transport::Initiator;
@@ -191,7 +191,7 @@ impl TransportSessions {
         let Some(task) = RelayTask::register(self.clone(), scope, key) else {
             return EffectEnqueue::Failed;
         };
-        tokio::spawn(async move {
+        spawn_detached(async move {
             match kind {
                 TransportKind::Tcp => {
                     match timeout(CONNECT_TIMEOUT, TcpStream::connect(addr)).await {
@@ -347,7 +347,7 @@ impl TransportSessions {
                 else {
                     return Some(key);
                 };
-                tokio::spawn(async move {
+                spawn_detached(async move {
                     if open(&task.scope, &task.key, service.as_str())
                         .await
                         .is_err()
@@ -374,7 +374,7 @@ impl TransportSessions {
                     return Some(key);
                 };
                 udp::spawn_udp_sendto(socket, src, outbound_rx, cancel);
-                tokio::spawn(async move {
+                spawn_detached(async move {
                     if open(&scope, &key, service.as_str()).await.is_err() {
                         if self.close_if_current(&scope, &key, generation).await {
                             let _ = send_frame(&scope, key.peer, Frame::Close {
@@ -654,6 +654,35 @@ impl RelayTask {
             .await;
         }
     }
+}
+
+#[cfg(test)]
+fn relay_task_for_test(namespace: &str) -> Result<(RelayTask, Arc<TransportSessions>, SessionKey)> {
+    use rings_core::ecc::SecretKey;
+    use rings_core::session::SessionSk;
+
+    use crate::extension::ext::Extensions;
+    use crate::processor::ProcessorBuilder;
+    use crate::processor::ProcessorConfig;
+
+    let session_sk = SessionSk::new_with_seckey(&SecretKey::random())?;
+    let config = ProcessorConfig::new(1, String::new(), session_sk, 1);
+    let processor = ProcessorBuilder::from_config(&config)?
+        .advertise_presence(false)
+        .build()?;
+    let extensions = Extensions::new(Arc::new(processor));
+    let scope = Scope::new(extensions.core(), namespace.to_string());
+    let sessions = Arc::new(TransportSessions::new());
+    let key = SessionKey::new(
+        Did::from(99_u32),
+        namespace,
+        crate::extension::transport::SessionId(1),
+        Initiator::Remote,
+    );
+    let task = RelayTask::register(Arc::clone(&sessions), scope, key.clone()).ok_or_else(|| {
+        Error::ExtensionError("test relay generation exhausted unexpectedly".to_string())
+    })?;
+    Ok((task, sessions, key))
 }
 
 /// Whether *this node* opened the session (sets `Frame::from_opener` on outbound frames).

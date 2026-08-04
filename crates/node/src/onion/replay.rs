@@ -41,7 +41,7 @@ pub(crate) enum ReplayAdmission {
 ///
 /// `Duplicate` and `Stale` are distinct state facts even though both are rejected at the wire
 /// boundary: the TCP adapter records which replay-window relation caused the rejection.
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SequenceAdmission {
     /// The sequence had not been observed and is now consumed.
@@ -58,14 +58,14 @@ pub(crate) enum SequenceAdmission {
 /// `highest - d`. Thus storage is O(1), a frame can be admitted at most once,
 /// and bounded reordering cannot make a fresh frame disappear merely because an
 /// unrelated circuit was busy.
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 #[derive(Debug, Default)]
 pub(crate) struct OnionSequenceWindow {
     highest: Option<u64>,
     consumed: u128,
 }
 
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 impl OnionSequenceWindow {
     /// Create a window in which `sequence` has already authorized the circuit's
     /// initial transition.
@@ -471,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "node")]
+    #[cfg(rings_native)]
     fn sequence_window_accepts_bounded_reordering_once() {
         let mut window = OnionSequenceWindow::default();
 
@@ -482,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "node")]
+    #[cfg(rings_native)]
     fn sequence_window_rejects_values_left_of_fixed_window() {
         let mut window = OnionSequenceWindow::with_initial(0);
 

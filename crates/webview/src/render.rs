@@ -82,7 +82,7 @@ where T: GatewayTransport
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
+    use std::sync::Mutex;
 
     use async_trait::async_trait;
 
@@ -91,25 +91,29 @@ mod tests {
     use crate::GatewayPrefix;
 
     struct FixtureTransport {
-        requests: RefCell<Vec<GatewayRequest>>,
+        requests: Mutex<Vec<GatewayRequest>>,
     }
 
     impl FixtureTransport {
         fn new() -> Self {
             Self {
-                requests: RefCell::new(Vec::new()),
+                requests: Mutex::new(Vec::new()),
             }
         }
     }
 
-    #[async_trait(?Send)]
+    #[cfg_attr(target_family = "wasm", async_trait(?Send))]
+    #[cfg_attr(not(target_family = "wasm"), async_trait)]
     impl GatewayTransport for FixtureTransport {
         async fn send(
             &self,
             request: GatewayRequest,
             _body_limit: crate::transport::GatewayResponseBodyLimit,
         ) -> Result<GatewayResponse> {
-            self.requests.borrow_mut().push(request);
+            self.requests
+                .lock()
+                .map_err(|_| WebviewError::transport("test transport lock poisoned".to_string()))?
+                .push(request);
             GatewayResponse::new(
                 200,
                 vec![

@@ -17,6 +17,22 @@ pub struct HeaderPolicy {
     gateway_prefix: GatewayPrefix,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum HeaderAction {
+    Drop,
+    Keep(GatewayHeader),
+    Replace(GatewayHeader),
+}
+
+impl HeaderAction {
+    fn into_header(self) -> Option<GatewayHeader> {
+        match self {
+            Self::Drop => None,
+            Self::Keep(header) | Self::Replace(header) => Some(header),
+        }
+    }
+}
+
 impl HeaderPolicy {
     /// Build a header policy that rewrites target redirects into `gateway_prefix`.
     pub fn new(gateway_prefix: GatewayPrefix) -> Self {
@@ -50,29 +66,15 @@ impl HeaderPolicy {
         target: &Url,
         response: GatewayResponse,
     ) -> Result<GatewayResponse> {
-        let mut headers = Vec::new();
-        for header in response.headers {
-            if should_strip_response_header(header.name.as_str()) {
-                continue;
-            }
-            if header.name_eq("location") {
-                if let Some(location) = self
-                    .gateway_prefix
-                    .rewrite_url_value(target, header.value.as_str())?
-                {
-                    headers.push(GatewayHeader::new(header.name, location)?);
-                }
-                continue;
-            }
-            if header.name_eq("refresh") {
-                headers.push(GatewayHeader::new(
-                    header.name,
-                    rewrite_refresh_value(header.value.as_str(), target, &self.gateway_prefix)?,
-                )?);
-                continue;
-            }
-            headers.push(header);
-        }
+        let actions = response
+            .headers
+            .into_iter()
+            .map(|header| classify_response_header(target, &self.gateway_prefix, header))
+            .collect::<Result<Vec<_>>>()?;
+        let mut headers = actions
+            .into_iter()
+            .filter_map(HeaderAction::into_header)
+            .collect::<Vec<_>>();
         headers.push(GatewayHeader::new(
             "Content-Security-Policy",
             gateway_content_security_policy(),
@@ -80,6 +82,31 @@ impl HeaderPolicy {
         headers.push(GatewayHeader::new("X-Content-Type-Options", "nosniff")?);
         GatewayResponse::new(response.status, headers, response.body)
     }
+}
+
+fn classify_response_header(
+    target: &Url,
+    gateway_prefix: &GatewayPrefix,
+    header: GatewayHeader,
+) -> Result<HeaderAction> {
+    if should_strip_response_header(header.name.as_str()) {
+        return Ok(HeaderAction::Drop);
+    }
+    if header.name_eq("location") {
+        return gateway_prefix
+            .rewrite_url_value(target, header.value.as_str())?
+            .map(|value| GatewayHeader::new(header.name, value))
+            .transpose()
+            .map(|header| header.map_or(HeaderAction::Drop, HeaderAction::Replace));
+    }
+    if header.name_eq("refresh") {
+        return GatewayHeader::new(
+            header.name,
+            rewrite_refresh_value(header.value.as_str(), target, gateway_prefix)?,
+        )
+        .map(HeaderAction::Replace);
+    }
+    Ok(HeaderAction::Keep(header))
 }
 
 fn should_strip_request_header(name: &str) -> bool {
@@ -140,6 +167,39 @@ fn should_strip_response_header(name: &str) -> bool {
 mod tests {
     use super::*;
     use crate::types::GatewayRequestKind;
+
+    #[test]
+    fn response_header_classification_is_pure_and_explicit() -> Result<()> {
+        let target = Url::parse("https://example.com/app/page")?;
+        let prefix = GatewayPrefix::new("/webview/")?;
+
+        assert_eq!(
+            classify_response_header(
+                &target,
+                &prefix,
+                GatewayHeader::new("Set-Cookie", "sid=one")?,
+            )?,
+            HeaderAction::Drop
+        );
+        assert!(matches!(
+            classify_response_header(
+                &target,
+                &prefix,
+                GatewayHeader::new("Location", "../login")?,
+            )?,
+            HeaderAction::Replace(header) if header.name_eq("location")
+                && header.value.starts_with("/webview/")
+        ));
+        assert!(matches!(
+            classify_response_header(
+                &target,
+                &prefix,
+                GatewayHeader::new("Content-Type", "text/html")?,
+            )?,
+            HeaderAction::Keep(header) if header.name_eq("content-type")
+        ));
+        Ok(())
+    }
 
     #[test]
     fn redirect_location_rewrites_to_gateway_url() -> Result<()> {

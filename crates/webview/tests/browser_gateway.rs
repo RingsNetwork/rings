@@ -53,7 +53,8 @@ impl BrowserFixtureTransport {
     }
 }
 
-#[async_trait(?Send)]
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl GatewayTransport for BrowserFixtureTransport {
     async fn send(
         &self,

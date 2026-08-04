@@ -17,7 +17,7 @@ use crate::onion::OnionRoute;
 use crate::onion::OnionServiceName;
 use crate::online::OnlineNodeType;
 
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 pub mod http;
 
 /// Exit service used by native HTTP CONNECT/SOCKS-style byte tunnels.

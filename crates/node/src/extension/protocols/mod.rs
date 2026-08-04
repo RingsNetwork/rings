@@ -5,6 +5,6 @@
 //! platform (`NativeRelay` / `WtRelay`).
 
 pub mod echo;
-#[cfg(all(feature = "browser", target_family = "wasm"))]
+#[cfg(rings_browser)]
 pub mod js;
 pub mod relay;

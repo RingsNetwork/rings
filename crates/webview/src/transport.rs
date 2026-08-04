@@ -38,9 +38,26 @@ impl GatewayResponseBodyLimit {
     }
 }
 
+/// Target-dependent transport ownership bound.
+///
+/// Native transports are safe to move between executor threads; browser transports stay on the
+/// single-threaded wasm executor.
+#[doc(hidden)]
+#[cfg(not(target_family = "wasm"))]
+pub trait GatewayTransportMaybeSend: Send + Sync {}
+#[cfg(not(target_family = "wasm"))]
+impl<T: Send + Sync> GatewayTransportMaybeSend for T {}
+/// Target-dependent transport ownership bound.
+#[doc(hidden)]
+#[cfg(target_family = "wasm")]
+pub trait GatewayTransportMaybeSend {}
+#[cfg(target_family = "wasm")]
+impl<T> GatewayTransportMaybeSend for T {}
+
 /// Pluggable transport for normalized webview gateway requests.
-#[async_trait(?Send)]
-pub trait GatewayTransport {
+#[cfg_attr(target_family = "wasm", async_trait(?Send))]
+#[cfg_attr(not(target_family = "wasm"), async_trait)]
+pub trait GatewayTransport: GatewayTransportMaybeSend {
     /// Send `request` through the concrete transport and return a raw response.
     ///
     /// Implementations must stop reading before retaining more than `body_limit` bytes. Returning

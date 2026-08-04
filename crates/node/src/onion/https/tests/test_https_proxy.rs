@@ -1,17 +1,17 @@
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 use std::sync::atomic::AtomicU64;
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 use std::sync::atomic::Ordering;
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 use std::time::Duration;
 
 use rings_core::ecc::SecretKey;
 use rings_core::session::SessionSk;
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 use tokio::io::AsyncReadExt;
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 use tokio::io::AsyncWriteExt;
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 use tokio::net::TcpListener;
 
 use super::super::*;
@@ -334,7 +334,7 @@ fn exit_limiter_counts_distinct_circuit_ids() {
         .is_ok());
 }
 
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 #[tokio::test]
 async fn native_fetch_times_out_stalled_response() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -367,7 +367,7 @@ async fn native_fetch_times_out_stalled_response() {
     );
 }
 
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 #[tokio::test]
 async fn native_fetch_records_response_bytes_as_chunks_arrive() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
