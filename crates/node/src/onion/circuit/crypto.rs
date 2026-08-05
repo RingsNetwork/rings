@@ -282,6 +282,15 @@ fn edge_circuit_ids(
     hop_count: usize,
     first_circuit_id: OnionCircuitId,
 ) -> Result<Vec<OnionCircuitId>> {
+    edge_circuit_ids_with(hop_count, first_circuit_id, OnionCircuitId::random)
+}
+
+pub(super) fn edge_circuit_ids_with(
+    hop_count: usize,
+    first_circuit_id: OnionCircuitId,
+    mut next_id: impl FnMut() -> OnionCircuitId,
+) -> Result<Vec<OnionCircuitId>> {
+    const MAX_ALLOCATION_ATTEMPTS_PER_EDGE: usize = 16;
     if hop_count == 0 || hop_count > usize::from(super::MAX_ONION_CIRCUIT_HOPS) {
         return Err(Error::OnionRouteError(
             OnionRouteError::HopCountOutOfBounds {
@@ -293,7 +302,11 @@ fn edge_circuit_ids(
     let mut ids = Vec::with_capacity(hop_count);
     ids.push(first_circuit_id);
     while ids.len() < hop_count {
-        ids.push(OnionCircuitId::random());
+        let next = (0..MAX_ALLOCATION_ATTEMPTS_PER_EDGE)
+            .map(|_| next_id())
+            .find(|candidate| !ids.contains(candidate))
+            .ok_or_else(|| Error::OnionRouteError(OnionRouteError::CircuitIdAllocationFailed))?;
+        ids.push(next);
     }
     Ok(ids)
 }

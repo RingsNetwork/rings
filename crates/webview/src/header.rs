@@ -124,7 +124,6 @@ fn should_forward_request_header(name: &str) -> bool {
             | "access-control-request-method"
             | "authorization"
             | "cache-control"
-            | "content-language"
             | "content-type"
             | "if-match"
             | "if-modified-since"
@@ -208,6 +207,7 @@ mod tests {
         request.headers = vec![
             GatewayHeader::new("Accept", "text/html,application/xhtml+xml")?,
             GatewayHeader::new("Accept-Language", "en-US,fr;q=0.7")?,
+            GatewayHeader::new("Content-Language", "en-US")?,
             GatewayHeader::new("DNT", "1")?,
             GatewayHeader::new("Sec-CH-UA", "fingerprint")?,
             GatewayHeader::new("X-Page-Fingerprint", "unique")?,
@@ -228,7 +228,13 @@ mod tests {
             .headers
             .iter()
             .any(|header| header.name_eq("range")));
-        for denied in ["accept-language", "dnt", "sec-ch-ua", "x-page-fingerprint"] {
+        for denied in [
+            "accept-language",
+            "content-language",
+            "dnt",
+            "sec-ch-ua",
+            "x-page-fingerprint",
+        ] {
             assert!(!normalized
                 .headers
                 .iter()

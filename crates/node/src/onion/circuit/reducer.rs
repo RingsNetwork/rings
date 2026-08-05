@@ -145,6 +145,7 @@ pub enum OnionCircuitEffect {
 /// CellReady(forward exit)      -> state, [Exit]
 /// CellReady(backward match)    -> state' with refreshed edge, [SealAndSend previous]
 /// CellReady(backward no match) -> state, [DecryptClient]
+/// CellReady(cover)             -> state, []
 /// ```
 ///
 /// Law: replaying `apply(state, input)` with the same values returns the same `(state', effects)`.
@@ -176,11 +177,11 @@ impl OnionCircuitReducer {
                 from,
                 bucket,
                 sealed,
-            } => Ok(OnionCircuitEffect::DecryptCell {
+            } => Ok(Some(OnionCircuitEffect::DecryptCell {
                 from,
                 bucket,
                 sealed,
-            }),
+            })),
             OnionCircuitInput::CellReady {
                 from,
                 received_at_ms,
@@ -193,11 +194,14 @@ impl OnionCircuitReducer {
                 bucket,
                 circuit_id,
                 layer,
-            } => self.advance_forward(from, received_at_ms, bucket, circuit_id, layer, &mut state),
+            } => self
+                .advance_forward(from, received_at_ms, bucket, circuit_id, layer, &mut state)
+                .map(Some),
         };
 
         match effect {
-            Ok(effect) => Transition::with(state, vec![effect]),
+            Ok(Some(effect)) => Transition::with(state, vec![effect]),
+            Ok(None) => Transition::pure(state),
             Err(error) => {
                 tracing::debug!("drop onion circuit message: {error}");
                 Transition::pure(state)
@@ -212,23 +216,24 @@ impl OnionCircuitReducer {
         bucket: OnionCellBucket,
         message: OnionWireMessage,
         state: &mut OnionCircuitState,
-    ) -> Result<OnionCircuitEffect> {
+    ) -> Result<Option<OnionCircuitEffect>> {
         match message {
             OnionWireMessage::Forward(frame) => {
                 if !self.capabilities.accepts_forward_layers() {
                     return Err(Error::NoPermission);
                 }
-                Ok(OnionCircuitEffect::DecryptForward {
+                Ok(Some(OnionCircuitEffect::DecryptForward {
                     from,
                     received_at_ms,
                     bucket,
                     circuit_id: frame.circuit_id,
                     payload: frame.layer,
-                })
+                }))
             }
-            OnionWireMessage::Backward(frame) => {
-                self.advance_backward(from, received_at_ms, bucket, frame, state)
-            }
+            OnionWireMessage::Backward(frame) => self
+                .advance_backward(from, received_at_ms, bucket, frame, state)
+                .map(Some),
+            OnionWireMessage::Cover => Ok(None),
         }
     }
 

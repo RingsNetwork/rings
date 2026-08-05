@@ -2,6 +2,7 @@ use super::super::codec::OnionCircuitInput;
 use super::super::codec::OnionWireMessage;
 use super::super::crypto::decrypt_client_payload;
 use super::super::crypto::decrypt_forward_layer;
+use super::super::crypto::edge_circuit_ids_with;
 use super::super::crypto::encrypt_client_payload;
 use super::super::limiter::OnionCryptoLimiter;
 use super::super::protocol::OnionCircuitCapabilities;
@@ -208,15 +209,53 @@ fn crypto_limiter_bounds_sender_window() {
     let peer = session().account_did();
     let mut limiter = OnionCryptoLimiter::with_limit(2);
 
-    assert!(limiter.admit(peer, 100).is_ok());
-    assert!(limiter.admit(peer, 101).is_ok());
+    assert!(limiter.admit(peer, 100, 0).is_ok());
+    assert!(limiter.admit(peer, 101, 0).is_ok());
     assert!(matches!(
-        limiter.admit(peer, 102),
+        limiter.admit(peer, 102, 0),
         Err(crate::error::Error::NoPermission)
     ));
     assert!(limiter
-        .admit(peer, 100 + ONION_CRYPTO_LIMIT_WINDOW_MS)
+        .admit(peer, 100 + ONION_CRYPTO_LIMIT_WINDOW_MS, 0)
         .is_ok());
+}
+
+#[test]
+fn one_hop_cover_cell_has_no_state_transition_or_effect() {
+    let peer = session();
+    let reducer = OnionCircuitReducer::new(OnionCircuitCapabilities::relay());
+    let state = OnionCircuitState::default();
+
+    let transition = reducer.apply(&state, OnionCircuitInput::CellReady {
+        from: peer.account_did(),
+        received_at_ms: 1,
+        bucket: OnionCellBucket::KiB4,
+        message: OnionWireMessage::Cover,
+    });
+
+    assert_eq!(transition.state, state);
+    assert!(transition.effects.is_empty());
+}
+
+#[test]
+fn edge_circuit_id_allocation_retries_collisions_and_fails_boundedly() {
+    let first = OnionCircuitId::new([1; 16]);
+    let second = OnionCircuitId::new([2; 16]);
+    let third = OnionCircuitId::new([3; 16]);
+    let mut candidates = [first, second, second, third].into_iter();
+
+    let ids = edge_circuit_ids_with(3, first, || {
+        candidates.next().expect("bounded collision fixture")
+    })
+    .expect("unique candidates eventually succeed");
+    assert_eq!(ids, vec![first, second, third]);
+
+    assert!(matches!(
+        edge_circuit_ids_with(2, first, || first),
+        Err(crate::error::Error::OnionRouteError(
+            crate::onion::OnionRouteError::CircuitIdAllocationFailed
+        ))
+    ));
 }
 
 #[test]

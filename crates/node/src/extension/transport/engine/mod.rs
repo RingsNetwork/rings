@@ -373,7 +373,18 @@ impl TransportSessions {
                     self.remove_udp_flow_for_key(src, &key);
                     return Some(key);
                 };
-                udp::spawn_udp_sendto(socket, src, outbound_rx, cancel);
+                udp::spawn_udp_sendto(
+                    RelayTask {
+                        sessions: Arc::clone(&self),
+                        scope: scope.clone(),
+                        key: key.clone(),
+                        outbound_rx,
+                        cancel,
+                        generation,
+                    },
+                    socket,
+                    src,
+                );
                 spawn_detached(async move {
                     if open(&scope, &key, service.as_str()).await.is_err() {
                         if self.close_if_current(&scope, &key, generation).await {
@@ -658,6 +669,14 @@ impl RelayTask {
 
 #[cfg(test)]
 fn relay_task_for_test(namespace: &str) -> Result<(RelayTask, Arc<TransportSessions>, SessionKey)> {
+    relay_task_for_test_with_src(namespace, None)
+}
+
+#[cfg(test)]
+fn relay_task_for_test_with_src(
+    namespace: &str,
+    src: Option<SocketAddr>,
+) -> Result<(RelayTask, Arc<TransportSessions>, SessionKey)> {
     use rings_core::ecc::SecretKey;
     use rings_core::session::SessionSk;
 
@@ -673,15 +692,29 @@ fn relay_task_for_test(namespace: &str) -> Result<(RelayTask, Arc<TransportSessi
     let extensions = Extensions::new(Arc::new(processor));
     let scope = Scope::new(extensions.core(), namespace.to_string());
     let sessions = Arc::new(TransportSessions::new());
+    let initiator = if src.is_some() {
+        Initiator::Local
+    } else {
+        Initiator::Remote
+    };
     let key = SessionKey::new(
         Did::from(99_u32),
         namespace,
         crate::extension::transport::SessionId(1),
-        Initiator::Remote,
+        initiator,
     );
-    let task = RelayTask::register(Arc::clone(&sessions), scope, key.clone()).ok_or_else(|| {
-        Error::ExtensionError("test relay generation exhausted unexpectedly".to_string())
-    })?;
+    let (outbound_rx, cancel, generation) =
+        sessions.register(key.clone(), src).ok_or_else(|| {
+            Error::ExtensionError("test relay generation exhausted unexpectedly".to_string())
+        })?;
+    let task = RelayTask {
+        sessions: Arc::clone(&sessions),
+        scope,
+        key: key.clone(),
+        outbound_rx,
+        cancel,
+        generation,
+    };
     Ok((task, sessions, key))
 }
 

@@ -9,6 +9,7 @@ import { bytes, request, type ServiceWorkerTestApi, text } from "./webview-servi
 /** Request-body helpers installed by the dedicated worker asset. */
 export type WorkerRequestApi = {
   readonly gatewayRequestBodyLimitBytes: number;
+  readonly gatewayRequestMayHaveBody: (request: { readonly method: string }) => boolean;
   readonly isGatewayRequestBodyTooLarge: (error: unknown) => boolean;
   readonly readGatewayRequestBody: (
     request: {
@@ -18,6 +19,10 @@ export type WorkerRequestApi = {
     },
     signal?: AbortSignal,
   ) => Promise<ArrayBuffer | undefined>;
+  readonly validateGatewayRequestBodyMetadata: (request: {
+    readonly method: string;
+    readonly headers: Headers;
+  }) => void;
 };
 
 /** Dependencies shared with the stateful Service Worker VM harness. */
@@ -49,6 +54,8 @@ export async function runStaticServiceWorkerTests({
 
   {
     const limit = workerRequestApi.gatewayRequestBodyLimitBytes;
+    assert.equal(workerRequestApi.gatewayRequestMayHaveBody({ method: "GET" }), false);
+    assert.equal(workerRequestApi.gatewayRequestMayHaveBody({ method: "POST" }), true);
     const requestWithChunks = (chunks: Uint8Array[]) => ({
       method: "POST",
       headers: new Headers(),
@@ -63,6 +70,14 @@ export async function runStaticServiceWorkerTests({
     assert.equal(exact?.byteLength, limit);
     await assert.rejects(
       workerRequestApi.readGatewayRequestBody(requestWithChunks([new Uint8Array(limit), new Uint8Array(1)])),
+      workerRequestApi.isGatewayRequestBodyTooLarge,
+    );
+    assert.throws(
+      () =>
+        workerRequestApi.validateGatewayRequestBodyMetadata({
+          method: "POST",
+          headers: new Headers({ "content-length": String(limit + 1) }),
+        }),
       workerRequestApi.isGatewayRequestBodyTooLarge,
     );
 

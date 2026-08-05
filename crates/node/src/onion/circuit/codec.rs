@@ -18,6 +18,8 @@ use crate::extension::ext::Wire;
 pub(super) enum OnionWireMessage {
     Forward(OnionForwardFrame),
     Backward(OnionBackwardFrame),
+    /// One-hop link padding. It is authenticated to the immediate neighbor and never forwarded.
+    Cover,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]

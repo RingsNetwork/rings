@@ -671,6 +671,10 @@ async fn send_effect_releases_transition_turn_and_preserves_peer_order() {
         .map(|payload| open_wire(&peer, payload))
         .collect::<Vec<_>>();
     assert_eq!(observed, messages);
+    tokio::time::timeout(std::time::Duration::from_secs(1), hook.wait_for_covers(2))
+        .await
+        .expect("two real cells fill the other two fixed batch slots with cover");
+    assert_eq!(hook.cover_count(), 2);
 }
 
 #[test]
@@ -796,10 +800,11 @@ async fn two_relays_peel_fixed_size_cells_through_the_exit_reducer_and_shell() {
     let exit = session();
     let route = route(&[first.clone(), second.clone()], &exit);
     let expected = test_payload("multi-hop-fixed-cell");
+    let first_edge_id = OnionCircuitId::new([31; 16]);
     let (first_peer, first_payload) = encode_initial_forward(
         OnionClientReturn::new(client.session_public_key()),
         &route,
-        OnionCircuitId::new([31; 16]),
+        first_edge_id,
         expected.clone(),
     )
     .expect("encode multi-hop route");
@@ -828,6 +833,13 @@ async fn two_relays_peel_fixed_size_cells_through_the_exit_reducer_and_shell() {
         panic!("first relay must emit one padded next-hop cell");
     };
     assert_eq!(*to, second.account_did());
+    let second_edge_id =
+        match bincode::deserialize(encoded_message.as_ref()).expect("decode second-hop message") {
+            OnionWireMessage::Forward(frame) => frame.circuit_id,
+            OnionWireMessage::Backward(_) => panic!("forward route emitted a backward message"),
+            OnionWireMessage::Cover => panic!("forward route emitted a cover message"),
+        };
+    assert_ne!(second_edge_id, first_edge_id);
     let second_payload = seal_encoded_message(encoded_message, *recipient, Some(*bucket))
         .expect("seal second-hop cell");
     assert_eq!(first_payload.len(), second_payload.len());
@@ -855,6 +867,14 @@ async fn two_relays_peel_fixed_size_cells_through_the_exit_reducer_and_shell() {
         panic!("second relay must emit one padded exit cell");
     };
     assert_eq!(*to, exit.account_did());
+    let exit_edge_id =
+        match bincode::deserialize(encoded_message.as_ref()).expect("decode exit-hop message") {
+            OnionWireMessage::Forward(frame) => frame.circuit_id,
+            OnionWireMessage::Backward(_) => panic!("forward route emitted a backward message"),
+            OnionWireMessage::Cover => panic!("forward route emitted a cover message"),
+        };
+    assert_ne!(exit_edge_id, first_edge_id);
+    assert_ne!(exit_edge_id, second_edge_id);
     let exit_payload =
         seal_encoded_message(encoded_message, *recipient, Some(*bucket)).expect("seal exit cell");
     assert_eq!(first_payload.len(), exit_payload.len());

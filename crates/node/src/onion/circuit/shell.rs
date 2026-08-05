@@ -64,8 +64,8 @@ impl<H> OnionCircuitShell<H> {
         }
     }
 
-    fn admit_crypto(&self, from: Did, now_ms: u128) -> Result<()> {
-        self.crypto_gate.admit(from, now_ms)
+    fn admit_crypto(&self, from: Did, now_ms: u128, visible_cell_bytes: u64) -> Result<()> {
+        self.crypto_gate.admit(from, now_ms, visible_cell_bytes)
     }
 
     fn decrypt_cell_reinject(
@@ -75,7 +75,9 @@ impl<H> OnionCircuitShell<H> {
         sealed: &rings_core::ecc::elgamal::impls::secp256k1::AeadCiphertext,
     ) -> Result<Option<Bytes>> {
         let received_at_ms = get_epoch_ms();
-        match self.admit_crypto(from, received_at_ms) {
+        let visible_cell_bytes = u64::try_from(bucket.plaintext_len())
+            .map_err(|_| Error::OnionRouteError(crate::onion::OnionRouteError::InvalidCell))?;
+        match self.admit_crypto(from, received_at_ms, visible_cell_bytes) {
             Ok(()) => {}
             Err(Error::NoPermission) => {
                 drop_bad_crypto("forward admission denied", Error::NoPermission);
@@ -107,7 +109,7 @@ impl<H> OnionCircuitShell<H> {
         circuit_id: OnionCircuitId,
         payload: &rings_core::ecc::elgamal::impls::secp256k1::AeadCiphertext,
     ) -> Result<Option<Bytes>> {
-        match self.admit_crypto(from, received_at_ms) {
+        match self.admit_crypto(from, received_at_ms, 0) {
             Ok(()) => {}
             Err(Error::NoPermission) => {
                 drop_bad_crypto("forward admission denied", Error::NoPermission);
@@ -138,7 +140,7 @@ impl<H> OnionCircuitShell<H> {
         payload: &rings_core::ecc::elgamal::impls::secp256k1::AeadCiphertext,
     ) -> Result<Option<OnionAuthenticatedPayload>> {
         let received_at_ms = get_epoch_ms();
-        match self.admit_crypto(from, received_at_ms) {
+        match self.admit_crypto(from, received_at_ms, 0) {
             Ok(()) => {}
             Err(Error::NoPermission) => {
                 drop_bad_crypto("client admission denied", Error::NoPermission);
@@ -190,7 +192,8 @@ where H: OnionCircuitHandler + crate::extension::ext::MaybeSend + 'static
                 encoded_message,
             } => {
                 let payload = seal_encoded_message(&encoded_message, recipient, Some(bucket))?;
-                self.send_outbox.enqueue(scope.lifecycle(), to, payload)?;
+                self.send_outbox
+                    .enqueue(scope.lifecycle(), to, recipient, bucket, payload)?;
                 Ok(Vec::new())
             }
             OnionCircuitEffect::Exit {

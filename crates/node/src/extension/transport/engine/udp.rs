@@ -7,8 +7,6 @@ use std::sync::Arc;
 use bytes::Bytes;
 use rings_core::dht::Did;
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc;
-use tokio_util::sync::CancellationToken;
 
 use super::inject_accepted;
 use super::send_frame;
@@ -152,28 +150,24 @@ async fn relay_udp_connected_with_idle(
 }
 
 /// Client-side UDP flow: route peer bytes back to the originating local client `dest`.
-pub(super) fn spawn_udp_sendto(
-    socket: Arc<UdpSocket>,
-    dest: SocketAddr,
-    outbound_rx: mpsc::Receiver<Outbound>,
-    cancel: CancellationToken,
-) {
-    spawn_detached(relay_udp_sendto(
-        socket,
-        dest,
-        outbound_rx,
-        cancel,
-        RELAY_IDLE_TIMEOUT,
-    ));
+pub(super) fn spawn_udp_sendto(task: RelayTask, socket: Arc<UdpSocket>, dest: SocketAddr) {
+    spawn_detached(relay_udp_sendto(task, socket, dest, RELAY_IDLE_TIMEOUT));
 }
 
 async fn relay_udp_sendto(
+    task: RelayTask,
     socket: Arc<UdpSocket>,
     dest: SocketAddr,
-    mut outbound_rx: mpsc::Receiver<Outbound>,
-    cancel: CancellationToken,
     idle_timeout: std::time::Duration,
 ) {
+    let RelayTask {
+        sessions,
+        scope,
+        key,
+        mut outbound_rx,
+        cancel,
+        generation,
+    } = task;
     let idle = tokio::time::sleep(idle_timeout);
     tokio::pin!(idle);
     loop {
@@ -189,6 +183,16 @@ async fn relay_udp_sendto(
             },
             _ = &mut idle => break,
         }
+    }
+    // The return-path task owns the client-side UDP flow lifetime. An idle timeout therefore
+    // retires both the live session and its `udp_flows` projection; a stale generation stays
+    // silent and cannot close a replacement (the same ABA rule as every other relay task).
+    if sessions.close_if_current(&scope, &key, generation).await {
+        let _ = send_frame(&scope, key.peer, Frame::Close {
+            session: key.session,
+            from_opener: super::opened_by_us(&key),
+        })
+        .await;
     }
 }
 
@@ -216,6 +220,8 @@ mod tests {
     use crate::error::Error;
     use crate::error::Result;
     use crate::extension::transport::engine::relay_task_for_test;
+    use crate::extension::transport::engine::relay_task_for_test_with_src;
+    use crate::extension::transport::engine::UdpFlowState;
 
     #[tokio::test]
     async fn idle_connected_udp_relay_releases_its_session() -> Result<()> {
@@ -238,23 +244,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn idle_udp_return_path_is_reclaimed() {
+    async fn idle_udp_return_path_reclaims_session_and_flow_projection() -> Result<()> {
         let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("bind UDP"));
-        let (_outbound_tx, outbound_rx) = mpsc::channel(1);
-        let cancel = CancellationToken::new();
+        let src = "127.0.0.1:19001".parse().expect("UDP source");
+        let (task, sessions, key) = relay_task_for_test_with_src("udp", Some(src))?;
+        sessions
+            .udp_flows
+            .lock()
+            .map_err(|_| Error::Lock)?
+            .insert(src, UdpFlowState::Active(key.clone()));
 
         tokio::time::timeout(
             Duration::from_secs(1),
-            relay_udp_sendto(
-                socket,
-                "127.0.0.1:9".parse().expect("discard address"),
-                outbound_rx,
-                cancel,
-                Duration::from_millis(20),
-            ),
+            relay_udp_sendto(task, socket, src, Duration::from_millis(20)),
         )
         .await
         .expect("idle UDP return path must terminate");
+        assert!(!sessions.is_live(&key));
+        assert!(!sessions
+            .udp_flows
+            .lock()
+            .map_err(|_| Error::Lock)?
+            .contains_key(&src));
+        Ok(())
     }
 
     #[test]

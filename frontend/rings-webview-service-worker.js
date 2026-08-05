@@ -9,7 +9,13 @@ importScripts(
 const { gatewayFailure, gatewayFailureDocument } = self.RingsWebviewWorkerResponse;
 const { injectControlledNavigationScripts, isTrustedShellEntrypoint, sameTargetOrigin, sameTargetUrl } =
   self.RingsWebviewWorkerNavigation;
-const { isGatewayRequestBodyTooLarge, readGatewayRequestBody } = self.RingsWebviewWorkerRequest;
+const {
+  gatewayRequestBodyLimitBytes,
+  gatewayRequestMayHaveBody,
+  isGatewayRequestBodyTooLarge,
+  readGatewayRequestBody,
+  validateGatewayRequestBodyMetadata,
+} = self.RingsWebviewWorkerRequest;
 const gatewayPrefix = "/webview/";
 const runtimeGatewayPrefix = `${gatewayPrefix.replace(/\/$/, "")}-runtime/`;
 const runtimeTargetHeader = "x-rings-webview-target";
@@ -20,8 +26,13 @@ const gatewayContentSecurityPolicy =
   "sandbox allow-scripts allow-forms allow-popups allow-downloads; default-src 'self' data: blob:; base-uri 'self'; connect-src 'self'; font-src 'self' data:; form-action 'self'; frame-src 'self' data: blob:; img-src 'self' data: blob:; media-src 'self' data: blob:; object-src 'self'; script-src 'self' data: 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; style-src 'self' data: 'unsafe-inline'; worker-src 'none'";
 const minimumGatewayHostCapabilityLength = 32;
 const clientStatePruneInterval = 64;
-const maxActiveGatewayBodies = 6;
-const maxQueuedGatewayBodies = 32;
+// A retained FetchEvent may keep an unread, not-yet-size-checked request stream alive. Bound the
+// body budget to six active readers without an unread waiter queue; bodyless GET/HEAD requests
+// bypass this gate and remain covered by the host's ordinary request limiter.
+const maxRetainedGatewayBodyBytes = 48 * 1024 * 1024;
+const maxActiveGatewayBodies = Math.floor(
+  maxRetainedGatewayBodyBytes / gatewayRequestBodyLimitBytes,
+);
 let gatewayHostClientId = null;
 let gatewayHostCapability = null;
 const trustedShellClientIds = new Set();
@@ -33,7 +44,6 @@ const debugHistory = [];
 let nextRequestId = 1;
 let requestsUntilClientStatePrune = clientStatePruneInterval;
 let activeGatewayBodies = 0;
-const queuedGatewayBodies = [];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(self.skipWaiting());
@@ -155,6 +165,15 @@ function handleGatewayFetchWithTimeout(event) {
 }
 
 async function handleGatewayFetch(event, requestId, startedAt, signal = undefined) {
+  try {
+    // Reject a declared oversize before the FetchEvent enters the bounded waiter queue.
+    validateGatewayRequestBodyMetadata(event.request);
+  } catch (error) {
+    return rejectGatewayRequestInput(event, requestId, startedAt, error);
+  }
+  if (!gatewayRequestMayHaveBody(event.request)) {
+    return handleAdmittedGatewayFetch(event, requestId, startedAt, signal);
+  }
   let release;
   try {
     release = await acquireGatewayBodyPermit(signal);
@@ -192,23 +211,7 @@ async function handleAdmittedGatewayFetch(event, requestId, startedAt, signal = 
     if (error === gatewayRequestCancelled) {
       return gatewayDeadlineFailure();
     }
-    request = debugRequestForFailure(event.request);
-    const bodyTooLarge = isGatewayRequestBodyTooLarge(error);
-    const status = bodyTooLarge ? 413 : 400;
-    const summary = bodyTooLarge
-      ? "Rings WebView request body is too large."
-      : "Malformed Rings WebView gateway request.";
-    const code = bodyTooLarge ? "gateway_request_body_too_large" : "invalid_gateway_request";
-    emitResourceDebug(
-      requestId,
-      request,
-      startedAt,
-      "failed",
-      `#${requestId} rejected gateway request: ${errorMessage(error)}`,
-      "error",
-      status,
-    );
-    return gatewayFailure(status, errorMessage(error), summary, code);
+    return rejectGatewayRequestInput(event, requestId, startedAt, error);
   }
   emitResourceDebug(
     requestId,
@@ -307,6 +310,26 @@ async function handleAdmittedGatewayFetch(event, requestId, startedAt, signal = 
   }
 }
 
+function rejectGatewayRequestInput(event, requestId, startedAt, error) {
+  const request = debugRequestForFailure(event.request);
+  const bodyTooLarge = isGatewayRequestBodyTooLarge(error);
+  const status = bodyTooLarge ? 413 : 400;
+  const summary = bodyTooLarge
+    ? "Rings WebView request body is too large."
+    : "Malformed Rings WebView gateway request.";
+  const code = bodyTooLarge ? "gateway_request_body_too_large" : "invalid_gateway_request";
+  emitResourceDebug(
+    requestId,
+    request,
+    startedAt,
+    "failed",
+    `#${requestId} rejected gateway request: ${errorMessage(error)}`,
+    "error",
+    status,
+  );
+  return gatewayFailure(status, errorMessage(error), summary, code);
+}
+
 function gatewayDeadlineFailure() {
   return gatewayFailure(
     504,
@@ -323,23 +346,11 @@ function acquireGatewayBodyPermit(signal = undefined) {
   if (signal?.aborted) {
     return Promise.reject(gatewayRequestCancelled);
   }
-  if (activeGatewayBodies < maxActiveGatewayBodies) {
-    activeGatewayBodies += 1;
-    return Promise.resolve(gatewayBodyPermitRelease());
-  }
-  if (queuedGatewayBodies.length >= maxQueuedGatewayBodies) {
+  if (activeGatewayBodies >= maxActiveGatewayBodies) {
     return Promise.reject(gatewayBodyAdmissionFull);
   }
-  return new Promise((resolve, reject) => {
-    const waiter = { resolve, reject, signal, abort: undefined };
-    waiter.abort = () => {
-      const index = queuedGatewayBodies.indexOf(waiter);
-      if (index >= 0) queuedGatewayBodies.splice(index, 1);
-      reject(gatewayRequestCancelled);
-    };
-    signal?.addEventListener("abort", waiter.abort, { once: true });
-    queuedGatewayBodies.push(waiter);
-  });
+  activeGatewayBodies += 1;
+  return Promise.resolve(gatewayBodyPermitRelease());
 }
 
 function gatewayBodyPermitRelease() {
@@ -347,16 +358,6 @@ function gatewayBodyPermitRelease() {
   return () => {
     if (released) return;
     released = true;
-    while (queuedGatewayBodies.length > 0) {
-      const waiter = queuedGatewayBodies.shift();
-      waiter.signal?.removeEventListener("abort", waiter.abort);
-      if (waiter.signal?.aborted) {
-        waiter.reject(gatewayRequestCancelled);
-        continue;
-      }
-      waiter.resolve(gatewayBodyPermitRelease());
-      return;
-    }
     activeGatewayBodies = Math.max(0, activeGatewayBodies - 1);
   };
 }

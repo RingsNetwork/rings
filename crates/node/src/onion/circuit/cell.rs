@@ -35,7 +35,9 @@ pub enum OnionCellBucket {
     MiB1,
     /// Up to four MiB of encrypted cell plaintext.
     MiB4,
-    /// Up to twelve MiB of encrypted cell plaintext.
+    /// Up to twelve MiB of encrypted cell plaintext. Admission charges the full visible bucket
+    /// size, irrespective of the hidden encoded length, so an undersized payload cannot bypass
+    /// the relay's per-peer or global byte budget.
     MiB12,
 }
 
@@ -238,5 +240,22 @@ mod tests {
             message
         );
         assert!(open_cell(&wrong, cell.bucket, &cell.sealed).is_err());
+    }
+
+    #[test]
+    fn one_hop_cover_is_authenticated_inside_the_same_cell_algebra() {
+        let recipient = session();
+        let encoded = seal_message(
+            &OnionWireMessage::Cover,
+            recipient.session_public_key(),
+            Some(OnionCellBucket::KiB4),
+        )
+        .expect("seal cover");
+        let cell: OnionWireCell = bincode::deserialize(&encoded).expect("decode cover cell");
+
+        assert_eq!(
+            open_cell(&recipient, cell.bucket, &cell.sealed).expect("open cover cell"),
+            OnionWireMessage::Cover
+        );
     }
 }

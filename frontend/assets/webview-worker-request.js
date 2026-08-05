@@ -5,11 +5,22 @@
 
   class GatewayRequestBodyTooLarge extends Error {}
 
-  async function readGatewayRequestBody(request, signal = undefined) {
-    if (request.method === "GET" || request.method === "HEAD") {
-      return undefined;
+  function gatewayRequestMayHaveBody(request) {
+    return request.method !== "GET" && request.method !== "HEAD";
+  }
+
+  function validateGatewayRequestBodyMetadata(request) {
+    if (!gatewayRequestMayHaveBody(request)) {
+      return;
     }
     rejectOversizedDeclaredBody(request.headers.get("content-length"));
+  }
+
+  async function readGatewayRequestBody(request, signal = undefined) {
+    if (!gatewayRequestMayHaveBody(request)) {
+      return undefined;
+    }
+    validateGatewayRequestBodyMetadata(request);
     // Consume the original stream. `Request::clone` tees the body; leaving the
     // other branch unread would let the platform buffer it without this
     // function's byte budget and defeat the resource bound.
@@ -106,7 +117,9 @@
 
   self.RingsWebviewWorkerRequest = Object.freeze({
     gatewayRequestBodyLimitBytes,
+    gatewayRequestMayHaveBody,
     isGatewayRequestBodyTooLarge,
     readGatewayRequestBody,
+    validateGatewayRequestBodyMetadata,
   });
 })();

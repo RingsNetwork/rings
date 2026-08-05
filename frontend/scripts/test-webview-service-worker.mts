@@ -129,19 +129,30 @@ await runStaticServiceWorkerTests({
 
 {
   const held = await Promise.all(Array.from({ length: 6 }, () => acquireGatewayBodyPermit()));
-  const queued = Array.from({ length: 32 }, () => acquireGatewayBodyPermit());
   await assert.rejects(
     acquireGatewayBodyPermit(),
     (error) => typeof error === "object",
-    "the thirty-ninth retained request must fail before reading its body",
+    "the seventh body-bearing request must fail before retaining an unread waiter",
   );
+  const bodylessWhileFull = await handleGatewayFetch(
+    gatewayFetchEvent("https://bodyless.example/"),
+    698,
+    performance.now(),
+  );
+  assert.match(
+    await bodylessWhileFull.text(),
+    /data-rings-webview-failure-code="local_gateway_unavailable"/,
+    "bodyless requests must bypass the body-retention gate",
+  );
+  const oversizedWhileFull = runtimeGatewayFetchEvent("https://example.test/oversized");
+  oversizedWhileFull.request.headers.set("content-length", String(workerRequestApi.gatewayRequestBodyLimitBytes + 1));
+  const oversizedResponse = await handleGatewayFetch(oversizedWhileFull, 699, performance.now());
+  assert.equal(oversizedResponse.status, 413, "declared oversize must be classified before the full waiter queue");
   const firstRelease = held.shift();
   assert(firstRelease, "one active body permit must exist");
   firstRelease();
-  for (const permit of queued) {
-    const release = await permit;
-    release();
-  }
+  const replacement = await acquireGatewayBodyPermit();
+  replacement();
   for (const release of held) release();
 }
 
