@@ -41,8 +41,11 @@ pub(super) struct CryptoWindow {
 /// Preservation: `admit` removes expired evidence, computes both global and peer transitions
 /// before committing either budget, and evicts only the least-recently-admitted peer when the
 /// witness set is full. Identity-independent global limits make that fairness eviction unable to
-/// reset the node-wide
-/// crypto or bandwidth budget.
+/// reset the node-wide crypto or bandwidth budget.
+///
+/// Inflation bound: because the caller charges the public bucket size before decryption, a byte
+/// limit `L` admits at most `floor(L / b)` cells of visible bucket size `b`, even if every hidden
+/// payload is much smaller than its selected bucket.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct OnionCryptoLimiter {
     limits: CryptoLimits,
@@ -183,6 +186,7 @@ impl OnionCryptoGate {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::onion::circuit::OnionCellBucket;
 
     fn limits(
         per_peer_operations: u32,
@@ -265,6 +269,42 @@ mod tests {
         assert_eq!(
             limiter.windows.get(&peer).map(|window| window.used_bytes),
             Some(12)
+        );
+    }
+
+    #[test]
+    fn largest_bucket_has_exact_peer_and_global_admission_bounds() {
+        let bucket_bytes =
+            u64::try_from(OnionCellBucket::MiB12.plaintext_len()).unwrap_or_default();
+        assert_ne!(bucket_bytes, 0);
+        let per_peer_cells = MAX_ONION_CRYPTO_BYTES_PER_WINDOW / bucket_bytes;
+        let global_cells = MAX_ONION_CRYPTO_BYTES_GLOBAL_PER_WINDOW / bucket_bytes;
+        assert_eq!(per_peer_cells, 21);
+        assert_eq!(global_cells, 42);
+
+        let first = Did::from(1_u32);
+        let second = Did::from(2_u32);
+        let third = Did::from(3_u32);
+        let mut limiter = OnionCryptoLimiter::default();
+        for now_ms in 0..per_peer_cells {
+            assert!(limiter
+                .admit(first, u128::from(now_ms), bucket_bytes)
+                .is_ok());
+        }
+        assert!(limiter
+            .admit(first, u128::from(per_peer_cells), bucket_bytes)
+            .is_err());
+        for now_ms in per_peer_cells..global_cells {
+            assert!(limiter
+                .admit(second, u128::from(now_ms), bucket_bytes)
+                .is_ok());
+        }
+        assert!(limiter
+            .admit(third, u128::from(global_cells), bucket_bytes)
+            .is_err());
+        assert_eq!(limiter.global.used_bytes, global_cells * bucket_bytes);
+        assert!(
+            MAX_ONION_CRYPTO_BYTES_GLOBAL_PER_WINDOW - limiter.global.used_bytes < bucket_bytes
         );
     }
 }

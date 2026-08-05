@@ -1,4 +1,16 @@
 //! Ordered off-gate delivery for onion data-plane frames.
+//!
+//! Traffic-shaping contract: let `B = ONION_LINK_BATCH_CELLS` and let a non-empty batch contain
+//! `r` real cells, where `1 <= r <= B`. The drain attempts exactly `B - r` authenticated one-hop
+//! cover cells after the real cells. When encryption and overlay sends succeed, every observable
+//! batch therefore contains exactly `B` cells and the visible cell-count amplification is
+//! `B / r <= B`. Cover is generated only for a real-driven batch; an idle lane emits nothing.
+//!
+//! One injected pacing delay precedes each batch. Production delays lie in the closed interval
+//! `[MIN_ONION_SEND_JITTER_MS, MAX_ONION_SEND_JITTER_MS]`; with `B = 4`, the pacing-only nominal
+//! rate is 160--800 visible cells per second before overlay backpressure. Sparse traffic can cost
+//! four visible cells for one real cell. These bounded bandwidth, latency, and throughput costs are
+//! intentional privacy properties, not queue inefficiencies to optimize away.
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
@@ -32,8 +44,20 @@ const MAX_PENDING_ONION_SENDS_PER_PEER: usize = 128;
 const MAX_PENDING_ONION_SEND_BYTES: usize = 64 * 1024 * 1024;
 const MAX_PENDING_ONION_SEND_BYTES_PER_PEER: usize = 16 * 1024 * 1024;
 const MIN_ONION_SEND_JITTER_MS: u64 = 5;
-const ONION_SEND_JITTER_SPAN_MS: u64 = 21;
+const MAX_ONION_SEND_JITTER_MS: u64 = 25;
+const ONION_SEND_JITTER_SPAN_MS: u64 = MAX_ONION_SEND_JITTER_MS - MIN_ONION_SEND_JITTER_MS + 1;
 const ONION_LINK_BATCH_CELLS: usize = 4;
+
+/// Pure fixed-batch algebra.
+///
+/// Post: for every accepted `real_cells`, `real_cells + result == ONION_LINK_BATCH_CELLS`.
+const fn cover_cells_for_batch(real_cells: usize) -> Option<usize> {
+    if real_cells == 0 || real_cells > ONION_LINK_BATCH_CELLS {
+        None
+    } else {
+        Some(ONION_LINK_BATCH_CELLS - real_cells)
+    }
+}
 
 /// Effect capability for the observable delay before one ordered overlay batch.
 ///
@@ -304,7 +328,11 @@ async fn drain_peer(
                 continue;
             }
 
-            for _ in batch_slots..ONION_LINK_BATCH_CELLS {
+            let Some(cover_cells) = cover_cells_for_batch(batch_slots) else {
+                tracing::debug!(%peer, batch_slots, "onion send outbox produced invalid batch");
+                return;
+            };
+            for _ in 0..cover_cells {
                 let cover = match seal_message(
                     &OnionWireMessage::Cover,
                     send.cover.recipient,
@@ -549,5 +577,28 @@ mod tests {
         assert_eq!(onion_send_jitter(0), Duration::from_millis(5));
         assert_eq!(onion_send_jitter(20), Duration::from_millis(25));
         assert_eq!(onion_send_jitter(u8::MAX), Duration::from_millis(8));
+        for sample in u8::MIN..=u8::MAX {
+            let delay_ms = onion_send_jitter(sample).as_millis();
+            assert!(delay_ms >= u128::from(MIN_ONION_SEND_JITTER_MS));
+            assert!(delay_ms <= u128::from(MAX_ONION_SEND_JITTER_MS));
+        }
+    }
+
+    #[test]
+    fn fixed_link_batch_algebra_bounds_cover_amplification() {
+        assert_eq!(cover_cells_for_batch(0), None);
+        assert_eq!(cover_cells_for_batch(ONION_LINK_BATCH_CELLS + 1), None);
+
+        for real_cells in 1..=ONION_LINK_BATCH_CELLS {
+            let cover_cells = cover_cells_for_batch(real_cells);
+            assert_eq!(
+                cover_cells.map(|cover| real_cells + cover),
+                Some(ONION_LINK_BATCH_CELLS)
+            );
+            assert_eq!(
+                cover_cells.map(|cover| real_cells + cover <= real_cells * ONION_LINK_BATCH_CELLS),
+                Some(true)
+            );
+        }
     }
 }

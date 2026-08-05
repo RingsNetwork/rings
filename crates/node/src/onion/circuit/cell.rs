@@ -1,3 +1,13 @@
+//! Fixed-bucket onion-cell encoding.
+//!
+//! Local producers select the smallest bucket that contains the encoded message. Relays preserve
+//! the already-visible bucket across a circuit edge so that shrinking cells cannot reveal route
+//! position. An authenticated hostile peer can deliberately choose a larger bucket for a small
+//! hidden payload; a relay cannot canonicalize that choice without weakening the fixed-bucket
+//! privacy contract. The crypto admission gate therefore charges `bucket.plaintext_len()` before
+//! decryption. For a byte budget `L` and visible bucket size `b`, at most `floor(L / b)` such cells
+//! can be admitted in one limiter window, independent of their hidden encoded lengths.
+
 use bytes::Bytes;
 use rand::CryptoRng;
 use rand::RngCore;
@@ -257,5 +267,23 @@ mod tests {
             open_cell(&recipient, cell.bucket, &cell.sealed).expect("open cover cell"),
             OnionWireMessage::Cover
         );
+    }
+
+    #[test]
+    fn local_bucket_selection_is_minimal_at_every_boundary() {
+        for (index, bucket) in OnionCellBucket::ALL.into_iter().enumerate() {
+            let encoded_capacity = bucket.plaintext_len() - CELL_LENGTH_PREFIX_BYTES;
+            assert_eq!(
+                OnionCellBucket::smallest_for(encoded_capacity).ok(),
+                Some(bucket)
+            );
+            match OnionCellBucket::ALL.get(index + 1).copied() {
+                Some(next) => assert_eq!(
+                    OnionCellBucket::smallest_for(encoded_capacity + 1).ok(),
+                    Some(next)
+                ),
+                None => assert!(OnionCellBucket::smallest_for(encoded_capacity + 1).is_err()),
+            }
+        }
     }
 }
