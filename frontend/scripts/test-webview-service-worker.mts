@@ -83,10 +83,11 @@ context = {
 };
 const globalThisKey = "globalThis";
 context[globalThisKey] = context;
+context.__ringsWebviewGatewayHostLifetimeMs = 0;
 vm.createContext(context);
 
 vm.runInContext(
-  `${serviceWorkerSource}\nglobalThis.__ringsWebviewServiceWorkerTest = { acquireGatewayBodyPermit, controlledNavigationBody, emitDebug, gatewayContentSecurityPolicy, gatewayFailureDocument, gatewayHostClient, handleGatewayFetch, handleGatewayFetchWithTimeout, pruneTrackedClientState, rememberNavigationClientTarget, rememberShellNavigationClient, rememberClientSourceTargetForTest, rememberTrustedShellClientForTest, registerDebugClient, registerGatewayHostClient, requestGatewayResponse, resetGatewayHostForTest, requestKind, sourceTargetForClient };`,
+  `${serviceWorkerSource}\nglobalThis.__ringsWebviewServiceWorkerTest = { acquireGatewayBodyPermit, controlledNavigationBody, emitDebug, gatewayContentSecurityPolicy, gatewayFailureDocument, gatewayHostClient, handleGatewayFetch, handleGatewayFetchWithTimeout, holdShellNavigationForHostRegistration, pruneTrackedClientState, rememberNavigationClientTarget, rememberShellNavigationClient, rememberClientSourceTargetForTest, rememberTrustedShellClientForTest, registerDebugClient, registerGatewayHostClient, requestGatewayResponse, resetGatewayHostForTest, requestKind, sourceTargetForClient };`,
   context,
   {
     filename: serviceWorkerPath,
@@ -101,6 +102,7 @@ const {
   gatewayHostClient,
   handleGatewayFetch,
   handleGatewayFetchWithTimeout,
+  holdShellNavigationForHostRegistration,
   pruneTrackedClientState,
   rememberNavigationClientTarget,
   rememberShellNavigationClient,
@@ -905,7 +907,8 @@ async function dispatchMessage(clientId: string, data: unknown): Promise<unknown
   const shellMessages: unknown[] = [];
   clientsById.set("cold-shell-host", {
     id: "cold-shell-host",
-    url: "http://127.0.0.1:8080/#node",
+    // WindowClient.url may omit the document fragment even when the application is on #node.
+    url: "http://127.0.0.1:8080/",
     frameType: "top-level",
     postMessage(message) {
       shellMessages.push(message);
@@ -929,6 +932,12 @@ async function dispatchMessage(clientId: string, data: unknown): Promise<unknown
     ),
     true,
   );
+  let navigationLifetimeSettled = false;
+  const navigationLifetime = holdShellNavigationForHostRegistration("cold-shell-host").then(() => {
+    navigationLifetimeSettled = true;
+  });
+  await Promise.resolve();
+  assert.equal(navigationLifetimeSettled, false);
   assertJsonEqual(
     await dispatchMessage("cold-shell-host", {
       type: "rings-webview-host-register",
@@ -936,6 +945,8 @@ async function dispatchMessage(clientId: string, data: unknown): Promise<unknown
     }),
     [{ ok: true }],
   );
+  await navigationLifetime;
+  assert.equal(navigationLifetimeSettled, true);
   assert.equal((await gatewayHostClient())?.id, "cold-shell-host");
   assert.equal(shellMessages.length, 0);
 }

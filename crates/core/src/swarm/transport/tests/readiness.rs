@@ -35,7 +35,7 @@ async fn disconnected_open_transport_cannot_commit_admission() -> Result<()> {
         .force_peer_connection_state_without_callback(peer, WebrtcConnectionState::Disconnected)?;
     transport.force_peer_data_channel_open_without_callback(peer, Some(true))?;
 
-    assert!(transport.begin_connection_admission(attempt)?);
+    assert!(transport.begin_connection_admission_for_test(attempt)?);
     assert!(matches!(
         transport.commit_connection_admission(attempt),
         Err(Error::TransportNotReady {
@@ -47,6 +47,44 @@ async fn disconnected_open_transport_cannot_commit_admission() -> Result<()> {
     assert!(!transport.dht.successors().contains(&peer)?);
 
     assert!(transport.cancel_pending_connection(attempt).await?);
+    Ok(())
+}
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+#[tokio::test]
+async fn data_channel_open_before_peer_state_converges_preserves_pending_admission() -> Result<()> {
+    let transport = Arc::new(transport_with_measure(Arc::new(
+        RecordingMeasure::default(),
+    ))?);
+    let peer = SecretKey::random().address().into();
+    let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
+    let (attempt, _offer) = transport
+        .prepare_connection_offer_with_attempt(peer, callback)
+        .await?;
+    transport.force_peer_data_channel_open_without_callback(peer, Some(true))?;
+
+    let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback))
+        .with_pending_connection_attempt(attempt);
+    callback
+        .on_data_channel_open(&peer.to_string())
+        .await
+        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+
+    assert_eq!(transport.unadmitted_attempt(peer)?, Some(attempt));
+    assert!(!transport.is_admitted_connection(peer));
+    assert!(!transport.dht.successors().contains(&peer)?);
+    assert!(transport.get_raw_connection(peer).is_some());
+
+    transport
+        .force_peer_connection_state_without_callback(peer, WebrtcConnectionState::Connected)?;
+    callback
+        .on_peer_connection_state_change(&peer.to_string(), WebrtcConnectionState::Connected)
+        .await
+        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+
+    assert!(transport.is_admitted_connection_attempt(attempt));
+    assert!(transport.dht.successors().contains(&peer)?);
+    transport.disconnect(peer).await?;
     Ok(())
 }
 

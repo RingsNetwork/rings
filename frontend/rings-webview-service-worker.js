@@ -26,6 +26,10 @@ const gatewayContentSecurityPolicy =
   "sandbox allow-scripts allow-forms allow-popups allow-downloads; default-src 'self' data: blob:; base-uri 'self'; connect-src 'self'; font-src 'self' data:; form-action 'self'; frame-src 'self' data: blob:; img-src 'self' data: blob:; media-src 'self' data: blob:; object-src 'self'; script-src 'self' data: 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; style-src 'self' data: 'unsafe-inline'; worker-src 'none'";
 const minimumGatewayHostCapabilityLength = 32;
 const clientStatePruneInterval = 64;
+const shellRegistrationLifetimeMs = 5_000;
+const gatewayHostLifetimeMs = Number.isFinite(globalThis.__ringsWebviewGatewayHostLifetimeMs)
+  ? Math.max(0, globalThis.__ringsWebviewGatewayHostLifetimeMs)
+  : 45_000;
 // A retained FetchEvent may keep an unread, not-yet-size-checked request stream alive. Bound the
 // body budget to six active readers without an unread waiter queue; bodyless GET/HEAD requests
 // bypass this gate and remain covered by the host's ordinary request limiter.
@@ -41,6 +45,7 @@ const trustedDebugClientIds = new Set();
 const clientSourceTargets = new Map();
 const debugClientScopes = new Map();
 const debugHistory = [];
+const pendingShellRegistrationLifetimes = new Map();
 let nextRequestId = 1;
 let requestsUntilClientStatePrune = clientStatePruneInterval;
 let activeGatewayBodies = 0;
@@ -86,8 +91,17 @@ self.addEventListener("message", (event) => {
         queueDebug("worker", "Rejected untrusted Rings node gateway host registration", "warning");
         reply?.postMessage({ ok: false, error: "untrusted gateway host registration" });
       }
+      return ok;
     });
-    event.waitUntil?.(registration);
+    // waitUntil is the worker-side lease. The host renews it before expiry so an active gateway
+    // session cannot lose its in-memory capability merely because the browser reclaims the worker.
+    event.waitUntil?.(
+      registration.then((registered) =>
+        registered
+          ? new Promise((resolve) => globalThis.setTimeout(resolve, gatewayHostLifetimeMs))
+          : undefined,
+      ),
+    );
     return;
   }
   if (event.data?.type === "rings-webview-debug-register" && typeof clientId === "string" && clientId) {
@@ -109,7 +123,13 @@ self.addEventListener("message", (event) => {
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin || !isGatewayControlledPathname(url.pathname)) {
-    rememberShellNavigationClient(event, url);
+    const clientId = trustedShellNavigationClientId(event, url);
+    if (clientId) {
+      // Keep the navigation event alive until the newly loaded shell presents its capability.
+      // Otherwise the worker may be terminated between the fetch witness and the message event,
+      // erasing the only authority that distinguishes a real shell navigation from history spoofing.
+      event.waitUntil?.(holdShellNavigationForHostRegistration(clientId));
+    }
     return;
   }
   event.respondWith(handleGatewayFetchWithTimeout(event));
@@ -533,7 +553,32 @@ async function registerGatewayHostClient(clientId, capability) {
   trustedHostClientIds.add(clientId);
   gatewayHostClientId = clientId;
   gatewayHostCapability = capability;
+  finishShellNavigationHostRegistration(clientId);
   return true;
+}
+
+function holdShellNavigationForHostRegistration(clientId) {
+  pendingShellRegistrationLifetimes.get(clientId)?.();
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      globalThis.clearTimeout(timeout);
+      if (pendingShellRegistrationLifetimes.get(clientId) === finish) {
+        pendingShellRegistrationLifetimes.delete(clientId);
+      }
+      resolve();
+    };
+    const timeout = globalThis.setTimeout(finish, shellRegistrationLifetimeMs);
+    pendingShellRegistrationLifetimes.set(clientId, finish);
+  });
+}
+
+function finishShellNavigationHostRegistration(clientId) {
+  pendingShellRegistrationLifetimes.get(clientId)?.();
 }
 
 async function registerDebugClient(clientId, capability) {
@@ -674,27 +719,30 @@ function replayDebugHistory(client, scope) {
 }
 
 function isTrustedGatewayHostUrl(url) {
-  return isTrustedShellUrl(url, "#node");
+  return isTrustedShellUrl(url);
 }
 
 function isTrustedDebugClientUrl(url) {
-  return isTrustedShellUrl(url, "#webview");
+  return isTrustedShellUrl(url);
 }
 
-function isTrustedShellUrl(url, hashPrefix) {
+function isTrustedShellUrl(url) {
   try {
     const parsed = new URL(url);
-    return (
-      parsed.origin === self.location.origin &&
-      isTrustedShellEntrypoint(parsed.pathname) &&
-      parsed.hash.startsWith(hashPrefix)
-    );
+    // WindowClient.url does not provide a trustworthy fragment witness. Authority comes from the
+    // top-level fetch navigation recorded in trustedShellClientIds plus the unguessable host
+    // capability; this check only constrains the client to the application-owned shell path.
+    return parsed.origin === self.location.origin && isTrustedShellEntrypoint(parsed.pathname);
   } catch (_error) {
     return false;
   }
 }
 
 function resetGatewayHostForTest() {
+  for (const finish of pendingShellRegistrationLifetimes.values()) {
+    finish();
+  }
+  pendingShellRegistrationLifetimes.clear();
   gatewayHostClientId = null;
   gatewayHostCapability = null;
   trustedShellClientIds.clear();
@@ -852,21 +900,24 @@ function rememberNavigationClientTarget(event, request) {
 }
 
 function rememberShellNavigationClient(event, url) {
+  return Boolean(trustedShellNavigationClientId(event, url));
+}
+
+function trustedShellNavigationClientId(event, url) {
   if (
     url.origin !== self.location.origin ||
     !isTrustedShellEntrypoint(url.pathname) ||
     !isTopLevelNavigationRequest(event.request)
   ) {
-    return false;
+    return undefined;
   }
-  let remembered = false;
   if (rememberTrustedShellClient(event.resultingClientId, event.clientId)) {
-    remembered = true;
+    return event.resultingClientId;
   }
-  if (!remembered) {
-    remembered = rememberTrustedShellClient(event.clientId);
+  if (rememberTrustedShellClient(event.clientId)) {
+    return event.clientId;
   }
-  return remembered;
+  return undefined;
 }
 
 function rememberClientSourceTargetForTest(clientId, sourceTarget) {

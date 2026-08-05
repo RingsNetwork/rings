@@ -46,7 +46,7 @@ async fn admitting_finger_update_is_retained_until_atomic_commit() -> Result<()>
         .await?;
     open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
 
-    assert!(transport.begin_connection_admission(attempt)?);
+    assert!(transport.begin_connection_admission_for_test(attempt)?);
     let observed = transport
         .unadmitted_attempt(peer)?
         .ok_or_else(|| Error::InvalidMessage("admitting attempt disappeared".to_string()))?;

@@ -385,20 +385,65 @@ impl SwarmTransport {
         Ok(self.peer_lifecycles()?.state(peer))
     }
 
-    pub(crate) fn begin_connection_admission(
+    /// Start admission only after the coherent transport product state can make progress.
+    ///
+    /// Data-channel and peer-connection callbacks are independent inputs. Browsers may therefore
+    /// report `data_channel_open = true` while the peer-connection state still reads `New`. That
+    /// observation is transient, not a failed handshake: leave the attempt in `Pending` so the
+    /// later peer-connection callback can retry the same transition.
+    ///
+    /// Pre: `attempt` may identify the current `Pending` generation.
+    /// Post: `Pending(attempt) -> Admitting(attempt)` iff the current transport snapshot is ready;
+    /// a non-terminal snapshot preserves `Pending(attempt)`, while a terminal snapshot is an error.
+    pub(crate) fn begin_ready_connection_admission(
         &self,
         attempt: PendingConnectionAttempt,
     ) -> Result<bool> {
-        self.begin_connection_admission_with_observer(attempt, |_| {})
+        self.begin_connection_admission_when(
+            attempt,
+            |transport| {
+                if transport.peer_lifecycles()?.pending_attempt(attempt.peer) != Some(attempt) {
+                    return Ok(false);
+                }
+
+                let connection = transport
+                    .get_raw_connection(attempt.peer)
+                    .ok_or(Error::SwarmMissTransport(attempt.peer))?;
+                let readiness = connection.readiness();
+                if readiness.can_make_progress() {
+                    return Ok(true);
+                }
+                if readiness.is_terminal() {
+                    readiness.ensure_can_make_progress()?;
+                }
+                tracing::debug!(
+                    target: "rings_core::swarm::transport::handshake",
+                    local = %transport.dht.did,
+                    peer = %attempt.peer,
+                    generation = attempt.generation,
+                    readiness = readiness.as_str(),
+                    state = ?readiness.state(),
+                    data_channel_open = readiness.data_channel_open(),
+                    "connection admission deferred until transport state converges"
+                );
+                Ok(false)
+            },
+            |_| {},
+        )
     }
 
-    fn begin_connection_admission_with_observer(
+    /// Serialize one guarded transition into `Admitting` and its optional test observation hook.
+    ///
+    /// Post: `false` preserves the lifecycle state; `true` means the matching `Pending` generation
+    /// became `Admitting` and the observer ran while the lifecycle gate was still held.
+    fn begin_connection_admission_when(
         &self,
         attempt: PendingConnectionAttempt,
+        guard: impl FnOnce(&Self) -> Result<bool>,
         observe_transition: impl FnOnce(&Self),
     ) -> Result<bool> {
         let _lifecycle = self.connection_lifecycle()?;
-        if !self.peer_lifecycles()?.begin_admission(attempt) {
+        if !guard(self)? || !self.peer_lifecycles()?.begin_admission(attempt) {
             return Ok(false);
         }
         observe_transition(self);
@@ -413,12 +458,20 @@ impl SwarmTransport {
     }
 
     #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
+    pub(crate) fn begin_connection_admission_for_test(
+        &self,
+        attempt: PendingConnectionAttempt,
+    ) -> Result<bool> {
+        self.begin_connection_admission_with_observer_for_test(attempt, |_| {})
+    }
+
+    #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
     pub(crate) fn begin_connection_admission_with_observer_for_test(
         &self,
         attempt: PendingConnectionAttempt,
         observe_transition: impl FnOnce(&Self),
     ) -> Result<bool> {
-        self.begin_connection_admission_with_observer(attempt, observe_transition)
+        self.begin_connection_admission_when(attempt, |_| Ok(true), observe_transition)
     }
 
     #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]

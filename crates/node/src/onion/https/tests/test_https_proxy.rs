@@ -350,13 +350,17 @@ async fn native_fetch_times_out_stalled_response() {
         headers: Vec::new(),
         body: Vec::new(),
     };
+    let egress = NativeHttpsEgress::Direct {
+        host: address.ip().to_string(),
+        addresses: vec![address],
+    };
 
     let result = native_fetch_with_timeout(
         &format!("http://{address}/"),
         &request,
         DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES,
         Duration::from_millis(25),
-        None,
+        &egress,
         |_| Ok(()),
     )
     .await;
@@ -392,13 +396,17 @@ async fn native_fetch_records_response_bytes_as_chunks_arrive() {
     };
     let recorded = std::sync::Arc::new(AtomicU64::new(0));
     let recorded_for_fetch = recorded.clone();
+    let egress = NativeHttpsEgress::Direct {
+        host: address.ip().to_string(),
+        addresses: vec![address],
+    };
 
     let response = native_fetch_with_timeout(
         &format!("http://{address}/"),
         &request,
         DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES,
         Duration::from_secs(1),
-        None,
+        &egress,
         move |bytes| {
             recorded_for_fetch.fetch_add(bytes, Ordering::SeqCst);
             Ok(())
@@ -410,6 +418,113 @@ async fn native_fetch_records_response_bytes_as_chunks_arrive() {
     server.await.unwrap();
     assert_eq!(response.body, b"abcde");
     assert_eq!(recorded.load(Ordering::SeqCst), 5);
+}
+
+#[cfg(rings_native)]
+#[test]
+fn native_egress_selection_pins_public_addresses_and_proxies_only_synthetic_dns() {
+    let target = OnionProxyTarget::parse_authority("example.com:443").unwrap();
+    let public = "8.8.8.8:443".parse().unwrap();
+    let synthetic = "198.18.1.113:443".parse().unwrap();
+
+    assert_eq!(
+        select_native_https_egress(
+            &target,
+            vec![public],
+            Some("http://127.0.0.1:6152".to_string()),
+        )
+        .unwrap(),
+        NativeHttpsEgress::Direct {
+            host: "example.com".to_string(),
+            addresses: vec![public],
+        },
+    );
+    assert_eq!(
+        select_native_https_egress(
+            &target,
+            vec![synthetic],
+            Some("http://127.0.0.1:6152".to_string()),
+        )
+        .unwrap(),
+        NativeHttpsEgress::Proxy("http://127.0.0.1:6152".to_string()),
+    );
+    assert!(matches!(
+        select_native_https_egress(&target, vec![synthetic], None),
+        Err(Error::NoPermission),
+    ));
+}
+
+#[cfg(rings_native)]
+#[test]
+fn native_proxy_fallback_rejects_private_loopback_and_literal_synthetic_targets() {
+    let proxy = Some("http://127.0.0.1:6152".to_string());
+    for (authority, address) in [
+        ("localhost:443", "127.0.0.1:443"),
+        ("internal.example:443", "10.0.0.1:443"),
+        ("198.18.1.113:443", "198.18.1.113:443"),
+    ] {
+        let target = OnionProxyTarget::parse_authority(authority).unwrap();
+        assert!(matches!(
+            select_native_https_egress(&target, vec![address.parse().unwrap()], proxy.clone()),
+            Err(Error::NoPermission),
+        ));
+    }
+}
+
+#[cfg(rings_native)]
+#[test]
+fn native_proxy_configuration_uses_https_before_all_proxy_and_skips_blanks() {
+    let values = std::collections::HashMap::from([
+        ("HTTPS_PROXY", "  "),
+        ("https_proxy", "http://secure-proxy:8080"),
+        ("ALL_PROXY", "http://fallback-proxy:8080"),
+    ]);
+
+    assert_eq!(
+        configured_https_proxy_from(|name| values.get(name).map(ToString::to_string)),
+        Some("http://secure-proxy:8080".to_string()),
+    );
+}
+
+#[cfg(rings_native)]
+#[tokio::test]
+async fn native_proxy_egress_delegates_target_resolution() {
+    let proxy = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let proxy_address = proxy.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = proxy.accept().await.unwrap();
+        let mut request = [0_u8; 2048];
+        let request_len = stream.read(&mut request).await.unwrap();
+        let request = String::from_utf8_lossy(&request[..request_len]);
+        assert!(request.starts_with("GET http://unresolvable.invalid/probe HTTP/1.1"));
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+            .await
+            .unwrap();
+    });
+    let request = OnionHttpsRequest {
+        target: "unresolvable.invalid:80".to_string(),
+        method: "GET".to_string(),
+        path: "/probe".to_string(),
+        headers: Vec::new(),
+        body: Vec::new(),
+    };
+    let egress = NativeHttpsEgress::Proxy(format!("http://{proxy_address}"));
+
+    let response = native_fetch_with_timeout(
+        "http://unresolvable.invalid/probe",
+        &request,
+        DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES,
+        Duration::from_secs(1),
+        &egress,
+        |_| Ok(()),
+    )
+    .await
+    .unwrap();
+
+    server.await.unwrap();
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body, b"ok");
 }
 
 #[test]

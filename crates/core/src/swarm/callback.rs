@@ -115,7 +115,7 @@ impl InnerSwarmCallback {
             self.transport.cancel_pending_connection(attempt).await?;
             return Ok(false);
         }
-        if !self.transport.begin_connection_admission(attempt)? {
+        if !self.transport.begin_ready_connection_admission(attempt)? {
             return Ok(false);
         }
 
@@ -428,11 +428,13 @@ impl TransportCallback for InnerSwarmCallback {
             return Ok(());
         }
 
-        match s {
-            // ICE `Connected` is not enough for routing: admission happens only
-            // after the data channel opens, because that is the first point at
-            // which payload transport is actually usable.
-            WebrtcConnectionState::Connected => {}
+        let admission_completed = match s {
+            // Peer-state progress may complete admission, but only when the
+            // product snapshot also observes an open data channel. This makes
+            // either browser callback order converge on the same transition.
+            WebrtcConnectionState::Connecting | WebrtcConnectionState::Connected => {
+                self.admit_pending_connection(did).await?
+            }
             // `Failed` and `Closed` are terminal states. Pending handshakes are
             // discarded without touching the DHT; active peers leave it.
             WebrtcConnectionState::Failed | WebrtcConnectionState::Closed => {
@@ -451,6 +453,7 @@ impl TransportCallback for InnerSwarmCallback {
                 }
                 self.transport.record_peer_disconnected(attempt).await;
                 self.message_handler.leave_dht_attempt(attempt).await?;
+                false
             }
             // `Disconnected` is a transient ICE state that frequently recovers
             // back to `Connected` on its own (e.g. a brief network blip or ICE
@@ -471,13 +474,15 @@ impl TransportCallback for InnerSwarmCallback {
                 };
                 self.transport.record_peer_disconnected(attempt).await;
                 tracing::info!("Connection to {did} is disconnected, waiting for recovery");
+                false
             }
-            _ => {}
+            _ => false,
         };
 
         // Data-channel admission emits the application-level Connected event.
-        // Other state changes are passed through directly.
-        if s != WebrtcConnectionState::Connected {
+        // Other state changes are passed through directly, unless this exact
+        // callback completed admission and already emitted the ordered Connected event.
+        if s != WebrtcConnectionState::Connected && !admission_completed {
             self.emit_connection_state_change(did, s, self.pending_attempt)
                 .await?
         }

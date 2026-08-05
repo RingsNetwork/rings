@@ -89,6 +89,7 @@ export type ServiceWorkerTestApi = {
     startedAt: number,
   ) => Promise<Response>;
   readonly handleGatewayFetchWithTimeout: (event: ServiceWorkerFetchEventFixture) => Promise<Response>;
+  readonly holdShellNavigationForHostRegistration: (clientId: string) => Promise<void>;
   readonly pruneTrackedClientState: () => Promise<void>;
   readonly rememberNavigationClientTarget: (
     event: ServiceWorkerNavigationEventFixture,
@@ -133,6 +134,7 @@ export type ServiceWorkerTestContext = Record<string, unknown> & {
       matchAll: () => Promise<ServiceWorkerClientFixture[]>;
     };
   };
+  __ringsWebviewGatewayHostLifetimeMs?: number;
   __ringsWebviewServiceWorkerTest?: ServiceWorkerTestApi;
 };
 

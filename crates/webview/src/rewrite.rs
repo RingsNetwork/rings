@@ -245,10 +245,7 @@ impl<'a> HtmlRewriteState<'a> {
         if let Some(script) = self.bootstrap_script {
             context = context.with_bootstrap_script(script);
         }
-        context.rewrite_html_with_limit(
-            decode_srcdoc_attribute_value(html).as_str(),
-            self.output_limit,
-        )
+        context.rewrite_html_with_limit(html, self.output_limit)
     }
 
     fn rewrite_refresh(&self, value: &str) -> Result<String> {
@@ -266,10 +263,19 @@ where
 {
     let tag_name = element.tag_name();
     let is_base = tag_name.eq_ignore_ascii_case("base");
+    // lol_html intentionally exposes the source spelling, including character references. HTML
+    // semantics resolve those references before URL parsing, so decode exactly once at this
+    // adapter boundary and keep the downstream URL/CSS/srcdoc transforms over semantic values.
     let attributes: Vec<(String, String)> = element
         .attributes()
         .iter()
-        .map(|attribute| (attribute.name(), attribute.value()))
+        .map(|attribute| {
+            let value = attribute.value();
+            (
+                attribute.name(),
+                html_escape::decode_html_entities(&value).into_owned(),
+            )
+        })
         .collect();
     let is_meta_refresh = tag_name.eq_ignore_ascii_case("meta")
         && attributes.iter().any(|(name, value)| {
@@ -612,21 +618,6 @@ fn split_refresh_target(raw_target: &str) -> (Option<char>, &str, &str) {
     (None, target, suffix)
 }
 
-fn decode_srcdoc_attribute_value(value: &str) -> String {
-    value
-        .replace("&quot;", "\"")
-        .replace("&#34;", "\"")
-        .replace("&#x22;", "\"")
-        .replace("&#X22;", "\"")
-        .replace("&apos;", "'")
-        .replace("&#39;", "'")
-        .replace("&#x27;", "'")
-        .replace("&#X27;", "'")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&amp;", "&")
-}
-
 fn find_ascii_case_insensitive(input: &str, pattern: &str) -> Option<usize> {
     let pattern = pattern.as_bytes();
     (!pattern.is_empty()).then_some(())?;
@@ -688,6 +679,21 @@ mod tests {
         assert!(rewritten.contains("/webview/https%3A%2F%2Fexample%2Ecom%2Fsubmit"));
         assert!(rewritten.contains("1x"));
         assert!(rewritten.contains("2x"));
+        Ok(())
+    }
+
+    #[test]
+    fn html_decodes_character_references_before_url_rewrite() -> Result<()> {
+        let rewritten = context()?
+            .rewrite_html(r#"<a href="/search?q=test&amp;gbv=1&amp;page=&#x32;">results</a>"#)?;
+
+        assert!(
+            rewritten.contains(
+                "/webview/https%3A%2F%2Fexample%2Ecom%2Fsearch%3Fq%3Dtest%26gbv%3D1%26page%3D2"
+            ),
+            "{rewritten}",
+        );
+        assert_absent(&rewritten, "%26amp%3B");
         Ok(())
     }
 

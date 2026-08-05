@@ -22,10 +22,19 @@ type HostAssetMessageEventFixture = {
 /** VM global shape needed to load the host asset without a browser. */
 type HostAssetTestContext = Record<string, unknown> & {
   RingsWebviewGateway?: unknown;
+  RingsWebviewHost?: {
+    readonly ensureReady: () => Promise<unknown>;
+    readonly shellPreparation: Promise<boolean>;
+    readonly takeDebugEntries: () => unknown[];
+  };
   readonly location: URL;
   readonly navigator: {
     readonly serviceWorker: {
       readonly addEventListener: (type: string, listener: (event: unknown) => void) => void;
+      readonly controller?: unknown;
+      readonly ready?: Promise<unknown>;
+      readonly register?: (url: string, options: { readonly scope: string }) => Promise<unknown>;
+      readonly removeEventListener?: (type: string, listener: (event: unknown) => void) => void;
     };
   };
   readonly crypto: {
@@ -41,6 +50,161 @@ type HostGatewayEvent = {
 };
 
 const globalThisKey = "globalThis";
+
+/** Verify a first installation reloads exactly once after claiming the current page. */
+async function verifyFirstInstallClaimsCurrentPage(hostAssetSource: string, hostAssetPath: string): Promise<void> {
+  let controller: unknown;
+  let controllerChangeListener: ((event: unknown) => void) | undefined;
+  let reloadCount = 0;
+  let resolveReload: (() => void) | undefined;
+  const reloaded = new Promise<void>((resolve) => {
+    resolveReload = resolve;
+  });
+  const activeWorker = { state: "activated" };
+  const registration = { active: activeWorker };
+  const location = Object.assign(new URL("http://127.0.0.1:8080/#node"), {
+    reload() {
+      reloadCount += 1;
+      resolveReload?.();
+    },
+  });
+  const context: HostAssetTestContext = {
+    console,
+    URL,
+    Uint8Array,
+    clearTimeout,
+    setInterval: () => 1,
+    setTimeout,
+    location,
+    navigator: {
+      serviceWorker: {
+        get controller() {
+          return controller;
+        },
+        ready: Promise.resolve(registration),
+        register(url, options) {
+          assert.equal(url, "/rings-webview-service-worker.js?gateway-host-protocol=5");
+          assert.equal(options.scope, "/");
+          setTimeout(() => {
+            controller = activeWorker;
+            controllerChangeListener?.({});
+          }, 0);
+          return Promise.resolve(registration);
+        },
+        addEventListener(type, listener) {
+          if (type === "controllerchange") {
+            controllerChangeListener = listener;
+          }
+        },
+        removeEventListener(type, listener) {
+          if (type === "controllerchange" && controllerChangeListener === listener) {
+            controllerChangeListener = undefined;
+          }
+        },
+      },
+    },
+    crypto: {
+      getRandomValues(values) {
+        values.fill(0x31);
+        return values;
+      },
+    },
+    addEventListener() {},
+  };
+  context[globalThisKey] = context;
+  vm.runInNewContext(hostAssetSource, context, {
+    filename: hostAssetPath,
+  });
+
+  assert(context.RingsWebviewHost, "host bridge was not installed");
+  assert.equal(await context.RingsWebviewHost.shellPreparation, true);
+  assert.equal(await context.RingsWebviewHost.ensureReady(), registration);
+  const reloadObserved = await Promise.race([
+    reloaded.then(() => true),
+    new Promise<false>((resolve) => setTimeout(() => resolve(false), 100)),
+  ]);
+  assert.equal(controller, activeWorker);
+  assert.equal(
+    reloadObserved,
+    true,
+    `first installation did not reload the claimed shell: ${JSON.stringify(context.RingsWebviewHost.takeDebugEntries())}`,
+  );
+  assert.equal(reloadCount, 1);
+}
+
+/** Verify a controlled shell records its trusted host capability before node startup. */
+async function verifyControlledShellPreRegistersGateway(hostAssetSource: string, hostAssetPath: string): Promise<void> {
+  const messages: unknown[] = [];
+  let reloadCount = 0;
+  class HostMessageChannel {
+    readonly port1: {
+      onmessage?: (event: { readonly data: unknown }) => void;
+      close: () => void;
+    };
+    readonly port2: { postMessage: (message: unknown) => void };
+
+    constructor() {
+      this.port1 = { close() {} };
+      this.port2 = {
+        postMessage: (message) => this.port1.onmessage?.({ data: message }),
+      };
+    }
+  }
+  const activeWorker = {
+    state: "activated",
+    postMessage(message: unknown, ports?: Array<{ postMessage: (message: unknown) => void }>) {
+      messages.push(message);
+      ports?.[0]?.postMessage({ ok: true });
+    },
+  };
+  const registration = { active: activeWorker };
+  const location = Object.assign(new URL("http://127.0.0.1:8080/#node"), {
+    reload() {
+      reloadCount += 1;
+    },
+  });
+  const context: HostAssetTestContext = {
+    console,
+    URL,
+    Uint8Array,
+    clearTimeout,
+    setInterval: () => 1,
+    setTimeout,
+    MessageChannel: HostMessageChannel,
+    location,
+    navigator: {
+      serviceWorker: {
+        controller: activeWorker,
+        ready: Promise.resolve(registration),
+        register: () => Promise.resolve(registration),
+        addEventListener() {},
+        removeEventListener() {},
+      },
+    },
+    crypto: {
+      getRandomValues(values) {
+        values.fill(0x52);
+        return values;
+      },
+    },
+    addEventListener() {},
+  };
+  context[globalThisKey] = context;
+  vm.runInNewContext(hostAssetSource, context, {
+    filename: hostAssetPath,
+  });
+
+  assert(context.RingsWebviewHost, "host bridge was not installed");
+  assert.equal(await context.RingsWebviewHost.shellPreparation, false);
+  assert.equal(reloadCount, 0);
+  const registrationMessages = messages.filter(
+    (message) => (message as { readonly type?: string }).type === "rings-webview-host-register",
+  );
+  assert.equal(registrationMessages.length, 1);
+  const registrationMessage = registrationMessages[0] as { readonly capability?: string; readonly type?: string };
+  assert.equal(registrationMessage.type, "rings-webview-host-register");
+  assert.equal(registrationMessage.capability?.length, 64);
+}
 
 /** Send one synthetic opener handoff request into the host asset VM. */
 function requestHostDebugCapability(
@@ -203,6 +367,9 @@ async function verifyHostGatewayCancellation(hostAssetSource: string, hostAssetP
 
 /** Verify trusted handoff, cancellation, and gateway failure behavior. */
 export async function verifyWebviewHostAsset(hostAssetSource: string, hostAssetPath: string): Promise<void> {
+  await verifyFirstInstallClaimsCurrentPage(hostAssetSource, hostAssetPath);
+  await verifyControlledShellPreRegistersGateway(hostAssetSource, hostAssetPath);
+
   const trustedResponses = requestHostDebugCapability(hostAssetSource, hostAssetPath, "http://127.0.0.1:8080/#webview");
   assert.equal(trustedResponses.length, 1);
   const response = trustedResponses[0] as {

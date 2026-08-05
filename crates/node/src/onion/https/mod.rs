@@ -13,6 +13,8 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 #[cfg(rings_native)]
+use std::net::IpAddr;
+#[cfg(rings_native)]
 use std::net::SocketAddr;
 #[cfg(rings_browser)]
 use std::rc::Rc;
@@ -83,9 +85,13 @@ use crate::onion::replay::OnionForwardReplayKey;
 use crate::onion::replay::OnionForwardReplayPartitions;
 use crate::onion::replay::ReplayAdmission;
 #[cfg(rings_native)]
-use crate::onion::target::resolve_public_target;
+use crate::onion::target::resolve_target_addresses;
+#[cfg(rings_native)]
+use crate::onion::target::select_public_exit_addresses;
 #[cfg(rings_browser)]
 use crate::onion::target::validate_public_ip_literal;
+#[cfg(rings_native)]
+use crate::onion::target::PublicAddressSelection;
 use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitFailure;
 use crate::onion::OnionExitPolicy;
@@ -619,6 +625,87 @@ struct FetchResponse {
     body: Vec<u8>,
 }
 
+/// Mutually exclusive native HTTPS egress strategies.
+///
+/// A direct request is allowed only after resolving and pinning public addresses. A proxied
+/// request deliberately delegates name resolution to an operator-configured upstream proxy; the
+/// explicit proxy object prevents reqwest from silently applying `NO_PROXY` and bypassing that
+/// trust boundary.
+#[cfg(rings_native)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum NativeHttpsEgress {
+    Direct {
+        host: String,
+        addresses: Vec<SocketAddr>,
+    },
+    Proxy(String),
+}
+
+#[cfg(rings_native)]
+impl NativeHttpsEgress {
+    fn configure(
+        &self,
+        builder: reqwest::ClientBuilder,
+    ) -> std::result::Result<reqwest::ClientBuilder, reqwest::Error> {
+        match self {
+            Self::Direct { host, addresses } => {
+                Ok(builder.no_proxy().resolve_to_addrs(host, addresses))
+            }
+            Self::Proxy(proxy) => reqwest::Proxy::all(proxy).map(|proxy| builder.proxy(proxy)),
+        }
+    }
+}
+
+/// Select native HTTPS egress from an immutable resolution result and proxy configuration.
+///
+/// Post: public resolution always selects a pinned direct path; only a hostname whose complete DNS
+/// snapshot is in the proxy fake-IP range may delegate resolution to an operator-configured proxy;
+/// every other non-public result remains denied.
+#[cfg(rings_native)]
+fn select_native_https_egress(
+    target: &OnionProxyTarget,
+    addresses: Vec<SocketAddr>,
+    configured_proxy: Option<String>,
+) -> Result<NativeHttpsEgress> {
+    let proxy_synthetic_resolution = target.host().parse::<IpAddr>().is_err()
+        && !addresses.is_empty()
+        && addresses
+            .iter()
+            .all(|address| is_native_proxy_synthetic_ip(address.ip()));
+    match select_public_exit_addresses(addresses) {
+        PublicAddressSelection::Public(addresses) => Ok(NativeHttpsEgress::Direct {
+            host: target.host().to_string(),
+            addresses,
+        }),
+        PublicAddressSelection::Denied if proxy_synthetic_resolution => configured_proxy
+            .map(NativeHttpsEgress::Proxy)
+            .ok_or(Error::NoPermission),
+        PublicAddressSelection::Denied => Err(Error::NoPermission),
+        PublicAddressSelection::Empty => Err(Error::OnionTargetResolvedEmpty {
+            authority: target.authority(),
+        }),
+    }
+}
+
+/// Return whether local DNS produced the narrow IPv4 range commonly reserved for proxy fake-IP
+/// synthesis. No other non-public address is eligible for proxy-side resolution.
+#[cfg(rings_native)]
+const fn is_native_proxy_synthetic_ip(address: IpAddr) -> bool {
+    matches!(address, IpAddr::V4(address) if matches!(address.octets(), [198, 18..=19, _, _]))
+}
+
+#[cfg(rings_native)]
+fn configured_https_proxy_from(mut read: impl FnMut(&str) -> Option<String>) -> Option<String> {
+    ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]
+        .into_iter()
+        .find_map(|name| read(name).filter(|value| !value.trim().is_empty()))
+}
+
+#[cfg(rings_native)]
+fn configured_https_proxy() -> Option<String> {
+    configured_https_proxy_from(|name| std::env::var(name).ok())
+}
+
 #[cfg(rings_native)]
 async fn execute_https_request(
     url: &str,
@@ -653,13 +740,14 @@ async fn native_fetch(
     runtime: &OnionHttpsRuntime,
     policy: &OnionExitPolicy,
 ) -> Result<FetchResponse> {
-    let addresses = resolve_public_target(target).await?;
+    let addresses = resolve_target_addresses(target).await?;
+    let egress = select_native_https_egress(target, addresses, configured_https_proxy())?;
     native_fetch_with_timeout(
         url,
         request,
         max_body_bytes,
         HTTPS_EXIT_REQUEST_TIMEOUT,
-        Some((target.host(), addresses.as_slice())),
+        &egress,
         |bytes| runtime.record_exit_bytes(policy, bytes),
     )
     .await
@@ -680,18 +768,17 @@ async fn native_fetch_with_timeout(
     request: &OnionHttpsRequest,
     max_body_bytes: u64,
     timeout: Duration,
-    pinned_resolution: Option<(&str, &[SocketAddr])>,
+    egress: &NativeHttpsEgress,
     record_bytes: impl Fn(u64) -> Result<()>,
 ) -> Result<FetchResponse> {
     let method = reqwest::Method::from_bytes(normalize_method(&request.method).as_bytes())
         .map_err(|error| Error::HttpRequestError(format!("invalid HTTPS proxy method: {error}")))?;
-    let mut client = reqwest::Client::builder()
+    let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .timeout(timeout);
-    if let Some((host, addresses)) = pinned_resolution {
-        client = client.resolve_to_addrs(host, addresses);
-    }
-    let client = client
+    let client = egress
+        .configure(client)
+        .map_err(|error| native_http_error("configure HTTPS proxy", error))?
         .build()
         .map_err(|error| Error::HttpRequestError(format!("build HTTPS proxy client: {error}")))?;
     let mut builder = client.request(method, url);

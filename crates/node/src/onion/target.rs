@@ -102,13 +102,7 @@ impl OnionProxyTarget {
 /// the destination after this admission decision.
 #[cfg(rings_native)]
 pub(crate) async fn resolve_public_target(target: &OnionProxyTarget) -> Result<Vec<SocketAddr>> {
-    let addresses = lookup_host((target.host(), target.port()))
-        .await
-        .map_err(|error| Error::OnionTargetResolve {
-            authority: target.authority(),
-            source: error,
-        })?
-        .collect::<Vec<_>>();
+    let addresses = resolve_target_addresses(target).await?;
     match select_public_exit_addresses(addresses) {
         PublicAddressSelection::Public(addresses) => Ok(addresses),
         PublicAddressSelection::Denied => Err(Error::NoPermission),
@@ -118,9 +112,25 @@ pub(crate) async fn resolve_public_target(target: &OnionProxyTarget) -> Result<V
     }
 }
 
+/// Resolve one target into a single DNS snapshot without assigning egress authority.
+///
+/// Callers must pass the complete snapshot through a closed address-selection policy before using
+/// it. Keeping resolution separate lets an explicitly configured proxy recognize its synthetic
+/// DNS placeholders without treating ordinary private or loopback results as public.
+#[cfg(rings_native)]
+pub(crate) async fn resolve_target_addresses(target: &OnionProxyTarget) -> Result<Vec<SocketAddr>> {
+    Ok(lookup_host((target.host(), target.port()))
+        .await
+        .map_err(|error| Error::OnionTargetResolve {
+            authority: target.authority(),
+            source: error,
+        })?
+        .collect())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[cfg(any(test, rings_native))]
-enum PublicAddressSelection {
+pub(crate) enum PublicAddressSelection {
     Empty,
     Denied,
     Public(Vec<SocketAddr>),
@@ -128,7 +138,7 @@ enum PublicAddressSelection {
 
 /// Select a stable, de-duplicated public projection from one DNS result snapshot.
 #[cfg(any(test, rings_native))]
-fn select_public_exit_addresses(addresses: Vec<SocketAddr>) -> PublicAddressSelection {
+pub(crate) fn select_public_exit_addresses(addresses: Vec<SocketAddr>) -> PublicAddressSelection {
     if addresses.is_empty() {
         return PublicAddressSelection::Empty;
     }

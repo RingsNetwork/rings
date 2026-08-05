@@ -7,6 +7,7 @@
   let ownsGatewayHost = false;
   let registrationPromise;
   let popupDebugCapabilityPromise;
+  let gatewayHostHeartbeat;
   const debugEntries = [];
   const pendingGatewayRequests = new Map();
 
@@ -83,12 +84,10 @@
   async function registration() {
     ensureServiceWorkerSupport();
     if (!registrationPromise) {
-      registrationPromise = navigator.serviceWorker
-        .register(workerUrl, { scope: "/" })
-        .then(async (activeRegistration) => {
-          await activeRegistration.update();
-          return activeRegistration;
-        });
+      // register() already runs the Service Worker update algorithm. Calling update() again here
+      // races the first installation before an active worker exists and can prevent clients.claim()
+      // from controlling the page until a manual reload.
+      registrationPromise = navigator.serviceWorker.register(workerUrl, { scope: "/" });
     }
     return registrationPromise;
   }
@@ -113,6 +112,15 @@
 
   function isWebviewShell() {
     return isTrustedWebviewShellUrl(globalThis.location?.href || "");
+  }
+
+  function isGatewayHostShell() {
+    const parsed = sameOriginUrl(globalThis.location?.href || "");
+    return Boolean(
+      parsed &&
+        (parsed.pathname === "/" || parsed.pathname === "/index.html") &&
+        !parsed.hash.startsWith("#webview"),
+    );
   }
 
   function isTrustedWebviewShellWindow(source) {
@@ -180,8 +188,34 @@
     const activeRegistration = await registration();
     await navigator.serviceWorker.ready;
     await waitForController();
-    recordDebug("popup", "Service Worker controls this popup");
+    recordDebug("host", "Service Worker controls this page");
     return activeRegistration;
+  }
+
+  function prepareGatewayHostShell() {
+    if (!navigator.serviceWorker || !isGatewayHostShell()) {
+      return Promise.resolve(false);
+    }
+    const controlledAtLoad = Boolean(navigator.serviceWorker.controller);
+    return ensureReady()
+      .then(async () => {
+        if (!controlledAtLoad && isGatewayHostShell()) {
+          // A newly claimed page did not cross the worker's fetch boundary, so it cannot yet hold
+          // the trusted-shell witness required for gateway registration. Reload exactly once under
+          // worker control rather than weakening that security predicate to a URL-only check.
+          globalThis.location.reload();
+          return true;
+        }
+        // Register the trusted shell while the navigation witness is fresh. The Rust gateway may
+        // be installed later; re-registering the same client/capability after node startup is
+        // idempotent and avoids depending on incidental Service Worker lifetime.
+        await registerGatewayHost();
+        return false;
+      })
+      .catch((error) => {
+        recordDebug("host", `Service Worker preparation failed: ${String(error)}`, "warning");
+        return false;
+      });
   }
 
   async function registerGatewayHost() {
@@ -196,11 +230,34 @@
     });
     ownsGatewayHost = Boolean(acknowledged);
     if (acknowledged) {
+      startGatewayHostHeartbeat();
       recordDebug("host", "Registered the local Rings node as gateway host");
       return true;
     }
     recordDebug("host", "Service Worker rejected gateway host registration", "warning");
     throw new Error("Service Worker rejected gateway host registration");
+  }
+
+  function startGatewayHostHeartbeat() {
+    if (gatewayHostHeartbeat !== undefined) {
+      return;
+    }
+    gatewayHostHeartbeat = globalThis.setInterval(() => {
+      const worker = navigator.serviceWorker?.controller;
+      if (!worker) {
+        ownsGatewayHost = false;
+        return;
+      }
+      void postWorkerMessage(worker, {
+        type: "rings-webview-host-register",
+        capability: gatewayHostCapability,
+      }).then((acknowledged) => {
+        ownsGatewayHost = Boolean(acknowledged);
+        if (!acknowledged) {
+          recordDebug("host", "Service Worker rejected gateway host lease renewal", "warning");
+        }
+      });
+    }, 20_000);
   }
 
   async function enableDebug() {
@@ -381,8 +438,10 @@
       });
   });
 
+  const shellPreparation = prepareGatewayHostShell();
   globalThis.RingsWebviewHost = Object.freeze({
     ensureReady,
+    shellPreparation,
     registerGatewayHost,
     enableDebug,
     recordDebugEntry: recordDebug,
