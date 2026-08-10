@@ -457,7 +457,7 @@ impl SwarmTransport {
         Ok(true)
     }
 
-    #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn begin_connection_admission_for_test(
         &self,
         attempt: PendingConnectionAttempt,
