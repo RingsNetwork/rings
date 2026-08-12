@@ -1,8 +1,8 @@
 //! End-to-end policy flow coverage for the webview gateway.
 #![cfg(feature = "browser")]
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 use rings_webview::browser::bootstrap_script;
@@ -23,16 +23,23 @@ use url::Url;
 
 #[derive(Clone, Default)]
 struct FixtureLog {
-    requests: Rc<RefCell<Vec<GatewayRequest>>>,
+    requests: Arc<Mutex<Vec<GatewayRequest>>>,
 }
 
 impl FixtureLog {
-    fn push(&self, request: GatewayRequest) {
-        self.requests.borrow_mut().push(request);
+    fn push(&self, request: GatewayRequest) -> Result<()> {
+        self.requests
+            .lock()
+            .map_err(|error| WebviewError::transport(format!("fixture log poisoned: {error}")))?
+            .push(request);
+        Ok(())
     }
 
-    fn requests(&self) -> Vec<GatewayRequest> {
-        self.requests.borrow().clone()
+    fn requests(&self) -> Result<Vec<GatewayRequest>> {
+        self.requests
+            .lock()
+            .map(|requests| requests.clone())
+            .map_err(|error| WebviewError::transport(format!("fixture log poisoned: {error}")))
     }
 }
 
@@ -55,7 +62,7 @@ impl GatewayTransport for FixtureTransport {
         _body_limit: rings_webview::GatewayResponseBodyLimit,
     ) -> Result<GatewayResponse> {
         let target = request.target.clone();
-        self.log.push(request);
+        self.log.push(request)?;
 
         match target.as_str() {
             "https://example.test/docs/index.html" => response(
@@ -215,7 +222,7 @@ fn webview_gateway_renders_and_routes_page_flow() -> Result<()> {
         "https://example.test/login"
     );
 
-    let requests = log.requests();
+    let requests = log.requests()?;
     assert!(requests.iter().all(|request| {
         matches!(request.target.scheme(), "http" | "https")
             && !request.target.as_str().starts_with(prefix.as_str())

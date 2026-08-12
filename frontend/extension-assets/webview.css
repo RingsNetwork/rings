@@ -1,0 +1,164 @@
+:root {
+  color-scheme: dark;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #020c10;
+  color: #d8fbff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+}
+
+body {
+  display: grid;
+  grid-template-rows: auto 3px auto minmax(0, 1fr);
+  background: #020c10;
+}
+
+.webview-toolbar {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(0, 229, 255, 0.18);
+  background: #06171d;
+}
+
+.webview-history,
+.webview-address-form {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+button,
+input {
+  height: 34px;
+  border: 1px solid rgba(138, 218, 231, 0.28);
+  border-radius: 7px;
+  color: #d8fbff;
+  background: #0a222a;
+}
+
+button {
+  min-width: 36px;
+  padding: 0 12px;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+button:hover:not(:disabled) {
+  border-color: #00e5ff;
+  background: #10333d;
+}
+
+button:disabled {
+  opacity: 0.38;
+  cursor: default;
+}
+
+input {
+  flex: 1;
+  min-width: 0;
+  padding: 0 11px;
+  outline: none;
+}
+
+input:focus {
+  border-color: #00e5ff;
+  box-shadow: 0 0 0 2px rgba(0, 229, 255, 0.12);
+}
+
+.onion-badge {
+  flex: none;
+  padding: 4px 7px;
+  border: 1px solid rgba(84, 255, 208, 0.42);
+  border-radius: 999px;
+  color: #54ffd0;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.webview-progress {
+  overflow: hidden;
+  background: rgba(0, 229, 255, 0.07);
+}
+
+.webview-progress span {
+  display: none;
+  width: 35%;
+  height: 100%;
+  background: linear-gradient(90deg, #00e5ff, #54ffd0);
+  animation: rings-webview-progress 1s ease-in-out infinite;
+}
+
+body[data-loading="true"] .webview-progress span {
+  display: block;
+}
+
+@keyframes rings-webview-progress {
+  from {
+    transform: translateX(-110%);
+  }
+  to {
+    transform: translateX(320%);
+  }
+}
+
+.webview-status {
+  min-height: 27px;
+  margin: 0;
+  padding: 5px 12px;
+  overflow: hidden;
+  color: #8adae7;
+  background: #041218;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.webview-status[data-error="true"] {
+  color: #ff9b9b;
+}
+
+.webview-content {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  background: #fff;
+}
+
+.webview-frame {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #fff;
+}
+
+.webview-frame-staging {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+@media (max-width: 700px) {
+  .webview-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .webview-history {
+    display: none;
+  }
+}

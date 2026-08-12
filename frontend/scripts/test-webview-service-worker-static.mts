@@ -15,7 +15,7 @@ export type WorkerRequestApi = {
     request: {
       readonly method: string;
       readonly headers: Headers;
-      readonly body: ReadableStream<Uint8Array> | null;
+      readonly body: ReadableStream<ArrayBuffer | ArrayBufferView> | null;
     },
     signal?: AbortSignal,
   ) => Promise<ArrayBuffer | undefined>;
@@ -23,6 +23,7 @@ export type WorkerRequestApi = {
     readonly method: string;
     readonly headers: Headers;
   }) => void;
+  readonly workerRuntimeSource: string;
 };
 
 /** Dependencies shared with the stateful Service Worker VM harness. */
@@ -56,6 +57,7 @@ export async function runStaticServiceWorkerTests({
     const limit = workerRequestApi.gatewayRequestBodyLimitBytes;
     assert.equal(workerRequestApi.gatewayRequestMayHaveBody({ method: "GET" }), false);
     assert.equal(workerRequestApi.gatewayRequestMayHaveBody({ method: "POST" }), true);
+    assert.match(workerRequestApi.workerRuntimeSource, /readGatewayRequestBody/);
     const requestWithChunks = (chunks: Uint8Array[]) => ({
       method: "POST",
       headers: new Headers(),
@@ -83,16 +85,16 @@ export async function runStaticServiceWorkerTests({
 
     const storage = Uint8Array.from([0x10, 0x20, 0x30, 0x40, 0x50, 0x60]);
     const view = new Uint16Array(storage.buffer, 2, 2);
-    const viewRequest = {
+    const viewRequest: Parameters<typeof workerRequestApi.readGatewayRequestBody>[0] = {
       method: "POST",
       headers: new Headers(),
-      body: new ReadableStream({
+      body: new ReadableStream<ArrayBufferView>({
         start(controller) {
           controller.enqueue(view);
           controller.close();
         },
       }),
-    } as unknown as Parameters<typeof workerRequestApi.readGatewayRequestBody>[0];
+    };
     const viewed = await workerRequestApi.readGatewayRequestBody(viewRequest);
     assert.deepEqual(
       Array.from(new Uint8Array(viewed ?? new ArrayBuffer(0))),

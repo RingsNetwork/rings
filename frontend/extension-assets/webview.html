@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Rings Onion WebView</title>
+    <link rel="stylesheet" href="./webview.css" />
+  </head>
+  <body>
+    <header class="webview-toolbar">
+      <nav class="webview-history" aria-label="WebView history">
+        <button id="webview-back" type="button" aria-label="Back" disabled>←</button>
+        <button id="webview-forward" type="button" aria-label="Forward" disabled>→</button>
+        <button id="webview-reload" type="button" aria-label="Reload" disabled>↻</button>
+      </nav>
+      <form id="webview-address-form" class="webview-address-form">
+        <span class="onion-badge" aria-label="Rings onion route">ONION</span>
+        <input
+          id="webview-address"
+          type="text"
+          inputmode="url"
+          autocomplete="off"
+          spellcheck="false"
+          aria-label="HTTPS address"
+        />
+        <button type="submit">Open</button>
+      </form>
+    </header>
+    <div class="webview-progress" aria-hidden="true"><span></span></div>
+    <p id="webview-status" class="webview-status" role="status">Preparing network isolation…</p>
+    <main class="webview-content">
+      <iframe
+        id="webview-frame"
+        class="webview-frame"
+        title="Onion WebView content"
+        src="./webview_frame.html"
+        sandbox="allow-scripts allow-forms allow-modals"
+      ></iframe>
+    </main>
+    <script type="module" src="./node_bridge.js"></script>
+    <script type="module" src="./extension_webview.js"></script>
+  </body>
+</html>

@@ -121,10 +121,13 @@ export type ServiceWorkerTestApi = {
   readonly sourceTargetForClient: (clientId: string | undefined) => Promise<string | undefined>;
 };
 
+/** Timer handle accepted by both the Node VM host and deterministic numeric fixture. */
+type ServiceWorkerTimerHandle = ReturnType<typeof setTimeout> | number;
+
 /** VM global shape needed to load the service worker without a browser. */
 export type ServiceWorkerTestContext = Record<string, unknown> & {
-  setTimeout: typeof setTimeout;
-  clearTimeout: typeof clearTimeout;
+  setTimeout: (callback: () => void, delay?: number) => ServiceWorkerTimerHandle;
+  clearTimeout: (handle?: ServiceWorkerTimerHandle) => void;
   importScripts: (...urls: string[]) => void;
   self: {
     readonly location: URL;
@@ -133,6 +136,7 @@ export type ServiceWorkerTestContext = Record<string, unknown> & {
       get: (clientId: string) => Promise<ServiceWorkerClientFixture | undefined>;
       matchAll: () => Promise<ServiceWorkerClientFixture[]>;
     };
+    RingsWebviewWorkerRequest?: unknown;
   };
   __ringsWebviewGatewayHostLifetimeMs?: number;
   __ringsWebviewServiceWorkerTest?: ServiceWorkerTestApi;
@@ -146,13 +150,11 @@ export function captureTimeoutCallbacks(context: ServiceWorkerTestContext): {
   const originalSetTimeout = context.setTimeout;
   const originalClearTimeout = context.clearTimeout;
   const callbacks: Array<() => void> = [];
-  context.setTimeout = ((callback: TimerHandler) => {
-    if (typeof callback === "function") {
-      callbacks.push(() => callback());
-    }
+  context.setTimeout = (callback: () => void): number => {
+    callbacks.push(callback);
     return callbacks.length;
-  }) as unknown as typeof setTimeout;
-  context.clearTimeout = (() => {}) as unknown as typeof clearTimeout;
+  };
+  context.clearTimeout = (): void => {};
   return {
     callbacks,
     restore() {

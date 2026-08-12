@@ -14,6 +14,7 @@ use js_sys::Reflect;
 use js_sys::Uint8Array;
 use rings_node::provider::Provider;
 use rings_webview::browser::bootstrap_script;
+use rings_webview::browser::bootstrap_script_with_extension_bridge;
 use rings_webview::ConcurrentWebviewGateway;
 use rings_webview::GatewayCredentials;
 use rings_webview::GatewayFailure;
@@ -99,7 +100,7 @@ impl Default for WebviewOnionSettings {
     }
 }
 
-async fn dispatch_browser_request(gateway: WebviewNode, request: JsValue) -> JsValue {
+pub(crate) async fn dispatch_browser_request(gateway: WebviewNode, request: JsValue) -> JsValue {
     let request = match browser_host_request(&request) {
         Ok(request) => request,
         Err(error) => return browser_failure(400, error),
@@ -541,8 +542,27 @@ impl WebviewNode {
             Rc::new((*provider).clone()),
             controlled_origin,
             onion_settings,
+            web_shell_bootstrap,
         )
         .map(Some)
+    }
+
+    /// Build the gateway owned by the retained MV3 node.
+    ///
+    /// The origin is a routing witness only. Extension documents never navigate to it: the
+    /// trusted extension window sends typed requests to the offscreen node, while an opaque
+    /// sandbox renders the returned bytes.
+    pub(crate) fn for_extension(
+        provider: Arc<Provider>,
+        onion_settings: WebviewOnionSettings,
+    ) -> WebviewResult<Self> {
+        let controlled_origin = TargetUrl::parse("https://rings-webview.invalid/")?;
+        Self::new(
+            Rc::new((*provider).clone()),
+            controlled_origin,
+            onion_settings,
+            extension_webview_bootstrap,
+        )
     }
 
     /// Handle a browser request after the host has captured it before connection dispatch.
@@ -554,6 +574,7 @@ impl WebviewNode {
         provider: Rc<Provider>,
         controlled_origin: TargetUrl,
         onion_settings: WebviewOnionSettings,
+        request_bootstrap: fn(&GatewayRequest) -> String,
     ) -> WebviewResult<Self> {
         let prefix = GatewayPrefix::new(GATEWAY_PREFIX)?;
         let policy = GatewayRoutePolicy::new(controlled_origin.into_url(), prefix.clone())?;
@@ -561,7 +582,7 @@ impl WebviewNode {
             provider,
             onion_settings,
         })
-        .with_request_bootstrap(webview_bootstrap);
+        .with_request_bootstrap(request_bootstrap);
         Ok(Self {
             host: Rc::new(WebviewGatewayHost {
                 policy,
@@ -899,13 +920,17 @@ fn gateway_kind_label(kind: GatewayRequestKind) -> &'static str {
     }
 }
 
-fn webview_bootstrap(request: &GatewayRequest) -> String {
+fn web_shell_bootstrap(request: &GatewayRequest) -> String {
     let bootstrap = bootstrap_script(GATEWAY_PREFIX, &request.target);
     if request.top_level_navigation {
         format!("{bootstrap}\n{WEBVIEW_OVERLAY_LOADER}")
     } else {
         bootstrap
     }
+}
+
+fn extension_webview_bootstrap(request: &GatewayRequest) -> String {
+    bootstrap_script_with_extension_bridge(GATEWAY_PREFIX, &request.target)
 }
 
 fn is_http_origin(origin: &str) -> bool {

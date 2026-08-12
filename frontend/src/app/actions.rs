@@ -272,7 +272,7 @@ impl StartAction {
         match extension::operation_timeout(
             "session authorization",
             extension::SESSION_AUTH_TIMEOUT,
-            node::build_node(account, settings),
+            node::build_node(account, settings, node::WebviewHost::CurrentWindow),
         )
         .await
         {

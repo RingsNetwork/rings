@@ -115,11 +115,25 @@
     return error instanceof GatewayRequestBodyTooLarge;
   }
 
+  // The generated Worker facades execute in a separate realm and cannot import
+  // functions from the document. Serialize this exact implementation so every
+  // browser adapter preserves the same request-body bound.
+  const workerRuntimeSource = [
+    `const gatewayRequestBodyLimitBytes = ${gatewayRequestBodyLimitBytes};`,
+    GatewayRequestBodyTooLarge.toString(),
+    gatewayRequestMayHaveBody.toString(),
+    validateGatewayRequestBodyMetadata.toString(),
+    readGatewayRequestBody.toString(),
+    byteView.toString(),
+    rejectOversizedDeclaredBody.toString(),
+  ].join("\n");
+
   self.RingsWebviewWorkerRequest = Object.freeze({
     gatewayRequestBodyLimitBytes,
     gatewayRequestMayHaveBody,
     isGatewayRequestBodyTooLarge,
     readGatewayRequestBody,
     validateGatewayRequestBodyMetadata,
+    workerRuntimeSource,
   });
 })();

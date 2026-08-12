@@ -27,7 +27,7 @@ pub struct DemoNode {
     pub provider: Arc<Provider>,
     /// SNARK behaviour and task store.
     pub snark: SNARKBehaviour,
-    /// Controlled webview gateway attached to this browser node when its host origin is HTTP(S).
+    /// Controlled webview gateway attached through an HTTP(S) host or the extension adapter.
     pub webview: Option<WebviewNode>,
     listener: ProviderListener,
 }
@@ -46,10 +46,7 @@ impl DemoNode {
     /// Return the controlled webview gateway attached to this browser node.
     pub fn webview(&self) -> WebviewResult<WebviewNode> {
         self.webview.clone().ok_or_else(|| {
-            WebviewError::Browser(
-                "webview requires an HTTP(S) frontend origin; it is unavailable in this host"
-                    .to_string(),
-            )
+            WebviewError::Browser("webview gateway is unavailable in this host".to_string())
         })
     }
 }
@@ -107,6 +104,15 @@ pub struct NodeSettings {
     pub webview_onion_settings: WebviewOnionSettings,
 }
 
+/// Closed set of browser hosts that own a node-scoped WebView gateway.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WebviewHost {
+    /// A Service Worker-controlled HTTP(S) application window.
+    CurrentWindow,
+    /// The retained MV3 offscreen node and its trusted popup adapter.
+    Extension,
+}
+
 /// Build a browser provider from a wallet-authorized session key.
 ///
 /// The browser provider is used only on the single-threaded wasm event loop, but
@@ -116,6 +122,7 @@ pub struct NodeSettings {
 pub async fn build_node(
     wallet: &WalletAccount,
     settings: NodeSettings,
+    webview_host: WebviewHost,
 ) -> Result<DemoNode, String> {
     let mut builder = SessionSkBuilder::new(wallet.account.clone(), wallet.account_type.clone());
     let proof = builder.unsigned_proof();
@@ -140,9 +147,15 @@ pub async fn build_node(
     snark
         .register(&provider)
         .map_err(|error| format!("register snark protocol: {error}"))?;
-    let webview =
-        WebviewNode::for_current_window(provider.clone(), settings.webview_onion_settings)
-            .map_err(|error| format!("initialize webview: {error}"))?;
+    let webview = match webview_host {
+        WebviewHost::CurrentWindow => {
+            WebviewNode::for_current_window(provider.clone(), settings.webview_onion_settings)
+        }
+        WebviewHost::Extension => {
+            WebviewNode::for_extension(provider.clone(), settings.webview_onion_settings).map(Some)
+        }
+    }
+    .map_err(|error| format!("initialize webview: {error}"))?;
     let listener = provider.listen();
 
     Ok(DemoNode {

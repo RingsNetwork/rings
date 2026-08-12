@@ -1,5 +1,11 @@
 ;(function(config) {
   const { prefix, targetBase, marker } = config;
+  const shellNavigation = config.delegateNavigation === true
+    ? globalThis.__ringsWebviewShellNavigation
+    : undefined;
+  if (config.delegateNavigation === true) {
+    try { delete globalThis.__ringsWebviewShellNavigation; } catch (_error) {}
+  }
   try { delete globalThis.__ringsWebviewBootstrapConfig; } catch (_error) {}
   const runtimePrefix = `${prefix.replace(/\/$/, "")}-runtime/`;
   const runtimeTargetHeader = "X-Rings-Webview-Target";
@@ -49,8 +55,13 @@
     return { url: runtimeGatewayPath(), target };
   }
   function requestShellNavigation(input) {
-    void input;
-    return false;
+    if (typeof shellNavigation !== "function") return false;
+    try {
+      return shellNavigation(String(input)) === true;
+    } catch (error) {
+      reportFormNavigation(`Host navigation failed: ${String(error)}`);
+      return false;
+    }
   }
   function reportFormNavigation(message) {
     try {
@@ -353,11 +364,12 @@
     return url;
   }
   function navigateGetForm(form, submitter) {
-    if (String(form?.method || "get").toUpperCase() !== "GET") {
+    const method = String(submitter?.formMethod || form?.method || "get").trim().toUpperCase();
+    if (method !== "GET") {
       reportFormNavigation("Skipped non-GET form submission");
       return false;
     }
-    const targetName = String(form?.target || "").trim().toLowerCase();
+    const targetName = String(submitter?.formTarget || form?.target || "").trim().toLowerCase();
     if (targetName && targetName !== "_self") {
       reportFormNavigation(`Skipped form submission targeting ${targetName}`);
       return false;
@@ -392,10 +404,12 @@
     const document = globalThis.document;
     if (document?.addEventListener) {
       const intercept = function(event, form, submitter) {
-        if (!navigateGetForm(form, submitter)) return false;
+        if (!form) return false;
+        const navigated = navigateGetForm(form, submitter);
+        if (!navigated && config.delegateNavigation !== true) return false;
         event.preventDefault();
         event.stopImmediatePropagation?.();
-        return true;
+        return navigated;
       };
       document.addEventListener("keydown", function(event) {
         if (event.defaultPrevented || event.isComposing || event.key !== "Enter") return;
@@ -425,7 +439,7 @@
     const nativeSubmit = proto?.submit;
     if (typeof nativeSubmit === "function") {
       proto.submit = function() {
-        if (navigateGetForm(this, undefined)) return;
+        if (navigateGetForm(this, undefined) || config.delegateNavigation === true) return;
         return nativeSubmit.call(this);
       };
     }
@@ -475,8 +489,10 @@
   }
   blockUnsupportedConstructor("WebSocket");
   blockUnsupportedConstructor("EventSource");
-  blockUnsupportedConstructor("Worker");
-  blockUnsupportedConstructor("SharedWorker");
+  if (config.blockWorkers !== false) {
+    blockUnsupportedConstructor("Worker");
+    blockUnsupportedConstructor("SharedWorker");
+  }
   if (globalThis.navigator?.sendBeacon) {
     globalThis.navigator.sendBeacon = function() {
       return false;

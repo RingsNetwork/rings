@@ -106,6 +106,11 @@ jobs:
       - name: Build Rings frontend extension package
         run: npm run package:frontend-extension
 
+      - name: Test Rings extension Onion WebView
+        run: |
+          xvfb-run -a node frontend/.generated/scripts/test-extension-webview.mjs
+          xvfb-run -a node frontend/.generated/scripts/test-extension-webview-regressions.mjs
+
       - name: Check Rings frontend
         run: cargo check --target=wasm32-unknown-unknown
         working-directory: ./frontend

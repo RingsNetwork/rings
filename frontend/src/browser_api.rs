@@ -92,6 +92,13 @@ pub(crate) fn open_debug_url(url: &str) -> Result<DebugUrlOpenResult, String> {
 /// The caller supplies no remote target here: remote addresses are entered only inside the
 /// controlled shell and become `/webview/` paths before the top-level document receives them.
 pub(crate) fn open_webview_popup() -> Result<(), String> {
+    if let Ok(bridge) = js_global_prop("RingsExtensionNodeBridge") {
+        if is_callable(&bridge, "openWebview") {
+            let opened = js_call0(&bridge, "openWebview")?;
+            observe_promise_rejection(opened);
+            return Ok(());
+        }
+    }
     let window = web_sys::window().ok_or_else(|| "window unavailable".to_string())?;
     let location = window.location();
     let mut url = location.origin().map_err(js_error_label)?;

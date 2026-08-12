@@ -58,13 +58,25 @@ fn fixture_host() -> WebviewResult<(FixtureHost, RecordedRequests)> {
     let host = WebviewGatewayHost {
         policy,
         gateway: ConcurrentWebviewGateway::new(prefix, FixtureTransport::new(requests.clone()))
-            .with_request_bootstrap(webview_bootstrap),
+            .with_request_bootstrap(web_shell_bootstrap),
         limiter: GatewayRequestLimiter::new(
             MAX_CONCURRENT_GATEWAY_REQUESTS,
             MAX_QUEUED_GATEWAY_REQUESTS,
         ),
     };
     Ok((host, requests))
+}
+
+#[wasm_bindgen_test]
+fn extension_bootstrap_omits_web_overlay_and_preserves_worker_bridge() -> WebviewResult<()> {
+    let request = GatewayRequest::navigation(TargetUrl::parse("https://example.test/")?.into_url());
+
+    let bootstrap = extension_webview_bootstrap(&request);
+
+    assert!(!bootstrap.contains("data-rings-webview-overlay-loader"));
+    assert!(bootstrap.contains("\"blockWorkers\":false"));
+    assert!(bootstrap.contains("\"delegateNavigation\":true"));
+    Ok(())
 }
 
 #[wasm_bindgen_test]

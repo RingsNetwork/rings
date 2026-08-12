@@ -114,11 +114,8 @@ const {
   resetGatewayHostForTest,
   sourceTargetForClient,
 } = serviceWorkerApi;
-const workerRequestApi = (
-  context.self as unknown as {
-    readonly RingsWebviewWorkerRequest: WorkerRequestApi;
-  }
-).RingsWebviewWorkerRequest;
+const workerRequestApi = context.self.RingsWebviewWorkerRequest;
+assertWorkerRequestApi(workerRequestApi);
 
 await runStaticServiceWorkerTests({
   api: serviceWorkerApi,
@@ -128,6 +125,28 @@ await runStaticServiceWorkerTests({
   hostAssetSource,
   workerRequestApi,
 });
+
+/** Narrows the asset-installed request reader before invoking its VM boundary. */
+function assertWorkerRequestApi(value: unknown): asserts value is WorkerRequestApi {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !("gatewayRequestBodyLimitBytes" in value) ||
+    typeof value.gatewayRequestBodyLimitBytes !== "number" ||
+    !("gatewayRequestMayHaveBody" in value) ||
+    typeof value.gatewayRequestMayHaveBody !== "function" ||
+    !("isGatewayRequestBodyTooLarge" in value) ||
+    typeof value.isGatewayRequestBodyTooLarge !== "function" ||
+    !("readGatewayRequestBody" in value) ||
+    typeof value.readGatewayRequestBody !== "function" ||
+    !("validateGatewayRequestBodyMetadata" in value) ||
+    typeof value.validateGatewayRequestBodyMetadata !== "function" ||
+    !("workerRuntimeSource" in value) ||
+    typeof value.workerRuntimeSource !== "string"
+  ) {
+    throw new TypeError("WebView Worker request API fixture is invalid");
+  }
+}
 
 {
   const held = await Promise.all(Array.from({ length: 6 }, () => acquireGatewayBodyPermit()));
@@ -236,7 +255,7 @@ async function dispatchMessage(clientId: string, data: unknown): Promise<unknown
 
 {
   // A reclaimed worker has no durable popup-to-host proof. It must not bind a
-  // gateway request to any currently open #node page merely to recover state.
+  // gateway request to a currently open #node page merely to recover state.
   resetGatewayHostForTest();
   clientsById.clear();
   const hostMessages: unknown[] = [];

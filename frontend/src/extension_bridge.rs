@@ -138,6 +138,8 @@ pub(crate) fn extension_node_bridge() -> Option<JsValue> {
         || !is_callable(&bridge, "connectHttp")
         || !is_callable(&bridge, "onionProxyRoute")
         || !is_callable(&bridge, "onionProxyRequest")
+        || !is_callable(&bridge, "webviewRequest")
+        || !is_callable(&bridge, "openWebview")
     {
         return None;
     }

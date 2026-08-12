@@ -68,6 +68,7 @@ const EXTENSION_NODE_ANSWER_OFFER: &str = "rings.node.answerOffer";
 const EXTENSION_NODE_ACCEPT_ANSWER: &str = "rings.node.acceptAnswer";
 const EXTENSION_NODE_ONION_ROUTE: &str = "rings.node.onionProxyRoute";
 const EXTENSION_NODE_ONION_REQUEST: &str = "rings.node.onionProxyRequest";
+const EXTENSION_NODE_WEBVIEW_REQUEST: &str = "rings.node.webviewRequest";
 pub(crate) const SETTING_WALLET_KIND: &str = "rings.frontend.walletKind";
 pub(crate) const SETTING_NETWORK_ID: &str = "rings.frontend.networkId";
 pub(crate) const SETTING_ICE_SERVERS: &str = "rings.frontend.iceServers";
@@ -253,6 +254,7 @@ async fn handle_headless_node_message(
         EXTENSION_NODE_ACCEPT_ANSWER => accept_headless_answer(state, &message).await,
         EXTENSION_NODE_ONION_ROUTE => route_headless_onion_proxy(state, &message).await,
         EXTENSION_NODE_ONION_REQUEST => request_headless_onion_proxy(state, &message).await,
+        EXTENSION_NODE_WEBVIEW_REQUEST => request_headless_webview(state, message).await,
         _ => Err(format!("unknown node message type {message_type}")),
     }
 }
@@ -398,7 +400,7 @@ async fn build_headless_node(
     operation_timeout(
         "session authorization",
         SESSION_AUTH_TIMEOUT,
-        node::build_node(account, node_settings),
+        node::build_node(account, node_settings, node::WebviewHost::Extension),
     )
     .await
 }
@@ -599,6 +601,17 @@ async fn request_headless_onion_proxy(
         .map_err(|error| error.to_string())?;
     ensure_headless_generation_current(&handle.generation)?;
     response.to_js()
+}
+
+async fn request_headless_webview(
+    state: Rc<RefCell<HeadlessNodeState>>,
+    message: JsValue,
+) -> Result<JsValue, String> {
+    let handle = headless_demo_node(&state)?;
+    let gateway = handle.node.webview().map_err(|error| error.to_string())?;
+    let response = crate::webview::dispatch_browser_request(gateway, message).await;
+    ensure_headless_generation_current(&handle.generation)?;
+    Ok(response)
 }
 
 fn headless_demo_node(state: &Rc<RefCell<HeadlessNodeState>>) -> Result<HeadlessDemoNode, String> {

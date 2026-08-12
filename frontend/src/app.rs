@@ -603,7 +603,10 @@ fn render_console_shell(ctx: AppRenderContext<'_>, header: Html) -> Html {
     let link_control = render_link_control(ctx.node, ctx.link, ctx.shell);
     let workbench_body = render_workbench_body(&ctx);
     let dialog_actions = dialog_actions(ctx.shell);
-    let webview_availability = webview_availability(*ctx.node.webview_ready);
+    let webview_availability = webview_availability(
+        webview_gateway_ready(ctx.extension_mode, &ctx.node.did, *ctx.node.webview_ready),
+        ctx.extension_mode,
+    );
     let workbench_control = controls::workbench_control(
         *ctx.shell.active_panel,
         ctx.shell.active_panel.clone(),
@@ -613,7 +616,7 @@ fn render_console_shell(ctx: AppRenderContext<'_>, header: Html) -> Html {
         true,
         ctx.extension_mode,
     );
-    let webview_control = (!ctx.extension_mode).then(|| {
+    let webview_control = Some({
         let status = ctx.node.status.clone();
         let ready = webview_availability.ready;
         controls::webview_control(
@@ -661,9 +664,22 @@ fn console_shell_class(extension_mode: bool) -> &'static str {
     }
 }
 
-fn webview_availability(gateway_ready: bool) -> WebviewAvailability {
+fn webview_gateway_ready(extension_mode: bool, node_did: &str, local_gateway_ready: bool) -> bool {
+    if extension_mode {
+        !node_did.is_empty()
+    } else {
+        local_gateway_ready
+    }
+}
+
+fn webview_availability(gateway_ready: bool, extension_mode: bool) -> WebviewAvailability {
     if !gateway_ready {
-        let reason = "WebView is available after the local gateway is ready".to_string();
+        let reason = if extension_mode {
+            "WebView is available after the extension node is online"
+        } else {
+            "WebView is available after the local gateway is ready"
+        }
+        .to_string();
         return WebviewAvailability {
             ready: false,
             unavailable_reason: reason,
@@ -960,7 +976,7 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn webview_gateway_unready_disables_the_control() {
-        let availability = webview_availability(false);
+        let availability = webview_availability(false, false);
 
         assert!(!availability.ready);
         assert_eq!(
@@ -972,11 +988,29 @@ mod tests {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn webview_gateway_readiness_does_not_guess_onion_routes_from_direct_peers() {
-        let availability = webview_availability(true);
+        let availability = webview_availability(true, false);
 
         assert_eq!(availability, WebviewAvailability {
             ready: true,
             unavailable_reason: String::new(),
         });
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn extension_webview_requires_an_online_node_identity() {
+        assert!(!webview_gateway_ready(true, "", true));
+        assert!(webview_gateway_ready(true, "did:ring:online", false));
+        assert_eq!(
+            webview_availability(false, true).unavailable_reason,
+            "WebView is available after the extension node is online"
+        );
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn browser_webview_uses_the_local_gateway_witness() {
+        assert!(!webview_gateway_ready(false, "did:ring:online", false));
+        assert!(webview_gateway_ready(false, "", true));
     }
 }

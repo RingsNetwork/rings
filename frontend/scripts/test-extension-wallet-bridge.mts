@@ -75,13 +75,6 @@ type ExtensionPageGlobal = typeof globalThis & {
 };
 
 /**
- * Fixture-page helper exposed by wallet-fixture.html.
- */
-type FixtureWindow = Window & {
-  __ringsFixtureChooseEip191Wallet(wallet: string): void;
-};
-
-/**
  * Local HTTP fixture server handle.
  */
 type FixtureServer = {
@@ -266,7 +259,9 @@ function frontendProjectRoot(currentScriptDir: string): string {
  */
 async function chooseEip191Wallet(page: Page, wallet: string): Promise<void> {
   await page.evaluate((nextWallet: string): void => {
-    (window as unknown as FixtureWindow).__ringsFixtureChooseEip191Wallet(nextWallet);
+    const chooser: unknown = Reflect.get(window, "__ringsFixtureChooseEip191Wallet");
+    if (typeof chooser !== "function") throw new Error("wallet fixture chooser is unavailable");
+    chooser(nextWallet);
   }, wallet);
 }
 

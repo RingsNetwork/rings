@@ -19,6 +19,14 @@ struct BrowserBootstrapConfig<'a> {
     prefix: &'a str,
     target_base: &'a str,
     marker: &'a str,
+    block_workers: bool,
+    delegate_navigation: bool,
+}
+
+#[derive(Clone, Copy)]
+enum BrowserHostPolicy {
+    Web,
+    Extension,
 }
 
 /// Serialized shape accepted by the browser onion HTTPS client.
@@ -59,10 +67,29 @@ impl<'a> OnionHttpsRequest<'a> {
 /// not controlled by the Service Worker that served its gateway URL. See the crate-level
 /// opaque-origin deployment boundary.
 pub fn bootstrap_script(gateway_prefix: &str, document_url: &Url) -> String {
+    bootstrap_script_with_policy(gateway_prefix, document_url, BrowserHostPolicy::Web)
+}
+
+/// Build a browser runtime that delegates navigation and Worker effects to an extension host.
+///
+/// The caller must install fail-closed navigation, `Worker`, and `SharedWorker` adapters before
+/// executing the returned script. All other unsupported browser-global network protocols remain
+/// blocked.
+pub fn bootstrap_script_with_extension_bridge(gateway_prefix: &str, document_url: &Url) -> String {
+    bootstrap_script_with_policy(gateway_prefix, document_url, BrowserHostPolicy::Extension)
+}
+
+fn bootstrap_script_with_policy(
+    gateway_prefix: &str,
+    document_url: &Url,
+    host_policy: BrowserHostPolicy,
+) -> String {
     let config = BrowserBootstrapConfig {
         prefix: gateway_prefix,
         target_base: document_url.as_str(),
         marker: BOOTSTRAP_MARKER,
+        block_workers: matches!(host_policy, BrowserHostPolicy::Web),
+        delegate_navigation: matches!(host_policy, BrowserHostPolicy::Extension),
     };
     let config = match serde_json::to_string(&config) {
         Ok(config) => config,

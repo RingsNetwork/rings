@@ -25,6 +25,7 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::wasm_bindgen_test;
 
+use super::web_shell_bootstrap;
 use super::WebviewHostOutcome;
 use super::WebviewHostRequest;
 use super::WebviewNode;
@@ -89,6 +90,7 @@ async fn run_browser_onion_webview_flow() -> WebviewResult<()> {
         client,
         controlled_origin()?,
         WebviewOnionSettings::new(true),
+        web_shell_bootstrap,
     )?;
     let index_target = TargetUrl::parse(fixture_index.as_str())?;
     let index = retry_gateway_navigation(&node, &index_target).await?;

@@ -13,11 +13,12 @@
   "scripts": {
     "wasm_pack": "wasm-pack build crates/node --release --scope ringsnetwork -t web --no-default-features --features browser_default --features console_error_panic_hook",
     "prepare": "npm run wasm_pack && rm -rf dist && mkdir -p dist && cp crates/node/pkg/rings_node* ./dist && cp index.ts ./dist && tsc -p tsconfig.json",
-    "check:frontend-extension-scripts": "biome check frontend/extension-assets/*.ts frontend/scripts/*.mts frontend/tsconfig.base.json frontend/tsconfig.extension-assets.json frontend/tsconfig.scripts.json",
-    "build:frontend-extension-scripts": "npm run check:frontend-extension-scripts && rm -rf frontend/.generated && tsc -p frontend/tsconfig.extension-assets.json && tsc -p frontend/tsconfig.scripts.json && node frontend/.generated/scripts/check-extension-docs.mjs && node frontend/.generated/scripts/test-webview-service-worker.mjs && node frontend/.generated/scripts/test-webview-overlay.mjs",
+    "check:frontend-extension-scripts": "biome check index.ts frontend/extension-assets/*.ts frontend/scripts/*.mts frontend/tsconfig.base.json frontend/tsconfig.extension-assets.json frontend/tsconfig.scripts.json",
+    "build:frontend-extension-scripts": "npm run check:frontend-extension-scripts && rm -rf frontend/.generated && tsc -p frontend/tsconfig.extension-assets.json && tsc -p frontend/tsconfig.scripts.json && node frontend/.generated/scripts/check-extension-docs.mjs && node frontend/.generated/scripts/test-webview-service-worker.mjs && node frontend/.generated/scripts/test-webview-overlay.mjs && node frontend/.generated/scripts/test-extension-webview-contract.mjs && node frontend/.generated/scripts/test-extension-webview-service-worker.mjs",
     "build:frontend-web": "cd frontend && NO_COLOR=true trunk build --release",
     "package:frontend-extension": "npm run build:frontend-extension-scripts && cd frontend && NO_COLOR=true trunk build --release && cd .. && node frontend/.generated/scripts/package-extension.mjs",
     "test:frontend-extension-wallet": "npm run package:frontend-extension && node frontend/.generated/scripts/test-extension-wallet-bridge.mjs",
+    "test:frontend-extension-webview": "npm run package:frontend-extension && node frontend/.generated/scripts/test-extension-webview.mjs && node frontend/.generated/scripts/test-extension-webview-regressions.mjs",
     "test:frontend-webview-service-worker": "tsc -p frontend/tsconfig.scripts.json && node frontend/.generated/scripts/test-webview-service-worker.mjs",
     "test:frontend-webview-overlay": "tsc -p frontend/tsconfig.scripts.json && node frontend/.generated/scripts/test-webview-overlay.mjs"
   },
@@ -26,8 +27,11 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.3",
+    "@rollup/browser": "4.62.4",
     "@types/chrome": "0.1.1",
     "@types/node": "25.0.0",
+    "acorn": "8.17.0",
+    "es-module-lexer": "2.3.1",
     "playwright": "1.61.1",
     "typescript": "5.9.3"
   },

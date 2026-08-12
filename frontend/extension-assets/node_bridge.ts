@@ -2,6 +2,8 @@
  * Exposes the extension node bridge used by the Rings Yew app.
  */
 
+import type { WebviewGatewayRequest } from "./webview_protocol.js";
+
 /**
  * Message envelope sent from the extension page to the MV3 service worker or offscreen node.
  */
@@ -91,6 +93,8 @@ type NodeBridge = {
   acceptAnswer(answer: string): Promise<unknown>;
   onionProxyRoute(request: OnionProxyRouteRequest): Promise<unknown>;
   onionProxyRequest(request: OnionProxyHttpRequest): Promise<unknown>;
+  webviewRequest(request: WebviewGatewayRequest): Promise<unknown>;
+  openWebview(): Promise<unknown>;
 };
 
 let startPromise: Promise<NodeSnapshot> | undefined;
@@ -344,15 +348,24 @@ const nodeBridge: NodeBridge = {
   },
   onionProxyRoute(request: OnionProxyRouteRequest): Promise<unknown> {
     return sendNodeMessage({
-      type: "rings.node.onionProxyRoute",
       ...request,
+      type: "rings.node.onionProxyRoute",
     });
   },
   onionProxyRequest(request: OnionProxyHttpRequest): Promise<unknown> {
     return sendNodeMessage({
-      type: "rings.node.onionProxyRequest",
       ...request,
+      type: "rings.node.onionProxyRequest",
     });
+  },
+  webviewRequest(request: WebviewGatewayRequest): Promise<unknown> {
+    return sendNodeMessage({
+      ...request,
+      type: "rings.node.webviewRequest",
+    });
+  },
+  openWebview(): Promise<unknown> {
+    return sendNodeBridgeRuntimeMessage({ type: "rings.webview.open" });
   },
 };
 

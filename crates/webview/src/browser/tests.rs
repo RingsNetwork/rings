@@ -23,9 +23,21 @@ fn bootstrap_hooks_browser_network_entrypoints() -> Result<()> {
     assert!(script.contains("EventSource"));
     assert!(script.contains("sendBeacon"));
     assert!(script.contains("SharedWorker"));
+    assert!(script.contains("\"blockWorkers\":true"));
     assert!(script.contains("HTMLBaseElement"));
     assert!(script.contains("setAttribute"));
     assert!(script.contains("encodeURIComponent"));
+    Ok(())
+}
+
+#[test]
+fn host_worker_bridge_bootstrap_preserves_host_worker_constructors() -> Result<()> {
+    let document_url = Url::parse("https://example.test/docs/index.html")?;
+    let script = bootstrap_script_with_extension_bridge("/webview/", &document_url);
+
+    assert!(script.contains("\"blockWorkers\":false"));
+    assert!(script.contains("\"delegateNavigation\":true"));
+    assert!(script.contains("config.blockWorkers !== false"));
     Ok(())
 }
 
@@ -252,6 +264,22 @@ const submitEvent = {{
   stopImmediatePropagation() {{ this.stopped = true; }}
 }};
 for (const listener of submitListeners) listener(submitEvent);
+const postOverrideEvent = {{
+  target: form,
+  submitter: {{ formMethod: "post", formTarget: "" }},
+  preventDefault() {{ this.prevented = true; }},
+  stopImmediatePropagation() {{ this.stopped = true; }}
+}};
+for (const listener of submitListeners) listener(postOverrideEvent);
+const targetOverrideEvent = {{
+  target: form,
+  submitter: {{ formMethod: "get", formTarget: "named" }},
+  preventDefault() {{ this.prevented = true; }},
+  stopImmediatePropagation() {{ this.stopped = true; }}
+}};
+for (const listener of submitListeners) listener(targetOverrideEvent);
+form.method = "post";
+form.submit();
 const actual = JSON.stringify(calls);
 assert(calls.some((call) => call[0] === "fetch" && String(call[1]).startsWith(runtimePrefix) && header(call[2], "X-Rings-Webview-Target") === "https://example.test/api/data"), "fetch URL was not routed through runtime gateway: " + actual);
 assert(calls.some((call) => call[0] === "fetch" && String(call[1]).startsWith(runtimePrefix) && header(call[2], "X-Rings-Webview-Target") === "https://example.test/docs/forms/submit"), "Request URL was not routed through runtime gateway: " + actual);
@@ -269,6 +297,10 @@ assert(calls.some((call) => call[0] === "property" && call[1] === "img.src" && c
 assert(calls.some((call) => call[0] === "property" && call[1] === "img.srcset" && call[2].includes(gateway("https://example.test/docs/property-small.png")) && call[2].includes(gateway("https://example.test/property-big.png"))), "img.srcset property was not rewritten: " + actual);
 assert(submitEvent.prevented && submitEvent.stopped, "GET form submission was not intercepted");
 assert(calls.some((call) => call[0] === "navigate" && call[1] === gateway("https://example.test/docs/search?q=test")), "GET form query did not use native gateway navigation: " + actual);
+assert(!postOverrideEvent.prevented && !postOverrideEvent.stopped, "web host blocked a native POST override");
+assert(!targetOverrideEvent.prevented && !targetOverrideEvent.stopped, "web host blocked a named browsing-context target");
+assert(calls.filter((call) => call[0] === "navigate").length === 1, "POST form override navigated through the GET path: " + actual);
+assert(calls.filter((call) => call[0] === "native-form-submit").length === 1, "web host did not preserve native programmatic POST submission: " + actual);
 "#,
         script = script
     );
