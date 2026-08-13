@@ -4677,9 +4677,9 @@ name = "rings-webview"
 version = "0.15.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "futures",
  "html-escape",
- "httpdate",
  "js-sys",
  "lol_html",
  "percent-encoding",

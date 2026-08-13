@@ -18,8 +18,8 @@ browser = [
 
 [dependencies]
 async-trait = { workspace = true }
+chrono = { version = "0.4.23", default-features = false, features = ["std"] }
 html-escape = "0.2"
-httpdate = "1"
 js-sys = { workspace = true, optional = true }
 lol_html = "3"
 percent-encoding = "2"

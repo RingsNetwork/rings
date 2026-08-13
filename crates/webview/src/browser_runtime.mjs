@@ -213,7 +213,7 @@
     const NativeConstructor = globalThis[name];
     if (!NativeConstructor) return;
     const BlockedConstructor = function() {
-      throw new TypeError(`${name} is blocked by Rings WebView until gateway transport supports it`);
+      throw new TypeError(`${name} is blocked by Rings WebView`);
     };
     BlockedConstructor.prototype = NativeConstructor.prototype;
     Object.setPrototypeOf?.(BlockedConstructor, NativeConstructor);

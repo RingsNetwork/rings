@@ -84,6 +84,17 @@ impl PeerQuota {
         }
         true
     }
+
+    /// Release one peer's entire projection atomically.
+    ///
+    /// Post: on success, the peer is absent and `total` is reduced by exactly the returned count.
+    pub(crate) fn release_peer(&mut self, peer: Did) -> Option<usize> {
+        let peer_total = self.per_peer.get(&peer).copied()?;
+        let next_total = self.total.checked_sub(peer_total)?;
+        self.total = next_total;
+        self.per_peer.remove(&peer);
+        Some(peer_total)
+    }
 }
 
 #[cfg(test)]
@@ -112,5 +123,8 @@ mod tests {
         assert!(!quota.release(first));
         assert_eq!(quota.total(), 1);
         assert_eq!(quota.peer_total(second), 1);
+        assert_eq!(quota.release_peer(second), Some(1));
+        assert_eq!(quota.release_peer(second), None);
+        assert_eq!(quota.total(), 0);
     }
 }

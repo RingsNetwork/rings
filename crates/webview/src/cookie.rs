@@ -1,7 +1,4 @@
-use std::time::Duration;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
-
+use chrono::NaiveDateTime;
 use url::Host;
 use url::Url;
 
@@ -295,8 +292,7 @@ fn evaluate_set_cookie(
                     }
                 }
             } else if key.eq_ignore_ascii_case("expires") && !saw_max_age {
-                if let Ok(expires_at) = httpdate::parse_http_date(value.trim()) {
-                    let expires_at = system_time_millis(expires_at);
+                if let Some(expires_at) = parse_http_date_millis(value.trim()) {
                     if expires_at <= now {
                         delete_cookie = true;
                         cookie.expires_at = None;
@@ -466,20 +462,21 @@ fn max_age_millis(seconds: i64) -> i64 {
     seconds.saturating_mul(1_000)
 }
 
-fn system_time_millis(time: SystemTime) -> i64 {
-    let Ok(duration) = time.duration_since(UNIX_EPOCH) else {
-        return 0;
-    };
-    duration_millis(duration)
-}
+const HTTP_DATE_FORMATS: [&str; 3] = [
+    "%a, %d %b %Y %H:%M:%S GMT",
+    "%A, %d-%b-%y %H:%M:%S GMT",
+    "%a %b %e %H:%M:%S %Y",
+];
 
-fn duration_millis(duration: Duration) -> i64 {
-    let millis = duration.as_millis();
-    if millis > i64::MAX as u128 {
-        i64::MAX
-    } else {
-        millis as i64
-    }
+/// Parse every HTTP-date wire form without consulting a platform clock.
+///
+/// Post: equal instants in IMF-fixdate, RFC 850, and asctime notation map to the same Unix
+/// millisecond value on native and wasm targets.
+fn parse_http_date_millis(value: &str) -> Option<i64> {
+    HTTP_DATE_FORMATS
+        .iter()
+        .find_map(|format| NaiveDateTime::parse_from_str(value, format).ok())
+        .map(|date| date.and_utc().timestamp_millis())
 }
 
 fn path_matches(cookie_path: &str, request_path: &str) -> bool {
@@ -511,6 +508,23 @@ fn default_cookie_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn http_date_wire_forms_are_one_platform_independent_instant() {
+        const EXPECTED: i64 = 784_111_777_000;
+        for value in [
+            "Sun, 06 Nov 1994 08:49:37 GMT",
+            "Sunday, 06-Nov-94 08:49:37 GMT",
+            "Sun Nov  6 08:49:37 1994",
+        ] {
+            assert_eq!(parse_http_date_millis(value), Some(EXPECTED));
+        }
+        assert_eq!(parse_http_date_millis("not an HTTP date"), None);
+        assert_eq!(
+            parse_http_date_millis("Sun, 06 Nov 1994 08:49:37 PST"),
+            None
+        );
+    }
 
     #[test]
     fn set_cookie_evaluation_is_a_pure_total_decision() -> Result<()> {

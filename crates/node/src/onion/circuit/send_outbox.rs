@@ -37,6 +37,7 @@ use crate::error::OnionQueueAdmissionReason;
 use crate::error::OnionQueueKind;
 use crate::error::Result;
 use crate::extension::ext::Scope;
+use crate::extension::transport::platform::sleep;
 use crate::extension::transport::platform::spawn_detached;
 use crate::peer_quota::PeerQuota;
 use crate::sync_lock::lock;
@@ -185,6 +186,29 @@ impl<T> OrderedSendState<T> {
         self.lanes
             .get(&peer)
             .is_some_and(|lane| !lane.queued.is_empty())
+    }
+
+    /// Cancel a lane before its next batch starts and return its effects to the caller.
+    ///
+    /// Pre: the lane has no in-flight item. Post: every queued item, byte, and quota reservation
+    /// for `peer` is removed together; an inconsistent predecessor leaves state unchanged.
+    fn cancel_queued_lane(&mut self, peer: Did) -> Option<Vec<T>> {
+        let lane = self.lanes.get(&peer)?;
+        if lane.in_flight_bytes.is_some()
+            || lane.queued.is_empty()
+            || lane.queued.len() != self.quota.peer_total(peer)
+        {
+            return None;
+        }
+        let next_pending_bytes = self.pending_bytes.checked_sub(lane.pending_bytes)?;
+        let queued_count = lane.queued.len();
+        let released = self.quota.release_peer(peer)?;
+        if released != queued_count {
+            return None;
+        }
+        let lane = self.lanes.remove(&peer)?;
+        self.pending_bytes = next_pending_bytes;
+        Some(lane.queued.into_iter().map(|(item, _)| item).collect())
     }
 
     /// Complete one in-flight frame and return whether the lane has more work.
@@ -341,7 +365,19 @@ async fn drain_peer(
         // One lane owns FIFO order. Delay once per bounded batch, then fill its unused slots with
         // authenticated one-hop cover cells. This quantizes both the forwarding time and visible
         // count without holding the protocol transition gate or creating an unbounded cover task.
-        futures_timer::Delay::new(pacing.delay_before_batch()).await;
+        if let Err(error) = sleep(pacing.delay_before_batch()).await {
+            let cancelled = lock(&state)
+                .ok()
+                .and_then(|mut state| state.cancel_queued_lane(peer));
+            let Some(cancelled) = cancelled else {
+                tracing::debug!(%peer, ?error, "onion send outbox pacing and cleanup failed");
+                return;
+            };
+            let cancelled_count = cancelled.len();
+            drop(cancelled);
+            tracing::debug!(%peer, ?error, cancelled_count, "onion send outbox pacing failed");
+            return;
+        }
         let mut batch_slots = 0;
         loop {
             let Some(send) = lock(&state)
@@ -540,6 +576,37 @@ mod tests {
         assert_eq!(lane.in_flight_bytes, Some(7));
         assert_eq!(lane.pending_bytes, 7);
         assert_eq!(state.pending_bytes, 7);
+    }
+
+    #[test]
+    fn pre_batch_cancellation_atomically_retires_the_peer_lane() {
+        let peer = Did::from(13_u32);
+        let other = Did::from(14_u32);
+        let mut state = OrderedSendState::default();
+
+        assert_eq!(state.enqueue(peer, 1, 7), Ok(true));
+        assert_eq!(state.enqueue(peer, 2, 11), Ok(false));
+        assert_eq!(state.enqueue(other, 3, 5), Ok(true));
+        assert_eq!(state.cancel_queued_lane(peer), Some(vec![1, 2]));
+        assert_eq!(state.quota.total(), 1);
+        assert_eq!(state.quota.peer_total(peer), 0);
+        assert_eq!(state.quota.peer_total(other), 1);
+        assert_eq!(state.pending_bytes, 5);
+        assert!(!state.lanes.contains_key(&peer));
+        assert!(state.lanes.contains_key(&other));
+    }
+
+    #[test]
+    fn pre_batch_cancellation_rejects_an_in_flight_lane_without_mutation() {
+        let peer = Did::from(15_u32);
+        let mut state = OrderedSendState::default();
+
+        assert_eq!(state.enqueue(peer, 1, 7), Ok(true));
+        assert_eq!(state.take_next(peer), Some(1));
+        assert_eq!(state.cancel_queued_lane(peer), None);
+        assert_eq!(state.quota.peer_total(peer), 1);
+        assert_eq!(state.pending_bytes, 7);
+        assert!(state.lanes.contains_key(&peer));
     }
 
     #[test]
