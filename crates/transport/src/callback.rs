@@ -31,16 +31,24 @@ impl InnerTransportCallback {
 
     /// Notify the data channel is open.
     pub async fn on_data_channel_open(&self) {
+        self.on_data_channel_open_with_cid(&self.cid).await;
+    }
+
+    pub(crate) async fn on_data_channel_open_with_cid(&self, cid: &str) {
         self.data_channel_state_notifier.wake();
-        if let Err(e) = self.callback.on_data_channel_open(&self.cid).await {
+        if let Err(e) = self.callback.on_data_channel_open(cid).await {
             tracing::error!("Callback on_data_channel_open failed: {e:?}");
         }
     }
 
     /// Notify the data channel is close.
     pub async fn on_data_channel_close(&self) {
+        self.on_data_channel_close_with_cid(&self.cid).await;
+    }
+
+    pub(crate) async fn on_data_channel_close_with_cid(&self, cid: &str) {
         self.data_channel_state_notifier.wake();
-        if let Err(e) = self.callback.on_data_channel_close(&self.cid).await {
+        if let Err(e) = self.callback.on_data_channel_close(cid).await {
             tracing::error!("Callback on_data_channel_close failed: {e:?}");
         }
     }
@@ -57,11 +65,16 @@ impl InnerTransportCallback {
 
     /// This method is invoked when the state of connection has changed.
     pub async fn on_peer_connection_state_change(&self, s: WebrtcConnectionState) {
-        if let Err(e) = self
-            .callback
-            .on_peer_connection_state_change(&self.cid, s)
-            .await
-        {
+        self.on_peer_connection_state_change_with_cid(&self.cid, s)
+            .await;
+    }
+
+    pub(crate) async fn on_peer_connection_state_change_with_cid(
+        &self,
+        cid: &str,
+        s: WebrtcConnectionState,
+    ) {
+        if let Err(e) = self.callback.on_peer_connection_state_change(cid, s).await {
             tracing::error!("Callback on_peer_connection_state_change failed: {e:?}");
         }
     }

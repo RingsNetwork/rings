@@ -15,12 +15,14 @@ if [[ -v RINGS_ICE_SERVERS ]]; then
 else
     ICE_SERVERS="stun://stun.l.google.com:19302"
 fi
-STABILIZE_INTERVAL="${RINGS_STABILIZE_INTERVAL:-3}"
+STABILIZE_INTERVAL="${RINGS_STABILIZE_INTERVAL:-15}"
 SESSION_TTL_SECONDS="${RINGS_SESSION_TTL_SECONDS:-2592000}"
 READY_RETRIES="${RINGS_READY_RETRIES:-60}"
 READY_SLEEP_SECONDS="${RINGS_READY_SLEEP_SECONDS:-1}"
-LOG_LEVEL="${RINGS_LOG_LEVEL:-info}"
+LOG_LEVEL="${RINGS_LOG_LEVEL:-warn}"
 RUNTIME="${RINGS_RUNTIME:-current-thread}"
+EXTERNAL_IP="${RINGS_EXTERNAL_IP:-}"
+APPEND_CONTAINER_EXTERNAL_IP="${RINGS_EXTERNAL_IP_APPEND_CONTAINER_IP:-true}"
 WEBRTC_UDP_PORT_MIN="${RINGS_WEBRTC_UDP_PORT_MIN:-}"
 WEBRTC_UDP_PORT_MAX="${RINGS_WEBRTC_UDP_PORT_MAX:-}"
 STORAGE_CAPACITY="${RINGS_STORAGE_CAPACITY:-200000000}"
@@ -77,6 +79,63 @@ yaml_quote() {
     local value="$1"
     value="${value//\'/\'\'}"
     printf "'%s'" "$value"
+}
+
+detect_container_ip() {
+    local ip=""
+    for ip in $(hostname -i 2>/dev/null || true); do
+        [[ -n "$ip" ]] || continue
+        [[ "$ip" != 127.* && "$ip" != "::1" ]] || continue
+        printf '%s' "$ip"
+        return 0
+    done
+}
+
+csv_contains_item() {
+    local csv="$1"
+    local needle="$2"
+    local item=""
+    local old_ifs="$IFS"
+    IFS=','
+    for item in $csv; do
+        item="$(trim "$item")"
+        if [[ "$item" == "$needle" ]]; then
+            IFS="$old_ifs"
+            return 0
+        fi
+    done
+    IFS="$old_ifs"
+    return 1
+}
+
+append_csv_unique() {
+    local csv="$1"
+    local item="$2"
+    [[ -n "$item" ]] || {
+        printf '%s' "$csv"
+        return 0
+    }
+    if csv_contains_item "$csv" "$item"; then
+        printf '%s' "$csv"
+    elif [[ -n "$csv" ]]; then
+        printf '%s,%s' "$csv" "$item"
+    else
+        printf '%s' "$item"
+    fi
+}
+
+external_ip_candidates() {
+    local candidates=""
+    local container_ip=""
+    candidates="$(trim "$EXTERNAL_IP")"
+    [[ -n "$candidates" ]] || return 0
+
+    if [[ "$APPEND_CONTAINER_EXTERNAL_IP" == "true" ]]; then
+        container_ip="$(detect_container_ip)"
+        candidates="$(append_csv_unique "$candidates" "$container_ip")"
+    fi
+
+    printf '%s' "$candidates"
 }
 
 canonical_onion_transport() {
@@ -162,6 +221,7 @@ require_uint RINGS_READY_SLEEP_SECONDS "$READY_SLEEP_SECONDS"
 require_uint RINGS_STORAGE_CAPACITY "$STORAGE_CAPACITY"
 ADVERTISE_ONION_RELAY="$(bool_literal RINGS_ADVERTISE_ONION_RELAY "$ADVERTISE_ONION_RELAY")"
 ADVERTISE_ONION_EXIT="$(bool_literal RINGS_ADVERTISE_ONION_EXIT "$ADVERTISE_ONION_EXIT")"
+APPEND_CONTAINER_EXTERNAL_IP="$(bool_literal RINGS_EXTERNAL_IP_APPEND_CONTAINER_IP "$APPEND_CONTAINER_EXTERNAL_IP")"
 
 if (( NODE_COUNT < 1 )); then
     die "RINGS_NODE_COUNT must be at least 1"
@@ -288,6 +348,7 @@ write_config() {
     local storage_path="$6"
     local data_path="$storage_path/data"
     local measure_path="$storage_path/measure"
+    local external_ips=""
 
     {
         printf 'network_id: %s\n' "$NETWORK_ID"
@@ -317,7 +378,12 @@ write_config() {
             printf '  max_streams_per_circuit: 0\n'
             printf '  max_bytes_per_minute: 0\n'
         fi
-        printf 'external_ip: null\n'
+        external_ips="$(external_ip_candidates)"
+        if [[ -n "$external_ips" ]]; then
+            printf 'external_ip: %s\n' "$(yaml_quote "$external_ips")"
+        else
+            printf 'external_ip: null\n'
+        fi
         if [[ -n "$WEBRTC_UDP_PORT_MIN" || -n "$WEBRTC_UDP_PORT_MAX" ]]; then
             [[ -n "$WEBRTC_UDP_PORT_MIN" && -n "$WEBRTC_UDP_PORT_MAX" ]] \
                 || die "RINGS_WEBRTC_UDP_PORT_MIN and RINGS_WEBRTC_UDP_PORT_MAX must be set together"

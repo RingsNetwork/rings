@@ -35,12 +35,12 @@ pub(crate) const fn peer_quality_thresholds() -> PeerQualityThresholds {
 
 /// `MeasureStorage` is the type accepted by `PeriodicMeasure::new`.
 /// It's used to store counts in a storage media provided by user.
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 pub type MeasureStorage = Box<dyn KvStorageInterface<u64>>;
 
 /// `MeasureStorage` is the type accepted by `PeriodicMeasure::new`.
 /// It's used to store counts in a storage media provided by user.
-#[cfg(not(feature = "browser"))]
+#[cfg(not(all(feature = "browser", target_family = "wasm")))]
 pub type MeasureStorage = Box<dyn KvStorageInterface<u64> + Sync + Send>;
 
 /// `PeriodicMeasure` is used to assess the reliability of peers by counting their behaviour.
@@ -63,8 +63,21 @@ trait MeasureClock: Send + Sync {
 struct SystemMeasureClock;
 
 impl MeasureClock for SystemMeasureClock {
+    #[cfg(not(all(feature = "browser", target_family = "wasm")))]
     fn now(&self) -> DateTime<Utc> {
         Utc::now()
+    }
+
+    #[cfg(all(feature = "browser", target_family = "wasm"))]
+    fn now(&self) -> DateTime<Utc> {
+        let now = js_sys::Date::now();
+        if !now.is_finite() {
+            return DateTime::UNIX_EPOCH;
+        }
+        match DateTime::from_timestamp_millis(now as i64) {
+            Some(value) => value,
+            None => DateTime::UNIX_EPOCH,
+        }
     }
 }
 
@@ -178,7 +191,7 @@ impl PeriodicMeasure {
 }
 
 #[cfg_attr(feature = "node", async_trait)]
-#[cfg_attr(feature = "browser", async_trait(?Send))]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
 impl Measure for PeriodicMeasure {
     /// `incr` increments the counter of the given peer.
     async fn incr(&self, did: Did, counter: MeasureCounter) {
@@ -217,7 +230,7 @@ impl Measure for PeriodicMeasure {
 }
 
 #[cfg_attr(feature = "node", async_trait)]
-#[cfg_attr(feature = "browser", async_trait(?Send))]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
 impl measure::BehaviourJudgement for PeriodicMeasure {
     async fn quality(&self, did: Did) -> PeerQuality {
         let thresholds = peer_quality_thresholds();

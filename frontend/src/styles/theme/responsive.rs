@@ -1,4 +1,5 @@
-use super::{border, media};
+use super::border;
+use super::media;
 
 pub(super) fn append(css: &mut String) {
     append_wide_breakpoints(css);
@@ -8,38 +9,30 @@ pub(super) fn append(css: &mut String) {
 }
 
 fn append_wide_breakpoints(css: &mut String) {
-    media(
-        css,
-        "(max-width: 1260px)",
-        &[
-            (
-                ".landing-hero",
-                &[
-                    ("align-items", "start"),
-                    ("min-height", "560px"),
-                    ("padding", "56px clamp(24px, 5vw, 56px) 48px"),
-                ][..],
-            ),
-            (
-                ".landing-feature-grid",
-                &[("grid-template-columns", "repeat(2, minmax(0, 1fr))")][..],
-            ),
-        ],
-    );
-    media(
-        css,
-        "(max-width: 1080px)",
-        &[
-            (
-                ".landing-feature-card",
-                &[("grid-template-columns", "184px minmax(0, 1fr)")][..],
-            ),
-            (
-                ".landing-feature-illustration",
-                &[("min-height", "178px")][..],
-            ),
-        ],
-    );
+    media(css, "(max-width: 1260px)", &[
+        (
+            ".landing-hero",
+            &[
+                ("align-items", "start"),
+                ("min-height", "560px"),
+                ("padding", "56px clamp(24px, 5vw, 56px) 48px"),
+            ][..],
+        ),
+        (
+            ".landing-feature-grid",
+            &[("grid-template-columns", "repeat(2, minmax(0, 1fr))")][..],
+        ),
+    ]);
+    media(css, "(max-width: 1080px)", &[
+        (
+            ".landing-feature-card",
+            &[("grid-template-columns", "184px minmax(0, 1fr)")][..],
+        ),
+        (
+            ".landing-feature-illustration",
+            &[("min-height", "178px")][..],
+        ),
+    ]);
 }
 
 fn append_mid_breakpoint(css: &mut String) {
@@ -288,20 +281,16 @@ fn append_mobile_landing(css: &mut String) {
 }
 
 fn append_small_breakpoint(css: &mut String) {
-    media(
-        css,
-        "(max-width: 520px)",
-        &[
-            (
-                ".landing-feature-grid,.landing-example-grid",
-                &[("grid-template-columns", "1fr")][..],
-            ),
-            (
-                ".landing-feature-card",
-                &[("grid-template-columns", "1fr")][..],
-            ),
-            (".landing-feature-illustration", &[("height", "208px")][..]),
-            (".landing-hero h2", &[("font-size", "2.05rem")][..]),
-        ],
-    );
+    media(css, "(max-width: 520px)", &[
+        (
+            ".landing-feature-grid,.landing-example-grid",
+            &[("grid-template-columns", "1fr")][..],
+        ),
+        (
+            ".landing-feature-card",
+            &[("grid-template-columns", "1fr")][..],
+        ),
+        (".landing-feature-illustration", &[("height", "208px")][..]),
+        (".landing-hero h2", &[("font-size", "2.05rem")][..]),
+    ]);
 }

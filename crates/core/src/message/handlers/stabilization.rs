@@ -1,11 +1,9 @@
 use async_trait::async_trait;
 
-use crate::dht::Chord;
 use crate::dht::ChordStorageSync;
+use crate::error::Error;
 use crate::error::Result;
-use crate::message::effects::ConnectionFunctor;
-use crate::message::effects::PayloadRelayFunctor;
-use crate::message::effects::StorageSyncFunctor;
+use crate::message::effects::CoreEffect;
 use crate::message::types::Message;
 use crate::message::types::NotifyPredecessorReport;
 use crate::message::types::NotifyPredecessorSend;
@@ -14,19 +12,27 @@ use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<NotifyPredecessorSend> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &NotifyPredecessorSend) -> Result<()> {
-        let predecessor = self.dht.notify(msg.did)?;
-
-        if predecessor != ctx.relay.try_origin_sender()? {
+        if ctx.should_forward_from(self.dht.did) {
             return self
-                .run_effects([PayloadRelayFunctor::send_report_message(
+                .run_effects([CoreEffect::forward_payload(ctx, None)])
+                .await;
+        }
+
+        let origin = self.verified_notify_predecessor_origin(ctx, msg)?;
+        let Some(predecessor) = self.transport.notify_admitted_predecessor(origin)? else {
+            return Err(Error::NotifyPredecessorOriginNotAdmitted { origin });
+        };
+
+        if predecessor != origin {
+            return self
+                .run_effects([CoreEffect::send_report_message(
                     ctx,
                     Message::NotifyPredecessorReport(NotifyPredecessorReport { did: predecessor }),
-                )
-                .into()])
+                )])
                 .await;
         }
 
@@ -34,21 +40,38 @@ impl HandleMsg<NotifyPredecessorSend> for MessageHandler {
     }
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+impl MessageHandler {
+    fn verified_notify_predecessor_origin(
+        &self,
+        ctx: &MessagePayload,
+        msg: &NotifyPredecessorSend,
+    ) -> Result<crate::dht::Did> {
+        let origin = ctx.relay.try_origin_sender()?;
+        if msg.did != origin {
+            return Err(Error::NotifyPredecessorOriginMismatch {
+                claimed: msg.did,
+                origin,
+            });
+        }
+        Ok(origin)
+    }
+}
+
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
     async fn handle(&self, _ctx: &MessagePayload, msg: &NotifyPredecessorReport) -> Result<()> {
-        self.run_effects([ConnectionFunctor::connect_dht_peer(msg.did).into()])
+        self.run_effects([CoreEffect::connect_dht_peer(msg.did)])
             .await?;
 
         let deliveries = self
             .dht
             .sync_entries_with_successor(msg.did)
             .await?
-            .storage_sync_deliveries()?;
+            .coalesced_storage_sync_deliveries()?;
         let effects = deliveries.into_iter().map(|delivery| {
             let msg = SyncEntriesWithSuccessor::from_delivery(delivery);
-            StorageSyncFunctor::send_storage_sync(msg).into()
+            CoreEffect::send_storage_sync(msg)
         });
         self.run_effects(effects).await?;
 
@@ -56,7 +79,7 @@ impl HandleMsg<NotifyPredecessorReport> for MessageHandler {
     }
 }
 
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 #[cfg(test)]
 mod test {
     use std::sync::Arc;
@@ -90,9 +113,64 @@ mod test {
 
     impl SwarmCallback for NoopCallback {}
 
+    fn notify_context(origin: &SecretKey, destination: crate::dht::Did) -> Result<MessagePayload> {
+        let session = SessionSk::new_with_seckey(origin)?;
+        MessagePayload::new_send(
+            Message::custom(b"notify predecessor context")?,
+            &session,
+            destination,
+            destination,
+        )
+    }
+
     fn next_generated_key(keys: &mut impl Iterator<Item = SecretKey>) -> Result<SecretKey> {
         keys.next()
             .ok_or_else(|| Error::InvalidMessage("expected generated key".to_string()))
+    }
+
+    #[tokio::test]
+    async fn notify_predecessor_rejects_origin_mismatch_without_mutating_topology() -> Result<()> {
+        let node = prepare_node(SecretKey::random()).await;
+        let origin = SecretKey::random();
+        let spoofed = SecretKey::random().address().into();
+        let context = notify_context(&origin, node.did())?;
+        let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+
+        let result = handler
+            .handle(&context, &NotifyPredecessorSend { did: spoofed })
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(Error::NotifyPredecessorOriginMismatch {
+                claimed,
+                origin: observed_origin,
+            }) if claimed == spoofed && observed_origin == origin.address().into()
+        ));
+        assert_eq!(*node.dht().lock_predecessor()?, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn notify_predecessor_rejects_unadmitted_origin_without_mutating_topology() -> Result<()>
+    {
+        let node = prepare_node(SecretKey::random()).await;
+        let origin = SecretKey::random();
+        let origin_did = origin.address().into();
+        let context = notify_context(&origin, node.did())?;
+        let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+
+        let result = handler
+            .handle(&context, &NotifyPredecessorSend { did: origin_did })
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(Error::NotifyPredecessorOriginNotAdmitted { origin })
+                if origin == origin_did
+        ));
+        assert_eq!(*node.dht().lock_predecessor()?, None);
+        Ok(())
     }
 
     #[tokio::test]
@@ -282,12 +360,18 @@ mod test {
         assert_no_more_msg([&node1, &node2, &node3]).await;
 
         println!("=== Check state before stabilization ===");
-        assert_eq!(node1.dht().successors().list()?, vec![node2.did()]);
+        assert_eq!(node1.dht().successors().list()?, vec![
+            node2.did(),
+            node3.did()
+        ]);
         assert_eq!(node2.dht().successors().list()?, vec![
             node3.did(),
             node1.did()
         ]);
-        assert_eq!(node3.dht().successors().list()?, vec![node2.did()]);
+        assert_eq!(node3.dht().successors().list()?, vec![
+            node1.did(),
+            node2.did()
+        ]);
         assert!(node1.dht().lock_predecessor()?.is_none());
         assert!(node2.dht().lock_predecessor()?.is_none());
         assert!(node3.dht().lock_predecessor()?.is_none());
@@ -371,12 +455,18 @@ mod test {
         assert_no_more_msg([&node1, &node2, &node3]).await;
 
         println!("=== Check state before stabilization ===");
-        assert_eq!(node1.dht().successors().list()?, vec![node2.did()]);
+        assert_eq!(node1.dht().successors().list()?, vec![
+            node3.did(),
+            node2.did()
+        ]);
         assert_eq!(node2.dht().successors().list()?, vec![
             node1.did(),
             node3.did()
         ]);
-        assert_eq!(node3.dht().successors().list()?, vec![node2.did()]);
+        assert_eq!(node3.dht().successors().list()?, vec![
+            node2.did(),
+            node1.did()
+        ]);
         assert!(node1.dht().lock_predecessor()?.is_none());
         assert!(node2.dht().lock_predecessor()?.is_none());
         assert!(node3.dht().lock_predecessor()?.is_none());

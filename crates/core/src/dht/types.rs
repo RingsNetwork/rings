@@ -62,8 +62,8 @@ pub trait Chord<Action> {
 /// Some methods return an `Action`. It's because the real storing node may not be this
 /// node. The outer should take the action to forward the request to the real storing
 /// node.
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait ChordStorage<Action, const REDUNDANT: u16>: Chord<Action> {
     /// Look up an [`Entry`] by its ring key.
     /// Always finds resource by DHT, ignoring the local cache.
@@ -74,8 +74,8 @@ pub trait ChordStorage<Action, const REDUNDANT: u16>: Chord<Action> {
 }
 
 /// ChordStorageSync defines storage hand-off triggered by ownership changes.
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait ChordStorageSync<Action>: Chord<Action> {
     /// When the successor of a node is updated, it needs to check if there are
     /// `Entry`s that are no longer between current node and `new_successor`,
@@ -104,8 +104,8 @@ pub trait ChordStorageSync<Action>: Chord<Action> {
 /// Repair never deletes local copies. It only republishes a known [`Entry`] as
 /// a join delivery to the current affine placement set so missing owners can
 /// regain a copy.
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait ChordStorageRepair<Action>: Chord<Action> {
     /// Republish every locally stored entry to its current affine owners.
     ///
@@ -127,8 +127,8 @@ pub trait ChordStorageRepair<Action>: Chord<Action> {
 }
 
 /// ChordStorageCache defines the basic API for getting and setting DHT cache storage.
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait ChordStorageCache<Action>: Chord<Action> {
     /// Cache fetched resource locally.
     async fn local_cache_put(&self, entry: Entry) -> Result<()>;
@@ -166,8 +166,8 @@ pub trait ChordStorageCache<Action>: Chord<Action> {
 /// - `topo_info` is a helper function to get the topological info of the chord.
 ///
 /// Some methods return an `Action`. The reason is the same as [Chord].
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait CorrectChord<Action>: Chord<Action> {
     /// Join Operation in the paper.
     ///
@@ -222,7 +222,7 @@ pub trait CorrectChord<Action>: Chord<Action> {
 ///
 /// Implementors of this trait must also be convertible into a `Did` type using the `Into` trait, and
 /// must satisfy some additional constraints (see below).
-#[cfg(feature = "wasm")]
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
 #[async_trait(?Send)]
 pub trait LiveDid: Into<Did> + Clone {
     /// Necessary method, should return true if a wrapped did is live.
@@ -233,7 +233,7 @@ pub trait LiveDid: Into<Did> + Clone {
 ///
 /// Implementors of this trait must also be convertible into a `Did` type using the `Into` trait, and
 /// must satisfy some additional constraints (see below).
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 #[async_trait]
 pub trait LiveDid: Into<Did> + Clone + Send + Sync {
     /// Necessary method, should return true if a wrapped did is live.

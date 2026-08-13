@@ -2,6 +2,8 @@
 
 use std::collections::BTreeSet;
 
+use reqwest::Url;
+
 use crate::error::Error;
 use crate::error::Result;
 use crate::onion::OnionExitPolicy;
@@ -17,6 +19,7 @@ use crate::onion::OnionServiceName;
 pub struct NativeOnionTcpExitConfig {
     services: Vec<OnionServiceName>,
     policy: OnionExitPolicy,
+    https_proxy: Option<String>,
 }
 
 impl NativeOnionTcpExitConfig {
@@ -43,6 +46,7 @@ impl NativeOnionTcpExitConfig {
         Ok(Self {
             services: service_names.into_iter().collect(),
             policy,
+            https_proxy: None,
         })
     }
 
@@ -51,7 +55,26 @@ impl NativeOnionTcpExitConfig {
         Self {
             services: vec![OnionServiceName::tcp()],
             policy,
+            https_proxy: None,
         }
+    }
+
+    /// Explicitly delegate eligible synthetic-DNS HTTPS targets to this operator proxy.
+    ///
+    /// Ambient process proxy variables are intentionally ignored by onion exits: enabling a new
+    /// egress trust boundary must be an explicit node capability.
+    pub fn with_https_proxy(mut self, proxy: impl AsRef<str>) -> Result<Self> {
+        let proxy = proxy.as_ref().trim();
+        let parsed = Url::parse(proxy).map_err(|_| {
+            Error::InvalidConfig("native onion HTTPS proxy must be an absolute URL".to_string())
+        })?;
+        if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+            return Err(Error::InvalidConfig(
+                "native onion HTTPS proxy must use http or https with a host".to_string(),
+            ));
+        }
+        self.https_proxy = Some(proxy.to_string());
+        Ok(self)
     }
 
     /// Return whether this exit may execute TCP payloads for `service`.
@@ -61,5 +84,9 @@ impl NativeOnionTcpExitConfig {
 
     pub(super) fn policy(&self) -> &OnionExitPolicy {
         &self.policy
+    }
+
+    pub(super) fn https_proxy(&self) -> Option<&str> {
+        self.https_proxy.as_deref()
     }
 }

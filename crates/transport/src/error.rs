@@ -31,7 +31,7 @@ pub enum Error {
     #[error("WebRTC error: {0}")]
     Webrtc(#[from] webrtc::error::Error),
 
-    #[cfg(feature = "web-sys-webrtc")]
+    #[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
     /// WebSysWebRTC error: {}
     #[error("WebSysWebRTC error: {}", dump_js_value(.0))]
     WebSysWebrtc(wasm_bindgen::JsValue),
@@ -51,6 +51,10 @@ pub enum Error {
     /// Message was not delivered: {0}
     #[error("Message was not delivered: {0}")]
     MessageNotDelivered(String),
+
+    /// The higher-level authorization was revoked before backend send admission.
+    #[error("Send permit was revoked before transport send admission")]
+    SendPermitRevoked,
 
     /// WebRTC local SDP generation error: {0}
     #[error("WebRTC local SDP generation error: {0}")]
@@ -85,7 +89,7 @@ pub enum Error {
     RoundRobinPoolEmpty,
 }
 
-#[cfg(feature = "web-sys-webrtc")]
+#[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
 fn dump_js_value(v: &wasm_bindgen::JsValue) -> String {
     let Ok(s) = js_sys::JSON::stringify(v) else {
         return "Failed to stringify Error(JsValue)".to_string();

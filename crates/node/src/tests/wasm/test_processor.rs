@@ -50,16 +50,22 @@ impl SwarmCallback for SwarmCallbackStruct {
 /// itself and fail with `SwarmMissDidInTable`.
 async fn wait_for_dht_successor(p: &Processor, did: Did) {
     let did = did.to_string();
+    let mut last_inspect = None;
     for _ in 0..100 {
-        let successors = p.swarm.inspect().await.dht.successors;
-        if successors.iter().any(|s| s == &did) {
+        let inspect = p.swarm.inspect().await;
+        if inspect.dht.successors.iter().any(|s| s == &did) {
             return;
         }
+        last_inspect = Some(inspect);
         fluvio_wasm_timer::Delay::new(Duration::from_millis(200))
             .await
             .unwrap();
     }
-    panic!("timeout waiting for {did} to appear in DHT successors");
+    panic!(
+        "timeout waiting for {did} to appear in DHT successors; peers={:?}, dht={:?}",
+        last_inspect.as_ref().map(|inspect| &inspect.peers),
+        last_inspect.as_ref().map(|inspect| &inspect.dht),
+    );
 }
 
 async fn create_connection(p1: &Processor, p2: &Processor) {

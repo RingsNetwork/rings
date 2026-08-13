@@ -7,12 +7,13 @@ use std::pin::Pin;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use futures::future::Either;
-use futures::FutureExt;
+use futures::channel::oneshot;
 use js_sys;
 use js_sys::Uint8Array;
 use rings_core::dht::Did;
+use rings_core::dht::EntryStorage;
 use rings_core::ecc::PublicKey;
+use rings_core::lifecycle::StopSource;
 use rings_core::measure::PeerQuality;
 use rings_core::message::DhtProtocolMode;
 use rings_core::prelude::entry;
@@ -31,21 +32,19 @@ use wasm_bindgen_futures::JsFuture;
 
 use crate::error::Error;
 use crate::error::Result as NodeResult;
+use crate::extension::ext::Scope;
 use crate::measure::peer_quality_thresholds;
-use crate::onion::circuit::encode_initial_forward;
+use crate::measure::MeasureStorage;
 use crate::onion::circuit::route_first_hop;
 use crate::onion::circuit::OnionCircuitCapabilities;
 use crate::onion::circuit::OnionCircuitProtocol;
 use crate::onion::circuit::OnionCircuitShell;
-use crate::onion::circuit::OnionClientReturn;
 use crate::onion::circuit::ONION_CIRCUIT_NAMESPACE;
 use crate::onion::directory;
 use crate::onion::directory::OnionDirectoryReader;
-use crate::onion::https::client_request_from_url as onion_https_client_request_from_url;
-use crate::onion::https::encode_https_payload;
 use crate::onion::https::BrowserOnionCircuitHandler;
 use crate::onion::https::OnionHttpsClientRequest;
-use crate::onion::https::OnionHttpsPayload;
+use crate::onion::https::OnionHttpsClientResponse;
 use crate::onion::https::OnionHttpsRuntime;
 use crate::onion::proxy::OnionProxyConfig;
 use crate::onion::proxy::OnionProxyRoute;
@@ -59,6 +58,8 @@ use crate::processor::ProcessorConfig;
 use crate::provider::AsyncSigner;
 use crate::provider::Provider;
 use crate::provider::Signer;
+
+mod onion_proxy;
 
 /// AddressType enum contains `DEFAULT` and `ED25519`.
 #[wasm_export]
@@ -83,6 +84,40 @@ impl ProviderRef {
     }
 }
 
+/// Browser listener lifecycle handle returned by [`Provider::listen`].
+#[derive(Clone)]
+#[wasm_export]
+pub struct ProviderListener {
+    stop: StopSource,
+    started: js_sys::Promise,
+    task: js_sys::Promise,
+}
+
+#[wasm_export]
+impl ProviderListener {
+    /// Request cooperative shutdown for the listener task.
+    pub fn stop(&self) {
+        self.stop.request_stop();
+    }
+
+    /// Return whether shutdown was requested through this handle.
+    pub fn is_stopped(&self) -> bool {
+        self.stop.is_stop_requested()
+    }
+
+    /// Return a promise that resolves once the listener task enters its run loop.
+    pub fn started(&self) -> js_sys::Promise {
+        self.started.clone()
+    }
+
+    /// Return the underlying listener task promise.
+    ///
+    /// It resolves only after [`ProviderListener::stop`] requests cooperative shutdown.
+    pub fn task(&self) -> js_sys::Promise {
+        self.task.clone()
+    }
+}
+
 /// Browser-compatible onion proxy handle.
 ///
 /// The proxy is target-agnostic: callers create it once with route-selection options, then send
@@ -91,9 +126,18 @@ impl ProviderRef {
 #[wasm_export]
 pub struct BrowserOnionProxy {
     processor: Arc<Processor>,
+    scope: Scope,
     config: OnionProxyConfig,
     runtime: Arc<OnionHttpsRuntime>,
     directory_endpoint: Option<String>,
+}
+
+/// Typed response from a cancellable browser onion HTTPS request.
+pub struct BrowserOnionProxyResponse {
+    /// HTTP response returned by the selected onion exit.
+    pub response: OnionHttpsClientResponse,
+    /// Onion route used for the request.
+    pub route: OnionProxyRoute,
 }
 
 #[derive(Clone)]
@@ -126,7 +170,7 @@ impl BrowserOnionDirectoryReader {
         let local = self.processor.did();
         self.processor
             .swarm
-            .peer_dids()
+            .connected_peer_dids()
             .into_iter()
             .filter(|did| *did != local)
             .collect()
@@ -264,13 +308,10 @@ impl BrowserOnionProxy {
 
     /// Build an HTTPS-over-TCP onion proxy route for `target_authority` (`host:port`).
     pub fn route(&self, target_authority: String) -> js_sys::Promise {
-        let p = self.processor.clone();
-        let config = self.config.clone();
-        let directory_endpoint = self.directory_endpoint.clone();
+        let proxy = self.clone();
         future_to_promise(async move {
-            let target =
-                OnionProxyTarget::parse_authority(&target_authority).map_err(JsError::from)?;
-            let route = build_browser_onion_proxy_route(p, config, target, directory_endpoint)
+            let route = proxy
+                .route_http(&target_authority)
                 .await
                 .map_err(JsError::from)?;
             let response =
@@ -286,76 +327,28 @@ impl BrowserOnionProxy {
     /// `headers`, `body`, and `path` override fields. The returned Promise resolves to
     /// `{ status, headers, body }`.
     pub fn request(&self, url: String, request: JsValue) -> js_sys::Promise {
-        let p = self.processor.clone();
-        let config = self.config.clone();
-        let runtime = self.runtime.clone();
-        let directory_endpoint = self.directory_endpoint.clone();
+        let proxy = self.clone();
         future_to_promise(async move {
             let request = if request.is_null() || request.is_undefined() {
-                OnionHttpsClientRequest::default()
+                OnionHttpsClientRequest {
+                    method: "GET".to_string(),
+                    path: None,
+                    headers: Vec::new(),
+                    body: Vec::new(),
+                }
             } else {
                 js_value::deserialize::<OnionHttpsClientRequest>(request).map_err(JsError::from)?
             };
-            let (target, request) = onion_https_client_request_from_url(url.as_str(), request)
+            let response = proxy
+                .request_http(url.as_str(), request)
+                .await
                 .map_err(JsError::from)?;
-            let proxy_route = build_browser_onion_proxy_route(
-                p.clone(),
-                config,
-                target.clone(),
-                directory_endpoint,
-            )
-            .await
-            .map_err(JsError::from)?;
-            let first_hop = route_first_hop(&proxy_route.route).map_err(JsError::from)?;
-            let client_return = OnionClientReturn::new(p.session_sk().session_public_key());
-            let (id, receiver) = runtime
-                .begin_request(
-                    first_hop,
-                    proxy_route.route.exit().clone(),
-                    client_return.return_id,
-                )
+            let route_response = crate::rpc_dto::onion_route_response(response.route.route)
                 .map_err(JsError::from)?;
-            let request_payload = match encode_https_payload(OnionHttpsPayload::Request(request)) {
-                Ok(payload) => payload,
-                Err(error) => {
-                    runtime.cancel_request(id);
-                    return Err(JsValue::from(JsError::from(error)));
-                }
-            };
-            let (to, payload) = match encode_initial_forward(
-                client_return,
-                &proxy_route.route,
-                id,
-                request_payload,
-            ) {
-                Ok(encoded) => encoded,
-                Err(error) => {
-                    runtime.cancel_request(id);
-                    return Err(JsValue::from(JsError::from(error)));
-                }
-            };
-            let envelope =
-                crate::extension::ext::Envelope::new(ONION_CIRCUIT_NAMESPACE.to_string(), payload);
-            if let Err(error) = p.send_envelope(to, &envelope).await {
-                runtime.cancel_request(id);
-                return Err(JsValue::from(JsError::from(error)));
-            }
-            let response = receiver.fuse();
-            let timeout = js_utils::window_sleep(30_000).fuse();
-            futures::pin_mut!(response, timeout);
-            match futures::future::select(response, timeout).await {
-                Either::Left((result, _)) => match result {
-                    Ok(Ok(response)) => Ok(js_value::serialize(&response).map_err(JsError::from)?),
-                    Ok(Err(error)) => Err(JsValue::from(JsError::from(error))),
-                    Err(_) => Err(JsValue::from_str(
-                        "onion HTTPS proxy response channel closed",
-                    )),
-                },
-                Either::Right((_, _)) => {
-                    runtime.cancel_request(id);
-                    Err(JsValue::from_str("onion HTTPS proxy request timed out"))
-                }
-            }
+            let route_value = js_value::serialize(&route_response).map_err(JsError::from)?;
+            let value = js_value::serialize(&response.response).map_err(JsError::from)?;
+            js_sys::Reflect::set(&value, &JsValue::from_str("route"), &route_value)?;
+            Ok(value)
         })
     }
 }
@@ -385,6 +378,70 @@ fn wrapped_signer(signer: js_sys::Function) -> AsyncSigner {
             })
         },
     )
+}
+
+async fn open_browser_entry_storage(storage_name: &str) -> NodeResult<EntryStorage> {
+    IdbStorage::new_with_cap_and_name(50000, storage_name)
+        .await
+        .map(|storage| Box::new(storage) as EntryStorage)
+        .map_err(|source| Error::BrowserStorageOpen {
+            name: storage_name.to_string(),
+            source,
+        })
+}
+
+async fn open_browser_entry_storage_or_memory(storage_name: &str) -> Option<EntryStorage> {
+    match open_browser_entry_storage(storage_name).await {
+        Ok(storage) => Some(storage),
+        Err(error) => {
+            tracing::warn!(
+                storage_name = %storage_name,
+                error = %error,
+                "browser entry IndexedDB unavailable; falling back to in-memory entry storage"
+            );
+            None
+        }
+    }
+}
+
+async fn open_browser_measure_storage(storage_name: &str) -> Option<MeasureStorage> {
+    match IdbStorage::new_with_cap_and_name(50000, storage_name).await {
+        Ok(storage) => Some(Box::new(storage) as MeasureStorage),
+        Err(source) => {
+            tracing::warn!(
+                storage_name = %storage_name,
+                error = %source,
+                "browser measurement IndexedDB unavailable; falling back to in-memory measurement storage"
+            );
+            None
+        }
+    }
+}
+
+impl Provider {
+    /// Create a browser provider backed by IndexedDB storage and install its default backend.
+    ///
+    /// This is the Rust-side constructor for browser frontends. It keeps provider ownership as the
+    /// lifecycle boundary while reusing the same storage, backend, and onion-protocol setup as the
+    /// wasm-exported constructors.
+    pub async fn new_browser_provider_with_storage(
+        config: ProcessorConfig,
+        storage_name: String,
+    ) -> NodeResult<Self> {
+        let onion_https_exit_policy = config.onion_https_exit_policy();
+        let entry_storage = open_browser_entry_storage_or_memory(&storage_name).await;
+        let measure_storage =
+            open_browser_measure_storage(&format!("{storage_name}/measure")).await;
+
+        let provider =
+            Self::new_provider_with_storage_internal(config, entry_storage, measure_storage)
+                .await?;
+        provider.set_backend()?;
+        if let Some(policy) = onion_https_exit_policy {
+            provider.install_onion_https_protocol(Some(policy))?;
+        }
+        Ok(provider)
+    }
 }
 
 #[wasm_export]
@@ -419,17 +476,8 @@ impl Provider {
         future_to_promise(async move {
             let signer = wrapped_signer(signer);
 
-            let entry_storage = Box::new(
-                IdbStorage::new_with_cap_and_name(50000, "rings-node")
-                    .await
-                    .map_err(JsError::from)?,
-            );
-
-            let measure_storage = Box::new(
-                IdbStorage::new_with_cap_and_name(50000, "rings-node/measure")
-                    .await
-                    .map_err(JsError::from)?,
-            );
+            let entry_storage = open_browser_entry_storage_or_memory("rings-node").await;
+            let measure_storage = open_browser_measure_storage("rings-node/measure").await;
 
             let provider = Provider::new_provider_internal(
                 network_id,
@@ -438,8 +486,8 @@ impl Provider {
                 account,
                 account_type,
                 Signer::Async(Box::new(signer)),
-                Some(entry_storage),
-                Some(measure_storage),
+                entry_storage,
+                measure_storage,
             )
             .await?;
 
@@ -467,17 +515,8 @@ impl Provider {
                 .map_err(JsError::from)?;
             policy.validate_targets().map_err(JsError::from)?;
 
-            let entry_storage = Box::new(
-                IdbStorage::new_with_cap_and_name(50000, "rings-node")
-                    .await
-                    .map_err(JsError::from)?,
-            );
-
-            let measure_storage = Box::new(
-                IdbStorage::new_with_cap_and_name(50000, "rings-node/measure")
-                    .await
-                    .map_err(JsError::from)?,
-            );
+            let entry_storage = open_browser_entry_storage_or_memory("rings-node").await;
+            let measure_storage = open_browser_measure_storage("rings-node/measure").await;
 
             let config_policy = policy.clone();
             let provider = Provider::new_provider_internal_with_config(
@@ -487,8 +526,8 @@ impl Provider {
                 account,
                 account_type,
                 Signer::Async(Box::new(signer)),
-                Some(entry_storage),
-                Some(measure_storage),
+                entry_storage,
+                measure_storage,
                 move |config| {
                     config
                         .enable_https_onion_exit()
@@ -504,6 +543,24 @@ impl Provider {
 
             Ok(JsValue::from(provider))
         })
+    }
+
+    /// Install the browser HTTPS onion-exit protocol handler with an explicit target policy.
+    ///
+    /// This updates the local exit handler used by incoming onion HTTPS requests. Discovery still
+    /// comes from the provider's processor configuration, so nodes that should be routeable exits
+    /// must also be constructed with HTTPS onion-exit advertisement enabled.
+    pub fn install_onion_https_exit(
+        &self,
+        allowed_targets: Vec<String>,
+        denied_targets: Vec<String>,
+    ) -> Result<(), JsError> {
+        let policy = OnionExitPolicy::from_target_strings(allowed_targets, denied_targets)
+            .map_err(JsError::from)?;
+        policy.validate_targets().map_err(JsError::from)?;
+        self.install_onion_https_protocol(Some(policy))
+            .map(|_| ())
+            .map_err(JsError::from)
     }
 
     /// Create new provider instance with serialized config (yaml/json)
@@ -531,32 +588,9 @@ impl Provider {
         storage_name: String,
     ) -> js_sys::Promise {
         future_to_promise(async move {
-            let onion_https_exit_policy = config.onion_https_exit_policy();
-            let entry_storage = Box::new(
-                IdbStorage::new_with_cap_and_name(50000, &storage_name)
-                    .await
-                    .map_err(JsError::from)?,
-            );
-
-            let measure_storage = Box::new(
-                IdbStorage::new_with_cap_and_name(50000, &format!("{storage_name}/measure"))
-                    .await
-                    .map_err(JsError::from)?,
-            );
-
-            let provider = Self::new_provider_with_storage_internal(
-                config,
-                Some(entry_storage),
-                Some(measure_storage),
-            )
-            .await
-            .map_err(JsError::from)?;
-            provider.set_backend().map_err(JsError::from)?;
-            if let Some(policy) = onion_https_exit_policy {
-                provider
-                    .install_onion_https_protocol(Some(policy))
-                    .map_err(JsError::from)?;
-            }
+            let provider = Self::new_browser_provider_with_storage(config, storage_name)
+                .await
+                .map_err(JsError::from)?;
             Ok(JsValue::from(provider))
         })
     }
@@ -594,17 +628,31 @@ impl Provider {
         })
     }
 
-    /// Start the long-running listener.
-    ///
-    /// The returned Promise is not a readiness barrier and does not resolve
-    /// during normal operation.
-    pub fn listen(&self) -> js_sys::Promise {
+    /// Start the long-running listener and return its lifecycle handle.
+    pub fn listen(&self) -> ProviderListener {
         let p = self.processor.clone();
+        let stop = StopSource::new();
+        let token = stop.token();
+        let (started_sender, started_receiver) = oneshot::channel::<()>();
 
-        future_to_promise(async move {
-            p.listen().await;
+        let started = future_to_promise(async move {
+            started_receiver
+                .await
+                .map_err(|_| JsError::new("provider listener exited before start"))?;
             Ok(JsValue::null())
-        })
+        });
+
+        let task = future_to_promise(async move {
+            let _sent = started_sender.send(());
+            p.listen_with(token).await;
+            Ok(JsValue::null())
+        });
+
+        ProviderListener {
+            stop,
+            started,
+            task,
+        }
     }
 
     /// connect peer with remote jsonrpc server url
@@ -725,6 +773,10 @@ impl Provider {
             .map_err(JsError::from)?;
         Ok(BrowserOnionProxy {
             processor: self.processor.clone(),
+            scope: Scope::new(
+                self.extensions().core(),
+                ONION_CIRCUIT_NAMESPACE.to_string(),
+            ),
             config: OnionProxyConfig::https_proxy(hop_count, allow_short_paths),
             runtime,
             directory_endpoint: self.onion_directory_endpoint().map_err(JsError::from)?,
@@ -857,9 +909,11 @@ impl Provider {
         &self,
         runtime: Arc<OnionHttpsRuntime>,
     ) -> OnionCircuitShell<BrowserOnionCircuitHandler> {
-        OnionCircuitShell::new(
+        let link_sender = runtime.link_sender();
+        OnionCircuitShell::with_link_sender(
             self.processor.session_sk().clone(),
             BrowserOnionCircuitHandler::new(runtime, self.processor.session_sk().clone()),
+            link_sender,
         )
     }
 }

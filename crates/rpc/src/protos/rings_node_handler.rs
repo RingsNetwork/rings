@@ -9,8 +9,8 @@ use super::rings_node::*;
 use crate::method::Method;
 
 /// Used for processor to match rpc request and response.
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait HandleRpc<Req, Resp> {
     /// Handle rpc request and return response.
     async fn handle_rpc(&self, req: Req) -> Result<Resp>;

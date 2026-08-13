@@ -43,7 +43,7 @@ pub const DEFAULT_ENDPOINT_URL: &str = "http://127.0.0.1:50000";
 /// Default WebRTC ICE server list.
 pub const DEFAULT_ICE_SERVERS: &str = "stun://stun.l.google.com:19302";
 /// Default Chord stabilization interval in seconds.
-pub const DEFAULT_STABILIZE_INTERVAL: u64 = 3;
+pub const DEFAULT_STABILIZE_INTERVAL: u64 = 15;
 /// Default storage capacity in bytes for native storage backends.
 pub const DEFAULT_STORAGE_CAPACITY: u32 = 200000000;
 
@@ -327,7 +327,7 @@ internal_api_port: 50000
 external_api_addr: 127.0.0.1:50001
 endpoint_url: http://127.0.0.1:50000
 ice_servers: stun://stun.l.google.com:19302
-stabilize_interval: 3
+stabilize_interval: 15
 external_ip: null
 webrtc_udp_port_min: null
 webrtc_udp_port_max: null
@@ -374,7 +374,7 @@ internal_api_port: 50000
 external_api_addr: 127.0.0.1:50001
 endpoint_url: http://127.0.0.1:50000
 ice_servers: stun://stun.l.google.com:19302
-stabilize_interval: 3
+stabilize_interval: 15
 dht_virtual_nodes: 0
 external_ip: null
 webrtc_udp_port_min: null

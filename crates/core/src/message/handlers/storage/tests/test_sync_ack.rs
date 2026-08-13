@@ -223,6 +223,28 @@ async fn additive_repair_sync_cannot_create_pending_cleanup_capability() -> Resu
 }
 
 #[tokio::test]
+async fn send_storage_sync_applies_local_destination_without_transport_send() -> Result<()> {
+    let node = prepare_node(SecretKey::random()).await;
+    let entry = Entry::new(Did::from(100u32), vec![], EntryKind::Data);
+    let placement_key = entry.did;
+    let stored_entry = entry.clone().try_into_storage_entry()?;
+    let sync_msg = SyncEntriesWithSuccessor {
+        purpose: StorageSyncPurpose::AdditiveRepair,
+        destination: StorageSyncDestination::PhysicalOwner(node.did()),
+        data: vec![PlacedEntry::new(placement_key, entry)],
+    };
+
+    node.swarm.transport.send_storage_sync(sync_msg).await?;
+
+    assert_eq!(
+        node.dht().storage.get(&placement_key.to_string()).await?,
+        Some(stored_entry)
+    );
+    assert_no_more_msg([&node]).await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn sync_entries_report_handler_rejects_wrong_physical_receiver() -> Result<()> {
     let sender = prepare_node(SecretKey::random()).await;
     let receiver = prepare_node(SecretKey::random()).await;

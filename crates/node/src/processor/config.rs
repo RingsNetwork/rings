@@ -140,7 +140,7 @@ impl ProcessorConfig {
     }
 
     /// Return the HTTPS onion-exit policy when this config advertises that service.
-    #[cfg(feature = "browser")]
+    #[cfg(all(feature = "browser", target_family = "wasm"))]
     pub fn onion_https_exit_policy(&self) -> Option<OnionExitPolicy> {
         (self.advertise_onion_exit
             && self

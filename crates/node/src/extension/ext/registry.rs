@@ -16,6 +16,7 @@ use std::sync::Mutex;
 use std::sync::RwLock;
 
 use bytes::Bytes;
+use futures::lock::Mutex as AsyncMutex;
 use rings_core::dht::Did;
 
 use super::Ctx;
@@ -30,24 +31,25 @@ use super::Wire;
 use crate::error::Error;
 use crate::error::Result;
 use crate::processor::Processor;
+use crate::sync_lock::lock;
 
 /// Upper bound on re-injection iterations per inbound message, so a misbehaving
 /// protocol/effect cycle cannot diverge.
 const MAX_FIXPOINT_STEPS: u32 = 1024;
 
 /// Type-erased handler stored in the registry: native is `Send + Sync`, browser not.
-#[cfg(not(feature = "browser"))]
+#[cfg(rings_native)]
 pub(crate) type DynHandler = dyn Handler + Send + Sync;
 /// Type-erased handler stored in the registry.
-#[cfg(feature = "browser")]
+#[cfg(rings_browser)]
 pub(crate) type DynHandler = dyn Handler;
 
 type HandlerMap = RwLock<HashMap<String, Arc<DynHandler>>>;
 
 /// Erased, runtime-facing handler — the router-internal ABI. Implemented once, generically, by
 /// `Runner`; protocol authors never name it (they write `Protocol` + `Interpret`).
-#[cfg_attr(feature = "browser", async_trait::async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait::async_trait)]
+#[cfg_attr(rings_browser, async_trait::async_trait(?Send))]
+#[cfg_attr(rings_native, async_trait::async_trait)]
 pub(crate) trait Handler {
     /// Decode → step (pure, committed) → run the protocol's effects, returning re-injected
     /// messages. `handle : (from, payload) → IO [Inbound]`.
@@ -170,13 +172,52 @@ impl Scope {
     /// `pub(crate)`: this is the **long-lived lifecycle sink** for an extension's own engine
     /// (e.g. the relay's spawned socket tasks reporting `Accepted`/`Untrack` later), and it
     /// starts a **fresh** [`dispatch`](Core::dispatch) fixpoint with its own
-    /// `MAX_FIXPOINT_STEPS` budget — it is *not* part of the bounded re-injection fixpoint that
+    /// `MAX_FIXPOINT_STEPS` budget — it is *not* part of the bounded feedback fixpoint that
     /// drives a single inbound. The synchronous per-effect feedback path is the `Vec<Bytes>`
-    /// returned from [`Interpret::run`], which the router re-injects within the current budget.
+    /// returned from [`Interpret::run`], which the runner reduces within its current ordered
+    /// turn and budget.
     /// A third-party shell therefore gets only that bounded return path, never this re-entrant
     /// sink, so it cannot recurse `inject` to escape the budget.
     pub(crate) async fn inject(&self, payload: Bytes) -> Result<()> {
         self.core.inject(self.namespace.as_str(), payload).await
+    }
+}
+
+/// Capability available while an interpreter applies one committed effect.
+///
+/// It can send overlay messages and return synchronous feedback, but cannot re-enter its own
+/// reducer. Long-lived engines receive a [`Scope`] explicitly through the crate-private
+/// `EffectScope::lifecycle` handoff, making ownership visible at the effect boundary.
+pub struct EffectScope {
+    scope: Scope,
+}
+
+impl EffectScope {
+    pub(crate) fn new(scope: Scope) -> Self {
+        Self { scope }
+    }
+
+    /// This node's DID.
+    pub fn did(&self) -> Did {
+        self.scope.did()
+    }
+
+    /// The namespace this effect is confined to.
+    pub fn namespace(&self) -> &str {
+        self.scope.namespace()
+    }
+
+    /// Put a message on the overlay under this effect's namespace.
+    pub async fn send(&self, to: Did, payload: Bytes) -> Result<()> {
+        self.scope.send(to, payload).await
+    }
+
+    /// Hand the lifecycle capability to an explicitly long-lived engine task.
+    ///
+    /// The interpreter itself must return same-turn feedback from [`Interpret::run`], rather
+    /// than await [`Scope::inject`] while the ordered effect turn is active.
+    pub(crate) fn lifecycle(&self) -> Scope {
+        self.scope.clone()
     }
 }
 
@@ -186,10 +227,17 @@ struct Runner<P: Protocol, I> {
     protocol: P,
     interpret: I,
     state: Mutex<P::State>,
+    transition_gate: AsyncMutex<()>,
+    #[cfg(all(test, rings_native))]
+    after_decode_for_test: Option<Arc<dyn Fn() + Send + Sync>>,
+    #[cfg(all(test, rings_native))]
+    after_commit_for_test: Option<Arc<dyn Fn() + Send + Sync>>,
+    #[cfg(all(test, rings_native))]
+    before_gate_wait_for_test: Option<Arc<dyn Fn(bool) + Send + Sync>>,
 }
 
-#[cfg_attr(feature = "browser", async_trait::async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait::async_trait)]
+#[cfg_attr(rings_browser, async_trait::async_trait(?Send))]
+#[cfg_attr(rings_native, async_trait::async_trait)]
 impl<P, I> Handler for Runner<P, I>
 where
     P: Protocol + MaybeSend + 'static,
@@ -212,41 +260,78 @@ where
             }
         };
 
-        // Pure region: a brief *synchronous* critical section — read state, run `step`,
-        // commit next state. No `.await` inside, so the std `Mutex` is correct and the state
-        // fold stays serial per protocol (state-machine semantics, not a limitation;
-        // different protocols and all effects below run concurrently). The commit is the
-        // logical transition point; effect failures that matter come back as events.
-        let effects = {
-            let mut guard = self.state.lock().map_err(|_| Error::Lock)?;
-            let Transition { state, effects } = self.protocol.step(
-                Ctx {
-                    did: core.did(),
-                    state: guard.deref(),
-                },
-                event,
-            );
-            *guard = state;
-            effects
-        };
+        #[cfg(all(test, rings_native))]
+        if let Some(observe) = self.after_decode_for_test.as_ref() {
+            observe();
+        }
 
-        // Impure region (lock released): run the protocol's own effects via its interpreter,
-        // handing it only a namespace-scoped capability. Each payload it returns is re-injected
-        // into *this* namespace with `from = this node` — the router fixes the provenance, so a
-        // shell cannot forge a target namespace or a remote `from`.
+        // The transition gate establishes the protocol's linearization order for state commit
+        // and its resulting effect trace. Decode remains outside that order: it has no state or
+        // effects by contract. Holding the gate through interpretation preserves:
+        // commit(A) < commit(B) => applying A's effects ends before applying B's effects begins.
+        // The state mutex itself remains synchronous and never crosses an await.
+        #[cfg(all(test, rings_native))]
+        if let Some(observe) = self.before_gate_wait_for_test.as_ref() {
+            // Witness the real synchronization boundary: false means this task could acquire
+            // the gate immediately; true means another transition owns it at this exact point.
+            observe(self.transition_gate.try_lock().is_none());
+        }
+        let _transition_turn = self.transition_gate.lock().await;
+
+        // Impure region: the state lock is released, while the transition gate keeps this
+        // protocol's effect trace and synchronous feedback fixpoint in commit order. Returned
+        // payloads are reduced before this turn releases the gate, so a later inbound cannot
+        // observe state that predates an effect's own feedback.
         let namespace = self.protocol.namespace().to_string();
-        let scope = Scope::new(core.clone(), namespace.clone());
-        let mut reinjected = Vec::new();
-        for effect in effects {
-            for payload in self.interpret.run(&scope, effect).await? {
-                reinjected.push(Inbound {
-                    namespace: namespace.clone(),
-                    from: core.did(),
-                    payload,
-                });
+        let scope = EffectScope::new(Scope::new(core.clone(), namespace.clone()));
+        let mut feedback = VecDeque::new();
+        feedback.push_back(event);
+        let mut feedback_budget = MAX_FIXPOINT_STEPS;
+        while let Some(event) = feedback.pop_front() {
+            if feedback_budget == 0 {
+                return Err(Error::ExtensionError(format!(
+                    "feedback fixpoint budget ({MAX_FIXPOINT_STEPS}) exhausted on {namespace:?}"
+                )));
+            }
+            feedback_budget -= 1;
+
+            // Pure region: a brief synchronous state fold. No await crosses `state`; the
+            // feedback queue makes every same-turn effect result part of this fold before a
+            // competing inbound can begin its own transition.
+            let effects = {
+                let mut guard = lock(&self.state)?;
+                let Transition { state, effects } = self.protocol.step(
+                    Ctx {
+                        did: core.did(),
+                        state: guard.deref(),
+                    },
+                    event,
+                );
+                *guard = state;
+                effects
+            };
+
+            #[cfg(all(test, rings_native))]
+            if let Some(observe) = self.after_commit_for_test.as_ref() {
+                observe();
+            }
+
+            for effect in effects {
+                for payload in self.interpret.run(&scope, effect).await? {
+                    match self.protocol.decode(Wire {
+                        from: core.did(),
+                        me: core.did(),
+                        payload: payload.as_ref(),
+                    }) {
+                        Ok(event) => feedback.push_back(event),
+                        Err(Reject(why)) => {
+                            tracing::debug!("drop feedback on {}: {why}", self.protocol.namespace())
+                        }
+                    }
+                }
             }
         }
-        Ok(reinjected)
+        Ok(Vec::new())
     }
 }
 
@@ -326,6 +411,13 @@ impl Extensions {
                     protocol,
                     interpret,
                     state,
+                    transition_gate: AsyncMutex::new(()),
+                    #[cfg(all(test, rings_native))]
+                    after_decode_for_test: None,
+                    #[cfg(all(test, rings_native))]
+                    after_commit_for_test: None,
+                    #[cfg(all(test, rings_native))]
+                    before_gate_wait_for_test: None,
                 });
                 (namespace, runner)
             })
@@ -364,6 +456,13 @@ impl Extensions {
             protocol,
             interpret,
             state,
+            transition_gate: AsyncMutex::new(()),
+            #[cfg(all(test, rings_native))]
+            after_decode_for_test: None,
+            #[cfg(all(test, rings_native))]
+            after_commit_for_test: None,
+            #[cfg(all(test, rings_native))]
+            before_gate_wait_for_test: None,
         });
         let mut handlers = self.core.handlers.write().map_err(|_| Error::Lock)?;
         if !replace && handlers.contains_key(&namespace) {
@@ -391,5 +490,478 @@ impl Extensions {
     /// [`Core::dispatch`].
     pub(crate) async fn dispatch(&self, from: Did, envelope: Envelope) -> Result<()> {
         self.core.dispatch(from, envelope).await
+    }
+}
+
+#[cfg(all(test, rings_native))]
+mod tests {
+    use std::collections::HashMap;
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    use async_trait::async_trait;
+    use rings_core::ecc::SecretKey;
+    use rings_core::session::SessionSk;
+    use tokio::sync::Notify;
+
+    use super::*;
+    use crate::extension::protocols::relay::ControlSendTestHook;
+    use crate::extension::protocols::relay::NativeRelay;
+    use crate::extension::protocols::relay::Relay;
+    use crate::extension::protocols::relay::RelayCommand;
+    use crate::extension::protocols::relay::RelayEffect;
+    use crate::extension::protocols::relay::TCP;
+    use crate::extension::transport::engine::TransportSessions;
+    use crate::extension::transport::Frame;
+    use crate::extension::transport::Initiator;
+    use crate::extension::transport::SessionId;
+    use crate::extension::transport::SessionKey;
+    use crate::processor::ProcessorBuilder;
+    use crate::processor::ProcessorConfig;
+
+    struct OrderedProtocol;
+
+    impl Protocol for OrderedProtocol {
+        type State = u8;
+        type Event = u8;
+        type Effect = u8;
+
+        fn namespace(&self) -> &str {
+            "ordered-effects"
+        }
+
+        fn init(&self) -> Self::State {
+            0
+        }
+
+        fn decode(&self, wire: Wire<'_>) -> std::result::Result<Self::Event, Reject> {
+            let event = wire
+                .payload
+                .first()
+                .copied()
+                .ok_or_else(|| Reject("missing effect value".to_string()))?;
+            Ok(event)
+        }
+
+        fn step(
+            &self,
+            ctx: Ctx<'_, Self::State>,
+            event: Self::Event,
+        ) -> Transition<Self::State, Self::Effect> {
+            Transition::with(ctx.state.saturating_add(1), vec![event])
+        }
+    }
+
+    #[derive(Default)]
+    struct BlockingOrderedInterpreter {
+        first_effect_started: Notify,
+        release_first_effect: Notify,
+        observed: Mutex<Vec<u8>>,
+    }
+
+    #[async_trait]
+    impl Interpret for Arc<BlockingOrderedInterpreter> {
+        type Effect = u8;
+
+        async fn run(&self, _scope: &EffectScope, effect: Self::Effect) -> Result<Vec<Bytes>> {
+            if effect == 1 {
+                self.first_effect_started.notify_one();
+                self.release_first_effect.notified().await;
+            }
+            lock(&self.observed)?.push(effect);
+            Ok(Vec::new())
+        }
+    }
+
+    #[derive(Default)]
+    struct RelayFeedbackInterpreter {
+        first_effect_started: Notify,
+        release_first_effect: Notify,
+        first_connect_seen: Mutex<bool>,
+        observed_connects: Mutex<Vec<SessionId>>,
+    }
+
+    #[async_trait]
+    impl Interpret for Arc<RelayFeedbackInterpreter> {
+        type Effect = RelayEffect<SocketAddr>;
+
+        async fn run(&self, _scope: &EffectScope, effect: Self::Effect) -> Result<Vec<Bytes>> {
+            match effect {
+                RelayEffect::Connect { key, .. } => {
+                    let first_connect = {
+                        let mut seen = lock(&self.first_connect_seen)?;
+                        let first_connect = !*seen;
+                        *seen = true;
+                        first_connect
+                    };
+                    if first_connect {
+                        self.first_effect_started.notify_one();
+                        self.release_first_effect.notified().await;
+                        let feedback = RelayCommand::<SocketAddr>::Untrack {
+                            peer: key.peer,
+                            session: key.session,
+                            initiator: key.initiator,
+                        };
+                        return bincode::serialize(&feedback)
+                            .map(Bytes::from)
+                            .map(|payload| vec![payload])
+                            .map_err(|_| Error::EncodeError);
+                    }
+                    lock(&self.observed_connects)?.push(key.session);
+                    Ok(Vec::new())
+                }
+                _ => Ok(Vec::new()),
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct FailingOrderedInterpreter {
+        observed: Mutex<Vec<u8>>,
+    }
+
+    #[async_trait]
+    impl Interpret for Arc<FailingOrderedInterpreter> {
+        type Effect = u8;
+
+        async fn run(&self, _scope: &EffectScope, effect: Self::Effect) -> Result<Vec<Bytes>> {
+            lock(&self.observed)?.push(effect);
+            if effect == 1 {
+                return Err(Error::ExtensionError(
+                    "intentional effect failure".to_string(),
+                ));
+            }
+            Ok(Vec::new())
+        }
+    }
+
+    fn extensions() -> Result<Extensions> {
+        let session = SessionSk::new_with_seckey(&SecretKey::random())?;
+        let config = ProcessorConfig::new(1, String::new(), session, 1);
+        let processor = ProcessorBuilder::from_config(&config)?
+            .advertise_presence(false)
+            .build()?;
+        Ok(Extensions::new(Arc::new(processor)))
+    }
+
+    #[tokio::test]
+    async fn committed_transitions_execute_effects_in_commit_order() -> Result<()> {
+        // Invariant: while A's effect is blocked, B cannot commit or emit; releasing A
+        // produces the unique effect trace [A, B] for the protocol's state-transition order.
+        let extensions = extensions()?;
+        let interpreter = Arc::new(BlockingOrderedInterpreter::default());
+        let gate_wait = Arc::new(Notify::new());
+        let gate_contention = Arc::new(Mutex::new(Vec::new()));
+        let gate_observer = {
+            let gate_wait = Arc::clone(&gate_wait);
+            let gate_contention = Arc::clone(&gate_contention);
+            Arc::new(move |contended| {
+                gate_contention
+                    .lock()
+                    .expect("test gate witness lock")
+                    .push(contended);
+                gate_wait.notify_one();
+            }) as Arc<dyn Fn(bool) + Send + Sync>
+        };
+        let committed = Arc::new(Mutex::new(0_u8));
+        let commit_observer = {
+            let committed = Arc::clone(&committed);
+            Arc::new(move || {
+                *committed.lock().expect("test commit witness lock") += 1;
+            }) as Arc<dyn Fn() + Send + Sync>
+        };
+        let runner: Arc<DynHandler> = Arc::new(Runner {
+            protocol: OrderedProtocol,
+            interpret: Arc::clone(&interpreter),
+            state: Mutex::new(0),
+            transition_gate: AsyncMutex::new(()),
+            after_decode_for_test: None,
+            after_commit_for_test: Some(commit_observer),
+            before_gate_wait_for_test: Some(gate_observer),
+        });
+        extensions
+            .core
+            .handlers
+            .write()
+            .map_err(|_| Error::Lock)?
+            .insert("ordered-effects".to_string(), runner);
+        let from = extensions.core().did();
+
+        let first_extensions = extensions.clone();
+        let first = tokio::spawn(async move {
+            first_extensions
+                .dispatch(
+                    from,
+                    Envelope::new("ordered-effects", Bytes::from_static(&[1])),
+                )
+                .await
+        });
+        interpreter.first_effect_started.notified().await;
+        gate_wait.notified().await;
+
+        let second_extensions = extensions.clone();
+        let second = tokio::spawn(async move {
+            second_extensions
+                .dispatch(
+                    from,
+                    Envelope::new("ordered-effects", Bytes::from_static(&[2])),
+                )
+                .await
+        });
+        gate_wait.notified().await;
+        assert_eq!(*lock(&gate_contention)?, vec![false, true]);
+        assert!(!second.is_finished());
+        assert!(lock(&interpreter.observed)?.is_empty());
+        assert_eq!(*lock(&committed)?, 1);
+
+        interpreter.release_first_effect.notify_one();
+        first
+            .await
+            .map_err(|error| Error::ExtensionError(error.to_string()))??;
+        second
+            .await
+            .map_err(|error| Error::ExtensionError(error.to_string()))??;
+        assert_eq!(*lock(&committed)?, 2);
+        assert_eq!(*lock(&interpreter.observed)?, vec![1, 2]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn failed_effect_releases_ordered_turn_for_later_transition() -> Result<()> {
+        // Law: failure is an outcome of the committed transition, not a leaked gate. The next
+        // transition can run after the failed application has ended.
+        let extensions = extensions()?;
+        let interpreter = Arc::new(FailingOrderedInterpreter::default());
+        extensions.register(OrderedProtocol, Arc::clone(&interpreter))?;
+        let from = extensions.core().did();
+
+        let failed = extensions
+            .dispatch(
+                from,
+                Envelope::new("ordered-effects", Bytes::from_static(&[1])),
+            )
+            .await;
+        assert!(matches!(failed, Err(Error::ExtensionError(_))));
+        extensions
+            .dispatch(
+                from,
+                Envelope::new("ordered-effects", Bytes::from_static(&[2])),
+            )
+            .await?;
+
+        assert_eq!(*lock(&interpreter.observed)?, vec![1, 2]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn returned_feedback_precedes_a_waiting_transition() -> Result<()> {
+        // Invariant: the first inbound Open returns a real RelayCommand::Untrack feedback before
+        // a duplicate Open may inspect relay state. Therefore the duplicate is accepted and emits
+        // its own Connect; the old queue-after-gate implementation dropped it as a live duplicate.
+        let extensions = extensions()?;
+        let interpreter = Arc::new(RelayFeedbackInterpreter::default());
+        let decoded = Arc::new(Notify::new());
+        let observer = {
+            let decoded = Arc::clone(&decoded);
+            Arc::new(move || decoded.notify_one()) as Arc<dyn Fn() + Send + Sync>
+        };
+        let protocol = Relay::tcp(HashMap::from([(
+            "web".to_string(),
+            "127.0.0.1:80"
+                .parse::<SocketAddr>()
+                .map_err(|error| Error::ExtensionError(error.to_string()))?,
+        )]));
+        let state = protocol.init();
+        let runner: Arc<DynHandler> = Arc::new(Runner {
+            protocol,
+            interpret: Arc::clone(&interpreter),
+            state: Mutex::new(state),
+            transition_gate: AsyncMutex::new(()),
+            after_decode_for_test: Some(observer),
+            after_commit_for_test: None,
+            before_gate_wait_for_test: None,
+        });
+        extensions
+            .core
+            .handlers
+            .write()
+            .map_err(|_| Error::Lock)?
+            .insert(TCP.to_string(), runner);
+        let from: Did = SecretKey::random().address().into();
+        let open = bincode::serialize(&Frame::Open {
+            session: SessionId(0),
+            service: "web".to_string(),
+        })
+        .map(Bytes::from)
+        .map_err(|_| Error::EncodeError)?;
+        let first_open = open.clone();
+
+        let first_extensions = extensions.clone();
+        let first = tokio::spawn(async move {
+            first_extensions
+                .dispatch(from, Envelope::new(TCP, first_open))
+                .await
+        });
+        interpreter.first_effect_started.notified().await;
+        decoded.notified().await;
+
+        let second_extensions = extensions.clone();
+        let second = tokio::spawn(async move {
+            second_extensions
+                .dispatch(from, Envelope::new(TCP, open))
+                .await
+        });
+        decoded.notified().await;
+        assert!(!second.is_finished());
+
+        interpreter.release_first_effect.notify_one();
+        let timeout = std::time::Duration::from_secs(1);
+        tokio::time::timeout(timeout, first)
+            .await
+            .map_err(|_| Error::ExtensionError("first feedback turn timed out".to_string()))?
+            .map_err(|error| Error::ExtensionError(error.to_string()))??;
+        tokio::time::timeout(timeout, second)
+            .await
+            .map_err(|_| Error::ExtensionError("second feedback turn timed out".to_string()))?
+            .map_err(|error| Error::ExtensionError(error.to_string()))??;
+        assert_eq!(*lock(&interpreter.observed_connects)?, vec![SessionId(0)]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_open_accepted_resource_returns_synchronous_untrack() -> Result<()> {
+        let extensions = extensions()?;
+        let effect_scope = EffectScope::new(Scope::new(extensions.core(), TCP.to_string()));
+        let interpreter = NativeRelay::new(Arc::new(TransportSessions::new()));
+        let peer: Did = SecretKey::random().address().into();
+        let key = SessionKey::new(peer, TCP, SessionId(9), Initiator::Local);
+
+        let feedback = interpreter
+            .run(&effect_scope, RelayEffect::OpenAccepted {
+                token: 77,
+                key: key.clone(),
+                service: "missing-pending-resource".to_string(),
+            })
+            .await?;
+
+        assert_eq!(feedback.len(), 1);
+        assert!(matches!(
+            bincode::deserialize::<RelayCommand<SocketAddr>>(feedback[0].as_ref()),
+            Ok(RelayCommand::Untrack {
+                peer: actual_peer,
+                session: SessionId(9),
+                initiator: Initiator::Local,
+            }) if actual_peer == peer
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn terminal_relay_control_effect_does_not_await_overlay_send() -> Result<()> {
+        let extensions = extensions()?;
+        let hook = Arc::new(ControlSendTestHook::default());
+        let interpreter = Arc::new(NativeRelay::new_with_control_send_test_hook(
+            Arc::new(TransportSessions::new()),
+            Arc::clone(&hook),
+        ));
+        let peer: Did = SecretKey::random().address().into();
+        let core = extensions.core();
+        let application = tokio::spawn(async move {
+            let effect_scope = EffectScope::new(Scope::new(core, TCP.to_string()));
+            interpreter
+                .run(&effect_scope, RelayEffect::SendClose {
+                    to: peer,
+                    session: SessionId(5),
+                    from_opener: false,
+                })
+                .await
+        });
+
+        // Await a real outbox-worker suspension before observing completion. The interpreter
+        // must already have returned; otherwise this join times out deterministically while the
+        // hook remains held.
+        tokio::time::timeout(std::time::Duration::from_secs(1), hook.wait_until_blocked())
+            .await
+            .map_err(|_| {
+                Error::ExtensionError("control outbox did not reach test gate".to_string())
+            })?;
+        let applied = tokio::time::timeout(std::time::Duration::from_secs(1), application)
+            .await
+            .map_err(|_| {
+                Error::ExtensionError("terminal control effect held the gate".to_string())
+            })?
+            .map_err(|error| Error::ExtensionError(error.to_string()))??;
+
+        assert!(applied.is_empty());
+        hook.release();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn saturated_peer_control_lane_does_not_block_another_peer() -> Result<()> {
+        let extensions = extensions()?;
+        let hook = Arc::new(ControlSendTestHook::default());
+        let interpreter = NativeRelay::new_with_control_send_test_hook(
+            Arc::new(TransportSessions::new()),
+            Arc::clone(&hook),
+        );
+        let blocked_peer: Did = SecretKey::random().address().into();
+        let independent_peer: Did = SecretKey::random().address().into();
+        let effect_scope = EffectScope::new(Scope::new(extensions.core(), TCP.to_string()));
+
+        interpreter
+            .run(&effect_scope, RelayEffect::SendClose {
+                to: blocked_peer,
+                session: SessionId(0),
+                from_opener: false,
+            })
+            .await?;
+        tokio::time::timeout(std::time::Duration::from_secs(1), hook.wait_until_blocked())
+            .await
+            .map_err(|_| {
+                Error::ExtensionError("first peer control lane did not block".to_string())
+            })?;
+
+        let mut saturated = false;
+        for session in 1..=8 {
+            let result = interpreter
+                .run(&effect_scope, RelayEffect::SendClose {
+                    to: blocked_peer,
+                    session: SessionId(session),
+                    from_opener: false,
+                })
+                .await;
+            if result.is_err() {
+                saturated = true;
+                break;
+            }
+        }
+        assert!(saturated, "the blocked peer must have a finite lane budget");
+
+        interpreter
+            .run(&effect_scope, RelayEffect::SendClose {
+                to: independent_peer,
+                session: SessionId(9),
+                from_opener: false,
+            })
+            .await?;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            hook.wait_until_completed(independent_peer),
+        )
+        .await
+        .map_err(|_| {
+            Error::ExtensionError("independent peer control lane was blocked".to_string())
+        })??;
+
+        hook.release();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            hook.wait_until_completed(blocked_peer),
+        )
+        .await
+        .map_err(|_| Error::ExtensionError("blocked peer lane did not resume".to_string()))??;
+        Ok(())
     }
 }

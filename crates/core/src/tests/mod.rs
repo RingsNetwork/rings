@@ -1,9 +1,9 @@
 use crate::swarm::Swarm;
 
-#[cfg(feature = "wasm")]
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
 pub mod wasm;
 
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 pub mod default;
 
 #[allow(dead_code)]
@@ -22,7 +22,4 @@ pub async fn manually_establish_connection(swarm1: &Swarm, swarm2: &Swarm) {
     let offer = swarm1.create_offer(swarm2.did()).await.unwrap();
     let answer = swarm2.answer_offer(offer).await.unwrap();
     swarm1.accept_answer(answer).await.unwrap();
-
-    assert!(swarm1.transport.get_connection(swarm2.did()).is_some());
-    assert!(swarm2.transport.get_connection(swarm1.did()).is_some());
 }

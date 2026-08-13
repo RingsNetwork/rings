@@ -25,9 +25,9 @@ use crate::error::Result;
 ///
 /// It is `Send` on native targets (so it can be spawned on a multi-threaded
 /// runtime) and `!Send` on wasm, matching the rest of the transport.
-#[cfg(feature = "web-sys-webrtc")]
+#[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
 pub type DeliveryFuture = Pin<Box<dyn Future<Output = Result<()>>>>;
 
 /// A future resolving to the eventual fate of a sent message.
-#[cfg(not(feature = "web-sys-webrtc"))]
+#[cfg(not(all(feature = "web-sys-webrtc", target_family = "wasm")))]
 pub type DeliveryFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;

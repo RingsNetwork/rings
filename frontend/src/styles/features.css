@@ -160,15 +160,44 @@
 }
 
 .topology .ring-node {
-  transition:
-    filter 120ms ease,
-    stroke-width 120ms ease;
   vector-effect: non-scaling-stroke;
 }
 
 .topology .topology-node.active .ring-node {
-  filter: drop-shadow(0 0 13px rgba(126, 239, 255, 0.78));
   stroke-width: 3;
+}
+
+.topology .active-node-halo {
+  fill: none;
+  stroke: rgba(126, 239, 255, 0.88);
+  stroke-width: 1.8;
+  vector-effect: non-scaling-stroke;
+}
+
+.topology .active-node-pointer {
+  stroke: rgba(126, 239, 255, 0.56);
+  stroke-width: 1.2;
+  vector-effect: non-scaling-stroke;
+}
+
+.topology .active-node-frame {
+  fill: rgba(255, 250, 240, 0.96);
+  stroke: rgba(126, 239, 255, 0.7);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+}
+
+.topology .active-node-caption {
+  fill: #b42318;
+  font-size: 0.34rem;
+  font-weight: 900;
+}
+
+.topology .active-node-id {
+  fill: #231f1a;
+  font-size: 0.52rem;
+  font-weight: 700;
+  letter-spacing: 0;
 }
 
 .topology .scan {
@@ -198,31 +227,6 @@
 
 .topology .successor-label text {
   fill: rgba(126, 239, 255, 0.94);
-}
-
-.topology .active-node-pointer {
-  stroke: rgba(126, 239, 255, 0.52);
-  stroke-dasharray: 3 5;
-  stroke-linecap: round;
-  vector-effect: non-scaling-stroke;
-}
-
-.topology .active-node-frame {
-  fill: rgba(2, 9, 13, 0.82);
-  stroke: rgba(126, 239, 255, 0.48);
-  stroke-width: 1;
-  vector-effect: non-scaling-stroke;
-}
-
-.topology .active-node-id {
-  fill: var(--ink-strong);
-  font-size: 0.52rem;
-  font-weight: 800;
-  letter-spacing: 0;
-  paint-order: stroke;
-  stroke: rgba(2, 7, 10, 0.96);
-  stroke-linejoin: round;
-  stroke-width: 4px;
 }
 
 .topology .node-label,

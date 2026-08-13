@@ -9,6 +9,8 @@ pub use url;
 pub use uuid;
 
 pub use crate::dht::entry;
+pub use crate::lifecycle::StopSource;
+pub use crate::lifecycle::StopToken;
 pub use crate::measure::PeerMeasurement;
 pub use crate::message;
 pub use crate::message::ChordStorageInterface;

@@ -2,6 +2,9 @@
  * MV3 service worker for Rings wallet injection, offscreen node setup, and icon state.
  */
 
+import { errorMessage, type RuntimeResponse } from "./extension_runtime.js";
+import { installExtensionWebviewServiceWorker } from "./extension_webview_service_worker.js";
+
 /**
  * Wallet kinds accepted by the service-worker wallet bridge.
  */
@@ -10,19 +13,6 @@ type WalletKind = "eip191" | "metamask" | "ed25519" | "phantom";
  * Extension action icon states exposed to extension pages.
  */
 type IconState = "disconnected" | "connecting" | "connected";
-
-/**
- * Standard service-worker response shape for chrome.runtime messages.
- */
-type RuntimeResponse<T> =
-  | {
-      readonly ok: true;
-      readonly result?: T;
-    }
-  | {
-      readonly ok: false;
-      readonly error: string;
-    };
 
 /**
  * Runtime message requesting an extension action icon update.
@@ -179,6 +169,8 @@ let selectedEip191Provider: SelectedProvider = {
   providerId: "",
 };
 
+installExtensionWebviewServiceWorker();
+
 /**
  * Enables side-panel opening from the extension action when the browser supports it.
  */
@@ -211,12 +203,7 @@ setNodeIconState("disconnected").catch((error: unknown): void => {
 });
 
 chrome.action.onClicked.addListener((): void => {
-  const optionalChrome = chrome as unknown as {
-    readonly sidePanel?: {
-      readonly setPanelBehavior?: unknown;
-    };
-  };
-  if (optionalChrome.sidePanel?.setPanelBehavior) {
+  if (typeof chrome.sidePanel?.setPanelBehavior === "function") {
     return;
   }
   chrome.tabs.create({ url: chrome.runtime.getURL("index.html") });
@@ -701,11 +688,4 @@ function getTab(tabId: number): Promise<chrome.tabs.Tab> {
  */
 function isRecord(value: unknown): value is RuntimeMessageRecord {
   return typeof value === "object" && value !== null;
-}
-
-/**
- * Converts an unknown thrown value into a message string.
- */
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

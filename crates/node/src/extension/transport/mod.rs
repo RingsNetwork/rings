@@ -54,15 +54,34 @@
 
 // The relay's imperative resource tables are private to the relay interpreter — not a public
 // API. Reachable in-crate by the relay extension only.
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 pub(crate) mod engine;
-#[cfg(feature = "browser")]
+pub(crate) mod platform;
+#[cfg(rings_browser)]
 pub(crate) mod wt;
+
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+#[cfg(rings_native)]
+use std::time::Duration;
 
 use bytes::Bytes;
 use rings_core::dht::Did;
 use serde::Deserialize;
 use serde::Serialize;
+
+/// Maximum silence before an abandoned local socket/flow is reclaimed.
+#[cfg(rings_native)]
+pub(crate) const RELAY_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+/// Allocate one counter value without ever wrapping back to a live ABA-equivalent value.
+pub(crate) fn allocate_non_reusing(counter: &AtomicU64) -> Option<u64> {
+    counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            value.checked_add(1)
+        })
+        .ok()
+}
 
 /// Identifier of a relayed session/flow (a virtual circuit ↔ local socket pairing).
 ///
@@ -86,13 +105,98 @@ pub enum Initiator {
     Remote,
 }
 
-impl Initiator {
-    /// The other end's view of the same session.
-    pub fn flip(self) -> Self {
+/// Result of applying one ordered peer-to-local transport effect without
+/// waiting for backend backpressure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum EffectEnqueue {
+    /// The effect was accepted by the current backend generation.
+    Enqueued,
+    /// No backend generation exists; pure state must simply forget the key.
+    Missing,
+    /// The current backend generation failed or saturated; pure state must
+    /// forget it and notify the peer with `Close`.
+    Failed,
+}
+
+/// Maximum number of ordered peer-to-local operations retained by a browser transport session.
+#[cfg(any(test, rings_browser))]
+pub(crate) const MAX_OUTBOUND_QUEUE_OPS: usize = 1024;
+
+/// Maximum aggregate payload retained by a browser transport session.
+#[cfg(any(test, rings_browser))]
+pub(crate) const MAX_OUTBOUND_QUEUE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Pure resource account for a browser transport's deferred operation trace.
+///
+/// Invariant: `operations <= MAX_OUTBOUND_QUEUE_OPS` and
+/// `data_bytes <= MAX_OUTBOUND_QUEUE_BYTES` after every successful reservation.
+#[derive(Default)]
+#[cfg(any(test, rings_browser))]
+pub(crate) struct OutboundQueueBudget {
+    operations: usize,
+    data_bytes: usize,
+}
+
+/// Pure ownership state for the single browser writer-drain task.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[cfg(any(test, rings_browser))]
+pub(crate) enum OutboundDrainState {
+    /// No task owns the queue; the next successful enqueue must start one.
+    #[default]
+    Idle,
+    /// Exactly one task owns the queue and will observe later enqueues.
+    Active,
+}
+
+#[cfg(any(test, rings_browser))]
+impl OutboundDrainState {
+    /// Claim an idle queue. Returns whether the caller acquired drain ownership.
+    pub(crate) fn claim(&mut self) -> bool {
         match self {
-            Initiator::Local => Initiator::Remote,
-            Initiator::Remote => Initiator::Local,
+            Self::Idle => {
+                *self = Self::Active;
+                true
+            }
+            Self::Active => false,
         }
+    }
+
+    /// Release drain ownership after observing an empty queue.
+    pub(crate) fn release(&mut self) {
+        *self = Self::Idle;
+    }
+}
+
+#[cfg(any(test, rings_browser))]
+impl OutboundQueueBudget {
+    /// Reserve one operation carrying `data_bytes`, or leave the budget unchanged.
+    pub(crate) fn try_reserve(&mut self, data_bytes: usize) -> bool {
+        let Some(operations) = self.operations.checked_add(1) else {
+            return false;
+        };
+        let Some(total_bytes) = self.data_bytes.checked_add(data_bytes) else {
+            return false;
+        };
+        if operations > MAX_OUTBOUND_QUEUE_OPS || total_bytes > MAX_OUTBOUND_QUEUE_BYTES {
+            return false;
+        }
+        self.operations = operations;
+        self.data_bytes = total_bytes;
+        true
+    }
+
+    /// Release one previously reserved operation, or leave the budget unchanged when the
+    /// supplied values do not refine the current state.
+    pub(crate) fn release(&mut self, data_bytes: usize) -> bool {
+        let Some(operations) = self.operations.checked_sub(1) else {
+            return false;
+        };
+        let Some(total_bytes) = self.data_bytes.checked_sub(data_bytes) else {
+            return false;
+        };
+        self.operations = operations;
+        self.data_bytes = total_bytes;
+        true
     }
 }
 
@@ -196,4 +300,63 @@ pub enum Frame {
         /// Whether the sender of this frame opened the session.
         from_opener: bool,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outbound_budget_preserves_both_operation_and_byte_bounds() {
+        let mut operation_bound = OutboundQueueBudget::default();
+        for _ in 0..MAX_OUTBOUND_QUEUE_OPS {
+            assert!(operation_bound.try_reserve(0));
+        }
+        assert!(!operation_bound.try_reserve(0));
+
+        let mut byte_bound = OutboundQueueBudget::default();
+        assert!(byte_bound.try_reserve(MAX_OUTBOUND_QUEUE_BYTES));
+        assert!(!byte_bound.try_reserve(1));
+    }
+
+    #[test]
+    fn rejected_outbound_budget_reservation_does_not_consume_capacity() {
+        let mut budget = OutboundQueueBudget::default();
+        assert!(!budget.try_reserve(MAX_OUTBOUND_QUEUE_BYTES + 1));
+        assert!(budget.try_reserve(MAX_OUTBOUND_QUEUE_BYTES));
+    }
+
+    #[test]
+    fn released_outbound_budget_can_be_reserved_again() {
+        let mut budget = OutboundQueueBudget::default();
+        assert!(budget.try_reserve(MAX_OUTBOUND_QUEUE_BYTES));
+        assert!(budget.release(MAX_OUTBOUND_QUEUE_BYTES));
+        assert!(budget.try_reserve(MAX_OUTBOUND_QUEUE_BYTES));
+    }
+
+    #[test]
+    fn invalid_outbound_budget_release_is_total_and_does_not_mutate() {
+        let mut budget = OutboundQueueBudget::default();
+        assert!(budget.try_reserve(4));
+        assert!(!budget.release(5));
+        assert!(budget.release(4));
+        assert!(!budget.release(0));
+    }
+
+    #[test]
+    fn outbound_drain_has_exactly_one_owner_until_empty() {
+        let mut drain = OutboundDrainState::Idle;
+        assert!(drain.claim());
+        assert!(!drain.claim());
+        drain.release();
+        assert!(drain.claim());
+    }
+
+    #[test]
+    fn non_reusing_allocator_is_total_at_exhaustion() {
+        let counter = AtomicU64::new(u64::MAX - 1);
+        assert_eq!(allocate_non_reusing(&counter), Some(u64::MAX - 1));
+        assert_eq!(allocate_non_reusing(&counter), None);
+        assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
+    }
 }

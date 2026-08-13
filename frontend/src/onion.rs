@@ -1,14 +1,17 @@
 //! Onion proxy helpers for the browser frontend.
 
-use std::sync::Arc;
+use std::fmt;
 
 use js_sys::Array;
 use js_sys::Object;
 use js_sys::Uint8Array;
+use rings_node::error::Error as NodeError;
+use rings_node::onion::https::OnionHttpsClientRequest;
+use rings_node::onion::proxy::OnionProxyRoute as NodeOnionProxyRoute;
+use rings_node::onion::OnionRouteError;
 use rings_node::provider::Provider;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
-use wasm_bindgen_futures::JsFuture;
 use web_sys::Url;
 
 use crate::browser_api::js_bool_field;
@@ -70,15 +73,94 @@ pub(crate) struct OnionProxyResponse {
     pub(crate) status: u16,
     /// Response headers.
     pub(crate) headers: Vec<(String, String)>,
-    /// Lossy UTF-8 response body for the demo panel.
-    pub(crate) body: String,
+    /// Exact response body bytes returned by the onion exit.
+    pub(crate) body: Vec<u8>,
+    /// Actual onion route used by the request, when returned by the browser provider.
+    pub(crate) route: Option<OnionProxyRoute>,
+}
+
+/// Stable class for onion proxy failures that cross the JS promise boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OnionProxyFailureKind {
+    /// The proxy failed before selecting a more specific route state.
+    Generic,
+    /// The route builder found no live exit for the requested HTTPS service.
+    ExitUnavailable,
+    /// The route builder found exits or relays, but no usable route.
+    RouteUnavailable,
+    /// The selected onion request did not complete before its deadline.
+    RequestTimedOut,
+}
+
+/// Onion proxy error with a stable failure class and a diagnostic message.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OnionProxyError {
+    kind: OnionProxyFailureKind,
+    message: String,
+}
+
+impl OnionProxyError {
+    /// Build a generic onion proxy error.
+    pub(crate) fn generic(message: impl Into<String>) -> Self {
+        Self {
+            kind: OnionProxyFailureKind::Generic,
+            message: message.into(),
+        }
+    }
+
+    /// Stable class for browser-facing failure handling.
+    pub(crate) fn kind(&self) -> OnionProxyFailureKind {
+        self.kind
+    }
+
+    /// Diagnostic message for logs and UI text.
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for OnionProxyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for OnionProxyError {}
+
+impl From<String> for OnionProxyError {
+    fn from(message: String) -> Self {
+        Self::generic(message)
+    }
+}
+
+impl From<NodeError> for OnionProxyError {
+    fn from(error: NodeError) -> Self {
+        let kind = match &error {
+            NodeError::OnionRouteError(OnionRouteError::NoLiveExit { .. }) => {
+                OnionProxyFailureKind::ExitUnavailable
+            }
+            NodeError::OnionRouteError(
+                OnionRouteError::NotEnoughRelays { .. }
+                | OnionRouteError::NoPermittedFirstHop
+                | OnionRouteError::NoExitWithTransport { .. }
+                | OnionRouteError::NoExitForProxyProtocol { .. }
+                | OnionRouteError::NoExitAllowsTarget { .. },
+            ) => OnionProxyFailureKind::RouteUnavailable,
+            NodeError::OnionProxyRequestTimedOut => OnionProxyFailureKind::RequestTimedOut,
+            _ => OnionProxyFailureKind::Generic,
+        };
+        Self {
+            kind,
+            message: error.to_string(),
+        }
+    }
 }
 
 impl Default for OnionProxyOptions {
     fn default() -> Self {
         Self {
             hop_count: DEFAULT_HOP_COUNT,
-            allow_short_paths: true,
+            allow_short_paths: false,
         }
     }
 }
@@ -101,7 +183,7 @@ impl OnionProxyOptions {
     fn from_js(message: &JsValue) -> Result<Self, String> {
         Ok(Self {
             hop_count: optional_usize_field(message, "hopCount", DEFAULT_HOP_COUNT)?,
-            allow_short_paths: js_bool_field(message, "allowShortPaths").unwrap_or(true),
+            allow_short_paths: js_bool_field(message, "allowShortPaths").unwrap_or(false),
         })
     }
 
@@ -166,12 +248,13 @@ impl OnionProxyHttpRequest {
         Ok(object.into())
     }
 
-    fn client_request_js(&self) -> Result<JsValue, String> {
-        let object = Object::new();
-        js_set(&object, "method", &JsValue::from_str(&self.method))?;
-        js_set(&object, "headers", &headers_js(&self.headers).into())?;
-        js_set(&object, "body", &body_js(&self.body).into())?;
-        Ok(object.into())
+    fn client_request(&self) -> OnionHttpsClientRequest {
+        OnionHttpsClientRequest {
+            method: self.method.clone(),
+            path: None,
+            headers: self.headers.clone(),
+            body: self.body.clone(),
+        }
     }
 }
 
@@ -219,6 +302,7 @@ impl OnionProxyResponse {
             status: parse_status(js_prop(value, "status")?)?,
             headers: parse_headers_js(js_prop(value, "headers")?)?,
             body: parse_body_js(js_prop(value, "body")?)?,
+            route: optional_route_js(js_prop(value, "route")?)?,
         })
     }
 
@@ -231,8 +315,16 @@ impl OnionProxyResponse {
             &JsValue::from_f64(f64::from(self.status)),
         )?;
         js_set(&object, "headers", &headers_js(&self.headers).into())?;
-        js_set(&object, "body", &body_js(self.body.as_bytes()).into())?;
+        js_set(&object, "body", &body_js(&self.body).into())?;
+        if let Some(route) = &self.route {
+            js_set(&object, "route", &route.to_js()?)?;
+        }
         Ok(object.into())
+    }
+
+    /// Return a lossy UTF-8 representation for text-only UI output.
+    pub(crate) fn body_text(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
     }
 }
 
@@ -267,32 +359,57 @@ pub(crate) fn format_headers(headers: &[(String, String)]) -> String {
 
 /// Build a route through an HTTPS onion exit.
 pub(crate) async fn route(
-    provider: &Arc<Provider>,
+    provider: &Provider,
     request: OnionProxyRouteRequest,
-) -> Result<OnionProxyRoute, String> {
+) -> Result<OnionProxyRoute, OnionProxyError> {
     let target_authority = target_authority(&request.url)?;
     let proxy = provider
         .onion_https_proxy(request.options.hop_count, request.options.allow_short_paths)
-        .map_err(|error| format!("create onion proxy failed: {error:?}"))?;
-    let value = JsFuture::from(proxy.route(target_authority))
+        .map_err(|error| {
+            OnionProxyError::generic(format!(
+                "create onion proxy failed: {}",
+                js_error_label(error.into())
+            ))
+        })?;
+    let route = proxy
+        .route_http(&target_authority)
         .await
-        .map_err(|error| format!("build onion route failed: {}", js_error_label(error)))?;
-    OnionProxyRoute::from_js(&value)
+        .map_err(OnionProxyError::from)?;
+    Ok(display_route(&route))
 }
 
 /// Send one HTTPS request through an onion proxy.
 pub(crate) async fn request(
-    provider: &Arc<Provider>,
+    provider: &Provider,
     request: OnionProxyHttpRequest,
-) -> Result<OnionProxyResponse, String> {
+) -> Result<OnionProxyResponse, OnionProxyError> {
     target_authority(&request.url)?;
     let proxy = provider
         .onion_https_proxy(request.options.hop_count, request.options.allow_short_paths)
-        .map_err(|error| format!("create onion proxy failed: {error:?}"))?;
-    let value = JsFuture::from(proxy.request(request.url.clone(), request.client_request_js()?))
+        .map_err(|error| {
+            OnionProxyError::generic(format!(
+                "create onion proxy failed: {}",
+                js_error_label(error.into())
+            ))
+        })?;
+    let response = proxy
+        .request_http(request.url.as_str(), request.client_request())
         .await
-        .map_err(|error| format!("onion proxy request failed: {}", js_error_label(error)))?;
-    OnionProxyResponse::from_js(&value)
+        .map_err(OnionProxyError::from)?;
+    Ok(OnionProxyResponse {
+        status: response.response.status,
+        headers: response.response.headers,
+        body: response.response.body,
+        route: Some(display_route(&response.route)),
+    })
+}
+
+fn display_route(route: &NodeOnionProxyRoute) -> OnionProxyRoute {
+    OnionProxyRoute {
+        service: route.exit_service().to_string(),
+        hops: route.route.hops().iter().map(ToString::to_string).collect(),
+        exit: route.exit_did().to_string(),
+    }
 }
 
 fn target_authority(url: &str) -> Result<String, String> {
@@ -332,6 +449,13 @@ fn optional_usize_field(
         return Err(format!("{field} is too large"));
     }
     Ok(number as usize)
+}
+
+fn optional_route_js(value: JsValue) -> Result<Option<OnionProxyRoute>, String> {
+    if value.is_null() || value.is_undefined() {
+        return Ok(None);
+    }
+    OnionProxyRoute::from_js(&value).map(Some)
 }
 
 fn required_string_field(
@@ -404,14 +528,14 @@ fn parse_route_exit_js(value: &JsValue) -> Result<String, String> {
     js_string_field(value, "did")
 }
 
-fn parse_body_js(value: JsValue) -> Result<String, String> {
+fn parse_body_js(value: JsValue) -> Result<Vec<u8>, String> {
     if let Some(body) = value.as_string() {
-        return Ok(body);
+        return Ok(body.into_bytes());
     }
     if let Ok(bytes) = value.clone().dyn_into::<Uint8Array>() {
         let mut body = vec![0; bytes.length() as usize];
         bytes.copy_to(body.as_mut_slice());
-        return Ok(String::from_utf8_lossy(&body).into_owned());
+        return Ok(body);
     }
     let array = Array::from(&value);
     let mut body = Vec::new();
@@ -424,7 +548,7 @@ fn parse_body_js(value: JsValue) -> Result<String, String> {
         }
         body.push(byte as u8);
     }
-    Ok(String::from_utf8_lossy(&body).into_owned())
+    Ok(body)
 }
 
 fn headers_js(headers: &[(String, String)]) -> Array {
@@ -462,6 +586,61 @@ mod tests {
     use wasm_bindgen_test::wasm_bindgen_test;
 
     use super::target_authority;
+    use super::OnionProxyError;
+    use super::OnionProxyFailureKind;
+    use super::OnionProxyHttpRequest;
+    use super::OnionProxyOptions;
+    use super::OnionProxyRouteRequest;
+
+    #[wasm_bindgen_test]
+    fn onion_proxy_options_default_requires_full_paths() {
+        assert_eq!(OnionProxyOptions::default(), OnionProxyOptions {
+            hop_count: super::DEFAULT_HOP_COUNT,
+            allow_short_paths: false,
+        });
+    }
+
+    #[wasm_bindgen_test]
+    fn route_request_from_js_requires_explicit_short_path_opt_in() {
+        let message = Object::new();
+        assert_eq!(
+            super::js_set(&message, "url", &JsValue::from_str("https://example.com/")),
+            Ok(())
+        );
+
+        let parsed =
+            OnionProxyRouteRequest::from_js(&message.into()).map(|request| request.options);
+
+        assert_eq!(
+            parsed,
+            Ok(OnionProxyOptions {
+                hop_count: super::DEFAULT_HOP_COUNT,
+                allow_short_paths: false,
+            })
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn http_request_from_js_allows_explicit_short_path_opt_in() {
+        let message = Object::new();
+        let set_message =
+            super::js_set(&message, "url", &JsValue::from_str("https://example.com/"))
+                .and_then(|()| super::js_set(&message, "method", &JsValue::from_str("GET")))
+                .and_then(|()| super::js_set(&message, "headers", &Array::new().into()))
+                .and_then(|()| super::js_set(&message, "body", &JsValue::from_str("")))
+                .and_then(|()| super::js_set(&message, "allowShortPaths", &JsValue::TRUE));
+        assert_eq!(set_message, Ok(()));
+
+        let parsed = OnionProxyHttpRequest::from_js(&message.into()).map(|request| request.options);
+
+        assert_eq!(
+            parsed,
+            Ok(OnionProxyOptions {
+                hop_count: super::DEFAULT_HOP_COUNT,
+                allow_short_paths: true,
+            })
+        );
+    }
 
     #[wasm_bindgen_test]
     fn target_authority_adds_default_https_port() {
@@ -477,6 +656,23 @@ mod tests {
             target_authority("https://Example.COM:8443/original").as_deref(),
             Ok("example.com:8443")
         );
+    }
+
+    #[wasm_bindgen_test]
+    fn typed_node_errors_preserve_browser_failure_kind() {
+        let exit = OnionProxyError::from(super::NodeError::OnionRouteError(
+            super::OnionRouteError::NoLiveExit {
+                service: "https".to_string(),
+            },
+        ));
+        let route = OnionProxyError::from(super::NodeError::OnionRouteError(
+            super::OnionRouteError::NotEnoughRelays { hop_count: 3 },
+        ));
+        let timeout = OnionProxyError::from(super::NodeError::OnionProxyRequestTimedOut);
+
+        assert_eq!(exit.kind(), OnionProxyFailureKind::ExitUnavailable);
+        assert_eq!(route.kind(), OnionProxyFailureKind::RouteUnavailable);
+        assert_eq!(timeout.kind(), OnionProxyFailureKind::RequestTimedOut);
     }
 
     #[wasm_bindgen_test]
@@ -518,7 +714,24 @@ mod tests {
         let response = super::OnionProxyResponse {
             status: 200,
             headers: vec![("content-type".to_string(), "text/plain".to_string())],
-            body: "hello through onion".to_string(),
+            body: b"hello through onion".to_vec(),
+            route: None,
+        };
+
+        let parsed = response
+            .to_js()
+            .and_then(|value| super::OnionProxyResponse::from_js(&value));
+
+        assert_eq!(parsed, Ok(response));
+    }
+
+    #[wasm_bindgen_test]
+    fn response_roundtrip_preserves_binary_body_bytes() {
+        let response = super::OnionProxyResponse {
+            status: 200,
+            headers: vec![("content-type".to_string(), "image/png".to_string())],
+            body: vec![0xff, 0x00, 0x80],
+            route: None,
         };
 
         let parsed = response
@@ -538,8 +751,8 @@ mod tests {
             });
         assert_eq!(set_response, Ok(()));
 
-        let parsed =
-            super::OnionProxyResponse::from_js(&response.into()).map(|response| response.body);
+        let parsed = super::OnionProxyResponse::from_js(&response.into())
+            .map(|response| response.body_text());
 
         assert_eq!(parsed, Ok("hello through onion".to_string()));
     }

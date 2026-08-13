@@ -215,7 +215,7 @@ impl ProcessorBuilder {
             session_sk,
             stabilize_interval: self.stabilize_interval,
             online_node_registration,
-            #[cfg(feature = "browser")]
+            #[cfg(all(feature = "browser", target_family = "wasm"))]
             advertise_onion_relay: self.advertise_onion_relay,
             registration_tasks,
         })

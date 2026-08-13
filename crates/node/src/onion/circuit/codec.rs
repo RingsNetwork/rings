@@ -3,6 +3,8 @@ use rings_core::dht::Did;
 use serde::Deserialize;
 use serde::Serialize;
 
+use super::cell::OnionCellBucket;
+use super::cell::OnionWireCell;
 use super::OnionBackwardFrame;
 use super::OnionCircuitId;
 use super::OnionForwardFrame;
@@ -16,44 +18,46 @@ use crate::extension::ext::Wire;
 pub(super) enum OnionWireMessage {
     Forward(OnionForwardFrame),
     Backward(OnionBackwardFrame),
+    /// One-hop link padding. It is authenticated to the immediate neighbor and never forwarded.
+    Cover,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
 pub(super) enum OnionLocalMessage {
+    CellReady {
+        from: Did,
+        received_at_ms: u128,
+        bucket: OnionCellBucket,
+        message: OnionWireMessage,
+    },
     ForwardReady {
         from: Did,
         received_at_ms: u128,
+        bucket: OnionCellBucket,
         circuit_id: OnionCircuitId,
         layer: OnionForwardLayer,
-    },
-    BackwardReady {
-        from: Did,
-        received_at_ms: u128,
-        frame: OnionBackwardFrame,
     },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum OnionCircuitInput {
-    ForwardObserved {
+    CellObserved {
         from: Did,
-        circuit_id: OnionCircuitId,
-        layer: rings_core::ecc::elgamal::impls::secp256k1::AeadCiphertext,
+        bucket: OnionCellBucket,
+        sealed: rings_core::ecc::elgamal::impls::secp256k1::AeadCiphertext,
     },
-    BackwardObserved {
+    CellReady {
         from: Did,
-        frame: OnionBackwardFrame,
+        received_at_ms: u128,
+        bucket: OnionCellBucket,
+        message: OnionWireMessage,
     },
     ForwardReady {
         from: Did,
         received_at_ms: u128,
+        bucket: OnionCellBucket,
         circuit_id: OnionCircuitId,
         layer: OnionForwardLayer,
-    },
-    BackwardReady {
-        from: Did,
-        received_at_ms: u128,
-        frame: OnionBackwardFrame,
     },
 }
 
@@ -75,51 +79,67 @@ fn decode_wire_message(
     from: Did,
     payload: &[u8],
 ) -> std::result::Result<OnionCircuitEvent, Reject> {
-    let message = bincode::deserialize::<OnionWireMessage>(payload)
-        .map_err(|error| Reject(format!("bad onion circuit message: {error}")))?;
-    let input = match message {
-        OnionWireMessage::Forward(frame) => OnionCircuitInput::ForwardObserved {
+    const MAX_SERIALIZED_CELL_OVERHEAD: usize = 4 * 1024;
+    const AEAD_TAG_BYTES: usize = 16;
+    let max_wire_len = OnionCellBucket::MiB12
+        .plaintext_len()
+        .saturating_add(MAX_SERIALIZED_CELL_OVERHEAD);
+    if payload.len() > max_wire_len {
+        return Err(Reject(
+            "encrypted onion cell exceeds wire bound".to_string(),
+        ));
+    }
+    let cell = bincode::deserialize::<OnionWireCell>(payload)
+        .map_err(|error| Reject(format!("bad encrypted onion cell: {error}")))?;
+    let expected_ciphertext_len = cell
+        .bucket
+        .plaintext_len()
+        .checked_add(AEAD_TAG_BYTES)
+        .ok_or_else(|| Reject("encrypted onion cell length overflow".to_string()))?;
+    if cell.sealed.ciphertext.len() != expected_ciphertext_len {
+        return Err(Reject(
+            "encrypted onion cell does not match its size class".to_string(),
+        ));
+    }
+    Ok(OnionCircuitEvent {
+        input: OnionCircuitInput::CellObserved {
             from,
-            circuit_id: frame.circuit_id,
-            layer: frame.layer,
+            bucket: cell.bucket,
+            sealed: cell.sealed,
         },
-        OnionWireMessage::Backward(frame) => OnionCircuitInput::BackwardObserved { from, frame },
-    };
-    Ok(OnionCircuitEvent { input })
+    })
 }
 
 fn decode_local_message(payload: &[u8]) -> std::result::Result<OnionCircuitEvent, Reject> {
     let message = bincode::deserialize::<OnionLocalMessage>(payload)
         .map_err(|error| Reject(format!("bad local onion circuit message: {error}")))?;
     let input = match message {
+        OnionLocalMessage::CellReady {
+            from,
+            received_at_ms,
+            bucket,
+            message,
+        } => OnionCircuitInput::CellReady {
+            from,
+            received_at_ms,
+            bucket,
+            message,
+        },
         OnionLocalMessage::ForwardReady {
             from,
             received_at_ms,
+            bucket,
             circuit_id,
             layer,
         } => OnionCircuitInput::ForwardReady {
             from,
             received_at_ms,
+            bucket,
             circuit_id,
             layer,
         },
-        OnionLocalMessage::BackwardReady {
-            from,
-            received_at_ms,
-            frame,
-        } => OnionCircuitInput::BackwardReady {
-            from,
-            received_at_ms,
-            frame,
-        },
     };
     Ok(OnionCircuitEvent { input })
-}
-
-pub(super) fn encode_wire_message(message: OnionWireMessage) -> Result<Bytes> {
-    bincode::serialize(&message)
-        .map(Bytes::from)
-        .map_err(|_| Error::EncodeError)
 }
 
 pub(super) fn encode_local_message(message: OnionLocalMessage) -> Result<Bytes> {

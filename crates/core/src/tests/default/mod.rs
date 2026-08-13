@@ -37,6 +37,8 @@ mod test_dht_schedule;
 mod test_chunk_e2e;
 mod test_message_handler;
 mod test_stabilization;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+mod test_stabilization_failover;
 
 const TEST_DHT_FINGER_TABLE_SIZE: usize = 8;
 const TEST_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -71,15 +73,14 @@ impl Node {
         self.message_rx.lock().await.try_recv().ok()
     }
 
-    /// Whether any connection is still mid-handshake (`New`/`Connecting`) — i.e. its offer/answer
-    /// SDP exchange has not finished. Used to detect true quiescence without a wall clock.
+    /// Whether any connection is still mid-handshake. Used to detect true
+    /// quiescence without a wall clock.
     pub fn has_handshaking_connection(&self) -> bool {
-        self.swarm.transport.get_connections().iter().any(|(_, c)| {
-            matches!(
-                c.webrtc_connection_state(),
-                WebrtcConnectionState::New | WebrtcConnectionState::Connecting
-            )
-        })
+        self.swarm
+            .transport
+            .pending_connection_count()
+            .unwrap_or_default()
+            > 0
     }
 
     pub fn did(&self) -> Did {
@@ -325,8 +326,8 @@ pub async fn wait_for_msgs(nodes: impl IntoIterator<Item = &Node>) {
         drained
     };
     let handshaking = || nodes.iter().any(|n| n.has_handshaking_connection());
-    // A snapshot of every node's DHT. Reaching `Connected` fires `on_data_channel_open -> join_dht`,
-    // which mutates the DHT and emits more messages *after* the handshake finished — so true
+    // A snapshot of every node's DHT. Opening the data channel fires `join_dht`, which mutates the
+    // DHT and emits more messages *after* the ICE connection state reached `Connected` — so true
     // quiescence also requires the DHT to have stopped changing, not just the handshakes to be done.
     let snapshot = || {
         nodes

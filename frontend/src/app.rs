@@ -34,9 +34,14 @@ use crate::node::PeerView;
 use crate::styles;
 use crate::wallet::WalletAccount;
 use crate::wallet::WalletKind;
+use crate::webview;
+use crate::webview_ui;
 use crate::workbench;
 
 mod actions;
+
+const DEFAULT_STABILIZE_INTERVAL_SECONDS: &str = "15";
+const LEGACY_DEFAULT_STABILIZE_INTERVAL_SECONDS: &str = "3";
 
 #[derive(Clone, PartialEq)]
 struct SettingsSnapshot {
@@ -45,6 +50,7 @@ struct SettingsSnapshot {
     ice_servers: String,
     stabilize_interval: String,
     storage_name: String,
+    webview_allow_short_paths: bool,
     seed_url: String,
     http_endpoint: String,
 }
@@ -70,8 +76,11 @@ struct NodeState {
     ice_servers: UseStateHandle<String>,
     stabilize_interval: UseStateHandle<String>,
     storage_name: UseStateHandle<String>,
+    webview_allow_short_paths: UseStateHandle<bool>,
+    webview_onion_settings: webview::WebviewOnionSettings,
     peers: UseStateHandle<Vec<PeerView>>,
     seed_url: UseStateHandle<String>,
+    webview_ready: UseStateHandle<bool>,
 }
 
 struct LinkState {
@@ -113,6 +122,12 @@ struct OnionState {
     response_body: UseStateHandle<String>,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct WebviewAvailability {
+    ready: bool,
+    unavailable_reason: String,
+}
+
 struct AppRenderContext<'a> {
     shell: &'a ShellState,
     node: &'a NodeState,
@@ -139,6 +154,18 @@ fn use_shell_state() -> ShellState {
 fn use_node_state() -> NodeState {
     let generation_ref = use_mut_ref(GenerationClock::default);
     let generation = generation_ref.borrow().clone();
+    let initial_webview_allow_short_paths =
+        load_bool_setting_or_default(extension::SETTING_WEBVIEW_ALLOW_SHORT_PATHS, false);
+    let webview_allow_short_paths = use_state(move || initial_webview_allow_short_paths);
+    let webview_onion_settings =
+        use_state(move || webview::WebviewOnionSettings::new(initial_webview_allow_short_paths));
+    {
+        let webview_onion_settings = (*webview_onion_settings).clone();
+        use_effect_with(*webview_allow_short_paths, move |allow_short_paths| {
+            webview_onion_settings.set_allow_short_paths(*allow_short_paths);
+            || {}
+        });
+    }
     NodeState {
         wallet_kind: use_state(initial_wallet_kind),
         wallet_account: use_state(|| None::<WalletAccount>),
@@ -162,13 +189,7 @@ fn use_node_state() -> NodeState {
                 "stun://stun.l.google.com:19302",
             )
         }),
-        stabilize_interval: use_state(|| {
-            load_setting_or_default(
-                extension::SETTING_STABILIZE_INTERVAL,
-                extension::LEGACY_SETTING_STABILIZE_INTERVAL,
-                "3",
-            )
-        }),
+        stabilize_interval: use_state(load_stabilize_interval_setting_or_default),
         storage_name: use_state(|| {
             load_setting_or_default(
                 extension::SETTING_STORAGE_NAME,
@@ -176,6 +197,8 @@ fn use_node_state() -> NodeState {
                 "rings-frontend",
             )
         }),
+        webview_allow_short_paths,
+        webview_onion_settings: (*webview_onion_settings).clone(),
         peers: use_state(Vec::<PeerView>::new),
         seed_url: use_state(|| {
             extension::load_setting_with_legacy(
@@ -184,6 +207,7 @@ fn use_node_state() -> NodeState {
             )
             .unwrap_or_default()
         }),
+        webview_ready: use_state(|| false),
     }
 }
 
@@ -239,7 +263,7 @@ fn use_onion_state() -> OnionState {
         url: use_state(|| "https://example.com/".to_string()),
         method: use_state(|| "GET".to_string()),
         hop_count: use_state(|| "3".to_string()),
-        allow_short_paths: use_state(|| true),
+        allow_short_paths: use_state(|| false),
         headers: use_state(String::new),
         body: use_state(String::new),
         route_result: use_state(String::new),
@@ -260,6 +284,29 @@ fn initial_wallet_kind() -> WalletKind {
 
 fn load_setting_or_default(key: &str, legacy_key: &str, default: &'static str) -> String {
     extension::load_setting_with_legacy(key, legacy_key).unwrap_or_else(|| default.to_string())
+}
+
+fn load_bool_setting_or_default(key: &str, default: bool) -> bool {
+    extension::load_setting(key)
+        .map(|value| value == "true")
+        .unwrap_or(default)
+}
+
+fn load_stabilize_interval_setting_or_default() -> String {
+    match extension::load_setting_with_legacy(
+        extension::SETTING_STABILIZE_INTERVAL,
+        extension::LEGACY_SETTING_STABILIZE_INTERVAL,
+    ) {
+        Some(value) if value.trim() == LEGACY_DEFAULT_STABILIZE_INTERVAL_SECONDS => {
+            extension::save_setting(
+                extension::SETTING_STABILIZE_INTERVAL,
+                DEFAULT_STABILIZE_INTERVAL_SECONDS,
+            );
+            DEFAULT_STABILIZE_INTERVAL_SECONDS.to_string()
+        }
+        Some(value) => value,
+        None => DEFAULT_STABILIZE_INTERVAL_SECONDS.to_string(),
+    }
 }
 
 /// Rings browser frontend app.
@@ -309,6 +356,7 @@ fn use_settings_persistence(node: &NodeState, link: &LinkState) {
         ice_servers: (*node.ice_servers).clone(),
         stabilize_interval: (*node.stabilize_interval).clone(),
         storage_name: (*node.storage_name).clone(),
+        webview_allow_short_paths: *node.webview_allow_short_paths,
         seed_url: (*node.seed_url).clone(),
         http_endpoint: (*link.http_endpoint).clone(),
     };
@@ -321,6 +369,14 @@ fn use_settings_persistence(node: &NodeState, link: &LinkState) {
             &settings.stabilize_interval,
         );
         extension::save_setting(extension::SETTING_STORAGE_NAME, &settings.storage_name);
+        extension::save_setting(
+            extension::SETTING_WEBVIEW_ALLOW_SHORT_PATHS,
+            if settings.webview_allow_short_paths {
+                "true"
+            } else {
+                "false"
+            },
+        );
         extension::save_setting(extension::SETTING_SEED_URL, &settings.seed_url);
         extension::save_setting(extension::SETTING_HTTP_ENDPOINT, &settings.http_endpoint);
     });
@@ -488,6 +544,9 @@ fn use_shell_history(
 
 fn render_app(ctx: AppRenderContext<'_>) -> Html {
     let effective_page = effective_shell_page(ctx.shell, ctx.extension_mode);
+    if effective_page == ShellPage::Webview {
+        return html! { <webview_ui::WebviewShell /> };
+    }
     let navigate_page = navigate_page_callback(ctx.shell);
     let header = controls::app_header(effective_page, navigate_page.clone(), !ctx.extension_mode);
     if effective_page == ShellPage::Guide {
@@ -544,6 +603,10 @@ fn render_console_shell(ctx: AppRenderContext<'_>, header: Html) -> Html {
     let link_control = render_link_control(ctx.node, ctx.link, ctx.shell);
     let workbench_body = render_workbench_body(&ctx);
     let dialog_actions = dialog_actions(ctx.shell);
+    let webview_availability = webview_availability(
+        webview_gateway_ready(ctx.extension_mode, &ctx.node.did, *ctx.node.webview_ready),
+        ctx.extension_mode,
+    );
     let workbench_control = controls::workbench_control(
         *ctx.shell.active_panel,
         ctx.shell.active_panel.clone(),
@@ -553,14 +616,30 @@ fn render_console_shell(ctx: AppRenderContext<'_>, header: Html) -> Html {
         true,
         ctx.extension_mode,
     );
+    let webview_control = Some({
+        let status = ctx.node.status.clone();
+        let ready = webview_availability.ready;
+        controls::webview_control(
+            ready,
+            webview_availability.unavailable_reason.clone(),
+            Callback::from(move |_| {
+                if let Err(error) = webview::open_webview_popup() {
+                    status.set(format!("open webview: {error}"));
+                }
+            }),
+        )
+    });
     let control_sidebar = controls::control_sidebar(
         control_view(ctx.node),
         ctx.launch_actions,
-        workbench_control,
-        *ctx.shell.active_dialog,
-        dialog_actions,
-        ctx.shell.control_sidebar_collapsed.clone(),
-        ctx.extension_mode,
+        controls::ControlSidebarShell {
+            workbench_control,
+            webview_control,
+            active_dialog: *ctx.shell.active_dialog,
+            dialog_actions,
+            collapsed: ctx.shell.control_sidebar_collapsed.clone(),
+            extension_mode: ctx.extension_mode,
+        },
     );
     let shell_class = console_shell_class(ctx.extension_mode);
     html! {
@@ -585,6 +664,34 @@ fn console_shell_class(extension_mode: bool) -> &'static str {
     }
 }
 
+fn webview_gateway_ready(extension_mode: bool, node_did: &str, local_gateway_ready: bool) -> bool {
+    if extension_mode {
+        !node_did.is_empty()
+    } else {
+        local_gateway_ready
+    }
+}
+
+fn webview_availability(gateway_ready: bool, extension_mode: bool) -> WebviewAvailability {
+    if !gateway_ready {
+        let reason = if extension_mode {
+            "WebView is available after the extension node is online"
+        } else {
+            "WebView is available after the local gateway is ready"
+        }
+        .to_string();
+        return WebviewAvailability {
+            ready: false,
+            unavailable_reason: reason,
+        };
+    }
+
+    WebviewAvailability {
+        ready: true,
+        unavailable_reason: String::new(),
+    }
+}
+
 fn control_view(node: &NodeState) -> ControlView<'_> {
     ControlView {
         wallet_kind: *node.wallet_kind,
@@ -597,6 +704,7 @@ fn control_view(node: &NodeState) -> ControlView<'_> {
         ice_servers: &node.ice_servers,
         stabilize_interval: &node.stabilize_interval,
         storage_name: &node.storage_name,
+        webview_allow_short_paths: &node.webview_allow_short_paths,
         seed_url: &node.seed_url,
     }
 }
@@ -715,7 +823,23 @@ fn current_shell_route() -> ShellRoute {
 }
 
 fn routed_shell_route() -> Option<ShellRoute> {
-    let hash = web_sys::window()?.location().hash().ok()?;
+    let location = web_sys::window()?.location();
+    let pathname = location.pathname().ok()?;
+    if is_webview_path(pathname.as_str()) {
+        return Some(ShellRoute {
+            page: ShellPage::Webview,
+            dialog: ActiveDialog::None,
+        });
+    }
+    let hash = location.hash().ok()?;
+    route_for_hash(hash.as_str())
+}
+
+fn is_webview_path(pathname: &str) -> bool {
+    pathname == "/webview" || pathname.starts_with(webview::GATEWAY_PREFIX)
+}
+
+fn route_for_hash(hash: &str) -> Option<ShellRoute> {
     match hash.trim_start_matches('#').trim_start_matches('/') {
         "" | "home" => Some(ShellRoute {
             page: ShellPage::Guide,
@@ -723,6 +847,10 @@ fn routed_shell_route() -> Option<ShellRoute> {
         }),
         "node" => Some(ShellRoute {
             page: ShellPage::Console,
+            dialog: ActiveDialog::None,
+        }),
+        "webview" => Some(ShellRoute {
+            page: ShellPage::Webview,
             dialog: ActiveDialog::None,
         }),
         "node/settings" | "settings" => Some(ShellRoute {
@@ -823,6 +951,7 @@ fn shell_route_fragment(page: ShellPage, dialog: ActiveDialog) -> Option<&'stati
     match (page, dialog) {
         (ShellPage::Guide, ActiveDialog::None) => None,
         (ShellPage::Console, ActiveDialog::None) => Some("node"),
+        (ShellPage::Webview, ActiveDialog::None) => Some("webview"),
         (_, ActiveDialog::Settings) => Some("node/settings"),
         (_, ActiveDialog::Workbench) => Some("node/workbench"),
     }
@@ -838,4 +967,50 @@ fn current_path_search_hash(window: &Window) -> Option<String> {
         current.push_str(&hash);
     }
     Some(current)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn webview_gateway_unready_disables_the_control() {
+        let availability = webview_availability(false, false);
+
+        assert!(!availability.ready);
+        assert_eq!(
+            availability.unavailable_reason,
+            "WebView is available after the local gateway is ready"
+        );
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn webview_gateway_readiness_does_not_guess_onion_routes_from_direct_peers() {
+        let availability = webview_availability(true, false);
+
+        assert_eq!(availability, WebviewAvailability {
+            ready: true,
+            unavailable_reason: String::new(),
+        });
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn extension_webview_requires_an_online_node_identity() {
+        assert!(!webview_gateway_ready(true, "", true));
+        assert!(webview_gateway_ready(true, "did:ring:online", false));
+        assert_eq!(
+            webview_availability(false, true).unavailable_reason,
+            "WebView is available after the extension node is online"
+        );
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn browser_webview_uses_the_local_gateway_witness() {
+        assert!(!webview_gateway_ready(false, "did:ring:online", false));
+        assert!(webview_gateway_ready(false, "", true));
+    }
 }

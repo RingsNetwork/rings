@@ -17,7 +17,7 @@ use crate::onion::OnionRoute;
 use crate::onion::OnionServiceName;
 use crate::online::OnlineNodeType;
 
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 pub mod http;
 
 /// Exit service used by native HTTP CONNECT/SOCKS-style byte tunnels.
@@ -152,10 +152,12 @@ impl OnionProxyConfig {
     pub(crate) fn accepts_exit_descriptor(&self, descriptor: &OnionExitDescriptor) -> bool {
         match self.protocol {
             OnionProxyProtocol::TcpConnect => {
-                descriptor.node_type == OnlineNodeType::Native
-                    && descriptor
-                        .service
-                        .matches(self.service.as_str(), OnionExitTransport::Tcp)
+                matches!(
+                    descriptor.node_type,
+                    OnlineNodeType::Native | OnlineNodeType::Ffi
+                ) && descriptor
+                    .service
+                    .matches(self.service.as_str(), OnionExitTransport::Tcp)
             }
             OnionProxyProtocol::HttpsProxy => {
                 self.service == OnionServiceName::https()
@@ -289,7 +291,9 @@ mod tests {
     fn target_authority_rejects_missing_port() {
         assert!(matches!(
             OnionProxyTarget::parse_authority("example.com"),
-            Err(Error::HttpRequestError(_))
+            Err(Error::OnionProxyTarget(
+                crate::onion::OnionProxyTargetError::MissingPort
+            ))
         ));
     }
 }

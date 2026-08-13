@@ -89,6 +89,9 @@ jobs:
       - name: Install frontend extension script dependencies
         run: npm ci --ignore-scripts
 
+      - name: Install frontend Playwright browser
+        run: npx playwright install --with-deps chromium
+
       - name: Check frontend extension scripts
         run: npm run build:frontend-extension-scripts
 
@@ -102,6 +105,11 @@ jobs:
 
       - name: Build Rings frontend extension package
         run: npm run package:frontend-extension
+
+      - name: Test Rings extension Onion WebView
+        run: |
+          xvfb-run -a node frontend/.generated/scripts/test-extension-webview.mjs
+          xvfb-run -a node frontend/.generated/scripts/test-extension-webview-regressions.mjs
 
       - name: Check Rings frontend
         run: cargo check --target=wasm32-unknown-unknown
@@ -266,6 +274,9 @@ jobs:
             -D clippy::todo \
             -D clippy::unimplemented \
             -D clippy::indexing_slicing
+
+      - name: Check node native with browser feature enabled
+        run: cargo check -p rings-node --all-features
 
       - name: Run clippy
         run: cargo clippy --all --tests -- -D warnings

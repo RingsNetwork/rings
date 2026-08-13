@@ -1,6 +1,8 @@
 //! Control sidebar, settings dialog, and shell UI.
 
+use wasm_bindgen::JsCast;
 use web_sys::Event;
+use web_sys::HtmlInputElement;
 use web_sys::MouseEvent;
 use yew::prelude::*;
 
@@ -15,6 +17,7 @@ use crate::wallet::WalletKind;
 
 mod sidebar;
 pub(crate) use sidebar::control_sidebar;
+pub(crate) use sidebar::ControlSidebarShell;
 
 const CHROME_WEBRTC_DEBUG_URL: &str = "chrome://webrtc-internals/";
 const FIREFOX_WEBRTC_DEBUG_URL: &str = "about:webrtc";
@@ -25,6 +28,7 @@ const FIREFOX_EXTENSION_MANAGER_URL: &str = "about:debugging#/runtime/this-firef
 pub(crate) enum ShellPage {
     Guide,
     Console,
+    Webview,
 }
 
 impl ShellPage {
@@ -32,6 +36,7 @@ impl ShellPage {
         match self {
             Self::Guide => "Home",
             Self::Console => "Node",
+            Self::Webview => "WebView",
         }
     }
 }
@@ -71,6 +76,7 @@ enum UiIcon {
     Power,
     PowerOff,
     Terminal,
+    Globe,
     Sliders,
     PanelOpen,
     PanelClose,
@@ -96,6 +102,14 @@ fn ui_icon(icon: UiIcon) -> Html {
                 <rect x="4.5" y="5" width="15" height="14" rx="2.2" />
                 <path d="M8 10l2.6 2L8 14" />
                 <path d="M13 15h3.5" />
+            </>
+        },
+        UiIcon::Globe => html! {
+            <>
+                <circle cx="12" cy="12" r="8" />
+                <path d="M4 12h16" />
+                <path d="M12 4c2.1 2.2 3.2 4.9 3.2 8S14.1 17.8 12 20" />
+                <path d="M12 4C9.9 6.2 8.8 8.9 8.8 12s1.1 5.8 3.2 8" />
             </>
         },
         UiIcon::Sliders => html! {
@@ -165,6 +179,7 @@ pub(crate) struct ControlView<'a> {
     pub(crate) ice_servers: &'a UseStateHandle<String>,
     pub(crate) stabilize_interval: &'a UseStateHandle<String>,
     pub(crate) storage_name: &'a UseStateHandle<String>,
+    pub(crate) webview_allow_short_paths: &'a UseStateHandle<bool>,
     pub(crate) seed_url: &'a UseStateHandle<String>,
 }
 
@@ -174,6 +189,35 @@ pub(crate) struct SessionView<'a> {
     pub(crate) peers: &'a UseStateHandle<Vec<PeerView>>,
 }
 
+/// Render the Node-only entry point for the controlled browser WebView.
+pub(crate) fn webview_control(
+    ready: bool,
+    unavailable_reason: String,
+    on_open: Callback<MouseEvent>,
+) -> Html {
+    let title = if ready {
+        "Open WebView".to_string()
+    } else {
+        unavailable_reason
+    };
+    html! {
+        <button
+            class="secondary action-button command-button webview-button"
+            type="button"
+            aria-label="Open WebView"
+            title={title}
+            disabled={!ready}
+            onclick={on_open}
+        >
+            <span class="label-desktop">{ "WebView" }</span>
+            <span class="label-mobile command-icon" aria-hidden="true">
+                { ui_icon(UiIcon::Globe) }
+                <span class="command-caption">{ "WebView" }</span>
+            </span>
+        </button>
+    }
+}
+
 struct SettingsDialogView<'a> {
     wallet_kind: WalletKind,
     actions: LaunchActions,
@@ -181,6 +225,7 @@ struct SettingsDialogView<'a> {
     ice_servers: &'a UseStateHandle<String>,
     stabilize_interval: &'a UseStateHandle<String>,
     storage_name: &'a UseStateHandle<String>,
+    webview_allow_short_paths: &'a UseStateHandle<bool>,
     seed_url: &'a UseStateHandle<String>,
     status: &'a UseStateHandle<String>,
     did_value: String,
@@ -309,6 +354,7 @@ fn settings_dialog(view: SettingsDialogView<'_>) -> Html {
                                     view.ice_servers,
                                     view.stabilize_interval,
                                     view.storage_name,
+                                    view.webview_allow_short_paths,
                                     view.seed_url,
                                     view.status,
                                 ) }
@@ -634,6 +680,7 @@ fn settings_controls(
     ice_servers: &UseStateHandle<String>,
     stabilize_interval: &UseStateHandle<String>,
     storage_name: &UseStateHandle<String>,
+    webview_allow_short_paths: &UseStateHandle<bool>,
     seed_url: &UseStateHandle<String>,
     status: &UseStateHandle<String>,
 ) -> Html {
@@ -644,8 +691,29 @@ fn settings_controls(
             { text_input("ICE servers", ice_servers.clone()) }
             { text_input("Stabilize interval seconds", stabilize_interval.clone()) }
             { text_input("IndexedDB storage", storage_name.clone()) }
+            { webview_short_paths_control(webview_allow_short_paths.clone()) }
             { webrtc_debug_controls(status) }
         </>
+    }
+}
+
+fn webview_short_paths_control(state: UseStateHandle<bool>) -> Html {
+    let onchange = {
+        let state = state.clone();
+        Callback::from(move |event: Event| {
+            if let Some(input) = event
+                .target()
+                .and_then(|target| target.dyn_into::<HtmlInputElement>().ok())
+            {
+                state.set(input.checked());
+            }
+        })
+    };
+    html! {
+        <label class="field checkbox-field">
+            <span>{ "Allow short WebView onion paths" }</span>
+            <input type="checkbox" checked={*state} {onchange} />
+        </label>
     }
 }
 
@@ -701,25 +769,38 @@ fn open_detected_debug_callback(
     status: UseStateHandle<String>,
 ) -> Callback<MouseEvent> {
     Callback::from(move |_| {
-        let status = status.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            let browser = detect_browser();
-            let Some(url) = debug_url(browser, target) else {
-                status.set(format!(
-                    "cannot detect supported browser for {}",
-                    target.label()
-                ));
-                return;
-            };
-            match extension::open_debug_url(url).await {
-                Ok(()) => status.set(format!("opened {} {}", browser.label(), target.label())),
-                Err(error) => status.set(format!(
-                    "open {} {} failed: {error}",
-                    browser.label(),
-                    target.label()
-                )),
+        let browser = detect_browser();
+        let Some(url) = debug_url(browser, target) else {
+            status.set(format!(
+                "cannot detect supported browser for {}",
+                target.label()
+            ));
+            return;
+        };
+        match extension::open_debug_url(url) {
+            Ok(extension::DebugUrlOpenResult::Opened) => {
+                status.set(format!("opened {} {}", browser.label(), target.label()));
             }
-        });
+            Ok(extension::DebugUrlOpenResult::CopiedInternalUrl) => {
+                status.set(format!(
+                    "{} blocks direct {} links from webpages; URL copied, paste it into the address bar",
+                    browser.label(),
+                    target.label(),
+                ));
+            }
+            Ok(extension::DebugUrlOpenResult::ManualInternalUrl) => {
+                status.set(format!(
+                    "{} blocks direct {} links from webpages; paste {url} into the address bar",
+                    browser.label(),
+                    target.label(),
+                ));
+            }
+            Err(error) => status.set(format!(
+                "open {} {} failed: {error}",
+                browser.label(),
+                target.label()
+            )),
+        }
     })
 }
 

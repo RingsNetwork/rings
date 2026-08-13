@@ -74,6 +74,7 @@ pub mod algebra;
 pub mod dht;
 pub mod ecc;
 pub mod error;
+pub mod lifecycle;
 pub mod macros;
 pub mod message;
 pub mod prelude;

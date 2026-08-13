@@ -17,17 +17,20 @@
 //! emit an effect only for a session in `sessions` (the engine never adjudicates liveness).
 //!
 //! ```text
-//!   S = (services : Name ⇀ T,  sessions : ℘ SessionKey,  next : ℕ)
+//!   S = (services : Name ⇀ T, sessions : ℘ SessionKey, next : ℕ)
 //!   k = (from, namespace, session, init)        init = Remote if from_opener else Local
 //!   step (Command(Register n t))                ↦ (S[services∪{n↦t}], ε)
 //!   step (Command(Accepted tok peer svc))       ↦ (S[sessions∪{kₗ}, next+1], [OpenAccepted tok kₗ svc])
 //!                                                   where kₗ=(peer,ns,next,Local)   ← core mints the id
 //!   step (Command(Untrack k))                   ↦ (S[sessions∖{k}], ε)
-//!   step (Frame(from, Open s n)) | k∈sessions   ↦ (S, ε)                            (duplicate)
+//!   step (Frame(from, Open s n)) | k∈sessions   ↦ (S, ε)                  (live duplicate)
 //!                                | n∈services    ↦ (S∪{k}, [Connect k t kind])
 //!                                | otherwise     ↦ (S, [SendClose s])
-//!   step (Frame(from, Data s b)) | k∈sessions   ↦ (S, [Write k b])   else (S, ε)
-//!   step (Frame(from, Close s))  | k∈sessions   ↦ (S∖{k}, [Close k]) else (S, ε)
+//!   step (Frame(from, Data s b)) | k∈sessions∖shutdown ↦ (S, [Write k b]) else (S, ε)
+//!   step (Frame(from, FIN s))    | TCP ∧ k∈sessions    ↦ (S∪shutdown(k), [Shutdown k])
+//!                                                   repeated/UDP ↦ (S, ε)
+//!   step (Frame(from, Close s))  | k∈sessions          ↦ (S∖{k}, [Close k]) else (S, ε)
+//!   invariant                    |sessions| ≤ 1024 ∧ ∀peer. sessions(peer) ≤ 64
 //! ```
 
 use std::collections::HashMap;
@@ -41,6 +44,9 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::extension::ext::Ctx;
+#[cfg(any(rings_native, rings_browser))]
+use crate::extension::ext::EffectScope;
+#[cfg(any(rings_native, rings_browser))]
 use crate::extension::ext::Interpret;
 use crate::extension::ext::MaybeSend;
 use crate::extension::ext::Protocol;
@@ -48,17 +54,31 @@ use crate::extension::ext::Reject;
 use crate::extension::ext::Scope;
 use crate::extension::ext::Transition;
 use crate::extension::ext::Wire;
+use crate::extension::transport::EffectEnqueue;
 use crate::extension::transport::Frame;
 use crate::extension::transport::Initiator;
 use crate::extension::transport::SessionId;
 use crate::extension::transport::SessionKey;
 use crate::extension::transport::TransportKind;
+use crate::peer_quota::PeerQuota;
+
+#[cfg(any(rings_native, rings_browser))]
+mod control_outbox;
+#[cfg(any(rings_native, rings_browser))]
+use self::control_outbox::ControlOutbox;
+#[cfg(all(test, rings_native))]
+pub(crate) use self::control_outbox::ControlSendTestHook;
 
 /// Namespace for the TCP relay.
 pub const TCP: &str = "tcp";
 /// Namespace for the UDP relay.
 pub const UDP: &str = "udp";
 
+/// Hard per-namespace live-session bound. The reducer owns admission, so both native and
+/// browser interpreters inherit the same resource ceiling.
+pub(crate) const MAX_RELAY_SESSIONS: usize = 1_024;
+/// A single authenticated peer cannot consume the entire relay-session budget.
+pub(crate) const MAX_RELAY_SESSIONS_PER_PEER: usize = 64;
 /// A local control command, re-injected by the provider (provenance = self; never sent by
 /// peers). Generic over the service target `T`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -69,11 +89,6 @@ pub enum RelayCommand<T> {
         name: String,
         /// Local target (`SocketAddr` natively, WebTransport URL in browser).
         target: T,
-    },
-    /// Remove a service mapping.
-    UnregisterService {
-        /// Service name to remove.
-        name: String,
     },
     /// Engine→protocol feedback: a local connection/datagram-flow was accepted, pending
     /// under engine-local `token`, destined for `peer`'s `service`. The pure `step` mints
@@ -96,6 +111,16 @@ pub enum RelayCommand<T> {
         /// The session id.
         session: SessionId,
         /// Which end opened it (so the right key is removed).
+        initiator: Initiator,
+    },
+    /// Engine→protocol feedback: the current backend failed under an ordered
+    /// effect. Forget it and emit exactly one peer-facing `Close`.
+    Abort {
+        /// The remote peer of the session.
+        peer: Did,
+        /// The session id.
+        session: SessionId,
+        /// Which end opened it.
         initiator: Initiator,
     },
 }
@@ -165,15 +190,33 @@ pub enum RelayEffect<T> {
         /// The remote service to open.
         service: String,
     },
+    /// Drop an accepted local resource when the pure session-id space is exhausted.
+    RejectAccepted {
+        /// Engine-local handle whose resource must be released.
+        token: u64,
+    },
 }
 
-/// Relay state: the service registry and the set of open (server-side, remote-opened)
-/// sessions. The live OS/WebTransport resources are the interpreter's engine table; this is
-/// the protocol's view used for owner-rejection and duplicate-`Open` rejection.
+/// Relay state: the service registry and the set of live sessions in both directions. The live
+/// OS/WebTransport resources are the interpreter's engine table; this is the protocol's view
+/// used for admission, ownership checks, and duplicate-`Open` rejection.
 #[derive(Clone)]
 pub struct RelayState<T> {
     services: Arc<HashMap<String, T>>,
-    sessions: HashSet<SessionKey>,
+    /// Persistent live-session index. Cloning a pure state for a data-frame transition is O(1);
+    /// session lifecycle steps copy on write.
+    sessions: Arc<HashSet<SessionKey>>,
+    /// Exact cached cardinality of `sessions` projected by authenticated peer.
+    ///
+    /// Invariant: `session_quota.peer_total(p) = |{ k \in sessions : k.peer = p }|`; zero entries are
+    /// absent. Keeping the projection in the pure state makes admission O(1) without giving the
+    /// interpreter a second source of truth.
+    session_quota: Arc<PeerQuota>,
+    /// TCP sessions whose peer-to-local direction consumed its affine FIN.
+    ///
+    /// Invariant: `peer_shutdown` is a subset of `sessions`. The reverse direction remains live
+    /// until `Close`, but no later peer `Data` can escape the pure reducer into a backend writer.
+    peer_shutdown: Arc<HashSet<SessionKey>>,
     /// Monotonic allocator for client-side session ids. Lives in the **pure** state so the
     /// core (not the engine) mints session identities — `Event → step → Effect` is the sole
     /// authority for both the session set and its ids.
@@ -184,9 +227,66 @@ impl<T> Default for RelayState<T> {
     fn default() -> Self {
         Self {
             services: Arc::new(HashMap::new()),
-            sessions: HashSet::new(),
+            sessions: Arc::new(HashSet::new()),
+            session_quota: Arc::new(PeerQuota::new(
+                MAX_RELAY_SESSIONS,
+                MAX_RELAY_SESSIONS_PER_PEER,
+            )),
+            peer_shutdown: Arc::new(HashSet::new()),
             next_session: 0,
         }
+    }
+}
+
+impl<T> RelayState<T> {
+    fn can_admit_session(&self, key: &SessionKey) -> bool {
+        self.session_quota.can_reserve(key.peer).is_ok()
+    }
+
+    fn insert_session(&mut self, key: SessionKey) -> bool {
+        if self.sessions.contains(&key) {
+            return false;
+        }
+        if Arc::make_mut(&mut self.session_quota)
+            .reserve(key.peer)
+            .is_err()
+        {
+            return false;
+        }
+        if Arc::make_mut(&mut self.sessions).insert(key.clone()) {
+            Arc::make_mut(&mut self.peer_shutdown).remove(&key);
+            true
+        } else {
+            let rolled_back = Arc::make_mut(&mut self.session_quota).release(key.peer);
+            debug_assert!(rolled_back);
+            false
+        }
+    }
+
+    fn remove_session(&mut self, key: &SessionKey) -> bool {
+        if !self.sessions.contains(key) {
+            return false;
+        }
+        if !Arc::make_mut(&mut self.session_quota).release(key.peer) {
+            debug_assert!(false, "session quota missing admitted peer {}", key.peer);
+            return false;
+        }
+        Arc::make_mut(&mut self.peer_shutdown).remove(key);
+        let removed = Arc::make_mut(&mut self.sessions).remove(key);
+        debug_assert!(removed);
+        removed
+    }
+
+    fn peer_can_send(&self, key: &SessionKey) -> bool {
+        self.sessions.contains(key) && !self.peer_shutdown.contains(key)
+    }
+
+    /// Consume the peer-to-local FIN exactly once for a live TCP stream.
+    fn shutdown_peer(&mut self, key: &SessionKey, kind: TransportKind) -> bool {
+        kind == TransportKind::Tcp
+            && self.sessions.contains(key)
+            && !self.peer_shutdown.contains(key)
+            && Arc::make_mut(&mut self.peer_shutdown).insert(key.clone())
     }
 }
 
@@ -232,7 +332,12 @@ where T: Clone + DeserializeOwned + Serialize + MaybeSend + 'static
     fn init(&self) -> RelayState<T> {
         RelayState {
             services: Arc::new(self.config.clone()),
-            sessions: HashSet::new(),
+            sessions: Arc::new(HashSet::new()),
+            session_quota: Arc::new(PeerQuota::new(
+                MAX_RELAY_SESSIONS,
+                MAX_RELAY_SESSIONS_PER_PEER,
+            )),
+            peer_shutdown: Arc::new(HashSet::new()),
             next_session: 0,
         }
     }
@@ -283,10 +388,6 @@ fn step_command<T: Clone>(
             Arc::make_mut(&mut next.services).insert(name, target);
             Transition::pure(next)
         }
-        RelayCommand::UnregisterService { name } => {
-            Arc::make_mut(&mut next.services).remove(&name);
-            Transition::pure(next)
-        }
         RelayCommand::Accepted {
             token,
             peer,
@@ -295,10 +396,18 @@ fn step_command<T: Clone>(
             // The core mints the session id (the engine reported only its local token), so
             // id allocation is part of the pure state transition, not a shell decision.
             let session = SessionId(next.next_session);
-            next.next_session += 1;
-            // A locally-accepted tunnel: we are the initiator.
             let key = SessionKey::new(peer, namespace, session, Initiator::Local);
-            next.sessions.insert(key.clone());
+            if !next.can_admit_session(&key) {
+                return Transition::with(next, vec![RelayEffect::RejectAccepted { token }]);
+            }
+            let Some(next_session) = next.next_session.checked_add(1) else {
+                return Transition::with(next, vec![RelayEffect::RejectAccepted { token }]);
+            };
+            next.next_session = next_session;
+            // A locally-accepted tunnel: we are the initiator.
+            if !next.insert_session(key.clone()) {
+                return Transition::with(next, vec![RelayEffect::RejectAccepted { token }]);
+            }
             Transition::with(next, vec![RelayEffect::OpenAccepted {
                 token,
                 key,
@@ -310,9 +419,24 @@ fn step_command<T: Clone>(
             session,
             initiator,
         } => {
-            next.sessions
-                .remove(&SessionKey::new(peer, namespace, session, initiator));
+            next.remove_session(&SessionKey::new(peer, namespace, session, initiator));
             Transition::pure(next)
+        }
+        RelayCommand::Abort {
+            peer,
+            session,
+            initiator,
+        } => {
+            let key = SessionKey::new(peer, namespace, session, initiator);
+            if next.remove_session(&key) {
+                Transition::with(next, vec![RelayEffect::SendClose {
+                    to: peer,
+                    session,
+                    from_opener: matches!(initiator, Initiator::Local),
+                }])
+            } else {
+                Transition::pure(next)
+            }
         }
     }
 }
@@ -329,23 +453,25 @@ fn step_frame<T: Clone>(
         // `Open` is always sent by the opener, so from our side the peer is the initiator.
         Frame::Open { session, service } => {
             let key = SessionKey::new(from, namespace, session, Initiator::Remote);
-            // Reject a duplicate/retried Open for a session this peer already holds open.
+            // A duplicate for a live session is silent. Rejected opens are not retained in pure
+            // state: the bounded interpreter outbox owns control-plane resource admission, so a
+            // historical failure cannot permanently consume protocol capacity.
             if state.sessions.contains(&key) {
                 return Transition::pure(state.clone());
             }
             match state.services.get(service.as_str()) {
                 Some(target) => {
-                    let target = target.clone();
                     let mut next = state.clone();
-                    next.sessions.insert(key.clone());
+                    if !next.can_admit_session(&key) {
+                        return rejected_open(next, key);
+                    }
+                    let target = target.clone();
+                    if !next.insert_session(key.clone()) {
+                        return rejected_open(next, key);
+                    }
                     Transition::with(next, vec![RelayEffect::Connect { key, target, kind }])
                 }
-                None => Transition::with(state.clone(), vec![RelayEffect::SendClose {
-                    to: from,
-                    session,
-                    // The peer opened it (unknown service); we did not.
-                    from_opener: false,
-                }]),
+                None => rejected_open(state.clone(), key),
             }
         }
         // Data/Shutdown/Close are guarded on the authoritative session set: the *reducer*
@@ -357,7 +483,7 @@ fn step_frame<T: Clone>(
             bytes,
         } => {
             let key = SessionKey::new(from, namespace, session, opener_to_initiator(from_opener));
-            if state.sessions.contains(&key) {
+            if state.peer_can_send(&key) {
                 Transition::with(state.clone(), vec![RelayEffect::Write { key, bytes }])
             } else {
                 Transition::pure(state.clone())
@@ -368,10 +494,11 @@ fn step_frame<T: Clone>(
             from_opener,
         } => {
             let key = SessionKey::new(from, namespace, session, opener_to_initiator(from_opener));
-            if state.sessions.contains(&key) {
-                Transition::with(state.clone(), vec![RelayEffect::Shutdown { key }])
+            let mut next = state.clone();
+            if next.shutdown_peer(&key, kind) {
+                Transition::with(next, vec![RelayEffect::Shutdown { key }])
             } else {
-                Transition::pure(state.clone())
+                Transition::pure(next)
             }
         }
         Frame::Close {
@@ -381,13 +508,26 @@ fn step_frame<T: Clone>(
             let key = SessionKey::new(from, namespace, session, opener_to_initiator(from_opener));
             if state.sessions.contains(&key) {
                 let mut next = state.clone();
-                next.sessions.remove(&key);
+                next.remove_session(&key);
                 Transition::with(next, vec![RelayEffect::Close { key }])
             } else {
                 Transition::pure(state.clone())
             }
         }
     }
+}
+
+/// Reject a peer-opened session without allocating live-session or interpreter state.
+fn rejected_open<T>(
+    state: RelayState<T>,
+    key: SessionKey,
+) -> Transition<RelayState<T>, RelayEffect<T>> {
+    Transition::with(state, vec![RelayEffect::SendClose {
+        to: key.peer,
+        session: key.session,
+        // The peer opened it; this endpoint did not.
+        from_opener: false,
+    }])
 }
 
 /// Map a frame's `from_opener` (the **sender** opened the session) to our own [`Initiator`].
@@ -401,12 +541,14 @@ fn opener_to_initiator(from_opener: bool) -> Initiator {
 
 /// Encode a `Frame::Close` as bytes for an overlay send. `from_opener` is whether *we* (the
 /// sender of this close) opened the session.
-pub(crate) fn close_frame(session: SessionId, from_opener: bool) -> Bytes {
+pub(crate) fn close_frame(session: SessionId, from_opener: bool) -> crate::error::Result<Bytes> {
     let frame = Frame::Close {
         session,
         from_opener,
     };
-    Bytes::from(bincode::serialize(&frame).unwrap_or_default())
+    bincode::serialize(&frame)
+        .map(Bytes::from)
+        .map_err(|_| crate::error::Error::EncodeError)
 }
 
 // ── Native interpreter (OS sockets) ───────────────────────────────────────────────────
@@ -414,120 +556,200 @@ pub(crate) fn close_frame(session: SessionId, from_opener: bool) -> Bytes {
 /// Native relay interpreter: runs [`RelayEffect`]s over the OS-socket engine it owns. The
 /// engine uses the namespace-scoped [`Scope`] capability for both overlay sends and lifecycle
 /// feedback (`Accepted`/`Untrack`), so the engine has no `Processor` of its own.
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 pub(crate) struct NativeRelay {
     engine: Arc<crate::extension::transport::engine::TransportSessions>,
+    control_outbox: ControlOutbox,
 }
 
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 impl NativeRelay {
     /// Build over a shared engine.
     pub(crate) fn new(engine: Arc<crate::extension::transport::engine::TransportSessions>) -> Self {
-        Self { engine }
+        Self {
+            engine,
+            control_outbox: ControlOutbox::default(),
+        }
+    }
+
+    #[cfg(all(test, rings_native))]
+    pub(crate) fn new_with_control_send_test_hook(
+        engine: Arc<crate::extension::transport::engine::TransportSessions>,
+        hook: Arc<ControlSendTestHook>,
+    ) -> Self {
+        Self {
+            engine,
+            control_outbox: ControlOutbox::with_test_hook(hook),
+        }
     }
 }
 
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 #[async_trait::async_trait]
 impl Interpret for NativeRelay {
     type Effect = RelayEffect<std::net::SocketAddr>;
 
     async fn run(
         &self,
-        scope: &Scope,
+        scope: &EffectScope,
         effect: RelayEffect<std::net::SocketAddr>,
     ) -> crate::error::Result<Vec<Bytes>> {
         match effect {
             RelayEffect::Connect { key, target, kind } => {
-                self.engine
-                    .clone()
-                    .connect(scope.clone(), key, target, kind)
-                    .await;
+                let admission =
+                    self.engine
+                        .clone()
+                        .connect(scope.lifecycle(), key.clone(), target, kind);
+                return enqueue_feedback::<std::net::SocketAddr>(key, admission);
             }
             RelayEffect::Write { key, bytes } => {
-                self.engine.write(&key, bytes).await;
+                let admission = self.engine.write(&key, bytes);
+                return enqueue_feedback::<std::net::SocketAddr>(key, admission);
             }
             RelayEffect::Shutdown { key } => {
-                self.engine.shutdown(&key).await;
+                let admission = self.engine.shutdown(&key);
+                return enqueue_feedback::<std::net::SocketAddr>(key, admission);
             }
             RelayEffect::Close { key } => {
-                self.engine.close(scope, &key).await;
+                self.engine.close_for_effect(&key);
             }
             RelayEffect::SendClose {
                 to,
                 session,
                 from_opener,
             } => {
-                scope.send(to, close_frame(session, from_opener)).await?;
+                self.control_outbox.enqueue(
+                    scope.lifecycle(),
+                    to,
+                    close_frame(session, from_opener)?,
+                )?;
             }
             RelayEffect::OpenAccepted {
                 token,
                 key,
                 service,
             } => {
-                self.engine
-                    .clone()
-                    .bind_accepted(scope.clone(), token, key, service)
-                    .await;
+                let feedback =
+                    self.engine
+                        .clone()
+                        .bind_accepted(scope.lifecycle(), token, key, service);
+                return feedback
+                    .map(untrack_feedback::<std::net::SocketAddr>)
+                    .transpose()
+                    .map(|feedback| feedback.into_iter().collect());
+            }
+            RelayEffect::RejectAccepted { token } => {
+                self.engine.evict_pending_for_effect(token);
             }
         }
         Ok(Vec::new())
     }
 }
 
-// ── Browser interpreter (WebTransport) ────────────────────────────────────────────────
-
-/// Browser relay interpreter: runs [`RelayEffect`]s over the WebTransport engine it owns.
-#[cfg(feature = "browser")]
-pub(crate) struct WtRelay {
-    engine: Arc<crate::extension::transport::wt::WtSessions>,
+/// Encode an engine teardown as the relay's synchronous, ordered feedback path.
+fn untrack_feedback<T: Serialize>(key: SessionKey) -> crate::error::Result<Bytes> {
+    let command = RelayCommand::<T>::Untrack {
+        peer: key.peer,
+        session: key.session,
+        initiator: key.initiator,
+    };
+    bincode::serialize(&command)
+        .map(Bytes::from)
+        .map_err(|_| crate::error::Error::EncodeError)
 }
 
-#[cfg(feature = "browser")]
-impl WtRelay {
-    /// Build over a shared WebTransport engine.
-    pub(crate) fn new(engine: Arc<crate::extension::transport::wt::WtSessions>) -> Self {
-        Self { engine }
+/// Encode a synchronous engine failure so the pure reducer owns both state
+/// removal and the exactly-once peer-facing terminal effect.
+fn abort_feedback<T: Serialize>(key: SessionKey) -> crate::error::Result<Bytes> {
+    let command = RelayCommand::<T>::Abort {
+        peer: key.peer,
+        session: key.session,
+        initiator: key.initiator,
+    };
+    bincode::serialize(&command)
+        .map(Bytes::from)
+        .map_err(|_| crate::error::Error::EncodeError)
+}
+
+/// Map backend admission into the relay reducer's ordered feedback algebra.
+fn enqueue_feedback<T: Serialize>(
+    key: SessionKey,
+    admission: EffectEnqueue,
+) -> crate::error::Result<Vec<Bytes>> {
+    match admission {
+        EffectEnqueue::Enqueued => Ok(Vec::new()),
+        EffectEnqueue::Missing => untrack_feedback::<T>(key).map(|feedback| vec![feedback]),
+        EffectEnqueue::Failed => abort_feedback::<T>(key).map(|feedback| vec![feedback]),
     }
 }
 
-#[cfg(feature = "browser")]
+// ── Browser interpreter (WebTransport) ────────────────────────────────────────────────
+
+/// Browser relay interpreter: runs [`RelayEffect`]s over the WebTransport engine it owns.
+#[cfg(rings_browser)]
+pub(crate) struct WtRelay {
+    engine: Arc<crate::extension::transport::wt::WtSessions>,
+    control_outbox: ControlOutbox,
+}
+
+#[cfg(rings_browser)]
+impl WtRelay {
+    /// Build over a shared WebTransport engine.
+    pub(crate) fn new(engine: Arc<crate::extension::transport::wt::WtSessions>) -> Self {
+        Self {
+            engine,
+            control_outbox: ControlOutbox::default(),
+        }
+    }
+}
+
+#[cfg(rings_browser)]
 #[async_trait::async_trait(?Send)]
 impl Interpret for WtRelay {
     type Effect = RelayEffect<String>;
 
     async fn run(
         &self,
-        scope: &Scope,
+        scope: &EffectScope,
         effect: RelayEffect<String>,
     ) -> crate::error::Result<Vec<Bytes>> {
         match effect {
             RelayEffect::Connect { key, target, kind } => {
-                self.engine
-                    .clone()
-                    .connect(scope.clone(), key, target, kind)
-                    .await;
+                let admission =
+                    self.engine
+                        .clone()
+                        .connect(scope.lifecycle(), key.clone(), target, kind);
+                return enqueue_feedback::<String>(key, admission);
             }
             RelayEffect::Write { key, bytes } => {
-                self.engine.write(&key, bytes).await;
+                let admission = self.engine.write(scope.lifecycle(), key.clone(), bytes);
+                return enqueue_feedback::<String>(key, admission);
             }
             RelayEffect::Shutdown { key } => {
-                self.engine.shutdown(&key).await;
+                let admission = self.engine.shutdown(scope.lifecycle(), key.clone());
+                return enqueue_feedback::<String>(key, admission);
             }
             RelayEffect::Close { key } => {
-                self.engine.close(scope, &key).await;
+                self.engine.close_for_effect(&key);
             }
             RelayEffect::SendClose {
                 to,
                 session,
                 from_opener,
             } => {
-                scope.send(to, close_frame(session, from_opener)).await?;
+                self.control_outbox.enqueue(
+                    scope.lifecycle(),
+                    to,
+                    close_frame(session, from_opener)?,
+                )?;
             }
             // The browser relay is server-side only (no local listener), so it never reports
             // an `Accepted` and thus never receives `OpenAccepted`.
             RelayEffect::OpenAccepted { .. } => {
                 tracing::warn!("browser relay received OpenAccepted; it has no local listener");
+            }
+            RelayEffect::RejectAccepted { .. } => {
+                tracing::warn!("browser relay received RejectAccepted; it has no local listener");
             }
         }
         Ok(Vec::new())
@@ -543,7 +765,7 @@ impl Interpret for WtRelay {
 /// Cloneable; every clone drives the same shared engine and pure [`Relay`] state.
 /// Holds the two per-namespace scoped capabilities (`tcp` / `udp`); each method picks one and
 /// can only act within it, so the handle cannot address an arbitrary namespace even internally.
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 #[derive(Clone)]
 pub struct RelayHandle {
     engine: Arc<crate::extension::transport::engine::TransportSessions>,
@@ -551,7 +773,7 @@ pub struct RelayHandle {
     udp: Scope,
 }
 
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 impl RelayHandle {
     /// Install the relay into an extension registry: register the TCP and UDP interpreters
     /// over a fresh, relay-owned OS-socket engine and return the client handle. Errors if the
@@ -649,7 +871,7 @@ impl RelayHandle {
 
 /// Map a service `name` → `target` by self-injecting a `RegisterService` command into the
 /// scope's own namespace (provenance = self).
-#[cfg(any(feature = "node", feature = "browser"))]
+#[cfg(any(rings_native, rings_browser))]
 async fn register_service<T>(scope: &Scope, name: String, target: T) -> crate::error::Result<()>
 where T: Serialize {
     let command = RelayCommand::RegisterService { name, target };
@@ -657,20 +879,18 @@ where T: Serialize {
     scope.inject(Bytes::from(payload)).await
 }
 
-/// Client-facing handle to the browser relay extension's live WebTransport engine: register
-/// local WebTransport-backed services. The browser relay is server-side only (no local
-/// listener), so it has no tunnel-open surface. Cloneable. See the native [`RelayHandle`].
-/// Holds the two per-namespace scoped capabilities (`tcp` / `udp`). The browser relay is
-/// server-side only (no local listener), so this handle just registers services. See the
-/// native [`RelayHandle`].
-#[cfg(feature = "browser")]
+/// Client-facing handle to the browser relay extension's live WebTransport engine. It owns the
+/// two per-namespace scoped capabilities (`tcp` / `udp`) and registers services, but exposes no
+/// tunnel-open surface because the browser relay is server-side only. Cloneable; see the native
+/// [`RelayHandle`].
+#[cfg(rings_browser)]
 #[derive(Clone)]
 pub struct RelayHandle {
     tcp: Scope,
     udp: Scope,
 }
 
-#[cfg(feature = "browser")]
+#[cfg(rings_browser)]
 impl RelayHandle {
     /// Install the browser relay into an extension registry: register the TCP and UDP
     /// interpreters over a fresh, relay-owned WebTransport engine and return the client handle.
@@ -713,588 +933,4 @@ impl RelayHandle {
 }
 
 #[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
-    use std::collections::HashSet;
-    use std::net::SocketAddr;
-
-    use bytes::Bytes;
-    use rings_core::dht::Did;
-
-    use super::Frame;
-    use super::Initiator;
-    use super::Relay;
-    use super::RelayCommand;
-    use super::RelayEffect;
-    use super::RelayState;
-    use super::SessionId;
-    use super::SessionKey;
-    use super::TransportKind;
-    use crate::extension::ext::Ctx;
-    use crate::extension::ext::Protocol;
-    use crate::extension::ext::Transition;
-    use crate::extension::ext::Wire;
-
-    fn this_node() -> Did {
-        Did::from(1u32)
-    }
-    fn peer_a() -> Did {
-        Did::from(2u32)
-    }
-    fn peer_b() -> Did {
-        Did::from(3u32)
-    }
-    fn web_addr() -> SocketAddr {
-        "127.0.0.1:8080".parse().unwrap()
-    }
-
-    /// A server-side (peer-opened) key on the TCP relay — the common case in these tests.
-    fn rkey(peer: Did, session: u64) -> SessionKey {
-        SessionKey::new(peer, super::TCP, SessionId(session), Initiator::Remote)
-    }
-    /// Peer `Data` on a peer-opened session (`from_opener = true`).
-    fn data(session: u64, bytes: &'static [u8]) -> Frame {
-        Frame::Data {
-            session: SessionId(session),
-            from_opener: true,
-            bytes: Bytes::from_static(bytes),
-        }
-    }
-    /// Peer `Close` on a peer-opened session (`from_opener = true`).
-    fn close(session: u64) -> Frame {
-        Frame::Close {
-            session: SessionId(session),
-            from_opener: true,
-        }
-    }
-    /// Peer `Open` for `service`.
-    fn open(session: u64, service: &str) -> Frame {
-        Frame::Open {
-            session: SessionId(session),
-            service: service.to_string(),
-        }
-    }
-
-    fn web_relay() -> Relay<SocketAddr> {
-        let mut config = HashMap::new();
-        config.insert("web".to_string(), web_addr());
-        Relay::tcp(config)
-    }
-
-    /// Decode a peer frame then step.
-    fn step_frame(
-        relay: &Relay<SocketAddr>,
-        state: &RelayState<SocketAddr>,
-        from: Did,
-        frame: &Frame,
-    ) -> Transition<RelayState<SocketAddr>, RelayEffect<SocketAddr>> {
-        let payload = bincode::serialize(frame).unwrap();
-        let event = relay
-            .decode(Wire {
-                from,
-                me: this_node(),
-                payload: payload.as_ref(),
-            })
-            .unwrap();
-        relay.step(
-            Ctx {
-                did: this_node(),
-                state,
-            },
-            event,
-        )
-    }
-
-    /// Decode a self command then step.
-    fn step_command(
-        relay: &Relay<SocketAddr>,
-        state: &RelayState<SocketAddr>,
-        command: &RelayCommand<SocketAddr>,
-    ) -> Transition<RelayState<SocketAddr>, RelayEffect<SocketAddr>> {
-        let payload = bincode::serialize(command).unwrap();
-        let event = relay
-            .decode(Wire {
-                from: this_node(),
-                me: this_node(),
-                payload: payload.as_ref(),
-            })
-            .unwrap();
-        relay.step(
-            Ctx {
-                did: this_node(),
-                state,
-            },
-            event,
-        )
-    }
-
-    #[test]
-    fn open_known_service_connects_and_records_the_session() {
-        let relay = web_relay();
-        let t = step_frame(&relay, &relay.init(), peer_a(), &open(7, "web"));
-        let expected = rkey(peer_a(), 7);
-        match t.effects.as_slice() {
-            [RelayEffect::Connect { key, target, kind }] => {
-                assert_eq!(*key, expected);
-                assert_eq!(*target, web_addr());
-                assert!(matches!(kind, TransportKind::Tcp));
-            }
-            other => panic!("expected one Connect, got {other:?}"),
-        }
-        assert!(t.state.sessions.contains(&expected));
-    }
-
-    #[test]
-    fn duplicate_open_for_a_live_session_is_rejected() {
-        let relay = web_relay();
-        let opened = step_frame(&relay, &relay.init(), peer_a(), &open(7, "web"));
-        assert!(opened.state.sessions.contains(&rkey(peer_a(), 7)));
-        let again = step_frame(&relay, &opened.state, peer_a(), &open(7, "web"));
-        assert!(
-            again.effects.is_empty(),
-            "duplicate Open must emit no effect"
-        );
-        assert_eq!(again.state.sessions.len(), 1);
-    }
-
-    #[test]
-    fn open_unknown_service_closes_and_records_nothing() {
-        let relay = web_relay();
-        let t = step_frame(&relay, &relay.init(), peer_a(), &open(7, "ssh"));
-        match t.effects.as_slice() {
-            [RelayEffect::SendClose {
-                to,
-                session,
-                from_opener,
-            }] => {
-                assert_eq!(*to, peer_a());
-                assert_eq!(*session, SessionId(7));
-                assert!(!from_opener, "we are not the opener of the peer's session");
-            }
-            other => panic!("expected one SendClose, got {other:?}"),
-        }
-        assert!(t.state.sessions.is_empty());
-    }
-
-    #[test]
-    fn data_writes_to_a_live_keyed_session() {
-        let relay = web_relay();
-        // Data is now guarded on the session set, so open it first.
-        let opened = step_frame(&relay, &relay.init(), peer_a(), &open(7, "web"));
-        let t = step_frame(&relay, &opened.state, peer_a(), &data(7, b"hello"));
-        match t.effects.as_slice() {
-            [RelayEffect::Write { key, bytes }] => {
-                assert_eq!(*key, rkey(peer_a(), 7));
-                assert_eq!(bytes.as_ref(), b"hello");
-            }
-            other => panic!("expected one Write, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn data_for_an_unknown_session_is_dropped_by_the_reducer() {
-        let relay = web_relay();
-        // No Open first: the reducer (not the engine table) decides there is no such session.
-        let t = step_frame(&relay, &relay.init(), peer_a(), &data(7, b"hello"));
-        assert!(
-            t.effects.is_empty(),
-            "Data for an unknown session emits nothing"
-        );
-    }
-
-    #[test]
-    fn close_removes_the_session_and_emits_close() {
-        let relay = web_relay();
-        let opened = step_frame(&relay, &relay.init(), peer_a(), &open(7, "web"));
-        let t = step_frame(&relay, &opened.state, peer_a(), &close(7));
-        let expected = rkey(peer_a(), 7);
-        match t.effects.as_slice() {
-            [RelayEffect::Close { key }] => assert_eq!(*key, expected),
-            other => panic!("expected one Close, got {other:?}"),
-        }
-        assert!(!t.state.sessions.contains(&expected));
-    }
-
-    #[test]
-    fn register_service_via_self_command_then_open_connects() {
-        let relay = Relay::tcp(HashMap::new());
-        let registered = step_command(&relay, &relay.init(), &RelayCommand::RegisterService {
-            name: "web".to_string(),
-            target: web_addr(),
-        });
-        assert!(registered.effects.is_empty());
-        let t = step_frame(&relay, &registered.state, peer_a(), &open(1, "web"));
-        match t.effects.as_slice() {
-            [RelayEffect::Connect { target, .. }] => assert_eq!(*target, web_addr()),
-            other => panic!("expected one Connect, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn accepted_mints_in_the_core_then_untrack_removes() {
-        let relay = web_relay();
-        // A client-side accept is fed back as `Accepted{token}`. The core mints the session id
-        // (0 on fresh state, initiator Local) and replies OpenAccepted with that minted key.
-        let accepted = step_command(&relay, &relay.init(), &RelayCommand::Accepted {
-            token: 42,
-            peer: peer_a(),
-            service: "web".to_string(),
-        });
-        let key = SessionKey::new(peer_a(), super::TCP, SessionId(0), Initiator::Local);
-        match accepted.effects.as_slice() {
-            [RelayEffect::OpenAccepted {
-                token,
-                key: k,
-                service,
-            }] => {
-                assert_eq!(*token, 42);
-                assert_eq!(*k, key);
-                assert_eq!(service, "web");
-            }
-            other => panic!("expected one OpenAccepted, got {other:?}"),
-        }
-        assert!(accepted.state.sessions.contains(&key));
-
-        let untracked = step_command(&relay, &accepted.state, &RelayCommand::Untrack {
-            peer: peer_a(),
-            session: SessionId(0),
-            initiator: Initiator::Local,
-        });
-        assert!(untracked.effects.is_empty());
-        assert!(!untracked.state.sessions.contains(&key));
-    }
-
-    #[test]
-    fn a_peer_cannot_address_another_peers_session() {
-        let relay = web_relay();
-        let a_open = step_frame(&relay, &relay.init(), peer_a(), &open(0, "web"));
-        let key_a = rkey(peer_a(), 0);
-        assert!(a_open.state.sessions.contains(&key_a));
-
-        // peer B references session 0 (same id) but never opened it here: the reducer drops
-        // both Data and Close — A's session is untouched. (Owner rejection in the core.)
-        let b_data = step_frame(&relay, &a_open.state, peer_b(), &data(0, b"x"));
-        assert!(
-            b_data.effects.is_empty(),
-            "B's Data for a session it did not open is dropped"
-        );
-        let b_close = step_frame(&relay, &a_open.state, peer_b(), &close(0));
-        assert!(
-            b_close.effects.is_empty(),
-            "B's Close for a session it did not open is dropped"
-        );
-        assert!(b_close.state.sessions.contains(&key_a));
-    }
-
-    #[test]
-    fn local_and_remote_sessions_with_the_same_id_do_not_collide() {
-        // Bidirectional open against the same peer, both id 0: a peer-opened (Remote) session
-        // and a locally-accepted (Local) session must be distinct keys.
-        let relay = web_relay();
-        let opened = step_frame(&relay, &relay.init(), peer_a(), &open(0, "web"));
-        let accepted = step_command(&relay, &opened.state, &RelayCommand::Accepted {
-            token: 1,
-            peer: peer_a(),
-            service: "web".to_string(),
-        });
-        let remote = SessionKey::new(peer_a(), super::TCP, SessionId(0), Initiator::Remote);
-        let local = SessionKey::new(peer_a(), super::TCP, SessionId(0), Initiator::Local);
-        assert_ne!(remote, local);
-        assert!(accepted.state.sessions.contains(&remote));
-        assert!(accepted.state.sessions.contains(&local));
-        assert_eq!(accepted.state.sessions.len(), 2);
-    }
-
-    // ── lifecycle property tests (reviewer-requested) ─────────────────────────────────
-
-    #[test]
-    fn open_then_close_then_data_does_not_resurrect_the_session() {
-        let relay = web_relay();
-        let key = rkey(peer_a(), 3);
-        let opened = step_frame(&relay, &relay.init(), peer_a(), &open(3, "web"));
-        assert!(opened.state.sessions.contains(&key));
-        let closed = step_frame(&relay, &opened.state, peer_a(), &close(3));
-        assert!(!closed.state.sessions.contains(&key));
-        // A late Data for the now-closed session is dropped by the reducer (guarded on the
-        // session set) — no effect, no resurrection.
-        let late = step_frame(&relay, &closed.state, peer_a(), &data(3, b"late"));
-        assert!(late.effects.is_empty());
-        assert!(late.state.sessions.is_empty());
-    }
-
-    #[test]
-    fn close_after_close_is_idempotent() {
-        let relay = web_relay();
-        let opened = step_frame(&relay, &relay.init(), peer_a(), &open(5, "web"));
-        let c1 = step_frame(&relay, &opened.state, peer_a(), &close(5));
-        assert!(matches!(c1.effects.as_slice(), [RelayEffect::Close { .. }]));
-        // The second close hits no live session: the reducer drops it (no effect, no panic).
-        let c2 = step_frame(&relay, &c1.state, peer_a(), &close(5));
-        assert!(c2.effects.is_empty());
-        assert!(c2.state.sessions.is_empty());
-    }
-
-    #[test]
-    fn malformed_payload_is_rejected_at_the_boundary() {
-        let relay = web_relay();
-        let bad = [0xFFu8, 0xFF, 0xFF, 0xFF, 0xFF];
-        let result = relay.decode(Wire {
-            from: peer_a(),
-            me: this_node(),
-            payload: &bad,
-        });
-        assert!(result.is_err(), "a malformed frame must be rejected");
-    }
-
-    /// Property: across a long, deterministic, collision-prone interleaving of peer frames
-    /// (Open/Data/Close) from several peers, the pure `State.sessions` never diverges from an
-    /// independent model, and Data/Close only ever act on live sessions (reducer authority).
-    #[test]
-    fn lifecycle_property_state_never_diverges_from_model() {
-        let relay = web_relay();
-        let peers = [peer_a(), peer_b(), Did::from(4u32)];
-        let mut state = relay.init();
-        let mut model: HashSet<SessionKey> = HashSet::new();
-        let mut rng: u64 = 0x2545_F491_4F6C_DD1D;
-        let mut next = move || {
-            rng ^= rng << 13;
-            rng ^= rng >> 7;
-            rng ^= rng << 17;
-            rng
-        };
-
-        for _ in 0..4000 {
-            let r = next();
-            let peer = peers[(r % 3) as usize];
-            let session = (r >> 2) & 0x7; // 8 ids → frequent collisions
-            let key = rkey(peer, session);
-            let transition = match (r >> 8) % 4 {
-                0 => {
-                    let t = step_frame(&relay, &state, peer, &open(session, "web"));
-                    if model.contains(&key) {
-                        assert!(t.effects.is_empty(), "duplicate Open must emit nothing");
-                    } else {
-                        assert!(matches!(t.effects.as_slice(), [
-                            RelayEffect::Connect { .. }
-                        ]));
-                        model.insert(key.clone());
-                    }
-                    t
-                }
-                1 => {
-                    let t = step_frame(&relay, &state, peer, &open(session, "nope"));
-                    if model.contains(&key) {
-                        assert!(t.effects.is_empty());
-                    } else {
-                        assert!(matches!(t.effects.as_slice(), [
-                            RelayEffect::SendClose { .. }
-                        ]));
-                    }
-                    t
-                }
-                2 => {
-                    let t = step_frame(&relay, &state, peer, &data(session, b"x"));
-                    if model.contains(&key) {
-                        match t.effects.as_slice() {
-                            [RelayEffect::Write { key: k, .. }] => assert_eq!(*k, key),
-                            other => panic!("expected one Write, got {other:?}"),
-                        }
-                    } else {
-                        assert!(
-                            t.effects.is_empty(),
-                            "Data on an unknown session is dropped"
-                        );
-                    }
-                    t
-                }
-                _ => {
-                    let t = step_frame(&relay, &state, peer, &close(session));
-                    if model.contains(&key) {
-                        assert!(matches!(t.effects.as_slice(), [RelayEffect::Close { .. }]));
-                    } else {
-                        assert!(
-                            t.effects.is_empty(),
-                            "Close on an unknown session is dropped"
-                        );
-                    }
-                    model.remove(&key);
-                    t
-                }
-            };
-            state = transition.state;
-            assert_eq!(
-                state.sessions, model,
-                "State.sessions diverged from the model"
-            );
-        }
-    }
-
-    /// A faithful in-test model of a relay engine's resource table: `key → generation`,
-    /// mirroring `register` (insert a fresh generation), `close` (drop the current handle) and
-    /// `close_if_current` (drop only if the generation matches, returning whether it did).
-    /// This logic is identical in the native [`TransportSessions`] and browser `WtSessions`
-    /// engines, so the model covers both — only the socket vs. WebTransport plumbing differs.
-    struct EngineModel {
-        map: HashMap<SessionKey, u64>,
-        next_gen: u64,
-    }
-
-    impl EngineModel {
-        fn new() -> Self {
-            Self {
-                map: HashMap::new(),
-                next_gen: 0,
-            }
-        }
-        fn register(&mut self, key: SessionKey) -> u64 {
-            let gen = self.next_gen;
-            self.next_gen += 1;
-            self.map.insert(key, gen);
-            gen
-        }
-        fn close(&mut self, key: &SessionKey) {
-            self.map.remove(key);
-        }
-        /// Returns whether it was the current owner (and removed it). A `false` here means the
-        /// caller is a stale task: it must send the peer **no** `Close` either.
-        fn close_if_current(&mut self, key: &SessionKey, gen: u64) -> bool {
-            if self.map.get(key) == Some(&gen) {
-                self.map.remove(key);
-                true
-            } else {
-                false
-            }
-        }
-    }
-
-    /// Apply a step's effects to the engine model, returning the generation of any handle the
-    /// effects registered (a relay task's captured generation). Asserts `Write`/`Shutdown`
-    /// only ever hit a live handle — i.e. the reducer, not the engine table, decided.
-    fn apply_effects(
-        eng: &mut EngineModel,
-        effects: &[RelayEffect<SocketAddr>],
-    ) -> Option<(SessionKey, u64)> {
-        let mut registered = None;
-        for effect in effects {
-            match effect {
-                RelayEffect::Connect { key, .. } | RelayEffect::OpenAccepted { key, .. } => {
-                    registered = Some((key.clone(), eng.register(key.clone())));
-                }
-                RelayEffect::Write { key, .. } | RelayEffect::Shutdown { key } => {
-                    assert!(
-                        eng.map.contains_key(key),
-                        "effect targeted a non-live session"
-                    );
-                }
-                RelayEffect::Close { key } => eng.close(key),
-                RelayEffect::SendClose { .. } => {}
-            }
-        }
-        registered
-    }
-
-    #[test]
-    fn generation_prevents_a_slow_old_task_deleting_a_reopened_handle() {
-        // Server session id 7 is opener-chosen, so it can be reused after close. Open → close
-        // → reopen, then let the *old* task tear down: with generations it must not delete the
-        // new handle (ABA safety).
-        let relay = web_relay();
-        let mut eng = EngineModel::new();
-
-        let opened = step_frame(&relay, &relay.init(), peer_a(), &open(7, "web"));
-        let (key, gen_old) = apply_effects(&mut eng, &opened.effects).expect("registered");
-
-        // Peer closes; the reducer removes it and the engine drops the current handle.
-        let closed = step_frame(&relay, &opened.state, peer_a(), &close(7));
-        apply_effects(&mut eng, &closed.effects);
-        assert!(!eng.map.contains_key(&key));
-
-        // Peer reopens the same id → a new handle with a fresh generation.
-        let reopened = step_frame(&relay, &closed.state, peer_a(), &open(7, "web"));
-        let (_, gen_new) = apply_effects(&mut eng, &reopened.effects).expect("registered");
-        assert_ne!(gen_old, gen_new);
-
-        // The slow OLD task finally tears down with its stale generation: it must neither
-        // remove the new handle nor (since this returns false) send the peer a `Close`.
-        let removed = eng.close_if_current(&key, gen_old);
-        assert!(
-            !removed,
-            "stale task must not remove — and so must send no peer Close"
-        );
-        assert_eq!(
-            eng.map.get(&key),
-            Some(&gen_new),
-            "old task must not delete the reopened handle"
-        );
-    }
-
-    #[test]
-    fn engine_model_stays_consistent_with_step_under_interleaving() {
-        // Drive Open/Data/Close (peer frames) with *deferred* generation-checked teardowns,
-        // asserting the pure session set and the engine model's live keys never diverge.
-        let relay = web_relay();
-        let peers = [peer_a(), peer_b()];
-        let mut state = relay.init();
-        let mut eng = EngineModel::new();
-        let mut tasks: Vec<(SessionKey, u64)> = Vec::new();
-        let mut rng: u64 = 0x9E37_79B9_7F4A_7C15;
-        let mut next = move || {
-            rng ^= rng << 13;
-            rng ^= rng >> 7;
-            rng ^= rng << 17;
-            rng
-        };
-
-        for _ in 0..3000 {
-            let r = next();
-            let peer = peers[(r % 2) as usize];
-            let session = (r >> 2) & 0x3; // 4 ids → frequent reuse
-            match (r >> 8) % 4 {
-                0 => {
-                    let t = step_frame(&relay, &state, peer, &open(session, "web"));
-                    if let Some(task) = apply_effects(&mut eng, &t.effects) {
-                        tasks.push(task);
-                    }
-                    state = t.state;
-                }
-                1 => {
-                    let t = step_frame(&relay, &state, peer, &data(session, b"x"));
-                    apply_effects(&mut eng, &t.effects);
-                    state = t.state;
-                }
-                2 => {
-                    // Peer close: reducer removes, engine drops current; the matching task is
-                    // now stale (its later teardown will be a generation no-op).
-                    let t = step_frame(&relay, &state, peer, &close(session));
-                    apply_effects(&mut eng, &t.effects);
-                    state = t.state;
-                }
-                _ => {
-                    // A deferred task teardown fires. `close_if_current` returns whether this
-                    // task was still current; ONLY then does it Untrack and (would) send the
-                    // peer a Close. A stale task must do neither — modelled by the `removed`
-                    // gate, so a reopened session is never torn down by an old task.
-                    if !tasks.is_empty() {
-                        let idx = (r >> 16) as usize % tasks.len();
-                        let (tkey, tgen) = tasks.swap_remove(idx);
-                        let removed = eng.close_if_current(&tkey, tgen);
-                        if removed {
-                            let untrack = RelayCommand::Untrack {
-                                peer: tkey.peer,
-                                session: tkey.session,
-                                initiator: tkey.initiator,
-                            };
-                            state = step_command(&relay, &state, &untrack).state;
-                        }
-                    }
-                }
-            }
-            // The pure session set and the engine's live keys must agree at every step.
-            let live: HashSet<SessionKey> = eng.map.keys().cloned().collect();
-            assert_eq!(
-                state.sessions, live,
-                "pure state diverged from the engine model"
-            );
-        }
-    }
-}
+mod tests;

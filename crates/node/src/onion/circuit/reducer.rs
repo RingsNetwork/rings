@@ -1,13 +1,16 @@
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use rings_core::dht::Did;
 use rings_core::ecc::elgamal::impls::secp256k1::AeadCiphertext;
+use rings_core::ecc::PublicKey;
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::codec::encode_wire_message;
+use super::cell::encode_message;
+use super::cell::OnionCellBucket;
 use super::codec::OnionCircuitInput;
 use super::codec::OnionWireMessage;
 use super::protocol::OnionCircuitCapabilities;
@@ -18,8 +21,9 @@ use super::OnionClientReturn;
 use super::OnionForwardFrame;
 use super::OnionForwardLayer;
 use super::OnionForwardNonce;
-use super::MAX_ONION_CIRCUIT_HOPS;
+use super::OnionForwardSequence;
 use super::MAX_ONION_RELAY_CIRCUITS;
+use super::ONION_FORWARD_MAX_VALIDITY_MS;
 use super::ONION_RELAY_RETURN_TTL_MS;
 use crate::error::Error;
 use crate::error::Result;
@@ -33,9 +37,18 @@ pub(super) struct RelayReturnKey {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct RelayReturnEdge {
+    pub(super) key: RelayReturnKey,
+    pub(super) previous_hop: Did,
+    pub(super) previous_circuit_id: OnionCircuitId,
+    pub(super) previous_session_public_key: PublicKey<33>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RelayReturnEntry {
     previous_hop: Did,
     previous_circuit_id: OnionCircuitId,
+    previous_session_public_key: PublicKey<33>,
     expires_at_ms: u128,
 }
 
@@ -50,7 +63,7 @@ struct RelayReturnEntry {
 /// client and are not authenticated to relays.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct OnionCircuitState {
-    relay_returns: BTreeMap<RelayReturnKey, RelayReturnEntry>,
+    relay_returns: Arc<BTreeMap<RelayReturnKey, RelayReturnEntry>>,
 }
 
 impl OnionCircuitState {
@@ -58,33 +71,48 @@ impl OnionCircuitState {
     pub(super) fn relay_return_count(&self) -> usize {
         self.relay_returns.len()
     }
+
+    #[cfg(test)]
+    pub(super) fn shares_return_table_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.relay_returns, &other.relay_returns)
+    }
 }
 
 /// Effects emitted by the route-aware circuit reducer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OnionCircuitEffect {
     /// Run forward-layer crypto at the shell boundary and re-inject the decoded layer.
+    DecryptCell {
+        /// Authenticated immediate sender.
+        from: Did,
+        /// Public padding class; direction and exact length remain encrypted.
+        bucket: OnionCellBucket,
+        /// Hop-encrypted fixed-size cell payload.
+        sealed: AeadCiphertext,
+    },
+    /// Decrypt one forward onion layer after its outer cell has authenticated the direction.
     DecryptForward {
         /// Authenticated immediate sender.
         from: Did,
-        /// Random circuit correlation id.
+        /// Cell receipt time captured once at the shell boundary.
+        received_at_ms: u128,
+        /// Public padding class to preserve on the next edge.
+        bucket: OnionCellBucket,
+        /// Edge-local circuit id bound into the layer AEAD.
         circuit_id: OnionCircuitId,
-        /// AEAD-encrypted layer for this hop.
+        /// Forward onion layer encrypted to this node.
         payload: AeadCiphertext,
     },
-    /// Timestamp a backward frame at the shell boundary and re-inject it for pure reduction.
-    TimestampBackward {
-        /// Authenticated immediate sender.
-        from: Did,
-        /// Backward frame from an exit or relay.
-        frame: OnionBackwardFrame,
-    },
-    /// Send a frame to the next hop.
-    Send {
+    /// Encrypt and send one fixed-size cell at the shell boundary.
+    SealAndSend {
         /// Next hop.
         to: Did,
-        /// Encoded frame.
-        payload: Bytes,
+        /// Next hop session key authenticated inside the current layer.
+        recipient: PublicKey<33>,
+        /// Padding class preserved across relay edges.
+        bucket: OnionCellBucket,
+        /// Encoded direction and frame protected by the cell AEAD.
+        encoded_message: Bytes,
     },
     /// A forward frame reached the exit.
     Exit {
@@ -94,10 +122,14 @@ pub enum OnionCircuitEffect {
         circuit_id: OnionCircuitId,
         /// Immediate return peer.
         return_peer: Did,
+        /// Immediate return peer session key for the first backward cell.
+        return_session_public_key: PublicKey<33>,
         /// Client return key.
         client: OnionClientReturn,
-        /// Random per-frame nonce consumed by the exit adapter.
+        /// Replay token consumed by one-shot exit operations; stream frames use `forward_sequence`.
         forward_nonce: OnionForwardNonce,
+        /// Monotonic client-to-exit sequence within this circuit.
+        forward_sequence: OnionForwardSequence,
         /// Application payload.
         payload: OnionCircuitPayload,
     },
@@ -115,12 +147,12 @@ pub enum OnionCircuitEffect {
 /// Pure state relation for onion circuits.
 ///
 /// ```text
-/// ForwardObserved(encrypted)   -> [DecryptForward]
-/// ForwardReady(relay layer)    -> state' with return edge, [Send next]
-/// ForwardReady(exit layer)     -> state, [Exit]
-/// BackwardObserved(encrypted)  -> [TimestampBackward]
-/// BackwardReady(return match)  -> state' with refreshed edge, [Send previous]
-/// BackwardReady(no match)      -> state, [DecryptClient]
+/// CellObserved(encrypted)      -> [DecryptCell]
+/// CellReady(forward relay)     -> state' with return edge, [SealAndSend next]
+/// CellReady(forward exit)      -> state, [Exit]
+/// CellReady(backward match)    -> state' with refreshed edge, [SealAndSend previous]
+/// CellReady(backward no match) -> state, [DecryptClient]
+/// CellReady(cover)             -> state, []
 /// ```
 ///
 /// Law: replaying `apply(state, input)` with the same values returns the same `(state', effects)`.
@@ -128,19 +160,11 @@ pub enum OnionCircuitEffect {
 #[derive(Clone, Debug)]
 pub(super) struct OnionCircuitReducer {
     capabilities: OnionCircuitCapabilities,
-    max_hops: u8,
-    max_relay_circuits: usize,
-    relay_return_ttl_ms: u128,
 }
 
 impl OnionCircuitReducer {
     pub(super) const fn new(capabilities: OnionCircuitCapabilities) -> Self {
-        Self {
-            capabilities,
-            max_hops: MAX_ONION_CIRCUIT_HOPS,
-            max_relay_circuits: MAX_ONION_RELAY_CIRCUITS,
-            relay_return_ttl_ms: ONION_RELAY_RETURN_TTL_MS,
-        }
+        Self { capabilities }
     }
 
     pub(super) fn apply(
@@ -150,29 +174,35 @@ impl OnionCircuitReducer {
     ) -> Transition<OnionCircuitState, OnionCircuitEffect> {
         let mut state = state.clone();
         let effect = match input {
-            OnionCircuitInput::ForwardObserved {
+            OnionCircuitInput::CellObserved {
                 from,
-                circuit_id,
-                layer,
-            } => self.observe_forward(from, circuit_id, layer),
-            OnionCircuitInput::BackwardObserved { from, frame } => {
-                Ok(OnionCircuitEffect::TimestampBackward { from, frame })
-            }
+                bucket,
+                sealed,
+            } => Ok(Some(OnionCircuitEffect::DecryptCell {
+                from,
+                bucket,
+                sealed,
+            })),
+            OnionCircuitInput::CellReady {
+                from,
+                received_at_ms,
+                bucket,
+                message,
+            } => self.advance_cell(from, received_at_ms, bucket, message, &mut state),
             OnionCircuitInput::ForwardReady {
                 from,
                 received_at_ms,
+                bucket,
                 circuit_id,
                 layer,
-            } => self.advance_forward(from, received_at_ms, circuit_id, layer, &mut state),
-            OnionCircuitInput::BackwardReady {
-                from,
-                received_at_ms,
-                frame,
-            } => self.advance_backward(from, received_at_ms, frame, &mut state),
+            } => self
+                .advance_forward(from, received_at_ms, bucket, circuit_id, layer, &mut state)
+                .map(Some),
         };
 
         match effect {
-            Ok(effect) => Transition::with(state, vec![effect]),
+            Ok(Some(effect)) => Transition::with(state, vec![effect]),
+            Ok(None) => Transition::pure(state),
             Err(error) => {
                 tracing::debug!("drop onion circuit message: {error}");
                 Transition::pure(state)
@@ -180,69 +210,98 @@ impl OnionCircuitReducer {
         }
     }
 
-    fn observe_forward(
+    fn advance_cell(
         &self,
         from: Did,
-        circuit_id: OnionCircuitId,
-        layer: AeadCiphertext,
-    ) -> Result<OnionCircuitEffect> {
-        if !self.capabilities.accepts_forward_layers() {
-            return Err(Error::NoPermission);
+        received_at_ms: u128,
+        bucket: OnionCellBucket,
+        message: OnionWireMessage,
+        state: &mut OnionCircuitState,
+    ) -> Result<Option<OnionCircuitEffect>> {
+        match message {
+            OnionWireMessage::Forward(frame) => {
+                if !self.capabilities.accepts_forward_layers() {
+                    return Err(Error::NoPermission);
+                }
+                Ok(Some(OnionCircuitEffect::DecryptForward {
+                    from,
+                    received_at_ms,
+                    bucket,
+                    circuit_id: frame.circuit_id,
+                    payload: frame.layer,
+                }))
+            }
+            OnionWireMessage::Backward(frame) => self
+                .advance_backward(from, received_at_ms, bucket, frame, state)
+                .map(Some),
+            OnionWireMessage::Cover => Ok(None),
         }
-        Ok(OnionCircuitEffect::DecryptForward {
-            from,
-            circuit_id,
-            payload: layer,
-        })
     }
 
     fn advance_forward(
         &self,
         from: Did,
         received_at_ms: u128,
+        bucket: OnionCellBucket,
         circuit_id: OnionCircuitId,
         layer: OnionForwardLayer,
         state: &mut OnionCircuitState,
     ) -> Result<OnionCircuitEffect> {
+        if !self.capabilities.accepts_forward_layers() {
+            return Err(Error::NoPermission);
+        }
         match layer {
             OnionForwardLayer::Relay {
                 next_hop,
                 next_circuit_id,
-                remaining_hops,
+                next_session_public_key,
+                return_session_public_key,
                 inner,
             } => {
-                self.validate_relay_forward(remaining_hops)?;
+                self.validate_relay_forward()?;
                 remember_return_hop(
                     state,
-                    self.max_relay_circuits,
-                    self.relay_return_ttl_ms,
-                    RelayReturnKey {
-                        circuit_id: next_circuit_id,
-                        next_hop,
+                    MAX_ONION_RELAY_CIRCUITS,
+                    ONION_RELAY_RETURN_TTL_MS,
+                    RelayReturnEdge {
+                        key: RelayReturnKey {
+                            circuit_id: next_circuit_id,
+                            next_hop,
+                        },
+                        previous_hop: from,
+                        previous_circuit_id: circuit_id,
+                        previous_session_public_key: return_session_public_key,
                     },
-                    from,
-                    circuit_id,
                     received_at_ms,
                 )?;
-                encode_wire_message(OnionWireMessage::Forward(OnionForwardFrame {
+                encode_message(&OnionWireMessage::Forward(OnionForwardFrame {
                     circuit_id: next_circuit_id,
                     layer: inner,
                 }))
-                .map(|payload| OnionCircuitEffect::Send {
+                .map(|encoded_message| OnionCircuitEffect::SealAndSend {
                     to: next_hop,
-                    payload,
+                    recipient: next_session_public_key,
+                    bucket,
+                    encoded_message,
                 })
             }
             OnionForwardLayer::Exit {
                 client,
+                return_session_public_key,
                 expires_at_ms,
                 forward_nonce,
+                forward_sequence,
                 payload,
             } => {
                 if !self.capabilities.permits_exit_layer() {
                     return Err(Error::NoPermission);
                 }
-                if expires_at_ms <= received_at_ms {
+                // Invariant: every accepted layer expires while its replay witness is still live.
+                // The upper bound also prevents a malicious client from extending authenticated
+                // validity beyond the finite replay-cache retention contract.
+                if expires_at_ms <= received_at_ms
+                    || expires_at_ms > received_at_ms.saturating_add(ONION_FORWARD_MAX_VALIDITY_MS)
+                {
                     return Err(Error::OnionRouteError(
                         OnionRouteError::ForwardPayloadExpired,
                     ));
@@ -251,8 +310,10 @@ impl OnionCircuitReducer {
                     from,
                     circuit_id,
                     return_peer: from,
+                    return_session_public_key,
                     client,
                     forward_nonce,
+                    forward_sequence,
                     payload,
                 })
             }
@@ -263,6 +324,7 @@ impl OnionCircuitReducer {
         &self,
         from: Did,
         received_at_ms: u128,
+        bucket: OnionCellBucket,
         frame: OnionBackwardFrame,
         state: &mut OnionCircuitState,
     ) -> Result<OnionCircuitEffect> {
@@ -271,17 +333,23 @@ impl OnionCircuitReducer {
             circuit_id: frame.circuit_id,
             next_hop: from,
         };
-        if let Some(entry) = state.relay_returns.get_mut(&key) {
+        if let Some(entry) = state.relay_returns.get(&key).copied() {
             let previous_hop = entry.previous_hop;
             let previous_circuit_id = entry.previous_circuit_id;
-            entry.expires_at_ms = received_at_ms.saturating_add(self.relay_return_ttl_ms);
-            let payload = encode_wire_message(OnionWireMessage::Backward(OnionBackwardFrame {
-                circuit_id: previous_circuit_id,
-                payload: frame.payload,
-            }))?;
-            return Ok(OnionCircuitEffect::Send {
+            let previous_session_public_key = entry.previous_session_public_key;
+            if let Some(entry) = Arc::make_mut(&mut state.relay_returns).get_mut(&key) {
+                entry.expires_at_ms = received_at_ms.saturating_add(ONION_RELAY_RETURN_TTL_MS);
+            }
+            let encoded_message =
+                encode_message(&OnionWireMessage::Backward(OnionBackwardFrame {
+                    circuit_id: previous_circuit_id,
+                    payload: frame.payload,
+                }))?;
+            return Ok(OnionCircuitEffect::SealAndSend {
                 to: previous_hop,
-                payload,
+                recipient: previous_session_public_key,
+                bucket,
+                encoded_message,
             });
         }
 
@@ -292,21 +360,13 @@ impl OnionCircuitReducer {
         })
     }
 
-    fn validate_relay_forward(&self, remaining_hops: u8) -> Result<()> {
+    fn validate_relay_forward(&self) -> Result<()> {
         if !self.capabilities.permits_relay_layer() {
             return Err(Error::NoPermission);
         }
-        // Pre: `remaining_hops` is authenticated inside this decrypted layer but authored by the
-        // client route constructor. A relay can bound the next layer budget; it cannot prove the
-        // hidden global route length without breaking onion path privacy.
-        if remaining_hops == 0 || remaining_hops > self.max_hops {
-            return Err(Error::OnionRouteError(
-                OnionRouteError::InvalidRelayHopBudget {
-                    remaining_hops,
-                    max_hops: self.max_hops,
-                },
-            ));
-        }
+        // The route constructor bounds honest routes. Untrusted recursive layers are bounded by
+        // the identity-independent crypto window and relay-return capacity instead of an exact
+        // countdown that would disclose this relay's absolute position.
         Ok(())
     }
 }
@@ -315,17 +375,28 @@ pub(super) fn remember_return_hop(
     state: &mut OnionCircuitState,
     max_relay_circuits: usize,
     ttl_ms: u128,
-    key: RelayReturnKey,
-    previous_hop: Did,
-    previous_circuit_id: OnionCircuitId,
+    edge: RelayReturnEdge,
     now_ms: u128,
 ) -> Result<()> {
+    let RelayReturnEdge {
+        key,
+        previous_hop,
+        previous_circuit_id,
+        previous_session_public_key,
+    } = edge;
     purge_expired_return_hops(state, now_ms);
-    let table_is_full = state.relay_returns.len() >= max_relay_circuits;
-    match state.relay_returns.entry(key) {
+    let table = Arc::make_mut(&mut state.relay_returns);
+    let table_is_full = table.len() >= max_relay_circuits;
+    let peer_table_is_full = table
+        .values()
+        .filter(|entry| entry.previous_hop == previous_hop)
+        .count()
+        >= max_relay_circuits_per_peer(max_relay_circuits);
+    match table.entry(key) {
         Entry::Occupied(mut entry) => {
             if entry.get().previous_hop != previous_hop
                 || entry.get().previous_circuit_id != previous_circuit_id
+                || entry.get().previous_session_public_key != previous_session_public_key
             {
                 return Err(Error::OnionRouteError(OnionRouteError::ReturnEdgeConflict));
             }
@@ -335,9 +406,13 @@ pub(super) fn remember_return_hop(
             if table_is_full {
                 return Err(Error::OnionRouteError(OnionRouteError::RelayTableFull));
             }
+            if peer_table_is_full {
+                return Err(Error::OnionRouteError(OnionRouteError::RelayPeerTableFull));
+            }
             entry.insert(RelayReturnEntry {
                 previous_hop,
                 previous_circuit_id,
+                previous_session_public_key,
                 expires_at_ms: now_ms.saturating_add(ttl_ms),
             });
         }
@@ -345,8 +420,19 @@ pub(super) fn remember_return_hop(
     Ok(())
 }
 
+/// Reserve at most one sixteenth of the global relay-return capacity for any
+/// authenticated previous hop. Therefore one peer cannot exclude honest peers
+/// while the global table has free entries.
+const fn max_relay_circuits_per_peer(max_relay_circuits: usize) -> usize {
+    max_relay_circuits.div_ceil(16)
+}
+
 fn purge_expired_return_hops(state: &mut OnionCircuitState, now_ms: u128) {
-    state
+    if state
         .relay_returns
-        .retain(|_, entry| entry.expires_at_ms > now_ms);
+        .values()
+        .any(|entry| entry.expires_at_ms <= now_ms)
+    {
+        Arc::make_mut(&mut state.relay_returns).retain(|_, entry| entry.expires_at_ms > now_ms);
+    }
 }

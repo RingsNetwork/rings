@@ -62,12 +62,8 @@ pub(crate) fn onion_proxy_panel(
     generation: GenerationClock,
     status: UseStateHandle<String>,
 ) -> Html {
-    let on_route = onion_route_callback(
-        &state,
-        node_ref.clone(),
-        generation.clone(),
-        status.clone(),
-    );
+    let on_route =
+        onion_route_callback(&state, node_ref.clone(), generation.clone(), status.clone());
     let on_request = onion_request_callback(&state, node_ref, generation, status);
 
     html! {
@@ -146,7 +142,9 @@ async fn build_onion_route(
         if let Some(bridge) = backend.bridge {
             extension::extension_onion_proxy_route(&bridge, request).await
         } else if let Some(node) = backend.node {
-            onion::route(&node.provider, request).await
+            onion::route(&node.provider, request)
+                .await
+                .map_err(|error| error.to_string())
         } else {
             Err("start the node first".to_string())
         }
@@ -194,18 +192,14 @@ fn onion_request_callback(
             &response_body,
             &route_result,
         );
-        spawn_onion_request(
-            backend,
-            request,
-            OnionRequestOutputs {
-                response_status: response_status.clone(),
-                response_headers: response_headers.clone(),
-                response_body: response_body.clone(),
-                route_result: route_result.clone(),
-                status: status.clone(),
-                token,
-            },
-        );
+        spawn_onion_request(backend, request, OnionRequestOutputs {
+            response_status: response_status.clone(),
+            response_headers: response_headers.clone(),
+            response_body: response_body.clone(),
+            route_result: route_result.clone(),
+            status: status.clone(),
+            token,
+        });
     })
 }
 
@@ -268,7 +262,7 @@ fn spawn_onion_request(
                 outputs
                     .response_headers
                     .set(onion::format_headers(&response.headers));
-                outputs.response_body.set(response.body);
+                outputs.response_body.set(response.body_text());
                 outputs
                     .route_result
                     .set("request completed through onion HTTPS proxy".to_string());
@@ -293,7 +287,9 @@ async fn send_onion_request(
         if let Some(bridge) = backend.bridge {
             extension::extension_onion_proxy_request(&bridge, request).await
         } else if let Some(node) = backend.node {
-            onion::request(&node.provider, request).await
+            onion::request(&node.provider, request)
+                .await
+                .map_err(|error| error.to_string())
         } else {
             Err("start the node first".to_string())
         }

@@ -1,6 +1,7 @@
 use std::str::FromStr;
 
 use async_trait::async_trait;
+use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 use serde::Serialize;
 
 use super::StorageSyncDestination;
@@ -8,7 +9,6 @@ use super::StorageSyncPurpose;
 use super::StorageSyncTarget;
 use crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD;
 use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
-use crate::consts::TRANSPORT_MAX_SIZE;
 use crate::dht::chord::PeerRing;
 use crate::dht::chord::PeerRingAction;
 use crate::dht::entry::Entry;
@@ -23,10 +23,10 @@ use crate::message::types::SyncEntriesWithSuccessor;
 
 /// Maximum wire budget for one `SyncEntriesWithSuccessor` hand-off batch.
 ///
-/// This is deliberately far below `TRANSPORT_MAX_SIZE` so stabilization does
-/// not create a single all-or-nothing serialized message. The batch cost also
+/// This stays below one interoperable WebRTC data-channel frame so storage
+/// anti-entropy cannot monopolize the chunk sender. The batch cost also
 /// reserves the payload/chunk envelope bytes below.
-pub(crate) const SYNC_BATCH_MAX_BYTES: usize = TRANSPORT_MAX_SIZE / 32;
+pub(crate) const SYNC_BATCH_MAX_BYTES: usize = MAX_DATA_CHANNEL_MESSAGE_SIZE / 4;
 
 const SYNC_BATCH_ENVELOPE_HEADROOM_BYTES: usize =
     MAX_CHUNK_ENVELOPE_OVERHEAD + TRANSPORT_CUSTOM_OVERHEAD;
@@ -58,7 +58,7 @@ fn placed_entry_wire_cost(placed: &PlacedEntry) -> Result<usize> {
     serialized_wire_size(placed)
 }
 
-#[cfg(all(test, not(feature = "wasm")))]
+#[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
 pub(super) fn sync_entries_batch_wire_cost(data: &[PlacedEntry]) -> Result<usize> {
     let mut cost = sync_entries_fixed_wire_cost()?;
     for placed in data {
@@ -111,8 +111,8 @@ pub(super) fn sync_entries_batches(
     Ok(batches)
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl ChordStorageSync<PeerRingAction> for PeerRing {
     /// When the successor of a node is updated, it needs to check if there are
     /// `Entry`s that are no longer between current node and `new_successor`,

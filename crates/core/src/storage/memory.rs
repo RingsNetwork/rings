@@ -23,8 +23,8 @@ where V: Clone
     }
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl<V> KvStorageInterface<V> for MemStorage<V>
 where V: Clone + Send + Sync
 {
@@ -59,7 +59,7 @@ where V: Clone + Send + Sync
     }
 }
 
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 #[cfg(test)]
 mod tests {
     use super::*;

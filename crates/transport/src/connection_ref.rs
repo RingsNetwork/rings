@@ -8,12 +8,15 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use crate::core::transport::ConnectionInterface;
+use crate::core::transport::ConnectionStateSnapshot;
+use crate::core::transport::SendPermit;
 use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
 use crate::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 use crate::delivery::DeliveryFuture;
 use crate::error::Error;
 use crate::error::Result;
+use crate::PlatformSendSync;
 
 /// [ConnectionRef] is a weak reference to a connection and implements the `ConnectionInterface` trait.
 /// When the connection is dropped, it returns an error called [Error::ConnectionReleased].
@@ -47,13 +50,47 @@ impl<C> ConnectionRef<C> {
             None => Err(Error::ConnectionReleased(self.cid.clone())),
         }
     }
+
+    pub(crate) fn cid(&self) -> &str {
+        &self.cid
+    }
+
+    pub(crate) fn points_to(&self, connection: &Arc<C>) -> bool {
+        self.conn.ptr_eq(&Arc::downgrade(connection))
+    }
 }
 
-#[cfg(feature = "web-sys-webrtc")]
-#[async_trait(?Send)]
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+impl ConnectionRef<crate::connections::DummyConnection> {
+    /// Test hook: force a dummy connection state without dispatching lifecycle callbacks.
+    pub fn force_dummy_webrtc_connection_state_without_callback(
+        &self,
+        state: WebrtcConnectionState,
+    ) -> Result<()> {
+        self.upgrade()?
+            .force_webrtc_connection_state_without_callback(state);
+        Ok(())
+    }
+
+    /// Test hook: override dummy data-channel readiness without dispatching callbacks.
+    pub fn force_dummy_data_channel_open_without_callback(&self, open: Option<bool>) -> Result<()> {
+        self.upgrade()?
+            .force_data_channel_open_without_callback(open);
+        Ok(())
+    }
+}
+
+#[cfg_attr(
+    all(feature = "web-sys-webrtc", target_family = "wasm"),
+    async_trait(?Send)
+)]
+#[cfg_attr(
+    not(all(feature = "web-sys-webrtc", target_family = "wasm")),
+    async_trait
+)]
 impl<C, S> ConnectionInterface for ConnectionRef<C>
 where
-    C: ConnectionInterface<Error = Error, Sdp = S>,
+    C: ConnectionInterface<Error = Error, Sdp = S> + PlatformSendSync,
     for<'async_trait> S: Serialize + DeserializeOwned + Send + Sync + 'async_trait,
 {
     type Sdp = C::Sdp;
@@ -63,71 +100,35 @@ where
         self.upgrade()?.send_message(msg).await
     }
 
-    fn webrtc_connection_state(&self) -> WebrtcConnectionState {
-        self.upgrade()
-            .map(|c| c.webrtc_connection_state())
-            .unwrap_or(WebrtcConnectionState::Closed)
-    }
-
-    // On a released reference this reports the interop default rather than an error, by deliberate
-    // design: `ConnectionInterface::max_message_size` returns `usize` (it feeds the framing
-    // planner), and threading a `Result` through it and every backend for this one edge would add
-    // churn out of proportion to the case. It is harmless because a send on a released ref fails
-    // anyway (`send_message` upgrades the same `Weak` and returns `ConnectionReleased`), so the
-    // framing plan computed against the default is never actually transmitted. See the
-    // `released_ref_*` tests.
-    fn max_message_size(&self) -> usize {
-        self.upgrade()
-            .map(|c| c.max_message_size())
-            .unwrap_or(MAX_DATA_CHANNEL_MESSAGE_SIZE)
-    }
-
-    async fn get_stats(&self) -> Vec<String> {
-        let Ok(c) = self.upgrade() else {
-            return Vec::new();
-        };
-        c.get_stats().await
-    }
-
-    async fn webrtc_create_offer(&self) -> Result<Self::Sdp> {
-        self.upgrade()?.webrtc_create_offer().await
-    }
-
-    async fn webrtc_answer_offer(&self, offer: Self::Sdp) -> Result<Self::Sdp> {
-        self.upgrade()?.webrtc_answer_offer(offer).await
-    }
-
-    async fn webrtc_accept_answer(&self, answer: Self::Sdp) -> Result<()> {
-        self.upgrade()?.webrtc_accept_answer(answer).await
-    }
-
-    async fn webrtc_wait_for_data_channel_open(&self) -> Result<()> {
-        self.upgrade()?.webrtc_wait_for_data_channel_open().await
-    }
-
-    async fn close(&self) -> Result<()> {
-        self.upgrade()?.close().await
-    }
-}
-
-#[cfg(not(feature = "web-sys-webrtc"))]
-#[async_trait]
-impl<C, S> ConnectionInterface for ConnectionRef<C>
-where
-    C: ConnectionInterface<Error = Error, Sdp = S> + Send + Sync,
-    for<'async_trait> S: Serialize + DeserializeOwned + Send + Sync + 'async_trait,
-{
-    type Sdp = C::Sdp;
-    type Error = C::Error;
-
-    async fn send_message(&self, msg: TransportMessage) -> Result<DeliveryFuture> {
-        self.upgrade()?.send_message(msg).await
+    async fn send_message_with_permit(
+        &self,
+        msg: TransportMessage,
+        permit: SendPermit,
+    ) -> Result<DeliveryFuture> {
+        self.upgrade()?.send_message_with_permit(msg, permit).await
     }
 
     fn webrtc_connection_state(&self) -> WebrtcConnectionState {
         self.upgrade()
             .map(|c| c.webrtc_connection_state())
             .unwrap_or(WebrtcConnectionState::Closed)
+    }
+
+    fn connection_state_snapshot(&self) -> ConnectionStateSnapshot {
+        self.upgrade()
+            .map(|connection| connection.connection_state_snapshot())
+            .unwrap_or(ConnectionStateSnapshot::new(
+                WebrtcConnectionState::Closed,
+                false,
+            ))
+    }
+
+    fn data_channel_is_open(&self) -> Result<bool> {
+        match self.upgrade() {
+            Ok(c) => c.data_channel_is_open(),
+            Err(Error::ConnectionReleased(_)) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     // On a released reference this reports the interop default rather than an error, by deliberate
@@ -181,8 +182,11 @@ mod tests {
     #[derive(Debug)]
     struct Mock;
 
-    #[cfg_attr(feature = "web-sys-webrtc", async_trait(?Send))]
-    #[cfg_attr(not(feature = "web-sys-webrtc"), async_trait)]
+    #[cfg_attr(all(feature = "web-sys-webrtc", target_family = "wasm"), async_trait(?Send))]
+    #[cfg_attr(
+        not(all(feature = "web-sys-webrtc", target_family = "wasm")),
+        async_trait
+    )]
     impl ConnectionInterface for Mock {
         type Sdp = String;
         type Error = Error;
@@ -194,7 +198,20 @@ mod tests {
         async fn send_message(&self, _: TransportMessage) -> Result<DeliveryFuture> {
             unreachable!("a released ref must fail before reaching the inner connection")
         }
+        async fn send_message_with_permit(
+            &self,
+            _: TransportMessage,
+            _: SendPermit,
+        ) -> Result<DeliveryFuture> {
+            unreachable!("a released ref must fail before reaching the inner connection")
+        }
         fn webrtc_connection_state(&self) -> WebrtcConnectionState {
+            unreachable!()
+        }
+        fn connection_state_snapshot(&self) -> ConnectionStateSnapshot {
+            unreachable!()
+        }
+        fn data_channel_is_open(&self) -> Result<bool> {
             unreachable!()
         }
         async fn get_stats(&self) -> Vec<String> {

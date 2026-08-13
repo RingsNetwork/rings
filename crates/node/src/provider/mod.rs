@@ -3,11 +3,13 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 use std::sync::Mutex;
 
 use rings_core::dht::Did;
 use rings_core::dht::EntryStorage;
+#[cfg(feature = "node")]
+use rings_core::lifecycle::StopToken;
 use rings_core::measure::PeerMeasurement;
 use rings_core::session::SessionSkBuilder;
 use rings_core::storage::MemStorage;
@@ -24,7 +26,7 @@ use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
 
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 pub mod browser;
 #[cfg(feature = "ffi")]
 pub mod ffi;
@@ -40,18 +42,18 @@ pub struct Provider {
     processor: Arc<Processor>,
     handler: InternalRpcHandler,
     extensions: crate::extension::ext::Extensions,
-    #[cfg(feature = "browser")]
+    #[cfg(all(feature = "browser", target_family = "wasm"))]
     onion_https_runtime: Arc<Mutex<Option<Arc<crate::onion::https::OnionHttpsRuntime>>>>,
-    #[cfg(feature = "browser")]
+    #[cfg(all(feature = "browser", target_family = "wasm"))]
     onion_directory_endpoint: Arc<Mutex<Option<String>>>,
 }
 
 /// Async signer, without Send required
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 pub type AsyncSigner = Box<dyn Fn(String) -> Pin<Box<dyn Future<Output = Vec<u8>>>>>;
 
 /// Async signer, use for non-wasm envirement, Send is necessary
-#[cfg(not(feature = "browser"))]
+#[cfg(not(all(feature = "browser", target_family = "wasm")))]
 pub type AsyncSigner = Box<dyn Fn(String) -> Pin<Box<dyn Future<Output = Vec<u8>> + Send>>>;
 
 /// Signer can be async and sync
@@ -72,9 +74,9 @@ impl Provider {
             processor,
             handler: InternalRpcHandler,
             extensions,
-            #[cfg(feature = "browser")]
+            #[cfg(all(feature = "browser", target_family = "wasm"))]
             onion_https_runtime: Arc::new(Mutex::new(None)),
-            #[cfg(feature = "browser")]
+            #[cfg(all(feature = "browser", target_family = "wasm"))]
             onion_directory_endpoint: Arc::new(Mutex::new(None)),
         }
     }
@@ -150,9 +152,9 @@ impl Provider {
             processor,
             handler: InternalRpcHandler,
             extensions,
-            #[cfg(feature = "browser")]
+            #[cfg(all(feature = "browser", target_family = "wasm"))]
             onion_https_runtime: Arc::new(Mutex::new(None)),
-            #[cfg(feature = "browser")]
+            #[cfg(all(feature = "browser", target_family = "wasm"))]
             onion_directory_endpoint: Arc::new(Mutex::new(None)),
         })
     }
@@ -252,14 +254,14 @@ impl Provider {
         params: serde_json::Value,
     ) -> Result<serde_json::Value> {
         tracing::debug!("request {}", method);
-        #[cfg(feature = "browser")]
+        #[cfg(all(feature = "browser", target_family = "wasm"))]
         let onion_directory_endpoint = onion_directory_endpoint_from_rpc(method.as_str(), &params);
         let result = self
             .handler
             .handle_request(self.processor.clone(), method, params)
             .await
             .map_err(Error::InternalRpcError)?;
-        #[cfg(feature = "browser")]
+        #[cfg(all(feature = "browser", target_family = "wasm"))]
         if let Some(endpoint) = onion_directory_endpoint {
             self.set_onion_directory_endpoint(Some(endpoint))?;
         }
@@ -288,9 +290,16 @@ impl Provider {
     pub async fn listen(&self) {
         self.processor.listen().await;
     }
+
+    /// Listen for messages until `stop` requests cooperative shutdown.
+    ///
+    /// This is a long-running task; do not await completion as a readiness signal.
+    pub async fn listen_with(&self, stop: StopToken) {
+        self.processor.listen_with(stop).await;
+    }
 }
 
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 fn onion_directory_endpoint_from_rpc(method: &str, params: &serde_json::Value) -> Option<String> {
     if !matches!(method, "connectPeerViaHttp" | "ConnectPeerViaHttp") {
         return None;
@@ -303,7 +312,7 @@ fn onion_directory_endpoint_from_rpc(method: &str, params: &serde_json::Value) -
         .map(ToOwned::to_owned)
 }
 
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 impl Provider {
     pub(crate) fn set_onion_directory_endpoint(&self, endpoint: Option<String>) -> Result<()> {
         let mut slot = self

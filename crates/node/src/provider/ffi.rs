@@ -18,10 +18,9 @@
 //!    for message callback functionalities between Rust and other languages. It can hold
 //!    function pointers to C-compatible functions that handle custom and built-in messages.
 //!
-//! 3. **Functions for Provider Interaction**: Several extern "C" functions, such as `new_provider_with_callback`,
-//!    `listen`, and `async_listen`, facilitate the creation of providers, listening to messages,
-//!    and making internal requests. They make the module's core functionalities accessible from C
-//!    or other languages supporting FFI.
+//! 3. **Functions for Provider Interaction**: The `rings_node_*` C ABI functions create providers,
+//!    start listeners, configure logging, and make internal requests. The prefix prevents symbol
+//!    collisions with platform functions such as POSIX `listen(2)`.
 //!
 //! This FFI integration is essential when this Rust module is part of a larger system, which might be
 //! written in different languages, and needs a standardized way to communicate with or make use of
@@ -102,8 +101,8 @@ impl FfiBackend {
     }
 }
 
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
 impl SwarmCallback for FfiBackend {
     async fn on_inbound(
         &self,
@@ -305,7 +304,7 @@ impl From<&ProviderWithRuntime> for ProviderPtr {
 /// # Safety
 /// Listen function accept a ProviderPtr and will unsafety cast it into Arc based Provider
 #[no_mangle]
-pub extern "C" fn listen(provider_ptr: *const ProviderPtr) {
+pub extern "C" fn rings_node_listen(provider_ptr: *const ProviderPtr) {
     let provider: ProviderWithRuntime = match ProviderWithRuntime::from_raw(provider_ptr) {
         Ok(provider) => provider,
         Err(error) => {
@@ -326,7 +325,7 @@ pub extern "C" fn listen(provider_ptr: *const ProviderPtr) {
 /// * This function accept a ProviderPtr and will unsafety cast it into Arc based Provider
 /// * This function cast CStr into Str
 #[no_mangle]
-pub extern "C" fn request(
+pub extern "C" fn rings_node_request(
     provider_ptr: *const ProviderPtr,
     method: *const c_char,
     params: *const c_char,
@@ -375,7 +374,7 @@ pub extern "C" fn request(
 ///
 /// * This function cast CStr into Str
 #[no_mangle]
-pub unsafe extern "C" fn new_provider_with_callback(
+pub unsafe extern "C" fn rings_node_new_provider_with_callback(
     network_id: u32,
     ice_server: *const c_char,
     stabilize_interval: u64,

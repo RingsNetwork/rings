@@ -2,23 +2,23 @@
 
 use std::sync::Arc;
 
-use futures::future::AbortHandle;
-use futures::future::Abortable;
 use js_sys::Array;
 use js_sys::Object;
 use js_sys::Reflect;
 use js_sys::Uint8Array;
 use rings_node::extension::snark::SNARKBehaviour;
 use rings_node::prelude::rings_core::session::SessionSkBuilder;
-use rings_node::prelude::rings_core::storage::idb::IdbStorage;
-use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
+use rings_node::provider::browser::ProviderListener;
 use rings_node::provider::Provider;
+use rings_webview::Result as WebviewResult;
+use rings_webview::WebviewError;
 use wasm_bindgen::JsValue;
-use wasm_bindgen_futures::spawn_local;
 use wasm_bindgen_futures::JsFuture;
 
 use crate::wallet::WalletAccount;
+use crate::webview::WebviewNode;
+use crate::webview::WebviewOnionSettings;
 
 /// A browser Rings node with all demo protocols installed.
 #[derive(Clone)]
@@ -27,13 +27,27 @@ pub struct DemoNode {
     pub provider: Arc<Provider>,
     /// SNARK behaviour and task store.
     pub snark: SNARKBehaviour,
-    listen_abort: AbortHandle,
+    /// Controlled webview gateway attached through an HTTP(S) host or the extension adapter.
+    pub webview: Option<WebviewNode>,
+    listener: ProviderListener,
 }
 
 impl DemoNode {
+    /// Return true when both handles refer to the same browser provider instance.
+    pub(crate) fn same_provider_instance(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.provider, &other.provider)
+    }
+
     /// Stop the background listen/stabilize loop started for this demo node.
     pub fn stop(&self) {
-        self.listen_abort.abort();
+        self.listener.stop();
+    }
+
+    /// Return the controlled webview gateway attached to this browser node.
+    pub fn webview(&self) -> WebviewResult<WebviewNode> {
+        self.webview.clone().ok_or_else(|| {
+            WebviewError::Browser("webview gateway is unavailable in this host".to_string())
+        })
     }
 }
 
@@ -86,6 +100,17 @@ pub struct NodeSettings {
     pub stabilize_interval: u64,
     /// IndexedDB storage namespace.
     pub storage_name: String,
+    /// Runtime WebView onion routing settings.
+    pub webview_onion_settings: WebviewOnionSettings,
+}
+
+/// Closed set of browser hosts that own a node-scoped WebView gateway.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WebviewHost {
+    /// A Service Worker-controlled HTTP(S) application window.
+    CurrentWindow,
+    /// The retained MV3 offscreen node and its trusted popup adapter.
+    Extension,
 }
 
 /// Build a browser provider from a wallet-authorized session key.
@@ -97,6 +122,7 @@ pub struct NodeSettings {
 pub async fn build_node(
     wallet: &WalletAccount,
     settings: NodeSettings,
+    webview_host: WebviewHost,
 ) -> Result<DemoNode, String> {
     let mut builder = SessionSkBuilder::new(wallet.account.clone(), wallet.account_type.clone());
     let proof = builder.unsigned_proof();
@@ -111,38 +137,32 @@ pub async fn build_node(
         session_sk,
         settings.stabilize_interval,
     );
-    let storage = Box::new(
-        IdbStorage::new_with_cap_and_name(50_000, &settings.storage_name)
+    let provider = Arc::new(
+        Provider::new_browser_provider_with_storage(config, settings.storage_name)
             .await
-            .map_err(|error| format!("idb storage: {error}"))?,
+            .map_err(|error| format!("build provider: {error}"))?,
     );
-    let processor = Arc::new(
-        ProcessorBuilder::from_config(&config)
-            .map_err(|error| format!("processor builder: {error}"))?
-            .storage(storage)
-            .build()
-            .map_err(|error| format!("build processor: {error}"))?,
-    );
-    let listening = processor.clone();
-    let provider = Arc::new(Provider::from_processor(processor));
-    provider
-        .set_backend()
-        .map_err(|error| format!("install backend: {error}"))?;
 
     let snark = SNARKBehaviour::default();
     snark
         .register(&provider)
         .map_err(|error| format!("register snark protocol: {error}"))?;
-
-    let (listen_abort, listen_registration) = AbortHandle::new_pair();
-    spawn_local(async move {
-        let _result = Abortable::new(listening.listen(), listen_registration).await;
-    });
+    let webview = match webview_host {
+        WebviewHost::CurrentWindow => {
+            WebviewNode::for_current_window(provider.clone(), settings.webview_onion_settings)
+        }
+        WebviewHost::Extension => {
+            WebviewNode::for_extension(provider.clone(), settings.webview_onion_settings).map(Some)
+        }
+    }
+    .map_err(|error| format!("initialize webview: {error}"))?;
+    let listener = provider.listen();
 
     Ok(DemoNode {
         provider,
         snark,
-        listen_abort,
+        webview,
+        listener,
     })
 }
 
@@ -255,4 +275,142 @@ fn get_string(value: &JsValue, field: &str) -> Result<String, String> {
         .map_err(|error| format!("read {field} failed: {error:?}"))?
         .as_string()
         .ok_or_else(|| format!("missing string field {field}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use futures::FutureExt;
+    use gloo_timers::future::sleep;
+    use rings_node::prelude::rings_core::ecc::SecretKey;
+    use rings_node::prelude::rings_core::prelude::uuid;
+    use rings_node::prelude::rings_core::session::SessionSk;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::*;
+
+    const TEST_NETWORK_ID: u32 = 665;
+    const TEST_ICE_SERVERS: &str = "stun://stun.l.google.com:19302";
+    const LISTENER_START_TIMEOUT_MS: u64 = 2_000;
+    const LISTENER_SETTLE_TIMEOUT_MS: u64 = 2_000;
+
+    #[wasm_bindgen_test(async)]
+    async fn demo_node_stop_settles_provider_listener_task() {
+        let result = run_demo_node_stop_settles_provider_listener_task().await;
+        assert!(
+            result.is_ok(),
+            "DemoNode::stop did not settle ProviderListener task: {result:?}"
+        );
+    }
+
+    // Mirrors the browser-only `DemoNode` ownership boundary from `build_node`.
+    #[allow(clippy::arc_with_non_send_sync)]
+    async fn run_demo_node_stop_settles_provider_listener_task() -> Result<(), String> {
+        let key = SecretKey::random();
+        let node = build_test_demo_node(&key).await?;
+        let started = node.listener.started();
+        let task = node.listener.task();
+
+        assert!(!node.listener.is_stopped());
+        await_promise_with_timeout(
+            started,
+            LISTENER_START_TIMEOUT_MS,
+            "ProviderListener did not start",
+        )
+        .await?;
+        sleep(Duration::from_millis(20)).await;
+        assert!(!node.listener.is_stopped());
+        node.stop();
+        assert!(node.listener.is_stopped());
+        await_promise_with_timeout(
+            task,
+            LISTENER_SETTLE_TIMEOUT_MS,
+            "ProviderListener task did not settle",
+        )
+        .await
+    }
+
+    #[wasm_bindgen_test(async)]
+    async fn demo_node_identity_distinguishes_same_wallet_restarts() {
+        let result = run_demo_node_identity_distinguishes_same_wallet_restarts().await;
+        assert!(
+            result.is_ok(),
+            "DemoNode identity should not collapse same-wallet restarts: {result:?}"
+        );
+    }
+
+    #[allow(clippy::arc_with_non_send_sync)]
+    async fn run_demo_node_identity_distinguishes_same_wallet_restarts() -> Result<(), String> {
+        let key = SecretKey::random();
+        let first = build_test_demo_node(&key).await?;
+        let second = build_test_demo_node(&key).await?;
+
+        assert_eq!(first.provider.address(), second.provider.address());
+        assert!(first.same_provider_instance(&first.clone()));
+        assert!(!first.same_provider_instance(&second));
+
+        first.stop();
+        second.stop();
+        await_promise_with_timeout(
+            first.listener.task(),
+            LISTENER_SETTLE_TIMEOUT_MS,
+            "first ProviderListener task did not settle",
+        )
+        .await?;
+        await_promise_with_timeout(
+            second.listener.task(),
+            LISTENER_SETTLE_TIMEOUT_MS,
+            "second ProviderListener task did not settle",
+        )
+        .await
+    }
+
+    // Mirrors the browser-only `DemoNode` ownership boundary from `build_node`.
+    #[allow(clippy::arc_with_non_send_sync)]
+    async fn build_test_demo_node(key: &SecretKey) -> Result<DemoNode, String> {
+        let session_sk = SessionSk::new_with_seckey(key)
+            .map_err(|error| format!("session key rejected: {error}"))?;
+        let config =
+            ProcessorConfig::new(TEST_NETWORK_ID, TEST_ICE_SERVERS.to_string(), session_sk, 0);
+        let storage_name = format!(
+            "rings-frontend-listener-{}",
+            uuid::Uuid::new_v4().to_simple()
+        );
+        let provider = Arc::new(
+            Provider::new_browser_provider_with_storage(config, storage_name)
+                .await
+                .map_err(|error| format!("build provider: {error}"))?,
+        );
+        let listener = provider.listen();
+        let node = DemoNode {
+            provider,
+            snark: SNARKBehaviour::default(),
+            webview: None,
+            listener,
+        };
+        Ok(node)
+    }
+
+    async fn await_promise_with_timeout(
+        promise: js_sys::Promise,
+        timeout_ms: u64,
+        timeout_message: &str,
+    ) -> Result<(), String> {
+        let promise = JsFuture::from(promise)
+            .map(|result| {
+                result
+                    .map(|_| ())
+                    .map_err(crate::browser_api::js_error_label)
+            })
+            .fuse();
+        let timeout = sleep(Duration::from_millis(timeout_ms))
+            .map(|_| Err(format!("{timeout_message} within {timeout_ms}ms")))
+            .fuse();
+        futures::pin_mut!(promise, timeout);
+        futures::select! {
+            result = promise => result,
+            result = timeout => result,
+        }
+    }
 }

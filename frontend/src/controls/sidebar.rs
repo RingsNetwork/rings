@@ -47,36 +47,48 @@ impl ControlSidebarDerived {
     }
 }
 
+pub(crate) struct ControlSidebarShell {
+    pub(crate) workbench_control: Html,
+    pub(crate) webview_control: Option<Html>,
+    pub(crate) active_dialog: ActiveDialog,
+    pub(crate) dialog_actions: DialogActions,
+    pub(crate) collapsed: UseStateHandle<bool>,
+    pub(crate) extension_mode: bool,
+}
+
 pub(crate) fn control_sidebar(
     view: ControlView<'_>,
     actions: LaunchActions,
-    workbench_control: Html,
-    active_dialog: ActiveDialog,
-    dialog_actions: DialogActions,
-    collapsed: UseStateHandle<bool>,
-    extension_mode: bool,
+    shell: ControlSidebarShell,
 ) -> Html {
     let derived = ControlSidebarDerived::from_view(&view);
     let on_copy_did = copy_local_did_callback(view.did, view.status);
     let open_settings_dialog = {
-        let open_dialog = dialog_actions.open.clone();
+        let open_dialog = shell.dialog_actions.open.clone();
         Callback::from(move |_| open_dialog.emit(ActiveDialog::Settings))
     };
-    let close_settings_dialog = dialog_actions.close.clone();
+    let close_settings_dialog = shell.dialog_actions.close.clone();
     let toggle_sidebar = {
-        let collapsed = collapsed.clone();
+        let collapsed = shell.collapsed.clone();
         Callback::from(move |_| collapsed.set(!*collapsed))
     };
-    let sidebar_class = control_sidebar_class(extension_mode, *collapsed);
+    let sidebar_class = control_sidebar_class(shell.extension_mode, *shell.collapsed);
     html! {
         <aside class={sidebar_class} aria-label="Node controls">
-            if !extension_mode {
-                { sidebar_toggle_button(*collapsed, toggle_sidebar) }
+            if !shell.extension_mode {
+                { sidebar_toggle_button(*shell.collapsed, toggle_sidebar) }
             }
-            if extension_mode || !*collapsed {
-                { sidebar_content(&derived, &actions, workbench_control, open_settings_dialog, on_copy_did.clone()) }
+            if shell.extension_mode || !*shell.collapsed {
+                { sidebar_content(
+                    &derived,
+                    &actions,
+                    shell.workbench_control,
+                    shell.webview_control,
+                    open_settings_dialog,
+                    on_copy_did.clone(),
+                ) }
             }
-            { settings_dialog_if_open(active_dialog, &view, actions, &derived, on_copy_did, close_settings_dialog) }
+            { settings_dialog_if_open(shell.active_dialog, &view, actions, &derived, on_copy_did, close_settings_dialog) }
         </aside>
     }
 }
@@ -180,15 +192,17 @@ fn sidebar_content(
     derived: &ControlSidebarDerived,
     actions: &LaunchActions,
     workbench_control: Html,
+    webview_control: Option<Html>,
     open_settings_dialog: Callback<MouseEvent>,
     on_copy_did: Callback<MouseEvent>,
 ) -> Html {
     html! {
         <div id="node-control-sidebar-content" class="sidebar-content sidebar-command-panel">
-            { command_panel_header() }
+            { command_panel_header(webview_control.is_some()) }
             <div class="command-grid">
                 { node_action_button(derived, actions) }
                 { workbench_control }
+                { webview_control }
                 { settings_button(open_settings_dialog) }
             </div>
             { rail_telemetry(derived, on_copy_did) }
@@ -196,14 +210,14 @@ fn sidebar_content(
     }
 }
 
-fn command_panel_header() -> Html {
+fn command_panel_header(has_webview: bool) -> Html {
     html! {
         <div class="command-panel-header">
             <div>
                 <p class="eyebrow">{ "Control" }</p>
                 <h3>{ "Command deck" }</h3>
             </div>
-            <span>{ "03" }</span>
+            <span>{ if has_webview { "04" } else { "03" } }</span>
         </div>
     }
 }
@@ -337,6 +351,7 @@ fn settings_dialog_if_open(
         ice_servers: view.ice_servers,
         stabilize_interval: view.stabilize_interval,
         storage_name: view.storage_name,
+        webview_allow_short_paths: view.webview_allow_short_paths,
         seed_url: view.seed_url,
         status: view.status,
         did_value: derived.did_value.clone(),

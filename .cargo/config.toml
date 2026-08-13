@@ -3,6 +3,9 @@ build-node = "build --features node --no-default-features"
 build-browser = "build --lib --target=wasm32-unknown-unknown --features browser --no-default-features"
 test-browser = "test --target=wasm32-unknown-unknown --features browser --no-default-features"
 
+[env]
+WASM_BINDGEN_TEST_TIMEOUT = { value = "120", force = false }
+
 [target.wasm32-unknown-unknown]
 runner = 'wasm-bindgen-test-runner'
 # Required by `web-sys`'s WebTransport bindings (still unstable). Applies to all

@@ -1,5 +1,9 @@
+#[cfg(feature = "dummy")]
+use rings_transport::connections::dummy_controlled;
 use rings_transport::core::transport::WebrtcConnectionState;
 
+#[cfg(feature = "dummy")]
+use crate::dht::successor::SuccessorReader;
 use crate::ecc::tests::gen_ordered_keys;
 use crate::ecc::SecretKey;
 use crate::tests::default::assert_no_more_msg;
@@ -73,43 +77,27 @@ async fn test_handshake_on_both_sides(key1: SecretKey, key2: SecretKey, key3: Se
         WebrtcConnectionState::Connected
     );
 
+    let direct_connection_already_synced =
+        node1.swarm.transport.get_connection(node2.did()).is_some()
+            && node2.swarm.transport.get_connection(node1.did()).is_some();
+
     // connect to each at same time
     // Node 1 -> Offer -> Node 2
     // Node 2 -> Offer -> Node 1
     _ = node1.swarm.connect(node2.did()).await;
     _ = node2.swarm.connect(node1.did()).await;
 
-    // Both sides have just initiated an outbound connection (offer created) but no answer has
-    // been exchanged yet, so neither has reached `Connected`. The exact pre-connected sub-state —
-    // `New` vs `Connecting` — depends on whether the peer's offer has already arrived and started
-    // ICE, which is webrtc-version/timing dependent; the invariant we assert is only that the glare
-    // handshake is still in progress.
-    let node1_to_node2 = node1
-        .swarm
-        .transport
-        .get_connection(node2.did())
-        .unwrap()
-        .webrtc_connection_state();
-    assert!(
-        matches!(
-            node1_to_node2,
-            WebrtcConnectionState::New | WebrtcConnectionState::Connecting
-        ),
-        "swarm1 -> swarm2 should still be handshaking, got {node1_to_node2:?}",
-    );
-    let node2_to_node1 = node2
-        .swarm
-        .transport
-        .get_connection(node1.did())
-        .unwrap()
-        .webrtc_connection_state();
-    assert!(
-        matches!(
-            node2_to_node1,
-            WebrtcConnectionState::New | WebrtcConnectionState::Connecting
-        ),
-        "swarm2 -> swarm1 should still be handshaking, got {node2_to_node1:?}",
-    );
+    if direct_connection_already_synced {
+        assert_eq!(node1.swarm.transport.pending_connection_count().unwrap(), 0);
+        assert_eq!(node2.swarm.transport.pending_connection_count().unwrap(), 0);
+    } else {
+        // Both offers exist but neither handshake has been admitted. Pending
+        // peers must remain invisible to the public connection view.
+        assert!(node1.swarm.transport.get_connection(node2.did()).is_none());
+        assert!(node2.swarm.transport.get_connection(node1.did()).is_none());
+        assert_eq!(node1.swarm.transport.pending_connection_count().unwrap(), 1);
+        assert_eq!(node2.swarm.transport.pending_connection_count().unwrap(), 1);
+    }
 
     wait_for_msgs([&node1, &node2, &node3]).await;
     assert_no_more_msg([&node1, &node2, &node3]).await;
@@ -137,4 +125,39 @@ async fn test_handshake_on_both_sides(key1: SecretKey, key2: SecretKey, key3: Se
             .webrtc_connection_state(),
         WebrtcConnectionState::Connected,
     )
+}
+
+#[cfg(feature = "dummy")]
+#[tokio::test]
+async fn dummy_mismatched_data_channel_open_does_not_admit_peer() {
+    dummy_controlled::enable(true);
+
+    let keys = gen_ordered_keys(2);
+    let node1 = prepare_node(keys[0]).await;
+    let node2 = prepare_node(keys[1]).await;
+
+    let offer = node1.swarm.create_offer(node2.did()).await.unwrap();
+    assert!(node1.swarm.transport.get_connection(node2.did()).is_none());
+    assert_eq!(node1.swarm.transport.pending_connection_count().unwrap(), 1);
+
+    let answer = node2.swarm.answer_offer(offer).await.unwrap();
+    node1.swarm.accept_answer(answer).await.unwrap();
+
+    assert!(
+        dummy_controlled::deliver_next_data_channel_open_with_cid(node1.did().to_string()).await
+    );
+
+    assert_eq!(node1.swarm.transport.pending_connection_count().unwrap(), 0);
+    assert!(node1.swarm.transport.get_connection(node2.did()).is_none());
+    assert!(node1.swarm.transport.get_connection(node1.did()).is_none());
+    assert!(!node1
+        .dht()
+        .successors()
+        .list()
+        .unwrap()
+        .contains(&node2.did()));
+
+    _ = node1.swarm.disconnect(node2.did()).await;
+    _ = node2.swarm.disconnect(node1.did()).await;
+    dummy_controlled::enable(false);
 }

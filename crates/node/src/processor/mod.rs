@@ -11,6 +11,7 @@ use rings_core::dht::EntryStorage;
 use rings_core::dht::DEFAULT_FINGER_TABLE_SIZE;
 use rings_core::ecc::PublicKey;
 use rings_core::ecc::SecretKey;
+use rings_core::lifecycle::StopToken;
 use rings_core::measure::MeasureImpl;
 use rings_core::measure::PeerMeasurement;
 use rings_core::measure::PeerQuality;
@@ -50,7 +51,7 @@ use crate::onion::https_onion_exit_services;
 use crate::onion::proxy::OnionProxyConfig;
 use crate::onion::proxy::OnionProxyRoute;
 use crate::onion::proxy::OnionProxyTarget;
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 use crate::onion::proxy::ONION_PROXY_HTTPS_SERVICE;
 use crate::onion::validate_onion_exit_registration_timing;
 use crate::onion::OnionExitDescriptor;
@@ -89,20 +90,37 @@ pub use config::ProcessorConfigSerialized;
 
 const DHT_LOOKUP_CACHE_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DHT_LOOKUP_CACHE_POLL_ATTEMPTS: usize = 40;
+const REGISTRATION_STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-#[cfg(not(feature = "browser"))]
+#[cfg(not(all(feature = "browser", target_family = "wasm")))]
 async fn sleep_dht_lookup_poll_interval(interval: Duration) -> Result<()> {
     futures_timer::Delay::new(interval).await;
     Ok(())
 }
 
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 async fn sleep_dht_lookup_poll_interval(interval: Duration) -> Result<()> {
     let interval_ms = i32::try_from(interval.as_millis()).unwrap_or(i32::MAX);
     rings_core::utils::js_utils::window_sleep(interval_ms)
         .await
         .map_err(|error| Error::JsError(format!("{error:?}")))?;
     Ok(())
+}
+
+async fn sleep_registration_interval_with_stop(
+    interval: Duration,
+    stop: &StopToken,
+) -> Result<bool> {
+    let mut remaining = interval;
+    while !remaining.is_zero() {
+        if stop.should_stop() {
+            return Ok(false);
+        }
+        let step = std::cmp::min(remaining, REGISTRATION_STOP_POLL_INTERVAL);
+        sleep_registration_interval(step).await?;
+        remaining = remaining.saturating_sub(step);
+    }
+    Ok(!stop.should_stop())
 }
 
 /// Processor for rings-node rpc server.
@@ -117,7 +135,7 @@ pub struct Processor {
     session_sk: SessionSk,
     stabilize_interval: Duration,
     online_node_registration: OnlineNodeRegistration,
-    #[cfg(feature = "browser")]
+    #[cfg(all(feature = "browser", target_family = "wasm"))]
     advertise_onion_relay: bool,
     registration_tasks: Vec<Arc<dyn RegistrationTask>>,
 }
@@ -132,13 +150,17 @@ impl Processor {
         &self.session_sk
     }
 
-    #[cfg(feature = "browser")]
+    #[cfg(all(feature = "browser", target_family = "wasm"))]
     pub(crate) fn advertise_onion_relay(&self) -> bool {
         self.advertise_onion_relay
     }
 
     fn registration_context(&self) -> RegistrationContext<'_> {
         RegistrationContext::new(self)
+    }
+
+    fn registration_context_with_stop(&self, stop: StopToken) -> RegistrationContext<'_> {
+        RegistrationContext::new_with_stop(self, stop)
     }
 
     #[cfg(all(test, feature = "node"))]
@@ -242,9 +264,24 @@ impl Processor {
         Ok(self.select_onion_exits_from_entry(&refreshed_entry, service, include_expired))
     }
 
-    async fn fetch_storage_entry(&self, entry_key: Did) -> Result<Option<entry::Entry>> {
+    pub(crate) async fn fetch_storage_entry(&self, entry_key: Did) -> Result<Option<entry::Entry>> {
+        let stop = StopToken::never();
+        self.fetch_storage_entry_with_stop(entry_key, &stop).await
+    }
+
+    pub(crate) async fn fetch_storage_entry_with_stop(
+        &self,
+        entry_key: Did,
+        stop: &StopToken,
+    ) -> Result<Option<entry::Entry>> {
+        if stop.should_stop() {
+            return Err(Error::RegistrationStopped);
+        }
         self.storage_fetch(entry_key).await?;
         for attempt in 0..DHT_LOOKUP_CACHE_POLL_ATTEMPTS {
+            if stop.should_stop() {
+                return Err(Error::RegistrationStopped);
+            }
             if let Some(entry) = self.storage_check_cache(entry_key).await {
                 return Ok(Some(entry));
             }
@@ -323,26 +360,52 @@ impl Processor {
         directory::build_onion_proxy_route(self, proxy, target).await
     }
 
-    async fn registration_task_daemon(&self, task: &dyn RegistrationTask) {
+    async fn run_registration_once(
+        &self,
+        task: &dyn RegistrationTask,
+        stop: StopToken,
+    ) -> Result<()> {
+        let context = self.registration_context_with_stop(stop);
+        task.register_once(&context).await
+    }
+
+    async fn registration_task_daemon_with(&self, task: &dyn RegistrationTask, stop: StopToken) {
         loop {
-            if let Err(error) = task.register_once(&self.registration_context()).await {
+            if stop.should_stop() {
+                return;
+            }
+            if let Err(error) = self.run_registration_once(task, stop.clone()).await {
+                if matches!(error, Error::RegistrationStopped) {
+                    tracing::debug!(
+                        "Stopping {} registration task after cooperative stop",
+                        task.name()
+                    );
+                    return;
+                }
                 tracing::warn!("Failed to run {} registration task: {error:?}", task.name());
             }
-            if let Err(error) = sleep_registration_interval(task.interval()).await {
-                tracing::warn!(
-                    "Stopping {} registration task after timer error: {error:?}",
-                    task.name()
-                );
+            if stop.should_stop() {
                 return;
+            }
+            match sleep_registration_interval_with_stop(task.interval(), &stop).await {
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(error) => {
+                    tracing::warn!(
+                        "Stopping {} registration task after timer error: {error:?}",
+                        task.name()
+                    );
+                    return;
+                }
             }
         }
     }
 
-    async fn registration_daemons(&self) {
+    async fn registration_daemons_with(&self, stop: StopToken) {
         join_all(
             self.registration_tasks
                 .iter()
-                .map(|task| self.registration_task_daemon(task.as_ref())),
+                .map(|task| self.registration_task_daemon_with(task.as_ref(), stop.clone())),
         )
         .await;
     }
@@ -351,14 +414,24 @@ impl Processor {
     ///
     /// This is a long-running task; do not await completion as a readiness signal.
     pub async fn listen(&self) {
+        self.listen_with(StopToken::never()).await;
+    }
+
+    /// Run stabilization and node registration tasks until `stop` asks them to exit.
+    ///
+    /// The shutdown is cooperative: it waits for the current stabilization or
+    /// registration operation to finish before returning. This avoids dropping
+    /// browser IndexedDB request futures while their JavaScript callbacks are
+    /// still pending.
+    pub async fn listen_with(&self, stop: StopToken) {
         let stabilizer = self.swarm.stabilizer();
         let stabilizer = Arc::new(stabilizer);
         if self.registration_tasks.is_empty() {
-            stabilizer.wait(self.stabilize_interval).await;
+            stabilizer.wait_with(self.stabilize_interval, stop).await;
         } else {
             let _ = futures::future::join(
-                stabilizer.wait(self.stabilize_interval),
-                self.registration_daemons(),
+                stabilizer.wait_with(self.stabilize_interval, stop.clone()),
+                self.registration_daemons_with(stop),
             )
             .await;
         }
@@ -369,9 +442,14 @@ impl Processor {
     /// 1. PeerA has a connection with PeerB.
     /// 2. PeerC has a connection with PeerB.
     /// 3. PeerC can connect PeerA with PeerA's web3 address.
+    ///
+    /// This operation is idempotent: if topology convergence already produced
+    /// the direct connection, the requested connection is satisfied.
     pub async fn connect_with_did(&self, did: Did) -> Result<()> {
-        self.swarm.connect(did).await.map_err(Error::ConnectError)?;
-        Ok(())
+        match self.swarm.connect(did).await {
+            Ok(()) | Err(rings_core::error::Error::AlreadyConnected) => Ok(()),
+            Err(error) => Err(Error::ConnectError(error)),
+        }
     }
 
     /// Disconnect a peer with web3 did.
@@ -390,6 +468,21 @@ impl Processor {
 
         self.swarm
             .send_message(msg, destination)
+            .await
+            .map_err(Error::SendMessage)
+    }
+
+    /// Send a custom message to an already connected peer without Chord routing.
+    ///
+    /// Protocols with their own authenticated hop selection, such as onion circuits, use this
+    /// to keep the core transport from replacing their selected next hop.
+    pub async fn send_direct_message(&self, destination: Did, msg: &[u8]) -> Result<uuid::Uuid> {
+        tracing::info!("send_direct_message, message size: {:?}", msg.len());
+
+        let msg = Message::custom(msg).map_err(Error::SendMessage)?;
+
+        self.swarm
+            .send_direct_message(msg, destination)
             .await
             .map_err(Error::SendMessage)
     }
@@ -528,6 +621,18 @@ impl Processor {
         self.send_message(destination, &msg_bytes).await
     }
 
+    /// Send a namespaced envelope directly to an already connected peer.
+    ///
+    /// This bypasses Chord routing while retaining the normal custom-message envelope codec.
+    pub async fn send_direct_envelope(
+        &self,
+        destination: Did,
+        envelope: &crate::extension::ext::Envelope,
+    ) -> Result<uuid::Uuid> {
+        let msg_bytes = envelope.encode()?;
+        self.send_direct_message(destination, &msg_bytes).await
+    }
+
     /// check local cache of dht
     pub async fn storage_check_cache(&self, entry_key: Did) -> Option<entry::Entry> {
         self.swarm.storage_check_cache(entry_key).await
@@ -625,8 +730,11 @@ impl Processor {
     }
 }
 
-#[cfg_attr(feature = "browser", async_trait::async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait::async_trait)]
+#[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait::async_trait(?Send))]
+#[cfg_attr(
+    not(all(feature = "browser", target_family = "wasm")),
+    async_trait::async_trait
+)]
 impl OnionDirectoryReader for Processor {
     fn local_did(&self) -> Did {
         self.did()

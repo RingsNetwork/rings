@@ -18,10 +18,10 @@ use super::TaskId;
 use super::NAMESPACE;
 use crate::error::Error;
 use crate::extension::ext::Ctx;
+use crate::extension::ext::EffectScope;
 use crate::extension::ext::Interpret;
 use crate::extension::ext::Protocol;
 use crate::extension::ext::Reject;
-use crate::extension::ext::Scope;
 use crate::extension::ext::Transition;
 use crate::extension::ext::Wire;
 use crate::extension::types::snark::SNARKProofTask;
@@ -40,11 +40,6 @@ pub enum ComputeResult {
         reply_to: Did,
         /// The produced verify task.
         verify_task: SNARKVerifyTask,
-    },
-    /// Verification finished; the boolean is already stored in the task manager.
-    Verified {
-        /// Task id.
-        task_id: TaskId,
     },
 }
 
@@ -92,7 +87,6 @@ pub enum SnarkEffect {
 ///
 /// ```text
 ///   step (Ctx (), Result(Proved id to vt)) ↦ ((), [SendTask to (Verify id vt)])
-///   step (Ctx (), Result(Verified id))     ↦ ((), ε)
 ///   step (Ctx (), Task(from, Proof t))     ↦ ((), [Prove id from t])
 ///   step (Ctx (), Task(from, Verify vt))   ↦ ((), [Verify id vt])
 /// ```
@@ -141,7 +135,6 @@ impl Protocol for SnarkProtocol {
                     task: SNARKTask::SNARKVerify(verify_task),
                 },
             }]),
-            SnarkEvent::Result(ComputeResult::Verified { .. }) => Transition::pure(()),
             SnarkEvent::Task { from, msg } => match msg.task {
                 SNARKTask::SNARKProof(task) => Transition::with((), vec![SnarkEffect::Prove {
                     task_id: msg.task_id,
@@ -178,12 +171,16 @@ impl SnarkShell {
     }
 }
 
-#[cfg_attr(feature = "browser", async_trait::async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait::async_trait)]
+#[cfg_attr(rings_browser, async_trait::async_trait(?Send))]
+#[cfg_attr(rings_native, async_trait::async_trait)]
 impl Interpret for SnarkShell {
     type Effect = SnarkEffect;
 
-    async fn run(&self, scope: &Scope, effect: SnarkEffect) -> crate::error::Result<Vec<Bytes>> {
+    async fn run(
+        &self,
+        scope: &EffectScope,
+        effect: SnarkEffect,
+    ) -> crate::error::Result<Vec<Bytes>> {
         match effect {
             SnarkEffect::SendTask { to, msg } => {
                 let payload = bincode::serialize(&msg).map_err(|_| Error::EncodeError)?;
@@ -215,7 +212,7 @@ impl Interpret for SnarkShell {
                     SNARKBehaviour::handle_snark_verify_task(&verify_task, task.value())?;
                 drop(task);
                 self.manager.verified.insert(task_id, verified);
-                self.reinject(&ComputeResult::Verified { task_id })
+                Ok(Vec::new())
             }
         }
     }

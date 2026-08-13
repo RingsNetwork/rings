@@ -40,13 +40,16 @@ impl Notifier {
     }
 
     /// Wake the notifier after the specified time.
-    #[cfg(not(any(feature = "web-sys-webrtc", feature = "native-webrtc")))]
+    #[cfg(not(any(
+        all(feature = "web-sys-webrtc", target_family = "wasm"),
+        all(feature = "native-webrtc", not(target_family = "wasm"))
+    )))]
     pub fn set_timeout(&self, seconds: u8) {
         self.set_timeout_ms(u64::from(seconds) * 1000);
     }
 
     /// Wake the notifier after the specified time.
-    #[cfg(feature = "native-webrtc")]
+    #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
     pub fn set_timeout(&self, seconds: u8) {
         let this = self.clone();
         tokio::spawn(async move {
@@ -56,7 +59,7 @@ impl Notifier {
     }
 
     /// Wake the notifier after the specified number of milliseconds.
-    #[cfg(feature = "native-webrtc")]
+    #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
     pub fn set_timeout_ms(&self, millis: u64) {
         let this = self.clone();
         tokio::spawn(async move {
@@ -66,19 +69,22 @@ impl Notifier {
     }
 
     /// Wake the notifier after the specified number of milliseconds.
-    #[cfg(not(any(feature = "web-sys-webrtc", feature = "native-webrtc")))]
+    #[cfg(not(any(
+        all(feature = "web-sys-webrtc", target_family = "wasm"),
+        all(feature = "native-webrtc", not(target_family = "wasm"))
+    )))]
     pub fn set_timeout_ms(&self, millis: u64) {
         native_timeout_scheduler::schedule_wake(self.clone(), millis);
     }
 
     /// Wake the notifier after the specified time.
-    #[cfg(feature = "web-sys-webrtc")]
+    #[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
     pub fn set_timeout(&self, seconds: u8) {
         self.set_timeout_ms(u64::from(seconds) * 1000);
     }
 
     /// Wake the notifier after the specified number of milliseconds.
-    #[cfg(feature = "web-sys-webrtc")]
+    #[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
     pub fn set_timeout_ms(&self, millis: u64) {
         use wasm_bindgen::JsCast;
 
@@ -117,7 +123,10 @@ impl Future for Notifier {
     }
 }
 
-#[cfg(not(any(feature = "web-sys-webrtc", feature = "native-webrtc")))]
+#[cfg(not(any(
+    all(feature = "web-sys-webrtc", target_family = "wasm"),
+    all(feature = "native-webrtc", not(target_family = "wasm"))
+)))]
 mod native_timeout_scheduler {
     use std::cmp::Ordering;
     use std::collections::BinaryHeap;
@@ -301,7 +310,7 @@ mod native_timeout_scheduler {
 }
 
 // This is copied from utils module of rings-core crate.
-#[cfg(feature = "web-sys-webrtc")]
+#[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
 mod js_utils {
     use wasm_bindgen::JsCast;
     use wasm_bindgen::JsValue;

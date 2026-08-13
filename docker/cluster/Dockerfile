@@ -1,11 +1,12 @@
 # syntax=docker/dockerfile:1.7
 
-FROM rust:1.94-trixie AS builder
+FROM rust:1.97-trixie AS builder
 
 WORKDIR /src
 COPY Cargo.lock Cargo.toml README.md rust-toolchain.toml ./
 COPY crates ./crates
 COPY examples ./examples
+COPY third_party ./third_party
 
 RUN cargo build -p rings-node --bin rings --features node --no-default-features --release
 
@@ -30,14 +31,14 @@ ENV RINGS_ALLOW_RANDOM_KEYS=true \
     RINGS_CLUSTER_DIR=/var/lib/rings-cluster \
     RINGS_CONNECT_TOPOLOGY=ring \
     RINGS_ICE_SERVERS=stun://stun.l.google.com:19302 \
-    RINGS_LOG_LEVEL=info \
+    RINGS_LOG_LEVEL=warn \
     RINGS_NETWORK_ID=1 \
     RINGS_NODE_COUNT=3 \
     RINGS_READY_RETRIES=60 \
     RINGS_READY_SLEEP_SECONDS=1 \
     RINGS_RUNTIME=current-thread \
     RINGS_SESSION_TTL_SECONDS=2592000 \
-    RINGS_STABILIZE_INTERVAL=3
+    RINGS_STABILIZE_INTERVAL=15
 
 EXPOSE 51000-51018/tcp
 

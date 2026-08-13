@@ -72,7 +72,6 @@ use crate::dht::chord::PeerRingAction;
 use crate::dht::entry::Entry;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::PlacementMiss;
-use crate::dht::successor::SuccessorReader;
 use crate::dht::Chord;
 use crate::dht::ChordStorageRepair;
 use crate::dht::Did;
@@ -115,16 +114,14 @@ impl PeerRing {
         if self.observed_storage_virtual_owner_registered(peer)? {
             return Ok(true);
         }
-        if self
-            .lock_predecessor()?
-            .is_some_and(|predecessor| predecessor == peer)
-        {
+        let topology = self.topology_state()?;
+        if topology.predecessor == Some(peer) {
             return Ok(true);
         }
-        if self.successors().contains(&peer)? {
+        if topology.successors.contains(&peer) {
             return Ok(true);
         }
-        if self.lock_finger()?.contains(Some(peer)) {
+        if topology.fingers.contains(&Some(peer)) {
             return Ok(true);
         }
 
@@ -222,8 +219,8 @@ impl PeerRing {
     }
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl ChordStorageRepair<PeerRingAction> for PeerRing {
     async fn republish_local_entries(&self, redundancy: u16) -> Result<PeerRingAction> {
         if redundancy <= 1 {

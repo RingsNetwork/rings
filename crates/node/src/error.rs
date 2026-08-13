@@ -1,6 +1,40 @@
 //! A bunch of wrap errors.
+use rings_core::dht::Did;
+
+use crate::onion::OnionProxyTargetError;
 use crate::onion::OnionRouteError;
 use crate::prelude::rings_core;
+
+/// Bounded onion/relay queue whose admission failed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OnionQueueKind {
+    /// Terminal relay-control sends.
+    RelayControl,
+    /// Onion data-plane sends.
+    CircuitData,
+}
+
+impl OnionQueueKind {
+    /// Build the closed admission error for this queue kind.
+    pub(crate) const fn admission(self, peer: Did, reason: OnionQueueAdmissionReason) -> Error {
+        Error::OnionQueueAdmission {
+            queue: self,
+            peer,
+            reason,
+        }
+    }
+}
+
+/// Algebraic reason a bounded onion/relay queue rejected one item.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OnionQueueAdmissionReason {
+    /// The queue-wide bound was reached.
+    GlobalFull,
+    /// One peer reached its isolated share.
+    PeerFull,
+    /// A resource counter could not represent its successor.
+    CounterOverflow,
+}
 
 /// A wrap `Result` contains custom errors.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -144,6 +178,17 @@ pub enum Error {
     /// The node configuration is structurally invalid.
     #[error("Invalid configuration: {0}")]
     InvalidConfig(String) = 812,
+    /// Opening browser IndexedDB-backed provider storage failed.
+    #[error("Open browser storage \"{name}\" failed: {source}")]
+    BrowserStorageOpen {
+        /// IndexedDB database and object-store name requested by the browser provider.
+        name: String,
+        /// Storage backend error returned while opening the database.
+        source: rings_core::error::Error,
+    } = 814,
+    /// A periodic registration task observed a cooperative stop request.
+    #[error("registration task stopped")]
+    RegistrationStopped = 815,
     /// Creating a file on disk failed.
     #[error("Create File Error: {0}")]
     CreateFileError(String) = 900,
@@ -203,11 +248,11 @@ pub enum Error {
     #[error("Wrong field, should be {0}")]
     SNARKWrongField(String) = 1403,
     /// Converting a JavaScript bigint into a prime-field element was out of range.
-    #[cfg(feature = "browser")]
+    #[cfg(all(feature = "browser", target_family = "wasm"))]
     #[error("range error when covering js_sys::BigInt to PrimeField: {0}")]
     SNARKFFRangeError(String) = 1404,
     /// Converting a JavaScript bigint produced an empty representation.
-    #[cfg(feature = "browser")]
+    #[cfg(all(feature = "browser", target_family = "wasm"))]
     #[error("Failed to load bigint to repr string, it's empty")]
     SNARKBigIntValueEmpty() = 1405,
     /// Loading a string as a prime-field element failed.
@@ -225,6 +270,36 @@ pub enum Error {
     /// Onion proxy I/O failed.
     #[error("Onion proxy IO error: {0}")]
     OnionProxyIoError(String) = 1602,
+    /// A local onion proxy request did not complete before its deadline.
+    #[error("Onion proxy request timed out")]
+    OnionProxyRequestTimedOut = 1603,
+    /// A bounded onion or relay send queue rejected one item.
+    #[error("{queue:?} queue rejected peer {peer}: {reason:?}")]
+    OnionQueueAdmission {
+        /// Queue whose bound was reached.
+        queue: OnionQueueKind,
+        /// Peer whose item was rejected.
+        peer: Did,
+        /// Exact admission relation that failed.
+        reason: OnionQueueAdmissionReason,
+    } = 1604,
+    /// An onion proxy authority failed closed parsing.
+    #[error("Invalid onion proxy target: {0}")]
+    OnionProxyTarget(#[from] OnionProxyTargetError) = 1605,
+    /// Runtime DNS resolution of an admitted onion target failed.
+    #[error("Failed to resolve onion target {authority:?}: {source}")]
+    OnionTargetResolve {
+        /// Canonical target authority.
+        authority: String,
+        /// Resolver I/O failure.
+        source: std::io::Error,
+    } = 1606,
+    /// Runtime DNS resolution returned no addresses.
+    #[error("Onion target {authority:?} resolved no addresses")]
+    OnionTargetResolvedEmpty {
+        /// Canonical target authority.
+        authority: String,
+    } = 1607,
 }
 
 impl Error {
@@ -269,7 +344,7 @@ impl From<rings_rpc::error::Error> for Error {
     }
 }
 
-#[cfg(feature = "browser")]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
 impl From<Error> for wasm_bindgen::JsValue {
     fn from(err: Error) -> Self {
         wasm_bindgen::JsValue::from_str(&err.to_string())

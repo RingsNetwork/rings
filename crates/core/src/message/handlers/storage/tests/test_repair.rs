@@ -1,7 +1,12 @@
 use std::sync::Arc;
 
+#[cfg(feature = "dummy")]
+use rings_transport::connections::dummy_controlled;
+
 use super::super::ChordStorageInterface;
 use super::super::ChordStorageInterfaceCacheChecker;
+#[cfg(feature = "dummy")]
+use super::test_support::install_two_node_chord_view;
 use super::test_support::next_generated_key;
 use super::test_support::next_payload;
 use super::test_support::non_affine_placement;
@@ -37,8 +42,40 @@ use crate::tests::default::wait_for_msgs;
 use crate::tests::default::Node;
 use crate::tests::manually_establish_connection;
 
+#[cfg(feature = "dummy")]
+struct PendingSendGuard;
+
+#[cfg(feature = "dummy")]
+impl PendingSendGuard {
+    fn new() -> Self {
+        dummy_controlled::set_send_message_pending(true);
+        Self
+    }
+}
+
+#[cfg(feature = "dummy")]
+impl Drop for PendingSendGuard {
+    fn drop(&mut self) {
+        dummy_controlled::set_send_message_pending(false);
+    }
+}
+
 #[tokio::test]
-async fn leave_dht_republishes_after_responsibility_peer_departure() -> Result<()> {
+async fn storage_repair_request_after_claim_remains_pending() -> Result<()> {
+    let node = prepare_node(SecretKey::random()).await;
+
+    assert!(!node.swarm.transport.storage_repair_requested());
+    node.swarm.transport.request_storage_repair();
+    assert!(node.swarm.transport.claim_storage_repair());
+    assert!(!node.swarm.transport.storage_repair_requested());
+
+    node.swarm.transport.request_storage_repair();
+    assert!(node.swarm.transport.storage_repair_requested());
+    Ok(())
+}
+
+#[tokio::test]
+async fn leave_dht_defers_repair_until_maintenance_runs() -> Result<()> {
     let key = SecretKey::random();
     let session = SessionSk::new_with_seckey(&key)?;
     let swarm = Arc::new(
@@ -66,6 +103,18 @@ async fn leave_dht_republishes_after_responsibility_peer_departure() -> Result<(
     handler.leave_dht(departed).await?;
 
     assert!(!node.dht().successors().contains(&departed)?);
+    assert!(node.swarm.transport.storage_repair_requested());
+    assert_eq!(
+        node.dht()
+            .storage
+            .get(&placement_keys[1].to_string())
+            .await?,
+        None
+    );
+
+    node.swarm.stabilizer().stabilize().await?;
+
+    assert!(!node.swarm.transport.storage_repair_requested());
     assert_eq!(
         node.dht()
             .storage
@@ -73,6 +122,77 @@ async fn leave_dht_republishes_after_responsibility_peer_departure() -> Result<(
             .await?,
         Some(entry)
     );
+    Ok(())
+}
+
+#[cfg(feature = "dummy")]
+#[tokio::test]
+async fn found_entry_read_repair_backpressure_is_deferred() -> Result<()> {
+    let node1 = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
+    let node2 = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
+    manually_establish_connection(&node1.swarm, &node2.swarm).await;
+    install_two_node_chord_view(&node1, &node2)?;
+    wait_for_msgs([&node1, &node2]).await;
+
+    let (entry, primary, replica, primary_owner, replica_owner) =
+        split_redundant_entry(&[&node1, &node2])?;
+    let remote_placement = if primary_owner == 1 {
+        primary
+    } else if replica_owner == 1 {
+        replica
+    } else {
+        return Err(Error::InvalidMessage(
+            "expected a replica owned by node2".to_string(),
+        ));
+    };
+    let context = MessagePayload::new_send(
+        Message::FoundEntry(FoundEntry {
+            data: vec![entry.clone()],
+            misses: vec![],
+            resource: entry.did,
+            redundancy: 2,
+        }),
+        node2.swarm.transport.session_sk(),
+        node1.did(),
+        node1.did(),
+    )?;
+    let handler = MessageHandler::new(node1.swarm.transport.clone(), Arc::new(NoopCallback));
+    node1.swarm.transport.start_storage_lookup(entry.did, 2)?;
+
+    handler
+        .handle(&context, &FoundEntry {
+            data: vec![],
+            misses: vec![PlacementMiss::new(remote_placement, node2.did())],
+            resource: entry.did,
+            redundancy: 2,
+        })
+        .await?;
+
+    let _pending_send = PendingSendGuard::new();
+    handler
+        .handle(&context, &FoundEntry {
+            data: vec![entry.clone()],
+            misses: vec![],
+            resource: entry.did,
+            redundancy: 2,
+        })
+        .await?;
+
+    assert_eq!(
+        node1.swarm.storage_check_cache(entry.did).await,
+        Some(entry)
+    );
+    assert_eq!(
+        node2
+            .dht()
+            .storage
+            .get(&remote_placement.to_string())
+            .await?,
+        None
+    );
+    assert!(node1.swarm.transport.get_connection(node2.did()).is_some());
+    assert!(node1.dht().successors().contains(&node2.did())?);
+    assert_no_more_msg([&node2]).await;
     Ok(())
 }
 
@@ -557,3 +677,5 @@ async fn expired_storage_response_does_not_update_cache_or_repair() -> Result<()
     );
     Ok(())
 }
+#[cfg(feature = "dummy")]
+use crate::message::PayloadSender;

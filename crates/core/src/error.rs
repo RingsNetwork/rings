@@ -268,6 +268,46 @@ pub enum Error {
     #[error("Found existing transport when answer offer from remote node")]
     AlreadyConnected,
 
+    /// Pending WebRTC connection capacity {capacity} is exhausted
+    #[error("Pending WebRTC connection capacity {capacity} is exhausted")]
+    PendingConnectionCapacityExceeded {
+        /// Maximum number of concurrent pending peers.
+        capacity: usize,
+    },
+
+    /// Pending WebRTC connection generation id space is exhausted.
+    #[error("Pending WebRTC connection generation is exhausted")]
+    PendingConnectionGenerationExhausted,
+
+    /// Connection attempt {generation} for {peer} was replaced before setup completed.
+    #[error("Connection attempt {generation} for {peer} was superseded")]
+    ConnectionAttemptSuperseded {
+        /// Peer whose connection generation changed.
+        peer: crate::dht::Did,
+        /// Generation that no longer owns the peer slot.
+        generation: u64,
+    },
+
+    /// A predecessor notification claims a DID different from its signed origin.
+    #[error("Notify predecessor DID {claimed} does not match relay origin {origin}")]
+    NotifyPredecessorOriginMismatch {
+        /// DID claimed by the notification body.
+        claimed: crate::dht::Did,
+        /// DID authenticated by the signed relay origin.
+        origin: crate::dht::Did,
+    },
+
+    /// A predecessor notification originated from a peer without an admitted connection.
+    #[error("Notify predecessor origin {origin} is not an admitted connection")]
+    NotifyPredecessorOriginNotAdmitted {
+        /// Authenticated origin that has no admitted connection generation.
+        origin: crate::dht::Did,
+    },
+
+    /// Failed to access the swarm connection lifecycle state
+    #[error("Failed to access the swarm connection lifecycle state")]
+    SwarmConnectionLifecycleLock,
+
     /// You should not connect to yourself
     #[error("You should not connect to yourself")]
     ShouldNotConnectSelf,
@@ -369,7 +409,7 @@ pub enum Error {
     #[error("Invalid entry kind")]
     InvalidEntryKind,
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
     /// RTC new peer connection failed
     #[error("RTC new peer connection failed")]
     RTCPeerConnectionCreateFailed(#[source] webrtc::Error),
@@ -378,22 +418,22 @@ pub enum Error {
     #[error("RTC peer_connection not establish")]
     RTCPeerConnectionNotEstablish,
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
     /// RTC peer_connection fail to create offer
     #[error("RTC peer_connection fail to create offer")]
     RTCPeerConnectionCreateOfferFailed(#[source] webrtc::Error),
 
-    #[cfg(feature = "wasm")]
+    #[cfg(all(feature = "wasm", target_family = "wasm"))]
     /// RTC peer_connection fail to create offer
     #[error("RTC peer_connection fail to create offer")]
     RTCPeerConnectionCreateOfferFailed(String),
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
     /// RTC peer_connection fail to create answer
     #[error("RTC peer_connection fail to create answer")]
     RTCPeerConnectionCreateAnswerFailed(#[source] webrtc::Error),
 
-    #[cfg(feature = "wasm")]
+    #[cfg(all(feature = "wasm", target_family = "wasm"))]
     /// RTC peer_connection fail to create answer
     #[error("RTC peer_connection fail to create answer")]
     RTCPeerConnectionCreateAnswerFailed(String),
@@ -402,12 +442,12 @@ pub enum Error {
     #[error("DataChannel message size not match, {0} < {1}")]
     RTCDataChannelMessageIncomplete(usize, usize),
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
     /// DataChannel send text message failed
     #[error("DataChannel send text message failed")]
     RTCDataChannelSendTextFailed(#[source] webrtc::Error),
 
-    #[cfg(feature = "wasm")]
+    #[cfg(all(feature = "wasm", target_family = "wasm"))]
     /// DataChannel send text message failed, {0}
     #[error("DataChannel send text message failed, {0}")]
     RTCDataChannelSendTextFailed(String),
@@ -420,37 +460,46 @@ pub enum Error {
     #[error("DataChannel state not open")]
     RTCDataChannelStateNotOpen,
 
-    #[cfg(not(feature = "wasm"))]
+    /// The observed WebRTC/data-channel product state cannot make progress.
+    #[error("Transport not ready: state {state:?}, data channel open: {data_channel_open}")]
+    TransportNotReady {
+        /// Observed WebRTC peer-connection state.
+        state: rings_transport::core::transport::WebrtcConnectionState,
+        /// Whether every transport data channel reported open.
+        data_channel_open: bool,
+    },
+
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
     /// RTC peer_connection add ice candidate error
     #[error("RTC peer_connection add ice candidate error")]
     RTCPeerConnectionAddIceCandidateError(#[source] webrtc::Error),
 
-    #[cfg(feature = "wasm")]
+    #[cfg(all(feature = "wasm", target_family = "wasm"))]
     /// RTC peer_connection add ice candidate error
     #[error("RTC peer_connection add ice candidate error")]
     RTCPeerConnectionAddIceCandidateError(String),
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
     /// RTC peer_connection set local description failed
     #[error("RTC peer_connection set local description failed")]
     RTCPeerConnectionSetLocalDescFailed(#[source] webrtc::Error),
 
-    #[cfg(feature = "wasm")]
+    #[cfg(all(feature = "wasm", target_family = "wasm"))]
     /// RTC peer_connection set local description failed
     #[error("RTC peer_connection set local description failed")]
     RTCPeerConnectionSetLocalDescFailed(String),
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
     /// RTC peer_connection set remote description failed
     #[error("RTC peer_connection set remote description failed")]
     RTCPeerConnectionSetRemoteDescFailed(#[source] webrtc::Error),
 
-    #[cfg(feature = "wasm")]
+    #[cfg(all(feature = "wasm", target_family = "wasm"))]
     /// RTC peer_connection set remote description failed
     #[error("RTC peer_connection set remote description failed")]
     RTCPeerConnectionSetRemoteDescFailed(String),
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
     /// RTC peer_connection failed to close it
     #[error("RTC peer_connection failed to close it")]
     RTCPeerConnectionCloseFailed(#[source] webrtc::Error),
@@ -507,7 +556,7 @@ pub enum Error {
     #[error("Only SEND message can reset destination")]
     ResetDestinationNeedSend,
 
-    #[cfg(feature = "wasm")]
+    #[cfg(all(feature = "wasm", target_family = "wasm"))]
     /// IndexedDB error, {0}
     #[error("IndexedDB error, {0}")]
     IDBError(rexie::Error),
@@ -516,7 +565,7 @@ pub enum Error {
     #[error("Invalid capacity value")]
     InvalidCapacity,
 
-    #[cfg(not(feature = "wasm"))]
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
     /// Sled error, {0}
     #[error("Sled error, {0}")]
     SledError(sled::Error),
@@ -561,22 +610,37 @@ pub enum Error {
     #[error("Peer's negotiated max_message_size {0} is too small to carry even one chunk")]
     PeerMaxMessageSizeTooSmall(usize),
 
-    #[cfg(feature = "wasm")]
+    /// Timed out while waiting for the data-channel send queue to accept bytes
+    #[error(
+        "Timed out after {timeout_ms}ms waiting for data-channel send queue to accept {bytes} bytes for {peer} during {context}"
+    )]
+    DataChannelSendQueueTimeout {
+        /// Peer whose data-channel send queue did not accept the bytes.
+        peer: crate::dht::Did,
+        /// Timeout budget in milliseconds.
+        timeout_ms: u128,
+        /// Serialized bytes that were waiting to be accepted.
+        bytes: usize,
+        /// Send context used for diagnostics.
+        context: &'static str,
+    },
+
+    #[cfg(all(feature = "wasm", target_family = "wasm"))]
     /// Cannot get property {0} from JsValue
     #[error("Cannot get property {0} from JsValue")]
     FailedOnGetProperty(String),
 
-    #[cfg(feature = "wasm")]
+    #[cfg(all(feature = "wasm", target_family = "wasm"))]
     /// Cannot set property {0} from JsValue
     #[error("Cannot set property {0} from JsValue")]
     FailedOnSetProperty(String),
 
-    #[cfg(feature = "wasm")]
+    #[cfg(all(feature = "wasm", target_family = "wasm"))]
     /// Error on ser/der JsValue
     #[error("Error on ser/der JsValue")]
     SerdeWasmBindgenError(#[from] serde_wasm_bindgen::Error),
 
-    #[cfg(feature = "wasm")]
+    #[cfg(all(feature = "wasm", target_family = "wasm"))]
     /// Error create RTC connection: {0}
     #[error("Error create RTC connection: {0}")]
     CreateConnectionError(String),
@@ -598,16 +662,52 @@ impl Error {
     pub(crate) fn unexpected_peer_ring_action(action: crate::dht::PeerRingAction) -> Self {
         Self::PeerRingUnexpectedAction(Box::new(action))
     }
+
+    /// True when a send failed because the local data-channel write queue did not accept bytes
+    /// before the bounded admission timeout. This is a local backpressure signal, not evidence
+    /// that the remote peer is unreachable or malicious.
+    pub(crate) const fn is_data_channel_backpressure(&self) -> bool {
+        matches!(self, Self::DataChannelSendQueueTimeout { .. })
+    }
+
+    /// Whether a data-plane send should be retried from freshly computed topology.
+    pub(crate) const fn is_deferrable_data_plane_send(&self) -> bool {
+        self.is_data_channel_backpressure()
+            || matches!(
+                self,
+                Self::ConnectionAttemptSuperseded { .. }
+                    | Self::RTCDataChannelStateNotOpen
+                    | Self::TransportNotReady { .. }
+                    | Self::SwarmMissDidInTable(_)
+                    | Self::Transport(rings_transport::error::Error::SendPermitRevoked)
+            )
+    }
+
+    /// Whether this error should degrade peer quality through `FailedToSend`.
+    pub(crate) const fn records_peer_send_failure(&self) -> bool {
+        match self {
+            Self::ConnectionAttemptSuperseded { .. } | Self::DataChannelSendQueueTimeout { .. } => {
+                false
+            }
+            Self::Transport(rings_transport::error::Error::SendPermitRevoked) => false,
+            Self::TransportNotReady { state, .. } => matches!(
+                state,
+                rings_transport::core::transport::WebrtcConnectionState::Failed
+                    | rings_transport::core::transport::WebrtcConnectionState::Closed
+            ),
+            _ => true,
+        }
+    }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
 impl From<Error> for wasm_bindgen::JsValue {
     fn from(err: Error) -> Self {
         wasm_bindgen::JsValue::from_str(&err.to_string())
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
 impl From<js_sys::Error> for Error {
     fn from(err: js_sys::Error) -> Self {
         Error::JsError(err.to_string().into())

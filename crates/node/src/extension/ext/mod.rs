@@ -48,6 +48,7 @@ pub use protocol::Reject;
 pub use protocol::Transition;
 pub use protocol::Wire;
 pub(crate) use registry::Core;
+pub use registry::EffectScope;
 pub use registry::Extensions;
 pub use registry::Scope;
 
@@ -55,12 +56,12 @@ pub use registry::Scope;
 ///
 /// Lets the pure-core types be written once; the `Send`-ness divergence (browser futures
 /// are not `Send`) is confined here. `∀ T` on browser; `Send + Sync` elsewhere.
-#[cfg(not(feature = "browser"))]
+#[cfg(rings_native)]
 pub trait MaybeSend: Send + Sync {}
-#[cfg(not(feature = "browser"))]
+#[cfg(rings_native)]
 impl<T: Send + Sync> MaybeSend for T {}
 /// Auto-trait bound that is `Send + Sync` on native and empty on browser.
-#[cfg(feature = "browser")]
+#[cfg(rings_browser)]
 pub trait MaybeSend {}
-#[cfg(feature = "browser")]
+#[cfg(rings_browser)]
 impl<T> MaybeSend for T {}

@@ -23,10 +23,14 @@ pub fn wasm_export(attr: TokenStream, input: TokenStream) -> TokenStream {
         .into();
     }
     #[cfg(feature = "wasm")]
-    return match wasm_bindgen_macro_support::expand(attr.into(), input.into()) {
-        Ok(tokens) => tokens.into(),
-        Err(diagnostic) => (quote! { #diagnostic }).into(),
-    };
+    {
+        let input: proc_macro2::TokenStream = input.into();
+        quote! {
+            #[cfg_attr(target_family = "wasm", wasm_bindgen::prelude::wasm_bindgen)]
+            #input
+        }
+        .into()
+    }
 
     #[cfg(not(feature = "wasm"))]
     return input;

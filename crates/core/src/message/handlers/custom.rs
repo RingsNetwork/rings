@@ -3,7 +3,6 @@ use async_trait::async_trait;
 use crate::dht::Did;
 use crate::error::Result;
 use crate::message::effects::CoreEffect;
-use crate::message::effects::PayloadRelayFunctor;
 use crate::message::types::CustomMessage;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
@@ -14,14 +13,14 @@ pub(crate) fn custom_message_effects<'payload>(
     ctx: &'payload MessagePayload,
 ) -> Option<CoreEffect<'payload>> {
     if ctx.should_forward_from(local) {
-        Some(PayloadRelayFunctor::forward_payload(ctx, None).into())
+        Some(CoreEffect::forward_payload(ctx, None))
     } else {
         None
     }
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<CustomMessage> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, _: &CustomMessage) -> Result<()> {
         self.run_effects(custom_message_effects(self.dht.did, ctx))
@@ -66,10 +65,10 @@ mod tests {
             .ok_or_else(|| Error::InvalidMessage("expected ForwardPayload effect".to_string()))?;
 
         match effect {
-            CoreEffect::Payload(PayloadRelayFunctor::ForwardPayload {
+            CoreEffect::ForwardPayload {
                 payload: forwarded,
                 next_hop,
-            }) => {
+            } => {
                 assert!(std::ptr::eq(forwarded, &payload));
                 assert_eq!(next_hop, None);
             }

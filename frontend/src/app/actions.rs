@@ -27,6 +27,7 @@ use crate::peer_sync;
 use crate::wallet;
 use crate::wallet::WalletAccount;
 use crate::wallet::WalletKind;
+use crate::webview;
 
 #[derive(Clone)]
 struct StartAction {
@@ -43,9 +44,12 @@ struct StartAction {
     ice_servers: UseStateHandle<String>,
     stabilize_interval: UseStateHandle<String>,
     storage_name: UseStateHandle<String>,
+    webview_allow_short_paths: UseStateHandle<bool>,
+    webview_onion_settings: webview::WebviewOnionSettings,
     seed_url: UseStateHandle<String>,
     custom_events: UseStateHandle<Vec<custom::CustomEvent>>,
     active_dialog: UseStateHandle<ActiveDialog>,
+    webview_ready: UseStateHandle<bool>,
 }
 
 struct StartRequest {
@@ -54,6 +58,7 @@ struct StartRequest {
     ice_servers: String,
     stabilize_interval: String,
     storage_name: String,
+    webview_allow_short_paths: bool,
     seed_url: String,
 }
 
@@ -72,6 +77,7 @@ struct DisconnectAction {
     remote_answer: UseStateHandle<String>,
     link_dialog_open: UseStateHandle<bool>,
     active_dialog: UseStateHandle<ActiveDialog>,
+    webview_ready: UseStateHandle<bool>,
 }
 
 pub(super) fn launch_actions(
@@ -95,7 +101,10 @@ pub(super) fn launch_actions(
         ice_servers: node.ice_servers.clone(),
         stabilize_interval: node.stabilize_interval.clone(),
         storage_name: node.storage_name.clone(),
+        webview_allow_short_paths: node.webview_allow_short_paths.clone(),
+        webview_onion_settings: node.webview_onion_settings.clone(),
         seed_url: node.seed_url.clone(),
+        webview_ready: node.webview_ready.clone(),
         custom_events: custom_state.events.clone(),
         active_dialog: shell.active_dialog.clone(),
     }
@@ -114,6 +123,7 @@ pub(super) fn launch_actions(
         remote_answer: link.remote_answer.clone(),
         link_dialog_open: link.link_dialog_open.clone(),
         active_dialog: shell.active_dialog.clone(),
+        webview_ready: node.webview_ready.clone(),
     }
     .callback();
     LaunchActions {
@@ -130,6 +140,7 @@ impl StartAction {
             let request = action.request();
             let start_token = action.generation.bump();
             action.node_starting.set(true);
+            action.webview_ready.set(false);
             action
                 .status
                 .set(format!("connecting {}", request.kind.label()));
@@ -146,6 +157,7 @@ impl StartAction {
             ice_servers: (*self.ice_servers).clone(),
             stabilize_interval: (*self.stabilize_interval).clone(),
             storage_name: (*self.storage_name).clone(),
+            webview_allow_short_paths: *self.webview_allow_short_paths,
             seed_url: (*self.seed_url).trim().to_string(),
         }
     }
@@ -169,6 +181,7 @@ impl StartAction {
             ice_servers: request.ice_servers,
             stabilize_interval: request.stabilize_interval,
             storage_name: request.storage_name,
+            webview_allow_short_paths: request.webview_allow_short_paths,
             seed_url: request.seed_url,
         };
         match extension::extension_node_start(bridge, request.kind, settings).await {
@@ -201,11 +214,14 @@ impl StartAction {
     }
 
     async fn start_local_node(self, request: StartRequest, token: GenerationToken) {
+        self.webview_onion_settings
+            .set_allow_short_paths(request.webview_allow_short_paths);
         let settings = match extension::node_settings(
             request.network_id,
             request.ice_servers,
             request.stabilize_interval,
             request.storage_name,
+            self.webview_onion_settings.clone(),
         ) {
             Ok(settings) => settings,
             Err(error) => {
@@ -256,7 +272,7 @@ impl StartAction {
         match extension::operation_timeout(
             "session authorization",
             extension::SESSION_AUTH_TIMEOUT,
-            node::build_node(account, settings),
+            node::build_node(account, settings, node::WebviewHost::CurrentWindow),
         )
         .await
         {
@@ -289,14 +305,43 @@ impl StartAction {
             built.stop();
             return;
         }
-        self.did.set(my_did);
+        self.did.set(my_did.clone());
         self.wallet_account.set(Some(account));
         *self.node_ref.borrow_mut() = Some(built.clone());
+        let webview_result = match webview::install_browser_gateway(built.webview.clone()) {
+            Ok(true) => webview::register_browser_gateway().await.map(|()| true),
+            Ok(false) => Ok(false),
+            Err(error) => Err(error),
+        };
+        if !token.is_current() {
+            self.discard_stale_local_node(&built);
+            return;
+        }
+        let webview_ready = match webview_result {
+            Ok(ready) => ready,
+            Err(error) => {
+                self.status.set(format!("webview gateway: {error}"));
+                false
+            }
+        };
+        self.webview_ready.set(webview_ready);
         super::clear_shell_dialog_route();
         self.active_dialog.set(ActiveDialog::None);
         self.node_starting.set(false);
         self.connect_seed_if_configured(built, seed_url, token)
             .await;
+    }
+
+    fn discard_stale_local_node(&self, built: &DemoNode) {
+        built.stop();
+        let mut node_ref = self.node_ref.borrow_mut();
+        if node_ref
+            .as_ref()
+            .is_some_and(|node| node.same_provider_instance(built))
+        {
+            *node_ref = None;
+            webview::clear_browser_gateway();
+        }
     }
 
     fn register_local_protocols(&self, built: &DemoNode, my_did: &str) -> Result<(), String> {
@@ -432,11 +477,13 @@ impl DisconnectAction {
         let was_starting = *self.node_starting;
         let cleanup_token = self.generation.bump();
         let Some(node) = self.node_ref.borrow_mut().take() else {
+            webview::clear_browser_gateway();
             self.node_starting.set(false);
             self.status.set(offline_disconnect_message(was_starting));
             return;
         };
         let provider = node.provider.clone();
+        webview::clear_browser_gateway();
         self.clear_session();
         self.status.set("node disconnected".to_string());
         let status = self.status.clone();
@@ -453,6 +500,7 @@ impl DisconnectAction {
         self.did.set(String::new());
         self.wallet_account.set(None);
         self.node_starting.set(false);
+        self.webview_ready.set(false);
         self.peers.set(Vec::new());
         self.generated_offer.set(String::new());
         self.remote_offer.set(String::new());

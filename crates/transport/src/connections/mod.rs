@@ -2,24 +2,24 @@
 //! Plus a `WebSysWebrtcConnection` for wasm environment.
 //! Also provide a `DummyConnection` for testing.
 
-#[cfg(feature = "dummy")]
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 mod dummy;
-#[cfg(feature = "native-webrtc")]
+#[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
 mod native_webrtc;
-#[cfg(feature = "web-sys-webrtc")]
+#[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
 mod web_sys_webrtc;
 
-#[cfg(feature = "dummy")]
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 pub use crate::connections::dummy::controlled as dummy_controlled;
-#[cfg(feature = "dummy")]
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 pub use crate::connections::dummy::DummyConnection;
-#[cfg(feature = "dummy")]
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 pub use crate::connections::dummy::DummyTransport;
-#[cfg(feature = "native-webrtc")]
+#[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
 pub use crate::connections::native_webrtc::WebrtcConnection;
-#[cfg(feature = "native-webrtc")]
+#[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
 pub use crate::connections::native_webrtc::WebrtcTransport;
-#[cfg(feature = "web-sys-webrtc")]
+#[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
 pub use crate::connections::web_sys_webrtc::WebSysWebrtcConnection;
-#[cfg(feature = "web-sys-webrtc")]
+#[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
 pub use crate::connections::web_sys_webrtc::WebSysWebrtcTransport;

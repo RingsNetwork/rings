@@ -42,13 +42,13 @@ pub mod circuit;
 pub(crate) mod directory;
 pub(crate) mod exit_accounting;
 mod failure;
-#[cfg(any(feature = "browser", feature = "node"))]
+#[cfg(any(rings_native, rings_browser))]
 pub mod https;
 pub mod proxy;
 pub(crate) mod replay;
 pub mod route;
 pub mod target;
-#[cfg(feature = "node")]
+#[cfg(rings_native)]
 pub mod tcp;
 
 pub use failure::OnionExitFailure;
@@ -62,6 +62,7 @@ pub use route::OnionRouteRequest;
 pub(crate) use route::SystemRouteEntropy;
 pub use route::DEFAULT_ONION_ROUTE_HOPS;
 pub use target::OnionProxyTarget;
+pub use target::OnionProxyTargetError;
 
 /// DHT topic used for application-layer onion exit descriptors.
 pub const ONION_EXITS_TOPIC: &str = "onion_exits";
@@ -822,7 +823,16 @@ impl OnionExitRegistration {
             .iter()
             .map(|descriptor| descriptor.encode().map_err(Error::CoreError))
             .collect::<Result<Vec<_>>>()?;
-        self.publisher.publish_many(context, encoded).await?;
+        self.publisher
+            .publish_many_replacing(context, encoded, |observed| {
+                observed
+                    .decode::<OnionExitDescriptor>()
+                    .is_ok_and(|descriptor| {
+                        descriptor.did == context.did()
+                            || (descriptor.verify_signature() && descriptor.is_expired_at(now_ms))
+                    })
+            })
+            .await?;
         Ok(descriptors)
     }
 
@@ -860,8 +870,8 @@ impl OnionExitRegistration {
     }
 }
 
-#[cfg_attr(feature = "browser", async_trait(?Send))]
-#[cfg_attr(not(feature = "browser"), async_trait)]
+#[cfg_attr(rings_browser, async_trait(?Send))]
+#[cfg_attr(rings_native, async_trait)]
 impl RegistrationTask for OnionExitRegistration {
     fn name(&self) -> &'static str {
         "onion-exit"

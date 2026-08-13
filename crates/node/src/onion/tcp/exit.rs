@@ -1,25 +1,83 @@
 use std::sync::Arc;
+use std::time::Duration;
 
-use bytes::Bytes;
 use rings_core::dht::Did;
-use tokio::io::AsyncReadExt;
-use tokio::io::AsyncWriteExt;
+use rings_core::ecc::PublicKey;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 
-use super::duplex::TcpDuplexState;
 use super::inbound::TcpInbound;
-use super::send_tcp_backward;
+use super::pump::pump_tcp_duplex;
+use super::pump::TcpDuplexEffects;
 use super::OnionTcpPayload;
 use super::OnionTcpRuntime;
+use super::TcpBackwardRoute;
 use super::TcpStreamKey;
-use super::TCP_BUF;
 use crate::extension::ext::Scope;
 use crate::onion::circuit::OnionCircuitId;
 use crate::onion::circuit::OnionClientReturn;
 use crate::onion::exit_accounting::OnionExitLease;
+use crate::onion::target::resolve_public_target;
 use crate::onion::OnionExitFailure;
+use crate::onion::OnionExitPolicy;
+use crate::onion::OnionExitTarget;
+use crate::onion::OnionProxyTarget;
 use crate::onion::OnionServiceName;
+
+const TCP_OPEN_RESPONSE_QUANTUM_MS: u128 = 250;
+
+pub(super) fn open_response_deadline(opened_at: Instant, now: Instant) -> Instant {
+    let elapsed_ms = now.saturating_duration_since(opened_at).as_millis();
+    let quanta = elapsed_ms
+        .saturating_add(TCP_OPEN_RESPONSE_QUANTUM_MS - 1)
+        .checked_div(TCP_OPEN_RESPONSE_QUANTUM_MS)
+        .unwrap_or(1)
+        .max(1);
+    let deadline_ms =
+        u64::try_from(quanta.saturating_mul(TCP_OPEN_RESPONSE_QUANTUM_MS)).unwrap_or(u64::MAX);
+    opened_at
+        .checked_add(Duration::from_millis(deadline_ms))
+        .unwrap_or(now)
+}
+
+pub(super) fn admit_exit_target(
+    policy: &OnionExitPolicy,
+    target: &str,
+) -> std::result::Result<OnionProxyTarget, OnionExitFailure> {
+    let target = OnionProxyTarget::parse_authority(target)
+        .map_err(|error| OnionExitFailure::InvalidTarget(error.to_string()))?;
+    let exit_target = OnionExitTarget::from_proxy_target(&target);
+    if !policy.allows_target(&exit_target) {
+        return Err(OnionExitFailure::PermissionDenied);
+    }
+    Ok(target)
+}
+
+pub(super) async fn connect_exit_target(
+    target: &OnionProxyTarget,
+) -> std::result::Result<TcpStream, OnionExitFailure> {
+    let authority = target.authority();
+    let addresses = resolve_public_target(target).await.map_err(|error| {
+        tracing::warn!(target = authority, %error, "rejected or failed to resolve onion TCP exit target");
+        if matches!(error, crate::error::Error::NoPermission) {
+            OnionExitFailure::PermissionDenied
+        } else {
+            OnionExitFailure::ResolveTarget
+        }
+    })?;
+    let mut last_error = None;
+    for address in addresses {
+        match TcpStream::connect(address).await {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    if let Some(error) = last_error {
+        tracing::warn!(target = authority, %error, "failed to connect onion TCP exit target");
+    }
+    Err(OnionExitFailure::ConnectTarget)
+}
 
 pub(super) struct ExitStreamTask {
     pub(super) runtime: Arc<OnionTcpRuntime>,
@@ -27,6 +85,7 @@ pub(super) struct ExitStreamTask {
     pub(super) key: TcpStreamKey,
     pub(super) circuit_id: OnionCircuitId,
     pub(super) return_peer: Did,
+    pub(super) return_session_public_key: PublicKey<33>,
     pub(super) client: OnionClientReturn,
     pub(super) service: OnionServiceName,
     pub(super) stream: TcpStream,
@@ -39,28 +98,34 @@ struct ExitReturnPath {
     scope: Scope,
     circuit_id: OnionCircuitId,
     return_peer: Did,
+    return_session_public_key: PublicKey<33>,
     client: OnionClientReturn,
     service: OnionServiceName,
 }
 
 impl ExitReturnPath {
-    async fn send(&self, payload: OnionTcpPayload) -> crate::error::Result<()> {
-        send_tcp_backward(
-            &self.scope,
-            &self.runtime.session_sk,
-            &self.service,
-            self.circuit_id,
-            self.return_peer,
-            self.client,
-            payload,
-        )
+    async fn send_payload(&self, payload: OnionTcpPayload) -> crate::error::Result<()> {
+        let sequence = self.runtime.next_backward_sequence(TcpStreamKey {
+            circuit_id: self.circuit_id,
+        })?;
+        TcpBackwardRoute {
+            link_sender: &self.runtime.link_sender,
+            scope: &self.scope,
+            signer: &self.runtime.session_sk,
+            service: &self.service,
+            circuit_id: self.circuit_id,
+            return_peer: self.return_peer,
+            return_session_public_key: self.return_session_public_key,
+            client: self.client,
+        }
+        .send(sequence, payload)
         .await
     }
 
     async fn record_bytes_or_reject(&self, bytes: usize) -> bool {
         let Ok(bytes) = u64::try_from(bytes) else {
             let _ = self
-                .send(OnionTcpPayload::Error(OnionExitFailure::PermissionDenied))
+                .send_payload(OnionTcpPayload::Error(OnionExitFailure::PermissionDenied))
                 .await;
             return false;
         };
@@ -71,10 +136,32 @@ impl ExitReturnPath {
         });
         if rejected {
             let _ = self
-                .send(OnionTcpPayload::Error(OnionExitFailure::PermissionDenied))
+                .send_payload(OnionTcpPayload::Error(OnionExitFailure::PermissionDenied))
                 .await;
         }
         !rejected
+    }
+}
+
+#[async_trait::async_trait]
+impl TcpDuplexEffects for ExitReturnPath {
+    async fn send(&mut self, payload: OnionTcpPayload) -> crate::error::Result<()> {
+        self.send_payload(payload).await
+    }
+
+    async fn admit_bytes(&mut self, bytes: usize) -> bool {
+        self.record_bytes_or_reject(bytes).await
+    }
+
+    async fn read_failed(&mut self, error: &std::io::Error) {
+        tracing::warn!(%error, "failed to read onion TCP exit target");
+        let _ = self
+            .send_payload(OnionTcpPayload::Error(OnionExitFailure::ReadTarget))
+            .await;
+    }
+
+    fn remote_failed(&mut self, failure: &OnionExitFailure) {
+        tracing::warn!("onion TCP exit stream failed: {failure}");
     }
 }
 
@@ -89,97 +176,23 @@ async fn run_exit_stream(task: ExitStreamTask) {
         key,
         circuit_id,
         return_peer,
+        return_session_public_key,
         client,
         service,
         stream,
-        mut rx,
+        rx,
         lease,
     } = task;
-    let return_path = ExitReturnPath {
+    let mut return_path = ExitReturnPath {
         runtime: runtime.clone(),
         scope,
         circuit_id,
         return_peer,
+        return_session_public_key,
         client,
         service,
     };
-    let (mut read, mut write) = stream.into_split();
-    let mut read_buf = vec![0_u8; TCP_BUF];
-    let mut state = TcpDuplexState::open();
-    loop {
-        if state.is_closed() {
-            break;
-        }
-        tokio::select! {
-            read_result = read.read(read_buf.as_mut_slice()), if state.can_read() => {
-                match read_result {
-                    Ok(0) => {
-                        if return_path.send(OnionTcpPayload::Shutdown).await.is_err() {
-                            break;
-                        }
-                        state.close_read();
-                    }
-                    Ok(n) => {
-                        let bytes = read_chunk(&read_buf, n);
-                        if !return_path.record_bytes_or_reject(bytes.len()).await {
-                            break;
-                        }
-                        if return_path.send(OnionTcpPayload::Data { bytes }).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(error) => {
-                        let _ = return_path
-                            .send(OnionTcpPayload::Error(OnionExitFailure::ReadTarget(format!(
-                                "read onion TCP target: {error}"
-                            ))))
-                            .await;
-                        break;
-                    }
-                }
-            }
-            inbound = rx.recv() => {
-                match inbound {
-                    Some(TcpInbound::Data(bytes)) => {
-                        if !state.can_write() {
-                            continue;
-                        }
-                        if !return_path.record_bytes_or_reject(bytes.len()).await {
-                            break;
-                        }
-                        if write.write_all(bytes.as_ref()).await.is_err() {
-                            break;
-                        }
-                    }
-                    Some(TcpInbound::Shutdown) => {
-                        if state.can_write() {
-                            let _ = write.shutdown().await;
-                            state.close_write();
-                        }
-                    }
-                    Some(TcpInbound::Close) | None => {
-                        state.observe_remote_terminal();
-                        break;
-                    }
-                    Some(TcpInbound::Error(failure)) => {
-                        tracing::warn!("onion TCP exit stream failed: {failure}");
-                        state.observe_remote_terminal();
-                        break;
-                    }
-                }
-            }
-        }
-    }
-    if state.should_announce_terminal() {
-        let _ = return_path.send(OnionTcpPayload::Close).await;
-    }
+    pump_tcp_duplex(stream, rx, &mut return_path).await;
     runtime.remove_exit_stream(key);
     drop(lease);
-}
-
-fn read_chunk(read_buf: &[u8], n: usize) -> Bytes {
-    // Pre: Tokio returns a byte count no larger than the buffer passed to `read`.
-    // Post: the returned `Bytes` is exactly the observed prefix, or empty if an invalid
-    // foreign implementation violates the `AsyncRead` contract.
-    Bytes::copy_from_slice(read_buf.get(..n).unwrap_or_default())
 }

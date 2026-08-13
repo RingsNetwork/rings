@@ -43,6 +43,18 @@ async fn test_two_provider_connect_and_list() {
 }
 
 #[wasm_bindgen_test]
+async fn test_provider_listener_handle_requests_stop() {
+    let provider = new_provider().await;
+
+    let listener = provider.listen();
+    assert!(!listener.is_stopped());
+
+    listener.stop();
+    assert!(listener.is_stopped());
+    utils::js_utils::window_sleep(10).await.unwrap();
+}
+
+#[wasm_bindgen_test]
 async fn test_send_backend_message() {
     let provider1 = new_provider().await;
     let provider2 = new_provider().await;

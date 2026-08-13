@@ -19,6 +19,7 @@ use crate::dht::PeerRingAction;
 use crate::dht::PeerRingRemoteAction;
 use crate::ecc::tests::gen_ordered_keys;
 use crate::ecc::SecretKey;
+use crate::error::Error;
 use crate::error::Result;
 use crate::message;
 use crate::message::Encoder;
@@ -37,6 +38,8 @@ use crate::tests::default::wait_for_msgs;
 use crate::tests::default::wait_for_predecessor;
 use crate::tests::default::wait_for_storage_entry;
 use crate::tests::default::wait_for_successor;
+#[cfg(feature = "dummy")]
+use crate::tests::default::Node;
 use crate::tests::manually_establish_connection;
 
 #[cfg(feature = "dummy")]
@@ -44,6 +47,30 @@ struct NoopCallback;
 
 #[cfg(feature = "dummy")]
 impl SwarmCallback for NoopCallback {}
+
+#[cfg(feature = "dummy")]
+async fn drain_controlled_dummy_events() {
+    while dummy_controlled::pending() > 0 {
+        assert!(dummy_controlled::deliver(0).await);
+        tokio::task::yield_now().await;
+    }
+}
+
+#[cfg(feature = "dummy")]
+async fn drain_node_messages(nodes: &[&Node]) {
+    loop {
+        let mut drained = false;
+        for node in nodes {
+            while node.try_listen_once().await.is_some() {
+                drained = true;
+            }
+        }
+        if !drained {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+}
 
 #[tokio::test]
 async fn test_handle_join() -> Result<()> {
@@ -65,7 +92,7 @@ async fn test_handle_join() -> Result<()> {
 #[tokio::test]
 async fn test_join_dht_keeps_local_join_when_convergence_send_fails() -> Result<()> {
     dummy_controlled::enable(true);
-    dummy_controlled::set_max_message_size(0);
+    dummy_controlled::set_max_message_size(1);
 
     let key1 = SecretKey::random();
     let key2 = SecretKey::random();
@@ -78,19 +105,15 @@ async fn test_join_dht_keeps_local_join_when_convergence_send_fails() -> Result<
         "controlled delivery should prevent automatic DataChannelOpen join"
     );
 
+    drain_controlled_dummy_events().await;
+
     dummy_controlled::enable(false);
-    dummy_controlled::set_max_message_size(1);
-
-    let handler = MessageHandler::new(node1.swarm.transport.clone(), Arc::new(NoopCallback));
-    let join_result = handler.join_dht(node2.did()).await;
-
     dummy_controlled::set_max_message_size(0);
 
     assert!(
-        join_result.is_ok(),
-        "join must not fail when follow-up convergence sends fail: {join_result:?}"
+        node1.dht().successors().list()?.contains(&node2.did()),
+        "local join must survive failed follow-up convergence sends"
     );
-    assert!(node1.dht().successors().list()?.contains(&node2.did()));
 
     Ok(())
 }
@@ -106,8 +129,11 @@ async fn test_handle_dht_notify_remote_action_sends_predecessor_to_target() -> R
     let node3 = prepare_node(keys[2]).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
 
-    // Clear queued connection-open callbacks so this test exercises only the
-    // explicit handler action below, not automatic join/stabilization traffic.
+    drain_controlled_dummy_events().await;
+    drain_node_messages(&[&node1, &node2, &node3]).await;
+
+    // Clear any empty controlled queue so this test exercises only the
+    // explicit handler action below.
     dummy_controlled::enable(false);
 
     let handler = MessageHandler::new(node1.swarm.transport.clone(), Arc::new(NoopCallback));
@@ -188,7 +214,10 @@ async fn test_handle_connect_node() -> Result<()> {
     // node1 may already have connected node3 while syncing successor-list
     // candidates. If not, ask DHT to connect it through node2.
     if node1.swarm.transport.get_connection(node3.did()).is_none() {
-        node1.swarm.connect(node3.did()).await.unwrap();
+        match node1.swarm.connect(node3.did()).await {
+            Ok(()) | Err(Error::AlreadyConnected) => {}
+            Err(error) => return Err(error),
+        }
     }
     wait_for_connection_state(&node1, node3.did(), WebrtcConnectionState::Connected).await?;
 

@@ -59,17 +59,74 @@ pub(crate) async fn copy_text_to_clipboard(value: String) -> Result<(), String> 
     Ok(())
 }
 
-pub(crate) async fn open_debug_url(url: &str) -> Result<(), String> {
-    match open_debug_url_with_extension_tabs("browser", url).await {
-        Ok(()) => Ok(()),
-        Err(_) => match open_debug_url_with_extension_tabs("chrome", url).await {
-            Ok(()) => Ok(()),
-            Err(_) => open_debug_url_with_window(url),
-        },
-    }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DebugUrlOpenResult {
+    Opened,
+    CopiedInternalUrl,
+    ManualInternalUrl,
 }
 
-async fn open_debug_url_with_extension_tabs(namespace: &str, url: &str) -> Result<(), String> {
+pub(crate) fn open_debug_url(url: &str) -> Result<DebugUrlOpenResult, String> {
+    if open_debug_url_with_extension_tabs("browser", url).is_ok()
+        || open_debug_url_with_extension_tabs("chrome", url).is_ok()
+    {
+        return Ok(DebugUrlOpenResult::Opened);
+    }
+
+    // Browser-internal pages (`chrome://`, `about:`) are intentionally blocked from ordinary
+    // webpages. Avoid calling `window.open` for them, otherwise the user only sees a blocked
+    // navigation and the console records a misleading local-resource failure.
+    if is_browser_internal_url(url) {
+        return Ok(if copy_text_to_clipboard_start(url).is_ok() {
+            DebugUrlOpenResult::CopiedInternalUrl
+        } else {
+            DebugUrlOpenResult::ManualInternalUrl
+        });
+    }
+
+    open_debug_url_with_window(url).map(|_| DebugUrlOpenResult::Opened)
+}
+
+/// Open the application-owned WebView shell in a browser popup.
+///
+/// The caller supplies no remote target here: remote addresses are entered only inside the
+/// controlled shell and become `/webview/` paths before the top-level document receives them.
+pub(crate) fn open_webview_popup() -> Result<(), String> {
+    if let Ok(bridge) = js_global_prop("RingsExtensionNodeBridge") {
+        if is_callable(&bridge, "openWebview") {
+            let opened = js_call0(&bridge, "openWebview")?;
+            observe_promise_rejection(opened);
+            return Ok(());
+        }
+    }
+    let window = web_sys::window().ok_or_else(|| "window unavailable".to_string())?;
+    let location = window.location();
+    let mut url = location.origin().map_err(js_error_label)?;
+    url.push_str(location.pathname().map_err(js_error_label)?.as_str());
+    if let Ok(search) = location.search() {
+        url.push_str(search.as_str());
+    }
+    url.push_str("#webview");
+
+    let window_value: JsValue = window.into();
+    let open = js_method(&window_value, "open")?;
+    let opened = open
+        .call3(
+            &window_value,
+            &JsValue::from_str(url.as_str()),
+            &JsValue::from_str("rings-webview"),
+            &JsValue::from_str("popup=yes,width=1280,height=860"),
+        )
+        .map_err(js_error_label)?;
+    if opened.is_null() || opened.is_undefined() {
+        return Err("browser blocked the WebView popup".to_string());
+    }
+    // The trusted `#webview` shell uses opener only for a one-shot MessageChannel debug
+    // capability handoff, then `assets/webview-host.js` clears it before remote navigation.
+    Ok(())
+}
+
+fn open_debug_url_with_extension_tabs(namespace: &str, url: &str) -> Result<(), String> {
     let extension_api =
         Reflect::get(&js_sys::global(), &JsValue::from_str(namespace)).map_err(js_error_label)?;
     if extension_api.is_null() || extension_api.is_undefined() {
@@ -89,9 +146,7 @@ async fn open_debug_url_with_extension_tabs(namespace: &str, url: &str) -> Resul
     let opened = create
         .call1(&tabs, &options.into())
         .map_err(js_error_label)?;
-    if let Ok(promise) = opened.dyn_into::<Promise>() {
-        JsFuture::from(promise).await.map_err(js_error_label)?;
-    }
+    observe_promise_rejection(opened);
     Ok(())
 }
 
@@ -116,6 +171,39 @@ fn open_debug_url_with_window(url: &str) -> Result<(), String> {
         return Err("browser blocked the debug console tab".to_string());
     }
     Ok(())
+}
+
+fn is_browser_internal_url(url: &str) -> bool {
+    url.starts_with("chrome://") || url.starts_with("about:")
+}
+
+fn copy_text_to_clipboard_start(value: &str) -> Result<(), String> {
+    let navigator =
+        Reflect::get(&js_sys::global(), &JsValue::from_str("navigator")).map_err(js_error_label)?;
+    let clipboard =
+        Reflect::get(&navigator, &JsValue::from_str("clipboard")).map_err(js_error_label)?;
+    if clipboard.is_null() || clipboard.is_undefined() {
+        return Err("clipboard API unavailable".to_string());
+    }
+    let write_text = js_method(&clipboard, "writeText")?;
+    let result = write_text
+        .call1(&clipboard, &JsValue::from_str(value))
+        .map_err(js_error_label)?;
+    observe_promise_rejection(result);
+    Ok(())
+}
+
+fn observe_promise_rejection(value: JsValue) {
+    let Ok(promise) = value.dyn_into::<Promise>() else {
+        return;
+    };
+    let promise: JsValue = promise.into();
+    let Ok(catch) = js_method(&promise, "catch") else {
+        return;
+    };
+    let handler =
+        wasm_bindgen::closure::Closure::once_into_js(|_error: JsValue| JsValue::UNDEFINED);
+    let _ = catch.call1(&promise, &handler);
 }
 
 pub(crate) async fn await_js(value: JsValue) -> Result<JsValue, String> {
@@ -219,5 +307,79 @@ pub(crate) fn js_set(object: &Object, name: &str, value: &JsValue) -> Result<(),
 }
 
 pub(crate) fn js_error_label(error: JsValue) -> String {
-    error.as_string().unwrap_or_else(|| format!("{error:?}"))
+    if let Some(message) = js_error_message(&error) {
+        return message;
+    }
+    if let Some(text) = error.as_string() {
+        return compact_js_error_text(&text);
+    }
+    compact_js_error_text(&format!("{error:?}"))
+}
+
+fn js_error_message(error: &JsValue) -> Option<String> {
+    let message = string_property(error, "message")?;
+    let name = string_property(error, "name");
+    match name.as_deref() {
+        Some(name) if !name.is_empty() && name != "Error" && !message.starts_with(name) => {
+            Some(format!("{name}: {message}"))
+        }
+        _ => Some(message),
+    }
+}
+
+fn string_property(object: &JsValue, name: &str) -> Option<String> {
+    Reflect::get(object, &JsValue::from_str(name))
+        .ok()
+        .and_then(|value| value.as_string())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn compact_js_error_text(raw: &str) -> String {
+    let mut text = raw.trim();
+    if let Some(inner) = text
+        .strip_prefix("JsValue(")
+        .and_then(|value| value.strip_suffix(')'))
+    {
+        text = inner.trim();
+    }
+    text.lines()
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown JavaScript error")
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use js_sys::Error;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::*;
+
+    #[wasm_bindgen_test]
+    fn js_error_label_uses_error_message_without_stack() {
+        let error = Error::new("Onion route error: no live onion exit offers service \"https\"");
+
+        assert_eq!(
+            js_error_label(error.into()),
+            "Onion route error: no live onion exit offers service \"https\""
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn js_error_label_compacts_debug_fallback() {
+        assert_eq!(
+            compact_js_error_text("JsValue(Error: boom\n    at wasm-function[1])"),
+            "Error: boom"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn browser_internal_debug_urls_are_detected() {
+        assert!(is_browser_internal_url("chrome://webrtc-internals/"));
+        assert!(is_browser_internal_url("about:webrtc"));
+        assert!(!is_browser_internal_url("https://example.test/"));
+    }
 }

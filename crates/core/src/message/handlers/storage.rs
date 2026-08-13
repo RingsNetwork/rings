@@ -21,8 +21,6 @@ use crate::dht::StorageSyncPurpose;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::effects::CoreEffect;
-use crate::message::effects::PayloadRelayFunctor;
-use crate::message::effects::StorageSyncFunctor;
 use crate::message::types::FoundEntry;
 use crate::message::types::Message;
 use crate::message::types::SearchEntry;
@@ -39,8 +37,8 @@ use crate::swarm::transport::SwarmTransport;
 use crate::swarm::Swarm;
 
 /// ChordStorageInterface should imply necessary method for DHT storage
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait ChordStorageInterface<const REDUNDANT: u16> {
     /// Fetch an entry from DHT storage.
     async fn storage_fetch(&self, entry_key: Did) -> Result<()>;
@@ -55,8 +53,8 @@ pub trait ChordStorageInterface<const REDUNDANT: u16> {
 }
 
 /// ChordStorageInterfaceCacheChecker defines the interface for checking the local cache of the DHT.
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait ChordStorageInterfaceCacheChecker {
     /// Check the local cache of the DHT for a specific entry key.
     ///
@@ -77,7 +75,7 @@ async fn reset_storage_relay_destination(
     next: Did,
 ) -> Result<()> {
     handler
-        .run_effects([PayloadRelayFunctor::reset_destination(ctx, next).into()])
+        .run_effects([CoreEffect::reset_destination(ctx, next)])
         .await
 }
 
@@ -95,8 +93,8 @@ async fn repair_observed_storage_misses(
 }
 
 /// Execute storage fetch actions for the Swarm-facing storage API.
-#[cfg_attr(feature = "wasm", async_recursion(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_recursion)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_recursion(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_recursion)]
 async fn handle_storage_fetch_act<const REDUNDANT: u16>(
     transport: Arc<SwarmTransport>,
     resource: Did,
@@ -148,8 +146,8 @@ async fn handle_storage_fetch_act<const REDUNDANT: u16>(
 }
 
 /// Execute storage store actions for the Swarm-facing storage API.
-#[cfg_attr(feature = "wasm", async_recursion(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_recursion)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_recursion(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_recursion)]
 pub(super) async fn handle_storage_store_act(
     transport: Arc<SwarmTransport>,
     act: PeerRingAction,
@@ -208,31 +206,18 @@ async fn run_storage_repair_transport_effects(
     transport: Arc<SwarmTransport>,
     act: PeerRingAction,
 ) -> Result<()> {
-    for delivery in act.storage_sync_deliveries()? {
+    for delivery in act.coalesced_storage_sync_deliveries()? {
         let msg = SyncEntriesWithSuccessor::from_delivery(delivery);
-        transport.send_storage_sync(msg).await?;
+        transport
+            .send_storage_sync_or_defer(msg, "storage_repair")
+            .await?;
     }
     Ok(())
 }
 
-/// Lower copy-only storage repair actions emitted inside message handlers.
-///
-/// Law: lowering a storage-sync delivery preserves its destination and payload
-/// exactly; the transport interpreter chooses the storage route and records the
-/// ack capability at the effect boundary.
-pub(super) fn storage_sync_effects(act: PeerRingAction) -> Result<Vec<CoreEffect<'static>>> {
-    act.storage_sync_deliveries()?
-        .into_iter()
-        .map(|delivery| {
-            let msg = SyncEntriesWithSuccessor::from_delivery(delivery);
-            Ok(StorageSyncFunctor::send_storage_sync(msg).into())
-        })
-        .collect()
-}
-
 /// Execute storage search actions emitted by inbound message handlers.
-#[cfg_attr(feature = "wasm", async_recursion(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_recursion)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_recursion(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_recursion)]
 async fn handle_storage_search_act(
     handler: &MessageHandler,
     ctx: &MessagePayload,
@@ -243,7 +228,7 @@ async fn handle_storage_search_act(
     match act {
         PeerRingAction::SomeEntry(evidence) => {
             handler
-                .run_effects([PayloadRelayFunctor::send_report_message(
+                .run_effects([CoreEffect::send_report_message(
                     ctx,
                     Message::FoundEntry(FoundEntry {
                         data: vec![evidence.entry],
@@ -251,13 +236,12 @@ async fn handle_storage_search_act(
                         resource,
                         redundancy,
                     }),
-                )
-                .into()])
+                )])
                 .await
         }
         PeerRingAction::EntryMisses(misses) => {
             handler
-                .run_effects([PayloadRelayFunctor::send_report_message(
+                .run_effects([CoreEffect::send_report_message(
                     ctx,
                     Message::FoundEntry(FoundEntry {
                         data: vec![],
@@ -265,8 +249,7 @@ async fn handle_storage_search_act(
                         resource,
                         redundancy,
                     }),
-                )
-                .into()])
+                )])
                 .await
         }
         PeerRingAction::RemoteAction(next, _) => {
@@ -389,7 +372,7 @@ async fn report_synced_entries(
     acks: Vec<SyncedEntryAck>,
 ) -> Result<()> {
     handler
-        .run_effects([PayloadRelayFunctor::send_report_message(
+        .run_effects([CoreEffect::send_report_message(
             ctx,
             Message::SyncEntriesWithSuccessorReport(SyncEntriesWithSuccessorReport::new(
                 purpose,
@@ -397,13 +380,12 @@ async fn report_synced_entries(
                 handler.dht.did,
                 acks,
             )),
-        )
-        .into()])
+        )])
         .await
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl ChordStorageInterfaceCacheChecker for Swarm {
     /// Check local cache
     async fn storage_check_cache(&self, entry_key: Did) -> Option<Entry> {
@@ -411,8 +393,8 @@ impl ChordStorageInterfaceCacheChecker for Swarm {
     }
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl<const REDUNDANT: u16> ChordStorageInterface<REDUNDANT> for Swarm {
     /// Fetch an entry. If it exists in local storage, copy it to the cache;
     /// otherwise query the responsible remote node.
@@ -465,8 +447,8 @@ impl<const REDUNDANT: u16> ChordStorageInterface<REDUNDANT> for Swarm {
     }
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<SearchEntry> for MessageHandler {
     /// Search Entry via successor
     /// If a Entry is storead local, it will response immediately.(See Chordstorageinterface::storage_fetch)
@@ -481,13 +463,13 @@ impl HandleMsg<SearchEntry> for MessageHandler {
     }
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<FoundEntry> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &FoundEntry) -> Result<()> {
         if ctx.should_forward_from(self.dht.did) {
             return self
-                .run_effects([PayloadRelayFunctor::forward_payload(ctx, None).into()])
+                .run_effects([CoreEffect::forward_payload(ctx, None)])
                 .await;
         }
         // Pre: this node started a local lookup for (resource, redundancy).
@@ -515,22 +497,22 @@ impl HandleMsg<FoundEntry> for MessageHandler {
     }
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<PlacedEntryOperation> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &PlacedEntryOperation) -> Result<()> {
         handle_placed_entry_operation(self, ctx, msg).await
     }
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<SyncEntriesWithSuccessor> for MessageHandler {
     // received remote sync entry request
     async fn handle(&self, ctx: &MessagePayload, msg: &SyncEntriesWithSuccessor) -> Result<()> {
         if let Some(next) = next_hop_for_sync_entries(self, ctx, msg)? {
             return self
-                .run_effects([PayloadRelayFunctor::forward_payload(ctx, Some(next)).into()])
+                .run_effects([CoreEffect::forward_payload(ctx, Some(next))])
                 .await;
         }
 
@@ -546,8 +528,8 @@ impl HandleMsg<SyncEntriesWithSuccessor> for MessageHandler {
     }
 }
 
-#[cfg_attr(feature = "wasm", async_trait(?Send))]
-#[cfg_attr(not(feature = "wasm"), async_trait)]
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl HandleMsg<SyncEntriesWithSuccessorReport> for MessageHandler {
     async fn handle(
         &self,
@@ -556,7 +538,7 @@ impl HandleMsg<SyncEntriesWithSuccessorReport> for MessageHandler {
     ) -> Result<()> {
         if ctx.should_forward_from(self.dht.did) {
             return self
-                .run_effects([PayloadRelayFunctor::forward_payload(ctx, None).into()])
+                .run_effects([CoreEffect::forward_payload(ctx, None)])
                 .await;
         }
 
@@ -575,6 +557,6 @@ impl HandleMsg<SyncEntriesWithSuccessorReport> for MessageHandler {
     }
 }
 
-#[cfg(not(feature = "wasm"))]
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 #[cfg(test)]
 mod tests;

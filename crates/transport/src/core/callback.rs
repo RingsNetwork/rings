@@ -12,8 +12,11 @@ use crate::core::transport::WebrtcConnectionState;
 type CallbackError = Box<dyn std::error::Error>;
 
 /// Any object that implements this trait can be used as a callback for the connection.
-#[cfg_attr(feature = "web-sys-webrtc", async_trait(?Send))]
-#[cfg_attr(not(feature = "web-sys-webrtc"), async_trait)]
+#[cfg_attr(all(feature = "web-sys-webrtc", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(
+    not(all(feature = "web-sys-webrtc", target_family = "wasm")),
+    async_trait
+)]
 pub trait TransportCallback {
     /// Notify the data channel is open.
     async fn on_data_channel_open(&self, _cid: &str) -> Result<(), CallbackError> {
@@ -46,11 +49,11 @@ pub trait TransportCallback {
 /// The `new_connection` method of
 /// [TransportInterface](super::transport::TransportInterface) trait will
 /// accept boxed [TransportCallback] trait object.
-#[cfg(not(feature = "web-sys-webrtc"))]
+#[cfg(not(all(feature = "web-sys-webrtc", target_family = "wasm")))]
 pub type BoxedTransportCallback = Box<dyn TransportCallback + Send + Sync>;
 
 /// The `new_connection` method of
 /// [TransportInterface](super::transport::TransportInterface) trait will
 /// accept boxed [TransportCallback] trait object.
-#[cfg(feature = "web-sys-webrtc")]
+#[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
 pub type BoxedTransportCallback = Box<dyn TransportCallback>;

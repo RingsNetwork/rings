@@ -72,8 +72,8 @@ def test_header_loads_from_crate_owned_path():
     module = load_example_module()
 
     header = module.read_header()
-    assert "new_provider_with_callback" in header
-    assert "const char *request" in header
+    assert "rings_node_new_provider_with_callback" in header
+    assert "const char *rings_node_request" in header
 
     ffi = module.build_ffi()
     assert ffi.typeof("struct ProviderPtr *")
@@ -99,7 +99,7 @@ def test_request_reports_null_ffi_return_as_runtime_error():
     provider_storage = ffi.new("struct ProviderPtr *")
 
     class Rings:
-        def request(self, provider, method, data):
+        def rings_node_request(self, provider, method, data):
             return ffi.NULL
 
     runtime = module.FfiRuntime(ffi=ffi, rings=Rings())
@@ -115,10 +115,10 @@ def test_create_provider_reports_null_provider_ptr_as_runtime_error():
     class Rings:
         Debug = 0
 
-        def init_logging(self, level):
+        def rings_node_init_logging(self, level):
             pass
 
-        def new_provider_with_callback(
+        def rings_node_new_provider_with_callback(
             self,
             network_id,
             ice_server,
@@ -128,6 +128,9 @@ def test_create_provider_reports_null_provider_ptr_as_runtime_error():
             signer,
         ):
             return ffi.new("struct ProviderPtr *")[0]
+
+        def rings_node_listen(self, provider):
+            pass
 
     runtime = module.FfiRuntime(ffi=ffi, rings=Rings())
     account = Web3().eth.account.create()

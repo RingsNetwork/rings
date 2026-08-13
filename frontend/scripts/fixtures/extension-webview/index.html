@@ -1,0 +1,234 @@
+<!doctype html>
+<html>
+  <head>
+    <title>Fixture</title>
+  </head>
+  <body>
+    <h1>Onion fixture</h1>
+    <img id="onion-image" src=__IMAGE_TARGET__ alt="fixture" />
+    <video id="multi-resource" preload="none" src=__IMAGE_TARGET__ poster=__IMAGE_LARGE_TARGET__></video>
+    <img id="responsive-image" srcset=__SRCSET_TARGETS__ alt="responsive fixture" />
+    <div id="styled" style=__STYLE_TARGET__>styled</div>
+    <style>@import __IMPORT_TARGET__;</style>
+    <p id="imported-style">imported style</p>
+    <p id="nested-style">nested imported style</p>
+    <p id="runtime-result" hidden></p>
+    <p id="empty-result" hidden></p>
+    <p id="xhr-result" hidden></p>
+    <p id="xhr-reuse-result" hidden></p>
+    <p id="xhr-abort-result" hidden></p>
+    <p id="xhr-timeout-result" hidden></p>
+    <p id="xhr-open-result" hidden></p>
+    <p id="dynamic-result" hidden></p>
+    <p id="redirect-result" hidden></p>
+    <p id="manual-redirect-result" hidden></p>
+    <p id="worker-result" hidden></p>
+    <p id="worker-clone-result" hidden></p>
+    <p id="shared-worker-result" hidden></p>
+    <p id="module-worker-result" hidden></p>
+    <p id="module-diamond-result" hidden></p>
+    <iframe id="nested-remote" src="https://fixture.example/nested-frame"></iframe>
+    <iframe
+      id="nested-srcdoc"
+      srcdoc="<p id='srcdoc-runtime-result'></p><script>fetch('https://fixture.example/srcdoc-runtime').then((response) => response.text()).then((text) => { document.getElementById('srcdoc-runtime-result').textContent = text; });</script>"
+    ></iframe>
+    <button
+      id="direct-navigation"
+      type="button"
+      onclick="location.href='https://fixture.example/direct-navigation'"
+    >
+      direct navigation
+    </button>
+    <script data-rings-webview-bootstrap>__RINGS_BOOTSTRAP__</script>
+    <script>
+      fetch("https://fixture.example/runtime")
+        .then((response) => response.text())
+        .then((text) => {
+          const result = document.getElementById("runtime-result");
+          result.textContent = text;
+          result.hidden = false;
+        });
+      fetch("https://fixture.example/empty")
+        .then((response) => response.text())
+        .then((text) => {
+          const result = document.getElementById("empty-result");
+          result.textContent = text === "" ? "empty 204 through onion bridge" : "unexpected 204 body";
+          result.hidden = false;
+        });
+
+      const xhr = new XMLHttpRequest();
+      xhr.open("GET", "https://fixture.example/runtime-xhr");
+      xhr.onload = () => {
+        const result = document.getElementById("xhr-result");
+        result.textContent = xhr.responseText;
+        result.hidden = false;
+      };
+      xhr.send();
+
+      const reusableXhr = new XMLHttpRequest();
+      reusableXhr.open("GET", "https://fixture.example/runtime-xhr");
+      reusableXhr.setRequestHeader("X-Stale", "must-not-leak");
+      reusableXhr.onload = () => {
+        reusableXhr.open("GET", "https://fixture.example/runtime-xhr-reused");
+        reusableXhr.onload = () => {
+          const result = document.getElementById("xhr-reuse-result");
+          result.textContent = reusableXhr.responseText;
+          result.hidden = false;
+        };
+        reusableXhr.send();
+      };
+      reusableXhr.send();
+
+      const abortedXhr = new XMLHttpRequest();
+      const abortEvents = [];
+      for (const type of ["readystatechange", "loadstart", "abort", "loadend"]) {
+        abortedXhr.addEventListener(type, () => abortEvents.push(type + ":" + abortedXhr.readyState));
+      }
+      abortedXhr.open("GET", "https://fixture.example/runtime-xhr-slow");
+      abortedXhr.send();
+      abortedXhr.abort();
+      queueMicrotask(() => {
+        const result = document.getElementById("xhr-abort-result");
+        result.textContent = abortEvents.join(",") + ";after:" + abortedXhr.readyState;
+        result.hidden = false;
+      });
+
+      const timedOutXhr = new XMLHttpRequest();
+      const timeoutEvents = [];
+      for (const type of ["readystatechange", "loadstart", "timeout", "loadend"]) {
+        timedOutXhr.addEventListener(type, () => timeoutEvents.push(type + ":" + timedOutXhr.readyState));
+      }
+      timedOutXhr.open("GET", "https://fixture.example/runtime-xhr-slow");
+      timedOutXhr.timeout = 20;
+      timedOutXhr.onloadend = () =>
+        queueMicrotask(() => {
+          const result = document.getElementById("xhr-timeout-result");
+          result.textContent = timeoutEvents.join(",") + ";after:" + timedOutXhr.readyState;
+          result.hidden = false;
+        });
+      timedOutXhr.send();
+
+      const reopenedXhr = new XMLHttpRequest();
+      const openEvents = [];
+      for (const type of ["readystatechange", "loadstart", "abort", "loadend"]) {
+        reopenedXhr.addEventListener(type, () => openEvents.push(type + ":" + reopenedXhr.readyState));
+      }
+      reopenedXhr.open("GET", "https://fixture.example/runtime-xhr-slow");
+      reopenedXhr.send();
+      reopenedXhr.open("GET", "https://fixture.example/runtime-xhr-reopened");
+      queueMicrotask(() => {
+        const result = document.getElementById("xhr-open-result");
+        result.textContent = openEvents.join(",") + ";after:" + reopenedXhr.readyState;
+        result.hidden = false;
+      });
+
+      fetch("https://fixture.example/redirect-start")
+        .then((response) => response.text())
+        .then((text) => {
+          const result = document.getElementById("redirect-result");
+          result.textContent = text;
+          result.hidden = false;
+        });
+      fetch("https://fixture.example/redirect-start", { redirect: "manual" }).then((response) => {
+        const result = document.getElementById("manual-redirect-result");
+        result.textContent =
+          response.type + ":" + response.status + ":" + (response.headers.has("location") ? "location" : "no-location");
+        result.hidden = false;
+      });
+
+      const worker = new Worker("https://fixture.example/worker.js");
+      worker.onmessage = (event) => {
+        const result = document.getElementById("worker-result");
+        result.textContent = event.data;
+        result.hidden = false;
+        worker.terminate();
+      };
+      worker.postMessage("test");
+
+      const cloneWorker = new Worker("https://fixture.example/worker-clone.js");
+      const clonePayload = { label: "before" };
+      const cloneBuffer = new ArrayBuffer(1);
+      new Uint8Array(cloneBuffer)[0] = 7;
+      cloneWorker.onmessage = (event) => {
+        const result = document.getElementById("worker-clone-result");
+        result.textContent = event.data + ":detached=" + String(cloneBuffer.byteLength === 0);
+        result.hidden = false;
+        cloneWorker.terminate();
+      };
+      cloneWorker.postMessage({ payload: clonePayload, buffer: cloneBuffer }, [cloneBuffer]);
+      const cloneDetachedSynchronously = cloneBuffer.byteLength === 0;
+      clonePayload.label = "after";
+      if (!cloneDetachedSynchronously) throw new Error("Worker transferable was not detached synchronously");
+
+      const sharedWorker = new SharedWorker("https://fixture.example/shared-worker.js", { name: "fixture" });
+      sharedWorker.port.onmessage = (event) => {
+        const result = document.getElementById("shared-worker-result");
+        result.textContent = event.data;
+        result.hidden = false;
+      };
+      sharedWorker.port.start();
+      sharedWorker.port.postMessage("shared");
+
+      const moduleWorker = new Worker("https://fixture.example/module-worker.js", { type: "module" });
+      moduleWorker.onmessage = (event) => {
+        const result = document.getElementById("module-worker-result");
+        result.textContent = event.data;
+        result.hidden = false;
+        moduleWorker.terminate();
+      };
+      moduleWorker.postMessage("module");
+
+      const diamondWorker = new Worker("https://fixture.example/module-diamond.js", { type: "module" });
+      diamondWorker.onmessage = (event) => {
+        const result = document.getElementById("module-diamond-result");
+        result.textContent = event.data;
+        result.hidden = false;
+        diamondWorker.terminate();
+      };
+      diamondWorker.postMessage("diamond");
+
+      const rendererGeneration = Number(new URL(location.href).searchParams.get("navigation"));
+      setInterval(
+        () =>
+          window.parent.postMessage(
+            {
+              type: "rings.webview.frame.ready",
+              rendererGeneration,
+            },
+            "*",
+          ),
+        20,
+      );
+      document.documentElement.dataset.gatewayLeaked = "false";
+      window.addEventListener("message", (event) => {
+        if (event.data?.type === "rings.webview.gateway.response") {
+          document.documentElement.dataset.gatewayLeaked = "true";
+        }
+      });
+      window.parent.postMessage(
+        {
+          type: "rings.webview.gateway.request",
+          requestId: 999,
+          request: { target: "https://fixture.example/forged", method: "GET", headers: [], body: [] },
+        },
+        "*",
+      );
+      try {
+        new RTCPeerConnection();
+        document.documentElement.dataset.rtcBlocked = "false";
+      } catch (_error) {
+        document.documentElement.dataset.rtcBlocked = "true";
+      }
+      try {
+        new WebTransport("https://fixture.example/direct");
+        document.documentElement.dataset.webTransportBlocked = "false";
+      } catch (_error) {
+        document.documentElement.dataset.webTransportBlocked = "true";
+      }
+      document.documentElement.dataset.popupBlocked = String(window.open("https://fixture.example/popup") === null);
+      const dynamic = document.createElement("script");
+      dynamic.src = "https://fixture.example/dynamic.js";
+      document.body.append(dynamic);
+    </script>
+  </body>
+</html>

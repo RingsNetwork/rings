@@ -1,11 +1,44 @@
 //! Utils for ring-core
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 use chrono::Utc;
+
 /// Get local utc timestamp (millisecond)
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 pub fn get_epoch_ms() -> u128 {
     Utc::now().timestamp_millis() as u128
 }
 
-#[cfg(feature = "wasm")]
+/// Get local utc timestamp (millisecond)
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+pub fn get_epoch_ms() -> u128 {
+    let now = js_sys::Date::now();
+    if now.is_finite() && now > 0.0 {
+        now as u128
+    } else {
+        0
+    }
+}
+
+pub(crate) fn get_epoch_ms_i64() -> i64 {
+    i64::try_from(get_epoch_ms()).unwrap_or(i64::MAX)
+}
+
+/// Sleep for `duration` on the active runtime.
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+pub(crate) async fn sleep(duration: std::time::Duration) {
+    futures_timer::Delay::new(duration).await;
+}
+
+/// Sleep for `duration` on the JavaScript event loop.
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+pub(crate) async fn sleep(duration: std::time::Duration) {
+    let millis = i32::try_from(duration.as_millis()).unwrap_or(i32::MAX);
+    if let Err(error) = js_utils::window_sleep(millis).await {
+        tracing::error!("failed to wait for timeout: {:?}", error);
+    }
+}
+
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
 /// Toolset for wasm
 pub mod js_value {
     use serde::de::DeserializeOwned;
@@ -38,7 +71,7 @@ pub mod js_value {
     }
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
 /// Helpers for adapting JavaScript functions into async Rust callbacks.
 pub mod js_func {
     /// This macro will generate a wrapper for mapping a js_sys::Function with type fn(T, T, T, T) -> Promise<()>
@@ -145,7 +178,7 @@ pub mod js_func {
     of!(of4, a: T0, b: T1, c: T2, d: T3);
 }
 
-#[cfg(feature = "wasm")]
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
 /// Browser and worker utility functions for wasm runtimes.
 pub mod js_utils {
     use std::future::Future;

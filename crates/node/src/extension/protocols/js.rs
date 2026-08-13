@@ -28,10 +28,10 @@ use rings_core::dht::Did;
 use wasm_bindgen::JsValue;
 
 use crate::extension::ext::Ctx;
+use crate::extension::ext::EffectScope;
 use crate::extension::ext::Interpret;
 use crate::extension::ext::Protocol;
 use crate::extension::ext::Reject;
-use crate::extension::ext::Scope;
 use crate::extension::ext::Transition;
 use crate::extension::ext::Wire;
 
@@ -99,7 +99,7 @@ pub struct JsShell;
 impl Interpret for JsShell {
     type Effect = JsSend;
 
-    async fn run(&self, scope: &Scope, effect: JsSend) -> crate::error::Result<Vec<Bytes>> {
+    async fn run(&self, scope: &EffectScope, effect: JsSend) -> crate::error::Result<Vec<Bytes>> {
         scope.send(effect.to, effect.payload).await?;
         Ok(Vec::new())
     }

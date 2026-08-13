@@ -107,7 +107,7 @@ pub trait Protocol {
     /// Protocol-private state, owned by the runtime and threaded through `step`.
     type State;
     /// The protocol's typed input, produced by [`decode`](Protocol::decode).
-    type Event;
+    type Event: super::MaybeSend;
     /// The protocol's **own** effect algebra (the core defines no global effect enum).
     type Effect;
 
