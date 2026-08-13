@@ -7,10 +7,9 @@ use super::BrowserOnionProxy;
 use super::BrowserOnionProxyResponse;
 use crate::error::Error;
 use crate::error::Result as NodeResult;
-use crate::onion::circuit::encode_initial_forward;
+use crate::onion::circuit::encode_initial_forward_link;
 use crate::onion::circuit::route_first_hop;
 use crate::onion::circuit::OnionClientReturn;
-use crate::onion::circuit::ONION_CIRCUIT_NAMESPACE;
 use crate::onion::https::encode_https_payload;
 use crate::onion::https::OnionHttpsClientRequest;
 use crate::onion::https::OnionHttpsPayload;
@@ -54,11 +53,12 @@ impl BrowserOnionProxy {
             client_return.return_id,
         )?;
         let request_payload = encode_https_payload(OnionHttpsPayload::Request(request))?;
-        let (to, payload) =
-            encode_initial_forward(client_return, &proxy_route.route, id, request_payload)?;
-        let envelope =
-            crate::extension::ext::Envelope::new(ONION_CIRCUIT_NAMESPACE.to_string(), payload);
-        self.processor.send_direct_envelope(to, &envelope).await?;
+        let (first_link, payload) =
+            encode_initial_forward_link(client_return, &proxy_route.route, id, request_payload)?;
+        self.runtime
+            .link_sender()
+            .send_sealed(self.scope.clone(), first_link, payload)
+            .await?;
 
         let response = pending_request.fuse();
         let timeout = js_utils::window_sleep(30_000).fuse();

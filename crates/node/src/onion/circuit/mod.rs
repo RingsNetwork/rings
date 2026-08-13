@@ -21,8 +21,10 @@ use bytes::Bytes;
 pub use cell::OnionCellBucket;
 pub use codec::OnionCircuitEvent;
 pub use crypto::encode_initial_forward;
+#[cfg(rings_browser)]
+pub(crate) use crypto::encode_initial_forward_link;
 pub use crypto::route_first_hop;
-pub use crypto::send_backward;
+pub(crate) use crypto::send_backward;
 #[cfg(rings_native)]
 pub(crate) use crypto::OnionCircuitPath;
 pub use protocol::OnionCircuitCapabilities;
@@ -33,6 +35,7 @@ use rings_core::dht::Did;
 use rings_core::ecc::elgamal::impls::secp256k1::AeadCiphertext;
 use rings_core::ecc::PublicKey;
 use rings_core::message::MessageVerification;
+pub(crate) use send_outbox::OnionLinkSender;
 use serde::Deserialize;
 use serde::Serialize;
 pub use shell::OnionCircuitExitFrame;
@@ -41,6 +44,19 @@ pub use shell::OnionCircuitShell;
 
 use super::OnionServiceName;
 use crate::error::Result;
+
+/// Immediate authenticated overlay link for one already sealed circuit cell.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct OnionLink {
+    peer: Did,
+    recipient: PublicKey<33>,
+}
+
+impl OnionLink {
+    const fn new(peer: Did, recipient: PublicKey<33>) -> Self {
+        Self { peer, recipient }
+    }
+}
 
 /// Namespace used by route-aware onion circuit messages.
 pub const ONION_CIRCUIT_NAMESPACE: &str = "onion-circuit";
@@ -63,6 +79,12 @@ pub(super) const MAX_ONION_RELAY_CIRCUITS: usize = 1024;
 pub(super) const ONION_RELAY_RETURN_TTL_MS: u128 = 120_000;
 pub(super) const ONION_FORWARD_PAYLOAD_TTL_MS: u128 = 120_000;
 pub(super) const ONION_FORWARD_EXPIRY_QUANTUM_MS: u128 = 30_000;
+/// Maximum authenticated lifetime accepted by an exit after receipt.
+///
+/// Law: replay witnesses live for this same interval, so no still-valid forward layer can outlive
+/// the nonce that proves its one-shot exit effect was already consumed.
+pub(super) const ONION_FORWARD_MAX_VALIDITY_MS: u128 =
+    ONION_FORWARD_PAYLOAD_TTL_MS + ONION_FORWARD_EXPIRY_QUANTUM_MS;
 pub(super) const ONION_CRYPTO_LIMIT_WINDOW_MS: u128 = 60_000;
 pub(super) const MAX_ONION_CRYPTO_OPS_PER_WINDOW: u32 = 4096;
 pub(super) const MAX_ONION_CRYPTO_OPS_GLOBAL_PER_WINDOW: u32 = 8192;
@@ -251,17 +273,6 @@ impl OnionClientReturn {
         Self {
             session_public_key,
             return_id: OnionReturnId::random(),
-        }
-    }
-
-    /// Build a client return descriptor with an explicit return id.
-    pub const fn with_return_id(
-        session_public_key: PublicKey<33>,
-        return_id: OnionReturnId,
-    ) -> Self {
-        Self {
-            session_public_key,
-            return_id,
         }
     }
 }

@@ -1,6 +1,7 @@
 (() => {
   const gatewayPrefix = "/webview/";
   const workerUrl = "/rings-webview-service-worker.js?gateway-host-protocol=5";
+  const gatewayHostReloadGuardKey = "rings-webview-gateway-host-reload";
   const debugCapabilityRequestType = "rings-webview-debug-capability-request";
   const debugCapabilityResponseType = "rings-webview-debug-capability-response";
   const gatewayHostCapability = createGatewayHostCapability();
@@ -8,6 +9,8 @@
   let registrationPromise;
   let popupDebugCapabilityPromise;
   let gatewayHostHeartbeat;
+  let gatewayHostReloadRequested = false;
+  let gatewayHostLifecycleInstalled = false;
   const debugEntries = [];
   const pendingGatewayRequests = new Map();
 
@@ -203,7 +206,7 @@
           // A newly claimed page did not cross the worker's fetch boundary, so it cannot yet hold
           // the trusted-shell witness required for gateway registration. Reload exactly once under
           // worker control rather than weakening that security predicate to a URL-only check.
-          globalThis.location.reload();
+          reloadGatewayHostShell("Reloading the newly controlled gateway host shell");
           return true;
         }
         // Register the trusted shell while the navigation witness is fresh. The Rust gateway may
@@ -230,12 +233,59 @@
     });
     ownsGatewayHost = Boolean(acknowledged);
     if (acknowledged) {
+      clearGatewayHostReloadGuard();
       startGatewayHostHeartbeat();
       recordDebug("host", "Registered the local Rings node as gateway host");
       return true;
     }
     recordDebug("host", "Service Worker rejected gateway host registration", "warning");
     throw new Error("Service Worker rejected gateway host registration");
+  }
+
+  function clearGatewayHostReloadGuard() {
+    gatewayHostReloadRequested = false;
+    try {
+      globalThis.sessionStorage?.removeItem(gatewayHostReloadGuardKey);
+    } catch (_error) {}
+  }
+
+  function stopGatewayHostHeartbeat() {
+    if (gatewayHostHeartbeat === undefined) {
+      return;
+    }
+    if (typeof globalThis.clearInterval === "function") {
+      globalThis.clearInterval(gatewayHostHeartbeat);
+    }
+    gatewayHostHeartbeat = undefined;
+  }
+
+  function reloadGatewayHostShell(reason) {
+    ownsGatewayHost = false;
+    stopGatewayHostHeartbeat();
+    let reloadAlreadyRequested = gatewayHostReloadRequested;
+    try {
+      reloadAlreadyRequested ||= globalThis.sessionStorage?.getItem(gatewayHostReloadGuardKey) === workerUrl;
+    } catch (_error) {}
+    if (reloadAlreadyRequested) {
+      return false;
+    }
+    gatewayHostReloadRequested = true;
+    try {
+      globalThis.sessionStorage?.setItem(gatewayHostReloadGuardKey, workerUrl);
+    } catch (_error) {}
+    recordDebug("host", reason, "warning");
+    globalThis.location.reload();
+    return true;
+  }
+
+  function installGatewayHostLifecycle() {
+    if (gatewayHostLifecycleInstalled || !navigator.serviceWorker || !isGatewayHostShell()) {
+      return;
+    }
+    gatewayHostLifecycleInstalled = true;
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      reloadGatewayHostShell("Service Worker controller changed; renewing the trusted gateway host witness");
+    });
   }
 
   function startGatewayHostHeartbeat() {
@@ -245,18 +295,21 @@
     gatewayHostHeartbeat = globalThis.setInterval(() => {
       const worker = navigator.serviceWorker?.controller;
       if (!worker) {
-        ownsGatewayHost = false;
+        reloadGatewayHostShell("Service Worker controller was lost; renewing the trusted gateway host witness");
         return;
       }
       void postWorkerMessage(worker, {
         type: "rings-webview-host-register",
         capability: gatewayHostCapability,
-      }).then((acknowledged) => {
-        ownsGatewayHost = Boolean(acknowledged);
-        if (!acknowledged) {
-          recordDebug("host", "Service Worker rejected gateway host lease renewal", "warning");
-        }
-      });
+      }).then(
+        (acknowledged) => {
+          ownsGatewayHost = Boolean(acknowledged);
+          if (!acknowledged) {
+            reloadGatewayHostShell("Service Worker rejected the gateway host lease renewal");
+          }
+        },
+        () => reloadGatewayHostShell("Service Worker gateway host lease renewal failed"),
+      );
     }, 20_000);
   }
 
@@ -329,25 +382,6 @@
         false,
         message.onion,
       );
-      return;
-    }
-    if (message?.type === "rings-webview-gateway-host-query") {
-      const ready = typeof globalThis.RingsWebviewGateway?.handle === "function";
-      event.ports?.[0]?.postMessage({ ready, capability: gatewayHostCapability });
-      const worker = navigator.serviceWorker.controller;
-      if (ready && worker) {
-        void postWorkerMessage(worker, {
-          type: "rings-webview-host-register",
-          capability: gatewayHostCapability,
-        }).then((acknowledged) => {
-          ownsGatewayHost = Boolean(acknowledged);
-          if (acknowledged) {
-            recordDebug("host", "Restored the local Rings node gateway host");
-          } else {
-            recordDebug("host", "Service Worker rejected restored gateway host registration", "warning");
-          }
-        });
-      }
       return;
     }
     if (message?.type === "rings-webview-gateway-cancel") {
@@ -438,7 +472,7 @@
       });
   });
 
-  const shellPreparation = prepareGatewayHostShell();
+  const shellPreparation = prepareGatewayHostShell().finally(installGatewayHostLifecycle);
   globalThis.RingsWebviewHost = Object.freeze({
     ensureReady,
     shellPreparation,

@@ -27,6 +27,8 @@ use super::OnionForwardFrame;
 use super::OnionForwardLayer;
 use super::OnionForwardNonce;
 use super::OnionForwardSequence;
+use super::OnionLink;
+use super::OnionLinkSender;
 use super::OnionReturnId;
 use super::OnionVerifiedPayload;
 use super::ONION_AEAD_NAMESPACE;
@@ -53,8 +55,19 @@ pub fn encode_initial_forward(
     circuit_id: OnionCircuitId,
     payload: OnionCircuitPayload,
 ) -> Result<(Did, Bytes)> {
+    encode_initial_forward_link(client, route, circuit_id, payload)
+        .map(|(link, payload)| (link.peer, payload))
+}
+
+/// Encode the first forward frame while preserving its authenticated link as one value.
+pub(crate) fn encode_initial_forward_link(
+    client: OnionClientReturn,
+    route: &OnionRoute,
+    circuit_id: OnionCircuitId,
+    payload: OnionCircuitPayload,
+) -> Result<(OnionLink, Bytes)> {
     validate_route_payload_service(route, &payload)?;
-    let first = route_first_hop(route)?;
+    let first = route_first_link(route)?;
     let layer = build_forward_layers(
         client,
         route.encryption_hops(),
@@ -63,12 +76,8 @@ pub fn encode_initial_forward(
         payload,
     )?;
     let frame = OnionForwardFrame { circuit_id, layer };
-    let recipient = route
-        .encryption_hops()
-        .first()
-        .map(|hop| hop.session_public_key)
-        .ok_or_else(|| Error::OnionRouteError(OnionRouteError::RouteHasNoHops))?;
-    seal_message(&OnionWireMessage::Forward(frame), recipient, None).map(|payload| (first, payload))
+    seal_message(&OnionWireMessage::Forward(frame), first.recipient, None)
+        .map(|payload| (first, payload))
 }
 
 /// Stable edge-id plan for a long-lived onion circuit.
@@ -103,7 +112,7 @@ impl OnionCircuitPath {
         &self,
         client: OnionClientReturn,
         payload: OnionCircuitPayload,
-    ) -> Result<(Did, Bytes)> {
+    ) -> Result<(OnionLink, Bytes)> {
         validate_route_payload_service(&self.route, &payload)?;
         let sequence = self
             .next_forward_sequence
@@ -112,7 +121,7 @@ impl OnionCircuitPath {
             })
             .map(OnionForwardSequence::new)
             .map_err(|_| Error::OnionRouteError(OnionRouteError::SequenceExhausted))?;
-        let first = route_first_hop(&self.route)?;
+        let first = route_first_link(&self.route)?;
         let layer = build_forward_layers_with_ids(
             client,
             self.route.encryption_hops(),
@@ -124,13 +133,7 @@ impl OnionCircuitPath {
             circuit_id: self.first_circuit_id,
             layer,
         };
-        let recipient = self
-            .route
-            .encryption_hops()
-            .first()
-            .map(|hop| hop.session_public_key)
-            .ok_or_else(|| Error::OnionRouteError(OnionRouteError::RouteHasNoHops))?;
-        seal_message(&OnionWireMessage::Forward(frame), recipient, None)
+        seal_message(&OnionWireMessage::Forward(frame), first.recipient, None)
             .map(|payload| (first, payload))
     }
 
@@ -145,15 +148,21 @@ impl OnionCircuitPath {
 /// Pre: `route` was built by the route module constructor.
 /// Post: result is the first encrypted hop DID used by forward encoding.
 pub fn route_first_hop(route: &OnionRoute) -> Result<Did> {
+    route_first_link(route).map(|link| link.peer)
+}
+
+/// Return the first overlay peer and hop encryption recipient as one inseparable link value.
+pub(crate) fn route_first_link(route: &OnionRoute) -> Result<OnionLink> {
     route
         .encryption_hops()
         .first()
-        .map(|hop| hop.did)
+        .map(|hop| OnionLink::new(hop.did, hop.session_public_key))
         .ok_or_else(|| Error::OnionRouteError(OnionRouteError::RouteHasNoHops))
 }
 
 /// Send a response payload back to the immediate return peer.
 pub async fn send_backward(
+    link_sender: &OnionLinkSender,
     scope: &Scope,
     signer: &SessionSk,
     path: OnionBackwardPath,
@@ -175,7 +184,13 @@ pub async fn send_backward(
         path.return_session_public_key,
         None,
     )?;
-    scope.send(path.return_peer, payload).await
+    link_sender
+        .send_sealed(
+            scope.clone(),
+            OnionLink::new(path.return_peer, path.return_session_public_key),
+            payload,
+        )
+        .await
 }
 
 fn build_forward_layers(

@@ -32,6 +32,7 @@ use wasm_bindgen_futures::JsFuture;
 
 use crate::error::Error;
 use crate::error::Result as NodeResult;
+use crate::extension::ext::Scope;
 use crate::measure::peer_quality_thresholds;
 use crate::measure::MeasureStorage;
 use crate::onion::circuit::route_first_hop;
@@ -125,6 +126,7 @@ impl ProviderListener {
 #[wasm_export]
 pub struct BrowserOnionProxy {
     processor: Arc<Processor>,
+    scope: Scope,
     config: OnionProxyConfig,
     runtime: Arc<OnionHttpsRuntime>,
     directory_endpoint: Option<String>,
@@ -771,6 +773,10 @@ impl Provider {
             .map_err(JsError::from)?;
         Ok(BrowserOnionProxy {
             processor: self.processor.clone(),
+            scope: Scope::new(
+                self.extensions().core(),
+                ONION_CIRCUIT_NAMESPACE.to_string(),
+            ),
             config: OnionProxyConfig::https_proxy(hop_count, allow_short_paths),
             runtime,
             directory_endpoint: self.onion_directory_endpoint().map_err(JsError::from)?,
@@ -903,9 +909,11 @@ impl Provider {
         &self,
         runtime: Arc<OnionHttpsRuntime>,
     ) -> OnionCircuitShell<BrowserOnionCircuitHandler> {
-        OnionCircuitShell::new(
+        let link_sender = runtime.link_sender();
+        OnionCircuitShell::with_link_sender(
             self.processor.session_sk().clone(),
             BrowserOnionCircuitHandler::new(runtime, self.processor.session_sk().clone()),
+            link_sender,
         )
     }
 }

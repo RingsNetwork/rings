@@ -23,7 +23,7 @@ const requestTimeoutMs = 30_000;
 const gatewayFetchDeadlineMs = requestTimeoutMs + 1_000;
 const webviewOverlayScriptPath = "/assets/webview-overlay.js";
 const gatewayContentSecurityPolicy =
-  "sandbox allow-scripts allow-forms allow-popups allow-downloads; default-src 'self' data: blob:; base-uri 'self'; connect-src 'self'; font-src 'self' data:; form-action 'self'; frame-src 'self' data: blob:; img-src 'self' data: blob:; media-src 'self' data: blob:; object-src 'self'; script-src 'self' data: 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; style-src 'self' data: 'unsafe-inline'; worker-src 'none'";
+  "sandbox allow-scripts allow-forms allow-popups allow-downloads; default-src 'self' data: blob:; base-uri 'self'; connect-src 'self'; font-src 'self' data:; form-action 'self'; frame-src 'self' data: blob:; img-src 'self' data: blob:; media-src 'self' data: blob:; object-src 'self'; script-src 'self' data: 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; style-src 'self' data: 'unsafe-inline'; webrtc 'block'; worker-src 'none'";
 const minimumGatewayHostCapabilityLength = 32;
 const clientStatePruneInterval = 64;
 const shellRegistrationLifetimeMs = 5_000;
@@ -387,10 +387,13 @@ function responseMustNotHaveBody(status) {
 }
 
 function controlledNavigationBody(request, status, headers, body) {
-  if (request.kind !== "navigation" || status < 200 || status >= 300) {
+  if (request.kind !== "navigation") {
     return body;
   }
   prepareControlledNavigationHeaders(headers);
+  if (status < 200 || status >= 300) {
+    return body;
+  }
   if (!body) return body;
   const bytes = bodyBytes(body);
   if (!bytes) {

@@ -44,6 +44,27 @@ fn runtime() -> OnionTcpRuntime {
 }
 
 #[test]
+fn native_tcp_and_https_share_one_node_wide_exit_budget() {
+    let session = session();
+    let policy = OnionExitPolicy {
+        max_circuits: 1,
+        max_streams_per_circuit: 1,
+        ..OnionExitPolicy::default()
+    };
+    let (tcp, https) = native_onion_runtimes(session, None);
+    let peer = Did::from(71_u32);
+    let _tcp_lease = tcp
+        .accounting
+        .admit(&policy, OnionCircuitId::new([71; 16]), peer, 0)
+        .expect("first protocol reserves the shared circuit budget");
+
+    assert!(https
+        .accounting_for_test()
+        .admit(&policy, OnionCircuitId::new([72; 16]), peer, 0)
+        .is_err());
+}
+
+#[test]
 fn exit_target_admission_returns_the_canonical_parsed_target() -> Result<()> {
     let policy =
         OnionExitPolicy::from_target_strings(vec!["example.com:443".to_string()], Vec::new())?;
@@ -375,6 +396,26 @@ fn native_tcp_exit_config_rejects_empty_or_non_tcp_services() {
         ),
         Err(Error::InvalidConfig(_))
     ));
+}
+
+#[test]
+fn native_https_proxy_requires_explicit_valid_exit_configuration() -> Result<()> {
+    let configured =
+        NativeOnionTcpExitConfig::new(vec![OnionExitService::https()], OnionExitPolicy::default())?
+            .with_https_proxy("http://127.0.0.1:6152")?;
+    assert_eq!(configured.https_proxy(), Some("http://127.0.0.1:6152"));
+
+    for invalid in ["", "relative-proxy", "socks5://127.0.0.1:6152"] {
+        assert!(matches!(
+            NativeOnionTcpExitConfig::new(
+                vec![OnionExitService::https()],
+                OnionExitPolicy::default(),
+            )?
+            .with_https_proxy(invalid),
+            Err(Error::InvalidConfig(_))
+        ));
+    }
+    Ok(())
 }
 
 #[test]

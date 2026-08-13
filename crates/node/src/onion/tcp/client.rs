@@ -4,6 +4,7 @@ use super::*;
 use crate::onion::circuit::OnionBackwardPath;
 
 struct ClientReturnPath {
+    runtime: Arc<OnionTcpRuntime>,
     scope: Scope,
     path: OnionCircuitPath,
     client_return: OnionClientReturn,
@@ -12,7 +13,14 @@ struct ClientReturnPath {
 #[async_trait::async_trait]
 impl pump::TcpDuplexEffects for ClientReturnPath {
     async fn send(&mut self, payload: OnionTcpPayload) -> Result<()> {
-        send_client_payload(&self.scope, &self.path, self.client_return, payload).await
+        send_client_payload(
+            &self.runtime.link_sender,
+            &self.scope,
+            &self.path,
+            self.client_return,
+            payload,
+        )
+        .await
     }
 
     fn remote_failed(&mut self, failure: &OnionExitFailure) {
@@ -31,6 +39,7 @@ pub(super) fn spawn_client_stream(
 ) {
     tokio::spawn(async move {
         let mut return_path = ClientReturnPath {
+            runtime: runtime.clone(),
             scope,
             path,
             client_return,
@@ -41,17 +50,21 @@ pub(super) fn spawn_client_stream(
 }
 
 async fn send_client_payload(
+    link_sender: &OnionLinkSender,
     scope: &Scope,
     path: &OnionCircuitPath,
     client_return: OnionClientReturn,
     payload: OnionTcpPayload,
 ) -> Result<()> {
     let payload = encode_tcp_payload(path.service_name(), payload)?;
-    let (to, payload) = path.encode_forward(client_return, payload)?;
-    scope.send(to, payload).await
+    let (first_link, payload) = path.encode_forward(client_return, payload)?;
+    link_sender
+        .send_sealed(scope.clone(), first_link, payload)
+        .await
 }
 
 pub(super) struct TcpBackwardRoute<'route> {
+    pub(super) link_sender: &'route OnionLinkSender,
     pub(super) scope: &'route Scope,
     pub(super) signer: &'route SessionSk,
     pub(super) service: &'route OnionServiceName,
@@ -68,6 +81,7 @@ impl TcpBackwardRoute<'_> {
         payload: OnionTcpPayload,
     ) -> Result<()> {
         send_backward(
+            self.link_sender,
             self.scope,
             self.signer,
             OnionBackwardPath::new(

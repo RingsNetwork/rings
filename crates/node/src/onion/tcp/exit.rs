@@ -109,6 +109,7 @@ impl ExitReturnPath {
             circuit_id: self.circuit_id,
         })?;
         TcpBackwardRoute {
+            link_sender: &self.runtime.link_sender,
             scope: &self.scope,
             signer: &self.runtime.session_sk,
             service: &self.service,

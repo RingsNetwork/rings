@@ -110,6 +110,8 @@ pub enum OnionRouteError {
     UnexpectedBackwardPayload,
     /// The runtime could not allocate a unique circuit id.
     CircuitIdAllocationFailed,
+    /// A queued endpoint cell lost its drain task before the overlay reported a result.
+    LinkSendCancelled,
     /// A TCP open response channel closed before an answer.
     TcpOpenResponseClosed,
     /// A TCP open request timed out before the exit answered.
@@ -230,6 +232,9 @@ impl fmt::Display for OnionRouteError {
             }
             Self::CircuitIdAllocationFailed => {
                 f.write_str("failed to allocate unique onion circuit id")
+            }
+            Self::LinkSendCancelled => {
+                f.write_str("onion link send was cancelled before overlay completion")
             }
             Self::TcpOpenResponseClosed => {
                 f.write_str("onion TCP open response channel closed")

@@ -13,7 +13,7 @@ use super::codec::OnionLocalMessage;
 use super::crypto::decrypt_client_payload;
 use super::crypto::decrypt_forward_layer;
 use super::limiter::OnionCryptoGate;
-use super::send_outbox::OnionSendOutbox;
+use super::send_outbox::OnionLinkSender;
 #[cfg(all(test, rings_native))]
 use super::send_outbox::OnionSendTestHook;
 use super::OnionAuthenticatedPayload;
@@ -35,7 +35,7 @@ use crate::extension::transport::platform::spawn_detached;
 pub struct OnionCircuitShell<H> {
     session_sk: SessionSk,
     crypto_gate: OnionCryptoGate,
-    send_outbox: OnionSendOutbox,
+    link_sender: OnionLinkSender,
     handler: Arc<H>,
 }
 
@@ -45,7 +45,7 @@ impl<H> OnionCircuitShell<H> {
         Self {
             session_sk,
             crypto_gate: OnionCryptoGate::default(),
-            send_outbox: OnionSendOutbox::default(),
+            link_sender: OnionLinkSender::default(),
             handler: Arc::new(handler),
         }
     }
@@ -59,7 +59,21 @@ impl<H> OnionCircuitShell<H> {
         Self {
             session_sk,
             crypto_gate: OnionCryptoGate::default(),
-            send_outbox: OnionSendOutbox::with_test_hook(test_hook),
+            link_sender: OnionLinkSender::with_test_hook(test_hook),
+            handler: Arc::new(handler),
+        }
+    }
+
+    /// Create an interpreter sharing one node-level link sender with endpoint adapters.
+    pub(crate) fn with_link_sender(
+        session_sk: SessionSk,
+        handler: H,
+        link_sender: OnionLinkSender,
+    ) -> Self {
+        Self {
+            session_sk,
+            crypto_gate: OnionCryptoGate::default(),
+            link_sender,
             handler: Arc::new(handler),
         }
     }
@@ -192,8 +206,11 @@ where H: OnionCircuitHandler + crate::extension::ext::MaybeSend + 'static
                 encoded_message,
             } => {
                 let payload = seal_encoded_message(&encoded_message, recipient, Some(bucket))?;
-                self.send_outbox
-                    .enqueue(scope.lifecycle(), to, recipient, bucket, payload)?;
+                self.link_sender.enqueue_sealed(
+                    scope.lifecycle(),
+                    super::OnionLink::new(to, recipient),
+                    payload,
+                )?;
                 Ok(Vec::new())
             }
             OnionCircuitEffect::Exit {

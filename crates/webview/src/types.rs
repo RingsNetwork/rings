@@ -206,19 +206,6 @@ impl GatewayRequest {
             }
         }
     }
-
-    /// Return the path and query component used by HTTPS onion request adapters.
-    pub fn path_and_query(&self) -> String {
-        let mut out = self.target.path().to_string();
-        if out.is_empty() {
-            out.push('/');
-        }
-        if let Some(query) = self.target.query() {
-            out.push('?');
-            out.push_str(query);
-        }
-        out
-    }
 }
 
 fn normalize_origin_url(mut url: Url) -> Url {

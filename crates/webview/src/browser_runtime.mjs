@@ -11,7 +11,23 @@
   const runtimeTargetHeader = "X-Rings-Webview-Target";
   const controlledAssetPaths = new Set(["/assets/webview-overlay.js"]);
   const styleProxies = new WeakMap();
+  const attributeMapOwners = new WeakMap();
   const nativeSetAttribute = globalThis.Element?.prototype?.setAttribute;
+  const nativeSetAttributeNode = globalThis.Element?.prototype?.setAttributeNode;
+  const nativeSetAttributeNodeNs = globalThis.Element?.prototype?.setAttributeNodeNS;
+  const nativeNamedNodeMapSetNamedItem = globalThis.NamedNodeMap?.prototype?.setNamedItem;
+  const nativeNamedNodeMapSetNamedItemNs = globalThis.NamedNodeMap?.prototype?.setNamedItemNS;
+  const nativeElementAttributes = Object.getOwnPropertyDescriptor(
+    globalThis.Element?.prototype || {},
+    "attributes"
+  );
+  const nativeAttrValue = Object.getOwnPropertyDescriptor(globalThis.Attr?.prototype || {}, "value");
+  const nativeNodeValue = Object.getOwnPropertyDescriptor(globalThis.Node?.prototype || {}, "nodeValue");
+  const nativeNodeTextContent = Object.getOwnPropertyDescriptor(
+    globalThis.Node?.prototype || {},
+    "textContent"
+  );
+  const nativeNodeAppendChild = globalThis.Node?.prototype?.appendChild;
   if (globalThis[marker]) {
     globalThis[marker].targetBase = targetBase;
     return;
@@ -111,6 +127,10 @@
       }
     }
   }
+  function nativeInsertion(prototype, method) {
+    const native = prototype?.[method];
+    return typeof native === "function" ? native : undefined;
+  }
   function injectSrcdocRuntime(root) {
     const doc = globalThis.document;
     if (!doc?.createElement) return;
@@ -179,6 +199,15 @@
     if (!isMetaRefreshElement(element)) return;
     const content = element.getAttribute?.("content");
     if (content != null) setRawAttribute(element, "content", encodeRefreshText(content));
+  }
+  function setRawAttributeValue(attribute, descriptor, value) {
+    if (descriptor?.set) return descriptor.set.call(attribute, value);
+    attribute.value = value;
+  }
+  function prepareAttributeNode(element, attribute) {
+    const value = encodeElementAttribute(element, attribute.name, attribute.value);
+    setRawAttributeValue(attribute, nativeAttrValue, value);
+    return attribute;
   }
   function blockUnsupportedConstructor(name) {
     const NativeConstructor = globalThis[name];
@@ -353,6 +382,15 @@
       }
     });
   }
+  function patchNavigationApi() {
+    const proto = globalThis.Navigation?.prototype;
+    const nativeNavigate = proto?.navigate;
+    if (typeof nativeNavigate !== "function") return;
+    proto.navigate = function(url, options) {
+      if (requestShellNavigation(url)) return;
+      return nativeNavigate.call(this, encodeTarget(url), options);
+    };
+  }
   function formTargetUrl(form, submitter) {
     const action = submitter?.getAttribute?.("formaction")
       || form.getAttribute?.("action")
@@ -489,6 +527,10 @@
   }
   blockUnsupportedConstructor("WebSocket");
   blockUnsupportedConstructor("EventSource");
+  blockUnsupportedConstructor("RTCPeerConnection");
+  blockUnsupportedConstructor("webkitRTCPeerConnection");
+  blockUnsupportedConstructor("RTCDataChannel");
+  blockUnsupportedConstructor("WebTransport");
   if (config.blockWorkers !== false) {
     blockUnsupportedConstructor("Worker");
     blockUnsupportedConstructor("SharedWorker");
@@ -502,6 +544,7 @@
   // Effect boundary: DOM and CSSOM mutations are installed separately from transforms.
   function installDomEffects() {
   function loadLocalScript(path, markerAttribute) {
+    if (!controlledAssetPaths.has(String(path))) return false;
     const script = globalThis.document?.createElement?.("script");
     if (!script) return false;
     script.async = false;
@@ -512,8 +555,57 @@
       script.src = path;
       if (markerAttribute) script.setAttribute?.(markerAttribute, "");
     }
-    (globalThis.document?.head || globalThis.document?.documentElement)?.append?.(script);
+    const container = globalThis.document?.head || globalThis.document?.documentElement;
+    if (container && nativeNodeAppendChild) nativeNodeAppendChild.call(container, script);
+    else container?.append?.(script);
     return true;
+  }
+  function rewriteInsertedNode(value) {
+    if (!globalThis.Node || !(value instanceof globalThis.Node)) return;
+    rewriteHtmlTree(
+      value,
+      resolveTargetBase(),
+      !globalThis.document?.querySelector?.("base[href]")
+    );
+  }
+  function patchInsertionArguments(prototype, method, indexes) {
+    const native = nativeInsertion(prototype, method);
+    if (!native) return;
+    prototype[method] = function(...args) {
+      for (const index of indexes) rewriteInsertedNode(args[index]);
+      return native.apply(this, args);
+    };
+  }
+  function patchVariadicInsertions(prototype, method) {
+    const native = nativeInsertion(prototype, method);
+    if (!native) return;
+    prototype[method] = function(...args) {
+      for (const value of args) rewriteInsertedNode(value);
+      return native.apply(this, args);
+    };
+  }
+  patchInsertionArguments(globalThis.Node?.prototype, "appendChild", [0]);
+  patchInsertionArguments(globalThis.Node?.prototype, "insertBefore", [0]);
+  patchInsertionArguments(globalThis.Node?.prototype, "replaceChild", [0]);
+  patchInsertionArguments(globalThis.Element?.prototype, "insertAdjacentElement", [1]);
+  patchInsertionArguments(globalThis.Range?.prototype, "insertNode", [0]);
+  for (const prototype of [
+    globalThis.Element?.prototype,
+    globalThis.Document?.prototype,
+    globalThis.DocumentFragment?.prototype,
+  ]) {
+    for (const method of ["append", "prepend", "replaceChildren"]) {
+      patchVariadicInsertions(prototype, method);
+    }
+  }
+  for (const prototype of [
+    globalThis.Element?.prototype,
+    globalThis.CharacterData?.prototype,
+    globalThis.DocumentType?.prototype,
+  ]) {
+    for (const method of ["after", "before", "replaceWith"]) {
+      patchVariadicInsertions(prototype, method);
+    }
   }
   if (nativeSetAttribute) {
     globalThis.Element.prototype.setAttribute = function(name, value) {
@@ -531,6 +623,65 @@
       return nativeSetAttributeNs.call(this, namespace, name, encodeElementAttribute(this, name, value));
     };
   }
+  if (nativeSetAttributeNode) {
+    globalThis.Element.prototype.setAttributeNode = function(attribute) {
+      const result = nativeSetAttributeNode.call(this, prepareAttributeNode(this, attribute));
+      rewriteMetaRefreshElement(this);
+      return result;
+    };
+  }
+  if (nativeSetAttributeNodeNs) {
+    globalThis.Element.prototype.setAttributeNodeNS = function(attribute) {
+      const result = nativeSetAttributeNodeNs.call(this, prepareAttributeNode(this, attribute));
+      rewriteMetaRefreshElement(this);
+      return result;
+    };
+  }
+  function patchAttachedAttributeSetter(prototype, property, descriptor) {
+    if (!prototype || !descriptor?.get || !descriptor?.set) return;
+    Object.defineProperty(prototype, property, {
+      ...descriptor,
+      set(value) {
+        const owner = globalThis.Attr && this instanceof globalThis.Attr ? this.ownerElement : null;
+        const rewritten = owner
+          ? encodeElementAttribute(owner, this.name, value == null ? "" : String(value))
+          : value;
+        const result = descriptor.set.call(this, rewritten);
+        if (owner) rewriteMetaRefreshElement(owner);
+        return result;
+      }
+    });
+  }
+  patchAttachedAttributeSetter(globalThis.Attr?.prototype, "value", nativeAttrValue);
+  patchAttachedAttributeSetter(globalThis.Node?.prototype, "nodeValue", nativeNodeValue);
+  patchAttachedAttributeSetter(globalThis.Node?.prototype, "textContent", nativeNodeTextContent);
+  if (nativeElementAttributes?.get) {
+    Object.defineProperty(globalThis.Element.prototype, "attributes", {
+      ...nativeElementAttributes,
+      get() {
+        const attributes = nativeElementAttributes.get.call(this);
+        attributeMapOwners.set(attributes, this);
+        return attributes;
+      }
+    });
+  }
+  function setNamedAttribute(attributes, attribute, native) {
+    const owner = attributeMapOwners.get(attributes);
+    const prepared = owner ? prepareAttributeNode(owner, attribute) : attribute;
+    const result = native.call(attributes, prepared);
+    if (owner) rewriteMetaRefreshElement(owner);
+    return result;
+  }
+  if (nativeNamedNodeMapSetNamedItem) {
+    globalThis.NamedNodeMap.prototype.setNamedItem = function(attribute) {
+      return setNamedAttribute(this, attribute, nativeNamedNodeMapSetNamedItem);
+    };
+  }
+  if (nativeNamedNodeMapSetNamedItemNs) {
+    globalThis.NamedNodeMap.prototype.setNamedItemNS = function(attribute) {
+      return setNamedAttribute(this, attribute, nativeNamedNodeMapSetNamedItemNs);
+    };
+  }
   patchHtmlProperty("innerHTML");
   patchHtmlProperty("outerHTML");
   const nativeInsertAdjacentHtml = globalThis.Element?.prototype?.insertAdjacentHTML;
@@ -546,11 +697,30 @@
       return nativeDocumentWrite.call(this, encodeHtmlFragment(parts.join("")));
     };
   }
+  const nativeDocumentWriteln = globalThis.Document?.prototype?.writeln;
+  if (nativeDocumentWriteln) {
+    globalThis.Document.prototype.writeln = function(...parts) {
+      return nativeDocumentWriteln.call(this, encodeHtmlFragment(parts.join("")));
+    };
+  }
+  const nativeCreateContextualFragment = globalThis.Range?.prototype?.createContextualFragment;
+  if (nativeCreateContextualFragment) {
+    globalThis.Range.prototype.createContextualFragment = function(markup) {
+      const fragment = nativeCreateContextualFragment.call(this, String(markup));
+      rewriteHtmlTree(
+        fragment,
+        resolveTargetBase(),
+        !globalThis.document?.querySelector?.("base[href]")
+      );
+      return fragment;
+    };
+  }
   patchCssStyleDeclaration();
   patchMetaRefreshProperty("content");
   patchMetaRefreshProperty("httpEquiv");
   patchWindowOpen();
   patchLocationNavigation();
+  patchNavigationApi();
   patchGetFormSubmission();
   for (const constructorName of ["HTMLElement", "SVGElement", "CSSStyleRule", "CSSFontFaceRule", "CSSPageRule", "CSSKeyframeRule"]) {
     patchStyleGetter(constructorName);

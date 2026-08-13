@@ -209,7 +209,7 @@ impl GatewayTransport for BrowserFixtureTransport {
 
         const writeFrame = document.createElement("iframe");
         writeFrame.id = "document-write-srcdoc";
-        writeFrame.srcdoc = '<script>document.write(\'<img id="document-write-image" src="document-write-image.png" alt="document write">\');' + closeScript;
+        writeFrame.srcdoc = '<script>document.writeln(\'<img id="document-write-image" src="document-write-image.png" alt="document write">\');' + closeScript;
         document.body.appendChild(writeFrame);
 
         const dynamicPing = document.createElement("a");
@@ -225,9 +225,91 @@ impl GatewayTransport for BrowserFixtureTransport {
         namespaceImage.setAttributeNS(null, "src", "namespace-image.png");
         document.body.appendChild(namespaceImage);
 
+        const appendAttributeImage = (id, configure) => {
+          const image = document.createElement("img");
+          image.id = id;
+          configure(image);
+          document.body.appendChild(image);
+          return image;
+        };
+        appendAttributeImage("attribute-node-image", (image) => {
+          const attribute = document.createAttribute("src");
+          attribute.value = "attribute-node-image.png";
+          image.setAttributeNode(attribute);
+        });
+        appendAttributeImage("attribute-node-ns-image", (image) => {
+          const attribute = document.createAttributeNS(null, "src");
+          attribute.value = "attribute-node-ns-image.png";
+          image.setAttributeNodeNS(attribute);
+        });
+        appendAttributeImage("named-item-image", (image) => {
+          const attribute = document.createAttribute("src");
+          attribute.value = "named-item-image.png";
+          image.attributes.setNamedItem(attribute);
+        });
+        appendAttributeImage("named-item-ns-image", (image) => {
+          const attribute = document.createAttributeNS(null, "src");
+          attribute.value = "named-item-ns-image.png";
+          image.attributes.setNamedItemNS(attribute);
+        });
+        for (const [id, property] of [
+          ["attr-value-image", "value"],
+          ["attr-node-value-image", "nodeValue"],
+          ["attr-text-content-image", "textContent"],
+        ]) {
+          appendAttributeImage(id, (image) => {
+            image.setAttribute("src", "about:blank");
+            image.getAttributeNode("src")[property] = `${id}.png`;
+          });
+        }
+
+        const range = document.createRange();
+        range.selectNodeContents(document.body);
+        document.body.appendChild(range.createContextualFragment(
+          '<img id="range-fragment-image" src="range-fragment-image.png" alt="range fragment">'
+        ));
+
+        const parsedDocument = new DOMParser().parseFromString(
+          '<link rel="preconnect" href="https://dom-parser-hint.example.test/"><img id="dom-parser-image" src="dom-parser-image.png">',
+          "text/html",
+        );
+        document.head.appendChild(parsedDocument.querySelector("link"));
+        document.body.appendChild(parsedDocument.querySelector("img"));
+
+        const preconnect = document.createElement("link");
+        preconnect.rel = "preconnect";
+        const preconnectHref = document.createAttribute("href");
+        preconnectHref.value = "https://preconnect.example.test/";
+        preconnect.attributes.setNamedItem(preconnectHref);
+        document.head.appendChild(preconnect);
+        const dnsPrefetch = document.createElement("link");
+        dnsPrefetch.rel = "dns-prefetch";
+        const dnsPrefetchHref = document.createAttribute("href");
+        dnsPrefetchHref.value = "https://dns-prefetch.example.test/";
+        dnsPrefetch.setAttributeNode(dnsPrefetchHref);
+        document.head.appendChild(dnsPrefetch);
+
+        const blockedNetworkConstructors = [
+          "RTCPeerConnection",
+          "webkitRTCPeerConnection",
+          "RTCDataChannel",
+          "WebTransport",
+        ].filter((name) => typeof globalThis[name] === "function");
+        const constructorResult = document.createElement("p");
+        constructorResult.id = "network-constructor-result";
+        constructorResult.textContent = blockedNetworkConstructors.every((name) => {
+          try {
+            new globalThis[name](name === "WebTransport" ? "https://example.test/" : undefined);
+            return false;
+          } catch (_error) {
+            return true;
+          }
+        }) ? "blocked" : "escaped";
+        document.body.appendChild(constructorResult);
+
         const refreshFrame = document.createElement("iframe");
         refreshFrame.id = "refresh-navigation-srcdoc";
-        refreshFrame.srcdoc = '<script>const meta = document.createElement("meta");meta.content = "0; url=refresh-navigation.html";meta.httpEquiv = "refresh";document.head.appendChild(meta);' + closeScript;
+        refreshFrame.srcdoc = '<script>const meta = document.createElement("meta");const content = document.createAttribute("content");content.value = "0; url=refresh-navigation.html";meta.setAttributeNode(content);const httpEquiv = document.createAttribute("http-equiv");httpEquiv.nodeValue = "refresh";meta.attributes.setNamedItem(httpEquiv);document.head.appendChild(meta);' + closeScript;
         document.body.appendChild(refreshFrame);
 
         const runtimeOpen = document.createElement("button");
@@ -280,7 +362,16 @@ impl GatewayTransport for BrowserFixtureTransport {
             | "https://example.test/assets/cssom-insert-bg.png"
             | "https://example.test/assets/cssom-replace-bg.png"
             | "https://example.test/assets/document-write-image.png"
-            | "https://example.test/assets/namespace-image.png" => {
+            | "https://example.test/assets/namespace-image.png"
+            | "https://example.test/assets/attribute-node-image.png"
+            | "https://example.test/assets/attribute-node-ns-image.png"
+            | "https://example.test/assets/named-item-image.png"
+            | "https://example.test/assets/named-item-ns-image.png"
+            | "https://example.test/assets/attr-value-image.png"
+            | "https://example.test/assets/attr-node-value-image.png"
+            | "https://example.test/assets/attr-text-content-image.png"
+            | "https://example.test/assets/range-fragment-image.png"
+            | "https://example.test/assets/dom-parser-image.png" => {
                 response(200, "image/png", Vec::new(), ONE_PIXEL_PNG.to_vec())
             }
             "https://example.test/assets/form-result.html?q=test" => response(
@@ -311,6 +402,12 @@ impl GatewayTransport for BrowserFixtureTransport {
                 "text/html; charset=utf-8",
                 Vec::new(),
                 b"<!doctype html><title>window open</title>".to_vec(),
+            ),
+            "https://example.test/assets/navigation-api.html" => response(
+                200,
+                "text/html; charset=utf-8",
+                Vec::new(),
+                b"<!doctype html><title>navigation api</title>".to_vec(),
             ),
             other => Err(WebviewError::transport(format!(
                 "unexpected browser fixture request {other}"
@@ -412,6 +509,15 @@ fn playwright_browser_renders_gateway_fixture_without_direct_remote_requests() -
         "https://example.test/assets/cssom-replace-bg.png",
         "https://example.test/assets/document-write-image.png",
         "https://example.test/assets/namespace-image.png",
+        "https://example.test/assets/attribute-node-image.png",
+        "https://example.test/assets/attribute-node-ns-image.png",
+        "https://example.test/assets/named-item-image.png",
+        "https://example.test/assets/named-item-ns-image.png",
+        "https://example.test/assets/attr-value-image.png",
+        "https://example.test/assets/attr-node-value-image.png",
+        "https://example.test/assets/attr-text-content-image.png",
+        "https://example.test/assets/range-fragment-image.png",
+        "https://example.test/assets/dom-parser-image.png",
         "https://example.test/assets/refresh-navigation.html",
     ] {
         assert_recorded_target(&requests, GatewayRequestKind::Subresource, "GET", target)?;
@@ -425,6 +531,7 @@ fn playwright_browser_renders_gateway_fixture_without_direct_remote_requests() -
     for target in [
         "https://example.test/assets/ping-navigation.html",
         "https://example.test/assets/window-open.html",
+        "https://example.test/assets/navigation-api.html",
     ] {
         assert_recorded_target(&requests, GatewayRequestKind::Navigation, "GET", target)?;
     }
@@ -494,6 +601,18 @@ const pageUrl = {page_url:?};
       && document.querySelector("#adjacent-html-image")?.complete
       && document.querySelector("#outer-html-image")?.complete
       && document.querySelector("#namespace-image")?.complete
+      && [
+        "#attribute-node-image",
+        "#attribute-node-ns-image",
+        "#named-item-image",
+        "#named-item-ns-image",
+        "#attr-value-image",
+        "#attr-node-value-image",
+        "#attr-text-content-image",
+        "#range-fragment-image",
+        "#dom-parser-image",
+      ].every((selector) => document.querySelector(selector)?.complete)
+      && document.querySelector("#network-constructor-result")?.textContent === "blocked"
       && document.querySelector("#dynamic-srcdoc")
       && document.querySelector("#dynamic-srcdoc-attr")
       && document.querySelector("#document-write-srcdoc")
@@ -510,7 +629,8 @@ const pageUrl = {page_url:?};
       return {{
         fixtureError: document.body.dataset.fixtureError || "",
         refreshFramePresent: Boolean(document.querySelector("#refresh-navigation-srcdoc")),
-        namespaceImage: document.querySelector("#namespace-image")?.src || ""
+        namespaceImage: document.querySelector("#namespace-image")?.src || "",
+        constructorResult: document.querySelector("#network-constructor-result")?.textContent || ""
       }};
     }});
     throw new Error(`${{error.message}} fixture state=${{JSON.stringify(diagnostic)}}`);
@@ -539,7 +659,20 @@ const pageUrl = {page_url:?};
   const runtimeOpenPopupPromise = page.waitForEvent("popup");
   await page.locator("#runtime-open-button").click();
   const runtimeOpenPopup = await runtimeOpenPopupPromise;
-  await runtimeOpenPopup.waitForLoadState("domcontentloaded");
+  await runtimeOpenPopup.waitForFunction(() => document.title === "window open");
+  const hasNavigationApi = await runtimeOpenPopup.evaluate(() => typeof globalThis.navigation?.navigate === "function");
+  if (!hasNavigationApi) throw new Error("Chromium fixture does not expose the Navigation API");
+  await runtimeOpenPopup.evaluate(() => globalThis.navigation.navigate("https://example.test/assets/navigation-api.html"));
+  try {{
+    await runtimeOpenPopup.waitForFunction(() => document.title === "navigation api", null, {{ timeout: 10000 }});
+  }} catch (error) {{
+    const navigationState = await runtimeOpenPopup.evaluate(() => ({{
+      title: document.title,
+      url: location.href,
+      marker: Boolean(globalThis.__ringsWebviewGateway),
+    }}));
+    throw new Error(`Navigation API did not stay on the gateway: ${{error.message}} state=${{JSON.stringify(navigationState)}} requests=${{JSON.stringify(requests.slice(-8))}}`);
+  }}
   const result = await page.evaluate(() => {{
     const title = document.querySelector("#title");
     const dynamicLink = document.querySelector("#dynamic-link");
@@ -553,6 +686,17 @@ const pageUrl = {page_url:?};
     const outerHtmlImage = document.querySelector("#outer-html-image");
     const dynamicPing = document.querySelector("#dynamic-ping-link");
     const namespaceImage = document.querySelector("#namespace-image");
+    const attributeImageSources = [
+      "attribute-node-image",
+      "attribute-node-ns-image",
+      "named-item-image",
+      "named-item-ns-image",
+      "attr-value-image",
+      "attr-node-value-image",
+      "attr-text-content-image",
+      "range-fragment-image",
+      "dom-parser-image",
+    ].map((id) => document.getElementById(id)?.src || "");
     const overlayScript = document.querySelector("script[data-rings-webview-overlay-loader]");
     const backgroundImage = (selector) => {{
       const element = document.querySelector(selector);
@@ -590,6 +734,11 @@ const pageUrl = {page_url:?};
       dynamicPingHref: dynamicPing?.href,
       dynamicPingValue: dynamicPing?.getAttribute("ping"),
       namespaceImageSrc: namespaceImage?.src,
+      attributeImageSources,
+      preconnectHref: document.querySelector('link[rel="preconnect"]')?.href || "",
+      dnsPrefetchHref: document.querySelector('link[rel="dns-prefetch"]')?.href || "",
+      parsedPreconnectHref: document.querySelector('link[href*="dom-parser-hint"]')?.href || "",
+      constructorResult: document.querySelector("#network-constructor-result")?.textContent || "",
       fixtureError: document.body.dataset.fixtureError || ""
     }};
   }});
@@ -613,7 +762,8 @@ const pageUrl = {page_url:?};
   }}
   const directRemoteRequests = requests.filter((url) => {{
     try {{
-      return new URL(url).hostname === "example.test";
+      const hostname = new URL(url).hostname;
+      return hostname === "example.test" || hostname.endsWith(".example.test");
     }} catch (_error) {{
       return false;
     }}
@@ -653,6 +803,18 @@ const pageUrl = {page_url:?};
   }}
   if (!result.namespaceImageSrc.includes("/webview/")) {{
     throw new Error(`setAttributeNS URL did not stay on gateway: ${{JSON.stringify(result)}}`);
+  }}
+  if (!result.attributeImageSources.every((value) => value.includes("/webview/"))) {{
+    throw new Error(`attribute-node or fragment URL escaped gateway: ${{JSON.stringify(result)}}`);
+  }}
+  if (!result.preconnectHref.includes("/webview/") || !result.dnsPrefetchHref.includes("/webview/")) {{
+    throw new Error(`connection-hint URL escaped gateway: ${{JSON.stringify(result)}}`);
+  }}
+  if (!result.parsedPreconnectHref.includes("/webview/")) {{
+    throw new Error(`detached DOM insertion escaped gateway: ${{JSON.stringify(result)}}`);
+  }}
+  if (result.constructorResult !== "blocked") {{
+    throw new Error(`unsupported network constructor escaped gateway: ${{JSON.stringify(result)}}`);
   }}
   if (!result.styleBgImage.includes("/webview/") || !result.importedBgImage.includes("/webview/")) {{
     throw new Error(`CSS URLs did not stay on gateway: ${{JSON.stringify(result)}}`);

@@ -469,20 +469,6 @@ fn native_proxy_fallback_rejects_private_loopback_and_literal_synthetic_targets(
 }
 
 #[cfg(rings_native)]
-#[test]
-fn native_proxy_configuration_uses_https_before_all_proxy_and_skips_blanks() {
-    let values = std::collections::HashMap::from([
-        ("HTTPS_PROXY", "  "),
-        ("https_proxy", "http://secure-proxy:8080"),
-        ("ALL_PROXY", "http://fallback-proxy:8080"),
-    ]);
-
-    assert_eq!(
-        configured_https_proxy_from(|name| values.get(name).map(ToString::to_string)),
-        Some("http://secure-proxy:8080".to_string()),
-    );
-}
-
 #[cfg(rings_native)]
 #[tokio::test]
 async fn native_proxy_egress_delegates_target_resolution() {

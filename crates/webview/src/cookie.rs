@@ -10,6 +10,9 @@ use crate::error::Result;
 use crate::types::GatewayRequest;
 use crate::types::GatewayRequestKind;
 
+const MAX_COOKIE_BYTES: usize = 4_096;
+const MAX_COOKIES: usize = 4_096;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct StoredCookie {
     partition: CookiePartitionKey,
@@ -118,11 +121,15 @@ impl CookieJar {
         now: i64,
     ) -> Result<()> {
         let outcome = evaluate_set_cookie(partition, origin, set_cookie, now)?;
+        self.cookies.retain(|cookie| !cookie_expired(cookie, now));
         match outcome {
             SetCookieOutcome::Ignore => {}
             SetCookieOutcome::Remove(key) => self.remove_cookie(&key),
             SetCookieOutcome::Upsert(cookie) => {
                 self.remove_cookie(&cookie.key());
+                if self.cookies.len() == MAX_COOKIES {
+                    self.cookies.remove(0);
+                }
                 self.cookies.push(cookie);
             }
         }
@@ -224,6 +231,9 @@ fn evaluate_set_cookie(
     set_cookie: &str,
     now: i64,
 ) -> Result<SetCookieOutcome> {
+    if set_cookie.len() > MAX_COOKIE_BYTES {
+        return Ok(SetCookieOutcome::Ignore);
+    }
     let Some(host) = origin.host_str() else {
         return Err(CookieFailure::MissingOriginHost.into());
     };
@@ -261,7 +271,11 @@ fn evaluate_set_cookie(
         }
         if let Some((key, value)) = part.split_once('=') {
             if key.eq_ignore_ascii_case("domain") {
-                return Ok(SetCookieOutcome::Ignore);
+                let Some(domain) = accepted_cookie_domain(origin, value) else {
+                    return Ok(SetCookieOutcome::Ignore);
+                };
+                cookie.domain = domain;
+                cookie.host_only = false;
             } else if key.eq_ignore_ascii_case("path") {
                 let path = value.trim();
                 cookie.path = if path.starts_with('/') {
@@ -309,6 +323,36 @@ fn evaluate_set_cookie(
     } else {
         SetCookieOutcome::Upsert(cookie)
     })
+}
+
+/// Validate a `Domain` attribute against the response origin and public-suffix boundary.
+///
+/// Post: a returned domain is an IDNA-normalized suffix of the origin host, is not itself a
+/// public suffix, and therefore cannot grant the cookie authority outside the origin's
+/// registrable site.
+fn accepted_cookie_domain(origin: &Url, value: &str) -> Option<String> {
+    let Host::Domain(origin_host) = origin.host()? else {
+        return None;
+    };
+    let candidate = value.trim().trim_start_matches('.').trim_end_matches('.');
+    let Host::Domain(domain) = Host::parse(candidate).ok()? else {
+        return None;
+    };
+    let origin_host = origin_host.trim_end_matches('.').to_ascii_lowercase();
+    let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+    if psl::domain_str(domain.as_str()).is_none()
+        || !host_domain_matches(origin_host.as_str(), domain.as_str())
+    {
+        return None;
+    }
+    Some(domain)
+}
+
+fn host_domain_matches(host: &str, domain: &str) -> bool {
+    host == domain
+        || host
+            .strip_suffix(domain)
+            .is_some_and(|prefix| prefix.ends_with('.'))
 }
 
 #[cfg(test)]
@@ -479,7 +523,8 @@ mod tests {
                 "sid=one; Domain=example.com",
                 1_000,
             )?,
-            SetCookieOutcome::Ignore
+            SetCookieOutcome::Upsert(cookie)
+                if cookie.domain == "example.com" && !cookie.host_only
         ));
         assert!(matches!(
             evaluate_set_cookie(
@@ -570,12 +615,13 @@ mod tests {
     }
 
     #[test]
-    fn cookie_ignores_domain_attributes() -> Result<()> {
+    fn cookie_accepts_safe_parent_domain_attributes() -> Result<()> {
         let mut jar = CookieJar::new();
-        let origin = Url::parse("https://evil.example/set-cookie")?;
+        let origin = Url::parse("https://login.example.com/set-cookie")?;
 
-        jar.store_set_cookie(&origin, "sid=stolen; Domain=example.com; Path=/")?;
-        assert!(jar.is_empty());
+        jar.store_set_cookie(&origin, "sid=shared; Domain=.example.com; Path=/")?;
+        let sibling = Url::parse("https://app.example.com/account")?;
+        assert_eq!(jar.cookie_header(&sibling).as_deref(), Some("sid=shared"));
         Ok(())
     }
 
@@ -594,12 +640,34 @@ mod tests {
     }
 
     #[test]
-    fn cookie_ignores_registrable_domain_attributes_by_default() -> Result<()> {
+    fn cookie_ignores_unrelated_domain_attributes() -> Result<()> {
         let mut jar = CookieJar::new();
         let origin = Url::parse("https://app.example.co.uk/set-cookie")?;
 
-        jar.store_set_cookie(&origin, "sid=one; Domain=example.co.uk; Path=/")?;
+        jar.store_set_cookie(&origin, "sid=one; Domain=attacker.co.uk; Path=/")?;
         assert!(jar.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn cookie_jar_has_deterministic_count_and_entry_size_bounds() -> Result<()> {
+        let mut jar = CookieJar::new();
+        let origin = Url::parse("https://example.com/")?;
+        for index in 0..=MAX_COOKIES {
+            jar.store_set_cookie(&origin, format!("cookie{index}=value; Path=/").as_str())?;
+        }
+        assert_eq!(jar.len(), MAX_COOKIES);
+        let header = jar.cookie_header(&origin).unwrap_or_default();
+        assert!(!header.contains("cookie0=value"));
+        assert!(header.contains(format!("cookie{MAX_COOKIES}=value").as_str()));
+
+        let oversized = format!("oversized={}", "x".repeat(MAX_COOKIE_BYTES));
+        jar.store_set_cookie(&origin, oversized.as_str())?;
+        assert_eq!(jar.len(), MAX_COOKIES);
+        assert!(!jar
+            .cookie_header(&origin)
+            .unwrap_or_default()
+            .contains("oversized="));
         Ok(())
     }
 

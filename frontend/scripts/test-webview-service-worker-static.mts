@@ -407,6 +407,24 @@ export async function runStaticServiceWorkerTests({
   }
 
   {
+    const headers = new Headers({
+      "content-length": "42",
+      "content-security-policy": "default-src https:",
+      "content-security-policy-report-only": "default-src https:",
+      "content-type": "text/html",
+      "x-frame-options": "ALLOWALL",
+    });
+    const failure = bytes("<!doctype html><title>upstream failure</title>");
+    const body = controlledNavigationBody({ kind: "navigation" }, 404, headers, failure);
+    assert.equal(body, failure, "non-success navigation bodies are not script-injected");
+    assert.equal(headers.has("content-length"), false);
+    assert.equal(headers.has("content-security-policy-report-only"), false);
+    assert.equal(headers.has("x-frame-options"), false);
+    assert.equal(headers.get("content-security-policy"), canonicalGatewayCsp);
+    assert.equal(headers.get("x-content-type-options"), "nosniff");
+  }
+
+  {
     const css = bytes("body { color: red; }");
     const body = controlledNavigationBody(
       { kind: "subresource" },

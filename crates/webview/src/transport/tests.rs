@@ -398,7 +398,7 @@ impl GatewayTransport for DomainCookieTransport {
 }
 
 #[test]
-fn gateway_ignores_domain_cookie_without_failing_response() -> Result<()> {
+fn gateway_accepts_safe_domain_cookie_without_exposing_set_cookie() -> Result<()> {
     let target = TargetUrl::parse("https://example.com/index.html")?.into_url();
     let gateway =
         ConcurrentWebviewGateway::new(GatewayPrefix::new("/webview/")?, DomainCookieTransport);
@@ -408,7 +408,7 @@ fn gateway_ignores_domain_cookie_without_failing_response() -> Result<()> {
         .map_err(|error| WebviewError::transport(error.to_string()))?;
 
     assert!(body.contains("<p>ok</p>"));
-    assert!(gateway.lock_cookies()?.is_empty());
+    assert_eq!(gateway.lock_cookies()?.len(), 1);
     assert!(!response
         .headers
         .iter()

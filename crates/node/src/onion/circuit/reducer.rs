@@ -1,5 +1,6 @@
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use rings_core::dht::Did;
@@ -22,6 +23,7 @@ use super::OnionForwardLayer;
 use super::OnionForwardNonce;
 use super::OnionForwardSequence;
 use super::MAX_ONION_RELAY_CIRCUITS;
+use super::ONION_FORWARD_MAX_VALIDITY_MS;
 use super::ONION_RELAY_RETURN_TTL_MS;
 use crate::error::Error;
 use crate::error::Result;
@@ -61,13 +63,18 @@ struct RelayReturnEntry {
 /// client and are not authenticated to relays.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct OnionCircuitState {
-    relay_returns: BTreeMap<RelayReturnKey, RelayReturnEntry>,
+    relay_returns: Arc<BTreeMap<RelayReturnKey, RelayReturnEntry>>,
 }
 
 impl OnionCircuitState {
     #[cfg(test)]
     pub(super) fn relay_return_count(&self) -> usize {
         self.relay_returns.len()
+    }
+
+    #[cfg(test)]
+    pub(super) fn shares_return_table_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.relay_returns, &other.relay_returns)
     }
 }
 
@@ -289,7 +296,12 @@ impl OnionCircuitReducer {
                 if !self.capabilities.permits_exit_layer() {
                     return Err(Error::NoPermission);
                 }
-                if expires_at_ms <= received_at_ms {
+                // Invariant: every accepted layer expires while its replay witness is still live.
+                // The upper bound also prevents a malicious client from extending authenticated
+                // validity beyond the finite replay-cache retention contract.
+                if expires_at_ms <= received_at_ms
+                    || expires_at_ms > received_at_ms.saturating_add(ONION_FORWARD_MAX_VALIDITY_MS)
+                {
                     return Err(Error::OnionRouteError(
                         OnionRouteError::ForwardPayloadExpired,
                     ));
@@ -321,11 +333,13 @@ impl OnionCircuitReducer {
             circuit_id: frame.circuit_id,
             next_hop: from,
         };
-        if let Some(entry) = state.relay_returns.get_mut(&key) {
+        if let Some(entry) = state.relay_returns.get(&key).copied() {
             let previous_hop = entry.previous_hop;
             let previous_circuit_id = entry.previous_circuit_id;
             let previous_session_public_key = entry.previous_session_public_key;
-            entry.expires_at_ms = received_at_ms.saturating_add(ONION_RELAY_RETURN_TTL_MS);
+            if let Some(entry) = Arc::make_mut(&mut state.relay_returns).get_mut(&key) {
+                entry.expires_at_ms = received_at_ms.saturating_add(ONION_RELAY_RETURN_TTL_MS);
+            }
             let encoded_message =
                 encode_message(&OnionWireMessage::Backward(OnionBackwardFrame {
                     circuit_id: previous_circuit_id,
@@ -371,14 +385,14 @@ pub(super) fn remember_return_hop(
         previous_session_public_key,
     } = edge;
     purge_expired_return_hops(state, now_ms);
-    let table_is_full = state.relay_returns.len() >= max_relay_circuits;
-    let peer_table_is_full = state
-        .relay_returns
+    let table = Arc::make_mut(&mut state.relay_returns);
+    let table_is_full = table.len() >= max_relay_circuits;
+    let peer_table_is_full = table
         .values()
         .filter(|entry| entry.previous_hop == previous_hop)
         .count()
         >= max_relay_circuits_per_peer(max_relay_circuits);
-    match state.relay_returns.entry(key) {
+    match table.entry(key) {
         Entry::Occupied(mut entry) => {
             if entry.get().previous_hop != previous_hop
                 || entry.get().previous_circuit_id != previous_circuit_id
@@ -414,7 +428,11 @@ const fn max_relay_circuits_per_peer(max_relay_circuits: usize) -> usize {
 }
 
 fn purge_expired_return_hops(state: &mut OnionCircuitState, now_ms: u128) {
-    state
+    if state
         .relay_returns
-        .retain(|_, entry| entry.expires_at_ms > now_ms);
+        .values()
+        .any(|entry| entry.expires_at_ms <= now_ms)
+    {
+        Arc::make_mut(&mut state.relay_returns).retain(|_, entry| entry.expires_at_ms > now_ms);
+    }
 }

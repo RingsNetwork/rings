@@ -123,6 +123,16 @@ pub(super) fn seal_encoded_message(
     seal_encoded_message_with_rng(encoded, recipient, bucket, &mut rng)
 }
 
+/// Recover the public size class from a locally sealed cell.
+///
+/// This reads only the hop-visible envelope metadata; it does not decrypt or inspect the hidden
+/// wire message. Endpoint senders use the same class when producing link cover cells.
+pub(super) fn sealed_cell_bucket(payload: &[u8]) -> Result<OnionCellBucket> {
+    bincode::deserialize::<OnionWireCell>(payload)
+        .map(|cell| cell.bucket)
+        .map_err(|_| Error::OnionRouteError(OnionRouteError::InvalidCell))
+}
+
 fn seal_encoded_message_with_rng<R: CryptoRng + RngCore>(
     encoded: &[u8],
     recipient: PublicKey<33>,
@@ -266,6 +276,10 @@ mod tests {
         assert_eq!(
             open_cell(&recipient, cell.bucket, &cell.sealed).expect("open cover cell"),
             OnionWireMessage::Cover
+        );
+        assert_eq!(
+            sealed_cell_bucket(&encoded).expect("read public cell bucket"),
+            OnionCellBucket::KiB4
         );
     }
 

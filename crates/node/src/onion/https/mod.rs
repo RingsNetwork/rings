@@ -27,8 +27,6 @@ use self::browser::execute_https_request;
 use self::limits::checked_status_code;
 use self::limits::https_response_body_limit;
 use self::limits::usize_to_u64;
-#[cfg(all(test, rings_native))]
-use self::native::configured_https_proxy_from;
 #[cfg(rings_native)]
 use self::native::execute_https_request;
 #[cfg(all(test, rings_native))]
@@ -54,6 +52,7 @@ use crate::onion::circuit::OnionCircuitId;
 use crate::onion::circuit::OnionCircuitPayload;
 use crate::onion::circuit::OnionForwardNonce;
 use crate::onion::circuit::OnionForwardSequence;
+use crate::onion::circuit::OnionLinkSender;
 #[cfg(any(test, rings_browser))]
 use crate::onion::circuit::OnionReturnId;
 use crate::onion::exit_accounting::OnionExitAccounting;
@@ -155,13 +154,21 @@ pub struct OnionHttpsClientResponse {
 }
 
 /// Shared runtime for the local HTTPS proxy protocol.
-#[derive(Default)]
 pub(crate) struct OnionHttpsRuntime {
     #[cfg(any(test, rings_browser))]
     pending: Mutex<HashMap<OnionCircuitId, PendingRequest>>,
     exit_policy: Mutex<Option<OnionExitPolicy>>,
     forward_replays: Mutex<OnionForwardReplayPartitions>,
     accounting: OnionExitAccounting,
+    link_sender: OnionLinkSender,
+    #[cfg(rings_native)]
+    native_proxy: Mutex<Option<String>>,
+}
+
+impl Default for OnionHttpsRuntime {
+    fn default() -> Self {
+        Self::with_resources(OnionExitAccounting::default(), OnionLinkSender::default())
+    }
 }
 
 #[cfg(any(test, rings_browser))]
@@ -174,8 +181,51 @@ struct PendingRequest {
 
 impl OnionHttpsRuntime {
     /// Create an empty runtime.
+    #[cfg(any(test, rings_browser))]
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// Create a runtime sharing node-wide accounting and link-traffic effect capabilities.
+    pub(crate) fn with_resources(
+        accounting: OnionExitAccounting,
+        link_sender: OnionLinkSender,
+    ) -> Self {
+        Self {
+            #[cfg(any(test, rings_browser))]
+            pending: Mutex::new(HashMap::new()),
+            exit_policy: Mutex::new(None),
+            forward_replays: Mutex::new(OnionForwardReplayPartitions::default()),
+            accounting,
+            link_sender,
+            #[cfg(rings_native)]
+            native_proxy: Mutex::new(None),
+        }
+    }
+
+    #[cfg(rings_browser)]
+    pub(crate) fn link_sender(&self) -> OnionLinkSender {
+        self.link_sender.clone()
+    }
+
+    #[cfg(rings_native)]
+    pub(crate) fn set_native_proxy(&self, proxy: Option<String>) {
+        if let Ok(mut current) = self.native_proxy.lock() {
+            *current = proxy;
+        }
+    }
+
+    #[cfg(rings_native)]
+    pub(crate) fn native_proxy(&self) -> Option<String> {
+        self.native_proxy
+            .lock()
+            .ok()
+            .and_then(|proxy| proxy.clone())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn accounting_for_test(&self) -> OnionExitAccounting {
+        self.accounting.clone()
     }
 
     /// Set the local exit policy. `None` means client-only mode.
@@ -539,6 +589,7 @@ pub(crate) async fn try_handle_https_exit_payload(
         OnionHttpsPayload::Response(_) | OnionHttpsPayload::Error(_) => return Ok(true),
     };
     send_backward(
+        &runtime.link_sender,
         scope,
         session_sk,
         OnionBackwardPath::new(

@@ -6,8 +6,9 @@ use rings_core::dht::Did;
 
 use super::circuit::OnionCircuitId;
 use super::circuit::OnionForwardNonce;
+use super::circuit::ONION_FORWARD_MAX_VALIDITY_MS;
 
-const ONION_REPLAY_TTL_MS: u128 = 120_000;
+const ONION_REPLAY_TTL_MS: u128 = ONION_FORWARD_MAX_VALIDITY_MS;
 const MAX_ONION_REPLAY_ENTRIES: usize = 4096;
 const MAX_ONION_REPLAY_PEERS: usize = 64;
 
@@ -361,6 +362,28 @@ mod tests {
 
         assert_eq!(cache.consume(key, 0), ReplayAdmission::Consumed);
         assert_eq!(cache.consume(key, 1), ReplayAdmission::Duplicate);
+    }
+
+    #[test]
+    fn replay_witness_covers_every_still_valid_forward_instant() {
+        let mut cache = OnionForwardReplayCache::default();
+        let key = forward_key(33);
+        let received_at_ms = 10_000;
+
+        assert_eq!(
+            cache.consume(key, received_at_ms),
+            ReplayAdmission::Consumed
+        );
+        assert_eq!(
+            cache.consume(
+                key,
+                received_at_ms
+                    .saturating_add(ONION_FORWARD_MAX_VALIDITY_MS)
+                    .saturating_sub(1),
+            ),
+            ReplayAdmission::Duplicate
+        );
+        assert_eq!(ONION_REPLAY_TTL_MS, ONION_FORWARD_MAX_VALIDITY_MS);
     }
 
     #[test]

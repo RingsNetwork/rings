@@ -37,6 +37,7 @@ use crate::onion::circuit::OnionCircuitShell;
 use crate::onion::circuit::OnionClientReturn;
 use crate::onion::circuit::OnionForwardNonce;
 use crate::onion::circuit::OnionForwardSequence;
+use crate::onion::circuit::OnionLinkSender;
 use crate::onion::circuit::OnionReturnId;
 use crate::onion::circuit::ONION_CIRCUIT_NAMESPACE;
 use crate::onion::exit_accounting::OnionExitAccounting;
@@ -126,22 +127,26 @@ impl NativeOnionCircuitHandle {
         exit_config: Option<NativeOnionTcpExitConfig>,
     ) -> Result<Self> {
         let allow_exit = exit_config.is_some();
-        let runtime = Arc::new(OnionTcpRuntime::new(session_sk.clone(), exit_config));
-        let https = Arc::new(OnionHttpsRuntime::new());
+        let (runtime, https) = native_onion_runtimes(session_sk.clone(), exit_config);
         if let Some(config) = runtime.exit_config.as_ref() {
             if config.allows_service(&OnionServiceName::https()) {
                 https.set_exit_policy(Some(config.policy().clone()));
+                https.set_native_proxy(config.https_proxy().map(ToString::to_string));
             }
         }
         let capabilities = OnionCircuitCapabilities::from_registration(allow_relay, allow_exit);
         let handler_session_sk = session_sk.clone();
         extensions.register(
             OnionCircuitProtocol::new(capabilities),
-            OnionCircuitShell::new(session_sk, NativeOnionCircuitHandler {
-                runtime: runtime.clone(),
-                https,
-                session_sk: handler_session_sk,
-            }),
+            OnionCircuitShell::with_link_sender(
+                session_sk,
+                NativeOnionCircuitHandler {
+                    runtime: runtime.clone(),
+                    https,
+                    session_sk: handler_session_sk,
+                },
+                runtime.link_sender.clone(),
+            ),
         )?;
         Ok(Self {
             runtime,
@@ -171,6 +176,22 @@ impl NativeOnionCircuitHandle {
             .open_client_connection(self.scope.clone(), route, target)
             .await
     }
+}
+
+fn native_onion_runtimes(
+    session_sk: SessionSk,
+    exit_config: Option<NativeOnionTcpExitConfig>,
+) -> (Arc<OnionTcpRuntime>, Arc<OnionHttpsRuntime>) {
+    let accounting = OnionExitAccounting::default();
+    let link_sender = OnionLinkSender::default();
+    let runtime = Arc::new(OnionTcpRuntime::with_resources(
+        session_sk,
+        exit_config,
+        accounting.clone(),
+        link_sender.clone(),
+    ));
+    let https = Arc::new(OnionHttpsRuntime::with_resources(accounting, link_sender));
+    (runtime, https)
 }
 
 /// Client-side onion TCP stream after the exit has accepted and connected the target.
@@ -239,17 +260,34 @@ struct OnionTcpRuntime {
     forward_replays: Mutex<OnionForwardReplayPartitions>,
     exit_config: Option<NativeOnionTcpExitConfig>,
     accounting: OnionExitAccounting,
+    link_sender: OnionLinkSender,
 }
 
 impl OnionTcpRuntime {
+    #[cfg(test)]
     fn new(session_sk: SessionSk, exit_config: Option<NativeOnionTcpExitConfig>) -> Self {
+        Self::with_resources(
+            session_sk,
+            exit_config,
+            OnionExitAccounting::default(),
+            OnionLinkSender::default(),
+        )
+    }
+
+    fn with_resources(
+        session_sk: SessionSk,
+        exit_config: Option<NativeOnionTcpExitConfig>,
+        accounting: OnionExitAccounting,
+        link_sender: OnionLinkSender,
+    ) -> Self {
         Self {
             session_sk,
             client_streams: Mutex::new(HashMap::new()),
             exit_streams: Mutex::new(HashMap::new()),
             forward_replays: Mutex::new(OnionForwardReplayPartitions::default()),
             exit_config,
-            accounting: OnionExitAccounting::default(),
+            accounting,
+            link_sender,
         }
     }
 
@@ -289,14 +327,18 @@ impl OnionTcpRuntime {
                 return Err(error);
             }
         };
-        let (to, payload) = match path.encode_forward(client_return, open_payload) {
+        let (first_link, payload) = match path.encode_forward(client_return, open_payload) {
             Ok(encoded) => encoded,
             Err(error) => {
                 self.remove_client_stream(key);
                 return Err(error);
             }
         };
-        if let Err(error) = scope.send(to, payload).await {
+        if let Err(error) = self
+            .link_sender
+            .send_sealed(scope.clone(), first_link, payload)
+            .await
+        {
             self.remove_client_stream(key);
             return Err(error);
         }
@@ -561,6 +603,7 @@ impl OnionTcpRuntime {
         // target-connect timing.
         tokio::time::sleep_until(open_response_deadline(request.opened_at, Instant::now())).await;
         TcpBackwardRoute {
+            link_sender: &self.link_sender,
             scope: &request.scope,
             signer: &self.session_sk,
             service: &request.service,

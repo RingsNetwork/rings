@@ -206,6 +206,95 @@ async function verifyControlledShellPreRegistersGateway(hostAssetSource: string,
   assert.equal(registrationMessage.capability?.length, 64);
 }
 
+/** Verify a controller upgrade revokes the old lease and reloads exactly once. */
+async function verifyControllerUpgradeRenewsHostWitness(hostAssetSource: string, hostAssetPath: string): Promise<void> {
+  const controllerChangeListeners: Array<() => void> = [];
+  const clearedIntervals: number[] = [];
+  const sessionValues = new Map<string, string>();
+  let reloadCount = 0;
+  class HostMessageChannel {
+    readonly port1: {
+      onmessage?: (event: { readonly data: unknown }) => void;
+      close: () => void;
+    };
+    readonly port2: { postMessage: (message: unknown) => void };
+
+    constructor() {
+      this.port1 = { close() {} };
+      this.port2 = {
+        postMessage: (message) => this.port1.onmessage?.({ data: message }),
+      };
+    }
+  }
+  const activeWorker = {
+    postMessage(_message: unknown, ports?: Array<{ postMessage: (message: unknown) => void }>) {
+      ports?.[0]?.postMessage({ ok: true });
+    },
+  };
+  const registration = { active: activeWorker };
+  const location = Object.assign(new URL("http://127.0.0.1:8080/#node"), {
+    reload() {
+      reloadCount += 1;
+    },
+  });
+  const context: HostAssetTestContext = {
+    console,
+    URL,
+    Uint8Array,
+    clearInterval(intervalId: number) {
+      clearedIntervals.push(intervalId);
+    },
+    clearTimeout,
+    setInterval: () => 17,
+    setTimeout,
+    MessageChannel: HostMessageChannel,
+    sessionStorage: {
+      getItem(key: string) {
+        return sessionValues.get(key) ?? null;
+      },
+      removeItem(key: string) {
+        sessionValues.delete(key);
+      },
+      setItem(key: string, value: string) {
+        sessionValues.set(key, value);
+      },
+    },
+    location,
+    navigator: {
+      serviceWorker: {
+        controller: activeWorker,
+        ready: Promise.resolve(registration),
+        register: () => Promise.resolve(registration),
+        addEventListener(type, listener) {
+          if (type === "controllerchange") {
+            controllerChangeListeners.push(listener as () => void);
+          }
+        },
+        removeEventListener() {},
+      },
+    },
+    crypto: {
+      getRandomValues(values) {
+        values.fill(0x63);
+        return values;
+      },
+    },
+    addEventListener() {},
+  };
+  context[globalThisKey] = context;
+  vm.runInNewContext(hostAssetSource, context, {
+    filename: hostAssetPath,
+  });
+
+  assert(context.RingsWebviewHost, "host bridge was not installed");
+  assert.equal(await context.RingsWebviewHost.shellPreparation, false);
+  assert.equal(controllerChangeListeners.length, 1);
+  controllerChangeListeners[0]?.();
+  controllerChangeListeners[0]?.();
+  assert.equal(reloadCount, 1);
+  assertJsonEqual(clearedIntervals, [17]);
+}
+
 /** Send one synthetic opener handoff request into the host asset VM. */
 function requestHostDebugCapability(
   hostAssetSource: string,
@@ -369,6 +458,7 @@ async function verifyHostGatewayCancellation(hostAssetSource: string, hostAssetP
 export async function verifyWebviewHostAsset(hostAssetSource: string, hostAssetPath: string): Promise<void> {
   await verifyFirstInstallClaimsCurrentPage(hostAssetSource, hostAssetPath);
   await verifyControlledShellPreRegistersGateway(hostAssetSource, hostAssetPath);
+  await verifyControllerUpgradeRenewsHostWitness(hostAssetSource, hostAssetPath);
 
   const trustedResponses = requestHostDebugCapability(hostAssetSource, hostAssetPath, "http://127.0.0.1:8080/#webview");
   assert.equal(trustedResponses.length, 1);

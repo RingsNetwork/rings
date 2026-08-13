@@ -56,7 +56,7 @@ pub(super) async fn execute_https_request(
     policy: &OnionExitPolicy,
 ) -> Result<FetchResponse> {
     let addresses = resolve_target_addresses(target).await?;
-    let egress = select_native_https_egress(target, addresses, configured_https_proxy())?;
+    let egress = select_native_https_egress(target, addresses, runtime.native_proxy())?;
     native_fetch_with_timeout(
         url,
         request,
@@ -102,18 +102,6 @@ pub(super) fn select_native_https_egress(
 /// synthesis. No other non-public address is eligible for proxy-side resolution.
 const fn is_native_proxy_synthetic_ip(address: IpAddr) -> bool {
     matches!(address, IpAddr::V4(address) if matches!(address.octets(), [198, 18..=19, _, _]))
-}
-
-pub(super) fn configured_https_proxy_from(
-    mut read: impl FnMut(&str) -> Option<String>,
-) -> Option<String> {
-    ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]
-        .into_iter()
-        .find_map(|name| read(name).filter(|value| !value.trim().is_empty()))
-}
-
-fn configured_https_proxy() -> Option<String> {
-    configured_https_proxy_from(|name| std::env::var(name).ok())
 }
 
 fn native_http_error(context: &str, error: reqwest::Error) -> Error {

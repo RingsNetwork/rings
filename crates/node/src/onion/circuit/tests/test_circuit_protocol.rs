@@ -676,6 +676,55 @@ async fn send_effect_releases_transition_turn_and_preserves_peer_order() {
     assert_eq!(hook.cover_count(), 2);
 }
 
+#[cfg(rings_native)]
+#[tokio::test]
+async fn endpoint_send_awaits_the_same_paced_link_lane_and_emits_cover() {
+    let local = session();
+    let peer = session();
+    let hook = Arc::new(OnionSendTestHook::default());
+    let link_sender = OnionLinkSender::with_test_hook(Arc::clone(&hook));
+    let scope = test_scope(local.clone()).lifecycle();
+    let payload = seal_message(
+        &OnionWireMessage::Backward(OnionBackwardFrame {
+            circuit_id: OnionCircuitId::new([41; 16]),
+            payload: encrypt_client_payload(
+                OnionReturnId::new([42; 16]),
+                test_payload("endpoint-shaped"),
+                local.session_public_key(),
+                &local,
+            )
+            .expect("encrypt endpoint fixture"),
+        }),
+        peer.session_public_key(),
+        None,
+    )
+    .expect("seal endpoint fixture");
+
+    let send = tokio::spawn(async move {
+        link_sender
+            .send_sealed(
+                scope,
+                OnionLink::new(peer.account_did(), peer.session_public_key()),
+                payload,
+            )
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(1), hook.wait_until_blocked())
+        .await
+        .expect("endpoint cell reached the shared pacing hook");
+    assert!(
+        !send.is_finished(),
+        "endpoint returned before its real overlay send"
+    );
+
+    hook.release();
+    assert!(send.await.expect("endpoint task joined").is_err());
+    tokio::time::timeout(std::time::Duration::from_secs(1), hook.wait_for_covers(3))
+        .await
+        .expect("one endpoint cell fills the remaining fixed batch slots");
+    assert_eq!(hook.cover_count(), 3);
+}
+
 #[test]
 fn expired_exit_layer_emits_no_exit_effect() {
     let client = session();
@@ -695,6 +744,52 @@ fn expired_exit_layer_emits_no_exit_effect() {
             forward_nonce: OnionForwardNonce::new([9; 16]),
             forward_sequence: OnionForwardSequence::FIRST,
             payload: test_payload("expired"),
+        },
+    });
+
+    assert_eq!(transition.state, state);
+    assert!(transition.effects.is_empty());
+}
+
+#[test]
+fn read_only_reducer_arm_structurally_shares_return_state() {
+    let peer = session();
+    let reducer = OnionCircuitReducer::new(OnionCircuitCapabilities::relay());
+    let state = OnionCircuitState::default();
+
+    let transition = reducer.apply(&state, OnionCircuitInput::CellReady {
+        from: peer.account_did(),
+        received_at_ms: 1,
+        bucket: OnionCellBucket::KiB4,
+        message: OnionWireMessage::Cover,
+    });
+
+    assert!(state.shares_return_table_with(&transition.state));
+    assert!(transition.effects.is_empty());
+}
+
+#[test]
+fn overlong_exit_layer_emits_no_exit_effect() {
+    let client = session();
+    let reducer = OnionCircuitReducer::new(OnionCircuitCapabilities::exit());
+    let state = OnionCircuitState::default();
+    let received_at_ms = 100;
+    let circuit_id = OnionCircuitId::new([38; 16]);
+
+    let transition = reducer.apply(&state, OnionCircuitInput::ForwardReady {
+        from: client.account_did(),
+        received_at_ms,
+        bucket: OnionCellBucket::KiB4,
+        circuit_id,
+        layer: OnionForwardLayer::Exit {
+            client: OnionClientReturn::new(client.session_public_key()),
+            return_session_public_key: client.session_public_key(),
+            expires_at_ms: received_at_ms
+                .saturating_add(super::super::ONION_FORWARD_MAX_VALIDITY_MS)
+                .saturating_add(1),
+            forward_nonce: OnionForwardNonce::new([39; 16]),
+            forward_sequence: OnionForwardSequence::FIRST,
+            payload: test_payload("overlong"),
         },
     });
 

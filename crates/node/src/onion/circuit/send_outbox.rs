@@ -24,12 +24,15 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use bytes::Bytes;
+use futures::channel::oneshot;
 use rings_core::dht::Did;
 use rings_core::ecc::PublicKey;
 
 use super::cell::seal_message;
+use super::cell::sealed_cell_bucket;
 use super::codec::OnionWireMessage;
 use super::OnionCellBucket;
+use super::OnionLink;
 use crate::error::OnionQueueAdmissionReason;
 use crate::error::OnionQueueKind;
 use crate::error::Result;
@@ -90,6 +93,7 @@ struct OverlaySend {
     scope: Scope,
     payload: Bytes,
     cover: CoverSpec,
+    completion: Option<oneshot::Sender<Result<()>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -205,7 +209,8 @@ impl<T> OrderedSendState<T> {
 }
 
 /// Per-next-hop ordered outbox. Enqueue is synchronous; overlay backpressure lives in drains.
-pub(super) struct OnionSendOutbox {
+#[derive(Clone)]
+struct OnionSendOutbox {
     state: Arc<Mutex<OrderedSendState<OverlaySend>>>,
     pacing: Arc<dyn OnionSendPacing>,
     #[cfg(all(test, rings_native))]
@@ -224,13 +229,14 @@ impl Default for OnionSendOutbox {
 }
 
 impl OnionSendOutbox {
-    pub(super) fn enqueue(
+    fn enqueue(
         &self,
         scope: Scope,
         to: Did,
         recipient: PublicKey<33>,
         bucket: OnionCellBucket,
         payload: Bytes,
+        completion: Option<oneshot::Sender<Result<()>>>,
     ) -> Result<()> {
         let item_bytes = payload.len();
         let should_spawn = lock(&self.state)?
@@ -240,6 +246,7 @@ impl OnionSendOutbox {
                     scope,
                     payload,
                     cover: CoverSpec { recipient, bucket },
+                    completion,
                 },
                 item_bytes,
             )
@@ -273,6 +280,57 @@ impl OnionSendOutbox {
     }
 }
 
+/// Shared endpoint/relay capability for one node's ordered, paced onion link traffic.
+///
+/// Clones share the same bounded peer lanes. This is the single effect boundary through which
+/// real circuit cells enter the overlay; relay effects enqueue without waiting, while endpoint
+/// adapters may await the real cell's overlay result without holding protocol transition state.
+#[derive(Clone, Default)]
+pub(crate) struct OnionLinkSender {
+    outbox: OnionSendOutbox,
+}
+
+impl OnionLinkSender {
+    pub(super) fn enqueue_sealed(
+        &self,
+        scope: Scope,
+        link: OnionLink,
+        payload: Bytes,
+    ) -> Result<()> {
+        let bucket = sealed_cell_bucket(&payload)?;
+        self.outbox
+            .enqueue(scope, link.peer, link.recipient, bucket, payload, None)
+    }
+
+    pub(crate) async fn send_sealed(
+        &self,
+        scope: Scope,
+        link: OnionLink,
+        payload: Bytes,
+    ) -> Result<()> {
+        let bucket = sealed_cell_bucket(&payload)?;
+        let (completion, completed) = oneshot::channel();
+        self.outbox.enqueue(
+            scope,
+            link.peer,
+            link.recipient,
+            bucket,
+            payload,
+            Some(completion),
+        )?;
+        completed.await.map_err(|_| {
+            crate::error::Error::OnionRouteError(crate::onion::OnionRouteError::LinkSendCancelled)
+        })?
+    }
+
+    #[cfg(all(test, rings_native))]
+    pub(super) fn with_test_hook(test_hook: Arc<OnionSendTestHook>) -> Self {
+        Self {
+            outbox: OnionSendOutbox::with_test_hook(test_hook),
+        }
+    }
+}
+
 async fn drain_peer(
     state: Arc<Mutex<OrderedSendState<OverlaySend>>>,
     peer: Did,
@@ -293,12 +351,26 @@ async fn drain_peer(
                 tracing::debug!(%peer, "onion send outbox lost drain ownership");
                 return;
             };
+            let OverlaySend {
+                scope,
+                payload,
+                cover,
+                completion,
+            } = send;
             #[cfg(all(test, rings_native))]
             if let Some(hook) = test_hook.as_ref() {
-                hook.before_send(&send.payload).await;
+                hook.before_send(&payload).await;
             }
-            if let Err(error) = send.scope.send(peer, send.payload).await {
-                tracing::debug!(%peer, ?error, "ordered onion overlay send failed");
+            let send_result = scope.send(peer, payload).await;
+            match completion {
+                Some(completion) => {
+                    let _ = completion.send(send_result);
+                }
+                None => {
+                    if let Err(error) = send_result {
+                        tracing::debug!(%peer, ?error, "ordered onion overlay send failed");
+                    }
+                }
             }
             batch_slots += 1;
             let queued_real = batch_slots < ONION_LINK_BATCH_CELLS
@@ -320,8 +392,8 @@ async fn drain_peer(
             for _ in 0..cover_cells {
                 let cover = match seal_message(
                     &OnionWireMessage::Cover,
-                    send.cover.recipient,
-                    Some(send.cover.bucket),
+                    cover.recipient,
+                    Some(cover.bucket),
                 ) {
                     Ok(cover) => cover,
                     Err(error) => {
@@ -333,7 +405,7 @@ async fn drain_peer(
                 if let Some(hook) = test_hook.as_ref() {
                     hook.before_cover();
                 }
-                if let Err(error) = send.scope.send(peer, cover).await {
+                if let Err(error) = scope.send(peer, cover).await {
                     tracing::debug!(%peer, ?error, "onion link-cover send failed");
                 }
             }
