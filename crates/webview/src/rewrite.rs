@@ -74,6 +74,7 @@ impl RewriteContext {
     }
 
     /// Rewrite one HTML document body.
+    #[cfg(test)]
     pub fn rewrite_html(&self, html: &str) -> Result<String> {
         self.rewrite_html_with_limit(html, usize::MAX)
     }
@@ -153,6 +154,7 @@ impl RewriteContext {
     }
 
     /// Rewrite one CSS stylesheet body.
+    #[cfg(test)]
     pub fn rewrite_css(&self, css: &str) -> Result<String> {
         self.rewrite_css_with_limit(css, usize::MAX)
     }

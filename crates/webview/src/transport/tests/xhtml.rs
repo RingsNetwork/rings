@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn bootstrap_is_xml_cdata_and_svg_gets_no_html_runtime() -> Result<()> {
     let target = TargetUrl::parse("https://example.com/index")?.into_url();
-    let mut xhtml = WebviewGateway::new(
+    let xhtml = ConcurrentWebviewGateway::new(
         GatewayPrefix::new("/webview/")?,
         DocumentTransport {
             content_type: Some("application/xhtml+xml"),
@@ -23,7 +23,7 @@ fn bootstrap_is_xml_cdata_and_svg_gets_no_html_runtime() -> Result<()> {
     assert!(body.contains("]]>") && body.contains("&&"));
     assert!(body.contains("]]]]><![CDATA[>"));
 
-    let mut headless_xhtml = WebviewGateway::new(
+    let headless_xhtml = ConcurrentWebviewGateway::new(
         GatewayPrefix::new("/webview/")?,
         DocumentTransport {
             content_type: Some("application/xhtml+xml"),
@@ -49,7 +49,7 @@ fn bootstrap_is_xml_cdata_and_svg_gets_no_html_runtime() -> Result<()> {
     );
     assert!(body.trim_end().ends_with("</html>"));
 
-    let mut svg = WebviewGateway::new(GatewayPrefix::new("/webview/")?, DocumentTransport {
+    let svg = ConcurrentWebviewGateway::new(GatewayPrefix::new("/webview/")?, DocumentTransport {
         content_type: Some("image/svg+xml"),
         body: br#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><image href="/image.png"/></svg>"#.to_vec(),
     })

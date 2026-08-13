@@ -236,10 +236,7 @@ fn data_writes_to_a_live_keyed_session() {
         &opened.state.sessions,
         &t.state.sessions
     ));
-    assert!(std::sync::Arc::ptr_eq(
-        &opened.state.session_counts,
-        &t.state.session_counts
-    ));
+    assert_eq!(opened.state.session_quota, t.state.session_quota);
     assert!(std::sync::Arc::ptr_eq(
         &opened.state.peer_shutdown,
         &t.state.peer_shutdown
@@ -544,11 +541,14 @@ fn lifecycle_property_state_never_diverges_from_model() {
             &model,
             "State.sessions diverged from the model"
         );
-        let projected_session_counts = model.iter().fold(HashMap::new(), |mut counts, key| {
-            *counts.entry(key.peer).or_insert(0) += 1;
-            counts
-        });
-        assert_eq!(state.session_counts.as_ref(), &projected_session_counts);
+        let mut projected_session_counts = HashMap::new();
+        for key in &model {
+            *projected_session_counts.entry(key.peer).or_insert(0) += 1;
+        }
+        assert_eq!(state.session_quota.total(), model.len());
+        for (peer, count) in projected_session_counts {
+            assert_eq!(state.session_quota.peer_total(peer), count);
+        }
     }
 }
 

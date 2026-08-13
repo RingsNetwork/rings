@@ -153,6 +153,7 @@ mod tests {
 
     use super::*;
     use crate::error::Error;
+    use crate::sync_lock::lock;
 
     #[derive(Default)]
     struct RecordedEffects {
@@ -167,11 +168,7 @@ mod tests {
     #[async_trait::async_trait]
     impl TcpDuplexEffects for RecordingRoute {
         async fn send(&mut self, payload: OnionTcpPayload) -> Result<()> {
-            self.effects
-                .payloads
-                .lock()
-                .map_err(|_| Error::Lock)?
-                .push(payload);
+            lock(&self.effects.payloads)?.push(payload);
             self.effects.changed.notify_waiters();
             Ok(())
         }
@@ -181,10 +178,7 @@ mod tests {
         async fn wait_for_shutdown(&self) -> Result<()> {
             loop {
                 let changed = self.changed.notified();
-                if self
-                    .payloads
-                    .lock()
-                    .map_err(|_| Error::Lock)?
+                if lock(&self.payloads)?
                     .iter()
                     .any(|payload| matches!(payload, OnionTcpPayload::Shutdown))
                 {
@@ -236,7 +230,7 @@ mod tests {
             .map_err(|_| Error::ExtensionError("TCP pump did not terminate".to_string()))?
             .map_err(|error| Error::ExtensionError(error.to_string()))?;
 
-        let payloads = recorded.payloads.lock().map_err(|_| Error::Lock)?;
+        let payloads = lock(&recorded.payloads)?;
         let data = payloads
             .iter()
             .filter_map(|payload| match payload {
@@ -279,11 +273,7 @@ mod tests {
             .await
             .map_err(|_| Error::ExtensionError("TCP pump did not accept remote close".to_string()))?
             .map_err(|error| Error::ExtensionError(error.to_string()))?;
-        assert!(recorded
-            .payloads
-            .lock()
-            .map_err(|_| Error::Lock)?
-            .is_empty());
+        assert!(lock(&recorded.payloads)?.is_empty());
         Ok(())
     }
 
@@ -306,7 +296,7 @@ mod tests {
             .map_err(|_| Error::ExtensionError("idle TCP pump was not reclaimed".to_string()))?
             .map_err(|error| Error::ExtensionError(error.to_string()))?;
         assert!(matches!(
-            recorded.payloads.lock().map_err(|_| Error::Lock)?.last(),
+            lock(&recorded.payloads)?.last(),
             Some(OnionTcpPayload::Close)
         ));
         Ok(())

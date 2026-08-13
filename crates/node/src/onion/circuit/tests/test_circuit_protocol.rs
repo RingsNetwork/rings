@@ -54,6 +54,8 @@ use crate::online::OnlineNodeType;
 use crate::processor::ProcessorBuilder;
 #[cfg(rings_native)]
 use crate::processor::ProcessorConfig;
+#[cfg(rings_native)]
+use crate::sync_lock::lock;
 
 pub(super) fn session() -> SessionSk {
     SessionSk::new_with_seckey(&SecretKey::random()).expect("session key")
@@ -242,10 +244,7 @@ impl OnionCircuitHandler for RecordingHandler {
         circuit_id: OnionCircuitId,
         payload: OnionAuthenticatedPayload,
     ) -> crate::error::Result<()> {
-        self.clients
-            .lock()
-            .map_err(|_| crate::error::Error::Lock)?
-            .push((from, circuit_id, payload));
+        lock(&self.clients)?.push((from, circuit_id, payload));
         Ok(())
     }
 }

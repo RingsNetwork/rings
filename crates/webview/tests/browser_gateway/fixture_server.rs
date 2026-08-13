@@ -5,7 +5,6 @@ use std::net::TcpStream;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 
 use url::Url;
@@ -21,7 +20,7 @@ pub(super) struct BrowserFixtureServer {
 impl BrowserFixtureServer {
     pub(super) fn start(
         prefix: GatewayPrefix,
-        gateway: WebviewGateway<BrowserFixtureTransport>,
+        gateway: ConcurrentWebviewGateway<BrowserFixtureTransport>,
     ) -> Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .map_err(|error| WebviewError::transport(error.to_string()))?;
@@ -33,7 +32,7 @@ impl BrowserFixtureServer {
             .map_err(|error| WebviewError::transport(error.to_string()))?;
         let shutdown = Arc::new(AtomicBool::new(false));
         let thread_shutdown = Arc::clone(&shutdown);
-        let gateway = Arc::new(Mutex::new(gateway));
+        let gateway = Arc::new(gateway);
         let handle =
             std::thread::spawn(move || serve_gateway(listener, thread_shutdown, prefix, gateway));
         Ok(Self {
@@ -63,7 +62,7 @@ fn serve_gateway(
     listener: TcpListener,
     shutdown: Arc<AtomicBool>,
     prefix: GatewayPrefix,
-    gateway: Arc<Mutex<WebviewGateway<BrowserFixtureTransport>>>,
+    gateway: Arc<ConcurrentWebviewGateway<BrowserFixtureTransport>>,
 ) -> Result<()> {
     while !shutdown.load(Ordering::SeqCst) {
         match listener.accept() {
@@ -91,7 +90,7 @@ fn serve_gateway(
 fn handle_connection(
     stream: &mut TcpStream,
     prefix: &GatewayPrefix,
-    gateway: &Arc<Mutex<WebviewGateway<BrowserFixtureTransport>>>,
+    gateway: &Arc<ConcurrentWebviewGateway<BrowserFixtureTransport>>,
 ) -> Result<()> {
     stream
         .set_nonblocking(false)
@@ -135,9 +134,6 @@ document.documentElement.appendChild(Object.assign(document.createElement("div")
     };
 
     let kind = gateway_request_kind(&request);
-    let mut gateway = gateway.lock().map_err(|_| {
-        WebviewError::transport("browser fixture gateway lock poisoned".to_string())
-    })?;
     let mut gateway_request =
         gateway_request_from_http(prefix, gateway_path.as_str(), kind, &request.headers)?;
     gateway_request.method = request.method;

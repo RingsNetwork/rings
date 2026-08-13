@@ -7,6 +7,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use rings_webview::browser::bootstrap_script;
+use rings_webview::ConcurrentWebviewGateway;
 use rings_webview::GatewayHeader;
 use rings_webview::GatewayPrefix;
 use rings_webview::GatewayRequest;
@@ -16,7 +17,6 @@ use rings_webview::GatewayTransport;
 use rings_webview::Result;
 use rings_webview::TargetUrl;
 use rings_webview::WebviewError;
-use rings_webview::WebviewGateway;
 
 #[path = "browser_gateway/fixture_server.rs"]
 mod fixture_server;
@@ -329,8 +329,9 @@ fn playwright_browser_renders_gateway_fixture_without_direct_remote_requests() -
         bootstrap_script(prefix.as_str(), target.as_url()),
         fixture_overlay_loader()
     );
-    let gateway = WebviewGateway::new(prefix.clone(), BrowserFixtureTransport::new(log.clone()))
-        .with_bootstrap_script(bootstrap);
+    let gateway =
+        ConcurrentWebviewGateway::new(prefix.clone(), BrowserFixtureTransport::new(log.clone()))
+            .with_bootstrap_script(bootstrap);
     let server = BrowserFixtureServer::start(prefix.clone(), gateway)?;
     let page_url = server.gateway_url(&prefix.encode(target.as_url()));
 

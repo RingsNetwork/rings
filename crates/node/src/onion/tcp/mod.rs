@@ -55,6 +55,7 @@ use crate::onion::OnionProxyTarget;
 use crate::onion::OnionRoute;
 use crate::onion::OnionRouteError;
 use crate::onion::OnionServiceName;
+use crate::sync_lock::lock;
 
 mod client;
 mod config;
@@ -421,7 +422,7 @@ impl OnionTcpRuntime {
         circuit_id: OnionCircuitId,
         nonce: OnionForwardNonce,
     ) -> Result<()> {
-        let mut replays = self.forward_replays.lock().map_err(|_| Error::Lock)?;
+        let mut replays = lock(&self.forward_replays)?;
         match replays.consume(
             from,
             OnionForwardReplayKey::new(circuit_id, nonce),
@@ -602,7 +603,7 @@ impl OnionTcpRuntime {
         open_ack: oneshot::Sender<std::result::Result<(), OnionExitFailure>>,
         tx: mpsc::Sender<TcpInbound>,
     ) -> Result<TcpStreamKey> {
-        let mut streams = self.client_streams.lock().map_err(|_| Error::Lock)?;
+        let mut streams = lock(&self.client_streams)?;
         for _ in 0..16 {
             let key = TcpStreamKey {
                 circuit_id: OnionCircuitId::random(),
@@ -635,7 +636,7 @@ impl OnionTcpRuntime {
         expected_forward_peer: Did,
         tx: mpsc::Sender<TcpInbound>,
     ) -> Result<()> {
-        let mut streams = self.exit_streams.lock().map_err(|_| Error::Lock)?;
+        let mut streams = lock(&self.exit_streams)?;
         match streams.entry(key) {
             Entry::Vacant(entry) => {
                 entry.insert(ExitStream {
@@ -687,18 +688,8 @@ impl OnionTcpRuntime {
     }
 
     fn client_stream_service(&self, key: TcpStreamKey, from: Did) -> Result<OnionServiceName> {
-        let streams = self.client_streams.lock().map_err(|_| Error::Lock)?;
-        let stream = streams
-            .get(&key)
-            .ok_or(Error::OnionRouteError(OnionRouteError::UnknownTcpStream))?;
-        if stream.expected_return_peer != from {
-            return Err(Error::OnionRouteError(
-                OnionRouteError::UnexpectedTcpReturnPeer {
-                    expected: stream.expected_return_peer,
-                    actual: from,
-                },
-            ));
-        }
+        let streams = lock(&self.client_streams)?;
+        let stream = authorize_client_stream(&streams, key, from)?;
         Ok(stream.service.clone())
     }
 
@@ -707,18 +698,8 @@ impl OnionTcpRuntime {
         key: TcpStreamKey,
         from: Did,
     ) -> Result<mpsc::Sender<TcpInbound>> {
-        let streams = self.client_streams.lock().map_err(|_| Error::Lock)?;
-        let stream = streams
-            .get(&key)
-            .ok_or(Error::OnionRouteError(OnionRouteError::UnknownTcpStream))?;
-        if stream.expected_return_peer != from {
-            return Err(Error::OnionRouteError(
-                OnionRouteError::UnexpectedTcpReturnPeer {
-                    expected: stream.expected_return_peer,
-                    actual: from,
-                },
-            ));
-        }
+        let streams = lock(&self.client_streams)?;
+        let stream = authorize_client_stream(&streams, key, from)?;
         Ok(stream.tx.clone())
     }
 
@@ -729,18 +710,8 @@ impl OnionTcpRuntime {
         payload: OnionAuthenticatedPayload,
     ) -> Result<OnionCircuitPayload> {
         let (service, expected_exit, return_id) = {
-            let streams = self.client_streams.lock().map_err(|_| Error::Lock)?;
-            let stream = streams
-                .get(&key)
-                .ok_or(Error::OnionRouteError(OnionRouteError::UnknownTcpStream))?;
-            if stream.expected_return_peer != from {
-                return Err(Error::OnionRouteError(
-                    OnionRouteError::UnexpectedTcpReturnPeer {
-                        expected: stream.expected_return_peer,
-                        actual: from,
-                    },
-                ));
-            }
+            let streams = lock(&self.client_streams)?;
+            let stream = authorize_client_stream(&streams, key, from)?;
             (
                 stream.service.clone(),
                 stream.expected_exit.clone(),
@@ -766,18 +737,8 @@ impl OnionTcpRuntime {
         from: Did,
         sequence: OnionBackwardSequence,
     ) -> Result<()> {
-        let mut streams = self.client_streams.lock().map_err(|_| Error::Lock)?;
-        let stream = streams
-            .get_mut(&key)
-            .ok_or(Error::OnionRouteError(OnionRouteError::UnknownTcpStream))?;
-        if stream.expected_return_peer != from {
-            return Err(Error::OnionRouteError(
-                OnionRouteError::UnexpectedTcpReturnPeer {
-                    expected: stream.expected_return_peer,
-                    actual: from,
-                },
-            ));
-        }
+        let mut streams = lock(&self.client_streams)?;
+        let stream = authorize_client_stream_mut(&mut streams, key, from)?;
         match stream.backward_sequences.consume(sequence.value()) {
             SequenceAdmission::Consumed => Ok(()),
             SequenceAdmission::Duplicate => {
@@ -805,18 +766,8 @@ impl OnionTcpRuntime {
         from: Did,
         result: std::result::Result<(), OnionExitFailure>,
     ) -> Result<bool> {
-        let mut streams = self.client_streams.lock().map_err(|_| Error::Lock)?;
-        let stream = streams
-            .get_mut(&key)
-            .ok_or(Error::OnionRouteError(OnionRouteError::UnknownTcpStream))?;
-        if stream.expected_return_peer != from {
-            return Err(Error::OnionRouteError(
-                OnionRouteError::UnexpectedTcpReturnPeer {
-                    expected: stream.expected_return_peer,
-                    actual: from,
-                },
-            ));
-        }
+        let mut streams = lock(&self.client_streams)?;
+        let stream = authorize_client_stream_mut(&mut streams, key, from)?;
         let Some(open_ack) = stream.open_ack.take() else {
             return Ok(false);
         };
@@ -831,18 +782,8 @@ impl OnionTcpRuntime {
         service: &OnionServiceName,
         sequence: OnionForwardSequence,
     ) -> Result<mpsc::Sender<TcpInbound>> {
-        let mut streams = self.exit_streams.lock().map_err(|_| Error::Lock)?;
-        let stream = streams
-            .get_mut(&key)
-            .ok_or(Error::OnionRouteError(OnionRouteError::UnknownTcpStream))?;
-        if stream.expected_forward_peer != from {
-            return Err(Error::OnionRouteError(
-                OnionRouteError::UnexpectedTcpForwardPeer {
-                    expected: stream.expected_forward_peer,
-                    actual: from,
-                },
-            ));
-        }
+        let mut streams = lock(&self.exit_streams)?;
+        let stream = authorize_exit_stream(&mut streams, key, from)?;
         if &stream.service != service {
             return Err(Error::OnionRouteError(
                 OnionRouteError::PayloadServiceMismatch {
@@ -874,7 +815,7 @@ impl OnionTcpRuntime {
     }
 
     fn next_backward_sequence(&self, key: TcpStreamKey) -> Result<OnionBackwardSequence> {
-        let mut streams = self.exit_streams.lock().map_err(|_| Error::Lock)?;
+        let mut streams = lock(&self.exit_streams)?;
         let stream = streams
             .get_mut(&key)
             .ok_or(Error::OnionRouteError(OnionRouteError::UnknownTcpStream))?;
@@ -960,6 +901,63 @@ struct ExitStream {
     forward_sequences: OnionSequenceWindow,
     next_backward_sequence: u64,
     tx: mpsc::Sender<TcpInbound>,
+}
+
+fn authorize_client_stream(
+    streams: &HashMap<TcpStreamKey, ClientStream>,
+    key: TcpStreamKey,
+    actual: Did,
+) -> Result<&ClientStream> {
+    let stream = streams
+        .get(&key)
+        .ok_or(Error::OnionRouteError(OnionRouteError::UnknownTcpStream))?;
+    if stream.expected_return_peer != actual {
+        return Err(Error::OnionRouteError(
+            OnionRouteError::UnexpectedTcpReturnPeer {
+                expected: stream.expected_return_peer,
+                actual,
+            },
+        ));
+    }
+    Ok(stream)
+}
+
+fn authorize_client_stream_mut(
+    streams: &mut HashMap<TcpStreamKey, ClientStream>,
+    key: TcpStreamKey,
+    actual: Did,
+) -> Result<&mut ClientStream> {
+    let stream = streams
+        .get_mut(&key)
+        .ok_or(Error::OnionRouteError(OnionRouteError::UnknownTcpStream))?;
+    if stream.expected_return_peer != actual {
+        return Err(Error::OnionRouteError(
+            OnionRouteError::UnexpectedTcpReturnPeer {
+                expected: stream.expected_return_peer,
+                actual,
+            },
+        ));
+    }
+    Ok(stream)
+}
+
+fn authorize_exit_stream(
+    streams: &mut HashMap<TcpStreamKey, ExitStream>,
+    key: TcpStreamKey,
+    actual: Did,
+) -> Result<&mut ExitStream> {
+    let stream = streams
+        .get_mut(&key)
+        .ok_or(Error::OnionRouteError(OnionRouteError::UnknownTcpStream))?;
+    if stream.expected_forward_peer != actual {
+        return Err(Error::OnionRouteError(
+            OnionRouteError::UnexpectedTcpForwardPeer {
+                expected: stream.expected_forward_peer,
+                actual,
+            },
+        ));
+    }
+    Ok(stream)
 }
 
 #[cfg(test)]

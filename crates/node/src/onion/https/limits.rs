@@ -6,6 +6,7 @@ pub(super) fn https_response_body_limit(remaining_policy_bytes: Option<u64>) -> 
     })
 }
 
+#[cfg(any(test, rings_browser))]
 pub(super) fn checked_status_code(status: f64) -> Result<u16> {
     if !status.is_finite() || status.fract() != 0.0 || !(100.0..=999.0).contains(&status) {
         return Err(Error::HttpRequestError(format!(

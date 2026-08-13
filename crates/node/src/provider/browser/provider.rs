@@ -328,7 +328,12 @@ impl BrowserOnionProxy {
         let proxy = self.clone();
         future_to_promise(async move {
             let request = if request.is_null() || request.is_undefined() {
-                OnionHttpsClientRequest::default()
+                OnionHttpsClientRequest {
+                    method: "GET".to_string(),
+                    path: None,
+                    headers: Vec::new(),
+                    body: Vec::new(),
+                }
             } else {
                 js_value::deserialize::<OnionHttpsClientRequest>(request).map_err(JsError::from)?
             };

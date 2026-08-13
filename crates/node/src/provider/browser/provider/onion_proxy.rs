@@ -48,12 +48,11 @@ impl BrowserOnionProxy {
         let first_hop = route_first_hop(&proxy_route.route)?;
         let client_return =
             OnionClientReturn::new(self.processor.session_sk().session_public_key());
-        let pending_request = self.runtime.begin_request(
+        let (id, pending_request) = self.runtime.begin_request(
             first_hop,
             proxy_route.route.exit().clone(),
             client_return.return_id,
         )?;
-        let id = pending_request.id();
         let request_payload = encode_https_payload(OnionHttpsPayload::Request(request))?;
         let (to, payload) =
             encode_initial_forward(client_return, &proxy_route.route, id, request_payload)?;

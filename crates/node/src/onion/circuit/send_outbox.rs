@@ -16,8 +16,6 @@ use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 #[cfg(all(test, rings_native))]
-use std::sync::atomic::AtomicBool;
-#[cfg(all(test, rings_native))]
 use std::sync::atomic::AtomicUsize;
 #[cfg(all(test, rings_native))]
 use std::sync::atomic::Ordering;
@@ -32,12 +30,15 @@ use rings_core::ecc::PublicKey;
 use super::cell::seal_message;
 use super::codec::OnionWireMessage;
 use super::OnionCellBucket;
-use crate::error::Error;
 use crate::error::OnionQueueAdmissionReason;
 use crate::error::OnionQueueKind;
 use crate::error::Result;
 use crate::extension::ext::Scope;
 use crate::extension::transport::platform::spawn_detached;
+use crate::peer_quota::PeerQuota;
+use crate::sync_lock::lock;
+#[cfg(all(test, rings_native))]
+use crate::test_support::BlockingSendProbe;
 
 const MAX_PENDING_ONION_SENDS: usize = 1_024;
 const MAX_PENDING_ONION_SENDS_PER_PEER: usize = 128;
@@ -104,7 +105,7 @@ struct PeerLane<T> {
 }
 
 struct OrderedSendState<T> {
-    pending: usize,
+    quota: PeerQuota,
     pending_bytes: usize,
     lanes: HashMap<Did, PeerLane<T>>,
 }
@@ -112,7 +113,7 @@ struct OrderedSendState<T> {
 impl<T> Default for OrderedSendState<T> {
     fn default() -> Self {
         Self {
-            pending: 0,
+            quota: PeerQuota::new(MAX_PENDING_ONION_SENDS, MAX_PENDING_ONION_SENDS_PER_PEER),
             pending_bytes: 0,
             lanes: HashMap::new(),
         }
@@ -122,7 +123,7 @@ impl<T> Default for OrderedSendState<T> {
 impl<T> OrderedSendState<T> {
     /// Reserve one frame and return whether its peer needs a new drain task.
     ///
-    /// Invariant: `pending`/`pending_bytes` equal queued work plus the optional in-flight item in
+    /// Invariant: `quota.total()`/`pending_bytes` equal queued work plus the optional in-flight item in
     /// every lane. No lane has more than one in-flight item, which is the serialization witness
     /// for per-peer order. Cover cells are generated just in time and are never retained here.
     fn enqueue(
@@ -131,19 +132,8 @@ impl<T> OrderedSendState<T> {
         item: T,
         item_bytes: usize,
     ) -> std::result::Result<bool, OnionQueueAdmissionReason> {
-        let (peer_pending, peer_pending_bytes) = self.lanes.get(&peer).map_or((0, 0), |lane| {
-            (
-                lane.queued.len() + usize::from(lane.in_flight_bytes.is_some()),
-                lane.pending_bytes,
-            )
-        });
-        let next_peer = peer_pending
-            .checked_add(1)
-            .ok_or(OnionQueueAdmissionReason::CounterOverflow)?;
-        let next_pending = self
-            .pending
-            .checked_add(1)
-            .ok_or(OnionQueueAdmissionReason::CounterOverflow)?;
+        let peer_pending_bytes = self.lanes.get(&peer).map_or(0, |lane| lane.pending_bytes);
+        self.quota.can_reserve(peer)?;
         let next_peer_bytes = peer_pending_bytes
             .checked_add(item_bytes)
             .ok_or(OnionQueueAdmissionReason::CounterOverflow)?;
@@ -151,19 +141,13 @@ impl<T> OrderedSendState<T> {
             .pending_bytes
             .checked_add(item_bytes)
             .ok_or(OnionQueueAdmissionReason::CounterOverflow)?;
-        if next_pending > MAX_PENDING_ONION_SENDS {
-            return Err(OnionQueueAdmissionReason::GlobalFull);
-        }
         if next_pending_bytes > MAX_PENDING_ONION_SEND_BYTES {
             return Err(OnionQueueAdmissionReason::GlobalFull);
-        }
-        if next_peer > MAX_PENDING_ONION_SENDS_PER_PEER {
-            return Err(OnionQueueAdmissionReason::PeerFull);
         }
         if next_peer_bytes > MAX_PENDING_ONION_SEND_BYTES_PER_PEER {
             return Err(OnionQueueAdmissionReason::PeerFull);
         }
-        self.pending = next_pending;
+        self.quota.reserve(peer)?;
         self.pending_bytes = next_pending_bytes;
         match self.lanes.entry(peer) {
             Entry::Occupied(mut lane) => {
@@ -203,12 +187,13 @@ impl<T> OrderedSendState<T> {
     fn complete(&mut self, peer: Did) -> Option<bool> {
         let lane = self.lanes.get_mut(&peer)?;
         let completed_bytes = lane.in_flight_bytes?;
-        let next_pending = self.pending.checked_sub(1)?;
         let next_pending_bytes = self.pending_bytes.checked_sub(completed_bytes)?;
         let next_lane_bytes = lane.pending_bytes.checked_sub(completed_bytes)?;
+        if !self.quota.release(peer) {
+            return None;
+        }
         lane.in_flight_bytes = None;
         lane.pending_bytes = next_lane_bytes;
-        self.pending = next_pending;
         self.pending_bytes = next_pending_bytes;
         if lane.queued.is_empty() {
             self.lanes.remove(&peer);
@@ -258,7 +243,7 @@ impl OnionSendOutbox {
                 },
                 item_bytes,
             )
-            .map_err(|reason| capacity_error(to, reason))?;
+            .map_err(|reason| OnionQueueKind::CircuitData.admission(to, reason))?;
         if should_spawn {
             let state = Arc::clone(&self.state);
             let pacing = Arc::clone(&self.pacing);
@@ -370,24 +355,9 @@ const fn onion_send_jitter(sample: u8) -> Duration {
     Duration::from_millis(MIN_ONION_SEND_JITTER_MS + (sample as u64 % ONION_SEND_JITTER_SPAN_MS))
 }
 
-fn capacity_error(peer: Did, reason: OnionQueueAdmissionReason) -> Error {
-    Error::OnionQueueAdmission {
-        queue: OnionQueueKind::CircuitData,
-        peer,
-        reason,
-    }
-}
-
-fn lock<T>(state: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>> {
-    state.lock().map_err(|_| Error::Lock)
-}
-
 #[cfg(all(test, rings_native))]
 pub(super) struct OnionSendTestHook {
-    first: AtomicBool,
-    released: AtomicBool,
-    entered: tokio::sync::Notify,
-    release: tokio::sync::Notify,
+    blocking: BlockingSendProbe<()>,
     observed: Mutex<Vec<Bytes>>,
     changed: tokio::sync::Notify,
     cover_count: AtomicUsize,
@@ -398,10 +368,7 @@ pub(super) struct OnionSendTestHook {
 impl Default for OnionSendTestHook {
     fn default() -> Self {
         Self {
-            first: AtomicBool::new(true),
-            released: AtomicBool::new(false),
-            entered: tokio::sync::Notify::new(),
-            release: tokio::sync::Notify::new(),
+            blocking: BlockingSendProbe::default(),
             observed: Mutex::new(Vec::new()),
             changed: tokio::sync::Notify::new(),
             cover_count: AtomicUsize::new(0),
@@ -413,16 +380,7 @@ impl Default for OnionSendTestHook {
 #[cfg(all(test, rings_native))]
 impl OnionSendTestHook {
     async fn before_send(&self, payload: &Bytes) {
-        if self.first.swap(false, Ordering::AcqRel) {
-            self.entered.notify_one();
-            while !self.released.load(Ordering::Acquire) {
-                let release = self.release.notified();
-                if self.released.load(Ordering::Acquire) {
-                    break;
-                }
-                release.await;
-            }
-        }
+        let _ = self.blocking.block_first(()).await;
         if let Ok(mut observed) = self.observed.lock() {
             observed.push(payload.clone());
             self.changed.notify_waiters();
@@ -435,15 +393,11 @@ impl OnionSendTestHook {
     }
 
     pub(super) async fn wait_until_blocked(&self) {
-        if !self.first.load(Ordering::Acquire) {
-            return;
-        }
-        self.entered.notified().await;
+        self.blocking.wait_until_blocked().await;
     }
 
     pub(super) fn release(&self) {
-        self.released.store(true, Ordering::Release);
-        self.release.notify_waiters();
+        self.blocking.release();
     }
 
     pub(super) fn observed(&self) -> Result<Vec<Bytes>> {
@@ -495,9 +449,25 @@ mod tests {
         assert_eq!(state.complete(peer), Some(true));
         assert_eq!(state.take_next(peer), Some(2));
         assert_eq!(state.complete(peer), Some(false));
-        assert_eq!(state.pending, 0);
+        assert_eq!(state.quota.total(), 0);
         assert_eq!(state.pending_bytes, 0);
         assert!(!state.lanes.contains_key(&peer));
+    }
+
+    #[test]
+    fn failed_quota_release_does_not_half_retire_in_flight_item() {
+        let peer = Did::from(12_u32);
+        let mut state = OrderedSendState::default();
+
+        assert_eq!(state.enqueue(peer, 1, 7), Ok(true));
+        assert_eq!(state.take_next(peer), Some(1));
+        state.quota = PeerQuota::new(MAX_PENDING_ONION_SENDS, MAX_PENDING_ONION_SENDS_PER_PEER);
+
+        assert_eq!(state.complete(peer), None);
+        let lane = state.lanes.get(&peer).expect("in-flight lane is retained");
+        assert_eq!(lane.in_flight_bytes, Some(7));
+        assert_eq!(lane.pending_bytes, 7);
+        assert_eq!(state.pending_bytes, 7);
     }
 
     #[test]
@@ -525,7 +495,7 @@ mod tests {
             }
         }
         let recovering_peer = Did::from(9_u32);
-        assert_eq!(state.pending, MAX_PENDING_ONION_SENDS);
+        assert_eq!(state.quota.total(), MAX_PENDING_ONION_SENDS);
         assert_eq!(
             state.enqueue(recovering_peer, 1, 1),
             Err(OnionQueueAdmissionReason::GlobalFull)

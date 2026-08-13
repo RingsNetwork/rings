@@ -33,16 +33,6 @@ impl GatewayRoutePolicy {
         })
     }
 
-    /// Return the controlled browser origin used to host gateway routes.
-    pub fn controlled_origin(&self) -> &Url {
-        &self.controlled_origin
-    }
-
-    /// Return the gateway route prefix handled by this policy.
-    pub fn gateway_prefix(&self) -> &GatewayPrefix {
-        &self.gateway_prefix
-    }
-
     /// Build the controlled-origin URL that represents `target`.
     pub fn gateway_url(&self, target: &Url) -> Result<Url> {
         self.controlled_origin

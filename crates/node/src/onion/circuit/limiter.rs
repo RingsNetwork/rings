@@ -11,6 +11,7 @@ use super::MAX_ONION_CRYPTO_PEERS;
 use super::ONION_CRYPTO_LIMIT_WINDOW_MS;
 use crate::error::Error;
 use crate::error::Result;
+use crate::sync_lock::lock;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CryptoBudget {
@@ -176,10 +177,7 @@ pub(super) struct OnionCryptoGate {
 
 impl OnionCryptoGate {
     pub(super) fn admit(&self, from: Did, now_ms: u128, visible_cell_bytes: u64) -> Result<()> {
-        self.limiter
-            .lock()
-            .map_err(|_| Error::Lock)?
-            .admit(from, now_ms, visible_cell_bytes)
+        lock(&self.limiter)?.admit(from, now_ms, visible_cell_bytes)
     }
 }
 

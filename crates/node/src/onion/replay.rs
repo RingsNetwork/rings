@@ -1,7 +1,6 @@
 //! Bounded replay cache for one-shot onion payloads.
 
 use std::collections::HashMap;
-use std::hash::Hash;
 
 use rings_core::dht::Did;
 
@@ -112,13 +111,13 @@ impl OnionSequenceWindow {
 /// Invariant: an inserted key has already authorized at most one state transition.
 /// Preservation: `consume` purges expired entries first, rejects duplicate keys, and inserts a new
 /// key before the caller executes the side effect.
-pub(crate) struct OnionReplayCache<K> {
-    entries: HashMap<K, u128>,
+pub(crate) struct OnionForwardReplayCache {
+    entries: HashMap<OnionForwardReplayKey, u128>,
     max_entries: usize,
     ttl_ms: u128,
 }
 
-impl<K> Default for OnionReplayCache<K> {
+impl Default for OnionForwardReplayCache {
     fn default() -> Self {
         Self {
             entries: HashMap::new(),
@@ -128,9 +127,7 @@ impl<K> Default for OnionReplayCache<K> {
     }
 }
 
-impl<K> OnionReplayCache<K>
-where K: Eq + Hash
-{
+impl OnionForwardReplayCache {
     fn with_limits(max_entries: usize, ttl_ms: u128) -> Self {
         Self {
             entries: HashMap::new(),
@@ -140,7 +137,7 @@ where K: Eq + Hash
     }
 
     /// Consume a nonce exactly once inside the current replay window.
-    pub(crate) fn consume(&mut self, key: K, now_ms: u128) -> ReplayAdmission {
+    pub(crate) fn consume(&mut self, key: OnionForwardReplayKey, now_ms: u128) -> ReplayAdmission {
         self.purge_expired(now_ms);
         if self.entries.contains_key(&key) {
             return ReplayAdmission::Duplicate;
@@ -157,9 +154,6 @@ where K: Eq + Hash
             .retain(|_, expires_at_ms| *expires_at_ms > now_ms);
     }
 }
-
-/// Bounded cache of forward nonces at an exit.
-pub(crate) type OnionForwardReplayCache = OnionReplayCache<OnionForwardReplayKey>;
 
 struct OnionForwardReplayPartition {
     cache: OnionForwardReplayCache,
@@ -279,7 +273,7 @@ impl OnionForwardReplayPartitions {
             .peers
             .entry(peer)
             .or_insert_with(|| OnionForwardReplayPartition {
-                cache: OnionReplayCache::with_limits(self.max_entries_per_peer, self.ttl_ms),
+                cache: OnionForwardReplayCache::with_limits(self.max_entries_per_peer, self.ttl_ms),
                 expires_at_ms: 0,
                 last_activity_ms: now_ms,
             });
@@ -362,7 +356,7 @@ mod tests {
 
     #[test]
     fn replay_cache_rejects_duplicates_inside_window() {
-        let mut cache = OnionReplayCache::with_limits(2, 10);
+        let mut cache = OnionForwardReplayCache::with_limits(2, 10);
         let key = forward_key(1);
 
         assert_eq!(cache.consume(key, 0), ReplayAdmission::Consumed);
@@ -371,7 +365,7 @@ mod tests {
 
     #[test]
     fn replay_cache_rejects_new_keys_when_full() {
-        let mut cache = OnionReplayCache::with_limits(1, 10);
+        let mut cache = OnionForwardReplayCache::with_limits(1, 10);
 
         assert_eq!(cache.consume(forward_key(1), 0), ReplayAdmission::Consumed);
         assert_eq!(cache.consume(forward_key(2), 1), ReplayAdmission::Full);
@@ -379,7 +373,7 @@ mod tests {
 
     #[test]
     fn replay_cache_reclaims_expired_keys_before_capacity_check() {
-        let mut cache = OnionReplayCache::with_limits(1, 10);
+        let mut cache = OnionForwardReplayCache::with_limits(1, 10);
 
         assert_eq!(cache.consume(forward_key(1), 0), ReplayAdmission::Consumed);
         assert_eq!(cache.consume(forward_key(2), 11), ReplayAdmission::Consumed);

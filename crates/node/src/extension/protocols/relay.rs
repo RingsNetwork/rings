@@ -60,6 +60,7 @@ use crate::extension::transport::Initiator;
 use crate::extension::transport::SessionId;
 use crate::extension::transport::SessionKey;
 use crate::extension::transport::TransportKind;
+use crate::peer_quota::PeerQuota;
 
 #[cfg(any(rings_native, rings_browser))]
 mod control_outbox;
@@ -88,11 +89,6 @@ pub enum RelayCommand<T> {
         name: String,
         /// Local target (`SocketAddr` natively, WebTransport URL in browser).
         target: T,
-    },
-    /// Remove a service mapping.
-    UnregisterService {
-        /// Service name to remove.
-        name: String,
     },
     /// Engine→protocol feedback: a local connection/datagram-flow was accepted, pending
     /// under engine-local `token`, destined for `peer`'s `service`. The pure `step` mints
@@ -212,10 +208,10 @@ pub struct RelayState<T> {
     sessions: Arc<HashSet<SessionKey>>,
     /// Exact cached cardinality of `sessions` projected by authenticated peer.
     ///
-    /// Invariant: `session_counts[p] = |{ k \in sessions : k.peer = p }|`; zero entries are
+    /// Invariant: `session_quota.peer_total(p) = |{ k \in sessions : k.peer = p }|`; zero entries are
     /// absent. Keeping the projection in the pure state makes admission O(1) without giving the
     /// interpreter a second source of truth.
-    session_counts: Arc<HashMap<Did, usize>>,
+    session_quota: Arc<PeerQuota>,
     /// TCP sessions whose peer-to-local direction consumed its affine FIN.
     ///
     /// Invariant: `peer_shutdown` is a subset of `sessions`. The reverse direction remains live
@@ -232,7 +228,10 @@ impl<T> Default for RelayState<T> {
         Self {
             services: Arc::new(HashMap::new()),
             sessions: Arc::new(HashSet::new()),
-            session_counts: Arc::new(HashMap::new()),
+            session_quota: Arc::new(PeerQuota::new(
+                MAX_RELAY_SESSIONS,
+                MAX_RELAY_SESSIONS_PER_PEER,
+            )),
             peer_shutdown: Arc::new(HashSet::new()),
             next_session: 0,
         }
@@ -241,31 +240,40 @@ impl<T> Default for RelayState<T> {
 
 impl<T> RelayState<T> {
     fn can_admit_session(&self, key: &SessionKey) -> bool {
-        self.sessions.len() < MAX_RELAY_SESSIONS
-            && self.session_counts.get(&key.peer).copied().unwrap_or(0)
-                < MAX_RELAY_SESSIONS_PER_PEER
+        self.session_quota.can_reserve(key.peer).is_ok()
     }
 
     fn insert_session(&mut self, key: SessionKey) -> bool {
         if self.sessions.contains(&key) {
             return false;
         }
-        Arc::make_mut(&mut self.peer_shutdown).remove(&key);
-        if !increment_peer_count(Arc::make_mut(&mut self.session_counts), key.peer) {
+        if Arc::make_mut(&mut self.session_quota)
+            .reserve(key.peer)
+            .is_err()
+        {
             return false;
         }
-        Arc::make_mut(&mut self.sessions).insert(key)
+        if Arc::make_mut(&mut self.sessions).insert(key.clone()) {
+            Arc::make_mut(&mut self.peer_shutdown).remove(&key);
+            true
+        } else {
+            let rolled_back = Arc::make_mut(&mut self.session_quota).release(key.peer);
+            debug_assert!(rolled_back);
+            false
+        }
     }
 
     fn remove_session(&mut self, key: &SessionKey) -> bool {
         if !self.sessions.contains(key) {
             return false;
         }
+        if !Arc::make_mut(&mut self.session_quota).release(key.peer) {
+            debug_assert!(false, "session quota missing admitted peer {}", key.peer);
+            return false;
+        }
         Arc::make_mut(&mut self.peer_shutdown).remove(key);
         let removed = Arc::make_mut(&mut self.sessions).remove(key);
-        if removed {
-            decrement_peer_count(Arc::make_mut(&mut self.session_counts), key.peer);
-        }
+        debug_assert!(removed);
         removed
     }
 
@@ -279,37 +287,6 @@ impl<T> RelayState<T> {
             && self.sessions.contains(key)
             && !self.peer_shutdown.contains(key)
             && Arc::make_mut(&mut self.peer_shutdown).insert(key.clone())
-    }
-}
-
-fn increment_peer_count(counts: &mut HashMap<Did, usize>, peer: Did) -> bool {
-    let count = counts.entry(peer).or_default();
-    let Some(next) = count.checked_add(1) else {
-        debug_assert!(false, "count projection overflow for peer {peer}");
-        return false;
-    };
-    *count = next;
-    true
-}
-
-fn decrement_peer_count(counts: &mut HashMap<Did, usize>, peer: Did) {
-    let remove = match counts.get_mut(&peer) {
-        Some(count) if *count > 1 => {
-            *count -= 1;
-            false
-        }
-        Some(1) => true,
-        Some(_) => {
-            debug_assert!(false, "count projection is zero for peer {peer}");
-            false
-        }
-        None => {
-            debug_assert!(false, "count projection missing peer {peer}");
-            false
-        }
-    };
-    if remove {
-        counts.remove(&peer);
     }
 }
 
@@ -356,7 +333,10 @@ where T: Clone + DeserializeOwned + Serialize + MaybeSend + 'static
         RelayState {
             services: Arc::new(self.config.clone()),
             sessions: Arc::new(HashSet::new()),
-            session_counts: Arc::new(HashMap::new()),
+            session_quota: Arc::new(PeerQuota::new(
+                MAX_RELAY_SESSIONS,
+                MAX_RELAY_SESSIONS_PER_PEER,
+            )),
             peer_shutdown: Arc::new(HashSet::new()),
             next_session: 0,
         }
@@ -406,10 +386,6 @@ fn step_command<T: Clone>(
     match command {
         RelayCommand::RegisterService { name, target } => {
             Arc::make_mut(&mut next.services).insert(name, target);
-            Transition::pure(next)
-        }
-        RelayCommand::UnregisterService { name } => {
-            Arc::make_mut(&mut next.services).remove(&name);
             Transition::pure(next)
         }
         RelayCommand::Accepted {

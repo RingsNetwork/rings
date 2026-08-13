@@ -1,7 +1,5 @@
 use super::*;
 use crate::error::WebviewError;
-use crate::types::GatewayHeader;
-use crate::types::GatewayRequest;
 
 #[test]
 fn bootstrap_hooks_browser_network_entrypoints() -> Result<()> {
@@ -38,34 +36,6 @@ fn host_worker_bridge_bootstrap_preserves_host_worker_constructors() -> Result<(
     assert!(script.contains("\"blockWorkers\":false"));
     assert!(script.contains("\"delegateNavigation\":true"));
     assert!(script.contains("config.blockWorkers !== false"));
-    Ok(())
-}
-
-#[test]
-fn onion_https_request_preserves_path_headers_and_body() -> Result<()> {
-    let request = GatewayRequest::xhr(
-        Url::parse("https://example.test:8443/forms/submit?draft=1")?,
-        "POST",
-    )
-    .with_header(GatewayHeader::new("X-Requested-With", "XMLHttpRequest")?)
-    .with_body(b"name=value".to_vec());
-
-    let onion_request = OnionHttpsRequest::new(
-        &request,
-        crate::transport::GatewayResponseBodyLimit::DEFAULT,
-    );
-
-    assert_eq!(onion_request.method, "POST");
-    assert_eq!(onion_request.path, "/forms/submit?draft=1");
-    assert_eq!(onion_request.headers, vec![(
-        "X-Requested-With",
-        "XMLHttpRequest"
-    )]);
-    assert_eq!(onion_request.body, b"name=value");
-    assert_eq!(
-        onion_request.max_response_body_bytes,
-        crate::transport::GatewayResponseBodyLimit::DEFAULT.bytes()
-    );
     Ok(())
 }
 

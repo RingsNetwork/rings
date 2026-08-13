@@ -36,11 +36,6 @@ impl PendingOnionHttpsRequest {
         }
     }
 
-    /// Return the circuit identifier carried by this pending request.
-    pub(crate) const fn id(&self) -> OnionCircuitId {
-        self.id
-    }
-
     #[cfg(test)]
     pub(crate) fn try_recv(
         &mut self,

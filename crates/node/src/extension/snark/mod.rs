@@ -365,15 +365,9 @@ where
     E1: Engine<Base = <E2 as Engine>::Scalar>,
     E2: Engine<Base = <E1 as Engine>::Scalar>,
 {
-    /// Setup snark, get pk and vk, if check set to true, it will check the folding is working correct
-    pub fn fold(&mut self, check: bool) -> Result<()> {
+    /// Fold all circuits into the recursive proof state.
+    pub fn fold(&mut self) -> Result<()> {
         self.snark.fold_all(&self.pp, &self.circuits)?;
-        if check {
-            let steps = self.circuits.len();
-            let first_input = self.first_circuit()?.get_public_inputs()?;
-            self.snark
-                .verify(&self.pp, steps, first_input, vec![E2::Scalar::from(0)])?;
-        }
         Ok(())
     }
 
@@ -452,7 +446,7 @@ impl SNARKBehaviour {
                 type S1 = spartan::snark::RelaxedR1CSSNARK<E1, EE1>;
                 type S2 = spartan::snark::RelaxedR1CSSNARK<E2, EE2>;
                 let mut snark = s.clone();
-                snark.fold(false)?;
+                snark.fold()?;
                 let (pk, vk) = snark.setup()?;
                 let compressed_proof = snark.prove::<S1, S2>(&pk)?;
                 let proof = SNARKProof::<E1, E2, S1, S2> {
@@ -469,7 +463,7 @@ impl SNARKBehaviour {
                 type S1 = spartan::snark::RelaxedR1CSSNARK<E1, EE1>;
                 type S2 = spartan::snark::RelaxedR1CSSNARK<E2, EE2>;
                 let mut snark = s.clone();
-                snark.fold(false)?;
+                snark.fold()?;
                 let (pk, vk) = snark.setup()?;
                 let compressed_proof = snark.prove::<S1, S2>(&pk)?;
                 let proof = SNARKProof::<E1, E2, S1, S2> {
@@ -486,7 +480,7 @@ impl SNARKBehaviour {
                 type S1 = spartan::snark::RelaxedR1CSSNARK<E1, EE1>; // non-preprocessing SNARK
                 type S2 = spartan::snark::RelaxedR1CSSNARK<E2, EE2>; // non-preprocessing SNARK
                 let mut snark = s.clone();
-                snark.fold(false)?;
+                snark.fold()?;
                 let (pk, vk) = snark.setup()?;
                 let compressed_proof = snark.prove::<S1, S2>(&pk)?;
                 let proof = SNARKProof::<E1, E2, S1, S2> {

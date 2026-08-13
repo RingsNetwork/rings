@@ -29,8 +29,6 @@ pub mod cors;
 pub mod error;
 /// Response header normalization policy.
 pub mod header;
-/// Render target pages into gateway-rewritten HTML.
-pub mod render;
 /// HTML and CSS rewriting helpers.
 pub mod rewrite;
 /// Host request routing policy for controlled webview origins.
@@ -57,8 +55,6 @@ pub use error::Result;
 pub use error::TransportFailure;
 pub use error::WebviewError;
 pub use header::HeaderPolicy;
-pub use render::RenderedPage;
-pub use render::WebviewRenderer;
 pub use rewrite::RewriteContext;
 pub use route::GatewayRoute;
 pub use route::GatewayRoutePolicy;
@@ -66,7 +62,6 @@ pub use route::GatewayRouteRejection;
 pub use transport::ConcurrentWebviewGateway;
 pub use transport::GatewayResponseBodyLimit;
 pub use transport::GatewayTransport;
-pub use transport::WebviewGateway;
 pub use types::GatewayCredentials;
 pub use types::GatewayHeader;
 pub use types::GatewayRequest;

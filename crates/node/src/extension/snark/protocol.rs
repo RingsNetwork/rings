@@ -41,11 +41,6 @@ pub enum ComputeResult {
         /// The produced verify task.
         verify_task: SNARKVerifyTask,
     },
-    /// Verification finished; the boolean is already stored in the task manager.
-    Verified {
-        /// Task id.
-        task_id: TaskId,
-    },
 }
 
 /// SNARK's typed input: a self re-injected [`ComputeResult`], or a network task message.
@@ -92,7 +87,6 @@ pub enum SnarkEffect {
 ///
 /// ```text
 ///   step (Ctx (), Result(Proved id to vt)) ↦ ((), [SendTask to (Verify id vt)])
-///   step (Ctx (), Result(Verified id))     ↦ ((), ε)
 ///   step (Ctx (), Task(from, Proof t))     ↦ ((), [Prove id from t])
 ///   step (Ctx (), Task(from, Verify vt))   ↦ ((), [Verify id vt])
 /// ```
@@ -141,7 +135,6 @@ impl Protocol for SnarkProtocol {
                     task: SNARKTask::SNARKVerify(verify_task),
                 },
             }]),
-            SnarkEvent::Result(ComputeResult::Verified { .. }) => Transition::pure(()),
             SnarkEvent::Task { from, msg } => match msg.task {
                 SNARKTask::SNARKProof(task) => Transition::with((), vec![SnarkEffect::Prove {
                     task_id: msg.task_id,
@@ -219,7 +212,7 @@ impl Interpret for SnarkShell {
                     SNARKBehaviour::handle_snark_verify_task(&verify_task, task.value())?;
                 drop(task);
                 self.manager.verified.insert(task_id, verified);
-                self.reinject(&ComputeResult::Verified { task_id })
+                Ok(Vec::new())
             }
         }
     }

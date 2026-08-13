@@ -69,13 +69,6 @@ pub trait GatewayTransport: GatewayTransportMaybeSend {
     ) -> Result<GatewayResponse>;
 }
 
-/// Policy wrapper that applies cookies, header policy, and body rewriting around a transport.
-pub struct WebviewGateway<T> {
-    policy: GatewayResponsePolicy,
-    transport: T,
-    cookies: CookieJar,
-}
-
 /// A gateway that permits concurrent transport requests while sharing one virtual cookie jar.
 ///
 /// The cookie jar is locked only while a request is prepared and while upstream `Set-Cookie`
@@ -184,7 +177,6 @@ impl GatewayRequestSession {
 
 enum BootstrapScript {
     Static(String),
-    PerTarget(fn(&url::Url) -> String),
     PerRequest(fn(&GatewayRequest) -> String),
 }
 
@@ -300,7 +292,6 @@ impl GatewayResponsePolicy {
     fn bootstrap_for(&self, request: &GatewayRequest) -> Option<String> {
         match &self.bootstrap_script {
             Some(BootstrapScript::Static(script)) => Some(script.clone()),
-            Some(BootstrapScript::PerTarget(build)) => Some(build(&request.target)),
             Some(BootstrapScript::PerRequest(build)) => Some(build(request)),
             None => None,
         }
@@ -420,99 +411,7 @@ fn sniff_active_document(body: &[u8]) -> Option<RewriteKind> {
     }
 }
 
-// These two adapters differ only in cookie ownership and the resulting `send` receiver. Keep the
-// policy-facing API generated from one definition so adding a bootstrap or path rule cannot drift
-// between the serialized and concurrent shells.
-macro_rules! impl_gateway_policy_api {
-    ($gateway:ident) => {
-        impl<T> $gateway<T> {
-            /// Return the controlled-origin gateway prefix.
-            pub fn prefix(&self) -> &GatewayPrefix {
-                &self.policy.prefix
-            }
-
-            /// Attach a runtime bootstrap script that is injected into rendered HTML.
-            pub fn with_bootstrap_script(mut self, script: impl Into<String>) -> Self {
-                self.policy.bootstrap_script = Some(BootstrapScript::Static(script.into()));
-                self
-            }
-
-            /// Attach a runtime bootstrap factory evaluated for each rendered target page.
-            pub fn with_target_bootstrap(mut self, script: fn(&url::Url) -> String) -> Self {
-                self.policy.bootstrap_script = Some(BootstrapScript::PerTarget(script));
-                self
-            }
-
-            /// Attach a runtime bootstrap factory evaluated against each rendered request.
-            pub fn with_request_bootstrap(mut self, script: fn(&GatewayRequest) -> String) -> Self {
-                self.policy.bootstrap_script = Some(BootstrapScript::PerRequest(script));
-                self
-            }
-
-            /// Build a typed request from a controlled-origin gateway path.
-            pub fn request_from_gateway_path(
-                &self,
-                path: &str,
-                kind: GatewayRequestKind,
-            ) -> Result<GatewayRequest> {
-                let target = self.policy.prefix.decode_path(path)?.into_url();
-                Ok(match kind {
-                    GatewayRequestKind::Navigation => GatewayRequest::navigation(target),
-                    GatewayRequestKind::Subresource => GatewayRequest::subresource(target),
-                    GatewayRequestKind::Fetch | GatewayRequestKind::Xhr => {
-                        return Err(WebviewError::MissingRuntimeSourceOrigin);
-                    }
-                })
-            }
-        }
-    };
-}
-
-impl_gateway_policy_api!(WebviewGateway);
-impl_gateway_policy_api!(ConcurrentWebviewGateway);
-
-impl<T> WebviewGateway<T>
-where T: GatewayTransport
-{
-    /// Build a webview gateway around `transport`.
-    pub fn new(prefix: GatewayPrefix, transport: T) -> Self {
-        Self {
-            policy: GatewayResponsePolicy::new(prefix),
-            transport,
-            cookies: CookieJar::new(),
-        }
-    }
-
-    /// Access the virtual cookie jar.
-    pub fn cookies(&self) -> &CookieJar {
-        &self.cookies
-    }
-
-    /// Send one request through the gateway policy stack.
-    pub async fn send(&mut self, request: GatewayRequest) -> Result<GatewayResponse> {
-        let prepare_now = current_time_millis()?;
-        let mut session =
-            GatewayRequestSession::prepare(&self.policy, &self.cookies, request, prepare_now)?;
-        let response = session.send(&self.policy, &self.transport).await?;
-        let commit_now = current_time_millis()?;
-        session.commit_response_cookies(&self.policy, &mut self.cookies, &response, commit_now)?;
-        session.finish(&self.policy, response)
-    }
-
-    /// Send one request addressed by a controlled-origin gateway path.
-    pub async fn send_gateway_path(
-        &mut self,
-        path: &str,
-        kind: GatewayRequestKind,
-    ) -> Result<GatewayResponse> {
-        let request = self.request_from_gateway_path(path, kind)?;
-        self.send(request).await
-    }
-}
-
-impl<T> ConcurrentWebviewGateway<T>
-where T: GatewayTransport
-{
+impl<T> ConcurrentWebviewGateway<T> {
     /// Build a concurrent webview gateway around `transport`.
     pub fn new(prefix: GatewayPrefix, transport: T) -> Self {
         Self {
@@ -522,6 +421,22 @@ where T: GatewayTransport
         }
     }
 
+    /// Attach a runtime bootstrap script that is injected into rendered HTML.
+    pub fn with_bootstrap_script(mut self, script: impl Into<String>) -> Self {
+        self.policy.bootstrap_script = Some(BootstrapScript::Static(script.into()));
+        self
+    }
+
+    /// Attach a runtime bootstrap factory evaluated against each rendered request.
+    pub fn with_request_bootstrap(mut self, script: fn(&GatewayRequest) -> String) -> Self {
+        self.policy.bootstrap_script = Some(BootstrapScript::PerRequest(script));
+        self
+    }
+}
+
+impl<T> ConcurrentWebviewGateway<T>
+where T: GatewayTransport
+{
     /// Send one request without holding the virtual-cookie lock during upstream I/O.
     pub async fn send(&self, request: GatewayRequest) -> Result<GatewayResponse> {
         let mut session = {
@@ -536,16 +451,6 @@ where T: GatewayTransport
             session.commit_response_cookies(&self.policy, &mut cookies, &response, commit_now)?;
         }
         session.finish(&self.policy, response)
-    }
-
-    /// Send one request addressed by a controlled-origin gateway path.
-    pub async fn send_gateway_path(
-        &self,
-        path: &str,
-        kind: GatewayRequestKind,
-    ) -> Result<GatewayResponse> {
-        let request = self.request_from_gateway_path(path, kind)?;
-        self.send(request).await
     }
 
     fn lock_cookies(&self) -> Result<std::sync::MutexGuard<'_, CookieJar>> {

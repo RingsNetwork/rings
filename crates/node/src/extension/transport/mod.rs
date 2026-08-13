@@ -200,16 +200,6 @@ impl OutboundQueueBudget {
     }
 }
 
-impl Initiator {
-    /// The other end's view of the same session.
-    pub fn flip(self) -> Self {
-        match self {
-            Initiator::Local => Initiator::Remote,
-            Initiator::Remote => Initiator::Local,
-        }
-    }
-}
-
 /// A relay session's full identity — the unit used to key live sessions and to address
 /// transport effects.
 ///

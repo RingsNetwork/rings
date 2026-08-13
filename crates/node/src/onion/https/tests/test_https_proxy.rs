@@ -165,7 +165,7 @@ fn dropping_pending_request_future_removes_waiting_circuit() {
     let runtime = Arc::new(OnionHttpsRuntime::new());
     let exit = session();
     let return_id = OnionReturnId::new([3; 16]);
-    let pending_request = runtime
+    let (_, pending_request) = runtime
         .begin_request(did(), exit_descriptor(&exit), return_id)
         .unwrap();
     let mut pending_request = Box::pin(pending_request);
@@ -184,10 +184,9 @@ fn pending_request_completes_only_from_expected_return_peer() {
     let other = did();
     let exit = session();
     let return_id = OnionReturnId::new([1; 16]);
-    let pending_request = runtime
+    let (id, pending_request) = runtime
         .begin_request(expected, exit_descriptor(&exit), return_id)
         .unwrap();
-    let id = pending_request.id();
 
     runtime.complete_payload(other, id, dummy_authenticated_payload(return_id, &exit));
     assert_eq!(runtime.pending_len(), 1);
@@ -201,10 +200,9 @@ fn pending_request_rejects_payload_from_wrong_exit_session() {
     let selected_exit = session();
     let wrong_exit = session();
     let return_id = OnionReturnId::new([2; 16]);
-    let mut pending_request = runtime
+    let (id, mut pending_request) = runtime
         .begin_request(expected, exit_descriptor(&selected_exit), return_id)
         .unwrap();
-    let id = pending_request.id();
 
     runtime.complete_payload(
         expected,
@@ -222,10 +220,9 @@ fn pending_request_reports_authenticated_request_as_unexpected_backward_payload(
     let expected = did();
     let exit = session();
     let return_id = OnionReturnId::new([4; 16]);
-    let mut pending_request = runtime
+    let (id, mut pending_request) = runtime
         .begin_request(expected, exit_descriptor(&exit), return_id)
         .unwrap();
-    let id = pending_request.id();
     let request_payload = OnionHttpsPayload::Request(OnionHttpsRequest {
         target: "example.com:443".to_string(),
         method: "GET".to_string(),

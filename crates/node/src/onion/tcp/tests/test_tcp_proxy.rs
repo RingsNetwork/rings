@@ -6,6 +6,7 @@ use crate::onion::OnionExitService;
 use crate::onion::OnionExitTransport;
 use crate::onion::OnionServiceName;
 use crate::online::OnlineNodeType;
+use crate::sync_lock::lock;
 
 fn did() -> Did {
     SecretKey::random().address().into()
@@ -151,11 +152,7 @@ fn saturated_client_inbound_queue_closes_stream_without_waiting() -> Result<()> 
             OnionRouteError::TcpStreamBackpressure
         ))
     ));
-    assert!(!runtime
-        .client_streams
-        .lock()
-        .map_err(|_| Error::Lock)?
-        .contains_key(&key));
+    assert!(!lock(&runtime.client_streams)?.contains_key(&key));
     Ok(())
 }
 
@@ -189,11 +186,7 @@ fn saturated_exit_inbound_queue_closes_stream_without_waiting() -> Result<()> {
             OnionRouteError::TcpStreamBackpressure
         ))
     ));
-    assert!(!runtime
-        .exit_streams
-        .lock()
-        .map_err(|_| Error::Lock)?
-        .contains_key(&key));
+    assert!(!lock(&runtime.exit_streams)?.contains_key(&key));
     Ok(())
 }
 

@@ -150,12 +150,6 @@ impl GatewayRequest {
         self
     }
 
-    /// Attach the trusted concrete source target for diagnostics.
-    pub fn with_source_target(mut self, source_target: Url) -> Self {
-        self.source_target = Some(source_target);
-        self
-    }
-
     /// Normalize trusted source context after direct struct construction.
     pub fn normalize_source_origin(mut self) -> Self {
         if let Some(source_origin) = self.source_origin.take() {

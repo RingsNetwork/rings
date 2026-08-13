@@ -1,4 +1,3 @@
-#![cfg_attr(rings_native, allow(dead_code))]
 //! HTTPS onion-exit request/response adapter.
 //!
 //! This protocol is intentionally application-layer HTTPS. Clients can send an HTTPS request
@@ -9,63 +8,42 @@
 //! headers, credentials policy, and extension host permissions still apply. A full arbitrary HTTPS
 //! exit must run in a browser-extension or native context that grants those fetch permissions.
 
-#[cfg(rings_browser)]
-use std::cell::RefCell;
+#[cfg(any(test, rings_browser))]
 use std::collections::HashMap;
-#[cfg(rings_native)]
-use std::net::IpAddr;
-#[cfg(rings_native)]
-use std::net::SocketAddr;
-#[cfg(rings_browser)]
-use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::Mutex;
-#[cfg(rings_native)]
-use std::time::Duration;
 
 use bytes::Bytes;
+#[cfg(any(test, rings_browser))]
 use futures::channel::oneshot;
-#[cfg(rings_browser)]
-use futures::future::Either;
-#[cfg(rings_browser)]
-use futures::FutureExt;
-#[cfg(rings_browser)]
-use js_sys::Function;
-#[cfg(rings_browser)]
-use js_sys::Object;
-#[cfg(rings_browser)]
-use js_sys::Promise;
-#[cfg(rings_browser)]
-use js_sys::Reflect;
-#[cfg(rings_browser)]
-use js_sys::Uint8Array;
 use rings_core::dht::Did;
 use rings_core::session::SessionSk;
-#[cfg(rings_browser)]
-use rings_core::utils::js_utils;
 use serde::Deserialize;
 use serde::Serialize;
-#[cfg(rings_browser)]
-use wasm_bindgen::closure::Closure;
-#[cfg(rings_browser)]
-use wasm_bindgen::JsCast;
-#[cfg(rings_browser)]
-use wasm_bindgen::JsValue;
-#[cfg(rings_browser)]
-use wasm_bindgen_futures::JsFuture;
-#[cfg(rings_browser)]
-use web_sys::AbortController;
 
-#[cfg(any(test, rings_browser))]
+#[cfg(rings_browser)]
+use self::browser::execute_https_request;
+#[cfg(test)]
 use self::limits::checked_status_code;
 use self::limits::https_response_body_limit;
-use self::limits::reject_content_length_over_limit;
 use self::limits::usize_to_u64;
+#[cfg(all(test, rings_native))]
+use self::native::configured_https_proxy_from;
+#[cfg(rings_native)]
+use self::native::execute_https_request;
+#[cfg(all(test, rings_native))]
+use self::native::native_fetch_with_timeout;
+#[cfg(all(test, rings_native))]
+use self::native::select_native_https_egress;
+#[cfg(all(test, rings_native))]
+use self::native::NativeHttpsEgress;
+#[cfg(any(test, rings_browser))]
 use self::pending::PendingOnionHttpsRequest;
 use crate::error::Error;
 use crate::error::Result;
 use crate::extension::ext::Scope;
 use crate::onion::circuit::send_backward;
+#[cfg(any(test, rings_browser))]
 use crate::onion::circuit::OnionAuthenticatedPayload;
 use crate::onion::circuit::OnionBackwardPath;
 use crate::onion::circuit::OnionBackwardSequence;
@@ -76,6 +54,7 @@ use crate::onion::circuit::OnionCircuitId;
 use crate::onion::circuit::OnionCircuitPayload;
 use crate::onion::circuit::OnionForwardNonce;
 use crate::onion::circuit::OnionForwardSequence;
+#[cfg(any(test, rings_browser))]
 use crate::onion::circuit::OnionReturnId;
 use crate::onion::exit_accounting::OnionExitAccounting;
 use crate::onion::exit_accounting::OnionExitLease;
@@ -84,25 +63,15 @@ use crate::onion::proxy::ONION_PROXY_HTTPS_SERVICE;
 use crate::onion::replay::OnionForwardReplayKey;
 use crate::onion::replay::OnionForwardReplayPartitions;
 use crate::onion::replay::ReplayAdmission;
-#[cfg(rings_native)]
-use crate::onion::target::resolve_target_addresses;
-#[cfg(rings_native)]
-use crate::onion::target::select_public_exit_addresses;
-#[cfg(rings_browser)]
-use crate::onion::target::validate_public_ip_literal;
-#[cfg(rings_native)]
-use crate::onion::target::PublicAddressSelection;
+#[cfg(any(test, rings_browser))]
 use crate::onion::OnionExitDescriptor;
 use crate::onion::OnionExitFailure;
 use crate::onion::OnionExitPolicy;
 use crate::onion::OnionExitTarget;
 use crate::onion::OnionRouteError;
+use crate::sync_lock::lock;
 
 const DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES: u64 = 8 * 1024 * 1024;
-#[cfg(rings_native)]
-const HTTPS_EXIT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-#[cfg(rings_browser)]
-const HTTPS_EXIT_REQUEST_TIMEOUT_MS: i32 = 30_000;
 
 /// One HTTPS request executed by an HTTPS exit.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
@@ -155,6 +124,8 @@ fn decode_https_payload(payload: OnionCircuitPayload) -> Result<Option<OnionHttp
 }
 
 /// JS-facing request fields for one HTTPS proxy request.
+#[cfg(any(test, rings_browser))]
+#[cfg_attr(test, derive(Default))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct OnionHttpsClientRequest {
     /// HTTP method. Defaults to `GET`.
@@ -171,18 +142,8 @@ pub struct OnionHttpsClientRequest {
     pub body: Vec<u8>,
 }
 
-impl Default for OnionHttpsClientRequest {
-    fn default() -> Self {
-        Self {
-            method: default_method(),
-            path: None,
-            headers: Vec::new(),
-            body: Vec::new(),
-        }
-    }
-}
-
 /// JS-facing response fields returned from one HTTPS proxy request.
+#[cfg(any(test, rings_browser))]
 #[derive(Clone, Debug, Serialize, Deserialize, Eq, PartialEq)]
 pub struct OnionHttpsClientResponse {
     /// HTTP status code.
@@ -196,12 +157,14 @@ pub struct OnionHttpsClientResponse {
 /// Shared runtime for the local HTTPS proxy protocol.
 #[derive(Default)]
 pub(crate) struct OnionHttpsRuntime {
+    #[cfg(any(test, rings_browser))]
     pending: Mutex<HashMap<OnionCircuitId, PendingRequest>>,
     exit_policy: Mutex<Option<OnionExitPolicy>>,
     forward_replays: Mutex<OnionForwardReplayPartitions>,
     accounting: OnionExitAccounting,
 }
 
+#[cfg(any(test, rings_browser))]
 struct PendingRequest {
     expected_return_peer: Did,
     expected_exit: OnionExitDescriptor,
@@ -223,13 +186,14 @@ impl OnionHttpsRuntime {
     }
 
     /// Begin a client request expected to complete from the immediate return peer.
+    #[cfg(any(test, rings_browser))]
     pub(crate) fn begin_request(
         self: &Arc<Self>,
         expected_return_peer: Did,
         expected_exit: OnionExitDescriptor,
         return_id: OnionReturnId,
-    ) -> Result<PendingOnionHttpsRequest> {
-        let mut pending = self.pending.lock().map_err(|_| Error::Lock)?;
+    ) -> Result<(OnionCircuitId, PendingOnionHttpsRequest)> {
+        let mut pending = lock(&self.pending)?;
         for _ in 0..16 {
             let id = OnionCircuitId::random();
             if pending.contains_key(&id) {
@@ -242,13 +206,17 @@ impl OnionHttpsRuntime {
                 return_id,
                 sender,
             });
-            return Ok(PendingOnionHttpsRequest::new(self.clone(), id, receiver));
+            return Ok((
+                id,
+                PendingOnionHttpsRequest::new(self.clone(), id, receiver),
+            ));
         }
         Err(Error::OnionRouteError(
             OnionRouteError::CircuitIdAllocationFailed,
         ))
     }
 
+    #[cfg(any(test, rings_browser))]
     fn cancel_request(&self, id: OnionCircuitId) {
         if let Ok(mut pending) = self.pending.lock() {
             pending.remove(&id);
@@ -256,6 +224,7 @@ impl OnionHttpsRuntime {
     }
 
     /// Complete a pending HTTPS request with a signed response or error payload.
+    #[cfg(any(test, rings_browser))]
     pub(crate) fn complete_payload(
         &self,
         from: Did,
@@ -292,6 +261,7 @@ impl OnionHttpsRuntime {
         }
     }
 
+    #[cfg(any(test, rings_browser))]
     fn take_pending_payload(
         &self,
         from: Did,
@@ -345,7 +315,7 @@ impl OnionHttpsRuntime {
         circuit_id: OnionCircuitId,
         nonce: OnionForwardNonce,
     ) -> Result<()> {
-        let mut replays = self.forward_replays.lock().map_err(|_| Error::Lock)?;
+        let mut replays = lock(&self.forward_replays)?;
         match replays.consume(
             from,
             OnionForwardReplayKey::new(circuit_id, nonce),
@@ -369,6 +339,7 @@ impl OnionHttpsRuntime {
 }
 
 /// Parse a full HTTPS URL and encode one client request for its target.
+#[cfg(any(test, rings_browser))]
 pub(crate) fn client_request_from_url(
     url: &str,
     request: OnionHttpsClientRequest,
@@ -378,6 +349,7 @@ pub(crate) fn client_request_from_url(
     Ok((target, request))
 }
 
+#[cfg(any(test, rings_browser))]
 fn client_request_with_default_path(
     target: &OnionProxyTarget,
     request: OnionHttpsClientRequest,
@@ -393,6 +365,7 @@ fn client_request_with_default_path(
     })
 }
 
+#[cfg(any(test, rings_browser))]
 fn parse_https_url(url: &str) -> Result<(OnionProxyTarget, String)> {
     let url = url.trim();
     let (scheme, rest) = url.split_once("://").ok_or_else(|| {
@@ -417,6 +390,7 @@ fn parse_https_url(url: &str) -> Result<(OnionProxyTarget, String)> {
     Ok((target, url_path(suffix)))
 }
 
+#[cfg(any(test, rings_browser))]
 fn https_authority_with_default_port(authority: &str) -> Result<String> {
     let authority = authority.trim();
     if authority.is_empty() {
@@ -481,6 +455,7 @@ fn https_authority_with_default_port(authority: &str) -> Result<String> {
     }
 }
 
+#[cfg(any(test, rings_browser))]
 fn url_path(suffix: &str) -> String {
     let path = suffix
         .split_once('#')
@@ -619,406 +594,10 @@ pub(crate) async fn execute_exit_fetch(
     })
 }
 
-struct FetchResponse {
+pub(super) struct FetchResponse {
     status: u16,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
-}
-
-/// Mutually exclusive native HTTPS egress strategies.
-///
-/// A direct request is allowed only after resolving and pinning public addresses. A proxied
-/// request deliberately delegates name resolution to an operator-configured upstream proxy; the
-/// explicit proxy object prevents reqwest from silently applying `NO_PROXY` and bypassing that
-/// trust boundary.
-#[cfg(rings_native)]
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum NativeHttpsEgress {
-    Direct {
-        host: String,
-        addresses: Vec<SocketAddr>,
-    },
-    Proxy(String),
-}
-
-#[cfg(rings_native)]
-impl NativeHttpsEgress {
-    fn configure(
-        &self,
-        builder: reqwest::ClientBuilder,
-    ) -> std::result::Result<reqwest::ClientBuilder, reqwest::Error> {
-        match self {
-            Self::Direct { host, addresses } => {
-                Ok(builder.no_proxy().resolve_to_addrs(host, addresses))
-            }
-            Self::Proxy(proxy) => reqwest::Proxy::all(proxy).map(|proxy| builder.proxy(proxy)),
-        }
-    }
-}
-
-/// Select native HTTPS egress from an immutable resolution result and proxy configuration.
-///
-/// Post: public resolution always selects a pinned direct path; only a hostname whose complete DNS
-/// snapshot is in the proxy fake-IP range may delegate resolution to an operator-configured proxy;
-/// every other non-public result remains denied.
-#[cfg(rings_native)]
-fn select_native_https_egress(
-    target: &OnionProxyTarget,
-    addresses: Vec<SocketAddr>,
-    configured_proxy: Option<String>,
-) -> Result<NativeHttpsEgress> {
-    let proxy_synthetic_resolution = target.host().parse::<IpAddr>().is_err()
-        && !addresses.is_empty()
-        && addresses
-            .iter()
-            .all(|address| is_native_proxy_synthetic_ip(address.ip()));
-    match select_public_exit_addresses(addresses) {
-        PublicAddressSelection::Public(addresses) => Ok(NativeHttpsEgress::Direct {
-            host: target.host().to_string(),
-            addresses,
-        }),
-        PublicAddressSelection::Denied if proxy_synthetic_resolution => configured_proxy
-            .map(NativeHttpsEgress::Proxy)
-            .ok_or(Error::NoPermission),
-        PublicAddressSelection::Denied => Err(Error::NoPermission),
-        PublicAddressSelection::Empty => Err(Error::OnionTargetResolvedEmpty {
-            authority: target.authority(),
-        }),
-    }
-}
-
-/// Return whether local DNS produced the narrow IPv4 range commonly reserved for proxy fake-IP
-/// synthesis. No other non-public address is eligible for proxy-side resolution.
-#[cfg(rings_native)]
-const fn is_native_proxy_synthetic_ip(address: IpAddr) -> bool {
-    matches!(address, IpAddr::V4(address) if matches!(address.octets(), [198, 18..=19, _, _]))
-}
-
-#[cfg(rings_native)]
-fn configured_https_proxy_from(mut read: impl FnMut(&str) -> Option<String>) -> Option<String> {
-    ["HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"]
-        .into_iter()
-        .find_map(|name| read(name).filter(|value| !value.trim().is_empty()))
-}
-
-#[cfg(rings_native)]
-fn configured_https_proxy() -> Option<String> {
-    configured_https_proxy_from(|name| std::env::var(name).ok())
-}
-
-#[cfg(rings_native)]
-async fn execute_https_request(
-    url: &str,
-    target: &OnionProxyTarget,
-    request: &OnionHttpsRequest,
-    max_body_bytes: u64,
-    runtime: &OnionHttpsRuntime,
-    policy: &OnionExitPolicy,
-) -> Result<FetchResponse> {
-    native_fetch(url, target, request, max_body_bytes, runtime, policy).await
-}
-
-#[cfg(rings_browser)]
-async fn execute_https_request(
-    url: &str,
-    target: &OnionProxyTarget,
-    request: &OnionHttpsRequest,
-    max_body_bytes: u64,
-    runtime: &OnionHttpsRuntime,
-    policy: &OnionExitPolicy,
-) -> Result<FetchResponse> {
-    validate_public_ip_literal(target)?;
-    browser_fetch(url, request, max_body_bytes, runtime, policy).await
-}
-
-#[cfg(rings_native)]
-async fn native_fetch(
-    url: &str,
-    target: &OnionProxyTarget,
-    request: &OnionHttpsRequest,
-    max_body_bytes: u64,
-    runtime: &OnionHttpsRuntime,
-    policy: &OnionExitPolicy,
-) -> Result<FetchResponse> {
-    let addresses = resolve_target_addresses(target).await?;
-    let egress = select_native_https_egress(target, addresses, configured_https_proxy())?;
-    native_fetch_with_timeout(
-        url,
-        request,
-        max_body_bytes,
-        HTTPS_EXIT_REQUEST_TIMEOUT,
-        &egress,
-        |bytes| runtime.record_exit_bytes(policy, bytes),
-    )
-    .await
-}
-
-#[cfg(rings_native)]
-fn native_http_error(context: &str, error: reqwest::Error) -> Error {
-    if error.is_timeout() {
-        Error::HttpRequestError(format!("{context}: timed out"))
-    } else {
-        Error::HttpRequestError(format!("{context}: {error}"))
-    }
-}
-
-#[cfg(rings_native)]
-async fn native_fetch_with_timeout(
-    url: &str,
-    request: &OnionHttpsRequest,
-    max_body_bytes: u64,
-    timeout: Duration,
-    egress: &NativeHttpsEgress,
-    record_bytes: impl Fn(u64) -> Result<()>,
-) -> Result<FetchResponse> {
-    let method = reqwest::Method::from_bytes(normalize_method(&request.method).as_bytes())
-        .map_err(|error| Error::HttpRequestError(format!("invalid HTTPS proxy method: {error}")))?;
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(timeout);
-    let client = egress
-        .configure(client)
-        .map_err(|error| native_http_error("configure HTTPS proxy", error))?
-        .build()
-        .map_err(|error| Error::HttpRequestError(format!("build HTTPS proxy client: {error}")))?;
-    let mut builder = client.request(method, url);
-    for (name, value) in &request.headers {
-        builder = builder.header(name.as_str(), value.as_str());
-    }
-    if !request.body.is_empty() {
-        builder = builder.body(request.body.clone());
-    }
-    let mut response = builder
-        .send()
-        .await
-        .map_err(|error| native_http_error("native HTTPS proxy request", error))?;
-    let status = response.status().as_u16();
-    let headers = response
-        .headers()
-        .iter()
-        .map(|(name, value)| {
-            (
-                name.as_str().to_string(),
-                value.to_str().unwrap_or_default().to_string(),
-            )
-        })
-        .collect::<Vec<_>>();
-    reject_content_length_over_limit(&headers, max_body_bytes)?;
-    let mut body = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|error| native_http_error("read HTTPS proxy response", error))?
-    {
-        let body_len = usize_to_u64(body.len())?;
-        let chunk_len = usize_to_u64(chunk.len())?;
-        if max_body_bytes > 0 && body_len.saturating_add(chunk_len) > max_body_bytes {
-            return Err(Error::NoPermission);
-        }
-        record_bytes(chunk_len)?;
-        body.extend_from_slice(chunk.as_ref());
-    }
-    Ok(FetchResponse {
-        status,
-        headers,
-        body,
-    })
-}
-
-#[cfg(rings_browser)]
-async fn browser_fetch(
-    url: &str,
-    request: &OnionHttpsRequest,
-    max_body_bytes: u64,
-    runtime: &OnionHttpsRuntime,
-    policy: &OnionExitPolicy,
-) -> Result<FetchResponse> {
-    let global = js_sys::global();
-    let fetch = Reflect::get(global.as_ref(), JsValue::from_str("fetch").as_ref())
-        .map_err(js_error)?
-        .dyn_into::<Function>()
-        .map_err(js_error)?;
-    let controller = AbortController::new().map_err(js_error)?;
-    let signal = controller.signal();
-    let init = fetch_init(request, signal.as_ref())?;
-    let promise = fetch
-        .call2(
-            global.as_ref(),
-            JsValue::from_str(url).as_ref(),
-            init.as_ref(),
-        )
-        .map_err(js_error)?;
-    let fetch_task = async move {
-        let response = JsFuture::from(Promise::from(promise))
-            .await
-            .map_err(js_error)?;
-        let status = Reflect::get(response.as_ref(), JsValue::from_str("status").as_ref())
-            .map_err(js_error)?
-            .as_f64()
-            .ok_or_else(|| {
-                Error::HttpRequestError("fetch response status is not numeric".to_string())
-            })
-            .and_then(checked_status_code)?;
-        let headers = collect_headers(&response)?;
-        reject_content_length_over_limit(&headers, max_body_bytes)?;
-        let body = response_body(&response, max_body_bytes, runtime, policy).await?;
-        Ok::<FetchResponse, Error>(FetchResponse {
-            status,
-            headers,
-            body,
-        })
-    };
-    let timeout = js_utils::window_sleep(HTTPS_EXIT_REQUEST_TIMEOUT_MS).fuse();
-    futures::pin_mut!(fetch_task, timeout);
-    match futures::future::select(fetch_task, timeout).await {
-        Either::Left((result, _)) => result,
-        Either::Right((_, _)) => {
-            controller.abort();
-            Err(Error::HttpRequestError(
-                "browser HTTPS proxy request timed out".to_string(),
-            ))
-        }
-    }
-}
-
-#[cfg(rings_browser)]
-fn fetch_init(request: &OnionHttpsRequest, signal: &JsValue) -> Result<Object> {
-    let init = Object::new();
-    Reflect::set(
-        init.as_ref(),
-        JsValue::from_str("method").as_ref(),
-        JsValue::from_str(normalize_method(&request.method).as_str()).as_ref(),
-    )
-    .map_err(js_error)?;
-    let headers = Object::new();
-    for (name, value) in &request.headers {
-        Reflect::set(
-            headers.as_ref(),
-            JsValue::from_str(name).as_ref(),
-            JsValue::from_str(value).as_ref(),
-        )
-        .map_err(js_error)?;
-    }
-    Reflect::set(
-        init.as_ref(),
-        JsValue::from_str("headers").as_ref(),
-        headers.as_ref(),
-    )
-    .map_err(js_error)?;
-    Reflect::set(
-        init.as_ref(),
-        JsValue::from_str("credentials").as_ref(),
-        JsValue::from_str("omit").as_ref(),
-    )
-    .map_err(js_error)?;
-    Reflect::set(
-        init.as_ref(),
-        JsValue::from_str("referrerPolicy").as_ref(),
-        JsValue::from_str("no-referrer").as_ref(),
-    )
-    .map_err(js_error)?;
-    Reflect::set(
-        init.as_ref(),
-        JsValue::from_str("redirect").as_ref(),
-        JsValue::from_str("error").as_ref(),
-    )
-    .map_err(js_error)?;
-    Reflect::set(init.as_ref(), JsValue::from_str("signal").as_ref(), signal).map_err(js_error)?;
-    if !request.body.is_empty() {
-        let body = Uint8Array::from(request.body.as_slice());
-        Reflect::set(
-            init.as_ref(),
-            JsValue::from_str("body").as_ref(),
-            body.as_ref(),
-        )
-        .map_err(js_error)?;
-    }
-    Ok(init)
-}
-
-#[cfg(rings_browser)]
-fn collect_headers(response: &JsValue) -> Result<Vec<(String, String)>> {
-    let headers =
-        Reflect::get(response, JsValue::from_str("headers").as_ref()).map_err(js_error)?;
-    let for_each = Reflect::get(headers.as_ref(), JsValue::from_str("forEach").as_ref())
-        .map_err(js_error)?
-        .dyn_into::<Function>()
-        .map_err(js_error)?;
-    let pairs = Rc::new(RefCell::new(Vec::<(String, String)>::new()));
-    let pairs_for_callback = pairs.clone();
-    let callback = Closure::wrap(Box::new(move |value: JsValue, name: JsValue| {
-        if let (Some(name), Some(value)) = (name.as_string(), value.as_string()) {
-            pairs_for_callback.borrow_mut().push((name, value));
-        }
-    }) as Box<dyn FnMut(JsValue, JsValue)>);
-    for_each
-        .call1(headers.as_ref(), callback.as_ref().unchecked_ref())
-        .map_err(js_error)?;
-    drop(callback);
-    let collected = pairs.borrow().clone();
-    Ok(collected)
-}
-
-#[cfg(rings_browser)]
-async fn response_body(
-    response: &JsValue,
-    max_body_bytes: u64,
-    runtime: &OnionHttpsRuntime,
-    policy: &OnionExitPolicy,
-) -> Result<Vec<u8>> {
-    let body = Reflect::get(response, JsValue::from_str("body").as_ref()).map_err(js_error)?;
-    if body.is_null() || body.is_undefined() {
-        return Ok(Vec::new());
-    }
-    let get_reader = Reflect::get(body.as_ref(), JsValue::from_str("getReader").as_ref())
-        .map_err(js_error)?
-        .dyn_into::<Function>()
-        .map_err(js_error)?;
-    let reader = get_reader.call0(body.as_ref()).map_err(js_error)?;
-    let read = Reflect::get(reader.as_ref(), JsValue::from_str("read").as_ref())
-        .map_err(js_error)?
-        .dyn_into::<Function>()
-        .map_err(js_error)?;
-    let cancel = Reflect::get(reader.as_ref(), JsValue::from_str("cancel").as_ref())
-        .ok()
-        .and_then(|value| value.dyn_into::<Function>().ok());
-    let mut body = Vec::new();
-    loop {
-        let chunk = JsFuture::from(Promise::from(
-            read.call0(reader.as_ref()).map_err(js_error)?,
-        ))
-        .await
-        .map_err(js_error)?;
-        let done = Reflect::get(chunk.as_ref(), JsValue::from_str("done").as_ref())
-            .map_err(js_error)?
-            .as_bool()
-            .unwrap_or(false);
-        if done {
-            break;
-        }
-        let value =
-            Reflect::get(chunk.as_ref(), JsValue::from_str("value").as_ref()).map_err(js_error)?;
-        if value.is_null() || value.is_undefined() {
-            continue;
-        }
-        let bytes = Uint8Array::new(value.as_ref()).to_vec();
-        let body_len = usize_to_u64(body.len())?;
-        let bytes_len = usize_to_u64(bytes.len())?;
-        if max_body_bytes > 0 && body_len.saturating_add(bytes_len) > max_body_bytes {
-            if let Some(cancel) = &cancel {
-                let _ = cancel.call0(reader.as_ref());
-            }
-            return Err(Error::NoPermission);
-        }
-        if let Err(error) = runtime.record_exit_bytes(policy, bytes_len) {
-            if let Some(cancel) = &cancel {
-                let _ = cancel.call0(reader.as_ref());
-            }
-            return Err(error);
-        }
-        body.extend_from_slice(bytes.as_slice());
-    }
-    Ok(body)
 }
 
 fn normalize_method(method: &str) -> String {
@@ -1054,13 +633,13 @@ fn default_path() -> String {
     "/".to_string()
 }
 
-#[cfg(rings_browser)]
-fn js_error(error: JsValue) -> Error {
-    Error::JsError(format!("{error:?}"))
-}
-
 #[cfg(test)]
 mod tests;
 
+#[cfg(rings_browser)]
+mod browser;
 mod limits;
+#[cfg(rings_native)]
+mod native;
+#[cfg(any(test, rings_browser))]
 mod pending;

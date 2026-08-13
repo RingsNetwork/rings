@@ -9,6 +9,8 @@ use super::circuit::OnionCircuitId;
 use super::OnionExitPolicy;
 use crate::error::Error;
 use crate::error::Result;
+use crate::peer_quota::PeerQuota;
+use crate::sync_lock::lock;
 
 const EXIT_LIMIT_WINDOW_MS: u128 = 60_000;
 const HARD_MAX_ACTIVE_CIRCUITS: u32 = 1_024;
@@ -17,8 +19,8 @@ const HARD_MAX_STREAMS_PER_CIRCUIT: u32 = 64;
 
 /// Shared accounting gate for onion exits.
 ///
-/// Invariant: `active_circuits == count({ circuit | active_streams_by_circuit[circuit] > 0 })`.
-/// Invariant: for every `peer`, `active_circuits_by_peer[peer]` equals the number of live circuit
+/// Invariant: `circuit_quota.total() == count({ circuit | active_streams_by_circuit[circuit] > 0 })`.
+/// Invariant: for every `peer`, `circuit_quota.peer_total(peer)` equals the number of live circuit
 /// keys whose `return_peer == peer`, and never exceeds [`HARD_MAX_CIRCUITS_PER_RETURN_PEER`].
 /// Invariant: `bytes_this_window <= policy.max_bytes_per_minute` whenever that policy field is
 /// non-zero.
@@ -33,13 +35,25 @@ pub(crate) struct OnionExitAccounting {
     limiter: Arc<Mutex<ExitLimiter>>,
 }
 
-#[derive(Default)]
 struct ExitLimiter {
-    active_circuits: u32,
-    active_circuits_by_peer: HashMap<Did, u32>,
+    circuit_quota: PeerQuota,
     active_streams_by_circuit: HashMap<ExitCircuitKey, u32>,
     window_start_ms: u128,
     bytes_this_window: u64,
+}
+
+impl Default for ExitLimiter {
+    fn default() -> Self {
+        Self {
+            circuit_quota: PeerQuota::new(
+                HARD_MAX_ACTIVE_CIRCUITS as usize,
+                HARD_MAX_CIRCUITS_PER_RETURN_PEER as usize,
+            ),
+            active_streams_by_circuit: HashMap::new(),
+            window_start_ms: 0,
+            bytes_this_window: 0,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -52,8 +66,7 @@ struct ExitCircuitKey {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AdmitCommit {
     circuit: ExitCircuitKey,
-    active_circuits: u32,
-    active_peer_circuits: u32,
+    reserve_circuit: bool,
     active_streams: u32,
     bytes_this_window: Option<u64>,
 }
@@ -80,12 +93,11 @@ impl Drop for OnionExitLease {
                 if *active_streams > 1 {
                     *active_streams -= 1;
                 } else {
-                    limiter.active_streams_by_circuit.remove(&self.circuit);
-                    limiter.active_circuits = limiter.active_circuits.saturating_sub(1);
-                    decrement_peer_circuits(
-                        &mut limiter.active_circuits_by_peer,
-                        self.circuit.return_peer,
-                    );
+                    let released = limiter.circuit_quota.release(self.circuit.return_peer);
+                    debug_assert!(released);
+                    if released {
+                        limiter.active_streams_by_circuit.remove(&self.circuit);
+                    }
                 }
             }
         }
@@ -102,10 +114,10 @@ impl OnionExitAccounting {
         bytes: u64,
     ) -> Result<OnionExitLease> {
         let circuit = ExitCircuitKey::new(circuit_id, return_peer);
-        let mut limiter = self.limiter.lock().map_err(|_| Error::Lock)?;
+        let mut limiter = lock(&self.limiter)?;
         limiter.refresh_byte_window(get_epoch_ms());
         let commit = limiter.decide_admission(policy, circuit.clone(), bytes)?;
-        limiter.apply_admission(commit);
+        limiter.apply_admission(commit)?;
         Ok(OnionExitLease {
             limiter: self.limiter.clone(),
             circuit,
@@ -117,7 +129,7 @@ impl OnionExitAccounting {
         if policy.max_bytes_per_minute == 0 || bytes == 0 {
             return Ok(());
         }
-        let mut limiter = self.limiter.lock().map_err(|_| Error::Lock)?;
+        let mut limiter = lock(&self.limiter)?;
         limiter.refresh_byte_window(get_epoch_ms());
         if let Some(next) = limiter.next_recorded_bytes(policy, bytes)? {
             limiter.bytes_this_window = next;
@@ -130,7 +142,7 @@ impl OnionExitAccounting {
         if policy.max_bytes_per_minute == 0 {
             return Ok(None);
         }
-        let mut limiter = self.limiter.lock().map_err(|_| Error::Lock)?;
+        let mut limiter = lock(&self.limiter)?;
         limiter.refresh_byte_window(get_epoch_ms());
         Ok(Some(
             policy
@@ -162,48 +174,35 @@ impl ExitLimiter {
             return Err(Error::NoPermission);
         }
         let max_circuits = effective_limit(policy.max_circuits, HARD_MAX_ACTIVE_CIRCUITS);
-        if active_streams == 0 && self.active_circuits >= max_circuits {
+        if active_streams == 0 && self.circuit_quota.total() >= max_circuits as usize {
             return Err(Error::NoPermission);
         }
-        let peer_circuits = self
-            .active_circuits_by_peer
-            .get(&circuit.return_peer)
-            .copied()
-            .unwrap_or_default();
-        if active_streams == 0 && peer_circuits >= HARD_MAX_CIRCUITS_PER_RETURN_PEER {
-            return Err(Error::NoPermission);
+        if active_streams == 0 {
+            self.circuit_quota
+                .can_reserve(circuit.return_peer)
+                .map_err(|_| Error::NoPermission)?;
         }
         let active_streams = active_streams.checked_add(1).ok_or(Error::NoPermission)?;
-        let active_circuits = if active_streams == 1 {
-            self.active_circuits
-                .checked_add(1)
-                .ok_or(Error::NoPermission)?
-        } else {
-            self.active_circuits
-        };
-        let active_peer_circuits = if active_streams == 1 {
-            peer_circuits.checked_add(1).ok_or(Error::NoPermission)?
-        } else {
-            peer_circuits
-        };
         Ok(AdmitCommit {
             circuit,
-            active_circuits,
-            active_peer_circuits,
+            reserve_circuit: active_streams == 1,
             active_streams,
             bytes_this_window: self.next_recorded_bytes(policy, bytes)?,
         })
     }
 
-    fn apply_admission(&mut self, commit: AdmitCommit) {
-        self.active_circuits = commit.active_circuits;
-        self.active_circuits_by_peer
-            .insert(commit.circuit.return_peer, commit.active_peer_circuits);
+    fn apply_admission(&mut self, commit: AdmitCommit) -> Result<()> {
+        if commit.reserve_circuit {
+            self.circuit_quota
+                .reserve(commit.circuit.return_peer)
+                .map_err(|_| Error::NoPermission)?;
+        }
         self.active_streams_by_circuit
             .insert(commit.circuit, commit.active_streams);
         if let Some(bytes_this_window) = commit.bytes_this_window {
             self.bytes_this_window = bytes_this_window;
         }
+        Ok(())
     }
 
     fn refresh_byte_window(&mut self, now_ms: u128) {
@@ -225,16 +224,6 @@ impl ExitLimiter {
             return Err(Error::NoPermission);
         }
         Ok(Some(next))
-    }
-}
-
-fn decrement_peer_circuits(active_by_peer: &mut HashMap<Did, u32>, peer: Did) {
-    match active_by_peer.get_mut(&peer) {
-        Some(count) if *count > 1 => *count -= 1,
-        Some(_) => {
-            active_by_peer.remove(&peer);
-        }
-        None => {}
     }
 }
 
@@ -288,17 +277,15 @@ mod tests {
         let commit = limiter
             .decide_admission(&policy, circuit.clone(), 7)
             .expect("pure admission decision");
-        assert_eq!(limiter.active_circuits, 0);
-        assert!(limiter.active_circuits_by_peer.is_empty());
+        assert_eq!(limiter.circuit_quota.total(), 0);
         assert!(limiter.active_streams_by_circuit.is_empty());
         assert_eq!(limiter.bytes_this_window, 0);
 
-        limiter.apply_admission(commit);
-        assert_eq!(limiter.active_circuits, 1);
-        assert_eq!(
-            limiter.active_circuits_by_peer.get(&circuit.return_peer),
-            Some(&1)
-        );
+        limiter
+            .apply_admission(commit)
+            .expect("validated commit applies atomically");
+        assert_eq!(limiter.circuit_quota.total(), 1);
+        assert_eq!(limiter.circuit_quota.peer_total(circuit.return_peer), 1);
         assert_eq!(limiter.active_streams_by_circuit.get(&circuit), Some(&1));
         assert_eq!(limiter.bytes_this_window, 7);
         assert!(limiter.decide_admission(&policy, circuit, 4).is_err());

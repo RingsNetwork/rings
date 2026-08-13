@@ -14,6 +14,17 @@ pub enum OnionQueueKind {
     CircuitData,
 }
 
+impl OnionQueueKind {
+    /// Build the closed admission error for this queue kind.
+    pub(crate) const fn admission(self, peer: Did, reason: OnionQueueAdmissionReason) -> Error {
+        Error::OnionQueueAdmission {
+            queue: self,
+            peer,
+            reason,
+        }
+    }
+}
+
 /// Algebraic reason a bounded onion/relay queue rejected one item.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OnionQueueAdmissionReason {

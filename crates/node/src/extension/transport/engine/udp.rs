@@ -222,6 +222,7 @@ mod tests {
     use crate::extension::transport::engine::relay_task_for_test;
     use crate::extension::transport::engine::relay_task_for_test_with_src;
     use crate::extension::transport::engine::UdpFlowState;
+    use crate::sync_lock::lock;
 
     #[tokio::test]
     async fn idle_connected_udp_relay_releases_its_session() -> Result<()> {
@@ -248,11 +249,7 @@ mod tests {
         let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("bind UDP"));
         let src = "127.0.0.1:19001".parse().expect("UDP source");
         let (task, sessions, key) = relay_task_for_test_with_src("udp", Some(src))?;
-        sessions
-            .udp_flows
-            .lock()
-            .map_err(|_| Error::Lock)?
-            .insert(src, UdpFlowState::Active(key.clone()));
+        lock(&sessions.udp_flows)?.insert(src, UdpFlowState::Active(key.clone()));
 
         tokio::time::timeout(
             Duration::from_secs(1),
@@ -261,11 +258,7 @@ mod tests {
         .await
         .expect("idle UDP return path must terminate");
         assert!(!sessions.is_live(&key));
-        assert!(!sessions
-            .udp_flows
-            .lock()
-            .map_err(|_| Error::Lock)?
-            .contains_key(&src));
+        assert!(!lock(&sessions.udp_flows)?.contains_key(&src));
         Ok(())
     }
 

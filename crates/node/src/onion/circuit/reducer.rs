@@ -153,17 +153,11 @@ pub enum OnionCircuitEffect {
 #[derive(Clone, Debug)]
 pub(super) struct OnionCircuitReducer {
     capabilities: OnionCircuitCapabilities,
-    max_relay_circuits: usize,
-    relay_return_ttl_ms: u128,
 }
 
 impl OnionCircuitReducer {
     pub(super) const fn new(capabilities: OnionCircuitCapabilities) -> Self {
-        Self {
-            capabilities,
-            max_relay_circuits: MAX_ONION_RELAY_CIRCUITS,
-            relay_return_ttl_ms: ONION_RELAY_RETURN_TTL_MS,
-        }
+        Self { capabilities }
     }
 
     pub(super) fn apply(
@@ -260,8 +254,8 @@ impl OnionCircuitReducer {
                 self.validate_relay_forward()?;
                 remember_return_hop(
                     state,
-                    self.max_relay_circuits,
-                    self.relay_return_ttl_ms,
+                    MAX_ONION_RELAY_CIRCUITS,
+                    ONION_RELAY_RETURN_TTL_MS,
                     RelayReturnEdge {
                         key: RelayReturnKey {
                             circuit_id: next_circuit_id,
@@ -331,7 +325,7 @@ impl OnionCircuitReducer {
             let previous_hop = entry.previous_hop;
             let previous_circuit_id = entry.previous_circuit_id;
             let previous_session_public_key = entry.previous_session_public_key;
-            entry.expires_at_ms = received_at_ms.saturating_add(self.relay_return_ttl_ms);
+            entry.expires_at_ms = received_at_ms.saturating_add(ONION_RELAY_RETURN_TTL_MS);
             let encoded_message =
                 encode_message(&OnionWireMessage::Backward(OnionBackwardFrame {
                     circuit_id: previous_circuit_id,

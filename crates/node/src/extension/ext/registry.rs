@@ -31,6 +31,7 @@ use super::Wire;
 use crate::error::Error;
 use crate::error::Result;
 use crate::processor::Processor;
+use crate::sync_lock::lock;
 
 /// Upper bound on re-injection iterations per inbound message, so a misbehaving
 /// protocol/effect cycle cannot diverge.
@@ -298,7 +299,7 @@ where
             // feedback queue makes every same-turn effect result part of this fold before a
             // competing inbound can begin its own transition.
             let effects = {
-                let mut guard = self.state.lock().map_err(|_| Error::Lock)?;
+                let mut guard = lock(&self.state)?;
                 let Transition { state, effects } = self.protocol.step(
                     Ctx {
                         did: core.did(),
@@ -568,7 +569,7 @@ mod tests {
                 self.first_effect_started.notify_one();
                 self.release_first_effect.notified().await;
             }
-            self.observed.lock().map_err(|_| Error::Lock)?.push(effect);
+            lock(&self.observed)?.push(effect);
             Ok(Vec::new())
         }
     }
@@ -589,7 +590,7 @@ mod tests {
             match effect {
                 RelayEffect::Connect { key, .. } => {
                     let first_connect = {
-                        let mut seen = self.first_connect_seen.lock().map_err(|_| Error::Lock)?;
+                        let mut seen = lock(&self.first_connect_seen)?;
                         let first_connect = !*seen;
                         *seen = true;
                         first_connect
@@ -607,10 +608,7 @@ mod tests {
                             .map(|payload| vec![payload])
                             .map_err(|_| Error::EncodeError);
                     }
-                    self.observed_connects
-                        .lock()
-                        .map_err(|_| Error::Lock)?
-                        .push(key.session);
+                    lock(&self.observed_connects)?.push(key.session);
                     Ok(Vec::new())
                 }
                 _ => Ok(Vec::new()),
@@ -628,7 +626,7 @@ mod tests {
         type Effect = u8;
 
         async fn run(&self, _scope: &EffectScope, effect: Self::Effect) -> Result<Vec<Bytes>> {
-            self.observed.lock().map_err(|_| Error::Lock)?.push(effect);
+            lock(&self.observed)?.push(effect);
             if effect == 1 {
                 return Err(Error::ExtensionError(
                     "intentional effect failure".to_string(),
@@ -712,16 +710,10 @@ mod tests {
                 .await
         });
         gate_wait.notified().await;
-        assert_eq!(*gate_contention.lock().map_err(|_| Error::Lock)?, vec![
-            false, true
-        ]);
+        assert_eq!(*lock(&gate_contention)?, vec![false, true]);
         assert!(!second.is_finished());
-        assert!(interpreter
-            .observed
-            .lock()
-            .map_err(|_| Error::Lock)?
-            .is_empty());
-        assert_eq!(*committed.lock().map_err(|_| Error::Lock)?, 1);
+        assert!(lock(&interpreter.observed)?.is_empty());
+        assert_eq!(*lock(&committed)?, 1);
 
         interpreter.release_first_effect.notify_one();
         first
@@ -730,11 +722,8 @@ mod tests {
         second
             .await
             .map_err(|error| Error::ExtensionError(error.to_string()))??;
-        assert_eq!(*committed.lock().map_err(|_| Error::Lock)?, 2);
-        assert_eq!(
-            *interpreter.observed.lock().map_err(|_| Error::Lock)?,
-            vec![1, 2]
-        );
+        assert_eq!(*lock(&committed)?, 2);
+        assert_eq!(*lock(&interpreter.observed)?, vec![1, 2]);
         Ok(())
     }
 
@@ -761,10 +750,7 @@ mod tests {
             )
             .await?;
 
-        assert_eq!(
-            *interpreter.observed.lock().map_err(|_| Error::Lock)?,
-            vec![1, 2]
-        );
+        assert_eq!(*lock(&interpreter.observed)?, vec![1, 2]);
         Ok(())
     }
 
@@ -839,13 +825,7 @@ mod tests {
             .await
             .map_err(|_| Error::ExtensionError("second feedback turn timed out".to_string()))?
             .map_err(|error| Error::ExtensionError(error.to_string()))??;
-        assert_eq!(
-            *interpreter
-                .observed_connects
-                .lock()
-                .map_err(|_| Error::Lock)?,
-            vec![SessionId(0)]
-        );
+        assert_eq!(*lock(&interpreter.observed_connects)?, vec![SessionId(0)]);
         Ok(())
     }
 

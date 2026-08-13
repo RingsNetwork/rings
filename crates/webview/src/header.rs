@@ -52,7 +52,7 @@ impl HeaderPolicy {
             name: "Accept-Encoding".to_string(),
             value: "identity".to_string(),
         });
-        if should_send_virtual_origin(&request) {
+        if request.is_cross_origin_runtime_request() {
             let Some(source_origin) = request.source_origin.as_ref() else {
                 return request;
             };
@@ -133,10 +133,6 @@ fn should_forward_request_header(name: &str) -> bool {
             | "pragma"
             | "range"
     )
-}
-
-fn should_send_virtual_origin(request: &GatewayRequest) -> bool {
-    request.is_cross_origin_runtime_request()
 }
 
 fn should_strip_response_header(name: &str) -> bool {

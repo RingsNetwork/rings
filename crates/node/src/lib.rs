@@ -22,6 +22,7 @@ pub mod measure;
 pub mod native;
 pub mod onion;
 pub mod online;
+mod peer_quota;
 pub mod prelude;
 pub mod processor;
 pub mod provider;
@@ -29,6 +30,9 @@ pub mod registration;
 mod rpc_dto;
 mod rpc_impl;
 pub mod seed;
+mod sync_lock;
+#[cfg(all(test, rings_native))]
+mod test_support;
 #[cfg(test)]
 mod tests;
 pub mod util;
