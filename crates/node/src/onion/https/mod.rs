@@ -223,7 +223,7 @@ impl OnionHttpsRuntime {
             .and_then(|proxy| proxy.clone())
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, rings_native))]
     pub(crate) fn accounting_for_test(&self) -> OnionExitAccounting {
         self.accounting.clone()
     }
