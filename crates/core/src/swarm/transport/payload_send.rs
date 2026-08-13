@@ -80,6 +80,32 @@ fn message_kind(message: &Message) -> &'static str {
     }
 }
 
+#[derive(Clone, Copy)]
+struct OversizedPayloadLog {
+    local: Did,
+    next_hop: Did,
+    destination: Did,
+    relay_destination: Did,
+    tx_id: uuid::Uuid,
+    message_kind: &'static str,
+    bytes: usize,
+    max_bytes: usize,
+}
+
+fn log_oversized_payload(metadata: OversizedPayloadLog) {
+    tracing::error!(
+        local = %metadata.local,
+        next_hop = %metadata.next_hop,
+        destination = %metadata.destination,
+        relay_destination = %metadata.relay_destination,
+        tx_id = %metadata.tx_id,
+        message_kind = metadata.message_kind,
+        bytes = metadata.bytes,
+        max_bytes = metadata.max_bytes,
+        "message payload is too large"
+    );
+}
+
 impl SwarmTransport {
     /// Send a maintenance payload and return only after all of its frames stop.
     ///
@@ -268,17 +294,16 @@ impl SwarmTransport {
         let next_hop = payload.relay.next_hop;
         let data = payload.to_bincode()?;
         if data.len() > TRANSPORT_MAX_SIZE {
-            tracing::error!(
-                local = %self.dht.did,
-                next_hop = %next_hop,
-                destination = %destination,
-                relay_destination = %relay_destination,
-                tx_id = %tx_id,
+            log_oversized_payload(OversizedPayloadLog {
+                local: self.dht.did,
+                next_hop,
+                destination,
+                relay_destination,
+                tx_id,
                 message_kind,
-                bytes = data.len(),
-                max_bytes = TRANSPORT_MAX_SIZE,
-                "message payload is too large"
-            );
+                bytes: data.len(),
+                max_bytes: TRANSPORT_MAX_SIZE,
+            });
             return Err(Error::MessageTooLarge(data.len()));
         }
 
@@ -357,5 +382,39 @@ impl PayloadSender for SwarmTransport {
         self.do_send_payload_with_completion(did, payload, SendCompletion::Detached)
             .await
             .map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tracing_test::traced_test;
+
+    use super::*;
+
+    #[traced_test]
+    #[test]
+    fn oversized_payload_log_omits_message_body() {
+        let sensitive_body = "secret custom payload body must not be logged";
+        let tx_id = uuid::Uuid::from_u128(0x1111_2222_3333_4444_5555_6666_7777_8888);
+
+        log_oversized_payload(OversizedPayloadLog {
+            local: Did::from(1_u32),
+            next_hop: Did::from(2_u32),
+            destination: Did::from(3_u32),
+            relay_destination: Did::from(4_u32),
+            tx_id,
+            message_kind: "CustomMessage",
+            bytes: TRANSPORT_MAX_SIZE.saturating_add(1),
+            max_bytes: TRANSPORT_MAX_SIZE,
+        });
+
+        assert!(logs_contain("message payload is too large"));
+        assert!(logs_contain(&tx_id.to_string()));
+        assert!(logs_contain("CustomMessage"));
+        assert!(logs_contain(
+            &(TRANSPORT_MAX_SIZE.saturating_add(1)).to_string()
+        ));
+        assert!(!logs_contain(sensitive_body));
+        assert!(!logs_contain("CustomMessage {"));
     }
 }
