@@ -402,9 +402,10 @@ impl Extensions {
         I: Interpret<Effect = P::Effect> + MaybeSend + 'static,
     {
         // Build (namespace, runner) outside the lock.
-        let prepared: Vec<(String, Arc<DynHandler>)> = items
+        let prepared: Vec<(String, Arc<DynHandler>, Vec<&'static str>)> = items
             .into_iter()
             .map(|(protocol, interpret)| {
+                let capabilities = protocol.capabilities().to_vec();
                 let namespace = protocol.namespace().to_string();
                 let state = Mutex::new(protocol.init());
                 let runner: Arc<DynHandler> = Arc::new(Runner {
@@ -419,25 +420,30 @@ impl Extensions {
                     #[cfg(all(test, rings_native))]
                     before_gate_wait_for_test: None,
                 });
-                (namespace, runner)
+                (namespace, runner, capabilities)
             })
             .collect();
 
         let mut handlers = self.core.handlers.write().map_err(|_| Error::Lock)?;
         // Check-all (existing table + intra-batch duplicates) before mutating anything.
-        for (index, (namespace, _)) in prepared.iter().enumerate() {
+        for (index, (namespace, _, _)) in prepared.iter().enumerate() {
             let duplicate_in_batch = prepared
                 .iter()
                 .take(index)
-                .any(|(seen, _)| seen == namespace);
+                .any(|(seen, _, _)| seen == namespace);
             if duplicate_in_batch || handlers.contains_key(namespace) {
                 return Err(Error::ExtensionError(format!(
                     "namespace {namespace:?} is already registered"
                 )));
             }
         }
+        self.core.processor.add_online_node_capabilities(
+            prepared
+                .iter()
+                .flat_map(|(_, _, capabilities)| capabilities.iter().copied()),
+        )?;
         // All free: insert the whole batch.
-        for (namespace, runner) in prepared {
+        for (namespace, runner, _) in prepared {
             handlers.insert(namespace, runner);
         }
         Ok(())
@@ -450,6 +456,7 @@ impl Extensions {
         P::Effect: MaybeSend,
         I: Interpret<Effect = P::Effect> + MaybeSend + 'static,
     {
+        let capabilities = protocol.capabilities();
         let namespace = protocol.namespace().to_string();
         let state = Mutex::new(protocol.init());
         let runner: Arc<DynHandler> = Arc::new(Runner {
@@ -470,6 +477,9 @@ impl Extensions {
                 "namespace {namespace:?} is already registered"
             )));
         }
+        self.core
+            .processor
+            .add_online_node_capabilities(capabilities.iter().copied())?;
         handlers.insert(namespace, runner);
         Ok(())
     }

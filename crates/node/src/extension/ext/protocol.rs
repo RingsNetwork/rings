@@ -114,6 +114,11 @@ pub trait Protocol {
     /// The namespace this protocol is registered and routed under.
     fn namespace(&self) -> &str;
 
+    /// Optional online-node capability labels advertised when this protocol is registered.
+    fn capabilities(&self) -> &'static [&'static str] {
+        &[]
+    }
+
     /// Initial state. `init : 1 → S`.
     fn init(&self) -> Self::State;
 

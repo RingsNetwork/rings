@@ -22,25 +22,30 @@ use rings_snark::snark::SNARK;
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::types::snark::SNARKProofTask;
-use super::types::snark::SNARKTask;
-use super::types::snark::SNARKTaskMessage;
-use super::types::snark::SNARKVerifyTask;
 use crate::error::Error;
 use crate::error::Result;
+use crate::extension::snark::types::SNARKProofTask;
+use crate::extension::snark::types::SNARKTask;
+use crate::extension::snark::types::SNARKTaskMessage;
+use crate::extension::snark::types::SNARKVerifyTask;
 use crate::provider::Provider;
 
 type TaskId = uuid::Uuid;
 
 /// Namespace under which SNARK proof/verify tasks travel.
 pub const NAMESPACE: &str = "snark";
+/// Online-node capability advertised by providers that register this extension.
+pub const CAPABILITY: &str = NAMESPACE;
 
 #[cfg(rings_browser)]
 pub mod browser;
 mod builder;
+mod error;
 mod protocol;
+pub mod types;
 
 pub use builder::SNARKTaskBuilder;
+pub use error::SnarkError;
 pub use protocol::SnarkProtocol;
 
 /// Task Manageer of SNARK provider and verifier
@@ -429,7 +434,7 @@ where
     fn first_circuit(&self) -> Result<&circuit::Circuit<E1::Scalar>> {
         self.circuits
             .first()
-            .ok_or_else(|| Error::SNARKHandleMessage("empty SNARK circuit list".to_string()))
+            .ok_or_else(|| SnarkError::HandleMessage("empty SNARK circuit list".to_string()).into())
     }
 }
 
@@ -516,7 +521,7 @@ impl SNARKBehaviour {
                     let ret = t.verify::<S1, S2>(proof.proof, proof.vk);
                     Ok(ret.is_ok())
                 } else {
-                    Err(Error::SNARKCurveNotMatch())
+                    Err(SnarkError::CurveNotMatch.into())
                 }
             }
             SNARKVerifyTask::VastaPallas(p) => {
@@ -531,7 +536,7 @@ impl SNARKBehaviour {
                     let ret = t.verify::<S1, S2>(proof.proof, proof.vk);
                     Ok(ret.is_ok())
                 } else {
-                    Err(Error::SNARKCurveNotMatch())
+                    Err(SnarkError::CurveNotMatch.into())
                 }
             }
             SNARKVerifyTask::Bn256KZGGrumpkin(p) => {
@@ -546,7 +551,7 @@ impl SNARKBehaviour {
                     let ret = t.verify::<S1, S2>(proof.proof, proof.vk);
                     Ok(ret.is_ok())
                 } else {
-                    Err(Error::SNARKCurveNotMatch())
+                    Err(SnarkError::CurveNotMatch.into())
                 }
             }
         };

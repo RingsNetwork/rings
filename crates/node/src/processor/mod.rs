@@ -163,6 +163,11 @@ impl Processor {
         RegistrationContext::new_with_stop(self, stop)
     }
 
+    pub(crate) fn add_online_node_capabilities<I>(&self, capabilities: I) -> Result<()>
+    where I: IntoIterator<Item = &'static str> {
+        self.online_node_registration.add_capabilities(capabilities)
+    }
+
     #[cfg(all(test, feature = "node"))]
     fn online_node_descriptor_at(&self, now_ms: u128) -> Result<OnlineNodeDescriptor> {
         self.online_node_registration

@@ -1,5 +1,5 @@
-//! Backend message types for SNARK
-//! ==============================
+//! Backend message types for the SNARK extension.
+
 use rings_snark::prelude::nova::provider::Bn256EngineKZG;
 use rings_snark::prelude::nova::provider::GrumpkinEngine;
 use rings_snark::prelude::nova::provider::PallasEngine;
@@ -7,7 +7,7 @@ use rings_snark::prelude::nova::provider::VestaEngine;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::extension::snark::SNARKGenerator;
+use super::SNARKGenerator;
 
 /// Message for snark task
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -22,10 +22,9 @@ pub struct SNARKTaskMessage {
     pub task: SNARKTask,
 }
 
-// `SNARKTaskMessage` now travels as a `snark` namespace [`Envelope`] payload (see
-// [`crate::extension::snark::SnarkProtocol`]); it no longer wraps into `BackendMessage`.
+// `SNARKTaskMessage` travels as a `snark` namespace [`Envelope`] payload (see
+// [`crate::extension::snark::SnarkProtocol`]); it does not wrap into a core message enum.
 
-#[cfg(feature = "snark")]
 /// Message types for snark task, including proof and verify
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum SNARKTask {

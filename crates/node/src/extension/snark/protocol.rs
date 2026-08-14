@@ -15,6 +15,7 @@ use serde::Serialize;
 use super::SNARKBehaviour;
 use super::SNARKTaskManager;
 use super::TaskId;
+use super::CAPABILITY;
 use super::NAMESPACE;
 use crate::error::Error;
 use crate::extension::ext::Ctx;
@@ -24,10 +25,10 @@ use crate::extension::ext::Protocol;
 use crate::extension::ext::Reject;
 use crate::extension::ext::Transition;
 use crate::extension::ext::Wire;
-use crate::extension::types::snark::SNARKProofTask;
-use crate::extension::types::snark::SNARKTask;
-use crate::extension::types::snark::SNARKTaskMessage;
-use crate::extension::types::snark::SNARKVerifyTask;
+use crate::extension::snark::types::SNARKProofTask;
+use crate::extension::snark::types::SNARKTask;
+use crate::extension::snark::types::SNARKTaskMessage;
+use crate::extension::snark::types::SNARKVerifyTask;
 
 /// The result of a SNARK compute job, re-injected as a self-event for the pure `step`.
 #[derive(Serialize, Deserialize)]
@@ -103,6 +104,10 @@ impl Protocol for SnarkProtocol {
 
     fn namespace(&self) -> &str {
         NAMESPACE
+    }
+
+    fn capabilities(&self) -> &'static [&'static str] {
+        &[CAPABILITY]
     }
 
     fn init(&self) {}

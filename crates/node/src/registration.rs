@@ -27,8 +27,6 @@ use crate::online::OnlineNodeDescriptor;
 use crate::online::OnlineNodeDescriptorBody;
 use crate::online::OnlineNodeType;
 use crate::online::ONLINE_NODES_TOPIC;
-#[cfg(feature = "snark")]
-use crate::online::ONLINE_NODE_CAPABILITY_SNARK;
 use crate::online::ONLINE_NODE_CAPABILITY_STORAGE;
 use crate::processor::Processor;
 
@@ -336,6 +334,55 @@ pub trait RegistrationTask: MaybeSend {
     async fn register_once(&self, context: &RegistrationContext<'_>) -> Result<()>;
 }
 
+/// Shared online-node capability labels.
+#[derive(Clone, Debug)]
+pub struct OnlineNodeCapabilities {
+    labels: Arc<Mutex<Vec<String>>>,
+}
+
+impl OnlineNodeCapabilities {
+    fn new(additional_capabilities: Vec<String>) -> Self {
+        let mut labels = Self::default_labels();
+        Self::append_unique_many(&mut labels, additional_capabilities);
+        Self {
+            labels: Arc::new(Mutex::new(labels)),
+        }
+    }
+
+    fn default_labels() -> Vec<String> {
+        vec![ONLINE_NODE_CAPABILITY_STORAGE.to_string()]
+    }
+
+    fn append_unique_many<I, S>(labels: &mut Vec<String>, capabilities: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        for capability in capabilities {
+            let capability = capability.into();
+            if !labels.iter().any(|known| known == &capability) {
+                labels.push(capability);
+            }
+        }
+    }
+
+    /// Add labels declared by registered extensions.
+    pub fn add_many<I>(&self, capabilities: I) -> Result<()>
+    where I: IntoIterator<Item = &'static str> {
+        let mut labels = self.labels.lock().map_err(|_| Error::Lock)?;
+        Self::append_unique_many(&mut labels, capabilities);
+        Ok(())
+    }
+
+    /// Current descriptor labels.
+    pub fn labels(&self) -> Result<Vec<String>> {
+        self.labels
+            .lock()
+            .map(|labels| labels.clone())
+            .map_err(|_| Error::Lock)
+    }
+}
+
 /// Online-node registry task.
 #[derive(Clone, Debug)]
 pub struct OnlineNodeRegistration {
@@ -344,7 +391,7 @@ pub struct OnlineNodeRegistration {
     node_type: OnlineNodeType,
     started_at_ms: u128,
     endpoint_hint: Option<String>,
-    additional_capabilities: Vec<String>,
+    capabilities: OnlineNodeCapabilities,
     publisher: DhtRegistrationPublisher,
 }
 
@@ -363,7 +410,7 @@ impl OnlineNodeRegistration {
             node_type,
             started_at_ms: get_epoch_ms(),
             endpoint_hint,
-            additional_capabilities,
+            capabilities: OnlineNodeCapabilities::new(additional_capabilities),
             publisher: DhtRegistrationPublisher::new(ONLINE_NODES_TOPIC),
         }
     }
@@ -375,25 +422,18 @@ impl OnlineNodeRegistration {
 
     /// Return capability labels advertised by online-node descriptors.
     pub fn default_capabilities() -> Vec<String> {
-        let capabilities = vec![ONLINE_NODE_CAPABILITY_STORAGE.to_string()];
-        #[cfg(feature = "snark")]
-        let capabilities = {
-            let mut capabilities = capabilities;
-            capabilities.push(ONLINE_NODE_CAPABILITY_SNARK.to_string());
-            capabilities
-        };
-        capabilities
+        OnlineNodeCapabilities::default_labels()
+    }
+
+    /// Add extension-declared capability labels.
+    pub fn add_capabilities<I>(&self, capabilities: I) -> Result<()>
+    where I: IntoIterator<Item = &'static str> {
+        self.capabilities.add_many(capabilities)
     }
 
     /// Return capability labels advertised by this registration.
-    pub fn capabilities(&self) -> Vec<String> {
-        let mut capabilities = Self::default_capabilities();
-        for capability in &self.additional_capabilities {
-            if !capabilities.iter().any(|known| known == capability) {
-                capabilities.push(capability.clone());
-            }
-        }
-        capabilities
+    pub fn capabilities(&self) -> Result<Vec<String>> {
+        self.capabilities.labels()
     }
 
     /// Build this node's signed descriptor at `now_ms`.
@@ -411,7 +451,7 @@ impl OnlineNodeRegistration {
                 network_id: context.network_id(),
                 storage_redundancy: context.storage_redundancy(),
                 dht_virtual_nodes: context.dht_virtual_nodes(),
-                capabilities: self.capabilities(),
+                capabilities: self.capabilities()?,
                 endpoint_hint: self.endpoint_hint.clone(),
                 started_at_ms: self.started_at_ms,
                 heartbeat_at_ms: now_ms,

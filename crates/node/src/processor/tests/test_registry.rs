@@ -3,6 +3,56 @@ use super::*;
 
 struct StoppedRegistration;
 
+struct CapabilityProtocol;
+
+impl crate::extension::ext::Protocol for CapabilityProtocol {
+    type State = ();
+    type Event = ();
+    type Effect = ();
+
+    fn namespace(&self) -> &str {
+        "capability-test"
+    }
+
+    fn capabilities(&self) -> &'static [&'static str] {
+        &["capability-test"]
+    }
+
+    fn init(&self) {}
+
+    fn decode(
+        &self,
+        _wire: crate::extension::ext::Wire<'_>,
+    ) -> std::result::Result<Self::Event, crate::extension::ext::Reject> {
+        Err(crate::extension::ext::Reject(
+            "test-only protocol".to_string(),
+        ))
+    }
+
+    fn step(
+        &self,
+        _ctx: crate::extension::ext::Ctx<'_, Self::State>,
+        _event: Self::Event,
+    ) -> crate::extension::ext::Transition<Self::State, Self::Effect> {
+        crate::extension::ext::Transition::pure(())
+    }
+}
+
+struct NoopShell;
+
+#[async_trait]
+impl crate::extension::ext::Interpret for NoopShell {
+    type Effect = ();
+
+    async fn run(
+        &self,
+        _scope: &crate::extension::ext::EffectScope,
+        _effect: Self::Effect,
+    ) -> Result<Vec<bytes::Bytes>> {
+        Ok(Vec::new())
+    }
+}
+
 #[async_trait]
 impl RegistrationTask for StoppedRegistration {
     fn name(&self) -> &'static str {
@@ -16,6 +66,47 @@ impl RegistrationTask for StoppedRegistration {
     async fn register_once(&self, _context: &RegistrationContext<'_>) -> Result<()> {
         Err(Error::RegistrationStopped)
     }
+}
+
+#[tokio::test]
+async fn extension_declared_capability_is_advertised_after_registration() -> Result<()> {
+    let processor = prepare_processor().await;
+    let descriptor = processor.online_node_descriptor_at(get_epoch_ms())?;
+    assert_eq!(
+        descriptor.capabilities,
+        OnlineNodeRegistration::default_capabilities()
+    );
+
+    let provider = Provider::from_processor(std::sync::Arc::new(processor.clone()));
+    provider.register_protocol(CapabilityProtocol, NoopShell)?;
+    let descriptor = processor.online_node_descriptor_at(get_epoch_ms())?;
+
+    assert!(descriptor
+        .capabilities
+        .iter()
+        .any(|capability| capability == "capability-test"));
+    Ok(())
+}
+
+#[cfg(feature = "snark")]
+#[tokio::test]
+async fn snark_capability_is_declared_by_registered_extension() -> Result<()> {
+    let processor = prepare_processor().await;
+    let descriptor = processor.online_node_descriptor_at(get_epoch_ms())?;
+    assert!(!descriptor
+        .capabilities
+        .iter()
+        .any(|capability| capability == crate::extension::snark::CAPABILITY));
+
+    let provider = Provider::from_processor(std::sync::Arc::new(processor.clone()));
+    crate::extension::snark::SNARKBehaviour::default().register(&provider)?;
+    let descriptor = processor.online_node_descriptor_at(get_epoch_ms())?;
+
+    assert!(descriptor
+        .capabilities
+        .iter()
+        .any(|capability| capability == crate::extension::snark::CAPABILITY));
+    Ok(())
 }
 
 #[tokio::test]

@@ -9,8 +9,8 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::future_to_promise;
 
 use super::*;
-use crate::extension::types::snark::SNARKProofTask;
-use crate::extension::types::snark::SNARKVerifyTask;
+use crate::extension::snark::types::SNARKProofTask;
+use crate::extension::snark::types::SNARKVerifyTask;
 use crate::provider::browser::ProviderRef;
 
 /// We need this ref to pass Task ref to js_sys
@@ -226,12 +226,12 @@ impl SNARKTaskBuilder {
 pub(crate) fn bigint2ff<F: ff::PrimeField>(v: js_sys::BigInt) -> Result<F> {
     let repr = v
         .to_string(10)
-        .map_err(|e| Error::SNARKFFRangeError(format!("{e:?}")))?
+        .map_err(|e| SnarkError::FieldRange(format!("{e:?}")))?
         .as_string();
     if let Some(v) = &repr {
-        Ok(F::from_str_vartime(v).ok_or(Error::FailedToLoadFF())?)
+        Ok(F::from_str_vartime(v).ok_or(SnarkError::FailedToLoadField)?)
     } else {
-        Err(Error::SNARKBigIntValueEmpty())
+        Err(SnarkError::BigIntValueEmpty.into())
     }
 }
 

@@ -234,30 +234,6 @@ pub enum Error {
     /// Converting owned FFI bytes to UTF-8 failed.
     #[error("Failed to convert bytes to String: {0}")]
     FFIFromUtf8Error(#[from] std::string::FromUtf8Error) = 1206,
-    /// The SNARK subsystem returned an error.
-    #[cfg(feature = "snark")]
-    #[error("Snark error: {0}")]
-    RingsSNARKError(#[from] rings_snark::error::Error) = 1400,
-    /// The requested SNARK curve does not match the task.
-    #[error("Snark curve not match")]
-    SNARKCurveNotMatch() = 1401,
-    /// Handling a SNARK protocol message failed.
-    #[error("Snark handle message error: {0}")]
-    SNARKHandleMessage(String) = 1402,
-    /// A SNARK field value belongs to the wrong field.
-    #[error("Wrong field, should be {0}")]
-    SNARKWrongField(String) = 1403,
-    /// Converting a JavaScript bigint into a prime-field element was out of range.
-    #[cfg(all(feature = "browser", target_family = "wasm"))]
-    #[error("range error when covering js_sys::BigInt to PrimeField: {0}")]
-    SNARKFFRangeError(String) = 1404,
-    /// Converting a JavaScript bigint produced an empty representation.
-    #[cfg(all(feature = "browser", target_family = "wasm"))]
-    #[error("Failed to load bigint to repr string, it's empty")]
-    SNARKBigIntValueEmpty() = 1405,
-    /// Loading a string as a prime-field element failed.
-    #[error("Failed to load string to PrimeField")]
-    FailedToLoadFF() = 1406,
     /// A protocol backend returned an error.
     #[error("Extend Backend Error {0}")]
     BackendError(String) = 1501,
