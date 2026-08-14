@@ -104,8 +104,11 @@ impl SuccessorSeq {
             return Ok(false);
         }
 
-        if self.bias(did) >= self.bias(self.max()?) && self.is_full()? {
-            return Ok(false);
+        if self.is_full()? {
+            let max = self.max()?;
+            if BiasId::cmp_from_observer(self.did, did, max) != std::cmp::Ordering::Less {
+                return Ok(false);
+            }
         }
         Ok(true)
     }

@@ -37,6 +37,7 @@
 //! width arithmetic, and DHT placement. Protocol handlers depend on `Did`
 //! operations and do not perform byte-level arithmetic.
 
+use std::cmp::Ordering;
 use std::num::NonZeroU32;
 use std::ops::Add;
 use std::ops::Deref;
@@ -89,6 +90,10 @@ impl std::fmt::Display for Did {
 /// Invariant: `did` is always stored as `raw_did - bias`.
 ///
 /// Law: `BiasId::new(x, y).to_did() == y`.
+///
+/// `BiasId` intentionally has no total [`Ord`] implementation. Values with
+/// different observers live in different reference frames, so callers must
+/// either compare same-observer values or name the observer explicitly.
 #[derive(Copy, Clone, Eq, PartialEq, Debug, Serialize, Deserialize, Hash)]
 pub struct BiasId {
     /// the zero point for determine order of Did.
@@ -133,11 +138,22 @@ impl BiasId {
     pub fn pos(&self) -> Did {
         self.did
     }
+
+    /// Compare two biased identifiers only when they share the same observer.
+    pub fn cmp_same_observer(&self, other: &Self) -> Option<Ordering> {
+        (self.bias == other.bias).then(|| self.did.cmp(&other.did))
+    }
+
+    /// Compare two raw identifiers from one explicit Chord observer.
+    pub fn cmp_from_observer(observer: Did, left: Did, right: Did) -> Ordering {
+        let (left, right) = (left - observer, right - observer);
+        left.cmp(&right)
+    }
 }
 
 impl PartialOrd for BiasId {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.cmp_same_observer(other)
     }
 }
 
@@ -145,18 +161,6 @@ impl PartialEq<Did> for BiasId {
     fn eq(&self, rhs: &Did) -> bool {
         let id: Did = self.into();
         id == *rhs
-    }
-}
-
-impl Ord for BiasId {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        if other.bias != self.bias {
-            let did: Did = other.into();
-            let bid = BiasId::new(self.bias, did);
-            self.did.cmp(&bid.did)
-        } else {
-            self.did.cmp(&other.did)
-        }
     }
 }
 
@@ -452,6 +456,7 @@ fn set_ring_bit(bytes: &mut [u8; Did::BYTE_LEN], bit: usize) {
 
 #[cfg(test)]
 mod tests {
+    use std::cmp::Ordering;
     use std::collections::BTreeSet;
     use std::str::FromStr;
 
@@ -544,6 +549,41 @@ mod tests {
         assert_eq!(v, vec![c, d, a, b]);
         v.sort(d);
         assert_eq!(v, vec![d, a, b, c]);
+    }
+
+    fn former_mixed_observer_cmp(left: BiasId, right: BiasId) -> Ordering {
+        let right_raw = right.to_did();
+        let right_in_left_observer = BiasId::new(left.bias, right_raw);
+        left.pos().cmp(&right_in_left_observer.pos())
+    }
+
+    #[test]
+    fn bias_id_orders_same_observer() {
+        let observer = Did::from(10u32);
+        let near = BiasId::new(observer, Did::from(11u32));
+        let far = BiasId::new(observer, Did::from(12u32));
+
+        assert_eq!(near.cmp_same_observer(&far), Some(Ordering::Less));
+        assert_eq!(far.cmp_same_observer(&near), Some(Ordering::Greater));
+        assert_eq!(near.partial_cmp(&far), Some(Ordering::Less));
+        assert_eq!(
+            BiasId::cmp_from_observer(observer, Did::from(11u32), Did::from(12u32)),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn bias_id_rejects_mixed_observer_ordering() {
+        let a = BiasId::new(Did::from(0u32), Did::from(1u32));
+        let b = BiasId::new(
+            Did::power_of_two(159),
+            Did::from(ring_size() - BigUint::from(1u8)),
+        );
+
+        assert_eq!(former_mixed_observer_cmp(a, b), Ordering::Less);
+        assert_eq!(former_mixed_observer_cmp(b, a), Ordering::Less);
+        assert_eq!(a.partial_cmp(&b), None);
+        assert_eq!(b.partial_cmp(&a), None);
     }
 
     #[test]
