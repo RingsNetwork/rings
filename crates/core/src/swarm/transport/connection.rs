@@ -15,6 +15,7 @@ use super::pending::SharedConnectionLifecycles;
 use super::PendingConnectionAttempt;
 use super::SwarmConnection;
 use super::SwarmTransport;
+use crate::dht::did::BiasId;
 use crate::dht::Chord;
 use crate::dht::CorrectChord;
 use crate::dht::Did;
@@ -440,7 +441,8 @@ impl SwarmTransport {
             .map(PendingConnectionAttempt::peer)
             .filter(|candidate| *candidate != self.dht.did && *candidate != removed)
             .collect::<Vec<_>>();
-        candidates.sort_by_key(|candidate| self.dht.bias(*candidate));
+        let observer = self.dht.did;
+        candidates.sort_by(|left, right| BiasId::cmp_from_observer(observer, *left, *right));
         candidates.dedup();
 
         let capacity = self.dht.successors().capacity();

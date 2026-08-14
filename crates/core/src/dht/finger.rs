@@ -6,6 +6,7 @@ use derivative::Derivative;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::dht::did::BiasId;
 use crate::dht::Did;
 
 /// Default number of Chord finger slots for a 160-bit `Did`.
@@ -88,7 +89,8 @@ impl FingerTable {
 
     /// Join FingerTable
     pub fn join(&mut self, did: Did) {
-        let bias = did.bias(self.did);
+        let observer = self.did;
+        let bias = did.bias(observer);
 
         for k in 0..self.size {
             let pos = Did::power_of_two(k);
@@ -98,7 +100,7 @@ impl FingerTable {
             }
 
             if let Some(v) = self.finger.get(k).copied().flatten() {
-                if bias > v.bias(self.did) {
+                if BiasId::cmp_from_observer(observer, did, v) == std::cmp::Ordering::Greater {
                     continue;
                 }
             }
@@ -114,11 +116,11 @@ impl FingerTable {
 
     /// get closest predecessor
     pub fn closest_predecessor(&self, did: Did) -> Did {
-        let bias = did.bias(self.did);
+        let observer = self.did;
 
         for i in (0..self.size).rev() {
             if let Some(v) = self.finger.get(i).copied().flatten() {
-                if v.bias(self.did) < bias {
+                if BiasId::cmp_from_observer(observer, v, did) == std::cmp::Ordering::Less {
                     return v;
                 }
             }

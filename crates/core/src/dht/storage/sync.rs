@@ -11,6 +11,7 @@ use crate::consts::MAX_CHUNK_ENVELOPE_OVERHEAD;
 use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
 use crate::dht::chord::PeerRing;
 use crate::dht::chord::PeerRingAction;
+use crate::dht::did::BiasId;
 use crate::dht::entry::Entry;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
@@ -136,7 +137,9 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
         // transition and does not define storage convergence.
         for (entry_key_str, entry) in all_items {
             let entry_key = Did::from_str(&entry_key_str)?;
-            if self.bias(entry_key) > self.bias(new_successor) {
+            if BiasId::cmp_from_observer(self.did, entry_key, new_successor)
+                == std::cmp::Ordering::Greater
+            {
                 data.push(PlacedEntry::new(entry_key, entry));
             }
         }
