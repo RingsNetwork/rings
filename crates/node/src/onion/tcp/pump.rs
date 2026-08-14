@@ -147,7 +147,6 @@ mod tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
-    use tokio::io::AsyncWriteExt as _;
     use tokio::net::TcpListener;
     use tokio::sync::Notify;
 

@@ -230,6 +230,9 @@ We welcome contributions to rings-node!
 
 If you have a bug report or feature request, please open an issue on GitHub.
 
+Security and supply-chain CI gates are documented in
+[docs/ci-security-gates.md](./docs/ci-security-gates.md).
+
 If you'd like to contribute code, please follow these steps:
 
 ```text
