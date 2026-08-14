@@ -15,7 +15,8 @@ use serde::Serializer;
 use crate::error::Error;
 
 #[allow(dead_code)]
-pub(crate) fn serialize_forward<T, S>(value: &T, serializer: S) -> Result<S::Ok, S::Error>
+/// Serialize a value through Serde without an intermediate wrapper.
+pub fn serialize_forward<T, S>(value: &T, serializer: S) -> Result<S::Ok, S::Error>
 where
     T: Serialize,
     S: Serializer,
@@ -24,7 +25,8 @@ where
 }
 
 #[allow(dead_code)]
-pub(crate) fn deserialize_forward<'de, T, D>(deserializer: D) -> Result<T, D::Error>
+/// Deserialize a value through Serde without an intermediate wrapper.
+pub fn deserialize_forward<'de, T, D>(deserializer: D) -> Result<T, D::Error>
 where
     T: Deserialize<'de>,
     D: Deserializer<'de>,
@@ -33,7 +35,8 @@ where
 }
 
 #[allow(dead_code)]
-pub(crate) fn serialize_gzip<T, S>(value: &T, serializer: S) -> Result<S::Ok, S::Error>
+/// Serialize a value as gzipped JSON bytes.
+pub fn serialize_gzip<T, S>(value: &T, serializer: S) -> Result<S::Ok, S::Error>
 where
     T: Serialize,
     S: Serializer,
@@ -45,7 +48,8 @@ where
 }
 
 #[allow(dead_code)]
-pub(crate) fn deserialize_gzip<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+/// Deserialize gzipped JSON bytes into a value.
+pub fn deserialize_gzip<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     T: DeserializeOwned,
     D: Deserializer<'de>,

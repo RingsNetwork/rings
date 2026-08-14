@@ -1,6 +1,9 @@
 //! Error facts owned by the SNARK extension.
 
-use crate::error::Error;
+use rings_node::error::Error;
+
+/// Result type owned by the SNARK extension.
+pub type Result<T> = std::result::Result<T, SnarkError>;
 
 /// SNARK extension failures before they cross the generic extension boundary.
 #[derive(Debug, thiserror::Error)]
@@ -8,6 +11,18 @@ pub enum SnarkError {
     /// The proving backend returned an error.
     #[error("Snark error: {0}")]
     Backend(#[from] rings_snark::error::Error),
+    /// The Rings node extension boundary returned an error.
+    #[error("Node extension error: {0}")]
+    Node(#[from] Error),
+    /// A task id could not be parsed.
+    #[error("Invalid task id: {0}")]
+    TaskId(#[from] uuid::Error),
+    /// JSON serialization failed.
+    #[error("Snark json error: {0}")]
+    Json(#[from] serde_json::Error),
+    /// Binary serialization failed.
+    #[error("Snark encode error")]
+    Encode,
     /// The requested curve does not match the task.
     #[error("Snark curve not match")]
     CurveNotMatch,
@@ -33,8 +48,9 @@ impl From<SnarkError> for Error {
     }
 }
 
-impl From<rings_snark::error::Error> for Error {
-    fn from(error: rings_snark::error::Error) -> Self {
-        SnarkError::Backend(error).into()
+#[cfg(all(feature = "browser", target_family = "wasm"))]
+impl From<SnarkError> for wasm_bindgen::JsValue {
+    fn from(error: SnarkError) -> Self {
+        wasm_bindgen::JsValue::from_str(&error.to_string())
     }
 }

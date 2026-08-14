@@ -22,7 +22,7 @@ use super::SNARKGenerator;
 use super::SnarkError;
 use super::SupportedPrimeField;
 use crate::error::Result;
-use crate::extension::snark::types::SNARKProofTask;
+use crate::types::SNARKProofTask;
 
 /// Snark builder
 #[wasm_export]
@@ -226,9 +226,12 @@ impl SNARKTaskBuilder {
                 let first = first_generated_circuit(&circuits)?;
                 let inputs = first.get_public_inputs()?;
                 let pp = SNARK::<E1, E2>::gen_pp::<S1, S2>(first.clone())?;
-                let snark = SNARK::<E1, E2>::new(first, &pp, &inputs, &vec![
-                    <E2 as Engine>::Scalar::from(0),
-                ])?;
+                let snark = SNARK::<E1, E2>::new(
+                    first,
+                    &pp,
+                    &inputs,
+                    &vec![<E2 as Engine>::Scalar::from(0)],
+                )?;
 
                 SNARKProofTask::VastaPallas(SNARKGenerator {
                     pp: pp.into(),
@@ -256,9 +259,12 @@ impl SNARKTaskBuilder {
                 let first = first_generated_circuit(&circuits)?;
                 let inputs = first.get_public_inputs()?;
                 let pp = SNARK::<E1, E2>::gen_pp::<S1, S2>(first.clone())?;
-                let snark = SNARK::<E1, E2>::new(first, &pp, &inputs, &vec![
-                    <E2 as Engine>::Scalar::from(0),
-                ])?;
+                let snark = SNARK::<E1, E2>::new(
+                    first,
+                    &pp,
+                    &inputs,
+                    &vec![<E2 as Engine>::Scalar::from(0)],
+                )?;
                 SNARKProofTask::PallasVasta(SNARKGenerator {
                     pp: pp.into(),
                     snark,
@@ -285,9 +291,12 @@ impl SNARKTaskBuilder {
                 let first = first_generated_circuit(&circuits)?;
                 let inputs = first.get_public_inputs()?;
                 let pp = SNARK::<E1, E2>::gen_pp::<S1, S2>(first.clone())?;
-                let snark = SNARK::<E1, E2>::new(first, &pp, &inputs, &vec![
-                    <E2 as Engine>::Scalar::from(0),
-                ])?;
+                let snark = SNARK::<E1, E2>::new(
+                    first,
+                    &pp,
+                    &inputs,
+                    &vec![<E2 as Engine>::Scalar::from(0)],
+                )?;
                 SNARKProofTask::Bn256KZGGrumpkin(SNARKGenerator {
                     pp: pp.into(),
                     snark,

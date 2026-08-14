@@ -16,14 +16,14 @@ pub struct SNARKTaskMessage {
     pub task_id: uuid::Uuid,
     /// task details
     #[serde(
-        serialize_with = "crate::util::serialize_gzip",
-        deserialize_with = "crate::util::deserialize_gzip"
+        serialize_with = "rings_node::util::serialize_gzip",
+        deserialize_with = "rings_node::util::deserialize_gzip"
     )]
     pub task: SNARKTask,
 }
 
 // `SNARKTaskMessage` travels as a `snark` namespace [`Envelope`] payload (see
-// [`crate::extension::snark::SnarkProtocol`]); it does not wrap into a core message enum.
+// [`crate::SnarkProtocol`]); it does not wrap into a core message enum.
 
 /// Message types for snark task, including proof and verify
 #[derive(Debug, Clone, Deserialize, Serialize)]

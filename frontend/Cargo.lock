@@ -4367,6 +4367,7 @@ dependencies = [
  "gloo-timers 0.3.0",
  "js-sys",
  "rings-node",
+ "rings-snark-extension",
  "rings-webview",
  "serde",
  "serde_json",
@@ -4406,7 +4407,6 @@ dependencies = [
  "rings-core",
  "rings-derive",
  "rings-rpc",
- "rings-snark",
  "rings-transport",
  "serde",
  "serde-wasm-bindgen 0.6.5",
@@ -4465,6 +4465,28 @@ dependencies = [
  "wasm-bindgen-test",
  "wasmer",
  "zksync_bellman",
+]
+
+[[package]]
+name = "rings-snark-extension"
+version = "0.15.0"
+dependencies = [
+ "async-trait",
+ "bincode",
+ "bytes",
+ "dashmap 5.5.3",
+ "js-sys",
+ "rings-core",
+ "rings-derive",
+ "rings-node",
+ "rings-snark",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tracing",
+ "uuid 0.8.2",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
 ]
 
 [[package]]

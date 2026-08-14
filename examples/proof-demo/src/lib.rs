@@ -3,7 +3,7 @@
 //! A Rust/Yew rewrite of the (deprecated, TypeScript) `rings-proof-demo`. This node is
 //! the **verifier**: it builds a recursive SNARK proof task from a circuit, offloads the
 //! heavy proving to a **prover** peer over rings, and verifies the returned proof — all
-//! through the same `SnarkProtocol` the daemon uses (`gen_and_send_proof_task` →
+//! through the same `SnarkProtocol` extension API (`gen_and_send_proof_task` →
 //! `Effect::Compute` on the prover → reply → `get_task_result`).
 //!
 //! The rings wiring is kept in `rings`-prefixed helpers; the rest is a thin Yew UI.
@@ -17,12 +17,6 @@ use std::time::Duration;
 use futures::future::AbortHandle;
 use futures::future::Abortable;
 use gloo_timers::future::sleep;
-use rings_node::extension::snark::Field;
-use rings_node::extension::snark::Input;
-use rings_node::extension::snark::ProofResult;
-use rings_node::extension::snark::SNARKBehaviour;
-use rings_node::extension::snark::SNARKTaskBuilder;
-use rings_node::extension::snark::SupportedPrimeField;
 use rings_node::prelude::rings_core::dht::Did;
 use rings_node::prelude::rings_core::ecc::SecretKey;
 use rings_node::prelude::rings_core::session::SessionSk;
@@ -30,6 +24,12 @@ use rings_node::prelude::rings_core::storage::idb::IdbStorage;
 use rings_node::processor::ProcessorBuilder;
 use rings_node::processor::ProcessorConfig;
 use rings_node::provider::Provider;
+use rings_snark_extension::Field;
+use rings_snark_extension::Input;
+use rings_snark_extension::ProofResult;
+use rings_snark_extension::SNARKBehaviour;
+use rings_snark_extension::SNARKTaskBuilder;
+use rings_snark_extension::SupportedPrimeField;
 use wasm_bindgen_futures::spawn_local;
 use wasm_bindgen_futures::JsFuture;
 use web_sys::HtmlInputElement;

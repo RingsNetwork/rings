@@ -88,27 +88,6 @@ async fn extension_declared_capability_is_advertised_after_registration() -> Res
     Ok(())
 }
 
-#[cfg(feature = "snark")]
-#[tokio::test]
-async fn snark_capability_is_declared_by_registered_extension() -> Result<()> {
-    let processor = prepare_processor().await;
-    let descriptor = processor.online_node_descriptor_at(get_epoch_ms())?;
-    assert!(!descriptor
-        .capabilities
-        .iter()
-        .any(|capability| capability == crate::extension::snark::CAPABILITY));
-
-    let provider = Provider::from_processor(std::sync::Arc::new(processor.clone()));
-    crate::extension::snark::SNARKBehaviour::default().register(&provider)?;
-    let descriptor = processor.online_node_descriptor_at(get_epoch_ms())?;
-
-    assert!(descriptor
-        .capabilities
-        .iter()
-        .any(|capability| capability == crate::extension::snark::CAPABILITY));
-    Ok(())
-}
-
 #[tokio::test]
 async fn registration_daemon_treats_expected_stop_as_terminal() {
     let processor = prepare_processor().await;

@@ -2,8 +2,6 @@
 
 pub mod ext;
 pub mod protocols;
-#[cfg(feature = "snark")]
-pub mod snark;
 pub mod transport;
 use std::result::Result;
 use std::sync::Arc;

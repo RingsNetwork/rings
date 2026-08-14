@@ -1,7 +1,5 @@
 pub mod test_browser;
 pub mod test_processor;
-#[cfg(feature = "snark")]
-pub mod test_snark;
 use std::sync::Arc;
 
 use rings_core::ecc::SecretKey;

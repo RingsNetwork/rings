@@ -17,18 +17,19 @@ use super::SNARKTaskManager;
 use super::TaskId;
 use super::CAPABILITY;
 use super::NAMESPACE;
-use crate::error::Error;
-use crate::extension::ext::Ctx;
-use crate::extension::ext::EffectScope;
-use crate::extension::ext::Interpret;
-use crate::extension::ext::Protocol;
-use crate::extension::ext::Reject;
-use crate::extension::ext::Transition;
-use crate::extension::ext::Wire;
-use crate::extension::snark::types::SNARKProofTask;
-use crate::extension::snark::types::SNARKTask;
-use crate::extension::snark::types::SNARKTaskMessage;
-use crate::extension::snark::types::SNARKVerifyTask;
+use rings_node::error::Error;
+use rings_node::extension::ext::Ctx;
+use rings_node::extension::ext::EffectScope;
+use rings_node::extension::ext::Interpret;
+use rings_node::extension::ext::Protocol;
+use rings_node::extension::ext::Reject;
+use rings_node::extension::ext::Transition;
+use rings_node::extension::ext::Wire;
+
+use crate::types::SNARKProofTask;
+use crate::types::SNARKTask;
+use crate::types::SNARKTaskMessage;
+use crate::types::SNARKVerifyTask;
 
 /// The result of a SNARK compute job, re-injected as a self-event for the pure `step`.
 #[derive(Serialize, Deserialize)]
@@ -133,25 +134,32 @@ impl Protocol for SnarkProtocol {
                 task_id,
                 reply_to,
                 verify_task,
-            }) => Transition::with((), vec![SnarkEffect::SendTask {
-                to: reply_to,
-                msg: SNARKTaskMessage {
-                    task_id,
-                    task: SNARKTask::SNARKVerify(verify_task),
-                },
-            }]),
+            }) => Transition::with(
+                (),
+                vec![SnarkEffect::SendTask {
+                    to: reply_to,
+                    msg: SNARKTaskMessage {
+                        task_id,
+                        task: SNARKTask::SNARKVerify(verify_task),
+                    },
+                }],
+            ),
             SnarkEvent::Task { from, msg } => match msg.task {
-                SNARKTask::SNARKProof(task) => Transition::with((), vec![SnarkEffect::Prove {
-                    task_id: msg.task_id,
-                    reply_to: from,
-                    task,
-                }]),
-                SNARKTask::SNARKVerify(verify_task) => {
-                    Transition::with((), vec![SnarkEffect::Verify {
+                SNARKTask::SNARKProof(task) => Transition::with(
+                    (),
+                    vec![SnarkEffect::Prove {
+                        task_id: msg.task_id,
+                        reply_to: from,
+                        task,
+                    }],
+                ),
+                SNARKTask::SNARKVerify(verify_task) => Transition::with(
+                    (),
+                    vec![SnarkEffect::Verify {
                         task_id: msg.task_id,
                         verify_task,
-                    }])
-                }
+                    }],
+                ),
             },
         }
     }
@@ -170,7 +178,7 @@ impl SnarkShell {
 
     /// Serialize a [`ComputeResult`] for re-injection as a self-event for the pure `step`. The
     /// router re-delivers it to this same namespace with `from = this node`.
-    fn reinject(&self, result: &ComputeResult) -> crate::error::Result<Vec<Bytes>> {
+    fn reinject(&self, result: &ComputeResult) -> rings_node::error::Result<Vec<Bytes>> {
         let payload = bincode::serialize(result).map_err(|_| Error::EncodeError)?;
         Ok(vec![Bytes::from(payload)])
     }
@@ -185,7 +193,7 @@ impl Interpret for SnarkShell {
         &self,
         scope: &EffectScope,
         effect: SnarkEffect,
-    ) -> crate::error::Result<Vec<Bytes>> {
+    ) -> rings_node::error::Result<Vec<Bytes>> {
         match effect {
             SnarkEffect::SendTask { to, msg } => {
                 let payload = bincode::serialize(&msg).map_err(|_| Error::EncodeError)?;

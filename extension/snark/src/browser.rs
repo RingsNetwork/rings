@@ -9,9 +9,9 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::future_to_promise;
 
 use super::*;
-use crate::extension::snark::types::SNARKProofTask;
-use crate::extension::snark::types::SNARKVerifyTask;
-use crate::provider::browser::ProviderRef;
+use crate::types::SNARKProofTask;
+use crate::types::SNARKVerifyTask;
+use rings_node::provider::browser::ProviderRef;
 
 /// We need this ref to pass Task ref to js_sys
 #[wasm_bindgen]
@@ -126,7 +126,7 @@ impl SNARKBehaviour {
     /// envelopes are dispatched automatically. Call once after constructing the
     /// provider. See [`SNARKBehaviour::register`].
     pub fn register_to(&self, provider: ProviderRef) -> Result<()> {
-        self.register(provider.inner().as_ref())
+        Ok(self.register(provider.inner().as_ref())?)
     }
 
     /// gen proof task with circuits, this function is use for solo proof
@@ -270,7 +270,7 @@ impl Input {
             .map(|s| {
                 let last = js_sys::Array::from(&s);
                 let p = last.get(0).as_string().ok_or_else(|| {
-                    Error::JsError("SNARK input name must be a string".to_string())
+                    SnarkError::HandleMessage("SNARK input name must be a string".to_string())
                 })?;
                 let v = js_sys::Array::from(&last.get(1))
                     .into_iter()

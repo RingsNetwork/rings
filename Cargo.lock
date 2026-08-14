@@ -4563,7 +4563,6 @@ dependencies = [
  "rings-core",
  "rings-derive",
  "rings-rpc",
- "rings-snark",
  "rings-transport",
  "serde",
  "serde-wasm-bindgen",
@@ -4644,6 +4643,30 @@ version = "0.15.0"
 dependencies = [
  "rings-snark",
  "tokio",
+]
+
+[[package]]
+name = "rings-snark-extension"
+version = "0.15.0"
+dependencies = [
+ "async-trait",
+ "bincode",
+ "bytes",
+ "dashmap 5.5.3",
+ "js-sys",
+ "rings-core",
+ "rings-derive",
+ "rings-node",
+ "rings-snark",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid 0.8.2",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test",
 ]
 
 [[package]]

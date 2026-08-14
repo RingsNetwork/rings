@@ -8,7 +8,7 @@ use std::time::Duration;
 use futures::future::Either;
 use futures::FutureExt;
 use gloo_timers::future::sleep;
-use rings_node::extension::snark::ProofResult;
+use rings_snark_extension::ProofResult;
 use wasm_bindgen::JsCast;
 use web_sys::Event;
 use web_sys::HtmlInputElement;
