@@ -9,9 +9,6 @@ use crate::prelude::rings_core::utils;
 use crate::prelude::rings_core::utils::js_value;
 use crate::provider::browser;
 
-#[cfg(feature = "browser_chrome_test")]
-wasm_bindgen_test_configure!(run_in_browser);
-
 #[wasm_bindgen_test]
 async fn test_two_provider_connect_and_list() {
     // super::setup_log();

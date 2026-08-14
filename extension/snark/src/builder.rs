@@ -19,10 +19,10 @@ use super::CircuitGenerator;
 use super::FieldEnum;
 use super::Input;
 use super::SNARKGenerator;
+use super::SnarkError;
 use super::SupportedPrimeField;
-use crate::error::Error;
 use crate::error::Result;
-use crate::extension::types::snark::SNARKProofTask;
+use crate::types::SNARKProofTask;
 
 /// Snark builder
 #[wasm_export]
@@ -204,7 +204,7 @@ impl SNARKTaskBuilder {
     pub fn gen_proof_task(circuits: Vec<Circuit>) -> Result<SNARKProofTask> {
         let first = circuits
             .first()
-            .ok_or_else(|| Error::SNARKHandleMessage("empty SNARK circuit list".to_string()))?;
+            .ok_or_else(|| SnarkError::HandleMessage("empty SNARK circuit list".to_string()))?;
         let task = match &first.inner {
             CircuitEnum::Vesta(_) => {
                 type E1 = provider::VestaEngine;
@@ -219,7 +219,7 @@ impl SNARKTaskBuilder {
                         if let CircuitEnum::Vesta(c) = circ.inner {
                             Ok(c)
                         } else {
-                            Err(Error::SNARKCurveNotMatch())
+                            Err(SnarkError::CurveNotMatch)
                         }
                     })
                     .collect::<Result<Vec<_>>>()?;
@@ -249,7 +249,7 @@ impl SNARKTaskBuilder {
                         if let CircuitEnum::Pallas(c) = circ.inner {
                             Ok(c)
                         } else {
-                            Err(Error::SNARKCurveNotMatch())
+                            Err(SnarkError::CurveNotMatch)
                         }
                     })
                     .collect::<Result<Vec<_>>>()?;
@@ -278,7 +278,7 @@ impl SNARKTaskBuilder {
                         if let CircuitEnum::Bn256KZG(c) = circ.inner {
                             Ok(c)
                         } else {
-                            Err(Error::SNARKCurveNotMatch())
+                            Err(SnarkError::CurveNotMatch)
                         }
                     })
                     .collect::<Result<Vec<_>>>()?;
@@ -304,7 +304,7 @@ fn first_generated_circuit<F: PrimeField>(
 ) -> Result<&circuit::Circuit<F>> {
     circuits
         .first()
-        .ok_or_else(|| Error::SNARKHandleMessage("empty generated SNARK circuit list".to_string()))
+        .ok_or_else(|| SnarkError::HandleMessage("empty generated SNARK circuit list".to_string()))
 }
 
 fn convert_input<F: PrimeField>(
@@ -327,20 +327,20 @@ fn convert_input<F: PrimeField>(
 fn vesta_field(field: FieldEnum) -> Result<<provider::VestaEngine as Engine>::Scalar> {
     match field {
         FieldEnum::Vesta(value) => Ok(value),
-        _ => Err(Error::SNARKCurveNotMatch()),
+        _ => Err(SnarkError::CurveNotMatch),
     }
 }
 
 fn pallas_field(field: FieldEnum) -> Result<<provider::PallasEngine as Engine>::Scalar> {
     match field {
         FieldEnum::Pallas(value) => Ok(value),
-        _ => Err(Error::SNARKCurveNotMatch()),
+        _ => Err(SnarkError::CurveNotMatch),
     }
 }
 
 fn bn256_kzg_field(field: FieldEnum) -> Result<<provider::Bn256EngineKZG as Engine>::Scalar> {
     match field {
         FieldEnum::Bn256KZG(value) => Ok(value),
-        _ => Err(Error::SNARKCurveNotMatch()),
+        _ => Err(SnarkError::CurveNotMatch),
     }
 }

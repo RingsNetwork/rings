@@ -1,7 +1,5 @@
 pub mod test_browser;
 pub mod test_processor;
-#[cfg(feature = "snark")]
-pub mod test_snark;
 use std::sync::Arc;
 
 use rings_core::ecc::SecretKey;
@@ -10,6 +8,7 @@ use rings_core::session::SessionSk;
 use rings_core::storage::idb::IdbStorage;
 use rings_rpc::protos::rings_node::*;
 use wasm_bindgen_futures::JsFuture;
+use wasm_bindgen_test::wasm_bindgen_test_configure;
 
 use crate::logging::browser::init_logging;
 use crate::prelude::rings_core::utils::js_value;
@@ -19,6 +18,8 @@ use crate::processor::ProcessorConfig;
 use crate::provider::Provider;
 
 const TEST_DHT_FINGER_TABLE_SIZE: usize = 8;
+
+wasm_bindgen_test_configure!(run_in_browser);
 
 pub fn setup_log() {
     init_logging(crate::logging::LogLevel::Info);

@@ -737,9 +737,6 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
         advertise_onion_relay,
         onion_exit_config,
     )?;
-    // SNARK is a namespaced protocol now; register it so the daemon can prove/verify.
-    #[cfg(feature = "snark")]
-    rings_node::extension::snark::SNARKBehaviour::default().register(provider.as_ref())?;
     // The Backend decodes inbound custom messages as namespaced envelopes and routes
     // them to the protocol registry.
     let backend = Arc::new(Backend::new(provider));

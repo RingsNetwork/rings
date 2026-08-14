@@ -9,25 +9,26 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use rings_core::dht::Did;
+use rings_node::error::Error;
+use rings_node::extension::ext::Ctx;
+use rings_node::extension::ext::EffectScope;
+use rings_node::extension::ext::Interpret;
+use rings_node::extension::ext::Protocol;
+use rings_node::extension::ext::Reject;
+use rings_node::extension::ext::Transition;
+use rings_node::extension::ext::Wire;
 use serde::Deserialize;
 use serde::Serialize;
 
 use super::SNARKBehaviour;
 use super::SNARKTaskManager;
 use super::TaskId;
+use super::CAPABILITY;
 use super::NAMESPACE;
-use crate::error::Error;
-use crate::extension::ext::Ctx;
-use crate::extension::ext::EffectScope;
-use crate::extension::ext::Interpret;
-use crate::extension::ext::Protocol;
-use crate::extension::ext::Reject;
-use crate::extension::ext::Transition;
-use crate::extension::ext::Wire;
-use crate::extension::types::snark::SNARKProofTask;
-use crate::extension::types::snark::SNARKTask;
-use crate::extension::types::snark::SNARKTaskMessage;
-use crate::extension::types::snark::SNARKVerifyTask;
+use crate::types::SNARKProofTask;
+use crate::types::SNARKTask;
+use crate::types::SNARKTaskMessage;
+use crate::types::SNARKVerifyTask;
 
 /// The result of a SNARK compute job, re-injected as a self-event for the pure `step`.
 #[derive(Serialize, Deserialize)]
@@ -105,6 +106,10 @@ impl Protocol for SnarkProtocol {
         NAMESPACE
     }
 
+    fn capabilities(&self) -> &'static [&'static str] {
+        &[CAPABILITY]
+    }
+
     fn init(&self) {}
 
     fn decode(&self, wire: Wire<'_>) -> Result<SnarkEvent, Reject> {
@@ -165,7 +170,7 @@ impl SnarkShell {
 
     /// Serialize a [`ComputeResult`] for re-injection as a self-event for the pure `step`. The
     /// router re-delivers it to this same namespace with `from = this node`.
-    fn reinject(&self, result: &ComputeResult) -> crate::error::Result<Vec<Bytes>> {
+    fn reinject(&self, result: &ComputeResult) -> rings_node::error::Result<Vec<Bytes>> {
         let payload = bincode::serialize(result).map_err(|_| Error::EncodeError)?;
         Ok(vec![Bytes::from(payload)])
     }
@@ -180,7 +185,7 @@ impl Interpret for SnarkShell {
         &self,
         scope: &EffectScope,
         effect: SnarkEffect,
-    ) -> crate::error::Result<Vec<Bytes>> {
+    ) -> rings_node::error::Result<Vec<Bytes>> {
         match effect {
             SnarkEffect::SendTask { to, msg } => {
                 let payload = bincode::serialize(&msg).map_err(|_| Error::EncodeError)?;

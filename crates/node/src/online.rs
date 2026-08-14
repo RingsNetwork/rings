@@ -25,8 +25,6 @@ use crate::descriptor::SignedDescriptorBody;
 pub const ONLINE_NODES_TOPIC: &str = "online_nodes";
 /// Capability label for nodes that provide DHT storage.
 pub const ONLINE_NODE_CAPABILITY_STORAGE: &str = "storage";
-/// Capability label for nodes that provide SNARK proof services.
-pub const ONLINE_NODE_CAPABILITY_SNARK: &str = "snark";
 
 /// Runtime family advertised by a node descriptor.
 #[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]

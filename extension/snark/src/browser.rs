@@ -2,6 +2,7 @@
 //! ===========
 use std::str::FromStr;
 
+use rings_node::provider::browser::ProviderRef;
 use rings_snark::prelude::ff;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsError;
@@ -9,9 +10,8 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::future_to_promise;
 
 use super::*;
-use crate::extension::types::snark::SNARKProofTask;
-use crate::extension::types::snark::SNARKVerifyTask;
-use crate::provider::browser::ProviderRef;
+use crate::types::SNARKProofTask;
+use crate::types::SNARKVerifyTask;
 
 /// We need this ref to pass Task ref to js_sys
 #[wasm_bindgen]
@@ -126,7 +126,7 @@ impl SNARKBehaviour {
     /// envelopes are dispatched automatically. Call once after constructing the
     /// provider. See [`SNARKBehaviour::register`].
     pub fn register_to(&self, provider: ProviderRef) -> Result<()> {
-        self.register(provider.inner().as_ref())
+        Ok(self.register(provider.inner().as_ref())?)
     }
 
     /// gen proof task with circuits, this function is use for solo proof
@@ -226,12 +226,12 @@ impl SNARKTaskBuilder {
 pub(crate) fn bigint2ff<F: ff::PrimeField>(v: js_sys::BigInt) -> Result<F> {
     let repr = v
         .to_string(10)
-        .map_err(|e| Error::SNARKFFRangeError(format!("{e:?}")))?
+        .map_err(|e| SnarkError::FieldRange(format!("{e:?}")))?
         .as_string();
     if let Some(v) = &repr {
-        Ok(F::from_str_vartime(v).ok_or(Error::FailedToLoadFF())?)
+        Ok(F::from_str_vartime(v).ok_or(SnarkError::FailedToLoadField)?)
     } else {
-        Err(Error::SNARKBigIntValueEmpty())
+        Err(SnarkError::BigIntValueEmpty.into())
     }
 }
 
@@ -270,7 +270,7 @@ impl Input {
             .map(|s| {
                 let last = js_sys::Array::from(&s);
                 let p = last.get(0).as_string().ok_or_else(|| {
-                    Error::JsError("SNARK input name must be a string".to_string())
+                    SnarkError::HandleMessage("SNARK input name must be a string".to_string())
                 })?;
                 let v = js_sys::Array::from(&last.get(1))
                     .into_iter()

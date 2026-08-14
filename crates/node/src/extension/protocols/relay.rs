@@ -761,7 +761,7 @@ impl Interpret for WtRelay {
 /// Client-facing handle to the relay extension's live engine: open local tunnels and register
 /// local services. This is the relay extension's *own* surface — the relay owns its engine and
 /// installs itself ([`install`](RelayHandle::install)), so nothing about it leaks into the
-/// generic [`Provider`](crate::provider::Provider) (the same way SNARK registers itself).
+/// generic [`Provider`](crate::provider::Provider).
 /// Cloneable; every clone drives the same shared engine and pure [`Relay`] state.
 /// Holds the two per-namespace scoped capabilities (`tcp` / `udp`); each method picks one and
 /// can only act within it, so the handle cannot address an arbitrary namespace even internally.

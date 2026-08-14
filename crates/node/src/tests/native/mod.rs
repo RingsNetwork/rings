@@ -5,8 +5,6 @@ use crate::prelude::SessionSk;
 use crate::processor::Processor;
 use crate::processor::ProcessorBuilder;
 use crate::processor::ProcessorConfig;
-#[cfg(feature = "snark")]
-pub mod test_snark;
 
 mod test_duplicate_namespace;
 

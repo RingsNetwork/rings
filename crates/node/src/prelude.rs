@@ -47,7 +47,6 @@ pub use crate::onion::ONION_RELAY_CAPABILITY;
 pub use crate::online::OnlineNodeDescriptor;
 pub use crate::online::OnlineNodeType;
 pub use crate::online::ONLINE_NODES_TOPIC;
-pub use crate::online::ONLINE_NODE_CAPABILITY_SNARK;
 pub use crate::online::ONLINE_NODE_CAPABILITY_STORAGE;
 pub use crate::registration::DhtRegistrationPublisher;
 pub use crate::registration::RegistrationContext;

@@ -7,7 +7,7 @@ publish = false
 
 # Wasm/Yew app for both web and Chrome MV3 extension packaging. The empty
 # workspace avoids feature unification with native examples while this app uses
-# browser_default.
+# browser node features plus application-level extensions.
 [workspace]
 
 [dependencies]
@@ -17,7 +17,8 @@ base64 = "0.22"
 futures = "0.3"
 gloo-timers = { version = "0.3", features = ["futures"] }
 js-sys = "=0.3.98"
-rings-node = { path = "../crates/node", default-features = false, features = ["browser_default"] }
+rings-node = { path = "../crates/node", default-features = false, features = ["browser"] }
+rings-snark-extension = { path = "../extension/snark", default-features = false, features = ["browser"] }
 rings-webview = { path = "../crates/webview", features = ["browser"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

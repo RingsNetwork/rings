@@ -7,6 +7,7 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use rings_core::dht::Did;
 use rings_derive::wasm_export;
+use rings_node::provider::Provider;
 use rings_snark::circuit;
 use rings_snark::prelude::nova::provider;
 use rings_snark::prelude::nova::provider::hyperkzg;
@@ -22,25 +23,30 @@ use rings_snark::snark::SNARK;
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::types::snark::SNARKProofTask;
-use super::types::snark::SNARKTask;
-use super::types::snark::SNARKTaskMessage;
-use super::types::snark::SNARKVerifyTask;
-use crate::error::Error;
-use crate::error::Result;
-use crate::provider::Provider;
+use crate::types::SNARKProofTask;
+use crate::types::SNARKTask;
+use crate::types::SNARKTaskMessage;
+use crate::types::SNARKVerifyTask;
 
 type TaskId = uuid::Uuid;
 
 /// Namespace under which SNARK proof/verify tasks travel.
 pub const NAMESPACE: &str = "snark";
+/// Online-node capability advertised by providers that register this extension.
+pub const CAPABILITY: &str = NAMESPACE;
 
 #[cfg(rings_browser)]
 pub mod browser;
 mod builder;
+mod error;
 mod protocol;
+#[cfg(test)]
+mod tests;
+pub mod types;
 
 pub use builder::SNARKTaskBuilder;
+pub use error::Result;
+pub use error::SnarkError;
 pub use protocol::SnarkProtocol;
 
 /// Task Manageer of SNARK provider and verifier
@@ -112,13 +118,13 @@ impl SNARKBehaviour {
             task_id,
             task: SNARKTask::SNARKProof(Box::new(task.clone())),
         };
-        let payload = bincode::serialize(&msg).map_err(|_| Error::EncodeError)?;
+        let payload = bincode::serialize(&msg).map_err(|_| SnarkError::Encode)?;
         // Record the task *before* sending, so a fast verify reply cannot arrive before
         // the verifier has the proof task to check against. Roll back if the send fails.
         self.task.insert(task_id, task.clone());
         if let Err(e) = provider.send(did, NAMESPACE, Bytes::from(payload)).await {
             self.task.remove(&task_id);
-            return Err(e);
+            return Err(e.into());
         }
         tracing::info!("sent proof request");
         Ok(task_id.to_string())
@@ -129,7 +135,7 @@ impl SNARKBehaviour {
     /// the proving/verification crypto). After this, inbound `snark` envelopes are
     /// dispatched automatically; results are readable via
     /// [`SNARKBehaviour::get_task_result`].
-    pub fn register(&self, provider: &Provider) -> Result<()> {
+    pub fn register(&self, provider: &Provider) -> rings_node::error::Result<()> {
         provider.register_protocol(SnarkProtocol, protocol::SnarkShell::new(self.inner.clone()))
     }
 }
@@ -313,13 +319,13 @@ where
 {
     /// verifier key of proof
     #[serde(
-        serialize_with = "crate::util::serialize_forward",
-        deserialize_with = "crate::util::deserialize_forward"
+        serialize_with = "rings_node::util::serialize_forward",
+        deserialize_with = "rings_node::util::deserialize_forward"
     )]
     pub vk: VerifierKey<E1, E2, S1, S2>,
     #[serde(
-        serialize_with = "crate::util::serialize_forward",
-        deserialize_with = "crate::util::deserialize_forward"
+        serialize_with = "rings_node::util::serialize_forward",
+        deserialize_with = "rings_node::util::deserialize_forward"
     )]
     /// compressed proof
     pub proof: CompressedSNARK<E1, E2, S1, S2>,
@@ -429,7 +435,7 @@ where
     fn first_circuit(&self) -> Result<&circuit::Circuit<E1::Scalar>> {
         self.circuits
             .first()
-            .ok_or_else(|| Error::SNARKHandleMessage("empty SNARK circuit list".to_string()))
+            .ok_or_else(|| SnarkError::HandleMessage("empty SNARK circuit list".to_string()))
     }
 }
 
@@ -516,7 +522,7 @@ impl SNARKBehaviour {
                     let ret = t.verify::<S1, S2>(proof.proof, proof.vk);
                     Ok(ret.is_ok())
                 } else {
-                    Err(Error::SNARKCurveNotMatch())
+                    Err(SnarkError::CurveNotMatch)
                 }
             }
             SNARKVerifyTask::VastaPallas(p) => {
@@ -531,7 +537,7 @@ impl SNARKBehaviour {
                     let ret = t.verify::<S1, S2>(proof.proof, proof.vk);
                     Ok(ret.is_ok())
                 } else {
-                    Err(Error::SNARKCurveNotMatch())
+                    Err(SnarkError::CurveNotMatch)
                 }
             }
             SNARKVerifyTask::Bn256KZGGrumpkin(p) => {
@@ -546,7 +552,7 @@ impl SNARKBehaviour {
                     let ret = t.verify::<S1, S2>(proof.proof, proof.vk);
                     Ok(ret.is_ok())
                 } else {
-                    Err(Error::SNARKCurveNotMatch())
+                    Err(SnarkError::CurveNotMatch)
                 }
             }
         };

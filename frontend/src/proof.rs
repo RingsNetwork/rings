@@ -4,12 +4,12 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use gloo_timers::future::sleep;
-use rings_node::extension::snark::Field;
-use rings_node::extension::snark::Input;
-use rings_node::extension::snark::ProofResult;
-use rings_node::extension::snark::SNARKTaskBuilder;
-use rings_node::extension::snark::SupportedPrimeField;
 use rings_node::prelude::rings_core::dht::Did;
+use rings_snark_extension::Field;
+use rings_snark_extension::Input;
+use rings_snark_extension::ProofResult;
+use rings_snark_extension::SNARKTaskBuilder;
+use rings_snark_extension::SupportedPrimeField;
 
 use crate::node::DemoNode;
 
