@@ -4430,7 +4430,7 @@ dependencies = [
 
 [[package]]
 name = "rings-core"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "ark-bls12-381",
  "ark-ec",
@@ -4504,7 +4504,7 @@ dependencies = [
 
 [[package]]
 name = "rings-derive"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4514,7 +4514,7 @@ dependencies = [
 
 [[package]]
 name = "rings-native-example"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "async-trait",
  "base64 0.13.1",
@@ -4528,7 +4528,7 @@ dependencies = [
 
 [[package]]
 name = "rings-node"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "anyhow",
  "arrayref",
@@ -4586,7 +4586,7 @@ dependencies = [
 
 [[package]]
 name = "rings-relay-example"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "rings-core",
  "rings-node",
@@ -4595,7 +4595,7 @@ dependencies = [
 
 [[package]]
 name = "rings-rpc"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "async-trait",
  "base64 0.13.1",
@@ -4611,7 +4611,7 @@ dependencies = [
 
 [[package]]
 name = "rings-snark"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "bellpepper-core",
  "byteorder",
@@ -4639,7 +4639,7 @@ dependencies = [
 
 [[package]]
 name = "rings-snark-example"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "rings-snark",
  "tokio",
@@ -4647,7 +4647,7 @@ dependencies = [
 
 [[package]]
 name = "rings-snark-extension"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "async-trait",
  "bincode",
@@ -4671,7 +4671,7 @@ dependencies = [
 
 [[package]]
 name = "rings-transport"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "async-trait",
  "bincode",
@@ -4697,7 +4697,7 @@ dependencies = [
 
 [[package]]
 name = "rings-webview"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "async-trait",
  "chrono",
