@@ -9,14 +9,6 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use rings_core::dht::Did;
-use serde::Deserialize;
-use serde::Serialize;
-
-use super::SNARKBehaviour;
-use super::SNARKTaskManager;
-use super::TaskId;
-use super::CAPABILITY;
-use super::NAMESPACE;
 use rings_node::error::Error;
 use rings_node::extension::ext::Ctx;
 use rings_node::extension::ext::EffectScope;
@@ -25,7 +17,14 @@ use rings_node::extension::ext::Protocol;
 use rings_node::extension::ext::Reject;
 use rings_node::extension::ext::Transition;
 use rings_node::extension::ext::Wire;
+use serde::Deserialize;
+use serde::Serialize;
 
+use super::SNARKBehaviour;
+use super::SNARKTaskManager;
+use super::TaskId;
+use super::CAPABILITY;
+use super::NAMESPACE;
 use crate::types::SNARKProofTask;
 use crate::types::SNARKTask;
 use crate::types::SNARKTaskMessage;
@@ -134,32 +133,25 @@ impl Protocol for SnarkProtocol {
                 task_id,
                 reply_to,
                 verify_task,
-            }) => Transition::with(
-                (),
-                vec![SnarkEffect::SendTask {
-                    to: reply_to,
-                    msg: SNARKTaskMessage {
-                        task_id,
-                        task: SNARKTask::SNARKVerify(verify_task),
-                    },
-                }],
-            ),
+            }) => Transition::with((), vec![SnarkEffect::SendTask {
+                to: reply_to,
+                msg: SNARKTaskMessage {
+                    task_id,
+                    task: SNARKTask::SNARKVerify(verify_task),
+                },
+            }]),
             SnarkEvent::Task { from, msg } => match msg.task {
-                SNARKTask::SNARKProof(task) => Transition::with(
-                    (),
-                    vec![SnarkEffect::Prove {
-                        task_id: msg.task_id,
-                        reply_to: from,
-                        task,
-                    }],
-                ),
-                SNARKTask::SNARKVerify(verify_task) => Transition::with(
-                    (),
-                    vec![SnarkEffect::Verify {
+                SNARKTask::SNARKProof(task) => Transition::with((), vec![SnarkEffect::Prove {
+                    task_id: msg.task_id,
+                    reply_to: from,
+                    task,
+                }]),
+                SNARKTask::SNARKVerify(verify_task) => {
+                    Transition::with((), vec![SnarkEffect::Verify {
                         task_id: msg.task_id,
                         verify_task,
-                    }],
-                ),
+                    }])
+                }
             },
         }
     }

@@ -7,6 +7,7 @@ use bytes::Bytes;
 use dashmap::DashMap;
 use rings_core::dht::Did;
 use rings_derive::wasm_export;
+use rings_node::provider::Provider;
 use rings_snark::circuit;
 use rings_snark::prelude::nova::provider;
 use rings_snark::prelude::nova::provider::hyperkzg;
@@ -21,8 +22,6 @@ use rings_snark::snark::VerifierKey;
 use rings_snark::snark::SNARK;
 use serde::Deserialize;
 use serde::Serialize;
-
-use rings_node::provider::Provider;
 
 use crate::types::SNARKProofTask;
 use crate::types::SNARKTask;
@@ -46,7 +45,8 @@ mod tests;
 pub mod types;
 
 pub use builder::SNARKTaskBuilder;
-pub use error::{Result, SnarkError};
+pub use error::Result;
+pub use error::SnarkError;
 pub use protocol::SnarkProtocol;
 
 /// Task Manageer of SNARK provider and verifier
@@ -522,7 +522,7 @@ impl SNARKBehaviour {
                     let ret = t.verify::<S1, S2>(proof.proof, proof.vk);
                     Ok(ret.is_ok())
                 } else {
-                    Err(SnarkError::CurveNotMatch.into())
+                    Err(SnarkError::CurveNotMatch)
                 }
             }
             SNARKVerifyTask::VastaPallas(p) => {
@@ -537,7 +537,7 @@ impl SNARKBehaviour {
                     let ret = t.verify::<S1, S2>(proof.proof, proof.vk);
                     Ok(ret.is_ok())
                 } else {
-                    Err(SnarkError::CurveNotMatch.into())
+                    Err(SnarkError::CurveNotMatch)
                 }
             }
             SNARKVerifyTask::Bn256KZGGrumpkin(p) => {
@@ -552,7 +552,7 @@ impl SNARKBehaviour {
                     let ret = t.verify::<S1, S2>(proof.proof, proof.vk);
                     Ok(ret.is_ok())
                 } else {
-                    Err(SnarkError::CurveNotMatch.into())
+                    Err(SnarkError::CurveNotMatch)
                 }
             }
         };

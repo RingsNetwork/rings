@@ -71,13 +71,10 @@ async fn test_gen_proof_and_verify() -> Result<()> {
     let r1cs = fixture_path("simple_bn256.r1cs");
     let snark_task_builder =
         SNARKTaskBuilder::from_local(r1cs, wasm, SupportedPrimeField::Vesta).await?;
-    let input: Input = vec![(
-        "step_in".to_string(),
-        vec![
-            Field::from_u64(4, SupportedPrimeField::Vesta),
-            Field::from_u64(2, SupportedPrimeField::Vesta),
-        ],
-    )]
+    let input: Input = vec![("step_in".to_string(), vec![
+        Field::from_u64(4, SupportedPrimeField::Vesta),
+        Field::from_u64(2, SupportedPrimeField::Vesta),
+    ])]
     .into();
     let circuits = snark_task_builder.gen_circuits(input, vec![], 5)?;
     assert_eq!(circuits.len(), 5);

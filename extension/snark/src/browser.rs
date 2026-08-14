@@ -2,6 +2,7 @@
 //! ===========
 use std::str::FromStr;
 
+use rings_node::provider::browser::ProviderRef;
 use rings_snark::prelude::ff;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsError;
@@ -11,7 +12,6 @@ use wasm_bindgen_futures::future_to_promise;
 use super::*;
 use crate::types::SNARKProofTask;
 use crate::types::SNARKVerifyTask;
-use rings_node::provider::browser::ProviderRef;
 
 /// We need this ref to pass Task ref to js_sys
 #[wasm_bindgen]

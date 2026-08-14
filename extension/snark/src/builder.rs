@@ -219,19 +219,16 @@ impl SNARKTaskBuilder {
                         if let CircuitEnum::Vesta(c) = circ.inner {
                             Ok(c)
                         } else {
-                            Err(SnarkError::CurveNotMatch.into())
+                            Err(SnarkError::CurveNotMatch)
                         }
                     })
                     .collect::<Result<Vec<_>>>()?;
                 let first = first_generated_circuit(&circuits)?;
                 let inputs = first.get_public_inputs()?;
                 let pp = SNARK::<E1, E2>::gen_pp::<S1, S2>(first.clone())?;
-                let snark = SNARK::<E1, E2>::new(
-                    first,
-                    &pp,
-                    &inputs,
-                    &vec![<E2 as Engine>::Scalar::from(0)],
-                )?;
+                let snark = SNARK::<E1, E2>::new(first, &pp, &inputs, &vec![
+                    <E2 as Engine>::Scalar::from(0),
+                ])?;
 
                 SNARKProofTask::VastaPallas(SNARKGenerator {
                     pp: pp.into(),
@@ -252,19 +249,16 @@ impl SNARKTaskBuilder {
                         if let CircuitEnum::Pallas(c) = circ.inner {
                             Ok(c)
                         } else {
-                            Err(SnarkError::CurveNotMatch.into())
+                            Err(SnarkError::CurveNotMatch)
                         }
                     })
                     .collect::<Result<Vec<_>>>()?;
                 let first = first_generated_circuit(&circuits)?;
                 let inputs = first.get_public_inputs()?;
                 let pp = SNARK::<E1, E2>::gen_pp::<S1, S2>(first.clone())?;
-                let snark = SNARK::<E1, E2>::new(
-                    first,
-                    &pp,
-                    &inputs,
-                    &vec![<E2 as Engine>::Scalar::from(0)],
-                )?;
+                let snark = SNARK::<E1, E2>::new(first, &pp, &inputs, &vec![
+                    <E2 as Engine>::Scalar::from(0),
+                ])?;
                 SNARKProofTask::PallasVasta(SNARKGenerator {
                     pp: pp.into(),
                     snark,
@@ -284,19 +278,16 @@ impl SNARKTaskBuilder {
                         if let CircuitEnum::Bn256KZG(c) = circ.inner {
                             Ok(c)
                         } else {
-                            Err(SnarkError::CurveNotMatch.into())
+                            Err(SnarkError::CurveNotMatch)
                         }
                     })
                     .collect::<Result<Vec<_>>>()?;
                 let first = first_generated_circuit(&circuits)?;
                 let inputs = first.get_public_inputs()?;
                 let pp = SNARK::<E1, E2>::gen_pp::<S1, S2>(first.clone())?;
-                let snark = SNARK::<E1, E2>::new(
-                    first,
-                    &pp,
-                    &inputs,
-                    &vec![<E2 as Engine>::Scalar::from(0)],
-                )?;
+                let snark = SNARK::<E1, E2>::new(first, &pp, &inputs, &vec![
+                    <E2 as Engine>::Scalar::from(0),
+                ])?;
                 SNARKProofTask::Bn256KZGGrumpkin(SNARKGenerator {
                     pp: pp.into(),
                     snark,
@@ -311,9 +302,9 @@ impl SNARKTaskBuilder {
 fn first_generated_circuit<F: PrimeField>(
     circuits: &[circuit::Circuit<F>],
 ) -> Result<&circuit::Circuit<F>> {
-    circuits.first().ok_or_else(|| {
-        SnarkError::HandleMessage("empty generated SNARK circuit list".to_string()).into()
-    })
+    circuits
+        .first()
+        .ok_or_else(|| SnarkError::HandleMessage("empty generated SNARK circuit list".to_string()))
 }
 
 fn convert_input<F: PrimeField>(
@@ -336,20 +327,20 @@ fn convert_input<F: PrimeField>(
 fn vesta_field(field: FieldEnum) -> Result<<provider::VestaEngine as Engine>::Scalar> {
     match field {
         FieldEnum::Vesta(value) => Ok(value),
-        _ => Err(SnarkError::CurveNotMatch.into()),
+        _ => Err(SnarkError::CurveNotMatch),
     }
 }
 
 fn pallas_field(field: FieldEnum) -> Result<<provider::PallasEngine as Engine>::Scalar> {
     match field {
         FieldEnum::Pallas(value) => Ok(value),
-        _ => Err(SnarkError::CurveNotMatch.into()),
+        _ => Err(SnarkError::CurveNotMatch),
     }
 }
 
 fn bn256_kzg_field(field: FieldEnum) -> Result<<provider::Bn256EngineKZG as Engine>::Scalar> {
     match field {
         FieldEnum::Bn256KZG(value) => Ok(value),
-        _ => Err(SnarkError::CurveNotMatch.into()),
+        _ => Err(SnarkError::CurveNotMatch),
     }
 }
