@@ -18,10 +18,10 @@ repository = "https://github.com/RingsNetwork/rings"
 
 [workspace.dependencies]
 async-trait = "0.1.77"
+bincode = { package = "rings-bincode", path = "crates/bincode", version = "0.16.0" }
 js-sys = "0.3.98"
 jsonrpc-core = "18.0.0"
 rings-core = { path = "crates/core", version = "0.16.0", default-features = false }
-bincode = { package = "rings-bincode", path = "crates/bincode", version = "0.16.0" }
 rings-derive = { path = "crates/derive", version = "0.16.0", default-features = false }
 rings-node = { path = "crates/node", version = "0.16.0" }
 rings-rpc = { path = "crates/rpc", version = "0.16.0", default-features = false }
