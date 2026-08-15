@@ -35,13 +35,15 @@ use chacha20poly1305::aead::Payload;
 use chacha20poly1305::ChaCha20Poly1305;
 use chacha20poly1305::Key;
 use chacha20poly1305::Nonce;
+use elliptic_curve::point::AffineCoordinates;
+use elliptic_curve::point::DecompressPoint;
 use hkdf::Hkdf;
-use libsecp256k1::curve::Affine;
-use libsecp256k1::curve::Field;
+use k256::AffinePoint as Affine;
 use rand::RngCore;
 use serde::Deserialize;
 use serde::Serialize;
 use sha2::Sha256;
+use subtle::Choice;
 use zeroize::Zeroizing;
 
 use crate::ecc::elgamal::ElGamal;
@@ -66,6 +68,25 @@ pub const PLAINTEXT_BLOCK_SIZE: usize = FIELD_CHUNK_SIZE;
 
 /// One serialized ElGamal ciphertext block over secp256k1.
 pub type CiphertextBlock = (CurveEle<33>, CurveEle<33>);
+
+/// Secp256k1 field candidate used by this adapter's reversible plaintext encoding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Field([u8; 32]);
+
+impl Field {
+    fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Return the big-endian 32-byte field representation.
+    pub fn b32(&self) -> [u8; 32] {
+        self.0
+    }
+
+    fn is_odd(&self) -> bool {
+        self.0.last().copied().unwrap_or_default() & 1 == 1
+    }
+}
 
 const AEAD_VERSION: u8 = 1;
 const AEAD_KEY_LEN: usize = 32;
@@ -204,14 +225,7 @@ pub fn str_to_field(s: &str) -> Vec<Field> {
 pub fn bytes_to_field(bytes: &[u8]) -> Vec<Field> {
     bytes
         .chunks(PLAINTEXT_BLOCK_SIZE)
-        .map(|x| {
-            let data = encode_field_candidate(x);
-            let mut field = Field::default();
-            // `FIELD_ENCODING_MARKER` is below the secp256k1 modulus prefix, so
-            // the encoded 32-byte candidate always fits in the field.
-            let _ = field.set_b32(&data);
-            field
-        })
+        .map(|x| Field::new(encode_field_candidate(x)))
         .collect()
 }
 
@@ -241,9 +255,7 @@ pub fn field_to_str(f: &[Field]) -> Result<String> {
 /// Decode field elements produced by [`bytes_to_field`].
 pub fn field_to_bytes(f: &[Field]) -> Vec<u8> {
     f.iter().fold(vec![], |mut acc, x| {
-        let mut field = *x;
-        field.normalize();
-        acc.extend(decode_field_bytes(field.b32()));
+        acc.extend(decode_field_bytes(x.b32()));
         acc
     })
 }
@@ -272,37 +284,31 @@ fn decode_field_bytes(mut bytes: [u8; 32]) -> Vec<u8> {
 /// plaintext bytes. If no high-byte candidate lifts, the adapter returns a
 /// typed error.
 fn lift_x(x: &Field) -> Result<Affine> {
-    let mut ec = Affine::default();
-    let mut x = *x;
-    x.normalize();
-
-    if ec.set_xo_var(&x, x.is_odd()) {
-        return Ok(ec);
+    let x_bytes = x.b32();
+    if let Some(point) = decompress_x(x_bytes, x.is_odd()) {
+        return Ok(point);
     }
 
     for bias in (1..=254).rev() {
-        let mut bytes = x.b32();
+        let mut bytes = x_bytes;
         let Some(first) = bytes.first_mut() else {
             return Err(Error::Secp256k1PointLiftFailed);
         };
         *first = bias;
 
-        let mut candidate = Field::default();
-        if !candidate.set_b32(&bytes) {
-            continue;
-        }
-        candidate.normalize();
-
-        if ec.set_xo_var(&candidate, candidate.is_odd()) {
-            ec.x.normalize();
-            ec.y.normalize();
-            return Ok(ec);
+        let candidate = Field::new(bytes);
+        if let Some(point) = decompress_x(candidate.b32(), candidate.is_odd()) {
+            return Ok(point);
         }
     }
 
     // Typed safeguard for future encoding changes; normal adapter chunks should
     // find a valid lift among the high-byte candidates above.
     Err(Error::Secp256k1PointLiftFailed)
+}
+
+fn decompress_x(x: [u8; 32], y_is_odd: bool) -> Option<Affine> {
+    Affine::decompress(&k256::FieldBytes::from(x), Choice::from(y_is_odd as u8)).into()
 }
 
 /// Convert a string into secp256k1 points using the adapter encoding.
@@ -325,7 +331,16 @@ pub fn affine_to_str(a: &[Affine]) -> Result<String> {
 
 /// Decode secp256k1 points produced by [`bytes_to_affine`].
 pub fn affine_to_bytes(a: &[Affine]) -> Vec<u8> {
-    field_to_bytes(a.iter().map(|x| x.x).collect::<Vec<Field>>().as_slice())
+    field_to_bytes(
+        a.iter()
+            .map(|point| {
+                let mut x = [0u8; 32];
+                x.copy_from_slice(point.x().as_slice());
+                Field::new(x)
+            })
+            .collect::<Vec<Field>>()
+            .as_slice(),
+    )
 }
 
 /// Encrypt a string with the current secp256k1 compatibility adapter.
@@ -488,10 +503,8 @@ mod test {
     use std::collections::HashSet;
     use std::time::Instant;
 
-    use libsecp256k1::curve::ECMultContext;
-    use libsecp256k1::curve::ECMultGenContext;
-    use libsecp256k1::curve::Jacobian;
-    use libsecp256k1::curve::Scalar;
+    use elliptic_curve::sec1::ToEncodedPoint;
+    use k256::ProjectivePoint as K256ProjectivePoint;
     use rand::distributions::Alphanumeric;
     use rand::Rng;
     use rand::SeedableRng;
@@ -505,6 +518,26 @@ mod test {
             .take(len)
             .map(char::from)
             .collect()
+    }
+
+    fn affine_xy(point: Affine) -> ([u8; 32], [u8; 32]) {
+        let encoded = point.to_encoded_point(false);
+        let bytes = encoded.as_bytes();
+        let mut x = [0u8; 32];
+        let mut y = [0u8; 32];
+        let Some(x_bytes) = bytes.get(1..33) else {
+            panic!("missing uncompressed x-coordinate");
+        };
+        let Some(y_bytes) = bytes.get(33..65) else {
+            panic!("missing uncompressed y-coordinate");
+        };
+        x.copy_from_slice(x_bytes);
+        y.copy_from_slice(y_bytes);
+        (x, y)
+    }
+
+    fn affine_x(point: Affine) -> [u8; 32] {
+        affine_xy(point).0
     }
 
     #[test]
@@ -563,11 +596,7 @@ mod test {
         let key =
             SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")
                 .unwrap();
-        let sec_key: libsecp256k1::SecretKey = key.into();
-        let pubkey: libsecp256k1::PublicKey = key.pubkey().try_into().unwrap();
-        let mut pub_point: Affine = pubkey.into();
-        pub_point.x.normalize();
-        pub_point.y.normalize();
+        let pub_point: Affine = key.pubkey().try_into().unwrap();
         let pub_x = [
             226, 15, 49, 60, 133, 119, 254, 51, 180, 4, 209, 133, 17, 253, 134, 129, 149, 245, 53,
             173, 45, 62, 36, 113, 168, 153, 24, 91, 137, 141, 81, 47,
@@ -576,30 +605,27 @@ mod test {
             108, 113, 105, 68, 84, 69, 224, 17, 240, 33, 13, 214, 109, 90, 19, 142, 61, 78, 77,
             105, 96, 121, 193, 87, 117, 185, 180, 47, 202, 81, 181, 204,
         ];
-        assert_eq!(pub_point.x.b32(), pub_x);
-        assert_eq!(pub_point.y.b32(), pub_y);
+        let (got_pub_x, got_pub_y) = affine_xy(pub_point);
+        assert_eq!(got_pub_x, pub_x);
+        assert_eq!(got_pub_y, pub_y);
         let test = "test";
         let points = str_to_affine(test).unwrap();
         assert_eq!(points.len(), 1);
         assert_eq!(affine_to_str(&str_to_affine(test).unwrap()).unwrap(), test);
         let m_point = points[0];
-        let r: libsecp256k1::SecretKey =
+        let r =
             SecretKey::try_from("1f9275dbafdfba81942eb3330b07f38cbee4ebb86bdc2174af9648d5f5509a54")
-                .unwrap()
-                .into();
+                .unwrap();
         let r_v = [
             31, 146, 117, 219, 175, 223, 186, 129, 148, 46, 179, 51, 11, 7, 243, 140, 190, 228,
             235, 184, 107, 220, 33, 116, 175, 150, 72, 213, 245, 80, 154, 84,
         ];
-        let r_sca: Scalar = r.into();
-        assert_eq!(r_sca.b32(), r_v);
-        let cxt = ECMultGenContext::new_boxed();
-        let mut c1 = Jacobian::default();
-        cxt.ecmult_gen(&mut c1, &r_sca);
-        let mut a_c1 = Affine::from_gej(&c1);
-
-        a_c1.x.normalize();
-        a_c1.y.normalize();
+        let r_sca = GroupScalar::<Secp256k1>::from(r).into_inner();
+        let mut got_r = [0u8; 32];
+        got_r.copy_from_slice(r_sca.to_bytes().as_slice());
+        assert_eq!(got_r, r_v);
+        let c1 = K256ProjectivePoint::GENERATOR * r_sca;
+        let a_c1 = c1.to_affine();
         let c1_x = [
             252, 168, 85, 233, 220, 119, 76, 217, 52, 108, 167, 27, 234, 188, 197, 95, 72, 213,
             148, 212, 111, 255, 6, 59, 9, 134, 111, 121, 175, 9, 189, 105,
@@ -608,15 +634,12 @@ mod test {
             20, 45, 13, 61, 245, 50, 136, 183, 182, 210, 169, 120, 84, 204, 77, 138, 12, 116, 50,
             9, 115, 98, 138, 245, 24, 61, 223, 144, 55, 180, 231, 59,
         ];
-        assert_eq!(a_c1.x.b32(), c1_x);
-        assert_eq!(a_c1.y.b32(), c1_y);
+        let (got_c1_x, got_c1_y) = affine_xy(a_c1);
+        assert_eq!(got_c1_x, c1_x);
+        assert_eq!(got_c1_y, c1_y);
 
-        let mut mask_point = Jacobian::default();
-        let cxt2 = ECMultContext::new_boxed();
-        cxt2.ecmult_const(&mut mask_point, &pub_point, &r_sca);
-        let mut a_mask = Affine::from_gej(&mask_point);
-        a_mask.x.normalize();
-        a_mask.y.normalize();
+        let mask_point = K256ProjectivePoint::from(pub_point) * r_sca;
+        let a_mask = mask_point.to_affine();
 
         let mask_x = [
             218, 19, 55, 137, 15, 46, 160, 160, 208, 222, 206, 77, 46, 79, 32, 80, 64, 243, 93, 23,
@@ -627,9 +650,10 @@ mod test {
             106, 127, 47, 58, 214, 6, 110, 28, 171, 176, 73, 11, 34, 28, 125, 10, 82, 154, 84, 154,
             11, 80, 191, 68, 111, 197, 98, 224, 84, 116, 208, 115,
         ];
-        assert_eq!(a_mask.x.b32(), mask_x);
-        assert_eq!(a_mask.y.b32(), mask_y);
-        let c2 = mask_point.add_ge(&m_point);
+        let (got_mask_x, got_mask_y) = affine_xy(a_mask);
+        assert_eq!(got_mask_x, mask_x);
+        assert_eq!(got_mask_y, mask_y);
+        let c2 = mask_point + K256ProjectivePoint::from(m_point);
         let c2_y = [
             225, 196, 104, 44, 46, 208, 86, 14, 40, 40, 133, 81, 125, 222, 217, 21, 242, 64, 68,
             206, 194, 27, 61, 193, 20, 18, 110, 198, 39, 60, 214, 200,
@@ -638,15 +662,13 @@ mod test {
             156, 159, 250, 245, 112, 81, 128, 176, 19, 145, 119, 199, 12, 181, 147, 13, 138, 34,
             205, 124, 119, 235, 28, 243, 77, 11, 100, 13, 159, 164, 188, 247,
         ];
-        let mut a_c2 = Affine::from_gej(&c2);
-        a_c2.x.normalize();
-        a_c2.y.normalize();
-        assert_eq!(a_c2.x.b32(), c2_x);
-        assert_eq!(a_c2.y.b32(), c2_y);
+        let a_c2 = c2.to_affine();
+        let (got_c2_x, got_c2_y) = affine_xy(a_c2);
+        assert_eq!(got_c2_x, c2_x);
+        assert_eq!(got_c2_y, c2_y);
 
-        let mut t = Jacobian::default();
-        cxt2.ecmult_const(&mut t, &a_c1, &sec_key.into());
-        let mut a_t = Affine::from_gej(&t);
+        let t = K256ProjectivePoint::from(a_c1) * GroupScalar::<Secp256k1>::from(key).into_inner();
+        let a_t = t.to_affine();
         let t_x = [
             218, 19, 55, 137, 15, 46, 160, 160, 208, 222, 206, 77, 46, 79, 32, 80, 64, 243, 93, 23,
             223, 130, 148, 226, 131, 17, 254, 95, 43, 95, 35, 34,
@@ -655,16 +677,12 @@ mod test {
             106, 127, 47, 58, 214, 6, 110, 28, 171, 176, 73, 11, 34, 28, 125, 10, 82, 154, 84, 154,
             11, 80, 191, 68, 111, 197, 98, 224, 84, 116, 208, 115,
         ];
-        a_t.x.normalize();
-        a_t.y.normalize();
-        assert_eq!(a_t.x.b32(), t_x);
-        assert_eq!(a_t.y.b32(), t_y);
+        let (got_t_x, got_t_y) = affine_xy(a_t);
+        assert_eq!(got_t_x, t_x);
+        assert_eq!(got_t_y, t_y);
 
-        let ret = c2.add_ge(&a_t.neg());
-        let mut a_ret = Affine::from_gej(&ret);
-        a_ret.x.normalize();
-        a_ret.y.normalize();
-        assert_eq!(a_ret.x, m_point.x);
+        let ret = c2 - t;
+        assert_eq!(affine_x(ret.to_affine()), affine_x(m_point));
     }
 
     #[test]

@@ -60,7 +60,12 @@ jobs:
         run: cargo install cargo-deny --version "$CARGO_DENY_VERSION" --locked
 
       - name: Check dependency policy
-        run: cargo deny --locked check advisories licenses bans sources
+        run: |
+          cargo deny --locked \
+            --exclude rings-snark \
+            --exclude rings-snark-example \
+            --exclude rings-snark-extension \
+            check -A unmatched-source advisories licenses bans sources
 
   miri_core:
     name: Miri core invariants

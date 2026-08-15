@@ -1,11 +1,17 @@
 #![deny(missing_docs)]
 
-//! Persistence Storage for default, use `sled` as backend db.
+//! Persistent native key-value storage.
+
+use std::path::Path;
+use std::path::PathBuf;
+use std::sync::RwLock;
 
 use async_trait::async_trait;
 use itertools::Itertools;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
+use sha1::Digest;
+use sha1::Sha1;
 
 use crate::error::Error;
 use crate::error::Result;
@@ -14,7 +20,8 @@ use crate::storage::KvStorageInterface;
 /// StorageInstance struct
 #[allow(dead_code)]
 pub struct SledStorage {
-    db: sled::Db,
+    root: PathBuf,
+    lock: RwLock<()>,
     cap: u32,
     path: String,
 }
@@ -25,17 +32,31 @@ impl SledStorage {
     /// * path: db file location
     pub async fn new_with_cap_and_path<P>(cap: u32, path: P) -> Result<Self>
     where P: AsRef<std::path::Path> {
-        let db = sled::Config::new()
-            .path(path.as_ref())
-            .mode(sled::Mode::HighThroughput)
-            .cache_capacity(cap as u64)
-            .open()
-            .map_err(Error::SledError)?;
+        std::fs::create_dir_all(path.as_ref()).map_err(Error::ServiceIOError)?;
         Ok(Self {
-            db,
+            root: path.as_ref().to_path_buf(),
+            lock: RwLock::new(()),
             cap,
             path: path.as_ref().to_string_lossy().to_string(),
         })
+    }
+
+    fn key_path(&self, key: &str) -> PathBuf {
+        let mut hasher = Sha1::new();
+        hasher.update(key.as_bytes());
+        self.root.join(hex::encode(hasher.finalize()))
+    }
+
+    fn entries(&self) -> Result<Vec<PathBuf>> {
+        match std::fs::read_dir(&self.root) {
+            Ok(entries) => Ok(entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| is_entry_path(path))
+                .collect_vec()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(error) => Err(Error::ServiceIOError(error)),
+        }
     }
 }
 
@@ -44,51 +65,74 @@ impl<V> KvStorageInterface<V> for SledStorage
 where V: Serialize + DeserializeOwned + Sync
 {
     async fn get(&self, key: &str) -> Result<Option<V>> {
-        let v = self.db.get(key).map_err(Error::SledError)?;
-        if let Some(v) = v {
-            let v = v.as_ref();
-            return bincode::deserialize(v)
-                .map_err(Error::BincodeDeserialize)
-                .map(|r| Some(r));
+        let _guard = self.lock.read().map_err(|_| Error::DHTSyncLockError)?;
+        match std::fs::read(self.key_path(key)) {
+            Ok(data) => {
+                let (stored_key, value): (String, V) =
+                    bincode::deserialize(&data).map_err(Error::BincodeDeserialize)?;
+                if stored_key == key {
+                    Ok(Some(value))
+                } else {
+                    Ok(None)
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(Error::ServiceIOError(error)),
         }
-        Ok(None)
     }
 
     async fn put(&self, key: &str, value: &V) -> Result<()> {
-        let data = bincode::serialize(&value).map_err(Error::BincodeSerialize)?;
+        let _guard = self.lock.write().map_err(|_| Error::DHTSyncLockError)?;
+        std::fs::create_dir_all(&self.root).map_err(Error::ServiceIOError)?;
+        let data = bincode::serialize(&(key, value)).map_err(Error::BincodeSerialize)?;
         tracing::debug!("Try inserting key: {:?}", key);
-        self.db.insert(key, data).map_err(Error::SledError)?;
+        let path = self.key_path(key);
+        let tmp_path = path.with_extension("tmp");
+        std::fs::write(&tmp_path, data).map_err(Error::ServiceIOError)?;
+        std::fs::rename(tmp_path, path).map_err(Error::ServiceIOError)?;
         Ok(())
     }
 
     async fn get_all(&self) -> Result<Vec<(String, V)>> {
-        let iter = self.db.iter();
-        Ok(iter
-            .flatten()
-            .flat_map(|(k, v)| {
-                Some((
-                    std::str::from_utf8(k.as_ref()).ok()?.to_string(),
-                    bincode::deserialize(v.as_ref()).ok()?,
-                ))
+        let _guard = self.lock.read().map_err(|_| Error::DHTSyncLockError)?;
+        Ok(self
+            .entries()?
+            .into_iter()
+            .flat_map(|path| {
+                let data = std::fs::read(path).ok()?;
+                bincode::deserialize::<(String, V)>(&data).ok()
             })
             .collect_vec())
     }
 
     async fn remove(&self, key: &str) -> Result<()> {
-        self.db
-            .remove(key.to_string().as_bytes())
-            .map_err(Error::SledError)?;
-        Ok(())
+        let _guard = self.lock.write().map_err(|_| Error::DHTSyncLockError)?;
+        match std::fs::remove_file(self.key_path(key)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(Error::ServiceIOError(error)),
+        }
     }
 
     async fn clear(&self) -> Result<()> {
-        self.db.clear().map_err(Error::SledError)?;
+        let _guard = self.lock.write().map_err(|_| Error::DHTSyncLockError)?;
+        for path in self.entries()? {
+            std::fs::remove_file(path).map_err(Error::ServiceIOError)?;
+        }
         Ok(())
     }
 
     async fn count(&self) -> Result<u32> {
-        Ok(self.db.len() as u32)
+        let _guard = self.lock.read().map_err(|_| Error::DHTSyncLockError)?;
+        Ok(self.entries()?.len() as u32)
     }
+}
+
+fn is_entry_path(path: &Path) -> bool {
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    file_name.len() == 40 && file_name.as_bytes().iter().all(u8::is_ascii_hexdigit)
 }
 
 impl std::fmt::Debug for SledStorage {
@@ -114,7 +158,14 @@ mod test {
 
     #[tokio::test]
     async fn test_kv_storage_put_delete() {
-        let storage = SledStorage::new_with_cap_and_path(4096, "tmp/test_db")
+        let path = std::env::temp_dir().join(format!(
+            "rings-file-kv-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let storage = SledStorage::new_with_cap_and_path(4096, &path)
             .await
             .unwrap();
         let key1 = "test1".to_owned();
@@ -179,8 +230,8 @@ mod test {
                 .await
                 .unwrap();
         assert!(count1 == 0, "expect count1 is 0, got {count1}");
-        storage.db.flush_async().await.unwrap();
 
-        drop(storage)
+        drop(storage);
+        let _ = std::fs::remove_dir_all(path);
     }
 }

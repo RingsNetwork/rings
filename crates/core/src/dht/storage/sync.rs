@@ -32,7 +32,7 @@ pub(crate) const SYNC_BATCH_MAX_BYTES: usize = MAX_DATA_CHANNEL_MESSAGE_SIZE / 4
 const SYNC_BATCH_ENVELOPE_HEADROOM_BYTES: usize =
     MAX_CHUNK_ENVELOPE_OVERHEAD + TRANSPORT_CUSTOM_OVERHEAD;
 
-fn serialized_wire_size<T: Serialize + ?Sized>(value: &T) -> Result<usize> {
+fn serialized_wire_size<T: Serialize>(value: &T) -> Result<usize> {
     let bytes = bincode::serialized_size(value).map_err(Error::BincodeSerialize)?;
     usize::try_from(bytes).map_err(|_| Error::MessageTooLarge(usize::MAX))
 }

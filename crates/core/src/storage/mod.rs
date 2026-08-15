@@ -6,7 +6,7 @@ pub mod idb;
 /// In-memory key value storage.
 pub mod memory;
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-/// Sled-backed persistent storage for native runtimes.
+/// Persistent storage for native runtimes.
 pub mod sled;
 
 use async_trait::async_trait;

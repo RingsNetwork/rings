@@ -807,7 +807,7 @@ async fn pubsub_run(client_args: ClientArgs, topic: String) -> anyhow::Result<()
 }
 
 fn main() -> anyhow::Result<()> {
-    dotenv::dotenv().ok();
+    dotenvy::dotenv().ok();
 
     let cli = Cli::parse();
     init_logging(cli.log_level.clone());

@@ -33,7 +33,7 @@ browser = [
 
 [dependencies]
 async-trait = { workspace = true }
-bincode = "1.3.3"
+bincode = { workspace = true }
 bytes = { version = "1.2.1", features = ["serde"] }
 dashmap = "5"
 js-sys = { workspace = true, optional = true }

@@ -20,7 +20,7 @@
 //!
 //! This split gives the rest of the cryptographic code one stable vocabulary:
 //! algorithms depend on algebraic carrier laws, not on a concrete crate such as
-//! `libsecp256k1`, `p256`, `arkworks`, or `curve25519-dalek`. Adding a curve is
+//! `k256`, `p256`, `arkworks`, or `curve25519-dalek`. Adding a curve is
 //! therefore a matter of implementing the point and scalar adapter boundaries
 //! once; algorithms such as ElGamal do not need per-curve branches.
 
@@ -30,12 +30,12 @@ use std::ops::Add;
 use std::ops::Mul;
 use std::ops::Neg;
 use std::ops::Sub;
-use std::sync::OnceLock;
 
 use ark_bls12_381::Fr as Bls12381ScalarField;
 use ark_bls12_381::G1Projective;
-use ark_ec::Group as ArkGroup;
+use ark_ec::PrimeGroup as _;
 use ark_ff::Field as _;
+use ark_ff::One as _;
 use ark_ff::Zero as _;
 use ark_std::UniformRand;
 #[cfg(feature = "curve-ristretto255")]
@@ -47,12 +47,10 @@ use curve25519_dalek::scalar::Scalar as Ristretto255ScalarField;
 #[cfg(feature = "curve-ristretto255")]
 use curve25519_dalek::traits::Identity as _;
 use elliptic_curve::ff::Field as _;
-use libsecp256k1::curve::Affine;
-use libsecp256k1::curve::ECMultContext;
-use libsecp256k1::curve::ECMultGenContext;
-use libsecp256k1::curve::Jacobian;
-use libsecp256k1::curve::Scalar as SecpK1FieldScalar;
-use p256::ProjectivePoint;
+use k256::AffinePoint as K256AffinePoint;
+use k256::ProjectivePoint as K256ProjectivePoint;
+use k256::Scalar as K256Scalar;
+use p256::ProjectivePoint as Secp256r1ProjectivePoint;
 use p256::Scalar as Secp256r1ScalarField;
 use rand::RngCore;
 use rand::SeedableRng;
@@ -240,8 +238,6 @@ pub struct Ristretto255;
 thread_local! {
     static GROUP_RNG: RefCell<Hc128Rng> = RefCell::new(Hc128Rng::from_entropy());
 }
-
-static SECP256K1_GENERATOR: OnceLock<Jacobian> = OnceLock::new();
 
 impl<C: CurveGroup> Point<C> {
     /// Build a group element from the curve-native point type.
@@ -443,9 +439,7 @@ impl<C: CurveScalarField> AlgebraField for Scalar<C> {
 // already exposes identity, generator, addition, negation, scalar
 // multiplication, equality, and point conversion. Keeping that pattern in one
 // macro makes each supported curve a short declaration while preserving the
-// explicit algebraic operations at the trait boundary. secp256k1 remains
-// hand-written because it needs precomputed multiplication contexts and
-// explicit infinity handling from `libsecp256k1`.
+// explicit algebraic operations at the trait boundary.
 macro_rules! impl_curve_group_adapter {
     (
         $curve:ty {
@@ -556,60 +550,45 @@ macro_rules! impl_curve_group_adapter {
 }
 
 impl CurveGroup for Secp256k1 {
-    type Point = Jacobian;
-    type Scalar = SecpK1FieldScalar;
+    type Point = K256ProjectivePoint;
+    type Scalar = K256Scalar;
 
     fn identity() -> Self::Point {
-        secp256k1_identity()
+        K256ProjectivePoint::IDENTITY
     }
 
     fn generator() -> Self::Point {
-        *SECP256K1_GENERATOR.get_or_init(secp256k1_generator)
-    }
-
-    fn generator_mul(scalar: &Self::Scalar) -> Self::Point {
-        let mut result = Jacobian::default();
-        secp256k1_generator_context().ecmult_gen(&mut result, scalar);
-        result
+        K256ProjectivePoint::GENERATOR
     }
 
     fn add(lhs: &Self::Point, rhs: &Self::Point) -> Self::Point {
-        lhs.add_var(rhs, None)
+        *lhs + *rhs
     }
 
     fn neg(point: &Self::Point) -> Self::Point {
-        point.neg()
+        -*point
     }
 
     fn mul(point: &Self::Point, scalar: &Self::Scalar) -> Self::Point {
-        if point.is_infinity() {
-            return secp256k1_identity();
-        }
-        let mut result = Jacobian::default();
-        secp256k1_multiplication_context().ecmult_const(
-            &mut result,
-            &Affine::from_gej(point),
-            scalar,
-        );
-        result
+        *point * *scalar
     }
 
     fn eq(lhs: &Self::Point, rhs: &Self::Point) -> bool {
-        secp256k1_jacobian_bytes(*lhs) == secp256k1_jacobian_bytes(*rhs)
+        lhs == rhs
     }
 }
 
 impl CurveScalarField for Secp256k1 {
     fn scalar_zero() -> Self::Scalar {
-        SecpK1FieldScalar::from_int(0)
+        K256Scalar::ZERO
     }
 
     fn scalar_one() -> Self::Scalar {
-        SecpK1FieldScalar::from_int(1)
+        K256Scalar::ONE
     }
 
     fn scalar_is_zero(scalar: &Self::Scalar) -> bool {
-        scalar.is_zero()
+        bool::from(scalar.is_zero())
     }
 
     fn scalar_add(lhs: &Self::Scalar, rhs: &Self::Scalar) -> Self::Scalar {
@@ -617,7 +596,7 @@ impl CurveScalarField for Secp256k1 {
     }
 
     fn scalar_sub(lhs: &Self::Scalar, rhs: &Self::Scalar) -> Self::Scalar {
-        *lhs + -*rhs
+        *lhs - *rhs
     }
 
     fn scalar_neg(scalar: &Self::Scalar) -> Self::Scalar {
@@ -629,11 +608,7 @@ impl CurveScalarField for Secp256k1 {
     }
 
     fn scalar_inverse(scalar: &Self::Scalar) -> Option<Self::Scalar> {
-        if scalar.is_zero() {
-            None
-        } else {
-            Some(scalar.inv())
-        }
+        scalar.invert().into_option()
     }
 
     fn scalar_eq(lhs: &Self::Scalar, rhs: &Self::Scalar) -> bool {
@@ -641,16 +616,21 @@ impl CurveScalarField for Secp256k1 {
     }
 
     fn random_scalar_with_rng(rng: &mut impl RngCore) -> Self::Scalar {
-        libsecp256k1::SecretKey::random(rng).into()
+        loop {
+            let scalar = K256Scalar::generate_vartime(rng);
+            if !bool::from(scalar.is_zero()) {
+                break scalar;
+            }
+        }
     }
 }
 
 impl_curve_group_adapter! {
     Secp256r1 {
-        point: ProjectivePoint,
+        point: Secp256r1ProjectivePoint,
         scalar: Secp256r1ScalarField,
-        identity: ProjectivePoint::IDENTITY,
-        generator: ProjectivePoint::GENERATOR,
+        identity: Secp256r1ProjectivePoint::IDENTITY,
+        generator: Secp256r1ProjectivePoint::GENERATOR,
         random_scalar: |rng| {
             loop {
                 let scalar = Secp256r1ScalarField::random(&mut *rng);
@@ -659,10 +639,10 @@ impl_curve_group_adapter! {
                 }
             }
         },
-        add: |lhs: &ProjectivePoint, rhs: &ProjectivePoint| *lhs + *rhs,
-        neg: |point: &ProjectivePoint| -*point,
-        mul: |point: &ProjectivePoint, scalar: &Secp256r1ScalarField| *point * *scalar,
-        eq: |lhs: &ProjectivePoint, rhs: &ProjectivePoint| lhs == rhs,
+        add: |lhs: &Secp256r1ProjectivePoint, rhs: &Secp256r1ProjectivePoint| *lhs + *rhs,
+        neg: |point: &Secp256r1ProjectivePoint| -*point,
+        mul: |point: &Secp256r1ProjectivePoint, scalar: &Secp256r1ScalarField| *point * *scalar,
+        eq: |lhs: &Secp256r1ProjectivePoint, rhs: &Secp256r1ProjectivePoint| lhs == rhs,
         scalar_zero: Secp256r1ScalarField::ZERO,
         scalar_one: Secp256r1ScalarField::ONE,
         scalar_is_zero: |scalar: &Secp256r1ScalarField| bool::from(scalar.is_zero()),
@@ -693,8 +673,8 @@ impl_curve_group_adapter! {
         neg: |point: &G1Projective| -*point,
         mul: |point: &G1Projective, scalar: &Bls12381ScalarField| *point * *scalar,
         eq: |lhs: &G1Projective, rhs: &G1Projective| lhs == rhs,
-        scalar_zero: Bls12381ScalarField::ZERO,
-        scalar_one: Bls12381ScalarField::ONE,
+        scalar_zero: Bls12381ScalarField::zero(),
+        scalar_one: Bls12381ScalarField::one(),
         scalar_is_zero: |scalar: &Bls12381ScalarField| scalar.is_zero(),
         scalar_add: |lhs: &Bls12381ScalarField, rhs: &Bls12381ScalarField| *lhs + *rhs,
         scalar_sub: |lhs: &Bls12381ScalarField, rhs: &Bls12381ScalarField| *lhs - *rhs,
@@ -746,19 +726,19 @@ impl_curve_group_adapter! {
 
 impl From<SecretKey> for Scalar<Secp256k1> {
     fn from(secret_key: SecretKey) -> Self {
-        Self::new(secret_key.into())
+        Self::new(secret_key.secp256k1_scalar())
     }
 }
 
-impl From<Affine> for Point<Secp256k1> {
-    fn from(point: Affine) -> Self {
-        Self::new(Jacobian::from_ge(&normalize_affine(point)))
+impl From<K256AffinePoint> for Point<Secp256k1> {
+    fn from(point: K256AffinePoint) -> Self {
+        Self::new(K256ProjectivePoint::from(point))
     }
 }
 
-impl From<Point<Secp256k1>> for Affine {
+impl From<Point<Secp256k1>> for K256AffinePoint {
     fn from(point: Point<Secp256k1>) -> Self {
-        Affine::from_gej(&point.inner)
+        point.inner.to_affine()
     }
 }
 
@@ -766,7 +746,7 @@ impl TryFrom<PublicKey<33>> for Point<Secp256k1> {
     type Error = Error;
 
     fn try_from(public_key: PublicKey<33>) -> Result<Self> {
-        let point: Affine = public_key.try_into()?;
+        let point: K256AffinePoint = public_key.try_into()?;
         Ok(point.into())
     }
 }
@@ -775,40 +755,11 @@ impl TryFrom<Point<Secp256k1>> for PublicKey<33> {
     type Error = Error;
 
     fn try_from(point: Point<Secp256k1>) -> Result<Self> {
-        if point.inner.is_infinity() {
+        if point.inner == K256ProjectivePoint::IDENTITY {
             return Err(Error::InvalidPublicKey);
         }
-        Affine::from(point).try_into()
+        K256AffinePoint::from(point).try_into()
     }
-}
-
-fn secp256k1_generator() -> Jacobian {
-    let scalar = SecpK1FieldScalar::from_int(1);
-    let mut point = Jacobian::default();
-    secp256k1_generator_context().ecmult_gen(&mut point, &scalar);
-    point
-}
-
-// Pre:
-// - libsecp256k1 exposes immutable precomputed tables under `static-context`.
-// - group randomness remains independent mutable state and stays in `GROUP_RNG`.
-// Invariant:
-// - every secp256k1 group operation borrows the same process-global contexts.
-// - no worker thread constructs its own `ECMultContext` or `ECMultGenContext`.
-// Post:
-// - secp256k1 arithmetic does not allocate per-thread precomputation tables.
-fn secp256k1_generator_context() -> &'static ECMultGenContext {
-    &libsecp256k1::ECMULT_GEN_CONTEXT
-}
-
-fn secp256k1_multiplication_context() -> &'static ECMultContext {
-    &libsecp256k1::ECMULT_CONTEXT
-}
-
-fn secp256k1_identity() -> Jacobian {
-    let mut point = Jacobian::default();
-    point.set_infinity();
-    point
 }
 
 fn with_group_rng<R>(f: impl FnOnce(&mut Hc128Rng) -> R) -> R {
@@ -816,22 +767,6 @@ fn with_group_rng<R>(f: impl FnOnce(&mut Hc128Rng) -> R) -> R {
         let mut rng = rng.borrow_mut();
         f(&mut rng)
     })
-}
-
-fn normalize_affine(mut point: Affine) -> Affine {
-    point.x.normalize();
-    point.y.normalize();
-    point
-}
-
-fn secp256k1_jacobian_bytes(point: Jacobian) -> Option<([u8; 32], [u8; 32])> {
-    if point.is_infinity() {
-        return None;
-    }
-    let mut affine = Affine::from_gej(&point);
-    affine.x.normalize();
-    affine.y.normalize();
-    Some((affine.x.b32(), affine.y.b32()))
 }
 
 #[cfg(test)]
@@ -910,45 +845,5 @@ mod tests {
         algebra_laws::<Bls12381G1>();
         #[cfg(feature = "curve-ristretto255")]
         algebra_laws::<Ristretto255>();
-    }
-
-    #[test]
-    fn secp256k1_contexts_are_shared_across_threads() {
-        const THREAD_COUNT: usize = 4;
-
-        let context_addresses = std::thread::scope(|scope| {
-            let handles: Vec<_> = (0..THREAD_COUNT)
-                .map(|_| {
-                    scope.spawn(|| {
-                        let scalar = SecpK1FieldScalar::from_int(2);
-                        let generator = <Secp256k1 as CurveGroup>::generator();
-                        let _ = <Secp256k1 as CurveGroup>::generator_mul(&scalar);
-                        let _ = <Secp256k1 as CurveGroup>::mul(&generator, &scalar);
-
-                        (
-                            secp256k1_generator_context() as *const ECMultGenContext as usize,
-                            secp256k1_multiplication_context() as *const ECMultContext as usize,
-                        )
-                    })
-                })
-                .collect();
-
-            let mut addresses = std::collections::BTreeSet::new();
-            for handle in handles {
-                match handle.join() {
-                    Ok(address) => {
-                        addresses.insert(address);
-                    }
-                    Err(payload) => std::panic::resume_unwind(payload),
-                }
-            }
-            addresses
-        });
-
-        assert_eq!(
-            context_addresses.len(),
-            1,
-            "secp256k1 precomputed contexts must be process-global"
-        );
     }
 }

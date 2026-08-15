@@ -16,13 +16,24 @@ Local reproduction:
 
 ```sh
 cargo install cargo-deny --version 0.20.2 --locked
-cargo deny --locked check advisories licenses bans sources
+cargo deny --locked \
+  --exclude rings-snark \
+  --exclude rings-snark-example \
+  --exclude rings-snark-extension \
+  check -A unmatched-source advisories licenses bans sources
 ```
 
-Reviewed exceptions live in `deny.toml`. Advisory exceptions must use the
-structured form with an issue reference and an expiry date. Git sources must be
-listed explicitly under `sources.allow-git`; do not rely on broad organization
-allow-lists for new sources.
+The blocking gate does not carry RustSec advisory exceptions. Advisory failures
+must be handled by migrating the dependency, removing it from the checked graph,
+or deliberately narrowing the gate to the security boundary under review. Git
+sources must be listed explicitly under `sources.allow-git`; do not rely on
+broad organization allow-lists for new sources.
+
+The current blocking dependency-policy boundary is the non-SNARK workspace. The
+SNARK crates are separate extension/example packages and are excluded at
+`cargo-deny` graph construction, not through advisory ignores. The only allowed
+lint override is `unmatched-source`, because excluding the SNARK graph also means
+the SNARK-only zksync git source is not encountered by this boundary check.
 
 ## Miri core invariants
 

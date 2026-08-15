@@ -1,11 +1,11 @@
 #![deny(missing_docs)]
 
+use std::fmt;
 use std::io::Write;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use derivative::Derivative;
 use flate2::write::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -89,8 +89,7 @@ fn hash_transaction(
 ///
 /// To transmit `Transaction` in RingsNetwork, user should build
 /// [MessagePayload] and use [PayloadSender] to send.
-#[derive(Derivative, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[derivative(Debug)]
+#[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct Transaction {
     /// The destination of this message.
     pub destination: Did,
@@ -104,14 +103,23 @@ pub struct Transaction {
     pub report_return: ReportReturnPolicy,
     /// This field holds a signature from a node,
     /// which is used to prove that the transaction was created by that node.
-    #[derivative(Debug = "ignore")]
     pub verification: MessageVerification,
+}
+
+impl fmt::Debug for Transaction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Transaction")
+            .field("destination", &self.destination)
+            .field("tx_id", &self.tx_id)
+            .field("data", &self.data)
+            .field("report_return", &self.report_return)
+            .finish()
+    }
 }
 
 /// `MessagePayload` is used to transmit data between nodes.
 /// The data should be packed by [Transaction].
-#[derive(Derivative, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[derivative(Debug)]
+#[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct MessagePayload {
     /// Payload data
     pub transaction: Transaction,
@@ -120,8 +128,16 @@ pub struct MessagePayload {
     pub relay: MessageRelay,
     /// This field holds a signature from a node,
     /// which is used to prove that payload was created by that node.
-    #[derivative(Debug = "ignore")]
     pub verification: MessageVerification,
+}
+
+impl fmt::Debug for MessagePayload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MessagePayload")
+            .field("transaction", &self.transaction)
+            .field("relay", &self.relay)
+            .finish()
+    }
 }
 
 impl Transaction {

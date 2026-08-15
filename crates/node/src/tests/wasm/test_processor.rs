@@ -1,10 +1,10 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::lock::Mutex;
 use rings_core::dht::Did;
 use rings_core::swarm::callback::SwarmCallback;
+use rings_core::utils;
 use wasm_bindgen_futures::spawn_local;
 use wasm_bindgen_test::*;
 
@@ -57,9 +57,7 @@ async fn wait_for_dht_successor(p: &Processor, did: Did) {
             return;
         }
         last_inspect = Some(inspect);
-        fluvio_wasm_timer::Delay::new(Duration::from_millis(200))
-            .await
-            .unwrap();
+        utils::js_utils::window_sleep(200).await.unwrap();
     }
     panic!(
         "timeout waiting for {did} to appear in DHT successors; peers={:?}, dht={:?}",
@@ -125,9 +123,7 @@ async fn test_processor_handshake_and_msg() {
     console_log!("processor_hs_connect_1_2");
     create_connection(&p1, &p2).await;
 
-    fluvio_wasm_timer::Delay::new(Duration::from_secs(2))
-        .await
-        .unwrap();
+    utils::js_utils::window_sleep(2000).await.unwrap();
 
     console_log!("processor_send_test_text_messages");
     p1.send_message(p2_did, test_text1.as_bytes())
@@ -155,9 +151,7 @@ async fn test_processor_handshake_and_msg() {
         .unwrap();
     console_log!("send test_text5 done");
 
-    fluvio_wasm_timer::Delay::new(Duration::from_secs(4))
-        .await
-        .unwrap();
+    utils::js_utils::window_sleep(4000).await.unwrap();
 
     console_log!("check received");
 
@@ -213,9 +207,7 @@ async fn test_processor_connect_with_did() {
     console_log!("connect p1 and p3");
     // p1 create connect with p3's address
     p1.connect_with_did(p3.did()).await.unwrap();
-    fluvio_wasm_timer::Delay::new(Duration::from_millis(1000))
-        .await
-        .unwrap();
+    utils::js_utils::window_sleep(1000).await.unwrap();
     console_log!("processor_detect_connection_state");
     let peer3 = p1
         .swarm
