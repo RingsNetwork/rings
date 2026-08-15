@@ -209,6 +209,9 @@ impl ProviderHandle {
                 tracing::warn!("FFI provider listener thread panicked during shutdown");
             }
         }
+        if let Err(error) = self.provider.clear_swarm_callback_internal() {
+            tracing::warn!("failed to clear FFI provider callback during shutdown: {error}");
+        }
     }
 }
 
@@ -483,7 +486,12 @@ mod tests {
             let events_response = request(handle, "takeE2eEvents", "{}");
             assert!(events_response.contains("\"events\":[]"));
 
+            let weak_provider = unsafe { Arc::downgrade(&(*handle).provider) };
             unsafe { rings_node_provider_destroy(handle) };
+            assert!(
+                weak_provider.upgrade().is_none(),
+                "destroy must release the provider callback reference cycle"
+            );
         }
     }
 

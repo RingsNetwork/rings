@@ -17,7 +17,7 @@ env:
   WASM_BINDGEN_CLI_VERSION: 0.2.121
   WASM_PACK_VERSION: 0.15.0
   NODE_VERSION: 20.20.2
-  PYTHON_VERSION: 3.11.16
+  PYTHON_VERSION: "3.11"
   CARGO_DENY_VERSION: 0.20.2
   TRUNK_VERSION: 0.21.14
   TAPLO_CLI_VERSION: 0.10.0
@@ -122,8 +122,14 @@ jobs:
       - name: Run FFI lifecycle tests under ASan and LSan
         run: |
           set -euo pipefail
+          set +e
           output="$(cargo +"$NIGHTLY_TOOLCHAIN" test -p rings-node --features ffi ffi_ -- --nocapture 2>&1)"
+          status=$?
+          set -e
           printf '%s\n' "$output"
+          if [ "$status" -ne 0 ]; then
+            exit "$status"
+          fi
           grep -Eq 'test result: ok\. [1-9][0-9]* passed' <<< "$output"
 
   build_wasm:
