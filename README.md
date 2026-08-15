@@ -19,6 +19,10 @@ their own network layer instead of a server-owned data path. Browser tabs and na
 daemons can join the same overlay, discover peers by DID, and exchange messages over
 direct WebRTC datachannels routed by a Chord DHT.
 
+The current overlay threat model is documented in [SECURITY.md](./SECURITY.md).
+DID authentication proves key control; it is not, by itself, Sybil or eclipse
+resistance for permissionless public membership.
+
 At the application layer, Rings gives developers a namespace-scoped protocol runtime:
 write a pure state machine, attach an interpreter shell, and run it over a decentralized
 overlay. Built-in protocols already cover peer service relay and fold-scheme zkSNARK
@@ -59,13 +63,15 @@ browser-to-browser connections without an application server in the data path.
 Peers are addressed by decentralized identifiers backed by selectable signature
 schemes, including secp256k1, secp256r1, ed25519, BLS, and bip137. This lets Rings
 bridge browser, daemon, and wallet-oriented identity workflows without binding the
-network to one key system.
+network to one key system. See [the threat model](./SECURITY.md#did-identity) for
+the boundary between DID authentication and Sybil resistance.
 
 ### Structured peer routing
 
 The overlay uses a Chord DHT for successor/finger-table routing, DID lookup, message
 relay, stabilization, and `network_id` isolation. Independent overlays stay separate
-while retaining deterministic routing behavior.
+while retaining deterministic routing behavior. Chord routing assumes an acceptable
+membership model; see [the overlay threat model](./SECURITY.md#chord-routing).
 
 ### Protocol runtime
 
@@ -161,6 +167,7 @@ handler)`. See [`examples/relay`](./examples/relay) and
 | Resource | Link | Notes |
 |---|---|---|
 | Rings Whitepaper | [PDF](./papers/rings.pdf), [LaTeX source](./papers/rings.tex), [citation](#whitepaper) | Canonical protocol paper |
+| Security model | [SECURITY.md](./SECURITY.md) | Overlay assumptions, deployment models, and Sybil boundary |
 | Browser frontend | [`frontend`](./frontend) | Landing guide, web app, and extension workflow |
 | Examples | [`examples/`](./examples) | Native, dweb, proof, relay, snark, and FFI examples |
 
@@ -181,7 +188,8 @@ handler)`. See [`examples/relay`](./examples/relay) and
 ## Architecture
 
 Rings is layered so that **every layer is decentralized — there is no server in the data
-path**. Each layer maps directly to a crate/module:
+path**. This is a data-path topology statement, not a permissionless Sybil-resistance
+claim; see [SECURITY.md](./SECURITY.md). Each layer maps directly to a crate/module:
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -229,6 +237,9 @@ is described in [ROADMAP.md](./ROADMAP.md).
 We welcome contributions to rings-node!
 
 If you have a bug report or feature request, please open an issue on GitHub.
+
+Security and supply-chain CI gates are documented in
+[docs/ci-security-gates.md](./docs/ci-security-gates.md).
 
 If you'd like to contribute code, please follow these steps:
 

@@ -166,6 +166,19 @@ impl<'a> RegistrationContext<'a> {
             .fetch_storage_entry_with_stop(entry_key, &self.stop)
             .await
     }
+
+    async fn overwrite_data_topic(
+        &self,
+        topic: &str,
+        values: impl IntoIterator<Item = Encoded>,
+    ) -> Result<()> {
+        let entry = entry::Entry::new(
+            entry::Entry::gen_did(topic)?,
+            values.into_iter().collect(),
+            entry::EntryKind::Data,
+        );
+        self.processor.storage_store(entry).await
+    }
 }
 
 /// Common publisher for DHT-backed registries.
@@ -225,6 +238,80 @@ impl DhtRegistrationPublisher {
             .await
     }
 
+    /// Publish values and compact observed registry state to verified live values.
+    ///
+    /// The compaction is still routed through storage ownership via `Overwrite`.
+    /// It is emitted only when the observed entry contains removable payloads
+    /// or tombstone metadata that a new register floor can prune.
+    pub async fn publish_many_replacing_and_compacting(
+        &self,
+        context: &RegistrationContext<'_>,
+        values: impl IntoIterator<Item = Encoded>,
+        replaces_observed_value: impl Fn(&Encoded) -> bool,
+        preserves_observed_value: impl Fn(&Encoded) -> bool,
+    ) -> Result<()> {
+        let current_values = values.into_iter().collect::<BTreeSet<_>>();
+        let _publish_turn = self.publish_gate.lock().await;
+        context.ensure_running()?;
+        let observed_entry = self.observed_registry_entry(context).await?;
+        let observed_values = observed_entry
+            .as_ref()
+            .map(|entry| entry.data.clone())
+            .unwrap_or_default();
+        let compacted_values = compacted_registry_values(
+            &current_values,
+            &observed_values,
+            &replaces_observed_value,
+            &preserves_observed_value,
+        );
+        let should_compact = observed_entry
+            .as_ref()
+            .is_some_and(registry_entry_has_compactable_metadata)
+            || observed_values.iter().any(|observed| {
+                !current_values.contains(observed)
+                    && (replaces_observed_value(observed) || !preserves_observed_value(observed))
+            });
+        let stale_values = {
+            let mut published_values = self.published_values.lock().map_err(|_| Error::Lock)?;
+            begin_registration_publish(
+                &mut published_values,
+                &current_values,
+                observed_values,
+                &replaces_observed_value,
+            )
+        };
+
+        for value in &current_values {
+            context.ensure_running()?;
+            context
+                .processor
+                .storage_touch_data(&self.topic, value.clone())
+                .await?;
+        }
+        for stale_value in stale_values {
+            context.ensure_running()?;
+            context
+                .processor
+                .storage_tombstone_data(&self.topic, stale_value.clone())
+                .await?;
+            self.published_values
+                .lock()
+                .map_err(|_| Error::Lock)?
+                .remove(&stale_value);
+        }
+        if should_compact {
+            context.ensure_running()?;
+            context
+                .overwrite_data_topic(&self.topic, compacted_values)
+                .await?;
+        }
+        {
+            let mut published_values = self.published_values.lock().map_err(|_| Error::Lock)?;
+            finish_registration_publish(&mut published_values, current_values);
+        }
+        Ok(())
+    }
+
     async fn publish_many_with_replacement(
         &self,
         context: &RegistrationContext<'_>,
@@ -281,12 +368,40 @@ impl DhtRegistrationPublisher {
         &self,
         context: &RegistrationContext<'_>,
     ) -> Result<Vec<Encoded>> {
-        let entry_key = entry::Entry::gen_did(&self.topic)?;
-        let Some(entry) = context.fetch_storage_entry(entry_key).await? else {
-            return Ok(vec![]);
-        };
-        Ok(entry.data)
+        Ok(self
+            .observed_registry_entry(context)
+            .await?
+            .map(|entry| entry.data)
+            .unwrap_or_default())
     }
+
+    async fn observed_registry_entry(
+        &self,
+        context: &RegistrationContext<'_>,
+    ) -> Result<Option<entry::Entry>> {
+        let entry_key = entry::Entry::gen_did(&self.topic)?;
+        context.fetch_storage_entry(entry_key).await
+    }
+}
+
+fn registry_entry_has_compactable_metadata(entry: &entry::Entry) -> bool {
+    !entry.crdt.tombstones.is_empty()
+}
+
+fn compacted_registry_values(
+    current_values: &BTreeSet<Encoded>,
+    observed_values: &[Encoded],
+    replaces_observed_value: impl Fn(&Encoded) -> bool,
+    preserves_observed_value: impl Fn(&Encoded) -> bool,
+) -> BTreeSet<Encoded> {
+    let mut values = current_values.clone();
+    values.extend(observed_values.iter().filter_map(|observed| {
+        if current_values.contains(observed) || replaces_observed_value(observed) {
+            return None;
+        }
+        preserves_observed_value(observed).then(|| observed.clone())
+    }));
+    values
 }
 
 fn begin_registration_publish(
@@ -472,14 +587,26 @@ impl OnlineNodeRegistration {
         let descriptor = self.descriptor_at(context, now_ms)?;
         let encoded = descriptor.encode().map_err(Error::CoreError)?;
         self.publisher
-            .publish_many_replacing(context, std::iter::once(encoded), |observed| {
-                observed
-                    .decode::<OnlineNodeDescriptor>()
-                    .is_ok_and(|descriptor| {
-                        descriptor.did == context.did()
-                            || (descriptor.verify_signature() && descriptor.is_expired_at(now_ms))
-                    })
-            })
+            .publish_many_replacing_and_compacting(
+                context,
+                std::iter::once(encoded),
+                |observed| {
+                    observed
+                        .decode::<OnlineNodeDescriptor>()
+                        .is_ok_and(|descriptor| {
+                            descriptor.did == context.did()
+                                || (descriptor.verify_signature()
+                                    && descriptor.is_expired_at(now_ms))
+                        })
+                },
+                |observed| {
+                    observed
+                        .decode::<OnlineNodeDescriptor>()
+                        .is_ok_and(|descriptor| {
+                            descriptor.verify_signature() && !descriptor.is_expired_at(now_ms)
+                        })
+                },
+            )
             .await?;
         Ok(descriptor)
     }
@@ -614,5 +741,29 @@ mod tests {
 
         assert_eq!(stale, vec![observed_self_old]);
         assert_eq!(known, current);
+    }
+
+    #[test]
+    fn registration_compaction_keeps_current_and_preserved_observed_values() {
+        let current = BTreeSet::from([encoded("self-new")]);
+        let observed_self_old = encoded("self-old");
+        let observed_live = encoded("other-live");
+        let observed_invalid = encoded("invalid");
+
+        let compacted = compacted_registry_values(
+            &current,
+            &[
+                observed_self_old.clone(),
+                observed_live.clone(),
+                observed_invalid,
+            ],
+            |observed| observed == &observed_self_old,
+            |observed| observed == &observed_live,
+        );
+
+        assert_eq!(
+            compacted,
+            BTreeSet::from([encoded("self-new"), observed_live])
+        );
     }
 }
