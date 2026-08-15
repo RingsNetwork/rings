@@ -83,6 +83,12 @@ mod tests {
         bytes: Vec<u8>,
     }
 
+    #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+    struct WideIntegers {
+        signed: i128,
+        unsigned: u128,
+    }
+
     #[test]
     fn roundtrip_and_size_match() -> std::result::Result<(), Box<dyn StdError>> {
         let value = Example {
@@ -103,6 +109,29 @@ mod tests {
         );
         assert_eq!(u64::try_from(encoded.len())?, serialized_size(&value)?);
         assert_eq!(deserialize::<Example>(&encoded)?, value);
+        Ok(())
+    }
+
+    #[test]
+    fn roundtrip_128_bit_integers() -> std::result::Result<(), Box<dyn StdError>> {
+        let value = WideIntegers {
+            signed: -123_456_789_012_345_678_901_234_567_890i128,
+            unsigned: 0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10u128,
+        };
+
+        let encoded = serialize(&value)?;
+        let expected = value
+            .signed
+            .to_le_bytes()
+            .into_iter()
+            .chain(value.unsigned.to_le_bytes())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            encoded, expected,
+            "128-bit integers must encode as bincode-compatible little-endian bytes"
+        );
+        assert_eq!(u64::try_from(encoded.len())?, serialized_size(&value)?);
+        assert_eq!(deserialize::<WideIntegers>(&encoded)?, value);
         Ok(())
     }
 }

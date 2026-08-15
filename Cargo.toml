@@ -7,7 +7,7 @@ members = [
     "examples/snark",
     "extension/snark",
 ]
-exclude = ["third_party/proc-macro-error2"]
+exclude = ["third_party/proc-macro-error2", "third_party/serde-wincode"]
 
 [workspace.package]
 version = "0.16.0"
@@ -36,6 +36,7 @@ webrtc = { version = "0.17.1" }
 
 [patch.crates-io]
 proc-macro-error2 = { path = "third_party/proc-macro-error2" }
+serde-wincode = { path = "third_party/serde-wincode" }
 
 [workspace.lints.rust]
 missing_docs = "deny"

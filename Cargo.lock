@@ -4849,8 +4849,6 @@ dependencies = [
 [[package]]
 name = "serde-wincode"
 version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9aa9d3a86c66cf10ce79df36f555a5a4c8d72a82515d9ea8ca420e02c925c30f"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
