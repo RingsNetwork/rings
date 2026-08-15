@@ -100,7 +100,7 @@ jobs:
     env:
       ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1:check_initialization_order=1
       LSAN_OPTIONS: print_suppressions=0
-      RUSTFLAGS: -Zsanitizer=address
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -Zsanitizer=address
     steps:
       - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
 
@@ -113,6 +113,7 @@ jobs:
         run: |
           rustup toolchain install "$NIGHTLY_TOOLCHAIN" --profile minimal
           rustup default "$NIGHTLY_TOOLCHAIN"
+          rustup target add x86_64-unknown-linux-gnu --toolchain "$NIGHTLY_TOOLCHAIN"
           rustup show
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
@@ -123,7 +124,7 @@ jobs:
         run: |
           set -euo pipefail
           set +e
-          output="$(cargo +"$NIGHTLY_TOOLCHAIN" test -p rings-node --features ffi ffi_ -- --nocapture 2>&1)"
+          output="$(cargo +"$NIGHTLY_TOOLCHAIN" test --target x86_64-unknown-linux-gnu -p rings-node --features ffi ffi_ -- --nocapture 2>&1)"
           status=$?
           set -e
           printf '%s\n' "$output"
