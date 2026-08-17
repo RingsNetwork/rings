@@ -1,0 +1,50 @@
+name: Setup protoc
+description: Download an exact protoc release asset and add it to PATH.
+inputs:
+  version:
+    description: Protoc version without the leading v.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Install protoc
+      shell: bash
+      env:
+        PROTOC_VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+
+        protoc_version="${PROTOC_VERSION#v}"
+        case "$(uname -s)/$(uname -m)" in
+          Linux/x86_64)
+            platform="linux-x86_64"
+            ;;
+          Linux/aarch64 | Linux/arm64)
+            platform="linux-aarch_64"
+            ;;
+          Darwin/x86_64)
+            platform="osx-x86_64"
+            ;;
+          Darwin/arm64 | Darwin/aarch64)
+            platform="osx-aarch_64"
+            ;;
+          *)
+            echo "Unsupported protoc platform: $(uname -s)/$(uname -m)" >&2
+            exit 1
+            ;;
+        esac
+
+        archive="protoc-${protoc_version}-${platform}.zip"
+        url="https://github.com/protocolbuffers/protobuf/releases/download/v${protoc_version}/${archive}"
+        tool_cache="${RUNNER_TOOL_CACHE:-${RUNNER_TEMP:-/tmp}/tool-cache}"
+        runner_temp="${RUNNER_TEMP:-/tmp}"
+        install_dir="${tool_cache}/protoc/${protoc_version}/${platform}"
+
+        if [ ! -x "${install_dir}/bin/protoc" ]; then
+          mkdir -p "${install_dir}" "${runner_temp}"
+          curl --fail --location --show-error "${url}" --output "${runner_temp}/${archive}"
+          unzip -q "${runner_temp}/${archive}" -d "${install_dir}"
+        fi
+
+        echo "${install_dir}/bin" >> "${GITHUB_PATH}"
+        "${install_dir}/bin/protoc" --version
