@@ -53,10 +53,6 @@ jobs:
           rustup default "$RUST_TOOLCHAIN"
           rustup show
 
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          shared-key: dependency-policy-v1
-
       - name: Install cargo-deny
         run: cargo install cargo-deny --version "$CARGO_DENY_VERSION" --locked
 
@@ -81,10 +77,6 @@ jobs:
           rustup component add miri rust-src --toolchain "$NIGHTLY_TOOLCHAIN"
           cargo +"$NIGHTLY_TOOLCHAIN" miri setup
           rustup show
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          shared-key: miri-core-v1
 
       - name: Run Miri-compatible core tests
         env:
@@ -121,10 +113,6 @@ jobs:
           rustup default "$NIGHTLY_TOOLCHAIN"
           rustup target add x86_64-unknown-linux-gnu --toolchain "$NIGHTLY_TOOLCHAIN"
           rustup show
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          shared-key: ffi-asan-lsan-v1
 
       - name: Run FFI lifecycle tests under ASan and LSan
         run: |
@@ -164,11 +152,6 @@ jobs:
       - uses: jetli/wasm-bindgen-action@20b33e20595891ab1a0ed73145d8a21fc96e7c29 # v0.2.0
         with:
           version: ${{ env.WASM_BINDGEN_CLI_VERSION }}
-
-      # If you need to reset the cache version, increment the number after `v`
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          shared-key: wasm-v1
 
       - name: Run clippy for core wasm
         run: cargo clippy -p rings-core --features wasm --no-deps --no-default-features --target=wasm32-unknown-unknown --tests -- -D warnings
@@ -280,11 +263,6 @@ jobs:
           rustup default "$RUST_TOOLCHAIN"
           rustup show
 
-      # If you need to reset the cache version, increment the number after `v`
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          shared-key: default-v1
-
       - name: Build
         run: cargo build --all --verbose
 
@@ -317,11 +295,6 @@ jobs:
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
           rustup default "$RUST_TOOLCHAIN"
           rustup show
-
-      # If you need to reset the cache version, increment the number after `v`
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          shared-key: ffi-${{ runner.os }}-${{ runner.arch }}-v2
 
       - name: Run clippy for node ffi
         run: cargo clippy -p rings-node --features ffi
@@ -366,11 +339,6 @@ jobs:
           rustup toolchain install "$NIGHTLY_TOOLCHAIN" --profile minimal
           rustup component add rustfmt --toolchain "$NIGHTLY_TOOLCHAIN"
           rustup show
-
-      # If you need to reset the cache version, increment the number after `v`
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-        with:
-          shared-key: static-v1
 
       - name: Run strict clippy for node native lib
         run: |
