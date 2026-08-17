@@ -17,6 +17,7 @@ env:
   WASM_BINDGEN_CLI_VERSION: 0.2.121
   WASM_PACK_VERSION: 0.15.0
   NODE_VERSION: 20.20.2
+  PROTOC_VERSION: "23.4"
   PYTHON_VERSION: "3.11"
   CARGO_DENY_VERSION: 0.20.2
   TRUNK_VERSION: 0.21.14
@@ -112,6 +113,7 @@ jobs:
       - name: Setup protoc
         uses: arduino/setup-protoc@a8b67ba40b37d35169e222f3bb352603327985b6 # v2.1.0
         with:
+          version: ${{ env.PROTOC_VERSION }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup sanitizer toolchain
@@ -151,6 +153,7 @@ jobs:
       - name: Setup protoc
         uses: arduino/setup-protoc@a8b67ba40b37d35169e222f3bb352603327985b6 # v2.1.0
         with:
+          version: ${{ env.PROTOC_VERSION }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup rust toolchain
@@ -271,6 +274,7 @@ jobs:
       - name: Setup protoc
         uses: arduino/setup-protoc@a8b67ba40b37d35169e222f3bb352603327985b6 # v2.1.0
         with:
+          version: ${{ env.PROTOC_VERSION }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup rust toolchain
@@ -309,6 +313,7 @@ jobs:
       - name: Setup protoc
         uses: arduino/setup-protoc@a8b67ba40b37d35169e222f3bb352603327985b6 # v2.1.0
         with:
+          version: ${{ env.PROTOC_VERSION }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup rust toolchain
@@ -356,6 +361,7 @@ jobs:
       - name: Setup protoc
         uses: arduino/setup-protoc@a8b67ba40b37d35169e222f3bb352603327985b6 # v2.1.0
         with:
+          version: ${{ env.PROTOC_VERSION }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup rust toolchain
