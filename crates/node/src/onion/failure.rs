@@ -323,7 +323,7 @@ mod tests {
     fn wire_internal_failure_does_not_expose_local_diagnostic() {
         let diagnostic = "secret local filesystem and resolver detail";
         let failure = OnionExitFailure::from_error(&Error::InvalidConfig(diagnostic.to_string()));
-        let encoded = bincode::serialize(&failure).expect("encode wire failure");
+        let encoded = rings_codec::serialize(&failure).expect("encode wire failure");
 
         assert_eq!(failure, OnionExitFailure::Internal);
         assert!(!failure.to_string().contains(diagnostic));

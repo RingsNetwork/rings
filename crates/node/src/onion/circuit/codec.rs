@@ -89,7 +89,7 @@ fn decode_wire_message(
             "encrypted onion cell exceeds wire bound".to_string(),
         ));
     }
-    let cell = bincode::deserialize::<OnionWireCell>(payload)
+    let cell = rings_codec::deserialize::<OnionWireCell>(payload)
         .map_err(|error| Reject(format!("bad encrypted onion cell: {error}")))?;
     let expected_ciphertext_len = cell
         .bucket
@@ -111,7 +111,7 @@ fn decode_wire_message(
 }
 
 fn decode_local_message(payload: &[u8]) -> std::result::Result<OnionCircuitEvent, Reject> {
-    let message = bincode::deserialize::<OnionLocalMessage>(payload)
+    let message = rings_codec::deserialize::<OnionLocalMessage>(payload)
         .map_err(|error| Reject(format!("bad local onion circuit message: {error}")))?;
     let input = match message {
         OnionLocalMessage::CellReady {
@@ -143,7 +143,7 @@ fn decode_local_message(payload: &[u8]) -> std::result::Result<OnionCircuitEvent
 }
 
 pub(super) fn encode_local_message(message: OnionLocalMessage) -> Result<Bytes> {
-    bincode::serialize(&message)
+    rings_codec::serialize(&message)
         .map(Bytes::from)
         .map_err(|_| Error::EncodeError)
 }

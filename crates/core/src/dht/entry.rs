@@ -423,7 +423,7 @@ impl Entry {
             did: self.did,
             data: &self.data,
         };
-        let bytes = bincode::serialize(&digest).map_err(Error::BincodeSerialize)?;
+        let bytes = rings_codec::serialize(&digest).map_err(Error::CodecSerialize)?;
         Did::try_from(HashStr::from_bytes(&bytes))
     }
 

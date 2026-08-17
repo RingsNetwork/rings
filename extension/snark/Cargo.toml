@@ -33,10 +33,10 @@ browser = [
 
 [dependencies]
 async-trait = { workspace = true }
-bincode = { workspace = true }
 bytes = { version = "1.2.1", features = ["serde"] }
 dashmap = "5"
 js-sys = { workspace = true, optional = true }
+rings-codec = { workspace = true }
 rings-core = { workspace = true, default-features = false }
 rings-derive = { workspace = true, default-features = false }
 rings-node = { path = "../../crates/node", version = "0.16.0", default-features = false }

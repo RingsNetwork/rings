@@ -490,12 +490,12 @@ fn derive_aead_key(
 }
 
 fn aead_associated_data(encrypted_key: &[CiphertextBlock], aad: &[u8]) -> Result<Vec<u8>> {
-    bincode::serialize(&AeadTranscript {
+    rings_codec::serialize(&AeadTranscript {
         version: AEAD_VERSION,
         encrypted_key,
         aad,
     })
-    .map_err(Error::BincodeSerialize)
+    .map_err(Error::CodecSerialize)
 }
 
 #[cfg(test)]

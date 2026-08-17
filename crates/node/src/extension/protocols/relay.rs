@@ -344,11 +344,11 @@ where T: Clone + DeserializeOwned + Serialize + MaybeSend + 'static
 
     fn decode(&self, wire: Wire<'_>) -> Result<RelayEvent<T>, Reject> {
         if wire.from == wire.me {
-            let command = bincode::deserialize::<RelayCommand<T>>(wire.payload)
+            let command = rings_codec::deserialize::<RelayCommand<T>>(wire.payload)
                 .map_err(|e| Reject(format!("bad relay command: {e}")))?;
             Ok(RelayEvent::Command(command))
         } else {
-            let frame = bincode::deserialize::<Frame>(wire.payload)
+            let frame = rings_codec::deserialize::<Frame>(wire.payload)
                 .map_err(|e| Reject(format!("bad relay frame: {e}")))?;
             Ok(RelayEvent::Frame {
                 from: wire.from,
@@ -546,7 +546,7 @@ pub(crate) fn close_frame(session: SessionId, from_opener: bool) -> crate::error
         session,
         from_opener,
     };
-    bincode::serialize(&frame)
+    rings_codec::serialize(&frame)
         .map(Bytes::from)
         .map_err(|_| crate::error::Error::EncodeError)
 }
@@ -653,7 +653,7 @@ fn untrack_feedback<T: Serialize>(key: SessionKey) -> crate::error::Result<Bytes
         session: key.session,
         initiator: key.initiator,
     };
-    bincode::serialize(&command)
+    rings_codec::serialize(&command)
         .map(Bytes::from)
         .map_err(|_| crate::error::Error::EncodeError)
 }
@@ -666,7 +666,7 @@ fn abort_feedback<T: Serialize>(key: SessionKey) -> crate::error::Result<Bytes> 
         session: key.session,
         initiator: key.initiator,
     };
-    bincode::serialize(&command)
+    rings_codec::serialize(&command)
         .map(Bytes::from)
         .map_err(|_| crate::error::Error::EncodeError)
 }
@@ -875,7 +875,7 @@ impl RelayHandle {
 async fn register_service<T>(scope: &Scope, name: String, target: T) -> crate::error::Result<()>
 where T: Serialize {
     let command = RelayCommand::RegisterService { name, target };
-    let payload = bincode::serialize(&command).map_err(|_| crate::error::Error::EncodeError)?;
+    let payload = rings_codec::serialize(&command).map_err(|_| crate::error::Error::EncodeError)?;
     scope.inject(Bytes::from(payload)).await
 }
 

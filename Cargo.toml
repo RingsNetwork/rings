@@ -7,7 +7,7 @@ members = [
     "examples/snark",
     "extension/snark",
 ]
-exclude = ["third_party/proc-macro-error2", "third_party/serde-wincode"]
+exclude = ["third_party/proc-macro-error2"]
 
 [workspace.package]
 version = "0.16.0"
@@ -18,9 +18,9 @@ repository = "https://github.com/RingsNetwork/rings"
 
 [workspace.dependencies]
 async-trait = "0.1.77"
-bincode = { package = "rings-bincode", path = "crates/bincode", version = "0.16.0" }
 js-sys = "0.3.98"
 jsonrpc-core = "18.0.0"
+rings-codec = { path = "crates/codec", version = "0.16.0" }
 rings-core = { path = "crates/core", version = "0.16.0", default-features = false }
 rings-derive = { path = "crates/derive", version = "0.16.0", default-features = false }
 rings-node = { path = "crates/node", version = "0.16.0" }
@@ -36,7 +36,6 @@ webrtc = { version = "0.17.1" }
 
 [patch.crates-io]
 proc-macro-error2 = { path = "third_party/proc-macro-error2" }
-serde-wincode = { path = "third_party/serde-wincode" }
 
 [workspace.lints.rust]
 missing_docs = "deny"

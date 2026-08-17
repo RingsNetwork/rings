@@ -213,7 +213,7 @@ impl MessageSenderPool<TrackedChannel> for RoundRobinPool<TrackedChannel> {
         permit: SendPermit,
     ) -> Result<DeliveryFuture> {
         let (channel, enqueued, send_lock) = self.select()?;
-        let data = bincode::serialize(&msg).map(Bytes::from)?;
+        let data = rings_codec::serialize(&msg).map(Bytes::from)?;
         // Hold the per-channel lock across send + counter advance so the bytes
         // are enqueued and accounted in the same (FIFO) order: concurrent senders
         // can't interleave the yielding send and the counter update. Advance

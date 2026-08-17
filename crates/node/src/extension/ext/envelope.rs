@@ -7,7 +7,7 @@ use serde::Serialize;
 use crate::error::Error;
 use crate::error::Result;
 
-/// Namespaced message envelope carried over the P2P transport (bincode), in place of
+/// Namespaced message envelope carried over the P2P transport codec, in place of
 /// the old closed `BackendMessage` enum. `payload` is opaque to the core.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Envelope {
@@ -28,11 +28,11 @@ impl Envelope {
 
     /// Encode for the P2P transport. `encode : Envelope → [u8]`.
     pub fn encode(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self).map_err(|_| Error::EncodeError)
+        rings_codec::serialize(self).map_err(|_| Error::EncodeError)
     }
 
     /// Decode from the P2P transport. `decode : [u8] ⇀ Envelope` (partial).
     pub fn decode(bytes: &[u8]) -> Result<Self> {
-        bincode::deserialize(bytes).map_err(|_| Error::DecodeError)
+        rings_codec::deserialize(bytes).map_err(|_| Error::DecodeError)
     }
 }

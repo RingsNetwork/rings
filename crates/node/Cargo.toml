@@ -74,7 +74,6 @@ anyhow = "1.0.45"
 arrayref = "0.3.6"
 async-trait = { workspace = true }
 base64 = { version = "0.13.0" }
-bincode = { workspace = true }
 bytes = { version = "1.2.1", features = ["serde"] }
 chrono = "0.4.23"
 dashmap = "5"
@@ -85,6 +84,7 @@ http = "0.2.6"
 jsonrpc-core = { workspace = true }
 log = { version = "0.4", features = ["std"] }
 rand = { version = "0.8.5", features = ["getrandom"] }
+rings-codec = { workspace = true }
 rings-core = { workspace = true, optional = true }
 rings-derive = { workspace = true, optional = true }
 rings-rpc = { workspace = true, optional = true }

@@ -141,7 +141,7 @@ impl fmt::Debug for MessagePayload {
 }
 
 impl Transaction {
-    /// Wrap data. Will serialize by [bincode::serialize]
+    /// Wrap data. Will serialize by [rings_codec::serialize]
     /// then sign [MessageVerification] by session_sk.
     pub fn new<T>(
         destination: Did,
@@ -173,7 +173,7 @@ impl Transaction {
         T: Serialize,
     {
         report_return.validate_authorized_by(session_sk.account_did())?;
-        let data = bincode::serialize(&data).map_err(Error::BincodeSerialize)?;
+        let data = rings_codec::serialize(&data).map_err(Error::CodecSerialize)?;
         let msg_hash = hash_transaction(destination, tx_id, report_return, &data);
         let verification = MessageVerification::new(&msg_hash, session_sk)?;
         Ok(Self {
@@ -188,7 +188,7 @@ impl Transaction {
     /// Deserializes the data field into a `T` instance.
     pub fn data<T>(&self) -> Result<T>
     where T: DeserializeOwned {
-        bincode::deserialize(&self.data).map_err(Error::BincodeDeserialize)
+        rings_codec::deserialize(&self.data).map_err(Error::CodecDeserialize)
     }
 }
 
@@ -236,14 +236,14 @@ impl MessagePayload {
 
     /// Deserializes a `MessagePayload` instance from the given binary data.
     pub fn from_bincode(data: &[u8]) -> Result<Self> {
-        bincode::deserialize(data).map_err(Error::BincodeDeserialize)
+        rings_codec::deserialize(data).map_err(Error::CodecDeserialize)
     }
 
     /// Serializes the `MessagePayload` instance into binary data.
     pub fn to_bincode(&self) -> Result<Bytes> {
-        bincode::serialize(self)
+        rings_codec::serialize(self)
             .map(Bytes::from)
-            .map_err(Error::BincodeSerialize)
+            .map_err(Error::CodecSerialize)
     }
 
     /// Returns whether `local` is the relay destination of this payload.
@@ -596,11 +596,12 @@ pub mod test {
             .pop()
             .expect("one chunk");
 
-        // The bytes actually handed to SCTP: bincode(Custom(bincode(MessagePayload))).
+        // The bytes actually handed to SCTP: rings codec(Custom(rings codec(MessagePayload))).
         let payload_bytes = new_payload(Message::Chunk(chunk), next_hop)
             .to_bincode()
             .unwrap();
-        let wire = bincode::serialize(&TransportMessage::Custom(payload_bytes.to_vec())).unwrap();
+        let wire =
+            rings_codec::serialize(&TransportMessage::Custom(payload_bytes.to_vec())).unwrap();
 
         assert!(
             wire.len() <= MAX_DATA_CHANNEL_MESSAGE_SIZE,
@@ -628,7 +629,8 @@ pub mod test {
         let payload_len = limit - reserves.whole;
         assert_eq!(reserves.plan(payload_len, limit), Some(Framing::Whole));
 
-        let wire = bincode::serialize(&TransportMessage::Custom(vec![0u8; payload_len])).unwrap();
+        let wire =
+            rings_codec::serialize(&TransportMessage::Custom(vec![0u8; payload_len])).unwrap();
         assert!(
             wire.len() <= limit,
             "whole wire {} exceeds limit {}",

@@ -895,7 +895,7 @@ async fn malformed_outbound_payload_is_rejected_before_connection_admission() ->
 
     assert!(matches!(
         transport.send_payload(payload).await,
-        Err(Error::BincodeDeserialize(_))
+        Err(Error::CodecDeserialize(_))
     ));
     Ok(())
 }

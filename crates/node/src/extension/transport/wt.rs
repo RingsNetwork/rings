@@ -524,7 +524,7 @@ async fn open(
 
 /// Send a [`Frame`] to `peer` over the overlay, under the scope's own namespace.
 async fn send_frame(scope: &Scope, peer: Did, frame: Frame) -> Result<()> {
-    let payload = bincode::serialize(&frame).map_err(|_| Error::EncodeError)?;
+    let payload = rings_codec::serialize(&frame).map_err(|_| Error::EncodeError)?;
     scope.send(peer, Bytes::from(payload)).await
 }
 
@@ -535,7 +535,7 @@ async fn inject_untrack(scope: &Scope, key: &SessionKey) {
         session: key.session,
         initiator: key.initiator,
     };
-    if let Ok(bytes) = bincode::serialize(&command) {
+    if let Ok(bytes) = rings_codec::serialize(&command) {
         if let Err(e) = scope.inject(Bytes::from(bytes)).await {
             tracing::warn!(
                 "relay Untrack inject failed for {key:?}: {e:?}; pure state may still list \

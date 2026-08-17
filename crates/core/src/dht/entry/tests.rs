@@ -280,7 +280,7 @@ fn operation_digest_hashes_canonical_bytes_not_legacy_base58() -> Result<()> {
         did: entry.did,
         data: &entry.data,
     };
-    let bytes = bincode::serialize(&digest).map_err(Error::BincodeSerialize)?;
+    let bytes = rings_codec::serialize(&digest).map_err(Error::CodecSerialize)?;
 
     let direct = Did::try_from(HashStr::from_bytes(&bytes))?;
     let legacy_encoded = bytes.encode()?;

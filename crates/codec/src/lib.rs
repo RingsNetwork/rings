@@ -1,22 +1,27 @@
 #![deny(missing_docs)]
 
-//! Bincode-compatible serde wire helpers backed by maintained crates.
+//! Serde wire helpers backed by the Rings postcard codec.
 
 use std::error::Error as StdError;
 use std::fmt;
 
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use serde_wincode::wincode;
-use serde_wincode::SerdeCompat;
 
-/// Codec error returned by bincode-compatible helper functions.
+/// Codec error returned by Rings wire helper functions.
 #[derive(Debug)]
 pub enum Error {
     /// Serialization failed.
-    Serialize(wincode::error::WriteError),
+    Serialize(postcard::Error),
     /// Deserialization failed.
-    Deserialize(wincode::error::ReadError),
+    Deserialize(postcard::Error),
+    /// Deserialization succeeded before all bytes were consumed.
+    TrailingBytes {
+        /// Number of bytes consumed by the decoder.
+        decoded: usize,
+        /// Total number of bytes provided to the decoder.
+        total: usize,
+    },
 }
 
 impl fmt::Display for Error {
@@ -24,6 +29,10 @@ impl fmt::Display for Error {
         match self {
             Self::Serialize(error) => write!(f, "{error}"),
             Self::Deserialize(error) => write!(f, "{error}"),
+            Self::TrailingBytes { decoded, total } => write!(
+                f,
+                "deserializer consumed {decoded} of {total} bytes; trailing bytes remain"
+            ),
         }
     }
 }
@@ -33,18 +42,19 @@ impl StdError for Error {
         match self {
             Self::Serialize(error) => Some(error),
             Self::Deserialize(error) => Some(error),
+            Self::TrailingBytes { .. } => None,
         }
     }
 }
 
-impl From<wincode::error::WriteError> for Error {
-    fn from(error: wincode::error::WriteError) -> Self {
+impl From<postcard::Error> for Error {
+    fn from(error: postcard::Error) -> Self {
         Self::Serialize(error)
     }
 }
 
-impl From<wincode::error::ReadError> for Error {
-    fn from(error: wincode::error::ReadError) -> Self {
+impl Error {
+    fn deserialize(error: postcard::Error) -> Self {
         Self::Deserialize(error)
     }
 }
@@ -52,22 +62,29 @@ impl From<wincode::error::ReadError> for Error {
 /// Codec result type.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Serialize a serde value using bincode-compatible default wire encoding.
+/// Serialize a serde value using the Rings wire encoding.
 pub fn serialize<T>(value: &T) -> Result<Vec<u8>>
 where T: Serialize {
-    <SerdeCompat<T> as wincode::Serialize>::serialize(value).map_err(Error::from)
+    postcard::to_allocvec(value).map_err(Error::from)
 }
 
-/// Deserialize a serde value using bincode-compatible default wire encoding.
+/// Deserialize a serde value using the Rings wire encoding.
 pub fn deserialize<T>(bytes: &[u8]) -> Result<T>
 where T: DeserializeOwned {
-    <SerdeCompat<T> as wincode::Deserialize>::deserialize(bytes).map_err(Error::from)
+    let (value, remaining) = postcard::take_from_bytes(bytes).map_err(Error::deserialize)?;
+    if !remaining.is_empty() {
+        return Err(Error::TrailingBytes {
+            decoded: bytes.len() - remaining.len(),
+            total: bytes.len(),
+        });
+    }
+    Ok(value)
 }
 
 /// Return the serialized size of a serde value using the default wire encoding.
 pub fn serialized_size<T>(value: &T) -> Result<u64>
 where T: Serialize {
-    <SerdeCompat<T> as wincode::Serialize>::serialized_size(value).map_err(Error::from)
+    serialize(value).map(|bytes| bytes.len() as u64)
 }
 
 #[cfg(test)]
@@ -100,12 +117,8 @@ mod tests {
         let encoded = serialize(&value)?;
         assert_eq!(
             encoded,
-            vec![
-                42, 0, 0, 0, 0, 0, 0, 0, // id
-                5, 0, 0, 0, 0, 0, 0, 0, b'r', b'i', b'n', b'g', b's', // label
-                4, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, // bytes
-            ],
-            "wire encoding must stay compatible with bincode 1 default options"
+            vec![42, 5, b'r', b'i', b'n', b'g', b's', 4, 1, 2, 3, 4],
+            "wire encoding must stay stable for the Rings codec"
         );
         assert_eq!(u64::try_from(encoded.len())?, serialized_size(&value)?);
         assert_eq!(deserialize::<Example>(&encoded)?, value);
@@ -120,18 +133,21 @@ mod tests {
         };
 
         let encoded = serialize(&value)?;
-        let expected = value
-            .signed
-            .to_le_bytes()
-            .into_iter()
-            .chain(value.unsigned.to_le_bytes())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            encoded, expected,
-            "128-bit integers must encode as bincode-compatible little-endian bytes"
-        );
         assert_eq!(u64::try_from(encoded.len())?, serialized_size(&value)?);
         assert_eq!(deserialize::<WideIntegers>(&encoded)?, value);
+        Ok(())
+    }
+
+    #[test]
+    fn deserialize_rejects_trailing_bytes() -> std::result::Result<(), Box<dyn StdError>> {
+        let mut encoded = serialize(&42u64)?;
+        encoded.extend_from_slice(&[1, 2, 3]);
+
+        let error = deserialize::<u64>(&encoded).expect_err("trailing bytes must fail");
+        assert!(matches!(error, Error::TrailingBytes {
+            decoded: 1,
+            total: 4
+        }));
         Ok(())
     }
 }

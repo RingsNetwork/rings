@@ -200,13 +200,13 @@ pub enum Error {
     #[error("JSON deserialization error")]
     Deserialize(#[source] serde_json::Error),
 
-    /// Bincode serialization error
-    #[error("Bincode serialization error")]
-    BincodeSerialize(#[source] bincode::Error),
+    /// Codec serialization error
+    #[error("Codec serialization error")]
+    CodecSerialize(#[source] rings_codec::Error),
 
-    /// Bincode deserialization error
-    #[error("Bincode deserialization error")]
-    BincodeDeserialize(#[source] bincode::Error),
+    /// Codec deserialization error
+    #[error("Codec deserialization error")]
+    CodecDeserialize(#[source] rings_codec::Error),
 
     /// Unknown account
     #[error("Unknown account")]

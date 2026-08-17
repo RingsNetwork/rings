@@ -161,14 +161,14 @@ pub struct Chunk {
 impl Chunk {
     /// serialize chunk to bytes
     pub fn to_bincode(&self) -> Result<Bytes> {
-        bincode::serialize(self)
+        rings_codec::serialize(self)
             .map(Bytes::from)
-            .map_err(Error::BincodeSerialize)
+            .map_err(Error::CodecSerialize)
     }
 
     /// deserialize bytes to chunk
     pub fn from_bincode(data: &[u8]) -> Result<Self> {
-        bincode::deserialize(data).map_err(Error::BincodeDeserialize)
+        rings_codec::deserialize(data).map_err(Error::CodecDeserialize)
     }
 }
 

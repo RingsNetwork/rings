@@ -69,7 +69,7 @@ where V: Serialize + DeserializeOwned + Sync
         match std::fs::read(self.key_path(key)) {
             Ok(data) => {
                 let (stored_key, value): (String, V) =
-                    bincode::deserialize(&data).map_err(Error::BincodeDeserialize)?;
+                    rings_codec::deserialize(&data).map_err(Error::CodecDeserialize)?;
                 if stored_key == key {
                     Ok(Some(value))
                 } else {
@@ -84,7 +84,7 @@ where V: Serialize + DeserializeOwned + Sync
     async fn put(&self, key: &str, value: &V) -> Result<()> {
         let _guard = self.lock.write().map_err(|_| Error::DHTSyncLockError)?;
         std::fs::create_dir_all(&self.root).map_err(Error::ServiceIOError)?;
-        let data = bincode::serialize(&(key, value)).map_err(Error::BincodeSerialize)?;
+        let data = rings_codec::serialize(&(key, value)).map_err(Error::CodecSerialize)?;
         tracing::debug!("Try inserting key: {:?}", key);
         let path = self.key_path(key);
         let tmp_path = path.with_extension("tmp");
@@ -100,7 +100,7 @@ where V: Serialize + DeserializeOwned + Sync
             .into_iter()
             .flat_map(|path| {
                 let data = std::fs::read(path).ok()?;
-                bincode::deserialize::<(String, V)>(&data).ok()
+                rings_codec::deserialize::<(String, V)>(&data).ok()
             })
             .collect_vec())
     }

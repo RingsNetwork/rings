@@ -62,7 +62,7 @@ pub(super) fn session() -> SessionSk {
 }
 
 pub(super) fn open_wire(recipient: &SessionSk, payload: &[u8]) -> OnionWireMessage {
-    let cell = bincode::deserialize::<OnionWireCell>(payload).expect("decode encrypted cell");
+    let cell = rings_codec::deserialize::<OnionWireCell>(payload).expect("decode encrypted cell");
     open_cell(recipient, cell.bucket, &cell.sealed).expect("open encrypted cell")
 }
 
@@ -481,7 +481,7 @@ fn hidden_cell_direction_defers_relay_capability_check_until_after_cell_decrypt(
         OnionCircuitEffect::DecryptCell { .. }
     ]));
 
-    let cell = bincode::deserialize::<OnionWireCell>(&payload).expect("decode encrypted cell");
+    let cell = rings_codec::deserialize::<OnionWireCell>(&payload).expect("decode encrypted cell");
     let message = open_cell(&relay, cell.bucket, &cell.sealed).expect("open encrypted cell");
     let event = super::super::codec::OnionCircuitEvent {
         input: OnionCircuitInput::CellReady {
@@ -927,12 +927,13 @@ async fn two_relays_peel_fixed_size_cells_through_the_exit_reducer_and_shell() {
         panic!("first relay must emit one padded next-hop cell");
     };
     assert_eq!(*to, second.account_did());
-    let second_edge_id =
-        match bincode::deserialize(encoded_message.as_ref()).expect("decode second-hop message") {
-            OnionWireMessage::Forward(frame) => frame.circuit_id,
-            OnionWireMessage::Backward(_) => panic!("forward route emitted a backward message"),
-            OnionWireMessage::Cover => panic!("forward route emitted a cover message"),
-        };
+    let second_edge_id = match rings_codec::deserialize(encoded_message.as_ref())
+        .expect("decode second-hop message")
+    {
+        OnionWireMessage::Forward(frame) => frame.circuit_id,
+        OnionWireMessage::Backward(_) => panic!("forward route emitted a backward message"),
+        OnionWireMessage::Cover => panic!("forward route emitted a cover message"),
+    };
     assert_ne!(second_edge_id, first_edge_id);
     let second_payload = seal_encoded_message(encoded_message, *recipient, Some(*bucket))
         .expect("seal second-hop cell");
@@ -961,12 +962,13 @@ async fn two_relays_peel_fixed_size_cells_through_the_exit_reducer_and_shell() {
         panic!("second relay must emit one padded exit cell");
     };
     assert_eq!(*to, exit.account_did());
-    let exit_edge_id =
-        match bincode::deserialize(encoded_message.as_ref()).expect("decode exit-hop message") {
-            OnionWireMessage::Forward(frame) => frame.circuit_id,
-            OnionWireMessage::Backward(_) => panic!("forward route emitted a backward message"),
-            OnionWireMessage::Cover => panic!("forward route emitted a cover message"),
-        };
+    let exit_edge_id = match rings_codec::deserialize(encoded_message.as_ref())
+        .expect("decode exit-hop message")
+    {
+        OnionWireMessage::Forward(frame) => frame.circuit_id,
+        OnionWireMessage::Backward(_) => panic!("forward route emitted a backward message"),
+        OnionWireMessage::Cover => panic!("forward route emitted a cover message"),
+    };
     assert_ne!(exit_edge_id, first_edge_id);
     assert_ne!(exit_edge_id, second_edge_id);
     let exit_payload =

@@ -331,7 +331,7 @@ fn encrypt_forward_layer(
     layer: OnionForwardLayer,
     recipient: PublicKey<33>,
 ) -> Result<AeadCiphertext> {
-    let plaintext = bincode::serialize(&layer).map_err(|_| Error::EncodeError)?;
+    let plaintext = rings_codec::serialize(&layer).map_err(|_| Error::EncodeError)?;
     let aad = onion_aead_context(OnionAeadDirection::Forward, circuit_id)?;
     let mut rng = rand::thread_rng();
     encrypt_aead_with_rng(&plaintext, &aad, recipient, &mut rng).map_err(Error::CoreError)
@@ -346,7 +346,7 @@ pub(super) fn decrypt_forward_layer(
     let plaintext = session_sk
         .decrypt_elgamal_aead(sealed, &aad)
         .map_err(Error::CoreError)?;
-    bincode::deserialize(&plaintext).map_err(|_| Error::DecodeError)
+    rings_codec::deserialize(&plaintext).map_err(|_| Error::DecodeError)
 }
 
 #[cfg(test)]
@@ -374,7 +374,7 @@ pub(super) fn encrypt_client_payload_at_sequence(
 ) -> Result<AeadCiphertext> {
     let authenticated =
         OnionAuthenticatedPayload::new_signed_at_sequence(return_id, sequence, payload, signer)?;
-    let plaintext = bincode::serialize(&authenticated).map_err(|_| Error::EncodeError)?;
+    let plaintext = rings_codec::serialize(&authenticated).map_err(|_| Error::EncodeError)?;
     // The outer hop cell authenticates the edge-local circuit and direction. This inner payload
     // deliberately remains stable while relays rewrite edge ids; its signed transcript binds the
     // client-only return id, nonce, monotonic sequence, exit session key, and payload bytes.
@@ -391,7 +391,7 @@ pub(super) fn decrypt_client_payload(
     let plaintext = session_sk
         .decrypt_elgamal_aead(sealed, &aad)
         .map_err(Error::CoreError)?;
-    bincode::deserialize(&plaintext).map_err(|_| Error::DecodeError)
+    rings_codec::deserialize(&plaintext).map_err(|_| Error::DecodeError)
 }
 
 impl OnionAuthenticatedPayload {
@@ -517,7 +517,7 @@ fn onion_aead_context(
     direction: OnionAeadDirection,
     circuit_id: OnionCircuitId,
 ) -> Result<Vec<u8>> {
-    bincode::serialize(&OnionAeadContext {
+    rings_codec::serialize(&OnionAeadContext {
         namespace: ONION_AEAD_NAMESPACE,
         direction,
         circuit_id,
@@ -526,7 +526,7 @@ fn onion_aead_context(
 }
 
 fn backward_aead_context() -> Result<Vec<u8>> {
-    bincode::serialize(&OnionAeadDirectionContext {
+    rings_codec::serialize(&OnionAeadDirectionContext {
         namespace: ONION_AEAD_NAMESPACE,
         direction: OnionAeadDirection::Backward,
     })
@@ -540,7 +540,7 @@ fn backward_payload_authentication_data(
     exit_session_public_key: PublicKey<33>,
     payload: &OnionCircuitPayload,
 ) -> Result<Vec<u8>> {
-    bincode::serialize(&OnionBackwardAuthenticationData {
+    rings_codec::serialize(&OnionBackwardAuthenticationData {
         namespace: ONION_AEAD_NAMESPACE,
         direction: OnionAeadDirection::Backward,
         return_id,

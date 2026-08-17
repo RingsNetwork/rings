@@ -795,6 +795,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cobs"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fa961b519f0b462e3a3b4a34b64d119eeaca1d59af726fe450bbba07a9fc0a1"
+dependencies = [
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1422,6 +1431,18 @@ dependencies = [
  "subtle",
  "zeroize",
 ]
+
+[[package]]
+name = "embedded-io"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef1a6892d9eef45c8fa6b9e0086428a2cca8491aca8f787c534a3d6d0bcb3ced"
+
+[[package]]
+name = "embedded-io"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 
 [[package]]
 name = "ena"
@@ -3342,12 +3363,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
-name = "pastey"
-version = "0.2.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
-
-[[package]]
 name = "pem-rfc7468"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3437,6 +3452,18 @@ dependencies = [
  "cpufeatures 0.2.17",
  "opaque-debug",
  "universal-hash",
+]
+
+[[package]]
+name = "postcard"
+version = "1.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6764c3b5dd454e283a30e6dfe78e9b31096d9e32036b5d1eaac7a6119ccb9a24"
+dependencies = [
+ "cobs",
+ "embedded-io 0.4.0",
+ "embedded-io 0.6.1",
+ "serde",
 ]
 
 [[package]]
@@ -4003,11 +4030,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "rings-bincode"
+name = "rings-codec"
 version = "0.16.0"
 dependencies = [
+ "postcard",
  "serde",
- "serde-wincode",
 ]
 
 [[package]]
@@ -4050,7 +4077,7 @@ dependencies = [
  "rand_core 0.6.4",
  "rand_hc",
  "rexie",
- "rings-bincode",
+ "rings-codec",
  "rings-derive",
  "rings-transport",
  "serde",
@@ -4105,7 +4132,7 @@ dependencies = [
  "log",
  "rand 0.8.6",
  "reqwest",
- "rings-bincode",
+ "rings-codec",
  "rings-core",
  "rings-derive",
  "rings-rpc",
@@ -4193,7 +4220,7 @@ dependencies = [
  "bytes",
  "dashmap 5.5.3",
  "js-sys",
- "rings-bincode",
+ "rings-codec",
  "rings-core",
  "rings-derive",
  "rings-node",
@@ -4216,7 +4243,7 @@ dependencies = [
  "chrono",
  "dashmap 5.5.3",
  "js-sys",
- "rings-bincode",
+ "rings-codec",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -4459,15 +4486,6 @@ dependencies = [
  "js-sys",
  "serde",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "serde-wincode"
-version = "0.1.2"
-dependencies = [
- "serde",
- "thiserror 2.0.18",
- "wincode",
 ]
 
 [[package]]
@@ -5774,18 +5792,6 @@ name = "winapi-x86_64-pc-windows-gnu"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "712e227841d057c1ee1cd2fb22fa7e5a5461ae8e48fa2ca79ec42cfc1931183f"
-
-[[package]]
-name = "wincode"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bfc6339f1ba427bf7ad7c42403b28e524832ba2ddb5eef1bb2cc3b85db6b7b75"
-dependencies = [
- "pastey",
- "proc-macro2",
- "quote",
- "thiserror 2.0.18",
-]
 
 [[package]]
 name = "windows-core"
