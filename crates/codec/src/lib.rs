@@ -143,7 +143,9 @@ mod tests {
         let mut encoded = serialize(&42u64)?;
         encoded.extend_from_slice(&[1, 2, 3]);
 
-        let error = deserialize::<u64>(&encoded).expect_err("trailing bytes must fail");
+        let Err(error) = deserialize::<u64>(&encoded) else {
+            return Err("trailing bytes must fail".into());
+        };
         assert!(matches!(error, Error::TrailingBytes {
             decoded: 1,
             total: 4
