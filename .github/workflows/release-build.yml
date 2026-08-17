@@ -33,7 +33,6 @@ env:
   WASM_BINDGEN_CLI_VERSION: 0.2.121
   WASM_PACK_VERSION: 0.15.0
   NODE_VERSION: 20.20.2
-  PROTOC_VERSION: "23.4"
 
 jobs:
   build_macos:
@@ -58,11 +57,6 @@ jobs:
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
           rustup target add ${{ steps.target.outputs.target }} --toolchain "$RUST_TOOLCHAIN"
-
-      - name: Setup protoc
-        uses: ./.github/actions/setup-protoc
-        with:
-          version: ${{ env.PROTOC_VERSION }}
 
       - name: Setup rust toolchain
         run: |
@@ -108,11 +102,6 @@ jobs:
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
           rustup target add ${{ steps.target.outputs.target }} --toolchain "$RUST_TOOLCHAIN"
-
-      - name: Setup protoc
-        uses: ./.github/actions/setup-protoc
-        with:
-          version: ${{ env.PROTOC_VERSION }}
 
       - name: alias compiler
         run: |
@@ -180,11 +169,6 @@ jobs:
 
       - name: Install wasm-pack
         run: cargo install wasm-pack --version "$WASM_PACK_VERSION" --locked
-
-      - name: Setup protoc
-        uses: ./.github/actions/setup-protoc
-        with:
-          version: ${{ env.PROTOC_VERSION }}
 
       - name: Setup rust toolchain
         run: |

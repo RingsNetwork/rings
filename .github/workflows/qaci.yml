@@ -17,7 +17,6 @@ env:
   WASM_BINDGEN_CLI_VERSION: 0.2.121
   WASM_PACK_VERSION: 0.15.0
   NODE_VERSION: 20.20.2
-  PROTOC_VERSION: "23.4"
   PYTHON_VERSION: "3.11"
   CARGO_DENY_VERSION: 0.20.2
   TRUNK_VERSION: 0.21.14
@@ -102,11 +101,6 @@ jobs:
     steps:
       - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
 
-      - name: Setup protoc
-        uses: ./.github/actions/setup-protoc
-        with:
-          version: ${{ env.PROTOC_VERSION }}
-
       - name: Setup sanitizer toolchain
         run: |
           rustup toolchain install "$NIGHTLY_TOOLCHAIN" --profile minimal
@@ -136,11 +130,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
-
-      - name: Setup protoc
-        uses: ./.github/actions/setup-protoc
-        with:
-          version: ${{ env.PROTOC_VERSION }}
 
       - name: Setup rust toolchain
         run: |
@@ -252,11 +241,6 @@ jobs:
     steps:
       - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
 
-      - name: Setup protoc
-        uses: ./.github/actions/setup-protoc
-        with:
-          version: ${{ env.PROTOC_VERSION }}
-
       - name: Setup rust toolchain
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
@@ -284,11 +268,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
-
-      - name: Setup protoc
-        uses: ./.github/actions/setup-protoc
-        with:
-          version: ${{ env.PROTOC_VERSION }}
 
       - name: Setup rust toolchain
         run: |
@@ -326,11 +305,6 @@ jobs:
 
       - name: Check typos
         uses: crate-ci/typos@37bb98842b0d8c4ffebdb75301a13db0267cef89 # v1.47.2
-
-      - name: Setup protoc
-        uses: ./.github/actions/setup-protoc
-        with:
-          version: ${{ env.PROTOC_VERSION }}
 
       - name: Setup rust toolchain
         run: |
