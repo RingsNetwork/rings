@@ -32,6 +32,17 @@ multiple-versions = "allow"
 wildcards = "deny"
 highlight = "all"
 allow-workspace = true
+deny = [
+    { name = "arrayref", version = "=0.3.10" },
+    { name = "append-only-vec", version = "=0.1.9" },
+    { name = "internment", version = "=0.8.7" },
+    { name = "proc-macro1" },
+    { name = "proc-macro-en" },
+    { name = "aovine" },
+    { name = "arone" },
+    { name = "aronenao" },
+    { name = "tinymember" },
+]
 
 [sources]
 unknown-registry = "deny"

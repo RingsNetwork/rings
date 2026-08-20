@@ -52,6 +52,9 @@ jobs:
           rustup default "$RUST_TOOLCHAIN"
           rustup show
 
+      - name: Cargo cooldown check
+        uses: RyanKung/cargo-cooldown-check@d8588ee951cc30c7680e7538f20cfe190eaa1350
+
       - name: Install cargo-deny
         run: cargo install cargo-deny --version "$CARGO_DENY_VERSION" --locked
 
