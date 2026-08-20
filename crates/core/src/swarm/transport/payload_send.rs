@@ -266,7 +266,7 @@ impl SwarmTransport {
         let destination = payload.transaction.destination;
         let relay_destination = payload.relay.destination;
         let next_hop = payload.relay.next_hop;
-        let data = payload.to_bincode()?;
+        let data = payload.to_wire()?;
         if data.len() > TRANSPORT_MAX_SIZE {
             tracing::error!(
                 local = %self.dht.did,

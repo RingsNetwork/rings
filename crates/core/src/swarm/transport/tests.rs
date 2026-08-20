@@ -474,7 +474,7 @@ async fn pending_callback_messages_do_not_dispatch_before_admission() -> Result<
         transport.dht.did,
         transport.dht.did,
     )?;
-    let bytes = payload.to_bincode()?;
+    let bytes = payload.to_wire()?;
 
     pending_callback
         .on_message(&peer.to_string(), &bytes)

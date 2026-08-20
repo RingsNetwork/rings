@@ -166,19 +166,6 @@ impl<'a> RegistrationContext<'a> {
             .fetch_storage_entry_with_stop(entry_key, &self.stop)
             .await
     }
-
-    async fn overwrite_data_topic(
-        &self,
-        topic: &str,
-        values: impl IntoIterator<Item = Encoded>,
-    ) -> Result<()> {
-        let entry = entry::Entry::new(
-            entry::Entry::gen_did(topic)?,
-            values.into_iter().collect(),
-            entry::EntryKind::Data,
-        );
-        self.processor.storage_store(entry).await
-    }
 }
 
 /// Common publisher for DHT-backed registries.
@@ -238,11 +225,12 @@ impl DhtRegistrationPublisher {
             .await
     }
 
-    /// Publish values and compact observed registry state to verified live values.
+    /// Publish values, tombstone stale observed registry values, and compact at the owner.
     ///
-    /// The compaction is still routed through storage ownership via `Overwrite`.
-    /// It is emitted only when the observed entry contains removable payloads
-    /// or tombstone metadata that a new register floor can prune.
+    /// This never sends a replacement value set computed from an observed client
+    /// snapshot. Compaction is requested with only the removable payloads, so the
+    /// storage owner computes the final live set from its current local entry and
+    /// preserves concurrent live writes.
     pub async fn publish_many_replacing_and_compacting(
         &self,
         context: &RegistrationContext<'_>,
@@ -258,28 +246,26 @@ impl DhtRegistrationPublisher {
             .as_ref()
             .map(|entry| entry.data.clone())
             .unwrap_or_default();
-        let compacted_values = compacted_registry_values(
-            &current_values,
-            &observed_values,
-            &replaces_observed_value,
-            &preserves_observed_value,
-        );
-        let should_compact = observed_entry
+        let should_compact_metadata = observed_entry
             .as_ref()
-            .is_some_and(registry_entry_has_compactable_metadata)
-            || observed_values.iter().any(|observed| {
-                !current_values.contains(observed)
-                    && (replaces_observed_value(observed) || !preserves_observed_value(observed))
-            });
+            .is_some_and(registry_entry_has_compactable_metadata);
         let stale_values = {
             let mut published_values = self.published_values.lock().map_err(|_| Error::Lock)?;
             begin_registration_publish(
                 &mut published_values,
                 &current_values,
                 observed_values,
-                &replaces_observed_value,
+                |observed| {
+                    should_prune_observed_registry_value(
+                        observed,
+                        &replaces_observed_value,
+                        &preserves_observed_value,
+                    )
+                },
             )
         };
+        let should_compact = should_compact_metadata || !stale_values.is_empty();
+        let removals = stale_values.clone();
 
         for value in &current_values {
             context.ensure_running()?;
@@ -302,7 +288,8 @@ impl DhtRegistrationPublisher {
         if should_compact {
             context.ensure_running()?;
             context
-                .overwrite_data_topic(&self.topic, compacted_values)
+                .processor
+                .storage_compact_data(&self.topic, removals)
                 .await?;
         }
         {
@@ -388,20 +375,12 @@ fn registry_entry_has_compactable_metadata(entry: &entry::Entry) -> bool {
     !entry.crdt.tombstones.is_empty()
 }
 
-fn compacted_registry_values(
-    current_values: &BTreeSet<Encoded>,
-    observed_values: &[Encoded],
-    replaces_observed_value: impl Fn(&Encoded) -> bool,
-    preserves_observed_value: impl Fn(&Encoded) -> bool,
-) -> BTreeSet<Encoded> {
-    let mut values = current_values.clone();
-    values.extend(observed_values.iter().filter_map(|observed| {
-        if current_values.contains(observed) || replaces_observed_value(observed) {
-            return None;
-        }
-        preserves_observed_value(observed).then(|| observed.clone())
-    }));
-    values
+fn should_prune_observed_registry_value(
+    observed: &Encoded,
+    replaces_observed_value: &impl Fn(&Encoded) -> bool,
+    preserves_observed_value: &impl Fn(&Encoded) -> bool,
+) -> bool {
+    replaces_observed_value(observed) || !preserves_observed_value(observed)
 }
 
 fn begin_registration_publish(
@@ -744,26 +723,47 @@ mod tests {
     }
 
     #[test]
-    fn registration_compaction_keeps_current_and_preserved_observed_values() {
-        let current = BTreeSet::from([encoded("self-new")]);
+    fn registration_pruning_removes_replaced_or_unpreserved_observed_values() {
         let observed_self_old = encoded("self-old");
         let observed_live = encoded("other-live");
         let observed_invalid = encoded("invalid");
 
-        let compacted = compacted_registry_values(
+        let should_prune = |observed: &Encoded| {
+            should_prune_observed_registry_value(
+                observed,
+                &|value| value == &observed_self_old,
+                &|value| value == &observed_live,
+            )
+        };
+
+        assert!(should_prune(&observed_self_old));
+        assert!(!should_prune(&observed_live));
+        assert!(should_prune(&observed_invalid));
+    }
+
+    #[test]
+    fn registration_publish_tombstones_unpreserved_observed_values() {
+        let current = BTreeSet::from([encoded("self-new")]);
+        let observed_self_old = encoded("self-old");
+        let observed_live = encoded("other-live");
+        let observed_invalid = encoded("invalid");
+        let mut known = BTreeSet::new();
+
+        let stale = begin_registration_publish(
+            &mut known,
             &current,
-            &[
+            vec![
                 observed_self_old.clone(),
-                observed_live.clone(),
-                observed_invalid,
+                observed_live,
+                observed_invalid.clone(),
             ],
-            |observed| observed == &observed_self_old,
-            |observed| observed == &observed_live,
+            |observed| observed == &observed_self_old || observed == &observed_invalid,
         );
 
         assert_eq!(
-            compacted,
-            BTreeSet::from([encoded("self-new"), observed_live])
+            stale.into_iter().collect::<BTreeSet<_>>(),
+            BTreeSet::from([observed_invalid, observed_self_old])
         );
+        assert_eq!(known, current);
     }
 }

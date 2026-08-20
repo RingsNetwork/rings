@@ -234,13 +234,13 @@ impl MessagePayload {
         Self::new(transaction, session_sk, relay)
     }
 
-    /// Deserializes a `MessagePayload` instance from the given binary data.
-    pub fn from_bincode(data: &[u8]) -> Result<Self> {
+    /// Deserializes a `MessagePayload` instance from the Rings wire encoding.
+    pub fn from_wire(data: &[u8]) -> Result<Self> {
         rings_codec::deserialize(data).map_err(Error::CodecDeserialize)
     }
 
-    /// Serializes the `MessagePayload` instance into binary data.
-    pub fn to_bincode(&self) -> Result<Bytes> {
+    /// Serializes the `MessagePayload` instance into the Rings wire encoding.
+    pub fn to_wire(&self) -> Result<Bytes> {
         rings_codec::serialize(self)
             .map(Bytes::from)
             .map_err(Error::CodecSerialize)
@@ -289,14 +289,14 @@ impl MessageVerificationExt for MessagePayload {
 
 impl Encoder for MessagePayload {
     fn encode(&self) -> Result<Encoded> {
-        self.to_bincode()?.encode()
+        self.to_wire()?.encode()
     }
 }
 
 impl Decoder for MessagePayload {
     fn from_encoded(encoded: &Encoded) -> Result<Self> {
         let v: Bytes = encoded.decode()?;
-        Self::from_bincode(&v)
+        Self::from_wire(&v)
     }
 }
 
@@ -598,7 +598,7 @@ pub mod test {
 
         // The bytes actually handed to SCTP: rings codec(Custom(rings codec(MessagePayload))).
         let payload_bytes = new_payload(Message::Chunk(chunk), next_hop)
-            .to_bincode()
+            .to_wire()
             .unwrap();
         let wire =
             rings_codec::serialize(&TransportMessage::Custom(payload_bytes.to_vec())).unwrap();
@@ -653,7 +653,7 @@ pub mod test {
         let payload2: MessagePayload = gzipped_encoded_payload.decode().unwrap();
         assert_eq!(payload, payload2);
 
-        let gunzip_encoded_payload = payload.to_bincode().unwrap().encode().unwrap();
+        let gunzip_encoded_payload = payload.to_wire().unwrap().encode().unwrap();
         let payload2: MessagePayload = gunzip_encoded_payload.decode().unwrap();
         assert_eq!(payload, payload2);
     }
@@ -666,14 +666,14 @@ pub mod test {
         let data1 = data;
         let msg1 = Message::custom(&data1).unwrap();
         let payload1 = new_payload(msg1, next_hop);
-        let bytes1 = payload1.to_bincode().unwrap();
+        let bytes1 = payload1.to_wire().unwrap();
         let encoded1 = payload1.encode().unwrap();
         let encoded_bytes1: Vec<u8> = encoded1.into();
 
         let data2 = data.repeat(2);
         let msg2 = Message::custom(&data2).unwrap();
         let payload2 = new_payload(msg2, next_hop);
-        let bytes2 = payload2.to_bincode().unwrap();
+        let bytes2 = payload2.to_wire().unwrap();
         let encoded2 = payload2.encode().unwrap();
         let encoded_bytes2: Vec<u8> = encoded2.into();
 

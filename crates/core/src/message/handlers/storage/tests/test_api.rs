@@ -251,3 +251,71 @@ async fn storage_tombstone_data_removes_observed_payload() -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn storage_compact_data_prunes_tombstones_and_preserves_owner_values() -> Result<()> {
+    let mut keys = gen_ordered_keys(2).into_iter();
+    let key1 = next_generated_key(&mut keys)?;
+    let key2 = next_generated_key(&mut keys)?;
+    let node1 = prepare_node(key1).await;
+    let node2 = prepare_node(key2).await;
+
+    manually_establish_connection(&node1.swarm, &node2.swarm).await;
+    wait_for_msgs([&node1, &node2]).await;
+    assert_no_more_msg([&node1, &node2]).await;
+
+    let topic = "compact data prunes tombstone metadata".to_string();
+    let entry: Entry = topic.clone().try_into()?;
+    let entry_key = entry.did;
+
+    let (node1, node2) = if entry_key.in_range(node2.did(), node2.did(), node1.did()) {
+        (node1, node2)
+    } else {
+        (node2, node1)
+    };
+
+    for value in ["111", "222", "333"] {
+        <Swarm as ChordStorageInterface<1>>::storage_touch_data(
+            &node1.swarm,
+            &topic,
+            value.to_string().encode()?,
+        )
+        .await?;
+        wait_for_msgs([&node1, &node2]).await;
+        assert_no_more_msg([&node1, &node2]).await;
+    }
+
+    <Swarm as ChordStorageInterface<1>>::storage_tombstone_data(
+        &node1.swarm,
+        &topic,
+        "111".to_string().encode()?,
+    )
+    .await?;
+    wait_for_msgs([&node1, &node2]).await;
+    assert_no_more_msg([&node1, &node2]).await;
+
+    let compact_removals = vec!["111".to_string().encode()?];
+    <Swarm as ChordStorageInterface<1>>::storage_compact_data(
+        &node1.swarm,
+        &topic,
+        compact_removals,
+    )
+    .await?;
+    wait_for_msgs([&node1, &node2]).await;
+    assert_no_more_msg([&node1, &node2]).await;
+
+    <Swarm as ChordStorageInterface<1>>::storage_fetch(&node1.swarm, entry_key).await?;
+    wait_for_msgs([&node1, &node2]).await;
+    assert_no_more_msg([&node1, &node2]).await;
+
+    assert_cached_data_values(&node1, entry_key, &["222", "333"]).await?;
+    let entry = node1
+        .swarm
+        .storage_check_cache(entry_key)
+        .await
+        .ok_or_else(|| crate::error::Error::InvalidMessage("expected cached entry".to_string()))?;
+    assert!(entry.crdt.register.is_some());
+    assert!(entry.crdt.tombstones.is_empty());
+
+    Ok(())
+}

@@ -6,6 +6,7 @@ use async_recursion::async_recursion;
 use async_trait::async_trait;
 
 use crate::dht::entry::Entry;
+use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntryOperation;
 use crate::dht::entry::SyncedEntryAck;
 use crate::dht::ChordStorage;
@@ -50,6 +51,8 @@ pub trait ChordStorageInterface<const REDUNDANT: u16> {
     async fn storage_touch_data(&self, topic: &str, data: Encoded) -> Result<()>;
     /// Tombstone observed data in a Data kind entry.
     async fn storage_tombstone_data(&self, topic: &str, data: Encoded) -> Result<()>;
+    /// Compact a Data kind entry after removing listed payloads.
+    async fn storage_compact_data(&self, topic: &str, removals: Vec<Encoded>) -> Result<()>;
 }
 
 /// ChordStorageInterfaceCacheChecker defines the interface for checking the local cache of the DHT.
@@ -441,6 +444,15 @@ impl<const REDUNDANT: u16> ChordStorageInterface<REDUNDANT> for Swarm {
         self.transport.ensure_storage_redundancy::<REDUNDANT>()?;
         let entry: Entry = (topic.to_string(), data).try_into()?;
         let op = EntryOperation::Tombstone(entry);
+        let act = <PeerRing as ChordStorage<_, REDUNDANT>>::entry_operate(&self.dht, op).await?;
+        handle_storage_store_act(self.transport.clone(), act).await?;
+        Ok(())
+    }
+
+    async fn storage_compact_data(&self, topic: &str, removals: Vec<Encoded>) -> Result<()> {
+        self.transport.ensure_storage_redundancy::<REDUNDANT>()?;
+        let entry = Entry::new(Entry::gen_did(topic)?, removals, EntryKind::Data);
+        let op = EntryOperation::CompactData(entry);
         let act = <PeerRing as ChordStorage<_, REDUNDANT>>::entry_operate(&self.dht, op).await?;
         handle_storage_store_act(self.transport.clone(), act).await?;
         Ok(())

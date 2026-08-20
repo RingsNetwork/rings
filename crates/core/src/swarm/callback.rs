@@ -380,7 +380,7 @@ impl TransportCallback for InnerSwarmCallback {
         if !self.pending_connection_allows_message(peer).await? {
             return Ok(());
         }
-        let payload = match MessagePayload::from_bincode(msg) {
+        let payload = match MessagePayload::from_wire(msg) {
             Ok(payload) => payload,
             Err(e) => {
                 if let Some(peer) = peer {

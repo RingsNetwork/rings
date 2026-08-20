@@ -42,6 +42,18 @@ fn decode_entry_data(entry: &Entry) -> Result<Vec<String>> {
         .collect::<Result<Vec<String>>>()
 }
 
+fn assert_entry_data_set(entry: &Entry, expected: &[&str]) -> Result<()> {
+    let actual = decode_entry_data(entry)?
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let expected = expected
+        .iter()
+        .map(|value| String::from(*value))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(actual, expected);
+    Ok(())
+}
+
 fn assert_entry_keeps_recent_overflow(
     entry: &Entry,
     incoming_count: usize,
@@ -478,6 +490,85 @@ fn data_tombstone_removes_observed_payload_by_join() -> Result<()> {
     assert_eq!(decode_entry_data(&joined_with_stale_add)?, vec![
         String::from("second")
     ]);
+    Ok(())
+}
+
+#[test]
+fn data_compaction_prunes_tombstones_and_preserves_current_live_payloads() -> Result<()> {
+    let first = data_delta("topic", "first", 1)?;
+    let second = data_delta("topic", "second", 2)?;
+    let concurrent = data_delta("topic", "concurrent", 3)?;
+    let carrier = Entry::new(Entry::gen_did("topic")?, vec![], EntryKind::Data)
+        .join(first.clone())?
+        .join(second.clone())?
+        .tombstone(first.clone())?
+        .join(concurrent)?;
+
+    assert_eq!(decode_entry_data(&carrier)?, vec![
+        String::from("second"),
+        String::from("concurrent")
+    ]);
+    assert!(!carrier.crdt.tombstones.is_empty());
+
+    let compacted = carrier.compact_data(data_entry("topic", "first")?, actor())?;
+
+    assert_entry_data_set(&compacted, &["second", "concurrent"])?;
+    assert!(compacted.crdt.register.is_some());
+    assert!(compacted.crdt.tombstones.is_empty());
+    assert_eq!(compacted.crdt.dots.len(), compacted.data.len());
+
+    let joined_with_stale_add = compacted.join(first)?;
+    assert_entry_data_set(&joined_with_stale_add, &["second", "concurrent"])?;
+    Ok(())
+}
+
+#[test]
+fn data_compaction_uses_one_shared_floor_for_divergent_replicas() -> Result<()> {
+    let first = data_delta("topic", "first", 1)?;
+    let left_live = data_delta("topic", "left-live", 2)?;
+    let right_live = data_delta("topic", "right-live", 3)?;
+    let tombstoned = Entry::new(Entry::gen_did("topic")?, vec![], EntryKind::Data)
+        .join(first.clone())?
+        .tombstone(first.clone())?;
+    let left = tombstoned.clone().join(left_live)?;
+    let right = tombstoned.join(right_live)?;
+    let op = EntryOperation::CompactData(data_entry("topic", "first")?).stamped(actor())?;
+
+    let compacted_left = left.operate(op.clone(), Did::from(7u32))?;
+    let compacted_right = right.operate(op, Did::from(8u32))?;
+
+    assert_eq!(compacted_left.crdt.register, compacted_right.crdt.register);
+    let joined = compacted_left.join(compacted_right)?;
+    assert_entry_data_set(&joined, &["left-live", "right-live"])?;
+
+    let without_left = joined.tombstone(data_entry("topic", "left-live")?)?;
+    assert_eq!(decode_entry_data(&without_left)?, vec![String::from(
+        "right-live"
+    )]);
+    Ok(())
+}
+
+#[test]
+fn data_compaction_keeps_value_dots_stable_across_replica_positions() -> Result<()> {
+    let first = data_delta("topic", "first", 1)?;
+    let left_live = data_delta("topic", "left-live", 2)?;
+    let shared = data_delta("topic", "shared", 3)?;
+    let tombstoned = Entry::new(Entry::gen_did("topic")?, vec![], EntryKind::Data)
+        .join(first.clone())?
+        .tombstone(first.clone())?;
+    let left = tombstoned.clone().join(left_live)?.join(shared.clone())?;
+    let right = tombstoned.join(shared)?;
+    let op = EntryOperation::CompactData(data_entry("topic", "first")?).stamped(actor())?;
+
+    let compacted_left = left.operate(op.clone(), Did::from(7u32))?;
+    let compacted_right = right.operate(op, Did::from(8u32))?;
+    let joined = compacted_left.join(compacted_right.clone())?;
+    assert_entry_data_set(&joined, &["left-live", "shared"])?;
+
+    let without_shared = joined.tombstone(data_entry("topic", "shared")?)?;
+    assert_entry_data_set(&without_shared, &["left-live"])?;
+    let joined_with_stale_replica = without_shared.join(compacted_right)?;
+    assert_entry_data_set(&joined_with_stale_replica, &["left-live"])?;
     Ok(())
 }
 

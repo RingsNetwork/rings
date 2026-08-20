@@ -159,15 +159,15 @@ pub struct Chunk {
 }
 
 impl Chunk {
-    /// serialize chunk to bytes
-    pub fn to_bincode(&self) -> Result<Bytes> {
+    /// Serialize chunk to the Rings wire encoding.
+    pub fn to_wire(&self) -> Result<Bytes> {
         rings_codec::serialize(self)
             .map(Bytes::from)
             .map_err(Error::CodecSerialize)
     }
 
-    /// deserialize bytes to chunk
-    pub fn from_bincode(data: &[u8]) -> Result<Self> {
+    /// Deserialize chunk from the Rings wire encoding.
+    pub fn from_wire(data: &[u8]) -> Result<Self> {
         rings_codec::deserialize(data).map_err(Error::CodecDeserialize)
     }
 }
