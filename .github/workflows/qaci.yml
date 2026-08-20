@@ -233,7 +233,7 @@ jobs:
 
   build:
     name: Build and test
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       matrix:
         os: ["ubuntu-latest"]
@@ -257,7 +257,7 @@ jobs:
         run: cargo test -p rings-core --features dummy --verbose
 
       - name: Run tests
-        run: cargo test --release --all --verbose
+        run: cargo test --release --all --all-targets --verbose
 
   build_ffi:
     name: Build and test for examples
