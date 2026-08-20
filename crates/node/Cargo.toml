@@ -29,7 +29,6 @@ node_default = ["node"]
 node = [
     "tokio",
     "tokio-util",
-    "hyper",
     "tower-http",
     "clap",
     "dep:reqwest",
@@ -41,7 +40,6 @@ node = [
     "backtrace",
     "lazy_static",
     "axum/ws",
-    "axum/headers",
     "rings-core/default",
     "rings-rpc/std",
     "rings-derive/default",
@@ -80,7 +78,6 @@ dashmap = "5"
 dotenvy = "0.15.7"
 futures = { version = "0.3.21", features = ["alloc"] }
 futures-timer = "3.0.2"
-http = "0.2.6"
 jsonrpc-core = { workspace = true }
 log = { version = "0.4", features = ["std"] }
 rand = { version = "0.8.5", features = ["getrandom"] }
@@ -101,18 +98,17 @@ uuid = { version = "0.8.2" }
 
 # node
 async-stream = { version = "0.3.2", optional = true }
-axum = { version = "0.6.10", optional = true }
+axum = { version = "0.8.9", optional = true }
 backtrace = { version = "0.3.6", optional = true }
 clap = { version = "4.0.14", features = ["derive", "env"], optional = true }
 form_urlencoded = { version = "1.0.1", optional = true }
 home = { version = "0.5.5", optional = true }
-hyper = { version = "0.14.25", features = ["full"], optional = true }
 lazy_static = { version = "1.4.0", optional = true }
 pin-project = { version = "1", optional = true }
 reqwest = { version = "0.12.22", optional = true, default-features = false }
 tokio = { version = "1.13.0", features = ["io-std", "io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"], optional = true }
 tokio-util = { version = "0.7.8", optional = true }
-tower-http = { version = "0.3.4", features = ["cors"], optional = true }
+tower-http = { version = "0.6.11", features = ["cors"], optional = true }
 
 # browser
 console_error_panic_hook = { version = "0.1.1", optional = true }

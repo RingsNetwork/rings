@@ -6,14 +6,17 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::extract::ConnectInfo;
+use axum::extract::Request;
 use axum::extract::State;
 use axum::extract::WebSocketUpgrade;
+use axum::http::HeaderValue;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::routing::post;
 use axum::Router;
 use jsonrpc_core::MetaIoHandler;
 use rings_rpc::protos::rings_node::NodeInfoResponse;
+use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 
 use self::http_error::HttpError;
@@ -73,9 +76,8 @@ pub async fn run_internal_api(port: u16, processor: Arc<Processor>) -> anyhow::R
 
     println!("JSON-RPC endpoint: http://{binding_addr}");
     println!("WebSocket endpoint: http://{binding_addr}/ws");
-    axum::Server::bind(&binding_addr)
-        .serve(axum_make_service)
-        .await?;
+    let listener = TcpListener::bind(binding_addr).await?;
+    axum::serve(listener, axum_make_service).await?;
     Ok(())
 }
 
@@ -102,9 +104,8 @@ pub async fn run_external_api(addr: String, processor: Arc<Processor>) -> anyhow
         .into_make_service_with_connect_info::<SocketAddr>();
 
     println!("JSON-RPC endpoint: http://{addr}");
-    axum::Server::bind(&binding_addr)
-        .serve(axum_make_service)
-        .await?;
+    let listener = TcpListener::bind(binding_addr).await?;
+    axum::serve(listener, axum_make_service).await?;
     Ok(())
 }
 
@@ -123,14 +124,11 @@ where
     Ok(JsonResponse(r))
 }
 
-async fn node_info_header<B>(
-    req: http::Request<B>,
-    next: axum::middleware::Next<B>,
-) -> axum::response::Response {
+async fn node_info_header(req: Request, next: axum::middleware::Next) -> axum::response::Response {
     let mut res = next.run(req).await;
     let headers = res.headers_mut();
 
-    if let Ok(version) = http::HeaderValue::from_str(crate::util::build_version().as_str()) {
+    if let Ok(version) = HeaderValue::from_str(crate::util::build_version().as_str()) {
         headers.insert("X-NODE-VERSION", version);
     }
     res
