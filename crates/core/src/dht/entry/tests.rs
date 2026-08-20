@@ -86,12 +86,46 @@ fn version(counter: u32) -> EntryVersion {
     )
 }
 
+fn version_after(floor: EntryVersion, counter: u32) -> Result<EntryVersion> {
+    let logical_time_ms = floor
+        .logical_time_ms
+        .checked_add(u128::from(counter))
+        .ok_or_else(|| Error::InvalidMessage("test version overflow".to_string()))?;
+    Ok(EntryVersion::new(
+        logical_time_ms,
+        Did::from(counter),
+        Did::from(counter.saturating_add(1000)),
+    ))
+}
+
 fn data_delta(topic: &str, value: &str, counter: u32) -> Result<Entry> {
     data_entry(topic, value)?.stamp_delta(version(counter))
 }
 
 fn overwrite_delta(topic: &str, value: &str, counter: u32) -> Result<Entry> {
     data_entry(topic, value)?.stamp_overwrite(version(counter))
+}
+
+fn compact_operation_floor(op: &EntryOperation) -> Result<EntryVersion> {
+    match op {
+        EntryOperation::CompactData(entry) => entry
+            .crdt
+            .register
+            .ok_or_else(|| Error::InvalidMessage("compact op missing floor".to_string())),
+        _ => Err(Error::InvalidMessage(
+            "expected compact data operation".to_string(),
+        )),
+    }
+}
+
+fn entry_dot_for_value(entry: &Entry, value: &str) -> Result<EntryDot> {
+    let encoded_value = encoded(value)?;
+    entry
+        .data
+        .iter()
+        .zip(entry.crdt.dots.iter().copied())
+        .find_map(|(candidate, dot)| (candidate == &encoded_value).then_some(dot))
+        .ok_or_else(|| Error::InvalidMessage(format!("missing dot for {value}")))
 }
 
 fn relay_delta(did: Did, value: &str, counter: u32) -> Result<Entry> {
@@ -569,6 +603,60 @@ fn data_compaction_keeps_value_dots_stable_across_replica_positions() -> Result<
     assert_entry_data_set(&without_shared, &["left-live"])?;
     let joined_with_stale_replica = without_shared.join(compacted_right)?;
     assert_entry_data_set(&joined_with_stale_replica, &["left-live"])?;
+    Ok(())
+}
+
+#[test]
+fn delayed_data_compaction_preserves_post_floor_writes() -> Result<()> {
+    let first = data_delta("topic", "first", 1)?;
+    let second = data_delta("topic", "second", 2)?;
+    let tombstoned = Entry::new(Entry::gen_did("topic")?, vec![], EntryKind::Data)
+        .join(first.clone())?
+        .join(second)?
+        .tombstone(first.clone())?;
+    let op = EntryOperation::CompactData(data_entry("topic", "first")?).stamped(actor())?;
+    let floor = compact_operation_floor(&op)?;
+    let readded_first = data_entry("topic", "first")?.stamp_delta(version_after(floor, 101)?)?;
+    let late_live = data_entry("topic", "late-live")?.stamp_delta(version_after(floor, 102)?)?;
+    let readded_first_dot = entry_dot_for_value(&readded_first, "first")?;
+    let late_live_dot = entry_dot_for_value(&late_live, "late-live")?;
+    let with_post_floor_writes = tombstoned.join(readded_first)?.join(late_live)?;
+
+    let compacted = with_post_floor_writes.operate(op, Did::from(7u32))?;
+
+    assert_entry_data_set(&compacted, &["first", "second", "late-live"])?;
+    assert_eq!(entry_dot_for_value(&compacted, "first")?, readded_first_dot);
+    assert_eq!(entry_dot_for_value(&compacted, "late-live")?, late_live_dot);
+    let joined_with_stale_add = compacted.join(first)?;
+    assert_entry_data_set(&joined_with_stale_add, &["first", "second", "late-live"])?;
+    Ok(())
+}
+
+#[test]
+fn delayed_data_compaction_preserves_newer_register_floor() -> Result<()> {
+    let op = EntryOperation::CompactData(data_entry("topic", "obsolete")?).stamped(actor())?;
+    let compact_floor = compact_operation_floor(&op)?;
+    let stale_after_compact =
+        data_entry("topic", "stale")?.stamp_delta(version_after(compact_floor, 1)?)?;
+    let reset =
+        data_entry("topic", "reset")?.stamp_overwrite(version_after(compact_floor, 100)?)?;
+    let reset_floor = reset
+        .crdt
+        .register
+        .ok_or_else(|| Error::InvalidMessage("reset missing register".to_string()))?;
+    let state = Entry::new(Entry::gen_did("topic")?, vec![], EntryKind::Data)
+        .join(stale_after_compact.clone())?
+        .join(reset)?;
+
+    assert_entry_data_set(&state, &["reset"])?;
+    assert_eq!(state.crdt.register, Some(reset_floor));
+
+    let compacted = state.operate(op, Did::from(7u32))?;
+
+    assert_entry_data_set(&compacted, &["reset"])?;
+    assert_eq!(compacted.crdt.register, Some(reset_floor));
+    let joined_with_stale_add = compacted.join(stale_after_compact)?;
+    assert_entry_data_set(&joined_with_stale_add, &["reset"])?;
     Ok(())
 }
 

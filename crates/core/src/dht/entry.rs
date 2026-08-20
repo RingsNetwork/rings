@@ -588,6 +588,25 @@ impl Entry {
         EntryDot::for_index(version, 0)
     }
 
+    fn compact_data_element(
+        floor: EntryVersion,
+        removal_values: &BTreeSet<Encoded>,
+        value: Encoded,
+        dot: EntryDot,
+    ) -> Result<Option<(Encoded, EntryDot)>> {
+        let covered_by_compaction = dot.version < floor;
+        if covered_by_compaction && removal_values.contains(&value) {
+            return Ok(None);
+        }
+
+        let dot = if covered_by_compaction {
+            Self::compacted_data_dot(floor, &value)?
+        } else {
+            dot
+        };
+        Ok(Some((value, dot)))
+    }
+
     fn join_subring_entry(&self, other: &Self) -> Result<Self> {
         let members = self.subring_member_set()?.join(other.subring_member_set()?);
         let mut subring: Subring = self.clone().try_into()?;
@@ -794,8 +813,8 @@ impl Entry {
     ///
     /// Pre: `removals` names the same Data carrier as `self`.
     /// Post: every current visible payload not listed in `removals` is preserved
-    /// under the operation's shared register floor, and older tombstone
-    /// metadata is pruned by that floor.
+    /// under the greatest observed register floor, and older tombstone metadata
+    /// is pruned by that floor.
     pub fn compact_data(&self, removals: Self, actor: Did) -> Result<Self> {
         if !self.is_data_entry() {
             return Err(Error::EntryNotOverwritable);
@@ -814,30 +833,26 @@ impl Entry {
             let Some(dot) = live_values.remove(value) else {
                 continue;
             };
-            if removal_values.contains(value) {
-                if dot.version >= floor {
-                    tombstones.insert(dot);
-                }
-            } else {
-                let compacted_dot = Self::compacted_data_dot(floor, value)?;
-                elements.push((value.clone(), compacted_dot));
+            if let Some(element) =
+                Self::compact_data_element(floor, &removal_values, value.clone(), dot)?
+            {
+                elements.push(element);
             }
         }
         for (value, dot) in live_values {
-            if removal_values.contains(&value) {
-                if dot.version >= floor {
-                    tombstones.insert(dot);
-                }
-            } else {
-                let compacted_dot = Self::compacted_data_dot(floor, &value)?;
-                elements.push((value, compacted_dot));
+            if let Some(element) = Self::compact_data_element(floor, &removal_values, value, dot)? {
+                elements.push(element);
             }
         }
-        tombstones.retain(|dot| dot.version >= floor);
+        let output_floor = self
+            .crdt
+            .register
+            .map_or(floor, |current| current.max(floor));
+        tombstones.retain(|dot| dot.version >= output_floor);
         Ok(Self::materialize_elements(
             self.did,
             EntryKind::Data,
-            Some(floor),
+            Some(output_floor),
             elements,
             tombstones,
         ))
