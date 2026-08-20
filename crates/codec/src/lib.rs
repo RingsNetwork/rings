@@ -72,13 +72,13 @@ where T: Serialize {
 pub fn deserialize<T>(bytes: &[u8]) -> Result<T>
 where T: DeserializeOwned {
     let (value, remaining) = postcard::take_from_bytes(bytes).map_err(Error::deserialize)?;
-    if !remaining.is_empty() {
-        return Err(Error::TrailingBytes {
+    match remaining.is_empty() {
+        true => Ok(value),
+        false => Err(Error::TrailingBytes {
             decoded: bytes.len() - remaining.len(),
             total: bytes.len(),
-        });
+        }),
     }
-    Ok(value)
 }
 
 /// Return the serialized size of a serde value using the default wire encoding.
@@ -107,7 +107,7 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_and_size_match() -> std::result::Result<(), Box<dyn StdError>> {
+    fn test_roundtrip_and_size_match() -> std::result::Result<(), Box<dyn StdError>> {
         let value = Example {
             id: 42,
             label: "rings".to_string(),
@@ -126,7 +126,7 @@ mod tests {
     }
 
     #[test]
-    fn roundtrip_128_bit_integers() -> std::result::Result<(), Box<dyn StdError>> {
+    fn test_roundtrip_128_bit_integers() -> std::result::Result<(), Box<dyn StdError>> {
         let value = WideIntegers {
             signed: -123_456_789_012_345_678_901_234_567_890i128,
             unsigned: 0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10u128,
@@ -139,17 +139,19 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_rejects_trailing_bytes() -> std::result::Result<(), Box<dyn StdError>> {
+    fn test_deserialize_rejects_trailing_bytes() -> std::result::Result<(), Box<dyn StdError>> {
         let mut encoded = serialize(&42u64)?;
         encoded.extend_from_slice(&[1, 2, 3]);
 
-        let Err(error) = deserialize::<u64>(&encoded) else {
-            return Err("trailing bytes must fail".into());
-        };
-        assert!(matches!(error, Error::TrailingBytes {
-            decoded: 1,
-            total: 4
-        }));
-        Ok(())
+        match deserialize::<u64>(&encoded) {
+            Err(error) => {
+                assert!(matches!(error, Error::TrailingBytes {
+                    decoded: 1,
+                    total: 4
+                }));
+                Ok(())
+            }
+            Ok(_) => Err("trailing bytes must fail".into()),
+        }
     }
 }

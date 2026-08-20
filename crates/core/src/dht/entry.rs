@@ -450,19 +450,23 @@ impl Entry {
         floor: Option<EntryVersion>,
         kind: EntryStampKind,
     ) -> Result<Self> {
-        if self.crdt.has_write_witness() {
-            return Ok(self);
+        match self.crdt.has_write_witness() {
+            true => Ok(self),
+            false => {
+                let version = self.issue_version_after(actor, floor)?;
+                self.stamp(version, kind)
+            }
         }
-        let version = self.issue_version_after(actor, floor)?;
-        self.stamp(version, kind)
     }
 
     fn ensure_overwrite_stamp_after(self, actor: Did, floor: Option<EntryVersion>) -> Result<Self> {
-        if self.crdt.register.is_some() {
-            return Ok(self);
+        match self.crdt.register.is_some() {
+            true => Ok(self),
+            false => {
+                let version = self.issue_version_after(actor, floor)?;
+                self.stamp_overwrite(version)
+            }
         }
-        let version = self.issue_version_after(actor, floor)?;
-        self.stamp_overwrite(version)
     }
 
     fn max_observed_version(&self) -> Option<EntryVersion> {
@@ -594,17 +598,63 @@ impl Entry {
         value: Encoded,
         dot: EntryDot,
     ) -> Result<Option<(Encoded, EntryDot)>> {
-        let covered_by_compaction = dot.version < floor;
-        if covered_by_compaction && removal_values.contains(&value) {
-            return Ok(None);
+        match dot.version < floor {
+            true if removal_values.contains(&value) => Ok(None),
+            true => Self::compacted_data_dot(floor, &value).map(|dot| Some((value, dot))),
+            false => Ok(Some((value, dot))),
         }
+    }
 
-        let dot = if covered_by_compaction {
-            Self::compacted_data_dot(floor, &value)?
-        } else {
-            dot
-        };
-        Ok(Some((value, dot)))
+    fn data_compaction_candidates(
+        payload_order: &[Encoded],
+        live_values: BTreeMap<Encoded, EntryDot>,
+    ) -> Vec<(Encoded, EntryDot)> {
+        let (ordered_values, remaining_values) = payload_order.iter().fold(
+            (Vec::new(), live_values),
+            |(mut ordered, mut remaining), value| {
+                if let Some(dot) = remaining.remove(value) {
+                    ordered.push((value.clone(), dot));
+                }
+                (ordered, remaining)
+            },
+        );
+        ordered_values.into_iter().chain(remaining_values).collect()
+    }
+
+    fn compact_data_elements(
+        floor: EntryVersion,
+        removal_values: &BTreeSet<Encoded>,
+        values: impl IntoIterator<Item = (Encoded, EntryDot)>,
+    ) -> Result<Vec<(Encoded, EntryDot)>> {
+        values.into_iter().try_fold(
+            Vec::new(),
+            |mut elements, (value, dot)| -> Result<Vec<(Encoded, EntryDot)>> {
+                match Self::compact_data_element(floor, removal_values, value, dot)? {
+                    Some(element) => {
+                        elements.push(element);
+                        Ok(elements)
+                    }
+                    None => Ok(elements),
+                }
+            },
+        )
+    }
+
+    fn compact_data_output_floor(
+        current_floor: Option<EntryVersion>,
+        operation_floor: EntryVersion,
+    ) -> EntryVersion {
+        current_floor.map_or(operation_floor, |current| current.max(operation_floor))
+    }
+
+    fn compact_data_tombstones(
+        floor: EntryVersion,
+        tombstones: BTreeSet<EntryDot>,
+    ) -> BTreeSet<EntryDot> {
+        tombstones
+            .into_iter()
+            .filter(|dot| dot.version >= floor)
+            .collect()
     }
 
     fn join_subring_entry(&self, other: &Self) -> Result<Self> {
@@ -816,9 +866,13 @@ impl Entry {
     /// under the greatest observed register floor, and older tombstone metadata
     /// is pruned by that floor.
     pub fn compact_data(&self, removals: Self, actor: Did) -> Result<Self> {
-        if !self.is_data_entry() {
-            return Err(Error::EntryNotOverwritable);
+        match self.is_data_entry() {
+            true => self.compact_data_entry(removals, actor),
+            false => Err(Error::EntryNotOverwritable),
         }
+    }
+
+    fn compact_data_entry(&self, removals: Self, actor: Did) -> Result<Self> {
         let removals = removals.ensure_overwrite_stamp_after(actor, self.max_observed_version())?;
         self.validate_same_carrier(&removals)?;
         let floor = removals.crdt.register.ok_or_else(|| {
@@ -826,29 +880,13 @@ impl Entry {
         })?;
         let removal_values = removals.data.into_iter().collect::<BTreeSet<_>>();
         let buffer = self.topic_buffer()?;
-        let mut tombstones = buffer.removes;
-        let mut live_values = buffer.values;
-        let mut elements = Vec::new();
-        for value in &self.data {
-            let Some(dot) = live_values.remove(value) else {
-                continue;
-            };
-            if let Some(element) =
-                Self::compact_data_element(floor, &removal_values, value.clone(), dot)?
-            {
-                elements.push(element);
-            }
-        }
-        for (value, dot) in live_values {
-            if let Some(element) = Self::compact_data_element(floor, &removal_values, value, dot)? {
-                elements.push(element);
-            }
-        }
-        let output_floor = self
-            .crdt
-            .register
-            .map_or(floor, |current| current.max(floor));
-        tombstones.retain(|dot| dot.version >= output_floor);
+        let output_floor = Self::compact_data_output_floor(self.crdt.register, floor);
+        let elements = Self::compact_data_elements(
+            floor,
+            &removal_values,
+            Self::data_compaction_candidates(&self.data, buffer.values),
+        )?;
+        let tombstones = Self::compact_data_tombstones(output_floor, buffer.removes);
         Ok(Self::materialize_elements(
             self.did,
             EntryKind::Data,

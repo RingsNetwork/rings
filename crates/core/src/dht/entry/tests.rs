@@ -528,7 +528,7 @@ fn data_tombstone_removes_observed_payload_by_join() -> Result<()> {
 }
 
 #[test]
-fn data_compaction_prunes_tombstones_and_preserves_current_live_payloads() -> Result<()> {
+fn test_data_compaction_prunes_tombstones_and_preserves_current_live_payloads() -> Result<()> {
     let first = data_delta("topic", "first", 1)?;
     let second = data_delta("topic", "second", 2)?;
     let concurrent = data_delta("topic", "concurrent", 3)?;
@@ -557,7 +557,7 @@ fn data_compaction_prunes_tombstones_and_preserves_current_live_payloads() -> Re
 }
 
 #[test]
-fn data_compaction_uses_one_shared_floor_for_divergent_replicas() -> Result<()> {
+fn test_data_compaction_uses_one_shared_floor_for_divergent_replicas() -> Result<()> {
     let first = data_delta("topic", "first", 1)?;
     let left_live = data_delta("topic", "left-live", 2)?;
     let right_live = data_delta("topic", "right-live", 3)?;
@@ -583,7 +583,7 @@ fn data_compaction_uses_one_shared_floor_for_divergent_replicas() -> Result<()> 
 }
 
 #[test]
-fn data_compaction_keeps_value_dots_stable_across_replica_positions() -> Result<()> {
+fn test_data_compaction_keeps_value_dots_stable_across_replica_positions() -> Result<()> {
     let first = data_delta("topic", "first", 1)?;
     let left_live = data_delta("topic", "left-live", 2)?;
     let shared = data_delta("topic", "shared", 3)?;
@@ -607,7 +607,7 @@ fn data_compaction_keeps_value_dots_stable_across_replica_positions() -> Result<
 }
 
 #[test]
-fn delayed_data_compaction_preserves_post_floor_writes() -> Result<()> {
+fn test_delayed_data_compaction_preserves_post_floor_writes() -> Result<()> {
     let first = data_delta("topic", "first", 1)?;
     let second = data_delta("topic", "second", 2)?;
     let tombstoned = Entry::new(Entry::gen_did("topic")?, vec![], EntryKind::Data)
@@ -633,7 +633,7 @@ fn delayed_data_compaction_preserves_post_floor_writes() -> Result<()> {
 }
 
 #[test]
-fn delayed_data_compaction_preserves_newer_register_floor() -> Result<()> {
+fn test_delayed_data_compaction_preserves_newer_register_floor() -> Result<()> {
     let op = EntryOperation::CompactData(data_entry("topic", "obsolete")?).stamped(actor())?;
     let compact_floor = compact_operation_floor(&op)?;
     let stale_after_compact =
