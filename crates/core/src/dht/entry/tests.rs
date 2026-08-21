@@ -42,6 +42,18 @@ fn decode_entry_data(entry: &Entry) -> Result<Vec<String>> {
         .collect::<Result<Vec<String>>>()
 }
 
+fn assert_entry_data_set(entry: &Entry, expected: &[&str]) -> Result<()> {
+    let actual = decode_entry_data(entry)?
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let expected = expected
+        .iter()
+        .map(|value| String::from(*value))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(actual, expected);
+    Ok(())
+}
+
 fn assert_entry_keeps_recent_overflow(
     entry: &Entry,
     incoming_count: usize,
@@ -74,12 +86,46 @@ fn version(counter: u32) -> EntryVersion {
     )
 }
 
+fn version_after(floor: EntryVersion, counter: u32) -> Result<EntryVersion> {
+    let logical_time_ms = floor
+        .logical_time_ms
+        .checked_add(u128::from(counter))
+        .ok_or_else(|| Error::InvalidMessage("test version overflow".to_string()))?;
+    Ok(EntryVersion::new(
+        logical_time_ms,
+        Did::from(counter),
+        Did::from(counter.saturating_add(1000)),
+    ))
+}
+
 fn data_delta(topic: &str, value: &str, counter: u32) -> Result<Entry> {
     data_entry(topic, value)?.stamp_delta(version(counter))
 }
 
 fn overwrite_delta(topic: &str, value: &str, counter: u32) -> Result<Entry> {
     data_entry(topic, value)?.stamp_overwrite(version(counter))
+}
+
+fn compact_operation_floor(op: &EntryOperation) -> Result<EntryVersion> {
+    match op {
+        EntryOperation::CompactData(entry) => entry
+            .crdt
+            .register
+            .ok_or_else(|| Error::InvalidMessage("compact op missing floor".to_string())),
+        _ => Err(Error::InvalidMessage(
+            "expected compact data operation".to_string(),
+        )),
+    }
+}
+
+fn entry_dot_for_value(entry: &Entry, value: &str) -> Result<EntryDot> {
+    let encoded_value = encoded(value)?;
+    entry
+        .data
+        .iter()
+        .zip(entry.crdt.dots.iter().copied())
+        .find_map(|(candidate, dot)| (candidate == &encoded_value).then_some(dot))
+        .ok_or_else(|| Error::InvalidMessage(format!("missing dot for {value}")))
 }
 
 fn relay_delta(did: Did, value: &str, counter: u32) -> Result<Entry> {
@@ -280,7 +326,7 @@ fn operation_digest_hashes_canonical_bytes_not_legacy_base58() -> Result<()> {
         did: entry.did,
         data: &entry.data,
     };
-    let bytes = bincode::serialize(&digest).map_err(Error::BincodeSerialize)?;
+    let bytes = rings_codec::serialize(&digest).map_err(Error::CodecSerialize)?;
 
     let direct = Did::try_from(HashStr::from_bytes(&bytes))?;
     let legacy_encoded = bytes.encode()?;
@@ -478,6 +524,139 @@ fn data_tombstone_removes_observed_payload_by_join() -> Result<()> {
     assert_eq!(decode_entry_data(&joined_with_stale_add)?, vec![
         String::from("second")
     ]);
+    Ok(())
+}
+
+#[test]
+fn test_data_compaction_prunes_tombstones_and_preserves_current_live_payloads() -> Result<()> {
+    let first = data_delta("topic", "first", 1)?;
+    let second = data_delta("topic", "second", 2)?;
+    let concurrent = data_delta("topic", "concurrent", 3)?;
+    let carrier = Entry::new(Entry::gen_did("topic")?, vec![], EntryKind::Data)
+        .join(first.clone())?
+        .join(second.clone())?
+        .tombstone(first.clone())?
+        .join(concurrent)?;
+
+    assert_eq!(decode_entry_data(&carrier)?, vec![
+        String::from("second"),
+        String::from("concurrent")
+    ]);
+    assert!(!carrier.crdt.tombstones.is_empty());
+
+    let compacted = carrier.compact_data(data_entry("topic", "first")?, actor())?;
+
+    assert_entry_data_set(&compacted, &["second", "concurrent"])?;
+    assert!(compacted.crdt.register.is_some());
+    assert!(compacted.crdt.tombstones.is_empty());
+    assert_eq!(compacted.crdt.dots.len(), compacted.data.len());
+
+    let joined_with_stale_add = compacted.join(first)?;
+    assert_entry_data_set(&joined_with_stale_add, &["second", "concurrent"])?;
+    Ok(())
+}
+
+#[test]
+fn test_data_compaction_uses_one_shared_floor_for_divergent_replicas() -> Result<()> {
+    let first = data_delta("topic", "first", 1)?;
+    let left_live = data_delta("topic", "left-live", 2)?;
+    let right_live = data_delta("topic", "right-live", 3)?;
+    let tombstoned = Entry::new(Entry::gen_did("topic")?, vec![], EntryKind::Data)
+        .join(first.clone())?
+        .tombstone(first.clone())?;
+    let left = tombstoned.clone().join(left_live)?;
+    let right = tombstoned.join(right_live)?;
+    let op = EntryOperation::CompactData(data_entry("topic", "first")?).stamped(actor())?;
+
+    let compacted_left = left.operate(op.clone(), Did::from(7u32))?;
+    let compacted_right = right.operate(op, Did::from(8u32))?;
+
+    assert_eq!(compacted_left.crdt.register, compacted_right.crdt.register);
+    let joined = compacted_left.join(compacted_right)?;
+    assert_entry_data_set(&joined, &["left-live", "right-live"])?;
+
+    let without_left = joined.tombstone(data_entry("topic", "left-live")?)?;
+    assert_eq!(decode_entry_data(&without_left)?, vec![String::from(
+        "right-live"
+    )]);
+    Ok(())
+}
+
+#[test]
+fn test_data_compaction_keeps_value_dots_stable_across_replica_positions() -> Result<()> {
+    let first = data_delta("topic", "first", 1)?;
+    let left_live = data_delta("topic", "left-live", 2)?;
+    let shared = data_delta("topic", "shared", 3)?;
+    let tombstoned = Entry::new(Entry::gen_did("topic")?, vec![], EntryKind::Data)
+        .join(first.clone())?
+        .tombstone(first.clone())?;
+    let left = tombstoned.clone().join(left_live)?.join(shared.clone())?;
+    let right = tombstoned.join(shared)?;
+    let op = EntryOperation::CompactData(data_entry("topic", "first")?).stamped(actor())?;
+
+    let compacted_left = left.operate(op.clone(), Did::from(7u32))?;
+    let compacted_right = right.operate(op, Did::from(8u32))?;
+    let joined = compacted_left.join(compacted_right.clone())?;
+    assert_entry_data_set(&joined, &["left-live", "shared"])?;
+
+    let without_shared = joined.tombstone(data_entry("topic", "shared")?)?;
+    assert_entry_data_set(&without_shared, &["left-live"])?;
+    let joined_with_stale_replica = without_shared.join(compacted_right)?;
+    assert_entry_data_set(&joined_with_stale_replica, &["left-live"])?;
+    Ok(())
+}
+
+#[test]
+fn test_delayed_data_compaction_preserves_post_floor_writes() -> Result<()> {
+    let first = data_delta("topic", "first", 1)?;
+    let second = data_delta("topic", "second", 2)?;
+    let tombstoned = Entry::new(Entry::gen_did("topic")?, vec![], EntryKind::Data)
+        .join(first.clone())?
+        .join(second)?
+        .tombstone(first.clone())?;
+    let op = EntryOperation::CompactData(data_entry("topic", "first")?).stamped(actor())?;
+    let floor = compact_operation_floor(&op)?;
+    let readded_first = data_entry("topic", "first")?.stamp_delta(version_after(floor, 101)?)?;
+    let late_live = data_entry("topic", "late-live")?.stamp_delta(version_after(floor, 102)?)?;
+    let readded_first_dot = entry_dot_for_value(&readded_first, "first")?;
+    let late_live_dot = entry_dot_for_value(&late_live, "late-live")?;
+    let with_post_floor_writes = tombstoned.join(readded_first)?.join(late_live)?;
+
+    let compacted = with_post_floor_writes.operate(op, Did::from(7u32))?;
+
+    assert_entry_data_set(&compacted, &["first", "second", "late-live"])?;
+    assert_eq!(entry_dot_for_value(&compacted, "first")?, readded_first_dot);
+    assert_eq!(entry_dot_for_value(&compacted, "late-live")?, late_live_dot);
+    let joined_with_stale_add = compacted.join(first)?;
+    assert_entry_data_set(&joined_with_stale_add, &["first", "second", "late-live"])?;
+    Ok(())
+}
+
+#[test]
+fn test_delayed_data_compaction_preserves_newer_register_floor() -> Result<()> {
+    let op = EntryOperation::CompactData(data_entry("topic", "obsolete")?).stamped(actor())?;
+    let compact_floor = compact_operation_floor(&op)?;
+    let stale_after_compact =
+        data_entry("topic", "stale")?.stamp_delta(version_after(compact_floor, 1)?)?;
+    let reset =
+        data_entry("topic", "reset")?.stamp_overwrite(version_after(compact_floor, 100)?)?;
+    let reset_floor = reset
+        .crdt
+        .register
+        .ok_or_else(|| Error::InvalidMessage("reset missing register".to_string()))?;
+    let state = Entry::new(Entry::gen_did("topic")?, vec![], EntryKind::Data)
+        .join(stale_after_compact.clone())?
+        .join(reset)?;
+
+    assert_entry_data_set(&state, &["reset"])?;
+    assert_eq!(state.crdt.register, Some(reset_floor));
+
+    let compacted = state.operate(op, Did::from(7u32))?;
+
+    assert_entry_data_set(&compacted, &["reset"])?;
+    assert_eq!(compacted.crdt.register, Some(reset_floor));
+    let joined_with_stale_add = compacted.join(stale_after_compact)?;
+    assert_entry_data_set(&joined_with_stale_add, &["reset"])?;
     Ok(())
 }
 

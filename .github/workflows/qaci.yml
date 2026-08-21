@@ -12,7 +12,15 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_TOOLCHAIN: 1.97.0
+  NIGHTLY_TOOLCHAIN: nightly-2026-07-02
   WASM_BINDGEN_TEST_TIMEOUT: 120
+  WASM_BINDGEN_CLI_VERSION: 0.2.121
+  WASM_PACK_VERSION: 0.15.0
+  NODE_VERSION: 20.20.2
+  PYTHON_VERSION: "3.11"
+  CARGO_DENY_VERSION: 0.20.2
+  TRUNK_VERSION: 0.21.14
+  TAPLO_CLI_VERSION: 0.10.0
 
 permissions:
   contents: read
@@ -31,6 +39,91 @@ jobs:
     if: github.event_name == 'pull_request'
     uses: ./.github/workflows/release-build.yml
 
+  dependency_policy:
+    name: Dependency policy
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
+
+      - name: Setup rust toolchain
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+          rustup show
+
+      - name: Cargo cooldown check
+        uses: RyanKung/cargo-cooldown-check@d8588ee951cc30c7680e7538f20cfe190eaa1350
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --version "$CARGO_DENY_VERSION" --locked
+
+      - name: Check dependency policy
+        run: |
+          cargo deny --locked \
+            --exclude rings-snark \
+            --exclude rings-snark-example \
+            --exclude rings-snark-extension \
+            check -A unmatched-source advisories licenses bans sources
+
+  miri_core:
+    name: Miri core invariants
+    timeout-minutes: 45
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
+
+      - name: Setup Miri toolchain
+        run: |
+          rustup toolchain install "$NIGHTLY_TOOLCHAIN" --profile minimal
+          rustup component add miri rust-src --toolchain "$NIGHTLY_TOOLCHAIN"
+          cargo +"$NIGHTLY_TOOLCHAIN" miri setup
+          rustup show
+
+      - name: Run Miri-compatible core tests
+        env:
+          MIRIFLAGS: -Zmiri-strict-provenance
+        run: |
+          set -euo pipefail
+          for filter in \
+            "lifecycle::tests" \
+            "dht::did::tests" \
+            "dht::virtual_node::tests"
+          do
+            cargo +"$NIGHTLY_TOOLCHAIN" miri test -q -p rings-core --lib "$filter"
+          done
+
+  ffi_sanitizers:
+    name: FFI ASan and LSan
+    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    env:
+      ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1:check_initialization_order=1
+      LSAN_OPTIONS: print_suppressions=0
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: -Zsanitizer=address
+    steps:
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
+
+      - name: Setup sanitizer toolchain
+        run: |
+          rustup toolchain install "$NIGHTLY_TOOLCHAIN" --profile minimal
+          rustup default "$NIGHTLY_TOOLCHAIN"
+          rustup target add x86_64-unknown-linux-gnu --toolchain "$NIGHTLY_TOOLCHAIN"
+          rustup show
+
+      - name: Run FFI lifecycle tests under ASan and LSan
+        run: |
+          set -euo pipefail
+          set +e
+          output="$(cargo +"$NIGHTLY_TOOLCHAIN" test --target x86_64-unknown-linux-gnu -p rings-node --features ffi ffi_ -- --nocapture 2>&1)"
+          status=$?
+          set -e
+          printf '%s\n' "$output"
+          if [ "$status" -ne 0 ]; then
+            exit "$status"
+          fi
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed' <<< "$output"
+
   build_wasm:
     name: Build and test for wasm
     timeout-minutes: 45
@@ -39,12 +132,7 @@ jobs:
         os: ["ubuntu-latest"]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v3
-
-      - name: Setup protoc
-        uses: arduino/setup-protoc@v2.1.0
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
 
       - name: Setup rust toolchain
         run: |
@@ -53,14 +141,9 @@ jobs:
           rustup target add wasm32-unknown-unknown
           rustup show
 
-      - uses: jetli/wasm-bindgen-action@v0.2.0
+      - uses: jetli/wasm-bindgen-action@20b33e20595891ab1a0ed73145d8a21fc96e7c29 # v0.2.0
         with:
-          version: "0.2.121"
-
-      # If you need to reset the cache version, increment the number after `v`
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: wasm-v1
+          version: ${{ env.WASM_BINDGEN_CLI_VERSION }}
 
       - name: Run clippy for core wasm
         run: cargo clippy -p rings-core --features wasm --no-deps --no-default-features --target=wasm32-unknown-unknown --tests -- -D warnings
@@ -80,11 +163,11 @@ jobs:
         run: cargo clippy -p rings-node --features browser_default --no-deps --no-default-features --target=wasm32-unknown-unknown --tests -- -D warnings
 
       - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+        run: cargo install wasm-pack --version "$WASM_PACK_VERSION" --locked
 
-      - uses: actions/setup-node@v3
+      - uses: actions/setup-node@3235b876344d2a9aa001b8d1453c930bba69e610 # v3
         with:
-          node-version: 20
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Install frontend extension script dependencies
         run: npm ci --ignore-scripts
@@ -101,7 +184,7 @@ jobs:
           sudo apt-get install -y librsvg2-bin
 
       - name: Install Trunk
-        run: cargo install trunk --locked
+        run: cargo install trunk --version "$TRUNK_VERSION" --locked
 
       - name: Build Rings frontend extension package
         run: npm run package:frontend-extension
@@ -120,13 +203,13 @@ jobs:
         working-directory: ./frontend
 
       - name: Run Rings frontend tests
-        uses: coactions/setup-xvfb@v1
+        uses: coactions/setup-xvfb@b6b4fcfb9f5a895edadc3bc76318fae0ac17c8b3 # v1
         with:
           run: cargo test --release --target=wasm32-unknown-unknown
           working-directory: ./frontend
 
       - name: Run dweb example browser tests
-        uses: coactions/setup-xvfb@v1
+        uses: coactions/setup-xvfb@b6b4fcfb9f5a895edadc3bc76318fae0ac17c8b3 # v1
         with:
           run: |
             wasm-pack test --release --headless --chrome . -- --skip two_nodes_fetch_a_hosted_page
@@ -134,48 +217,38 @@ jobs:
           working-directory: ./examples/dweb
 
       - name: Run proof-demo browser tests
-        uses: coactions/setup-xvfb@v1
+        uses: coactions/setup-xvfb@b6b4fcfb9f5a895edadc3bc76318fae0ac17c8b3 # v1
         with:
           run: wasm-pack test --release --headless --chrome
           working-directory: ./examples/proof-demo
 
       - name: Run core browser tests
-        uses: coactions/setup-xvfb@v1
+        uses: coactions/setup-xvfb@b6b4fcfb9f5a895edadc3bc76318fae0ac17c8b3 # v1
         with:
           run: cargo test -p rings-core --release --target=wasm32-unknown-unknown --features wasm --no-default-features
           working-directory: ./
 
       - name: Run node browser tests
-        uses: coactions/setup-xvfb@v1
+        uses: coactions/setup-xvfb@b6b4fcfb9f5a895edadc3bc76318fae0ac17c8b3 # v1
         with:
           run: cargo test -p rings-node --release --target=wasm32-unknown-unknown --features browser_default --no-default-features
           working-directory: ./
 
   build:
     name: Build and test
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       matrix:
         os: ["ubuntu-latest"]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v3
-
-      - name: Setup protoc
-        uses: arduino/setup-protoc@v2.1.0
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
 
       - name: Setup rust toolchain
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
           rustup default "$RUST_TOOLCHAIN"
           rustup show
-
-      # If you need to reset the cache version, increment the number after `v`
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: default-v1
 
       - name: Build
         run: cargo build --all --verbose
@@ -187,7 +260,7 @@ jobs:
         run: cargo test -p rings-core --features dummy --verbose
 
       - name: Run tests
-        run: cargo test --release --all --verbose
+        run: cargo test --release --all --all-targets --verbose
 
   build_ffi:
     name: Build and test for examples
@@ -197,12 +270,7 @@ jobs:
         os: ["ubuntu-latest", "macos-latest"]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v3
-
-      - name: Setup protoc
-        uses: arduino/setup-protoc@v2.1.0
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
 
       - name: Setup rust toolchain
         run: |
@@ -210,20 +278,15 @@ jobs:
           rustup default "$RUST_TOOLCHAIN"
           rustup show
 
-      # If you need to reset the cache version, increment the number after `v`
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: ffi-${{ runner.os }}-${{ runner.arch }}-v2
-
       - name: Run clippy for node ffi
         run: cargo clippy -p rings-node --features ffi
 
       - name: Build
         run: cargo build -p rings-node --features ffi
 
-      - uses: actions/setup-python@v4
+      - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4
         with:
-          python-version: "3.11"
+          python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install Python FFI test dependencies
         run: python -m pip install --upgrade pip wheel && python -m pip install web3 cffi pytest
@@ -241,28 +304,18 @@ jobs:
     timeout-minutes: 10
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
 
       - name: Check typos
-        uses: crate-ci/typos@v1.47.2
-
-      - name: Setup protoc
-        uses: arduino/setup-protoc@v2.1.0
-        with:
-          repo-token: ${{ secrets.GITHUB_TOKEN }}
+        uses: crate-ci/typos@37bb98842b0d8c4ffebdb75301a13db0267cef89 # v1.47.2
 
       - name: Setup rust toolchain
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
           rustup default "$RUST_TOOLCHAIN"
-          rustup install nightly
-          rustup component add rustfmt --toolchain nightly
+          rustup toolchain install "$NIGHTLY_TOOLCHAIN" --profile minimal
+          rustup component add rustfmt --toolchain "$NIGHTLY_TOOLCHAIN"
           rustup show
-
-      # If you need to reset the cache version, increment the number after `v`
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: static-v1
 
       - name: Run strict clippy for node native lib
         run: |
@@ -282,7 +335,7 @@ jobs:
         run: cargo clippy --all --tests -- -D warnings
 
       - name: Check formating
-        run: cargo +nightly fmt --all -- --check
+        run: cargo +"$NIGHTLY_TOOLCHAIN" fmt --all -- --check
 
       - name: Check docs
         env:
@@ -290,7 +343,7 @@ jobs:
         run: cargo doc --all --no-deps
 
       - name: Install taplo
-        run: cargo install taplo-cli --locked
+        run: cargo install taplo-cli --version "$TAPLO_CLI_VERSION" --locked
 
       - name: Check toml file formating by taplo
         run: taplo format --check

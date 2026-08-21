@@ -103,7 +103,7 @@ impl MessageSenderPool<TrackedChannel> for RoundRobinPool<TrackedChannel> {
         permit: SendPermit,
     ) -> Result<DeliveryFuture> {
         let (channel, enqueued) = self.select()?;
-        let data = bincode::serialize(&msg)?;
+        let data = rings_codec::serialize(&msg)?;
         // `send_with_u8_array` is synchronous, so there's no interleaving to
         // guard; just advance `enqueued` ONLY after a successful send. Advancing
         // first would, on a rejected send, leave the counter ahead of the bytes

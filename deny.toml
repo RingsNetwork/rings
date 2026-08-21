@@ -1,0 +1,53 @@
+[graph]
+all-features = true
+
+[advisories]
+git-fetch-with-cli = false
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "0BSD",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "GPL-3.0-only",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.8
+
+[licenses.private]
+ignore = false
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+highlight = "all"
+allow-workspace = true
+deny = [
+    { name = "arrayref", version = "=0.3.10" },
+    { name = "append-only-vec", version = "=0.1.9" },
+    { name = "internment", version = "=0.8.7" },
+    { name = "proc-macro1" },
+    { name = "proc-macro-en" },
+    { name = "aovine" },
+    { name = "arone" },
+    { name = "aronenao" },
+    { name = "tinymember" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = [
+    "https://github.com/matter-labs/zksync-crypto",
+]

@@ -513,7 +513,7 @@ struct OnionExitDescriptorBodyRef<'a> {
 
 impl OnionExitDescriptorBodyRef<'_> {
     fn signing_data(&self) -> CoreResult<Vec<u8>> {
-        bincode::serialize(self).map_err(CoreError::BincodeSerialize)
+        rings_codec::serialize(self).map_err(CoreError::CodecSerialize)
     }
 }
 

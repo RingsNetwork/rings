@@ -24,7 +24,7 @@ jobs:
       version: ${{ steps.generated-tag.outputs.tag }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
         with:
           fetch-depth: 0
       - name: Get latest tag
@@ -35,7 +35,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Bump version
         id: generated-tag
-        uses: actions/github-script@v6
+        uses: actions/github-script@d7906e4ad0b1822421a7e6a35d5ca353c962f410 # v6
         with:
           script: |
             if (context.ref.startsWith("refs/tags/")) {
@@ -72,22 +72,22 @@ jobs:
       actions: read
       contents: write
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
         with:
           fetch-depth: 0
 
       - name: Generate changelog
-        uses: orhun/git-cliff-action@v4
+        uses: orhun/git-cliff-action@f50e11560dce63f7c33227798f90b924471a88b5 # v4
         id: git-cliff
         with:
           config: cliff.toml
           args: "-vv --strip header ${{ needs.gen_version.outputs.version == 'prerelease' && '--unreleased' || '--latest' }}"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
       - name: Display fetched artifacts
         run: ls -R
 
-      - uses: softprops/action-gh-release@v2.0.4
+      - uses: softprops/action-gh-release@9d7c94cfd0a1f3ed45544c887983e9fa900f0564 # v2.0.4
         name: Emit a Github Release
         with:
           token: "${{ secrets.GITHUB_TOKEN }}"

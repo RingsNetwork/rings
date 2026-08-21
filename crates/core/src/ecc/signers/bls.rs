@@ -1,5 +1,5 @@
 //! signer of bls
-//! A module for signing messages using BLS (Boneh-Lynn-Shacham) and interfacing with secp256k1 cryptographic libraries.
+//! A module for signing messages using BLS (Boneh-Lynn-Shacham) and secp256k1-compatible secret key bytes.
 //!
 //! This module provides functionality for generating private and public keys, signing messages,
 //! and verifying signatures using both BLS and secp256k1 cryptographic standards.
@@ -15,12 +15,11 @@ use ark_ec::hashing::curve_maps::wb::WBMap;
 use ark_ec::hashing::map_to_curve_hasher::MapToCurveBasedHasher;
 use ark_ec::hashing::HashToCurve;
 use ark_ec::pairing::Pairing;
-use ark_ec::Group;
+use ark_ec::PrimeGroup;
 use ark_ff::fields::field_hashers::DefaultFieldHasher;
 use ark_serialize::CanonicalDeserialize;
 use ark_serialize::CanonicalSerialize;
 use ark_std::UniformRand;
-use libsecp256k1;
 use rand::SeedableRng;
 use rand_hc::Hc128Rng;
 
@@ -59,7 +58,7 @@ fn to_compressed<T: CanonicalSerialize, const S: usize>(s: &T) -> Result<[u8; S]
 impl TryFrom<SecretKey> for Fr {
     type Error = Error;
     fn try_from(sk: SecretKey) -> Result<Fr> {
-        let data: [u8; 32] = sk.0.serialize();
+        let data: [u8; 32] = sk.ser();
         let ret: Fr = from_compressed(&data)?;
         Ok(ret)
     }
@@ -69,8 +68,7 @@ impl TryFrom<Fr> for SecretKey {
     type Error = Error;
     fn try_from(sk: Fr) -> Result<SecretKey> {
         let data: [u8; 32] = to_compressed(&sk)?;
-        let sk = libsecp256k1::SecretKey::parse(&data)?;
-        Ok(SecretKey(sk))
+        SecretKey::from_bytes(data)
     }
 }
 

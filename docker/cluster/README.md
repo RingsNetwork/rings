@@ -2,6 +2,10 @@
 
 This image runs N native `rings` daemon processes in one container, generates per-node session keys from external private keys, waits for every HTTP API to become ready, then connects the nodes. It is a demo/test cluster, so onion relay and onion exit advertisement are enabled by default.
 
+This cluster is intended for controlled testing. Random or externally supplied keys
+authenticate DIDs, but they do not make the cluster Sybil-resistant; see the repository
+[threat model](../../SECURITY.md).
+
 Build from the repository root:
 
 ```sh

@@ -1,11 +1,11 @@
 #![deny(missing_docs)]
 
+use std::fmt;
 use std::io::Write;
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use derivative::Derivative;
 use flate2::write::GzDecoder;
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -89,8 +89,7 @@ fn hash_transaction(
 ///
 /// To transmit `Transaction` in RingsNetwork, user should build
 /// [MessagePayload] and use [PayloadSender] to send.
-#[derive(Derivative, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[derivative(Debug)]
+#[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct Transaction {
     /// The destination of this message.
     pub destination: Did,
@@ -104,14 +103,23 @@ pub struct Transaction {
     pub report_return: ReportReturnPolicy,
     /// This field holds a signature from a node,
     /// which is used to prove that the transaction was created by that node.
-    #[derivative(Debug = "ignore")]
     pub verification: MessageVerification,
+}
+
+impl fmt::Debug for Transaction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Transaction")
+            .field("destination", &self.destination)
+            .field("tx_id", &self.tx_id)
+            .field("data", &self.data)
+            .field("report_return", &self.report_return)
+            .finish()
+    }
 }
 
 /// `MessagePayload` is used to transmit data between nodes.
 /// The data should be packed by [Transaction].
-#[derive(Derivative, Deserialize, Serialize, Clone, PartialEq, Eq)]
-#[derivative(Debug)]
+#[derive(Deserialize, Serialize, Clone, PartialEq, Eq)]
 pub struct MessagePayload {
     /// Payload data
     pub transaction: Transaction,
@@ -120,12 +128,20 @@ pub struct MessagePayload {
     pub relay: MessageRelay,
     /// This field holds a signature from a node,
     /// which is used to prove that payload was created by that node.
-    #[derivative(Debug = "ignore")]
     pub verification: MessageVerification,
 }
 
+impl fmt::Debug for MessagePayload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MessagePayload")
+            .field("transaction", &self.transaction)
+            .field("relay", &self.relay)
+            .finish()
+    }
+}
+
 impl Transaction {
-    /// Wrap data. Will serialize by [bincode::serialize]
+    /// Wrap data. Will serialize by [rings_codec::serialize]
     /// then sign [MessageVerification] by session_sk.
     pub fn new<T>(
         destination: Did,
@@ -157,7 +173,7 @@ impl Transaction {
         T: Serialize,
     {
         report_return.validate_authorized_by(session_sk.account_did())?;
-        let data = bincode::serialize(&data).map_err(Error::BincodeSerialize)?;
+        let data = rings_codec::serialize(&data).map_err(Error::CodecSerialize)?;
         let msg_hash = hash_transaction(destination, tx_id, report_return, &data);
         let verification = MessageVerification::new(&msg_hash, session_sk)?;
         Ok(Self {
@@ -172,7 +188,7 @@ impl Transaction {
     /// Deserializes the data field into a `T` instance.
     pub fn data<T>(&self) -> Result<T>
     where T: DeserializeOwned {
-        bincode::deserialize(&self.data).map_err(Error::BincodeDeserialize)
+        rings_codec::deserialize(&self.data).map_err(Error::CodecDeserialize)
     }
 }
 
@@ -218,16 +234,16 @@ impl MessagePayload {
         Self::new(transaction, session_sk, relay)
     }
 
-    /// Deserializes a `MessagePayload` instance from the given binary data.
-    pub fn from_bincode(data: &[u8]) -> Result<Self> {
-        bincode::deserialize(data).map_err(Error::BincodeDeserialize)
+    /// Deserializes a `MessagePayload` instance from the Rings wire encoding.
+    pub fn from_wire(data: &[u8]) -> Result<Self> {
+        rings_codec::deserialize(data).map_err(Error::CodecDeserialize)
     }
 
-    /// Serializes the `MessagePayload` instance into binary data.
-    pub fn to_bincode(&self) -> Result<Bytes> {
-        bincode::serialize(self)
+    /// Serializes the `MessagePayload` instance into the Rings wire encoding.
+    pub fn to_wire(&self) -> Result<Bytes> {
+        rings_codec::serialize(self)
             .map(Bytes::from)
-            .map_err(Error::BincodeSerialize)
+            .map_err(Error::CodecSerialize)
     }
 
     /// Returns whether `local` is the relay destination of this payload.
@@ -273,14 +289,14 @@ impl MessageVerificationExt for MessagePayload {
 
 impl Encoder for MessagePayload {
     fn encode(&self) -> Result<Encoded> {
-        self.to_bincode()?.encode()
+        self.to_wire()?.encode()
     }
 }
 
 impl Decoder for MessagePayload {
     fn from_encoded(encoded: &Encoded) -> Result<Self> {
         let v: Bytes = encoded.decode()?;
-        Self::from_bincode(&v)
+        Self::from_wire(&v)
     }
 }
 
@@ -580,11 +596,12 @@ pub mod test {
             .pop()
             .expect("one chunk");
 
-        // The bytes actually handed to SCTP: bincode(Custom(bincode(MessagePayload))).
+        // The bytes actually handed to SCTP: rings codec(Custom(rings codec(MessagePayload))).
         let payload_bytes = new_payload(Message::Chunk(chunk), next_hop)
-            .to_bincode()
+            .to_wire()
             .unwrap();
-        let wire = bincode::serialize(&TransportMessage::Custom(payload_bytes.to_vec())).unwrap();
+        let wire =
+            rings_codec::serialize(&TransportMessage::Custom(payload_bytes.to_vec())).unwrap();
 
         assert!(
             wire.len() <= MAX_DATA_CHANNEL_MESSAGE_SIZE,
@@ -612,7 +629,8 @@ pub mod test {
         let payload_len = limit - reserves.whole;
         assert_eq!(reserves.plan(payload_len, limit), Some(Framing::Whole));
 
-        let wire = bincode::serialize(&TransportMessage::Custom(vec![0u8; payload_len])).unwrap();
+        let wire =
+            rings_codec::serialize(&TransportMessage::Custom(vec![0u8; payload_len])).unwrap();
         assert!(
             wire.len() <= limit,
             "whole wire {} exceeds limit {}",
@@ -635,7 +653,7 @@ pub mod test {
         let payload2: MessagePayload = gzipped_encoded_payload.decode().unwrap();
         assert_eq!(payload, payload2);
 
-        let gunzip_encoded_payload = payload.to_bincode().unwrap().encode().unwrap();
+        let gunzip_encoded_payload = payload.to_wire().unwrap().encode().unwrap();
         let payload2: MessagePayload = gunzip_encoded_payload.decode().unwrap();
         assert_eq!(payload, payload2);
     }
@@ -648,14 +666,14 @@ pub mod test {
         let data1 = data;
         let msg1 = Message::custom(&data1).unwrap();
         let payload1 = new_payload(msg1, next_hop);
-        let bytes1 = payload1.to_bincode().unwrap();
+        let bytes1 = payload1.to_wire().unwrap();
         let encoded1 = payload1.encode().unwrap();
         let encoded_bytes1: Vec<u8> = encoded1.into();
 
         let data2 = data.repeat(2);
         let msg2 = Message::custom(&data2).unwrap();
         let payload2 = new_payload(msg2, next_hop);
-        let bytes2 = payload2.to_bincode().unwrap();
+        let bytes2 = payload2.to_wire().unwrap();
         let encoded2 = payload2.encode().unwrap();
         let encoded_bytes2: Vec<u8> = encoded2.into();
 

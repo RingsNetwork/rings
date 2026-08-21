@@ -690,6 +690,17 @@ impl Processor {
         .map_err(Error::EntryError)
     }
 
+    /// Compact observed data in an entry on DHT storage.
+    pub async fn storage_compact_data(&self, topic: &str, removals: Vec<Encoded>) -> Result<()> {
+        <Swarm as ChordStorageInterface<DATA_REDUNDANT>>::storage_compact_data(
+            &self.swarm,
+            topic,
+            removals,
+        )
+        .await
+        .map_err(Error::EntryError)
+    }
+
     /// Return local measurement counters for a peer, if observed.
     pub async fn peer_measurement(&self, did: Did) -> Option<PeerMeasurement> {
         self.swarm.peer_measurement(did).await

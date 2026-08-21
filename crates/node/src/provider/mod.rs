@@ -14,6 +14,7 @@ use rings_core::measure::PeerMeasurement;
 use rings_core::session::SessionSkBuilder;
 use rings_core::storage::MemStorage;
 use rings_core::swarm::callback::SharedSwarmCallback;
+use rings_core::swarm::callback::SwarmCallback;
 use rings_rpc::protos::rings_node_handler::InternalRpcHandler;
 
 use crate::error::Error;
@@ -64,6 +65,10 @@ pub enum Signer {
     /// Async signer
     Async(AsyncSigner),
 }
+
+struct NoopSwarmCallback;
+
+impl SwarmCallback for NoopSwarmCallback {}
 
 #[allow(dead_code)]
 impl Provider {
@@ -243,6 +248,13 @@ impl Provider {
         self.processor
             .swarm
             .set_callback(callback)
+            .map_err(Error::InternalError)
+    }
+
+    pub(crate) fn clear_swarm_callback_internal(&self) -> Result<()> {
+        self.processor
+            .swarm
+            .set_callback(Arc::new(NoopSwarmCallback))
             .map_err(Error::InternalError)
     }
 

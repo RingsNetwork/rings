@@ -11,7 +11,7 @@ use crate::error::Result;
 pub struct PublicKey<const SIZE: usize>(pub [u8; SIZE]);
 
 struct PublicKeyVisitor<const SIZE: usize>;
-// /// twist from https://docs.rs/libsecp256k1/latest/src/libsecp256k1/lib.rs.html#335-344
+// /// twist handling reference for compressed elliptic-curve public keys.
 impl<const SIZE: usize> Serialize for PublicKey<SIZE> {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where S: serde::ser::Serializer {

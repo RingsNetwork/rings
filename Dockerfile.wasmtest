@@ -8,11 +8,13 @@
 #             --features browser_chrome_test --no-default-features"
 FROM rust:1.88-bookworm
 
+ARG WASM_PACK_VERSION=0.15.0
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        chromium chromium-driver protobuf-compiler ca-certificates curl \
+        chromium chromium-driver ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-RUN curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+RUN cargo install wasm-pack --version "$WASM_PACK_VERSION" --locked
 RUN rustup target add wasm32-unknown-unknown
 
 # wasm-pack/wasm-bindgen-test-runner locate the browser/driver via these.

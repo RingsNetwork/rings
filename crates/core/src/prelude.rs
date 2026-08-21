@@ -4,7 +4,6 @@ pub use async_trait;
 pub use base58;
 pub use dashmap;
 pub use futures;
-pub use libsecp256k1;
 pub use url;
 pub use uuid;
 

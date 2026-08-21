@@ -613,7 +613,7 @@ mod tests {
                             session: key.session,
                             initiator: key.initiator,
                         };
-                        return bincode::serialize(&feedback)
+                        return rings_codec::serialize(&feedback)
                             .map(Bytes::from)
                             .map(|payload| vec![payload])
                             .map_err(|_| Error::EncodeError);
@@ -799,7 +799,7 @@ mod tests {
             .map_err(|_| Error::Lock)?
             .insert(TCP.to_string(), runner);
         let from: Did = SecretKey::random().address().into();
-        let open = bincode::serialize(&Frame::Open {
+        let open = rings_codec::serialize(&Frame::Open {
             session: SessionId(0),
             service: "web".to_string(),
         })
@@ -857,7 +857,7 @@ mod tests {
 
         assert_eq!(feedback.len(), 1);
         assert!(matches!(
-            bincode::deserialize::<RelayCommand<SocketAddr>>(feedback[0].as_ref()),
+            rings_codec::deserialize::<RelayCommand<SocketAddr>>(feedback[0].as_ref()),
             Ok(RelayCommand::Untrack {
                 peer: actual_peer,
                 session: SessionId(9),

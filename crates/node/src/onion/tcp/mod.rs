@@ -94,7 +94,7 @@ fn encode_tcp_payload(
     service: &OnionServiceName,
     payload: OnionTcpPayload,
 ) -> Result<OnionCircuitPayload> {
-    bincode::serialize(&payload)
+    rings_codec::serialize(&payload)
         .map(|body| OnionCircuitPayload::new(service.clone(), Bytes::from(body)))
         .map_err(|_| Error::EncodeError)
 }
@@ -106,7 +106,7 @@ fn decode_tcp_payload_for_service(
     if !payload.is_service(service) {
         return Ok(None);
     }
-    bincode::deserialize(payload.body.as_ref())
+    rings_codec::deserialize(payload.body.as_ref())
         .map(Some)
         .map_err(|_| Error::DecodeError)
 }

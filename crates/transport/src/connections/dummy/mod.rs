@@ -492,7 +492,7 @@ impl ConnectionInterface for DummyConnection {
         }
         SENT_COUNT.with(|c| c.set(c.get() + 1));
 
-        let data = bincode::serialize(&msg).map(Bytes::from)?;
+        let data = rings_codec::serialize(&msg).map(Bytes::from)?;
         if DROP_MESSAGES.with(|drop| drop.get()) {
             return Ok(Box::pin(async { Ok(()) }));
         }

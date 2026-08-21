@@ -78,6 +78,14 @@ pub enum EntryOperation {
     /// otherwise the receiver tombstones currently observed dots with matching
     /// payload bytes.
     Tombstone(Entry),
+    /// Compact a Data kind entry after removing listed payload bytes.
+    ///
+    /// The receiver computes the compacted live set from its current local
+    /// entry, not from a sender snapshot. This preserves concurrent live writes
+    /// already observed by the storage owner. The operation carries one
+    /// source-stamped register floor shared by every replica, so divergent
+    /// storage owners stay join-compatible after compaction.
+    CompactData(Entry),
 }
 
 /// A storage operation targeted at one concrete affine placement key.
@@ -313,6 +321,9 @@ impl EntryOperation {
             )?),
             EntryOperation::JoinSubring(name, did) => EntryOperation::JoinSubring(name, did),
             EntryOperation::Tombstone(entry) => EntryOperation::Tombstone(entry),
+            EntryOperation::CompactData(entry) => {
+                EntryOperation::CompactData(entry.ensure_overwrite_stamp_after(actor, None)?)
+            }
         })
     }
 
@@ -324,6 +335,7 @@ impl EntryOperation {
             EntryOperation::Touch(entry) => entry.did,
             EntryOperation::JoinSubring(name, _) => Entry::gen_did(name)?,
             EntryOperation::Tombstone(entry) => entry.did,
+            EntryOperation::CompactData(entry) => entry.did,
         })
     }
 
@@ -335,6 +347,7 @@ impl EntryOperation {
             EntryOperation::Touch(entry) => entry.kind,
             EntryOperation::JoinSubring(..) => EntryKind::Subring,
             EntryOperation::Tombstone(entry) => entry.kind,
+            EntryOperation::CompactData(entry) => entry.kind,
         }
     }
 
@@ -423,7 +436,7 @@ impl Entry {
             did: self.did,
             data: &self.data,
         };
-        let bytes = bincode::serialize(&digest).map_err(Error::BincodeSerialize)?;
+        let bytes = rings_codec::serialize(&digest).map_err(Error::CodecSerialize)?;
         Did::try_from(HashStr::from_bytes(&bytes))
     }
 
@@ -437,11 +450,23 @@ impl Entry {
         floor: Option<EntryVersion>,
         kind: EntryStampKind,
     ) -> Result<Self> {
-        if self.crdt.has_write_witness() {
-            return Ok(self);
+        match self.crdt.has_write_witness() {
+            true => Ok(self),
+            false => {
+                let version = self.issue_version_after(actor, floor)?;
+                self.stamp(version, kind)
+            }
         }
-        let version = self.issue_version_after(actor, floor)?;
-        self.stamp(version, kind)
+    }
+
+    fn ensure_overwrite_stamp_after(self, actor: Did, floor: Option<EntryVersion>) -> Result<Self> {
+        match self.crdt.register.is_some() {
+            true => Ok(self),
+            false => {
+                let version = self.issue_version_after(actor, floor)?;
+                self.stamp_overwrite(version)
+            }
+        }
     }
 
     fn max_observed_version(&self) -> Option<EntryVersion> {
@@ -560,6 +585,78 @@ impl Entry {
         )
     }
 
+    fn compacted_data_dot(floor: EntryVersion, value: &Encoded) -> Result<EntryDot> {
+        let operation = Did::try_from(HashStr::from_bytes(value.value().as_bytes()))?;
+        let version =
+            EntryVersion::new(floor.logical_time_ms, floor.actor, operation).after(Some(floor));
+        EntryDot::for_index(version, 0)
+    }
+
+    fn compact_data_element(
+        floor: EntryVersion,
+        removal_values: &BTreeSet<Encoded>,
+        value: Encoded,
+        dot: EntryDot,
+    ) -> Result<Option<(Encoded, EntryDot)>> {
+        match dot.version < floor {
+            true if removal_values.contains(&value) => Ok(None),
+            true => Self::compacted_data_dot(floor, &value).map(|dot| Some((value, dot))),
+            false => Ok(Some((value, dot))),
+        }
+    }
+
+    fn data_compaction_candidates(
+        payload_order: &[Encoded],
+        live_values: BTreeMap<Encoded, EntryDot>,
+    ) -> Vec<(Encoded, EntryDot)> {
+        let (ordered_values, remaining_values) = payload_order.iter().fold(
+            (Vec::new(), live_values),
+            |(mut ordered, mut remaining), value| {
+                if let Some(dot) = remaining.remove(value) {
+                    ordered.push((value.clone(), dot));
+                }
+                (ordered, remaining)
+            },
+        );
+        ordered_values.into_iter().chain(remaining_values).collect()
+    }
+
+    fn compact_data_elements(
+        floor: EntryVersion,
+        removal_values: &BTreeSet<Encoded>,
+        values: impl IntoIterator<Item = (Encoded, EntryDot)>,
+    ) -> Result<Vec<(Encoded, EntryDot)>> {
+        values.into_iter().try_fold(
+            Vec::new(),
+            |mut elements, (value, dot)| -> Result<Vec<(Encoded, EntryDot)>> {
+                match Self::compact_data_element(floor, removal_values, value, dot)? {
+                    Some(element) => {
+                        elements.push(element);
+                        Ok(elements)
+                    }
+                    None => Ok(elements),
+                }
+            },
+        )
+    }
+
+    fn compact_data_output_floor(
+        current_floor: Option<EntryVersion>,
+        operation_floor: EntryVersion,
+    ) -> EntryVersion {
+        current_floor.map_or(operation_floor, |current| current.max(operation_floor))
+    }
+
+    fn compact_data_tombstones(
+        floor: EntryVersion,
+        tombstones: BTreeSet<EntryDot>,
+    ) -> BTreeSet<EntryDot> {
+        tombstones
+            .into_iter()
+            .filter(|dot| dot.version >= floor)
+            .collect()
+    }
+
     fn join_subring_entry(&self, other: &Self) -> Result<Self> {
         let members = self.subring_member_set()?.join(other.subring_member_set()?);
         let mut subring: Subring = self.clone().try_into()?;
@@ -657,6 +754,7 @@ impl Entry {
             EntryOperation::Touch(entry) => self.touch(entry, actor),
             EntryOperation::JoinSubring(_, did) => self.join_subring(did),
             EntryOperation::Tombstone(entry) => self.tombstone(entry),
+            EntryOperation::CompactData(entry) => self.compact_data(entry, actor),
         }
     }
 
@@ -759,6 +857,43 @@ impl Entry {
             }
             EntryKind::Subring => Err(Error::EntryNotTombstonable),
         }
+    }
+
+    /// Compact a Data kind entry using the receiver's current visible payloads.
+    ///
+    /// Pre: `removals` names the same Data carrier as `self`.
+    /// Post: every current visible payload not listed in `removals` is preserved
+    /// under the greatest observed register floor, and older tombstone metadata
+    /// is pruned by that floor.
+    pub fn compact_data(&self, removals: Self, actor: Did) -> Result<Self> {
+        match self.is_data_entry() {
+            true => self.compact_data_entry(removals, actor),
+            false => Err(Error::EntryNotOverwritable),
+        }
+    }
+
+    fn compact_data_entry(&self, removals: Self, actor: Did) -> Result<Self> {
+        let removals = removals.ensure_overwrite_stamp_after(actor, self.max_observed_version())?;
+        self.validate_same_carrier(&removals)?;
+        let floor = removals.crdt.register.ok_or_else(|| {
+            Error::InvalidMessage("compact data operation has no register floor".to_string())
+        })?;
+        let removal_values = removals.data.into_iter().collect::<BTreeSet<_>>();
+        let buffer = self.topic_buffer()?;
+        let output_floor = Self::compact_data_output_floor(self.crdt.register, floor);
+        let elements = Self::compact_data_elements(
+            floor,
+            &removal_values,
+            Self::data_compaction_candidates(&self.data, buffer.values),
+        )?;
+        let tombstones = Self::compact_data_tombstones(output_floor, buffer.removes);
+        Ok(Self::materialize_elements(
+            self.did,
+            EntryKind::Data,
+            Some(output_floor),
+            elements,
+            tombstones,
+        ))
     }
 }
 

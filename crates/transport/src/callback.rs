@@ -55,7 +55,7 @@ impl InnerTransportCallback {
 
     /// This method is invoked on a binary message arrival over the data channel of webrtc.
     pub async fn on_message(&self, msg: &Bytes) {
-        match bincode::deserialize(msg) {
+        match rings_codec::deserialize(msg) {
             Ok(m) => self.handle_message(&m).await,
             Err(e) => {
                 tracing::error!("Deserialize DataChannelMessage failed: {e:?}");

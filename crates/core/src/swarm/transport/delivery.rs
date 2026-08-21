@@ -291,7 +291,7 @@ pub(super) fn spawn_delivery(
 /// Frame one chunk into the bytes a data-channel send carries: wrap it in a `MessagePayload`
 /// addressed to `did` and serialize it. Pure (the only failure is serialization).
 pub(super) fn frame_chunk(session_sk: &SessionSk, did: Did, chunk: Chunk) -> Result<Bytes> {
-    MessagePayload::new_send(Message::Chunk(chunk), session_sk, did, did)?.to_bincode()
+    MessagePayload::new_send(Message::Chunk(chunk), session_sk, did, did)?.to_wire()
 }
 
 /// The *tail* of a chunked message — every chunk after the first — yielded lazily. Boxed so the

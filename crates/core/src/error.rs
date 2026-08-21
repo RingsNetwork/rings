@@ -200,13 +200,13 @@ pub enum Error {
     #[error("JSON deserialization error")]
     Deserialize(#[source] serde_json::Error),
 
-    /// Bincode serialization error
-    #[error("Bincode serialization error")]
-    BincodeSerialize(#[source] bincode::Error),
+    /// Codec serialization error
+    #[error("Codec serialization error")]
+    CodecSerialize(#[source] rings_codec::Error),
 
-    /// Bincode deserialization error
-    #[error("Bincode deserialization error")]
-    BincodeDeserialize(#[source] bincode::Error),
+    /// Codec deserialization error
+    #[error("Codec deserialization error")]
+    CodecDeserialize(#[source] rings_codec::Error),
 
     /// Unknown account
     #[error("Unknown account")]
@@ -243,22 +243,6 @@ pub enum Error {
     /// Ice server get url without host
     #[error("Ice server get url without host")]
     IceServerURLMissHost,
-
-    /// Libsecp256k1 error
-    #[error("Libsecp256k1 error")]
-    Libsecp256k1Error(#[from] libsecp256k1::Error),
-
-    /// Signature standard parse failed, {0}
-    #[error("Signature standard parse failed, {0}")]
-    Libsecp256k1SignatureParseStandard(String),
-
-    /// RecoverId parse failed, {0}
-    #[error("RecoverId parse failed, {0}")]
-    Libsecp256k1RecoverIdParse(String),
-
-    /// Libsecp256k1 recover failed
-    #[error("Libsecp256k1 recover failed")]
-    Libsecp256k1Recover,
 
     /// Cannot find next node by local DHT
     #[error("Cannot find next node by local DHT")]
@@ -564,11 +548,6 @@ pub enum Error {
     /// Invalid capacity value
     #[error("Invalid capacity value")]
     InvalidCapacity,
-
-    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-    /// Sled error, {0}
-    #[error("Sled error, {0}")]
-    SledError(sled::Error),
 
     /// entry not found
     #[error("entry not found")]

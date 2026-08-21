@@ -474,7 +474,7 @@ async fn pending_callback_messages_do_not_dispatch_before_admission() -> Result<
         transport.dht.did,
         transport.dht.did,
     )?;
-    let bytes = payload.to_bincode()?;
+    let bytes = payload.to_wire()?;
 
     pending_callback
         .on_message(&peer.to_string(), &bytes)
@@ -895,7 +895,7 @@ async fn malformed_outbound_payload_is_rejected_before_connection_admission() ->
 
     assert!(matches!(
         transport.send_payload(payload).await,
-        Err(Error::BincodeDeserialize(_))
+        Err(Error::CodecDeserialize(_))
     ));
     Ok(())
 }

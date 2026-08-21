@@ -112,12 +112,12 @@ where
 }
 
 pub(crate) fn encode_descriptor<T: Serialize>(descriptor: &T) -> Result<Encoded> {
-    bincode::serialize(descriptor)
-        .map_err(Error::BincodeSerialize)?
+    rings_codec::serialize(descriptor)
+        .map_err(Error::CodecSerialize)?
         .encode()
 }
 
 pub(crate) fn decode_descriptor<T: DeserializeOwned>(encoded: &Encoded) -> Result<T> {
     let data: Vec<u8> = encoded.decode()?;
-    bincode::deserialize(&data).map_err(Error::BincodeDeserialize)
+    rings_codec::deserialize(&data).map_err(Error::CodecDeserialize)
 }

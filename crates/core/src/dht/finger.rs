@@ -2,7 +2,6 @@
 
 #![deny(missing_docs)]
 
-use derivative::Derivative;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -14,15 +13,21 @@ pub const DEFAULT_FINGER_TABLE_SIZE: usize = 160;
 
 /// Finger table of Chord DHT
 /// Ring's finger table is implemented with BiasRing
-#[derive(Derivative, Clone, Debug, Serialize, Deserialize)]
-#[derivative(PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FingerTable {
     did: Did,
     size: usize,
     finger: Vec<Option<Did>>,
-    #[derivative(PartialEq = "ignore")]
     pub(super) fix_finger_index: usize,
 }
+
+impl PartialEq for FingerTable {
+    fn eq(&self, other: &Self) -> bool {
+        self.did == other.did && self.size == other.size && self.finger == other.finger
+    }
+}
+
+impl Eq for FingerTable {}
 
 impl FingerTable {
     /// builder

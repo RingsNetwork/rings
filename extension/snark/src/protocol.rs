@@ -114,11 +114,11 @@ impl Protocol for SnarkProtocol {
 
     fn decode(&self, wire: Wire<'_>) -> Result<SnarkEvent, Reject> {
         if wire.from == wire.me {
-            let result = bincode::deserialize::<ComputeResult>(wire.payload)
+            let result = rings_codec::deserialize::<ComputeResult>(wire.payload)
                 .map_err(|e| Reject(format!("bad snark result: {e}")))?;
             Ok(SnarkEvent::Result(result))
         } else {
-            let msg = bincode::deserialize::<SNARKTaskMessage>(wire.payload)
+            let msg = rings_codec::deserialize::<SNARKTaskMessage>(wire.payload)
                 .map_err(|e| Reject(format!("bad snark task: {e}")))?;
             Ok(SnarkEvent::Task {
                 from: wire.from,
@@ -171,7 +171,7 @@ impl SnarkShell {
     /// Serialize a [`ComputeResult`] for re-injection as a self-event for the pure `step`. The
     /// router re-delivers it to this same namespace with `from = this node`.
     fn reinject(&self, result: &ComputeResult) -> rings_node::error::Result<Vec<Bytes>> {
-        let payload = bincode::serialize(result).map_err(|_| Error::EncodeError)?;
+        let payload = rings_codec::serialize(result).map_err(|_| Error::EncodeError)?;
         Ok(vec![Bytes::from(payload)])
     }
 }
@@ -188,7 +188,7 @@ impl Interpret for SnarkShell {
     ) -> rings_node::error::Result<Vec<Bytes>> {
         match effect {
             SnarkEffect::SendTask { to, msg } => {
-                let payload = bincode::serialize(&msg).map_err(|_| Error::EncodeError)?;
+                let payload = rings_codec::serialize(&msg).map_err(|_| Error::EncodeError)?;
                 scope.send(to, Bytes::from(payload)).await?;
                 Ok(Vec::new())
             }

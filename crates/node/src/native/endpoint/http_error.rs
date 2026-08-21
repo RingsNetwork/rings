@@ -19,14 +19,8 @@ impl IntoResponse for HttpError {
     }
 }
 
-impl From<hyper::Error> for HttpError {
-    fn from(_: hyper::Error) -> Self {
-        HttpError::Internal
-    }
-}
-
-impl From<hyper::http::Error> for HttpError {
-    fn from(_: hyper::http::Error) -> Self {
+impl From<axum::http::Error> for HttpError {
+    fn from(_: axum::http::Error) -> Self {
         HttpError::Internal
     }
 }

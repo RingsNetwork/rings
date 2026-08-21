@@ -146,7 +146,7 @@ struct OnlineNodeDescriptorBodyRef<'a> {
 
 impl OnlineNodeDescriptorBodyRef<'_> {
     fn signing_data(&self) -> Result<Vec<u8>> {
-        bincode::serialize(self).map_err(Error::BincodeSerialize)
+        rings_codec::serialize(self).map_err(Error::CodecSerialize)
     }
 }
 

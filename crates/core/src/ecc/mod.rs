@@ -1,10 +1,17 @@
 //! ECDSA, EdDSA, and ElGamal
 use std::convert::TryFrom;
-use std::ops::Deref;
 use std::str::FromStr;
 
 use ethereum_types::H160;
 use hex;
+use k256::ecdsa::RecoveryId;
+use k256::ecdsa::Signature as K256Signature;
+use k256::ecdsa::SigningKey as K256SigningKey;
+use k256::ecdsa::VerifyingKey as K256VerifyingKey;
+use k256::AffinePoint as K256AffinePoint;
+use k256::PublicKey as K256PublicKey;
+use k256::Scalar as K256Scalar;
+use k256::SecretKey as K256SecretKey;
 use rand::SeedableRng;
 use rand_hc::Hc128Rng;
 use serde::Deserialize;
@@ -25,7 +32,9 @@ use elliptic_curve::generic_array::typenum::U32;
 use elliptic_curve::generic_array::GenericArray;
 use elliptic_curve::point::AffineCoordinates;
 use elliptic_curve::point::DecompressPoint;
+use elliptic_curve::sec1::ToEncodedPoint;
 use elliptic_curve::FieldBytes;
+use elliptic_curve::PrimeField as _;
 pub use group::*;
 pub use keys::*;
 use p256::NistP256;
@@ -41,10 +50,18 @@ pub type CurveEle<const SIZE: usize> = PublicKey<SIZE>;
 /// PublicKeyAddress is H160.
 pub type PublicKeyAddress = H160;
 
-/// Wrap libsecp256k1::SecretKey.
-/// which is a A 256-bit scalar value, present as [u32; 4]
-#[derive(PartialEq, Eq, Debug, Clone, Copy)]
-pub struct SecretKey(libsecp256k1::SecretKey);
+/// Secp256k1 secret key bytes.
+///
+/// The bytes are validated at construction time and stay in the canonical
+/// external format used by existing configs and DIDs.
+#[derive(PartialEq, Eq, Clone, Copy)]
+pub struct SecretKey([u8; 32]);
+
+impl std::fmt::Debug for SecretKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("SecretKey").field(&"<redacted>").finish()
+    }
+}
 
 /// Wrap String into HashStr.
 #[derive(Deserialize, Serialize, Debug, Clone, Eq, PartialEq)]
@@ -80,24 +97,10 @@ impl HashStr {
     }
 }
 
-impl Deref for SecretKey {
-    type Target = libsecp256k1::SecretKey;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl From<SecretKey> for libsecp256k1::SecretKey {
-    fn from(key: SecretKey) -> Self {
-        *key.deref()
-    }
-}
-
-impl TryFrom<PublicKey<33>> for libsecp256k1::PublicKey {
+impl TryFrom<PublicKey<33>> for K256PublicKey {
     type Error = Error;
     fn try_from(key: PublicKey<33>) -> Result<Self> {
-        let data: [u8; 33] = key.0;
-        Self::parse_compressed(&data).map_err(|_| Error::ECDSAPublicKeyBadFormat)
+        Self::from_sec1_bytes(&key.0).map_err(|_| Error::ECDSAPublicKeyBadFormat)
     }
 }
 
@@ -170,42 +173,52 @@ impl From<ed25519_dalek::VerifyingKey> for PublicKey<33> {
     }
 }
 
-impl TryFrom<PublicKey<33>> for libsecp256k1::curve::Affine {
+impl TryFrom<PublicKey<33>> for K256AffinePoint {
     type Error = Error;
     fn try_from(key: PublicKey<33>) -> Result<Self> {
-        Ok(TryInto::<libsecp256k1::PublicKey>::try_into(key)?.into())
+        Ok(TryInto::<K256PublicKey>::try_into(key)?
+            .to_projective()
+            .to_affine())
     }
 }
 
-impl TryFrom<libsecp256k1::curve::Affine> for PublicKey<33> {
+impl TryFrom<K256AffinePoint> for PublicKey<33> {
     type Error = Error;
-    fn try_from(a: libsecp256k1::curve::Affine) -> Result<Self> {
-        let pubkey: libsecp256k1::PublicKey = a.try_into().map_err(|_| Error::InvalidPublicKey)?;
-        Ok(pubkey.into())
+    fn try_from(a: K256AffinePoint) -> Result<Self> {
+        let encoded = a.to_encoded_point(true);
+        let data: [u8; 33] = encoded
+            .as_bytes()
+            .try_into()
+            .map_err(|_| Error::InvalidPublicKey)?;
+        Ok(Self(data))
     }
 }
 
-impl From<SecretKey> for libsecp256k1::curve::Scalar {
-    fn from(key: SecretKey) -> libsecp256k1::curve::Scalar {
-        key.0.into()
+impl From<K256PublicKey> for PublicKey<33> {
+    fn from(key: K256PublicKey) -> Self {
+        let encoded = key.to_encoded_point(true);
+        let mut data = [0u8; 33];
+        if encoded.as_bytes().len() == data.len() {
+            data.copy_from_slice(encoded.as_bytes());
+        }
+        Self(data)
     }
 }
 
-impl From<libsecp256k1::SecretKey> for SecretKey {
-    fn from(key: libsecp256k1::SecretKey) -> Self {
-        Self(key)
-    }
-}
-
-impl From<libsecp256k1::PublicKey> for PublicKey<33> {
-    fn from(key: libsecp256k1::PublicKey) -> Self {
-        Self(key.serialize_compressed())
+impl From<K256VerifyingKey> for PublicKey<33> {
+    fn from(key: K256VerifyingKey) -> Self {
+        let encoded = key.to_encoded_point(true);
+        let mut data = [0u8; 33];
+        if encoded.as_bytes().len() == data.len() {
+            data.copy_from_slice(encoded.as_bytes());
+        }
+        Self(data)
     }
 }
 
 impl From<SecretKey> for PublicKey<33> {
     fn from(secret_key: SecretKey) -> Self {
-        libsecp256k1::PublicKey::from_secret_key(&secret_key.0).into()
+        secret_key.pubkey()
     }
 }
 
@@ -223,7 +236,7 @@ impl TryFrom<&str> for SecretKey {
     fn try_from(s: &str) -> Result<Self> {
         let key = hex::decode(s)?;
         let key_arr: [u8; 32] = key.as_slice().try_into()?;
-        Ok(libsecp256k1::SecretKey::parse(&key_arr)?.into())
+        Self::from_bytes(key_arr)
     }
 }
 
@@ -238,7 +251,7 @@ impl std::str::FromStr for SecretKey {
 #[allow(clippy::to_string_trait_impl)]
 impl ToString for SecretKey {
     fn to_string(&self) -> String {
-        hex::encode(self.0.serialize())
+        hex::encode(self.0)
     }
 }
 
@@ -271,29 +284,39 @@ impl Serialize for SecretKey {
 }
 
 fn public_key_address(pubkey: &PublicKey<33>) -> PublicKeyAddress {
-    let hash = match TryInto::<libsecp256k1::PublicKey>::try_into(*pubkey) {
+    let hash = match TryInto::<K256PublicKey>::try_into(*pubkey) {
         // if pubkey is ecdsa key
         Ok(pk) => {
-            let data = pk.serialize();
-            debug_assert_eq!(data[0], 0x04);
-            keccak256(&data[1..])
+            let data = pk.to_encoded_point(false);
+            let data = data.as_bytes();
+            debug_assert_eq!(data.first(), Some(&0x04));
+            keccak256(data.get(1..).unwrap_or_default())
         }
         // if pubkey is eddsa key
-        Err(_) => keccak256(&pubkey.0[1..]),
+        Err(_) => keccak256(pubkey.0.get(1..).unwrap_or_default()),
     };
     PublicKeyAddress::from_slice(&hash[12..])
 }
 
 fn secret_key_address(secret_key: &SecretKey) -> PublicKeyAddress {
-    let public_key = libsecp256k1::PublicKey::from_secret_key(secret_key);
-    public_key_address(&public_key.into())
+    secret_key.pubkey().address()
 }
 
 impl SecretKey {
+    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Result<Self> {
+        K256SecretKey::from_slice(&bytes).map_err(|_| Error::PrivateKeyBadFormat)?;
+        Ok(Self(bytes))
+    }
+
+    pub(crate) fn secp256k1_scalar(&self) -> K256Scalar {
+        Option::<K256Scalar>::from(K256Scalar::from_repr(self.0.into())).unwrap_or(K256Scalar::ONE)
+    }
+
     /// Generate a random secp256k1 secret key.
     pub fn random() -> Self {
         let mut rng = Hc128Rng::from_entropy();
-        Self(libsecp256k1::SecretKey::random(&mut rng))
+        let bytes = K256SecretKey::random(&mut rng).to_bytes();
+        Self(bytes.into())
     }
 
     /// Derive the Ethereum-style address for this secret key.
@@ -314,23 +337,31 @@ impl SecretKey {
 
     /// Sign an already computed 32-byte message hash.
     pub fn sign_hash(&self, message_hash: &[u8; 32]) -> SigBytes {
-        let (signature, recover_id) =
-            libsecp256k1::sign(&libsecp256k1::Message::parse(message_hash), self);
+        let signing_key = match K256SigningKey::from_slice(&self.0) {
+            Ok(signing_key) => signing_key,
+            Err(_) => return [0u8; 65],
+        };
+        let (signature, recover_id) = match signing_key.sign_prehash_recoverable(message_hash) {
+            Ok(signature) => signature,
+            Err(_) => return [0u8; 65],
+        };
         let mut sig_bytes: SigBytes = [0u8; 65];
-        sig_bytes[0..32].copy_from_slice(&signature.r.b32());
-        sig_bytes[32..64].copy_from_slice(&signature.s.b32());
-        sig_bytes[64] = recover_id.serialize();
+        sig_bytes[0..64].copy_from_slice(signature.to_bytes().as_slice());
+        sig_bytes[64] = recover_id.to_byte();
         sig_bytes
     }
 
     /// Derive the compressed public key for this secret key.
     pub fn pubkey(&self) -> PublicKey<33> {
-        libsecp256k1::PublicKey::from_secret_key(&(*self).into()).into()
+        match K256SecretKey::from_slice(&self.0) {
+            Ok(secret_key) => secret_key.public_key().into(),
+            Err(_) => PublicKey([0u8; 33]),
+        }
     }
 
     /// Serialize this secret key into its 32-byte representation.
     pub fn ser(&self) -> [u8; 32] {
-        self.0.serialize()
+        self.0
     }
 }
 
@@ -353,15 +384,14 @@ where S: AsRef<[u8]> {
 pub fn recover_hash(message_hash: &[u8; 32], sig: &[u8; 65]) -> Result<PublicKey<33>> {
     let r_s_signature: [u8; 64] = sig[..64].try_into()?;
     let recovery_id: u8 = sig[64];
-    Ok(libsecp256k1::recover(
-        &libsecp256k1::Message::parse(message_hash),
-        &libsecp256k1::Signature::parse_standard(&r_s_signature)
-            .map_err(|e| Error::Libsecp256k1SignatureParseStandard(e.to_string()))?,
-        &libsecp256k1::RecoveryId::parse(recovery_id)
-            .map_err(|e| Error::Libsecp256k1RecoverIdParse(e.to_string()))?,
+    let signature = K256Signature::try_from(r_s_signature.as_slice()).map_err(Error::ECDSAError)?;
+    let recovery_id =
+        RecoveryId::from_byte(recovery_id).ok_or(Error::InvalidRecoverId(recovery_id))?;
+    Ok(
+        K256VerifyingKey::recover_from_prehash(message_hash, &signature, recovery_id)
+            .map_err(Error::ECDSAError)?
+            .into(),
     )
-    .map_err(|_| Error::Libsecp256k1Recover)?
-    .into())
 }
 
 #[cfg(test)]
@@ -412,8 +442,8 @@ pub(crate) mod tests {
         let metamask_sig = Vec::from_hex("724fc31d9272b34d8406e2e3a12a182e72510b008de6cc44684577e31e20d9626fb760d6a0badd79a6cf4cd56b2fc0fbd60c438b809aa7d29bfb598c13e7b50e1b").unwrap();
         assert_eq!(metamask_sig.len(), 65);
         let h: [u8; 32] = sig_hash.as_slice().try_into().unwrap();
-        let (_, recover_id) = libsecp256k1::sign(&libsecp256k1::Message::parse(&h), key);
-        assert_eq!(recover_id.serialize(), 0);
+        let recover_id = key.sign_hash(&h)[64];
+        assert_eq!(recover_id, 0);
         let mut sig = key.sign_raw(&prefix_msg);
         sig[64] = 27;
         assert_eq!(sig, metamask_sig.as_slice());

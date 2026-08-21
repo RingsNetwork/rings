@@ -247,6 +247,9 @@ async fn online_node_publish_replaces_observed_self_records() -> Result<()> {
     let stored = Processor::online_node_descriptors_from_entry(&entry);
 
     assert_eq!(stored.len(), 2);
+    assert!(entry.crdt.register.is_some());
+    assert!(entry.crdt.tombstones.is_empty());
+    assert_eq!(entry.crdt.dots.len(), stored.len());
     assert_eq!(
         stored
             .iter()

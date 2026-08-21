@@ -784,7 +784,7 @@ fn sync_entries_batch_wire_cost_matches_serialized_message_cost() -> Result<()> 
         destination: StorageSyncDestination::PhysicalOwner(Did::from(50u32)),
         data: entries.clone(),
     });
-    let serialized_bytes = bincode::serialized_size(&message).map_err(Error::BincodeSerialize)?;
+    let serialized_bytes = rings_codec::serialized_size(&message).map_err(Error::CodecSerialize)?;
     let message_bytes =
         usize::try_from(serialized_bytes).map_err(|_| Error::MessageTooLarge(usize::MAX))?;
     let expected = message_bytes

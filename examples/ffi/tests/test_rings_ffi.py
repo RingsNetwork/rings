@@ -73,10 +73,12 @@ def test_header_loads_from_crate_owned_path():
 
     header = module.read_header()
     assert "rings_node_new_provider_with_callback" in header
-    assert "const char *rings_node_request" in header
+    assert "char *rings_node_request" in header
+    assert "rings_node_string_free" in header
+    assert "rings_node_provider_destroy" in header
 
     ffi = module.build_ffi()
-    assert ffi.typeof("struct ProviderPtr *")
+    assert ffi.typeof("struct ProviderHandle *")
 
 
 def test_signer_writes_a_65_byte_signature():
@@ -96,7 +98,6 @@ def test_signer_writes_a_65_byte_signature():
 def test_request_reports_null_ffi_return_as_runtime_error():
     module = load_example_module()
     ffi = module.build_ffi()
-    provider_storage = ffi.new("struct ProviderPtr *")
 
     class Rings:
         def rings_node_request(self, provider, method, data):
@@ -105,7 +106,29 @@ def test_request_reports_null_ffi_return_as_runtime_error():
     runtime = module.FfiRuntime(ffi=ffi, rings=Rings())
 
     with pytest.raises(RuntimeError, match=r"rings request 'nodeInfo' failed"):
-        module.request(runtime, provider_storage[0], "nodeInfo", {})
+        module.request(runtime, ffi.NULL, "nodeInfo", {})
+
+
+def test_request_frees_non_null_ffi_return():
+    module = load_example_module()
+    ffi = module.build_ffi()
+
+    class Rings:
+        def __init__(self):
+            self.response = ffi.new("char[]", b'{"ok":true}')
+            self.freed = []
+
+        def rings_node_request(self, provider, method, data):
+            return self.response
+
+        def rings_node_string_free(self, value):
+            self.freed.append(ffi.string(value))
+
+    rings = Rings()
+    runtime = module.FfiRuntime(ffi=ffi, rings=rings)
+
+    assert module.request(runtime, ffi.NULL, "nodeInfo", {}) == b'{"ok":true}'
+    assert rings.freed == [b'{"ok":true}']
 
 
 def test_create_provider_reports_null_provider_ptr_as_runtime_error():
@@ -127,7 +150,7 @@ def test_create_provider_reports_null_provider_ptr_as_runtime_error():
             account_type,
             signer,
         ):
-            return ffi.new("struct ProviderPtr *")[0]
+            return ffi.NULL
 
         def rings_node_listen(self, provider):
             pass
@@ -151,7 +174,10 @@ def test_provider_node_info_round_trip(ffi_runtime):
     account = Web3().eth.account.create()
     provider = module.create_provider(runtime, account)
 
-    result = module.request_json(runtime, provider, "nodeInfo", {})
+    try:
+        result = module.request_json(runtime, provider, "nodeInfo", {})
+    finally:
+        module.destroy_provider(runtime, provider)
 
     assert isinstance(result, dict)
     assert result
@@ -162,12 +188,15 @@ def test_create_offer_exercises_ffi_request_path(ffi_runtime):
     account = Web3().eth.account.create()
     provider = module.create_provider(runtime, account)
 
-    result = module.request_json(
-        runtime,
-        provider,
-        "createOffer",
-        {"did": "0x11E807fcc88dD319270493fB2e822e388Fe36ab0"},
-    )
+    try:
+        result = module.request_json(
+            runtime,
+            provider,
+            "createOffer",
+            {"did": "0x11E807fcc88dD319270493fB2e822e388Fe36ab0"},
+        )
+    finally:
+        module.destroy_provider(runtime, provider)
 
     assert isinstance(result, dict)
     assert isinstance(result.get("offer"), str)
@@ -178,54 +207,62 @@ def test_two_ffi_providers_connect_with_offer_answer(ffi_runtime):
     module, runtime = ffi_runtime
     provider_a = module.create_provider(runtime, Web3().eth.account.create())
     provider_b = module.create_provider(runtime, Web3().eth.account.create())
-    did_a = module.node_did(runtime, provider_a)
-    did_b = module.node_did(runtime, provider_b)
+    try:
+        did_a = module.node_did(runtime, provider_a)
+        did_b = module.node_did(runtime, provider_b)
 
-    module.connect_providers(runtime, provider_a, provider_b)
+        module.connect_providers(runtime, provider_a, provider_b)
 
-    assert module.peer_is_connected(runtime, provider_a, did_b)
-    assert module.peer_is_connected(runtime, provider_b, did_a)
+        assert module.peer_is_connected(runtime, provider_a, did_b)
+        assert module.peer_is_connected(runtime, provider_b, did_a)
+    finally:
+        module.destroy_provider(runtime, provider_a)
+        module.destroy_provider(runtime, provider_b)
 
 
 def test_two_ffi_providers_exchange_e2e_handshake_and_stream_frames(ffi_runtime):
     module, runtime = ffi_runtime
     provider_a = module.create_provider(runtime, Web3().eth.account.create())
     provider_b = module.create_provider(runtime, Web3().eth.account.create())
-    did_a = module.node_did(runtime, provider_a)
-    did_b = module.node_did(runtime, provider_b)
+    try:
+        did_a = module.node_did(runtime, provider_a)
+        did_b = module.node_did(runtime, provider_b)
 
-    module.connect_providers(runtime, provider_a, provider_b)
-    module.send_e2e_handshake(runtime, provider_a, did_b)
+        module.connect_providers(runtime, provider_a, provider_b)
+        module.send_e2e_handshake(runtime, provider_a, did_b)
 
-    request = module.wait_for_e2e_event(
-        runtime,
-        provider_b,
-        lambda event: event.get("kind") == "handshakeRequest"
-        and event.get("from") == did_a,
-    )
-    response = module.wait_for_e2e_event(
-        runtime,
-        provider_a,
-        lambda event: event.get("kind") == "handshakeResponse"
-        and event.get("from") == did_b,
-    )
+        request = module.wait_for_e2e_event(
+            runtime,
+            provider_b,
+            lambda event: event.get("kind") == "handshakeRequest"
+            and event.get("from") == did_a,
+        )
+        response = module.wait_for_e2e_event(
+            runtime,
+            provider_a,
+            lambda event: event.get("kind") == "handshakeResponse"
+            and event.get("from") == did_b,
+        )
 
-    assert request["public_key"]
-    assert response["public_key"]
+        assert request["public_key"]
+        assert response["public_key"]
 
-    stream_id = module.send_e2e_message(
-        runtime,
-        provider_a,
-        did_b,
-        response["public_key"],
-        b"ffi e2e encrypted stream body",
-        max_plaintext_frame_len=8,
-    )
-    frames = module.wait_for_e2e_stream(runtime, provider_b, stream_id)
-    sequences = sorted(frame["sequence"] for frame in frames)
+        stream_id = module.send_e2e_message(
+            runtime,
+            provider_a,
+            did_b,
+            response["public_key"],
+            b"ffi e2e encrypted stream body",
+            max_plaintext_frame_len=8,
+        )
+        frames = module.wait_for_e2e_stream(runtime, provider_b, stream_id)
+        sequences = sorted(frame["sequence"] for frame in frames)
 
-    assert len(frames) > 1
-    assert sequences == list(range(len(frames)))
-    assert sum(1 for frame in frames if frame["is_final"]) == 1
-    assert all(frame["from"] == did_a for frame in frames)
-    assert all(frame["ciphertext_blocks"] > 0 for frame in frames)
+        assert len(frames) > 1
+        assert sequences == list(range(len(frames)))
+        assert sum(1 for frame in frames if frame["is_final"]) == 1
+        assert all(frame["from"] == did_a for frame in frames)
+        assert all(frame["ciphertext_blocks"] > 0 for frame in frames)
+    finally:
+        module.destroy_provider(runtime, provider_a)
+        module.destroy_provider(runtime, provider_b)

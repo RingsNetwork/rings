@@ -9,10 +9,9 @@
 //! this Rust module.
 //!
 //! Primary Features:
-//! 1. **Provider Representation for FFI**: The module defines `ProviderPtr`, a struct that
-//!    serves as a C-compatible representation of the `Provider` type, allowing for interaction
-//!    with other languages through raw pointers. It abstracts the reference counting of
-//!    internal `Arc` components, ensuring memory safety across the boundary.
+//! 1. **Provider Representation for FFI**: The module defines `ProviderHandle`, an opaque,
+//!    destructible handle that owns the Rust provider resources behind a raw C pointer. Callers
+//!    never receive raw `Arc` ownership tokens.
 //!
 //! 2. **Message Callback for FFI**: The `SwarmCallbackInstanceFFI` struct serves as a bridge
 //!    for message callback functionalities between Rust and other languages. It can hold
@@ -34,7 +33,6 @@
 //!
 //! Please check python example at examples/ffi/rings.py
 
-use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::ffi::c_char;
 use std::ffi::CStr;
@@ -42,11 +40,11 @@ use std::ffi::CString;
 use std::ptr;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::OnceLock;
 
 use async_trait::async_trait;
 use futures::executor;
 use rings_core::ecc::PublicKey;
+use rings_core::lifecycle::StopSource;
 use rings_core::message::Message;
 use rings_core::message::MessagePayload;
 use rings_core::message::MessageVerificationExt;
@@ -63,8 +61,6 @@ use crate::extension::Backend;
 type FfiE2eInbox = Mutex<Vec<FfiE2eEvent>>;
 
 const FFI_SIGNATURE_LEN: usize = 65;
-
-static FFI_E2E_INBOXES: OnceLock<Mutex<HashMap<usize, Arc<FfiE2eInbox>>>> = OnceLock::new();
 
 #[derive(Clone, Debug, Serialize)]
 struct FfiE2eEvent {
@@ -152,186 +148,116 @@ fn public_key_json_string(public_key: PublicKey<33>) -> Result<String> {
     value.as_str().map(str::to_owned).ok_or(Error::InvalidData)
 }
 
-fn ffi_e2e_inboxes() -> &'static Mutex<HashMap<usize, Arc<FfiE2eInbox>>> {
-    FFI_E2E_INBOXES.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn provider_key(provider: &Arc<Provider>) -> usize {
-    Arc::as_ptr(provider) as usize
-}
-
-fn register_ffi_e2e_inbox(provider: &Arc<Provider>, inbox: Arc<FfiE2eInbox>) -> Result<()> {
-    ffi_e2e_inboxes()
-        .lock()
-        .map_err(|_| Error::Lock)?
-        .insert(provider_key(provider), inbox);
-    Ok(())
-}
-
-fn take_ffi_e2e_events(provider: &Arc<Provider>) -> Result<Vec<FfiE2eEvent>> {
-    let inbox = ffi_e2e_inboxes()
-        .lock()
-        .map_err(|_| Error::Lock)?
-        .get(&provider_key(provider))
-        .cloned()
-        .ok_or_else(|| Error::ExtensionError("missing FFI E2E inbox".to_string()))?;
-    let mut events = inbox.lock().map_err(|_| Error::Lock)?;
-    Ok(std::mem::take(&mut *events))
-}
-
-/// A structure to represent the Provider in a C-compatible format.
-/// This is necessary as using Arc directly in FFI can be unsafe.
-#[repr(C)]
-pub struct ProviderPtr {
-    provider: *const Provider,
-    runtime: *const Runtime,
-}
-
-impl ProviderPtr {
-    const fn null() -> Self {
-        Self {
-            provider: ptr::null(),
-            runtime: ptr::null(),
-        }
-    }
-}
-
-/// Provider with runtime
-/// cbindgen:field-names=[]
-pub(crate) struct ProviderWithRuntime {
+/// Opaque provider handle owned by the C ABI caller.
+///
+/// The handle owns ordinary Rust [`Arc`] values and is released exactly once by
+/// [`rings_node_provider_destroy`]. C callers must treat `ProviderHandle` as an
+/// incomplete type and must never inspect or copy its contents.
+pub struct ProviderHandle {
     provider: Arc<Provider>,
     runtime: Arc<Runtime>,
+    e2e_events: Arc<FfiE2eInbox>,
+    stop: StopSource,
+    listener_threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
 }
 
-impl ProviderWithRuntime {
-    /// Create a new instance of ProviderWithRuntime
-    pub fn new(p: Arc<Provider>, r: Arc<Runtime>) -> Self {
+impl ProviderHandle {
+    fn new(provider: Arc<Provider>, runtime: Arc<Runtime>, e2e_events: Arc<FfiE2eInbox>) -> Self {
         Self {
-            provider: p,
-            runtime: r,
+            provider,
+            runtime,
+            e2e_events,
+            stop: StopSource::new(),
+            listener_threads: Mutex::new(Vec::new()),
         }
     }
-}
 
-impl ProviderWithRuntime {
-    /// Converts a raw ProviderPtr pointer to a Rust Provider type.
-    /// # Safety
-    /// Unsafe due to the dereferencing of the raw pointer.
-    fn from_raw(ptr: *const ProviderPtr) -> Result<ProviderWithRuntime> {
-        // Check point here.
+    unsafe fn from_ptr<'a>(ptr: *const ProviderHandle) -> Result<&'a ProviderHandle> {
         if ptr.is_null() {
             return Err(Error::FFINulPtrError);
         }
 
-        let provider_ptr: &ProviderPtr = unsafe { &*ptr };
-        if provider_ptr.provider.is_null() || provider_ptr.runtime.is_null() {
-            return Err(Error::FFINulPtrError);
-        }
-        let provider: ProviderWithRuntime = provider_ptr.into();
-        // Avoid release here
-        provider.check_arc();
-        Ok(provider)
+        Ok(unsafe { &*ptr })
     }
 
-    /// Make sure there 1 at least 5 ref to keep arc onlive
-    pub fn check_arc(&self) {
-        let threshold = 5;
+    fn spawn_listener(&self) -> Result<()> {
+        let provider = self.provider.clone();
+        let runtime = self.runtime.clone();
+        let stop = self.stop.token();
+        let mut listener_threads = self.listener_threads.lock().map_err(|_| Error::Lock)?;
+        listener_threads.push(std::thread::spawn(move || {
+            runtime.block_on(async {
+                provider.listen_with(stop).await;
+            })
+        }));
+        Ok(())
+    }
 
-        let p_count = Arc::strong_count(&self.provider);
-        let r_count = Arc::strong_count(&self.runtime);
+    fn take_e2e_events(&self) -> Result<Vec<FfiE2eEvent>> {
+        let mut events = self.e2e_events.lock().map_err(|_| Error::Lock)?;
+        Ok(std::mem::take(&mut *events))
+    }
 
-        if p_count < threshold {
-            for _ in 0..threshold - p_count {
-                unsafe { self.increase_provider_count() };
+    fn shutdown(self) {
+        self.stop.request_stop();
+        let listener_threads = match self.listener_threads.into_inner() {
+            Ok(listener_threads) => listener_threads,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        for listener_thread in listener_threads {
+            if listener_thread.join().is_err() {
+                tracing::warn!("FFI provider listener thread panicked during shutdown");
             }
-            tracing::debug!("Arc<Provider> will be released when out of scope, increased")
         }
-
-        if r_count < threshold {
-            for _ in 0..threshold - r_count {
-                unsafe { self.increase_runtime_count() };
-            }
-            tracing::debug!("Arc<Runtime> will be released when out of scope, increased")
-        }
-    }
-
-    unsafe fn increase_provider_count(&self) {
-        tracing::debug!("Increment strong count on provider");
-        let p = Arc::into_raw(self.provider.clone());
-        Arc::increment_strong_count(p);
-    }
-
-    unsafe fn increase_runtime_count(&self) {
-        tracing::debug!("Decrement strong count on runtime");
-        let h = Arc::into_raw(self.runtime.clone());
-        Arc::increment_strong_count(h);
-    }
-}
-
-impl From<&ProviderPtr> for ProviderWithRuntime {
-    /// Converts a reference to a ProviderPtr to a Provider type.
-    /// Note that the conversion from raw pointers to Arcs does not modify the reference count.
-    /// # Safety
-    /// Unsafe due to the conversion from raw pointers to Arcs.
-    fn from(ptr: &ProviderPtr) -> ProviderWithRuntime {
-        tracing::debug!("FFI: Provider from Ptr!");
-        let provider = unsafe { Arc::<Provider>::from_raw(ptr.provider) };
-        let runtime = unsafe { Arc::<Runtime>::from_raw(ptr.runtime) };
-
-        Self { provider, runtime }
-    }
-}
-
-impl From<&ProviderWithRuntime> for ProviderPtr {
-    /// Cast a Provider into ProviderPtr
-    fn from(provider: &ProviderWithRuntime) -> ProviderPtr {
-        tracing::debug!("FFI: Provider into Ptr!");
-        // Clone the Arcs, which increases the ref count,
-        // then turn them into raw pointers.
-        let provider_ptr = Arc::into_raw(provider.provider.clone());
-        let runtime_ptr = Arc::into_raw(provider.runtime.clone());
-
-        provider.check_arc();
-        ProviderPtr {
-            provider: provider_ptr,
-            runtime: runtime_ptr,
+        if let Err(error) = self.provider.clear_swarm_callback_internal() {
+            tracing::warn!("failed to clear FFI provider callback during shutdown: {error}");
         }
     }
 }
 
-/// Start message listening and stabilization
-/// This function will launch listener in a new thread
+/// Start message listening and stabilization.
+///
+/// This function launches a cooperative listener thread owned by the provider
+/// handle. The listener is stopped and joined by [`rings_node_provider_destroy`].
+///
 /// # Safety
-/// Listen function accept a ProviderPtr and will unsafety cast it into Arc based Provider
+///
+/// `provider_ptr` must be null or a live handle returned by
+/// [`rings_node_new_provider_with_callback`]. A destroyed handle must not be
+/// used again.
 #[no_mangle]
-pub extern "C" fn rings_node_listen(provider_ptr: *const ProviderPtr) {
-    let provider: ProviderWithRuntime = match ProviderWithRuntime::from_raw(provider_ptr) {
+pub unsafe extern "C" fn rings_node_listen(provider_ptr: *const ProviderHandle) {
+    let provider = match unsafe { ProviderHandle::from_ptr(provider_ptr) } {
         Ok(provider) => provider,
         Err(error) => {
             tracing::error!("FFI listen failed: {error}");
             return;
         }
     };
-    std::thread::spawn(move || {
-        provider.runtime.block_on(async {
-            provider.provider.processor.listen().await;
-        })
-    });
+    if let Err(error) = provider.spawn_listener() {
+        tracing::error!("FFI listen failed: {error}");
+    }
 }
 
 /// Request internal rpc api
+///
+/// Returns a newly allocated UTF-8 JSON string on success. Call
+/// [`rings_node_string_free`] exactly once for every non-null returned pointer.
+///
 /// # Safety
 ///
-/// * This function accept a ProviderPtr and will unsafety cast it into Arc based Provider
-/// * This function cast CStr into Str
+/// * `provider_ptr` must be null or a live handle returned by
+///   [`rings_node_new_provider_with_callback`]. A destroyed handle must not be
+///   used again.
+/// * `method` and `params` must be valid null-terminated UTF-8 strings.
 #[no_mangle]
-pub extern "C" fn rings_node_request(
-    provider_ptr: *const ProviderPtr,
+pub unsafe extern "C" fn rings_node_request(
+    provider_ptr: *const ProviderHandle,
     method: *const c_char,
     params: *const c_char,
-) -> *const c_char {
-    match (|| -> Result<*const c_char> {
-        let provider: ProviderWithRuntime = ProviderWithRuntime::from_raw(provider_ptr)?;
+) -> *mut c_char {
+    match (|| -> Result<*mut c_char> {
+        let handle = unsafe { ProviderHandle::from_ptr(provider_ptr) }?;
 
         let method = c_char_to_string(method)?;
         let params = c_char_to_string(params)?;
@@ -339,13 +265,13 @@ pub extern "C" fn rings_node_request(
 
         let ret = if method == "takeE2eEvents" {
             serde_json::to_value(TakeFfiE2eEventsResponse {
-                events: take_ffi_e2e_events(&provider.provider)?,
+                events: handle.take_e2e_events()?,
             })?
         } else {
+            let provider = handle.provider.clone();
+            let runtime = handle.runtime.clone();
             let handle = std::thread::spawn(move || {
-                provider
-                    .runtime
-                    .block_on(async { provider.provider.request_internal(method, params).await })
+                runtime.block_on(async { provider.request_internal(method, params).await })
             });
             handle
                 .join()
@@ -358,9 +284,47 @@ pub extern "C" fn rings_node_request(
         Ok(r) => r,
         Err(e) => {
             tracing::error!("FFI Request failed, cause by: {:?}", e);
-            ptr::null()
+            ptr::null_mut()
         }
     }
+}
+
+/// Free a string returned by [`rings_node_request`].
+///
+/// Passing null is a no-op. Passing any pointer not returned by
+/// [`rings_node_request`], or freeing the same pointer twice, is undefined
+/// behavior.
+///
+/// # Safety
+///
+/// `value` must be null or a pointer returned by [`rings_node_request`] that has
+/// not already been freed.
+#[no_mangle]
+pub unsafe extern "C" fn rings_node_string_free(value: *mut c_char) {
+    if value.is_null() {
+        return;
+    }
+    drop(unsafe { CString::from_raw(value) });
+}
+
+/// Destroy a provider handle returned by [`rings_node_new_provider_with_callback`].
+///
+/// Passing null is a no-op. The function requests cooperative listener
+/// shutdown, joins listener threads started through [`rings_node_listen`], and
+/// then releases the handle. The pointer is invalid after this call.
+///
+/// # Safety
+///
+/// `provider_ptr` must be null or a live handle returned by
+/// [`rings_node_new_provider_with_callback`]. It must be destroyed exactly once
+/// and must not be used concurrently by other FFI calls while destruction runs.
+#[no_mangle]
+pub unsafe extern "C" fn rings_node_provider_destroy(provider_ptr: *mut ProviderHandle) {
+    if provider_ptr.is_null() {
+        return;
+    }
+    let provider = unsafe { Box::from_raw(provider_ptr) };
+    provider.shutdown();
 }
 
 /// Craft a new Provider with signer.
@@ -381,7 +345,7 @@ pub unsafe extern "C" fn rings_node_new_provider_with_callback(
     account: *const c_char,
     account_type: *const c_char,
     signer: extern "C" fn(*const c_char, *mut c_char) -> (),
-) -> ProviderPtr {
+) -> *mut ProviderHandle {
     fn wrapped_signer(
         signer: extern "C" fn(*const c_char, *mut c_char) -> (),
     ) -> impl Fn(String) -> Vec<u8> {
@@ -400,7 +364,7 @@ pub unsafe extern "C" fn rings_node_new_provider_with_callback(
         }
     }
 
-    match (|| -> Result<ProviderPtr> {
+    match (|| -> Result<*mut ProviderHandle> {
         let ice: String = c_char_to_string(ice_server)?;
         let acc: String = c_char_to_string(account)?;
         let acc_ty: String = c_char_to_string(account_type)?;
@@ -424,13 +388,14 @@ pub unsafe extern "C" fn rings_node_new_provider_with_callback(
         let callback = FfiBackend::new(backend, e2e_events.clone());
 
         provider.set_swarm_callback_internal(Arc::new(callback))?;
-        register_ffi_e2e_inbox(&provider, e2e_events)?;
-        Ok((&ProviderWithRuntime::new(provider.clone(), runtime.clone())).into())
+        Ok(Box::into_raw(Box::new(ProviderHandle::new(
+            provider, runtime, e2e_events,
+        ))))
     })() {
         Ok(provider_ptr) => provider_ptr,
         Err(error) => {
             tracing::error!("FFI provider creation failed: {error}");
-            ProviderPtr::null()
+            ptr::null_mut()
         }
     }
 }
@@ -442,4 +407,99 @@ fn c_char_to_string(ptr: *const c_char) -> Result<String> {
     let c_str: &CStr = unsafe { CStr::from_ptr(ptr) };
     // Drop none utf8 sym here.
     String::from_utf8(c_str.to_owned().into()).map_err(Error::FFIFromUtf8Error)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::CStr;
+    use std::ffi::CString;
+
+    use rings_core::ecc::signers::eip191;
+    use rings_core::ecc::SecretKey;
+
+    use super::*;
+
+    const TEST_ACCOUNT: &str = "0x11E807fcc88dD319270493fB2e822e388Fe36ab0";
+    const TEST_SECRET_KEY: &str =
+        "65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0";
+
+    extern "C" fn test_signer(data: *const c_char, output: *mut c_char) {
+        if data.is_null() || output.is_null() {
+            return;
+        }
+        let data = unsafe { CStr::from_ptr(data) };
+        let key = SecretKey::try_from(TEST_SECRET_KEY).expect("valid test key");
+        let signature = eip191::sign_raw(key, data.to_bytes());
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                signature.as_ptr().cast::<c_char>(),
+                output,
+                FFI_SIGNATURE_LEN,
+            );
+        }
+    }
+
+    fn c_string(value: &str) -> CString {
+        CString::new(value).expect("test string has no nul bytes")
+    }
+
+    fn request(handle: *const ProviderHandle, method: &str, params: &str) -> String {
+        let method = c_string(method);
+        let params = c_string(params);
+        let response = unsafe { rings_node_request(handle, method.as_ptr(), params.as_ptr()) };
+        assert!(!response.is_null());
+        let response_string = unsafe { CStr::from_ptr(response) }
+            .to_str()
+            .expect("response is utf-8")
+            .to_owned();
+        unsafe { rings_node_string_free(response) };
+        response_string
+    }
+
+    #[test]
+    fn ffi_provider_handle_create_listen_request_destroy_cycles() {
+        for _ in 0..3 {
+            let ice_server = c_string("stun://stun.l.google.com");
+            let account = c_string(TEST_ACCOUNT);
+            let account_type = c_string("eip191");
+            let handle = unsafe {
+                rings_node_new_provider_with_callback(
+                    0,
+                    ice_server.as_ptr(),
+                    1,
+                    account.as_ptr(),
+                    account_type.as_ptr(),
+                    test_signer,
+                )
+            };
+            assert!(!handle.is_null());
+
+            unsafe { rings_node_listen(handle) };
+            let did_response = request(handle, "nodeDid", "{}");
+            let did_response: serde_json::Value =
+                serde_json::from_str(&did_response).expect("nodeDid response is json");
+            let did = did_response
+                .get("did")
+                .and_then(serde_json::Value::as_str)
+                .expect("nodeDid response contains did");
+            assert!(did.eq_ignore_ascii_case(TEST_ACCOUNT));
+            let events_response = request(handle, "takeE2eEvents", "{}");
+            assert!(events_response.contains("\"events\":[]"));
+
+            let weak_provider = unsafe { Arc::downgrade(&(*handle).provider) };
+            unsafe { rings_node_provider_destroy(handle) };
+            assert!(
+                weak_provider.upgrade().is_none(),
+                "destroy must release the provider callback reference cycle"
+            );
+        }
+    }
+
+    #[test]
+    fn ffi_free_functions_accept_null() {
+        unsafe {
+            rings_node_string_free(ptr::null_mut());
+            rings_node_provider_destroy(ptr::null_mut());
+        }
+    }
 }

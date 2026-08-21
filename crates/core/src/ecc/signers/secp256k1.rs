@@ -1,4 +1,4 @@
-//! Default method signing using libsecp256k1::SecretKey.
+//! Default method signing using secp256k1 ECDSA.
 
 use crate::ecc::keccak256;
 use crate::ecc::PublicKey;

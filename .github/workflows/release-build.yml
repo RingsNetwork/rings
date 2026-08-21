@@ -30,6 +30,9 @@ permissions:
 
 env:
   RUST_TOOLCHAIN: 1.97.0
+  WASM_BINDGEN_CLI_VERSION: 0.2.121
+  WASM_PACK_VERSION: 0.15.0
+  NODE_VERSION: 20.20.2
 
 jobs:
   build_macos:
@@ -42,34 +45,22 @@ jobs:
           - x86_64
           - aarch64
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
         with:
           fetch-depth: 0
 
       - name: Get target
         id: target
-        run: echo 'target=${{ matrix.arch }}-apple-darwin' >> $GITHUB_OUTPUT
+        run: echo 'target=${{ matrix.arch }}-apple-darwin' >> "$GITHUB_OUTPUT"
 
       - name: Add target
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
           rustup target add ${{ steps.target.outputs.target }} --toolchain "$RUST_TOOLCHAIN"
 
-      - name: Setup protoc
-        uses: arduino/setup-protoc@v2.1.0
-        with:
-          # Automatic per-run token — avoids `secrets: inherit` widening the secret surface on
-          # the PR path.
-          repo-token: ${{ github.token }}
-
       - name: Setup rust toolchain
         run: |
           rustup show
-
-      # If you need to reset the cache version, increment the number after `v`
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: auto-release-${{ steps.target.outputs.target }}-v1
 
       - name: Build
         run: |
@@ -80,7 +71,7 @@ jobs:
         run: |
           zip -j rings-${{ inputs.version }}-${{ steps.target.outputs.target }}.zip ./target/${{ steps.target.outputs.target }}/release/rings
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: ${{ inputs.publish_artifacts }}
         name: Upload artifacts
         with:
@@ -99,25 +90,18 @@ jobs:
         platform:
           - musl
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
         with:
           fetch-depth: 0
 
       - name: Get target
         id: target
-        run: echo 'target=${{ matrix.arch }}-unknown-linux-${{ matrix.platform }}' >> $GITHUB_OUTPUT
+        run: echo 'target=${{ matrix.arch }}-unknown-linux-${{ matrix.platform }}' >> "$GITHUB_OUTPUT"
 
       - name: Add target
         run: |
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
           rustup target add ${{ steps.target.outputs.target }} --toolchain "$RUST_TOOLCHAIN"
-
-      - name: Setup protoc
-        uses: arduino/setup-protoc@v2.1.0
-        with:
-          # Automatic per-run token — avoids `secrets: inherit` widening the secret surface on
-          # the PR path.
-          repo-token: ${{ github.token }}
 
       - name: alias compiler
         run: |
@@ -134,11 +118,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y musl-tools
 
-      # If you need to reset the cache version, increment the number after `v`
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: auto-release-${{ steps.target.outputs.target }}-v1
-
       - name: Build
         run: |
           rustup run "$RUST_TOOLCHAIN" cargo build -p rings-node --bin rings --features node --no-default-features --release --target ${{ steps.target.outputs.target }}
@@ -148,7 +127,7 @@ jobs:
         run: |
           zip -j rings-${{ inputs.version }}-${{ steps.target.outputs.target }}.zip ./target/${{ steps.target.outputs.target }}/release/rings
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: ${{ inputs.publish_artifacts }}
         name: Upload artifacts
         with:
@@ -170,13 +149,13 @@ jobs:
         platform:
           - unknown
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
         with:
           fetch-depth: 0
 
       - name: Get target
         id: target
-        run: echo 'target=${{ matrix.arch }}-unknown-${{ matrix.platform }}' >> $GITHUB_OUTPUT
+        run: echo 'target=${{ matrix.arch }}-unknown-${{ matrix.platform }}' >> "$GITHUB_OUTPUT"
 
       - name: Add target
         run: |
@@ -184,32 +163,20 @@ jobs:
           rustup target add ${{ steps.target.outputs.target }} --toolchain "$RUST_TOOLCHAIN"
           rustup default "$RUST_TOOLCHAIN"
 
-      - uses: jetli/wasm-bindgen-action@v0.2.0
+      - uses: jetli/wasm-bindgen-action@20b33e20595891ab1a0ed73145d8a21fc96e7c29 # v0.2.0
         with:
-          version: "0.2.121"
+          version: ${{ env.WASM_BINDGEN_CLI_VERSION }}
 
       - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-
-      - name: Setup protoc
-        uses: arduino/setup-protoc@v2.1.0
-        with:
-          # Automatic per-run token — avoids `secrets: inherit` widening the secret surface on
-          # the PR path.
-          repo-token: ${{ github.token }}
+        run: cargo install wasm-pack --version "$WASM_PACK_VERSION" --locked
 
       - name: Setup rust toolchain
         run: |
           rustup show
 
-      # If you need to reset the cache version, increment the number after `v`
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@3235b876344d2a9aa001b8d1453c930bba69e610 # v3
         with:
-          shared-key: auto-release-${{ steps.target.outputs.target }}-v1
-
-      - uses: actions/setup-node@v3
-        with:
-          node-version: 20
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Build
         run: |
@@ -221,7 +188,7 @@ jobs:
         run: |
           mv ringsnetwork-rings-node-*.tgz rings-${{ inputs.version }}-${{ steps.target.outputs.target }}.tgz
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: ${{ inputs.publish_artifacts }}
         name: Upload artifacts
         with:

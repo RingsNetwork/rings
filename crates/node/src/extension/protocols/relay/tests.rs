@@ -81,7 +81,7 @@ fn step_frame(
     from: Did,
     frame: &Frame,
 ) -> Transition<RelayState<SocketAddr>, RelayEffect<SocketAddr>> {
-    let payload = bincode::serialize(frame).unwrap();
+    let payload = rings_codec::serialize(frame).unwrap();
     let event = relay
         .decode(Wire {
             from,
@@ -104,7 +104,7 @@ fn step_command(
     state: &RelayState<SocketAddr>,
     command: &RelayCommand<SocketAddr>,
 ) -> Transition<RelayState<SocketAddr>, RelayEffect<SocketAddr>> {
-    let payload = bincode::serialize(command).unwrap();
+    let payload = rings_codec::serialize(command).unwrap();
     let event = relay
         .decode(Wire {
             from: this_node(),

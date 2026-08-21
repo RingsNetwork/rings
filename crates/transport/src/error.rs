@@ -36,9 +36,9 @@ pub enum Error {
     #[error("WebSysWebRTC error: {}", dump_js_value(.0))]
     WebSysWebrtc(wasm_bindgen::JsValue),
 
-    /// Bincode error: {0}
-    #[error("Bincode error: {0}")]
-    Bincode(#[from] bincode::Error),
+    /// Codec error: {0}
+    #[error("Codec error: {0}")]
+    Codec(#[from] rings_codec::Error),
 
     /// IceServer error: {0}
     #[error("IceServer error: {0}")]

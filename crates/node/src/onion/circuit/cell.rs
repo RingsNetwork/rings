@@ -100,7 +100,7 @@ pub(super) struct OnionWireCell {
 }
 
 pub(super) fn encode_message(message: &OnionWireMessage) -> Result<Bytes> {
-    bincode::serialize(message)
+    rings_codec::serialize(message)
         .map(Bytes::from)
         .map_err(|_| Error::EncodeError)
 }
@@ -128,7 +128,7 @@ pub(super) fn seal_encoded_message(
 /// This reads only the hop-visible envelope metadata; it does not decrypt or inspect the hidden
 /// wire message. Endpoint senders use the same class when producing link cover cells.
 pub(super) fn sealed_cell_bucket(payload: &[u8]) -> Result<OnionCellBucket> {
-    bincode::deserialize::<OnionWireCell>(payload)
+    rings_codec::deserialize::<OnionWireCell>(payload)
         .map(|cell| cell.bucket)
         .map_err(|_| Error::OnionRouteError(OnionRouteError::InvalidCell))
 }
@@ -165,7 +165,7 @@ fn seal_encoded_message_with_rng<R: CryptoRng + RngCore>(
     let aad = cell_aad(bucket)?;
     let sealed =
         encrypt_aead_with_rng(&plaintext, &aad, recipient, rng).map_err(Error::CoreError)?;
-    bincode::serialize(&OnionWireCell { bucket, sealed })
+    rings_codec::serialize(&OnionWireCell { bucket, sealed })
         .map(Bytes::from)
         .map_err(|_| Error::EncodeError)
 }
@@ -198,11 +198,11 @@ pub(super) fn open_cell(
     let encoded = plaintext
         .get(CELL_LENGTH_PREFIX_BYTES..encoded_end)
         .ok_or_else(|| Error::OnionRouteError(OnionRouteError::InvalidCell))?;
-    bincode::deserialize(encoded).map_err(|_| Error::DecodeError)
+    rings_codec::deserialize(encoded).map_err(|_| Error::DecodeError)
 }
 
 fn cell_aad(bucket: OnionCellBucket) -> Result<Vec<u8>> {
-    bincode::serialize(&(ONION_CELL_AEAD_NAMESPACE, bucket)).map_err(|_| Error::EncodeError)
+    rings_codec::serialize(&(ONION_CELL_AEAD_NAMESPACE, bucket)).map_err(|_| Error::EncodeError)
 }
 
 #[cfg(test)]
@@ -254,7 +254,7 @@ mod tests {
         let message = backward_message(1);
         let encoded =
             seal_message(&message, recipient.session_public_key(), None).expect("seal message");
-        let cell: OnionWireCell = bincode::deserialize(&encoded).expect("decode cell");
+        let cell: OnionWireCell = rings_codec::deserialize(&encoded).expect("decode cell");
         assert_eq!(
             open_cell(&recipient, cell.bucket, &cell.sealed).expect("open cell"),
             message
@@ -271,7 +271,7 @@ mod tests {
             Some(OnionCellBucket::KiB4),
         )
         .expect("seal cover");
-        let cell: OnionWireCell = bincode::deserialize(&encoded).expect("decode cover cell");
+        let cell: OnionWireCell = rings_codec::deserialize(&encoded).expect("decode cover cell");
 
         assert_eq!(
             open_cell(&recipient, cell.bucket, &cell.sealed).expect("open cover cell"),

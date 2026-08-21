@@ -118,7 +118,7 @@ impl SNARKBehaviour {
             task_id,
             task: SNARKTask::SNARKProof(Box::new(task.clone())),
         };
-        let payload = bincode::serialize(&msg).map_err(|_| SnarkError::Encode)?;
+        let payload = rings_codec::serialize(&msg).map_err(|_| SnarkError::Encode)?;
         // Record the task *before* sending, so a fast verify reply cannot arrive before
         // the verifier has the proof task to check against. Roll back if the send fails.
         self.task.insert(task_id, task.clone());

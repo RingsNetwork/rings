@@ -23,10 +23,11 @@ class FfiRuntime:
     rings: Any
 
 
-@dataclass(frozen=True)
+@dataclass
 class ProviderHandle:
     provider: Any
     signer: Any
+    closed: bool = False
 
 
 def library_extension(system: str | None = None) -> str:
@@ -129,8 +130,8 @@ def _provider_value(provider: ProviderHandle | Any):
     return provider
 
 
-def _provider_has_null_field(runtime: FfiRuntime, provider: Any) -> bool:
-    return provider.provider == runtime.ffi.NULL or provider.runtime == runtime.ffi.NULL
+def _provider_is_null(runtime: FfiRuntime, provider: Any) -> bool:
+    return _provider_value(provider) == runtime.ffi.NULL
 
 
 def request(runtime: FfiRuntime, provider: ProviderHandle | Any, method: str, data: Any) -> bytes:
@@ -139,12 +140,13 @@ def request(runtime: FfiRuntime, provider: ProviderHandle | Any, method: str, da
     provider_value = _provider_value(provider)
     c_data = runtime.ffi.new("char[]", data.encode())
     c_method = runtime.ffi.new("char[]", method.encode())
-    ret = runtime.rings.rings_node_request(
-        runtime.ffi.addressof(provider_value), c_method, c_data
-    )
+    ret = runtime.rings.rings_node_request(provider_value, c_method, c_data)
     if ret == runtime.ffi.NULL:
         raise RuntimeError(f"rings request {method!r} failed")
-    return runtime.ffi.string(ret)
+    try:
+        return runtime.ffi.string(ret)
+    finally:
+        runtime.rings.rings_node_string_free(ret)
 
 
 def request_json(runtime: FfiRuntime, provider: ProviderHandle | Any, method: str, data: Any) -> Any:
@@ -170,10 +172,20 @@ def create_provider(
         "eip191".encode(),
         signer,
     )
-    if _provider_has_null_field(runtime, provider):
+    if _provider_is_null(runtime, provider):
         raise RuntimeError("rings provider creation failed")
-    runtime.rings.rings_node_listen(runtime.ffi.addressof(provider))
+    runtime.rings.rings_node_listen(provider)
     return ProviderHandle(provider=provider, signer=signer)
+
+
+def destroy_provider(runtime: FfiRuntime, provider: ProviderHandle | Any) -> None:
+    provider_value = _provider_value(provider)
+    if provider_value == runtime.ffi.NULL:
+        return
+    runtime.rings.rings_node_provider_destroy(provider_value)
+    if isinstance(provider, ProviderHandle):
+        provider.provider = runtime.ffi.NULL
+        provider.closed = True
 
 
 def node_did(runtime: FfiRuntime, provider: ProviderHandle | Any) -> str:
