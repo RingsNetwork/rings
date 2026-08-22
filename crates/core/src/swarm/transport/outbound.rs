@@ -7,6 +7,7 @@ use std::sync::MutexGuard;
 use bytes::Bytes;
 use futures::channel::mpsc;
 use futures::channel::oneshot;
+use futures::future::FutureExt;
 use futures::SinkExt;
 use futures::StreamExt;
 use rings_transport::delivery::DeliveryFuture;
@@ -404,6 +405,12 @@ enum OutboundCommand {
     Shutdown,
 }
 
+enum CommandPoll {
+    Ready(OutboundCommand),
+    Empty,
+    Closed,
+}
+
 #[derive(Clone)]
 pub(super) struct OutboundPeerHandle {
     sender: mpsc::Sender<OutboundCommand>,
@@ -522,20 +529,28 @@ impl OutboundWorker {
 
     fn drain_available(&mut self) -> bool {
         for _ in 0..OUTBOUND_COMMAND_DRAIN_BUDGET {
-            match self.receiver.try_next() {
-                Ok(Some(command)) => {
+            match self.poll_command() {
+                CommandPoll::Ready(command) => {
                     if self.handle_command(command) {
                         return true;
                     }
                 }
-                Ok(None) => {
+                CommandPoll::Closed => {
                     self.input_closed = true;
                     return false;
                 }
-                Err(_) => return false,
+                CommandPoll::Empty => return false,
             }
         }
         false
+    }
+
+    fn poll_command(&mut self) -> CommandPoll {
+        match self.receiver.next().now_or_never() {
+            Some(Some(command)) => CommandPoll::Ready(command),
+            Some(None) => CommandPoll::Closed,
+            None => CommandPoll::Empty,
+        }
     }
 
     fn handle_command(&mut self, command: OutboundCommand) -> bool {
@@ -611,17 +626,17 @@ impl OutboundWorker {
 
     fn cancel_buffered_commands(&mut self) {
         loop {
-            match self.receiver.try_next() {
-                Ok(Some(OutboundCommand::Enqueue(transfer))) => {
+            match self.poll_command() {
+                CommandPoll::Ready(OutboundCommand::Enqueue(transfer)) => {
                     let mut transfer = *transfer;
                     transfer.resolve_final(Ok(SendCompletionOutcome::Cancelled));
                 }
-                Ok(Some(OutboundCommand::Delivery(_)) | Some(OutboundCommand::Shutdown)) => {}
-                Ok(None) => {
+                CommandPoll::Ready(OutboundCommand::Delivery(_) | OutboundCommand::Shutdown) => {}
+                CommandPoll::Closed => {
                     self.input_closed = true;
                     return;
                 }
-                Err(_) => return,
+                CommandPoll::Empty => return,
             }
         }
     }
@@ -824,10 +839,56 @@ mod tests {
         assert!(!worker.drain_available());
 
         let mut remaining = 0;
-        while let Ok(Some(_)) = worker.receiver.try_next() {
+        while matches!(worker.poll_command(), CommandPoll::Ready(_)) {
             remaining += 1;
         }
         assert_eq!(remaining, 1);
+    }
+
+    #[test]
+    fn input_drain_leaves_open_empty_channel_unclosed() {
+        let (sender, receiver) = mpsc::channel(OUTBOUND_TRANSFER_QUEUE_CAPACITY);
+        let mut worker = OutboundWorker::new(sender, receiver);
+
+        assert!(!worker.drain_available());
+        assert!(!worker.input_closed);
+    }
+
+    #[test]
+    fn poll_command_receives_message_after_empty_probe() {
+        let (sender, receiver) = mpsc::channel(OUTBOUND_TRANSFER_QUEUE_CAPACITY);
+        let mut external_sender = sender.clone();
+        let mut worker = OutboundWorker::new(sender, receiver);
+
+        assert!(matches!(worker.poll_command(), CommandPoll::Empty));
+        assert!(external_sender
+            .try_send(OutboundCommand::Delivery(DeliveryEvent {
+                id: 7,
+                result: ChunkSendProgress::Ready(Ok(())),
+            }))
+            .is_ok());
+
+        assert!(matches!(
+            worker.poll_command(),
+            CommandPoll::Ready(OutboundCommand::Delivery(DeliveryEvent { id: 7, .. }))
+        ));
+    }
+
+    #[test]
+    fn shutdown_drains_buffered_commands_and_marks_input_closed() {
+        let (mut sender, receiver) = mpsc::channel(OUTBOUND_TRANSFER_QUEUE_CAPACITY);
+        assert!(sender
+            .try_send(OutboundCommand::Delivery(DeliveryEvent {
+                id: 7,
+                result: ChunkSendProgress::Ready(Ok(())),
+            }))
+            .is_ok());
+        let mut worker = OutboundWorker::new(sender, receiver);
+
+        worker.shutdown();
+
+        assert!(worker.input_closed);
+        assert!(matches!(worker.poll_command(), CommandPoll::Closed));
     }
 
     #[test]

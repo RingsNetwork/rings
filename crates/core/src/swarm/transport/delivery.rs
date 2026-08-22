@@ -101,12 +101,17 @@ impl ChunkSendCancelReason {
 
     /// Resolve cancellation before the first frame has been accepted.
     ///
-    /// A revoked generation or vanished storage route is a normal cancellation
-    /// before any bytes are accepted. Check and readiness failures remain explicit
-    /// errors from the connection or route proof that admitted the send.
+    /// A vanished storage route is a normal cancellation before any bytes are
+    /// accepted. A revoked generation, failed proof, or readiness failure
+    /// remains an explicit error from the connection or route proof that
+    /// admitted the send.
     pub(super) fn resolve_initial(self) -> Result<()> {
         match self {
-            Self::AdmissionRevoked(_) | Self::RouteNoLongerPermitted => Ok(()),
+            Self::AdmissionRevoked(attempt) => Err(Error::ConnectionAttemptSuperseded {
+                peer: attempt.peer(),
+                generation: attempt.generation(),
+            }),
+            Self::RouteNoLongerPermitted => Ok(()),
             Self::AdmissionCheckFailed(error) | Self::RouteCheckFailed(error) => Err(error),
             Self::TransportNotReady(readiness) => Err(Error::TransportNotReady {
                 state: readiness.state(),
@@ -344,13 +349,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn initial_cancel_treats_generation_revocation_as_cancelled() {
+    fn initial_cancel_reports_generation_revocation_explicitly() {
         let attempt = PendingConnectionAttempt {
             peer: Did::from(1_u32),
             generation: 7,
         };
 
-        assert!(ChunkSendCancelReason::AdmissionRevoked(attempt)
+        assert!(matches!(
+            ChunkSendCancelReason::AdmissionRevoked(attempt).resolve_initial(),
+            Err(Error::ConnectionAttemptSuperseded { peer, generation })
+                if peer == attempt.peer() && generation == attempt.generation()
+        ));
+    }
+
+    #[test]
+    fn initial_cancel_treats_route_revocation_as_cancelled() {
+        assert!(ChunkSendCancelReason::RouteNoLongerPermitted
             .resolve_initial()
             .is_ok());
     }
