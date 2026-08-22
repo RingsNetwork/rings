@@ -1,5 +1,7 @@
 //! Rings native node command-line entrypoint.
 
+mod daemon;
+
 use std::net::SocketAddr;
 use std::path::Path;
 use std::str::FromStr;
@@ -68,6 +70,13 @@ enum RuntimeFlavor {
 }
 
 impl RuntimeFlavor {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::MultiThread => "multi-thread",
+            Self::CurrentThread => "current-thread",
+        }
+    }
+
     fn build(self) -> std::io::Result<tokio::runtime::Runtime> {
         match self {
             Self::MultiThread => tokio::runtime::Builder::new_multi_thread()
@@ -144,6 +153,11 @@ enum Command {
     NewSession(NewSessionCommand),
     #[command(about = "Starts a long-running node daemon.")]
     Run(Box<RunCommand>),
+    #[command(
+        about = "Manages the node as a user-level operating-system service.",
+        subcommand
+    )]
+    Daemon(daemon::DaemonCommand),
     #[command(about = "Provides chat room-like functionality on the Rings Network.")]
     Pubsub(PubsubCommand),
     #[command(about = "Connects to a remote peer.", subcommand)]
@@ -816,8 +830,13 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
+    let worker_options = daemon::WorkerOptions {
+        log_level: log_level_name(&cli.log_level),
+        runtime: cli.runtime.as_str(),
+    };
     match cli.command {
         Command::Run(args) => daemon_run(*args).await,
+        Command::Daemon(command) => daemon::execute(command, worker_options),
         Command::Pubsub(args) => pubsub_run(args.client_args, args.topic).await,
         Command::Connect(ConnectCommand::Node(args)) => {
             args.client_args
@@ -917,3 +936,16 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         }
     }
 }
+
+const fn log_level_name(log_level: &LogLevel) -> &'static str {
+    match log_level {
+        LogLevel::Debug => "debug",
+        LogLevel::Info => "info",
+        LogLevel::Warn => "warn",
+        LogLevel::Error => "error",
+        LogLevel::Trace => "trace",
+    }
+}
+
+#[cfg(test)]
+mod cli_tests;

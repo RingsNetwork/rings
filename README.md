@@ -101,6 +101,30 @@ cd ./rings
 cargo install --path crates/node
 ```
 
+### User-level daemon
+
+Initialize the default `~/.rings/config.yaml`, then install and start Rings as a
+user-level service:
+
+```sh
+rings init
+rings daemon start
+```
+
+The daemon commands are:
+
+```sh
+rings daemon start
+rings daemon stop
+rings daemon status
+rings daemon restart
+```
+
+On macOS, Rings installs `~/Library/LaunchAgents/io.ringsnetwork.node.plist`. On
+Linux, it installs `${XDG_CONFIG_HOME:-~/.config}/systemd/user/rings-node.service`.
+`start` enables login startup. `stop` stops the current process while preserving
+that registration, so the service starts again at the next login.
+
 ### Build for WebAssembly
 
 Build the browser provider with Cargo and `wasm-bindgen`:
