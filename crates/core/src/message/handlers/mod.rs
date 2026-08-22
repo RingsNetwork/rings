@@ -6,6 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use super::effects::lower_dht_action;
+use super::effects::yield_core_actor_step;
 use super::effects::CoreEffect;
 use super::effects::CoreEffectInterpreter;
 use super::MessagePayload;
@@ -91,6 +92,7 @@ impl MessageHandler {
     ) -> Result<()> {
         for peer in self.transport.order_dht_candidates_by_quality(peers).await {
             self.connect_dht_peer(peer).await?;
+            yield_core_actor_step().await;
         }
         Ok(())
     }
@@ -205,12 +207,14 @@ impl MessageHandler {
             if let Err(e) = self.connect_dht_peer(peer).await {
                 tracing::error!("Failed on handle multi connection action: {e:?}");
             }
+            yield_core_actor_step().await;
         }
 
         for effect in other_effects {
             if let Err(e) = self.run_effects([effect]).await {
                 tracing::error!("Failed on handle multi action: {e:?}");
             }
+            yield_core_actor_step().await;
         }
 
         Ok(())

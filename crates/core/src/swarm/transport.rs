@@ -60,6 +60,7 @@ mod connection;
 mod delivery;
 mod event_delivery;
 mod liveness;
+mod outbound;
 mod payload_send;
 mod pending;
 mod readiness;
@@ -77,6 +78,7 @@ use self::liveness::PeerLivenessMap;
 pub(crate) use self::liveness::PEER_LIVENESS_IDLE_MS;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::liveness::PEER_LIVENESS_TIMEOUT_MS;
+use self::outbound::OutboundSchedulers;
 pub(crate) use self::pending::ConnectionEventDisposition;
 use self::pending::ConnectionLifecycleBoundary;
 pub(crate) use self::pending::PendingConnectionAttempt;
@@ -109,6 +111,7 @@ pub struct SwarmTransport {
     pending_storage_sync_acks: Mutex<StorageSyncAckMap>,
     storage_repair_requested: AtomicBool,
     storage_repair_cursor: Mutex<Option<StorageSyncDeliveryCursor>>,
+    outbound_schedulers: OutboundSchedulers,
     measured_disconnects: Mutex<BTreeMap<Did, (u64, i64)>>,
     measure: Option<MeasureImpl>,
 }
@@ -213,6 +216,7 @@ impl SwarmTransport {
             pending_storage_sync_acks: Mutex::new(BTreeMap::new()),
             storage_repair_requested: AtomicBool::new(false),
             storage_repair_cursor: Mutex::new(None),
+            outbound_schedulers: OutboundSchedulers::new(),
             measured_disconnects: Mutex::new(BTreeMap::new()),
             measure,
         }

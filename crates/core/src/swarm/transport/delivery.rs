@@ -101,21 +101,17 @@ impl ChunkSendCancelReason {
 
     /// Resolve cancellation before the first frame has been accepted.
     ///
-    /// A vanished storage route is a normal maintenance deferral. Every other
-    /// reason is an explicit failure of the connection or route check that
-    /// admitted the send.
+    /// A revoked generation or vanished storage route is a normal cancellation
+    /// before any bytes are accepted. Check and readiness failures remain explicit
+    /// errors from the connection or route proof that admitted the send.
     pub(super) fn resolve_initial(self) -> Result<()> {
         match self {
-            Self::AdmissionRevoked(attempt) => Err(Error::ConnectionAttemptSuperseded {
-                peer: attempt.peer(),
-                generation: attempt.generation(),
-            }),
+            Self::AdmissionRevoked(_) | Self::RouteNoLongerPermitted => Ok(()),
             Self::AdmissionCheckFailed(error) | Self::RouteCheckFailed(error) => Err(error),
             Self::TransportNotReady(readiness) => Err(Error::TransportNotReady {
                 state: readiness.state(),
                 data_channel_open: readiness.data_channel_open(),
             }),
-            Self::RouteNoLongerPermitted => Ok(()),
         }
     }
 }
@@ -256,51 +252,11 @@ pub(super) async fn record_measurement(
     }
 }
 
-/// Drive a message's [DeliveryFuture] to completion on the runtime, recording
-/// the eventual peer-quality observation. This keeps delivery tracking confined
-/// to the send site: the status never propagates up through the swarm/node
-/// layers.
-#[cfg(all(feature = "wasm", target_family = "wasm"))]
-pub(super) fn spawn_delivery(
-    fut: DeliveryFuture,
-    admitted: AdmittedConnection,
-    permit: ChunkSendPermit,
-    did: Did,
-    measure: Option<MeasureImpl>,
-) {
-    wasm_bindgen_futures::spawn_local(async move {
-        let _ = await_tracked_delivery(fut, &admitted, &permit, did, measure).await;
-    });
-}
-
-/// Drive a message's [DeliveryFuture] to completion on the runtime, recording
-/// the eventual peer-quality observation.
-#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-pub(super) fn spawn_delivery(
-    fut: DeliveryFuture,
-    admitted: AdmittedConnection,
-    permit: ChunkSendPermit,
-    did: Did,
-    measure: Option<MeasureImpl>,
-) {
-    tokio::spawn(async move {
-        let _ = await_tracked_delivery(fut, &admitted, &permit, did, measure).await;
-    });
-}
-
 /// Frame one chunk into the bytes a data-channel send carries: wrap it in a `MessagePayload`
 /// addressed to `did` and serialize it. Pure (the only failure is serialization).
 pub(super) fn frame_chunk(session_sk: &SessionSk, did: Did, chunk: Chunk) -> Result<Bytes> {
     MessagePayload::new_send(Message::Chunk(chunk), session_sk, did, did)?.to_wire()
 }
-
-/// The *tail* of a chunked message — every chunk after the first — yielded lazily. Boxed so the
-/// background task owns a concrete, nameable type (`Send` off the browser, where spawned tasks must
-/// be `Send`; single-threaded on it).
-#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-type ChunkTail = Box<dyn Iterator<Item = Chunk> + Send>;
-#[cfg(all(feature = "wasm", target_family = "wasm"))]
-type ChunkTail = Box<dyn Iterator<Item = Chunk>>;
 
 fn chunk_send_cancel_reason(
     admitted: &AdmittedConnection,
@@ -340,7 +296,7 @@ fn log_chunk_send_cancel(did: Did, phase: &'static str, reason: &ChunkSendCancel
     );
 }
 
-async fn record_cancel_measurement(
+pub(super) async fn record_cancel_measurement(
     measure: Option<MeasureImpl>,
     did: Did,
     reason: &ChunkSendCancelReason,
@@ -350,32 +306,7 @@ async fn record_cancel_measurement(
     }
 }
 
-/// Await one complete tracked delivery or its route cancellation.
-pub(super) async fn await_tracked_delivery(
-    delivery: DeliveryFuture,
-    admitted: &AdmittedConnection,
-    permit: &ChunkSendPermit,
-    did: Did,
-    measure: Option<MeasureImpl>,
-) -> Result<SendCompletionOutcome> {
-    match await_delivery_or_cancel(delivery, admitted, permit, did, "tracked_delivery").await {
-        ChunkSendProgress::Ready(Ok(())) => {
-            record_measurement(measure, did, MeasureCounter::Sent).await;
-            Ok(SendCompletionOutcome::Succeeded)
-        }
-        ChunkSendProgress::Ready(Err(error)) => {
-            tracing::warn!("Tracked message to {did} was not delivered: {error}");
-            record_measurement(measure, did, MeasureCounter::FailedToSend).await;
-            Err(error)
-        }
-        ChunkSendProgress::Cancelled(reason) => {
-            record_cancel_measurement(measure, did, &reason).await;
-            Ok(SendCompletionOutcome::Cancelled)
-        }
-    }
-}
-
-async fn await_delivery_or_cancel(
+pub(super) async fn await_delivery_or_cancel(
     delivery: DeliveryFuture,
     admitted: &AdmittedConnection,
     permit: &ChunkSendPermit,
@@ -408,131 +339,29 @@ async fn await_delivery_or_cancel(
     }
 }
 
-async fn send_chunk_or_cancel(
-    admitted: &AdmittedConnection,
-    bytes: Bytes,
-    permit: &ChunkSendPermit,
-    did: Did,
-) -> ChunkSendProgress<Result<DeliveryFuture>> {
-    send_data_with_timeout(admitted, bytes, permit, did, "chunked_tail").await
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Drive the *tail* of a chunked send: the first chunk has already been accepted by the caller
-/// (`do_send_payload`), so wait for it to flush (backpressure), then frame, send, and await each
-/// remaining chunk in turn. One chunk is in flight at a time and no per-chunk task is spawned. A
-/// later frame/send failure aborts the rest; the receiver TTL-expires the partial message (chunks
-/// carry the message ttl), so no abort marker is needed. Callers choose whether
-/// to await this future or detach it after first-chunk admission.
-pub(super) async fn run_chunked_send(
-    admitted: AdmittedConnection,
-    tail: ChunkTail,
-    first_delivery: DeliveryFuture,
-    session_sk: SessionSk,
-    did: Did,
-    permit: ChunkSendPermit,
-    measure: Option<MeasureImpl>,
-) -> Result<SendCompletionOutcome> {
-    match await_delivery_or_cancel(first_delivery, &admitted, &permit, did, "first_delivery").await
-    {
-        ChunkSendProgress::Ready(Ok(())) => {}
-        ChunkSendProgress::Ready(Err(e)) => {
-            tracing::warn!("Chunked send to {did} stopped before the first chunk flushed: {e}");
-            record_measurement(measure, did, MeasureCounter::FailedToSend).await;
-            return Err(e);
-        }
-        ChunkSendProgress::Cancelled(reason) => {
-            record_cancel_measurement(measure, did, &reason).await;
-            return Ok(SendCompletionOutcome::Cancelled);
-        }
-    }
-    for chunk in tail {
-        let bytes = match frame_chunk(&session_sk, did, chunk) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                tracing::warn!("Chunked send to {did} aborted while framing a chunk: {e}");
-                record_measurement(measure, did, MeasureCounter::FailedToSend).await;
-                return Err(e);
-            }
+    #[test]
+    fn initial_cancel_treats_generation_revocation_as_cancelled() {
+        let attempt = PendingConnectionAttempt {
+            peer: Did::from(1_u32),
+            generation: 7,
         };
-        let delivery = match send_chunk_or_cancel(&admitted, bytes, &permit, did).await {
-            ChunkSendProgress::Ready(Ok(delivery)) => delivery,
-            ChunkSendProgress::Ready(Err(e)) => {
-                tracing::warn!("Chunked send to {did} stopped: {e}");
-                if e.records_peer_send_failure() {
-                    record_measurement(measure, did, MeasureCounter::FailedToSend).await;
-                }
-                return Err(e);
-            }
-            ChunkSendProgress::Cancelled(reason) => {
-                record_cancel_measurement(measure, did, &reason).await;
-                return Ok(SendCompletionOutcome::Cancelled);
-            }
-        };
-        match await_delivery_or_cancel(delivery, &admitted, &permit, did, "chunk_delivery").await {
-            ChunkSendProgress::Ready(Ok(())) => {}
-            ChunkSendProgress::Ready(Err(e)) => {
-                tracing::warn!("Chunked send to {did} stopped before flush: {e}");
-                record_measurement(measure, did, MeasureCounter::FailedToSend).await;
-                return Err(e);
-            }
-            ChunkSendProgress::Cancelled(reason) => {
-                record_cancel_measurement(measure, did, &reason).await;
-                return Ok(SendCompletionOutcome::Cancelled);
-            }
-        }
+
+        assert!(ChunkSendCancelReason::AdmissionRevoked(attempt)
+            .resolve_initial()
+            .is_ok());
     }
-    record_measurement(measure, did, MeasureCounter::Sent).await;
-    Ok(SendCompletionOutcome::Succeeded)
-}
 
-/// Drive the tail of a chunked send on the runtime (one bounded task per large message). See
-/// [`run_chunked_send`].
-#[cfg(all(feature = "wasm", target_family = "wasm"))]
-pub(super) fn spawn_chunked_send(
-    admitted: AdmittedConnection,
-    tail: ChunkTail,
-    first_delivery: DeliveryFuture,
-    session_sk: SessionSk,
-    did: Did,
-    permit: ChunkSendPermit,
-    measure: Option<MeasureImpl>,
-) {
-    wasm_bindgen_futures::spawn_local(async move {
-        let _ = run_chunked_send(
-            admitted,
-            tail,
-            first_delivery,
-            session_sk,
-            did,
-            permit,
-            measure,
-        )
-        .await;
-    });
-}
+    #[test]
+    fn initial_cancel_keeps_route_check_error_explicit() {
+        let error = Error::InvalidMessage("route check failed".to_string());
 
-/// Drive the tail of a chunked send on the runtime (one bounded task per large message). See
-/// [`run_chunked_send`].
-#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-pub(super) fn spawn_chunked_send(
-    admitted: AdmittedConnection,
-    tail: ChunkTail,
-    first_delivery: DeliveryFuture,
-    session_sk: SessionSk,
-    did: Did,
-    permit: ChunkSendPermit,
-    measure: Option<MeasureImpl>,
-) {
-    tokio::spawn(async move {
-        let _ = run_chunked_send(
-            admitted,
-            tail,
-            first_delivery,
-            session_sk,
-            did,
-            permit,
-            measure,
-        )
-        .await;
-    });
+        assert!(matches!(
+            ChunkSendCancelReason::RouteCheckFailed(error).resolve_initial(),
+            Err(Error::InvalidMessage(_))
+        ));
+    }
 }

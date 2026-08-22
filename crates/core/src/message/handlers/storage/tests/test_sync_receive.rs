@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
 use super::super::finish_storage_action;
+use super::super::StorageSyncBatch;
+use super::super::StorageSyncBatchStep;
 use super::test_support::install_two_node_chord_view;
 use super::test_support::next_generated_key;
 use super::test_support::next_payload;
@@ -197,6 +199,98 @@ async fn sync_entries_handler_rejects_non_affine_placement_before_writing() -> R
             .await?,
         None
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn storage_sync_batch_persists_one_entry_per_step_after_validation() -> Result<()> {
+    let node = prepare_node(SecretKey::random()).await;
+    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
+    let first = Entry::new(
+        Did::from(31u32),
+        vec!["first".to_string().encode()?],
+        EntryKind::Data,
+    );
+    let second = Entry::new(
+        Did::from(32u32),
+        vec!["second".to_string().encode()?],
+        EntryKind::Data,
+    );
+    let first_key = first.did;
+    let second_key = second.did;
+    let first_stored = first.clone().try_into_storage_entry()?;
+    let second_stored = second.clone().try_into_storage_entry()?;
+    let msg = SyncEntriesWithSuccessor {
+        purpose: StorageSyncPurpose::OwnershipHandoff,
+        destination: StorageSyncDestination::PhysicalOwner(node.did()),
+        data: vec![
+            PlacedEntry::new(first_key, first),
+            PlacedEntry::new(second_key, second),
+        ],
+    };
+    let mut batch = StorageSyncBatch::new(&msg);
+
+    assert!(matches!(
+        batch.step(&handler).await?,
+        StorageSyncBatchStep::Pending
+    ));
+    assert_eq!(node.dht().storage.get(&first_key.to_string()).await?, None);
+    assert_eq!(node.dht().storage.get(&second_key.to_string()).await?, None);
+
+    assert!(matches!(
+        batch.step(&handler).await?,
+        StorageSyncBatchStep::Pending
+    ));
+    assert_eq!(node.dht().storage.get(&first_key.to_string()).await?, None);
+    assert_eq!(node.dht().storage.get(&second_key.to_string()).await?, None);
+
+    assert!(matches!(
+        batch.step(&handler).await?,
+        StorageSyncBatchStep::Pending
+    ));
+    assert_eq!(node.dht().storage.get(&first_key.to_string()).await?, None);
+    assert_eq!(node.dht().storage.get(&second_key.to_string()).await?, None);
+
+    assert!(matches!(
+        batch.step(&handler).await?,
+        StorageSyncBatchStep::Pending
+    ));
+    assert_eq!(
+        node.dht().storage.get(&first_key.to_string()).await?,
+        Some(first_stored.clone())
+    );
+    assert_eq!(node.dht().storage.get(&second_key.to_string()).await?, None);
+
+    assert!(matches!(
+        batch.step(&handler).await?,
+        StorageSyncBatchStep::Pending
+    ));
+    assert_eq!(
+        node.dht().storage.get(&first_key.to_string()).await?,
+        Some(first_stored.clone())
+    );
+    assert_eq!(
+        node.dht().storage.get(&second_key.to_string()).await?,
+        Some(second_stored.clone())
+    );
+
+    assert!(matches!(
+        batch.step(&handler).await?,
+        StorageSyncBatchStep::Pending
+    ));
+    match batch.step(&handler).await? {
+        StorageSyncBatchStep::Complete(acks) => {
+            assert_eq!(acks, vec![
+                SyncedEntryAck::new(first_key, first_stored),
+                SyncedEntryAck::new(second_key, second_stored),
+            ]);
+        }
+        StorageSyncBatchStep::Pending => {
+            return Err(Error::InvalidMessage(
+                "expected storage sync batch completion".to_string(),
+            ))
+        }
+    }
     Ok(())
 }
 

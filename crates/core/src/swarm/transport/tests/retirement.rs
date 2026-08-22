@@ -142,6 +142,25 @@ async fn retirement_clears_disconnect_epoch_for_departed_peer() -> Result<()> {
 }
 
 #[tokio::test]
+async fn retirement_shuts_down_outbound_scheduler_for_departed_peer() -> Result<()> {
+    let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
+    let peer = SecretKey::random().address().into();
+    let attempt = transport.reserve_pending_connection(peer).await?;
+    assert!(transport.activate_connection_for_test(attempt)?);
+
+    let _handle = transport.outbound_schedulers.handle(peer);
+    assert_eq!(transport.outbound_schedulers.peer_count_for_test(), 1);
+
+    assert_eq!(
+        transport.retire_active_connection_with(attempt, |_| Ok(()))?,
+        Some(())
+    );
+
+    assert_eq!(transport.outbound_schedulers.peer_count_for_test(), 0);
+    Ok(())
+}
+
+#[tokio::test]
 async fn failed_dht_retirement_preserves_active_peer_state() -> Result<()> {
     let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
     let peer = SecretKey::random().address().into();

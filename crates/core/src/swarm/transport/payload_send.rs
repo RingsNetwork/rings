@@ -5,17 +5,14 @@ use async_trait::async_trait;
 use futures::future::FutureExt;
 use futures::pin_mut;
 use futures::select;
-use rings_transport::delivery::DeliveryFuture;
 
-use super::delivery::await_tracked_delivery;
-use super::delivery::frame_chunk;
-use super::delivery::run_chunked_send;
-use super::delivery::send_data_with_timeout;
-use super::delivery::spawn_chunked_send;
-use super::delivery::spawn_delivery;
 use super::delivery::ChunkSendPermit;
-use super::delivery::ChunkSendProgress;
 use super::delivery::SendCompletionOutcome;
+use super::outbound::ChunkFrames;
+use super::outbound::OutboundCompletion;
+use super::outbound::OutboundMessageMeta;
+use super::outbound::OutboundTransfer;
+use super::outbound::OutboundTransferRoute;
 use super::AdmittedConnection;
 use super::SwarmTransport;
 use crate::chunk::ChunkList;
@@ -43,41 +40,38 @@ enum SendCompletion {
     Tracked,
 }
 
-fn accepted_initial_delivery(
-    progress: ChunkSendProgress<Result<DeliveryFuture>>,
-) -> Result<Option<DeliveryFuture>> {
-    match progress {
-        ChunkSendProgress::Ready(result) => result.map(Some),
-        ChunkSendProgress::Cancelled(reason) => {
-            reason.resolve_initial()?;
-            Ok(None)
+impl From<SendCompletion> for OutboundCompletion {
+    fn from(value: SendCompletion) -> Self {
+        match value {
+            SendCompletion::Detached => Self::Detached,
+            SendCompletion::Tracked => Self::Tracked,
         }
     }
 }
 
-fn message_kind(message: &Message) -> &'static str {
-    match message {
-        Message::ConnectNodeSend(_) => "ConnectNodeSend",
-        Message::ConnectNodeReport(_) => "ConnectNodeReport",
-        Message::FindSuccessorSend(_) => "FindSuccessorSend",
-        Message::FindSuccessorReport(_) => "FindSuccessorReport",
-        Message::NotifyPredecessorSend(_) => "NotifyPredecessorSend",
-        Message::NotifyPredecessorReport(_) => "NotifyPredecessorReport",
-        Message::PeerLivenessProbe(_) => "PeerLivenessProbe",
-        Message::PeerLivenessReport(_) => "PeerLivenessReport",
-        Message::SearchEntry(_) => "SearchEntry",
-        Message::FoundEntry(_) => "FoundEntry",
-        Message::OperateEntry(_) => "OperateEntry",
-        Message::SyncEntriesWithSuccessor(_) => "SyncEntriesWithSuccessor",
-        Message::SyncEntriesWithSuccessorReport(_) => "SyncEntriesWithSuccessorReport",
-        Message::CustomMessage(_) => "CustomMessage",
-        Message::E2eHandshakeRequest(_) => "E2eHandshakeRequest",
-        Message::E2eHandshakeResponse(_) => "E2eHandshakeResponse",
-        Message::E2eStreamFrame(_) => "E2eStreamFrame",
-        Message::QueryForTopoInfoSend(_) => "QueryForTopoInfoSend",
-        Message::QueryForTopoInfoReport(_) => "QueryForTopoInfoReport",
-        Message::Chunk(_) => "Chunk",
-    }
+struct OversizedPayloadLog {
+    local: Did,
+    next_hop: Did,
+    destination: Did,
+    relay_destination: Did,
+    tx_id: String,
+    message_kind: &'static str,
+    bytes: usize,
+    max_bytes: usize,
+}
+
+fn log_oversized_payload(metadata: OversizedPayloadLog) {
+    tracing::error!(
+        local = %metadata.local,
+        next_hop = %metadata.next_hop,
+        destination = %metadata.destination,
+        relay_destination = %metadata.relay_destination,
+        tx_id = %metadata.tx_id,
+        message_kind = metadata.message_kind,
+        bytes = metadata.bytes,
+        max_bytes = metadata.max_bytes,
+        "message payload is too large"
+    );
 }
 
 impl SwarmTransport {
@@ -145,104 +139,36 @@ impl SwarmTransport {
         }
     }
 
-    async fn send_whole(
-        &self,
-        admitted: AdmittedConnection,
-        data: bytes::Bytes,
-        did: Did,
-        permit: ChunkSendPermit,
-        completion: SendCompletion,
-    ) -> Result<SendCompletionOutcome> {
-        let Some(delivery) = accepted_initial_delivery(
-            self.send_frame(&admitted, data, &permit, did, "whole_message")
-                .await,
-        )?
-        else {
-            return Ok(SendCompletionOutcome::Cancelled);
-        };
-        match completion {
-            SendCompletion::Detached => {
-                spawn_delivery(delivery, admitted, permit, did, self.measure.clone());
-                Ok(SendCompletionOutcome::Succeeded)
-            }
-            SendCompletion::Tracked => {
-                await_tracked_delivery(delivery, &admitted, &permit, did, self.measure.clone())
-                    .await
-            }
-        }
-    }
-
-    async fn send_frame(
+    async fn submit_outbound_transfer(
         &self,
         admitted: &AdmittedConnection,
-        data: bytes::Bytes,
-        permit: &ChunkSendPermit,
         did: Did,
-        context: &'static str,
-    ) -> ChunkSendProgress<Result<DeliveryFuture>> {
-        match send_data_with_timeout(admitted, data, permit, did, context).await {
-            ChunkSendProgress::Ready(Err(error)) => {
-                if error.records_peer_send_failure() {
-                    self.record_peer_message_send_failed(did).await;
-                }
-                ChunkSendProgress::Ready(Err(error))
-            }
-            ChunkSendProgress::Cancelled(reason) => {
-                if reason.records_peer_failure() {
-                    self.record_peer_message_send_failed(did).await;
-                }
-                ChunkSendProgress::Cancelled(reason)
-            }
-            ready => ready,
-        }
-    }
-
-    async fn send_chunked(
-        &self,
-        admitted: AdmittedConnection,
-        data: bytes::Bytes,
-        did: Did,
-        chunk_size: usize,
-        permit: ChunkSendPermit,
-        completion: SendCompletion,
+        transfer: OutboundTransfer,
+        receiver: futures::channel::oneshot::Receiver<Result<SendCompletionOutcome>>,
     ) -> Result<SendCompletionOutcome> {
-        let mut chunks = ChunkList::stream(data, chunk_size);
-        let Some(first) = chunks.next() else {
-            return Ok(SendCompletionOutcome::Succeeded);
-        };
-        let first = frame_chunk(&self.session_sk, did, first)?;
-        let Some(first_delivery) = accepted_initial_delivery(
-            self.send_frame(&admitted, first, &permit, did, "chunked_first")
-                .await,
-        )?
-        else {
+        let Some(handle) = admitted.with_current(|_| self.outbound_schedulers.handle(did))? else {
             return Ok(SendCompletionOutcome::Cancelled);
         };
-        match completion {
-            SendCompletion::Detached => {
-                spawn_chunked_send(
-                    admitted,
-                    Box::new(chunks),
-                    first_delivery,
-                    self.session_sk.clone(),
-                    did,
-                    permit,
-                    self.measure.clone(),
-                );
-                Ok(SendCompletionOutcome::Succeeded)
-            }
-            SendCompletion::Tracked => {
-                run_chunked_send(
-                    admitted,
-                    Box::new(chunks),
-                    first_delivery,
-                    self.session_sk.clone(),
-                    did,
-                    permit,
-                    self.measure.clone(),
-                )
-                .await
-            }
+        if let Err(error) = handle.submit(transfer).await {
+            return match admitted.ensure_current() {
+                Ok(()) => Err(error),
+                Err(Error::ConnectionAttemptSuperseded { .. }) => {
+                    Ok(SendCompletionOutcome::Cancelled)
+                }
+                Err(current_error) => Err(current_error),
+            };
+        }
+        match receiver.await {
+            Ok(result) => result,
+            Err(_) => match admitted.ensure_current() {
+                Ok(()) => Err(Error::ChannelRecvMessageFailed(
+                    "outbound scheduler stopped".into(),
+                )),
+                Err(Error::ConnectionAttemptSuperseded { .. }) => {
+                    Ok(SendCompletionOutcome::Cancelled)
+                }
+                Err(error) => Err(error),
+            },
         }
     }
 
@@ -252,13 +178,25 @@ impl SwarmTransport {
         payload: MessagePayload,
         completion: SendCompletion,
     ) -> Result<SendCompletionOutcome> {
-        let (permit, message_kind) = {
+        self.do_send_payload_with_completion_observing(did, payload, completion, || {})
+            .await
+    }
+
+    async fn do_send_payload_with_completion_observing(
+        &self,
+        did: Did,
+        payload: MessagePayload,
+        completion: SendCompletion,
+        observe_before_scheduler_submit: impl FnOnce(),
+    ) -> Result<SendCompletionOutcome> {
+        let (permit, message_metadata) = {
             let message = payload.transaction.data::<Message>()?;
             (
                 ChunkSendPermit::for_message(self.dht.clone(), did, &message),
-                message_kind(&message),
+                OutboundMessageMeta::from_message(&message),
             )
         };
+        let message_kind = message_metadata.kind();
         let admitted = self
             .connection_for_send(did, completion, permit.records_missing_connection_failure())
             .await?;
@@ -268,17 +206,16 @@ impl SwarmTransport {
         let next_hop = payload.relay.next_hop;
         let data = payload.to_wire()?;
         if data.len() > TRANSPORT_MAX_SIZE {
-            tracing::error!(
-                local = %self.dht.did,
-                next_hop = %next_hop,
-                destination = %destination,
-                relay_destination = %relay_destination,
-                tx_id = %tx_id,
+            log_oversized_payload(OversizedPayloadLog {
+                local: self.dht.did,
+                next_hop,
+                destination,
+                relay_destination,
+                tx_id: tx_id.to_string(),
                 message_kind,
-                bytes = data.len(),
-                max_bytes = TRANSPORT_MAX_SIZE,
-                "message payload is too large"
-            );
+                bytes: data.len(),
+                max_bytes: TRANSPORT_MAX_SIZE,
+            });
             return Err(Error::MessageTooLarge(data.len()));
         }
 
@@ -299,17 +236,39 @@ impl SwarmTransport {
             framing = ?plan,
             "send payload start"
         );
-        let outcome = match plan {
-            Framing::Whole => {
-                self.send_whole(admitted, data, did, permit, completion)
-                    .await
-            }
+        let completion_policy = OutboundCompletion::from(completion);
+        let (transfer, receiver) = match plan {
+            Framing::Whole => OutboundTransfer::whole(
+                OutboundTransferRoute::new(
+                    message_metadata.class(),
+                    did,
+                    admitted.clone(),
+                    permit,
+                    self.measure.clone(),
+                ),
+                data,
+                completion_policy,
+            ),
             Framing::Chunked { chunk_size } => {
-                self.send_chunked(admitted, data, did, chunk_size, permit, completion)
-                    .await
+                let chunks: ChunkFrames = Box::new(ChunkList::stream(data, chunk_size));
+                OutboundTransfer::chunked(
+                    OutboundTransferRoute::new(
+                        message_metadata.class(),
+                        did,
+                        admitted.clone(),
+                        permit,
+                        self.measure.clone(),
+                    ),
+                    self.session_sk.clone(),
+                    chunks,
+                    completion_policy,
+                )
             }
         };
-        let outcome = outcome?;
+        observe_before_scheduler_submit();
+        let outcome = self
+            .submit_outbound_transfer(&admitted, did, transfer, receiver)
+            .await?;
 
         tracing::debug!(
             local = %self.dht.did,
@@ -323,6 +282,21 @@ impl SwarmTransport {
             "send payload accepted"
         );
         Ok(outcome)
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) async fn send_payload_detached_observing_scheduler_submit_for_test(
+        &self,
+        payload: MessagePayload,
+        observe_before_scheduler_submit: impl FnOnce(),
+    ) -> Result<SendCompletionOutcome> {
+        self.do_send_payload_with_completion_observing(
+            payload.relay.next_hop,
+            payload,
+            SendCompletion::Detached,
+            observe_before_scheduler_submit,
+        )
+        .await
     }
 
     pub(super) async fn send_payload_detached_with_outcome(
@@ -357,5 +331,38 @@ impl PayloadSender for SwarmTransport {
         self.do_send_payload_with_completion(did, payload, SendCompletion::Detached)
             .await
             .map(|_| ())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tracing_test::traced_test;
+
+    use super::*;
+
+    #[test]
+    #[traced_test]
+    fn oversized_payload_log_omits_message_body() {
+        let secret_body = "do-not-log-this-custom-payload-body";
+        log_oversized_payload(OversizedPayloadLog {
+            local: Did::from(1_u32),
+            next_hop: Did::from(2_u32),
+            destination: Did::from(3_u32),
+            relay_destination: Did::from(4_u32),
+            tx_id: "tx-oversized-669".to_string(),
+            message_kind: "CustomMessage",
+            bytes: TRANSPORT_MAX_SIZE.saturating_add(1),
+            max_bytes: TRANSPORT_MAX_SIZE,
+        });
+
+        assert!(logs_contain("message payload is too large"));
+        assert!(logs_contain("tx-oversized-669"));
+        assert!(logs_contain("CustomMessage"));
+        assert!(logs_contain(
+            &(TRANSPORT_MAX_SIZE.saturating_add(1)).to_string()
+        ));
+        assert!(logs_contain(&TRANSPORT_MAX_SIZE.to_string()));
+        assert!(!logs_contain(secret_body));
+        assert!(!logs_contain("CustomMessage {"));
     }
 }

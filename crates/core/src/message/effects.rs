@@ -6,6 +6,7 @@
 //! current transport implementation.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::dht::Did;
 use crate::dht::PeerRingAction;
@@ -24,6 +25,14 @@ use crate::message::SyncEntriesWithSuccessor;
 use crate::swarm::callback::InnerSwarmCallback;
 use crate::swarm::callback::SharedSwarmCallback;
 use crate::swarm::transport::SwarmTransport;
+use crate::utils::sleep;
+
+const CORE_ACTOR_STEP_YIELD: Duration = Duration::from_millis(0);
+
+/// Yield after one bounded core actor work item.
+pub(crate) async fn yield_core_actor_step() {
+    sleep(CORE_ACTOR_STEP_YIELD).await;
+}
 
 /// One side effect requested by a Core message handler.
 #[derive(Clone, Debug)]
@@ -276,6 +285,7 @@ impl<'handler> CoreEffectInterpreter<'handler> {
     ) -> Result<()> {
         for effect in effects {
             self.run(effect).await?;
+            yield_core_actor_step().await;
         }
         Ok(())
     }

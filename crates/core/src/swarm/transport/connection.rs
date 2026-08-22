@@ -358,6 +358,7 @@ impl SwarmTransport {
                 .map(|_| ());
         }
         if let Some(connection) = self.get_raw_connection(peer) {
+            self.outbound_schedulers.shutdown(peer);
             self.transport
                 .close_connection_if_current(&connection.connection)
                 .await

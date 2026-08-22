@@ -1,3 +1,5 @@
+#[cfg(feature = "dummy")]
+use super::super::delivery::SendCompletionOutcome;
 use super::*;
 #[cfg(feature = "dummy")]
 use crate::dht::StorageSyncDestination;
@@ -496,6 +498,32 @@ async fn final_send_admission_serializes_generation_route_and_readiness() -> Res
 
     assert!(!transport.is_admitted_connection(peer));
     assert!(!transport.dht.successors().contains(&peer)?);
+    Ok(())
+}
+
+#[cfg(feature = "dummy")]
+#[tokio::test]
+async fn stale_send_after_retirement_does_not_recreate_outbound_scheduler() -> Result<()> {
+    let (transport, peer, attempt) = transport_with_routable_peer().await?;
+    let payload = MessagePayload::new_send(
+        Message::custom(b"stale-after-admission")?,
+        transport.session_sk(),
+        peer,
+        peer,
+    )?;
+    let retire_transport = Arc::clone(&transport);
+
+    let outcome = transport
+        .send_payload_detached_observing_scheduler_submit_for_test(payload, move || {
+            assert!(matches!(
+                retire_transport.retire_active_connection_with(attempt, |_| Ok(())),
+                Ok(Some(()))
+            ));
+        })
+        .await?;
+
+    assert_eq!(outcome, SendCompletionOutcome::Cancelled);
+    assert_eq!(transport.outbound_schedulers.peer_count_for_test(), 0);
     Ok(())
 }
 

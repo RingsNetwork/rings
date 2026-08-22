@@ -26,6 +26,7 @@ use crate::measure::MeasureCounter;
 use crate::measure::MeasureImpl;
 use crate::measure::PeerQuality;
 use crate::message::Message;
+use crate::message::PeerLivenessProbe;
 use crate::message::SyncEntriesWithSuccessor;
 use crate::session::SessionSk;
 use crate::storage::MemStorage;
@@ -673,6 +674,63 @@ async fn tracked_storage_sync_defers_a_delivery_future_that_never_completes() ->
     assert_eq!(outcome, TrackedStorageSyncOutcome::Deferred);
     assert_eq!(dummy_controlled::sent_count(), 1);
     assert!(node1.swarm.transport.is_admitted_connection(node2.did()));
+    Ok(())
+}
+
+#[tokio::test]
+async fn dht_control_frame_runs_while_bulk_transfer_waits_for_delivery() -> Result<()> {
+    let node1 = prepare_node(SecretKey::random()).await;
+    let node2 = prepare_node(SecretKey::random()).await;
+    manually_establish_connection(&node1.swarm, &node2.swarm).await;
+    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
+    wait_for_successor(&node1, node2.did()).await?;
+    wait_for_msgs([&node1, &node2]).await;
+
+    let _max_size = MaxMessageSizeGuard::new(8192);
+    let _pending_delivery = PendingDeliveryGuard::new();
+    dummy_controlled::reset_sent_count();
+    let bulk: Vec<u8> = vec![0xcd; 50_000];
+
+    node1
+        .swarm
+        .send_message(Message::custom(&bulk)?, node2.did())
+        .await?;
+    assert_eq!(
+        dummy_controlled::sent_count(),
+        1,
+        "detached bulk send should admit exactly its first frame"
+    );
+    let first = node2
+        .listen_once()
+        .await
+        .ok_or_else(|| crate::error::Error::InvalidMessage("expected bulk chunk".to_string()))?;
+    assert!(
+        matches!(first.transaction.data::<Message>()?, Message::Chunk(_)),
+        "the first delivered frame should be the bulk chunk envelope"
+    );
+
+    node1
+        .swarm
+        .send_message(
+            Message::PeerLivenessProbe(PeerLivenessProbe { sent_at_ms: 7 }),
+            node2.did(),
+        )
+        .await?;
+    assert_eq!(
+        dummy_controlled::sent_count(),
+        2,
+        "DHT control should not wait behind the bulk transfer's pending tail"
+    );
+    let second = node2.listen_once().await.ok_or_else(|| {
+        crate::error::Error::InvalidMessage("expected DHT control frame".to_string())
+    })?;
+    assert!(
+        matches!(
+            second.transaction.data::<Message>()?,
+            Message::PeerLivenessProbe(_)
+        ),
+        "new control work must be admitted before any new bulk frame"
+    );
     Ok(())
 }
 

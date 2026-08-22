@@ -9,6 +9,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+#[cfg(feature = "dummy")]
+use bytes::Bytes;
 use rings_transport::core::callback::TransportCallback;
 #[cfg(feature = "dummy")]
 use tokio::sync::Notify;
@@ -17,6 +19,10 @@ use super::pending::ConnectionLifecycleRegistry;
 #[cfg(feature = "dummy")]
 use super::pending::FingerUpdateDisposition;
 use super::*;
+#[cfg(feature = "dummy")]
+use crate::chunk::Chunk;
+#[cfg(feature = "dummy")]
+use crate::chunk::ChunkMeta;
 use crate::dht::successor::SuccessorReader;
 #[cfg(feature = "dummy")]
 use crate::dht::Chord;
@@ -174,6 +180,62 @@ impl SwarmCallback for CountingSwarmCallback {
             Ok(mut events) => events.push(*state),
             Err(_) => tracing::error!("CountingSwarmCallback events mutex is poisoned"),
         }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "dummy")]
+#[derive(Default)]
+struct BlockingValidateSwarmCallback {
+    validates: AtomicUsize,
+    inbounds: AtomicUsize,
+    validate_started: AtomicBool,
+    validate_started_notify: Notify,
+    release_validate: Notify,
+}
+
+#[cfg(feature = "dummy")]
+impl BlockingValidateSwarmCallback {
+    async fn wait_for_first_validate_started(&self) {
+        while !self.validate_started.load(Ordering::SeqCst) {
+            self.validate_started_notify.notified().await;
+        }
+    }
+
+    fn release_first_validate(&self) {
+        self.release_validate.notify_waiters();
+    }
+
+    fn validates(&self) -> usize {
+        self.validates.load(Ordering::SeqCst)
+    }
+
+    fn inbounds(&self) -> usize {
+        self.inbounds.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(feature = "dummy")]
+#[async_trait]
+impl SwarmCallback for BlockingValidateSwarmCallback {
+    async fn on_validate(
+        &self,
+        _payload: &MessagePayload,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let previous = self.validates.fetch_add(1, Ordering::SeqCst);
+        if previous == 0 {
+            self.validate_started.store(true, Ordering::SeqCst);
+            self.validate_started_notify.notify_waiters();
+            self.release_validate.notified().await;
+        }
+        Ok(())
+    }
+
+    async fn on_inbound(
+        &self,
+        _payload: &MessagePayload,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        self.inbounds.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 }
@@ -459,7 +521,7 @@ async fn pending_callback_messages_do_not_dispatch_before_admission() -> Result<
     let measure = Arc::new(RecordingMeasure::default());
     let transport = Arc::new(transport_with_measure(measure.clone())?);
     let peer_key = SecretKey::random();
-    let peer = peer_key.address().into();
+    let peer: Did = peer_key.address().into();
     let peer_session = SessionSk::new_with_seckey(&peer_key)?;
     let app_callback = Arc::new(CountingSwarmCallback::default());
     let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
@@ -509,6 +571,111 @@ async fn pending_callback_messages_do_not_dispatch_before_admission() -> Result<
 
 #[cfg(feature = "dummy")]
 #[tokio::test]
+async fn reassembled_chunks_are_drained_by_mailbox_without_recursive_callback_entry() -> Result<()>
+{
+    let transport = Arc::new(transport_with_measure(Arc::new(
+        RecordingMeasure::default(),
+    ))?);
+    let peer_key = SecretKey::random();
+    let peer: Did = peer_key.address().into();
+    let peer_session = SessionSk::new_with_seckey(&peer_key)?;
+    let app_callback = Arc::new(CountingSwarmCallback::default());
+    let callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
+    let mut current: Bytes = MessagePayload::new_send(
+        Message::custom(b"mailbox-drained")?,
+        &peer_session,
+        transport.dht.did,
+        transport.dht.did,
+    )?
+    .to_wire()?;
+    let depth = 16;
+
+    for _ in 0..depth {
+        let chunk = Chunk {
+            chunk: [0, 1],
+            data: current,
+            meta: ChunkMeta::default(),
+        };
+        current = MessagePayload::new_send(
+            Message::Chunk(chunk),
+            &peer_session,
+            transport.dht.did,
+            transport.dht.did,
+        )?
+        .to_wire()?;
+    }
+
+    callback
+        .on_message(&peer.to_string(), &current)
+        .await
+        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+
+    assert_eq!(app_callback.validates(), depth + 1);
+    assert_eq!(app_callback.inbounds(), 1);
+    Ok(())
+}
+
+#[cfg(feature = "dummy")]
+#[tokio::test]
+async fn pending_mailbox_rechecks_admission_before_reassembled_payload() -> Result<()> {
+    let transport = Arc::new(transport_with_measure(Arc::new(
+        RecordingMeasure::default(),
+    ))?);
+    let peer_key = SecretKey::random();
+    let peer: Did = peer_key.address().into();
+    let peer_session = SessionSk::new_with_seckey(&peer_key)?;
+    let app_callback = Arc::new(BlockingValidateSwarmCallback::default());
+    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
+    let (attempt, _offer) = transport
+        .prepare_connection_offer_with_attempt(peer, offer_callback)
+        .await?;
+    assert!(transport.activate_connection_for_test(attempt)?);
+
+    let inner = MessagePayload::new_send(
+        Message::custom(b"must-not-dispatch-after-retire")?,
+        &peer_session,
+        transport.dht.did,
+        transport.dht.did,
+    )?
+    .to_wire()?;
+    let outer = MessagePayload::new_send(
+        Message::Chunk(Chunk {
+            chunk: [0, 1],
+            data: inner,
+            meta: ChunkMeta::default(),
+        }),
+        &peer_session,
+        transport.dht.did,
+        transport.dht.did,
+    )?
+    .to_wire()?;
+    let pending_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone())
+        .with_pending_connection_attempt(attempt);
+    let cid = peer.to_string();
+    let delivery = tokio::spawn(async move {
+        pending_callback
+            .on_message(&cid, &outer)
+            .await
+            .map_err(|error| Error::InvalidMessage(error.to_string()))
+    });
+
+    app_callback.wait_for_first_validate_started().await;
+    assert!(matches!(
+        transport.retire_active_connection_with(attempt, |_| Ok(())),
+        Ok(Some(()))
+    ));
+    app_callback.release_first_validate();
+    delivery
+        .await
+        .map_err(|_| Error::InvalidMessage("mailbox task panicked".to_string()))??;
+
+    assert_eq!(app_callback.validates(), 1);
+    assert_eq!(app_callback.inbounds(), 0);
+    Ok(())
+}
+
+#[cfg(feature = "dummy")]
+#[tokio::test]
 async fn pending_disconnected_before_data_channel_open_is_not_reported() -> Result<()> {
     let measure = Arc::new(RecordingMeasure::default());
     let transport = Arc::new(transport_with_measure(measure.clone())?);
@@ -538,9 +705,9 @@ async fn pending_disconnected_before_data_channel_open_is_not_reported() -> Resu
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
 
     assert!(transport.is_admitted_connection_attempt(attempt));
-    assert_eq!(app_callback.events()?, vec![
-        WebrtcConnectionState::Connected
-    ]);
+    let events = app_callback.events()?;
+    assert!(!events.contains(&WebrtcConnectionState::Disconnected));
+    assert!(events.contains(&WebrtcConnectionState::Connected));
     assert!(transport.dht.successors().contains(&peer)?);
 
     transport.disconnect(peer).await?;

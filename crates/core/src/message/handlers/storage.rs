@@ -1,5 +1,6 @@
 #![deny(missing_docs)]
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use async_recursion::async_recursion;
@@ -21,6 +22,7 @@ use crate::dht::StorageSyncDestination;
 use crate::dht::StorageSyncPurpose;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::effects::yield_core_actor_step;
 use crate::message::effects::CoreEffect;
 use crate::message::types::FoundEntry;
 use crate::message::types::Message;
@@ -138,6 +140,7 @@ async fn handle_storage_fetch_act<const REDUNDANT: u16>(
         PeerRingAction::MultiActions(acts) => {
             for act in acts {
                 handle_storage_fetch_act::<REDUNDANT>(transport.clone(), resource, act).await?;
+                yield_core_actor_step().await;
             }
         }
         PeerRingAction::EntryMisses(misses) => {
@@ -164,6 +167,7 @@ pub(super) async fn handle_storage_store_act(
         PeerRingAction::MultiActions(acts) => {
             for act in acts {
                 handle_storage_store_act(transport.clone(), act).await?;
+                yield_core_actor_step().await;
             }
         }
         act => finish_storage_action(act)?,
@@ -214,6 +218,7 @@ async fn run_storage_repair_transport_effects(
         transport
             .send_storage_sync_or_defer(msg, "storage_repair")
             .await?;
+        yield_core_actor_step().await;
     }
     Ok(())
 }
@@ -259,14 +264,13 @@ async fn handle_storage_search_act(
             reset_storage_relay_destination(handler, ctx, next).await
         }
         PeerRingAction::MultiActions(acts) => {
-            let jobs = acts.iter().map(|act| async move {
-                handle_storage_search_act(handler, ctx, act.clone(), resource, redundancy).await
-            });
-
-            for res in futures::future::join_all(jobs).await {
-                if res.is_err() {
-                    tracing::error!("Failed on handle multi actions: {:#?}", res)
+            for act in acts {
+                if let Err(e) =
+                    handle_storage_search_act(handler, ctx, act, resource, redundancy).await
+                {
+                    tracing::error!("Failed on handle multi actions: {e:#?}");
                 }
+                yield_core_actor_step().await;
             }
 
             Ok(())
@@ -279,38 +283,90 @@ async fn persist_synced_entries(
     handler: &MessageHandler,
     msg: &SyncEntriesWithSuccessor,
 ) -> Result<Vec<SyncedEntryAck>> {
-    // Preservation: batch validation is complete before the first storage
-    // effect. Invalid placement data cannot leave a partially-written batch.
-    let acks = accepted_synced_entry_acks(handler, msg)?;
+    StorageSyncBatch::new(msg).run(handler).await
+}
 
-    for ack in acks.iter() {
+enum StorageSyncBatchPhase {
+    Validate,
+    Persist,
+    Ack,
+}
+
+enum StorageSyncBatchStep {
+    Pending,
+    Complete(Vec<SyncedEntryAck>),
+}
+
+struct StorageSyncBatch {
+    destination: StorageSyncDestination,
+    validate: VecDeque<crate::dht::entry::PlacedEntry>,
+    persist: VecDeque<SyncedEntryAck>,
+    accepted: Vec<SyncedEntryAck>,
+    phase: StorageSyncBatchPhase,
+}
+
+impl StorageSyncBatch {
+    fn new(msg: &SyncEntriesWithSuccessor) -> Self {
+        Self {
+            destination: msg.destination,
+            validate: msg.data.iter().cloned().collect(),
+            persist: VecDeque::new(),
+            accepted: Vec::with_capacity(msg.data.len()),
+            phase: StorageSyncBatchPhase::Validate,
+        }
+    }
+
+    async fn run(mut self, handler: &MessageHandler) -> Result<Vec<SyncedEntryAck>> {
+        loop {
+            match self.step(handler).await? {
+                StorageSyncBatchStep::Pending => yield_core_actor_step().await,
+                StorageSyncBatchStep::Complete(acks) => return Ok(acks),
+            }
+        }
+    }
+
+    async fn step(&mut self, handler: &MessageHandler) -> Result<StorageSyncBatchStep> {
+        match self.phase {
+            StorageSyncBatchPhase::Validate => self.validate_one(handler),
+            StorageSyncBatchPhase::Persist => self.persist_one(handler).await,
+            StorageSyncBatchPhase::Ack => Ok(StorageSyncBatchStep::Complete(std::mem::take(
+                &mut self.accepted,
+            ))),
+        }
+    }
+
+    fn validate_one(&mut self, handler: &MessageHandler) -> Result<StorageSyncBatchStep> {
+        let Some(placed) = self.validate.pop_front() else {
+            self.phase = StorageSyncBatchPhase::Persist;
+            return Ok(StorageSyncBatchStep::Pending);
+        };
+
+        // Pre: no storage write for this sync batch has happened.
+        // Post: every accepted ack is locally routable and names an affine replica
+        // placement for the entry under the configured storage redundancy.
+        if should_persist_synced_entry(&handler.dht, self.destination, placed.key)? {
+            placed.validate_placement(handler.transport.storage_redundancy())?;
+            let entry = placed.entry.clone().try_into_storage_entry()?;
+            let ack = SyncedEntryAck::new(placed.key, entry);
+            self.persist.push_back(ack.clone());
+            self.accepted.push(ack);
+        }
+
+        Ok(StorageSyncBatchStep::Pending)
+    }
+
+    async fn persist_one(&mut self, handler: &MessageHandler) -> Result<StorageSyncBatchStep> {
+        let Some(ack) = self.persist.pop_front() else {
+            self.phase = StorageSyncBatchPhase::Ack;
+            return Ok(StorageSyncBatchStep::Pending);
+        };
+
         handler
             .dht
             .join_storage_entry(ack.key, ack.entry.clone())
             .await?;
+        Ok(StorageSyncBatchStep::Pending)
     }
-
-    Ok(acks)
-}
-
-fn accepted_synced_entry_acks(
-    handler: &MessageHandler,
-    msg: &SyncEntriesWithSuccessor,
-) -> Result<Vec<SyncedEntryAck>> {
-    // Pre: no storage write for this sync batch has happened.
-    // Post: every returned ack is locally routable and names an affine replica
-    // placement for the entry under the configured storage redundancy.
-    let mut acks = Vec::with_capacity(msg.data.len());
-    for placed in msg.data.iter() {
-        if !should_persist_synced_entry(&handler.dht, msg.destination, placed.key)? {
-            continue;
-        }
-
-        placed.validate_placement(handler.transport.storage_redundancy())?;
-        let entry = placed.entry.clone().try_into_storage_entry()?;
-        acks.push(SyncedEntryAck::new(placed.key, entry));
-    }
-    Ok(acks)
 }
 
 fn should_persist_synced_entry(

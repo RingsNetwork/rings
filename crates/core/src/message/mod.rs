@@ -7,6 +7,7 @@ pub use encoder::Encoder;
 pub mod e2e;
 
 mod effects;
+pub(crate) use effects::yield_core_actor_step;
 
 mod payload;
 pub use payload::decode_gzip_data;

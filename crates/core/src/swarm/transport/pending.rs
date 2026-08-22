@@ -607,6 +607,7 @@ impl SwarmTransport {
         pending_finger_updates.retain(|pending, _| pending.peer != attempt.peer);
         peer_liveness.remove(attempt.peer);
         measured_disconnects.remove(&attempt.peer);
+        self.outbound_schedulers.shutdown(attempt.peer);
         Ok(Some(result))
     }
 

@@ -1,13 +1,16 @@
+use std::collections::VecDeque;
 use std::str::FromStr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures::lock::Mutex as FuturesMutex;
 use rings_transport::core::callback::TransportCallback;
 use rings_transport::core::transport::WebrtcConnectionState;
 
 use crate::chunk::MessageReassembler;
 use crate::dht::Did;
+use crate::message::yield_core_actor_step;
 use crate::message::HandleMsg;
 use crate::message::Message;
 use crate::message::MessageHandler;
@@ -302,8 +305,9 @@ impl InnerSwarmCallback {
 
     async fn handle_payload(
         &self,
-        cid: &str,
+        _cid: &str,
         payload: &MessagePayload,
+        mailbox: &mut VecDeque<Bytes>,
     ) -> Result<(), CallbackError> {
         let message: Message = payload.transaction.data()?;
 
@@ -347,11 +351,10 @@ impl InnerSwarmCallback {
             }
             Message::Chunk(ref msg) => {
                 // A chunk is an internal framing envelope, never an application message. When it
-                // completes a payload, re-enter with the reassembled bytes; when it does not, there
-                // is nothing to deliver. Either way we return here so the raw chunk envelope is
-                // *never* passed to `on_inbound` (the app only ever sees reassembled messages).
+                // completes a payload, enqueue the reassembled bytes so the outer mailbox drains it
+                // as a fresh logical message without recursively entering `on_message`.
                 if let Some(data) = self.reassembler.lock().await.handle(msg.clone()) {
-                    return self.on_message(cid, &data).await;
+                    mailbox.push_back(data);
                 }
                 return Ok(());
             }
@@ -370,16 +373,12 @@ impl InnerSwarmCallback {
 
         Ok(())
     }
-}
 
-#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
-#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
-impl TransportCallback for InnerSwarmCallback {
-    async fn on_message(&self, cid: &str, msg: &[u8]) -> Result<(), CallbackError> {
-        let peer = Did::from_str(cid).ok();
-        if !self.pending_connection_allows_message(peer).await? {
-            return Ok(());
-        }
+    async fn decode_verified_message(
+        &self,
+        peer: Option<Did>,
+        msg: &[u8],
+    ) -> Result<MessagePayload, CallbackError> {
         let payload = match MessagePayload::from_wire(msg) {
             Ok(payload) => payload,
             Err(e) => {
@@ -405,8 +404,36 @@ impl TransportCallback for InnerSwarmCallback {
                 self.transport.record_peer_message_received(attempt).await;
             }
         }
-        self.callback.on_validate(&payload).await?;
-        self.handle_payload(cid, &payload).await
+        Ok(payload)
+    }
+
+    async fn drain_message_mailbox(
+        &self,
+        cid: &str,
+        peer: Option<Did>,
+        first: Bytes,
+    ) -> Result<(), CallbackError> {
+        let mut mailbox = VecDeque::from([first]);
+        while let Some(data) = mailbox.pop_front() {
+            if !self.pending_connection_allows_message(peer).await? {
+                return Ok(());
+            }
+            let payload = self.decode_verified_message(peer, &data).await?;
+            self.callback.on_validate(&payload).await?;
+            self.handle_payload(cid, &payload, &mut mailbox).await?;
+            yield_core_actor_step().await;
+        }
+        Ok(())
+    }
+}
+
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
+impl TransportCallback for InnerSwarmCallback {
+    async fn on_message(&self, cid: &str, msg: &[u8]) -> Result<(), CallbackError> {
+        let peer = Did::from_str(cid).ok();
+        self.drain_message_mailbox(cid, peer, Bytes::copy_from_slice(msg))
+            .await
     }
 
     async fn on_peer_connection_state_change(
