@@ -82,3 +82,10 @@ rings <command> [options]
 - `-c, --config <FILE>`: uses a custom configuration file instead of `~/.rings/config.yaml` on commands that accept configuration.
 - `-h, --help`: displays the usage information.
 - `-V, --version`: displays the version information for rings-node.
+
+`daemon start` records the current working directory so the managed process can
+load the same `.env` file as `run`. Persist daemon settings in the configuration
+file or that `.env` file; shell-only exported variables are not copied into the
+service definition. macOS logs are stored under `~/.rings/logs/`; Linux logs are
+available through `journalctl --user -u rings-node.service`. See the repository
+README for Linux lingering requirements and manual service removal.

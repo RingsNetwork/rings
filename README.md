@@ -125,6 +125,43 @@ Linux, it installs `${XDG_CONFIG_HOME:-~/.config}/systemd/user/rings-node.servic
 `start` enables login startup. `stop` stops the current process while preserving
 that registration, so the service starts again at the next login.
 
+The service uses the directory where `rings daemon start` was run as its working
+directory. This lets the daemon load the same `.env` file as a foreground
+`rings run`. Shell variables that are only exported in the installing terminal
+are not copied into the service definition; put persistent settings in the Rings
+configuration file or that working directory's `.env` file. Run `daemon start`
+again after changing the executable path, configuration path, working directory,
+log level, or runtime scheduler stored in the service definition.
+
+On macOS, standard output is written to `~/.rings/logs/daemon.log` and standard
+error to `~/.rings/logs/daemon.error.log`. On Linux, inspect logs with:
+
+```sh
+journalctl --user -u rings-node.service
+```
+
+Linux daemon commands require an active per-user systemd manager and user bus.
+To keep the user service running after logout, an administrator can enable
+lingering for that account:
+
+```sh
+loginctl enable-linger "$USER"
+```
+
+There is intentionally no daemon uninstall command. To remove the registration,
+stop it first and remove the platform definition manually:
+
+```sh
+# macOS
+rings daemon stop
+rm ~/Library/LaunchAgents/io.ringsnetwork.node.plist
+
+# Linux
+systemctl --user disable --now rings-node.service
+rm "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/rings-node.service"
+systemctl --user daemon-reload
+```
+
 ### Build for WebAssembly
 
 Build the browser provider with Cargo and `wasm-bindgen`:

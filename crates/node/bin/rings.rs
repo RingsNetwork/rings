@@ -70,13 +70,6 @@ enum RuntimeFlavor {
 }
 
 impl RuntimeFlavor {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::MultiThread => "multi-thread",
-            Self::CurrentThread => "current-thread",
-        }
-    }
-
     fn build(self) -> std::io::Result<tokio::runtime::Runtime> {
         match self {
             Self::MultiThread => tokio::runtime::Builder::new_multi_thread()
@@ -151,7 +144,7 @@ enum Command {
     Init(InitCommand),
     #[command(about = "Creates a new session secret key.")]
     NewSession(NewSessionCommand),
-    #[command(about = "Starts a long-running node daemon.")]
+    #[command(about = "Runs the node in the foreground.")]
     Run(Box<RunCommand>),
     #[command(
         about = "Manages the node as a user-level operating-system service.",
@@ -825,18 +818,26 @@ fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
     init_logging(cli.log_level.clone());
-    let runtime = cli.runtime.build()?;
-    runtime.block_on(run(cli))
+    let Cli {
+        command,
+        log_level,
+        runtime,
+    } = cli;
+    match command {
+        Command::Daemon(command) => {
+            daemon::execute(command, daemon::WorkerOptions { log_level, runtime })
+        }
+        command => {
+            let tokio_runtime = runtime.build()?;
+            tokio_runtime.block_on(run(command))
+        }
+    }
 }
 
-async fn run(cli: Cli) -> anyhow::Result<()> {
-    let worker_options = daemon::WorkerOptions {
-        log_level: log_level_name(&cli.log_level),
-        runtime: cli.runtime.as_str(),
-    };
-    match cli.command {
+async fn run(command: Command) -> anyhow::Result<()> {
+    match command {
         Command::Run(args) => daemon_run(*args).await,
-        Command::Daemon(command) => daemon::execute(command, worker_options),
+        Command::Daemon(_) => anyhow::bail!("daemon command reached the asynchronous dispatcher"),
         Command::Pubsub(args) => pubsub_run(args.client_args, args.topic).await,
         Command::Connect(ConnectCommand::Node(args)) => {
             args.client_args
@@ -934,16 +935,6 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 .display();
             Ok(())
         }
-    }
-}
-
-const fn log_level_name(log_level: &LogLevel) -> &'static str {
-    match log_level {
-        LogLevel::Debug => "debug",
-        LogLevel::Info => "info",
-        LogLevel::Warn => "warn",
-        LogLevel::Error => "error",
-        LogLevel::Trace => "trace",
     }
 }
 
