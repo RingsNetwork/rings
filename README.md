@@ -132,6 +132,9 @@ are not copied into the service definition; put persistent settings in the Rings
 configuration file or that working directory's `.env` file. Run `daemon start`
 again after changing the executable path, configuration path, working directory,
 log level, or runtime scheduler stored in the service definition.
+The captured working directory must continue to exist at the same path. Moving
+or deleting it prevents the service manager from starting the node; run
+`rings daemon start` again from a persistent directory to update the definition.
 
 On macOS, standard output is written to `~/.rings/logs/daemon.log` and standard
 error to `~/.rings/logs/daemon.error.log`. On Linux, inspect logs with:

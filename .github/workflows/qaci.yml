@@ -284,6 +284,10 @@ jobs:
       - name: Build
         run: cargo build -p rings-node --features ffi
 
+      - name: Run macOS daemon service tests
+        if: matrix.os == 'macos-latest'
+        run: "cargo test -p rings-node --bin rings daemon::"
+
       - uses: actions/setup-python@7f4fc3e22c37d6ff65e88745f38bd3157c663f7c # v4
         with:
           python-version: ${{ env.PYTHON_VERSION }}

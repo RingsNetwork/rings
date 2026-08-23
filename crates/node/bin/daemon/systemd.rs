@@ -16,6 +16,8 @@ use super::ServiceManager;
 use super::ServiceSpec;
 
 const SYSTEMD_UNIT: &str = "rings-node.service";
+// Resolve systemctl through PATH for non-FHS systems such as NixOS.
+const SYSTEMCTL: &str = "systemctl";
 const SYSTEMD_STATUS_ARGS: [&str; 7] = [
     "--user",
     "show",
@@ -60,8 +62,8 @@ where R: CommandRunner
     }
 
     fn stop(&self) -> Result<(), DaemonError> {
-        if !matches!(self.status()?.state, DaemonState::NotInstalled) {
-            systemctl(&self.runner, &["--user", "stop", SYSTEMD_UNIT])?;
+        if self.state()?.is_installed() {
+            run_checked(&self.runner, SYSTEMCTL, &["--user", "stop", SYSTEMD_UNIT])?;
         }
         Ok(())
     }
@@ -70,12 +72,25 @@ where R: CommandRunner
         if self.unit_path.is_file() {
             return reload_enable_restart(&self.runner);
         }
-        if matches!(self.status()?.state, DaemonState::NotInstalled) {
+        if !self.state()?.is_installed() {
             return Err(DaemonError::ServiceNotInstalled {
                 path: self.unit_path.clone(),
             });
         }
-        systemctl(&self.runner, &["--user", "restart", SYSTEMD_UNIT])
+        run_checked(&self.runner, SYSTEMCTL, &[
+            "--user",
+            "restart",
+            SYSTEMD_UNIT,
+        ])
+        .map(|_| ())
+    }
+
+    fn state(&self) -> Result<DaemonState, DaemonError> {
+        systemd_status(&self.runner).map(|status| status.state)
+    }
+
+    fn autostart(&self) -> Result<AutostartState, DaemonError> {
+        systemd_status(&self.runner).map(|status| status.autostart)
     }
 
     fn status(&self) -> Result<DaemonStatus, DaemonError> {
@@ -85,32 +100,16 @@ where R: CommandRunner
 
 fn reload_enable_restart<R>(runner: &R) -> Result<(), DaemonError>
 where R: CommandRunner + ?Sized {
-    systemctl(runner, &["--user", "daemon-reload"])?;
-    systemctl(runner, &["--user", "enable", SYSTEMD_UNIT])?;
-    systemctl(runner, &["--user", "restart", SYSTEMD_UNIT])?;
+    run_checked(runner, SYSTEMCTL, &["--user", "daemon-reload"])?;
+    run_checked(runner, SYSTEMCTL, &["--user", "enable", SYSTEMD_UNIT])?;
+    run_checked(runner, SYSTEMCTL, &["--user", "restart", SYSTEMD_UNIT])?;
     Ok(())
 }
 
 fn systemd_status<R>(runner: &R) -> Result<DaemonStatus, DaemonError>
 where R: CommandRunner + ?Sized {
-    let output = systemctl_output_checked(runner, &SYSTEMD_STATUS_ARGS)?;
+    let output = run_checked(runner, SYSTEMCTL, &SYSTEMD_STATUS_ARGS)?;
     parse_systemd_status(&String::from_utf8_lossy(&output.stdout))
-}
-
-fn systemctl<R>(runner: &R, args: &[&str]) -> Result<(), DaemonError>
-where R: CommandRunner + ?Sized {
-    systemctl_output_checked(runner, args).map(|_| ())
-}
-
-// systemctl is intentionally resolved through PATH for non-FHS systems such as NixOS.
-fn systemctl_output_checked<R>(
-    runner: &R,
-    args: &[&str],
-) -> Result<std::process::Output, DaemonError>
-where
-    R: CommandRunner + ?Sized,
-{
-    run_checked(runner, "systemctl", args)
 }
 
 fn systemd_config_home(home: &Path, candidate: Option<&Path>) -> PathBuf {
@@ -143,26 +142,18 @@ TimeoutStopSec=30\n\
 \n\
 [Install]\n\
 WantedBy=default.target\n",
-        systemd_path_quote(&spec.working_directory)
+        systemd_working_directory(&spec.working_directory)
     )
 }
 
 fn systemd_exec_quote(value: &str) -> String {
-    systemd_quote(value, true)
-}
-
-fn systemd_path_quote(value: &str) -> String {
-    systemd_quote(value, false)
-}
-
-fn systemd_quote(value: &str, escape_dollar: bool) -> String {
     let mut quoted = String::with_capacity(value.len() + 2);
     quoted.push('"');
     for character in value.chars() {
         match character {
             '\\' => quoted.push_str("\\\\"),
             '"' => quoted.push_str("\\\""),
-            '$' if escape_dollar => quoted.push_str("$$"),
+            '$' => quoted.push_str("$$"),
             '%' => quoted.push_str("%%"),
             '\n' => quoted.push_str("\\n"),
             '\r' => quoted.push_str("\\r"),
@@ -172,6 +163,10 @@ fn systemd_quote(value: &str, escape_dollar: bool) -> String {
     }
     quoted.push('"');
     quoted
+}
+
+fn systemd_working_directory(value: &str) -> String {
+    value.replace('%', "%%")
 }
 
 fn parse_systemd_state(output: &str) -> DaemonState {
@@ -273,7 +268,7 @@ mod tests {
 
         assert!(unit.contains("ExecStart=\"/Users/test user/bin/rings\""));
         assert!(unit.contains("\"/Users/test user/.rings/config&prod.yaml\""));
-        assert!(unit.contains("WorkingDirectory=\"/Users/test user/work\""));
+        assert!(unit.contains("WorkingDirectory=/Users/test user/work"));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("WantedBy=default.target"));
         Ok(())
@@ -348,7 +343,7 @@ mod tests {
                 &SYSTEMD_STATUS_ARGS,
                 "LoadState=not-found\nActiveState=active\nUnitFileState=\n",
             ),
-            CommandStep::success("systemctl", &["--user", "stop", SYSTEMD_UNIT], ""),
+            CommandStep::success(SYSTEMCTL, &["--user", "stop", SYSTEMD_UNIT], ""),
         ]);
         let manager = SystemdManager {
             unit_path: PathBuf::from("/definition/does/not/exist"),
@@ -364,7 +359,7 @@ mod tests {
     #[test]
     fn status_preserves_systemctl_connection_failures() {
         let runner = ScriptedCommandRunner::new([CommandStep::failure(
-            "systemctl",
+            SYSTEMCTL,
             &SYSTEMD_STATUS_ARGS,
             1,
             "Failed to connect to bus",
@@ -385,9 +380,9 @@ mod tests {
         let root = test_root("start-sequence");
         let _ = fs::remove_dir_all(&root);
         let runner = ScriptedCommandRunner::new([
-            CommandStep::success("systemctl", &["--user", "daemon-reload"], ""),
-            CommandStep::success("systemctl", &["--user", "enable", SYSTEMD_UNIT], ""),
-            CommandStep::success("systemctl", &["--user", "restart", SYSTEMD_UNIT], ""),
+            CommandStep::success(SYSTEMCTL, &["--user", "daemon-reload"], ""),
+            CommandStep::success(SYSTEMCTL, &["--user", "enable", SYSTEMD_UNIT], ""),
+            CommandStep::success(SYSTEMCTL, &["--user", "restart", SYSTEMD_UNIT], ""),
         ]);
         let manager = test_manager(&root, runner);
         let spec = service_spec(&LogLevel::Info, &RuntimeFlavor::MultiThread)?;
@@ -409,7 +404,7 @@ mod tests {
                 &SYSTEMD_STATUS_ARGS,
                 "LoadState=not-found\nActiveState=active\nUnitFileState=\n",
             ),
-            CommandStep::success("systemctl", &["--user", "restart", SYSTEMD_UNIT], ""),
+            CommandStep::success(SYSTEMCTL, &["--user", "restart", SYSTEMD_UNIT], ""),
         ]);
         let manager = SystemdManager {
             unit_path: PathBuf::from("/definition/does/not/exist"),
@@ -427,9 +422,9 @@ mod tests {
         let root = test_root("restart-sequence");
         let _ = fs::remove_dir_all(&root);
         let runner = ScriptedCommandRunner::new([
-            CommandStep::success("systemctl", &["--user", "daemon-reload"], ""),
-            CommandStep::success("systemctl", &["--user", "enable", SYSTEMD_UNIT], ""),
-            CommandStep::success("systemctl", &["--user", "restart", SYSTEMD_UNIT], ""),
+            CommandStep::success(SYSTEMCTL, &["--user", "daemon-reload"], ""),
+            CommandStep::success(SYSTEMCTL, &["--user", "enable", SYSTEMD_UNIT], ""),
+            CommandStep::success(SYSTEMCTL, &["--user", "restart", SYSTEMD_UNIT], ""),
         ]);
         let manager = test_manager(&root, runner);
         write_atomic(&manager.unit_path, "installed")?;
@@ -448,8 +443,8 @@ mod tests {
             "\"/tmp/a $$HOME/%%n/\\\"rings\\\"\""
         );
         assert_eq!(
-            systemd_path_quote("/tmp/a $HOME/%n/\"rings\""),
-            "\"/tmp/a $HOME/%%n/\\\"rings\\\"\""
+            systemd_working_directory("/tmp/a $HOME/%n/rings"),
+            "/tmp/a $HOME/%%n/rings"
         );
     }
 }

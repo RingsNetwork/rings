@@ -19,7 +19,7 @@ use crate::prelude::wasm_export;
 /// Logging verbosity accepted by native CLI and browser bindings.
 #[repr(C)]
 #[wasm_export]
-#[derive(ValueEnum, Debug, Clone)]
+#[derive(ValueEnum, Debug, Clone, Copy)]
 pub enum LogLevel {
     /// Debug-level diagnostic output.
     Debug,

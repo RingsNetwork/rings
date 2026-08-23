@@ -1,4 +1,4 @@
-#![cfg(target_os = "macos")]
+#![cfg(any(target_os = "macos", all(test, unix)))]
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -14,7 +14,6 @@ use super::AutostartState;
 use super::CommandRunner;
 use super::DaemonError;
 use super::DaemonState;
-use super::DaemonStatus;
 use super::ProcessCommandRunner;
 use super::ServiceManager;
 use super::ServiceSpec;
@@ -34,6 +33,7 @@ pub(super) struct LaunchdManager<R = ProcessCommandRunner> {
     runner: R,
 }
 
+#[cfg(target_os = "macos")]
 impl LaunchdManager<ProcessCommandRunner> {
     pub(super) fn discover() -> Result<Self, DaemonError> {
         let home = home::home_dir().ok_or(DaemonError::HomeDirectoryUnavailable)?;
@@ -104,7 +104,7 @@ where R: CommandRunner
         Ok(())
     }
 
-    fn autostart(&self) -> Result<AutostartState, DaemonError> {
+    fn autostart_state(&self) -> Result<AutostartState, DaemonError> {
         if !self.definition_path.is_file() {
             return Ok(AutostartState::Disabled);
         }
@@ -162,17 +162,17 @@ where R: CommandRunner
         }
     }
 
-    fn status(&self) -> Result<DaemonStatus, DaemonError> {
+    fn state(&self) -> Result<DaemonState, DaemonError> {
         let installed = self.definition_path.is_file();
-        let state = match self.service_output()? {
+        Ok(match self.service_output()? {
             Some(output) => parse_launchd_state(&String::from_utf8_lossy(&output.stdout)),
             None if installed => DaemonState::Stopped,
             None => DaemonState::NotInstalled,
-        };
-        Ok(DaemonStatus {
-            state,
-            autostart: self.autostart()?,
         })
+    }
+
+    fn autostart(&self) -> Result<AutostartState, DaemonError> {
+        self.autostart_state()
     }
 }
 
@@ -239,26 +239,33 @@ fn parse_launchd_state(output: &str) -> DaemonState {
     match state {
         Some("running") => DaemonState::Running,
         Some("waiting" | "exited" | "not running") => DaemonState::Stopped,
+        Some("throttled") => DaemonState::Failed,
         Some(other) => DaemonState::Unknown(other.to_owned()),
         None => DaemonState::Unknown("loaded without a state field".to_owned()),
     }
 }
 
 fn parse_launchd_autostart(output: &str) -> AutostartState {
+    let mut parsed_entry = false;
     for line in output.lines() {
         let Some((label, value)) = line.trim().trim_end_matches(';').split_once("=>") else {
             continue;
         };
+        parsed_entry = true;
         if label.trim().trim_matches('"') != LAUNCHD_LABEL {
             continue;
         }
         return match value.trim() {
-            "true" => AutostartState::Disabled,
-            "false" => AutostartState::Enabled,
+            "true" | "disabled" => AutostartState::Disabled,
+            "false" | "enabled" => AutostartState::Enabled,
             _ => AutostartState::Unknown,
         };
     }
-    AutostartState::Enabled
+    if parsed_entry {
+        AutostartState::Enabled
+    } else {
+        AutostartState::Unknown
+    }
 }
 
 #[cfg(test)]
@@ -272,6 +279,7 @@ mod tests {
     use super::super::tests::command_runner::CommandStep;
     use super::super::tests::command_runner::ScriptedCommandRunner;
     use super::super::tests::service_spec;
+    use super::super::DaemonStatus;
     use super::*;
 
     fn test_root(name: &str) -> PathBuf {
@@ -328,8 +336,8 @@ mod tests {
             DaemonState::Stopped
         );
         assert_eq!(
-            parse_launchd_state("state = throttled\n"),
-            DaemonState::Unknown("throttled".to_owned())
+            parse_launchd_state("state = throttled\nlast exit code = 78\n"),
+            DaemonState::Failed
         );
     }
 
@@ -343,6 +351,14 @@ mod tests {
         assert_eq!(parse_launchd_autostart(output), AutostartState::Enabled);
         assert_eq!(
             parse_launchd_autostart("disabled services = {}"),
+            AutostartState::Unknown
+        );
+        assert_eq!(
+            parse_launchd_autostart("\"io.ringsnetwork.node\" => disabled"),
+            AutostartState::Disabled
+        );
+        assert_eq!(
+            parse_launchd_autostart("\"io.ringsnetwork.node\" => enabled"),
             AutostartState::Enabled
         );
         assert_eq!(
@@ -462,6 +478,73 @@ mod tests {
             Err(DaemonError::ServiceNotInstalled { .. })
         ));
         manager.runner.assert_exhausted();
+    }
+
+    #[test]
+    fn start_reporting_polls_state_then_reads_autostart_once() -> anyhow::Result<()> {
+        let root = test_root("start-reporting");
+        let _ = fs::remove_dir_all(&root);
+        let domain = "gui/501";
+        let target = format!("{domain}/{LAUNCHD_LABEL}");
+        let definition = root
+            .join("Library")
+            .join("LaunchAgents")
+            .join(format!("{LAUNCHD_LABEL}.plist"));
+        write_atomic(&definition, "installed")?;
+        let runner = ScriptedCommandRunner::new([
+            CommandStep::success("/bin/launchctl", &["print", &target], "state = waiting\n"),
+            CommandStep::success("/bin/launchctl", &["print", &target], "state = running\n"),
+            CommandStep::success(
+                "/bin/launchctl",
+                &["print-disabled", domain],
+                "\"io.ringsnetwork.node\" => false\n",
+            ),
+        ]);
+        let manager = test_manager(&root, runner);
+
+        let result = super::super::report_started(&manager);
+
+        manager.runner.assert_exhausted();
+        assert!(fs::remove_dir_all(&root).is_ok());
+        result
+    }
+
+    #[test]
+    fn start_reporting_treats_a_throttled_job_as_terminal_failure() -> anyhow::Result<()> {
+        let root = test_root("start-reporting-failure");
+        let _ = fs::remove_dir_all(&root);
+        let domain = "gui/501";
+        let target = format!("{domain}/{LAUNCHD_LABEL}");
+        let definition = root
+            .join("Library")
+            .join("LaunchAgents")
+            .join(format!("{LAUNCHD_LABEL}.plist"));
+        write_atomic(&definition, "installed")?;
+        let runner = ScriptedCommandRunner::new([
+            CommandStep::success(
+                "/bin/launchctl",
+                &["print", &target],
+                "state = throttled\nlast exit code = 78\n",
+            ),
+            CommandStep::success(
+                "/bin/launchctl",
+                &["print-disabled", domain],
+                "\"io.ringsnetwork.node\" => false\n",
+            ),
+        ]);
+        let manager = test_manager(&root, runner);
+
+        let error = super::super::report_started(&manager)
+            .err()
+            .map(|error| error.to_string());
+
+        assert_eq!(
+            error.as_deref(),
+            Some("the daemon did not reach the running state; current state: failed")
+        );
+        manager.runner.assert_exhausted();
+        assert!(fs::remove_dir_all(&root).is_ok());
+        Ok(())
     }
 
     #[test]

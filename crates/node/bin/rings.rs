@@ -140,17 +140,24 @@ fn validate_native_onion_exit_services(services: &[OnionExitService]) -> anyhow:
 #[derive(Subcommand, Debug)]
 #[command(rename_all = "kebab-case")]
 enum Command {
+    #[command(
+        about = "Manages the node as a user-level operating-system service.",
+        subcommand
+    )]
+    Daemon(daemon::DaemonCommand),
+    #[command(flatten)]
+    Async(AsyncCommand),
+}
+
+#[derive(Subcommand, Debug)]
+#[command(rename_all = "kebab-case")]
+enum AsyncCommand {
     #[command(about = "Initializes a node with the given configuration.")]
     Init(InitCommand),
     #[command(about = "Creates a new session secret key.")]
     NewSession(NewSessionCommand),
     #[command(about = "Runs the node in the foreground.")]
     Run(Box<RunCommand>),
-    #[command(
-        about = "Manages the node as a user-level operating-system service.",
-        subcommand
-    )]
-    Daemon(daemon::DaemonCommand),
     #[command(about = "Provides chat room-like functionality on the Rings Network.")]
     Pubsub(PubsubCommand),
     #[command(about = "Connects to a remote peer.", subcommand)]
@@ -816,30 +823,28 @@ async fn pubsub_run(client_args: ClientArgs, topic: String) -> anyhow::Result<()
 fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
 
-    let cli = Cli::parse();
-    init_logging(cli.log_level.clone());
     let Cli {
         command,
         log_level,
         runtime,
-    } = cli;
+    } = Cli::parse();
+    init_logging(log_level);
     match command {
         Command::Daemon(command) => {
             daemon::execute(command, daemon::WorkerOptions { log_level, runtime })
         }
-        command => {
+        Command::Async(command) => {
             let tokio_runtime = runtime.build()?;
             tokio_runtime.block_on(run(command))
         }
     }
 }
 
-async fn run(command: Command) -> anyhow::Result<()> {
+async fn run(command: AsyncCommand) -> anyhow::Result<()> {
     match command {
-        Command::Run(args) => daemon_run(*args).await,
-        Command::Daemon(_) => anyhow::bail!("daemon command reached the asynchronous dispatcher"),
-        Command::Pubsub(args) => pubsub_run(args.client_args, args.topic).await,
-        Command::Connect(ConnectCommand::Node(args)) => {
+        AsyncCommand::Run(args) => daemon_run(*args).await,
+        AsyncCommand::Pubsub(args) => pubsub_run(args.client_args, args.topic).await,
+        AsyncCommand::Connect(ConnectCommand::Node(args)) => {
             args.client_args
                 .new_client()
                 .await?
@@ -848,7 +853,7 @@ async fn run(command: Command) -> anyhow::Result<()> {
                 .display();
             Ok(())
         }
-        Command::Connect(ConnectCommand::Did(args)) => {
+        AsyncCommand::Connect(ConnectCommand::Did(args)) => {
             args.client_args
                 .new_client()
                 .await?
@@ -857,7 +862,7 @@ async fn run(command: Command) -> anyhow::Result<()> {
                 .display();
             Ok(())
         }
-        Command::Connect(ConnectCommand::Seed(args)) => {
+        AsyncCommand::Connect(ConnectCommand::Seed(args)) => {
             args.client_args
                 .new_client()
                 .await?
@@ -866,7 +871,7 @@ async fn run(command: Command) -> anyhow::Result<()> {
                 .display();
             Ok(())
         }
-        Command::Peer(PeerCommand::List(args)) => {
+        AsyncCommand::Peer(PeerCommand::List(args)) => {
             args.client_args
                 .new_client()
                 .await?
@@ -875,7 +880,7 @@ async fn run(command: Command) -> anyhow::Result<()> {
                 .display();
             Ok(())
         }
-        Command::Peer(PeerCommand::Disconnect(args)) => {
+        AsyncCommand::Peer(PeerCommand::Disconnect(args)) => {
             args.client_args
                 .new_client()
                 .await?
@@ -884,7 +889,7 @@ async fn run(command: Command) -> anyhow::Result<()> {
                 .display();
             Ok(())
         }
-        Command::Send(SendCommand::Message(args)) => {
+        AsyncCommand::Send(SendCommand::Message(args)) => {
             args.client_args
                 .new_client()
                 .await?
@@ -897,7 +902,7 @@ async fn run(command: Command) -> anyhow::Result<()> {
                 .display();
             Ok(())
         }
-        Command::Service(ServiceCommand::Register(args)) => {
+        AsyncCommand::Service(ServiceCommand::Register(args)) => {
             args.client_args
                 .new_client()
                 .await?
@@ -906,7 +911,7 @@ async fn run(command: Command) -> anyhow::Result<()> {
                 .display();
             Ok(())
         }
-        Command::Service(ServiceCommand::Lookup(args)) => {
+        AsyncCommand::Service(ServiceCommand::Lookup(args)) => {
             args.client_args
                 .new_client()
                 .await?
@@ -915,18 +920,18 @@ async fn run(command: Command) -> anyhow::Result<()> {
                 .display();
             Ok(())
         }
-        Command::Init(args) => {
+        AsyncCommand::Init(args) => {
             let session_sk_path = args.session_args.new_session_then_write_to_fs()?;
             let config = config::Config::new(session_sk_path);
             let p = config.write_fs(&args.location)?;
             println!("Your config file has saved to: {p}");
             Ok(())
         }
-        Command::NewSession(args) => {
+        AsyncCommand::NewSession(args) => {
             args.session_args.new_session_then_write_to_fs()?;
             Ok(())
         }
-        Command::Inspect(args) => {
+        AsyncCommand::Inspect(args) => {
             args.client_args
                 .new_client()
                 .await?

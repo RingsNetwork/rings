@@ -1,7 +1,9 @@
 use clap::CommandFactory;
 use clap::Parser;
 
+use super::daemon::DaemonCommand;
 use super::Cli;
+use super::Command;
 
 #[test]
 fn daemon_command_tree_accepts_the_four_supported_actions() {
@@ -23,8 +25,12 @@ fn daemon_command_tree_accepts_the_four_supported_actions() {
 #[test]
 fn daemon_start_accepts_a_config_path() {
     let parsed = Cli::try_parse_from(["rings", "daemon", "start", "-c", "custom.yaml"]);
+    let config_path = parsed.ok().and_then(|cli| match cli.command {
+        Command::Daemon(DaemonCommand::Start(command)) => Some(command.config_path().to_owned()),
+        _ => None,
+    });
 
-    assert!(parsed.is_ok());
+    assert_eq!(config_path.as_deref(), Some("custom.yaml"));
 }
 
 #[test]

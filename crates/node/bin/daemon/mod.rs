@@ -22,6 +22,7 @@ use thiserror::Error;
 use super::ConfigArgs;
 use super::RuntimeFlavor;
 
+#[cfg(any(target_os = "macos", all(test, unix)))]
 mod launchd;
 mod systemd;
 
@@ -45,6 +46,13 @@ pub(super) enum DaemonCommand {
 pub(super) struct DaemonStartCommand {
     #[command(flatten)]
     config_args: ConfigArgs,
+}
+
+#[cfg(test)]
+impl DaemonStartCommand {
+    pub(super) fn config_path(&self) -> &str {
+        &self.config_args.config
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -137,7 +145,7 @@ enum DaemonError {
     ServiceNotInstalled { path: PathBuf },
     #[error("the daemon did not reach the running state; current state: {state}")]
     ServiceDidNotStart { state: DaemonState },
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", all(test, unix)))]
     #[error("launchd did not unload the daemon service")]
     ServiceDidNotUnload,
 }
@@ -185,7 +193,6 @@ enum DaemonState {
     NotInstalled,
     Running,
     Stopped,
-    #[cfg(target_os = "linux")]
     Failed,
     #[cfg(target_os = "linux")]
     Starting,
@@ -195,17 +202,17 @@ enum DaemonState {
 }
 
 impl DaemonState {
+    #[cfg(target_os = "linux")]
+    fn is_installed(&self) -> bool {
+        !matches!(self, Self::NotInstalled)
+    }
+
     fn is_running(&self) -> bool {
         matches!(self, Self::Running)
     }
 
     fn is_terminal_start_failure(&self) -> bool {
-        match self {
-            Self::NotInstalled => true,
-            #[cfg(target_os = "linux")]
-            Self::Failed => true,
-            _ => false,
-        }
+        matches!(self, Self::NotInstalled | Self::Failed)
     }
 }
 
@@ -215,7 +222,6 @@ impl fmt::Display for DaemonState {
             Self::NotInstalled => formatter.write_str("not installed"),
             Self::Running => formatter.write_str("running"),
             Self::Stopped => formatter.write_str("stopped"),
-            #[cfg(target_os = "linux")]
             Self::Failed => formatter.write_str("failed"),
             #[cfg(target_os = "linux")]
             Self::Starting => formatter.write_str("starting"),
@@ -304,7 +310,15 @@ trait ServiceManager {
     fn start(&self, spec: &ServiceSpec) -> Result<(), DaemonError>;
     fn stop(&self) -> Result<(), DaemonError>;
     fn restart(&self) -> Result<(), DaemonError>;
-    fn status(&self) -> Result<DaemonStatus, DaemonError>;
+    fn state(&self) -> Result<DaemonState, DaemonError>;
+    fn autostart(&self) -> Result<AutostartState, DaemonError>;
+
+    fn status(&self) -> Result<DaemonStatus, DaemonError> {
+        Ok(DaemonStatus {
+            state: self.state()?,
+            autostart: self.autostart()?,
+        })
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -347,7 +361,10 @@ pub(super) fn execute(command: DaemonCommand, options: WorkerOptions) -> anyhow:
 }
 
 fn report_started(manager: &dyn ServiceManager) -> anyhow::Result<()> {
-    let status = wait_for_running(manager)?;
+    let status = DaemonStatus {
+        state: wait_for_running(manager)?,
+        autostart: manager.autostart()?,
+    };
     print_status(manager, &status);
     if status.state.is_running() {
         Ok(())
@@ -359,16 +376,16 @@ fn report_started(manager: &dyn ServiceManager) -> anyhow::Result<()> {
     }
 }
 
-fn wait_for_running(manager: &dyn ServiceManager) -> Result<DaemonStatus, DaemonError> {
-    let mut status = manager.status()?;
+fn wait_for_running(manager: &dyn ServiceManager) -> Result<DaemonState, DaemonError> {
+    let mut state = manager.state()?;
     for _ in 0..START_STATUS_ATTEMPTS {
-        if status.state.is_running() || status.state.is_terminal_start_failure() {
-            return Ok(status);
+        if state.is_running() || state.is_terminal_start_failure() {
+            return Ok(state);
         }
         thread::sleep(START_STATUS_INTERVAL);
-        status = manager.status()?;
+        state = manager.state()?;
     }
-    Ok(status)
+    Ok(state)
 }
 
 fn print_status(manager: &dyn ServiceManager, status: &DaemonStatus) {
