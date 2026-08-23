@@ -2,6 +2,7 @@
 
 use std::future::pending;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -69,6 +70,45 @@ async fn connect_nodes(node1: Node, node2: Node) -> Result<(Node, Node)> {
 
 struct PendingMeasure {
     started: Arc<AtomicBool>,
+}
+
+#[derive(Default)]
+struct FailedSendMeasure {
+    count: AtomicUsize,
+}
+
+impl FailedSendMeasure {
+    fn count(&self) -> usize {
+        self.count.load(Ordering::Acquire)
+    }
+}
+
+#[async_trait]
+impl Measure for FailedSendMeasure {
+    async fn incr(&self, _did: Did, counter: MeasureCounter) {
+        if counter == MeasureCounter::FailedToSend {
+            self.count.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    async fn get_count(&self, _did: Did, counter: MeasureCounter) -> u64 {
+        if counter == MeasureCounter::FailedToSend {
+            self.count() as u64
+        } else {
+            0
+        }
+    }
+}
+
+#[async_trait]
+impl BehaviourJudgement for FailedSendMeasure {
+    async fn quality(&self, _did: Did) -> PeerQuality {
+        PeerQuality::Unknown
+    }
+
+    async fn good(&self, _did: Did) -> bool {
+        true
+    }
 }
 
 #[async_trait]
@@ -458,7 +498,11 @@ async fn transfer_capacity_bounds_real_waiting_and_queued_lifetimes() -> Result<
 
 #[tokio::test]
 async fn detached_delivery_timeout_releases_transfer_capacity() -> Result<()> {
-    let (node1, node2) = connected_nodes().await?;
+    let measure = Arc::new(FailedSendMeasure::default());
+    let measure_impl: MeasureImpl = measure.clone();
+    let node1 = prepare_node_with_measure(SecretKey::random(), measure_impl)?;
+    let node2 = prepare_node(SecretKey::random()).await;
+    let (node1, node2) = connect_nodes(node1, node2).await?;
     let peer = node2.did();
     let _pending_delivery = PendingDeliveryGuard::new();
 
@@ -486,6 +530,12 @@ async fn detached_delivery_timeout_releases_transfer_capacity() -> Result<()> {
     })
     .await
     .map_err(|_| invalid_test_state("detached delivery timeout retained capacity"))?;
+    wait_for_msgs([&node1, &node2]).await;
+    assert_eq!(
+        measure.count(),
+        0,
+        "local delivery timeout must not degrade peer quality"
+    );
     Ok(())
 }
 

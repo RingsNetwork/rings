@@ -669,6 +669,19 @@ impl OutboundWorker {
         final_result
     }
 
+    fn fail_transfer(
+        &mut self,
+        transfer: RunnableTransfer<QueuedTransfer>,
+        error: Error,
+        fairness: TerminationFairness,
+    ) {
+        let record_failure = error.records_peer_send_failure();
+        self.terminate_transfer(transfer, Err(error), fairness);
+        if record_failure {
+            self.measurements.record(OutboundMeasurement::FailedToSend);
+        }
+    }
+
     fn handle_delivery(&mut self, event: DeliveryEvent) {
         let Some(transfer) = self.ready.take_waiting(event.class, event.id) else {
             debug_assert!(false, "delivery must identify the waiting lane head");
@@ -679,8 +692,7 @@ impl OutboundWorker {
                 self.ready.make_runnable(transfer);
             }
             ChunkSendProgress::Ready(Err(error)) => {
-                self.terminate_transfer(transfer, Err(error), TerminationFairness::AlreadyAdvanced);
-                self.measurements.record(OutboundMeasurement::FailedToSend);
+                self.fail_transfer(transfer, error, TerminationFairness::AlreadyAdvanced);
             }
             ChunkSendProgress::Cancelled(reason) => {
                 let record_failure = reason.records_peer_failure();
@@ -758,12 +770,7 @@ impl OutboundWorker {
                 return;
             }
             Err(error) => {
-                self.terminate_transfer(
-                    runnable,
-                    Err(error),
-                    TerminationFairness::AdvanceFailedAttempt,
-                );
-                self.measurements.record(OutboundMeasurement::FailedToSend);
+                self.fail_transfer(runnable, error, TerminationFairness::AdvanceFailedAttempt);
                 return;
             }
         };
@@ -789,15 +796,7 @@ impl OutboundWorker {
                 self.deliveries.push(delivery_wait);
             }
             ChunkSendProgress::Ready(Err(error)) => {
-                let record_failure = error.records_peer_send_failure();
-                self.terminate_transfer(
-                    runnable,
-                    Err(error),
-                    TerminationFairness::AdvanceFailedAttempt,
-                );
-                if record_failure {
-                    self.measurements.record(OutboundMeasurement::FailedToSend);
-                }
+                self.fail_transfer(runnable, error, TerminationFairness::AdvanceFailedAttempt);
             }
             ChunkSendProgress::Cancelled(reason) => {
                 let record_failure = reason.records_peer_failure();
