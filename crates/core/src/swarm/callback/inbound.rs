@@ -1,11 +1,9 @@
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
-use std::future::poll_fn;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::task::Poll;
 
 use futures::channel::mpsc;
 use futures::channel::oneshot;
@@ -22,14 +20,9 @@ use crate::error::Result;
 use crate::message::MessageClass;
 use crate::message::MessageMeta;
 use crate::message::MessagePayload;
-#[cfg(all(test, not(target_family = "wasm")))]
-use crate::swarm::transport::TestActivityPermit;
-#[cfg(all(test, not(target_family = "wasm")))]
-use crate::swarm::transport::TestActivityTracker;
-use crate::utils::fair_reservation_fits;
-use crate::utils::fixed_reservation_covers;
-use crate::utils::FairAdmission;
+use crate::utils::acquire_fair;
 use crate::utils::FairWaitQueue;
+use crate::utils::ReservedCapacity;
 
 mod ticket;
 
@@ -38,89 +31,81 @@ use self::ticket::InboundSender;
 use self::ticket::InboundTicket;
 
 const INBOUND_MAILBOX_CAPACITY: usize = 256;
-const INBOUND_MAILBOX_BYTE_CAPACITY: usize = 128 * 1024 * 1024;
+const INBOUND_MAILBOX_BYTE_CAPACITY: usize = 256 * 1024 * 1024;
 const INBOUND_RESERVED_TRANSFERS_PER_LANE: usize = 16;
 const INBOUND_RESERVED_BYTES_PER_LANE: usize = 1024 * 1024;
 const INBOUND_RESERVED_TRANSFERS: [usize; INBOUND_LANE_COUNT] =
     [INBOUND_RESERVED_TRANSFERS_PER_LANE; INBOUND_LANE_COUNT];
 const INBOUND_RESERVED_BYTES: [usize; INBOUND_LANE_COUNT] =
     [INBOUND_RESERVED_BYTES_PER_LANE; INBOUND_LANE_COUNT];
-const INBOUND_PEER_CAPACITY: usize = 64;
-const INBOUND_PEER_BYTE_CAPACITY: usize = crate::consts::TRANSPORT_MAX_SIZE * 2;
+const INBOUND_PEER_CAPACITY: usize = 32;
+const INBOUND_PEER_BYTE_CAPACITY: usize = 128 * 1024 * 1024;
 const INBOUND_COMMAND_DRAIN_BUDGET: usize = 32;
 const INBOUND_LANE_COUNT: usize = MessageClass::COUNT + 1;
 
+const _: () = {
+    assert!(INBOUND_PEER_CAPACITY < INBOUND_MAILBOX_CAPACITY);
+    assert!(INBOUND_PEER_BYTE_CAPACITY < INBOUND_MAILBOX_BYTE_CAPACITY);
+    assert!(crate::consts::TRANSPORT_MAX_SIZE * 2 <= INBOUND_PEER_BYTE_CAPACITY);
+    assert!(INBOUND_RESERVED_TRANSFERS_PER_LANE * INBOUND_LANE_COUNT <= INBOUND_MAILBOX_CAPACITY);
+    assert!(INBOUND_RESERVED_BYTES_PER_LANE * INBOUND_LANE_COUNT <= INBOUND_MAILBOX_BYTE_CAPACITY);
+};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum InboundLane {
-    DhtControl,
-    Reassembly,
-    Storage,
-    E2e,
-    Application,
-}
+struct InboundLane(usize);
 
 impl InboundLane {
-    const ORDER: [Self; INBOUND_LANE_COUNT] = [
-        Self::DhtControl,
-        Self::Reassembly,
-        Self::Storage,
-        Self::E2e,
-        Self::Application,
-    ];
+    #[allow(non_upper_case_globals)]
+    const DhtControl: Self = Self(MessageClass::DhtControl.index());
+    #[allow(non_upper_case_globals)]
+    const Storage: Self = Self(MessageClass::Storage.index());
+    #[allow(non_upper_case_globals)]
+    const E2e: Self = Self(MessageClass::E2e.index());
+    #[allow(non_upper_case_globals)]
+    const Application: Self = Self(MessageClass::Application.index());
+    #[allow(non_upper_case_globals)]
+    const Reassembly: Self = Self(MessageClass::COUNT);
 
     const fn from_meta(meta: MessageMeta) -> Self {
         if meta.kind().is_chunk() {
             return Self::Reassembly;
         }
-        match meta.class() {
-            MessageClass::DhtControl => Self::DhtControl,
-            MessageClass::Storage => Self::Storage,
-            MessageClass::E2e => Self::E2e,
-            MessageClass::Application => Self::Application,
-        }
+        Self(meta.class().index())
     }
 
     const fn index(self) -> usize {
-        match self {
-            Self::DhtControl => 0,
-            Self::Reassembly => 1,
-            Self::Storage => 2,
-            Self::E2e => 3,
-            Self::Application => 4,
+        self.0
+    }
+
+    const fn from_index(index: usize) -> Option<Self> {
+        if index < INBOUND_LANE_COUNT {
+            Some(Self(index))
+        } else {
+            None
         }
     }
 }
 
 #[derive(Clone, Copy)]
 struct InboundCapacityState {
-    admitted: usize,
-    admitted_bytes: usize,
-    admitted_by_lane: [usize; INBOUND_LANE_COUNT],
-    admitted_bytes_by_lane: [usize; INBOUND_LANE_COUNT],
+    messages: ReservedCapacity<INBOUND_LANE_COUNT>,
+    bytes: ReservedCapacity<INBOUND_LANE_COUNT>,
 }
 
 impl InboundCapacityState {
     const fn new() -> Self {
         Self {
-            admitted: 0,
-            admitted_bytes: 0,
-            admitted_by_lane: [0; INBOUND_LANE_COUNT],
-            admitted_bytes_by_lane: [0; INBOUND_LANE_COUNT],
+            messages: ReservedCapacity::new(),
+            bytes: ReservedCapacity::new(),
         }
     }
 
     fn reservation_covers(&self, lane: InboundLane, bytes: usize) -> bool {
-        fixed_reservation_covers(
-            &self.admitted_by_lane,
-            lane.index(),
-            1,
-            &INBOUND_RESERVED_TRANSFERS,
-        ) && fixed_reservation_covers(
-            &self.admitted_bytes_by_lane,
-            lane.index(),
-            bytes,
-            &INBOUND_RESERVED_BYTES,
-        )
+        self.messages
+            .reservation_covers(lane.index(), 1, &INBOUND_RESERVED_TRANSFERS)
+            && self
+                .bytes
+                .reservation_covers(lane.index(), bytes, &INBOUND_RESERVED_BYTES)
     }
 
     fn try_reserve(
@@ -128,9 +113,7 @@ impl InboundCapacityState {
         lane: InboundLane,
         bytes: usize,
     ) -> std::result::Result<(), CapacityRejection> {
-        if !fair_reservation_fits(
-            &self.admitted_by_lane,
-            self.admitted,
+        if !self.messages.try_reserve(
             lane.index(),
             1,
             INBOUND_MAILBOX_CAPACITY,
@@ -138,36 +121,21 @@ impl InboundCapacityState {
         ) {
             return Err(CapacityRejection::Count);
         }
-        if !fair_reservation_fits(
-            &self.admitted_bytes_by_lane,
-            self.admitted_bytes,
+        if !self.bytes.try_reserve(
             lane.index(),
             bytes,
             INBOUND_MAILBOX_BYTE_CAPACITY,
             &INBOUND_RESERVED_BYTES,
         ) {
+            self.messages.release(lane.index(), 1);
             return Err(CapacityRejection::Bytes);
-        }
-        self.admitted += 1;
-        self.admitted_bytes += bytes;
-        if let Some(lane_count) = self.admitted_by_lane.get_mut(lane.index()) {
-            *lane_count += 1;
-        }
-        if let Some(lane_bytes) = self.admitted_bytes_by_lane.get_mut(lane.index()) {
-            *lane_bytes += bytes;
         }
         Ok(())
     }
 
     fn release(&mut self, lane: InboundLane, bytes: usize) {
-        self.admitted = self.admitted.saturating_sub(1);
-        self.admitted_bytes = self.admitted_bytes.saturating_sub(bytes);
-        if let Some(lane_count) = self.admitted_by_lane.get_mut(lane.index()) {
-            *lane_count = lane_count.saturating_sub(1);
-        }
-        if let Some(lane_bytes) = self.admitted_bytes_by_lane.get_mut(lane.index()) {
-            *lane_bytes = lane_bytes.saturating_sub(bytes);
-        }
+        self.messages.release(lane.index(), 1);
+        self.bytes.release(lane.index(), bytes);
     }
 }
 
@@ -176,28 +144,48 @@ enum CapacityRejection {
     Bytes,
 }
 
-#[derive(Clone, Copy, Default)]
+const PEER_RESERVATION: [usize; 1] = [0];
+
+#[derive(Clone, Copy)]
 struct InboundPeerCapacityState {
-    admitted: usize,
-    admitted_bytes: usize,
+    messages: ReservedCapacity<1>,
+    bytes: ReservedCapacity<1>,
+}
+
+impl Default for InboundPeerCapacityState {
+    fn default() -> Self {
+        Self {
+            messages: ReservedCapacity::new(),
+            bytes: ReservedCapacity::new(),
+        }
+    }
 }
 
 impl InboundPeerCapacityState {
     fn try_reserve(&mut self, bytes: usize) -> std::result::Result<(), CapacityRejection> {
-        if self.admitted >= INBOUND_PEER_CAPACITY {
+        if !self
+            .messages
+            .try_reserve(0, 1, INBOUND_PEER_CAPACITY, &PEER_RESERVATION)
+        {
             return Err(CapacityRejection::Count);
         }
-        if self.admitted_bytes.saturating_add(bytes) > INBOUND_PEER_BYTE_CAPACITY {
+        if !self
+            .bytes
+            .try_reserve(0, bytes, INBOUND_PEER_BYTE_CAPACITY, &PEER_RESERVATION)
+        {
+            self.messages.release(0, 1);
             return Err(CapacityRejection::Bytes);
         }
-        self.admitted += 1;
-        self.admitted_bytes += bytes;
         Ok(())
     }
 
     fn release(&mut self, bytes: usize) {
-        self.admitted = self.admitted.saturating_sub(1);
-        self.admitted_bytes = self.admitted_bytes.saturating_sub(bytes);
+        self.messages.release(0, 1);
+        self.bytes.release(0, bytes);
+    }
+
+    const fn is_idle(self) -> bool {
+        self.messages.admitted() == 0
     }
 }
 
@@ -205,32 +193,14 @@ pub(crate) struct InboundCapacity {
     state: Mutex<InboundCapacityState>,
     peer_states: Mutex<BTreeMap<Option<Did>, InboundPeerCapacityState>>,
     waiters: Arc<FairWaitQueue>,
-    #[cfg(all(test, not(target_family = "wasm")))]
-    test_activity: Arc<TestActivityTracker>,
 }
 
 impl InboundCapacity {
     pub(crate) fn new() -> Self {
-        Self::from_parts(
-            #[cfg(all(test, not(target_family = "wasm")))]
-            Arc::new(TestActivityTracker::new()),
-        )
-    }
-
-    #[cfg(all(test, not(target_family = "wasm")))]
-    pub(crate) fn with_test_activity(test_activity: Arc<TestActivityTracker>) -> Self {
-        Self::from_parts(test_activity)
-    }
-
-    fn from_parts(
-        #[cfg(all(test, not(target_family = "wasm")))] test_activity: Arc<TestActivityTracker>,
-    ) -> Self {
         Self {
             state: Mutex::new(InboundCapacityState::new()),
             peer_states: Mutex::new(BTreeMap::new()),
             waiters: Arc::new(FairWaitQueue::new()),
-            #[cfg(all(test, not(target_family = "wasm")))]
-            test_activity,
         }
     }
 
@@ -259,8 +229,6 @@ impl InboundCapacity {
         bytes: usize,
         reserved_only: bool,
     ) -> Result<InboundCapacityPermit> {
-        #[cfg(all(test, not(target_family = "wasm")))]
-        let test_activity = self.test_activity.begin();
         let mut peer_states = self
             .peer_states
             .lock()
@@ -298,8 +266,6 @@ impl InboundCapacity {
             peer,
             lane,
             bytes,
-            #[cfg(all(test, not(target_family = "wasm")))]
-            _test_activity: test_activity,
         })
     }
 
@@ -321,23 +287,14 @@ impl InboundCapacity {
                     self.try_acquire(peer, lane, bytes)
                 });
         }
-        match self
-            .waiters
-            .admit_or_wait(bytes, memory_capacity_error(bytes), || {
-                self.try_acquire(peer, lane, bytes)
-            })? {
-            FairAdmission::Ready(permit) => Ok(permit),
-            FairAdmission::Waiting(mut waiter) => {
-                poll_fn(|context| {
-                    match waiter.poll(context, || self.try_acquire(peer, lane, bytes).ok()) {
-                        Poll::Ready(Some(permit)) => Poll::Ready(Ok(permit)),
-                        Poll::Ready(None) => Poll::Ready(Err(Error::InboundMailboxClosed)),
-                        Poll::Pending => Poll::Pending,
-                    }
-                })
-                .await
-            }
-        }
+        acquire_fair(
+            &self.waiters,
+            bytes,
+            memory_capacity_error(bytes),
+            || Error::InboundMailboxClosed,
+            || self.try_acquire(peer, lane, bytes),
+        )
+        .await
     }
 
     #[cfg(all(test, not(target_family = "wasm")))]
@@ -345,7 +302,8 @@ impl InboundCapacity {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .admitted
+            .messages
+            .admitted()
     }
 }
 
@@ -354,8 +312,6 @@ struct InboundCapacityPermit {
     peer: Option<Did>,
     lane: InboundLane,
     bytes: usize,
-    #[cfg(all(test, not(target_family = "wasm")))]
-    _test_activity: TestActivityPermit,
 }
 
 impl InboundCapacityPermit {
@@ -437,7 +393,7 @@ impl Drop for InboundCapacityPermit {
         state.release(self.lane, self.bytes);
         if let Some(peer_state) = peer_states.get_mut(&self.peer) {
             peer_state.release(self.bytes);
-            if peer_state.admitted == 0 {
+            if peer_state.is_idle() {
                 peer_states.remove(&self.peer);
             }
         }
@@ -587,11 +543,11 @@ impl InboundQueues {
 
     fn push_pending(&mut self, sequence: u64, lane: InboundLane) {
         if let Some(queue) = self.lanes.get_mut(lane.index()) {
+            debug_assert!(queue.back().is_none_or(|entry| entry.sequence < sequence));
             queue.push_back(InboundQueueEntry {
                 sequence,
                 event: None,
             });
-            queue.make_contiguous().sort_by_key(|entry| entry.sequence);
         }
     }
 
@@ -604,11 +560,12 @@ impl InboundQueues {
                 entry.event = Some(event);
                 return;
             }
-            queue.push_back(InboundQueueEntry {
+            let entry = InboundQueueEntry {
                 sequence: event.sequence,
                 event: Some(event),
-            });
-            queue.make_contiguous().sort_by_key(|entry| entry.sequence);
+            };
+            let position = queue.partition_point(|queued| queued.sequence < entry.sequence);
+            queue.insert(position, entry);
         }
     }
 
@@ -705,33 +662,20 @@ impl InboundActor {
     }
 
     fn dispatch_runnable(&mut self) {
-        let reassembly_barrier = self
-            .active_lanes
-            .get(InboundLane::Reassembly.index())
-            .copied()
-            .flatten()
-            .into_iter()
-            .chain(self.queues.front_sequence(InboundLane::Reassembly))
-            .min();
-        for (lane, active) in InboundLane::ORDER
-            .into_iter()
-            .zip(self.active_lanes.iter_mut())
-        {
-            if active.is_some() {
+        for index in 0..INBOUND_LANE_COUNT {
+            if self.active_lanes[index].is_some() {
                 continue;
             }
+            let Some(lane) = InboundLane::from_index(index) else {
+                continue;
+            };
             let Some(sequence) = self.queues.front_sequence(lane) else {
                 continue;
             };
-            if lane != InboundLane::Reassembly
-                && reassembly_barrier.is_some_and(|barrier| sequence > barrier)
-            {
-                continue;
-            }
             let Some(event) = self.queues.pop(lane) else {
                 continue;
             };
-            *active = Some(sequence);
+            self.active_lanes[index] = Some(sequence);
             self.active
                 .push(Box::pin(process_event(self.processor.clone(), event)));
         }

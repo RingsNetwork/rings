@@ -43,8 +43,6 @@ use super::delivery::ChunkSendProgress;
 use super::delivery::SendCompletionOutcome;
 use super::delivery::TransferStop;
 use super::AdmittedConnection;
-#[cfg(all(test, not(target_family = "wasm")))]
-use super::TestActivityTracker;
 use crate::chunk::Chunk;
 use crate::dht::Did;
 use crate::error::Error;
@@ -64,8 +62,6 @@ mod model;
 mod queue;
 
 use capacity::GlobalTransferCapacity;
-#[cfg(all(test, not(target_family = "wasm")))]
-use capacity::TransferActivity;
 use capacity::TransferCapacity;
 pub(super) use capacity::TransferCapacityPermit;
 #[cfg(test)]
@@ -79,6 +75,7 @@ use measurement::OutboundMeasurement;
 pub(super) use model::OutboundCompletion;
 pub(super) use model::OutboundMessageMeta;
 use model::TransferClass;
+use queue::RunnableTransfer;
 use queue::TransferQueues;
 #[cfg(test)]
 use queue::OUTBOUND_CONTROL_BURST;
@@ -307,16 +304,6 @@ struct DeliveryEvent {
     result: ChunkSendProgress<Result<()>>,
 }
 
-enum OutboundCommand {
-    Enqueue(Box<ScheduledTransfer>),
-}
-
-enum CommandPoll {
-    Ready(OutboundCommand),
-    Empty,
-    Closed,
-}
-
 #[derive(Clone)]
 pub(super) struct OutboundPeerHandle {
     peer: Did,
@@ -324,8 +311,9 @@ pub(super) struct OutboundPeerHandle {
 }
 
 struct OutboundPeerState {
-    sender: Mutex<mpsc::Sender<OutboundCommand>>,
-    _capacity: Arc<TransferCapacity>,
+    sender: Mutex<mpsc::Sender<Box<ScheduledTransfer>>>,
+    #[cfg(all(test, not(target_family = "wasm")))]
+    capacity: Arc<TransferCapacity>,
     stop: StopSource,
 }
 
@@ -339,7 +327,7 @@ impl OutboundPeerHandle {
         if self.state.stop.is_stop_requested() {
             return Err(Error::ChannelSendMessageFailed);
         }
-        self.state._capacity.try_acquire(self.peer, class, bytes)
+        self.state.capacity.try_acquire(self.peer, class, bytes)
     }
 
     pub(super) fn submit(
@@ -364,18 +352,16 @@ impl OutboundPeerHandle {
         if self.state.stop.is_stop_requested() {
             return Err(Error::ChannelSendMessageFailed);
         }
-        let result = sender
-            .try_send(OutboundCommand::Enqueue(Box::new(scheduled)))
-            .map_err(|error| {
-                if error.is_full() {
-                    Error::OutboundTransferCapacityExceeded {
-                        peer: self.peer,
-                        capacity: OUTBOUND_TRANSFER_QUEUE_CAPACITY,
-                    }
-                } else {
-                    Error::ChannelSendMessageFailed
+        let result = sender.try_send(Box::new(scheduled)).map_err(|error| {
+            if error.is_full() {
+                Error::OutboundTransferCapacityExceeded {
+                    peer: self.peer,
+                    capacity: OUTBOUND_TRANSFER_QUEUE_CAPACITY,
                 }
-            });
+            } else {
+                Error::ChannelSendMessageFailed
+            }
+        });
         #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
         if result.is_ok() {
             record_outbound_submit_for_test();
@@ -410,8 +396,6 @@ impl Drop for OutboundPeerState {
 pub(super) struct OutboundSchedulers {
     registry: Mutex<OutboundRegistry>,
     global_capacity: Arc<GlobalTransferCapacity>,
-    #[cfg(all(test, not(target_family = "wasm")))]
-    activity: Arc<TransferActivity>,
     measure: Option<MeasureImpl>,
 }
 
@@ -444,30 +428,9 @@ impl OutboundRegistry {
 
 impl OutboundSchedulers {
     pub(super) fn new(measure: Option<MeasureImpl>) -> Self {
-        Self::from_parts(
-            measure,
-            #[cfg(all(test, not(target_family = "wasm")))]
-            Arc::new(TestActivityTracker::new()),
-        )
-    }
-
-    #[cfg(all(test, not(target_family = "wasm")))]
-    pub(super) fn with_test_activity(
-        measure: Option<MeasureImpl>,
-        test_activity: Arc<TestActivityTracker>,
-    ) -> Self {
-        Self::from_parts(measure, test_activity)
-    }
-
-    fn from_parts(
-        measure: Option<MeasureImpl>,
-        #[cfg(all(test, not(target_family = "wasm")))] test_activity: Arc<TestActivityTracker>,
-    ) -> Self {
         Self {
             registry: Mutex::new(OutboundRegistry::default()),
             global_capacity: Arc::new(GlobalTransferCapacity::new()),
-            #[cfg(all(test, not(target_family = "wasm")))]
-            activity: Arc::new(TransferActivity::new(test_activity)),
             measure,
         }
     }
@@ -477,12 +440,14 @@ impl OutboundSchedulers {
         if let Some(handle) = registry.peers.get(&peer) {
             return Ok(handle.clone());
         }
+        #[cfg(all(test, not(target_family = "wasm")))]
         let capacity = registry.capacity(peer, &self.global_capacity);
         let (sender, receiver) = mpsc::channel(OUTBOUND_TRANSFER_QUEUE_CAPACITY);
         let stop = StopSource::new();
         let state = Arc::new(OutboundPeerState {
             sender: Mutex::new(sender),
-            _capacity: capacity,
+            #[cfg(all(test, not(target_family = "wasm")))]
+            capacity,
             stop: stop.clone(),
         });
         let handle = OutboundPeerHandle { peer, state };
@@ -502,14 +467,8 @@ impl OutboundSchedulers {
         class: TransferClass,
         bytes: usize,
     ) -> Result<TransferCapacityPermit> {
-        #[cfg(all(test, not(target_family = "wasm")))]
-        let activity = self.activity.begin();
         let capacity = self.lock_registry().capacity(peer, &self.global_capacity);
-        let permit = capacity.acquire(peer, class, bytes).await?;
-        #[cfg(all(test, not(target_family = "wasm")))]
-        return Ok(permit.track_activity(activity));
-        #[cfg(not(all(test, not(target_family = "wasm"))))]
-        Ok(permit)
+        capacity.acquire(peer, class, bytes).await
     }
 
     pub(super) fn shutdown(&self, peer: Did) {
@@ -541,7 +500,14 @@ impl OutboundSchedulers {
 
     #[cfg(all(test, not(target_family = "wasm")))]
     fn admitted_transfer_total_for_test(&self) -> usize {
-        self.activity.admitted_for_test()
+        let mut registry = self.lock_registry();
+        registry.prune_capacities();
+        registry
+            .capacities
+            .values()
+            .filter_map(Weak::upgrade)
+            .map(|capacity| capacity.admitted())
+            .sum()
     }
 
     fn lock_registry(&self) -> MutexGuard<'_, OutboundRegistry> {
@@ -584,7 +550,7 @@ type DeliveryWaitFuture = Pin<Box<dyn Future<Output = DeliveryEvent> + Send>>;
 type DeliveryWaitFuture = Pin<Box<dyn Future<Output = DeliveryEvent>>>;
 
 struct OutboundWorker {
-    receiver: mpsc::Receiver<OutboundCommand>,
+    receiver: mpsc::Receiver<Box<ScheduledTransfer>>,
     ready: TransferQueues<QueuedTransfer>,
     deliveries: FuturesUnordered<DeliveryWaitFuture>,
     measurements: MeasurementRecorder,
@@ -595,7 +561,7 @@ struct OutboundWorker {
 
 impl OutboundWorker {
     fn new(
-        receiver: mpsc::Receiver<OutboundCommand>,
+        receiver: mpsc::Receiver<Box<ScheduledTransfer>>,
         stop: StopToken,
         measurements: MeasurementRecorder,
     ) -> Self {
@@ -616,7 +582,7 @@ impl OutboundWorker {
                 self.shutdown();
                 return;
             }
-            self.drain_available().await;
+            self.drain_available();
             if self.stop.should_stop() {
                 self.shutdown();
                 return;
@@ -625,23 +591,23 @@ impl OutboundWorker {
                 self.cancel_all();
                 return;
             }
-            if let Some(queued) = self.ready.pop() {
-                self.admit_one_frame(queued).await;
+            if let Some(transfer) = self.ready.pop() {
+                self.admit_one_frame(transfer).await;
                 continue;
             }
             self.wait_for_input().await;
         }
     }
 
-    async fn drain_available(&mut self) {
+    fn drain_available(&mut self) {
         for _ in 0..OUTBOUND_COMMAND_DRAIN_BUDGET {
-            match self.poll_command() {
-                CommandPoll::Ready(command) => self.handle_command(command),
-                CommandPoll::Closed => {
+            match self.receiver.next().now_or_never() {
+                Some(Some(transfer)) => self.enqueue_transfer(*transfer),
+                Some(None) => {
                     self.input_closed = true;
                     break;
                 }
-                CommandPoll::Empty => break,
+                None => break,
             }
         }
 
@@ -653,20 +619,6 @@ impl OutboundWorker {
         }
     }
 
-    fn poll_command(&mut self) -> CommandPoll {
-        match self.receiver.next().now_or_never() {
-            Some(Some(command)) => CommandPoll::Ready(command),
-            Some(None) => CommandPoll::Closed,
-            None => CommandPoll::Empty,
-        }
-    }
-
-    fn handle_command(&mut self, command: OutboundCommand) {
-        match command {
-            OutboundCommand::Enqueue(transfer) => self.enqueue_transfer(*transfer),
-        }
-    }
-
     fn enqueue_transfer(&mut self, scheduled: ScheduledTransfer) {
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
@@ -675,44 +627,33 @@ impl OutboundWorker {
     }
 
     fn handle_delivery(&mut self, event: DeliveryEvent) {
-        let Some(mut queued) = self.ready.take_waiting(event.class, event.id) else {
-            tracing::error!(
-                class = ?event.class,
-                transfer_id = event.id,
-                "outbound scheduler received delivery for a non-waiting lane"
-            );
-            self.cancel_all();
+        let Some(mut transfer) = self.ready.take_waiting(event.class, event.id) else {
+            debug_assert!(false, "delivery must identify the waiting lane head");
             return;
         };
         match event.result {
             ChunkSendProgress::Ready(Ok(())) => {
-                if let Err(mut rejected) = self.ready.make_runnable(event.class, queued) {
-                    tracing::error!(
-                        class = ?event.class,
-                        transfer_id = event.id,
-                        "outbound scheduler could not resume a delivered lane"
-                    );
-                    rejected
-                        .scheduled
-                        .transfer
-                        .resolve_final(Err(Error::OutboundSchedulerInvariantViolation));
-                    self.cancel_all();
-                }
+                self.ready.make_runnable(transfer);
             }
             ChunkSendProgress::Ready(Err(error)) => {
                 self.ready.finish_current(event.class);
-                queued.scheduled.transfer.resolve_final(Err(error));
-                drop(queued);
+                transfer
+                    .item_mut()
+                    .scheduled
+                    .transfer
+                    .resolve_final(Err(error));
+                drop(transfer);
                 self.measurements.record(OutboundMeasurement::FailedToSend);
             }
             ChunkSendProgress::Cancelled(reason) => {
                 let record_failure = reason.records_peer_failure();
                 self.ready.finish_current(event.class);
-                queued
+                transfer
+                    .item_mut()
                     .scheduled
                     .transfer
                     .resolve_final(Ok(SendCompletionOutcome::Cancelled));
-                drop(queued);
+                drop(transfer);
                 if record_failure {
                     self.measurements.record(OutboundMeasurement::FailedToSend);
                 }
@@ -737,90 +678,86 @@ impl OutboundWorker {
 
     fn cancel_buffered_commands(&mut self) {
         loop {
-            match self.poll_command() {
-                CommandPoll::Ready(OutboundCommand::Enqueue(transfer)) => {
+            match self.receiver.next().now_or_never() {
+                Some(Some(transfer)) => {
                     let mut scheduled = *transfer;
                     scheduled
                         .transfer
                         .resolve_final(Ok(SendCompletionOutcome::Cancelled));
                 }
-                CommandPoll::Closed => {
+                Some(None) => {
                     self.input_closed = true;
                     return;
                 }
-                CommandPoll::Empty => return,
+                None => return,
             }
         }
     }
 
-    async fn admit_one_frame(&mut self, mut queued: QueuedTransfer) {
-        let class = queued.scheduled.transfer.class();
-        if queued.scheduled.transfer.is_stopped() {
-            queued
+    async fn admit_one_frame(&mut self, mut runnable: RunnableTransfer<QueuedTransfer>) {
+        let class = runnable.class();
+        if runnable.item().scheduled.transfer.is_stopped() {
+            runnable
+                .item_mut()
                 .scheduled
                 .transfer
                 .resolve_final(Ok(SendCompletionOutcome::Cancelled));
-            self.ready.finish_attempt(class);
+            self.ready.discard(runnable);
             return;
         }
-        let before_first_frame = queued.scheduled.transfer.is_before_first_frame();
-        let frame = match queued.scheduled.transfer.next_frame() {
+        let before_first_frame = runnable.item().scheduled.transfer.is_before_first_frame();
+        let frame = match runnable.item_mut().scheduled.transfer.next_frame() {
             Ok(Some(frame)) => frame,
             Ok(None) => {
-                queued
+                runnable
+                    .item_mut()
                     .scheduled
                     .transfer
                     .resolve_final(Ok(SendCompletionOutcome::Succeeded));
-                self.ready.finish_current(class);
-                drop(queued);
+                self.ready.discard(runnable);
                 self.measurements.record(OutboundMeasurement::Sent);
                 return;
             }
             Err(error) => {
-                queued.scheduled.transfer.resolve_final(Err(error));
-                self.ready.finish_attempt(class);
-                drop(queued);
+                runnable
+                    .item_mut()
+                    .scheduled
+                    .transfer
+                    .resolve_final(Err(error));
+                self.ready.discard(runnable);
                 self.measurements.record(OutboundMeasurement::FailedToSend);
                 return;
             }
         };
         let (bytes, context) = frame;
         let admission = send_data_with_timeout(
-            &queued.scheduled.transfer.admitted,
+            &runnable.item().scheduled.transfer.admitted,
             bytes,
-            &queued.scheduled.transfer.permit,
-            &queued.scheduled.transfer.stop,
-            queued.scheduled.transfer.did,
+            &runnable.item().scheduled.transfer.permit,
+            &runnable.item().scheduled.transfer.stop,
+            runnable.item().scheduled.transfer.did,
             context,
         )
         .await;
 
         match admission {
             ChunkSendProgress::Ready(Ok(delivery)) => {
-                queued.scheduled.transfer.mark_frame_admitted();
+                runnable.item_mut().scheduled.transfer.mark_frame_admitted();
                 self.ready.record_frame_admitted(class);
+                let id = runnable.item().id;
                 let delivery_wait =
-                    Self::delivery_wait(queued.id, class, delivery, &queued.scheduled.transfer);
-                if let Err(mut rejected) = self.ready.wait_for_delivery(class, queued.id, queued) {
-                    tracing::error!(
-                        class = ?class,
-                        transfer_id = rejected.id,
-                        "outbound scheduler could not suspend a runnable lane"
-                    );
-                    rejected
-                        .scheduled
-                        .transfer
-                        .resolve_final(Err(Error::OutboundSchedulerInvariantViolation));
-                    self.cancel_all();
-                    return;
-                }
+                    Self::delivery_wait(id, class, delivery, &runnable.item().scheduled.transfer);
+                self.ready.wait_for_delivery(id, runnable);
                 self.deliveries.push(delivery_wait);
             }
             ChunkSendProgress::Ready(Err(error)) => {
                 let record_failure = error.records_peer_send_failure();
-                queued.scheduled.transfer.resolve_final(Err(error));
-                self.ready.finish_attempt(class);
-                drop(queued);
+                runnable
+                    .item_mut()
+                    .scheduled
+                    .transfer
+                    .resolve_final(Err(error));
+                self.ready.discard(runnable);
                 if record_failure {
                     self.measurements.record(OutboundMeasurement::FailedToSend);
                 }
@@ -829,20 +766,25 @@ impl OutboundWorker {
                 let record_failure = reason.records_peer_failure();
                 if before_first_frame {
                     match reason.resolve_initial() {
-                        Ok(()) => queued
+                        Ok(()) => runnable
+                            .item_mut()
                             .scheduled
                             .transfer
                             .resolve_final(Ok(SendCompletionOutcome::Cancelled)),
-                        Err(error) => queued.scheduled.transfer.resolve_final(Err(error)),
+                        Err(error) => runnable
+                            .item_mut()
+                            .scheduled
+                            .transfer
+                            .resolve_final(Err(error)),
                     }
                 } else {
-                    queued
+                    runnable
+                        .item_mut()
                         .scheduled
                         .transfer
                         .resolve_final(Ok(SendCompletionOutcome::Cancelled));
                 }
-                self.ready.finish_attempt(class);
-                drop(queued);
+                self.ready.discard(runnable);
                 if record_failure {
                     self.measurements.record(OutboundMeasurement::FailedToSend);
                 }
@@ -876,23 +818,15 @@ impl OutboundWorker {
 
     async fn wait_for_input(&mut self) {
         if self.deliveries.is_empty() {
-            if !self.input_closed {
-                match self.receiver.next().await {
-                    Some(command) => self.handle_command(command),
-                    None => self.input_closed = true,
-                }
-            }
-            return;
-        }
-        if self.input_closed {
-            if let Some(event) = self.deliveries.next().await {
-                self.handle_delivery(event);
+            match self.receiver.next().await {
+                Some(transfer) => self.enqueue_transfer(*transfer),
+                None => self.input_closed = true,
             }
             return;
         }
 
         enum WorkerInput {
-            Command(Option<OutboundCommand>),
+            Command(Option<Box<ScheduledTransfer>>),
             Delivery(Option<DeliveryEvent>),
         }
 
@@ -906,7 +840,7 @@ impl OutboundWorker {
             }
         };
         match input {
-            WorkerInput::Command(Some(command)) => self.handle_command(command),
+            WorkerInput::Command(Some(transfer)) => self.enqueue_transfer(*transfer),
             WorkerInput::Command(None) => self.input_closed = true,
             WorkerInput::Delivery(Some(event)) => self.handle_delivery(event),
             WorkerInput::Delivery(None) => {}

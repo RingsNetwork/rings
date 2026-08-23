@@ -61,16 +61,6 @@ mod lifecycle;
 mod readiness;
 mod retirement;
 
-#[test]
-fn activity_tracker_does_not_alias_idle_at_the_packed_counter_boundary() {
-    let activity = Arc::new(TestActivityTracker::new());
-    let permits = (0..=u16::MAX).map(|_| activity.begin()).collect::<Vec<_>>();
-
-    assert!(!activity.snapshot().is_idle());
-    drop(permits);
-    assert!(activity.snapshot().is_idle());
-}
-
 #[derive(Default)]
 struct RecordingMeasure {
     counters: Mutex<Vec<(Did, MeasureCounter)>>,

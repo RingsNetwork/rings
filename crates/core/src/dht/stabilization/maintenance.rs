@@ -354,16 +354,19 @@ mod tests {
             Some(MaintenanceTask::Stabilize)
         );
         assert!(schedule.complete_stabilization(26_000, false));
-        assert_eq!(schedule.next_stabilize_ms, 31_100);
+        let reserved_stabilization_ms = schedule.next_stabilize_ms;
+        assert!(schedule.has_storage_repair_window(schedule.repair_not_before_ms));
         assert_eq!(schedule.poll(26_000, true).task, None);
         assert_eq!(
             schedule.poll(26_050, true).task,
             Some(MaintenanceTask::Repair)
         );
-        schedule.complete_repair(31_050, true);
-        assert_eq!(schedule.poll(31_050, false).task, None);
+        let quiet_gap_ms = duration_ms(MAINTENANCE_QUIET_GAP);
+        let repair_completed_ms = reserved_stabilization_ms.saturating_sub(quiet_gap_ms);
+        schedule.complete_repair(repair_completed_ms, true);
+        assert_eq!(schedule.poll(repair_completed_ms, false).task, None);
         assert_eq!(
-            schedule.poll(31_100, false).task,
+            schedule.poll(reserved_stabilization_ms, false).task,
             Some(MaintenanceTask::Stabilize)
         );
     }

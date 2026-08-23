@@ -7,7 +7,9 @@ use crate::message::Message;
 type TestTransfer = (TransferClass, &'static str);
 
 fn pop_and_finish(queues: &mut TransferQueues<TestTransfer>) -> Option<&'static str> {
-    let (class, item) = queues.pop()?;
+    let transfer = queues.pop()?;
+    let class = transfer.class();
+    let (_, item) = transfer.into_item();
     queues.record_frame_admitted(class);
     queues.finish_current(class);
     Some(item)
@@ -48,19 +50,16 @@ fn admit_single_frame_transfer(
     delivery_id: u64,
 ) -> &'static str {
     let active = queues.pop().expect("a runnable transfer must exist");
-    let (class, label) = active;
+    let class = active.class();
+    let label = active.item().1;
     queues.record_frame_admitted(class);
-    queues
-        .wait_for_delivery(class, delivery_id, active)
-        .expect("the active lane must enter delivery wait");
+    queues.wait_for_delivery(delivery_id, active);
     let delivered = queues
         .take_waiting(class, delivery_id)
         .expect("the matching delivery must own the lane head");
-    queues
-        .make_runnable(class, delivered)
-        .expect("a delivered lane must become runnable");
+    queues.make_runnable(delivered);
     let completion_probe = queues.pop().expect("completion probe must be runnable");
-    assert_eq!(completion_probe, active);
+    assert_eq!(completion_probe.item().1, label);
     queues.finish_current(class);
     label
 }
@@ -102,23 +101,22 @@ fn completion_probes_do_not_consume_control_frame_burst() {
     }
 
     let active = queues.pop().expect("fourth control transfer must exist");
-    assert_eq!(active.1, "dht-4");
-    queues.record_frame_admitted(active.0);
-    admitted.push(active.1);
-    assert!(queues.wait_for_delivery(active.0, 3, active).is_ok());
+    assert_eq!(active.item().1, "dht-4");
+    let class = active.class();
+    queues.record_frame_admitted(class);
+    admitted.push(active.item().1);
+    queues.wait_for_delivery(3, active);
     let delivered = queues
         .take_waiting(TransferClass::DhtControl, 3)
         .expect("fourth control delivery must resume its lane");
-    assert!(queues
-        .make_runnable(TransferClass::DhtControl, delivered)
-        .is_ok());
+    queues.make_runnable(delivered);
 
     admitted.push(pop_and_finish(&mut queues).expect("application frame must receive its slot"));
     let completed_control = queues
         .pop()
         .expect("fourth control completion probe must remain runnable");
-    assert_eq!(completed_control.1, "dht-4");
-    queues.finish_current(completed_control.0);
+    assert_eq!(completed_control.item().1, "dht-4");
+    queues.finish_current(completed_control.class());
     admitted.push(admit_single_frame_transfer(&mut queues, 4));
 
     assert_eq!(admitted, vec![
@@ -143,7 +141,7 @@ fn lower_classes_progress_round_robin() {
 }
 
 #[test]
-fn terminal_attempt_advances_the_lower_class_cursor() {
+fn terminal_attempt_does_not_advance_the_lower_class_cursor() {
     let mut queues = TransferQueues::default();
     push(&mut queues, TransferClass::Storage, "stale-storage");
     push(&mut queues, TransferClass::E2e, "e2e");
@@ -152,18 +150,18 @@ fn terminal_attempt_advances_the_lower_class_cursor() {
     let stale = queues
         .pop()
         .expect("storage must start at the initial cursor");
-    assert_eq!(stale.1, "stale-storage");
-    queues.finish_attempt(stale.0);
+    assert_eq!(stale.item().1, "stale-storage");
+    queues.discard(stale);
     push(&mut queues, TransferClass::Storage, "more-stale-storage");
 
     let next = queues
         .pop()
-        .expect("a terminal storage attempt must yield to the next lower class");
-    assert_eq!(next.1, "e2e");
+        .expect("a failed attempt must not count as a frame admission");
+    assert_eq!(next.item().1, "more-stale-storage");
 }
 
 #[test]
-fn cancelled_control_attempts_consume_the_control_burst() {
+fn cancelled_control_attempts_do_not_consume_the_control_burst() {
     let mut queues = TransferQueues::default();
     push(&mut queues, TransferClass::Application, "application");
     for index in 0..OUTBOUND_CONTROL_BURST {
@@ -171,15 +169,19 @@ fn cancelled_control_attempts_consume_the_control_burst() {
         let control = queues
             .pop()
             .expect("control must run while its burst remains");
-        assert_eq!(control.1, "cancelled-control", "control attempt {index}");
-        queues.finish_attempt(control.0);
+        assert_eq!(
+            control.item().1,
+            "cancelled-control",
+            "control attempt {index}"
+        );
+        queues.discard(control);
     }
     push(&mut queues, TransferClass::DhtControl, "fifth-control");
 
     let next = queues
         .pop()
-        .expect("lower work must run after cancelled control consumes the burst");
-    assert_eq!(next.1, "application");
+        .expect("control must retain priority until a frame is admitted");
+    assert_eq!(next.item().1, "fifth-control");
 }
 
 #[test]
@@ -189,18 +191,14 @@ fn waiting_lane_preserves_same_class_fifo_and_allows_control_preemption() {
     push(&mut queues, TransferClass::Application, "app-2");
 
     let active = queues.pop().expect("first application transfer must exist");
-    assert_eq!(active, (TransferClass::Application, "app-1"));
+    assert_eq!(active.item(), &(TransferClass::Application, "app-1"));
     queues.record_frame_admitted(TransferClass::Application);
-    assert!(queues
-        .wait_for_delivery(TransferClass::Application, 7, active)
-        .is_ok());
+    queues.wait_for_delivery(7, active);
     push(&mut queues, TransferClass::DhtControl, "dht");
     let resumed = queues
         .take_waiting(TransferClass::Application, 7)
         .expect("matching application delivery must resume the lane");
-    assert!(queues
-        .make_runnable(TransferClass::Application, resumed)
-        .is_ok());
+    queues.make_runnable(resumed);
 
     assert_eq!(pop_and_finish(&mut queues), Some("dht"));
     assert_eq!(pop_and_finish(&mut queues), Some("app-1"));
@@ -217,9 +215,7 @@ fn draining_a_waiting_lane_returns_its_active_and_queued_transfers() {
         .pop()
         .expect("active transfer must exist before drain");
     queues.record_frame_admitted(TransferClass::Application);
-    assert!(queues
-        .wait_for_delivery(TransferClass::Application, 11, active)
-        .is_ok());
+    queues.wait_for_delivery(11, active);
 
     let mut drained: Vec<_> = queues
         .drain_transfers()
@@ -316,7 +312,8 @@ fn shutdown_closes_channel_without_worker_owned_sender() {
         peer: Did::from(8_u32),
         state: Arc::new(OutboundPeerState {
             sender: Mutex::new(sender),
-            _capacity: Arc::new(TransferCapacity::new(Arc::new(
+            #[cfg(not(target_family = "wasm"))]
+            capacity: Arc::new(TransferCapacity::new(Arc::new(
                 GlobalTransferCapacity::new(),
             ))),
             stop: stop.clone(),
@@ -337,7 +334,8 @@ fn final_handle_drop_requests_stop_before_channel_close() {
         peer: Did::from(10_u32),
         state: Arc::new(OutboundPeerState {
             sender: Mutex::new(sender),
-            _capacity: Arc::new(TransferCapacity::new(Arc::new(
+            #[cfg(not(target_family = "wasm"))]
+            capacity: Arc::new(TransferCapacity::new(Arc::new(
                 GlobalTransferCapacity::new(),
             ))),
             stop: stop.clone(),

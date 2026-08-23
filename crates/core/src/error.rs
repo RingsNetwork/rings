@@ -336,6 +336,17 @@ pub enum Error {
         capacity_bytes: usize,
     },
 
+    /// A detached send could not obtain bounded scheduler capacity in time.
+    #[error(
+        "Timed out after {timeout_ms}ms waiting for outbound transfer capacity for peer {peer}"
+    )]
+    OutboundTransferAdmissionTimeout {
+        /// Peer whose scheduler capacity remained exhausted.
+        peer: crate::dht::Did,
+        /// Admission deadline in milliseconds.
+        timeout_ms: u128,
+    },
+
     /// No Tokio runtime is available to host a native outbound scheduler.
     #[error("Outbound scheduler requires an active Tokio runtime")]
     OutboundSchedulerRuntimeUnavailable,
@@ -776,7 +787,9 @@ impl Error {
     pub(crate) const fn is_data_channel_backpressure(&self) -> bool {
         matches!(
             self,
-            Self::DataChannelSendQueueTimeout { .. } | Self::DataChannelDeliveryTimeout { .. }
+            Self::DataChannelSendQueueTimeout { .. }
+                | Self::DataChannelDeliveryTimeout { .. }
+                | Self::OutboundTransferAdmissionTimeout { .. }
         )
     }
 
@@ -788,6 +801,7 @@ impl Error {
                 Self::ConnectionAttemptSuperseded { .. }
                     | Self::OutboundTransferCapacityExceeded { .. }
                     | Self::OutboundTransferMemoryCapacityExceeded { .. }
+                    | Self::OutboundTransferAdmissionTimeout { .. }
                     | Self::RTCDataChannelStateNotOpen
                     | Self::TransportNotReady { .. }
                     | Self::SwarmMissDidInTable(_)
@@ -803,6 +817,7 @@ impl Error {
             | Self::DataChannelDeliveryTimeout { .. }
             | Self::OutboundTransferCapacityExceeded { .. }
             | Self::OutboundTransferMemoryCapacityExceeded { .. }
+            | Self::OutboundTransferAdmissionTimeout { .. }
             | Self::OutboundSchedulerRuntimeUnavailable
             | Self::OutboundSchedulerInvariantViolation => false,
             Self::Transport(rings_transport::error::Error::SendPermitRevoked) => false,

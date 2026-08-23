@@ -16,3 +16,6 @@
 - Bound inbound and outbound scheduling, chunk reassembly, and data-channel delivery lifetimes.
 - Preserve typed callback and native send task error sources.
 - Keep connection admission, cancellation, and same-class transfer ordering coherent under races.
+- Emit the observable `Connecting` state before connection establishment completes.
+- Run native and wasm transport tests with production timeout profiles; dummy transport tests keep
+  a reduced profile while preserving the same timeout relationships.

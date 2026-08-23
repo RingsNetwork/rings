@@ -1,3 +1,5 @@
+use std::task::Poll;
+
 use super::*;
 
 #[derive(Default)]
@@ -9,21 +11,24 @@ impl futures::task::ArcWake for WakeCounter {
     }
 }
 
-#[cfg(not(target_family = "wasm"))]
-#[test]
-fn inbound_capacity_advances_shared_activity_generation() {
-    let activity = Arc::new(crate::swarm::transport::TestActivityTracker::new());
-    let capacity = Arc::new(InboundCapacity::with_test_activity(activity.clone()));
-
-    let permit = capacity
-        .try_acquire(Some(Did::from(1_u32)), InboundLane::Application, 1)
-        .expect("test admission must fit");
-    assert!(!activity.snapshot().is_idle());
-    assert_eq!(activity.snapshot().generation(), 1);
-
-    drop(permit);
-    assert!(activity.snapshot().is_idle());
-    assert_eq!(activity.snapshot().generation(), 2);
+fn reserve_application_bytes(
+    capacity: &Arc<InboundCapacity>,
+    total: usize,
+) -> Vec<InboundCapacityPermit> {
+    let mut remaining = total;
+    let mut peer = 1_u32;
+    let mut permits = Vec::new();
+    while remaining > 0 {
+        let bytes = remaining.min(INBOUND_PEER_BYTE_CAPACITY);
+        permits.push(
+            capacity
+                .try_acquire(Some(Did::from(peer)), InboundLane::Application, bytes)
+                .expect("application blocker must fit within the declared limits"),
+        );
+        remaining -= bytes;
+        peer = peer.saturating_add(1);
+    }
+    permits
 }
 
 #[cfg_attr(
@@ -136,13 +141,7 @@ fn inbound_capacity_reserves_memory_for_every_lane() {
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), test)]
 fn reassembly_handoff_rejects_capacity_pressure_without_waiting() {
     let capacity = Arc::new(InboundCapacity::new());
-    let blocker = capacity
-        .try_acquire(
-            Some(Did::from(1_u32)),
-            InboundLane::Application,
-            INBOUND_PEER_BYTE_CAPACITY,
-        )
-        .expect("one peer may borrow the application byte budget");
+    let blockers = reserve_application_bytes(&capacity, 240 * 1024 * 1024);
     let mut handoff = capacity
         .try_acquire(Some(Did::from(2_u32)), InboundLane::Reassembly, 1)
         .expect("reassembly retains its reserved byte budget");
@@ -154,7 +153,7 @@ fn reassembly_handoff_rejects_capacity_pressure_without_waiting() {
     assert_eq!(handoff.lane, InboundLane::Reassembly);
     assert_eq!(handoff.bytes, 1);
 
-    drop(blocker);
+    drop(blockers);
     handoff
         .try_transition(InboundLane::Application, 16 * 1024 * 1024)
         .expect("failed transition must preserve the original reservation atomically");
@@ -167,13 +166,7 @@ fn reassembly_handoff_rejects_capacity_pressure_without_waiting() {
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), test)]
 fn successful_capacity_transition_wakes_waiter_without_dropping_permit() {
     let capacity = Arc::new(InboundCapacity::new());
-    let _blocker = capacity
-        .try_acquire(
-            Some(Did::from(1_u32)),
-            InboundLane::Application,
-            INBOUND_PEER_BYTE_CAPACITY,
-        )
-        .expect("one peer may borrow the application byte budget");
+    let _blockers = reserve_application_bytes(&capacity, 240 * 1024 * 1024);
     let mut handoff = capacity
         .try_acquire(
             Some(Did::from(2_u32)),
@@ -224,13 +217,7 @@ fn pending_ingress_ticket_blocks_later_same_lane_sequence() {
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), tokio::test)]
 async fn same_lane_ticket_preserves_capacity_admission_order_under_saturation() {
     let capacity = Arc::new(InboundCapacity::new());
-    let blocker = capacity
-        .try_acquire(
-            Some(Did::from(1_u32)),
-            InboundLane::Application,
-            INBOUND_PEER_BYTE_CAPACITY,
-        )
-        .expect("one peer may borrow the application byte budget");
+    let blockers = reserve_application_bytes(&capacity, 240 * 1024 * 1024);
     let (command_sender, _commands) = mpsc::unbounded();
     let mut sender = InboundSender::new(command_sender);
     let mut first = sender
@@ -256,7 +243,7 @@ async fn same_lane_ticket_preserves_capacity_admission_order_under_saturation() 
         Poll::Pending
     ));
 
-    drop(blocker);
+    drop(blockers);
     assert!(matches!(
         futures::poll!(first_capacity.as_mut()),
         Poll::Ready(Ok(_))

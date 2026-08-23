@@ -7,8 +7,8 @@
 
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 use std::cell::Cell;
-use std::future::poll_fn;
 use std::sync::Arc;
+#[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
 use std::task::Poll;
 
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
@@ -37,6 +37,7 @@ use crate::message::SyncEntriesWithSuccessor;
 use crate::swarm::callback::InnerSwarmCallback;
 use crate::swarm::callback::SharedSwarmCallback;
 use crate::swarm::transport::SwarmTransport;
+use crate::utils::yield_executor_once;
 
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 pub(crate) const CORE_ACTOR_BROWSER_YIELD_INTERVAL: u8 = 32;
@@ -91,20 +92,6 @@ impl Drop for BrowserTaskYieldGuard {
                 .with(|cleared| cleared.set(cleared.get().saturating_add(1)));
         }
     }
-}
-
-async fn yield_executor_once() {
-    let mut yielded = false;
-    poll_fn(move |cx| {
-        if yielded {
-            Poll::Ready(())
-        } else {
-            yielded = true;
-            cx.waker().wake_by_ref();
-            Poll::Pending
-        }
-    })
-    .await;
 }
 
 /// Yield after one bounded core actor work item.

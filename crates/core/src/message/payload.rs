@@ -739,4 +739,25 @@ pub mod test {
         assert_eq!(payload.wire_size()?, payload.to_wire()?.len());
         Ok(())
     }
+
+    #[test]
+    fn wire_size_matches_every_message_discriminant_and_signature_width() -> Result<()> {
+        let next_hop = SecretKey::random().address().into();
+        for (wire_index, _) in crate::message::MessageKind::WIRE_ORDER {
+            for signature_len in [0, 1, 63, 64, 255, 256, 4_096, 65_535] {
+                let mut payload = new_payload(Message::custom(b"body")?, next_hop);
+                payload.transaction.data[0] = u8::try_from(*wire_index)
+                    .map_err(|_| Error::InvalidMessage("wire index must fit u8".into()))?;
+                payload.verification.sig = vec![9; signature_len];
+                payload.transaction.verification.sig = vec![7; signature_len / 2];
+
+                assert_eq!(
+                    payload.wire_size()?,
+                    payload.to_wire()?.len(),
+                    "wire index {wire_index}, signature length {signature_len}"
+                );
+            }
+        }
+        Ok(())
+    }
 }

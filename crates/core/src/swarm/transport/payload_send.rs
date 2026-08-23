@@ -17,6 +17,7 @@ use super::outbound::OutboundTransferRoute;
 use super::outbound::TransferCapacityPermit;
 use super::AdmittedConnection;
 use super::SwarmTransport;
+use super::DATA_CHANNEL_SEND_ACCEPT_BUDGET;
 use super::TRANSPORT_TIMEOUT_PROFILE;
 use crate::chunk::ChunkList;
 use crate::chunk::Framing;
@@ -92,6 +93,31 @@ fn outbound_memory_reservation(wire_bytes: usize) -> usize {
 }
 
 impl SwarmTransport {
+    async fn reserve_outbound_capacity(
+        &self,
+        peer: Did,
+        metadata: OutboundMessageMeta,
+        bytes: usize,
+        completion: OutboundCompletion,
+    ) -> Result<TransferCapacityPermit> {
+        let reserve = self
+            .outbound_schedulers
+            .reserve(peer, metadata.class(), bytes)
+            .fuse();
+        if completion == OutboundCompletion::Tracked {
+            return reserve.await;
+        }
+        let timeout = sleep(DATA_CHANNEL_SEND_ACCEPT_BUDGET).fuse();
+        pin_mut!(reserve, timeout);
+        select! {
+            result = reserve => result,
+            _ = timeout => Err(Error::OutboundTransferAdmissionTimeout {
+                peer,
+                timeout_ms: DATA_CHANNEL_SEND_ACCEPT_BUDGET.as_millis(),
+            }),
+        }
+    }
+
     /// Send a maintenance payload and return only after all of its frames stop.
     ///
     /// This is a network-only cancellation boundary. Dropping the send future
@@ -100,15 +126,6 @@ impl SwarmTransport {
     pub(crate) async fn send_payload_tracked(
         &self,
         payload: MessagePayload,
-    ) -> Result<SendCompletionOutcome> {
-        self.send_payload_tracked_with_timeout(payload, TRACKED_PAYLOAD_TIMEOUT)
-            .await
-    }
-
-    async fn send_payload_tracked_with_timeout(
-        &self,
-        payload: MessagePayload,
-        tracked_payload_timeout: Duration,
     ) -> Result<SendCompletionOutcome> {
         let did = payload.relay.next_hop;
         let stop = StopSource::new();
@@ -120,7 +137,7 @@ impl SwarmTransport {
                 stop.token(),
             )
             .fuse();
-        let timeout = sleep(tracked_payload_timeout).fuse();
+        let timeout = sleep(TRACKED_PAYLOAD_TIMEOUT).fuse();
         pin_mut!(send, timeout);
 
         select! {
@@ -131,7 +148,7 @@ impl SwarmTransport {
                     target: "rings_core::transport::tracked_send",
                     local = %self.dht.did,
                     peer = %did,
-                    timeout_ms = tracked_payload_timeout.as_millis(),
+                    timeout_ms = TRACKED_PAYLOAD_TIMEOUT.as_millis(),
                     "tracked payload delivery timed out and was deferred"
                 );
                 Ok(SendCompletionOutcome::Cancelled)
@@ -251,11 +268,11 @@ impl SwarmTransport {
             return Err(Error::SwarmMissDidInTable(did));
         }
         let capacity_permit = self
-            .outbound_schedulers
-            .reserve(
+            .reserve_outbound_capacity(
                 did,
-                message_metadata.class(),
+                message_metadata,
                 outbound_memory_reservation(wire_bytes),
+                completion,
             )
             .await?;
         let permit = {

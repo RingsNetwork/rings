@@ -242,6 +242,7 @@ mod tests {
     use crate::measure::BehaviourJudgement;
     use crate::measure::Measure;
     use crate::measure::PeerQuality;
+    use crate::utils::yield_executor_once;
 
     struct CountingMeasure {
         calls: Arc<AtomicUsize>,
@@ -256,7 +257,7 @@ mod tests {
             self.started.store(true, Ordering::Release);
             if self.pending {
                 while !self.released.load(Ordering::Acquire) {
-                    tokio::task::yield_now().await;
+                    yield_executor_once().await;
                 }
             }
             self.calls.fetch_add(1, Ordering::AcqRel);
@@ -357,7 +358,7 @@ mod tests {
         let run = tokio::spawn(receiver.run());
         tokio::time::timeout(Duration::from_secs(1), async {
             while calls.load(Ordering::Acquire) < 1_024 {
-                tokio::task::yield_now().await;
+                yield_executor_once().await;
             }
         })
         .await
@@ -390,7 +391,7 @@ mod tests {
                 if len == 1_025 {
                     break;
                 }
-                tokio::task::yield_now().await;
+                yield_executor_once().await;
             }
         })
         .await
@@ -415,7 +416,7 @@ mod tests {
         let run = tokio::spawn(receiver.run());
         tokio::time::timeout(Duration::from_secs(1), async {
             while !started.load(Ordering::Acquire) {
-                tokio::task::yield_now().await;
+                yield_executor_once().await;
             }
         })
         .await

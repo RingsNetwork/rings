@@ -1,5 +1,6 @@
 //! Utils for ring-core
 use std::collections::VecDeque;
+use std::future::poll_fn;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -66,6 +67,66 @@ pub(crate) fn fixed_reservation_covers<const N: usize>(
         .zip(reservations.get(class_index))
         .and_then(|(admitted, reserved)| admitted.checked_add(amount).map(|next| (next, reserved)))
         .is_some_and(|(next, reserved)| next <= *reserved)
+}
+
+/// Capacity shared by a fixed number of traffic classes with minimum reservations.
+#[derive(Clone, Copy)]
+pub(crate) struct ReservedCapacity<const N: usize> {
+    admitted: usize,
+    admitted_by_class: [usize; N],
+}
+
+impl<const N: usize> ReservedCapacity<N> {
+    pub(crate) const fn new() -> Self {
+        Self {
+            admitted: 0,
+            admitted_by_class: [0; N],
+        }
+    }
+
+    pub(crate) fn reservation_covers(
+        &self,
+        class_index: usize,
+        amount: usize,
+        reservations: &[usize; N],
+    ) -> bool {
+        fixed_reservation_covers(&self.admitted_by_class, class_index, amount, reservations)
+    }
+
+    pub(crate) fn try_reserve(
+        &mut self,
+        class_index: usize,
+        amount: usize,
+        capacity: usize,
+        reservations: &[usize; N],
+    ) -> bool {
+        if !fair_reservation_fits(
+            &self.admitted_by_class,
+            self.admitted,
+            class_index,
+            amount,
+            capacity,
+            reservations,
+        ) {
+            return false;
+        }
+        self.admitted = self.admitted.saturating_add(amount);
+        if let Some(class_admitted) = self.admitted_by_class.get_mut(class_index) {
+            *class_admitted = class_admitted.saturating_add(amount);
+        }
+        true
+    }
+
+    pub(crate) fn release(&mut self, class_index: usize, amount: usize) {
+        self.admitted = self.admitted.saturating_sub(amount);
+        if let Some(class_admitted) = self.admitted_by_class.get_mut(class_index) {
+            *class_admitted = class_admitted.saturating_sub(amount);
+        }
+    }
+
+    pub(crate) const fn admitted(self) -> usize {
+        self.admitted
+    }
 }
 
 #[derive(Default)]
@@ -140,6 +201,11 @@ struct FairWaitQueueState {
 
 /// FIFO gate used by bounded admissions that only queue requests larger than
 /// their fixed class reservation.
+///
+/// Requests within a fixed reservation never join the borrower queue. They
+/// bypass it when their reservation covers them and otherwise fail fast, so a
+/// large borrower cannot retain an arbitrary number of smaller payloads behind
+/// itself.
 pub(crate) struct FairWaitQueue {
     state: Mutex<FairWaitQueueState>,
     budget: Option<Arc<FairWaitBudget>>,
@@ -225,6 +291,42 @@ impl FairWaitQueue {
             waker.wake();
         }
     }
+}
+
+/// Acquire from a FIFO fair-admission queue after the caller validates the request ceiling.
+pub(crate) async fn acquire_fair<T>(
+    queue: &Arc<FairWaitQueue>,
+    cost: usize,
+    budget_error: crate::error::Error,
+    closed_error: impl Fn() -> crate::error::Error,
+    mut attempt: impl FnMut() -> crate::error::Result<T>,
+) -> crate::error::Result<T> {
+    match queue.admit_or_wait(cost, budget_error, &mut attempt)? {
+        FairAdmission::Ready(value) => Ok(value),
+        FairAdmission::Waiting(mut waiter) => {
+            poll_fn(|context| match waiter.poll(context, || attempt().ok()) {
+                Poll::Ready(Some(value)) => Poll::Ready(Ok(value)),
+                Poll::Ready(None) => Poll::Ready(Err(closed_error())),
+                Poll::Pending => Poll::Pending,
+            })
+            .await
+        }
+    }
+}
+
+/// Yield one executor poll without depending on a particular async runtime.
+pub(crate) async fn yield_executor_once() {
+    let mut yielded = false;
+    poll_fn(move |context| {
+        if yielded {
+            Poll::Ready(())
+        } else {
+            yielded = true;
+            context.waker().wake_by_ref();
+            Poll::Pending
+        }
+    })
+    .await;
 }
 
 pub(crate) struct FairWaiter {

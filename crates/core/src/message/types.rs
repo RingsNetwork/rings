@@ -434,6 +434,25 @@ macro_rules! with_message_variants {
     };
 }
 
+macro_rules! message_requires_storage_route {
+    (SyncEntriesWithSuccessor) => {
+        true
+    };
+    ($variant:ident) => {
+        false
+    };
+}
+
+macro_rules! message_storage_destination {
+    (SyncEntriesWithSuccessor, $body:expr) => {
+        Some($body.destination)
+    };
+    ($variant:ident, $body:expr) => {{
+        let _ = $body;
+        None
+    }};
+}
+
 macro_rules! define_message_model {
     ($( $(#[$docs:meta])* $index:literal => $variant:ident($body:ty): $class:ident ),+ $(,)?) => {
         /// A collection MessageType use for unified management.
@@ -450,7 +469,7 @@ macro_rules! define_message_model {
 
         impl MessageKind {
             #[cfg(test)]
-            const WIRE_ORDER: &'static [(u32, Self)] = &[$(($index, Self::$variant)),+];
+            pub(crate) const WIRE_ORDER: &'static [(u32, Self)] = &[$(($index, Self::$variant)),+];
 
             const fn from_wire_variant(variant: u32) -> Option<Self> {
                 match variant {
@@ -473,6 +492,20 @@ macro_rules! define_message_model {
 
             pub(crate) const fn is_chunk(self) -> bool {
                 matches!(self, Self::Chunk)
+            }
+
+            pub(crate) const fn requires_storage_route(self) -> bool {
+                match self {
+                    $(Self::$variant => message_requires_storage_route!($variant)),+
+                }
+            }
+        }
+
+        impl Message {
+            pub(crate) const fn storage_sync_destination(&self) -> Option<StorageSyncDestination> {
+                match self {
+                    $(Self::$variant(body) => message_storage_destination!($variant, body)),+
+                }
             }
         }
 
@@ -544,7 +577,7 @@ impl MessageMeta {
     }
 
     pub(crate) const fn records_missing_connection_failure(self) -> bool {
-        !matches!(self.kind, MessageKind::SyncEntriesWithSuccessor)
+        !self.kind.requires_storage_route()
     }
 }
 

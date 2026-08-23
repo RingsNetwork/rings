@@ -1,25 +1,16 @@
-use std::future::poll_fn;
-#[cfg(all(test, not(target_family = "wasm")))]
-use std::sync::atomic::AtomicUsize;
-#[cfg(all(test, not(target_family = "wasm")))]
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
+#[cfg(test)]
 use std::task::Poll;
 
-#[cfg(all(test, not(target_family = "wasm")))]
-use super::super::TestActivityPermit;
-#[cfg(all(test, not(target_family = "wasm")))]
-use super::super::TestActivityTracker;
 use super::model::TransferClass;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
-use crate::utils::fair_reservation_fits;
-use crate::utils::fixed_reservation_covers;
-use crate::utils::FairAdmission;
+use crate::utils::acquire_fair;
 use crate::utils::FairWaitBudget;
 use crate::utils::FairWaitQueue;
+use crate::utils::ReservedCapacity;
 
 /// Hard per-peer transfer bound, including queued and delivery-waiting heads.
 pub(crate) const OUTBOUND_TRANSFER_QUEUE_CAPACITY: usize = 256;
@@ -90,7 +81,7 @@ const fn global_fixed_request_bytes(class: TransferClass) -> usize {
 }
 
 pub(super) struct GlobalTransferCapacity {
-    state: Mutex<GlobalCapacityState>,
+    state: Mutex<ReservedCapacity<{ TransferClass::COUNT }>>,
     waiters: Arc<FairWaitQueue>,
     wait_budget: Arc<FairWaitBudget>,
 }
@@ -102,7 +93,7 @@ impl GlobalTransferCapacity {
             OUTBOUND_GLOBAL_BYTE_CAPACITY,
         ));
         Self {
-            state: Mutex::new(GlobalCapacityState::new()),
+            state: Mutex::new(ReservedCapacity::new()),
             waiters: Arc::new(FairWaitQueue::with_budget(wait_budget.clone())),
             wait_budget,
         }
@@ -138,10 +129,17 @@ impl GlobalTransferCapacity {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut next = *state;
-        if reserved_only && !next.reservation_covers(class, bytes) {
+        if reserved_only
+            && !next.reservation_covers(class.index(), bytes, &OUTBOUND_GLOBAL_BYTE_RESERVATIONS)
+        {
             return Err(memory_capacity_error(peer, bytes, global_byte_limit(class)));
         }
-        if !next.try_reserve(class, bytes) {
+        if !next.try_reserve(
+            class.index(),
+            bytes,
+            OUTBOUND_GLOBAL_BYTE_CAPACITY,
+            &OUTBOUND_GLOBAL_BYTE_RESERVATIONS,
+        ) {
             return Err(memory_capacity_error(peer, bytes, global_byte_limit(class)));
         }
         *state = next;
@@ -171,157 +169,56 @@ impl GlobalTransferCapacity {
             &self.waiters,
             bytes,
             memory_capacity_error(peer, bytes, global_byte_limit(class)),
+            || Error::ChannelSendMessageFailed,
             || self.try_acquire(peer, class, bytes),
         )
         .await
     }
 }
 
-async fn acquire_fair<T>(
-    queue: &Arc<FairWaitQueue>,
-    cost: usize,
-    budget_error: Error,
-    mut attempt: impl FnMut() -> Result<T>,
-) -> Result<T> {
-    match queue.admit_or_wait(cost, budget_error, &mut attempt)? {
-        FairAdmission::Ready(value) => Ok(value),
-        FairAdmission::Waiting(mut waiter) => {
-            poll_fn(|context| match waiter.poll(context, || attempt().ok()) {
-                Poll::Ready(Some(value)) => Poll::Ready(Ok(value)),
-                Poll::Ready(None) => Poll::Ready(Err(Error::ChannelSendMessageFailed)),
-                Poll::Pending => Poll::Pending,
-            })
-            .await
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-struct GlobalCapacityState {
-    admitted_bytes: usize,
-    admitted_bytes_by_class: [usize; TransferClass::COUNT],
-}
-
-impl GlobalCapacityState {
-    const fn new() -> Self {
-        Self {
-            admitted_bytes: 0,
-            admitted_bytes_by_class: [0; TransferClass::COUNT],
-        }
-    }
-
-    fn reservation_covers(&self, class: TransferClass, bytes: usize) -> bool {
-        fixed_reservation_covers(
-            &self.admitted_bytes_by_class,
-            class.index(),
-            bytes,
-            &OUTBOUND_GLOBAL_BYTE_RESERVATIONS,
-        )
-    }
-
-    fn try_reserve(&mut self, class: TransferClass, bytes: usize) -> bool {
-        if !fair_reservation_fits(
-            &self.admitted_bytes_by_class,
-            self.admitted_bytes,
-            class.index(),
-            bytes,
-            OUTBOUND_GLOBAL_BYTE_CAPACITY,
-            &OUTBOUND_GLOBAL_BYTE_RESERVATIONS,
-        ) {
-            return false;
-        }
-        self.admitted_bytes += bytes;
-        if let Some(class_bytes) = self.admitted_bytes_by_class.get_mut(class.index()) {
-            *class_bytes += bytes;
-        }
-        true
-    }
-
-    fn release(&mut self, class: TransferClass, bytes: usize) {
-        self.admitted_bytes = self.admitted_bytes.saturating_sub(bytes);
-        if let Some(class_bytes) = self.admitted_bytes_by_class.get_mut(class.index()) {
-            *class_bytes = class_bytes.saturating_sub(bytes);
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
 struct PeerCapacityState {
-    admitted_transfers: usize,
-    admitted_bytes: usize,
-    admitted_transfers_by_class: [usize; TransferClass::COUNT],
-    admitted_bytes_by_class: [usize; TransferClass::COUNT],
+    transfers: ReservedCapacity<{ TransferClass::COUNT }>,
+    bytes: ReservedCapacity<{ TransferClass::COUNT }>,
 }
 
 impl PeerCapacityState {
     const fn new() -> Self {
         Self {
-            admitted_transfers: 0,
-            admitted_bytes: 0,
-            admitted_transfers_by_class: [0; TransferClass::COUNT],
-            admitted_bytes_by_class: [0; TransferClass::COUNT],
+            transfers: ReservedCapacity::new(),
+            bytes: ReservedCapacity::new(),
         }
     }
 
     fn reservation_covers(&self, class: TransferClass, bytes: usize) -> bool {
-        fixed_reservation_covers(
-            &self.admitted_transfers_by_class,
-            class.index(),
-            1,
-            &OUTBOUND_TRANSFER_RESERVATIONS,
-        ) && fixed_reservation_covers(
-            &self.admitted_bytes_by_class,
-            class.index(),
-            bytes,
-            &OUTBOUND_PEER_BYTE_RESERVATIONS,
-        )
+        self.transfers
+            .reservation_covers(class.index(), 1, &OUTBOUND_TRANSFER_RESERVATIONS)
+            && self
+                .bytes
+                .reservation_covers(class.index(), bytes, &OUTBOUND_PEER_BYTE_RESERVATIONS)
     }
 
     fn try_reserve_count(&mut self, class: TransferClass) -> bool {
-        if !fair_reservation_fits(
-            &self.admitted_transfers_by_class,
-            self.admitted_transfers,
+        self.transfers.try_reserve(
             class.index(),
             1,
             OUTBOUND_TRANSFER_QUEUE_CAPACITY,
             &OUTBOUND_TRANSFER_RESERVATIONS,
-        ) {
-            return false;
-        }
-        self.admitted_transfers += 1;
-        if let Some(class_count) = self.admitted_transfers_by_class.get_mut(class.index()) {
-            *class_count += 1;
-        }
-        true
+        )
     }
 
     fn try_reserve_bytes(&mut self, class: TransferClass, bytes: usize) -> bool {
-        if !fair_reservation_fits(
-            &self.admitted_bytes_by_class,
-            self.admitted_bytes,
+        self.bytes.try_reserve(
             class.index(),
             bytes,
             OUTBOUND_PEER_BYTE_CAPACITY,
             &OUTBOUND_PEER_BYTE_RESERVATIONS,
-        ) {
-            return false;
-        }
-        self.admitted_bytes += bytes;
-        if let Some(class_bytes) = self.admitted_bytes_by_class.get_mut(class.index()) {
-            *class_bytes += bytes;
-        }
-        true
+        )
     }
 
     fn release(&mut self, class: TransferClass, bytes: usize) {
-        self.admitted_transfers = self.admitted_transfers.saturating_sub(1);
-        self.admitted_bytes = self.admitted_bytes.saturating_sub(bytes);
-        if let Some(class_count) = self.admitted_transfers_by_class.get_mut(class.index()) {
-            *class_count = class_count.saturating_sub(1);
-        }
-        if let Some(class_bytes) = self.admitted_bytes_by_class.get_mut(class.index()) {
-            *class_bytes = class_bytes.saturating_sub(bytes);
-        }
+        self.transfers.release(class.index(), 1);
+        self.bytes.release(class.index(), bytes);
     }
 }
 
@@ -410,6 +307,7 @@ impl TransferCapacity {
             &self.waiters,
             bytes,
             memory_capacity_error(peer, bytes, peer_byte_limit(class)),
+            || Error::ChannelSendMessageFailed,
             || self.try_acquire_peer(peer, class, bytes),
         )
         .await
@@ -429,8 +327,6 @@ impl TransferCapacity {
         Ok(TransferCapacityPermit {
             _peer: peer_permit,
             _global: global_permit,
-            #[cfg(all(test, not(target_family = "wasm")))]
-            _activity: None,
         })
     }
 
@@ -447,17 +343,16 @@ impl TransferCapacity {
         Ok(TransferCapacityPermit {
             _peer: peer_permit,
             _global: global_permit,
-            #[cfg(all(test, not(target_family = "wasm")))]
-            _activity: None,
         })
     }
 
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    #[cfg(all(test, not(target_family = "wasm")))]
     pub(super) fn admitted(&self) -> usize {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .admitted_transfers
+            .transfers
+            .admitted()
     }
 
     #[cfg(test)]
@@ -465,65 +360,14 @@ impl TransferCapacity {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .admitted_bytes
+            .bytes
+            .admitted()
     }
 }
 
 pub(in crate::swarm::transport) struct TransferCapacityPermit {
     _peer: PeerCapacityPermit,
     _global: GlobalCapacityPermit,
-    #[cfg(all(test, not(target_family = "wasm")))]
-    _activity: Option<TransferActivityPermit>,
-}
-
-#[cfg(all(test, not(target_family = "wasm")))]
-impl TransferCapacityPermit {
-    pub(super) fn track_activity(mut self, activity: TransferActivityPermit) -> Self {
-        self._activity = Some(activity);
-        self
-    }
-}
-
-#[cfg(all(test, not(target_family = "wasm")))]
-pub(super) struct TransferActivity {
-    admitted: AtomicUsize,
-    test_activity: Arc<TestActivityTracker>,
-}
-
-#[cfg(all(test, not(target_family = "wasm")))]
-impl TransferActivity {
-    pub(super) fn new(test_activity: Arc<TestActivityTracker>) -> Self {
-        Self {
-            admitted: AtomicUsize::new(0),
-            test_activity,
-        }
-    }
-
-    pub(super) fn begin(self: &Arc<Self>) -> TransferActivityPermit {
-        let test_activity = self.test_activity.begin();
-        self.admitted.fetch_add(1, Ordering::AcqRel);
-        TransferActivityPermit {
-            activity: self.clone(),
-            _test_activity: test_activity,
-        }
-    }
-
-    pub(super) fn admitted_for_test(&self) -> usize {
-        self.admitted.load(Ordering::Acquire)
-    }
-}
-
-#[cfg(all(test, not(target_family = "wasm")))]
-pub(super) struct TransferActivityPermit {
-    activity: Arc<TransferActivity>,
-    _test_activity: TestActivityPermit,
-}
-
-#[cfg(all(test, not(target_family = "wasm")))]
-impl Drop for TransferActivityPermit {
-    fn drop(&mut self) {
-        self.activity.admitted.fetch_sub(1, Ordering::AcqRel);
-    }
 }
 
 struct PeerCapacityPermit {
@@ -555,7 +399,7 @@ impl Drop for GlobalCapacityPermit {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .release(self.class, self.bytes);
+            .release(self.class.index(), self.bytes);
         self.capacity.waiters.wake_front();
     }
 }
@@ -608,34 +452,6 @@ fn validate_memory_request(peer: Did, class: TransferClass, requested_bytes: usi
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[cfg(not(target_family = "wasm"))]
-    #[test]
-    fn transfer_activity_tracks_the_full_guard_lifetime() {
-        let test_activity = Arc::new(TestActivityTracker::new());
-        let activity = Arc::new(TransferActivity::new(test_activity.clone()));
-        assert_eq!(activity.admitted_for_test(), 0);
-        assert!(test_activity.snapshot().is_idle());
-        assert_eq!(test_activity.snapshot().generation(), 0);
-
-        let first = activity.begin();
-        assert_eq!(activity.admitted_for_test(), 1);
-        assert!(!test_activity.snapshot().is_idle());
-        assert_eq!(test_activity.snapshot().generation(), 1);
-        let second = activity.begin();
-        assert_eq!(activity.admitted_for_test(), 2);
-        assert!(!test_activity.snapshot().is_idle());
-        assert_eq!(test_activity.snapshot().generation(), 2);
-
-        drop(first);
-        assert_eq!(activity.admitted_for_test(), 1);
-        assert!(!test_activity.snapshot().is_idle());
-        assert_eq!(test_activity.snapshot().generation(), 3);
-        drop(second);
-        assert_eq!(activity.admitted_for_test(), 0);
-        assert!(test_activity.snapshot().is_idle());
-        assert_eq!(test_activity.snapshot().generation(), 4);
-    }
 
     #[cfg_attr(
         all(feature = "wasm", target_family = "wasm"),

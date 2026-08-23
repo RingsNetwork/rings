@@ -53,6 +53,42 @@ fn payload_observation_error(label: &str, observed: &[MessagePayload]) -> Error 
     ))
 }
 
+struct PayloadRestoreGuard<'scan, 'inbox> {
+    scan: &'scan mut crate::tests::default::NodeMessageScan<'inbox>,
+    payload: MessagePayload,
+    restore: bool,
+}
+
+impl<'scan, 'inbox> PayloadRestoreGuard<'scan, 'inbox> {
+    fn new(
+        scan: &'scan mut crate::tests::default::NodeMessageScan<'inbox>,
+        payload: MessagePayload,
+    ) -> Self {
+        Self {
+            scan,
+            payload,
+            restore: true,
+        }
+    }
+
+    const fn payload(&self) -> &MessagePayload {
+        &self.payload
+    }
+
+    fn accept(mut self) -> MessagePayload {
+        self.restore = false;
+        self.payload.clone()
+    }
+}
+
+impl Drop for PayloadRestoreGuard<'_, '_> {
+    fn drop(&mut self) {
+        if self.restore {
+            self.scan.skip(self.payload.clone());
+        }
+    }
+}
+
 pub(super) async fn next_payload_matching(
     node: &Node,
     label: &str,
@@ -85,20 +121,9 @@ async fn next_payload_matching_with_timeout(
                 return Err(payload_observation_error(label, scan.skipped()));
             }
         };
-        scan.skip(payload);
-        let Some(candidate) = scan.skipped().last() else {
-            return Err(Error::InvalidMessage(
-                "protected payload disappeared during test observation".to_string(),
-            ));
-        };
-        match matches(candidate) {
-            Ok(true) => {
-                return scan.pop_skipped().ok_or_else(|| {
-                    Error::InvalidMessage(
-                        "matched payload disappeared during test observation".to_string(),
-                    )
-                });
-            }
+        let candidate = PayloadRestoreGuard::new(&mut scan, payload);
+        match matches(candidate.payload()) {
+            Ok(true) => return Ok(candidate.accept()),
             Ok(false) => {}
             Err(error) => return Err(error),
         }

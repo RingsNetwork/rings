@@ -54,13 +54,9 @@ impl<T> TransferLane<T> {
         }
     }
 
-    fn wait_for_delivery(&mut self, id: u64, item: T) -> std::result::Result<(), T> {
-        if matches!(self.state, TransferLaneState::Idle) {
-            self.state = TransferLaneState::WaitingDelivery { id, item };
-            Ok(())
-        } else {
-            Err(item)
-        }
+    fn wait_for_delivery(&mut self, id: u64, item: T) {
+        debug_assert!(matches!(self.state, TransferLaneState::Idle));
+        self.state = TransferLaneState::WaitingDelivery { id, item };
     }
 
     fn take_waiting(&mut self, id: u64) -> Option<T> {
@@ -76,13 +72,9 @@ impl<T> TransferLane<T> {
         }
     }
 
-    fn make_runnable(&mut self, item: T) -> std::result::Result<(), T> {
-        if matches!(self.state, TransferLaneState::Idle) {
-            self.state = TransferLaneState::Runnable(item);
-            Ok(())
-        } else {
-            Err(item)
-        }
+    fn make_runnable(&mut self, item: T) {
+        debug_assert!(matches!(self.state, TransferLaneState::Idle));
+        self.state = TransferLaneState::Runnable(item);
     }
 
     fn finish_current(&mut self) {
@@ -102,6 +94,31 @@ impl<T> TransferLane<T> {
         }
         transfers.extend(self.queued.drain(..));
         transfers
+    }
+}
+
+/// Runnable lane head whose class was selected by this queue.
+#[must_use]
+pub(super) struct RunnableTransfer<T> {
+    class: TransferClass,
+    item: T,
+}
+
+impl<T> RunnableTransfer<T> {
+    pub(super) const fn class(&self) -> TransferClass {
+        self.class
+    }
+
+    pub(super) fn item(&self) -> &T {
+        &self.item
+    }
+
+    pub(super) fn item_mut(&mut self) -> &mut T {
+        &mut self.item
+    }
+
+    pub(super) fn into_item(self) -> T {
+        self.item
     }
 }
 
@@ -128,7 +145,7 @@ impl<T> TransferQueues<T> {
         }
     }
 
-    pub(super) fn pop(&mut self) -> Option<T> {
+    pub(super) fn pop(&mut self) -> Option<RunnableTransfer<T>> {
         let has_control = self.is_runnable(TransferClass::DhtControl);
         let selected = if has_control
             && (self.consecutive_control < OUTBOUND_CONTROL_BURST || !self.has_lower())
@@ -136,38 +153,31 @@ impl<T> TransferQueues<T> {
             Some(TransferClass::DhtControl)
         } else {
             self.next_lower_class()
-                .or(has_control.then_some(TransferClass::DhtControl))
         }?;
-        self.take(selected)
+        self.take(selected).map(|item| RunnableTransfer {
+            class: selected,
+            item,
+        })
     }
 
-    pub(super) fn wait_for_delivery(
+    pub(super) fn wait_for_delivery(&mut self, id: u64, transfer: RunnableTransfer<T>) {
+        let lane = &mut self.lanes[transfer.class.index()];
+        lane.wait_for_delivery(id, transfer.item);
+    }
+
+    pub(super) fn take_waiting(
         &mut self,
         class: TransferClass,
         id: u64,
-        item: T,
-    ) -> std::result::Result<(), T> {
-        let Some(lane) = self.lanes.get_mut(class.index()) else {
-            return Err(item);
-        };
-        lane.wait_for_delivery(id, item)
-    }
-
-    pub(super) fn take_waiting(&mut self, class: TransferClass, id: u64) -> Option<T> {
+    ) -> Option<RunnableTransfer<T>> {
         self.lanes
             .get_mut(class.index())
             .and_then(|lane| lane.take_waiting(id))
+            .map(|item| RunnableTransfer { class, item })
     }
 
-    pub(super) fn make_runnable(
-        &mut self,
-        class: TransferClass,
-        item: T,
-    ) -> std::result::Result<(), T> {
-        let Some(lane) = self.lanes.get_mut(class.index()) else {
-            return Err(item);
-        };
-        lane.make_runnable(item)
+    pub(super) fn make_runnable(&mut self, transfer: RunnableTransfer<T>) {
+        self.lanes[transfer.class.index()].make_runnable(transfer.item);
     }
 
     pub(super) fn record_frame_admitted(&mut self, class: TransferClass) {
@@ -190,9 +200,8 @@ impl<T> TransferQueues<T> {
         }
     }
 
-    pub(super) fn finish_attempt(&mut self, class: TransferClass) {
-        self.record_frame_admitted(class);
-        self.finish_current(class);
+    pub(super) fn discard(&mut self, transfer: RunnableTransfer<T>) {
+        self.finish_current(transfer.class);
     }
 
     pub(super) fn drain_transfers(&mut self) -> Vec<T> {

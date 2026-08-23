@@ -177,13 +177,13 @@ pub(super) enum ChunkSendPermit {
 
 impl ChunkSendPermit {
     pub(super) fn for_message(dht: Arc<PeerRing>, next_hop: Did, message: &Message) -> Self {
-        match message {
-            Message::SyncEntriesWithSuccessor(msg) => Self::StorageSyncRoute {
+        match message.storage_sync_destination() {
+            Some(destination) => Self::StorageSyncRoute {
                 dht,
-                destination: msg.destination,
+                destination,
                 next_hop,
             },
-            _ => Self::Always,
+            None => Self::Always,
         }
     }
 

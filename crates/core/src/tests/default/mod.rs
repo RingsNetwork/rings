@@ -139,11 +139,6 @@ impl Node {
         self.swarm.transport.inbound_admitted_count_for_test() > 0
     }
 
-    /// Atomic active-count and generation snapshot shared by inbound and outbound test work.
-    pub fn activity_snapshot(&self) -> crate::swarm::transport::TestActivitySnapshot {
-        self.swarm.transport.test_activity_snapshot()
-    }
-
     pub fn did(&self) -> Did {
         self.swarm.did()
     }
@@ -183,10 +178,6 @@ impl NodeMessageScan<'_> {
 
     pub(crate) fn skipped(&self) -> &[MessagePayload] {
         &self.skipped
-    }
-
-    pub(crate) fn pop_skipped(&mut self) -> Option<MessagePayload> {
-        self.skipped.pop()
     }
 }
 
@@ -432,12 +423,6 @@ pub async fn wait_for_msgs(nodes: impl IntoIterator<Item = &Node>) {
     let handshaking = || nodes.iter().any(|n| n.has_handshaking_connection());
     let inbound = || nodes.iter().any(|n| n.has_inbound_message());
     let outbound = || nodes.iter().any(|n| n.has_outbound_transfer());
-    let activity = || {
-        nodes
-            .iter()
-            .map(|node| node.activity_snapshot())
-            .collect::<Vec<_>>()
-    };
     let transport_activity = pending_transport_snapshot;
     // A snapshot of every node's DHT. Opening the data channel fires `join_dht`, which mutates the
     // DHT and emits more messages *after* the ICE connection state reached `Connected` — so true
@@ -456,32 +441,20 @@ pub async fn wait_for_msgs(nodes: impl IntoIterator<Item = &Node>) {
     loop {
         let drained = drain().await;
         let before = snapshot();
-        let activity_before = activity();
         let transport_before = transport_activity();
-        if !drained
-            && !handshaking()
-            && !inbound()
-            && !outbound()
-            && activity_before.iter().all(|snapshot| snapshot.is_idle())
-            && transport_before.is_idle()
-        {
+        if !drained && !handshaking() && !inbound() && !outbound() && transport_before.is_idle() {
             // Quiescent candidate: settle briefly, then require that across the gap nothing changed
             // — no message handed off, no handshake started, and no DHT mutation (join_dht /
             // stabilize chains). Any change means activity is still in flight; keep waiting.
             sleep(Duration::from_millis(500)).await;
             let quiet = !drain().await && !handshaking() && !inbound() && !outbound();
             let unchanged_dht = snapshot() == before;
-            // Read atomic activity states last. Equality plus zero active work proves no inbound
-            // or outbound lifecycle transition occurred in the candidate observation window.
-            let activity_after = activity();
-            let unchanged_activity = activity_after == activity_before
-                && activity_after.iter().all(|snapshot| snapshot.is_idle());
             // This is the final synchronous observation before returning. The dummy queue is
             // thread-local, so no event can be enqueued between this snapshot and the return.
             let transport_after = transport_activity();
             let unchanged_transport =
                 transport_after == transport_before && transport_after.is_idle();
-            if quiet && unchanged_dht && unchanged_activity && unchanged_transport {
+            if quiet && unchanged_dht && unchanged_transport {
                 return;
             }
         } else {

@@ -416,7 +416,7 @@ async fn closing_inbound_mailbox_cancels_pending_callback() -> Result<()> {
 }
 
 #[tokio::test]
-async fn reassembly_handoff_preserves_ingress_order_with_whole_message() -> Result<()> {
+async fn reassembly_handoff_does_not_block_later_control_lane() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
@@ -475,34 +475,32 @@ async fn reassembly_handoff_preserves_ingress_order_with_whole_message() -> Resu
     });
     app_callback.wait_for_final_chunk().await;
 
-    let second = MessagePayload::new_send(
-        Message::custom(b"whole-second")?,
+    let control = MessagePayload::new_send(
+        Message::PeerLivenessReport(crate::message::PeerLivenessReport { sent_at_ms: 1 }),
         &peer_session,
         transport.dht.did,
         transport.dht.did,
     )?
     .to_wire()?;
-    let second_callback = Arc::clone(&callback);
-    let second_delivery = tokio::spawn(async move {
-        second_callback
-            .on_message(&cid, &second)
+    let control_callback = Arc::clone(&callback);
+    let control_delivery = tokio::spawn(async move {
+        control_callback
+            .on_message(&cid, &control)
             .await
             .map_err(|error| Error::InvalidMessage(error.to_string()))
     });
-    tokio::task::yield_now().await;
+    tokio::time::timeout(Duration::from_secs(1), control_delivery)
+        .await
+        .map_err(|_| Error::InvalidMessage("control lane was blocked by reassembly".to_string()))?
+        .map_err(|_| Error::InvalidMessage("control lane task panicked".to_string()))??;
     assert!(app_callback.delivered()?.is_empty());
-    assert!(!second_delivery.is_finished());
 
     app_callback.release_final_chunk();
     final_delivery
         .await
         .map_err(|_| Error::InvalidMessage("final chunk task panicked".to_string()))??;
-    second_delivery
-        .await
-        .map_err(|_| Error::InvalidMessage("whole message task panicked".to_string()))??;
     assert_eq!(app_callback.delivered()?, vec![
-        b"reassembled-first".to_vec(),
-        b"whole-second".to_vec()
+        b"reassembled-first".to_vec()
     ]);
     Ok(())
 }

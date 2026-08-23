@@ -34,15 +34,8 @@ pub(super) const DATA_CHANNEL_CLOSE_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFIL
 pub(super) async fn await_bounded_connection_close(
     close: impl Future<Output = Result<()>>,
 ) -> Result<bool> {
-    await_bounded_connection_close_with_timeout(close, DATA_CHANNEL_CLOSE_TIMEOUT).await
-}
-
-async fn await_bounded_connection_close_with_timeout(
-    close: impl Future<Output = Result<()>>,
-    close_timeout: Duration,
-) -> Result<bool> {
     let close = close.fuse();
-    let timeout = sleep(close_timeout).fuse();
+    let timeout = sleep(DATA_CHANNEL_CLOSE_TIMEOUT).fuse();
     pin_mut!(close, timeout);
     select! {
         result = close => result.map(|()| true),
@@ -697,22 +690,5 @@ async fn wait_for_transport_readiness(connection: &SwarmConnection) -> Result<()
             return readiness.ensure_can_make_progress();
         }
         sleep(TRANSPORT_READINESS_POLL_INTERVAL).await;
-    }
-}
-
-#[cfg(all(test, not(target_family = "wasm")))]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn bounded_close_uses_the_injected_failure_deadline() -> Result<()> {
-        let completed = await_bounded_connection_close_with_timeout(
-            std::future::pending::<Result<()>>(),
-            Duration::from_millis(1),
-        )
-        .await?;
-
-        assert!(!completed);
-        Ok(())
     }
 }
