@@ -30,6 +30,8 @@ pub use finger::FingerTable;
 pub use finger::DEFAULT_FINGER_TABLE_SIZE;
 pub use stabilization::Stabilizer;
 pub use stabilization::StorageRepairOutcome;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use stabilization::STORAGE_REPAIR_MAX_DELIVERIES_PER_STEP;
 pub(crate) use storage::StorageSyncDelivery;
 pub(crate) use storage::StorageSyncDeliveryCursor;
 pub use storage::StorageSyncDestination;

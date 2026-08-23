@@ -4,6 +4,8 @@
 //! There is also a [TransportInterface] trait, which is used to specify the management of all
 //! [ConnectionInterface] objects.
 
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 #[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
 use std::sync::Mutex;
@@ -11,6 +13,7 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
@@ -25,7 +28,11 @@ use crate::delivery::DeliveryFuture;
 pub enum TransportMessage {
     /// The custom message is sent by an external invoker and
     /// should be handled by the on_message callback.
-    Custom(Vec<u8>),
+    ///
+    /// Since 0.18 this stores [`Bytes`] instead of `Vec<u8>`. Convert owned
+    /// vectors with `TransportMessage::Custom(data.into())`; the wire encoding
+    /// is unchanged.
+    Custom(Bytes),
 }
 
 #[cfg(target_family = "wasm")]
@@ -38,11 +45,31 @@ type SendPermitPredicate = dyn Fn() -> bool + Send + Sync;
 /// The permit is intentionally not `Clone`: one constructed value authorizes at
 /// most one call to [`ConnectionInterface::send_message_with_permit`]. Returning
 /// `false` means the higher-level condition that authorized the send no longer
-/// holds, so the backend must not start its send primitive. Once the predicate
-/// returns `true`, the higher layer treats that send as linearized even if the
-/// backend future still waits for internal queue capacity.
+/// holds, so the backend must not start its send primitive. The backend marks
+/// acceptance only after its send primitive confirms queue admission.
 pub struct SendPermit {
     predicate: Arc<SendPermitPredicate>,
+    irrevocable: Arc<AtomicBool>,
+    accepted: Arc<AtomicBool>,
+}
+
+/// Shared observation of whether a one-send permit reached its linearization point.
+#[derive(Clone)]
+pub struct SendAcceptance {
+    irrevocable: Arc<AtomicBool>,
+    accepted: Arc<AtomicBool>,
+}
+
+impl SendAcceptance {
+    /// Return whether the backend crossed its final cancellation-safe boundary.
+    pub fn is_irrevocable(&self) -> bool {
+        self.irrevocable.load(Ordering::Acquire)
+    }
+
+    /// Return whether the backend accepted the send permit.
+    pub fn is_accepted(&self) -> bool {
+        self.accepted.load(Ordering::Acquire)
+    }
 }
 
 impl SendPermit {
@@ -51,6 +78,8 @@ impl SendPermit {
     pub fn new(predicate: impl Fn() -> bool + 'static) -> Self {
         Self {
             predicate: Arc::new(predicate),
+            irrevocable: Arc::new(AtomicBool::new(false)),
+            accepted: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -59,6 +88,8 @@ impl SendPermit {
     pub fn new(predicate: impl Fn() -> bool + Send + Sync + 'static) -> Self {
         Self {
             predicate: Arc::new(predicate),
+            irrevocable: Arc::new(AtomicBool::new(false)),
+            accepted: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -67,9 +98,27 @@ impl SendPermit {
         Self::new(|| true)
     }
 
-    /// Evaluate this permit exactly where a backend is about to start its send.
+    /// Evaluate this permit where a backend is about to start its send.
     pub fn allows(&self) -> bool {
         (self.predicate)()
+    }
+
+    /// Mark that a backend write has started and must be driven to completion.
+    pub fn mark_irrevocable(&self) {
+        self.irrevocable.store(true, Ordering::Release);
+    }
+
+    /// Consume the permit and publish successful backend queue admission.
+    pub fn mark_accepted(self) {
+        self.accepted.store(true, Ordering::Release);
+    }
+
+    /// Return a shared observer for the backend acceptance boundary.
+    pub fn acceptance(&self) -> SendAcceptance {
+        SendAcceptance {
+            irrevocable: Arc::clone(&self.irrevocable),
+            accepted: Arc::clone(&self.accepted),
+        }
     }
 }
 
@@ -79,19 +128,61 @@ mod send_permit_tests {
     use std::sync::atomic::Ordering;
     use std::sync::Arc;
 
+    use bytes::Bytes;
+    use serde::Serialize;
+
     use super::SendPermit;
+    use super::TransportMessage;
+
+    #[derive(Serialize)]
+    enum LegacyTransportMessage {
+        Custom(Vec<u8>),
+    }
 
     #[test]
     fn send_permit_observes_revocation_at_evaluation_time() {
         let admitted = Arc::new(AtomicBool::new(true));
+        admitted.store(false, Ordering::SeqCst);
         let permit = SendPermit::new({
             let admitted = Arc::clone(&admitted);
             move || admitted.load(Ordering::SeqCst)
         });
 
-        assert!(permit.allows());
-        admitted.store(false, Ordering::SeqCst);
         assert!(!permit.allows());
+    }
+
+    #[test]
+    fn send_acceptance_observes_confirmed_queue_admission() {
+        let permit = SendPermit::always();
+        let acceptance = permit.acceptance();
+
+        assert!(!acceptance.is_accepted());
+        assert!(!acceptance.is_irrevocable());
+        assert!(permit.allows());
+        permit.mark_irrevocable();
+        assert!(acceptance.is_irrevocable());
+        assert!(!acceptance.is_accepted());
+        permit.mark_accepted();
+        assert!(acceptance.is_accepted());
+    }
+
+    #[test]
+    fn bytes_transport_message_preserves_legacy_wire_encoding() {
+        let body = vec![1, 2, 3, 4];
+        let legacy = rings_codec::serialize(&LegacyTransportMessage::Custom(body.clone()))
+            .expect("legacy message must serialize");
+        let current = rings_codec::serialize(&TransportMessage::Custom(Bytes::from(body)))
+            .expect("current message must serialize");
+
+        assert_eq!(current, legacy);
+    }
+
+    #[test]
+    fn custom_message_accepts_the_documented_vec_migration() {
+        let body = vec![1, 2, 3, 4];
+        let message = TransportMessage::Custom(body.into());
+
+        assert!(matches!(message, TransportMessage::Custom(bytes) if bytes.len() == 4));
     }
 }
 

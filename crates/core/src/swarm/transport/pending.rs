@@ -627,11 +627,11 @@ impl SwarmTransport {
         observe_admission: impl FnOnce(),
     ) -> Result<FingerUpdateDisposition> {
         let _lifecycle = self.connection_lifecycle()?;
-        let lifecycle = self.peer_lifecycles()?.state(peer);
-        let is_routable = matches!(lifecycle, Some(PeerConnectionLifecycle::Active(_)))
-            && self
-                .get_raw_connection(peer)
-                .is_some_and(|connection| connection.readiness().can_make_progress());
+        let (lifecycle, active) = {
+            let lifecycles = self.peer_lifecycles()?;
+            (lifecycles.state(peer), lifecycles.active_connections())
+        };
+        let is_routable = self.is_routable_active_candidate(peer, &active);
         match finger_candidate_admission(lifecycle, is_routable) {
             FingerCandidateAdmission::Queue(current) => {
                 observe_admission();

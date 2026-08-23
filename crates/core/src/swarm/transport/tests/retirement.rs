@@ -148,7 +148,7 @@ async fn retirement_shuts_down_outbound_scheduler_for_departed_peer() -> Result<
     let attempt = transport.reserve_pending_connection(peer).await?;
     assert!(transport.activate_connection_for_test(attempt)?);
 
-    let _handle = transport.outbound_schedulers.handle(peer);
+    let _handle = transport.outbound_schedulers.handle(peer)?;
     assert_eq!(transport.outbound_schedulers.peer_count_for_test(), 1);
 
     assert_eq!(

@@ -7,6 +7,8 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use std::time::Duration;
 
 use async_trait::async_trait;
 #[cfg(feature = "dummy")]
@@ -14,6 +16,8 @@ use bytes::Bytes;
 use rings_transport::core::callback::TransportCallback;
 #[cfg(feature = "dummy")]
 use tokio::sync::Notify;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use tracing_test::traced_test;
 
 use super::pending::ConnectionLifecycleRegistry;
 #[cfg(feature = "dummy")]
@@ -33,16 +37,24 @@ use crate::dht::MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use crate::ecc::SecretKey;
 use crate::measure::BehaviourJudgement;
 use crate::measure::Measure;
+use crate::message::MessageClass;
 use crate::message::MessagePayload;
 use crate::storage::MemStorage;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use crate::swarm::callback::max_on_message_recursion_depth_for_test;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use crate::swarm::callback::reset_on_message_recursion_depth_for_test;
 use crate::swarm::callback::InnerSwarmCallback;
 use crate::swarm::callback::SwarmCallback;
 #[cfg(feature = "dummy")]
 use crate::swarm::callback::SwarmEvent;
 use crate::swarm::SwarmBuilder;
 
+mod events;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 mod finger;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+mod inbound;
 mod lifecycle;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 mod readiness;
@@ -158,7 +170,7 @@ impl SwarmCallback for CountingSwarmCallback {
     async fn on_validate(
         &self,
         _payload: &MessagePayload,
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    ) -> std::result::Result<(), crate::error::CallbackError> {
         self.validates.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -166,7 +178,7 @@ impl SwarmCallback for CountingSwarmCallback {
     async fn on_inbound(
         &self,
         _payload: &MessagePayload,
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    ) -> std::result::Result<(), crate::error::CallbackError> {
         self.inbounds.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -174,68 +186,12 @@ impl SwarmCallback for CountingSwarmCallback {
     async fn on_event(
         &self,
         event: &SwarmEvent,
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    ) -> std::result::Result<(), crate::error::CallbackError> {
         let SwarmEvent::ConnectionStateChange { state, .. } = event;
         match self.events.lock() {
             Ok(mut events) => events.push(*state),
             Err(_) => tracing::error!("CountingSwarmCallback events mutex is poisoned"),
         }
-        Ok(())
-    }
-}
-
-#[cfg(feature = "dummy")]
-#[derive(Default)]
-struct BlockingValidateSwarmCallback {
-    validates: AtomicUsize,
-    inbounds: AtomicUsize,
-    validate_started: AtomicBool,
-    validate_started_notify: Notify,
-    release_validate: Notify,
-}
-
-#[cfg(feature = "dummy")]
-impl BlockingValidateSwarmCallback {
-    async fn wait_for_first_validate_started(&self) {
-        while !self.validate_started.load(Ordering::SeqCst) {
-            self.validate_started_notify.notified().await;
-        }
-    }
-
-    fn release_first_validate(&self) {
-        self.release_validate.notify_waiters();
-    }
-
-    fn validates(&self) -> usize {
-        self.validates.load(Ordering::SeqCst)
-    }
-
-    fn inbounds(&self) -> usize {
-        self.inbounds.load(Ordering::SeqCst)
-    }
-}
-
-#[cfg(feature = "dummy")]
-#[async_trait]
-impl SwarmCallback for BlockingValidateSwarmCallback {
-    async fn on_validate(
-        &self,
-        _payload: &MessagePayload,
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let previous = self.validates.fetch_add(1, Ordering::SeqCst);
-        if previous == 0 {
-            self.validate_started.store(true, Ordering::SeqCst);
-            self.validate_started_notify.notify_waiters();
-            self.release_validate.notified().await;
-        }
-        Ok(())
-    }
-
-    async fn on_inbound(
-        &self,
-        _payload: &MessagePayload,
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        self.inbounds.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 }
@@ -351,7 +307,7 @@ impl SwarmCallback for BlockingEventSwarmCallback {
     async fn on_event(
         &self,
         event: &SwarmEvent,
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    ) -> std::result::Result<(), crate::error::CallbackError> {
         let SwarmEvent::ConnectionStateChange { peer, state } = event;
         match self.events.lock() {
             Ok(mut events) => events.push((*peer, *state)),
@@ -569,10 +525,9 @@ async fn pending_callback_messages_do_not_dispatch_before_admission() -> Result<
     Ok(())
 }
 
-#[cfg(feature = "dummy")]
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[tokio::test]
-async fn reassembled_chunks_are_drained_by_mailbox_without_recursive_callback_entry() -> Result<()>
-{
+async fn nested_reassembled_chunk_is_rejected_without_recursive_callback_entry() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
@@ -588,9 +543,7 @@ async fn reassembled_chunks_are_drained_by_mailbox_without_recursive_callback_en
         transport.dht.did,
     )?
     .to_wire()?;
-    let depth = 16;
-
-    for _ in 0..depth {
+    for _ in 0..2 {
         let chunk = Chunk {
             chunk: [0, 1],
             data: current,
@@ -605,72 +558,81 @@ async fn reassembled_chunks_are_drained_by_mailbox_without_recursive_callback_en
         .to_wire()?;
     }
 
-    callback
+    reset_on_message_recursion_depth_for_test();
+    let error = callback
         .on_message(&peer.to_string(), &current)
         .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+        .expect_err("nested chunks must be rejected");
 
-    assert_eq!(app_callback.validates(), depth + 1);
-    assert_eq!(app_callback.inbounds(), 1);
+    assert!(error.to_string().contains("Nested chunk"));
+    assert_eq!(app_callback.validates(), 1);
+    assert_eq!(app_callback.inbounds(), 0);
+    assert_eq!(max_on_message_recursion_depth_for_test(), 1);
     Ok(())
 }
 
-#[cfg(feature = "dummy")]
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[tokio::test]
-async fn pending_mailbox_rechecks_admission_before_reassembled_payload() -> Result<()> {
+async fn missing_peer_error_precedes_outbound_capacity_admission() -> Result<()> {
+    let transport = Arc::new(transport_with_measure(Arc::new(
+        RecordingMeasure::default(),
+    ))?);
+    let peer = Did::from(700_u32);
+    let mut permits = Vec::with_capacity(OUTBOUND_DATA_TRANSFER_CAPACITY);
+    for _ in 0..OUTBOUND_DATA_TRANSFER_CAPACITY {
+        permits.push(
+            transport
+                .outbound_schedulers
+                .reserve(peer, MessageClass::Application, 1)
+                .await?,
+        );
+    }
+    let payload = MessagePayload::new_send(
+        Message::custom(b"missing-peer")?,
+        transport.session_sk(),
+        peer,
+        peer,
+    )?;
+
+    let error = transport
+        .send_payload_detached_with_outcome(payload)
+        .await
+        .expect_err("missing route must be checked before capacity");
+
+    assert!(matches!(error, Error::SwarmMissDidInTable(did) if did == peer));
+    drop(permits);
+    Ok(())
+}
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+#[traced_test]
+#[tokio::test]
+async fn invalid_inbound_log_omits_transaction_data() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
     let peer_session = SessionSk::new_with_seckey(&peer_key)?;
-    let app_callback = Arc::new(BlockingValidateSwarmCallback::default());
-    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
-    let (attempt, _offer) = transport
-        .prepare_connection_offer_with_attempt(peer, offer_callback)
-        .await?;
-    assert!(transport.activate_connection_for_test(attempt)?);
-
-    let inner = MessagePayload::new_send(
-        Message::custom(b"must-not-dispatch-after-retire")?,
+    let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
+    let mut payload = MessagePayload::new_send(
+        Message::custom(&vec![171; 4096])?,
         &peer_session,
         transport.dht.did,
         transport.dht.did,
-    )?
-    .to_wire()?;
-    let outer = MessagePayload::new_send(
-        Message::Chunk(Chunk {
-            chunk: [0, 1],
-            data: inner,
-            meta: ChunkMeta::default(),
-        }),
-        &peer_session,
-        transport.dht.did,
-        transport.dht.did,
-    )?
-    .to_wire()?;
-    let pending_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone())
-        .with_pending_connection_attempt(attempt);
-    let cid = peer.to_string();
-    let delivery = tokio::spawn(async move {
-        pending_callback
-            .on_message(&cid, &outer)
-            .await
-            .map_err(|error| Error::InvalidMessage(error.to_string()))
-    });
+    )?;
+    payload.transaction.data.push(171);
+    let bytes = payload.to_wire()?;
 
-    app_callback.wait_for_first_validate_started().await;
-    assert!(matches!(
-        transport.retire_active_connection_with(attempt, |_| Ok(())),
-        Ok(Some(()))
-    ));
-    app_callback.release_first_validate();
-    delivery
+    callback
+        .on_message(&peer.to_string(), &bytes)
         .await
-        .map_err(|_| Error::InvalidMessage("mailbox task panicked".to_string()))??;
+        .expect_err("mutating signed transaction data must fail verification");
 
-    assert_eq!(app_callback.validates(), 1);
-    assert_eq!(app_callback.inbounds(), 0);
+    assert!(logs_contain(
+        "inbound message verification failed or expired"
+    ));
+    assert!(!logs_contain("171, 171, 171, 171"));
     Ok(())
 }
 
@@ -706,8 +668,10 @@ async fn pending_disconnected_before_data_channel_open_is_not_reported() -> Resu
 
     assert!(transport.is_admitted_connection_attempt(attempt));
     let events = app_callback.events()?;
-    assert!(!events.contains(&WebrtcConnectionState::Disconnected));
-    assert!(events.contains(&WebrtcConnectionState::Connected));
+    assert_eq!(events, vec![
+        WebrtcConnectionState::Connecting,
+        WebrtcConnectionState::Connected,
+    ]);
     assert!(transport.dht.successors().contains(&peer)?);
 
     transport.disconnect(peer).await?;
@@ -759,310 +723,5 @@ async fn terminal_event_during_pending_admission_prevents_late_dht_join() -> Res
     let events = app_callback.events()?;
     assert!(events.contains(&WebrtcConnectionState::Closed));
     assert!(!events.contains(&WebrtcConnectionState::Connected));
-    Ok(())
-}
-
-#[cfg(feature = "dummy")]
-#[tokio::test]
-async fn terminal_event_starts_in_order_without_waiting_for_connected_callback() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
-    let peer = SecretKey::random().address().into();
-    let app_callback = Arc::new(BlockingEventSwarmCallback::default());
-    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
-    let (attempt, _offer) = transport
-        .prepare_connection_offer_with_attempt(peer, offer_callback)
-        .await?;
-    open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
-
-    let opening_transport = Arc::clone(&transport);
-    let opening_callback = app_callback.clone();
-    let opening = tokio::spawn(async move {
-        let callback = InnerSwarmCallback::new(opening_transport, opening_callback)
-            .with_pending_connection_attempt(attempt);
-        callback
-            .on_data_channel_open(&peer.to_string())
-            .await
-            .map_err(|error| Error::InvalidMessage(error.to_string()))
-    });
-
-    app_callback.wait_for_connected_event_started().await;
-    let terminal_transport = Arc::clone(&transport);
-    let terminal_callback = app_callback.clone();
-    let terminal = tokio::spawn(async move {
-        let callback = InnerSwarmCallback::new(terminal_transport, terminal_callback)
-            .with_pending_connection_attempt(attempt);
-        callback
-            .on_peer_connection_state_change(&peer.to_string(), WebrtcConnectionState::Closed)
-            .await
-            .map_err(|error| Error::InvalidMessage(error.to_string()))
-    });
-
-    tokio::time::timeout(std::time::Duration::from_secs(1), terminal)
-        .await
-        .map_err(|_| {
-            Error::InvalidMessage("terminal event was blocked by application callback".to_string())
-        })?
-        .map_err(|error| Error::InvalidMessage(error.to_string()))??;
-    assert_eq!(connected_and_closed_events(app_callback.events()?), vec![
-        WebrtcConnectionState::Connected,
-        WebrtcConnectionState::Closed
-    ]);
-    app_callback.release_connected_event();
-
-    opening
-        .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))??;
-    assert_eq!(connected_and_closed_events(app_callback.events()?), vec![
-        WebrtcConnectionState::Connected,
-        WebrtcConnectionState::Closed
-    ]);
-    assert!(!transport.is_admitted_connection_attempt(attempt));
-    assert!(!transport.dht.successors().contains(&peer)?);
-    Ok(())
-}
-
-#[cfg(feature = "dummy")]
-#[tokio::test]
-async fn slow_connected_event_for_one_peer_does_not_block_other_peer_events() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
-    let blocked_peer: Did = SecretKey::random().address().into();
-    let other_peer: Did = SecretKey::random().address().into();
-    let app_callback = Arc::new(BlockingEventSwarmCallback::blocking_peer(blocked_peer));
-    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
-    let (attempt, _offer) = transport
-        .prepare_connection_offer_with_attempt(blocked_peer, offer_callback)
-        .await?;
-    open_dummy_data_channel_before_ice_connected(&transport, blocked_peer).await?;
-
-    let opening_transport = Arc::clone(&transport);
-    let opening_callback = app_callback.clone();
-    let opening = tokio::spawn(async move {
-        let callback = InnerSwarmCallback::new(opening_transport, opening_callback)
-            .with_pending_connection_attempt(attempt);
-        callback
-            .on_data_channel_open(&blocked_peer.to_string())
-            .await
-            .map_err(|error| Error::InvalidMessage(error.to_string()))
-    });
-
-    app_callback.wait_for_connected_event_started().await;
-    let other_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
-    tokio::time::timeout(
-        std::time::Duration::from_millis(100),
-        other_callback.on_peer_connection_state_change(
-            &other_peer.to_string(),
-            WebrtcConnectionState::Connecting,
-        ),
-    )
-    .await
-    .map_err(|_| Error::InvalidMessage("unrelated peer event was blocked".to_string()))?
-    .map_err(|error| Error::InvalidMessage(error.to_string()))?;
-
-    assert!(app_callback
-        .peer_events()?
-        .contains(&(other_peer, WebrtcConnectionState::Connecting)));
-    app_callback.release_connected_event();
-    opening
-        .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))??;
-
-    assert!(app_callback
-        .peer_events()?
-        .contains(&(blocked_peer, WebrtcConnectionState::Connected)));
-    transport.disconnect(blocked_peer).await?;
-    Ok(())
-}
-
-#[cfg(feature = "dummy")]
-fn connected_and_closed_events(events: Vec<WebrtcConnectionState>) -> Vec<WebrtcConnectionState> {
-    events
-        .into_iter()
-        .filter(|state| {
-            matches!(
-                state,
-                WebrtcConnectionState::Connected | WebrtcConnectionState::Closed
-            )
-        })
-        .collect()
-}
-
-#[tokio::test]
-async fn local_did_lifecycle_callbacks_are_ignored() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
-    let local_cid = transport.dht.did.to_string();
-
-    callback
-        .on_data_channel_open(&local_cid)
-        .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
-    callback
-        .on_peer_connection_state_change(&local_cid, WebrtcConnectionState::Closed)
-        .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
-    callback
-        .on_data_channel_close(&local_cid)
-        .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
-
-    assert_eq!(transport.pending_connection_count()?, 0);
-    assert!(transport.get_connection(transport.dht.did).is_none());
-    Ok(())
-}
-
-#[tokio::test]
-async fn mismatched_pending_callback_cancels_attempt_without_admission() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
-    let peer = SecretKey::random().address().into();
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
-    let (attempt, _offer) = transport
-        .prepare_connection_offer_with_attempt(peer, callback)
-        .await?;
-    let mismatched_callback =
-        InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback))
-            .with_pending_connection_attempt(attempt);
-    let local_cid = transport.dht.did.to_string();
-
-    mismatched_callback
-        .on_data_channel_open(&local_cid)
-        .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
-
-    assert_eq!(transport.pending_connection_count()?, 0);
-    assert!(transport.get_connection(peer).is_none());
-    assert!(transport.get_connection(transport.dht.did).is_none());
-    Ok(())
-}
-
-#[tokio::test]
-async fn late_terminal_callback_cannot_remove_replacement_active_slot() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
-    let peer = SecretKey::random().address().into();
-    let old_attempt = transport.reserve_pending_connection(peer).await?;
-    assert!(transport.retire_pending_connection(old_attempt)?);
-    let current_attempt = transport.reserve_pending_connection(peer).await?;
-    assert!(transport.activate_connection_for_test(current_attempt)?);
-    let late_callback =
-        InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback))
-            .with_pending_connection_attempt(old_attempt);
-
-    late_callback
-        .on_peer_connection_state_change(&peer.to_string(), WebrtcConnectionState::Closed)
-        .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
-
-    assert!(transport.is_admitted_connection_attempt(current_attempt));
-    assert_eq!(transport.admitted_connection_ids(), vec![peer]);
-    Ok(())
-}
-
-#[test]
-fn connection_offer_protocol_mode_includes_storage_redundancy() -> Result<()> {
-    let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
-    let matching = ConnectNodeSend {
-        sdp: String::new(),
-        network_id: 0,
-        storage_redundancy: 1,
-        dht_virtual_nodes: 0,
-    };
-    let mismatched_redundancy = ConnectNodeSend {
-        storage_redundancy: 2,
-        ..matching.clone()
-    };
-
-    assert!(transport.accepts_connection_offer(&matching));
-    assert!(!transport.accepts_connection_offer(&mismatched_redundancy));
-    Ok(())
-}
-
-#[test]
-fn connection_answer_protocol_mode_includes_storage_redundancy() -> Result<()> {
-    let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
-    let matching = ConnectNodeReport {
-        sdp: String::new(),
-        network_id: 0,
-        storage_redundancy: 1,
-        dht_virtual_nodes: 0,
-    };
-    let mismatched_redundancy = ConnectNodeReport {
-        storage_redundancy: 2,
-        ..matching.clone()
-    };
-
-    assert!(transport.accepts_connection_answer(&matching));
-    assert!(!transport.accepts_connection_answer(&mismatched_redundancy));
-    Ok(())
-}
-
-#[tokio::test]
-async fn disconnected_observation_is_once_per_connection_epoch() -> Result<()> {
-    let measure = Arc::new(RecordingMeasure::default());
-    let transport = transport_with_measure(measure.clone())?;
-    let peer: Did = SecretKey::random().address().into();
-    let attempt = transport.reserve_pending_connection(peer).await?;
-    assert!(transport.activate_connection_for_test(attempt)?);
-
-    transport.record_peer_disconnected(attempt).await;
-    transport.record_peer_disconnected(attempt).await;
-    assert!(transport.peer_disconnected_since_ms(peer).is_some());
-    transport.record_peer_connected(attempt).await;
-    assert!(transport.peer_disconnected_since_ms(peer).is_none());
-    transport.record_peer_disconnected(attempt).await;
-    assert!(transport.peer_disconnected_since_ms(peer).is_some());
-
-    assert_eq!(measure.snapshot_counters()?.as_slice(), &[
-        (peer, MeasureCounter::Disconnected),
-        (peer, MeasureCounter::Connect),
-        (peer, MeasureCounter::Disconnected),
-    ]);
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn dht_candidate_order_uses_peer_quality_without_dropping_candidates() -> Result<()> {
-    let degraded = SecretKey::random().address().into();
-    let unknown = SecretKey::random().address().into();
-    let healthy = SecretKey::random().address().into();
-    let measure = Arc::new(RecordingMeasure::default());
-    measure.set_quality(degraded, PeerQuality::Degraded)?;
-    measure.set_quality(healthy, PeerQuality::Healthy)?;
-    let transport = transport_with_measure(measure)?;
-
-    let ordered = transport
-        .order_dht_candidates_by_quality([degraded, unknown, healthy])
-        .await;
-
-    assert_eq!(ordered, vec![healthy, unknown, degraded]);
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn malformed_outbound_payload_is_rejected_before_connection_admission() -> Result<()> {
-    let transport = transport_with_measure(Arc::new(RecordingMeasure::default()))?;
-    let peer = SecretKey::random().address().into();
-    let mut payload = MessagePayload::new_send(
-        Message::custom(b"malformed outbound payload")?,
-        &transport.session_sk,
-        peer,
-        peer,
-    )?;
-    payload.transaction.data = vec![0xff];
-
-    assert!(matches!(
-        transport.send_payload(payload).await,
-        Err(Error::CodecDeserialize(_))
-    ));
     Ok(())
 }

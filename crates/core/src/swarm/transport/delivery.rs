@@ -8,6 +8,8 @@ use futures::select;
 use rings_transport::core::transport::SendPermit;
 use rings_transport::delivery::DeliveryFuture;
 
+use super::connection::await_bounded_connection_close;
+use super::connection::DATA_CHANNEL_CLOSE_TIMEOUT;
 use super::AdmittedConnection;
 use super::PendingConnectionAttempt;
 use super::TransportReadiness;
@@ -17,6 +19,7 @@ use crate::dht::PeerRing;
 use crate::dht::StorageSyncDestination;
 use crate::error::Error;
 use crate::error::Result;
+use crate::lifecycle::StopToken;
 use crate::measure::MeasureCounter;
 use crate::measure::MeasureImpl;
 use crate::message::Message;
@@ -40,8 +43,14 @@ const CHUNK_SEND_PERMIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 #[cfg(not(test))]
 const CHUNK_SEND_PERMIT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
+#[cfg(test)]
+const DATA_CHANNEL_DELIVERY_TIMEOUT: Duration = Duration::from_millis(500);
+#[cfg(not(test))]
+const DATA_CHANNEL_DELIVERY_TIMEOUT: Duration = Duration::from_secs(25);
+
 #[derive(Debug)]
 pub(super) enum ChunkSendCancelReason {
+    TransferStopped,
     AdmissionRevoked(PendingConnectionAttempt),
     AdmissionCheckFailed(Error),
     TransportNotReady(TransportReadiness),
@@ -52,6 +61,7 @@ pub(super) enum ChunkSendCancelReason {
 impl ChunkSendCancelReason {
     const fn as_str(&self) -> &'static str {
         match self {
+            Self::TransferStopped => "transfer_stopped",
             Self::AdmissionRevoked(_) => "admission_revoked",
             Self::AdmissionCheckFailed(_) => "admission_check_failed",
             Self::TransportNotReady(_) => "transport_not_ready",
@@ -63,7 +73,8 @@ impl ChunkSendCancelReason {
     const fn transport_readiness(&self) -> Option<TransportReadiness> {
         match self {
             Self::TransportNotReady(readiness) => Some(*readiness),
-            Self::AdmissionRevoked(_)
+            Self::TransferStopped
+            | Self::AdmissionRevoked(_)
             | Self::AdmissionCheckFailed(_)
             | Self::RouteNoLongerPermitted
             | Self::RouteCheckFailed(_) => None,
@@ -73,7 +84,8 @@ impl ChunkSendCancelReason {
     const fn check_error(&self) -> Option<&Error> {
         match self {
             Self::AdmissionCheckFailed(error) | Self::RouteCheckFailed(error) => Some(error),
-            Self::AdmissionRevoked(_)
+            Self::TransferStopped
+            | Self::AdmissionRevoked(_)
             | Self::TransportNotReady(_)
             | Self::RouteNoLongerPermitted => None,
         }
@@ -82,7 +94,8 @@ impl ChunkSendCancelReason {
     pub(super) const fn records_peer_failure(&self) -> bool {
         match self {
             Self::TransportNotReady(readiness) => readiness.is_terminal(),
-            Self::AdmissionRevoked(_)
+            Self::TransferStopped
+            | Self::AdmissionRevoked(_)
             | Self::AdmissionCheckFailed(_)
             | Self::RouteNoLongerPermitted
             | Self::RouteCheckFailed(_) => false,
@@ -92,7 +105,8 @@ impl ChunkSendCancelReason {
     const fn attempt(&self) -> Option<PendingConnectionAttempt> {
         match self {
             Self::AdmissionRevoked(attempt) => Some(*attempt),
-            Self::AdmissionCheckFailed(_)
+            Self::TransferStopped
+            | Self::AdmissionCheckFailed(_)
             | Self::TransportNotReady(_)
             | Self::RouteNoLongerPermitted
             | Self::RouteCheckFailed(_) => None,
@@ -107,6 +121,7 @@ impl ChunkSendCancelReason {
     /// admitted the send.
     pub(super) fn resolve_initial(self) -> Result<()> {
         match self {
+            Self::TransferStopped => Ok(()),
             Self::AdmissionRevoked(attempt) => Err(Error::ConnectionAttemptSuperseded {
                 peer: attempt.peer(),
                 generation: attempt.generation(),
@@ -126,12 +141,36 @@ pub(super) enum ChunkSendProgress<T> {
     Cancelled(ChunkSendCancelReason),
 }
 
+/// Combined caller and scheduler cancellation observed by every frame phase.
+#[derive(Clone)]
+pub(super) struct TransferStop {
+    caller: StopToken,
+    scheduler: StopToken,
+}
+
+impl TransferStop {
+    pub(super) fn new(caller: StopToken) -> Self {
+        Self {
+            caller,
+            scheduler: StopToken::never(),
+        }
+    }
+
+    pub(super) fn bind_scheduler(&mut self, scheduler: StopToken) {
+        self.scheduler = scheduler;
+    }
+
+    pub(super) fn should_stop(&self) -> bool {
+        self.caller.should_stop() || self.scheduler.should_stop()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SendCompletionOutcome {
     /// The boundary selected by the completion policy was reached: transport
     /// acceptance for detached sends, full delivery for tracked sends.
     Succeeded,
-    /// A generation, readiness, route, or tracked-delivery condition was revoked.
+    /// A caller deadline, generation, readiness, route, or tracked-delivery condition was revoked.
     Cancelled,
 }
 
@@ -187,35 +226,41 @@ impl ChunkSendPermit {
             ),
         }
     }
-
-    pub(super) const fn records_missing_connection_failure(&self) -> bool {
-        matches!(self, Self::Always)
-    }
 }
 
 pub(super) async fn send_data_with_timeout(
     admitted: &AdmittedConnection,
     data: Bytes,
     permit: &ChunkSendPermit,
+    stop: &TransferStop,
     did: Did,
     context: &'static str,
 ) -> ChunkSendProgress<Result<DeliveryFuture>> {
     let bytes = data.len();
     let admission = admitted.clone();
     let route = permit.clone();
+    let transfer_stop = stop.clone();
     let send_permit = SendPermit::new(move || {
         admission
-            .with_current(|connection| route.admits(|| connection.readiness().can_make_progress()))
+            .with_current_connection(|connection| {
+                route.admits(|| {
+                    !transfer_stop.should_stop() && connection.readiness().can_make_progress()
+                })
+            })
             .ok()
             .flatten()
             .unwrap_or(false)
     });
+    let acceptance = send_permit.acceptance();
     let send = admitted.connection().send_data(data, send_permit).fuse();
     let timeout = sleep(DATA_CHANNEL_SEND_ACCEPT_TIMEOUT).fuse();
     pin_mut!(send, timeout);
 
     loop {
-        if let Some(reason) = chunk_send_cancel_reason(admitted, permit) {
+        if acceptance.is_irrevocable() {
+            return complete_irrevocable_send(send.await, admitted).await;
+        }
+        if let Some(reason) = chunk_send_cancel_reason(admitted, permit, stop) {
             log_chunk_send_cancel(did, context, &reason);
             return ChunkSendProgress::Cancelled(reason);
         }
@@ -227,14 +272,21 @@ pub(super) async fn send_data_with_timeout(
                     result,
                     Err(Error::Transport(rings_transport::error::Error::SendPermitRevoked))
                 ) {
-                    if let Some(reason) = chunk_send_cancel_reason(admitted, permit) {
+                    if let Some(reason) = chunk_send_cancel_reason(admitted, permit, stop) {
                         log_chunk_send_cancel(did, context, &reason);
                         return ChunkSendProgress::Cancelled(reason);
                     }
                 }
-                return ChunkSendProgress::Ready(result);
+                return if acceptance.is_irrevocable() {
+                    complete_irrevocable_send(result, admitted).await
+                } else {
+                    ChunkSendProgress::Ready(result)
+                };
             },
             _ = timeout => {
+                if acceptance.is_irrevocable() {
+                    return complete_irrevocable_send(send.await, admitted).await;
+                }
                 return ChunkSendProgress::Ready(Err(Error::DataChannelSendQueueTimeout {
                     peer: did,
                     timeout_ms: DATA_CHANNEL_SEND_ACCEPT_TIMEOUT.as_millis(),
@@ -245,6 +297,18 @@ pub(super) async fn send_data_with_timeout(
             _ = poll => {}
         }
     }
+}
+
+async fn complete_irrevocable_send(
+    result: Result<DeliveryFuture>,
+    admitted: &AdmittedConnection,
+) -> ChunkSendProgress<Result<DeliveryFuture>> {
+    if result.is_err() {
+        if let Err(close_error) = terminate_accepted_connection(admitted).await {
+            return ChunkSendProgress::Ready(Err(close_error));
+        }
+    }
+    ChunkSendProgress::Ready(result)
 }
 
 pub(super) async fn record_measurement(
@@ -266,7 +330,11 @@ pub(super) fn frame_chunk(session_sk: &SessionSk, did: Did, chunk: Chunk) -> Res
 fn chunk_send_cancel_reason(
     admitted: &AdmittedConnection,
     permit: &ChunkSendPermit,
+    stop: &TransferStop,
 ) -> Option<ChunkSendCancelReason> {
+    if stop.should_stop() {
+        return Some(ChunkSendCancelReason::TransferStopped);
+    }
     if let Err(error) = admitted.ensure_current() {
         return match error {
             Error::ConnectionAttemptSuperseded { .. } => {
@@ -301,30 +369,21 @@ fn log_chunk_send_cancel(did: Did, phase: &'static str, reason: &ChunkSendCancel
     );
 }
 
-pub(super) async fn record_cancel_measurement(
-    measure: Option<MeasureImpl>,
-    did: Did,
-    reason: &ChunkSendCancelReason,
-) {
-    if reason.records_peer_failure() {
-        record_measurement(measure, did, MeasureCounter::FailedToSend).await;
-    }
-}
-
 pub(super) async fn await_delivery_or_cancel(
     delivery: DeliveryFuture,
     admitted: &AdmittedConnection,
     permit: &ChunkSendPermit,
+    stop: &TransferStop,
     did: Did,
     phase: &'static str,
 ) -> ChunkSendProgress<Result<()>> {
     let delivery = delivery.fuse();
-    pin_mut!(delivery);
+    let timeout = sleep(DATA_CHANNEL_DELIVERY_TIMEOUT).fuse();
+    pin_mut!(delivery, timeout);
 
     loop {
-        if let Some(reason) = chunk_send_cancel_reason(admitted, permit) {
-            log_chunk_send_cancel(did, phase, &reason);
-            return ChunkSendProgress::Cancelled(reason);
+        if let Some(reason) = chunk_send_cancel_reason(admitted, permit, stop) {
+            return cancel_accepted_delivery(admitted, did, phase, reason).await;
         }
 
         let poll = sleep(CHUNK_SEND_PERMIT_POLL_INTERVAL).fuse();
@@ -332,16 +391,51 @@ pub(super) async fn await_delivery_or_cancel(
         select! {
             result = delivery => {
                 if result.is_err() {
-                    if let Some(reason) = chunk_send_cancel_reason(admitted, permit) {
-                        log_chunk_send_cancel(did, phase, &reason);
-                        return ChunkSendProgress::Cancelled(reason);
+                    if let Some(reason) = chunk_send_cancel_reason(admitted, permit, stop) {
+                        return cancel_accepted_delivery(admitted, did, phase, reason).await;
                     }
                 }
                 return ChunkSendProgress::Ready(result.map_err(Error::Transport));
             },
+            _ = timeout => {
+                if let Err(error) = terminate_accepted_connection(admitted).await {
+                    return ChunkSendProgress::Ready(Err(error));
+                }
+                return ChunkSendProgress::Ready(Err(Error::DataChannelDeliveryTimeout {
+                    peer: did,
+                    timeout_ms: DATA_CHANNEL_DELIVERY_TIMEOUT.as_millis(),
+                    context: phase,
+                }));
+            },
             _ = poll => {}
         }
     }
+}
+
+async fn cancel_accepted_delivery(
+    admitted: &AdmittedConnection,
+    did: Did,
+    phase: &'static str,
+    reason: ChunkSendCancelReason,
+) -> ChunkSendProgress<Result<()>> {
+    log_chunk_send_cancel(did, phase, &reason);
+    match terminate_accepted_connection(admitted).await {
+        Ok(()) => ChunkSendProgress::Cancelled(reason),
+        Err(error) => ChunkSendProgress::Ready(Err(error)),
+    }
+}
+
+async fn terminate_accepted_connection(admitted: &AdmittedConnection) -> Result<()> {
+    admitted.mark_send_terminal()?;
+    if !await_bounded_connection_close(admitted.connection().close()).await? {
+        tracing::warn!(
+            peer = %admitted.attempt().peer(),
+            generation = admitted.attempt().generation(),
+            timeout_ms = DATA_CHANNEL_CLOSE_TIMEOUT.as_millis(),
+            "timed out cleaning up terminal data-channel generation"
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]

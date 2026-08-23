@@ -1,6 +1,296 @@
 //! Utils for ring-core
+use std::collections::VecDeque;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::task::Context;
+use std::task::Poll;
+use std::task::Waker;
+
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 use chrono::Utc;
+
+/// Atomically add `amount` when the resulting reservation stays within `limit`.
+pub(crate) fn try_reserve_atomic(counter: &AtomicUsize, amount: usize, limit: usize) -> bool {
+    let mut current = counter.load(Ordering::Acquire);
+    loop {
+        let Some(next) = current.checked_add(amount) else {
+            return false;
+        };
+        if next > limit {
+            return false;
+        }
+        match counter.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return true,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+/// Return whether one class may reserve `amount` while preserving every other
+/// class's unmet minimum reservation.
+pub(crate) fn fair_reservation_fits<const N: usize>(
+    admitted_by_class: &[usize; N],
+    admitted: usize,
+    class_index: usize,
+    amount: usize,
+    capacity: usize,
+    reservations: &[usize; N],
+) -> bool {
+    if class_index >= N {
+        return false;
+    }
+    let reserved_for_others = admitted_by_class
+        .iter()
+        .zip(reservations)
+        .enumerate()
+        .filter(|(index, _)| *index != class_index)
+        .map(|(_, (admitted, reserved))| reserved.saturating_sub(*admitted))
+        .sum::<usize>();
+    admitted
+        .checked_add(amount)
+        .is_some_and(|next| next <= capacity.saturating_sub(reserved_for_others))
+}
+
+/// Return whether one request still fits entirely inside its class's fixed
+/// reservation, without borrowing shared capacity.
+pub(crate) fn fixed_reservation_covers<const N: usize>(
+    admitted_by_class: &[usize; N],
+    class_index: usize,
+    amount: usize,
+    reservations: &[usize; N],
+) -> bool {
+    admitted_by_class
+        .get(class_index)
+        .zip(reservations.get(class_index))
+        .and_then(|(admitted, reserved)| admitted.checked_add(amount).map(|next| (next, reserved)))
+        .is_some_and(|(next, reserved)| next <= *reserved)
+}
+
+#[derive(Default)]
+struct FairWaitBudgetState {
+    waiters: usize,
+    cost: usize,
+}
+
+/// Shared hard bound for payloads retained while fair admission is pending.
+pub(crate) struct FairWaitBudget {
+    state: Mutex<FairWaitBudgetState>,
+    max_waiters: usize,
+    max_cost: usize,
+}
+
+impl FairWaitBudget {
+    pub(crate) fn new(max_waiters: usize, max_cost: usize) -> Self {
+        Self {
+            state: Mutex::new(FairWaitBudgetState::default()),
+            max_waiters,
+            max_cost,
+        }
+    }
+
+    fn try_acquire(self: &Arc<Self>, cost: usize) -> Option<FairWaitBudgetPermit> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let next_waiters = state.waiters.checked_add(1)?;
+        let next_cost = state.cost.checked_add(cost)?;
+        if next_waiters > self.max_waiters || next_cost > self.max_cost {
+            return None;
+        }
+        state.waiters = next_waiters;
+        state.cost = next_cost;
+        Some(FairWaitBudgetPermit {
+            budget: self.clone(),
+            cost,
+        })
+    }
+}
+
+struct FairWaitBudgetPermit {
+    budget: Arc<FairWaitBudget>,
+    cost: usize,
+}
+
+impl Drop for FairWaitBudgetPermit {
+    fn drop(&mut self) {
+        let mut state = self
+            .budget
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.waiters = state.waiters.saturating_sub(1);
+        state.cost = state.cost.saturating_sub(self.cost);
+    }
+}
+
+struct FairWaiterEntry {
+    id: u64,
+    waker: Option<Waker>,
+    _budget: Option<FairWaitBudgetPermit>,
+}
+
+#[derive(Default)]
+struct FairWaitQueueState {
+    next_id: u64,
+    queue: VecDeque<FairWaiterEntry>,
+}
+
+/// FIFO gate used by bounded admissions that only queue requests larger than
+/// their fixed class reservation.
+pub(crate) struct FairWaitQueue {
+    state: Mutex<FairWaitQueueState>,
+    budget: Option<Arc<FairWaitBudget>>,
+}
+
+pub(crate) enum FairAdmission<T> {
+    Ready(T),
+    Waiting(FairWaiter),
+}
+
+impl FairWaitQueue {
+    pub(crate) fn new() -> Self {
+        Self {
+            state: Mutex::new(FairWaitQueueState::default()),
+            budget: None,
+        }
+    }
+
+    pub(crate) fn with_budget(budget: Arc<FairWaitBudget>) -> Self {
+        Self {
+            state: Mutex::new(FairWaitQueueState::default()),
+            budget: Some(budget),
+        }
+    }
+
+    pub(crate) fn try_admit_unqueued<T, E>(
+        &self,
+        blocked_error: E,
+        attempt: impl FnOnce() -> std::result::Result<T, E>,
+    ) -> std::result::Result<T, E> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.queue.is_empty() {
+            return Err(blocked_error);
+        }
+        attempt()
+    }
+
+    pub(crate) fn admit_or_wait<T, E>(
+        self: &Arc<Self>,
+        cost: usize,
+        budget_error: E,
+        attempt: impl FnOnce() -> std::result::Result<T, E>,
+    ) -> std::result::Result<FairAdmission<T>, E> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.queue.is_empty() {
+            if let Ok(value) = attempt() {
+                return Ok(FairAdmission::Ready(value));
+            }
+        }
+        let budget = match &self.budget {
+            Some(budget) => Some(budget.try_acquire(cost).ok_or(budget_error)?),
+            None => None,
+        };
+        let id = state.next_id;
+        state.next_id = state.next_id.wrapping_add(1);
+        state.queue.push_back(FairWaiterEntry {
+            id,
+            waker: None,
+            _budget: budget,
+        });
+        Ok(FairAdmission::Waiting(FairWaiter {
+            queue: self.clone(),
+            id,
+            active: true,
+        }))
+    }
+
+    pub(crate) fn wake_front(&self) {
+        let waker = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .queue
+            .front()
+            .and_then(|waiter| waiter.waker.clone());
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+    }
+}
+
+pub(crate) struct FairWaiter {
+    queue: Arc<FairWaitQueue>,
+    id: u64,
+    active: bool,
+}
+
+impl FairWaiter {
+    pub(crate) fn poll<T>(
+        &mut self,
+        context: &mut Context<'_>,
+        attempt: impl FnOnce() -> Option<T>,
+    ) -> Poll<Option<T>> {
+        let mut state = self
+            .queue
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(position) = state.queue.iter().position(|waiter| waiter.id == self.id) else {
+            return Poll::Ready(None);
+        };
+        if let Some(waiter) = state.queue.get_mut(position) {
+            waiter.waker = Some(context.waker().clone());
+        }
+        if position != 0 {
+            return Poll::Pending;
+        }
+        let Some(value) = attempt() else {
+            return Poll::Pending;
+        };
+        state.queue.pop_front();
+        let next = state.queue.front().and_then(|waiter| waiter.waker.clone());
+        self.active = false;
+        drop(state);
+        if let Some(waker) = next {
+            waker.wake();
+        }
+        Poll::Ready(Some(value))
+    }
+}
+
+impl Drop for FairWaiter {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let mut state = self
+            .queue
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let was_front = state
+            .queue
+            .front()
+            .is_some_and(|waiter| waiter.id == self.id);
+        state.queue.retain(|waiter| waiter.id != self.id);
+        let next = was_front
+            .then(|| state.queue.front().and_then(|waiter| waiter.waker.clone()))
+            .flatten();
+        drop(state);
+        if let Some(waker) = next {
+            waker.wake();
+        }
+    }
+}
 
 /// Get local utc timestamp (millisecond)
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]

@@ -23,6 +23,8 @@ use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 
+use crate::callback::admit_inbound_data_channel;
+use crate::callback::InboundFrameCapacity;
 use crate::callback::InnerTransportCallback;
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
@@ -56,6 +58,11 @@ const DATA_CHANNEL_POOL_SIZE: u8 = 4;
 
 /// How often the delivery future re-checks whether a message has been flushed.
 const DELIVERY_POLL_INTERVAL: Duration = Duration::from_millis(300);
+
+#[cfg(test)]
+const NATIVE_SEND_COMPLETION_TIMEOUT: Duration = Duration::from_millis(100);
+#[cfg(not(test))]
+const NATIVE_SEND_COMPLETION_TIMEOUT: Duration = Duration::from_secs(25);
 
 /// A data channel paired with a monotonic counter of the total bytes ever
 /// enqueued onto it, plus a lock that serializes sends. The counter lets the
@@ -203,6 +210,29 @@ fn delivery_future(
     })
 }
 
+fn native_send_runtime() -> Result<tokio::runtime::Handle> {
+    tokio::runtime::Handle::try_current().map_err(|_| Error::NativeSendRuntimeUnavailable)
+}
+
+async fn run_irrevocable_send<T>(
+    runtime: &tokio::runtime::Handle,
+    send: impl std::future::Future<Output = Result<T>> + Send + 'static,
+) -> Result<T>
+where
+    T: Send + 'static,
+{
+    runtime
+        .spawn(async move {
+            tokio::time::timeout(NATIVE_SEND_COMPLETION_TIMEOUT, send)
+                .await
+                .map_err(|_| Error::NativeSendCompletionTimeout {
+                    timeout_ms: NATIVE_SEND_COMPLETION_TIMEOUT.as_millis(),
+                })?
+        })
+        .await
+        .map_err(Error::NativeSendTask)?
+}
+
 #[cfg_attr(target_family = "wasm", async_trait(?Send))]
 #[cfg_attr(not(target_family = "wasm"), async_trait)]
 impl MessageSenderPool<TrackedChannel> for RoundRobinPool<TrackedChannel> {
@@ -214,23 +244,30 @@ impl MessageSenderPool<TrackedChannel> for RoundRobinPool<TrackedChannel> {
     ) -> Result<DeliveryFuture> {
         let (channel, enqueued, send_lock) = self.select()?;
         let data = rings_codec::serialize(&msg).map(Bytes::from)?;
+        let runtime = native_send_runtime()?;
         // Hold the per-channel lock across send + counter advance so the bytes
         // are enqueued and accounted in the same (FIFO) order: concurrent senders
         // can't interleave the yielding send and the counter update. Advance
         // `enqueued` ONLY after a successful send — otherwise a failed send would
         // leave the counter ahead of what was actually queued, making earlier
         // messages' delivery futures resolve early on phantom bytes.
-        let end_offset = {
-            let _guard = send_lock.lock().await;
-            if !permit.allows() {
-                return Err(Error::SendPermitRevoked);
+        let guard = send_lock.lock_owned().await;
+        if !permit.allows() {
+            return Err(Error::SendPermitRevoked);
+        }
+        permit.mark_irrevocable();
+        let send_channel = Arc::clone(&channel);
+        let send_enqueued = Arc::clone(&enqueued);
+        let end_offset = run_irrevocable_send(&runtime, async move {
+            let _guard = guard;
+            if let Err(error) = send_channel.send(&data).await {
+                tracing::error!("{:?}, Data size: {:?}", error, data.len());
+                return Err(error.into());
             }
-            if let Err(e) = channel.send(&data).await {
-                tracing::error!("{:?}, Data size: {:?}", e, data.len());
-                return Err(e.into());
-            }
-            enqueued.fetch_add(data.len() as u64, Ordering::SeqCst) + data.len() as u64
-        };
+            permit.mark_accepted();
+            Ok(send_enqueued.fetch_add(data.len() as u64, Ordering::SeqCst) + data.len() as u64)
+        })
+        .await?;
         Ok(delivery_future(channel, enqueued, end_offset))
     }
 }
@@ -238,6 +275,83 @@ impl MessageSenderPool<TrackedChannel> for RoundRobinPool<TrackedChannel> {
 impl StatusPool<TrackedChannel> for RoundRobinPool<TrackedChannel> {
     fn all_ready(&self) -> Result<bool> {
         self.all(|(c, _, _)| c.ready_state() == RTCDataChannelState::Open)
+    }
+}
+
+#[cfg(test)]
+mod send_cancellation_tests {
+    use std::sync::atomic::AtomicBool;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn started_native_send_outlives_cancelled_caller() {
+        let started = Arc::new(AtomicBool::new(false));
+        let completed = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(tokio::sync::Notify::new());
+        let send = {
+            let started = Arc::clone(&started);
+            let completed = Arc::clone(&completed);
+            let release = Arc::clone(&release);
+            async move {
+                started.store(true, Ordering::Release);
+                release.notified().await;
+                completed.store(true, Ordering::Release);
+                Ok(())
+            }
+        };
+        let runtime = native_send_runtime().expect("Tokio test runtime must be available");
+        let caller = tokio::spawn(async move { run_irrevocable_send(&runtime, send).await });
+        while !started.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+
+        caller.abort();
+        release.notify_one();
+        while !completed.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+
+        assert!(completed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn missing_runtime_returns_typed_error() {
+        assert!(matches!(
+            native_send_runtime(),
+            Err(Error::NativeSendRuntimeUnavailable)
+        ));
+    }
+
+    #[tokio::test]
+    async fn native_send_task_preserves_join_error_source() {
+        let runtime = native_send_runtime().expect("Tokio test runtime must be available");
+        let error = run_irrevocable_send(&runtime, async {
+            panic!("native send task panic witness");
+            #[allow(unreachable_code)]
+            Ok(())
+        })
+        .await
+        .expect_err("panicking send task must fail");
+
+        assert!(matches!(&error, Error::NativeSendTask(source) if source.is_panic()));
+        assert!(std::error::Error::source(&error)
+            .and_then(|source| source.downcast_ref::<tokio::task::JoinError>())
+            .is_some_and(tokio::task::JoinError::is_panic));
+    }
+
+    #[tokio::test]
+    async fn irrevocable_native_send_has_a_completion_bound() {
+        let runtime = native_send_runtime().expect("Tokio test runtime must be available");
+        let error = run_irrevocable_send(&runtime, std::future::pending::<Result<()>>())
+            .await
+            .expect_err("an irrevocable send must not remain pending forever");
+
+        assert!(matches!(
+            error,
+            Error::NativeSendCompletionTimeout { timeout_ms }
+                if timeout_ms == NATIVE_SEND_COMPLETION_TIMEOUT.as_millis()
+        ));
     }
 }
 
@@ -262,6 +376,7 @@ pub struct WebrtcTransport {
     external_address: Option<String>,
     udp_port_range: Option<WebrtcUdpPortRange>,
     pool: Pool<WebrtcConnection>,
+    inbound_frames: Arc<InboundFrameCapacity>,
 }
 
 impl WebrtcConnection {
@@ -347,6 +462,7 @@ impl WebrtcTransport {
             external_address,
             udp_port_range,
             pool: Pool::new(),
+            inbound_frames: Arc::new(InboundFrameCapacity::new()),
         }
     }
 }
@@ -537,17 +653,32 @@ impl ConnectionInterface for WebrtcConnection {
 fn wire_received_data_channels(
     webrtc_conn: &RTCPeerConnection,
     inner_cb: Arc<InnerTransportCallback>,
+    inbound_frames: Arc<InboundFrameCapacity>,
 ) {
     // Inbound channels carry messages only. One remote-created channel closing
     // does not prove the SCTP association is gone; outbound-pool state owns
     // readiness and emits the terminal data-channel callback when all close.
+    let admitted_channels = AtomicUsize::new(0);
     webrtc_conn.on_data_channel(Box::new(move |channel: Arc<RTCDataChannel>| {
+        if !admit_inbound_data_channel(&admitted_channels) {
+            tracing::warn!(
+                peer = %inner_cb.cid,
+                label = channel.label(),
+                "rejected excess inbound data channel"
+            );
+            return Box::pin(async move {
+                if let Err(error) = channel.close().await {
+                    tracing::debug!(%error, "failed to close excess inbound data channel");
+                }
+            });
+        }
         tracing::debug!(
             label = channel.label(),
             id = channel.id(),
             "new received data channel"
         );
         let message_cb = Arc::clone(&inner_cb);
+        let frame_capacity = inbound_frames.clone();
         channel.on_message(Box::new(move |msg: DataChannelMessage| {
             tracing::debug!(
                 peer = %message_cb.cid,
@@ -555,8 +686,28 @@ fn wire_received_data_channels(
                 bytes = msg.data.len(),
                 "received data-channel message"
             );
+            if msg.data.len() > MAX_DATA_CHANNEL_MESSAGE_SIZE {
+                tracing::warn!(
+                    peer = %message_cb.cid,
+                    bytes = msg.data.len(),
+                    max_bytes = MAX_DATA_CHANNEL_MESSAGE_SIZE,
+                    "rejected oversized data-channel message before dispatch"
+                );
+                return Box::pin(async {});
+            }
+            let Some(permit) = frame_capacity.try_acquire(msg.data.len()) else {
+                tracing::warn!(
+                    peer = %message_cb.cid,
+                    bytes = msg.data.len(),
+                    "rejected data-channel message before dispatch"
+                );
+                return Box::pin(async {});
+            };
             let cb = Arc::clone(&message_cb);
-            Box::pin(async move { cb.on_message(&msg.data).await })
+            Box::pin(async move {
+                cb.on_message(&msg.data).await;
+                drop(permit);
+            })
         }));
         Box::pin(async {})
     }));
@@ -665,7 +816,11 @@ impl TransportInterface for WebrtcTransport {
         // `on_data_channel_open` (and thus `join_dht`) never fires. The created
         // channels are registered before they can open, so this is reliable.
         let channel_pool = Arc::new(RoundRobinPool::default());
-        wire_received_data_channels(&webrtc_conn, Arc::clone(&inner_cb));
+        wire_received_data_channels(
+            &webrtc_conn,
+            Arc::clone(&inner_cb),
+            self.inbound_frames.clone(),
+        );
         wire_peer_connection_state(
             &webrtc_conn,
             Arc::clone(&inner_cb),

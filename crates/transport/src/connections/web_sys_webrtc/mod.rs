@@ -25,6 +25,8 @@ use web_sys::RtcSessionDescription;
 use web_sys::RtcSessionDescriptionInit;
 use web_sys::RtcStatsReport;
 
+use crate::callback::admit_inbound_data_channel;
+use crate::callback::InboundFrameCapacity;
 use crate::callback::InnerTransportCallback;
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
@@ -64,6 +66,15 @@ const DELIVERY_POLL_INTERVAL_MS: u64 = 300;
 /// lets the delivery future tell, per message, whether the bytes have left the
 /// local send buffer (`enqueued_total - buffered_amount`).
 type TrackedChannel = (RtcDataChannel, Arc<AtomicU64>);
+
+fn send_after_permit<T>(permit: SendPermit, send: impl FnOnce() -> Result<T>) -> Result<T> {
+    if !permit.allows() {
+        return Err(Error::SendPermitRevoked);
+    }
+    let value = send()?;
+    permit.mark_accepted();
+    Ok(value)
+}
 
 /// Build the future that resolves once the message ending at `end_offset` on
 /// this channel has been flushed to the wire, or errors if the channel closes
@@ -109,13 +120,11 @@ impl MessageSenderPool<TrackedChannel> for RoundRobinPool<TrackedChannel> {
         // first would, on a rejected send, leave the counter ahead of the bytes
         // actually buffered, making earlier messages' delivery futures resolve
         // early on phantom bytes (`enqueued_total - buffered_amount`).
-        if !permit.allows() {
-            return Err(Error::SendPermitRevoked);
-        }
-        if let Err(e) = channel
-            .send_with_u8_array(&data)
-            .map_err(Error::WebSysWebrtc)
-        {
+        if let Err(e) = send_after_permit(permit, || {
+            channel
+                .send_with_u8_array(&data)
+                .map_err(Error::WebSysWebrtc)
+        }) {
             tracing::error!("{:?}, Data size: {:?}", e, data.len());
             return Err(e);
         }
@@ -150,6 +159,7 @@ pub struct WebSysWebrtcConnection {
 pub struct WebSysWebrtcTransport {
     ice_servers: Vec<IceServer>,
     pool: Pool<WebSysWebrtcConnection>,
+    inbound_frames: Arc<InboundFrameCapacity>,
 }
 
 impl WebSysWebrtcConnection {
@@ -214,6 +224,7 @@ impl WebSysWebrtcTransport {
         Self {
             ice_servers,
             pool: Pool::new(),
+            inbound_frames: Arc::new(InboundFrameCapacity::new()),
         }
     }
 }
@@ -365,55 +376,77 @@ impl ConnectionInterface for WebSysWebrtcConnection {
     }
 }
 
-async fn decode_data_channel_message(data: JsValue) -> Result<Option<Vec<u8>>> {
-    let message = if data.has_type::<web_sys::Blob>() {
-        let blob: web_sys::Blob = data.into();
-        if blob.size() == 0f64 {
-            return Ok(None);
-        }
-        let buffer = JsFuture::from(blob.array_buffer())
-            .await
-            .map_err(Error::WebSysWebrtc)?;
-        js_sys::Uint8Array::new(&buffer).to_vec()
-    } else {
-        js_sys::Uint8Array::new(data.as_ref()).to_vec()
-    };
-
-    Ok((!message.is_empty()).then_some(message))
+fn decode_data_channel_message(
+    data: JsValue,
+    capacity: &Arc<InboundFrameCapacity>,
+) -> Result<Option<(Vec<u8>, crate::callback::InboundFramePermit)>> {
+    let buffer = data.dyn_into::<js_sys::ArrayBuffer>().map_err(|_| {
+        Error::DataChannelMessage(
+            "received a non-ArrayBuffer value after configuring binaryType".to_string(),
+        )
+    })?;
+    let bytes = buffer.byte_length() as usize;
+    if bytes == 0 {
+        return Ok(None);
+    }
+    if bytes > MAX_DATA_CHANNEL_MESSAGE_SIZE {
+        return Err(Error::DataChannelMessage(format!(
+            "inbound frame of {bytes} bytes exceeds the {MAX_DATA_CHANNEL_MESSAGE_SIZE}-byte protocol ceiling"
+        )));
+    }
+    let permit = capacity.try_acquire(bytes).ok_or_else(|| {
+        Error::DataChannelMessage(format!("inbound frame capacity exceeded for {bytes} bytes"))
+    })?;
+    let message = js_sys::Uint8Array::new(&buffer).to_vec();
+    Ok(Some((message, permit)))
 }
 
 fn wire_received_data_channels(
     webrtc_conn: &RtcPeerConnection,
     inner_cb: Rc<InnerTransportCallback>,
+    inbound_frames: Arc<InboundFrameCapacity>,
 ) {
     // Inbound channels carry messages only. One remote-created channel closing
     // does not prove the SCTP association is gone; outbound-pool state owns
     // readiness and emits the terminal data-channel callback when all close.
+    let admitted_channels = AtomicUsize::new(0);
     let on_data_channel = Box::new(move |event: RtcDataChannelEvent| {
         let channel = event.channel();
+        if !admit_inbound_data_channel(&admitted_channels) {
+            tracing::warn!(
+                peer = %inner_cb.cid,
+                label = channel.label(),
+                "rejected excess inbound data channel"
+            );
+            channel.close();
+            return;
+        }
+        channel.set_binary_type(web_sys::RtcDataChannelType::Arraybuffer);
         tracing::debug!(label = channel.label(), "new received data channel");
 
         let message_cb = inner_cb.clone();
+        let frame_capacity = inbound_frames.clone();
         let on_message = Closure::wrap(Box::new(move |event: MessageEvent| {
             let cb = message_cb.clone();
-            spawn_local(async move {
-                match decode_data_channel_message(event.data()).await {
-                    Ok(Some(message)) => {
+            match decode_data_channel_message(event.data(), &frame_capacity) {
+                Ok(Some((message, permit))) => {
+                    spawn_local(async move {
                         tracing::debug!(
                             peer = %cb.cid,
                             bytes = message.len(),
                             "received data-channel message"
                         );
                         cb.on_message(&message.into()).await;
-                    }
-                    Ok(None) => {
-                        tracing::debug!(peer = %cb.cid, "received empty data-channel message");
-                    }
-                    Err(error) => {
-                        tracing::error!(peer = %cb.cid, %error, "failed to decode data-channel message");
-                    }
+                        drop(permit);
+                    });
                 }
-            });
+                Ok(None) => {
+                    tracing::debug!(peer = %cb.cid, "received empty data-channel message");
+                }
+                Err(error) => {
+                    tracing::warn!(peer = %cb.cid, %error, "rejected data-channel message");
+                }
+            }
         }) as Box<dyn FnMut(MessageEvent)>);
         channel.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
         on_message.forget();
@@ -540,7 +573,7 @@ impl TransportInterface for WebSysWebrtcTransport {
         // it opens before the handler is registered, so `on_data_channel_open`
         // (and thus `join_dht`) would never fire. Created channels are wired
         // before they can open, so this is reliable.
-        wire_received_data_channels(&webrtc_conn, inner_cb.clone());
+        wire_received_data_channels(&webrtc_conn, inner_cb.clone(), self.inbound_frames.clone());
         wire_peer_connection_state(&webrtc_conn, inner_cb.clone(), connection_state.clone());
         create_outbound_data_channels(&webrtc_conn, &channel_pool, &inner_cb, &connection_state)?;
 
@@ -639,4 +672,77 @@ fn dump_stats_entry(entry: &Option<JsValue>) -> Option<String> {
     js_sys::JSON::stringify(entry.as_ref()?)
         .ok()
         .and_then(|x| x.as_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use bytes::Bytes;
+    use wasm_bindgen_test::wasm_bindgen_test;
+    use wasm_bindgen_test::wasm_bindgen_test_configure;
+
+    use super::*;
+
+    wasm_bindgen_test_configure!(run_in_browser);
+
+    #[wasm_bindgen_test]
+    fn rejected_permit_does_not_call_browser_send_primitive() {
+        let called = Rc::new(Cell::new(false));
+        let observed = called.clone();
+        let result = send_after_permit(SendPermit::new(|| false), move || {
+            observed.set(true);
+            Ok(())
+        });
+
+        assert!(matches!(result, Err(Error::SendPermitRevoked)));
+        assert!(!called.get());
+    }
+
+    #[wasm_bindgen_test]
+    fn browser_send_failure_does_not_mark_permit_accepted() {
+        let permit = SendPermit::always();
+        let acceptance = permit.acceptance();
+        let result = send_after_permit(permit, || {
+            Err::<(), _>(Error::DataChannelMessage(
+                "injected browser send failure".to_string(),
+            ))
+        });
+
+        assert!(matches!(result, Err(Error::DataChannelMessage(_))));
+        assert!(!acceptance.is_accepted());
+    }
+
+    #[wasm_bindgen_test]
+    fn oversized_browser_frame_is_rejected_before_capacity_or_copy() {
+        let capacity = Arc::new(InboundFrameCapacity::new());
+        let length = u32::try_from(MAX_DATA_CHANNEL_MESSAGE_SIZE + 1)
+            .expect("protocol ceiling must fit in a JavaScript array length");
+        let array = js_sys::Uint8Array::new_with_length(length);
+
+        let result = decode_data_channel_message(array.buffer().into(), &capacity);
+
+        assert!(matches!(result, Err(Error::DataChannelMessage(_))));
+        assert!(capacity.try_acquire(1).is_some());
+    }
+
+    #[wasm_bindgen_test]
+    async fn round_robin_backend_checks_permit_before_real_browser_send() {
+        let connection = RtcPeerConnection::new().expect("browser peer connection must construct");
+        let channel = connection.create_data_channel("permit-boundary-test");
+        let enqueued = Arc::new(AtomicU64::new(0));
+        let pool = RoundRobinPool::from_vec(vec![(channel, enqueued.clone())]);
+
+        let result = pool
+            .send_with_permit(
+                TransportMessage::Custom(Bytes::from_static(&[1, 2, 3])),
+                SendPermit::new(|| false),
+            )
+            .await;
+
+        connection.close();
+        assert!(matches!(result, Err(Error::SendPermitRevoked)));
+        assert_eq!(enqueued.load(Ordering::SeqCst), 0);
+    }
 }

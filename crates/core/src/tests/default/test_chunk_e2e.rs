@@ -28,91 +28,18 @@ use crate::measure::PeerQuality;
 use crate::message::Message;
 use crate::message::PeerLivenessProbe;
 use crate::message::SyncEntriesWithSuccessor;
-use crate::session::SessionSk;
-use crate::storage::MemStorage;
 use crate::swarm::transport::TrackedStorageSyncOutcome;
-use crate::swarm::SwarmBuilder;
+use crate::tests::default::dummy_hooks::MaxMessageSizeGuard;
+use crate::tests::default::dummy_hooks::PausedDispatchGuard;
+use crate::tests::default::dummy_hooks::PendingAfterSentCountGuard;
+use crate::tests::default::dummy_hooks::PendingDeliveryGuard;
+use crate::tests::default::dummy_hooks::PendingSendGuard;
 use crate::tests::default::prepare_node;
+use crate::tests::default::prepare_node_with_measure;
 use crate::tests::default::wait_for_connection_state;
 use crate::tests::default::wait_for_msgs;
 use crate::tests::default::wait_for_successor;
-use crate::tests::default::Node;
 use crate::tests::manually_establish_connection;
-
-struct PendingSendGuard;
-
-impl PendingSendGuard {
-    fn new() -> Self {
-        dummy_controlled::set_send_message_pending(true);
-        Self
-    }
-}
-
-struct PausedDispatchGuard;
-
-impl PausedDispatchGuard {
-    fn new() -> Self {
-        dummy_controlled::pause_send_message_at_dispatch();
-        Self
-    }
-}
-
-impl Drop for PausedDispatchGuard {
-    fn drop(&mut self) {
-        dummy_controlled::release_send_message_gate();
-    }
-}
-
-impl Drop for PendingSendGuard {
-    fn drop(&mut self) {
-        dummy_controlled::set_send_message_pending(false);
-    }
-}
-
-struct PendingAfterSentCountGuard;
-
-impl PendingAfterSentCountGuard {
-    fn new(threshold: usize) -> Self {
-        dummy_controlled::set_send_message_pending_after_sent_count(Some(threshold));
-        Self
-    }
-}
-
-impl Drop for PendingAfterSentCountGuard {
-    fn drop(&mut self) {
-        dummy_controlled::set_send_message_pending_after_sent_count(None);
-    }
-}
-
-struct PendingDeliveryGuard;
-
-impl PendingDeliveryGuard {
-    fn new() -> Self {
-        dummy_controlled::set_delivery_future_pending(true);
-        Self
-    }
-}
-
-impl Drop for PendingDeliveryGuard {
-    fn drop(&mut self) {
-        dummy_controlled::set_delivery_future_pending(false);
-    }
-}
-
-struct MaxMessageSizeGuard;
-
-impl MaxMessageSizeGuard {
-    fn new(size: usize) -> Self {
-        dummy_controlled::set_max_message_size(size);
-        Self
-    }
-}
-
-impl Drop for MaxMessageSizeGuard {
-    fn drop(&mut self) {
-        dummy_controlled::set_max_message_size(0);
-    }
-}
 
 #[derive(Default)]
 struct CountingMeasure {
@@ -155,23 +82,6 @@ impl BehaviourJudgement for CountingMeasure {
     async fn good(&self, _did: crate::dht::Did) -> bool {
         true
     }
-}
-
-fn prepare_node_with_measure(key: SecretKey, measure: MeasureImpl) -> Result<Node> {
-    let session = SessionSk::new_with_seckey(&key)?;
-    let swarm = Arc::new(
-        SwarmBuilder::new(
-            0,
-            "stun://stun.l.google.com:19302",
-            Box::new(MemStorage::new()),
-            session,
-        )
-        .dht_finger_table_size(super::TEST_DHT_FINGER_TABLE_SIZE)
-        .dht_virtual_nodes(0)
-        .measure(measure)
-        .build(),
-    );
-    Ok(Node::new(swarm))
 }
 
 fn large_storage_sync_entries() -> Result<Vec<PlacedEntry>> {
@@ -649,7 +559,7 @@ async fn tracked_storage_sync_does_not_finish_while_a_chunk_tail_is_pending() ->
 }
 
 #[tokio::test]
-async fn tracked_storage_sync_defers_a_delivery_future_that_never_completes() -> Result<()> {
+async fn tracked_storage_sync_timeout_closes_stalled_delivery_generation() -> Result<()> {
     let node1 = prepare_node(SecretKey::random()).await;
     let node2 = prepare_node(SecretKey::random()).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
@@ -658,7 +568,7 @@ async fn tracked_storage_sync_defers_a_delivery_future_that_never_completes() ->
     wait_for_msgs([&node1, &node2]).await;
 
     dummy_controlled::reset_sent_count();
-    let _pending_delivery = PendingDeliveryGuard::new();
+    let pending_delivery = PendingDeliveryGuard::new();
     let msg = SyncEntriesWithSuccessor {
         purpose: StorageSyncPurpose::AdditiveRepair,
         destination: StorageSyncDestination::PhysicalOwner(node2.did()),
@@ -673,7 +583,25 @@ async fn tracked_storage_sync_defers_a_delivery_future_that_never_completes() ->
 
     assert_eq!(outcome, TrackedStorageSyncOutcome::Deferred);
     assert_eq!(dummy_controlled::sent_count(), 1);
-    assert!(node1.swarm.transport.is_admitted_connection(node2.did()));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if node1.swarm.transport.get_connection(node2.did()).is_none()
+                && node1
+                    .swarm
+                    .transport
+                    .outbound_admitted_transfer_count_for_test(node2.did())
+                    == Some(0)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("tracked timeout must close the stalled physical connection");
+
+    drop(pending_delivery);
+    assert_eq!(dummy_controlled::sent_count(), 1);
     Ok(())
 }
 

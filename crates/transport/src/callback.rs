@@ -1,11 +1,97 @@
 //! This module contains the [InnerTransportCallback] struct.
 
+#[cfg(any(test, feature = "native-webrtc", feature = "web-sys-webrtc"))]
+use std::sync::atomic::AtomicUsize;
+#[cfg(any(test, feature = "native-webrtc", feature = "web-sys-webrtc"))]
+use std::sync::atomic::Ordering;
+#[cfg(any(test, feature = "native-webrtc", feature = "web-sys-webrtc"))]
+use std::sync::Arc;
+#[cfg(any(test, feature = "native-webrtc", feature = "web-sys-webrtc"))]
+use std::sync::Mutex;
+
 use bytes::Bytes;
 
 use crate::core::callback::BoxedTransportCallback;
 use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
 use crate::notifier::Notifier;
+
+#[cfg(any(test, feature = "native-webrtc", feature = "web-sys-webrtc"))]
+const INBOUND_FRAME_CAPACITY: usize = 256;
+#[cfg(any(test, feature = "native-webrtc", feature = "web-sys-webrtc"))]
+const INBOUND_FRAME_BYTE_CAPACITY: usize = 128 * 1024 * 1024;
+#[cfg(any(test, feature = "native-webrtc", feature = "web-sys-webrtc"))]
+pub(crate) const INBOUND_DATA_CHANNEL_CAPACITY: usize = 4;
+
+#[cfg(any(test, feature = "native-webrtc", feature = "web-sys-webrtc"))]
+#[derive(Default)]
+struct InboundFrameState {
+    frames: usize,
+    bytes: usize,
+}
+
+#[cfg(any(test, feature = "native-webrtc", feature = "web-sys-webrtc"))]
+/// Node-wide bound held before a backend copies or dispatches an inbound frame.
+pub(crate) struct InboundFrameCapacity {
+    state: Mutex<InboundFrameState>,
+}
+
+#[cfg(any(test, feature = "native-webrtc", feature = "web-sys-webrtc"))]
+impl InboundFrameCapacity {
+    pub(crate) fn new() -> Self {
+        Self {
+            state: Mutex::new(InboundFrameState::default()),
+        }
+    }
+
+    pub(crate) fn try_acquire(self: &Arc<Self>, bytes: usize) -> Option<InboundFramePermit> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let next_frames = state.frames.checked_add(1)?;
+        let next_bytes = state.bytes.checked_add(bytes)?;
+        if next_frames > INBOUND_FRAME_CAPACITY || next_bytes > INBOUND_FRAME_BYTE_CAPACITY {
+            return None;
+        }
+        state.frames = next_frames;
+        state.bytes = next_bytes;
+        Some(InboundFramePermit {
+            capacity: self.clone(),
+            bytes,
+        })
+    }
+}
+
+#[cfg(any(test, feature = "native-webrtc", feature = "web-sys-webrtc"))]
+/// RAII ownership of one admitted raw frame until its core callback completes.
+pub(crate) struct InboundFramePermit {
+    capacity: Arc<InboundFrameCapacity>,
+    bytes: usize,
+}
+
+#[cfg(any(test, feature = "native-webrtc", feature = "web-sys-webrtc"))]
+impl Drop for InboundFramePermit {
+    fn drop(&mut self) {
+        let mut state = self
+            .capacity
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.frames = state.frames.saturating_sub(1);
+        state.bytes = state.bytes.saturating_sub(self.bytes);
+    }
+}
+
+#[cfg(any(test, feature = "native-webrtc", feature = "web-sys-webrtc"))]
+/// Admit at most the protocol's fixed number of remote-created channels.
+pub(crate) fn admit_inbound_data_channel(admitted: &AtomicUsize) -> bool {
+    admitted
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            (current < INBOUND_DATA_CHANNEL_CAPACITY).then_some(current + 1)
+        })
+        .is_ok()
+}
 
 /// [InnerTransportCallback] wraps the [BoxedTransportCallback] with inner handling for a specific connection.
 pub struct InnerTransportCallback {
@@ -87,5 +173,30 @@ impl InnerTransportCallback {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raw_frame_capacity_releases_count_and_bytes_with_permit() {
+        let capacity = Arc::new(InboundFrameCapacity::new());
+        let permit = capacity
+            .try_acquire(INBOUND_FRAME_BYTE_CAPACITY)
+            .expect("one maximum-size frame must fit");
+        assert!(capacity.try_acquire(1).is_none());
+        drop(permit);
+        assert!(capacity.try_acquire(1).is_some());
+    }
+
+    #[test]
+    fn inbound_data_channel_count_is_monotonic_and_bounded() {
+        let admitted = AtomicUsize::new(0);
+        for _ in 0..INBOUND_DATA_CHANNEL_CAPACITY {
+            assert!(admit_inbound_data_channel(&admitted));
+        }
+        assert!(!admit_inbound_data_channel(&admitted));
     }
 }

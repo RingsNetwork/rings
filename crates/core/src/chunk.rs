@@ -4,9 +4,11 @@
 //! receiver.
 //!
 //! NOTE: this is **whole-message** buffering, not MSRP-style (RFC 4975) streaming. There is no
-//! mid-message interruption, interleaving, or incremental delivery — the receiver yields a payload
-//! only once *every* chunk has arrived (or drops it on TTL). The "split into ordered, id-tagged
-//! pieces and reassemble" idea is borrowed from MSRP chunking; the interruption semantics are not.
+//! incremental delivery: the receiver yields a payload only once *every* chunk has arrived (or
+//! drops it on TTL). The outbound scheduler keeps each message class FIFO, so two chunked messages
+//! in the same class do not interleave; a higher-priority class may run between chunks while a
+//! delivery is pending. The "split into ordered, id-tagged pieces and reassemble" idea is borrowed
+//! from MSRP chunking; MSRP interruption semantics are not implemented.
 //!
 //! Two halves, deliberately separated:
 //!
@@ -32,6 +34,9 @@
 
 use std::collections::btree_map::BTreeMap;
 use std::collections::HashMap;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
@@ -49,6 +54,7 @@ use crate::consts::TS_OFFSET_TOLERANCE_MS;
 use crate::error::Error;
 use crate::error::Result;
 use crate::utils::get_epoch_ms;
+use crate::utils::try_reserve_atomic;
 
 /// The limits a [`MessageReassembler`] enforces on incoming chunks, as an explicit value rather
 /// than module globals. This keeps the core admission rule independent of *where* the numbers come
@@ -104,22 +110,25 @@ impl ReassemblyLimits {
         }
     }
 
-    /// Smaller limits for constrained deployments.
+    /// Lower-concurrency limits for constrained deployments.
     ///
-    /// This profile preserves the protocol-level 60 MB send ceiling elsewhere,
-    /// but bounds one receiver's reassembly memory to a few MiB so weak devices
-    /// can reject oversized in-flight transfers before allocating for them.
+    /// The per-message ceiling remains protocol-compatible with production.
+    /// Constrained nodes instead admit fewer simultaneous messages and only one
+    /// maximum-size reassembly, including its contiguous output copy.
     pub fn constrained() -> Self {
-        const CONSTRAINED_MESSAGE_BYTES: usize = 4 * 1024 * 1024;
-        const CONSTRAINED_TOTAL_COST: usize = 8 * 1024 * 1024;
+        const CONSTRAINED_MESSAGE_BYTES: usize = TRANSPORT_MAX_SIZE;
+        const CONSTRAINED_MAX_CHUNKS: usize = CONSTRAINED_MESSAGE_BYTES / MIN_CHUNK_DATA + 1;
+        const CONSTRAINED_SLOT_OVERHEAD: usize = 128;
+        const CONSTRAINED_TOTAL_COST: usize =
+            CONSTRAINED_MESSAGE_BYTES * 2 + CONSTRAINED_MAX_CHUNKS * CONSTRAINED_SLOT_OVERHEAD;
 
         Self {
             max_pending_messages: 64,
             max_chunk_data_len: MAX_DATA_CHANNEL_MESSAGE_SIZE,
             max_message_bytes: CONSTRAINED_MESSAGE_BYTES,
-            max_chunks_per_message: CONSTRAINED_MESSAGE_BYTES / MIN_CHUNK_DATA + 1,
+            max_chunks_per_message: CONSTRAINED_MAX_CHUNKS,
             max_total_buffered_cost: CONSTRAINED_TOTAL_COST,
-            slot_overhead: 128,
+            slot_overhead: CONSTRAINED_SLOT_OVERHEAD,
             max_completed_ids: 256,
         }
     }
@@ -138,6 +147,18 @@ impl ReassemblyLimits {
             slot_overhead: self.slot_overhead,
             max_completed_ids: self.max_completed_ids.max(1),
         }
+    }
+
+    /// Pending cost one peer may retain. One maximum-size legitimate message
+    /// still fits, while the node-wide budget keeps capacity available to other
+    /// peers instead of allowing a single incomplete-chunk flood to consume it.
+    fn max_peer_buffered_cost(self) -> usize {
+        self.max_message_bytes
+            .saturating_add(
+                self.max_chunks_per_message
+                    .saturating_mul(self.slot_overhead),
+            )
+            .min(self.max_total_buffered_cost)
     }
 }
 
@@ -417,14 +438,13 @@ impl Pending {
 /// twice.
 ///
 /// **Bounded against a hostile peer** by the [`ReassemblyLimits`] it is built with: every accepted
-/// chunk is validated and charged to a budget, so reassembly memory cannot grow without limit no
-/// matter how the load is shaped — per-chunk data, per-message data, a global buffered-cost ceiling
-/// (charging a per-slot overhead so a tiny-chunk flood is bounded by slot count too), the id count,
-/// and the completed-id tombstone set are all capped, and an already-expired chunk is rejected
-/// before it can be delivered or buffered.
+/// chunk is validated and charged to both a per-peer pending-cost limit and a node-wide budget, so
+/// reassembly memory cannot grow without limit no matter how the load is shaped. Per-chunk data,
+/// per-message data, slot overhead, the id count, and the completed-id tombstone set are all capped,
+/// and an already-expired chunk is rejected before it can be delivered or buffered.
 pub struct MessageReassembler {
     pending: HashMap<Uuid, Pending>,
-    /// Sum of `Pending::cost(..)` over `pending`, maintained incrementally for an O(1) global cap.
+    /// Sum of `Pending::cost(..)` over this peer's `pending` entries.
     buffered_cost: usize,
     /// Tombstones for ids that have already been delivered, each paired with its expiry
     /// (`ts_ms + ttl_ms`). A chunk for one of these is dropped, so a post-completion retransmit of a
@@ -434,6 +454,65 @@ pub struct MessageReassembler {
     completed_ids: std::collections::HashSet<Uuid>,
     /// The bounds enforced on every incoming chunk.
     limits: ReassemblyLimits,
+    budget: Arc<ReassemblyBudget>,
+}
+
+/// Node-wide retained chunk cost shared by every per-peer reassembler.
+pub(crate) struct ReassemblyBudget {
+    buffered_cost: AtomicUsize,
+    limit: usize,
+}
+
+impl ReassemblyBudget {
+    pub(crate) fn new(limits: ReassemblyLimits) -> Self {
+        Self {
+            buffered_cost: AtomicUsize::new(0),
+            limit: limits.normalized().max_total_buffered_cost,
+        }
+    }
+
+    fn try_reserve(&self, cost: usize) -> bool {
+        try_reserve_atomic(&self.buffered_cost, cost, self.limit)
+    }
+
+    fn release(&self, cost: usize) {
+        if self
+            .buffered_cost
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current.checked_sub(cost)
+            })
+            .is_err()
+        {
+            tracing::error!(cost, "reassembly budget release exceeded retained cost");
+        }
+    }
+}
+
+/// Completed bytes that remain charged to the node budget until core admission takes ownership.
+pub(crate) struct RetainedReassembly {
+    bytes: Bytes,
+    budget: Arc<ReassemblyBudget>,
+    cost: usize,
+}
+
+impl RetainedReassembly {
+    fn into_bytes(mut self) -> Bytes {
+        self.budget.release(self.cost);
+        self.cost = 0;
+        std::mem::take(&mut self.bytes)
+    }
+}
+
+impl AsRef<[u8]> for RetainedReassembly {
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes
+    }
+}
+
+impl Drop for RetainedReassembly {
+    fn drop(&mut self) {
+        self.budget.release(self.cost);
+    }
 }
 
 impl Default for MessageReassembler {
@@ -451,6 +530,15 @@ impl MessageReassembler {
     /// Empty reassembler enforcing the given `limits`. Tests use this with small limits to exercise
     /// the admission rule without giant synthetic payloads.
     pub fn with_limits(limits: ReassemblyLimits) -> Self {
+        let budget = Arc::new(ReassemblyBudget::new(limits));
+        Self::with_limits_and_budget(limits, budget)
+    }
+
+    /// Empty per-peer reassembler charged to a node-wide shared budget.
+    pub(crate) fn with_limits_and_budget(
+        limits: ReassemblyLimits,
+        budget: Arc<ReassemblyBudget>,
+    ) -> Self {
         Self {
             pending: HashMap::new(),
             buffered_cost: 0,
@@ -458,6 +546,7 @@ impl MessageReassembler {
             completed_ids: std::collections::HashSet::new(),
             // Clamp nonsensical caps so a caller cannot disable an invariant (e.g. a `0` cap).
             limits: limits.normalized(),
+            budget,
         }
     }
 
@@ -490,11 +579,14 @@ impl MessageReassembler {
     /// `now` to drive the real eviction logic).
     fn remove_expired_at(&mut self, now: u128) {
         let buffered_cost = &mut self.buffered_cost;
+        let budget = &self.budget;
         let slot_overhead = self.limits.slot_overhead;
         self.pending.retain(|_, p| {
             let alive = p.ts_ms.saturating_add(p.ttl_ms as u128) > now;
             if !alive {
-                *buffered_cost = buffered_cost.saturating_sub(p.cost(slot_overhead));
+                let cost = p.cost(slot_overhead);
+                *buffered_cost = buffered_cost.saturating_sub(cost);
+                budget.release(cost);
             }
             alive
         });
@@ -514,7 +606,9 @@ impl MessageReassembler {
     /// Forget a message (e.g. after it has been delivered), returning its cost to the budget.
     pub fn remove(&mut self, id: Uuid) {
         if let Some(p) = self.pending.remove(&id) {
-            self.buffered_cost -= p.cost(self.limits.slot_overhead);
+            let cost = p.cost(self.limits.slot_overhead);
+            self.buffered_cost = self.buffered_cost.saturating_sub(cost);
+            self.budget.release(cost);
         }
     }
 
@@ -528,9 +622,19 @@ impl MessageReassembler {
         self.handle_at(chunk, get_epoch_ms())
     }
 
+    /// Accept one chunk while retaining the completed output's node-wide budget charge.
+    pub(crate) fn handle_retained(&mut self, chunk: Chunk) -> Option<RetainedReassembly> {
+        self.handle_retained_at(chunk, get_epoch_ms())
+    }
+
     /// [`handle`](Self::handle) with the clock injected, so tests drive expiry/admission against a
     /// controlled `now` through the real production path instead of poking internal state.
     fn handle_at(&mut self, chunk: Chunk, now: u128) -> Option<Bytes> {
+        self.handle_retained_at(chunk, now)
+            .map(RetainedReassembly::into_bytes)
+    }
+
+    fn handle_retained_at(&mut self, chunk: Chunk, now: u128) -> Option<RetainedReassembly> {
         // Reclaim expired pending entries and tombstones FIRST — before classify reads them — so
         // invalid traffic still frees memory and an expired tombstone cannot suppress a fresh
         // message that reuses its id after the TTL window.
@@ -615,11 +719,11 @@ impl MessageReassembler {
             return Err(Rejected::PerMessageBytes);
         }
 
-        // Cost charged to the global budget: this slot's data + its fixed overhead. Saturating, so a
-        // pathological `slot_overhead` cannot wrap the budget.
+        // Cost charged to both the peer and node budgets: this slot's data plus its fixed overhead.
+        // Saturating arithmetic keeps a pathological `slot_overhead` from wrapping either limit.
         let cost = chunk.data.len().saturating_add(self.limits.slot_overhead);
-        if self.buffered_cost.saturating_add(cost) > self.limits.max_total_buffered_cost {
-            return Err(Rejected::GlobalBudget);
+        if self.buffered_cost.saturating_add(cost) > self.limits.max_peer_buffered_cost() {
+            return Err(Rejected::PeerBudget);
         }
         Ok(cost)
     }
@@ -629,7 +733,15 @@ impl MessageReassembler {
     /// reassembled payload.
     ///
     /// [`classify`]: Self::classify
-    fn admit(&mut self, chunk: Chunk, cost: usize) -> Option<Bytes> {
+    fn admit(&mut self, chunk: Chunk, cost: usize) -> Option<RetainedReassembly> {
+        if !self.budget.try_reserve(cost) {
+            tracing::debug!(
+                reason = ?Rejected::GlobalBudget,
+                id = ?chunk.meta.id,
+                "reassembler dropped chunk"
+            );
+            return None;
+        }
         let id = chunk.meta.id;
         let [position, _total] = chunk.chunk;
         let pending = self
@@ -643,13 +755,39 @@ impl MessageReassembler {
         if !pending.is_complete() {
             return None;
         }
+        let output_cost = pending.data_bytes;
+        if !self.budget.try_reserve(output_cost) {
+            let dropped = self.pending.remove(&id)?;
+            let dropped_cost = dropped.cost(self.limits.slot_overhead);
+            self.buffered_cost = self.buffered_cost.saturating_sub(dropped_cost);
+            self.budget.release(dropped_cost);
+            tracing::debug!(
+                reason = ?Rejected::GlobalBudget,
+                ?id,
+                output_cost,
+                "reassembler dropped completed message before output allocation"
+            );
+            return None;
+        }
         let done = self.pending.remove(&id)?;
-        self.buffered_cost = self
-            .buffered_cost
-            .saturating_sub(done.cost(self.limits.slot_overhead));
+        let done_cost = done.cost(self.limits.slot_overhead);
+        let expiry = done.ts_ms.saturating_add(done.ttl_ms as u128);
+        self.buffered_cost = self.buffered_cost.saturating_sub(done_cost);
+        let bytes = done.assemble();
+        self.budget.release(done_cost);
         // Tombstone the id until it would expire, so a later full retransmit is suppressed.
-        self.mark_completed(id, done.ts_ms.saturating_add(done.ttl_ms as u128));
-        Some(done.assemble())
+        self.mark_completed(id, expiry);
+        Some(RetainedReassembly {
+            bytes,
+            budget: self.budget.clone(),
+            cost: output_cost,
+        })
+    }
+}
+
+impl Drop for MessageReassembler {
+    fn drop(&mut self) {
+        self.budget.release(self.buffered_cost);
     }
 }
 
@@ -681,6 +819,8 @@ enum Rejected {
     DuplicatePosition,
     /// Admitting would exceed the message's [`ReassemblyLimits::max_message_bytes`].
     PerMessageBytes,
+    /// Admitting would exceed this peer's derived pending-cost allowance.
+    PeerBudget,
     /// Admitting would exceed the global [`ReassemblyLimits::max_total_buffered_cost`].
     GlobalBudget,
 }

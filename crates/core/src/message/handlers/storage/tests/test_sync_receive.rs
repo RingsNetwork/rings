@@ -248,37 +248,17 @@ async fn storage_sync_batch_persists_one_entry_per_step_after_validation() -> Re
         batch.step(&handler).await?,
         StorageSyncBatchStep::Pending
     ));
-    assert_eq!(node.dht().storage.get(&first_key.to_string()).await?, None);
-    assert_eq!(node.dht().storage.get(&second_key.to_string()).await?, None);
-
-    assert!(matches!(
-        batch.step(&handler).await?,
-        StorageSyncBatchStep::Pending
-    ));
     assert_eq!(
         node.dht().storage.get(&first_key.to_string()).await?,
         Some(first_stored.clone())
     );
     assert_eq!(node.dht().storage.get(&second_key.to_string()).await?, None);
 
-    assert!(matches!(
-        batch.step(&handler).await?,
-        StorageSyncBatchStep::Pending
-    ));
-    assert_eq!(
-        node.dht().storage.get(&first_key.to_string()).await?,
-        Some(first_stored.clone())
-    );
-    assert_eq!(
-        node.dht().storage.get(&second_key.to_string()).await?,
-        Some(second_stored.clone())
-    );
+    let final_step = batch.step(&handler).await?;
+    let persisted_second = node.dht().storage.get(&second_key.to_string()).await?;
+    assert_eq!(persisted_second.as_ref(), Some(&second_stored));
 
-    assert!(matches!(
-        batch.step(&handler).await?,
-        StorageSyncBatchStep::Pending
-    ));
-    match batch.step(&handler).await? {
+    match final_step {
         StorageSyncBatchStep::Complete(acks) => {
             assert_eq!(acks, vec![
                 SyncedEntryAck::new(first_key, first_stored),

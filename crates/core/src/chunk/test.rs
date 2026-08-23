@@ -23,8 +23,11 @@ fn constrained_reassembly_limits_are_smaller_than_production() {
     let constrained = ReassemblyLimits::constrained();
 
     assert!(constrained.max_pending_messages < production.max_pending_messages);
-    assert!(constrained.max_message_bytes < production.max_message_bytes);
-    assert!(constrained.max_chunks_per_message < production.max_chunks_per_message);
+    assert_eq!(constrained.max_message_bytes, production.max_message_bytes);
+    assert_eq!(
+        constrained.max_chunks_per_message,
+        production.max_chunks_per_message
+    );
     assert!(constrained.max_total_buffered_cost < production.max_total_buffered_cost);
     assert!(constrained.max_completed_ids < production.max_completed_ids);
     assert_eq!(
@@ -442,6 +445,114 @@ fn global_cost_cap_bounds_total() {
         r.buffered_cost,
         limits.max_total_buffered_cost
     );
+}
+
+#[test]
+fn shared_budget_bounds_multiple_peer_reassemblers() {
+    let mut limits = small_limits();
+    limits.max_total_buffered_cost = 96;
+    let budget = Arc::new(ReassemblyBudget::new(limits));
+    let mut first = MessageReassembler::with_limits_and_budget(limits, budget.clone());
+    let mut second = MessageReassembler::with_limits_and_budget(limits, budget);
+
+    for _ in 0..4 {
+        first.handle(Chunk {
+            chunk: [0, 2],
+            data: vec![0_u8; limits.max_chunk_data_len].into(),
+            meta: ChunkMeta::default(),
+        });
+    }
+    second.handle(Chunk {
+        chunk: [0, 2],
+        data: vec![0_u8; limits.max_chunk_data_len].into(),
+        meta: ChunkMeta::default(),
+    });
+    assert_eq!(first.pending_count(), 4);
+    assert_eq!(second.pending_count(), 0);
+
+    drop(first);
+    second.handle(Chunk {
+        chunk: [0, 2],
+        data: vec![0_u8; limits.max_chunk_data_len].into(),
+        meta: ChunkMeta::default(),
+    });
+    assert_eq!(second.pending_count(), 1);
+}
+
+#[test]
+fn peer_budget_preserves_shared_capacity_for_another_peer() {
+    let mut limits = small_limits();
+    limits.max_message_bytes = 32;
+    limits.max_chunks_per_message = 2;
+    limits.max_total_buffered_cost = 96;
+    let budget = Arc::new(ReassemblyBudget::new(limits));
+    let mut first = MessageReassembler::with_limits_and_budget(limits, budget.clone());
+    let mut second = MessageReassembler::with_limits_and_budget(limits, budget);
+
+    for _ in 0..4 {
+        first.handle(Chunk {
+            chunk: [0, 2],
+            data: vec![0_u8; limits.max_chunk_data_len].into(),
+            meta: ChunkMeta::default(),
+        });
+    }
+    assert_eq!(first.pending_count(), 2);
+    assert_eq!(
+        first.buffered_cost,
+        limits.max_peer_buffered_cost(),
+        "one peer must stop at its pending-cost allowance"
+    );
+
+    assert_eq!(
+        second
+            .handle(Chunk {
+                chunk: [0, 1],
+                data: Bytes::from_static(b"ok"),
+                meta: ChunkMeta::default(),
+            })
+            .as_deref(),
+        Some(b"ok".as_slice()),
+        "another peer must still be able to complete a small reassembly"
+    );
+}
+
+#[test]
+fn completed_output_keeps_shared_budget_until_released() {
+    let mut limits = small_limits();
+    limits.slot_overhead = 0;
+    limits.max_total_buffered_cost = 6;
+    let budget = Arc::new(ReassemblyBudget::new(limits));
+    let mut first = MessageReassembler::with_limits_and_budget(limits, budget.clone());
+    let mut second = MessageReassembler::with_limits_and_budget(limits, budget.clone());
+
+    let retained = first
+        .handle_retained(Chunk {
+            chunk: [0, 1],
+            data: Bytes::from_static(b"one"),
+            meta: ChunkMeta::default(),
+        })
+        .expect("first output must fit its buffered and contiguous copies");
+    assert_eq!(budget.buffered_cost.load(Ordering::Acquire), 3);
+    assert!(
+        second
+            .handle_retained(Chunk {
+                chunk: [0, 1],
+                data: Bytes::from_static(b"two"),
+                meta: ChunkMeta::default(),
+            })
+            .is_none(),
+        "second output copy must not reuse retained output capacity"
+    );
+
+    drop(retained);
+    assert_eq!(budget.buffered_cost.load(Ordering::Acquire), 0);
+    assert!(second
+        .handle_retained(Chunk {
+            chunk: [0, 1],
+            data: Bytes::from_static(b"two"),
+            meta: ChunkMeta::default(),
+        })
+        .is_some());
 }
 
 #[test]

@@ -14,6 +14,8 @@ use crate::dht::successor::SuccessorReader;
 use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::ecc::SecretKey;
+use crate::error::Result;
+use crate::measure::MeasureImpl;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
@@ -25,6 +27,8 @@ use crate::swarm::SwarmBuilder;
 
 mod test_dht_convergence;
 // Uses the `stateright` model checker, which doesn't build for wasm32.
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+mod dummy_hooks;
 #[cfg(not(target_family = "wasm"))]
 mod test_dht_stateright;
 mod test_dht_trace_replay;
@@ -36,6 +40,8 @@ mod test_dht_schedule;
 #[cfg(feature = "dummy")]
 mod test_chunk_e2e;
 mod test_message_handler;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+mod test_outbound_scheduler;
 mod test_stabilization;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 mod test_stabilization_failover;
@@ -113,7 +119,7 @@ impl SwarmCallback for NodeCallback {
     async fn on_validate(
         &self,
         payload: &MessagePayload,
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    ) -> std::result::Result<(), crate::error::CallbackError> {
         // Here we are using on_validate to record messages.
         // When on_validate return error, the message will be ignored, which is not on purpose.
         // To prevent returning errors when sending fails, we choose to panic instead.
@@ -123,21 +129,34 @@ impl SwarmCallback for NodeCallback {
 }
 
 pub async fn prepare_node(key: SecretKey) -> Node {
+    prepare_node_with_optional_measure(key, None).unwrap()
+}
+
+pub(super) fn prepare_node_with_measure(key: SecretKey, measure: MeasureImpl) -> Result<Node> {
+    prepare_node_with_optional_measure(key, Some(measure))
+}
+
+fn prepare_node_with_optional_measure(
+    key: SecretKey,
+    measure: Option<MeasureImpl>,
+) -> Result<Node> {
     let stun = "stun://stun.l.google.com:19302";
     let storage = Box::new(MemStorage::new());
 
-    let session_sk = SessionSk::new_with_seckey(&key).unwrap();
-    let swarm = Arc::new(
-        SwarmBuilder::new(0, stun, storage, session_sk)
-            .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
-            .dht_virtual_nodes(0)
-            .build(),
-    );
+    let session_sk = SessionSk::new_with_seckey(&key)?;
+    let builder = SwarmBuilder::new(0, stun, storage, session_sk)
+        .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
+        .dht_virtual_nodes(0);
+    let builder = match measure {
+        Some(measure) => builder.measure(measure),
+        None => builder,
+    };
+    let swarm = Arc::new(builder.build());
 
     println!("key: {:?}", key.to_string());
     println!("did: {:?}", swarm.did());
 
-    Node::new(swarm)
+    Ok(Node::new(swarm))
 }
 
 pub async fn wait_until_result(

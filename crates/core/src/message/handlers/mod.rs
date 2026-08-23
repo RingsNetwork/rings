@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use super::effects::core_actor_steps;
 use super::effects::lower_dht_action;
 use super::effects::yield_core_actor_step;
 use super::effects::CoreEffect;
@@ -90,9 +91,13 @@ impl MessageHandler {
         &self,
         peers: impl IntoIterator<Item = Did>,
     ) -> Result<()> {
-        for peer in self.transport.order_dht_candidates_by_quality(peers).await {
+        for (peer, has_next) in
+            core_actor_steps(self.transport.order_dht_candidates_by_quality(peers).await)
+        {
             self.connect_dht_peer(peer).await?;
-            yield_core_actor_step().await;
+            if has_next {
+                yield_core_actor_step().await;
+            }
         }
         Ok(())
     }
@@ -199,22 +204,26 @@ impl MessageHandler {
             }
         }
 
-        for peer in self
+        let ordered_peers = self
             .transport
             .order_dht_candidates_by_quality(connection_peers)
-            .await
-        {
+            .await;
+        for (peer, has_next) in core_actor_steps(ordered_peers) {
             if let Err(e) = self.connect_dht_peer(peer).await {
                 tracing::error!("Failed on handle multi connection action: {e:?}");
             }
-            yield_core_actor_step().await;
+            if has_next || !other_effects.is_empty() {
+                yield_core_actor_step().await;
+            }
         }
 
-        for effect in other_effects {
+        for (effect, has_next) in core_actor_steps(other_effects) {
             if let Err(e) = self.run_effects([effect]).await {
                 tracing::error!("Failed on handle multi action: {e:?}");
             }
-            yield_core_actor_step().await;
+            if has_next {
+                yield_core_actor_step().await;
+            }
         }
 
         Ok(())

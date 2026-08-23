@@ -34,6 +34,7 @@ use rings_transport::delivery::DeliveryFuture;
 use rings_transport::webrtc_config::WebrtcUdpPortRange;
 
 use self::storage_sync::StorageSyncAckMap;
+use crate::chunk::ReassemblyBudget;
 use crate::chunk::ReassemblyLimits;
 use crate::dht::Did;
 use crate::dht::LiveDid;
@@ -78,7 +79,17 @@ use self::liveness::PeerLivenessMap;
 pub(crate) use self::liveness::PEER_LIVENESS_IDLE_MS;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::liveness::PEER_LIVENESS_TIMEOUT_MS;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::outbound::outbound_submit_count_for_test;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::outbound::reset_outbound_submit_count_for_test;
 use self::outbound::OutboundSchedulers;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::outbound::OUTBOUND_CONTROL_RESERVED_TRANSFERS;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::outbound::OUTBOUND_DATA_TRANSFER_CAPACITY;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::outbound::OUTBOUND_TRANSFER_QUEUE_CAPACITY;
 pub(crate) use self::pending::ConnectionEventDisposition;
 use self::pending::ConnectionLifecycleBoundary;
 pub(crate) use self::pending::PendingConnectionAttempt;
@@ -92,6 +103,7 @@ use self::storage_lookup::StorageLookupObservationMap;
 #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
 pub(crate) use self::storage_lookup::STORAGE_LOOKUP_OBSERVATION_CAPACITY;
 pub(crate) use self::storage_sync::TrackedStorageSyncOutcome;
+use super::callback::InboundCapacity;
 
 pub struct SwarmTransport {
     pub(crate) network_id: u32,
@@ -101,6 +113,8 @@ pub struct SwarmTransport {
     storage_redundancy: u16,
     dht_virtual_nodes: u16,
     reassembly_limits: ReassemblyLimits,
+    reassembly_budget: Arc<ReassemblyBudget>,
+    inbound_capacity: Arc<InboundCapacity>,
     connection_lifecycle: ConnectionLifecycleBoundary,
     swarm_event_delivery: SwarmEventDeliveryLocks,
     connection_creation: PeerOperationLocks,
@@ -204,6 +218,8 @@ impl SwarmTransport {
             storage_redundancy: settings.storage_redundancy,
             dht_virtual_nodes: settings.dht_virtual_nodes,
             reassembly_limits: settings.reassembly_limits,
+            reassembly_budget: Arc::new(ReassemblyBudget::new(settings.reassembly_limits)),
+            inbound_capacity: Arc::new(InboundCapacity::new()),
             connection_lifecycle: ConnectionLifecycleBoundary::new(),
             swarm_event_delivery: SwarmEventDeliveryLocks::new(),
             connection_creation: PeerOperationLocks::new(),
@@ -216,7 +232,7 @@ impl SwarmTransport {
             pending_storage_sync_acks: Mutex::new(BTreeMap::new()),
             storage_repair_requested: AtomicBool::new(false),
             storage_repair_cursor: Mutex::new(None),
-            outbound_schedulers: OutboundSchedulers::new(),
+            outbound_schedulers: OutboundSchedulers::new(measure.clone()),
             measured_disconnects: Mutex::new(BTreeMap::new()),
             measure,
         }
@@ -250,6 +266,9 @@ impl SwarmTransport {
             let Some(attempt) = self.active_attempt(peer)? else {
                 return Ok(IncomingOfferAdmittedPeer::Vacant);
             };
+            if self.peer_lifecycles()?.sendable_attempt(peer) != Some(attempt) {
+                return Ok(IncomingOfferAdmittedPeer::Unroutable(attempt));
+            }
             let Some(connection) = self.get_raw_connection(peer) else {
                 return Ok(IncomingOfferAdmittedPeer::Unroutable(attempt));
             };
@@ -331,6 +350,14 @@ impl SwarmTransport {
     /// Chunk reassembly limits enforced by inbound callbacks.
     pub(crate) fn reassembly_limits(&self) -> ReassemblyLimits {
         self.reassembly_limits
+    }
+
+    pub(crate) fn reassembly_budget(&self) -> Arc<ReassemblyBudget> {
+        self.reassembly_budget.clone()
+    }
+
+    pub(crate) fn inbound_capacity(&self) -> Arc<InboundCapacity> {
+        self.inbound_capacity.clone()
     }
 
     async fn record_peer_measurement(&self, peer: Did, counter: MeasureCounter) {
@@ -896,9 +923,13 @@ impl SwarmTransport {
 impl SwarmConnection {
     async fn send_data(&self, data: Bytes, permit: SendPermit) -> Result<DeliveryFuture> {
         self.connection
-            .send_message_with_permit(TransportMessage::Custom(data.to_vec()), permit)
+            .send_message_with_permit(TransportMessage::Custom(data), permit)
             .await
             .map_err(|e| e.into())
+    }
+
+    async fn close(&self) -> Result<()> {
+        self.connection.close().await.map_err(Into::into)
     }
 
     pub fn webrtc_connection_state(&self) -> WebrtcConnectionState {

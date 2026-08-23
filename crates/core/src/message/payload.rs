@@ -20,6 +20,7 @@ use super::protocols::MessageRelay;
 use super::protocols::MessageVerification;
 use super::protocols::MessageVerificationExt;
 use super::protocols::ReportReturnPolicy;
+use super::types::MessageMeta;
 use crate::dht::Chord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
@@ -111,7 +112,7 @@ impl fmt::Debug for Transaction {
         f.debug_struct("Transaction")
             .field("destination", &self.destination)
             .field("tx_id", &self.tx_id)
-            .field("data", &self.data)
+            .field("data_bytes", &self.data.len())
             .field("report_return", &self.report_return)
             .finish()
     }
@@ -239,11 +240,28 @@ impl MessagePayload {
         rings_codec::deserialize(data).map_err(Error::CodecDeserialize)
     }
 
+    /// Classify the nested message from a wire payload without allocating its body.
+    pub(crate) fn message_meta_from_wire(data: &[u8]) -> Result<MessageMeta> {
+        let (_, data) =
+            rings_codec::deserialize_prefix::<Did>(data).map_err(Error::CodecDeserialize)?;
+        let (_, data) =
+            rings_codec::deserialize_prefix::<uuid::Uuid>(data).map_err(Error::CodecDeserialize)?;
+        let (message, _) =
+            rings_codec::deserialize_prefix::<&[u8]>(data).map_err(Error::CodecDeserialize)?;
+        MessageMeta::from_wire(message)
+    }
+
     /// Serializes the `MessagePayload` instance into the Rings wire encoding.
     pub fn to_wire(&self) -> Result<Bytes> {
         rings_codec::serialize(self)
             .map(Bytes::from)
             .map_err(Error::CodecSerialize)
+    }
+
+    /// Return the exact Rings wire size without allocating the wire buffer.
+    pub(crate) fn wire_size(&self) -> Result<usize> {
+        let bytes = rings_codec::serialized_size(self).map_err(Error::CodecSerialize)?;
+        usize::try_from(bytes).map_err(|_| Error::MessageTooLarge(usize::MAX))
     }
 
     /// Returns whether `local` is the relay destination of this payload.
@@ -508,6 +526,31 @@ pub mod test {
     }
 
     #[test]
+    fn wire_prefix_classification_matches_nested_message() -> Result<()> {
+        let next_hop = SecretKey::random().address().into();
+        let message = Message::custom(b"prefix-classification")?;
+        let expected = MessageMeta::from_message(&message);
+        let payload = new_payload(message, next_hop);
+
+        assert_eq!(
+            MessagePayload::message_meta_from_wire(&payload.to_wire()?)?,
+            expected
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn transaction_debug_reports_size_without_data_bytes() -> Result<()> {
+        let next_hop = SecretKey::random().address().into();
+        let payload = new_payload(Message::custom(&[171; 32])?, next_hop);
+        let debug = format!("{:?}", payload.transaction);
+
+        assert!(debug.contains("data_bytes"));
+        assert!(!debug.contains("171, 171"));
+        Ok(())
+    }
+
+    #[test]
     fn relay_destination_predicates_name_forwarding_state() -> Result<()> {
         let local_key = SecretKey::random();
         let session_sk = SessionSk::new_with_seckey(&local_key)?;
@@ -600,8 +643,7 @@ pub mod test {
         let payload_bytes = new_payload(Message::Chunk(chunk), next_hop)
             .to_wire()
             .unwrap();
-        let wire =
-            rings_codec::serialize(&TransportMessage::Custom(payload_bytes.to_vec())).unwrap();
+        let wire = rings_codec::serialize(&TransportMessage::Custom(payload_bytes)).unwrap();
 
         assert!(
             wire.len() <= MAX_DATA_CHANNEL_MESSAGE_SIZE,
@@ -629,8 +671,11 @@ pub mod test {
         let payload_len = limit - reserves.whole;
         assert_eq!(reserves.plan(payload_len, limit), Some(Framing::Whole));
 
-        let wire =
-            rings_codec::serialize(&TransportMessage::Custom(vec![0u8; payload_len])).unwrap();
+        let wire = rings_codec::serialize(&TransportMessage::Custom(Bytes::from(vec![
+            0u8;
+            payload_len
+        ])))
+        .unwrap();
         assert!(
             wire.len() <= limit,
             "whole wire {} exceeds limit {}",
@@ -682,5 +727,16 @@ pub mod test {
             encoded_bytes1.len() - data1.len(),
             encoded_bytes2.len() - data2.len()
         );
+    }
+
+    #[test]
+    fn wire_size_counts_large_verification_fields_without_allocating_wire() -> Result<()> {
+        let next_hop = SecretKey::random().address().into();
+        let mut payload = new_payload(Message::custom(b"body")?, next_hop);
+        payload.verification.sig = vec![9; 64 * 1024];
+        payload.transaction.verification.sig = vec![7; 32 * 1024];
+
+        assert_eq!(payload.wire_size()?, payload.to_wire()?.len());
+        Ok(())
     }
 }

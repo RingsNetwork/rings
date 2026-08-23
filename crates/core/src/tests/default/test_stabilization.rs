@@ -36,7 +36,10 @@ use crate::swarm::transport::PEER_LIVENESS_IDLE_MS;
 use crate::swarm::transport::PEER_LIVENESS_TIMEOUT_MS;
 use crate::swarm::SwarmBuilder;
 use crate::tests::default::assert_no_more_msg;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use crate::tests::default::dummy_hooks::PendingSendGuard;
 use crate::tests::default::prepare_node;
+use crate::tests::default::prepare_node_with_measure;
 use crate::tests::default::wait_for_msgs;
 use crate::tests::default::wait_for_predecessor;
 use crate::tests::default::wait_for_successor;
@@ -123,41 +126,6 @@ impl Drop for DropMessagesGuard {
     fn drop(&mut self) {
         dummy_controlled::set_drop_messages(false);
     }
-}
-
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-struct PendingSendGuard;
-
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-impl PendingSendGuard {
-    fn new() -> Self {
-        dummy_controlled::set_send_message_pending(true);
-        Self
-    }
-}
-
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-impl Drop for PendingSendGuard {
-    fn drop(&mut self) {
-        dummy_controlled::set_send_message_pending(false);
-    }
-}
-
-fn prepare_node_with_measure(key: SecretKey, measure: MeasureImpl) -> Result<Node> {
-    let session = SessionSk::new_with_seckey(&key)?;
-    let swarm = Arc::new(
-        SwarmBuilder::new(
-            0,
-            "stun://stun.l.google.com:19302",
-            Box::new(MemStorage::new()),
-            session,
-        )
-        .dht_finger_table_size(super::TEST_DHT_FINGER_TABLE_SIZE)
-        .dht_virtual_nodes(0)
-        .measure(measure)
-        .build(),
-    );
-    Ok(Node::new(swarm))
 }
 
 fn prepare_repair_node(key: SecretKey) -> Result<Node> {

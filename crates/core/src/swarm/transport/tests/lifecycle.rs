@@ -1,4 +1,7 @@
 #[cfg(feature = "dummy")]
+use rings_transport::connections::dummy_controlled;
+
+#[cfg(feature = "dummy")]
 use super::super::delivery::SendCompletionOutcome;
 use super::*;
 #[cfg(feature = "dummy")]
@@ -125,6 +128,47 @@ fn promotion_replaces_pending_with_active_in_one_state_slot() -> Result<()> {
         registry.reserve(peer, now),
         Err(Error::AlreadyConnected)
     ));
+    Ok(())
+}
+
+#[test]
+fn terminal_send_marker_is_generation_scoped_and_survives_until_retirement() -> Result<()> {
+    let mut registry = ConnectionLifecycleRegistry::<1>::new();
+    let peer = SecretKey::random().address().into();
+    let attempt = registry.reserve(peer, 1_000)?;
+    assert!(registry.activate_for_test(attempt));
+
+    assert!(registry.mark_send_terminal(attempt));
+    assert_eq!(registry.active_attempt(peer), Some(attempt));
+    assert_eq!(registry.sendable_attempt(peer), None);
+    assert_eq!(registry.active_connections().attempt(peer), None);
+    assert_eq!(registry.admitted_connections().attempt(peer), Some(attempt));
+    assert!(registry.remove_active(attempt));
+
+    let replacement = registry.reserve(peer, 2_000)?;
+    assert!(registry.activate_for_test(replacement));
+    assert_eq!(registry.sendable_attempt(peer), Some(replacement));
+    assert!(!registry.mark_send_terminal(attempt));
+    Ok(())
+}
+
+#[cfg(feature = "dummy")]
+#[tokio::test]
+async fn terminal_send_generation_cannot_reenter_topology() -> Result<()> {
+    let (transport, peer, attempt) = transport_with_routable_peer().await?;
+    let connection = transport
+        .admitted_send_connection(peer)?
+        .ok_or(Error::ConnectionNotFound)?;
+    assert!(connection.mark_send_terminal()?);
+    assert!(transport.is_send_terminal_attempt(attempt)?);
+
+    assert_eq!(transport.notify_admitted_predecessor(peer)?, None);
+    assert_ne!(*transport.dht.lock_predecessor()?, Some(peer));
+    assert_eq!(
+        transport.record_finger_candidate(peer, 1)?,
+        FingerUpdateDisposition::Unroutable
+    );
+    assert_eq!(transport.dht.lock_finger()?.get(1), None);
     Ok(())
 }
 
@@ -423,7 +467,7 @@ async fn final_send_admission_serializes_generation_route_and_readiness() -> Res
         let entered = Arc::clone(&entered);
         let release = Arc::clone(&release);
         std::thread::spawn(move || -> Result<bool> {
-            let route_check = admission.with_current(|connection| {
+            let route_check = admission.with_current_connection(|connection| {
                 dht.with_permitted_storage_sync_route(
                     StorageSyncDestination::PhysicalOwner(peer),
                     peer,
@@ -524,6 +568,82 @@ async fn stale_send_after_retirement_does_not_recreate_outbound_scheduler() -> R
 
     assert_eq!(outcome, SendCompletionOutcome::Cancelled);
     assert_eq!(transport.outbound_schedulers.peer_count_for_test(), 0);
+    Ok(())
+}
+
+#[cfg(feature = "dummy")]
+#[tokio::test]
+async fn scheduler_shutdown_revokes_a_frame_waiting_at_transport_dispatch() -> Result<()> {
+    let (transport, peer, _attempt) = transport_with_routable_peer().await?;
+    let payload = MessagePayload::new_send(
+        Message::custom(b"shutdown-at-dispatch")?,
+        transport.session_sk(),
+        peer,
+        peer,
+    )?;
+    dummy_controlled::reset_sent_count();
+    dummy_controlled::pause_send_message_at_dispatch();
+    let sending_transport = Arc::clone(&transport);
+    let send = tokio::spawn(async move {
+        sending_transport
+            .send_payload_detached_with_outcome(payload)
+            .await
+    });
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while !dummy_controlled::send_message_waiting_at_dispatch() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| Error::InvalidMessage("send did not reach dispatch gate".to_string()))?;
+    transport.outbound_schedulers.shutdown(peer);
+    dummy_controlled::release_send_message_gate();
+
+    let outcome = send
+        .await
+        .map_err(|error| Error::InvalidMessage(format!("send task failed: {error}")))??;
+    assert_eq!(outcome, SendCompletionOutcome::Cancelled);
+    assert_eq!(dummy_controlled::sent_count(), 0);
+    Ok(())
+}
+
+#[cfg(feature = "dummy")]
+#[tokio::test]
+async fn scheduler_shutdown_cancels_a_send_before_queue_acceptance() -> Result<()> {
+    let (transport, peer, _attempt) = transport_with_routable_peer().await?;
+    let payload = MessagePayload::new_send(
+        Message::custom(b"linearized-before-shutdown")?,
+        transport.session_sk(),
+        peer,
+        peer,
+    )?;
+    dummy_controlled::reset_sent_count();
+    dummy_controlled::set_drop_messages(true);
+    dummy_controlled::pause_send_message_after_permit();
+    let sending_transport = Arc::clone(&transport);
+    let send = tokio::spawn(async move {
+        sending_transport
+            .send_payload_detached_with_outcome(payload)
+            .await
+    });
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while !dummy_controlled::post_permit_send_gate_waiting() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| Error::InvalidMessage("send did not reach its acceptance gate".to_string()))?;
+    transport.outbound_schedulers.shutdown(peer);
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), send)
+        .await
+        .map_err(|_| Error::InvalidMessage("unaccepted send did not cancel".to_string()))?
+        .map_err(|error| Error::InvalidMessage(format!("send task failed: {error}")))??;
+    dummy_controlled::release_post_permit_send_gate();
+    dummy_controlled::set_drop_messages(false);
+    assert_eq!(outcome, SendCompletionOutcome::Cancelled);
+    assert_eq!(dummy_controlled::sent_count(), 0);
     Ok(())
 }
 

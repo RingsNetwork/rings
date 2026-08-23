@@ -387,50 +387,165 @@ pub enum FindSuccessorReportHandler {
     CustomCallback(u8),
 }
 
-/// A collection MessageType use for unified management.
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[non_exhaustive]
-pub enum Message {
-    /// Remote message of try connecting a node.
-    ConnectNodeSend(ConnectNodeSend),
-    /// Response of ConnectNodeSend
-    ConnectNodeReport(ConnectNodeReport),
-    /// Remote message of find successor
-    FindSuccessorSend(FindSuccessorSend),
-    /// Response of FindSuccessorSend
-    FindSuccessorReport(FindSuccessorReport),
-    /// Remote message of notify a predecessor
-    NotifyPredecessorSend(NotifyPredecessorSend),
-    /// Response of NotifyPredecessorSend
-    NotifyPredecessorReport(NotifyPredecessorReport),
-    /// Overlay liveness probe.
-    PeerLivenessProbe(PeerLivenessProbe),
-    /// Overlay liveness probe response.
-    PeerLivenessReport(PeerLivenessReport),
-    /// Remote message for searching an entry.
-    SearchEntry(SearchEntry),
-    /// Response when entries are found.
-    FoundEntry(FoundEntry),
-    /// Remote message for entry operations.
-    OperateEntry(PlacedEntryOperation),
-    /// Remote message for entry syncing.
-    SyncEntriesWithSuccessor(SyncEntriesWithSuccessor),
-    /// Response after synced entries are durably persisted.
-    SyncEntriesWithSuccessorReport(SyncEntriesWithSuccessorReport),
-    /// Custom messages
-    CustomMessage(CustomMessage),
-    /// Request to negotiate E2E ElGamal encryption with a signed public key.
-    E2eHandshakeRequest(E2eHandshakeRequest),
-    /// Response accepting E2E ElGamal encryption with a signed public key.
-    E2eHandshakeResponse(E2eHandshakeResponse),
-    /// Direct ElGamal-encrypted E2E stream frame.
-    E2eStreamFrame(E2eStreamFrame),
-    /// Remote message of query topological info of a node.
-    QueryForTopoInfoSend(QueryForTopoInfoSend),
-    /// Response of QueryForTopoInfoSend
-    QueryForTopoInfoReport(QueryForTopoInfoReport),
-    /// A chunk that can be deserialized to a payload.
-    Chunk(Chunk),
+macro_rules! with_message_variants {
+    ($macro:ident) => {
+        $macro! {
+            /// Remote message of try connecting a node.
+            0 => ConnectNodeSend(ConnectNodeSend): DhtControl,
+            /// Response of ConnectNodeSend.
+            1 => ConnectNodeReport(ConnectNodeReport): DhtControl,
+            /// Remote message of find successor.
+            2 => FindSuccessorSend(FindSuccessorSend): DhtControl,
+            /// Response of FindSuccessorSend.
+            3 => FindSuccessorReport(FindSuccessorReport): DhtControl,
+            /// Remote message of notify a predecessor.
+            4 => NotifyPredecessorSend(NotifyPredecessorSend): DhtControl,
+            /// Response of NotifyPredecessorSend.
+            5 => NotifyPredecessorReport(NotifyPredecessorReport): DhtControl,
+            /// Overlay liveness probe.
+            6 => PeerLivenessProbe(PeerLivenessProbe): DhtControl,
+            /// Overlay liveness probe response.
+            7 => PeerLivenessReport(PeerLivenessReport): DhtControl,
+            /// Remote message for searching an entry.
+            8 => SearchEntry(SearchEntry): Storage,
+            /// Response when entries are found.
+            9 => FoundEntry(FoundEntry): Storage,
+            /// Remote message for entry operations.
+            10 => OperateEntry(PlacedEntryOperation): Storage,
+            /// Remote message for entry syncing.
+            11 => SyncEntriesWithSuccessor(SyncEntriesWithSuccessor): Storage,
+            /// Response after synced entries are durably persisted.
+            12 => SyncEntriesWithSuccessorReport(SyncEntriesWithSuccessorReport): Storage,
+            /// Custom messages.
+            13 => CustomMessage(CustomMessage): Application,
+            /// Request to negotiate E2E ElGamal encryption with a signed public key.
+            14 => E2eHandshakeRequest(E2eHandshakeRequest): E2e,
+            /// Response accepting E2E ElGamal encryption with a signed public key.
+            15 => E2eHandshakeResponse(E2eHandshakeResponse): E2e,
+            /// Direct ElGamal-encrypted E2E stream frame.
+            16 => E2eStreamFrame(E2eStreamFrame): E2e,
+            /// Remote message of query topological info of a node.
+            17 => QueryForTopoInfoSend(QueryForTopoInfoSend): DhtControl,
+            /// Response of QueryForTopoInfoSend.
+            18 => QueryForTopoInfoReport(QueryForTopoInfoReport): DhtControl,
+            /// A chunk that can be deserialized to a payload.
+            19 => Chunk(Chunk): Application,
+        }
+    };
+}
+
+macro_rules! define_message_model {
+    ($( $(#[$docs:meta])* $index:literal => $variant:ident($body:ty): $class:ident ),+ $(,)?) => {
+        /// A collection MessageType use for unified management.
+        #[derive(Debug, Deserialize, Serialize, Clone)]
+        #[non_exhaustive]
+        pub enum Message {
+            $($(#[$docs])* $variant($body)),+
+        }
+
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        pub(crate) enum MessageKind {
+            $($variant),+
+        }
+
+        impl MessageKind {
+            #[cfg(test)]
+            const WIRE_ORDER: &'static [(u32, Self)] = &[$(($index, Self::$variant)),+];
+
+            const fn from_wire_variant(variant: u32) -> Option<Self> {
+                match variant {
+                    $($index => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
+
+            pub(crate) const fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => stringify!($variant)),+
+                }
+            }
+
+            pub(crate) const fn class(self) -> MessageClass {
+                match self {
+                    $(Self::$variant => MessageClass::$class),+
+                }
+            }
+
+            pub(crate) const fn is_chunk(self) -> bool {
+                matches!(self, Self::Chunk)
+            }
+        }
+
+        #[cfg(test)]
+        impl Message {
+            pub(crate) const fn kind(&self) -> MessageKind {
+                match self {
+                    $(Self::$variant(_) => MessageKind::$variant),+
+                }
+            }
+        }
+    };
+}
+
+with_message_variants!(define_message_model);
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum MessageClass {
+    DhtControl,
+    Storage,
+    E2e,
+    Application,
+}
+
+impl MessageClass {
+    pub(crate) const COUNT: usize = 4;
+
+    pub(crate) const fn index(self) -> usize {
+        match self {
+            Self::DhtControl => 0,
+            Self::Storage => 1,
+            Self::E2e => 2,
+            Self::Application => 3,
+        }
+    }
+
+    pub(crate) const fn is_control(self) -> bool {
+        matches!(self, Self::DhtControl)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct MessageMeta {
+    kind: MessageKind,
+}
+
+impl MessageMeta {
+    pub(crate) fn from_wire(data: &[u8]) -> Result<Self> {
+        let variant =
+            rings_codec::deserialize_enum_variant(data).map_err(Error::CodecDeserialize)?;
+        let kind = MessageKind::from_wire_variant(variant)
+            .ok_or_else(|| Error::InvalidMessage(format!("unknown message variant {variant}")))?;
+        Ok(Self { kind })
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn from_message(message: &Message) -> Self {
+        Self {
+            kind: message.kind(),
+        }
+    }
+
+    pub(crate) const fn kind(self) -> MessageKind {
+        self.kind
+    }
+
+    pub(crate) const fn class(self) -> MessageClass {
+        self.kind.class()
+    }
+
+    pub(crate) const fn records_missing_connection_failure(self) -> bool {
+        !matches!(self.kind, MessageKind::SyncEntriesWithSuccessor)
+    }
 }
 
 impl std::fmt::Display for Message {
@@ -516,5 +631,12 @@ mod tests {
 
         assert!(QueryForTopoInfoSend::new_for_sync(local).targets(local));
         assert!(!QueryForTopoInfoSend::new_for_sync(remote).targets(local));
+    }
+
+    #[test]
+    fn message_metadata_wire_indices_follow_enum_declaration_order() {
+        for (position, (wire_index, _)) in MessageKind::WIRE_ORDER.iter().enumerate() {
+            assert_eq!(usize::try_from(*wire_index), Ok(position));
+        }
     }
 }

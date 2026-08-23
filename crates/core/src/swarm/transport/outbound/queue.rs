@@ -1,0 +1,236 @@
+use std::collections::VecDeque;
+
+use super::model::TransferClass;
+
+/// Four control frames followed by one lower-class frame gives control at most
+/// 80% of frame admissions under sustained mixed load.
+pub(super) const OUTBOUND_CONTROL_BURST: usize = 4;
+const LOWER_CLASSES: [TransferClass; 3] = [
+    TransferClass::Storage,
+    TransferClass::E2e,
+    TransferClass::Application,
+];
+
+enum TransferLaneState<T> {
+    Idle,
+    Runnable(T),
+    WaitingDelivery { id: u64, item: T },
+}
+
+struct TransferLane<T> {
+    state: TransferLaneState<T>,
+    queued: VecDeque<T>,
+}
+
+impl<T> Default for TransferLane<T> {
+    fn default() -> Self {
+        Self {
+            state: TransferLaneState::Idle,
+            queued: VecDeque::new(),
+        }
+    }
+}
+
+impl<T> TransferLane<T> {
+    fn enqueue(&mut self, item: T) {
+        if matches!(self.state, TransferLaneState::Idle) {
+            self.state = TransferLaneState::Runnable(item);
+        } else {
+            self.queued.push_back(item);
+        }
+    }
+
+    fn is_runnable(&self) -> bool {
+        matches!(self.state, TransferLaneState::Runnable(_))
+    }
+
+    fn take_runnable(&mut self) -> Option<T> {
+        match std::mem::replace(&mut self.state, TransferLaneState::Idle) {
+            TransferLaneState::Runnable(item) => Some(item),
+            state => {
+                self.state = state;
+                None
+            }
+        }
+    }
+
+    fn wait_for_delivery(&mut self, id: u64, item: T) -> std::result::Result<(), T> {
+        if matches!(self.state, TransferLaneState::Idle) {
+            self.state = TransferLaneState::WaitingDelivery { id, item };
+            Ok(())
+        } else {
+            Err(item)
+        }
+    }
+
+    fn take_waiting(&mut self, id: u64) -> Option<T> {
+        match std::mem::replace(&mut self.state, TransferLaneState::Idle) {
+            TransferLaneState::WaitingDelivery {
+                id: waiting_id,
+                item,
+            } if waiting_id == id => Some(item),
+            state => {
+                self.state = state;
+                None
+            }
+        }
+    }
+
+    fn make_runnable(&mut self, item: T) -> std::result::Result<(), T> {
+        if matches!(self.state, TransferLaneState::Idle) {
+            self.state = TransferLaneState::Runnable(item);
+            Ok(())
+        } else {
+            Err(item)
+        }
+    }
+
+    fn finish_current(&mut self) {
+        self.state = self
+            .queued
+            .pop_front()
+            .map_or(TransferLaneState::Idle, TransferLaneState::Runnable);
+    }
+
+    fn drain_transfers(&mut self) -> Vec<T> {
+        let mut transfers = Vec::with_capacity(self.queued.len().saturating_add(1));
+        match std::mem::replace(&mut self.state, TransferLaneState::Idle) {
+            TransferLaneState::Runnable(item) | TransferLaneState::WaitingDelivery { item, .. } => {
+                transfers.push(item)
+            }
+            TransferLaneState::Idle => {}
+        }
+        transfers.extend(self.queued.drain(..));
+        transfers
+    }
+}
+
+pub(super) struct TransferQueues<T> {
+    lanes: [TransferLane<T>; TransferClass::COUNT],
+    lower_cursor: usize,
+    consecutive_control: usize,
+}
+
+impl<T> Default for TransferQueues<T> {
+    fn default() -> Self {
+        Self {
+            lanes: std::array::from_fn(|_| TransferLane::default()),
+            lower_cursor: 0,
+            consecutive_control: 0,
+        }
+    }
+}
+
+impl<T> TransferQueues<T> {
+    pub(super) fn push(&mut self, class: TransferClass, item: T) {
+        if let Some(lane) = self.lanes.get_mut(class.index()) {
+            lane.enqueue(item);
+        }
+    }
+
+    pub(super) fn pop(&mut self) -> Option<T> {
+        let has_control = self.is_runnable(TransferClass::DhtControl);
+        let selected = if has_control
+            && (self.consecutive_control < OUTBOUND_CONTROL_BURST || !self.has_lower())
+        {
+            Some(TransferClass::DhtControl)
+        } else {
+            self.next_lower_class()
+                .or(has_control.then_some(TransferClass::DhtControl))
+        }?;
+        self.take(selected)
+    }
+
+    pub(super) fn wait_for_delivery(
+        &mut self,
+        class: TransferClass,
+        id: u64,
+        item: T,
+    ) -> std::result::Result<(), T> {
+        let Some(lane) = self.lanes.get_mut(class.index()) else {
+            return Err(item);
+        };
+        lane.wait_for_delivery(id, item)
+    }
+
+    pub(super) fn take_waiting(&mut self, class: TransferClass, id: u64) -> Option<T> {
+        self.lanes
+            .get_mut(class.index())
+            .and_then(|lane| lane.take_waiting(id))
+    }
+
+    pub(super) fn make_runnable(
+        &mut self,
+        class: TransferClass,
+        item: T,
+    ) -> std::result::Result<(), T> {
+        let Some(lane) = self.lanes.get_mut(class.index()) else {
+            return Err(item);
+        };
+        lane.make_runnable(item)
+    }
+
+    pub(super) fn record_frame_admitted(&mut self, class: TransferClass) {
+        if class == TransferClass::DhtControl {
+            self.consecutive_control = self.consecutive_control.saturating_add(1);
+            return;
+        }
+        self.consecutive_control = 0;
+        if let Some(index) = LOWER_CLASSES
+            .iter()
+            .position(|candidate| *candidate == class)
+        {
+            self.lower_cursor = index.saturating_add(1) % LOWER_CLASSES.len();
+        }
+    }
+
+    pub(super) fn finish_current(&mut self, class: TransferClass) {
+        if let Some(lane) = self.lanes.get_mut(class.index()) {
+            lane.finish_current();
+        }
+    }
+
+    pub(super) fn finish_attempt(&mut self, class: TransferClass) {
+        self.record_frame_admitted(class);
+        self.finish_current(class);
+    }
+
+    pub(super) fn drain_transfers(&mut self) -> Vec<T> {
+        self.lanes
+            .iter_mut()
+            .flat_map(TransferLane::drain_transfers)
+            .collect()
+    }
+
+    fn is_runnable(&self, class: TransferClass) -> bool {
+        self.lanes
+            .get(class.index())
+            .is_some_and(TransferLane::is_runnable)
+    }
+
+    fn has_lower(&self) -> bool {
+        LOWER_CLASSES
+            .iter()
+            .copied()
+            .any(|class| self.is_runnable(class))
+    }
+
+    fn take(&mut self, class: TransferClass) -> Option<T> {
+        self.lanes
+            .get_mut(class.index())
+            .and_then(TransferLane::take_runnable)
+    }
+
+    fn next_lower_class(&self) -> Option<TransferClass> {
+        for offset in 0..LOWER_CLASSES.len() {
+            let index = self.lower_cursor.saturating_add(offset) % LOWER_CLASSES.len();
+            let Some(class) = LOWER_CLASSES.get(index).copied() else {
+                continue;
+            };
+            if self.is_runnable(class) {
+                return Some(class);
+            }
+        }
+        None
+    }
+}

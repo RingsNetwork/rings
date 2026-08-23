@@ -56,6 +56,7 @@ const DHT_TOPOLOGY_EVICTION_THRESHOLDS: PeerQualityThresholds =
 enum TopologyPeerRemovalReason {
     NoAdmittedTransport,
     MissingTransportObject,
+    SendTerminal,
     TerminalTransport(WebrtcConnectionState),
     DataChannelNotOpen(WebrtcConnectionState),
     DisconnectedGraceElapsed {
@@ -79,6 +80,7 @@ enum TopologyPeerRemovalReason {
 struct AdmittedPeerState {
     attempt: PendingConnectionAttempt,
     readiness: Option<TransportReadiness>,
+    send_terminal: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -92,6 +94,7 @@ impl TopologyPeerRemovalReason {
         match self {
             Self::NoAdmittedTransport => "no_admitted_transport",
             Self::MissingTransportObject => "missing_transport_object",
+            Self::SendTerminal => "send_terminal",
             Self::TerminalTransport(_) => "terminal_transport",
             Self::DataChannelNotOpen(_) => "data_channel_not_open",
             Self::DisconnectedGraceElapsed { .. } => "disconnected_grace_elapsed",
@@ -347,7 +350,12 @@ impl Stabilizer {
             .into_iter()
             .map(|(attempt, connection)| {
                 let readiness = connection.as_ref().map(|connection| connection.readiness());
-                Ok((attempt.peer(), AdmittedPeerState { attempt, readiness }))
+                let send_terminal = self.transport.is_send_terminal_attempt(attempt)?;
+                Ok((attempt.peer(), AdmittedPeerState {
+                    attempt,
+                    readiness,
+                    send_terminal,
+                }))
             })
             .collect()
     }
@@ -395,6 +403,9 @@ impl Stabilizer {
                 reason,
             })
         };
+        if admitted.send_terminal {
+            return Ok(removal(TopologyPeerRemovalReason::SendTerminal));
+        }
         let Some(readiness) = admitted.readiness else {
             return Ok(removal(TopologyPeerRemovalReason::MissingTransportObject));
         };

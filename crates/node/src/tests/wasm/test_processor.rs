@@ -28,7 +28,10 @@ struct SwarmCallbackStruct {
 
 #[async_trait(?Send)]
 impl SwarmCallback for SwarmCallbackStruct {
-    async fn on_inbound(&self, payload: &MessagePayload) -> Result<(), Box<dyn std::error::Error>> {
+    async fn on_inbound(
+        &self,
+        payload: &MessagePayload,
+    ) -> Result<(), rings_core::error::CallbackError> {
         let msg: Message = payload.transaction.data().map_err(Box::new)?;
         if let Message::CustomMessage(ref msg) = msg {
             let text = String::from_utf8(msg.0.to_vec()).unwrap();

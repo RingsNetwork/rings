@@ -6,6 +6,8 @@ use super::*;
 use crate::dht::topology;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::dht::StorageSyncDestination;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use crate::dht::STORAGE_REPAIR_MAX_DELIVERIES_PER_STEP;
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 fn midpoint_storage_key(local: Did, lower: Did, upper: Did) -> Did {
@@ -119,7 +121,10 @@ async fn continuous_storage_repair_reaches_remote_owners_across_three_nodes() ->
 
     let mut head_repaired = false;
     let mut tail_repaired = false;
-    for _ in 0..12 {
+    let repaired_entries = 2usize;
+    let repair_candidates = repaired_entries * usize::from(node1.swarm.storage_redundancy());
+    let required_steps = repair_candidates.div_ceil(STORAGE_REPAIR_MAX_DELIVERIES_PER_STEP);
+    for _ in 0..required_steps {
         let _ = node1.swarm.stabilizer().repair_storage().await?;
         wait_for_msgs([&node1, &node2, &node3]).await;
 

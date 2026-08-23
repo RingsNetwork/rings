@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,6 +28,22 @@ use crate::utils::sleep;
 
 const DATA_CHANNEL_OPEN_TIMEOUT: Duration = Duration::from_secs(8);
 const TRANSPORT_READINESS_POLL_INTERVAL: Duration = Duration::from_millis(50);
+#[cfg(test)]
+pub(super) const DATA_CHANNEL_CLOSE_TIMEOUT: Duration = Duration::from_millis(100);
+#[cfg(not(test))]
+pub(super) const DATA_CHANNEL_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub(super) async fn await_bounded_connection_close(
+    close: impl Future<Output = Result<()>>,
+) -> Result<bool> {
+    let close = close.fuse();
+    let timeout = sleep(DATA_CHANNEL_CLOSE_TIMEOUT).fuse();
+    pin_mut!(close, timeout);
+    select! {
+        result = close => result.map(|()| true),
+        _ = timeout => Ok(false),
+    }
+}
 
 enum DhtPeerRemoval {
     Ordinary,
@@ -39,7 +56,7 @@ enum DhtPeerRemoval {
 /// Clone law: clones identify the same physical connection generation. They do
 /// not authorize sends by possession; every asynchronous progression
 /// revalidates the generation through [`Self::ensure_current`] or
-/// [`Self::with_current`].
+/// [`Self::with_current_connection`].
 #[derive(Clone)]
 pub(crate) struct AdmittedConnection {
     attempt: PendingConnectionAttempt,
@@ -77,7 +94,7 @@ impl AdmittedConnection {
             .lifecycles
             .lock()
             .map_err(|_| Error::SwarmConnectionLifecycleLock)?;
-        if lifecycles.active_attempt(self.attempt.peer) == Some(self.attempt) {
+        if lifecycles.sendable_attempt(self.attempt.peer) == Some(self.attempt) {
             return Ok(());
         }
         Err(Error::ConnectionAttemptSuperseded {
@@ -86,25 +103,35 @@ impl AdmittedConnection {
         })
     }
 
-    /// Evaluate `condition` while this connection generation cannot be retired.
+    /// Run `operation` while this connection generation cannot be retired.
     ///
     /// `Ok(Some(value))` proves that `attempt` was active throughout
-    /// `condition`. `Ok(None)` means the generation had already been revoked.
-    pub(crate) fn with_current<T>(
+    /// `operation`. `Ok(None)` means the generation had already been revoked.
+    pub(crate) fn with_current_connection<T>(
         &self,
-        condition: impl FnOnce(&SwarmConnection) -> T,
+        operation: impl FnOnce(&SwarmConnection) -> T,
     ) -> Result<Option<T>> {
         let _lifecycle = self.lifecycle_boundary.lock()?;
         let is_current = self
             .lifecycles
             .lock()
             .map_err(|_| Error::SwarmConnectionLifecycleLock)?
-            .active_attempt(self.attempt.peer)
+            .sendable_attempt(self.attempt.peer)
             == Some(self.attempt);
         if !is_current {
             return Ok(None);
         }
-        Ok(Some(condition(&self.connection)))
+        Ok(Some(operation(&self.connection)))
+    }
+
+    /// Revoke new sends for this exact generation before transport cleanup.
+    pub(crate) fn mark_send_terminal(&self) -> Result<bool> {
+        let _lifecycle = self.lifecycle_boundary.lock()?;
+        let mut lifecycles = self
+            .lifecycles
+            .lock()
+            .map_err(|_| Error::SwarmConnectionLifecycleLock)?;
+        Ok(lifecycles.mark_send_terminal(self.attempt))
     }
 }
 
@@ -125,7 +152,7 @@ impl SwarmTransport {
     /// Pending and non-ready physical transports are intentionally invisible here.
     pub fn get_connection(&self, peer: Did) -> Option<SwarmConnection> {
         self.with_connection_lifecycle(|| {
-            if self.active_attempt(peer)?.is_none() {
+            if self.peer_lifecycles()?.sendable_attempt(peer).is_none() {
                 return Ok(None);
             }
             let Some(connection) = self.get_raw_connection(peer) else {
@@ -145,7 +172,7 @@ impl SwarmTransport {
         peer: Did,
     ) -> Result<Option<(PendingConnectionAttempt, SwarmConnection)>> {
         self.with_connection_lifecycle(|| {
-            let Some(attempt) = self.active_attempt(peer)? else {
+            let Some(attempt) = self.peer_lifecycles()?.sendable_attempt(peer) else {
                 return Ok(None);
             };
             let Some(connection) = self.get_raw_connection(peer) else {
@@ -163,7 +190,7 @@ impl SwarmTransport {
 
     pub(crate) fn admitted_send_connection(&self, peer: Did) -> Result<Option<AdmittedConnection>> {
         self.with_connection_lifecycle(|| {
-            let Some(attempt) = self.active_attempt(peer)? else {
+            let Some(attempt) = self.peer_lifecycles()?.sendable_attempt(peer) else {
                 return Ok(None);
             };
             let Some(connection) = self.get_raw_connection(peer) else {
@@ -182,12 +209,19 @@ impl SwarmTransport {
         &self,
     ) -> Result<Vec<(PendingConnectionAttempt, Option<SwarmConnection>)>> {
         self.with_connection_lifecycle(|| {
-            Ok(self
-                .active_connections()?
+            let admitted = self.peer_lifecycles()?.admitted_connections();
+            Ok(admitted
                 .iter()
                 .map(|attempt| (attempt, self.get_raw_connection(attempt.peer)))
                 .collect())
         })
+    }
+
+    pub(crate) fn is_send_terminal_attempt(
+        &self,
+        attempt: PendingConnectionAttempt,
+    ) -> Result<bool> {
+        Ok(self.peer_lifecycles()?.is_send_terminal(attempt))
     }
 
     /// Get all active, ready transport connections.
@@ -274,7 +308,8 @@ impl SwarmTransport {
         observe_admission: impl FnOnce(),
     ) -> Result<Option<Did>> {
         self.with_connection_lifecycle(|| {
-            if self.active_attempt(peer)?.is_none() {
+            let active = self.active_connections()?;
+            if !self.is_routable_active_candidate(peer, &active) {
                 return Ok(None);
             }
             observe_admission();
@@ -358,7 +393,6 @@ impl SwarmTransport {
                 .map(|_| ());
         }
         if let Some(connection) = self.get_raw_connection(peer) {
-            self.outbound_schedulers.shutdown(peer);
             self.transport
                 .close_connection_if_current(&connection.connection)
                 .await
@@ -462,8 +496,12 @@ impl SwarmTransport {
         Ok(replacements)
     }
 
-    fn is_routable_active_candidate(&self, candidate: Did, active: &ActiveConnectionSet) -> bool {
-        if !active.contains(candidate) {
+    pub(super) fn is_routable_active_candidate(
+        &self,
+        candidate: Did,
+        active: &ActiveConnectionSet,
+    ) -> bool {
+        if active.attempt(candidate).is_none() {
             return false;
         }
         let Some(connection) = self.get_raw_connection(candidate) else {
@@ -508,11 +546,21 @@ impl SwarmTransport {
     }
 
     async fn close_connection_for_disconnect(&self, connection: &SwarmConnection) -> Result<()> {
-        self.transport
-            .close_connection_if_current(&connection.connection)
-            .await
-            .map(|_| ())
-            .map_err(Error::Transport)
+        let close = async {
+            self.transport
+                .close_connection_if_current(&connection.connection)
+                .await
+                .map(|_| ())
+                .map_err(Error::Transport)
+        };
+        if !await_bounded_connection_close(close).await? {
+            tracing::warn!(
+                peer = %connection.peer,
+                timeout_ms = DATA_CHANNEL_CLOSE_TIMEOUT.as_millis(),
+                "timed out cleaning up retired transport connection"
+            );
+        }
+        Ok(())
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]

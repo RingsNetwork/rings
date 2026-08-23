@@ -3,6 +3,20 @@
 /// A wrap `Result` contains custom errors.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Application callback error retained as the source of a core error.
+///
+/// Wasm callbacks may retain thread-local error values.
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+pub type CallbackError = Box<dyn std::error::Error>;
+
+/// Application callback error retained as the source of a core error.
+///
+/// Since 0.18 native callbacks require `Send + Sync` because callback work is
+/// driven by Tokio tasks. Prefer this alias in [`crate::swarm::callback::SwarmCallback`]
+/// implementations instead of spelling the trait object directly.
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+pub type CallbackError = Box<dyn std::error::Error + Send + Sync>;
+
 /// Errors collections in ring-core.
 #[derive(thiserror::Error, Debug)]
 #[non_exhaustive]
@@ -299,6 +313,108 @@ pub enum Error {
     /// Send message through channel failed
     #[error("Send message through channel failed")]
     ChannelSendMessageFailed,
+
+    /// The per-peer outbound scheduler has admitted its maximum transfer count.
+    #[error("Outbound transfer capacity {capacity} exceeded for peer {peer}")]
+    OutboundTransferCapacityExceeded {
+        /// Peer whose scheduler is at capacity.
+        peer: crate::dht::Did,
+        /// Maximum transfers admitted across all scheduler states.
+        capacity: usize,
+    },
+
+    /// The outbound scheduler cannot retain another payload within its byte budget.
+    #[error(
+        "Outbound transfer of {requested_bytes} bytes exceeds the remaining {capacity_bytes}-byte budget for peer {peer}"
+    )]
+    OutboundTransferMemoryCapacityExceeded {
+        /// Peer whose scheduler would retain the payload.
+        peer: crate::dht::Did,
+        /// Bytes the transfer needs to retain.
+        requested_bytes: usize,
+        /// Total byte capacity of the exhausted budget.
+        capacity_bytes: usize,
+    },
+
+    /// No Tokio runtime is available to host a native outbound scheduler.
+    #[error("Outbound scheduler requires an active Tokio runtime")]
+    OutboundSchedulerRuntimeUnavailable,
+
+    /// An outbound scheduler lane violated its internal state model.
+    #[error("Outbound scheduler state invariant violated")]
+    OutboundSchedulerInvariantViolation,
+
+    /// The inbound actor has admitted its maximum number of messages.
+    #[error("Inbound mailbox capacity {capacity} exceeded")]
+    InboundMailboxCapacityExceeded {
+        /// Maximum queued and executing inbound messages.
+        capacity: usize,
+    },
+
+    /// The inbound actor cannot retain another message within its byte budget.
+    #[error(
+        "Inbound message of {requested_bytes} bytes exceeds the {capacity_bytes}-byte mailbox budget"
+    )]
+    InboundMailboxMemoryCapacityExceeded {
+        /// Bytes retained by the decoded message and its handler representation.
+        requested_bytes: usize,
+        /// Total mailbox byte capacity.
+        capacity_bytes: usize,
+    },
+
+    /// One peer has exhausted its inbound message count allowance.
+    #[error("Inbound peer {peer:?} capacity {capacity} exceeded")]
+    InboundPeerCapacityExceeded {
+        /// Peer associated with the inbound connection, when its DID parsed successfully.
+        peer: Option<crate::dht::Did>,
+        /// Maximum queued and executing messages retained for one peer.
+        capacity: usize,
+    },
+
+    /// One peer has exhausted its inbound retained-memory allowance.
+    #[error(
+        "Inbound peer {peer:?} message of {requested_bytes} bytes exceeds its {capacity_bytes}-byte budget"
+    )]
+    InboundPeerMemoryCapacityExceeded {
+        /// Peer associated with the inbound connection, when its DID parsed successfully.
+        peer: Option<crate::dht::Did>,
+        /// Bytes requested by the inbound message.
+        requested_bytes: usize,
+        /// Retained byte capacity available to one peer.
+        capacity_bytes: usize,
+    },
+
+    /// The connection's inbound mailbox actor is unavailable.
+    #[error("Inbound mailbox is closed")]
+    InboundMailboxClosed,
+
+    /// No Tokio runtime is available to host a native inbound actor.
+    #[error("Inbound mailbox requires an active Tokio runtime")]
+    InboundMailboxRuntimeUnavailable,
+
+    /// The inbound actor observed an impossible message/lane state.
+    #[error("Inbound actor state invariant violated")]
+    InboundActorInvariantViolation,
+
+    /// A reassembled chunk payload attempted to contain another chunk envelope.
+    #[error("Nested chunk messages are not allowed")]
+    NestedChunkMessage,
+
+    /// The application rejected an inbound message during validation.
+    #[error("Inbound message validation failed: {source}")]
+    InboundValidationFailed {
+        /// Original application validation error.
+        #[source]
+        source: CallbackError,
+    },
+
+    /// An application callback failed after core inbound handling.
+    #[error("Inbound message callback failed: {source}")]
+    InboundCallbackFailed {
+        /// Original application callback error.
+        #[source]
+        source: CallbackError,
+    },
 
     /// Recv message through channel failed {0}
     #[error("Recv message through channel failed {0}")]
@@ -604,6 +720,19 @@ pub enum Error {
         context: &'static str,
     },
 
+    /// Timed out while waiting for accepted data-channel bytes to leave the local buffer.
+    #[error(
+        "Timed out after {timeout_ms}ms waiting for data-channel delivery to {peer} during {context}"
+    )]
+    DataChannelDeliveryTimeout {
+        /// Peer whose accepted bytes did not leave the local send buffer.
+        peer: crate::dht::Did,
+        /// Delivery timeout budget in milliseconds.
+        timeout_ms: u128,
+        /// Send context used for diagnostics.
+        context: &'static str,
+    },
+
     #[cfg(all(feature = "wasm", target_family = "wasm"))]
     /// Cannot get property {0} from JsValue
     #[error("Cannot get property {0} from JsValue")]
@@ -642,11 +771,13 @@ impl Error {
         Self::PeerRingUnexpectedAction(Box::new(action))
     }
 
-    /// True when a send failed because the local data-channel write queue did not accept bytes
-    /// before the bounded admission timeout. This is a local backpressure signal, not evidence
-    /// that the remote peer is unreachable or malicious.
+    /// True when local data-channel admission or delivery exceeded its bounded wait. This is a
+    /// local backpressure signal, not evidence that the remote peer is unreachable or malicious.
     pub(crate) const fn is_data_channel_backpressure(&self) -> bool {
-        matches!(self, Self::DataChannelSendQueueTimeout { .. })
+        matches!(
+            self,
+            Self::DataChannelSendQueueTimeout { .. } | Self::DataChannelDeliveryTimeout { .. }
+        )
     }
 
     /// Whether a data-plane send should be retried from freshly computed topology.
@@ -655,6 +786,8 @@ impl Error {
             || matches!(
                 self,
                 Self::ConnectionAttemptSuperseded { .. }
+                    | Self::OutboundTransferCapacityExceeded { .. }
+                    | Self::OutboundTransferMemoryCapacityExceeded { .. }
                     | Self::RTCDataChannelStateNotOpen
                     | Self::TransportNotReady { .. }
                     | Self::SwarmMissDidInTable(_)
@@ -665,9 +798,13 @@ impl Error {
     /// Whether this error should degrade peer quality through `FailedToSend`.
     pub(crate) const fn records_peer_send_failure(&self) -> bool {
         match self {
-            Self::ConnectionAttemptSuperseded { .. } | Self::DataChannelSendQueueTimeout { .. } => {
-                false
-            }
+            Self::ConnectionAttemptSuperseded { .. }
+            | Self::DataChannelSendQueueTimeout { .. }
+            | Self::DataChannelDeliveryTimeout { .. }
+            | Self::OutboundTransferCapacityExceeded { .. }
+            | Self::OutboundTransferMemoryCapacityExceeded { .. }
+            | Self::OutboundSchedulerRuntimeUnavailable
+            | Self::OutboundSchedulerInvariantViolation => false,
             Self::Transport(rings_transport::error::Error::SendPermitRevoked) => false,
             Self::TransportNotReady { state, .. } => matches!(
                 state,

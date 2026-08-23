@@ -52,9 +52,31 @@ pub enum Error {
     #[error("Message was not delivered: {0}")]
     MessageNotDelivered(String),
 
+    /// A data-channel message used an unsupported representation: {0}
+    #[error("Unsupported data-channel message: {0}")]
+    DataChannelMessage(String),
+
     /// The higher-level authorization was revoked before backend send admission.
     #[error("Send permit was revoked before transport send admission")]
     SendPermitRevoked,
+
+    #[cfg(feature = "native-webrtc")]
+    /// No Tokio runtime is available to drive a native data-channel write.
+    #[error("Native data-channel send requires an active Tokio runtime")]
+    NativeSendRuntimeUnavailable,
+
+    #[cfg(feature = "native-webrtc")]
+    /// An irrevocable native data-channel write exceeded its completion bound.
+    #[error("Native data-channel send did not complete within {timeout_ms}ms")]
+    NativeSendCompletionTimeout {
+        /// Completion bound applied after the write became irrevocable.
+        timeout_ms: u128,
+    },
+
+    #[cfg(feature = "native-webrtc")]
+    /// A native task driving an irrevocable data-channel write stopped unexpectedly.
+    #[error("Native data-channel send task stopped: {0}")]
+    NativeSendTask(#[source] tokio::task::JoinError),
 
     /// WebRTC local SDP generation error: {0}
     #[error("WebRTC local SDP generation error: {0}")]

@@ -38,7 +38,10 @@ impl Backend {
 #[cfg_attr(rings_browser, async_trait(?Send))]
 #[cfg_attr(rings_native, async_trait)]
 impl SwarmCallback for Backend {
-    async fn on_inbound(&self, payload: &MessagePayload) -> Result<(), Box<dyn std::error::Error>> {
+    async fn on_inbound(
+        &self,
+        payload: &MessagePayload,
+    ) -> Result<(), rings_core::error::CallbackError> {
         let data: Message = payload.transaction.data()?;
 
         let Message::CustomMessage(CustomMessage(msg)) = data else {

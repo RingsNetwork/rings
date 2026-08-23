@@ -1,6 +1,8 @@
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -45,6 +47,20 @@ lazy_static! {
     static ref CONNS: DashMap<String, Arc<DummyConnection>> = DashMap::new();
 }
 
+struct DeliveryGate {
+    waiting: AtomicBool,
+    notify: Notify,
+}
+
+impl DeliveryGate {
+    fn new() -> Self {
+        Self {
+            waiting: AtomicBool::new(false),
+            notify: Notify::new(),
+        }
+    }
+}
+
 thread_local! {
     /// Per-(test-)thread controlled-delivery state. THREAD-LOCAL on purpose: the
     /// flag and queue are scoped to the current thread so a controlled test is
@@ -80,12 +96,22 @@ thread_local! {
     static SEND_MESSAGE_GATE: RefCell<Option<Arc<Notify>>> = const { RefCell::new(None) };
     /// Whether a dummy send is currently suspended at [`SEND_MESSAGE_GATE`].
     static SEND_MESSAGE_GATE_WAITING: Cell<bool> = const { Cell::new(false) };
+    /// Test-only releasable gate immediately after the send permit linearizes.
+    static POST_PERMIT_SEND_GATE: RefCell<Option<Arc<Notify>>> = const { RefCell::new(None) };
+    /// Whether a dummy send is suspended after its permit was accepted.
+    static POST_PERMIT_SEND_GATE_WAITING: Cell<bool> = const { Cell::new(false) };
     /// Test-only per-thread threshold that makes `send_message` stay pending after
     /// this many messages have already been dispatched.
     static SEND_MESSAGE_PENDING_AFTER_SENT_COUNT: Cell<Option<usize>> = const { Cell::new(None) };
     /// Test-only per-thread switch that returns a delivery future which never
     /// observes completion after the message has been accepted.
     static DELIVERY_FUTURE_PENDING: Cell<bool> = const { Cell::new(false) };
+    /// Test-only per-thread switch that makes connection cleanup stay pending.
+    static CLOSE_PENDING: Cell<bool> = const { Cell::new(false) };
+    /// One-shot gate captured by the next accepted delivery future.
+    static NEXT_DELIVERY_GATE: RefCell<Option<Arc<DeliveryGate>>> = const { RefCell::new(None) };
+    /// Gate currently held by an accepted delivery future.
+    static ACTIVE_DELIVERY_GATE: RefCell<Option<Arc<DeliveryGate>>> = const { RefCell::new(None) };
     /// Test-only per-thread switch that makes `send_message` report local success
     /// without dispatching the message to the remote callback.
     static DROP_MESSAGES: Cell<bool> = const { Cell::new(false) };
@@ -99,6 +125,8 @@ thread_local! {
 pub mod controlled {
     use std::sync::Arc;
 
+    use super::ACTIVE_DELIVERY_GATE;
+    use super::CLOSE_PENDING;
     use super::CONNS;
     use super::CONTROLLED;
     use super::DELIVERY;
@@ -106,6 +134,9 @@ pub mod controlled {
     use super::DROP_MESSAGES;
     use super::MAX_MESSAGE_SIZE;
     use super::NEXT_CALLBACK_CID;
+    use super::NEXT_DELIVERY_GATE;
+    use super::POST_PERMIT_SEND_GATE;
+    use super::POST_PERMIT_SEND_GATE_WAITING;
     use super::SEND_MESSAGE_GATE;
     use super::SEND_MESSAGE_GATE_WAITING;
     use super::SEND_MESSAGE_PENDING;
@@ -124,8 +155,11 @@ pub mod controlled {
             WAIT_FOR_DATA_CHANNEL_OPEN_PENDING.with(|pending| pending.set(false));
             SEND_MESSAGE_PENDING.with(|pending| pending.set(false));
             release_send_message_gate();
+            release_post_permit_send_gate();
             SEND_MESSAGE_PENDING_AFTER_SENT_COUNT.with(|threshold| threshold.set(None));
             DELIVERY_FUTURE_PENDING.with(|pending| pending.set(false));
+            CLOSE_PENDING.with(|pending| pending.set(false));
+            release_delivery_future_gate();
             DROP_MESSAGES.with(|drop| drop.set(false));
         }
     }
@@ -177,6 +211,28 @@ pub mod controlled {
         SEND_MESSAGE_GATE_WAITING.with(|waiting| waiting.get())
     }
 
+    /// Test hook: suspend the next dummy send after its initial permit check but
+    /// before queue admission is confirmed.
+    pub fn pause_send_message_after_permit() {
+        POST_PERMIT_SEND_GATE.with(|gate| {
+            *gate.borrow_mut() = Some(Arc::new(tokio::sync::Notify::new()));
+        });
+    }
+
+    /// Test hook: release a send suspended before queue admission.
+    pub fn release_post_permit_send_gate() {
+        let gate = POST_PERMIT_SEND_GATE.with(|gate| gate.borrow_mut().take());
+        if let Some(gate) = gate {
+            gate.notify_waiters();
+        }
+        POST_PERMIT_SEND_GATE_WAITING.with(|waiting| waiting.set(false));
+    }
+
+    /// Return whether a send is suspended before queue admission.
+    pub fn post_permit_send_gate_waiting() -> bool {
+        POST_PERMIT_SEND_GATE_WAITING.with(|waiting| waiting.get())
+    }
+
     /// Test hook: force `send_message` to stay pending once this thread has already dispatched
     /// `threshold` messages. `None` disables the hook.
     pub fn set_send_message_pending_after_sent_count(threshold: Option<usize>) {
@@ -186,6 +242,37 @@ pub mod controlled {
     /// Test hook: make an accepted send return a delivery future that never completes.
     pub fn set_delivery_future_pending(on: bool) {
         DELIVERY_FUTURE_PENDING.with(|pending| pending.set(on));
+    }
+
+    /// Test hook: make connection cleanup never complete.
+    pub fn set_close_pending(on: bool) {
+        CLOSE_PENDING.with(|pending| pending.set(on));
+    }
+
+    /// Suspend exactly the next accepted send's delivery future.
+    pub fn pause_next_delivery_future() {
+        NEXT_DELIVERY_GATE.with(|slot| {
+            *slot.borrow_mut() = Some(Arc::new(super::DeliveryGate::new()));
+        });
+    }
+
+    /// Return whether the one-shot delivery future reached its gate.
+    pub fn delivery_future_waiting() -> bool {
+        ACTIVE_DELIVERY_GATE.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .is_some_and(|gate| gate.waiting.load(super::Ordering::Acquire))
+        })
+    }
+
+    /// Release a delivery future suspended by [`pause_next_delivery_future`].
+    pub fn release_delivery_future_gate() {
+        let gate = ACTIVE_DELIVERY_GATE
+            .with(|slot| slot.borrow_mut().take())
+            .or_else(|| NEXT_DELIVERY_GATE.with(|slot| slot.borrow_mut().take()));
+        if let Some(gate) = gate {
+            gate.notify.notify_one();
+        }
     }
 
     /// Test hook: make dummy sends disappear while still returning a successful
@@ -490,10 +577,20 @@ impl ConnectionInterface for DummyConnection {
         if !permit.allows() {
             return Err(Error::SendPermitRevoked);
         }
-        SENT_COUNT.with(|c| c.set(c.get() + 1));
+        let post_permit_gate = POST_PERMIT_SEND_GATE.with(|gate| gate.borrow().clone());
+        if let Some(post_permit_gate) = post_permit_gate {
+            POST_PERMIT_SEND_GATE_WAITING.with(|waiting| waiting.set(true));
+            post_permit_gate.notified().await;
+            POST_PERMIT_SEND_GATE_WAITING.with(|waiting| waiting.set(false));
+        }
+        if !permit.allows() {
+            return Err(Error::SendPermitRevoked);
+        }
 
         let data = rings_codec::serialize(&msg).map(Bytes::from)?;
         if DROP_MESSAGES.with(|drop| drop.get()) {
+            SENT_COUNT.with(|c| c.set(c.get() + 1));
+            permit.mark_accepted();
             return Ok(Box::pin(async { Ok(()) }));
         }
         // The remote connection may have been torn down between the data
@@ -508,8 +605,22 @@ impl ConnectionInterface for DummyConnection {
                 "dummy remote connection is closed".to_string(),
             ));
         }
+        SENT_COUNT.with(|c| c.set(c.get() + 1));
+        permit.mark_accepted();
         if DELIVERY_FUTURE_PENDING.with(|pending| pending.get()) {
             return Ok(Box::pin(std::future::pending::<Result<()>>()));
+        }
+        let delivery_gate = NEXT_DELIVERY_GATE.with(|slot| slot.borrow_mut().take());
+        if let Some(gate) = delivery_gate {
+            ACTIVE_DELIVERY_GATE.with(|slot| {
+                *slot.borrow_mut() = Some(gate.clone());
+            });
+            return Ok(Box::pin(async move {
+                gate.waiting.store(true, Ordering::Release);
+                gate.notify.notified().await;
+                gate.waiting.store(false, Ordering::Release);
+                Ok(())
+            }));
         }
 
         // The dummy backend delivers synchronously in-memory, so delivery is
@@ -583,6 +694,9 @@ impl ConnectionInterface for DummyConnection {
     }
 
     async fn close(&self) -> Result<()> {
+        if CLOSE_PENDING.with(|pending| pending.get()) {
+            std::future::pending::<()>().await;
+        }
         CONNS.remove(&self.rand_id);
         self.event_listener.abort();
 

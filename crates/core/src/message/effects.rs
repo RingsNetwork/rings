@@ -5,8 +5,20 @@
 //! [`CoreEffect`], and [`CoreEffectInterpreter`] applies those values to the
 //! current transport implementation.
 
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+use std::cell::Cell;
+use std::future::poll_fn;
 use std::sync::Arc;
-use std::time::Duration;
+use std::task::Poll;
+
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+use futures::channel::oneshot;
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+use wasm_bindgen::closure::Closure;
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+use wasm_bindgen::JsCast;
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+use wasm_bindgen::JsValue;
 
 use crate::dht::Did;
 use crate::dht::PeerRingAction;
@@ -25,13 +37,146 @@ use crate::message::SyncEntriesWithSuccessor;
 use crate::swarm::callback::InnerSwarmCallback;
 use crate::swarm::callback::SharedSwarmCallback;
 use crate::swarm::transport::SwarmTransport;
-use crate::utils::sleep;
 
-const CORE_ACTOR_STEP_YIELD: Duration = Duration::from_millis(0);
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+pub(crate) const CORE_ACTOR_BROWSER_YIELD_INTERVAL: u8 = 32;
+
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+thread_local! {
+    static CORE_ACTOR_STEPS_SINCE_BROWSER_YIELD: Cell<u8> = const { Cell::new(0) };
+    #[cfg(test)]
+    static LIVE_BROWSER_TASK_YIELD_GUARDS: Cell<usize> = const { Cell::new(0) };
+    #[cfg(test)]
+    static CLEARED_BROWSER_TASK_YIELD_HANDLERS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+struct BrowserTaskYieldGuard {
+    channel: web_sys::MessageChannel,
+    _callback: Closure<dyn FnMut(web_sys::MessageEvent)>,
+}
+
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+impl BrowserTaskYieldGuard {
+    fn new(
+        channel: web_sys::MessageChannel,
+        callback: Closure<dyn FnMut(web_sys::MessageEvent)>,
+    ) -> Self {
+        channel
+            .port1()
+            .set_onmessage(Some(callback.as_ref().unchecked_ref()));
+        #[cfg(test)]
+        LIVE_BROWSER_TASK_YIELD_GUARDS.with(|live| live.set(live.get().saturating_add(1)));
+        Self {
+            channel,
+            _callback: callback,
+        }
+    }
+
+    fn post(&self) -> std::result::Result<(), JsValue> {
+        self.channel.port2().post_message(&JsValue::NULL)
+    }
+}
+
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+impl Drop for BrowserTaskYieldGuard {
+    fn drop(&mut self) {
+        self.channel.port1().set_onmessage(None);
+        self.channel.port1().close();
+        self.channel.port2().close();
+        #[cfg(test)]
+        {
+            LIVE_BROWSER_TASK_YIELD_GUARDS.with(|live| live.set(live.get().saturating_sub(1)));
+            CLEARED_BROWSER_TASK_YIELD_HANDLERS
+                .with(|cleared| cleared.set(cleared.get().saturating_add(1)));
+        }
+    }
+}
+
+async fn yield_executor_once() {
+    let mut yielded = false;
+    poll_fn(move |cx| {
+        if yielded {
+            Poll::Ready(())
+        } else {
+            yielded = true;
+            cx.waker().wake_by_ref();
+            Poll::Pending
+        }
+    })
+    .await;
+}
 
 /// Yield after one bounded core actor work item.
+///
+/// Native tasks yield for one executor poll. Browser tasks do the same cheap
+/// yield and additionally cross a `MessageChannel` task boundary every
+/// [`CORE_ACTOR_BROWSER_YIELD_INTERVAL`] steps, bounding event-loop starvation
+/// without the nested-timer clamp of `setTimeout(0)`.
 pub(crate) async fn yield_core_actor_step() {
-    sleep(CORE_ACTOR_STEP_YIELD).await;
+    yield_executor_once().await;
+    #[cfg(all(feature = "wasm", target_family = "wasm"))]
+    if browser_task_yield_due() {
+        yield_browser_task().await;
+    }
+}
+
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+fn browser_task_yield_due() -> bool {
+    CORE_ACTOR_STEPS_SINCE_BROWSER_YIELD.with(|steps| {
+        let next = steps.get().saturating_add(1);
+        if next >= CORE_ACTOR_BROWSER_YIELD_INTERVAL {
+            steps.set(0);
+            true
+        } else {
+            steps.set(next);
+            false
+        }
+    })
+}
+
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+pub(crate) async fn yield_browser_task() {
+    let Ok(channel) = web_sys::MessageChannel::new() else {
+        return;
+    };
+    let (sender, receiver) = oneshot::channel();
+    let mut sender = Some(sender);
+    let callback = Closure::wrap(Box::new(move |_event: web_sys::MessageEvent| {
+        if let Some(sender) = sender.take() {
+            let _ = sender.send(());
+        }
+    }) as Box<dyn FnMut(_)>);
+    let guard = BrowserTaskYieldGuard::new(channel, callback);
+    if guard.post().is_err() {
+        return;
+    }
+    let _ = receiver.await;
+}
+
+#[cfg(all(test, feature = "wasm", target_family = "wasm"))]
+pub(crate) fn reset_browser_task_yield_guard_counts_for_test() {
+    LIVE_BROWSER_TASK_YIELD_GUARDS.with(|live| live.set(0));
+    CLEARED_BROWSER_TASK_YIELD_HANDLERS.with(|cleared| cleared.set(0));
+}
+
+#[cfg(all(test, feature = "wasm", target_family = "wasm"))]
+pub(crate) fn browser_task_yield_guard_counts_for_test() -> (usize, usize) {
+    (
+        LIVE_BROWSER_TASK_YIELD_GUARDS.with(Cell::get),
+        CLEARED_BROWSER_TASK_YIELD_HANDLERS.with(Cell::get),
+    )
+}
+
+/// Pair each work item with whether another item follows it.
+pub(crate) fn core_actor_steps<T>(
+    items: impl IntoIterator<Item = T>,
+) -> impl Iterator<Item = (T, bool)> {
+    let mut items = items.into_iter().peekable();
+    std::iter::from_fn(move || {
+        let item = items.next()?;
+        Some((item, items.peek().is_some()))
+    })
 }
 
 /// One side effect requested by a Core message handler.
@@ -283,9 +428,11 @@ impl<'handler> CoreEffectInterpreter<'handler> {
         &self,
         effects: impl IntoIterator<Item = CoreEffect<'payload>>,
     ) -> Result<()> {
-        for effect in effects {
+        for (effect, has_next) in core_actor_steps(effects) {
             self.run(effect).await?;
-            yield_core_actor_step().await;
+            if has_next {
+                yield_core_actor_step().await;
+            }
         }
         Ok(())
     }
@@ -293,6 +440,19 @@ impl<'handler> CoreEffectInterpreter<'handler> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+    use std::future::Future;
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+    use std::sync::atomic::AtomicUsize;
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+    use std::sync::atomic::Ordering;
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+    use std::task::Context;
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+    use std::task::Wake;
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+    use std::task::Waker;
+
     use super::*;
     use crate::dht::StorageSyncDestination;
     use crate::dht::StorageSyncPurpose;
@@ -319,6 +479,40 @@ mod tests {
         effect: Result<Option<CoreEffect<'payload>>>,
     ) -> Result<CoreEffect<'payload>> {
         effect?.ok_or_else(|| Error::InvalidMessage("expected one effect".to_string()))
+    }
+
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+    struct WakeCounter(AtomicUsize);
+
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+    impl Wake for WakeCounter {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+    #[test]
+    fn core_actor_step_yields_for_exactly_one_poll() {
+        let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&wake_counter));
+        let mut context = Context::from_waker(&waker);
+        let mut future = std::pin::pin!(yield_core_actor_step());
+
+        assert_eq!(Future::poll(future.as_mut(), &mut context), Poll::Pending);
+        assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
+        assert_eq!(Future::poll(future.as_mut(), &mut context), Poll::Ready(()));
+        assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn core_actor_steps_marks_only_real_yield_boundaries() {
+        assert_eq!(core_actor_steps([1, 2, 3]).collect::<Vec<_>>(), vec![
+            (1, true),
+            (2, true),
+            (3, false),
+        ]);
+        assert_eq!(core_actor_steps(Vec::<u8>::new()).next(), None);
     }
 
     #[test]
