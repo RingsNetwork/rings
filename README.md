@@ -121,7 +121,7 @@ rings daemon restart
 ```
 
 On macOS, Rings installs `~/Library/LaunchAgents/io.ringsnetwork.node.plist`. On
-Linux, it installs `${XDG_CONFIG_HOME:-~/.config}/systemd/user/rings-node.service`.
+Linux, it installs `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/rings-node.service`.
 `start` enables login startup. `stop` stops the current process while preserving
 that registration, so the service starts again at the next login.
 

@@ -205,24 +205,25 @@ fn parse_systemd_status(output: &str) -> Result<DaemonStatus, DaemonError> {
         manager: "systemd --user",
         detail: "missing LoadState property",
     })?;
-    if load_state == "not-found" {
-        return Ok(DaemonStatus {
-            state: DaemonState::NotInstalled,
-            autostart: AutostartState::Disabled,
-        });
-    }
-    let state = if load_state == "loaded" {
-        parse_systemd_state(active_state.ok_or(DaemonError::MalformedServiceStatus {
-            manager: "systemd --user",
-            detail: "missing ActiveState property",
-        })?)
+    let active_state = active_state.ok_or(DaemonError::MalformedServiceStatus {
+        manager: "systemd --user",
+        detail: "missing ActiveState property",
+    })?;
+    let state = parse_systemd_status_state(load_state, active_state);
+    let autostart = if matches!(state, DaemonState::NotInstalled) {
+        AutostartState::Disabled
     } else {
-        DaemonState::Unknown(format!("load state: {load_state}"))
+        parse_systemd_autostart(unit_file_state.unwrap_or_default())
     };
-    Ok(DaemonStatus {
-        state,
-        autostart: parse_systemd_autostart(unit_file_state.unwrap_or_default()),
-    })
+    Ok(DaemonStatus { state, autostart })
+}
+
+fn parse_systemd_status_state(load_state: &str, active_state: &str) -> DaemonState {
+    match (load_state, active_state) {
+        ("not-found", "inactive") => DaemonState::NotInstalled,
+        ("loaded" | "not-found", state) => parse_systemd_state(state),
+        (load_state, _) => DaemonState::Unknown(format!("load state: {load_state}")),
+    }
 }
 
 fn parse_systemd_autostart(output: &str) -> AutostartState {
@@ -237,6 +238,9 @@ fn parse_systemd_autostart(output: &str) -> AutostartState {
 
 #[cfg(test)]
 mod tests {
+    use std::env;
+    use std::fs;
+
     use rings_node::logging::LogLevel;
 
     use super::super::super::RuntimeFlavor;
@@ -244,6 +248,23 @@ mod tests {
     use super::super::tests::command_runner::ScriptedCommandRunner;
     use super::super::tests::service_spec;
     use super::*;
+
+    fn test_root(name: &str) -> PathBuf {
+        env::temp_dir().join(format!(
+            "rings-daemon-systemd-{name}-{}",
+            std::process::id()
+        ))
+    }
+
+    fn test_manager(
+        root: &Path,
+        runner: ScriptedCommandRunner,
+    ) -> SystemdManager<ScriptedCommandRunner> {
+        SystemdManager {
+            unit_path: root.join("systemd/user").join(SYSTEMD_UNIT),
+            runner,
+        }
+    }
 
     #[test]
     fn definition_quotes_arguments_and_sets_working_directory() -> Result<(), DaemonError> {
@@ -298,12 +319,18 @@ mod tests {
     {
         let running =
             parse_systemd_status("LoadState=loaded\nActiveState=active\nUnitFileState=enabled\n")?;
+        let detached_running =
+            parse_systemd_status("LoadState=not-found\nActiveState=active\nUnitFileState=\n")?;
         let missing =
             parse_systemd_status("LoadState=not-found\nActiveState=inactive\nUnitFileState=\n")?;
 
         assert_eq!(running, DaemonStatus {
             state: DaemonState::Running,
             autostart: AutostartState::Enabled,
+        });
+        assert_eq!(detached_running, DaemonStatus {
+            state: DaemonState::Running,
+            autostart: AutostartState::Unknown,
         });
         assert_eq!(missing, DaemonStatus {
             state: DaemonState::NotInstalled,
@@ -313,13 +340,13 @@ mod tests {
     }
 
     #[test]
-    fn stop_targets_a_loaded_unit_when_the_local_definition_is_missing() -> Result<(), DaemonError>
+    fn stop_targets_an_active_unit_when_the_local_definition_is_missing() -> Result<(), DaemonError>
     {
         let runner = ScriptedCommandRunner::new([
             CommandStep::success(
                 "systemctl",
                 &SYSTEMD_STATUS_ARGS,
-                "LoadState=loaded\nActiveState=active\nUnitFileState=enabled\n",
+                "LoadState=not-found\nActiveState=active\nUnitFileState=\n",
             ),
             CommandStep::success("systemctl", &["--user", "stop", SYSTEMD_UNIT], ""),
         ]);
@@ -354,17 +381,64 @@ mod tests {
     }
 
     #[test]
-    fn installed_start_and_restart_reload_enable_then_restart() -> Result<(), DaemonError> {
+    fn start_installs_definition_then_reload_enables_and_restarts() -> Result<(), DaemonError> {
+        let root = test_root("start-sequence");
+        let _ = fs::remove_dir_all(&root);
         let runner = ScriptedCommandRunner::new([
             CommandStep::success("systemctl", &["--user", "daemon-reload"], ""),
             CommandStep::success("systemctl", &["--user", "enable", SYSTEMD_UNIT], ""),
             CommandStep::success("systemctl", &["--user", "restart", SYSTEMD_UNIT], ""),
         ]);
+        let manager = test_manager(&root, runner);
+        let spec = service_spec(&LogLevel::Info, &RuntimeFlavor::MultiThread)?;
 
-        reload_enable_restart(&runner)?;
+        let result = manager.start(&spec);
 
-        runner.assert_exhausted();
+        assert!(manager.unit_path.is_file());
+        manager.runner.assert_exhausted();
+        assert!(fs::remove_dir_all(&root).is_ok());
+        result
+    }
+
+    #[test]
+    fn restart_targets_an_active_unit_when_the_local_definition_is_missing(
+    ) -> Result<(), DaemonError> {
+        let runner = ScriptedCommandRunner::new([
+            CommandStep::success(
+                "systemctl",
+                &SYSTEMD_STATUS_ARGS,
+                "LoadState=not-found\nActiveState=active\nUnitFileState=\n",
+            ),
+            CommandStep::success("systemctl", &["--user", "restart", SYSTEMD_UNIT], ""),
+        ]);
+        let manager = SystemdManager {
+            unit_path: PathBuf::from("/definition/does/not/exist"),
+            runner,
+        };
+
+        manager.restart()?;
+
+        manager.runner.assert_exhausted();
         Ok(())
+    }
+
+    #[test]
+    fn restart_of_installed_unit_reloads_enables_and_restarts() -> Result<(), DaemonError> {
+        let root = test_root("restart-sequence");
+        let _ = fs::remove_dir_all(&root);
+        let runner = ScriptedCommandRunner::new([
+            CommandStep::success("systemctl", &["--user", "daemon-reload"], ""),
+            CommandStep::success("systemctl", &["--user", "enable", SYSTEMD_UNIT], ""),
+            CommandStep::success("systemctl", &["--user", "restart", SYSTEMD_UNIT], ""),
+        ]);
+        let manager = test_manager(&root, runner);
+        write_atomic(&manager.unit_path, "installed")?;
+
+        let result = manager.restart();
+
+        manager.runner.assert_exhausted();
+        assert!(fs::remove_dir_all(&root).is_ok());
+        result
     }
 
     #[test]

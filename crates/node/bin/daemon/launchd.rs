@@ -145,21 +145,20 @@ where R: CommandRunner
     }
 
     fn restart(&self) -> Result<(), DaemonError> {
-        if !self.definition_path.is_file() {
-            return Err(DaemonError::ServiceNotInstalled {
-                path: self.definition_path.clone(),
-            });
-        }
-        run_checked(&self.runner, "/bin/launchctl", &["enable", &self.target])?;
         if self.is_loaded()? {
+            run_checked(&self.runner, "/bin/launchctl", &["enable", &self.target])?;
             run_checked(&self.runner, "/bin/launchctl", &[
                 "kickstart",
                 "-k",
                 &self.target,
             ])?;
             Ok(())
-        } else {
+        } else if self.definition_path.is_file() {
             self.bootstrap()
+        } else {
+            Err(DaemonError::ServiceNotInstalled {
+                path: self.definition_path.clone(),
+            })
         }
     }
 
@@ -391,8 +390,27 @@ mod tests {
     }
 
     #[test]
-    fn restart_kickstarts_only_an_already_loaded_service() -> Result<(), DaemonError> {
+    fn restart_kickstarts_a_loaded_service_without_a_definition() -> Result<(), DaemonError> {
         let root = test_root("restart-sequence");
+        let _ = fs::remove_dir_all(&root);
+        let domain = "gui/501";
+        let target = format!("{domain}/{LAUNCHD_LABEL}");
+        let runner = ScriptedCommandRunner::new([
+            CommandStep::success("/bin/launchctl", &["print", &target], "state = running\n"),
+            CommandStep::success("/bin/launchctl", &["enable", &target], ""),
+            CommandStep::success("/bin/launchctl", &["kickstart", "-k", &target], ""),
+        ]);
+        let manager = test_manager(&root, runner);
+
+        let result = manager.restart();
+
+        manager.runner.assert_exhausted();
+        result
+    }
+
+    #[test]
+    fn restart_bootstraps_an_installed_but_unloaded_service() -> Result<(), DaemonError> {
+        let root = test_root("restart-bootstrap-sequence");
         let _ = fs::remove_dir_all(&root);
         let domain = "gui/501";
         let target = format!("{domain}/{LAUNCHD_LABEL}");
@@ -400,11 +418,21 @@ mod tests {
             .join("Library")
             .join("LaunchAgents")
             .join(format!("{LAUNCHD_LABEL}.plist"));
+        let definition_text = path_text(&definition)?;
         write_atomic(&definition, "installed")?;
         let runner = ScriptedCommandRunner::new([
+            CommandStep::failure(
+                "/bin/launchctl",
+                &["print", &target],
+                LAUNCHD_SERVICE_NOT_FOUND,
+                "Could not find specified service",
+            ),
             CommandStep::success("/bin/launchctl", &["enable", &target], ""),
-            CommandStep::success("/bin/launchctl", &["print", &target], "state = running\n"),
-            CommandStep::success("/bin/launchctl", &["kickstart", "-k", &target], ""),
+            CommandStep::success(
+                "/bin/launchctl",
+                &["bootstrap", domain, &definition_text],
+                "",
+            ),
         ]);
         let manager = test_manager(&root, runner);
 
@@ -413,6 +441,27 @@ mod tests {
         manager.runner.assert_exhausted();
         assert!(fs::remove_dir_all(&root).is_ok());
         result
+    }
+
+    #[test]
+    fn restart_rejects_an_unloaded_service_without_a_definition() {
+        let root = test_root("restart-not-installed");
+        let target = format!("gui/501/{LAUNCHD_LABEL}");
+        let runner = ScriptedCommandRunner::new([CommandStep::failure(
+            "/bin/launchctl",
+            &["print", &target],
+            LAUNCHD_SERVICE_NOT_FOUND,
+            "Could not find specified service",
+        )]);
+        let manager = test_manager(&root, runner);
+
+        let result = manager.restart();
+
+        assert!(matches!(
+            result,
+            Err(DaemonError::ServiceNotInstalled { .. })
+        ));
+        manager.runner.assert_exhausted();
     }
 
     #[test]
