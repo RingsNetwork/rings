@@ -16,6 +16,7 @@ use super::pending::SharedConnectionLifecycles;
 use super::PendingConnectionAttempt;
 use super::SwarmConnection;
 use super::SwarmTransport;
+use super::TRANSPORT_TIMEOUT_PROFILE;
 use crate::dht::did::BiasId;
 use crate::dht::Chord;
 use crate::dht::CorrectChord;
@@ -28,16 +29,20 @@ use crate::utils::sleep;
 
 const DATA_CHANNEL_OPEN_TIMEOUT: Duration = Duration::from_secs(8);
 const TRANSPORT_READINESS_POLL_INTERVAL: Duration = Duration::from_millis(50);
-#[cfg(test)]
-pub(super) const DATA_CHANNEL_CLOSE_TIMEOUT: Duration = Duration::from_millis(100);
-#[cfg(not(test))]
-pub(super) const DATA_CHANNEL_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
+pub(super) const DATA_CHANNEL_CLOSE_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.close;
 
 pub(super) async fn await_bounded_connection_close(
     close: impl Future<Output = Result<()>>,
 ) -> Result<bool> {
+    await_bounded_connection_close_with_timeout(close, DATA_CHANNEL_CLOSE_TIMEOUT).await
+}
+
+async fn await_bounded_connection_close_with_timeout(
+    close: impl Future<Output = Result<()>>,
+    close_timeout: Duration,
+) -> Result<bool> {
     let close = close.fuse();
-    let timeout = sleep(DATA_CHANNEL_CLOSE_TIMEOUT).fuse();
+    let timeout = sleep(close_timeout).fuse();
     pin_mut!(close, timeout);
     select! {
         result = close => result.map(|()| true),
@@ -692,5 +697,22 @@ async fn wait_for_transport_readiness(connection: &SwarmConnection) -> Result<()
             return readiness.ensure_can_make_progress();
         }
         sleep(TRANSPORT_READINESS_POLL_INTERVAL).await;
+    }
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn bounded_close_uses_the_injected_failure_deadline() -> Result<()> {
+        let completed = await_bounded_connection_close_with_timeout(
+            std::future::pending::<Result<()>>(),
+            Duration::from_millis(1),
+        )
+        .await?;
+
+        assert!(!completed);
+        Ok(())
     }
 }

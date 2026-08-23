@@ -59,10 +59,9 @@ const DATA_CHANNEL_POOL_SIZE: u8 = 4;
 /// How often the delivery future re-checks whether a message has been flushed.
 const DELIVERY_POLL_INTERVAL: Duration = Duration::from_millis(300);
 
-#[cfg(test)]
-const NATIVE_SEND_COMPLETION_TIMEOUT: Duration = Duration::from_millis(100);
-#[cfg(not(test))]
 const NATIVE_SEND_COMPLETION_TIMEOUT: Duration = Duration::from_secs(25);
+#[cfg(test)]
+const NATIVE_SEND_TEST_COMPLETION_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// A data channel paired with a monotonic counter of the total bytes ever
 /// enqueued onto it, plus a lock that serializes sends. The counter lets the
@@ -221,12 +220,23 @@ async fn run_irrevocable_send<T>(
 where
     T: Send + 'static,
 {
+    run_irrevocable_send_with_timeout(runtime, NATIVE_SEND_COMPLETION_TIMEOUT, send).await
+}
+
+async fn run_irrevocable_send_with_timeout<T>(
+    runtime: &tokio::runtime::Handle,
+    completion_timeout: Duration,
+    send: impl std::future::Future<Output = Result<T>> + Send + 'static,
+) -> Result<T>
+where
+    T: Send + 'static,
+{
     runtime
         .spawn(async move {
-            tokio::time::timeout(NATIVE_SEND_COMPLETION_TIMEOUT, send)
+            tokio::time::timeout(completion_timeout, send)
                 .await
                 .map_err(|_| Error::NativeSendCompletionTimeout {
-                    timeout_ms: NATIVE_SEND_COMPLETION_TIMEOUT.as_millis(),
+                    timeout_ms: completion_timeout.as_millis(),
                 })?
         })
         .await
@@ -343,14 +353,18 @@ mod send_cancellation_tests {
     #[tokio::test]
     async fn irrevocable_native_send_has_a_completion_bound() {
         let runtime = native_send_runtime().expect("Tokio test runtime must be available");
-        let error = run_irrevocable_send(&runtime, std::future::pending::<Result<()>>())
-            .await
-            .expect_err("an irrevocable send must not remain pending forever");
+        let error = run_irrevocable_send_with_timeout(
+            &runtime,
+            NATIVE_SEND_TEST_COMPLETION_TIMEOUT,
+            std::future::pending::<Result<()>>(),
+        )
+        .await
+        .expect_err("an irrevocable send must not remain pending forever");
 
         assert!(matches!(
             error,
             Error::NativeSendCompletionTimeout { timeout_ms }
-                if timeout_ms == NATIVE_SEND_COMPLETION_TIMEOUT.as_millis()
+                if timeout_ms == NATIVE_SEND_TEST_COMPLETION_TIMEOUT.as_millis()
         ));
     }
 }

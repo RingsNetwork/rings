@@ -9,6 +9,23 @@ impl futures::task::ArcWake for WakeCounter {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
+#[test]
+fn inbound_capacity_advances_shared_activity_generation() {
+    let activity = Arc::new(crate::swarm::transport::TestActivityTracker::new());
+    let capacity = Arc::new(InboundCapacity::with_test_activity(activity.clone()));
+
+    let permit = capacity
+        .try_acquire(Some(Did::from(1_u32)), InboundLane::Application, 1)
+        .expect("test admission must fit");
+    assert!(!activity.snapshot().is_idle());
+    assert_eq!(activity.snapshot().generation(), 1);
+
+    drop(permit);
+    assert!(activity.snapshot().is_idle());
+    assert_eq!(activity.snapshot().generation(), 2);
+}
+
 #[cfg_attr(
     all(feature = "wasm", target_family = "wasm"),
     wasm_bindgen_test::wasm_bindgen_test

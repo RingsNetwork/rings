@@ -70,6 +70,7 @@ mod tests {
     use crate::storage::MemStorage;
     use crate::swarm::Swarm;
     use crate::swarm::SwarmBuilder;
+    use crate::tests::default::dummy_hooks::ControlledDeliveryGuard;
     use crate::tests::default::Node;
     use crate::tests::manually_establish_connection;
 
@@ -104,21 +105,6 @@ mod tests {
     const MAX_STAGNANT_ROUNDS: usize = 20;
     /// Number of recent round summaries retained for failure diagnostics.
     const TRACE_WINDOW: usize = 16;
-
-    struct ControlledDeliveryGuard;
-
-    impl ControlledDeliveryGuard {
-        fn enable() -> Self {
-            dummy_controlled::enable(true);
-            Self
-        }
-    }
-
-    impl Drop for ControlledDeliveryGuard {
-        fn drop(&mut self) {
-            dummy_controlled::enable(false);
-        }
-    }
 
     #[derive(Debug, Default)]
     struct DrainStats {
@@ -388,7 +374,7 @@ mod tests {
         let expected = expected_dhts(&swarms);
         let mut diagnostics = ScheduleDiagnostics::default();
 
-        let _controlled = ControlledDeliveryGuard::enable();
+        let _controlled = ControlledDeliveryGuard::new();
 
         // Star bootstrap - queues each connection's setup events.
         for sw in swarms.iter().skip(1) {

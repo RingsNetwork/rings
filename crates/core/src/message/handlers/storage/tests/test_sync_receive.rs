@@ -5,7 +5,6 @@ use super::super::StorageSyncBatch;
 use super::super::StorageSyncBatchStep;
 use super::test_support::install_two_node_chord_view;
 use super::test_support::next_generated_key;
-use super::test_support::next_payload;
 use super::test_support::next_payload_for_tx;
 use super::test_support::non_affine_placement;
 use super::test_support::prepare_node_with_storage_redundancy;
@@ -314,7 +313,7 @@ async fn sync_entries_handler_accepts_placement_destination_on_local_branch() ->
         node1.dht().storage.get(&placement_key.to_string()).await?,
         Some(stored_entry.clone())
     );
-    let ack = next_payload(&node2).await?;
+    let ack = next_payload_for_tx(&node2, context.transaction.tx_id).await?;
     assert!(matches!(
         ack.transaction.data()?,
         Message::SyncEntriesWithSuccessorReport(SyncEntriesWithSuccessorReport {

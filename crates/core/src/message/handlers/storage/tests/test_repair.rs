@@ -1,14 +1,11 @@
 use std::sync::Arc;
 
-#[cfg(feature = "dummy")]
-use rings_transport::connections::dummy_controlled;
-
 use super::super::ChordStorageInterface;
 use super::super::ChordStorageInterfaceCacheChecker;
 #[cfg(feature = "dummy")]
 use super::test_support::install_two_node_chord_view;
 use super::test_support::next_generated_key;
-use super::test_support::next_payload;
+use super::test_support::next_payload_matching;
 use super::test_support::non_affine_placement;
 use super::test_support::prepare_node_with_storage_redundancy;
 use super::test_support::split_redundant_entry;
@@ -29,6 +26,7 @@ use crate::message::Encoder;
 use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
+use crate::message::MessageVerificationExt;
 use crate::prelude::entry::EntryKind;
 use crate::prelude::entry::EntryOperation;
 use crate::session::SessionSk;
@@ -37,28 +35,12 @@ use crate::swarm::transport::STORAGE_LOOKUP_OBSERVATION_CAPACITY;
 use crate::swarm::Swarm;
 use crate::swarm::SwarmBuilder;
 use crate::tests::default::assert_no_more_msg;
+#[cfg(feature = "dummy")]
+use crate::tests::default::dummy_hooks::PendingSendGuard;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
 use crate::tests::default::Node;
 use crate::tests::manually_establish_connection;
-
-#[cfg(feature = "dummy")]
-struct PendingSendGuard;
-
-#[cfg(feature = "dummy")]
-impl PendingSendGuard {
-    fn new() -> Self {
-        dummy_controlled::set_send_message_pending(true);
-        Self
-    }
-}
-
-#[cfg(feature = "dummy")]
-impl Drop for PendingSendGuard {
-    fn drop(&mut self) {
-        dummy_controlled::set_send_message_pending(false);
-    }
-}
 
 #[tokio::test]
 async fn storage_repair_request_after_claim_remains_pending() -> Result<()> {
@@ -267,14 +249,23 @@ async fn remote_redundant_store_writes_split_replica_at_affine_placement() -> Re
 
     <Swarm as ChordStorageInterface<2>>::storage_store(&writer.swarm, entry.clone()).await?;
 
-    let payload = next_payload(remote_replica_owner).await?;
-    assert!(matches!(
-        payload.transaction.data()?,
-        Message::OperateEntry(PlacedEntryOperation {
-            placement,
-            op: EntryOperation::Overwrite(remote_entry),
-        }) if placement == replica && remote_entry.did == entry.did
-    ));
+    next_payload_matching(
+        remote_replica_owner,
+        "remote redundant overwrite operation",
+        |payload| {
+            Ok(payload.transaction.signer() == writer.did()
+                && payload.transaction.destination == remote_replica_owner.did()
+                && payload.relay.destination == remote_replica_owner.did()
+                && matches!(
+                    payload.transaction.data()?,
+                    Message::OperateEntry(PlacedEntryOperation {
+                        placement,
+                        op: EntryOperation::Overwrite(remote_entry),
+                    }) if placement == replica && remote_entry.did == entry.did
+                ))
+        },
+    )
+    .await?;
     assert_eq!(
         writer
             .dht()

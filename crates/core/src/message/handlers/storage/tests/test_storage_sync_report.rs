@@ -3,7 +3,6 @@ use std::sync::Arc;
 use super::super::next_hop_for_sync_entries;
 use super::super::persist_synced_entries;
 use super::test_support::next_generated_key;
-use super::test_support::next_payload;
 use super::test_support::next_payload_for_tx;
 use super::test_support::physical_sync_route_next_hop;
 use super::test_support::prepare_node_with_virtual_nodes;
@@ -76,7 +75,7 @@ async fn sync_entries_handler_reports_persisted_entries() -> Result<()> {
 
     receiver_handler.handle(&context, &sync_msg).await?;
 
-    let payload = next_payload(&sender).await?;
+    let payload = next_payload_for_tx(&sender, context.transaction.tx_id).await?;
     match payload.transaction.data::<Message>()? {
         Message::SyncEntriesWithSuccessorReport(report) => {
             assert_eq!(report.acks, vec![SyncedEntryAck::new(

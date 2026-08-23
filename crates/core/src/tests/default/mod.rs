@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -28,7 +29,7 @@ use crate::swarm::SwarmBuilder;
 mod test_dht_convergence;
 // Uses the `stateright` model checker, which doesn't build for wasm32.
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-mod dummy_hooks;
+pub(crate) mod dummy_hooks;
 #[cfg(not(target_family = "wasm"))]
 mod test_dht_stateright;
 mod test_dht_trace_replay;
@@ -49,10 +50,24 @@ mod test_stabilization_failover;
 const TEST_DHT_FINGER_TABLE_SIZE: usize = 8;
 const TEST_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const TEST_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(5);
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub(crate) const TEST_NETWORK_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(not(all(feature = "dummy", not(target_family = "wasm"))))]
+pub(crate) const TEST_NETWORK_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub struct Node {
     pub swarm: Arc<Swarm>,
-    message_rx: Mutex<mpsc::UnboundedReceiver<MessagePayload>>,
+    inbox: Mutex<NodeInbox>,
+}
+
+struct NodeInbox {
+    buffered: VecDeque<MessagePayload>,
+    receiver: mpsc::UnboundedReceiver<MessagePayload>,
+}
+
+pub(crate) struct NodeMessageScan<'a> {
+    inbox: futures::lock::MutexGuard<'a, NodeInbox>,
+    skipped: Vec<MessagePayload>,
 }
 
 pub struct NodeCallback {
@@ -66,17 +81,39 @@ impl Node {
         swarm.set_callback(Arc::new(callback)).unwrap();
         Self {
             swarm,
-            message_rx: Mutex::new(message_rx),
+            inbox: Mutex::new(NodeInbox {
+                buffered: VecDeque::new(),
+                receiver: message_rx,
+            }),
         }
     }
 
     pub async fn listen_once(&self) -> Option<MessagePayload> {
-        self.message_rx.lock().await.recv().await
+        self.message_scan().await.next().await
     }
 
     /// Non-blocking variant: pop a buffered message if one is immediately available, else `None`.
     pub async fn try_listen_once(&self) -> Option<MessagePayload> {
-        self.message_rx.lock().await.try_recv().ok()
+        let mut inbox = self.inbox.lock().await;
+        match inbox.buffered.pop_front() {
+            Some(payload) => Some(payload),
+            None => inbox.receiver.try_recv().ok(),
+        }
+    }
+
+    pub(crate) async fn message_scan(&self) -> NodeMessageScan<'_> {
+        NodeMessageScan {
+            inbox: self.inbox.lock().await,
+            skipped: Vec::new(),
+        }
+    }
+
+    /// Seed the front of this test node's inbox without changing message order.
+    pub(crate) async fn prepend_messages_for_test(&self, messages: Vec<MessagePayload>) {
+        let mut inbox = self.inbox.lock().await;
+        for payload in messages.into_iter().rev() {
+            inbox.buffered.push_front(payload);
+        }
     }
 
     /// Whether any connection is still mid-handshake. Used to detect true
@@ -87,6 +124,24 @@ impl Node {
             .pending_connection_count()
             .unwrap_or_default()
             > 0
+    }
+
+    /// Whether a transfer is queued, sending, or waiting for delivery.
+    pub fn has_outbound_transfer(&self) -> bool {
+        self.swarm
+            .transport
+            .outbound_admitted_transfer_total_for_test()
+            > 0
+    }
+
+    /// Whether an admitted inbound message is queued or still being handled.
+    pub fn has_inbound_message(&self) -> bool {
+        self.swarm.transport.inbound_admitted_count_for_test() > 0
+    }
+
+    /// Atomic active-count and generation snapshot shared by inbound and outbound test work.
+    pub fn activity_snapshot(&self) -> crate::swarm::transport::TestActivitySnapshot {
+        self.swarm.transport.test_activity_snapshot()
     }
 
     pub fn did(&self) -> Did {
@@ -110,6 +165,35 @@ impl Node {
         );
         for addr in addresses {
             assert!(self.swarm.transport.get_connection(addr).is_some());
+        }
+    }
+}
+
+impl NodeMessageScan<'_> {
+    pub(crate) async fn next(&mut self) -> Option<MessagePayload> {
+        match self.inbox.buffered.pop_front() {
+            Some(payload) => Some(payload),
+            None => self.inbox.receiver.recv().await,
+        }
+    }
+
+    pub(crate) fn skip(&mut self, payload: MessagePayload) {
+        self.skipped.push(payload);
+    }
+
+    pub(crate) fn skipped(&self) -> &[MessagePayload] {
+        &self.skipped
+    }
+
+    pub(crate) fn pop_skipped(&mut self) -> Option<MessagePayload> {
+        self.skipped.pop()
+    }
+}
+
+impl Drop for NodeMessageScan<'_> {
+    fn drop(&mut self) {
+        for payload in self.skipped.drain(..).rev() {
+            self.inbox.buffered.push_front(payload);
         }
     }
 }
@@ -300,7 +384,8 @@ pub async fn assert_no_more_msg(nodes: impl IntoIterator<Item = &Node>) {
 }
 
 /// Wait until the nodes are quiescent, **state-driven, not on a wall clock**: every connection has
-/// finished its handshake (none left in `New`/`Connecting`) and no buffered messages remain.
+/// finished its handshake, every inbound and outbound transfer has completed, and no buffered
+/// message remains.
 ///
 /// The old version returned after a fixed 3-second silence gap, which could fire *mid-handshake* —
 /// e.g. while a stabilization-triggered connection's answer SDP (`ConnectNodeReport`) was still
@@ -345,6 +430,15 @@ pub async fn wait_for_msgs(nodes: impl IntoIterator<Item = &Node>) {
         drained
     };
     let handshaking = || nodes.iter().any(|n| n.has_handshaking_connection());
+    let inbound = || nodes.iter().any(|n| n.has_inbound_message());
+    let outbound = || nodes.iter().any(|n| n.has_outbound_transfer());
+    let activity = || {
+        nodes
+            .iter()
+            .map(|node| node.activity_snapshot())
+            .collect::<Vec<_>>()
+    };
+    let transport_activity = pending_transport_snapshot;
     // A snapshot of every node's DHT. Opening the data channel fires `join_dht`, which mutates the
     // DHT and emits more messages *after* the ICE connection state reached `Connected` — so true
     // quiescence also requires the DHT to have stopped changing, not just the handshakes to be done.
@@ -357,17 +451,37 @@ pub async fn wait_for_msgs(nodes: impl IntoIterator<Item = &Node>) {
 
     // Diagnostics + hard failure if quiescence is never reached — never silently proceed, or later
     // assertions would run against unresolved async state (the bug this helper exists to catch).
-    let ceiling = Duration::from_secs(30);
+    let ceiling = TEST_NETWORK_IDLE_TIMEOUT;
     let started = std::time::Instant::now();
     loop {
         let drained = drain().await;
         let before = snapshot();
-        if !drained && !handshaking() {
+        let activity_before = activity();
+        let transport_before = transport_activity();
+        if !drained
+            && !handshaking()
+            && !inbound()
+            && !outbound()
+            && activity_before.iter().all(|snapshot| snapshot.is_idle())
+            && transport_before.is_idle()
+        {
             // Quiescent candidate: settle briefly, then require that across the gap nothing changed
             // — no message handed off, no handshake started, and no DHT mutation (join_dht /
             // stabilize chains). Any change means activity is still in flight; keep waiting.
             sleep(Duration::from_millis(500)).await;
-            if !drain().await && !handshaking() && snapshot() == before {
+            let quiet = !drain().await && !handshaking() && !inbound() && !outbound();
+            let unchanged_dht = snapshot() == before;
+            // Read atomic activity states last. Equality plus zero active work proves no inbound
+            // or outbound lifecycle transition occurred in the candidate observation window.
+            let activity_after = activity();
+            let unchanged_activity = activity_after == activity_before
+                && activity_after.iter().all(|snapshot| snapshot.is_idle());
+            // This is the final synchronous observation before returning. The dummy queue is
+            // thread-local, so no event can be enqueued between this snapshot and the return.
+            let transport_after = transport_activity();
+            let unchanged_transport =
+                transport_after == transport_before && transport_after.is_idle();
+            if quiet && unchanged_dht && unchanged_activity && unchanged_transport {
                 return;
             }
         } else {
@@ -385,10 +499,74 @@ pub async fn wait_for_msgs(nodes: impl IntoIterator<Item = &Node>) {
                         .unwrap_or_default()
                 })
                 .collect();
+            let outbound_nodes: Vec<(String, usize)> = nodes
+                .iter()
+                .filter_map(|n| {
+                    let admitted = n
+                        .swarm
+                        .transport
+                        .outbound_admitted_transfer_total_for_test();
+                    (admitted > 0).then(|| {
+                        (
+                            did_names
+                                .get(&n.did())
+                                .map(|s| s.clone())
+                                .unwrap_or_default(),
+                            admitted,
+                        )
+                    })
+                })
+                .collect();
+            let inbound_nodes: Vec<(String, usize)> = nodes
+                .iter()
+                .filter_map(|n| {
+                    let admitted = n.swarm.transport.inbound_admitted_count_for_test();
+                    (admitted > 0).then(|| {
+                        (
+                            did_names
+                                .get(&n.did())
+                                .map(|s| s.clone())
+                                .unwrap_or_default(),
+                            admitted,
+                        )
+                    })
+                })
+                .collect();
             panic!(
                 "wait_for_msgs did not reach quiescence within {ceiling:?}: still-handshaking \
-                 nodes={handshaking_nodes:?}, last-loop drained={drained}"
+                 nodes={handshaking_nodes:?}, inbound={inbound_nodes:?}, \
+                 outbound={outbound_nodes:?}, transport-pending={}, last-loop drained={drained}",
+                pending_transport_snapshot().pending
             );
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingTransportSnapshot {
+    pending: usize,
+    generation: u64,
+}
+
+impl PendingTransportSnapshot {
+    const fn is_idle(self) -> bool {
+        self.pending == 0
+    }
+}
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+fn pending_transport_snapshot() -> PendingTransportSnapshot {
+    let snapshot = rings_transport::connections::dummy_controlled::snapshot();
+    PendingTransportSnapshot {
+        pending: snapshot.pending(),
+        generation: snapshot.generation(),
+    }
+}
+
+#[cfg(not(all(feature = "dummy", not(target_family = "wasm"))))]
+const fn pending_transport_snapshot() -> PendingTransportSnapshot {
+    PendingTransportSnapshot {
+        pending: 0,
+        generation: 0,
     }
 }

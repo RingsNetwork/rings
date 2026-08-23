@@ -1,5 +1,20 @@
 use rings_transport::connections::dummy_controlled;
 
+pub(crate) struct ControlledDeliveryGuard;
+
+impl ControlledDeliveryGuard {
+    pub(crate) fn new() -> Self {
+        dummy_controlled::enable(true);
+        Self
+    }
+}
+
+impl Drop for ControlledDeliveryGuard {
+    fn drop(&mut self) {
+        dummy_controlled::enable(false);
+    }
+}
+
 pub(super) struct PendingDataChannelOpenGuard;
 
 impl PendingDataChannelOpenGuard {
@@ -15,10 +30,10 @@ impl Drop for PendingDataChannelOpenGuard {
     }
 }
 
-pub(super) struct PendingSendGuard;
+pub(crate) struct PendingSendGuard;
 
 impl PendingSendGuard {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         dummy_controlled::set_send_message_pending(true);
         Self
     }

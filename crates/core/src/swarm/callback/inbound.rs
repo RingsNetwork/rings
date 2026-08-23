@@ -22,6 +22,10 @@ use crate::error::Result;
 use crate::message::MessageClass;
 use crate::message::MessageMeta;
 use crate::message::MessagePayload;
+#[cfg(all(test, not(target_family = "wasm")))]
+use crate::swarm::transport::TestActivityPermit;
+#[cfg(all(test, not(target_family = "wasm")))]
+use crate::swarm::transport::TestActivityTracker;
 use crate::utils::fair_reservation_fits;
 use crate::utils::fixed_reservation_covers;
 use crate::utils::FairAdmission;
@@ -201,14 +205,32 @@ pub(crate) struct InboundCapacity {
     state: Mutex<InboundCapacityState>,
     peer_states: Mutex<BTreeMap<Option<Did>, InboundPeerCapacityState>>,
     waiters: Arc<FairWaitQueue>,
+    #[cfg(all(test, not(target_family = "wasm")))]
+    test_activity: Arc<TestActivityTracker>,
 }
 
 impl InboundCapacity {
     pub(crate) fn new() -> Self {
+        Self::from_parts(
+            #[cfg(all(test, not(target_family = "wasm")))]
+            Arc::new(TestActivityTracker::new()),
+        )
+    }
+
+    #[cfg(all(test, not(target_family = "wasm")))]
+    pub(crate) fn with_test_activity(test_activity: Arc<TestActivityTracker>) -> Self {
+        Self::from_parts(test_activity)
+    }
+
+    fn from_parts(
+        #[cfg(all(test, not(target_family = "wasm")))] test_activity: Arc<TestActivityTracker>,
+    ) -> Self {
         Self {
             state: Mutex::new(InboundCapacityState::new()),
             peer_states: Mutex::new(BTreeMap::new()),
             waiters: Arc::new(FairWaitQueue::new()),
+            #[cfg(all(test, not(target_family = "wasm")))]
+            test_activity,
         }
     }
 
@@ -237,6 +259,8 @@ impl InboundCapacity {
         bytes: usize,
         reserved_only: bool,
     ) -> Result<InboundCapacityPermit> {
+        #[cfg(all(test, not(target_family = "wasm")))]
+        let test_activity = self.test_activity.begin();
         let mut peer_states = self
             .peer_states
             .lock()
@@ -274,6 +298,8 @@ impl InboundCapacity {
             peer,
             lane,
             bytes,
+            #[cfg(all(test, not(target_family = "wasm")))]
+            _test_activity: test_activity,
         })
     }
 
@@ -313,6 +339,14 @@ impl InboundCapacity {
             }
         }
     }
+
+    #[cfg(all(test, not(target_family = "wasm")))]
+    pub(crate) fn admitted_count_for_test(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .admitted
+    }
 }
 
 struct InboundCapacityPermit {
@@ -320,6 +354,8 @@ struct InboundCapacityPermit {
     peer: Option<Did>,
     lane: InboundLane,
     bytes: usize,
+    #[cfg(all(test, not(target_family = "wasm")))]
+    _test_activity: TestActivityPermit,
 }
 
 impl InboundCapacityPermit {
@@ -506,11 +542,7 @@ impl InboundMailbox {
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(super) fn admitted_count_for_test(&self) -> usize {
-        self.capacity
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .admitted
+        self.capacity.admitted_count_for_test()
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]

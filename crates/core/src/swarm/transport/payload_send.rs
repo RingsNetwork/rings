@@ -17,6 +17,7 @@ use super::outbound::OutboundTransferRoute;
 use super::outbound::TransferCapacityPermit;
 use super::AdmittedConnection;
 use super::SwarmTransport;
+use super::TRANSPORT_TIMEOUT_PROFILE;
 use crate::chunk::ChunkList;
 use crate::chunk::Framing;
 use crate::chunk::WireReserves;
@@ -33,10 +34,7 @@ use crate::message::PayloadSender;
 use crate::session::SessionSk;
 use crate::utils::sleep;
 
-#[cfg(test)]
-const TRACKED_PAYLOAD_TIMEOUT: Duration = Duration::from_millis(100);
-#[cfg(not(test))]
-const TRACKED_PAYLOAD_TIMEOUT: Duration = Duration::from_secs(25);
+const TRACKED_PAYLOAD_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.tracked_payload;
 
 struct OversizedPayloadLog {
     local: Did,
@@ -103,6 +101,15 @@ impl SwarmTransport {
         &self,
         payload: MessagePayload,
     ) -> Result<SendCompletionOutcome> {
+        self.send_payload_tracked_with_timeout(payload, TRACKED_PAYLOAD_TIMEOUT)
+            .await
+    }
+
+    async fn send_payload_tracked_with_timeout(
+        &self,
+        payload: MessagePayload,
+        tracked_payload_timeout: Duration,
+    ) -> Result<SendCompletionOutcome> {
         let did = payload.relay.next_hop;
         let stop = StopSource::new();
         let send = self
@@ -113,7 +120,7 @@ impl SwarmTransport {
                 stop.token(),
             )
             .fuse();
-        let timeout = sleep(TRACKED_PAYLOAD_TIMEOUT).fuse();
+        let timeout = sleep(tracked_payload_timeout).fuse();
         pin_mut!(send, timeout);
 
         select! {
@@ -124,7 +131,7 @@ impl SwarmTransport {
                     target: "rings_core::transport::tracked_send",
                     local = %self.dht.did,
                     peer = %did,
-                    timeout_ms = TRACKED_PAYLOAD_TIMEOUT.as_millis(),
+                    timeout_ms = tracked_payload_timeout.as_millis(),
                     "tracked payload delivery timed out and was deferred"
                 );
                 Ok(SendCompletionOutcome::Cancelled)

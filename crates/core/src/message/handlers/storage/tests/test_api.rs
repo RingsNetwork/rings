@@ -2,13 +2,14 @@ use super::super::ChordStorageInterface;
 use super::super::ChordStorageInterfaceCacheChecker;
 use super::test_support::assert_cached_data_values;
 use super::test_support::next_generated_key;
-use super::test_support::next_payload;
+use super::test_support::next_payload_matching;
 use crate::dht::entry::Entry;
 use crate::dht::entry::PlacedEntryOperation;
 use crate::ecc::tests::gen_ordered_keys;
 use crate::error::Result;
 use crate::message::types::Message;
 use crate::message::Encoder;
+use crate::message::MessageVerificationExt;
 use crate::prelude::entry::EntryOperation;
 use crate::swarm::Swarm;
 use crate::tests::default::assert_no_more_msg;
@@ -44,14 +45,19 @@ async fn storage_store_fetches_remote_entry_into_cache() -> Result<()> {
     assert!(node2.swarm.storage_check_cache(entry_key).await.is_none());
 
     <Swarm as ChordStorageInterface<1>>::storage_store(&node1.swarm, entry.clone()).await?;
-    let ev = next_payload(&node2).await?;
-    assert!(matches!(
-        ev.transaction.data()?,
-        Message::OperateEntry(PlacedEntryOperation {
-            placement,
-            op: EntryOperation::Overwrite(x),
-        }) if placement == entry_key && x.did == entry_key
-    ));
+    next_payload_matching(&node2, "remote overwrite operation", |payload| {
+        Ok(payload.transaction.signer() == node1.did()
+            && payload.transaction.destination == node2.did()
+            && payload.relay.destination == node2.did()
+            && matches!(
+                payload.transaction.data()?,
+                Message::OperateEntry(PlacedEntryOperation {
+                    placement,
+                    op: EntryOperation::Overwrite(x),
+                }) if placement == entry_key && x.did == entry_key
+            ))
+    })
+    .await?;
 
     assert!(node1.swarm.storage_check_cache(entry_key).await.is_none());
     assert!(node2.swarm.storage_check_cache(entry_key).await.is_none());
@@ -60,20 +66,30 @@ async fn storage_store_fetches_remote_entry_into_cache() -> Result<()> {
 
     <Swarm as ChordStorageInterface<1>>::storage_fetch(&node1.swarm, entry_key).await?;
 
-    let ev = next_payload(&node2).await?;
-    assert!(matches!(
-        ev.transaction.data()?,
-        Message::SearchEntry(x) if x.resource == entry_key && x.placement == entry_key
-    ));
+    next_payload_matching(&node2, "remote entry search", |payload| {
+        Ok(payload.transaction.signer() == node1.did()
+            && payload.transaction.destination == node2.did()
+            && payload.relay.destination == node2.did()
+            && matches!(
+                payload.transaction.data()?,
+                Message::SearchEntry(x) if x.resource == entry_key && x.placement == entry_key
+            ))
+    })
+    .await?;
 
-    let ev = next_payload(&node1).await?;
-    assert!(matches!(
-        ev.transaction.data()?,
-        Message::FoundEntry(x)
-            if x.resource == entry_key
-                && x.misses.is_empty()
-                && x.data.first().is_some_and(|entry| entry.did == entry_key)
-    ));
+    next_payload_matching(&node1, "entry lookup response", |payload| {
+        Ok(payload.transaction.signer() == node2.did()
+            && payload.transaction.destination == node1.did()
+            && payload.relay.destination == node1.did()
+            && matches!(
+                payload.transaction.data()?,
+                Message::FoundEntry(x)
+                    if x.resource == entry_key
+                        && x.misses.is_empty()
+                        && x.data.first().is_some_and(|entry| entry.did == entry_key)
+            ))
+    })
+    .await?;
 
     assert_cached_data_values(&node1, entry_key, &[data.as_str()]).await?;
 

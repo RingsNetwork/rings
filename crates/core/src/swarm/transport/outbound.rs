@@ -43,6 +43,8 @@ use super::delivery::ChunkSendProgress;
 use super::delivery::SendCompletionOutcome;
 use super::delivery::TransferStop;
 use super::AdmittedConnection;
+#[cfg(all(test, not(target_family = "wasm")))]
+use super::TestActivityTracker;
 use crate::chunk::Chunk;
 use crate::dht::Did;
 use crate::error::Error;
@@ -62,6 +64,8 @@ mod model;
 mod queue;
 
 use capacity::GlobalTransferCapacity;
+#[cfg(all(test, not(target_family = "wasm")))]
+use capacity::TransferActivity;
 use capacity::TransferCapacity;
 pub(super) use capacity::TransferCapacityPermit;
 #[cfg(test)]
@@ -406,6 +410,8 @@ impl Drop for OutboundPeerState {
 pub(super) struct OutboundSchedulers {
     registry: Mutex<OutboundRegistry>,
     global_capacity: Arc<GlobalTransferCapacity>,
+    #[cfg(all(test, not(target_family = "wasm")))]
+    activity: Arc<TransferActivity>,
     measure: Option<MeasureImpl>,
 }
 
@@ -438,9 +444,30 @@ impl OutboundRegistry {
 
 impl OutboundSchedulers {
     pub(super) fn new(measure: Option<MeasureImpl>) -> Self {
+        Self::from_parts(
+            measure,
+            #[cfg(all(test, not(target_family = "wasm")))]
+            Arc::new(TestActivityTracker::new()),
+        )
+    }
+
+    #[cfg(all(test, not(target_family = "wasm")))]
+    pub(super) fn with_test_activity(
+        measure: Option<MeasureImpl>,
+        test_activity: Arc<TestActivityTracker>,
+    ) -> Self {
+        Self::from_parts(measure, test_activity)
+    }
+
+    fn from_parts(
+        measure: Option<MeasureImpl>,
+        #[cfg(all(test, not(target_family = "wasm")))] test_activity: Arc<TestActivityTracker>,
+    ) -> Self {
         Self {
             registry: Mutex::new(OutboundRegistry::default()),
             global_capacity: Arc::new(GlobalTransferCapacity::new()),
+            #[cfg(all(test, not(target_family = "wasm")))]
+            activity: Arc::new(TransferActivity::new(test_activity)),
             measure,
         }
     }
@@ -475,8 +502,14 @@ impl OutboundSchedulers {
         class: TransferClass,
         bytes: usize,
     ) -> Result<TransferCapacityPermit> {
+        #[cfg(all(test, not(target_family = "wasm")))]
+        let activity = self.activity.begin();
         let capacity = self.lock_registry().capacity(peer, &self.global_capacity);
-        capacity.acquire(peer, class, bytes).await
+        let permit = capacity.acquire(peer, class, bytes).await?;
+        #[cfg(all(test, not(target_family = "wasm")))]
+        return Ok(permit.track_activity(activity));
+        #[cfg(not(all(test, not(target_family = "wasm"))))]
+        Ok(permit)
     }
 
     pub(super) fn shutdown(&self, peer: Did) {
@@ -506,6 +539,11 @@ impl OutboundSchedulers {
             .map(|capacity| capacity.admitted())
     }
 
+    #[cfg(all(test, not(target_family = "wasm")))]
+    fn admitted_transfer_total_for_test(&self) -> usize {
+        self.activity.admitted_for_test()
+    }
+
     fn lock_registry(&self) -> MutexGuard<'_, OutboundRegistry> {
         self.registry
             .lock()
@@ -530,6 +568,13 @@ impl super::SwarmTransport {
     pub(crate) fn outbound_admitted_transfer_count_for_test(&self, peer: Did) -> Option<usize> {
         self.outbound_schedulers
             .admitted_transfer_count_for_test(peer)
+    }
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+impl super::SwarmTransport {
+    pub(crate) fn outbound_admitted_transfer_total_for_test(&self) -> usize {
+        self.outbound_schedulers.admitted_transfer_total_for_test()
     }
 }
 

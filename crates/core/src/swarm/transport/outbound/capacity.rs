@@ -1,8 +1,16 @@
 use std::future::poll_fn;
+#[cfg(all(test, not(target_family = "wasm")))]
+use std::sync::atomic::AtomicUsize;
+#[cfg(all(test, not(target_family = "wasm")))]
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::task::Poll;
 
+#[cfg(all(test, not(target_family = "wasm")))]
+use super::super::TestActivityPermit;
+#[cfg(all(test, not(target_family = "wasm")))]
+use super::super::TestActivityTracker;
 use super::model::TransferClass;
 use crate::dht::Did;
 use crate::error::Error;
@@ -421,6 +429,8 @@ impl TransferCapacity {
         Ok(TransferCapacityPermit {
             _peer: peer_permit,
             _global: global_permit,
+            #[cfg(all(test, not(target_family = "wasm")))]
+            _activity: None,
         })
     }
 
@@ -437,6 +447,8 @@ impl TransferCapacity {
         Ok(TransferCapacityPermit {
             _peer: peer_permit,
             _global: global_permit,
+            #[cfg(all(test, not(target_family = "wasm")))]
+            _activity: None,
         })
     }
 
@@ -460,6 +472,58 @@ impl TransferCapacity {
 pub(in crate::swarm::transport) struct TransferCapacityPermit {
     _peer: PeerCapacityPermit,
     _global: GlobalCapacityPermit,
+    #[cfg(all(test, not(target_family = "wasm")))]
+    _activity: Option<TransferActivityPermit>,
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+impl TransferCapacityPermit {
+    pub(super) fn track_activity(mut self, activity: TransferActivityPermit) -> Self {
+        self._activity = Some(activity);
+        self
+    }
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(super) struct TransferActivity {
+    admitted: AtomicUsize,
+    test_activity: Arc<TestActivityTracker>,
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+impl TransferActivity {
+    pub(super) fn new(test_activity: Arc<TestActivityTracker>) -> Self {
+        Self {
+            admitted: AtomicUsize::new(0),
+            test_activity,
+        }
+    }
+
+    pub(super) fn begin(self: &Arc<Self>) -> TransferActivityPermit {
+        let test_activity = self.test_activity.begin();
+        self.admitted.fetch_add(1, Ordering::AcqRel);
+        TransferActivityPermit {
+            activity: self.clone(),
+            _test_activity: test_activity,
+        }
+    }
+
+    pub(super) fn admitted_for_test(&self) -> usize {
+        self.admitted.load(Ordering::Acquire)
+    }
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(super) struct TransferActivityPermit {
+    activity: Arc<TransferActivity>,
+    _test_activity: TestActivityPermit,
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+impl Drop for TransferActivityPermit {
+    fn drop(&mut self) {
+        self.activity.admitted.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 struct PeerCapacityPermit {
@@ -544,6 +608,34 @@ fn validate_memory_request(peer: Did, class: TransferClass, requested_bytes: usi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_family = "wasm"))]
+    #[test]
+    fn transfer_activity_tracks_the_full_guard_lifetime() {
+        let test_activity = Arc::new(TestActivityTracker::new());
+        let activity = Arc::new(TransferActivity::new(test_activity.clone()));
+        assert_eq!(activity.admitted_for_test(), 0);
+        assert!(test_activity.snapshot().is_idle());
+        assert_eq!(test_activity.snapshot().generation(), 0);
+
+        let first = activity.begin();
+        assert_eq!(activity.admitted_for_test(), 1);
+        assert!(!test_activity.snapshot().is_idle());
+        assert_eq!(test_activity.snapshot().generation(), 1);
+        let second = activity.begin();
+        assert_eq!(activity.admitted_for_test(), 2);
+        assert!(!test_activity.snapshot().is_idle());
+        assert_eq!(test_activity.snapshot().generation(), 2);
+
+        drop(first);
+        assert_eq!(activity.admitted_for_test(), 1);
+        assert!(!test_activity.snapshot().is_idle());
+        assert_eq!(test_activity.snapshot().generation(), 3);
+        drop(second);
+        assert_eq!(activity.admitted_for_test(), 0);
+        assert!(test_activity.snapshot().is_idle());
+        assert_eq!(test_activity.snapshot().generation(), 4);
+    }
 
     #[cfg_attr(
         all(feature = "wasm", target_family = "wasm"),

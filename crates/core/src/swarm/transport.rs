@@ -3,6 +3,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -68,9 +69,53 @@ mod readiness;
 mod storage_lookup;
 mod storage_sync;
 
+/// Production admission budget for one data-channel send.
+///
+/// Maintenance scheduling uses this bound to leave control-plane work a
+/// deterministic window around storage repair.
+pub(crate) const DATA_CHANNEL_SEND_ACCEPT_BUDGET: Duration = Duration::from_secs(5);
+
+struct TransportTimeoutProfile {
+    send_accept: Duration,
+    delivery: Duration,
+    tracked_payload: Duration,
+    close: Duration,
+}
+
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+const TRANSPORT_TIMEOUT_PROFILE: TransportTimeoutProfile = TransportTimeoutProfile {
+    send_accept: Duration::from_millis(50),
+    delivery: Duration::from_millis(500),
+    tracked_payload: Duration::from_millis(100),
+    close: Duration::from_millis(100),
+};
+
+#[cfg(not(all(test, feature = "dummy", not(target_family = "wasm"))))]
+const TRANSPORT_TIMEOUT_PROFILE: TransportTimeoutProfile = TransportTimeoutProfile {
+    send_accept: DATA_CHANNEL_SEND_ACCEPT_BUDGET,
+    delivery: Duration::from_secs(25),
+    tracked_payload: Duration::from_secs(25),
+    close: Duration::from_secs(5),
+};
+
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+const _: () = {
+    assert!(TRANSPORT_TIMEOUT_PROFILE.send_accept.as_millis() == 50);
+    assert!(TRANSPORT_TIMEOUT_PROFILE.delivery.as_millis() == 500);
+    assert!(TRANSPORT_TIMEOUT_PROFILE.tracked_payload.as_millis() == 100);
+    assert!(TRANSPORT_TIMEOUT_PROFILE.close.as_millis() == 100);
+};
+
+#[cfg(all(test, not(all(feature = "dummy", not(target_family = "wasm")))))]
+const _: () = {
+    assert!(TRANSPORT_TIMEOUT_PROFILE.send_accept.as_secs() == 5);
+    assert!(TRANSPORT_TIMEOUT_PROFILE.delivery.as_secs() == 25);
+    assert!(TRANSPORT_TIMEOUT_PROFILE.tracked_payload.as_secs() == 25);
+    assert!(TRANSPORT_TIMEOUT_PROFILE.close.as_secs() == 5);
+};
+
 pub(crate) use self::connection::AdmittedConnection;
 use self::delivery::record_measurement;
-pub(crate) use self::delivery::DATA_CHANNEL_SEND_ACCEPT_BUDGET;
 use self::event_delivery::PeerOperationLocks;
 use self::event_delivery::SwarmEventDeliveryLock;
 use self::event_delivery::SwarmEventDeliveryLocks;
@@ -126,8 +171,89 @@ pub struct SwarmTransport {
     storage_repair_requested: AtomicBool,
     storage_repair_cursor: Mutex<Option<StorageSyncDeliveryCursor>>,
     outbound_schedulers: OutboundSchedulers,
+    #[cfg(all(test, not(target_family = "wasm")))]
+    test_activity: Arc<TestActivityTracker>,
     measured_disconnects: Mutex<BTreeMap<Did, (u64, i64)>>,
     measure: Option<MeasureImpl>,
+}
+
+/// Per-node activity clock used to prove test quiescence across inbound and outbound work.
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) struct TestActivityTracker {
+    state: Mutex<TestActivityState>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[cfg(all(test, not(target_family = "wasm")))]
+struct TestActivityState {
+    active: usize,
+    generation: u64,
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+impl TestActivityTracker {
+    pub(crate) const fn new() -> Self {
+        Self {
+            state: Mutex::new(TestActivityState {
+                active: 0,
+                generation: 0,
+            }),
+        }
+    }
+
+    pub(crate) fn begin(self: &Arc<Self>) -> TestActivityPermit {
+        let mut state = self.lock_state();
+        state.active += 1;
+        state.generation = state.generation.wrapping_add(1);
+        drop(state);
+        TestActivityPermit {
+            activity: self.clone(),
+        }
+    }
+
+    pub(crate) fn snapshot(&self) -> TestActivitySnapshot {
+        TestActivitySnapshot(*self.lock_state())
+    }
+
+    fn finish(&self) {
+        let mut state = self.lock_state();
+        state.active -= 1;
+        state.generation = state.generation.wrapping_add(1);
+    }
+
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, TestActivityState> {
+        match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) struct TestActivityPermit {
+    activity: Arc<TestActivityTracker>,
+}
+
+#[cfg(all(test, not(target_family = "wasm")))]
+impl Drop for TestActivityPermit {
+    fn drop(&mut self) {
+        self.activity.finish();
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) struct TestActivitySnapshot(TestActivityState);
+
+#[cfg(all(test, not(target_family = "wasm")))]
+impl TestActivitySnapshot {
+    pub(crate) const fn is_idle(self) -> bool {
+        self.0.active == 0
+    }
+
+    pub(crate) const fn generation(self) -> u64 {
+        self.0.generation
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -206,6 +332,8 @@ impl SwarmTransport {
         measure: Option<MeasureImpl>,
         settings: SwarmTransportSettings,
     ) -> Self {
+        #[cfg(all(test, not(target_family = "wasm")))]
+        let test_activity = Arc::new(TestActivityTracker::new());
         Self {
             network_id,
             transport: Transport::new(
@@ -219,7 +347,16 @@ impl SwarmTransport {
             dht_virtual_nodes: settings.dht_virtual_nodes,
             reassembly_limits: settings.reassembly_limits,
             reassembly_budget: Arc::new(ReassemblyBudget::new(settings.reassembly_limits)),
-            inbound_capacity: Arc::new(InboundCapacity::new()),
+            inbound_capacity: Arc::new({
+                #[cfg(all(test, not(target_family = "wasm")))]
+                {
+                    InboundCapacity::with_test_activity(test_activity.clone())
+                }
+                #[cfg(not(all(test, not(target_family = "wasm"))))]
+                {
+                    InboundCapacity::new()
+                }
+            }),
             connection_lifecycle: ConnectionLifecycleBoundary::new(),
             swarm_event_delivery: SwarmEventDeliveryLocks::new(),
             connection_creation: PeerOperationLocks::new(),
@@ -232,7 +369,18 @@ impl SwarmTransport {
             pending_storage_sync_acks: Mutex::new(BTreeMap::new()),
             storage_repair_requested: AtomicBool::new(false),
             storage_repair_cursor: Mutex::new(None),
-            outbound_schedulers: OutboundSchedulers::new(measure.clone()),
+            outbound_schedulers: {
+                #[cfg(all(test, not(target_family = "wasm")))]
+                {
+                    OutboundSchedulers::with_test_activity(measure.clone(), test_activity.clone())
+                }
+                #[cfg(not(all(test, not(target_family = "wasm"))))]
+                {
+                    OutboundSchedulers::new(measure.clone())
+                }
+            },
+            #[cfg(all(test, not(target_family = "wasm")))]
+            test_activity,
             measured_disconnects: Mutex::new(BTreeMap::new()),
             measure,
         }
@@ -358,6 +506,16 @@ impl SwarmTransport {
 
     pub(crate) fn inbound_capacity(&self) -> Arc<InboundCapacity> {
         self.inbound_capacity.clone()
+    }
+
+    #[cfg(all(test, not(target_family = "wasm")))]
+    pub(crate) fn inbound_admitted_count_for_test(&self) -> usize {
+        self.inbound_capacity.admitted_count_for_test()
+    }
+
+    #[cfg(all(test, not(target_family = "wasm")))]
+    pub(crate) fn test_activity_snapshot(&self) -> TestActivitySnapshot {
+        self.test_activity.snapshot()
     }
 
     async fn record_peer_measurement(&self, peer: Did, counter: MeasureCounter) {

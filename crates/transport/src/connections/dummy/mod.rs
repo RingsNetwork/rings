@@ -71,9 +71,9 @@ thread_local! {
     /// only its events land in its own `DELIVERY` queue. Other tests, on other
     /// threads, keep auto-dispatching as usual.
     static CONTROLLED: Cell<bool> = const { Cell::new(false) };
-    /// Test-only controlled delivery queue: `(target connection rand_id, event)`,
-    /// populated instead of auto-dispatching while `CONTROLLED` is on.
-    static DELIVERY: RefCell<VecDeque<(String, Event)>> = const { RefCell::new(VecDeque::new()) };
+    /// Test-only controlled delivery state, populated instead of auto-dispatching
+    /// while `CONTROLLED` is on.
+    static DELIVERY: RefCell<ControlledDeliveryState> = const { RefCell::new(ControlledDeliveryState::new()) };
     /// Test-only per-thread counter of data-channel messages dispatched by `send_message`, so a
     /// test can prove an expected send happened (or, after an error, did *not* happen). Thread-local
     /// for the same isolation reason as the controlled queue.
@@ -117,6 +117,72 @@ thread_local! {
     static DROP_MESSAGES: Cell<bool> = const { Cell::new(false) };
 }
 
+struct ControlledDeliveryState {
+    queue: VecDeque<(String, Event)>,
+    generation: u64,
+}
+
+impl ControlledDeliveryState {
+    const fn new() -> Self {
+        Self {
+            queue: VecDeque::new(),
+            generation: 0,
+        }
+    }
+
+    fn push_back(&mut self, entry: (String, Event)) {
+        self.queue.push_back(entry);
+        self.advance_generation();
+    }
+
+    fn remove(&mut self, index: usize) -> Option<(String, Event)> {
+        let entry = self.queue.remove(index);
+        if entry.is_some() {
+            self.advance_generation();
+        }
+        entry
+    }
+
+    fn clear(&mut self) {
+        if !self.queue.is_empty() {
+            self.queue.clear();
+            self.advance_generation();
+        }
+    }
+
+    fn snapshot(&self) -> controlled::DeliverySnapshot {
+        controlled::DeliverySnapshot::new(self.queue.len(), self.generation)
+    }
+
+    fn advance_generation(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+}
+
+#[cfg(test)]
+mod controlled_delivery_state_tests {
+    use bytes::Bytes;
+
+    use super::ControlledDeliveryState;
+    use super::Event;
+
+    #[test]
+    fn snapshot_generation_witnesses_transient_queue_activity() {
+        let mut state = ControlledDeliveryState::new();
+        let idle = state.snapshot();
+
+        state.push_back(("peer".to_owned(), Event::Message(Bytes::new())));
+        let queued = state.snapshot();
+        assert_eq!(queued.pending(), 1);
+        assert_ne!(queued.generation(), idle.generation());
+
+        assert!(state.remove(0).is_some());
+        let drained = state.snapshot();
+        assert!(drained.is_idle());
+        assert_ne!(drained.generation(), idle.generation());
+    }
+}
+
 /// Test-only controlled delivery scheduler. When enabled (per thread), dummy
 /// message/event delivery is queued instead of auto-dispatched, so a test can
 /// drive the exact ordering and deterministically explore the timing-state space
@@ -143,12 +209,43 @@ pub mod controlled {
     use super::SEND_MESSAGE_PENDING_AFTER_SENT_COUNT;
     use super::WAIT_FOR_DATA_CHANNEL_OPEN_PENDING;
 
+    /// Atomic observation of the current thread's controlled delivery queue.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct DeliverySnapshot {
+        pending: usize,
+        generation: u64,
+    }
+
+    impl DeliverySnapshot {
+        pub(super) const fn new(pending: usize, generation: u64) -> Self {
+            Self {
+                pending,
+                generation,
+            }
+        }
+
+        /// Return whether no controlled event is currently queued.
+        pub const fn is_idle(self) -> bool {
+            self.pending == 0
+        }
+
+        /// Return the number of controlled events currently queued.
+        pub const fn pending(self) -> usize {
+            self.pending
+        }
+
+        /// Return the queue generation, advanced on every enqueue or removal.
+        pub const fn generation(self) -> u64 {
+            self.generation
+        }
+    }
+
     /// Turn the controlled scheduler on/off for the current thread. Turning it
     /// off clears this thread's queue.
     pub fn enable(on: bool) {
         CONTROLLED.with(|c| c.set(on));
         if !on {
-            DELIVERY.with(|q| q.borrow_mut().clear());
+            DELIVERY.with(|state| state.borrow_mut().clear());
             NEXT_CALLBACK_CID.with(|next| {
                 *next.borrow_mut() = None;
             });
@@ -295,14 +392,19 @@ pub mod controlled {
 
     /// Number of events currently queued on the current thread.
     pub fn pending() -> usize {
-        DELIVERY.with(|q| q.borrow().len())
+        snapshot().pending()
+    }
+
+    /// Atomically observe queue depth and lifecycle generation on the current thread.
+    pub fn snapshot() -> DeliverySnapshot {
+        DELIVERY.with(|state| state.borrow().snapshot())
     }
 
     /// Deliver the queued event at `index` to its target connection — invoking
     /// the real handler, which may enqueue further events. Returns false if the
     /// index is out of range or the target connection is gone.
     pub async fn deliver(index: usize) -> bool {
-        let entry = DELIVERY.with(|q| q.borrow_mut().remove(index));
+        let entry = DELIVERY.with(|state| state.borrow_mut().remove(index));
         let Some((rand_id, mut event)) = entry else {
             return false;
         };
@@ -320,8 +422,10 @@ pub mod controlled {
 
     /// Deliver the next queued data-channel-open event with a rewritten callback cid.
     pub async fn deliver_next_data_channel_open_with_cid(cid: impl Into<String>) -> bool {
-        let index = DELIVERY.with(|q| {
-            q.borrow()
+        let index = DELIVERY.with(|state| {
+            state
+                .borrow()
+                .queue
                 .iter()
                 .position(|(_, event)| matches!(event, super::Event::DataChannelOpen(_)))
         });
@@ -490,7 +594,9 @@ impl DummyConnection {
     /// gone during teardown).
     fn dispatch(&self, event: Event) -> bool {
         if CONTROLLED.with(|c| c.get()) {
-            DELIVERY.with(|q| q.borrow_mut().push_back((self.rand_id.clone(), event)));
+            DELIVERY.with(|state| {
+                state.borrow_mut().push_back((self.rand_id.clone(), event));
+            });
             true
         } else {
             self.event_sender.send(event).is_ok()

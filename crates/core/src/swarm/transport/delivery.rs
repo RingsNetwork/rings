@@ -13,6 +13,7 @@ use super::connection::DATA_CHANNEL_CLOSE_TIMEOUT;
 use super::AdmittedConnection;
 use super::PendingConnectionAttempt;
 use super::TransportReadiness;
+use super::TRANSPORT_TIMEOUT_PROFILE;
 use crate::chunk::Chunk;
 use crate::dht::Did;
 use crate::dht::PeerRing;
@@ -27,26 +28,14 @@ use crate::message::MessagePayload;
 use crate::session::SessionSk;
 use crate::utils::sleep;
 
-/// Production admission budget for one data-channel send.
-///
-/// Maintenance scheduling uses this bound to leave control-plane work a
-/// deterministic window around storage repair.
-pub(crate) const DATA_CHANNEL_SEND_ACCEPT_BUDGET: Duration = Duration::from_secs(5);
-
-#[cfg(test)]
-pub(super) const DATA_CHANNEL_SEND_ACCEPT_TIMEOUT: Duration = Duration::from_millis(50);
-#[cfg(not(test))]
-pub(super) const DATA_CHANNEL_SEND_ACCEPT_TIMEOUT: Duration = DATA_CHANNEL_SEND_ACCEPT_BUDGET;
+pub(super) const DATA_CHANNEL_SEND_ACCEPT_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.send_accept;
 
 #[cfg(test)]
 const CHUNK_SEND_PERMIT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 #[cfg(not(test))]
 const CHUNK_SEND_PERMIT_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
-#[cfg(test)]
-const DATA_CHANNEL_DELIVERY_TIMEOUT: Duration = Duration::from_millis(500);
-#[cfg(not(test))]
-const DATA_CHANNEL_DELIVERY_TIMEOUT: Duration = Duration::from_secs(25);
+const DATA_CHANNEL_DELIVERY_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.delivery;
 
 #[derive(Debug)]
 pub(super) enum ChunkSendCancelReason {

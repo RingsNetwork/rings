@@ -1,7 +1,10 @@
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
+use futures::FutureExt;
 use tokio::time::timeout;
 use tokio::time::Duration;
+use tokio::time::Instant;
 
 use super::super::ChordStorageInterfaceCacheChecker;
 use crate::dht::entry::Entry;
@@ -19,6 +22,7 @@ use crate::message::types::SyncEntriesWithSuccessorReport;
 use crate::message::Encoder;
 use crate::message::MessagePayload;
 use crate::message::MessageRelay;
+use crate::message::PayloadSender;
 use crate::message::Transaction;
 use crate::prelude::entry::EntryKind;
 use crate::session::SessionSk;
@@ -26,33 +30,174 @@ use crate::storage::MemStorage;
 use crate::swarm::callback::SwarmCallback;
 use crate::swarm::SwarmBuilder;
 use crate::tests::default::Node;
+use crate::tests::default::TEST_NETWORK_IDLE_TIMEOUT;
 
 pub(super) struct NoopCallback;
 
 impl SwarmCallback for NoopCallback {}
 
-pub(super) async fn next_payload(node: &Node) -> Result<MessagePayload> {
-    node.listen_once()
-        .await
-        .ok_or_else(|| Error::InvalidMessage("expected message payload".to_string()))
+fn payload_observation_error(label: &str, observed: &[MessagePayload]) -> Error {
+    let observed = observed
+        .iter()
+        .map(|payload| {
+            format!(
+                "tx_id={}, destination={}, message={:?}",
+                payload.transaction.tx_id,
+                payload.transaction.destination,
+                payload.transaction.data::<Message>()
+            )
+        })
+        .collect::<Vec<_>>();
+    Error::InvalidMessage(format!(
+        "timed out waiting for {label}; unmatched payloads={observed:?}"
+    ))
+}
+
+pub(super) async fn next_payload_matching(
+    node: &Node,
+    label: &str,
+    matches: impl FnMut(&MessagePayload) -> Result<bool>,
+) -> Result<MessagePayload> {
+    next_payload_matching_with_timeout(node, label, TEST_NETWORK_IDLE_TIMEOUT, matches).await
+}
+
+async fn next_payload_matching_with_timeout(
+    node: &Node,
+    label: &str,
+    observation_timeout: Duration,
+    mut matches: impl FnMut(&MessagePayload) -> Result<bool>,
+) -> Result<MessagePayload> {
+    let deadline = Instant::now() + observation_timeout;
+    let mut scan = node.message_scan().await;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(payload_observation_error(label, scan.skipped()));
+        }
+        let payload = match timeout(remaining, scan.next()).await {
+            Ok(Some(payload)) => payload,
+            Ok(None) => {
+                return Err(Error::InvalidMessage(
+                    "message payload channel closed while waiting for test observation".to_string(),
+                ));
+            }
+            Err(_) => {
+                return Err(payload_observation_error(label, scan.skipped()));
+            }
+        };
+        scan.skip(payload);
+        let Some(candidate) = scan.skipped().last() else {
+            return Err(Error::InvalidMessage(
+                "protected payload disappeared during test observation".to_string(),
+            ));
+        };
+        match matches(candidate) {
+            Ok(true) => {
+                return scan.pop_skipped().ok_or_else(|| {
+                    Error::InvalidMessage(
+                        "matched payload disappeared during test observation".to_string(),
+                    )
+                });
+            }
+            Ok(false) => {}
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 pub(super) async fn next_payload_for_tx(node: &Node, tx_id: uuid::Uuid) -> Result<MessagePayload> {
-    for _ in 0..64 {
-        let payload = timeout(Duration::from_secs(1), node.listen_once())
-            .await
-            .map_err(|_| {
-                Error::InvalidMessage("timed out waiting for matching payload".to_string())
-            })?
-            .ok_or_else(|| Error::InvalidMessage("expected message payload".to_string()))?;
-        if payload.transaction.tx_id == tx_id {
-            return Ok(payload);
-        }
-    }
+    next_payload_matching(node, "matching transaction payload", |payload| {
+        Ok(payload.transaction.tx_id == tx_id)
+    })
+    .await
+}
 
-    Err(Error::InvalidMessage(
-        "matching transaction payload was not observed".to_string(),
+#[tokio::test]
+async fn matching_payload_restores_skipped_messages_in_order() -> Result<()> {
+    let node = crate::tests::default::prepare_node(SecretKey::random()).await;
+    let first = test_payload(&node, b"first")?;
+    let second = test_payload(&node, b"second")?;
+    let matched = test_payload(&node, b"matched")?;
+    node.prepend_messages_for_test(vec![first.clone(), second.clone(), matched.clone()])
+        .await;
+
+    let observed = next_payload_for_tx(&node, matched.transaction.tx_id).await?;
+
+    assert_eq!(observed, matched);
+    assert_eq!(node.try_listen_once().await, Some(first));
+    assert_eq!(node.try_listen_once().await, Some(second));
+    assert!(node.try_listen_once().await.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn matching_payload_restores_skipped_message_after_predicate_error() -> Result<()> {
+    let node = crate::tests::default::prepare_node(SecretKey::random()).await;
+    let skipped = test_payload(&node, b"predicate error")?;
+    node.prepend_messages_for_test(vec![skipped.clone()]).await;
+
+    let result = next_payload_matching_with_timeout(
+        &node,
+        "predicate error",
+        Duration::from_millis(20),
+        |_| Err(Error::InvalidMessage("predicate failed".to_string())),
+    )
+    .await;
+
+    assert!(result.is_err());
+    assert_eq!(node.try_listen_once().await, Some(skipped));
+    Ok(())
+}
+
+#[tokio::test]
+async fn matching_payload_restores_skipped_message_when_cancelled() -> Result<()> {
+    let node = crate::tests::default::prepare_node(SecretKey::random()).await;
+    let skipped = test_payload(&node, b"cancelled")?;
+    node.prepend_messages_for_test(vec![skipped.clone()]).await;
+
+    let result = timeout(
+        Duration::from_millis(20),
+        next_payload_matching_with_timeout(
+            &node,
+            "cancelled observation",
+            Duration::from_secs(1),
+            |_| Ok(false),
+        ),
+    )
+    .await;
+
+    assert!(result.is_err());
+    assert_eq!(node.try_listen_once().await, Some(skipped));
+    Ok(())
+}
+
+#[tokio::test]
+async fn matching_payload_restores_current_message_when_predicate_panics() -> Result<()> {
+    let node = crate::tests::default::prepare_node(SecretKey::random()).await;
+    let current = test_payload(&node, b"predicate panic")?;
+    node.prepend_messages_for_test(vec![current.clone()]).await;
+
+    let result = AssertUnwindSafe(next_payload_matching_with_timeout(
+        &node,
+        "predicate panic",
+        Duration::from_millis(20),
+        |_| panic!("intentional predicate panic"),
     ))
+    .catch_unwind()
+    .await;
+
+    assert!(result.is_err());
+    assert_eq!(node.try_listen_once().await, Some(current));
+    Ok(())
+}
+
+fn test_payload(node: &Node, data: &[u8]) -> Result<MessagePayload> {
+    MessagePayload::new_send(
+        Message::custom(data)?,
+        node.swarm.transport.session_sk(),
+        node.did(),
+        node.did(),
+    )
 }
 
 pub(super) fn next_generated_key(keys: &mut impl Iterator<Item = SecretKey>) -> Result<SecretKey> {
