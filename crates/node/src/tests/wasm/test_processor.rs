@@ -3,6 +3,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::lock::Mutex;
 use rings_core::dht::Did;
+use rings_core::inspect::SwarmInspect;
 use rings_core::swarm::callback::SwarmCallback;
 use rings_core::utils;
 use wasm_bindgen_futures::spawn_local;
@@ -43,6 +44,27 @@ impl SwarmCallback for SwarmCallbackStruct {
     }
 }
 
+async fn wait_for_swarm_state(
+    p: &Processor,
+    label: &str,
+    predicate: impl Fn(&SwarmInspect) -> bool,
+) {
+    let mut last_inspect = None;
+    for _ in 0..100 {
+        let inspect = p.swarm.inspect().await;
+        if predicate(&inspect) {
+            return;
+        }
+        last_inspect = Some(inspect);
+        utils::js_utils::window_sleep(200).await.unwrap();
+    }
+    panic!(
+        "timeout waiting for {label}; peers={:?}, dht={:?}",
+        last_inspect.as_ref().map(|inspect| &inspect.peers),
+        last_inspect.as_ref().map(|inspect| &inspect.dht),
+    );
+}
+
 /// Wait until `did` shows up in `p`'s DHT successor list.
 ///
 /// The WebRTC data channel opens asynchronously after `accept_answer`, and the
@@ -53,20 +75,28 @@ impl SwarmCallback for SwarmCallbackStruct {
 /// itself and fail with `SwarmMissDidInTable`.
 async fn wait_for_dht_successor(p: &Processor, did: Did) {
     let did = did.to_string();
-    let mut last_inspect = None;
-    for _ in 0..100 {
-        let inspect = p.swarm.inspect().await;
-        if inspect.dht.successors.iter().any(|s| s == &did) {
-            return;
-        }
-        last_inspect = Some(inspect);
-        utils::js_utils::window_sleep(200).await.unwrap();
-    }
-    panic!(
-        "timeout waiting for {did} to appear in DHT successors; peers={:?}, dht={:?}",
-        last_inspect.as_ref().map(|inspect| &inspect.peers),
-        last_inspect.as_ref().map(|inspect| &inspect.dht),
-    );
+    let label = format!("{did} to appear in DHT successors");
+    wait_for_swarm_state(p, &label, |inspect| {
+        inspect
+            .dht
+            .successors
+            .iter()
+            .any(|successor| successor == &did)
+    })
+    .await;
+}
+
+async fn wait_for_single_connected_peer(p: &Processor, did: Did) {
+    let did = did.to_string();
+    let label = format!("{did} to have exactly one Connected peer entry");
+    wait_for_swarm_state(p, &label, |inspect| {
+        let mut matching_peers = inspect.peers.iter().filter(|peer| peer.did == did);
+        matches!(
+            (matching_peers.next(), matching_peers.next()),
+            (Some(peer), None) if peer.state == "Connected"
+        )
+    })
+    .await;
 }
 
 async fn create_connection(p1: &Processor, p2: &Processor) {
@@ -208,17 +238,15 @@ async fn test_processor_connect_with_did() {
     // p1's offer to p3 (and route p3's answer back to p1).
 
     console_log!("connect p1 and p3");
-    // p1 create connect with p3's address
-    p1.connect_with_did(p3.did()).await.unwrap();
-    utils::js_utils::window_sleep(1000).await.unwrap();
+    let (p1_connect, p3_connect) =
+        futures::join!(p1.connect_with_did(p3.did()), p3.connect_with_did(p1.did()),);
+    p1_connect.unwrap();
+    p3_connect.unwrap();
+    futures::join!(
+        wait_for_single_connected_peer(&p1, p3.did()),
+        wait_for_single_connected_peer(&p3, p1.did()),
+    );
     console_log!("processor_detect_connection_state");
-    let peer3 = p1
-        .swarm
-        .peers()
-        .into_iter()
-        .find(|peer| peer.did == p3.did().to_string())
-        .unwrap();
-    assert_eq!(peer3.state, "Connected");
 
     console_log!("check peers");
     let peers = p1.swarm.peers();
