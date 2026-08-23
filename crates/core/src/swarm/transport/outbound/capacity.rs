@@ -432,6 +432,14 @@ const fn global_byte_limit(class: TransferClass) -> usize {
     }
 }
 
+const _: () = {
+    let maximum_payload_reservation = crate::consts::TRANSPORT_MAX_SIZE.saturating_mul(2);
+    assert!(maximum_payload_reservation <= peer_byte_limit(TransferClass::DhtControl));
+    assert!(maximum_payload_reservation <= peer_byte_limit(TransferClass::Application));
+    assert!(maximum_payload_reservation <= global_byte_limit(TransferClass::DhtControl));
+    assert!(maximum_payload_reservation <= global_byte_limit(TransferClass::Application));
+};
+
 fn memory_capacity_error(peer: Did, requested_bytes: usize, capacity_bytes: usize) -> Error {
     Error::OutboundTransferMemoryCapacityExceeded {
         peer,

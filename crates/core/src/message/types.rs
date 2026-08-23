@@ -391,70 +391,70 @@ macro_rules! with_message_variants {
     ($macro:ident) => {
         $macro! {
             /// Remote message of try connecting a node.
-            0 => ConnectNodeSend(ConnectNodeSend): DhtControl,
+            0 => ConnectNodeSend(ConnectNodeSend): DhtControl, NoStorageRoute,
             /// Response of ConnectNodeSend.
-            1 => ConnectNodeReport(ConnectNodeReport): DhtControl,
+            1 => ConnectNodeReport(ConnectNodeReport): DhtControl, NoStorageRoute,
             /// Remote message of find successor.
-            2 => FindSuccessorSend(FindSuccessorSend): DhtControl,
+            2 => FindSuccessorSend(FindSuccessorSend): DhtControl, NoStorageRoute,
             /// Response of FindSuccessorSend.
-            3 => FindSuccessorReport(FindSuccessorReport): DhtControl,
+            3 => FindSuccessorReport(FindSuccessorReport): DhtControl, NoStorageRoute,
             /// Remote message of notify a predecessor.
-            4 => NotifyPredecessorSend(NotifyPredecessorSend): DhtControl,
+            4 => NotifyPredecessorSend(NotifyPredecessorSend): DhtControl, NoStorageRoute,
             /// Response of NotifyPredecessorSend.
-            5 => NotifyPredecessorReport(NotifyPredecessorReport): DhtControl,
+            5 => NotifyPredecessorReport(NotifyPredecessorReport): DhtControl, NoStorageRoute,
             /// Overlay liveness probe.
-            6 => PeerLivenessProbe(PeerLivenessProbe): DhtControl,
+            6 => PeerLivenessProbe(PeerLivenessProbe): DhtControl, NoStorageRoute,
             /// Overlay liveness probe response.
-            7 => PeerLivenessReport(PeerLivenessReport): DhtControl,
+            7 => PeerLivenessReport(PeerLivenessReport): DhtControl, NoStorageRoute,
             /// Remote message for searching an entry.
-            8 => SearchEntry(SearchEntry): Storage,
+            8 => SearchEntry(SearchEntry): Storage, NoStorageRoute,
             /// Response when entries are found.
-            9 => FoundEntry(FoundEntry): Storage,
+            9 => FoundEntry(FoundEntry): Storage, NoStorageRoute,
             /// Remote message for entry operations.
-            10 => OperateEntry(PlacedEntryOperation): Storage,
+            10 => OperateEntry(PlacedEntryOperation): Storage, NoStorageRoute,
             /// Remote message for entry syncing.
-            11 => SyncEntriesWithSuccessor(SyncEntriesWithSuccessor): Storage,
+            11 => SyncEntriesWithSuccessor(SyncEntriesWithSuccessor): Storage, StorageRoute,
             /// Response after synced entries are durably persisted.
-            12 => SyncEntriesWithSuccessorReport(SyncEntriesWithSuccessorReport): Storage,
+            12 => SyncEntriesWithSuccessorReport(SyncEntriesWithSuccessorReport): Storage, NoStorageRoute,
             /// Custom messages.
-            13 => CustomMessage(CustomMessage): Application,
+            13 => CustomMessage(CustomMessage): Application, NoStorageRoute,
             /// Request to negotiate E2E ElGamal encryption with a signed public key.
-            14 => E2eHandshakeRequest(E2eHandshakeRequest): E2e,
+            14 => E2eHandshakeRequest(E2eHandshakeRequest): E2e, NoStorageRoute,
             /// Response accepting E2E ElGamal encryption with a signed public key.
-            15 => E2eHandshakeResponse(E2eHandshakeResponse): E2e,
+            15 => E2eHandshakeResponse(E2eHandshakeResponse): E2e, NoStorageRoute,
             /// Direct ElGamal-encrypted E2E stream frame.
-            16 => E2eStreamFrame(E2eStreamFrame): E2e,
+            16 => E2eStreamFrame(E2eStreamFrame): E2e, NoStorageRoute,
             /// Remote message of query topological info of a node.
-            17 => QueryForTopoInfoSend(QueryForTopoInfoSend): DhtControl,
+            17 => QueryForTopoInfoSend(QueryForTopoInfoSend): DhtControl, NoStorageRoute,
             /// Response of QueryForTopoInfoSend.
-            18 => QueryForTopoInfoReport(QueryForTopoInfoReport): DhtControl,
+            18 => QueryForTopoInfoReport(QueryForTopoInfoReport): DhtControl, NoStorageRoute,
             /// A chunk that can be deserialized to a payload.
-            19 => Chunk(Chunk): Application,
+            19 => Chunk(Chunk): Application, NoStorageRoute,
         }
     };
 }
 
 macro_rules! message_requires_storage_route {
-    (SyncEntriesWithSuccessor) => {
+    (StorageRoute) => {
         true
     };
-    ($variant:ident) => {
+    (NoStorageRoute) => {
         false
     };
 }
 
 macro_rules! message_storage_destination {
-    (SyncEntriesWithSuccessor, $body:expr) => {
+    (StorageRoute, $body:expr) => {
         Some($body.destination)
     };
-    ($variant:ident, $body:expr) => {{
+    (NoStorageRoute, $body:expr) => {{
         let _ = $body;
         None
     }};
 }
 
 macro_rules! define_message_model {
-    ($( $(#[$docs:meta])* $index:literal => $variant:ident($body:ty): $class:ident ),+ $(,)?) => {
+    ($( $(#[$docs:meta])* $index:literal => $variant:ident($body:ty): $class:ident, $storage_route:ident ),+ $(,)?) => {
         /// A collection MessageType use for unified management.
         #[derive(Debug, Deserialize, Serialize, Clone)]
         #[non_exhaustive]
@@ -496,7 +496,7 @@ macro_rules! define_message_model {
 
             pub(crate) const fn requires_storage_route(self) -> bool {
                 match self {
-                    $(Self::$variant => message_requires_storage_route!($variant)),+
+                    $(Self::$variant => message_requires_storage_route!($storage_route)),+
                 }
             }
         }
@@ -504,7 +504,7 @@ macro_rules! define_message_model {
         impl Message {
             pub(crate) const fn storage_sync_destination(&self) -> Option<StorageSyncDestination> {
                 match self {
-                    $(Self::$variant(body) => message_storage_destination!($variant, body)),+
+                    $(Self::$variant(body) => message_storage_destination!($storage_route, body)),+
                 }
             }
         }
@@ -515,6 +515,11 @@ macro_rules! define_message_model {
                 match self {
                     $(Self::$variant(_) => MessageKind::$variant),+
                 }
+            }
+
+            pub(crate) fn test_variants() -> Vec<Self> {
+                let fixture = tests::MessageFixture::new();
+                vec![$(Self::$variant(tests::sample_body::<$body>(&fixture))),+]
             }
         }
     };
@@ -604,8 +609,151 @@ impl std::fmt::Debug for CustomMessage {
 
 #[cfg(test)]
 mod tests {
+    use bytes::Bytes;
+
     use super::*;
+    use crate::chunk::ChunkMeta;
+    use crate::dht::entry::EntryCrdt;
+    use crate::dht::entry::EntryKind;
+    use crate::dht::entry::EntryOperation;
     use crate::ecc::SecretKey;
+
+    pub(super) struct MessageFixture {
+        did: Did,
+        public_key: crate::ecc::PublicKey<33>,
+        entry: Entry,
+    }
+
+    impl MessageFixture {
+        pub(super) fn new() -> Self {
+            let secret_key = SecretKey::random();
+            let did = secret_key.address().into();
+            Self {
+                did,
+                public_key: secret_key.pubkey(),
+                entry: Entry {
+                    did,
+                    data: Vec::new(),
+                    kind: EntryKind::Data,
+                    crdt: EntryCrdt::default(),
+                },
+            }
+        }
+    }
+
+    pub(super) trait SampleMessageBody: Sized {
+        fn sample(fixture: &MessageFixture) -> Self;
+    }
+
+    pub(super) fn sample_body<T: SampleMessageBody>(fixture: &MessageFixture) -> T {
+        T::sample(fixture)
+    }
+
+    macro_rules! sample_message_body {
+        ($body:ty, |$fixture:ident| $sample:expr) => {
+            impl SampleMessageBody for $body {
+                fn sample($fixture: &MessageFixture) -> Self {
+                    $sample
+                }
+            }
+        };
+    }
+
+    sample_message_body!(ConnectNodeSend, |_fixture| ConnectNodeSend {
+        sdp: String::new(),
+        network_id: 1,
+        storage_redundancy: 1,
+        dht_virtual_nodes: 1,
+    });
+    sample_message_body!(ConnectNodeReport, |_fixture| ConnectNodeReport {
+        sdp: String::new(),
+        network_id: 1,
+        storage_redundancy: 1,
+        dht_virtual_nodes: 1,
+    });
+    sample_message_body!(FindSuccessorSend, |fixture| FindSuccessorSend {
+        did: fixture.did,
+        strict: false,
+        then: FindSuccessorThen::Report(FindSuccessorReportHandler::None),
+    });
+    sample_message_body!(FindSuccessorReport, |fixture| FindSuccessorReport {
+        did: fixture.did,
+        handler: FindSuccessorReportHandler::None,
+    });
+    sample_message_body!(NotifyPredecessorSend, |fixture| NotifyPredecessorSend {
+        did: fixture.did,
+    });
+    sample_message_body!(NotifyPredecessorReport, |fixture| NotifyPredecessorReport {
+        did: fixture.did,
+    });
+    sample_message_body!(PeerLivenessProbe, |fixture| PeerLivenessProbe {
+        sent_at_ms: i64::from(fixture.did != Did::from(0_u32)),
+    });
+    sample_message_body!(PeerLivenessReport, |fixture| PeerLivenessReport {
+        sent_at_ms: i64::from(fixture.did != Did::from(0_u32)),
+    });
+    sample_message_body!(SearchEntry, |fixture| SearchEntry {
+        resource: fixture.did,
+        placement: fixture.did,
+        redundancy: 1,
+    });
+    sample_message_body!(FoundEntry, |fixture| FoundEntry {
+        data: vec![fixture.entry.clone()],
+        misses: vec![PlacementMiss::new(fixture.did, fixture.did)],
+        resource: fixture.did,
+        redundancy: 1,
+    });
+    sample_message_body!(PlacedEntryOperation, |fixture| PlacedEntryOperation {
+        placement: fixture.did,
+        op: EntryOperation::Overwrite(fixture.entry.clone()),
+    });
+    sample_message_body!(SyncEntriesWithSuccessor, |fixture| {
+        SyncEntriesWithSuccessor {
+            purpose: StorageSyncPurpose::AdditiveRepair,
+            destination: StorageSyncDestination::physical_owner(fixture.did),
+            data: vec![PlacedEntry::new(fixture.did, fixture.entry.clone())],
+        }
+    });
+    sample_message_body!(SyncEntriesWithSuccessorReport, |fixture| {
+        SyncEntriesWithSuccessorReport::new(
+            StorageSyncPurpose::AdditiveRepair,
+            StorageSyncDestination::physical_owner(fixture.did),
+            fixture.did,
+            vec![SyncedEntryAck::new(fixture.did, fixture.entry.clone())],
+        )
+    });
+    sample_message_body!(CustomMessage, |fixture| CustomMessage(
+        fixture.did.to_string().into_bytes()
+    ));
+    sample_message_body!(E2eHandshakeRequest, |fixture| E2eHandshakeRequest {
+        requester_public_key: fixture.public_key,
+    });
+    sample_message_body!(E2eHandshakeResponse, |fixture| E2eHandshakeResponse {
+        responder_public_key: fixture.public_key,
+    });
+    sample_message_body!(E2eStreamFrame, |fixture| E2eStreamFrame {
+        stream_id: uuid::Uuid::nil(),
+        sender_public_key: fixture.public_key,
+        sequence: 0,
+        is_final: true,
+        ciphertext: Vec::new(),
+    });
+    sample_message_body!(QueryForTopoInfoSend, |fixture| QueryForTopoInfoSend {
+        did: fixture.did,
+        then: QueryFor::Stabilization,
+    });
+    sample_message_body!(QueryForTopoInfoReport, |fixture| QueryForTopoInfoReport {
+        info: TopoInfo {
+            successors: vec![fixture.did],
+            predecessor: Some(fixture.did),
+        },
+        then: QueryFor::Stabilization,
+    });
+    sample_message_body!(Chunk, |fixture| Chunk {
+        chunk: [0, 1],
+        data: Bytes::from(fixture.did.to_string()),
+        meta: ChunkMeta::default(),
+    });
 
     fn random_did() -> Did {
         SecretKey::random().address().into()
@@ -668,8 +816,17 @@ mod tests {
 
     #[test]
     fn message_metadata_wire_indices_follow_enum_declaration_order() {
-        for (position, (wire_index, _)) in MessageKind::WIRE_ORDER.iter().enumerate() {
+        let messages = Message::test_variants();
+        assert_eq!(messages.len(), MessageKind::WIRE_ORDER.len());
+        for (position, ((wire_index, kind), message)) in
+            MessageKind::WIRE_ORDER.iter().zip(messages).enumerate()
+        {
             assert_eq!(usize::try_from(*wire_index), Ok(position));
+            assert_eq!(message.kind(), *kind);
+            assert_eq!(
+                kind.requires_storage_route(),
+                message.storage_sync_destination().is_some()
+            );
         }
     }
 }

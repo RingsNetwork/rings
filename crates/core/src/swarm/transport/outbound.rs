@@ -702,7 +702,7 @@ impl OutboundWorker {
                 .scheduled
                 .transfer
                 .resolve_final(Ok(SendCompletionOutcome::Cancelled));
-            self.ready.discard(runnable);
+            self.ready.fail_attempt(runnable);
             return;
         }
         let before_first_frame = runnable.item().scheduled.transfer.is_before_first_frame();
@@ -714,7 +714,7 @@ impl OutboundWorker {
                     .scheduled
                     .transfer
                     .resolve_final(Ok(SendCompletionOutcome::Succeeded));
-                self.ready.discard(runnable);
+                self.ready.finish_transfer(runnable);
                 self.measurements.record(OutboundMeasurement::Sent);
                 return;
             }
@@ -724,7 +724,7 @@ impl OutboundWorker {
                     .scheduled
                     .transfer
                     .resolve_final(Err(error));
-                self.ready.discard(runnable);
+                self.ready.fail_attempt(runnable);
                 self.measurements.record(OutboundMeasurement::FailedToSend);
                 return;
             }
@@ -757,7 +757,7 @@ impl OutboundWorker {
                     .scheduled
                     .transfer
                     .resolve_final(Err(error));
-                self.ready.discard(runnable);
+                self.ready.fail_attempt(runnable);
                 if record_failure {
                     self.measurements.record(OutboundMeasurement::FailedToSend);
                 }
@@ -784,7 +784,7 @@ impl OutboundWorker {
                         .transfer
                         .resolve_final(Ok(SendCompletionOutcome::Cancelled));
                 }
-                self.ready.discard(runnable);
+                self.ready.fail_attempt(runnable);
                 if record_failure {
                     self.measurements.record(OutboundMeasurement::FailedToSend);
                 }

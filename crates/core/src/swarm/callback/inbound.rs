@@ -4,6 +4,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::Weak;
 
 use futures::channel::mpsc;
 use futures::channel::oneshot;
@@ -55,12 +56,16 @@ const _: () = {
 struct InboundLane(usize);
 
 impl InboundLane {
+    #[cfg(test)]
     #[allow(non_upper_case_globals)]
     const DhtControl: Self = Self(MessageClass::DhtControl.index());
+    #[cfg(test)]
     #[allow(non_upper_case_globals)]
     const Storage: Self = Self(MessageClass::Storage.index());
+    #[cfg(test)]
     #[allow(non_upper_case_globals)]
     const E2e: Self = Self(MessageClass::E2e.index());
+    #[cfg(test)]
     #[allow(non_upper_case_globals)]
     const Application: Self = Self(MessageClass::Application.index());
     #[allow(non_upper_case_globals)]
@@ -192,7 +197,7 @@ impl InboundPeerCapacityState {
 pub(crate) struct InboundCapacity {
     state: Mutex<InboundCapacityState>,
     peer_states: Mutex<BTreeMap<Option<Did>, InboundPeerCapacityState>>,
-    waiters: Arc<FairWaitQueue>,
+    peer_waiters: Mutex<BTreeMap<Option<Did>, Weak<FairWaitQueue>>>,
 }
 
 impl InboundCapacity {
@@ -200,7 +205,42 @@ impl InboundCapacity {
         Self {
             state: Mutex::new(InboundCapacityState::new()),
             peer_states: Mutex::new(BTreeMap::new()),
-            waiters: Arc::new(FairWaitQueue::new()),
+            peer_waiters: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    fn waiters_for_peer(&self, peer: Option<Did>) -> Arc<FairWaitQueue> {
+        let mut waiters = self
+            .peer_waiters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        waiters.retain(|_, queue| queue.strong_count() > 0);
+        if let Some(queue) = waiters.get(&peer).and_then(Weak::upgrade) {
+            return queue;
+        }
+        let queue = Arc::new(FairWaitQueue::new());
+        waiters.insert(peer, Arc::downgrade(&queue));
+        queue
+    }
+
+    fn wake_waiters(&self) {
+        let queues = {
+            let mut waiters = self
+                .peer_waiters
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut queues = Vec::with_capacity(waiters.len());
+            waiters.retain(|_, queue| match queue.upgrade() {
+                Some(queue) => {
+                    queues.push(queue);
+                    true
+                }
+                None => false,
+            });
+            queues
+        };
+        for queue in queues {
+            queue.wake_front();
         }
     }
 
@@ -280,15 +320,14 @@ impl InboundCapacity {
         if let Ok(permit) = self.try_acquire_reserved(peer, lane, bytes) {
             return Ok(permit);
         }
+        let waiters = self.waiters_for_peer(peer);
         if bytes <= INBOUND_RESERVED_BYTES_PER_LANE {
-            return self
-                .waiters
-                .try_admit_unqueued(memory_capacity_error(bytes), || {
-                    self.try_acquire(peer, lane, bytes)
-                });
+            return waiters.try_admit_unqueued(memory_capacity_error(bytes), || {
+                self.try_acquire(peer, lane, bytes)
+            });
         }
         acquire_fair(
-            &self.waiters,
+            &waiters,
             bytes,
             memory_capacity_error(bytes),
             || Error::InboundMailboxClosed,
@@ -367,7 +406,7 @@ impl InboundCapacityPermit {
                 self.bytes = bytes;
                 drop(state);
                 drop(peer_states);
-                self.capacity.waiters.wake_front();
+                self.capacity.wake_waiters();
                 Ok(())
             }
             Err(CapacityRejection::Count) => Err(Error::InboundMailboxCapacityExceeded {
@@ -399,7 +438,7 @@ impl Drop for InboundCapacityPermit {
         }
         drop(state);
         drop(peer_states);
-        self.capacity.waiters.wake_front();
+        self.capacity.wake_waiters();
     }
 }
 

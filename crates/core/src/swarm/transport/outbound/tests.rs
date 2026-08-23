@@ -141,7 +141,7 @@ fn lower_classes_progress_round_robin() {
 }
 
 #[test]
-fn terminal_attempt_does_not_advance_the_lower_class_cursor() {
+fn terminal_attempt_advances_the_lower_class_cursor() {
     let mut queues = TransferQueues::default();
     push(&mut queues, TransferClass::Storage, "stale-storage");
     push(&mut queues, TransferClass::E2e, "e2e");
@@ -151,17 +151,17 @@ fn terminal_attempt_does_not_advance_the_lower_class_cursor() {
         .pop()
         .expect("storage must start at the initial cursor");
     assert_eq!(stale.item().1, "stale-storage");
-    queues.discard(stale);
+    queues.fail_attempt(stale);
     push(&mut queues, TransferClass::Storage, "more-stale-storage");
 
     let next = queues
         .pop()
-        .expect("a failed attempt must not count as a frame admission");
-    assert_eq!(next.item().1, "more-stale-storage");
+        .expect("a failed attempt must yield to the next lower class");
+    assert_eq!(next.item().1, "e2e");
 }
 
 #[test]
-fn cancelled_control_attempts_do_not_consume_the_control_burst() {
+fn cancelled_control_attempts_consume_the_control_burst() {
     let mut queues = TransferQueues::default();
     push(&mut queues, TransferClass::Application, "application");
     for index in 0..OUTBOUND_CONTROL_BURST {
@@ -174,14 +174,14 @@ fn cancelled_control_attempts_do_not_consume_the_control_burst() {
             "cancelled-control",
             "control attempt {index}"
         );
-        queues.discard(control);
+        queues.fail_attempt(control);
     }
     push(&mut queues, TransferClass::DhtControl, "fifth-control");
 
     let next = queues
         .pop()
-        .expect("control must retain priority until a frame is admitted");
-    assert_eq!(next.item().1, "fifth-control");
+        .expect("lower work must run after failed control consumes the burst");
+    assert_eq!(next.item().1, "application");
 }
 
 #[test]

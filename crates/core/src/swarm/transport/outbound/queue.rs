@@ -117,6 +117,7 @@ impl<T> RunnableTransfer<T> {
         &mut self.item
     }
 
+    #[cfg(test)]
     pub(super) fn into_item(self) -> T {
         self.item
     }
@@ -181,6 +182,10 @@ impl<T> TransferQueues<T> {
     }
 
     pub(super) fn record_frame_admitted(&mut self, class: TransferClass) {
+        self.advance_fairness(class);
+    }
+
+    fn advance_fairness(&mut self, class: TransferClass) {
         if class == TransferClass::DhtControl {
             self.consecutive_control = self.consecutive_control.saturating_add(1);
             return;
@@ -200,7 +205,12 @@ impl<T> TransferQueues<T> {
         }
     }
 
-    pub(super) fn discard(&mut self, transfer: RunnableTransfer<T>) {
+    pub(super) fn finish_transfer(&mut self, transfer: RunnableTransfer<T>) {
+        self.finish_current(transfer.class);
+    }
+
+    pub(super) fn fail_attempt(&mut self, transfer: RunnableTransfer<T>) {
+        self.advance_fairness(transfer.class);
         self.finish_current(transfer.class);
     }
 

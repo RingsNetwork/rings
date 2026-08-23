@@ -263,7 +263,7 @@ async fn same_lane_ticket_preserves_capacity_admission_order_under_saturation() 
 async fn reserved_inbound_request_bypasses_borrower_waiter() {
     let capacity = Arc::new(InboundCapacity::new());
     let data_peer = Some(Did::from(1_u32));
-    let control_peer = Some(Did::from(2_u32));
+    let control_peer = data_peer;
     let blocker = capacity
         .try_acquire(data_peer, InboundLane::Application, 100 * 1024 * 1024)
         .expect("blocker must fit");
@@ -284,9 +284,38 @@ async fn reserved_inbound_request_bypasses_borrower_waiter() {
         futures::poll!(later.as_mut()),
         Poll::Ready(Err(_))
     ));
+    drop(reserved);
     drop(blocker);
     assert!(matches!(futures::poll!(large.as_mut()), Poll::Ready(Ok(_))));
-    drop(reserved);
+}
+
+#[cfg_attr(
+    all(feature = "wasm", target_family = "wasm"),
+    wasm_bindgen_test::wasm_bindgen_test
+)]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), tokio::test)]
+async fn peer_local_saturation_does_not_block_another_peers_large_request() {
+    let capacity = Arc::new(InboundCapacity::new());
+    let saturated_peer = Some(Did::from(1_u32));
+    let available_peer = Some(Did::from(2_u32));
+    let blocker = capacity
+        .try_acquire(saturated_peer, InboundLane::Application, 120 * 1024 * 1024)
+        .expect("peer-local blocker must fit");
+    let mut blocked =
+        Box::pin(capacity.acquire(saturated_peer, InboundLane::Storage, 16 * 1024 * 1024));
+    assert!(matches!(futures::poll!(blocked.as_mut()), Poll::Pending));
+
+    let available = capacity
+        .acquire(available_peer, InboundLane::Storage, 16 * 1024 * 1024)
+        .await
+        .expect("a peer-local waiter must not block another peer");
+
+    drop(blocker);
+    assert!(matches!(
+        futures::poll!(blocked.as_mut()),
+        Poll::Ready(Ok(_))
+    ));
+    drop(available);
 }
 
 #[cfg_attr(
