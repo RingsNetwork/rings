@@ -136,7 +136,7 @@ enum DaemonError {
         #[source]
         source: io::Error,
     },
-    #[cfg(any(target_os = "macos", target_os = "linux", all(test, unix)))]
+    #[cfg(any(target_os = "linux", all(test, unix)))]
     #[error("{manager} returned malformed service status: {detail}")]
     MalformedServiceStatus {
         manager: &'static str,
@@ -259,22 +259,13 @@ struct DaemonStatus {
     autostart: AutostartState,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-enum StartObservation {
-    #[default]
-    Fresh,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FailureBoundary {
+    Unambiguous,
     #[cfg(any(target_os = "macos", all(test, unix)))]
-    AfterRuns(u64),
-}
-
-impl StartObservation {
-    #[cfg(any(target_os = "macos", all(test, unix)))]
-    fn previous_runs(self) -> Option<u64> {
-        match self {
-            Self::Fresh => None,
-            Self::AfterRuns(runs) => Some(runs),
-        }
-    }
+    PostAction {
+        sequence: Option<u64>,
+    },
 }
 
 #[derive(Debug)]
@@ -329,16 +320,13 @@ where T: ValueEnum + fmt::Debug {
 trait ServiceManager {
     fn name(&self) -> &'static str;
     fn definition_path(&self) -> &Path;
-    fn start(&self, spec: &ServiceSpec) -> Result<StartObservation, DaemonError>;
+    fn start(&self, spec: &ServiceSpec) -> Result<FailureBoundary, DaemonError>;
     fn stop(&self) -> Result<(), DaemonError>;
-    fn restart(&self) -> Result<StartObservation, DaemonError>;
+    fn restart(&self) -> Result<FailureBoundary, DaemonError>;
     fn state(&self) -> Result<DaemonState, DaemonError>;
     fn autostart(&self) -> Result<AutostartState, DaemonError>;
 
-    fn state_after_start(
-        &self,
-        _observation: StartObservation,
-    ) -> Result<DaemonState, DaemonError> {
+    fn state_after_action(&self, _boundary: FailureBoundary) -> Result<DaemonState, DaemonError> {
         self.state()
     }
 
@@ -370,8 +358,8 @@ pub(super) fn execute(command: DaemonCommand, options: WorkerOptions) -> anyhow:
     match command {
         DaemonCommand::Start(args) => {
             let spec = ServiceSpec::discover(args.config_path(), options)?;
-            let observation = manager.start(&spec)?;
-            report_started(manager.as_ref(), observation)
+            let boundary = manager.start(&spec)?;
+            report_started(manager.as_ref(), boundary)
         }
         DaemonCommand::Stop => {
             manager.stop()?;
@@ -383,18 +371,15 @@ pub(super) fn execute(command: DaemonCommand, options: WorkerOptions) -> anyhow:
             Ok(())
         }
         DaemonCommand::Restart => {
-            let observation = manager.restart()?;
-            report_started(manager.as_ref(), observation)
+            let boundary = manager.restart()?;
+            report_started(manager.as_ref(), boundary)
         }
     }
 }
 
-fn report_started(
-    manager: &dyn ServiceManager,
-    observation: StartObservation,
-) -> anyhow::Result<()> {
+fn report_started(manager: &dyn ServiceManager, boundary: FailureBoundary) -> anyhow::Result<()> {
     let status = DaemonStatus {
-        state: wait_for_running(manager, observation)?,
+        state: wait_for_running(manager, boundary)?,
         autostart: manager.autostart()?,
     };
     print_status(manager, &status);
@@ -410,15 +395,15 @@ fn report_started(
 
 fn wait_for_running(
     manager: &dyn ServiceManager,
-    observation: StartObservation,
+    boundary: FailureBoundary,
 ) -> Result<DaemonState, DaemonError> {
-    let mut state = manager.state_after_start(observation)?;
+    let mut state = manager.state_after_action(boundary)?;
     for _ in 0..START_STATUS_ATTEMPTS {
         if state.is_running() || state.is_terminal_start_failure() {
             return Ok(state);
         }
         thread::sleep(START_STATUS_INTERVAL);
-        state = manager.state_after_start(observation)?;
+        state = manager.state_after_action(boundary)?;
     }
     Ok(state)
 }

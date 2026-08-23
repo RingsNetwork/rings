@@ -14,10 +14,10 @@ use super::CommandRunner;
 use super::DaemonError;
 use super::DaemonState;
 use super::DaemonStatus;
+use super::FailureBoundary;
 use super::ProcessCommandRunner;
 use super::ServiceManager;
 use super::ServiceSpec;
-use super::StartObservation;
 
 const SYSTEMD_UNIT: &str = "rings-node.service";
 // Resolve systemctl through PATH for non-FHS systems such as NixOS.
@@ -70,10 +70,10 @@ where R: CommandRunner
         &self.unit_path
     }
 
-    fn start(&self, spec: &ServiceSpec) -> Result<StartObservation, DaemonError> {
+    fn start(&self, spec: &ServiceSpec) -> Result<FailureBoundary, DaemonError> {
         write_atomic(&self.unit_path, &render_systemd_unit(spec)?)?;
         reload_enable_restart(&self.runner)?;
-        Ok(StartObservation::Fresh)
+        Ok(FailureBoundary::Unambiguous)
     }
 
     fn stop(&self) -> Result<(), DaemonError> {
@@ -83,10 +83,10 @@ where R: CommandRunner
         Ok(())
     }
 
-    fn restart(&self) -> Result<StartObservation, DaemonError> {
+    fn restart(&self) -> Result<FailureBoundary, DaemonError> {
         if self.unit_path.is_file() {
             reload_enable_restart(&self.runner)?;
-            return Ok(StartObservation::Fresh);
+            return Ok(FailureBoundary::Unambiguous);
         }
         if !self.state()?.is_installed() {
             return Err(DaemonError::ServiceNotInstalled {
@@ -98,7 +98,7 @@ where R: CommandRunner
             "restart",
             SYSTEMD_UNIT,
         ])?;
-        Ok(StartObservation::Fresh)
+        Ok(FailureBoundary::Unambiguous)
     }
 
     fn state(&self) -> Result<DaemonState, DaemonError> {
@@ -411,10 +411,10 @@ mod tests {
         let manager = test_manager(&root, runner);
         let spec = service_spec(&LogLevel::Info, &RuntimeFlavor::MultiThread)?;
 
-        let observation = manager.start(&spec)?;
+        let boundary = manager.start(&spec)?;
 
         assert!(manager.unit_path.is_file());
-        assert_eq!(observation, StartObservation::Fresh);
+        assert_eq!(boundary, FailureBoundary::Unambiguous);
         manager.runner.assert_exhausted();
         assert!(fs::remove_dir_all(&root).is_ok());
         Ok(())
@@ -436,9 +436,9 @@ mod tests {
             runner,
         };
 
-        let observation = manager.restart()?;
+        let boundary = manager.restart()?;
 
-        assert_eq!(observation, StartObservation::Fresh);
+        assert_eq!(boundary, FailureBoundary::Unambiguous);
         manager.runner.assert_exhausted();
         Ok(())
     }
@@ -455,9 +455,9 @@ mod tests {
         let manager = test_manager(&root, runner);
         write_atomic(&manager.unit_path, "installed")?;
 
-        let observation = manager.restart()?;
+        let boundary = manager.restart()?;
 
-        assert_eq!(observation, StartObservation::Fresh);
+        assert_eq!(boundary, FailureBoundary::Unambiguous);
         manager.runner.assert_exhausted();
         assert!(fs::remove_dir_all(&root).is_ok());
         Ok(())

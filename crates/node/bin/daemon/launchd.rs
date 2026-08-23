@@ -16,10 +16,10 @@ use super::AutostartState;
 use super::CommandRunner;
 use super::DaemonError;
 use super::DaemonState;
+use super::FailureBoundary;
 use super::ProcessCommandRunner;
 use super::ServiceManager;
 use super::ServiceSpec;
-use super::StartObservation;
 use super::START_STATUS_ATTEMPTS;
 use super::START_STATUS_INTERVAL;
 
@@ -30,8 +30,26 @@ const LAUNCHD_SERVICE_NOT_FOUND: i32 = 113;
 #[derive(Debug, Error)]
 pub(super) enum LaunchdDefinitionError {
     // Debug formatting keeps the rejected control character escaped in diagnostics.
-    #[error("path contains a character forbidden by XML 1.0 launchd plists: {path:?}")]
-    XmlIncompatiblePath { path: String },
+    #[error("value contains a character forbidden by XML 1.0 launchd plists: {value:?}")]
+    XmlIncompatibleValue { value: String },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FailureAttribution {
+    CurrentStatus,
+    Action(FailureBoundary),
+}
+
+impl FailureAttribution {
+    fn failed_exit_is_current(self, observed_sequence: Option<u64>) -> bool {
+        match self {
+            Self::CurrentStatus | Self::Action(FailureBoundary::Unambiguous) => true,
+            Self::Action(FailureBoundary::PostAction {
+                sequence: Some(baseline),
+            }) => observed_sequence.is_some_and(|sequence| sequence > baseline),
+            Self::Action(FailureBoundary::PostAction { sequence: None }) => false,
+        }
+    }
 }
 
 pub(super) struct LaunchdManager<R = ProcessCommandRunner> {
@@ -127,16 +145,15 @@ where R: CommandRunner
         )))
     }
 
-    fn state_with_observation(
+    fn state_with_attribution(
         &self,
-        observation: StartObservation,
+        attribution: FailureAttribution,
     ) -> Result<DaemonState, DaemonError> {
         let installed = self.definition_path.is_file();
         Ok(match self.service_output()? {
-            Some(output) => parse_launchd_state(
-                &String::from_utf8_lossy(&output.stdout),
-                observation.previous_runs(),
-            ),
+            Some(output) => {
+                parse_launchd_state(&String::from_utf8_lossy(&output.stdout), attribution)
+            }
             None if installed => DaemonState::Stopped,
             None => DaemonState::NotInstalled,
         })
@@ -154,37 +171,33 @@ where R: CommandRunner
         &self.definition_path
     }
 
-    fn start(&self, spec: &ServiceSpec) -> Result<StartObservation, DaemonError> {
+    fn start(&self, spec: &ServiceSpec) -> Result<FailureBoundary, DaemonError> {
         let definition = render_launchd_plist(spec, &self.stdout_log, &self.stderr_log)?;
         ensure_parent_directory(&self.stdout_log)?;
         ensure_parent_directory(&self.stderr_log)?;
         write_atomic(&self.definition_path, &definition)?;
         self.unload_if_loaded()?;
         self.bootstrap()?;
-        Ok(StartObservation::Fresh)
+        Ok(FailureBoundary::Unambiguous)
     }
 
     fn stop(&self) -> Result<(), DaemonError> {
         self.unload_if_loaded()
     }
 
-    fn restart(&self) -> Result<StartObservation, DaemonError> {
+    fn restart(&self) -> Result<FailureBoundary, DaemonError> {
         if let Some(output) = self.service_output()? {
-            let previous_runs = parse_launchd_runs(&String::from_utf8_lossy(&output.stdout))
-                .ok_or(DaemonError::MalformedServiceStatus {
-                    manager: "launchd",
-                    detail: "missing or invalid runs field",
-                })?;
+            let sequence = parse_launchd_runs(&String::from_utf8_lossy(&output.stdout));
             run_checked(&self.runner, "/bin/launchctl", &["enable", &self.target])?;
             run_checked(&self.runner, "/bin/launchctl", &[
                 "kickstart",
                 "-k",
                 &self.target,
             ])?;
-            Ok(StartObservation::AfterRuns(previous_runs))
+            Ok(FailureBoundary::PostAction { sequence })
         } else if self.definition_path.is_file() {
             self.bootstrap()?;
-            Ok(StartObservation::Fresh)
+            Ok(FailureBoundary::Unambiguous)
         } else {
             Err(DaemonError::ServiceNotInstalled {
                 path: self.definition_path.clone(),
@@ -193,15 +206,15 @@ where R: CommandRunner
     }
 
     fn state(&self) -> Result<DaemonState, DaemonError> {
-        self.state_with_observation(StartObservation::Fresh)
+        self.state_with_attribution(FailureAttribution::CurrentStatus)
     }
 
     fn autostart(&self) -> Result<AutostartState, DaemonError> {
         self.autostart_state()
     }
 
-    fn state_after_start(&self, observation: StartObservation) -> Result<DaemonState, DaemonError> {
-        self.state_with_observation(observation)
+    fn state_after_action(&self, boundary: FailureBoundary) -> Result<DaemonState, DaemonError> {
+        self.state_with_attribution(FailureAttribution::Action(boundary))
     }
 }
 
@@ -255,8 +268,8 @@ fn render_launchd_plist(
 
 fn xml_string(value: &str) -> Result<String, LaunchdDefinitionError> {
     if !value.chars().all(is_xml_1_0_character) {
-        Err(LaunchdDefinitionError::XmlIncompatiblePath {
-            path: value.to_owned(),
+        Err(LaunchdDefinitionError::XmlIncompatibleValue {
+            value: value.to_owned(),
         })
     } else {
         Ok(value
@@ -293,20 +306,17 @@ fn parse_launchd_runs(output: &str) -> Option<u64> {
     launchd_value(output, "runs = ")?.parse().ok()
 }
 
-fn failed_exit_belongs_to_attempt(output: &str, previous_runs: Option<u64>) -> bool {
+fn failed_exit_belongs_to_attempt(output: &str, attribution: FailureAttribution) -> bool {
     let has_failed_exit = launchd_value(output, "last exit code = ")
         .and_then(|value| value.split_whitespace().next())
         .and_then(|value| value.parse::<i32>().ok())
         .is_some_and(|code| code != 0);
-    let exit_is_current = previous_runs
-        .map(|previous| parse_launchd_runs(output).is_some_and(|runs| runs > previous))
-        .unwrap_or(true);
-    has_failed_exit && exit_is_current
+    has_failed_exit && attribution.failed_exit_is_current(parse_launchd_runs(output))
 }
 
-fn parse_launchd_state(output: &str, previous_runs: Option<u64>) -> DaemonState {
+fn parse_launchd_state(output: &str, attribution: FailureAttribution) -> DaemonState {
     let state = launchd_value(output, "state = ");
-    let has_current_failed_exit = failed_exit_belongs_to_attempt(output, previous_runs);
+    let has_current_failed_exit = failed_exit_belongs_to_attempt(output, attribution);
     match state {
         Some("running") => DaemonState::Running,
         Some("spawn scheduled") if has_current_failed_exit => DaemonState::Failed,
@@ -413,7 +423,7 @@ mod tests {
     }
 
     #[test]
-    fn definition_rejects_paths_forbidden_by_xml_1_0() -> Result<(), DaemonError> {
+    fn definition_rejects_values_forbidden_by_xml_1_0() -> Result<(), DaemonError> {
         for character in [
             '\u{0}', '\u{1}', '\u{8}', '\u{b}', '\u{c}', '\u{e}', '\u{1f}', '\u{fffe}', '\u{ffff}',
         ] {
@@ -426,7 +436,7 @@ mod tests {
                     Path::new("/tmp/rings-daemon.error.log"),
                 ),
                 Err(DaemonError::LaunchdDefinition(
-                    LaunchdDefinitionError::XmlIncompatiblePath { .. }
+                    LaunchdDefinitionError::XmlIncompatibleValue { .. }
                 ))
             ));
         }
@@ -449,7 +459,7 @@ mod tests {
         assert!(matches!(
             result,
             Err(DaemonError::LaunchdDefinition(
-                LaunchdDefinitionError::XmlIncompatiblePath { .. }
+                LaunchdDefinitionError::XmlIncompatibleValue { .. }
             ))
         ));
         assert!(!root.exists());
@@ -485,31 +495,46 @@ mod tests {
     #[test]
     fn state_parser_preserves_launchd_lifecycle_and_failure_states() {
         assert_eq!(
-            parse_launchd_state("state = running\n", None),
+            parse_launchd_state("state = running\n", FailureAttribution::CurrentStatus),
             DaemonState::Running
         );
         assert_eq!(
-            parse_launchd_state("state = waiting\n", None),
+            parse_launchd_state("state = waiting\n", FailureAttribution::CurrentStatus),
             DaemonState::Stopped
         );
         assert_eq!(
-            parse_launchd_state("state = throttled\nlast exit code = 78\n", None),
+            parse_launchd_state(
+                "state = throttled\nlast exit code = 78\n",
+                FailureAttribution::CurrentStatus,
+            ),
             DaemonState::Failed
         );
         assert_eq!(
-            parse_launchd_state("state = spawn scheduled\n", None),
+            parse_launchd_state(
+                "state = spawn scheduled\n",
+                FailureAttribution::CurrentStatus,
+            ),
             DaemonState::Starting
         );
         assert_eq!(
-            parse_launchd_state("state = spawn scheduled\nlast exit code = 1\n", None),
+            parse_launchd_state(
+                "state = spawn scheduled\nlast exit code = 1\n",
+                FailureAttribution::CurrentStatus,
+            ),
             DaemonState::Failed
         );
         assert_eq!(
-            parse_launchd_state("state = exited\nlast exit code = 0\n", None),
+            parse_launchd_state(
+                "state = exited\nlast exit code = 0\n",
+                FailureAttribution::CurrentStatus,
+            ),
             DaemonState::Stopped
         );
         assert_eq!(
-            parse_launchd_state("state = exited\nlast exit code = 78\n", None),
+            parse_launchd_state(
+                "state = exited\nlast exit code = 78\n",
+                FailureAttribution::CurrentStatus,
+            ),
             DaemonState::Failed
         );
     }
@@ -518,15 +543,29 @@ mod tests {
     fn state_parser_assigns_only_newer_runs_exit_to_restart_attempt() {
         assert_eq!(
             parse_launchd_state(
+                "state = spawn scheduled\nlast exit code = 1\n",
+                FailureAttribution::Action(FailureBoundary::Unambiguous),
+            ),
+            DaemonState::Failed
+        );
+        assert_eq!(
+            parse_launchd_state(
+                "state = spawn scheduled\nlast exit code = 9\n",
+                FailureAttribution::Action(FailureBoundary::PostAction { sequence: None }),
+            ),
+            DaemonState::Starting
+        );
+        assert_eq!(
+            parse_launchd_state(
                 "state = spawn scheduled\nruns = 4\nlast exit code = 9\n",
-                Some(4),
+                FailureAttribution::Action(FailureBoundary::PostAction { sequence: Some(4) }),
             ),
             DaemonState::Starting
         );
         assert_eq!(
             parse_launchd_state(
                 "state = spawn scheduled\nruns = 5\nlast exit code = 1\n",
-                Some(4),
+                FailureAttribution::Action(FailureBoundary::PostAction { sequence: Some(4) }),
             ),
             DaemonState::Failed
         );
@@ -596,10 +635,10 @@ mod tests {
         let manager = test_manager(&root, runner);
         let spec = service_spec(&LogLevel::Info, &RuntimeFlavor::MultiThread)?;
 
-        let observation = manager.start(&spec)?;
+        let boundary = manager.start(&spec)?;
 
         assert!(manager.definition_path.is_file());
-        assert_eq!(observation, StartObservation::Fresh);
+        assert_eq!(boundary, FailureBoundary::Unambiguous);
         manager.runner.assert_exhausted();
         assert!(fs::remove_dir_all(&root).is_ok());
         Ok(())
@@ -632,10 +671,10 @@ mod tests {
         ]);
         let manager = test_manager(&root, runner);
 
-        let observation = manager.restart()?;
-        let result = super::super::report_started(&manager, observation);
+        let boundary = manager.restart()?;
+        let result = super::super::report_started(&manager, boundary);
 
-        assert_eq!(observation, StartObservation::AfterRuns(4));
+        assert_eq!(boundary, FailureBoundary::PostAction { sequence: Some(4) });
         manager.runner.assert_exhausted();
         result
     }
@@ -668,9 +707,9 @@ mod tests {
         ]);
         let manager = test_manager(&root, runner);
 
-        let observation = manager.restart()?;
+        let boundary = manager.restart()?;
 
-        assert_eq!(observation, StartObservation::Fresh);
+        assert_eq!(boundary, FailureBoundary::Unambiguous);
         manager.runner.assert_exhausted();
         assert!(fs::remove_dir_all(&root).is_ok());
         Ok(())
@@ -698,26 +737,28 @@ mod tests {
     }
 
     #[test]
-    fn restart_rejects_loaded_status_without_a_runs_baseline() {
+    fn restart_without_a_sequence_baseline_uses_state_only() -> anyhow::Result<()> {
         let root = test_root("restart-missing-runs");
         let target = format!("gui/501/{LAUNCHD_LABEL}");
-        let runner = ScriptedCommandRunner::new([CommandStep::success(
-            "/bin/launchctl",
-            &["print", &target],
-            "state = running\n",
-        )]);
+        let runner = ScriptedCommandRunner::new([
+            CommandStep::success("/bin/launchctl", &["print", &target], "state = running\n"),
+            CommandStep::success("/bin/launchctl", &["enable", &target], ""),
+            CommandStep::success("/bin/launchctl", &["kickstart", "-k", &target], ""),
+            CommandStep::success(
+                "/bin/launchctl",
+                &["print", &target],
+                "state = spawn scheduled\nlast exit code = 9\n",
+            ),
+            CommandStep::success("/bin/launchctl", &["print", &target], "state = running\n"),
+        ]);
         let manager = test_manager(&root, runner);
 
-        let result = manager.restart();
+        let boundary = manager.restart()?;
+        let result = super::super::report_started(&manager, boundary);
 
-        assert!(matches!(
-            result,
-            Err(DaemonError::MalformedServiceStatus {
-                manager: "launchd",
-                detail: "missing or invalid runs field",
-            })
-        ));
+        assert_eq!(boundary, FailureBoundary::PostAction { sequence: None });
         manager.runner.assert_exhausted();
+        result
     }
 
     #[test]
@@ -742,7 +783,7 @@ mod tests {
         ]);
         let manager = test_manager(&root, runner);
 
-        let result = super::super::report_started(&manager, StartObservation::Fresh);
+        let result = super::super::report_started(&manager, FailureBoundary::Unambiguous);
 
         manager.runner.assert_exhausted();
         assert!(fs::remove_dir_all(&root).is_ok());
@@ -774,7 +815,7 @@ mod tests {
         ]);
         let manager = test_manager(&root, runner);
 
-        let error = super::super::report_started(&manager, StartObservation::Fresh)
+        let error = super::super::report_started(&manager, FailureBoundary::Unambiguous)
             .err()
             .map(|error| error.to_string());
 
