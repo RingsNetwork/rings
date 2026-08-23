@@ -4288,7 +4288,6 @@ dependencies = [
  "flate2",
  "futures",
  "futures-timer",
- "http 0.2.12",
  "js-sys",
  "jsonrpc-core",
  "lazy_static",

@@ -37,6 +37,7 @@ use crate::dht::MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use crate::ecc::SecretKey;
 use crate::measure::BehaviourJudgement;
 use crate::measure::Measure;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::message::MessageClass;
 use crate::message::MessagePayload;
 use crate::storage::MemStorage;

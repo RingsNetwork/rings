@@ -661,9 +661,9 @@ impl InboundActor {
 
     fn drain_available(&mut self) {
         for _ in 0..INBOUND_COMMAND_DRAIN_BUDGET {
-            match self.receiver.try_next() {
-                Ok(Some(command)) => self.handle_command(command),
-                Ok(None) => {
+            match self.receiver.try_recv() {
+                Ok(command) => self.handle_command(command),
+                Err(error) if error.is_closed() => {
                     self.input_closed = true;
                     return;
                 }

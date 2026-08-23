@@ -46,6 +46,7 @@ use crate::tests::default::wait_for_connection_state;
 use crate::tests::default::wait_for_msgs;
 use crate::tests::default::wait_for_successor;
 use crate::tests::default::Node;
+use crate::tests::default::TEST_WAIT_TIMEOUT;
 use crate::tests::manually_establish_connection;
 
 fn invalid_test_state(message: impl Into<String>) -> Error {
@@ -94,7 +95,7 @@ impl BehaviourJudgement for PendingMeasure {
 }
 
 async fn wait_until(label: &str, condition: impl Fn() -> bool) -> Result<()> {
-    timeout(Duration::from_secs(1), async {
+    timeout(TEST_WAIT_TIMEOUT, async {
         while !condition() {
             tokio::task::yield_now().await;
         }

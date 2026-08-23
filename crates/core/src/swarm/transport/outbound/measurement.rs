@@ -191,9 +191,9 @@ impl MeasurementReceiver {
 
     fn receiver_is_closed(&mut self) -> bool {
         loop {
-            match self.receiver.try_next() {
-                Ok(Some(())) => {}
-                Ok(None) => return true,
+            match self.receiver.try_recv() {
+                Ok(()) => {}
+                Err(error) if error.is_closed() => return true,
                 Err(_) => return false,
             }
         }
