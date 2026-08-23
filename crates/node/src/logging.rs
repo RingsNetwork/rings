@@ -17,6 +17,7 @@ pub use self::node::rings_node_init_logging as init_logging;
 use crate::prelude::wasm_export;
 
 /// Logging verbosity accepted by native CLI and browser bindings.
+///
 /// Copying a log level preserves the same immutable verbosity selection.
 #[repr(C)]
 #[wasm_export]

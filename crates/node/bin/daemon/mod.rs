@@ -94,6 +94,10 @@ enum DaemonError {
     },
     #[error("path is not valid UTF-8 and cannot be written to a service definition: {path}")]
     NonUtf8Path { path: PathBuf },
+    // Debug formatting keeps the rejected control character escaped in diagnostics.
+    #[error("path contains a character forbidden by XML 1.0 service definitions: {path:?}")]
+    XmlIncompatiblePath { path: PathBuf },
+    // Debug formatting keeps the rejected line break escaped in diagnostics.
     #[error(
         "current working directory contains a line break and cannot be written safely to a service definition: {path:?}"
     )]
@@ -206,6 +210,10 @@ enum DaemonState {
 }
 
 impl DaemonState {
+    #[allow(
+        dead_code,
+        reason = "used by the Linux production adapter and both adapters' Unix test builds"
+    )]
     fn is_installed(&self) -> bool {
         !matches!(self, Self::NotInstalled)
     }
@@ -215,7 +223,7 @@ impl DaemonState {
     }
 
     fn is_terminal_start_failure(&self) -> bool {
-        !self.is_installed() || matches!(self, Self::Failed)
+        matches!(self, Self::NotInstalled | Self::Failed)
     }
 }
 
@@ -424,11 +432,27 @@ fn resolve_config_path(config: &str) -> Result<PathBuf, DaemonError> {
 }
 
 fn path_text(path: &Path) -> Result<String, DaemonError> {
-    path.to_str()
-        .map(str::to_owned)
-        .ok_or_else(|| DaemonError::NonUtf8Path {
+    let text = path.to_str().ok_or_else(|| DaemonError::NonUtf8Path {
+        path: path.to_path_buf(),
+    })?;
+    if !text.chars().all(is_xml_1_0_character) {
+        return Err(DaemonError::XmlIncompatiblePath {
             path: path.to_path_buf(),
-        })
+        });
+    }
+    Ok(text.to_owned())
+}
+
+fn is_xml_1_0_character(character: char) -> bool {
+    matches!(
+        character,
+        '\u{9}'
+            | '\u{a}'
+            | '\u{d}'
+            | '\u{20}'..='\u{d7ff}'
+            | '\u{e000}'..='\u{fffd}'
+            | '\u{10000}'..='\u{10ffff}'
+    )
 }
 
 fn working_directory_text(path: &Path) -> Result<String, DaemonError> {
@@ -654,6 +678,40 @@ mod tests {
             working_directory_text(Path::new("/tmp/rings %n")),
             Ok(path) if path == "/tmp/rings %n"
         ));
+    }
+
+    #[test]
+    fn path_text_rejects_characters_forbidden_by_xml_1_0() {
+        for character in [
+            '\u{0}', '\u{1}', '\u{8}', '\u{b}', '\u{c}', '\u{e}', '\u{1f}', '\u{fffe}', '\u{ffff}',
+        ] {
+            let path = PathBuf::from(format!("/tmp/rings{character}daemon"));
+            assert!(matches!(
+                path_text(&path),
+                Err(DaemonError::XmlIncompatiblePath { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn path_text_accepts_xml_1_0_boundary_characters() {
+        for character in [
+            '\u{9}',
+            '\u{a}',
+            '\u{d}',
+            '\u{20}',
+            '\u{d7ff}',
+            '\u{e000}',
+            '\u{fffd}',
+            '\u{10000}',
+            '\u{10ffff}',
+        ] {
+            let expected = format!("/tmp/rings{character}daemon");
+            assert!(matches!(
+                path_text(Path::new(&expected)),
+                Ok(path) if path == expected
+            ));
+        }
     }
 
     #[test]

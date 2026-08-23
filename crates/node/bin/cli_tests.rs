@@ -46,7 +46,7 @@ fn clap_command_tree_is_internally_consistent() {
 }
 
 #[test]
-fn daemon_command_is_appended_after_the_preexisting_commands() {
+fn command_order_is_stable() {
     let command = Cli::command();
     let subcommands = command
         .get_subcommands()
