@@ -351,10 +351,6 @@ pub enum Error {
     #[error("Outbound scheduler requires an active Tokio runtime")]
     OutboundSchedulerRuntimeUnavailable,
 
-    /// An outbound scheduler lane violated its internal state model.
-    #[error("Outbound scheduler state invariant violated")]
-    OutboundSchedulerInvariantViolation,
-
     /// The inbound actor has admitted its maximum number of messages.
     #[error("Inbound mailbox capacity {capacity} exceeded")]
     InboundMailboxCapacityExceeded {
@@ -816,8 +812,7 @@ impl Error {
 
         match self {
             Self::ConnectionAttemptSuperseded { .. }
-            | Self::OutboundSchedulerRuntimeUnavailable
-            | Self::OutboundSchedulerInvariantViolation => false,
+            | Self::OutboundSchedulerRuntimeUnavailable => false,
             Self::Transport(rings_transport::error::Error::SendPermitRevoked) => false,
             Self::TransportNotReady { state, .. } => matches!(
                 state,

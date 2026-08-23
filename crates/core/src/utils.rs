@@ -250,14 +250,14 @@ impl FairWaitQueue {
         self: &Arc<Self>,
         cost: usize,
         budget_error: E,
-        attempt: impl FnOnce() -> std::result::Result<T, E>,
+        attempt: impl FnOnce() -> Option<T>,
     ) -> std::result::Result<FairAdmission<T>, E> {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if state.queue.is_empty() {
-            if let Ok(value) = attempt() {
+            if let Some(value) = attempt() {
                 return Ok(FairAdmission::Ready(value));
             }
         }
@@ -301,10 +301,11 @@ pub(crate) async fn acquire_fair<T>(
     closed_error: impl Fn() -> crate::error::Error,
     mut attempt: impl FnMut() -> crate::error::Result<T>,
 ) -> crate::error::Result<T> {
-    match queue.admit_or_wait(cost, budget_error, &mut attempt)? {
+    let mut try_acquire = || attempt().ok();
+    match queue.admit_or_wait(cost, budget_error, &mut try_acquire)? {
         FairAdmission::Ready(value) => Ok(value),
         FairAdmission::Waiting(mut waiter) => {
-            poll_fn(|context| match waiter.poll(context, || attempt().ok()) {
+            poll_fn(|context| match waiter.poll(context, &mut try_acquire) {
                 Poll::Ready(Some(value)) => Poll::Ready(Ok(value)),
                 Poll::Ready(None) => Poll::Ready(Err(closed_error())),
                 Poll::Pending => Poll::Pending,
