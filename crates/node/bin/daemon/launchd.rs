@@ -35,18 +35,32 @@ pub(super) enum LaunchdDefinitionError {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FailureAttribution {
+enum ExitCodeAttribution {
     CurrentStatus,
     Action(FailureBoundary),
 }
 
-impl FailureAttribution {
-    fn failed_exit_is_current(self, observed_sequence: Option<u64>) -> bool {
+impl ExitCodeAttribution {
+    fn is_current_failure(self, output: &str) -> bool {
+        let has_failed_exit = launchd_value(output, "last exit code = ")
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|value| value.parse::<i32>().ok())
+            .is_some_and(|code| code != 0);
+        if !has_failed_exit {
+            return false;
+        }
         match self {
+            // Status chooses to trust the recorded exit. An unambiguous action knows history was
+            // reset. These are distinct propositions that intentionally reach the same decision.
             Self::CurrentStatus | Self::Action(FailureBoundary::Unambiguous) => true,
             Self::Action(FailureBoundary::PostAction {
                 sequence: Some(baseline),
-            }) => observed_sequence.is_some_and(|sequence| sequence > baseline),
+            }) => {
+                // Observed on macOS 15.6.1 (24G90): after `kickstart -k`, a stale exit code
+                // remained while `runs` equalled the baseline; once `runs` advanced, launchd
+                // cleared that code before the new instance reached `running`.
+                parse_launchd_runs(output).is_some_and(|sequence| sequence > baseline)
+            }
             Self::Action(FailureBoundary::PostAction { sequence: None }) => false,
         }
     }
@@ -145,14 +159,14 @@ where R: CommandRunner
         )))
     }
 
-    fn state_with_attribution(
+    fn state_with_exit_attribution(
         &self,
-        attribution: FailureAttribution,
+        exit_attribution: ExitCodeAttribution,
     ) -> Result<DaemonState, DaemonError> {
         let installed = self.definition_path.is_file();
         Ok(match self.service_output()? {
             Some(output) => {
-                parse_launchd_state(&String::from_utf8_lossy(&output.stdout), attribution)
+                parse_launchd_state(&String::from_utf8_lossy(&output.stdout), exit_attribution)
             }
             None if installed => DaemonState::Stopped,
             None => DaemonState::NotInstalled,
@@ -206,7 +220,7 @@ where R: CommandRunner
     }
 
     fn state(&self) -> Result<DaemonState, DaemonError> {
-        self.state_with_attribution(FailureAttribution::CurrentStatus)
+        self.state_with_exit_attribution(ExitCodeAttribution::CurrentStatus)
     }
 
     fn autostart(&self) -> Result<AutostartState, DaemonError> {
@@ -214,7 +228,7 @@ where R: CommandRunner
     }
 
     fn state_after_action(&self, boundary: FailureBoundary) -> Result<DaemonState, DaemonError> {
-        self.state_with_attribution(FailureAttribution::Action(boundary))
+        self.state_with_exit_attribution(ExitCodeAttribution::Action(boundary))
     }
 }
 
@@ -306,17 +320,9 @@ fn parse_launchd_runs(output: &str) -> Option<u64> {
     launchd_value(output, "runs = ")?.parse().ok()
 }
 
-fn failed_exit_belongs_to_attempt(output: &str, attribution: FailureAttribution) -> bool {
-    let has_failed_exit = launchd_value(output, "last exit code = ")
-        .and_then(|value| value.split_whitespace().next())
-        .and_then(|value| value.parse::<i32>().ok())
-        .is_some_and(|code| code != 0);
-    has_failed_exit && attribution.failed_exit_is_current(parse_launchd_runs(output))
-}
-
-fn parse_launchd_state(output: &str, attribution: FailureAttribution) -> DaemonState {
+fn parse_launchd_state(output: &str, exit_attribution: ExitCodeAttribution) -> DaemonState {
     let state = launchd_value(output, "state = ");
-    let has_current_failed_exit = failed_exit_belongs_to_attempt(output, attribution);
+    let has_current_failed_exit = exit_attribution.is_current_failure(output);
     match state {
         Some("running") => DaemonState::Running,
         Some("spawn scheduled") if has_current_failed_exit => DaemonState::Failed,
@@ -495,45 +501,45 @@ mod tests {
     #[test]
     fn state_parser_preserves_launchd_lifecycle_and_failure_states() {
         assert_eq!(
-            parse_launchd_state("state = running\n", FailureAttribution::CurrentStatus),
+            parse_launchd_state("state = running\n", ExitCodeAttribution::CurrentStatus),
             DaemonState::Running
         );
         assert_eq!(
-            parse_launchd_state("state = waiting\n", FailureAttribution::CurrentStatus),
+            parse_launchd_state("state = waiting\n", ExitCodeAttribution::CurrentStatus),
             DaemonState::Stopped
         );
         assert_eq!(
             parse_launchd_state(
                 "state = throttled\nlast exit code = 78\n",
-                FailureAttribution::CurrentStatus,
+                ExitCodeAttribution::CurrentStatus,
             ),
             DaemonState::Failed
         );
         assert_eq!(
             parse_launchd_state(
                 "state = spawn scheduled\n",
-                FailureAttribution::CurrentStatus,
+                ExitCodeAttribution::CurrentStatus,
             ),
             DaemonState::Starting
         );
         assert_eq!(
             parse_launchd_state(
                 "state = spawn scheduled\nlast exit code = 1\n",
-                FailureAttribution::CurrentStatus,
+                ExitCodeAttribution::CurrentStatus,
             ),
             DaemonState::Failed
         );
         assert_eq!(
             parse_launchd_state(
                 "state = exited\nlast exit code = 0\n",
-                FailureAttribution::CurrentStatus,
+                ExitCodeAttribution::CurrentStatus,
             ),
             DaemonState::Stopped
         );
         assert_eq!(
             parse_launchd_state(
                 "state = exited\nlast exit code = 78\n",
-                FailureAttribution::CurrentStatus,
+                ExitCodeAttribution::CurrentStatus,
             ),
             DaemonState::Failed
         );
@@ -544,28 +550,28 @@ mod tests {
         assert_eq!(
             parse_launchd_state(
                 "state = spawn scheduled\nlast exit code = 1\n",
-                FailureAttribution::Action(FailureBoundary::Unambiguous),
+                ExitCodeAttribution::Action(FailureBoundary::Unambiguous),
             ),
             DaemonState::Failed
         );
         assert_eq!(
             parse_launchd_state(
                 "state = spawn scheduled\nlast exit code = 9\n",
-                FailureAttribution::Action(FailureBoundary::PostAction { sequence: None }),
+                ExitCodeAttribution::Action(FailureBoundary::PostAction { sequence: None }),
             ),
             DaemonState::Starting
         );
         assert_eq!(
             parse_launchd_state(
                 "state = spawn scheduled\nruns = 4\nlast exit code = 9\n",
-                FailureAttribution::Action(FailureBoundary::PostAction { sequence: Some(4) }),
+                ExitCodeAttribution::Action(FailureBoundary::PostAction { sequence: Some(4) }),
             ),
             DaemonState::Starting
         );
         assert_eq!(
             parse_launchd_state(
                 "state = spawn scheduled\nruns = 5\nlast exit code = 1\n",
-                FailureAttribution::Action(FailureBoundary::PostAction { sequence: Some(4) }),
+                ExitCodeAttribution::Action(FailureBoundary::PostAction { sequence: Some(4) }),
             ),
             DaemonState::Failed
         );
@@ -677,6 +683,40 @@ mod tests {
         assert_eq!(boundary, FailureBoundary::PostAction { sequence: Some(4) });
         manager.runner.assert_exhausted();
         result
+    }
+
+    #[test]
+    fn restart_reports_failure_after_a_new_run_exits_nonzero() -> anyhow::Result<()> {
+        let root = test_root("restart-current-failure");
+        let target = format!("gui/501/{LAUNCHD_LABEL}");
+        let runner = ScriptedCommandRunner::new([
+            CommandStep::success(
+                "/bin/launchctl",
+                &["print", &target],
+                "state = running\nruns = 4\n",
+            ),
+            CommandStep::success("/bin/launchctl", &["enable", &target], ""),
+            CommandStep::success("/bin/launchctl", &["kickstart", "-k", &target], ""),
+            CommandStep::success(
+                "/bin/launchctl",
+                &["print", &target],
+                "state = spawn scheduled\nruns = 5\nlast exit code = 1\n",
+            ),
+        ]);
+        let manager = test_manager(&root, runner);
+
+        let boundary = manager.restart()?;
+        let error = super::super::report_started(&manager, boundary)
+            .err()
+            .map(|error| error.to_string());
+
+        assert_eq!(boundary, FailureBoundary::PostAction { sequence: Some(4) });
+        assert_eq!(
+            error.as_deref(),
+            Some("the daemon did not reach the running state; current state: failed")
+        );
+        manager.runner.assert_exhausted();
+        Ok(())
     }
 
     #[test]
