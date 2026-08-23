@@ -89,6 +89,10 @@ impl InboundLane {
             None
         }
     }
+
+    const fn is_logical_data(self) -> bool {
+        self.0 != MessageClass::DhtControl.index() && self.0 != Self::Reassembly.0
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -701,6 +705,7 @@ impl InboundActor {
     }
 
     fn dispatch_runnable(&mut self) {
+        let reassembly_barrier = self.reassembly_barrier_sequence();
         for (index, active_lane) in self.active_lanes.iter_mut().enumerate() {
             if active_lane.is_some() {
                 continue;
@@ -711,6 +716,13 @@ impl InboundActor {
             let Some(sequence) = self.queues.front_sequence(lane) else {
                 continue;
             };
+            // The nested class is unknown until reassembly completes. Preserve data-plane order
+            // across that handoff, while keeping control traffic independent for liveness.
+            if lane.is_logical_data()
+                && reassembly_barrier.is_some_and(|barrier| sequence > barrier)
+            {
+                continue;
+            }
             let Some(event) = self.queues.pop(lane) else {
                 continue;
             };
@@ -718,6 +730,19 @@ impl InboundActor {
             self.active
                 .push(Box::pin(process_event(self.processor.clone(), event)));
         }
+    }
+
+    fn reassembly_barrier_sequence(&self) -> Option<u64> {
+        [
+            self.active_lanes
+                .get(InboundLane::Reassembly.index())
+                .copied()
+                .flatten(),
+            self.queues.front_sequence(InboundLane::Reassembly),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     async fn wait_for_input(&mut self) {

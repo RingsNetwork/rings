@@ -416,7 +416,7 @@ async fn closing_inbound_mailbox_cancels_pending_callback() -> Result<()> {
 }
 
 #[tokio::test]
-async fn reassembly_handoff_does_not_block_later_control_lane() -> Result<()> {
+async fn reassembly_handoff_preserves_data_order_without_blocking_control() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
@@ -475,6 +475,22 @@ async fn reassembly_handoff_does_not_block_later_control_lane() -> Result<()> {
     });
     app_callback.wait_for_final_chunk().await;
 
+    let later = MessagePayload::new_send(
+        Message::custom(b"later-application")?,
+        &peer_session,
+        transport.dht.did,
+        transport.dht.did,
+    )?
+    .to_wire()?;
+    let later_callback = Arc::clone(&callback);
+    let later_cid = cid.clone();
+    let later_delivery = tokio::spawn(async move {
+        later_callback
+            .on_message(&later_cid, &later)
+            .await
+            .map_err(|error| Error::InvalidMessage(error.to_string()))
+    });
+
     let control = MessagePayload::new_send(
         Message::PeerLivenessReport(crate::message::PeerLivenessReport { sent_at_ms: 1 }),
         &peer_session,
@@ -499,8 +515,12 @@ async fn reassembly_handoff_does_not_block_later_control_lane() -> Result<()> {
     final_delivery
         .await
         .map_err(|_| Error::InvalidMessage("final chunk task panicked".to_string()))??;
+    later_delivery
+        .await
+        .map_err(|_| Error::InvalidMessage("later application task panicked".to_string()))??;
     assert_eq!(app_callback.delivered()?, vec![
-        b"reassembled-first".to_vec()
+        b"reassembled-first".to_vec(),
+        b"later-application".to_vec(),
     ]);
     Ok(())
 }

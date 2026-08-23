@@ -782,25 +782,25 @@ impl Error {
         Self::PeerRingUnexpectedAction(Box::new(action))
     }
 
-    /// True when local data-channel admission or delivery exceeded its bounded wait. This is a
-    /// local backpressure signal, not evidence that the remote peer is unreachable or malicious.
-    pub(crate) const fn is_data_channel_backpressure(&self) -> bool {
+    /// True when local send admission, memory, or delivery capacity is exhausted. This is local
+    /// backpressure, not evidence that the remote peer is unreachable or malicious.
+    pub(crate) const fn is_local_send_backpressure(&self) -> bool {
         matches!(
             self,
             Self::DataChannelSendQueueTimeout { .. }
                 | Self::DataChannelDeliveryTimeout { .. }
+                | Self::OutboundTransferCapacityExceeded { .. }
+                | Self::OutboundTransferMemoryCapacityExceeded { .. }
                 | Self::OutboundTransferAdmissionTimeout { .. }
         )
     }
 
     /// Whether a data-plane send should be retried from freshly computed topology.
     pub(crate) const fn is_deferrable_data_plane_send(&self) -> bool {
-        self.is_data_channel_backpressure()
+        self.is_local_send_backpressure()
             || matches!(
                 self,
                 Self::ConnectionAttemptSuperseded { .. }
-                    | Self::OutboundTransferCapacityExceeded { .. }
-                    | Self::OutboundTransferMemoryCapacityExceeded { .. }
                     | Self::RTCDataChannelStateNotOpen
                     | Self::TransportNotReady { .. }
                     | Self::SwarmMissDidInTable(_)
@@ -810,14 +810,12 @@ impl Error {
 
     /// Whether this error should degrade peer quality through `FailedToSend`.
     pub(crate) const fn records_peer_send_failure(&self) -> bool {
-        if self.is_data_channel_backpressure() {
+        if self.is_local_send_backpressure() {
             return false;
         }
 
         match self {
             Self::ConnectionAttemptSuperseded { .. }
-            | Self::OutboundTransferCapacityExceeded { .. }
-            | Self::OutboundTransferMemoryCapacityExceeded { .. }
             | Self::OutboundSchedulerRuntimeUnavailable
             | Self::OutboundSchedulerInvariantViolation => false,
             Self::Transport(rings_transport::error::Error::SendPermitRevoked) => false,

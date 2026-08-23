@@ -207,7 +207,7 @@ mod tests {
     }
 
     #[test]
-    fn data_channel_backpressure_never_degrades_peer_quality() {
+    fn local_send_backpressure_is_deferrable_and_never_degrades_peer_quality() {
         let peer: crate::dht::Did = crate::ecc::SecretKey::random().address().into();
         let backpressure = [
             Error::DataChannelSendQueueTimeout {
@@ -221,6 +221,12 @@ mod tests {
                 timeout_ms: 1,
                 context: "test",
             },
+            Error::OutboundTransferCapacityExceeded { peer, capacity: 1 },
+            Error::OutboundTransferMemoryCapacityExceeded {
+                peer,
+                requested_bytes: 1,
+                capacity_bytes: 1,
+            },
             Error::OutboundTransferAdmissionTimeout {
                 peer,
                 timeout_ms: 1,
@@ -228,7 +234,8 @@ mod tests {
         ];
 
         for error in backpressure {
-            assert!(error.is_data_channel_backpressure(), "{error:?}");
+            assert!(error.is_local_send_backpressure(), "{error:?}");
+            assert!(error.is_deferrable_data_plane_send(), "{error:?}");
             assert!(!error.records_peer_send_failure(), "{error:?}");
         }
     }
