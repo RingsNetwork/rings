@@ -5,6 +5,8 @@ use std::path::PathBuf;
 use std::process::Output;
 use std::thread;
 
+use thiserror::Error;
+
 use super::command_failure;
 use super::ensure_parent_directory;
 use super::path_text;
@@ -23,6 +25,13 @@ use super::START_STATUS_INTERVAL;
 const LAUNCHD_LABEL: &str = "io.ringsnetwork.node";
 // `launchctl error 113` is "Could not find specified service"; other failures are real errors.
 const LAUNCHD_SERVICE_NOT_FOUND: i32 = 113;
+
+#[derive(Debug, Error)]
+pub(super) enum LaunchdDefinitionError {
+    // Debug formatting keeps the rejected control character escaped in diagnostics.
+    #[error("path contains a character forbidden by XML 1.0 launchd plists: {path:?}")]
+    XmlIncompatiblePath { path: PathBuf },
+}
 
 pub(super) struct LaunchdManager<R = ProcessCommandRunner> {
     definition_path: PathBuf,
@@ -181,6 +190,15 @@ fn render_launchd_plist(
     stdout_log: &Path,
     stderr_log: &Path,
 ) -> Result<String, DaemonError> {
+    for path in [
+        Path::new(spec.executable.as_str()),
+        Path::new(spec.config.as_str()),
+        Path::new(spec.working_directory.as_str()),
+        stdout_log,
+        stderr_log,
+    ] {
+        validate_launchd_path(path)?;
+    }
     let arguments = spec
         .arguments()
         .into_iter()
@@ -220,6 +238,30 @@ fn render_launchd_plist(
     ))
 }
 
+fn validate_launchd_path(path: &Path) -> Result<(), DaemonError> {
+    let text = path_text(path)?;
+    if text.chars().all(is_xml_1_0_character) {
+        Ok(())
+    } else {
+        Err(LaunchdDefinitionError::XmlIncompatiblePath {
+            path: path.to_path_buf(),
+        }
+        .into())
+    }
+}
+
+fn is_xml_1_0_character(character: char) -> bool {
+    matches!(
+        character,
+        '\u{9}'
+            | '\u{a}'
+            | '\u{d}'
+            | '\u{20}'..='\u{d7ff}'
+            | '\u{e000}'..='\u{fffd}'
+            | '\u{10000}'..='\u{10ffff}'
+    )
+}
+
 fn xml_escape(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -236,8 +278,20 @@ fn parse_launchd_state(output: &str) -> DaemonState {
             .map(str::trim)
             .filter(|state| !state.is_empty())
     });
+    let has_failed_exit = output
+        .lines()
+        .find_map(|line| {
+            line.trim()
+                .strip_prefix("last exit code = ")
+                .and_then(|value| value.split_whitespace().next())
+                .and_then(|value| value.parse::<i32>().ok())
+        })
+        .is_some_and(|code| code != 0);
     match state {
         Some("running") => DaemonState::Running,
+        Some("spawn scheduled") if has_failed_exit => DaemonState::Failed,
+        Some("spawn scheduled") => DaemonState::Starting,
+        Some("waiting" | "exited" | "not running") if has_failed_exit => DaemonState::Failed,
         Some("waiting" | "exited" | "not running") => DaemonState::Stopped,
         Some("throttled") => DaemonState::Failed,
         Some(other) => DaemonState::Unknown(other.to_owned()),
@@ -337,7 +391,53 @@ mod tests {
     }
 
     #[test]
-    fn state_parser_preserves_running_stopped_and_unknown_states() {
+    fn definition_rejects_paths_forbidden_by_xml_1_0() -> Result<(), DaemonError> {
+        for character in [
+            '\u{0}', '\u{1}', '\u{8}', '\u{b}', '\u{c}', '\u{e}', '\u{1f}', '\u{fffe}', '\u{ffff}',
+        ] {
+            let mut spec = service_spec(&LogLevel::Warn, &RuntimeFlavor::CurrentThread)?;
+            spec.working_directory = format!("/tmp/rings{character}daemon");
+            assert!(matches!(
+                render_launchd_plist(
+                    &spec,
+                    Path::new("/tmp/rings-daemon.log"),
+                    Path::new("/tmp/rings-daemon.error.log"),
+                ),
+                Err(DaemonError::LaunchdDefinition(
+                    LaunchdDefinitionError::XmlIncompatiblePath { .. }
+                ))
+            ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn definition_accepts_xml_1_0_path_boundaries() -> Result<(), DaemonError> {
+        for character in [
+            '\u{9}',
+            '\u{a}',
+            '\u{d}',
+            '\u{20}',
+            '\u{d7ff}',
+            '\u{e000}',
+            '\u{fffd}',
+            '\u{10000}',
+            '\u{10ffff}',
+        ] {
+            let mut spec = service_spec(&LogLevel::Warn, &RuntimeFlavor::CurrentThread)?;
+            spec.working_directory = format!("/tmp/rings{character}daemon");
+            assert!(render_launchd_plist(
+                &spec,
+                Path::new("/tmp/rings-daemon.log"),
+                Path::new("/tmp/rings-daemon.error.log"),
+            )
+            .is_ok());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn state_parser_preserves_launchd_lifecycle_and_failure_states() {
         assert_eq!(
             parse_launchd_state("state = running\n"),
             DaemonState::Running
@@ -348,6 +448,22 @@ mod tests {
         );
         assert_eq!(
             parse_launchd_state("state = throttled\nlast exit code = 78\n"),
+            DaemonState::Failed
+        );
+        assert_eq!(
+            parse_launchd_state("state = spawn scheduled\nruns = 0\n"),
+            DaemonState::Starting
+        );
+        assert_eq!(
+            parse_launchd_state("state = spawn scheduled\nruns = 1\nlast exit code = 1\n"),
+            DaemonState::Failed
+        );
+        assert_eq!(
+            parse_launchd_state("state = exited\nlast exit code = 0\n"),
+            DaemonState::Stopped
+        );
+        assert_eq!(
+            parse_launchd_state("state = exited\nlast exit code = 78\n"),
             DaemonState::Failed
         );
     }

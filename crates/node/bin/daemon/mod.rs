@@ -94,14 +94,12 @@ enum DaemonError {
     },
     #[error("path is not valid UTF-8 and cannot be written to a service definition: {path}")]
     NonUtf8Path { path: PathBuf },
-    // Debug formatting keeps the rejected control character escaped in diagnostics.
-    #[error("path contains a character forbidden by XML 1.0 service definitions: {path:?}")]
-    XmlIncompatiblePath { path: PathBuf },
-    // Debug formatting keeps the rejected line break escaped in diagnostics.
-    #[error(
-        "current working directory contains a line break and cannot be written safely to a service definition: {path:?}"
-    )]
-    WorkingDirectoryContainsLineBreak { path: PathBuf },
+    #[cfg(any(target_os = "macos", all(test, unix)))]
+    #[error(transparent)]
+    LaunchdDefinition(#[from] launchd::LaunchdDefinitionError),
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    #[error(transparent)]
+    SystemdDefinition(#[from] systemd::SystemdDefinitionError),
     #[error("could not derive a CLI name for {value}")]
     CliValueNameUnavailable { value: String },
     #[error("could not prepare the parent directory for {path}: {source}")]
@@ -202,7 +200,6 @@ enum DaemonState {
     Running,
     Stopped,
     Failed,
-    #[cfg(any(target_os = "linux", all(test, unix)))]
     Starting,
     #[cfg(any(target_os = "linux", all(test, unix)))]
     Stopping,
@@ -210,10 +207,7 @@ enum DaemonState {
 }
 
 impl DaemonState {
-    #[allow(
-        dead_code,
-        reason = "used by the Linux production adapter and both adapters' Unix test builds"
-    )]
+    #[cfg(any(target_os = "linux", all(test, unix)))]
     fn is_installed(&self) -> bool {
         !matches!(self, Self::NotInstalled)
     }
@@ -234,7 +228,6 @@ impl fmt::Display for DaemonState {
             Self::Running => formatter.write_str("running"),
             Self::Stopped => formatter.write_str("stopped"),
             Self::Failed => formatter.write_str("failed"),
-            #[cfg(any(target_os = "linux", all(test, unix)))]
             Self::Starting => formatter.write_str("starting"),
             #[cfg(any(target_os = "linux", all(test, unix)))]
             Self::Stopping => formatter.write_str("stopping"),
@@ -285,7 +278,7 @@ impl ServiceSpec {
         Ok(Self {
             executable: path_text(&executable)?,
             config: path_text(&config)?,
-            working_directory: working_directory_text(&working_directory)?,
+            working_directory: path_text(&working_directory)?,
             log_level: cli_value_name(&options.log_level)?,
             runtime: cli_value_name(&options.runtime)?,
         })
@@ -432,40 +425,11 @@ fn resolve_config_path(config: &str) -> Result<PathBuf, DaemonError> {
 }
 
 fn path_text(path: &Path) -> Result<String, DaemonError> {
-    let text = path.to_str().ok_or_else(|| DaemonError::NonUtf8Path {
-        path: path.to_path_buf(),
-    })?;
-    if !text.chars().all(is_xml_1_0_character) {
-        return Err(DaemonError::XmlIncompatiblePath {
+    path.to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| DaemonError::NonUtf8Path {
             path: path.to_path_buf(),
-        });
-    }
-    Ok(text.to_owned())
-}
-
-fn is_xml_1_0_character(character: char) -> bool {
-    matches!(
-        character,
-        '\u{9}'
-            | '\u{a}'
-            | '\u{d}'
-            | '\u{20}'..='\u{d7ff}'
-            | '\u{e000}'..='\u{fffd}'
-            | '\u{10000}'..='\u{10ffff}'
-    )
-}
-
-fn working_directory_text(path: &Path) -> Result<String, DaemonError> {
-    let text = path_text(path)?;
-    if text
-        .chars()
-        .any(|character| matches!(character, '\n' | '\r'))
-    {
-        return Err(DaemonError::WorkingDirectoryContainsLineBreak {
-            path: path.to_path_buf(),
-        });
-    }
-    Ok(text)
+        })
 }
 
 fn ensure_parent_directory(path: &Path) -> Result<(), DaemonError> {
@@ -664,54 +628,6 @@ mod tests {
         let command = format_command("rings", &["run", "$HOME/%n"]);
 
         assert_eq!(command, "\"rings\" \"run\" \"$HOME/%n\"");
-    }
-
-    #[test]
-    fn working_directory_rejects_line_breaks() {
-        for path in ["/tmp/rings\nEnvironment=BAD", "/tmp/rings\rRestart=no"] {
-            assert!(matches!(
-                working_directory_text(Path::new(path)),
-                Err(DaemonError::WorkingDirectoryContainsLineBreak { .. })
-            ));
-        }
-        assert!(matches!(
-            working_directory_text(Path::new("/tmp/rings %n")),
-            Ok(path) if path == "/tmp/rings %n"
-        ));
-    }
-
-    #[test]
-    fn path_text_rejects_characters_forbidden_by_xml_1_0() {
-        for character in [
-            '\u{0}', '\u{1}', '\u{8}', '\u{b}', '\u{c}', '\u{e}', '\u{1f}', '\u{fffe}', '\u{ffff}',
-        ] {
-            let path = PathBuf::from(format!("/tmp/rings{character}daemon"));
-            assert!(matches!(
-                path_text(&path),
-                Err(DaemonError::XmlIncompatiblePath { .. })
-            ));
-        }
-    }
-
-    #[test]
-    fn path_text_accepts_xml_1_0_boundary_characters() {
-        for character in [
-            '\u{9}',
-            '\u{a}',
-            '\u{d}',
-            '\u{20}',
-            '\u{d7ff}',
-            '\u{e000}',
-            '\u{fffd}',
-            '\u{10000}',
-            '\u{10ffff}',
-        ] {
-            let expected = format!("/tmp/rings{character}daemon");
-            assert!(matches!(
-                path_text(Path::new(&expected)),
-                Ok(path) if path == expected
-            ));
-        }
     }
 
     #[test]

@@ -5,6 +5,8 @@ use std::env;
 use std::path::Path;
 use std::path::PathBuf;
 
+use thiserror::Error;
+
 use super::run_checked;
 use super::write_atomic;
 use super::AutostartState;
@@ -28,6 +30,15 @@ const SYSTEMD_STATUS_ARGS: [&str; 7] = [
     "--property=UnitFileState",
     SYSTEMD_UNIT,
 ];
+
+#[derive(Debug, Error)]
+pub(super) enum SystemdDefinitionError {
+    // Debug formatting keeps the rejected line break escaped in diagnostics.
+    #[error(
+        "working directory contains a line break and cannot be written safely to a systemd unit: {path:?}"
+    )]
+    WorkingDirectoryContainsLineBreak { path: PathBuf },
+}
 
 pub(super) struct SystemdManager<R = ProcessCommandRunner> {
     unit_path: PathBuf,
@@ -59,7 +70,7 @@ where R: CommandRunner
     }
 
     fn start(&self, spec: &ServiceSpec) -> Result<(), DaemonError> {
-        write_atomic(&self.unit_path, &render_systemd_unit(spec))?;
+        write_atomic(&self.unit_path, &render_systemd_unit(spec)?)?;
         reload_enable_restart(&self.runner)
     }
 
@@ -121,14 +132,14 @@ fn systemd_config_home(home: &Path, candidate: Option<&Path>) -> PathBuf {
         .unwrap_or_else(|| home.join(".config"))
 }
 
-fn render_systemd_unit(spec: &ServiceSpec) -> String {
+fn render_systemd_unit(spec: &ServiceSpec) -> Result<String, DaemonError> {
     let command = spec
         .arguments()
         .into_iter()
         .map(systemd_exec_quote)
         .collect::<Vec<_>>()
         .join(" ");
-    format!(
+    Ok(format!(
         "[Unit]\n\
 Description=Rings Network node\n\
 Wants=network-online.target\n\
@@ -144,8 +155,8 @@ TimeoutStopSec=30\n\
 \n\
 [Install]\n\
 WantedBy=default.target\n",
-        systemd_working_directory(&spec.working_directory)
-    )
+        systemd_working_directory(&spec.working_directory)?
+    ))
 }
 
 fn systemd_exec_quote(value: &str) -> String {
@@ -167,8 +178,16 @@ fn systemd_exec_quote(value: &str) -> String {
     quoted
 }
 
-fn systemd_working_directory(value: &str) -> String {
-    value.replace('%', "%%")
+fn systemd_working_directory(value: &str) -> Result<String, SystemdDefinitionError> {
+    if value
+        .chars()
+        .any(|character| matches!(character, '\n' | '\r'))
+    {
+        return Err(SystemdDefinitionError::WorkingDirectoryContainsLineBreak {
+            path: PathBuf::from(value),
+        });
+    }
+    Ok(value.replace('%', "%%"))
 }
 
 fn parse_systemd_state(output: &str) -> DaemonState {
@@ -266,7 +285,7 @@ mod tests {
     #[test]
     fn definition_quotes_arguments_and_sets_working_directory() -> Result<(), DaemonError> {
         let spec = service_spec(&LogLevel::Warn, &RuntimeFlavor::CurrentThread)?;
-        let unit = render_systemd_unit(&spec);
+        let unit = render_systemd_unit(&spec)?;
 
         assert!(unit.contains("ExecStart=\"/Users/test user/bin/rings\""));
         assert!(unit.contains("\"/Users/test user/.rings/config&prod.yaml\""));
@@ -444,9 +463,19 @@ mod tests {
             systemd_exec_quote("/tmp/a $HOME/%n/\"rings\""),
             "\"/tmp/a $$HOME/%%n/\\\"rings\\\"\""
         );
-        assert_eq!(
+        assert!(matches!(
             systemd_working_directory("/tmp/a $HOME/%n/rings"),
-            "/tmp/a $HOME/%%n/rings"
-        );
+            Ok(path) if path == "/tmp/a $HOME/%%n/rings"
+        ));
+    }
+
+    #[test]
+    fn working_directory_rejects_unit_line_breaks() {
+        for path in ["/tmp/rings\nEnvironment=BAD", "/tmp/rings\rRestart=no"] {
+            assert!(matches!(
+                systemd_working_directory(path),
+                Err(SystemdDefinitionError::WorkingDirectoryContainsLineBreak { .. })
+            ));
+        }
     }
 }
