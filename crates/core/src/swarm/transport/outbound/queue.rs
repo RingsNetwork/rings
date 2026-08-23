@@ -141,9 +141,7 @@ impl<T> Default for TransferQueues<T> {
 
 impl<T> TransferQueues<T> {
     pub(super) fn push(&mut self, class: TransferClass, item: T) {
-        if let Some(lane) = self.lanes.get_mut(class.index()) {
-            lane.enqueue(item);
-        }
+        self.lane_mut(class).enqueue(item);
     }
 
     pub(super) fn pop(&mut self) -> Option<RunnableTransfer<T>> {
@@ -162,8 +160,8 @@ impl<T> TransferQueues<T> {
     }
 
     pub(super) fn wait_for_delivery(&mut self, id: u64, transfer: RunnableTransfer<T>) {
-        let lane = &mut self.lanes[transfer.class.index()];
-        lane.wait_for_delivery(id, transfer.item);
+        self.lane_mut(transfer.class)
+            .wait_for_delivery(id, transfer.item);
     }
 
     pub(super) fn take_waiting(
@@ -171,14 +169,13 @@ impl<T> TransferQueues<T> {
         class: TransferClass,
         id: u64,
     ) -> Option<RunnableTransfer<T>> {
-        self.lanes
-            .get_mut(class.index())
-            .and_then(|lane| lane.take_waiting(id))
+        self.lane_mut(class)
+            .take_waiting(id)
             .map(|item| RunnableTransfer { class, item })
     }
 
     pub(super) fn make_runnable(&mut self, transfer: RunnableTransfer<T>) {
-        self.lanes[transfer.class.index()].make_runnable(transfer.item);
+        self.lane_mut(transfer.class).make_runnable(transfer.item);
     }
 
     pub(super) fn record_frame_admitted(&mut self, class: TransferClass) {
@@ -200,9 +197,7 @@ impl<T> TransferQueues<T> {
     }
 
     pub(super) fn finish_current(&mut self, class: TransferClass) {
-        if let Some(lane) = self.lanes.get_mut(class.index()) {
-            lane.finish_current();
-        }
+        self.lane_mut(class).finish_current();
     }
 
     pub(super) fn finish_transfer(&mut self, transfer: RunnableTransfer<T>) {
@@ -222,9 +217,7 @@ impl<T> TransferQueues<T> {
     }
 
     fn is_runnable(&self, class: TransferClass) -> bool {
-        self.lanes
-            .get(class.index())
-            .is_some_and(TransferLane::is_runnable)
+        self.lane(class).is_runnable()
     }
 
     fn has_lower(&self) -> bool {
@@ -235,9 +228,27 @@ impl<T> TransferQueues<T> {
     }
 
     fn take(&mut self, class: TransferClass) -> Option<T> {
-        self.lanes
-            .get_mut(class.index())
-            .and_then(TransferLane::take_runnable)
+        self.lane_mut(class).take_runnable()
+    }
+
+    fn lane(&self, class: TransferClass) -> &TransferLane<T> {
+        let [control, storage, e2e, application] = &self.lanes;
+        match class {
+            TransferClass::DhtControl => control,
+            TransferClass::Storage => storage,
+            TransferClass::E2e => e2e,
+            TransferClass::Application => application,
+        }
+    }
+
+    fn lane_mut(&mut self, class: TransferClass) -> &mut TransferLane<T> {
+        let [control, storage, e2e, application] = &mut self.lanes;
+        match class {
+            TransferClass::DhtControl => control,
+            TransferClass::Storage => storage,
+            TransferClass::E2e => e2e,
+            TransferClass::Application => application,
+        }
     }
 
     fn next_lower_class(&self) -> Option<TransferClass> {

@@ -810,13 +810,14 @@ impl Error {
 
     /// Whether this error should degrade peer quality through `FailedToSend`.
     pub(crate) const fn records_peer_send_failure(&self) -> bool {
+        if self.is_data_channel_backpressure() {
+            return false;
+        }
+
         match self {
             Self::ConnectionAttemptSuperseded { .. }
-            | Self::DataChannelSendQueueTimeout { .. }
-            | Self::DataChannelDeliveryTimeout { .. }
             | Self::OutboundTransferCapacityExceeded { .. }
             | Self::OutboundTransferMemoryCapacityExceeded { .. }
-            | Self::OutboundTransferAdmissionTimeout { .. }
             | Self::OutboundSchedulerRuntimeUnavailable
             | Self::OutboundSchedulerInvariantViolation => false,
             Self::Transport(rings_transport::error::Error::SendPermitRevoked) => false,

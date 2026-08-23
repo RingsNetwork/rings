@@ -701,8 +701,8 @@ impl InboundActor {
     }
 
     fn dispatch_runnable(&mut self) {
-        for index in 0..INBOUND_LANE_COUNT {
-            if self.active_lanes[index].is_some() {
+        for (index, active_lane) in self.active_lanes.iter_mut().enumerate() {
+            if active_lane.is_some() {
                 continue;
             }
             let Some(lane) = InboundLane::from_index(index) else {
@@ -714,7 +714,7 @@ impl InboundActor {
             let Some(event) = self.queues.pop(lane) else {
                 continue;
             };
-            self.active_lanes[index] = Some(sequence);
+            *active_lane = Some(sequence);
             self.active
                 .push(Box::pin(process_event(self.processor.clone(), event)));
         }

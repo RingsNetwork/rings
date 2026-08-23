@@ -207,6 +207,33 @@ mod tests {
     }
 
     #[test]
+    fn data_channel_backpressure_never_degrades_peer_quality() {
+        let peer: crate::dht::Did = crate::ecc::SecretKey::random().address().into();
+        let backpressure = [
+            Error::DataChannelSendQueueTimeout {
+                peer,
+                timeout_ms: 1,
+                bytes: 1,
+                context: "test",
+            },
+            Error::DataChannelDeliveryTimeout {
+                peer,
+                timeout_ms: 1,
+                context: "test",
+            },
+            Error::OutboundTransferAdmissionTimeout {
+                peer,
+                timeout_ms: 1,
+            },
+        ];
+
+        for error in backpressure {
+            assert!(error.is_data_channel_backpressure(), "{error:?}");
+            assert!(!error.records_peer_send_failure(), "{error:?}");
+        }
+    }
+
+    #[test]
     fn data_plane_deferral_errors_require_fresh_topology() {
         let peer: crate::dht::Did = crate::ecc::SecretKey::random().address().into();
         let deferrals = [
