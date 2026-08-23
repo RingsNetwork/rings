@@ -1,5 +1,6 @@
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", all(test, unix)))]
 
+#[cfg(target_os = "linux")]
 use std::env;
 use std::path::Path;
 use std::path::PathBuf;
@@ -33,6 +34,7 @@ pub(super) struct SystemdManager<R = ProcessCommandRunner> {
     runner: R,
 }
 
+#[cfg(target_os = "linux")]
 impl SystemdManager<ProcessCommandRunner> {
     pub(super) fn discover() -> Result<Self, DaemonError> {
         let home = home::home_dir().ok_or(DaemonError::HomeDirectoryUnavailable)?;

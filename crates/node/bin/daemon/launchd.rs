@@ -246,12 +246,16 @@ fn parse_launchd_state(output: &str) -> DaemonState {
 }
 
 fn parse_launchd_autostart(output: &str) -> AutostartState {
-    let mut parsed_entry = false;
+    let mut recognized_listing = false;
     for line in output.lines() {
-        let Some((label, value)) = line.trim().trim_end_matches(';').split_once("=>") else {
+        let line = line.trim().trim_end_matches(';');
+        if is_disabled_services_listing(line) {
+            recognized_listing = true;
+            continue;
+        }
+        let Some((label, value)) = line.split_once("=>") else {
             continue;
         };
-        parsed_entry = true;
         if label.trim().trim_matches('"') != LAUNCHD_LABEL {
             continue;
         }
@@ -261,11 +265,18 @@ fn parse_launchd_autostart(output: &str) -> AutostartState {
             _ => AutostartState::Unknown,
         };
     }
-    if parsed_entry {
+    if recognized_listing {
         AutostartState::Enabled
     } else {
         AutostartState::Unknown
     }
+}
+
+fn is_disabled_services_listing(line: &str) -> bool {
+    let Some((heading, listing)) = line.split_once('=') else {
+        return false;
+    };
+    heading.trim() == "disabled services" && matches!(listing.trim(), "{" | "{}")
 }
 
 #[cfg(test)]
@@ -351,7 +362,11 @@ mod tests {
         assert_eq!(parse_launchd_autostart(output), AutostartState::Enabled);
         assert_eq!(
             parse_launchd_autostart("disabled services = {}"),
-            AutostartState::Unknown
+            AutostartState::Enabled
+        );
+        assert_eq!(
+            parse_launchd_autostart("disabled services = {\n}"),
+            AutostartState::Enabled
         );
         assert_eq!(
             parse_launchd_autostart("\"io.ringsnetwork.node\" => disabled"),
@@ -363,6 +378,10 @@ mod tests {
         );
         assert_eq!(
             parse_launchd_autostart("\"io.ringsnetwork.node\" => malformed"),
+            AutostartState::Unknown
+        );
+        assert_eq!(
+            parse_launchd_autostart("unrecognized launchctl output"),
             AutostartState::Unknown
         );
     }

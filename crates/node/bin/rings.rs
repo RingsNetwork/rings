@@ -140,13 +140,13 @@ fn validate_native_onion_exit_services(services: &[OnionExitService]) -> anyhow:
 #[derive(Subcommand, Debug)]
 #[command(rename_all = "kebab-case")]
 enum Command {
+    #[command(flatten)]
+    Async(AsyncCommand),
     #[command(
         about = "Manages the node as a user-level operating-system service.",
         subcommand
     )]
     Daemon(daemon::DaemonCommand),
-    #[command(flatten)]
-    Async(AsyncCommand),
 }
 
 #[derive(Subcommand, Debug)]

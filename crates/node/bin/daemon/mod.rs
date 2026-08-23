@@ -24,6 +24,7 @@ use super::RuntimeFlavor;
 
 #[cfg(any(target_os = "macos", all(test, unix)))]
 mod launchd;
+#[cfg(any(target_os = "linux", all(test, unix)))]
 mod systemd;
 
 const START_STATUS_ATTEMPTS: usize = 20;
@@ -48,7 +49,6 @@ pub(super) struct DaemonStartCommand {
     config_args: ConfigArgs,
 }
 
-#[cfg(test)]
 impl DaemonStartCommand {
     pub(super) fn config_path(&self) -> &str {
         &self.config_args.config
@@ -94,6 +94,10 @@ enum DaemonError {
     },
     #[error("path is not valid UTF-8 and cannot be written to a service definition: {path}")]
     NonUtf8Path { path: PathBuf },
+    #[error(
+        "current working directory contains a line break and cannot be written safely to a service definition: {path:?}"
+    )]
+    WorkingDirectoryContainsLineBreak { path: PathBuf },
     #[error("could not derive a CLI name for {value}")]
     CliValueNameUnavailable { value: String },
     #[error("could not prepare the parent directory for {path}: {source}")]
@@ -130,7 +134,7 @@ enum DaemonError {
         #[source]
         source: io::Error,
     },
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", all(test, unix)))]
     #[error("{manager} returned malformed service status: {detail}")]
     MalformedServiceStatus {
         manager: &'static str,
@@ -194,15 +198,14 @@ enum DaemonState {
     Running,
     Stopped,
     Failed,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", all(test, unix)))]
     Starting,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", all(test, unix)))]
     Stopping,
     Unknown(String),
 }
 
 impl DaemonState {
-    #[cfg(target_os = "linux")]
     fn is_installed(&self) -> bool {
         !matches!(self, Self::NotInstalled)
     }
@@ -212,7 +215,7 @@ impl DaemonState {
     }
 
     fn is_terminal_start_failure(&self) -> bool {
-        matches!(self, Self::NotInstalled | Self::Failed)
+        !self.is_installed() || matches!(self, Self::Failed)
     }
 }
 
@@ -223,9 +226,9 @@ impl fmt::Display for DaemonState {
             Self::Running => formatter.write_str("running"),
             Self::Stopped => formatter.write_str("stopped"),
             Self::Failed => formatter.write_str("failed"),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", all(test, unix)))]
             Self::Starting => formatter.write_str("starting"),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", all(test, unix)))]
             Self::Stopping => formatter.write_str("stopping"),
             Self::Unknown(state) => write!(formatter, "unknown ({state})"),
         }
@@ -274,7 +277,7 @@ impl ServiceSpec {
         Ok(Self {
             executable: path_text(&executable)?,
             config: path_text(&config)?,
-            working_directory: path_text(&working_directory)?,
+            working_directory: working_directory_text(&working_directory)?,
             log_level: cli_value_name(&options.log_level)?,
             runtime: cli_value_name(&options.runtime)?,
         })
@@ -340,7 +343,7 @@ pub(super) fn execute(command: DaemonCommand, options: WorkerOptions) -> anyhow:
     let manager = current_service_manager()?;
     match command {
         DaemonCommand::Start(args) => {
-            let spec = ServiceSpec::discover(&args.config_args.config, options)?;
+            let spec = ServiceSpec::discover(args.config_path(), options)?;
             manager.start(&spec)?;
             report_started(manager.as_ref())
         }
@@ -426,6 +429,19 @@ fn path_text(path: &Path) -> Result<String, DaemonError> {
         .ok_or_else(|| DaemonError::NonUtf8Path {
             path: path.to_path_buf(),
         })
+}
+
+fn working_directory_text(path: &Path) -> Result<String, DaemonError> {
+    let text = path_text(path)?;
+    if text
+        .chars()
+        .any(|character| matches!(character, '\n' | '\r'))
+    {
+        return Err(DaemonError::WorkingDirectoryContainsLineBreak {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(text)
 }
 
 fn ensure_parent_directory(path: &Path) -> Result<(), DaemonError> {
@@ -624,6 +640,20 @@ mod tests {
         let command = format_command("rings", &["run", "$HOME/%n"]);
 
         assert_eq!(command, "\"rings\" \"run\" \"$HOME/%n\"");
+    }
+
+    #[test]
+    fn working_directory_rejects_line_breaks() {
+        for path in ["/tmp/rings\nEnvironment=BAD", "/tmp/rings\rRestart=no"] {
+            assert!(matches!(
+                working_directory_text(Path::new(path)),
+                Err(DaemonError::WorkingDirectoryContainsLineBreak { .. })
+            ));
+        }
+        assert!(matches!(
+            working_directory_text(Path::new("/tmp/rings %n")),
+            Ok(path) if path == "/tmp/rings %n"
+        ));
     }
 
     #[test]
