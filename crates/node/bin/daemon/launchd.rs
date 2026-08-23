@@ -19,6 +19,7 @@ use super::DaemonState;
 use super::ProcessCommandRunner;
 use super::ServiceManager;
 use super::ServiceSpec;
+use super::StartObservation;
 use super::START_STATUS_ATTEMPTS;
 use super::START_STATUS_INTERVAL;
 
@@ -30,7 +31,7 @@ const LAUNCHD_SERVICE_NOT_FOUND: i32 = 113;
 pub(super) enum LaunchdDefinitionError {
     // Debug formatting keeps the rejected control character escaped in diagnostics.
     #[error("path contains a character forbidden by XML 1.0 launchd plists: {path:?}")]
-    XmlIncompatiblePath { path: PathBuf },
+    XmlIncompatiblePath { path: String },
 }
 
 pub(super) struct LaunchdManager<R = ProcessCommandRunner> {
@@ -125,6 +126,21 @@ where R: CommandRunner
             &output.stdout,
         )))
     }
+
+    fn state_with_observation(
+        &self,
+        observation: StartObservation,
+    ) -> Result<DaemonState, DaemonError> {
+        let installed = self.definition_path.is_file();
+        Ok(match self.service_output()? {
+            Some(output) => parse_launchd_state(
+                &String::from_utf8_lossy(&output.stdout),
+                observation.previous_runs(),
+            ),
+            None if installed => DaemonState::Stopped,
+            None => DaemonState::NotInstalled,
+        })
+    }
 }
 
 impl<R> ServiceManager for LaunchdManager<R>
@@ -138,32 +154,37 @@ where R: CommandRunner
         &self.definition_path
     }
 
-    fn start(&self, spec: &ServiceSpec) -> Result<(), DaemonError> {
+    fn start(&self, spec: &ServiceSpec) -> Result<StartObservation, DaemonError> {
+        let definition = render_launchd_plist(spec, &self.stdout_log, &self.stderr_log)?;
         ensure_parent_directory(&self.stdout_log)?;
         ensure_parent_directory(&self.stderr_log)?;
-        write_atomic(
-            &self.definition_path,
-            &render_launchd_plist(spec, &self.stdout_log, &self.stderr_log)?,
-        )?;
+        write_atomic(&self.definition_path, &definition)?;
         self.unload_if_loaded()?;
-        self.bootstrap()
+        self.bootstrap()?;
+        Ok(StartObservation::Fresh)
     }
 
     fn stop(&self) -> Result<(), DaemonError> {
         self.unload_if_loaded()
     }
 
-    fn restart(&self) -> Result<(), DaemonError> {
-        if self.is_loaded()? {
+    fn restart(&self) -> Result<StartObservation, DaemonError> {
+        if let Some(output) = self.service_output()? {
+            let previous_runs = parse_launchd_runs(&String::from_utf8_lossy(&output.stdout))
+                .ok_or(DaemonError::MalformedServiceStatus {
+                    manager: "launchd",
+                    detail: "missing or invalid runs field",
+                })?;
             run_checked(&self.runner, "/bin/launchctl", &["enable", &self.target])?;
             run_checked(&self.runner, "/bin/launchctl", &[
                 "kickstart",
                 "-k",
                 &self.target,
             ])?;
-            Ok(())
+            Ok(StartObservation::AfterRuns(previous_runs))
         } else if self.definition_path.is_file() {
-            self.bootstrap()
+            self.bootstrap()?;
+            Ok(StartObservation::Fresh)
         } else {
             Err(DaemonError::ServiceNotInstalled {
                 path: self.definition_path.clone(),
@@ -172,16 +193,15 @@ where R: CommandRunner
     }
 
     fn state(&self) -> Result<DaemonState, DaemonError> {
-        let installed = self.definition_path.is_file();
-        Ok(match self.service_output()? {
-            Some(output) => parse_launchd_state(&String::from_utf8_lossy(&output.stdout)),
-            None if installed => DaemonState::Stopped,
-            None => DaemonState::NotInstalled,
-        })
+        self.state_with_observation(StartObservation::Fresh)
     }
 
     fn autostart(&self) -> Result<AutostartState, DaemonError> {
         self.autostart_state()
+    }
+
+    fn state_after_start(&self, observation: StartObservation) -> Result<DaemonState, DaemonError> {
+        self.state_with_observation(observation)
     }
 }
 
@@ -190,27 +210,24 @@ fn render_launchd_plist(
     stdout_log: &Path,
     stderr_log: &Path,
 ) -> Result<String, DaemonError> {
-    for path in [
-        Path::new(spec.executable.as_str()),
-        Path::new(spec.config.as_str()),
-        Path::new(spec.working_directory.as_str()),
-        stdout_log,
-        stderr_log,
-    ] {
-        validate_launchd_path(path)?;
-    }
+    let label = xml_string(LAUNCHD_LABEL)?;
     let arguments = spec
         .arguments()
         .into_iter()
-        .map(|argument| format!("    <string>{}</string>\n", xml_escape(argument)))
-        .collect::<String>();
+        .map(|argument| {
+            xml_string(argument).map(|argument| format!("    <string>{argument}</string>\n"))
+        })
+        .collect::<Result<String, LaunchdDefinitionError>>()?;
+    let working_directory = xml_string(&spec.working_directory)?;
+    let stdout_log = xml_string(&path_text(stdout_log)?)?;
+    let stderr_log = xml_string(&path_text(stderr_log)?)?;
     Ok(format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>{LAUNCHD_LABEL}</string>
+  <string>{label}</string>
   <key>ProgramArguments</key>
   <array>
 {arguments}  </array>
@@ -232,21 +249,22 @@ fn render_launchd_plist(
 </dict>
 </plist>
 "#,
-        xml_escape(&spec.working_directory),
-        xml_escape(&path_text(stdout_log)?),
-        xml_escape(&path_text(stderr_log)?),
+        working_directory, stdout_log, stderr_log,
     ))
 }
 
-fn validate_launchd_path(path: &Path) -> Result<(), DaemonError> {
-    let text = path_text(path)?;
-    if text.chars().all(is_xml_1_0_character) {
-        Ok(())
-    } else {
+fn xml_string(value: &str) -> Result<String, LaunchdDefinitionError> {
+    if !value.chars().all(is_xml_1_0_character) {
         Err(LaunchdDefinitionError::XmlIncompatiblePath {
-            path: path.to_path_buf(),
-        }
-        .into())
+            path: value.to_owned(),
+        })
+    } else {
+        Ok(value
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&apos;"))
     }
 }
 
@@ -262,36 +280,40 @@ fn is_xml_1_0_character(character: char) -> bool {
     )
 }
 
-fn xml_escape(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
+fn launchd_value<'a>(output: &'a str, field: &str) -> Option<&'a str> {
+    output.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix(field)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    })
 }
 
-fn parse_launchd_state(output: &str) -> DaemonState {
-    let state = output.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix("state = ")
-            .map(str::trim)
-            .filter(|state| !state.is_empty())
-    });
-    let has_failed_exit = output
-        .lines()
-        .find_map(|line| {
-            line.trim()
-                .strip_prefix("last exit code = ")
-                .and_then(|value| value.split_whitespace().next())
-                .and_then(|value| value.parse::<i32>().ok())
-        })
+fn parse_launchd_runs(output: &str) -> Option<u64> {
+    launchd_value(output, "runs = ")?.parse().ok()
+}
+
+fn failed_exit_belongs_to_attempt(output: &str, previous_runs: Option<u64>) -> bool {
+    let has_failed_exit = launchd_value(output, "last exit code = ")
+        .and_then(|value| value.split_whitespace().next())
+        .and_then(|value| value.parse::<i32>().ok())
         .is_some_and(|code| code != 0);
+    let exit_is_current = previous_runs
+        .map(|previous| parse_launchd_runs(output).is_some_and(|runs| runs > previous))
+        .unwrap_or(true);
+    has_failed_exit && exit_is_current
+}
+
+fn parse_launchd_state(output: &str, previous_runs: Option<u64>) -> DaemonState {
+    let state = launchd_value(output, "state = ");
+    let has_current_failed_exit = failed_exit_belongs_to_attempt(output, previous_runs);
     match state {
         Some("running") => DaemonState::Running,
-        Some("spawn scheduled") if has_failed_exit => DaemonState::Failed,
+        Some("spawn scheduled") if has_current_failed_exit => DaemonState::Failed,
         Some("spawn scheduled") => DaemonState::Starting,
-        Some("waiting" | "exited" | "not running") if has_failed_exit => DaemonState::Failed,
+        Some("waiting" | "exited" | "not running") if has_current_failed_exit => {
+            DaemonState::Failed
+        }
         Some("waiting" | "exited" | "not running") => DaemonState::Stopped,
         Some("throttled") => DaemonState::Failed,
         Some(other) => DaemonState::Unknown(other.to_owned()),
@@ -412,6 +434,30 @@ mod tests {
     }
 
     #[test]
+    fn start_rejects_invalid_definition_before_creating_directories() -> Result<(), DaemonError> {
+        let root = test_root("start-invalid-definition");
+        let _ = fs::remove_dir_all(&root);
+        let manager = test_manager(
+            &root,
+            ScriptedCommandRunner::new(std::iter::empty::<CommandStep>()),
+        );
+        let mut spec = service_spec(&LogLevel::Warn, &RuntimeFlavor::CurrentThread)?;
+        spec.working_directory = "/tmp/rings\u{b}daemon".to_owned();
+
+        let result = manager.start(&spec);
+
+        assert!(matches!(
+            result,
+            Err(DaemonError::LaunchdDefinition(
+                LaunchdDefinitionError::XmlIncompatiblePath { .. }
+            ))
+        ));
+        assert!(!root.exists());
+        manager.runner.assert_exhausted();
+        Ok(())
+    }
+
+    #[test]
     fn definition_accepts_xml_1_0_path_boundaries() -> Result<(), DaemonError> {
         for character in [
             '\u{9}',
@@ -439,31 +485,49 @@ mod tests {
     #[test]
     fn state_parser_preserves_launchd_lifecycle_and_failure_states() {
         assert_eq!(
-            parse_launchd_state("state = running\n"),
+            parse_launchd_state("state = running\n", None),
             DaemonState::Running
         );
         assert_eq!(
-            parse_launchd_state("state = waiting\n"),
+            parse_launchd_state("state = waiting\n", None),
             DaemonState::Stopped
         );
         assert_eq!(
-            parse_launchd_state("state = throttled\nlast exit code = 78\n"),
+            parse_launchd_state("state = throttled\nlast exit code = 78\n", None),
             DaemonState::Failed
         );
         assert_eq!(
-            parse_launchd_state("state = spawn scheduled\nruns = 0\n"),
+            parse_launchd_state("state = spawn scheduled\n", None),
             DaemonState::Starting
         );
         assert_eq!(
-            parse_launchd_state("state = spawn scheduled\nruns = 1\nlast exit code = 1\n"),
+            parse_launchd_state("state = spawn scheduled\nlast exit code = 1\n", None),
             DaemonState::Failed
         );
         assert_eq!(
-            parse_launchd_state("state = exited\nlast exit code = 0\n"),
+            parse_launchd_state("state = exited\nlast exit code = 0\n", None),
             DaemonState::Stopped
         );
         assert_eq!(
-            parse_launchd_state("state = exited\nlast exit code = 78\n"),
+            parse_launchd_state("state = exited\nlast exit code = 78\n", None),
+            DaemonState::Failed
+        );
+    }
+
+    #[test]
+    fn state_parser_assigns_only_newer_runs_exit_to_restart_attempt() {
+        assert_eq!(
+            parse_launchd_state(
+                "state = spawn scheduled\nruns = 4\nlast exit code = 9\n",
+                Some(4),
+            ),
+            DaemonState::Starting
+        );
+        assert_eq!(
+            parse_launchd_state(
+                "state = spawn scheduled\nruns = 5\nlast exit code = 1\n",
+                Some(4),
+            ),
             DaemonState::Failed
         );
     }
@@ -532,29 +596,46 @@ mod tests {
         let manager = test_manager(&root, runner);
         let spec = service_spec(&LogLevel::Info, &RuntimeFlavor::MultiThread)?;
 
-        let result = manager.start(&spec);
+        let observation = manager.start(&spec)?;
 
         assert!(manager.definition_path.is_file());
+        assert_eq!(observation, StartObservation::Fresh);
         manager.runner.assert_exhausted();
         assert!(fs::remove_dir_all(&root).is_ok());
-        result
+        Ok(())
     }
 
     #[test]
-    fn restart_kickstarts_a_loaded_service_without_a_definition() -> Result<(), DaemonError> {
+    fn restart_ignores_stale_exit_until_a_new_run_is_observed() -> anyhow::Result<()> {
         let root = test_root("restart-sequence");
         let _ = fs::remove_dir_all(&root);
         let domain = "gui/501";
         let target = format!("{domain}/{LAUNCHD_LABEL}");
         let runner = ScriptedCommandRunner::new([
-            CommandStep::success("/bin/launchctl", &["print", &target], "state = running\n"),
+            CommandStep::success(
+                "/bin/launchctl",
+                &["print", &target],
+                "state = running\nruns = 4\n",
+            ),
             CommandStep::success("/bin/launchctl", &["enable", &target], ""),
             CommandStep::success("/bin/launchctl", &["kickstart", "-k", &target], ""),
+            CommandStep::success(
+                "/bin/launchctl",
+                &["print", &target],
+                "state = spawn scheduled\nruns = 4\nlast exit code = 9\n",
+            ),
+            CommandStep::success(
+                "/bin/launchctl",
+                &["print", &target],
+                "state = running\nruns = 5\n",
+            ),
         ]);
         let manager = test_manager(&root, runner);
 
-        let result = manager.restart();
+        let observation = manager.restart()?;
+        let result = super::super::report_started(&manager, observation);
 
+        assert_eq!(observation, StartObservation::AfterRuns(4));
         manager.runner.assert_exhausted();
         result
     }
@@ -587,11 +668,12 @@ mod tests {
         ]);
         let manager = test_manager(&root, runner);
 
-        let result = manager.restart();
+        let observation = manager.restart()?;
 
+        assert_eq!(observation, StartObservation::Fresh);
         manager.runner.assert_exhausted();
         assert!(fs::remove_dir_all(&root).is_ok());
-        result
+        Ok(())
     }
 
     #[test]
@@ -611,6 +693,29 @@ mod tests {
         assert!(matches!(
             result,
             Err(DaemonError::ServiceNotInstalled { .. })
+        ));
+        manager.runner.assert_exhausted();
+    }
+
+    #[test]
+    fn restart_rejects_loaded_status_without_a_runs_baseline() {
+        let root = test_root("restart-missing-runs");
+        let target = format!("gui/501/{LAUNCHD_LABEL}");
+        let runner = ScriptedCommandRunner::new([CommandStep::success(
+            "/bin/launchctl",
+            &["print", &target],
+            "state = running\n",
+        )]);
+        let manager = test_manager(&root, runner);
+
+        let result = manager.restart();
+
+        assert!(matches!(
+            result,
+            Err(DaemonError::MalformedServiceStatus {
+                manager: "launchd",
+                detail: "missing or invalid runs field",
+            })
         ));
         manager.runner.assert_exhausted();
     }
@@ -637,7 +742,7 @@ mod tests {
         ]);
         let manager = test_manager(&root, runner);
 
-        let result = super::super::report_started(&manager);
+        let result = super::super::report_started(&manager, StartObservation::Fresh);
 
         manager.runner.assert_exhausted();
         assert!(fs::remove_dir_all(&root).is_ok());
@@ -669,7 +774,7 @@ mod tests {
         ]);
         let manager = test_manager(&root, runner);
 
-        let error = super::super::report_started(&manager)
+        let error = super::super::report_started(&manager, StartObservation::Fresh)
             .err()
             .map(|error| error.to_string());
 

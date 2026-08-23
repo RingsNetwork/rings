@@ -17,6 +17,7 @@ use super::DaemonStatus;
 use super::ProcessCommandRunner;
 use super::ServiceManager;
 use super::ServiceSpec;
+use super::StartObservation;
 
 const SYSTEMD_UNIT: &str = "rings-node.service";
 // Resolve systemctl through PATH for non-FHS systems such as NixOS.
@@ -35,9 +36,9 @@ const SYSTEMD_STATUS_ARGS: [&str; 7] = [
 pub(super) enum SystemdDefinitionError {
     // Debug formatting keeps the rejected line break escaped in diagnostics.
     #[error(
-        "working directory contains a line break and cannot be written safely to a systemd unit: {path:?}"
+        "working directory contains a line break and cannot be written safely to a systemd unit: {value:?}"
     )]
-    WorkingDirectoryContainsLineBreak { path: PathBuf },
+    WorkingDirectoryContainsLineBreak { value: String },
 }
 
 pub(super) struct SystemdManager<R = ProcessCommandRunner> {
@@ -69,9 +70,10 @@ where R: CommandRunner
         &self.unit_path
     }
 
-    fn start(&self, spec: &ServiceSpec) -> Result<(), DaemonError> {
+    fn start(&self, spec: &ServiceSpec) -> Result<StartObservation, DaemonError> {
         write_atomic(&self.unit_path, &render_systemd_unit(spec)?)?;
-        reload_enable_restart(&self.runner)
+        reload_enable_restart(&self.runner)?;
+        Ok(StartObservation::Fresh)
     }
 
     fn stop(&self) -> Result<(), DaemonError> {
@@ -81,9 +83,10 @@ where R: CommandRunner
         Ok(())
     }
 
-    fn restart(&self) -> Result<(), DaemonError> {
+    fn restart(&self) -> Result<StartObservation, DaemonError> {
         if self.unit_path.is_file() {
-            return reload_enable_restart(&self.runner);
+            reload_enable_restart(&self.runner)?;
+            return Ok(StartObservation::Fresh);
         }
         if !self.state()?.is_installed() {
             return Err(DaemonError::ServiceNotInstalled {
@@ -94,8 +97,8 @@ where R: CommandRunner
             "--user",
             "restart",
             SYSTEMD_UNIT,
-        ])
-        .map(|_| ())
+        ])?;
+        Ok(StartObservation::Fresh)
     }
 
     fn state(&self) -> Result<DaemonState, DaemonError> {
@@ -184,7 +187,7 @@ fn systemd_working_directory(value: &str) -> Result<String, SystemdDefinitionErr
         .any(|character| matches!(character, '\n' | '\r'))
     {
         return Err(SystemdDefinitionError::WorkingDirectoryContainsLineBreak {
-            path: PathBuf::from(value),
+            value: value.to_owned(),
         });
     }
     Ok(value.replace('%', "%%"))
@@ -408,12 +411,13 @@ mod tests {
         let manager = test_manager(&root, runner);
         let spec = service_spec(&LogLevel::Info, &RuntimeFlavor::MultiThread)?;
 
-        let result = manager.start(&spec);
+        let observation = manager.start(&spec)?;
 
         assert!(manager.unit_path.is_file());
+        assert_eq!(observation, StartObservation::Fresh);
         manager.runner.assert_exhausted();
         assert!(fs::remove_dir_all(&root).is_ok());
-        result
+        Ok(())
     }
 
     #[test]
@@ -432,8 +436,9 @@ mod tests {
             runner,
         };
 
-        manager.restart()?;
+        let observation = manager.restart()?;
 
+        assert_eq!(observation, StartObservation::Fresh);
         manager.runner.assert_exhausted();
         Ok(())
     }
@@ -450,11 +455,12 @@ mod tests {
         let manager = test_manager(&root, runner);
         write_atomic(&manager.unit_path, "installed")?;
 
-        let result = manager.restart();
+        let observation = manager.restart()?;
 
+        assert_eq!(observation, StartObservation::Fresh);
         manager.runner.assert_exhausted();
         assert!(fs::remove_dir_all(&root).is_ok());
-        result
+        Ok(())
     }
 
     #[test]
