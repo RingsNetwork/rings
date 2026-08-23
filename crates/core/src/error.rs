@@ -801,7 +801,6 @@ impl Error {
                 Self::ConnectionAttemptSuperseded { .. }
                     | Self::OutboundTransferCapacityExceeded { .. }
                     | Self::OutboundTransferMemoryCapacityExceeded { .. }
-                    | Self::OutboundTransferAdmissionTimeout { .. }
                     | Self::RTCDataChannelStateNotOpen
                     | Self::TransportNotReady { .. }
                     | Self::SwarmMissDidInTable(_)

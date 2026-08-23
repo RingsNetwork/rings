@@ -159,6 +159,17 @@ struct TransferCompletion {
     sender: Option<TransferResultSender>,
 }
 
+struct FinalTransferResult {
+    sender: TransferResultSender,
+    result: Result<SendCompletionOutcome>,
+}
+
+impl FinalTransferResult {
+    fn publish(self) {
+        let _ = self.sender.send(self.result);
+    }
+}
+
 impl TransferCompletion {
     fn resolve_first_admission(&mut self) {
         if self.policy == OutboundCompletion::Detached {
@@ -166,8 +177,10 @@ impl TransferCompletion {
         }
     }
 
-    fn resolve_final(&mut self, result: Result<SendCompletionOutcome>) {
-        self.send(result);
+    fn take_final(&mut self, result: Result<SendCompletionOutcome>) -> Option<FinalTransferResult> {
+        self.sender
+            .take()
+            .map(|sender| FinalTransferResult { sender, result })
     }
 
     fn send(&mut self, result: Result<SendCompletionOutcome>) {
@@ -283,8 +296,8 @@ impl OutboundTransfer {
         }
     }
 
-    fn resolve_final(&mut self, result: Result<SendCompletionOutcome>) {
-        self.completion.resolve_final(result);
+    fn take_final(&mut self, result: Result<SendCompletionOutcome>) -> Option<FinalTransferResult> {
+        self.completion.take_final(result)
     }
 }
 
@@ -302,6 +315,12 @@ struct DeliveryEvent {
     id: u64,
     class: TransferClass,
     result: ChunkSendProgress<Result<()>>,
+}
+
+#[derive(Clone, Copy)]
+enum TerminationFairness {
+    AlreadyAdvanced,
+    AdvanceFailedAttempt,
 }
 
 #[derive(Clone)]
@@ -626,8 +645,32 @@ impl OutboundWorker {
         self.ready.push(class, QueuedTransfer { id, scheduled });
     }
 
+    fn terminate_transfer(
+        &mut self,
+        mut transfer: RunnableTransfer<QueuedTransfer>,
+        result: Result<SendCompletionOutcome>,
+        fairness: TerminationFairness,
+    ) {
+        let final_result = transfer.item_mut().scheduled.transfer.take_final(result);
+        match fairness {
+            TerminationFairness::AlreadyAdvanced => self.ready.finish_transfer(transfer),
+            TerminationFairness::AdvanceFailedAttempt => self.ready.fail_attempt(transfer),
+        }
+        if let Some(final_result) = final_result {
+            final_result.publish();
+        }
+    }
+
+    fn cancel_scheduled_transfer(mut scheduled: ScheduledTransfer) -> Option<FinalTransferResult> {
+        let final_result = scheduled
+            .transfer
+            .take_final(Ok(SendCompletionOutcome::Cancelled));
+        drop(scheduled);
+        final_result
+    }
+
     fn handle_delivery(&mut self, event: DeliveryEvent) {
-        let Some(mut transfer) = self.ready.take_waiting(event.class, event.id) else {
+        let Some(transfer) = self.ready.take_waiting(event.class, event.id) else {
             debug_assert!(false, "delivery must identify the waiting lane head");
             return;
         };
@@ -636,24 +679,16 @@ impl OutboundWorker {
                 self.ready.make_runnable(transfer);
             }
             ChunkSendProgress::Ready(Err(error)) => {
-                self.ready.finish_current(event.class);
-                transfer
-                    .item_mut()
-                    .scheduled
-                    .transfer
-                    .resolve_final(Err(error));
-                drop(transfer);
+                self.terminate_transfer(transfer, Err(error), TerminationFairness::AlreadyAdvanced);
                 self.measurements.record(OutboundMeasurement::FailedToSend);
             }
             ChunkSendProgress::Cancelled(reason) => {
                 let record_failure = reason.records_peer_failure();
-                self.ready.finish_current(event.class);
-                transfer
-                    .item_mut()
-                    .scheduled
-                    .transfer
-                    .resolve_final(Ok(SendCompletionOutcome::Cancelled));
-                drop(transfer);
+                self.terminate_transfer(
+                    transfer,
+                    Ok(SendCompletionOutcome::Cancelled),
+                    TerminationFairness::AlreadyAdvanced,
+                );
                 if record_failure {
                     self.measurements.record(OutboundMeasurement::FailedToSend);
                 }
@@ -662,11 +697,14 @@ impl OutboundWorker {
     }
 
     fn cancel_all(&mut self) {
-        for mut queued in self.ready.drain_transfers() {
-            queued
-                .scheduled
-                .transfer
-                .resolve_final(Ok(SendCompletionOutcome::Cancelled));
+        let final_results = self
+            .ready
+            .drain_transfers()
+            .into_iter()
+            .filter_map(|queued| Self::cancel_scheduled_transfer(queued.scheduled))
+            .collect::<Vec<_>>();
+        for final_result in final_results {
+            final_result.publish();
         }
     }
 
@@ -677,54 +715,54 @@ impl OutboundWorker {
     }
 
     fn cancel_buffered_commands(&mut self) {
+        let mut final_results = Vec::new();
         loop {
             match self.receiver.next().now_or_never() {
                 Some(Some(transfer)) => {
-                    let mut scheduled = *transfer;
-                    scheduled
-                        .transfer
-                        .resolve_final(Ok(SendCompletionOutcome::Cancelled));
+                    if let Some(final_result) = Self::cancel_scheduled_transfer(*transfer) {
+                        final_results.push(final_result);
+                    }
                 }
                 Some(None) => {
                     self.input_closed = true;
-                    return;
+                    break;
                 }
-                None => return,
+                None => break,
             }
+        }
+        for final_result in final_results {
+            final_result.publish();
         }
     }
 
     async fn admit_one_frame(&mut self, mut runnable: RunnableTransfer<QueuedTransfer>) {
         let class = runnable.class();
         if runnable.item().scheduled.transfer.is_stopped() {
-            runnable
-                .item_mut()
-                .scheduled
-                .transfer
-                .resolve_final(Ok(SendCompletionOutcome::Cancelled));
-            self.ready.fail_attempt(runnable);
+            self.terminate_transfer(
+                runnable,
+                Ok(SendCompletionOutcome::Cancelled),
+                TerminationFairness::AdvanceFailedAttempt,
+            );
             return;
         }
         let before_first_frame = runnable.item().scheduled.transfer.is_before_first_frame();
         let frame = match runnable.item_mut().scheduled.transfer.next_frame() {
             Ok(Some(frame)) => frame,
             Ok(None) => {
-                runnable
-                    .item_mut()
-                    .scheduled
-                    .transfer
-                    .resolve_final(Ok(SendCompletionOutcome::Succeeded));
-                self.ready.finish_transfer(runnable);
+                self.terminate_transfer(
+                    runnable,
+                    Ok(SendCompletionOutcome::Succeeded),
+                    TerminationFairness::AlreadyAdvanced,
+                );
                 self.measurements.record(OutboundMeasurement::Sent);
                 return;
             }
             Err(error) => {
-                runnable
-                    .item_mut()
-                    .scheduled
-                    .transfer
-                    .resolve_final(Err(error));
-                self.ready.fail_attempt(runnable);
+                self.terminate_transfer(
+                    runnable,
+                    Err(error),
+                    TerminationFairness::AdvanceFailedAttempt,
+                );
                 self.measurements.record(OutboundMeasurement::FailedToSend);
                 return;
             }
@@ -752,39 +790,30 @@ impl OutboundWorker {
             }
             ChunkSendProgress::Ready(Err(error)) => {
                 let record_failure = error.records_peer_send_failure();
-                runnable
-                    .item_mut()
-                    .scheduled
-                    .transfer
-                    .resolve_final(Err(error));
-                self.ready.fail_attempt(runnable);
+                self.terminate_transfer(
+                    runnable,
+                    Err(error),
+                    TerminationFairness::AdvanceFailedAttempt,
+                );
                 if record_failure {
                     self.measurements.record(OutboundMeasurement::FailedToSend);
                 }
             }
             ChunkSendProgress::Cancelled(reason) => {
                 let record_failure = reason.records_peer_failure();
-                if before_first_frame {
+                let result = if before_first_frame {
                     match reason.resolve_initial() {
-                        Ok(()) => runnable
-                            .item_mut()
-                            .scheduled
-                            .transfer
-                            .resolve_final(Ok(SendCompletionOutcome::Cancelled)),
-                        Err(error) => runnable
-                            .item_mut()
-                            .scheduled
-                            .transfer
-                            .resolve_final(Err(error)),
+                        Ok(()) => Ok(SendCompletionOutcome::Cancelled),
+                        Err(error) => Err(error),
                     }
                 } else {
-                    runnable
-                        .item_mut()
-                        .scheduled
-                        .transfer
-                        .resolve_final(Ok(SendCompletionOutcome::Cancelled));
-                }
-                self.ready.fail_attempt(runnable);
+                    Ok(SendCompletionOutcome::Cancelled)
+                };
+                self.terminate_transfer(
+                    runnable,
+                    result,
+                    TerminationFairness::AdvanceFailedAttempt,
+                );
                 if record_failure {
                     self.measurements.record(OutboundMeasurement::FailedToSend);
                 }

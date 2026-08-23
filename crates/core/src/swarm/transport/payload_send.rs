@@ -71,6 +71,28 @@ struct FramedOutboundTransfer {
     receiver: futures::channel::oneshot::Receiver<Result<SendCompletionOutcome>>,
 }
 
+struct StopOnDrop(StopSource);
+
+impl StopOnDrop {
+    fn new() -> Self {
+        Self(StopSource::new())
+    }
+
+    fn token(&self) -> StopToken {
+        self.0.token()
+    }
+
+    fn request_stop(&self) {
+        self.0.request_stop();
+    }
+}
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.request_stop();
+    }
+}
+
 fn log_oversized_payload(metadata: OversizedPayloadLog) {
     tracing::error!(
         local = %metadata.local,
@@ -121,39 +143,59 @@ impl SwarmTransport {
     /// Send a maintenance payload and return only after all of its frames stop.
     ///
     /// This is a network-only cancellation boundary. Dropping the send future
-    /// cannot cancel storage work, and bounds a delivery future that never
-    /// observes buffered-amount recovery.
+    /// requests transfer stop without cancelling storage work, and the deadline
+    /// bounds a delivery future that never observes buffered-amount recovery.
     pub(crate) async fn send_payload_tracked(
         &self,
         payload: MessagePayload,
     ) -> Result<SendCompletionOutcome> {
         let did = payload.relay.next_hop;
-        let stop = StopSource::new();
-        let send = self
-            .do_send_payload_with_completion(
-                payload.relay.next_hop,
-                payload,
-                OutboundCompletion::Tracked,
-                stop.token(),
-            )
-            .fuse();
+        let stop = StopOnDrop::new();
         let timeout = sleep(TRACKED_PAYLOAD_TIMEOUT).fuse();
-        pin_mut!(send, timeout);
+        pin_mut!(timeout);
+        let prepared = {
+            let prepare = self
+                .prepare_outbound_transfer(
+                    payload.relay.next_hop,
+                    payload,
+                    OutboundCompletion::Tracked,
+                    stop.token(),
+                )
+                .fuse();
+            pin_mut!(prepare);
+            select! {
+                result = prepare => result?,
+                _ = timeout => {
+                    self.log_tracked_payload_timeout(did);
+                    return Ok(SendCompletionOutcome::Cancelled);
+                }
+            }
+        };
+        let Some(prepared) = prepared else {
+            return Ok(SendCompletionOutcome::Cancelled);
+        };
+        let send = self.submit_prepared_outbound_transfer(prepared).fuse();
+        pin_mut!(send);
 
         select! {
             result = send => result,
             _ = timeout => {
                 stop.request_stop();
-                tracing::warn!(
-                    target: "rings_core::transport::tracked_send",
-                    local = %self.dht.did,
-                    peer = %did,
-                    timeout_ms = TRACKED_PAYLOAD_TIMEOUT.as_millis(),
-                    "tracked payload delivery timed out and was deferred"
-                );
-                Ok(SendCompletionOutcome::Cancelled)
+                let terminal_result = send.await;
+                self.log_tracked_payload_timeout(did);
+                terminal_result.map(|_| SendCompletionOutcome::Cancelled)
             }
         }
+    }
+
+    fn log_tracked_payload_timeout(&self, did: Did) {
+        tracing::warn!(
+            target: "rings_core::transport::tracked_send",
+            local = %self.dht.did,
+            peer = %did,
+            timeout_ms = TRACKED_PAYLOAD_TIMEOUT.as_millis(),
+            "tracked payload deadline elapsed and was deferred"
+        );
     }
 
     async fn connection_for_send(
