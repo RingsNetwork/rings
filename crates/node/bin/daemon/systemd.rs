@@ -5,33 +5,47 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use super::run_checked;
-use super::run_command;
 use super::write_atomic;
 use super::AutostartState;
+use super::CommandRunner;
 use super::DaemonError;
 use super::DaemonState;
 use super::DaemonStatus;
+use super::ProcessCommandRunner;
 use super::ServiceManager;
 use super::ServiceSpec;
 
 const SYSTEMD_UNIT: &str = "rings-node.service";
+const SYSTEMD_STATUS_ARGS: [&str; 7] = [
+    "--user",
+    "show",
+    "--all",
+    "--property=LoadState",
+    "--property=ActiveState",
+    "--property=UnitFileState",
+    SYSTEMD_UNIT,
+];
 
-pub(super) struct SystemdManager {
+pub(super) struct SystemdManager<R = ProcessCommandRunner> {
     unit_path: PathBuf,
+    runner: R,
 }
 
-impl SystemdManager {
+impl SystemdManager<ProcessCommandRunner> {
     pub(super) fn discover() -> Result<Self, DaemonError> {
         let home = home::home_dir().ok_or(DaemonError::HomeDirectoryUnavailable)?;
         let xdg_config_home = env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
         let config_home = systemd_config_home(&home, xdg_config_home.as_deref());
         Ok(Self {
             unit_path: config_home.join("systemd").join("user").join(SYSTEMD_UNIT),
+            runner: ProcessCommandRunner,
         })
     }
 }
 
-impl ServiceManager for SystemdManager {
+impl<R> ServiceManager for SystemdManager<R>
+where R: CommandRunner
+{
     fn name(&self) -> &'static str {
         "systemd --user"
     }
@@ -42,59 +56,61 @@ impl ServiceManager for SystemdManager {
 
     fn start(&self, spec: &ServiceSpec) -> Result<(), DaemonError> {
         write_atomic(&self.unit_path, &render_systemd_unit(spec))?;
-        reload_enable_restart()
+        reload_enable_restart(&self.runner)
     }
 
     fn stop(&self) -> Result<(), DaemonError> {
-        if self.unit_path.is_file() {
-            systemctl(&["--user", "stop", SYSTEMD_UNIT])?;
+        if !matches!(self.status()?.state, DaemonState::NotInstalled) {
+            systemctl(&self.runner, &["--user", "stop", SYSTEMD_UNIT])?;
         }
         Ok(())
     }
 
     fn restart(&self) -> Result<(), DaemonError> {
-        if !self.unit_path.is_file() {
+        if self.unit_path.is_file() {
+            return reload_enable_restart(&self.runner);
+        }
+        if matches!(self.status()?.state, DaemonState::NotInstalled) {
             return Err(DaemonError::ServiceNotInstalled {
                 path: self.unit_path.clone(),
             });
         }
-        reload_enable_restart()
+        systemctl(&self.runner, &["--user", "restart", SYSTEMD_UNIT])
     }
 
     fn status(&self) -> Result<DaemonStatus, DaemonError> {
-        if !self.unit_path.is_file() {
-            return Ok(DaemonStatus {
-                state: DaemonState::NotInstalled,
-                autostart: AutostartState::Disabled,
-            });
-        }
-        let active = systemctl_output(&["--user", "is-active", SYSTEMD_UNIT])?;
-        let enabled = systemctl_output(&["--user", "is-enabled", SYSTEMD_UNIT])?;
-        Ok(DaemonStatus {
-            state: parse_systemd_state(&String::from_utf8_lossy(&active.stdout)),
-            autostart: parse_systemd_autostart(&String::from_utf8_lossy(&enabled.stdout)),
-        })
+        systemd_status(&self.runner)
     }
 }
 
-fn reload_enable_restart() -> Result<(), DaemonError> {
-    systemctl(&["--user", "daemon-reload"])?;
-    systemctl(&["--user", "enable", SYSTEMD_UNIT])?;
-    systemctl(&["--user", "restart", SYSTEMD_UNIT])?;
+fn reload_enable_restart<R>(runner: &R) -> Result<(), DaemonError>
+where R: CommandRunner + ?Sized {
+    systemctl(runner, &["--user", "daemon-reload"])?;
+    systemctl(runner, &["--user", "enable", SYSTEMD_UNIT])?;
+    systemctl(runner, &["--user", "restart", SYSTEMD_UNIT])?;
     Ok(())
 }
 
-fn systemctl(args: &[&str]) -> Result<(), DaemonError> {
-    systemctl_output_checked(args).map(|_| ())
+fn systemd_status<R>(runner: &R) -> Result<DaemonStatus, DaemonError>
+where R: CommandRunner + ?Sized {
+    let output = systemctl_output_checked(runner, &SYSTEMD_STATUS_ARGS)?;
+    parse_systemd_status(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn systemctl<R>(runner: &R, args: &[&str]) -> Result<(), DaemonError>
+where R: CommandRunner + ?Sized {
+    systemctl_output_checked(runner, args).map(|_| ())
 }
 
 // systemctl is intentionally resolved through PATH for non-FHS systems such as NixOS.
-fn systemctl_output(args: &[&str]) -> Result<std::process::Output, DaemonError> {
-    run_command("systemctl", args)
-}
-
-fn systemctl_output_checked(args: &[&str]) -> Result<std::process::Output, DaemonError> {
-    run_checked("systemctl", args)
+fn systemctl_output_checked<R>(
+    runner: &R,
+    args: &[&str],
+) -> Result<std::process::Output, DaemonError>
+where
+    R: CommandRunner + ?Sized,
+{
+    run_checked(runner, "systemctl", args)
 }
 
 fn systemd_config_home(home: &Path, candidate: Option<&Path>) -> PathBuf {
@@ -170,6 +186,45 @@ fn parse_systemd_state(output: &str) -> DaemonState {
     }
 }
 
+fn parse_systemd_status(output: &str) -> Result<DaemonStatus, DaemonError> {
+    let mut load_state = None;
+    let mut active_state = None;
+    let mut unit_file_state = None;
+    for line in output.lines() {
+        let Some((property, value)) = line.split_once('=') else {
+            continue;
+        };
+        match property {
+            "LoadState" => load_state = Some(value),
+            "ActiveState" => active_state = Some(value),
+            "UnitFileState" => unit_file_state = Some(value),
+            _ => {}
+        }
+    }
+    let load_state = load_state.ok_or(DaemonError::MalformedServiceStatus {
+        manager: "systemd --user",
+        detail: "missing LoadState property",
+    })?;
+    if load_state == "not-found" {
+        return Ok(DaemonStatus {
+            state: DaemonState::NotInstalled,
+            autostart: AutostartState::Disabled,
+        });
+    }
+    let state = if load_state == "loaded" {
+        parse_systemd_state(active_state.ok_or(DaemonError::MalformedServiceStatus {
+            manager: "systemd --user",
+            detail: "missing ActiveState property",
+        })?)
+    } else {
+        DaemonState::Unknown(format!("load state: {load_state}"))
+    };
+    Ok(DaemonStatus {
+        state,
+        autostart: parse_systemd_autostart(unit_file_state.unwrap_or_default()),
+    })
+}
+
 fn parse_systemd_autostart(output: &str) -> AutostartState {
     match output.trim() {
         "enabled" | "enabled-runtime" | "linked" | "linked-runtime" | "alias" => {
@@ -185,6 +240,8 @@ mod tests {
     use rings_node::logging::LogLevel;
 
     use super::super::super::RuntimeFlavor;
+    use super::super::tests::command_runner::CommandStep;
+    use super::super::tests::command_runner::ScriptedCommandRunner;
     use super::super::tests::service_spec;
     use super::*;
 
@@ -234,6 +291,80 @@ mod tests {
             parse_systemd_autostart("indirect\n"),
             AutostartState::Unknown
         );
+    }
+
+    #[test]
+    fn status_parser_uses_manager_load_state_instead_of_definition_path() -> Result<(), DaemonError>
+    {
+        let running =
+            parse_systemd_status("LoadState=loaded\nActiveState=active\nUnitFileState=enabled\n")?;
+        let missing =
+            parse_systemd_status("LoadState=not-found\nActiveState=inactive\nUnitFileState=\n")?;
+
+        assert_eq!(running, DaemonStatus {
+            state: DaemonState::Running,
+            autostart: AutostartState::Enabled,
+        });
+        assert_eq!(missing, DaemonStatus {
+            state: DaemonState::NotInstalled,
+            autostart: AutostartState::Disabled,
+        });
+        Ok(())
+    }
+
+    #[test]
+    fn stop_targets_a_loaded_unit_when_the_local_definition_is_missing() -> Result<(), DaemonError>
+    {
+        let runner = ScriptedCommandRunner::new([
+            CommandStep::success(
+                "systemctl",
+                &SYSTEMD_STATUS_ARGS,
+                "LoadState=loaded\nActiveState=active\nUnitFileState=enabled\n",
+            ),
+            CommandStep::success("systemctl", &["--user", "stop", SYSTEMD_UNIT], ""),
+        ]);
+        let manager = SystemdManager {
+            unit_path: PathBuf::from("/definition/does/not/exist"),
+            runner,
+        };
+
+        manager.stop()?;
+
+        manager.runner.assert_exhausted();
+        Ok(())
+    }
+
+    #[test]
+    fn status_preserves_systemctl_connection_failures() {
+        let runner = ScriptedCommandRunner::new([CommandStep::failure(
+            "systemctl",
+            &SYSTEMD_STATUS_ARGS,
+            1,
+            "Failed to connect to bus",
+        )]);
+        let manager = SystemdManager {
+            unit_path: PathBuf::from("/definition/does/not/exist"),
+            runner,
+        };
+
+        let result = manager.status();
+
+        assert!(matches!(result, Err(DaemonError::CommandFailed(_))));
+        manager.runner.assert_exhausted();
+    }
+
+    #[test]
+    fn installed_start_and_restart_reload_enable_then_restart() -> Result<(), DaemonError> {
+        let runner = ScriptedCommandRunner::new([
+            CommandStep::success("systemctl", &["--user", "daemon-reload"], ""),
+            CommandStep::success("systemctl", &["--user", "enable", SYSTEMD_UNIT], ""),
+            CommandStep::success("systemctl", &["--user", "restart", SYSTEMD_UNIT], ""),
+        ]);
+
+        reload_enable_restart(&runner)?;
+
+        runner.assert_exhausted();
+        Ok(())
     }
 
     #[test]

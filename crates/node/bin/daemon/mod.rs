@@ -122,6 +122,12 @@ enum DaemonError {
         #[source]
         source: io::Error,
     },
+    #[cfg(target_os = "linux")]
+    #[error("{manager} returned malformed service status: {detail}")]
+    MalformedServiceStatus {
+        manager: &'static str,
+        detail: &'static str,
+    },
     #[error(transparent)]
     CommandFailed(#[from] CommandFailure),
     #[cfg(target_os = "macos")]
@@ -158,6 +164,21 @@ impl fmt::Display for CommandFailure {
 }
 
 impl std::error::Error for CommandFailure {}
+
+trait CommandRunner {
+    fn run(&self, program: &'static str, args: &[&str]) -> Result<Output, DaemonError>;
+}
+
+struct ProcessCommandRunner;
+
+impl CommandRunner for ProcessCommandRunner {
+    fn run(&self, program: &'static str, args: &[&str]) -> Result<Output, DaemonError> {
+        Command::new(program)
+            .args(args)
+            .output()
+            .map_err(|source| DaemonError::ExecuteCommand { program, source })
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum DaemonState {
@@ -427,11 +448,16 @@ fn write_atomic(path: &Path, contents: &str) -> Result<(), DaemonError> {
     Ok(())
 }
 
-fn run_checked(program: &'static str, args: &[&str]) -> Result<Output, DaemonError> {
-    let output = run_command(program, args)?;
+fn run_checked<R>(runner: &R, program: &'static str, args: &[&str]) -> Result<Output, DaemonError>
+where R: CommandRunner + ?Sized {
+    let output = runner.run(program, args)?;
     if output.status.success() {
         return Ok(output);
     }
+    Err(command_failure(program, args, output).into())
+}
+
+fn command_failure(program: &str, args: &[&str], output: Output) -> CommandFailure {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     let detail = if !stderr.is_empty() {
@@ -441,19 +467,11 @@ fn run_checked(program: &'static str, args: &[&str]) -> Result<Output, DaemonErr
     } else {
         None
     };
-    Err(CommandFailure {
+    CommandFailure {
         command: format_command(program, args),
         status: output.status,
         detail,
     }
-    .into())
-}
-
-fn run_command(program: &'static str, args: &[&str]) -> Result<Output, DaemonError> {
-    Command::new(program)
-        .args(args)
-        .output()
-        .map_err(|source| DaemonError::ExecuteCommand { program, source })
 }
 
 fn format_command(program: &str, args: &[&str]) -> String {
@@ -470,6 +488,86 @@ mod tests {
 
     use super::super::Cli;
     use super::*;
+
+    #[cfg(unix)]
+    pub(super) mod command_runner {
+        use std::cell::RefCell;
+        use std::collections::VecDeque;
+        use std::os::unix::process::ExitStatusExt;
+
+        use super::super::CommandRunner;
+        use super::super::DaemonError;
+        use super::super::Output;
+
+        pub(crate) struct CommandStep {
+            program: String,
+            args: Vec<String>,
+            output: Output,
+        }
+
+        impl CommandStep {
+            pub(crate) fn success(program: &str, args: &[&str], stdout: &str) -> Self {
+                Self::with_status(program, args, 0, stdout, "")
+            }
+
+            pub(crate) fn failure(program: &str, args: &[&str], status: i32, stderr: &str) -> Self {
+                Self::with_status(program, args, status, "", stderr)
+            }
+
+            fn with_status(
+                program: &str,
+                args: &[&str],
+                status: i32,
+                stdout: &str,
+                stderr: &str,
+            ) -> Self {
+                Self {
+                    program: program.to_owned(),
+                    args: args.iter().map(|argument| (*argument).to_owned()).collect(),
+                    output: Output {
+                        status: std::process::ExitStatus::from_raw(status << 8),
+                        stdout: stdout.as_bytes().to_vec(),
+                        stderr: stderr.as_bytes().to_vec(),
+                    },
+                }
+            }
+        }
+
+        pub(crate) struct ScriptedCommandRunner {
+            steps: RefCell<VecDeque<CommandStep>>,
+        }
+
+        impl ScriptedCommandRunner {
+            pub(crate) fn new(steps: impl IntoIterator<Item = CommandStep>) -> Self {
+                Self {
+                    steps: RefCell::new(steps.into_iter().collect()),
+                }
+            }
+
+            pub(crate) fn assert_exhausted(&self) {
+                assert!(
+                    self.steps.borrow().is_empty(),
+                    "scripted command runner has unconsumed steps"
+                );
+            }
+        }
+
+        impl CommandRunner for ScriptedCommandRunner {
+            fn run(&self, program: &'static str, args: &[&str]) -> Result<Output, DaemonError> {
+                let Some(step) = self.steps.borrow_mut().pop_front() else {
+                    return Err(DaemonError::ExecuteCommand {
+                        program,
+                        source: std::io::Error::other(format!(
+                            "unexpected scripted command: {program} {args:?}"
+                        )),
+                    });
+                };
+                assert_eq!(program, step.program);
+                assert_eq!(args, step.args);
+                Ok(step.output)
+            }
+        }
+    }
 
     pub(super) fn service_spec(
         log_level: &LogLevel,

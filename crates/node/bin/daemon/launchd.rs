@@ -2,36 +2,43 @@
 
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Output;
 use std::thread;
 
+use super::command_failure;
 use super::ensure_parent_directory;
 use super::path_text;
 use super::run_checked;
-use super::run_command;
 use super::write_atomic;
 use super::AutostartState;
+use super::CommandRunner;
 use super::DaemonError;
 use super::DaemonState;
 use super::DaemonStatus;
+use super::ProcessCommandRunner;
 use super::ServiceManager;
 use super::ServiceSpec;
 use super::START_STATUS_ATTEMPTS;
 use super::START_STATUS_INTERVAL;
 
 const LAUNCHD_LABEL: &str = "io.ringsnetwork.node";
+// `launchctl error 113` is "Could not find specified service"; other failures are real errors.
+const LAUNCHD_SERVICE_NOT_FOUND: i32 = 113;
 
-pub(super) struct LaunchdManager {
+pub(super) struct LaunchdManager<R = ProcessCommandRunner> {
     definition_path: PathBuf,
     stdout_log: PathBuf,
     stderr_log: PathBuf,
     domain: String,
     target: String,
+    runner: R,
 }
 
-impl LaunchdManager {
+impl LaunchdManager<ProcessCommandRunner> {
     pub(super) fn discover() -> Result<Self, DaemonError> {
         let home = home::home_dir().ok_or(DaemonError::HomeDirectoryUnavailable)?;
-        let output = run_checked("/usr/bin/id", &["-u"])?;
+        let runner = ProcessCommandRunner;
+        let output = run_checked(&runner, "/usr/bin/id", &["-u"])?;
         let user_id = String::from_utf8_lossy(&output.stdout).trim().to_owned();
         if user_id.is_empty() || !user_id.chars().all(|character| character.is_ascii_digit()) {
             return Err(DaemonError::InvalidUserId { output: user_id });
@@ -48,20 +55,35 @@ impl LaunchdManager {
             stderr_log: logs.join("daemon.error.log"),
             domain,
             target,
+            runner,
         })
+    }
+}
+
+impl<R> LaunchdManager<R>
+where R: CommandRunner
+{
+    fn service_output(&self) -> Result<Option<Output>, DaemonError> {
+        let arguments = ["print", self.target.as_str()];
+        let output = self.runner.run("/bin/launchctl", &arguments)?;
+        if output.status.success() {
+            return Ok(Some(output));
+        }
+        if output.status.code() == Some(LAUNCHD_SERVICE_NOT_FOUND) {
+            return Ok(None);
+        }
+        Err(command_failure("/bin/launchctl", &arguments, output).into())
     }
 
     fn is_loaded(&self) -> Result<bool, DaemonError> {
-        Ok(run_command("/bin/launchctl", &["print", &self.target])?
-            .status
-            .success())
+        self.service_output().map(|output| output.is_some())
     }
 
     fn unload_if_loaded(&self) -> Result<(), DaemonError> {
         if !self.is_loaded()? {
             return Ok(());
         }
-        run_checked("/bin/launchctl", &["bootout", &self.target])?;
+        run_checked(&self.runner, "/bin/launchctl", &["bootout", &self.target])?;
         for _ in 0..START_STATUS_ATTEMPTS {
             if !self.is_loaded()? {
                 return Ok(());
@@ -73,8 +95,12 @@ impl LaunchdManager {
 
     fn bootstrap(&self) -> Result<(), DaemonError> {
         let definition = path_text(&self.definition_path)?;
-        run_checked("/bin/launchctl", &["enable", &self.target])?;
-        run_checked("/bin/launchctl", &["bootstrap", &self.domain, &definition])?;
+        run_checked(&self.runner, "/bin/launchctl", &["enable", &self.target])?;
+        run_checked(&self.runner, "/bin/launchctl", &[
+            "bootstrap",
+            &self.domain,
+            &definition,
+        ])?;
         Ok(())
     }
 
@@ -82,17 +108,19 @@ impl LaunchdManager {
         if !self.definition_path.is_file() {
             return Ok(AutostartState::Disabled);
         }
-        let output = run_command("/bin/launchctl", &["print-disabled", &self.domain])?;
-        if !output.status.success() {
-            return Ok(AutostartState::Unknown);
-        }
+        let output = run_checked(&self.runner, "/bin/launchctl", &[
+            "print-disabled",
+            &self.domain,
+        ])?;
         Ok(parse_launchd_autostart(&String::from_utf8_lossy(
             &output.stdout,
         )))
     }
 }
 
-impl ServiceManager for LaunchdManager {
+impl<R> ServiceManager for LaunchdManager<R>
+where R: CommandRunner
+{
     fn name(&self) -> &'static str {
         "launchd"
     }
@@ -122,9 +150,13 @@ impl ServiceManager for LaunchdManager {
                 path: self.definition_path.clone(),
             });
         }
-        run_checked("/bin/launchctl", &["enable", &self.target])?;
+        run_checked(&self.runner, "/bin/launchctl", &["enable", &self.target])?;
         if self.is_loaded()? {
-            run_checked("/bin/launchctl", &["kickstart", "-k", &self.target])?;
+            run_checked(&self.runner, "/bin/launchctl", &[
+                "kickstart",
+                "-k",
+                &self.target,
+            ])?;
             Ok(())
         } else {
             self.bootstrap()
@@ -133,13 +165,10 @@ impl ServiceManager for LaunchdManager {
 
     fn status(&self) -> Result<DaemonStatus, DaemonError> {
         let installed = self.definition_path.is_file();
-        let output = run_command("/bin/launchctl", &["print", &self.target])?;
-        let state = if output.status.success() {
-            parse_launchd_state(&String::from_utf8_lossy(&output.stdout))
-        } else if installed {
-            DaemonState::Stopped
-        } else {
-            DaemonState::NotInstalled
+        let state = match self.service_output()? {
+            Some(output) => parse_launchd_state(&String::from_utf8_lossy(&output.stdout)),
+            None if installed => DaemonState::Stopped,
+            None => DaemonState::NotInstalled,
         };
         Ok(DaemonStatus {
             state,
@@ -235,11 +264,41 @@ fn parse_launchd_autostart(output: &str) -> AutostartState {
 
 #[cfg(test)]
 mod tests {
+    use std::env;
+    use std::fs;
+
     use rings_node::logging::LogLevel;
 
     use super::super::super::RuntimeFlavor;
+    use super::super::tests::command_runner::CommandStep;
+    use super::super::tests::command_runner::ScriptedCommandRunner;
     use super::super::tests::service_spec;
     use super::*;
+
+    fn test_root(name: &str) -> PathBuf {
+        env::temp_dir().join(format!(
+            "rings-daemon-launchd-{name}-{}",
+            std::process::id()
+        ))
+    }
+
+    fn test_manager(
+        root: &Path,
+        runner: ScriptedCommandRunner,
+    ) -> LaunchdManager<ScriptedCommandRunner> {
+        let domain = "gui/501".to_owned();
+        LaunchdManager {
+            definition_path: root
+                .join("Library")
+                .join("LaunchAgents")
+                .join(format!("{LAUNCHD_LABEL}.plist")),
+            stdout_log: root.join(".rings/logs/daemon.log"),
+            stderr_log: root.join(".rings/logs/daemon.error.log"),
+            target: format!("{domain}/{LAUNCHD_LABEL}"),
+            domain,
+            runner,
+        }
+    }
 
     #[test]
     fn definition_preserves_arguments_working_directory_and_xml() -> Result<(), DaemonError> {
@@ -291,5 +350,115 @@ mod tests {
             parse_launchd_autostart("\"io.ringsnetwork.node\" => malformed"),
             AutostartState::Unknown
         );
+    }
+
+    #[test]
+    fn start_waits_for_bootout_then_bootstraps_without_kickstart() -> Result<(), DaemonError> {
+        let root = test_root("start-sequence");
+        let _ = fs::remove_dir_all(&root);
+        let domain = "gui/501";
+        let target = format!("{domain}/{LAUNCHD_LABEL}");
+        let definition = root
+            .join("Library")
+            .join("LaunchAgents")
+            .join(format!("{LAUNCHD_LABEL}.plist"));
+        let definition_text = path_text(&definition)?;
+        let runner = ScriptedCommandRunner::new([
+            CommandStep::success("/bin/launchctl", &["print", &target], "state = running\n"),
+            CommandStep::success("/bin/launchctl", &["bootout", &target], ""),
+            CommandStep::failure(
+                "/bin/launchctl",
+                &["print", &target],
+                LAUNCHD_SERVICE_NOT_FOUND,
+                "Could not find specified service",
+            ),
+            CommandStep::success("/bin/launchctl", &["enable", &target], ""),
+            CommandStep::success(
+                "/bin/launchctl",
+                &["bootstrap", domain, &definition_text],
+                "",
+            ),
+        ]);
+        let manager = test_manager(&root, runner);
+        let spec = service_spec(&LogLevel::Info, &RuntimeFlavor::MultiThread)?;
+
+        let result = manager.start(&spec);
+
+        assert!(manager.definition_path.is_file());
+        manager.runner.assert_exhausted();
+        assert!(fs::remove_dir_all(&root).is_ok());
+        result
+    }
+
+    #[test]
+    fn restart_kickstarts_only_an_already_loaded_service() -> Result<(), DaemonError> {
+        let root = test_root("restart-sequence");
+        let _ = fs::remove_dir_all(&root);
+        let domain = "gui/501";
+        let target = format!("{domain}/{LAUNCHD_LABEL}");
+        let definition = root
+            .join("Library")
+            .join("LaunchAgents")
+            .join(format!("{LAUNCHD_LABEL}.plist"));
+        write_atomic(&definition, "installed")?;
+        let runner = ScriptedCommandRunner::new([
+            CommandStep::success("/bin/launchctl", &["enable", &target], ""),
+            CommandStep::success("/bin/launchctl", &["print", &target], "state = running\n"),
+            CommandStep::success("/bin/launchctl", &["kickstart", "-k", &target], ""),
+        ]);
+        let manager = test_manager(&root, runner);
+
+        let result = manager.restart();
+
+        manager.runner.assert_exhausted();
+        assert!(fs::remove_dir_all(&root).is_ok());
+        result
+    }
+
+    #[test]
+    fn status_preserves_unexpected_launchctl_failures() {
+        let root = test_root("status-failure");
+        let target = format!("gui/501/{LAUNCHD_LABEL}");
+        let runner = ScriptedCommandRunner::new([CommandStep::failure(
+            "/bin/launchctl",
+            &["print", &target],
+            112,
+            "Could not find specified domain",
+        )]);
+        let manager = test_manager(&root, runner);
+
+        let result = manager.status();
+
+        let failure_detail = match result {
+            Err(DaemonError::CommandFailed(failure)) => failure.detail,
+            _ => None,
+        };
+        assert_eq!(
+            failure_detail.as_deref(),
+            Some("Could not find specified domain")
+        );
+        manager.runner.assert_exhausted();
+    }
+
+    #[test]
+    fn status_maps_only_launchd_service_not_found_to_not_installed() -> Result<(), DaemonError> {
+        let root = test_root("status-not-found");
+        let target = format!("gui/501/{LAUNCHD_LABEL}");
+        let runner = ScriptedCommandRunner::new([CommandStep::failure(
+            "/bin/launchctl",
+            &["print", &target],
+            LAUNCHD_SERVICE_NOT_FOUND,
+            "Could not find specified service",
+        )]);
+        let manager = test_manager(&root, runner);
+
+        let status = manager.status()?;
+
+        assert_eq!(status, DaemonStatus {
+            state: DaemonState::NotInstalled,
+            autostart: AutostartState::Disabled,
+        });
+        manager.runner.assert_exhausted();
+        Ok(())
     }
 }
