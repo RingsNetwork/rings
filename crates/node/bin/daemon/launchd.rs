@@ -41,14 +41,7 @@ enum ExitCodeAttribution {
 }
 
 impl ExitCodeAttribution {
-    fn is_current_failure(self, output: &str) -> bool {
-        let has_failed_exit = launchd_value(output, "last exit code = ")
-            .and_then(|value| value.split_whitespace().next())
-            .and_then(|value| value.parse::<i32>().ok())
-            .is_some_and(|code| code != 0);
-        if !has_failed_exit {
-            return false;
-        }
+    fn accepts(self, observed_sequence: Option<u64>) -> bool {
         match self {
             // Status chooses to trust the recorded exit. An unambiguous action knows history was
             // reset. These are distinct propositions that intentionally reach the same decision.
@@ -56,10 +49,11 @@ impl ExitCodeAttribution {
             Self::Action(FailureBoundary::PostAction {
                 sequence: Some(baseline),
             }) => {
-                // Observed on macOS 15.6.1 (24G90): after `kickstart -k`, a stale exit code
-                // remained while `runs` equalled the baseline; once `runs` advanced, launchd
-                // cleared that code before the new instance reached `running`.
-                parse_launchd_runs(output).is_some_and(|sequence| sequence > baseline)
+                // Empirical premise from macOS 15.6.1 (24G90): launchd kept the old exit code
+                // only while `runs` equalled the baseline and cleared it before `runs` advanced.
+                // The comparison marks the action boundary; that clearing guarantees a stale code
+                // cannot cross it and makes a later non-zero code attributable to the newer run.
+                observed_sequence.is_some_and(|sequence| sequence > baseline)
             }
             Self::Action(FailureBoundary::PostAction { sequence: None }) => false,
         }
@@ -320,9 +314,18 @@ fn parse_launchd_runs(output: &str) -> Option<u64> {
     launchd_value(output, "runs = ")?.parse().ok()
 }
 
+fn parse_launchd_exit_code(output: &str) -> Option<i32> {
+    launchd_value(output, "last exit code = ")?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
 fn parse_launchd_state(output: &str, exit_attribution: ExitCodeAttribution) -> DaemonState {
     let state = launchd_value(output, "state = ");
-    let has_current_failed_exit = exit_attribution.is_current_failure(output);
+    let has_current_failed_exit = parse_launchd_exit_code(output).is_some_and(|code| code != 0)
+        && exit_attribution.accepts(parse_launchd_runs(output));
     match state {
         Some("running") => DaemonState::Running,
         Some("spawn scheduled") if has_current_failed_exit => DaemonState::Failed,
@@ -799,6 +802,36 @@ mod tests {
         assert_eq!(boundary, FailureBoundary::PostAction { sequence: None });
         manager.runner.assert_exhausted();
         result
+    }
+
+    #[test]
+    fn restart_without_a_sequence_baseline_reports_crash_loop_as_starting() -> anyhow::Result<()> {
+        let root = test_root("restart-missing-runs-crash-loop");
+        let target = format!("gui/501/{LAUNCHD_LABEL}");
+        let crash_loop = "state = spawn scheduled\nlast exit code = 1\n";
+        let mut steps = vec![
+            CommandStep::success("/bin/launchctl", &["print", &target], "state = waiting\n"),
+            CommandStep::success("/bin/launchctl", &["enable", &target], ""),
+            CommandStep::success("/bin/launchctl", &["kickstart", "-k", &target], ""),
+        ];
+        steps.extend(
+            (0..=START_STATUS_ATTEMPTS)
+                .map(|_| CommandStep::success("/bin/launchctl", &["print", &target], crash_loop)),
+        );
+        let manager = test_manager(&root, ScriptedCommandRunner::new(steps));
+
+        let boundary = manager.restart()?;
+        let error = super::super::report_started(&manager, boundary)
+            .err()
+            .map(|error| error.to_string());
+
+        assert_eq!(boundary, FailureBoundary::PostAction { sequence: None });
+        assert_eq!(
+            error.as_deref(),
+            Some("the daemon did not reach the running state; current state: starting")
+        );
+        manager.runner.assert_exhausted();
+        Ok(())
     }
 
     #[test]
