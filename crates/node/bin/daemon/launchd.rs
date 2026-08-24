@@ -23,6 +23,13 @@ use super::ServiceSpec;
 use super::START_STATUS_ATTEMPTS;
 use super::START_STATUS_INTERVAL;
 
+mod status;
+
+use status::parse_launchd_autostart;
+use status::parse_launchd_runs;
+use status::parse_launchd_state;
+use status::TerminationAttribution;
+
 const LAUNCHD_LABEL: &str = "io.ringsnetwork.node";
 // `launchctl error 113` is "Could not find specified service"; other failures are real errors.
 const LAUNCHD_SERVICE_NOT_FOUND: i32 = 113;
@@ -32,32 +39,6 @@ pub(super) enum LaunchdDefinitionError {
     // Debug formatting keeps the rejected control character escaped in diagnostics.
     #[error("value contains a character forbidden by XML 1.0 launchd plists: {value:?}")]
     XmlIncompatibleValue { value: String },
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ExitCodeAttribution {
-    CurrentStatus,
-    Action(FailureBoundary),
-}
-
-impl ExitCodeAttribution {
-    fn accepts(self, observed_sequence: Option<u64>) -> bool {
-        match self {
-            // Status chooses to trust the recorded exit. An unambiguous action knows history was
-            // reset. These are distinct propositions that intentionally reach the same decision.
-            Self::CurrentStatus | Self::Action(FailureBoundary::Unambiguous) => true,
-            Self::Action(FailureBoundary::PostAction {
-                sequence: Some(baseline),
-            }) => {
-                // Empirical premise from macOS 15.6.1 (24G90): launchd kept the old exit code
-                // only while `runs` equalled the baseline and cleared it before `runs` advanced.
-                // The comparison marks the action boundary; that clearing guarantees a stale code
-                // cannot cross it and makes a later non-zero code attributable to the newer run.
-                observed_sequence.is_some_and(|sequence| sequence > baseline)
-            }
-            Self::Action(FailureBoundary::PostAction { sequence: None }) => false,
-        }
-    }
 }
 
 pub(super) struct LaunchdManager<R = ProcessCommandRunner> {
@@ -153,15 +134,16 @@ where R: CommandRunner
         )))
     }
 
-    fn state_with_exit_attribution(
+    fn state_with_termination_attribution(
         &self,
-        exit_attribution: ExitCodeAttribution,
+        termination_attribution: TerminationAttribution,
     ) -> Result<DaemonState, DaemonError> {
         let installed = self.definition_path.is_file();
         Ok(match self.service_output()? {
-            Some(output) => {
-                parse_launchd_state(&String::from_utf8_lossy(&output.stdout), exit_attribution)
-            }
+            Some(output) => parse_launchd_state(
+                &String::from_utf8_lossy(&output.stdout),
+                termination_attribution,
+            ),
             None if installed => DaemonState::Stopped,
             None => DaemonState::NotInstalled,
         })
@@ -214,7 +196,7 @@ where R: CommandRunner
     }
 
     fn state(&self) -> Result<DaemonState, DaemonError> {
-        self.state_with_exit_attribution(ExitCodeAttribution::CurrentStatus)
+        self.state_with_termination_attribution(TerminationAttribution::CurrentStatus)
     }
 
     fn autostart(&self) -> Result<AutostartState, DaemonError> {
@@ -222,7 +204,7 @@ where R: CommandRunner
     }
 
     fn state_after_action(&self, boundary: FailureBoundary) -> Result<DaemonState, DaemonError> {
-        self.state_with_exit_attribution(ExitCodeAttribution::Action(boundary))
+        self.state_with_termination_attribution(TerminationAttribution::Action(boundary))
     }
 }
 
@@ -299,79 +281,6 @@ fn is_xml_1_0_character(character: char) -> bool {
             | '\u{e000}'..='\u{fffd}'
             | '\u{10000}'..='\u{10ffff}'
     )
-}
-
-fn launchd_value<'a>(output: &'a str, field: &str) -> Option<&'a str> {
-    output.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix(field)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-    })
-}
-
-fn parse_launchd_runs(output: &str) -> Option<u64> {
-    launchd_value(output, "runs = ")?.parse().ok()
-}
-
-fn parse_launchd_exit_code(output: &str) -> Option<i32> {
-    launchd_value(output, "last exit code = ")?
-        .split_whitespace()
-        .next()?
-        .parse()
-        .ok()
-}
-
-fn parse_launchd_state(output: &str, exit_attribution: ExitCodeAttribution) -> DaemonState {
-    let state = launchd_value(output, "state = ");
-    let has_current_failed_exit = parse_launchd_exit_code(output).is_some_and(|code| code != 0)
-        && exit_attribution.accepts(parse_launchd_runs(output));
-    match state {
-        Some("running") => DaemonState::Running,
-        Some("spawn scheduled") if has_current_failed_exit => DaemonState::Failed,
-        Some("spawn scheduled") => DaemonState::Starting,
-        Some("waiting" | "exited" | "not running") if has_current_failed_exit => {
-            DaemonState::Failed
-        }
-        Some("waiting" | "exited" | "not running") => DaemonState::Stopped,
-        Some("throttled") => DaemonState::Failed,
-        Some(other) => DaemonState::Unknown(other.to_owned()),
-        None => DaemonState::Unknown("loaded without a state field".to_owned()),
-    }
-}
-
-fn parse_launchd_autostart(output: &str) -> AutostartState {
-    let mut recognized_listing = false;
-    for line in output.lines() {
-        let line = line.trim().trim_end_matches(';');
-        if is_disabled_services_listing(line) {
-            recognized_listing = true;
-            continue;
-        }
-        let Some((label, value)) = line.split_once("=>") else {
-            continue;
-        };
-        if label.trim().trim_matches('"') != LAUNCHD_LABEL {
-            continue;
-        }
-        return match value.trim() {
-            "true" | "disabled" => AutostartState::Disabled,
-            "false" | "enabled" => AutostartState::Enabled,
-            _ => AutostartState::Unknown,
-        };
-    }
-    if recognized_listing {
-        AutostartState::Enabled
-    } else {
-        AutostartState::Unknown
-    }
-}
-
-fn is_disabled_services_listing(line: &str) -> bool {
-    let Some((heading, listing)) = line.split_once('=') else {
-        return false;
-    };
-    heading.trim() == "disabled services" && matches!(listing.trim(), "{" | "{}")
 }
 
 #[cfg(test)]
@@ -502,119 +411,6 @@ mod tests {
     }
 
     #[test]
-    fn state_parser_preserves_launchd_lifecycle_and_failure_states() {
-        assert_eq!(
-            parse_launchd_state("state = running\n", ExitCodeAttribution::CurrentStatus),
-            DaemonState::Running
-        );
-        assert_eq!(
-            parse_launchd_state("state = waiting\n", ExitCodeAttribution::CurrentStatus),
-            DaemonState::Stopped
-        );
-        assert_eq!(
-            parse_launchd_state(
-                "state = throttled\nlast exit code = 78\n",
-                ExitCodeAttribution::CurrentStatus,
-            ),
-            DaemonState::Failed
-        );
-        assert_eq!(
-            parse_launchd_state(
-                "state = spawn scheduled\n",
-                ExitCodeAttribution::CurrentStatus,
-            ),
-            DaemonState::Starting
-        );
-        assert_eq!(
-            parse_launchd_state(
-                "state = spawn scheduled\nlast exit code = 1\n",
-                ExitCodeAttribution::CurrentStatus,
-            ),
-            DaemonState::Failed
-        );
-        assert_eq!(
-            parse_launchd_state(
-                "state = exited\nlast exit code = 0\n",
-                ExitCodeAttribution::CurrentStatus,
-            ),
-            DaemonState::Stopped
-        );
-        assert_eq!(
-            parse_launchd_state(
-                "state = exited\nlast exit code = 78\n",
-                ExitCodeAttribution::CurrentStatus,
-            ),
-            DaemonState::Failed
-        );
-    }
-
-    #[test]
-    fn state_parser_assigns_only_newer_runs_exit_to_restart_attempt() {
-        assert_eq!(
-            parse_launchd_state(
-                "state = spawn scheduled\nlast exit code = 1\n",
-                ExitCodeAttribution::Action(FailureBoundary::Unambiguous),
-            ),
-            DaemonState::Failed
-        );
-        assert_eq!(
-            parse_launchd_state(
-                "state = spawn scheduled\nlast exit code = 9\n",
-                ExitCodeAttribution::Action(FailureBoundary::PostAction { sequence: None }),
-            ),
-            DaemonState::Starting
-        );
-        assert_eq!(
-            parse_launchd_state(
-                "state = spawn scheduled\nruns = 4\nlast exit code = 9\n",
-                ExitCodeAttribution::Action(FailureBoundary::PostAction { sequence: Some(4) }),
-            ),
-            DaemonState::Starting
-        );
-        assert_eq!(
-            parse_launchd_state(
-                "state = spawn scheduled\nruns = 5\nlast exit code = 1\n",
-                ExitCodeAttribution::Action(FailureBoundary::PostAction { sequence: Some(4) }),
-            ),
-            DaemonState::Failed
-        );
-    }
-
-    #[test]
-    fn autostart_parser_matches_only_the_rings_service() {
-        let output = r#"disabled services = {
-    "unrelated.service" => true
-    "io.ringsnetwork.node" => false
-}"#;
-
-        assert_eq!(parse_launchd_autostart(output), AutostartState::Enabled);
-        assert_eq!(
-            parse_launchd_autostart("disabled services = {}"),
-            AutostartState::Enabled
-        );
-        assert_eq!(
-            parse_launchd_autostart("disabled services = {\n}"),
-            AutostartState::Enabled
-        );
-        assert_eq!(
-            parse_launchd_autostart("\"io.ringsnetwork.node\" => disabled"),
-            AutostartState::Disabled
-        );
-        assert_eq!(
-            parse_launchd_autostart("\"io.ringsnetwork.node\" => enabled"),
-            AutostartState::Enabled
-        );
-        assert_eq!(
-            parse_launchd_autostart("\"io.ringsnetwork.node\" => malformed"),
-            AutostartState::Unknown
-        );
-        assert_eq!(
-            parse_launchd_autostart("unrecognized launchctl output"),
-            AutostartState::Unknown
-        );
-    }
-
-    #[test]
     fn start_waits_for_bootout_then_bootstraps_without_kickstart() -> Result<(), DaemonError> {
         let root = test_root("start-sequence");
         let _ = fs::remove_dir_all(&root);
@@ -654,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn restart_ignores_stale_exit_until_a_new_run_is_observed() -> anyhow::Result<()> {
+    fn restart_ignores_action_termination_signal_during_respawn() -> anyhow::Result<()> {
         let root = test_root("restart-sequence");
         let _ = fs::remove_dir_all(&root);
         let domain = "gui/501";
@@ -663,19 +459,19 @@ mod tests {
             CommandStep::success(
                 "/bin/launchctl",
                 &["print", &target],
-                "state = running\nruns = 4\n",
+                "state = running\nruns = 3\n",
             ),
             CommandStep::success("/bin/launchctl", &["enable", &target], ""),
             CommandStep::success("/bin/launchctl", &["kickstart", "-k", &target], ""),
             CommandStep::success(
                 "/bin/launchctl",
                 &["print", &target],
-                "state = spawn scheduled\nruns = 4\nlast exit code = 9\n",
+                "state = spawn scheduled\nruns = 4\nlast terminating signal = Terminated: 15\n",
             ),
             CommandStep::success(
                 "/bin/launchctl",
                 &["print", &target],
-                "state = running\nruns = 5\n",
+                "state = running\nruns = 5\nlast terminating signal = Terminated: 15\n",
             ),
         ]);
         let manager = test_manager(&root, runner);
@@ -683,7 +479,7 @@ mod tests {
         let boundary = manager.restart()?;
         let result = super::super::report_started(&manager, boundary);
 
-        assert_eq!(boundary, FailureBoundary::PostAction { sequence: Some(4) });
+        assert_eq!(boundary, FailureBoundary::PostAction { sequence: Some(3) });
         manager.runner.assert_exhausted();
         result
     }
@@ -879,6 +675,43 @@ mod tests {
                 "/bin/launchctl",
                 &["print", &target],
                 "state = throttled\nlast exit code = 78\n",
+            ),
+            CommandStep::success(
+                "/bin/launchctl",
+                &["print-disabled", domain],
+                "\"io.ringsnetwork.node\" => false\n",
+            ),
+        ]);
+        let manager = test_manager(&root, runner);
+
+        let error = super::super::report_started(&manager, FailureBoundary::Unambiguous)
+            .err()
+            .map(|error| error.to_string());
+
+        assert_eq!(
+            error.as_deref(),
+            Some("the daemon did not reach the running state; current state: failed")
+        );
+        manager.runner.assert_exhausted();
+        assert!(fs::remove_dir_all(&root).is_ok());
+        Ok(())
+    }
+
+    #[test]
+    fn start_reporting_treats_signal_death_as_terminal_failure() -> anyhow::Result<()> {
+        let root = test_root("start-reporting-signal-failure");
+        let domain = "gui/501";
+        let target = format!("{domain}/{LAUNCHD_LABEL}");
+        let definition = root
+            .join("Library")
+            .join("LaunchAgents")
+            .join(format!("{LAUNCHD_LABEL}.plist"));
+        write_atomic(&definition, "installed")?;
+        let runner = ScriptedCommandRunner::new([
+            CommandStep::success(
+                "/bin/launchctl",
+                &["print", &target],
+                "state = spawn scheduled\nruns = 1\nlast terminating signal = Segmentation fault: 11\n",
             ),
             CommandStep::success(
                 "/bin/launchctl",
