@@ -20,8 +20,8 @@ use crate::error::Result;
 use crate::message::MessageMeta;
 use crate::message::MessagePayload;
 use crate::utils::acquire_fair_with_handoff;
+use crate::utils::CoordinatedFairWaitQueue;
 use crate::utils::FairHandoff;
-use crate::utils::FairWaitQueue;
 use crate::utils::ReservedCapacity;
 
 mod lane;
@@ -173,7 +173,7 @@ impl InboundCapacity {
         }
     }
 
-    fn waiters_for_peer(&self, peer: Option<Did>) -> Arc<FairWaitQueue> {
+    fn waiters_for_peer(&self, peer: Option<Did>) -> Arc<CoordinatedFairWaitQueue> {
         let mut waiters = self
             .peer_waiters
             .lock()
@@ -186,38 +186,29 @@ impl InboundCapacity {
             .peer_waiters
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .start_wake_round();
-        self.wake_waiter(target);
-    }
-
-    fn continue_waiter_wake_round(&self, peer: Option<Did>, remaining: usize) {
-        let target = self
-            .peer_waiters
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .continue_wake_round(peer, remaining);
+            .request_wake_round();
         self.wake_waiter(target);
     }
 
     fn handle_waiter_handoff(&self, peer: Option<Did>, handoff: FairHandoff) {
-        match handoff {
-            FairHandoff::Continue(remaining) => {
-                self.continue_waiter_wake_round(peer, remaining);
-            }
-            FairHandoff::Progress => self.start_waiter_wake_round(),
-        }
+        let target = self
+            .peer_waiters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .handle_handoff(peer, handoff);
+        self.wake_waiter(target);
     }
 
     fn wake_waiter(&self, mut target: Option<WakeTarget>) {
         while let Some(next) = target {
-            if next.queue.wake_front_with_handoff(next.remaining) {
+            if next.queue.wake_front_with_handoff(next.round.clone()) {
                 return;
             }
             target = self
                 .peer_waiters
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .continue_wake_round(next.peer, next.remaining);
+                .handle_handoff(next.peer, FairHandoff::Continue(next.round));
         }
     }
 

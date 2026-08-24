@@ -164,6 +164,7 @@ struct FinalTransferResult {
     result: Result<SendCompletionOutcome>,
 }
 
+/// Owns every scheduler source until all capacity permits have been released.
 struct ShutdownBatch<T> {
     ready: Vec<T>,
     buffered: Vec<T>,
@@ -351,7 +352,12 @@ pub(super) struct OutboundPeerHandle {
 
 struct OutboundPeerState {
     sender: Mutex<mpsc::Sender<Box<ScheduledTransfer>>>,
-    _capacity: Arc<TransferCapacity>,
+    // Strong lifetime anchor; the peer registry intentionally stores only a Weak reference.
+    #[allow(
+        dead_code,
+        reason = "the field owns capacity for the peer state lifetime"
+    )]
+    capacity_anchor: Arc<TransferCapacity>,
     stop: StopSource,
 }
 
@@ -365,7 +371,9 @@ impl OutboundPeerHandle {
         if self.state.stop.is_stop_requested() {
             return Err(Error::ChannelSendMessageFailed);
         }
-        self.state._capacity.try_acquire(self.peer, class, bytes)
+        self.state
+            .capacity_anchor
+            .try_acquire(self.peer, class, bytes)
     }
 
     pub(super) fn submit(
@@ -483,7 +491,7 @@ impl OutboundSchedulers {
         let stop = StopSource::new();
         let state = Arc::new(OutboundPeerState {
             sender: Mutex::new(sender),
-            _capacity: capacity,
+            capacity_anchor: capacity,
             stop: stop.clone(),
         });
         let handle = OutboundPeerHandle { peer, state };

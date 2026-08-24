@@ -396,7 +396,7 @@ fn shutdown_closes_channel_without_worker_owned_sender() {
         peer: Did::from(8_u32),
         state: Arc::new(OutboundPeerState {
             sender: Mutex::new(sender),
-            _capacity: Arc::new(TransferCapacity::new(Arc::new(
+            capacity_anchor: Arc::new(TransferCapacity::new(Arc::new(
                 GlobalTransferCapacity::new(),
             ))),
             stop: stop.clone(),
@@ -448,7 +448,7 @@ fn final_handle_drop_requests_stop_before_channel_close() {
         peer: Did::from(10_u32),
         state: Arc::new(OutboundPeerState {
             sender: Mutex::new(sender),
-            _capacity: Arc::new(TransferCapacity::new(Arc::new(
+            capacity_anchor: Arc::new(TransferCapacity::new(Arc::new(
                 GlobalTransferCapacity::new(),
             ))),
             stop: stop.clone(),
