@@ -1,5 +1,4 @@
 //! User-level operating-system service management for the native node.
-#![cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
 
 use std::env;
 use std::fmt;
@@ -27,8 +26,10 @@ mod launchd;
 #[cfg(any(target_os = "linux", all(test, unix)))]
 mod systemd;
 
-const START_STATUS_ATTEMPTS: usize = 20;
-const START_STATUS_INTERVAL: Duration = Duration::from_millis(100);
+// A start or restart gets a two-second observation budget. Stopped is not terminal during this
+// window because service managers can report it before the first spawn is recorded.
+const START_OBSERVATION_ATTEMPTS: usize = 20;
+const START_OBSERVATION_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Subcommand, Debug)]
 #[command(rename_all = "kebab-case")]
@@ -39,7 +40,7 @@ pub(super) enum DaemonCommand {
     Stop,
     #[command(about = "Shows the service-manager and login-startup state.")]
     Status,
-    #[command(about = "Restarts the installed user-level node service.")]
+    #[command(about = "Restarts the installed service without changing login startup.")]
     Restart,
 }
 
@@ -55,7 +56,7 @@ impl DaemonStartCommand {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(super) struct WorkerOptions {
     pub(super) log_level: LogLevel,
     pub(super) runtime: RuntimeFlavor,
@@ -114,6 +115,15 @@ enum DaemonError {
         #[source]
         source: io::Error,
     },
+    #[error(
+        "could not write temporary service definition {path}: {source}; also could not remove it: {cleanup}"
+    )]
+    WriteAndCleanupServiceDefinition {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+        cleanup: io::Error,
+    },
     #[error("could not install service definition {path}: {source}")]
     InstallServiceDefinition {
         path: PathBuf,
@@ -154,6 +164,20 @@ enum DaemonError {
     #[cfg(any(target_os = "macos", all(test, unix)))]
     #[error("launchd did not unload the daemon service")]
     ServiceDidNotUnload,
+    #[cfg(any(target_os = "macos", all(test, unix)))]
+    #[error("could not restore disabled login autostart after bootstrapping: {source}")]
+    RestoreAutostart {
+        #[source]
+        source: Box<DaemonError>,
+    },
+    #[cfg(any(target_os = "macos", all(test, unix)))]
+    #[error(
+        "could not bootstrap the disabled service: {bootstrap}; also could not restore disabled login autostart: {restore}"
+    )]
+    BootstrapAndRestoreAutostart {
+        bootstrap: Box<DaemonError>,
+        restore: Box<DaemonError>,
+    },
 }
 
 #[derive(Debug)]
@@ -179,8 +203,17 @@ impl fmt::Display for CommandFailure {
 
 impl std::error::Error for CommandFailure {}
 
+/// Runs service-manager commands at the process boundary.
 trait CommandRunner {
     fn run(&self, program: &'static str, args: &[&str]) -> Result<Output, DaemonError>;
+
+    fn run_checked(&self, program: &'static str, args: &[&str]) -> Result<Output, DaemonError> {
+        let output = self.run(program, args)?;
+        if output.status.success() {
+            return Ok(output);
+        }
+        Err(command_failure(program, args, output).into())
+    }
 }
 
 struct ProcessCommandRunner;
@@ -194,10 +227,29 @@ impl CommandRunner for ProcessCommandRunner {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// A concrete cause for a failed state, attributed either to the process or its manager.
+#[derive(Debug, Eq, PartialEq)]
 enum DaemonFailure {
     ExitCode(i32),
-    Signal { name: Option<String>, number: i32 },
+    Signal {
+        name: Option<String>,
+        number: i32,
+        core_dumped: bool,
+    },
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    Manager(DaemonManagerFailure),
+}
+
+/// A failure caused or diagnosed by the service manager rather than by a process exit record.
+#[cfg(any(target_os = "linux", all(test, unix)))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DaemonManagerFailure {
+    Timeout,
+    Watchdog,
+    OutOfMemory,
+    StartLimit,
+    Protocol,
+    Resources,
 }
 
 impl fmt::Display for DaemonFailure {
@@ -207,13 +259,49 @@ impl fmt::Display for DaemonFailure {
             Self::Signal {
                 name: Some(name),
                 number,
+                core_dumped: false,
             } => write!(formatter, "signal {name}: {number}"),
-            Self::Signal { name: None, number } => write!(formatter, "signal {number}"),
+            Self::Signal {
+                name: None,
+                number,
+                core_dumped: false,
+            } => write!(formatter, "signal {number}"),
+            Self::Signal {
+                name: Some(name),
+                number,
+                core_dumped: true,
+            } => write!(formatter, "signal {name}: {number}, core dumped"),
+            Self::Signal {
+                name: None,
+                number,
+                core_dumped: true,
+            } => write!(formatter, "signal {number}, core dumped"),
+            #[cfg(any(target_os = "linux", all(test, unix)))]
+            Self::Manager(failure) => write!(formatter, "{failure}"),
         }
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg(any(target_os = "linux", all(test, unix)))]
+impl fmt::Display for DaemonManagerFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Timeout => formatter.write_str("service-manager timeout"),
+            Self::Watchdog => formatter.write_str("watchdog failure"),
+            Self::OutOfMemory => formatter.write_str("out-of-memory kill"),
+            Self::StartLimit => formatter.write_str("start limit reached"),
+            Self::Protocol => formatter.write_str("service protocol failure"),
+            Self::Resources => formatter.write_str("service resource failure"),
+        }
+    }
+}
+
+/// The user-visible lifecycle of the installed daemon.
+///
+/// `Stopped` means a definition exists but no process is running. `NotInstalled` means the
+/// manager has no installed definition. `Failed(None)` means the manager reports failure without
+/// an attributable cause.
+#[derive(Debug, Eq, PartialEq)]
 enum DaemonState {
     NotInstalled,
     Running,
@@ -236,6 +324,8 @@ impl DaemonState {
     }
 
     fn is_terminal_start_failure(&self) -> bool {
+        // Stopped can be transient immediately after bootstrap or restart, before the manager has
+        // recorded its first spawn. Only absence or a manager-declared failure ends polling.
         matches!(self, Self::NotInstalled | Self::Failed(_))
     }
 }
@@ -256,6 +346,7 @@ impl fmt::Display for DaemonState {
     }
 }
 
+/// Whether the installed definition is registered to start at login.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AutostartState {
     Enabled,
@@ -273,21 +364,14 @@ impl fmt::Display for AutostartState {
     }
 }
 
+/// One observation containing both lifecycle and login-startup state.
 #[derive(Debug, Eq, PartialEq)]
 struct DaemonStatus {
     state: DaemonState,
     autostart: AutostartState,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FailureBoundary {
-    Unambiguous,
-    #[cfg(any(target_os = "macos", all(test, unix)))]
-    PostAction {
-        sequence: Option<u64>,
-    },
-}
-
+/// The complete foreground command encoded into an OS service definition.
 #[derive(Debug)]
 struct ServiceSpec {
     executable: String,
@@ -337,25 +421,14 @@ where T: ValueEnum + fmt::Debug {
         })
 }
 
+/// The common lifecycle operations, each returning one complete status observation.
 trait ServiceManager {
     fn name(&self) -> &'static str;
     fn definition_path(&self) -> &Path;
-    fn start(&self, spec: &ServiceSpec) -> Result<FailureBoundary, DaemonError>;
-    fn stop(&self) -> Result<(), DaemonError>;
-    fn restart(&self) -> Result<FailureBoundary, DaemonError>;
-    fn state(&self) -> Result<DaemonState, DaemonError>;
-    fn autostart(&self) -> Result<AutostartState, DaemonError>;
-
-    fn state_after_action(&self, _boundary: FailureBoundary) -> Result<DaemonState, DaemonError> {
-        self.state()
-    }
-
-    fn status(&self) -> Result<DaemonStatus, DaemonError> {
-        Ok(DaemonStatus {
-            state: self.state()?,
-            autostart: self.autostart()?,
-        })
-    }
+    fn start(&self, spec: &ServiceSpec) -> Result<DaemonStatus, DaemonError>;
+    fn stop(&self) -> Result<DaemonStatus, DaemonError>;
+    fn restart(&self) -> Result<DaemonStatus, DaemonError>;
+    fn observe(&self) -> Result<DaemonStatus, DaemonError>;
 }
 
 #[cfg(target_os = "macos")]
@@ -378,54 +451,46 @@ pub(super) fn execute(command: DaemonCommand, options: WorkerOptions) -> anyhow:
     match command {
         DaemonCommand::Start(args) => {
             let spec = ServiceSpec::discover(args.config_path(), options)?;
-            let boundary = manager.start(&spec)?;
-            report_started(manager.as_ref(), boundary)
+            let status = manager.start(&spec)?;
+            report_started(manager.as_ref(), status)?;
         }
         DaemonCommand::Stop => {
-            manager.stop()?;
-            print_status(manager.as_ref(), &manager.status()?);
-            Ok(())
+            let status = manager.stop()?;
+            print_status(manager.as_ref(), &status);
         }
         DaemonCommand::Status => {
-            print_status(manager.as_ref(), &manager.status()?);
-            Ok(())
+            print_status(manager.as_ref(), &manager.observe()?);
         }
         DaemonCommand::Restart => {
-            let boundary = manager.restart()?;
-            report_started(manager.as_ref(), boundary)
+            let status = manager.restart()?;
+            report_started(manager.as_ref(), status)?;
         }
     }
+    Ok(())
 }
 
-fn report_started(manager: &dyn ServiceManager, boundary: FailureBoundary) -> anyhow::Result<()> {
-    let status = DaemonStatus {
-        state: wait_for_running(manager, boundary)?,
-        autostart: manager.autostart()?,
-    };
+fn report_started(manager: &dyn ServiceManager, status: DaemonStatus) -> Result<(), DaemonError> {
     print_status(manager, &status);
     if status.state.is_running() {
         Ok(())
     } else {
         Err(DaemonError::ServiceDidNotStart {
             state: status.state,
-        }
-        .into())
+        })
     }
 }
 
-fn wait_for_running(
-    manager: &dyn ServiceManager,
-    boundary: FailureBoundary,
-) -> Result<DaemonState, DaemonError> {
-    let mut state = manager.state_after_action(boundary)?;
-    for _ in 0..START_STATUS_ATTEMPTS {
-        if state.is_running() || state.is_terminal_start_failure() {
-            return Ok(state);
+fn wait_for_running<F>(mut observe: F) -> Result<DaemonStatus, DaemonError>
+where F: FnMut() -> Result<DaemonStatus, DaemonError> {
+    let mut status = observe()?;
+    for _ in 0..START_OBSERVATION_ATTEMPTS {
+        if status.state.is_running() || status.state.is_terminal_start_failure() {
+            return Ok(status);
         }
-        thread::sleep(START_STATUS_INTERVAL);
-        state = manager.state_after_action(boundary)?;
+        thread::sleep(START_OBSERVATION_INTERVAL);
+        status = observe()?;
     }
-    Ok(state)
+    Ok(status)
 }
 
 fn print_status(manager: &dyn ServiceManager, status: &DaemonStatus) {
@@ -476,20 +541,38 @@ fn ensure_parent_directory(path: &Path) -> Result<(), DaemonError> {
 }
 
 fn write_atomic(path: &Path, contents: &str) -> Result<(), DaemonError> {
-    ensure_parent_directory(path)?;
+    write_atomic_with(path, contents, |temporary, value| {
+        fs::write(temporary, value)
+    })
+}
+
+fn write_atomic_with<F>(path: &Path, contents: &str, write: F) -> Result<(), DaemonError>
+where F: FnOnce(&Path, &str) -> io::Result<()> {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| DaemonError::NonUtf8Path {
             path: path.to_path_buf(),
         })?;
+    // LaunchAgents is scanned by launchd. The dot keeps a partial file hidden from that scan, and
+    // the process id prevents concurrent CLI invocations from sharing a temporary path.
     let temporary = path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
-    fs::write(&temporary, contents).map_err(|source| DaemonError::WriteServiceDefinition {
-        path: temporary.clone(),
-        source,
-    })?;
+    ensure_parent_directory(path)?;
+    if let Err(source) = write(&temporary, contents) {
+        return match remove_temporary(&temporary) {
+            Ok(()) => Err(DaemonError::WriteServiceDefinition {
+                path: temporary,
+                source,
+            }),
+            Err(cleanup) => Err(DaemonError::WriteAndCleanupServiceDefinition {
+                path: temporary,
+                source,
+                cleanup,
+            }),
+        };
+    }
     if let Err(source) = fs::rename(&temporary, path) {
-        return match fs::remove_file(&temporary) {
+        return match remove_temporary(&temporary) {
             Ok(()) => Err(DaemonError::InstallServiceDefinition {
                 path: path.to_path_buf(),
                 source,
@@ -505,13 +588,19 @@ fn write_atomic(path: &Path, contents: &str) -> Result<(), DaemonError> {
     Ok(())
 }
 
-fn run_checked<R>(runner: &R, program: &'static str, args: &[&str]) -> Result<Output, DaemonError>
-where R: CommandRunner + ?Sized {
-    let output = runner.run(program, args)?;
-    if output.status.success() {
-        return Ok(output);
+fn remove_temporary(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
     }
-    Err(command_failure(program, args, output).into())
+}
+
+fn command_output_value<'a>(output: &'a str, field: &str, separator: &str) -> Option<&'a str> {
+    output.lines().find_map(|line| {
+        let (name, value) = line.trim().split_once(separator)?;
+        (name.trim() == field).then(|| value.trim())
+    })
 }
 
 fn command_failure(program: &str, args: &[&str], output: Output) -> CommandFailure {
@@ -541,10 +630,39 @@ fn format_command(program: &str, args: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::ops::Deref;
+
     use clap::Parser;
 
     use super::super::Cli;
     use super::*;
+
+    pub(super) struct TestRoot {
+        path: PathBuf,
+    }
+
+    impl TestRoot {
+        pub(super) fn new(area: &str, name: &str) -> Self {
+            let path =
+                env::temp_dir().join(format!("rings-daemon-{area}-{name}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&path);
+            Self { path }
+        }
+    }
+
+    impl Deref for TestRoot {
+        type Target = Path;
+
+        fn deref(&self) -> &Self::Target {
+            &self.path
+        }
+    }
+
+    impl Drop for TestRoot {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
 
     #[cfg(unix)]
     pub(super) mod command_runner {
@@ -667,15 +785,10 @@ mod tests {
     }
 
     #[test]
-    fn atomic_write_removes_temporary_file_when_install_fails(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let root = env::temp_dir().join(format!(
-            "rings-daemon-atomic-write-test-{}",
-            std::process::id()
-        ));
+    fn atomic_write_removes_temporary_file_when_install_fails() -> io::Result<()> {
+        let root = TestRoot::new("shared", "atomic-install-failure");
         let target = root.join("definition");
         let temporary = root.join(format!(".definition.{}.tmp", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&target)?;
 
         let result = write_atomic(&target, "definition");
@@ -685,7 +798,70 @@ mod tests {
             Err(DaemonError::InstallServiceDefinition { .. })
         ));
         assert!(!temporary.exists());
-        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn atomic_write_removes_partial_file_when_write_fails() {
+        let root = TestRoot::new("shared", "atomic-write-failure");
+        let target = root.join("definition");
+        let temporary = root.join(format!(".definition.{}.tmp", std::process::id()));
+
+        let result = write_atomic_with(&target, "definition", |path, contents| {
+            fs::write(path, contents)?;
+            Err(io::Error::other("injected write failure"))
+        });
+
+        assert!(matches!(
+            result,
+            Err(DaemonError::WriteServiceDefinition { .. })
+        ));
+        assert!(!temporary.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_validates_non_utf8_name_before_creating_parent() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        let root = TestRoot::new("shared", "atomic-non-utf8");
+        let parent = root.join("new-parent");
+        let target = parent.join(OsStr::from_bytes(b"definition-\xff"));
+
+        let result = write_atomic(&target, "definition");
+
+        assert!(matches!(result, Err(DaemonError::NonUtf8Path { .. })));
+        assert!(!parent.exists());
+    }
+
+    #[test]
+    fn config_path_reports_missing_file_with_init_guidance() {
+        let root = TestRoot::new("shared", "missing-config");
+        let missing = root.join("config.yaml");
+
+        let error = resolve_config_path(missing.to_string_lossy().as_ref());
+
+        assert!(matches!(
+            &error,
+            Err(DaemonError::ConfigNotFound { path }) if *path == missing
+        ));
+        assert!(error
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.to_string().contains("run `rings init` first")));
+    }
+
+    #[test]
+    fn config_path_canonicalizes_an_existing_file() -> io::Result<()> {
+        let root = TestRoot::new("shared", "existing-config");
+        fs::create_dir_all(&*root)?;
+        let config = root.join("config.yaml");
+        fs::write(&config, "config")?;
+
+        let resolved = resolve_config_path(config.to_string_lossy().as_ref());
+
+        assert_eq!(resolved.ok(), config.canonicalize().ok());
         Ok(())
     }
 }

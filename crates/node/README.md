@@ -90,4 +90,5 @@ service definition. macOS logs are stored under `~/.rings/logs/`; Linux logs are
 available through `journalctl --user -u rings-node.service`. See the repository
 README for Linux lingering requirements and manual service removal. The captured
 working directory must remain at the same path; rerun `daemon start` from a
-persistent directory after moving or deleting it.
+persistent directory after moving or deleting it. `daemon stop` and `daemon
+restart` preserve the current login-autostart setting.

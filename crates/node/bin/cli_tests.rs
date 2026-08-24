@@ -1,5 +1,6 @@
 use clap::CommandFactory;
 use clap::Parser;
+use clap::ValueEnum;
 
 use super::daemon::DaemonCommand;
 use super::Cli;
@@ -31,6 +32,17 @@ fn daemon_start_accepts_a_config_path() {
     });
 
     assert_eq!(config_path.as_deref(), Some("custom.yaml"));
+}
+
+#[test]
+fn daemon_start_preserves_the_default_config_path() {
+    let parsed = Cli::try_parse_from(["rings", "daemon", "start"]);
+    let config_path = parsed.ok().and_then(|cli| match cli.command {
+        Command::Daemon(DaemonCommand::Start(command)) => Some(command.config_path().to_owned()),
+        _ => None,
+    });
+
+    assert_eq!(config_path.as_deref(), Some("~/.rings/config.yaml"));
 }
 
 #[test]
@@ -105,5 +117,14 @@ fn global_runtime_and_log_options_remain_compatible() {
         "inspect",
     ]);
 
-    assert!(parsed.is_ok());
+    let values = parsed.ok().and_then(|parsed| {
+        Some((
+            parsed.log_level.to_possible_value()?.get_name().to_owned(),
+            parsed.runtime.to_possible_value()?.get_name().to_owned(),
+        ))
+    });
+    assert_eq!(
+        values,
+        Some(("warn".to_owned(), "current-thread".to_owned()))
+    );
 }

@@ -613,14 +613,11 @@ struct InspectCommand {
     client_args: ClientArgs,
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
-    let mut c = config::Config::read_fs(args.config_args.config)?;
-
-    if let Some(ice_servers) = args.ice_servers {
+fn apply_run_config_overrides(c: &mut config::Config, args: &mut RunCommand) -> anyhow::Result<()> {
+    if let Some(ice_servers) = args.ice_servers.take() {
         c.ice_servers = ice_servers;
     }
-    if let Some(external_ip) = args.external_ip {
+    if let Some(external_ip) = args.external_ip.take() {
         c.external_ip = Some(external_ip);
     }
     if args.webrtc_udp_port_min.is_some() {
@@ -632,7 +629,7 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     if let Some(stabilize_interval) = args.stabilize_interval {
         c.stabilize_interval = stabilize_interval;
     }
-    if let Some(external_api_addr) = args.external_api_addr {
+    if let Some(external_api_addr) = args.external_api_addr.take() {
         c.external_api_addr = external_api_addr;
     }
     if let Some(internal_api_port) = args.internal_api_port {
@@ -645,14 +642,15 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
         c.advertise_onion_exit = true;
     }
     if !args.onion_exit_service.is_empty() {
-        c.onion_exit_services = args.onion_exit_service;
+        c.onion_exit_services = std::mem::take(&mut args.onion_exit_service);
     }
     if !args.onion_exit_allow_target.is_empty() {
         c.onion_exit_policy.allowed_targets =
-            parse_onion_exit_targets(args.onion_exit_allow_target)?;
+            parse_onion_exit_targets(std::mem::take(&mut args.onion_exit_allow_target))?;
     }
     if !args.onion_exit_deny_target.is_empty() {
-        c.onion_exit_policy.denied_targets = parse_onion_exit_targets(args.onion_exit_deny_target)?;
+        c.onion_exit_policy.denied_targets =
+            parse_onion_exit_targets(std::mem::take(&mut args.onion_exit_deny_target))?;
     }
     if let Some(max_circuits) = args.onion_exit_max_circuits {
         c.onion_exit_policy.max_circuits = max_circuits;
@@ -669,10 +667,10 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     if let Some(ttl_secs) = args.onion_exit_ttl_secs {
         c.onion_exit_ttl_secs = ttl_secs;
     }
-    if let Some(addr) = args.onion_http_proxy_addr {
+    if let Some(addr) = args.onion_http_proxy_addr.take() {
         c.onion_http_proxy_addr = Some(addr);
     }
-    if let Some(service) = args.onion_http_proxy_service {
+    if let Some(service) = args.onion_http_proxy_service.take() {
         c.onion_http_proxy_service = service;
     }
     if let Some(hop_count) = args.onion_http_proxy_hop_count {
@@ -690,6 +688,13 @@ async fn daemon_run(args: RunCommand) -> anyhow::Result<()> {
     if c.advertise_onion_exit {
         validate_native_onion_exit_services(&c.onion_exit_services)?;
     }
+    Ok(())
+}
+
+async fn run_node_foreground(mut args: RunCommand) -> anyhow::Result<()> {
+    let config_path = std::mem::take(&mut args.config_args.config);
+    let mut c = config::Config::read_fs(config_path)?;
+    apply_run_config_overrides(&mut c, &mut args)?;
 
     let pc = ProcessorConfig::try_from(c.clone())?;
     let onion_session_sk = pc.session_sk();
@@ -842,7 +847,7 @@ fn main() -> anyhow::Result<()> {
 
 async fn run(command: AsyncCommand) -> anyhow::Result<()> {
     match command {
-        AsyncCommand::Run(args) => daemon_run(*args).await,
+        AsyncCommand::Run(args) => run_node_foreground(*args).await,
         AsyncCommand::Pubsub(args) => pubsub_run(args.client_args, args.topic).await,
         AsyncCommand::Connect(ConnectCommand::Node(args)) => {
             args.client_args
