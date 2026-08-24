@@ -11,6 +11,18 @@ const LOWER_CLASSES: [TransferClass; 3] = [
     TransferClass::Application,
 ];
 
+macro_rules! lane_for_class {
+    ($lanes:expr, $class:expr) => {{
+        let [control, storage, e2e, application] = $lanes;
+        match $class {
+            TransferClass::DhtControl => control,
+            TransferClass::Storage => storage,
+            TransferClass::E2e => e2e,
+            TransferClass::Application => application,
+        }
+    }};
+}
+
 enum TransferLaneState<T> {
     Idle,
     Runnable(T),
@@ -117,6 +129,10 @@ impl<T> RunnableTransfer<T> {
         &mut self.item
     }
 
+    pub(super) fn into_parts(self) -> (TransferClass, T) {
+        (self.class, self.item)
+    }
+
     #[cfg(test)]
     pub(super) fn into_item(self) -> T {
         self.item
@@ -200,13 +216,17 @@ impl<T> TransferQueues<T> {
         self.lane_mut(class).finish_current();
     }
 
-    pub(super) fn finish_transfer(&mut self, transfer: RunnableTransfer<T>) {
-        self.finish_current(transfer.class);
+    pub(super) fn finish_transfer(&mut self, transfer: RunnableTransfer<T>) -> T {
+        let (class, item) = transfer.into_parts();
+        self.finish_current(class);
+        item
     }
 
-    pub(super) fn fail_attempt(&mut self, transfer: RunnableTransfer<T>) {
-        self.advance_fairness(transfer.class);
-        self.finish_current(transfer.class);
+    pub(super) fn fail_attempt(&mut self, transfer: RunnableTransfer<T>) -> T {
+        let (class, item) = transfer.into_parts();
+        self.advance_fairness(class);
+        self.finish_current(class);
+        item
     }
 
     pub(super) fn drain_transfers(&mut self) -> Vec<T> {
@@ -232,35 +252,20 @@ impl<T> TransferQueues<T> {
     }
 
     fn lane(&self, class: TransferClass) -> &TransferLane<T> {
-        let [control, storage, e2e, application] = &self.lanes;
-        match class {
-            TransferClass::DhtControl => control,
-            TransferClass::Storage => storage,
-            TransferClass::E2e => e2e,
-            TransferClass::Application => application,
-        }
+        lane_for_class!(&self.lanes, class)
     }
 
     fn lane_mut(&mut self, class: TransferClass) -> &mut TransferLane<T> {
-        let [control, storage, e2e, application] = &mut self.lanes;
-        match class {
-            TransferClass::DhtControl => control,
-            TransferClass::Storage => storage,
-            TransferClass::E2e => e2e,
-            TransferClass::Application => application,
-        }
+        lane_for_class!(&mut self.lanes, class)
     }
 
     fn next_lower_class(&self) -> Option<TransferClass> {
-        for offset in 0..LOWER_CLASSES.len() {
-            let index = self.lower_cursor.saturating_add(offset) % LOWER_CLASSES.len();
-            let Some(class) = LOWER_CLASSES.get(index).copied() else {
-                continue;
-            };
-            if self.is_runnable(class) {
-                return Some(class);
-            }
-        }
-        None
+        LOWER_CLASSES
+            .iter()
+            .copied()
+            .cycle()
+            .skip(self.lower_cursor)
+            .take(LOWER_CLASSES.len())
+            .find(|class| self.is_runnable(*class))
     }
 }

@@ -1,3 +1,6 @@
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+
 use super::capacity::OUTBOUND_DATA_RESERVED_TRANSFERS;
 use super::*;
 use crate::ecc::SecretKey;
@@ -5,6 +8,36 @@ use crate::message::e2e::E2eHandshakeRequest;
 use crate::message::Message;
 
 type TestTransfer = (TransferClass, &'static str);
+
+struct ShutdownProbe {
+    admitted: Arc<AtomicUsize>,
+    sender: Option<oneshot::Sender<usize>>,
+}
+
+impl Drop for ShutdownProbe {
+    fn drop(&mut self) {
+        let previous = self.admitted.fetch_sub(1, Ordering::AcqRel);
+        assert!(previous > 0, "a shutdown probe must own one admission");
+    }
+}
+
+struct ShutdownProbeCompletion {
+    admitted: Arc<AtomicUsize>,
+    sender: oneshot::Sender<usize>,
+}
+
+impl ShutdownProbeCompletion {
+    fn publish(self) {
+        let _ = self.sender.send(self.admitted.load(Ordering::Acquire));
+    }
+}
+
+fn finalize_shutdown_probe(mut probe: ShutdownProbe) -> Option<ShutdownProbeCompletion> {
+    let sender = probe.sender.take()?;
+    let admitted = probe.admitted.clone();
+    drop(probe);
+    Some(ShutdownProbeCompletion { admitted, sender })
+}
 
 fn pop_and_finish(queues: &mut TransferQueues<TestTransfer>) -> Option<&'static str> {
     let transfer = queues.pop()?;
@@ -138,6 +171,57 @@ fn lower_classes_progress_round_robin() {
         "app",
         "storage-2"
     ]);
+}
+
+#[test]
+fn every_transfer_class_uses_its_own_lane() {
+    let classes = [
+        TransferClass::DhtControl,
+        TransferClass::Storage,
+        TransferClass::E2e,
+        TransferClass::Application,
+    ];
+    let mut queues = TransferQueues::default();
+    for class in classes {
+        push(&mut queues, class, "indexed-lane");
+    }
+
+    for _ in classes {
+        let transfer = queues.pop().expect("every indexed lane must be reachable");
+        assert_eq!(transfer.class(), transfer.item().0);
+        queues.finish_current(transfer.class());
+    }
+}
+
+#[test]
+fn lower_cursor_wraps_and_skips_idle_lanes() {
+    for (previous, expected) in [
+        (TransferClass::Application, TransferClass::Storage),
+        (TransferClass::Storage, TransferClass::E2e),
+        (TransferClass::E2e, TransferClass::Application),
+    ] {
+        let mut queues = TransferQueues::default();
+        queues.record_frame_admitted(previous);
+        for class in [
+            TransferClass::Storage,
+            TransferClass::E2e,
+            TransferClass::Application,
+        ] {
+            push(&mut queues, class, "round-robin");
+        }
+        assert_eq!(
+            queues.pop().map(|transfer| transfer.class()),
+            Some(expected)
+        );
+    }
+
+    let mut sparse = TransferQueues::default();
+    sparse.record_frame_admitted(TransferClass::Storage);
+    push(&mut sparse, TransferClass::Application, "sparse");
+    assert_eq!(
+        sparse.pop().map(|transfer| transfer.class()),
+        Some(TransferClass::Application)
+    );
 }
 
 #[test]
@@ -312,8 +396,7 @@ fn shutdown_closes_channel_without_worker_owned_sender() {
         peer: Did::from(8_u32),
         state: Arc::new(OutboundPeerState {
             sender: Mutex::new(sender),
-            #[cfg(not(target_family = "wasm"))]
-            capacity: Arc::new(TransferCapacity::new(Arc::new(
+            _capacity: Arc::new(TransferCapacity::new(Arc::new(
                 GlobalTransferCapacity::new(),
             ))),
             stop: stop.clone(),
@@ -327,6 +410,37 @@ fn shutdown_closes_channel_without_worker_owned_sender() {
 }
 
 #[test]
+fn shutdown_batch_finalizes_ready_and_buffered_before_first_publish() {
+    let admitted = Arc::new(AtomicUsize::new(2));
+    let (ready_sender, ready_receiver) = oneshot::channel();
+    let (buffered_sender, buffered_receiver) = oneshot::channel();
+    let ready = ShutdownProbe {
+        admitted: admitted.clone(),
+        sender: Some(ready_sender),
+    };
+    let buffered = ShutdownProbe {
+        admitted: admitted.clone(),
+        sender: Some(buffered_sender),
+    };
+
+    let completions =
+        ShutdownBatch::new(vec![ready], vec![buffered]).finalize(finalize_shutdown_probe);
+    assert_eq!(admitted.load(Ordering::Acquire), 0);
+    let mut completions = completions.into_iter();
+    completions
+        .next()
+        .expect("ready completion must be collected first")
+        .publish();
+    assert_eq!(ready_receiver.now_or_never(), Some(Ok(0)));
+    completions
+        .next()
+        .expect("buffered completion must remain available")
+        .publish();
+    assert_eq!(buffered_receiver.now_or_never(), Some(Ok(0)));
+    assert!(completions.next().is_none());
+}
+
+#[test]
 fn final_handle_drop_requests_stop_before_channel_close() {
     let (sender, mut receiver) = mpsc::channel(OUTBOUND_TRANSFER_QUEUE_CAPACITY);
     let stop = StopSource::new();
@@ -334,8 +448,7 @@ fn final_handle_drop_requests_stop_before_channel_close() {
         peer: Did::from(10_u32),
         state: Arc::new(OutboundPeerState {
             sender: Mutex::new(sender),
-            #[cfg(not(target_family = "wasm"))]
-            capacity: Arc::new(TransferCapacity::new(Arc::new(
+            _capacity: Arc::new(TransferCapacity::new(Arc::new(
                 GlobalTransferCapacity::new(),
             ))),
             stop: stop.clone(),
@@ -428,5 +541,24 @@ async fn dead_peer_capacity_keys_are_pruned() {
     drop(second);
     schedulers.shutdown(Did::from(42_u32));
 
+    assert_eq!(schedulers.capacity_key_count_for_test(), 0);
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[tokio::test]
+async fn peer_state_keeps_idle_capacity_accountant_alive() {
+    let schedulers = OutboundSchedulers::new(None);
+    let peer = Did::from(43_u32);
+    let handle = schedulers.handle(peer).expect("peer worker must start");
+    let permit = schedulers
+        .reserve(peer, TransferClass::Application, 1)
+        .await
+        .expect("peer must reserve capacity");
+
+    drop(permit);
+    assert_eq!(schedulers.capacity_key_count_for_test(), 1);
+
+    drop(handle);
+    schedulers.shutdown(peer);
     assert_eq!(schedulers.capacity_key_count_for_test(), 0);
 }

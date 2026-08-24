@@ -118,14 +118,56 @@ impl<const N: usize> ReservedCapacity<N> {
     }
 
     pub(crate) fn release(&mut self, class_index: usize, amount: usize) {
-        self.admitted = self.admitted.saturating_sub(amount);
-        if let Some(class_admitted) = self.admitted_by_class.get_mut(class_index) {
-            *class_admitted = class_admitted.saturating_sub(amount);
-        }
+        let Some(next_class) = self
+            .admitted_by_class
+            .get(class_index)
+            .and_then(|admitted| admitted.checked_sub(amount))
+        else {
+            return;
+        };
+        let Some(next_total) = self.admitted.checked_sub(amount) else {
+            return;
+        };
+        let Some(class_admitted) = self.admitted_by_class.get_mut(class_index) else {
+            return;
+        };
+        *class_admitted = next_class;
+        self.admitted = next_total;
     }
 
     pub(crate) const fn admitted(self) -> usize {
         self.admitted
+    }
+}
+
+#[cfg(test)]
+mod reserved_capacity_tests {
+    use super::ReservedCapacity;
+
+    #[test]
+    fn invalid_release_keeps_aggregate_and_class_totals_equal() {
+        let mut capacity = ReservedCapacity::<2>::new();
+        assert!(capacity.try_reserve(0, 4, 8, &[0, 0]));
+
+        capacity.release(2, 1);
+        assert_eq!(capacity.admitted, 4);
+        assert_eq!(capacity.admitted_by_class, [4, 0]);
+
+        capacity.release(0, 5);
+        assert_eq!(capacity.admitted, 4);
+        assert_eq!(capacity.admitted_by_class, [4, 0]);
+    }
+
+    #[test]
+    fn valid_release_preserves_capacity_sum_invariant() {
+        let mut capacity = ReservedCapacity::<2>::new();
+        assert!(capacity.try_reserve(0, 3, 8, &[0, 0]));
+        assert!(capacity.try_reserve(1, 2, 8, &[0, 0]));
+
+        capacity.release(0, 2);
+
+        assert_eq!(capacity.admitted, 3);
+        assert_eq!(capacity.admitted_by_class.iter().sum::<usize>(), 3);
     }
 }
 
@@ -190,13 +232,36 @@ impl Drop for FairWaitBudgetPermit {
 struct FairWaiterEntry {
     id: u64,
     waker: Option<Waker>,
+    wake: Option<FairWake>,
     _budget: Option<FairWaitBudgetPermit>,
+}
+
+#[derive(Clone, Copy)]
+enum FairWake {
+    Local,
+    Handoff(usize),
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum FairHandoff {
+    Continue(usize),
+    Progress,
 }
 
 #[derive(Default)]
 struct FairWaitQueueState {
     next_id: u64,
     queue: VecDeque<FairWaiterEntry>,
+}
+
+impl FairWaitQueueState {
+    fn notify_front(&mut self, wake: FairWake) -> (bool, Option<Waker>) {
+        let Some(waiter) = self.queue.front_mut() else {
+            return (false, None);
+        };
+        waiter.wake = Some(wake);
+        (true, waiter.waker.clone())
+    }
 }
 
 /// FIFO gate used by bounded admissions that only queue requests larger than
@@ -270,6 +335,7 @@ impl FairWaitQueue {
         state.queue.push_back(FairWaiterEntry {
             id,
             waker: None,
+            wake: None,
             _budget: budget,
         });
         Ok(FairAdmission::Waiting(FairWaiter {
@@ -280,16 +346,23 @@ impl FairWaitQueue {
     }
 
     pub(crate) fn wake_front(&self) {
-        let waker = self
+        let _ = self.wake_front_with(FairWake::Local);
+    }
+
+    pub(crate) fn wake_front_with_handoff(&self, remaining: usize) -> bool {
+        self.wake_front_with(FairWake::Handoff(remaining))
+    }
+
+    fn wake_front_with(&self, wake: FairWake) -> bool {
+        let (armed, waker) = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .queue
-            .front()
-            .and_then(|waiter| waiter.waker.clone());
+            .notify_front(wake);
         if let Some(waker) = waker {
             waker.wake();
         }
+        armed
     }
 }
 
@@ -299,12 +372,25 @@ pub(crate) async fn acquire_fair<T>(
     cost: usize,
     budget_error: crate::error::Error,
     closed_error: impl Fn() -> crate::error::Error,
+    attempt: impl FnMut() -> crate::error::Result<T>,
+) -> crate::error::Result<T> {
+    acquire_fair_with_handoff(queue, cost, budget_error, closed_error, attempt, |_| {}).await
+}
+
+/// Acquire fairly and hand admission to another queue when this queue's head remains blocked.
+pub(crate) async fn acquire_fair_with_handoff<T>(
+    queue: &Arc<FairWaitQueue>,
+    cost: usize,
+    budget_error: crate::error::Error,
+    closed_error: impl Fn() -> crate::error::Error,
     mut attempt: impl FnMut() -> crate::error::Result<T>,
+    handoff: impl FnMut(FairHandoff),
 ) -> crate::error::Result<T> {
     let mut try_acquire = || attempt().ok();
     match queue.admit_or_wait(cost, budget_error, &mut try_acquire)? {
         FairAdmission::Ready(value) => Ok(value),
-        FairAdmission::Waiting(mut waiter) => {
+        FairAdmission::Waiting(waiter) => {
+            let mut waiter = FairHandoffWaiter::new(waiter, handoff);
             poll_fn(|context| match waiter.poll(context, &mut try_acquire) {
                 Poll::Ready(Some(value)) => Poll::Ready(Ok(value)),
                 Poll::Ready(None) => Poll::Ready(Err(closed_error())),
@@ -336,11 +422,39 @@ pub(crate) struct FairWaiter {
     active: bool,
 }
 
+struct FairHandoffWaiter<F: FnMut(FairHandoff)> {
+    waiter: FairWaiter,
+    handoff: F,
+}
+
+impl<F: FnMut(FairHandoff)> FairHandoffWaiter<F> {
+    fn new(waiter: FairWaiter, handoff: F) -> Self {
+        Self { waiter, handoff }
+    }
+
+    fn poll<T>(
+        &mut self,
+        context: &mut Context<'_>,
+        attempt: impl FnOnce() -> Option<T>,
+    ) -> Poll<Option<T>> {
+        self.waiter.poll(context, attempt, &mut self.handoff)
+    }
+}
+
+impl<F: FnMut(FairHandoff)> Drop for FairHandoffWaiter<F> {
+    fn drop(&mut self) {
+        if let Some(remaining) = self.waiter.cancel() {
+            (self.handoff)(remaining);
+        }
+    }
+}
+
 impl FairWaiter {
     pub(crate) fn poll<T>(
         &mut self,
         context: &mut Context<'_>,
         attempt: impl FnOnce() -> Option<T>,
+        handoff: impl FnOnce(FairHandoff),
     ) -> Poll<Option<T>> {
         let mut state = self
             .queue
@@ -350,48 +464,74 @@ impl FairWaiter {
         let Some(position) = state.queue.iter().position(|waiter| waiter.id == self.id) else {
             return Poll::Ready(None);
         };
-        if let Some(waiter) = state.queue.get_mut(position) {
-            waiter.waker = Some(context.waker().clone());
-        }
+        let Some(waiter) = state.queue.get_mut(position) else {
+            return Poll::Ready(None);
+        };
+        waiter.waker = Some(context.waker().clone());
         if position != 0 {
             return Poll::Pending;
         }
+        let Some(wake) = waiter.wake.take() else {
+            return Poll::Pending;
+        };
         let Some(value) = attempt() else {
+            drop(state);
+            if let FairWake::Handoff(remaining) = wake {
+                handoff(FairHandoff::Continue(remaining));
+            }
             return Poll::Pending;
         };
         state.queue.pop_front();
-        let next = state.queue.front().and_then(|waiter| waiter.waker.clone());
+        let next = matches!(wake, FairWake::Local)
+            .then(|| state.notify_front(FairWake::Local).1)
+            .flatten();
         self.active = false;
         drop(state);
         if let Some(waker) = next {
             waker.wake();
         }
+        if matches!(wake, FairWake::Handoff(_)) {
+            handoff(FairHandoff::Progress);
+        }
         Poll::Ready(Some(value))
     }
-}
 
-impl Drop for FairWaiter {
-    fn drop(&mut self) {
+    fn cancel(&mut self) -> Option<FairHandoff> {
         if !self.active {
-            return;
+            return None;
         }
         let mut state = self
             .queue
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let was_front = state
-            .queue
-            .front()
-            .is_some_and(|waiter| waiter.id == self.id);
-        state.queue.retain(|waiter| waiter.id != self.id);
-        let next = was_front
-            .then(|| state.queue.front().and_then(|waiter| waiter.waker.clone()))
+        let Some(position) = state.queue.iter().position(|waiter| waiter.id == self.id) else {
+            self.active = false;
+            return None;
+        };
+        let was_front = position == 0;
+        let removed = state.queue.remove(position);
+        self.active = false;
+        let handoff = removed.and_then(|waiter| match waiter.wake {
+            Some(FairWake::Handoff(remaining)) if was_front => {
+                Some(FairHandoff::Continue(remaining))
+            }
+            _ => None,
+        });
+        let next = (was_front && handoff.is_none())
+            .then(|| state.notify_front(FairWake::Local).1)
             .flatten();
         drop(state);
         if let Some(waker) = next {
             waker.wake();
         }
+        handoff
+    }
+}
+
+impl Drop for FairWaiter {
+    fn drop(&mut self) {
+        let _ = self.cancel();
     }
 }
 

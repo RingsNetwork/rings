@@ -4,7 +4,6 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::Weak;
 
 use futures::channel::mpsc;
 use futures::channel::oneshot;
@@ -18,18 +17,24 @@ use super::PayloadHandlingError;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
-use crate::message::MessageClass;
 use crate::message::MessageMeta;
 use crate::message::MessagePayload;
-use crate::utils::acquire_fair;
+use crate::utils::acquire_fair_with_handoff;
+use crate::utils::FairHandoff;
 use crate::utils::FairWaitQueue;
 use crate::utils::ReservedCapacity;
 
+mod lane;
 mod ticket;
+mod waiters;
 
+use self::lane::InboundLane;
+use self::lane::INBOUND_LANE_COUNT;
 use self::ticket::InboundCommand;
 use self::ticket::InboundSender;
 use self::ticket::InboundTicket;
+use self::waiters::InboundWaitQueues;
+use self::waiters::WakeTarget;
 
 const INBOUND_MAILBOX_CAPACITY: usize = 256;
 const INBOUND_MAILBOX_BYTE_CAPACITY: usize = 256 * 1024 * 1024;
@@ -42,8 +47,6 @@ const INBOUND_RESERVED_BYTES: [usize; INBOUND_LANE_COUNT] =
 const INBOUND_PEER_CAPACITY: usize = 32;
 const INBOUND_PEER_BYTE_CAPACITY: usize = 128 * 1024 * 1024;
 const INBOUND_COMMAND_DRAIN_BUDGET: usize = 32;
-const INBOUND_LANE_COUNT: usize = MessageClass::COUNT + 1;
-
 const _: () = {
     assert!(INBOUND_PEER_CAPACITY < INBOUND_MAILBOX_CAPACITY);
     assert!(INBOUND_PEER_BYTE_CAPACITY < INBOUND_MAILBOX_BYTE_CAPACITY);
@@ -51,49 +54,6 @@ const _: () = {
     assert!(INBOUND_RESERVED_TRANSFERS_PER_LANE * INBOUND_LANE_COUNT <= INBOUND_MAILBOX_CAPACITY);
     assert!(INBOUND_RESERVED_BYTES_PER_LANE * INBOUND_LANE_COUNT <= INBOUND_MAILBOX_BYTE_CAPACITY);
 };
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct InboundLane(usize);
-
-impl InboundLane {
-    #[cfg(test)]
-    #[allow(non_upper_case_globals)]
-    const DhtControl: Self = Self(MessageClass::DhtControl.index());
-    #[cfg(test)]
-    #[allow(non_upper_case_globals)]
-    const Storage: Self = Self(MessageClass::Storage.index());
-    #[cfg(test)]
-    #[allow(non_upper_case_globals)]
-    const E2e: Self = Self(MessageClass::E2e.index());
-    #[cfg(test)]
-    #[allow(non_upper_case_globals)]
-    const Application: Self = Self(MessageClass::Application.index());
-    #[allow(non_upper_case_globals)]
-    const Reassembly: Self = Self(MessageClass::COUNT);
-
-    const fn from_meta(meta: MessageMeta) -> Self {
-        if meta.kind().is_chunk() {
-            return Self::Reassembly;
-        }
-        Self(meta.class().index())
-    }
-
-    const fn index(self) -> usize {
-        self.0
-    }
-
-    const fn from_index(index: usize) -> Option<Self> {
-        if index < INBOUND_LANE_COUNT {
-            Some(Self(index))
-        } else {
-            None
-        }
-    }
-
-    const fn is_logical_data(self) -> bool {
-        self.0 != MessageClass::DhtControl.index() && self.0 != Self::Reassembly.0
-    }
-}
 
 #[derive(Clone, Copy)]
 struct InboundCapacityState {
@@ -201,7 +161,7 @@ impl InboundPeerCapacityState {
 pub(crate) struct InboundCapacity {
     state: Mutex<InboundCapacityState>,
     peer_states: Mutex<BTreeMap<Option<Did>, InboundPeerCapacityState>>,
-    peer_waiters: Mutex<BTreeMap<Option<Did>, Weak<FairWaitQueue>>>,
+    peer_waiters: Mutex<InboundWaitQueues>,
 }
 
 impl InboundCapacity {
@@ -209,7 +169,7 @@ impl InboundCapacity {
         Self {
             state: Mutex::new(InboundCapacityState::new()),
             peer_states: Mutex::new(BTreeMap::new()),
-            peer_waiters: Mutex::new(BTreeMap::new()),
+            peer_waiters: Mutex::new(InboundWaitQueues::default()),
         }
     }
 
@@ -218,34 +178,68 @@ impl InboundCapacity {
             .peer_waiters
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        waiters.retain(|_, queue| queue.strong_count() > 0);
-        if let Some(queue) = waiters.get(&peer).and_then(Weak::upgrade) {
-            return queue;
-        }
-        let queue = Arc::new(FairWaitQueue::new());
-        waiters.insert(peer, Arc::downgrade(&queue));
-        queue
+        waiters.queue_for_peer(peer)
     }
 
-    fn wake_waiters(&self) {
-        let queues = {
-            let mut waiters = self
+    fn start_waiter_wake_round(&self) {
+        let target = self
+            .peer_waiters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .start_wake_round();
+        self.wake_waiter(target);
+    }
+
+    fn continue_waiter_wake_round(&self, peer: Option<Did>, remaining: usize) {
+        let target = self
+            .peer_waiters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .continue_wake_round(peer, remaining);
+        self.wake_waiter(target);
+    }
+
+    fn handle_waiter_handoff(&self, peer: Option<Did>, handoff: FairHandoff) {
+        match handoff {
+            FairHandoff::Continue(remaining) => {
+                self.continue_waiter_wake_round(peer, remaining);
+            }
+            FairHandoff::Progress => self.start_waiter_wake_round(),
+        }
+    }
+
+    fn wake_waiter(&self, mut target: Option<WakeTarget>) {
+        while let Some(next) = target {
+            if next.queue.wake_front_with_handoff(next.remaining) {
+                return;
+            }
+            target = self
                 .peer_waiters
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let mut queues = Vec::with_capacity(waiters.len());
-            waiters.retain(|_, queue| match queue.upgrade() {
-                Some(queue) => {
-                    queues.push(queue);
-                    true
-                }
-                None => false,
-            });
-            queues
-        };
-        for queue in queues {
-            queue.wake_front();
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .continue_wake_round(next.peer, next.remaining);
         }
+    }
+
+    fn try_admit_unqueued(
+        self: &Arc<Self>,
+        peer: Option<Did>,
+        lane: InboundLane,
+        bytes: usize,
+    ) -> Result<InboundCapacityPermit> {
+        let mut waiters = self
+            .peer_waiters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(queue) = waiters.existing_queue(peer) {
+            drop(waiters);
+            return queue.try_admit_unqueued(memory_capacity_error(bytes), || {
+                self.try_acquire(peer, lane, bytes)
+            });
+        }
+        let result = self.try_acquire(peer, lane, bytes);
+        drop(waiters);
+        result
     }
 
     fn try_acquire(
@@ -324,18 +318,17 @@ impl InboundCapacity {
         if let Ok(permit) = self.try_acquire_reserved(peer, lane, bytes) {
             return Ok(permit);
         }
-        let waiters = self.waiters_for_peer(peer);
         if bytes <= INBOUND_RESERVED_BYTES_PER_LANE {
-            return waiters.try_admit_unqueued(memory_capacity_error(bytes), || {
-                self.try_acquire(peer, lane, bytes)
-            });
+            return self.try_admit_unqueued(peer, lane, bytes);
         }
-        acquire_fair(
+        let waiters = self.waiters_for_peer(peer);
+        acquire_fair_with_handoff(
             &waiters,
             bytes,
             memory_capacity_error(bytes),
             || Error::InboundMailboxClosed,
             || self.try_acquire(peer, lane, bytes),
+            |handoff| self.handle_waiter_handoff(peer, handoff),
         )
         .await
     }
@@ -347,6 +340,14 @@ impl InboundCapacity {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .messages
             .admitted()
+    }
+
+    #[cfg(test)]
+    fn waiter_queue_count_for_test(&self) -> usize {
+        self.peer_waiters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
     }
 }
 
@@ -410,7 +411,7 @@ impl InboundCapacityPermit {
                 self.bytes = bytes;
                 drop(state);
                 drop(peer_states);
-                self.capacity.wake_waiters();
+                self.capacity.start_waiter_wake_round();
                 Ok(())
             }
             Err(CapacityRejection::Count) => Err(Error::InboundMailboxCapacityExceeded {
@@ -442,7 +443,7 @@ impl Drop for InboundCapacityPermit {
         }
         drop(state);
         drop(peer_states);
-        self.capacity.wake_waiters();
+        self.capacity.start_waiter_wake_round();
     }
 }
 
@@ -735,10 +736,10 @@ impl InboundActor {
     fn reassembly_barrier_sequence(&self) -> Option<u64> {
         [
             self.active_lanes
-                .get(InboundLane::Reassembly.index())
+                .get(InboundLane::REASSEMBLY.index())
                 .copied()
                 .flatten(),
-            self.queues.front_sequence(InboundLane::Reassembly),
+            self.queues.front_sequence(InboundLane::REASSEMBLY),
         ]
         .into_iter()
         .flatten()

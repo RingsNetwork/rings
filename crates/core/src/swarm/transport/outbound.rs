@@ -164,7 +164,27 @@ struct FinalTransferResult {
     result: Result<SendCompletionOutcome>,
 }
 
+struct ShutdownBatch<T> {
+    ready: Vec<T>,
+    buffered: Vec<T>,
+}
+
+impl<T> ShutdownBatch<T> {
+    fn new(ready: Vec<T>, buffered: Vec<T>) -> Self {
+        Self { ready, buffered }
+    }
+
+    fn finalize<R>(self, finalize: impl FnMut(T) -> Option<R>) -> Vec<R> {
+        self.ready
+            .into_iter()
+            .chain(self.buffered)
+            .filter_map(finalize)
+            .collect()
+    }
+}
+
 impl FinalTransferResult {
+    /// Publish only after the scheduled transfer has dropped its capacity permit.
     fn publish(self) {
         let _ = self.sender.send(self.result);
     }
@@ -331,8 +351,7 @@ pub(super) struct OutboundPeerHandle {
 
 struct OutboundPeerState {
     sender: Mutex<mpsc::Sender<Box<ScheduledTransfer>>>,
-    #[cfg(all(test, not(target_family = "wasm")))]
-    capacity: Arc<TransferCapacity>,
+    _capacity: Arc<TransferCapacity>,
     stop: StopSource,
 }
 
@@ -346,7 +365,7 @@ impl OutboundPeerHandle {
         if self.state.stop.is_stop_requested() {
             return Err(Error::ChannelSendMessageFailed);
         }
-        self.state.capacity.try_acquire(self.peer, class, bytes)
+        self.state._capacity.try_acquire(self.peer, class, bytes)
     }
 
     pub(super) fn submit(
@@ -459,14 +478,12 @@ impl OutboundSchedulers {
         if let Some(handle) = registry.peers.get(&peer) {
             return Ok(handle.clone());
         }
-        #[cfg(all(test, not(target_family = "wasm")))]
         let capacity = registry.capacity(peer, &self.global_capacity);
         let (sender, receiver) = mpsc::channel(OUTBOUND_TRANSFER_QUEUE_CAPACITY);
         let stop = StopSource::new();
         let state = Arc::new(OutboundPeerState {
             sender: Mutex::new(sender),
-            #[cfg(all(test, not(target_family = "wasm")))]
-            capacity,
+            _capacity: capacity,
             stop: stop.clone(),
         });
         let handle = OutboundPeerHandle { peer, state };
@@ -607,7 +624,11 @@ impl OutboundWorker {
                 return;
             }
             if self.input_closed {
-                self.cancel_all();
+                let final_results = Self::cancel_batch(ShutdownBatch::new(
+                    self.drain_ready_transfers(),
+                    Vec::new(),
+                ));
+                Self::publish_released_results(final_results);
                 return;
             }
             if let Some(transfer) = self.ready.pop() {
@@ -647,26 +668,42 @@ impl OutboundWorker {
 
     fn terminate_transfer(
         &mut self,
-        mut transfer: RunnableTransfer<QueuedTransfer>,
+        transfer: RunnableTransfer<QueuedTransfer>,
         result: Result<SendCompletionOutcome>,
         fairness: TerminationFairness,
     ) {
-        let final_result = transfer.item_mut().scheduled.transfer.take_final(result);
-        match fairness {
+        let queued = match fairness {
             TerminationFairness::AlreadyAdvanced => self.ready.finish_transfer(transfer),
             TerminationFairness::AdvanceFailedAttempt => self.ready.fail_attempt(transfer),
-        }
+        };
+        let final_result = Self::finalize_scheduled_transfer(queued.scheduled, result);
         if let Some(final_result) = final_result {
             final_result.publish();
         }
     }
 
-    fn cancel_scheduled_transfer(mut scheduled: ScheduledTransfer) -> Option<FinalTransferResult> {
-        let final_result = scheduled
-            .transfer
-            .take_final(Ok(SendCompletionOutcome::Cancelled));
+    fn finalize_scheduled_transfer(
+        mut scheduled: ScheduledTransfer,
+        result: Result<SendCompletionOutcome>,
+    ) -> Option<FinalTransferResult> {
+        let final_result = scheduled.transfer.take_final(result);
         drop(scheduled);
         final_result
+    }
+
+    fn cancel_scheduled_transfer(scheduled: ScheduledTransfer) -> Option<FinalTransferResult> {
+        Self::finalize_scheduled_transfer(scheduled, Ok(SendCompletionOutcome::Cancelled))
+    }
+
+    fn cancel_batch(batch: ShutdownBatch<ScheduledTransfer>) -> Vec<FinalTransferResult> {
+        batch.finalize(Self::cancel_scheduled_transfer)
+    }
+
+    /// Publish a batch only after every source transfer has released its capacity permit.
+    fn publish_released_results(final_results: Vec<FinalTransferResult>) {
+        for final_result in final_results {
+            final_result.publish();
+        }
     }
 
     fn fail_transfer(
@@ -708,33 +745,29 @@ impl OutboundWorker {
         }
     }
 
-    fn cancel_all(&mut self) {
-        let final_results = self
-            .ready
+    fn drain_ready_transfers(&mut self) -> Vec<ScheduledTransfer> {
+        self.ready
             .drain_transfers()
             .into_iter()
-            .filter_map(|queued| Self::cancel_scheduled_transfer(queued.scheduled))
-            .collect::<Vec<_>>();
-        for final_result in final_results {
-            final_result.publish();
-        }
+            .map(|queued| queued.scheduled)
+            .collect()
     }
 
     fn shutdown(&mut self) {
         self.receiver.close();
-        self.cancel_all();
-        self.cancel_buffered_commands();
+        let batch = ShutdownBatch::new(
+            self.drain_ready_transfers(),
+            self.drain_buffered_transfers(),
+        );
+        let final_results = Self::cancel_batch(batch);
+        Self::publish_released_results(final_results);
     }
 
-    fn cancel_buffered_commands(&mut self) {
-        let mut final_results = Vec::new();
+    fn drain_buffered_transfers(&mut self) -> Vec<ScheduledTransfer> {
+        let mut buffered = Vec::new();
         loop {
             match self.receiver.next().now_or_never() {
-                Some(Some(transfer)) => {
-                    if let Some(final_result) = Self::cancel_scheduled_transfer(*transfer) {
-                        final_results.push(final_result);
-                    }
-                }
+                Some(Some(transfer)) => buffered.push(*transfer),
                 Some(None) => {
                     self.input_closed = true;
                     break;
@@ -742,9 +775,7 @@ impl OutboundWorker {
                 None => break,
             }
         }
-        for final_result in final_results {
-            final_result.publish();
-        }
+        buffered
     }
 
     async fn admit_one_frame(&mut self, mut runnable: RunnableTransfer<QueuedTransfer>) {

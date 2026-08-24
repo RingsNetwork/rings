@@ -28,6 +28,8 @@ use crate::measure::PeerQuality;
 use crate::message::CustomMessage;
 use crate::message::FoundEntry;
 use crate::message::Message;
+use crate::message::MessagePayload;
+use crate::message::PayloadSender;
 use crate::message::PeerLivenessProbe;
 use crate::swarm::transport::outbound_submit_count_for_test;
 use crate::swarm::transport::reset_outbound_submit_count_for_test;
@@ -58,6 +60,96 @@ async fn connected_nodes() -> Result<(Node, Node)> {
     let node1 = prepare_node(SecretKey::random()).await;
     let node2 = prepare_node(SecretKey::random()).await;
     connect_nodes(node1, node2).await
+}
+
+fn tracked_payload(node: &Node, peer: Did, body: &[u8]) -> Result<MessagePayload> {
+    MessagePayload::new_send(
+        Message::custom(body)?,
+        node.swarm.transport.session_sk(),
+        peer,
+        peer,
+    )
+}
+
+#[tokio::test]
+async fn tracked_completion_releases_capacity_before_returning() -> Result<()> {
+    let (node1, node2) = connected_nodes().await?;
+    let peer = node2.did();
+    let payload = tracked_payload(&node1, peer, b"tracked-capacity-release")?;
+
+    node1.swarm.transport.send_payload_tracked(payload).await?;
+
+    assert_eq!(
+        node1
+            .swarm
+            .transport
+            .outbound_admitted_transfer_count_for_test(peer),
+        Some(0)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn shutdown_releases_batch_before_first_tracked_completion() -> Result<()> {
+    let (node1, node2) = connected_nodes().await?;
+    let peer = node2.did();
+    let _pending_delivery = PendingDeliveryGuard::new();
+    let first_payload = tracked_payload(&node1, peer, b"first-shutdown-transfer")?;
+    let second_payload = tracked_payload(&node1, peer, b"second-shutdown-transfer")?;
+    let first_swarm = node1.swarm.clone();
+    let second_swarm = node1.swarm.clone();
+    let mut first = tokio::spawn(async move {
+        first_swarm
+            .transport
+            .send_payload_tracked(first_payload)
+            .await
+    });
+    let mut second = tokio::spawn(async move {
+        second_swarm
+            .transport
+            .send_payload_tracked(second_payload)
+            .await
+    });
+    wait_until("tracked shutdown batch admission", || {
+        node1
+            .swarm
+            .transport
+            .outbound_admitted_transfer_count_for_test(peer)
+            == Some(2)
+    })
+    .await?;
+
+    node1.swarm.transport.disconnect(peer).await?;
+    let first_completed = timeout(Duration::from_secs(2), async {
+        tokio::select! {
+            result = &mut first => {
+                let _ = result.map_err(|error| {
+                    invalid_test_state(format!("first tracked task failed: {error}"))
+                })?;
+                Ok::<_, Error>(true)
+            }
+            result = &mut second => {
+                let _ = result.map_err(|error| {
+                    invalid_test_state(format!("second tracked task failed: {error}"))
+                })?;
+                Ok(false)
+            }
+        }
+    })
+    .await
+    .map_err(|_| invalid_test_state("tracked shutdown batch did not complete"))??;
+
+    assert!(node1
+        .swarm
+        .transport
+        .outbound_admitted_transfer_count_for_test(peer)
+        .is_none_or(|admitted| admitted == 0));
+    let remaining = if first_completed { second } else { first };
+    let _ = timeout(Duration::from_secs(2), remaining)
+        .await
+        .map_err(|_| invalid_test_state("remaining tracked shutdown task did not complete"))?
+        .map_err(|error| invalid_test_state(format!("tracked shutdown task failed: {error}")))?;
+    Ok(())
 }
 
 async fn connect_nodes(node1: Node, node2: Node) -> Result<(Node, Node)> {
