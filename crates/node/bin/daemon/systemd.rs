@@ -12,6 +12,7 @@ use super::write_atomic;
 use super::AutostartState;
 use super::CommandRunner;
 use super::DaemonError;
+use super::DaemonFailure;
 use super::DaemonState;
 use super::DaemonStatus;
 use super::FailureBoundary;
@@ -22,23 +23,34 @@ use super::ServiceSpec;
 const SYSTEMD_UNIT: &str = "rings-node.service";
 // Resolve systemctl through PATH for non-FHS systems such as NixOS.
 const SYSTEMCTL: &str = "systemctl";
-const SYSTEMD_STATUS_ARGS: [&str; 7] = [
+const SYSTEMD_STATUS_ARGS: [&str; 10] = [
     "--user",
     "show",
     "--all",
     "--property=LoadState",
     "--property=ActiveState",
     "--property=UnitFileState",
+    "--property=ExecMainCode",
+    "--property=ExecMainStatus",
+    "--property=Result",
     SYSTEMD_UNIT,
 ];
+// Linux `siginfo_t::si_code` values published by systemd's ExecMainCode property.
+const SYSTEMD_EXEC_CODE_EXITED: i32 = 1;
+const SYSTEMD_EXEC_CODE_KILLED: i32 = 2;
+const SYSTEMD_EXEC_CODE_DUMPED: i32 = 3;
 
 #[derive(Debug, Error)]
 pub(super) enum SystemdDefinitionError {
-    // Debug formatting keeps the rejected line break escaped in diagnostics.
+    // Debug formatting keeps the rejected control character escaped in diagnostics.
     #[error(
-        "working directory contains a line break and cannot be written safely to a systemd unit: {value:?}"
+        "working directory contains an ASCII control character and cannot be written safely to a systemd unit: {value:?}"
     )]
-    WorkingDirectoryContainsLineBreak { value: String },
+    WorkingDirectoryContainsControlCharacter { value: String },
+    #[error(
+        "working directory ends in a backslash that would continue the systemd unit line: {value:?}"
+    )]
+    WorkingDirectoryEndsWithBackslash { value: String },
 }
 
 pub(super) struct SystemdManager<R = ProcessCommandRunner> {
@@ -182,30 +194,19 @@ fn systemd_exec_quote(value: &str) -> String {
 }
 
 fn systemd_working_directory(value: &str) -> Result<String, SystemdDefinitionError> {
-    if value
-        .chars()
-        .any(|character| matches!(character, '\n' | '\r'))
-    {
-        return Err(SystemdDefinitionError::WorkingDirectoryContainsLineBreak {
+    if value.chars().any(|character| character.is_ascii_control()) {
+        return Err(
+            SystemdDefinitionError::WorkingDirectoryContainsControlCharacter {
+                value: value.to_owned(),
+            },
+        );
+    }
+    if value.ends_with('\\') {
+        return Err(SystemdDefinitionError::WorkingDirectoryEndsWithBackslash {
             value: value.to_owned(),
         });
     }
-    let mut escaped = String::with_capacity(value.len());
-    for character in value.chars() {
-        match character {
-            '\u{7}' => escaped.push_str("\\a"),
-            '\u{8}' => escaped.push_str("\\b"),
-            '\u{b}' => escaped.push_str("\\v"),
-            '\u{c}' => escaped.push_str("\\f"),
-            '\t' => escaped.push_str("\\t"),
-            '\\' => escaped.push_str("\\\\"),
-            '"' => escaped.push_str("\\\""),
-            '\'' => escaped.push_str("\\'"),
-            '%' => escaped.push_str("%%"),
-            other => escaped.push(other),
-        }
-    }
-    Ok(escaped)
+    Ok(value.replace('%', "%%"))
 }
 
 fn parse_systemd_state(output: &str) -> DaemonState {
@@ -224,6 +225,9 @@ fn parse_systemd_status(output: &str) -> Result<DaemonStatus, DaemonError> {
     let mut load_state = None;
     let mut active_state = None;
     let mut unit_file_state = None;
+    let mut exec_main_code = None;
+    let mut exec_main_status = None;
+    let mut service_result = None;
     for line in output.lines() {
         let Some((property, value)) = line.split_once('=') else {
             continue;
@@ -232,6 +236,9 @@ fn parse_systemd_status(output: &str) -> Result<DaemonStatus, DaemonError> {
             "LoadState" => load_state = Some(value),
             "ActiveState" => active_state = Some(value),
             "UnitFileState" => unit_file_state = Some(value),
+            "ExecMainCode" => exec_main_code = Some(value),
+            "ExecMainStatus" => exec_main_status = Some(value),
+            "Result" => service_result = Some(value),
             _ => {}
         }
     }
@@ -243,13 +250,58 @@ fn parse_systemd_status(output: &str) -> Result<DaemonStatus, DaemonError> {
         manager: "systemd --user",
         detail: "missing ActiveState property",
     })?;
-    let state = parse_systemd_status_state(load_state, active_state);
+    let state = attribute_systemd_failure(
+        parse_systemd_status_state(load_state, active_state),
+        active_state,
+        service_result,
+        parse_systemd_failure(exec_main_code, exec_main_status),
+    );
     let autostart = if matches!(state, DaemonState::NotInstalled) {
         AutostartState::Disabled
     } else {
         parse_systemd_autostart(unit_file_state.unwrap_or_default())
     };
     Ok(DaemonStatus { state, autostart })
+}
+
+fn attribute_systemd_failure(
+    state: DaemonState,
+    active_state: &str,
+    service_result: Option<&str>,
+    failure: Option<DaemonFailure>,
+) -> DaemonState {
+    match (state, failure) {
+        (DaemonState::Failed(None), failure) => DaemonState::Failed(failure),
+        // The generated Type=simple unit cannot remain in ordinary startup. A terminated main
+        // process plus a failed Result and `activating` means Restart=on-failure is waiting to
+        // spawn the next attempt.
+        (DaemonState::Starting, Some(failure))
+            if active_state == "activating"
+                && service_result.is_some_and(is_failed_systemd_result) =>
+        {
+            DaemonState::Failed(Some(failure))
+        }
+        (state, _) => state,
+    }
+}
+
+fn is_failed_systemd_result(result: &str) -> bool {
+    !result.is_empty() && result != "success"
+}
+
+fn parse_systemd_failure(code: Option<&str>, status: Option<&str>) -> Option<DaemonFailure> {
+    let code = code?.parse::<i32>().ok()?;
+    let status = status?.parse::<i32>().ok()?;
+    match code {
+        SYSTEMD_EXEC_CODE_EXITED if status > 0 => Some(DaemonFailure::ExitCode(status)),
+        SYSTEMD_EXEC_CODE_KILLED | SYSTEMD_EXEC_CODE_DUMPED if status > 0 => {
+            Some(DaemonFailure::Signal {
+                name: None,
+                number: status,
+            })
+        }
+        _ => None,
+    }
 }
 
 fn parse_systemd_status_state(load_state: &str, active_state: &str) -> DaemonState {
@@ -346,6 +398,104 @@ mod tests {
             parse_systemd_autostart("indirect\n"),
             AutostartState::Unknown
         );
+    }
+
+    #[test]
+    fn status_parser_preserves_systemd_exit_and_signal_causes() -> Result<(), DaemonError> {
+        let exited = parse_systemd_status(
+            "LoadState=loaded\nActiveState=activating\nUnitFileState=enabled\nExecMainCode=1\nExecMainStatus=78\nResult=exit-code\n",
+        )?;
+        let killed = parse_systemd_status(
+            "LoadState=loaded\nActiveState=failed\nUnitFileState=enabled\nExecMainCode=2\nExecMainStatus=15\n",
+        )?;
+        let dumped = parse_systemd_status(
+            "LoadState=loaded\nActiveState=failed\nUnitFileState=enabled\nExecMainCode=3\nExecMainStatus=6\n",
+        )?;
+
+        assert_eq!(
+            exited.state,
+            DaemonState::Failed(Some(DaemonFailure::ExitCode(78)))
+        );
+        assert_eq!(
+            killed.state,
+            DaemonState::Failed(Some(DaemonFailure::Signal {
+                name: None,
+                number: 15,
+            }))
+        );
+        assert_eq!(
+            dumped.state,
+            DaemonState::Failed(Some(DaemonFailure::Signal {
+                name: None,
+                number: 6,
+            }))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn failure_parser_rejects_nonterminal_or_malformed_process_status() {
+        for (code, status) in [
+            (Some("0"), Some("78")),
+            (Some("1"), Some("0")),
+            (Some("1"), Some("-1")),
+            (Some("2"), Some("0")),
+            (Some("4"), Some("9")),
+            (Some("invalid"), Some("78")),
+            (Some("1"), Some("invalid")),
+            (None, Some("78")),
+            (Some("1"), None),
+        ] {
+            assert_eq!(parse_systemd_failure(code, status), None);
+        }
+    }
+
+    #[test]
+    fn status_parser_keeps_an_unfailed_activating_unit_starting() -> Result<(), DaemonError> {
+        let status = parse_systemd_status(
+            "LoadState=loaded\nActiveState=activating\nUnitFileState=enabled\nExecMainCode=0\nExecMainStatus=0\nResult=success\n",
+        )?;
+
+        assert_eq!(status.state, DaemonState::Starting);
+        Ok(())
+    }
+
+    #[test]
+    fn status_parser_does_not_attribute_a_healthy_restart_signal() -> Result<(), DaemonError> {
+        for result in ["success", ""] {
+            let status = parse_systemd_status(&format!(
+                "LoadState=loaded\nActiveState=activating\nUnitFileState=enabled\nExecMainCode=2\nExecMainStatus=15\nResult={result}\n"
+            ))?;
+
+            assert_eq!(status.state, DaemonState::Starting);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn start_reporting_includes_the_systemd_exit_cause() -> anyhow::Result<()> {
+        let failed_status = "LoadState=loaded\nActiveState=activating\nUnitFileState=enabled\nExecMainCode=1\nExecMainStatus=78\nResult=exit-code\n";
+        let runner = ScriptedCommandRunner::new([
+            CommandStep::success(SYSTEMCTL, &SYSTEMD_STATUS_ARGS, failed_status),
+            CommandStep::success(SYSTEMCTL, &SYSTEMD_STATUS_ARGS, failed_status),
+        ]);
+        let manager = SystemdManager {
+            unit_path: PathBuf::from("/definition/rings-node.service"),
+            runner,
+        };
+
+        let error = super::super::report_started(&manager, FailureBoundary::Unambiguous)
+            .err()
+            .map(|error| error.to_string());
+
+        assert_eq!(
+            error.as_deref(),
+            Some(
+                "the daemon did not reach the running state; current state: failed (exit code 78)"
+            )
+        );
+        manager.runner.assert_exhausted();
+        Ok(())
     }
 
     #[test]
@@ -487,20 +637,31 @@ mod tests {
     }
 
     #[test]
-    fn working_directory_escapes_unit_syntax_and_specifiers() {
+    fn working_directory_preserves_raw_characters_and_escapes_only_specifiers() {
         assert!(matches!(
-            systemd_working_directory("/tmp/a $HOME/%n/\\rings/\"node\"/'worker'/\t"),
-            Ok(path) if path == "/tmp/a $HOME/%%n/\\\\rings/\\\"node\\\"/\\'worker\\'/\\t"
+            systemd_working_directory("/tmp/a $HOME/%n/\\rings/\"node\"/'worker'"),
+            Ok(path) if path == "/tmp/a $HOME/%%n/\\rings/\"node\"/'worker'"
         ));
     }
 
     #[test]
-    fn working_directory_rejects_unit_line_breaks() {
-        for path in ["/tmp/rings\nEnvironment=BAD", "/tmp/rings\rRestart=no"] {
+    fn working_directory_rejects_ascii_control_characters() {
+        for character in [
+            '\0', '\u{7}', '\u{8}', '\t', '\n', '\u{b}', '\u{c}', '\r', '\u{1f}', '\u{7f}',
+        ] {
+            let path = format!("/tmp/rings{character}daemon");
             assert!(matches!(
-                systemd_working_directory(path),
-                Err(SystemdDefinitionError::WorkingDirectoryContainsLineBreak { .. })
+                systemd_working_directory(&path),
+                Err(SystemdDefinitionError::WorkingDirectoryContainsControlCharacter { .. })
             ));
         }
+    }
+
+    #[test]
+    fn working_directory_rejects_a_trailing_line_continuation() {
+        assert!(matches!(
+            systemd_working_directory("/tmp/rings\\"),
+            Err(SystemdDefinitionError::WorkingDirectoryEndsWithBackslash { .. })
+        ));
     }
 }
