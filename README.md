@@ -121,10 +121,14 @@ rings daemon restart
 ```
 
 On macOS, Rings installs `~/Library/LaunchAgents/io.ringsnetwork.node.plist`. On
-Linux, it installs `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/rings-node.service`.
+Linux, it installs `$XDG_CONFIG_HOME/systemd/user/rings-node.service` when
+`XDG_CONFIG_HOME` is absolute, and otherwise falls back to
+`$HOME/.config/systemd/user/rings-node.service`.
 `start` enables login startup. `stop` and `restart` preserve the existing login
 startup setting; stopping an enabled service therefore leaves it registered for
 the next login, while restarting a disabled service does not silently enable it.
+If restoring a temporarily changed launchd setting fails, `restart` exits with an
+explicit error and reports that preservation could not be completed.
 
 The service uses the directory where `rings daemon start` was run as its working
 directory. This lets the daemon load the same `.env` file as a foreground
@@ -136,6 +140,11 @@ log level, or runtime scheduler stored in the service definition.
 The captured working directory must continue to exist at the same path. Moving
 or deleting it prevents the service manager from starting the node; run
 `rings daemon start` again from a persistent directory to update the definition.
+`daemon start` observes only the manager's initial bookkeeping window. A node
+that is still in manager startup bookkeeping, throttled, or waiting for
+`RestartSec` when that window ends remains installed but makes the command exit
+non-zero with its last state; use `rings daemon status` to observe the later
+transition.
 
 On macOS, standard output is written to `~/.rings/logs/daemon.log` and standard
 error to `~/.rings/logs/daemon.error.log`. On Linux, inspect logs with:

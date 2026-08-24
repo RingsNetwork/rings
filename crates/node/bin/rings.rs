@@ -268,8 +268,7 @@ struct RunCommand {
 
     #[arg(
         long,
-        default_value = "200000000",
-        help = "Storage capacity. If not provider, use storage.capacity in config file or 200000000",
+        help = "Storage capacity. If not provided, preserve each configured storage capacity",
         env
     )]
     pub storage_capacity: Option<u32>,
@@ -614,6 +613,12 @@ struct InspectCommand {
 }
 
 fn apply_run_config_overrides(c: &mut config::Config, args: &mut RunCommand) -> anyhow::Result<()> {
+    apply_storage_overrides(
+        &mut c.data_storage,
+        &mut c.measure_storage,
+        args.storage_path.take(),
+        args.storage_capacity,
+    );
     if let Some(ice_servers) = args.ice_servers.take() {
         c.ice_servers = ice_servers;
     }
@@ -709,20 +714,8 @@ async fn run_node_foreground(mut args: RunCommand) -> anyhow::Result<()> {
     let onion_http_proxy_header_timeout_secs = c.onion_http_proxy_header_timeout_secs;
     let onion_http_proxy_max_connections = c.onion_http_proxy_max_connections;
 
-    let (data_storage, measure_storage) = if let Some(storage_path) = args.storage_path {
-        let storage_path = Path::new(&storage_path);
-        let data_path = storage_path.join("data").to_string_lossy().to_string();
-        let measure_path = storage_path.join("measure").to_string_lossy().to_string();
-        let capacity = args
-            .storage_capacity
-            .unwrap_or(config::DEFAULT_STORAGE_CAPACITY);
-        (
-            config::StorageConfig::new(&data_path, capacity),
-            config::StorageConfig::new(&measure_path, capacity),
-        )
-    } else {
-        (c.data_storage, c.measure_storage)
-    };
+    let data_storage = c.data_storage;
+    let measure_storage = c.measure_storage;
 
     let per_data_storage = Box::new(
         SledStorage::new_with_cap_and_path(data_storage.capacity, data_storage.path).await?,
@@ -788,6 +781,23 @@ async fn run_node_foreground(mut args: RunCommand) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn apply_storage_overrides(
+    data: &mut config::StorageConfig,
+    measure: &mut config::StorageConfig,
+    storage_path: Option<String>,
+    storage_capacity: Option<u32>,
+) {
+    if let Some(storage_path) = storage_path {
+        let storage_path = Path::new(&storage_path);
+        data.path = storage_path.join("data").to_string_lossy().to_string();
+        measure.path = storage_path.join("measure").to_string_lossy().to_string();
+    }
+    if let Some(capacity) = storage_capacity {
+        data.capacity = capacity;
+        measure.capacity = capacity;
+    }
 }
 
 fn parse_onion_exit_targets(targets: Vec<String>) -> anyhow::Result<Vec<OnionExitTarget>> {

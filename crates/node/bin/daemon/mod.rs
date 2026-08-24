@@ -1,4 +1,4 @@
-//! User-level operating-system service management for the native node.
+//! Owns the cross-platform daemon model while confining OS effects to manager adapters.
 
 use std::env;
 use std::fmt;
@@ -26,10 +26,14 @@ mod launchd;
 #[cfg(any(target_os = "linux", all(test, unix)))]
 mod systemd;
 
-// A start or restart gets a two-second observation budget. Stopped is not terminal during this
-// window because service managers can report it before the first spawn is recorded.
-const START_OBSERVATION_ATTEMPTS: usize = 20;
-const START_OBSERVATION_INTERVAL: Duration = Duration::from_millis(100);
+// Twenty 100 ms retries cover manager bookkeeping before a first spawn. They intentionally do not
+// wait through launchd throttling or systemd's RestartSec=5; those states remain observable as
+// Restarting when the budget ends. Tests use a zero interval without changing the retry topology.
+const OBSERVATION_RETRIES: usize = 20;
+#[cfg(not(test))]
+const OBSERVATION_INTERVAL: Duration = Duration::from_millis(100);
+#[cfg(test)]
+const OBSERVATION_INTERVAL: Duration = Duration::ZERO;
 
 #[derive(Subcommand, Debug)]
 #[command(rename_all = "kebab-case")]
@@ -69,17 +73,17 @@ enum DaemonError {
     UnsupportedPlatform,
     #[error("could not determine the current user's home directory")]
     HomeDirectoryUnavailable,
-    #[error("could not resolve the current working directory: {source}")]
+    #[error("could not resolve the current working directory")]
     CurrentDirectory {
         #[source]
         source: io::Error,
     },
-    #[error("could not resolve the running rings executable: {source}")]
+    #[error("could not resolve the running rings executable")]
     CurrentExecutable {
         #[source]
         source: io::Error,
     },
-    #[error("could not expand configuration path {path}: {source}")]
+    #[error("could not expand configuration path {path}")]
     ExpandConfig {
         path: PathBuf,
         #[source]
@@ -87,7 +91,7 @@ enum DaemonError {
     },
     #[error("configuration file does not exist: {path}; run `rings init` first")]
     ConfigNotFound { path: PathBuf },
-    #[error("could not resolve configuration file {path}: {source}")]
+    #[error("could not resolve configuration file {path}")]
     ResolveConfig {
         path: PathBuf,
         #[source]
@@ -97,87 +101,105 @@ enum DaemonError {
     NonUtf8Path { path: PathBuf },
     #[cfg(any(target_os = "macos", all(test, unix)))]
     #[error(transparent)]
-    LaunchdDefinition(#[from] launchd::LaunchdDefinitionError),
+    Launchd(#[from] launchd::LaunchdError),
     #[cfg(any(target_os = "linux", all(test, unix)))]
     #[error(transparent)]
-    SystemdDefinition(#[from] systemd::SystemdDefinitionError),
+    Systemd(#[from] systemd::SystemdError),
     #[error("could not derive a CLI name for {value}")]
     CliValueNameUnavailable { value: String },
-    #[error("could not prepare the parent directory for {path}: {source}")]
+    #[error("could not prepare the parent directory for {path}")]
     EnsureParentDirectory {
         path: PathBuf,
         #[source]
         source: Box<rings_node::error::Error>,
     },
-    #[error("could not write temporary service definition {path}: {source}")]
+    #[error("could not write temporary service definition {path}")]
     WriteServiceDefinition {
         path: PathBuf,
         #[source]
-        source: io::Error,
+        failure: RecoveryFailure<io::Error>,
     },
-    #[error(
-        "could not write temporary service definition {path}: {source}; also could not remove it: {cleanup}"
-    )]
-    WriteAndCleanupServiceDefinition {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-        cleanup: io::Error,
-    },
-    #[error("could not install service definition {path}: {source}")]
+    #[error("could not install service definition {path}")]
     InstallServiceDefinition {
         path: PathBuf,
         #[source]
-        source: io::Error,
+        failure: RecoveryFailure<io::Error>,
     },
-    #[error(
-        "could not install service definition {path}: {source}; also could not remove temporary file {temporary}: {cleanup}"
-    )]
-    InstallAndCleanupServiceDefinition {
-        path: PathBuf,
-        temporary: PathBuf,
-        #[source]
-        source: io::Error,
-        cleanup: io::Error,
-    },
-    #[error("could not execute {program}: {source}")]
+    #[error("could not execute {program}")]
     ExecuteCommand {
         program: &'static str,
         #[source]
         source: io::Error,
     },
-    #[cfg(any(target_os = "linux", all(test, unix)))]
-    #[error("{manager} returned malformed service status: {detail}")]
-    MalformedServiceStatus {
-        manager: &'static str,
-        detail: &'static str,
-    },
     #[error(transparent)]
     CommandFailed(#[from] CommandFailure),
-    #[cfg(target_os = "macos")]
-    #[error("could not read the current user id from `{output}`")]
-    InvalidUserId { output: String },
     #[error("the daemon service is not installed at {path}; run `rings daemon start` first")]
     ServiceNotInstalled { path: PathBuf },
-    #[error("the daemon did not reach the running state; current state: {state}")]
-    ServiceDidNotStart { state: DaemonState },
+    #[error("the daemon did not reach the running state; current status: {status}")]
+    ServiceDidNotStart { status: DaemonStatus },
+}
+
+/// A primary operation and its compensating recovery form one algebraic result.
+#[derive(Debug)]
+enum RecoveryFailure<E> {
+    Primary(E),
     #[cfg(any(target_os = "macos", all(test, unix)))]
-    #[error("launchd did not unload the daemon service")]
-    ServiceDidNotUnload,
-    #[cfg(any(target_os = "macos", all(test, unix)))]
-    #[error("could not restore disabled login autostart after bootstrapping: {source}")]
-    RestoreAutostart {
-        #[source]
-        source: Box<DaemonError>,
+    Recovery(E),
+    Both {
+        primary: E,
+        recovery: E,
     },
-    #[cfg(any(target_os = "macos", all(test, unix)))]
-    #[error(
-        "could not bootstrap the disabled service: {bootstrap}; also could not restore disabled login autostart: {restore}"
-    )]
-    BootstrapAndRestoreAutostart {
-        bootstrap: Box<DaemonError>,
-        restore: Box<DaemonError>,
-    },
+}
+
+impl<E> fmt::Display for RecoveryFailure<E>
+where E: fmt::Display
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Primary(_) => formatter.write_str("primary operation failed"),
+            #[cfg(any(target_os = "macos", all(test, unix)))]
+            Self::Recovery(_) => formatter.write_str("recovery operation failed"),
+            Self::Both { recovery, .. } => {
+                write!(
+                    formatter,
+                    "primary operation failed; recovery also failed: {recovery}"
+                )
+            }
+        }
+    }
+}
+
+impl<E> std::error::Error for RecoveryFailure<E>
+where E: std::error::Error + 'static
+{
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Primary(primary) => Some(primary),
+            #[cfg(any(target_os = "macos", all(test, unix)))]
+            Self::Recovery(recovery) => Some(recovery),
+            Self::Both { primary, .. } => Some(primary),
+        }
+    }
+}
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn finish_with_recovery<T, E>(
+    primary: Result<T, E>,
+    recovery: Result<(), E>,
+) -> Result<T, RecoveryFailure<E>> {
+    match (primary, recovery) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(primary), Ok(())) => Err(RecoveryFailure::Primary(primary)),
+        (Ok(_), Err(recovery)) => Err(RecoveryFailure::Recovery(recovery)),
+        (Err(primary), Err(recovery)) => Err(RecoveryFailure::Both { primary, recovery }),
+    }
+}
+
+fn primary_with_recovery<E>(primary: E, recovery: Result<(), E>) -> RecoveryFailure<E> {
+    match recovery {
+        Ok(()) => RecoveryFailure::Primary(primary),
+        Err(recovery) => RecoveryFailure::Both { primary, recovery },
+    }
 }
 
 #[derive(Debug)]
@@ -207,6 +229,7 @@ impl std::error::Error for CommandFailure {}
 trait CommandRunner {
     fn run(&self, program: &'static str, args: &[&str]) -> Result<Output, DaemonError>;
 
+    /// Requires success for every invocation whose non-zero exit is not classified by an adapter.
     fn run_checked(&self, program: &'static str, args: &[&str]) -> Result<Output, DaemonError> {
         let output = self.run(program, args)?;
         if output.status.success() {
@@ -242,7 +265,7 @@ enum DaemonFailure {
 
 /// A failure caused or diagnosed by the service manager rather than by a process exit record.
 #[cfg(any(target_os = "linux", all(test, unix)))]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 enum DaemonManagerFailure {
     Timeout,
     Watchdog,
@@ -250,6 +273,7 @@ enum DaemonManagerFailure {
     StartLimit,
     Protocol,
     Resources,
+    Other(String),
 }
 
 impl fmt::Display for DaemonFailure {
@@ -292,20 +316,21 @@ impl fmt::Display for DaemonManagerFailure {
             Self::StartLimit => formatter.write_str("start limit reached"),
             Self::Protocol => formatter.write_str("service protocol failure"),
             Self::Resources => formatter.write_str("service resource failure"),
+            Self::Other(result) => write!(formatter, "service-manager result {result}"),
         }
     }
 }
 
 /// The user-visible lifecycle of the installed daemon.
 ///
-/// `Stopped` means a definition exists but no process is running. `NotInstalled` means the
-/// manager has no installed definition. `Failed(None)` means the manager reports failure without
-/// an attributable cause.
+/// `Stopped` means the manager retains an installed or loaded job but no process is running.
+/// `Restarting` means the manager has scheduled another spawn after the optional last failure.
+/// `Failed(None)` means the manager reports a terminal failure without an attributable cause.
 #[derive(Debug, Eq, PartialEq)]
 enum DaemonState {
-    NotInstalled,
     Running,
     Stopped,
+    Restarting(Option<DaemonFailure>),
     Failed(Option<DaemonFailure>),
     Starting,
     #[cfg(any(target_os = "linux", all(test, unix)))]
@@ -314,28 +339,23 @@ enum DaemonState {
 }
 
 impl DaemonState {
-    #[cfg(any(target_os = "linux", all(test, unix)))]
-    fn is_installed(&self) -> bool {
-        !matches!(self, Self::NotInstalled)
-    }
-
     fn is_running(&self) -> bool {
         matches!(self, Self::Running)
     }
 
     fn is_terminal_start_failure(&self) -> bool {
-        // Stopped can be transient immediately after bootstrap or restart, before the manager has
-        // recorded its first spawn. Only absence or a manager-declared failure ends polling.
-        matches!(self, Self::NotInstalled | Self::Failed(_))
+        // Stopped can precede the first spawn, and Restarting explicitly has another spawn pending.
+        matches!(self, Self::Failed(_))
     }
 }
 
 impl fmt::Display for DaemonState {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotInstalled => formatter.write_str("not installed"),
             Self::Running => formatter.write_str("running"),
             Self::Stopped => formatter.write_str("stopped"),
+            Self::Restarting(Some(failure)) => write!(formatter, "restarting ({failure})"),
+            Self::Restarting(None) => formatter.write_str("restarting"),
             Self::Failed(Some(failure)) => write!(formatter, "failed ({failure})"),
             Self::Failed(None) => formatter.write_str("failed"),
             Self::Starting => formatter.write_str("starting"),
@@ -351,6 +371,8 @@ impl fmt::Display for DaemonState {
 enum AutostartState {
     Enabled,
     Disabled,
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    Unavailable,
     Unknown,
 }
 
@@ -359,16 +381,59 @@ impl fmt::Display for AutostartState {
         match self {
             Self::Enabled => formatter.write_str("enabled"),
             Self::Disabled => formatter.write_str("disabled"),
+            #[cfg(any(target_os = "linux", all(test, unix)))]
+            Self::Unavailable => formatter.write_str("unavailable"),
             Self::Unknown => formatter.write_str("unknown"),
         }
     }
 }
 
-/// One observation containing both lifecycle and login-startup state.
+/// One manager observation; autostart exists only when a definition or loaded job exists.
 #[derive(Debug, Eq, PartialEq)]
-struct DaemonStatus {
-    state: DaemonState,
-    autostart: AutostartState,
+enum DaemonStatus {
+    NotInstalled,
+    Installed {
+        state: DaemonState,
+        autostart: AutostartState,
+    },
+}
+
+impl DaemonStatus {
+    fn installed(state: DaemonState, autostart: AutostartState) -> Self {
+        Self::Installed { state, autostart }
+    }
+
+    fn state(&self) -> Option<&DaemonState> {
+        match self {
+            Self::NotInstalled => None,
+            Self::Installed { state, .. } => Some(state),
+        }
+    }
+
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    fn is_installed(&self) -> bool {
+        matches!(self, Self::Installed { .. })
+    }
+
+    fn is_running(&self) -> bool {
+        self.state().is_some_and(DaemonState::is_running)
+    }
+
+    fn is_terminal_start_failure(&self) -> bool {
+        matches!(self, Self::NotInstalled)
+            || self
+                .state()
+                .is_some_and(DaemonState::is_terminal_start_failure)
+    }
+}
+
+impl fmt::Display for DaemonStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotInstalled => formatter.write_str("not installed"),
+            Self::Installed { state, .. } => state.fmt(formatter),
+        }
+    }
 }
 
 /// The complete foreground command encoded into an OS service definition.
@@ -387,11 +452,20 @@ impl ServiceSpec {
             env::current_exe().map_err(|source| DaemonError::CurrentExecutable { source })?;
         let working_directory =
             env::current_dir().map_err(|source| DaemonError::CurrentDirectory { source })?;
-        let config = resolve_config_path(config)?;
+        Self::from_paths(config, options, &executable, &working_directory)
+    }
+
+    fn from_paths(
+        config: &str,
+        options: WorkerOptions,
+        executable: &Path,
+        working_directory: &Path,
+    ) -> Result<Self, DaemonError> {
+        let config = resolve_config_path(config, working_directory)?;
         Ok(Self {
-            executable: path_text(&executable)?,
+            executable: path_text(executable)?,
             config: path_text(&config)?,
-            working_directory: path_text(&working_directory)?,
+            working_directory: path_text(working_directory)?,
             log_level: cli_value_name(&options.log_level)?,
             runtime: cli_value_name(&options.runtime)?,
         })
@@ -421,7 +495,8 @@ where T: ValueEnum + fmt::Debug {
         })
 }
 
-/// The common lifecycle operations, each returning one complete status observation.
+/// The common lifecycle boundary. Start enables autostart; stop and restart preserve it unless a
+/// manager recovery fails explicitly. Every operation returns one complete manager observation.
 trait ServiceManager {
     fn name(&self) -> &'static str;
     fn definition_path(&self) -> &Path;
@@ -471,36 +546,51 @@ pub(super) fn execute(command: DaemonCommand, options: WorkerOptions) -> anyhow:
 
 fn report_started(manager: &dyn ServiceManager, status: DaemonStatus) -> Result<(), DaemonError> {
     print_status(manager, &status);
-    if status.state.is_running() {
+    if status.is_running() {
         Ok(())
     } else {
-        Err(DaemonError::ServiceDidNotStart {
-            state: status.state,
-        })
+        Err(DaemonError::ServiceDidNotStart { status })
     }
 }
 
+/// Polls through manager bookkeeping only. Exhausting the budget returns the last observation;
+/// `report_started` alone converts a non-running status into `ServiceDidNotStart`.
 fn wait_for_running<F>(mut observe: F) -> Result<DaemonStatus, DaemonError>
 where F: FnMut() -> Result<DaemonStatus, DaemonError> {
-    let mut status = observe()?;
-    for _ in 0..START_OBSERVATION_ATTEMPTS {
-        if status.state.is_running() || status.state.is_terminal_start_failure() {
-            return Ok(status);
+    poll_until(&mut observe, |status| {
+        status.is_running() || status.is_terminal_start_failure()
+    })
+}
+
+fn poll_until<T, E, F, P>(observe: &mut F, settled: P) -> Result<T, E>
+where
+    F: FnMut() -> Result<T, E>,
+    P: Fn(&T) -> bool,
+{
+    let mut value = observe()?;
+    for _ in 0..OBSERVATION_RETRIES {
+        if settled(&value) {
+            return Ok(value);
         }
-        thread::sleep(START_OBSERVATION_INTERVAL);
-        status = observe()?;
+        thread::sleep(OBSERVATION_INTERVAL);
+        value = observe()?;
     }
-    Ok(status)
+    Ok(value)
 }
 
 fn print_status(manager: &dyn ServiceManager, status: &DaemonStatus) {
-    println!("rings daemon: {}", status.state);
+    println!("rings daemon: {status}");
     println!("manager: {}", manager.name());
-    println!("login autostart: {}", status.autostart);
+    match status {
+        DaemonStatus::NotInstalled => println!("login autostart: not applicable"),
+        DaemonStatus::Installed { autostart, .. } => {
+            println!("login autostart: {autostart}");
+        }
+    }
     println!("definition: {}", manager.definition_path().display());
 }
 
-fn resolve_config_path(config: &str) -> Result<PathBuf, DaemonError> {
+fn resolve_config_path(config: &str, working_directory: &Path) -> Result<PathBuf, DaemonError> {
     let supplied = PathBuf::from(config);
     let expanded =
         rings_node::util::expand_home(&supplied).map_err(|source| DaemonError::ExpandConfig {
@@ -510,9 +600,7 @@ fn resolve_config_path(config: &str) -> Result<PathBuf, DaemonError> {
     let absolute = if expanded.is_absolute() {
         expanded
     } else {
-        env::current_dir()
-            .map_err(|source| DaemonError::CurrentDirectory { source })?
-            .join(expanded)
+        working_directory.join(expanded)
     };
     if !absolute.is_file() {
         return Err(DaemonError::ConfigNotFound { path: absolute });
@@ -554,36 +642,24 @@ where F: FnOnce(&Path, &str) -> io::Result<()> {
         .ok_or_else(|| DaemonError::NonUtf8Path {
             path: path.to_path_buf(),
         })?;
-    // LaunchAgents is scanned by launchd. The dot keeps a partial file hidden from that scan, and
-    // the process id prevents concurrent CLI invocations from sharing a temporary path.
+    // The hidden `.tmp` path is not a launchd plist or systemd unit; the process id prevents two
+    // CLI processes from sharing it. Rename is atomic to observers, not durable across power loss;
+    // rerunning `daemon start` recovers an incomplete on-disk definition.
     let temporary = path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
     ensure_parent_directory(path)?;
     if let Err(source) = write(&temporary, contents) {
-        return match remove_temporary(&temporary) {
-            Ok(()) => Err(DaemonError::WriteServiceDefinition {
-                path: temporary,
-                source,
-            }),
-            Err(cleanup) => Err(DaemonError::WriteAndCleanupServiceDefinition {
-                path: temporary,
-                source,
-                cleanup,
-            }),
-        };
+        let failure = primary_with_recovery(source, remove_temporary(&temporary));
+        return Err(DaemonError::WriteServiceDefinition {
+            path: temporary,
+            failure,
+        });
     }
     if let Err(source) = fs::rename(&temporary, path) {
-        return match remove_temporary(&temporary) {
-            Ok(()) => Err(DaemonError::InstallServiceDefinition {
-                path: path.to_path_buf(),
-                source,
-            }),
-            Err(cleanup) => Err(DaemonError::InstallAndCleanupServiceDefinition {
-                path: path.to_path_buf(),
-                temporary,
-                source,
-                cleanup,
-            }),
-        };
+        let failure = primary_with_recovery(source, remove_temporary(&temporary));
+        return Err(DaemonError::InstallServiceDefinition {
+            path: path.to_path_buf(),
+            failure,
+        });
     }
     Ok(())
 }
@@ -596,9 +672,9 @@ fn remove_temporary(path: &Path) -> io::Result<()> {
     }
 }
 
-fn command_output_value<'a>(output: &'a str, field: &str, separator: &str) -> Option<&'a str> {
+fn command_output_value<'a>(output: &'a str, field: &str) -> Option<&'a str> {
     output.lines().find_map(|line| {
-        let (name, value) = line.trim().split_once(separator)?;
+        let (name, value) = line.trim().split_once('=')?;
         (name.trim() == field).then(|| value.trim())
     })
 }
@@ -630,6 +706,8 @@ fn format_command(program: &str, args: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
+    mod model;
+
     use std::ops::Deref;
 
     use clap::Parser;
@@ -718,10 +796,16 @@ mod tests {
                     steps: RefCell::new(steps.into_iter().collect()),
                 }
             }
+        }
 
-            pub(crate) fn assert_exhausted(&self) {
+        impl Drop for ScriptedCommandRunner {
+            fn drop(&mut self) {
+                if std::thread::panicking() {
+                    return;
+                }
+
                 assert!(
-                    self.steps.borrow().is_empty(),
+                    self.steps.get_mut().is_empty(),
                     "scripted command runner has unconsumed steps"
                 );
             }
@@ -840,7 +924,7 @@ mod tests {
         let root = TestRoot::new("shared", "missing-config");
         let missing = root.join("config.yaml");
 
-        let error = resolve_config_path(missing.to_string_lossy().as_ref());
+        let error = resolve_config_path(missing.to_string_lossy().as_ref(), &root);
 
         assert!(matches!(
             &error,
@@ -859,9 +943,35 @@ mod tests {
         let config = root.join("config.yaml");
         fs::write(&config, "config")?;
 
-        let resolved = resolve_config_path(config.to_string_lossy().as_ref());
+        let resolved = resolve_config_path(config.to_string_lossy().as_ref(), &root);
 
         assert_eq!(resolved.ok(), config.canonicalize().ok());
         Ok(())
+    }
+
+    #[test]
+    fn config_path_resolves_relative_to_the_captured_working_directory() -> io::Result<()> {
+        let root = TestRoot::new("shared", "relative-config");
+        fs::create_dir_all(&*root)?;
+        let config = root.join("relative.yaml");
+        fs::write(&config, "config")?;
+
+        let resolved = resolve_config_path("relative.yaml", &root);
+
+        assert_eq!(resolved.ok(), config.canonicalize().ok());
+        Ok(())
+    }
+
+    #[test]
+    fn config_path_expands_home_before_using_the_working_directory() {
+        let root = TestRoot::new("shared", "home-config");
+        let missing = "~/.rings/codex-daemon-review-missing.yaml";
+
+        let error = resolve_config_path(missing, &root);
+
+        assert!(matches!(
+            error,
+            Err(DaemonError::ConfigNotFound { path }) if path.is_absolute() && !path.starts_with(&*root)
+        ));
     }
 }
