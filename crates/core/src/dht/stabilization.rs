@@ -445,51 +445,62 @@ impl Stabilizer {
         }
 
         if matches!(state, WebrtcConnectionState::Disconnected) {
-            let disconnected_for_ms = if let Some(disconnected_since_ms) = self
-                .transport
-                .peer_disconnected_since_attempt_ms(admitted.attempt)
+            if let Some(reason) = self
+                .disconnected_peer_removal_reason(did, admitted, now_ms)
+                .await?
             {
-                now_ms.saturating_sub(disconnected_since_ms)
-            } else {
-                self.transport
-                    .record_peer_disconnected(admitted.attempt)
-                    .await;
-                tracing::warn!(
-                    target: "rings_core::dht::stabilization",
-                    local = %self.dht.did,
-                    peer = %did,
-                    state = ?state,
-                    "STABILIZATION clean_unavailable observed disconnected peer without prior callback"
-                );
-                0
-            };
-            if self.transport.live_successor_fallback(did)?.is_some() {
-                return Ok(removal(
-                    TopologyPeerRemovalReason::DisconnectedSuccessorFailover {
-                        disconnected_for_ms,
-                    },
-                ));
-            }
-            if self.disconnected_topology_prune_candidate(did)? {
-                return Ok(removal(
-                    TopologyPeerRemovalReason::DisconnectedTopologyPrune {
-                        disconnected_for_ms,
-                    },
-                ));
-            }
-            if disconnected_for_ms >= DISCONNECTED_CONNECTION_GRACE_MS {
-                return Ok(removal(
-                    TopologyPeerRemovalReason::DisconnectedGraceElapsed {
-                        disconnected_for_ms,
-                        grace_ms: DISCONNECTED_CONNECTION_GRACE_MS,
-                    },
-                ));
+                return Ok(removal(reason));
             }
         } else {
             self.transport.clear_peer_disconnected(admitted.attempt);
         }
 
         Ok(None)
+    }
+
+    async fn disconnected_peer_removal_reason(
+        &self,
+        did: Did,
+        admitted: AdmittedPeerState,
+        now_ms: i64,
+    ) -> Result<Option<TopologyPeerRemovalReason>> {
+        let disconnected_for_ms = if let Some(disconnected_since_ms) = self
+            .transport
+            .peer_disconnected_since_attempt_ms(admitted.attempt)
+        {
+            now_ms.saturating_sub(disconnected_since_ms)
+        } else {
+            self.transport
+                .record_peer_disconnected(admitted.attempt)
+                .await;
+            tracing::warn!(
+                target: "rings_core::dht::stabilization",
+                local = %self.dht.did,
+                peer = %did,
+                "STABILIZATION clean_unavailable observed disconnected peer without prior callback"
+            );
+            0
+        };
+        if self.transport.live_successor_fallback(did)?.is_some() {
+            return Ok(Some(
+                TopologyPeerRemovalReason::DisconnectedSuccessorFailover {
+                    disconnected_for_ms,
+                },
+            ));
+        }
+        if self.disconnected_topology_prune_candidate(did)? {
+            return Ok(Some(TopologyPeerRemovalReason::DisconnectedTopologyPrune {
+                disconnected_for_ms,
+            }));
+        }
+        Ok(
+            (disconnected_for_ms >= DISCONNECTED_CONNECTION_GRACE_MS).then_some(
+                TopologyPeerRemovalReason::DisconnectedGraceElapsed {
+                    disconnected_for_ms,
+                    grace_ms: DISCONNECTED_CONNECTION_GRACE_MS,
+                },
+            ),
+        )
     }
 
     fn disconnected_topology_prune_candidate(&self, peer: Did) -> Result<bool> {

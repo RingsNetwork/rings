@@ -21,6 +21,7 @@ use crate::message::MessageMeta;
 use crate::message::MessagePayload;
 use crate::utils::acquire_fair_with_handoff;
 use crate::utils::CoordinatedFairWaitQueue;
+use crate::utils::FairCapacityDemand;
 use crate::utils::FairHandoff;
 use crate::utils::ReservedCapacity;
 
@@ -33,8 +34,9 @@ use self::lane::INBOUND_LANE_COUNT;
 use self::ticket::InboundCommand;
 use self::ticket::InboundSender;
 use self::ticket::InboundTicket;
+use self::waiters::wake_waiter;
+use self::waiters::AfterProgress;
 use self::waiters::InboundWaitQueues;
-use self::waiters::WakeTarget;
 
 const INBOUND_MAILBOX_CAPACITY: usize = 256;
 const INBOUND_MAILBOX_BYTE_CAPACITY: usize = 256 * 1024 * 1024;
@@ -68,7 +70,6 @@ impl InboundCapacityState {
             bytes: ReservedCapacity::new(),
         }
     }
-
     fn reservation_covers(&self, lane: InboundLane, bytes: usize) -> bool {
         self.messages
             .reservation_covers(lane.index(), 1, &INBOUND_RESERVED_TRANSFERS)
@@ -77,6 +78,19 @@ impl InboundCapacityState {
                 .reservation_covers(lane.index(), bytes, &INBOUND_RESERVED_BYTES)
     }
 
+    fn can_reserve_demand(&self, demand: FairCapacityDemand) -> bool {
+        self.messages.can_reserve(
+            demand.class_index(),
+            1,
+            INBOUND_MAILBOX_CAPACITY,
+            &INBOUND_RESERVED_TRANSFERS,
+        ) && self.bytes.can_reserve(
+            demand.class_index(),
+            demand.cost(),
+            INBOUND_MAILBOX_BYTE_CAPACITY,
+            &INBOUND_RESERVED_BYTES,
+        )
+    }
     fn try_reserve(
         &mut self,
         lane: InboundLane,
@@ -101,7 +115,6 @@ impl InboundCapacityState {
         }
         Ok(())
     }
-
     fn release(&mut self, lane: InboundLane, bytes: usize) {
         self.messages.release(lane.index(), 1);
         self.bytes.release(lane.index(), bytes);
@@ -187,31 +200,32 @@ impl InboundCapacity {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .request_wake_round();
-        self.wake_waiter(target);
+        wake_waiter(&self.peer_waiters, target);
     }
 
     fn handle_waiter_handoff(&self, peer: Option<Did>, handoff: FairHandoff) {
-        let target = self
+        let mut waiters = self
             .peer_waiters
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .handle_handoff(peer, handoff);
-        self.wake_waiter(target);
-    }
-
-    fn wake_waiter(&self, mut target: Option<WakeTarget>) {
-        while let Some(next) = target {
-            if next.queue.wake_front_with_handoff(next.round.clone()) {
-                return;
-            }
-            target = self
-                .peer_waiters
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Hold the coordinator through snapshot and close; release FIFO locks before capacity.
+        let can_scan = if matches!(&handoff, FairHandoff::Progress(_)) {
+            let front_demands = waiters.front_demands();
+            let state = self
+                .state
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .handle_handoff(next.peer, FairHandoff::Continue(next.round));
-        }
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            front_demands
+                .into_iter()
+                .any(|demand| state.can_reserve_demand(demand))
+        } else {
+            false
+        };
+        let after_progress = AfterProgress::from_capacity(can_scan);
+        let target = waiters.handle_handoff(peer, handoff, after_progress);
+        drop(waiters);
+        wake_waiter(&self.peer_waiters, target);
     }
-
     fn try_admit_unqueued(
         self: &Arc<Self>,
         peer: Option<Did>,
@@ -315,7 +329,7 @@ impl InboundCapacity {
         let waiters = self.waiters_for_peer(peer);
         acquire_fair_with_handoff(
             &waiters,
-            bytes,
+            FairCapacityDemand::new(lane.index(), bytes),
             memory_capacity_error(bytes),
             || Error::InboundMailboxClosed,
             || self.try_acquire(peer, lane, bytes),

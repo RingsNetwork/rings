@@ -415,6 +415,10 @@ async fn closing_inbound_mailbox_cancels_pending_callback() -> Result<()> {
     Ok(())
 }
 
+fn local_wire(message: Message, session: &SessionSk, local: Did) -> Result<bytes::Bytes> {
+    MessagePayload::new_send(message, session, local, local)?.to_wire()
+}
+
 #[tokio::test]
 async fn reassembly_handoff_preserves_data_order_without_blocking_control() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
@@ -428,43 +432,36 @@ async fn reassembly_handoff_preserves_data_order_without_blocking_control() -> R
         Arc::clone(&transport),
         app_callback.clone(),
     ));
-    let first_wire = MessagePayload::new_send(
+    let first_wire = local_wire(
         Message::custom(b"reassembled-first")?,
         &peer_session,
         transport.dht.did,
-        transport.dht.did,
-    )?
-    .to_wire()?;
+    )?;
     let chunks: Vec<Chunk> = ChunkList::split(&first_wire, 32).into();
     assert!(chunks.len() > 1);
     let cid = peer.to_string();
 
     for chunk in &chunks[..chunks.len() - 1] {
-        let frame = MessagePayload::new_send(
+        let frame = local_wire(
             Message::Chunk(chunk.clone()),
             &peer_session,
             transport.dht.did,
-            transport.dht.did,
-        )?
-        .to_wire()?;
+        )?;
         callback
             .on_message(&cid, &frame)
             .await
             .map_err(|error| Error::InvalidMessage(error.to_string()))?;
     }
 
-    let final_frame = MessagePayload::new_send(
-        Message::Chunk(
-            chunks
-                .last()
-                .cloned()
-                .ok_or(Error::InboundActorInvariantViolation)?,
-        ),
+    let final_chunk = chunks
+        .last()
+        .cloned()
+        .ok_or(Error::InboundActorInvariantViolation)?;
+    let final_frame = local_wire(
+        Message::Chunk(final_chunk),
         &peer_session,
         transport.dht.did,
-        transport.dht.did,
-    )?
-    .to_wire()?;
+    )?;
     let final_callback = Arc::clone(&callback);
     let final_cid = cid.clone();
     let final_delivery = tokio::spawn(async move {
@@ -475,13 +472,11 @@ async fn reassembly_handoff_preserves_data_order_without_blocking_control() -> R
     });
     app_callback.wait_for_final_chunk().await;
 
-    let later = MessagePayload::new_send(
+    let later = local_wire(
         Message::custom(b"later-application")?,
         &peer_session,
         transport.dht.did,
-        transport.dht.did,
-    )?
-    .to_wire()?;
+    )?;
     let later_callback = Arc::clone(&callback);
     let later_cid = cid.clone();
     let later_delivery = tokio::spawn(async move {
@@ -491,13 +486,11 @@ async fn reassembly_handoff_preserves_data_order_without_blocking_control() -> R
             .map_err(|error| Error::InvalidMessage(error.to_string()))
     });
 
-    let control = MessagePayload::new_send(
+    let control = local_wire(
         Message::PeerLivenessReport(crate::message::PeerLivenessReport { sent_at_ms: 1 }),
         &peer_session,
         transport.dht.did,
-        transport.dht.did,
-    )?
-    .to_wire()?;
+    )?;
     let control_callback = Arc::clone(&callback);
     let control_delivery = tokio::spawn(async move {
         control_callback

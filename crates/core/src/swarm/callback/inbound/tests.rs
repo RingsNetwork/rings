@@ -6,6 +6,8 @@ use std::task::Poll;
 use super::*;
 use crate::message::MessageClass;
 use crate::utils::acquire_fair_with_handoff;
+use crate::utils::FairWakeArm;
+use crate::utils::FairWakeRound;
 
 const DHT_CONTROL_LANE: InboundLane = InboundLane::from_class(MessageClass::DhtControl);
 const STORAGE_LANE: InboundLane = InboundLane::from_class(MessageClass::Storage);
@@ -34,7 +36,7 @@ fn register_waiter_with_admission<'a>(
 ) -> Pin<Box<dyn Future<Output = Result<()>> + 'a>> {
     let mut waiter = Box::pin(acquire_fair_with_handoff(
         queue,
-        1,
+        FairCapacityDemand::new(APPLICATION_LANE.index(), 1),
         Error::InboundMailboxClosed,
         || Error::InboundMailboxClosed,
         move || {
@@ -90,11 +92,7 @@ fn inbound_lane_mapping_is_total_and_reserves_one_extra_lane() {
 
 #[test]
 fn inbound_waiter_wakeup_is_round_robin_and_bounded() {
-    let peers = [
-        Some(Did::from(1_u32)),
-        Some(Did::from(2_u32)),
-        Some(Did::from(3_u32)),
-    ];
+    let peers = [None, Some(Did::from(1_u32)), Some(Did::from(2_u32))];
     let mut waiters = InboundWaitQueues::default();
     let _queues = peers.map(|peer| waiters.queue_for_peer(peer));
 
@@ -108,8 +106,11 @@ fn inbound_waiter_wakeup_is_round_robin_and_bounded() {
             .position(|candidate| *candidate == target.peer)
             .expect("selected queue must be registered");
         selected.push(index);
-        let Some(next) = waiters.handle_handoff(target.peer, FairHandoff::Continue(target.round))
-        else {
+        let Some(next) = waiters.handle_handoff(
+            target.peer,
+            FairHandoff::Continue(target.round),
+            AfterProgress::Stop,
+        ) else {
             break;
         };
         target = next;
@@ -129,17 +130,29 @@ fn concurrent_release_repeats_one_serialized_round_after_exhaustion() {
     let first_round = first.round.clone();
     assert!(waiters.request_wake_round().is_none());
     let second = waiters
-        .handle_handoff(first.peer, FairHandoff::Continue(first.round.clone()))
+        .handle_handoff(
+            first.peer,
+            FairHandoff::Continue(first.round),
+            AfterProgress::Stop,
+        )
         .expect("the active round must continue to its second peer");
     assert_eq!(second.peer, peers[1]);
-    assert!(second.round.same(&first_round));
+    assert_eq!(second.round, first_round);
     let repeated = waiters
-        .handle_handoff(second.peer, FairHandoff::Continue(second.round))
+        .handle_handoff(
+            second.peer,
+            FairHandoff::Continue(second.round),
+            AfterProgress::Stop,
+        )
         .expect("the concurrent release must request one fresh scan");
     assert_eq!(repeated.peer, peers[0]);
-    assert!(!repeated.round.same(&first_round));
+    assert_ne!(repeated.round, first_round);
     assert!(waiters
-        .handle_handoff(first.peer, FairHandoff::Continue(first_round))
+        .handle_handoff(
+            first.peer,
+            FairHandoff::Continue(first_round),
+            AfterProgress::Stop,
+        )
         .is_none());
 }
 
@@ -163,7 +176,10 @@ fn cancellation_after_handoff_arm_continues_the_same_wake_round() {
         .request_wake_round()
         .expect("the first peer must be selected before it cancels");
     let selected_round = selected.round.clone();
-    assert!(selected.queue.wake_front_with_handoff(selected.round));
+    assert_eq!(
+        selected.queue.wake_front_with_handoff(selected.round),
+        FairWakeArm::Armed
+    );
     assert_eq!(
         first_counter.0.load(std::sync::atomic::Ordering::Acquire),
         1
@@ -172,11 +188,14 @@ fn cancellation_after_handoff_arm_continues_the_same_wake_round() {
     drop(first_waiter);
     let handoff = take_handoff(&handoffs);
     let next = waiters
-        .handle_handoff(first_peer, handoff)
+        .handle_handoff(first_peer, handoff, AfterProgress::Stop)
         .expect("cancellation must continue to the second peer");
     assert_eq!(next.peer, second_peer);
-    assert!(next.round.same(&selected_round));
-    assert!(next.queue.wake_front_with_handoff(next.round));
+    assert_eq!(next.round, selected_round);
+    assert_eq!(
+        next.queue.wake_front_with_handoff(next.round),
+        FairWakeArm::Armed
+    );
 
     assert_eq!(
         second_counter.0.load(std::sync::atomic::Ordering::Acquire),
@@ -197,10 +216,13 @@ fn cancellation_before_handoff_arm_wakes_the_same_peer_successor() {
 
     drop(first_waiter);
     let target = waiters
-        .handle_handoff(peer, take_handoff(&first_handoffs))
+        .handle_handoff(peer, take_handoff(&first_handoffs), AfterProgress::Stop)
         .expect("head cancellation must request a coordinated rescan");
     assert_eq!(target.peer, peer);
-    assert!(target.queue.wake_front_with_handoff(target.round));
+    assert_eq!(
+        target.queue.wake_front_with_handoff(target.round),
+        FairWakeArm::Armed
+    );
     assert_eq!(
         first_counter.0.load(std::sync::atomic::Ordering::Acquire),
         0
@@ -223,18 +245,23 @@ fn blocked_poll_resolves_the_handoff_round_exactly_once() {
         .request_wake_round()
         .expect("the blocked waiter must start a round");
     let round = target.round.clone();
-    assert!(target.queue.wake_front_with_handoff(target.round));
+    assert_eq!(
+        target.queue.wake_front_with_handoff(target.round),
+        FairWakeArm::Armed
+    );
 
     let waker = futures::task::waker_ref(&counter);
     let mut context = Context::from_waker(&waker);
     assert!(waiter.as_mut().poll(&mut context).is_pending());
     let handoff = take_handoff(&handoffs);
-    assert!(matches!(&handoff, FairHandoff::Continue(event) if event.same(&round)));
+    assert!(matches!(&handoff, FairHandoff::Continue(event) if event == &round));
     assert!(handoffs
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .is_empty());
-    assert!(waiters.handle_handoff(peer, handoff).is_none());
+    assert!(waiters
+        .handle_handoff(peer, handoff, AfterProgress::Stop)
+        .is_none());
 }
 
 #[test]
@@ -251,7 +278,10 @@ fn successful_poll_resolves_the_handoff_round_exactly_once() {
         .request_wake_round()
         .expect("the blocked waiter must start a round");
     let round = target.round.clone();
-    assert!(target.queue.wake_front_with_handoff(target.round));
+    assert_eq!(
+        target.queue.wake_front_with_handoff(target.round),
+        FairWakeArm::Armed
+    );
     admission.store(true, std::sync::atomic::Ordering::Release);
 
     let waker = futures::task::waker_ref(&counter);
@@ -261,7 +291,7 @@ fn successful_poll_resolves_the_handoff_round_exactly_once() {
         Poll::Ready(Ok(()))
     ));
     let handoff = take_handoff(&handoffs);
-    assert!(matches!(&handoff, FairHandoff::Progress(event) if event.same(&round)));
+    assert!(matches!(&handoff, FairHandoff::Progress(event) if event == &round));
     assert!(handoffs
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -281,10 +311,100 @@ fn successful_peer_restarts_wakeup_through_the_coordinator() {
         .expect("the first peer must start the wake round");
     let first_round = first.round.clone();
     let selected = waiters
-        .handle_handoff(first.peer, FairHandoff::Progress(first.round))
+        .handle_handoff(
+            first.peer,
+            FairHandoff::Progress(first.round),
+            AfterProgress::Scan,
+        )
         .expect("progress must restart at the next peer");
     assert_eq!(selected.peer, second_peer);
-    assert!(!selected.round.same(&first_round));
+    assert_ne!(selected.round, first_round);
+}
+
+#[test]
+fn progress_with_consumed_capacity_closes_the_round_without_a_rescan() {
+    let peers = [Some(Did::from(1_u32)), Some(Did::from(2_u32))];
+    let mut waiters = InboundWaitQueues::default();
+    let _queues = peers.map(|peer| waiters.queue_for_peer(peer));
+    let first = waiters
+        .request_wake_round()
+        .expect("the first peer must start the wake round");
+    let first_round = first.round.clone();
+    assert!(waiters.request_wake_round().is_none());
+
+    assert!(waiters
+        .handle_handoff(
+            first.peer,
+            FairHandoff::Progress(first.round),
+            AfterProgress::Stop,
+        )
+        .is_none());
+
+    let next_release = waiters
+        .request_wake_round()
+        .expect("progress must close the round so the next release can start one");
+    assert_eq!(next_release.peer, peers[1]);
+    assert_ne!(next_release.round, first_round);
+}
+
+#[test]
+fn already_armed_head_advances_the_new_round_without_parking_it() {
+    let first_peer = Some(Did::from(1_u32));
+    let second_peer = Some(Did::from(2_u32));
+    let mut waiters = InboundWaitQueues::default();
+    let first_queue = waiters.queue_for_peer(first_peer);
+    let second_queue = waiters.queue_for_peer(second_peer);
+    let first_counter = Arc::new(WakeCounter::default());
+    let second_counter = Arc::new(WakeCounter::default());
+    let first_handoffs = Arc::new(Mutex::new(Vec::new()));
+    let second_handoffs = Arc::new(Mutex::new(Vec::new()));
+    let first_waiter = register_waiter(&first_queue, &first_counter, first_handoffs.clone());
+    let mut second_waiter =
+        register_waiter(&second_queue, &second_counter, second_handoffs.clone());
+    let stale_round = FairWakeRound::new(u64::MAX);
+    assert_eq!(
+        first_queue.wake_front_with_handoff(stale_round),
+        FairWakeArm::Armed
+    );
+
+    let first_target = waiters
+        .request_wake_round()
+        .expect("the new round must select the already-armed peer first");
+    assert_eq!(first_target.peer, first_peer);
+    let current_round = first_target.round.clone();
+    let waiters = Mutex::new(waiters);
+    wake_waiter(&waiters, Some(first_target));
+    assert_eq!(
+        second_counter.0.load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+
+    drop(first_waiter);
+    assert!(waiters
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .handle_handoff(
+            first_peer,
+            take_handoff(&first_handoffs),
+            AfterProgress::Stop,
+        )
+        .is_none());
+    let waker = futures::task::waker_ref(&second_counter);
+    let mut context = Context::from_waker(&waker);
+    assert!(second_waiter.as_mut().poll(&mut context).is_pending());
+    let handoff = take_handoff(&second_handoffs);
+    assert!(matches!(&handoff, FairHandoff::Continue(round) if round == &current_round));
+    assert!(waiters
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .handle_handoff(second_peer, handoff, AfterProgress::Stop,)
+        .is_none());
+
+    assert!(waiters
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .request_wake_round()
+        .is_some());
 }
 
 #[test]
@@ -304,7 +424,11 @@ fn active_round_skips_a_queue_that_expires_mid_scan() {
     drop(expired);
 
     let next = waiters
-        .handle_handoff(selected.peer, FairHandoff::Continue(selected.round))
+        .handle_handoff(
+            selected.peer,
+            FairHandoff::Continue(selected.round),
+            AfterProgress::Stop,
+        )
         .expect("expiry must not hide the remaining live peer");
     assert_eq!(next.peer, peers[2]);
     assert!(Arc::ptr_eq(&next.queue, &third));
@@ -579,6 +703,89 @@ async fn same_lane_ticket_preserves_capacity_admission_order_under_saturation() 
     assert!(matches!(
         futures::poll!(second_turn.as_mut()),
         Poll::Ready(())
+    ));
+}
+
+#[cfg_attr(
+    all(feature = "wasm", target_family = "wasm"),
+    wasm_bindgen_test::wasm_bindgen_test
+)]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), tokio::test)]
+async fn one_large_release_can_admit_multiple_smaller_waiters() {
+    let capacity = Arc::new(InboundCapacity::new());
+    let mut blockers = reserve_application_bytes(&capacity, 240 * 1024 * 1024).into_iter();
+    let released = blockers
+        .next()
+        .expect("the saturated mailbox must retain one large permit");
+    let _remaining_blockers = blockers.collect::<Vec<_>>();
+    let mut first =
+        Box::pin(capacity.acquire(Some(Did::from(3_u32)), STORAGE_LANE, 16 * 1024 * 1024));
+    let mut second =
+        Box::pin(capacity.acquire(Some(Did::from(4_u32)), STORAGE_LANE, 16 * 1024 * 1024));
+    assert!(matches!(futures::poll!(first.as_mut()), Poll::Pending));
+    assert!(matches!(futures::poll!(second.as_mut()), Poll::Pending));
+
+    drop(released);
+
+    let Poll::Ready(Ok(first_permit)) = futures::poll!(first.as_mut()) else {
+        panic!("the first small waiter must consume part of the large release");
+    };
+    let Poll::Ready(Ok(second_permit)) = futures::poll!(second.as_mut()) else {
+        panic!("the remaining released bytes must admit the second waiter");
+    };
+    drop(second_permit);
+    drop(first_permit);
+}
+
+#[cfg_attr(
+    all(feature = "wasm", target_family = "wasm"),
+    wasm_bindgen_test::wasm_bindgen_test
+)]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), tokio::test)]
+async fn exact_byte_replacement_does_not_start_a_failed_peer_scan() {
+    let capacity = Arc::new(InboundCapacity::new());
+    let _storage_blockers = [
+        (Some(Did::from(1_u32)), 128 * 1024 * 1024),
+        (Some(Did::from(2_u32)), 122 * 1024 * 1024),
+    ]
+    .map(|(peer, bytes)| {
+        capacity
+            .try_acquire(peer, STORAGE_LANE, bytes)
+            .expect("the storage blocker must fit")
+    });
+    let released = capacity
+        .try_acquire(Some(Did::from(3_u32)), STORAGE_LANE, 2 * 1024 * 1024)
+        .expect("the releasable storage blocker must fit");
+    let mut first =
+        Box::pin(capacity.acquire(Some(Did::from(4_u32)), STORAGE_LANE, 2 * 1024 * 1024));
+    let mut second =
+        Box::pin(capacity.acquire(Some(Did::from(5_u32)), STORAGE_LANE, 2 * 1024 * 1024));
+    let first_counter = Arc::new(WakeCounter::default());
+    let second_counter = Arc::new(WakeCounter::default());
+    let first_waker = futures::task::waker_ref(&first_counter);
+    let second_waker = futures::task::waker_ref(&second_counter);
+    let mut first_context = Context::from_waker(&first_waker);
+    let mut second_context = Context::from_waker(&second_waker);
+    assert!(first.as_mut().poll(&mut first_context).is_pending());
+    assert!(second.as_mut().poll(&mut second_context).is_pending());
+
+    drop(released);
+    let Poll::Ready(Ok(first_permit)) = first.as_mut().poll(&mut first_context) else {
+        panic!("the first waiter must replace the released byte capacity");
+    };
+
+    assert_eq!(
+        second_counter.0.load(std::sync::atomic::Ordering::Acquire),
+        0
+    );
+    drop(first_permit);
+    assert_eq!(
+        second_counter.0.load(std::sync::atomic::Ordering::Acquire),
+        1
+    );
+    assert!(matches!(
+        second.as_mut().poll(&mut second_context),
+        Poll::Ready(Ok(_))
     ));
 }
 

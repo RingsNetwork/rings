@@ -398,22 +398,10 @@ pub async fn wait_for_msgs(nodes: impl IntoIterator<Item = &Node>) {
                 drained = true;
                 println!(
                     "Msg {} -> {} [{} => {}] : {:?}",
-                    did_names
-                        .get(&payload.signer())
-                        .map(|n| n.clone())
-                        .unwrap_or_default(),
-                    did_names
-                        .get(&node.did())
-                        .map(|n| n.clone())
-                        .unwrap_or_default(),
-                    did_names
-                        .get(&payload.transaction.signer())
-                        .map(|n| n.clone())
-                        .unwrap_or_default(),
-                    did_names
-                        .get(&payload.transaction.destination)
-                        .map(|n| n.clone())
-                        .unwrap_or_default(),
+                    did_name_or_default(&did_names, payload.signer()),
+                    did_name_or_default(&did_names, node.did()),
+                    did_name_or_default(&did_names, payload.transaction.signer()),
+                    did_name_or_default(&did_names, payload.transaction.destination),
                     payload.transaction.data::<Message>().unwrap()
                 );
             }
@@ -462,57 +450,57 @@ pub async fn wait_for_msgs(nodes: impl IntoIterator<Item = &Node>) {
         }
 
         if started.elapsed() > ceiling {
-            let handshaking_nodes: Vec<String> = nodes
-                .iter()
-                .filter(|n| n.has_handshaking_connection())
-                .map(|n| {
-                    did_names
-                        .get(&n.did())
-                        .map(|s| s.clone())
-                        .unwrap_or_default()
-                })
-                .collect();
-            let outbound_nodes: Vec<(String, usize)> = nodes
-                .iter()
-                .filter_map(|n| {
-                    let admitted = n
-                        .swarm
-                        .transport
-                        .outbound_admitted_transfer_total_for_test();
-                    (admitted > 0).then(|| {
-                        (
-                            did_names
-                                .get(&n.did())
-                                .map(|s| s.clone())
-                                .unwrap_or_default(),
-                            admitted,
-                        )
-                    })
-                })
-                .collect();
-            let inbound_nodes: Vec<(String, usize)> = nodes
-                .iter()
-                .filter_map(|n| {
-                    let admitted = n.swarm.transport.inbound_admitted_count_for_test();
-                    (admitted > 0).then(|| {
-                        (
-                            did_names
-                                .get(&n.did())
-                                .map(|s| s.clone())
-                                .unwrap_or_default(),
-                            admitted,
-                        )
-                    })
-                })
-                .collect();
-            panic!(
-                "wait_for_msgs did not reach quiescence within {ceiling:?}: still-handshaking \
-                 nodes={handshaking_nodes:?}, inbound={inbound_nodes:?}, \
-                 outbound={outbound_nodes:?}, transport-pending={}, last-loop drained={drained}",
-                pending_transport_snapshot().pending
-            );
+            panic_wait_for_msgs_timeout(&nodes, &did_names, ceiling, drained);
         }
     }
+}
+
+fn did_name_or_default(did_names: &DashMap<Did, String>, did: Did) -> String {
+    did_names
+        .get(&did)
+        .map(|name| name.clone())
+        .unwrap_or_default()
+}
+
+fn active_node_counts(
+    nodes: &[&Node],
+    did_names: &DashMap<Did, String>,
+    count: impl Fn(&Node) -> usize,
+) -> Vec<(String, usize)> {
+    nodes
+        .iter()
+        .filter_map(|node| {
+            let admitted = count(node);
+            (admitted > 0).then(|| (did_name_or_default(did_names, node.did()), admitted))
+        })
+        .collect()
+}
+
+fn panic_wait_for_msgs_timeout(
+    nodes: &[&Node],
+    did_names: &DashMap<Did, String>,
+    ceiling: Duration,
+    drained: bool,
+) -> ! {
+    let handshaking_nodes: Vec<String> = nodes
+        .iter()
+        .filter(|node| node.has_handshaking_connection())
+        .map(|node| did_name_or_default(did_names, node.did()))
+        .collect();
+    let outbound_nodes = active_node_counts(nodes, did_names, |node| {
+        node.swarm
+            .transport
+            .outbound_admitted_transfer_total_for_test()
+    });
+    let inbound_nodes = active_node_counts(nodes, did_names, |node| {
+        node.swarm.transport.inbound_admitted_count_for_test()
+    });
+    panic!(
+        "wait_for_msgs did not reach quiescence within {ceiling:?}: still-handshaking \
+         nodes={handshaking_nodes:?}, inbound={inbound_nodes:?}, outbound={outbound_nodes:?}, \
+         transport-pending={}, last-loop drained={drained}",
+        pending_transport_snapshot().pending
+    );
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

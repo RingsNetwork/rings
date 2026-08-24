@@ -3,7 +3,6 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -68,76 +67,7 @@ mod pending;
 mod readiness;
 mod storage_lookup;
 mod storage_sync;
-
-struct TransportTimeoutProfile {
-    send_accept: Duration,
-    delivery: Duration,
-    tracked_payload: Duration,
-    close: Duration,
-}
-
-const DUMMY_NATIVE_TEST_TIMEOUT_PROFILE: TransportTimeoutProfile = TransportTimeoutProfile {
-    send_accept: Duration::from_millis(50),
-    delivery: Duration::from_millis(500),
-    tracked_payload: Duration::from_millis(100),
-    close: Duration::from_millis(100),
-};
-
-const PRODUCTION_TRANSPORT_TIMEOUT_PROFILE: TransportTimeoutProfile = TransportTimeoutProfile {
-    send_accept: Duration::from_secs(5),
-    delivery: Duration::from_secs(25),
-    tracked_payload: Duration::from_secs(25),
-    close: Duration::from_secs(5),
-};
-
-#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-const TRANSPORT_TIMEOUT_PROFILE: TransportTimeoutProfile = DUMMY_NATIVE_TEST_TIMEOUT_PROFILE;
-
-#[cfg(not(all(test, feature = "dummy", not(target_family = "wasm"))))]
-const TRANSPORT_TIMEOUT_PROFILE: TransportTimeoutProfile = PRODUCTION_TRANSPORT_TIMEOUT_PROFILE;
-
-const _: () = {
-    assert!(
-        PRODUCTION_TRANSPORT_TIMEOUT_PROFILE.send_accept.as_millis()
-            < PRODUCTION_TRANSPORT_TIMEOUT_PROFILE.delivery.as_millis()
-    );
-    assert!(
-        PRODUCTION_TRANSPORT_TIMEOUT_PROFILE
-            .tracked_payload
-            .as_millis()
-            >= PRODUCTION_TRANSPORT_TIMEOUT_PROFILE.delivery.as_millis()
-    );
-    assert!(
-        PRODUCTION_TRANSPORT_TIMEOUT_PROFILE.close.as_millis()
-            <= PRODUCTION_TRANSPORT_TIMEOUT_PROFILE.delivery.as_millis()
-    );
-    assert!(
-        DUMMY_NATIVE_TEST_TIMEOUT_PROFILE.send_accept.as_millis()
-            < PRODUCTION_TRANSPORT_TIMEOUT_PROFILE.send_accept.as_millis()
-    );
-    assert!(
-        DUMMY_NATIVE_TEST_TIMEOUT_PROFILE.delivery.as_millis()
-            < PRODUCTION_TRANSPORT_TIMEOUT_PROFILE.delivery.as_millis()
-    );
-    assert!(
-        DUMMY_NATIVE_TEST_TIMEOUT_PROFILE
-            .tracked_payload
-            .as_millis()
-            < PRODUCTION_TRANSPORT_TIMEOUT_PROFILE
-                .tracked_payload
-                .as_millis()
-    );
-    assert!(
-        DUMMY_NATIVE_TEST_TIMEOUT_PROFILE.close.as_millis()
-            < PRODUCTION_TRANSPORT_TIMEOUT_PROFILE.close.as_millis()
-    );
-};
-
-/// Admission budget for one data-channel send in the active transport profile.
-///
-/// Maintenance scheduling uses the same bound so control-plane work and data
-/// admission cannot drift onto independent timeout policies.
-pub(crate) const DATA_CHANNEL_SEND_ACCEPT_BUDGET: Duration = TRANSPORT_TIMEOUT_PROFILE.send_accept;
+mod timeouts;
 
 pub(crate) use self::connection::AdmittedConnection;
 use self::delivery::record_measurement;
@@ -173,6 +103,8 @@ use self::storage_lookup::StorageLookupObservationMap;
 #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
 pub(crate) use self::storage_lookup::STORAGE_LOOKUP_OBSERVATION_CAPACITY;
 pub(crate) use self::storage_sync::TrackedStorageSyncOutcome;
+pub(crate) use self::timeouts::DATA_CHANNEL_SEND_ACCEPT_BUDGET;
+use self::timeouts::TRANSPORT_TIMEOUT_PROFILE;
 use super::callback::InboundCapacity;
 
 pub struct SwarmTransport {
