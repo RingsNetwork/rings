@@ -190,14 +190,29 @@ fn systemd_working_directory(value: &str) -> Result<String, SystemdDefinitionErr
             value: value.to_owned(),
         });
     }
-    Ok(value.replace('%', "%%"))
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '\u{7}' => escaped.push_str("\\a"),
+            '\u{8}' => escaped.push_str("\\b"),
+            '\u{b}' => escaped.push_str("\\v"),
+            '\u{c}' => escaped.push_str("\\f"),
+            '\t' => escaped.push_str("\\t"),
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\'' => escaped.push_str("\\'"),
+            '%' => escaped.push_str("%%"),
+            other => escaped.push(other),
+        }
+    }
+    Ok(escaped)
 }
 
 fn parse_systemd_state(output: &str) -> DaemonState {
     match output.trim() {
         "active" => DaemonState::Running,
         "inactive" => DaemonState::Stopped,
-        "failed" => DaemonState::Failed,
+        "failed" => DaemonState::Failed(None),
         "activating" | "reloading" => DaemonState::Starting,
         "deactivating" => DaemonState::Stopping,
         "" => DaemonState::Unknown("empty systemctl response".to_owned()),
@@ -320,7 +335,7 @@ mod tests {
     fn state_parser_preserves_lifecycle_states() {
         assert_eq!(parse_systemd_state("active\n"), DaemonState::Running);
         assert_eq!(parse_systemd_state("inactive\n"), DaemonState::Stopped);
-        assert_eq!(parse_systemd_state("failed\n"), DaemonState::Failed);
+        assert_eq!(parse_systemd_state("failed\n"), DaemonState::Failed(None));
         assert_eq!(parse_systemd_state("activating\n"), DaemonState::Starting);
         assert_eq!(parse_systemd_state("deactivating\n"), DaemonState::Stopping);
         assert_eq!(
@@ -464,14 +479,18 @@ mod tests {
     }
 
     #[test]
-    fn quote_escapes_service_manager_expansion_characters() {
+    fn exec_quote_escapes_service_manager_expansion_characters() {
         assert_eq!(
             systemd_exec_quote("/tmp/a $HOME/%n/\"rings\""),
             "\"/tmp/a $$HOME/%%n/\\\"rings\\\"\""
         );
+    }
+
+    #[test]
+    fn working_directory_escapes_unit_syntax_and_specifiers() {
         assert!(matches!(
-            systemd_working_directory("/tmp/a $HOME/%n/rings"),
-            Ok(path) if path == "/tmp/a $HOME/%%n/rings"
+            systemd_working_directory("/tmp/a $HOME/%n/\\rings/\"node\"/'worker'/\t"),
+            Ok(path) if path == "/tmp/a $HOME/%%n/\\\\rings/\\\"node\\\"/\\'worker\\'/\\t"
         ));
     }
 

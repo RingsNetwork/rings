@@ -195,11 +195,30 @@ impl CommandRunner for ProcessCommandRunner {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+enum DaemonFailure {
+    ExitCode(i32),
+    Signal { name: Option<String>, number: i32 },
+}
+
+impl fmt::Display for DaemonFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ExitCode(code) => write!(formatter, "exit code {code}"),
+            Self::Signal {
+                name: Some(name),
+                number,
+            } => write!(formatter, "signal {name}: {number}"),
+            Self::Signal { name: None, number } => write!(formatter, "signal {number}"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum DaemonState {
     NotInstalled,
     Running,
     Stopped,
-    Failed,
+    Failed(Option<DaemonFailure>),
     Starting,
     #[cfg(any(target_os = "linux", all(test, unix)))]
     Stopping,
@@ -217,7 +236,7 @@ impl DaemonState {
     }
 
     fn is_terminal_start_failure(&self) -> bool {
-        matches!(self, Self::NotInstalled | Self::Failed)
+        matches!(self, Self::NotInstalled | Self::Failed(_))
     }
 }
 
@@ -227,7 +246,8 @@ impl fmt::Display for DaemonState {
             Self::NotInstalled => formatter.write_str("not installed"),
             Self::Running => formatter.write_str("running"),
             Self::Stopped => formatter.write_str("stopped"),
-            Self::Failed => formatter.write_str("failed"),
+            Self::Failed(Some(failure)) => write!(formatter, "failed ({failure})"),
+            Self::Failed(None) => formatter.write_str("failed"),
             Self::Starting => formatter.write_str("starting"),
             #[cfg(any(target_os = "linux", all(test, unix)))]
             Self::Stopping => formatter.write_str("stopping"),

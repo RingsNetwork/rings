@@ -294,6 +294,7 @@ mod tests {
     use super::super::tests::command_runner::CommandStep;
     use super::super::tests::command_runner::ScriptedCommandRunner;
     use super::super::tests::service_spec;
+    use super::super::DaemonFailure;
     use super::super::DaemonStatus;
     use super::*;
 
@@ -512,7 +513,43 @@ mod tests {
         assert_eq!(boundary, FailureBoundary::PostAction { sequence: Some(4) });
         assert_eq!(
             error.as_deref(),
-            Some("the daemon did not reach the running state; current state: failed")
+            Some("the daemon did not reach the running state; current state: failed (exit code 1)")
+        );
+        manager.runner.assert_exhausted();
+        Ok(())
+    }
+
+    #[test]
+    fn restart_reports_signal_crash_after_sequence_advances() -> anyhow::Result<()> {
+        let root = test_root("restart-signal-failure");
+        let target = format!("gui/501/{LAUNCHD_LABEL}");
+        let runner = ScriptedCommandRunner::new([
+            CommandStep::success(
+                "/bin/launchctl",
+                &["print", &target],
+                "state = running\nruns = 3\n",
+            ),
+            CommandStep::success("/bin/launchctl", &["enable", &target], ""),
+            CommandStep::success("/bin/launchctl", &["kickstart", "-k", &target], ""),
+            CommandStep::success(
+                "/bin/launchctl",
+                &["print", &target],
+                "state = spawn scheduled\nruns = 4\nlast terminating signal = Segmentation fault: 11\n",
+            ),
+        ]);
+        let manager = test_manager(&root, runner);
+
+        let boundary = manager.restart()?;
+        let error = super::super::report_started(&manager, boundary)
+            .err()
+            .map(|error| error.to_string());
+
+        assert_eq!(boundary, FailureBoundary::PostAction { sequence: Some(3) });
+        assert_eq!(
+            error.as_deref(),
+            Some(
+                "the daemon did not reach the running state; current state: failed (signal Segmentation fault: 11)"
+            )
         );
         manager.runner.assert_exhausted();
         Ok(())
@@ -690,7 +727,9 @@ mod tests {
 
         assert_eq!(
             error.as_deref(),
-            Some("the daemon did not reach the running state; current state: failed")
+            Some(
+                "the daemon did not reach the running state; current state: failed (exit code 78)"
+            )
         );
         manager.runner.assert_exhausted();
         assert!(fs::remove_dir_all(&root).is_ok());
@@ -727,7 +766,9 @@ mod tests {
 
         assert_eq!(
             error.as_deref(),
-            Some("the daemon did not reach the running state; current state: failed")
+            Some(
+                "the daemon did not reach the running state; current state: failed (signal Segmentation fault: 11)"
+            )
         );
         manager.runner.assert_exhausted();
         assert!(fs::remove_dir_all(&root).is_ok());
@@ -757,6 +798,30 @@ mod tests {
             Some("Could not find specified domain")
         );
         manager.runner.assert_exhausted();
+    }
+
+    #[test]
+    fn status_reports_unambiguous_signal_crash() -> Result<(), DaemonError> {
+        let root = test_root("status-signal-failure");
+        let target = format!("gui/501/{LAUNCHD_LABEL}");
+        let runner = ScriptedCommandRunner::new([CommandStep::success(
+            "/bin/launchctl",
+            &["print", &target],
+            "state = spawn scheduled\nruns = 7\nlast terminating signal = Bus error: 10\n",
+        )]);
+        let manager = test_manager(&root, runner);
+
+        let status = manager.status()?;
+
+        assert_eq!(status, DaemonStatus {
+            state: DaemonState::Failed(Some(DaemonFailure::Signal {
+                name: Some("Bus error".to_owned()),
+                number: 10,
+            })),
+            autostart: AutostartState::Disabled,
+        });
+        manager.runner.assert_exhausted();
+        Ok(())
     }
 
     #[test]
