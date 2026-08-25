@@ -45,6 +45,8 @@ use crate::core::transport::TransportInterface;
 use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
 use crate::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
+use crate::delivery::closed_before_flush;
+use crate::delivery::delivery_flushed;
 use crate::delivery::DeliveryFuture;
 use crate::error::Error;
 use crate::error::Result;
@@ -80,16 +82,14 @@ fn delivery_future(
     Box::pin(async move {
         loop {
             let buffered = channel.buffered_amount() as u64;
-            if enqueued.load(Ordering::SeqCst).saturating_sub(buffered) >= end_offset {
+            if delivery_flushed(enqueued.load(Ordering::SeqCst), buffered, end_offset) {
                 return Ok(());
             }
             if matches!(
                 channel.ready_state(),
                 RtcDataChannelState::Closing | RtcDataChannelState::Closed
             ) {
-                return Err(Error::MessageNotDelivered(
-                    "data channel closed before the message was flushed".to_string(),
-                ));
+                return Err(closed_before_flush());
             }
             let notifier = Notifier::default();
             notifier.set_timeout_ms(DELIVERY_POLL_INTERVAL_MS);

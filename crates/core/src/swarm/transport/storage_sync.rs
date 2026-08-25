@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::mem;
 
 use super::delivery::SendCompletionOutcome;
+use super::outbound::OutboundCompletion;
 use super::SwarmTransport;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
@@ -30,12 +31,6 @@ pub(super) struct StorageSyncAckCapability {
     destination: StorageSyncDestination,
     expected_receiver: Did,
     expected_acks: Vec<SyncedEntryAck>,
-}
-
-#[derive(Clone, Copy)]
-enum StorageSyncCompletion {
-    Detached,
-    Tracked,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -339,7 +334,7 @@ impl SwarmTransport {
     async fn send_storage_sync_with_completion(
         &self,
         msg: SyncEntriesWithSuccessor,
-        completion: StorageSyncCompletion,
+        completion: OutboundCompletion,
     ) -> Result<(uuid::Uuid, SendCompletionOutcome)> {
         let destination = msg.destination.did();
         let Some(next_hop) = self.dht.next_hop_for_storage_sync(msg.destination)? else {
@@ -368,10 +363,8 @@ impl SwarmTransport {
             )?;
         }
         let send_outcome = match completion {
-            StorageSyncCompletion::Detached => {
-                self.send_payload_detached_with_outcome(payload).await
-            }
-            StorageSyncCompletion::Tracked => self.send_payload_tracked(payload).await,
+            OutboundCompletion::Detached => self.send_payload_detached_with_outcome(payload).await,
+            OutboundCompletion::Tracked => self.send_payload_tracked(payload).await,
         };
         match send_outcome {
             Ok(SendCompletionOutcome::Succeeded) => Ok((tx_id, SendCompletionOutcome::Succeeded)),
@@ -403,7 +396,7 @@ impl SwarmTransport {
         msg: SyncEntriesWithSuccessor,
     ) -> Result<Option<uuid::Uuid>> {
         match self
-            .send_storage_sync_with_completion(msg, StorageSyncCompletion::Detached)
+            .send_storage_sync_with_completion(msg, OutboundCompletion::Detached)
             .await?
         {
             (tx_id, SendCompletionOutcome::Succeeded) => Ok(Some(tx_id)),
@@ -417,7 +410,7 @@ impl SwarmTransport {
         msg: SyncEntriesWithSuccessor,
     ) -> Result<TrackedStorageSyncOutcome> {
         match self
-            .send_storage_sync_with_completion(msg, StorageSyncCompletion::Tracked)
+            .send_storage_sync_with_completion(msg, OutboundCompletion::Tracked)
             .await?
         {
             (tx_id, SendCompletionOutcome::Succeeded) => {

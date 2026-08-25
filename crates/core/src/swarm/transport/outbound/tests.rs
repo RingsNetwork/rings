@@ -2,6 +2,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
+use bytes::Bytes;
+use futures::channel::oneshot;
+
 use super::capacity::OUTBOUND_DATA_RESERVED_TRANSFERS;
 use super::*;
 use crate::ecc::SecretKey;
@@ -25,6 +28,28 @@ impl Drop for ShutdownProbe {
 struct ShutdownProbeCompletion {
     admitted: Arc<AtomicUsize>,
     sender: oneshot::Sender<usize>,
+}
+
+struct ImplicitCompletionProbe {
+    admitted: Arc<AtomicUsize>,
+    sender: Option<oneshot::Sender<usize>>,
+}
+
+impl Drop for ImplicitCompletionProbe {
+    fn drop(&mut self) {
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send(self.admitted.load(Ordering::Acquire));
+        }
+    }
+}
+
+struct ImplicitCapacityProbe(Arc<AtomicUsize>);
+
+impl Drop for ImplicitCapacityProbe {
+    fn drop(&mut self) {
+        let previous = self.0.fetch_sub(1, Ordering::AcqRel);
+        assert_eq!(previous, 1, "the active transfer must own one admission");
+    }
 }
 
 impl ShutdownProbeCompletion {
@@ -450,8 +475,8 @@ fn shutdown_closes_channel_without_worker_owned_sender() {
             peer: Did::from(42_u32),
             sender,
             cancel_requested: Arc::new(AtomicBool::new(false)),
-            capacity_anchor: Arc::new(TransferCapacity::new(Arc::new(
-                GlobalTransferCapacity::new(),
+            _capacity_anchor: TransferCapacityAnchor::new(Arc::new(TransferCapacity::new(
+                Arc::new(GlobalTransferCapacity::new()),
             ))),
             stop: stop.clone(),
         }),
@@ -464,10 +489,77 @@ fn shutdown_closes_channel_without_worker_owned_sender() {
 }
 
 #[test]
-fn shutdown_batch_finalizes_ready_and_buffered_before_first_publish() {
-    let admitted = Arc::new(AtomicUsize::new(2));
+fn worker_drop_stops_generation_and_closes_ingress_without_a_normal_run_exit() {
+    let peer = Did::from(43_u32);
+    let (sender, receiver) = mailbox::channel();
+    let stop = StopSource::new();
+    let (measurements, _measurement_receiver) = MeasurementRecorder::channel(None, peer);
+    let worker = OutboundWorker::new(
+        receiver,
+        stop.clone(),
+        measurements,
+        peer,
+        Arc::new(AtomicBool::new(false)),
+    );
+
+    drop(worker);
+
+    assert!(stop.is_stop_requested());
+    assert!(sender
+        .send(OutboundCommand::CancelStopped, MailboxLane::Priority)
+        .is_err());
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[tokio::test]
+async fn worker_drop_allows_registry_to_replace_the_stopped_generation() {
+    let schedulers = OutboundSchedulers::new(None);
+    let peer = Did::from(44_u32);
+    let capacity = schedulers
+        .lock_registry()
+        .capacity(peer, &schedulers.global_capacity);
+    let (sender, receiver) = mailbox::channel();
+    let stop = StopSource::new();
+    let stale = OutboundPeerHandle {
+        state: Arc::new(OutboundPeerState {
+            #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+            peer,
+            sender,
+            cancel_requested: Arc::new(AtomicBool::new(false)),
+            _capacity_anchor: TransferCapacityAnchor::new(capacity),
+            stop: stop.clone(),
+        }),
+    };
+    schedulers.lock_registry().peers.insert(peer, stale.clone());
+    let (measurements, _measurement_receiver) = MeasurementRecorder::channel(None, peer);
+    let worker = OutboundWorker::new(
+        receiver,
+        stop,
+        measurements,
+        peer,
+        Arc::new(AtomicBool::new(false)),
+    );
+
+    drop(worker);
+    let replacement = schedulers
+        .handle(peer)
+        .expect("a stopped worker generation must be replaceable");
+
+    assert!(!Arc::ptr_eq(&stale.state, &replacement.state));
+    assert!(!replacement.state.stop.is_stop_requested());
+    schedulers.shutdown(peer);
+}
+
+#[test]
+fn shutdown_batch_finalizes_active_ready_and_buffered_before_first_publish() {
+    let admitted = Arc::new(AtomicUsize::new(3));
+    let (active_sender, active_receiver) = oneshot::channel();
     let (ready_sender, ready_receiver) = oneshot::channel();
     let (buffered_sender, buffered_receiver) = oneshot::channel();
+    let active = ShutdownProbe {
+        admitted: admitted.clone(),
+        sender: Some(active_sender),
+    };
     let ready = ShutdownProbe {
         admitted: admitted.clone(),
         sender: Some(ready_sender),
@@ -477,13 +569,18 @@ fn shutdown_batch_finalizes_ready_and_buffered_before_first_publish() {
         sender: Some(buffered_sender),
     };
 
-    let completions =
-        ShutdownBatch::new(vec![ready], vec![buffered]).finalize(finalize_shutdown_probe);
+    let completions = ShutdownBatch::new(vec![active], vec![ready], vec![buffered])
+        .finalize(finalize_shutdown_probe);
     assert_eq!(admitted.load(Ordering::Acquire), 0);
     let mut completions = completions.into_iter();
     completions
         .next()
-        .expect("ready completion must be collected first")
+        .expect("active completion must be collected first")
+        .publish();
+    assert_eq!(active_receiver.now_or_never(), Some(Ok(0)));
+    completions
+        .next()
+        .expect("ready completion must remain available")
         .publish();
     assert_eq!(ready_receiver.now_or_never(), Some(Ok(0)));
     completions
@@ -492,6 +589,24 @@ fn shutdown_batch_finalizes_ready_and_buffered_before_first_publish() {
         .publish();
     assert_eq!(buffered_receiver.now_or_never(), Some(Ok(0)));
     assert!(completions.next().is_none());
+}
+
+#[test]
+fn active_transfer_drop_releases_capacity_before_implicit_completion() {
+    let admitted = Arc::new(AtomicUsize::new(1));
+    let (sender, receiver) = oneshot::channel();
+    let scheduled = ScheduledTransfer::new(
+        ImplicitCompletionProbe {
+            admitted: admitted.clone(),
+            sender: Some(sender),
+        },
+        ImplicitCapacityProbe(admitted.clone()),
+    );
+
+    drop(scheduled);
+
+    assert_eq!(receiver.now_or_never(), Some(Ok(0)));
+    assert_eq!(admitted.load(Ordering::Acquire), 0);
 }
 
 #[test]
@@ -504,8 +619,8 @@ fn final_handle_drop_requests_stop_before_channel_close() {
             peer: Did::from(42_u32),
             sender,
             cancel_requested: Arc::new(AtomicBool::new(false)),
-            capacity_anchor: Arc::new(TransferCapacity::new(Arc::new(
-                GlobalTransferCapacity::new(),
+            _capacity_anchor: TransferCapacityAnchor::new(Arc::new(TransferCapacity::new(
+                Arc::new(GlobalTransferCapacity::new()),
             ))),
             stop: stop.clone(),
         }),

@@ -1,8 +1,12 @@
 //! Bounded inbound admission and per-lane actor scheduling.
 //!
-//! Raw transport frames are admitted synchronously when their lane ticket reaches the front.
-//! Every valid frame fits its lane's fixed reservation; shared capacity may be borrowed,
-//! but capacity pressure fails rather than parking ingress behind the actor that releases it.
+//! Transport first bounds undecoded frames and transfers an opaque capacity lease.
+//! Core then verifies the frame and atomically reserves per-peer plus class-aware
+//! actor capacity before waiting for its lane ticket. The raw transport lease is
+//! released after the ticket wait, when both capacity ownership and lane order are
+//! established. Decode, validation, reassembly, and dispatch retain only the core
+//! permit. Capacity pressure fails without peer penalty rather than parking ingress
+//! behind the actor that releases it.
 
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
@@ -14,12 +18,13 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use bytes::Bytes;
 use futures::channel::mpsc;
 use futures::channel::oneshot;
 use futures::stream::FuturesUnordered;
 use futures::FutureExt;
 use futures::StreamExt;
-use rings_transport::core::callback::InboundFrameClass;
+use rings_transport::core::callback::InboundFrameCapacityLease;
 use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 use web_time::Instant;
 
@@ -31,13 +36,19 @@ use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
 use crate::message::MessagePayload;
+use crate::utils::admissible_capacity;
+use crate::utils::retained_wire_bytes;
 use crate::utils::sleep;
-use crate::utils::ReservedCapacity;
+use crate::utils::CountedReservationRejection;
+use crate::utils::CountedReservedCapacity;
 
+mod deadline;
 mod lane;
 mod reassembly;
 mod ticket;
 
+use self::deadline::await_inbound_deadline;
+use self::deadline::InboundDeadline;
 use self::lane::InboundLane;
 use self::lane::INBOUND_LANE_COUNT;
 use self::reassembly::process_chunk_event;
@@ -45,70 +56,83 @@ use self::ticket::InboundCommand;
 use self::ticket::InboundSender;
 use self::ticket::InboundTicket;
 
+macro_rules! inbound_lane_entry {
+    ($lanes:expr, $lane:expr) => {{
+        let [control, storage, e2e, application, reassembly] = $lanes;
+        match $lane {
+            InboundLane::DhtControl => control,
+            InboundLane::Storage => storage,
+            InboundLane::E2e => e2e,
+            InboundLane::Application => application,
+            InboundLane::Reassembly => reassembly,
+        }
+    }};
+}
+
+/// Total logical events retained across queued and executing actor work.
 const INBOUND_MAILBOX_CAPACITY: usize = 256;
+/// Weighted decoded representations retained by the actor.
 const INBOUND_MAILBOX_BYTE_CAPACITY: usize = 256 * 1024 * 1024;
+/// Per-lane slots preserved when other lanes borrow shared capacity.
 const INBOUND_RESERVED_TRANSFERS_PER_LANE: usize = 16;
+/// One maximum transport frame fits each lane's byte reservation after decoding.
 const INBOUND_RESERVED_BYTES_PER_LANE: usize = 1024 * 1024;
 const INBOUND_RESERVED_TRANSFERS: [usize; INBOUND_LANE_COUNT] =
     [INBOUND_RESERVED_TRANSFERS_PER_LANE; INBOUND_LANE_COUNT];
 const INBOUND_RESERVED_BYTES: [usize; INBOUND_LANE_COUNT] =
     [INBOUND_RESERVED_BYTES_PER_LANE; INBOUND_LANE_COUNT];
+/// Per-peer share prevents one connection from occupying the node-wide actor.
 const INBOUND_PEER_CAPACITY: usize = 32;
 const INBOUND_PEER_BYTE_CAPACITY: usize = 128 * 1024 * 1024;
+/// Bounds command work before completed lane tasks are observed.
 const INBOUND_COMMAND_DRAIN_BUDGET: usize = 32;
+/// Maximum time an application-owned inbound callback may retain one lane and
+/// its capacity permit. The deadline cancels the future; callback
+/// implementations must therefore be cancellation-safe at every suspension.
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+const INBOUND_CALLBACK_TIMEOUT: Duration = Duration::from_secs(1);
+#[cfg(not(all(test, feature = "dummy", not(target_family = "wasm"))))]
+const INBOUND_CALLBACK_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 const REASSEMBLY_CLEANUP_INTERVAL: Duration = Duration::from_millis(50);
 #[cfg(not(all(test, feature = "dummy", not(target_family = "wasm"))))]
 const REASSEMBLY_CLEANUP_INTERVAL: Duration = Duration::from_secs(1);
 const _: () = {
+    // One peer cannot consume the node budget, every lane retains a fixed
+    // minimum, and one maximum legal frame always fits that minimum.
     assert!(INBOUND_PEER_CAPACITY < INBOUND_MAILBOX_CAPACITY);
     assert!(INBOUND_PEER_BYTE_CAPACITY < INBOUND_MAILBOX_BYTE_CAPACITY);
-    assert!(crate::consts::TRANSPORT_MAX_SIZE * 2 <= INBOUND_PEER_BYTE_CAPACITY);
+    assert!(retained_wire_bytes(crate::consts::TRANSPORT_MAX_SIZE) <= INBOUND_PEER_BYTE_CAPACITY);
     assert!(INBOUND_RESERVED_TRANSFERS_PER_LANE * INBOUND_LANE_COUNT <= INBOUND_MAILBOX_CAPACITY);
     assert!(INBOUND_RESERVED_BYTES_PER_LANE * INBOUND_LANE_COUNT <= INBOUND_MAILBOX_BYTE_CAPACITY);
     assert!(memory_reservation(MAX_DATA_CHANNEL_MESSAGE_SIZE) <= INBOUND_RESERVED_BYTES_PER_LANE);
 };
 
 #[derive(Clone, Copy)]
-struct InboundCapacityState {
-    messages: ReservedCapacity<INBOUND_LANE_COUNT>,
-    bytes: ReservedCapacity<INBOUND_LANE_COUNT>,
-}
+struct InboundCapacityState(CountedReservedCapacity<INBOUND_LANE_COUNT>);
 
 impl InboundCapacityState {
     const fn new() -> Self {
-        Self {
-            messages: ReservedCapacity::new(),
-            bytes: ReservedCapacity::new(),
-        }
+        Self(CountedReservedCapacity::new())
     }
     fn try_reserve(
         &mut self,
         lane: InboundLane,
         bytes: usize,
     ) -> std::result::Result<(), CapacityRejection> {
-        if !self.messages.try_reserve(
-            lane.index(),
-            1,
-            INBOUND_MAILBOX_CAPACITY,
-            &INBOUND_RESERVED_TRANSFERS,
-        ) {
-            return Err(CapacityRejection::Count);
-        }
-        if !self.bytes.try_reserve(
+        CountedReservedCapacity::try_reserve(
+            &mut self.0,
             lane.index(),
             bytes,
+            INBOUND_MAILBOX_CAPACITY,
+            &INBOUND_RESERVED_TRANSFERS,
             INBOUND_MAILBOX_BYTE_CAPACITY,
             &INBOUND_RESERVED_BYTES,
-        ) {
-            self.messages.release(lane.index(), 1);
-            return Err(CapacityRejection::Bytes);
-        }
-        Ok(())
+        )
+        .map_err(Into::into)
     }
     fn release(&mut self, lane: InboundLane, bytes: usize) {
-        self.messages.release(lane.index(), 1);
-        self.bytes.release(lane.index(), bytes);
+        self.0.release(lane.index(), bytes);
     }
 }
 
@@ -117,48 +141,40 @@ enum CapacityRejection {
     Bytes,
 }
 
-const PEER_RESERVATION: [usize; 1] = [0];
-
-#[derive(Clone, Copy)]
-struct InboundPeerCapacityState {
-    messages: ReservedCapacity<1>,
-    bytes: ReservedCapacity<1>,
-}
-
-impl Default for InboundPeerCapacityState {
-    fn default() -> Self {
-        Self {
-            messages: ReservedCapacity::new(),
-            bytes: ReservedCapacity::new(),
+impl From<CountedReservationRejection> for CapacityRejection {
+    fn from(rejection: CountedReservationRejection) -> Self {
+        match rejection {
+            CountedReservationRejection::Count => Self::Count,
+            CountedReservationRejection::Bytes => Self::Bytes,
         }
     }
 }
+
+const PEER_RESERVATION: [usize; 1] = [0];
+
+#[derive(Clone, Copy, Default)]
+struct InboundPeerCapacityState(CountedReservedCapacity<1>);
 
 impl InboundPeerCapacityState {
     fn try_reserve(&mut self, bytes: usize) -> std::result::Result<(), CapacityRejection> {
-        if !self
-            .messages
-            .try_reserve(0, 1, INBOUND_PEER_CAPACITY, &PEER_RESERVATION)
-        {
-            return Err(CapacityRejection::Count);
-        }
-        if !self
-            .bytes
-            .try_reserve(0, bytes, INBOUND_PEER_BYTE_CAPACITY, &PEER_RESERVATION)
-        {
-            self.messages.release(0, 1);
-            return Err(CapacityRejection::Bytes);
-        }
-        Ok(())
+        CountedReservedCapacity::try_reserve(
+            &mut self.0,
+            0,
+            bytes,
+            INBOUND_PEER_CAPACITY,
+            &PEER_RESERVATION,
+            INBOUND_PEER_BYTE_CAPACITY,
+            &PEER_RESERVATION,
+        )
+        .map_err(Into::into)
     }
 
     fn release(&mut self, bytes: usize) {
-        self.messages.release(0, 1);
-        self.bytes.release(0, bytes);
+        self.0.release(0, bytes);
     }
 
     const fn is_idle(self) -> bool {
-        self.messages.admitted() == 0
+        self.0.admitted_count() == 0
     }
 }
 
@@ -234,8 +250,8 @@ impl InboundCapacity {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .messages
-            .admitted()
+            .0
+            .admitted_count()
     }
 }
 
@@ -321,6 +337,14 @@ enum InboundFailure {
     Core(Error),
     Validation(CallbackError),
     Callback(CallbackError),
+    ValidationTimeout { peer: Option<Did> },
+    ProcessingTimeout { peer: Option<Did> },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InboundValidation {
+    Dispatch,
+    AcknowledgeDrop,
 }
 
 type InboundReply = oneshot::Sender<std::result::Result<(), InboundFailure>>;
@@ -331,7 +355,6 @@ struct InboundEvent {
     payload: MessagePayload,
     prepared_message: Option<crate::message::Message>,
     lane: InboundLane,
-    is_chunk: bool,
     permit: InboundCapacityPermit,
     reply: InboundReply,
 }
@@ -364,13 +387,13 @@ impl InboundMailbox {
         &self,
         processor: &InboundProcessor,
         peer: Option<Did>,
-        bytes: &[u8],
+        bytes: Bytes,
         prepared: PreparedInboundFrame,
+        transport_capacity: Option<InboundFrameCapacityLease>,
     ) -> Result<()> {
         self.ensure_actor_available()?;
         let lane = InboundLane::from_frame_class(prepared.class);
-        let is_chunk = prepared.class == InboundFrameClass::Reassembly;
-        self.submit_to_lane(processor, peer, bytes, lane, is_chunk, Some(prepared))
+        self.submit_to_lane(processor, peer, bytes, lane, prepared, transport_capacity)
             .await
     }
 
@@ -386,21 +409,30 @@ impl InboundMailbox {
         &self,
         processor: &InboundProcessor,
         peer: Option<Did>,
-        bytes: &[u8],
+        bytes: Bytes,
         lane: InboundLane,
-        is_chunk: bool,
-        prepared: Option<PreparedInboundFrame>,
+        prepared: PreparedInboundFrame,
+        transport_capacity: Option<InboundFrameCapacityLease>,
     ) -> Result<()> {
         let mut ticket = self.reserve_ticket(lane)?;
-        ticket.wait_for_admission_turn().await;
         let permit = self
             .capacity
             .acquire(peer, lane, memory_reservation(bytes.len()))?;
+        ticket.wait_for_admission_turn().await;
+        let PreparedInboundFrame {
+            payload, message, ..
+        } = prepared;
+        // Core now owns both retained decoded representations. Release the raw
+        // bytes and their transport lease together at this handoff boundary.
+        drop((bytes, transport_capacity));
         ticket.release_admission_turn();
         if !processor.pending_connection_allows_message(peer).await? {
             return Ok(());
         }
-        let decoded = decode_payload(processor, peer, bytes, prepared).await?;
+        let decoded = DecodedInboundFrame {
+            payload: processor.accept_preverified_message(peer, payload).await?,
+            prepared_message: Some(message),
+        };
         let (reply, completion) = oneshot::channel();
         let sequence = ticket.sequence();
         ticket.commit(InboundEvent {
@@ -409,7 +441,6 @@ impl InboundMailbox {
             payload: decoded.payload,
             prepared_message: decoded.prepared_message,
             lane,
-            is_chunk,
             permit,
             reply,
         })?;
@@ -430,6 +461,11 @@ impl InboundMailbox {
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(super) fn admitted_count_for_test(&self) -> usize {
         self.capacity.admitted_count_for_test()
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(super) fn hold_application_admission_for_test(&self) -> Result<impl Drop> {
+        self.reserve_ticket(InboundLane::APPLICATION)
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -473,51 +509,47 @@ impl InboundQueues {
     }
 
     fn push_pending(&mut self, sequence: u64, lane: InboundLane) {
-        if let Some(queue) = self.lanes.get_mut(lane.index()) {
-            debug_assert!(queue.back().is_none_or(|entry| entry.sequence < sequence));
-            queue.push_back(InboundQueueEntry {
-                sequence,
-                event: None,
-            });
-        }
+        let queue = inbound_lane_entry!(&mut self.lanes, lane);
+        debug_assert!(queue.back().is_none_or(|entry| entry.sequence < sequence));
+        queue.push_back(InboundQueueEntry {
+            sequence,
+            event: None,
+        });
     }
 
     fn push_ready(&mut self, event: InboundEvent) {
-        if let Some(queue) = self.lanes.get_mut(event.lane().index()) {
-            if let Some(entry) = queue
-                .iter_mut()
-                .find(|entry| entry.sequence == event.sequence)
-            {
-                entry.event = Some(event);
-                return;
-            }
-            let entry = InboundQueueEntry {
-                sequence: event.sequence,
-                event: Some(event),
-            };
-            let position = queue.partition_point(|queued| queued.sequence < entry.sequence);
-            queue.insert(position, entry);
+        let queue = inbound_lane_entry!(&mut self.lanes, event.lane());
+        if let Some(entry) = queue
+            .iter_mut()
+            .find(|entry| entry.sequence == event.sequence)
+        {
+            entry.event = Some(event);
+            return;
         }
+        let entry = InboundQueueEntry {
+            sequence: event.sequence,
+            event: Some(event),
+        };
+        let position = queue.partition_point(|queued| queued.sequence < entry.sequence);
+        queue.insert(position, entry);
     }
 
     fn cancel(&mut self, sequence: u64, lane: InboundLane) {
-        if let Some(queue) = self.lanes.get_mut(lane.index()) {
-            if let Some(index) = queue.iter().position(|entry| entry.sequence == sequence) {
-                queue.remove(index);
-            }
+        let queue = inbound_lane_entry!(&mut self.lanes, lane);
+        if let Some(index) = queue.iter().position(|entry| entry.sequence == sequence) {
+            queue.remove(index);
         }
     }
 
     fn pop(&mut self, lane: InboundLane) -> Option<InboundEvent> {
-        let queue = self.lanes.get_mut(lane.index())?;
+        let queue = inbound_lane_entry!(&mut self.lanes, lane);
         queue.front()?.event.as_ref()?;
         queue.pop_front()?.event
     }
 
     fn front_sequence(&self, lane: InboundLane) -> Option<u64> {
-        self.lanes
-            .get(lane.index())
-            .and_then(VecDeque::front)
+        inbound_lane_entry!(&self.lanes, lane)
+            .front()
             .map(|entry| entry.sequence)
     }
 }
@@ -605,13 +637,13 @@ impl InboundActor {
 
     fn dispatch_runnable(&mut self) {
         let reassembly_barrier = self.reassembly_barrier_sequence();
-        for (index, active_lane) in self.active_lanes.iter_mut().enumerate() {
+        for (lane, active_lane) in InboundLane::ALL
+            .into_iter()
+            .zip(self.active_lanes.iter_mut())
+        {
             if active_lane.is_some() {
                 continue;
             }
-            let Some(lane) = InboundLane::from_index(index) else {
-                continue;
-            };
             let Some(sequence) = self.queues.front_sequence(lane) else {
                 continue;
             };
@@ -651,10 +683,7 @@ impl InboundActor {
 
     fn reassembly_barrier_sequence(&self) -> Option<u64> {
         [
-            self.active_lanes
-                .get(InboundLane::REASSEMBLY.index())
-                .copied()
-                .flatten(),
+            *inbound_lane_entry!(&self.active_lanes, InboundLane::REASSEMBLY),
             self.queues.front_sequence(InboundLane::REASSEMBLY),
             self.reassembly_handoff_barrier
                 .as_ref()
@@ -702,16 +731,13 @@ impl InboundActor {
     }
 
     fn handle_completion(&mut self, completion: InboundTaskCompletion) {
-        if let Some(active) = self.active_lanes.get_mut(completion.lane.index()) {
-            if active.take() != Some(completion.sequence) {
-                tracing::error!(
-                    lane = ?completion.lane,
-                    sequence = completion.sequence,
-                    "inbound actor completed a non-active sequence"
-                );
-            }
-        } else {
-            tracing::error!(lane = ?completion.lane, "inbound actor completed an unknown lane");
+        let active = inbound_lane_entry!(&mut self.active_lanes, completion.lane);
+        if active.take() != Some(completion.sequence) {
+            tracing::error!(
+                lane = ?completion.lane,
+                sequence = completion.sequence,
+                "inbound actor completed a non-active sequence"
+            );
         }
         if let Some(next) = completion.next {
             if next.lane().is_logical_data() {
@@ -771,8 +797,8 @@ async fn process_event(
     let lane = event.lane();
     let sequence = event.sequence;
     match validate_event(&processor, &event).await {
-        Ok(true) => {}
-        Ok(false) => {
+        Ok(InboundValidation::Dispatch) => {}
+        Ok(InboundValidation::AcknowledgeDrop) => {
             finish_reply(event.reply, Ok(()));
             return InboundTaskCompletion {
                 lane,
@@ -789,7 +815,7 @@ async fn process_event(
             };
         }
     }
-    if event.is_chunk {
+    if event.lane() == InboundLane::REASSEMBLY {
         let next = process_chunk_event(&processor, event).await;
         return InboundTaskCompletion {
             lane,
@@ -798,12 +824,13 @@ async fn process_event(
         };
     }
 
-    let result = process_logical_message(&processor, &event.payload, event.prepared_message)
-        .await
-        .map_err(|error| match error {
-            PayloadHandlingError::Core(error) => InboundFailure::Core(error),
-            PayloadHandlingError::Callback(error) => InboundFailure::Callback(error),
-        });
+    let result = process_logical_message(
+        &processor,
+        event.peer,
+        &event.payload,
+        event.prepared_message,
+    )
+    .await;
     finish_reply(event.reply, result);
     InboundTaskCompletion {
         lane,
@@ -815,31 +842,55 @@ async fn process_event(
 async fn validate_event(
     processor: &InboundProcessor,
     event: &InboundEvent,
-) -> std::result::Result<bool, InboundFailure> {
+) -> std::result::Result<InboundValidation, InboundFailure> {
     if !processor
         .pending_connection_allows_message(event.peer)
         .await
         .map_err(InboundFailure::Core)?
     {
-        return Ok(false);
+        return Ok(InboundValidation::AcknowledgeDrop);
     }
-    processor
-        .callback
-        .on_validate(&event.payload)
-        .await
-        .map_err(InboundFailure::Validation)?;
-    processor
+    match await_inbound_deadline(
+        processor.callback.on_validate(&event.payload),
+        INBOUND_CALLBACK_TIMEOUT,
+    )
+    .await
+    {
+        InboundDeadline::Completed(result) => result.map_err(InboundFailure::Validation)?,
+        InboundDeadline::TimedOut => {
+            return Err(InboundFailure::ValidationTimeout { peer: event.peer });
+        }
+    }
+    let still_admitted = processor
         .pending_connection_allows_message(event.peer)
         .await
-        .map_err(InboundFailure::Core)
+        .map_err(InboundFailure::Core)?;
+    Ok(if still_admitted {
+        InboundValidation::Dispatch
+    } else {
+        InboundValidation::AcknowledgeDrop
+    })
 }
 
 async fn process_logical_message(
     processor: &InboundProcessor,
+    peer: Option<Did>,
     payload: &MessagePayload,
     prepared_message: Option<crate::message::Message>,
-) -> std::result::Result<(), PayloadHandlingError> {
-    processor.handle_payload(payload, prepared_message).await
+) -> std::result::Result<(), InboundFailure> {
+    processor
+        .handle_payload(payload, prepared_message)
+        .await
+        .map_err(|error| match error {
+            PayloadHandlingError::Core(error) => InboundFailure::Core(error),
+        })?;
+    if !processor.is_local_destination(payload) {
+        return Ok(());
+    }
+    match await_inbound_deadline(processor.on_inbound(payload), INBOUND_CALLBACK_TIMEOUT).await {
+        InboundDeadline::Completed(result) => result.map_err(InboundFailure::Callback),
+        InboundDeadline::TimedOut => Err(InboundFailure::ProcessingTimeout { peer }),
+    }
 }
 
 struct DecodedInboundFrame {
@@ -851,26 +902,12 @@ async fn decode_payload(
     processor: &InboundProcessor,
     peer: Option<Did>,
     bytes: &[u8],
-    prepared: Option<PreparedInboundFrame>,
 ) -> Result<DecodedInboundFrame> {
-    match prepared {
-        Some(PreparedInboundFrame {
-            payload, message, ..
-        }) => {
-            let payload = processor.accept_preverified_message(peer, payload).await?;
-            Ok(DecodedInboundFrame {
-                payload,
-                prepared_message: Some(message),
-            })
-        }
-        None => {
-            let payload = processor.decode_verified_message(peer, bytes).await?;
-            Ok(DecodedInboundFrame {
-                payload,
-                prepared_message: None,
-            })
-        }
-    }
+    let payload = processor.decode_verified_message(peer, bytes).await?;
+    Ok(DecodedInboundFrame {
+        payload,
+        prepared_message: None,
+    })
 }
 
 fn finish_reply(reply: InboundReply, result: std::result::Result<(), InboundFailure>) {
@@ -882,11 +919,19 @@ fn inbound_failure_error(failure: InboundFailure) -> Error {
         InboundFailure::Core(error) => error,
         InboundFailure::Validation(source) => Error::InboundValidationFailed { source },
         InboundFailure::Callback(source) => Error::InboundCallbackFailed { source },
+        InboundFailure::ValidationTimeout { peer } => Error::InboundValidationTimeout {
+            peer,
+            timeout_ms: INBOUND_CALLBACK_TIMEOUT.as_millis(),
+        },
+        InboundFailure::ProcessingTimeout { peer } => Error::InboundProcessingTimeout {
+            peer,
+            timeout_ms: INBOUND_CALLBACK_TIMEOUT.as_millis(),
+        },
     }
 }
 
 const fn memory_reservation(bytes: usize) -> usize {
-    bytes.saturating_mul(2)
+    retained_wire_bytes(bytes)
 }
 
 fn memory_capacity_error(requested_bytes: usize) -> Error {
@@ -912,13 +957,11 @@ fn validate_peer_memory_request(peer: Option<Did>, requested_bytes: usize) -> Re
 }
 
 fn validate_memory_request(lane: InboundLane, requested_bytes: usize) -> Result<()> {
-    let reserved_for_other_lanes = INBOUND_RESERVED_BYTES
-        .iter()
-        .enumerate()
-        .filter(|(index, _)| *index != lane.index())
-        .map(|(_, bytes)| *bytes)
-        .sum::<usize>();
-    let limit = INBOUND_MAILBOX_BYTE_CAPACITY.saturating_sub(reserved_for_other_lanes);
+    let limit = admissible_capacity(
+        INBOUND_MAILBOX_BYTE_CAPACITY,
+        &INBOUND_RESERVED_BYTES,
+        lane.index(),
+    );
     if requested_bytes > limit {
         return Err(Error::InboundMailboxMemoryCapacityExceeded {
             requested_bytes,

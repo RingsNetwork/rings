@@ -443,12 +443,30 @@ pub enum Error {
         source: CallbackError,
     },
 
+    /// An application validation callback did not complete within its deadline.
+    #[error("Inbound validation for {peer:?} timed out after {timeout_ms}ms")]
+    InboundValidationTimeout {
+        /// Peer associated with the inbound connection, when its DID parsed successfully.
+        peer: Option<crate::dht::Did>,
+        /// Callback deadline in milliseconds.
+        timeout_ms: u128,
+    },
+
     /// An application callback failed after core inbound handling.
     #[error("Inbound message callback failed: {source}")]
     InboundCallbackFailed {
         /// Original application callback error.
         #[source]
         source: CallbackError,
+    },
+
+    /// Inbound handling and its application callback did not complete within the deadline.
+    #[error("Inbound processing for {peer:?} timed out after {timeout_ms}ms")]
+    InboundProcessingTimeout {
+        /// Peer associated with the inbound connection, when its DID parsed successfully.
+        peer: Option<crate::dht::Did>,
+        /// Processing deadline in milliseconds.
+        timeout_ms: u128,
     },
 
     /// Recv message through channel failed {0}

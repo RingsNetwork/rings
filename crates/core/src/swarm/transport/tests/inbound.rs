@@ -10,6 +10,8 @@ use crate::swarm::callback::inbound_application_capacity_for_test;
 use crate::swarm::callback::inbound_mailbox_capacity_for_test;
 use crate::swarm::callback::inbound_peer_capacity_for_test;
 
+mod callback_failure;
+mod capacity_handoff;
 mod storage_interleave;
 
 #[derive(Default)]
@@ -472,6 +474,40 @@ fn spawn_inbound_delivery(
     })
 }
 
+async fn saturate_application_lane(
+    transport: &Arc<SwarmTransport>,
+    callback: &Arc<InnerSwarmCallback>,
+) -> Result<Vec<tokio::task::JoinHandle<Result<()>>>> {
+    let lane_capacity = inbound_application_capacity_for_test();
+    let peer_capacity = inbound_peer_capacity_for_test();
+    let mut pending_deliveries = Vec::with_capacity(lane_capacity);
+    while pending_deliveries.len() < lane_capacity {
+        let peer_key = SecretKey::random();
+        let peer: Did = peer_key.address().into();
+        let session = SessionSk::new_with_seckey(&peer_key)?;
+        let frame = local_wire(
+            Message::custom(b"application-capacity")?,
+            &session,
+            transport.dht.did,
+        )?;
+        for _ in 0..peer_capacity.min(lane_capacity - pending_deliveries.len()) {
+            pending_deliveries.push(spawn_inbound_delivery(
+                Arc::clone(callback),
+                peer.to_string(),
+                frame.clone(),
+            ));
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while callback.inbound_admitted_count_for_test() < lane_capacity {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| Error::InvalidMessage("application lane did not fill".to_string()))?;
+    Ok(pending_deliveries)
+}
+
 #[tokio::test]
 async fn reassembly_handoff_preserves_data_order_without_blocking_control() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
@@ -646,35 +682,7 @@ async fn reassembled_control_shape_is_verified_before_lane_transition() -> Resul
         Arc::clone(&transport),
         pending_callback,
     ));
-    let lane_capacity = inbound_application_capacity_for_test();
-    let peer_capacity = inbound_peer_capacity_for_test();
-    let mut pending_deliveries = Vec::with_capacity(lane_capacity);
-    while pending_deliveries.len() < lane_capacity {
-        let peer_key = SecretKey::random();
-        let peer: Did = peer_key.address().into();
-        let session = SessionSk::new_with_seckey(&peer_key)?;
-        let control = MessagePayload::new_send(
-            Message::PeerLivenessReport(crate::message::PeerLivenessReport { sent_at_ms: 3 }),
-            &session,
-            transport.dht.did,
-            transport.dht.did,
-        )?
-        .to_wire()?;
-        for _ in 0..peer_capacity.min(lane_capacity - pending_deliveries.len()) {
-            pending_deliveries.push(spawn_inbound_delivery(
-                Arc::clone(&saturated),
-                peer.to_string(),
-                control.clone(),
-            ));
-        }
-    }
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while saturated.inbound_admitted_count_for_test() < lane_capacity {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .map_err(|_| Error::InvalidMessage("control lane did not fill".to_string()))?;
+    let pending_deliveries = saturate_application_lane(&transport, &saturated).await?;
 
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();

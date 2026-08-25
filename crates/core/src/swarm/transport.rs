@@ -952,6 +952,7 @@ impl SwarmConnection {
     }
 
     #[cfg(all(
+        test,
         not(all(feature = "wasm", target_family = "wasm")),
         not(feature = "dummy")
     ))]

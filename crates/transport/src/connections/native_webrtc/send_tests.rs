@@ -443,10 +443,8 @@ fn missing_runtime_returns_typed_error() {
 #[tokio::test]
 async fn native_send_task_preserves_join_error_source() {
     let runtime = native_send_runtime().expect("Tokio test runtime must be available");
-    let error = run_irrevocable_send(&runtime, test_retirement_fence(), async {
+    let error = run_irrevocable_send::<()>(&runtime, test_retirement_fence(), async {
         panic!("native send task panic witness");
-        #[allow(unreachable_code)]
-        Ok(())
     })
     .await
     .expect_err("panicking send task must fail");
@@ -471,8 +469,6 @@ async fn panicking_irrevocable_native_send_retires_connection() {
             .try_mark_irrevocable()
             .expect("live permit must become irrevocable");
         panic!("irrevocable native send panic witness");
-        #[allow(unreachable_code)]
-        Ok(())
     };
     let retirement = {
         let retired = Arc::clone(&retired);
@@ -483,9 +479,10 @@ async fn panicking_irrevocable_native_send_retires_connection() {
     };
     let runtime = native_send_runtime().expect("Tokio test runtime must be available");
 
-    let error = run_send_with_retirement(&runtime, acceptance, retirement_fence, send, retirement)
-        .await
-        .expect_err("panicking send task must fail");
+    let error =
+        run_send_with_retirement::<()>(&runtime, acceptance, retirement_fence, send, retirement)
+            .await
+            .expect_err("panicking send task must fail");
 
     assert!(retired.load(Ordering::Acquire));
     assert_eq!(
@@ -511,8 +508,6 @@ async fn panicking_revocable_native_send_does_not_retire_connection() {
     let send = async move {
         drop(permit);
         panic!("revocable native send panic witness");
-        #[allow(unreachable_code)]
-        Ok(())
     };
     let retirement = {
         let retired = Arc::clone(&retired);
@@ -523,9 +518,10 @@ async fn panicking_revocable_native_send_does_not_retire_connection() {
     };
     let runtime = native_send_runtime().expect("Tokio test runtime must be available");
 
-    let error = run_send_with_retirement(&runtime, acceptance, retirement_fence, send, retirement)
-        .await
-        .expect_err("panicking send task must fail");
+    let error =
+        run_send_with_retirement::<()>(&runtime, acceptance, retirement_fence, send, retirement)
+            .await
+            .expect_err("panicking send task must fail");
 
     assert!(!retired.load(Ordering::Acquire));
     assert_eq!(

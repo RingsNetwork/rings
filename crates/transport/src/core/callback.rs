@@ -6,7 +6,9 @@
 //! accept boxed [TransportCallback] trait object.
 
 use async_trait::async_trait;
+use bytes::Bytes;
 
+use crate::callback::InboundFramePermit;
 use crate::core::transport::WebrtcConnectionState;
 
 type CallbackError = Box<dyn std::error::Error>;
@@ -34,12 +36,17 @@ pub enum InboundFrameClass {
 /// adapters can therefore dispatch messages only after synchronous admission.
 pub struct AdmittedInboundMessage<'a> {
     cid: &'a str,
-    payload: &'a [u8],
+    payload: Bytes,
+    capacity: InboundFrameCapacityLease,
 }
 
 impl<'a> AdmittedInboundMessage<'a> {
-    pub(crate) const fn new(cid: &'a str, payload: &'a [u8]) -> Self {
-        Self { cid, payload }
+    pub(crate) fn new(cid: &'a str, payload: Bytes, capacity: InboundFrameCapacityLease) -> Self {
+        Self {
+            cid,
+            payload,
+            capacity,
+        }
     }
 
     /// Return the connection identifier associated with this frame.
@@ -48,13 +55,32 @@ impl<'a> AdmittedInboundMessage<'a> {
     }
 
     /// Return the decoded custom transport payload.
-    pub const fn payload(&self) -> &[u8] {
-        self.payload
+    pub fn payload(&self) -> &[u8] {
+        self.payload.as_ref()
     }
 
-    /// Consume this admission and return its connection identifier and payload.
-    pub const fn into_parts(self) -> (&'a str, &'a [u8]) {
-        (self.cid, self.payload)
+    /// Consume this admission while retaining its raw-frame capacity lease.
+    ///
+    /// A callback that transfers the payload into another bounded queue should
+    /// hold the returned lease until that queue has admitted the payload, then
+    /// drop it immediately. This prevents the transport's raw-frame bound from
+    /// accounting for downstream callback execution time.
+    pub fn into_parts(self) -> (&'a str, Bytes, InboundFrameCapacityLease) {
+        (self.cid, self.payload, self.capacity)
+    }
+}
+
+/// Opaque ownership of one transport raw-frame capacity reservation.
+///
+/// Dropping this value releases the reservation. It cannot be cloned, so a
+/// downstream bounded queue can use it as a precise handoff witness.
+pub struct InboundFrameCapacityLease {
+    _permit: InboundFramePermit,
+}
+
+impl InboundFrameCapacityLease {
+    pub(crate) const fn new(permit: InboundFramePermit) -> Self {
+        Self { _permit: permit }
     }
 }
 

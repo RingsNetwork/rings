@@ -6,13 +6,35 @@ use crate::message::MessageMeta;
 pub(super) const INBOUND_LANE_COUNT: usize = MessageClass::COUNT + 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) struct InboundLane(usize);
+pub(super) enum InboundLane {
+    DhtControl,
+    Storage,
+    E2e,
+    Application,
+    Reassembly,
+}
 
 impl InboundLane {
-    pub(super) const REASSEMBLY: Self = Self(MessageClass::COUNT);
+    pub(super) const DHT_CONTROL: Self = Self::DhtControl;
+    pub(super) const STORAGE: Self = Self::Storage;
+    pub(super) const E2E: Self = Self::E2e;
+    pub(super) const APPLICATION: Self = Self::Application;
+    pub(super) const REASSEMBLY: Self = Self::Reassembly;
+    pub(super) const ALL: [Self; INBOUND_LANE_COUNT] = [
+        Self::DHT_CONTROL,
+        Self::STORAGE,
+        Self::E2E,
+        Self::APPLICATION,
+        Self::REASSEMBLY,
+    ];
 
     pub(super) const fn from_class(class: MessageClass) -> Self {
-        Self(class.index())
+        match class {
+            MessageClass::DhtControl => Self::DHT_CONTROL,
+            MessageClass::Storage => Self::STORAGE,
+            MessageClass::E2e => Self::E2E,
+            MessageClass::Application => Self::APPLICATION,
+        }
     }
 
     pub(super) const fn from_meta(meta: MessageMeta) -> Self {
@@ -35,18 +57,16 @@ impl InboundLane {
     }
 
     pub(super) const fn index(self) -> usize {
-        self.0
-    }
-
-    pub(super) const fn from_index(index: usize) -> Option<Self> {
-        if index < INBOUND_LANE_COUNT {
-            Some(Self(index))
-        } else {
-            None
+        match self {
+            Self::DhtControl => 0,
+            Self::Storage => 1,
+            Self::E2e => 2,
+            Self::Application => 3,
+            Self::Reassembly => MessageClass::COUNT,
         }
     }
 
-    pub(super) fn is_logical_data(self) -> bool {
-        self != Self::from_class(MessageClass::DhtControl) && self != Self::REASSEMBLY
+    pub(super) const fn is_logical_data(self) -> bool {
+        matches!(self, Self::Storage | Self::E2e | Self::Application)
     }
 }

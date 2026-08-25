@@ -20,10 +20,10 @@ const DUMMY_NATIVE_TEST_TIMEOUT_PROFILE: TransportTimeoutProfile = TransportTime
 
 const PRODUCTION_TRANSPORT_TIMEOUT_PROFILE: TransportTimeoutProfile = TransportTimeoutProfile {
     send_accept: Duration::from_secs(5),
-    first_frame_admission: Duration::from_secs(25),
-    delivery: Duration::from_secs(25),
-    tracked_payload: Duration::from_secs(25),
-    close: Duration::from_secs(5),
+    first_frame_admission: rings_transport::core::transport::IRREVOCABLE_SEND_COMPLETION_TIMEOUT,
+    delivery: rings_transport::core::transport::IRREVOCABLE_SEND_COMPLETION_TIMEOUT,
+    tracked_payload: rings_transport::core::transport::IRREVOCABLE_SEND_COMPLETION_TIMEOUT,
+    close: rings_transport::core::transport::CONNECTION_RETIRE_TIMEOUT,
 };
 
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]

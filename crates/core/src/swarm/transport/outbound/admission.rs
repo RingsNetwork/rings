@@ -1,18 +1,21 @@
-use std::sync::atomic::AtomicU8;
-use std::sync::atomic::Ordering;
-use std::sync::Arc;
+//! Detached first-frame admission layered above backend send admission.
+//!
+//! `Pending -> Irrevocable -> Accepted` publishes first-frame success.
+//! `Pending -> Cancelled` wins cancellation before the backend boundary, while
+//! `Irrevocable -> Cancelled` is an explicit rollback allowed only when backend
+//! admission did not succeed. The shared transport state model defines these
+//! edges; this wrapper adds the stop signal required by detached payload work.
+
+use rings_transport::core::admission::AdmissionEvent;
+use rings_transport::core::admission::AdmissionPhase;
+use rings_transport::core::admission::AtomicAdmission;
 
 use crate::lifecycle::StopSource;
 use crate::lifecycle::StopToken;
 
-const PENDING: u8 = 0;
-const CANCELLED: u8 = 1;
-const IRREVOCABLE: u8 = 2;
-const SUCCEEDED: u8 = 3;
-
 #[derive(Clone)]
 pub(in crate::swarm::transport) struct DetachedAdmission {
-    state: Arc<AtomicU8>,
+    state: AtomicAdmission,
     stop: StopSource,
 }
 
@@ -31,7 +34,7 @@ pub(in crate::swarm::transport) enum DetachedAdmissionClaim {
 impl DetachedAdmission {
     pub(in crate::swarm::transport) fn new() -> Self {
         Self {
-            state: Arc::new(AtomicU8::new(PENDING)),
+            state: AtomicAdmission::new(),
             stop: StopSource::new(),
         }
     }
@@ -41,11 +44,8 @@ impl DetachedAdmission {
     }
 
     pub(in crate::swarm::transport) fn cancel(&self) -> DetachedAdmissionCancel {
-        match self
-            .state
-            .compare_exchange(PENDING, CANCELLED, Ordering::AcqRel, Ordering::Acquire)
-        {
-            Ok(_) | Err(CANCELLED) => {
+        match self.state.try_transition(AdmissionEvent::Cancel) {
+            Ok(_) | Err(AdmissionPhase::Cancelled) => {
                 self.stop.request_stop();
                 DetachedAdmissionCancel::Cancelled
             }
@@ -56,30 +56,23 @@ impl DetachedAdmission {
     pub(in crate::swarm::transport) fn try_mark_irrevocable(
         &self,
     ) -> Option<DetachedAdmissionClaim> {
-        match self
-            .state
-            .compare_exchange(PENDING, IRREVOCABLE, Ordering::AcqRel, Ordering::Acquire)
-        {
+        match self.state.try_transition(AdmissionEvent::MarkIrrevocable) {
             Ok(_) => Some(DetachedAdmissionClaim::New),
-            Err(IRREVOCABLE | SUCCEEDED) => Some(DetachedAdmissionClaim::Existing),
+            Err(AdmissionPhase::Irrevocable | AdmissionPhase::Accepted) => {
+                Some(DetachedAdmissionClaim::Existing)
+            }
             Err(_) => None,
         }
     }
 
     pub(in crate::swarm::transport) fn rollback_irrevocable_send(&self) {
-        if self
-            .state
-            .compare_exchange(IRREVOCABLE, CANCELLED, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
+        if self.state.try_transition(AdmissionEvent::Rollback).is_ok() {
             self.stop.request_stop();
         }
     }
 
     pub(in crate::swarm::transport) fn try_succeed(&self) -> bool {
-        self.state
-            .compare_exchange(IRREVOCABLE, SUCCEEDED, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+        self.state.try_transition(AdmissionEvent::Accept).is_ok()
     }
 
     pub(in crate::swarm::transport) fn enforce_cancelled_stop(&self) {

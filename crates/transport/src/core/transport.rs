@@ -4,13 +4,12 @@
 //! There is also a [TransportInterface] trait, which is used to specify the management of all
 //! [ConnectionInterface] objects.
 
-use std::sync::atomic::AtomicU8;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 #[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
 use std::sync::Mutex;
 #[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
 use std::sync::MutexGuard;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -20,6 +19,9 @@ use serde::Serialize;
 
 use crate::callback::InboundFrameCapacity;
 use crate::connection_ref::ConnectionRef;
+use crate::core::admission::AdmissionEvent;
+use crate::core::admission::AdmissionPhase;
+use crate::core::admission::AtomicAdmission;
 use crate::core::callback::BoxedTransportCallback;
 use crate::core::sdp::parse_sdp_max_message_size;
 use crate::delivery::DeliveryFuture;
@@ -46,6 +48,11 @@ macro_rules! define_transport_messages {
 
 define_transport_messages!(Custom);
 
+/// Maximum time a native backend drives an irrevocable send to completion.
+pub const IRREVOCABLE_SEND_COMPLETION_TIMEOUT: Duration = Duration::from_secs(25);
+/// Maximum cleanup interval after a connection generation becomes terminal.
+pub const CONNECTION_RETIRE_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[cfg(target_family = "wasm")]
 type SendPermitPredicate = dyn Fn() -> bool;
 #[cfg(not(target_family = "wasm"))]
@@ -66,17 +73,17 @@ type SendPermitIrrevocableGuard = dyn for<'a> Fn(SendPermitClaim<'a>) + Send + S
 pub struct SendPermit {
     predicate: Arc<SendPermitPredicate>,
     irrevocable_guard: Arc<SendPermitIrrevocableGuard>,
-    state: Arc<AtomicU8>,
+    state: AtomicAdmission,
 }
 
 /// One-use capability that linearizes backend admission with an external guard.
 pub struct SendPermitClaim<'a> {
-    state: &'a Arc<AtomicU8>,
+    state: &'a AtomicAdmission,
 }
 
 /// Proof that a backend crossed the final cancellation-safe send boundary.
 pub struct IrrevocableSendPermit {
-    state: Arc<AtomicU8>,
+    state: AtomicAdmission,
 }
 
 /// Retires a connection generation when an irrevocable send does not reach acceptance.
@@ -92,41 +99,29 @@ pub(crate) struct IrrevocableSendGuard<F: FnOnce()> {
     retire: Option<F>,
 }
 
-const SEND_REVOCABLE: u8 = 0;
-const SEND_IRREVOCABLE: u8 = 1;
-const SEND_ACCEPTED: u8 = 2;
-const SEND_CANCELLED: u8 = 3;
-
 /// Shared observation of whether a one-send permit reached its linearization point.
 #[derive(Clone)]
 pub struct SendAcceptance {
-    state: Arc<AtomicU8>,
+    state: AtomicAdmission,
 }
 
 impl SendAcceptance {
     /// Return whether the backend crossed its final cancellation-safe boundary.
     pub fn is_irrevocable(&self) -> bool {
         matches!(
-            self.state.load(Ordering::Acquire),
-            SEND_IRREVOCABLE | SEND_ACCEPTED
+            self.state.phase(),
+            AdmissionPhase::Irrevocable | AdmissionPhase::Accepted
         )
     }
 
     /// Return whether the backend accepted the send permit.
     pub fn is_accepted(&self) -> bool {
-        self.state.load(Ordering::Acquire) == SEND_ACCEPTED
+        self.state.phase() == AdmissionPhase::Accepted
     }
 
     /// Atomically cancel a send that has not crossed its irrevocable boundary.
     pub fn try_cancel(&self) -> bool {
-        self.state
-            .compare_exchange(
-                SEND_REVOCABLE,
-                SEND_CANCELLED,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
+        self.state.try_transition(AdmissionEvent::Cancel).is_ok()
     }
 }
 
@@ -134,12 +129,7 @@ impl SendPermitClaim<'_> {
     /// Claim the final cancellation-safe boundary while the caller's guards are held.
     pub fn try_claim(self) -> bool {
         self.state
-            .compare_exchange(
-                SEND_REVOCABLE,
-                SEND_IRREVOCABLE,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
+            .try_transition(AdmissionEvent::MarkIrrevocable)
             .is_ok()
     }
 }
@@ -153,7 +143,7 @@ impl SendPermit {
             irrevocable_guard: Arc::new(|claim| {
                 let _claimed = claim.try_claim();
             }),
-            state: Arc::new(AtomicU8::new(SEND_REVOCABLE)),
+            state: AtomicAdmission::new(),
         }
     }
 
@@ -165,7 +155,7 @@ impl SendPermit {
             irrevocable_guard: Arc::new(|claim| {
                 let _claimed = claim.try_claim();
             }),
-            state: Arc::new(AtomicU8::new(SEND_REVOCABLE)),
+            state: AtomicAdmission::new(),
         }
     }
 
@@ -215,7 +205,7 @@ impl SendPermit {
             return None;
         }
         (self.irrevocable_guard)(SendPermitClaim { state: &self.state });
-        if self.state.load(Ordering::Acquire) != SEND_IRREVOCABLE {
+        if self.state.phase() != AdmissionPhase::Irrevocable {
             return None;
         }
         Some(IrrevocableSendPermit { state: self.state })
@@ -224,7 +214,7 @@ impl SendPermit {
     /// Return a shared observer for the backend acceptance boundary.
     pub fn acceptance(&self) -> SendAcceptance {
         SendAcceptance {
-            state: Arc::clone(&self.state),
+            state: self.state.clone(),
         }
     }
 }
@@ -232,12 +222,7 @@ impl SendPermit {
 impl IrrevocableSendPermit {
     /// Consume the proof and publish successful backend queue admission.
     pub fn mark_accepted(self) {
-        let transitioned = self.state.compare_exchange(
-            SEND_IRREVOCABLE,
-            SEND_ACCEPTED,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
+        let transitioned = self.state.try_transition(AdmissionEvent::Accept);
         debug_assert!(
             transitioned.is_ok(),
             "send acceptance requires irrevocable state"

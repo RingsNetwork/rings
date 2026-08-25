@@ -731,6 +731,50 @@ async fn scheduler_shutdown_revokes_a_frame_waiting_at_transport_dispatch() -> R
 
 #[cfg(feature = "dummy")]
 #[tokio::test]
+async fn scheduler_shutdown_after_backend_acceptance_preserves_detached_success() -> Result<()> {
+    let (transport, peer, _attempt) = transport_with_routable_peer().await?;
+    let payload = MessagePayload::new_send(
+        Message::custom(b"shutdown-after-backend-acceptance")?,
+        transport.session_sk(),
+        peer,
+        peer,
+    )?;
+    dummy_controlled::reset_sent_count();
+    dummy_controlled::set_drop_messages(true);
+    dummy_controlled::pause_irrevocable_send();
+    let sending_transport = Arc::clone(&transport);
+    let send = tokio::spawn(async move {
+        sending_transport
+            .send_payload_detached_with_outcome(payload)
+            .await
+    });
+
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while !dummy_controlled::irrevocable_send_gate_waiting() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| Error::InvalidMessage("send did not become irrevocable".to_string()))?;
+    transport.outbound_schedulers.shutdown(peer);
+    dummy_controlled::release_irrevocable_send_gate();
+
+    let outcome = send
+        .await
+        .map_err(|error| Error::InvalidMessage(format!("send task failed: {error}")))??;
+    dummy_controlled::set_drop_messages(false);
+    assert_eq!(outcome, SendCompletionOutcome::Succeeded);
+    assert_eq!(dummy_controlled::sent_count(), 1);
+    assert_eq!(
+        transport.outbound_admitted_transfer_total_for_test(),
+        0,
+        "accepted completion must publish only after scheduler capacity is released"
+    );
+    Ok(())
+}
+
+#[cfg(feature = "dummy")]
+#[tokio::test]
 async fn scheduler_shutdown_cancels_a_send_before_queue_acceptance() -> Result<()> {
     let (transport, peer, _attempt) = transport_with_routable_peer().await?;
     let payload = MessagePayload::new_send(

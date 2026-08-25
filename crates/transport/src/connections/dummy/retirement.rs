@@ -1,4 +1,14 @@
-use super::*;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Mutex;
+
+use super::DummyConnection;
+use super::DummyConnectionState;
+use super::CONNS;
+use crate::callback::InnerTransportCallback;
+use crate::core::transport::WebrtcConnectionState;
+use crate::sync_utils::lock_recover;
 
 fn mark_connection_state_closed(
     connection_state: &Arc<Mutex<DummyConnectionState>>,

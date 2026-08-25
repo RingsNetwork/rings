@@ -1,6 +1,15 @@
-use super::*;
+use super::decode_payload;
+use super::finish_reply;
+use super::memory_reservation;
+use super::DecodedInboundFrame;
+use super::InboundEvent;
+use super::InboundFailure;
+use super::InboundLane;
+use super::InboundProcessor;
 use crate::chunk::ReassemblyOutcome;
 use crate::chunk::ReassemblyRejection;
+use crate::error::Error;
+use crate::error::Result;
 
 pub(super) async fn process_chunk_event(
     processor: &InboundProcessor,
@@ -45,7 +54,7 @@ pub(super) async fn process_chunk_event(
     let DecodedInboundFrame {
         payload,
         prepared_message,
-    } = match decode_payload(processor, event.peer, bytes.as_ref(), None).await {
+    } = match decode_payload(processor, event.peer, bytes.as_ref()).await {
         Ok(decoded) => decoded,
         Err(error) => {
             finish_reply(event.reply, Err(InboundFailure::Core(error)));
@@ -83,7 +92,6 @@ pub(super) async fn process_chunk_event(
         payload,
         prepared_message: Some(message),
         lane,
-        is_chunk: false,
         permit: event.permit,
         reply: event.reply,
     })

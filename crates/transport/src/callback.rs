@@ -36,6 +36,7 @@ use bytes::Bytes;
 
 use crate::core::callback::AdmittedInboundMessage;
 use crate::core::callback::BoxedTransportCallback;
+use crate::core::callback::InboundFrameCapacityLease;
 use crate::core::transport::BorrowedTransportMessage;
 use crate::core::transport::TransportInterface;
 #[cfg(test)]
@@ -172,18 +173,18 @@ pub(crate) const fn inbound_frame_exceeds_protocol_ceiling(bytes: usize) -> bool
     bytes > crate::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE
 }
 
-/// RAII ownership of one admitted raw frame until its core callback completes.
+/// RAII ownership of one admitted raw frame until a downstream bounded queue takes ownership.
 pub(crate) struct InboundFramePermit {
     capacity: Arc<InboundFrameCapacity>,
     peer: Arc<str>,
     bytes: usize,
 }
 
-/// One decoded transport frame retaining its raw-frame capacity until callback completion.
+/// One decoded transport frame retaining raw capacity until downstream admission.
 pub struct AdmittedInboundFrame {
     payload: Bytes,
     owner: Arc<()>,
-    _permit: InboundFramePermit,
+    permit: InboundFramePermit,
 }
 
 /// Result of decoding and capacity-admitting one raw backend frame.
@@ -253,8 +254,7 @@ pub struct InnerTransportCallback {
     all(target_family = "wasm", feature = "web-sys-webrtc")
 ))]
 struct InvalidFrameWorkerGuard<'a> {
-    state: &'a AtomicUsize,
-    armed: bool,
+    state: Option<&'a AtomicUsize>,
 }
 
 #[cfg(any(
@@ -264,7 +264,11 @@ struct InvalidFrameWorkerGuard<'a> {
 ))]
 impl<'a> InvalidFrameWorkerGuard<'a> {
     const fn new(state: &'a AtomicUsize) -> Self {
-        Self { state, armed: true }
+        Self { state: Some(state) }
+    }
+
+    fn disarm(&mut self) {
+        self.state.take();
     }
 }
 
@@ -275,12 +279,12 @@ impl<'a> InvalidFrameWorkerGuard<'a> {
 ))]
 impl Drop for InvalidFrameWorkerGuard<'_> {
     fn drop(&mut self) {
-        if self.armed {
+        if let Some(state) = self.state.take() {
             // Cancellation is terminal for this best-effort measurement batch.
             // One atomic swap prevents a producer from observing a stale active
             // worker: a producer before the swap is discarded with the batch;
             // one after it observes idle state and starts a replacement.
-            self.state.swap(0, Ordering::AcqRel);
+            state.swap(0, Ordering::AcqRel);
         }
     }
 }
@@ -466,7 +470,7 @@ impl InnerTransportCallback {
         InboundFrameAdmission::Admitted(AdmittedInboundFrame {
             payload,
             owner: Arc::clone(&self.admission_identity),
-            _permit: permit,
+            permit,
         })
     }
 
@@ -476,15 +480,21 @@ impl InnerTransportCallback {
     #[cfg(all(target_family = "wasm", feature = "web-sys-webrtc"))]
     define_prepare_inbound_frame!(Rc);
 
-    /// Dispatch one capacity-admitted frame and release its permit on completion.
+    /// Dispatch one capacity-admitted frame and transfer its permit to the callback.
     pub async fn handle_admitted_frame(&self, frame: AdmittedInboundFrame) {
         if !Arc::ptr_eq(&self.admission_identity, &frame.owner)
-            || frame._permit.peer.as_ref() != self.cid.as_ref()
+            || frame.permit.peer.as_ref() != self.cid.as_ref()
         {
             tracing::error!(peer = %self.cid, "rejected inbound frame admitted by another callback");
             return;
         }
-        let message = AdmittedInboundMessage::new(&self.cid, &frame.payload);
+        let AdmittedInboundFrame {
+            payload,
+            owner: _,
+            permit,
+        } = frame;
+        let message =
+            AdmittedInboundMessage::new(&self.cid, payload, InboundFrameCapacityLease::new(permit));
         if let Err(error) = self.callback.on_admitted_message(message).await {
             tracing::error!("Callback on_admitted_message failed: {error:?}");
         }
@@ -548,7 +558,7 @@ impl InnerTransportCallback {
             }
 
             if self.release_invalid_frame_worker_if_idle() {
-                active_guard.armed = false;
+                active_guard.disarm();
                 return;
             }
             yield_invalid_frame_report_worker().await;
@@ -626,6 +636,9 @@ impl InnerTransportCallback {
     }
 }
 
+#[cfg(all(test, not(target_family = "wasm")))]
+mod capacity_handoff_tests;
+
 #[cfg(test)]
 mod tests {
     #[cfg(not(target_family = "wasm"))]
@@ -659,11 +672,12 @@ mod tests {
             &self,
             message: AdmittedInboundMessage<'_>,
         ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-            let (cid, payload) = message.into_parts();
+            let (cid, payload, capacity) = message.into_parts();
             self.admitted
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push((cid.to_owned(), payload.to_vec()));
+            drop((payload, capacity));
             Ok(())
         }
     }

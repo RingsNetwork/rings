@@ -296,7 +296,7 @@ impl SwarmTransport {
         self.commit_pending_reservation(peer)
     }
 
-    /// Validate a reservation and expire stale lifecycle records before its commit.
+    /// Validate the remote-peer precondition and expire stale records before commit.
     ///
     /// Separation law: validation is pure; expiry and commit are separate lifecycle mutations,
     /// each serialized by the shared boundary without holding a synchronous lock across await.

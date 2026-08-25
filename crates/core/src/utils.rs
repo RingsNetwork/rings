@@ -57,7 +57,7 @@ pub(crate) fn fair_reservation_fits<const N: usize>(
 /// Capacity available to one class after preserving every other class reservation.
 #[allow(
     clippy::indexing_slicing,
-    reason = "the loop condition proves the fixed-array index is below N"
+    reason = "stable const evaluation lacks array.get; the loop condition proves index < N"
 )]
 pub(crate) const fn admissible_capacity<const N: usize>(
     capacity: usize,
@@ -74,6 +74,19 @@ pub(crate) const fn admissible_capacity<const N: usize>(
         index += 1;
     }
     capacity.saturating_sub(reserved_for_other_classes)
+}
+
+/// Conservative retained-memory witness for simultaneously owned wire-sized
+/// representations during decode, encode, or contiguous reassembly.
+pub(crate) const fn retained_wire_bytes(wire_bytes: usize) -> usize {
+    wire_bytes.saturating_mul(2)
+}
+
+/// Which dimension rejected a transactional count-and-byte reservation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CountedReservationRejection {
+    Count,
+    Bytes,
 }
 
 /// Return whether one request still fits entirely inside its class's fixed
@@ -169,6 +182,81 @@ impl<const N: usize> ReservedCapacity<N> {
 
     pub(crate) const fn admitted(self) -> usize {
         self.admitted
+    }
+}
+
+/// Transactional count-and-byte capacity sharing the same class partition.
+#[derive(Clone, Copy)]
+pub(crate) struct CountedReservedCapacity<const N: usize> {
+    counts: ReservedCapacity<N>,
+    bytes: ReservedCapacity<N>,
+}
+
+impl<const N: usize> CountedReservedCapacity<N> {
+    pub(crate) const fn new() -> Self {
+        Self {
+            counts: ReservedCapacity::new(),
+            bytes: ReservedCapacity::new(),
+        }
+    }
+
+    pub(crate) fn reservation_covers(
+        &self,
+        class_index: usize,
+        bytes: usize,
+        count_reservations: &[usize; N],
+        byte_reservations: &[usize; N],
+    ) -> bool {
+        self.counts
+            .reservation_covers(class_index, 1, count_reservations)
+            && self
+                .bytes
+                .reservation_covers(class_index, bytes, byte_reservations)
+    }
+
+    pub(crate) fn try_reserve(
+        &mut self,
+        class_index: usize,
+        bytes: usize,
+        count_capacity: usize,
+        count_reservations: &[usize; N],
+        byte_capacity: usize,
+        byte_reservations: &[usize; N],
+    ) -> Result<(), CountedReservationRejection> {
+        if !self
+            .counts
+            .try_reserve(class_index, 1, count_capacity, count_reservations)
+        {
+            return Err(CountedReservationRejection::Count);
+        }
+        if !self
+            .bytes
+            .try_reserve(class_index, bytes, byte_capacity, byte_reservations)
+        {
+            self.counts.release(class_index, 1);
+            return Err(CountedReservationRejection::Bytes);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn release(&mut self, class_index: usize, bytes: usize) {
+        self.counts.release(class_index, 1);
+        self.bytes.release(class_index, bytes);
+    }
+
+    pub(crate) const fn admitted_count(self) -> usize {
+        self.counts.admitted()
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn admitted_bytes(self) -> usize {
+        self.bytes.admitted()
+    }
+}
+
+impl<const N: usize> Default for CountedReservedCapacity<N> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

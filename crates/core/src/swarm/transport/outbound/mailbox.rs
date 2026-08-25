@@ -1,3 +1,11 @@
+//! Two-lane worker mailbox with cancellation/control precedence.
+//!
+//! Capacity is owned by each submitted item before it enters this unbounded
+//! channel. Priority input is observed first, but each drain has a fixed budget
+//! and then includes regular input, so a sustained priority stream cannot hide
+//! already-buffered regular commands forever. Closing is serialized with
+//! validated submission by the sender mutex.
+
 use std::sync::Mutex;
 
 use futures::channel::mpsc;
@@ -8,6 +16,12 @@ use futures::stream::StreamExt;
 struct Senders<T> {
     priority: mpsc::UnboundedSender<T>,
     regular: mpsc::UnboundedSender<T>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum MailboxLane {
+    Priority,
+    Regular,
 }
 
 pub(super) struct MailboxSender<T> {
@@ -41,12 +55,11 @@ pub(super) fn channel<T>() -> (MailboxSender<T>, MailboxReceiver<T>) {
 }
 
 impl<T> MailboxSender<T> {
-    pub(super) fn send(&self, item: T, priority: bool) -> Result<(), ()> {
+    pub(super) fn send(&self, item: T, lane: MailboxLane) -> Result<(), ()> {
         let senders = self.senders.lock().map_err(|_| ())?;
-        let sender = if priority {
-            &senders.priority
-        } else {
-            &senders.regular
+        let sender = match lane {
+            MailboxLane::Priority => &senders.priority,
+            MailboxLane::Regular => &senders.regular,
         };
         sender.unbounded_send(item).map_err(|_| ())
     }
@@ -54,7 +67,7 @@ impl<T> MailboxSender<T> {
     pub(super) fn send_if(
         &self,
         item: T,
-        priority: bool,
+        lane: MailboxLane,
         predicate: impl FnOnce(&T) -> bool,
     ) -> Result<(), T> {
         let senders = match self.senders.lock() {
@@ -64,10 +77,9 @@ impl<T> MailboxSender<T> {
         if !predicate(&item) {
             return Err(item);
         }
-        let sender = if priority {
-            &senders.priority
-        } else {
-            &senders.regular
+        let sender = match lane {
+            MailboxLane::Priority => &senders.priority,
+            MailboxLane::Regular => &senders.regular,
         };
         sender
             .unbounded_send(item)
@@ -191,16 +203,18 @@ impl<T> MailboxReceiver<T> {
 
 #[cfg(test)]
 mod tests {
+    use super::MailboxLane::Priority;
+    use super::MailboxLane::Regular;
     use super::*;
 
     #[test]
     fn priority_submission_bypasses_regular_backlog_beyond_drain_budget() {
         let (sender, mut receiver) = channel();
         for index in 0..64 {
-            sender.send(index, false).expect("regular mailbox open");
+            sender.send(index, Regular).expect("regular mailbox open");
         }
         sender
-            .send(usize::MAX, true)
+            .send(usize::MAX, Priority)
             .expect("priority mailbox open");
 
         let first_batch = receiver.drain_available(32);
@@ -213,9 +227,9 @@ mod tests {
     #[test]
     fn validation_and_regular_drain_share_the_sender_linearization_boundary() {
         let (sender, mut receiver) = channel();
-        sender.send(1, false).expect("regular mailbox open");
-        assert_eq!(sender.send_if(2, false, |_| false), Err(2));
-        sender.send(3, false).expect("regular mailbox open");
+        sender.send(1, Regular).expect("regular mailbox open");
+        assert_eq!(sender.send_if(2, Regular, |_| false), Err(2));
+        sender.send(3, Regular).expect("regular mailbox open");
 
         assert_eq!(receiver.drain_regular_available(), vec![1, 3]);
         assert!(receiver.drain_regular_available().is_empty());
@@ -232,11 +246,11 @@ mod tests {
         let (sender, mut receiver) = channel();
         for index in 0..64 {
             sender
-                .send(Command::Submit(index), false)
+                .send(Command::Submit(index), Regular)
                 .expect("regular mailbox open");
         }
         sender
-            .send(Command::Cancel, true)
+            .send(Command::Cancel, Priority)
             .expect("priority mailbox open");
 
         let first_batch = receiver.drain_available(32);
@@ -248,8 +262,8 @@ mod tests {
     #[test]
     fn drain_all_grows_from_actual_items_instead_of_the_unbounded_budget() {
         let (sender, mut receiver) = channel();
-        sender.send(1, true).expect("priority mailbox open");
-        sender.send(2, false).expect("regular mailbox open");
+        sender.send(1, Priority).expect("priority mailbox open");
+        sender.send(2, Regular).expect("regular mailbox open");
 
         assert_eq!(receiver.drain_all(), vec![1, 2]);
     }
@@ -264,7 +278,7 @@ mod tests {
         let submitting = {
             let sender = std::sync::Arc::clone(&sender);
             std::thread::spawn(move || {
-                let result = sender.send_if(1, false, |_| {
+                let result = sender.send_if(1, Regular, |_| {
                     validation_entered_tx
                         .send(())
                         .expect("validation observer must remain open");
@@ -304,6 +318,6 @@ mod tests {
         closing.join().expect("close thread must not panic");
 
         assert_eq!(receiver.drain_all(), vec![1]);
-        assert_eq!(sender.send_if(2, false, |_| true), Err(2));
+        assert_eq!(sender.send_if(2, Regular, |_| true), Err(2));
     }
 }

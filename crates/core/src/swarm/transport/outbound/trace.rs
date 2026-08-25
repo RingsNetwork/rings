@@ -15,6 +15,8 @@ static OUTBOUND_FRAME_TRACES: Mutex<BTreeMap<Did, Vec<FrameAdmission>>> =
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 static PAUSED_WORKERS: Mutex<BTreeSet<Did>> = Mutex::new(BTreeSet::new());
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+static ACTIVE_TRANSFERS: Mutex<BTreeMap<Did, usize>> = Mutex::new(BTreeMap::new());
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 static SUBMITTED_TRANSFERS: Mutex<BTreeMap<Did, usize>> = Mutex::new(BTreeMap::new());
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 static HANDLED_TRANSFERS: Mutex<BTreeMap<Did, usize>> = Mutex::new(BTreeMap::new());
@@ -38,6 +40,41 @@ fn lock_paused_workers() -> std::sync::MutexGuard<'static, BTreeSet<Did>> {
     PAUSED_WORKERS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+fn lock_active_transfers() -> std::sync::MutexGuard<'static, BTreeMap<Did, usize>> {
+    ACTIVE_TRANSFERS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub(super) struct ActiveTransferGuard {
+    peer: Did,
+}
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+impl ActiveTransferGuard {
+    pub(super) fn enter(peer: Did) -> Self {
+        let mut active = lock_active_transfers();
+        let count = active.entry(peer).or_default();
+        *count = count.saturating_add(1);
+        Self { peer }
+    }
+}
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+impl Drop for ActiveTransferGuard {
+    fn drop(&mut self) {
+        let mut active = lock_active_transfers();
+        if let Some(count) = active.get_mut(&self.peer) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                active.remove(&self.peer);
+            }
+        }
+    }
 }
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
@@ -117,6 +154,11 @@ impl super::super::SwarmTransport {
     #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn outbound_buffered_submissions_for_test(&self, peer: Did) -> usize {
         buffered_submissions(peer)
+    }
+
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) fn outbound_worker_has_active_transfer_for_test(&self, peer: Did) -> bool {
+        lock_active_transfers().contains_key(&peer)
     }
 
     pub(crate) fn start_outbound_frame_trace_for_test(&self, peer: Did) {

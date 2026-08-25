@@ -386,7 +386,8 @@ async fn cancelled_transfer_is_rejected_when_cancel_command_precedes_submit() ->
 async fn shutdown_releases_batch_before_first_tracked_completion() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
-    let _pending_delivery = PendingDeliveryGuard::new();
+    dummy_controlled::reset_sent_count();
+    let _paused_dispatch = PausedDispatchGuard::new();
     node1.swarm.transport.pause_outbound_worker_for_test(peer);
     let payloads = (0..40)
         .map(|index| {
@@ -425,8 +426,22 @@ async fn shutdown_releases_batch_before_first_tracked_completion() -> Result<()>
         Some(40)
     );
 
-    node1.swarm.transport.disconnect(peer).await?;
     node1.swarm.transport.resume_outbound_worker_for_test(peer);
+    wait_until("active tracked shutdown transfer", || {
+        node1
+            .swarm
+            .transport
+            .outbound_worker_has_active_transfer_for_test(peer)
+            && dummy_controlled::send_message_waiting_at_dispatch()
+            && node1
+                .swarm
+                .transport
+                .outbound_buffered_submissions_for_test(peer)
+                > 0
+            && dummy_controlled::sent_count() == 0
+    })
+    .await?;
+    node1.swarm.transport.disconnect(peer).await?;
     for (index, task) in tasks.into_iter().enumerate() {
         let outcome = timeout(Duration::from_secs(2), task)
             .await

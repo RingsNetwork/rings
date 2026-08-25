@@ -81,7 +81,7 @@ struct FramedOutboundTransfer {
 struct StopOnDrop {
     source: StopSource,
     handle: Option<OutboundPeerHandle>,
-    armed: bool,
+    authority: Option<()>,
 }
 
 async fn await_bounded_cleanup<F, T>(future: F, cleanup_grace: Duration) -> Option<T>
@@ -100,7 +100,7 @@ impl StopOnDrop {
         Self {
             source: StopSource::new(),
             handle: None,
-            armed: true,
+            authority: Some(()),
         }
     }
 
@@ -120,13 +120,13 @@ impl StopOnDrop {
     }
 
     fn disarm(&mut self) {
-        self.armed = false;
+        self.authority.take();
     }
 }
 
 impl Drop for StopOnDrop {
     fn drop(&mut self) {
-        if self.armed {
+        if self.authority.take().is_some() {
             self.request_stop();
         }
     }
@@ -135,7 +135,7 @@ impl Drop for StopOnDrop {
 struct DetachedAdmissionOnDrop {
     admission: DetachedAdmission,
     handle: OutboundPeerHandle,
-    armed: bool,
+    authority: Option<()>,
 }
 
 impl DetachedAdmissionOnDrop {
@@ -143,7 +143,7 @@ impl DetachedAdmissionOnDrop {
         Self {
             admission,
             handle,
-            armed: true,
+            authority: Some(()),
         }
     }
 
@@ -156,13 +156,13 @@ impl DetachedAdmissionOnDrop {
     }
 
     fn disarm(&mut self) {
-        self.armed = false;
+        self.authority.take();
     }
 }
 
 impl Drop for DetachedAdmissionOnDrop {
     fn drop(&mut self) {
-        if self.armed {
+        if self.authority.take().is_some() {
             self.cancel();
         }
     }
@@ -195,7 +195,18 @@ fn outbound_memory_reservation(wire_bytes: usize) -> usize {
     // Preparation owns the payload bytes plus the serialized transport frame.
     // TransportMessage shares the payload's Bytes allocation, so weighting by
     // two covers the whole-message peak without another wire-sized body copy.
-    wire_bytes.saturating_mul(2).max(1)
+    crate::utils::retained_wire_bytes(wire_bytes).max(1)
+}
+
+fn resolve_scheduler_loss(
+    admitted: &AdmittedConnection,
+    local_error: Error,
+) -> Result<SendCompletionOutcome> {
+    match admitted.ensure_current() {
+        Ok(()) => Err(local_error),
+        Err(Error::ConnectionAttemptSuperseded { .. }) => Ok(SendCompletionOutcome::Cancelled),
+        Err(error) => Err(error),
+    }
 }
 
 impl SwarmTransport {
@@ -402,25 +413,14 @@ impl SwarmTransport {
         receiver: futures::channel::oneshot::Receiver<Result<SendCompletionOutcome>>,
     ) -> Result<SendCompletionOutcome> {
         if let Err(error) = handle.submit(transfer, capacity_permit) {
-            return match admitted.ensure_current() {
-                Ok(()) => Err(error),
-                Err(Error::ConnectionAttemptSuperseded { .. }) => {
-                    Ok(SendCompletionOutcome::Cancelled)
-                }
-                Err(current_error) => Err(current_error),
-            };
+            return resolve_scheduler_loss(admitted, error);
         }
         match receiver.await {
             Ok(result) => result,
-            Err(_) => match admitted.ensure_current() {
-                Ok(()) => Err(Error::ChannelRecvMessageFailed(
-                    "outbound scheduler stopped".into(),
-                )),
-                Err(Error::ConnectionAttemptSuperseded { .. }) => {
-                    Ok(SendCompletionOutcome::Cancelled)
-                }
-                Err(error) => Err(error),
-            },
+            Err(_) => resolve_scheduler_loss(
+                admitted,
+                Error::ChannelRecvMessageFailed("outbound scheduler stopped".into()),
+            ),
         }
     }
 

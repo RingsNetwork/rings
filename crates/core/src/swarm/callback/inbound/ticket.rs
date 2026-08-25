@@ -1,9 +1,11 @@
 //! Per-lane ingress ordering tickets.
 //!
 //! Sequences increase monotonically. `reserve` publishes `Pending` before any
-//! matching `Ready`, and each ticket releases its admission turn exactly once:
-//! explicitly on commit or implicitly from `Drop`. Dropping an active ticket also
-//! publishes `Cancel`, so no abandoned sequence can block the actor lane.
+//! matching `Ready`, and each ticket releases its admission turn exactly once.
+//! The normal path releases immediately after core capacity admission so later
+//! same-lane frames can decode in parallel; `commit` and `Drop` are idempotent
+//! fallbacks. Dropping an active ticket also publishes `Cancel`, so no abandoned
+//! sequence can block the actor lane.
 
 use futures::channel::mpsc;
 use futures::channel::oneshot;

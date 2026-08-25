@@ -1,3 +1,10 @@
+//! Native send execution and connection-retirement boundaries.
+//!
+//! The backend polls a send primitive once while holding the retirement fence;
+//! after irrevocable admission, a bounded continuation owns completion. Panic,
+//! timeout, or abandoned continuation retires the connection generation before
+//! cleanup, so callers never treat an uncertain physical write as cancellable.
+
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -83,7 +90,7 @@ impl NativeRetirementFence {
 pub(super) struct RetirementFenceGuard {
     fence: NativeRetirementFence,
     acceptance: Option<SendAcceptance>,
-    armed: bool,
+    authority: Option<()>,
 }
 
 impl RetirementFenceGuard {
@@ -91,7 +98,7 @@ impl RetirementFenceGuard {
         Self {
             fence,
             acceptance: None,
-            armed: true,
+            authority: Some(()),
         }
     }
 
@@ -102,25 +109,23 @@ impl RetirementFenceGuard {
         Self {
             fence,
             acceptance: Some(acceptance),
-            armed: true,
+            authority: Some(()),
         }
     }
 
     pub(super) fn retire(&mut self) {
-        if self.armed {
-            self.armed = false;
-            if self
+        if self.authority.take().is_some()
+            && self
                 .acceptance
                 .as_ref()
                 .is_none_or(SendAcceptance::is_irrevocable)
-            {
-                self.fence.request();
-            }
+        {
+            self.fence.request();
         }
     }
 
     pub(super) fn disarm(&mut self) {
-        self.armed = false;
+        self.authority.take();
     }
 
     pub(super) fn fence(&self) -> &NativeRetirementFence {

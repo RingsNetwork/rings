@@ -4,7 +4,8 @@
 //! transfer finishes. Runnable heads use bounded DHT-control priority and
 //! round-robin service for storage, E2E, and application traffic.
 //! Cross-class order is not preserved; ordered sequences must stay in one class.
-//! The worker admits one frame before draining completions and choosing a lane.
+//! Each iteration applies cancellation, drains a bounded command/completion
+//! batch, then admits at most one frame before choosing again.
 //! This boundary can consume one send-accept budget and, after an irrevocable
 //! timeout, one bounded close interval before another lane runs.
 //!
@@ -25,8 +26,6 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::Weak;
 
-use bytes::Bytes;
-use futures::channel::oneshot;
 use futures::future::FutureExt;
 use futures::pin_mut;
 use futures::select;
@@ -42,14 +41,11 @@ use super::delivery::ChunkSendProgress;
 use super::delivery::SendCompletionOutcome;
 use super::delivery::TransferStop;
 use super::AdmittedConnection;
-use crate::chunk::Chunk;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
 use crate::lifecycle::StopSource;
-use crate::lifecycle::StopToken;
 use crate::measure::MeasureImpl;
-use crate::session::SessionSk;
 
 #[path = "outbound/admission.rs"]
 mod admission;
@@ -68,6 +64,8 @@ mod spawn;
 #[cfg(test)]
 #[path = "outbound/trace.rs"]
 mod trace;
+#[path = "outbound/transfer.rs"]
+mod transfer;
 
 pub(super) use admission::DetachedAdmission;
 pub(super) use admission::DetachedAdmissionCancel;
@@ -81,6 +79,7 @@ pub(crate) use capacity::OUTBOUND_CONTROL_RESERVED_TRANSFERS;
 pub(crate) use capacity::OUTBOUND_DATA_TRANSFER_CAPACITY;
 #[cfg(test)]
 pub(crate) use capacity::OUTBOUND_TRANSFER_QUEUE_CAPACITY;
+use mailbox::MailboxLane;
 use mailbox::MailboxReceiver;
 use mailbox::MailboxSender;
 use measurement::MeasurementReceiver;
@@ -94,10 +93,13 @@ use queue::TransferQueues;
 #[cfg(test)]
 use queue::OUTBOUND_CONTROL_BURST;
 use spawn::spawn_worker;
+pub(super) use transfer::ChunkFrames;
+use transfer::FinalTransferResult;
+pub(super) use transfer::OutboundTransfer;
+pub(super) use transfer::OutboundTransferRoute;
+use transfer::ShutdownBatch;
 
-#[cfg_attr(test, allow(dead_code))]
 pub(crate) const OUTBOUND_COMMAND_DRAIN_BUDGET: usize = 32;
-type TransferResultSender = oneshot::Sender<Result<SendCompletionOutcome>>;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 thread_local! {
     static OUTBOUND_SUBMIT_COUNT: Cell<usize> = const { Cell::new(0) };
@@ -118,244 +120,26 @@ fn record_outbound_submit_for_test() {
     OUTBOUND_SUBMIT_COUNT.with(|count| count.set(count.get().saturating_add(1)));
 }
 
-#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-pub(super) type ChunkFrames = Box<dyn Iterator<Item = Chunk> + Send>;
-#[cfg(all(feature = "wasm", target_family = "wasm"))]
-pub(super) type ChunkFrames = Box<dyn Iterator<Item = Chunk>>;
-
-enum FrameSource {
-    Whole(Option<Bytes>),
-    Chunked {
-        session_sk: SessionSk,
-        did: Did,
-        chunks: ChunkFrames,
-    },
+struct ScheduledTransfer<T = OutboundTransfer, P = TransferCapacityPermit> {
+    transfer: T,
+    capacity_permit: Option<P>,
 }
 
-impl FrameSource {
-    fn next_frame(&mut self) -> Result<Option<(Bytes, &'static str)>> {
-        match self {
-            Self::Whole(frame) => Ok(frame.take().map(|bytes| (bytes, "whole_message"))),
-            Self::Chunked {
-                session_sk,
-                did,
-                chunks,
-            } => {
-                let Some(chunk) = chunks.next() else {
-                    return Ok(None);
-                };
-                let [position, _total] = chunk.chunk;
-                let context = if position == 0 {
-                    "chunked_first"
-                } else {
-                    "chunked_tail"
-                };
-                frame_chunk(session_sk, *did, chunk).map(|bytes| Some((bytes, context)))
-            }
-        }
-    }
-}
-
-pub(super) struct OutboundTransfer {
-    class: TransferClass,
-    did: Did,
-    admitted: AdmittedConnection,
-    permit: ChunkSendPermit,
-    source: FrameSource,
-    completion: TransferCompletion,
-    first_frame_admitted: bool,
-    stop: TransferStop,
-    detached_admission: Option<DetachedAdmission>,
-}
-
-struct TransferCompletion {
-    policy: OutboundCompletion,
-    sender: Option<TransferResultSender>,
-}
-
-struct FinalTransferResult {
-    sender: TransferResultSender,
-    result: Result<SendCompletionOutcome>,
-}
-
-/// Owns every scheduler source until all capacity permits have been released.
-struct ShutdownBatch<T> {
-    ready: Vec<T>,
-    buffered: Vec<T>,
-}
-
-impl<T> ShutdownBatch<T> {
-    fn new(ready: Vec<T>, buffered: Vec<T>) -> Self {
-        Self { ready, buffered }
-    }
-
-    fn finalize<R>(self, finalize: impl FnMut(T) -> Option<R>) -> Vec<R> {
-        self.ready
-            .into_iter()
-            .chain(self.buffered)
-            .filter_map(finalize)
-            .collect()
-    }
-}
-
-impl FinalTransferResult {
-    /// Publish only after the scheduled transfer has dropped its capacity permit.
-    fn publish(self) {
-        let _ = self.sender.send(self.result);
-    }
-}
-
-impl TransferCompletion {
-    fn resolve_first_admission(&mut self) {
-        if self.policy == OutboundCompletion::Detached {
-            self.send(Ok(SendCompletionOutcome::Succeeded));
-        }
-    }
-
-    fn take_final(&mut self, result: Result<SendCompletionOutcome>) -> Option<FinalTransferResult> {
-        self.sender
-            .take()
-            .map(|sender| FinalTransferResult { sender, result })
-    }
-
-    fn send(&mut self, result: Result<SendCompletionOutcome>) {
-        if let Some(sender) = self.sender.take() {
-            let _ = sender.send(result);
-        }
-    }
-}
-
-pub(super) struct OutboundTransferRoute {
-    class: TransferClass,
-    did: Did,
-    admitted: AdmittedConnection,
-    permit: ChunkSendPermit,
-}
-
-impl OutboundTransferRoute {
-    pub(super) fn new(
-        class: TransferClass,
-        did: Did,
-        admitted: AdmittedConnection,
-        permit: ChunkSendPermit,
-    ) -> Self {
+impl<T, P> ScheduledTransfer<T, P> {
+    fn new(transfer: T, capacity_permit: P) -> Self {
         Self {
-            class,
-            did,
-            admitted,
-            permit,
+            transfer,
+            capacity_permit: Some(capacity_permit),
         }
     }
 }
 
-impl OutboundTransfer {
-    pub(super) fn whole(
-        route: OutboundTransferRoute,
-        data: Bytes,
-        completion: OutboundCompletion,
-        stop: StopToken,
-        detached_admission: Option<DetachedAdmission>,
-    ) -> (Self, oneshot::Receiver<Result<SendCompletionOutcome>>) {
-        Self::new(
-            route,
-            FrameSource::Whole(Some(data)),
-            completion,
-            stop,
-            detached_admission,
-        )
+impl<T, P> Drop for ScheduledTransfer<T, P> {
+    fn drop(&mut self) {
+        // Completion senders may live inside `transfer`. Release admission
+        // before Rust drops that field and wakes a receiver.
+        self.capacity_permit.take();
     }
-
-    pub(super) fn chunked(
-        route: OutboundTransferRoute,
-        session_sk: SessionSk,
-        chunks: ChunkFrames,
-        completion: OutboundCompletion,
-        stop: StopToken,
-        detached_admission: Option<DetachedAdmission>,
-    ) -> (Self, oneshot::Receiver<Result<SendCompletionOutcome>>) {
-        let did = route.did;
-        Self::new(
-            route,
-            FrameSource::Chunked {
-                session_sk,
-                did,
-                chunks,
-            },
-            completion,
-            stop,
-            detached_admission,
-        )
-    }
-
-    fn new(
-        route: OutboundTransferRoute,
-        source: FrameSource,
-        completion: OutboundCompletion,
-        stop: StopToken,
-        detached_admission: Option<DetachedAdmission>,
-    ) -> (Self, oneshot::Receiver<Result<SendCompletionOutcome>>) {
-        let (sender, receiver) = oneshot::channel();
-        let completion = TransferCompletion {
-            policy: completion,
-            sender: Some(sender),
-        };
-        (
-            Self {
-                class: route.class,
-                did: route.did,
-                admitted: route.admitted,
-                permit: route.permit,
-                source,
-                completion,
-                first_frame_admitted: false,
-                stop: TransferStop::new(stop),
-                detached_admission,
-            },
-            receiver,
-        )
-    }
-
-    fn class(&self) -> TransferClass {
-        self.class
-    }
-
-    fn next_frame(&mut self) -> Result<Option<(Bytes, &'static str)>> {
-        self.source.next_frame()
-    }
-
-    fn is_before_first_frame(&self) -> bool {
-        !self.first_frame_admitted
-    }
-
-    fn is_stopped(&self) -> bool {
-        self.stop.should_stop()
-    }
-
-    fn bind_scheduler_stop(&mut self, stop: StopToken) {
-        self.stop.bind_scheduler(stop);
-    }
-
-    fn resolve_frame_admission(&mut self) {
-        if !self.first_frame_admitted {
-            if let Some(admission) = &self.detached_admission {
-                if !admission.try_succeed() {
-                    admission.enforce_cancelled_stop();
-                    return;
-                }
-            }
-            self.first_frame_admitted = true;
-            self.completion.resolve_first_admission();
-        }
-    }
-
-    fn take_final(&mut self, result: Result<SendCompletionOutcome>) -> Option<FinalTransferResult> {
-        self.completion.take_final(result)
-    }
-}
-
-struct ScheduledTransfer {
-    transfer: OutboundTransfer,
-    _capacity_permit: TransferCapacityPermit,
 }
 
 enum OutboundCommand {
@@ -380,6 +164,18 @@ enum TerminationFairness {
     AdvanceFailedAttempt,
 }
 
+enum ActiveFrameStep {
+    Stopped,
+    Complete,
+    Failed(Error),
+    Send {
+        class: TransferClass,
+        before_first_frame: bool,
+        bytes: bytes::Bytes,
+        context: &'static str,
+    },
+}
+
 #[derive(Clone)]
 pub(super) struct OutboundPeerHandle {
     state: Arc<OutboundPeerState>,
@@ -391,12 +187,30 @@ struct OutboundPeerState {
     sender: MailboxSender<OutboundCommand>,
     cancel_requested: Arc<AtomicBool>,
     // Strong lifetime anchor; the peer registry intentionally stores only a Weak reference.
-    #[allow(
-        dead_code,
-        reason = "the field owns capacity for the peer state lifetime"
-    )]
-    capacity_anchor: Arc<TransferCapacity>,
+    _capacity_anchor: TransferCapacityAnchor,
     stop: StopSource,
+}
+
+struct TransferCapacityAnchor {
+    _capacity: Arc<TransferCapacity>,
+}
+
+impl TransferCapacityAnchor {
+    fn new(capacity: Arc<TransferCapacity>) -> Self {
+        Self {
+            _capacity: capacity,
+        }
+    }
+
+    #[cfg(all(test, not(target_family = "wasm")))]
+    fn try_acquire(
+        &self,
+        peer: Did,
+        class: TransferClass,
+        bytes: usize,
+    ) -> Result<TransferCapacityPermit> {
+        self._capacity.try_acquire(peer, class, bytes)
+    }
 }
 
 impl OutboundPeerHandle {
@@ -410,7 +224,7 @@ impl OutboundPeerHandle {
         if self.state.stop.is_stop_requested() {
             return Err(Error::ChannelSendMessageFailed);
         }
-        self.state.capacity_anchor.try_acquire(peer, class, bytes)
+        self.state._capacity_anchor.try_acquire(peer, class, bytes)
     }
 
     pub(super) fn submit(
@@ -423,16 +237,17 @@ impl OutboundPeerHandle {
         }
         let mut transfer = transfer;
         transfer.bind_scheduler_stop(self.state.stop.token());
-        let scheduled = ScheduledTransfer {
-            transfer,
-            _capacity_permit: capacity_permit,
-        };
+        let scheduled = ScheduledTransfer::new(transfer, capacity_permit);
         if self.state.stop.is_stop_requested() {
             return Err(Error::ChannelSendMessageFailed);
         }
-        let priority = scheduled.transfer.class() == TransferClass::DhtControl;
+        let lane = if scheduled.transfer.class() == TransferClass::DhtControl {
+            MailboxLane::Priority
+        } else {
+            MailboxLane::Regular
+        };
         let command = OutboundCommand::Submit(Box::new(scheduled));
-        let (result, submitted) = match self.state.sender.send_if(command, priority, |command| {
+        let (result, submitted) = match self.state.sender.send_if(command, lane, |command| {
             matches!(command, OutboundCommand::Submit(scheduled) if !scheduled.transfer.is_stopped())
         }) {
             Ok(()) => (Ok(()), true),
@@ -459,7 +274,10 @@ impl OutboundPeerHandle {
 
     pub(super) fn cancel_stopped(&self) {
         self.state.cancel_requested.store(true, Ordering::Release);
-        let _ = self.state.sender.send(OutboundCommand::CancelStopped, true);
+        let _ = self
+            .state
+            .sender
+            .send(OutboundCommand::CancelStopped, MailboxLane::Priority);
     }
 
     fn shutdown(&self) {
@@ -525,8 +343,15 @@ impl OutboundSchedulers {
 
     pub(super) fn handle(&self, peer: Did) -> Result<OutboundPeerHandle> {
         let mut registry = self.lock_registry();
-        if let Some(handle) = registry.peers.get(&peer) {
+        if let Some(handle) = registry
+            .peers
+            .get(&peer)
+            .filter(|handle| !handle.state.stop.is_stop_requested())
+        {
             return Ok(handle.clone());
+        }
+        if let Some(stopped) = registry.peers.remove(&peer) {
+            stopped.shutdown();
         }
         let capacity = registry.capacity(peer, &self.global_capacity);
         let (sender, receiver) = mailbox::channel();
@@ -537,14 +362,14 @@ impl OutboundSchedulers {
             peer,
             sender,
             cancel_requested: cancel_requested.clone(),
-            capacity_anchor: capacity,
+            _capacity_anchor: TransferCapacityAnchor::new(capacity),
             stop: stop.clone(),
         });
         let handle = OutboundPeerHandle { state };
         let (measurements, measurement_receiver) =
             MeasurementRecorder::channel(self.measure.clone(), peer);
         spawn_worker(
-            OutboundWorker::new(receiver, stop.token(), measurements, peer, cancel_requested),
+            OutboundWorker::new(receiver, stop, measurements, peer, cancel_requested),
             measurement_receiver,
         )?;
         registry.peers.insert(peer, handle.clone());
@@ -645,17 +470,19 @@ struct OutboundWorker {
     receiver: MailboxReceiver<OutboundCommand>,
     cancel_requested: Arc<AtomicBool>,
     ready: TransferQueues<QueuedTransfer>,
+    active: Option<RunnableTransfer<QueuedTransfer>>,
     deliveries: FuturesUnordered<DeliveryWaitFuture>,
     measurements: MeasurementRecorder,
-    stop: StopToken,
+    stop: StopSource,
     next_id: u64,
     input_closed: bool,
+    shutdown_complete: bool,
 }
 
 impl OutboundWorker {
     fn new(
         receiver: MailboxReceiver<OutboundCommand>,
-        stop: StopToken,
+        stop: StopSource,
         measurements: MeasurementRecorder,
         peer: Did,
         cancel_requested: Arc<AtomicBool>,
@@ -672,44 +499,43 @@ impl OutboundWorker {
             receiver,
             cancel_requested,
             ready: TransferQueues::default(),
+            active: None,
             deliveries: FuturesUnordered::new(),
             measurements,
             stop,
             next_id,
             input_closed: false,
+            shutdown_complete: false,
         }
     }
 
     async fn run(mut self) {
         loop {
-            if self.stop.should_stop() {
+            if self.stop.is_stop_requested() {
                 self.shutdown();
                 return;
             }
             #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-            while trace::worker_is_paused(self.peer) && !self.stop.should_stop() {
+            while trace::worker_is_paused(self.peer) && !self.stop.is_stop_requested() {
                 tokio::task::yield_now().await;
             }
-            if self.stop.should_stop() {
+            if self.stop.is_stop_requested() {
                 self.shutdown();
                 return;
             }
             self.apply_pending_cancellation();
             self.drain_available();
-            if self.stop.should_stop() {
+            if self.stop.is_stop_requested() {
                 self.shutdown();
                 return;
             }
             if self.input_closed {
-                let final_results = Self::cancel_batch(ShutdownBatch::new(
-                    self.drain_ready_transfers(),
-                    Vec::new(),
-                ));
-                Self::publish_released_results(final_results);
+                self.shutdown();
                 return;
             }
             if let Some(transfer) = self.ready.pop() {
-                self.admit_one_frame(transfer).await;
+                self.active = Some(transfer);
+                self.admit_active_frame().await;
                 continue;
             }
             self.wait_for_input().await;
@@ -872,13 +698,31 @@ impl OutboundWorker {
             .collect()
     }
 
+    fn drain_active_transfers(&mut self) -> Vec<ScheduledTransfer> {
+        self.active
+            .take()
+            .into_iter()
+            .map(|transfer| transfer.into_parts().1.scheduled)
+            .collect()
+    }
+
     fn shutdown(&mut self) {
+        self.shutdown_with_results(Vec::new());
+    }
+
+    fn shutdown_with_results(&mut self, mut final_results: Vec<FinalTransferResult>) {
+        if self.shutdown_complete {
+            return;
+        }
+        self.shutdown_complete = true;
+        self.stop.request_stop();
         self.receiver.close();
         let batch = ShutdownBatch::new(
+            self.drain_active_transfers(),
             self.drain_ready_transfers(),
             self.drain_buffered_transfers(),
         );
-        let final_results = Self::cancel_batch(batch);
+        final_results.extend(Self::cancel_batch(batch));
         Self::publish_released_results(final_results);
     }
 
@@ -896,57 +740,111 @@ impl OutboundWorker {
         buffered
     }
 
-    async fn admit_one_frame(&mut self, mut runnable: RunnableTransfer<QueuedTransfer>) {
+    fn prepare_active_frame(&mut self) -> Option<ActiveFrameStep> {
+        let runnable = self.active.as_mut()?;
         let class = runnable.class();
-        if runnable.item().scheduled.transfer.is_stopped() {
-            self.terminate_transfer(
-                runnable,
-                Ok(SendCompletionOutcome::Cancelled),
-                TerminationFairness::AdvanceFailedAttempt,
-            );
-            return;
+        let transfer = &mut runnable.item_mut().scheduled.transfer;
+        if transfer.is_stopped() {
+            return Some(ActiveFrameStep::Stopped);
         }
-        let before_first_frame = runnable.item().scheduled.transfer.is_before_first_frame();
-        let frame = match runnable.item_mut().scheduled.transfer.next_frame() {
-            Ok(Some(frame)) => frame,
-            Ok(None) => {
-                self.terminate_transfer(
-                    runnable,
-                    Ok(SendCompletionOutcome::Succeeded),
-                    TerminationFairness::AlreadyAdvanced,
-                );
-                self.measurements.record(OutboundMeasurement::Sent);
-                return;
-            }
-            Err(error) => {
-                self.fail_transfer(runnable, error, TerminationFairness::AdvanceFailedAttempt);
-                return;
-            }
+        let before_first_frame = transfer.is_before_first_frame();
+        Some(match transfer.next_frame() {
+            Ok(Some((bytes, context))) => ActiveFrameStep::Send {
+                class,
+                before_first_frame,
+                bytes,
+                context,
+            },
+            Ok(None) => ActiveFrameStep::Complete,
+            Err(error) => ActiveFrameStep::Failed(error),
+        })
+    }
+
+    async fn admit_active_frame(&mut self) {
+        let Some(step) = self.prepare_active_frame() else {
+            tracing::error!("outbound worker has no active transfer to admit");
+            return;
         };
-        let (bytes, context) = frame;
-        let admission = send_data_with_timeout(
-            &runnable.item().scheduled.transfer.admitted,
-            bytes,
-            &runnable.item().scheduled.transfer.permit,
-            &runnable.item().scheduled.transfer.stop,
-            runnable
-                .item()
-                .scheduled
-                .transfer
-                .detached_admission
-                .as_ref(),
-            runnable.item().scheduled.transfer.did,
-            context,
-        )
-        .await;
+        match step {
+            ActiveFrameStep::Stopped => {
+                if let Some(runnable) = self.active.take() {
+                    self.terminate_transfer(
+                        runnable,
+                        Ok(SendCompletionOutcome::Cancelled),
+                        TerminationFairness::AdvanceFailedAttempt,
+                    );
+                }
+            }
+            ActiveFrameStep::Complete => {
+                if let Some(runnable) = self.active.take() {
+                    self.terminate_transfer(
+                        runnable,
+                        Ok(SendCompletionOutcome::Succeeded),
+                        TerminationFairness::AlreadyAdvanced,
+                    );
+                    self.measurements.record(OutboundMeasurement::Sent);
+                }
+            }
+            ActiveFrameStep::Failed(error) => {
+                if let Some(runnable) = self.active.take() {
+                    self.fail_transfer(runnable, error, TerminationFairness::AdvanceFailedAttempt);
+                }
+            }
+            ActiveFrameStep::Send {
+                class,
+                before_first_frame,
+                bytes,
+                context,
+            } => {
+                let Some(runnable) = self.active.as_ref() else {
+                    tracing::error!("outbound worker lost its active transfer before send");
+                    return;
+                };
+                let transfer = &runnable.item().scheduled.transfer;
+                #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+                let _active_trace = trace::ActiveTransferGuard::enter(self.peer);
+                let admission = send_data_with_timeout(
+                    &transfer.admitted,
+                    bytes,
+                    &transfer.permit,
+                    &transfer.stop,
+                    transfer.detached_admission.as_ref(),
+                    transfer.did,
+                    context,
+                )
+                .await;
+                if self.stop.is_stop_requested() {
+                    let final_results =
+                        self.finalize_stopped_active_admission(before_first_frame, admission);
+                    self.shutdown_with_results(final_results);
+                    return;
+                }
+                self.finish_active_admission(class, before_first_frame, admission);
+            }
+        }
+    }
+
+    fn finish_active_admission(
+        &mut self,
+        class: TransferClass,
+        before_first_frame: bool,
+        admission: ChunkSendProgress<Result<DeliveryFuture>>,
+    ) {
+        let Some(mut runnable) = self.active.take() else {
+            tracing::error!("outbound worker lost its active transfer after send");
+            return;
+        };
 
         match admission {
             ChunkSendProgress::Ready(Ok(delivery)) => {
-                runnable
+                if let Some(final_result) = runnable
                     .item_mut()
                     .scheduled
                     .transfer
-                    .resolve_frame_admission();
+                    .take_frame_admission_result()
+                {
+                    final_result.publish();
+                }
                 self.ready.record_frame_admitted(class);
                 #[cfg(test)]
                 trace::record(self.peer, class, runnable.item().id);
@@ -979,6 +877,46 @@ impl OutboundWorker {
                 }
             }
         }
+    }
+
+    fn finalize_stopped_active_admission(
+        &mut self,
+        before_first_frame: bool,
+        admission: ChunkSendProgress<Result<DeliveryFuture>>,
+    ) -> Vec<FinalTransferResult> {
+        let Some(runnable) = self.active.take() else {
+            tracing::error!("outbound worker lost its stopped active transfer");
+            return Vec::new();
+        };
+        let mut scheduled = runnable.into_parts().1.scheduled;
+        let mut final_results = Vec::new();
+        let result = match admission {
+            ChunkSendProgress::Ready(Ok(delivery)) => {
+                drop(delivery);
+                final_results.extend(scheduled.transfer.take_frame_admission_result());
+                Ok(SendCompletionOutcome::Cancelled)
+            }
+            ChunkSendProgress::Ready(Err(error)) => {
+                if error.records_peer_send_failure() {
+                    self.measurements.record(OutboundMeasurement::FailedToSend);
+                }
+                Err(error)
+            }
+            ChunkSendProgress::Cancelled(reason) => {
+                if reason.records_peer_failure() {
+                    self.measurements.record(OutboundMeasurement::FailedToSend);
+                }
+                if before_first_frame {
+                    reason
+                        .resolve_initial()
+                        .map(|()| SendCompletionOutcome::Cancelled)
+                } else {
+                    Ok(SendCompletionOutcome::Cancelled)
+                }
+            }
+        };
+        final_results.extend(Self::finalize_scheduled_transfer(scheduled, result));
+        final_results
     }
 
     fn delivery_wait(
@@ -1034,6 +972,15 @@ impl OutboundWorker {
             WorkerInput::Delivery(Some(event)) => self.handle_delivery(event),
             WorkerInput::Delivery(None) => {}
         }
+    }
+}
+
+impl Drop for OutboundWorker {
+    fn drop(&mut self) {
+        // Task panic and runtime cancellation both pass through this state:
+        // close ingress, drain permit-bearing commands, and publish completion
+        // only after their capacity guards have been released.
+        self.shutdown();
     }
 }
 

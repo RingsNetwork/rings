@@ -120,7 +120,8 @@ impl ReassemblyLimits {
         const CONSTRAINED_MAX_CHUNKS: usize = CONSTRAINED_MESSAGE_BYTES / MIN_CHUNK_DATA + 1;
         const CONSTRAINED_SLOT_OVERHEAD: usize = 128;
         const CONSTRAINED_TOTAL_COST: usize =
-            CONSTRAINED_MESSAGE_BYTES * 2 + CONSTRAINED_MAX_CHUNKS * CONSTRAINED_SLOT_OVERHEAD;
+            crate::utils::retained_wire_bytes(CONSTRAINED_MESSAGE_BYTES)
+                + CONSTRAINED_MAX_CHUNKS * CONSTRAINED_SLOT_OVERHEAD;
 
         Self {
             max_pending_messages: 64,

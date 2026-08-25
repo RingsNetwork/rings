@@ -5,8 +5,10 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures::lock::Mutex as FuturesMutex;
 use rings_transport::core::callback::AdmittedInboundMessage;
+use rings_transport::core::callback::InboundFrameCapacityLease;
 use rings_transport::core::callback::InboundFrameClass;
 use rings_transport::core::callback::TransportCallback;
 use rings_transport::core::transport::WebrtcConnectionState;
@@ -72,7 +74,6 @@ fn log_inbound_verification_failure(
 
 pub(super) enum PayloadHandlingError {
     Core(crate::error::Error),
-    Callback(CallbackError),
 }
 
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -144,12 +145,18 @@ pub enum SwarmEvent {
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait SwarmCallback {
     /// This method is invoked when a new message is received and before handling.
+    ///
+    /// The swarm enforces a deadline and cancels this future if it expires.
+    /// Implementations must therefore be cancellation-safe at every suspension.
     async fn on_validate(&self, _payload: &MessagePayload) -> Result<(), CallbackError> {
         Ok(())
     }
 
     /// This method is invoked when a new message is received and after handling.
     /// Will not be invoked if the message is not for this node.
+    ///
+    /// The swarm enforces a deadline and cancels this future if it expires.
+    /// Implementations must therefore be cancellation-safe at every suspension.
     async fn on_inbound(&self, _payload: &MessagePayload) -> Result<(), CallbackError> {
         Ok(())
     }
@@ -245,6 +252,11 @@ impl InnerSwarmCallback {
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn inbound_admitted_count_for_test(&self) -> usize {
         self.inbound.admitted_count_for_test()
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) fn hold_application_admission_for_test(&self) -> crate::error::Result<impl Drop> {
+        self.inbound.hold_application_admission_for_test()
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -573,14 +585,18 @@ impl InboundProcessor {
             return Err(PayloadHandlingError::Core(e));
         }
 
-        if payload.transaction.destination == self.transport.dht.did {
-            self.callback
-                .on_inbound(payload)
-                .await
-                .map_err(PayloadHandlingError::Callback)?;
-        }
-
         Ok(())
+    }
+
+    pub(super) fn is_local_destination(&self, payload: &MessagePayload) -> bool {
+        payload.transaction.destination == self.transport.dht.did
+    }
+
+    pub(super) async fn on_inbound(
+        &self,
+        payload: &MessagePayload,
+    ) -> std::result::Result<(), CallbackError> {
+        self.callback.on_inbound(payload).await
     }
 
     pub(super) async fn handle_chunk(&self, chunk: crate::chunk::Chunk) -> ReassemblyOutcome {
@@ -682,13 +698,14 @@ impl InnerSwarmCallback {
     async fn submit_inbound_message(
         &self,
         cid: &str,
-        msg: &[u8],
+        msg: Bytes,
+        transport_capacity: Option<InboundFrameCapacityLease>,
     ) -> Result<(), TransportCallbackError> {
         #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
         let _depth_guard = OnMessageRecursionDepthGuard::enter();
 
         let peer = Did::from_str(cid).ok();
-        let prepared = match prepare_transport_frame(peer, msg) {
+        let prepared = match prepare_transport_frame(peer, msg.as_ref()) {
             Ok(prepared) => prepared,
             Err(error) => {
                 self.processor.record_receive_failure(peer).await;
@@ -696,7 +713,7 @@ impl InnerSwarmCallback {
             }
         };
         self.inbound
-            .submit_prepared(&self.processor, peer, msg, prepared)
+            .submit_prepared(&self.processor, peer, msg, prepared, transport_capacity)
             .await
             .map_err(Into::into)
     }
@@ -707,7 +724,8 @@ impl InnerSwarmCallback {
         cid: &str,
         msg: &[u8],
     ) -> Result<(), TransportCallbackError> {
-        self.submit_inbound_message(cid, msg).await
+        self.submit_inbound_message(cid, Bytes::copy_from_slice(msg), None)
+            .await
     }
 }
 
@@ -718,8 +736,9 @@ impl TransportCallback for InnerSwarmCallback {
         &self,
         message: AdmittedInboundMessage<'_>,
     ) -> Result<(), TransportCallbackError> {
-        let (cid, msg) = message.into_parts();
-        self.submit_inbound_message(cid, msg).await
+        let (cid, msg, transport_capacity) = message.into_parts();
+        self.submit_inbound_message(cid, msg, Some(transport_capacity))
+            .await
     }
 
     async fn on_invalid_inbound_frame(&self, cid: &str) -> Result<(), TransportCallbackError> {

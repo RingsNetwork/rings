@@ -9,6 +9,9 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::utils::acquire_fair;
 use crate::utils::admissible_capacity;
+use crate::utils::retained_wire_bytes;
+use crate::utils::CountedReservationRejection;
+use crate::utils::CountedReservedCapacity;
 use crate::utils::FairWaitBudget;
 use crate::utils::FairWaitQueue;
 use crate::utils::ReservedCapacity;
@@ -18,7 +21,7 @@ pub(crate) const OUTBOUND_TRANSFER_QUEUE_CAPACITY: usize = 256;
 /// Slots unavailable to non-control transfers, so topology traffic can always enter the scheduler.
 pub(crate) const OUTBOUND_CONTROL_RESERVED_TRANSFERS: usize = 16;
 pub(super) const OUTBOUND_DATA_RESERVED_TRANSFERS: usize = 8;
-/// Maximum non-control transfers admitted for one peer.
+/// Per-class minimum transfer reservations preserved under shared-capacity borrowing.
 const OUTBOUND_TRANSFER_RESERVATIONS: [usize; TransferClass::COUNT] = [
     OUTBOUND_CONTROL_RESERVED_TRANSFERS,
     OUTBOUND_DATA_RESERVED_TRANSFERS,
@@ -42,7 +45,7 @@ pub(super) const OUTBOUND_PEER_BYTE_CAPACITY: usize = 128 * 1024 * 1024;
 pub(super) const OUTBOUND_PEER_CONTROL_RESERVED_BYTES: usize = 1024 * 1024;
 pub(super) const OUTBOUND_PEER_DATA_RESERVED_BYTES: usize = 1024 * 1024;
 const OUTBOUND_PEER_BYTE_RESERVATIONS: [usize; TransferClass::COUNT] = [
-    OUTBOUND_PEER_CONTROL_RESERVED_BYTES * 2,
+    retained_wire_bytes(OUTBOUND_PEER_CONTROL_RESERVED_BYTES),
     OUTBOUND_PEER_DATA_RESERVED_BYTES,
     OUTBOUND_PEER_DATA_RESERVED_BYTES,
     OUTBOUND_PEER_DATA_RESERVED_BYTES,
@@ -170,47 +173,42 @@ impl GlobalTransferCapacity {
 
 #[derive(Clone, Copy)]
 struct PeerCapacityState {
-    transfers: ReservedCapacity<{ TransferClass::COUNT }>,
-    bytes: ReservedCapacity<{ TransferClass::COUNT }>,
+    capacity: CountedReservedCapacity<{ TransferClass::COUNT }>,
 }
 
 impl PeerCapacityState {
     const fn new() -> Self {
         Self {
-            transfers: ReservedCapacity::new(),
-            bytes: ReservedCapacity::new(),
+            capacity: CountedReservedCapacity::new(),
         }
     }
 
     fn reservation_covers(&self, class: TransferClass, bytes: usize) -> bool {
-        self.transfers
-            .reservation_covers(class.index(), 1, &OUTBOUND_TRANSFER_RESERVATIONS)
-            && self
-                .bytes
-                .reservation_covers(class.index(), bytes, &OUTBOUND_PEER_BYTE_RESERVATIONS)
-    }
-
-    fn try_reserve_count(&mut self, class: TransferClass) -> bool {
-        self.transfers.try_reserve(
+        self.capacity.reservation_covers(
             class.index(),
-            1,
-            OUTBOUND_TRANSFER_QUEUE_CAPACITY,
+            bytes,
             &OUTBOUND_TRANSFER_RESERVATIONS,
+            &OUTBOUND_PEER_BYTE_RESERVATIONS,
         )
     }
 
-    fn try_reserve_bytes(&mut self, class: TransferClass, bytes: usize) -> bool {
-        self.bytes.try_reserve(
+    fn try_reserve(
+        &mut self,
+        class: TransferClass,
+        bytes: usize,
+    ) -> std::result::Result<(), CountedReservationRejection> {
+        self.capacity.try_reserve(
             class.index(),
             bytes,
+            OUTBOUND_TRANSFER_QUEUE_CAPACITY,
+            &OUTBOUND_TRANSFER_RESERVATIONS,
             OUTBOUND_PEER_BYTE_CAPACITY,
             &OUTBOUND_PEER_BYTE_RESERVATIONS,
         )
     }
 
     fn release(&mut self, class: TransferClass, bytes: usize) {
-        self.transfers.release(class.index(), 1);
-        self.bytes.release(class.index(), bytes);
+        self.capacity.release(class.index(), bytes);
     }
 }
 
@@ -263,14 +261,17 @@ impl TransferCapacity {
         if reserved_only && !next.reservation_covers(class, bytes) {
             return Err(memory_capacity_error(peer, bytes, peer_byte_limit(class)));
         }
-        if !next.try_reserve_count(class) {
-            return Err(Error::OutboundTransferCapacityExceeded {
-                peer,
-                capacity: transfer_limit(class),
-            });
-        }
-        if !next.try_reserve_bytes(class, bytes) {
-            return Err(memory_capacity_error(peer, bytes, peer_byte_limit(class)));
+        match next.try_reserve(class, bytes) {
+            Ok(()) => {}
+            Err(CountedReservationRejection::Count) => {
+                return Err(Error::OutboundTransferCapacityExceeded {
+                    peer,
+                    capacity: transfer_limit(class),
+                });
+            }
+            Err(CountedReservationRejection::Bytes) => {
+                return Err(memory_capacity_error(peer, bytes, peer_byte_limit(class)));
+            }
         }
         *state = next;
         Ok(PeerCapacityPermit {
@@ -343,8 +344,8 @@ impl TransferCapacity {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .transfers
-            .admitted()
+            .capacity
+            .admitted_count()
     }
 
     #[cfg(test)]
@@ -352,8 +353,8 @@ impl TransferCapacity {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .bytes
-            .admitted()
+            .capacity
+            .admitted_bytes()
     }
 }
 
@@ -426,7 +427,7 @@ const fn global_byte_limit(class: TransferClass) -> usize {
 }
 
 const _: () = {
-    let maximum_payload_reservation = crate::consts::TRANSPORT_MAX_SIZE.saturating_mul(2);
+    let maximum_payload_reservation = retained_wire_bytes(crate::consts::TRANSPORT_MAX_SIZE);
     assert!(maximum_payload_reservation <= peer_byte_limit(TransferClass::DhtControl));
     assert!(maximum_payload_reservation <= peer_byte_limit(TransferClass::Application));
     assert!(maximum_payload_reservation <= global_byte_limit(TransferClass::DhtControl));

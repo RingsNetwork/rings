@@ -1,3 +1,10 @@
+//! Bounded, coalesced outbound measurement delivery.
+//!
+//! Producers retain only counters and a one-slot wake channel, so measurement
+//! I/O never blocks the scheduler. Overflow is deliberately lossy. Shutdown
+//! drains a bounded tail and clears any remainder; dropping either side releases
+//! all pending state without affecting transfer completion.
+
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
