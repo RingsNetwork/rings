@@ -84,10 +84,12 @@ rings <command> [options]
 - `-V, --version`: displays the version information for rings-node.
 
 `daemon start` records the current working directory so the managed process can
-load the same `.env` file as `run`. Persist daemon settings in the configuration
-file or that `.env` file; shell-only exported variables are not copied into the
-service definition. macOS logs are stored under `~/.rings/logs/`; Linux logs are
-available through `journalctl --user -u rings-node.service`. See the repository
+load the same `.env` file as `run`. `CONFIG`, `LOG_LEVEL`, and `RUNTIME` from the
+installing shell or that `.env` file are copied into the service definition;
+other shell variables are not copied. Persist node settings in the
+configuration file or the captured `.env` file. macOS logs are stored under
+`~/.rings/logs/`; Linux logs are available through
+`journalctl --user -u rings-node.service`. See the repository
 README for Linux lingering requirements and manual service removal. The captured
 working directory must remain at the same path; rerun `daemon start` from a
 persistent directory after moving or deleting it. `daemon stop` and `daemon

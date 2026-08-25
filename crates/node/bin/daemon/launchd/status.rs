@@ -1,20 +1,18 @@
-//! Pure parsing and failure-attribution policy for launchd status output.
+//! Pure launchd lifecycle parsing and failure-attribution policy.
 
 use super::super::command_output_value;
 use super::super::AutostartState;
 use super::super::DaemonFailure;
+use super::super::DaemonObservation;
 use super::super::DaemonState;
-use super::LAUNCHD_LABEL;
 
 const SIGKILL: i32 = 9;
 const SIGTERM: i32 = 15;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum LaunchdAttribution {
-    /// Inspect history without claiming it was produced by a new CLI action.
-    CurrentStatus,
-    /// Attribute history from a newly bootstrapped job, which has no previous instance.
-    FreshInstance,
+    /// Attribute the current record without suppressing action-shaped termination data.
+    Unfiltered,
     /// Attribute only history newer than the observed pre-restart run counter.
     SinceRun(u64),
     /// Do not attribute history when launchd did not expose a run-counter baseline.
@@ -22,9 +20,9 @@ pub(super) enum LaunchdAttribution {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub(super) enum LaunchdObservation {
-    NotInstalled,
-    Installed(DaemonState),
+pub(super) enum LaunchdRecord<T> {
+    Missing,
+    Loaded(T),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -67,12 +65,18 @@ enum LaunchdLifecycle<'a> {
 }
 
 impl LaunchdLifecycle<'_> {
-    fn into_state(self, attributed_failure: Option<DaemonFailure>) -> DaemonState {
+    fn into_state(
+        self,
+        observed_sequence: Option<u64>,
+        attributed_failure: Option<DaemonFailure>,
+    ) -> DaemonState {
         match self {
             Self::Running => DaemonState::Running,
-            Self::SpawnScheduled => attributed_failure
-                .map(|failure| DaemonState::Restarting(Some(failure)))
-                .unwrap_or(DaemonState::Starting),
+            Self::SpawnScheduled => match (attributed_failure, observed_sequence) {
+                (Some(failure), _) => DaemonState::Restarting(Some(failure)),
+                (None, Some(sequence)) if sequence > 0 => DaemonState::Restarting(None),
+                (None, _) => DaemonState::Starting,
+            },
             Self::Stopped => attributed_failure
                 .map(|failure| DaemonState::Failed(Some(failure)))
                 .unwrap_or(DaemonState::Stopped),
@@ -91,10 +95,7 @@ impl LaunchdAttribution {
         termination: LaunchdTermination<'_>,
     ) -> bool {
         match self {
-            // Status has no Rings action in flight, so every current termination is external.
-            Self::CurrentStatus => true,
-            // A fresh bootstrap has no action-created termination history.
-            Self::FreshInstance => true,
+            Self::Unfiltered => true,
             // Observed on macOS 15.6.1 (24G90): one kickstart action can advance `runs` twice.
             // Sequence advancement alone therefore cannot distinguish an action-translated exit
             // or action signal from a new-instance failure. Only non-action signals are attributable.
@@ -167,15 +168,15 @@ pub(super) fn attribution_after_restart(output: &str) -> LaunchdAttribution {
 }
 
 pub(super) fn parse_launchd_observation(
-    output: Option<&str>,
+    record: LaunchdRecord<&str>,
     definition_present: bool,
     attribution: LaunchdAttribution,
-) -> LaunchdObservation {
-    let Some(output) = output else {
+) -> DaemonObservation {
+    let LaunchdRecord::Loaded(output) = record else {
         return if definition_present {
-            LaunchdObservation::Installed(DaemonState::Stopped)
+            DaemonObservation::Installed(DaemonState::Stopped)
         } else {
-            LaunchdObservation::NotInstalled
+            DaemonObservation::NotInstalled
         };
     };
     let lifecycle = parse_launchd_lifecycle(output);
@@ -184,11 +185,11 @@ pub(super) fn parse_launchd_observation(
         .and_then(|termination| termination.failure().map(|failure| (termination, failure)))
         .filter(|(termination, _)| attribution.attributes(observed_sequence, *termination))
         .map(|(_, failure)| failure);
-    let state = lifecycle.into_state(attributed_failure);
-    LaunchdObservation::Installed(state)
+    let state = lifecycle.into_state(observed_sequence, attributed_failure);
+    DaemonObservation::Installed(state)
 }
 
-pub(super) fn parse_launchd_autostart(output: &str) -> AutostartState {
+pub(super) fn parse_launchd_autostart(output: &str, service_label: &str) -> AutostartState {
     // Observed on macOS 15.6.1 (24G90): launchctl emits both boolean and enabled/disabled
     // vocabularies. A recognized listing that omits this label means it is enabled.
     let mut recognized_listing = false;
@@ -201,7 +202,7 @@ pub(super) fn parse_launchd_autostart(output: &str) -> AutostartState {
         let Some((label, value)) = line.split_once("=>") else {
             continue;
         };
-        if label.trim().trim_matches('"') != LAUNCHD_LABEL {
+        if label.trim().trim_matches('"') != service_label {
             continue;
         }
         return match value.trim() {
@@ -226,12 +227,13 @@ fn is_disabled_services_listing(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::super::model::LAUNCHD_LABEL;
     use super::*;
 
     fn parse_state(output: &str, attribution: LaunchdAttribution) -> DaemonState {
-        match parse_launchd_observation(Some(output), true, attribution) {
-            LaunchdObservation::Installed(state) => state,
-            LaunchdObservation::NotInstalled => unreachable!("output always represents a job"),
+        match parse_launchd_observation(LaunchdRecord::Loaded(output), true, attribution) {
+            DaemonObservation::Installed(state) => state,
+            DaemonObservation::NotInstalled => unreachable!("output always represents a job"),
         }
     }
 
@@ -266,31 +268,31 @@ mod tests {
     #[test]
     fn state_parser_preserves_launchd_lifecycle_and_exit_states() {
         assert_eq!(
-            parse_state("state = running\n", LaunchdAttribution::CurrentStatus),
+            parse_state("state = running\n", LaunchdAttribution::Unfiltered),
             DaemonState::Running
         );
         assert_eq!(
-            parse_state("state = waiting\n", LaunchdAttribution::CurrentStatus),
+            parse_state("state = waiting\n", LaunchdAttribution::Unfiltered),
             DaemonState::Stopped
         );
         assert_eq!(
             parse_state(
                 "state = throttled\nlast exit code = 78\n",
-                LaunchdAttribution::CurrentStatus,
+                LaunchdAttribution::Unfiltered,
             ),
             restarting_exit_failure(78)
         );
         assert_eq!(
             parse_state(
                 "state = spawn scheduled\nlast exit code = 1\n",
-                LaunchdAttribution::CurrentStatus,
+                LaunchdAttribution::Unfiltered,
             ),
             restarting_exit_failure(1)
         );
         assert_eq!(
             parse_state(
                 "state = exited\nlast exit code = 0\n",
-                LaunchdAttribution::CurrentStatus,
+                LaunchdAttribution::Unfiltered,
             ),
             DaemonState::Stopped
         );
@@ -301,7 +303,7 @@ mod tests {
         assert_eq!(
             parse_state(
                 "state = spawn scheduled\nlast exit code = 1\n",
-                LaunchdAttribution::FreshInstance,
+                LaunchdAttribution::Unfiltered,
             ),
             restarting_exit_failure(1)
         );
@@ -317,14 +319,14 @@ mod tests {
                 "state = spawn scheduled\nruns = 4\nlast exit code = 9\n",
                 LaunchdAttribution::SinceRun(4),
             ),
-            DaemonState::Starting
+            DaemonState::Restarting(None)
         );
         assert_eq!(
             parse_state(
                 "state = spawn scheduled\nruns = 5\nlast exit code = 1\n",
                 LaunchdAttribution::SinceRun(4),
             ),
-            DaemonState::Starting
+            DaemonState::Restarting(None)
         );
     }
 
@@ -333,35 +335,35 @@ mod tests {
         assert_eq!(
             parse_state(
                 "state = spawn scheduled\nruns = 1\nlast terminating signal = Segmentation fault: 11\n",
-                LaunchdAttribution::FreshInstance,
+                LaunchdAttribution::Unfiltered,
             ),
             restarting_signal_failure("Segmentation fault", 11)
         );
         assert_eq!(
             parse_state(
                 "state = spawn scheduled\nruns = 4\nlast terminating signal = Terminated: 15\n",
-                LaunchdAttribution::CurrentStatus,
+                LaunchdAttribution::Unfiltered,
             ),
             restarting_signal_failure("Terminated", 15)
         );
         assert_eq!(
             parse_state(
                 "state = spawn scheduled\nruns = 4\nlast terminating signal = Segmentation fault: 11\n",
-                LaunchdAttribution::CurrentStatus,
+                LaunchdAttribution::Unfiltered,
             ),
             restarting_signal_failure("Segmentation fault", 11)
         );
         assert_eq!(
             parse_state(
                 "state = exited\nruns = 4\nlast terminating signal = Bus error: 10\n",
-                LaunchdAttribution::CurrentStatus,
+                LaunchdAttribution::Unfiltered,
             ),
             signal_failure("Bus error", 10)
         );
         assert_eq!(
             parse_state(
                 "state = throttled\nruns = 4\nlast terminating signal = Terminated: 15\n",
-                LaunchdAttribution::CurrentStatus,
+                LaunchdAttribution::Unfiltered,
             ),
             restarting_signal_failure("Terminated", 15)
         );
@@ -370,14 +372,14 @@ mod tests {
                 "state = spawn scheduled\nruns = 4\nlast terminating signal = Terminated: 15\n",
                 LaunchdAttribution::SinceRun(3),
             ),
-            DaemonState::Starting
+            DaemonState::Restarting(None)
         );
         assert_eq!(
             parse_state(
                 "state = spawn scheduled\nruns = 3\nlast terminating signal = Segmentation fault: 11\n",
                 LaunchdAttribution::SinceRun(3),
             ),
-            DaemonState::Starting
+            DaemonState::Restarting(None)
         );
         assert_eq!(
             parse_state(
@@ -391,7 +393,7 @@ mod tests {
                 "state = spawn scheduled\nruns = 5\nlast terminating signal = Killed: 9\n",
                 LaunchdAttribution::SinceRun(3),
             ),
-            DaemonState::Starting
+            DaemonState::Restarting(None)
         );
         assert_eq!(
             parse_state(
@@ -438,12 +440,16 @@ mod tests {
             LaunchdAttribution::Unattributable
         );
         assert_eq!(
-            parse_launchd_observation(None, true, LaunchdAttribution::CurrentStatus),
-            LaunchdObservation::Installed(DaemonState::Stopped)
+            parse_launchd_observation(LaunchdRecord::Missing, true, LaunchdAttribution::Unfiltered,),
+            DaemonObservation::Installed(DaemonState::Stopped)
         );
         assert_eq!(
-            parse_launchd_observation(None, false, LaunchdAttribution::CurrentStatus),
-            LaunchdObservation::NotInstalled
+            parse_launchd_observation(
+                LaunchdRecord::Missing,
+                false,
+                LaunchdAttribution::Unfiltered,
+            ),
+            DaemonObservation::NotInstalled
         );
     }
 
@@ -452,7 +458,7 @@ mod tests {
         assert_eq!(
             parse_state(
                 "state = throttled\nruns = 5\nlast terminating signal = Killed: 9\n",
-                LaunchdAttribution::CurrentStatus,
+                LaunchdAttribution::Unfiltered,
             ),
             restarting_signal_failure("Killed", 9)
         );
@@ -476,7 +482,7 @@ mod tests {
         let expected = unnamed_signal_failure(11);
         let state = parse_state(
             "state = exited\nlast terminating signal = 11\n",
-            LaunchdAttribution::CurrentStatus,
+            LaunchdAttribution::Unfiltered,
         );
 
         assert_eq!(state, expected);
@@ -502,29 +508,32 @@ mod tests {
     "io.ringsnetwork.node" => false
 }"#;
 
-        assert_eq!(parse_launchd_autostart(output), AutostartState::Enabled);
         assert_eq!(
-            parse_launchd_autostart("disabled services = {}"),
+            parse_launchd_autostart(output, LAUNCHD_LABEL),
             AutostartState::Enabled
         );
         assert_eq!(
-            parse_launchd_autostart("disabled services = {\n}"),
+            parse_launchd_autostart("disabled services = {}", LAUNCHD_LABEL),
             AutostartState::Enabled
         );
         assert_eq!(
-            parse_launchd_autostart("\"io.ringsnetwork.node\" => disabled"),
+            parse_launchd_autostart("disabled services = {\n}", LAUNCHD_LABEL),
+            AutostartState::Enabled
+        );
+        assert_eq!(
+            parse_launchd_autostart("\"io.ringsnetwork.node\" => disabled", LAUNCHD_LABEL,),
             AutostartState::Disabled
         );
         assert_eq!(
-            parse_launchd_autostart("\"io.ringsnetwork.node\" => enabled"),
+            parse_launchd_autostart("\"io.ringsnetwork.node\" => enabled", LAUNCHD_LABEL,),
             AutostartState::Enabled
         );
         assert_eq!(
-            parse_launchd_autostart("\"io.ringsnetwork.node\" => malformed"),
+            parse_launchd_autostart("\"io.ringsnetwork.node\" => malformed", LAUNCHD_LABEL,),
             AutostartState::Unknown
         );
         assert_eq!(
-            parse_launchd_autostart("unrecognized launchctl output"),
+            parse_launchd_autostart("unrecognized launchctl output", LAUNCHD_LABEL),
             AutostartState::Unknown
         );
     }

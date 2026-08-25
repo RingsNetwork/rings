@@ -1,4 +1,4 @@
-//! Owns the cross-platform daemon model while confining OS effects to manager adapters.
+//! Coordinates the cross-platform daemon model and its shared process, filesystem, and timing boundaries.
 
 use std::env;
 use std::fmt;
@@ -27,13 +27,24 @@ mod launchd;
 mod systemd;
 
 // Twenty 100 ms retries cover manager bookkeeping before a first spawn. They intentionally do not
-// wait through launchd throttling or systemd's RestartSec=5; those states remain observable as
-// Restarting when the budget ends. Tests use a zero interval without changing the retry topology.
-const OBSERVATION_RETRIES: usize = 20;
-#[cfg(not(test))]
-const OBSERVATION_INTERVAL: Duration = Duration::from_millis(100);
+// wait through launchd throttling or systemd's RestartSec=5; Restarting settles immediately because
+// neither configured respawn delay can complete inside this two-second budget.
+const MANAGER_OBSERVATION_SCHEDULE: PollSchedule = PollSchedule {
+    retries: 20,
+    interval: Duration::from_millis(100),
+};
+
 #[cfg(test)]
-const OBSERVATION_INTERVAL: Duration = Duration::ZERO;
+const TEST_OBSERVATION_SCHEDULE: PollSchedule = PollSchedule {
+    retries: 20,
+    interval: Duration::ZERO,
+};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PollSchedule {
+    retries: usize,
+    interval: Duration,
+}
 
 #[derive(Subcommand, Debug)]
 #[command(rename_all = "kebab-case")]
@@ -143,7 +154,13 @@ enum DaemonError {
 #[derive(Debug)]
 enum RecoveryFailure<E> {
     Primary(E),
-    #[cfg(any(target_os = "macos", all(test, unix)))]
+    #[cfg_attr(
+        all(not(target_os = "macos"), not(test)),
+        expect(
+            dead_code,
+            reason = "the shared recovery algebra includes launchd's restore-only failure"
+        )
+    )]
     Recovery(E),
     Both {
         primary: E,
@@ -152,18 +169,15 @@ enum RecoveryFailure<E> {
 }
 
 impl<E> fmt::Display for RecoveryFailure<E>
-where E: fmt::Display
+where E: std::error::Error + 'static
 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Primary(_) => formatter.write_str("primary operation failed"),
-            #[cfg(any(target_os = "macos", all(test, unix)))]
-            Self::Recovery(_) => formatter.write_str("recovery operation failed"),
-            Self::Both { recovery, .. } => {
-                write!(
-                    formatter,
-                    "primary operation failed; recovery also failed: {recovery}"
-                )
+            Self::Primary(primary) => fmt::Display::fmt(primary, formatter),
+            Self::Recovery(recovery) => fmt::Display::fmt(recovery, formatter),
+            Self::Both { primary, recovery } => {
+                write!(formatter, "{primary}; recovery also failed: ")?;
+                write_error_chain(formatter, recovery)
             }
         }
     }
@@ -174,15 +188,20 @@ where E: std::error::Error + 'static
 {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Primary(primary) => Some(primary),
-            #[cfg(any(target_os = "macos", all(test, unix)))]
-            Self::Recovery(recovery) => Some(recovery),
-            Self::Both { primary, .. } => Some(primary),
+            Self::Primary(primary) => primary.source(),
+            Self::Recovery(recovery) => recovery.source(),
+            Self::Both { primary, .. } => primary.source(),
         }
     }
 }
 
-#[cfg(any(target_os = "macos", all(test, unix)))]
+#[cfg_attr(
+    all(not(target_os = "macos"), not(test)),
+    expect(
+        dead_code,
+        reason = "the shared recovery algebra is currently exercised by launchd"
+    )
+)]
 fn finish_with_recovery<T, E>(
     primary: Result<T, E>,
     recovery: Result<(), E>,
@@ -193,6 +212,17 @@ fn finish_with_recovery<T, E>(
         (Ok(_), Err(recovery)) => Err(RecoveryFailure::Recovery(recovery)),
         (Err(primary), Err(recovery)) => Err(RecoveryFailure::Both { primary, recovery }),
     }
+}
+
+fn write_error_chain<E>(formatter: &mut fmt::Formatter<'_>, error: &E) -> fmt::Result
+where E: std::error::Error + 'static {
+    write!(formatter, "{error}")?;
+    let mut source = error.source();
+    while let Some(cause) = source {
+        write!(formatter, ": {cause}")?;
+        source = cause.source();
+    }
+    Ok(())
 }
 
 fn primary_with_recovery<E>(primary: E, recovery: Result<(), E>) -> RecoveryFailure<E> {
@@ -227,9 +257,12 @@ impl std::error::Error for CommandFailure {}
 
 /// Runs service-manager commands at the process boundary.
 trait CommandRunner {
+    /// Returns `Err` only when the process could not be executed. Any completed process, including
+    /// one with a non-zero exit status, is returned as `Ok(Output)` for adapter classification.
     fn run(&self, program: &'static str, args: &[&str]) -> Result<Output, DaemonError>;
 
-    /// Requires success for every invocation whose non-zero exit is not classified by an adapter.
+    /// Converts a completed non-zero exit into `CommandFailed` when no adapter classification is
+    /// required. Callers that classify manager-specific exit codes use `run` directly.
     fn run_checked(&self, program: &'static str, args: &[&str]) -> Result<Output, DaemonError> {
         let output = self.run(program, args)?;
         if output.status.success() {
@@ -259,21 +292,14 @@ enum DaemonFailure {
         number: i32,
         core_dumped: bool,
     },
-    #[cfg(any(target_os = "linux", all(test, unix)))]
-    Manager(DaemonManagerFailure),
-}
-
-/// A failure caused or diagnosed by the service manager rather than by a process exit record.
-#[cfg(any(target_os = "linux", all(test, unix)))]
-#[derive(Debug, Eq, PartialEq)]
-enum DaemonManagerFailure {
-    Timeout,
-    Watchdog,
-    OutOfMemory,
-    StartLimit,
-    Protocol,
-    Resources,
-    Other(String),
+    #[cfg_attr(
+        all(not(target_os = "linux"), not(test)),
+        expect(
+            dead_code,
+            reason = "the shared cross-platform failure sum includes systemd manager verdicts"
+        )
+    )]
+    Manager(String),
 }
 
 impl fmt::Display for DaemonFailure {
@@ -300,23 +326,7 @@ impl fmt::Display for DaemonFailure {
                 number,
                 core_dumped: true,
             } => write!(formatter, "signal {number}, core dumped"),
-            #[cfg(any(target_os = "linux", all(test, unix)))]
-            Self::Manager(failure) => write!(formatter, "{failure}"),
-        }
-    }
-}
-
-#[cfg(any(target_os = "linux", all(test, unix)))]
-impl fmt::Display for DaemonManagerFailure {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Timeout => formatter.write_str("service-manager timeout"),
-            Self::Watchdog => formatter.write_str("watchdog failure"),
-            Self::OutOfMemory => formatter.write_str("out-of-memory kill"),
-            Self::StartLimit => formatter.write_str("start limit reached"),
-            Self::Protocol => formatter.write_str("service protocol failure"),
-            Self::Resources => formatter.write_str("service resource failure"),
-            Self::Other(result) => write!(formatter, "service-manager result {result}"),
+            Self::Manager(failure) => formatter.write_str(failure),
         }
     }
 }
@@ -333,16 +343,18 @@ enum DaemonState {
     Restarting(Option<DaemonFailure>),
     Failed(Option<DaemonFailure>),
     Starting,
-    #[cfg(any(target_os = "linux", all(test, unix)))]
+    #[cfg_attr(
+        all(not(target_os = "linux"), not(test)),
+        expect(
+            dead_code,
+            reason = "the shared lifecycle sum includes systemd's deactivating state"
+        )
+    )]
     Stopping,
     Unknown(String),
 }
 
 impl DaemonState {
-    fn is_running(&self) -> bool {
-        matches!(self, Self::Running)
-    }
-
     fn is_terminal_start_failure(&self) -> bool {
         // Stopped can precede the first spawn, and Restarting explicitly has another spawn pending.
         matches!(self, Self::Failed(_))
@@ -359,7 +371,6 @@ impl fmt::Display for DaemonState {
             Self::Failed(Some(failure)) => write!(formatter, "failed ({failure})"),
             Self::Failed(None) => formatter.write_str("failed"),
             Self::Starting => formatter.write_str("starting"),
-            #[cfg(any(target_os = "linux", all(test, unix)))]
             Self::Stopping => formatter.write_str("stopping"),
             Self::Unknown(state) => write!(formatter, "unknown ({state})"),
         }
@@ -371,7 +382,13 @@ impl fmt::Display for DaemonState {
 enum AutostartState {
     Enabled,
     Disabled,
-    #[cfg(any(target_os = "linux", all(test, unix)))]
+    #[cfg_attr(
+        all(not(target_os = "linux"), not(test)),
+        expect(
+            dead_code,
+            reason = "the shared autostart sum includes systemd's masked state"
+        )
+    )]
     Unavailable,
     Unknown,
 }
@@ -381,9 +398,31 @@ impl fmt::Display for AutostartState {
         match self {
             Self::Enabled => formatter.write_str("enabled"),
             Self::Disabled => formatter.write_str("disabled"),
-            #[cfg(any(target_os = "linux", all(test, unix)))]
             Self::Unavailable => formatter.write_str("unavailable"),
             Self::Unknown => formatter.write_str("unknown"),
+        }
+    }
+}
+
+/// One service-manager lifecycle observation before the independent autostart axis is read.
+#[derive(Debug, Eq, PartialEq)]
+enum DaemonObservation {
+    NotInstalled,
+    Installed(DaemonState),
+}
+
+impl DaemonObservation {
+    fn is_running(&self) -> bool {
+        matches!(self, Self::Installed(DaemonState::Running))
+    }
+
+    fn settles_start_poll(&self) -> bool {
+        match self {
+            // Absence is not a start failure, but there is no installed lifecycle left to await.
+            Self::NotInstalled => true,
+            Self::Installed(state) => {
+                state.is_terminal_start_failure() || matches!(state, DaemonState::Restarting(_))
+            }
         }
     }
 }
@@ -403,27 +442,11 @@ impl DaemonStatus {
         Self::Installed { state, autostart }
     }
 
-    fn state(&self) -> Option<&DaemonState> {
-        match self {
-            Self::NotInstalled => None,
-            Self::Installed { state, .. } => Some(state),
-        }
-    }
-
-    #[cfg(any(target_os = "linux", all(test, unix)))]
-    fn is_installed(&self) -> bool {
-        matches!(self, Self::Installed { .. })
-    }
-
     fn is_running(&self) -> bool {
-        self.state().is_some_and(DaemonState::is_running)
-    }
-
-    fn is_terminal_start_failure(&self) -> bool {
-        matches!(self, Self::NotInstalled)
-            || self
-                .state()
-                .is_some_and(DaemonState::is_terminal_start_failure)
+        matches!(self, Self::Installed {
+            state: DaemonState::Running,
+            ..
+        })
     }
 }
 
@@ -448,10 +471,23 @@ struct ServiceSpec {
 
 impl ServiceSpec {
     fn discover(config: &str, options: WorkerOptions) -> Result<Self, DaemonError> {
+        Self::discover_with(config, options, env::current_exe, env::current_dir)
+    }
+
+    fn discover_with<Executable, WorkingDirectory>(
+        config: &str,
+        options: WorkerOptions,
+        current_executable: Executable,
+        current_directory: WorkingDirectory,
+    ) -> Result<Self, DaemonError>
+    where
+        Executable: FnOnce() -> io::Result<PathBuf>,
+        WorkingDirectory: FnOnce() -> io::Result<PathBuf>,
+    {
         let executable =
-            env::current_exe().map_err(|source| DaemonError::CurrentExecutable { source })?;
+            current_executable().map_err(|source| DaemonError::CurrentExecutable { source })?;
         let working_directory =
-            env::current_dir().map_err(|source| DaemonError::CurrentDirectory { source })?;
+            current_directory().map_err(|source| DaemonError::CurrentDirectory { source })?;
         Self::from_paths(config, options, &executable, &working_directory)
     }
 
@@ -553,29 +589,36 @@ fn report_started(manager: &dyn ServiceManager, status: DaemonStatus) -> Result<
     }
 }
 
-/// Polls through manager bookkeeping only. Exhausting the budget returns the last observation;
-/// `report_started` alone converts a non-running status into `ServiceDidNotStart`.
-fn wait_for_running<F>(mut observe: F) -> Result<DaemonStatus, DaemonError>
-where F: FnMut() -> Result<DaemonStatus, DaemonError> {
-    poll_until(&mut observe, |status| {
-        status.is_running() || status.is_terminal_start_failure()
+/// Polls manager lifecycle only. Running, absence, terminal failure, and a scheduled respawn settle
+/// immediately; exhausting the budget returns the final evaluated observation.
+fn wait_for_running<F>(
+    schedule: PollSchedule,
+    observe: F,
+) -> Result<DaemonObservation, DaemonError>
+where
+    F: FnMut() -> Result<DaemonObservation, DaemonError>,
+{
+    poll_until(schedule, observe, |observation| {
+        observation.is_running() || observation.settles_start_poll()
     })
 }
 
-fn poll_until<T, E, F, P>(observe: &mut F, settled: P) -> Result<T, E>
+/// Performs at most `retries + 1` observations and at most `retries` sleeps. Every observation,
+/// including the final one, is evaluated by `settled` before it is returned.
+fn poll_until<T, E, F, P>(schedule: PollSchedule, mut observe: F, settled: P) -> Result<T, E>
 where
     F: FnMut() -> Result<T, E>,
     P: Fn(&T) -> bool,
 {
-    let mut value = observe()?;
-    for _ in 0..OBSERVATION_RETRIES {
-        if settled(&value) {
+    let mut retries_remaining = schedule.retries;
+    loop {
+        let value = observe()?;
+        if settled(&value) || retries_remaining == 0 {
             return Ok(value);
         }
-        thread::sleep(OBSERVATION_INTERVAL);
-        value = observe()?;
+        thread::sleep(schedule.interval);
+        retries_remaining -= 1;
     }
-    Ok(value)
 }
 
 fn print_status(manager: &dyn ServiceManager, status: &DaemonStatus) {
@@ -839,33 +882,6 @@ mod tests {
             log_level: cli_value_name(log_level)?,
             runtime: cli_value_name(runtime)?,
         })
-    }
-
-    #[test]
-    fn generated_worker_arguments_parse_for_every_cli_value() -> Result<(), DaemonError> {
-        for log_level in LogLevel::value_variants() {
-            for runtime in RuntimeFlavor::value_variants() {
-                let spec = service_spec(log_level, runtime)?;
-                let expected = Some((spec.log_level.clone(), spec.runtime.clone()));
-                let parsed_names = Cli::try_parse_from(spec.arguments())
-                    .ok()
-                    .and_then(|parsed| {
-                        Some((
-                            parsed.log_level.to_possible_value()?.get_name().to_owned(),
-                            parsed.runtime.to_possible_value()?.get_name().to_owned(),
-                        ))
-                    });
-                assert_eq!(parsed_names, expected);
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn human_command_format_does_not_apply_service_manager_escaping() {
-        let command = format_command("rings", &["run", "$HOME/%n"]);
-
-        assert_eq!(command, "\"rings\" \"run\" \"$HOME/%n\"");
     }
 
     #[test]

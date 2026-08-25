@@ -1,4 +1,4 @@
-//! Owns all systemd user-manager effects and delegates pure reduction to `model`.
+//! Owns systemd user-manager effects and delegates unit rendering and status reduction to `model`.
 #![cfg(any(target_os = "linux", all(test, unix)))]
 
 #[cfg(target_os = "linux")]
@@ -6,20 +6,48 @@ use std::env;
 use std::path::Path;
 use std::path::PathBuf;
 
+use thiserror::Error;
+
 use super::wait_for_running;
 use super::write_atomic;
 use super::CommandRunner;
 use super::DaemonError;
+use super::DaemonObservation;
 use super::DaemonStatus;
+use super::PollSchedule;
 use super::ProcessCommandRunner;
 use super::ServiceManager;
 use super::ServiceSpec;
+#[cfg(target_os = "linux")]
+use super::MANAGER_OBSERVATION_SCHEDULE;
 
-mod model;
+pub(super) mod model;
 
+use model::parse_systemd_observation;
 use model::parse_systemd_status;
 use model::render_systemd_unit;
-pub(super) use model::SystemdError;
+use model::SystemdDefinitionError;
+use model::SystemdStatusError;
+
+#[derive(Debug, Error)]
+pub(super) enum SystemdError {
+    #[error(transparent)]
+    Definition(#[from] SystemdDefinitionError),
+    #[error(transparent)]
+    Status(#[from] SystemdStatusError),
+}
+
+impl From<SystemdDefinitionError> for DaemonError {
+    fn from(error: SystemdDefinitionError) -> Self {
+        SystemdError::from(error).into()
+    }
+}
+
+impl From<SystemdStatusError> for DaemonError {
+    fn from(error: SystemdStatusError) -> Self {
+        SystemdError::from(error).into()
+    }
+}
 
 const SYSTEMD_UNIT: &str = "rings-node.service";
 // Linux has no distribution-independent fixed systemctl path. PATH lookup is required for NixOS
@@ -42,6 +70,7 @@ const SYSTEMD_STATUS_ARGS: [&str; 11] = [
 ];
 pub(super) struct SystemdManager<R = ProcessCommandRunner> {
     unit_path: PathBuf,
+    poll_schedule: PollSchedule,
     runner: R,
 }
 
@@ -61,6 +90,7 @@ impl SystemdManager<ProcessCommandRunner> {
         let config_home = systemd_config_home(&home, xdg_config_home.as_deref());
         Ok(Self {
             unit_path: config_home.join("systemd").join("user").join(SYSTEMD_UNIT),
+            poll_schedule: MANAGER_OBSERVATION_SCHEDULE,
             runner: ProcessCommandRunner,
         })
     }
@@ -78,19 +108,21 @@ where R: CommandRunner
     }
 
     fn start(&self, spec: &ServiceSpec) -> Result<DaemonStatus, DaemonError> {
-        write_atomic(&self.unit_path, &render_systemd_unit(spec)?)?;
+        let definition = render_systemd_unit(spec)?;
+        write_atomic(&self.unit_path, &definition)?;
         self.runner
             .run_checked(SYSTEMCTL, &[SYSTEMD_USER_ARG, "daemon-reload"])?;
         self.runner
             .run_checked(SYSTEMCTL, &[SYSTEMD_USER_ARG, "enable", SYSTEMD_UNIT])?;
         self.runner
             .run_checked(SYSTEMCTL, &[SYSTEMD_USER_ARG, "restart", SYSTEMD_UNIT])?;
-        wait_for_running(|| self.observe())
+        wait_for_running(self.poll_schedule, || self.observe_lifecycle())?;
+        self.observe()
     }
 
     fn stop(&self) -> Result<DaemonStatus, DaemonError> {
         let status = self.observe()?;
-        if !status.is_installed() {
+        if matches!(status, DaemonStatus::NotInstalled) {
             return Ok(status);
         }
         self.runner
@@ -104,21 +136,34 @@ where R: CommandRunner
                 .run_checked(SYSTEMCTL, &[SYSTEMD_USER_ARG, "daemon-reload"])?;
             self.runner
                 .run_checked(SYSTEMCTL, &[SYSTEMD_USER_ARG, "restart", SYSTEMD_UNIT])?;
-            return wait_for_running(|| self.observe());
+            wait_for_running(self.poll_schedule, || self.observe_lifecycle())?;
+            return self.observe();
         }
-        if !self.observe()?.is_installed() {
+        if matches!(self.observe()?, DaemonStatus::NotInstalled) {
             return Err(DaemonError::ServiceNotInstalled {
                 path: self.unit_path.clone(),
             });
         }
         self.runner
             .run_checked(SYSTEMCTL, &[SYSTEMD_USER_ARG, "restart", SYSTEMD_UNIT])?;
-        wait_for_running(|| self.observe())
+        wait_for_running(self.poll_schedule, || self.observe_lifecycle())?;
+        self.observe()
     }
 
     fn observe(&self) -> Result<DaemonStatus, DaemonError> {
         let output = self.runner.run_checked(SYSTEMCTL, &SYSTEMD_STATUS_ARGS)?;
         Ok(parse_systemd_status(&String::from_utf8_lossy(
+            &output.stdout,
+        ))?)
+    }
+}
+
+impl<R> SystemdManager<R>
+where R: CommandRunner
+{
+    fn observe_lifecycle(&self) -> Result<DaemonObservation, DaemonError> {
+        let output = self.runner.run_checked(SYSTEMCTL, &SYSTEMD_STATUS_ARGS)?;
+        Ok(parse_systemd_observation(&String::from_utf8_lossy(
             &output.stdout,
         ))?)
     }
@@ -143,6 +188,7 @@ mod tests {
     use super::super::AutostartState;
     use super::super::DaemonFailure;
     use super::super::DaemonState;
+    use super::super::TEST_OBSERVATION_SCHEDULE;
     use super::*;
 
     const RUNNING_STATUS: &str = "LoadState=loaded\nActiveState=active\nSubState=running\nUnitFileState=enabled\nExecMainCode=0\nExecMainStatus=0\nResult=success\n";
@@ -157,6 +203,7 @@ mod tests {
     ) -> SystemdManager<ScriptedCommandRunner> {
         SystemdManager {
             unit_path: root.join("systemd/user").join(SYSTEMD_UNIT),
+            poll_schedule: TEST_OBSERVATION_SCHEDULE,
             runner,
         }
     }
@@ -164,6 +211,7 @@ mod tests {
     fn detached_manager(runner: ScriptedCommandRunner) -> SystemdManager<ScriptedCommandRunner> {
         SystemdManager {
             unit_path: PathBuf::from("/definition/does/not/exist"),
+            poll_schedule: TEST_OBSERVATION_SCHEDULE,
             runner,
         }
     }
@@ -195,13 +243,16 @@ mod tests {
             CommandStep::success(SYSTEMCTL, &[SYSTEMD_USER_ARG, "enable", SYSTEMD_UNIT], ""),
             CommandStep::success(SYSTEMCTL, &[SYSTEMD_USER_ARG, "restart", SYSTEMD_UNIT], ""),
         ];
-        for _ in 0..=super::super::OBSERVATION_RETRIES {
-            steps.push(CommandStep::success(
-                SYSTEMCTL,
-                &SYSTEMD_STATUS_ARGS,
-                failed_status,
-            ));
-        }
+        steps.push(CommandStep::success(
+            SYSTEMCTL,
+            &SYSTEMD_STATUS_ARGS,
+            failed_status,
+        ));
+        steps.push(CommandStep::success(
+            SYSTEMCTL,
+            &SYSTEMD_STATUS_ARGS,
+            failed_status,
+        ));
         let runner = ScriptedCommandRunner::new(steps);
         let manager = test_manager(&root, runner);
         let spec = service_spec(&LogLevel::Info, &RuntimeFlavor::MultiThread)?;
@@ -267,6 +318,7 @@ mod tests {
             CommandStep::success(SYSTEMCTL, &[SYSTEMD_USER_ARG, "enable", SYSTEMD_UNIT], ""),
             CommandStep::success(SYSTEMCTL, &[SYSTEMD_USER_ARG, "restart", SYSTEMD_UNIT], ""),
             CommandStep::success(SYSTEMCTL, &SYSTEMD_STATUS_ARGS, RUNNING_STATUS),
+            CommandStep::success(SYSTEMCTL, &SYSTEMD_STATUS_ARGS, RUNNING_STATUS),
         ]);
         let manager = test_manager(&root, runner);
         let spec = service_spec(&LogLevel::Info, &RuntimeFlavor::MultiThread)?;
@@ -296,6 +348,11 @@ mod tests {
                 &SYSTEMD_STATUS_ARGS,
                 "LoadState=not-found\nActiveState=active\nSubState=running\nUnitFileState=\n",
             ),
+            CommandStep::success(
+                SYSTEMCTL,
+                &SYSTEMD_STATUS_ARGS,
+                "LoadState=not-found\nActiveState=active\nSubState=running\nUnitFileState=\n",
+            ),
         ]);
         let manager = detached_manager(runner);
 
@@ -314,6 +371,11 @@ mod tests {
         let runner = ScriptedCommandRunner::new([
             CommandStep::success(SYSTEMCTL, &[SYSTEMD_USER_ARG, "daemon-reload"], ""),
             CommandStep::success(SYSTEMCTL, &[SYSTEMD_USER_ARG, "restart", SYSTEMD_UNIT], ""),
+            CommandStep::success(
+                SYSTEMCTL,
+                &SYSTEMD_STATUS_ARGS,
+                "LoadState=loaded\nActiveState=active\nSubState=running\nUnitFileState=disabled\nResult=success\n",
+            ),
             CommandStep::success(
                 SYSTEMCTL,
                 &SYSTEMD_STATUS_ARGS,

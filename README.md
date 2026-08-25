@@ -132,15 +132,18 @@ explicit error and reports that preservation could not be completed.
 
 The service uses the directory where `rings daemon start` was run as its working
 directory. This lets the daemon load the same `.env` file as a foreground
-`rings run`. Shell variables that are only exported in the installing terminal
-are not copied into the service definition; put persistent settings in the Rings
-configuration file or that working directory's `.env` file. Run `daemon start`
-again after changing the executable path, configuration path, working directory,
-log level, or runtime scheduler stored in the service definition.
+`rings run`. `CONFIG`, `LOG_LEVEL`, and `RUNTIME` from the installing shell or
+that directory's `.env` file are parsed by the CLI and copied into the service
+definition. Other shell variables are not copied into the definition; put
+persistent node settings in the Rings configuration file or the captured `.env`
+file. Run `daemon start` again after changing the executable path, configuration
+path, working directory, log level, or runtime scheduler stored in the service
+definition.
 The captured working directory must continue to exist at the same path. Moving
 or deleting it prevents the service manager from starting the node; run
 `rings daemon start` again from a persistent directory to update the definition.
-`daemon start` observes only the manager's initial bookkeeping window. A node
+`daemon start` and `daemon restart` observe only the manager's initial
+bookkeeping window. A node
 that is still in manager startup bookkeeping, throttled, or waiting for
 `RestartSec` when that window ends remains installed but makes the command exit
 non-zero with its last state; use `rings daemon status` to observe the later
@@ -171,9 +174,18 @@ rm ~/Library/LaunchAgents/io.ringsnetwork.node.plist
 
 # Linux
 systemctl --user disable --now rings-node.service
-rm "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/rings-node.service"
+case "${XDG_CONFIG_HOME:-}" in
+  /*) rings_config_home=$XDG_CONFIG_HOME ;;
+  *) rings_config_home=$HOME/.config ;;
+esac
+rm "$rings_config_home/systemd/user/rings-node.service"
 systemctl --user daemon-reload
 ```
+
+Linux must disable the unit to remove the default-target symlink created by
+`systemctl enable`. On macOS, the plist itself is the login registration and
+`rings daemon stop` has already unloaded the job, so removing the plist is
+sufficient.
 
 ### Build for WebAssembly
 

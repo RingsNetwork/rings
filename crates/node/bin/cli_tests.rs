@@ -133,46 +133,62 @@ fn global_runtime_and_log_options_remain_compatible() {
 
 #[test]
 fn storage_path_preserves_each_configured_capacity_without_an_override() {
-    let data = config::StorageConfig::new("old-data", 5_000);
-    let measure = config::StorageConfig::new("old-measure", 7_000);
+    let mut config = config::Config::new("session");
+    config.data_storage = config::StorageConfig::new("old-data", 5_000);
+    config.measure_storage = config::StorageConfig::new("old-measure", 7_000);
 
-    let mut data = data;
-    let mut measure = measure;
-    apply_storage_overrides(&mut data, &mut measure, Some("/new-root".to_owned()), None);
+    apply_storage_overrides(&mut config, Some("/new-root".to_owned()), None);
 
     assert_eq!(
-        (data.path.as_str(), data.capacity),
+        (
+            config.data_storage.path.as_str(),
+            config.data_storage.capacity,
+        ),
         ("/new-root/data", 5_000)
     );
     assert_eq!(
-        (measure.path.as_str(), measure.capacity),
+        (
+            config.measure_storage.path.as_str(),
+            config.measure_storage.capacity,
+        ),
         ("/new-root/measure", 7_000)
     );
 }
 
 #[test]
 fn storage_capacity_overrides_both_configured_stores_without_replacing_paths() {
-    let data = config::StorageConfig::new("old-data", 5_000);
-    let measure = config::StorageConfig::new("old-measure", 7_000);
+    let mut config = config::Config::new("session");
+    config.data_storage = config::StorageConfig::new("old-data", 5_000);
+    config.measure_storage = config::StorageConfig::new("old-measure", 7_000);
 
-    let mut data = data;
-    let mut measure = measure;
-    apply_storage_overrides(&mut data, &mut measure, None, Some(9_000));
+    apply_storage_overrides(&mut config, None, Some(9_000));
 
-    assert_eq!((data.path.as_str(), data.capacity), ("old-data", 9_000));
     assert_eq!(
-        (measure.path.as_str(), measure.capacity),
+        (
+            config.data_storage.path.as_str(),
+            config.data_storage.capacity,
+        ),
+        ("old-data", 9_000)
+    );
+    assert_eq!(
+        (
+            config.measure_storage.path.as_str(),
+            config.measure_storage.capacity,
+        ),
         ("old-measure", 9_000)
     );
 }
 
 #[test]
 fn storage_capacity_is_absent_when_the_cli_flag_is_omitted() {
-    let parsed = Cli::try_parse_from(["rings", "run", "--storage-path", "/new-root"]);
-    let storage_capacity = parsed.ok().and_then(|cli| match cli.command {
-        Command::Async(super::AsyncCommand::Run(command)) => Some(command.storage_capacity),
-        _ => None,
-    });
+    let command = Cli::command();
+    let storage_capacity = command
+        .get_subcommands()
+        .find(|subcommand| subcommand.get_name() == "run")
+        .and_then(|run| {
+            run.get_arguments()
+                .find(|argument| argument.get_id() == "storage_capacity")
+        });
 
-    assert_eq!(storage_capacity, Some(None));
+    assert!(storage_capacity.is_some_and(|argument| argument.get_default_values().is_empty()));
 }

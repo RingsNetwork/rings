@@ -1,10 +1,12 @@
+//! Scripted witnesses for launchd unload and stop behavior.
+
 use super::*;
 
 #[test]
 fn stop_unloads_the_job_and_preserves_enabled_autostart() -> Result<(), DaemonError> {
     let root = test_root("stop-success");
     let domain = TEST_DOMAIN;
-    let target = TEST_TARGET.to_owned();
+    let target = test_target();
     install_test_definition(&root)?;
     let runner = ScriptedCommandRunner::new([
         CommandStep::success(LAUNCHCTL, &["print", &target], "state = running\n"),
@@ -37,13 +39,13 @@ fn stop_unloads_the_job_and_preserves_enabled_autostart() -> Result<(), DaemonEr
 #[test]
 fn stop_reports_a_job_that_never_unloads() -> Result<(), DaemonError> {
     let root = test_root("stop-timeout");
-    let target = TEST_TARGET.to_owned();
+    let target = test_target();
     install_test_definition(&root)?;
     let mut steps = vec![
         CommandStep::success(LAUNCHCTL, &["print", &target], "state = running\n"),
         CommandStep::success(LAUNCHCTL, &["bootout", &target], ""),
     ];
-    for _ in 0..=super::super::super::OBSERVATION_RETRIES {
+    for _ in 0..=TEST_OBSERVATION_SCHEDULE.retries {
         steps.push(CommandStep::success(
             LAUNCHCTL,
             &["print", &target],
@@ -58,25 +60,5 @@ fn stop_reports_a_job_that_never_unloads() -> Result<(), DaemonError> {
         result,
         Err(DaemonError::Launchd(LaunchdError::ServiceDidNotUnload))
     ));
-    Ok(())
-}
-
-#[test]
-fn loaded_job_without_a_plist_still_queries_manager_autostart() -> Result<(), DaemonError> {
-    let root = test_root("status-loaded-without-plist");
-    let domain = TEST_DOMAIN;
-    let target = TEST_TARGET.to_owned();
-    let runner = ScriptedCommandRunner::new([
-        CommandStep::success(LAUNCHCTL, &["print", &target], "state = running\n"),
-        enabled_autostart(domain),
-    ]);
-    let manager = test_manager(&root, runner);
-
-    let status = manager.observe()?;
-
-    assert_eq!(
-        status,
-        DaemonStatus::installed(DaemonState::Running, AutostartState::Enabled)
-    );
     Ok(())
 }

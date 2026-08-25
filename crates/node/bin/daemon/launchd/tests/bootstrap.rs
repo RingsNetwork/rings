@@ -1,3 +1,5 @@
+//! Scripted witnesses for launchd bootstrap recovery and autostart restoration.
+
 use super::*;
 
 #[test]
@@ -5,7 +7,7 @@ fn restart_bootstraps_an_installed_but_unloaded_service_without_enabling_autosta
 ) -> Result<(), DaemonError> {
     let root = test_root("restart-bootstrap-sequence");
     let domain = TEST_DOMAIN;
-    let target = TEST_TARGET.to_owned();
+    let target = test_target();
     let definition = install_test_definition(&root)?;
     let definition_text = path_text(&definition)?;
     let runner = ScriptedCommandRunner::new([
@@ -21,6 +23,7 @@ fn restart_bootstraps_an_installed_but_unloaded_service_without_enabling_autosta
             LAUNCHD_BOOTSTRAP_DISABLED,
             "Input/output error",
         ),
+        disabled_autostart(domain),
         CommandStep::success(LAUNCHCTL, &["enable", &target], ""),
         CommandStep::success(LAUNCHCTL, &["bootstrap", domain, &definition_text], ""),
         CommandStep::success(LAUNCHCTL, &["disable", &target], ""),
@@ -42,7 +45,7 @@ fn restart_bootstraps_an_installed_but_unloaded_service_without_enabling_autosta
 fn enabled_unloaded_restart_does_not_mutate_autostart() -> Result<(), DaemonError> {
     let root = test_root("restart-enabled-unloaded");
     let domain = TEST_DOMAIN;
-    let target = TEST_TARGET.to_owned();
+    let target = test_target();
     let definition = install_test_definition(&root)?;
     let definition_text = path_text(&definition)?;
     let runner = ScriptedCommandRunner::new([
@@ -68,10 +71,11 @@ fn enabled_unloaded_restart_does_not_mutate_autostart() -> Result<(), DaemonErro
 }
 
 #[test]
-fn failed_bootstrap_still_restores_disabled_autostart() -> Result<(), DaemonError> {
-    let root = test_root("restart-bootstrap-failure");
+fn exit_five_with_enabled_autostart_does_not_mutate_the_observed_state() -> Result<(), DaemonError>
+{
+    let root = test_root("restart-exit-five-enabled");
     let domain = TEST_DOMAIN;
-    let target = TEST_TARGET.to_owned();
+    let target = test_target();
     let definition = install_test_definition(&root)?;
     let definition_text = path_text(&definition)?;
     let runner = ScriptedCommandRunner::new([
@@ -87,6 +91,79 @@ fn failed_bootstrap_still_restores_disabled_autostart() -> Result<(), DaemonErro
             LAUNCHD_BOOTSTRAP_DISABLED,
             "Input/output error",
         ),
+        enabled_autostart(domain),
+    ]);
+    let manager = test_manager(&root, runner);
+
+    let result = manager.restart();
+
+    assert!(matches!(
+        result,
+        Err(DaemonError::CommandFailed(failure))
+            if failure.status.code() == Some(LAUNCHD_BOOTSTRAP_DISABLED)
+    ));
+    Ok(())
+}
+
+#[test]
+fn exit_five_with_unknown_autostart_does_not_mutate_manager_state() -> Result<(), DaemonError> {
+    let root = test_root("restart-exit-five-unknown");
+    let domain = TEST_DOMAIN;
+    let target = test_target();
+    let definition = install_test_definition(&root)?;
+    let definition_text = path_text(&definition)?;
+    let runner = ScriptedCommandRunner::new([
+        CommandStep::failure(
+            LAUNCHCTL,
+            &["print", &target],
+            LAUNCHD_SERVICE_NOT_FOUND,
+            "Could not find specified service",
+        ),
+        CommandStep::failure(
+            LAUNCHCTL,
+            &["bootstrap", domain, &definition_text],
+            LAUNCHD_BOOTSTRAP_DISABLED,
+            "Input/output error",
+        ),
+        CommandStep::success(
+            LAUNCHCTL,
+            &["print-disabled", domain],
+            "unrecognized launchctl output",
+        ),
+    ]);
+    let manager = test_manager(&root, runner);
+
+    let result = manager.restart();
+
+    assert!(matches!(
+        result,
+        Err(DaemonError::CommandFailed(failure))
+            if failure.status.code() == Some(LAUNCHD_BOOTSTRAP_DISABLED)
+    ));
+    Ok(())
+}
+
+#[test]
+fn failed_bootstrap_still_restores_disabled_autostart() -> Result<(), DaemonError> {
+    let root = test_root("restart-bootstrap-failure");
+    let domain = TEST_DOMAIN;
+    let target = test_target();
+    let definition = install_test_definition(&root)?;
+    let definition_text = path_text(&definition)?;
+    let runner = ScriptedCommandRunner::new([
+        CommandStep::failure(
+            LAUNCHCTL,
+            &["print", &target],
+            LAUNCHD_SERVICE_NOT_FOUND,
+            "Could not find specified service",
+        ),
+        CommandStep::failure(
+            LAUNCHCTL,
+            &["bootstrap", domain, &definition_text],
+            LAUNCHD_BOOTSTRAP_DISABLED,
+            "Input/output error",
+        ),
+        disabled_autostart(domain),
         CommandStep::success(LAUNCHCTL, &["enable", &target], ""),
         CommandStep::failure(
             LAUNCHCTL,
@@ -113,7 +190,7 @@ fn failed_bootstrap_still_restores_disabled_autostart() -> Result<(), DaemonErro
 fn successful_bootstrap_reports_restore_failure() -> Result<(), DaemonError> {
     let root = test_root("restart-restore-failure");
     let domain = TEST_DOMAIN;
-    let target = TEST_TARGET.to_owned();
+    let target = test_target();
     let definition = install_test_definition(&root)?;
     let definition_text = path_text(&definition)?;
     let runner = ScriptedCommandRunner::new([
@@ -129,6 +206,7 @@ fn successful_bootstrap_reports_restore_failure() -> Result<(), DaemonError> {
             LAUNCHD_BOOTSTRAP_DISABLED,
             "Input/output error",
         ),
+        disabled_autostart(domain),
         CommandStep::success(LAUNCHCTL, &["enable", &target], ""),
         CommandStep::success(LAUNCHCTL, &["bootstrap", domain, &definition_text], ""),
         CommandStep::failure(LAUNCHCTL, &["disable", &target], 7, "restore failed"),
@@ -150,7 +228,7 @@ fn successful_bootstrap_reports_restore_failure() -> Result<(), DaemonError> {
 fn failed_bootstrap_and_restore_preserve_both_errors() -> Result<(), DaemonError> {
     let root = test_root("restart-bootstrap-and-restore-failure");
     let domain = TEST_DOMAIN;
-    let target = TEST_TARGET.to_owned();
+    let target = test_target();
     let definition = install_test_definition(&root)?;
     let definition_text = path_text(&definition)?;
     let runner = ScriptedCommandRunner::new([
@@ -166,6 +244,7 @@ fn failed_bootstrap_and_restore_preserve_both_errors() -> Result<(), DaemonError
             LAUNCHD_BOOTSTRAP_DISABLED,
             "Input/output error",
         ),
+        disabled_autostart(domain),
         CommandStep::success(LAUNCHCTL, &["enable", &target], ""),
         CommandStep::failure(
             LAUNCHCTL,
@@ -192,7 +271,7 @@ fn failed_bootstrap_and_restore_preserve_both_errors() -> Result<(), DaemonError
 fn enable_failure_does_not_attempt_a_restore() -> Result<(), DaemonError> {
     let root = test_root("restart-enable-failure");
     let domain = TEST_DOMAIN;
-    let target = TEST_TARGET.to_owned();
+    let target = test_target();
     let definition = install_test_definition(&root)?;
     let definition_text = path_text(&definition)?;
     let runner = ScriptedCommandRunner::new([
@@ -208,6 +287,7 @@ fn enable_failure_does_not_attempt_a_restore() -> Result<(), DaemonError> {
             LAUNCHD_BOOTSTRAP_DISABLED,
             "Input/output error",
         ),
+        disabled_autostart(domain),
         CommandStep::failure(LAUNCHCTL, &["enable", &target], 7, "enable failed"),
     ]);
     let manager = test_manager(&root, runner);
@@ -222,7 +302,7 @@ fn enable_failure_does_not_attempt_a_restore() -> Result<(), DaemonError> {
 fn non_disabled_bootstrap_failure_does_not_mutate_autostart() -> Result<(), DaemonError> {
     let root = test_root("restart-non-disabled-bootstrap-failure");
     let domain = TEST_DOMAIN;
-    let target = TEST_TARGET.to_owned();
+    let target = test_target();
     let definition = install_test_definition(&root)?;
     let definition_text = path_text(&definition)?;
     let runner = ScriptedCommandRunner::new([

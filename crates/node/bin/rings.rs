@@ -261,7 +261,7 @@ struct RunCommand {
 
     #[arg(
         long,
-        help = "Storage files location. If not provided, use storage.path in config file or ~/.local/share/rings",
+        help = "Storage root. If provided, data and measure files use its data/ and measure/ subdirectories; otherwise preserve their configured paths (defaults: ~/.rings/data and ~/.rings/measure)",
         env
     )]
     pub storage_path: Option<String>,
@@ -613,12 +613,7 @@ struct InspectCommand {
 }
 
 fn apply_run_config_overrides(c: &mut config::Config, args: &mut RunCommand) -> anyhow::Result<()> {
-    apply_storage_overrides(
-        &mut c.data_storage,
-        &mut c.measure_storage,
-        args.storage_path.take(),
-        args.storage_capacity,
-    );
+    apply_storage_overrides(c, args.storage_path.take(), args.storage_capacity);
     if let Some(ice_servers) = args.ice_servers.take() {
         c.ice_servers = ice_servers;
     }
@@ -784,19 +779,18 @@ async fn run_node_foreground(mut args: RunCommand) -> anyhow::Result<()> {
 }
 
 fn apply_storage_overrides(
-    data: &mut config::StorageConfig,
-    measure: &mut config::StorageConfig,
-    storage_path: Option<String>,
+    config: &mut config::Config,
+    storage_root: Option<String>,
     storage_capacity: Option<u32>,
 ) {
-    if let Some(storage_path) = storage_path {
-        let storage_path = Path::new(&storage_path);
-        data.path = storage_path.join("data").to_string_lossy().to_string();
-        measure.path = storage_path.join("measure").to_string_lossy().to_string();
+    if let Some(storage_root) = storage_root {
+        let storage_root = Path::new(&storage_root);
+        config.data_storage.path = storage_root.join("data").to_string_lossy().to_string();
+        config.measure_storage.path = storage_root.join("measure").to_string_lossy().to_string();
     }
     if let Some(capacity) = storage_capacity {
-        data.capacity = capacity;
-        measure.capacity = capacity;
+        config.data_storage.capacity = capacity;
+        config.measure_storage.capacity = capacity;
     }
 }
 
