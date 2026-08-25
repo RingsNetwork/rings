@@ -1,4 +1,5 @@
-//! Pure launchd definition rendering and manager-exit classification.
+//! Renders the Rings LaunchAgent plist and classifies launchctl exit codes. XML validation occurs
+//! before any filesystem or manager effect in the launchd adapter.
 
 use thiserror::Error;
 
@@ -104,6 +105,8 @@ fn is_xml_1_0_character(character: char) -> bool {
 
 #[cfg(test)]
 mod tests {
+    //! Proves plist rendering escapes XML and rejects every forbidden XML 1.0 boundary case.
+
     use rings_node::logging::LogLevel;
 
     use super::super::super::super::RuntimeFlavor;

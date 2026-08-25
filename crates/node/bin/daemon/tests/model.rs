@@ -1,4 +1,5 @@
-//! Pure shared-model, discovery, formatting, and polling invariants.
+//! Exercises shared state reductions plus their filesystem-backed discovery and atomic-write
+//! boundaries. Tests that touch disk use isolated per-process temporary roots.
 
 use super::*;
 
@@ -78,12 +79,23 @@ fn recovery_failure_display_keeps_the_recovery_source_chain() {
 
     assert_eq!(
         failure.to_string(),
-        "could not execute primary-manager; recovery also failed: could not execute recovery-manager: recovery source"
+        "could not execute primary-manager: primary source; recovery also failed: could not execute recovery-manager: recovery source"
     );
+    assert!(std::error::Error::source(&failure).is_none());
+}
+
+#[test]
+fn primary_recovery_failure_renders_its_complete_chain_without_a_skipped_link() {
+    let failure = RecoveryFailure::Primary(Box::new(DaemonError::ExecuteCommand {
+        program: "primary-manager",
+        source: io::Error::other("primary source"),
+    }));
+
     assert_eq!(
-        std::error::Error::source(&failure).map(ToString::to_string),
-        Some("primary source".to_owned())
+        failure.to_string(),
+        "could not execute primary-manager: primary source"
     );
+    assert!(std::error::Error::source(&failure).is_none());
 }
 
 #[test]
@@ -158,4 +170,139 @@ fn human_command_format_does_not_apply_service_manager_escaping() {
     let command = format_command("rings", &["run", "$HOME/%n"]);
 
     assert_eq!(command, "\"rings\" \"run\" \"$HOME/%n\"");
+}
+
+#[test]
+fn atomic_write_removes_temporary_file_when_install_fails() -> io::Result<()> {
+    let root = TestRoot::new("shared", "atomic-install-failure");
+    let target = root.join("definition");
+    let temporary = root.join(format!(".definition.{}.tmp", std::process::id()));
+    fs::create_dir_all(&target)?;
+
+    let result = write_atomic(&target, "definition");
+
+    assert!(matches!(
+        result,
+        Err(DaemonError::InstallServiceDefinition { .. })
+    ));
+    assert!(!temporary.exists());
+    Ok(())
+}
+
+#[test]
+fn install_failure_names_the_artifact_that_requires_action() {
+    let target = Path::new("definition.plist");
+    let temporary = Path::new(".definition.plist.42.tmp");
+    let cleanup_succeeded = Ok(());
+    let cleanup_failed = Err(io::Error::other("cleanup failed"));
+
+    assert_eq!(
+        definition_failure_path(target, temporary, &cleanup_succeeded),
+        target
+    );
+    assert_eq!(
+        definition_failure_path(target, temporary, &cleanup_failed),
+        temporary
+    );
+}
+
+#[test]
+fn atomic_write_removes_partial_file_when_write_fails() {
+    let root = TestRoot::new("shared", "atomic-write-failure");
+    let target = root.join("definition");
+    let temporary = root.join(format!(".definition.{}.tmp", std::process::id()));
+
+    let result = write_atomic_with(&target, "definition", |path, contents| {
+        fs::write(path, contents)?;
+        Err(io::Error::other("injected write failure"))
+    });
+
+    assert!(matches!(
+        result,
+        Err(DaemonError::WriteServiceDefinition { path, .. }) if path == target
+    ));
+    assert!(!temporary.exists());
+}
+
+#[test]
+fn atomic_write_distinguishes_a_missing_file_name_from_non_utf8() {
+    let result = write_atomic(Path::new("/"), "definition");
+
+    assert!(matches!(
+        result,
+        Err(DaemonError::ServiceDefinitionPathHasNoFileName { path })
+            if path == Path::new("/")
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn atomic_write_validates_non_utf8_name_before_creating_parent() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let root = TestRoot::new("shared", "atomic-non-utf8");
+    let parent = root.join("new-parent");
+    let target = parent.join(OsStr::from_bytes(b"definition-\xff"));
+
+    let result = write_atomic(&target, "definition");
+
+    assert!(matches!(result, Err(DaemonError::NonUtf8Path { .. })));
+    assert!(!parent.exists());
+}
+
+#[test]
+fn config_path_reports_missing_file_with_init_guidance() {
+    let root = TestRoot::new("shared", "missing-config");
+    let missing = root.join("config.yaml");
+
+    let error = resolve_config_path(missing.to_string_lossy().as_ref(), &root);
+
+    assert!(matches!(
+        &error,
+        Err(DaemonError::ConfigNotFound { path }) if *path == missing
+    ));
+    assert!(error
+        .as_ref()
+        .err()
+        .is_some_and(|error| error.to_string().contains("run `rings init` first")));
+}
+
+#[test]
+fn config_path_canonicalizes_an_existing_file() -> io::Result<()> {
+    let root = TestRoot::new("shared", "existing-config");
+    fs::create_dir_all(&*root)?;
+    let config = root.join("config.yaml");
+    fs::write(&config, "config")?;
+
+    let resolved = resolve_config_path(config.to_string_lossy().as_ref(), &root);
+
+    assert_eq!(resolved.ok(), config.canonicalize().ok());
+    Ok(())
+}
+
+#[test]
+fn config_path_resolves_relative_to_the_captured_working_directory() -> io::Result<()> {
+    let root = TestRoot::new("shared", "relative-config");
+    fs::create_dir_all(&*root)?;
+    let config = root.join("relative.yaml");
+    fs::write(&config, "config")?;
+
+    let resolved = resolve_config_path("relative.yaml", &root);
+
+    assert_eq!(resolved.ok(), config.canonicalize().ok());
+    Ok(())
+}
+
+#[test]
+fn config_path_expands_home_before_using_the_working_directory() {
+    let root = TestRoot::new("shared", "home-config");
+    let missing = "~/.rings/codex-daemon-review-missing.yaml";
+
+    let error = resolve_config_path(missing, &root);
+
+    assert!(matches!(
+        error,
+        Err(DaemonError::ConfigNotFound { path }) if path.is_absolute() && !path.starts_with(&*root)
+    ));
 }

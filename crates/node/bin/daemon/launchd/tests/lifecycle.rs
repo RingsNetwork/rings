@@ -1,4 +1,5 @@
-//! Scripted witnesses for launchd unload and stop behavior.
+//! Verifies stop waits for the loaded record to disappear and reuses that terminal observation
+//! while preserving the independent login-autostart setting.
 
 use super::*;
 
@@ -11,18 +12,7 @@ fn stop_unloads_the_job_and_preserves_enabled_autostart() -> Result<(), DaemonEr
     let runner = ScriptedCommandRunner::new([
         CommandStep::success(LAUNCHCTL, &["print", &target], "state = running\n"),
         CommandStep::success(LAUNCHCTL, &["bootout", &target], ""),
-        CommandStep::failure(
-            LAUNCHCTL,
-            &["print", &target],
-            LAUNCHD_SERVICE_NOT_FOUND,
-            "Could not find specified service",
-        ),
-        CommandStep::failure(
-            LAUNCHCTL,
-            &["print", &target],
-            LAUNCHD_SERVICE_NOT_FOUND,
-            "Could not find specified service",
-        ),
+        missing_service(&target),
         enabled_autostart(domain),
     ]);
     let manager = test_manager(&root, runner);

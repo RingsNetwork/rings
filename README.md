@@ -142,12 +142,13 @@ definition.
 The captured working directory must continue to exist at the same path. Moving
 or deleting it prevents the service manager from starting the node; run
 `rings daemon start` again from a persistent directory to update the definition.
-`daemon start` and `daemon restart` observe only the manager's initial
-bookkeeping window. A node
-that is still in manager startup bookkeeping, throttled, or waiting for
-`RestartSec` when that window ends remains installed but makes the command exit
-non-zero with its last state; use `rings daemon status` to observe the later
-transition.
+`daemon start` and `daemon restart` poll short manager-bookkeeping transitions
+for up to two seconds. launchd throttling settles immediately because the
+manager-imposed delay exceeds that window; systemd `auto-restart` remains
+pending until it runs or the polling budget expires because an already-loaded
+unit may not use Rings' configured `RestartSec`. In either case the service
+remains installed, the command exits non-zero with its last state, and `rings
+daemon status` shows the later transition.
 
 On macOS, standard output is written to `~/.rings/logs/daemon.log` and standard
 error to `~/.rings/logs/daemon.error.log`. On Linux, inspect logs with:
@@ -170,6 +171,7 @@ stop it first and remove the platform definition manually:
 ```sh
 # macOS
 rings daemon stop
+launchctl enable "gui/$(id -u)/io.ringsnetwork.node"
 rm ~/Library/LaunchAgents/io.ringsnetwork.node.plist
 
 # Linux
@@ -183,9 +185,12 @@ systemctl --user daemon-reload
 ```
 
 Linux must disable the unit to remove the default-target symlink created by
-`systemctl enable`. On macOS, the plist itself is the login registration and
-`rings daemon stop` has already unloaded the job, so removing the plist is
-sufficient.
+`systemctl enable`. On macOS, `rings daemon stop` unloads the job, while the
+plist and launchd's per-user enable/disable override are independent. The
+`launchctl enable` step prevents a stale disabled override from affecting a
+future installation before the plist is removed. launchd provides no
+label-scoped command to delete that override database entry, so it may retain a
+harmless enabled record after manual removal.
 
 ### Build for WebAssembly
 

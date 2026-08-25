@@ -1,4 +1,5 @@
-//! Coordinates the cross-platform daemon model and its shared process, filesystem, and timing boundaries.
+//! Defines the daemon command model and keeps shared process, filesystem, and polling effects at
+//! explicit boundaries. Platform adapters own manager-specific state and rendering policy.
 
 use std::env;
 use std::fmt;
@@ -26,8 +27,9 @@ mod launchd;
 #[cfg(any(target_os = "linux", all(test, unix)))]
 mod systemd;
 
-// Twenty 100 ms retries cover manager bookkeeping and ordinary in-flight spawns. Adapter lifecycle
-// models decide whether an observation is stable or still expected to advance inside this window.
+// This is a CLI responsiveness budget, not a promise about manager spawn latency. Twenty 100 ms
+// retries let adapters observe short bookkeeping transitions without waiting through a configured
+// or manager-imposed respawn delay.
 const MANAGER_OBSERVATION_SCHEDULE: PollSchedule = PollSchedule {
     retries: 20,
     interval: Duration::from_millis(100),
@@ -109,6 +111,8 @@ enum DaemonError {
     },
     #[error("path is not valid UTF-8 and cannot be written to a service definition: {path}")]
     NonUtf8Path { path: PathBuf },
+    #[error("service definition path has no file name: {path}")]
+    ServiceDefinitionPathHasNoFileName { path: PathBuf },
     #[cfg(any(target_os = "macos", all(test, unix)))]
     #[error(transparent)]
     Launchd(#[from] launchd::LaunchdError),
@@ -123,7 +127,7 @@ enum DaemonError {
         #[source]
         source: Box<rings_node::error::Error>,
     },
-    #[error("could not write temporary service definition {path}")]
+    #[error("could not prepare service definition {path}")]
     WriteServiceDefinition {
         path: PathBuf,
         #[source]
@@ -163,9 +167,10 @@ where E: std::error::Error + 'static
 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Primary(primary) => fmt::Display::fmt(primary, formatter),
+            Self::Primary(primary) => write_error_chain(formatter, primary),
             Self::Both { primary, recovery } => {
-                write!(formatter, "{primary}; recovery also failed: ")?;
+                write_error_chain(formatter, primary)?;
+                write!(formatter, "; recovery also failed: ")?;
                 write_error_chain(formatter, recovery)
             }
         }
@@ -176,10 +181,9 @@ impl<E> std::error::Error for RecoveryFailure<E>
 where E: std::error::Error + 'static
 {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Primary(primary) => primary.source(),
-            Self::Both { primary, .. } => primary.source(),
-        }
+        // Display renders both complete chains in operation order. Exposing either branch as the
+        // single `source` would make a chain walker misattribute or duplicate the other branch.
+        None
     }
 }
 
@@ -281,14 +285,15 @@ impl fmt::Display for DaemonFailure {
 ///
 /// `Stopped` means the manager retains an installed or loaded job but no process is running.
 /// `Restarting` means the manager has scheduled another spawn after the optional last failure.
-/// `Failed(None)` means the manager reports a terminal failure without an attributable cause.
+/// `Failed(None)` means systemd reports a terminal failure without an attributable cause. launchd
+/// reports a cause-less non-running state as `Stopped` because it has no equivalent failed state.
 #[derive(Debug, Eq, PartialEq)]
 enum DaemonState {
     Running,
     Stopped,
     Restarting(Option<DaemonFailure>),
     Failed(Option<DaemonFailure>),
-    Transitioning(&'static str),
+    Transitioning(DaemonTransition),
     Unknown(String),
 }
 
@@ -307,8 +312,26 @@ impl fmt::Display for DaemonState {
             Self::Restarting(None) => formatter.write_str("restarting"),
             Self::Failed(Some(failure)) => write!(formatter, "failed ({failure})"),
             Self::Failed(None) => formatter.write_str("failed"),
-            Self::Transitioning(state) => formatter.write_str(state),
+            Self::Transitioning(state) => state.fmt(formatter),
             Self::Unknown(state) => write!(formatter, "unknown ({state})"),
+        }
+    }
+}
+
+/// A manager-reported lifecycle transition that has not reached its stable state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DaemonTransition {
+    Starting,
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    Stopping,
+}
+
+impl fmt::Display for DaemonTransition {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Starting => formatter.write_str("starting"),
+            #[cfg(any(target_os = "linux", all(test, unix)))]
+            Self::Stopping => formatter.write_str("stopping"),
         }
     }
 }
@@ -318,6 +341,8 @@ impl fmt::Display for DaemonState {
 enum AutostartState {
     Enabled,
     Disabled,
+    Unknown,
+    #[cfg(any(target_os = "linux", all(test, unix)))]
     Other(&'static str),
 }
 
@@ -326,6 +351,8 @@ impl fmt::Display for AutostartState {
         match self {
             Self::Enabled => formatter.write_str("enabled"),
             Self::Disabled => formatter.write_str("disabled"),
+            Self::Unknown => formatter.write_str("unknown"),
+            #[cfg(any(target_os = "linux", all(test, unix)))]
             Self::Other(state) => formatter.write_str(state),
         }
     }
@@ -338,19 +365,27 @@ enum StartPollDisposition {
     Settled,
 }
 
-/// One service-manager lifecycle observation before the independent autostart axis is read.
+/// One service-manager lifecycle observation with an adapter-selected attachment.
+///
+/// `A = ()` represents a lifecycle-only observation. systemd attaches `AutostartState` from the
+/// same `systemctl show` snapshot, while launchd reads that independent axis after settling.
 #[derive(Debug, Eq, PartialEq)]
-enum DaemonObservation {
+enum DaemonObservation<A = ()> {
     NotInstalled,
     Installed {
         state: DaemonState,
         start_poll: StartPollDisposition,
+        attachment: A,
     },
 }
 
-impl DaemonObservation {
-    fn installed(state: DaemonState, start_poll: StartPollDisposition) -> Self {
-        Self::Installed { state, start_poll }
+impl<A> DaemonObservation<A> {
+    fn installed(state: DaemonState, start_poll: StartPollDisposition, attachment: A) -> Self {
+        Self::Installed {
+            state,
+            start_poll,
+            attachment,
+        }
     }
 }
 
@@ -360,13 +395,13 @@ trait StartPollObservation {
     fn settles_start_poll(&self) -> bool;
 }
 
-impl StartPollObservation for DaemonObservation {
+impl<A> StartPollObservation for DaemonObservation<A> {
     fn settles_start_poll(&self) -> bool {
         match self {
             Self::NotInstalled => true,
-            Self::Installed { state, start_poll } => {
-                state.is_running() || *start_poll == StartPollDisposition::Settled
-            }
+            Self::Installed {
+                state, start_poll, ..
+            } => state.is_running() || *start_poll == StartPollDisposition::Settled,
         }
     }
 }
@@ -391,6 +426,18 @@ impl DaemonStatus {
             state: DaemonState::Running,
             ..
         })
+    }
+}
+
+#[cfg(any(target_os = "linux", all(test, unix)))]
+impl DaemonObservation<AutostartState> {
+    fn into_status(self) -> DaemonStatus {
+        match self {
+            Self::NotInstalled => DaemonStatus::NotInstalled,
+            Self::Installed {
+                state, attachment, ..
+            } => DaemonStatus::installed(state, attachment),
+        }
     }
 }
 
@@ -480,8 +527,9 @@ where T: ValueEnum + fmt::Debug {
 /// Invariant: start enables autostart; stop and restart preserve it unless a reported recovery
 /// failure says otherwise.
 ///
-/// Post: every successful operation returns the complete status derived from the same settled
-/// manager observation, rather than a later untested re-query.
+/// Post: successful `start` and `restart` return the lifecycle selected by their settling poll.
+/// launchd samples the independent autostart axis once after that lifecycle settles; systemd reads
+/// both axes from the same manager snapshot. `stop` and `observe` do not use the start-settling poll.
 trait ServiceManager {
     fn name(&self) -> &'static str;
     fn definition_path(&self) -> &Path;
@@ -626,27 +674,31 @@ fn write_atomic(path: &Path, contents: &str) -> Result<(), DaemonError> {
 
 fn write_atomic_with<F>(path: &Path, contents: &str, write: F) -> Result<(), DaemonError>
 where F: FnOnce(&Path, &str) -> io::Result<()> {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| DaemonError::NonUtf8Path {
-            path: path.to_path_buf(),
-        })?;
+    let file_name =
+        path.file_name()
+            .ok_or_else(|| DaemonError::ServiceDefinitionPathHasNoFileName {
+                path: path.to_path_buf(),
+            })?;
+    let file_name = file_name.to_str().ok_or_else(|| DaemonError::NonUtf8Path {
+        path: path.to_path_buf(),
+    })?;
     // The hidden `.tmp` path is not a launchd plist or systemd unit; the process id prevents two
     // CLI processes from sharing it. Rename is atomic to observers, not durable across power loss;
     // rerunning `daemon start` recovers an incomplete on-disk definition.
     let temporary = path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
     ensure_parent_directory(path)?;
     if let Err(source) = write(&temporary, contents) {
-        let failure = primary_with_recovery(source, remove_temporary(&temporary));
+        let cleanup = remove_temporary(&temporary);
+        let error_path = definition_failure_path(path, &temporary, &cleanup);
+        let failure = primary_with_recovery(source, cleanup);
         return Err(DaemonError::WriteServiceDefinition {
-            path: temporary,
+            path: error_path,
             failure,
         });
     }
     if let Err(source) = fs::rename(&temporary, path) {
         let cleanup = remove_temporary(&temporary);
-        let error_path = install_failure_path(path, &temporary, &cleanup);
+        let error_path = definition_failure_path(path, &temporary, &cleanup);
         let failure = primary_with_recovery(source, cleanup);
         return Err(DaemonError::InstallServiceDefinition {
             path: error_path,
@@ -657,8 +709,8 @@ where F: FnOnce(&Path, &str) -> io::Result<()> {
 }
 
 /// Post: names the temporary artifact exactly when cleanup failed and left it as the actionable
-/// path; otherwise names the requested installation target whose rename failed.
-fn install_failure_path(target: &Path, temporary: &Path, cleanup: &io::Result<()>) -> PathBuf {
+/// path; otherwise names the requested installation target rather than a deleted temporary file.
+fn definition_failure_path(target: &Path, temporary: &Path, cleanup: &io::Result<()>) -> PathBuf {
     if cleanup.is_err() {
         temporary.to_path_buf()
     } else {
@@ -701,6 +753,8 @@ fn format_command(program: &str, args: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
+    //! Exercises the shared command model and its filesystem and process-boundary adapters.
+
     mod model;
 
     use std::ops::Deref;
@@ -834,129 +888,5 @@ mod tests {
             log_level: cli_value_name(log_level)?,
             runtime: cli_value_name(runtime)?,
         })
-    }
-
-    #[test]
-    fn atomic_write_removes_temporary_file_when_install_fails() -> io::Result<()> {
-        let root = TestRoot::new("shared", "atomic-install-failure");
-        let target = root.join("definition");
-        let temporary = root.join(format!(".definition.{}.tmp", std::process::id()));
-        fs::create_dir_all(&target)?;
-
-        let result = write_atomic(&target, "definition");
-
-        assert!(matches!(
-            result,
-            Err(DaemonError::InstallServiceDefinition { .. })
-        ));
-        assert!(!temporary.exists());
-        Ok(())
-    }
-
-    #[test]
-    fn install_failure_names_the_artifact_that_requires_action() {
-        let target = Path::new("definition.plist");
-        let temporary = Path::new(".definition.plist.42.tmp");
-        let cleanup_succeeded = Ok(());
-        let cleanup_failed = Err(io::Error::other("cleanup failed"));
-
-        assert_eq!(
-            install_failure_path(target, temporary, &cleanup_succeeded),
-            target
-        );
-        assert_eq!(
-            install_failure_path(target, temporary, &cleanup_failed),
-            temporary
-        );
-    }
-
-    #[test]
-    fn atomic_write_removes_partial_file_when_write_fails() {
-        let root = TestRoot::new("shared", "atomic-write-failure");
-        let target = root.join("definition");
-        let temporary = root.join(format!(".definition.{}.tmp", std::process::id()));
-
-        let result = write_atomic_with(&target, "definition", |path, contents| {
-            fs::write(path, contents)?;
-            Err(io::Error::other("injected write failure"))
-        });
-
-        assert!(matches!(
-            result,
-            Err(DaemonError::WriteServiceDefinition { .. })
-        ));
-        assert!(!temporary.exists());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn atomic_write_validates_non_utf8_name_before_creating_parent() {
-        use std::ffi::OsStr;
-        use std::os::unix::ffi::OsStrExt;
-
-        let root = TestRoot::new("shared", "atomic-non-utf8");
-        let parent = root.join("new-parent");
-        let target = parent.join(OsStr::from_bytes(b"definition-\xff"));
-
-        let result = write_atomic(&target, "definition");
-
-        assert!(matches!(result, Err(DaemonError::NonUtf8Path { .. })));
-        assert!(!parent.exists());
-    }
-
-    #[test]
-    fn config_path_reports_missing_file_with_init_guidance() {
-        let root = TestRoot::new("shared", "missing-config");
-        let missing = root.join("config.yaml");
-
-        let error = resolve_config_path(missing.to_string_lossy().as_ref(), &root);
-
-        assert!(matches!(
-            &error,
-            Err(DaemonError::ConfigNotFound { path }) if *path == missing
-        ));
-        assert!(error
-            .as_ref()
-            .err()
-            .is_some_and(|error| error.to_string().contains("run `rings init` first")));
-    }
-
-    #[test]
-    fn config_path_canonicalizes_an_existing_file() -> io::Result<()> {
-        let root = TestRoot::new("shared", "existing-config");
-        fs::create_dir_all(&*root)?;
-        let config = root.join("config.yaml");
-        fs::write(&config, "config")?;
-
-        let resolved = resolve_config_path(config.to_string_lossy().as_ref(), &root);
-
-        assert_eq!(resolved.ok(), config.canonicalize().ok());
-        Ok(())
-    }
-
-    #[test]
-    fn config_path_resolves_relative_to_the_captured_working_directory() -> io::Result<()> {
-        let root = TestRoot::new("shared", "relative-config");
-        fs::create_dir_all(&*root)?;
-        let config = root.join("relative.yaml");
-        fs::write(&config, "config")?;
-
-        let resolved = resolve_config_path("relative.yaml", &root);
-
-        assert_eq!(resolved.ok(), config.canonicalize().ok());
-        Ok(())
-    }
-
-    #[test]
-    fn config_path_expands_home_before_using_the_working_directory() {
-        let root = TestRoot::new("shared", "home-config");
-        let missing = "~/.rings/codex-daemon-review-missing.yaml";
-
-        let error = resolve_config_path(missing, &root);
-
-        assert!(matches!(
-            error,
-            Err(DaemonError::ConfigNotFound { path }) if path.is_absolute() && !path.starts_with(&*root)
-        ));
     }
 }

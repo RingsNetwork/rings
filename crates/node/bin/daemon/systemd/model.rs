@@ -1,4 +1,5 @@
-//! Pure systemd unit rendering with no process or filesystem effects.
+//! Renders the Rings user unit after validating systemd line-reader constraints. The adapter calls
+//! this module before writing a definition or mutating the user manager.
 
 use std::time::Duration;
 
@@ -6,6 +7,8 @@ use thiserror::Error;
 
 use super::super::ServiceSpec;
 
+// Rings-rendered units use five seconds so repeated node failures remain observable and do not
+// spin. Status parsing cannot assume this value for already-loaded or foreign unit definitions.
 pub(crate) const SYSTEMD_RESTART_DELAY: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Error)]
@@ -104,6 +107,8 @@ fn has_boundary_ascii_whitespace(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    //! Proves unit rendering preserves arguments and rejects line-reader mutations.
+
     use rings_node::logging::LogLevel;
 
     use super::super::super::super::RuntimeFlavor;

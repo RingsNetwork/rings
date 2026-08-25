@@ -1,4 +1,5 @@
-//! Pure launchd lifecycle parsing and failure-attribution policy.
+//! Reduces `launchctl print` output into lifecycle state without performing manager effects. The
+//! parser keeps restart-action provenance distinct from absent or clean termination history.
 
 #[cfg(test)]
 use std::time::Duration;
@@ -7,6 +8,7 @@ use super::super::AutostartState;
 use super::super::DaemonFailure;
 use super::super::DaemonObservation;
 use super::super::DaemonState;
+use super::super::DaemonTransition;
 use super::super::StartPollDisposition;
 #[cfg(test)]
 use super::super::StartPollObservation;
@@ -19,6 +21,11 @@ const SIGTERM: i32 = 15;
 pub(crate) const OBSERVED_THROTTLE_FLOOR: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Selects which termination records may be projected after a manager action.
+///
+/// Law: `Unfiltered` accepts every valid failure record. `SinceRun(n)` accepts a newer record only
+/// after the bounded `kickstart -k` sequence window or when its signal cannot be action-shaped;
+/// `Unattributable` accepts no record because it has no finite run-counter baseline.
 pub(super) enum LaunchdAttribution {
     /// Attribute the current record without suppressing action-shaped termination data.
     Unfiltered,
@@ -28,23 +35,10 @@ pub(super) enum LaunchdAttribution {
     Unattributable,
 }
 
-// Law: `Unfiltered` attributes all valid termination records; `SinceRun(n)` attributes only a
-// record proven newer than action n and outside the bounded action-ambiguity window;
-// `Unattributable` is the conservative limit where no finite run baseline is available.
-
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum LaunchdRecord<T> {
     Missing,
     Loaded(T),
-}
-
-impl<T> LaunchdRecord<T> {
-    pub(super) fn map<U>(self, loaded: impl FnOnce(T) -> U) -> LaunchdRecord<U> {
-        match self {
-            Self::Missing => LaunchdRecord::Missing,
-            Self::Loaded(value) => LaunchdRecord::Loaded(loaded(value)),
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -76,6 +70,26 @@ impl LaunchdTermination<'_> {
     }
 }
 
+/// The three termination-history propositions needed by lifecycle reduction.
+#[derive(Debug, Eq, PartialEq)]
+enum AttributedTermination {
+    /// No failure record exists, or the latest record is a clean exit.
+    None,
+    /// A failure record exists but is indistinguishable from the current restart action.
+    SuppressedAsAction,
+    /// A failure record is attributable to the managed process.
+    Attributed(DaemonFailure),
+}
+
+impl AttributedTermination {
+    fn projected_failure(self) -> Option<DaemonFailure> {
+        match self {
+            Self::Attributed(failure) => Some(failure),
+            Self::None | Self::SuppressedAsAction => None,
+        }
+    }
+}
+
 impl std::fmt::Display for LaunchdTermination<'_> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -102,52 +116,74 @@ enum LaunchdLifecycle<'a> {
 }
 
 impl LaunchdLifecycle<'_> {
-    fn is_settled_after_restart_action(self) -> bool {
-        matches!(self, Self::Waiting | Self::NotRunning)
-    }
-
     fn into_observation(
         self,
+        definition_present: bool,
         observed_sequence: Option<u64>,
-        attributed_failure: Option<DaemonFailure>,
+        termination: AttributedTermination,
     ) -> DaemonObservation {
         let (state, start_poll) = match self {
             Self::Running => (DaemonState::Running, StartPollDisposition::Settled),
-            Self::SpawnScheduled => match (attributed_failure, observed_sequence) {
-                (Some(failure), _) => (
+            Self::SpawnScheduled => match (termination, observed_sequence) {
+                (AttributedTermination::Attributed(failure), _) => (
                     DaemonState::Restarting(Some(failure)),
                     StartPollDisposition::Pending,
                 ),
                 // Observed on macOS 15.6.1 (24G90): runs == 0 means the loaded job has never
                 // spawned; a positive value means this is a respawn rather than its first start.
-                (None, Some(sequence)) if sequence > 0 => {
+                (_, Some(sequence)) if sequence > 0 => {
                     (DaemonState::Restarting(None), StartPollDisposition::Pending)
                 }
-                (None, _) => (
-                    DaemonState::Transitioning("starting"),
+                (_, _) => (
+                    DaemonState::Transitioning(DaemonTransition::Starting),
                     StartPollDisposition::Pending,
                 ),
             },
             // Observed on macOS 15.6.1 (24G90): `exited` is visible before KeepAlive schedules the
-            // next unsuccessful spawn. A successful exit is stable because SuccessfulExit=false.
-            Self::Exited => match attributed_failure {
-                Some(failure) => (
+            // next unsuccessful spawn. `SuccessfulExit=false` is used only when our plist exists.
+            Self::Exited => match (definition_present, termination) {
+                (true, AttributedTermination::Attributed(failure)) => (
                     DaemonState::Restarting(Some(failure)),
                     StartPollDisposition::Pending,
                 ),
-                None => (DaemonState::Stopped, StartPollDisposition::Settled),
-            },
-            Self::Waiting | Self::NotRunning => match attributed_failure {
-                Some(failure) => (
+                (true, AttributedTermination::SuppressedAsAction) => {
+                    (DaemonState::Restarting(None), StartPollDisposition::Pending)
+                }
+                (true, AttributedTermination::None) => {
+                    (DaemonState::Stopped, StartPollDisposition::Settled)
+                }
+                (false, AttributedTermination::Attributed(failure)) => (
                     DaemonState::Failed(Some(failure)),
-                    StartPollDisposition::Settled,
+                    StartPollDisposition::Pending,
                 ),
-                None => (DaemonState::Stopped, StartPollDisposition::Pending),
+                (false, AttributedTermination::SuppressedAsAction) => (
+                    DaemonState::Transitioning(DaemonTransition::Starting),
+                    StartPollDisposition::Pending,
+                ),
+                (false, AttributedTermination::None) => {
+                    (DaemonState::Stopped, StartPollDisposition::Pending)
+                }
+            },
+            Self::Waiting | Self::NotRunning => match (definition_present, termination) {
+                (true, AttributedTermination::Attributed(failure)) => (
+                    DaemonState::Restarting(Some(failure)),
+                    StartPollDisposition::Pending,
+                ),
+                (true, AttributedTermination::SuppressedAsAction) => {
+                    (DaemonState::Restarting(None), StartPollDisposition::Pending)
+                }
+                (false, AttributedTermination::Attributed(failure)) => (
+                    DaemonState::Failed(Some(failure)),
+                    StartPollDisposition::Pending,
+                ),
+                (_, AttributedTermination::None | AttributedTermination::SuppressedAsAction) => {
+                    (DaemonState::Stopped, StartPollDisposition::Pending)
+                }
             },
             // Observed on macOS 15.6.1 (24G90): throttled is a manager-delayed respawn whose
             // default delay exceeds the shared two-second observation window.
             Self::Throttled => (
-                DaemonState::Restarting(attributed_failure),
+                DaemonState::Restarting(termination.projected_failure()),
                 StartPollDisposition::Settled,
             ),
             Self::Other(other) => (
@@ -159,42 +195,43 @@ impl LaunchdLifecycle<'_> {
                 StartPollDisposition::Pending,
             ),
         };
-        DaemonObservation::installed(state, start_poll)
+        DaemonObservation::installed(state, start_poll, ())
     }
 }
 
 impl LaunchdAttribution {
     fn attributes(
         self,
-        lifecycle: LaunchdLifecycle<'_>,
         observed_sequence: Option<u64>,
         termination: LaunchdTermination<'_>,
     ) -> bool {
         match self {
             Self::Unfiltered => true,
-            // Observed on macOS 15.6.1 (24G90): one kickstart action can advance `runs` twice.
-            // A stable lifecycle or a third advancement proves that a record no longer belongs to
-            // the bounded action window; non-action signals remain attributable immediately.
+            // Observed on macOS 15.6.1 (24G90): one kickstart action can advance `runs` twice and
+            // leave SIGTERM, SIGKILL, or a translated numeric exit. Lifecycle vocabulary does not
+            // shorten that ambiguity window; a non-action signal remains attributable immediately.
             Self::SinceRun(baseline) => observed_sequence.is_some_and(|sequence| {
                 sequence > baseline
-                    && (lifecycle.is_settled_after_restart_action()
-                        || sequence > baseline.saturating_add(2)
+                    && (sequence > baseline.saturating_add(2)
                         || !termination.may_originate_from_restart_action())
             }),
-            // Without a baseline, post-action reporting degrades to lifecycle alone.
+            // Without a baseline, a failure record remains action-suppressed; lifecycle and the
+            // presence of our KeepAlive definition determine whether another spawn is pending.
             Self::Unattributable => false,
         }
     }
 }
 
 fn launchd_value<'a>(output: &'a str, field: &str) -> Option<&'a str> {
-    // Observed on macOS 15.6.1 (24G90): `launchctl print` wraps service properties in one root
-    // dictionary and may emit nested dictionaries with repeated keys. Only the root property depth
-    // is authoritative. Flat fixtures use depth zero and follow the same rule.
+    // Empty root properties count as absent. Their raw presence remains observable through
+    // `launchd_property`, which prevents malformed signal fields from reviving stale exit fields.
     launchd_property(output, field).filter(|value| !value.is_empty())
 }
 
 fn launchd_property<'a>(output: &'a str, field: &str) -> Option<&'a str> {
+    // Observed on macOS 15.6.1 (24G90): `launchctl print` wraps service properties in one root
+    // dictionary and may emit nested dictionaries with repeated keys. Only the root property depth
+    // is authoritative. Flat fixtures use depth zero and follow the same rule.
     let root_is_wrapped = output
         .lines()
         .find(|line| !line.trim().is_empty())
@@ -290,7 +327,7 @@ where
 {
     let LaunchdRecord::Loaded(output) = record else {
         return if definition_present {
-            DaemonObservation::installed(DaemonState::Stopped, StartPollDisposition::Pending)
+            DaemonObservation::installed(DaemonState::Stopped, StartPollDisposition::Pending, ())
         } else {
             DaemonObservation::NotInstalled
         };
@@ -298,13 +335,17 @@ where
     let output = output.as_ref();
     let lifecycle = parse_launchd_lifecycle(output);
     let observed_sequence = parse_launchd_runs(output);
-    let attributed_failure = parse_launchd_termination(output)
-        .and_then(|termination| termination.failure().map(|failure| (termination, failure)))
-        .filter(|(termination, _)| {
-            attribution.attributes(lifecycle, observed_sequence, *termination)
-        })
-        .map(|(_, failure)| failure);
-    lifecycle.into_observation(observed_sequence, attributed_failure)
+    let termination =
+        parse_launchd_termination(output).map_or(AttributedTermination::None, |termination| {
+            match termination.failure() {
+                None => AttributedTermination::None,
+                Some(failure) if attribution.attributes(observed_sequence, termination) => {
+                    AttributedTermination::Attributed(failure)
+                }
+                Some(_) => AttributedTermination::SuppressedAsAction,
+            }
+        });
+    lifecycle.into_observation(definition_present, observed_sequence, termination)
 }
 
 pub(super) fn parse_launchd_autostart(output: &str, service_label: &str) -> AutostartState {
@@ -326,13 +367,13 @@ pub(super) fn parse_launchd_autostart(output: &str, service_label: &str) -> Auto
         return match value.trim() {
             "true" | "disabled" => AutostartState::Disabled,
             "false" | "enabled" => AutostartState::Enabled,
-            _ => AutostartState::Other("unknown"),
+            _ => AutostartState::Unknown,
         };
     }
     if recognized_listing {
         AutostartState::Enabled
     } else {
-        AutostartState::Other("unknown")
+        AutostartState::Unknown
     }
 }
 
@@ -345,6 +386,8 @@ fn is_disabled_services_listing(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    //! Witnesses launchd parsing, lifecycle reduction, and restart-attribution laws.
+
     use super::super::model::LAUNCHD_LABEL;
     use super::*;
 
@@ -355,18 +398,8 @@ mod tests {
         }
     }
 
-    fn signal_failure(name: &str, number: i32) -> DaemonState {
-        DaemonState::Failed(Some(DaemonFailure::described(format!(
-            "signal {name}: {number}"
-        ))))
-    }
-
     fn restarting_exit_failure(code: i32) -> DaemonState {
         DaemonState::Restarting(Some(DaemonFailure::described(format!("exit code {code}"))))
-    }
-
-    fn failed_exit_failure(code: i32) -> DaemonState {
-        DaemonState::Failed(Some(DaemonFailure::described(format!("exit code {code}"))))
     }
 
     fn restarting_signal_failure(name: &str, number: i32) -> DaemonState {
@@ -448,7 +481,7 @@ mod tests {
                 "state = spawn scheduled\nlast exit code = 9\n",
                 LaunchdAttribution::Unattributable,
             ),
-            DaemonState::Transitioning("starting")
+            DaemonState::Transitioning(DaemonTransition::Starting)
         );
         assert_eq!(
             parse_state(
@@ -476,7 +509,7 @@ mod tests {
                 "state = waiting\nruns = 5\nlast exit code = 78\n",
                 LaunchdAttribution::SinceRun(4),
             ),
-            failed_exit_failure(78)
+            DaemonState::Restarting(None)
         );
     }
 
@@ -550,21 +583,21 @@ mod tests {
                 "state = waiting\nruns = 5\nlast terminating signal = Segmentation fault: 11\n",
                 LaunchdAttribution::SinceRun(3),
             ),
-            signal_failure("Segmentation fault", 11)
+            restarting_signal_failure("Segmentation fault", 11)
         );
         assert_eq!(
             parse_state(
                 "state = waiting\nruns = 4\nlast terminating signal = Terminated: 15\n",
                 LaunchdAttribution::SinceRun(3),
             ),
-            signal_failure("Terminated", 15)
+            DaemonState::Restarting(None)
         );
         assert_eq!(
             parse_state(
                 "state = waiting\nlast terminating signal = Segmentation fault: 11\n",
                 LaunchdAttribution::Unattributable,
             ),
-            DaemonState::Stopped
+            DaemonState::Restarting(None)
         );
     }
 
@@ -577,6 +610,29 @@ mod tests {
             ),
             DaemonState::Restarting(None)
         );
+    }
+
+    #[test]
+    fn loaded_job_without_our_plist_does_not_assume_keepalive_policy() {
+        let clean_exit = parse_launchd_observation(
+            LaunchdRecord::Loaded("state = exited\nruns = 4\nlast exit code = 0\n"),
+            false,
+            LaunchdAttribution::Unfiltered,
+        );
+        let failed_wait = parse_launchd_observation(
+            LaunchdRecord::Loaded(
+                "state = waiting\nruns = 4\nlast terminating signal = Segmentation fault: 11\n",
+            ),
+            false,
+            LaunchdAttribution::Unfiltered,
+        );
+
+        assert!(!clean_exit.settles_start_poll());
+        assert!(!failed_wait.settles_start_poll());
+        assert!(matches!(failed_wait, DaemonObservation::Installed {
+            state: DaemonState::Failed(Some(_)),
+            ..
+        }));
     }
 
     #[test]
@@ -595,7 +651,7 @@ mod tests {
                 true,
                 LaunchdAttribution::Unfiltered,
             ),
-            DaemonObservation::installed(DaemonState::Stopped, StartPollDisposition::Pending)
+            DaemonObservation::installed(DaemonState::Stopped, StartPollDisposition::Pending, (),)
         );
         assert_eq!(
             parse_launchd_observation(
@@ -702,11 +758,11 @@ mod tests {
         );
         assert_eq!(
             parse_launchd_autostart("\"io.ringsnetwork.node\" => malformed", LAUNCHD_LABEL,),
-            AutostartState::Other("unknown")
+            AutostartState::Unknown
         );
         assert_eq!(
             parse_launchd_autostart("unrecognized launchctl output", LAUNCHD_LABEL),
-            AutostartState::Other("unknown")
+            AutostartState::Unknown
         );
     }
 }

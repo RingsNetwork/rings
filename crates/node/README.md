@@ -94,7 +94,9 @@ README for Linux lingering requirements and manual service removal. The captured
 working directory must remain at the same path; rerun `daemon start` from a
 persistent directory after moving or deleting it. `daemon stop` and `daemon
 restart` preserve the current login-autostart setting unless the service manager
-reports that its recovery step failed. Start and restart observe only the
-manager's initial bookkeeping window; a service still in manager startup
-bookkeeping or waiting for a configured respawn delay can be installed
-successfully while the command exits non-zero with its last observed state.
+reports that its recovery step failed. Start and restart poll short manager
+bookkeeping transitions. launchd's manager-imposed throttling delay settles
+immediately, while systemd auto-restart polling continues within the bounded
+window because already-loaded units may use a different `RestartSec`. The
+service can remain installed while the command exits non-zero with its last
+observed state.

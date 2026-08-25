@@ -1,4 +1,5 @@
-//! Pure systemd status parsing and reduction with no process or filesystem effects.
+//! Parses one `systemctl show` snapshot into lifecycle and autostart state. Unknown manager
+//! vocabulary remains visible, and no parser result assumes the unit came from our renderer.
 
 use thiserror::Error;
 
@@ -6,9 +7,10 @@ use super::super::AutostartState;
 use super::super::DaemonFailure;
 use super::super::DaemonObservation;
 use super::super::DaemonState;
+#[cfg(test)]
 use super::super::DaemonStatus;
+use super::super::DaemonTransition;
 use super::super::StartPollDisposition;
-use super::super::StartPollObservation;
 
 // Verified with systemd 257.13: ExecMainCode publishes Linux siginfo_t::si_code.
 const SYSTEMD_EXEC_CODE_EXITED: i32 = 1;
@@ -38,7 +40,15 @@ enum SystemdLifecycle<'a> {
 }
 
 impl SystemdLifecycle<'_> {
-    fn into_observation(self, output: &str) -> DaemonObservation {
+    /// Pre: `output` is the same snapshot from which this lifecycle and `autostart` were parsed.
+    ///
+    /// Post: transient states remain pending unless systemd itself reports a terminal lifecycle;
+    /// no disposition depends on fields from a unit definition that this parser cannot identify.
+    fn into_observation(
+        self,
+        output: &str,
+        autostart: AutostartState,
+    ) -> DaemonObservation<AutostartState> {
         let (state, start_poll) = match self {
             Self::NotInstalled => return DaemonObservation::NotInstalled,
             Self::Running => (DaemonState::Running, StartPollDisposition::Settled),
@@ -48,17 +58,17 @@ impl SystemdLifecycle<'_> {
                 StartPollDisposition::Settled,
             ),
             Self::Starting => (
-                DaemonState::Transitioning("starting"),
+                DaemonState::Transitioning(DaemonTransition::Starting),
                 StartPollDisposition::Pending,
             ),
-            // The rendered RestartSec is longer than the shared observation budget, so this
-            // manager state is already the stable answer for the current command.
+            // `systemctl show` does not prove which unit definition supplied RestartSec. A foreign
+            // unit may use systemd's short default, so the observation budget must decide.
             Self::AutoRestarting => (
                 DaemonState::Restarting(project_systemd_failure(output)),
-                StartPollDisposition::Settled,
+                StartPollDisposition::Pending,
             ),
             Self::Stopping => (
-                DaemonState::Transitioning("stopping"),
+                DaemonState::Transitioning(DaemonTransition::Stopping),
                 StartPollDisposition::Pending,
             ),
             Self::Other { load, active, sub } => (
@@ -68,73 +78,17 @@ impl SystemdLifecycle<'_> {
                 StartPollDisposition::Pending,
             ),
         };
-        DaemonObservation::installed(state, start_poll)
+        DaemonObservation::installed(state, start_poll, autostart)
     }
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub(super) enum SystemdSnapshot {
-    NotInstalled,
-    Installed {
-        state: DaemonState,
-        start_poll: StartPollDisposition,
-        autostart: AutostartState,
-    },
-}
-
-impl StartPollObservation for SystemdSnapshot {
-    fn settles_start_poll(&self) -> bool {
-        match self {
-            Self::NotInstalled => true,
-            Self::Installed {
-                state, start_poll, ..
-            } => state.is_running() || *start_poll == StartPollDisposition::Settled,
-        }
-    }
-}
-
-impl SystemdSnapshot {
-    pub(super) fn into_status(self) -> DaemonStatus {
-        match self {
-            Self::NotInstalled => DaemonStatus::NotInstalled,
-            Self::Installed {
-                state, autostart, ..
-            } => DaemonStatus::installed(state, autostart),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SystemdResult<'a> {
+enum SystemdResult {
     Success,
-    ExitCode,
-    Signal,
-    CoreDump,
-    Timeout,
-    Watchdog,
-    OutOfMemory,
+    Process(SystemdExecOutcome),
     StartLimit,
-    Protocol,
-    Resources,
-    Other(&'a str),
+    Manager(SystemdManagerFailure),
     Missing,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ProcessTerminationClass {
-    ExitCode,
-    Signal,
-    CoreDump,
-}
-
-impl std::fmt::Display for ProcessTerminationClass {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::ExitCode => formatter.write_str("process exited with an unavailable exit code"),
-            Self::Signal => formatter.write_str("process was killed by an unavailable signal"),
-            Self::CoreDump => formatter.write_str("process dumped core from an unavailable signal"),
-        }
-    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -142,7 +96,6 @@ enum SystemdManagerFailure {
     Timeout,
     Watchdog,
     OutOfMemory,
-    StartLimit,
     Protocol,
     Resources,
     Other(String),
@@ -154,7 +107,6 @@ impl std::fmt::Display for SystemdManagerFailure {
             Self::Timeout => formatter.write_str("service-manager timeout"),
             Self::Watchdog => formatter.write_str("watchdog failure"),
             Self::OutOfMemory => formatter.write_str("out-of-memory kill"),
-            Self::StartLimit => formatter.write_str("start limit reached"),
             Self::Protocol => formatter.write_str("service protocol failure"),
             Self::Resources => formatter.write_str("service resource failure"),
             Self::Other(result) => write!(formatter, "service-manager result {result}"),
@@ -164,51 +116,41 @@ impl std::fmt::Display for SystemdManagerFailure {
 
 #[derive(Debug, Eq, PartialEq)]
 enum SystemdFailure {
-    ExitCode(i32),
-    Signal { number: i32, core_dumped: bool },
-    ProcessClass(ProcessTerminationClass),
+    Process(SystemdProcessFailure),
     Manager(SystemdManagerFailure),
+    StartLimit {
+        last_process: Option<SystemdProcessFailure>,
+    },
 }
 
 impl std::fmt::Display for SystemdFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ExitCode(code) => write!(formatter, "exit code {code}"),
-            Self::Signal {
-                number,
-                core_dumped: false,
-            } => write!(formatter, "signal {number}"),
-            Self::Signal {
-                number,
-                core_dumped: true,
-            } => write!(formatter, "signal {number}, core dumped"),
-            Self::ProcessClass(class) => class.fmt(formatter),
+            Self::Process(failure) => failure.fmt(formatter),
             Self::Manager(failure) => failure.fmt(formatter),
+            Self::StartLimit {
+                last_process: Some(failure),
+            } => write!(
+                formatter,
+                "start limit reached; last process failure: {failure}"
+            ),
+            Self::StartLimit { last_process: None } => formatter.write_str("start limit reached"),
         }
     }
 }
 
-impl SystemdResult<'_> {
+impl SystemdResult {
     fn failure(self, output: &str) -> Option<SystemdFailure> {
         match self {
-            Self::ExitCode => Some(SystemdExecOutcome::Exited.failure_from(output).unwrap_or(
-                SystemdFailure::ProcessClass(ProcessTerminationClass::ExitCode),
+            Self::Process(outcome) => Some(SystemdFailure::Process(
+                outcome
+                    .failure_from(output)
+                    .unwrap_or_else(|| outcome.unavailable()),
             )),
-            Self::Signal => Some(SystemdExecOutcome::Killed.failure_from(output).unwrap_or(
-                SystemdFailure::ProcessClass(ProcessTerminationClass::Signal),
-            )),
-            Self::CoreDump => Some(SystemdExecOutcome::Dumped.failure_from(output).unwrap_or(
-                SystemdFailure::ProcessClass(ProcessTerminationClass::CoreDump),
-            )),
-            Self::Timeout => Some(SystemdFailure::Manager(SystemdManagerFailure::Timeout)),
-            Self::Watchdog => Some(SystemdFailure::Manager(SystemdManagerFailure::Watchdog)),
-            Self::OutOfMemory => Some(SystemdFailure::Manager(SystemdManagerFailure::OutOfMemory)),
-            Self::StartLimit => Some(SystemdFailure::Manager(SystemdManagerFailure::StartLimit)),
-            Self::Protocol => Some(SystemdFailure::Manager(SystemdManagerFailure::Protocol)),
-            Self::Resources => Some(SystemdFailure::Manager(SystemdManagerFailure::Resources)),
-            Self::Other(result) => Some(SystemdFailure::Manager(SystemdManagerFailure::Other(
-                result.to_owned(),
-            ))),
+            Self::StartLimit => Some(SystemdFailure::StartLimit {
+                last_process: SystemdExecOutcome::failure_from_snapshot(output),
+            }),
+            Self::Manager(failure) => Some(SystemdFailure::Manager(failure)),
             Self::Success | Self::Missing => None,
         }
     }
@@ -221,6 +163,38 @@ enum SystemdExecOutcome {
     Dumped,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum SystemdProcessFailure {
+    ExitCode(i32),
+    Signal { number: i32, core_dumped: bool },
+    Unavailable(SystemdExecOutcome),
+}
+
+impl std::fmt::Display for SystemdProcessFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ExitCode(code) => write!(formatter, "exit code {code}"),
+            Self::Signal {
+                number,
+                core_dumped: false,
+            } => write!(formatter, "signal {number}"),
+            Self::Signal {
+                number,
+                core_dumped: true,
+            } => write!(formatter, "signal {number}, core dumped"),
+            Self::Unavailable(SystemdExecOutcome::Exited) => {
+                formatter.write_str("process exited with an unavailable exit code")
+            }
+            Self::Unavailable(SystemdExecOutcome::Killed) => {
+                formatter.write_str("process was killed by an unavailable signal")
+            }
+            Self::Unavailable(SystemdExecOutcome::Dumped) => {
+                formatter.write_str("process dumped core from an unavailable signal")
+            }
+        }
+    }
+}
+
 impl SystemdExecOutcome {
     fn si_code(self) -> i32 {
         match self {
@@ -230,48 +204,57 @@ impl SystemdExecOutcome {
         }
     }
 
-    fn failure_from(self, output: &str) -> Option<SystemdFailure> {
+    fn unavailable(self) -> SystemdProcessFailure {
+        SystemdProcessFailure::Unavailable(self)
+    }
+
+    fn failure_from(self, output: &str) -> Option<SystemdProcessFailure> {
         let code = property(output, "ExecMainCode")?.parse::<i32>().ok()?;
         let status = property(output, "ExecMainStatus")?.parse::<i32>().ok()?;
         if code != self.si_code() || status <= 0 {
             return None;
         }
         match self {
-            Self::Exited => Some(SystemdFailure::ExitCode(status)),
-            Self::Killed => Some(SystemdFailure::Signal {
+            Self::Exited => Some(SystemdProcessFailure::ExitCode(status)),
+            Self::Killed => Some(SystemdProcessFailure::Signal {
                 number: status,
                 core_dumped: false,
             }),
-            Self::Dumped => Some(SystemdFailure::Signal {
+            Self::Dumped => Some(SystemdProcessFailure::Signal {
                 number: status,
                 core_dumped: true,
             }),
         }
     }
+
+    fn failure_from_snapshot(output: &str) -> Option<SystemdProcessFailure> {
+        let code = property(output, "ExecMainCode")?.parse::<i32>().ok()?;
+        match code {
+            SYSTEMD_EXEC_CODE_EXITED => Self::Exited.failure_from(output),
+            SYSTEMD_EXEC_CODE_KILLED => Self::Killed.failure_from(output),
+            SYSTEMD_EXEC_CODE_DUMPED => Self::Dumped.failure_from(output),
+            _ => None,
+        }
+    }
 }
 
-fn parse_systemd_observation(output: &str) -> Result<DaemonObservation, SystemdStatusError> {
+pub(super) fn parse_systemd_observation(
+    output: &str,
+) -> Result<DaemonObservation<AutostartState>, SystemdStatusError> {
     let load = required_property(output, "LoadState")?;
     let active = required_property(output, "ActiveState")?;
     let sub = required_property(output, "SubState")?;
-    Ok(parse_systemd_lifecycle(load, active, sub).into_observation(output))
-}
-
-pub(super) fn parse_systemd_snapshot(output: &str) -> Result<SystemdSnapshot, SystemdStatusError> {
-    let observation = parse_systemd_observation(output)?;
-    match observation {
-        DaemonObservation::NotInstalled => Ok(SystemdSnapshot::NotInstalled),
-        DaemonObservation::Installed { state, start_poll } => Ok(SystemdSnapshot::Installed {
-            state,
-            start_poll,
-            autostart: parse_systemd_autostart(required_property(output, "UnitFileState")?),
-        }),
+    let lifecycle = parse_systemd_lifecycle(load, active, sub);
+    if lifecycle == SystemdLifecycle::NotInstalled {
+        return Ok(DaemonObservation::NotInstalled);
     }
+    let autostart = parse_systemd_autostart(required_property(output, "UnitFileState")?);
+    Ok(lifecycle.into_observation(output, autostart))
 }
 
 #[cfg(test)]
 fn parse_systemd_status(output: &str) -> Result<DaemonStatus, SystemdStatusError> {
-    Ok(parse_systemd_snapshot(output)?.into_status())
+    Ok(parse_systemd_observation(output)?.into_status())
 }
 
 fn required_property<'a>(
@@ -301,7 +284,7 @@ fn parse_systemd_lifecycle<'a>(
     // LoadState is not-found. Refreshing is an active state since systemd 254. Masking changes
     // loadability, not whether an already-loaded process is active. Unknown tuples remain visible.
     match (load, active, sub) {
-        ("not-found", "inactive", _) => SystemdLifecycle::NotInstalled,
+        ("not-found" | "masked", "inactive", _) => SystemdLifecycle::NotInstalled,
         ("loaded" | "not-found" | "masked", "active" | "reloading" | "refreshing", _) => {
             SystemdLifecycle::Running
         }
@@ -326,35 +309,39 @@ fn project_systemd_failure(output: &str) -> Option<DaemonFailure> {
     parse_systemd_failure(output).map(|failure| DaemonFailure::from_display(&failure))
 }
 
-fn parse_systemd_result(result: Option<&str>) -> SystemdResult<'_> {
+fn parse_systemd_result(result: Option<&str>) -> SystemdResult {
     match result {
         Some("success") => SystemdResult::Success,
-        Some("exit-code") => SystemdResult::ExitCode,
-        Some("signal") => SystemdResult::Signal,
-        Some("core-dump") => SystemdResult::CoreDump,
-        Some("timeout") => SystemdResult::Timeout,
-        Some("watchdog") => SystemdResult::Watchdog,
-        Some("oom-kill") => SystemdResult::OutOfMemory,
+        Some("exit-code") => SystemdResult::Process(SystemdExecOutcome::Exited),
+        Some("signal") => SystemdResult::Process(SystemdExecOutcome::Killed),
+        Some("core-dump") => SystemdResult::Process(SystemdExecOutcome::Dumped),
+        Some("timeout") => SystemdResult::Manager(SystemdManagerFailure::Timeout),
+        Some("watchdog") => SystemdResult::Manager(SystemdManagerFailure::Watchdog),
+        Some("oom-kill") => SystemdResult::Manager(SystemdManagerFailure::OutOfMemory),
         Some("start-limit-hit") => SystemdResult::StartLimit,
-        Some("protocol") => SystemdResult::Protocol,
-        Some("resources") => SystemdResult::Resources,
+        Some("protocol") => SystemdResult::Manager(SystemdManagerFailure::Protocol),
+        Some("resources") => SystemdResult::Manager(SystemdManagerFailure::Resources),
         Some("") | None => SystemdResult::Missing,
-        Some(other) => SystemdResult::Other(other),
+        Some(other) => SystemdResult::Manager(SystemdManagerFailure::Other(other.to_owned())),
     }
 }
 
 fn parse_systemd_autostart(output: &str) -> AutostartState {
+    // Verified with systemd 257.13: linked, alias, static, indirect, and generated units have no
+    // default-target enablement owned by this command, so they project to login autostart disabled.
     match output.trim() {
         "enabled" | "enabled-runtime" => AutostartState::Enabled,
         "disabled" | "linked" | "linked-runtime" | "alias" | "static" | "indirect"
         | "generated" => AutostartState::Disabled,
         "masked" | "masked-runtime" => AutostartState::Other("unavailable"),
-        _ => AutostartState::Other("unknown"),
+        _ => AutostartState::Unknown,
     }
 }
 
 #[cfg(test)]
 mod tests {
+    //! Witnesses systemd snapshot parsing, finite lifecycle reduction, and failure composition.
+
     use super::*;
 
     #[test]
@@ -426,13 +413,6 @@ mod tests {
         for (active, sub, state) in [
             ("active", "running", DaemonState::Running),
             ("refreshing", "reload", DaemonState::Running),
-            (
-                "inactive",
-                "dead",
-                DaemonState::Unknown(
-                    "load state: masked, active state: inactive, substate: dead".to_owned(),
-                ),
-            ),
             ("failed", "failed", DaemonState::Failed(None)),
         ] {
             let status = parse_systemd_status(&format!(
@@ -443,6 +423,10 @@ mod tests {
                 DaemonStatus::installed(state, AutostartState::Other("unavailable"))
             );
         }
+
+        let masked_inactive =
+            parse_systemd_status("LoadState=masked\nActiveState=inactive\nSubState=dead\n")?;
+        assert_eq!(masked_inactive, DaemonStatus::NotInstalled);
         Ok(())
     }
 
@@ -506,15 +490,30 @@ mod tests {
     #[test]
     fn recognized_process_results_use_matching_siginfo() {
         let cases = [
-            ("exit-code", "1", "78", SystemdFailure::ExitCode(78)),
-            ("signal", "2", "15", SystemdFailure::Signal {
-                number: 15,
-                core_dumped: false,
-            }),
-            ("core-dump", "3", "6", SystemdFailure::Signal {
-                number: 6,
-                core_dumped: true,
-            }),
+            (
+                "exit-code",
+                "1",
+                "78",
+                SystemdFailure::Process(SystemdProcessFailure::ExitCode(78)),
+            ),
+            (
+                "signal",
+                "2",
+                "15",
+                SystemdFailure::Process(SystemdProcessFailure::Signal {
+                    number: 15,
+                    core_dumped: false,
+                }),
+            ),
+            (
+                "core-dump",
+                "3",
+                "6",
+                SystemdFailure::Process(SystemdProcessFailure::Signal {
+                    number: 6,
+                    core_dumped: true,
+                }),
+            ),
         ];
         for (result, code, process_status, failure) in cases {
             let output = format!(
@@ -546,21 +545,52 @@ mod tests {
     #[test]
     fn known_result_survives_a_mismatched_or_invalid_siginfo_record() {
         for (result, code, process_status, expected) in [
-            ("exit-code", "2", "78", ProcessTerminationClass::ExitCode),
-            ("exit-code", "1", "0", ProcessTerminationClass::ExitCode),
-            ("signal", "3", "9", ProcessTerminationClass::Signal),
-            ("core-dump", "2", "6", ProcessTerminationClass::CoreDump),
-            ("signal", "invalid", "9", ProcessTerminationClass::Signal),
-            ("signal", "2", "invalid", ProcessTerminationClass::Signal),
+            ("exit-code", "2", "78", SystemdExecOutcome::Exited),
+            ("exit-code", "1", "0", SystemdExecOutcome::Exited),
+            ("signal", "3", "9", SystemdExecOutcome::Killed),
+            ("core-dump", "2", "6", SystemdExecOutcome::Dumped),
+            ("signal", "invalid", "9", SystemdExecOutcome::Killed),
+            ("signal", "2", "invalid", SystemdExecOutcome::Killed),
         ] {
             let output = format!(
                 "LoadState=loaded\nActiveState=failed\nSubState=failed\nUnitFileState=enabled\nExecMainCode={code}\nExecMainStatus={process_status}\nResult={result}\n"
             );
             assert_eq!(
                 parse_systemd_failure(&output),
-                Some(SystemdFailure::ProcessClass(expected))
+                Some(SystemdFailure::Process(SystemdProcessFailure::Unavailable(
+                    expected
+                )))
             );
         }
+    }
+
+    #[test]
+    fn start_limit_composes_manager_verdict_with_the_last_process_failure() {
+        let output = "LoadState=loaded\nActiveState=failed\nSubState=failed\nUnitFileState=enabled\nExecMainCode=1\nExecMainStatus=78\nResult=start-limit-hit\n";
+
+        assert_eq!(
+            parse_systemd_failure(output),
+            Some(SystemdFailure::StartLimit {
+                last_process: Some(SystemdProcessFailure::ExitCode(78)),
+            })
+        );
+        assert_eq!(
+            project_systemd_failure(output).map(|failure| failure.to_string()),
+            Some("start limit reached; last process failure: exit code 78".to_owned())
+        );
+    }
+
+    #[test]
+    fn auto_restart_remains_pending_when_definition_provenance_is_unknown(
+    ) -> Result<(), SystemdStatusError> {
+        use super::super::super::StartPollObservation;
+
+        let observation = parse_systemd_observation(
+            "LoadState=not-found\nActiveState=activating\nSubState=auto-restart\nUnitFileState=\nResult=success\n",
+        )?;
+
+        assert!(!observation.settles_start_poll());
+        Ok(())
     }
 
     #[test]

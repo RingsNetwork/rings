@@ -1,4 +1,5 @@
-//! Owns systemd user-manager effects and delegates unit rendering and status reduction.
+//! Executes systemd user-manager commands and delegates unit rendering and snapshot reduction to
+//! effect-free sibling modules. One `systemctl show` call supplies both reported status axes.
 #![cfg(any(target_os = "linux", all(test, unix)))]
 
 #[cfg(target_os = "linux")]
@@ -10,8 +11,10 @@ use thiserror::Error;
 
 use super::wait_for_running;
 use super::write_atomic;
+use super::AutostartState;
 use super::CommandRunner;
 use super::DaemonError;
+use super::DaemonObservation;
 use super::DaemonStatus;
 use super::PollSchedule;
 use super::ProcessCommandRunner;
@@ -26,8 +29,7 @@ use model::render_systemd_unit;
 use model::SystemdDefinitionError;
 #[cfg(test)]
 pub(super) use model::SYSTEMD_RESTART_DELAY;
-use status::parse_systemd_snapshot;
-use status::SystemdSnapshot;
+use status::parse_systemd_observation;
 use status::SystemdStatusError;
 
 #[derive(Debug, Error)]
@@ -150,28 +152,23 @@ where R: CommandRunner
     }
 
     fn observe(&self) -> Result<DaemonStatus, DaemonError> {
-        let snapshot = self.observe_snapshot()?;
-        Ok(self.complete_observation(snapshot))
+        Ok(self.observe_snapshot()?.into_status())
     }
 }
 
 impl<R> SystemdManager<R>
 where R: CommandRunner
 {
-    fn observe_snapshot(&self) -> Result<SystemdSnapshot, DaemonError> {
+    fn observe_snapshot(&self) -> Result<DaemonObservation<AutostartState>, DaemonError> {
         let output = self.runner.run_checked(SYSTEMCTL, &SYSTEMD_STATUS_ARGS)?;
-        Ok(parse_systemd_snapshot(&String::from_utf8_lossy(
+        Ok(parse_systemd_observation(&String::from_utf8_lossy(
             &output.stdout,
         ))?)
     }
 
-    fn complete_observation(&self, snapshot: SystemdSnapshot) -> DaemonStatus {
-        snapshot.into_status()
-    }
-
     fn settle_status(&self) -> Result<DaemonStatus, DaemonError> {
         let snapshot = wait_for_running(self.poll_schedule, || self.observe_snapshot())?;
-        Ok(self.complete_observation(snapshot))
+        Ok(snapshot.into_status())
     }
 }
 
@@ -184,6 +181,8 @@ fn systemd_config_home(home: &Path, candidate: Option<&Path>) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    //! Scripts the systemd command boundary and verifies lifecycle polling consumes every step.
+
     use rings_node::logging::LogLevel;
 
     use super::super::super::RuntimeFlavor;
@@ -197,7 +196,10 @@ mod tests {
     use super::super::TEST_OBSERVATION_SCHEDULE;
     use super::*;
 
-    const RUNNING_STATUS: &str = "LoadState=loaded\nActiveState=active\nSubState=running\nUnitFileState=enabled\nExecMainCode=0\nExecMainStatus=0\nResult=success\n";
+    const DETACHED_RUNNING_STATUS: &str =
+        "LoadState=not-found\nActiveState=active\nSubState=running\nUnitFileState=\n";
+    const NOT_INSTALLED_STATUS: &str =
+        "LoadState=not-found\nActiveState=inactive\nSubState=dead\nUnitFileState=\n";
 
     fn test_root(name: &str) -> TestRoot {
         TestRoot::new("systemd", name)
@@ -249,11 +251,13 @@ mod tests {
             CommandStep::success(SYSTEMCTL, &[SYSTEMD_USER_ARG, "enable", SYSTEMD_UNIT], ""),
             CommandStep::success(SYSTEMCTL, &[SYSTEMD_USER_ARG, "restart", SYSTEMD_UNIT], ""),
         ];
-        steps.push(CommandStep::success(
-            SYSTEMCTL,
-            &SYSTEMD_STATUS_ARGS,
-            failed_status,
-        ));
+        for _ in 0..=TEST_OBSERVATION_SCHEDULE.retries {
+            steps.push(CommandStep::success(
+                SYSTEMCTL,
+                &SYSTEMD_STATUS_ARGS,
+                failed_status,
+            ));
+        }
         let runner = ScriptedCommandRunner::new(steps);
         let manager = test_manager(&root, runner);
         let spec = service_spec(&LogLevel::Info, &RuntimeFlavor::MultiThread)?;
@@ -273,20 +277,42 @@ mod tests {
     }
 
     #[test]
+    fn start_waits_through_auto_restart_until_the_unit_runs() -> Result<(), DaemonError> {
+        let root = test_root("start-auto-restart-pending");
+        let runner = ScriptedCommandRunner::new([
+            CommandStep::success(SYSTEMCTL, &[SYSTEMD_USER_ARG, "daemon-reload"], ""),
+            CommandStep::success(SYSTEMCTL, &[SYSTEMD_USER_ARG, "enable", SYSTEMD_UNIT], ""),
+            CommandStep::success(SYSTEMCTL, &[SYSTEMD_USER_ARG, "restart", SYSTEMD_UNIT], ""),
+            CommandStep::success(
+                SYSTEMCTL,
+                &SYSTEMD_STATUS_ARGS,
+                "LoadState=loaded\nActiveState=activating\nSubState=auto-restart\nUnitFileState=enabled\nExecMainCode=1\nExecMainStatus=78\nResult=exit-code\n",
+            ),
+            CommandStep::success(
+                SYSTEMCTL,
+                &SYSTEMD_STATUS_ARGS,
+                "LoadState=loaded\nActiveState=active\nSubState=running\nUnitFileState=enabled\nResult=success\n",
+            ),
+        ]);
+        let manager = test_manager(&root, runner);
+        let spec = service_spec(&LogLevel::Info, &RuntimeFlavor::MultiThread)?;
+
+        let status = manager.start(&spec)?;
+
+        assert_eq!(
+            status,
+            DaemonStatus::installed(DaemonState::Running, AutostartState::Enabled)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn stop_targets_an_active_unit_when_the_local_definition_is_missing() -> Result<(), DaemonError>
     {
         let runner = ScriptedCommandRunner::new([
-            CommandStep::success(
-                SYSTEMCTL,
-                &SYSTEMD_STATUS_ARGS,
-                "LoadState=not-found\nActiveState=active\nSubState=running\nUnitFileState=\n",
-            ),
+            CommandStep::success(SYSTEMCTL, &SYSTEMD_STATUS_ARGS, DETACHED_RUNNING_STATUS),
             CommandStep::success(SYSTEMCTL, &[SYSTEMD_USER_ARG, "stop", SYSTEMD_UNIT], ""),
-            CommandStep::success(
-                SYSTEMCTL,
-                &SYSTEMD_STATUS_ARGS,
-                "LoadState=not-found\nActiveState=inactive\nSubState=dead\nUnitFileState=\n",
-            ),
+            CommandStep::success(SYSTEMCTL, &SYSTEMD_STATUS_ARGS, NOT_INSTALLED_STATUS),
         ]);
         let manager = detached_manager(runner);
 
@@ -317,7 +343,11 @@ mod tests {
             CommandStep::success(SYSTEMCTL, &[SYSTEMD_USER_ARG, "daemon-reload"], ""),
             CommandStep::success(SYSTEMCTL, &[SYSTEMD_USER_ARG, "enable", SYSTEMD_UNIT], ""),
             CommandStep::success(SYSTEMCTL, &[SYSTEMD_USER_ARG, "restart", SYSTEMD_UNIT], ""),
-            CommandStep::success(SYSTEMCTL, &SYSTEMD_STATUS_ARGS, RUNNING_STATUS),
+            CommandStep::success(
+                SYSTEMCTL,
+                &SYSTEMD_STATUS_ARGS,
+                "LoadState=loaded\nActiveState=active\nSubState=running\nUnitFileState=enabled\nExecMainCode=0\nExecMainStatus=0\nResult=success\n",
+            ),
         ]);
         let manager = test_manager(&root, runner);
         let spec = service_spec(&LogLevel::Info, &RuntimeFlavor::MultiThread)?;
@@ -336,17 +366,9 @@ mod tests {
     fn restart_targets_an_active_unit_when_the_local_definition_is_missing(
     ) -> Result<(), DaemonError> {
         let runner = ScriptedCommandRunner::new([
-            CommandStep::success(
-                SYSTEMCTL,
-                &SYSTEMD_STATUS_ARGS,
-                "LoadState=not-found\nActiveState=active\nSubState=running\nUnitFileState=\n",
-            ),
+            CommandStep::success(SYSTEMCTL, &SYSTEMD_STATUS_ARGS, DETACHED_RUNNING_STATUS),
             CommandStep::success(SYSTEMCTL, &[SYSTEMD_USER_ARG, "restart", SYSTEMD_UNIT], ""),
-            CommandStep::success(
-                SYSTEMCTL,
-                &SYSTEMD_STATUS_ARGS,
-                "LoadState=not-found\nActiveState=active\nSubState=running\nUnitFileState=\n",
-            ),
+            CommandStep::success(SYSTEMCTL, &SYSTEMD_STATUS_ARGS, DETACHED_RUNNING_STATUS),
         ]);
         let manager = detached_manager(runner);
 
@@ -354,7 +376,7 @@ mod tests {
 
         assert_eq!(
             status,
-            DaemonStatus::installed(DaemonState::Running, AutostartState::Other("unknown"))
+            DaemonStatus::installed(DaemonState::Running, AutostartState::Unknown)
         );
         Ok(())
     }
@@ -385,33 +407,43 @@ mod tests {
 
     #[test]
     fn stop_returns_not_installed_without_issuing_stop() -> Result<(), DaemonError> {
-        let runner = ScriptedCommandRunner::new([CommandStep::success(
-            SYSTEMCTL,
-            &SYSTEMD_STATUS_ARGS,
-            "LoadState=not-found\nActiveState=inactive\nSubState=dead\nUnitFileState=\n",
-        )]);
-        let manager = detached_manager(runner);
+        for status_output in [
+            NOT_INSTALLED_STATUS,
+            "LoadState=masked\nActiveState=inactive\nSubState=dead\nUnitFileState=masked\n",
+        ] {
+            let runner = ScriptedCommandRunner::new([CommandStep::success(
+                SYSTEMCTL,
+                &SYSTEMD_STATUS_ARGS,
+                status_output,
+            )]);
+            let manager = detached_manager(runner);
 
-        let status = manager.stop()?;
+            let status = manager.stop()?;
 
-        assert_eq!(status, DaemonStatus::NotInstalled);
+            assert_eq!(status, DaemonStatus::NotInstalled);
+        }
         Ok(())
     }
 
     #[test]
     fn restart_rejects_a_not_installed_unit() {
-        let runner = ScriptedCommandRunner::new([CommandStep::success(
-            SYSTEMCTL,
-            &SYSTEMD_STATUS_ARGS,
-            "LoadState=not-found\nActiveState=inactive\nSubState=dead\nUnitFileState=\n",
-        )]);
-        let manager = detached_manager(runner);
+        for status_output in [
+            NOT_INSTALLED_STATUS,
+            "LoadState=masked\nActiveState=inactive\nSubState=dead\nUnitFileState=masked\n",
+        ] {
+            let runner = ScriptedCommandRunner::new([CommandStep::success(
+                SYSTEMCTL,
+                &SYSTEMD_STATUS_ARGS,
+                status_output,
+            )]);
+            let manager = detached_manager(runner);
 
-        let result = manager.restart();
+            let result = manager.restart();
 
-        assert!(matches!(
-            result,
-            Err(DaemonError::ServiceNotInstalled { .. })
-        ));
+            assert!(matches!(
+                result,
+                Err(DaemonError::ServiceNotInstalled { .. })
+            ));
+        }
     }
 }
