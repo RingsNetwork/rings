@@ -204,21 +204,19 @@ mod tests {
             !Error::Transport(rings_transport::error::Error::SendPermitRevoked)
                 .records_peer_send_failure()
         );
+        let invariant = Error::CancelledDetachedAdmissionPublishedSuccess;
+        assert!(!invariant.is_deferrable_data_plane_send());
+        assert!(!invariant.records_peer_send_failure());
     }
 
     #[test]
-    fn local_send_backpressure_is_deferrable_and_never_degrades_peer_quality() {
+    fn pre_acceptance_backpressure_is_deferrable_and_never_degrades_peer_quality() {
         let peer: crate::dht::Did = crate::ecc::SecretKey::random().address().into();
         let backpressure = [
             Error::DataChannelSendQueueTimeout {
                 peer,
                 timeout_ms: 1,
                 bytes: 1,
-                context: "test",
-            },
-            Error::DataChannelDeliveryTimeout {
-                peer,
-                timeout_ms: 1,
                 context: "test",
             },
             Error::OutboundTransferCapacityExceeded { peer, capacity: 1 },
@@ -231,11 +229,47 @@ mod tests {
                 peer,
                 timeout_ms: 1,
             },
+            Error::OutboundFirstFrameAdmissionTimeout {
+                peer,
+                timeout_ms: 1,
+            },
         ];
 
         for error in backpressure {
             assert!(error.is_local_send_backpressure(), "{error:?}");
             assert!(error.is_deferrable_data_plane_send(), "{error:?}");
+            assert!(!error.records_peer_send_failure(), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn post_acceptance_timeouts_are_ambiguous_and_not_retryable() {
+        let peer: crate::dht::Did = crate::ecc::SecretKey::random().address().into();
+        let ambiguous = [
+            Error::DataChannelSendCompletionTimeout {
+                peer,
+                timeout_ms: 1,
+                bytes: 1,
+                context: "test",
+            },
+            Error::DataChannelDeliveryTimeout {
+                peer,
+                timeout_ms: 1,
+                context: "test",
+            },
+            Error::DetachedPayloadCleanupTimeout {
+                peer,
+                timeout_ms: 1,
+            },
+            Error::TrackedPayloadCleanupTimeout {
+                peer,
+                timeout_ms: 1,
+            },
+        ];
+
+        for error in ambiguous {
+            assert!(!error.is_local_send_backpressure(), "{error:?}");
+            assert!(!error.is_deferrable_data_plane_send(), "{error:?}");
             assert!(!error.records_peer_send_failure(), "{error:?}");
         }
     }

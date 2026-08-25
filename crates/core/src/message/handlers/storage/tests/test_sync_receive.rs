@@ -1,8 +1,6 @@
 use std::sync::Arc;
 
 use super::super::finish_storage_action;
-use super::super::StorageSyncBatch;
-use super::super::StorageSyncBatchStep;
 use super::test_support::install_two_node_chord_view;
 use super::test_support::next_generated_key;
 use super::test_support::next_payload_for_tx;
@@ -34,6 +32,8 @@ use crate::message::MessagePayload;
 use crate::message::PayloadSender;
 use crate::prelude::entry::EntryKind;
 use crate::session::SessionSk;
+use crate::swarm::transport::StorageSyncBatch;
+use crate::swarm::transport::StorageSyncBatchStep;
 use crate::tests::default::assert_no_more_msg;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
@@ -204,7 +204,6 @@ async fn sync_entries_handler_rejects_non_affine_placement_before_writing() -> R
 #[tokio::test]
 async fn storage_sync_batch_persists_one_entry_per_step_after_validation() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
-    let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
     let first = Entry::new(
         Did::from(31u32),
         vec!["first".to_string().encode()?],
@@ -230,21 +229,21 @@ async fn storage_sync_batch_persists_one_entry_per_step_after_validation() -> Re
     let mut batch = StorageSyncBatch::new(&msg);
 
     assert!(matches!(
-        batch.step(&handler).await?,
+        batch.step(&node.swarm.transport).await?,
         StorageSyncBatchStep::Pending
     ));
     assert_eq!(node.dht().storage.get(&first_key.to_string()).await?, None);
     assert_eq!(node.dht().storage.get(&second_key.to_string()).await?, None);
 
     assert!(matches!(
-        batch.step(&handler).await?,
+        batch.step(&node.swarm.transport).await?,
         StorageSyncBatchStep::Pending
     ));
     assert_eq!(node.dht().storage.get(&first_key.to_string()).await?, None);
     assert_eq!(node.dht().storage.get(&second_key.to_string()).await?, None);
 
     assert!(matches!(
-        batch.step(&handler).await?,
+        batch.step(&node.swarm.transport).await?,
         StorageSyncBatchStep::Pending
     ));
     assert_eq!(
@@ -253,7 +252,7 @@ async fn storage_sync_batch_persists_one_entry_per_step_after_validation() -> Re
     );
     assert_eq!(node.dht().storage.get(&second_key.to_string()).await?, None);
 
-    let final_step = batch.step(&handler).await?;
+    let final_step = batch.step(&node.swarm.transport).await?;
     let persisted_second = node.dht().storage.get(&second_key.to_string()).await?;
     assert_eq!(persisted_second.as_ref(), Some(&second_stored));
 

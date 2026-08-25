@@ -13,7 +13,6 @@ pub(crate) use effects::browser_task_yield_guard_counts_for_test;
 pub(crate) use effects::reset_browser_task_yield_guard_counts_for_test;
 #[cfg(all(test, feature = "wasm", target_family = "wasm"))]
 pub(crate) use effects::yield_browser_task;
-#[cfg(all(test, feature = "wasm", target_family = "wasm"))]
 pub(crate) use effects::yield_core_actor_step;
 #[cfg(all(test, feature = "wasm", target_family = "wasm"))]
 pub(crate) use effects::CORE_ACTOR_BROWSER_YIELD_INTERVAL;

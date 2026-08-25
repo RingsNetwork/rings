@@ -67,10 +67,15 @@ mod pending;
 mod readiness;
 mod storage_lookup;
 mod storage_sync;
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) use storage_sync::StorageSyncBatch;
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) use storage_sync::StorageSyncBatchStep;
 mod timeouts;
-
 pub(crate) use self::connection::AdmittedConnection;
 use self::delivery::record_measurement;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::delivery::SendCompletionOutcome;
 use self::event_delivery::PeerOperationLocks;
 use self::event_delivery::SwarmEventDeliveryLock;
 use self::event_delivery::SwarmEventDeliveryLocks;
@@ -84,6 +89,8 @@ pub(crate) use self::outbound::outbound_submit_count_for_test;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::reset_outbound_submit_count_for_test;
 use self::outbound::OutboundSchedulers;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::outbound::OUTBOUND_COMMAND_DRAIN_BUDGET;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::OUTBOUND_CONTROL_RESERVED_TRANSFERS;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -104,6 +111,7 @@ use self::storage_lookup::StorageLookupObservationMap;
 pub(crate) use self::storage_lookup::STORAGE_LOOKUP_OBSERVATION_CAPACITY;
 pub(crate) use self::storage_sync::TrackedStorageSyncOutcome;
 pub(crate) use self::timeouts::DATA_CHANNEL_SEND_ACCEPT_BUDGET;
+pub(crate) use self::timeouts::TRACKED_PAYLOAD_COMPLETION_BOUND;
 use self::timeouts::TRANSPORT_TIMEOUT_PROFILE;
 use super::callback::InboundCapacity;
 
@@ -941,6 +949,16 @@ impl SwarmConnection {
 
     pub fn webrtc_connection_state(&self) -> WebrtcConnectionState {
         self.connection.webrtc_connection_state()
+    }
+
+    #[cfg(all(
+        not(all(feature = "wasm", target_family = "wasm")),
+        not(feature = "dummy")
+    ))]
+    pub(crate) fn physical_close_witness(
+        &self,
+    ) -> Result<rings_transport::connections::NativePhysicalCloseWitness> {
+        self.connection.physical_close_witness().map_err(Into::into)
     }
 
     /// The largest single data-channel message this connection can carry — the negotiated

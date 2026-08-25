@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,6 +11,8 @@ use rings_transport::delivery::DeliveryFuture;
 
 use super::connection::await_bounded_connection_close;
 use super::connection::DATA_CHANNEL_CLOSE_TIMEOUT;
+use super::outbound::DetachedAdmission;
+use super::outbound::DetachedAdmissionClaim;
 use super::AdmittedConnection;
 use super::PendingConnectionAttempt;
 use super::TransportReadiness;
@@ -222,10 +225,66 @@ pub(super) async fn send_data_with_timeout(
     data: Bytes,
     permit: &ChunkSendPermit,
     stop: &TransferStop,
+    detached_admission: Option<&DetachedAdmission>,
     did: Did,
     context: &'static str,
 ) -> ChunkSendProgress<Result<DeliveryFuture>> {
     let bytes = data.len();
+    let send_permit = build_transport_send_permit(admitted, permit, stop, detached_admission);
+    let acceptance = send_permit.acceptance();
+    let send = admitted.connection().send_data(data, send_permit).fuse();
+    let timeout = sleep(DATA_CHANNEL_SEND_ACCEPT_TIMEOUT).fuse();
+    pin_mut!(send, timeout);
+
+    loop {
+        if acceptance.is_irrevocable() {
+            return await_irrevocable_send(send, timeout, admitted, did, bytes, context).await;
+        }
+        if let Some(reason) = chunk_send_cancel_reason(admitted, permit, stop) {
+            if acceptance.try_cancel() {
+                log_chunk_send_cancel(did, context, &reason);
+                return ChunkSendProgress::Cancelled(reason);
+            }
+            return await_irrevocable_send(send, timeout, admitted, did, bytes, context).await;
+        }
+        let poll = sleep(CHUNK_SEND_PERMIT_POLL_INTERVAL).fuse();
+        pin_mut!(poll);
+        select! {
+            result = send => {
+                if result.is_err() && !acceptance.is_irrevocable() {
+                    if let Some(reason) = chunk_send_cancel_reason(admitted, permit, stop) {
+                        log_chunk_send_cancel(did, context, &reason);
+                        return ChunkSendProgress::Cancelled(reason);
+                    }
+                }
+                return if acceptance.is_irrevocable() {
+                    complete_irrevocable_send(result, admitted).await
+                } else {
+                    ChunkSendProgress::Ready(result)
+                };
+            },
+            _ = timeout => {
+                if !acceptance.try_cancel() {
+                    return expire_irrevocable_send(admitted, did, bytes, context).await;
+                }
+                return ChunkSendProgress::Ready(Err(Error::DataChannelSendQueueTimeout {
+                    peer: did,
+                    timeout_ms: DATA_CHANNEL_SEND_ACCEPT_TIMEOUT.as_millis(),
+                    bytes,
+                    context,
+                }));
+            },
+            _ = poll => {}
+        }
+    }
+}
+
+fn build_transport_send_permit(
+    admitted: &AdmittedConnection,
+    permit: &ChunkSendPermit,
+    stop: &TransferStop,
+    detached_admission: Option<&DetachedAdmission>,
+) -> SendPermit {
     let admission = admitted.clone();
     let route = permit.clone();
     let transfer_stop = stop.clone();
@@ -240,52 +299,70 @@ pub(super) async fn send_data_with_timeout(
             .flatten()
             .unwrap_or(false)
     });
-    let acceptance = send_permit.acceptance();
-    let send = admitted.connection().send_data(data, send_permit).fuse();
-    let timeout = sleep(DATA_CHANNEL_SEND_ACCEPT_TIMEOUT).fuse();
-    pin_mut!(send, timeout);
-
-    loop {
-        if acceptance.is_irrevocable() {
-            return complete_irrevocable_send(send.await, admitted).await;
-        }
-        if let Some(reason) = chunk_send_cancel_reason(admitted, permit, stop) {
-            log_chunk_send_cancel(did, context, &reason);
-            return ChunkSendProgress::Cancelled(reason);
-        }
-        let poll = sleep(CHUNK_SEND_PERMIT_POLL_INTERVAL).fuse();
-        pin_mut!(poll);
-        select! {
-            result = send => {
-                if matches!(
-                    result,
-                    Err(Error::Transport(rings_transport::error::Error::SendPermitRevoked))
-                ) {
-                    if let Some(reason) = chunk_send_cancel_reason(admitted, permit, stop) {
-                        log_chunk_send_cancel(did, context, &reason);
-                        return ChunkSendProgress::Cancelled(reason);
+    let final_admission = admitted.clone();
+    let final_route = permit.clone();
+    let final_stop = stop.clone();
+    let final_detached_admission = detached_admission.cloned();
+    send_permit.with_irrevocable_guard(move |claim| {
+        let mut claimed = false;
+        let mut newly_detached = false;
+        let _permitted = final_admission
+            .with_current_connection(|connection| {
+                final_route.admits(|| {
+                    if final_stop.should_stop() || !connection.readiness().can_make_progress() {
+                        return false;
                     }
-                }
-                return if acceptance.is_irrevocable() {
-                    complete_irrevocable_send(result, admitted).await
-                } else {
-                    ChunkSendProgress::Ready(result)
-                };
-            },
-            _ = timeout => {
-                if acceptance.is_irrevocable() {
-                    return complete_irrevocable_send(send.await, admitted).await;
-                }
-                return ChunkSendProgress::Ready(Err(Error::DataChannelSendQueueTimeout {
-                    peer: did,
-                    timeout_ms: DATA_CHANNEL_SEND_ACCEPT_TIMEOUT.as_millis(),
-                    bytes,
-                    context,
-                }));
-            },
-            _ = poll => {}
+                    if let Some(admission) = &final_detached_admission {
+                        let Some(detached_claim) = admission.try_mark_irrevocable() else {
+                            return false;
+                        };
+                        newly_detached = detached_claim == DetachedAdmissionClaim::New;
+                    }
+                    claimed = claim.try_claim();
+                    claimed
+                })
+            })
+            .ok()
+            .flatten()
+            .unwrap_or(false);
+        if !claimed && newly_detached {
+            if let Some(admission) = &final_detached_admission {
+                admission.rollback_irrevocable_send();
+            }
         }
+    })
+}
+
+async fn await_irrevocable_send(
+    send: impl Future<Output = Result<DeliveryFuture>>,
+    timeout: impl Future<Output = ()>,
+    admitted: &AdmittedConnection,
+    did: Did,
+    bytes: usize,
+    context: &'static str,
+) -> ChunkSendProgress<Result<DeliveryFuture>> {
+    let send = send.fuse();
+    let timeout = timeout.fuse();
+    pin_mut!(send, timeout);
+    select! {
+        result = send => complete_irrevocable_send(result, admitted).await,
+        _ = timeout => expire_irrevocable_send(admitted, did, bytes, context).await,
     }
+}
+
+async fn expire_irrevocable_send(
+    admitted: &AdmittedConnection,
+    did: Did,
+    bytes: usize,
+    context: &'static str,
+) -> ChunkSendProgress<Result<DeliveryFuture>> {
+    terminate_accepted_connection(admitted, "send_completion_timeout").await;
+    ChunkSendProgress::Ready(Err(Error::DataChannelSendCompletionTimeout {
+        peer: did,
+        timeout_ms: DATA_CHANNEL_SEND_ACCEPT_TIMEOUT.as_millis(),
+        bytes,
+        context,
+    }))
 }
 
 async fn complete_irrevocable_send(
@@ -293,9 +370,7 @@ async fn complete_irrevocable_send(
     admitted: &AdmittedConnection,
 ) -> ChunkSendProgress<Result<DeliveryFuture>> {
     if result.is_err() {
-        if let Err(close_error) = terminate_accepted_connection(admitted).await {
-            return ChunkSendProgress::Ready(Err(close_error));
-        }
+        terminate_accepted_connection(admitted, "irrevocable_send_error").await;
     }
     ChunkSendProgress::Ready(result)
 }
@@ -387,9 +462,7 @@ pub(super) async fn await_delivery_or_cancel(
                 return ChunkSendProgress::Ready(result.map_err(Error::Transport));
             },
             _ = timeout => {
-                if let Err(error) = terminate_accepted_connection(admitted).await {
-                    return ChunkSendProgress::Ready(Err(error));
-                }
+                terminate_accepted_connection(admitted, "delivery_timeout").await;
                 return ChunkSendProgress::Ready(Err(Error::DataChannelDeliveryTimeout {
                     peer: did,
                     timeout_ms: DATA_CHANNEL_DELIVERY_TIMEOUT.as_millis(),
@@ -408,28 +481,89 @@ async fn cancel_accepted_delivery(
     reason: ChunkSendCancelReason,
 ) -> ChunkSendProgress<Result<()>> {
     log_chunk_send_cancel(did, phase, &reason);
-    match terminate_accepted_connection(admitted).await {
-        Ok(()) => ChunkSendProgress::Cancelled(reason),
-        Err(error) => ChunkSendProgress::Ready(Err(error)),
+    terminate_accepted_connection(admitted, "accepted_delivery_cancelled").await;
+    ChunkSendProgress::Cancelled(reason)
+}
+
+pub(super) async fn terminate_accepted_connection(
+    admitted: &AdmittedConnection,
+    cause: &'static str,
+) {
+    let (terminal, close) = attempt_terminalization_and_close(
+        || admitted.mark_send_terminal(),
+        admitted.connection().close(),
+    )
+    .await;
+    if let Err(error) = terminal {
+        log_terminal_cleanup_failure(admitted, cause, "mark_terminal", &error);
+    }
+    match close {
+        Ok(true) => {}
+        Ok(false) => tracing::warn!(
+            peer = %admitted.attempt().peer(),
+            generation = admitted.attempt().generation(),
+            cause,
+            timeout_ms = DATA_CHANNEL_CLOSE_TIMEOUT.as_millis(),
+            "timed out cleaning up terminal data-channel generation"
+        ),
+        Err(error) => log_terminal_cleanup_failure(admitted, cause, "close", &error),
     }
 }
 
-async fn terminate_accepted_connection(admitted: &AdmittedConnection) -> Result<()> {
-    admitted.mark_send_terminal()?;
-    if !await_bounded_connection_close(admitted.connection().close()).await? {
-        tracing::warn!(
-            peer = %admitted.attempt().peer(),
-            generation = admitted.attempt().generation(),
-            timeout_ms = DATA_CHANNEL_CLOSE_TIMEOUT.as_millis(),
-            "timed out cleaning up terminal data-channel generation"
-        );
-    }
-    Ok(())
+async fn attempt_terminalization_and_close<F>(
+    mark_terminal: impl FnOnce() -> Result<bool>,
+    close: F,
+) -> (Result<bool>, Result<bool>)
+where
+    F: Future<Output = Result<()>>,
+{
+    let terminal = mark_terminal();
+    let close = await_bounded_connection_close(close).await;
+    (terminal, close)
+}
+
+fn log_terminal_cleanup_failure(
+    admitted: &AdmittedConnection,
+    cause: &'static str,
+    phase: &'static str,
+    error: &Error,
+) {
+    tracing::warn!(
+        peer = %admitted.attempt().peer(),
+        generation = admitted.attempt().generation(),
+        cause,
+        phase,
+        %error,
+        "failed to clean up terminal data-channel generation"
+    );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg_attr(
+        all(feature = "wasm", target_family = "wasm"),
+        wasm_bindgen_test::wasm_bindgen_test
+    )]
+    #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), tokio::test)]
+    async fn terminalization_failure_still_attempts_physical_close() {
+        let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let close_observer = Arc::clone(&closed);
+
+        let (terminal, close) = attempt_terminalization_and_close(
+            || Err(Error::SwarmConnectionLifecycleLock),
+            async move {
+                close_observer.store(true, std::sync::atomic::Ordering::Release);
+                Ok(())
+            },
+        )
+        .await;
+
+        assert!(matches!(terminal, Err(Error::SwarmConnectionLifecycleLock)));
+        assert!(matches!(close, Ok(true)));
+        assert!(closed.load(std::sync::atomic::Ordering::Acquire));
+    }
 
     #[test]
     fn initial_cancel_reports_generation_revocation_explicitly() {

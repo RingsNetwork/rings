@@ -27,6 +27,123 @@ async fn transport_with_routable_peer(
     Ok((transport, peer, attempt))
 }
 
+#[cfg(feature = "dummy")]
+struct BoundedThread<T> {
+    completion: std::sync::mpsc::Receiver<T>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+#[cfg(feature = "dummy")]
+impl<T: Send + 'static> BoundedThread<T> {
+    fn spawn(operation: impl FnOnce() -> T + Send + 'static) -> Self {
+        let (completion_tx, completion) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let result = operation();
+            let _ = completion_tx.send(result);
+        });
+        Self { completion, thread }
+    }
+
+    fn finish(self, label: &'static str) -> Result<T> {
+        let result = self
+            .completion
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .map_err(|error| Error::InvalidMessage(format!("{label} did not finish: {error}")))?;
+        self.thread
+            .join()
+            .map_err(|_| Error::InvalidMessage(format!("{label} thread panicked")))?;
+        Ok(result)
+    }
+}
+
+#[cfg(feature = "dummy")]
+struct LifecycleGateController {
+    entered: std::sync::mpsc::Receiver<()>,
+    release: std::sync::mpsc::SyncSender<()>,
+}
+
+#[cfg(feature = "dummy")]
+impl LifecycleGateController {
+    fn wait_until_entered(&self) -> Result<()> {
+        self.entered
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .map_err(|error| {
+                Error::InvalidMessage(format!(
+                    "lifecycle operation did not hold the gate: {error}"
+                ))
+            })
+    }
+
+    fn release(self) -> Result<()> {
+        self.release.send(()).map_err(|error| {
+            Error::InvalidMessage(format!("lifecycle gate release failed: {error}"))
+        })
+    }
+}
+
+#[cfg(feature = "dummy")]
+fn lifecycle_test_gate() -> (impl FnOnce() + Send + 'static, LifecycleGateController) {
+    let (entered_tx, entered) = std::sync::mpsc::sync_channel(0);
+    let (release, release_rx) = std::sync::mpsc::sync_channel(0);
+    let hold = move || {
+        entered_tx
+            .send(())
+            .expect("lifecycle gate observer must remain open");
+        release_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("lifecycle gate must be released within the test bound");
+    };
+    (hold, LifecycleGateController { entered, release })
+}
+
+#[cfg(feature = "dummy")]
+struct BlockedRetirement {
+    waiter_registered: std::sync::mpsc::Receiver<()>,
+    worker: BoundedThread<Result<Option<()>>>,
+}
+
+#[cfg(feature = "dummy")]
+impl BlockedRetirement {
+    fn spawn(transport: Arc<SwarmTransport>, peer: Did, attempt: PendingConnectionAttempt) -> Self {
+        let (waiter_tx, waiter_registered) = std::sync::mpsc::sync_channel(0);
+        let action_transport = Arc::clone(&transport);
+        let worker = BoundedThread::spawn(move || {
+            transport.retire_active_connection_with_observer_for_test(
+                attempt,
+                || {
+                    let _ = waiter_tx.send(());
+                },
+                |_| {
+                    action_transport.dht.remove(peer)?;
+                    Ok(())
+                },
+            )
+        });
+        Self {
+            waiter_registered,
+            worker,
+        }
+    }
+
+    fn wait_until_registered(&self, transport: &SwarmTransport) -> Result<()> {
+        self.waiter_registered
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .map_err(|error| {
+                Error::InvalidMessage(format!("retirement waiter was not registered: {error}"))
+            })?;
+        if transport.retirement_waiter_count_for_test() != 1 {
+            return Err(Error::InvalidMessage(
+                "retirement waiter count did not witness lifecycle contention".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn finish(self) -> Result<Option<()>> {
+        self.worker.finish("generation retirement")?
+    }
+}
+
 #[test]
 fn connection_lifecycle_registry_is_bounded_and_rejects_duplicate_peers() -> Result<()> {
     let mut registry = ConnectionLifecycleRegistry::<2>::new();
@@ -461,6 +578,8 @@ async fn final_send_admission_serializes_generation_route_and_readiness() -> Res
         .ok_or(Error::SwarmMissTransport(peer))?;
     let admission = admitted;
     let dht = Arc::clone(&transport.dht);
+    let send_permit = SendPermit::always();
+    let acceptance = send_permit.acceptance();
     let entered = Arc::new(std::sync::Barrier::new(2));
     let release = Arc::new(std::sync::Barrier::new(2));
     let admission_thread = {
@@ -475,6 +594,7 @@ async fn final_send_admission_serializes_generation_route_and_readiness() -> Res
                         entered.wait();
                         release.wait();
                         connection.readiness().can_make_progress()
+                            && send_permit.try_mark_irrevocable().is_some()
                     },
                 )
             })?;
@@ -530,6 +650,7 @@ async fn final_send_admission_serializes_generation_route_and_readiness() -> Res
     assert!(admission_thread
         .join()
         .map_err(|_| Error::InvalidMessage("send admission thread panicked".to_string()))??);
+    assert!(acceptance.is_irrevocable());
     assert_eq!(
         retirement_thread
             .join()
@@ -651,51 +772,18 @@ async fn scheduler_shutdown_cancels_a_send_before_queue_acceptance() -> Result<(
 #[tokio::test]
 async fn routable_join_serializes_with_generation_retirement() -> Result<()> {
     let (transport, peer, attempt) = transport_with_routable_peer().await?;
-    let entered = Arc::new(std::sync::Barrier::new(2));
-    let release = Arc::new(std::sync::Barrier::new(2));
+    let (hold_lifecycle, lifecycle_gate) = lifecycle_test_gate();
     let join_transport = Arc::clone(&transport);
-    let join_thread = {
-        let entered = Arc::clone(&entered);
-        let release = Arc::clone(&release);
-        std::thread::spawn(move || {
-            join_transport.join_routable_peer_with_observer_for_test(peer, || {
-                entered.wait();
-                release.wait();
-            })
-        })
-    };
-    entered.wait();
-
-    let (retirement_started_tx, retirement_started_rx) = std::sync::mpsc::sync_channel(0);
-    let (retirement_done_tx, retirement_done_rx) = std::sync::mpsc::channel();
-    let retirement_transport = Arc::clone(&transport);
-    let retirement_thread = std::thread::spawn(move || {
-        let _ = retirement_started_tx.send(());
-        let result = retirement_transport.retire_active_connection_with(attempt, |_| {
-            retirement_transport.dht.remove(peer)?;
-            Ok(())
-        });
-        let _ = retirement_done_tx.send(());
-        result
+    let join_thread = BoundedThread::spawn(move || {
+        join_transport.join_routable_peer_with_observer_for_test(peer, hold_lifecycle)
     });
-    retirement_started_rx
-        .recv_timeout(std::time::Duration::from_secs(1))
-        .map_err(|error| Error::InvalidMessage(format!("retirement did not start: {error}")))?;
-    assert!(retirement_done_rx
-        .recv_timeout(std::time::Duration::from_millis(25))
-        .is_err());
+    lifecycle_gate.wait_until_entered()?;
+    let retirement = BlockedRetirement::spawn(Arc::clone(&transport), peer, attempt);
+    retirement.wait_until_registered(&transport)?;
 
-    release.wait();
-    assert!(join_thread
-        .join()
-        .map_err(|_| Error::InvalidMessage("join thread panicked".to_string()))??
-        .is_some());
-    assert_eq!(
-        retirement_thread
-            .join()
-            .map_err(|_| Error::InvalidMessage("retirement thread panicked".to_string()))??,
-        Some(())
-    );
+    lifecycle_gate.release()?;
+    assert!(join_thread.finish("routable join")??.is_some());
+    assert_eq!(retirement.finish()?, Some(()));
     assert!(!transport.is_admitted_connection(peer));
     assert!(!transport.dht.successors().contains(&peer)?);
     Ok(())
@@ -709,54 +797,19 @@ async fn topology_report_serializes_with_generation_retirement() -> Result<()> {
         successors: vec![peer],
         predecessor: Some(peer),
     };
-    let entered = Arc::new(std::sync::Barrier::new(2));
-    let release = Arc::new(std::sync::Barrier::new(2));
+    let (hold_lifecycle, lifecycle_gate) = lifecycle_test_gate();
     let stabilization_transport = Arc::clone(&transport);
-    let stabilization_thread = {
-        let entered = Arc::clone(&entered);
-        let release = Arc::clone(&release);
-        std::thread::spawn(move || {
-            stabilization_transport.stabilize_routable_topology_with_observer_for_test(
-                &reported,
-                || {
-                    entered.wait();
-                    release.wait();
-                },
-            )
-        })
-    };
-    entered.wait();
-
-    let (retirement_started_tx, retirement_started_rx) = std::sync::mpsc::sync_channel(0);
-    let (retirement_done_tx, retirement_done_rx) = std::sync::mpsc::channel();
-    let retirement_transport = Arc::clone(&transport);
-    let retirement_thread = std::thread::spawn(move || {
-        let _ = retirement_started_tx.send(());
-        let result = retirement_transport.retire_active_connection_with(attempt, |_| {
-            retirement_transport.dht.remove(peer)?;
-            Ok(())
-        });
-        let _ = retirement_done_tx.send(());
-        result
+    let stabilization_thread = BoundedThread::spawn(move || {
+        stabilization_transport
+            .stabilize_routable_topology_with_observer_for_test(&reported, hold_lifecycle)
     });
-    retirement_started_rx
-        .recv_timeout(std::time::Duration::from_secs(1))
-        .map_err(|error| Error::InvalidMessage(format!("retirement did not start: {error}")))?;
-    assert!(retirement_done_rx
-        .recv_timeout(std::time::Duration::from_millis(25))
-        .is_err());
+    lifecycle_gate.wait_until_entered()?;
+    let retirement = BlockedRetirement::spawn(Arc::clone(&transport), peer, attempt);
+    retirement.wait_until_registered(&transport)?;
 
-    release.wait();
-    assert!(stabilization_thread
-        .join()
-        .map_err(|_| Error::InvalidMessage("stabilization thread panicked".to_string()))??
-        .is_some());
-    assert_eq!(
-        retirement_thread
-            .join()
-            .map_err(|_| Error::InvalidMessage("retirement thread panicked".to_string()))??,
-        Some(())
-    );
+    lifecycle_gate.release()?;
+    assert!(stabilization_thread.finish("topology report")??.is_some());
+    assert_eq!(retirement.finish()?, Some(()));
     assert!(!transport.is_admitted_connection(peer));
     assert!(!transport.dht.successors().contains(&peer)?);
     assert_ne!(*transport.dht.lock_predecessor()?, Some(peer));
@@ -767,53 +820,22 @@ async fn topology_report_serializes_with_generation_retirement() -> Result<()> {
 #[tokio::test]
 async fn predecessor_notification_serializes_with_generation_retirement() -> Result<()> {
     let (transport, peer, attempt) = transport_with_routable_peer().await?;
-    let entered = Arc::new(std::sync::Barrier::new(2));
-    let release = Arc::new(std::sync::Barrier::new(2));
+    let (hold_lifecycle, lifecycle_gate) = lifecycle_test_gate();
     let notification_transport = Arc::clone(&transport);
-    let notification_thread = {
-        let entered = Arc::clone(&entered);
-        let release = Arc::clone(&release);
-        std::thread::spawn(move || {
-            notification_transport.notify_admitted_predecessor_with_observer_for_test(peer, || {
-                entered.wait();
-                release.wait();
-            })
-        })
-    };
-    entered.wait();
-
-    let (retirement_started_tx, retirement_started_rx) = std::sync::mpsc::sync_channel(0);
-    let (retirement_done_tx, retirement_done_rx) = std::sync::mpsc::channel();
-    let retirement_transport = Arc::clone(&transport);
-    let retirement_thread = std::thread::spawn(move || {
-        let _ = retirement_started_tx.send(());
-        let result = retirement_transport.retire_active_connection_with(attempt, |_| {
-            retirement_transport.dht.remove(peer)?;
-            Ok(())
-        });
-        let _ = retirement_done_tx.send(());
-        result
+    let notification_thread = BoundedThread::spawn(move || {
+        notification_transport
+            .notify_admitted_predecessor_with_observer_for_test(peer, hold_lifecycle)
     });
-    retirement_started_rx
-        .recv_timeout(std::time::Duration::from_secs(1))
-        .map_err(|error| Error::InvalidMessage(format!("retirement did not start: {error}")))?;
-    assert!(retirement_done_rx
-        .recv_timeout(std::time::Duration::from_millis(25))
-        .is_err());
+    lifecycle_gate.wait_until_entered()?;
+    let retirement = BlockedRetirement::spawn(Arc::clone(&transport), peer, attempt);
+    retirement.wait_until_registered(&transport)?;
 
-    release.wait();
+    lifecycle_gate.release()?;
     assert_eq!(
-        notification_thread
-            .join()
-            .map_err(|_| Error::InvalidMessage("notification thread panicked".to_string()))??,
+        notification_thread.finish("predecessor notification")??,
         Some(peer)
     );
-    assert_eq!(
-        retirement_thread
-            .join()
-            .map_err(|_| Error::InvalidMessage("retirement thread panicked".to_string()))??,
-        Some(())
-    );
+    assert_eq!(retirement.finish()?, Some(()));
     assert!(!transport.is_admitted_connection(peer));
     assert_ne!(*transport.dht.lock_predecessor()?, Some(peer));
     Ok(())
@@ -824,57 +846,25 @@ async fn predecessor_notification_serializes_with_generation_retirement() -> Res
 async fn finger_update_serializes_with_generation_retirement() -> Result<()> {
     let (transport, peer, attempt) = transport_with_routable_peer().await?;
     let finger_index = 3;
-    let entered = Arc::new(std::sync::Barrier::new(2));
-    let release = Arc::new(std::sync::Barrier::new(2));
+    let (hold_lifecycle, lifecycle_gate) = lifecycle_test_gate();
     let finger_transport = Arc::clone(&transport);
-    let finger_thread = {
-        let entered = Arc::clone(&entered);
-        let release = Arc::clone(&release);
-        std::thread::spawn(move || {
-            finger_transport.record_finger_candidate_with_observer_for_test(
-                peer,
-                finger_index,
-                || {
-                    entered.wait();
-                    release.wait();
-                },
-            )
-        })
-    };
-    entered.wait();
-
-    let (retirement_started_tx, retirement_started_rx) = std::sync::mpsc::sync_channel(0);
-    let (retirement_done_tx, retirement_done_rx) = std::sync::mpsc::channel();
-    let retirement_transport = Arc::clone(&transport);
-    let retirement_thread = std::thread::spawn(move || {
-        let _ = retirement_started_tx.send(());
-        let result = retirement_transport.retire_active_connection_with(attempt, |_| {
-            retirement_transport.dht.remove(peer)?;
-            Ok(())
-        });
-        let _ = retirement_done_tx.send(());
-        result
+    let finger_thread = BoundedThread::spawn(move || {
+        finger_transport.record_finger_candidate_with_observer_for_test(
+            peer,
+            finger_index,
+            hold_lifecycle,
+        )
     });
-    retirement_started_rx
-        .recv_timeout(std::time::Duration::from_secs(1))
-        .map_err(|error| Error::InvalidMessage(format!("retirement did not start: {error}")))?;
-    assert!(retirement_done_rx
-        .recv_timeout(std::time::Duration::from_millis(25))
-        .is_err());
+    lifecycle_gate.wait_until_entered()?;
+    let retirement = BlockedRetirement::spawn(Arc::clone(&transport), peer, attempt);
+    retirement.wait_until_registered(&transport)?;
 
-    release.wait();
+    lifecycle_gate.release()?;
     assert_eq!(
-        finger_thread
-            .join()
-            .map_err(|_| Error::InvalidMessage("finger update thread panicked".to_string()))??,
+        finger_thread.finish("finger update")??,
         FingerUpdateDisposition::Applied
     );
-    assert_eq!(
-        retirement_thread
-            .join()
-            .map_err(|_| Error::InvalidMessage("retirement thread panicked".to_string()))??,
-        Some(())
-    );
+    assert_eq!(retirement.finish()?, Some(()));
     assert!(!transport.is_admitted_connection(peer));
     assert!(!transport.dht.lock_finger()?.contains(Some(peer)));
     Ok(())

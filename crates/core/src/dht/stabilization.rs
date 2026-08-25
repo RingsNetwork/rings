@@ -38,10 +38,12 @@ use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::transport::TransportReadiness;
 use crate::swarm::transport::PEER_LIVENESS_IDLE_MS;
+use crate::swarm::transport::TRACKED_PAYLOAD_COMPLETION_BOUND;
 use crate::utils::get_epoch_ms_i64;
 use crate::utils::sleep;
 
-const STABILIZATION_STEP_TIMEOUT: Duration = Duration::from_secs(30);
+const STABILIZATION_STEP_TIMEOUT: Duration =
+    TRACKED_PAYLOAD_COMPLETION_BOUND.saturating_add(Duration::from_secs(1));
 const STABILIZATION_STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DISCONNECTED_CONNECTION_GRACE_MS: i64 = 30_000;
 /// Run one repair delivery per maintenance phase. Every frame has a bounded
@@ -311,10 +313,12 @@ impl Stabilizer {
     /// - `Routable(n, p)` iff `p` has an admitted local transport with a stable
     ///   readiness observation in `Ready = ({Connecting, Connected}, Open)`.
     /// - `Evictable(n, p)` iff `p` has no admitted transport, has no raw
-    ///   connection object, is terminal, is the disconnected successor head
-    ///   while a live successor-tail or finger fallback exists, stayed
-    ///   disconnected past grace, or has reached the local failure-evidence
-    ///   limit.
+    ///   connection object, is terminal, is `Connected` with a data channel that
+    ///   is not open, is the disconnected successor head while a live
+    ///   successor-tail or finger fallback exists, stayed disconnected past
+    ///   grace, left a liveness probe unanswered past its deadline, or reached
+    ///   the local failure-evidence limit, including an admitted connection
+    ///   explicitly terminalized after an irrevocable send or delivery failure.
     /// - `PrunableTopologyPeer(n, p)` iff `p` is disconnected and appears only
     ///   in non-head topology slots. These slots are hints, so they are removed
     ///   from local DHT state immediately while the transport is allowed to
@@ -322,8 +326,10 @@ impl Stabilizer {
     ///
     /// Post: after this step returns `Ok`, every observed local
     /// `TopologyPeer(n, p) ∪ AdmittedPeer(n, p)` that was `Evictable(n, p)` at
-    /// the step's snapshot time has been removed through `PeerRing::remove`, so
-    /// successor, predecessor, and finger state are cleaned together.
+    /// snapshot time and still owns the same active transport evidence has been
+    /// removed through `PeerRing::remove`, so successor, predecessor, and finger
+    /// state are cleaned together. Evidence superseded by a newer connection is
+    /// a successful no-op that preserves the replacement and its topology.
     pub async fn clean_unavailable_connections(&self) -> Result<()> {
         self.transport.expire_pending_connections().await?;
         let admitted_states = self.admitted_connection_states()?;
@@ -875,6 +881,14 @@ fn elapsed_since(started_at: Instant) -> i64 {
 }
 
 mod maintenance;
+#[cfg(all(test, target_family = "wasm"))]
+pub(crate) use maintenance::maintenance_phase_trace_for_test;
+#[cfg(all(test, target_family = "wasm"))]
+pub(crate) use maintenance::reset_maintenance_phase_trace_for_test;
+#[cfg(all(test, target_family = "wasm"))]
+pub(crate) use maintenance::MaintenancePhaseEvent;
+#[cfg(all(test, target_family = "wasm"))]
+pub(crate) use maintenance::MaintenancePhaseKind;
 mod storage_repair;
 
 #[cfg(test)]

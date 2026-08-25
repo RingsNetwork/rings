@@ -321,6 +321,43 @@ fn malformed_chunks_are_dropped() {
 }
 
 #[test]
+fn reassembly_outcome_distinguishes_invalid_and_replayed_chunks() {
+    let mut reassembler = MessageReassembler::new();
+    let invalid = reassembler.handle_retained_outcome(Chunk {
+        chunk: [0, 0],
+        data: Bytes::from_static(b"invalid"),
+        meta: ChunkMeta::default(),
+    });
+    assert!(matches!(
+        invalid,
+        ReassemblyOutcome::Rejected(ReassemblyRejection::Invalid)
+    ));
+
+    let first = Chunk {
+        chunk: [0, 2],
+        data: Bytes::from_static(b"first"),
+        meta: ChunkMeta::default(),
+    };
+    assert!(matches!(
+        reassembler.handle_retained_outcome(first.clone()),
+        ReassemblyOutcome::Incomplete
+    ));
+    assert!(matches!(
+        reassembler.handle_retained_outcome(first.clone()),
+        ReassemblyOutcome::Rejected(ReassemblyRejection::Replay)
+    ));
+
+    let conflicting = Chunk {
+        data: Bytes::from_static(b"conflict"),
+        ..first
+    };
+    assert!(matches!(
+        reassembler.handle_retained_outcome(conflicting),
+        ReassemblyOutcome::Rejected(ReassemblyRejection::Invalid)
+    ));
+}
+
+#[test]
 fn old_timestamp_is_dropped_without_panic() {
     // ts_ms < TS_OFFSET_TOLERANCE_MS would underflow a plain `u128` subtraction (no panic with
     // saturating arithmetic), and a chunk stamped at the epoch is already long expired — it must

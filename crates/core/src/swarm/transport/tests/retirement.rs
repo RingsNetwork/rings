@@ -68,12 +68,15 @@ async fn retirement_serializes_with_liveness_generation_updates() -> Result<()> 
 
     let (observation_tx, observation_rx) = std::sync::mpsc::sync_channel(0);
     let (release_tx, release_rx) = std::sync::mpsc::sync_channel(0);
+    let (marker_done_tx, marker_done_rx) = std::sync::mpsc::channel();
     let marker_transport = Arc::clone(&transport);
     let marker_thread = std::thread::spawn(move || {
-        marker_transport.mark_peer_liveness_connected_with_observer_for_test(attempt, || {
-            let _ = observation_tx.send(());
-            let _ = release_rx.recv();
-        })
+        let result =
+            marker_transport.mark_peer_liveness_connected_with_observer_for_test(attempt, || {
+                let _ = observation_tx.send(());
+                let _ = release_rx.recv_timeout(std::time::Duration::from_secs(1));
+            });
+        let _ = marker_done_tx.send(result);
     });
     observation_rx
         .recv_timeout(std::time::Duration::from_secs(1))
@@ -81,34 +84,44 @@ async fn retirement_serializes_with_liveness_generation_updates() -> Result<()> 
             Error::InvalidMessage(format!("liveness observation did not start: {error}"))
         })?;
 
-    let (retirement_started_tx, retirement_started_rx) = std::sync::mpsc::sync_channel(0);
+    let (retirement_waiting_tx, retirement_waiting_rx) = std::sync::mpsc::sync_channel(0);
     let (retirement_done_tx, retirement_done_rx) = std::sync::mpsc::channel();
     let retirement_transport = Arc::clone(&transport);
     let retirement_thread = std::thread::spawn(move || {
-        let _ = retirement_started_tx.send(());
-        let result = retirement_transport.retire_active_connection_with(attempt, |_| Ok(()));
-        let _ = retirement_done_tx.send(());
-        result
+        let result = retirement_transport.retire_active_connection_with_observer_for_test(
+            attempt,
+            || {
+                let _ = retirement_waiting_tx.send(());
+            },
+            |_| Ok(()),
+        );
+        let _ = retirement_done_tx.send(result);
     });
-    retirement_started_rx
+    retirement_waiting_rx
         .recv_timeout(std::time::Duration::from_secs(1))
-        .map_err(|error| Error::InvalidMessage(format!("retirement did not start: {error}")))?;
-    assert!(retirement_done_rx
-        .recv_timeout(std::time::Duration::from_millis(25))
-        .is_err());
+        .map_err(|error| {
+            Error::InvalidMessage(format!("retirement did not reach lifecycle gate: {error}"))
+        })?;
+    assert_eq!(transport.retirement_waiter_count_for_test(), 1);
 
     release_tx
         .send(())
         .map_err(|error| Error::InvalidMessage(format!("liveness release failed: {error}")))?;
+    marker_done_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .map_err(|error| {
+            Error::InvalidMessage(format!("liveness marker did not finish: {error}"))
+        })??;
+    let retirement_result = retirement_done_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .map_err(|error| Error::InvalidMessage(format!("retirement did not finish: {error}")))??;
     marker_thread
         .join()
-        .map_err(|_| Error::InvalidMessage("liveness marker thread panicked".to_string()))??;
-    assert_eq!(
-        retirement_thread
-            .join()
-            .map_err(|_| Error::InvalidMessage("retirement thread panicked".to_string()))??,
-        Some(())
-    );
+        .map_err(|_| Error::InvalidMessage("liveness marker thread panicked".to_string()))?;
+    retirement_thread
+        .join()
+        .map_err(|_| Error::InvalidMessage("retirement thread panicked".to_string()))?;
+    assert_eq!(retirement_result, Some(()));
 
     assert!(!transport.is_admitted_connection(peer));
     assert_eq!(transport.peer_liveness_count_for_test()?, 0);

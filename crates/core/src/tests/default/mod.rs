@@ -41,6 +41,8 @@ mod test_dht_schedule;
 #[cfg(feature = "dummy")]
 mod test_chunk_e2e;
 mod test_message_handler;
+#[cfg(all(feature = "std", not(feature = "dummy")))]
+mod test_native_transport;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 mod test_outbound_scheduler;
 mod test_stabilization;

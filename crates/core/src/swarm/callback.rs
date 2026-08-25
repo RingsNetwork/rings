@@ -6,14 +6,17 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use futures::lock::Mutex as FuturesMutex;
+use rings_transport::core::callback::AdmittedInboundMessage;
+use rings_transport::core::callback::InboundFrameClass;
 use rings_transport::core::callback::TransportCallback;
 use rings_transport::core::transport::WebrtcConnectionState;
 
 use crate::chunk::MessageReassembler;
-use crate::chunk::RetainedReassembly;
+use crate::chunk::ReassemblyOutcome;
 use crate::dht::Did;
 use crate::message::HandleMsg;
 use crate::message::Message;
+use crate::message::MessageClass;
 use crate::message::MessageHandler;
 use crate::message::MessageMeta;
 use crate::message::MessagePayload;
@@ -46,6 +49,25 @@ type TransportCallbackError = Box<dyn std::error::Error>;
 
 fn into_transport_callback_error(error: CallbackError) -> TransportCallbackError {
     error
+}
+
+fn log_inbound_verification_failure(
+    peer: Option<Did>,
+    payload: &MessagePayload,
+    wire_bytes: usize,
+) {
+    let message_kind = MessageMeta::from_wire(&payload.transaction.data)
+        .ok()
+        .map(|meta| meta.kind().as_str());
+    tracing::error!(
+        peer = ?peer,
+        tx_id = %payload.transaction.tx_id,
+        destination = %payload.transaction.destination,
+        message_kind,
+        data_bytes = payload.transaction.data.len(),
+        wire_bytes,
+        "inbound message verification failed or expired"
+    );
 }
 
 pub(super) enum PayloadHandlingError {
@@ -489,11 +511,15 @@ impl InboundProcessor {
     pub(super) async fn handle_payload(
         &self,
         payload: &MessagePayload,
+        prepared_message: Option<Message>,
     ) -> std::result::Result<(), PayloadHandlingError> {
-        let message: Message = payload
-            .transaction
-            .data()
-            .map_err(PayloadHandlingError::Core)?;
+        let message = match prepared_message {
+            Some(message) => message,
+            None => payload
+                .transaction
+                .data()
+                .map_err(PayloadHandlingError::Core)?,
+        };
 
         let result = match message {
             Message::ConnectNodeSend(ref msg) => self.message_handler.handle(payload, msg).await,
@@ -557,14 +583,12 @@ impl InboundProcessor {
         Ok(())
     }
 
-    pub(super) async fn handle_chunk(
-        &self,
-        payload: &MessagePayload,
-    ) -> crate::error::Result<Option<RetainedReassembly>> {
-        let Message::Chunk(chunk) = payload.transaction.data::<Message>()? else {
-            return Err(crate::error::Error::InboundActorInvariantViolation);
-        };
-        Ok(self.reassembler.lock().await.handle_retained(chunk))
+    pub(super) async fn handle_chunk(&self, chunk: crate::chunk::Chunk) -> ReassemblyOutcome {
+        self.reassembler.lock().await.handle_retained_outcome(chunk)
+    }
+
+    pub(super) async fn remove_expired_reassembly(&self) {
+        self.reassembler.lock().await.remove_expired();
     }
 
     pub(super) async fn decode_verified_message(
@@ -580,21 +604,24 @@ impl InboundProcessor {
             }
         };
         if !(payload.verify() && payload.transaction.verify()) {
-            let message_kind = MessageMeta::from_wire(&payload.transaction.data)
-                .ok()
-                .map(|meta| meta.kind().as_str());
-            tracing::error!(
-                peer = ?peer,
-                tx_id = %payload.transaction.tx_id,
-                destination = %payload.transaction.destination,
-                message_kind,
-                data_bytes = payload.transaction.data.len(),
-                wire_bytes = msg.len(),
-                "inbound message verification failed or expired"
-            );
+            log_inbound_verification_failure(peer, &payload, msg.len());
             self.record_receive_failure(peer).await;
             return Err(crate::error::Error::InvalidMessage(
                 "message verification failed or message expired".to_string(),
+            ));
+        }
+        self.accept_preverified_message(peer, payload).await
+    }
+
+    pub(super) async fn accept_preverified_message(
+        &self,
+        peer: Option<Did>,
+        payload: MessagePayload,
+    ) -> crate::error::Result<MessagePayload> {
+        if payload.is_expired() || payload.transaction.is_expired() {
+            self.record_receive_failure(peer).await;
+            return Err(crate::error::Error::InvalidMessage(
+                "message expired after transport admission".to_string(),
             ));
         }
         if let (Some(peer), Some(attempt)) = (peer, self.pending_attempt()) {
@@ -606,18 +633,100 @@ impl InboundProcessor {
     }
 }
 
-#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
-#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
-impl TransportCallback for InnerSwarmCallback {
-    async fn on_message(&self, cid: &str, msg: &[u8]) -> Result<(), TransportCallbackError> {
+fn transport_frame_class(meta: MessageMeta) -> InboundFrameClass {
+    if meta.kind().is_chunk() {
+        return InboundFrameClass::Reassembly;
+    }
+    match meta.class() {
+        MessageClass::DhtControl => InboundFrameClass::Control,
+        MessageClass::Storage => InboundFrameClass::Storage,
+        MessageClass::E2e => InboundFrameClass::EndToEnd,
+        MessageClass::Application => InboundFrameClass::Application,
+    }
+}
+
+pub(super) struct PreparedInboundFrame {
+    payload: MessagePayload,
+    message: Message,
+    class: InboundFrameClass,
+}
+
+fn prepare_transport_frame(
+    peer: Option<Did>,
+    bytes: &[u8],
+) -> crate::error::Result<PreparedInboundFrame> {
+    let payload = MessagePayload::from_wire(bytes)?;
+    if !(payload.transaction.verify() && payload.verify()) {
+        log_inbound_verification_failure(peer, &payload, bytes.len());
+        return Err(crate::error::Error::InvalidMessage(
+            "message verification failed or message expired".to_string(),
+        ));
+    }
+    let message = payload.transaction.data::<Message>()?;
+    let class = transport_frame_class(MessageMeta::from_message(&message));
+    Ok(PreparedInboundFrame {
+        payload,
+        message,
+        class,
+    })
+}
+
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) fn prepare_transport_frame_class_for_test(
+    bytes: &[u8],
+) -> crate::error::Result<InboundFrameClass> {
+    prepare_transport_frame(None, bytes).map(|prepared| prepared.class)
+}
+
+impl InnerSwarmCallback {
+    async fn submit_inbound_message(
+        &self,
+        cid: &str,
+        msg: &[u8],
+    ) -> Result<(), TransportCallbackError> {
         #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
         let _depth_guard = OnMessageRecursionDepthGuard::enter();
 
         let peer = Did::from_str(cid).ok();
+        let prepared = match prepare_transport_frame(peer, msg) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.processor.record_receive_failure(peer).await;
+                return Err(error.into());
+            }
+        };
         self.inbound
-            .submit(&self.processor, peer, msg)
+            .submit_prepared(&self.processor, peer, msg, prepared)
             .await
             .map_err(Into::into)
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) async fn on_admitted_message_for_test(
+        &self,
+        cid: &str,
+        msg: &[u8],
+    ) -> Result<(), TransportCallbackError> {
+        self.submit_inbound_message(cid, msg).await
+    }
+}
+
+#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
+#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
+impl TransportCallback for InnerSwarmCallback {
+    async fn on_admitted_message(
+        &self,
+        message: AdmittedInboundMessage<'_>,
+    ) -> Result<(), TransportCallbackError> {
+        let (cid, msg) = message.into_parts();
+        self.submit_inbound_message(cid, msg).await
+    }
+
+    async fn on_invalid_inbound_frame(&self, cid: &str) -> Result<(), TransportCallbackError> {
+        self.processor
+            .record_receive_failure(Did::from_str(cid).ok())
+            .await;
+        Ok(())
     }
 
     async fn on_peer_connection_state_change(

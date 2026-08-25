@@ -312,7 +312,7 @@ impl PeerRing {
         self.lock_finger_state()
     }
 
-    #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
+    #[cfg(test)]
     pub(crate) fn lock_predecessor(&self) -> Result<MutexGuard<'_, Option<Did>>> {
         self.lock_predecessor_state()
     }

@@ -8,6 +8,7 @@ use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
 use crate::utils::acquire_fair;
+use crate::utils::admissible_capacity;
 use crate::utils::FairWaitBudget;
 use crate::utils::FairWaitQueue;
 use crate::utils::ReservedCapacity;
@@ -18,15 +19,17 @@ pub(crate) const OUTBOUND_TRANSFER_QUEUE_CAPACITY: usize = 256;
 pub(crate) const OUTBOUND_CONTROL_RESERVED_TRANSFERS: usize = 16;
 pub(super) const OUTBOUND_DATA_RESERVED_TRANSFERS: usize = 8;
 /// Maximum non-control transfers admitted for one peer.
-pub(crate) const OUTBOUND_DATA_TRANSFER_CAPACITY: usize = OUTBOUND_TRANSFER_QUEUE_CAPACITY
-    - OUTBOUND_CONTROL_RESERVED_TRANSFERS
-    - OUTBOUND_DATA_RESERVED_TRANSFERS * 2;
 const OUTBOUND_TRANSFER_RESERVATIONS: [usize; TransferClass::COUNT] = [
     OUTBOUND_CONTROL_RESERVED_TRANSFERS,
     OUTBOUND_DATA_RESERVED_TRANSFERS,
     OUTBOUND_DATA_RESERVED_TRANSFERS,
     OUTBOUND_DATA_RESERVED_TRANSFERS,
 ];
+pub(crate) const OUTBOUND_DATA_TRANSFER_CAPACITY: usize = admissible_capacity(
+    OUTBOUND_TRANSFER_QUEUE_CAPACITY,
+    &OUTBOUND_TRANSFER_RESERVATIONS,
+    TransferClass::Application.index(),
+);
 
 /// Weighted outbound memory allowed for one peer.
 ///
@@ -45,13 +48,11 @@ const OUTBOUND_PEER_BYTE_RESERVATIONS: [usize; TransferClass::COUNT] = [
     OUTBOUND_PEER_DATA_RESERVED_BYTES,
 ];
 
-const fn peer_fixed_request_bytes(class: TransferClass) -> usize {
-    match class {
-        TransferClass::DhtControl => OUTBOUND_PEER_CONTROL_RESERVED_BYTES * 2,
-        TransferClass::Storage | TransferClass::E2e | TransferClass::Application => {
-            OUTBOUND_PEER_DATA_RESERVED_BYTES
-        }
-    }
+fn fixed_request_bytes(
+    reservations: &[usize; TransferClass::COUNT],
+    class: TransferClass,
+) -> usize {
+    reservations.get(class.index()).copied().unwrap_or(0)
 }
 
 /// Native-wide retained outbound bytes across all peers.
@@ -70,15 +71,6 @@ const OUTBOUND_GLOBAL_BYTE_RESERVATIONS: [usize; TransferClass::COUNT] = [
     OUTBOUND_GLOBAL_DATA_RESERVED_BYTES,
     OUTBOUND_GLOBAL_DATA_RESERVED_BYTES,
 ];
-
-const fn global_fixed_request_bytes(class: TransferClass) -> usize {
-    match class {
-        TransferClass::DhtControl => OUTBOUND_GLOBAL_CONTROL_RESERVED_BYTES,
-        TransferClass::Storage | TransferClass::E2e | TransferClass::Application => {
-            OUTBOUND_GLOBAL_DATA_RESERVED_BYTES
-        }
-    }
-}
 
 pub(super) struct GlobalTransferCapacity {
     state: Mutex<ReservedCapacity<{ TransferClass::COUNT }>>,
@@ -159,7 +151,7 @@ impl GlobalTransferCapacity {
         if let Ok(permit) = self.try_acquire_reserved(peer, class, bytes) {
             return Ok(permit);
         }
-        if bytes <= global_fixed_request_bytes(class) {
+        if bytes <= fixed_request_bytes(&OUTBOUND_GLOBAL_BYTE_RESERVATIONS, class) {
             return self.waiters.try_admit_unqueued(
                 memory_capacity_error(peer, bytes, global_byte_limit(class)),
                 || self.try_acquire(peer, class, bytes),
@@ -297,7 +289,7 @@ impl TransferCapacity {
         if let Ok(permit) = self.try_acquire_reserved_peer(peer, class, bytes) {
             return Ok(permit);
         }
-        if bytes <= peer_fixed_request_bytes(class) {
+        if bytes <= fixed_request_bytes(&OUTBOUND_PEER_BYTE_RESERVATIONS, class) {
             return self.waiters.try_admit_unqueued(
                 memory_capacity_error(peer, bytes, peer_byte_limit(class)),
                 || self.try_acquire_peer(peer, class, bytes),
@@ -405,31 +397,32 @@ impl Drop for GlobalCapacityPermit {
 }
 
 pub(super) const fn transfer_limit(class: TransferClass) -> usize {
-    if class.is_control() {
-        OUTBOUND_TRANSFER_QUEUE_CAPACITY - OUTBOUND_DATA_RESERVED_TRANSFERS * 3
-    } else {
-        OUTBOUND_DATA_TRANSFER_CAPACITY
+    match class {
+        TransferClass::DhtControl => admissible_capacity(
+            OUTBOUND_TRANSFER_QUEUE_CAPACITY,
+            &OUTBOUND_TRANSFER_RESERVATIONS,
+            class.index(),
+        ),
+        TransferClass::Storage | TransferClass::E2e | TransferClass::Application => {
+            OUTBOUND_DATA_TRANSFER_CAPACITY
+        }
     }
 }
 
 pub(super) const fn peer_byte_limit(class: TransferClass) -> usize {
-    if class.is_control() {
-        OUTBOUND_PEER_BYTE_CAPACITY - OUTBOUND_PEER_DATA_RESERVED_BYTES * 3
-    } else {
-        OUTBOUND_PEER_BYTE_CAPACITY
-            - OUTBOUND_PEER_CONTROL_RESERVED_BYTES * 2
-            - OUTBOUND_PEER_DATA_RESERVED_BYTES * 2
-    }
+    admissible_capacity(
+        OUTBOUND_PEER_BYTE_CAPACITY,
+        &OUTBOUND_PEER_BYTE_RESERVATIONS,
+        class.index(),
+    )
 }
 
 const fn global_byte_limit(class: TransferClass) -> usize {
-    if class.is_control() {
-        OUTBOUND_GLOBAL_BYTE_CAPACITY - OUTBOUND_GLOBAL_DATA_RESERVED_BYTES * 3
-    } else {
-        OUTBOUND_GLOBAL_BYTE_CAPACITY
-            - OUTBOUND_GLOBAL_CONTROL_RESERVED_BYTES
-            - OUTBOUND_GLOBAL_DATA_RESERVED_BYTES * 2
-    }
+    admissible_capacity(
+        OUTBOUND_GLOBAL_BYTE_CAPACITY,
+        &OUTBOUND_GLOBAL_BYTE_RESERVATIONS,
+        class.index(),
+    )
 }
 
 const _: () = {
@@ -460,6 +453,38 @@ fn validate_memory_request(peer: Did, class: TransferClass, requested_bytes: usi
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reserved_capacity_bound_holds_for_all_short_reserve_release_traces() {
+        const CAPACITY: usize = 5;
+        const RESERVATIONS: [usize; TransferClass::COUNT] = [2, 1, 1, 1];
+        const ACTIONS: usize = TransferClass::COUNT * 2;
+        const TRACE_LENGTH: u32 = 6;
+        let trace_count = ACTIONS.pow(TRACE_LENGTH);
+
+        for encoded in 0..trace_count {
+            let mut code = encoded;
+            let mut capacity = ReservedCapacity::<{ TransferClass::COUNT }>::new();
+            let mut admitted_by_class = [0usize; TransferClass::COUNT];
+            for _ in 0..TRACE_LENGTH {
+                let action = code % ACTIONS;
+                code /= ACTIONS;
+                let class_index = action % TransferClass::COUNT;
+                if action < TransferClass::COUNT {
+                    if capacity.try_reserve(class_index, 1, CAPACITY, &RESERVATIONS) {
+                        admitted_by_class[class_index] =
+                            admitted_by_class[class_index].saturating_add(1);
+                    }
+                } else if admitted_by_class[class_index] > 0 {
+                    capacity.release(class_index, 1);
+                    admitted_by_class[class_index] =
+                        admitted_by_class[class_index].saturating_sub(1);
+                }
+                assert_eq!(capacity.admitted(), admitted_by_class.iter().sum::<usize>());
+                assert!(capacity.admitted() <= CAPACITY);
+            }
+        }
+    }
 
     #[cfg_attr(
         all(feature = "wasm", target_family = "wasm"),

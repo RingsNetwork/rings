@@ -4,7 +4,7 @@
 //! There is also a [TransportInterface] trait, which is used to specify the management of all
 //! [ConnectionInterface] objects.
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU8;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 #[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
@@ -18,27 +18,43 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::callback::InboundFrameCapacity;
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
 use crate::core::sdp::parse_sdp_max_message_size;
 use crate::delivery::DeliveryFuture;
 
-/// Wrapper for the data that is sent over the data channel.
-#[derive(Deserialize, Serialize, Debug, Clone)]
-pub enum TransportMessage {
-    /// The custom message is sent by an external invoker and
-    /// should be handled by the on_message callback.
-    ///
-    /// Since 0.18 this stores [`Bytes`] instead of `Vec<u8>`. Convert owned
-    /// vectors with `TransportMessage::Custom(data.into())`; the wire encoding
-    /// is unchanged.
-    Custom(Bytes),
+macro_rules! define_transport_messages {
+    ($($variant:ident),+ $(,)?) => {
+        /// Wrapper for the data that is sent over the data channel.
+        #[derive(Deserialize, Serialize, Debug, Clone)]
+        pub enum TransportMessage {
+            $(
+                /// A custom message sent by an external invoker and handled by
+                /// the `on_admitted_message` callback. Since 0.18 this stores [`Bytes`]
+                /// instead of `Vec<u8>` without changing its wire encoding.
+                $variant(Bytes),
+            )+
+        }
+
+        #[derive(Deserialize)]
+        pub(crate) enum BorrowedTransportMessage<'a> {
+            $($variant(#[serde(borrow)] &'a [u8]),)+
+        }
+    };
 }
+
+define_transport_messages!(Custom);
 
 #[cfg(target_family = "wasm")]
 type SendPermitPredicate = dyn Fn() -> bool;
 #[cfg(not(target_family = "wasm"))]
 type SendPermitPredicate = dyn Fn() -> bool + Send + Sync;
+
+#[cfg(target_family = "wasm")]
+type SendPermitIrrevocableGuard = dyn for<'a> Fn(SendPermitClaim<'a>);
+#[cfg(not(target_family = "wasm"))]
+type SendPermitIrrevocableGuard = dyn for<'a> Fn(SendPermitClaim<'a>) + Send + Sync;
 
 /// A one-send predicate checked at the backend's final cancellable send-admission boundary.
 ///
@@ -49,26 +65,82 @@ type SendPermitPredicate = dyn Fn() -> bool + Send + Sync;
 /// acceptance only after its send primitive confirms queue admission.
 pub struct SendPermit {
     predicate: Arc<SendPermitPredicate>,
-    irrevocable: Arc<AtomicBool>,
-    accepted: Arc<AtomicBool>,
+    irrevocable_guard: Arc<SendPermitIrrevocableGuard>,
+    state: Arc<AtomicU8>,
 }
+
+/// One-use capability that linearizes backend admission with an external guard.
+pub struct SendPermitClaim<'a> {
+    state: &'a Arc<AtomicU8>,
+}
+
+/// Proof that a backend crossed the final cancellation-safe send boundary.
+pub struct IrrevocableSendPermit {
+    state: Arc<AtomicU8>,
+}
+
+/// Retires a connection generation when an irrevocable send does not reach acceptance.
+#[cfg(any(
+    feature = "dummy",
+    feature = "native-webrtc",
+    feature = "web-sys-webrtc",
+    test
+))]
+pub(crate) struct IrrevocableSendGuard<F: FnOnce()> {
+    acceptance: SendAcceptance,
+    permit: Option<IrrevocableSendPermit>,
+    retire: Option<F>,
+}
+
+const SEND_REVOCABLE: u8 = 0;
+const SEND_IRREVOCABLE: u8 = 1;
+const SEND_ACCEPTED: u8 = 2;
+const SEND_CANCELLED: u8 = 3;
 
 /// Shared observation of whether a one-send permit reached its linearization point.
 #[derive(Clone)]
 pub struct SendAcceptance {
-    irrevocable: Arc<AtomicBool>,
-    accepted: Arc<AtomicBool>,
+    state: Arc<AtomicU8>,
 }
 
 impl SendAcceptance {
     /// Return whether the backend crossed its final cancellation-safe boundary.
     pub fn is_irrevocable(&self) -> bool {
-        self.irrevocable.load(Ordering::Acquire)
+        matches!(
+            self.state.load(Ordering::Acquire),
+            SEND_IRREVOCABLE | SEND_ACCEPTED
+        )
     }
 
     /// Return whether the backend accepted the send permit.
     pub fn is_accepted(&self) -> bool {
-        self.accepted.load(Ordering::Acquire)
+        self.state.load(Ordering::Acquire) == SEND_ACCEPTED
+    }
+
+    /// Atomically cancel a send that has not crossed its irrevocable boundary.
+    pub fn try_cancel(&self) -> bool {
+        self.state
+            .compare_exchange(
+                SEND_REVOCABLE,
+                SEND_CANCELLED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
+}
+
+impl SendPermitClaim<'_> {
+    /// Claim the final cancellation-safe boundary while the caller's guards are held.
+    pub fn try_claim(self) -> bool {
+        self.state
+            .compare_exchange(
+                SEND_REVOCABLE,
+                SEND_IRREVOCABLE,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
     }
 }
 
@@ -78,8 +150,10 @@ impl SendPermit {
     pub fn new(predicate: impl Fn() -> bool + 'static) -> Self {
         Self {
             predicate: Arc::new(predicate),
-            irrevocable: Arc::new(AtomicBool::new(false)),
-            accepted: Arc::new(AtomicBool::new(false)),
+            irrevocable_guard: Arc::new(|claim| {
+                let _claimed = claim.try_claim();
+            }),
+            state: Arc::new(AtomicU8::new(SEND_REVOCABLE)),
         }
     }
 
@@ -88,8 +162,10 @@ impl SendPermit {
     pub fn new(predicate: impl Fn() -> bool + Send + Sync + 'static) -> Self {
         Self {
             predicate: Arc::new(predicate),
-            irrevocable: Arc::new(AtomicBool::new(false)),
-            accepted: Arc::new(AtomicBool::new(false)),
+            irrevocable_guard: Arc::new(|claim| {
+                let _claimed = claim.try_claim();
+            }),
+            state: Arc::new(AtomicU8::new(SEND_REVOCABLE)),
         }
     }
 
@@ -103,21 +179,113 @@ impl SendPermit {
         (self.predicate)()
     }
 
-    /// Mark that a backend write has started and must be driven to completion.
-    pub fn mark_irrevocable(&self) {
-        self.irrevocable.store(true, Ordering::Release);
+    /// Add a final-boundary guard that calls `claim.try_claim()` only while its
+    /// external invariants hold. A successful claim always produces the proof
+    /// returned by [`Self::try_mark_irrevocable`].
+    #[cfg(target_family = "wasm")]
+    pub fn with_irrevocable_guard(
+        mut self,
+        guard: impl for<'a> Fn(SendPermitClaim<'a>) + 'static,
+    ) -> Self {
+        self.irrevocable_guard = Arc::new(guard);
+        self
     }
 
-    /// Consume the permit and publish successful backend queue admission.
-    pub fn mark_accepted(self) {
-        self.accepted.store(true, Ordering::Release);
+    /// Add a final-boundary guard that calls `claim.try_claim()` only while its
+    /// external invariants hold. A successful claim always produces the proof
+    /// returned by [`Self::try_mark_irrevocable`].
+    #[cfg(not(target_family = "wasm"))]
+    pub fn with_irrevocable_guard(
+        mut self,
+        guard: impl for<'a> Fn(SendPermitClaim<'a>) + Send + Sync + 'static,
+    ) -> Self {
+        self.irrevocable_guard = Arc::new(guard);
+        self
+    }
+
+    /// Evaluate the permit and cross the final cancellation-safe boundary.
+    ///
+    /// A backend must call this synchronously before its first non-cancellation-safe
+    /// yield, write, or spawned task. After this returns a proof token, the write
+    /// must be driven to completion while its connection remains usable. A caller
+    /// may abandon the returned future only after permanently retiring that
+    /// connection generation and initiating connection close.
+    pub fn try_mark_irrevocable(self) -> Option<IrrevocableSendPermit> {
+        if !self.allows() {
+            return None;
+        }
+        (self.irrevocable_guard)(SendPermitClaim { state: &self.state });
+        if self.state.load(Ordering::Acquire) != SEND_IRREVOCABLE {
+            return None;
+        }
+        Some(IrrevocableSendPermit { state: self.state })
     }
 
     /// Return a shared observer for the backend acceptance boundary.
     pub fn acceptance(&self) -> SendAcceptance {
         SendAcceptance {
-            irrevocable: Arc::clone(&self.irrevocable),
-            accepted: Arc::clone(&self.accepted),
+            state: Arc::clone(&self.state),
+        }
+    }
+}
+
+impl IrrevocableSendPermit {
+    /// Consume the proof and publish successful backend queue admission.
+    pub fn mark_accepted(self) {
+        let transitioned = self.state.compare_exchange(
+            SEND_IRREVOCABLE,
+            SEND_ACCEPTED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        debug_assert!(
+            transitioned.is_ok(),
+            "send acceptance requires irrevocable state"
+        );
+    }
+}
+
+#[cfg(any(
+    feature = "dummy",
+    feature = "native-webrtc",
+    feature = "web-sys-webrtc",
+    test
+))]
+impl<F: FnOnce()> IrrevocableSendGuard<F> {
+    pub(crate) fn new(acceptance: SendAcceptance, retire: F) -> Self {
+        Self {
+            acceptance,
+            permit: None,
+            retire: Some(retire),
+        }
+    }
+
+    pub(crate) fn bind(&mut self, permit: IrrevocableSendPermit) {
+        self.permit = Some(permit);
+    }
+
+    pub(crate) fn mark_accepted(mut self) {
+        if let Some(permit) = self.permit.take() {
+            permit.mark_accepted();
+        }
+        self.retire = None;
+    }
+}
+
+#[cfg(any(
+    feature = "dummy",
+    feature = "native-webrtc",
+    feature = "web-sys-webrtc",
+    test
+))]
+impl<F: FnOnce()> Drop for IrrevocableSendGuard<F> {
+    fn drop(&mut self) {
+        let must_retire = self.acceptance.is_irrevocable() && !self.acceptance.is_accepted();
+        drop(self.permit.take());
+        if must_retire {
+            if let Some(retire) = self.retire.take() {
+                retire();
+            }
         }
     }
 }
@@ -131,6 +299,7 @@ mod send_permit_tests {
     use bytes::Bytes;
     use serde::Serialize;
 
+    use super::IrrevocableSendGuard;
     use super::SendPermit;
     use super::TransportMessage;
 
@@ -159,11 +328,164 @@ mod send_permit_tests {
         assert!(!acceptance.is_accepted());
         assert!(!acceptance.is_irrevocable());
         assert!(permit.allows());
-        permit.mark_irrevocable();
+        let permit = permit
+            .try_mark_irrevocable()
+            .expect("live permit must become irrevocable");
         assert!(acceptance.is_irrevocable());
         assert!(!acceptance.is_accepted());
         permit.mark_accepted();
         assert!(acceptance.is_accepted());
+        assert!(acceptance.is_irrevocable());
+    }
+
+    #[test]
+    fn irrevocable_transition_is_one_shot_and_requires_a_live_predicate() {
+        let denied = SendPermit::new(|| false);
+        let denied_acceptance = denied.acceptance();
+        assert!(denied.try_mark_irrevocable().is_none());
+        assert!(!denied_acceptance.is_irrevocable());
+
+        let admitted = SendPermit::always();
+        let admitted_acceptance = admitted.acceptance();
+        let _irrevocable = admitted
+            .try_mark_irrevocable()
+            .expect("live permit must become irrevocable");
+        assert!(admitted_acceptance.is_irrevocable());
+        assert!(!admitted_acceptance.is_accepted());
+    }
+
+    #[test]
+    fn cancellation_and_irrevocable_admission_are_mutually_exclusive() {
+        let cancelled = SendPermit::always();
+        let cancelled_acceptance = cancelled.acceptance();
+        assert!(cancelled_acceptance.try_cancel());
+        assert!(cancelled.try_mark_irrevocable().is_none());
+        assert!(!cancelled_acceptance.is_irrevocable());
+
+        let admitted = SendPermit::always();
+        let admitted_acceptance = admitted.acceptance();
+        let _permit = admitted
+            .try_mark_irrevocable()
+            .expect("irrevocable admission must win before cancellation");
+        assert!(!admitted_acceptance.try_cancel());
+        assert!(admitted_acceptance.is_irrevocable());
+    }
+
+    #[test]
+    fn irrevocable_guard_is_claimed_only_at_the_final_boundary() {
+        let guard_open = Arc::new(AtomicBool::new(false));
+        let permit = SendPermit::always().with_irrevocable_guard({
+            let guard_open = Arc::clone(&guard_open);
+            move |claim| {
+                if guard_open.load(Ordering::SeqCst) {
+                    let _claimed = claim.try_claim();
+                }
+            }
+        });
+        let denied_acceptance = permit.acceptance();
+
+        assert!(permit.allows());
+        assert!(!denied_acceptance.is_irrevocable());
+        assert!(permit.try_mark_irrevocable().is_none());
+        let permit = SendPermit::always().with_irrevocable_guard({
+            let guard_open = Arc::clone(&guard_open);
+            move |claim| {
+                if guard_open.load(Ordering::SeqCst) {
+                    let _claimed = claim.try_claim();
+                }
+            }
+        });
+        let admitted_acceptance = permit.acceptance();
+        guard_open.store(true, Ordering::SeqCst);
+        assert!(permit.try_mark_irrevocable().is_some());
+        assert!(admitted_acceptance.is_irrevocable());
+    }
+
+    #[test]
+    fn irrevocable_guard_cannot_forge_a_proof_without_claiming_this_permit() {
+        let permit = SendPermit::always().with_irrevocable_guard(|_claim| {});
+        let acceptance = permit.acceptance();
+
+        assert!(permit.try_mark_irrevocable().is_none());
+        assert!(acceptance.try_cancel());
+        assert!(!acceptance.is_irrevocable());
+    }
+
+    #[test]
+    fn claiming_in_a_guard_always_returns_the_matching_proof() {
+        let permit = SendPermit::always().with_irrevocable_guard(|claim| {
+            assert!(claim.try_claim());
+        });
+        let acceptance = permit.acceptance();
+
+        let proof = permit
+            .try_mark_irrevocable()
+            .expect("a successful claim must return its proof");
+        assert!(acceptance.is_irrevocable());
+        proof.mark_accepted();
+        assert!(acceptance.is_accepted());
+    }
+
+    #[test]
+    fn failed_irrevocable_send_retires_while_acceptance_disarms_retirement() {
+        let failed = SendPermit::always();
+        let failed_acceptance = failed.acceptance();
+        let failed_retired = Arc::new(AtomicBool::new(false));
+        {
+            let retired = Arc::clone(&failed_retired);
+            let mut guard = IrrevocableSendGuard::new(failed_acceptance.clone(), move || {
+                retired.store(true, Ordering::Release)
+            });
+            guard.bind(
+                failed
+                    .try_mark_irrevocable()
+                    .expect("live permit must become irrevocable"),
+            );
+        }
+        assert!(failed_acceptance.is_irrevocable());
+        assert!(!failed_acceptance.is_accepted());
+        assert!(failed_retired.load(Ordering::Acquire));
+
+        let accepted = SendPermit::always();
+        let accepted_observer = accepted.acceptance();
+        let accepted_retired = Arc::new(AtomicBool::new(false));
+        let mut guard = IrrevocableSendGuard::new(accepted_observer.clone(), {
+            let retired = Arc::clone(&accepted_retired);
+            move || retired.store(true, Ordering::Release)
+        });
+        guard.bind(
+            accepted
+                .try_mark_irrevocable()
+                .expect("live permit must become irrevocable"),
+        );
+        guard.mark_accepted();
+        assert!(accepted_observer.is_accepted());
+        assert!(!accepted_retired.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn claim_then_panic_retires_an_already_armed_send() {
+        let permit = SendPermit::always().with_irrevocable_guard(|claim| {
+            assert!(claim.try_claim());
+            panic!("injected final-boundary guard panic");
+        });
+        let acceptance = permit.acceptance();
+        let retired = Arc::new(AtomicBool::new(false));
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe({
+            let retired = Arc::clone(&retired);
+            let guarded_acceptance = acceptance.clone();
+            move || {
+                let _retirement = IrrevocableSendGuard::new(guarded_acceptance, move || {
+                    retired.store(true, Ordering::Release);
+                });
+                let _proof = permit.try_mark_irrevocable();
+            }
+        }));
+
+        assert!(outcome.is_err());
+        assert!(acceptance.is_irrevocable());
+        assert!(!acceptance.is_accepted());
+        assert!(retired.load(Ordering::Acquire));
     }
 
     #[test]
@@ -180,7 +502,7 @@ mod send_permit_tests {
     #[test]
     fn custom_message_accepts_the_documented_vec_migration() {
         let body = vec![1, 2, 3, 4];
-        let message = TransportMessage::Custom(body.into());
+        let message: TransportMessage = TransportMessage::Custom(body.into());
 
         assert!(matches!(message, TransportMessage::Custom(bytes) if bytes.len() == 4));
     }
@@ -391,6 +713,17 @@ pub trait ConnectionInterface {
     }
 
     /// Send only if `permit` holds at the final cancellable backend boundary.
+    ///
+    /// Before the first write, spawn, or `.await` that can continue after this
+    /// returned future is dropped, implementations must synchronously call
+    /// [`SendPermit::try_mark_irrevocable`] and proceed only when it returns a
+    /// proof token. This requirement also applies to synchronous send primitives
+    /// so higher layers can atomically arbitrate deadlines at the same boundary.
+    /// After the backend accepts the bytes, implementations must consume that
+    /// proof with [`IrrevocableSendPermit::mark_accepted`] before returning
+    /// success. If work fails or is abandoned after claiming the proof but before
+    /// acceptance, the implementation must retire and close that connection
+    /// generation before returning.
     async fn send_message_with_permit(
         &self,
         msg: TransportMessage,
@@ -451,6 +784,11 @@ pub trait TransportInterface {
 
     /// The error type that is returned by transport.
     type Error: std::error::Error;
+
+    /// Return the stable raw-frame capacity account shared by every connection.
+    ///
+    /// Implementations must return the same allocation for their entire lifetime.
+    fn inbound_frame_capacity(&self) -> &Arc<InboundFrameCapacity>;
 
     /// Used to create a new connection and register it in the transport.
     ///

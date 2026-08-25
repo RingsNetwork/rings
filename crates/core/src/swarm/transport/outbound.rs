@@ -1,16 +1,14 @@
 //! Per-peer outbound transfer scheduling.
 //!
-//! Each message class owns one FIFO lane whose head is either runnable or
-//! waiting for frame delivery. A lane never admits a second transfer before
-//! its current transfer finishes, so messages in the same class cannot
-//! interleave. Runnable lane heads are selected with bounded DHT-control
-//! priority and round-robin service for storage, E2E, and application traffic.
-//! Cross-class submission order is intentionally not preserved: every protocol
-//! sequence that requires ordering must keep all of its variants in one class.
-//! The worker admits at most one frame before it drains completions and chooses
-//! a lane again, which is the preemption boundary.
+//! Each class owns one FIFO lane and admits no second transfer before its active
+//! transfer finishes. Runnable heads use bounded DHT-control priority and
+//! round-robin service for storage, E2E, and application traffic.
+//! Cross-class order is not preserved; ordered sequences must stay in one class.
+//! The worker admits one frame before draining completions and choosing a lane.
+//! This boundary can consume one send-accept budget and, after an irrevocable
+//! timeout, one bounded close interval before another lane runs.
 //!
-//! A peer admits at most [`OUTBOUND_TRANSFER_QUEUE_CAPACITY`] transfers across
+//! A peer admits at most `OUTBOUND_TRANSFER_QUEUE_CAPACITY` transfers across
 //! the command channel, lane queues, and delivery waits. Shutdown closes the
 //! command channel synchronously; the worker then cancels every admitted
 //! transfer and drops outstanding delivery futures.
@@ -20,13 +18,14 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::sync::Weak;
 
 use bytes::Bytes;
-use futures::channel::mpsc;
 use futures::channel::oneshot;
 use futures::future::FutureExt;
 use futures::pin_mut;
@@ -52,15 +51,27 @@ use crate::lifecycle::StopToken;
 use crate::measure::MeasureImpl;
 use crate::session::SessionSk;
 
+#[path = "outbound/admission.rs"]
+mod admission;
 #[path = "outbound/capacity.rs"]
 mod capacity;
+#[path = "outbound/mailbox.rs"]
+mod mailbox;
 #[path = "outbound/measurement.rs"]
 mod measurement;
 #[path = "outbound/model.rs"]
 mod model;
 #[path = "outbound/queue.rs"]
 mod queue;
+#[path = "outbound/spawn.rs"]
+mod spawn;
+#[cfg(test)]
+#[path = "outbound/trace.rs"]
+mod trace;
 
+pub(super) use admission::DetachedAdmission;
+pub(super) use admission::DetachedAdmissionCancel;
+pub(super) use admission::DetachedAdmissionClaim;
 use capacity::GlobalTransferCapacity;
 use capacity::TransferCapacity;
 pub(super) use capacity::TransferCapacityPermit;
@@ -68,7 +79,10 @@ pub(super) use capacity::TransferCapacityPermit;
 pub(crate) use capacity::OUTBOUND_CONTROL_RESERVED_TRANSFERS;
 #[cfg(test)]
 pub(crate) use capacity::OUTBOUND_DATA_TRANSFER_CAPACITY;
+#[cfg(test)]
 pub(crate) use capacity::OUTBOUND_TRANSFER_QUEUE_CAPACITY;
+use mailbox::MailboxReceiver;
+use mailbox::MailboxSender;
 use measurement::MeasurementReceiver;
 use measurement::MeasurementRecorder;
 use measurement::OutboundMeasurement;
@@ -79,12 +93,11 @@ use queue::RunnableTransfer;
 use queue::TransferQueues;
 #[cfg(test)]
 use queue::OUTBOUND_CONTROL_BURST;
+use spawn::spawn_worker;
 
-/// Maximum commands consumed before runnable lane heads are reconsidered.
-const OUTBOUND_COMMAND_DRAIN_BUDGET: usize = 32;
-
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) const OUTBOUND_COMMAND_DRAIN_BUDGET: usize = 32;
 type TransferResultSender = oneshot::Sender<Result<SendCompletionOutcome>>;
-
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 thread_local! {
     static OUTBOUND_SUBMIT_COUNT: Cell<usize> = const { Cell::new(0) };
@@ -152,6 +165,7 @@ pub(super) struct OutboundTransfer {
     completion: TransferCompletion,
     first_frame_admitted: bool,
     stop: TransferStop,
+    detached_admission: Option<DetachedAdmission>,
 }
 
 struct TransferCompletion {
@@ -240,8 +254,15 @@ impl OutboundTransfer {
         data: Bytes,
         completion: OutboundCompletion,
         stop: StopToken,
+        detached_admission: Option<DetachedAdmission>,
     ) -> (Self, oneshot::Receiver<Result<SendCompletionOutcome>>) {
-        Self::new(route, FrameSource::Whole(Some(data)), completion, stop)
+        Self::new(
+            route,
+            FrameSource::Whole(Some(data)),
+            completion,
+            stop,
+            detached_admission,
+        )
     }
 
     pub(super) fn chunked(
@@ -250,6 +271,7 @@ impl OutboundTransfer {
         chunks: ChunkFrames,
         completion: OutboundCompletion,
         stop: StopToken,
+        detached_admission: Option<DetachedAdmission>,
     ) -> (Self, oneshot::Receiver<Result<SendCompletionOutcome>>) {
         let did = route.did;
         Self::new(
@@ -261,6 +283,7 @@ impl OutboundTransfer {
             },
             completion,
             stop,
+            detached_admission,
         )
     }
 
@@ -269,6 +292,7 @@ impl OutboundTransfer {
         source: FrameSource,
         completion: OutboundCompletion,
         stop: StopToken,
+        detached_admission: Option<DetachedAdmission>,
     ) -> (Self, oneshot::Receiver<Result<SendCompletionOutcome>>) {
         let (sender, receiver) = oneshot::channel();
         let completion = TransferCompletion {
@@ -285,6 +309,7 @@ impl OutboundTransfer {
                 completion,
                 first_frame_admitted: false,
                 stop: TransferStop::new(stop),
+                detached_admission,
             },
             receiver,
         )
@@ -310,8 +335,14 @@ impl OutboundTransfer {
         self.stop.bind_scheduler(stop);
     }
 
-    fn mark_frame_admitted(&mut self) {
+    fn resolve_frame_admission(&mut self) {
         if !self.first_frame_admitted {
+            if let Some(admission) = &self.detached_admission {
+                if !admission.try_succeed() {
+                    admission.enforce_cancelled_stop();
+                    return;
+                }
+            }
             self.first_frame_admitted = true;
             self.completion.resolve_first_admission();
         }
@@ -325,6 +356,11 @@ impl OutboundTransfer {
 struct ScheduledTransfer {
     transfer: OutboundTransfer,
     _capacity_permit: TransferCapacityPermit,
+}
+
+enum OutboundCommand {
+    Submit(Box<ScheduledTransfer>),
+    CancelStopped,
 }
 
 struct QueuedTransfer {
@@ -346,12 +382,14 @@ enum TerminationFairness {
 
 #[derive(Clone)]
 pub(super) struct OutboundPeerHandle {
-    peer: Did,
     state: Arc<OutboundPeerState>,
 }
 
 struct OutboundPeerState {
-    sender: Mutex<mpsc::Sender<Box<ScheduledTransfer>>>,
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    peer: Did,
+    sender: MailboxSender<OutboundCommand>,
+    cancel_requested: Arc<AtomicBool>,
     // Strong lifetime anchor; the peer registry intentionally stores only a Weak reference.
     #[allow(
         dead_code,
@@ -365,15 +403,14 @@ impl OutboundPeerHandle {
     #[cfg(all(test, not(target_family = "wasm")))]
     pub(super) fn reserve(
         &self,
+        peer: Did,
         class: TransferClass,
         bytes: usize,
     ) -> Result<TransferCapacityPermit> {
         if self.state.stop.is_stop_requested() {
             return Err(Error::ChannelSendMessageFailed);
         }
-        self.state
-            .capacity_anchor
-            .try_acquire(self.peer, class, bytes)
+        self.state.capacity_anchor.try_acquire(peer, class, bytes)
     }
 
     pub(super) fn submit(
@@ -390,29 +427,39 @@ impl OutboundPeerHandle {
             transfer,
             _capacity_permit: capacity_permit,
         };
-        let mut sender = self
-            .state
-            .sender
-            .lock()
-            .map_err(|_| Error::ChannelSendMessageFailed)?;
         if self.state.stop.is_stop_requested() {
             return Err(Error::ChannelSendMessageFailed);
         }
-        let result = sender.try_send(Box::new(scheduled)).map_err(|error| {
-            if error.is_full() {
-                Error::OutboundTransferCapacityExceeded {
-                    peer: self.peer,
-                    capacity: OUTBOUND_TRANSFER_QUEUE_CAPACITY,
+        let priority = scheduled.transfer.class() == TransferClass::DhtControl;
+        let command = OutboundCommand::Submit(Box::new(scheduled));
+        let (result, submitted) = match self.state.sender.send_if(command, priority, |command| {
+            matches!(command, OutboundCommand::Submit(scheduled) if !scheduled.transfer.is_stopped())
+        }) {
+            Ok(()) => (Ok(()), true),
+            Err(OutboundCommand::Submit(scheduled)) if scheduled.transfer.is_stopped() => {
+                if let Some(final_result) = OutboundWorker::cancel_scheduled_transfer(*scheduled) {
+                    final_result.publish();
                 }
-            } else {
-                Error::ChannelSendMessageFailed
+                (Ok(()), false)
             }
-        });
+            Err(_) => (Err(Error::ChannelSendMessageFailed), false),
+        };
         #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-        if result.is_ok() {
+        if submitted {
             record_outbound_submit_for_test();
         }
+        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+        if submitted {
+            trace::record_submission(self.state.peer);
+        }
+        #[cfg(not(all(test, feature = "dummy", not(target_family = "wasm"))))]
+        let _ = submitted;
         result
+    }
+
+    pub(super) fn cancel_stopped(&self) {
+        self.state.cancel_requested.store(true, Ordering::Release);
+        let _ = self.state.sender.send(OutboundCommand::CancelStopped, true);
     }
 
     fn shutdown(&self) {
@@ -423,19 +470,14 @@ impl OutboundPeerHandle {
 impl OutboundPeerState {
     fn shutdown(&self) {
         self.stop.request_stop();
-        if let Ok(mut sender) = self.sender.lock() {
-            sender.close_channel();
-        }
+        self.sender.close();
     }
 }
 
 impl Drop for OutboundPeerState {
     fn drop(&mut self) {
         self.stop.request_stop();
-        match self.sender.get_mut() {
-            Ok(sender) => sender.close_channel(),
-            Err(poisoned) => poisoned.into_inner().close_channel(),
-        }
+        self.sender.close();
     }
 }
 
@@ -487,18 +529,22 @@ impl OutboundSchedulers {
             return Ok(handle.clone());
         }
         let capacity = registry.capacity(peer, &self.global_capacity);
-        let (sender, receiver) = mpsc::channel(OUTBOUND_TRANSFER_QUEUE_CAPACITY);
+        let (sender, receiver) = mailbox::channel();
         let stop = StopSource::new();
+        let cancel_requested = Arc::new(AtomicBool::new(false));
         let state = Arc::new(OutboundPeerState {
-            sender: Mutex::new(sender),
+            #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+            peer,
+            sender,
+            cancel_requested: cancel_requested.clone(),
             capacity_anchor: capacity,
             stop: stop.clone(),
         });
-        let handle = OutboundPeerHandle { peer, state };
+        let handle = OutboundPeerHandle { state };
         let (measurements, measurement_receiver) =
             MeasurementRecorder::channel(self.measure.clone(), peer);
         spawn_worker(
-            OutboundWorker::new(receiver, stop.token(), measurements),
+            OutboundWorker::new(receiver, stop.token(), measurements, peer, cancel_requested),
             measurement_receiver,
         )?;
         registry.peers.insert(peer, handle.clone());
@@ -594,7 +640,10 @@ type DeliveryWaitFuture = Pin<Box<dyn Future<Output = DeliveryEvent> + Send>>;
 type DeliveryWaitFuture = Pin<Box<dyn Future<Output = DeliveryEvent>>>;
 
 struct OutboundWorker {
-    receiver: mpsc::Receiver<Box<ScheduledTransfer>>,
+    #[cfg(test)]
+    peer: Did,
+    receiver: MailboxReceiver<OutboundCommand>,
+    cancel_requested: Arc<AtomicBool>,
     ready: TransferQueues<QueuedTransfer>,
     deliveries: FuturesUnordered<DeliveryWaitFuture>,
     measurements: MeasurementRecorder,
@@ -605,17 +654,28 @@ struct OutboundWorker {
 
 impl OutboundWorker {
     fn new(
-        receiver: mpsc::Receiver<Box<ScheduledTransfer>>,
+        receiver: MailboxReceiver<OutboundCommand>,
         stop: StopToken,
         measurements: MeasurementRecorder,
+        peer: Did,
+        cancel_requested: Arc<AtomicBool>,
     ) -> Self {
+        #[cfg(not(test))]
+        let _ = peer;
+        #[cfg(test)]
+        let next_id = trace::worker_transfer_id_base();
+        #[cfg(not(test))]
+        let next_id = 0;
         Self {
+            #[cfg(test)]
+            peer,
             receiver,
+            cancel_requested,
             ready: TransferQueues::default(),
             deliveries: FuturesUnordered::new(),
             measurements,
             stop,
-            next_id: 0,
+            next_id,
             input_closed: false,
         }
     }
@@ -626,6 +686,15 @@ impl OutboundWorker {
                 self.shutdown();
                 return;
             }
+            #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+            while trace::worker_is_paused(self.peer) && !self.stop.should_stop() {
+                tokio::task::yield_now().await;
+            }
+            if self.stop.should_stop() {
+                self.shutdown();
+                return;
+            }
+            self.apply_pending_cancellation();
             self.drain_available();
             if self.stop.should_stop() {
                 self.shutdown();
@@ -648,16 +717,10 @@ impl OutboundWorker {
     }
 
     fn drain_available(&mut self) {
-        for _ in 0..OUTBOUND_COMMAND_DRAIN_BUDGET {
-            match self.receiver.next().now_or_never() {
-                Some(Some(transfer)) => self.enqueue_transfer(*transfer),
-                Some(None) => {
-                    self.input_closed = true;
-                    break;
-                }
-                None => break,
-            }
+        for command in self.receiver.drain_available(OUTBOUND_COMMAND_DRAIN_BUDGET) {
+            self.handle_command(command);
         }
+        self.input_closed = self.receiver.is_closed();
 
         for _ in 0..OUTBOUND_COMMAND_DRAIN_BUDGET {
             match self.deliveries.next().now_or_never() {
@@ -672,6 +735,54 @@ impl OutboundWorker {
         self.next_id = self.next_id.saturating_add(1);
         let class = scheduled.transfer.class();
         self.ready.push(class, QueuedTransfer { id, scheduled });
+    }
+
+    fn handle_command(&mut self, command: OutboundCommand) {
+        match command {
+            OutboundCommand::Submit(transfer) => {
+                #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+                trace::record_handled_submission(self.peer);
+                self.accept_submission(*transfer);
+            }
+            OutboundCommand::CancelStopped => {
+                self.cancel_requested.store(false, Ordering::Release);
+                self.cancel_stopped_admitted();
+            }
+        }
+    }
+
+    fn accept_submission(&mut self, scheduled: ScheduledTransfer) {
+        if scheduled.transfer.is_stopped() {
+            if let Some(final_result) = Self::cancel_scheduled_transfer(scheduled) {
+                final_result.publish();
+            }
+        } else {
+            self.enqueue_transfer(scheduled);
+        }
+    }
+
+    fn apply_pending_cancellation(&mut self) {
+        if self.cancel_requested.swap(false, Ordering::AcqRel) {
+            self.cancel_stopped_admitted();
+        }
+    }
+
+    fn cancel_stopped_admitted(&mut self) {
+        let cancelled = self
+            .ready
+            .remove_ready_where(|queued| queued.scheduled.transfer.is_stopped());
+        let final_results = cancelled
+            .into_iter()
+            .filter_map(|queued| Self::cancel_scheduled_transfer(queued.scheduled))
+            .collect();
+        Self::publish_released_results(final_results);
+
+        for command in self.receiver.drain_all() {
+            if let OutboundCommand::Submit(transfer) = command {
+                self.accept_submission(*transfer);
+            }
+        }
+        self.input_closed = self.receiver.is_closed();
     }
 
     fn terminate_transfer(
@@ -772,17 +883,16 @@ impl OutboundWorker {
     }
 
     fn drain_buffered_transfers(&mut self) -> Vec<ScheduledTransfer> {
-        let mut buffered = Vec::new();
-        loop {
-            match self.receiver.next().now_or_never() {
-                Some(Some(transfer)) => buffered.push(*transfer),
-                Some(None) => {
-                    self.input_closed = true;
-                    break;
-                }
-                None => break,
-            }
-        }
+        let buffered = self
+            .receiver
+            .drain_all()
+            .into_iter()
+            .filter_map(|command| match command {
+                OutboundCommand::Submit(transfer) => Some(*transfer),
+                OutboundCommand::CancelStopped => None,
+            })
+            .collect();
+        self.input_closed = self.receiver.is_closed();
         buffered
     }
 
@@ -819,6 +929,12 @@ impl OutboundWorker {
             bytes,
             &runnable.item().scheduled.transfer.permit,
             &runnable.item().scheduled.transfer.stop,
+            runnable
+                .item()
+                .scheduled
+                .transfer
+                .detached_admission
+                .as_ref(),
             runnable.item().scheduled.transfer.did,
             context,
         )
@@ -826,8 +942,14 @@ impl OutboundWorker {
 
         match admission {
             ChunkSendProgress::Ready(Ok(delivery)) => {
-                runnable.item_mut().scheduled.transfer.mark_frame_admitted();
+                runnable
+                    .item_mut()
+                    .scheduled
+                    .transfer
+                    .resolve_frame_admission();
                 self.ready.record_frame_admitted(class);
+                #[cfg(test)]
+                trace::record(self.peer, class, runnable.item().id);
                 let id = runnable.item().id;
                 let delivery_wait =
                     Self::delivery_wait(id, class, delivery, &runnable.item().scheduled.transfer);
@@ -886,14 +1008,14 @@ impl OutboundWorker {
     async fn wait_for_input(&mut self) {
         if self.deliveries.is_empty() {
             match self.receiver.next().await {
-                Some(transfer) => self.enqueue_transfer(*transfer),
+                Some(command) => self.handle_command(command),
                 None => self.input_closed = true,
             }
             return;
         }
 
         enum WorkerInput {
-            Command(Option<Box<ScheduledTransfer>>),
+            Command(Option<OutboundCommand>),
             Delivery(Option<DeliveryEvent>),
         }
 
@@ -907,28 +1029,12 @@ impl OutboundWorker {
             }
         };
         match input {
-            WorkerInput::Command(Some(transfer)) => self.enqueue_transfer(*transfer),
+            WorkerInput::Command(Some(command)) => self.handle_command(command),
             WorkerInput::Command(None) => self.input_closed = true,
             WorkerInput::Delivery(Some(event)) => self.handle_delivery(event),
             WorkerInput::Delivery(None) => {}
         }
     }
-}
-
-#[cfg(all(feature = "wasm", target_family = "wasm"))]
-fn spawn_worker(worker: OutboundWorker, measurements: MeasurementReceiver) -> Result<()> {
-    wasm_bindgen_futures::spawn_local(worker.run());
-    wasm_bindgen_futures::spawn_local(measurements.run());
-    Ok(())
-}
-
-#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-fn spawn_worker(worker: OutboundWorker, measurements: MeasurementReceiver) -> Result<()> {
-    let runtime = tokio::runtime::Handle::try_current()
-        .map_err(|_| Error::OutboundSchedulerRuntimeUnavailable)?;
-    runtime.spawn(worker.run());
-    runtime.spawn(measurements.run());
-    Ok(())
 }
 
 #[cfg(test)]

@@ -1,4 +1,6 @@
+use std::future::Future;
 use std::net::IpAddr;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -28,7 +30,6 @@ use crate::callback::InboundFrameCapacity;
 use crate::callback::InnerTransportCallback;
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
-use crate::core::pool::MessageSenderPool;
 use crate::core::pool::RoundRobin;
 use crate::core::pool::RoundRobinPool;
 use crate::core::pool::StatusPool;
@@ -36,6 +37,7 @@ use crate::core::transport::effective_max_message_size;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateCell;
 use crate::core::transport::ConnectionStateSnapshot;
+use crate::core::transport::IrrevocableSendGuard;
 use crate::core::transport::SendPermit;
 use crate::core::transport::TransportInterface;
 use crate::core::transport::TransportMessage;
@@ -51,6 +53,18 @@ use crate::notifier::Notifier;
 use crate::pool::Pool;
 use crate::webrtc_config::WebrtcUdpPortRange;
 
+mod send_runtime;
+
+use send_runtime::native_send_runtime;
+use send_runtime::poll_once_while_guarded;
+use send_runtime::run_irrevocable_send;
+#[cfg(test)]
+use send_runtime::run_irrevocable_send_with_timeout;
+use send_runtime::run_native_close_task;
+use send_runtime::run_send_with_retirement;
+use send_runtime::NativeRetirementFence;
+use send_runtime::RetirementFenceGuard;
+
 const WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT: u8 = 8; // seconds
 const WEBRTC_GATHER_TIMEOUT: u8 = 60; // seconds
 /// pool size of data channel
@@ -60,6 +74,7 @@ const DATA_CHANNEL_POOL_SIZE: u8 = 4;
 const DELIVERY_POLL_INTERVAL: Duration = Duration::from_millis(300);
 
 const NATIVE_SEND_COMPLETION_TIMEOUT: Duration = Duration::from_secs(25);
+const NATIVE_CONNECTION_RETIRE_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(test)]
 const NATIVE_SEND_TEST_COMPLETION_TIMEOUT: Duration = Duration::from_millis(100);
 
@@ -209,48 +224,12 @@ fn delivery_future(
     })
 }
 
-fn native_send_runtime() -> Result<tokio::runtime::Handle> {
-    tokio::runtime::Handle::try_current().map_err(|_| Error::NativeSendRuntimeUnavailable)
-}
-
-async fn run_irrevocable_send<T>(
-    runtime: &tokio::runtime::Handle,
-    send: impl std::future::Future<Output = Result<T>> + Send + 'static,
-) -> Result<T>
-where
-    T: Send + 'static,
-{
-    run_irrevocable_send_with_timeout(runtime, NATIVE_SEND_COMPLETION_TIMEOUT, send).await
-}
-
-async fn run_irrevocable_send_with_timeout<T>(
-    runtime: &tokio::runtime::Handle,
-    completion_timeout: Duration,
-    send: impl std::future::Future<Output = Result<T>> + Send + 'static,
-) -> Result<T>
-where
-    T: Send + 'static,
-{
-    runtime
-        .spawn(async move {
-            tokio::time::timeout(completion_timeout, send)
-                .await
-                .map_err(|_| Error::NativeSendCompletionTimeout {
-                    timeout_ms: completion_timeout.as_millis(),
-                })?
-        })
-        .await
-        .map_err(Error::NativeSendTask)?
-}
-
-#[cfg_attr(target_family = "wasm", async_trait(?Send))]
-#[cfg_attr(not(target_family = "wasm"), async_trait)]
-impl MessageSenderPool<TrackedChannel> for RoundRobinPool<TrackedChannel> {
-    type Message = TransportMessage;
-    async fn send_with_permit(
+impl RoundRobinPool<TrackedChannel> {
+    async fn send_with_retirement_fence(
         &self,
         msg: TransportMessage,
         permit: SendPermit,
+        retirement_fence: NativeRetirementFence,
     ) -> Result<DeliveryFuture> {
         let (channel, enqueued, send_lock) = self.select()?;
         let data = rings_codec::serialize(&msg).map(Bytes::from)?;
@@ -262,22 +241,56 @@ impl MessageSenderPool<TrackedChannel> for RoundRobinPool<TrackedChannel> {
         // leave the counter ahead of what was actually queued, making earlier
         // messages' delivery futures resolve early on phantom bytes.
         let guard = send_lock.lock_owned().await;
-        if !permit.allows() {
-            return Err(Error::SendPermitRevoked);
-        }
-        permit.mark_irrevocable();
         let send_channel = Arc::clone(&channel);
         let send_enqueued = Arc::clone(&enqueued);
-        let end_offset = run_irrevocable_send(&runtime, async move {
-            let _guard = guard;
+        let send_fence = retirement_fence.clone();
+        let data_len = data.len();
+        let mut send = Box::pin(async move {
             if let Err(error) = send_channel.send(&data).await {
                 tracing::error!("{:?}, Data size: {:?}", error, data.len());
-                return Err(error.into());
+                return Err(Error::from(error));
             }
-            permit.mark_accepted();
-            Ok(send_enqueued.fetch_add(data.len() as u64, Ordering::SeqCst) + data.len() as u64)
-        })
-        .await?;
+            Ok(())
+        });
+        let acceptance = permit.acceptance();
+        let mut retirement = RetirementFenceGuard::once_irrevocable(send_fence, acceptance.clone());
+        let failure_fence = retirement_fence.clone();
+        let mut permit_retirement = IrrevocableSendGuard::new(acceptance, move || {
+            failure_fence.request();
+        });
+        let Some(admission) = retirement.fence().try_send_admission() else {
+            retirement.disarm();
+            return Err(Error::SendPermitRevoked);
+        };
+        let Some(proof) = permit.try_mark_irrevocable() else {
+            drop(admission);
+            retirement.disarm();
+            return Err(Error::SendPermitRevoked);
+        };
+        permit_retirement.bind(proof);
+        let first_poll = poll_once_while_guarded(send.as_mut(), admission);
+        let permit = permit_retirement;
+        let end_offset =
+            match first_poll {
+                std::task::Poll::Ready(result) => {
+                    result?;
+                    permit.mark_accepted();
+                    retirement.disarm();
+                    send_enqueued.fetch_add(data_len as u64, Ordering::SeqCst) + data_len as u64
+                }
+                std::task::Poll::Pending => {
+                    run_irrevocable_send(&runtime, retirement_fence, async move {
+                        let _guard = guard;
+                        let mut retirement = retirement;
+                        send.await?;
+                        permit.mark_accepted();
+                        retirement.disarm();
+                        Ok(send_enqueued.fetch_add(data_len as u64, Ordering::SeqCst)
+                            + data_len as u64)
+                    })
+                    .await?
+                }
+            };
         Ok(delivery_future(channel, enqueued, end_offset))
     }
 }
@@ -289,98 +302,36 @@ impl StatusPool<TrackedChannel> for RoundRobinPool<TrackedChannel> {
 }
 
 #[cfg(test)]
-mod send_cancellation_tests {
-    use std::sync::atomic::AtomicBool;
-
-    use super::*;
-
-    #[tokio::test]
-    async fn started_native_send_outlives_cancelled_caller() {
-        let started = Arc::new(AtomicBool::new(false));
-        let completed = Arc::new(AtomicBool::new(false));
-        let release = Arc::new(tokio::sync::Notify::new());
-        let send = {
-            let started = Arc::clone(&started);
-            let completed = Arc::clone(&completed);
-            let release = Arc::clone(&release);
-            async move {
-                started.store(true, Ordering::Release);
-                release.notified().await;
-                completed.store(true, Ordering::Release);
-                Ok(())
-            }
-        };
-        let runtime = native_send_runtime().expect("Tokio test runtime must be available");
-        let caller = tokio::spawn(async move { run_irrevocable_send(&runtime, send).await });
-        while !started.load(Ordering::Acquire) {
-            tokio::task::yield_now().await;
-        }
-
-        caller.abort();
-        release.notify_one();
-        while !completed.load(Ordering::Acquire) {
-            tokio::task::yield_now().await;
-        }
-
-        assert!(completed.load(Ordering::Acquire));
-    }
-
-    #[test]
-    fn missing_runtime_returns_typed_error() {
-        assert!(matches!(
-            native_send_runtime(),
-            Err(Error::NativeSendRuntimeUnavailable)
-        ));
-    }
-
-    #[tokio::test]
-    async fn native_send_task_preserves_join_error_source() {
-        let runtime = native_send_runtime().expect("Tokio test runtime must be available");
-        let error = run_irrevocable_send(&runtime, async {
-            panic!("native send task panic witness");
-            #[allow(unreachable_code)]
-            Ok(())
-        })
-        .await
-        .expect_err("panicking send task must fail");
-
-        assert!(matches!(&error, Error::NativeSendTask(source) if source.is_panic()));
-        assert!(std::error::Error::source(&error)
-            .and_then(|source| source.downcast_ref::<tokio::task::JoinError>())
-            .is_some_and(tokio::task::JoinError::is_panic));
-    }
-
-    #[tokio::test]
-    async fn irrevocable_native_send_has_a_completion_bound() {
-        let runtime = native_send_runtime().expect("Tokio test runtime must be available");
-        let error = run_irrevocable_send_with_timeout(
-            &runtime,
-            NATIVE_SEND_TEST_COMPLETION_TIMEOUT,
-            std::future::pending::<Result<()>>(),
-        )
-        .await
-        .expect_err("an irrevocable send must not remain pending forever");
-
-        assert!(matches!(
-            error,
-            Error::NativeSendCompletionTimeout { timeout_ms }
-                if timeout_ms == NATIVE_SEND_TEST_COMPLETION_TIMEOUT.as_millis()
-        ));
-    }
-}
+#[path = "send_tests.rs"]
+mod send_cancellation_tests;
 
 /// A connection that implemented by webrtc-rs library.
 /// Used for native environment.
 pub struct WebrtcConnection {
-    webrtc_conn: RTCPeerConnection,
+    webrtc_conn: Arc<RTCPeerConnection>,
     webrtc_data_channel: Arc<RoundRobinPool<TrackedChannel>>,
     webrtc_data_channel_state_notifier: Notifier,
     connection_state: ConnectionStateCell,
     cancel_token: CancellationToken,
+    retirement_fence: NativeRetirementFence,
     sdp_extra_host_candidates: Vec<String>,
     /// Negotiated SCTP `max_message_size` (RFC 8841), parsed from the remote SDP at handshake.
     /// `0` means not yet negotiated. webrtc-rs exposes no getter, so we track it ourselves.
     remote_max_message_size: Arc<AtomicUsize>,
+    physical_close_completed: Arc<AtomicBool>,
+}
+
+/// Stable observation that the native peer connection's close future completed successfully.
+#[derive(Clone)]
+pub struct NativePhysicalCloseWitness {
+    completed: Arc<AtomicBool>,
+}
+
+impl NativePhysicalCloseWitness {
+    /// Return true only after the underlying `RTCPeerConnection::close()` future succeeds.
+    pub fn is_complete(&self) -> bool {
+        self.completed.load(Ordering::Acquire)
+    }
 }
 
 /// [WebrtcTransport] manages all the [WebrtcConnection] and
@@ -401,15 +352,30 @@ impl WebrtcConnection {
         connection_state: ConnectionStateCell,
         sdp_extra_host_candidates: Vec<String>,
     ) -> Self {
+        let cancel_token = CancellationToken::new();
+        let retirement_fence =
+            NativeRetirementFence::new(connection_state.clone(), cancel_token.clone());
         Self {
-            webrtc_conn,
+            webrtc_conn: Arc::new(webrtc_conn),
             webrtc_data_channel,
             webrtc_data_channel_state_notifier,
             connection_state,
-            cancel_token: CancellationToken::new(),
+            cancel_token,
+            retirement_fence,
             sdp_extra_host_candidates,
             remote_max_message_size: Arc::new(AtomicUsize::new(0)),
+            physical_close_completed: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub(crate) fn physical_close_witness(&self) -> NativePhysicalCloseWitness {
+        NativePhysicalCloseWitness {
+            completed: Arc::clone(&self.physical_close_completed),
+        }
+    }
+
+    fn request_close(&self) {
+        self.retirement_fence.request();
     }
 
     async fn webrtc_gather(
@@ -553,7 +519,27 @@ impl ConnectionInterface for WebrtcConnection {
         permit: SendPermit,
     ) -> Result<DeliveryFuture> {
         self.webrtc_wait_for_data_channel_open().await?;
-        self.webrtc_data_channel.send_with_permit(msg, permit).await
+        let runtime = native_send_runtime()?;
+        let acceptance = permit.acceptance();
+        let pool = self.webrtc_data_channel.clone();
+        let connection = self.webrtc_conn.clone();
+        let physical_close_completed = Arc::clone(&self.physical_close_completed);
+        let retirement_fence = self.retirement_fence.clone();
+        run_send_with_retirement(
+            &runtime,
+            acceptance,
+            retirement_fence.clone(),
+            async move {
+                pool.send_with_retirement_fence(msg, permit, retirement_fence)
+                    .await
+            },
+            retire_native_connection(
+                connection,
+                self.retirement_fence.clone(),
+                physical_close_completed,
+            ),
+        )
+        .await
     }
 
     async fn get_stats(&self) -> Vec<String> {
@@ -658,16 +644,62 @@ impl ConnectionInterface for WebrtcConnection {
     }
 
     async fn close(&self) -> Result<()> {
-        self.connection_state.close();
-        self.cancel_token.cancel();
-        self.webrtc_conn.close().await.map_err(|e| e.into())
+        self.request_close();
+        close_native_connection(
+            self.webrtc_conn.clone(),
+            Arc::clone(&self.physical_close_completed),
+        )
+        .await
     }
+}
+
+async fn close_native_connection(
+    connection: Arc<RTCPeerConnection>,
+    physical_close_completed: Arc<AtomicBool>,
+) -> Result<()> {
+    let runtime = native_send_runtime()?;
+    run_native_close_with_witness(
+        &runtime,
+        async move { connection.close().await.map_err(Into::into) },
+        physical_close_completed,
+    )
+    .await
+}
+
+async fn run_native_close_with_witness(
+    runtime: &tokio::runtime::Handle,
+    close: impl Future<Output = Result<()>> + Send + 'static,
+    physical_close_completed: Arc<AtomicBool>,
+) -> Result<()> {
+    run_native_close_task(runtime, async move {
+        let result = close.await;
+        if result.is_ok() {
+            physical_close_completed.store(true, Ordering::Release);
+        }
+        result
+    })
+    .await
+}
+
+async fn retire_native_connection(
+    connection: Arc<RTCPeerConnection>,
+    retirement_fence: NativeRetirementFence,
+    physical_close_completed: Arc<AtomicBool>,
+) -> Result<()> {
+    retirement_fence.request();
+    tokio::time::timeout(
+        NATIVE_CONNECTION_RETIRE_TIMEOUT,
+        close_native_connection(connection, physical_close_completed),
+    )
+    .await
+    .map_err(|_| Error::NativeConnectionRetirementTimeout {
+        timeout_ms: NATIVE_CONNECTION_RETIRE_TIMEOUT.as_millis(),
+    })?
 }
 
 fn wire_received_data_channels(
     webrtc_conn: &RTCPeerConnection,
     inner_cb: Arc<InnerTransportCallback>,
-    inbound_frames: Arc<InboundFrameCapacity>,
 ) {
     // Inbound channels carry messages only. One remote-created channel closing
     // does not prove the SCTP association is gone; outbound-pool state owns
@@ -676,7 +708,7 @@ fn wire_received_data_channels(
     webrtc_conn.on_data_channel(Box::new(move |channel: Arc<RTCDataChannel>| {
         if !admit_inbound_data_channel(&admitted_channels) {
             tracing::warn!(
-                peer = %inner_cb.cid,
+                peer = %inner_cb.cid(),
                 label = channel.label(),
                 "rejected excess inbound data channel"
             );
@@ -692,36 +724,19 @@ fn wire_received_data_channels(
             "new received data channel"
         );
         let message_cb = Arc::clone(&inner_cb);
-        let frame_capacity = inbound_frames.clone();
         channel.on_message(Box::new(move |msg: DataChannelMessage| {
+            let bytes = msg.data.len();
             tracing::debug!(
-                peer = %message_cb.cid,
+                peer = %message_cb.cid(),
                 is_string = msg.is_string,
-                bytes = msg.data.len(),
+                bytes,
                 "received data-channel message"
             );
-            if msg.data.len() > MAX_DATA_CHANNEL_MESSAGE_SIZE {
-                tracing::warn!(
-                    peer = %message_cb.cid,
-                    bytes = msg.data.len(),
-                    max_bytes = MAX_DATA_CHANNEL_MESSAGE_SIZE,
-                    "rejected oversized data-channel message before dispatch"
-                );
-                return Box::pin(async {});
-            }
-            let Some(permit) = frame_capacity.try_acquire(msg.data.len()) else {
-                tracing::warn!(
-                    peer = %message_cb.cid,
-                    bytes = msg.data.len(),
-                    "rejected data-channel message before dispatch"
-                );
+            let Some(frame) = message_cb.prepare_inbound_frame(msg.data) else {
                 return Box::pin(async {});
             };
             let cb = Arc::clone(&message_cb);
-            Box::pin(async move {
-                cb.on_message(&msg.data).await;
-                drop(permit);
-            })
+            Box::pin(async move { cb.handle_admitted_frame(frame).await })
         }));
         Box::pin(async {})
     }));
@@ -800,6 +815,10 @@ impl TransportInterface for WebrtcTransport {
     type Connection = WebrtcConnection;
     type Error = Error;
 
+    fn inbound_frame_capacity(&self) -> &Arc<InboundFrameCapacity> {
+        &self.inbound_frames
+    }
+
     async fn new_connection(
         &self,
         cid: &str,
@@ -818,7 +837,8 @@ impl TransportInterface for WebrtcTransport {
         //
         let webrtc_data_channel_state_notifier = Notifier::default();
         let connection_state = ConnectionStateCell::new();
-        let inner_cb = Arc::new(InnerTransportCallback::new(
+        let inner_cb = Arc::new(InnerTransportCallback::for_transport(
+            self,
             cid,
             callback,
             webrtc_data_channel_state_notifier.clone(),
@@ -830,11 +850,7 @@ impl TransportInterface for WebrtcTransport {
         // `on_data_channel_open` (and thus `join_dht`) never fires. The created
         // channels are registered before they can open, so this is reliable.
         let channel_pool = Arc::new(RoundRobinPool::default());
-        wire_received_data_channels(
-            &webrtc_conn,
-            Arc::clone(&inner_cb),
-            self.inbound_frames.clone(),
-        );
+        wire_received_data_channels(&webrtc_conn, Arc::clone(&inner_cb));
         wire_peer_connection_state(
             &webrtc_conn,
             Arc::clone(&inner_cb),

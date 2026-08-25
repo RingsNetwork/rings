@@ -37,12 +37,16 @@ type PendingFingerUpdatesGuard<'transport> =
 #[derive(Clone)]
 pub(super) struct ConnectionLifecycleBoundary {
     inner: Arc<Mutex<()>>,
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    waiting: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl ConnectionLifecycleBoundary {
     pub(super) fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(())),
+            #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+            waiting: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
@@ -55,6 +59,25 @@ impl ConnectionLifecycleBoundary {
     #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
     pub(super) fn is_held_for_test(&self) -> bool {
         self.inner.try_lock().is_err()
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    fn lock_with_waiter_observer_for_test(
+        &self,
+        waiter_registered: impl FnOnce(),
+    ) -> Result<std::sync::MutexGuard<'_, ()>> {
+        self.waiting
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        waiter_registered();
+        let result = self.lock();
+        self.waiting
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        result
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    fn waiting_for_test(&self) -> usize {
+        self.waiting.load(std::sync::atomic::Ordering::Acquire)
     }
 }
 
@@ -584,6 +607,14 @@ impl SwarmTransport {
         action: impl FnOnce(&ActiveConnectionSet) -> Result<T>,
     ) -> Result<Option<T>> {
         let _lifecycle = self.connection_lifecycle()?;
+        self.retire_active_connection_locked(attempt, action)
+    }
+
+    fn retire_active_connection_locked<T>(
+        &self,
+        attempt: PendingConnectionAttempt,
+        action: impl FnOnce(&ActiveConnectionSet) -> Result<T>,
+    ) -> Result<Option<T>> {
         let mut lifecycles = self.peer_lifecycles()?;
         if lifecycles.active_attempt(attempt.peer) != Some(attempt) {
             return Ok(None);
@@ -609,6 +640,24 @@ impl SwarmTransport {
         measured_disconnects.remove(&attempt.peer);
         self.outbound_schedulers.shutdown(attempt.peer);
         Ok(Some(result))
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(super) fn retire_active_connection_with_observer_for_test<T>(
+        &self,
+        attempt: PendingConnectionAttempt,
+        before_lifecycle_gate: impl FnOnce(),
+        action: impl FnOnce(&ActiveConnectionSet) -> Result<T>,
+    ) -> Result<Option<T>> {
+        let _lifecycle = self
+            .connection_lifecycle
+            .lock_with_waiter_observer_for_test(before_lifecycle_gate)?;
+        self.retire_active_connection_locked(attempt, action)
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(super) fn retirement_waiter_count_for_test(&self) -> usize {
+        self.connection_lifecycle.waiting_for_test()
     }
 
     /// Apply one finger candidate or retain it until its current handshake commits.

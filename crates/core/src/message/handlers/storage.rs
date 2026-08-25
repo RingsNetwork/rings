@@ -1,6 +1,5 @@
 #![deny(missing_docs)]
 
-use std::mem;
 use std::sync::Arc;
 
 use async_recursion::async_recursion;
@@ -8,7 +7,6 @@ use async_trait::async_trait;
 
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
-use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::PlacedEntryOperation;
 use crate::dht::entry::SyncedEntryAck;
 use crate::dht::ChordStorage;
@@ -289,138 +287,6 @@ async fn handle_storage_search_act(
     }
 }
 
-async fn persist_synced_entries(
-    handler: &MessageHandler,
-    msg: &SyncEntriesWithSuccessor,
-) -> Result<Vec<SyncedEntryAck>> {
-    StorageSyncBatch::new(msg).run(handler).await
-}
-
-enum StorageSyncBatchPhase {
-    Validate,
-    Persist,
-}
-
-enum StorageSyncBatchStep {
-    Pending,
-    Complete(Vec<SyncedEntryAck>),
-}
-
-struct StorageSyncBatch<'data> {
-    destination: StorageSyncDestination,
-    data: &'data [PlacedEntry],
-    validate_index: usize,
-    accepted: Vec<SyncedEntryAck>,
-    persist_index: usize,
-    phase: StorageSyncBatchPhase,
-}
-
-impl<'data> StorageSyncBatch<'data> {
-    fn new(msg: &'data SyncEntriesWithSuccessor) -> Self {
-        Self {
-            destination: msg.destination,
-            data: &msg.data,
-            validate_index: 0,
-            accepted: Vec::with_capacity(msg.data.len()),
-            persist_index: 0,
-            phase: StorageSyncBatchPhase::Validate,
-        }
-    }
-
-    async fn run(mut self, handler: &MessageHandler) -> Result<Vec<SyncedEntryAck>> {
-        loop {
-            match self.step(handler).await? {
-                StorageSyncBatchStep::Pending => yield_core_actor_step().await,
-                StorageSyncBatchStep::Complete(acks) => return Ok(acks),
-            }
-        }
-    }
-
-    async fn step(&mut self, handler: &MessageHandler) -> Result<StorageSyncBatchStep> {
-        match self.phase {
-            StorageSyncBatchPhase::Validate => match self.validate_one(handler)? {
-                Some(step) => Ok(step),
-                None => self.persist_one(handler).await,
-            },
-            StorageSyncBatchPhase::Persist => self.persist_one(handler).await,
-        }
-    }
-
-    fn validate_one(&mut self, handler: &MessageHandler) -> Result<Option<StorageSyncBatchStep>> {
-        let Some(placed) = self.data.get(self.validate_index) else {
-            self.phase = StorageSyncBatchPhase::Persist;
-            return Ok(None);
-        };
-        self.validate_index += 1;
-
-        // Preservation: every input is validated before the first storage
-        // effect, so a later invalid input leaves the entire batch unwritten.
-        if should_persist_synced_entry(&handler.dht, self.destination, placed.key)? {
-            placed.validate_placement(handler.transport.storage_redundancy())?;
-            let entry = placed.entry.clone().try_into_storage_entry()?;
-            self.accepted.push(SyncedEntryAck::new(placed.key, entry));
-        }
-
-        Ok(Some(StorageSyncBatchStep::Pending))
-    }
-
-    async fn persist_one(&mut self, handler: &MessageHandler) -> Result<StorageSyncBatchStep> {
-        let Some(ack) = self.accepted.get(self.persist_index) else {
-            return Ok(self.complete());
-        };
-        let key = ack.key;
-        let entry = ack.entry.clone();
-
-        handler.dht.join_storage_entry(key, entry).await?;
-        self.persist_index += 1;
-
-        if self.persist_index == self.accepted.len() {
-            Ok(self.complete())
-        } else {
-            Ok(StorageSyncBatchStep::Pending)
-        }
-    }
-
-    fn complete(&mut self) -> StorageSyncBatchStep {
-        StorageSyncBatchStep::Complete(mem::take(&mut self.accepted))
-    }
-}
-
-fn should_persist_synced_entry(
-    dht: &PeerRing,
-    destination: StorageSyncDestination,
-    placement: Did,
-) -> Result<bool> {
-    // Pre: `destination` was already matched against the signed relay
-    // destination by `next_hop_for_sync_entries`.
-    // Post: true implies this receiver is the local storage branch for
-    // `placement`, and PlacementKey destinations can ack only their exact
-    // placement key.
-    if !destination_accepts_placement(destination, placement) {
-        return Ok(false);
-    }
-
-    local_accepts_storage_placement(dht, placement)
-}
-
-fn destination_accepts_placement(destination: StorageSyncDestination, placement: Did) -> bool {
-    match destination {
-        StorageSyncDestination::PhysicalOwner(_) => true,
-        StorageSyncDestination::PlacementKey(key) => key == placement,
-    }
-}
-
-fn local_accepts_storage_placement(dht: &PeerRing, placement: Did) -> Result<bool> {
-    match dht.find_storage_owner(placement)? {
-        // Invariant: `Some(_)` is the local-storage branch. In non-virtual
-        // Chord storage the DID carried by `Some` is the successor witness used
-        // for fallback lookup, not a remote-owner denial.
-        PeerRingAction::Some(_) => Ok(true),
-        PeerRingAction::RemoteAction(_, PeerRingRemoteAction::FindSuccessor(_)) => Ok(false),
-        action => Err(Error::unexpected_peer_ring_action(action)),
-    }
-}
-
 fn next_hop_for_sync_entries(
     handler: &MessageHandler,
     ctx: &MessagePayload,
@@ -601,7 +467,7 @@ impl HandleMsg<SyncEntriesWithSuccessor> for MessageHandler {
                 .await;
         }
 
-        let acks = persist_synced_entries(self, msg).await?;
+        let acks = self.transport.persist_storage_sync_entries(msg).await?;
         if msg.purpose.permits_source_cleanup() {
             if let Err(e) =
                 report_synced_entries(self, ctx, msg.purpose, msg.destination, acks).await

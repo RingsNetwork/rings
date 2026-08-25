@@ -6,8 +6,10 @@ use super::*;
 use crate::dht::topology;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::dht::StorageSyncDestination;
+#[cfg(not(target_family = "wasm"))]
+use crate::lifecycle::StopSource;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-use crate::dht::STORAGE_REPAIR_MAX_DELIVERIES_PER_STEP;
+use crate::tests::ring_topology_converged;
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 fn midpoint_storage_key(local: Did, lower: Did, upper: Did) -> Did {
@@ -80,6 +82,7 @@ async fn continuous_storage_repair_reaches_remote_owners_across_three_nodes() ->
 
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
     manually_establish_connection(&node1.swarm, &node3.swarm).await;
+    manually_establish_connection(&node2.swarm, &node3.swarm).await;
     wait_for_msgs([&node1, &node2, &node3]).await;
 
     let mut routed_peers = [&node2, &node3];
@@ -119,23 +122,60 @@ async fn continuous_storage_repair_reaches_remote_owners_across_three_nodes() ->
     assert_eq!(head.dht().storage.get(&head_key.to_string()).await?, None);
     assert_eq!(tail.dht().storage.get(&tail_key.to_string()).await?, None);
 
-    let mut head_repaired = false;
-    let mut tail_repaired = false;
-    let repaired_entries = 2usize;
-    let repair_candidates = repaired_entries * usize::from(node1.swarm.storage_redundancy());
-    let required_steps = repair_candidates.div_ceil(STORAGE_REPAIR_MAX_DELIVERIES_PER_STEP);
-    for _ in 0..required_steps {
-        let _ = node1.swarm.stabilizer().repair_storage().await?;
-        wait_for_msgs([&node1, &node2, &node3]).await;
-
-        head_repaired = head.dht().storage.get(&head_key.to_string()).await?
-            == Some(expected_head_entry.clone());
-        tail_repaired = tail.dht().storage.get(&tail_key.to_string()).await?
-            == Some(expected_tail_entry.clone());
-        if head_repaired && tail_repaired {
-            break;
+    let stop = StopSource::new();
+    let maintenance_interval = Duration::from_millis(500);
+    let maintenance = [
+        node1.swarm.stabilizer(),
+        node2.swarm.stabilizer(),
+        node3.swarm.stabilizer(),
+    ]
+    .map(|stabilizer| {
+        let token = stop.token();
+        tokio::spawn(Arc::new(stabilizer).wait_with(maintenance_interval, token))
+    });
+    let pressure_swarm = node1.swarm.clone();
+    let pressure_token = stop.token();
+    let repair_pressure = tokio::spawn(async move {
+        while !pressure_token.should_stop() {
+            pressure_swarm.transport.request_storage_repair();
+            tokio::time::sleep(Duration::from_millis(25)).await;
         }
+    });
+
+    let convergence = timeout(Duration::from_secs(15), async {
+        loop {
+            let head_repaired = head.dht().storage.get(&head_key.to_string()).await?
+                == Some(expected_head_entry.clone());
+            let tail_repaired = tail.dht().storage.get(&tail_key.to_string()).await?
+                == Some(expected_tail_entry.clone());
+            let topology_converged = ring_topology_converged(&[
+                node1.swarm.as_ref(),
+                node2.swarm.as_ref(),
+                node3.swarm.as_ref(),
+            ])?;
+            if head_repaired && tail_repaired && topology_converged {
+                return Ok::<_, Error>((head_repaired, tail_repaired, topology_converged));
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .map_err(|_| {
+        Error::InvalidMessage("maintenance loop did not converge under repair pressure".to_string())
+    });
+
+    stop.request_stop();
+    for task in maintenance {
+        timeout(Duration::from_secs(3), task)
+            .await
+            .map_err(|_| Error::InvalidMessage("maintenance task did not stop".to_string()))?
+            .map_err(|error| Error::InvalidMessage(format!("maintenance task failed: {error}")))?;
     }
+    timeout(Duration::from_secs(3), repair_pressure)
+        .await
+        .map_err(|_| Error::InvalidMessage("repair pressure task did not stop".to_string()))?
+        .map_err(|error| Error::InvalidMessage(format!("repair pressure task failed: {error}")))?;
+    let (head_repaired, tail_repaired, topology_converged) = convergence??;
 
     assert!(
         head_repaired,
@@ -145,6 +185,125 @@ async fn continuous_storage_repair_reaches_remote_owners_across_three_nodes() ->
         tail_repaired,
         "continuous repair did not persist the tail owner placement"
     );
+    assert!(
+        topology_converged,
+        "DHT control traffic did not converge the three-node ring during continuous repair"
+    );
+    Ok(())
+}
+
+#[cfg(all(feature = "std", not(feature = "dummy"), not(target_family = "wasm")))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_wait_with_repairs_storage_before_connection_retirement() -> Result<()> {
+    let (key1, key2) = repair_test_keys()?;
+    let node1 = prepare_repair_node(key1)?;
+    let node2 = prepare_repair_node(key2)?;
+    manually_establish_connection(&node1.swarm, &node2.swarm).await;
+    wait_for_successor(&node1, node2.did()).await?;
+    wait_for_msgs([&node1, &node2]).await;
+    replace_observed_topology(&node1, &[node2.did()], Some(node2.did()), &[(
+        0,
+        node2.did(),
+    )])?;
+    replace_observed_topology(&node2, &[node1.did()], Some(node1.did()), &[(
+        0,
+        node1.did(),
+    )])?;
+    node1
+        .swarm
+        .transport
+        .force_peer_connected_at(node2.did(), get_epoch_ms_i64() - 31_000)?;
+
+    let (entry, remote_placement) = entry_for_remote_repair_placement(&node1, node2.did())?;
+    let expected = entry.clone().try_into_storage_entry()?;
+    node1
+        .dht()
+        .storage
+        .put(&entry.did.to_string(), &entry)
+        .await?;
+    assert_eq!(
+        node2
+            .dht()
+            .storage
+            .get(&remote_placement.to_string())
+            .await?,
+        None
+    );
+
+    let stop = StopSource::new();
+    let maintenance = {
+        let token = stop.token();
+        tokio::spawn(
+            Arc::new(node1.swarm.stabilizer()).wait_with(Duration::from_millis(500), token),
+        )
+    };
+    let repair_pressure = {
+        let swarm = node1.swarm.clone();
+        let token = stop.token();
+        tokio::spawn(async move {
+            while !token.should_stop() {
+                swarm.transport.request_storage_repair();
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+    };
+
+    let repair = timeout(Duration::from_secs(30), async {
+        loop {
+            if node2
+                .dht()
+                .storage
+                .get(&remote_placement.to_string())
+                .await?
+                == Some(expected.clone())
+            {
+                return Ok::<_, Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .map_err(|_| Error::InvalidMessage("native wait_with repair timed out".to_string()));
+
+    if repair.is_ok() {
+        let physical_close = node1
+            .swarm
+            .transport
+            .get_connection(node2.did())
+            .ok_or_else(|| Error::InvalidMessage("missing native connection witness".to_string()))?
+            .physical_close_witness()?;
+        node1.swarm.disconnect(node2.did()).await?;
+        assert!(node1.swarm.transport.get_connection(node2.did()).is_none());
+        assert!(!node1.swarm.transport.is_admitted_connection(node2.did()));
+        assert!(!node1.dht().successors().contains(&node2.did())?);
+        assert_eq!(
+            node1
+                .swarm
+                .transport
+                .outbound_admitted_transfer_total_for_test(),
+            0
+        );
+        timeout(Duration::from_secs(3), async {
+            while !physical_close.is_complete() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .map_err(|_| {
+            Error::InvalidMessage("native physical connection close did not complete".to_string())
+        })?;
+    }
+
+    stop.request_stop();
+    timeout(Duration::from_secs(3), maintenance)
+        .await
+        .map_err(|_| Error::InvalidMessage("native maintenance task did not stop".to_string()))?
+        .map_err(|error| Error::InvalidMessage(format!("maintenance task failed: {error}")))?;
+    timeout(Duration::from_secs(3), repair_pressure)
+        .await
+        .map_err(|_| Error::InvalidMessage("native repair pressure did not stop".to_string()))?
+        .map_err(|error| Error::InvalidMessage(format!("repair pressure failed: {error}")))?;
+    repair??;
     Ok(())
 }
 

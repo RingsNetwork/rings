@@ -1,44 +1,79 @@
+use std::task::Context;
+use std::task::Poll;
+
+use futures::task::noop_waker;
+
 use super::*;
 
-#[test]
-fn wake_round_identity_is_shared_by_clone_and_not_by_sequence() {
-    let round = FairWakeRound::new(7);
-    let same_round = round.clone();
-    let reused_sequence = FairWakeRound::new(7);
+fn queue(max_waiters: usize) -> Arc<FairWaitQueue> {
+    Arc::new(FairWaitQueue::with_budget(Arc::new(FairWaitBudget::new(
+        max_waiters,
+        max_waiters,
+    ))))
+}
 
-    assert_eq!(round, same_round);
-    assert_ne!(round, reused_sequence);
+fn blocked_waiter(queue: &Arc<FairWaitQueue>) -> FairWaiter {
+    match queue
+        .admit_or_wait(1, (), || None::<()>)
+        .expect("one waiter must fit the test budget")
+    {
+        FairAdmission::Ready(()) => panic!("a blocked attempt must enqueue"),
+        FairAdmission::Waiting(waiter) => waiter,
+    }
+}
+
+fn poll_waiter(waiter: &mut FairWaiter, value: usize) -> Poll<Option<usize>> {
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    waiter.poll(&mut context, || Some(value))
 }
 
 #[test]
-fn repeated_arm_preserves_the_first_handoff_round() {
-    let queue = Arc::new(CoordinatedFairWaitQueue::coordinated());
-    let FairAdmission::Waiting(_waiter) = queue
-        .admit_or_wait(FairCapacityDemand::new(0, 1), (), || None::<()>, |_| {})
-        .expect("an unbudgeted blocked request must enqueue")
-    else {
-        panic!("a blocked request must return a waiter");
-    };
-    let first = FairWakeRound::new(1);
-    let second = FairWakeRound::new(2);
+fn wake_before_first_poll_is_retained() {
+    let queue = queue(1);
+    let mut waiter = blocked_waiter(&queue);
 
-    assert_eq!(
-        queue.wake_front_with_handoff(first.clone()),
-        FairWakeArm::Armed
-    );
-    assert_eq!(
-        queue.wake_front_with_handoff(second),
-        FairWakeArm::AlreadyArmed
-    );
+    queue.wake_front();
 
-    let state = queue
-        .state
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let wake = state
-        .queue
-        .front()
-        .and_then(|waiter| waiter.wake.as_ref())
-        .expect("the queue head must remain armed");
-    assert!(matches!(wake, FairWake::Handoff(round) if round == &first));
+    assert_eq!(poll_waiter(&mut waiter, 7), Poll::Ready(Some(7)));
+}
+
+#[test]
+fn cancelling_armed_front_hands_wake_to_successor() {
+    let queue = queue(2);
+    let first = blocked_waiter(&queue);
+    let mut second = blocked_waiter(&queue);
+    queue.wake_front();
+
+    drop(first);
+
+    assert_eq!(poll_waiter(&mut second, 2), Poll::Ready(Some(2)));
+}
+
+#[test]
+fn cancelling_middle_preserves_fifo_release_order() {
+    let queue = queue(3);
+    let mut first = blocked_waiter(&queue);
+    let middle = blocked_waiter(&queue);
+    let mut third = blocked_waiter(&queue);
+    drop(middle);
+    queue.wake_front();
+
+    assert_eq!(poll_waiter(&mut third, 3), Poll::Pending);
+    assert_eq!(poll_waiter(&mut first, 1), Poll::Ready(Some(1)));
+    assert_eq!(poll_waiter(&mut third, 3), Poll::Ready(Some(3)));
+}
+
+#[test]
+fn cancelled_waiter_releases_shared_budget() {
+    let queue = queue(1);
+    let waiter = blocked_waiter(&queue);
+    assert!(queue.admit_or_wait(1, (), || None::<()>).is_err());
+
+    drop(waiter);
+
+    assert!(matches!(
+        queue.admit_or_wait(1, (), || None::<()>),
+        Ok(FairAdmission::Waiting(_))
+    ));
 }

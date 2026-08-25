@@ -60,6 +60,21 @@ impl Drop for PausedDispatchGuard {
     }
 }
 
+pub(super) struct PausedIrrevocableSendGuard;
+
+impl PausedIrrevocableSendGuard {
+    pub(super) fn new() -> Self {
+        dummy_controlled::pause_irrevocable_send();
+        Self
+    }
+}
+
+impl Drop for PausedIrrevocableSendGuard {
+    fn drop(&mut self) {
+        dummy_controlled::release_irrevocable_send_gate();
+    }
+}
+
 pub(super) struct PendingAfterSentCountGuard;
 
 impl PendingAfterSentCountGuard {

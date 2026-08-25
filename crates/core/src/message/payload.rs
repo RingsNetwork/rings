@@ -20,7 +20,6 @@ use super::protocols::MessageRelay;
 use super::protocols::MessageVerification;
 use super::protocols::MessageVerificationExt;
 use super::protocols::ReportReturnPolicy;
-use super::types::MessageMeta;
 use crate::dht::Chord;
 use crate::dht::Did;
 use crate::dht::PeerRing;
@@ -238,17 +237,6 @@ impl MessagePayload {
     /// Deserializes a `MessagePayload` instance from the Rings wire encoding.
     pub fn from_wire(data: &[u8]) -> Result<Self> {
         rings_codec::deserialize(data).map_err(Error::CodecDeserialize)
-    }
-
-    /// Classify the nested message from a wire payload without allocating its body.
-    pub(crate) fn message_meta_from_wire(data: &[u8]) -> Result<MessageMeta> {
-        let (_, data) =
-            rings_codec::deserialize_prefix::<Did>(data).map_err(Error::CodecDeserialize)?;
-        let (_, data) =
-            rings_codec::deserialize_prefix::<uuid::Uuid>(data).map_err(Error::CodecDeserialize)?;
-        let (message, _) =
-            rings_codec::deserialize_prefix::<&[u8]>(data).map_err(Error::CodecDeserialize)?;
-        MessageMeta::from_wire(message)
     }
 
     /// Serializes the `MessagePayload` instance into the Rings wire encoding.
@@ -523,20 +511,6 @@ pub mod test {
 
         let payload = new_test_payload(did2);
         assert!(payload.verify());
-    }
-
-    #[test]
-    fn wire_prefix_classification_matches_nested_message() -> Result<()> {
-        let next_hop = SecretKey::random().address().into();
-        let message = Message::custom(b"prefix-classification")?;
-        let expected = MessageMeta::from_message(&message);
-        let payload = new_payload(message, next_hop);
-
-        assert_eq!(
-            MessagePayload::message_meta_from_wire(&payload.to_wire()?)?,
-            expected
-        );
-        Ok(())
     }
 
     #[test]

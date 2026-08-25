@@ -1,3 +1,5 @@
+use rings_transport::core::callback::InboundFrameClass;
+
 use crate::message::MessageClass;
 use crate::message::MessageMeta;
 
@@ -18,6 +20,18 @@ impl InboundLane {
             return Self::REASSEMBLY;
         }
         Self::from_class(meta.class())
+    }
+
+    pub(super) const fn from_frame_class(class: InboundFrameClass) -> Self {
+        match class {
+            InboundFrameClass::Control => Self::from_class(MessageClass::DhtControl),
+            InboundFrameClass::Storage => Self::from_class(MessageClass::Storage),
+            InboundFrameClass::EndToEnd => Self::from_class(MessageClass::E2e),
+            InboundFrameClass::Application | InboundFrameClass::Data => {
+                Self::from_class(MessageClass::Application)
+            }
+            InboundFrameClass::Reassembly => Self::REASSEMBLY,
+        }
     }
 
     pub(super) const fn index(self) -> usize {

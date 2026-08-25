@@ -6,9 +6,9 @@ use async_trait::async_trait;
 use rings_transport::connections::dummy_controlled;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use rings_transport::core::transport::WebrtcConnectionState;
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+#[cfg(not(target_family = "wasm"))]
 use tokio::time::timeout;
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+#[cfg(not(target_family = "wasm"))]
 use tokio::time::Duration;
 
 use crate::dht::entry::Entry;
@@ -187,7 +187,7 @@ fn entry_for_remote_repair_placement(node: &Node, successor: Did) -> Result<(Ent
     ))
 }
 
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+#[cfg(not(target_family = "wasm"))]
 pub(super) fn replace_observed_topology(
     node: &Node,
     successors: &[Did],

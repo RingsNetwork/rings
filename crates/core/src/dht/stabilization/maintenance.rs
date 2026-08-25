@@ -24,6 +24,74 @@ enum MaintenanceTask {
     Repair,
 }
 
+#[cfg(all(test, target_family = "wasm"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MaintenancePhaseKind {
+    Stabilize,
+    Repair,
+}
+
+#[cfg(all(test, target_family = "wasm"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct MaintenancePhaseEvent {
+    pub(crate) local: crate::dht::Did,
+    pub(crate) kind: MaintenancePhaseKind,
+    pub(crate) started_at_ms: u64,
+}
+
+#[cfg(all(test, target_family = "wasm"))]
+thread_local! {
+    static MAINTENANCE_PHASE_TRACE: std::cell::RefCell<Vec<MaintenancePhaseEvent>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
+}
+
+#[cfg(all(test, target_family = "wasm"))]
+pub(crate) fn reset_maintenance_phase_trace_for_test() {
+    MAINTENANCE_PHASE_TRACE.with(|trace| trace.borrow_mut().clear());
+}
+
+#[cfg(all(test, target_family = "wasm"))]
+pub(crate) fn maintenance_phase_trace_for_test(
+    local: crate::dht::Did,
+) -> Vec<MaintenancePhaseEvent> {
+    MAINTENANCE_PHASE_TRACE.with(|trace| {
+        trace
+            .borrow()
+            .iter()
+            .copied()
+            .filter(|event| event.local == local)
+            .collect()
+    })
+}
+
+#[cfg(all(test, target_family = "wasm"))]
+fn record_maintenance_phase_for_test(
+    local: crate::dht::Did,
+    task: MaintenanceTask,
+    started_at_ms: u64,
+) {
+    let kind = match task {
+        MaintenanceTask::Stabilize => MaintenancePhaseKind::Stabilize,
+        MaintenanceTask::Repair => MaintenancePhaseKind::Repair,
+    };
+    MAINTENANCE_PHASE_TRACE.with(|trace| {
+        trace.borrow_mut().push(MaintenancePhaseEvent {
+            local,
+            kind,
+            started_at_ms,
+        });
+    });
+}
+
+#[cfg(not(all(test, target_family = "wasm")))]
+fn record_maintenance_phase_for_test(
+    _local: crate::dht::Did,
+    _task: MaintenanceTask,
+    _started_at_ms: u64,
+) {
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct MaintenanceDecision {
     task: Option<MaintenanceTask>,
@@ -217,6 +285,11 @@ impl Stabilizer {
 
             match decision.task {
                 Some(MaintenanceTask::Stabilize) => {
+                    record_maintenance_phase_for_test(
+                        self.dht.did,
+                        MaintenanceTask::Stabilize,
+                        now_ms,
+                    );
                     self.stabilize_topology_with_step_timeout(STABILIZATION_STEP_TIMEOUT)
                         .await;
                     let periodic_repair_due = schedule.complete_stabilization(
@@ -228,6 +301,11 @@ impl Stabilizer {
                     }
                 }
                 Some(MaintenanceTask::Repair) => {
+                    record_maintenance_phase_for_test(
+                        self.dht.did,
+                        MaintenanceTask::Repair,
+                        now_ms,
+                    );
                     if let Some(outcome) = self.run_requested_storage_repair().await {
                         schedule
                             .complete_repair(monotonic_elapsed_ms(&origin), outcome.is_complete());

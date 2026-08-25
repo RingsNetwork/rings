@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -6,15 +7,20 @@ use futures::future::FutureExt;
 use futures::pin_mut;
 use futures::select;
 
+use super::delivery::terminate_accepted_connection;
 use super::delivery::ChunkSendPermit;
 use super::delivery::SendCompletionOutcome;
 use super::outbound::ChunkFrames;
+use super::outbound::DetachedAdmission;
+use super::outbound::DetachedAdmissionCancel;
 use super::outbound::OutboundCompletion;
 use super::outbound::OutboundMessageMeta;
 use super::outbound::OutboundPeerHandle;
 use super::outbound::OutboundTransfer;
 use super::outbound::OutboundTransferRoute;
 use super::outbound::TransferCapacityPermit;
+use super::timeouts::OUTBOUND_PAYLOAD_CLEANUP_GRACE;
+use super::timeouts::TRACKED_PAYLOAD_COMPLETION_BOUND;
 use super::AdmittedConnection;
 use super::SwarmTransport;
 use super::DATA_CHANNEL_SEND_ACCEPT_BUDGET;
@@ -36,6 +42,7 @@ use crate::session::SessionSk;
 use crate::utils::sleep;
 
 const TRACKED_PAYLOAD_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.tracked_payload;
+const DETACHED_FIRST_FRAME_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.first_frame_admission;
 
 struct OversizedPayloadLog {
     local: Did,
@@ -71,25 +78,93 @@ struct FramedOutboundTransfer {
     receiver: futures::channel::oneshot::Receiver<Result<SendCompletionOutcome>>,
 }
 
-struct StopOnDrop(StopSource);
+struct StopOnDrop {
+    source: StopSource,
+    handle: Option<OutboundPeerHandle>,
+    armed: bool,
+}
+
+async fn await_bounded_cleanup<F, T>(future: F, cleanup_grace: Duration) -> Option<T>
+where F: Future<Output = T> {
+    let future = future.fuse();
+    let timeout = sleep(cleanup_grace).fuse();
+    pin_mut!(future, timeout);
+    select! {
+        result = future => Some(result),
+        _ = timeout => None,
+    }
+}
 
 impl StopOnDrop {
     fn new() -> Self {
-        Self(StopSource::new())
+        Self {
+            source: StopSource::new(),
+            handle: None,
+            armed: true,
+        }
     }
 
     fn token(&self) -> StopToken {
-        self.0.token()
+        self.source.token()
+    }
+
+    fn bind_handle(&mut self, handle: OutboundPeerHandle) {
+        self.handle = Some(handle);
     }
 
     fn request_stop(&self) {
-        self.0.request_stop();
+        self.source.request_stop();
+        if let Some(handle) = &self.handle {
+            handle.cancel_stopped();
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
     }
 }
 
 impl Drop for StopOnDrop {
     fn drop(&mut self) {
-        self.request_stop();
+        if self.armed {
+            self.request_stop();
+        }
+    }
+}
+
+struct DetachedAdmissionOnDrop {
+    admission: DetachedAdmission,
+    handle: OutboundPeerHandle,
+    armed: bool,
+}
+
+impl DetachedAdmissionOnDrop {
+    fn new(admission: DetachedAdmission, handle: OutboundPeerHandle) -> Self {
+        Self {
+            admission,
+            handle,
+            armed: true,
+        }
+    }
+
+    fn cancel(&self) -> DetachedAdmissionCancel {
+        let decision = self.admission.cancel();
+        if decision == DetachedAdmissionCancel::Cancelled {
+            self.handle.cancel_stopped();
+        }
+        decision
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for DetachedAdmissionOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            self.cancel();
+        }
     }
 }
 
@@ -105,6 +180,15 @@ fn log_oversized_payload(metadata: OversizedPayloadLog) {
         max_bytes = metadata.max_bytes,
         "message payload is too large"
     );
+}
+
+fn validate_payload_size(metadata: OversizedPayloadLog) -> Result<()> {
+    if metadata.bytes <= metadata.max_bytes {
+        return Ok(());
+    }
+    let bytes = metadata.bytes;
+    log_oversized_payload(metadata);
+    Err(Error::MessageTooLarge(bytes))
 }
 
 fn outbound_memory_reservation(wire_bytes: usize) -> usize {
@@ -149,9 +233,25 @@ impl SwarmTransport {
         &self,
         payload: MessagePayload,
     ) -> Result<SendCompletionOutcome> {
+        self.send_payload_tracked_with_timeouts(
+            payload,
+            TRACKED_PAYLOAD_TIMEOUT,
+            OUTBOUND_PAYLOAD_CLEANUP_GRACE,
+            TRACKED_PAYLOAD_COMPLETION_BOUND,
+        )
+        .await
+    }
+
+    async fn send_payload_tracked_with_timeouts(
+        &self,
+        payload: MessagePayload,
+        tracked_timeout: Duration,
+        cleanup_grace: Duration,
+        completion_bound: Duration,
+    ) -> Result<SendCompletionOutcome> {
         let did = payload.relay.next_hop;
-        let stop = StopOnDrop::new();
-        let timeout = sleep(TRACKED_PAYLOAD_TIMEOUT).fuse();
+        let mut stop = StopOnDrop::new();
+        let timeout = sleep(tracked_timeout).fuse();
         pin_mut!(timeout);
         let prepared = {
             let prepare = self
@@ -160,13 +260,19 @@ impl SwarmTransport {
                     payload,
                     OutboundCompletion::Tracked,
                     stop.token(),
+                    None,
                 )
                 .fuse();
             pin_mut!(prepare);
             select! {
                 result = prepare => result?,
                 _ = timeout => {
-                    self.log_tracked_payload_timeout(did);
+                    self.log_tracked_payload_timeout(
+                        did,
+                        tracked_timeout,
+                        cleanup_grace,
+                        completion_bound,
+                    );
                     return Ok(SendCompletionOutcome::Cancelled);
                 }
             }
@@ -174,28 +280,88 @@ impl SwarmTransport {
         let Some(prepared) = prepared else {
             return Ok(SendCompletionOutcome::Cancelled);
         };
+        let cleanup_connection = prepared.admitted.clone();
+        stop.bind_handle(prepared.handle.clone());
         let send = self.submit_prepared_outbound_transfer(prepared).fuse();
         pin_mut!(send);
 
-        select! {
+        let result = select! {
             result = send => result,
             _ = timeout => {
                 stop.request_stop();
-                let terminal_result = send.await;
-                self.log_tracked_payload_timeout(did);
-                terminal_result.map(|_| SendCompletionOutcome::Cancelled)
+                self.log_tracked_payload_timeout(
+                    did,
+                    tracked_timeout,
+                    cleanup_grace,
+                    completion_bound,
+                );
+                match await_bounded_cleanup(send, cleanup_grace).await {
+                    Some(result) => result.map(|_| SendCompletionOutcome::Cancelled),
+                    None => {
+                        terminate_accepted_connection(
+                            &cleanup_connection,
+                            "tracked_payload_cleanup_timeout",
+                        )
+                        .await;
+                        Err(Error::TrackedPayloadCleanupTimeout {
+                            peer: did,
+                            timeout_ms: cleanup_grace.as_millis(),
+                        })
+                    }
+                }
             }
-        }
+        };
+        stop.disarm();
+        result
     }
 
-    fn log_tracked_payload_timeout(&self, did: Did) {
+    fn log_tracked_payload_timeout(
+        &self,
+        did: Did,
+        tracked_timeout: Duration,
+        cleanup_grace: Duration,
+        completion_bound: Duration,
+    ) {
         tracing::warn!(
             target: "rings_core::transport::tracked_send",
             local = %self.dht.did,
             peer = %did,
-            timeout_ms = TRACKED_PAYLOAD_TIMEOUT.as_millis(),
-            "tracked payload deadline elapsed and was deferred"
+            timeout_ms = tracked_timeout.as_millis(),
+            cleanup_grace_ms = cleanup_grace.as_millis(),
+            completion_bound_ms = completion_bound.as_millis(),
+            "tracked payload admission deadline elapsed; transfer stop and bounded cleanup were requested"
         );
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) async fn send_payload_tracked_with_matching_delivery_deadline_for_test(
+        &self,
+        payload: MessagePayload,
+    ) -> Result<SendCompletionOutcome> {
+        let tracked_timeout = TRANSPORT_TIMEOUT_PROFILE.delivery;
+        let completion_bound = tracked_timeout.saturating_add(OUTBOUND_PAYLOAD_CLEANUP_GRACE);
+        self.send_payload_tracked_with_timeouts(
+            payload,
+            tracked_timeout,
+            OUTBOUND_PAYLOAD_CLEANUP_GRACE,
+            completion_bound,
+        )
+        .await
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) async fn send_payload_tracked_with_shutdown_deadline_for_test(
+        &self,
+        payload: MessagePayload,
+    ) -> Result<SendCompletionOutcome> {
+        let tracked_timeout = Duration::from_secs(5);
+        self.send_payload_tracked_with_timeouts(
+            payload,
+            tracked_timeout,
+            OUTBOUND_PAYLOAD_CLEANUP_GRACE,
+            tracked_timeout.saturating_add(OUTBOUND_PAYLOAD_CLEANUP_GRACE),
+        )
+        .await
     }
 
     async fn connection_for_send(
@@ -258,20 +424,92 @@ impl SwarmTransport {
         }
     }
 
-    async fn do_send_payload_with_completion(
+    async fn do_send_payload_detached(
         &self,
         did: Did,
         payload: MessagePayload,
-        completion: OutboundCompletion,
-        stop: StopToken,
     ) -> Result<SendCompletionOutcome> {
-        let Some(prepared) = self
-            .prepare_outbound_transfer(did, payload, completion, stop)
-            .await?
-        else {
+        self.do_send_payload_detached_until(
+            did,
+            payload,
+            DETACHED_FIRST_FRAME_TIMEOUT,
+            sleep(DETACHED_FIRST_FRAME_TIMEOUT),
+        )
+        .await
+    }
+
+    async fn do_send_payload_detached_until(
+        &self,
+        did: Did,
+        payload: MessagePayload,
+        timeout_budget: Duration,
+        deadline: impl Future<Output = ()>,
+    ) -> Result<SendCompletionOutcome> {
+        let admission = DetachedAdmission::new();
+        let timeout_error = || Error::OutboundFirstFrameAdmissionTimeout {
+            peer: did,
+            timeout_ms: timeout_budget.as_millis(),
+        };
+        let timeout = deadline.fuse();
+        pin_mut!(timeout);
+        let prepared = {
+            let prepare = self
+                .prepare_outbound_transfer(
+                    did,
+                    payload,
+                    OutboundCompletion::Detached,
+                    admission.stop_token(),
+                    Some(admission.clone()),
+                )
+                .fuse();
+            pin_mut!(prepare);
+            select! {
+                result = prepare => result?,
+                _ = timeout => {
+                    admission.cancel();
+                    return Err(timeout_error());
+                },
+            }
+        };
+        let Some(prepared) = prepared else {
             return Ok(SendCompletionOutcome::Cancelled);
         };
-        self.submit_prepared_outbound_transfer(prepared).await
+        let mut cancel_on_drop =
+            DetachedAdmissionOnDrop::new(admission.clone(), prepared.handle.clone());
+        let cleanup_connection = prepared.admitted.clone();
+        let send = self.submit_prepared_outbound_transfer(prepared);
+        let send = send.fuse();
+        pin_mut!(send);
+        let result = select! {
+            result = send => result,
+            _ = timeout => {
+                let cancellation = cancel_on_drop.cancel();
+                match await_bounded_cleanup(send, OUTBOUND_PAYLOAD_CLEANUP_GRACE).await {
+                    Some(result) if cancellation == DetachedAdmissionCancel::MustAwait => result,
+                    Some(result) => {
+                        match result? {
+                            SendCompletionOutcome::Succeeded => {
+                                Err(Error::CancelledDetachedAdmissionPublishedSuccess)
+                            }
+                            SendCompletionOutcome::Cancelled => Err(timeout_error()),
+                        }
+                    }
+                    None => {
+                        terminate_accepted_connection(
+                            &cleanup_connection,
+                            "detached_payload_cleanup_timeout",
+                        )
+                        .await;
+                        Err(Error::DetachedPayloadCleanupTimeout {
+                            peer: did,
+                            timeout_ms: OUTBOUND_PAYLOAD_CLEANUP_GRACE.as_millis(),
+                        })
+                    }
+                }
+            },
+        };
+        cancel_on_drop.disarm();
+        result
     }
 
     async fn prepare_outbound_transfer(
@@ -280,6 +518,7 @@ impl SwarmTransport {
         payload: MessagePayload,
         completion: OutboundCompletion,
         stop: StopToken,
+        detached_admission: Option<DetachedAdmission>,
     ) -> Result<Option<PreparedOutboundTransfer>> {
         let message_metadata = OutboundMessageMeta::from_wire(&payload.transaction.data)?;
         let wire_bytes = payload.wire_size()?;
@@ -290,19 +529,16 @@ impl SwarmTransport {
         let destination = payload.transaction.destination;
         let relay_destination = payload.relay.destination;
         let next_hop = payload.relay.next_hop;
-        if wire_bytes > TRANSPORT_MAX_SIZE {
-            log_oversized_payload(OversizedPayloadLog {
-                local: self.dht.did,
-                next_hop,
-                destination,
-                relay_destination,
-                tx_id: tx_id.to_string(),
-                message_kind,
-                bytes: wire_bytes,
-                max_bytes: TRANSPORT_MAX_SIZE,
-            });
-            return Err(Error::MessageTooLarge(wire_bytes));
-        }
+        validate_payload_size(OversizedPayloadLog {
+            local: self.dht.did,
+            next_hop,
+            destination,
+            relay_destination,
+            tx_id: tx_id.to_string(),
+            message_kind,
+            bytes: wire_bytes,
+            max_bytes: TRANSPORT_MAX_SIZE,
+        })?;
         if self.admitted_send_connection(did)?.is_none() {
             if records_missing_connection_failure {
                 self.record_peer_message_send_failed(did).await;
@@ -354,6 +590,7 @@ impl SwarmTransport {
             data,
             completion,
             stop,
+            detached_admission,
             plan,
         );
         Ok(Some(PreparedOutboundTransfer {
@@ -379,13 +616,23 @@ impl SwarmTransport {
         data: bytes::Bytes,
         completion: OutboundCompletion,
         stop: StopToken,
+        detached_admission: Option<DetachedAdmission>,
         framing: Framing,
     ) -> FramedOutboundTransfer {
         let (transfer, receiver) = match framing {
-            Framing::Whole => OutboundTransfer::whole(route, data, completion, stop),
+            Framing::Whole => {
+                OutboundTransfer::whole(route, data, completion, stop, detached_admission)
+            }
             Framing::Chunked { chunk_size } => {
                 let chunks: ChunkFrames = Box::new(ChunkList::stream(data, chunk_size));
-                OutboundTransfer::chunked(route, self.session_sk.clone(), chunks, completion, stop)
+                OutboundTransfer::chunked(
+                    route,
+                    self.session_sk.clone(),
+                    chunks,
+                    completion,
+                    stop,
+                    detached_admission,
+                )
             }
         };
         FramedOutboundTransfer { transfer, receiver }
@@ -422,17 +669,35 @@ impl SwarmTransport {
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) async fn send_payload_detached_until_for_test(
+        &self,
+        payload: MessagePayload,
+        timeout_budget: Duration,
+        deadline: impl Future<Output = ()>,
+    ) -> Result<SendCompletionOutcome> {
+        self.do_send_payload_detached_until(
+            payload.relay.next_hop,
+            payload,
+            timeout_budget,
+            deadline,
+        )
+        .await
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) async fn send_payload_detached_observing_scheduler_submit_for_test(
         &self,
         payload: MessagePayload,
         observe_before_scheduler_submit: impl FnOnce(),
     ) -> Result<SendCompletionOutcome> {
+        let admission = DetachedAdmission::new();
         let prepared = self
             .prepare_outbound_transfer(
                 payload.relay.next_hop,
                 payload,
                 OutboundCompletion::Detached,
-                StopToken::never(),
+                admission.stop_token(),
+                Some(admission),
             )
             .await?;
         let Some(prepared) = prepared else {
@@ -442,17 +707,36 @@ impl SwarmTransport {
         self.submit_prepared_outbound_transfer(prepared).await
     }
 
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) async fn send_payload_detached_cancel_before_submit_for_test(
+        &self,
+        payload: MessagePayload,
+    ) -> Result<SendCompletionOutcome> {
+        let admission = DetachedAdmission::new();
+        let prepared = self
+            .prepare_outbound_transfer(
+                payload.relay.next_hop,
+                payload,
+                OutboundCompletion::Detached,
+                admission.stop_token(),
+                Some(admission.clone()),
+            )
+            .await?;
+        let Some(prepared) = prepared else {
+            return Ok(SendCompletionOutcome::Cancelled);
+        };
+        let handle = prepared.handle.clone();
+        admission.cancel();
+        handle.cancel_stopped();
+        self.submit_prepared_outbound_transfer(prepared).await
+    }
+
     pub(super) async fn send_payload_detached_with_outcome(
         &self,
         payload: MessagePayload,
     ) -> Result<SendCompletionOutcome> {
-        self.do_send_payload_with_completion(
-            payload.relay.next_hop,
-            payload,
-            OutboundCompletion::Detached,
-            StopToken::never(),
-        )
-        .await
+        self.do_send_payload_detached(payload.relay.next_hop, payload)
+            .await
     }
 }
 
@@ -472,13 +756,8 @@ impl PayloadSender for SwarmTransport {
     }
 
     async fn do_send_payload(&self, did: Did, payload: MessagePayload) -> Result<()> {
-        self.do_send_payload_with_completion(
-            did,
-            payload,
-            OutboundCompletion::Detached,
-            StopToken::never(),
-        )
-        .await
-        .map(|_| ())
+        self.do_send_payload_detached(did, payload)
+            .await
+            .map(|_| ())
     }
 }

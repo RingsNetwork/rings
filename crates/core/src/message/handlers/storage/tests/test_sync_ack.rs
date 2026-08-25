@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use super::test_support::next_payload_for_tx;
+use super::test_support::non_affine_placement;
 use super::test_support::storage_sync_report_payload;
 use super::test_support::NoopCallback;
 use crate::dht::entry::Entry;
@@ -239,6 +240,43 @@ async fn send_storage_sync_applies_local_destination_without_transport_send() ->
     assert_eq!(
         node.dht().storage.get(&placement_key.to_string()).await?,
         Some(stored_entry)
+    );
+    assert_no_more_msg([&node]).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn local_storage_sync_validates_entire_batch_before_persisting() -> Result<()> {
+    let node = prepare_node(SecretKey::random()).await;
+    let valid_entry = Entry::new(Did::from(101u32), vec![], EntryKind::Data);
+    let valid_key = valid_entry.did;
+    let invalid_entry = Entry::new(Did::from(102u32), vec![], EntryKind::Data);
+    let invalid_key = non_affine_placement(invalid_entry.did, node.swarm.storage_redundancy())?;
+    let sync_msg = SyncEntriesWithSuccessor {
+        purpose: StorageSyncPurpose::AdditiveRepair,
+        destination: StorageSyncDestination::PhysicalOwner(node.did()),
+        data: vec![
+            PlacedEntry::new(valid_key, valid_entry),
+            PlacedEntry::new(invalid_key, invalid_entry),
+        ],
+    };
+
+    let error = node
+        .swarm
+        .transport
+        .send_storage_sync(sync_msg)
+        .await
+        .expect_err("an invalid later placement must reject the complete local batch");
+
+    assert!(matches!(error, Error::InvalidMessage(_)));
+    assert_eq!(
+        node.dht().storage.get(&valid_key.to_string()).await?,
+        None,
+        "validation must finish before the first storage effect"
+    );
+    assert_eq!(
+        node.dht().storage.get(&invalid_key.to_string()).await?,
+        None
     );
     assert_no_more_msg([&node]).await;
     Ok(())

@@ -507,16 +507,14 @@ macro_rules! define_message_model {
                     $(Self::$variant(body) => message_storage_destination!($storage_route, body)),+
                 }
             }
-        }
 
-        #[cfg(test)]
-        impl Message {
             pub(crate) const fn kind(&self) -> MessageKind {
                 match self {
                     $(Self::$variant(_) => MessageKind::$variant),+
                 }
             }
 
+            #[cfg(test)]
             pub(crate) fn test_variants() -> Vec<Self> {
                 let fixture = tests::MessageFixture::new();
                 vec![$(Self::$variant(tests::sample_body::<$body>(&fixture))),+]
@@ -546,10 +544,6 @@ impl MessageClass {
             Self::Application => 3,
         }
     }
-
-    pub(crate) const fn is_control(self) -> bool {
-        matches!(self, Self::DhtControl)
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -566,7 +560,6 @@ impl MessageMeta {
         Ok(Self { kind })
     }
 
-    #[cfg(test)]
     pub(crate) const fn from_message(message: &Message) -> Self {
         Self {
             kind: message.kind(),

@@ -107,6 +107,31 @@ impl<T> TransferLane<T> {
         transfers.extend(self.queued.drain(..));
         transfers
     }
+
+    fn remove_ready_where(&mut self, predicate: &mut impl FnMut(&T) -> bool) -> Vec<T> {
+        let mut removed = Vec::new();
+        let mut retained = VecDeque::with_capacity(self.queued.len());
+        while let Some(item) = self.queued.pop_front() {
+            if predicate(&item) {
+                removed.push(item);
+            } else {
+                retained.push_back(item);
+            }
+        }
+        self.queued = retained;
+
+        let state = std::mem::replace(&mut self.state, TransferLaneState::Idle);
+        self.state = match state {
+            TransferLaneState::Runnable(item) if predicate(&item) => {
+                removed.push(item);
+                self.queued
+                    .pop_front()
+                    .map_or(TransferLaneState::Idle, TransferLaneState::Runnable)
+            }
+            state => state,
+        };
+        removed
+    }
 }
 
 /// Runnable lane head whose class was selected by this queue.
@@ -236,6 +261,15 @@ impl<T> TransferQueues<T> {
             .collect()
     }
 
+    /// Remove runnable and queued items matching `predicate` without disturbing
+    /// a lane head whose delivery future is still active.
+    pub(super) fn remove_ready_where(&mut self, mut predicate: impl FnMut(&T) -> bool) -> Vec<T> {
+        self.lanes
+            .iter_mut()
+            .flat_map(|lane| lane.remove_ready_where(&mut predicate))
+            .collect()
+    }
+
     fn is_runnable(&self, class: TransferClass) -> bool {
         self.lane(class).is_runnable()
     }
@@ -269,3 +303,7 @@ impl<T> TransferQueues<T> {
             .find(|class| self.is_runnable(*class))
     }
 }
+
+#[cfg(test)]
+#[path = "queue/property_tests.rs"]
+mod property_tests;

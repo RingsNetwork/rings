@@ -1,42 +1,49 @@
+//! Bounded inbound admission and per-lane actor scheduling.
+//!
+//! Raw transport frames are admitted synchronously when their lane ticket reaches the front.
+//! Every valid frame fits its lane's fixed reservation; shared capacity may be borrowed,
+//! but capacity pressure fails rather than parking ingress behind the actor that releases it.
+
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use futures::channel::mpsc;
 use futures::channel::oneshot;
 use futures::stream::FuturesUnordered;
 use futures::FutureExt;
 use futures::StreamExt;
+use rings_transport::core::callback::InboundFrameClass;
+use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
+use web_time::Instant;
 
 use super::CallbackError;
 use super::InboundProcessor;
 use super::PayloadHandlingError;
+use super::PreparedInboundFrame;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
-use crate::message::MessageMeta;
 use crate::message::MessagePayload;
-use crate::utils::acquire_fair_with_handoff;
-use crate::utils::CoordinatedFairWaitQueue;
-use crate::utils::FairCapacityDemand;
-use crate::utils::FairHandoff;
+use crate::utils::sleep;
 use crate::utils::ReservedCapacity;
 
 mod lane;
+mod reassembly;
 mod ticket;
-mod waiters;
 
 use self::lane::InboundLane;
 use self::lane::INBOUND_LANE_COUNT;
+use self::reassembly::process_chunk_event;
 use self::ticket::InboundCommand;
 use self::ticket::InboundSender;
 use self::ticket::InboundTicket;
-use self::waiters::wake_waiter;
-use self::waiters::AfterProgress;
-use self::waiters::InboundWaitQueues;
 
 const INBOUND_MAILBOX_CAPACITY: usize = 256;
 const INBOUND_MAILBOX_BYTE_CAPACITY: usize = 256 * 1024 * 1024;
@@ -49,12 +56,17 @@ const INBOUND_RESERVED_BYTES: [usize; INBOUND_LANE_COUNT] =
 const INBOUND_PEER_CAPACITY: usize = 32;
 const INBOUND_PEER_BYTE_CAPACITY: usize = 128 * 1024 * 1024;
 const INBOUND_COMMAND_DRAIN_BUDGET: usize = 32;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+const REASSEMBLY_CLEANUP_INTERVAL: Duration = Duration::from_millis(50);
+#[cfg(not(all(test, feature = "dummy", not(target_family = "wasm"))))]
+const REASSEMBLY_CLEANUP_INTERVAL: Duration = Duration::from_secs(1);
 const _: () = {
     assert!(INBOUND_PEER_CAPACITY < INBOUND_MAILBOX_CAPACITY);
     assert!(INBOUND_PEER_BYTE_CAPACITY < INBOUND_MAILBOX_BYTE_CAPACITY);
     assert!(crate::consts::TRANSPORT_MAX_SIZE * 2 <= INBOUND_PEER_BYTE_CAPACITY);
     assert!(INBOUND_RESERVED_TRANSFERS_PER_LANE * INBOUND_LANE_COUNT <= INBOUND_MAILBOX_CAPACITY);
     assert!(INBOUND_RESERVED_BYTES_PER_LANE * INBOUND_LANE_COUNT <= INBOUND_MAILBOX_BYTE_CAPACITY);
+    assert!(memory_reservation(MAX_DATA_CHANNEL_MESSAGE_SIZE) <= INBOUND_RESERVED_BYTES_PER_LANE);
 };
 
 #[derive(Clone, Copy)]
@@ -69,27 +81,6 @@ impl InboundCapacityState {
             messages: ReservedCapacity::new(),
             bytes: ReservedCapacity::new(),
         }
-    }
-    fn reservation_covers(&self, lane: InboundLane, bytes: usize) -> bool {
-        self.messages
-            .reservation_covers(lane.index(), 1, &INBOUND_RESERVED_TRANSFERS)
-            && self
-                .bytes
-                .reservation_covers(lane.index(), bytes, &INBOUND_RESERVED_BYTES)
-    }
-
-    fn can_reserve_demand(&self, demand: FairCapacityDemand) -> bool {
-        self.messages.can_reserve(
-            demand.class_index(),
-            1,
-            INBOUND_MAILBOX_CAPACITY,
-            &INBOUND_RESERVED_TRANSFERS,
-        ) && self.bytes.can_reserve(
-            demand.class_index(),
-            demand.cost(),
-            INBOUND_MAILBOX_BYTE_CAPACITY,
-            &INBOUND_RESERVED_BYTES,
-        )
     }
     fn try_reserve(
         &mut self,
@@ -174,7 +165,6 @@ impl InboundPeerCapacityState {
 pub(crate) struct InboundCapacity {
     state: Mutex<InboundCapacityState>,
     peer_states: Mutex<BTreeMap<Option<Did>, InboundPeerCapacityState>>,
-    peer_waiters: Mutex<InboundWaitQueues>,
 }
 
 impl InboundCapacity {
@@ -182,69 +172,7 @@ impl InboundCapacity {
         Self {
             state: Mutex::new(InboundCapacityState::new()),
             peer_states: Mutex::new(BTreeMap::new()),
-            peer_waiters: Mutex::new(InboundWaitQueues::default()),
         }
-    }
-
-    fn waiters_for_peer(&self, peer: Option<Did>) -> Arc<CoordinatedFairWaitQueue> {
-        let mut waiters = self
-            .peer_waiters
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        waiters.queue_for_peer(peer)
-    }
-
-    fn start_waiter_wake_round(&self) {
-        let target = self
-            .peer_waiters
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .request_wake_round();
-        wake_waiter(&self.peer_waiters, target);
-    }
-
-    fn handle_waiter_handoff(&self, peer: Option<Did>, handoff: FairHandoff) {
-        let mut waiters = self
-            .peer_waiters
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        // Hold the coordinator through snapshot and close; release FIFO locks before capacity.
-        let can_scan = if matches!(&handoff, FairHandoff::Progress(_)) {
-            let front_demands = waiters.front_demands();
-            let state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            front_demands
-                .into_iter()
-                .any(|demand| state.can_reserve_demand(demand))
-        } else {
-            false
-        };
-        let after_progress = AfterProgress::from_capacity(can_scan);
-        let target = waiters.handle_handoff(peer, handoff, after_progress);
-        drop(waiters);
-        wake_waiter(&self.peer_waiters, target);
-    }
-    fn try_admit_unqueued(
-        self: &Arc<Self>,
-        peer: Option<Did>,
-        lane: InboundLane,
-        bytes: usize,
-    ) -> Result<InboundCapacityPermit> {
-        let mut waiters = self
-            .peer_waiters
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(queue) = waiters.existing_queue(peer) {
-            drop(waiters);
-            return queue.try_admit_unqueued(memory_capacity_error(bytes), || {
-                self.try_acquire(peer, lane, bytes)
-            });
-        }
-        let result = self.try_acquire(peer, lane, bytes);
-        drop(waiters);
-        result
     }
 
     fn try_acquire(
@@ -252,25 +180,6 @@ impl InboundCapacity {
         peer: Option<Did>,
         lane: InboundLane,
         bytes: usize,
-    ) -> Result<InboundCapacityPermit> {
-        self.try_acquire_inner(peer, lane, bytes, false)
-    }
-
-    fn try_acquire_reserved(
-        self: &Arc<Self>,
-        peer: Option<Did>,
-        lane: InboundLane,
-        bytes: usize,
-    ) -> Result<InboundCapacityPermit> {
-        self.try_acquire_inner(peer, lane, bytes, true)
-    }
-
-    fn try_acquire_inner(
-        self: &Arc<Self>,
-        peer: Option<Did>,
-        lane: InboundLane,
-        bytes: usize,
-        reserved_only: bool,
     ) -> Result<InboundCapacityPermit> {
         let mut peer_states = self
             .peer_states
@@ -291,9 +200,6 @@ impl InboundCapacity {
             }
             Err(CapacityRejection::Bytes) => return Err(peer_memory_capacity_error(peer, bytes)),
         }
-        if reserved_only && !state.reservation_covers(lane, bytes) {
-            return Err(memory_capacity_error(bytes));
-        }
         match state.try_reserve(lane, bytes) {
             Ok(()) => {}
             Err(CapacityRejection::Count) => {
@@ -312,7 +218,7 @@ impl InboundCapacity {
         })
     }
 
-    async fn acquire(
+    fn acquire(
         self: &Arc<Self>,
         peer: Option<Did>,
         lane: InboundLane,
@@ -320,22 +226,7 @@ impl InboundCapacity {
     ) -> Result<InboundCapacityPermit> {
         validate_memory_request(lane, bytes)?;
         validate_peer_memory_request(peer, bytes)?;
-        if let Ok(permit) = self.try_acquire_reserved(peer, lane, bytes) {
-            return Ok(permit);
-        }
-        if bytes <= INBOUND_RESERVED_BYTES_PER_LANE {
-            return self.try_admit_unqueued(peer, lane, bytes);
-        }
-        let waiters = self.waiters_for_peer(peer);
-        acquire_fair_with_handoff(
-            &waiters,
-            FairCapacityDemand::new(lane.index(), bytes),
-            memory_capacity_error(bytes),
-            || Error::InboundMailboxClosed,
-            || self.try_acquire(peer, lane, bytes),
-            |handoff| self.handle_waiter_handoff(peer, handoff),
-        )
-        .await
+        self.try_acquire(peer, lane, bytes)
     }
 
     #[cfg(all(test, not(target_family = "wasm")))]
@@ -345,14 +236,6 @@ impl InboundCapacity {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .messages
             .admitted()
-    }
-
-    #[cfg(test)]
-    fn waiter_queue_count_for_test(&self) -> usize {
-        self.peer_waiters
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len()
     }
 }
 
@@ -370,15 +253,6 @@ impl InboundCapacityPermit {
         }
         validate_memory_request(lane, bytes)?;
         validate_peer_memory_request(self.peer, bytes)?;
-        self.try_transition_inner(lane, bytes, false)
-    }
-
-    fn try_transition_inner(
-        &mut self,
-        lane: InboundLane,
-        bytes: usize,
-        reserved_only: bool,
-    ) -> Result<()> {
         let mut peer_states = self
             .capacity
             .peer_states
@@ -405,18 +279,12 @@ impl InboundCapacityPermit {
         }
         let mut next = *state;
         next.release(self.lane, self.bytes);
-        if reserved_only && !next.reservation_covers(lane, bytes) {
-            return Err(memory_capacity_error(bytes));
-        }
         match next.try_reserve(lane, bytes) {
             Ok(()) => {
                 peer_states.insert(self.peer, next_peer);
                 *state = next;
                 self.lane = lane;
                 self.bytes = bytes;
-                drop(state);
-                drop(peer_states);
-                self.capacity.start_waiter_wake_round();
                 Ok(())
             }
             Err(CapacityRejection::Count) => Err(Error::InboundMailboxCapacityExceeded {
@@ -446,9 +314,6 @@ impl Drop for InboundCapacityPermit {
                 peer_states.remove(&self.peer);
             }
         }
-        drop(state);
-        drop(peer_states);
-        self.capacity.start_waiter_wake_round();
     }
 }
 
@@ -464,14 +329,16 @@ struct InboundEvent {
     sequence: u64,
     peer: Option<Did>,
     payload: MessagePayload,
-    meta: MessageMeta,
+    prepared_message: Option<crate::message::Message>,
+    lane: InboundLane,
+    is_chunk: bool,
     permit: InboundCapacityPermit,
     reply: InboundReply,
 }
 
 impl InboundEvent {
     const fn lane(&self) -> InboundLane {
-        InboundLane::from_meta(self.meta)
+        self.lane
     }
 }
 
@@ -493,41 +360,56 @@ impl InboundMailbox {
         }
     }
 
-    pub(super) async fn submit(
+    pub(super) async fn submit_prepared(
         &self,
         processor: &InboundProcessor,
         peer: Option<Did>,
         bytes: &[u8],
+        prepared: PreparedInboundFrame,
     ) -> Result<()> {
-        if !self.actor_available {
-            return Err(Error::InboundMailboxRuntimeUnavailable);
+        self.ensure_actor_available()?;
+        let lane = InboundLane::from_frame_class(prepared.class);
+        let is_chunk = prepared.class == InboundFrameClass::Reassembly;
+        self.submit_to_lane(processor, peer, bytes, lane, is_chunk, Some(prepared))
+            .await
+    }
+
+    fn ensure_actor_available(&self) -> Result<()> {
+        if self.actor_available {
+            Ok(())
+        } else {
+            Err(Error::InboundMailboxRuntimeUnavailable)
         }
-        let meta = match MessagePayload::message_meta_from_wire(bytes) {
-            Ok(meta) => meta,
-            Err(error) => {
-                processor.record_receive_failure(peer).await;
-                return Err(error);
-            }
-        };
-        let lane = InboundLane::from_meta(meta);
+    }
+
+    async fn submit_to_lane(
+        &self,
+        processor: &InboundProcessor,
+        peer: Option<Did>,
+        bytes: &[u8],
+        lane: InboundLane,
+        is_chunk: bool,
+        prepared: Option<PreparedInboundFrame>,
+    ) -> Result<()> {
         let mut ticket = self.reserve_ticket(lane)?;
         ticket.wait_for_admission_turn().await;
         let permit = self
             .capacity
-            .acquire(peer, lane, memory_reservation(bytes.len()))
-            .await?;
+            .acquire(peer, lane, memory_reservation(bytes.len()))?;
         ticket.release_admission_turn();
         if !processor.pending_connection_allows_message(peer).await? {
             return Ok(());
         }
-        let payload = decode_payload(processor, peer, bytes).await?;
+        let decoded = decode_payload(processor, peer, bytes, prepared).await?;
         let (reply, completion) = oneshot::channel();
         let sequence = ticket.sequence();
         ticket.commit(InboundEvent {
             sequence,
             peer,
-            payload,
-            meta,
+            payload: decoded.payload,
+            prepared_message: decoded.prepared_message,
+            lane,
+            is_chunk,
             permit,
             reply,
         })?;
@@ -657,6 +539,8 @@ struct InboundActor {
     queues: InboundQueues,
     active: FuturesUnordered<InboundTaskFuture>,
     active_lanes: [Option<u64>; INBOUND_LANE_COUNT],
+    reassembly_handoff_barrier: Option<ReassemblyHandoffBarrier>,
+    next_reassembly_cleanup: Instant,
     input_closed: bool,
 }
 
@@ -668,12 +552,18 @@ impl InboundActor {
             queues: InboundQueues::new(),
             active: FuturesUnordered::new(),
             active_lanes: [None; INBOUND_LANE_COUNT],
+            reassembly_handoff_barrier: None,
+            next_reassembly_cleanup: Instant::now() + REASSEMBLY_CLEANUP_INTERVAL,
             input_closed: false,
         }
     }
 
     async fn run(mut self) {
         loop {
+            if self.reassembly_cleanup_delay().is_zero() {
+                self.cleanup_expired_reassembly().await;
+            }
+            self.release_started_reassembly_handoff();
             self.drain_available();
             if self.input_closed {
                 return;
@@ -683,16 +573,19 @@ impl InboundActor {
                 self.wait_for_input().await;
                 continue;
             }
+            let cleanup_delay = self.reassembly_cleanup_delay();
             let input = self.receiver.next().fuse();
             let completed = self.active.next().fuse();
-            futures::pin_mut!(input, completed);
+            let cleanup = sleep(cleanup_delay).fuse();
+            futures::pin_mut!(input, completed, cleanup);
             futures::select! {
                 event = input => self.handle_input(event),
                 completion = completed => {
                     if let Some(completion) = completion {
                         self.handle_completion(completion);
                     }
-                }
+                },
+                _ = cleanup => self.cleanup_expired_reassembly().await,
             }
         }
     }
@@ -722,6 +615,13 @@ impl InboundActor {
             let Some(sequence) = self.queues.front_sequence(lane) else {
                 continue;
             };
+            if self
+                .reassembly_handoff_barrier
+                .as_ref()
+                .is_some_and(|barrier| barrier.blocks(lane, sequence))
+            {
+                continue;
+            }
             // The nested class is unknown until reassembly completes. Preserve data-plane order
             // across that handoff, while keeping control traffic independent for liveness.
             if lane.is_logical_data()
@@ -732,9 +632,20 @@ impl InboundActor {
             let Some(event) = self.queues.pop(lane) else {
                 continue;
             };
+            let handoff_started = self
+                .reassembly_handoff_barrier
+                .as_ref()
+                .filter(|barrier| barrier.sequence == sequence)
+                .map(ReassemblyHandoffBarrier::start_marker);
             *active_lane = Some(sequence);
-            self.active
-                .push(Box::pin(process_event(self.processor.clone(), event)));
+            self.active.push(Box::pin(process_event(
+                self.processor.clone(),
+                event,
+                handoff_started.clone(),
+            )));
+            if handoff_started.is_some() {
+                break;
+            }
         }
     }
 
@@ -745,6 +656,9 @@ impl InboundActor {
                 .copied()
                 .flatten(),
             self.queues.front_sequence(InboundLane::REASSEMBLY),
+            self.reassembly_handoff_barrier
+                .as_ref()
+                .map(|barrier| barrier.sequence),
         ]
         .into_iter()
         .flatten()
@@ -752,8 +666,24 @@ impl InboundActor {
     }
 
     async fn wait_for_input(&mut self) {
-        let event = self.receiver.next().await;
-        self.handle_input(event);
+        let cleanup_delay = self.reassembly_cleanup_delay();
+        let input = self.receiver.next().fuse();
+        let cleanup = sleep(cleanup_delay).fuse();
+        futures::pin_mut!(input, cleanup);
+        futures::select! {
+            event = input => self.handle_input(event),
+            _ = cleanup => self.cleanup_expired_reassembly().await,
+        }
+    }
+
+    fn reassembly_cleanup_delay(&self) -> Duration {
+        self.next_reassembly_cleanup
+            .saturating_duration_since(Instant::now())
+    }
+
+    async fn cleanup_expired_reassembly(&mut self) {
+        self.processor.remove_expired_reassembly().await;
+        self.next_reassembly_cleanup = Instant::now() + REASSEMBLY_CLEANUP_INTERVAL;
     }
 
     fn handle_input(&mut self, command: Option<InboundCommand>) {
@@ -784,12 +714,60 @@ impl InboundActor {
             tracing::error!(lane = ?completion.lane, "inbound actor completed an unknown lane");
         }
         if let Some(next) = completion.next {
+            if next.lane().is_logical_data() {
+                debug_assert!(self.reassembly_handoff_barrier.is_none());
+                self.reassembly_handoff_barrier =
+                    Some(ReassemblyHandoffBarrier::new(next.sequence));
+            }
             self.queues.push_ready(next);
+        }
+    }
+
+    fn release_started_reassembly_handoff(&mut self) {
+        if self
+            .reassembly_handoff_barrier
+            .as_ref()
+            .is_some_and(ReassemblyHandoffBarrier::has_started)
+        {
+            self.reassembly_handoff_barrier = None;
         }
     }
 }
 
-async fn process_event(processor: InboundProcessor, event: InboundEvent) -> InboundTaskCompletion {
+struct ReassemblyHandoffBarrier {
+    sequence: u64,
+    started: Arc<AtomicBool>,
+}
+
+impl ReassemblyHandoffBarrier {
+    fn new(sequence: u64) -> Self {
+        Self {
+            sequence,
+            started: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn start_marker(&self) -> Arc<AtomicBool> {
+        self.started.clone()
+    }
+
+    fn has_started(&self) -> bool {
+        self.started.load(Ordering::Acquire)
+    }
+
+    fn blocks(&self, lane: InboundLane, sequence: u64) -> bool {
+        lane == InboundLane::REASSEMBLY || (lane.is_logical_data() && sequence > self.sequence)
+    }
+}
+
+async fn process_event(
+    processor: InboundProcessor,
+    event: InboundEvent,
+    handoff_started: Option<Arc<AtomicBool>>,
+) -> InboundTaskCompletion {
+    if let Some(started) = handoff_started {
+        started.store(true, Ordering::Release);
+    }
     let lane = event.lane();
     let sequence = event.sequence;
     match validate_event(&processor, &event).await {
@@ -811,7 +789,7 @@ async fn process_event(processor: InboundProcessor, event: InboundEvent) -> Inbo
             };
         }
     }
-    if event.meta.kind().is_chunk() {
+    if event.is_chunk {
         let next = process_chunk_event(&processor, event).await;
         return InboundTaskCompletion {
             lane,
@@ -820,7 +798,7 @@ async fn process_event(processor: InboundProcessor, event: InboundEvent) -> Inbo
         };
     }
 
-    let result = process_logical_message(&processor, &event.payload)
+    let result = process_logical_message(&processor, &event.payload, event.prepared_message)
         .await
         .map_err(|error| match error {
             PayloadHandlingError::Core(error) => InboundFailure::Core(error),
@@ -856,73 +834,43 @@ async fn validate_event(
         .map_err(InboundFailure::Core)
 }
 
-async fn process_chunk_event(
-    processor: &InboundProcessor,
-    mut event: InboundEvent,
-) -> Option<InboundEvent> {
-    let bytes = match processor.handle_chunk(&event.payload).await {
-        Ok(Some(bytes)) => bytes,
-        Ok(None) => {
-            finish_reply(event.reply, Ok(()));
-            return None;
-        }
-        Err(error) => {
-            processor.record_receive_failure(event.peer).await;
-            finish_reply(event.reply, Err(InboundFailure::Core(error)));
-            return None;
-        }
-    };
-    let meta = match MessagePayload::message_meta_from_wire(bytes.as_ref()) {
-        Ok(meta) => meta,
-        Err(error) => {
-            processor.record_receive_failure(event.peer).await;
-            finish_reply(event.reply, Err(InboundFailure::Core(error)));
-            return None;
-        }
-    };
-    if meta.kind().is_chunk() {
-        finish_reply(
-            event.reply,
-            Err(InboundFailure::Core(Error::NestedChunkMessage)),
-        );
-        return None;
-    }
-    if let Err(error) = event.permit.try_transition(
-        InboundLane::from_meta(meta),
-        memory_reservation(bytes.as_ref().len()),
-    ) {
-        finish_reply(event.reply, Err(InboundFailure::Core(error)));
-        return None;
-    }
-    match decode_payload(processor, event.peer, bytes.as_ref()).await {
-        Ok(payload) => Some(InboundEvent {
-            sequence: event.sequence,
-            peer: event.peer,
-            payload,
-            meta,
-            permit: event.permit,
-            reply: event.reply,
-        }),
-        Err(error) => {
-            finish_reply(event.reply, Err(InboundFailure::Core(error)));
-            None
-        }
-    }
-}
-
 async fn process_logical_message(
     processor: &InboundProcessor,
     payload: &MessagePayload,
+    prepared_message: Option<crate::message::Message>,
 ) -> std::result::Result<(), PayloadHandlingError> {
-    processor.handle_payload(payload).await
+    processor.handle_payload(payload, prepared_message).await
+}
+
+struct DecodedInboundFrame {
+    payload: MessagePayload,
+    prepared_message: Option<crate::message::Message>,
 }
 
 async fn decode_payload(
     processor: &InboundProcessor,
     peer: Option<Did>,
     bytes: &[u8],
-) -> Result<MessagePayload> {
-    processor.decode_verified_message(peer, bytes).await
+    prepared: Option<PreparedInboundFrame>,
+) -> Result<DecodedInboundFrame> {
+    match prepared {
+        Some(PreparedInboundFrame {
+            payload, message, ..
+        }) => {
+            let payload = processor.accept_preverified_message(peer, payload).await?;
+            Ok(DecodedInboundFrame {
+                payload,
+                prepared_message: Some(message),
+            })
+        }
+        None => {
+            let payload = processor.decode_verified_message(peer, bytes).await?;
+            Ok(DecodedInboundFrame {
+                payload,
+                prepared_message: None,
+            })
+        }
+    }
 }
 
 fn finish_reply(reply: InboundReply, result: std::result::Result<(), InboundFailure>) {

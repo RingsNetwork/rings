@@ -1,3 +1,4 @@
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 
@@ -76,6 +77,30 @@ fn assert_wire_classification(
     assert_eq!(typed.class(), expected_class);
     assert_eq!(decoded.kind(), typed.kind());
     assert_eq!(decoded.class(), typed.class());
+}
+
+#[test]
+fn detached_first_frame_success_and_cancellation_are_mutually_exclusive() {
+    let cancelled = DetachedAdmission::new();
+    let cancelled_stop = cancelled.stop_token();
+    assert_eq!(cancelled.cancel(), DetachedAdmissionCancel::Cancelled);
+    assert!(cancelled.try_mark_irrevocable().is_none());
+    assert!(!cancelled.try_succeed());
+    assert!(cancelled_stop.should_stop());
+
+    let succeeded = DetachedAdmission::new();
+    let succeeded_stop = succeeded.stop_token();
+    assert!(succeeded.try_mark_irrevocable().is_some());
+    assert!(succeeded.try_succeed());
+    assert!(succeeded.try_mark_irrevocable().is_some());
+    assert_eq!(succeeded.cancel(), DetachedAdmissionCancel::MustAwait);
+    assert!(!succeeded_stop.should_stop());
+
+    let irrevocable = DetachedAdmission::new();
+    let irrevocable_stop = irrevocable.stop_token();
+    assert!(irrevocable.try_mark_irrevocable().is_some());
+    assert_eq!(irrevocable.cancel(), DetachedAdmissionCancel::MustAwait);
+    assert!(!irrevocable_stop.should_stop());
 }
 
 fn admit_single_frame_transfer(
@@ -311,6 +336,33 @@ fn draining_a_waiting_lane_returns_its_active_and_queued_transfers() {
 }
 
 #[test]
+fn removing_ready_items_preserves_waiting_heads_and_fifo_order() {
+    let mut queues = TransferQueues::default();
+    push(&mut queues, TransferClass::Application, "waiting");
+    push(&mut queues, TransferClass::Application, "cancel-1");
+    push(&mut queues, TransferClass::Application, "keep");
+    push(&mut queues, TransferClass::Application, "cancel-2");
+    let waiting = queues.pop().expect("lane head must be runnable");
+    queues.wait_for_delivery(17, waiting);
+
+    let removed = queues.remove_ready_where(|(_, label)| label.starts_with("cancel"));
+
+    assert_eq!(
+        removed
+            .into_iter()
+            .map(|(_, label)| label)
+            .collect::<Vec<_>>(),
+        vec!["cancel-1", "cancel-2"]
+    );
+    let waiting = queues
+        .take_waiting(TransferClass::Application, 17)
+        .expect("active delivery must remain owned by the lane");
+    queues.finish_current(TransferClass::Application);
+    assert_eq!(waiting.item().1, "waiting");
+    assert_eq!(pop_and_finish(&mut queues), Some("keep"));
+}
+
+#[test]
 fn transfer_capacity_is_strict_across_permit_lifetimes() {
     let global = Arc::new(GlobalTransferCapacity::new());
     let capacity = Arc::new(TransferCapacity::new(global));
@@ -390,12 +442,14 @@ fn transfer_memory_capacity_is_weighted_and_released() {
 
 #[test]
 fn shutdown_closes_channel_without_worker_owned_sender() {
-    let (sender, mut receiver) = mpsc::channel(OUTBOUND_TRANSFER_QUEUE_CAPACITY);
+    let (sender, mut receiver) = mailbox::channel();
     let stop = StopSource::new();
     let handle = OutboundPeerHandle {
-        peer: Did::from(8_u32),
         state: Arc::new(OutboundPeerState {
-            sender: Mutex::new(sender),
+            #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+            peer: Did::from(42_u32),
+            sender,
+            cancel_requested: Arc::new(AtomicBool::new(false)),
             capacity_anchor: Arc::new(TransferCapacity::new(Arc::new(
                 GlobalTransferCapacity::new(),
             ))),
@@ -442,12 +496,14 @@ fn shutdown_batch_finalizes_ready_and_buffered_before_first_publish() {
 
 #[test]
 fn final_handle_drop_requests_stop_before_channel_close() {
-    let (sender, mut receiver) = mpsc::channel(OUTBOUND_TRANSFER_QUEUE_CAPACITY);
+    let (sender, mut receiver) = mailbox::channel();
     let stop = StopSource::new();
     let handle = OutboundPeerHandle {
-        peer: Did::from(10_u32),
         state: Arc::new(OutboundPeerState {
-            sender: Mutex::new(sender),
+            #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+            peer: Did::from(42_u32),
+            sender,
+            cancel_requested: Arc::new(AtomicBool::new(false)),
             capacity_anchor: Arc::new(TransferCapacity::new(Arc::new(
                 GlobalTransferCapacity::new(),
             ))),
@@ -501,7 +557,7 @@ async fn peer_capacity_survives_scheduler_generation_replacement() {
     for _ in 0..OUTBOUND_DATA_TRANSFER_CAPACITY {
         permits.push(
             first
-                .reserve(TransferClass::Application, 1)
+                .reserve(peer, TransferClass::Application, 1)
                 .expect("first generation must fill its declared capacity"),
         );
     }
@@ -512,14 +568,16 @@ async fn peer_capacity_survives_scheduler_generation_replacement() {
         .expect("replacement scheduler generation must start");
 
     assert!(matches!(
-        replacement.reserve(TransferClass::Application, 1),
+        replacement.reserve(peer, TransferClass::Application, 1),
         Err(Error::OutboundTransferCapacityExceeded {
             peer: error_peer,
             capacity: OUTBOUND_DATA_TRANSFER_CAPACITY,
         }) if error_peer == peer
     ));
     permits.pop();
-    assert!(replacement.reserve(TransferClass::Application, 1).is_ok());
+    assert!(replacement
+        .reserve(peer, TransferClass::Application, 1)
+        .is_ok());
 }
 
 #[cfg(not(target_family = "wasm"))]

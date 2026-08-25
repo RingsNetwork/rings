@@ -16,6 +16,8 @@ pub use crate::connections::dummy::DummyConnection;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 pub use crate::connections::dummy::DummyTransport;
 #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
+pub use crate::connections::native_webrtc::NativePhysicalCloseWitness;
+#[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
 pub use crate::connections::native_webrtc::WebrtcConnection;
 #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
 pub use crate::connections::native_webrtc::WebrtcTransport;

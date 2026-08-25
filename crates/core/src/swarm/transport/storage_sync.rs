@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::mem;
 
 use super::delivery::SendCompletionOutcome;
 use super::SwarmTransport;
@@ -11,6 +12,7 @@ use crate::dht::StorageSyncDestination;
 use crate::dht::StorageSyncPurpose;
 use crate::error::Error;
 use crate::error::Result;
+use crate::message::yield_core_actor_step;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
@@ -96,6 +98,118 @@ fn storage_sync_destination_accepts_placement(
     }
 }
 
+enum StorageSyncBatchPhase {
+    Validate,
+    Persist,
+}
+
+pub(crate) enum StorageSyncBatchStep {
+    Pending,
+    Complete(Vec<SyncedEntryAck>),
+}
+
+pub(crate) struct StorageSyncBatch<'data> {
+    destination: StorageSyncDestination,
+    data: &'data [PlacedEntry],
+    validate_index: usize,
+    accepted: Vec<SyncedEntryAck>,
+    persist_index: usize,
+    phase: StorageSyncBatchPhase,
+}
+
+impl<'data> StorageSyncBatch<'data> {
+    pub(crate) fn new(msg: &'data SyncEntriesWithSuccessor) -> Self {
+        Self {
+            destination: msg.destination,
+            data: &msg.data,
+            validate_index: 0,
+            accepted: Vec::with_capacity(msg.data.len()),
+            persist_index: 0,
+            phase: StorageSyncBatchPhase::Validate,
+        }
+    }
+
+    async fn run(mut self, transport: &SwarmTransport) -> Result<Vec<SyncedEntryAck>> {
+        loop {
+            match self.step(transport).await? {
+                StorageSyncBatchStep::Pending => yield_core_actor_step().await,
+                StorageSyncBatchStep::Complete(acks) => return Ok(acks),
+            }
+        }
+    }
+
+    pub(crate) async fn step(
+        &mut self,
+        transport: &SwarmTransport,
+    ) -> Result<StorageSyncBatchStep> {
+        match self.phase {
+            StorageSyncBatchPhase::Validate => match self.validate_one(transport)? {
+                Some(step) => Ok(step),
+                None => self.persist_one(transport).await,
+            },
+            StorageSyncBatchPhase::Persist => self.persist_one(transport).await,
+        }
+    }
+
+    fn validate_one(&mut self, transport: &SwarmTransport) -> Result<Option<StorageSyncBatchStep>> {
+        let Some(placed) = self.data.get(self.validate_index) else {
+            self.phase = StorageSyncBatchPhase::Persist;
+            return Ok(None);
+        };
+        self.validate_index += 1;
+
+        // Preservation: every input is validated before the first storage
+        // effect, so a later invalid input leaves the entire batch unwritten.
+        if should_persist_synced_entry(transport, self.destination, placed.key)? {
+            placed.validate_placement(transport.storage_redundancy())?;
+            let entry = placed.entry.clone().try_into_storage_entry()?;
+            self.accepted.push(SyncedEntryAck::new(placed.key, entry));
+        }
+
+        Ok(Some(StorageSyncBatchStep::Pending))
+    }
+
+    async fn persist_one(&mut self, transport: &SwarmTransport) -> Result<StorageSyncBatchStep> {
+        let Some(ack) = self.accepted.get(self.persist_index) else {
+            return Ok(self.complete());
+        };
+        let key = ack.key;
+        let entry = ack.entry.clone();
+
+        transport.dht.join_storage_entry(key, entry).await?;
+        self.persist_index += 1;
+
+        if self.persist_index == self.accepted.len() {
+            Ok(self.complete())
+        } else {
+            Ok(StorageSyncBatchStep::Pending)
+        }
+    }
+
+    fn complete(&mut self) -> StorageSyncBatchStep {
+        StorageSyncBatchStep::Complete(mem::take(&mut self.accepted))
+    }
+}
+
+fn should_persist_synced_entry(
+    transport: &SwarmTransport,
+    destination: StorageSyncDestination,
+    placement: Did,
+) -> Result<bool> {
+    if !storage_sync_destination_accepts_placement(destination, placement) {
+        return Ok(false);
+    }
+
+    match transport.dht.find_storage_owner(placement)? {
+        // Invariant: `Some(_)` is the local-storage branch. In non-virtual
+        // Chord storage the DID carried by `Some` is the successor witness used
+        // for fallback lookup, not a remote-owner denial.
+        PeerRingAction::Some(_) => Ok(true),
+        PeerRingAction::RemoteAction(_, PeerRingRemoteAction::FindSuccessor(_)) => Ok(false),
+        action => Err(Error::unexpected_peer_ring_action(action)),
+    }
+}
+
 // Post: pending.len() < STORAGE_SYNC_ACK_CAPACITY.
 // Preservation: evicting an old pending capability before inserting a new one
 // can only make that old report fail validation; it cannot make an unproven
@@ -114,24 +228,12 @@ fn evict_storage_sync_acks(pending: &mut StorageSyncAckMap) {
 }
 
 impl SwarmTransport {
-    async fn apply_local_storage_sync(&self, msg: &SyncEntriesWithSuccessor) -> Result<()> {
-        for placed in msg.data.iter() {
-            if !storage_sync_destination_accepts_placement(msg.destination, placed.key) {
-                continue;
-            }
-
-            match self.dht.find_storage_owner(placed.key)? {
-                PeerRingAction::Some(_) => {
-                    placed.validate_placement(self.storage_redundancy())?;
-                    self.dht
-                        .join_storage_entry(placed.key, placed.entry.clone())
-                        .await?;
-                }
-                PeerRingAction::RemoteAction(_, PeerRingRemoteAction::FindSuccessor(_)) => {}
-                action => return Err(Error::unexpected_peer_ring_action(action)),
-            }
-        }
-        Ok(())
+    /// Validate a complete local storage-sync batch before persisting any entry.
+    pub(crate) async fn persist_storage_sync_entries(
+        &self,
+        msg: &SyncEntriesWithSuccessor,
+    ) -> Result<Vec<SyncedEntryAck>> {
+        StorageSyncBatch::new(msg).run(self).await
     }
 
     /// Record the exact ack capability created by an outbound storage-sync payload.
@@ -241,11 +343,11 @@ impl SwarmTransport {
     ) -> Result<(uuid::Uuid, SendCompletionOutcome)> {
         let destination = msg.destination.did();
         let Some(next_hop) = self.dht.next_hop_for_storage_sync(msg.destination)? else {
-            self.apply_local_storage_sync(&msg).await?;
+            self.persist_storage_sync_entries(&msg).await?;
             return Ok((uuid::Uuid::new_v4(), SendCompletionOutcome::Succeeded));
         };
         if next_hop == self.dht.did {
-            self.apply_local_storage_sync(&msg).await?;
+            self.persist_storage_sync_entries(&msg).await?;
             return Ok((uuid::Uuid::new_v4(), SendCompletionOutcome::Succeeded));
         }
         let payload = MessagePayload::new_send(

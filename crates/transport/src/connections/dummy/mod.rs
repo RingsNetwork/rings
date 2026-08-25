@@ -6,22 +6,24 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use dashmap::DashMap;
 use lazy_static::lazy_static;
-use rand::distributions::Distribution;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
+use crate::callback::AdmittedInboundFrame;
+use crate::callback::InboundFrameCapacity;
 use crate::callback::InnerTransportCallback;
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateSnapshot;
+use crate::core::transport::IrrevocableSendGuard;
 use crate::core::transport::SendPermit;
 use crate::core::transport::TransportInterface;
 use crate::core::transport::TransportMessage;
@@ -35,6 +37,13 @@ use crate::notifier::Notifier;
 use crate::pool::Pool;
 use crate::sync_utils::lock_recover;
 use crate::webrtc_config::WebrtcUdpPortRange;
+
+mod delay;
+mod retirement;
+
+use self::delay::random;
+use self::delay::random_delay;
+use self::retirement::DummyRetirementFence;
 
 /// Max delay in ms on sending message
 const DUMMY_DELAY_MAX: u64 = 100;
@@ -98,8 +107,12 @@ thread_local! {
     static SEND_MESSAGE_GATE_WAITING: Cell<bool> = const { Cell::new(false) };
     /// Test-only releasable gate immediately after the send permit linearizes.
     static POST_PERMIT_SEND_GATE: RefCell<Option<Arc<Notify>>> = const { RefCell::new(None) };
-    /// Whether a dummy send is suspended after its permit was accepted.
+    /// Whether a dummy send is suspended after its initial permit check.
     static POST_PERMIT_SEND_GATE_WAITING: Cell<bool> = const { Cell::new(false) };
+    /// Test-only releasable gate after the send becomes irrevocable.
+    static IRREVOCABLE_SEND_GATE: RefCell<Option<Arc<Notify>>> = const { RefCell::new(None) };
+    /// Whether a dummy send is suspended after becoming irrevocable.
+    static IRREVOCABLE_SEND_GATE_WAITING: Cell<bool> = const { Cell::new(false) };
     /// Test-only per-thread threshold that makes `send_message` stay pending after
     /// this many messages have already been dispatched.
     static SEND_MESSAGE_PENDING_AFTER_SENT_COUNT: Cell<Option<usize>> = const { Cell::new(None) };
@@ -160,28 +173,8 @@ impl ControlledDeliveryState {
 }
 
 #[cfg(test)]
-mod controlled_delivery_state_tests {
-    use bytes::Bytes;
-
-    use super::ControlledDeliveryState;
-    use super::Event;
-
-    #[test]
-    fn snapshot_generation_witnesses_transient_queue_activity() {
-        let mut state = ControlledDeliveryState::new();
-        let idle = state.snapshot();
-
-        state.push_back(("peer".to_owned(), Event::Message(Bytes::new())));
-        let queued = state.snapshot();
-        assert_eq!(queued.pending(), 1);
-        assert_ne!(queued.generation(), idle.generation());
-
-        assert!(state.remove(0).is_some());
-        let drained = state.snapshot();
-        assert!(drained.is_idle());
-        assert_ne!(drained.generation(), idle.generation());
-    }
-}
+#[path = "tests.rs"]
+mod tests;
 
 /// Test-only controlled delivery scheduler. When enabled (per thread), dummy
 /// message/event delivery is queued instead of auto-dispatched, so a test can
@@ -198,6 +191,8 @@ pub mod controlled {
     use super::DELIVERY;
     use super::DELIVERY_FUTURE_PENDING;
     use super::DROP_MESSAGES;
+    use super::IRREVOCABLE_SEND_GATE;
+    use super::IRREVOCABLE_SEND_GATE_WAITING;
     use super::MAX_MESSAGE_SIZE;
     use super::NEXT_CALLBACK_CID;
     use super::NEXT_DELIVERY_GATE;
@@ -253,6 +248,7 @@ pub mod controlled {
             SEND_MESSAGE_PENDING.with(|pending| pending.set(false));
             release_send_message_gate();
             release_post_permit_send_gate();
+            release_irrevocable_send_gate();
             SEND_MESSAGE_PENDING_AFTER_SENT_COUNT.with(|threshold| threshold.set(None));
             DELIVERY_FUTURE_PENDING.with(|pending| pending.set(false));
             CLOSE_PENDING.with(|pending| pending.set(false));
@@ -309,14 +305,14 @@ pub mod controlled {
     }
 
     /// Test hook: suspend the next dummy send after its initial permit check but
-    /// before queue admission is confirmed.
+    /// before the final cancellable check.
     pub fn pause_send_message_after_permit() {
         POST_PERMIT_SEND_GATE.with(|gate| {
             *gate.borrow_mut() = Some(Arc::new(tokio::sync::Notify::new()));
         });
     }
 
-    /// Test hook: release a send suspended before queue admission.
+    /// Test hook: release a send suspended before its final cancellable check.
     pub fn release_post_permit_send_gate() {
         let gate = POST_PERMIT_SEND_GATE.with(|gate| gate.borrow_mut().take());
         if let Some(gate) = gate {
@@ -325,9 +321,31 @@ pub mod controlled {
         POST_PERMIT_SEND_GATE_WAITING.with(|waiting| waiting.set(false));
     }
 
-    /// Return whether a send is suspended before queue admission.
+    /// Return whether a send is suspended before its final cancellable check.
     pub fn post_permit_send_gate_waiting() -> bool {
         POST_PERMIT_SEND_GATE_WAITING.with(|waiting| waiting.get())
+    }
+
+    /// Test hook: suspend the next dummy send after its final cancellable boundary.
+    pub fn pause_irrevocable_send() {
+        IRREVOCABLE_SEND_GATE.with(|gate| {
+            *gate.borrow_mut() = Some(Arc::new(tokio::sync::Notify::new()));
+        });
+    }
+
+    /// Test hook: release a send suspended after it became irrevocable.
+    pub fn release_irrevocable_send_gate() {
+        let gate = IRREVOCABLE_SEND_GATE.with(|gate| gate.borrow_mut().take());
+        if let Some(gate) = gate {
+            gate.notify_waiters();
+        } else {
+            IRREVOCABLE_SEND_GATE_WAITING.with(|waiting| waiting.set(false));
+        }
+    }
+
+    /// Return whether a background dummy send is waiting past its irrevocable boundary.
+    pub fn irrevocable_send_gate_waiting() -> bool {
+        IRREVOCABLE_SEND_GATE_WAITING.with(|waiting| waiting.get())
     }
 
     /// Test hook: force `send_message` to stay pending once this thread has already dispatched
@@ -441,7 +459,7 @@ enum Event {
     PeerConnectionStateChange(WebrtcConnectionState, Option<String>),
     DataChannelOpen(Option<String>),
     DataChannelClose(Option<String>),
-    Message(Bytes),
+    Message(AdmittedInboundFrame),
 }
 
 impl Event {
@@ -485,22 +503,26 @@ impl DummyConnectionState {
 /// In-memory connection used by [`DummyTransport`] to model transport events.
 pub struct DummyConnection {
     rand_id: String,
-    callback: InnerTransportCallback,
+    callback: Arc<InnerTransportCallback>,
     event_sender: mpsc::UnboundedSender<Event>,
     remote_rand_id: Arc<Mutex<Option<String>>>,
     event_listener: JoinHandle<()>,
     connection_state: Arc<Mutex<DummyConnectionState>>,
+    accepting_events: Arc<AtomicBool>,
+    retirement_runtime: tokio::runtime::Handle,
 }
 
 /// [DummyTransport] manages all the [DummyConnection] and
 /// provides methods to create, get and close connections.
 pub struct DummyTransport {
     pool: Pool<DummyConnection>,
+    inbound_frames: Arc<InboundFrameCapacity>,
 }
 
 impl DummyConnection {
     fn new(callback: InnerTransportCallback) -> Self {
         let rand_id = random(0, 10000000000).to_string();
+        let retirement_runtime = tokio::runtime::Handle::current();
 
         let (tx, mut rx) = mpsc::unbounded_channel();
 
@@ -522,7 +544,7 @@ impl DummyConnection {
 
         Self {
             rand_id,
-            callback,
+            callback: Arc::new(callback),
             event_sender: tx,
             remote_rand_id: Default::default(),
             event_listener,
@@ -530,7 +552,13 @@ impl DummyConnection {
                 webrtc: WebrtcConnectionState::New,
                 data_channel_open_override: None,
             })),
+            accepting_events: Arc::new(AtomicBool::new(true)),
+            retirement_runtime,
         }
+    }
+
+    fn retirement_fence(&self) -> DummyRetirementFence {
+        DummyRetirementFence::new(self)
     }
 
     async fn handle_event(&self, event: Event) {
@@ -558,11 +586,11 @@ impl DummyConnection {
                     self.callback.on_data_channel_close().await;
                 }
             }
-            Event::Message(data) => {
+            Event::Message(frame) => {
                 if SEND_MESSAGE_DELAY && !CONTROLLED.with(|c| c.get()) {
                     random_delay().await;
                 }
-                self.callback.on_message(&data).await
+                self.callback.handle_admitted_frame(frame).await
             }
         }
     }
@@ -593,6 +621,9 @@ impl DummyConnection {
     /// explicitly. Returns whether the event was accepted (the listener may be
     /// gone during teardown).
     fn dispatch(&self, event: Event) -> bool {
+        if !self.accepting_events.load(Ordering::Acquire) {
+            return false;
+        }
         if CONTROLLED.with(|c| c.get()) {
             DELIVERY.with(|state| {
                 state.borrow_mut().push_back((self.rand_id.clone(), event));
@@ -649,7 +680,77 @@ impl DummyTransport {
     ) -> Self {
         let _ = parse_ice_servers_or_warn(ice_servers, "dummy");
 
-        Self { pool: Pool::new() }
+        Self {
+            pool: Pool::new(),
+            inbound_frames: Arc::new(InboundFrameCapacity::new()),
+        }
+    }
+}
+
+fn complete_irrevocable_send<F: FnOnce()>(
+    connection_state: &Arc<Mutex<DummyConnectionState>>,
+    data: Bytes,
+    remote: Option<Arc<DummyConnection>>,
+    drop_message: bool,
+    permit: IrrevocableSendGuard<F>,
+) -> Result<DeliveryFuture> {
+    commit_irrevocable_dispatch(connection_state, permit, || {
+        if drop_message {
+            SENT_COUNT.with(|count| count.set(count.get() + 1));
+            return Ok(());
+        }
+        let Some(remote) = remote else {
+            return Err(Error::DummyRemoteConnectionUnavailable);
+        };
+        if let Some(frame) = remote.callback.prepare_inbound_frame(data) {
+            if !remote.dispatch(Event::Message(frame)) {
+                return Err(Error::DummyRemoteConnectionClosed);
+            }
+        }
+        SENT_COUNT.with(|count| count.set(count.get() + 1));
+        Ok(())
+    })?;
+    if DELIVERY_FUTURE_PENDING.with(|pending| pending.get()) {
+        return Ok(Box::pin(std::future::pending::<Result<()>>()));
+    }
+    let delivery_gate = NEXT_DELIVERY_GATE.with(|slot| slot.borrow_mut().take());
+    if let Some(gate) = delivery_gate {
+        ACTIVE_DELIVERY_GATE.with(|slot| {
+            *slot.borrow_mut() = Some(gate.clone());
+        });
+        return Ok(Box::pin(async move {
+            gate.waiting.store(true, Ordering::Release);
+            gate.notify.notified().await;
+            gate.waiting.store(false, Ordering::Release);
+            Ok(())
+        }));
+    }
+    Ok(Box::pin(async { Ok(()) }))
+}
+
+fn commit_irrevocable_dispatch<F, T>(
+    connection_state: &Arc<Mutex<DummyConnectionState>>,
+    permit: IrrevocableSendGuard<F>,
+    dispatch: impl FnOnce() -> Result<T>,
+) -> Result<T>
+where
+    F: FnOnce(),
+{
+    let state = lock_recover(connection_state);
+    if !state.snapshot().data_channel_open() {
+        drop(state);
+        return Err(Error::DummyConnectionRetiredBeforeDispatch);
+    }
+    match dispatch() {
+        Ok(value) => {
+            permit.mark_accepted();
+            drop(state);
+            Ok(value)
+        }
+        Err(error) => {
+            drop(state);
+            Err(error)
+        }
     }
 }
 
@@ -680,6 +781,7 @@ impl ConnectionInterface for DummyConnection {
             send_gate.notified().await;
             SEND_MESSAGE_GATE_WAITING.with(|waiting| waiting.set(false));
         }
+        let data = rings_codec::serialize(&msg).map(Bytes::from)?;
         if !permit.allows() {
             return Err(Error::SendPermitRevoked);
         }
@@ -692,46 +794,50 @@ impl ConnectionInterface for DummyConnection {
         if !permit.allows() {
             return Err(Error::SendPermitRevoked);
         }
-
-        let data = rings_codec::serialize(&msg).map(Bytes::from)?;
-        if DROP_MESSAGES.with(|drop| drop.get()) {
-            SENT_COUNT.with(|c| c.set(c.get() + 1));
-            permit.mark_accepted();
-            return Ok(Box::pin(async { Ok(()) }));
-        }
-        // The remote connection may have been torn down between the data
-        // channel check and here (the dummy analogue of sending on a channel
-        // that just closed). Mimic a real transport: fail gracefully instead of
-        // panicking.
-        let remote = self.remote_conn().ok_or_else(|| {
-            Error::MessageNotDelivered("dummy remote connection is gone".to_string())
-        })?;
-        if !remote.dispatch(Event::Message(data)) {
-            return Err(Error::MessageNotDelivered(
-                "dummy remote connection is closed".to_string(),
-            ));
-        }
-        SENT_COUNT.with(|c| c.set(c.get() + 1));
-        permit.mark_accepted();
-        if DELIVERY_FUTURE_PENDING.with(|pending| pending.get()) {
-            return Ok(Box::pin(std::future::pending::<Result<()>>()));
-        }
-        let delivery_gate = NEXT_DELIVERY_GATE.with(|slot| slot.borrow_mut().take());
-        if let Some(gate) = delivery_gate {
-            ACTIVE_DELIVERY_GATE.with(|slot| {
-                *slot.borrow_mut() = Some(gate.clone());
+        let drop_message = DROP_MESSAGES.with(|drop| drop.get());
+        let remote = if drop_message {
+            None
+        } else {
+            Some(
+                self.remote_conn()
+                    .ok_or(Error::DummyRemoteConnectionUnavailable)?,
+            )
+        };
+        let retirement_fence = self.retirement_fence();
+        let mut permit_retirement =
+            IrrevocableSendGuard::new(permit.acceptance(), move || retirement_fence.request());
+        let Some(proof) = permit.try_mark_irrevocable() else {
+            return Err(Error::SendPermitRevoked);
+        };
+        permit_retirement.bind(proof);
+        let irrevocable_gate = IRREVOCABLE_SEND_GATE.with(|gate| gate.borrow().clone());
+        if let Some(irrevocable_gate) = irrevocable_gate {
+            let connection_state = Arc::clone(&self.connection_state);
+            let (result_sender, result_receiver) = oneshot::channel();
+            tokio::spawn(async move {
+                IRREVOCABLE_SEND_GATE_WAITING.with(|waiting| waiting.set(true));
+                irrevocable_gate.notified().await;
+                IRREVOCABLE_SEND_GATE_WAITING.with(|waiting| waiting.set(false));
+                let result = complete_irrevocable_send(
+                    &connection_state,
+                    data,
+                    remote,
+                    drop_message,
+                    permit_retirement,
+                );
+                let _ = result_sender.send(result);
             });
-            return Ok(Box::pin(async move {
-                gate.waiting.store(true, Ordering::Release);
-                gate.notify.notified().await;
-                gate.waiting.store(false, Ordering::Release);
-                Ok(())
-            }));
+            return result_receiver
+                .await
+                .map_err(|_| Error::DummyIrrevocableSendTaskStopped)?;
         }
-
-        // The dummy backend delivers synchronously in-memory, so delivery is
-        // immediately complete.
-        Ok(Box::pin(async { Ok(()) }))
+        complete_irrevocable_send(
+            &self.connection_state,
+            data,
+            remote,
+            drop_message,
+            permit_retirement,
+        )
     }
 
     fn webrtc_connection_state(&self) -> WebrtcConnectionState {
@@ -800,27 +906,11 @@ impl ConnectionInterface for DummyConnection {
     }
 
     async fn close(&self) -> Result<()> {
+        let retirement = self.retirement_fence().begin();
         if CLOSE_PENDING.with(|pending| pending.get()) {
             std::future::pending::<()>().await;
         }
-        CONNS.remove(&self.rand_id);
-        self.event_listener.abort();
-
-        self.set_webrtc_connection_state(WebrtcConnectionState::Closed)
-            .await;
-
-        // simulate remote closing if it's not closed
-        if let Some(remote_conn) = self.remote_conn() {
-            if remote_conn.webrtc_connection_state() != WebrtcConnectionState::Closed {
-                remote_conn
-                    .set_webrtc_connection_state(WebrtcConnectionState::Disconnected)
-                    .await;
-                remote_conn
-                    .set_webrtc_connection_state(WebrtcConnectionState::Closed)
-                    .await;
-            }
-        }
-
+        retirement.finish();
         Ok(())
     }
 }
@@ -829,6 +919,10 @@ impl ConnectionInterface for DummyConnection {
 impl TransportInterface for DummyTransport {
     type Connection = DummyConnection;
     type Error = Error;
+
+    fn inbound_frame_capacity(&self) -> &Arc<InboundFrameCapacity> {
+        &self.inbound_frames
+    }
 
     async fn new_connection(
         &self,
@@ -841,7 +935,8 @@ impl TransportInterface for DummyTransport {
             }
         }
 
-        let inner_callback = InnerTransportCallback::new(cid, callback, Notifier::default());
+        let inner_callback =
+            InnerTransportCallback::for_transport(self, cid, callback, Notifier::default());
         let conn = DummyConnection::new(inner_callback);
 
         let connection = self.pool.safely_insert(cid, conn).await?;
@@ -873,18 +968,4 @@ impl TransportInterface for DummyTransport {
     fn connection_ids(&self) -> Vec<String> {
         self.pool.connection_ids()
     }
-}
-
-async fn random_delay() {
-    tokio::time::sleep(Duration::from_millis(random(
-        DUMMY_DELAY_MIN,
-        DUMMY_DELAY_MAX,
-    )))
-    .await;
-}
-
-fn random(low: u64, high: u64) -> u64 {
-    let range = rand::distributions::Uniform::new(low, high);
-    let mut rng = rand::thread_rng();
-    range.sample(&mut rng)
 }

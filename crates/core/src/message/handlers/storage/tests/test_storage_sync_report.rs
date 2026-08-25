@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use super::super::next_hop_for_sync_entries;
-use super::super::persist_synced_entries;
 use super::test_support::next_generated_key;
 use super::test_support::next_payload_for_tx;
 use super::test_support::physical_sync_route_next_hop;
@@ -103,7 +102,6 @@ async fn sync_entries_handler_reports_persisted_entries() -> Result<()> {
 #[tokio::test]
 async fn persist_synced_entries_returns_acks_for_owned_entries() -> Result<()> {
     let receiver = prepare_node(SecretKey::random()).await;
-    let handler = MessageHandler::new(receiver.swarm.transport.clone(), Arc::new(NoopCallback));
     let entry = Entry::new(
         Did::from(10u32),
         vec!["acked".to_string().encode()?],
@@ -117,7 +115,11 @@ async fn persist_synced_entries_returns_acks_for_owned_entries() -> Result<()> {
         data: vec![PlacedEntry::new(placement_key, entry.clone())],
     };
 
-    let acks = persist_synced_entries(&handler, &sync_msg).await?;
+    let acks = receiver
+        .swarm
+        .transport
+        .persist_storage_sync_entries(&sync_msg)
+        .await?;
 
     assert_eq!(acks, vec![SyncedEntryAck::new(
         placement_key,

@@ -21,7 +21,12 @@ pub fn setup_log() {
     tracing::debug!("test")
 }
 
-pub async fn prepare_node(key: SecretKey) -> Arc<Swarm> {
+enum TestStorageMode {
+    Default,
+    Repair,
+}
+
+async fn prepare_node_with_storage_mode(key: SecretKey, mode: TestStorageMode) -> Arc<Swarm> {
     let stun = "stun://stun.l.google.com:19302";
     let session_sk = SessionSk::new_with_seckey(&key).unwrap();
     let storage = Box::new(
@@ -30,10 +35,23 @@ pub async fn prepare_node(key: SecretKey) -> Arc<Swarm> {
             .unwrap(),
     );
 
-    let swarm = Arc::new(SwarmBuilder::new(0, stun, storage, session_sk).build());
+    let builder = SwarmBuilder::new(0, stun, storage, session_sk);
+    let builder = match mode {
+        TestStorageMode::Default => builder,
+        TestStorageMode::Repair => builder.dht_storage_redundancy(2).dht_virtual_nodes(0),
+    };
+    let swarm = Arc::new(builder.build());
 
     println!("key: {:?}", key.to_string());
     println!("did: {:?}", swarm.did());
 
     swarm
+}
+
+pub async fn prepare_node(key: SecretKey) -> Arc<Swarm> {
+    prepare_node_with_storage_mode(key, TestStorageMode::Default).await
+}
+
+pub async fn prepare_repair_node(key: SecretKey) -> Arc<Swarm> {
+    prepare_node_with_storage_mode(key, TestStorageMode::Repair).await
 }

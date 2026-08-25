@@ -324,6 +324,14 @@ impl SwarmCallback for BlockingEventSwarmCallback {
 }
 
 fn transport_with_key_and_measure(key: &SecretKey, measure: MeasureImpl) -> Result<SwarmTransport> {
+    transport_with_key_measure_and_reassembly_limits(key, measure, ReassemblyLimits::production())
+}
+
+fn transport_with_key_measure_and_reassembly_limits(
+    key: &SecretKey,
+    measure: MeasureImpl,
+    reassembly_limits: ReassemblyLimits,
+) -> Result<SwarmTransport> {
     let session_sk = SessionSk::new_with_seckey(key)?;
     let dht = Arc::new(PeerRing::new_with_storage_and_finger_table_size(
         session_sk.account_did(),
@@ -337,16 +345,24 @@ fn transport_with_key_and_measure(key: &SecretKey, measure: MeasureImpl) -> Resu
         session_sk,
         dht,
         Some(measure),
-        SwarmTransportSettings::new(
-            1,
-            VirtualNodeConfig::disabled(),
-            ReassemblyLimits::production(),
-        ),
+        SwarmTransportSettings::new(1, VirtualNodeConfig::disabled(), reassembly_limits),
     ))
 }
 
 fn transport_with_measure(measure: MeasureImpl) -> Result<SwarmTransport> {
     transport_with_key_and_measure(&SecretKey::random(), measure)
+}
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+fn transport_with_measure_and_reassembly_limits(
+    measure: MeasureImpl,
+    reassembly_limits: ReassemblyLimits,
+) -> Result<SwarmTransport> {
+    transport_with_key_measure_and_reassembly_limits(
+        &SecretKey::random(),
+        measure,
+        reassembly_limits,
+    )
 }
 
 #[cfg(feature = "dummy")]
@@ -496,7 +512,7 @@ async fn pending_callback_messages_do_not_dispatch_before_admission() -> Result<
     let bytes = payload.to_wire()?;
 
     pending_callback
-        .on_message(&peer.to_string(), &bytes)
+        .on_admitted_message_for_test(&peer.to_string(), &bytes)
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
 
@@ -511,7 +527,7 @@ async fn pending_callback_messages_do_not_dispatch_before_admission() -> Result<
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
     pending_callback
-        .on_message(&peer.to_string(), &bytes)
+        .on_admitted_message_for_test(&peer.to_string(), &bytes)
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
 
@@ -529,9 +545,8 @@ async fn pending_callback_messages_do_not_dispatch_before_admission() -> Result<
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[tokio::test]
 async fn nested_reassembled_chunk_is_rejected_without_recursive_callback_entry() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let measure = Arc::new(RecordingMeasure::default());
+    let transport = Arc::new(transport_with_measure(measure.clone())?);
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
     let peer_session = SessionSk::new_with_seckey(&peer_key)?;
@@ -561,7 +576,7 @@ async fn nested_reassembled_chunk_is_rejected_without_recursive_callback_entry()
 
     reset_on_message_recursion_depth_for_test();
     let error = callback
-        .on_message(&peer.to_string(), &current)
+        .on_admitted_message_for_test(&peer.to_string(), &current)
         .await
         .expect_err("nested chunks must be rejected");
 
@@ -569,6 +584,18 @@ async fn nested_reassembled_chunk_is_rejected_without_recursive_callback_entry()
     assert_eq!(app_callback.validates(), 1);
     assert_eq!(app_callback.inbounds(), 0);
     assert_eq!(max_on_message_recursion_depth_for_test(), 1);
+    assert_eq!(
+        measure
+            .snapshot_counters()?
+            .into_iter()
+            .filter(|(did, counter)| {
+                *did == peer && *counter == MeasureCounter::FailedToReceive
+            })
+            .count(),
+        1
+    );
+    assert_eq!(callback.inbound_admitted_count_for_test(), 0);
+    assert_eq!(transport.reassembly_budget().buffered_cost_for_test(), 0);
     Ok(())
 }
 
@@ -609,6 +636,7 @@ async fn missing_peer_error_precedes_outbound_capacity_admission() -> Result<()>
 #[traced_test]
 #[tokio::test]
 async fn invalid_inbound_log_omits_transaction_data() -> Result<()> {
+    const PRIVATE_MARKER: &str = "PRIVATE-INBOUND-PAYLOAD-7f34c91a";
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
@@ -617,23 +645,47 @@ async fn invalid_inbound_log_omits_transaction_data() -> Result<()> {
     let peer_session = SessionSk::new_with_seckey(&peer_key)?;
     let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
     let mut payload = MessagePayload::new_send(
-        Message::custom(&vec![171; 4096])?,
+        Message::custom(PRIVATE_MARKER.as_bytes())?,
         &peer_session,
         transport.dht.did,
         transport.dht.did,
     )?;
     payload.transaction.data.push(171);
+    let expected_tx_id = payload.transaction.tx_id;
+    let expected_destination = payload.transaction.destination;
+    let expected_data_bytes = payload.transaction.data.len();
     let bytes = payload.to_wire()?;
+    let expected_wire_bytes = bytes.len();
 
     callback
-        .on_message(&peer.to_string(), &bytes)
+        .on_admitted_message_for_test(&peer.to_string(), &bytes)
         .await
         .expect_err("mutating signed transaction data must fail verification");
 
-    assert!(logs_contain(
-        "inbound message verification failed or expired"
-    ));
-    assert!(!logs_contain("171, 171, 171, 171"));
+    let expected_fields = [
+        ("peer", format!("Some({peer:?})")),
+        ("destination", expected_destination.to_string()),
+        ("message_kind", "\"CustomMessage\"".to_owned()),
+        ("data_bytes", expected_data_bytes.to_string()),
+        ("wire_bytes", expected_wire_bytes.to_string()),
+    ];
+    let expected_tx_id = expected_tx_id.to_string();
+    let marker_debug = crate::tests::byte_debug_fragment(PRIVATE_MARKER.as_bytes());
+    logs_assert(|lines: &[&str]| {
+        crate::tests::assert_single_structured_log_event(
+            lines,
+            "rings_core::swarm::callback",
+            "inbound message verification failed or expired",
+            ("tx_id", &expected_tx_id),
+            &expected_fields,
+            &[
+                PRIVATE_MARKER,
+                &marker_debug,
+                "transaction.data",
+                "MessagePayload {",
+            ],
+        )
+    });
     Ok(())
 }
 

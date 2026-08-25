@@ -10,9 +10,6 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::RwLock;
 
-use async_trait::async_trait;
-
-use crate::core::transport::SendPermit;
 use crate::error::Error;
 use crate::error::Result;
 
@@ -103,35 +100,6 @@ impl<T: Clone> RoundRobin<T> for RoundRobinPool<T> {
         })?;
         Ok(pool.iter().all(statement))
     }
-}
-
-/// A trait for pools capable of asynchronously sending messages through their resources.
-///
-/// Extends `RoundRobin` with functionality for asynchronous message transmission, leveraging the pooled
-/// resources for communication. It's adaptable to various messaging patterns and data types, specified
-/// by the generic `Message` associated type.
-#[cfg_attr(any(all(feature = "web-sys-webrtc", target_family = "wasm"), target_family = "wasm"), async_trait(?Send))]
-#[cfg_attr(
-    not(any(
-        all(feature = "web-sys-webrtc", target_family = "wasm"),
-        target_family = "wasm"
-    )),
-    async_trait
-)]
-pub trait MessageSenderPool<T>: RoundRobin<T> {
-    /// The type of messages that can be sent through the pool.
-    ///
-    /// This associated type specifies the format and structure of messages suitable for transmission
-    /// using the pool's resources. By defining this as a generic type, the trait allows for implementation
-    /// with a wide variety of message types, making the pool versatile and adaptable to different
-    /// communication needs and protocols.
-    type Message;
-    /// Send only if `permit` holds after any pool-local serialization lock is acquired.
-    async fn send_with_permit(
-        &self,
-        msg: Self::Message,
-        permit: SendPermit,
-    ) -> Result<crate::delivery::DeliveryFuture>;
 }
 
 /// A trait for assessing the readiness of all resources in a pool.

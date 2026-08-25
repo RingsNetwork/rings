@@ -60,6 +60,14 @@ impl<C> ConnectionRef<C> {
     }
 }
 
+#[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
+impl ConnectionRef<crate::connections::WebrtcConnection> {
+    /// Capture a witness that survives pool removal and observes completed native close.
+    pub fn physical_close_witness(&self) -> Result<crate::connections::NativePhysicalCloseWitness> {
+        Ok(self.upgrade()?.physical_close_witness())
+    }
+}
+
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 impl ConnectionRef<crate::connections::DummyConnection> {
     /// Test hook: force a dummy connection state without dispatching lifecycle callbacks.

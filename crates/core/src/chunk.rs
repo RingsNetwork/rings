@@ -486,6 +486,11 @@ impl ReassemblyBudget {
             tracing::error!(cost, "reassembly budget release exceeded retained cost");
         }
     }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) fn buffered_cost_for_test(&self) -> usize {
+        self.buffered_cost.load(Ordering::Acquire)
+    }
 }
 
 /// Completed bytes that remain charged to the node budget until core admission takes ownership.
@@ -493,6 +498,29 @@ pub(crate) struct RetainedReassembly {
     bytes: Bytes,
     budget: Arc<ReassemblyBudget>,
     cost: usize,
+}
+
+/// Result of applying one chunk to a reassembler.
+pub(crate) enum ReassemblyOutcome {
+    /// The chunk was admitted but the message is not complete yet.
+    Incomplete,
+    /// The chunk completed a message whose output remains budget-charged.
+    Complete(RetainedReassembly),
+    /// The chunk was rejected without mutating retained reassembly state.
+    Rejected(ReassemblyRejection),
+}
+
+/// Whether a rejected chunk is evidence about the remote peer or local state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReassemblyRejection {
+    /// The wire shape, timestamp, metadata, or size is remotely invalid.
+    Invalid,
+    /// Local per-peer or node-wide reassembly capacity was exhausted.
+    Capacity,
+    /// The chunk repeats a position or a message already accepted.
+    Replay,
+    /// A local reassembler invariant failed after admission.
+    LocalInvariant,
 }
 
 impl RetainedReassembly {
@@ -623,18 +651,29 @@ impl MessageReassembler {
     }
 
     /// Accept one chunk while retaining the completed output's node-wide budget charge.
+    #[cfg(test)]
     pub(crate) fn handle_retained(&mut self, chunk: Chunk) -> Option<RetainedReassembly> {
+        match self.handle_retained_outcome(chunk) {
+            ReassemblyOutcome::Complete(bytes) => Some(bytes),
+            ReassemblyOutcome::Incomplete | ReassemblyOutcome::Rejected(_) => None,
+        }
+    }
+
+    /// Accept one chunk while preserving incomplete, complete, and rejected states.
+    pub(crate) fn handle_retained_outcome(&mut self, chunk: Chunk) -> ReassemblyOutcome {
         self.handle_retained_at(chunk, get_epoch_ms())
     }
 
     /// [`handle`](Self::handle) with the clock injected, so tests drive expiry/admission against a
     /// controlled `now` through the real production path instead of poking internal state.
     fn handle_at(&mut self, chunk: Chunk, now: u128) -> Option<Bytes> {
-        self.handle_retained_at(chunk, now)
-            .map(RetainedReassembly::into_bytes)
+        match self.handle_retained_at(chunk, now) {
+            ReassemblyOutcome::Complete(bytes) => Some(bytes.into_bytes()),
+            ReassemblyOutcome::Incomplete | ReassemblyOutcome::Rejected(_) => None,
+        }
     }
 
-    fn handle_retained_at(&mut self, chunk: Chunk, now: u128) -> Option<RetainedReassembly> {
+    fn handle_retained_at(&mut self, chunk: Chunk, now: u128) -> ReassemblyOutcome {
         // Reclaim expired pending entries and tombstones FIRST — before classify reads them — so
         // invalid traffic still frees memory and an expired tombstone cannot suppress a fresh
         // message that reuses its id after the TTL window.
@@ -643,7 +682,7 @@ impl MessageReassembler {
             Ok(cost) => self.admit(chunk, cost),
             Err(reason) => {
                 tracing::debug!(?reason, id = ?chunk.meta.id, "reassembler dropped chunk");
-                None
+                ReassemblyOutcome::Rejected(reason.rejection())
             }
         }
     }
@@ -708,8 +747,12 @@ impl MessageReassembler {
                     return Err(Rejected::MetadataMismatch);
                 }
                 // First write per position wins; a duplicate position is a no-op, not an error.
-                if p.slots.contains_key(&position) {
-                    return Err(Rejected::DuplicatePosition);
+                if let Some(existing) = p.slots.get(&position) {
+                    return if existing == &chunk.data {
+                        Err(Rejected::DuplicatePosition)
+                    } else {
+                        Err(Rejected::ConflictingPosition)
+                    };
                 }
                 p.data_bytes
             }
@@ -733,14 +776,14 @@ impl MessageReassembler {
     /// reassembled payload.
     ///
     /// [`classify`]: Self::classify
-    fn admit(&mut self, chunk: Chunk, cost: usize) -> Option<RetainedReassembly> {
+    fn admit(&mut self, chunk: Chunk, cost: usize) -> ReassemblyOutcome {
         if !self.budget.try_reserve(cost) {
             tracing::debug!(
                 reason = ?Rejected::GlobalBudget,
                 id = ?chunk.meta.id,
                 "reassembler dropped chunk"
             );
-            return None;
+            return ReassemblyOutcome::Rejected(ReassemblyRejection::Capacity);
         }
         let id = chunk.meta.id;
         let [position, _total] = chunk.chunk;
@@ -753,11 +796,17 @@ impl MessageReassembler {
         self.buffered_cost = self.buffered_cost.saturating_add(cost);
 
         if !pending.is_complete() {
-            return None;
+            return ReassemblyOutcome::Incomplete;
         }
         let output_cost = pending.data_bytes;
         if !self.budget.try_reserve(output_cost) {
-            let dropped = self.pending.remove(&id)?;
+            let Some(dropped) = self.pending.remove(&id) else {
+                tracing::error!(
+                    ?id,
+                    "completed reassembly disappeared before capacity rejection"
+                );
+                return ReassemblyOutcome::Rejected(ReassemblyRejection::LocalInvariant);
+            };
             let dropped_cost = dropped.cost(self.limits.slot_overhead);
             self.buffered_cost = self.buffered_cost.saturating_sub(dropped_cost);
             self.budget.release(dropped_cost);
@@ -767,9 +816,16 @@ impl MessageReassembler {
                 output_cost,
                 "reassembler dropped completed message before output allocation"
             );
-            return None;
+            return ReassemblyOutcome::Rejected(ReassemblyRejection::Capacity);
         }
-        let done = self.pending.remove(&id)?;
+        let Some(done) = self.pending.remove(&id) else {
+            tracing::error!(
+                ?id,
+                "completed reassembly disappeared before output construction"
+            );
+            self.budget.release(output_cost);
+            return ReassemblyOutcome::Rejected(ReassemblyRejection::LocalInvariant);
+        };
         let done_cost = done.cost(self.limits.slot_overhead);
         let expiry = done.ts_ms.saturating_add(done.ttl_ms as u128);
         self.buffered_cost = self.buffered_cost.saturating_sub(done_cost);
@@ -777,7 +833,7 @@ impl MessageReassembler {
         self.budget.release(done_cost);
         // Tombstone the id until it would expire, so a later full retransmit is suppressed.
         self.mark_completed(id, expiry);
-        Some(RetainedReassembly {
+        ReassemblyOutcome::Complete(RetainedReassembly {
             bytes,
             budget: self.budget.clone(),
             cost: output_cost,
@@ -817,12 +873,35 @@ enum Rejected {
     MetadataMismatch,
     /// This position is already buffered (a duplicate/retransmit).
     DuplicatePosition,
+    /// This position is buffered with different bytes.
+    ConflictingPosition,
     /// Admitting would exceed the message's [`ReassemblyLimits::max_message_bytes`].
     PerMessageBytes,
     /// Admitting would exceed this peer's derived pending-cost allowance.
     PeerBudget,
     /// Admitting would exceed the global [`ReassemblyLimits::max_total_buffered_cost`].
     GlobalBudget,
+}
+
+impl Rejected {
+    const fn rejection(self) -> ReassemblyRejection {
+        match self {
+            Self::AlreadyCompleted | Self::DuplicatePosition => ReassemblyRejection::Replay,
+            Self::PendingFull | Self::PeerBudget | Self::GlobalBudget => {
+                ReassemblyRejection::Capacity
+            }
+            Self::TtlTooLarge
+            | Self::FutureTimestamp
+            | Self::Expired
+            | Self::Malformed
+            | Self::TooManyChunks
+            | Self::ChunkTooLarge
+            | Self::TotalMismatch
+            | Self::MetadataMismatch
+            | Self::ConflictingPosition
+            | Self::PerMessageBytes => ReassemblyRejection::Invalid,
+        }
+    }
 }
 
 #[cfg(test)]

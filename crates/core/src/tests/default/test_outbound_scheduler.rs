@@ -33,12 +33,15 @@ use crate::message::PayloadSender;
 use crate::message::PeerLivenessProbe;
 use crate::swarm::transport::outbound_submit_count_for_test;
 use crate::swarm::transport::reset_outbound_submit_count_for_test;
+use crate::swarm::transport::SendCompletionOutcome;
+use crate::swarm::transport::OUTBOUND_COMMAND_DRAIN_BUDGET;
 use crate::swarm::transport::OUTBOUND_CONTROL_RESERVED_TRANSFERS;
 use crate::swarm::transport::OUTBOUND_DATA_TRANSFER_CAPACITY;
 use crate::swarm::transport::OUTBOUND_TRANSFER_QUEUE_CAPACITY;
 use crate::tests::default::dummy_hooks::MaxMessageSizeGuard;
 use crate::tests::default::dummy_hooks::PausedDeliveryGuard;
 use crate::tests::default::dummy_hooks::PausedDispatchGuard;
+use crate::tests::default::dummy_hooks::PausedIrrevocableSendGuard;
 use crate::tests::default::dummy_hooks::PendingAfterSentCountGuard;
 use crate::tests::default::dummy_hooks::PendingCloseGuard;
 use crate::tests::default::dummy_hooks::PendingDataChannelOpenGuard;
@@ -51,6 +54,7 @@ use crate::tests::default::wait_for_successor;
 use crate::tests::default::Node;
 use crate::tests::default::TEST_WAIT_TIMEOUT;
 use crate::tests::manually_establish_connection;
+use crate::tests::outbound_capacity_released;
 
 fn invalid_test_state(message: impl Into<String>) -> Error {
     Error::InvalidMessage(message.into())
@@ -79,38 +83,237 @@ async fn tracked_completion_releases_capacity_before_returning() -> Result<()> {
 
     node1.swarm.transport.send_payload_tracked(payload).await?;
 
+    assert!(outbound_capacity_released(&node1.swarm.transport, peer));
+    Ok(())
+}
+
+#[tokio::test]
+async fn tracked_timeout_removes_queued_capacity_before_predecessor_finishes() -> Result<()> {
+    let (node1, node2) = connected_nodes().await?;
+    let peer = node2.did();
+    let paused_delivery = PausedDeliveryGuard::new();
+    node1
+        .swarm
+        .send_message(Message::custom(b"tracked-lane-head")?, peer)
+        .await?;
+    let payload = tracked_payload(&node1, peer, b"tracked-queued-successor")?;
+
+    let outcome = node1.swarm.transport.send_payload_tracked(payload).await?;
+
+    assert_eq!(outcome, SendCompletionOutcome::Cancelled);
     assert_eq!(
         node1
             .swarm
             .transport
             .outbound_admitted_transfer_count_for_test(peer),
-        Some(0)
+        Some(1),
+        "only the still-active predecessor may retain capacity"
+    );
+    drop(paused_delivery);
+    wait_until("predecessor capacity release", || {
+        node1
+            .swarm
+            .transport
+            .outbound_admitted_transfer_count_for_test(peer)
+            == Some(0)
+    })
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn tracked_timeout_removes_target_behind_multiple_predecessors() -> Result<()> {
+    let (node1, node2) = connected_nodes().await?;
+    let peer = node2.did();
+    let paused_delivery = PausedDeliveryGuard::new();
+    reset_outbound_submit_count_for_test();
+    let mut predecessors = Vec::new();
+    for index in 0..3 {
+        let swarm = node1.swarm.clone();
+        predecessors.push(tokio::spawn(async move {
+            let body = format!("queued-predecessor-{index}");
+            let payload = MessagePayload::new_send(
+                Message::custom(body.as_bytes())?,
+                swarm.transport.session_sk(),
+                peer,
+                peer,
+            )?;
+            swarm
+                .transport
+                .send_payload_detached_observing_scheduler_submit_for_test(payload, || {})
+                .await
+        }));
+    }
+    wait_until("three predecessor submissions", || {
+        outbound_submit_count_for_test() == 3
+    })
+    .await?;
+    let payload = tracked_payload(&node1, peer, b"cancel-behind-predecessors")?;
+
+    let outcome = node1.swarm.transport.send_payload_tracked(payload).await?;
+
+    assert_eq!(outcome, SendCompletionOutcome::Cancelled);
+    assert_eq!(
+        node1
+            .swarm
+            .transport
+            .outbound_admitted_transfer_count_for_test(peer),
+        Some(3),
+        "the cancelled target must release capacity without waiting for queued predecessors"
+    );
+    drop(paused_delivery);
+    for predecessor in predecessors {
+        timeout(Duration::from_secs(2), predecessor)
+            .await
+            .map_err(|_| invalid_test_state("timed out joining predecessor send"))?
+            .map_err(|error| invalid_test_state(format!("predecessor task failed: {error}")))??;
+    }
+    wait_until("predecessor capacity cleanup", || {
+        node1
+            .swarm
+            .transport
+            .outbound_admitted_transfer_count_for_test(peer)
+            == Some(0)
+    })
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn irrevocable_send_timeout_releases_scheduler_capacity() -> Result<()> {
+    let (node1, node2) = connected_nodes().await?;
+    let peer = node2.did();
+    let payload = tracked_payload(&node1, peer, b"irrevocable-send-timeout")?;
+    let paused_send = PausedIrrevocableSendGuard::new();
+    dummy_controlled::reset_sent_count();
+
+    let error = node1
+        .swarm
+        .transport
+        .send_payload_tracked(payload)
+        .await
+        .expect_err("an irrevocable backend send must have a completion deadline");
+
+    assert!(
+        matches!(
+            &error,
+            Error::DataChannelSendCompletionTimeout { peer: timed_out, .. } if *timed_out == peer
+        ),
+        "unexpected cancellation result: {error:?}"
+    );
+    assert!(outbound_capacity_released(&node1.swarm.transport, peer));
+    assert!(dummy_controlled::irrevocable_send_gate_waiting());
+    drop(paused_send);
+    wait_until("retired irrevocable dummy send completion", || {
+        !dummy_controlled::irrevocable_send_gate_waiting()
+    })
+    .await?;
+    assert_eq!(
+        dummy_controlled::sent_count(),
+        0,
+        "an irrevocable task that outlives its caller must not dispatch after connection retirement"
     );
     Ok(())
 }
 
 #[tokio::test]
-async fn shutdown_releases_batch_before_first_tracked_completion() -> Result<()> {
+async fn detached_deadline_cannot_succeed_after_irrevocable_chunk_admission() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
-    let _pending_delivery = PendingDeliveryGuard::new();
-    let first_payload = tracked_payload(&node1, peer, b"first-shutdown-transfer")?;
-    let second_payload = tracked_payload(&node1, peer, b"second-shutdown-transfer")?;
-    let first_swarm = node1.swarm.clone();
-    let second_swarm = node1.swarm.clone();
-    let mut first = tokio::spawn(async move {
-        first_swarm
+    let _max_message_size = MaxMessageSizeGuard::new(8192);
+    let paused_send = PausedIrrevocableSendGuard::new();
+    dummy_controlled::reset_sent_count();
+    let payload = tracked_payload(&node1, peer, &vec![7_u8; 50_000])?;
+    let deadline = async {
+        while !dummy_controlled::irrevocable_send_gate_waiting() {
+            tokio::task::yield_now().await;
+        }
+    };
+
+    let error = node1
+        .swarm
+        .transport
+        .send_payload_detached_until_for_test(payload, Duration::from_millis(1), deadline)
+        .await
+        .expect_err("cancellation must win before first-frame success is published");
+
+    assert!(
+        matches!(
+            &error,
+            Error::DataChannelSendCompletionTimeout { peer: timed_out, .. } if *timed_out == peer
+        ),
+        "unexpected cancellation result: {error:?}"
+    );
+    assert!(outbound_capacity_released(&node1.swarm.transport, peer));
+    drop(paused_send);
+    wait_until("retired chunk send completion", || {
+        !dummy_controlled::irrevocable_send_gate_waiting()
+    })
+    .await?;
+    assert_eq!(
+        dummy_controlled::sent_count(),
+        0,
+        "neither the first chunk nor any tail may dispatch after cancellation wins"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn detached_first_frame_timeout_cancels_queued_transfer() -> Result<()> {
+    let (node1, node2) = connected_nodes().await?;
+    let peer = node2.did();
+    let paused_delivery = PausedDeliveryGuard::new();
+    dummy_controlled::reset_sent_count();
+
+    node1
+        .swarm
+        .send_message(Message::custom(b"lane-head")?, peer)
+        .await?;
+    let error = node1
+        .swarm
+        .send_message(Message::custom(b"queued-successor")?, peer)
+        .await
+        .expect_err("detached completion must not wait indefinitely behind a lane head");
+
+    assert!(matches!(
+        error,
+        Error::OutboundFirstFrameAdmissionTimeout { peer: timed_out, .. } if timed_out == peer
+    ));
+    drop(paused_delivery);
+    wait_until("timed-out detached transfer cancellation", || {
+        node1
+            .swarm
             .transport
-            .send_payload_tracked(first_payload)
+            .outbound_admitted_transfer_count_for_test(peer)
+            == Some(0)
+    })
+    .await?;
+    assert_eq!(
+        dummy_controlled::sent_count(),
+        1,
+        "the timed-out successor must stop before its first frame"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn dropping_detached_caller_after_submit_cancels_queued_transfer() -> Result<()> {
+    let (node1, node2) = connected_nodes().await?;
+    let peer = node2.did();
+    let paused_delivery = PausedDeliveryGuard::new();
+    dummy_controlled::reset_sent_count();
+
+    node1
+        .swarm
+        .send_message(Message::custom(b"drop-lane-head")?, peer)
+        .await?;
+    let swarm = node1.swarm.clone();
+    let successor = tokio::spawn(async move {
+        swarm
+            .send_message(Message::custom(b"drop-queued-successor")?, peer)
             .await
     });
-    let mut second = tokio::spawn(async move {
-        second_swarm
-            .transport
-            .send_payload_tracked(second_payload)
-            .await
-    });
-    wait_until("tracked shutdown batch admission", || {
+    wait_until("detached successor scheduler admission", || {
         node1
             .swarm
             .transport
@@ -119,36 +322,141 @@ async fn shutdown_releases_batch_before_first_tracked_completion() -> Result<()>
     })
     .await?;
 
-    node1.swarm.transport.disconnect(peer).await?;
-    let first_completed = timeout(Duration::from_secs(2), async {
-        tokio::select! {
-            result = &mut first => {
-                let _ = result.map_err(|error| {
-                    invalid_test_state(format!("first tracked task failed: {error}"))
-                })?;
-                Ok::<_, Error>(true)
-            }
-            result = &mut second => {
-                let _ = result.map_err(|error| {
-                    invalid_test_state(format!("second tracked task failed: {error}"))
-                })?;
-                Ok(false)
-            }
-        }
+    successor.abort();
+    wait_until("dropped detached successor cancellation", || {
+        node1
+            .swarm
+            .transport
+            .outbound_admitted_transfer_count_for_test(peer)
+            == Some(1)
     })
-    .await
-    .map_err(|_| invalid_test_state("tracked shutdown batch did not complete"))??;
+    .await?;
+    drop(paused_delivery);
+    wait_until("detached predecessor completion", || {
+        node1
+            .swarm
+            .transport
+            .outbound_admitted_transfer_count_for_test(peer)
+            == Some(0)
+    })
+    .await?;
+    assert_eq!(
+        dummy_controlled::sent_count(),
+        1,
+        "dropping the successor caller must stop it before its first frame"
+    );
+    Ok(())
+}
 
-    assert!(node1
+#[tokio::test]
+async fn cancelled_transfer_is_rejected_when_cancel_command_precedes_submit() -> Result<()> {
+    let (node1, node2) = connected_nodes().await?;
+    let peer = node2.did();
+    let paused_delivery = PausedDeliveryGuard::new();
+    node1
+        .swarm
+        .send_message(Message::custom(b"pre-cancel-lane-head")?, peer)
+        .await?;
+    let payload = tracked_payload(&node1, peer, b"pre-cancelled-successor")?;
+
+    let outcome = timeout(
+        Duration::from_millis(100),
+        node1
+            .swarm
+            .transport
+            .send_payload_detached_cancel_before_submit_for_test(payload),
+    )
+    .await
+    .map_err(|_| invalid_test_state("pre-cancelled transfer remained queued"))??;
+
+    assert_eq!(outcome, SendCompletionOutcome::Cancelled);
+    assert_eq!(
+        node1
+            .swarm
+            .transport
+            .outbound_admitted_transfer_count_for_test(peer),
+        Some(1),
+        "only the active predecessor may retain capacity"
+    );
+    drop(paused_delivery);
+    Ok(())
+}
+
+#[tokio::test]
+async fn shutdown_releases_batch_before_first_tracked_completion() -> Result<()> {
+    let (node1, node2) = connected_nodes().await?;
+    let peer = node2.did();
+    let _pending_delivery = PendingDeliveryGuard::new();
+    node1.swarm.transport.pause_outbound_worker_for_test(peer);
+    let payloads = (0..40)
+        .map(|index| {
+            tracked_payload(
+                &node1,
+                peer,
+                format!("shutdown-transfer-{index}").as_bytes(),
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let tasks = payloads
+        .into_iter()
+        .map(|payload| {
+            let swarm = node1.swarm.clone();
+            tokio::spawn(async move {
+                swarm
+                    .transport
+                    .send_payload_tracked_with_shutdown_deadline_for_test(payload)
+                    .await
+            })
+        })
+        .collect::<Vec<_>>();
+    wait_until("tracked shutdown mailbox backlog", || {
+        node1
+            .swarm
+            .transport
+            .outbound_buffered_submissions_for_test(peer)
+            > OUTBOUND_COMMAND_DRAIN_BUDGET
+    })
+    .await?;
+    assert_eq!(
+        node1
+            .swarm
+            .transport
+            .outbound_admitted_transfer_count_for_test(peer),
+        Some(40)
+    );
+
+    node1.swarm.transport.disconnect(peer).await?;
+    node1.swarm.transport.resume_outbound_worker_for_test(peer);
+    for (index, task) in tasks.into_iter().enumerate() {
+        let outcome = timeout(Duration::from_secs(2), task)
+            .await
+            .map_err(|_| invalid_test_state("tracked shutdown task did not complete"))?
+            .map_err(|error| {
+                invalid_test_state(format!("tracked shutdown task failed: {error}"))
+            })??;
+        assert_eq!(outcome, SendCompletionOutcome::Cancelled);
+        if index == 0 {
+            assert_eq!(
+                node1
+                    .swarm
+                    .transport
+                    .outbound_admitted_transfer_total_for_test(),
+                0,
+                "every shutdown permit must release before the first completion is published"
+            );
+        }
+    }
+
+    let rejected = node1
         .swarm
         .transport
-        .outbound_admitted_transfer_count_for_test(peer)
-        .is_none_or(|admitted| admitted == 0));
-    let remaining = if first_completed { second } else { first };
-    let _ = timeout(Duration::from_secs(2), remaining)
-        .await
-        .map_err(|_| invalid_test_state("remaining tracked shutdown task did not complete"))?
-        .map_err(|error| invalid_test_state(format!("tracked shutdown task failed: {error}")))?;
+        .send_payload_tracked_with_shutdown_deadline_for_test(tracked_payload(
+            &node1,
+            peer,
+            b"post-shutdown-submission",
+        )?)
+        .await;
+    assert!(matches!(rejected, Err(Error::SwarmMissDidInTable(missing)) if missing == peer));
     Ok(())
 }
 
@@ -464,9 +772,18 @@ fn spawn_data_capacity_transfers(node: &Node, peer: Did) -> Vec<JoinHandle<Resul
         let swarm = node.swarm.clone();
         sends.push(tokio::spawn(async move {
             let body = format!("capacity-transfer-{index}");
+            let payload = MessagePayload::new_send(
+                Message::custom(body.as_bytes())?,
+                swarm.transport.session_sk(),
+                peer,
+                peer,
+            )?;
+            let tx_id = payload.transaction.tx_id;
             swarm
-                .send_direct_message(Message::custom(body.as_bytes())?, peer)
+                .transport
+                .send_payload_detached_observing_scheduler_submit_for_test(payload, || {})
                 .await
+                .map(|_| tx_id)
         }));
     }
     sends
@@ -506,14 +823,20 @@ fn spawn_reserved_control_transfers(
     for index in 0..OUTBOUND_CONTROL_RESERVED_TRANSFERS {
         let swarm = node.swarm.clone();
         sends.push(tokio::spawn(async move {
+            let payload = MessagePayload::new_send(
+                Message::PeerLivenessProbe(PeerLivenessProbe {
+                    sent_at_ms: index as i64,
+                }),
+                swarm.transport.session_sk(),
+                peer,
+                peer,
+            )?;
+            let tx_id = payload.transaction.tx_id;
             swarm
-                .send_direct_message(
-                    Message::PeerLivenessProbe(PeerLivenessProbe {
-                        sent_at_ms: index as i64,
-                    }),
-                    peer,
-                )
+                .transport
+                .send_payload_detached_observing_scheduler_submit_for_test(payload, || {})
                 .await
+                .map(|_| tx_id)
         }));
     }
 }
@@ -560,6 +883,8 @@ async fn disconnect_and_join_capacity_transfers(
                 error,
                 Error::OutboundTransferCapacityExceeded { .. }
                     | Error::OutboundTransferMemoryCapacityExceeded { .. }
+                    | Error::OutboundTransferAdmissionTimeout { .. }
+                    | Error::OutboundFirstFrameAdmissionTimeout { .. }
                     | Error::ConnectionAttemptSuperseded { .. }
                     | Error::ChannelSendMessageFailed
             ));
@@ -588,183 +913,7 @@ async fn transfer_capacity_bounds_real_waiting_and_queued_lifetimes() -> Result<
     disconnect_and_join_capacity_transfers(&node1, peer, sends).await
 }
 
-#[tokio::test]
-async fn detached_delivery_timeout_releases_transfer_capacity() -> Result<()> {
-    let measure = Arc::new(FailedSendMeasure::default());
-    let measure_impl: MeasureImpl = measure.clone();
-    let node1 = prepare_node_with_measure(SecretKey::random(), measure_impl)?;
-    let node2 = prepare_node(SecretKey::random()).await;
-    let (node1, node2) = connect_nodes(node1, node2).await?;
-    let peer = node2.did();
-    let _pending_delivery = PendingDeliveryGuard::new();
-
-    node1
-        .swarm
-        .send_direct_message(Message::custom(b"bounded-detached-delivery")?, peer)
-        .await?;
-    wait_until("detached transfer admission", || {
-        node1
-            .swarm
-            .transport
-            .outbound_admitted_transfer_count_for_test(peer)
-            == Some(1)
-    })
-    .await?;
-    timeout(Duration::from_secs(2), async {
-        while node1
-            .swarm
-            .transport
-            .outbound_admitted_transfer_count_for_test(peer)
-            != Some(0)
-        {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .map_err(|_| invalid_test_state("detached delivery timeout retained capacity"))?;
-    wait_for_msgs([&node1, &node2]).await;
-    assert_eq!(
-        measure.count(),
-        0,
-        "local delivery timeout must not degrade peer quality"
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn delivery_timeout_marks_generation_terminal_before_releasing_fifo_lane() -> Result<()> {
-    let (node1, node2) = connected_nodes().await?;
-    let peer = node2.did();
-    let _paused_delivery = PausedDeliveryGuard::new();
-    let _pending_close = PendingCloseGuard::new();
-    dummy_controlled::reset_sent_count();
-
-    node1
-        .swarm
-        .send_direct_message(Message::custom(b"first-stalled-delivery")?, peer)
-        .await?;
-    wait_until("first delivery gate", || {
-        dummy_controlled::delivery_future_waiting()
-    })
-    .await?;
-
-    let second_swarm = node1.swarm.clone();
-    let second_send = tokio::spawn(async move {
-        second_swarm
-            .send_direct_message(Message::custom(b"second-fifo-transfer")?, peer)
-            .await
-    });
-    wait_until("second FIFO transfer submission", || {
-        node1
-            .swarm
-            .transport
-            .outbound_admitted_transfer_count_for_test(peer)
-            == Some(2)
-    })
-    .await?;
-    wait_until("timed-out generation send revocation", || {
-        node1.swarm.transport.get_connection(peer).is_none()
-    })
-    .await?;
-    assert!(node1.swarm.transport.is_admitted_connection(peer));
-
-    dummy_controlled::release_delivery_future_gate();
-    let second_result = timeout(Duration::from_secs(2), second_send)
-        .await
-        .map_err(|_| invalid_test_state("second FIFO submission did not finish"))?
-        .map_err(|error| invalid_test_state(format!("second FIFO task failed: {error}")))?;
-    assert!(second_result.is_err());
-    assert_eq!(dummy_controlled::sent_count(), 1);
-    timeout(
-        Duration::from_secs(2),
-        node1.swarm.stabilizer().clean_unavailable_connections(),
-    )
-    .await
-    .map_err(|_| invalid_test_state("terminal generation cleanup stayed pending"))??;
-    assert!(!node1.swarm.transport.is_admitted_connection(peer));
-    Ok(())
-}
-
-#[tokio::test]
-async fn outbound_capacity_is_reserved_before_readiness_wait() -> Result<()> {
-    let (node1, node2) = connected_nodes().await?;
-    let peer = node2.did();
-    let _pending_open = PendingDataChannelOpenGuard::new();
-    let swarm = node1.swarm.clone();
-    let send = tokio::spawn(async move {
-        swarm
-            .send_direct_message(Message::custom(b"reserve-before-readiness")?, peer)
-            .await
-    });
-
-    wait_until("capacity reservation before readiness", || {
-        node1
-            .swarm
-            .transport
-            .outbound_admitted_transfer_count_for_test(peer)
-            == Some(1)
-    })
-    .await?;
-    send.abort();
-    let _ = send.await;
-    wait_until("cancelled readiness wait capacity release", || {
-        node1
-            .swarm
-            .transport
-            .outbound_admitted_transfer_count_for_test(peer)
-            == Some(0)
-    })
-    .await?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn pending_measurement_does_not_block_peer_scheduler() -> Result<()> {
-    let started = Arc::new(AtomicBool::new(false));
-    let measure: MeasureImpl = Arc::new(PendingMeasure {
-        started: started.clone(),
-    });
-    let node1 = prepare_node_with_measure(SecretKey::random(), measure)?;
-    let node2 = prepare_node(SecretKey::random()).await;
-    let (node1, node2) = connect_nodes(node1, node2).await?;
-    let peer = node2.did();
-
-    node1
-        .swarm
-        .send_direct_message(Message::custom(b"first-measured-send")?, peer)
-        .await?;
-    wait_until("pending outbound measurement", || {
-        started.load(Ordering::Acquire)
-    })
-    .await?;
-
-    timeout(
-        Duration::from_secs(1),
-        node1
-            .swarm
-            .send_direct_message(Message::custom(b"scheduler-must-progress")?, peer),
-    )
-    .await
-    .map_err(|_| invalid_test_state("measurement blocked the peer scheduler"))??;
-    Ok(())
-}
-
-#[traced_test]
-#[tokio::test]
-async fn oversized_payload_log_omits_the_custom_message_body() -> Result<()> {
-    let (node1, node2) = connected_nodes().await?;
-    let marker = "private-oversized-custom-body";
-    let oversized_bytes = TRANSPORT_MAX_SIZE + 8 * 1024 * 1024;
-    let repeats = oversized_bytes / marker.len() + 1;
-    let body = marker.repeat(repeats).into_bytes();
-    let error = node1
-        .swarm
-        .send_direct_message(Message::CustomMessage(CustomMessage(body)), node2.did())
-        .await
-        .expect_err("oversized payload must be rejected before scheduling");
-
-    assert!(matches!(error, Error::MessageTooLarge(size) if size > TRANSPORT_MAX_SIZE));
-    assert!(logs_contain("message payload is too large"));
-    assert!(!logs_contain(marker));
-    Ok(())
-}
+#[path = "test_outbound_scheduler/boundaries.rs"]
+mod boundaries;
+#[path = "test_outbound_scheduler/delivery.rs"]
+mod delivery;

@@ -347,9 +347,33 @@ pub enum Error {
         timeout_ms: u128,
     },
 
+    /// A detached transfer did not admit its first frame before its deadline.
+    #[error("Timed out after {timeout_ms}ms waiting to admit the first outbound frame for {peer}")]
+    OutboundFirstFrameAdmissionTimeout {
+        /// Peer whose scheduler lane did not admit the first frame.
+        peer: crate::dht::Did,
+        /// First-frame admission deadline in milliseconds.
+        timeout_ms: u128,
+    },
+
+    /// A detached transfer did not stop within its post-deadline cleanup grace.
+    #[error(
+        "Detached payload cleanup for {peer} exceeded its {timeout_ms}ms grace after the first-frame deadline"
+    )]
+    DetachedPayloadCleanupTimeout {
+        /// Peer whose exact connection generation was made send-terminal.
+        peer: crate::dht::Did,
+        /// Cleanup grace in milliseconds.
+        timeout_ms: u128,
+    },
+
     /// No Tokio runtime is available to host a native outbound scheduler.
     #[error("Outbound scheduler requires an active Tokio runtime")]
     OutboundSchedulerRuntimeUnavailable,
+
+    /// A cancelled detached admission unexpectedly published send success.
+    #[error("Cancelled detached outbound admission published success")]
+    CancelledDetachedAdmissionPublishedSuccess,
 
     /// The inbound actor has admitted its maximum number of messages.
     #[error("Inbound mailbox capacity {capacity} exceeded")]
@@ -406,6 +430,10 @@ pub enum Error {
     /// A reassembled chunk payload attempted to contain another chunk envelope.
     #[error("Nested chunk messages are not allowed")]
     NestedChunkMessage,
+
+    /// A chunk was rejected for an invalid remote wire shape or metadata.
+    #[error("Invalid chunk message")]
+    InvalidChunkMessage,
 
     /// The application rejected an inbound message during validation.
     #[error("Inbound message validation failed: {source}")]
@@ -726,6 +754,20 @@ pub enum Error {
         /// Send context used for diagnostics.
         context: &'static str,
     },
+    /// Timed out after the backend crossed its final cancellable send boundary.
+    #[error(
+        "Timed out after {timeout_ms}ms completing an irrevocable {bytes}-byte data-channel send to {peer} during {context}"
+    )]
+    DataChannelSendCompletionTimeout {
+        /// Peer whose irrevocable backend send did not complete.
+        peer: crate::dht::Did,
+        /// Completion timeout budget in milliseconds.
+        timeout_ms: u128,
+        /// Number of bytes owned by the backend send.
+        bytes: usize,
+        /// Scheduler phase that issued the send.
+        context: &'static str,
+    },
 
     /// Timed out while waiting for accepted data-channel bytes to leave the local buffer.
     #[error(
@@ -738,6 +780,17 @@ pub enum Error {
         timeout_ms: u128,
         /// Send context used for diagnostics.
         context: &'static str,
+    },
+
+    /// A tracked transfer did not stop within its post-deadline cleanup grace.
+    #[error(
+        "Tracked payload cleanup for {peer} exceeded its {timeout_ms}ms grace after the send deadline"
+    )]
+    TrackedPayloadCleanupTimeout {
+        /// Peer whose exact connection generation was made send-terminal.
+        peer: crate::dht::Did,
+        /// Cleanup grace in milliseconds.
+        timeout_ms: u128,
     },
 
     #[cfg(all(feature = "wasm", target_family = "wasm"))]
@@ -778,16 +831,19 @@ impl Error {
         Self::PeerRingUnexpectedAction(Box::new(action))
     }
 
-    /// True when local send admission, memory, or delivery capacity is exhausted. This is local
-    /// backpressure, not evidence that the remote peer is unreachable or malicious.
+    /// True when local pre-send admission or memory capacity is exhausted.
+    ///
+    /// These failures happen before backend acceptance, so retrying cannot
+    /// duplicate a send. Post-acceptance timeouts are deliberately excluded:
+    /// their remote outcome is ambiguous even after the connection is retired.
     pub(crate) const fn is_local_send_backpressure(&self) -> bool {
         matches!(
             self,
             Self::DataChannelSendQueueTimeout { .. }
-                | Self::DataChannelDeliveryTimeout { .. }
                 | Self::OutboundTransferCapacityExceeded { .. }
                 | Self::OutboundTransferMemoryCapacityExceeded { .. }
                 | Self::OutboundTransferAdmissionTimeout { .. }
+                | Self::OutboundFirstFrameAdmissionTimeout { .. }
         )
     }
 
@@ -812,7 +868,12 @@ impl Error {
 
         match self {
             Self::ConnectionAttemptSuperseded { .. }
-            | Self::OutboundSchedulerRuntimeUnavailable => false,
+            | Self::OutboundSchedulerRuntimeUnavailable
+            | Self::CancelledDetachedAdmissionPublishedSuccess
+            | Self::DetachedPayloadCleanupTimeout { .. }
+            | Self::DataChannelSendCompletionTimeout { .. }
+            | Self::DataChannelDeliveryTimeout { .. }
+            | Self::TrackedPayloadCleanupTimeout { .. } => false,
             Self::Transport(rings_transport::error::Error::SendPermitRevoked) => false,
             Self::TransportNotReady { state, .. } => matches!(
                 state,
