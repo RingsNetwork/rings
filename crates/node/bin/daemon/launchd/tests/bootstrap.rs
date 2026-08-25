@@ -99,8 +99,14 @@ fn exit_five_with_enabled_autostart_does_not_mutate_the_observed_state() -> Resu
 
     assert!(matches!(
         result,
-        Err(DaemonError::CommandFailed(failure))
-            if failure.status.code() == Some(LAUNCHD_BOOTSTRAP_DISABLED)
+        Err(DaemonError::Launchd(LaunchdError::BootstrapStateMismatch {
+            observed: AutostartState::Enabled,
+            bootstrap,
+        })) if matches!(
+            &*bootstrap,
+            DaemonError::CommandFailed(failure)
+                if failure.status.code() == Some(LAUNCHD_BOOTSTRAP_DISABLED)
+        )
     ));
     Ok(())
 }
@@ -137,8 +143,14 @@ fn exit_five_with_unknown_autostart_does_not_mutate_manager_state() -> Result<()
 
     assert!(matches!(
         result,
-        Err(DaemonError::CommandFailed(failure))
-            if failure.status.code() == Some(LAUNCHD_BOOTSTRAP_DISABLED)
+        Err(DaemonError::Launchd(LaunchdError::BootstrapStateMismatch {
+            observed: AutostartState::Other("unknown"),
+            bootstrap,
+        })) if matches!(
+            &*bootstrap,
+            DaemonError::CommandFailed(failure)
+                if failure.status.code() == Some(LAUNCHD_BOOTSTRAP_DISABLED)
+        )
     ));
     Ok(())
 }
@@ -179,9 +191,7 @@ fn failed_bootstrap_still_restores_disabled_autostart() -> Result<(), DaemonErro
 
     assert!(matches!(
         result,
-        Err(DaemonError::Launchd(LaunchdError::DisabledBootstrap {
-            failure: RecoveryFailure::Primary(_),
-        }))
+        Err(DaemonError::Launchd(LaunchdError::BootstrapRetry { .. }))
     ));
     Ok(())
 }
@@ -215,11 +225,15 @@ fn successful_bootstrap_reports_restore_failure() -> Result<(), DaemonError> {
 
     let result = manager.restart();
 
+    assert!(result.as_ref().err().is_some_and(|error| error
+        .to_string()
+        .contains("the service was bootstrapped, but restoring disabled login autostart failed")));
+    assert!(result.as_ref().err().is_some_and(|error| error
+        .to_string()
+        .contains("the running service may remain enabled at login")));
     assert!(matches!(
         result,
-        Err(DaemonError::Launchd(LaunchdError::DisabledBootstrap {
-            failure: RecoveryFailure::Recovery(_),
-        }))
+        Err(DaemonError::Launchd(LaunchdError::AutostartRestore { .. }))
     ));
     Ok(())
 }
@@ -260,9 +274,11 @@ fn failed_bootstrap_and_restore_preserve_both_errors() -> Result<(), DaemonError
 
     assert!(matches!(
         result,
-        Err(DaemonError::Launchd(LaunchdError::DisabledBootstrap {
-            failure: RecoveryFailure::Both { .. },
-        }))
+        Err(DaemonError::Launchd(
+            LaunchdError::BootstrapRetryAndRestore {
+                failure: RecoveryFailure::Both { .. },
+            }
+        ))
     ));
     Ok(())
 }
@@ -294,7 +310,66 @@ fn enable_failure_does_not_attempt_a_restore() -> Result<(), DaemonError> {
 
     let result = manager.restart();
 
-    assert!(matches!(result, Err(DaemonError::CommandFailed(_))));
+    assert!(matches!(
+        result,
+        Err(DaemonError::Launchd(LaunchdError::BootstrapEnable {
+            failure: RecoveryFailure::Both { primary, recovery },
+        })) if matches!(
+            &*primary,
+            DaemonError::CommandFailed(failure)
+                if failure.status.code() == Some(LAUNCHD_BOOTSTRAP_DISABLED)
+        ) && matches!(
+            &*recovery,
+            DaemonError::CommandFailed(failure) if failure.status.code() == Some(7)
+        )
+    ));
+    Ok(())
+}
+
+#[test]
+fn failed_autostart_probe_preserves_the_bootstrap_failure() -> Result<(), DaemonError> {
+    let root = test_root("restart-autostart-probe-failure");
+    let domain = TEST_DOMAIN;
+    let target = test_target();
+    let definition = install_test_definition(&root)?;
+    let definition_text = path_text(&definition)?;
+    let runner = ScriptedCommandRunner::new([
+        CommandStep::failure(
+            LAUNCHCTL,
+            &["print", &target],
+            LAUNCHD_SERVICE_NOT_FOUND,
+            "Could not find specified service",
+        ),
+        CommandStep::failure(
+            LAUNCHCTL,
+            &["bootstrap", domain, &definition_text],
+            LAUNCHD_BOOTSTRAP_DISABLED,
+            "Input/output error",
+        ),
+        CommandStep::failure(
+            LAUNCHCTL,
+            &["print-disabled", domain],
+            9,
+            "session unavailable",
+        ),
+    ]);
+    let manager = test_manager(&root, runner);
+
+    let result = manager.restart();
+
+    assert!(matches!(
+        result,
+        Err(DaemonError::Launchd(LaunchdError::BootstrapStateProbe {
+            failure: RecoveryFailure::Both { primary, recovery },
+        })) if matches!(
+            &*primary,
+            DaemonError::CommandFailed(failure)
+                if failure.status.code() == Some(LAUNCHD_BOOTSTRAP_DISABLED)
+        ) && matches!(
+            &*recovery,
+            DaemonError::CommandFailed(failure) if failure.status.code() == Some(9)
+        )
+    ));
     Ok(())
 }
 

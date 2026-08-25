@@ -26,9 +26,8 @@ mod launchd;
 #[cfg(any(target_os = "linux", all(test, unix)))]
 mod systemd;
 
-// Twenty 100 ms retries cover manager bookkeeping before a first spawn. They intentionally do not
-// wait through launchd throttling or systemd's RestartSec=5; Restarting settles immediately because
-// neither configured respawn delay can complete inside this two-second budget.
+// Twenty 100 ms retries cover manager bookkeeping and ordinary in-flight spawns. Adapter lifecycle
+// models decide whether an observation is stable or still expected to advance inside this window.
 const MANAGER_OBSERVATION_SCHEDULE: PollSchedule = PollSchedule {
     retries: 20,
     interval: Duration::from_millis(100),
@@ -150,22 +149,13 @@ enum DaemonError {
     ServiceDidNotStart { status: DaemonStatus },
 }
 
-/// A primary operation and its compensating recovery form one algebraic result.
+/// A primary operation and its best-effort cleanup form one algebraic result.
+///
+/// Invariant: `Both` preserves the primary failure and the cleanup failure in operation order.
 #[derive(Debug)]
 enum RecoveryFailure<E> {
     Primary(E),
-    #[cfg_attr(
-        all(not(target_os = "macos"), not(test)),
-        expect(
-            dead_code,
-            reason = "the shared recovery algebra includes launchd's restore-only failure"
-        )
-    )]
-    Recovery(E),
-    Both {
-        primary: E,
-        recovery: E,
-    },
+    Both { primary: E, recovery: E },
 }
 
 impl<E> fmt::Display for RecoveryFailure<E>
@@ -174,7 +164,6 @@ where E: std::error::Error + 'static
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Primary(primary) => fmt::Display::fmt(primary, formatter),
-            Self::Recovery(recovery) => fmt::Display::fmt(recovery, formatter),
             Self::Both { primary, recovery } => {
                 write!(formatter, "{primary}; recovery also failed: ")?;
                 write_error_chain(formatter, recovery)
@@ -189,28 +178,8 @@ where E: std::error::Error + 'static
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Primary(primary) => primary.source(),
-            Self::Recovery(recovery) => recovery.source(),
             Self::Both { primary, .. } => primary.source(),
         }
-    }
-}
-
-#[cfg_attr(
-    all(not(target_os = "macos"), not(test)),
-    expect(
-        dead_code,
-        reason = "the shared recovery algebra is currently exercised by launchd"
-    )
-)]
-fn finish_with_recovery<T, E>(
-    primary: Result<T, E>,
-    recovery: Result<(), E>,
-) -> Result<T, RecoveryFailure<E>> {
-    match (primary, recovery) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(primary), Ok(())) => Err(RecoveryFailure::Primary(primary)),
-        (Ok(_), Err(recovery)) => Err(RecoveryFailure::Recovery(recovery)),
-        (Err(primary), Err(recovery)) => Err(RecoveryFailure::Both { primary, recovery }),
     }
 }
 
@@ -226,6 +195,7 @@ where E: std::error::Error + 'static {
 }
 
 fn primary_with_recovery<E>(primary: E, recovery: Result<(), E>) -> RecoveryFailure<E> {
+    // Law: the primary value is never replaced by cleanup; cleanup only enriches the failure.
     match recovery {
         Ok(()) => RecoveryFailure::Primary(primary),
         Err(recovery) => RecoveryFailure::Both { primary, recovery },
@@ -261,8 +231,8 @@ trait CommandRunner {
     /// one with a non-zero exit status, is returned as `Ok(Output)` for adapter classification.
     fn run(&self, program: &'static str, args: &[&str]) -> Result<Output, DaemonError>;
 
-    /// Converts a completed non-zero exit into `CommandFailed` when no adapter classification is
-    /// required. Callers that classify manager-specific exit codes use `run` directly.
+    /// Converts a completed non-zero exit into `CommandFailed`. Immediate classifiers use `run`
+    /// directly; higher-level recovery policy may inspect the typed `CommandFailed` status later.
     fn run_checked(&self, program: &'static str, args: &[&str]) -> Result<Output, DaemonError> {
         let output = self.run(program, args)?;
         if output.status.success() {
@@ -283,51 +253,27 @@ impl CommandRunner for ProcessCommandRunner {
     }
 }
 
-/// A concrete cause for a failed state, attributed either to the process or its manager.
+/// User-facing projection of an adapter-owned closed failure model.
 #[derive(Debug, Eq, PartialEq)]
-enum DaemonFailure {
-    ExitCode(i32),
-    Signal {
-        name: Option<String>,
-        number: i32,
-        core_dumped: bool,
-    },
-    #[cfg_attr(
-        all(not(target_os = "linux"), not(test)),
-        expect(
-            dead_code,
-            reason = "the shared cross-platform failure sum includes systemd manager verdicts"
-        )
-    )]
-    Manager(String),
+struct DaemonFailure {
+    description: String,
+}
+
+impl DaemonFailure {
+    fn described(description: impl Into<String>) -> Self {
+        Self {
+            description: description.into(),
+        }
+    }
+
+    fn from_display(failure: &impl fmt::Display) -> Self {
+        Self::described(failure.to_string())
+    }
 }
 
 impl fmt::Display for DaemonFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::ExitCode(code) => write!(formatter, "exit code {code}"),
-            Self::Signal {
-                name: Some(name),
-                number,
-                core_dumped: false,
-            } => write!(formatter, "signal {name}: {number}"),
-            Self::Signal {
-                name: None,
-                number,
-                core_dumped: false,
-            } => write!(formatter, "signal {number}"),
-            Self::Signal {
-                name: Some(name),
-                number,
-                core_dumped: true,
-            } => write!(formatter, "signal {name}: {number}, core dumped"),
-            Self::Signal {
-                name: None,
-                number,
-                core_dumped: true,
-            } => write!(formatter, "signal {number}, core dumped"),
-            Self::Manager(failure) => formatter.write_str(failure),
-        }
+        formatter.write_str(&self.description)
     }
 }
 
@@ -342,22 +288,13 @@ enum DaemonState {
     Stopped,
     Restarting(Option<DaemonFailure>),
     Failed(Option<DaemonFailure>),
-    Starting,
-    #[cfg_attr(
-        all(not(target_os = "linux"), not(test)),
-        expect(
-            dead_code,
-            reason = "the shared lifecycle sum includes systemd's deactivating state"
-        )
-    )]
-    Stopping,
+    Transitioning(&'static str),
     Unknown(String),
 }
 
 impl DaemonState {
-    fn is_terminal_start_failure(&self) -> bool {
-        // Stopped can precede the first spawn, and Restarting explicitly has another spawn pending.
-        matches!(self, Self::Failed(_))
+    fn is_running(&self) -> bool {
+        matches!(self, Self::Running)
     }
 }
 
@@ -370,8 +307,7 @@ impl fmt::Display for DaemonState {
             Self::Restarting(None) => formatter.write_str("restarting"),
             Self::Failed(Some(failure)) => write!(formatter, "failed ({failure})"),
             Self::Failed(None) => formatter.write_str("failed"),
-            Self::Starting => formatter.write_str("starting"),
-            Self::Stopping => formatter.write_str("stopping"),
+            Self::Transitioning(state) => formatter.write_str(state),
             Self::Unknown(state) => write!(formatter, "unknown ({state})"),
         }
     }
@@ -382,15 +318,7 @@ impl fmt::Display for DaemonState {
 enum AutostartState {
     Enabled,
     Disabled,
-    #[cfg_attr(
-        all(not(target_os = "linux"), not(test)),
-        expect(
-            dead_code,
-            reason = "the shared autostart sum includes systemd's masked state"
-        )
-    )]
-    Unavailable,
-    Unknown,
+    Other(&'static str),
 }
 
 impl fmt::Display for AutostartState {
@@ -398,30 +326,46 @@ impl fmt::Display for AutostartState {
         match self {
             Self::Enabled => formatter.write_str("enabled"),
             Self::Disabled => formatter.write_str("disabled"),
-            Self::Unavailable => formatter.write_str("unavailable"),
-            Self::Unknown => formatter.write_str("unknown"),
+            Self::Other(state) => formatter.write_str(state),
         }
     }
+}
+
+/// Whether the manager lifecycle is expected to advance inside the observation window.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StartPollDisposition {
+    Pending,
+    Settled,
 }
 
 /// One service-manager lifecycle observation before the independent autostart axis is read.
 #[derive(Debug, Eq, PartialEq)]
 enum DaemonObservation {
     NotInstalled,
-    Installed(DaemonState),
+    Installed {
+        state: DaemonState,
+        start_poll: StartPollDisposition,
+    },
 }
 
 impl DaemonObservation {
-    fn is_running(&self) -> bool {
-        matches!(self, Self::Installed(DaemonState::Running))
+    fn installed(state: DaemonState, start_poll: StartPollDisposition) -> Self {
+        Self::Installed { state, start_poll }
     }
+}
 
+trait StartPollObservation {
+    /// Post: returns true exactly when another observation inside the configured window cannot
+    /// improve the start result, including absence and a running process.
+    fn settles_start_poll(&self) -> bool;
+}
+
+impl StartPollObservation for DaemonObservation {
     fn settles_start_poll(&self) -> bool {
         match self {
-            // Absence is not a start failure, but there is no installed lifecycle left to await.
             Self::NotInstalled => true,
-            Self::Installed(state) => {
-                state.is_terminal_start_failure() || matches!(state, DaemonState::Restarting(_))
+            Self::Installed { state, start_poll } => {
+                state.is_running() || *start_poll == StartPollDisposition::Settled
             }
         }
     }
@@ -531,8 +475,13 @@ where T: ValueEnum + fmt::Debug {
         })
 }
 
-/// The common lifecycle boundary. Start enables autostart; stop and restart preserve it unless a
-/// manager recovery fails explicitly. Every operation returns one complete manager observation.
+/// The common lifecycle boundary.
+///
+/// Invariant: start enables autostart; stop and restart preserve it unless a reported recovery
+/// failure says otherwise.
+///
+/// Post: every successful operation returns the complete status derived from the same settled
+/// manager observation, rather than a later untested re-query.
 trait ServiceManager {
     fn name(&self) -> &'static str;
     fn definition_path(&self) -> &Path;
@@ -589,22 +538,19 @@ fn report_started(manager: &dyn ServiceManager, status: DaemonStatus) -> Result<
     }
 }
 
-/// Polls manager lifecycle only. Running, absence, terminal failure, and a scheduled respawn settle
-/// immediately; exhausting the budget returns the final evaluated observation.
-fn wait_for_running<F>(
-    schedule: PollSchedule,
-    observe: F,
-) -> Result<DaemonObservation, DaemonError>
+/// Polls manager lifecycle only until the adapter says the lifecycle has settled for start.
+fn wait_for_running<T, F>(schedule: PollSchedule, observe: F) -> Result<T, DaemonError>
 where
-    F: FnMut() -> Result<DaemonObservation, DaemonError>,
+    T: StartPollObservation,
+    F: FnMut() -> Result<T, DaemonError>,
 {
-    poll_until(schedule, observe, |observation| {
-        observation.is_running() || observation.settles_start_poll()
-    })
+    poll_until(schedule, observe, StartPollObservation::settles_start_poll)
 }
 
 /// Performs at most `retries + 1` observations and at most `retries` sleeps. Every observation,
 /// including the final one, is evaluated by `settled` before it is returned.
+///
+/// Post: `settled` is evaluated before the retry-exhaustion branch for every returned observation.
 fn poll_until<T, E, F, P>(schedule: PollSchedule, mut observe: F, settled: P) -> Result<T, E>
 where
     F: FnMut() -> Result<T, E>,
@@ -613,7 +559,8 @@ where
     let mut retries_remaining = schedule.retries;
     loop {
         let value = observe()?;
-        if settled(&value) || retries_remaining == 0 {
+        let is_settled = settled(&value);
+        if is_settled || retries_remaining == 0 {
             return Ok(value);
         }
         thread::sleep(schedule.interval);
@@ -698,13 +645,25 @@ where F: FnOnce(&Path, &str) -> io::Result<()> {
         });
     }
     if let Err(source) = fs::rename(&temporary, path) {
-        let failure = primary_with_recovery(source, remove_temporary(&temporary));
+        let cleanup = remove_temporary(&temporary);
+        let error_path = install_failure_path(path, &temporary, &cleanup);
+        let failure = primary_with_recovery(source, cleanup);
         return Err(DaemonError::InstallServiceDefinition {
-            path: path.to_path_buf(),
+            path: error_path,
             failure,
         });
     }
     Ok(())
+}
+
+/// Post: names the temporary artifact exactly when cleanup failed and left it as the actionable
+/// path; otherwise names the requested installation target whose rename failed.
+fn install_failure_path(target: &Path, temporary: &Path, cleanup: &io::Result<()>) -> PathBuf {
+    if cleanup.is_err() {
+        temporary.to_path_buf()
+    } else {
+        target.to_path_buf()
+    }
 }
 
 fn remove_temporary(path: &Path) -> io::Result<()> {
@@ -713,13 +672,6 @@ fn remove_temporary(path: &Path) -> io::Result<()> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
     }
-}
-
-fn command_output_value<'a>(output: &'a str, field: &str) -> Option<&'a str> {
-    output.lines().find_map(|line| {
-        let (name, value) = line.trim().split_once('=')?;
-        (name.trim() == field).then(|| value.trim())
-    })
 }
 
 fn command_failure(program: &str, args: &[&str], output: Output) -> CommandFailure {
@@ -899,6 +851,23 @@ mod tests {
         ));
         assert!(!temporary.exists());
         Ok(())
+    }
+
+    #[test]
+    fn install_failure_names_the_artifact_that_requires_action() {
+        let target = Path::new("definition.plist");
+        let temporary = Path::new(".definition.plist.42.tmp");
+        let cleanup_succeeded = Ok(());
+        let cleanup_failed = Err(io::Error::other("cleanup failed"));
+
+        assert_eq!(
+            install_failure_path(target, temporary, &cleanup_succeeded),
+            target
+        );
+        assert_eq!(
+            install_failure_path(target, temporary, &cleanup_failed),
+            temporary
+        );
     }
 
     #[test]

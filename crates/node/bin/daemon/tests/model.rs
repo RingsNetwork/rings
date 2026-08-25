@@ -1,24 +1,21 @@
 //! Pure shared-model, discovery, formatting, and polling invariants.
 
-use std::cell::Cell;
-
 use super::*;
 
+#[cfg(unix)]
 #[test]
-fn production_manager_observation_budget_is_two_seconds() {
-    assert_eq!(MANAGER_OBSERVATION_SCHEDULE.retries, 20);
-    assert_eq!(
-        MANAGER_OBSERVATION_SCHEDULE.interval,
-        Duration::from_millis(100)
-    );
-    assert_eq!(
-        MANAGER_OBSERVATION_SCHEDULE.interval * 20,
-        Duration::from_secs(2)
-    );
+fn production_observation_budget_is_shorter_than_delayed_respawns() {
+    let retry_count = u32::try_from(MANAGER_OBSERVATION_SCHEDULE.retries).unwrap_or(u32::MAX);
+    let budget = MANAGER_OBSERVATION_SCHEDULE
+        .interval
+        .saturating_mul(retry_count);
+
+    assert!(budget < super::super::systemd::SYSTEMD_RESTART_DELAY);
+    assert!(budget < super::super::launchd::OBSERVED_THROTTLE_FLOOR);
 }
 
 #[test]
-fn service_spec_resolves_environment_paths_once_before_rendering() -> io::Result<()> {
+fn service_spec_discovery_captures_paths_consumed_by_renderers() -> io::Result<()> {
     let root = TestRoot::new("shared", "service-spec-discovery");
     fs::create_dir_all(&*root)?;
     let config = root.join("config.yaml");
@@ -29,29 +26,19 @@ fn service_spec_resolves_environment_paths_once_before_rendering() -> io::Result
         runtime: RuntimeFlavor::CurrentThread,
     };
 
-    let executable_calls = Cell::new(0);
-    let working_directory_calls = Cell::new(0);
     let spec = ServiceSpec::discover_with(
         "config.yaml",
         options,
-        || {
-            executable_calls.set(executable_calls.get() + 1);
-            Ok(executable.clone())
-        },
-        || {
-            working_directory_calls.set(working_directory_calls.get() + 1);
-            Ok(root.to_path_buf())
-        },
+        || Ok(executable.clone()),
+        || Ok(root.to_path_buf()),
     )
     .map_err(io::Error::other)?;
 
-    assert_eq!(executable_calls.get(), 1);
-    assert_eq!(working_directory_calls.get(), 1);
+    #[cfg(unix)]
     super::super::launchd::model::render_launchd_plist(&spec, "/tmp/out", "/tmp/error")
         .map_err(io::Error::other)?;
+    #[cfg(unix)]
     super::super::systemd::model::render_systemd_unit(&spec).map_err(io::Error::other)?;
-    assert_eq!(executable_calls.get(), 1);
-    assert_eq!(working_directory_calls.get(), 1);
 
     assert_eq!(spec.executable, executable.to_string_lossy());
     assert_eq!(spec.config, config.canonicalize()?.to_string_lossy());

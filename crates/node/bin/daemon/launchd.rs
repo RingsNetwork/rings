@@ -9,9 +9,9 @@ use thiserror::Error;
 
 use super::command_failure;
 use super::ensure_parent_directory;
-use super::finish_with_recovery;
 use super::path_text;
 use super::poll_until;
+use super::primary_with_recovery;
 use super::wait_for_running;
 use super::write_atomic;
 use super::AutostartState;
@@ -29,7 +29,6 @@ use super::MANAGER_OBSERVATION_SCHEDULE;
 
 pub(super) mod model;
 mod status;
-
 use model::is_service_not_found;
 use model::may_be_disabled_bootstrap;
 use model::render_launchd_plist;
@@ -44,8 +43,11 @@ use status::parse_launchd_autostart;
 use status::parse_launchd_observation;
 use status::LaunchdAttribution;
 use status::LaunchdRecord;
+#[cfg(test)]
+pub(super) use status::OBSERVED_THROTTLE_FLOOR;
 
-// macOS provides launchctl at this SIP-protected path. PATH lookup would add a hijack surface.
+// Verified on macOS 15.6.1 (24G90): launchctl is provided at /bin on the SIP-protected signed
+// system volume. Using the fixed path avoids substituting a different manager through PATH.
 const LAUNCHCTL: &str = "/bin/launchctl";
 const LAUNCHD_MANAGER: &str = "launchd";
 
@@ -58,13 +60,55 @@ pub(super) enum LaunchdError {
     InvalidUserId { output: String },
     #[error("launchd did not unload the daemon service within the observation budget")]
     ServiceDidNotUnload,
-    #[error("could not bootstrap the disabled service while restoring its autostart setting")]
-    DisabledBootstrap {
+    #[error("could not determine whether launchd exit 5 came from a disabled label")]
+    BootstrapStateProbe {
         #[source]
         failure: RecoveryFailure<Box<DaemonError>>,
     },
-    #[error("cannot set launchd autostart to non-concrete state {state}")]
-    InvalidAutostartMutation { state: AutostartState },
+    #[error("launchd bootstrap failed, but disabled-label recovery is not applicable because login autostart is {observed}")]
+    BootstrapStateMismatch {
+        observed: AutostartState,
+        #[source]
+        bootstrap: Box<DaemonError>,
+    },
+    #[error("could not temporarily enable a disabled launchd label after bootstrap failed")]
+    BootstrapEnable {
+        #[source]
+        failure: RecoveryFailure<Box<DaemonError>>,
+    },
+    #[error("could not bootstrap the disabled launchd service after temporarily enabling it")]
+    BootstrapRetry {
+        #[source]
+        source: Box<DaemonError>,
+    },
+    #[error("the service was bootstrapped, but restoring disabled login autostart failed; the running service may remain enabled at login")]
+    AutostartRestore {
+        #[source]
+        source: Box<DaemonError>,
+    },
+    #[error("the bootstrap retry and disabled-autostart restore both failed; login autostart may remain enabled")]
+    BootstrapRetryAndRestore {
+        #[source]
+        failure: RecoveryFailure<Box<DaemonError>>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ConcreteAutostart {
+    Enabled,
+    Disabled,
+}
+
+impl TryFrom<AutostartState> for ConcreteAutostart {
+    type Error = AutostartState;
+
+    fn try_from(state: AutostartState) -> Result<Self, Self::Error> {
+        match state {
+            AutostartState::Enabled => Ok(Self::Enabled),
+            AutostartState::Disabled => Ok(Self::Disabled),
+            AutostartState::Other(_) => Err(state),
+        }
+    }
 }
 
 impl From<LaunchdDefinitionError> for DaemonError {
@@ -78,6 +122,7 @@ pub(super) struct LaunchdManager<R = ProcessCommandRunner> {
     stdout_log: PathBuf,
     stderr_log: PathBuf,
     domain: String,
+    target: String,
     poll_schedule: PollSchedule,
     runner: R,
 }
@@ -93,12 +138,14 @@ impl LaunchdManager<ProcessCommandRunner> {
             return Err(LaunchdError::InvalidUserId { output: user_id }.into());
         }
         let domain = format!("gui/{user_id}");
+        let target = launchd_target(&domain);
         let logs = home.join(".rings").join("logs");
         Ok(Self {
             definition_path: launchd_definition_path(&home),
             stdout_log: logs.join("daemon.log"),
             stderr_log: logs.join("daemon.error.log"),
             domain,
+            target,
             poll_schedule: MANAGER_OBSERVATION_SCHEDULE,
             runner,
         })
@@ -118,13 +165,12 @@ fn launchd_definition_path(home: &Path) -> PathBuf {
 impl<R> LaunchdManager<R>
 where R: CommandRunner
 {
-    fn target(&self) -> String {
-        launchd_target(&self.domain)
+    fn target(&self) -> &str {
+        &self.target
     }
 
     fn service_record(&self) -> Result<LaunchdRecord<Output>, DaemonError> {
-        let target = self.target();
-        let arguments = ["print", target.as_str()];
+        let arguments = ["print", self.target()];
         let output = self.runner.run(LAUNCHCTL, &arguments)?;
         if output.status.success() {
             return Ok(LaunchdRecord::Loaded(output));
@@ -144,8 +190,8 @@ where R: CommandRunner
         if !self.is_loaded()? {
             return Ok(());
         }
-        let target = self.target();
-        self.runner.run_checked(LAUNCHCTL, &["bootout", &target])?;
+        self.runner
+            .run_checked(LAUNCHCTL, &["bootout", self.target()])?;
         let still_loaded = poll_until(self.poll_schedule, || self.is_loaded(), |loaded| !*loaded)?;
         if still_loaded {
             Err(LaunchdError::ServiceDidNotUnload.into())
@@ -156,25 +202,22 @@ where R: CommandRunner
 
     fn bootstrap(&self) -> Result<(), DaemonError> {
         let definition = path_text(&self.definition_path)?;
-        let arguments = ["bootstrap", self.domain.as_str(), definition.as_str()];
-        let output = self.runner.run(LAUNCHCTL, &arguments)?;
-        if output.status.success() {
-            Ok(())
-        } else {
-            Err(command_failure(LAUNCHCTL, &arguments, output).into())
-        }
+        self.runner
+            .run_checked(LAUNCHCTL, &[
+                "bootstrap",
+                self.domain.as_str(),
+                definition.as_str(),
+            ])
+            .map(|_| ())
     }
 
-    fn set_autostart(&self, state: AutostartState) -> Result<(), DaemonError> {
+    fn set_autostart(&self, state: ConcreteAutostart) -> Result<(), DaemonError> {
         let action = match state {
-            AutostartState::Enabled => "enable",
-            AutostartState::Disabled => "disable",
-            AutostartState::Unavailable | AutostartState::Unknown => {
-                return Err(LaunchdError::InvalidAutostartMutation { state }.into());
-            }
+            ConcreteAutostart::Enabled => "enable",
+            ConcreteAutostart::Disabled => "disable",
         };
-        let target = self.target();
-        self.runner.run_checked(LAUNCHCTL, &[action, &target])?;
+        self.runner
+            .run_checked(LAUNCHCTL, &[action, self.target()])?;
         Ok(())
     }
 
@@ -190,17 +233,44 @@ where R: CommandRunner
         ) {
             return Err(error);
         }
-        let previous = self.autostart_state()?;
-        if previous != AutostartState::Disabled {
-            return Err(error);
+        let observed = match self.autostart_state() {
+            Ok(state) => state,
+            Err(probe) => {
+                return Err(LaunchdError::BootstrapStateProbe {
+                    failure: primary_with_recovery(Box::new(error), Err(Box::new(probe))),
+                }
+                .into());
+            }
+        };
+        let concrete = match ConcreteAutostart::try_from(observed) {
+            Ok(ConcreteAutostart::Disabled) => ConcreteAutostart::Disabled,
+            Ok(ConcreteAutostart::Enabled) | Err(_) => {
+                return Err(LaunchdError::BootstrapStateMismatch {
+                    observed,
+                    bootstrap: Box::new(error),
+                }
+                .into());
+            }
+        };
+        if let Err(enable) = self.set_autostart(ConcreteAutostart::Enabled) {
+            return Err(LaunchdError::BootstrapEnable {
+                failure: primary_with_recovery(Box::new(error), Err(Box::new(enable))),
+            }
+            .into());
         }
-        self.set_autostart(AutostartState::Enabled)?;
         let bootstrap = self.bootstrap().map_err(Box::new);
         // Observed on macOS 15.6.1 (24G90): disabling a live job does not unload or stop it. Restore
         // the corroborated prior value after either result of the retry.
-        let restore = self.set_autostart(previous).map_err(Box::new);
-        finish_with_recovery(bootstrap, restore)
-            .map_err(|failure| LaunchdError::DisabledBootstrap { failure }.into())
+        let restore = self.set_autostart(concrete).map_err(Box::new);
+        match (bootstrap, restore) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(source), Ok(())) => Err(LaunchdError::BootstrapRetry { source }.into()),
+            (Ok(()), Err(source)) => Err(LaunchdError::AutostartRestore { source }.into()),
+            (Err(primary), Err(recovery)) => Err(LaunchdError::BootstrapRetryAndRestore {
+                failure: RecoveryFailure::Both { primary, recovery },
+            }
+            .into()),
+        }
     }
 
     fn has_definition(&self) -> bool {
@@ -223,21 +293,14 @@ where R: CommandRunner
         attribution: LaunchdAttribution,
     ) -> Result<DaemonObservation, DaemonError> {
         let definition_present = self.has_definition();
-        let record = self.service_record()?;
-        let observation = match &record {
-            LaunchdRecord::Missing => {
-                parse_launchd_observation(LaunchdRecord::Missing, definition_present, attribution)
-            }
-            LaunchdRecord::Loaded(output) => {
-                let text = String::from_utf8_lossy(&output.stdout);
-                parse_launchd_observation(
-                    LaunchdRecord::Loaded(text.as_ref()),
-                    definition_present,
-                    attribution,
-                )
-            }
-        };
-        Ok(observation)
+        let record = self
+            .service_record()?
+            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned());
+        Ok(parse_launchd_observation(
+            record,
+            definition_present,
+            attribution,
+        ))
     }
 
     fn complete_observation(
@@ -246,7 +309,7 @@ where R: CommandRunner
     ) -> Result<DaemonStatus, DaemonError> {
         match observation {
             DaemonObservation::NotInstalled => Ok(DaemonStatus::NotInstalled),
-            DaemonObservation::Installed(state) => {
+            DaemonObservation::Installed { state, .. } => {
                 let autostart = self.autostart_state()?;
                 Ok(DaemonStatus::installed(state, autostart))
             }
@@ -258,6 +321,13 @@ where R: CommandRunner
         attribution: LaunchdAttribution,
     ) -> Result<DaemonStatus, DaemonError> {
         let observation = self.observe_lifecycle_with_attribution(attribution)?;
+        self.complete_observation(observation)
+    }
+
+    fn settle(&self, attribution: LaunchdAttribution) -> Result<DaemonStatus, DaemonError> {
+        let observation = wait_for_running(self.poll_schedule, || {
+            self.observe_lifecycle_with_attribution(attribution)
+        })?;
         self.complete_observation(observation)
     }
 }
@@ -281,12 +351,13 @@ where R: CommandRunner
         ensure_parent_directory(&self.stderr_log)?;
         write_atomic(&self.definition_path, &definition)?;
         self.unload_if_loaded()?;
-        self.set_autostart(AutostartState::Enabled)?;
+        // Observed on macOS 15.6.1 (24G90): bootstrap rejects an already-loaded label and a
+        // disabled unloaded label. Therefore start unloads first and explicitly enables before
+        // bootstrap. The log parents are created before bootstrap because launchd will not spawn a
+        // job whose StandardOutPath or StandardErrorPath parent is absent.
+        self.set_autostart(ConcreteAutostart::Enabled)?;
         self.bootstrap()?;
-        let observation = wait_for_running(self.poll_schedule, || {
-            self.observe_lifecycle_with_attribution(LaunchdAttribution::Unfiltered)
-        })?;
-        self.complete_observation(observation)
+        self.settle(LaunchdAttribution::Unfiltered)
     }
 
     fn stop(&self) -> Result<DaemonStatus, DaemonError> {
@@ -297,19 +368,12 @@ where R: CommandRunner
     fn restart(&self) -> Result<DaemonStatus, DaemonError> {
         if let LaunchdRecord::Loaded(output) = self.service_record()? {
             let attribution = attribution_after_restart(&String::from_utf8_lossy(&output.stdout));
-            let target = self.target();
             self.runner
-                .run_checked(LAUNCHCTL, &["kickstart", "-k", &target])?;
-            let observation = wait_for_running(self.poll_schedule, || {
-                self.observe_lifecycle_with_attribution(attribution)
-            })?;
-            self.complete_observation(observation)
+                .run_checked(LAUNCHCTL, &["kickstart", "-k", self.target()])?;
+            self.settle(attribution)
         } else if self.has_definition() {
             self.bootstrap_preserving_autostart()?;
-            let observation = wait_for_running(self.poll_schedule, || {
-                self.observe_lifecycle_with_attribution(LaunchdAttribution::Unfiltered)
-            })?;
-            self.complete_observation(observation)
+            self.settle(LaunchdAttribution::Unfiltered)
         } else {
             Err(DaemonError::ServiceNotInstalled {
                 path: self.definition_path.clone(),
@@ -361,11 +425,13 @@ mod tests {
         runner: ScriptedCommandRunner,
     ) -> LaunchdManager<ScriptedCommandRunner> {
         let domain = TEST_DOMAIN.to_owned();
+        let target = launchd_target(&domain);
         LaunchdManager {
             definition_path: launchd_definition_path(root),
             stdout_log: root.join(".rings/logs/daemon.log"),
             stderr_log: root.join(".rings/logs/daemon.error.log"),
             domain,
+            target,
             poll_schedule: TEST_OBSERVATION_SCHEDULE,
             runner,
         }
@@ -473,7 +539,7 @@ mod tests {
     }
 
     #[test]
-    fn restart_does_not_attribute_an_action_translated_exit_code() -> Result<(), DaemonError> {
+    fn healthy_restart_waits_past_an_action_translated_exit_code() -> Result<(), DaemonError> {
         let root = test_root("restart-current-failure");
         let target = test_target();
         let mut steps = vec![
@@ -489,24 +555,22 @@ mod tests {
             &["print", &target],
             "state = spawn scheduled\nruns = 5\nlast exit code = 1\n",
         ));
+        steps.push(CommandStep::success(
+            LAUNCHCTL,
+            &["print", &target],
+            "state = running\nruns = 5\n",
+        ));
         steps.push(enabled_autostart(TEST_DOMAIN));
         let runner = ScriptedCommandRunner::new(steps);
         let manager = test_manager(&root, runner);
         install_test_definition(&root)?;
 
         let status = manager.restart()?;
-        let error = super::super::report_started(&manager, status);
-
-        assert!(matches!(
-            error,
-            Err(DaemonError::ServiceDidNotStart {
-                status: DaemonStatus::Installed {
-                    state: DaemonState::Restarting(None),
-                    autostart: AutostartState::Enabled,
-                }
-            })
-        ));
-        Ok(())
+        assert_eq!(
+            status,
+            DaemonStatus::installed(DaemonState::Running, AutostartState::Enabled)
+        );
+        super::super::report_started(&manager, status)
     }
 
     #[test]
@@ -526,6 +590,11 @@ mod tests {
             &["print", &target],
             "state = spawn scheduled\nruns = 4\nlast terminating signal = Segmentation fault: 11\n",
         ));
+        steps.push(CommandStep::success(
+            LAUNCHCTL,
+            &["print", &target],
+            "state = throttled\nruns = 4\nlast terminating signal = Segmentation fault: 11\n",
+        ));
         steps.push(enabled_autostart(TEST_DOMAIN));
         let runner = ScriptedCommandRunner::new(steps);
         let manager = test_manager(&root, runner);
@@ -533,19 +602,16 @@ mod tests {
 
         let status = manager.restart()?;
         let error = super::super::report_started(&manager, status);
+        let expected = DaemonStatus::installed(
+            DaemonState::Restarting(Some(DaemonFailure::described(
+                "signal Segmentation fault: 11",
+            ))),
+            AutostartState::Enabled,
+        );
 
         assert!(matches!(
             error,
-            Err(DaemonError::ServiceDidNotStart {
-                status: DaemonStatus::Installed {
-                    state: DaemonState::Restarting(Some(DaemonFailure::Signal {
-                        name: Some(name),
-                        number: 11,
-                        core_dumped: false,
-                    })),
-                    autostart: AutostartState::Enabled,
-                }
-            }) if name == "Segmentation fault"
+            Err(DaemonError::ServiceDidNotStart { status }) if status == expected
         ));
         Ok(())
     }
@@ -620,7 +686,7 @@ mod tests {
             error,
             Err(DaemonError::ServiceDidNotStart {
                 status: DaemonStatus::Installed {
-                    state: DaemonState::Starting,
+                    state: DaemonState::Transitioning("starting"),
                     autostart: AutostartState::Enabled,
                 }
             })
@@ -634,18 +700,25 @@ mod tests {
         let root = test_root("start-reporting");
         let domain = TEST_DOMAIN;
         let target = test_target();
-        install_test_definition(&root)?;
+        let definition = launchd_definition_path(&root);
+        let definition_text = path_text(&definition)?;
         let runner = ScriptedCommandRunner::new([
+            CommandStep::failure(
+                LAUNCHCTL,
+                &["print", &target],
+                LAUNCHD_SERVICE_NOT_FOUND,
+                "Could not find specified service",
+            ),
+            CommandStep::success(LAUNCHCTL, &["enable", &target], ""),
+            CommandStep::success(LAUNCHCTL, &["bootstrap", domain, &definition_text], ""),
             CommandStep::success(LAUNCHCTL, &["print", &target], "state = waiting\n"),
             CommandStep::success(LAUNCHCTL, &["print", &target], "state = running\n"),
             enabled_autostart(domain),
         ]);
         let manager = test_manager(&root, runner);
+        let spec = service_spec(&LogLevel::Info, &RuntimeFlavor::MultiThread)?;
 
-        let observation = super::super::wait_for_running(TEST_OBSERVATION_SCHEDULE, || {
-            manager.observe_lifecycle_with_attribution(LaunchdAttribution::Unfiltered)
-        })?;
-        let status = manager.complete_observation(observation)?;
+        let status = manager.start(&spec)?;
         super::super::report_started(&manager, status)
     }
 
@@ -654,8 +727,17 @@ mod tests {
         let root = test_root("start-reporting-failure");
         let domain = TEST_DOMAIN;
         let target = test_target();
-        install_test_definition(&root)?;
+        let definition = launchd_definition_path(&root);
+        let definition_text = path_text(&definition)?;
         let runner = ScriptedCommandRunner::new([
+            CommandStep::failure(
+                LAUNCHCTL,
+                &["print", &target],
+                LAUNCHD_SERVICE_NOT_FOUND,
+                "Could not find specified service",
+            ),
+            CommandStep::success(LAUNCHCTL, &["enable", &target], ""),
+            CommandStep::success(LAUNCHCTL, &["bootstrap", domain, &definition_text], ""),
             CommandStep::success(
                 LAUNCHCTL,
                 &["print", &target],
@@ -664,61 +746,55 @@ mod tests {
             enabled_autostart(domain),
         ]);
         let manager = test_manager(&root, runner);
+        let spec = service_spec(&LogLevel::Info, &RuntimeFlavor::MultiThread)?;
 
-        let observation = super::super::wait_for_running(TEST_OBSERVATION_SCHEDULE, || {
-            manager.observe_lifecycle_with_attribution(LaunchdAttribution::Unfiltered)
-        })?;
-        let status = manager.complete_observation(observation)?;
+        let status = manager.start(&spec)?;
         let error = super::super::report_started(&manager, status);
+        let expected = DaemonStatus::installed(
+            DaemonState::Restarting(Some(DaemonFailure::described("exit code 78"))),
+            AutostartState::Enabled,
+        );
 
         assert!(matches!(
             error,
-            Err(DaemonError::ServiceDidNotStart {
-                status: DaemonStatus::Installed {
-                    state: DaemonState::Restarting(Some(DaemonFailure::ExitCode(78))),
-                    autostart: AutostartState::Enabled,
-                }
-            })
+            Err(DaemonError::ServiceDidNotStart { status }) if status == expected
         ));
         Ok(())
     }
 
     #[test]
-    fn start_reporting_settles_immediately_for_a_scheduled_retry() -> Result<(), DaemonError> {
+    fn start_waits_past_a_scheduled_retry_until_running() -> Result<(), DaemonError> {
         let root = test_root("start-reporting-signal-failure");
         let domain = TEST_DOMAIN;
         let target = test_target();
-        install_test_definition(&root)?;
+        let definition = launchd_definition_path(&root);
+        let definition_text = path_text(&definition)?;
         let runner = ScriptedCommandRunner::new([
+            CommandStep::failure(
+                LAUNCHCTL,
+                &["print", &target],
+                LAUNCHD_SERVICE_NOT_FOUND,
+                "Could not find specified service",
+            ),
+            CommandStep::success(LAUNCHCTL, &["enable", &target], ""),
+            CommandStep::success(LAUNCHCTL, &["bootstrap", domain, &definition_text], ""),
             CommandStep::success(
                 LAUNCHCTL,
                 &["print", &target],
                 "state = spawn scheduled\nruns = 1\nlast terminating signal = Segmentation fault: 11\n",
             ),
+            CommandStep::success(LAUNCHCTL, &["print", &target], "state = running\nruns = 1\n"),
             enabled_autostart(domain),
         ]);
         let manager = test_manager(&root, runner);
+        let spec = service_spec(&LogLevel::Info, &RuntimeFlavor::MultiThread)?;
 
-        let observation = super::super::wait_for_running(TEST_OBSERVATION_SCHEDULE, || {
-            manager.observe_lifecycle_with_attribution(LaunchdAttribution::Unfiltered)
-        })?;
-        let status = manager.complete_observation(observation)?;
-        let error = super::super::report_started(&manager, status);
-
-        assert!(matches!(
-            error,
-            Err(DaemonError::ServiceDidNotStart {
-                status: DaemonStatus::Installed {
-                    state: DaemonState::Restarting(Some(DaemonFailure::Signal {
-                        name: Some(name),
-                        number: 11,
-                        core_dumped: false,
-                    })),
-                    autostart: AutostartState::Enabled,
-                }
-            }) if name == "Segmentation fault"
-        ));
-        Ok(())
+        let status = manager.start(&spec)?;
+        assert_eq!(
+            status,
+            DaemonStatus::installed(DaemonState::Running, AutostartState::Enabled)
+        );
+        super::super::report_started(&manager, status)
     }
 
     #[test]
@@ -766,11 +842,7 @@ mod tests {
         assert_eq!(
             status,
             DaemonStatus::installed(
-                DaemonState::Restarting(Some(DaemonFailure::Signal {
-                    name: Some("Bus error".to_owned()),
-                    number: 10,
-                    core_dumped: false,
-                })),
+                DaemonState::Restarting(Some(DaemonFailure::described("signal Bus error: 10"))),
                 AutostartState::Enabled,
             )
         );

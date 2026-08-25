@@ -180,7 +180,7 @@ fn storage_capacity_overrides_both_configured_stores_without_replacing_paths() {
 }
 
 #[test]
-fn storage_capacity_is_absent_when_the_cli_flag_is_omitted() {
+fn storage_capacity_has_only_the_environment_as_an_implicit_cli_source() {
     let command = Cli::command();
     let storage_capacity = command
         .get_subcommands()
@@ -190,5 +190,8 @@ fn storage_capacity_is_absent_when_the_cli_flag_is_omitted() {
                 .find(|argument| argument.get_id() == "storage_capacity")
         });
 
-    assert!(storage_capacity.is_some_and(|argument| argument.get_default_values().is_empty()));
+    assert!(storage_capacity.is_some_and(|argument| {
+        argument.get_default_values().is_empty()
+            && argument.get_env().and_then(|value| value.to_str()) == Some("STORAGE_CAPACITY")
+    }));
 }
