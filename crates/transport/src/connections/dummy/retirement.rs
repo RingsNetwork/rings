@@ -11,11 +11,7 @@ use crate::core::drop_guard::ArmedDropGuard;
 use crate::core::transport::WebrtcConnectionState;
 use crate::sync_utils::lock_recover;
 
-fn mark_connection_state_closed(
-    connection_state: &Arc<Mutex<DummyConnectionState>>,
-    before_state_gate: impl FnOnce(),
-) -> bool {
-    before_state_gate();
+fn mark_connection_state_closed(connection_state: &Arc<Mutex<DummyConnectionState>>) -> bool {
     let mut state = lock_recover(connection_state);
     let notify = state.webrtc != WebrtcConnectionState::Closed;
     state.webrtc = WebrtcConnectionState::Closed;
@@ -28,7 +24,8 @@ pub(super) fn mark_connection_state_closed_with_observer_for_test(
     connection_state: &Arc<Mutex<DummyConnectionState>>,
     before_state_gate: impl FnOnce(),
 ) -> bool {
-    mark_connection_state_closed(connection_state, before_state_gate)
+    before_state_gate();
+    mark_connection_state_closed(connection_state)
 }
 
 #[derive(Clone)]
@@ -82,7 +79,7 @@ impl DummyRetirementFence {
     }
 
     pub(super) fn mark_closed(&self) -> bool {
-        mark_connection_state_closed(&self.connection_state, || {})
+        mark_connection_state_closed(&self.connection_state)
     }
 
     pub(super) fn finish_retirement(&self, notify: bool) {

@@ -144,6 +144,16 @@ impl Stabilizer {
             );
 
             match self.transport.send_storage_sync_tracked(msg).await {
+                Ok(TrackedStorageSyncOutcome::PersistedLocally) => {
+                    tracing::debug!(
+                        target: "rings_core::dht::stabilization",
+                        local = %self.dht.did,
+                        purpose = ?purpose,
+                        destination = ?destination,
+                        entries,
+                        "STABILIZATION storage repair persisted locally"
+                    );
+                }
                 Ok(TrackedStorageSyncOutcome::Delivered(tx_id)) => {
                     tracing::debug!(
                         target: "rings_core::dht::stabilization",

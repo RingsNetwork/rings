@@ -215,15 +215,13 @@ impl SwarmTransport {
         before_update: impl FnOnce(),
     ) -> Result<()> {
         let now_ms = get_epoch_ms_i64();
-        self.with_connection_lifecycle(|| {
-            if !self.owns_active_slot(attempt)? {
-                return Ok(());
-            }
+        self.with_active_slot(attempt, || {
             before_update();
             let mut liveness = self.peer_liveness()?;
             observation.apply(&mut liveness, attempt.peer, attempt.generation, now_ms);
             Ok(())
         })
+        .map(|_| ())
     }
 
     pub(crate) fn mark_peer_liveness_connected(&self, attempt: PendingConnectionAttempt) {
@@ -265,14 +263,12 @@ impl SwarmTransport {
         attempt: PendingConnectionAttempt,
         now_ms: i64,
     ) -> Result<()> {
-        self.with_connection_lifecycle(|| {
-            if !self.owns_active_slot(attempt)? {
-                return Ok(());
-            }
+        self.with_active_slot(attempt, || {
             self.peer_liveness()?
                 .mark_probe_sent(attempt.peer, attempt.generation, now_ms);
             Ok(())
         })
+        .map(|_| ())
     }
 
     pub(crate) fn peer_liveness_expiry(
@@ -280,14 +276,12 @@ impl SwarmTransport {
         attempt: PendingConnectionAttempt,
         now_ms: i64,
     ) -> Result<Option<PeerLivenessExpiry>> {
-        self.with_connection_lifecycle(|| {
-            if !self.owns_active_slot(attempt)? {
-                return Ok(None);
-            }
+        self.with_active_slot(attempt, || {
             Ok(self
                 .peer_liveness()?
                 .expiry(attempt.peer, attempt.generation, now_ms))
         })
+        .map(Option::flatten)
     }
 
     /// Return how long an admitted peer has owned its current active generation.

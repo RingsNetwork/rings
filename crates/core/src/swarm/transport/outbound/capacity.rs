@@ -87,7 +87,7 @@ async fn acquire_with_fixed_reservation<T>(
     fixed_request_limit: usize,
     capacity_error: impl Fn() -> Error,
     try_reserved: impl FnOnce() -> Result<T>,
-    try_shared: impl FnMut() -> Result<T>,
+    mut try_shared: impl FnMut() -> Result<T>,
 ) -> Result<T> {
     if let Ok(permit) = try_reserved() {
         return Ok(permit);
@@ -100,7 +100,7 @@ async fn acquire_with_fixed_reservation<T>(
         bytes,
         capacity_error(),
         || Error::ChannelSendMessageFailed,
-        try_shared,
+        || try_shared().ok(),
     )
     .await
 }
@@ -122,24 +122,6 @@ impl GlobalTransferCapacity {
             waiters: Arc::new(FairWaitQueue::with_budget(wait_budget.clone())),
             wait_budget,
         }
-    }
-
-    fn try_acquire(
-        self: &Arc<Self>,
-        peer: Did,
-        class: TransferClass,
-        bytes: usize,
-    ) -> Result<GlobalCapacityPermit> {
-        self.try_acquire_inner(peer, class, bytes, CapacityScope::Shared)
-    }
-
-    fn try_acquire_reserved(
-        self: &Arc<Self>,
-        peer: Did,
-        class: TransferClass,
-        bytes: usize,
-    ) -> Result<GlobalCapacityPermit> {
-        self.try_acquire_inner(peer, class, bytes, CapacityScope::FixedReservation)
     }
 
     fn try_acquire_inner(
@@ -186,8 +168,8 @@ impl GlobalTransferCapacity {
             bytes,
             fixed_request_bytes(&OUTBOUND_GLOBAL_BYTE_RESERVATIONS, class),
             || memory_capacity_error(peer, bytes, global_byte_limit(class)),
-            || self.try_acquire_reserved(peer, class, bytes),
-            || self.try_acquire(peer, class, bytes),
+            || self.try_acquire_inner(peer, class, bytes, CapacityScope::FixedReservation),
+            || self.try_acquire_inner(peer, class, bytes, CapacityScope::Shared),
         )
         .await
     }
@@ -250,24 +232,6 @@ impl TransferCapacity {
         }
     }
 
-    fn try_acquire_peer(
-        self: &Arc<Self>,
-        peer: Did,
-        class: TransferClass,
-        bytes: usize,
-    ) -> Result<PeerCapacityPermit> {
-        self.try_acquire_peer_inner(peer, class, bytes, CapacityScope::Shared)
-    }
-
-    fn try_acquire_reserved_peer(
-        self: &Arc<Self>,
-        peer: Did,
-        class: TransferClass,
-        bytes: usize,
-    ) -> Result<PeerCapacityPermit> {
-        self.try_acquire_peer_inner(peer, class, bytes, CapacityScope::FixedReservation)
-    }
-
     fn try_acquire_peer_inner(
         self: &Arc<Self>,
         peer: Did,
@@ -314,8 +278,8 @@ impl TransferCapacity {
             bytes,
             fixed_request_bytes(&OUTBOUND_PEER_BYTE_RESERVATIONS, class),
             || memory_capacity_error(peer, bytes, peer_byte_limit(class)),
-            || self.try_acquire_reserved_peer(peer, class, bytes),
-            || self.try_acquire_peer(peer, class, bytes),
+            || self.try_acquire_peer_inner(peer, class, bytes, CapacityScope::FixedReservation),
+            || self.try_acquire_peer_inner(peer, class, bytes, CapacityScope::Shared),
         )
         .await
     }
@@ -329,8 +293,10 @@ impl TransferCapacity {
     ) -> Result<TransferCapacityPermit> {
         validate_memory_request(peer, class, bytes)?;
         let bytes = bytes.max(1);
-        let peer_permit = self.try_acquire_peer(peer, class, bytes)?;
-        let global_permit = self.global.try_acquire(peer, class, bytes)?;
+        let peer_permit = self.try_acquire_peer_inner(peer, class, bytes, CapacityScope::Shared)?;
+        let global_permit =
+            self.global
+                .try_acquire_inner(peer, class, bytes, CapacityScope::Shared)?;
         Ok(TransferCapacityPermit {
             _peer: peer_permit,
             _global: global_permit,

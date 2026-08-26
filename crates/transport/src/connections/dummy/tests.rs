@@ -14,6 +14,7 @@ use super::retirement::mark_connection_state_closed_with_observer_for_test;
 use super::ControlledDeliveryState;
 use super::DummyConnection;
 use super::DummyConnectionState;
+use super::DummySendTarget;
 use super::Event;
 use super::CONNS;
 use crate::callback::inbound_peer_frame_capacity_for_test;
@@ -211,8 +212,7 @@ async fn queued_dummy_message_retains_raw_frame_capacity() {
     let _delivery = complete_irrevocable_send(
         &connection_state,
         data,
-        Some(remote),
-        false,
+        DummySendTarget::Deliver(remote),
         guarded_test_permit(&connection_state, SendPermit::always()),
     )
     .expect("first dummy frame must enter the controlled queue");
@@ -256,8 +256,13 @@ async fn receiver_capacity_drop_does_not_fail_irrevocable_dummy_send() {
     let acceptance = permit.acceptance();
     let permit = guarded_test_permit(&connection_state, permit);
 
-    let _delivery = complete_irrevocable_send(&connection_state, data, Some(remote), false, permit)
-        .expect("receiver-local capacity pressure must not fail the sender");
+    let _delivery = complete_irrevocable_send(
+        &connection_state,
+        data,
+        DummySendTarget::Deliver(remote),
+        permit,
+    )
+    .expect("receiver-local capacity pressure must not fail the sender");
 
     assert!(acceptance.is_accepted());
     assert_eq!(controlled::sent_count(), 1);
@@ -299,8 +304,7 @@ async fn oversized_dummy_frame_is_dropped_before_receiver_dispatch() {
     let _delivery = complete_irrevocable_send(
         &connection_state,
         Bytes::from(vec![0; MAX_DATA_CHANNEL_MESSAGE_SIZE + 1]),
-        Some(Arc::clone(&remote)),
-        false,
+        DummySendTarget::Deliver(Arc::clone(&remote)),
         guarded_test_permit(&connection_state, permit),
     )
     .expect("the local send may complete while the receiver drops an oversized frame");

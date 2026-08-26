@@ -52,7 +52,7 @@ async fn native_webrtc_control_interleaves_the_shared_multiframe_storage_fixture
         .transport
         .send_storage_sync(storage)
         .await?
-        .is_some());
+        .is_sent());
 
     for round in 0..16 {
         node1

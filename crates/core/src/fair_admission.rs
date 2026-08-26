@@ -7,11 +7,30 @@
 
 use std::collections::VecDeque;
 use std::future::poll_fn;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::task::Context;
 use std::task::Poll;
 use std::task::Waker;
+
+/// Atomically add `amount` when the resulting reservation stays within `limit`.
+pub(crate) fn try_reserve_atomic(counter: &AtomicUsize, amount: usize, limit: usize) -> bool {
+    let mut current = counter.load(Ordering::Acquire);
+    loop {
+        let Some(next) = current.checked_add(amount) else {
+            return false;
+        };
+        if next > limit {
+            return false;
+        }
+        match counter.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return true,
+            Err(observed) => current = observed,
+        }
+    }
+}
 
 pub(crate) fn fair_reservation_fits<const N: usize>(
     admitted_by_class: &[usize; N],
@@ -400,14 +419,13 @@ pub(crate) async fn acquire_fair<T>(
     cost: usize,
     budget_error: crate::error::Error,
     closed_error: impl Fn() -> crate::error::Error,
-    attempt: impl FnMut() -> crate::error::Result<T>,
+    attempt: impl FnMut() -> Option<T>,
 ) -> crate::error::Result<T> {
     let mut attempt = attempt;
-    let mut try_acquire = || attempt().ok();
-    match queue.admit_or_wait(cost, budget_error, &mut try_acquire)? {
+    match queue.admit_or_wait(cost, budget_error, &mut attempt)? {
         FairAdmission::Ready(value) => Ok(value),
         FairAdmission::Waiting(mut waiter) => {
-            poll_fn(|context| match waiter.poll(context, &mut try_acquire) {
+            poll_fn(|context| match waiter.poll(context, &mut attempt) {
                 Poll::Ready(Some(value)) => Poll::Ready(Ok(value)),
                 Poll::Ready(None) => Poll::Ready(Err(closed_error())),
                 Poll::Pending => Poll::Pending,

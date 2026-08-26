@@ -35,8 +35,36 @@ pub(super) struct StorageSyncAckCapability {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum TrackedStorageSyncOutcome {
+    PersistedLocally,
     Delivered(uuid::Uuid),
     Deferred,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum StorageSyncOutcome {
+    PersistedLocally,
+    Sent(uuid::Uuid),
+    Deferred,
+}
+
+impl StorageSyncOutcome {
+    #[cfg(test)]
+    pub(crate) const fn is_sent(self) -> bool {
+        matches!(self, Self::Sent(_))
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn is_deferred(self) -> bool {
+        matches!(self, Self::Deferred)
+    }
+}
+
+enum StorageSyncCompletion {
+    PersistedLocally,
+    Submitted {
+        tx_id: uuid::Uuid,
+        outcome: SendCompletionOutcome,
+    },
 }
 
 // Invariant: physical-owner sync proves the final owner identity. Placement-key
@@ -335,16 +363,16 @@ impl SwarmTransport {
         &self,
         msg: SyncEntriesWithSuccessor,
         completion: OutboundCompletion,
-    ) -> Result<(uuid::Uuid, SendCompletionOutcome)> {
+    ) -> Result<StorageSyncCompletion> {
         let destination = msg.destination.did();
-        let Some(next_hop) = self.dht.next_hop_for_storage_sync(msg.destination)? else {
+        let Some(next_hop) = self
+            .dht
+            .next_hop_for_storage_sync(msg.destination)?
+            .filter(|next_hop| *next_hop != self.dht.did)
+        else {
             self.persist_storage_sync_entries(&msg).await?;
-            return Ok((uuid::Uuid::new_v4(), SendCompletionOutcome::Succeeded));
+            return Ok(StorageSyncCompletion::PersistedLocally);
         };
-        if next_hop == self.dht.did {
-            self.persist_storage_sync_entries(&msg).await?;
-            return Ok((uuid::Uuid::new_v4(), SendCompletionOutcome::Succeeded));
-        }
         let payload = MessagePayload::new_send(
             Message::SyncEntriesWithSuccessor(msg.clone()),
             self.session_sk(),
@@ -367,19 +395,28 @@ impl SwarmTransport {
             OutboundCompletion::Tracked => self.send_payload_tracked(payload).await,
         };
         match send_outcome {
-            Ok(SendCompletionOutcome::Succeeded) => Ok((tx_id, SendCompletionOutcome::Succeeded)),
+            Ok(SendCompletionOutcome::Succeeded) => Ok(StorageSyncCompletion::Submitted {
+                tx_id,
+                outcome: SendCompletionOutcome::Succeeded,
+            }),
             Ok(SendCompletionOutcome::Cancelled) => {
                 if records_cleanup_ack {
                     self.remove_pending_storage_sync_ack(tx_id);
                 }
-                Ok((tx_id, SendCompletionOutcome::Cancelled))
+                Ok(StorageSyncCompletion::Submitted {
+                    tx_id,
+                    outcome: SendCompletionOutcome::Cancelled,
+                })
             }
             Err(error) => {
                 if records_cleanup_ack {
                     self.remove_pending_storage_sync_ack(tx_id);
                 }
                 if error.is_deferrable_data_plane_send() {
-                    Ok((tx_id, SendCompletionOutcome::Cancelled))
+                    Ok(StorageSyncCompletion::Submitted {
+                        tx_id,
+                        outcome: SendCompletionOutcome::Cancelled,
+                    })
                 } else {
                     Err(error)
                 }
@@ -389,18 +426,25 @@ impl SwarmTransport {
 
     /// Send a storage-sync payload and register cleanup acks only for hand-off sync.
     ///
-    /// `Ok(None)` means the data-plane admission or tracked delivery was
-    /// cancelled, so maintenance must recompute and retry from current topology.
+    /// The result distinguishes local persistence, remote submission, and a
+    /// cancelled data-plane admission that maintenance must recompute and retry.
     pub(crate) async fn send_storage_sync(
         &self,
         msg: SyncEntriesWithSuccessor,
-    ) -> Result<Option<uuid::Uuid>> {
+    ) -> Result<StorageSyncOutcome> {
         match self
             .send_storage_sync_with_completion(msg, OutboundCompletion::Detached)
             .await?
         {
-            (tx_id, SendCompletionOutcome::Succeeded) => Ok(Some(tx_id)),
-            (_, SendCompletionOutcome::Cancelled) => Ok(None),
+            StorageSyncCompletion::PersistedLocally => Ok(StorageSyncOutcome::PersistedLocally),
+            StorageSyncCompletion::Submitted {
+                tx_id,
+                outcome: SendCompletionOutcome::Succeeded,
+            } => Ok(StorageSyncOutcome::Sent(tx_id)),
+            StorageSyncCompletion::Submitted {
+                outcome: SendCompletionOutcome::Cancelled,
+                ..
+            } => Ok(StorageSyncOutcome::Deferred),
         }
     }
 
@@ -413,10 +457,17 @@ impl SwarmTransport {
             .send_storage_sync_with_completion(msg, OutboundCompletion::Tracked)
             .await?
         {
-            (tx_id, SendCompletionOutcome::Succeeded) => {
-                Ok(TrackedStorageSyncOutcome::Delivered(tx_id))
+            StorageSyncCompletion::PersistedLocally => {
+                Ok(TrackedStorageSyncOutcome::PersistedLocally)
             }
-            (_, SendCompletionOutcome::Cancelled) => Ok(TrackedStorageSyncOutcome::Deferred),
+            StorageSyncCompletion::Submitted {
+                tx_id,
+                outcome: SendCompletionOutcome::Succeeded,
+            } => Ok(TrackedStorageSyncOutcome::Delivered(tx_id)),
+            StorageSyncCompletion::Submitted {
+                outcome: SendCompletionOutcome::Cancelled,
+                ..
+            } => Ok(TrackedStorageSyncOutcome::Deferred),
         }
     }
 
@@ -430,7 +481,7 @@ impl SwarmTransport {
         &self,
         msg: SyncEntriesWithSuccessor,
         context: &'static str,
-    ) -> Result<Option<uuid::Uuid>> {
+    ) -> Result<StorageSyncOutcome> {
         let purpose = msg.purpose;
         let destination = msg.destination;
         let destination_did = destination.did();
@@ -445,7 +496,7 @@ impl SwarmTransport {
             .map(|conn| conn.webrtc_connection_state());
 
         let outcome = self.send_storage_sync(msg).await?;
-        if outcome.is_none() {
+        if outcome == StorageSyncOutcome::Deferred {
             tracing::warn!(
                 target: "rings_core::storage_sync",
                 local = %self.dht.did,

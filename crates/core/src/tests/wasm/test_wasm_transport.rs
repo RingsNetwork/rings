@@ -200,7 +200,7 @@ async fn exercise_contended_browser_storage(node1: &Swarm, node2: &Swarm) {
             .send_storage_sync(msg)
             .await
             .unwrap()
-            .is_some(),
+            .is_sent(),
         "browser storage contention send must not be deferred"
     );
     for round in 0..8 {

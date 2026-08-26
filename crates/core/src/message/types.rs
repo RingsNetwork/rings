@@ -46,10 +46,8 @@ impl DhtProtocolMode {
     }
 
     /// Return whether both descriptors name the same DHT protocol.
-    pub const fn matches(self, expected: Self) -> bool {
-        self.network_id == expected.network_id
-            && self.storage_redundancy == expected.storage_redundancy
-            && self.dht_virtual_nodes == expected.dht_virtual_nodes
+    pub fn matches(self, expected: Self) -> bool {
+        self == expected
     }
 }
 
@@ -73,22 +71,6 @@ pub struct ConnectNodeSend {
     pub dht_virtual_nodes: u16,
 }
 
-impl ConnectNodeSend {
-    /// Return the DHT protocol mode advertised by this offer.
-    pub const fn dht_protocol_mode(&self) -> DhtProtocolMode {
-        DhtProtocolMode::new(
-            self.network_id,
-            self.storage_redundancy,
-            self.dht_virtual_nodes,
-        )
-    }
-
-    /// Return whether this offer belongs to the receiver's DHT protocol mode.
-    pub const fn matches_dht_protocol(&self, expected: DhtProtocolMode) -> bool {
-        self.dht_protocol_mode().matches(expected)
-    }
-}
-
 /// MessageType report to origin with own transport_uuid and handshake_info.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ConnectNodeReport {
@@ -103,21 +85,36 @@ pub struct ConnectNodeReport {
     pub dht_virtual_nodes: u16,
 }
 
-impl ConnectNodeReport {
-    /// Return the DHT protocol mode advertised by this answer.
-    pub const fn dht_protocol_mode(&self) -> DhtProtocolMode {
-        DhtProtocolMode::new(
-            self.network_id,
-            self.storage_redundancy,
-            self.dht_virtual_nodes,
-        )
-    }
+macro_rules! impl_dht_protocol_advertisement {
+    ($message:ty, $mode_doc:literal, $match_doc:literal) => {
+        impl $message {
+            #[doc = $mode_doc]
+            pub const fn dht_protocol_mode(&self) -> DhtProtocolMode {
+                DhtProtocolMode::new(
+                    self.network_id,
+                    self.storage_redundancy,
+                    self.dht_virtual_nodes,
+                )
+            }
 
-    /// Return whether this answer belongs to the initiator's DHT protocol mode.
-    pub const fn matches_dht_protocol(&self, expected: DhtProtocolMode) -> bool {
-        self.dht_protocol_mode().matches(expected)
-    }
+            #[doc = $match_doc]
+            pub fn matches_dht_protocol(&self, expected: DhtProtocolMode) -> bool {
+                self.dht_protocol_mode().matches(expected)
+            }
+        }
+    };
 }
+
+impl_dht_protocol_advertisement!(
+    ConnectNodeSend,
+    "Return the DHT protocol mode advertised by this offer.",
+    "Return whether this offer belongs to the receiver's DHT protocol mode."
+);
+impl_dht_protocol_advertisement!(
+    ConnectNodeReport,
+    "Return the DHT protocol mode advertised by this answer.",
+    "Return whether this answer belongs to the initiator's DHT protocol mode."
+);
 
 /// MessageType use to find successor in a chord ring.
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -433,6 +430,7 @@ macro_rules! with_message_variants {
         }
     };
 }
+pub(crate) use with_message_variants;
 
 macro_rules! message_requires_storage_route {
     (StorageRoute) => {
@@ -478,6 +476,18 @@ macro_rules! define_message_model {
                 }
             }
 
+            pub(crate) fn from_wire(data: &[u8]) -> Result<Self> {
+                let variant = rings_codec::deserialize_enum_variant(data)
+                    .map_err(Error::CodecDeserialize)?;
+                Self::from_wire_variant(variant).ok_or_else(|| {
+                    Error::InvalidMessage(format!("unknown message variant {variant}"))
+                })
+            }
+
+            pub(crate) const fn from_message(message: &Message) -> Self {
+                message.kind()
+            }
+
             pub(crate) const fn as_str(self) -> &'static str {
                 match self {
                     $(Self::$variant => stringify!($variant)),+
@@ -498,6 +508,10 @@ macro_rules! define_message_model {
                 match self {
                     $(Self::$variant => message_requires_storage_route!($storage_route)),+
                 }
+            }
+
+            pub(crate) const fn records_missing_connection_failure(self) -> bool {
+                !self.requires_storage_route()
             }
         }
 
@@ -543,39 +557,6 @@ impl MessageClass {
             Self::E2e => 2,
             Self::Application => 3,
         }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct MessageMeta {
-    kind: MessageKind,
-}
-
-impl MessageMeta {
-    pub(crate) fn from_wire(data: &[u8]) -> Result<Self> {
-        let variant =
-            rings_codec::deserialize_enum_variant(data).map_err(Error::CodecDeserialize)?;
-        let kind = MessageKind::from_wire_variant(variant)
-            .ok_or_else(|| Error::InvalidMessage(format!("unknown message variant {variant}")))?;
-        Ok(Self { kind })
-    }
-
-    pub(crate) const fn from_message(message: &Message) -> Self {
-        Self {
-            kind: message.kind(),
-        }
-    }
-
-    pub(crate) const fn kind(self) -> MessageKind {
-        self.kind
-    }
-
-    pub(crate) const fn class(self) -> MessageClass {
-        self.kind.class()
-    }
-
-    pub(crate) const fn records_missing_connection_failure(self) -> bool {
-        !self.kind.requires_storage_route()
     }
 }
 

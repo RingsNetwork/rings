@@ -1,43 +1,6 @@
 //! Utils for ring-core
-use std::future::poll_fn;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
-use std::task::Poll;
-
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 use chrono::Utc;
-
-/// Atomically add `amount` when the resulting reservation stays within `limit`.
-pub(crate) fn try_reserve_atomic(counter: &AtomicUsize, amount: usize, limit: usize) -> bool {
-    let mut current = counter.load(Ordering::Acquire);
-    loop {
-        let Some(next) = current.checked_add(amount) else {
-            return false;
-        };
-        if next > limit {
-            return false;
-        }
-        match counter.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire) {
-            Ok(_) => return true,
-            Err(observed) => current = observed,
-        }
-    }
-}
-
-/// Yield one executor poll without depending on a particular async runtime.
-pub(crate) async fn yield_executor_once() {
-    let mut yielded = false;
-    poll_fn(move |context| {
-        if yielded {
-            Poll::Ready(())
-        } else {
-            yielded = true;
-            context.waker().wake_by_ref();
-            Poll::Pending
-        }
-    })
-    .await;
-}
 
 /// Get local utc timestamp (millisecond)
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]

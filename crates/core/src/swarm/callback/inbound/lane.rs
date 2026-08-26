@@ -1,12 +1,10 @@
-use rings_transport::core::callback::InboundFrameClass;
-
 use crate::message::MessageClass;
-use crate::message::MessageMeta;
+use crate::message::MessageKind;
 
 pub(super) const INBOUND_LANE_COUNT: usize = MessageClass::COUNT + 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum InboundLane {
+pub(crate) enum InboundLane {
     DhtControl,
     Storage,
     E2e,
@@ -15,45 +13,28 @@ pub(super) enum InboundLane {
 }
 
 impl InboundLane {
-    pub(super) const DHT_CONTROL: Self = Self::DhtControl;
-    pub(super) const STORAGE: Self = Self::Storage;
-    pub(super) const E2E: Self = Self::E2e;
-    pub(super) const APPLICATION: Self = Self::Application;
-    pub(super) const REASSEMBLY: Self = Self::Reassembly;
     pub(super) const ALL: [Self; INBOUND_LANE_COUNT] = [
-        Self::DHT_CONTROL,
-        Self::STORAGE,
-        Self::E2E,
-        Self::APPLICATION,
-        Self::REASSEMBLY,
+        Self::DhtControl,
+        Self::Storage,
+        Self::E2e,
+        Self::Application,
+        Self::Reassembly,
     ];
 
     pub(super) const fn from_class(class: MessageClass) -> Self {
         match class {
-            MessageClass::DhtControl => Self::DHT_CONTROL,
-            MessageClass::Storage => Self::STORAGE,
-            MessageClass::E2e => Self::E2E,
-            MessageClass::Application => Self::APPLICATION,
+            MessageClass::DhtControl => Self::DhtControl,
+            MessageClass::Storage => Self::Storage,
+            MessageClass::E2e => Self::E2e,
+            MessageClass::Application => Self::Application,
         }
     }
 
-    pub(super) const fn from_meta(meta: MessageMeta) -> Self {
-        if meta.kind().is_chunk() {
-            return Self::REASSEMBLY;
+    pub(crate) const fn from_kind(kind: MessageKind) -> Self {
+        if kind.is_chunk() {
+            return Self::Reassembly;
         }
-        Self::from_class(meta.class())
-    }
-
-    pub(super) const fn from_frame_class(class: InboundFrameClass) -> Self {
-        match class {
-            InboundFrameClass::Control => Self::from_class(MessageClass::DhtControl),
-            InboundFrameClass::Storage => Self::from_class(MessageClass::Storage),
-            InboundFrameClass::EndToEnd => Self::from_class(MessageClass::E2e),
-            InboundFrameClass::Application | InboundFrameClass::Data => {
-                Self::from_class(MessageClass::Application)
-            }
-            InboundFrameClass::Reassembly => Self::REASSEMBLY,
-        }
+        Self::from_class(kind.class())
     }
 
     pub(super) const fn index(self) -> usize {
@@ -70,3 +51,14 @@ impl InboundLane {
         matches!(self, Self::Storage | Self::E2e | Self::Application)
     }
 }
+
+const fn lanes_follow_indices(lanes: &[InboundLane], index: usize) -> bool {
+    match lanes.split_first() {
+        None => true,
+        Some((lane, remaining)) => {
+            lane.index() == index && lanes_follow_indices(remaining, index + 1)
+        }
+    }
+}
+
+const _: () = assert!(lanes_follow_indices(&InboundLane::ALL, 0));

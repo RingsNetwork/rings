@@ -1,5 +1,6 @@
 use std::sync::atomic::AtomicBool;
 
+use super::send_runtime::RetirementFenceGuard;
 use super::*;
 
 async fn wait_for_flag(flag: &AtomicBool, label: &str) {
@@ -388,6 +389,54 @@ async fn failed_irrevocable_send_retires_after_caller_is_cancelled() {
     wait_for_flag(&retired, "native retirement").await;
 
     assert!(retired.load(Ordering::Acquire));
+}
+
+#[tokio::test]
+async fn accepted_send_is_not_retired_when_its_waiter_is_cancelled() {
+    let accepted = Arc::new(AtomicBool::new(false));
+    let retired = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let permit = SendPermit::always();
+    let acceptance = permit.acceptance();
+    let send = {
+        let accepted = Arc::clone(&accepted);
+        let release = Arc::clone(&release);
+        async move {
+            permit
+                .try_mark_irrevocable()
+                .expect("live permit must become irrevocable")
+                .mark_accepted();
+            accepted.store(true, Ordering::Release);
+            release.notified().await;
+            Ok(())
+        }
+    };
+    let retirement = {
+        let retired = Arc::clone(&retired);
+        async move {
+            retired.store(true, Ordering::Release);
+            Ok(())
+        }
+    };
+    let runtime = native_send_runtime().expect("Tokio test runtime must be available");
+    let caller = tokio::spawn(async move {
+        run_send_with_retirement(
+            &runtime,
+            acceptance,
+            test_retirement_fence(),
+            send,
+            retirement,
+        )
+        .await
+    });
+    wait_for_flag(&accepted, "native send acceptance").await;
+
+    caller.abort();
+    let _cancelled = caller.await;
+    tokio::task::yield_now().await;
+
+    assert!(!retired.load(Ordering::Acquire));
+    release.notify_one();
 }
 
 #[tokio::test]

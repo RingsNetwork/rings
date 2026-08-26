@@ -5,7 +5,7 @@ const DHT_CONTROL_LANE: InboundLane = InboundLane::from_class(MessageClass::DhtC
 const STORAGE_LANE: InboundLane = InboundLane::from_class(MessageClass::Storage);
 const E2E_LANE: InboundLane = InboundLane::from_class(MessageClass::E2e);
 const APPLICATION_LANE: InboundLane = InboundLane::from_class(MessageClass::Application);
-const REASSEMBLY_LANE: InboundLane = InboundLane::REASSEMBLY;
+const REASSEMBLY_LANE: InboundLane = InboundLane::Reassembly;
 
 #[test]
 fn inbound_lane_mapping_is_total_and_reserves_one_extra_lane() {

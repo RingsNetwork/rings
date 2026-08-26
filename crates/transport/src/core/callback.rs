@@ -13,23 +13,6 @@ use crate::core::transport::WebrtcConnectionState;
 
 type CallbackError = Box<dyn std::error::Error>;
 
-/// Coarse inbound traffic class used by core callback scheduling.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum InboundFrameClass {
-    /// DHT and connection-liveness traffic needed to make protocol progress.
-    Control,
-    /// Storage protocol traffic.
-    Storage,
-    /// End-to-end protocol traffic.
-    EndToEnd,
-    /// Application traffic.
-    Application,
-    /// Chunk envelopes awaiting reassembly.
-    Reassembly,
-    /// Malformed, unknown, or otherwise unclassified data traffic.
-    Data,
-}
-
 /// One inbound payload whose transport envelope and raw-frame capacity were admitted.
 ///
 /// Only the transport admission layer can construct this value. Public transport

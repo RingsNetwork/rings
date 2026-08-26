@@ -34,6 +34,7 @@ use crate::core::pool::RoundRobin;
 use crate::core::pool::RoundRobinPool;
 use crate::core::pool::StatusPool;
 use crate::core::transport::effective_max_message_size;
+use crate::core::transport::stored_max_message_size;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateCell;
 use crate::core::transport::ConnectionStateSnapshot;
@@ -44,7 +45,6 @@ use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
 use crate::core::transport::CONNECTION_RETIRE_TIMEOUT as NATIVE_CONNECTION_RETIRE_TIMEOUT;
 use crate::core::transport::IRREVOCABLE_SEND_COMPLETION_TIMEOUT as NATIVE_SEND_COMPLETION_TIMEOUT;
-use crate::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 use crate::delivery::closed_before_flush;
 use crate::delivery::delivery_flushed;
 use crate::delivery::DeliveryFuture;
@@ -53,6 +53,7 @@ use crate::error::Result;
 use crate::ice_server::parse_ice_servers_or_warn;
 use crate::ice_server::IceCredentialType;
 use crate::ice_server::IceServer;
+use crate::notifier::wait_for_data_channel_open;
 use crate::notifier::Notifier;
 use crate::pool::Pool;
 use crate::webrtc_config::WebrtcUdpPortRange;
@@ -67,7 +68,6 @@ use send_runtime::run_irrevocable_send_with_timeout;
 use send_runtime::run_native_close_task;
 use send_runtime::run_send_with_retirement;
 use send_runtime::NativeRetirementFence;
-use send_runtime::RetirementFenceGuard;
 
 const WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT: u8 = 8; // seconds
 const WEBRTC_GATHER_TIMEOUT: u8 = 60; // seconds
@@ -92,7 +92,12 @@ const NATIVE_SEND_TEST_COMPLETION_TIMEOUT: Duration = Duration::from_millis(100)
 /// senders could reserve offsets in one order but reach `channel.send().await`
 /// (which yields) in the other, making an earlier future resolve against a
 /// later message's bytes.
-type TrackedChannel = (Arc<RTCDataChannel>, Arc<AtomicU64>, Arc<Mutex<()>>);
+#[derive(Clone)]
+struct TrackedChannel {
+    channel: Arc<RTCDataChannel>,
+    enqueued_bytes: Arc<AtomicU64>,
+    send_lock: Arc<Mutex<()>>,
+}
 
 fn sdp_candidate_count(sdp: &str) -> usize {
     sdp.lines()
@@ -231,7 +236,11 @@ impl RoundRobinPool<TrackedChannel> {
         permit: SendPermit,
         retirement_fence: NativeRetirementFence,
     ) -> Result<DeliveryFuture> {
-        let (channel, enqueued, send_lock) = self.select()?;
+        let TrackedChannel {
+            channel,
+            enqueued_bytes: enqueued,
+            send_lock,
+        } = self.select()?;
         let data = rings_codec::serialize(&msg).map(Bytes::from)?;
         let runtime = native_send_runtime()?;
         // Hold the per-channel lock across send + counter advance so the bytes
@@ -243,7 +252,6 @@ impl RoundRobinPool<TrackedChannel> {
         let guard = send_lock.lock_owned().await;
         let send_channel = Arc::clone(&channel);
         let send_enqueued = Arc::clone(&enqueued);
-        let send_fence = retirement_fence.clone();
         let data_len = data.len();
         let mut send = Box::pin(async move {
             if let Err(error) = send_channel.send(&data).await {
@@ -253,18 +261,15 @@ impl RoundRobinPool<TrackedChannel> {
             Ok(())
         });
         let acceptance = permit.acceptance();
-        let mut retirement = RetirementFenceGuard::once_irrevocable(send_fence, acceptance.clone());
         let failure_fence = retirement_fence.clone();
         let mut permit_retirement = IrrevocableSendGuard::new(acceptance, move || {
             failure_fence.request();
         });
-        let Some(admission) = retirement.fence().try_send_admission() else {
-            retirement.disarm();
+        let Some(admission) = retirement_fence.try_send_admission() else {
             return Err(Error::SendPermitRevoked);
         };
         let Some(proof) = permit.try_mark_irrevocable() else {
             drop(admission);
-            retirement.disarm();
             return Err(Error::SendPermitRevoked);
         };
         permit_retirement.bind(proof);
@@ -275,16 +280,13 @@ impl RoundRobinPool<TrackedChannel> {
                 std::task::Poll::Ready(result) => {
                     result?;
                     permit.mark_accepted();
-                    retirement.disarm();
                     send_enqueued.fetch_add(data_len as u64, Ordering::SeqCst) + data_len as u64
                 }
                 std::task::Poll::Pending => {
                     run_irrevocable_send(&runtime, retirement_fence, async move {
                         let _guard = guard;
-                        let mut retirement = retirement;
                         send.await?;
                         permit.mark_accepted();
-                        retirement.disarm();
                         Ok(send_enqueued.fetch_add(data_len as u64, Ordering::SeqCst)
                             + data_len as u64)
                     })
@@ -297,7 +299,7 @@ impl RoundRobinPool<TrackedChannel> {
 
 impl StatusPool<TrackedChannel> for RoundRobinPool<TrackedChannel> {
     fn all_ready(&self) -> Result<bool> {
-        self.all(|(c, _, _)| c.ready_state() == RTCDataChannelState::Open)
+        self.all(|tracked| tracked.channel.ready_state() == RTCDataChannelState::Open)
     }
 }
 
@@ -565,12 +567,7 @@ impl ConnectionInterface for WebrtcConnection {
     }
 
     fn max_message_size(&self) -> usize {
-        // The value negotiated from the remote SDP at handshake; `0` = not yet negotiated, so
-        // fall back to the interop default.
-        match self.remote_max_message_size.load(Ordering::SeqCst) {
-            0 => MAX_DATA_CHANNEL_MESSAGE_SIZE,
-            n => n,
-        }
+        stored_max_message_size(self.remote_max_message_size.load(Ordering::SeqCst))
     }
 
     async fn webrtc_create_offer(&self) -> Result<Self::Sdp> {
@@ -615,32 +612,13 @@ impl ConnectionInterface for WebrtcConnection {
     }
 
     async fn webrtc_wait_for_data_channel_open(&self) -> Result<()> {
-        // `Disconnected` is intentionally not treated as unavailable: it is a
-        // transient ICE state in which the data channel stays open, so we let
-        // the send proceed (the bytes buffer and flush on recovery). The
-        // returned `DeliveryFuture` reports whether they actually made it out.
-        if matches!(
+        wait_for_data_channel_open(
             self.webrtc_connection_state(),
-            WebrtcConnectionState::Failed | WebrtcConnectionState::Closed
-        ) {
-            return Err(Error::DataChannelOpen("Connection unavailable".to_string()));
-        }
-
-        if self.data_channel_is_open()? {
-            return Ok(());
-        }
-
-        self.webrtc_data_channel_state_notifier
-            .set_timeout(WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT);
-        self.webrtc_data_channel_state_notifier.clone().await;
-
-        if self.data_channel_is_open()? {
-            return Ok(());
-        } else {
-            return Err(Error::DataChannelOpen(format!(
-                "DataChannel not open in {WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT} seconds"
-            )));
-        }
+            || self.data_channel_is_open(),
+            &self.webrtc_data_channel_state_notifier,
+            WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT,
+        )
+        .await
     }
 
     async fn close(&self) -> Result<()> {
@@ -788,8 +766,8 @@ async fn create_outbound_data_channels(
         channel.on_close(Box::new(move || {
             close_state.observe_outbound_data_channels(false);
             let all_closed = matches!(
-                close_pool.all(|(candidate, _, _)| {
-                    candidate.ready_state() == RTCDataChannelState::Closed
+                close_pool.all(|tracked| {
+                    tracked.channel.ready_state() == RTCDataChannelState::Closed
                 }),
                 Ok(true)
             );
@@ -801,11 +779,11 @@ async fn create_outbound_data_channels(
             })
         }));
 
-        channel_pool.push((
+        channel_pool.push(TrackedChannel {
             channel,
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(Mutex::new(())),
-        ))?;
+            enqueued_bytes: Arc::new(AtomicU64::new(0)),
+            send_lock: Arc::new(Mutex::new(())),
+        })?;
     }
     Ok(())
 }
@@ -824,11 +802,7 @@ impl TransportInterface for WebrtcTransport {
         cid: &str,
         callback: BoxedTransportCallback,
     ) -> Result<ConnectionRef<Self::Connection>> {
-        if let Ok(existed_conn) = self.pool.connection(cid) {
-            if existed_conn.webrtc_connection_state().occupies_peer_slot() {
-                return Err(Error::ConnectionAlreadyExists(cid.to_string()));
-            }
-        }
+        self.pool.ensure_peer_slot_available(cid)?;
 
         let (webrtc_conn, sdp_extra_host_candidates) = create_peer_connection(self).await?;
 

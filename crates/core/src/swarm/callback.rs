@@ -9,18 +9,17 @@ use bytes::Bytes;
 use futures::lock::Mutex as FuturesMutex;
 use rings_transport::core::callback::AdmittedInboundMessage;
 use rings_transport::core::callback::InboundFrameCapacityLease;
-use rings_transport::core::callback::InboundFrameClass;
 use rings_transport::core::callback::TransportCallback;
 use rings_transport::core::transport::WebrtcConnectionState;
 
 use crate::chunk::MessageReassembler;
 use crate::chunk::ReassemblyOutcome;
 use crate::dht::Did;
+use crate::message::with_message_variants;
 use crate::message::HandleMsg;
 use crate::message::Message;
-use crate::message::MessageClass;
 use crate::message::MessageHandler;
-use crate::message::MessageMeta;
+use crate::message::MessageKind;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
 use crate::swarm::transport::ConnectionEventDisposition;
@@ -29,6 +28,7 @@ use crate::swarm::transport::SwarmTransport;
 
 mod inbound;
 pub(crate) use inbound::InboundCapacity;
+pub(crate) use inbound::InboundLane;
 
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) const fn inbound_mailbox_capacity_for_test() -> usize {
@@ -58,9 +58,9 @@ fn log_inbound_verification_failure(
     payload: &MessagePayload,
     wire_bytes: usize,
 ) {
-    let message_kind = MessageMeta::from_wire(&payload.transaction.data)
+    let message_kind = MessageKind::from_wire(&payload.transaction.data)
         .ok()
-        .map(|meta| meta.kind().as_str());
+        .map(MessageKind::as_str);
     tracing::error!(
         peer = ?peer,
         tx_id = %payload.transaction.tx_id,
@@ -70,10 +70,6 @@ fn log_inbound_verification_failure(
         wire_bytes,
         "inbound message verification failed or expired"
     );
-}
-
-pub(super) enum PayloadHandlingError {
-    Core(crate::error::Error),
 }
 
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -524,65 +520,36 @@ impl InboundProcessor {
         &self,
         payload: &MessagePayload,
         prepared_message: Option<Message>,
-    ) -> std::result::Result<(), PayloadHandlingError> {
+    ) -> crate::error::Result<()> {
         let message = match prepared_message {
             Some(message) => message,
-            None => payload
-                .transaction
-                .data()
-                .map_err(PayloadHandlingError::Core)?,
+            None => payload.transaction.data()?,
         };
 
-        let result = match message {
-            Message::ConnectNodeSend(ref msg) => self.message_handler.handle(payload, msg).await,
-            Message::ConnectNodeReport(ref msg) => self.message_handler.handle(payload, msg).await,
-            Message::FindSuccessorSend(ref msg) => self.message_handler.handle(payload, msg).await,
-            Message::FindSuccessorReport(ref msg) => {
-                self.message_handler.handle(payload, msg).await
-            }
-            Message::NotifyPredecessorSend(ref msg) => {
-                self.message_handler.handle(payload, msg).await
-            }
-            Message::NotifyPredecessorReport(ref msg) => {
-                self.message_handler.handle(payload, msg).await
-            }
-            Message::PeerLivenessProbe(ref msg) => self.message_handler.handle(payload, msg).await,
-            Message::PeerLivenessReport(ref msg) => self.message_handler.handle(payload, msg).await,
-            Message::SearchEntry(ref msg) => self.message_handler.handle(payload, msg).await,
-            Message::FoundEntry(ref msg) => self.message_handler.handle(payload, msg).await,
-            Message::SyncEntriesWithSuccessor(ref msg) => {
-                self.message_handler.handle(payload, msg).await
-            }
-            Message::SyncEntriesWithSuccessorReport(ref msg) => {
-                self.message_handler.handle(payload, msg).await
-            }
-            Message::OperateEntry(ref msg) => self.message_handler.handle(payload, msg).await,
-            Message::CustomMessage(ref msg) => self.message_handler.handle(payload, msg).await,
-            Message::E2eHandshakeRequest(ref msg) => {
-                self.message_handler.handle(payload, msg).await
-            }
-            Message::E2eHandshakeResponse(ref msg) => {
-                self.message_handler.handle(payload, msg).await
-            }
-            Message::E2eStreamFrame(ref msg) => self.message_handler.handle(payload, msg).await,
-            Message::QueryForTopoInfoSend(ref msg) => {
-                self.message_handler.handle(payload, msg).await
-            }
-            Message::QueryForTopoInfoReport(ref msg) => {
-                self.message_handler.handle(payload, msg).await
-            }
-            Message::Chunk(_) => {
-                return Err(PayloadHandlingError::Core(
-                    crate::error::Error::InboundActorInvariantViolation,
-                ));
-            }
-        };
+        macro_rules! dispatch_message_body {
+            (Chunk, $msg:expr) => {{
+                let _ = $msg;
+                Err(crate::error::Error::InboundActorInvariantViolation)
+            }};
+            ($variant:ident, $msg:expr) => {
+                self.message_handler.handle(payload, $msg).await
+            };
+        }
+        macro_rules! dispatch_message {
+            ($( $(#[$docs:meta])* $index:literal => $variant:ident($body:ty): $class:ident, $storage_route:ident ),+ $(,)?) => {
+                match message {
+                    $(Message::$variant(ref msg) => dispatch_message_body!($variant, msg)),+
+                }
+            };
+        }
+
+        let result = with_message_variants!(dispatch_message);
 
         // A handler that errored must not then be reported to the application as a successful
         // inbound message: surface the error and do not run `on_inbound` for it.
         if let Err(e) = result {
             tracing::error!("Failed to handle_payload: {e:?}");
-            return Err(PayloadHandlingError::Core(e));
+            return Err(e);
         }
 
         Ok(())
@@ -649,22 +616,10 @@ impl InboundProcessor {
     }
 }
 
-fn transport_frame_class(meta: MessageMeta) -> InboundFrameClass {
-    if meta.kind().is_chunk() {
-        return InboundFrameClass::Reassembly;
-    }
-    match meta.class() {
-        MessageClass::DhtControl => InboundFrameClass::Control,
-        MessageClass::Storage => InboundFrameClass::Storage,
-        MessageClass::E2e => InboundFrameClass::EndToEnd,
-        MessageClass::Application => InboundFrameClass::Application,
-    }
-}
-
 pub(super) struct PreparedInboundFrame {
     payload: MessagePayload,
     message: Message,
-    class: InboundFrameClass,
+    lane: InboundLane,
 }
 
 fn prepare_transport_frame(
@@ -679,19 +634,19 @@ fn prepare_transport_frame(
         ));
     }
     let message = payload.transaction.data::<Message>()?;
-    let class = transport_frame_class(MessageMeta::from_message(&message));
+    let lane = InboundLane::from_kind(MessageKind::from_message(&message));
     Ok(PreparedInboundFrame {
         payload,
         message,
-        class,
+        lane,
     })
 }
 
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-pub(crate) fn prepare_transport_frame_class_for_test(
+pub(crate) fn prepare_transport_frame_lane_for_test(
     bytes: &[u8],
-) -> crate::error::Result<InboundFrameClass> {
-    prepare_transport_frame(None, bytes).map(|prepared| prepared.class)
+) -> crate::error::Result<InboundLane> {
+    prepare_transport_frame(None, bytes).map(|prepared| prepared.lane)
 }
 
 impl InnerSwarmCallback {

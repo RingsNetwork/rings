@@ -53,8 +53,8 @@ use crate::consts::TRANSPORT_MAX_SIZE;
 use crate::consts::TS_OFFSET_TOLERANCE_MS;
 use crate::error::Error;
 use crate::error::Result;
+use crate::fair_admission::try_reserve_atomic;
 use crate::utils::get_epoch_ms;
-use crate::utils::try_reserve_atomic;
 
 /// The limits a [`MessageReassembler`] enforces on incoming chunks, as an explicit value rather
 /// than module globals. This keeps the core admission rule independent of *where* the numbers come
@@ -520,8 +520,6 @@ pub(crate) enum ReassemblyRejection {
     Capacity,
     /// The chunk repeats a position or a message already accepted.
     Replay,
-    /// A local reassembler invariant failed after admission.
-    LocalInvariant,
 }
 
 impl RetainedReassembly {
@@ -787,28 +785,22 @@ impl MessageReassembler {
             return ReassemblyOutcome::Rejected(ReassemblyRejection::Capacity);
         }
         let id = chunk.meta.id;
-        let [position, _total] = chunk.chunk;
-        let pending = self
+        let [position, total] = chunk.chunk;
+        let mut pending = self
             .pending
-            .entry(id)
-            .or_insert_with(|| Pending::new(chunk.chunk[1], chunk.meta.ts_ms, chunk.meta.ttl_ms));
+            .remove(&id)
+            .unwrap_or_else(|| Pending::new(total, chunk.meta.ts_ms, chunk.meta.ttl_ms));
         pending.data_bytes = pending.data_bytes.saturating_add(chunk.data.len());
         pending.slots.insert(position, chunk.data);
         self.buffered_cost = self.buffered_cost.saturating_add(cost);
 
         if !pending.is_complete() {
+            self.pending.insert(id, pending);
             return ReassemblyOutcome::Incomplete;
         }
         let output_cost = pending.data_bytes;
         if !self.budget.try_reserve(output_cost) {
-            let Some(dropped) = self.pending.remove(&id) else {
-                tracing::error!(
-                    ?id,
-                    "completed reassembly disappeared before capacity rejection"
-                );
-                return ReassemblyOutcome::Rejected(ReassemblyRejection::LocalInvariant);
-            };
-            let dropped_cost = dropped.cost(self.limits.slot_overhead);
+            let dropped_cost = pending.cost(self.limits.slot_overhead);
             self.buffered_cost = self.buffered_cost.saturating_sub(dropped_cost);
             self.budget.release(dropped_cost);
             tracing::debug!(
@@ -819,14 +811,7 @@ impl MessageReassembler {
             );
             return ReassemblyOutcome::Rejected(ReassemblyRejection::Capacity);
         }
-        let Some(done) = self.pending.remove(&id) else {
-            tracing::error!(
-                ?id,
-                "completed reassembly disappeared before output construction"
-            );
-            self.budget.release(output_cost);
-            return ReassemblyOutcome::Rejected(ReassemblyRejection::LocalInvariant);
-        };
+        let done = pending;
         let done_cost = done.cost(self.limits.slot_overhead);
         let expiry = done.ts_ms.saturating_add(done.ttl_ms as u128);
         self.buffered_cost = self.buffered_cost.saturating_sub(done_cost);

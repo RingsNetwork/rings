@@ -221,6 +221,19 @@ impl SwarmTransport {
         action()
     }
 
+    pub(super) fn with_active_slot<T>(
+        &self,
+        attempt: PendingConnectionAttempt,
+        action: impl FnOnce() -> Result<T>,
+    ) -> Result<Option<T>> {
+        self.with_connection_lifecycle(|| {
+            if !self.owns_active_slot(attempt)? {
+                return Ok(None);
+            }
+            action().map(Some)
+        })
+    }
+
     pub(super) fn peer_lifecycles(
         &self,
     ) -> Result<
@@ -626,10 +639,7 @@ impl SwarmTransport {
         // `active` while the action validates a successor fallback against it.
         let mut pending_finger_updates = self.pending_finger_updates()?;
         let mut peer_liveness = self.peer_liveness()?;
-        let mut measured_disconnects = self
-            .measured_disconnects
-            .lock()
-            .map_err(|_| Error::SwarmConnectionLifecycleLock)?;
+        let mut measured_disconnects = self.measured_disconnects()?;
         let result = action(&active)?;
 
         // These mutations are infallible after the DHT action commits. If the

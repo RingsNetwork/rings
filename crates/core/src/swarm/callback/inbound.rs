@@ -30,7 +30,6 @@ use web_time::Instant;
 
 use super::CallbackError;
 use super::InboundProcessor;
-use super::PayloadHandlingError;
 use super::PreparedInboundFrame;
 use crate::dht::Did;
 use crate::error::Error;
@@ -49,7 +48,7 @@ mod ticket;
 
 use self::deadline::await_inbound_deadline;
 use self::deadline::InboundDeadline;
-use self::lane::InboundLane;
+pub(crate) use self::lane::InboundLane;
 use self::lane::INBOUND_LANE_COUNT;
 use self::reassembly::process_chunk_event;
 use self::ticket::InboundCommand;
@@ -119,7 +118,7 @@ impl InboundCapacityState {
         &mut self,
         lane: InboundLane,
         bytes: usize,
-    ) -> std::result::Result<(), CapacityRejection> {
+    ) -> std::result::Result<(), CountedReservationRejection> {
         CountedReservedCapacity::try_reserve(
             &mut self.0,
             lane.index(),
@@ -129,24 +128,9 @@ impl InboundCapacityState {
             INBOUND_MAILBOX_BYTE_CAPACITY,
             &INBOUND_RESERVED_BYTES,
         )
-        .map_err(Into::into)
     }
     fn release(&mut self, lane: InboundLane, bytes: usize) {
         self.0.release(lane.index(), bytes);
-    }
-}
-
-enum CapacityRejection {
-    Count,
-    Bytes,
-}
-
-impl From<CountedReservationRejection> for CapacityRejection {
-    fn from(rejection: CountedReservationRejection) -> Self {
-        match rejection {
-            CountedReservationRejection::Count => Self::Count,
-            CountedReservationRejection::Bytes => Self::Bytes,
-        }
     }
 }
 
@@ -156,7 +140,10 @@ const PEER_RESERVATION: [usize; 1] = [0];
 struct InboundPeerCapacityState(CountedReservedCapacity<1>);
 
 impl InboundPeerCapacityState {
-    fn try_reserve(&mut self, bytes: usize) -> std::result::Result<(), CapacityRejection> {
+    fn try_reserve(
+        &mut self,
+        bytes: usize,
+    ) -> std::result::Result<(), CountedReservationRejection> {
         CountedReservedCapacity::try_reserve(
             &mut self.0,
             0,
@@ -166,7 +153,6 @@ impl InboundPeerCapacityState {
             INBOUND_PEER_BYTE_CAPACITY,
             &PEER_RESERVATION,
         )
-        .map_err(Into::into)
     }
 
     fn release(&mut self, bytes: usize) {
@@ -208,22 +194,24 @@ impl InboundCapacity {
         let mut next_peer = peer_states.get(&peer).copied().unwrap_or_default();
         match next_peer.try_reserve(bytes) {
             Ok(()) => {}
-            Err(CapacityRejection::Count) => {
+            Err(CountedReservationRejection::Count) => {
                 return Err(Error::InboundPeerCapacityExceeded {
                     peer,
                     capacity: INBOUND_PEER_CAPACITY,
                 });
             }
-            Err(CapacityRejection::Bytes) => return Err(peer_memory_capacity_error(peer, bytes)),
+            Err(CountedReservationRejection::Bytes) => {
+                return Err(peer_memory_capacity_error(peer, bytes));
+            }
         }
         match state.try_reserve(lane, bytes) {
             Ok(()) => {}
-            Err(CapacityRejection::Count) => {
+            Err(CountedReservationRejection::Count) => {
                 return Err(Error::InboundMailboxCapacityExceeded {
                     capacity: INBOUND_MAILBOX_CAPACITY,
                 });
             }
-            Err(CapacityRejection::Bytes) => return Err(memory_capacity_error(bytes)),
+            Err(CountedReservationRejection::Bytes) => return Err(memory_capacity_error(bytes)),
         }
         peer_states.insert(peer, next_peer);
         Ok(InboundCapacityPermit {
@@ -283,13 +271,13 @@ impl InboundCapacityPermit {
         next_peer.release(self.bytes);
         match next_peer.try_reserve(bytes) {
             Ok(()) => {}
-            Err(CapacityRejection::Count) => {
+            Err(CountedReservationRejection::Count) => {
                 return Err(Error::InboundPeerCapacityExceeded {
                     peer: self.peer,
                     capacity: INBOUND_PEER_CAPACITY,
                 });
             }
-            Err(CapacityRejection::Bytes) => {
+            Err(CountedReservationRejection::Bytes) => {
                 return Err(peer_memory_capacity_error(self.peer, bytes));
             }
         }
@@ -303,10 +291,10 @@ impl InboundCapacityPermit {
                 self.bytes = bytes;
                 Ok(())
             }
-            Err(CapacityRejection::Count) => Err(Error::InboundMailboxCapacityExceeded {
+            Err(CountedReservationRejection::Count) => Err(Error::InboundMailboxCapacityExceeded {
                 capacity: INBOUND_MAILBOX_CAPACITY,
             }),
-            Err(CapacityRejection::Bytes) => Err(memory_capacity_error(bytes)),
+            Err(CountedReservationRejection::Bytes) => Err(memory_capacity_error(bytes)),
         }
     }
 }
@@ -392,7 +380,7 @@ impl InboundMailbox {
         transport_capacity: Option<InboundFrameCapacityLease>,
     ) -> Result<()> {
         self.ensure_actor_available()?;
-        let lane = InboundLane::from_frame_class(prepared.class);
+        let lane = prepared.lane;
         self.submit_to_lane(processor, peer, bytes, lane, prepared, transport_capacity)
             .await
     }
@@ -429,17 +417,14 @@ impl InboundMailbox {
         if !processor.pending_connection_allows_message(peer).await? {
             return Ok(());
         }
-        let decoded = DecodedInboundFrame {
-            payload: processor.accept_preverified_message(peer, payload).await?,
-            prepared_message: Some(message),
-        };
+        let payload = processor.accept_preverified_message(peer, payload).await?;
         let (reply, completion) = oneshot::channel();
         let sequence = ticket.sequence();
         ticket.commit(InboundEvent {
             sequence,
             peer,
-            payload: decoded.payload,
-            prepared_message: decoded.prepared_message,
+            payload,
+            prepared_message: Some(message),
             lane,
             permit,
             reply,
@@ -465,7 +450,7 @@ impl InboundMailbox {
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(super) fn hold_application_admission_for_test(&self) -> Result<impl Drop> {
-        self.reserve_ticket(InboundLane::APPLICATION)
+        self.reserve_ticket(InboundLane::Application)
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -683,8 +668,8 @@ impl InboundActor {
 
     fn reassembly_barrier_sequence(&self) -> Option<u64> {
         [
-            *inbound_lane_entry!(&self.active_lanes, InboundLane::REASSEMBLY),
-            self.queues.front_sequence(InboundLane::REASSEMBLY),
+            *inbound_lane_entry!(&self.active_lanes, InboundLane::Reassembly),
+            self.queues.front_sequence(InboundLane::Reassembly),
             self.reassembly_handoff_barrier
                 .as_ref()
                 .map(|barrier| barrier.sequence),
@@ -782,7 +767,7 @@ impl ReassemblyHandoffBarrier {
     }
 
     fn blocks(&self, lane: InboundLane, sequence: u64) -> bool {
-        lane == InboundLane::REASSEMBLY || (lane.is_logical_data() && sequence > self.sequence)
+        lane == InboundLane::Reassembly || (lane.is_logical_data() && sequence > self.sequence)
     }
 }
 
@@ -815,7 +800,7 @@ async fn process_event(
             };
         }
     }
-    if event.lane() == InboundLane::REASSEMBLY {
+    if event.lane() == InboundLane::Reassembly {
         let next = process_chunk_event(&processor, event).await;
         return InboundTaskCompletion {
             lane,
@@ -881,9 +866,7 @@ async fn process_logical_message(
     processor
         .handle_payload(payload, prepared_message)
         .await
-        .map_err(|error| match error {
-            PayloadHandlingError::Core(error) => InboundFailure::Core(error),
-        })?;
+        .map_err(InboundFailure::Core)?;
     if !processor.is_local_destination(payload) {
         return Ok(());
     }
@@ -893,21 +876,12 @@ async fn process_logical_message(
     }
 }
 
-struct DecodedInboundFrame {
-    payload: MessagePayload,
-    prepared_message: Option<crate::message::Message>,
-}
-
 async fn decode_payload(
     processor: &InboundProcessor,
     peer: Option<Did>,
     bytes: &[u8],
-) -> Result<DecodedInboundFrame> {
-    let payload = processor.decode_verified_message(peer, bytes).await?;
-    Ok(DecodedInboundFrame {
-        payload,
-        prepared_message: None,
-    })
+) -> Result<MessagePayload> {
+    processor.decode_verified_message(peer, bytes).await
 }
 
 fn finish_reply(reply: InboundReply, result: std::result::Result<(), InboundFailure>) {

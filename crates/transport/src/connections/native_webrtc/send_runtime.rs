@@ -89,16 +89,13 @@ impl NativeRetirementFence {
 }
 
 pub(super) struct RetirementFenceGuard {
-    fence: NativeRetirementFence,
     cleanup: ArmedDropGuard<(), Box<dyn FnOnce(()) + Send>>,
 }
 
 impl RetirementFenceGuard {
     pub(super) fn new(fence: NativeRetirementFence) -> Self {
-        let cleanup_fence = fence.clone();
         Self {
-            fence,
-            cleanup: ArmedDropGuard::new((), Box::new(move |()| cleanup_fence.request())),
+            cleanup: ArmedDropGuard::new((), Box::new(move |()| fence.request())),
         }
     }
 
@@ -106,14 +103,12 @@ impl RetirementFenceGuard {
         fence: NativeRetirementFence,
         acceptance: SendAcceptance,
     ) -> Self {
-        let cleanup_fence = fence.clone();
         Self {
-            fence,
             cleanup: ArmedDropGuard::new(
                 (),
                 Box::new(move |()| {
-                    if acceptance.is_irrevocable() {
-                        cleanup_fence.request();
+                    if acceptance.failed_after_irrevocable() {
+                        fence.request();
                     }
                 }),
             ),
@@ -126,10 +121,6 @@ impl RetirementFenceGuard {
 
     pub(super) fn disarm(&mut self) {
         self.cleanup.disarm();
-    }
-
-    pub(super) fn fence(&self) -> &NativeRetirementFence {
-        &self.fence
     }
 }
 
@@ -231,7 +222,7 @@ struct PhysicalRetirement<F> {
 
 fn retire_abandoned_send<F>(retirement: PhysicalRetirement<F>)
 where F: Future<Output = Result<()>> + Send + 'static {
-    if retirement.acceptance.is_irrevocable() {
+    if retirement.acceptance.failed_after_irrevocable() {
         retirement.runtime.spawn(async move {
             if let Err(error) = retirement.retirement.await {
                 tracing::warn!(%error, "failed to retire abandoned native send");
@@ -309,7 +300,7 @@ where
         Ok(result) => result,
         Err(payload) => Err(Error::NativeSendPanic(panic_message(payload.as_ref()))),
     };
-    if result.is_err() && acceptance.is_irrevocable() {
+    if result.is_err() && acceptance.failed_after_irrevocable() {
         fence_retirement.retire();
         if let Err(error) = physical_retirement.retire().await {
             tracing::warn!(%error, "failed to retire connection after irrevocable send error");

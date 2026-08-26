@@ -786,10 +786,10 @@ fn sync_entries_batch_wire_cost_matches_serialized_message_cost() -> Result<()> 
     });
     let serialized_bytes = rings_codec::serialized_size(&message).map_err(Error::CodecSerialize)?;
     let message_bytes =
-        usize::try_from(serialized_bytes).map_err(|_| Error::MessageTooLarge(usize::MAX))?;
+        usize::try_from(serialized_bytes).map_err(|_| Error::MessageSizeOverflow)?;
     let expected = message_bytes
         .checked_add(MAX_CHUNK_ENVELOPE_OVERHEAD + TRANSPORT_CUSTOM_OVERHEAD)
-        .ok_or(Error::MessageTooLarge(usize::MAX))?;
+        .ok_or(Error::MessageSizeOverflow)?;
 
     assert_eq!(sync_entries_batch_wire_cost(&entries)?, expected);
     Ok(())

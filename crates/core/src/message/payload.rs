@@ -32,7 +32,6 @@ use crate::session::SessionSk;
 /// Compresses the given data byte slice using the gzip algorithm with the specified compression level.
 pub fn encode_data_gzip(data: &Bytes, level: u8) -> Result<Bytes> {
     let mut ec = GzEncoder::new(Vec::new(), Compression::new(level as u32));
-    tracing::info!("data before gzip len: {}", data.len());
     ec.write_all(data).map_err(|_| Error::GzipEncode)?;
     ec.finish().map(Bytes::from).map_err(|_| Error::GzipEncode)
 }
@@ -249,7 +248,7 @@ impl MessagePayload {
     /// Return the exact Rings wire size without allocating the wire buffer.
     pub(crate) fn wire_size(&self) -> Result<usize> {
         let bytes = rings_codec::serialized_size(self).map_err(Error::CodecSerialize)?;
-        usize::try_from(bytes).map_err(|_| Error::MessageTooLarge(usize::MAX))
+        usize::try_from(bytes).map_err(|_| Error::MessageSizeOverflow)
     }
 
     /// Returns whether `local` is the relay destination of this payload.
@@ -276,16 +275,7 @@ impl MessageVerificationExt for Transaction {
 
 impl MessageVerificationExt for MessagePayload {
     fn verification_data(&self) -> Result<Vec<u8>> {
-        self.transaction
-            .report_return
-            .validate_authorized_by(self.transaction.signer())?;
-        Ok(hash_transaction(
-            self.transaction.destination,
-            self.transaction.tx_id,
-            self.transaction.report_return,
-            &self.transaction.data,
-        )
-        .to_vec())
+        self.transaction.verification_data()
     }
 
     fn verification(&self) -> &MessageVerification {

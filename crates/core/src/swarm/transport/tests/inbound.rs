@@ -1,7 +1,5 @@
 use std::future::pending;
 
-use rings_transport::core::callback::InboundFrameClass;
-
 use super::*;
 use crate::chunk::ChunkList;
 use crate::message::CustomMessage;
@@ -9,6 +7,7 @@ use crate::message::FoundEntry;
 use crate::swarm::callback::inbound_application_capacity_for_test;
 use crate::swarm::callback::inbound_mailbox_capacity_for_test;
 use crate::swarm::callback::inbound_peer_capacity_for_test;
+use crate::swarm::callback::InboundLane;
 
 mod callback_failure;
 mod capacity_handoff;
@@ -631,13 +630,13 @@ async fn transport_preparation_authenticates_every_reserved_lane() -> Result<()>
         .ok_or(Error::InboundActorInvariantViolation)?;
     let reassembly = local_wire(Message::Chunk(chunk), &peer_session, transport.dht.did)?;
 
-    let control_class = crate::swarm::callback::prepare_transport_frame_class_for_test(&control)?;
-    assert_eq!(control_class, InboundFrameClass::Control);
+    let control_lane = crate::swarm::callback::prepare_transport_frame_lane_for_test(&control)?;
+    assert_eq!(control_lane, InboundLane::DhtControl);
     let truncated = control
         .get(..control.len().saturating_sub(1))
         .ok_or(Error::InboundActorInvariantViolation)?;
     assert!(
-        crate::swarm::callback::prepare_transport_frame_class_for_test(truncated).is_err(),
+        crate::swarm::callback::prepare_transport_frame_lane_for_test(truncated).is_err(),
         "a truncated control-shaped payload must not claim control capacity"
     );
     for (name, frame) in [
@@ -652,23 +651,23 @@ async fn transport_preparation_authenticates_every_reserved_lane() -> Result<()>
             .ok_or(Error::InboundActorInvariantViolation)?;
         *final_byte ^= 1;
         assert!(
-            crate::swarm::callback::prepare_transport_frame_class_for_test(&damaged).is_err(),
+            crate::swarm::callback::prepare_transport_frame_lane_for_test(&damaged).is_err(),
             "unauthenticated {name} shape must not claim reserved capacity"
         );
     }
     assert_eq!(
-        crate::swarm::callback::prepare_transport_frame_class_for_test(&application)?,
-        InboundFrameClass::Application
+        crate::swarm::callback::prepare_transport_frame_lane_for_test(&application)?,
+        InboundLane::Application
     );
     assert_eq!(
-        crate::swarm::callback::prepare_transport_frame_class_for_test(&storage)?,
-        InboundFrameClass::Storage
+        crate::swarm::callback::prepare_transport_frame_lane_for_test(&storage)?,
+        InboundLane::Storage
     );
     assert_eq!(
-        crate::swarm::callback::prepare_transport_frame_class_for_test(&reassembly)?,
-        InboundFrameClass::Reassembly
+        crate::swarm::callback::prepare_transport_frame_lane_for_test(&reassembly)?,
+        InboundLane::Reassembly
     );
-    assert!(crate::swarm::callback::prepare_transport_frame_class_for_test(&[0xff]).is_err());
+    assert!(crate::swarm::callback::prepare_transport_frame_lane_for_test(&[0xff]).is_err());
     Ok(())
 }
 
@@ -695,7 +694,7 @@ async fn reassembled_control_shape_is_verified_before_lane_transition() -> Resul
     )?;
     tampered.transaction.data.push(0);
     assert_eq!(
-        crate::message::MessageMeta::from_wire(&tampered.transaction.data)?.class(),
+        crate::message::MessageKind::from_wire(&tampered.transaction.data)?.class(),
         crate::message::MessageClass::DhtControl
     );
     let tampered_wire = tampered.to_wire()?;

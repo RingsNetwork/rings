@@ -501,7 +501,12 @@ async fn detached_storage_sync_missing_routable_transport_does_not_degrade_peer(
         data: Vec::new(),
     };
 
-    assert_eq!(node1.swarm.transport.send_storage_sync(msg).await?, None);
+    assert!(node1
+        .swarm
+        .transport
+        .send_storage_sync(msg)
+        .await?
+        .is_deferred());
     assert_eq!(
         measure.count(peer, MeasureCounter::FailedToSend),
         failed_before,
@@ -740,7 +745,7 @@ async fn dht_control_frame_runs_while_storage_transfer_waits_for_delivery() -> R
         .transport
         .send_storage_sync(msg)
         .await?
-        .is_some());
+        .is_sent());
     assert_eq!(
         dummy_controlled::sent_count(),
         1,

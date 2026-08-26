@@ -34,20 +34,15 @@ enum FrameSource {
     Whole(Option<Bytes>),
     Chunked {
         session_sk: SessionSk,
-        did: Did,
         chunks: ChunkFrames,
     },
 }
 
 impl FrameSource {
-    fn next_frame(&mut self) -> Result<Option<(Bytes, &'static str)>> {
+    fn next_frame(&mut self, did: Did) -> Result<Option<(Bytes, &'static str)>> {
         match self {
             Self::Whole(frame) => Ok(frame.take().map(|bytes| (bytes, "whole_message"))),
-            Self::Chunked {
-                session_sk,
-                did,
-                chunks,
-            } => {
+            Self::Chunked { session_sk, chunks } => {
                 let Some(chunk) = chunks.next() else {
                     return Ok(None);
                 };
@@ -57,7 +52,7 @@ impl FrameSource {
                 } else {
                     "chunked_tail"
                 };
-                frame_chunk(session_sk, *did, chunk).map(|bytes| Some((bytes, context)))
+                frame_chunk(session_sk, did, chunk).map(|bytes| Some((bytes, context)))
             }
         }
     }
@@ -181,14 +176,9 @@ impl OutboundTransfer {
         stop: StopToken,
         detached_admission: Option<DetachedAdmission>,
     ) -> (Self, oneshot::Receiver<Result<SendCompletionOutcome>>) {
-        let did = route.did;
         Self::new(
             route,
-            FrameSource::Chunked {
-                session_sk,
-                did,
-                chunks,
-            },
+            FrameSource::Chunked { session_sk, chunks },
             completion,
             stop,
             detached_admission,
@@ -228,7 +218,7 @@ impl OutboundTransfer {
     }
 
     pub(super) fn next_frame(&mut self) -> Result<Option<(Bytes, &'static str)>> {
-        self.source.next_frame()
+        self.source.next_frame(self.did)
     }
 
     pub(super) fn is_before_first_frame(&self) -> bool {

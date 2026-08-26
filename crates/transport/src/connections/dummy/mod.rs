@@ -21,6 +21,7 @@ use crate::callback::InboundFrameCapacity;
 use crate::callback::InnerTransportCallback;
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
+use crate::core::transport::stored_max_message_size;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateSnapshot;
 use crate::core::transport::IrrevocableSendGuard;
@@ -28,7 +29,6 @@ use crate::core::transport::SendPermit;
 use crate::core::transport::TransportInterface;
 use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
-use crate::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 use crate::delivery::DeliveryFuture;
 use crate::error::Error;
 use crate::error::Result;
@@ -241,6 +241,8 @@ pub mod controlled {
         CONTROLLED.with(|c| c.set(on));
         if !on {
             DELIVERY.with(|state| state.borrow_mut().clear());
+            super::SENT_COUNT.with(|count| count.set(0));
+            MAX_MESSAGE_SIZE.with(|size| size.set(0));
             NEXT_CALLBACK_CID.with(|next| {
                 *next.borrow_mut() = None;
             });
@@ -687,25 +689,27 @@ impl DummyTransport {
     }
 }
 
+enum DummySendTarget {
+    Deliver(Arc<DummyConnection>),
+    Drop,
+}
+
 fn complete_irrevocable_send<F: FnOnce()>(
     connection_state: &Arc<Mutex<DummyConnectionState>>,
     data: Bytes,
-    remote: Option<Arc<DummyConnection>>,
-    drop_message: bool,
+    target: DummySendTarget,
     permit: IrrevocableSendGuard<F>,
 ) -> Result<DeliveryFuture> {
     commit_irrevocable_dispatch(connection_state, permit, || {
-        if drop_message {
-            SENT_COUNT.with(|count| count.set(count.get() + 1));
-            return Ok(());
-        }
-        let Some(remote) = remote else {
-            return Err(Error::DummyRemoteConnectionUnavailable);
-        };
-        if let Some(frame) = remote.callback.prepare_inbound_frame(data) {
-            if !remote.dispatch(Event::Message(frame)) {
-                return Err(Error::DummyRemoteConnectionClosed);
+        match target {
+            DummySendTarget::Deliver(remote) => {
+                if let Some(frame) = remote.callback.prepare_inbound_frame(data) {
+                    if !remote.dispatch(Event::Message(frame)) {
+                        return Err(Error::DummyRemoteConnectionClosed);
+                    }
+                }
             }
+            DummySendTarget::Drop => {}
         }
         SENT_COUNT.with(|count| count.set(count.get() + 1));
         Ok(())
@@ -794,11 +798,10 @@ impl ConnectionInterface for DummyConnection {
         if !permit.allows() {
             return Err(Error::SendPermitRevoked);
         }
-        let drop_message = DROP_MESSAGES.with(|drop| drop.get());
-        let remote = if drop_message {
-            None
+        let target = if DROP_MESSAGES.with(|drop| drop.get()) {
+            DummySendTarget::Drop
         } else {
-            Some(
+            DummySendTarget::Deliver(
                 self.remote_conn()
                     .ok_or(Error::DummyRemoteConnectionUnavailable)?,
             )
@@ -818,26 +821,15 @@ impl ConnectionInterface for DummyConnection {
                 IRREVOCABLE_SEND_GATE_WAITING.with(|waiting| waiting.set(true));
                 irrevocable_gate.notified().await;
                 IRREVOCABLE_SEND_GATE_WAITING.with(|waiting| waiting.set(false));
-                let result = complete_irrevocable_send(
-                    &connection_state,
-                    data,
-                    remote,
-                    drop_message,
-                    permit_retirement,
-                );
+                let result =
+                    complete_irrevocable_send(&connection_state, data, target, permit_retirement);
                 let _ = result_sender.send(result);
             });
             return result_receiver
                 .await
                 .map_err(|_| Error::DummyIrrevocableSendTaskStopped)?;
         }
-        complete_irrevocable_send(
-            &self.connection_state,
-            data,
-            remote,
-            drop_message,
-            permit_retirement,
-        )
+        complete_irrevocable_send(&self.connection_state, data, target, permit_retirement)
     }
 
     fn webrtc_connection_state(&self) -> WebrtcConnectionState {
@@ -853,10 +845,7 @@ impl ConnectionInterface for DummyConnection {
     }
 
     fn max_message_size(&self) -> usize {
-        match MAX_MESSAGE_SIZE.with(|m| m.get()) {
-            0 => MAX_DATA_CHANNEL_MESSAGE_SIZE,
-            n => n,
-        }
+        stored_max_message_size(MAX_MESSAGE_SIZE.with(std::cell::Cell::get))
     }
 
     async fn get_stats(&self) -> Vec<String> {
@@ -929,11 +918,7 @@ impl TransportInterface for DummyTransport {
         cid: &str,
         callback: BoxedTransportCallback,
     ) -> Result<ConnectionRef<Self::Connection>> {
-        if let Ok(existed_conn) = self.pool.connection(cid) {
-            if existed_conn.webrtc_connection_state().occupies_peer_slot() {
-                return Err(Error::ConnectionAlreadyExists(cid.to_string()));
-            }
-        }
+        self.pool.ensure_peer_slot_available(cid)?;
 
         let inner_callback =
             InnerTransportCallback::for_transport(self, cid, callback, Notifier::default());

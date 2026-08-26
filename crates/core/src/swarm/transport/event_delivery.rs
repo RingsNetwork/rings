@@ -16,16 +16,58 @@ use crate::dht::Did;
 
 pub(super) type PeerOperationLock = Arc<AsyncMutex<()>>;
 
+struct PeerArcRegistry<T> {
+    entries: Mutex<BTreeMap<Did, Arc<T>>>,
+}
+
+impl<T> Default for PeerArcRegistry<T> {
+    fn default() -> Self {
+        Self {
+            entries: Mutex::new(BTreeMap::new()),
+        }
+    }
+}
+
+impl<T> PeerArcRegistry<T> {
+    fn lock_map(&self) -> MutexGuard<'_, BTreeMap<Did, Arc<T>>> {
+        self.entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn get_or_insert_with(&self, peer: Did, create: impl FnOnce() -> T) -> Arc<T> {
+        self.lock_map()
+            .entry(peer)
+            .or_insert_with(|| Arc::new(create()))
+            .clone()
+    }
+
+    fn prune(&self, peer: Did, value: &Arc<T>) {
+        let mut entries = self.lock_map();
+        if entries
+            .get(&peer)
+            .is_some_and(|current| Arc::ptr_eq(current, value) && Arc::strong_count(current) <= 2)
+        {
+            entries.remove(&peer);
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.lock_map().len()
+    }
+}
+
 #[derive(Default)]
 pub(super) struct PeerOperationLocks {
-    locks: Mutex<BTreeMap<Did, PeerOperationLock>>,
+    locks: PeerArcRegistry<AsyncMutex<()>>,
 }
 
 /// Per-peer event sequencers. Unlike an async mutex guard, a sequence turn holds
 /// no lock while application code is awaited.
 #[derive(Default)]
 pub(super) struct SwarmEventDeliveryLocks {
-    sequences: Mutex<BTreeMap<Did, SwarmEventDeliveryLock>>,
+    sequences: PeerArcRegistry<SwarmEventDeliverySequence>,
 }
 
 #[derive(Clone)]
@@ -170,19 +212,11 @@ impl SwarmEventDeliveryLocks {
         Self::default()
     }
 
-    fn lock_map(&self) -> MutexGuard<'_, BTreeMap<Did, SwarmEventDeliveryLock>> {
-        self.sequences
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
     pub(super) fn lock(&self, peer: Did) -> SwarmEventDeliveryLock {
-        self.lock_map()
-            .entry(peer)
-            .or_insert_with(|| {
-                SwarmEventDeliveryLock(Arc::new(SwarmEventDeliverySequence::default()))
-            })
-            .clone()
+        SwarmEventDeliveryLock(
+            self.sequences
+                .get_or_insert_with(peer, SwarmEventDeliverySequence::default),
+        )
     }
 
     pub(super) fn prune(
@@ -194,12 +228,7 @@ impl SwarmEventDeliveryLocks {
         if connection_epoch_exists {
             return;
         }
-        let mut sequences = self.lock_map();
-        if sequences.get(&peer).is_some_and(|current| {
-            Arc::ptr_eq(&current.0, &delivery.0) && Arc::strong_count(&current.0) <= 2
-        }) {
-            sequences.remove(&peer);
-        }
+        self.sequences.prune(peer, &delivery.0);
     }
 }
 
@@ -237,30 +266,17 @@ impl PeerOperationLocks {
         Self::default()
     }
 
-    fn lock_map(&self) -> MutexGuard<'_, BTreeMap<Did, PeerOperationLock>> {
-        self.locks
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
     #[cfg(all(
         test,
         feature = "dummy",
         not(all(feature = "wasm", target_family = "wasm"))
     ))]
     pub(super) fn lock(&self, peer: Did) -> PeerOperationLock {
-        self.lock_map()
-            .entry(peer)
-            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
-            .clone()
+        self.locks.get_or_insert_with(peer, || AsyncMutex::new(()))
     }
 
     pub(super) fn lease(&self, peer: Did) -> PeerOperationLease<'_> {
-        let operation = self
-            .lock_map()
-            .entry(peer)
-            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
-            .clone();
+        let operation = self.locks.get_or_insert_with(peer, || AsyncMutex::new(()));
         PeerOperationLease {
             locks: self,
             peer,
@@ -269,17 +285,12 @@ impl PeerOperationLocks {
     }
 
     pub(super) fn prune_idle(&self, peer: Did, delivery: &PeerOperationLock) {
-        let mut locks = self.lock_map();
-        if locks.get(&peer).is_some_and(|current| {
-            Arc::ptr_eq(current, delivery) && Arc::strong_count(current) <= 2
-        }) {
-            locks.remove(&peer);
-        }
+        self.locks.prune(peer, delivery);
     }
 
     #[cfg(test)]
     fn len(&self) -> usize {
-        self.lock_map().len()
+        self.locks.len()
     }
 }
 

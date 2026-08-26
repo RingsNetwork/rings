@@ -36,6 +36,7 @@ use crate::core::pool::RoundRobin;
 use crate::core::pool::RoundRobinPool;
 use crate::core::pool::StatusPool;
 use crate::core::transport::effective_max_message_size;
+use crate::core::transport::stored_max_message_size;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateCell;
 use crate::core::transport::ConnectionStateSnapshot;
@@ -53,6 +54,7 @@ use crate::error::Result;
 use crate::ice_server::parse_ice_servers_or_warn;
 use crate::ice_server::IceCredentialType;
 use crate::ice_server::IceServer;
+use crate::notifier::wait_for_data_channel_open;
 use crate::notifier::Notifier;
 use crate::pool::Pool;
 use crate::webrtc_config::WebrtcUdpPortRange;
@@ -267,12 +269,7 @@ impl ConnectionInterface for WebSysWebrtcConnection {
     }
 
     fn max_message_size(&self) -> usize {
-        // The value negotiated from the remote SDP at handshake; `0` = not yet negotiated, so
-        // fall back to the interop default. Same parsing as native (consistent behaviour).
-        match self.remote_max_message_size.load(Ordering::SeqCst) {
-            0 => MAX_DATA_CHANNEL_MESSAGE_SIZE,
-            n => n,
-        }
+        stored_max_message_size(self.remote_max_message_size.load(Ordering::SeqCst))
     }
 
     async fn get_stats(&self) -> Vec<String> {
@@ -352,32 +349,13 @@ impl ConnectionInterface for WebSysWebrtcConnection {
     }
 
     async fn webrtc_wait_for_data_channel_open(&self) -> Result<()> {
-        // `Disconnected` is intentionally not treated as unavailable: it is a
-        // transient ICE state in which the data channel stays open, so we let
-        // the send proceed (the bytes buffer and flush on recovery). The
-        // returned `DeliveryFuture` reports whether they actually made it out.
-        if matches!(
+        wait_for_data_channel_open(
             self.webrtc_connection_state(),
-            WebrtcConnectionState::Failed | WebrtcConnectionState::Closed
-        ) {
-            return Err(Error::DataChannelOpen("Connection unavailable".to_string()));
-        }
-
-        if self.data_channel_is_open()? {
-            return Ok(());
-        }
-
-        self.webrtc_data_channel_state_notifier
-            .set_timeout(WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT);
-        self.webrtc_data_channel_state_notifier.clone().await;
-
-        if self.data_channel_is_open()? {
-            return Ok(());
-        } else {
-            return Err(Error::DataChannelOpen(format!(
-                "DataChannel not open in {WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT} seconds"
-            )));
-        }
+            || self.data_channel_is_open(),
+            &self.webrtc_data_channel_state_notifier,
+            WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT,
+        )
+        .await
     }
 
     async fn close(&self) -> Result<()> {
@@ -547,11 +525,7 @@ impl TransportInterface for WebSysWebrtcTransport {
         cid: &str,
         callback: BoxedTransportCallback,
     ) -> Result<ConnectionRef<Self::Connection>> {
-        if let Ok(existed_conn) = self.pool.connection(cid) {
-            if existed_conn.webrtc_connection_state().occupies_peer_slot() {
-                return Err(Error::ConnectionAlreadyExists(cid.to_string()));
-            }
-        }
+        self.pool.ensure_peer_slot_available(cid)?;
 
         //
         // Setup webrtc connection env

@@ -94,13 +94,13 @@ fn assert_wire_classification(
     expected_kind: &'static str,
     expected_class: TransferClass,
 ) {
-    let typed = OutboundMessageMeta::from_message(message);
+    let typed = OutboundMessageKind::from_message(message);
     let wire = rings_codec::serialize(message).expect("message must serialize");
-    let decoded = OutboundMessageMeta::from_wire(&wire).expect("wire metadata must decode");
+    let decoded = OutboundMessageKind::from_wire(&wire).expect("wire metadata must decode");
 
-    assert_eq!(typed.kind().as_str(), expected_kind);
+    assert_eq!(typed.as_str(), expected_kind);
     assert_eq!(typed.class(), expected_class);
-    assert_eq!(decoded.kind(), typed.kind());
+    assert_eq!(decoded, typed);
     assert_eq!(decoded.class(), typed.class());
 }
 

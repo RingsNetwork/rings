@@ -37,6 +37,12 @@ use bytes::Bytes;
 use crate::core::callback::AdmittedInboundMessage;
 use crate::core::callback::BoxedTransportCallback;
 use crate::core::callback::InboundFrameCapacityLease;
+#[cfg(any(
+    test,
+    all(not(target_family = "wasm"), feature = "tokio"),
+    all(target_family = "wasm", feature = "web-sys-webrtc")
+))]
+use crate::core::drop_guard::ArmedDropGuard;
 use crate::core::transport::BorrowedTransportMessage;
 use crate::core::transport::TransportInterface;
 #[cfg(test)]
@@ -88,7 +94,7 @@ const _: () = {
 struct InboundFrameState {
     frames: usize,
     bytes: usize,
-    peers: BTreeMap<String, PeerInboundFrameState>,
+    peers: BTreeMap<Arc<str>, PeerInboundFrameState>,
 }
 
 #[derive(Default)]
@@ -144,7 +150,7 @@ impl InboundFrameCapacity {
             return None;
         }
         {
-            let peer_state = state.peers.entry(peer.to_string()).or_default();
+            let peer_state = state.peers.entry(Arc::clone(&peer)).or_default();
             peer_state.frames = next_peer_frames;
             peer_state.bytes = next_peer_bytes;
         }
@@ -253,40 +259,12 @@ pub struct InnerTransportCallback {
     all(not(target_family = "wasm"), feature = "tokio"),
     all(target_family = "wasm", feature = "web-sys-webrtc")
 ))]
-struct InvalidFrameWorkerGuard<'a> {
-    state: Option<&'a AtomicUsize>,
-}
-
-#[cfg(any(
-    test,
-    all(not(target_family = "wasm"), feature = "tokio"),
-    all(target_family = "wasm", feature = "web-sys-webrtc")
-))]
-impl<'a> InvalidFrameWorkerGuard<'a> {
-    const fn new(state: &'a AtomicUsize) -> Self {
-        Self { state: Some(state) }
-    }
-
-    fn disarm(&mut self) {
-        self.state.take();
-    }
-}
-
-#[cfg(any(
-    test,
-    all(not(target_family = "wasm"), feature = "tokio"),
-    all(target_family = "wasm", feature = "web-sys-webrtc")
-))]
-impl Drop for InvalidFrameWorkerGuard<'_> {
-    fn drop(&mut self) {
-        if let Some(state) = self.state.take() {
-            // Cancellation is terminal for this best-effort measurement batch.
-            // One atomic swap prevents a producer from observing a stale active
-            // worker: a producer before the swap is discarded with the batch;
-            // one after it observes idle state and starts a replacement.
-            state.swap(0, Ordering::AcqRel);
-        }
-    }
+fn release_invalid_frame_worker(state: &AtomicUsize) {
+    // Cancellation is terminal for this best-effort measurement batch.
+    // One atomic swap prevents a producer from observing a stale active
+    // worker: a producer before the swap is discarded with the batch;
+    // one after it observes idle state and starts a replacement.
+    state.swap(0, Ordering::AcqRel);
 }
 
 #[cfg(any(
@@ -549,7 +527,10 @@ impl InnerTransportCallback {
         all(target_family = "wasm", feature = "web-sys-webrtc")
     ))]
     async fn drain_invalid_inbound_frames(&self) {
-        let mut active_guard = InvalidFrameWorkerGuard::new(&self.invalid_frame_report_state);
+        let mut active_guard = ArmedDropGuard::new(
+            &self.invalid_frame_report_state,
+            release_invalid_frame_worker,
+        );
         loop {
             let mut processed = 0;
             while processed < INVALID_FRAME_REPORT_QUANTUM && self.take_invalid_inbound_frame() {

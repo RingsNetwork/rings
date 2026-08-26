@@ -36,6 +36,7 @@ use rings_transport::delivery::DeliveryFuture;
 use super::delivery::await_delivery_or_cancel;
 use super::delivery::frame_chunk;
 use super::delivery::send_data_with_timeout;
+use super::delivery::ChunkSendCancelReason;
 use super::delivery::ChunkSendPermit;
 use super::delivery::ChunkSendProgress;
 use super::delivery::SendCompletionOutcome;
@@ -86,7 +87,7 @@ use measurement::MeasurementReceiver;
 use measurement::MeasurementRecorder;
 use measurement::OutboundMeasurement;
 pub(super) use model::OutboundCompletion;
-pub(super) use model::OutboundMessageMeta;
+pub(super) use model::OutboundMessageKind;
 use model::TransferClass;
 use queue::RunnableTransfer;
 use queue::TransferQueues;
@@ -176,6 +177,19 @@ enum ActiveFrameStep {
     },
 }
 
+fn resolve_cancelled_transfer(
+    before_first_frame: bool,
+    reason: ChunkSendCancelReason,
+) -> Result<SendCompletionOutcome> {
+    if before_first_frame {
+        reason
+            .resolve_initial()
+            .map(|()| SendCompletionOutcome::Cancelled)
+    } else {
+        Ok(SendCompletionOutcome::Cancelled)
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct OutboundPeerHandle {
     state: Arc<OutboundPeerState>,
@@ -262,9 +276,6 @@ impl OutboundPeerHandle {
         #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
         if submitted {
             record_outbound_submit_for_test();
-        }
-        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-        if submitted {
             trace::record_submission(self.state.peer);
         }
         #[cfg(not(all(test, feature = "dummy", not(target_family = "wasm"))))]
@@ -294,8 +305,7 @@ impl OutboundPeerState {
 
 impl Drop for OutboundPeerState {
     fn drop(&mut self) {
-        self.stop.request_stop();
-        self.sender.close();
+        self.shutdown();
     }
 }
 
@@ -859,14 +869,7 @@ impl OutboundWorker {
             }
             ChunkSendProgress::Cancelled(reason) => {
                 let record_failure = reason.records_peer_failure();
-                let result = if before_first_frame {
-                    match reason.resolve_initial() {
-                        Ok(()) => Ok(SendCompletionOutcome::Cancelled),
-                        Err(error) => Err(error),
-                    }
-                } else {
-                    Ok(SendCompletionOutcome::Cancelled)
-                };
+                let result = resolve_cancelled_transfer(before_first_frame, reason);
                 self.terminate_transfer(
                     runnable,
                     result,
@@ -906,13 +909,7 @@ impl OutboundWorker {
                 if reason.records_peer_failure() {
                     self.measurements.record(OutboundMeasurement::FailedToSend);
                 }
-                if before_first_frame {
-                    reason
-                        .resolve_initial()
-                        .map(|()| SendCompletionOutcome::Cancelled)
-                } else {
-                    Ok(SendCompletionOutcome::Cancelled)
-                }
+                resolve_cancelled_transfer(before_first_frame, reason)
             }
         };
         final_results.extend(Self::finalize_scheduled_transfer(scheduled, result));

@@ -27,14 +27,12 @@ use crate::core::sdp::parse_sdp_max_message_size;
 use crate::delivery::DeliveryFuture;
 
 macro_rules! define_transport_messages {
-    ($($variant:ident),+ $(,)?) => {
+    ($( $(#[$docs:meta])* $variant:ident ),+ $(,)?) => {
         /// Wrapper for the data that is sent over the data channel.
         #[derive(Deserialize, Serialize, Debug, Clone)]
         pub enum TransportMessage {
             $(
-                /// A custom message sent by an external invoker and handled by
-                /// the `on_admitted_message` callback. Since 0.18 this stores [`Bytes`]
-                /// instead of `Vec<u8>` without changing its wire encoding.
+                $(#[$docs])*
                 $variant(Bytes),
             )+
         }
@@ -46,7 +44,12 @@ macro_rules! define_transport_messages {
     };
 }
 
-define_transport_messages!(Custom);
+define_transport_messages!(
+    /// A custom message sent by an external invoker and handled by the
+    /// `on_admitted_message` callback. Since 0.18 this stores [`Bytes`]
+    /// instead of `Vec<u8>` without changing its wire encoding.
+    Custom
+);
 
 /// Maximum time a native backend drives an irrevocable send to completion.
 pub const IRREVOCABLE_SEND_COMPLETION_TIMEOUT: Duration = Duration::from_secs(25);
@@ -117,6 +120,11 @@ impl SendAcceptance {
     /// Return whether the backend accepted the send permit.
     pub fn is_accepted(&self) -> bool {
         self.state.phase() == AdmissionPhase::Accepted
+    }
+
+    /// Return whether an irrevocable send failed before backend acceptance.
+    pub fn failed_after_irrevocable(&self) -> bool {
+        self.state.phase() == AdmissionPhase::Irrevocable
     }
 
     /// Atomically cancel a send that has not crossed its irrevocable boundary.
@@ -265,7 +273,7 @@ impl<F: FnOnce()> IrrevocableSendGuard<F> {
 ))]
 impl<F: FnOnce()> Drop for IrrevocableSendGuard<F> {
     fn drop(&mut self) {
-        let must_retire = self.acceptance.is_irrevocable() && !self.acceptance.is_accepted();
+        let must_retire = self.acceptance.failed_after_irrevocable();
         drop(self.permit.take());
         if must_retire {
             if let Some(retire) = self.retire.take() {
@@ -312,15 +320,18 @@ mod send_permit_tests {
 
         assert!(!acceptance.is_accepted());
         assert!(!acceptance.is_irrevocable());
+        assert!(!acceptance.failed_after_irrevocable());
         assert!(permit.allows());
         let permit = permit
             .try_mark_irrevocable()
             .expect("live permit must become irrevocable");
         assert!(acceptance.is_irrevocable());
         assert!(!acceptance.is_accepted());
+        assert!(acceptance.failed_after_irrevocable());
         permit.mark_accepted();
         assert!(acceptance.is_accepted());
         assert!(acceptance.is_irrevocable());
+        assert!(!acceptance.failed_after_irrevocable());
     }
 
     #[test]
@@ -535,6 +546,10 @@ impl WebrtcConnectionState {
     pub(crate) const fn occupies_peer_slot(self) -> bool {
         matches!(self, Self::New | Self::Connecting | Self::Connected)
     }
+
+    pub(crate) const fn is_terminal(self) -> bool {
+        matches!(self, Self::Failed | Self::Closed)
+    }
 }
 
 /// One coherent observation of the transport state used for routability.
@@ -570,14 +585,7 @@ impl ConnectionStateSnapshot {
     fn apply(self, event: ConnectionStateEvent) -> Self {
         match event {
             ConnectionStateEvent::Close => Self::new(WebrtcConnectionState::Closed, false),
-            ConnectionStateEvent::OutboundDataChannels(_)
-                if matches!(
-                    self.webrtc,
-                    WebrtcConnectionState::Failed | WebrtcConnectionState::Closed
-                ) =>
-            {
-                self
-            }
+            ConnectionStateEvent::OutboundDataChannels(_) if self.webrtc.is_terminal() => self,
             ConnectionStateEvent::OutboundDataChannels(open) => Self::new(self.webrtc, open),
             ConnectionStateEvent::Webrtc(_) if self.webrtc == WebrtcConnectionState::Closed => self,
             ConnectionStateEvent::Webrtc(WebrtcConnectionState::Closed) => {
@@ -658,6 +666,15 @@ impl ConnectionStateCell {
 /// peer) but never more. NOTE: this is the protocol default, not an independently verified property
 /// of every backend's SCTP stack — a peer advertising a *larger* limit is still clamped to this.
 pub const MAX_DATA_CHANNEL_MESSAGE_SIZE: usize = 65536;
+
+/// Decode the internal `0 = not negotiated` sentinel used by connection backends.
+pub(crate) const fn stored_max_message_size(stored: usize) -> usize {
+    if stored == 0 {
+        MAX_DATA_CHANNEL_MESSAGE_SIZE
+    } else {
+        stored
+    }
+}
 
 /// The effective per-message send limit for a peer whose SDP is `remote_sdp`. The negotiated value
 /// is parsed from the SDP by [`crate::core::sdp`]; this function is the *policy* layered on top.

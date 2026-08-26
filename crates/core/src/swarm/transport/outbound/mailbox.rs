@@ -156,14 +156,6 @@ impl<T> MailboxReceiver<T> {
 
     pub(super) async fn next(&mut self) -> Option<T> {
         loop {
-            if !self.priority_closed {
-                match self.priority.next().now_or_never() {
-                    Some(Some(item)) => return Some(item),
-                    Some(None) => self.priority_closed = true,
-                    None => {}
-                }
-            }
-
             match (self.priority_closed, self.regular_closed) {
                 (true, true) => return None,
                 (false, true) => match self.priority.next().await {

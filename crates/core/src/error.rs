@@ -754,6 +754,10 @@ pub enum Error {
     #[error("Message has {0} bytes which is too large")]
     MessageTooLarge(usize),
 
+    /// A serialized message size cannot be represented by the local platform.
+    #[error("Serialized message size exceeds the local platform limit")]
+    MessageSizeOverflow,
+
     /// Peer's negotiated max_message_size {0} is too small to carry even one chunk
     #[error("Peer's negotiated max_message_size {0} is too small to carry even one chunk")]
     PeerMaxMessageSizeTooSmall(usize),

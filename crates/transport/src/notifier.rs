@@ -8,6 +8,9 @@ use std::sync::MutexGuard;
 use std::task::Context;
 use std::task::Poll;
 
+use crate::core::transport::WebrtcConnectionState;
+use crate::error::Error;
+use crate::error::Result;
 use crate::sync_utils::lock_recover;
 
 #[derive(Default)]
@@ -120,6 +123,33 @@ impl Future for Notifier {
 
         state.wakers.push(cx.waker().clone());
         Poll::Pending
+    }
+}
+
+pub(crate) async fn wait_for_data_channel_open(
+    state: WebrtcConnectionState,
+    data_channel_is_open: impl Fn() -> Result<bool>,
+    notifier: &Notifier,
+    timeout_seconds: u8,
+) -> Result<()> {
+    // `Disconnected` remains eligible: buffered bytes may flush after ICE
+    // recovery, and the delivery future observes whether that happened.
+    if state.is_terminal() {
+        return Err(Error::DataChannelOpen("Connection unavailable".to_string()));
+    }
+    if data_channel_is_open()? {
+        return Ok(());
+    }
+
+    notifier.set_timeout(timeout_seconds);
+    notifier.clone().await;
+
+    if data_channel_is_open()? {
+        Ok(())
+    } else {
+        Err(Error::DataChannelOpen(format!(
+            "DataChannel not open in {timeout_seconds} seconds"
+        )))
     }
 }
 

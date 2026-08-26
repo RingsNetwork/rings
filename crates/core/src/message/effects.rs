@@ -7,8 +7,8 @@
 
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 use std::cell::Cell;
+use std::future::poll_fn;
 use std::sync::Arc;
-#[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
 use std::task::Poll;
 
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
@@ -37,7 +37,21 @@ use crate::message::SyncEntriesWithSuccessor;
 use crate::swarm::callback::InnerSwarmCallback;
 use crate::swarm::callback::SharedSwarmCallback;
 use crate::swarm::transport::SwarmTransport;
-use crate::utils::yield_executor_once;
+
+/// Yield one executor poll without depending on a particular async runtime.
+async fn yield_executor_once() {
+    let mut yielded = false;
+    poll_fn(move |context| {
+        if yielded {
+            Poll::Ready(())
+        } else {
+            yielded = true;
+            context.waker().wake_by_ref();
+            Poll::Pending
+        }
+    })
+    .await;
+}
 
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 pub(crate) const CORE_ACTOR_BROWSER_YIELD_INTERVAL: u8 = 32;
@@ -265,6 +279,23 @@ impl<'payload> CoreEffect<'payload> {
     }
 }
 
+fn find_successor_effect<'payload>(
+    next: Did,
+    did: Did,
+    handler: FindSuccessorReportHandler,
+) -> Option<CoreEffect<'payload>> {
+    (next != did).then(|| {
+        CoreEffect::send_direct_message(
+            Message::FindSuccessorSend(FindSuccessorSend {
+                did,
+                strict: false,
+                then: FindSuccessorThen::Report(handler),
+            }),
+            next,
+        )
+    })
+}
+
 /// Lower one DHT leaf action directly into a transport effect.
 pub(crate) fn lower_dht_action<'payload>(
     act: &PeerRingAction,
@@ -273,40 +304,20 @@ pub(crate) fn lower_dht_action<'payload>(
     match act {
         PeerRingAction::None => Ok(None),
         PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessorForConnect(did)) => {
-            let (next, did) = (*next, *did);
-            Ok(if next == did {
-                None
-            } else {
-                Some(CoreEffect::send_direct_message(
-                    Message::FindSuccessorSend(FindSuccessorSend {
-                        did,
-                        strict: false,
-                        then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect),
-                    }),
-                    next,
-                ))
-            })
+            Ok(find_successor_effect(
+                *next,
+                *did,
+                FindSuccessorReportHandler::Connect,
+            ))
         }
         PeerRingAction::RemoteAction(
             next,
             PeerRingRemoteAction::FindSuccessorForFix { did, index },
-        ) => {
-            let (next, did, index) = (*next, *did, *index);
-            Ok(if next == did {
-                None
-            } else {
-                Some(CoreEffect::send_direct_message(
-                    Message::FindSuccessorSend(FindSuccessorSend {
-                        did,
-                        strict: false,
-                        then: FindSuccessorThen::Report(
-                            FindSuccessorReportHandler::FixFingerTable { index },
-                        ),
-                    }),
-                    next,
-                ))
-            })
-        }
+        ) => Ok(find_successor_effect(
+            *next,
+            *did,
+            FindSuccessorReportHandler::FixFingerTable { index: *index },
+        )),
         PeerRingAction::RemoteAction(successor, PeerRingRemoteAction::QueryForSuccessorList) => {
             Ok(Some(if is_connected(*successor) {
                 CoreEffect::send_direct_message(

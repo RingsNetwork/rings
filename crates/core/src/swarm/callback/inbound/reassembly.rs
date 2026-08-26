@@ -1,7 +1,6 @@
 use super::decode_payload;
 use super::finish_reply;
 use super::memory_reservation;
-use super::DecodedInboundFrame;
 use super::InboundEvent;
 use super::InboundFailure;
 use super::InboundLane;
@@ -56,32 +55,23 @@ async fn advance_chunk_event(
             processor.record_receive_failure(event.peer).await;
             return Err(Error::InvalidChunkMessage);
         }
-        ReassemblyOutcome::Rejected(ReassemblyRejection::LocalInvariant) => {
-            return Err(Error::InboundActorInvariantViolation);
-        }
     };
     let reservation = memory_reservation(bytes.as_ref().len());
     event.permit.try_transition(event.lane, reservation)?;
-    let DecodedInboundFrame {
-        payload,
-        prepared_message,
-    } = decode_payload(processor, event.peer, bytes.as_ref()).await?;
-    let message = match prepared_message {
-        Some(message) => message,
-        None => match payload.transaction.data::<crate::message::Message>() {
-            Ok(message) => message,
-            Err(error) => {
-                processor.record_receive_failure(event.peer).await;
-                return Err(error);
-            }
-        },
+    let payload = decode_payload(processor, event.peer, bytes.as_ref()).await?;
+    let message = match payload.transaction.data::<crate::message::Message>() {
+        Ok(message) => message,
+        Err(error) => {
+            processor.record_receive_failure(event.peer).await;
+            return Err(error);
+        }
     };
-    let meta = crate::message::MessageMeta::from_message(&message);
-    if meta.kind().is_chunk() {
+    let kind = crate::message::MessageKind::from_message(&message);
+    if kind.is_chunk() {
         processor.record_receive_failure(event.peer).await;
         return Err(Error::NestedChunkMessage);
     }
-    let lane = InboundLane::from_meta(meta);
+    let lane = InboundLane::from_kind(kind);
     event.permit.try_transition(lane, reservation)?;
     Ok(Some(ReassembledEvent {
         payload,

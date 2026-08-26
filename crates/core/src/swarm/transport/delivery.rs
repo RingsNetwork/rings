@@ -489,7 +489,7 @@ pub(super) async fn terminate_accepted_connection(
     admitted: &AdmittedConnection,
     cause: &'static str,
 ) {
-    let (terminal, close) = attempt_terminalization_and_close(
+    let TerminalizationOutcome { terminal, close } = attempt_terminalization_and_close(
         || admitted.mark_send_terminal(),
         admitted.connection().close(),
     )
@@ -510,16 +510,21 @@ pub(super) async fn terminate_accepted_connection(
     }
 }
 
+struct TerminalizationOutcome {
+    terminal: Result<bool>,
+    close: Result<bool>,
+}
+
 async fn attempt_terminalization_and_close<F>(
     mark_terminal: impl FnOnce() -> Result<bool>,
     close: F,
-) -> (Result<bool>, Result<bool>)
+) -> TerminalizationOutcome
 where
     F: Future<Output = Result<()>>,
 {
     let terminal = mark_terminal();
     let close = await_bounded_connection_close(close).await;
-    (terminal, close)
+    TerminalizationOutcome { terminal, close }
 }
 
 fn log_terminal_cleanup_failure(
@@ -551,7 +556,7 @@ mod tests {
         let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let close_observer = Arc::clone(&closed);
 
-        let (terminal, close) = attempt_terminalization_and_close(
+        let TerminalizationOutcome { terminal, close } = attempt_terminalization_and_close(
             || Err(Error::SwarmConnectionLifecycleLock),
             async move {
                 close_observer.store(true, std::sync::atomic::Ordering::Release);

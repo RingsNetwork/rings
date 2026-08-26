@@ -15,7 +15,7 @@ use super::outbound::ChunkFrames;
 use super::outbound::DetachedAdmission;
 use super::outbound::DetachedAdmissionCancel;
 use super::outbound::OutboundCompletion;
-use super::outbound::OutboundMessageMeta;
+use super::outbound::OutboundMessageKind;
 use super::outbound::OutboundPeerHandle;
 use super::outbound::OutboundTransfer;
 use super::outbound::OutboundTransferRoute;
@@ -45,17 +45,12 @@ use crate::utils::sleep;
 const TRACKED_PAYLOAD_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.tracked_payload;
 const DETACHED_FIRST_FRAME_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.first_frame_admission;
 
-#[cfg(target_family = "wasm")]
-type CleanupAction = Box<dyn FnOnce(())>;
-#[cfg(not(target_family = "wasm"))]
-type CleanupAction = Box<dyn FnOnce(()) + Send>;
-
 struct OversizedPayloadLog {
     local: Did,
     next_hop: Did,
     destination: Did,
     relay_destination: Did,
-    tx_id: String,
+    tx_id: uuid::Uuid,
     message_kind: &'static str,
     bytes: usize,
     max_bytes: usize,
@@ -65,7 +60,7 @@ struct OutboundSendLog {
     next_hop: Did,
     destination: Did,
     relay_destination: Did,
-    tx_id: String,
+    tx_id: uuid::Uuid,
     message_kind: &'static str,
     completion: OutboundCompletion,
 }
@@ -153,35 +148,43 @@ impl StopOnDrop {
 }
 
 struct DetachedAdmissionOnDrop {
-    admission: DetachedAdmission,
-    handle: OutboundPeerHandle,
-    cleanup: ArmedDropGuard<(), CleanupAction>,
+    cleanup: ArmedDropGuard<DetachedAdmissionCleanup, fn(DetachedAdmissionCleanup)>,
 }
 
-impl DetachedAdmissionOnDrop {
-    fn new(admission: DetachedAdmission, handle: OutboundPeerHandle) -> Self {
-        let cleanup_admission = admission.clone();
-        let cleanup_handle = handle.clone();
-        Self {
-            admission,
-            handle,
-            cleanup: ArmedDropGuard::new(
-                (),
-                Box::new(move |()| {
-                    if cleanup_admission.cancel() == DetachedAdmissionCancel::Cancelled {
-                        cleanup_handle.cancel_stopped();
-                    }
-                }),
-            ),
-        }
-    }
+struct DetachedAdmissionCleanup {
+    admission: DetachedAdmission,
+    handle: OutboundPeerHandle,
+}
 
+impl DetachedAdmissionCleanup {
     fn cancel(&self) -> DetachedAdmissionCancel {
         let decision = self.admission.cancel();
         if decision == DetachedAdmissionCancel::Cancelled {
             self.handle.cancel_stopped();
         }
         decision
+    }
+}
+
+fn cancel_detached_admission(cleanup: DetachedAdmissionCleanup) {
+    cleanup.cancel();
+}
+
+impl DetachedAdmissionOnDrop {
+    fn new(admission: DetachedAdmission, handle: OutboundPeerHandle) -> Self {
+        Self {
+            cleanup: ArmedDropGuard::new(
+                DetachedAdmissionCleanup { admission, handle },
+                cancel_detached_admission,
+            ),
+        }
+    }
+
+    fn cancel(&self) -> DetachedAdmissionCancel {
+        self.cleanup.value().map_or(
+            DetachedAdmissionCancel::MustAwait,
+            DetachedAdmissionCleanup::cancel,
+        )
     }
 
     fn disarm(&mut self) {
@@ -201,15 +204,6 @@ fn log_oversized_payload(metadata: OversizedPayloadLog) {
         max_bytes = metadata.max_bytes,
         "message payload is too large"
     );
-}
-
-fn validate_payload_size(metadata: OversizedPayloadLog) -> Result<()> {
-    if metadata.bytes <= metadata.max_bytes {
-        return Ok(());
-    }
-    let bytes = metadata.bytes;
-    log_oversized_payload(metadata);
-    Err(Error::MessageTooLarge(bytes))
 }
 
 fn outbound_memory_reservation(wire_bytes: usize) -> usize {
@@ -234,13 +228,13 @@ impl SwarmTransport {
     async fn reserve_outbound_capacity(
         &self,
         peer: Did,
-        metadata: OutboundMessageMeta,
+        kind: OutboundMessageKind,
         bytes: usize,
         completion: OutboundCompletion,
     ) -> Result<TransferCapacityPermit> {
         let reserve = self
             .outbound_schedulers
-            .reserve(peer, metadata.class(), bytes)
+            .reserve(peer, kind.class(), bytes)
             .fuse();
         if completion == OutboundCompletion::Tracked {
             return reserve.await;
@@ -541,25 +535,28 @@ impl SwarmTransport {
         stop: StopToken,
         detached_admission: Option<DetachedAdmission>,
     ) -> Result<Option<PreparedOutboundTransfer>> {
-        let message_metadata = OutboundMessageMeta::from_wire(&payload.transaction.data)?;
+        let message_kind = OutboundMessageKind::from_wire(&payload.transaction.data)?;
         let wire_bytes = payload.wire_size()?;
-        let message_kind = message_metadata.kind().as_str();
+        let message_kind_name = message_kind.as_str();
         let records_missing_connection_failure = completion == OutboundCompletion::Detached
-            && message_metadata.records_missing_connection_failure();
+            && message_kind.records_missing_connection_failure();
         let tx_id = payload.transaction.tx_id;
         let destination = payload.transaction.destination;
         let relay_destination = payload.relay.destination;
         let next_hop = payload.relay.next_hop;
-        validate_payload_size(OversizedPayloadLog {
-            local: self.dht.did,
-            next_hop,
-            destination,
-            relay_destination,
-            tx_id: tx_id.to_string(),
-            message_kind,
-            bytes: wire_bytes,
-            max_bytes: TRANSPORT_MAX_SIZE,
-        })?;
+        if wire_bytes > TRANSPORT_MAX_SIZE {
+            log_oversized_payload(OversizedPayloadLog {
+                local: self.dht.did,
+                next_hop,
+                destination,
+                relay_destination,
+                tx_id,
+                message_kind: message_kind_name,
+                bytes: wire_bytes,
+                max_bytes: TRANSPORT_MAX_SIZE,
+            });
+            return Err(Error::MessageTooLarge(wire_bytes));
+        }
         if self.admitted_send_connection(did)?.is_none() {
             if records_missing_connection_failure {
                 self.record_peer_message_send_failed(did).await;
@@ -569,14 +566,16 @@ impl SwarmTransport {
         let capacity_permit = self
             .reserve_outbound_capacity(
                 did,
-                message_metadata,
+                message_kind,
                 outbound_memory_reservation(wire_bytes),
                 completion,
             )
             .await?;
-        let permit = {
+        let permit = if message_kind.requires_storage_route() {
             let message = payload.transaction.data::<Message>()?;
             ChunkSendPermit::for_message(self.dht.clone(), did, &message)
+        } else {
+            ChunkSendPermit::Always
         };
         let admitted = self
             .connection_for_send(did, completion, records_missing_connection_failure)
@@ -600,14 +599,14 @@ impl SwarmTransport {
             destination = %destination,
             relay_destination = %relay_destination,
             tx_id = %tx_id,
-            message_kind,
+            message_kind = message_kind_name,
             bytes = wire_bytes,
             max_message_size,
             framing = ?plan,
             "send payload start"
         );
         let framed = self.frame_outbound_transfer(
-            OutboundTransferRoute::new(message_metadata.class(), did, admitted.clone(), permit),
+            OutboundTransferRoute::new(message_kind.class(), did, admitted.clone(), permit),
             data,
             completion,
             stop,
@@ -624,8 +623,8 @@ impl SwarmTransport {
                 next_hop,
                 destination,
                 relay_destination,
-                tx_id: tx_id.to_string(),
-                message_kind,
+                tx_id,
+                message_kind: message_kind_name,
                 completion,
             },
         }))

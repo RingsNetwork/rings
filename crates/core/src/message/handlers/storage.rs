@@ -271,11 +271,7 @@ async fn handle_storage_search_act(
         }
         PeerRingAction::MultiActions(acts) => {
             for (act, has_next) in core_actor_steps(acts) {
-                if let Err(e) =
-                    handle_storage_search_act(handler, ctx, act, resource, redundancy).await
-                {
-                    tracing::error!("Failed on handle multi actions: {e:#?}");
-                }
+                handle_storage_search_act(handler, ctx, act, resource, redundancy).await?;
                 if has_next {
                     yield_core_actor_step().await;
                 }
@@ -285,6 +281,16 @@ async fn handle_storage_search_act(
         }
         act => finish_storage_action(act),
     }
+}
+
+async fn operate_storage_entry<const REDUNDANT: u16>(
+    swarm: &Swarm,
+    operation: EntryOperation,
+) -> Result<()> {
+    swarm.transport.ensure_storage_redundancy::<REDUNDANT>()?;
+    let action =
+        <PeerRing as ChordStorage<_, REDUNDANT>>::entry_operate(&swarm.dht, operation).await?;
+    handle_storage_store_act(swarm.transport.clone(), action).await
 }
 
 fn next_hop_for_sync_entries(
@@ -354,47 +360,27 @@ impl<const REDUNDANT: u16> ChordStorageInterface<REDUNDANT> for Swarm {
 
     /// Store Entry, `TryInto<Entry>` is implemented for alot of types
     async fn storage_store(&self, entry: Entry) -> Result<()> {
-        self.transport.ensure_storage_redundancy::<REDUNDANT>()?;
-        let op = EntryOperation::Overwrite(entry);
-        let act = <PeerRing as ChordStorage<_, REDUNDANT>>::entry_operate(&self.dht, op).await?;
-        handle_storage_store_act(self.transport.clone(), act).await?;
-        Ok(())
+        operate_storage_entry::<REDUNDANT>(self, EntryOperation::Overwrite(entry)).await
     }
 
     async fn storage_append_data(&self, topic: &str, data: Encoded) -> Result<()> {
-        self.transport.ensure_storage_redundancy::<REDUNDANT>()?;
         let entry: Entry = (topic.to_string(), data).try_into()?;
-        let op = EntryOperation::Extend(entry);
-        let act = <PeerRing as ChordStorage<_, REDUNDANT>>::entry_operate(&self.dht, op).await?;
-        handle_storage_store_act(self.transport.clone(), act).await?;
-        Ok(())
+        operate_storage_entry::<REDUNDANT>(self, EntryOperation::Extend(entry)).await
     }
 
     async fn storage_touch_data(&self, topic: &str, data: Encoded) -> Result<()> {
-        self.transport.ensure_storage_redundancy::<REDUNDANT>()?;
         let entry: Entry = (topic.to_string(), data).try_into()?;
-        let op = EntryOperation::Touch(entry);
-        let act = <PeerRing as ChordStorage<_, REDUNDANT>>::entry_operate(&self.dht, op).await?;
-        handle_storage_store_act(self.transport.clone(), act).await?;
-        Ok(())
+        operate_storage_entry::<REDUNDANT>(self, EntryOperation::Touch(entry)).await
     }
 
     async fn storage_tombstone_data(&self, topic: &str, data: Encoded) -> Result<()> {
-        self.transport.ensure_storage_redundancy::<REDUNDANT>()?;
         let entry: Entry = (topic.to_string(), data).try_into()?;
-        let op = EntryOperation::Tombstone(entry);
-        let act = <PeerRing as ChordStorage<_, REDUNDANT>>::entry_operate(&self.dht, op).await?;
-        handle_storage_store_act(self.transport.clone(), act).await?;
-        Ok(())
+        operate_storage_entry::<REDUNDANT>(self, EntryOperation::Tombstone(entry)).await
     }
 
     async fn storage_compact_data(&self, topic: &str, removals: Vec<Encoded>) -> Result<()> {
-        self.transport.ensure_storage_redundancy::<REDUNDANT>()?;
         let entry = Entry::new(Entry::gen_did(topic)?, removals, EntryKind::Data);
-        let op = EntryOperation::CompactData(entry);
-        let act = <PeerRing as ChordStorage<_, REDUNDANT>>::entry_operate(&self.dht, op).await?;
-        handle_storage_store_act(self.transport.clone(), act).await?;
-        Ok(())
+        operate_storage_entry::<REDUNDANT>(self, EntryOperation::CompactData(entry)).await
     }
 }
 

@@ -109,6 +109,18 @@ where
     C: ConnectionInterface<Error = Error, Sdp = S> + PlatformSendSync,
     S: Serialize + DeserializeOwned + Send + Sync + 'static,
 {
+    /// Reject an early connection setup while the peer already occupies its slot.
+    pub(crate) fn ensure_peer_slot_available(&self, cid: &str) -> Result<()> {
+        if self
+            .connection(cid)
+            .is_ok_and(|connection| connection.webrtc_connection_state().occupies_peer_slot())
+        {
+            Err(Error::ConnectionAlreadyExists(cid.to_string()))
+        } else {
+            Ok(())
+        }
+    }
+
     /// The `safely_insert` method is used to insert a connection into the pool.
     /// It ensures that the connection is not inserted twice in concurrent scenarios.
     ///
