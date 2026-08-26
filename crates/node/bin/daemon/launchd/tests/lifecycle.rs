@@ -1,5 +1,4 @@
-//! Verifies stop waits for the loaded record to disappear and reuses that terminal observation
-//! while preserving the independent login-autostart setting.
+//! Proves launchd stop waits until the job is absent.
 
 use super::*;
 
@@ -9,6 +8,29 @@ fn stop_unloads_the_job_and_preserves_enabled_autostart() -> Result<(), DaemonEr
     let domain = TEST_DOMAIN;
     let target = test_target();
     install_test_definition(&root)?;
+    let runner = ScriptedCommandRunner::new([
+        CommandStep::success(LAUNCHCTL, &["print", &target], "state = running\n"),
+        CommandStep::success(LAUNCHCTL, &["bootout", &target], ""),
+        missing_service(&target),
+        enabled_autostart(domain),
+    ]);
+    let manager = test_manager(&root, runner);
+
+    let status = manager.stop()?;
+
+    assert_eq!(
+        status,
+        DaemonStatus::installed(DaemonState::Stopped, AutostartState::Enabled)
+    );
+    Ok(())
+}
+
+#[test]
+fn stop_preserves_loaded_installation_evidence_after_a_plist_disappears() -> Result<(), DaemonError>
+{
+    let root = test_root("stop-loaded-without-plist");
+    let domain = TEST_DOMAIN;
+    let target = test_target();
     let runner = ScriptedCommandRunner::new([
         CommandStep::success(LAUNCHCTL, &["print", &target], "state = running\n"),
         CommandStep::success(LAUNCHCTL, &["bootout", &target], ""),

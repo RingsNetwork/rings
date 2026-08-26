@@ -1,5 +1,4 @@
-//! Parses one `systemctl show` snapshot into lifecycle and autostart state. Unknown manager
-//! vocabulary remains visible, and no parser result assumes the unit came from our renderer.
+//! Reduces `systemctl show` output into the platform-neutral daemon observation.
 
 use thiserror::Error;
 
@@ -25,7 +24,7 @@ pub(crate) enum SystemdStatusError {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SystemdLifecycle<'a> {
-    NotInstalled,
+    Missing,
     Running,
     Stopped,
     Failed,
@@ -44,13 +43,9 @@ impl SystemdLifecycle<'_> {
     ///
     /// Post: transient states remain pending unless systemd itself reports a terminal lifecycle;
     /// no disposition depends on fields from a unit definition that this parser cannot identify.
-    fn into_observation(
-        self,
-        output: &str,
-        autostart: AutostartState,
-    ) -> DaemonObservation<AutostartState> {
+    fn into_record(self, output: &str, autostart: AutostartState) -> SystemdRecord {
         let (state, start_poll) = match self {
-            Self::NotInstalled => return DaemonObservation::NotInstalled,
+            Self::Missing => return SystemdRecord::Missing { autostart },
             Self::Running => (DaemonState::Running, StartPollDisposition::Settled),
             Self::Stopped => (DaemonState::Stopped, StartPollDisposition::Pending),
             Self::Failed => (
@@ -61,8 +56,9 @@ impl SystemdLifecycle<'_> {
                 DaemonState::Transitioning(DaemonTransition::Starting),
                 StartPollDisposition::Pending,
             ),
-            // `systemctl show` does not prove which unit definition supplied RestartSec. A foreign
-            // unit may use systemd's short default, so the observation budget must decide.
+            // Verified with systemd 257.13: systemd's default RestartSec is shorter than this
+            // command's observation window. A foreign unit may retain that default, so the
+            // observation budget rather than renderer provenance must decide.
             Self::AutoRestarting => (
                 DaemonState::Restarting(project_systemd_failure(output)),
                 StartPollDisposition::Pending,
@@ -78,7 +74,34 @@ impl SystemdLifecycle<'_> {
                 StartPollDisposition::Pending,
             ),
         };
-        DaemonObservation::installed(state, start_poll, autostart)
+        SystemdRecord::Loaded(DaemonObservation::installed(state, start_poll, autostart))
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(super) enum SystemdRecord {
+    Missing { autostart: AutostartState },
+    Loaded(DaemonObservation<AutostartState>),
+}
+
+impl SystemdRecord {
+    pub(super) fn is_missing(&self) -> bool {
+        matches!(self, Self::Missing { .. })
+    }
+
+    pub(super) fn into_observation(
+        self,
+        definition_present: bool,
+    ) -> DaemonObservation<AutostartState> {
+        match self {
+            Self::Missing { autostart } if definition_present => DaemonObservation::installed(
+                DaemonState::Stopped,
+                StartPollDisposition::Settled,
+                autostart,
+            ),
+            Self::Missing { .. } => DaemonObservation::NotInstalled,
+            Self::Loaded(observation) => observation,
+        }
     }
 }
 
@@ -196,11 +219,12 @@ impl std::fmt::Display for SystemdProcessFailure {
 }
 
 impl SystemdExecOutcome {
-    fn si_code(self) -> i32 {
-        match self {
-            Self::Exited => SYSTEMD_EXEC_CODE_EXITED,
-            Self::Killed => SYSTEMD_EXEC_CODE_KILLED,
-            Self::Dumped => SYSTEMD_EXEC_CODE_DUMPED,
+    fn from_si_code(code: i32) -> Option<Self> {
+        match code {
+            SYSTEMD_EXEC_CODE_EXITED => Some(Self::Exited),
+            SYSTEMD_EXEC_CODE_KILLED => Some(Self::Killed),
+            SYSTEMD_EXEC_CODE_DUMPED => Some(Self::Dumped),
+            _ => None,
         }
     }
 
@@ -211,7 +235,14 @@ impl SystemdExecOutcome {
     fn failure_from(self, output: &str) -> Option<SystemdProcessFailure> {
         let code = property(output, "ExecMainCode")?.parse::<i32>().ok()?;
         let status = property(output, "ExecMainStatus")?.parse::<i32>().ok()?;
-        if code != self.si_code() || status <= 0 {
+        if Self::from_si_code(code) != Some(self) {
+            return None;
+        }
+        self.failure_from_status(status)
+    }
+
+    fn failure_from_status(self, status: i32) -> Option<SystemdProcessFailure> {
+        if status <= 0 {
             return None;
         }
         match self {
@@ -229,32 +260,31 @@ impl SystemdExecOutcome {
 
     fn failure_from_snapshot(output: &str) -> Option<SystemdProcessFailure> {
         let code = property(output, "ExecMainCode")?.parse::<i32>().ok()?;
-        match code {
-            SYSTEMD_EXEC_CODE_EXITED => Self::Exited.failure_from(output),
-            SYSTEMD_EXEC_CODE_KILLED => Self::Killed.failure_from(output),
-            SYSTEMD_EXEC_CODE_DUMPED => Self::Dumped.failure_from(output),
-            _ => None,
-        }
+        let status = property(output, "ExecMainStatus")?.parse::<i32>().ok()?;
+        Self::from_si_code(code)?.failure_from_status(status)
     }
 }
 
-pub(super) fn parse_systemd_observation(
-    output: &str,
-) -> Result<DaemonObservation<AutostartState>, SystemdStatusError> {
+pub(super) fn parse_systemd_record(output: &str) -> Result<SystemdRecord, SystemdStatusError> {
     let load = required_property(output, "LoadState")?;
     let active = required_property(output, "ActiveState")?;
     let sub = required_property(output, "SubState")?;
     let lifecycle = parse_systemd_lifecycle(load, active, sub);
-    if lifecycle == SystemdLifecycle::NotInstalled {
-        return Ok(DaemonObservation::NotInstalled);
-    }
-    let autostart = parse_systemd_autostart(required_property(output, "UnitFileState")?);
-    Ok(lifecycle.into_observation(output, autostart))
+    let autostart = if lifecycle == SystemdLifecycle::Missing {
+        property(output, "UnitFileState")
+            .map(parse_systemd_autostart)
+            .unwrap_or(AutostartState::Unknown)
+    } else {
+        parse_systemd_autostart(required_property(output, "UnitFileState")?)
+    };
+    Ok(lifecycle.into_record(output, autostart))
 }
 
 #[cfg(test)]
 fn parse_systemd_status(output: &str) -> Result<DaemonStatus, SystemdStatusError> {
-    Ok(parse_systemd_observation(output)?.into_status())
+    Ok(parse_systemd_record(output)?
+        .into_observation(false)
+        .into_status())
 }
 
 fn required_property<'a>(
@@ -284,7 +314,7 @@ fn parse_systemd_lifecycle<'a>(
     // LoadState is not-found. Refreshing is an active state since systemd 254. Masking changes
     // loadability, not whether an already-loaded process is active. Unknown tuples remain visible.
     match (load, active, sub) {
-        ("not-found" | "masked", "inactive", _) => SystemdLifecycle::NotInstalled,
+        ("not-found" | "masked", "inactive", _) => SystemdLifecycle::Missing,
         ("loaded" | "not-found" | "masked", "active" | "reloading" | "refreshing", _) => {
             SystemdLifecycle::Running
         }
@@ -333,14 +363,14 @@ fn parse_systemd_autostart(output: &str) -> AutostartState {
         "enabled" | "enabled-runtime" => AutostartState::Enabled,
         "disabled" | "linked" | "linked-runtime" | "alias" | "static" | "indirect"
         | "generated" => AutostartState::Disabled,
-        "masked" | "masked-runtime" => AutostartState::Other("unavailable"),
+        "masked" | "masked-runtime" => AutostartState::Unavailable,
         _ => AutostartState::Unknown,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    //! Witnesses systemd snapshot parsing, finite lifecycle reduction, and failure composition.
+    //! Proves systemd snapshot reduction.
 
     use super::*;
 
@@ -420,7 +450,7 @@ mod tests {
             ))?;
             assert_eq!(
                 status,
-                DaemonStatus::installed(state, AutostartState::Other("unavailable"))
+                DaemonStatus::installed(state, AutostartState::Unavailable)
             );
         }
 
@@ -583,11 +613,10 @@ mod tests {
     #[test]
     fn auto_restart_remains_pending_when_definition_provenance_is_unknown(
     ) -> Result<(), SystemdStatusError> {
-        use super::super::super::StartPollObservation;
-
-        let observation = parse_systemd_observation(
+        let observation = parse_systemd_record(
             "LoadState=not-found\nActiveState=activating\nSubState=auto-restart\nUnitFileState=\nResult=success\n",
-        )?;
+        )?
+        .into_observation(false);
 
         assert!(!observation.settles_start_poll());
         Ok(())
@@ -612,7 +641,7 @@ mod tests {
         }
         assert_eq!(
             parse_systemd_autostart("masked"),
-            AutostartState::Other("unavailable")
+            AutostartState::Unavailable
         );
     }
 }

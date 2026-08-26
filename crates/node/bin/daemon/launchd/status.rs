@@ -1,8 +1,4 @@
-//! Reduces `launchctl print` output into lifecycle state without performing manager effects. The
-//! parser keeps restart-action provenance distinct from absent or clean termination history.
-
-#[cfg(test)]
-use std::time::Duration;
+//! Reduces `launchctl print` output into the platform-neutral daemon observation.
 
 use super::super::AutostartState;
 use super::super::DaemonFailure;
@@ -10,28 +6,21 @@ use super::super::DaemonObservation;
 use super::super::DaemonState;
 use super::super::DaemonTransition;
 use super::super::StartPollDisposition;
-#[cfg(test)]
-use super::super::StartPollObservation;
 
 const SIGKILL: i32 = 9;
 const SIGTERM: i32 = 15;
-// Observed on macOS 15.6.1 (24G90): launchd's default throttled respawn delay is approximately ten
-// seconds. The plist does not configure this delay; it is manager policy.
-#[cfg(test)]
-pub(crate) const OBSERVED_THROTTLE_FLOOR: Duration = Duration::from_secs(10);
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Selects which termination records may be projected after a manager action.
 ///
 /// Law: `Unfiltered` accepts every valid failure record. `SinceRun(n)` accepts a newer record only
-/// after the bounded `kickstart -k` sequence window or when its signal cannot be action-shaped;
-/// `Unattributable` accepts no record because it has no finite run-counter baseline.
+/// after the bounded `kickstart -k` sequence window or when the termination cannot originate from
+/// that action. `Unattributable` accepts only records that cannot originate from the action.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum LaunchdAttribution {
     /// Attribute the current record without suppressing action-shaped termination data.
     Unfiltered,
     /// Attribute only history newer than the observed pre-restart run counter.
     SinceRun(u64),
-    /// Do not attribute history when launchd did not expose a run-counter baseline.
+    /// Attribute only failures whose shape excludes the current restart action.
     Unattributable,
 }
 
@@ -39,6 +28,20 @@ pub(super) enum LaunchdAttribution {
 pub(super) enum LaunchdRecord<T> {
     Missing,
     Loaded(T),
+}
+
+/// Installation evidence available when launchd has no record for the label.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum MissingRecordEvidence {
+    None,
+    DefinitionPresent,
+    PreviouslyLoaded,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RespawnPolicy {
+    KeepAliveOnUnsuccessfulExit,
+    Unknown,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -118,7 +121,7 @@ enum LaunchdLifecycle<'a> {
 impl LaunchdLifecycle<'_> {
     fn into_observation(
         self,
-        definition_present: bool,
+        respawn_policy: RespawnPolicy,
         observed_sequence: Option<u64>,
         termination: AttributedTermination,
     ) -> DaemonObservation {
@@ -139,52 +142,40 @@ impl LaunchdLifecycle<'_> {
                     StartPollDisposition::Pending,
                 ),
             },
-            // Observed on macOS 15.6.1 (24G90): `exited` is visible before KeepAlive schedules the
-            // next unsuccessful spawn. `SuccessfulExit=false` is used only when our plist exists.
-            Self::Exited => match (definition_present, termination) {
-                (true, AttributedTermination::Attributed(failure)) => (
-                    DaemonState::Restarting(Some(failure)),
-                    StartPollDisposition::Pending,
-                ),
-                (true, AttributedTermination::SuppressedAsAction) => {
-                    (DaemonState::Restarting(None), StartPollDisposition::Pending)
+            Self::Exited | Self::Waiting | Self::NotRunning => {
+                match (respawn_policy, termination) {
+                    (
+                        RespawnPolicy::KeepAliveOnUnsuccessfulExit,
+                        AttributedTermination::Attributed(failure),
+                    ) => (
+                        DaemonState::Restarting(Some(failure)),
+                        StartPollDisposition::Pending,
+                    ),
+                    (
+                        RespawnPolicy::KeepAliveOnUnsuccessfulExit,
+                        AttributedTermination::SuppressedAsAction,
+                    ) => (DaemonState::Restarting(None), StartPollDisposition::Pending),
+                    (RespawnPolicy::KeepAliveOnUnsuccessfulExit, AttributedTermination::None) => {
+                        (DaemonState::Stopped, StartPollDisposition::Settled)
+                    }
+                    (RespawnPolicy::Unknown, AttributedTermination::Attributed(failure)) => (
+                        DaemonState::Failed(Some(failure)),
+                        StartPollDisposition::Settled,
+                    ),
+                    (RespawnPolicy::Unknown, AttributedTermination::SuppressedAsAction) => (
+                        DaemonState::Transitioning(DaemonTransition::Starting),
+                        StartPollDisposition::Pending,
+                    ),
+                    (RespawnPolicy::Unknown, AttributedTermination::None) => {
+                        (DaemonState::Stopped, StartPollDisposition::Pending)
+                    }
                 }
-                (true, AttributedTermination::None) => {
-                    (DaemonState::Stopped, StartPollDisposition::Settled)
-                }
-                (false, AttributedTermination::Attributed(failure)) => (
-                    DaemonState::Failed(Some(failure)),
-                    StartPollDisposition::Pending,
-                ),
-                (false, AttributedTermination::SuppressedAsAction) => (
-                    DaemonState::Transitioning(DaemonTransition::Starting),
-                    StartPollDisposition::Pending,
-                ),
-                (false, AttributedTermination::None) => {
-                    (DaemonState::Stopped, StartPollDisposition::Pending)
-                }
-            },
-            Self::Waiting | Self::NotRunning => match (definition_present, termination) {
-                (true, AttributedTermination::Attributed(failure)) => (
-                    DaemonState::Restarting(Some(failure)),
-                    StartPollDisposition::Pending,
-                ),
-                (true, AttributedTermination::SuppressedAsAction) => {
-                    (DaemonState::Restarting(None), StartPollDisposition::Pending)
-                }
-                (false, AttributedTermination::Attributed(failure)) => (
-                    DaemonState::Failed(Some(failure)),
-                    StartPollDisposition::Pending,
-                ),
-                (_, AttributedTermination::None | AttributedTermination::SuppressedAsAction) => {
-                    (DaemonState::Stopped, StartPollDisposition::Pending)
-                }
-            },
-            // Observed on macOS 15.6.1 (24G90): throttled is a manager-delayed respawn whose
-            // default delay exceeds the shared two-second observation window.
+            }
+            // `throttled` proves that launchd scheduled a delayed respawn, but neither the loaded
+            // record nor this parser proves that delay exceeds the caller's observation window.
             Self::Throttled => (
                 DaemonState::Restarting(termination.projected_failure()),
-                StartPollDisposition::Settled,
+                StartPollDisposition::Pending,
             ),
             Self::Other(other) => (
                 DaemonState::Unknown(other.to_owned()),
@@ -215,9 +206,9 @@ impl LaunchdAttribution {
                     && (sequence > baseline.saturating_add(2)
                         || !termination.may_originate_from_restart_action())
             }),
-            // Without a baseline, a failure record remains action-suppressed; lifecycle and the
-            // presence of our KeepAlive definition determine whether another spawn is pending.
-            Self::Unattributable => false,
+            // A baseline is needed only for action-shaped history. Other termination shapes cannot
+            // have been produced by kickstart replacement and remain attributable immediately.
+            Self::Unattributable => !termination.may_originate_from_restart_action(),
         }
     }
 }
@@ -261,6 +252,44 @@ fn launchd_property<'a>(output: &'a str, field: &str) -> Option<&'a str> {
     None
 }
 
+fn launchd_nested_property<'a>(output: &'a str, dictionary: &str, field: &str) -> Option<&'a str> {
+    let root_is_wrapped = output
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .is_some_and(|line| line.trim_end().ends_with("= {"));
+    let root_depth = usize::from(root_is_wrapped);
+    let mut depth = 0usize;
+    let mut dictionary_depth = None;
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed == "}" {
+            if dictionary_depth == Some(depth) {
+                dictionary_depth = None;
+            }
+            depth = depth.saturating_sub(1);
+            continue;
+        }
+        if dictionary_depth == Some(depth) {
+            if let Some((name, value)) = trimmed.split_once('=') {
+                if name.trim() == field {
+                    return Some(value.trim());
+                }
+            }
+        }
+        if trimmed.ends_with("= {") {
+            depth = depth.saturating_add(1);
+            if depth == root_depth.saturating_add(1)
+                && trimmed
+                    .split_once('=')
+                    .is_some_and(|(name, _)| name.trim() == dictionary)
+            {
+                dictionary_depth = Some(depth);
+            }
+        }
+    }
+    None
+}
+
 fn parse_launchd_lifecycle(output: &str) -> LaunchdLifecycle<'_> {
     // Observed on macOS 15.6.1 (24G90). Unknown vocabulary remains visible to the user.
     match launchd_value(output, "state") {
@@ -277,6 +306,19 @@ fn parse_launchd_lifecycle(output: &str) -> LaunchdLifecycle<'_> {
 
 fn parse_launchd_runs(output: &str) -> Option<u64> {
     launchd_value(output, "runs")?.parse().ok()
+}
+
+fn parse_launchd_respawn_policy(output: &str) -> RespawnPolicy {
+    let loaded_from_definition = launchd_value(output, "path").is_some();
+    let unsuccessful_exit_keepalive = ["successful exit", "SuccessfulExit"]
+        .into_iter()
+        .filter_map(|field| launchd_nested_property(output, "keepalive", field))
+        .any(|value| matches!(value, "false" | "0"));
+    if loaded_from_definition && unsuccessful_exit_keepalive {
+        RespawnPolicy::KeepAliveOnUnsuccessfulExit
+    } else {
+        RespawnPolicy::Unknown
+    }
 }
 
 fn parse_launchd_exit(output: &str) -> Option<LaunchdTermination<'_>> {
@@ -319,14 +361,17 @@ pub(super) fn attribution_after_restart(output: &str) -> LaunchdAttribution {
 
 pub(super) fn parse_launchd_observation<T>(
     record: LaunchdRecord<T>,
-    definition_present: bool,
+    missing_evidence: MissingRecordEvidence,
     attribution: LaunchdAttribution,
 ) -> DaemonObservation
 where
     T: AsRef<str>,
 {
     let LaunchdRecord::Loaded(output) = record else {
-        return if definition_present {
+        return if matches!(
+            missing_evidence,
+            MissingRecordEvidence::DefinitionPresent | MissingRecordEvidence::PreviouslyLoaded
+        ) {
             DaemonObservation::installed(DaemonState::Stopped, StartPollDisposition::Pending, ())
         } else {
             DaemonObservation::NotInstalled
@@ -334,6 +379,7 @@ where
     };
     let output = output.as_ref();
     let lifecycle = parse_launchd_lifecycle(output);
+    let respawn_policy = parse_launchd_respawn_policy(output);
     let observed_sequence = parse_launchd_runs(output);
     let termination =
         parse_launchd_termination(output).map_or(AttributedTermination::None, |termination| {
@@ -345,7 +391,7 @@ where
                 Some(_) => AttributedTermination::SuppressedAsAction,
             }
         });
-    lifecycle.into_observation(definition_present, observed_sequence, termination)
+    lifecycle.into_observation(respawn_policy, observed_sequence, termination)
 }
 
 pub(super) fn parse_launchd_autostart(output: &str, service_label: &str) -> AutostartState {
@@ -386,13 +432,23 @@ fn is_disabled_services_listing(line: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    //! Witnesses launchd parsing, lifecycle reduction, and restart-attribution laws.
+    //! Proves launchd record reduction.
 
     use super::super::model::LAUNCHD_LABEL;
     use super::*;
 
+    fn keepalive_record(output: &str) -> String {
+        format!(
+            "path = /Library/LaunchAgents/{LAUNCHD_LABEL}.plist\nkeepalive = {{\n    successful exit = false\n}}\n{output}"
+        )
+    }
+
     fn parse_state(output: &str, attribution: LaunchdAttribution) -> DaemonState {
-        match parse_launchd_observation(LaunchdRecord::Loaded(output), true, attribution) {
+        match parse_launchd_observation(
+            LaunchdRecord::Loaded(keepalive_record(output)),
+            MissingRecordEvidence::DefinitionPresent,
+            attribution,
+        ) {
             DaemonObservation::Installed { state, .. } => state,
             DaemonObservation::NotInstalled => unreachable!("output always represents a job"),
         }
@@ -446,25 +502,27 @@ mod tests {
     }
 
     #[test]
-    fn keepalive_exit_and_spawn_scheduled_remain_pending_but_throttling_settles() {
+    fn keepalive_exit_spawn_scheduled_and_throttling_remain_pending() {
         for output in [
             "state = exited\nruns = 1\nlast exit code = 2\n",
             "state = spawn scheduled\nruns = 1\nlast exit code = 2\n",
         ] {
             let observation = parse_launchd_observation(
-                LaunchdRecord::Loaded(output),
-                true,
+                LaunchdRecord::Loaded(keepalive_record(output)),
+                MissingRecordEvidence::DefinitionPresent,
                 LaunchdAttribution::Unfiltered,
             );
             assert!(!observation.settles_start_poll());
         }
 
         let throttled = parse_launchd_observation(
-            LaunchdRecord::Loaded("state = throttled\nruns = 1\nlast exit code = 2\n"),
-            true,
+            LaunchdRecord::Loaded(keepalive_record(
+                "state = throttled\nruns = 1\nlast exit code = 2\n",
+            )),
+            MissingRecordEvidence::DefinitionPresent,
             LaunchdAttribution::Unfiltered,
         );
-        assert!(throttled.settles_start_poll());
+        assert!(!throttled.settles_start_poll());
     }
 
     #[test]
@@ -597,7 +655,7 @@ mod tests {
                 "state = waiting\nlast terminating signal = Segmentation fault: 11\n",
                 LaunchdAttribution::Unattributable,
             ),
-            DaemonState::Restarting(None)
+            restarting_signal_failure("Segmentation fault", 11)
         );
     }
 
@@ -613,22 +671,22 @@ mod tests {
     }
 
     #[test]
-    fn loaded_job_without_our_plist_does_not_assume_keepalive_policy() {
+    fn loaded_job_without_manager_policy_does_not_assume_keepalive() {
         let clean_exit = parse_launchd_observation(
             LaunchdRecord::Loaded("state = exited\nruns = 4\nlast exit code = 0\n"),
-            false,
+            MissingRecordEvidence::None,
             LaunchdAttribution::Unfiltered,
         );
         let failed_wait = parse_launchd_observation(
             LaunchdRecord::Loaded(
                 "state = waiting\nruns = 4\nlast terminating signal = Segmentation fault: 11\n",
             ),
-            false,
+            MissingRecordEvidence::None,
             LaunchdAttribution::Unfiltered,
         );
 
         assert!(!clean_exit.settles_start_poll());
-        assert!(!failed_wait.settles_start_poll());
+        assert!(failed_wait.settles_start_poll());
         assert!(matches!(failed_wait, DaemonObservation::Installed {
             state: DaemonState::Failed(Some(_)),
             ..
@@ -648,7 +706,7 @@ mod tests {
         assert_eq!(
             parse_launchd_observation(
                 LaunchdRecord::<&str>::Missing,
-                true,
+                MissingRecordEvidence::DefinitionPresent,
                 LaunchdAttribution::Unfiltered,
             ),
             DaemonObservation::installed(DaemonState::Stopped, StartPollDisposition::Pending, (),)
@@ -656,7 +714,7 @@ mod tests {
         assert_eq!(
             parse_launchd_observation(
                 LaunchdRecord::<&str>::Missing,
-                false,
+                MissingRecordEvidence::None,
                 LaunchdAttribution::Unfiltered,
             ),
             DaemonObservation::NotInstalled
@@ -671,6 +729,30 @@ mod tests {
                 LaunchdAttribution::Unfiltered,
             ),
             restarting_signal_failure("Killed", 9)
+        );
+    }
+
+    #[test]
+    fn loaded_record_policy_requires_manager_path_and_exact_keepalive_condition() {
+        assert_eq!(
+            parse_launchd_respawn_policy(
+                "path = /tmp/rings.plist\nproperties = keepalive | runatload\n"
+            ),
+            RespawnPolicy::Unknown
+        );
+        assert_eq!(
+            parse_launchd_respawn_policy(
+                "io.ringsnetwork.node = {\n    path = /tmp/rings.plist\n    keepalive = {\n        successful exit = false\n    }\n}\n"
+            ),
+            RespawnPolicy::KeepAliveOnUnsuccessfulExit
+        );
+        assert_eq!(
+            parse_launchd_respawn_policy("path = /tmp/rings.plist\nproperties = runatload\n"),
+            RespawnPolicy::Unknown
+        );
+        assert_eq!(
+            parse_launchd_respawn_policy("properties = keepalive | runatload\n"),
+            RespawnPolicy::Unknown
         );
     }
 

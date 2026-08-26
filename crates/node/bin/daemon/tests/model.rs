@@ -1,18 +1,16 @@
-//! Exercises shared state reductions plus their filesystem-backed discovery and atomic-write
-//! boundaries. Tests that touch disk use isolated per-process temporary roots.
+//! Exercises the shared daemon command model.
 
 use super::*;
 
 #[cfg(unix)]
 #[test]
-fn production_observation_budget_is_shorter_than_delayed_respawns() {
+fn production_observation_budget_is_shorter_than_our_systemd_restart_delay() {
     let retry_count = u32::try_from(MANAGER_OBSERVATION_SCHEDULE.retries).unwrap_or(u32::MAX);
     let budget = MANAGER_OBSERVATION_SCHEDULE
         .interval
         .saturating_mul(retry_count);
 
     assert!(budget < super::super::systemd::SYSTEMD_RESTART_DELAY);
-    assert!(budget < super::super::launchd::OBSERVED_THROTTLE_FLOOR);
 }
 
 #[test]
@@ -190,19 +188,41 @@ fn atomic_write_removes_temporary_file_when_install_fails() -> io::Result<()> {
 }
 
 #[test]
-fn install_failure_names_the_artifact_that_requires_action() {
+fn definition_failure_location_keeps_target_and_leftover_roles_distinct() {
     let target = Path::new("definition.plist");
     let temporary = Path::new(".definition.plist.42.tmp");
     let cleanup_succeeded = Ok(());
     let cleanup_failed = Err(io::Error::other("cleanup failed"));
 
     assert_eq!(
-        definition_failure_path(target, temporary, &cleanup_succeeded),
-        target
+        definition_failure_location(target, temporary, &cleanup_succeeded),
+        DefinitionFailureLocation {
+            target: target.to_path_buf(),
+            leftover_temporary: None,
+        }
     );
     assert_eq!(
-        definition_failure_path(target, temporary, &cleanup_failed),
-        temporary
+        definition_failure_location(target, temporary, &cleanup_failed),
+        DefinitionFailureLocation {
+            target: target.to_path_buf(),
+            leftover_temporary: Some(temporary.to_path_buf()),
+        }
+    );
+}
+
+#[test]
+fn definition_failure_message_names_target_and_leftover_temporary_artifact() {
+    let error = DaemonError::InstallServiceDefinition {
+        location: DefinitionFailureLocation {
+            target: PathBuf::from("definition.plist"),
+            leftover_temporary: Some(PathBuf::from(".definition.plist.42.tmp")),
+        },
+        failure: RecoveryFailure::Primary(io::Error::other("rename failed")),
+    };
+
+    assert_eq!(
+        error.to_string(),
+        "could not install service definition at definition.plist; temporary artifact remains at .definition.plist.42.tmp"
     );
 }
 
@@ -219,7 +239,8 @@ fn atomic_write_removes_partial_file_when_write_fails() {
 
     assert!(matches!(
         result,
-        Err(DaemonError::WriteServiceDefinition { path, .. }) if path == target
+        Err(DaemonError::WriteServiceDefinition { location, .. })
+            if location.target == target && location.leftover_temporary.is_none()
     ));
     assert!(!temporary.exists());
 }

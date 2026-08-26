@@ -1,5 +1,4 @@
-//! Defines the daemon command model and keeps shared process, filesystem, and polling effects at
-//! explicit boundaries. Platform adapters own manager-specific state and rendering policy.
+//! Defines the platform-neutral daemon command state machine.
 
 use std::env;
 use std::fmt;
@@ -127,15 +126,15 @@ enum DaemonError {
         #[source]
         source: Box<rings_node::error::Error>,
     },
-    #[error("could not prepare service definition {path}")]
+    #[error("could not prepare service definition {location}")]
     WriteServiceDefinition {
-        path: PathBuf,
+        location: DefinitionFailureLocation,
         #[source]
         failure: RecoveryFailure<io::Error>,
     },
-    #[error("could not install service definition {path}")]
+    #[error("could not install service definition {location}")]
     InstallServiceDefinition {
-        path: PathBuf,
+        location: DefinitionFailureLocation,
         #[source]
         failure: RecoveryFailure<io::Error>,
     },
@@ -151,6 +150,26 @@ enum DaemonError {
     ServiceNotInstalled { path: PathBuf },
     #[error("the daemon did not reach the running state; current status: {status}")]
     ServiceDidNotStart { status: DaemonStatus },
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct DefinitionFailureLocation {
+    target: PathBuf,
+    leftover_temporary: Option<PathBuf>,
+}
+
+impl fmt::Display for DefinitionFailureLocation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "at {}", self.target.display())?;
+        if let Some(temporary) = &self.leftover_temporary {
+            write!(
+                formatter,
+                "; temporary artifact remains at {}",
+                temporary.display()
+            )?;
+        }
+        Ok(())
+    }
 }
 
 /// A primary operation and its best-effort cleanup form one algebraic result.
@@ -286,7 +305,7 @@ impl fmt::Display for DaemonFailure {
 /// `Stopped` means the manager retains an installed or loaded job but no process is running.
 /// `Restarting` means the manager has scheduled another spawn after the optional last failure.
 /// `Failed(None)` means systemd reports a terminal failure without an attributable cause. launchd
-/// reports a cause-less non-running state as `Stopped` because it has no equivalent failed state.
+/// uses `Failed(Some(_))` only when it can attribute a terminal process failure.
 #[derive(Debug, Eq, PartialEq)]
 enum DaemonState {
     Running,
@@ -295,12 +314,6 @@ enum DaemonState {
     Failed(Option<DaemonFailure>),
     Transitioning(DaemonTransition),
     Unknown(String),
-}
-
-impl DaemonState {
-    fn is_running(&self) -> bool {
-        matches!(self, Self::Running)
-    }
 }
 
 impl fmt::Display for DaemonState {
@@ -343,7 +356,7 @@ enum AutostartState {
     Disabled,
     Unknown,
     #[cfg(any(target_os = "linux", all(test, unix)))]
-    Other(&'static str),
+    Unavailable,
 }
 
 impl fmt::Display for AutostartState {
@@ -353,7 +366,7 @@ impl fmt::Display for AutostartState {
             Self::Disabled => formatter.write_str("disabled"),
             Self::Unknown => formatter.write_str("unknown"),
             #[cfg(any(target_os = "linux", all(test, unix)))]
-            Self::Other(state) => formatter.write_str(state),
+            Self::Unavailable => formatter.write_str("unavailable"),
         }
     }
 }
@@ -387,21 +400,12 @@ impl<A> DaemonObservation<A> {
             attachment,
         }
     }
-}
 
-trait StartPollObservation {
-    /// Post: returns true exactly when another observation inside the configured window cannot
-    /// improve the start result, including absence and a running process.
-    fn settles_start_poll(&self) -> bool;
-}
-
-impl<A> StartPollObservation for DaemonObservation<A> {
+    /// Post: returns the adapter-owned settlement disposition; absence is terminal.
     fn settles_start_poll(&self) -> bool {
         match self {
             Self::NotInstalled => true,
-            Self::Installed {
-                state, start_poll, ..
-            } => state.is_running() || *start_poll == StartPollDisposition::Settled,
+            Self::Installed { start_poll, .. } => *start_poll == StartPollDisposition::Settled,
         }
     }
 }
@@ -529,7 +533,8 @@ where T: ValueEnum + fmt::Debug {
 ///
 /// Post: successful `start` and `restart` return the lifecycle selected by their settling poll.
 /// launchd samples the independent autostart axis once after that lifecycle settles; systemd reads
-/// both axes from the same manager snapshot. `stop` and `observe` do not use the start-settling poll.
+/// both axes from the same manager snapshot. A successful `stop` returns one post-stop manager
+/// observation folded with the adapter's installation evidence; `observe` performs the same fold.
 trait ServiceManager {
     fn name(&self) -> &'static str;
     fn definition_path(&self) -> &Path;
@@ -587,12 +592,14 @@ fn report_started(manager: &dyn ServiceManager, status: DaemonStatus) -> Result<
 }
 
 /// Polls manager lifecycle only until the adapter says the lifecycle has settled for start.
-fn wait_for_running<T, F>(schedule: PollSchedule, observe: F) -> Result<T, DaemonError>
+fn wait_for_start_settlement<A, F>(
+    schedule: PollSchedule,
+    observe: F,
+) -> Result<DaemonObservation<A>, DaemonError>
 where
-    T: StartPollObservation,
-    F: FnMut() -> Result<T, DaemonError>,
+    F: FnMut() -> Result<DaemonObservation<A>, DaemonError>,
 {
-    poll_until(schedule, observe, StartPollObservation::settles_start_poll)
+    poll_until(schedule, observe, DaemonObservation::settles_start_poll)
 }
 
 /// Performs at most `retries + 1` observations and at most `retries` sleeps. Every observation,
@@ -689,32 +696,28 @@ where F: FnOnce(&Path, &str) -> io::Result<()> {
     ensure_parent_directory(path)?;
     if let Err(source) = write(&temporary, contents) {
         let cleanup = remove_temporary(&temporary);
-        let error_path = definition_failure_path(path, &temporary, &cleanup);
+        let location = definition_failure_location(path, &temporary, &cleanup);
         let failure = primary_with_recovery(source, cleanup);
-        return Err(DaemonError::WriteServiceDefinition {
-            path: error_path,
-            failure,
-        });
+        return Err(DaemonError::WriteServiceDefinition { location, failure });
     }
     if let Err(source) = fs::rename(&temporary, path) {
         let cleanup = remove_temporary(&temporary);
-        let error_path = definition_failure_path(path, &temporary, &cleanup);
+        let location = definition_failure_location(path, &temporary, &cleanup);
         let failure = primary_with_recovery(source, cleanup);
-        return Err(DaemonError::InstallServiceDefinition {
-            path: error_path,
-            failure,
-        });
+        return Err(DaemonError::InstallServiceDefinition { location, failure });
     }
     Ok(())
 }
 
-/// Post: names the temporary artifact exactly when cleanup failed and left it as the actionable
-/// path; otherwise names the requested installation target rather than a deleted temporary file.
-fn definition_failure_path(target: &Path, temporary: &Path, cleanup: &io::Result<()>) -> PathBuf {
-    if cleanup.is_err() {
-        temporary.to_path_buf()
-    } else {
-        target.to_path_buf()
+/// Post: always names the requested target and names a temporary artifact only when cleanup failed.
+fn definition_failure_location(
+    target: &Path,
+    temporary: &Path,
+    cleanup: &io::Result<()>,
+) -> DefinitionFailureLocation {
+    DefinitionFailureLocation {
+        target: target.to_path_buf(),
+        leftover_temporary: cleanup.as_ref().err().map(|_| temporary.to_path_buf()),
     }
 }
 
@@ -753,7 +756,7 @@ fn format_command(program: &str, args: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
-    //! Exercises the shared command model and its filesystem and process-boundary adapters.
+    //! Provides fixtures for the shared daemon command model.
 
     mod model;
 

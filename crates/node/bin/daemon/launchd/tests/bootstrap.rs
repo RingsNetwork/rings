@@ -1,5 +1,4 @@
-//! Verifies every launchd bootstrap retry preserves the observed disabled-autostart setting and
-//! reports both retry and restoration failures without changing error provenance.
+//! Proves bootstrap retry preserves disabled login autostart unless restoration fails.
 
 use super::*;
 
@@ -193,9 +192,11 @@ fn failed_bootstrap_and_restore_preserve_both_errors() -> Result<(), DaemonError
         result,
         Err(DaemonError::Launchd(
             LaunchdError::BootstrapRetryAndRestore {
-                failure: RecoveryFailure::Both { .. },
+                retry,
+                restore,
             }
-        ))
+        )) if matches!(&*retry, DaemonError::CommandFailed(failure) if failure.status.code() == Some(6))
+            && matches!(&*restore, DaemonError::CommandFailed(failure) if failure.status.code() == Some(7))
     ));
     Ok(())
 }

@@ -95,8 +95,9 @@ working directory must remain at the same path; rerun `daemon start` from a
 persistent directory after moving or deleting it. `daemon stop` and `daemon
 restart` preserve the current login-autostart setting unless the service manager
 reports that its recovery step failed. Start and restart poll short manager
-bookkeeping transitions. launchd's manager-imposed throttling delay settles
-immediately, while systemd auto-restart polling continues within the bounded
-window because already-loaded units may use a different `RestartSec`. The
-service can remain installed while the command exits non-zero with its last
-observed state.
+bookkeeping transitions. launchd throttling and systemd auto-restart remain
+pending within the bounded window because loaded definitions may use retry
+delays different from Rings' renderer. The command succeeds if the service
+runs; otherwise it can remain installed while the command exits non-zero with
+its last observed state. On macOS, stop separately polls until launchd confirms
+unload.

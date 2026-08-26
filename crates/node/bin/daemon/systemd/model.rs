@@ -1,5 +1,4 @@
-//! Renders the Rings user unit after validating systemd line-reader constraints. The adapter calls
-//! this module before writing a definition or mutating the user manager.
+//! Owns the Rings systemd user-unit definition model.
 
 use std::time::Duration;
 
@@ -107,7 +106,7 @@ fn has_boundary_ascii_whitespace(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    //! Proves unit rendering preserves arguments and rejects line-reader mutations.
+    //! Proves systemd user-unit definition rendering.
 
     use rings_node::logging::LogLevel;
 

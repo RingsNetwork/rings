@@ -1,5 +1,4 @@
-//! Renders the Rings LaunchAgent plist and classifies launchctl exit codes. XML validation occurs
-//! before any filesystem or manager effect in the launchd adapter.
+//! Owns the Rings LaunchAgent definition model.
 
 use thiserror::Error;
 
@@ -105,7 +104,7 @@ fn is_xml_1_0_character(character: char) -> bool {
 
 #[cfg(test)]
 mod tests {
-    //! Proves plist rendering escapes XML and rejects every forbidden XML 1.0 boundary case.
+    //! Proves LaunchAgent definition rendering.
 
     use rings_node::logging::LogLevel;
 
