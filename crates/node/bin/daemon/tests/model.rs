@@ -1,10 +1,12 @@
-//! Exercises the shared daemon command model.
+//! Proves shared command invariants independently of either service-manager adapter.
 
 use super::*;
 
 #[cfg(unix)]
 #[test]
 fn production_observation_budget_is_shorter_than_our_systemd_restart_delay() {
+    // Invariant: the CLI returns while the rendered unit is still waiting for its first respawn, so
+    // a crash loop is reported as restarting rather than masked by a later activation.
     let retry_count = u32::try_from(MANAGER_OBSERVATION_SCHEDULE.retries).unwrap_or(u32::MAX);
     let budget = MANAGER_OBSERVATION_SCHEDULE
         .interval

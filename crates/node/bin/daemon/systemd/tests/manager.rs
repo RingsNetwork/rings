@@ -1,4 +1,4 @@
-//! Exercises systemd lifecycle command behavior.
+//! Proves systemd commands preserve manager evidence and typed loadability failures.
 
 use super::*;
 use crate::daemon::report_started;
@@ -85,13 +85,15 @@ fn stop_targets_an_active_unit_when_the_local_definition_is_missing() -> Result<
     let runner = ScriptedCommandRunner::new([
         CommandStep::success(SYSTEMCTL, &SYSTEMD_STATUS_ARGS, DETACHED_RUNNING_STATUS),
         CommandStep::success(SYSTEMCTL, &[SYSTEMD_USER_ARG, "stop", SYSTEMD_UNIT], ""),
-        CommandStep::success(SYSTEMCTL, &SYSTEMD_STATUS_ARGS, NOT_INSTALLED_STATUS),
     ]);
     let manager = detached_manager(runner);
 
     let status = manager.stop()?;
 
-    assert_eq!(status, DaemonStatus::NotInstalled);
+    assert_eq!(
+        status,
+        DaemonStatus::installed(DaemonState::Stopped, AutostartState::Reported("unknown"),)
+    );
     Ok(())
 }
 
@@ -150,7 +152,7 @@ fn restart_targets_an_active_unit_when_the_local_definition_is_missing() -> Resu
 
     assert_eq!(
         status,
-        DaemonStatus::installed(DaemonState::Running, AutostartState::Unknown)
+        DaemonStatus::installed(DaemonState::Running, AutostartState::Reported("unknown"),)
     );
     Ok(())
 }
@@ -159,6 +161,11 @@ fn restart_targets_an_active_unit_when_the_local_definition_is_missing() -> Resu
 fn restart_of_installed_unit_preserves_autostart() -> Result<(), DaemonError> {
     let root = test_root("restart-sequence");
     let runner = ScriptedCommandRunner::new([
+        CommandStep::success(
+            SYSTEMCTL,
+            &SYSTEMD_STATUS_ARGS,
+            "LoadState=loaded\nActiveState=active\nSubState=running\nUnitFileState=disabled\nResult=success\n",
+        ),
         CommandStep::success(SYSTEMCTL, &[SYSTEMD_USER_ARG, "daemon-reload"], ""),
         CommandStep::success(SYSTEMCTL, &[SYSTEMD_USER_ARG, "restart", SYSTEMD_UNIT], ""),
         CommandStep::success(
@@ -185,7 +192,13 @@ fn stop_returns_the_inactive_manager_verdict_without_issuing_stop() -> Result<()
         (NOT_INSTALLED_STATUS, DaemonStatus::NotInstalled),
         (
             "LoadState=masked\nActiveState=inactive\nSubState=dead\nUnitFileState=masked\n",
-            DaemonStatus::installed(DaemonState::Unavailable, AutostartState::Unavailable),
+            DaemonStatus::installed(
+                DaemonState::Reported {
+                    status: "unavailable",
+                    detail: None,
+                },
+                AutostartState::Reported("unavailable"),
+            ),
         ),
     ] {
         let runner = ScriptedCommandRunner::new([CommandStep::success(
@@ -215,11 +228,11 @@ fn missing_manager_record_with_local_definition_is_installed_and_stopped() -> Re
 
     assert_eq!(
         manager.observe()?,
-        DaemonStatus::installed(DaemonState::Stopped, AutostartState::Unknown)
+        DaemonStatus::installed(DaemonState::Stopped, AutostartState::Reported("unknown"),)
     );
     assert_eq!(
         manager.stop()?,
-        DaemonStatus::installed(DaemonState::Stopped, AutostartState::Unknown)
+        DaemonStatus::installed(DaemonState::Stopped, AutostartState::Reported("unknown"),)
     );
     Ok(())
 }
@@ -242,18 +255,29 @@ fn restart_rejects_a_not_installed_unit() {
 }
 
 #[test]
-fn restart_rejects_an_unavailable_unit_with_a_typed_error() {
+fn restart_rejects_a_runtime_mask_even_when_the_local_definition_exists() -> Result<(), DaemonError>
+{
+    let root = test_root("restart-runtime-mask");
     let runner = ScriptedCommandRunner::new([CommandStep::success(
         SYSTEMCTL,
         &SYSTEMD_STATUS_ARGS,
         "LoadState=masked\nActiveState=inactive\nSubState=dead\nUnitFileState=masked\n",
     )]);
-    let manager = detached_manager(runner);
+    let manager = test_manager(&root, runner);
+    write_atomic(&manager.unit_path, "installed")?;
 
     let result = manager.restart();
+    let rendered = result.as_ref().err().map(ToString::to_string);
 
     assert!(matches!(
         result,
-        Err(DaemonError::Systemd(SystemdError::UnitUnavailable { .. }))
+        Err(DaemonError::Systemd(SystemdError::UnitUnavailable))
     ));
+    assert_eq!(
+        rendered.as_deref(),
+        Some(
+            "the systemd user unit is unavailable; inspect its load state and repair or unmask it before restarting"
+        )
+    );
+    Ok(())
 }

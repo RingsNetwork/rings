@@ -1,4 +1,4 @@
-//! Exercises launchd manager behavior.
+//! Proves launchd commands preserve action provenance, autostart, and installed-state evidence.
 
 use super::*;
 use crate::daemon::report_started;
@@ -6,10 +6,7 @@ use crate::daemon::DaemonTransition;
 #[test]
 fn start_rejects_invalid_definition_before_creating_directories() -> Result<(), DaemonError> {
     let root = test_root("start-invalid-definition");
-    let manager = test_manager(
-        &root,
-        ScriptedCommandRunner::new(std::iter::empty::<CommandStep>()),
-    );
+    let manager = scripted_manager(&root, std::iter::empty::<CommandStep>());
     let mut spec = service_spec(&LogLevel::Warn, &RuntimeFlavor::CurrentThread)?;
     spec.working_directory = "/tmp/rings\u{b}daemon".to_owned();
 
@@ -32,16 +29,15 @@ fn start_waits_for_bootout_then_bootstraps_without_kickstart() -> Result<(), Dae
     let target = test_target();
     let definition = launchd_definition_path(&root);
     let definition_text = path_text(&definition)?;
-    let runner = ScriptedCommandRunner::new([
-        CommandStep::success(LAUNCHCTL, &["print", &target], "state = running\n"),
+    let manager = scripted_manager(&root, [
+        loaded_service(&target, "state = running\n"),
         CommandStep::success(LAUNCHCTL, &["bootout", &target], ""),
         missing_service(&target),
         CommandStep::success(LAUNCHCTL, &["enable", &target], ""),
         CommandStep::success(LAUNCHCTL, &["bootstrap", domain, &definition_text], ""),
-        CommandStep::success(LAUNCHCTL, &["print", &target], "state = running\n"),
+        loaded_service(&target, "state = running\n"),
         enabled_autostart(domain),
     ]);
-    let manager = test_manager(&root, runner);
     let spec = service_spec(&LogLevel::Info, &RuntimeFlavor::MultiThread)?;
 
     let status = manager.start(&spec)?;
@@ -60,23 +56,17 @@ fn restart_reads_disabled_autostart_once_and_suppresses_action_signal() -> Resul
     let domain = TEST_DOMAIN;
     let target = test_target();
     let mut steps = vec![
-        CommandStep::success(
-            LAUNCHCTL,
-            &["print", &target],
-            "state = running\nruns = 3\n",
-        ),
+        loaded_service(&target, "state = running\nruns = 3\n"),
         CommandStep::success(LAUNCHCTL, &["kickstart", "-k", &target], ""),
     ];
     fill_poll_budget(&mut steps, 0, || {
-        CommandStep::success(
-            LAUNCHCTL,
-            &["print", &target],
+        loaded_service(
+            &target,
             "state = throttled\nruns = 4\nlast terminating signal = Terminated: 15\n",
         )
     });
     steps.push(disabled_autostart(domain));
-    let runner = ScriptedCommandRunner::new(steps);
-    let manager = test_manager(&root, runner);
+    let manager = scripted_manager(&root, steps);
     install_test_definition(&root)?;
 
     let status = manager.restart()?;
@@ -96,26 +86,16 @@ fn healthy_restart_waits_past_an_action_translated_exit_code() -> Result<(), Dae
     let root = test_root("restart-current-failure");
     let target = test_target();
     let mut steps = vec![
-        CommandStep::success(
-            LAUNCHCTL,
-            &["print", &target],
-            "state = running\nruns = 4\n",
-        ),
+        loaded_service(&target, "state = running\nruns = 4\n"),
         CommandStep::success(LAUNCHCTL, &["kickstart", "-k", &target], ""),
     ];
-    steps.push(CommandStep::success(
-        LAUNCHCTL,
-        &["print", &target],
+    steps.push(loaded_service(
+        &target,
         "state = spawn scheduled\nruns = 5\nlast exit code = 1\n",
     ));
-    steps.push(CommandStep::success(
-        LAUNCHCTL,
-        &["print", &target],
-        "state = running\nruns = 5\n",
-    ));
+    steps.push(loaded_service(&target, "state = running\nruns = 5\n"));
     steps.push(enabled_autostart(TEST_DOMAIN));
-    let runner = ScriptedCommandRunner::new(steps);
-    let manager = test_manager(&root, runner);
+    let manager = scripted_manager(&root, steps);
     install_test_definition(&root)?;
 
     let status = manager.restart()?;
@@ -130,26 +110,35 @@ fn healthy_restart_waits_past_an_action_translated_exit_code() -> Result<(), Dae
 fn healthy_restart_waits_past_an_exited_action_record() -> Result<(), DaemonError> {
     let root = test_root("restart-exited-action-record");
     let target = test_target();
-    let runner = ScriptedCommandRunner::new([
-        CommandStep::success(
-            LAUNCHCTL,
-            &["print", &target],
-            "state = running\nruns = 3\n",
-        ),
+    let manager = scripted_manager(&root, [
+        loaded_service(&target, "state = running\nruns = 3\n"),
         CommandStep::success(LAUNCHCTL, &["kickstart", "-k", &target], ""),
-        CommandStep::success(
-            LAUNCHCTL,
-            &["print", &target],
-            "state = exited\nruns = 4\nlast exit code = 1\n",
-        ),
-        CommandStep::success(
-            LAUNCHCTL,
-            &["print", &target],
-            "state = running\nruns = 4\n",
-        ),
+        loaded_service(&target, "state = exited\nruns = 4\nlast exit code = 1\n"),
+        loaded_service(&target, "state = running\nruns = 4\n"),
         enabled_autostart(TEST_DOMAIN),
     ]);
-    let manager = test_manager(&root, runner);
+    install_test_definition(&root)?;
+
+    let status = manager.restart()?;
+
+    assert_eq!(
+        status,
+        DaemonStatus::installed(DaemonState::Running, AutostartState::Enabled)
+    );
+    Ok(())
+}
+
+#[test]
+fn healthy_restart_waits_past_its_own_clean_exit() -> Result<(), DaemonError> {
+    let root = test_root("restart-clean-action-exit");
+    let target = test_target();
+    let manager = scripted_manager(&root, [
+        loaded_service(&target, "state = running\nruns = 3\n"),
+        CommandStep::success(LAUNCHCTL, &["kickstart", "-k", &target], ""),
+        loaded_service(&target, "state = exited\nruns = 4\nlast exit code = 0\n"),
+        loaded_service(&target, "state = running\nruns = 4\n"),
+        enabled_autostart(TEST_DOMAIN),
+    ]);
     install_test_definition(&root)?;
 
     let status = manager.restart()?;
@@ -166,28 +155,21 @@ fn restart_reports_signal_crash_after_sequence_advances() -> Result<(), DaemonEr
     let root = test_root("restart-signal-failure");
     let target = test_target();
     let mut steps = vec![
-        CommandStep::success(
-            LAUNCHCTL,
-            &["print", &target],
-            "state = running\nruns = 3\n",
-        ),
+        loaded_service(&target, "state = running\nruns = 3\n"),
         CommandStep::success(LAUNCHCTL, &["kickstart", "-k", &target], ""),
     ];
-    steps.push(CommandStep::success(
-        LAUNCHCTL,
-        &["print", &target],
+    steps.push(loaded_service(
+        &target,
         "state = spawn scheduled\nruns = 4\nlast terminating signal = Segmentation fault: 11\n",
     ));
     fill_poll_budget(&mut steps, 1, || {
-        CommandStep::success(
-            LAUNCHCTL,
-            &["print", &target],
+        loaded_service(
+            &target,
             "state = throttled\nruns = 4\nlast terminating signal = Segmentation fault: 11\n",
         )
     });
     steps.push(enabled_autostart(TEST_DOMAIN));
-    let runner = ScriptedCommandRunner::new(steps);
-    let manager = test_manager(&root, runner);
+    let manager = scripted_manager(&root, steps);
     install_test_definition(&root)?;
 
     let status = manager.restart()?;
@@ -210,8 +192,7 @@ fn restart_reports_signal_crash_after_sequence_advances() -> Result<(), DaemonEr
 fn restart_rejects_an_unloaded_service_without_a_definition() {
     let root = test_root("restart-not-installed");
     let target = test_target();
-    let runner = ScriptedCommandRunner::new([missing_service(&target)]);
-    let manager = test_manager(&root, runner);
+    let manager = scripted_manager(&root, [missing_service(&target)]);
 
     let result = manager.restart();
 
@@ -225,18 +206,13 @@ fn restart_rejects_an_unloaded_service_without_a_definition() {
 fn restart_without_a_sequence_baseline_uses_state_only() -> Result<(), DaemonError> {
     let root = test_root("restart-missing-runs");
     let target = test_target();
-    let runner = ScriptedCommandRunner::new([
-        CommandStep::success(LAUNCHCTL, &["print", &target], "state = running\n"),
+    let manager = scripted_manager(&root, [
+        loaded_service(&target, "state = running\n"),
         CommandStep::success(LAUNCHCTL, &["kickstart", "-k", &target], ""),
-        CommandStep::success(
-            LAUNCHCTL,
-            &["print", &target],
-            "state = spawn scheduled\nlast exit code = 9\n",
-        ),
-        CommandStep::success(LAUNCHCTL, &["print", &target], "state = running\n"),
+        loaded_service(&target, "state = spawn scheduled\nlast exit code = 9\n"),
+        loaded_service(&target, "state = running\n"),
         enabled_autostart(TEST_DOMAIN),
     ]);
-    let manager = test_manager(&root, runner);
     install_test_definition(&root)?;
 
     let status = manager.restart()?;
@@ -249,27 +225,24 @@ fn restart_without_a_sequence_baseline_reports_crash_loop_as_starting() -> Resul
     let target = test_target();
     let crash_loop = "state = spawn scheduled\nlast exit code = 1\n";
     let mut steps = vec![
-        CommandStep::success(LAUNCHCTL, &["print", &target], "state = waiting\n"),
+        loaded_service(&target, "state = waiting\n"),
         CommandStep::success(LAUNCHCTL, &["kickstart", "-k", &target], ""),
     ];
-    fill_poll_budget(&mut steps, 0, || {
-        CommandStep::success(LAUNCHCTL, &["print", &target], crash_loop)
-    });
+    fill_poll_budget(&mut steps, 0, || loaded_service(&target, crash_loop));
     steps.push(enabled_autostart(TEST_DOMAIN));
-    let manager = test_manager(&root, ScriptedCommandRunner::new(steps));
+    let manager = scripted_manager(&root, steps);
     install_test_definition(&root)?;
 
     let status = manager.restart()?;
     let error = report_started(&manager, status);
+    let expected = DaemonStatus::installed(
+        DaemonState::Transitioning(DaemonTransition::named("starting")),
+        AutostartState::Enabled,
+    );
 
     assert!(matches!(
         error,
-        Err(DaemonError::ServiceDidNotStart {
-            status: DaemonStatus::Installed {
-                state: DaemonState::Transitioning(DaemonTransition::Starting),
-                autostart: AutostartState::Enabled,
-            }
-        })
+        Err(DaemonError::ServiceDidNotStart { status }) if status == expected
     ));
     Ok(())
 }
@@ -281,19 +254,14 @@ fn start_reporting_observes_autostart_once_after_lifecycle_settles() -> Result<(
     let target = test_target();
     let definition = launchd_definition_path(&root);
     let definition_text = path_text(&definition)?;
-    let runner = ScriptedCommandRunner::new([
+    let manager = scripted_manager(&root, [
         missing_service(&target),
         CommandStep::success(LAUNCHCTL, &["enable", &target], ""),
         CommandStep::success(LAUNCHCTL, &["bootstrap", domain, &definition_text], ""),
-        CommandStep::success(
-            LAUNCHCTL,
-            &["print", &target],
-            "state = spawn scheduled\nruns = 0\n",
-        ),
-        CommandStep::success(LAUNCHCTL, &["print", &target], "state = running\n"),
+        loaded_service(&target, "state = spawn scheduled\nruns = 0\n"),
+        loaded_service(&target, "state = running\n"),
         enabled_autostart(domain),
     ]);
-    let manager = test_manager(&root, runner);
     let spec = service_spec(&LogLevel::Info, &RuntimeFlavor::MultiThread)?;
 
     let status = manager.start(&spec)?;
@@ -313,15 +281,10 @@ fn start_reporting_returns_throttled_after_the_poll_budget() -> Result<(), Daemo
         CommandStep::success(LAUNCHCTL, &["bootstrap", domain, &definition_text], ""),
     ];
     fill_poll_budget(&mut steps, 0, || {
-        CommandStep::success(
-            LAUNCHCTL,
-            &["print", &target],
-            "state = throttled\nlast exit code = 78\n",
-        )
+        loaded_service(&target, "state = throttled\nlast exit code = 78\n")
     });
     steps.push(enabled_autostart(domain));
-    let runner = ScriptedCommandRunner::new(steps);
-    let manager = test_manager(&root, runner);
+    let manager = scripted_manager(&root, steps);
     let spec = service_spec(&LogLevel::Info, &RuntimeFlavor::MultiThread)?;
 
     let status = manager.start(&spec)?;
@@ -345,23 +308,17 @@ fn start_waits_past_a_scheduled_retry_until_running() -> Result<(), DaemonError>
     let target = test_target();
     let definition = launchd_definition_path(&root);
     let definition_text = path_text(&definition)?;
-    let runner = ScriptedCommandRunner::new([
+    let manager = scripted_manager(&root, [
         missing_service(&target),
         CommandStep::success(LAUNCHCTL, &["enable", &target], ""),
         CommandStep::success(LAUNCHCTL, &["bootstrap", domain, &definition_text], ""),
-        CommandStep::success(
-            LAUNCHCTL,
-            &["print", &target],
+        loaded_service(
+            &target,
             "state = spawn scheduled\nruns = 1\nlast terminating signal = Segmentation fault: 11\n",
         ),
-        CommandStep::success(
-            LAUNCHCTL,
-            &["print", &target],
-            "state = running\nruns = 1\n",
-        ),
+        loaded_service(&target, "state = running\nruns = 1\n"),
         enabled_autostart(domain),
     ]);
-    let manager = test_manager(&root, runner);
     let spec = service_spec(&LogLevel::Info, &RuntimeFlavor::MultiThread)?;
 
     let status = manager.start(&spec)?;
@@ -376,13 +333,12 @@ fn start_waits_past_a_scheduled_retry_until_running() -> Result<(), DaemonError>
 fn status_preserves_unexpected_launchctl_failures() {
     let root = test_root("status-failure");
     let target = test_target();
-    let runner = ScriptedCommandRunner::new([CommandStep::failure(
+    let manager = scripted_manager(&root, [CommandStep::failure(
         LAUNCHCTL,
         &["print", &target],
         112,
         "Could not find specified domain",
     )]);
-    let manager = test_manager(&root, runner);
 
     let result = manager.observe();
 
@@ -402,15 +358,13 @@ fn status_reports_an_external_signal_crash() -> Result<(), DaemonError> {
     let domain = TEST_DOMAIN;
     let target = test_target();
     install_test_definition(&root)?;
-    let runner = ScriptedCommandRunner::new([
-        CommandStep::success(
-            LAUNCHCTL,
-            &["print", &target],
+    let manager = scripted_manager(&root, [
+        loaded_service(
+            &target,
             "state = spawn scheduled\nruns = 7\nlast terminating signal = Bus error: 10\n",
         ),
         enabled_autostart(domain),
     ]);
-    let manager = test_manager(&root, runner);
 
     let status = manager.observe()?;
 
@@ -428,8 +382,7 @@ fn status_reports_an_external_signal_crash() -> Result<(), DaemonError> {
 fn status_maps_only_launchd_service_not_found_to_not_installed() -> Result<(), DaemonError> {
     let root = test_root("status-not-found");
     let target = test_target();
-    let runner = ScriptedCommandRunner::new([missing_service(&target)]);
-    let manager = test_manager(&root, runner);
+    let manager = scripted_manager(&root, [missing_service(&target)]);
 
     let status = manager.observe()?;
 
@@ -442,11 +395,10 @@ fn loaded_job_without_a_plist_still_queries_manager_autostart() -> Result<(), Da
     let root = test_root("status-loaded-without-plist");
     let domain = TEST_DOMAIN;
     let target = test_target();
-    let runner = ScriptedCommandRunner::new([
-        CommandStep::success(LAUNCHCTL, &["print", &target], "state = running\n"),
+    let manager = scripted_manager(&root, [
+        loaded_service(&target, "state = running\n"),
         enabled_autostart(domain),
     ]);
-    let manager = test_manager(&root, runner);
 
     let status = manager.observe()?;
 

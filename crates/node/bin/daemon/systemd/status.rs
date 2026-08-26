@@ -1,11 +1,10 @@
-//! Reduces `systemctl show` output into the platform-neutral daemon observation.
+//! Preserves systemd lifecycle vocabulary before projecting one complete manager snapshot.
 
 use thiserror::Error;
 
 use super::super::AutostartState;
 use super::super::DaemonFailure;
 use super::super::DaemonObservation;
-#[cfg(test)]
 use super::super::DaemonState;
 #[cfg(test)]
 use super::super::DaemonStatus;
@@ -34,6 +33,7 @@ enum SystemdLifecycle<'a> {
     Starting,
     AutoRestarting,
     Stopping,
+    Maintenance,
     Other {
         load: &'a str,
         active: &'a str,
@@ -41,20 +41,38 @@ enum SystemdLifecycle<'a> {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum SystemdLoadability {
+    Available,
+    Missing,
+    Placeholder,
+    Unavailable,
+    Other,
+}
+
 impl SystemdLifecycle<'_> {
     /// Pre: `output` is the same snapshot from which this lifecycle and `autostart` were parsed.
     ///
-    /// Post: every transient lifecycle becomes a `PendingDaemonState`; manager-terminal lifecycle
-    /// becomes `ObservedDaemonState::Settled`.
-    fn into_record(self, output: &str, autostart: AutostartState) -> SystemdRecord {
+    /// Post: missing and unavailable loadability remain typed `SystemdRecord` variants; running,
+    /// stopped, failed, and maintenance lifecycles settle; transition and unknown lifecycles remain
+    /// pending for the bounded start observation.
+    fn into_record(
+        self,
+        output: &str,
+        autostart: AutostartState,
+        loadability: SystemdLoadability,
+    ) -> SystemdRecord {
         let state = match self {
             Self::Missing => return SystemdRecord::Missing { autostart },
             Self::Unavailable => return SystemdRecord::Unavailable { autostart },
             Self::Running => ObservedDaemonState::running(),
             Self::Stopped => ObservedDaemonState::stopped(),
-            Self::Failed => ObservedDaemonState::failed(project_systemd_failure(output)),
+            Self::Failed => ObservedDaemonState::Settled(DaemonState::Reported {
+                status: "failed",
+                detail: project_systemd_failure(output),
+            }),
             Self::Starting => ObservedDaemonState::pending(PendingDaemonState::Transitioning(
-                DaemonTransition::Starting,
+                DaemonTransition::named("starting"),
             )),
             // Verified with systemd 257.13: `auto-restart` and `auto-restart-queued` mean systemd
             // scheduled another activation. Poll while that transition fits the command budget.
@@ -62,23 +80,39 @@ impl SystemdLifecycle<'_> {
                 project_systemd_failure(output),
             )),
             Self::Stopping => ObservedDaemonState::pending(PendingDaemonState::Transitioning(
-                DaemonTransition::Stopping,
+                DaemonTransition::named("stopping"),
             )),
+            Self::Maintenance => ObservedDaemonState::Settled(DaemonState::Reported {
+                status: "maintenance",
+                detail: None,
+            }),
             Self::Other { load, active, sub } => {
                 ObservedDaemonState::pending(PendingDaemonState::Unknown(format!(
                     "load state: {load}, active state: {active}, substate: {sub}"
                 )))
             }
         };
-        SystemdRecord::Loaded(DaemonObservation::installed(state, autostart))
+        SystemdRecord::Loaded {
+            state,
+            autostart,
+            loadability,
+        }
     }
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum SystemdRecord {
-    Missing { autostart: AutostartState },
-    Unavailable { autostart: AutostartState },
-    Loaded(DaemonObservation<AutostartState>),
+    Missing {
+        autostart: AutostartState,
+    },
+    Unavailable {
+        autostart: AutostartState,
+    },
+    Loaded {
+        state: ObservedDaemonState,
+        autostart: AutostartState,
+        loadability: SystemdLoadability,
+    },
 }
 
 impl SystemdRecord {
@@ -87,11 +121,25 @@ impl SystemdRecord {
     }
 
     pub(super) fn is_unavailable(&self) -> bool {
-        matches!(self, Self::Unavailable { .. })
+        matches!(
+            self,
+            Self::Unavailable { .. }
+                | Self::Loaded {
+                    loadability: SystemdLoadability::Unavailable,
+                    ..
+                }
+        )
     }
 
     pub(super) fn is_inactive_without_process(&self) -> bool {
         matches!(self, Self::Missing { .. } | Self::Unavailable { .. })
+    }
+
+    pub(super) fn autostart(&self) -> AutostartState {
+        match self {
+            Self::Missing { autostart } | Self::Unavailable { autostart } => *autostart,
+            Self::Loaded { autostart, .. } => *autostart,
+        }
     }
 
     pub(super) fn into_observation(
@@ -103,10 +151,16 @@ impl SystemdRecord {
                 DaemonObservation::definition_without_record(autostart)
             }
             Self::Missing { .. } => DaemonObservation::NotInstalled,
-            Self::Unavailable { autostart } => {
-                DaemonObservation::installed(ObservedDaemonState::unavailable(), autostart)
-            }
-            Self::Loaded(observation) => observation,
+            Self::Unavailable { autostart } => DaemonObservation::installed(
+                ObservedDaemonState::Settled(DaemonState::Reported {
+                    status: "unavailable",
+                    detail: None,
+                }),
+                autostart,
+            ),
+            Self::Loaded {
+                state, autostart, ..
+            } => DaemonObservation::installed(state, autostart),
         }
     }
 }
@@ -183,6 +237,7 @@ enum SystemdExecOutcome {
 enum SystemdProcessFailure {
     ExitCode(i32),
     Signal { number: i32, core_dumped: bool },
+    DetailUnavailable { result: &'static str },
 }
 
 impl std::fmt::Display for SystemdProcessFailure {
@@ -197,6 +252,12 @@ impl std::fmt::Display for SystemdProcessFailure {
                 number,
                 core_dumped: true,
             } => write!(formatter, "signal {number}, core dumped"),
+            Self::DetailUnavailable { result } => {
+                write!(
+                    formatter,
+                    "systemd result {result}; process detail unavailable"
+                )
+            }
         }
     }
 }
@@ -254,18 +315,21 @@ pub(super) fn parse_systemd_record(output: &str) -> Result<SystemdRecord, System
     let autostart = if lifecycle == SystemdLifecycle::Missing {
         property(output, "UnitFileState")
             .map(parse_systemd_autostart)
-            .unwrap_or(AutostartState::Unknown)
+            .unwrap_or(AutostartState::Reported("unknown"))
     } else {
         parse_systemd_autostart(required_property(output, "UnitFileState")?)
     };
-    Ok(lifecycle.into_record(output, autostart))
+    Ok(lifecycle.into_record(output, autostart, parse_systemd_loadability(load)))
 }
 
-#[cfg(test)]
-fn parse_systemd_status(output: &str) -> Result<DaemonStatus, SystemdStatusError> {
-    Ok(super::status_from_observation(
-        parse_systemd_record(output)?.into_observation(false),
-    ))
+fn parse_systemd_loadability(load: &str) -> SystemdLoadability {
+    match load {
+        "loaded" | "merged" => SystemdLoadability::Available,
+        "not-found" => SystemdLoadability::Missing,
+        "stub" => SystemdLoadability::Placeholder,
+        "masked" | "bad-setting" | "error" => SystemdLoadability::Unavailable,
+        _ => SystemdLoadability::Other,
+    }
 }
 
 fn required_property<'a>(
@@ -278,11 +342,11 @@ fn required_property<'a>(
 }
 
 fn property<'a>(output: &'a str, property_name: &str) -> Option<&'a str> {
-    // systemctl show emits a flat property list. Nested manager dictionaries are intentionally not
-    // accepted here because indentation and depth are outside this parser's type.
+    // Verified with systemd 257.13: `systemctl show` emits a flat property list. Leading whitespace
+    // is rejected so an indented foreign line cannot masquerade as a root manager property.
     output.lines().find_map(|line| {
-        let (name, value) = line.trim().split_once('=')?;
-        (name.trim() == property_name).then(|| value.trim())
+        let (name, value) = line.split_once('=')?;
+        (name == property_name).then(|| value.trim())
     })
 }
 
@@ -302,10 +366,11 @@ fn parse_systemd_lifecycle<'a>(
         }
         "activating" => SystemdLifecycle::Starting,
         "deactivating" => SystemdLifecycle::Stopping,
+        "maintenance" => SystemdLifecycle::Maintenance,
         "inactive" => match load {
-            "not-found" => SystemdLifecycle::Missing,
+            "not-found" | "stub" => SystemdLifecycle::Missing,
             "masked" | "bad-setting" | "error" => SystemdLifecycle::Unavailable,
-            "loaded" | "stub" | "merged" => SystemdLifecycle::Stopped,
+            "loaded" | "merged" => SystemdLifecycle::Stopped,
             _ => SystemdLifecycle::Other { load, active, sub },
         },
         _ => SystemdLifecycle::Other { load, active, sub },
@@ -313,16 +378,17 @@ fn parse_systemd_lifecycle<'a>(
 }
 
 fn parse_systemd_failure(output: &str) -> Option<SystemdFailure> {
-    let process = |expected| {
-        SystemdExecSnapshot::parse(output)
+    let process = |expected, result| {
+        let failure = SystemdExecSnapshot::parse(output)
             .filter(|snapshot| snapshot.outcome == expected)
             .and_then(SystemdExecSnapshot::process_failure)
-            .map(SystemdFailure::Process)
+            .unwrap_or(SystemdProcessFailure::DetailUnavailable { result });
+        Some(SystemdFailure::Process(failure))
     };
     match property(output, "Result") {
-        Some("exit-code") => process(SystemdExecOutcome::Exited),
-        Some("signal") => process(SystemdExecOutcome::Killed),
-        Some("core-dump") => process(SystemdExecOutcome::Dumped),
+        Some("exit-code") => process(SystemdExecOutcome::Exited, "exit-code"),
+        Some("signal") => process(SystemdExecOutcome::Killed, "signal"),
+        Some("core-dump") => process(SystemdExecOutcome::Dumped, "core-dump"),
         Some("timeout") => Some(SystemdFailure::Manager(SystemdManagerFailure::Timeout)),
         Some("watchdog") => Some(SystemdFailure::Manager(SystemdManagerFailure::Watchdog)),
         Some("oom-kill") => Some(SystemdFailure::Kernel(SystemdKernelFailure::OutOfMemory)),
@@ -347,16 +413,27 @@ fn parse_systemd_autostart(output: &str) -> AutostartState {
     match output.trim() {
         "enabled" | "enabled-runtime" => AutostartState::Enabled,
         "disabled" | "linked" | "linked-runtime" | "alias" | "indirect" => AutostartState::Disabled,
-        "static" | "generated" | "masked" | "masked-runtime" => AutostartState::Unavailable,
-        _ => AutostartState::Unknown,
+        "static" | "generated" | "transient" | "masked" | "masked-runtime" | "bad" => {
+            AutostartState::Reported("unavailable")
+        }
+        _ => AutostartState::Reported("unknown"),
     }
 }
 
 #[cfg(test)]
 mod tests {
-    //! Proves systemd snapshot reduction.
+    //! Proves every recognized systemd axis has an explicit lifecycle and provenance reduction.
 
     use super::*;
+
+    fn parse_status(
+        output: &str,
+        definition_present: bool,
+    ) -> Result<DaemonStatus, SystemdStatusError> {
+        Ok(parse_systemd_record(output)?
+            .into_observation(definition_present)
+            .into_status())
+    }
 
     #[test]
     fn lifecycle_reduction_preserves_manager_states() {
@@ -373,8 +450,32 @@ mod tests {
             SystemdLifecycle::AutoRestarting
         );
         assert_eq!(
+            parse_systemd_lifecycle("loaded", "activating", "start"),
+            SystemdLifecycle::Starting
+        );
+        assert_eq!(
+            parse_systemd_lifecycle("loaded", "deactivating", "stop"),
+            SystemdLifecycle::Stopping
+        );
+        assert_eq!(
+            parse_systemd_lifecycle("loaded", "inactive", "dead"),
+            SystemdLifecycle::Stopped
+        );
+        assert_eq!(
+            parse_systemd_lifecycle("loaded", "failed", "failed"),
+            SystemdLifecycle::Failed
+        );
+        assert_eq!(
             parse_systemd_lifecycle("error", "inactive", "dead"),
             SystemdLifecycle::Unavailable
+        );
+        assert_eq!(
+            parse_systemd_lifecycle("loaded", "maintenance", "maintenance"),
+            SystemdLifecycle::Maintenance
+        );
+        assert_eq!(
+            parse_systemd_lifecycle("stub", "inactive", "dead"),
+            SystemdLifecycle::Missing
         );
     }
 
@@ -388,7 +489,7 @@ mod tests {
                     .collect::<Vec<_>>()
                     .join("\n");
             assert!(matches!(
-                parse_systemd_status(&output),
+                parse_status(&output, false),
                 Err(SystemdStatusError::MissingProperty { property: missing }) if missing == property
             ));
         }
@@ -396,8 +497,10 @@ mod tests {
 
     #[test]
     fn not_installed_has_no_synthetic_autostart_state() -> Result<(), SystemdStatusError> {
-        let status =
-            parse_systemd_status("LoadState=not-found\nActiveState=inactive\nSubState=dead\n")?;
+        let status = parse_status(
+            "LoadState=not-found\nActiveState=inactive\nSubState=dead\n",
+            false,
+        )?;
 
         assert_eq!(status, DaemonStatus::NotInstalled);
         Ok(())
@@ -414,9 +517,12 @@ mod tests {
             ("bad-setting", "active", "running"),
             ("error", "active", "running"),
         ] {
-            let status = parse_systemd_status(&format!(
-                "LoadState={load}\nActiveState={active}\nSubState={sub}\nUnitFileState=linked\n"
-            ))?;
+            let status = parse_status(
+                &format!(
+                    "LoadState={load}\nActiveState={active}\nSubState={sub}\nUnitFileState=linked\n"
+                ),
+                false,
+            )?;
             assert_eq!(
                 status,
                 DaemonStatus::installed(DaemonState::Running, AutostartState::Disabled)
@@ -431,31 +537,57 @@ mod tests {
         for (active, sub, state) in [
             ("active", "running", DaemonState::Running),
             ("refreshing", "reload", DaemonState::Running),
-            ("failed", "failed", DaemonState::Failed(None)),
+            ("failed", "failed", DaemonState::Reported {
+                status: "failed",
+                detail: None,
+            }),
         ] {
-            let status = parse_systemd_status(&format!(
-                "LoadState=masked\nActiveState={active}\nSubState={sub}\nUnitFileState=masked\n"
-            ))?;
+            let status = parse_status(
+                &format!(
+                    "LoadState=masked\nActiveState={active}\nSubState={sub}\nUnitFileState=masked\n"
+                ),
+                false,
+            )?;
             assert_eq!(
                 status,
-                DaemonStatus::installed(state, AutostartState::Unavailable)
+                DaemonStatus::installed(state, AutostartState::Reported("unavailable"))
             );
         }
 
-        let masked_inactive = parse_systemd_status(
+        let masked_inactive = parse_status(
             "LoadState=masked\nActiveState=inactive\nSubState=dead\nUnitFileState=masked\n",
+            false,
         )?;
         assert_eq!(
             masked_inactive,
-            DaemonStatus::installed(DaemonState::Unavailable, AutostartState::Unavailable)
+            DaemonStatus::installed(
+                DaemonState::Reported {
+                    status: "unavailable",
+                    detail: None,
+                },
+                AutostartState::Reported("unavailable"),
+            )
+        );
+
+        let masked_active = parse_systemd_record(
+            "LoadState=masked\nActiveState=active\nSubState=running\nUnitFileState=masked\n",
+        )?;
+        assert!(masked_active.is_unavailable());
+        assert_eq!(
+            masked_active.into_observation(true).into_status(),
+            DaemonStatus::installed(
+                DaemonState::Running,
+                AutostartState::Reported("unavailable"),
+            )
         );
         Ok(())
     }
 
     #[test]
     fn unknown_manager_vocabulary_remains_user_visible() -> Result<(), SystemdStatusError> {
-        let status = parse_systemd_status(
+        let status = parse_status(
             "LoadState=loaded\nActiveState=future-active\nSubState=future-sub\nUnitFileState=enabled\n",
+            false,
         )?;
 
         assert_eq!(
@@ -466,10 +598,49 @@ mod tests {
     }
 
     #[test]
+    fn maintenance_is_explicit_and_terminal_for_start_polling() -> Result<(), SystemdStatusError> {
+        let observation = parse_systemd_record(
+            "LoadState=loaded\nActiveState=maintenance\nSubState=maintenance\nUnitFileState=enabled\n",
+        )?
+        .into_observation(true);
+
+        assert!(observation.settles_start_poll());
+        assert_eq!(observation.into_status().to_string(), "maintenance");
+        Ok(())
+    }
+
+    #[test]
+    fn stub_is_missing_and_uses_local_definition_evidence() -> Result<(), SystemdStatusError> {
+        let record = || {
+            parse_systemd_record(
+                "LoadState=stub\nActiveState=inactive\nSubState=dead\nUnitFileState=transient\n",
+            )
+        };
+
+        assert_eq!(
+            record()?.into_observation(false),
+            DaemonObservation::NotInstalled
+        );
+        assert_eq!(
+            record()?.into_observation(true),
+            DaemonObservation::definition_without_record(AutostartState::Reported("unavailable"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn indented_properties_cannot_shadow_the_flat_manager_snapshot() {
+        let output = "  LoadState=masked\nLoadState=loaded\n";
+
+        assert_eq!(property(output, "LoadState"), Some("loaded"));
+    }
+
+    #[test]
     fn auto_restart_preserves_failure_without_becoming_terminal() -> Result<(), SystemdStatusError>
     {
-        let status = parse_systemd_status(
+        let status = parse_status(
             "LoadState=loaded\nActiveState=activating\nSubState=auto-restart\nUnitFileState=enabled\nExecMainCode=1\nExecMainStatus=78\nResult=exit-code\n",
+            false,
         )?;
 
         assert_eq!(
@@ -484,8 +655,9 @@ mod tests {
 
     #[test]
     fn post_stop_success_does_not_attribute_systemd_sigterm() -> Result<(), SystemdStatusError> {
-        let status = parse_systemd_status(
+        let status = parse_status(
             "LoadState=loaded\nActiveState=inactive\nSubState=dead\nUnitFileState=enabled\nExecMainCode=2\nExecMainStatus=15\nResult=success\n",
+            false,
         )?;
 
         assert_eq!(
@@ -499,7 +671,7 @@ mod tests {
     fn manager_timeout_remains_authoritative_over_process_record() -> Result<(), SystemdStatusError>
     {
         let output = "LoadState=loaded\nActiveState=failed\nSubState=failed\nUnitFileState=enabled\nExecMainCode=2\nExecMainStatus=9\nResult=timeout\n";
-        let status = parse_systemd_status(output)?;
+        let status = parse_status(output, false)?;
 
         assert_eq!(
             parse_systemd_failure(output),
@@ -546,10 +718,34 @@ mod tests {
     }
 
     #[test]
+    fn recognized_process_result_survives_missing_main_process_detail() {
+        for (result, expected) in [
+            (
+                "exit-code",
+                "systemd result exit-code; process detail unavailable",
+            ),
+            (
+                "signal",
+                "systemd result signal; process detail unavailable",
+            ),
+            (
+                "core-dump",
+                "systemd result core-dump; process detail unavailable",
+            ),
+        ] {
+            let output = format!("ExecMainCode=0\nExecMainStatus=0\nResult={result}\n");
+            assert_eq!(
+                parse_systemd_failure(&output).map(|failure| failure.to_string()),
+                Some(expected.to_owned())
+            );
+        }
+    }
+
+    #[test]
     fn unknown_result_preserves_unknown_provenance_without_siginfo(
     ) -> Result<(), SystemdStatusError> {
         let output = "LoadState=loaded\nActiveState=failed\nSubState=failed\nUnitFileState=enabled\nResult=future-result\n";
-        let status = parse_systemd_status(output)?;
+        let status = parse_status(output, false)?;
 
         assert_eq!(
             parse_systemd_failure(output),
@@ -599,7 +795,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_record_with_definition_uses_the_shared_pending_fold(
+    fn missing_record_with_definition_uses_the_shared_stopped_fold(
     ) -> Result<(), SystemdStatusError> {
         let observation = parse_systemd_record(
             "LoadState=not-found\nActiveState=inactive\nSubState=dead\nUnitFileState=\n",
@@ -608,9 +804,9 @@ mod tests {
 
         assert_eq!(
             observation,
-            DaemonObservation::definition_without_record(AutostartState::Unknown)
+            DaemonObservation::definition_without_record(AutostartState::Reported("unknown"))
         );
-        assert!(!observation.settles_start_poll());
+        assert!(observation.settles_start_poll());
         Ok(())
     }
 
@@ -635,8 +831,11 @@ mod tests {
         for state in ["linked", "linked-runtime", "alias", "indirect"] {
             assert_eq!(parse_systemd_autostart(state), AutostartState::Disabled);
         }
-        for state in ["static", "generated", "masked"] {
-            assert_eq!(parse_systemd_autostart(state), AutostartState::Unavailable);
+        for state in ["static", "generated", "transient", "masked", "bad"] {
+            assert_eq!(
+                parse_systemd_autostart(state),
+                AutostartState::Reported("unavailable")
+            );
         }
     }
 }

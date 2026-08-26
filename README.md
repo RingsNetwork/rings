@@ -144,14 +144,18 @@ or deleting it prevents the service manager from starting the node; run
 `rings daemon start` again from a persistent directory to update the definition.
 `daemon start` and `daemon restart` use a bounded sequence of manager
 observations; this is a CLI responsiveness budget, not a wall-clock guarantee,
-because each manager command can take additional time. launchd `throttled` and
-systemd `auto-restart` remain pending because those states say another spawn is
-scheduled. Rings observes them until the service runs or the budget is
-exhausted. If the final state is not running, the command exits non-zero with
-that state, and `rings daemon status` shows any later transition. A detached
-systemd unit with no local definition can disappear during restart and then be
-reported as not installed. On macOS, both `daemon start` and `daemon stop` also
-use a separate bounded poll to confirm that any loaded job has been unloaded.
+because each manager command can take additional time. launchd `throttled`
+means a delayed spawn has been scheduled, so Rings keeps observing it within
+that budget. A Rings-rendered systemd unit uses a five-second `RestartSec`,
+deliberately longer than the observation budget: an `auto-restart` snapshot is
+therefore returned as `restarting` instead of waiting long enough for the next
+activation to hide the crash loop. If the final state is not running, the
+command exits non-zero with that state, and `rings daemon status` shows any
+later transition. A detached systemd unit with no local definition can
+disappear during restart and then be reported as not installed. On macOS, both
+`daemon start` and `daemon stop` also use a separate bounded poll to confirm
+that any loaded job has been unloaded. Exhausting that unload poll is a hard
+`ServiceDidNotUnload` error rather than a successful status report.
 
 On macOS, standard output is written to `~/.rings/logs/daemon.log` and standard
 error to `~/.rings/logs/daemon.error.log`. On Linux, inspect logs with:

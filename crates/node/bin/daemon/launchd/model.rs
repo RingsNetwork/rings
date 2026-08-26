@@ -1,4 +1,4 @@
-//! Owns the Rings LaunchAgent definition model.
+//! Proves every rendered LaunchAgent encodes the foreground command and unsuccessful-exit policy.
 
 use thiserror::Error;
 
@@ -128,6 +128,7 @@ mod tests {
         assert!(plist.contains("<string>/Users/test user/work</string>"));
         assert!(plist.contains("<key>RunAtLoad</key>"));
         assert!(plist.contains("<key>KeepAlive</key>"));
+        assert!(plist.contains("<key>SuccessfulExit</key>\n    <false/>"));
         Ok(())
     }
 

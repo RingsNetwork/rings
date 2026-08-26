@@ -1,4 +1,4 @@
-//! Owns the systemd adapter effect boundary.
+//! Confines systemd user-manager subprocess and filesystem effects to one adapter boundary.
 #![cfg(any(target_os = "linux", all(test, unix)))]
 
 #[cfg(target_os = "linux")]
@@ -14,6 +14,7 @@ use super::AutostartState;
 use super::CommandRunner;
 use super::DaemonError;
 use super::DaemonObservation;
+use super::DaemonState;
 use super::DaemonStatus;
 use super::PollSchedule;
 use super::ProcessCommandRunner;
@@ -38,21 +39,12 @@ pub(super) enum SystemdError {
     Definition(#[from] SystemdDefinitionError),
     #[error(transparent)]
     Status(#[from] SystemdStatusError),
-    #[error("the systemd user unit is unavailable; unmask or repair {path} before restarting it")]
-    UnitUnavailable { path: PathBuf },
+    #[error("the systemd user unit is unavailable; inspect its load state and repair or unmask it before restarting")]
+    UnitUnavailable,
 }
 
-impl From<SystemdDefinitionError> for DaemonError {
-    fn from(error: SystemdDefinitionError) -> Self {
-        SystemdError::from(error).into()
-    }
-}
-
-impl From<SystemdStatusError> for DaemonError {
-    fn from(error: SystemdStatusError) -> Self {
-        SystemdError::from(error).into()
-    }
-}
+impl_daemon_error_from_adapter!(SystemdDefinitionError => SystemdError);
+impl_daemon_error_from_adapter!(SystemdStatusError => SystemdError);
 
 const SYSTEMD_UNIT: &str = "rings-node.service";
 // Verified against systemd 257.13 packaging conventions: Linux has no distribution-independent
@@ -78,13 +70,6 @@ pub(super) struct SystemdManager<R = ProcessCommandRunner> {
     unit_path: PathBuf,
     poll_schedule: PollSchedule,
     runner: R,
-}
-
-impl<R> SystemdManager<R> {
-    fn has_definition(&self) -> bool {
-        // This local evidence is folded with systemd's manager record by every lifecycle command.
-        self.unit_path.is_file()
-    }
 }
 
 #[cfg(target_os = "linux")]
@@ -125,38 +110,37 @@ where R: CommandRunner
     fn stop(&self) -> Result<DaemonStatus, DaemonError> {
         let record = self.observe_record()?;
         if record.is_inactive_without_process() {
-            return Ok(status_from_observation(
-                record.into_observation(self.has_definition()),
-            ));
+            // `systemctl stop` turns an already missing or unavailable unit from a benign no-op into
+            // a command error, so preserve the manager verdict without issuing the action.
+            return Ok(record.into_observation(self.has_definition()).into_status());
         }
+        let autostart = record.autostart();
         self.runner
             .run_checked(SYSTEMCTL, &[SYSTEMD_USER_ARG, "stop", SYSTEMD_UNIT])?;
-        self.observe()
+        // Post: command success proves stop acted on the loaded record sampled above even if a
+        // detached unit disappears from the manager immediately afterward.
+        Ok(DaemonStatus::installed(DaemonState::Stopped, autostart))
     }
 
     fn restart(&self) -> Result<DaemonStatus, DaemonError> {
+        let record = self.observe_record()?;
+        if record.is_unavailable() {
+            return Err(SystemdError::UnitUnavailable.into());
+        }
+        if record.is_missing() && !self.has_definition() {
+            return Err(DaemonError::ServiceNotInstalled {
+                path: self.unit_path.clone(),
+            });
+        }
         if self.has_definition() {
             self.runner
                 .run_checked(SYSTEMCTL, &[SYSTEMD_USER_ARG, "daemon-reload"])?;
-        } else {
-            let record = self.observe_record()?;
-            if record.is_missing() {
-                return Err(DaemonError::ServiceNotInstalled {
-                    path: self.unit_path.clone(),
-                });
-            }
-            if record.is_unavailable() {
-                return Err(SystemdError::UnitUnavailable {
-                    path: self.unit_path.clone(),
-                }
-                .into());
-            }
         }
         self.restart_and_settle()
     }
 
     fn observe(&self) -> Result<DaemonStatus, DaemonError> {
-        Ok(status_from_observation(self.observe_snapshot()?))
+        Ok(self.observe_snapshot()?.into_status())
     }
 }
 
@@ -164,6 +148,9 @@ impl<R> SystemdManager<R>
 where R: CommandRunner
 {
     fn observe_snapshot(&self) -> Result<DaemonObservation<AutostartState>, DaemonError> {
+        // Verified with systemd 257.13: LoadState=not-found describes both an absent unit and a
+        // running unit whose file was removed. The configured unit path is the local installation
+        // evidence when no process lifecycle remains.
         Ok(self
             .observe_record()?
             .into_observation(self.has_definition()))
@@ -176,24 +163,11 @@ where R: CommandRunner
         ))?)
     }
 
-    fn settle_status(&self) -> Result<DaemonStatus, DaemonError> {
-        let snapshot = wait_for_start_settlement(self.poll_schedule, || self.observe_snapshot())?;
-        Ok(status_from_observation(snapshot))
-    }
-
     fn restart_and_settle(&self) -> Result<DaemonStatus, DaemonError> {
         self.runner
             .run_checked(SYSTEMCTL, &[SYSTEMD_USER_ARG, "restart", SYSTEMD_UNIT])?;
-        self.settle_status()
-    }
-}
-
-fn status_from_observation(observation: DaemonObservation<AutostartState>) -> DaemonStatus {
-    match observation {
-        DaemonObservation::NotInstalled => DaemonStatus::NotInstalled,
-        DaemonObservation::Installed { state, attachment } => {
-            DaemonStatus::installed(state.into_state(), attachment)
-        }
+        let snapshot = wait_for_start_settlement(self.poll_schedule, || self.observe_snapshot())?;
+        Ok(snapshot.into_status())
     }
 }
 
@@ -206,7 +180,7 @@ fn systemd_config_home(home: &Path, candidate: Option<&Path>) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    //! Exercises the systemd user-manager boundary.
+    //! Ensures lifecycle tests use complete snapshots and a zero-delay observation schedule.
 
     mod manager;
 

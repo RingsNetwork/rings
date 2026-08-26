@@ -1,4 +1,4 @@
-//! Proves bootstrap retry preserves disabled login autostart unless restoration fails.
+//! Proves bootstrap mutates autostart only for a corroborated disabled-label recovery.
 
 use super::*;
 
@@ -21,7 +21,7 @@ fn restart_bootstraps_an_installed_but_unloaded_service_without_enabling_autosta
         CommandStep::success(LAUNCHCTL, &["enable", &target], ""),
         CommandStep::success(LAUNCHCTL, &["bootstrap", domain, &definition_text], ""),
         CommandStep::success(LAUNCHCTL, &["disable", &target], ""),
-        CommandStep::success(LAUNCHCTL, &["print", &target], "state = running\n"),
+        loaded_service(&target, "state = running\n"),
         disabled_autostart(domain),
     ]);
     let manager = test_manager(&root, runner);
@@ -41,7 +41,7 @@ fn enabled_unloaded_restart_does_not_mutate_autostart() -> Result<(), DaemonErro
     let runner = ScriptedCommandRunner::new([
         missing_service(&target),
         CommandStep::success(LAUNCHCTL, &["bootstrap", domain, &definition_text], ""),
-        CommandStep::success(LAUNCHCTL, &["print", &target], "state = running\n"),
+        loaded_service(&target, "state = running\n"),
         enabled_autostart(domain),
     ]);
     let manager = test_manager(&root, runner);
@@ -101,7 +101,7 @@ fn exit_five_with_unknown_autostart_does_not_mutate_manager_state() -> Result<()
     assert!(matches!(
         result,
         Err(DaemonError::Launchd(LaunchdError::BootstrapStateMismatch {
-            observed: AutostartState::Unknown,
+            observed: AutostartState::Reported("unknown"),
             bootstrap,
         })) if matches!(
             &*bootstrap,

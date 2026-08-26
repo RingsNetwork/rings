@@ -1,4 +1,4 @@
-//! Owns the launchd adapter effect boundary.
+//! Confines launchd subprocess and filesystem effects to one adapter boundary.
 #![cfg(any(target_os = "macos", all(test, unix)))]
 
 use std::path::Path;
@@ -17,6 +17,7 @@ use super::AutostartState;
 use super::CommandRunner;
 use super::DaemonError;
 use super::DaemonObservation;
+use super::DaemonState;
 use super::DaemonStatus;
 use super::PollSchedule;
 use super::ProcessCommandRunner;
@@ -107,11 +108,13 @@ enum ConcreteAutostart {
     Disabled,
 }
 
-impl From<LaunchdDefinitionError> for DaemonError {
-    fn from(error: LaunchdDefinitionError) -> Self {
-        LaunchdError::from(error).into()
-    }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UnloadOutcome {
+    AlreadyAbsent,
+    Unloaded,
 }
+
+impl_daemon_error_from_adapter!(LaunchdDefinitionError => LaunchdError);
 
 pub(super) struct LaunchdManager<R = ProcessCommandRunner> {
     definition_path: PathBuf,
@@ -180,10 +183,10 @@ where R: CommandRunner
     /// Uses the command observation schedule to bound confirmation that `bootout` removed the
     /// manager record. Exhaustion is terminal: stop cannot claim success, and start cannot safely
     /// bootstrap a label that launchd may still consider loaded.
-    fn unload_if_loaded(&self) -> Result<LaunchdRecord<Output>, DaemonError> {
+    fn unload_if_loaded(&self) -> Result<UnloadOutcome, DaemonError> {
         let initial = self.service_record()?;
         if matches!(initial, LaunchdRecord::Missing) {
-            return Ok(initial);
+            return Ok(UnloadOutcome::AlreadyAbsent);
         }
         self.runner
             .run_checked(LAUNCHCTL, &["bootout", self.target()])?;
@@ -195,7 +198,7 @@ where R: CommandRunner
         if matches!(terminal_record, LaunchdRecord::Loaded(_)) {
             Err(LaunchdError::ServiceDidNotUnload.into())
         } else {
-            Ok(terminal_record)
+            Ok(UnloadOutcome::Unloaded)
         }
     }
 
@@ -277,11 +280,6 @@ where R: CommandRunner
         }
     }
 
-    fn has_definition(&self) -> bool {
-        // An unloaded launchd job has no manager record, so the plist is the installation evidence.
-        self.definition_path.is_file()
-    }
-
     fn autostart_state(&self) -> Result<AutostartState, DaemonError> {
         let output = self
             .runner
@@ -293,6 +291,8 @@ where R: CommandRunner
     }
 
     fn missing_record_evidence(&self) -> MissingRecordEvidence {
+        // An unloaded launchd job has no manager record, so the plist is the only local
+        // installation evidence available to passive status observation.
         if self.has_definition() {
             MissingRecordEvidence::DefinitionPresent
         } else {
@@ -304,11 +304,12 @@ where R: CommandRunner
         &self,
         attribution: LaunchdAttribution,
     ) -> Result<DaemonObservation, DaemonError> {
-        let record = self
-            .service_record()?
-            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned());
+        let record = self.service_record()?;
+        let text_record = record
+            .as_ref()
+            .map(|output| String::from_utf8_lossy(&output.stdout));
         Ok(parse_launchd_observation(
-            record,
+            text_record,
             self.missing_record_evidence(),
             attribution,
         ))
@@ -318,13 +319,14 @@ where R: CommandRunner
         &self,
         observation: DaemonObservation,
     ) -> Result<DaemonStatus, DaemonError> {
-        match observation {
-            DaemonObservation::NotInstalled => Ok(DaemonStatus::NotInstalled),
+        let complete = match observation {
+            DaemonObservation::NotInstalled => DaemonObservation::NotInstalled,
             DaemonObservation::Installed { state, .. } => {
                 let autostart = self.autostart_state()?;
-                Ok(DaemonStatus::installed(state.into_state(), autostart))
+                DaemonObservation::installed(state, autostart)
             }
-        }
+        };
+        Ok(complete.into_status())
     }
 
     fn observe_with_attribution(
@@ -340,6 +342,16 @@ where R: CommandRunner
             self.observe_lifecycle_with_attribution(attribution)
         })?;
         self.complete_observation(observation)
+    }
+
+    fn stopped_status(&self, installed: bool) -> Result<DaemonStatus, DaemonError> {
+        if !installed {
+            return Ok(DaemonStatus::NotInstalled);
+        }
+        Ok(DaemonStatus::installed(
+            DaemonState::Stopped,
+            self.autostart_state()?,
+        ))
     }
 }
 
@@ -358,7 +370,8 @@ where R: CommandRunner
         let stdout_log = path_text(&self.stdout_log)?;
         let stderr_log = path_text(&self.stderr_log)?;
         let definition = render_launchd_plist(spec, &stdout_log, &stderr_log)?;
-        // launchd will not spawn a job whose StandardOutPath or StandardErrorPath parent is absent.
+        // Observed on macOS 15.6.1 (24G90): launchd will not spawn a job whose StandardOutPath or
+        // StandardErrorPath parent is absent.
         ensure_parent_directory(&self.stdout_log)?;
         ensure_parent_directory(&self.stderr_log)?;
         write_atomic(&self.definition_path, &definition)?;
@@ -372,15 +385,12 @@ where R: CommandRunner
     }
 
     fn stop(&self) -> Result<DaemonStatus, DaemonError> {
-        let record = self
-            .unload_if_loaded()?
-            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned());
-        let observation = parse_launchd_observation(
-            record,
-            self.missing_record_evidence(),
-            LaunchdAttribution::Unfiltered,
-        );
-        self.complete_observation(observation)
+        match self.unload_if_loaded()? {
+            UnloadOutcome::AlreadyAbsent => self.stopped_status(self.has_definition()),
+            // Post: a successful bootout proves that stop acted on a loaded job even when no plist
+            // remains after the action.
+            UnloadOutcome::Unloaded => self.stopped_status(true),
+        }
     }
 
     fn restart(&self) -> Result<DaemonStatus, DaemonError> {
@@ -408,7 +418,7 @@ where R: CommandRunner
 
 #[cfg(test)]
 mod tests {
-    //! Provides fixtures for launchd manager tests.
+    //! Ensures scripted loaded records include the rendered unsuccessful-exit policy.
 
     mod bootstrap;
     mod lifecycle;
@@ -459,6 +469,18 @@ mod tests {
             poll_schedule: TEST_OBSERVATION_SCHEDULE,
             runner,
         }
+    }
+
+    fn scripted_manager(
+        root: &Path,
+        steps: impl IntoIterator<Item = CommandStep>,
+    ) -> LaunchdManager<ScriptedCommandRunner> {
+        test_manager(root, ScriptedCommandRunner::new(steps))
+    }
+
+    fn loaded_service(target: &str, properties: &str) -> CommandStep {
+        let output = format!("semaphores = {{\n    successful exit => 0\n}}\n{properties}");
+        CommandStep::success(LAUNCHCTL, &["print", target], &output)
     }
 
     fn enabled_autostart(domain: &str) -> CommandStep {

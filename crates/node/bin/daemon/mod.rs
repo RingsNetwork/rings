@@ -1,4 +1,4 @@
-//! Defines the platform-neutral daemon command state machine.
+//! Keeps daemon lifecycle policy platform-neutral and manager effects adapter-owned.
 
 use std::env;
 use std::fmt;
@@ -21,14 +21,25 @@ use thiserror::Error;
 use super::ConfigArgs;
 use super::RuntimeFlavor;
 
+macro_rules! impl_daemon_error_from_adapter {
+    ($source:ty => $adapter:ty) => {
+        impl From<$source> for DaemonError {
+            fn from(error: $source) -> Self {
+                <$adapter>::from(error).into()
+            }
+        }
+    };
+}
+
 #[cfg(any(target_os = "macos", all(test, unix)))]
 mod launchd;
 #[cfg(any(target_os = "linux", all(test, unix)))]
 mod systemd;
 
 // This is a CLI responsiveness budget, not a wall-clock or manager spawn-latency guarantee. Twenty
-// 100 ms sleeps let adapters observe transitions that complete inside the budget and return the
-// latest observation when manager bookkeeping or a respawn delay outlives it.
+// 100 ms sleeps bound manager observation work and return the latest snapshot when bookkeeping or a
+// respawn delay outlives it. It is intentionally shorter than the systemd restart delay rendered by
+// Rings, so a crash loop is reported as restarting instead of being hidden by a later activation.
 const MANAGER_OBSERVATION_SCHEDULE: PollSchedule = PollSchedule {
     retries: 20,
     interval: Duration::from_millis(100),
@@ -303,20 +314,18 @@ impl fmt::Display for DaemonFailure {
 /// The user-visible lifecycle of the installed daemon.
 ///
 /// `Stopped` means the manager retains an installed or loaded job but no process is running.
-/// `Restarting` means the manager has scheduled another spawn after the optional last failure.
-/// `Failed` means systemd reports a terminal failure. launchd keeps an unproven respawn policy in
-/// `Unknown` rather than converting process history into a terminal verdict.
+/// `Restarting` means another spawn is scheduled or remains eligible under manager policy after the
+/// optional last failure. Adapter-specific terminal vocabulary is preserved by `Reported`.
 #[derive(Debug, Eq, PartialEq)]
 enum DaemonState {
     Running,
     Stopped,
     Restarting(Option<DaemonFailure>),
-    #[cfg(any(target_os = "linux", all(test, unix)))]
-    Failed(Option<DaemonFailure>),
-    #[cfg(any(target_os = "linux", all(test, unix)))]
-    Unavailable,
     Transitioning(DaemonTransition),
-    Unknown(String),
+    Reported {
+        status: &'static str,
+        detail: Option<DaemonFailure>,
+    },
 }
 
 impl fmt::Display for DaemonState {
@@ -326,33 +335,32 @@ impl fmt::Display for DaemonState {
             Self::Stopped => formatter.write_str("stopped"),
             Self::Restarting(Some(failure)) => write!(formatter, "restarting ({failure})"),
             Self::Restarting(None) => formatter.write_str("restarting"),
-            #[cfg(any(target_os = "linux", all(test, unix)))]
-            Self::Failed(Some(failure)) => write!(formatter, "failed ({failure})"),
-            #[cfg(any(target_os = "linux", all(test, unix)))]
-            Self::Failed(None) => formatter.write_str("failed"),
-            #[cfg(any(target_os = "linux", all(test, unix)))]
-            Self::Unavailable => formatter.write_str("unavailable"),
             Self::Transitioning(state) => state.fmt(formatter),
-            Self::Unknown(state) => write!(formatter, "unknown ({state})"),
+            Self::Reported {
+                status,
+                detail: Some(detail),
+            } => write!(formatter, "{status} ({detail})"),
+            Self::Reported {
+                status,
+                detail: None,
+            } => formatter.write_str(status),
         }
     }
 }
 
 /// A manager-reported lifecycle transition that has not reached its stable state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DaemonTransition {
-    Starting,
-    #[cfg(any(target_os = "linux", all(test, unix)))]
-    Stopping,
+struct DaemonTransition(&'static str);
+
+impl DaemonTransition {
+    fn named(name: &'static str) -> Self {
+        Self(name)
+    }
 }
 
 impl fmt::Display for DaemonTransition {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Starting => formatter.write_str("starting"),
-            #[cfg(any(target_os = "linux", all(test, unix)))]
-            Self::Stopping => formatter.write_str("stopping"),
-        }
+        formatter.write_str(self.0)
     }
 }
 
@@ -361,9 +369,7 @@ impl fmt::Display for DaemonTransition {
 enum AutostartState {
     Enabled,
     Disabled,
-    Unknown,
-    #[cfg(any(target_os = "linux", all(test, unix)))]
-    Unavailable,
+    Reported(&'static str),
 }
 
 impl fmt::Display for AutostartState {
@@ -371,9 +377,7 @@ impl fmt::Display for AutostartState {
         match self {
             Self::Enabled => formatter.write_str("enabled"),
             Self::Disabled => formatter.write_str("disabled"),
-            Self::Unknown => formatter.write_str("unknown"),
-            #[cfg(any(target_os = "linux", all(test, unix)))]
-            Self::Unavailable => formatter.write_str("unavailable"),
+            Self::Reported(state) => formatter.write_str(state),
         }
     }
 }
@@ -381,7 +385,6 @@ impl fmt::Display for AutostartState {
 /// A non-running lifecycle that may still advance during start settlement.
 #[derive(Debug, Eq, PartialEq)]
 enum PendingDaemonState {
-    Stopped,
     Restarting(Option<DaemonFailure>),
     Transitioning(DaemonTransition),
     Unknown(String),
@@ -390,10 +393,12 @@ enum PendingDaemonState {
 impl PendingDaemonState {
     fn into_state(self) -> DaemonState {
         match self {
-            Self::Stopped => DaemonState::Stopped,
             Self::Restarting(failure) => DaemonState::Restarting(failure),
             Self::Transitioning(transition) => DaemonState::Transitioning(transition),
-            Self::Unknown(state) => DaemonState::Unknown(state),
+            Self::Unknown(state) => DaemonState::Reported {
+                status: "unknown",
+                detail: Some(DaemonFailure::described(state)),
+            },
         }
     }
 }
@@ -414,16 +419,6 @@ impl ObservedDaemonState {
 
     fn stopped() -> Self {
         Self::Settled(DaemonState::Stopped)
-    }
-
-    #[cfg(any(target_os = "linux", all(test, unix)))]
-    fn failed(failure: Option<DaemonFailure>) -> Self {
-        Self::Settled(DaemonState::Failed(failure))
-    }
-
-    #[cfg(any(target_os = "linux", all(test, unix)))]
-    fn unavailable() -> Self {
-        Self::Settled(DaemonState::Unavailable)
     }
 
     fn pending(state: PendingDaemonState) -> Self {
@@ -462,10 +457,7 @@ impl<A> DaemonObservation<A> {
 
     /// Central fold for an on-disk definition whose manager record is not yet observable.
     fn definition_without_record(attachment: A) -> Self {
-        Self::installed(
-            ObservedDaemonState::pending(PendingDaemonState::Stopped),
-            attachment,
-        )
+        Self::installed(ObservedDaemonState::stopped(), attachment)
     }
 
     /// Post: absence and every `Settled` lifecycle terminate start polling.
@@ -473,6 +465,17 @@ impl<A> DaemonObservation<A> {
         match self {
             Self::NotInstalled => true,
             Self::Installed { state, .. } => state.is_settled(),
+        }
+    }
+}
+
+impl DaemonObservation<AutostartState> {
+    fn into_status(self) -> DaemonStatus {
+        match self {
+            Self::NotInstalled => DaemonStatus::NotInstalled,
+            Self::Installed { state, attachment } => {
+                DaemonStatus::installed(state.into_state(), attachment)
+            }
         }
     }
 }
@@ -588,11 +591,14 @@ where T: ValueEnum + fmt::Debug {
 ///
 /// Post: successful `start` and `restart` return the lifecycle selected by their settling poll.
 /// launchd samples the independent autostart axis when producing status; systemd reads both axes
-/// from the same manager snapshot. `stop` and `observe` fold manager state with the same current
-/// installation evidence, so an action does not invent installation provenance.
+/// from one manager snapshot. `observe` uses current installation evidence. `stop` reports the
+/// manager record it acted upon, even when that record disappears as the result of stopping it.
 trait ServiceManager {
     fn name(&self) -> &'static str;
     fn definition_path(&self) -> &Path;
+    fn has_definition(&self) -> bool {
+        self.definition_path().is_file()
+    }
     fn start(&self, spec: &ServiceSpec) -> Result<DaemonStatus, DaemonError>;
     fn stop(&self) -> Result<DaemonStatus, DaemonError>;
     fn restart(&self) -> Result<DaemonStatus, DaemonError>;

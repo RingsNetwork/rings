@@ -1,4 +1,4 @@
-//! Owns the Rings systemd user-unit definition model.
+//! Proves every rendered user unit preserves arguments and exposes failures without rapid looping.
 
 use std::time::Duration;
 
@@ -7,7 +7,9 @@ use thiserror::Error;
 use super::super::ServiceSpec;
 
 // Rings-rendered units use five seconds so repeated node failures remain observable and do not
-// spin. Status parsing cannot assume this value for already-loaded or foreign unit definitions.
+// spin. The shared observation budget is deliberately shorter: the CLI reports the first scheduled
+// restart instead of waiting long enough to hide it behind re-activation. Status parsing cannot
+// assume this value for already-loaded or foreign unit definitions.
 pub(crate) const SYSTEMD_RESTART_DELAY: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Error)]
