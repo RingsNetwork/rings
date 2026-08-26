@@ -604,7 +604,7 @@ impl MessageReassembler {
 
     /// [`remove_expired`](Self::remove_expired) with the clock injected (tests pass a controlled
     /// `now` to drive the real eviction logic).
-    fn remove_expired_at(&mut self, now: u128) {
+    pub(crate) fn remove_expired_at(&mut self, now: u128) {
         let buffered_cost = &mut self.buffered_cost;
         let budget = &self.budget;
         let slot_overhead = self.limits.slot_overhead;

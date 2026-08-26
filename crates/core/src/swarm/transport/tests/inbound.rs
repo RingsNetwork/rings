@@ -890,14 +890,13 @@ async fn expired_partial_reassembly_releases_shared_budget_without_more_peer_tra
     let peer: Did = peer_key.address().into();
     let session = SessionSk::new_with_seckey(&peer_key)?;
     let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
+    let meta = crate::chunk::ChunkMeta::default();
+    let expiry = meta.ts_ms.saturating_add(meta.ttl_ms as u128);
     let frame = local_wire(
         Message::Chunk(Chunk {
             chunk: [0, 2],
             data: Bytes::from_static(b"partial"),
-            meta: crate::chunk::ChunkMeta {
-                ttl_ms: 20,
-                ..crate::chunk::ChunkMeta::default()
-            },
+            meta,
         }),
         &session,
         transport.dht.did,
@@ -908,6 +907,7 @@ async fn expired_partial_reassembly_releases_shared_budget_without_more_peer_tra
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
     assert!(budget.buffered_cost_for_test() > 0);
+    callback.set_reassembly_cleanup_now_for_test(expiry);
 
     tokio::time::timeout(Duration::from_secs(1), async {
         while budget.buffered_cost_for_test() != 0 {

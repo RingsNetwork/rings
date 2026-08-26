@@ -180,6 +180,8 @@ pub(super) struct InboundProcessor {
     callback: SharedSwarmCallback,
     reassembler: Arc<FuturesMutex<MessageReassembler>>,
     pending_attempt: Arc<Mutex<Option<PendingConnectionAttempt>>>,
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    reassembly_cleanup_now_for_test: Arc<Mutex<Option<u128>>>,
 }
 
 /// [InnerSwarmCallback] wraps [SharedSwarmCallback] with inner handling for a specific connection.
@@ -231,6 +233,8 @@ impl InnerSwarmCallback {
             callback,
             reassembler: Arc::new(FuturesMutex::new(reassembler)),
             pending_attempt: Arc::new(Mutex::new(None)),
+            #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+            reassembly_cleanup_now_for_test: Arc::new(Mutex::new(None)),
         };
         let inbound = InboundMailbox::spawn(processor.clone(), inbound_capacity);
         Self { processor, inbound }
@@ -248,6 +252,15 @@ impl InnerSwarmCallback {
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn inbound_admitted_count_for_test(&self) -> usize {
         self.inbound.admitted_count_for_test()
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) fn set_reassembly_cleanup_now_for_test(&self, now: u128) {
+        *self
+            .processor
+            .reassembly_cleanup_now_for_test
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(now);
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -571,7 +584,18 @@ impl InboundProcessor {
     }
 
     pub(super) async fn remove_expired_reassembly(&self) {
-        self.reassembler.lock().await.remove_expired();
+        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+        let cleanup_now = *self
+            .reassembly_cleanup_now_for_test
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut reassembler = self.reassembler.lock().await;
+        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+        if let Some(now) = cleanup_now {
+            reassembler.remove_expired_at(now);
+            return;
+        }
+        reassembler.remove_expired();
     }
 
     pub(super) async fn decode_verified_message(
