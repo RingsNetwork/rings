@@ -45,6 +45,7 @@ pub(crate) const fn inbound_peer_capacity_for_test() -> usize {
     inbound::peer_capacity_for_test()
 }
 use inbound::InboundMailbox;
+use inbound::ReassemblyCleanupClock;
 
 pub use crate::error::CallbackError;
 type TransportCallbackError = Box<dyn std::error::Error>;
@@ -180,8 +181,6 @@ pub(super) struct InboundProcessor {
     callback: SharedSwarmCallback,
     reassembler: Arc<FuturesMutex<MessageReassembler>>,
     pending_attempt: Arc<Mutex<Option<PendingConnectionAttempt>>>,
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    reassembly_cleanup_now_for_test: Arc<Mutex<Option<u128>>>,
 }
 
 /// [InnerSwarmCallback] wraps [SharedSwarmCallback] with inner handling for a specific connection.
@@ -221,6 +220,18 @@ impl InnerSwarmCallback {
 
     /// Create a new [InnerSwarmCallback] with the provided transport and callback.
     pub fn new(transport: Arc<SwarmTransport>, callback: SharedSwarmCallback) -> Self {
+        Self::new_with_reassembly_cleanup_clock(
+            transport,
+            callback,
+            ReassemblyCleanupClock::system(),
+        )
+    }
+
+    fn new_with_reassembly_cleanup_clock(
+        transport: Arc<SwarmTransport>,
+        callback: SharedSwarmCallback,
+        cleanup_clock: ReassemblyCleanupClock,
+    ) -> Self {
         let inbound_capacity = transport.inbound_capacity();
         let message_handler = MessageHandler::new(transport.clone(), callback.clone());
         let reassembler = MessageReassembler::with_limits_and_budget(
@@ -233,11 +244,23 @@ impl InnerSwarmCallback {
             callback,
             reassembler: Arc::new(FuturesMutex::new(reassembler)),
             pending_attempt: Arc::new(Mutex::new(None)),
-            #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-            reassembly_cleanup_now_for_test: Arc::new(Mutex::new(None)),
         };
-        let inbound = InboundMailbox::spawn(processor.clone(), inbound_capacity);
+        let inbound = InboundMailbox::spawn(processor.clone(), inbound_capacity, cleanup_clock);
         Self { processor, inbound }
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    /// Construct an inbound actor with an injected periodic-cleanup clock.
+    pub(crate) fn new_with_reassembly_cleanup_clock_for_test(
+        transport: Arc<SwarmTransport>,
+        callback: SharedSwarmCallback,
+        now_ms: Arc<Mutex<u128>>,
+    ) -> Self {
+        Self::new_with_reassembly_cleanup_clock(
+            transport,
+            callback,
+            ReassemblyCleanupClock::controlled(now_ms),
+        )
     }
 
     /// Bind this callback to the pending handshake that created its transport.
@@ -252,15 +275,6 @@ impl InnerSwarmCallback {
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn inbound_admitted_count_for_test(&self) -> usize {
         self.inbound.admitted_count_for_test()
-    }
-
-    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-    pub(crate) fn set_reassembly_cleanup_now_for_test(&self, now: u128) {
-        *self
-            .processor
-            .reassembly_cleanup_now_for_test
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(now);
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -583,19 +597,8 @@ impl InboundProcessor {
         self.reassembler.lock().await.handle_retained_outcome(chunk)
     }
 
-    pub(super) async fn remove_expired_reassembly(&self) {
-        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-        let cleanup_now = *self
-            .reassembly_cleanup_now_for_test
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut reassembler = self.reassembler.lock().await;
-        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-        if let Some(now) = cleanup_now {
-            reassembler.remove_expired_at(now);
-            return;
-        }
-        reassembler.remove_expired();
+    pub(super) async fn remove_expired_reassembly_at(&self, now_ms: u128) {
+        self.reassembler.lock().await.remove_expired_at(now_ms);
     }
 
     pub(super) async fn decode_verified_message(

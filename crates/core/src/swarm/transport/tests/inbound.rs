@@ -889,9 +889,14 @@ async fn expired_partial_reassembly_releases_shared_budget_without_more_peer_tra
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
     let session = SessionSk::new_with_seckey(&peer_key)?;
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
     let meta = crate::chunk::ChunkMeta::default();
     let expiry = meta.ts_ms.saturating_add(meta.ttl_ms as u128);
+    let cleanup_now_ms = Arc::new(Mutex::new(meta.ts_ms));
+    let callback = InnerSwarmCallback::new_with_reassembly_cleanup_clock_for_test(
+        Arc::clone(&transport),
+        Arc::new(NoopSwarmCallback),
+        Arc::clone(&cleanup_now_ms),
+    );
     let frame = local_wire(
         Message::Chunk(Chunk {
             chunk: [0, 2],
@@ -907,7 +912,9 @@ async fn expired_partial_reassembly_releases_shared_budget_without_more_peer_tra
         .await
         .map_err(|error| Error::InvalidMessage(error.to_string()))?;
     assert!(budget.buffered_cost_for_test() > 0);
-    callback.set_reassembly_cleanup_now_for_test(expiry);
+    *cleanup_now_ms
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = expiry;
 
     tokio::time::timeout(Duration::from_secs(1), async {
         while budget.buffered_cost_for_test() != 0 {

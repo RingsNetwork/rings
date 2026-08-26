@@ -44,6 +44,7 @@ use crate::utils::sleep;
 mod deadline;
 mod lane;
 mod reassembly;
+mod reassembly_clock;
 mod ticket;
 
 use self::deadline::await_inbound_deadline;
@@ -51,6 +52,7 @@ use self::deadline::InboundDeadline;
 pub(crate) use self::lane::InboundLane;
 use self::lane::INBOUND_LANE_COUNT;
 use self::reassembly::process_chunk_event;
+pub(super) use self::reassembly_clock::ReassemblyCleanupClock;
 use self::ticket::InboundCommand;
 use self::ticket::InboundSender;
 use self::ticket::InboundTicket;
@@ -361,9 +363,13 @@ pub(super) struct InboundMailbox {
 }
 
 impl InboundMailbox {
-    pub(super) fn spawn(processor: InboundProcessor, capacity: Arc<InboundCapacity>) -> Self {
+    pub(super) fn spawn(
+        processor: InboundProcessor,
+        capacity: Arc<InboundCapacity>,
+        cleanup_clock: ReassemblyCleanupClock,
+    ) -> Self {
         let (sender, receiver) = mpsc::unbounded();
-        let actor_available = spawn_actor(InboundActor::new(processor, receiver));
+        let actor_available = spawn_actor(InboundActor::new(processor, receiver, cleanup_clock));
         Self {
             sender: Arc::new(Mutex::new(InboundSender::new(sender))),
             capacity,
@@ -557,12 +563,17 @@ struct InboundActor {
     active: FuturesUnordered<InboundTaskFuture>,
     active_lanes: [Option<u64>; INBOUND_LANE_COUNT],
     reassembly_handoff_barrier: Option<ReassemblyHandoffBarrier>,
+    reassembly_cleanup_clock: ReassemblyCleanupClock,
     next_reassembly_cleanup: Instant,
     input_closed: bool,
 }
 
 impl InboundActor {
-    fn new(processor: InboundProcessor, receiver: mpsc::UnboundedReceiver<InboundCommand>) -> Self {
+    fn new(
+        processor: InboundProcessor,
+        receiver: mpsc::UnboundedReceiver<InboundCommand>,
+        reassembly_cleanup_clock: ReassemblyCleanupClock,
+    ) -> Self {
         Self {
             processor,
             receiver,
@@ -570,6 +581,7 @@ impl InboundActor {
             active: FuturesUnordered::new(),
             active_lanes: [None; INBOUND_LANE_COUNT],
             reassembly_handoff_barrier: None,
+            reassembly_cleanup_clock,
             next_reassembly_cleanup: Instant::now() + REASSEMBLY_CLEANUP_INTERVAL,
             input_closed: false,
         }
@@ -696,7 +708,8 @@ impl InboundActor {
     }
 
     async fn cleanup_expired_reassembly(&mut self) {
-        self.processor.remove_expired_reassembly().await;
+        let now_ms = self.reassembly_cleanup_clock.now_ms();
+        self.processor.remove_expired_reassembly_at(now_ms).await;
         self.next_reassembly_cleanup = Instant::now() + REASSEMBLY_CLEANUP_INTERVAL;
     }
 

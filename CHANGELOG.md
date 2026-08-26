@@ -35,6 +35,11 @@
   callback admission shares the transport's frame accountant. The connection identifier field is
   now private; read it with `cid()`.
 
+### Changed
+
+- Default CLI and SDK logging now emit only error-level events unless callers explicitly select a
+  more verbose level; high-frequency transport diagnostics moved to debug or trace.
+
 ### Fixed
 
 - Bound inbound and outbound scheduling, chunk reassembly, and data-channel delivery lifetimes.
