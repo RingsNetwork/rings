@@ -38,6 +38,8 @@ pub(super) enum SystemdError {
     Definition(#[from] SystemdDefinitionError),
     #[error(transparent)]
     Status(#[from] SystemdStatusError),
+    #[error("the systemd user unit is unavailable; unmask or repair {path} before restarting it")]
+    UnitUnavailable { path: PathBuf },
 }
 
 impl From<SystemdDefinitionError> for DaemonError {
@@ -117,15 +119,15 @@ where R: CommandRunner
             .run_checked(SYSTEMCTL, &[SYSTEMD_USER_ARG, "daemon-reload"])?;
         self.runner
             .run_checked(SYSTEMCTL, &[SYSTEMD_USER_ARG, "enable", SYSTEMD_UNIT])?;
-        self.runner
-            .run_checked(SYSTEMCTL, &[SYSTEMD_USER_ARG, "restart", SYSTEMD_UNIT])?;
-        self.settle_status()
+        self.restart_and_settle()
     }
 
     fn stop(&self) -> Result<DaemonStatus, DaemonError> {
         let record = self.observe_record()?;
-        if record.is_missing() {
-            return Ok(record.into_observation(self.has_definition()).into_status());
+        if record.is_inactive_without_process() {
+            return Ok(status_from_observation(
+                record.into_observation(self.has_definition()),
+            ));
         }
         self.runner
             .run_checked(SYSTEMCTL, &[SYSTEMD_USER_ARG, "stop", SYSTEMD_UNIT])?;
@@ -136,22 +138,25 @@ where R: CommandRunner
         if self.has_definition() {
             self.runner
                 .run_checked(SYSTEMCTL, &[SYSTEMD_USER_ARG, "daemon-reload"])?;
-            self.runner
-                .run_checked(SYSTEMCTL, &[SYSTEMD_USER_ARG, "restart", SYSTEMD_UNIT])?;
-            return self.settle_status();
+        } else {
+            let record = self.observe_record()?;
+            if record.is_missing() {
+                return Err(DaemonError::ServiceNotInstalled {
+                    path: self.unit_path.clone(),
+                });
+            }
+            if record.is_unavailable() {
+                return Err(SystemdError::UnitUnavailable {
+                    path: self.unit_path.clone(),
+                }
+                .into());
+            }
         }
-        if self.observe_record()?.is_missing() {
-            return Err(DaemonError::ServiceNotInstalled {
-                path: self.unit_path.clone(),
-            });
-        }
-        self.runner
-            .run_checked(SYSTEMCTL, &[SYSTEMD_USER_ARG, "restart", SYSTEMD_UNIT])?;
-        self.settle_status()
+        self.restart_and_settle()
     }
 
     fn observe(&self) -> Result<DaemonStatus, DaemonError> {
-        Ok(self.observe_snapshot()?.into_status())
+        Ok(status_from_observation(self.observe_snapshot()?))
     }
 }
 
@@ -173,7 +178,22 @@ where R: CommandRunner
 
     fn settle_status(&self) -> Result<DaemonStatus, DaemonError> {
         let snapshot = wait_for_start_settlement(self.poll_schedule, || self.observe_snapshot())?;
-        Ok(snapshot.into_status())
+        Ok(status_from_observation(snapshot))
+    }
+
+    fn restart_and_settle(&self) -> Result<DaemonStatus, DaemonError> {
+        self.runner
+            .run_checked(SYSTEMCTL, &[SYSTEMD_USER_ARG, "restart", SYSTEMD_UNIT])?;
+        self.settle_status()
+    }
+}
+
+fn status_from_observation(observation: DaemonObservation<AutostartState>) -> DaemonStatus {
+    match observation {
+        DaemonObservation::NotInstalled => DaemonStatus::NotInstalled,
+        DaemonObservation::Installed { state, attachment } => {
+            DaemonStatus::installed(state.into_state(), attachment)
+        }
     }
 }
 
@@ -195,6 +215,7 @@ mod tests {
     use super::super::super::RuntimeFlavor;
     use super::super::tests::command_runner::CommandStep;
     use super::super::tests::command_runner::ScriptedCommandRunner;
+    use super::super::tests::fill_poll_budget;
     use super::super::tests::service_spec;
     use super::super::tests::TestRoot;
     use super::super::AutostartState;

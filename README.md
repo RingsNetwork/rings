@@ -142,14 +142,16 @@ definition.
 The captured working directory must continue to exist at the same path. Moving
 or deleting it prevents the service manager from starting the node; run
 `rings daemon start` again from a persistent directory to update the definition.
-`daemon start` and `daemon restart` poll short manager-bookkeeping transitions
-for up to two seconds. launchd `throttled` and systemd `auto-restart` states
-remain pending until the service runs or the polling budget expires; the loaded
-definition may configure a retry delay different from Rings' renderer. If the
-service runs, the command succeeds. If the budget expires in a non-running
-state, the service remains installed, the command exits non-zero with its last
-state, and `rings daemon status` shows any later transition. On macOS, `daemon
-stop` separately polls until launchd confirms that the job is unloaded.
+`daemon start` and `daemon restart` use a bounded sequence of manager
+observations; this is a CLI responsiveness budget, not a wall-clock guarantee,
+because each manager command can take additional time. launchd `throttled` and
+systemd `auto-restart` remain pending because those states say another spawn is
+scheduled. Rings observes them until the service runs or the budget is
+exhausted. If the final state is not running, the command exits non-zero with
+that state, and `rings daemon status` shows any later transition. A detached
+systemd unit with no local definition can disappear during restart and then be
+reported as not installed. On macOS, both `daemon start` and `daemon stop` also
+use a separate bounded poll to confirm that any loaded job has been unloaded.
 
 On macOS, standard output is written to `~/.rings/logs/daemon.log` and standard
 error to `~/.rings/logs/daemon.error.log`. On Linux, inspect logs with:

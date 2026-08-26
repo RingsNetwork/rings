@@ -26,9 +26,9 @@ mod launchd;
 #[cfg(any(target_os = "linux", all(test, unix)))]
 mod systemd;
 
-// This is a CLI responsiveness budget, not a promise about manager spawn latency. Twenty 100 ms
-// retries let adapters observe short bookkeeping transitions without waiting through a configured
-// or manager-imposed respawn delay.
+// This is a CLI responsiveness budget, not a wall-clock or manager spawn-latency guarantee. Twenty
+// 100 ms sleeps let adapters observe transitions that complete inside the budget and return the
+// latest observation when manager bookkeeping or a respawn delay outlives it.
 const MANAGER_OBSERVATION_SCHEDULE: PollSchedule = PollSchedule {
     retries: 20,
     interval: Duration::from_millis(100),
@@ -304,14 +304,17 @@ impl fmt::Display for DaemonFailure {
 ///
 /// `Stopped` means the manager retains an installed or loaded job but no process is running.
 /// `Restarting` means the manager has scheduled another spawn after the optional last failure.
-/// `Failed(None)` means systemd reports a terminal failure without an attributable cause. launchd
-/// uses `Failed(Some(_))` only when it can attribute a terminal process failure.
+/// `Failed` means systemd reports a terminal failure. launchd keeps an unproven respawn policy in
+/// `Unknown` rather than converting process history into a terminal verdict.
 #[derive(Debug, Eq, PartialEq)]
 enum DaemonState {
     Running,
     Stopped,
     Restarting(Option<DaemonFailure>),
+    #[cfg(any(target_os = "linux", all(test, unix)))]
     Failed(Option<DaemonFailure>),
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    Unavailable,
     Transitioning(DaemonTransition),
     Unknown(String),
 }
@@ -323,8 +326,12 @@ impl fmt::Display for DaemonState {
             Self::Stopped => formatter.write_str("stopped"),
             Self::Restarting(Some(failure)) => write!(formatter, "restarting ({failure})"),
             Self::Restarting(None) => formatter.write_str("restarting"),
+            #[cfg(any(target_os = "linux", all(test, unix)))]
             Self::Failed(Some(failure)) => write!(formatter, "failed ({failure})"),
+            #[cfg(any(target_os = "linux", all(test, unix)))]
             Self::Failed(None) => formatter.write_str("failed"),
+            #[cfg(any(target_os = "linux", all(test, unix)))]
+            Self::Unavailable => formatter.write_str("unavailable"),
             Self::Transitioning(state) => state.fmt(formatter),
             Self::Unknown(state) => write!(formatter, "unknown ({state})"),
         }
@@ -371,41 +378,101 @@ impl fmt::Display for AutostartState {
     }
 }
 
-/// Whether the manager lifecycle is expected to advance inside the observation window.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum StartPollDisposition {
-    Pending,
-    Settled,
+/// A non-running lifecycle that may still advance during start settlement.
+#[derive(Debug, Eq, PartialEq)]
+enum PendingDaemonState {
+    Stopped,
+    Restarting(Option<DaemonFailure>),
+    Transitioning(DaemonTransition),
+    Unknown(String),
+}
+
+impl PendingDaemonState {
+    fn into_state(self) -> DaemonState {
+        match self {
+            Self::Stopped => DaemonState::Stopped,
+            Self::Restarting(failure) => DaemonState::Restarting(failure),
+            Self::Transitioning(transition) => DaemonState::Transitioning(transition),
+            Self::Unknown(state) => DaemonState::Unknown(state),
+        }
+    }
+}
+
+/// A lifecycle paired with its start-settlement proposition.
+///
+/// `PendingDaemonState` excludes `Running`, so a running service cannot consume the polling budget.
+#[derive(Debug, Eq, PartialEq)]
+enum ObservedDaemonState {
+    Settled(DaemonState),
+    Pending(PendingDaemonState),
+}
+
+impl ObservedDaemonState {
+    fn running() -> Self {
+        Self::Settled(DaemonState::Running)
+    }
+
+    fn stopped() -> Self {
+        Self::Settled(DaemonState::Stopped)
+    }
+
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    fn failed(failure: Option<DaemonFailure>) -> Self {
+        Self::Settled(DaemonState::Failed(failure))
+    }
+
+    #[cfg(any(target_os = "linux", all(test, unix)))]
+    fn unavailable() -> Self {
+        Self::Settled(DaemonState::Unavailable)
+    }
+
+    fn pending(state: PendingDaemonState) -> Self {
+        Self::Pending(state)
+    }
+
+    fn is_settled(&self) -> bool {
+        matches!(self, Self::Settled(_))
+    }
+
+    fn into_state(self) -> DaemonState {
+        match self {
+            Self::Settled(state) => state,
+            Self::Pending(state) => state.into_state(),
+        }
+    }
 }
 
 /// One service-manager lifecycle observation with an adapter-selected attachment.
 ///
 /// `A = ()` represents a lifecycle-only observation. systemd attaches `AutostartState` from the
-/// same `systemctl show` snapshot, while launchd reads that independent axis after settling.
+/// same `systemctl show` snapshot, while launchd reads that independent axis when producing status.
 #[derive(Debug, Eq, PartialEq)]
 enum DaemonObservation<A = ()> {
     NotInstalled,
     Installed {
-        state: DaemonState,
-        start_poll: StartPollDisposition,
+        state: ObservedDaemonState,
         attachment: A,
     },
 }
 
 impl<A> DaemonObservation<A> {
-    fn installed(state: DaemonState, start_poll: StartPollDisposition, attachment: A) -> Self {
-        Self::Installed {
-            state,
-            start_poll,
-            attachment,
-        }
+    fn installed(state: ObservedDaemonState, attachment: A) -> Self {
+        Self::Installed { state, attachment }
     }
 
-    /// Post: returns the adapter-owned settlement disposition; absence is terminal.
+    /// Central fold for an on-disk definition whose manager record is not yet observable.
+    fn definition_without_record(attachment: A) -> Self {
+        Self::installed(
+            ObservedDaemonState::pending(PendingDaemonState::Stopped),
+            attachment,
+        )
+    }
+
+    /// Post: absence and every `Settled` lifecycle terminate start polling.
     fn settles_start_poll(&self) -> bool {
         match self {
             Self::NotInstalled => true,
-            Self::Installed { start_poll, .. } => *start_poll == StartPollDisposition::Settled,
+            Self::Installed { state, .. } => state.is_settled(),
         }
     }
 }
@@ -430,18 +497,6 @@ impl DaemonStatus {
             state: DaemonState::Running,
             ..
         })
-    }
-}
-
-#[cfg(any(target_os = "linux", all(test, unix)))]
-impl DaemonObservation<AutostartState> {
-    fn into_status(self) -> DaemonStatus {
-        match self {
-            Self::NotInstalled => DaemonStatus::NotInstalled,
-            Self::Installed {
-                state, attachment, ..
-            } => DaemonStatus::installed(state, attachment),
-        }
     }
 }
 
@@ -532,9 +587,9 @@ where T: ValueEnum + fmt::Debug {
 /// failure says otherwise.
 ///
 /// Post: successful `start` and `restart` return the lifecycle selected by their settling poll.
-/// launchd samples the independent autostart axis once after that lifecycle settles; systemd reads
-/// both axes from the same manager snapshot. A successful `stop` returns one post-stop manager
-/// observation folded with the adapter's installation evidence; `observe` performs the same fold.
+/// launchd samples the independent autostart axis when producing status; systemd reads both axes
+/// from the same manager snapshot. `stop` and `observe` fold manager state with the same current
+/// installation evidence, so an action does not invent installation provenance.
 trait ServiceManager {
     fn name(&self) -> &'static str;
     fn definition_path(&self) -> &Path;
@@ -891,5 +946,20 @@ mod tests {
             log_level: cli_value_name(log_level)?,
             runtime: cli_value_name(runtime)?,
         })
+    }
+
+    #[cfg(unix)]
+    pub(super) fn fill_poll_budget(
+        steps: &mut Vec<command_runner::CommandStep>,
+        lifecycle_observations_already_queued: usize,
+        mut observation: impl FnMut() -> command_runner::CommandStep,
+    ) {
+        // A poll performs retries + 1 observations. The explicit queued count documents the one
+        // fixture that adds its first transition before filling the remaining budget.
+        let total_observations = TEST_OBSERVATION_SCHEDULE.retries.saturating_add(1);
+        assert!(lifecycle_observations_already_queued <= total_observations);
+        for _ in lifecycle_observations_already_queued..total_observations {
+            steps.push(observation());
+        }
     }
 }

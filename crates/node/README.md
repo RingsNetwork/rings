@@ -94,10 +94,10 @@ README for Linux lingering requirements and manual service removal. The captured
 working directory must remain at the same path; rerun `daemon start` from a
 persistent directory after moving or deleting it. `daemon stop` and `daemon
 restart` preserve the current login-autostart setting unless the service manager
-reports that its recovery step failed. Start and restart poll short manager
-bookkeeping transitions. launchd throttling and systemd auto-restart remain
-pending within the bounded window because loaded definitions may use retry
-delays different from Rings' renderer. The command succeeds if the service
-runs; otherwise it can remain installed while the command exits non-zero with
-its last observed state. On macOS, stop separately polls until launchd confirms
-unload.
+reports that its recovery step failed. Start and restart use a bounded sequence
+of manager observations rather than a wall-clock deadline. launchd throttling
+and systemd auto-restart remain pending because those states say another spawn
+is scheduled. The command succeeds if the service runs and otherwise exits
+non-zero with its last observed state. A detached systemd unit with no local
+definition can disappear during restart and then be reported as not installed.
+On macOS, start and stop also use a separate bounded poll to confirm unload.

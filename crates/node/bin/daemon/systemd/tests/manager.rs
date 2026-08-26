@@ -29,13 +29,9 @@ fn start_reporting_includes_the_systemd_exit_cause() -> Result<(), DaemonError> 
         CommandStep::success(SYSTEMCTL, &[SYSTEMD_USER_ARG, "enable", SYSTEMD_UNIT], ""),
         CommandStep::success(SYSTEMCTL, &[SYSTEMD_USER_ARG, "restart", SYSTEMD_UNIT], ""),
     ];
-    for _ in 0..=TEST_OBSERVATION_SCHEDULE.retries {
-        steps.push(CommandStep::success(
-            SYSTEMCTL,
-            &SYSTEMD_STATUS_ARGS,
-            failed_status,
-        ));
-    }
+    fill_poll_budget(&mut steps, 0, || {
+        CommandStep::success(SYSTEMCTL, &SYSTEMD_STATUS_ARGS, failed_status)
+    });
     let runner = ScriptedCommandRunner::new(steps);
     let manager = test_manager(&root, runner);
     let spec = service_spec(&LogLevel::Info, &RuntimeFlavor::MultiThread)?;
@@ -93,8 +89,9 @@ fn stop_targets_an_active_unit_when_the_local_definition_is_missing() -> Result<
     ]);
     let manager = detached_manager(runner);
 
-    manager.stop()?;
+    let status = manager.stop()?;
 
+    assert_eq!(status, DaemonStatus::NotInstalled);
     Ok(())
 }
 
@@ -183,10 +180,13 @@ fn restart_of_installed_unit_preserves_autostart() -> Result<(), DaemonError> {
 }
 
 #[test]
-fn stop_returns_not_installed_without_issuing_stop() -> Result<(), DaemonError> {
-    for status_output in [
-        NOT_INSTALLED_STATUS,
-        "LoadState=masked\nActiveState=inactive\nSubState=dead\nUnitFileState=masked\n",
+fn stop_returns_the_inactive_manager_verdict_without_issuing_stop() -> Result<(), DaemonError> {
+    for (status_output, expected) in [
+        (NOT_INSTALLED_STATUS, DaemonStatus::NotInstalled),
+        (
+            "LoadState=masked\nActiveState=inactive\nSubState=dead\nUnitFileState=masked\n",
+            DaemonStatus::installed(DaemonState::Unavailable, AutostartState::Unavailable),
+        ),
     ] {
         let runner = ScriptedCommandRunner::new([CommandStep::success(
             SYSTEMCTL,
@@ -197,7 +197,7 @@ fn stop_returns_not_installed_without_issuing_stop() -> Result<(), DaemonError> 
 
         let status = manager.stop()?;
 
-        assert_eq!(status, DaemonStatus::NotInstalled);
+        assert_eq!(status, expected);
     }
     Ok(())
 }
@@ -226,22 +226,34 @@ fn missing_manager_record_with_local_definition_is_installed_and_stopped() -> Re
 
 #[test]
 fn restart_rejects_a_not_installed_unit() {
-    for status_output in [
+    let runner = ScriptedCommandRunner::new([CommandStep::success(
+        SYSTEMCTL,
+        &SYSTEMD_STATUS_ARGS,
         NOT_INSTALLED_STATUS,
+    )]);
+    let manager = detached_manager(runner);
+
+    let result = manager.restart();
+
+    assert!(matches!(
+        result,
+        Err(DaemonError::ServiceNotInstalled { .. })
+    ));
+}
+
+#[test]
+fn restart_rejects_an_unavailable_unit_with_a_typed_error() {
+    let runner = ScriptedCommandRunner::new([CommandStep::success(
+        SYSTEMCTL,
+        &SYSTEMD_STATUS_ARGS,
         "LoadState=masked\nActiveState=inactive\nSubState=dead\nUnitFileState=masked\n",
-    ] {
-        let runner = ScriptedCommandRunner::new([CommandStep::success(
-            SYSTEMCTL,
-            &SYSTEMD_STATUS_ARGS,
-            status_output,
-        )]);
-        let manager = detached_manager(runner);
+    )]);
+    let manager = detached_manager(runner);
 
-        let result = manager.restart();
+    let result = manager.restart();
 
-        assert!(matches!(
-            result,
-            Err(DaemonError::ServiceNotInstalled { .. })
-        ));
-    }
+    assert!(matches!(
+        result,
+        Err(DaemonError::Systemd(SystemdError::UnitUnavailable { .. }))
+    ));
 }

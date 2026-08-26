@@ -67,13 +67,13 @@ fn restart_reads_disabled_autostart_once_and_suppresses_action_signal() -> Resul
         ),
         CommandStep::success(LAUNCHCTL, &["kickstart", "-k", &target], ""),
     ];
-    for _ in 0..=TEST_OBSERVATION_SCHEDULE.retries {
-        steps.push(CommandStep::success(
+    fill_poll_budget(&mut steps, 0, || {
+        CommandStep::success(
             LAUNCHCTL,
             &["print", &target],
             "state = throttled\nruns = 4\nlast terminating signal = Terminated: 15\n",
-        ));
-    }
+        )
+    });
     steps.push(disabled_autostart(domain));
     let runner = ScriptedCommandRunner::new(steps);
     let manager = test_manager(&root, runner);
@@ -178,13 +178,13 @@ fn restart_reports_signal_crash_after_sequence_advances() -> Result<(), DaemonEr
         &["print", &target],
         "state = spawn scheduled\nruns = 4\nlast terminating signal = Segmentation fault: 11\n",
     ));
-    for _ in 0..TEST_OBSERVATION_SCHEDULE.retries {
-        steps.push(CommandStep::success(
+    fill_poll_budget(&mut steps, 1, || {
+        CommandStep::success(
             LAUNCHCTL,
             &["print", &target],
             "state = throttled\nruns = 4\nlast terminating signal = Segmentation fault: 11\n",
-        ));
-    }
+        )
+    });
     steps.push(enabled_autostart(TEST_DOMAIN));
     let runner = ScriptedCommandRunner::new(steps);
     let manager = test_manager(&root, runner);
@@ -252,13 +252,9 @@ fn restart_without_a_sequence_baseline_reports_crash_loop_as_starting() -> Resul
         CommandStep::success(LAUNCHCTL, &["print", &target], "state = waiting\n"),
         CommandStep::success(LAUNCHCTL, &["kickstart", "-k", &target], ""),
     ];
-    for _ in 0..=TEST_OBSERVATION_SCHEDULE.retries {
-        steps.push(CommandStep::success(
-            LAUNCHCTL,
-            &["print", &target],
-            crash_loop,
-        ));
-    }
+    fill_poll_budget(&mut steps, 0, || {
+        CommandStep::success(LAUNCHCTL, &["print", &target], crash_loop)
+    });
     steps.push(enabled_autostart(TEST_DOMAIN));
     let manager = test_manager(&root, ScriptedCommandRunner::new(steps));
     install_test_definition(&root)?;
@@ -316,13 +312,13 @@ fn start_reporting_returns_throttled_after_the_poll_budget() -> Result<(), Daemo
         CommandStep::success(LAUNCHCTL, &["enable", &target], ""),
         CommandStep::success(LAUNCHCTL, &["bootstrap", domain, &definition_text], ""),
     ];
-    for _ in 0..=TEST_OBSERVATION_SCHEDULE.retries {
-        steps.push(CommandStep::success(
+    fill_poll_budget(&mut steps, 0, || {
+        CommandStep::success(
             LAUNCHCTL,
             &["print", &target],
             "state = throttled\nlast exit code = 78\n",
-        ));
-    }
+        )
+    });
     steps.push(enabled_autostart(domain));
     let runner = ScriptedCommandRunner::new(steps);
     let manager = test_manager(&root, runner);

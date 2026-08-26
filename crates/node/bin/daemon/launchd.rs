@@ -97,6 +97,10 @@ pub(super) enum LaunchdError {
     },
 }
 
+/// A concrete launchd disabled-label override.
+///
+/// Law: `Enabled` denotes the same manager fact as `AutostartState::Enabled`; `Disabled` denotes
+/// the same manager fact as `AutostartState::Disabled`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ConcreteAutostart {
     Enabled,
@@ -117,11 +121,6 @@ pub(super) struct LaunchdManager<R = ProcessCommandRunner> {
     target: String,
     poll_schedule: PollSchedule,
     runner: R,
-}
-
-struct UnloadResult<T> {
-    terminal_record: LaunchdRecord<T>,
-    was_loaded: bool,
 }
 
 #[cfg(target_os = "macos")]
@@ -178,13 +177,13 @@ where R: CommandRunner
         Err(command_failure(LAUNCHCTL, &arguments, output).into())
     }
 
-    fn unload_if_loaded(&self) -> Result<UnloadResult<Output>, DaemonError> {
+    /// Uses the command observation schedule to bound confirmation that `bootout` removed the
+    /// manager record. Exhaustion is terminal: stop cannot claim success, and start cannot safely
+    /// bootstrap a label that launchd may still consider loaded.
+    fn unload_if_loaded(&self) -> Result<LaunchdRecord<Output>, DaemonError> {
         let initial = self.service_record()?;
         if matches!(initial, LaunchdRecord::Missing) {
-            return Ok(UnloadResult {
-                terminal_record: initial,
-                was_loaded: false,
-            });
+            return Ok(initial);
         }
         self.runner
             .run_checked(LAUNCHCTL, &["bootout", self.target()])?;
@@ -196,10 +195,7 @@ where R: CommandRunner
         if matches!(terminal_record, LaunchdRecord::Loaded(_)) {
             Err(LaunchdError::ServiceDidNotUnload.into())
         } else {
-            Ok(UnloadResult {
-                terminal_record,
-                was_loaded: true,
-            })
+            Ok(terminal_record)
         }
     }
 
@@ -227,7 +223,8 @@ where R: CommandRunner
     /// Invariant: once temporary enablement succeeds, every bootstrap retry outcome attempts one
     /// disable. Only a failed disable can leave the previously observed disabled override changed.
     ///
-    /// Post: success bootstraps the service and restores the observed disabled override.
+    /// Post: direct bootstrap success changes no override. Retry success restores an observed
+    /// disabled override after temporarily enabling it.
     fn bootstrap_preserving_autostart(&self) -> Result<(), DaemonError> {
         let initial = self.bootstrap();
         let Err(error) = initial else {
@@ -265,8 +262,8 @@ where R: CommandRunner
             .into());
         }
         let bootstrap = self.bootstrap().map_err(Box::new);
-        // Observed on macOS 15.6.1 (24G90): disabling a live job does not unload or stop it. Restore
-        // Disabled was corroborated above, so restore that prior value after either retry result.
+        // Observed on macOS 15.6.1 (24G90): disabling a live job does not unload or stop it. The
+        // Disabled state was corroborated above, so restore that prior value after either result.
         let restore = self
             .set_autostart(ConcreteAutostart::Disabled)
             .map_err(Box::new);
@@ -303,27 +300,18 @@ where R: CommandRunner
         }
     }
 
-    fn reduce_record(
-        &self,
-        record: &LaunchdRecord<Output>,
-        missing_evidence: MissingRecordEvidence,
-        attribution: LaunchdAttribution,
-    ) -> DaemonObservation {
-        let borrowed = match record {
-            LaunchdRecord::Missing => LaunchdRecord::Missing,
-            LaunchdRecord::Loaded(output) => {
-                LaunchdRecord::Loaded(String::from_utf8_lossy(&output.stdout))
-            }
-        };
-        parse_launchd_observation(borrowed, missing_evidence, attribution)
-    }
-
     fn observe_lifecycle_with_attribution(
         &self,
         attribution: LaunchdAttribution,
     ) -> Result<DaemonObservation, DaemonError> {
-        let record = self.service_record()?;
-        Ok(self.reduce_record(&record, self.missing_record_evidence(), attribution))
+        let record = self
+            .service_record()?
+            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned());
+        Ok(parse_launchd_observation(
+            record,
+            self.missing_record_evidence(),
+            attribution,
+        ))
     }
 
     fn complete_observation(
@@ -334,7 +322,7 @@ where R: CommandRunner
             DaemonObservation::NotInstalled => Ok(DaemonStatus::NotInstalled),
             DaemonObservation::Installed { state, .. } => {
                 let autostart = self.autostart_state()?;
-                Ok(DaemonStatus::installed(state, autostart))
+                Ok(DaemonStatus::installed(state.into_state(), autostart))
             }
         }
     }
@@ -384,21 +372,20 @@ where R: CommandRunner
     }
 
     fn stop(&self) -> Result<DaemonStatus, DaemonError> {
-        let result = self.unload_if_loaded()?;
-        let evidence = if result.was_loaded {
-            MissingRecordEvidence::PreviouslyLoaded
-        } else {
-            self.missing_record_evidence()
-        };
-        let observation = self.reduce_record(
-            &result.terminal_record,
-            evidence,
+        let record = self
+            .unload_if_loaded()?
+            .map(|output| String::from_utf8_lossy(&output.stdout).into_owned());
+        let observation = parse_launchd_observation(
+            record,
+            self.missing_record_evidence(),
             LaunchdAttribution::Unfiltered,
         );
         self.complete_observation(observation)
     }
 
     fn restart(&self) -> Result<DaemonStatus, DaemonError> {
+        // Pre: sample the run counter strictly before issuing kickstart; attribution_after_restart
+        // uses that baseline to exclude termination history caused by this action.
         if let LaunchdRecord::Loaded(output) = self.service_record()? {
             let attribution = attribution_after_restart(&String::from_utf8_lossy(&output.stdout));
             self.runner
@@ -432,6 +419,7 @@ mod tests {
     use super::super::super::RuntimeFlavor;
     use super::super::tests::command_runner::CommandStep;
     use super::super::tests::command_runner::ScriptedCommandRunner;
+    use super::super::tests::fill_poll_budget;
     use super::super::tests::service_spec;
     use super::super::tests::TestRoot;
     use super::super::DaemonFailure;
