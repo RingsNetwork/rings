@@ -7,6 +7,7 @@ use super::DummyConnection;
 use super::DummyConnectionState;
 use super::CONNS;
 use crate::callback::InnerTransportCallback;
+use crate::core::drop_guard::ArmedDropGuard;
 use crate::core::transport::WebrtcConnectionState;
 use crate::sync_utils::lock_recover;
 
@@ -42,8 +43,16 @@ pub(super) struct DummyRetirementFence {
 }
 
 pub(super) struct DummyRetirementGuard {
-    fence: Option<DummyRetirementFence>,
+    cleanup: ArmedDropGuard<DummyRetirement, fn(DummyRetirement)>,
+}
+
+struct DummyRetirement {
+    fence: DummyRetirementFence,
     notify: bool,
+}
+
+fn finish_dummy_retirement(retirement: DummyRetirement) {
+    retirement.fence.finish_retirement(retirement.notify);
 }
 
 impl DummyRetirementFence {
@@ -62,8 +71,13 @@ impl DummyRetirementFence {
     pub(super) fn begin(self) -> DummyRetirementGuard {
         let notify = self.mark_closed();
         DummyRetirementGuard {
-            fence: Some(self),
-            notify,
+            cleanup: ArmedDropGuard::new(
+                DummyRetirement {
+                    fence: self,
+                    notify,
+                },
+                finish_dummy_retirement,
+            ),
         }
     }
 
@@ -106,18 +120,6 @@ impl DummyRetirementFence {
 
 impl DummyRetirementGuard {
     pub(super) fn finish(mut self) {
-        self.finish_inner();
-    }
-
-    fn finish_inner(&mut self) {
-        if let Some(fence) = self.fence.take() {
-            fence.finish_retirement(self.notify);
-        }
-    }
-}
-
-impl Drop for DummyRetirementGuard {
-    fn drop(&mut self) {
-        self.finish_inner();
+        self.cleanup.fire();
     }
 }

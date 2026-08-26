@@ -35,12 +35,12 @@ use super::PreparedInboundFrame;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
+use crate::fair_admission::admissible_capacity;
+use crate::fair_admission::retained_wire_bytes;
+use crate::fair_admission::CountedReservationRejection;
+use crate::fair_admission::CountedReservedCapacity;
 use crate::message::MessagePayload;
-use crate::utils::admissible_capacity;
-use crate::utils::retained_wire_bytes;
 use crate::utils::sleep;
-use crate::utils::CountedReservationRejection;
-use crate::utils::CountedReservedCapacity;
 
 mod deadline;
 mod lane;

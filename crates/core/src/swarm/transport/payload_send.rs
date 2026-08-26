@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use futures::future::FutureExt;
 use futures::pin_mut;
 use futures::select;
+use rings_transport::core::drop_guard::ArmedDropGuard;
 
 use super::delivery::terminate_accepted_connection;
 use super::delivery::ChunkSendPermit;
@@ -44,6 +45,11 @@ use crate::utils::sleep;
 const TRACKED_PAYLOAD_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.tracked_payload;
 const DETACHED_FIRST_FRAME_TIMEOUT: Duration = TRANSPORT_TIMEOUT_PROFILE.first_frame_admission;
 
+#[cfg(target_family = "wasm")]
+type CleanupAction = Box<dyn FnOnce(())>;
+#[cfg(not(target_family = "wasm"))]
+type CleanupAction = Box<dyn FnOnce(()) + Send>;
+
 struct OversizedPayloadLog {
     local: Did,
     next_hop: Did,
@@ -79,9 +85,25 @@ struct FramedOutboundTransfer {
 }
 
 struct StopOnDrop {
+    cleanup: ArmedDropGuard<StopCleanup, fn(StopCleanup)>,
+}
+
+struct StopCleanup {
     source: StopSource,
     handle: Option<OutboundPeerHandle>,
-    authority: Option<()>,
+}
+
+impl StopCleanup {
+    fn request_stop(&self) {
+        self.source.request_stop();
+        if let Some(handle) = &self.handle {
+            handle.cancel_stopped();
+        }
+    }
+}
+
+fn stop_outbound_transfer(cleanup: StopCleanup) {
+    cleanup.request_stop();
 }
 
 async fn await_bounded_cleanup<F, T>(future: F, cleanup_grace: Duration) -> Option<T>
@@ -96,54 +118,61 @@ where F: Future<Output = T> {
 }
 
 impl StopOnDrop {
-    fn new() -> Self {
-        Self {
-            source: StopSource::new(),
-            handle: None,
-            authority: Some(()),
-        }
-    }
-
-    fn token(&self) -> StopToken {
-        self.source.token()
+    fn new() -> (Self, StopToken) {
+        let source = StopSource::new();
+        let token = source.token();
+        (
+            Self {
+                cleanup: ArmedDropGuard::new(
+                    StopCleanup {
+                        source,
+                        handle: None,
+                    },
+                    stop_outbound_transfer,
+                ),
+            },
+            token,
+        )
     }
 
     fn bind_handle(&mut self, handle: OutboundPeerHandle) {
-        self.handle = Some(handle);
+        if let Some(cleanup) = self.cleanup.value_mut() {
+            cleanup.handle = Some(handle);
+        }
     }
 
     fn request_stop(&self) {
-        self.source.request_stop();
-        if let Some(handle) = &self.handle {
-            handle.cancel_stopped();
+        if let Some(cleanup) = self.cleanup.value() {
+            cleanup.request_stop();
         }
     }
 
     fn disarm(&mut self) {
-        self.authority.take();
-    }
-}
-
-impl Drop for StopOnDrop {
-    fn drop(&mut self) {
-        if self.authority.take().is_some() {
-            self.request_stop();
-        }
+        self.cleanup.disarm();
     }
 }
 
 struct DetachedAdmissionOnDrop {
     admission: DetachedAdmission,
     handle: OutboundPeerHandle,
-    authority: Option<()>,
+    cleanup: ArmedDropGuard<(), CleanupAction>,
 }
 
 impl DetachedAdmissionOnDrop {
     fn new(admission: DetachedAdmission, handle: OutboundPeerHandle) -> Self {
+        let cleanup_admission = admission.clone();
+        let cleanup_handle = handle.clone();
         Self {
             admission,
             handle,
-            authority: Some(()),
+            cleanup: ArmedDropGuard::new(
+                (),
+                Box::new(move |()| {
+                    if cleanup_admission.cancel() == DetachedAdmissionCancel::Cancelled {
+                        cleanup_handle.cancel_stopped();
+                    }
+                }),
+            ),
         }
     }
 
@@ -156,15 +185,7 @@ impl DetachedAdmissionOnDrop {
     }
 
     fn disarm(&mut self) {
-        self.authority.take();
-    }
-}
-
-impl Drop for DetachedAdmissionOnDrop {
-    fn drop(&mut self) {
-        if self.authority.take().is_some() {
-            self.cancel();
-        }
+        self.cleanup.disarm();
     }
 }
 
@@ -195,7 +216,7 @@ fn outbound_memory_reservation(wire_bytes: usize) -> usize {
     // Preparation owns the payload bytes plus the serialized transport frame.
     // TransportMessage shares the payload's Bytes allocation, so weighting by
     // two covers the whole-message peak without another wire-sized body copy.
-    crate::utils::retained_wire_bytes(wire_bytes).max(1)
+    crate::fair_admission::retained_wire_bytes(wire_bytes).max(1)
 }
 
 fn resolve_scheduler_loss(
@@ -261,7 +282,7 @@ impl SwarmTransport {
         completion_bound: Duration,
     ) -> Result<SendCompletionOutcome> {
         let did = payload.relay.next_hop;
-        let mut stop = StopOnDrop::new();
+        let (mut stop, stop_token) = StopOnDrop::new();
         let timeout = sleep(tracked_timeout).fuse();
         pin_mut!(timeout);
         let prepared = {
@@ -270,7 +291,7 @@ impl SwarmTransport {
                     payload.relay.next_hop,
                     payload,
                     OutboundCompletion::Tracked,
-                    stop.token(),
+                    stop_token,
                     None,
                 )
                 .fuse();

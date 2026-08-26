@@ -11,90 +11,83 @@ use crate::chunk::ReassemblyRejection;
 use crate::error::Error;
 use crate::error::Result;
 
+struct ReassembledEvent {
+    payload: crate::message::MessagePayload,
+    message: crate::message::Message,
+    lane: InboundLane,
+}
+
 pub(super) async fn process_chunk_event(
     processor: &InboundProcessor,
     mut event: InboundEvent,
 ) -> Option<InboundEvent> {
-    let chunk = match take_prepared_chunk(&mut event.prepared_message) {
-        Ok(chunk) => chunk,
-        Err(error) => {
-            finish_reply(event.reply, Err(InboundFailure::Core(error)));
-            return None;
+    let terminal_reply = match advance_chunk_event(processor, &mut event).await {
+        Ok(None) => Ok(()),
+        Ok(Some(reassembled)) => {
+            return Some(InboundEvent {
+                sequence: event.sequence,
+                peer: event.peer,
+                payload: reassembled.payload,
+                prepared_message: Some(reassembled.message),
+                lane: reassembled.lane,
+                permit: event.permit,
+                reply: event.reply,
+            });
         }
+        Err(error) => Err(InboundFailure::Core(error)),
     };
+    finish_reply(event.reply, terminal_reply);
+    None
+}
+
+async fn advance_chunk_event(
+    processor: &InboundProcessor,
+    event: &mut InboundEvent,
+) -> Result<Option<ReassembledEvent>> {
+    let chunk = take_prepared_chunk(&mut event.prepared_message)?;
     let bytes = match processor.handle_chunk(chunk).await {
         ReassemblyOutcome::Complete(bytes) => bytes,
         ReassemblyOutcome::Incomplete
         | ReassemblyOutcome::Rejected(ReassemblyRejection::Capacity)
         | ReassemblyOutcome::Rejected(ReassemblyRejection::Replay) => {
-            finish_reply(event.reply, Ok(()));
-            return None;
+            return Ok(None);
         }
         ReassemblyOutcome::Rejected(ReassemblyRejection::Invalid) => {
             processor.record_receive_failure(event.peer).await;
-            finish_reply(
-                event.reply,
-                Err(InboundFailure::Core(Error::InvalidChunkMessage)),
-            );
-            return None;
+            return Err(Error::InvalidChunkMessage);
         }
         ReassemblyOutcome::Rejected(ReassemblyRejection::LocalInvariant) => {
-            finish_reply(
-                event.reply,
-                Err(InboundFailure::Core(Error::InboundActorInvariantViolation)),
-            );
-            return None;
+            return Err(Error::InboundActorInvariantViolation);
         }
     };
     let reservation = memory_reservation(bytes.as_ref().len());
-    if let Err(error) = event.permit.try_transition(event.lane, reservation) {
-        finish_reply(event.reply, Err(InboundFailure::Core(error)));
-        return None;
-    }
+    event.permit.try_transition(event.lane, reservation)?;
     let DecodedInboundFrame {
         payload,
         prepared_message,
-    } = match decode_payload(processor, event.peer, bytes.as_ref()).await {
-        Ok(decoded) => decoded,
-        Err(error) => {
-            finish_reply(event.reply, Err(InboundFailure::Core(error)));
-            return None;
-        }
-    };
+    } = decode_payload(processor, event.peer, bytes.as_ref()).await?;
     let message = match prepared_message {
         Some(message) => message,
         None => match payload.transaction.data::<crate::message::Message>() {
             Ok(message) => message,
             Err(error) => {
                 processor.record_receive_failure(event.peer).await;
-                finish_reply(event.reply, Err(InboundFailure::Core(error)));
-                return None;
+                return Err(error);
             }
         },
     };
     let meta = crate::message::MessageMeta::from_message(&message);
     if meta.kind().is_chunk() {
         processor.record_receive_failure(event.peer).await;
-        finish_reply(
-            event.reply,
-            Err(InboundFailure::Core(Error::NestedChunkMessage)),
-        );
-        return None;
+        return Err(Error::NestedChunkMessage);
     }
     let lane = InboundLane::from_meta(meta);
-    if let Err(error) = event.permit.try_transition(lane, reservation) {
-        finish_reply(event.reply, Err(InboundFailure::Core(error)));
-        return None;
-    }
-    Some(InboundEvent {
-        sequence: event.sequence,
-        peer: event.peer,
+    event.permit.try_transition(lane, reservation)?;
+    Ok(Some(ReassembledEvent {
         payload,
-        prepared_message: Some(message),
+        message,
         lane,
-        permit: event.permit,
-        reply: event.reply,
-    })
+    }))
 }
 
 fn take_prepared_chunk(

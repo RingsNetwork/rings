@@ -7,14 +7,14 @@ use super::model::TransferClass;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
-use crate::utils::acquire_fair;
-use crate::utils::admissible_capacity;
-use crate::utils::retained_wire_bytes;
-use crate::utils::CountedReservationRejection;
-use crate::utils::CountedReservedCapacity;
-use crate::utils::FairWaitBudget;
-use crate::utils::FairWaitQueue;
-use crate::utils::ReservedCapacity;
+use crate::fair_admission::acquire_fair;
+use crate::fair_admission::admissible_capacity;
+use crate::fair_admission::retained_wire_bytes;
+use crate::fair_admission::CountedReservationRejection;
+use crate::fair_admission::CountedReservedCapacity;
+use crate::fair_admission::FairWaitBudget;
+use crate::fair_admission::FairWaitQueue;
+use crate::fair_admission::ReservedCapacity;
 
 /// Hard per-peer transfer bound, including queued and delivery-waiting heads.
 pub(crate) const OUTBOUND_TRANSFER_QUEUE_CAPACITY: usize = 256;
@@ -75,6 +75,36 @@ const OUTBOUND_GLOBAL_BYTE_RESERVATIONS: [usize; TransferClass::COUNT] = [
     OUTBOUND_GLOBAL_DATA_RESERVED_BYTES,
 ];
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum CapacityScope {
+    FixedReservation,
+    Shared,
+}
+
+async fn acquire_with_fixed_reservation<T>(
+    waiters: &Arc<FairWaitQueue>,
+    bytes: usize,
+    fixed_request_limit: usize,
+    capacity_error: impl Fn() -> Error,
+    try_reserved: impl FnOnce() -> Result<T>,
+    try_shared: impl FnMut() -> Result<T>,
+) -> Result<T> {
+    if let Ok(permit) = try_reserved() {
+        return Ok(permit);
+    }
+    if bytes <= fixed_request_limit {
+        return waiters.try_admit_unqueued(capacity_error(), try_shared);
+    }
+    acquire_fair(
+        waiters,
+        bytes,
+        capacity_error(),
+        || Error::ChannelSendMessageFailed,
+        try_shared,
+    )
+    .await
+}
+
 pub(super) struct GlobalTransferCapacity {
     state: Mutex<ReservedCapacity<{ TransferClass::COUNT }>>,
     waiters: Arc<FairWaitQueue>,
@@ -100,7 +130,7 @@ impl GlobalTransferCapacity {
         class: TransferClass,
         bytes: usize,
     ) -> Result<GlobalCapacityPermit> {
-        self.try_acquire_inner(peer, class, bytes, false)
+        self.try_acquire_inner(peer, class, bytes, CapacityScope::Shared)
     }
 
     fn try_acquire_reserved(
@@ -109,7 +139,7 @@ impl GlobalTransferCapacity {
         class: TransferClass,
         bytes: usize,
     ) -> Result<GlobalCapacityPermit> {
-        self.try_acquire_inner(peer, class, bytes, true)
+        self.try_acquire_inner(peer, class, bytes, CapacityScope::FixedReservation)
     }
 
     fn try_acquire_inner(
@@ -117,14 +147,14 @@ impl GlobalTransferCapacity {
         peer: Did,
         class: TransferClass,
         bytes: usize,
-        reserved_only: bool,
+        scope: CapacityScope,
     ) -> Result<GlobalCapacityPermit> {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut next = *state;
-        if reserved_only
+        if scope == CapacityScope::FixedReservation
             && !next.reservation_covers(class.index(), bytes, &OUTBOUND_GLOBAL_BYTE_RESERVATIONS)
         {
             return Err(memory_capacity_error(peer, bytes, global_byte_limit(class)));
@@ -151,20 +181,12 @@ impl GlobalTransferCapacity {
         class: TransferClass,
         bytes: usize,
     ) -> Result<GlobalCapacityPermit> {
-        if let Ok(permit) = self.try_acquire_reserved(peer, class, bytes) {
-            return Ok(permit);
-        }
-        if bytes <= fixed_request_bytes(&OUTBOUND_GLOBAL_BYTE_RESERVATIONS, class) {
-            return self.waiters.try_admit_unqueued(
-                memory_capacity_error(peer, bytes, global_byte_limit(class)),
-                || self.try_acquire(peer, class, bytes),
-            );
-        }
-        acquire_fair(
+        acquire_with_fixed_reservation(
             &self.waiters,
             bytes,
-            memory_capacity_error(peer, bytes, global_byte_limit(class)),
-            || Error::ChannelSendMessageFailed,
+            fixed_request_bytes(&OUTBOUND_GLOBAL_BYTE_RESERVATIONS, class),
+            || memory_capacity_error(peer, bytes, global_byte_limit(class)),
+            || self.try_acquire_reserved(peer, class, bytes),
             || self.try_acquire(peer, class, bytes),
         )
         .await
@@ -234,7 +256,7 @@ impl TransferCapacity {
         class: TransferClass,
         bytes: usize,
     ) -> Result<PeerCapacityPermit> {
-        self.try_acquire_peer_inner(peer, class, bytes, false)
+        self.try_acquire_peer_inner(peer, class, bytes, CapacityScope::Shared)
     }
 
     fn try_acquire_reserved_peer(
@@ -243,7 +265,7 @@ impl TransferCapacity {
         class: TransferClass,
         bytes: usize,
     ) -> Result<PeerCapacityPermit> {
-        self.try_acquire_peer_inner(peer, class, bytes, true)
+        self.try_acquire_peer_inner(peer, class, bytes, CapacityScope::FixedReservation)
     }
 
     fn try_acquire_peer_inner(
@@ -251,14 +273,14 @@ impl TransferCapacity {
         peer: Did,
         class: TransferClass,
         bytes: usize,
-        reserved_only: bool,
+        scope: CapacityScope,
     ) -> Result<PeerCapacityPermit> {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut next = *state;
-        if reserved_only && !next.reservation_covers(class, bytes) {
+        if scope == CapacityScope::FixedReservation && !next.reservation_covers(class, bytes) {
             return Err(memory_capacity_error(peer, bytes, peer_byte_limit(class)));
         }
         match next.try_reserve(class, bytes) {
@@ -287,20 +309,12 @@ impl TransferCapacity {
         class: TransferClass,
         bytes: usize,
     ) -> Result<PeerCapacityPermit> {
-        if let Ok(permit) = self.try_acquire_reserved_peer(peer, class, bytes) {
-            return Ok(permit);
-        }
-        if bytes <= fixed_request_bytes(&OUTBOUND_PEER_BYTE_RESERVATIONS, class) {
-            return self.waiters.try_admit_unqueued(
-                memory_capacity_error(peer, bytes, peer_byte_limit(class)),
-                || self.try_acquire_peer(peer, class, bytes),
-            );
-        }
-        acquire_fair(
+        acquire_with_fixed_reservation(
             &self.waiters,
             bytes,
-            memory_capacity_error(peer, bytes, peer_byte_limit(class)),
-            || Error::ChannelSendMessageFailed,
+            fixed_request_bytes(&OUTBOUND_PEER_BYTE_RESERVATIONS, class),
+            || memory_capacity_error(peer, bytes, peer_byte_limit(class)),
+            || self.try_acquire_reserved_peer(peer, class, bytes),
             || self.try_acquire_peer(peer, class, bytes),
         )
         .await

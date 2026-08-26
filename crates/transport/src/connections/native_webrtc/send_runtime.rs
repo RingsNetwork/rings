@@ -14,6 +14,7 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use super::NATIVE_SEND_COMPLETION_TIMEOUT;
+use crate::core::drop_guard::ArmedDropGuard;
 use crate::core::transport::ConnectionStateCell;
 use crate::core::transport::SendAcceptance;
 use crate::error::Error;
@@ -89,16 +90,15 @@ impl NativeRetirementFence {
 
 pub(super) struct RetirementFenceGuard {
     fence: NativeRetirementFence,
-    acceptance: Option<SendAcceptance>,
-    authority: Option<()>,
+    cleanup: ArmedDropGuard<(), Box<dyn FnOnce(()) + Send>>,
 }
 
 impl RetirementFenceGuard {
     pub(super) fn new(fence: NativeRetirementFence) -> Self {
+        let cleanup_fence = fence.clone();
         Self {
             fence,
-            acceptance: None,
-            authority: Some(()),
+            cleanup: ArmedDropGuard::new((), Box::new(move |()| cleanup_fence.request())),
         }
     }
 
@@ -106,36 +106,30 @@ impl RetirementFenceGuard {
         fence: NativeRetirementFence,
         acceptance: SendAcceptance,
     ) -> Self {
+        let cleanup_fence = fence.clone();
         Self {
             fence,
-            acceptance: Some(acceptance),
-            authority: Some(()),
+            cleanup: ArmedDropGuard::new(
+                (),
+                Box::new(move |()| {
+                    if acceptance.is_irrevocable() {
+                        cleanup_fence.request();
+                    }
+                }),
+            ),
         }
     }
 
     pub(super) fn retire(&mut self) {
-        if self.authority.take().is_some()
-            && self
-                .acceptance
-                .as_ref()
-                .is_none_or(SendAcceptance::is_irrevocable)
-        {
-            self.fence.request();
-        }
+        self.cleanup.fire();
     }
 
     pub(super) fn disarm(&mut self) {
-        self.authority.take();
+        self.cleanup.disarm();
     }
 
     pub(super) fn fence(&self) -> &NativeRetirementFence {
         &self.fence
-    }
-}
-
-impl Drop for RetirementFenceGuard {
-    fn drop(&mut self) {
-        self.retire();
     }
 }
 
@@ -226,9 +220,24 @@ where
 struct PhysicalRetirementGuard<F>
 where F: Future<Output = Result<()>> + Send + 'static
 {
+    cleanup: ArmedDropGuard<PhysicalRetirement<F>, fn(PhysicalRetirement<F>)>,
+}
+
+struct PhysicalRetirement<F> {
     runtime: tokio::runtime::Handle,
     acceptance: SendAcceptance,
-    retirement: Option<F>,
+    retirement: F,
+}
+
+fn retire_abandoned_send<F>(retirement: PhysicalRetirement<F>)
+where F: Future<Output = Result<()>> + Send + 'static {
+    if retirement.acceptance.is_irrevocable() {
+        retirement.runtime.spawn(async move {
+            if let Err(error) = retirement.retirement.await {
+                tracing::warn!(%error, "failed to retire abandoned native send");
+            }
+        });
+    }
 }
 
 impl<F> PhysicalRetirementGuard<F>
@@ -236,36 +245,25 @@ where F: Future<Output = Result<()>> + Send + 'static
 {
     fn new(runtime: tokio::runtime::Handle, acceptance: SendAcceptance, retirement: F) -> Self {
         Self {
-            runtime,
-            acceptance,
-            retirement: Some(retirement),
+            cleanup: ArmedDropGuard::new(
+                PhysicalRetirement {
+                    runtime,
+                    acceptance,
+                    retirement,
+                },
+                retire_abandoned_send::<F>,
+            ),
         }
     }
 
     fn disarm(&mut self) {
-        self.retirement = None;
+        self.cleanup.disarm();
     }
 
     async fn retire(&mut self) -> Result<()> {
-        match self.retirement.take() {
-            Some(retirement) => retirement.await,
+        match self.cleanup.take() {
+            Some(retirement) => retirement.retirement.await,
             None => Ok(()),
-        }
-    }
-}
-
-impl<F> Drop for PhysicalRetirementGuard<F>
-where F: Future<Output = Result<()>> + Send + 'static
-{
-    fn drop(&mut self) {
-        if self.acceptance.is_irrevocable() {
-            if let Some(retirement) = self.retirement.take() {
-                self.runtime.spawn(async move {
-                    if let Err(error) = retirement.await {
-                        tracing::warn!(%error, "failed to retire abandoned native send");
-                    }
-                });
-            }
         }
     }
 }
