@@ -242,7 +242,7 @@ impl OnlineNodeDescriptor {
     }
 
     /// Return whether this descriptor belongs to the local DHT protocol mode.
-    pub const fn matches_dht_protocol(&self, expected: DhtProtocolMode) -> bool {
+    pub fn matches_dht_protocol(&self, expected: DhtProtocolMode) -> bool {
         self.dht_protocol_mode().matches(expected)
     }
 

@@ -53,7 +53,6 @@ impl StorageSyncOutcome {
         matches!(self, Self::Sent(_))
     }
 
-    #[cfg(test)]
     pub(crate) const fn is_deferred(self) -> bool {
         matches!(self, Self::Deferred)
     }
@@ -496,7 +495,7 @@ impl SwarmTransport {
             .map(|conn| conn.webrtc_connection_state());
 
         let outcome = self.send_storage_sync(msg).await?;
-        if outcome == StorageSyncOutcome::Deferred {
+        if outcome.is_deferred() {
             tracing::warn!(
                 target: "rings_core::storage_sync",
                 local = %self.dht.did,
