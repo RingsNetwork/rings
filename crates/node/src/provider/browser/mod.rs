@@ -28,6 +28,6 @@ pub fn debug(value: bool) {
 /// set log_level
 #[wasm_export]
 pub fn log_level(level: &str) {
-    let level = LogLevel::from_str(level).unwrap_or(LogLevel::Error);
+    let level = LogLevel::from_str(level).unwrap_or_default();
     init_logging(level);
 }

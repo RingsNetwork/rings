@@ -127,7 +127,7 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
         }
 
         if ctx.should_forward_from(self.dht.did) {
-            tracing::info!(
+            tracing::trace!(
                 local = %self.dht.did,
                 tx_id = %ctx.transaction.tx_id,
                 origin = ?ctx.relay.try_origin_sender().ok(),
@@ -141,7 +141,7 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
                 .await
         } else {
             let peer = ctx.relay.try_origin_sender()?;
-            tracing::info!(
+            tracing::trace!(
                 local = %self.dht.did,
                 peer = %peer,
                 tx_id = %ctx.transaction.tx_id,
@@ -154,7 +154,7 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
                 .await
             {
                 Ok(answer) => {
-                    tracing::info!(
+                    tracing::trace!(
                         local = %self.dht.did,
                         peer = %peer,
                         tx_id = %ctx.transaction.tx_id,
@@ -188,7 +188,7 @@ impl HandleMsg<ConnectNodeSend> for MessageHandler {
 impl HandleMsg<ConnectNodeReport> for MessageHandler {
     async fn handle(&self, ctx: &MessagePayload, msg: &ConnectNodeReport) -> Result<()> {
         if ctx.should_forward_from(self.dht.did) {
-            tracing::info!(
+            tracing::trace!(
                 local = %self.dht.did,
                 tx_id = %ctx.transaction.tx_id,
                 origin = ?ctx.relay.try_origin_sender().ok(),
@@ -202,7 +202,7 @@ impl HandleMsg<ConnectNodeReport> for MessageHandler {
                 .await
         } else {
             let peer = ctx.relay.try_origin_sender()?;
-            tracing::info!(
+            tracing::trace!(
                 local = %self.dht.did,
                 peer = %peer,
                 tx_id = %ctx.transaction.tx_id,
@@ -211,7 +211,7 @@ impl HandleMsg<ConnectNodeReport> for MessageHandler {
             );
             match self.transport.accept_remote_connection(peer, msg).await {
                 Ok(()) => {
-                    tracing::info!(
+                    tracing::trace!(
                         local = %self.dht.did,
                         peer = %peer,
                         tx_id = %ctx.transaction.tx_id,

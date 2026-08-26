@@ -807,7 +807,7 @@ impl TransportCallback for InnerSwarmCallback {
                     .transport
                     .record_peer_disconnected(attempt)
                     .await;
-                tracing::info!("Connection to {did} is disconnected, waiting for recovery");
+                tracing::debug!("Connection to {did} is disconnected, waiting for recovery");
                 false
             }
             _ => false,

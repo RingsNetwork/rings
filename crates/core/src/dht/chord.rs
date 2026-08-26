@@ -313,6 +313,33 @@ impl PeerRing {
     }
 
     #[cfg(test)]
+    pub(crate) fn replace_fingers_for_test(&self, fingers: &[(usize, Did)]) -> Result<()> {
+        let _transition = self
+            .topology_transition
+            .lock()
+            .map_err(|_| Error::DHTSyncLockError)?;
+        let mut observed = self.lock_finger_state()?;
+        for (index, did) in fingers {
+            if *index >= observed.slot_count() {
+                return Err(Error::InvalidMessage(format!(
+                    "test finger index {index} exceeds slot count {}",
+                    observed.slot_count()
+                )));
+            }
+            if *did == self.did {
+                return Err(Error::InvalidMessage(
+                    "test finger fixture cannot contain the local DID".to_owned(),
+                ));
+            }
+        }
+        observed.reset_finger();
+        for (index, did) in fingers {
+            observed.set(*index, *did);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
     pub(crate) fn lock_predecessor(&self) -> Result<MutexGuard<'_, Option<Did>>> {
         self.lock_predecessor_state()
     }

@@ -618,7 +618,7 @@ impl Stabilizer {
 
         if should_repair {
             self.transport.request_storage_repair();
-            tracing::info!(
+            tracing::debug!(
                 target: "rings_core::dht::stabilization",
                 local = %self.dht.did,
                 peer = %did,

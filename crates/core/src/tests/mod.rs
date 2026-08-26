@@ -1,3 +1,9 @@
+#[cfg(any(
+    all(feature = "dummy", not(target_family = "wasm")),
+    all(feature = "wasm", target_family = "wasm")
+))]
+use num_bigint::BigUint;
+
 use crate::dht::entry::Entry;
 use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
@@ -11,10 +17,6 @@ use crate::dht::successor::SuccessorReader;
     all(feature = "wasm", target_family = "wasm")
 ))]
 use crate::dht::topology;
-#[cfg(any(
-    all(feature = "dummy", not(target_family = "wasm")),
-    all(feature = "wasm", target_family = "wasm")
-))]
 use crate::dht::Did;
 use crate::error::Result;
 use crate::message::Encoder;
@@ -67,6 +69,30 @@ pub fn ring_topology_converged(nodes: &[&Swarm]) -> Result<bool> {
         }
     }
     Ok(true)
+}
+
+pub(crate) fn replace_observed_fingers(swarm: &Swarm, fingers: &[(usize, Did)]) -> Result<()> {
+    swarm.dht().replace_fingers_for_test(fingers)
+}
+
+#[cfg(any(
+    all(feature = "dummy", not(target_family = "wasm")),
+    all(feature = "wasm", target_family = "wasm")
+))]
+pub(crate) fn midpoint_storage_key(local: Did, lower: Did, upper: Did) -> Did {
+    let midpoint =
+        (topology::dist(local, lower) + topology::dist(local, upper)) / BigUint::from(2_u8);
+    local + Did::from(midpoint)
+}
+
+#[cfg(any(
+    all(feature = "dummy", not(target_family = "wasm")),
+    all(feature = "wasm", target_family = "wasm")
+))]
+pub(crate) fn tail_storage_key(local: Did, lower: Did) -> Did {
+    let ring_size = BigUint::from(1_u8) << topology::RING_BITS;
+    let midpoint = (topology::dist(local, lower) + ring_size) / BigUint::from(2_u8);
+    local + Did::from(midpoint)
 }
 
 pub fn multi_frame_storage_sync_entries() -> Result<Vec<PlacedEntry>> {

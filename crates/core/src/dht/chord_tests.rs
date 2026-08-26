@@ -13,6 +13,22 @@ use crate::ecc::SecretKey;
 use crate::tests::default::gen_sorted_dht;
 
 #[test]
+fn replace_fingers_for_test_rejects_invalid_input_before_mutation() -> Result<()> {
+    let local = Did::from(0u32);
+    let peer = Did::from(1u32);
+    let node =
+        PeerRing::new_with_storage_and_finger_table_size(local, 3, Box::new(MemStorage::new()), 4);
+    node.replace_fingers_for_test(&[(0, peer)])?;
+    let expected = node.lock_finger()?.list().clone();
+
+    assert!(node.replace_fingers_for_test(&[(4, peer)]).is_err());
+    assert_eq!(node.lock_finger()?.list(), &expected);
+    assert!(node.replace_fingers_for_test(&[(1, local)]).is_err());
+    assert_eq!(node.lock_finger()?.list(), &expected);
+    Ok(())
+}
+
+#[test]
 fn topology_transitions_serialize_remove_and_notify() -> Result<()> {
     let local = Did::from(0u32);
     let removed = Did::from(10u32);

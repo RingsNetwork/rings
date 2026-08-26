@@ -330,7 +330,7 @@ impl SwarmTransport {
     fn commit_pending_reservation(&self, peer: Did) -> Result<PendingConnectionAttempt> {
         let _lifecycle = self.connection_lifecycle()?;
         let attempt = self.peer_lifecycles()?.reserve(peer, get_epoch_ms_i64())?;
-        tracing::info!(
+        tracing::debug!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
             peer = %peer,
@@ -483,7 +483,7 @@ impl SwarmTransport {
             return Ok(false);
         }
         observe_transition(self);
-        tracing::info!(
+        tracing::debug!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
             peer = %attempt.peer,
@@ -736,7 +736,7 @@ impl SwarmTransport {
         let Some(retired) = self.retire_pending_connection_for_close(attempt)? else {
             return Ok(false);
         };
-        tracing::info!(
+        tracing::debug!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
             peer = %attempt.peer,
@@ -849,7 +849,7 @@ impl SwarmTransport {
         callback: InnerSwarmCallback,
     ) -> Result<PendingTransportConnection> {
         let cid = attempt.peer.to_string();
-        tracing::info!(
+        tracing::trace!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
             peer = %attempt.peer,
@@ -901,7 +901,7 @@ impl SwarmTransport {
                 generation: attempt.generation,
             });
         }
-        tracing::info!(
+        tracing::trace!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
             peer = %attempt.peer,

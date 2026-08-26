@@ -1,6 +1,3 @@
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-use num_bigint::BigUint;
-
 use super::*;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::dht::topology;
@@ -9,21 +6,11 @@ use crate::dht::StorageSyncDestination;
 #[cfg(not(target_family = "wasm"))]
 use crate::lifecycle::StopSource;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+use crate::tests::midpoint_storage_key;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::tests::ring_topology_converged;
-
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-fn midpoint_storage_key(local: Did, lower: Did, upper: Did) -> Did {
-    let midpoint =
-        (topology::dist(local, lower) + topology::dist(local, upper)) / BigUint::from(2_u8);
-    local + Did::from(midpoint)
-}
-
-#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-fn tail_storage_key(local: Did, lower: Did) -> Did {
-    let ring_size = BigUint::from(1_u8) << 160usize;
-    let midpoint = (topology::dist(local, lower) + ring_size) / BigUint::from(2_u8);
-    local + Did::from(midpoint)
-}
+use crate::tests::tail_storage_key;
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 fn ensure_storage_repair_route(node: &Node, placement: Did, next_hop: Did) -> Result<()> {

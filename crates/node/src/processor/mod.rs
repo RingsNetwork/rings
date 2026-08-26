@@ -467,7 +467,7 @@ impl Processor {
 
     /// Send custom message to a did.
     pub async fn send_message(&self, destination: Did, msg: &[u8]) -> Result<uuid::Uuid> {
-        tracing::info!("send_message, message size: {:?}", msg.len());
+        tracing::trace!("send_message, message size: {:?}", msg.len());
 
         let msg = Message::custom(msg).map_err(Error::SendMessage)?;
 
@@ -482,7 +482,7 @@ impl Processor {
     /// Protocols with their own authenticated hop selection, such as onion circuits, use this
     /// to keep the core transport from replacing their selected next hop.
     pub async fn send_direct_message(&self, destination: Did, msg: &[u8]) -> Result<uuid::Uuid> {
-        tracing::info!("send_direct_message, message size: {:?}", msg.len());
+        tracing::trace!("send_direct_message, message size: {:?}", msg.len());
 
         let msg = Message::custom(msg).map_err(Error::SendMessage)?;
 

@@ -45,6 +45,7 @@ use crate::tests::default::wait_for_predecessor;
 use crate::tests::default::wait_for_successor;
 use crate::tests::default::Node;
 use crate::tests::manually_establish_connection;
+use crate::tests::replace_observed_fingers;
 use crate::utils::get_epoch_ms_i64;
 
 mod storage_repair_tests;
@@ -200,15 +201,7 @@ pub(super) fn replace_observed_topology(
     }
     successor_seq.extend(successors)?;
     *node.dht().lock_predecessor()? = predecessor;
-    {
-        let dht = node.dht();
-        let mut finger = dht.lock_finger()?;
-        finger.reset_finger();
-        for (index, did) in fingers {
-            finger.set(*index, *did);
-        }
-    }
-    Ok(())
+    replace_observed_fingers(&node.swarm, fingers)
 }
 
 #[tokio::test]

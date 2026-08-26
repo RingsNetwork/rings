@@ -19,7 +19,11 @@ STABILIZE_INTERVAL="${RINGS_STABILIZE_INTERVAL:-15}"
 SESSION_TTL_SECONDS="${RINGS_SESSION_TTL_SECONDS:-2592000}"
 READY_RETRIES="${RINGS_READY_RETRIES:-60}"
 READY_SLEEP_SECONDS="${RINGS_READY_SLEEP_SECONDS:-1}"
-LOG_LEVEL="${RINGS_LOG_LEVEL:-warn}"
+RINGS_LOG_LEVEL_VALUE="${RINGS_LOG_LEVEL:-}"
+LOG_LEVEL_ARGS=()
+if [[ -n "$RINGS_LOG_LEVEL_VALUE" ]]; then
+    LOG_LEVEL_ARGS=(--log-level "$RINGS_LOG_LEVEL_VALUE")
+fi
 RUNTIME="${RINGS_RUNTIME:-current-thread}"
 EXTERNAL_IP="${RINGS_EXTERNAL_IP:-}"
 APPEND_CONTAINER_EXTERNAL_IP="${RINGS_EXTERNAL_IP_APPEND_CONTAINER_IP:-true}"
@@ -321,7 +325,7 @@ create_session_file() {
 
     for _ in $(seq 1 16); do
         write_key_file "$node_index" "$key_file"
-        if "$RINGS_BIN" --log-level warn --runtime current-thread new-session \
+        if "$RINGS_BIN" "${LOG_LEVEL_ARGS[@]}" --runtime current-thread new-session \
             --session-sk "$session_file" \
             --key-file "$key_file" \
             --ttl "$SESSION_TTL_SECONDS" >"$command_log" 2>&1; then
@@ -443,7 +447,7 @@ connect_pair() {
     [[ "$source_index" == "$target_index" ]] && return 0
 
     log "connect node $source_index -> node $target_index"
-    if connect_output=$("$RINGS_BIN" --log-level warn --runtime current-thread connect node \
+    if connect_output=$("$RINGS_BIN" "${LOG_LEVEL_ARGS[@]}" --runtime current-thread connect node \
         --config "${configs[$source_index]}" \
         --endpoint-url "$source_endpoint" \
         "$target_endpoint" 2>&1); then
@@ -482,7 +486,7 @@ for i in $(seq 0 $((NODE_COUNT - 1))); do
     external_ports[$i]="$external_port"
     configs[$i]="$config_file"
 
-    "$RINGS_BIN" --log-level "$LOG_LEVEL" --runtime "$RUNTIME" run \
+    "$RINGS_BIN" "${LOG_LEVEL_ARGS[@]}" --runtime "$RUNTIME" run \
         --config "$config_file" \
         --storage-path "$storage_path" \
         >"$log_file" 2>&1 &

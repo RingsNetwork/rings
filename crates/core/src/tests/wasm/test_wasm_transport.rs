@@ -16,6 +16,7 @@ use crate::dht::entry::Entry;
 use crate::dht::maintenance_phase_trace_for_test;
 use crate::dht::reset_maintenance_phase_trace_for_test;
 use crate::dht::successor::SuccessorWriter;
+use crate::dht::topology;
 use crate::dht::MaintenancePhaseEvent;
 use crate::dht::MaintenancePhaseKind;
 use crate::dht::StorageSyncDestination;
@@ -33,8 +34,11 @@ use crate::swarm::Swarm;
 use crate::tests::assert_control_interleaves_transfer;
 use crate::tests::control_interleaves_transfer;
 use crate::tests::manually_establish_connection;
+use crate::tests::midpoint_storage_key;
 use crate::tests::multi_frame_storage_sync_entries;
+use crate::tests::replace_observed_fingers;
 use crate::tests::ring_topology_converged;
+use crate::tests::tail_storage_key;
 use crate::utils::get_epoch_ms_i64;
 use crate::utils::sleep;
 
@@ -97,11 +101,14 @@ async fn storage_matches(
         == Some(expected)
 }
 
+struct RepairPlacement {
+    owner: crate::dht::Did,
+    key: crate::dht::Did,
+    expected: Entry,
+}
+
 struct RepairFixture {
-    node2_key: crate::dht::Did,
-    node3_key: crate::dht::Did,
-    expected_node2: Entry,
-    expected_node3: Entry,
+    placements: [RepairPlacement; 2],
 }
 
 async fn prepare_repair_mesh() -> [Arc<Swarm>; 3] {
@@ -142,33 +149,37 @@ async fn prepare_repair_mesh() -> [Arc<Swarm>; 3] {
 }
 
 async fn seed_remote_repair_entries(node1: &Swarm, node2: &Swarm, node3: &Swarm) -> RepairFixture {
-    let node2_key = node2.did();
-    let node3_key = node3.did();
-    let node2_entry = Entry::new(
-        node2_key,
-        vec!["repair-node-2".encode().unwrap()],
+    let mut routed_peers = [node2, node3];
+    routed_peers.sort_by_key(|node| topology::dist(node1.did(), node.did()));
+    let [head, tail] = routed_peers;
+    replace_observed_fingers(node1, &[(0, head.did()), (3, tail.did())]).unwrap();
+    let head_key = midpoint_storage_key(node1.did(), head.did(), tail.did());
+    let tail_key = tail_storage_key(node1.did(), tail.did());
+    let head_entry = Entry::new(
+        head_key,
+        vec!["repair-head".encode().unwrap()],
         EntryKind::Data,
     );
-    let node3_entry = Entry::new(
-        node3_key,
-        vec!["repair-node-3".encode().unwrap()],
+    let tail_entry = Entry::new(
+        tail_key,
+        vec!["repair-tail".encode().unwrap()],
         EntryKind::Data,
     );
-    let expected_node2 = node2_entry.clone().try_into_storage_entry().unwrap();
-    let expected_node3 = node3_entry.clone().try_into_storage_entry().unwrap();
+    let expected_head = head_entry.clone().try_into_storage_entry().unwrap();
+    let expected_tail = tail_entry.clone().try_into_storage_entry().unwrap();
     node1
         .dht()
         .storage
-        .put(&node2_key.to_string(), &node2_entry)
+        .put(&head_key.to_string(), &head_entry)
         .await
         .unwrap();
     node1
         .dht()
         .storage
-        .put(&node3_key.to_string(), &node3_entry)
+        .put(&tail_key.to_string(), &tail_entry)
         .await
         .unwrap();
-    for (key, owner) in [(node2_key, node2.did()), (node3_key, node3.did())] {
+    for (key, owner) in [(head_key, head.did()), (tail_key, tail.did())] {
         assert_eq!(
             node1
                 .dht()
@@ -178,10 +189,18 @@ async fn seed_remote_repair_entries(node1: &Swarm, node2: &Swarm, node3: &Swarm)
         );
     }
     RepairFixture {
-        node2_key,
-        node3_key,
-        expected_node2,
-        expected_node3,
+        placements: [
+            RepairPlacement {
+                owner: head.did(),
+                key: head_key,
+                expected: expected_head,
+            },
+            RepairPlacement {
+                owner: tail.did(),
+                key: tail_key,
+                expected: expected_tail,
+            },
+        ],
     }
 }
 
@@ -231,10 +250,10 @@ async fn exercise_contended_browser_storage(node1: &Swarm, node2: &Swarm) {
 }
 
 async fn wait_for_repair_and_convergence(nodes: &[&Swarm; 3], fixture: &RepairFixture) {
-    let [_node1, node2, node3] = *nodes;
+    let [head, tail] = &fixture.placements;
     for _ in 0..REPAIR_POLL_ATTEMPTS {
-        if storage_matches(node2, fixture.node2_key, &fixture.expected_node2).await
-            && storage_matches(node3, fixture.node3_key, &fixture.expected_node3).await
+        if repair_placement_matches(nodes, head).await
+            && repair_placement_matches(nodes, tail).await
             && ring_topology_converged(nodes).unwrap()
         {
             return;
@@ -242,6 +261,17 @@ async fn wait_for_repair_and_convergence(nodes: &[&Swarm; 3], fixture: &RepairFi
         sleep(SOAK_POLL_INTERVAL).await;
     }
     panic!("real browser repair did not persist both remote placements and preserve convergence");
+}
+
+async fn repair_placement_matches(nodes: &[&Swarm; 3], placement: &RepairPlacement) -> bool {
+    let owner = nodes
+        .iter()
+        .copied()
+        .find(|node| node.did() == placement.owner);
+    match owner {
+        Some(node) => storage_matches(node, placement.key, &placement.expected).await,
+        None => false,
+    }
 }
 
 fn perturb_ring_predecessors(nodes: &[&Swarm; 3]) {
@@ -343,7 +373,10 @@ fn assert_browser_maintenance_cadence(trace: &[MaintenancePhaseEvent]) {
         .expect("repair phase must start after the first stabilization phase");
     let phase_offset = first_repair_after_stabilization.saturating_sub(stabilizations[0]);
     assert!(phase_offset >= SOAK_POLL_INTERVAL.as_millis() as u64);
-    assert!(phase_offset <= 2_000);
+    assert!(
+        first_repair_after_stabilization < stabilizations[1],
+        "repair phase must start before the next stabilization phase: stabilizations={stabilizations:?}, repairs={repairs:?}"
+    );
 }
 
 struct DefaultCallback;

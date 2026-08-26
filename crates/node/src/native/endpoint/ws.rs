@@ -40,5 +40,5 @@ pub async fn handle_socket(_ws_state: Arc<WsState>, socket: WebSocket) {
             send_task.abort();
         }
     }
-    tracing::info!("WS over");
+    tracing::debug!("WS over");
 }

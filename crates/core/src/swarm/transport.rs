@@ -608,7 +608,7 @@ impl SwarmTransport {
             Err(Error::AlreadyConnected) => return Err(Error::AlreadyConnected),
             Err(e) => {
                 if self.get_connection(peer).is_some() {
-                    tracing::info!(
+                    tracing::debug!(
                         target: "rings_core::swarm::transport::handshake",
                         local = %self.dht.did,
                         peer = %peer,
@@ -622,7 +622,7 @@ impl SwarmTransport {
             }
         };
         let sdp_len = offer_msg.sdp.len();
-        tracing::info!(
+        tracing::trace!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
             peer = %peer,
@@ -635,7 +635,7 @@ impl SwarmTransport {
             .await
         {
             Ok(tx_id) => {
-                tracing::info!(
+                tracing::trace!(
                     target: "rings_core::swarm::transport::handshake",
                     local = %self.dht.did,
                     peer = %peer,
@@ -656,7 +656,7 @@ impl SwarmTransport {
                 self.abandon_pending_connection(attempt, "sending connection offer")
                     .await;
                 if self.get_connection(peer).is_some() {
-                    tracing::info!(
+                    tracing::debug!(
                         target: "rings_core::swarm::transport::handshake",
                         local = %self.dht.did,
                         peer = %peer,
@@ -694,7 +694,7 @@ impl SwarmTransport {
         let attempt = pending_connection.attempt();
         let conn = pending_connection.connection();
 
-        tracing::info!(
+        tracing::trace!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
             peer = %peer,
@@ -718,7 +718,7 @@ impl SwarmTransport {
                 return Err(Error::Transport(error));
             }
         };
-        tracing::info!(
+        tracing::trace!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
             peer = %peer,
@@ -803,7 +803,7 @@ impl SwarmTransport {
         let attempt = pending_connection.attempt();
         let conn = pending_connection.connection();
 
-        tracing::info!(
+        tracing::trace!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
             peer = %peer,
@@ -828,7 +828,7 @@ impl SwarmTransport {
                 return Err(Error::Transport(error));
             }
         };
-        tracing::info!(
+        tracing::trace!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
             peer = %peer,
@@ -889,7 +889,7 @@ impl SwarmTransport {
         let (attempt, conn) = self
             .pending_connection_with_attempt(peer)?
             .ok_or(Error::SwarmMissTransport(peer))?;
-        tracing::info!(
+        tracing::trace!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
             peer = %peer,
@@ -916,7 +916,7 @@ impl SwarmTransport {
                 generation: attempt.generation,
             });
         }
-        tracing::info!(
+        tracing::trace!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
             peer = %peer,
