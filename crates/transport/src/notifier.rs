@@ -8,8 +8,11 @@ use std::sync::MutexGuard;
 use std::task::Context;
 use std::task::Poll;
 
+#[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
 use crate::core::transport::WebrtcConnectionState;
+#[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
 use crate::error::Error;
+#[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
 use crate::error::Result;
 use crate::sync_utils::lock_recover;
 
@@ -126,6 +129,7 @@ impl Future for Notifier {
     }
 }
 
+#[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
 pub(crate) async fn wait_for_data_channel_open(
     state: WebrtcConnectionState,
     data_channel_is_open: impl Fn() -> Result<bool>,

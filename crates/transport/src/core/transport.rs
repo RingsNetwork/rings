@@ -547,6 +547,7 @@ impl WebrtcConnectionState {
         matches!(self, Self::New | Self::Connecting | Self::Connected)
     }
 
+    #[cfg(any(feature = "native-webrtc", feature = "web-sys-webrtc"))]
     pub(crate) const fn is_terminal(self) -> bool {
         matches!(self, Self::Failed | Self::Closed)
     }
@@ -668,6 +669,11 @@ impl ConnectionStateCell {
 pub const MAX_DATA_CHANNEL_MESSAGE_SIZE: usize = 65536;
 
 /// Decode the internal `0 = not negotiated` sentinel used by connection backends.
+#[cfg(any(
+    feature = "dummy",
+    feature = "native-webrtc",
+    feature = "web-sys-webrtc"
+))]
 pub(crate) const fn stored_max_message_size(stored: usize) -> usize {
     if stored == 0 {
         MAX_DATA_CHANNEL_MESSAGE_SIZE

@@ -110,6 +110,11 @@ where
     S: Serialize + DeserializeOwned + Send + Sync + 'static,
 {
     /// Reject an early connection setup while the peer already occupies its slot.
+    #[cfg(any(
+        feature = "dummy",
+        feature = "native-webrtc",
+        feature = "web-sys-webrtc"
+    ))]
     pub(crate) fn ensure_peer_slot_available(&self, cid: &str) -> Result<()> {
         if self
             .connection(cid)
