@@ -275,7 +275,7 @@ mod tests {
     use crate::error::Error;
 
     #[test]
-    fn public_address_selection_distinguishes_empty_denied_and_deduplicated_public() {
+    fn test_public_address_selection_distinguishes_empty_denied_and_deduplicated_public() {
         let denied: SocketAddr = "127.0.0.1:443".parse().expect("denied address");
         let public: SocketAddr = "8.8.8.8:443".parse().expect("public address");
 
@@ -294,7 +294,7 @@ mod tests {
     }
 
     #[test]
-    fn exit_address_predicate_rejects_internal_and_special_destinations() {
+    fn test_exit_address_predicate_rejects_internal_and_special_destinations() {
         for address in [
             "0.0.0.0",
             "10.0.0.1",
@@ -326,7 +326,7 @@ mod tests {
     }
 
     #[test]
-    fn exit_address_predicate_accepts_public_destinations() {
+    fn test_exit_address_predicate_accepts_public_destinations() {
         for address in ["1.1.1.1", "8.8.8.8", "2606:4700:4700::1111"] {
             let address = address.parse::<IpAddr>().expect("valid fixture address");
             assert!(
@@ -338,7 +338,7 @@ mod tests {
 
     #[cfg(rings_native)]
     #[tokio::test]
-    async fn resolver_rejects_loopback_before_any_exit_connection() {
+    async fn test_resolver_rejects_loopback_before_any_exit_connection() {
         let target =
             OnionProxyTarget::parse_authority("127.0.0.1:443").expect("valid loopback authority");
 

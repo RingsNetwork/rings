@@ -797,7 +797,7 @@ mod tests {
     use crate::extension::transport::SessionKey;
 
     #[test]
-    fn saturated_local_queue_fails_closed_without_waiting() {
+    fn test_saturated_local_queue_fails_closed_without_waiting() {
         let sessions = TransportSessions::new();
         let key = SessionKey::new(Did::from(7_u32), "tcp", SessionId(11), Initiator::Remote);
         let registration = sessions.register(key.clone(), None);
@@ -821,7 +821,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_accept_table_rejects_above_its_hard_bound() {
+    async fn test_pending_accept_table_rejects_above_its_hard_bound() {
         let sessions = TransportSessions::new();
         let socket = Arc::new(
             UdpSocket::bind("127.0.0.1:0")
@@ -857,7 +857,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn udp_source_is_unique_and_invisible_until_open_admission() {
+    async fn test_udp_source_is_unique_and_invisible_until_open_admission() {
         let sessions = TransportSessions::new();
         let socket = Arc::new(
             UdpSocket::bind("127.0.0.1:0")
@@ -891,7 +891,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_udp_accept_releases_its_source_reservation() {
+    async fn test_failed_udp_accept_releases_its_source_reservation() {
         let sessions = TransportSessions::new();
         let socket = Arc::new(
             UdpSocket::bind("127.0.0.1:0")

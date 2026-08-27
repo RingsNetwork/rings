@@ -374,7 +374,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn circuit_deserialization_rejects_invalid_r1cs_shape() {
+    fn test_circuit_deserialization_rejects_invalid_r1cs_shape() {
         let value = serde_json::json!({
             "r1cs": {
                 "num_inputs": 0,
@@ -390,7 +390,7 @@ mod tests {
     }
 
     #[test]
-    fn circuit_serialization_round_trip_preserves_validated_shape(
+    fn test_circuit_serialization_round_trip_preserves_validated_shape(
     ) -> std::result::Result<(), String> {
         let circuit = Circuit::try_new(
             Arc::new(R1CS {

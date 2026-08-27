@@ -173,7 +173,7 @@ pub fn e2e_example_round_trip(
     plaintext: &[u8],
     max_plaintext_frame_len: usize,
 ) -> rings_core::error::Result<Vec<u8>> {
-    let stream_id = rings_core::prelude::uuid::Uuid::new_v4();
+    let stream_id = uuid::Uuid::new_v4();
     let frames = e2e::encrypt_stream_frames(
         plaintext,
         stream_id,
@@ -196,7 +196,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_cli_args_requires_seed_and_destination() {
+    fn test_parse_cli_args_requires_seed_and_destination() {
         assert_eq!(
             parse_cli_args(["rings-native-example"]),
             Err(ExampleArgsError::MissingSeedUrl)
@@ -208,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_cli_args_accepts_exact_seed_and_destination() {
+    fn test_parse_cli_args_accepts_exact_seed_and_destination() {
         let args = parse_cli_args([
             "rings-native-example",
             "http://127.0.0.1:50001",
@@ -224,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn peer_is_connected_requires_matching_did_and_connected_state() {
+    fn test_peer_is_connected_requires_matching_did_and_connected_state() {
         let peers = vec![
             PeerInfo {
                 did: "0xabc".to_string(),
@@ -241,7 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn example_message_request_is_base64_encoded_for_the_example_namespace() {
+    fn test_example_message_request_is_base64_encoded_for_the_example_namespace() {
         let req = example_message_request("0xdef".to_string());
 
         assert_eq!(req.destination_did, "0xdef");
@@ -253,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn protocol_logs_sender_and_payload_without_replying() {
+    fn test_protocol_logs_sender_and_payload_without_replying() {
         let did = Did::from(SecretKey::random().address());
         let protocol = Example;
         let event = protocol
@@ -275,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn build_session_key_uses_the_generated_account_did() {
+    fn test_build_session_key_uses_the_generated_account_did() {
         let key = SecretKey::random();
         let did = Did::from(key.address());
         let session = build_session_key(&key).expect("session key");
@@ -284,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn e2e_example_round_trip_decrypts_direct_elgamal_stream() {
+    fn test_e2e_example_round_trip_decrypts_direct_elgamal_stream() {
         let sender = SecretKey::random();
         let recipient = SecretKey::random();
         let plaintext = b"native example encrypted e2e body";

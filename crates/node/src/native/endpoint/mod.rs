@@ -160,7 +160,7 @@ async fn ws_handler(
     ws: WebSocketUpgrade,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> impl IntoResponse {
-    tracing::info!("ws connected, remote: {}", addr);
+    tracing::debug!("ws connected, remote: {}", addr);
     ws.on_upgrade(move |socket| self::ws::handle_socket(state, socket))
 }
 

@@ -11,6 +11,7 @@ use tokio::time::timeout;
 use tokio::time::Duration;
 
 use crate::dht::entry::Entry;
+use crate::dht::entry::EntryOperation;
 use crate::dht::entry::PlacedEntryOperation;
 use crate::dht::successor::SuccessorReader;
 #[cfg(feature = "dummy")]
@@ -28,9 +29,10 @@ use crate::message::FindSuccessorThen;
 use crate::message::Message;
 #[cfg(feature = "dummy")]
 use crate::message::MessageHandler;
-use crate::prelude::entry::EntryOperation;
 #[cfg(feature = "dummy")]
 use crate::swarm::callback::SwarmCallback;
+#[cfg(feature = "dummy")]
+use crate::tests::default::dummy_hooks::ControlledDeliveryGuard;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_connection_state;
 use crate::tests::default::wait_for_finger;
@@ -70,6 +72,20 @@ async fn drain_node_messages(nodes: &[&Node]) {
         }
         tokio::task::yield_now().await;
     }
+}
+
+#[cfg(feature = "dummy")]
+#[tokio::test]
+async fn test_wait_for_msgs_does_not_ignore_controlled_transport_events() {
+    let _controlled = ControlledDeliveryGuard::new();
+    let node1 = prepare_node(SecretKey::random()).await;
+    let node2 = prepare_node(SecretKey::random()).await;
+    manually_establish_connection(&node1.swarm, &node2.swarm).await;
+
+    assert!(dummy_controlled::pending() > 0);
+    let wait = timeout(Duration::from_millis(20), wait_for_msgs([&node1, &node2])).await;
+
+    assert!(wait.is_err(), "transport-queued events are not quiescent");
 }
 
 #[tokio::test]

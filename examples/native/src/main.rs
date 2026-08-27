@@ -22,7 +22,7 @@ use rings_rpc::protos::rings_node::*;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    init_logging(LogLevel::Info);
+    init_logging(LogLevel::default());
 
     // Generate a random secret key and its did.
     let key = SecretKey::random();

@@ -19,6 +19,7 @@ use crate::dht::successor::SuccessorReader;
 use crate::dht::StorageSyncDestination;
 use crate::dht::StorageSyncPurpose;
 use crate::ecc::SecretKey;
+use crate::error::Error;
 use crate::error::Result;
 use crate::measure::BehaviourJudgement;
 use crate::measure::Measure;
@@ -26,92 +27,28 @@ use crate::measure::MeasureCounter;
 use crate::measure::MeasureImpl;
 use crate::measure::PeerQuality;
 use crate::message::Message;
+use crate::message::MessageClass;
+use crate::message::MessagePayload;
+use crate::message::PayloadSender;
+use crate::message::PeerLivenessProbe;
 use crate::message::SyncEntriesWithSuccessor;
-use crate::session::SessionSk;
-use crate::storage::MemStorage;
 use crate::swarm::transport::TrackedStorageSyncOutcome;
-use crate::swarm::SwarmBuilder;
+use crate::tests::assert_control_interleaves_transfer;
+use crate::tests::default::dummy_hooks::MaxMessageSizeGuard;
+use crate::tests::default::dummy_hooks::PausedDeliveryGuard;
+use crate::tests::default::dummy_hooks::PausedDispatchGuard;
+use crate::tests::default::dummy_hooks::PendingAfterSentCountGuard;
+use crate::tests::default::dummy_hooks::PendingCloseGuard;
+use crate::tests::default::dummy_hooks::PendingDeliveryGuard;
+use crate::tests::default::dummy_hooks::PendingSendGuard;
 use crate::tests::default::prepare_node;
+use crate::tests::default::prepare_node_with_measure;
 use crate::tests::default::wait_for_connection_state;
 use crate::tests::default::wait_for_msgs;
 use crate::tests::default::wait_for_successor;
-use crate::tests::default::Node;
 use crate::tests::manually_establish_connection;
-
-struct PendingSendGuard;
-
-impl PendingSendGuard {
-    fn new() -> Self {
-        dummy_controlled::set_send_message_pending(true);
-        Self
-    }
-}
-
-struct PausedDispatchGuard;
-
-impl PausedDispatchGuard {
-    fn new() -> Self {
-        dummy_controlled::pause_send_message_at_dispatch();
-        Self
-    }
-}
-
-impl Drop for PausedDispatchGuard {
-    fn drop(&mut self) {
-        dummy_controlled::release_send_message_gate();
-    }
-}
-
-impl Drop for PendingSendGuard {
-    fn drop(&mut self) {
-        dummy_controlled::set_send_message_pending(false);
-    }
-}
-
-struct PendingAfterSentCountGuard;
-
-impl PendingAfterSentCountGuard {
-    fn new(threshold: usize) -> Self {
-        dummy_controlled::set_send_message_pending_after_sent_count(Some(threshold));
-        Self
-    }
-}
-
-impl Drop for PendingAfterSentCountGuard {
-    fn drop(&mut self) {
-        dummy_controlled::set_send_message_pending_after_sent_count(None);
-    }
-}
-
-struct PendingDeliveryGuard;
-
-impl PendingDeliveryGuard {
-    fn new() -> Self {
-        dummy_controlled::set_delivery_future_pending(true);
-        Self
-    }
-}
-
-impl Drop for PendingDeliveryGuard {
-    fn drop(&mut self) {
-        dummy_controlled::set_delivery_future_pending(false);
-    }
-}
-
-struct MaxMessageSizeGuard;
-
-impl MaxMessageSizeGuard {
-    fn new(size: usize) -> Self {
-        dummy_controlled::set_max_message_size(size);
-        Self
-    }
-}
-
-impl Drop for MaxMessageSizeGuard {
-    fn drop(&mut self) {
-        dummy_controlled::set_max_message_size(0);
-    }
-}
+use crate::tests::multi_frame_storage_sync_entries;
+use crate::tests::outbound_capacity_released;
 
 #[derive(Default)]
 struct CountingMeasure {
@@ -156,23 +93,6 @@ impl BehaviourJudgement for CountingMeasure {
     }
 }
 
-fn prepare_node_with_measure(key: SecretKey, measure: MeasureImpl) -> Result<Node> {
-    let session = SessionSk::new_with_seckey(&key)?;
-    let swarm = Arc::new(
-        SwarmBuilder::new(
-            0,
-            "stun://stun.l.google.com:19302",
-            Box::new(MemStorage::new()),
-            session,
-        )
-        .dht_finger_table_size(super::TEST_DHT_FINGER_TABLE_SIZE)
-        .dht_virtual_nodes(0)
-        .measure(measure)
-        .build(),
-    );
-    Ok(Node::new(swarm))
-}
-
 fn large_storage_sync_entries() -> Result<Vec<PlacedEntry>> {
     let mut entries = Vec::new();
     for index in 0..48 {
@@ -183,6 +103,16 @@ fn large_storage_sync_entries() -> Result<Vec<PlacedEntry>> {
         entries.push(PlacedEntry::new(entry_did, entry));
     }
     Ok(entries)
+}
+
+async fn wait_for_test_condition(description: &'static str, predicate: impl Fn() -> bool) {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !predicate() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{description}"));
 }
 
 /// Read inbound messages on `node` until a `CustomMessage` arrives (skipping DHT bookkeeping), or
@@ -198,7 +128,7 @@ async fn recv_custom(node: &crate::tests::default::Node) -> Option<Vec<u8>> {
 }
 
 #[tokio::test]
-async fn large_message_is_chunked_and_reassembled() {
+async fn test_large_message_is_chunked_and_reassembled() {
     let key1 = SecretKey::random();
     let key2 = SecretKey::random();
     let node1 = prepare_node(key1).await;
@@ -235,7 +165,7 @@ async fn large_message_is_chunked_and_reassembled() {
 }
 
 #[tokio::test]
-async fn spawned_storage_sync_tail_cancelled_by_route_disappear_does_not_degrade_next_hop(
+async fn test_spawned_storage_sync_tail_cancelled_by_route_disappear_does_not_degrade_next_hop(
 ) -> Result<()> {
     let measure = Arc::new(CountingMeasure::default());
     let measure_impl: MeasureImpl = measure.clone();
@@ -279,7 +209,7 @@ async fn spawned_storage_sync_tail_cancelled_by_route_disappear_does_not_degrade
 }
 
 #[tokio::test]
-async fn spawned_storage_sync_tail_cancels_when_transport_loses_readiness() -> Result<()> {
+async fn test_spawned_storage_sync_tail_cancels_when_transport_loses_readiness() -> Result<()> {
     let measure = Arc::new(CountingMeasure::default());
     let measure_impl: MeasureImpl = measure.clone();
     let node1 = prepare_node_with_measure(SecretKey::random(), measure_impl)?;
@@ -337,7 +267,7 @@ async fn spawned_storage_sync_tail_cancels_when_transport_loses_readiness() -> R
 }
 
 #[tokio::test]
-async fn spawned_chunk_tail_cancels_when_same_peer_is_readmitted() -> Result<()> {
+async fn test_spawned_chunk_tail_cancels_when_same_peer_is_readmitted() -> Result<()> {
     let measure = Arc::new(CountingMeasure::default());
     let measure_impl: MeasureImpl = measure.clone();
     let node1 = prepare_node_with_measure(SecretKey::random(), measure_impl)?;
@@ -390,7 +320,7 @@ async fn spawned_chunk_tail_cancels_when_same_peer_is_readmitted() -> Result<()>
 }
 
 #[tokio::test]
-async fn send_waiting_at_dispatch_rechecks_the_admitted_generation() -> Result<()> {
+async fn test_send_waiting_at_dispatch_rechecks_the_admitted_generation() -> Result<()> {
     let node1 = prepare_node(SecretKey::random()).await;
     let node2 = prepare_node(SecretKey::random()).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
@@ -406,16 +336,11 @@ async fn send_waiting_at_dispatch_rechecks_the_admitted_generation() -> Result<(
             .send_message(Message::custom(b"stale-generation")?, peer)
             .await
     });
-    for _ in 0..20 {
-        if dummy_controlled::send_message_waiting_at_dispatch() {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    assert!(
-        dummy_controlled::send_message_waiting_at_dispatch(),
-        "the send must reach the final pre-dispatch boundary"
-    );
+    wait_for_test_condition(
+        "the send must reach the final pre-dispatch boundary",
+        dummy_controlled::send_message_waiting_at_dispatch,
+    )
+    .await;
 
     let (old, replacement) = node1
         .swarm
@@ -449,7 +374,7 @@ async fn send_waiting_at_dispatch_rechecks_the_admitted_generation() -> Result<(
 }
 
 #[tokio::test]
-async fn storage_sync_waiting_at_dispatch_defers_when_its_route_disappears() -> Result<()> {
+async fn test_storage_sync_waiting_at_dispatch_defers_when_its_route_disappears() -> Result<()> {
     let measure = Arc::new(CountingMeasure::default());
     let measure_impl: MeasureImpl = measure.clone();
     let node1 = prepare_node_with_measure(SecretKey::random(), measure_impl)?;
@@ -469,16 +394,11 @@ async fn storage_sync_waiting_at_dispatch_defers_when_its_route_disappears() -> 
         data: Vec::new(),
     };
     let send = tokio::spawn(async move { transport.send_storage_sync_tracked(msg).await });
-    for _ in 0..20 {
-        if dummy_controlled::send_message_waiting_at_dispatch() {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    assert!(
-        dummy_controlled::send_message_waiting_at_dispatch(),
-        "the storage sync must reach the final pre-dispatch boundary"
-    );
+    wait_for_test_condition(
+        "the storage sync must reach the final pre-dispatch boundary",
+        dummy_controlled::send_message_waiting_at_dispatch,
+    )
+    .await;
 
     let failed_before = measure.count(peer, MeasureCounter::FailedToSend);
     node1.dht().remove(peer)?;
@@ -505,7 +425,8 @@ async fn storage_sync_waiting_at_dispatch_defers_when_its_route_disappears() -> 
 }
 
 #[tokio::test]
-async fn storage_sync_waiting_at_dispatch_defers_when_transport_loses_readiness() -> Result<()> {
+async fn test_storage_sync_waiting_at_dispatch_defers_when_transport_loses_readiness() -> Result<()>
+{
     let measure = Arc::new(CountingMeasure::default());
     let measure_impl: MeasureImpl = measure.clone();
     let node1 = prepare_node_with_measure(SecretKey::random(), measure_impl)?;
@@ -525,16 +446,11 @@ async fn storage_sync_waiting_at_dispatch_defers_when_transport_loses_readiness(
         data: Vec::new(),
     };
     let send = tokio::spawn(async move { transport.send_storage_sync_tracked(msg).await });
-    for _ in 0..20 {
-        if dummy_controlled::send_message_waiting_at_dispatch() {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    assert!(
-        dummy_controlled::send_message_waiting_at_dispatch(),
-        "the storage sync must reach the final pre-dispatch boundary"
-    );
+    wait_for_test_condition(
+        "the storage sync must reach the final pre-dispatch boundary",
+        dummy_controlled::send_message_waiting_at_dispatch,
+    )
+    .await;
 
     let failed_before = measure.count(peer, MeasureCounter::FailedToSend);
     node1
@@ -564,7 +480,8 @@ async fn storage_sync_waiting_at_dispatch_defers_when_transport_loses_readiness(
 }
 
 #[tokio::test]
-async fn detached_storage_sync_missing_routable_transport_does_not_degrade_peer() -> Result<()> {
+async fn test_detached_storage_sync_missing_routable_transport_does_not_degrade_peer() -> Result<()>
+{
     let measure = Arc::new(CountingMeasure::default());
     let measure_impl: MeasureImpl = measure.clone();
     let node1 = prepare_node_with_measure(SecretKey::random(), measure_impl)?;
@@ -586,7 +503,12 @@ async fn detached_storage_sync_missing_routable_transport_does_not_degrade_peer(
         data: Vec::new(),
     };
 
-    assert_eq!(node1.swarm.transport.send_storage_sync(msg).await?, None);
+    assert!(node1
+        .swarm
+        .transport
+        .send_storage_sync(msg)
+        .await?
+        .is_deferred());
     assert_eq!(
         measure.count(peer, MeasureCounter::FailedToSend),
         failed_before,
@@ -598,7 +520,7 @@ async fn detached_storage_sync_missing_routable_transport_does_not_degrade_peer(
 }
 
 #[tokio::test]
-async fn tracked_storage_sync_does_not_finish_while_a_chunk_tail_is_pending() -> Result<()> {
+async fn test_tracked_storage_sync_does_not_finish_while_a_chunk_tail_is_pending() -> Result<()> {
     let node1 = prepare_node(SecretKey::random()).await;
     let node2 = prepare_node(SecretKey::random()).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
@@ -617,12 +539,10 @@ async fn tracked_storage_sync_does_not_finish_while_a_chunk_tail_is_pending() ->
     let transport = node1.swarm.transport.clone();
     let send = tokio::spawn(async move { transport.send_storage_sync_tracked(msg).await });
 
-    for _ in 0..20 {
-        if dummy_controlled::sent_count() == 1 {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
+    wait_for_test_condition("the tracked path must enter the real chunk tail", || {
+        dummy_controlled::sent_count() == 1
+    })
+    .await;
     assert_eq!(
         dummy_controlled::sent_count(),
         1,
@@ -648,7 +568,7 @@ async fn tracked_storage_sync_does_not_finish_while_a_chunk_tail_is_pending() ->
 }
 
 #[tokio::test]
-async fn tracked_storage_sync_defers_a_delivery_future_that_never_completes() -> Result<()> {
+async fn test_tracked_storage_sync_timeout_closes_stalled_delivery_generation() -> Result<()> {
     let node1 = prepare_node(SecretKey::random()).await;
     let node2 = prepare_node(SecretKey::random()).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
@@ -657,7 +577,7 @@ async fn tracked_storage_sync_defers_a_delivery_future_that_never_completes() ->
     wait_for_msgs([&node1, &node2]).await;
 
     dummy_controlled::reset_sent_count();
-    let _pending_delivery = PendingDeliveryGuard::new();
+    let pending_delivery = PendingDeliveryGuard::new();
     let msg = SyncEntriesWithSuccessor {
         purpose: StorageSyncPurpose::AdditiveRepair,
         destination: StorageSyncDestination::PhysicalOwner(node2.did()),
@@ -672,12 +592,223 @@ async fn tracked_storage_sync_defers_a_delivery_future_that_never_completes() ->
 
     assert_eq!(outcome, TrackedStorageSyncOutcome::Deferred);
     assert_eq!(dummy_controlled::sent_count(), 1);
-    assert!(node1.swarm.transport.is_admitted_connection(node2.did()));
+    assert!(node1.swarm.transport.get_connection(node2.did()).is_none());
+    assert!(
+        outbound_capacity_released(&node1.swarm.transport, node2.did()),
+        "tracked cancellation must release capacity before returning"
+    );
+
+    drop(pending_delivery);
+    assert_eq!(dummy_controlled::sent_count(), 1);
     Ok(())
 }
 
 #[tokio::test]
-async fn send_queue_backpressure_returns_transport_timeout() {
+async fn test_tracked_cleanup_grace_terminalizes_a_nonresponsive_generation() -> Result<()> {
+    let node1 = prepare_node(SecretKey::random()).await;
+    let node2 = prepare_node(SecretKey::random()).await;
+    manually_establish_connection(&node1.swarm, &node2.swarm).await;
+    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
+    wait_for_successor(&node1, node2.did()).await?;
+    wait_for_msgs([&node1, &node2]).await;
+
+    let peer = node2.did();
+    let attempt = node1
+        .swarm
+        .transport
+        .active_attempt(peer)?
+        .ok_or(Error::ConnectionNotFound)?;
+    let connection = node1
+        .swarm
+        .transport
+        .get_connection(peer)
+        .ok_or(Error::ConnectionNotFound)?;
+    let _pending_delivery = PendingDeliveryGuard::new();
+    let _pending_close = PendingCloseGuard::new();
+    let payload = MessagePayload::new_send(
+        Message::custom(b"tracked-cleanup-grace")?,
+        node1.swarm.transport.session_sk(),
+        peer,
+        peer,
+    )?;
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(1),
+        node1
+            .swarm
+            .transport
+            .send_payload_tracked_with_matching_delivery_deadline_for_test(payload),
+    )
+    .await
+    .expect("tracked cleanup grace must bound a nonresponsive generation")
+    .expect_err("nonresponsive cleanup must return its typed timeout");
+
+    assert!(matches!(
+        error,
+        Error::TrackedPayloadCleanupTimeout { peer: failed, .. } if failed == peer
+    ));
+    assert_eq!(node1.swarm.transport.active_attempt(peer)?, None);
+    assert!(!node1.swarm.transport.is_send_terminal_attempt(attempt)?);
+    assert!(node1.swarm.transport.get_connection(peer).is_none());
+    assert_eq!(
+        connection.webrtc_connection_state(),
+        WebrtcConnectionState::Closed
+    );
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !outbound_capacity_released(&node1.swarm.transport, peer) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("terminal cleanup must release retained transfer capacity");
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_dropping_tracked_storage_sync_requests_transfer_stop() -> Result<()> {
+    let node1 = prepare_node(SecretKey::random()).await;
+    let node2 = prepare_node(SecretKey::random()).await;
+    manually_establish_connection(&node1.swarm, &node2.swarm).await;
+    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
+    wait_for_successor(&node1, node2.did()).await?;
+    wait_for_msgs([&node1, &node2]).await;
+
+    dummy_controlled::reset_sent_count();
+    let pending_delivery = PendingDeliveryGuard::new();
+    let msg = SyncEntriesWithSuccessor {
+        purpose: StorageSyncPurpose::AdditiveRepair,
+        destination: StorageSyncDestination::PhysicalOwner(node2.did()),
+        data: Vec::new(),
+    };
+    let transport = node1.swarm.transport.clone();
+    let send = tokio::spawn(async move { transport.send_storage_sync_tracked(msg).await });
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if dummy_controlled::sent_count() == 1
+                && node1
+                    .swarm
+                    .transport
+                    .outbound_admitted_transfer_count_for_test(node2.did())
+                    == Some(1)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("tracked send must reach the stalled delivery");
+
+    send.abort();
+    let _ = send.await;
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if node1.swarm.transport.get_connection(node2.did()).is_none()
+                && outbound_capacity_released(&node1.swarm.transport, node2.did())
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("dropping a tracked send must stop and release its transfer");
+
+    drop(pending_delivery);
+    assert_eq!(dummy_controlled::sent_count(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_dht_control_frame_runs_while_storage_transfer_waits_for_delivery() -> Result<()> {
+    let node1 = prepare_node(SecretKey::random()).await;
+    let node2 = prepare_node(SecretKey::random()).await;
+    manually_establish_connection(&node1.swarm, &node2.swarm).await;
+    wait_for_connection_state(&node1, node2.did(), WebrtcConnectionState::Connected).await?;
+    wait_for_successor(&node1, node2.did()).await?;
+    wait_for_msgs([&node1, &node2]).await;
+
+    let _max_size = MaxMessageSizeGuard::new(8192);
+    let _paused_delivery = PausedDeliveryGuard::new();
+    dummy_controlled::reset_sent_count();
+    node1
+        .swarm
+        .transport
+        .start_outbound_frame_trace_for_test(node2.did());
+
+    let msg = SyncEntriesWithSuccessor {
+        purpose: StorageSyncPurpose::AdditiveRepair,
+        destination: StorageSyncDestination::PhysicalOwner(node2.did()),
+        data: multi_frame_storage_sync_entries()?,
+    };
+    assert!(node1
+        .swarm
+        .transport
+        .send_storage_sync(msg)
+        .await?
+        .is_sent());
+    assert_eq!(
+        dummy_controlled::sent_count(),
+        1,
+        "detached storage send should admit exactly its first frame"
+    );
+    let first = node2
+        .listen_once()
+        .await
+        .ok_or_else(|| crate::error::Error::InvalidMessage("expected storage chunk".to_string()))?;
+    assert!(
+        matches!(first.transaction.data::<Message>()?, Message::Chunk(_)),
+        "the first delivered frame should be the storage chunk envelope"
+    );
+
+    node1
+        .swarm
+        .send_message(
+            Message::PeerLivenessProbe(PeerLivenessProbe { sent_at_ms: 7 }),
+            node2.did(),
+        )
+        .await?;
+    assert_eq!(
+        dummy_controlled::sent_count(),
+        2,
+        "DHT control should not wait behind the bulk transfer's pending tail"
+    );
+    let second = node2.listen_once().await.ok_or_else(|| {
+        crate::error::Error::InvalidMessage("expected DHT control frame".to_string())
+    })?;
+    assert!(
+        matches!(
+            second.transaction.data::<Message>()?,
+            Message::PeerLivenessProbe(_)
+        ),
+        "new control work must be admitted before any new bulk frame"
+    );
+    dummy_controlled::release_delivery_future_gate();
+    wait_for_test_condition(
+        "the storage tail must resume after control admission",
+        || {
+            node1
+                .swarm
+                .transport
+                .outbound_frame_trace_for_test(node2.did())
+                .iter()
+                .filter(|(class, _, _)| *class == MessageClass::Storage)
+                .count()
+                >= 2
+        },
+    )
+    .await;
+    let trace = node1
+        .swarm
+        .transport
+        .take_outbound_frame_trace_for_test(node2.did());
+    assert_control_interleaves_transfer(&trace, MessageClass::Storage);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_send_queue_backpressure_returns_transport_timeout() {
     let measure = Arc::new(CountingMeasure::default());
     let measure_impl: MeasureImpl = measure.clone();
     let key1 = SecretKey::random();
@@ -715,7 +846,7 @@ async fn send_queue_backpressure_returns_transport_timeout() {
 }
 
 #[tokio::test]
-async fn negotiated_size_too_small_errors_without_partial_send() {
+async fn test_negotiated_size_too_small_errors_without_partial_send() {
     let key1 = SecretKey::random();
     let key2 = SecretKey::random();
     let node1 = prepare_node(key1).await;

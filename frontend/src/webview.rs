@@ -938,7 +938,7 @@ fn is_http_origin(origin: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests;
+mod test_webview;
 
 #[cfg(all(test, target_arch = "wasm32"))]
-mod onion_browser_tests;
+mod test_onion_browser;

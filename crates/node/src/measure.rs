@@ -421,7 +421,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn repeated_disconnections_degrade_peer_quality(
+    async fn test_repeated_disconnections_degrade_peer_quality(
     ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let ms = Box::new(MemStorage::new());
         let did = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0")?;

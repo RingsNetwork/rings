@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -14,6 +15,8 @@ use crate::dht::successor::SuccessorReader;
 use crate::dht::Did;
 use crate::dht::PeerRing;
 use crate::ecc::SecretKey;
+use crate::error::Result;
+use crate::measure::MeasureImpl;
 use crate::message::Message;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
@@ -25,6 +28,8 @@ use crate::swarm::SwarmBuilder;
 
 mod test_dht_convergence;
 // Uses the `stateright` model checker, which doesn't build for wasm32.
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub(crate) mod dummy_hooks;
 #[cfg(not(target_family = "wasm"))]
 mod test_dht_stateright;
 mod test_dht_trace_replay;
@@ -36,6 +41,10 @@ mod test_dht_schedule;
 #[cfg(feature = "dummy")]
 mod test_chunk_e2e;
 mod test_message_handler;
+#[cfg(all(feature = "std", not(feature = "dummy")))]
+mod test_native_transport;
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+mod test_outbound_scheduler;
 mod test_stabilization;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 mod test_stabilization_failover;
@@ -43,10 +52,24 @@ mod test_stabilization_failover;
 const TEST_DHT_FINGER_TABLE_SIZE: usize = 8;
 const TEST_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const TEST_WAIT_POLL_INTERVAL: Duration = Duration::from_millis(5);
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+pub(crate) const TEST_NETWORK_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(not(all(feature = "dummy", not(target_family = "wasm"))))]
+pub(crate) const TEST_NETWORK_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub struct Node {
     pub swarm: Arc<Swarm>,
-    message_rx: Mutex<mpsc::UnboundedReceiver<MessagePayload>>,
+    inbox: Mutex<NodeInbox>,
+}
+
+struct NodeInbox {
+    buffered: VecDeque<MessagePayload>,
+    receiver: mpsc::UnboundedReceiver<MessagePayload>,
+}
+
+pub(crate) struct NodeMessageScan<'a> {
+    inbox: futures::lock::MutexGuard<'a, NodeInbox>,
+    skipped: Vec<MessagePayload>,
 }
 
 pub struct NodeCallback {
@@ -60,17 +83,39 @@ impl Node {
         swarm.set_callback(Arc::new(callback)).unwrap();
         Self {
             swarm,
-            message_rx: Mutex::new(message_rx),
+            inbox: Mutex::new(NodeInbox {
+                buffered: VecDeque::new(),
+                receiver: message_rx,
+            }),
         }
     }
 
     pub async fn listen_once(&self) -> Option<MessagePayload> {
-        self.message_rx.lock().await.recv().await
+        self.message_scan().await.next().await
     }
 
     /// Non-blocking variant: pop a buffered message if one is immediately available, else `None`.
     pub async fn try_listen_once(&self) -> Option<MessagePayload> {
-        self.message_rx.lock().await.try_recv().ok()
+        let mut inbox = self.inbox.lock().await;
+        match inbox.buffered.pop_front() {
+            Some(payload) => Some(payload),
+            None => inbox.receiver.try_recv().ok(),
+        }
+    }
+
+    pub(crate) async fn message_scan(&self) -> NodeMessageScan<'_> {
+        NodeMessageScan {
+            inbox: self.inbox.lock().await,
+            skipped: Vec::new(),
+        }
+    }
+
+    /// Seed the front of this test node's inbox without changing message order.
+    pub(crate) async fn prepend_messages_for_test(&self, messages: Vec<MessagePayload>) {
+        let mut inbox = self.inbox.lock().await;
+        for payload in messages.into_iter().rev() {
+            inbox.buffered.push_front(payload);
+        }
     }
 
     /// Whether any connection is still mid-handshake. Used to detect true
@@ -81,6 +126,19 @@ impl Node {
             .pending_connection_count()
             .unwrap_or_default()
             > 0
+    }
+
+    /// Whether a transfer is queued, sending, or waiting for delivery.
+    pub fn has_outbound_transfer(&self) -> bool {
+        self.swarm
+            .transport
+            .outbound_admitted_transfer_total_for_test()
+            > 0
+    }
+
+    /// Whether an admitted inbound message is queued or still being handled.
+    pub fn has_inbound_message(&self) -> bool {
+        self.swarm.transport.inbound_admitted_count_for_test() > 0
     }
 
     pub fn did(&self) -> Did {
@@ -108,12 +166,37 @@ impl Node {
     }
 }
 
+impl NodeMessageScan<'_> {
+    pub(crate) async fn next(&mut self) -> Option<MessagePayload> {
+        match self.inbox.buffered.pop_front() {
+            Some(payload) => Some(payload),
+            None => self.inbox.receiver.recv().await,
+        }
+    }
+
+    pub(crate) fn skip(&mut self, payload: MessagePayload) {
+        self.skipped.push(payload);
+    }
+
+    pub(crate) fn skipped(&self) -> &[MessagePayload] {
+        &self.skipped
+    }
+}
+
+impl Drop for NodeMessageScan<'_> {
+    fn drop(&mut self) {
+        for payload in self.skipped.drain(..).rev() {
+            self.inbox.buffered.push_front(payload);
+        }
+    }
+}
+
 #[async_trait]
 impl SwarmCallback for NodeCallback {
     async fn on_validate(
         &self,
         payload: &MessagePayload,
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    ) -> std::result::Result<(), crate::error::CallbackError> {
         // Here we are using on_validate to record messages.
         // When on_validate return error, the message will be ignored, which is not on purpose.
         // To prevent returning errors when sending fails, we choose to panic instead.
@@ -123,21 +206,34 @@ impl SwarmCallback for NodeCallback {
 }
 
 pub async fn prepare_node(key: SecretKey) -> Node {
+    prepare_node_with_optional_measure(key, None).unwrap()
+}
+
+pub(super) fn prepare_node_with_measure(key: SecretKey, measure: MeasureImpl) -> Result<Node> {
+    prepare_node_with_optional_measure(key, Some(measure))
+}
+
+fn prepare_node_with_optional_measure(
+    key: SecretKey,
+    measure: Option<MeasureImpl>,
+) -> Result<Node> {
     let stun = "stun://stun.l.google.com:19302";
     let storage = Box::new(MemStorage::new());
 
-    let session_sk = SessionSk::new_with_seckey(&key).unwrap();
-    let swarm = Arc::new(
-        SwarmBuilder::new(0, stun, storage, session_sk)
-            .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
-            .dht_virtual_nodes(0)
-            .build(),
-    );
+    let session_sk = SessionSk::new_with_seckey(&key)?;
+    let builder = SwarmBuilder::new(0, stun, storage, session_sk)
+        .dht_finger_table_size(TEST_DHT_FINGER_TABLE_SIZE)
+        .dht_virtual_nodes(0);
+    let builder = match measure {
+        Some(measure) => builder.measure(measure),
+        None => builder,
+    };
+    let swarm = Arc::new(builder.build());
 
     println!("key: {:?}", key.to_string());
     println!("did: {:?}", swarm.did());
 
-    Node::new(swarm)
+    Ok(Node::new(swarm))
 }
 
 pub async fn wait_until_result(
@@ -281,7 +377,8 @@ pub async fn assert_no_more_msg(nodes: impl IntoIterator<Item = &Node>) {
 }
 
 /// Wait until the nodes are quiescent, **state-driven, not on a wall clock**: every connection has
-/// finished its handshake (none left in `New`/`Connecting`) and no buffered messages remain.
+/// finished its handshake, every inbound and outbound transfer has completed, and no buffered
+/// message remains.
 ///
 /// The old version returned after a fixed 3-second silence gap, which could fire *mid-handshake* —
 /// e.g. while a stabilization-triggered connection's answer SDP (`ConnectNodeReport`) was still
@@ -303,22 +400,10 @@ pub async fn wait_for_msgs(nodes: impl IntoIterator<Item = &Node>) {
                 drained = true;
                 println!(
                     "Msg {} -> {} [{} => {}] : {:?}",
-                    did_names
-                        .get(&payload.signer())
-                        .map(|n| n.clone())
-                        .unwrap_or_default(),
-                    did_names
-                        .get(&node.did())
-                        .map(|n| n.clone())
-                        .unwrap_or_default(),
-                    did_names
-                        .get(&payload.transaction.signer())
-                        .map(|n| n.clone())
-                        .unwrap_or_default(),
-                    did_names
-                        .get(&payload.transaction.destination)
-                        .map(|n| n.clone())
-                        .unwrap_or_default(),
+                    did_name_or_default(&did_names, payload.signer()),
+                    did_name_or_default(&did_names, node.did()),
+                    did_name_or_default(&did_names, payload.transaction.signer()),
+                    did_name_or_default(&did_names, payload.transaction.destination),
                     payload.transaction.data::<Message>().unwrap()
                 );
             }
@@ -326,6 +411,9 @@ pub async fn wait_for_msgs(nodes: impl IntoIterator<Item = &Node>) {
         drained
     };
     let handshaking = || nodes.iter().any(|n| n.has_handshaking_connection());
+    let inbound = || nodes.iter().any(|n| n.has_inbound_message());
+    let outbound = || nodes.iter().any(|n| n.has_outbound_transfer());
+    let transport_activity = pending_transport_snapshot;
     // A snapshot of every node's DHT. Opening the data channel fires `join_dht`, which mutates the
     // DHT and emits more messages *after* the ICE connection state reached `Connected` — so true
     // quiescence also requires the DHT to have stopped changing, not just the handshakes to be done.
@@ -338,17 +426,25 @@ pub async fn wait_for_msgs(nodes: impl IntoIterator<Item = &Node>) {
 
     // Diagnostics + hard failure if quiescence is never reached — never silently proceed, or later
     // assertions would run against unresolved async state (the bug this helper exists to catch).
-    let ceiling = Duration::from_secs(30);
+    let ceiling = TEST_NETWORK_IDLE_TIMEOUT;
     let started = std::time::Instant::now();
     loop {
         let drained = drain().await;
         let before = snapshot();
-        if !drained && !handshaking() {
+        let transport_before = transport_activity();
+        if !drained && !handshaking() && !inbound() && !outbound() && transport_before.is_idle() {
             // Quiescent candidate: settle briefly, then require that across the gap nothing changed
             // — no message handed off, no handshake started, and no DHT mutation (join_dht /
             // stabilize chains). Any change means activity is still in flight; keep waiting.
             sleep(Duration::from_millis(500)).await;
-            if !drain().await && !handshaking() && snapshot() == before {
+            let quiet = !drain().await && !handshaking() && !inbound() && !outbound();
+            let unchanged_dht = snapshot() == before;
+            // This is the final synchronous observation before returning. The dummy queue is
+            // thread-local, so no event can be enqueued between this snapshot and the return.
+            let transport_after = transport_activity();
+            let unchanged_transport =
+                transport_after == transport_before && transport_after.is_idle();
+            if quiet && unchanged_dht && unchanged_transport {
                 return;
             }
         } else {
@@ -356,20 +452,84 @@ pub async fn wait_for_msgs(nodes: impl IntoIterator<Item = &Node>) {
         }
 
         if started.elapsed() > ceiling {
-            let handshaking_nodes: Vec<String> = nodes
-                .iter()
-                .filter(|n| n.has_handshaking_connection())
-                .map(|n| {
-                    did_names
-                        .get(&n.did())
-                        .map(|s| s.clone())
-                        .unwrap_or_default()
-                })
-                .collect();
-            panic!(
-                "wait_for_msgs did not reach quiescence within {ceiling:?}: still-handshaking \
-                 nodes={handshaking_nodes:?}, last-loop drained={drained}"
-            );
+            panic_wait_for_msgs_timeout(&nodes, &did_names, ceiling, drained);
         }
+    }
+}
+
+fn did_name_or_default(did_names: &DashMap<Did, String>, did: Did) -> String {
+    did_names
+        .get(&did)
+        .map(|name| name.clone())
+        .unwrap_or_default()
+}
+
+fn active_node_counts(
+    nodes: &[&Node],
+    did_names: &DashMap<Did, String>,
+    count: impl Fn(&Node) -> usize,
+) -> Vec<(String, usize)> {
+    nodes
+        .iter()
+        .filter_map(|node| {
+            let admitted = count(node);
+            (admitted > 0).then(|| (did_name_or_default(did_names, node.did()), admitted))
+        })
+        .collect()
+}
+
+fn panic_wait_for_msgs_timeout(
+    nodes: &[&Node],
+    did_names: &DashMap<Did, String>,
+    ceiling: Duration,
+    drained: bool,
+) -> ! {
+    let handshaking_nodes: Vec<String> = nodes
+        .iter()
+        .filter(|node| node.has_handshaking_connection())
+        .map(|node| did_name_or_default(did_names, node.did()))
+        .collect();
+    let outbound_nodes = active_node_counts(nodes, did_names, |node| {
+        node.swarm
+            .transport
+            .outbound_admitted_transfer_total_for_test()
+    });
+    let inbound_nodes = active_node_counts(nodes, did_names, |node| {
+        node.swarm.transport.inbound_admitted_count_for_test()
+    });
+    panic!(
+        "wait_for_msgs did not reach quiescence within {ceiling:?}: still-handshaking \
+         nodes={handshaking_nodes:?}, inbound={inbound_nodes:?}, outbound={outbound_nodes:?}, \
+         transport-pending={}, last-loop drained={drained}",
+        pending_transport_snapshot().pending
+    );
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingTransportSnapshot {
+    pending: usize,
+    generation: u64,
+}
+
+impl PendingTransportSnapshot {
+    const fn is_idle(self) -> bool {
+        self.pending == 0
+    }
+}
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+fn pending_transport_snapshot() -> PendingTransportSnapshot {
+    let snapshot = rings_transport::connections::dummy_controlled::snapshot();
+    PendingTransportSnapshot {
+        pending: snapshot.pending(),
+        generation: snapshot.generation(),
+    }
+}
+
+#[cfg(not(all(feature = "dummy", not(target_family = "wasm"))))]
+const fn pending_transport_snapshot() -> PendingTransportSnapshot {
+    PendingTransportSnapshot {
+        pending: 0,
+        generation: 0,
     }
 }

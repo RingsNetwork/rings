@@ -223,7 +223,7 @@ mod tests {
     use crate::error::Result;
 
     #[test]
-    fn proxy_protocol_maps_to_exit_service() {
+    fn test_proxy_protocol_maps_to_exit_service() {
         assert_eq!(OnionProxyProtocol::TcpConnect.exit_service(), "tcp");
         assert_eq!(OnionProxyProtocol::HttpsProxy.exit_service(), "https");
         assert_eq!(
@@ -237,7 +237,7 @@ mod tests {
     }
 
     #[test]
-    fn proxy_config_is_target_agnostic() {
+    fn test_proxy_config_is_target_agnostic() {
         let proxy = OnionProxyConfig::https_proxy(3, false);
 
         assert_eq!(proxy.exit_service(), "https");
@@ -247,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn tcp_proxy_config_accepts_custom_tcp_service() -> Result<()> {
+    fn test_tcp_proxy_config_accepts_custom_tcp_service() -> Result<()> {
         let service = OnionServiceName::parse("web")?;
         let proxy = OnionProxyConfig::tcp_connect_service(service, 2, true)?;
 
@@ -259,7 +259,7 @@ mod tests {
     }
 
     #[test]
-    fn tcp_proxy_config_accepts_https_tcp_service() -> Result<()> {
+    fn test_tcp_proxy_config_accepts_https_tcp_service() -> Result<()> {
         let proxy = OnionProxyConfig::tcp_connect_service(OnionServiceName::https(), 1, false)?;
 
         assert_eq!(proxy.exit_service(), "https");
@@ -268,7 +268,7 @@ mod tests {
     }
 
     #[test]
-    fn target_authority_parses_domain_targets() -> Result<()> {
+    fn test_target_authority_parses_domain_targets() -> Result<()> {
         let target = OnionProxyTarget::parse_authority("Example.COM.:443")?;
 
         assert_eq!(target.host(), "example.com");
@@ -278,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn target_authority_parses_ipv6_targets() -> Result<()> {
+    fn test_target_authority_parses_ipv6_targets() -> Result<()> {
         let target = OnionProxyTarget::parse_authority("[2001:db8::1]:8443")?;
 
         assert_eq!(target.host(), "2001:db8::1");
@@ -288,7 +288,7 @@ mod tests {
     }
 
     #[test]
-    fn target_authority_rejects_missing_port() {
+    fn test_target_authority_rejects_missing_port() {
         assert!(matches!(
             OnionProxyTarget::parse_authority("example.com"),
             Err(Error::OnionProxyTarget(

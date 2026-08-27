@@ -3,10 +3,10 @@ pub mod test_processor;
 use std::sync::Arc;
 
 use rings_core::ecc::SecretKey;
-use rings_core::prelude::uuid;
 use rings_core::session::SessionSk;
 use rings_core::storage::idb::IdbStorage;
 use rings_rpc::protos::rings_node::*;
+use uuid;
 use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::wasm_bindgen_test_configure;
 

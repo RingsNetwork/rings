@@ -219,7 +219,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn virtual_node_derivation_is_domain_separated_by_network() {
+    fn test_virtual_node_derivation_is_domain_separated_by_network() {
         let owner = Did::from(42u32);
         let first = VirtualNode::derive(7, owner, 0);
         let repeated = VirtualNode::derive(7, owner, 0);
@@ -231,7 +231,7 @@ mod tests {
     }
 
     #[test]
-    fn virtual_node_config_caps_positions_at_cost_bound() {
+    fn test_virtual_node_config_caps_positions_at_cost_bound() {
         let config =
             VirtualNodeConfig::new(1, MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER.saturating_add(1));
 
@@ -242,7 +242,8 @@ mod tests {
     }
 
     #[test]
-    fn storage_virtual_nodes_resolve_owner_from_virtual_position() -> crate::error::Result<()> {
+    fn test_storage_virtual_nodes_resolve_owner_from_virtual_position() -> crate::error::Result<()>
+    {
         let owner_a = Did::from(10u32);
         let owner_b = Did::from(20u32);
         let registry =
@@ -264,8 +265,8 @@ mod tests {
     }
 
     #[test]
-    fn storage_virtual_nodes_resolve_successor_owner_for_interval_key() -> crate::error::Result<()>
-    {
+    fn test_storage_virtual_nodes_resolve_successor_owner_for_interval_key(
+    ) -> crate::error::Result<()> {
         let owners = [Did::from(10u32), Did::from(20u32), Did::from(30u32)];
         let registry = StorageVirtualNodes::from_owners(VirtualNodeConfig::new(1, 2), owners);
         let positions = registry.positions();
@@ -290,7 +291,7 @@ mod tests {
     }
 
     #[test]
-    fn unregister_owner_removes_virtual_positions() {
+    fn test_unregister_owner_removes_virtual_positions() {
         let owner = Did::from(10u32);
         let mut registry = StorageVirtualNodes::new(VirtualNodeConfig::new(1, 3));
         registry.register_owner(owner);

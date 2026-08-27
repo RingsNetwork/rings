@@ -1,23 +1,120 @@
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+use std::cell::Cell;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use futures::lock::Mutex as FuturesMutex;
+use rings_transport::core::callback::AdmittedInboundMessage;
+use rings_transport::core::callback::InboundFrameCapacityLease;
 use rings_transport::core::callback::TransportCallback;
 use rings_transport::core::transport::WebrtcConnectionState;
 
 use crate::chunk::MessageReassembler;
+use crate::chunk::ReassemblyOutcome;
 use crate::dht::Did;
+use crate::message::with_message_variants;
 use crate::message::HandleMsg;
 use crate::message::Message;
 use crate::message::MessageHandler;
+use crate::message::MessageKind;
 use crate::message::MessagePayload;
 use crate::message::MessageVerificationExt;
 use crate::swarm::transport::ConnectionEventDisposition;
 use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 
-type CallbackError = Box<dyn std::error::Error>;
+mod inbound;
+pub(crate) use inbound::InboundCapacity;
+pub(crate) use inbound::InboundLane;
+
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) const fn inbound_mailbox_capacity_for_test() -> usize {
+    inbound::capacity_for_test()
+}
+
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) const fn inbound_application_capacity_for_test() -> usize {
+    inbound::application_capacity_for_test()
+}
+
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) const fn inbound_peer_capacity_for_test() -> usize {
+    inbound::peer_capacity_for_test()
+}
+use inbound::InboundMailbox;
+use inbound::ReassemblyCleanupClock;
+
+pub use crate::error::CallbackError;
+type TransportCallbackError = Box<dyn std::error::Error>;
+
+fn into_transport_callback_error(error: CallbackError) -> TransportCallbackError {
+    error
+}
+
+fn log_inbound_verification_failure(
+    peer: Option<Did>,
+    payload: &MessagePayload,
+    wire_bytes: usize,
+) {
+    let message_kind = MessageKind::from_wire(&payload.transaction.data)
+        .ok()
+        .map(MessageKind::as_str);
+    tracing::error!(
+        peer = ?peer,
+        tx_id = %payload.transaction.tx_id,
+        destination = %payload.transaction.destination,
+        message_kind,
+        data_bytes = payload.transaction.data.len(),
+        wire_bytes,
+        "inbound message verification failed or expired"
+    );
+}
+
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+thread_local! {
+    static ON_MESSAGE_RECURSION_DEPTH: Cell<usize> = const { Cell::new(0) };
+    static MAX_ON_MESSAGE_RECURSION_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+struct OnMessageRecursionDepthGuard;
+
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+impl OnMessageRecursionDepthGuard {
+    fn enter() -> Self {
+        ON_MESSAGE_RECURSION_DEPTH.with(|depth| {
+            let current = depth.get().saturating_add(1);
+            depth.set(current);
+            MAX_ON_MESSAGE_RECURSION_DEPTH.with(|max_depth| {
+                max_depth.set(max_depth.get().max(current));
+            });
+        });
+        Self
+    }
+}
+
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+impl Drop for OnMessageRecursionDepthGuard {
+    fn drop(&mut self) {
+        ON_MESSAGE_RECURSION_DEPTH.with(|depth| {
+            depth.set(depth.get().saturating_sub(1));
+        });
+    }
+}
+
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) fn reset_on_message_recursion_depth_for_test() {
+    ON_MESSAGE_RECURSION_DEPTH.with(|depth| depth.set(0));
+    MAX_ON_MESSAGE_RECURSION_DEPTH.with(|depth| depth.set(0));
+}
+
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) fn max_on_message_recursion_depth_for_test() -> usize {
+    MAX_ON_MESSAGE_RECURSION_DEPTH.with(Cell::get)
+}
 
 /// The [InnerSwarmCallback] will accept shared [SwarmCallback] trait object.
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
@@ -45,12 +142,18 @@ pub enum SwarmEvent {
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait SwarmCallback {
     /// This method is invoked when a new message is received and before handling.
+    ///
+    /// The swarm enforces a deadline and cancels this future if it expires.
+    /// Implementations must therefore be cancellation-safe at every suspension.
     async fn on_validate(&self, _payload: &MessagePayload) -> Result<(), CallbackError> {
         Ok(())
     }
 
     /// This method is invoked when a new message is received and after handling.
     /// Will not be invoked if the message is not for this node.
+    ///
+    /// The swarm enforces a deadline and cancels this future if it expires.
+    /// Implementations must therefore be cancellation-safe at every suspension.
     async fn on_inbound(&self, _payload: &MessagePayload) -> Result<(), CallbackError> {
         Ok(())
     }
@@ -71,40 +174,121 @@ pub trait SwarmCallback {
     }
 }
 
-/// [InnerSwarmCallback] wraps [SharedSwarmCallback] with inner handling for a specific connection.
-pub struct InnerSwarmCallback {
+#[derive(Clone)]
+pub(super) struct InboundProcessor {
     transport: Arc<SwarmTransport>,
     message_handler: MessageHandler,
     callback: SharedSwarmCallback,
-    reassembler: FuturesMutex<MessageReassembler>,
-    pending_attempt: Option<PendingConnectionAttempt>,
+    reassembler: Arc<FuturesMutex<MessageReassembler>>,
+    pending_attempt: Arc<Mutex<Option<PendingConnectionAttempt>>>,
+}
+
+/// [InnerSwarmCallback] wraps [SharedSwarmCallback] with inner handling for a specific connection.
+pub struct InnerSwarmCallback {
+    processor: InboundProcessor,
+    inbound: InboundMailbox,
+}
+
+impl InboundProcessor {
+    fn pending_attempt(&self) -> Option<PendingConnectionAttempt> {
+        *self
+            .pending_attempt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn set_pending_attempt(&self, attempt: PendingConnectionAttempt) {
+        *self
+            .pending_attempt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(attempt);
+    }
+
+    pub(super) async fn record_receive_failure(&self, peer: Option<Did>) {
+        if let Some(peer) = peer {
+            self.transport
+                .record_peer_message_receive_failed(peer)
+                .await;
+        }
+    }
 }
 
 impl InnerSwarmCallback {
+    fn pending_attempt(&self) -> Option<PendingConnectionAttempt> {
+        self.processor.pending_attempt()
+    }
+
     /// Create a new [InnerSwarmCallback] with the provided transport and callback.
     pub fn new(transport: Arc<SwarmTransport>, callback: SharedSwarmCallback) -> Self {
+        Self::new_with_reassembly_cleanup_clock(
+            transport,
+            callback,
+            ReassemblyCleanupClock::system(),
+        )
+    }
+
+    fn new_with_reassembly_cleanup_clock(
+        transport: Arc<SwarmTransport>,
+        callback: SharedSwarmCallback,
+        cleanup_clock: ReassemblyCleanupClock,
+    ) -> Self {
+        let inbound_capacity = transport.inbound_capacity();
         let message_handler = MessageHandler::new(transport.clone(), callback.clone());
-        let reassembler = MessageReassembler::with_limits(transport.reassembly_limits());
-        Self {
+        let reassembler = MessageReassembler::with_limits_and_budget(
+            transport.reassembly_limits(),
+            transport.reassembly_budget(),
+        );
+        let processor = InboundProcessor {
             transport,
             message_handler,
             callback,
-            reassembler: FuturesMutex::new(reassembler),
-            pending_attempt: None,
-        }
+            reassembler: Arc::new(FuturesMutex::new(reassembler)),
+            pending_attempt: Arc::new(Mutex::new(None)),
+        };
+        let inbound = InboundMailbox::spawn(processor.clone(), inbound_capacity, cleanup_clock);
+        Self { processor, inbound }
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    /// Construct an inbound actor with an injected periodic-cleanup clock.
+    pub(crate) fn new_with_reassembly_cleanup_clock_for_test(
+        transport: Arc<SwarmTransport>,
+        callback: SharedSwarmCallback,
+        now_ms: Arc<Mutex<u128>>,
+    ) -> Self {
+        Self::new_with_reassembly_cleanup_clock(
+            transport,
+            callback,
+            ReassemblyCleanupClock::controlled(now_ms),
+        )
     }
 
     /// Bind this callback to the pending handshake that created its transport.
     pub(crate) fn with_pending_connection_attempt(
-        mut self,
+        self,
         pending_attempt: PendingConnectionAttempt,
     ) -> Self {
-        self.pending_attempt = Some(pending_attempt);
+        self.processor.set_pending_attempt(pending_attempt);
         self
     }
 
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) fn inbound_admitted_count_for_test(&self) -> usize {
+        self.inbound.admitted_count_for_test()
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) fn hold_application_admission_for_test(&self) -> crate::error::Result<impl Drop> {
+        self.inbound.hold_application_admission_for_test()
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) fn close_inbound_for_test(&self) {
+        self.inbound.close_for_test();
+    }
+
     async fn admit_pending_connection(&self, did: Did) -> Result<bool, CallbackError> {
-        let Some(attempt) = self.pending_attempt else {
+        let Some(attempt) = self.pending_attempt() else {
             return Ok(false);
         };
         if attempt.peer() != did {
@@ -112,18 +296,34 @@ impl InnerSwarmCallback {
                 "ignoring data-channel open for {did}; pending attempt belongs to {}",
                 attempt.peer()
             );
-            self.transport.cancel_pending_connection(attempt).await?;
+            self.processor
+                .transport
+                .cancel_pending_connection(attempt)
+                .await?;
             return Ok(false);
         }
-        if !self.transport.begin_ready_connection_admission(attempt)? {
+        if !self
+            .processor
+            .transport
+            .begin_ready_connection_admission(attempt)?
+        {
             return Ok(false);
         }
 
-        match self.message_handler.admit_dht_attempt(attempt).await {
+        match self
+            .processor
+            .message_handler
+            .admit_dht_attempt(attempt)
+            .await
+        {
             Ok(true) => {}
             Ok(false) => return Ok(false),
             Err(error) => {
-                if let Err(cleanup_error) = self.transport.cancel_pending_connection(attempt).await
+                if let Err(cleanup_error) = self
+                    .processor
+                    .transport
+                    .cancel_pending_connection(attempt)
+                    .await
                 {
                     tracing::warn!(
                         peer = %did,
@@ -136,8 +336,15 @@ impl InnerSwarmCallback {
             }
         }
 
-        self.transport.record_peer_connected(attempt).await;
-        if !self.transport.is_admitted_connection_attempt(attempt) {
+        self.processor
+            .transport
+            .record_peer_connected(attempt)
+            .await;
+        if !self
+            .processor
+            .transport
+            .is_admitted_connection_attempt(attempt)
+        {
             return Ok(false);
         }
         self.emit_connected_event_for_attempt(did, attempt).await
@@ -148,10 +355,14 @@ impl InnerSwarmCallback {
         did: Did,
         attempt: PendingConnectionAttempt,
     ) -> Result<bool, CallbackError> {
-        let delivery = self.transport.swarm_event_delivery_lock(did);
+        let delivery = self.processor.transport.swarm_event_delivery_lock(did);
         let result = async {
             let delivery_turn = delivery.acquire().await;
-            if !self.transport.is_admitted_connection_attempt(attempt) {
+            if !self
+                .processor
+                .transport
+                .is_admitted_connection_attempt(attempt)
+            {
                 tracing::debug!("suppressing connected event for {did}; connection was retired before event delivery");
                 return Ok(false);
             }
@@ -164,7 +375,8 @@ impl InnerSwarmCallback {
             Ok(true)
         }
         .await;
-        self.transport
+        self.processor
+            .transport
             .prune_swarm_event_delivery_lock(did, &delivery);
         result
     }
@@ -175,11 +387,15 @@ impl InnerSwarmCallback {
         state: WebrtcConnectionState,
         attempt: Option<PendingConnectionAttempt>,
     ) -> Result<(), CallbackError> {
-        let delivery = self.transport.swarm_event_delivery_lock(did);
+        let delivery = self.processor.transport.swarm_event_delivery_lock(did);
         let result = async {
             let delivery_turn = delivery.acquire().await;
             if let Some(attempt) = attempt {
-                match self.transport.connection_event_disposition(attempt)? {
+                match self
+                    .processor
+                    .transport
+                    .connection_event_disposition(attempt)?
+                {
                     ConnectionEventDisposition::Deliver => {}
                     ConnectionEventDisposition::Suppress { active } => {
                         tracing::debug!(
@@ -197,7 +413,8 @@ impl InnerSwarmCallback {
                 .await
         }
         .await;
-        self.transport
+        self.processor
+            .transport
             .prune_swarm_event_delivery_lock(did, &delivery);
         result
     }
@@ -210,19 +427,23 @@ impl InnerSwarmCallback {
     ) -> Result<(), CallbackError> {
         let event = SwarmEvent::ConnectionStateChange { peer: did, state };
         delivery_turn
-            .poll_once_then_release(self.callback.on_event(&event))
+            .poll_once_then_release(self.processor.callback.on_event(&event))
             .await
     }
 
     fn pending_disconnected_before_admission(&self, did: Did) -> bool {
-        let Some(attempt) = self.pending_attempt else {
+        let Some(attempt) = self.pending_attempt() else {
             return false;
         };
-        attempt.peer() == did && !self.transport.is_admitted_connection_attempt(attempt)
+        attempt.peer() == did
+            && !self
+                .processor
+                .transport
+                .is_admitted_connection_attempt(attempt)
     }
 
     fn is_local_did_event(&self, did: Did, operation: &str) -> bool {
-        if did != self.transport.dht.did {
+        if did != self.processor.transport.dht.did {
             return false;
         }
         tracing::warn!("ignoring {operation} for local DID {did}");
@@ -234,7 +455,7 @@ impl InnerSwarmCallback {
         did: Did,
         operation: &str,
     ) -> Result<bool, CallbackError> {
-        let Some(attempt) = self.pending_attempt else {
+        let Some(attempt) = self.pending_attempt() else {
             return Ok(false);
         };
         if attempt.peer() == did {
@@ -244,17 +465,60 @@ impl InnerSwarmCallback {
             "ignoring {operation} for {did}; pending attempt belongs to {}",
             attempt.peer()
         );
-        if self.transport.cancel_pending_connection(attempt).await? {
-            self.transport.record_peer_disconnected(attempt).await;
+        if self
+            .processor
+            .transport
+            .cancel_pending_connection(attempt)
+            .await?
+        {
+            self.processor
+                .transport
+                .record_peer_disconnected(attempt)
+                .await;
         }
         Ok(true)
     }
 
-    async fn pending_connection_allows_message(
+    async fn handle_pending_terminal_event(
+        &self,
+        did: Did,
+        operation: &str,
+    ) -> Result<bool, CallbackError> {
+        let Some(attempt) = self.pending_attempt() else {
+            return Ok(false);
+        };
+        if self
+            .processor
+            .transport
+            .cancel_pending_connection(attempt)
+            .await?
+        {
+            self.processor
+                .transport
+                .record_peer_disconnected(attempt)
+                .await;
+            return Ok(true);
+        }
+        if self
+            .processor
+            .transport
+            .is_admitted_connection_attempt(attempt)
+        {
+            return Ok(false);
+        }
+        tracing::debug!(
+            "ignoring late {operation} for {did}; pending attempt belongs to generation already superseded"
+        );
+        Ok(true)
+    }
+}
+
+impl InboundProcessor {
+    pub(super) async fn pending_connection_allows_message(
         &self,
         peer: Option<Did>,
-    ) -> Result<bool, CallbackError> {
-        let Some(attempt) = self.pending_attempt else {
+    ) -> crate::error::Result<bool> {
+        let Some(attempt) = self.pending_attempt() else {
             return Ok(true);
         };
         let Some(peer) = peer else {
@@ -279,148 +543,206 @@ impl InnerSwarmCallback {
         Ok(true)
     }
 
-    async fn handle_pending_terminal_event(
+    pub(super) async fn handle_payload(
         &self,
-        did: Did,
-        operation: &str,
-    ) -> Result<bool, CallbackError> {
-        let Some(attempt) = self.pending_attempt else {
-            return Ok(false);
-        };
-        if self.transport.cancel_pending_connection(attempt).await? {
-            self.transport.record_peer_disconnected(attempt).await;
-            return Ok(true);
-        }
-        if self.transport.is_admitted_connection_attempt(attempt) {
-            return Ok(false);
-        }
-        tracing::debug!(
-            "ignoring late {operation} for {did}; pending attempt belongs to generation already superseded"
-        );
-        Ok(true)
-    }
-
-    async fn handle_payload(
-        &self,
-        cid: &str,
         payload: &MessagePayload,
-    ) -> Result<(), CallbackError> {
-        let message: Message = payload.transaction.data()?;
-
-        let result = match &message {
-            Message::ConnectNodeSend(ref msg) => self.message_handler.handle(payload, msg).await,
-            Message::ConnectNodeReport(ref msg) => self.message_handler.handle(payload, msg).await,
-            Message::FindSuccessorSend(ref msg) => self.message_handler.handle(payload, msg).await,
-            Message::FindSuccessorReport(ref msg) => {
-                self.message_handler.handle(payload, msg).await
-            }
-            Message::NotifyPredecessorSend(ref msg) => {
-                self.message_handler.handle(payload, msg).await
-            }
-            Message::NotifyPredecessorReport(ref msg) => {
-                self.message_handler.handle(payload, msg).await
-            }
-            Message::PeerLivenessProbe(ref msg) => self.message_handler.handle(payload, msg).await,
-            Message::PeerLivenessReport(ref msg) => self.message_handler.handle(payload, msg).await,
-            Message::SearchEntry(ref msg) => self.message_handler.handle(payload, msg).await,
-            Message::FoundEntry(ref msg) => self.message_handler.handle(payload, msg).await,
-            Message::SyncEntriesWithSuccessor(ref msg) => {
-                self.message_handler.handle(payload, msg).await
-            }
-            Message::SyncEntriesWithSuccessorReport(ref msg) => {
-                self.message_handler.handle(payload, msg).await
-            }
-            Message::OperateEntry(ref msg) => self.message_handler.handle(payload, msg).await,
-            Message::CustomMessage(ref msg) => self.message_handler.handle(payload, msg).await,
-            Message::E2eHandshakeRequest(ref msg) => {
-                self.message_handler.handle(payload, msg).await
-            }
-            Message::E2eHandshakeResponse(ref msg) => {
-                self.message_handler.handle(payload, msg).await
-            }
-            Message::E2eStreamFrame(ref msg) => self.message_handler.handle(payload, msg).await,
-            Message::QueryForTopoInfoSend(ref msg) => {
-                self.message_handler.handle(payload, msg).await
-            }
-            Message::QueryForTopoInfoReport(ref msg) => {
-                self.message_handler.handle(payload, msg).await
-            }
-            Message::Chunk(ref msg) => {
-                // A chunk is an internal framing envelope, never an application message. When it
-                // completes a payload, re-enter with the reassembled bytes; when it does not, there
-                // is nothing to deliver. Either way we return here so the raw chunk envelope is
-                // *never* passed to `on_inbound` (the app only ever sees reassembled messages).
-                if let Some(data) = self.reassembler.lock().await.handle(msg.clone()) {
-                    return self.on_message(cid, &data).await;
-                }
-                return Ok(());
-            }
+        prepared_message: Option<Message>,
+    ) -> crate::error::Result<()> {
+        let message = match prepared_message {
+            Some(message) => message,
+            None => payload.transaction.data()?,
         };
+
+        macro_rules! dispatch_message_body {
+            (Chunk, $msg:expr) => {{
+                let _ = $msg;
+                Err(crate::error::Error::InboundActorInvariantViolation)
+            }};
+            ($variant:ident, $msg:expr) => {
+                self.message_handler.handle(payload, $msg).await
+            };
+        }
+        macro_rules! dispatch_message {
+            ($( $(#[$docs:meta])* $index:literal => $variant:ident($body:ty): $class:ident, $storage_route:ident ),+ $(,)?) => {
+                match message {
+                    $(Message::$variant(ref msg) => dispatch_message_body!($variant, msg)),+
+                }
+            };
+        }
+
+        let result = with_message_variants!(dispatch_message);
 
         // A handler that errored must not then be reported to the application as a successful
         // inbound message: surface the error and do not run `on_inbound` for it.
         if let Err(e) = result {
             tracing::error!("Failed to handle_payload: {e:?}");
-            return Err(e.into());
-        }
-
-        if payload.transaction.destination == self.transport.dht.did {
-            self.callback.on_inbound(payload).await?;
+            return Err(e);
         }
 
         Ok(())
+    }
+
+    pub(super) fn is_local_destination(&self, payload: &MessagePayload) -> bool {
+        payload.transaction.destination == self.transport.dht.did
+    }
+
+    pub(super) async fn on_inbound(
+        &self,
+        payload: &MessagePayload,
+    ) -> std::result::Result<(), CallbackError> {
+        self.callback.on_inbound(payload).await
+    }
+
+    pub(super) async fn handle_chunk(&self, chunk: crate::chunk::Chunk) -> ReassemblyOutcome {
+        self.reassembler.lock().await.handle_retained_outcome(chunk)
+    }
+
+    pub(super) async fn remove_expired_reassembly_at(&self, now_ms: u128) {
+        self.reassembler.lock().await.remove_expired_at(now_ms);
+    }
+
+    pub(super) async fn decode_verified_message(
+        &self,
+        peer: Option<Did>,
+        msg: &[u8],
+    ) -> crate::error::Result<MessagePayload> {
+        let payload = match MessagePayload::from_wire(msg) {
+            Ok(payload) => payload,
+            Err(e) => {
+                self.record_receive_failure(peer).await;
+                return Err(e);
+            }
+        };
+        if !(payload.verify() && payload.transaction.verify()) {
+            log_inbound_verification_failure(peer, &payload, msg.len());
+            self.record_receive_failure(peer).await;
+            return Err(crate::error::Error::InvalidMessage(
+                "message verification failed or message expired".to_string(),
+            ));
+        }
+        self.accept_preverified_message(peer, payload).await
+    }
+
+    pub(super) async fn accept_preverified_message(
+        &self,
+        peer: Option<Did>,
+        payload: MessagePayload,
+    ) -> crate::error::Result<MessagePayload> {
+        if payload.is_expired() || payload.transaction.is_expired() {
+            self.record_receive_failure(peer).await;
+            return Err(crate::error::Error::InvalidMessage(
+                "message expired after transport admission".to_string(),
+            ));
+        }
+        if let (Some(peer), Some(attempt)) = (peer, self.pending_attempt()) {
+            if attempt.peer() == peer {
+                self.transport.record_peer_message_received(attempt).await;
+            }
+        }
+        Ok(payload)
+    }
+}
+
+pub(super) struct PreparedInboundFrame {
+    payload: MessagePayload,
+    message: Message,
+    lane: InboundLane,
+}
+
+fn prepare_transport_frame(
+    peer: Option<Did>,
+    bytes: &[u8],
+) -> crate::error::Result<PreparedInboundFrame> {
+    let payload = MessagePayload::from_wire(bytes)?;
+    if !(payload.transaction.verify() && payload.verify()) {
+        log_inbound_verification_failure(peer, &payload, bytes.len());
+        return Err(crate::error::Error::InvalidMessage(
+            "message verification failed or message expired".to_string(),
+        ));
+    }
+    let message = payload.transaction.data::<Message>()?;
+    let lane = InboundLane::from_kind(MessageKind::from_message(&message));
+    Ok(PreparedInboundFrame {
+        payload,
+        message,
+        lane,
+    })
+}
+
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) fn prepare_transport_frame_lane_for_test(
+    bytes: &[u8],
+) -> crate::error::Result<InboundLane> {
+    prepare_transport_frame(None, bytes).map(|prepared| prepared.lane)
+}
+
+impl InnerSwarmCallback {
+    async fn submit_inbound_message(
+        &self,
+        cid: &str,
+        msg: Bytes,
+        transport_capacity: Option<InboundFrameCapacityLease>,
+    ) -> Result<(), TransportCallbackError> {
+        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+        let _depth_guard = OnMessageRecursionDepthGuard::enter();
+
+        let peer = Did::from_str(cid).ok();
+        let prepared = match prepare_transport_frame(peer, msg.as_ref()) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.processor.record_receive_failure(peer).await;
+                return Err(error.into());
+            }
+        };
+        self.inbound
+            .submit_prepared(&self.processor, peer, msg, prepared, transport_capacity)
+            .await
+            .map_err(Into::into)
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) async fn on_admitted_message_for_test(
+        &self,
+        cid: &str,
+        msg: &[u8],
+    ) -> Result<(), TransportCallbackError> {
+        self.submit_inbound_message(cid, Bytes::copy_from_slice(msg), None)
+            .await
     }
 }
 
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl TransportCallback for InnerSwarmCallback {
-    async fn on_message(&self, cid: &str, msg: &[u8]) -> Result<(), CallbackError> {
-        let peer = Did::from_str(cid).ok();
-        if !self.pending_connection_allows_message(peer).await? {
-            return Ok(());
-        }
-        let payload = match MessagePayload::from_wire(msg) {
-            Ok(payload) => payload,
-            Err(e) => {
-                if let Some(peer) = peer {
-                    self.transport
-                        .record_peer_message_receive_failed(peer)
-                        .await;
-                }
-                return Err(e.into());
-            }
-        };
-        if !(payload.verify() && payload.transaction.verify()) {
-            tracing::error!("Cannot verify msg or it's expired: {:?}", payload);
-            if let Some(peer) = peer {
-                self.transport
-                    .record_peer_message_receive_failed(peer)
-                    .await;
-            }
-            return Err("Cannot verify msg or it's expired".into());
-        }
-        if let (Some(peer), Some(attempt)) = (peer, self.pending_attempt) {
-            if attempt.peer() == peer {
-                self.transport.record_peer_message_received(attempt).await;
-            }
-        }
-        self.callback.on_validate(&payload).await?;
-        self.handle_payload(cid, &payload).await
+    async fn on_admitted_message(
+        &self,
+        message: AdmittedInboundMessage<'_>,
+    ) -> Result<(), TransportCallbackError> {
+        let (cid, msg, transport_capacity) = message.into_parts();
+        self.submit_inbound_message(cid, msg, Some(transport_capacity))
+            .await
+    }
+
+    async fn on_invalid_inbound_frame(&self, cid: &str) -> Result<(), TransportCallbackError> {
+        self.processor
+            .record_receive_failure(Did::from_str(cid).ok())
+            .await;
+        Ok(())
     }
 
     async fn on_peer_connection_state_change(
         &self,
         cid: &str,
         s: WebrtcConnectionState,
-    ) -> Result<(), CallbackError> {
+    ) -> Result<(), TransportCallbackError> {
         let Ok(did) = Did::from_str(cid) else {
             tracing::warn!("on_peer_connection_state_change parse did failed: {}", cid);
             return Ok(());
         };
         if self
             .cancel_mismatched_pending_connection(did, "connection state change")
-            .await?
+            .await
+            .map_err(into_transport_callback_error)?
         {
             return Ok(());
         }
@@ -432,27 +754,39 @@ impl TransportCallback for InnerSwarmCallback {
             // Peer-state progress may complete admission, but only when the
             // product snapshot also observes an open data channel. This makes
             // either browser callback order converge on the same transition.
-            WebrtcConnectionState::Connecting | WebrtcConnectionState::Connected => {
-                self.admit_pending_connection(did).await?
-            }
+            WebrtcConnectionState::Connecting | WebrtcConnectionState::Connected => self
+                .admit_pending_connection(did)
+                .await
+                .map_err(into_transport_callback_error)?,
             // `Failed` and `Closed` are terminal states. Pending handshakes are
             // discarded without touching the DHT; active peers leave it.
             WebrtcConnectionState::Failed | WebrtcConnectionState::Closed => {
                 if self
                     .handle_pending_terminal_event(did, "connection terminal state")
-                    .await?
+                    .await
+                    .map_err(into_transport_callback_error)?
                 {
                     return Ok(());
                 }
-                let Some(attempt) = self.pending_attempt else {
+                let Some(attempt) = self.pending_attempt() else {
                     tracing::warn!("ignoring unbound terminal connection event for {did}");
                     return Ok(());
                 };
-                if !self.transport.is_admitted_connection_attempt(attempt) {
+                if !self
+                    .processor
+                    .transport
+                    .is_admitted_connection_attempt(attempt)
+                {
                     return Ok(());
                 }
-                self.transport.record_peer_disconnected(attempt).await;
-                self.message_handler.leave_dht_attempt(attempt).await?;
+                self.processor
+                    .transport
+                    .record_peer_disconnected(attempt)
+                    .await;
+                self.processor
+                    .message_handler
+                    .leave_dht_attempt(attempt)
+                    .await?;
                 false
             }
             // `Disconnected` is a transient ICE state that frequently recovers
@@ -468,12 +802,15 @@ impl TransportCallback for InnerSwarmCallback {
                     );
                     return Ok(());
                 }
-                let Some(attempt) = self.pending_attempt else {
+                let Some(attempt) = self.pending_attempt() else {
                     tracing::warn!("ignoring unbound disconnected connection event for {did}");
                     return Ok(());
                 };
-                self.transport.record_peer_disconnected(attempt).await;
-                tracing::info!("Connection to {did} is disconnected, waiting for recovery");
+                self.processor
+                    .transport
+                    .record_peer_disconnected(attempt)
+                    .await;
+                tracing::debug!("Connection to {did} is disconnected, waiting for recovery");
                 false
             }
             _ => false,
@@ -483,21 +820,23 @@ impl TransportCallback for InnerSwarmCallback {
         // Other state changes are passed through directly, unless this exact
         // callback completed admission and already emitted the ordered Connected event.
         if s != WebrtcConnectionState::Connected && !admission_completed {
-            self.emit_connection_state_change(did, s, self.pending_attempt)
-                .await?
+            self.emit_connection_state_change(did, s, self.pending_attempt())
+                .await
+                .map_err(into_transport_callback_error)?
         }
 
         Ok(())
     }
 
-    async fn on_data_channel_open(&self, cid: &str) -> Result<(), CallbackError> {
+    async fn on_data_channel_open(&self, cid: &str) -> Result<(), TransportCallbackError> {
         let Ok(did) = Did::from_str(cid) else {
             tracing::warn!("on_data_channel_open parse did failed: {}", cid);
             return Ok(());
         };
         if self
             .cancel_mismatched_pending_connection(did, "data-channel open")
-            .await?
+            .await
+            .map_err(into_transport_callback_error)?
         {
             return Ok(());
         }
@@ -505,21 +844,26 @@ impl TransportCallback for InnerSwarmCallback {
             return Ok(());
         }
 
-        if !self.admit_pending_connection(did).await? && !self.transport.is_admitted_connection(did)
+        if !self
+            .admit_pending_connection(did)
+            .await
+            .map_err(into_transport_callback_error)?
+            && !self.processor.transport.is_admitted_connection(did)
         {
             tracing::debug!("ignoring late data-channel open for {did}");
         }
         Ok(())
     }
 
-    async fn on_data_channel_close(&self, cid: &str) -> Result<(), CallbackError> {
+    async fn on_data_channel_close(&self, cid: &str) -> Result<(), TransportCallbackError> {
         let Ok(did) = Did::from_str(cid) else {
             tracing::warn!("on_data_channel_close parse did failed: {}", cid);
             return Ok(());
         };
         if self
             .cancel_mismatched_pending_connection(did, "data-channel close")
-            .await?
+            .await
+            .map_err(into_transport_callback_error)?
         {
             return Ok(());
         }
@@ -534,19 +878,30 @@ impl TransportCallback for InnerSwarmCallback {
         // it promptly without relying on the transient `Disconnected` state.
         if self
             .handle_pending_terminal_event(did, "data-channel close")
-            .await?
+            .await
+            .map_err(into_transport_callback_error)?
         {
             return Ok(());
         }
-        let Some(attempt) = self.pending_attempt else {
+        let Some(attempt) = self.pending_attempt() else {
             tracing::warn!("ignoring unbound data-channel close for {did}");
             return Ok(());
         };
-        if !self.transport.is_admitted_connection_attempt(attempt) {
+        if !self
+            .processor
+            .transport
+            .is_admitted_connection_attempt(attempt)
+        {
             return Ok(());
         }
-        self.transport.record_peer_disconnected(attempt).await;
-        self.message_handler.leave_dht_attempt(attempt).await?;
+        self.processor
+            .transport
+            .record_peer_disconnected(attempt)
+            .await;
+        self.processor
+            .message_handler
+            .leave_dht_attempt(attempt)
+            .await?;
         Ok(())
     }
 }

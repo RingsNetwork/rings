@@ -37,12 +37,16 @@ type PendingFingerUpdatesGuard<'transport> =
 #[derive(Clone)]
 pub(super) struct ConnectionLifecycleBoundary {
     inner: Arc<Mutex<()>>,
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    waiting: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl ConnectionLifecycleBoundary {
     pub(super) fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(())),
+            #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+            waiting: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
@@ -55,6 +59,25 @@ impl ConnectionLifecycleBoundary {
     #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
     pub(super) fn is_held_for_test(&self) -> bool {
         self.inner.try_lock().is_err()
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    fn lock_with_waiter_observer_for_test(
+        &self,
+        waiter_registered: impl FnOnce(),
+    ) -> Result<std::sync::MutexGuard<'_, ()>> {
+        self.waiting
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        waiter_registered();
+        let result = self.lock();
+        self.waiting
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        result
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    fn waiting_for_test(&self) -> usize {
+        self.waiting.load(std::sync::atomic::Ordering::Acquire)
     }
 }
 
@@ -198,6 +221,19 @@ impl SwarmTransport {
         action()
     }
 
+    pub(super) fn with_active_slot<T>(
+        &self,
+        attempt: PendingConnectionAttempt,
+        action: impl FnOnce() -> Result<T>,
+    ) -> Result<Option<T>> {
+        self.with_connection_lifecycle(|| {
+            if !self.owns_active_slot(attempt)? {
+                return Ok(None);
+            }
+            action().map(Some)
+        })
+    }
+
     pub(super) fn peer_lifecycles(
         &self,
     ) -> Result<
@@ -273,7 +309,7 @@ impl SwarmTransport {
         self.commit_pending_reservation(peer)
     }
 
-    /// Validate a reservation and expire stale lifecycle records before its commit.
+    /// Validate the remote-peer precondition and expire stale records before commit.
     ///
     /// Separation law: validation is pure; expiry and commit are separate lifecycle mutations,
     /// each serialized by the shared boundary without holding a synchronous lock across await.
@@ -294,7 +330,7 @@ impl SwarmTransport {
     fn commit_pending_reservation(&self, peer: Did) -> Result<PendingConnectionAttempt> {
         let _lifecycle = self.connection_lifecycle()?;
         let attempt = self.peer_lifecycles()?.reserve(peer, get_epoch_ms_i64())?;
-        tracing::info!(
+        tracing::debug!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
             peer = %peer,
@@ -447,7 +483,7 @@ impl SwarmTransport {
             return Ok(false);
         }
         observe_transition(self);
-        tracing::info!(
+        tracing::debug!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
             peer = %attempt.peer,
@@ -584,6 +620,14 @@ impl SwarmTransport {
         action: impl FnOnce(&ActiveConnectionSet) -> Result<T>,
     ) -> Result<Option<T>> {
         let _lifecycle = self.connection_lifecycle()?;
+        self.retire_active_connection_locked(attempt, action)
+    }
+
+    fn retire_active_connection_locked<T>(
+        &self,
+        attempt: PendingConnectionAttempt,
+        action: impl FnOnce(&ActiveConnectionSet) -> Result<T>,
+    ) -> Result<Option<T>> {
         let mut lifecycles = self.peer_lifecycles()?;
         if lifecycles.active_attempt(attempt.peer) != Some(attempt) {
             return Ok(None);
@@ -595,10 +639,7 @@ impl SwarmTransport {
         // `active` while the action validates a successor fallback against it.
         let mut pending_finger_updates = self.pending_finger_updates()?;
         let mut peer_liveness = self.peer_liveness()?;
-        let mut measured_disconnects = self
-            .measured_disconnects
-            .lock()
-            .map_err(|_| Error::SwarmConnectionLifecycleLock)?;
+        let mut measured_disconnects = self.measured_disconnects()?;
         let result = action(&active)?;
 
         // These mutations are infallible after the DHT action commits. If the
@@ -607,7 +648,26 @@ impl SwarmTransport {
         pending_finger_updates.retain(|pending, _| pending.peer != attempt.peer);
         peer_liveness.remove(attempt.peer);
         measured_disconnects.remove(&attempt.peer);
+        self.outbound_schedulers.shutdown(attempt.peer);
         Ok(Some(result))
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(super) fn retire_active_connection_with_observer_for_test<T>(
+        &self,
+        attempt: PendingConnectionAttempt,
+        before_lifecycle_gate: impl FnOnce(),
+        action: impl FnOnce(&ActiveConnectionSet) -> Result<T>,
+    ) -> Result<Option<T>> {
+        let _lifecycle = self
+            .connection_lifecycle
+            .lock_with_waiter_observer_for_test(before_lifecycle_gate)?;
+        self.retire_active_connection_locked(attempt, action)
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(super) fn retirement_waiter_count_for_test(&self) -> usize {
+        self.connection_lifecycle.waiting_for_test()
     }
 
     /// Apply one finger candidate or retain it until its current handshake commits.
@@ -626,11 +686,11 @@ impl SwarmTransport {
         observe_admission: impl FnOnce(),
     ) -> Result<FingerUpdateDisposition> {
         let _lifecycle = self.connection_lifecycle()?;
-        let lifecycle = self.peer_lifecycles()?.state(peer);
-        let is_routable = matches!(lifecycle, Some(PeerConnectionLifecycle::Active(_)))
-            && self
-                .get_raw_connection(peer)
-                .is_some_and(|connection| connection.readiness().can_make_progress());
+        let (lifecycle, active) = {
+            let lifecycles = self.peer_lifecycles()?;
+            (lifecycles.state(peer), lifecycles.active_connections())
+        };
+        let is_routable = self.is_routable_active_candidate(peer, &active);
         match finger_candidate_admission(lifecycle, is_routable) {
             FingerCandidateAdmission::Queue(current) => {
                 observe_admission();
@@ -676,7 +736,7 @@ impl SwarmTransport {
         let Some(retired) = self.retire_pending_connection_for_close(attempt)? else {
             return Ok(false);
         };
-        tracing::info!(
+        tracing::debug!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
             peer = %attempt.peer,
@@ -789,7 +849,7 @@ impl SwarmTransport {
         callback: InnerSwarmCallback,
     ) -> Result<PendingTransportConnection> {
         let cid = attempt.peer.to_string();
-        tracing::info!(
+        tracing::trace!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
             peer = %attempt.peer,
@@ -841,7 +901,7 @@ impl SwarmTransport {
                 generation: attempt.generation,
             });
         }
-        tracing::info!(
+        tracing::trace!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
             peer = %attempt.peer,
@@ -858,5 +918,4 @@ impl SwarmTransport {
 }
 
 #[cfg(test)]
-#[path = "pending/lifecycle_model.rs"]
-mod lifecycle_model;
+mod test_lifecycle_model;

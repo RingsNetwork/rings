@@ -31,7 +31,6 @@ ENV RINGS_ALLOW_RANDOM_KEYS=true \
     RINGS_CLUSTER_DIR=/var/lib/rings-cluster \
     RINGS_CONNECT_TOPOLOGY=ring \
     RINGS_ICE_SERVERS=stun://stun.l.google.com:19302 \
-    RINGS_LOG_LEVEL=warn \
     RINGS_NETWORK_ID=1 \
     RINGS_NODE_COUNT=3 \
     RINGS_READY_RETRIES=60 \

@@ -2,10 +2,10 @@
 use async_trait::async_trait;
 
 use super::storage::handle_storage_store_act;
+use crate::dht::entry::EntryOperation;
 use crate::dht::ChordStorage;
 use crate::dht::PeerRing;
 use crate::error::Result;
-use crate::prelude::entry::EntryOperation;
 use crate::swarm::Swarm;
 
 /// SubringInterface should imply necessary operator for DHT Subring

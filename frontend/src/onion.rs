@@ -593,7 +593,7 @@ mod tests {
     use super::OnionProxyRouteRequest;
 
     #[wasm_bindgen_test]
-    fn onion_proxy_options_default_requires_full_paths() {
+    fn test_onion_proxy_options_default_requires_full_paths() {
         assert_eq!(OnionProxyOptions::default(), OnionProxyOptions {
             hop_count: super::DEFAULT_HOP_COUNT,
             allow_short_paths: false,
@@ -601,7 +601,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn route_request_from_js_requires_explicit_short_path_opt_in() {
+    fn test_route_request_from_js_requires_explicit_short_path_opt_in() {
         let message = Object::new();
         assert_eq!(
             super::js_set(&message, "url", &JsValue::from_str("https://example.com/")),
@@ -621,7 +621,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn http_request_from_js_allows_explicit_short_path_opt_in() {
+    fn test_http_request_from_js_allows_explicit_short_path_opt_in() {
         let message = Object::new();
         let set_message =
             super::js_set(&message, "url", &JsValue::from_str("https://example.com/"))
@@ -643,7 +643,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn target_authority_adds_default_https_port() {
+    fn test_target_authority_adds_default_https_port() {
         assert_eq!(
             target_authority("https://Example.COM/search?q=rust").as_deref(),
             Ok("example.com:443")
@@ -651,7 +651,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn target_authority_preserves_explicit_port() {
+    fn test_target_authority_preserves_explicit_port() {
         assert_eq!(
             target_authority("https://Example.COM:8443/original").as_deref(),
             Ok("example.com:8443")
@@ -659,7 +659,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn typed_node_errors_preserve_browser_failure_kind() {
+    fn test_typed_node_errors_preserve_browser_failure_kind() {
         let exit = OnionProxyError::from(super::NodeError::OnionRouteError(
             super::OnionRouteError::NoLiveExit {
                 service: "https".to_string(),
@@ -676,7 +676,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn route_roundtrip_keeps_extension_exit_parseable() {
+    fn test_route_roundtrip_keeps_extension_exit_parseable() {
         let route = super::OnionProxyRoute {
             service: "https".to_string(),
             hops: vec!["did:ring:relay".to_string(), "did:ring:exit".to_string()],
@@ -691,7 +691,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn route_from_js_accepts_legacy_exit_string() {
+    fn test_route_from_js_accepts_legacy_exit_string() {
         let route = Object::new();
         let set_route = super::js_set(&route, "service", &JsValue::from_str("https"))
             .and_then(|()| super::js_set(&route, "exit", &JsValue::from_str("did:ring:exit")))
@@ -710,7 +710,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn response_roundtrip_keeps_extension_body_parseable() {
+    fn test_response_roundtrip_keeps_extension_body_parseable() {
         let response = super::OnionProxyResponse {
             status: 200,
             headers: vec![("content-type".to_string(), "text/plain".to_string())],
@@ -726,7 +726,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn response_roundtrip_preserves_binary_body_bytes() {
+    fn test_response_roundtrip_preserves_binary_body_bytes() {
         let response = super::OnionProxyResponse {
             status: 200,
             headers: vec![("content-type".to_string(), "image/png".to_string())],
@@ -742,7 +742,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn response_from_js_accepts_legacy_body_string() {
+    fn test_response_from_js_accepts_legacy_body_string() {
         let response = Object::new();
         let set_response = super::js_set(&response, "status", &JsValue::from_f64(200.0))
             .and_then(|()| super::js_set(&response, "headers", &Array::new().into()))

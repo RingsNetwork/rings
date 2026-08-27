@@ -19,7 +19,7 @@ use crate::prelude::wasm_export;
 /// Logging verbosity accepted by native CLI and browser bindings.
 #[repr(C)]
 #[wasm_export]
-#[derive(ValueEnum, Debug, Clone)]
+#[derive(ValueEnum, Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub enum LogLevel {
     /// Debug-level diagnostic output.
     Debug,
@@ -28,6 +28,7 @@ pub enum LogLevel {
     /// Warning-level runtime output.
     Warn,
     /// Error-level runtime output.
+    #[default]
     Error,
     /// Trace-level diagnostic output.
     Trace,
@@ -211,5 +212,15 @@ pub mod browser {
 
         // Ignore errors returned by set_global_default.
         let _ = tracing::subscriber::set_global_default(subscriber);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LogLevel;
+
+    #[test]
+    fn test_default_log_level_is_error() {
+        assert_eq!(LogLevel::default(), LogLevel::Error);
     }
 }

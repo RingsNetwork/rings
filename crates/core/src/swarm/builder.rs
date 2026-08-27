@@ -60,7 +60,7 @@ impl SwarmBuilder {
             dht_finger_table_size: DEFAULT_FINGER_TABLE_SIZE,
             dht_storage_redundancy: 1,
             dht_virtual_nodes: DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER,
-            reassembly_limits: ReassemblyLimits::production(),
+            reassembly_limits: default_reassembly_limits(),
             dht_storage,
             session_sk,
             session_ttl: None,
@@ -187,4 +187,14 @@ impl SwarmBuilder {
             callback,
         }
     }
+}
+
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+fn default_reassembly_limits() -> ReassemblyLimits {
+    ReassemblyLimits::production()
+}
+
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+fn default_reassembly_limits() -> ReassemblyLimits {
+    ReassemblyLimits::constrained()
 }

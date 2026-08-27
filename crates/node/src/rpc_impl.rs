@@ -11,6 +11,7 @@ use futures::future::join_all;
 use jsonrpc_core::types::error::Error;
 use jsonrpc_core::types::error::ErrorCode;
 use jsonrpc_core::Result;
+use rings_core::dht::entry::Entry;
 use rings_core::dht::Did;
 use rings_core::ecc::PublicKey;
 use rings_core::message::e2e;
@@ -19,7 +20,6 @@ use rings_core::message::Encoded;
 use rings_core::message::Encoder;
 use rings_core::message::MessagePayload;
 use rings_core::message::MessageVerificationExt;
-use rings_core::prelude::entry::Entry;
 use rings_rpc::protos::rings_node::*;
 use rings_rpc::protos::rings_node_handler::HandleRpc;
 

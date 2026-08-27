@@ -670,7 +670,7 @@ mod tests {
     }
 
     #[test]
-    fn html_rewrites_relative_subresources_and_srcset() -> Result<()> {
+    fn test_html_rewrites_relative_subresources_and_srcset() -> Result<()> {
         let ctx = context()?;
         let html = r#"<a href="next.html"><img src="/img.png" srcset="small.png 1x, /big.png 2x"><form action='../submit'></form></a>"#;
 
@@ -685,7 +685,7 @@ mod tests {
     }
 
     #[test]
-    fn html_decodes_character_references_before_url_rewrite() -> Result<()> {
+    fn test_html_decodes_character_references_before_url_rewrite() -> Result<()> {
         let rewritten = context()?
             .rewrite_html(r#"<a href="/search?q=test&amp;gbv=1&amp;page=&#x32;">results</a>"#)?;
 
@@ -700,7 +700,7 @@ mod tests {
     }
 
     #[test]
-    fn html_srcset_tokenizer_preserves_data_url_and_candidate_boundaries() -> Result<()> {
+    fn test_html_srcset_tokenizer_preserves_data_url_and_candidate_boundaries() -> Result<()> {
         let ctx = context()?;
         let html = r#"<img srcset="data:image/svg+xml,%3Csvg%3E,%3C/svg%3E, /next.png 2x"><img srcset="first.png 1x,,, /last.png 2x">"#;
 
@@ -728,7 +728,7 @@ mod tests {
     }
 
     #[test]
-    fn html_srcset_tokenizer_obeys_shared_runtime_contract() -> Result<()> {
+    fn test_html_srcset_tokenizer_obeys_shared_runtime_contract() -> Result<()> {
         let cases: Vec<SrcsetContractCase> =
             serde_json::from_str(include_str!("srcset_contract.json")).map_err(|error| {
                 WebviewError::transport(format!("invalid shared srcset contract: {error}"))
@@ -761,7 +761,7 @@ mod tests {
     }
 
     #[test]
-    fn css_rewrites_urls_and_imports() -> Result<()> {
+    fn test_css_rewrites_urls_and_imports() -> Result<()> {
         let ctx = context()?;
         let css = r#"@import "theme/base.css"; body { background: url('/assets/bg.png'); }"#;
 
@@ -775,7 +775,7 @@ mod tests {
     }
 
     #[test]
-    fn bounded_rewriters_preserve_typed_overflow_for_css_and_html_attributes() -> Result<()> {
+    fn test_bounded_rewriters_preserve_typed_overflow_for_css_and_html_attributes() -> Result<()> {
         let ctx = context()?;
         for result in [
             ctx.rewrite_css_with_limit("a { background: url('/large.png'); }", 16),
@@ -792,7 +792,7 @@ mod tests {
     }
 
     #[test]
-    fn bootstrap_injects_before_page_scripts() -> Result<()> {
+    fn test_bootstrap_injects_before_page_scripts() -> Result<()> {
         let ctx = context()?.with_bootstrap_script("globalThis.__ringsWebview = true;");
 
         let rewritten = ctx.rewrite_html("<html><script src=\"app.js\"></script></html>")?;
@@ -803,7 +803,7 @@ mod tests {
     }
 
     #[test]
-    fn html_rewrites_case_whitespace_unquoted_and_inline_style_urls() -> Result<()> {
+    fn test_html_rewrites_case_whitespace_unquoted_and_inline_style_urls() -> Result<()> {
         let ctx = context()?;
         let html = r#"<A HREF = next.html><img SRC=/img.png SRCSET='small.png 1x, /big.png 2x'><button formaction=../submit></button><div STYLE="background: URL(bg.png)"></div></A>"#;
 
@@ -817,7 +817,7 @@ mod tests {
     }
 
     #[test]
-    fn html_rewrites_style_element_urls() -> Result<()> {
+    fn test_html_rewrites_style_element_urls() -> Result<()> {
         let ctx = context()?;
         let html = r#"<style>@import "theme/base.css"; body { background: url("/assets/bg.png"); }</style>"#;
 
@@ -833,7 +833,7 @@ mod tests {
     }
 
     #[test]
-    fn html_rewrites_anchor_ping_url_lists() -> Result<()> {
+    fn test_html_rewrites_anchor_ping_url_lists() -> Result<()> {
         let ctx = context()?;
         let html =
             r#"<a href="next.html" ping="ping/one https://metrics.example/ping/two">next</a>"#;
@@ -847,7 +847,7 @@ mod tests {
     }
 
     #[test]
-    fn html_rewrites_srcdoc_document_urls() -> Result<()> {
+    fn test_html_rewrites_srcdoc_document_urls() -> Result<()> {
         let ctx = context()?.with_bootstrap_script("globalThis.__ringsWebview = true;");
         let html = r#"<iframe srcdoc="<img src=&quot;https://example.test/x.png&quot;><a href=&quot;next.html&quot;>next</a>"></iframe>"#;
 
@@ -868,7 +868,7 @@ mod tests {
     }
 
     #[test]
-    fn html_rejects_srcdoc_nesting_beyond_the_explicit_bound() -> Result<()> {
+    fn test_html_rejects_srcdoc_nesting_beyond_the_explicit_bound() -> Result<()> {
         let ctx = context()?;
         let mut html = "<p>leaf</p>".to_string();
         for _ in 0..=MAX_SRCDOC_NESTING_DEPTH {
@@ -886,7 +886,7 @@ mod tests {
     }
 
     #[test]
-    fn html_rewrites_meta_refresh_urls() -> Result<()> {
+    fn test_html_rewrites_meta_refresh_urls() -> Result<()> {
         let ctx = context()?;
         let html = r#"<meta http-equiv="refresh" content="0; URL = '../login?next=1'">"#;
 
@@ -898,7 +898,7 @@ mod tests {
     }
 
     #[test]
-    fn html_base_href_controls_following_relative_rewrites() -> Result<()> {
+    fn test_html_base_href_controls_following_relative_rewrites() -> Result<()> {
         let ctx = context()?;
         let html = r#"<html><head><base href="/assets/"><link href="site.css"><style>.hero { background: url(hero.png); }</style></head><body><img src="photo.png"><script src="app.js"></script></body></html>"#;
 
@@ -924,7 +924,7 @@ mod tests {
     }
 
     #[test]
-    fn css_rewrites_case_whitespace_and_import_url_forms() -> Result<()> {
+    fn test_css_rewrites_case_whitespace_and_import_url_forms() -> Result<()> {
         let ctx = context()?;
         let css = r#"@IMPORT    "theme/base.css"; @import url(extra.css); body { background: URL("/assets/bg.png"); }"#;
 
@@ -939,7 +939,7 @@ mod tests {
     }
 
     #[test]
-    fn css_url_scanner_preserves_quoted_parentheses_and_rewrites_later_urls() -> Result<()> {
+    fn test_css_url_scanner_preserves_quoted_parentheses_and_rewrites_later_urls() -> Result<()> {
         let ctx = context()?;
         let css = r#".a { background: url("a)b.png"); } .b { background: url(/later.png); }"#;
 
@@ -951,7 +951,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_css_url_does_not_suppress_later_independent_rewrite() -> Result<()> {
+    fn test_malformed_css_url_does_not_suppress_later_independent_rewrite() -> Result<()> {
         let ctx = context()?;
         let css = ".broken { background: url('unterminated'; } .ok { mask: URL(/later.svg); }";
 

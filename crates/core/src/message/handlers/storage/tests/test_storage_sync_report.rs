@@ -1,15 +1,14 @@
 use std::sync::Arc;
 
 use super::super::next_hop_for_sync_entries;
-use super::super::persist_synced_entries;
 use super::test_support::next_generated_key;
-use super::test_support::next_payload;
 use super::test_support::next_payload_for_tx;
 use super::test_support::physical_sync_route_next_hop;
 use super::test_support::prepare_node_with_virtual_nodes;
 use super::test_support::storage_sync_route_next_hop;
 use super::test_support::NoopCallback;
 use crate::dht::entry::Entry;
+use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
 use crate::dht::successor::SuccessorReader;
@@ -31,14 +30,13 @@ use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
-use crate::prelude::entry::EntryKind;
 use crate::tests::default::assert_no_more_msg;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
 use crate::tests::manually_establish_connection;
 
 #[tokio::test]
-async fn sync_entries_handler_reports_persisted_entries() -> Result<()> {
+async fn test_sync_entries_handler_reports_persisted_entries() -> Result<()> {
     let sender = prepare_node(SecretKey::random()).await;
     let receiver = prepare_node(SecretKey::random()).await;
     manually_establish_connection(&sender.swarm, &receiver.swarm).await;
@@ -76,7 +74,7 @@ async fn sync_entries_handler_reports_persisted_entries() -> Result<()> {
 
     receiver_handler.handle(&context, &sync_msg).await?;
 
-    let payload = next_payload(&sender).await?;
+    let payload = next_payload_for_tx(&sender, context.transaction.tx_id).await?;
     match payload.transaction.data::<Message>()? {
         Message::SyncEntriesWithSuccessorReport(report) => {
             assert_eq!(report.acks, vec![SyncedEntryAck::new(
@@ -102,9 +100,8 @@ async fn sync_entries_handler_reports_persisted_entries() -> Result<()> {
 }
 
 #[tokio::test]
-async fn persist_synced_entries_returns_acks_for_owned_entries() -> Result<()> {
+async fn test_persist_synced_entries_returns_acks_for_owned_entries() -> Result<()> {
     let receiver = prepare_node(SecretKey::random()).await;
-    let handler = MessageHandler::new(receiver.swarm.transport.clone(), Arc::new(NoopCallback));
     let entry = Entry::new(
         Did::from(10u32),
         vec!["acked".to_string().encode()?],
@@ -118,7 +115,11 @@ async fn persist_synced_entries_returns_acks_for_owned_entries() -> Result<()> {
         data: vec![PlacedEntry::new(placement_key, entry.clone())],
     };
 
-    let acks = persist_synced_entries(&handler, &sync_msg).await?;
+    let acks = receiver
+        .swarm
+        .transport
+        .persist_storage_sync_entries(&sync_msg)
+        .await?;
 
     assert_eq!(acks, vec![SyncedEntryAck::new(
         placement_key,
@@ -136,7 +137,7 @@ async fn persist_synced_entries_returns_acks_for_owned_entries() -> Result<()> {
 }
 
 #[tokio::test]
-async fn sync_entries_handler_skips_entries_owned_by_another_virtual_owner() -> Result<()> {
+async fn test_sync_entries_handler_skips_entries_owned_by_another_virtual_owner() -> Result<()> {
     let mut keys = gen_ordered_keys(2).into_iter();
     let sender = prepare_node_with_virtual_nodes(next_generated_key(&mut keys)?, 2)?;
     let receiver = prepare_node_with_virtual_nodes(next_generated_key(&mut keys)?, 2)?;
@@ -219,8 +220,8 @@ async fn sync_entries_handler_skips_entries_owned_by_another_virtual_owner() -> 
 }
 
 #[tokio::test]
-async fn sync_entries_physical_destination_routes_by_physical_did_not_storage_owner() -> Result<()>
-{
+async fn test_sync_entries_physical_destination_routes_by_physical_did_not_storage_owner(
+) -> Result<()> {
     let mut keys = gen_ordered_keys(6).into_iter();
     let node = prepare_node_with_virtual_nodes(next_generated_key(&mut keys)?, 4)?;
     let mut peers = Vec::new();

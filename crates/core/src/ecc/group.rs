@@ -830,7 +830,7 @@ mod tests {
     }
 
     #[test]
-    fn supported_curve_groups_satisfy_basic_laws() {
+    fn test_supported_curve_groups_satisfy_basic_laws() {
         cyclic_module_laws::<Point<Secp256k1>>();
         cyclic_module_laws::<Point<Secp256r1>>();
         cyclic_module_laws::<Point<Bls12381G1>>();
@@ -839,7 +839,7 @@ mod tests {
     }
 
     #[test]
-    fn supported_curve_groups_satisfy_algebra_laws() {
+    fn test_supported_curve_groups_satisfy_algebra_laws() {
         algebra_laws::<Secp256k1>();
         algebra_laws::<Secp256r1>();
         algebra_laws::<Bls12381G1>();

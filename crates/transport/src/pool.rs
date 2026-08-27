@@ -109,6 +109,23 @@ where
     C: ConnectionInterface<Error = Error, Sdp = S> + PlatformSendSync,
     S: Serialize + DeserializeOwned + Send + Sync + 'static,
 {
+    /// Reject an early connection setup while the peer already occupies its slot.
+    #[cfg(any(
+        feature = "dummy",
+        feature = "native-webrtc",
+        feature = "web-sys-webrtc"
+    ))]
+    pub(crate) fn ensure_peer_slot_available(&self, cid: &str) -> Result<()> {
+        if self
+            .connection(cid)
+            .is_ok_and(|connection| connection.webrtc_connection_state().occupies_peer_slot())
+        {
+            Err(Error::ConnectionAlreadyExists(cid.to_string()))
+        } else {
+            Ok(())
+        }
+    }
+
     /// The `safely_insert` method is used to insert a connection into the pool.
     /// It ensures that the connection is not inserted twice in concurrent scenarios.
     ///
@@ -280,7 +297,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn safely_insert_returns_the_exact_inserted_connection() -> Result<()> {
+    async fn test_safely_insert_returns_the_exact_inserted_connection() -> Result<()> {
         let pool = Pool::new();
         let old_closed = Arc::new(AtomicBool::new(false));
         let old = pool
@@ -311,7 +328,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn safely_insert_closes_rejected_connection() -> Result<()> {
+    async fn test_safely_insert_closes_rejected_connection() -> Result<()> {
         let pool = Pool::new();
         let current_closed = Arc::new(AtomicBool::new(false));
         let current = pool
@@ -345,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn current_removal_waits_for_pool_shard_contention() -> std::io::Result<()> {
+    fn test_current_removal_waits_for_pool_shard_contention() -> std::io::Result<()> {
         let pool = Arc::new(Pool::new());
         let expected = futures::executor::block_on(pool.safely_insert(
             "peer",

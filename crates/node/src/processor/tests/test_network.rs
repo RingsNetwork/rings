@@ -5,7 +5,7 @@ const LISTENER_START_YIELD: Duration = Duration::from_millis(100);
 const LISTENER_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[tokio::test]
-async fn listen_with_pre_stopped_token_returns_before_first_tick() {
+async fn test_listen_with_pre_stopped_token_returns_before_first_tick() {
     let processor = prepare_processor().await;
     let stop = StopSource::new();
     stop.request_stop();
@@ -19,7 +19,7 @@ async fn listen_with_pre_stopped_token_returns_before_first_tick() {
 }
 
 #[tokio::test]
-async fn provider_listen_with_pre_stopped_token_returns_before_first_tick() {
+async fn test_provider_listen_with_pre_stopped_token_returns_before_first_tick() {
     let processor = prepare_processor().await;
     let provider = Provider::from_processor(Arc::new(processor));
     let stop = StopSource::new();
@@ -34,7 +34,7 @@ async fn provider_listen_with_pre_stopped_token_returns_before_first_tick() {
 }
 
 #[tokio::test]
-async fn provider_listen_with_started_token_returns_after_stop() {
+async fn test_provider_listen_with_started_token_returns_after_stop() {
     let processor = prepare_processor().await;
     let provider = Provider::from_processor(Arc::new(processor));
     let stop = StopSource::new();
@@ -52,7 +52,7 @@ async fn provider_listen_with_started_token_returns_after_stop() {
 }
 
 #[tokio::test]
-async fn online_node_registry_lists_two_publishers_over_network() -> Result<()> {
+async fn test_online_node_registry_lists_two_publishers_over_network() -> Result<()> {
     let _network_guard = network_test_guard().await;
     let (publisher, owner) = prepare_online_node_registry_pair(42).await?;
     let callback = test_callback();
@@ -100,7 +100,7 @@ async fn online_node_registry_lists_two_publishers_over_network() -> Result<()> 
 }
 
 #[tokio::test]
-async fn online_node_type_is_configurable() {
+async fn test_online_node_type_is_configurable() {
     let processor = prepare_processor_with_online_node_type(OnlineNodeType::Browser).await;
     let descriptor = processor.online_node_descriptor_at(get_epoch_ms()).unwrap();
 
@@ -199,7 +199,7 @@ async fn test_processor_direct_message_reaches_connected_peer() {
 }
 
 #[tokio::test]
-async fn peer_measurement_is_absent_without_measure_or_observation() {
+async fn test_peer_measurement_is_absent_without_measure_or_observation() {
     let unmeasured = prepare_processor_with_identity_key(SecretKey::random()).await;
     let unseen_did = SecretKey::random().address().into();
     assert!(unmeasured.peer_measurement(unseen_did).await.is_none());
@@ -210,7 +210,7 @@ async fn peer_measurement_is_absent_without_measure_or_observation() {
 }
 
 #[tokio::test]
-async fn provider_exposes_sent_and_received_peer_measurements() {
+async fn test_provider_exposes_sent_and_received_peer_measurements() {
     let _network_guard = network_test_guard().await;
     let callback1 = test_callback();
     let callback2 = test_callback();

@@ -156,7 +156,7 @@ mod tests {
     }
 
     #[test]
-    fn external_navigation_redirects_to_controlled_gateway_url() -> Result<()> {
+    fn test_external_navigation_redirects_to_controlled_gateway_url() -> Result<()> {
         let policy = policy()?;
         let requested = Url::parse("https://example.test/docs/index.html")?;
 
@@ -172,7 +172,7 @@ mod tests {
     }
 
     #[test]
-    fn controlled_gateway_url_decodes_to_target_transport_route() -> Result<()> {
+    fn test_controlled_gateway_url_decodes_to_target_transport_route() -> Result<()> {
         let policy = policy()?;
         let target = Url::parse("https://example.test/docs/index.html")?;
         let requested = policy.gateway_url(&target)?;
@@ -187,7 +187,7 @@ mod tests {
     }
 
     #[test]
-    fn navigation_form_query_is_merged_into_gateway_target() -> Result<()> {
+    fn test_navigation_form_query_is_merged_into_gateway_target() -> Result<()> {
         let policy = policy()?;
         let target = Url::parse("https://www.google.com/search?source=hp")?;
         let mut requested = policy.gateway_url(&target)?;
@@ -205,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn gateway_outer_query_is_rejected_for_non_navigation_requests() -> Result<()> {
+    fn test_gateway_outer_query_is_rejected_for_non_navigation_requests() -> Result<()> {
         let policy = policy()?;
         let target = Url::parse("https://example.test/asset.css")?;
         let mut requested = policy.gateway_url(&target)?;
@@ -219,7 +219,7 @@ mod tests {
     }
 
     #[test]
-    fn cross_target_fetch_is_served_for_virtual_cors_evaluation() -> Result<()> {
+    fn test_cross_target_fetch_is_served_for_virtual_cors_evaluation() -> Result<()> {
         let policy = policy()?;
         let source = TargetUrl::parse("https://app.example.test/index.html")?;
         let target = Url::parse("https://bank.example.test/account")?;
@@ -235,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn cross_target_direct_fetch_is_redirected_through_the_gateway() -> Result<()> {
+    fn test_cross_target_direct_fetch_is_redirected_through_the_gateway() -> Result<()> {
         let policy = policy()?;
         let source = TargetUrl::parse("https://app.example.test/index.html")?;
         let requested = Url::parse("https://bank.example.test/account")?;
@@ -250,7 +250,7 @@ mod tests {
     }
 
     #[test]
-    fn same_target_xhr_is_served_through_gateway() -> Result<()> {
+    fn test_same_target_xhr_is_served_through_gateway() -> Result<()> {
         let policy = policy()?;
         let source = TargetUrl::parse("https://app.example.test/docs/index.html")?;
         let target = Url::parse("https://app.example.test/api/data")?;
@@ -266,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_requests_without_a_trusted_source_target_are_rejected() -> Result<()> {
+    fn test_runtime_requests_without_a_trusted_source_target_are_rejected() -> Result<()> {
         let policy = policy()?;
         let requested = Url::parse("https://app.example.test/api/data")?;
 
@@ -280,7 +280,7 @@ mod tests {
     }
 
     #[test]
-    fn cross_target_subresources_redirect_without_granting_script_read_access() -> Result<()> {
+    fn test_cross_target_subresources_redirect_without_granting_script_read_access() -> Result<()> {
         let policy = policy()?;
         let source = TargetUrl::parse("https://app.example.test/index.html")?;
         let requested = Url::parse("https://cdn.example.test/site.css")?;
@@ -295,7 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn controlled_origin_configuration_excludes_paths_and_credentials() -> Result<()> {
+    fn test_controlled_origin_configuration_excludes_paths_and_credentials() -> Result<()> {
         for value in [
             "https://webview.rings.test/app",
             "https://user@webview.rings.test/",
@@ -310,7 +310,7 @@ mod tests {
     }
 
     #[test]
-    fn controlled_shell_assets_remain_local() -> Result<()> {
+    fn test_controlled_shell_assets_remain_local() -> Result<()> {
         let policy = policy()?;
         let requested = Url::parse("https://webview.rings.test/assets/app.js")?;
 
@@ -321,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_requests_to_controlled_assets_still_require_a_trusted_source() -> Result<()> {
+    fn test_runtime_requests_to_controlled_assets_still_require_a_trusted_source() -> Result<()> {
         let policy = policy()?;
         let requested = Url::parse("https://webview.rings.test/assets/app.js")?;
 

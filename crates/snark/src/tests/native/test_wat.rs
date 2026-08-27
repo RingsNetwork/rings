@@ -3,7 +3,7 @@ use crate::witness::calculator::u256_from_vec_u32;
 use crate::witness::calculator::WitnessCalculator;
 
 #[test]
-fn wat_module_initializes_circom1_witness_calculator_metadata(
+fn test_wat_module_initializes_circom1_witness_calculator_metadata(
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let wasm = wat::parse_str(
         r#"
@@ -27,7 +27,7 @@ fn wat_module_initializes_circom1_witness_calculator_metadata(
 }
 
 #[test]
-fn wat_module_missing_required_export_returns_typed_error(
+fn test_wat_module_missing_required_export_returns_typed_error(
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let wasm = wat::parse_str(
         r#"
@@ -54,7 +54,7 @@ fn wat_module_missing_required_export_returns_typed_error(
 }
 
 #[test]
-fn wat_module_unsupported_circom_version_returns_typed_error(
+fn test_wat_module_unsupported_circom_version_returns_typed_error(
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let wasm = wat::parse_str(
         r#"
@@ -81,7 +81,7 @@ fn wat_module_unsupported_circom_version_returns_typed_error(
 }
 
 #[test]
-fn u256_from_vec_u32_rejects_invalid_word_count(
+fn test_u256_from_vec_u32_rejects_invalid_word_count(
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let error = match u256_from_vec_u32(&[1, 2, 3]) {
         Ok(_) => {

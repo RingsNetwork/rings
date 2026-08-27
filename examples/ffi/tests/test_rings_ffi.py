@@ -136,10 +136,13 @@ def test_create_provider_reports_null_provider_ptr_as_runtime_error():
     ffi = module.build_ffi()
 
     class Rings:
-        Debug = 0
+        Error = 3
+
+        def __init__(self):
+            self.log_levels = []
 
         def rings_node_init_logging(self, level):
-            pass
+            self.log_levels.append(level)
 
         def rings_node_new_provider_with_callback(
             self,
@@ -155,11 +158,13 @@ def test_create_provider_reports_null_provider_ptr_as_runtime_error():
         def rings_node_listen(self, provider):
             pass
 
-    runtime = module.FfiRuntime(ffi=ffi, rings=Rings())
+    rings = Rings()
+    runtime = module.FfiRuntime(ffi=ffi, rings=rings)
     account = Web3().eth.account.create()
 
     with pytest.raises(RuntimeError, match="rings provider creation failed"):
         module.create_provider(runtime, account)
+    assert rings.log_levels == [rings.Error]
 
 
 @pytest.fixture(scope="module")

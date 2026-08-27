@@ -19,6 +19,24 @@ use std::pin::Pin;
 
 use crate::error::Result;
 
+#[cfg(any(
+    all(feature = "native-webrtc", not(target_family = "wasm")),
+    all(feature = "web-sys-webrtc", target_family = "wasm")
+))]
+pub(crate) const fn delivery_flushed(enqueued: u64, buffered: u64, end_offset: u64) -> bool {
+    enqueued.saturating_sub(buffered) >= end_offset
+}
+
+#[cfg(any(
+    all(feature = "native-webrtc", not(target_family = "wasm")),
+    all(feature = "web-sys-webrtc", target_family = "wasm")
+))]
+pub(crate) fn closed_before_flush() -> crate::error::Error {
+    crate::error::Error::MessageNotDelivered(
+        "data channel closed before the message was flushed".to_string(),
+    )
+}
+
 /// A future resolving to the eventual fate of a sent message: `Ok(())` once the
 /// bytes are flushed to the wire, `Err(..)` if the channel closed while they
 /// were still buffered.
@@ -31,3 +49,22 @@ pub type DeliveryFuture = Pin<Box<dyn Future<Output = Result<()>>>>;
 /// A future resolving to the eventual fate of a sent message.
 #[cfg(not(all(feature = "web-sys-webrtc", target_family = "wasm")))]
 pub type DeliveryFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+
+#[cfg(all(
+    test,
+    any(
+        all(feature = "native-webrtc", not(target_family = "wasm")),
+        all(feature = "web-sys-webrtc", target_family = "wasm")
+    )
+))]
+mod tests {
+    use super::delivery_flushed;
+
+    #[test]
+    fn test_flush_predicate_is_monotonic_and_saturates_under_inconsistent_observation() {
+        assert!(!delivery_flushed(9, 4, 6));
+        assert!(delivery_flushed(10, 4, 6));
+        assert!(delivery_flushed(11, 4, 6));
+        assert!(!delivery_flushed(4, 5, 1));
+    }
+}

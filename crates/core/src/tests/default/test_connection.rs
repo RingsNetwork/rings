@@ -129,7 +129,7 @@ async fn test_handshake_on_both_sides(key1: SecretKey, key2: SecretKey, key3: Se
 
 #[cfg(feature = "dummy")]
 #[tokio::test]
-async fn dummy_mismatched_data_channel_open_does_not_admit_peer() {
+async fn test_dummy_mismatched_data_channel_open_does_not_admit_peer() {
     dummy_controlled::enable(true);
 
     let keys = gen_ordered_keys(2);

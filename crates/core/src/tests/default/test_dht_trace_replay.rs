@@ -123,7 +123,7 @@ mod tests {
     /// Chord boundary convention — which is a separate semantics question, not
     /// routing.)
     #[test]
-    fn real_find_successor_routing_is_correct() {
+    fn test_real_find_successor_routing_is_correct() {
         let layouts = [
             Layout::Even(5),
             Layout::Pow2(8),

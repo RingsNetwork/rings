@@ -411,13 +411,13 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn base64url_decoder_preserves_non_ascii_coordinate_bytes() {
+    fn test_base64url_decoder_preserves_non_ascii_coordinate_bytes() {
         assert_eq!(base64_url_to_bytes("AH-A_w"), Ok(vec![0, 127, 128, 255]));
     }
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn rings_prefix_matches_core_secp256r1_transcript() {
+    fn test_rings_prefix_matches_core_secp256r1_transcript() {
         assert_eq!(
             bytes_to_hex(&rings_prefixed_message("hello world")),
             "1952696e6773205369676e6564204d6573736167653a0a313168656c6c6f20776f726c64"
@@ -426,7 +426,7 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn hex_signature_parser_accepts_prefixed_even_hex() {
+    fn test_hex_signature_parser_accepts_prefixed_even_hex() {
         assert_eq!(hex_to_bytes("0x000aff"), Ok(vec![0, 10, 255]));
     }
 }
@@ -442,7 +442,7 @@ mod wasm_tests {
     wasm_bindgen_test_configure!(run_in_browser);
 
     #[wasm_bindgen_test(async)]
-    async fn webcrypto_account_authorizes_session_key() {
+    async fn test_webcrypto_account_authorizes_session_key() {
         let account = connect_webcrypto().await;
         assert!(account.is_ok());
         let Ok(account) = account else {

@@ -48,7 +48,7 @@ struct Cli {
     #[command(subcommand)]
     command: Command,
 
-    #[arg(long, default_value_t = LogLevel::Info, value_enum, env)]
+    #[arg(long, default_value_t = LogLevel::default(), value_enum, env)]
     log_level: LogLevel,
 
     #[arg(
@@ -810,7 +810,7 @@ fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
 
     let cli = Cli::parse();
-    init_logging(cli.log_level.clone());
+    init_logging(cli.log_level);
     let runtime = cli.runtime.build()?;
     runtime.block_on(run(cli))
 }
@@ -915,5 +915,55 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 .display();
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::CommandFactory;
+    use clap::FromArgMatches;
+    use rings_node::logging::LogLevel;
+
+    use super::Cli;
+
+    fn parse_without_log_level_env<const N: usize>(args: [&str; N]) -> Result<Cli, clap::Error> {
+        let matches = Cli::command()
+            .mut_arg("log_level", |arg| arg.env(None::<&'static str>))
+            .try_get_matches_from(args)?;
+        Cli::from_arg_matches(&matches)
+    }
+
+    #[test]
+    fn test_cli_default_log_level_is_error() {
+        let parsed =
+            parse_without_log_level_env(["rings", "--runtime", "current-thread", "new-session"]);
+
+        assert!(matches!(
+            parsed,
+            Ok(Cli {
+                log_level: LogLevel::Error,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn test_cli_explicit_log_level_overrides_default() {
+        let parsed = parse_without_log_level_env([
+            "rings",
+            "--log-level",
+            "debug",
+            "--runtime",
+            "current-thread",
+            "new-session",
+        ]);
+
+        assert!(matches!(
+            parsed,
+            Ok(Cli {
+                log_level: LogLevel::Debug,
+                ..
+            })
+        ));
     }
 }

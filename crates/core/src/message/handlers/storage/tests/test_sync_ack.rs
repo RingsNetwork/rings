@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
 use super::test_support::next_payload_for_tx;
+use super::test_support::non_affine_placement;
 use super::test_support::storage_sync_report_payload;
 use super::test_support::NoopCallback;
 use crate::dht::entry::Entry;
+use crate::dht::entry::EntryKind;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
 use crate::dht::Did;
@@ -19,14 +21,13 @@ use crate::message::HandleMsg;
 use crate::message::MessageHandler;
 use crate::message::MessagePayload;
 use crate::message::PayloadSender;
-use crate::prelude::entry::EntryKind;
 use crate::tests::default::assert_no_more_msg;
 use crate::tests::default::prepare_node;
 use crate::tests::default::wait_for_msgs;
 use crate::tests::manually_establish_connection;
 
 #[tokio::test]
-async fn sync_entries_report_handler_deletes_only_acked_keys() -> Result<()> {
+async fn test_sync_entries_report_handler_deletes_only_acked_keys() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
     let acked_key = Did::from(100u32);
@@ -86,7 +87,7 @@ async fn sync_entries_report_handler_deletes_only_acked_keys() -> Result<()> {
 }
 
 #[tokio::test]
-async fn sync_entries_report_handler_rejects_untracked_acks() -> Result<()> {
+async fn test_sync_entries_report_handler_rejects_untracked_acks() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
     let acked_key = Did::from(100u32);
@@ -136,7 +137,7 @@ async fn sync_entries_report_handler_rejects_untracked_acks() -> Result<()> {
 }
 
 #[tokio::test]
-async fn sync_entries_report_handler_forwards_before_pending_capability_check() -> Result<()> {
+async fn test_sync_entries_report_handler_forwards_before_pending_capability_check() -> Result<()> {
     let sender = prepare_node(SecretKey::random()).await;
     let relay = prepare_node(SecretKey::random()).await;
     let receiver = prepare_node(SecretKey::random()).await;
@@ -190,7 +191,7 @@ async fn sync_entries_report_handler_forwards_before_pending_capability_check() 
 }
 
 #[tokio::test]
-async fn additive_repair_sync_cannot_create_pending_cleanup_capability() -> Result<()> {
+async fn test_additive_repair_sync_cannot_create_pending_cleanup_capability() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
     let placement_key = Did::from(100u32);
     let entry = Entry::new(Did::from(100u32), vec![], EntryKind::Data);
@@ -223,7 +224,7 @@ async fn additive_repair_sync_cannot_create_pending_cleanup_capability() -> Resu
 }
 
 #[tokio::test]
-async fn send_storage_sync_applies_local_destination_without_transport_send() -> Result<()> {
+async fn test_send_storage_sync_applies_local_destination_without_transport_send() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
     let entry = Entry::new(Did::from(100u32), vec![], EntryKind::Data);
     let placement_key = entry.did;
@@ -245,7 +246,44 @@ async fn send_storage_sync_applies_local_destination_without_transport_send() ->
 }
 
 #[tokio::test]
-async fn sync_entries_report_handler_rejects_wrong_physical_receiver() -> Result<()> {
+async fn test_local_storage_sync_validates_entire_batch_before_persisting() -> Result<()> {
+    let node = prepare_node(SecretKey::random()).await;
+    let valid_entry = Entry::new(Did::from(101u32), vec![], EntryKind::Data);
+    let valid_key = valid_entry.did;
+    let invalid_entry = Entry::new(Did::from(102u32), vec![], EntryKind::Data);
+    let invalid_key = non_affine_placement(invalid_entry.did, node.swarm.storage_redundancy())?;
+    let sync_msg = SyncEntriesWithSuccessor {
+        purpose: StorageSyncPurpose::AdditiveRepair,
+        destination: StorageSyncDestination::PhysicalOwner(node.did()),
+        data: vec![
+            PlacedEntry::new(valid_key, valid_entry),
+            PlacedEntry::new(invalid_key, invalid_entry),
+        ],
+    };
+
+    let error = node
+        .swarm
+        .transport
+        .send_storage_sync(sync_msg)
+        .await
+        .expect_err("an invalid later placement must reject the complete local batch");
+
+    assert!(matches!(error, Error::InvalidMessage(_)));
+    assert_eq!(
+        node.dht().storage.get(&valid_key.to_string()).await?,
+        None,
+        "validation must finish before the first storage effect"
+    );
+    assert_eq!(
+        node.dht().storage.get(&invalid_key.to_string()).await?,
+        None
+    );
+    assert_no_more_msg([&node]).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_sync_entries_report_handler_rejects_wrong_physical_receiver() -> Result<()> {
     let sender = prepare_node(SecretKey::random()).await;
     let receiver = prepare_node(SecretKey::random()).await;
     let handler = MessageHandler::new(sender.swarm.transport.clone(), Arc::new(NoopCallback));
@@ -304,7 +342,7 @@ async fn sync_entries_report_handler_rejects_wrong_physical_receiver() -> Result
 }
 
 #[tokio::test]
-async fn sync_entries_report_handler_rejects_unproven_placement_receiver() -> Result<()> {
+async fn test_sync_entries_report_handler_rejects_unproven_placement_receiver() -> Result<()> {
     let sender = prepare_node(SecretKey::random()).await;
     let route_next_hop = prepare_node(SecretKey::random()).await;
     let final_receiver = prepare_node(SecretKey::random()).await;

@@ -3,7 +3,7 @@ use super::*;
 use crate::onion::OnionServiceName;
 
 #[tokio::test]
-async fn onion_exit_lookup_uses_dedicated_exit_registry() -> Result<()> {
+async fn test_onion_exit_lookup_uses_dedicated_exit_registry() -> Result<()> {
     let processor = prepare_processor().await;
     let relay_only = prepare_processor().await;
     let exit = prepare_processor().await;
@@ -32,7 +32,7 @@ async fn onion_exit_lookup_uses_dedicated_exit_registry() -> Result<()> {
 }
 
 #[tokio::test]
-async fn onion_exit_lookup_preserves_distinct_services_for_same_did() -> Result<()> {
+async fn test_onion_exit_lookup_preserves_distinct_services_for_same_did() -> Result<()> {
     let processor = prepare_processor().await;
     let exit = prepare_processor().await;
     let now_ms = get_epoch_ms();
@@ -52,7 +52,7 @@ async fn onion_exit_lookup_preserves_distinct_services_for_same_did() -> Result<
 }
 
 #[tokio::test]
-async fn onion_route_builder_uses_presence_relays_without_exit_descriptor() -> Result<()> {
+async fn test_onion_route_builder_uses_presence_relays_without_exit_descriptor() -> Result<()> {
     let processor = prepare_processor().await;
     let first_relay = prepare_processor().await;
     let second_relay = prepare_processor().await;
@@ -87,7 +87,7 @@ async fn onion_route_builder_uses_presence_relays_without_exit_descriptor() -> R
 }
 
 #[tokio::test]
-async fn onion_proxy_route_uses_protocol_service_class() -> Result<()> {
+async fn test_onion_proxy_route_uses_protocol_service_class() -> Result<()> {
     let processor = prepare_processor().await;
     let tcp_exit = prepare_processor().await;
     let https_exit = prepare_processor().await;
@@ -118,7 +118,7 @@ async fn onion_proxy_route_uses_protocol_service_class() -> Result<()> {
 }
 
 #[tokio::test]
-async fn onion_route_accepts_https_service_over_tcp_transport() -> Result<()> {
+async fn test_onion_route_accepts_https_service_over_tcp_transport() -> Result<()> {
     let processor = prepare_processor().await;
     let exit = prepare_processor().await;
     let descriptor = onion_exit_descriptor_for_processor_with_service(
@@ -148,7 +148,7 @@ async fn onion_route_accepts_https_service_over_tcp_transport() -> Result<()> {
 }
 
 #[tokio::test]
-async fn onion_proxy_route_accepts_https_service_over_tcp_transport() -> Result<()> {
+async fn test_onion_proxy_route_accepts_https_service_over_tcp_transport() -> Result<()> {
     let processor = prepare_processor().await;
     let exit = prepare_processor().await;
     let descriptor = onion_exit_descriptor_for_processor_with_service(
@@ -180,7 +180,7 @@ async fn onion_proxy_route_accepts_https_service_over_tcp_transport() -> Result<
 }
 
 #[tokio::test]
-async fn tcp_connect_route_rejects_browser_https_exit_descriptor() -> Result<()> {
+async fn test_tcp_connect_route_rejects_browser_https_exit_descriptor() -> Result<()> {
     let processor = prepare_processor().await;
     let browser_exit = prepare_processor().await;
     let descriptor = onion_exit_descriptor_for_processor_with_node_type_service(
@@ -220,7 +220,7 @@ async fn tcp_connect_route_rejects_browser_https_exit_descriptor() -> Result<()>
 }
 
 #[tokio::test]
-async fn onion_proxy_route_filters_exits_by_target_policy() -> Result<()> {
+async fn test_onion_proxy_route_filters_exits_by_target_policy() -> Result<()> {
     let processor = prepare_processor().await;
     let allowed_exit = prepare_processor().await;
     let denied_exit = prepare_processor().await;
@@ -259,7 +259,7 @@ async fn onion_proxy_route_filters_exits_by_target_policy() -> Result<()> {
 }
 
 #[tokio::test]
-async fn onion_proxy_route_reports_policy_denied_target() -> Result<()> {
+async fn test_onion_proxy_route_reports_policy_denied_target() -> Result<()> {
     let processor = prepare_processor().await;
     let denied_exit = prepare_processor().await;
     let now_ms = get_epoch_ms();

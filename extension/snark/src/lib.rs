@@ -126,7 +126,7 @@ impl SNARKBehaviour {
             self.task.remove(&task_id);
             return Err(e.into());
         }
-        tracing::info!("sent proof request");
+        tracing::debug!("sent proof request");
         Ok(task_id.to_string())
     }
 

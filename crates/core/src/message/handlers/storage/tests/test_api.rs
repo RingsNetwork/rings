@@ -2,14 +2,15 @@ use super::super::ChordStorageInterface;
 use super::super::ChordStorageInterfaceCacheChecker;
 use super::test_support::assert_cached_data_values;
 use super::test_support::next_generated_key;
-use super::test_support::next_payload;
+use super::test_support::next_payload_matching;
 use crate::dht::entry::Entry;
+use crate::dht::entry::EntryOperation;
 use crate::dht::entry::PlacedEntryOperation;
 use crate::ecc::tests::gen_ordered_keys;
 use crate::error::Result;
 use crate::message::types::Message;
 use crate::message::Encoder;
-use crate::prelude::entry::EntryOperation;
+use crate::message::MessageVerificationExt;
 use crate::swarm::Swarm;
 use crate::tests::default::assert_no_more_msg;
 use crate::tests::default::prepare_node;
@@ -17,7 +18,7 @@ use crate::tests::default::wait_for_msgs;
 use crate::tests::manually_establish_connection;
 
 #[tokio::test]
-async fn storage_store_fetches_remote_entry_into_cache() -> Result<()> {
+async fn test_storage_store_fetches_remote_entry_into_cache() -> Result<()> {
     let mut keys = gen_ordered_keys(2).into_iter();
     let key1 = next_generated_key(&mut keys)?;
     let key2 = next_generated_key(&mut keys)?;
@@ -44,14 +45,19 @@ async fn storage_store_fetches_remote_entry_into_cache() -> Result<()> {
     assert!(node2.swarm.storage_check_cache(entry_key).await.is_none());
 
     <Swarm as ChordStorageInterface<1>>::storage_store(&node1.swarm, entry.clone()).await?;
-    let ev = next_payload(&node2).await?;
-    assert!(matches!(
-        ev.transaction.data()?,
-        Message::OperateEntry(PlacedEntryOperation {
-            placement,
-            op: EntryOperation::Overwrite(x),
-        }) if placement == entry_key && x.did == entry_key
-    ));
+    next_payload_matching(&node2, "remote overwrite operation", |payload| {
+        Ok(payload.transaction.signer() == node1.did()
+            && payload.transaction.destination == node2.did()
+            && payload.relay.destination == node2.did()
+            && matches!(
+                payload.transaction.data()?,
+                Message::OperateEntry(PlacedEntryOperation {
+                    placement,
+                    op: EntryOperation::Overwrite(x),
+                }) if placement == entry_key && x.did == entry_key
+            ))
+    })
+    .await?;
 
     assert!(node1.swarm.storage_check_cache(entry_key).await.is_none());
     assert!(node2.swarm.storage_check_cache(entry_key).await.is_none());
@@ -60,20 +66,30 @@ async fn storage_store_fetches_remote_entry_into_cache() -> Result<()> {
 
     <Swarm as ChordStorageInterface<1>>::storage_fetch(&node1.swarm, entry_key).await?;
 
-    let ev = next_payload(&node2).await?;
-    assert!(matches!(
-        ev.transaction.data()?,
-        Message::SearchEntry(x) if x.resource == entry_key && x.placement == entry_key
-    ));
+    next_payload_matching(&node2, "remote entry search", |payload| {
+        Ok(payload.transaction.signer() == node1.did()
+            && payload.transaction.destination == node2.did()
+            && payload.relay.destination == node2.did()
+            && matches!(
+                payload.transaction.data()?,
+                Message::SearchEntry(x) if x.resource == entry_key && x.placement == entry_key
+            ))
+    })
+    .await?;
 
-    let ev = next_payload(&node1).await?;
-    assert!(matches!(
-        ev.transaction.data()?,
-        Message::FoundEntry(x)
-            if x.resource == entry_key
-                && x.misses.is_empty()
-                && x.data.first().is_some_and(|entry| entry.did == entry_key)
-    ));
+    next_payload_matching(&node1, "entry lookup response", |payload| {
+        Ok(payload.transaction.signer() == node2.did()
+            && payload.transaction.destination == node1.did()
+            && payload.relay.destination == node1.did()
+            && matches!(
+                payload.transaction.data()?,
+                Message::FoundEntry(x)
+                    if x.resource == entry_key
+                        && x.misses.is_empty()
+                        && x.data.first().is_some_and(|entry| entry.did == entry_key)
+            ))
+    })
+    .await?;
 
     assert_cached_data_values(&node1, entry_key, &[data.as_str()]).await?;
 
@@ -81,7 +97,7 @@ async fn storage_store_fetches_remote_entry_into_cache() -> Result<()> {
 }
 
 #[tokio::test]
-async fn storage_append_data_preserves_entry_payload_order() -> Result<()> {
+async fn test_storage_append_data_preserves_entry_payload_order() -> Result<()> {
     let mut keys = gen_ordered_keys(2).into_iter();
     let key1 = next_generated_key(&mut keys)?;
     let key2 = next_generated_key(&mut keys)?;
@@ -155,7 +171,7 @@ async fn storage_append_data_preserves_entry_payload_order() -> Result<()> {
 }
 
 #[tokio::test]
-async fn storage_touch_data_moves_existing_entry_payload_to_end_once() -> Result<()> {
+async fn test_storage_touch_data_moves_existing_entry_payload_to_end_once() -> Result<()> {
     let mut keys = gen_ordered_keys(2).into_iter();
     let key1 = next_generated_key(&mut keys)?;
     let key2 = next_generated_key(&mut keys)?;
@@ -202,7 +218,7 @@ async fn storage_touch_data_moves_existing_entry_payload_to_end_once() -> Result
 }
 
 #[tokio::test]
-async fn storage_tombstone_data_removes_observed_payload() -> Result<()> {
+async fn test_storage_tombstone_data_removes_observed_payload() -> Result<()> {
     let mut keys = gen_ordered_keys(2).into_iter();
     let key1 = next_generated_key(&mut keys)?;
     let key2 = next_generated_key(&mut keys)?;
@@ -253,7 +269,7 @@ async fn storage_tombstone_data_removes_observed_payload() -> Result<()> {
 }
 
 #[tokio::test]
-async fn storage_compact_data_prunes_tombstones_and_preserves_owner_values() -> Result<()> {
+async fn test_storage_compact_data_prunes_tombstones_and_preserves_owner_values() -> Result<()> {
     let mut keys = gen_ordered_keys(2).into_iter();
     let key1 = next_generated_key(&mut keys)?;
     let key2 = next_generated_key(&mut keys)?;

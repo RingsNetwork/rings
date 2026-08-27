@@ -898,4 +898,4 @@ impl Entry {
 }
 
 #[cfg(test)]
-mod tests;
+mod test_entry;

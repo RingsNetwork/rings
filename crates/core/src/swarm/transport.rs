@@ -3,6 +3,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::MutexGuard;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -34,6 +35,7 @@ use rings_transport::delivery::DeliveryFuture;
 use rings_transport::webrtc_config::WebrtcUdpPortRange;
 
 use self::storage_sync::StorageSyncAckMap;
+use crate::chunk::ReassemblyBudget;
 use crate::chunk::ReassemblyLimits;
 use crate::dht::Did;
 use crate::dht::LiveDid;
@@ -60,15 +62,21 @@ mod connection;
 mod delivery;
 mod event_delivery;
 mod liveness;
+mod outbound;
 mod payload_send;
 mod pending;
 mod readiness;
 mod storage_lookup;
 mod storage_sync;
-
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) use storage_sync::StorageSyncBatch;
+#[cfg(all(test, not(target_family = "wasm")))]
+pub(crate) use storage_sync::StorageSyncBatchStep;
+mod timeouts;
 pub(crate) use self::connection::AdmittedConnection;
 use self::delivery::record_measurement;
-pub(crate) use self::delivery::DATA_CHANNEL_SEND_ACCEPT_BUDGET;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::delivery::SendCompletionOutcome;
 use self::event_delivery::PeerOperationLocks;
 use self::event_delivery::SwarmEventDeliveryLock;
 use self::event_delivery::SwarmEventDeliveryLocks;
@@ -77,6 +85,19 @@ use self::liveness::PeerLivenessMap;
 pub(crate) use self::liveness::PEER_LIVENESS_IDLE_MS;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::liveness::PEER_LIVENESS_TIMEOUT_MS;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::outbound::outbound_submit_count_for_test;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::outbound::reset_outbound_submit_count_for_test;
+use self::outbound::OutboundSchedulers;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::outbound::OUTBOUND_COMMAND_DRAIN_BUDGET;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::outbound::OUTBOUND_CONTROL_RESERVED_TRANSFERS;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::outbound::OUTBOUND_DATA_TRANSFER_CAPACITY;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::outbound::OUTBOUND_TRANSFER_QUEUE_CAPACITY;
 pub(crate) use self::pending::ConnectionEventDisposition;
 use self::pending::ConnectionLifecycleBoundary;
 pub(crate) use self::pending::PendingConnectionAttempt;
@@ -90,6 +111,10 @@ use self::storage_lookup::StorageLookupObservationMap;
 #[cfg(all(test, not(all(feature = "wasm", target_family = "wasm"))))]
 pub(crate) use self::storage_lookup::STORAGE_LOOKUP_OBSERVATION_CAPACITY;
 pub(crate) use self::storage_sync::TrackedStorageSyncOutcome;
+pub(crate) use self::timeouts::DATA_CHANNEL_SEND_ACCEPT_BUDGET;
+pub(crate) use self::timeouts::TRACKED_PAYLOAD_COMPLETION_BOUND;
+use self::timeouts::TRANSPORT_TIMEOUT_PROFILE;
+use super::callback::InboundCapacity;
 
 pub struct SwarmTransport {
     pub(crate) network_id: u32,
@@ -99,6 +124,8 @@ pub struct SwarmTransport {
     storage_redundancy: u16,
     dht_virtual_nodes: u16,
     reassembly_limits: ReassemblyLimits,
+    reassembly_budget: Arc<ReassemblyBudget>,
+    inbound_capacity: Arc<InboundCapacity>,
     connection_lifecycle: ConnectionLifecycleBoundary,
     swarm_event_delivery: SwarmEventDeliveryLocks,
     connection_creation: PeerOperationLocks,
@@ -109,8 +136,17 @@ pub struct SwarmTransport {
     pending_storage_sync_acks: Mutex<StorageSyncAckMap>,
     storage_repair_requested: AtomicBool,
     storage_repair_cursor: Mutex<Option<StorageSyncDeliveryCursor>>,
-    measured_disconnects: Mutex<BTreeMap<Did, (u64, i64)>>,
+    outbound_schedulers: OutboundSchedulers,
+    measured_disconnects: Mutex<MeasuredDisconnectMap>,
     measure: Option<MeasureImpl>,
+}
+
+type MeasuredDisconnectMap = BTreeMap<Did, MeasuredDisconnect>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MeasuredDisconnect {
+    generation: u64,
+    disconnected_since_ms: i64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -181,6 +217,12 @@ pub struct SwarmConnection {
 }
 
 impl SwarmTransport {
+    fn measured_disconnects(&self) -> Result<MutexGuard<'_, MeasuredDisconnectMap>> {
+        self.measured_disconnects
+            .lock()
+            .map_err(|_| Error::SwarmConnectionLifecycleLock)
+    }
+
     pub(crate) fn new(
         network_id: u32,
         webrtc: SwarmWebrtcConfig,
@@ -201,6 +243,8 @@ impl SwarmTransport {
             storage_redundancy: settings.storage_redundancy,
             dht_virtual_nodes: settings.dht_virtual_nodes,
             reassembly_limits: settings.reassembly_limits,
+            reassembly_budget: Arc::new(ReassemblyBudget::new(settings.reassembly_limits)),
+            inbound_capacity: Arc::new(InboundCapacity::new()),
             connection_lifecycle: ConnectionLifecycleBoundary::new(),
             swarm_event_delivery: SwarmEventDeliveryLocks::new(),
             connection_creation: PeerOperationLocks::new(),
@@ -213,6 +257,7 @@ impl SwarmTransport {
             pending_storage_sync_acks: Mutex::new(BTreeMap::new()),
             storage_repair_requested: AtomicBool::new(false),
             storage_repair_cursor: Mutex::new(None),
+            outbound_schedulers: OutboundSchedulers::new(measure.clone()),
             measured_disconnects: Mutex::new(BTreeMap::new()),
             measure,
         }
@@ -246,6 +291,9 @@ impl SwarmTransport {
             let Some(attempt) = self.active_attempt(peer)? else {
                 return Ok(IncomingOfferAdmittedPeer::Vacant);
             };
+            if self.peer_lifecycles()?.sendable_attempt(peer) != Some(attempt) {
+                return Ok(IncomingOfferAdmittedPeer::Unroutable(attempt));
+            }
             let Some(connection) = self.get_raw_connection(peer) else {
                 return Ok(IncomingOfferAdmittedPeer::Unroutable(attempt));
             };
@@ -306,7 +354,7 @@ impl SwarmTransport {
         self.dht_virtual_nodes
     }
 
-    fn dht_protocol_mode(&self) -> DhtProtocolMode {
+    pub(crate) fn dht_protocol_mode(&self) -> DhtProtocolMode {
         DhtProtocolMode::new(
             self.network_id,
             self.storage_redundancy,
@@ -327,6 +375,19 @@ impl SwarmTransport {
     /// Chunk reassembly limits enforced by inbound callbacks.
     pub(crate) fn reassembly_limits(&self) -> ReassemblyLimits {
         self.reassembly_limits
+    }
+
+    pub(crate) fn reassembly_budget(&self) -> Arc<ReassemblyBudget> {
+        self.reassembly_budget.clone()
+    }
+
+    pub(crate) fn inbound_capacity(&self) -> Arc<InboundCapacity> {
+        self.inbound_capacity.clone()
+    }
+
+    #[cfg(all(test, not(target_family = "wasm")))]
+    pub(crate) fn inbound_admitted_count_for_test(&self) -> usize {
+        self.inbound_capacity.admitted_count_for_test()
     }
 
     async fn record_peer_measurement(&self, peer: Did, counter: MeasureCounter) {
@@ -358,19 +419,13 @@ impl SwarmTransport {
             return;
         }
         self.mark_peer_liveness_connected(attempt);
-        let updated = self.with_connection_lifecycle(|| {
-            if !self.owns_active_slot(attempt)? {
-                return Ok(false);
-            }
-            self.measured_disconnects
-                .lock()
-                .map_err(|_| Error::SwarmConnectionLifecycleLock)?
-                .remove(&attempt.peer);
-            Ok(true)
+        let updated = self.with_active_slot(attempt, || {
+            self.measured_disconnects()?.remove(&attempt.peer);
+            Ok(())
         });
         match updated {
-            Ok(true) => {}
-            Ok(false) => return,
+            Ok(Some(())) => {}
+            Ok(None) => return,
             Err(error) => {
                 tracing::warn!(
                     "Failed to update disconnect epoch for connected peer {} generation {}: {error}",
@@ -390,21 +445,17 @@ impl SwarmTransport {
     /// recorded. `record_peer_connected` starts a new epoch by clearing the marker.
     pub(crate) async fn record_peer_disconnected(&self, attempt: PendingConnectionAttempt) {
         let now_ms = get_epoch_ms_i64();
-        let should_record = match self.with_connection_lifecycle(|| {
-            if !self.owns_active_slot(attempt)? {
-                return Ok(false);
-            }
-            let mut measured = self
-                .measured_disconnects
-                .lock()
-                .map_err(|_| Error::SwarmConnectionLifecycleLock)?;
-            let previous = measured.insert(attempt.peer, (attempt.generation, now_ms));
-            Ok(!matches!(
-                previous,
-                Some((generation, _)) if generation == attempt.generation
-            ))
+        let should_record = match self.with_active_slot(attempt, || {
+            let previous = self
+                .measured_disconnects()?
+                .insert(attempt.peer, MeasuredDisconnect {
+                    generation: attempt.generation,
+                    disconnected_since_ms: now_ms,
+                });
+            Ok(!previous.is_some_and(|disconnect| disconnect.generation == attempt.generation))
         }) {
-            Ok(should_record) => should_record,
+            Ok(Some(should_record)) => should_record,
+            Ok(None) => false,
             Err(error) => {
                 tracing::warn!(
                     "Failed to update disconnect epoch for peer {} generation {}: {error}",
@@ -425,19 +476,15 @@ impl SwarmTransport {
         &self,
         attempt: PendingConnectionAttempt,
     ) -> Option<i64> {
-        self.with_connection_lifecycle(|| {
-            if !self.owns_active_slot(attempt)? {
-                return Ok(None);
-            }
+        self.with_active_slot(attempt, || {
             Ok(self
-                .measured_disconnects
-                .lock()
-                .map_err(|_| Error::SwarmConnectionLifecycleLock)?
+                .measured_disconnects()?
                 .get(&attempt.peer)
-                .filter(|(generation, _)| *generation == attempt.generation)
-                .map(|(_, since_ms)| *since_ms))
+                .filter(|disconnect| disconnect.generation == attempt.generation)
+                .map(|disconnect| disconnect.disconnected_since_ms))
         })
         .ok()
+        .flatten()
         .flatten()
     }
 
@@ -450,14 +497,8 @@ impl SwarmTransport {
     }
 
     pub(crate) fn clear_peer_disconnected(&self, attempt: PendingConnectionAttempt) {
-        if let Err(error) = self.with_connection_lifecycle(|| {
-            if !self.owns_active_slot(attempt)? {
-                return Ok(());
-            }
-            self.measured_disconnects
-                .lock()
-                .map_err(|_| Error::SwarmConnectionLifecycleLock)?
-                .remove(&attempt.peer);
+        if let Err(error) = self.with_active_slot(attempt, || {
+            self.measured_disconnects()?.remove(&attempt.peer);
             Ok(())
         }) {
             tracing::warn!(
@@ -477,16 +518,15 @@ impl SwarmTransport {
         let Some(attempt) = self.active_attempt(peer)? else {
             return Ok(());
         };
-        self.with_connection_lifecycle(|| {
-            if !self.owns_active_slot(attempt)? {
-                return Ok(());
-            }
-            self.measured_disconnects
-                .lock()
-                .map_err(|_| Error::SwarmConnectionLifecycleLock)?
-                .insert(peer, (attempt.generation, disconnected_since_ms));
+        self.with_active_slot(attempt, || {
+            self.measured_disconnects()?
+                .insert(peer, MeasuredDisconnect {
+                    generation: attempt.generation,
+                    disconnected_since_ms,
+                });
             Ok(())
         })
+        .map(|_| ())
     }
 
     /// Record that a payload from `peer` was accepted and verified by the swarm.
@@ -568,7 +608,7 @@ impl SwarmTransport {
             Err(Error::AlreadyConnected) => return Err(Error::AlreadyConnected),
             Err(e) => {
                 if self.get_connection(peer).is_some() {
-                    tracing::info!(
+                    tracing::debug!(
                         target: "rings_core::swarm::transport::handshake",
                         local = %self.dht.did,
                         peer = %peer,
@@ -582,7 +622,7 @@ impl SwarmTransport {
             }
         };
         let sdp_len = offer_msg.sdp.len();
-        tracing::info!(
+        tracing::trace!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
             peer = %peer,
@@ -595,7 +635,7 @@ impl SwarmTransport {
             .await
         {
             Ok(tx_id) => {
-                tracing::info!(
+                tracing::trace!(
                     target: "rings_core::swarm::transport::handshake",
                     local = %self.dht.did,
                     peer = %peer,
@@ -616,7 +656,7 @@ impl SwarmTransport {
                 self.abandon_pending_connection(attempt, "sending connection offer")
                     .await;
                 if self.get_connection(peer).is_some() {
-                    tracing::info!(
+                    tracing::debug!(
                         target: "rings_core::swarm::transport::handshake",
                         local = %self.dht.did,
                         peer = %peer,
@@ -654,7 +694,7 @@ impl SwarmTransport {
         let attempt = pending_connection.attempt();
         let conn = pending_connection.connection();
 
-        tracing::info!(
+        tracing::trace!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
             peer = %peer,
@@ -678,7 +718,7 @@ impl SwarmTransport {
                 return Err(Error::Transport(error));
             }
         };
-        tracing::info!(
+        tracing::trace!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
             peer = %peer,
@@ -763,7 +803,7 @@ impl SwarmTransport {
         let attempt = pending_connection.attempt();
         let conn = pending_connection.connection();
 
-        tracing::info!(
+        tracing::trace!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
             peer = %peer,
@@ -788,7 +828,7 @@ impl SwarmTransport {
                 return Err(Error::Transport(error));
             }
         };
-        tracing::info!(
+        tracing::trace!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
             peer = %peer,
@@ -849,7 +889,7 @@ impl SwarmTransport {
         let (attempt, conn) = self
             .pending_connection_with_attempt(peer)?
             .ok_or(Error::SwarmMissTransport(peer))?;
-        tracing::info!(
+        tracing::trace!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
             peer = %peer,
@@ -876,7 +916,7 @@ impl SwarmTransport {
                 generation: attempt.generation,
             });
         }
-        tracing::info!(
+        tracing::trace!(
             target: "rings_core::swarm::transport::handshake",
             local = %self.dht.did,
             peer = %peer,
@@ -892,13 +932,28 @@ impl SwarmTransport {
 impl SwarmConnection {
     async fn send_data(&self, data: Bytes, permit: SendPermit) -> Result<DeliveryFuture> {
         self.connection
-            .send_message_with_permit(TransportMessage::Custom(data.to_vec()), permit)
+            .send_message_with_permit(TransportMessage::Custom(data), permit)
             .await
             .map_err(|e| e.into())
     }
 
+    async fn close(&self) -> Result<()> {
+        self.connection.close().await.map_err(Into::into)
+    }
+
     pub fn webrtc_connection_state(&self) -> WebrtcConnectionState {
         self.connection.webrtc_connection_state()
+    }
+
+    #[cfg(all(
+        test,
+        not(all(feature = "wasm", target_family = "wasm")),
+        not(feature = "dummy")
+    ))]
+    pub(crate) fn physical_close_witness(
+        &self,
+    ) -> Result<rings_transport::connections::NativePhysicalCloseWitness> {
+        self.connection.physical_close_witness().map_err(Into::into)
     }
 
     /// The largest single data-channel message this connection can carry — the negotiated

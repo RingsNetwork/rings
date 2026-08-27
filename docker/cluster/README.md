@@ -67,7 +67,7 @@ Useful environment variables:
 - `RINGS_CLUSTER_DIR`: config, logs, storage, and session key directory; default `/var/lib/rings-cluster`
 - `RINGS_ICE_SERVERS`: ICE server list passed to every node; set it to an empty string to run without ICE servers
 - `RINGS_RUNTIME`: Tokio runtime flavor for each node process; default `current-thread`
-- `RINGS_LOG_LEVEL`: node log level; default `warn`
+- `RINGS_LOG_LEVEL`: optional node log level override; when unset, the `rings` CLI default is `error`
 - `RINGS_EXTERNAL_IP`: optional native WebRTC NAT 1:1 IP advertised in ICE host candidates; default unset. For browser testing from the Docker host, use `127.0.0.1`.
 - `RINGS_EXTERNAL_IP_APPEND_CONTAINER_IP`: when `RINGS_EXTERNAL_IP` is set, also advertise the container IP so nodes inside the same container can still connect to each other; default `true`
 - `RINGS_WEBRTC_UDP_PORT_MIN` and `RINGS_WEBRTC_UDP_PORT_MAX`: optional fixed native WebRTC UDP port range; publish the same range with `/udp` when browser peers must establish data channels to non-ingress nodes

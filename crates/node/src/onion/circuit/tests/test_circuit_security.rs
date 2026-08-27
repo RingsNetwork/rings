@@ -17,7 +17,7 @@ use super::test_circuit_protocol::session;
 use super::test_circuit_protocol::test_payload;
 
 #[test]
-fn relay_return_table_evicts_expired_entries() {
+fn test_relay_return_table_evicts_expired_entries() {
     let previous = session();
     let next = session();
     let other_next = session();
@@ -61,7 +61,7 @@ fn relay_return_table_evicts_expired_entries() {
 }
 
 #[test]
-fn backward_cell_after_return_expiry_is_never_forwarded() {
+fn test_backward_cell_after_return_expiry_is_never_forwarded() {
     let client = session();
     let next = session();
     let mut state = OnionCircuitState::default();
@@ -110,7 +110,7 @@ fn backward_cell_after_return_expiry_is_never_forwarded() {
 }
 
 #[test]
-fn relay_return_table_rejects_live_edge_overwrite() {
+fn test_relay_return_table_rejects_live_edge_overwrite() {
     let previous = session();
     let attacker_previous = session();
     let next = session();
@@ -144,7 +144,7 @@ fn relay_return_table_rejects_live_edge_overwrite() {
 }
 
 #[test]
-fn relay_return_table_preserves_capacity_for_other_authenticated_peers() {
+fn test_relay_return_table_preserves_capacity_for_other_authenticated_peers() {
     let first_peer = session();
     let second_peer = session();
     let next = session();
@@ -205,7 +205,7 @@ fn relay_return_table_preserves_capacity_for_other_authenticated_peers() {
 }
 
 #[test]
-fn crypto_limiter_bounds_sender_window() {
+fn test_crypto_limiter_bounds_sender_window() {
     let peer = session().account_did();
     let mut limiter = OnionCryptoLimiter::with_limit(2);
 
@@ -221,7 +221,7 @@ fn crypto_limiter_bounds_sender_window() {
 }
 
 #[test]
-fn one_hop_cover_cell_has_no_state_transition_or_effect() {
+fn test_one_hop_cover_cell_has_no_state_transition_or_effect() {
     let peer = session();
     let reducer = OnionCircuitReducer::new(OnionCircuitCapabilities::relay());
     let state = OnionCircuitState::default();
@@ -238,7 +238,7 @@ fn one_hop_cover_cell_has_no_state_transition_or_effect() {
 }
 
 #[test]
-fn edge_circuit_id_allocation_retries_collisions_and_fails_boundedly() {
+fn test_edge_circuit_id_allocation_retries_collisions_and_fails_boundedly() {
     let first = OnionCircuitId::new([1; 16]);
     let second = OnionCircuitId::new([2; 16]);
     let third = OnionCircuitId::new([3; 16]);
@@ -259,7 +259,7 @@ fn edge_circuit_id_allocation_retries_collisions_and_fails_boundedly() {
 }
 
 #[test]
-fn aead_context_binds_direction_and_circuit_id() {
+fn test_aead_context_binds_direction_and_circuit_id() {
     let client = session();
     let exit = session();
     let route = route(&[], &exit);
@@ -301,7 +301,7 @@ fn aead_context_binds_direction_and_circuit_id() {
 }
 
 #[test]
-fn backward_payload_authentication_rejects_wrong_exit_signer() {
+fn test_backward_payload_authentication_rejects_wrong_exit_signer() {
     let client = session();
     let exit = session();
     let attacker = session();

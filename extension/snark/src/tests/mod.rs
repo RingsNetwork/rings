@@ -1,2 +1,2 @@
 #[cfg(rings_native)]
-mod native;
+mod test_native;

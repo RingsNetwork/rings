@@ -38,10 +38,12 @@ use crate::swarm::transport::PendingConnectionAttempt;
 use crate::swarm::transport::SwarmTransport;
 use crate::swarm::transport::TransportReadiness;
 use crate::swarm::transport::PEER_LIVENESS_IDLE_MS;
+use crate::swarm::transport::TRACKED_PAYLOAD_COMPLETION_BOUND;
 use crate::utils::get_epoch_ms_i64;
 use crate::utils::sleep;
 
-const STABILIZATION_STEP_TIMEOUT: Duration = Duration::from_secs(30);
+const STABILIZATION_STEP_TIMEOUT: Duration =
+    TRACKED_PAYLOAD_COMPLETION_BOUND.saturating_add(Duration::from_secs(1));
 const STABILIZATION_STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const DISCONNECTED_CONNECTION_GRACE_MS: i64 = 30_000;
 /// Run one repair delivery per maintenance phase. Every frame has a bounded
@@ -56,6 +58,7 @@ const DHT_TOPOLOGY_EVICTION_THRESHOLDS: PeerQualityThresholds =
 enum TopologyPeerRemovalReason {
     NoAdmittedTransport,
     MissingTransportObject,
+    SendTerminal,
     TerminalTransport(WebrtcConnectionState),
     DataChannelNotOpen(WebrtcConnectionState),
     DisconnectedGraceElapsed {
@@ -79,6 +82,7 @@ enum TopologyPeerRemovalReason {
 struct AdmittedPeerState {
     attempt: PendingConnectionAttempt,
     readiness: Option<TransportReadiness>,
+    send_terminal: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -92,6 +96,7 @@ impl TopologyPeerRemovalReason {
         match self {
             Self::NoAdmittedTransport => "no_admitted_transport",
             Self::MissingTransportObject => "missing_transport_object",
+            Self::SendTerminal => "send_terminal",
             Self::TerminalTransport(_) => "terminal_transport",
             Self::DataChannelNotOpen(_) => "data_channel_not_open",
             Self::DisconnectedGraceElapsed { .. } => "disconnected_grace_elapsed",
@@ -308,10 +313,12 @@ impl Stabilizer {
     /// - `Routable(n, p)` iff `p` has an admitted local transport with a stable
     ///   readiness observation in `Ready = ({Connecting, Connected}, Open)`.
     /// - `Evictable(n, p)` iff `p` has no admitted transport, has no raw
-    ///   connection object, is terminal, is the disconnected successor head
-    ///   while a live successor-tail or finger fallback exists, stayed
-    ///   disconnected past grace, or has reached the local failure-evidence
-    ///   limit.
+    ///   connection object, is terminal, is `Connected` with a data channel that
+    ///   is not open, is the disconnected successor head while a live
+    ///   successor-tail or finger fallback exists, stayed disconnected past
+    ///   grace, left a liveness probe unanswered past its deadline, or reached
+    ///   the local failure-evidence limit, including an admitted connection
+    ///   explicitly terminalized after an irrevocable send or delivery failure.
     /// - `PrunableTopologyPeer(n, p)` iff `p` is disconnected and appears only
     ///   in non-head topology slots. These slots are hints, so they are removed
     ///   from local DHT state immediately while the transport is allowed to
@@ -319,8 +326,10 @@ impl Stabilizer {
     ///
     /// Post: after this step returns `Ok`, every observed local
     /// `TopologyPeer(n, p) ∪ AdmittedPeer(n, p)` that was `Evictable(n, p)` at
-    /// the step's snapshot time has been removed through `PeerRing::remove`, so
-    /// successor, predecessor, and finger state are cleaned together.
+    /// snapshot time and still owns the same active transport evidence has been
+    /// removed through `PeerRing::remove`, so successor, predecessor, and finger
+    /// state are cleaned together. Evidence superseded by a newer connection is
+    /// a successful no-op that preserves the replacement and its topology.
     pub async fn clean_unavailable_connections(&self) -> Result<()> {
         self.transport.expire_pending_connections().await?;
         let admitted_states = self.admitted_connection_states()?;
@@ -347,7 +356,12 @@ impl Stabilizer {
             .into_iter()
             .map(|(attempt, connection)| {
                 let readiness = connection.as_ref().map(|connection| connection.readiness());
-                Ok((attempt.peer(), AdmittedPeerState { attempt, readiness }))
+                let send_terminal = self.transport.is_send_terminal_attempt(attempt)?;
+                Ok((attempt.peer(), AdmittedPeerState {
+                    attempt,
+                    readiness,
+                    send_terminal,
+                }))
             })
             .collect()
     }
@@ -395,6 +409,9 @@ impl Stabilizer {
                 reason,
             })
         };
+        if admitted.send_terminal {
+            return Ok(removal(TopologyPeerRemovalReason::SendTerminal));
+        }
         let Some(readiness) = admitted.readiness else {
             return Ok(removal(TopologyPeerRemovalReason::MissingTransportObject));
         };
@@ -434,51 +451,62 @@ impl Stabilizer {
         }
 
         if matches!(state, WebrtcConnectionState::Disconnected) {
-            let disconnected_for_ms = if let Some(disconnected_since_ms) = self
-                .transport
-                .peer_disconnected_since_attempt_ms(admitted.attempt)
+            if let Some(reason) = self
+                .disconnected_peer_removal_reason(did, admitted, now_ms)
+                .await?
             {
-                now_ms.saturating_sub(disconnected_since_ms)
-            } else {
-                self.transport
-                    .record_peer_disconnected(admitted.attempt)
-                    .await;
-                tracing::warn!(
-                    target: "rings_core::dht::stabilization",
-                    local = %self.dht.did,
-                    peer = %did,
-                    state = ?state,
-                    "STABILIZATION clean_unavailable observed disconnected peer without prior callback"
-                );
-                0
-            };
-            if self.transport.live_successor_fallback(did)?.is_some() {
-                return Ok(removal(
-                    TopologyPeerRemovalReason::DisconnectedSuccessorFailover {
-                        disconnected_for_ms,
-                    },
-                ));
-            }
-            if self.disconnected_topology_prune_candidate(did)? {
-                return Ok(removal(
-                    TopologyPeerRemovalReason::DisconnectedTopologyPrune {
-                        disconnected_for_ms,
-                    },
-                ));
-            }
-            if disconnected_for_ms >= DISCONNECTED_CONNECTION_GRACE_MS {
-                return Ok(removal(
-                    TopologyPeerRemovalReason::DisconnectedGraceElapsed {
-                        disconnected_for_ms,
-                        grace_ms: DISCONNECTED_CONNECTION_GRACE_MS,
-                    },
-                ));
+                return Ok(removal(reason));
             }
         } else {
             self.transport.clear_peer_disconnected(admitted.attempt);
         }
 
         Ok(None)
+    }
+
+    async fn disconnected_peer_removal_reason(
+        &self,
+        did: Did,
+        admitted: AdmittedPeerState,
+        now_ms: i64,
+    ) -> Result<Option<TopologyPeerRemovalReason>> {
+        let disconnected_for_ms = if let Some(disconnected_since_ms) = self
+            .transport
+            .peer_disconnected_since_attempt_ms(admitted.attempt)
+        {
+            now_ms.saturating_sub(disconnected_since_ms)
+        } else {
+            self.transport
+                .record_peer_disconnected(admitted.attempt)
+                .await;
+            tracing::warn!(
+                target: "rings_core::dht::stabilization",
+                local = %self.dht.did,
+                peer = %did,
+                "STABILIZATION clean_unavailable observed disconnected peer without prior callback"
+            );
+            0
+        };
+        if self.transport.live_successor_fallback(did)?.is_some() {
+            return Ok(Some(
+                TopologyPeerRemovalReason::DisconnectedSuccessorFailover {
+                    disconnected_for_ms,
+                },
+            ));
+        }
+        if self.disconnected_topology_prune_candidate(did)? {
+            return Ok(Some(TopologyPeerRemovalReason::DisconnectedTopologyPrune {
+                disconnected_for_ms,
+            }));
+        }
+        Ok(
+            (disconnected_for_ms >= DISCONNECTED_CONNECTION_GRACE_MS).then_some(
+                TopologyPeerRemovalReason::DisconnectedGraceElapsed {
+                    disconnected_for_ms,
+                    grace_ms: DISCONNECTED_CONNECTION_GRACE_MS,
+                },
+            ),
+        )
     }
 
     fn disconnected_topology_prune_candidate(&self, peer: Did) -> Result<bool> {
@@ -590,7 +618,7 @@ impl Stabilizer {
 
         if should_repair {
             self.transport.request_storage_repair();
-            tracing::info!(
+            tracing::debug!(
                 target: "rings_core::dht::stabilization",
                 local = %self.dht.did,
                 peer = %did,
@@ -853,6 +881,14 @@ fn elapsed_since(started_at: Instant) -> i64 {
 }
 
 mod maintenance;
+#[cfg(all(test, target_family = "wasm"))]
+pub(crate) use maintenance::maintenance_phase_trace_for_test;
+#[cfg(all(test, target_family = "wasm"))]
+pub(crate) use maintenance::reset_maintenance_phase_trace_for_test;
+#[cfg(all(test, target_family = "wasm"))]
+pub(crate) use maintenance::MaintenancePhaseEvent;
+#[cfg(all(test, target_family = "wasm"))]
+pub(crate) use maintenance::MaintenancePhaseKind;
 mod storage_repair;
 
 #[cfg(test)]
@@ -872,7 +908,7 @@ mod tests {
 
     #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_family = "wasm"), tokio::test)]
-    async fn step_deadline_drops_work_that_does_not_complete() {
+    async fn test_step_deadline_drops_work_that_does_not_complete() {
         let dropped = Arc::new(AtomicBool::new(false));
         let witness = dropped.clone();
         let future = async move {

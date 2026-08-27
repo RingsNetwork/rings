@@ -569,7 +569,7 @@ mod tests {
     }
 
     #[test]
-    fn public_key_must_match_did() {
+    fn test_public_key_must_match_did() {
         let sender = sender_key();
         let recipient = recipient_key();
 
@@ -581,7 +581,7 @@ mod tests {
     }
 
     #[test]
-    fn handshake_messages_verify_signed_owner() {
+    fn test_handshake_messages_verify_signed_owner() {
         let sender = sender_key();
         let recipient = recipient_key();
         let request = E2eHandshakeRequest::new(sender.pubkey());
@@ -598,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn round_trip_random_binary_payloads_and_frame_sizes() {
+    fn test_round_trip_random_binary_payloads_and_frame_sizes() {
         let sender = sender_key();
         let recipient = recipient_key();
         let mut rng = Hc128Rng::seed_from_u64(608);
@@ -633,7 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_plaintext_sends_final_stream_frame() {
+    fn test_empty_plaintext_sends_final_stream_frame() {
         let sender = sender_key();
         let recipient = recipient_key();
         let mut rng = Hc128Rng::seed_from_u64(7);
@@ -660,7 +660,7 @@ mod tests {
     }
 
     #[test]
-    fn streaming_decryptor_accepts_ordered_final_frame() {
+    fn test_streaming_decryptor_accepts_ordered_final_frame() {
         let sender = sender_key();
         let recipient = recipient_key();
         let stream_id = uuid::Uuid::new_v4();
@@ -680,7 +680,7 @@ mod tests {
     }
 
     #[test]
-    fn truncation_is_rejected_without_final_frame() {
+    fn test_truncation_is_rejected_without_final_frame() {
         let sender = sender_key();
         let recipient = recipient_key();
         let mut rng = Hc128Rng::seed_from_u64(9);
@@ -705,7 +705,7 @@ mod tests {
     }
 
     #[test]
-    fn reordered_frames_are_buffered_until_contiguous() {
+    fn test_reordered_frames_are_buffered_until_contiguous() {
         let sender = sender_key();
         let recipient = recipient_key();
         let mut rng = Hc128Rng::seed_from_u64(10);
@@ -730,7 +730,7 @@ mod tests {
     }
 
     #[test]
-    fn replayed_consumed_frame_is_idempotent() {
+    fn test_replayed_consumed_frame_is_idempotent() {
         let sender = sender_key();
         let recipient = recipient_key();
         let mut rng = Hc128Rng::seed_from_u64(16);
@@ -768,7 +768,7 @@ mod tests {
     }
 
     #[test]
-    fn replayed_buffered_frame_is_idempotent() {
+    fn test_replayed_buffered_frame_is_idempotent() {
         let sender = sender_key();
         let recipient = recipient_key();
         let mut rng = Hc128Rng::seed_from_u64(17);
@@ -804,7 +804,7 @@ mod tests {
     }
 
     #[test]
-    fn future_frame_outside_reorder_window_is_rejected() {
+    fn test_future_frame_outside_reorder_window_is_rejected() {
         let sender = sender_key();
         let recipient = recipient_key();
         let mut rng = Hc128Rng::seed_from_u64(18);
@@ -836,7 +836,7 @@ mod tests {
     }
 
     #[test]
-    fn final_frame_can_arrive_before_gap_is_filled() {
+    fn test_final_frame_can_arrive_before_gap_is_filled() {
         let sender = sender_key();
         let recipient = recipient_key();
         let mut rng = Hc128Rng::seed_from_u64(14);
@@ -874,7 +874,7 @@ mod tests {
     }
 
     #[test]
-    fn frame_after_buffered_final_is_rejected() {
+    fn test_frame_after_buffered_final_is_rejected() {
         let sender = sender_key();
         let recipient = recipient_key();
         let mut rng = Hc128Rng::seed_from_u64(15);
@@ -904,7 +904,7 @@ mod tests {
     }
 
     #[test]
-    fn wrong_stream_id_is_rejected() {
+    fn test_wrong_stream_id_is_rejected() {
         let sender = sender_key();
         let recipient = recipient_key();
         let mut rng = Hc128Rng::seed_from_u64(12);
@@ -927,7 +927,7 @@ mod tests {
     }
 
     #[test]
-    fn wrong_sender_key_is_rejected() {
+    fn test_wrong_sender_key_is_rejected() {
         let sender = sender_key();
         let recipient = recipient_key();
         let mut rng = Hc128Rng::seed_from_u64(11);

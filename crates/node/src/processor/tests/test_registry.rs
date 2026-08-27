@@ -69,7 +69,7 @@ impl RegistrationTask for StoppedRegistration {
 }
 
 #[tokio::test]
-async fn extension_declared_capability_is_advertised_after_registration() -> Result<()> {
+async fn test_extension_declared_capability_is_advertised_after_registration() -> Result<()> {
     let processor = prepare_processor().await;
     let descriptor = processor.online_node_descriptor_at(get_epoch_ms())?;
     assert_eq!(
@@ -89,7 +89,7 @@ async fn extension_declared_capability_is_advertised_after_registration() -> Res
 }
 
 #[tokio::test]
-async fn registration_daemon_treats_expected_stop_as_terminal() {
+async fn test_registration_daemon_treats_expected_stop_as_terminal() {
     let processor = prepare_processor().await;
     let task = StoppedRegistration;
 
@@ -102,7 +102,7 @@ async fn registration_daemon_treats_expected_stop_as_terminal() {
 }
 
 #[tokio::test]
-async fn custom_registration_task_publishes_through_shared_dht_sink() -> Result<()> {
+async fn test_custom_registration_task_publishes_through_shared_dht_sink() -> Result<()> {
     let topic = "custom_registration_task";
     let value = "custom-value"
         .to_string()
@@ -146,7 +146,7 @@ async fn custom_registration_task_publishes_through_shared_dht_sink() -> Result<
 }
 
 #[tokio::test]
-async fn online_node_descriptor_publishes_and_lists_signed_self() -> Result<()> {
+async fn test_online_node_descriptor_publishes_and_lists_signed_self() -> Result<()> {
     let processor = prepare_processor().await;
     let published = processor.publish_online_node_descriptor().await?;
     let nodes = processor.lookup_online_nodes(false).await?;
@@ -169,7 +169,7 @@ async fn online_node_descriptor_publishes_and_lists_signed_self() -> Result<()> 
 }
 
 #[tokio::test]
-async fn online_node_descriptor_refresh_replaces_previous_self_record() -> Result<()> {
+async fn test_online_node_descriptor_refresh_replaces_previous_self_record() -> Result<()> {
     let processor = prepare_processor().await;
     let first = processor.publish_online_node_descriptor().await?;
     futures_timer::Delay::new(std::time::Duration::from_millis(1)).await;
@@ -192,7 +192,7 @@ async fn online_node_descriptor_refresh_replaces_previous_self_record() -> Resul
 }
 
 #[tokio::test]
-async fn online_node_concurrent_publish_keeps_one_self_record() -> Result<()> {
+async fn test_online_node_concurrent_publish_keeps_one_self_record() -> Result<()> {
     let processor = prepare_processor().await;
     let processor_clone = processor.clone();
 
@@ -220,7 +220,7 @@ async fn online_node_concurrent_publish_keeps_one_self_record() -> Result<()> {
 }
 
 #[tokio::test]
-async fn online_node_publish_replaces_observed_self_records() -> Result<()> {
+async fn test_online_node_publish_replaces_observed_self_records() -> Result<()> {
     let processor = prepare_processor().await;
     let other = prepare_processor().await;
     let now_ms = get_epoch_ms();
@@ -265,7 +265,7 @@ async fn online_node_publish_replaces_observed_self_records() -> Result<()> {
 }
 
 #[tokio::test]
-async fn onion_exit_publish_replaces_observed_self_records() -> Result<()> {
+async fn test_onion_exit_publish_replaces_observed_self_records() -> Result<()> {
     let processor = prepare_processor().await;
     let other = prepare_processor().await;
     let now_ms = get_epoch_ms();
@@ -353,7 +353,7 @@ async fn onion_exit_publish_replaces_observed_self_records() -> Result<()> {
 }
 
 #[tokio::test]
-async fn online_node_lookup_filters_expired_descriptors_by_default() -> Result<()> {
+async fn test_online_node_lookup_filters_expired_descriptors_by_default() -> Result<()> {
     let processor = prepare_processor().await;
     let expired_processor = prepare_processor().await;
     let now_ms = get_epoch_ms();
@@ -404,7 +404,7 @@ async fn online_node_lookup_filters_expired_descriptors_by_default() -> Result<(
 }
 
 #[tokio::test]
-async fn online_node_lookup_filters_other_network_descriptors() -> Result<()> {
+async fn test_online_node_lookup_filters_other_network_descriptors() -> Result<()> {
     let processor = prepare_processor_with_network(0).await;
     let foreign = prepare_processor_with_network(1).await;
     let now_ms = get_epoch_ms();
@@ -424,7 +424,7 @@ async fn online_node_lookup_filters_other_network_descriptors() -> Result<()> {
 }
 
 #[tokio::test]
-async fn online_node_lookup_filters_other_dht_virtual_node_modes() -> Result<()> {
+async fn test_online_node_lookup_filters_other_dht_virtual_node_modes() -> Result<()> {
     let processor = prepare_processor_with_network_and_virtual_nodes(0, 2).await;
     let foreign = prepare_processor_with_network_and_virtual_nodes(0, 3).await;
     let now_ms = get_epoch_ms();
@@ -444,7 +444,7 @@ async fn online_node_lookup_filters_other_dht_virtual_node_modes() -> Result<()>
 }
 
 #[tokio::test]
-async fn online_node_lookup_filters_other_storage_redundancy_modes() -> Result<()> {
+async fn test_online_node_lookup_filters_other_storage_redundancy_modes() -> Result<()> {
     let processor = prepare_processor_with_network(0).await;
     let foreign = prepare_processor_with_network(0).await;
     let now_ms = get_epoch_ms();
@@ -485,7 +485,7 @@ async fn online_node_lookup_filters_other_storage_redundancy_modes() -> Result<(
 }
 
 #[tokio::test]
-async fn online_node_registry_lists_multiple_nodes() -> Result<()> {
+async fn test_online_node_registry_lists_multiple_nodes() -> Result<()> {
     let processor = prepare_processor().await;
     let other = prepare_processor().await;
     let other_descriptor = other.online_node_descriptor_at(get_epoch_ms())?;

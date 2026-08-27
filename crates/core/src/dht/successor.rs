@@ -329,7 +329,7 @@ mod tests {
     }
 
     #[test]
-    fn get_out_of_bounds_returns_typed_error() {
+    fn test_get_out_of_bounds_returns_typed_error() {
         let dids = gen_ordered_dids(1);
         let succ = SuccessorSeq::new(dids[0], 3);
 

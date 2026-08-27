@@ -825,7 +825,7 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn did_identifier_left_pads_short_hex() {
+    fn test_did_identifier_left_pads_short_hex() {
         let id = did_identifier("0x000aff");
         assert!(id.is_some());
         let id = id.unwrap_or([0; CHORD_ID_BYTES]);
@@ -842,7 +842,7 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn did_identifier_uses_low_160_bits() {
+    fn test_did_identifier_uses_low_160_bits() {
         let did = format!("0xabcd{}", "11".repeat(CHORD_ID_BYTES));
         let id = did_identifier(&did);
         assert!(id.is_some());
@@ -853,7 +853,7 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn did_identifier_rejects_odd_or_non_hex_input() {
+    fn test_did_identifier_rejects_odd_or_non_hex_input() {
         assert!(did_identifier("0x123").is_none());
         assert!(did_identifier("0x00zz").is_none());
         assert!(did_identifier("").is_none());
@@ -861,7 +861,7 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn did_readout_preserves_the_full_identifier() {
+    fn test_did_readout_preserves_the_full_identifier() {
         let did = "0x0123456789abcdef0123456789abcdef01234567";
         let (first_line, second_line) = split_did_label(did);
 
@@ -871,7 +871,7 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn selected_node_click_toggles_the_readout() {
+    fn test_selected_node_click_toggles_the_readout() {
         let did = "0x0123456789abcdef";
 
         assert_eq!(toggle_pinned_did(&None, did), Some(did.to_string()));
@@ -880,7 +880,7 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn successor_edges_form_wrapped_cycle() {
+    fn test_successor_edges_form_wrapped_cycle() {
         let edges = inferred_successor_edges(4)
             .into_iter()
             .map(|edge| (edge.source, edge.target))
@@ -891,7 +891,7 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn local_context_uses_sorted_ring_neighbors() {
+    fn test_local_context_uses_sorted_ring_neighbors() {
         let peers = ["0x10", "0x30"]
             .into_iter()
             .filter_map(|did| PeerView::connected(did.to_string()))
@@ -906,7 +906,7 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn local_context_wraps_for_first_ring_node() {
+    fn test_local_context_wraps_for_first_ring_node() {
         let peers = ["0x20", "0x30"]
             .into_iter()
             .filter_map(|did| PeerView::connected(did.to_string()))
@@ -921,7 +921,7 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn chord_add_power_of_two_wraps_identifier_space() {
+    fn test_chord_add_power_of_two_wraps_identifier_space() {
         assert_eq!(
             chord_add_power_of_two(&[0xff; CHORD_ID_BYTES], 0),
             [0; CHORD_ID_BYTES]
@@ -936,7 +936,7 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn inferred_finger_links_have_bounded_non_self_targets() {
+    fn test_inferred_finger_links_have_bounded_non_self_targets() {
         let local = did_with_high_byte(0);
         let peers = (1u8..8)
             .filter_map(|index| PeerView::connected(did_with_high_byte(index * 32)))

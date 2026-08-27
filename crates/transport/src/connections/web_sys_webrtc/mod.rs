@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use js_sys::Array;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsValue;
@@ -25,28 +26,35 @@ use web_sys::RtcSessionDescription;
 use web_sys::RtcSessionDescriptionInit;
 use web_sys::RtcStatsReport;
 
+use crate::callback::admit_inbound_data_channel;
+use crate::callback::inbound_frame_exceeds_protocol_ceiling;
+use crate::callback::InboundFrameCapacity;
 use crate::callback::InnerTransportCallback;
 use crate::connection_ref::ConnectionRef;
 use crate::core::callback::BoxedTransportCallback;
-use crate::core::pool::MessageSenderPool;
 use crate::core::pool::RoundRobin;
 use crate::core::pool::RoundRobinPool;
 use crate::core::pool::StatusPool;
 use crate::core::transport::effective_max_message_size;
+use crate::core::transport::stored_max_message_size;
 use crate::core::transport::ConnectionInterface;
 use crate::core::transport::ConnectionStateCell;
 use crate::core::transport::ConnectionStateSnapshot;
+use crate::core::transport::IrrevocableSendGuard;
 use crate::core::transport::SendPermit;
 use crate::core::transport::TransportInterface;
 use crate::core::transport::TransportMessage;
 use crate::core::transport::WebrtcConnectionState;
 use crate::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
+use crate::delivery::closed_before_flush;
+use crate::delivery::delivery_flushed;
 use crate::delivery::DeliveryFuture;
 use crate::error::Error;
 use crate::error::Result;
 use crate::ice_server::parse_ice_servers_or_warn;
 use crate::ice_server::IceCredentialType;
 use crate::ice_server::IceServer;
+use crate::notifier::wait_for_data_channel_open;
 use crate::notifier::Notifier;
 use crate::pool::Pool;
 use crate::webrtc_config::WebrtcUdpPortRange;
@@ -76,16 +84,14 @@ fn delivery_future(
     Box::pin(async move {
         loop {
             let buffered = channel.buffered_amount() as u64;
-            if enqueued.load(Ordering::SeqCst).saturating_sub(buffered) >= end_offset {
+            if delivery_flushed(enqueued.load(Ordering::SeqCst), buffered, end_offset) {
                 return Ok(());
             }
             if matches!(
                 channel.ready_state(),
                 RtcDataChannelState::Closing | RtcDataChannelState::Closed
             ) {
-                return Err(Error::MessageNotDelivered(
-                    "data channel closed before the message was flushed".to_string(),
-                ));
+                return Err(closed_before_flush());
             }
             let notifier = Notifier::default();
             notifier.set_timeout_ms(DELIVERY_POLL_INTERVAL_MS);
@@ -94,28 +100,44 @@ fn delivery_future(
     })
 }
 
-#[async_trait(?Send)]
-impl MessageSenderPool<TrackedChannel> for RoundRobinPool<TrackedChannel> {
-    type Message = TransportMessage;
-    async fn send_with_permit(
+impl WebSysWebrtcConnection {
+    fn send_after_permit<T>(
+        &self,
+        permit: SendPermit,
+        send: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let retirement_state = self.connection_state.clone();
+        let retirement_connection = self.webrtc_conn.clone();
+        let mut retirement = IrrevocableSendGuard::new(permit.acceptance(), move || {
+            retirement_state.close();
+            retirement_connection.close();
+        });
+        let Some(proof) = permit.try_mark_irrevocable() else {
+            return Err(Error::SendPermitRevoked);
+        };
+        retirement.bind(proof);
+        let value = send()?;
+        retirement.mark_accepted();
+        Ok(value)
+    }
+
+    fn send_with_permit(
         &self,
         msg: TransportMessage,
         permit: SendPermit,
     ) -> Result<DeliveryFuture> {
-        let (channel, enqueued) = self.select()?;
+        let (channel, enqueued) = self.webrtc_data_channel.select()?;
         let data = rings_codec::serialize(&msg)?;
         // `send_with_u8_array` is synchronous, so there's no interleaving to
         // guard; just advance `enqueued` ONLY after a successful send. Advancing
         // first would, on a rejected send, leave the counter ahead of the bytes
         // actually buffered, making earlier messages' delivery futures resolve
         // early on phantom bytes (`enqueued_total - buffered_amount`).
-        if !permit.allows() {
-            return Err(Error::SendPermitRevoked);
-        }
-        if let Err(e) = channel
-            .send_with_u8_array(&data)
-            .map_err(Error::WebSysWebrtc)
-        {
+        if let Err(e) = self.send_after_permit(permit, || {
+            channel
+                .send_with_u8_array(&data)
+                .map_err(Error::WebSysWebrtc)
+        }) {
             tracing::error!("{:?}, Data size: {:?}", e, data.len());
             return Err(e);
         }
@@ -150,6 +172,7 @@ pub struct WebSysWebrtcConnection {
 pub struct WebSysWebrtcTransport {
     ice_servers: Vec<IceServer>,
     pool: Pool<WebSysWebrtcConnection>,
+    inbound_frames: Arc<InboundFrameCapacity>,
 }
 
 impl WebSysWebrtcConnection {
@@ -214,6 +237,7 @@ impl WebSysWebrtcTransport {
         Self {
             ice_servers,
             pool: Pool::new(),
+            inbound_frames: Arc::new(InboundFrameCapacity::new()),
         }
     }
 }
@@ -229,7 +253,7 @@ impl ConnectionInterface for WebSysWebrtcConnection {
         permit: SendPermit,
     ) -> Result<DeliveryFuture> {
         self.webrtc_wait_for_data_channel_open().await?;
-        self.webrtc_data_channel.send_with_permit(msg, permit).await
+        self.send_with_permit(msg, permit)
     }
 
     fn webrtc_connection_state(&self) -> WebrtcConnectionState {
@@ -245,12 +269,7 @@ impl ConnectionInterface for WebSysWebrtcConnection {
     }
 
     fn max_message_size(&self) -> usize {
-        // The value negotiated from the remote SDP at handshake; `0` = not yet negotiated, so
-        // fall back to the interop default. Same parsing as native (consistent behaviour).
-        match self.remote_max_message_size.load(Ordering::SeqCst) {
-            0 => MAX_DATA_CHANNEL_MESSAGE_SIZE,
-            n => n,
-        }
+        stored_max_message_size(self.remote_max_message_size.load(Ordering::SeqCst))
     }
 
     async fn get_stats(&self) -> Vec<String> {
@@ -330,32 +349,13 @@ impl ConnectionInterface for WebSysWebrtcConnection {
     }
 
     async fn webrtc_wait_for_data_channel_open(&self) -> Result<()> {
-        // `Disconnected` is intentionally not treated as unavailable: it is a
-        // transient ICE state in which the data channel stays open, so we let
-        // the send proceed (the bytes buffer and flush on recovery). The
-        // returned `DeliveryFuture` reports whether they actually made it out.
-        if matches!(
+        wait_for_data_channel_open(
             self.webrtc_connection_state(),
-            WebrtcConnectionState::Failed | WebrtcConnectionState::Closed
-        ) {
-            return Err(Error::DataChannelOpen("Connection unavailable".to_string()));
-        }
-
-        if self.data_channel_is_open()? {
-            return Ok(());
-        }
-
-        self.webrtc_data_channel_state_notifier
-            .set_timeout(WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT);
-        self.webrtc_data_channel_state_notifier.clone().await;
-
-        if self.data_channel_is_open()? {
-            return Ok(());
-        } else {
-            return Err(Error::DataChannelOpen(format!(
-                "DataChannel not open in {WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT} seconds"
-            )));
-        }
+            || self.data_channel_is_open(),
+            &self.webrtc_data_channel_state_notifier,
+            WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT,
+        )
+        .await
     }
 
     async fn close(&self) -> Result<()> {
@@ -365,21 +365,51 @@ impl ConnectionInterface for WebSysWebrtcConnection {
     }
 }
 
-async fn decode_data_channel_message(data: JsValue) -> Result<Option<Vec<u8>>> {
-    let message = if data.has_type::<web_sys::Blob>() {
-        let blob: web_sys::Blob = data.into();
-        if blob.size() == 0f64 {
-            return Ok(None);
-        }
-        let buffer = JsFuture::from(blob.array_buffer())
-            .await
-            .map_err(Error::WebSysWebrtc)?;
-        js_sys::Uint8Array::new(&buffer).to_vec()
-    } else {
-        js_sys::Uint8Array::new(data.as_ref()).to_vec()
-    };
+fn decode_data_channel_message(data: JsValue) -> Result<Vec<u8>> {
+    let buffer = data.dyn_into::<js_sys::ArrayBuffer>().map_err(|_| {
+        Error::DataChannelMessage(
+            "received a non-ArrayBuffer value after configuring binaryType".to_string(),
+        )
+    })?;
+    let bytes = buffer.byte_length() as usize;
+    if inbound_frame_exceeds_protocol_ceiling(bytes) {
+        return Err(Error::DataChannelMessage(format!(
+            "inbound frame of {bytes} bytes exceeds the {MAX_DATA_CHANNEL_MESSAGE_SIZE}-byte protocol ceiling"
+        )));
+    }
+    let message = js_sys::Uint8Array::new(&buffer).to_vec();
+    Ok(message)
+}
 
-    Ok((!message.is_empty()).then_some(message))
+fn dispatch_data_channel_message(callback: Rc<InnerTransportCallback>, data: JsValue) {
+    match decode_data_channel_message(data) {
+        Ok(message) => {
+            let bytes = message.len();
+            let Some(frame) = callback.prepare_inbound_frame(Bytes::from(message)) else {
+                return;
+            };
+            spawn_local(async move {
+                tracing::debug!(
+                    peer = %callback.cid(),
+                    bytes,
+                    "received data-channel message"
+                );
+                callback.handle_admitted_frame(frame).await;
+            });
+        }
+        Err(error) => {
+            tracing::warn!(peer = %callback.cid(), %error, "rejected data-channel message");
+            callback.report_invalid_inbound_frame();
+        }
+    }
+}
+
+fn wire_data_channel_messages(channel: &RtcDataChannel, callback: Rc<InnerTransportCallback>) {
+    let on_message = Closure::wrap(Box::new(move |event: MessageEvent| {
+        dispatch_data_channel_message(callback.clone(), event.data());
+    }) as Box<dyn FnMut(MessageEvent)>);
+    channel.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+    on_message.forget();
 }
 
 fn wire_received_data_channels(
@@ -389,34 +419,22 @@ fn wire_received_data_channels(
     // Inbound channels carry messages only. One remote-created channel closing
     // does not prove the SCTP association is gone; outbound-pool state owns
     // readiness and emits the terminal data-channel callback when all close.
+    let admitted_channels = AtomicUsize::new(0);
     let on_data_channel = Box::new(move |event: RtcDataChannelEvent| {
         let channel = event.channel();
+        if !admit_inbound_data_channel(&admitted_channels) {
+            tracing::warn!(
+                peer = %inner_cb.cid(),
+                label = channel.label(),
+                "rejected excess inbound data channel"
+            );
+            channel.close();
+            return;
+        }
+        channel.set_binary_type(web_sys::RtcDataChannelType::Arraybuffer);
         tracing::debug!(label = channel.label(), "new received data channel");
 
-        let message_cb = inner_cb.clone();
-        let on_message = Closure::wrap(Box::new(move |event: MessageEvent| {
-            let cb = message_cb.clone();
-            spawn_local(async move {
-                match decode_data_channel_message(event.data()).await {
-                    Ok(Some(message)) => {
-                        tracing::debug!(
-                            peer = %cb.cid,
-                            bytes = message.len(),
-                            "received data-channel message"
-                        );
-                        cb.on_message(&message.into()).await;
-                    }
-                    Ok(None) => {
-                        tracing::debug!(peer = %cb.cid, "received empty data-channel message");
-                    }
-                    Err(error) => {
-                        tracing::error!(peer = %cb.cid, %error, "failed to decode data-channel message");
-                    }
-                }
-            });
-        }) as Box<dyn FnMut(MessageEvent)>);
-        channel.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
-        on_message.forget();
+        wire_data_channel_messages(&channel, inner_cb.clone());
     });
 
     let callback = Closure::wrap(on_data_channel as Box<dyn FnMut(RtcDataChannelEvent)>);
@@ -498,16 +516,16 @@ impl TransportInterface for WebSysWebrtcTransport {
     type Connection = WebSysWebrtcConnection;
     type Error = Error;
 
+    fn inbound_frame_capacity(&self) -> &Arc<InboundFrameCapacity> {
+        &self.inbound_frames
+    }
+
     async fn new_connection(
         &self,
         cid: &str,
         callback: BoxedTransportCallback,
     ) -> Result<ConnectionRef<Self::Connection>> {
-        if let Ok(existed_conn) = self.pool.connection(cid) {
-            if existed_conn.webrtc_connection_state().occupies_peer_slot() {
-                return Err(Error::ConnectionAlreadyExists(cid.to_string()));
-            }
-        }
+        self.pool.ensure_peer_slot_available(cid)?;
 
         //
         // Setup webrtc connection env
@@ -528,7 +546,8 @@ impl TransportInterface for WebSysWebrtcTransport {
         //
         let webrtc_data_channel_state_notifier = Notifier::default();
         let connection_state = ConnectionStateCell::new();
-        let inner_cb = Rc::new(InnerTransportCallback::new(
+        let inner_cb = Rc::new(InnerTransportCallback::for_transport(
+            self,
             cid,
             callback,
             webrtc_data_channel_state_notifier.clone(),
@@ -639,4 +658,167 @@ fn dump_stats_entry(entry: &Option<JsValue>) -> Option<String> {
     js_sys::JSON::stringify(entry.as_ref()?)
         .ok()
         .and_then(|x| x.as_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use bytes::Bytes;
+    use wasm_bindgen_test::wasm_bindgen_test;
+    use wasm_bindgen_test::wasm_bindgen_test_configure;
+
+    use super::*;
+    use crate::core::callback::AdmittedInboundMessage;
+    use crate::core::callback::TransportCallback;
+
+    wasm_bindgen_test_configure!(run_in_browser);
+
+    struct InvalidRecordingCallback {
+        invalid_frames: Rc<Cell<usize>>,
+    }
+
+    #[async_trait(?Send)]
+    impl TransportCallback for InvalidRecordingCallback {
+        async fn on_admitted_message(
+            &self,
+            _message: AdmittedInboundMessage<'_>,
+        ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+            Ok(())
+        }
+
+        async fn on_invalid_inbound_frame(
+            &self,
+            _cid: &str,
+        ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+            self.invalid_frames.set(self.invalid_frames.get() + 1);
+            Ok(())
+        }
+    }
+
+    fn test_backend() -> (
+        RtcPeerConnection,
+        ConnectionStateCell,
+        WebSysWebrtcConnection,
+    ) {
+        let peer_connection =
+            RtcPeerConnection::new().expect("browser peer connection must construct");
+        let connection_state = ConnectionStateCell::new();
+        let connection = WebSysWebrtcConnection::new(
+            peer_connection.clone(),
+            Rc::new(RoundRobinPool::from_vec(Vec::new())),
+            Notifier::default(),
+            connection_state.clone(),
+        );
+        (peer_connection, connection_state, connection)
+    }
+
+    #[wasm_bindgen_test]
+    fn test_rejected_permit_does_not_call_browser_send_primitive() {
+        let (_peer_connection, connection_state, connection) = test_backend();
+        let called = Rc::new(Cell::new(false));
+        let observed = called.clone();
+        let result = connection.send_after_permit(SendPermit::new(|| false), move || {
+            observed.set(true);
+            Ok(())
+        });
+
+        assert!(matches!(result, Err(Error::SendPermitRevoked)));
+        assert!(!called.get());
+        assert_ne!(
+            connection_state.snapshot().webrtc(),
+            WebrtcConnectionState::Closed
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_browser_send_failure_retires_connection_and_rejects_later_send() {
+        let (_peer_connection, connection_state, connection) = test_backend();
+        connection_state.observe_webrtc(WebrtcConnectionState::Connected);
+        connection_state.observe_outbound_data_channels(true);
+        let permit = SendPermit::always();
+        let acceptance = permit.acceptance();
+        let result = connection.send_after_permit(permit, || {
+            Err::<(), _>(Error::DataChannelMessage(
+                "injected browser send failure".to_string(),
+            ))
+        });
+
+        assert!(matches!(result, Err(Error::DataChannelMessage(_))));
+        assert!(!acceptance.is_accepted());
+        assert_eq!(
+            connection_state.snapshot().webrtc(),
+            WebrtcConnectionState::Closed
+        );
+        assert!(matches!(
+            connection
+                .send_message_with_permit(
+                    TransportMessage::Custom(Bytes::from_static(&[1])),
+                    SendPermit::always(),
+                )
+                .await,
+            Err(Error::DataChannelOpen(_))
+        ));
+    }
+
+    #[wasm_bindgen_test]
+    fn test_oversized_browser_frame_is_rejected_before_copy() {
+        let length = u32::try_from(MAX_DATA_CHANNEL_MESSAGE_SIZE + 1)
+            .expect("protocol ceiling must fit in a JavaScript array length");
+        let array = js_sys::Uint8Array::new_with_length(length);
+
+        let result = decode_data_channel_message(array.buffer().into());
+
+        assert!(matches!(result, Err(Error::DataChannelMessage(_))));
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_registered_browser_onmessage_coalesces_invalid_frame_accounting() {
+        let invalid_frames = Rc::new(Cell::new(0));
+        let callback = Rc::new(InnerTransportCallback::new_for_test(
+            "peer",
+            Box::new(InvalidRecordingCallback {
+                invalid_frames: Rc::clone(&invalid_frames),
+            }),
+            Notifier::default(),
+            Arc::new(InboundFrameCapacity::new()),
+        ));
+        let connection = RtcPeerConnection::new().expect("browser peer connection must construct");
+        let channel = connection.create_data_channel("invalid-frame-accounting");
+        wire_data_channel_messages(&channel, callback);
+        let event = MessageEvent::new("message").expect("browser message event must construct");
+
+        for _ in 0..32 {
+            assert!(channel
+                .dispatch_event(&event)
+                .expect("browser message event must dispatch"));
+        }
+        let _ = JsFuture::from(js_sys::Promise::resolve(&JsValue::UNDEFINED)).await;
+
+        assert_eq!(invalid_frames.get(), 32);
+    }
+
+    #[wasm_bindgen_test]
+    async fn test_round_robin_backend_checks_permit_before_real_browser_send() {
+        let connection = RtcPeerConnection::new().expect("browser peer connection must construct");
+        let channel = connection.create_data_channel("permit-boundary-test");
+        let enqueued = Arc::new(AtomicU64::new(0));
+        let pool = Rc::new(RoundRobinPool::from_vec(vec![(channel, enqueued.clone())]));
+        let backend = WebSysWebrtcConnection::new(
+            connection.clone(),
+            pool,
+            Notifier::default(),
+            ConnectionStateCell::new(),
+        );
+
+        let result = backend.send_with_permit(
+            TransportMessage::Custom(Bytes::from_static(&[1, 2, 3])),
+            SendPermit::new(|| false),
+        );
+
+        connection.close();
+        assert!(matches!(result, Err(Error::SendPermitRevoked)));
+        assert_eq!(enqueued.load(Ordering::SeqCst), 0);
+    }
 }
