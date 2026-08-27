@@ -52,8 +52,10 @@ fn cli_explicit_log_level_overrides_default() {
 }
 
 #[test]
-fn daemon_command_tree_accepts_the_four_supported_actions() {
+fn daemon_command_tree_accepts_the_six_supported_actions() {
     let cases = [
+        ["rings", "daemon", "install"].as_slice(),
+        ["rings", "daemon", "uninstall"].as_slice(),
         ["rings", "daemon", "start"].as_slice(),
         ["rings", "daemon", "stop"].as_slice(),
         ["rings", "daemon", "status"].as_slice(),
@@ -69,10 +71,10 @@ fn daemon_command_tree_accepts_the_four_supported_actions() {
 }
 
 #[test]
-fn daemon_start_accepts_a_config_path() {
-    let parsed = Cli::try_parse_from(["rings", "daemon", "start", "-c", "custom.yaml"]);
+fn daemon_install_accepts_a_config_path() {
+    let parsed = Cli::try_parse_from(["rings", "daemon", "install", "-c", "custom.yaml"]);
     let config_path = parsed.ok().and_then(|cli| match cli.command {
-        Command::Daemon(DaemonCommand::Start(command)) => Some(command.config_path().to_owned()),
+        Command::Daemon(DaemonCommand::Install(command)) => Some(command.config_path().to_owned()),
         _ => None,
     });
 
@@ -80,10 +82,10 @@ fn daemon_start_accepts_a_config_path() {
 }
 
 #[test]
-fn daemon_start_preserves_the_default_config_path() {
-    let parsed = Cli::try_parse_from(["rings", "daemon", "start"]);
+fn daemon_install_preserves_the_default_config_path() {
+    let parsed = Cli::try_parse_from(["rings", "daemon", "install"]);
     let config_path = parsed.ok().and_then(|cli| match cli.command {
-        Command::Daemon(DaemonCommand::Start(command)) => Some(command.config_path().to_owned()),
+        Command::Daemon(DaemonCommand::Install(command)) => Some(command.config_path().to_owned()),
         _ => None,
     });
 
@@ -92,7 +94,14 @@ fn daemon_start_preserves_the_default_config_path() {
 
 #[test]
 fn daemon_command_tree_rejects_unknown_actions() {
-    let parsed = Cli::try_parse_from(["rings", "daemon", "install"]);
+    let parsed = Cli::try_parse_from(["rings", "daemon", "enable"]);
+
+    assert!(parsed.is_err());
+}
+
+#[test]
+fn daemon_start_does_not_accept_installation_options() {
+    let parsed = Cli::try_parse_from(["rings", "daemon", "start", "--config", "custom.yaml"]);
 
     assert!(parsed.is_err());
 }

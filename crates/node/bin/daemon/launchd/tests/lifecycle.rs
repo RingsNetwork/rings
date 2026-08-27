@@ -3,6 +3,48 @@
 use super::*;
 
 #[test]
+fn uninstall_unloads_and_removes_the_definition() -> Result<(), DaemonError> {
+    let root = test_root("uninstall-loaded");
+    let target = test_target();
+    let definition = install_test_definition(&root)?;
+    let manager = scripted_manager(&root, [
+        loaded_service(&target, "state = running\n"),
+        CommandStep::success(LAUNCHCTL, &["bootout", &target], ""),
+        missing_service(&target),
+    ]);
+
+    let status = manager.uninstall()?;
+
+    assert_eq!(status, DaemonStatus::NotInstalled);
+    assert!(!definition.exists());
+    Ok(())
+}
+
+#[test]
+fn uninstall_removes_an_unloaded_definition() -> Result<(), DaemonError> {
+    let root = test_root("uninstall-unloaded");
+    let target = test_target();
+    let definition = install_test_definition(&root)?;
+    let manager = scripted_manager(&root, [missing_service(&target)]);
+
+    let status = manager.uninstall()?;
+
+    assert_eq!(status, DaemonStatus::NotInstalled);
+    assert!(!definition.exists());
+    Ok(())
+}
+
+#[test]
+fn uninstall_is_idempotent_when_no_definition_or_job_exists() -> Result<(), DaemonError> {
+    let root = test_root("uninstall-absent");
+    let target = test_target();
+    let manager = scripted_manager(&root, [missing_service(&target)]);
+
+    assert_eq!(manager.uninstall()?, DaemonStatus::NotInstalled);
+    Ok(())
+}
+
+#[test]
 fn stop_unloads_the_job_and_preserves_enabled_autostart() -> Result<(), DaemonError> {
     let root = test_root("stop-success");
     let domain = TEST_DOMAIN;

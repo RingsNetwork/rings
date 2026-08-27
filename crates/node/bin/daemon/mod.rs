@@ -12,14 +12,15 @@ use std::process::Output;
 use std::thread;
 use std::time::Duration;
 
-use clap::Args;
-use clap::Subcommand;
 use clap::ValueEnum;
 use rings_node::logging::LogLevel;
 use thiserror::Error;
 
 use super::ConfigArgs;
 use super::RuntimeFlavor;
+
+mod command;
+pub(super) use command::DaemonCommand;
 
 macro_rules! impl_daemon_error_from_adapter {
     ($source:ty => $adapter:ty) => {
@@ -55,31 +56,6 @@ const TEST_OBSERVATION_SCHEDULE: PollSchedule = PollSchedule {
 struct PollSchedule {
     retries: usize,
     interval: Duration,
-}
-
-#[derive(Subcommand, Debug)]
-#[command(rename_all = "kebab-case")]
-pub(super) enum DaemonCommand {
-    #[command(about = "Installs, enables, and starts the user-level node service.")]
-    Start(DaemonStartCommand),
-    #[command(about = "Stops the user-level node service without disabling login startup.")]
-    Stop,
-    #[command(about = "Shows the service-manager and login-startup state.")]
-    Status,
-    #[command(about = "Restarts the installed service without changing login startup.")]
-    Restart,
-}
-
-#[derive(Args, Debug)]
-pub(super) struct DaemonStartCommand {
-    #[command(flatten)]
-    config_args: ConfigArgs,
-}
-
-impl DaemonStartCommand {
-    pub(super) fn config_path(&self) -> &str {
-        &self.config_args.config
-    }
 }
 
 #[derive(Debug)]
@@ -157,8 +133,14 @@ enum DaemonError {
     },
     #[error(transparent)]
     CommandFailed(#[from] CommandFailure),
-    #[error("the daemon service is not installed at {path}; run `rings daemon start` first")]
+    #[error("the daemon service is not installed at {path}; run `rings daemon install` first")]
     ServiceNotInstalled { path: PathBuf },
+    #[error("could not remove service definition {path}")]
+    RemoveServiceDefinition {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
     #[error("the daemon did not reach the running state; current status: {status}")]
     ServiceDidNotStart { status: DaemonStatus },
 }
@@ -467,6 +449,14 @@ impl<A> DaemonObservation<A> {
             Self::Installed { state, .. } => state.is_settled(),
         }
     }
+
+    #[cfg(any(target_os = "macos", all(test, unix)))]
+    fn is_running(&self) -> bool {
+        matches!(self, Self::Installed {
+            state: ObservedDaemonState::Settled(DaemonState::Running),
+            ..
+        })
+    }
 }
 
 impl DaemonObservation<AutostartState> {
@@ -584,10 +574,11 @@ where T: ValueEnum + fmt::Debug {
         })
 }
 
-/// The common lifecycle boundary.
+/// The common installation and lifecycle boundary.
 ///
-/// Invariant: start enables autostart; stop and restart preserve it unless a reported recovery
-/// failure says otherwise.
+/// Invariant: install enables autostart without starting the process; start, stop, and restart
+/// preserve autostart unless a reported recovery failure says otherwise. Uninstall removes both
+/// manager lifecycle and local installation evidence.
 ///
 /// Post: successful `start` and `restart` return the lifecycle selected by their settling poll.
 /// launchd samples the independent autostart axis when producing status; systemd reads both axes
@@ -599,7 +590,9 @@ trait ServiceManager {
     fn has_definition(&self) -> bool {
         self.definition_path().is_file()
     }
-    fn start(&self, spec: &ServiceSpec) -> Result<DaemonStatus, DaemonError>;
+    fn install(&self, spec: &ServiceSpec) -> Result<DaemonStatus, DaemonError>;
+    fn uninstall(&self) -> Result<DaemonStatus, DaemonError>;
+    fn start(&self) -> Result<DaemonStatus, DaemonError>;
     fn stop(&self) -> Result<DaemonStatus, DaemonError>;
     fn restart(&self) -> Result<DaemonStatus, DaemonError>;
     fn observe(&self) -> Result<DaemonStatus, DaemonError>;
@@ -623,9 +616,15 @@ fn current_service_manager() -> Result<Box<dyn ServiceManager>, DaemonError> {
 pub(super) fn execute(command: DaemonCommand, options: WorkerOptions) -> anyhow::Result<()> {
     let manager = current_service_manager()?;
     match command {
-        DaemonCommand::Start(args) => {
+        DaemonCommand::Install(args) => {
             let spec = ServiceSpec::discover(args.config_path(), options)?;
-            let status = manager.start(&spec)?;
+            print_status(manager.as_ref(), &manager.install(&spec)?);
+        }
+        DaemonCommand::Uninstall => {
+            print_status(manager.as_ref(), &manager.uninstall()?);
+        }
+        DaemonCommand::Start => {
+            let status = manager.start()?;
             report_started(manager.as_ref(), status)?;
         }
         DaemonCommand::Stop => {
@@ -752,7 +751,7 @@ where F: FnOnce(&Path, &str) -> io::Result<()> {
     })?;
     // The hidden `.tmp` path is not a launchd plist or systemd unit; the process id prevents two
     // CLI processes from sharing it. Rename is atomic to observers, not durable across power loss;
-    // rerunning `daemon start` recovers an incomplete on-disk definition.
+    // rerunning `daemon install` recovers an incomplete on-disk definition.
     let temporary = path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
     ensure_parent_directory(path)?;
     if let Err(source) = write(&temporary, contents) {
@@ -787,6 +786,17 @@ fn remove_temporary(path: &Path) -> io::Result<()> {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error),
+    }
+}
+
+fn remove_service_definition(path: &Path) -> Result<(), DaemonError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(DaemonError::RemoveServiceDefinition {
+            path: path.to_path_buf(),
+            source,
+        }),
     }
 }
 

@@ -116,6 +116,13 @@ pub(super) enum SystemdRecord {
 }
 
 impl SystemdRecord {
+    pub(super) fn is_running(&self) -> bool {
+        matches!(self, Self::Loaded {
+            state: ObservedDaemonState::Settled(DaemonState::Running),
+            ..
+        })
+    }
+
     pub(super) fn is_missing(&self) -> bool {
         matches!(self, Self::Missing { .. })
     }
@@ -140,6 +147,10 @@ impl SystemdRecord {
             Self::Missing { autostart } | Self::Unavailable { autostart } => *autostart,
             Self::Loaded { autostart, .. } => *autostart,
         }
+    }
+
+    pub(super) fn has_enabled_registration(&self) -> bool {
+        matches!(self.autostart(), AutostartState::Enabled)
     }
 
     pub(super) fn into_observation(

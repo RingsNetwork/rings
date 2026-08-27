@@ -11,6 +11,7 @@ use super::command_failure;
 use super::ensure_parent_directory;
 use super::path_text;
 use super::poll_until;
+use super::remove_service_definition;
 use super::wait_for_start_settlement;
 use super::write_atomic;
 use super::AutostartState;
@@ -188,6 +189,13 @@ where R: CommandRunner
         if matches!(initial, LaunchdRecord::Missing) {
             return Ok(UnloadOutcome::AlreadyAbsent);
         }
+        self.unload_loaded()
+    }
+
+    /// Pre: the manager has just reported this label as loaded.
+    ///
+    /// Post: success proves that launchd no longer retains the loaded job definition.
+    fn unload_loaded(&self) -> Result<UnloadOutcome, DaemonError> {
         self.runner
             .run_checked(LAUNCHCTL, &["bootout", self.target()])?;
         let terminal_record = poll_until(
@@ -305,14 +313,18 @@ where R: CommandRunner
         attribution: LaunchdAttribution,
     ) -> Result<DaemonObservation, DaemonError> {
         let record = self.service_record()?;
+        Ok(self.lifecycle_from_record(&record, attribution))
+    }
+
+    fn lifecycle_from_record(
+        &self,
+        record: &LaunchdRecord<Output>,
+        attribution: LaunchdAttribution,
+    ) -> DaemonObservation {
         let text_record = record
             .as_ref()
             .map(|output| String::from_utf8_lossy(&output.stdout));
-        Ok(parse_launchd_observation(
-            text_record,
-            self.missing_record_evidence(),
-            attribution,
-        ))
+        parse_launchd_observation(text_record, self.missing_record_evidence(), attribution)
     }
 
     fn complete_observation(
@@ -366,7 +378,7 @@ where R: CommandRunner
         &self.definition_path
     }
 
-    fn start(&self, spec: &ServiceSpec) -> Result<DaemonStatus, DaemonError> {
+    fn install(&self, spec: &ServiceSpec) -> Result<DaemonStatus, DaemonError> {
         let stdout_log = path_text(&self.stdout_log)?;
         let stderr_log = path_text(&self.stderr_log)?;
         let definition = render_launchd_plist(spec, &stdout_log, &stderr_log)?;
@@ -375,13 +387,44 @@ where R: CommandRunner
         ensure_parent_directory(&self.stdout_log)?;
         ensure_parent_directory(&self.stderr_log)?;
         write_atomic(&self.definition_path, &definition)?;
-        self.unload_if_loaded()?;
-        // Observed on macOS 15.6.1 (24G90): bootstrap rejects an already-loaded label and a
-        // disabled unloaded label. Therefore start unloads first and explicitly enables before
-        // bootstrap.
         self.set_autostart(ConcreteAutostart::Enabled)?;
-        self.bootstrap()?;
-        self.settle(LaunchdAttribution::Unfiltered)
+        self.observe()
+    }
+
+    fn uninstall(&self) -> Result<DaemonStatus, DaemonError> {
+        self.unload_if_loaded()?;
+        remove_service_definition(&self.definition_path)?;
+        Ok(DaemonStatus::NotInstalled)
+    }
+
+    fn start(&self) -> Result<DaemonStatus, DaemonError> {
+        let record = self.service_record()?;
+        match &record {
+            LaunchdRecord::Missing if self.has_definition() => {
+                self.bootstrap_preserving_autostart()?;
+                self.settle(LaunchdAttribution::Unfiltered)
+            }
+            LaunchdRecord::Missing => Err(DaemonError::ServiceNotInstalled {
+                path: self.definition_path.clone(),
+            }),
+            LaunchdRecord::Loaded(_) => {
+                let observation =
+                    self.lifecycle_from_record(&record, LaunchdAttribution::Unfiltered);
+                if observation.is_running() {
+                    return self.complete_observation(observation);
+                }
+                if self.has_definition() {
+                    // launchd retains the definition loaded before a later `install`. Reload the
+                    // plist before starting a stopped job so the installed definition takes effect.
+                    self.unload_loaded()?;
+                    self.bootstrap_preserving_autostart()?;
+                    return self.settle(LaunchdAttribution::Unfiltered);
+                }
+                self.runner
+                    .run_checked(LAUNCHCTL, &["kickstart", self.target()])?;
+                self.settle(LaunchdAttribution::Unfiltered)
+            }
+        }
     }
 
     fn stop(&self) -> Result<DaemonStatus, DaemonError> {
@@ -394,9 +437,17 @@ where R: CommandRunner
     }
 
     fn restart(&self) -> Result<DaemonStatus, DaemonError> {
-        // Pre: sample the run counter strictly before issuing kickstart; attribution_after_restart
-        // uses that baseline to exclude termination history caused by this action.
         if let LaunchdRecord::Loaded(output) = self.service_record()? {
+            if self.has_definition() {
+                // launchd caches the loaded job definition. Bootout plus bootstrap is the reload
+                // boundary that makes a definition replaced by `install` effective.
+                self.unload_loaded()?;
+                self.bootstrap_preserving_autostart()?;
+                return self.settle(LaunchdAttribution::Unfiltered);
+            }
+            // Pre: sample the run counter strictly before issuing kickstart;
+            // attribution_after_restart uses that baseline to exclude termination history caused
+            // by this action.
             let attribution = attribution_after_restart(&String::from_utf8_lossy(&output.stdout));
             self.runner
                 .run_checked(LAUNCHCTL, &["kickstart", "-k", self.target()])?;

@@ -69,7 +69,7 @@ rings <command> [options]
 - `init`: creates the default `~/.rings/config.yaml` and session key.
 - `new-session`: creates a new session secret key.
 - `run`: runs the node in the foreground.
-- `daemon start|stop|status|restart`: manages the node through the user-level macOS or Linux service manager.
+- `daemon install|uninstall|start|stop|status|restart`: manages the node through the user-level macOS or Linux service manager.
 - `pubsub`: publishes and subscribes to a topic.
 - `connect node|did|seed`: connects to a remote peer.
 - `peer list|disconnect`: inspects or disconnects peers.
@@ -85,15 +85,17 @@ rings <command> [options]
 
 Run `rings daemon --help` for the current daemon command syntax.
 
-`daemon start` records the current working directory so the managed process can
+`daemon install` records the current working directory so the managed process can
 load the same `.env` file as `run`. `CONFIG`, `LOG_LEVEL`, and `RUNTIME` from the
 installing shell or that `.env` file are copied into the service definition;
 other shell variables are not copied. Persist node settings in the
 configuration file or the captured `.env` file. macOS logs are stored under
 `~/.rings/logs/`; Linux logs are available through
 `journalctl --user -u rings-node.service`. The captured working directory must
-remain at the same path; rerun `daemon start` from a persistent directory after
-moving or deleting it. `daemon stop` and `daemon restart` preserve the current
+remain at the same path; rerun `daemon install` from a persistent directory after
+moving or deleting it. `daemon install` enables login startup without starting
+the process; `daemon uninstall` stops the process and removes its definition.
+`daemon start`, `daemon stop`, and `daemon restart` preserve the current
 login-autostart setting unless the service manager reports that its recovery
 step failed. Start and restart use a bounded sequence of manager observations
 rather than a wall-clock deadline. The command succeeds if the service runs and

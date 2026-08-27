@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 
+use super::remove_service_definition;
 use super::wait_for_start_settlement;
 use super::write_atomic;
 use super::AutostartState;
@@ -39,7 +40,7 @@ pub(super) enum SystemdError {
     Definition(#[from] SystemdDefinitionError),
     #[error(transparent)]
     Status(#[from] SystemdStatusError),
-    #[error("the systemd user unit is unavailable; inspect its load state and repair or unmask it before restarting")]
+    #[error("the systemd user unit is unavailable; inspect its load state and repair or unmask it before changing it")]
     UnitUnavailable,
 }
 
@@ -97,22 +98,71 @@ where R: CommandRunner
         &self.unit_path
     }
 
-    fn start(&self, spec: &ServiceSpec) -> Result<DaemonStatus, DaemonError> {
+    fn install(&self, spec: &ServiceSpec) -> Result<DaemonStatus, DaemonError> {
         let definition = render_systemd_unit(spec)?;
         write_atomic(&self.unit_path, &definition)?;
         self.runner
             .run_checked(SYSTEMCTL, &[SYSTEMD_USER_ARG, "daemon-reload"])?;
         self.runner
             .run_checked(SYSTEMCTL, &[SYSTEMD_USER_ARG, "enable", SYSTEMD_UNIT])?;
-        self.restart_and_settle()
+        Ok(self.observe_snapshot()?.into_status())
+    }
+
+    fn uninstall(&self) -> Result<DaemonStatus, DaemonError> {
+        let record = self.observe_record()?;
+        let inactive_without_process = record.is_inactive_without_process();
+        if record.is_unavailable() && !inactive_without_process {
+            return Err(SystemdError::UnitUnavailable.into());
+        }
+        let has_definition = self.has_definition();
+        let has_enabled_registration = record.has_enabled_registration();
+        if !has_definition && !has_enabled_registration && inactive_without_process {
+            return Ok(DaemonStatus::NotInstalled);
+        }
+        if has_definition || has_enabled_registration {
+            if inactive_without_process {
+                self.runner
+                    .run_checked(SYSTEMCTL, &[SYSTEMD_USER_ARG, "disable", SYSTEMD_UNIT])?;
+            } else {
+                self.runner.run_checked(SYSTEMCTL, &[
+                    SYSTEMD_USER_ARG,
+                    "disable",
+                    "--now",
+                    SYSTEMD_UNIT,
+                ])?;
+            }
+            remove_service_definition(&self.unit_path)?;
+        } else {
+            self.runner
+                .run_checked(SYSTEMCTL, &[SYSTEMD_USER_ARG, "stop", SYSTEMD_UNIT])?;
+        }
+        self.runner
+            .run_checked(SYSTEMCTL, &[SYSTEMD_USER_ARG, "daemon-reload"])?;
+        Ok(DaemonStatus::NotInstalled)
+    }
+
+    fn start(&self) -> Result<DaemonStatus, DaemonError> {
+        let record = self.observe_record()?;
+        if record.is_running() {
+            return Ok(record.into_observation(self.has_definition()).into_status());
+        }
+        self.validate_lifecycle_target(&record)?;
+        if self.has_definition() {
+            self.runner
+                .run_checked(SYSTEMCTL, &[SYSTEMD_USER_ARG, "daemon-reload"])?;
+        }
+        self.lifecycle_and_settle("start")
     }
 
     fn stop(&self) -> Result<DaemonStatus, DaemonError> {
         let record = self.observe_record()?;
         if record.is_inactive_without_process() {
-            // `systemctl stop` turns an already missing or unavailable unit from a benign no-op into
-            // a command error, so preserve the manager verdict without issuing the action.
+            // `systemctl stop` turns an already missing or inactive unavailable unit from a benign
+            // no-op into a command error, so preserve the manager verdict without issuing it.
             return Ok(record.into_observation(self.has_definition()).into_status());
+        }
+        if record.is_unavailable() {
+            return Err(SystemdError::UnitUnavailable.into());
         }
         let autostart = record.autostart();
         self.runner
@@ -124,19 +174,12 @@ where R: CommandRunner
 
     fn restart(&self) -> Result<DaemonStatus, DaemonError> {
         let record = self.observe_record()?;
-        if record.is_unavailable() {
-            return Err(SystemdError::UnitUnavailable.into());
-        }
-        if record.is_missing() && !self.has_definition() {
-            return Err(DaemonError::ServiceNotInstalled {
-                path: self.unit_path.clone(),
-            });
-        }
+        self.validate_lifecycle_target(&record)?;
         if self.has_definition() {
             self.runner
                 .run_checked(SYSTEMCTL, &[SYSTEMD_USER_ARG, "daemon-reload"])?;
         }
-        self.restart_and_settle()
+        self.lifecycle_and_settle("restart")
     }
 
     fn observe(&self) -> Result<DaemonStatus, DaemonError> {
@@ -163,9 +206,21 @@ where R: CommandRunner
         ))?)
     }
 
-    fn restart_and_settle(&self) -> Result<DaemonStatus, DaemonError> {
+    fn validate_lifecycle_target(&self, record: &SystemdRecord) -> Result<(), DaemonError> {
+        if record.is_unavailable() {
+            return Err(SystemdError::UnitUnavailable.into());
+        }
+        if record.is_missing() && !self.has_definition() {
+            return Err(DaemonError::ServiceNotInstalled {
+                path: self.unit_path.clone(),
+            });
+        }
+        Ok(())
+    }
+
+    fn lifecycle_and_settle(&self, action: &'static str) -> Result<DaemonStatus, DaemonError> {
         self.runner
-            .run_checked(SYSTEMCTL, &[SYSTEMD_USER_ARG, "restart", SYSTEMD_UNIT])?;
+            .run_checked(SYSTEMCTL, &[SYSTEMD_USER_ARG, action, SYSTEMD_UNIT])?;
         let snapshot = wait_for_start_settlement(self.poll_schedule, || self.observe_snapshot())?;
         Ok(snapshot.into_status())
     }

@@ -11,9 +11,9 @@ fn bootstrap_fixture(name: &str) -> Result<(TestRoot, &'static str, String, Stri
 }
 
 #[test]
-fn restart_bootstraps_an_installed_but_unloaded_service_without_enabling_autostart(
+fn start_bootstraps_an_installed_but_unloaded_service_without_enabling_autostart(
 ) -> Result<(), DaemonError> {
-    let (root, domain, target, definition_text) = bootstrap_fixture("restart-bootstrap-sequence")?;
+    let (root, domain, target, definition_text) = bootstrap_fixture("start-bootstrap-sequence")?;
     let runner = ScriptedCommandRunner::new([
         missing_service(&target),
         disabled_bootstrap(domain, &definition_text),
@@ -26,7 +26,7 @@ fn restart_bootstraps_an_installed_but_unloaded_service_without_enabling_autosta
     ]);
     let manager = test_manager(&root, runner);
 
-    let status = manager.restart()?;
+    let status = manager.start()?;
 
     assert_eq!(
         status,
