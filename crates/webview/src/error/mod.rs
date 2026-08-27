@@ -274,4 +274,4 @@ impl WebviewError {
 }
 
 #[cfg(test)]
-mod tests;
+mod test_error;

@@ -305,4 +305,4 @@ impl<T> TransferQueues<T> {
 }
 
 #[cfg(test)]
-mod property_tests;
+mod test_property;

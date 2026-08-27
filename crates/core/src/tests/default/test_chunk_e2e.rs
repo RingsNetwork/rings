@@ -128,7 +128,7 @@ async fn recv_custom(node: &crate::tests::default::Node) -> Option<Vec<u8>> {
 }
 
 #[tokio::test]
-async fn large_message_is_chunked_and_reassembled() {
+async fn test_large_message_is_chunked_and_reassembled() {
     let key1 = SecretKey::random();
     let key2 = SecretKey::random();
     let node1 = prepare_node(key1).await;
@@ -165,7 +165,7 @@ async fn large_message_is_chunked_and_reassembled() {
 }
 
 #[tokio::test]
-async fn spawned_storage_sync_tail_cancelled_by_route_disappear_does_not_degrade_next_hop(
+async fn test_spawned_storage_sync_tail_cancelled_by_route_disappear_does_not_degrade_next_hop(
 ) -> Result<()> {
     let measure = Arc::new(CountingMeasure::default());
     let measure_impl: MeasureImpl = measure.clone();
@@ -209,7 +209,7 @@ async fn spawned_storage_sync_tail_cancelled_by_route_disappear_does_not_degrade
 }
 
 #[tokio::test]
-async fn spawned_storage_sync_tail_cancels_when_transport_loses_readiness() -> Result<()> {
+async fn test_spawned_storage_sync_tail_cancels_when_transport_loses_readiness() -> Result<()> {
     let measure = Arc::new(CountingMeasure::default());
     let measure_impl: MeasureImpl = measure.clone();
     let node1 = prepare_node_with_measure(SecretKey::random(), measure_impl)?;
@@ -267,7 +267,7 @@ async fn spawned_storage_sync_tail_cancels_when_transport_loses_readiness() -> R
 }
 
 #[tokio::test]
-async fn spawned_chunk_tail_cancels_when_same_peer_is_readmitted() -> Result<()> {
+async fn test_spawned_chunk_tail_cancels_when_same_peer_is_readmitted() -> Result<()> {
     let measure = Arc::new(CountingMeasure::default());
     let measure_impl: MeasureImpl = measure.clone();
     let node1 = prepare_node_with_measure(SecretKey::random(), measure_impl)?;
@@ -320,7 +320,7 @@ async fn spawned_chunk_tail_cancels_when_same_peer_is_readmitted() -> Result<()>
 }
 
 #[tokio::test]
-async fn send_waiting_at_dispatch_rechecks_the_admitted_generation() -> Result<()> {
+async fn test_send_waiting_at_dispatch_rechecks_the_admitted_generation() -> Result<()> {
     let node1 = prepare_node(SecretKey::random()).await;
     let node2 = prepare_node(SecretKey::random()).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
@@ -374,7 +374,7 @@ async fn send_waiting_at_dispatch_rechecks_the_admitted_generation() -> Result<(
 }
 
 #[tokio::test]
-async fn storage_sync_waiting_at_dispatch_defers_when_its_route_disappears() -> Result<()> {
+async fn test_storage_sync_waiting_at_dispatch_defers_when_its_route_disappears() -> Result<()> {
     let measure = Arc::new(CountingMeasure::default());
     let measure_impl: MeasureImpl = measure.clone();
     let node1 = prepare_node_with_measure(SecretKey::random(), measure_impl)?;
@@ -425,7 +425,8 @@ async fn storage_sync_waiting_at_dispatch_defers_when_its_route_disappears() -> 
 }
 
 #[tokio::test]
-async fn storage_sync_waiting_at_dispatch_defers_when_transport_loses_readiness() -> Result<()> {
+async fn test_storage_sync_waiting_at_dispatch_defers_when_transport_loses_readiness() -> Result<()>
+{
     let measure = Arc::new(CountingMeasure::default());
     let measure_impl: MeasureImpl = measure.clone();
     let node1 = prepare_node_with_measure(SecretKey::random(), measure_impl)?;
@@ -479,7 +480,8 @@ async fn storage_sync_waiting_at_dispatch_defers_when_transport_loses_readiness(
 }
 
 #[tokio::test]
-async fn detached_storage_sync_missing_routable_transport_does_not_degrade_peer() -> Result<()> {
+async fn test_detached_storage_sync_missing_routable_transport_does_not_degrade_peer() -> Result<()>
+{
     let measure = Arc::new(CountingMeasure::default());
     let measure_impl: MeasureImpl = measure.clone();
     let node1 = prepare_node_with_measure(SecretKey::random(), measure_impl)?;
@@ -518,7 +520,7 @@ async fn detached_storage_sync_missing_routable_transport_does_not_degrade_peer(
 }
 
 #[tokio::test]
-async fn tracked_storage_sync_does_not_finish_while_a_chunk_tail_is_pending() -> Result<()> {
+async fn test_tracked_storage_sync_does_not_finish_while_a_chunk_tail_is_pending() -> Result<()> {
     let node1 = prepare_node(SecretKey::random()).await;
     let node2 = prepare_node(SecretKey::random()).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
@@ -566,7 +568,7 @@ async fn tracked_storage_sync_does_not_finish_while_a_chunk_tail_is_pending() ->
 }
 
 #[tokio::test]
-async fn tracked_storage_sync_timeout_closes_stalled_delivery_generation() -> Result<()> {
+async fn test_tracked_storage_sync_timeout_closes_stalled_delivery_generation() -> Result<()> {
     let node1 = prepare_node(SecretKey::random()).await;
     let node2 = prepare_node(SecretKey::random()).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
@@ -602,7 +604,7 @@ async fn tracked_storage_sync_timeout_closes_stalled_delivery_generation() -> Re
 }
 
 #[tokio::test]
-async fn tracked_cleanup_grace_terminalizes_a_nonresponsive_generation() -> Result<()> {
+async fn test_tracked_cleanup_grace_terminalizes_a_nonresponsive_generation() -> Result<()> {
     let node1 = prepare_node(SecretKey::random()).await;
     let node2 = prepare_node(SecretKey::random()).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
@@ -663,7 +665,7 @@ async fn tracked_cleanup_grace_terminalizes_a_nonresponsive_generation() -> Resu
 }
 
 #[tokio::test]
-async fn dropping_tracked_storage_sync_requests_transfer_stop() -> Result<()> {
+async fn test_dropping_tracked_storage_sync_requests_transfer_stop() -> Result<()> {
     let node1 = prepare_node(SecretKey::random()).await;
     let node2 = prepare_node(SecretKey::random()).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
@@ -719,7 +721,7 @@ async fn dropping_tracked_storage_sync_requests_transfer_stop() -> Result<()> {
 }
 
 #[tokio::test]
-async fn dht_control_frame_runs_while_storage_transfer_waits_for_delivery() -> Result<()> {
+async fn test_dht_control_frame_runs_while_storage_transfer_waits_for_delivery() -> Result<()> {
     let node1 = prepare_node(SecretKey::random()).await;
     let node2 = prepare_node(SecretKey::random()).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
@@ -806,7 +808,7 @@ async fn dht_control_frame_runs_while_storage_transfer_waits_for_delivery() -> R
 }
 
 #[tokio::test]
-async fn send_queue_backpressure_returns_transport_timeout() {
+async fn test_send_queue_backpressure_returns_transport_timeout() {
     let measure = Arc::new(CountingMeasure::default());
     let measure_impl: MeasureImpl = measure.clone();
     let key1 = SecretKey::random();
@@ -844,7 +846,7 @@ async fn send_queue_backpressure_returns_transport_timeout() {
 }
 
 #[tokio::test]
-async fn negotiated_size_too_small_errors_without_partial_send() {
+async fn test_negotiated_size_too_small_errors_without_partial_send() {
     let key1 = SecretKey::random();
     let key2 = SecretKey::random();
     let node1 = prepare_node(key1).await;

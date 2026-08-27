@@ -478,12 +478,12 @@ mod tests {
     }
 
     #[test]
-    fn did_abelian_group_laws_hold_on_representative_set() {
+    fn test_did_abelian_group_laws_hold_on_representative_set() {
         assert_abelian_group_laws(&samples());
     }
 
     #[test]
-    fn did_addition_matches_biguint_ring_oracle() {
+    fn test_did_addition_matches_biguint_ring_oracle() {
         for lhs in samples() {
             for rhs in samples() {
                 let expected = Did::from((BigUint::from(lhs) + BigUint::from(rhs)) % ring_size());
@@ -493,7 +493,7 @@ mod tests {
     }
 
     #[test]
-    fn did_dyadic_fraction_matches_biguint_oracle() {
+    fn test_did_dyadic_fraction_matches_biguint_oracle() {
         for denominator in [1u32, 2, 3, 7, 17, 360, 361, u16::MAX.into()] {
             let Some(nonzero_denominator) = NonZeroU32::new(denominator) else {
                 continue;
@@ -558,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    fn bias_id_orders_same_observer() {
+    fn test_bias_id_orders_same_observer() {
         let observer = Did::from(10u32);
         let near = BiasId::new(observer, Did::from(11u32));
         let far = BiasId::new(observer, Did::from(12u32));
@@ -573,7 +573,7 @@ mod tests {
     }
 
     #[test]
-    fn bias_id_rejects_mixed_observer_ordering() {
+    fn test_bias_id_rejects_mixed_observer_ordering() {
         let a = BiasId::new(Did::from(0u32), Did::from(1u32));
         let b = BiasId::new(
             Did::power_of_two(159),
@@ -587,7 +587,7 @@ mod tests {
     }
 
     #[test]
-    fn rotate_transformation() {
+    fn test_rotate_transformation() {
         assert_eq!(Did::from(0u32), Did::from(BigUint::from(2u16).pow(160)));
         let did = Did::from(10u32);
         let result = did.rotate(360);
@@ -595,14 +595,14 @@ mod tests {
     }
 
     #[test]
-    fn right_shift() {
+    fn test_right_shift() {
         let did = Did::from(10u32);
         let ret: Did = did.rotate(180);
         assert_eq!(ret, did + Did::from(BigUint::from(2u16).pow(159)));
     }
 
     #[test]
-    fn did_fixed_width_arithmetic_matches_biguint_ring_oracle() -> Result<()> {
+    fn test_did_fixed_width_arithmetic_matches_biguint_ring_oracle() -> Result<()> {
         let zero = Did::from(0u32);
         let one = Did::from(1u32);
         let max = Did::from(ring_size() - BigUint::from(1u8));
@@ -621,7 +621,7 @@ mod tests {
     }
 
     #[test]
-    fn did_rotate_matches_biguint_dyadic_offset_oracle() {
+    fn test_did_rotate_matches_biguint_dyadic_offset_oracle() {
         let did = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
 
         for angle in [0u16, 1, 90, 180, 359, 360, 361, u16::MAX] {
@@ -632,7 +632,7 @@ mod tests {
     }
 
     #[test]
-    fn did_power_of_two_matches_biguint_oracle() {
+    fn test_did_power_of_two_matches_biguint_oracle() {
         for bit in [0usize, 1, 8, 31, 32, 63, 64, 127, 128, 159, 160, 255] {
             let expected = Did::from(BigUint::from(1u8) << bit);
             assert_eq!(Did::power_of_two(bit), expected);
@@ -654,7 +654,7 @@ mod tests {
     }
 
     #[test]
-    fn rotate_affine_rejects_zero_scalar() {
+    fn test_rotate_affine_rejects_zero_scalar() {
         let did = Did::from(10u32);
 
         assert!(matches!(
@@ -664,7 +664,7 @@ mod tests {
     }
 
     #[test]
-    fn rotate_affine_supports_non_degree_divisors() -> Result<()> {
+    fn test_rotate_affine_supports_non_degree_divisors() -> Result<()> {
         let did = Did::from(10u32);
         let affine_dids = did.rotate_affine(7)?;
         let unique_dids = affine_dids.iter().copied().collect::<BTreeSet<_>>();
@@ -676,7 +676,7 @@ mod tests {
     }
 
     #[test]
-    fn rotate_affine_supports_more_than_360_replicas() -> Result<()> {
+    fn test_rotate_affine_supports_more_than_360_replicas() -> Result<()> {
         let did = Did::from(10u32);
         let affine_dids = did.rotate_affine(361)?;
         let unique_dids = affine_dids.iter().copied().collect::<BTreeSet<_>>();

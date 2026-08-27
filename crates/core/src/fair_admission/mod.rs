@@ -19,6 +19,6 @@ pub(crate) use wait_queue::FairWaitBudget;
 pub(crate) use wait_queue::FairWaitQueue;
 
 #[cfg(test)]
-mod fair_wait_queue_tests;
+mod test_fair_wait_queue;
 #[cfg(test)]
-mod reserved_capacity_tests;
+mod test_reserved_capacity;

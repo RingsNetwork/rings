@@ -61,7 +61,7 @@ mod tests {
     use super::delivery_flushed;
 
     #[test]
-    fn flush_predicate_is_monotonic_and_saturates_under_inconsistent_observation() {
+    fn test_flush_predicate_is_monotonic_and_saturates_under_inconsistent_observation() {
         assert!(!delivery_flushed(9, 4, 6));
         assert!(delivery_flushed(10, 4, 6));
         assert!(delivery_flushed(11, 4, 6));

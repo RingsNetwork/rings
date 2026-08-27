@@ -138,7 +138,7 @@ pub(super) async fn next_payload_for_tx(node: &Node, tx_id: uuid::Uuid) -> Resul
 }
 
 #[tokio::test]
-async fn matching_payload_restores_skipped_messages_in_order() -> Result<()> {
+async fn test_matching_payload_restores_skipped_messages_in_order() -> Result<()> {
     let node = crate::tests::default::prepare_node(SecretKey::random()).await;
     let first = test_payload(&node, b"first")?;
     let second = test_payload(&node, b"second")?;
@@ -156,7 +156,7 @@ async fn matching_payload_restores_skipped_messages_in_order() -> Result<()> {
 }
 
 #[tokio::test]
-async fn matching_payload_restores_skipped_message_after_predicate_error() -> Result<()> {
+async fn test_matching_payload_restores_skipped_message_after_predicate_error() -> Result<()> {
     let node = crate::tests::default::prepare_node(SecretKey::random()).await;
     let skipped = test_payload(&node, b"predicate error")?;
     node.prepend_messages_for_test(vec![skipped.clone()]).await;
@@ -175,7 +175,7 @@ async fn matching_payload_restores_skipped_message_after_predicate_error() -> Re
 }
 
 #[tokio::test]
-async fn matching_payload_restores_skipped_message_when_cancelled() -> Result<()> {
+async fn test_matching_payload_restores_skipped_message_when_cancelled() -> Result<()> {
     let node = crate::tests::default::prepare_node(SecretKey::random()).await;
     let skipped = test_payload(&node, b"cancelled")?;
     node.prepend_messages_for_test(vec![skipped.clone()]).await;
@@ -197,7 +197,7 @@ async fn matching_payload_restores_skipped_message_when_cancelled() -> Result<()
 }
 
 #[tokio::test]
-async fn matching_payload_restores_current_message_when_predicate_panics() -> Result<()> {
+async fn test_matching_payload_restores_current_message_when_predicate_panics() -> Result<()> {
     let node = crate::tests::default::prepare_node(SecretKey::random()).await;
     let current = test_payload(&node, b"predicate panic")?;
     node.prepend_messages_for_test(vec![current.clone()]).await;

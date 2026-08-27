@@ -193,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn enum_variant_decode_does_not_require_the_variant_body() -> Result<()> {
+    fn test_enum_variant_decode_does_not_require_the_variant_body() -> Result<()> {
         assert_eq!(
             deserialize_enum_variant(&serialize(&TaggedBody::Empty)?)?,
             0
@@ -209,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn prefix_decode_borrows_byte_slices_without_consuming_suffix() -> Result<()> {
+    fn test_prefix_decode_borrows_byte_slices_without_consuming_suffix() -> Result<()> {
         let mut encoded = serialize(&vec![1_u8, 2, 3])?;
         encoded.push(99);
 

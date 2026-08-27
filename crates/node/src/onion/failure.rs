@@ -320,7 +320,7 @@ mod tests {
     use crate::error::Error;
 
     #[test]
-    fn wire_internal_failure_does_not_expose_local_diagnostic() {
+    fn test_wire_internal_failure_does_not_expose_local_diagnostic() {
         let diagnostic = "secret local filesystem and resolver detail";
         let failure = OnionExitFailure::from_error(&Error::InvalidConfig(diagnostic.to_string()));
         let encoded = rings_codec::serialize(&failure).expect("encode wire failure");

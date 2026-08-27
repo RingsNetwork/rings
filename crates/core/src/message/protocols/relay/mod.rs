@@ -216,4 +216,4 @@ where T: PartialEq {
 }
 
 #[cfg(test)]
-mod tests;
+mod test_relay;

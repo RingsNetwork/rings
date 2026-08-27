@@ -97,4 +97,4 @@ pub fn magic_hash(msg: &[u8]) -> [u8; 32] {
 }
 
 #[cfg(test)]
-mod tests;
+mod test_bip137;

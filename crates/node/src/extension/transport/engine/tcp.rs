@@ -171,7 +171,7 @@ mod tests {
     use crate::extension::transport::engine::relay_task_for_test;
 
     #[tokio::test]
-    async fn idle_native_tcp_relay_releases_its_session() -> Result<()> {
+    async fn test_idle_native_tcp_relay_releases_its_session() -> Result<()> {
         let listener = TcpListener::bind("127.0.0.1:0").await.map_err(io_error)?;
         let address = listener.local_addr().map_err(io_error)?;
         let client = TcpStream::connect(address).await.map_err(io_error)?;

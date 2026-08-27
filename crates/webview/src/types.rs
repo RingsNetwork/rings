@@ -249,7 +249,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn source_origin_is_normalized_to_origin_root() -> Result<()> {
+    fn test_source_origin_is_normalized_to_origin_root() -> Result<()> {
         let request = GatewayRequest::fetch(Url::parse("https://api.example.test/data")?, "GET")
             .with_source_origin(Url::parse(
                 "https://user:pass@app.example.test:8443/path/page?q=1#section",
@@ -263,7 +263,7 @@ mod tests {
     }
 
     #[test]
-    fn source_less_runtime_requests_do_not_allow_target_cookies() -> Result<()> {
+    fn test_source_less_runtime_requests_do_not_allow_target_cookies() -> Result<()> {
         let request = GatewayRequest::fetch(Url::parse("https://api.example.test/data")?, "GET")
             .with_credentials(GatewayCredentials::Include);
 

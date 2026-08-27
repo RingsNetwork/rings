@@ -300,7 +300,7 @@ mod tests {
     use crate::ecc::SecretKey;
 
     #[test]
-    fn last_operation_lease_removes_the_peer_lock() {
+    fn test_last_operation_lease_removes_the_peer_lock() {
         let locks = PeerOperationLocks::new();
         let peer = SecretKey::random().address().into();
         let first = locks.lease(peer);
@@ -315,7 +315,7 @@ mod tests {
 
     #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
     #[tokio::test]
-    async fn cancelled_event_turn_does_not_block_the_following_turn() {
+    async fn test_cancelled_event_turn_does_not_block_the_following_turn() {
         let delivery = SwarmEventDeliveryLock(Arc::new(SwarmEventDeliverySequence::default()));
         let first = delivery.acquire().await;
         let waiting_delivery = delivery.clone();
@@ -338,7 +338,7 @@ mod tests {
 
     #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
     #[tokio::test]
-    async fn callback_start_order_does_not_hold_turn_across_suspension() {
+    async fn test_callback_start_order_does_not_hold_turn_across_suspension() {
         let delivery = SwarmEventDeliveryLock(Arc::new(SwarmEventDeliverySequence::default()));
         let first = delivery.acquire().await;
         let starts = Arc::new(Mutex::new(Vec::new()));

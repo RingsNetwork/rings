@@ -99,7 +99,7 @@ mod tests {
     use crate::message::Message;
 
     #[test]
-    fn prepared_chunk_is_moved_without_redecoding_transaction_data() {
+    fn test_prepared_chunk_is_moved_without_redecoding_transaction_data() {
         let meta = ChunkMeta::default();
         let mut prepared_message = Some(Message::Chunk(Chunk {
             chunk: [1, 3],

@@ -436,7 +436,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reserved_capacity_bound_holds_for_all_short_reserve_release_traces() {
+    fn test_reserved_capacity_bound_holds_for_all_short_reserve_release_traces() {
         const CAPACITY: usize = 5;
         const RESERVATIONS: [usize; TransferClass::COUNT] = [2, 1, 1, 1];
         const ACTIONS: usize = TransferClass::COUNT * 2;
@@ -472,7 +472,7 @@ mod tests {
         wasm_bindgen_test::wasm_bindgen_test
     )]
     #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), tokio::test)]
-    async fn reserved_outbound_request_bypasses_borrower_waiter() {
+    async fn test_reserved_outbound_request_bypasses_borrower_waiter() {
         let global = Arc::new(GlobalTransferCapacity::new());
         let capacity = Arc::new(TransferCapacity::new(global.clone()));
         let unrelated_capacity = Arc::new(TransferCapacity::new(global));
@@ -516,7 +516,7 @@ mod tests {
         wasm_bindgen_test::wasm_bindgen_test
     )]
     #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), tokio::test)]
-    async fn global_borrowers_are_fifo_while_reserved_control_bypasses() {
+    async fn test_global_borrowers_are_fifo_while_reserved_control_bypasses() {
         const BLOCKER_BYTES: usize = (OUTBOUND_GLOBAL_BYTE_CAPACITY - 16 * 1024 * 1024) / 2;
         let global = Arc::new(GlobalTransferCapacity::new());
         let first = Arc::new(TransferCapacity::new(global.clone()));
@@ -564,7 +564,7 @@ mod tests {
         wasm_bindgen_test::wasm_bindgen_test
     )]
     #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), tokio::test)]
-    async fn shared_wait_budget_bounds_payloads_outside_admitted_capacity() {
+    async fn test_shared_wait_budget_bounds_payloads_outside_admitted_capacity() {
         const HEADROOM_BYTES: usize = 16 * 1024 * 1024;
         const WAIT_BYTES: usize = 20 * 1024 * 1024;
         let global = Arc::new(GlobalTransferCapacity::new());

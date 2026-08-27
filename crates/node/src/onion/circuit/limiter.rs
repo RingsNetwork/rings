@@ -207,7 +207,7 @@ mod tests {
     }
 
     #[test]
-    fn distinct_identity_windows_and_global_crypto_work_are_both_bounded() {
+    fn test_distinct_identity_windows_and_global_crypto_work_are_both_bounded() {
         let mut limiter = OnionCryptoLimiter::with_limits(limits(2, 3, u64::MAX, u64::MAX, 2));
         let first = Did::from(1_u32);
         let second = Did::from(2_u32);
@@ -224,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn expired_crypto_windows_release_peer_and_global_budgets() {
+    fn test_expired_crypto_windows_release_peer_and_global_budgets() {
         let mut limiter = OnionCryptoLimiter::with_limits(limits(1, 1, u64::MAX, u64::MAX, 1));
         assert!(limiter.admit(Did::from(1_u32), 0, 0).is_ok());
         assert!(limiter.admit(Did::from(2_u32), 1, 0).is_err());
@@ -235,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn full_peer_table_evicts_lru_without_resetting_global_budget() {
+    fn test_full_peer_table_evicts_lru_without_resetting_global_budget() {
         let first = Did::from(1_u32);
         let second = Did::from(2_u32);
         let third = Did::from(3_u32);
@@ -257,7 +257,7 @@ mod tests {
     }
 
     #[test]
-    fn visible_bucket_bytes_bound_oversized_cell_amplification() {
+    fn test_visible_bucket_bytes_bound_oversized_cell_amplification() {
         let peer = Did::from(1_u32);
         let mut limiter = OnionCryptoLimiter::with_limits(limits(10, 10, 12, 20, 2));
 
@@ -271,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn largest_bucket_has_exact_peer_and_global_admission_bounds() {
+    fn test_largest_bucket_has_exact_peer_and_global_admission_bounds() {
         let bucket_bytes =
             u64::try_from(OnionCellBucket::MiB12.plaintext_len()).unwrap_or_default();
         assert_ne!(bucket_bytes, 0);

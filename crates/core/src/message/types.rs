@@ -734,7 +734,7 @@ mod tests {
     }
 
     #[test]
-    fn find_successor_send_predicate_names_local_report_rule() {
+    fn test_find_successor_send_predicate_names_local_report_rule() {
         let local = random_did();
         let remote = random_did();
         let then = FindSuccessorThen::Report(FindSuccessorReportHandler::None);
@@ -762,7 +762,7 @@ mod tests {
     }
 
     #[test]
-    fn find_successor_report_predicate_names_remote_successor() {
+    fn test_find_successor_report_predicate_names_remote_successor() {
         let local = random_did();
         let remote = random_did();
 
@@ -780,7 +780,7 @@ mod tests {
     }
 
     #[test]
-    fn topo_info_query_predicate_names_target_node() {
+    fn test_topo_info_query_predicate_names_target_node() {
         let local = random_did();
         let remote = random_did();
 
@@ -789,7 +789,7 @@ mod tests {
     }
 
     #[test]
-    fn message_metadata_wire_indices_follow_enum_declaration_order() {
+    fn test_message_metadata_wire_indices_follow_enum_declaration_order() {
         let messages = Message::test_variants();
         assert_eq!(messages.len(), MessageKind::WIRE_ORDER.len());
         for (position, ((wire_index, kind), message)) in

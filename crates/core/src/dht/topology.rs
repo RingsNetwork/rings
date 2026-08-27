@@ -606,7 +606,7 @@ mod tests {
     }
 
     #[test]
-    fn join_step_updates_successors_fingers_and_connect_action() {
+    fn test_join_step_updates_successors_fingers_and_connect_action() {
         let local = did(0);
         let peer = did(8);
         let next = step(
@@ -632,7 +632,7 @@ mod tests {
     }
 
     #[test]
-    fn join_step_refines_successor_distance_vector() {
+    fn test_join_step_refines_successor_distance_vector() {
         let local = did(0);
         let current = state(local, vec![did(20), did(40)], None, vec![None; 5], 0);
         let next = step(
@@ -645,7 +645,7 @@ mod tests {
     }
 
     #[test]
-    fn stabilize_step_refines_successor_distance_vector() {
+    fn test_stabilize_step_refines_successor_distance_vector() {
         let local = did(0);
         let current = state(local, vec![did(40)], None, vec![None; 5], 0);
         let next = step(
@@ -661,7 +661,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_step_removes_peer_from_every_topology_slot() {
+    fn test_remove_step_removes_peer_from_every_topology_slot() {
         let local = did(0);
         let peer = did(8);
         let next = step(
@@ -686,7 +686,7 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_remove_does_not_promote_an_unverified_finger() {
+    fn test_ordinary_remove_does_not_promote_an_unverified_finger() {
         let local = did(0);
         let removed = did(8);
         let fallback = did(16);
@@ -711,7 +711,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_step_preserves_valid_slots_between_noncontiguous_peer_runs() {
+    fn test_remove_step_preserves_valid_slots_between_noncontiguous_peer_runs() {
         let local = did(0);
         let removed = did(8);
         let middle = did(16);
@@ -740,7 +740,7 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_head_without_live_fallback_clears_unverified_successor_tail() {
+    fn test_unavailable_head_without_live_fallback_clears_unverified_successor_tail() {
         let local = did(0);
         let removed = did(8);
         let unverified = did(12);
@@ -765,7 +765,7 @@ mod tests {
     }
 
     #[test]
-    fn remove_step_replaces_unavailable_head_with_validated_successors_only() {
+    fn test_remove_step_replaces_unavailable_head_with_validated_successors_only() {
         let local = did(0);
         let removed = did(8);
         let unverified = did(12);
@@ -802,7 +802,7 @@ mod tests {
     }
 
     #[test]
-    fn admit_step_commits_join_and_pending_fingers_in_one_state() {
+    fn test_admit_step_commits_join_and_pending_fingers_in_one_state() {
         let local = did(0);
         let peer = did(16);
         let next = step(
@@ -835,7 +835,7 @@ mod tests {
     }
 
     #[test]
-    fn admit_step_does_not_overwrite_finger_changed_after_update_was_deferred() {
+    fn test_admit_step_does_not_overwrite_finger_changed_after_update_was_deferred() {
         let local = did(0);
         let fresher = did(8);
         let peer = did(16);
@@ -855,7 +855,7 @@ mod tests {
     }
 
     #[test]
-    fn fix_finger_step_updates_local_successor_slot() {
+    fn test_fix_finger_step_updates_local_successor_slot() {
         let local = did(0);
         let successor = did(8);
         let next = step(
@@ -870,7 +870,7 @@ mod tests {
     }
 
     #[test]
-    fn fix_finger_step_emits_indexed_remote_action() {
+    fn test_fix_finger_step_emits_indexed_remote_action() {
         let local = did(0);
         let successor = did(4);
         let next_hop = did(6);
@@ -895,7 +895,7 @@ mod tests {
     }
 
     #[test]
-    fn fix_finger_step_queries_local_relative_probe() {
+    fn test_fix_finger_step_queries_local_relative_probe() {
         let local = did(100);
         let successor = did(104);
         let next_hop = did(106);
@@ -920,7 +920,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_finger_step_updates_exact_slot() {
+    fn test_apply_finger_step_updates_exact_slot() {
         let local = did(0);
         let successor = did(8);
         let next = step(
@@ -937,7 +937,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_finger_step_ignores_self_and_out_of_range_slot() {
+    fn test_apply_finger_step_ignores_self_and_out_of_range_slot() {
         let local = did(0);
         let current = state(local, vec![], None, vec![None; 2], 0);
         let self_update = step(

@@ -297,7 +297,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn safely_insert_returns_the_exact_inserted_connection() -> Result<()> {
+    async fn test_safely_insert_returns_the_exact_inserted_connection() -> Result<()> {
         let pool = Pool::new();
         let old_closed = Arc::new(AtomicBool::new(false));
         let old = pool
@@ -328,7 +328,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn safely_insert_closes_rejected_connection() -> Result<()> {
+    async fn test_safely_insert_closes_rejected_connection() -> Result<()> {
         let pool = Pool::new();
         let current_closed = Arc::new(AtomicBool::new(false));
         let current = pool
@@ -362,7 +362,7 @@ mod tests {
     }
 
     #[test]
-    fn current_removal_waits_for_pool_shard_contention() -> std::io::Result<()> {
+    fn test_current_removal_waits_for_pool_shard_contention() -> std::io::Result<()> {
         let pool = Arc::new(Pool::new());
         let expected = futures::executor::block_on(pool.safely_insert(
             "peer",

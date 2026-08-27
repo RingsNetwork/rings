@@ -117,7 +117,7 @@ mod tests {
     use super::AtomicAdmission;
 
     #[test]
-    fn transition_table_has_only_declared_edges() {
+    fn test_transition_table_has_only_declared_edges() {
         use AdmissionEvent::Accept;
         use AdmissionEvent::Cancel;
         use AdmissionEvent::MarkIrrevocable;
@@ -139,7 +139,7 @@ mod tests {
     }
 
     #[test]
-    fn atomic_shell_observes_the_pure_model() {
+    fn test_atomic_shell_observes_the_pure_model() {
         let admission = AtomicAdmission::new();
         assert_eq!(admission.phase(), AdmissionPhase::Pending);
         assert_eq!(

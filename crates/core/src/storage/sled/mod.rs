@@ -145,4 +145,4 @@ impl std::fmt::Debug for SledStorage {
 }
 
 #[cfg(test)]
-mod tests;
+mod test_sled;

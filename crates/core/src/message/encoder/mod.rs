@@ -141,4 +141,4 @@ impl Encoded {
 }
 
 #[cfg(test)]
-mod tests;
+mod test_encoder;

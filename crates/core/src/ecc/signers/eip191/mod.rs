@@ -45,4 +45,4 @@ pub fn verify(msg: &[u8], address: &PublicKeyAddress, sig: impl AsRef<[u8]>) -> 
 }
 
 #[cfg(test)]
-mod tests;
+mod test_eip191;

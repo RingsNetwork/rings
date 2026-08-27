@@ -213,4 +213,4 @@ mod js_utils {
 }
 
 #[cfg(all(test, not(target_family = "wasm")))]
-mod tests;
+mod test_notifier;

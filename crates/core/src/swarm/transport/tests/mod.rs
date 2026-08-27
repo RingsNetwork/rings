@@ -51,15 +51,15 @@ use crate::swarm::callback::SwarmCallback;
 use crate::swarm::callback::SwarmEvent;
 use crate::swarm::SwarmBuilder;
 
-mod events;
+mod test_events;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-mod finger;
+mod test_finger;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-mod inbound;
-mod lifecycle;
+mod test_inbound;
+mod test_lifecycle;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
-mod readiness;
-mod retirement;
+mod test_readiness;
+mod test_retirement;
 
 #[derive(Default)]
 struct RecordingMeasure {
@@ -388,7 +388,7 @@ async fn open_dummy_data_channel_before_ice_connected(
 }
 
 #[test]
-fn swarm_builder_uses_chord_virtual_node_default() -> Result<()> {
+fn test_swarm_builder_uses_chord_virtual_node_default() -> Result<()> {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key)?;
     let swarm = SwarmBuilder::new(7, "", Box::new(MemStorage::new()), session_sk).build();
@@ -406,7 +406,7 @@ fn swarm_builder_uses_chord_virtual_node_default() -> Result<()> {
 }
 
 #[test]
-fn swarm_builder_normalizes_virtual_nodes_before_protocol_advertisement() -> Result<()> {
+fn test_swarm_builder_normalizes_virtual_nodes_before_protocol_advertisement() -> Result<()> {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key)?;
     let requested = MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER.saturating_add(1);
@@ -428,7 +428,7 @@ fn swarm_builder_normalizes_virtual_nodes_before_protocol_advertisement() -> Res
 
 #[cfg(feature = "dummy")]
 #[tokio::test]
-async fn successor_failover_considers_active_peer_outside_topology_hints() -> Result<()> {
+async fn test_successor_failover_considers_active_peer_outside_topology_hints() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
@@ -459,7 +459,7 @@ async fn successor_failover_considers_active_peer_outside_topology_hints() -> Re
 
 #[cfg(feature = "dummy")]
 #[tokio::test]
-async fn data_channel_open_admits_successor_before_ice_connected() -> Result<()> {
+async fn test_data_channel_open_admits_successor_before_ice_connected() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
@@ -490,7 +490,7 @@ async fn data_channel_open_admits_successor_before_ice_connected() -> Result<()>
 
 #[cfg(feature = "dummy")]
 #[tokio::test]
-async fn pending_callback_messages_do_not_dispatch_before_admission() -> Result<()> {
+async fn test_pending_callback_messages_do_not_dispatch_before_admission() -> Result<()> {
     let measure = Arc::new(RecordingMeasure::default());
     let transport = Arc::new(transport_with_measure(measure.clone())?);
     let peer_key = SecretKey::random();
@@ -544,7 +544,8 @@ async fn pending_callback_messages_do_not_dispatch_before_admission() -> Result<
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[tokio::test]
-async fn nested_reassembled_chunk_is_rejected_without_recursive_callback_entry() -> Result<()> {
+async fn test_nested_reassembled_chunk_is_rejected_without_recursive_callback_entry() -> Result<()>
+{
     let measure = Arc::new(RecordingMeasure::default());
     let transport = Arc::new(transport_with_measure(measure.clone())?);
     let peer_key = SecretKey::random();
@@ -601,7 +602,7 @@ async fn nested_reassembled_chunk_is_rejected_without_recursive_callback_entry()
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[tokio::test]
-async fn missing_peer_error_precedes_outbound_capacity_admission() -> Result<()> {
+async fn test_missing_peer_error_precedes_outbound_capacity_admission() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
@@ -635,7 +636,7 @@ async fn missing_peer_error_precedes_outbound_capacity_admission() -> Result<()>
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[traced_test]
 #[tokio::test]
-async fn invalid_inbound_log_omits_transaction_data() -> Result<()> {
+async fn test_invalid_inbound_log_omits_transaction_data() -> Result<()> {
     const PRIVATE_MARKER: &str = "PRIVATE-INBOUND-PAYLOAD-7f34c91a";
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
@@ -691,7 +692,7 @@ async fn invalid_inbound_log_omits_transaction_data() -> Result<()> {
 
 #[cfg(feature = "dummy")]
 #[tokio::test]
-async fn pending_disconnected_before_data_channel_open_is_not_reported() -> Result<()> {
+async fn test_pending_disconnected_before_data_channel_open_is_not_reported() -> Result<()> {
     let measure = Arc::new(RecordingMeasure::default());
     let transport = Arc::new(transport_with_measure(measure.clone())?);
     let peer = SecretKey::random().address().into();
@@ -733,7 +734,7 @@ async fn pending_disconnected_before_data_channel_open_is_not_reported() -> Resu
 
 #[cfg(feature = "dummy")]
 #[tokio::test]
-async fn terminal_event_during_pending_admission_prevents_late_dht_join() -> Result<()> {
+async fn test_terminal_event_during_pending_admission_prevents_late_dht_join() -> Result<()> {
     let measure = Arc::new(BlockingConnectMeasure::default());
     let transport = Arc::new(transport_with_measure(measure.clone())?);
     let peer = SecretKey::random().address().into();

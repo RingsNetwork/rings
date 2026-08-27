@@ -173,7 +173,7 @@ impl ControlledDeliveryState {
 }
 
 #[cfg(test)]
-mod tests;
+mod test_dummy;
 
 /// Test-only controlled delivery scheduler. When enabled (per thread), dummy
 /// message/event delivery is queued instead of auto-dispatched, so a test can

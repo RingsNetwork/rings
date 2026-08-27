@@ -87,4 +87,4 @@ pub fn runtime_gateway_url(
 }
 
 #[cfg(test)]
-mod tests;
+mod test_browser;

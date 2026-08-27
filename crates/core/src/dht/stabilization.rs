@@ -908,7 +908,7 @@ mod tests {
 
     #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_family = "wasm"), tokio::test)]
-    async fn step_deadline_drops_work_that_does_not_complete() {
+    async fn test_step_deadline_drops_work_that_does_not_complete() {
         let dropped = Arc::new(AtomicBool::new(false));
         let witness = dropped.clone();
         let future = async move {

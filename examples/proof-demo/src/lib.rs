@@ -322,7 +322,7 @@ mod tests {
     // SNARK protocol registered — exercising the wasm wiring end to end (short of an
     // actual peer to prove against).
     #[wasm_bindgen_test]
-    async fn builds_a_node_with_a_did() {
+    async fn test_builds_a_node_with_a_did() {
         let node = build_node().await.expect("build node");
         let did = node.provider.address();
         assert!(did.starts_with("0x"), "expected a DID, got {did:?}");
@@ -400,7 +400,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    async fn two_snark_registered_nodes_connect_over_offer_answer() {
+    async fn test_two_snark_registered_nodes_connect_over_offer_answer() {
         let suffix = Date::now().to_string();
         let a = build_node_with_storage(&format!("rings-proof-demo-test-a-{suffix}"))
             .await
@@ -423,7 +423,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn sample_input_is_a_well_formed_vesta_input() {
+    fn test_sample_input_is_a_well_formed_vesta_input() {
         let input = sample_input();
         // `step_in` with two field elements, and it round-trips through JSON.
         assert_eq!(input.len(), 1);

@@ -48,7 +48,7 @@ use crate::tests::manually_establish_connection;
 use crate::tests::replace_observed_fingers;
 use crate::utils::get_epoch_ms_i64;
 
-mod storage_repair_tests;
+mod test_storage_repair;
 
 #[derive(Default)]
 struct CountingMeasure {
@@ -230,7 +230,7 @@ async fn test_stabilization_once() -> Result<()> {
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[tokio::test]
-async fn get_and_check_connection_times_out_wedged_data_channel_wait() -> Result<()> {
+async fn test_get_and_check_connection_times_out_wedged_data_channel_wait() -> Result<()> {
     let key1 = SecretKey::random();
     let key2 = SecretKey::random();
     let node1 = prepare_node(key1).await;
@@ -258,7 +258,7 @@ async fn get_and_check_connection_times_out_wedged_data_channel_wait() -> Result
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[tokio::test]
-async fn get_and_check_connection_waits_for_disconnected_open_transport() -> Result<()> {
+async fn test_get_and_check_connection_waits_for_disconnected_open_transport() -> Result<()> {
     let node1 = prepare_node(SecretKey::random()).await;
     let node2 = prepare_node(SecretKey::random()).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
@@ -293,7 +293,7 @@ async fn get_and_check_connection_waits_for_disconnected_open_transport() -> Res
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[tokio::test]
-async fn liveness_probe_backpressure_does_not_degrade_peer() -> Result<()> {
+async fn test_liveness_probe_backpressure_does_not_degrade_peer() -> Result<()> {
     let measure = Arc::new(CountingMeasure::default());
     let measure_impl: MeasureImpl = measure.clone();
     let node1 = prepare_node_with_measure(SecretKey::random(), measure_impl)?;
@@ -324,7 +324,7 @@ async fn liveness_probe_backpressure_does_not_degrade_peer() -> Result<()> {
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[tokio::test]
-async fn clean_unavailable_connections_removes_silent_connected_peer() -> Result<()> {
+async fn test_clean_unavailable_connections_removes_silent_connected_peer() -> Result<()> {
     let node1 = prepare_node(SecretKey::random()).await;
     let node2 = prepare_node(SecretKey::random()).await;
 
@@ -363,7 +363,8 @@ async fn clean_unavailable_connections_removes_silent_connected_peer() -> Result
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[tokio::test]
-async fn clean_unavailable_connections_observes_disconnected_peer_without_callback() -> Result<()> {
+async fn test_clean_unavailable_connections_observes_disconnected_peer_without_callback(
+) -> Result<()> {
     let node1 = prepare_node(SecretKey::random()).await;
     let node2 = prepare_node(SecretKey::random()).await;
 
@@ -433,7 +434,7 @@ async fn clean_unavailable_connections_observes_disconnected_peer_without_callba
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[tokio::test]
-async fn clean_unavailable_connections_fails_over_to_live_successor_tail() -> Result<()> {
+async fn test_clean_unavailable_connections_fails_over_to_live_successor_tail() -> Result<()> {
     let node1 = prepare_node(SecretKey::random()).await;
     let node2 = prepare_node(SecretKey::random()).await;
     let node3 = prepare_node(SecretKey::random()).await;
@@ -492,7 +493,7 @@ async fn clean_unavailable_connections_fails_over_to_live_successor_tail() -> Re
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[tokio::test]
-async fn clean_unavailable_connections_prunes_disconnected_non_head_slots() -> Result<()> {
+async fn test_clean_unavailable_connections_prunes_disconnected_non_head_slots() -> Result<()> {
     let node1 = prepare_node(SecretKey::random()).await;
     let node2 = prepare_node(SecretKey::random()).await;
     let node3 = prepare_node(SecretKey::random()).await;
@@ -556,7 +557,8 @@ async fn clean_unavailable_connections_prunes_disconnected_non_head_slots() -> R
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[tokio::test]
-async fn clean_unavailable_connections_does_not_fail_over_to_disconnected_finger() -> Result<()> {
+async fn test_clean_unavailable_connections_does_not_fail_over_to_disconnected_finger() -> Result<()>
+{
     let node1 = prepare_node(SecretKey::random()).await;
     let node2 = prepare_node(SecretKey::random()).await;
     let node3 = prepare_node(SecretKey::random()).await;
@@ -626,7 +628,7 @@ async fn clean_unavailable_connections_does_not_fail_over_to_disconnected_finger
 
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[tokio::test]
-async fn clean_unavailable_connections_prunes_disconnected_finger() -> Result<()> {
+async fn test_clean_unavailable_connections_prunes_disconnected_finger() -> Result<()> {
     let node1 = prepare_node(SecretKey::random()).await;
     let node2 = prepare_node(SecretKey::random()).await;
 
@@ -686,7 +688,7 @@ async fn clean_unavailable_connections_prunes_disconnected_finger() -> Result<()
 }
 
 #[tokio::test]
-async fn clean_unavailable_connections_removes_stale_topology_peer() -> Result<()> {
+async fn test_clean_unavailable_connections_removes_stale_topology_peer() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
     let stale = SecretKey::random().address().into();
 
@@ -717,7 +719,7 @@ async fn clean_unavailable_connections_removes_stale_topology_peer() -> Result<(
 }
 
 #[tokio::test]
-async fn clean_unavailable_connections_removes_degraded_admitted_peer() -> Result<()> {
+async fn test_clean_unavailable_connections_removes_degraded_admitted_peer() -> Result<()> {
     let measure = Arc::new(CountingMeasure::default());
     let measure_impl: MeasureImpl = measure.clone();
     let node1 = prepare_node_with_measure(SecretKey::random(), measure_impl)?;

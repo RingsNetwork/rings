@@ -87,7 +87,7 @@ mod tests {
     use super::Result;
 
     #[tokio::test]
-    async fn cancelling_waiter_does_not_cancel_owned_detached_work() {
+    async fn test_cancelling_waiter_does_not_cancel_owned_detached_work() {
         let started = Arc::new(Notify::new());
         let release = Arc::new(Notify::new());
         let completed = Arc::new(Notify::new());
@@ -113,7 +113,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn detached_task_failure_preserves_typed_closed_error() {
+    async fn test_detached_task_failure_preserves_typed_closed_error() {
         let result: Result<()> = run_detached(async {
             panic!("injected detached extension task failure");
         })

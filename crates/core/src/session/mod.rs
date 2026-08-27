@@ -52,4 +52,4 @@ pub use model::Session;
 pub use signing_key::SessionSk;
 
 #[cfg(test)]
-mod tests;
+mod test_session;

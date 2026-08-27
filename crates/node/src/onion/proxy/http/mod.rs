@@ -240,4 +240,4 @@ async fn write_proxy_response(stream: &mut TcpStream, status: &str) -> Result<()
 mod tests;
 
 #[cfg(test)]
-mod unit_tests;
+mod test_http_unit;

@@ -20,7 +20,8 @@ const TRACE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const TRACE_POLL_ATTEMPTS: usize = 500;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn native_webrtc_control_interleaves_the_shared_multiframe_storage_fixture() -> Result<()> {
+async fn test_native_webrtc_control_interleaves_the_shared_multiframe_storage_fixture() -> Result<()>
+{
     let node1 = prepare_node(SecretKey::random()).await;
     let node2 = prepare_node(SecretKey::random()).await;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;

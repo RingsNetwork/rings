@@ -296,7 +296,7 @@ mod tests {
     const LISTENER_SETTLE_TIMEOUT_MS: u64 = 2_000;
 
     #[wasm_bindgen_test(async)]
-    async fn demo_node_stop_settles_provider_listener_task() {
+    async fn test_demo_node_stop_settles_provider_listener_task() {
         let result = run_demo_node_stop_settles_provider_listener_task().await;
         assert!(
             result.is_ok(),
@@ -332,7 +332,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test(async)]
-    async fn demo_node_identity_distinguishes_same_wallet_restarts() {
+    async fn test_demo_node_identity_distinguishes_same_wallet_restarts() {
         let result = run_demo_node_identity_distinguishes_same_wallet_restarts().await;
         assert!(
             result.is_ok(),

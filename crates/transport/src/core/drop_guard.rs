@@ -69,7 +69,7 @@ mod tests {
     use super::ArmedDropGuard;
 
     #[test]
-    fn drop_fires_action_exactly_once() {
+    fn test_drop_fires_action_exactly_once() {
         let calls = Rc::new(Cell::new(0));
         let observed = Rc::clone(&calls);
         let guard = ArmedDropGuard::new(2, move |amount| {
@@ -82,7 +82,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_fire_consumes_drop_authority() {
+    fn test_explicit_fire_consumes_drop_authority() {
         let calls = Rc::new(Cell::new(0));
         let observed = Rc::clone(&calls);
         let mut guard = ArmedDropGuard::new(3, move |amount| {
@@ -96,7 +96,7 @@ mod tests {
     }
 
     #[test]
-    fn disarm_suppresses_action() {
+    fn test_disarm_suppresses_action() {
         let fired = Rc::new(Cell::new(false));
         let observed = Rc::clone(&fired);
         let mut guard = ArmedDropGuard::new((), move |()| observed.set(true));

@@ -56,7 +56,7 @@ mod model;
 mod queue;
 mod spawn;
 #[cfg(test)]
-mod trace;
+mod test_trace;
 mod transfer;
 
 pub(super) use admission::DetachedAdmission;
@@ -267,7 +267,7 @@ impl OutboundPeerHandle {
         #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
         if submitted {
             record_outbound_submit_for_test();
-            trace::record_submission(self.state.peer);
+            test_trace::record_submission(self.state.peer);
         }
         #[cfg(not(all(test, feature = "dummy", not(target_family = "wasm"))))]
         let _ = submitted;
@@ -491,7 +491,7 @@ impl OutboundWorker {
         #[cfg(not(test))]
         let _ = peer;
         #[cfg(test)]
-        let next_id = trace::worker_transfer_id_base();
+        let next_id = test_trace::worker_transfer_id_base();
         #[cfg(not(test))]
         let next_id = 0;
         Self {
@@ -517,7 +517,7 @@ impl OutboundWorker {
                 return;
             }
             #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-            while trace::worker_is_paused(self.peer) && !self.stop.is_stop_requested() {
+            while test_trace::worker_is_paused(self.peer) && !self.stop.is_stop_requested() {
                 tokio::task::yield_now().await;
             }
             if self.stop.is_stop_requested() {
@@ -568,7 +568,7 @@ impl OutboundWorker {
         match command {
             OutboundCommand::Submit(transfer) => {
                 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-                trace::record_handled_submission(self.peer);
+                test_trace::record_handled_submission(self.peer);
                 self.accept_submission(*transfer);
             }
             OutboundCommand::CancelStopped => {
@@ -803,7 +803,7 @@ impl OutboundWorker {
                 };
                 let transfer = &runnable.item().scheduled.transfer;
                 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-                let _active_trace = trace::ActiveTransferGuard::enter(self.peer);
+                let _active_trace = test_trace::ActiveTransferGuard::enter(self.peer);
                 let admission = send_data_with_timeout(
                     &transfer.admitted,
                     bytes,
@@ -848,7 +848,7 @@ impl OutboundWorker {
                 }
                 self.ready.record_frame_admitted(class);
                 #[cfg(test)]
-                trace::record(self.peer, class, runnable.item().id);
+                test_trace::record(self.peer, class, runnable.item().id);
                 let id = runnable.item().id;
                 let delivery_wait =
                     Self::delivery_wait(id, class, delivery, &runnable.item().scheduled.transfer);
@@ -973,4 +973,4 @@ impl Drop for OutboundWorker {
 }
 
 #[cfg(test)]
-mod tests;
+mod test_outbound;

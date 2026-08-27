@@ -6,14 +6,14 @@ use super::*;
 use crate::processor::config::parse_webrtc_udp_port_range;
 
 #[test]
-fn webrtc_udp_port_range_absent_by_default() {
+fn test_webrtc_udp_port_range_absent_by_default() {
     let range = parse_webrtc_udp_port_range(None, None);
 
     assert!(matches!(range, core::result::Result::Ok(None)));
 }
 
 #[test]
-fn webrtc_udp_port_range_accepts_valid_bounds() {
+fn test_webrtc_udp_port_range_accepts_valid_bounds() {
     let range = parse_webrtc_udp_port_range(Some(49160), Some(49200));
 
     assert!(matches!(
@@ -23,7 +23,7 @@ fn webrtc_udp_port_range_accepts_valid_bounds() {
 }
 
 #[test]
-fn webrtc_udp_port_range_rejects_partial_bounds() {
+fn test_webrtc_udp_port_range_rejects_partial_bounds() {
     let range = parse_webrtc_udp_port_range(Some(49160), None);
 
     assert!(matches!(
@@ -36,7 +36,7 @@ fn webrtc_udp_port_range_rejects_partial_bounds() {
 }
 
 #[test]
-fn webrtc_udp_port_range_rejects_zero_bound() {
+fn test_webrtc_udp_port_range_rejects_zero_bound() {
     let range = parse_webrtc_udp_port_range(Some(0), Some(49200));
 
     assert!(matches!(
@@ -51,7 +51,7 @@ fn webrtc_udp_port_range_rejects_zero_bound() {
 }
 
 #[test]
-fn webrtc_udp_port_range_rejects_inverted_bounds() {
+fn test_webrtc_udp_port_range_rejects_inverted_bounds() {
     let range = parse_webrtc_udp_port_range(Some(49200), Some(49160));
 
     assert!(matches!(
@@ -66,7 +66,7 @@ fn webrtc_udp_port_range_rejects_inverted_bounds() {
 }
 
 #[test]
-fn online_node_timing_requires_heartbeat_interval_less_than_ttl_when_enabled() {
+fn test_online_node_timing_requires_heartbeat_interval_less_than_ttl_when_enabled() {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).unwrap();
     let serialized = ProcessorConfigSerialized::new(
@@ -87,7 +87,7 @@ fn online_node_timing_requires_heartbeat_interval_less_than_ttl_when_enabled() {
 }
 
 #[test]
-fn presence_advertisement_can_be_disabled() {
+fn test_presence_advertisement_can_be_disabled() {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).unwrap();
     let serialized = ProcessorConfigSerialized::new(
@@ -108,7 +108,7 @@ fn presence_advertisement_can_be_disabled() {
 }
 
 #[test]
-fn presence_advertisement_is_enabled_by_default() {
+fn test_presence_advertisement_is_enabled_by_default() {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).unwrap();
     let serialized = ProcessorConfigSerialized::new(
@@ -129,7 +129,7 @@ fn presence_advertisement_is_enabled_by_default() {
 }
 
 #[test]
-fn dht_virtual_nodes_rejects_values_above_cost_bound() {
+fn test_dht_virtual_nodes_rejects_values_above_cost_bound() {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).unwrap();
     let serialized = ProcessorConfigSerialized::new(
@@ -149,7 +149,7 @@ fn dht_virtual_nodes_rejects_values_above_cost_bound() {
 }
 
 #[test]
-fn serialized_processor_config_defaults_dht_virtual_nodes() {
+fn test_serialized_processor_config_defaults_dht_virtual_nodes() {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).unwrap();
     let yaml = format!(
@@ -180,7 +180,7 @@ advertise_presence: true
 }
 
 #[test]
-fn onion_relay_requires_presence_advertisement() {
+fn test_onion_relay_requires_presence_advertisement() {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).unwrap();
     let serialized = ProcessorConfigSerialized::new(
@@ -201,7 +201,7 @@ fn onion_relay_requires_presence_advertisement() {
 }
 
 #[test]
-fn advertised_onion_exit_requires_open_policy() {
+fn test_advertised_onion_exit_requires_open_policy() {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).unwrap();
     let serialized = ProcessorConfigSerialized::new(
@@ -219,7 +219,7 @@ fn advertised_onion_exit_requires_open_policy() {
 }
 
 #[test]
-fn onion_exit_registration_task_can_run_without_presence_advertisement() -> Result<()> {
+fn test_onion_exit_registration_task_can_run_without_presence_advertisement() -> Result<()> {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).unwrap();
     let serialized = ProcessorConfigSerialized::new(
@@ -245,7 +245,7 @@ fn onion_exit_registration_task_can_run_without_presence_advertisement() -> Resu
 }
 
 #[tokio::test]
-async fn onion_relay_capability_is_advertised_in_online_descriptor() {
+async fn test_onion_relay_capability_is_advertised_in_online_descriptor() {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).unwrap();
     let config = ProcessorConfig::new(
@@ -271,7 +271,7 @@ async fn onion_relay_capability_is_advertised_in_online_descriptor() {
 }
 
 #[test]
-fn https_onion_exit_config_uses_https_only_service() {
+fn test_https_onion_exit_config_uses_https_only_service() {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).unwrap();
     let config = ProcessorConfig::new(
@@ -287,7 +287,7 @@ fn https_onion_exit_config_uses_https_only_service() {
 }
 
 #[test]
-fn default_onion_exit_config_uses_native_tcp_backed_services() {
+fn test_default_onion_exit_config_uses_native_tcp_backed_services() {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).unwrap();
     let config = ProcessorConfig::new(
@@ -307,7 +307,7 @@ fn default_onion_exit_config_uses_native_tcp_backed_services() {
 }
 
 #[test]
-fn reserved_https_onion_exit_service_accepts_tcp_transport() -> Result<()> {
+fn test_reserved_https_onion_exit_service_accepts_tcp_transport() -> Result<()> {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).unwrap();
     let mut config = ProcessorConfig::new(
@@ -326,7 +326,7 @@ fn reserved_https_onion_exit_service_accepts_tcp_transport() -> Result<()> {
 }
 
 #[test]
-fn custom_onion_exit_service_allows_explicit_transport() -> Result<()> {
+fn test_custom_onion_exit_service_allows_explicit_transport() -> Result<()> {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).unwrap();
     let mut config = ProcessorConfig::new(

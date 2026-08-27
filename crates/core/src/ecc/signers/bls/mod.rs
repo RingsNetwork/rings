@@ -190,4 +190,4 @@ pub fn public_key(key: &SecretKey) -> Result<PublicKey<48>> {
 }
 
 #[cfg(test)]
-mod tests;
+mod test_bls;

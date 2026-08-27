@@ -43,7 +43,7 @@ use crate::tests::default::Node;
 use crate::tests::manually_establish_connection;
 
 #[tokio::test]
-async fn storage_repair_request_after_claim_remains_pending() -> Result<()> {
+async fn test_storage_repair_request_after_claim_remains_pending() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
 
     assert!(!node.swarm.transport.storage_repair_requested());
@@ -57,7 +57,7 @@ async fn storage_repair_request_after_claim_remains_pending() -> Result<()> {
 }
 
 #[tokio::test]
-async fn leave_dht_defers_repair_until_maintenance_runs() -> Result<()> {
+async fn test_leave_dht_defers_repair_until_maintenance_runs() -> Result<()> {
     let key = SecretKey::random();
     let session = SessionSk::new_with_seckey(&key)?;
     let swarm = Arc::new(
@@ -109,7 +109,7 @@ async fn leave_dht_defers_repair_until_maintenance_runs() -> Result<()> {
 
 #[cfg(feature = "dummy")]
 #[tokio::test]
-async fn found_entry_read_repair_backpressure_is_deferred() -> Result<()> {
+async fn test_found_entry_read_repair_backpressure_is_deferred() -> Result<()> {
     let node1 = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
     let node2 = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
     manually_establish_connection(&node1.swarm, &node2.swarm).await;
@@ -179,7 +179,7 @@ async fn found_entry_read_repair_backpressure_is_deferred() -> Result<()> {
 }
 
 #[tokio::test]
-async fn storage_api_rejects_redundancy_mismatch() -> Result<()> {
+async fn test_storage_api_rejects_redundancy_mismatch() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
 
     let result = <Swarm as ChordStorageInterface<2>>::storage_fetch(&node.swarm, node.did()).await;
@@ -195,7 +195,7 @@ async fn storage_api_rejects_redundancy_mismatch() -> Result<()> {
 }
 
 #[tokio::test]
-async fn placed_entry_operation_rejects_non_affine_placement() -> Result<()> {
+async fn test_placed_entry_operation_rejects_non_affine_placement() -> Result<()> {
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
     let topic = "reject misplaced remote storage operation".to_string();
@@ -232,7 +232,7 @@ async fn placed_entry_operation_rejects_non_affine_placement() -> Result<()> {
 }
 
 #[tokio::test]
-async fn remote_redundant_store_writes_split_replica_at_affine_placement() -> Result<()> {
+async fn test_remote_redundant_store_writes_split_replica_at_affine_placement() -> Result<()> {
     let mut keys = gen_ordered_keys(2).into_iter();
     let node1 = prepare_node_with_storage_redundancy(next_generated_key(&mut keys)?, 2)?;
     let node2 = prepare_node_with_storage_redundancy(next_generated_key(&mut keys)?, 2)?;
@@ -297,7 +297,7 @@ async fn remote_redundant_store_writes_split_replica_at_affine_placement() -> Re
 }
 
 #[tokio::test]
-async fn local_hit_read_repair_sends_no_search_for_unknown_replicas() -> Result<()> {
+async fn test_local_hit_read_repair_sends_no_search_for_unknown_replicas() -> Result<()> {
     let key = SecretKey::random();
     let session = SessionSk::new_with_seckey(&key)?;
     let swarm = Arc::new(
@@ -336,7 +336,7 @@ async fn local_hit_read_repair_sends_no_search_for_unknown_replicas() -> Result<
 }
 
 #[tokio::test]
-async fn found_entry_repairs_buffered_misses_only() -> Result<()> {
+async fn test_found_entry_repairs_buffered_misses_only() -> Result<()> {
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
     let entry = Entry::new(
@@ -396,7 +396,7 @@ async fn found_entry_repairs_buffered_misses_only() -> Result<()> {
 }
 
 #[tokio::test]
-async fn found_entry_rejects_multiple_entries() -> Result<()> {
+async fn test_found_entry_rejects_multiple_entries() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
     let resource = Did::from(10u32);
@@ -442,7 +442,7 @@ async fn found_entry_rejects_multiple_entries() -> Result<()> {
 }
 
 #[tokio::test]
-async fn found_entry_rejects_redundancy_outside_local_protocol_mode() -> Result<()> {
+async fn test_found_entry_rejects_redundancy_outside_local_protocol_mode() -> Result<()> {
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
     let resource = Did::from(10u32);
@@ -487,7 +487,7 @@ async fn found_entry_rejects_redundancy_outside_local_protocol_mode() -> Result<
 }
 
 #[tokio::test]
-async fn found_entry_rejects_response_without_active_lookup() -> Result<()> {
+async fn test_found_entry_rejects_response_without_active_lookup() -> Result<()> {
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
     let resource = Did::from(10u32);
@@ -528,7 +528,7 @@ async fn found_entry_rejects_response_without_active_lookup() -> Result<()> {
 }
 
 #[tokio::test]
-async fn found_entry_rejects_resource_mismatch_without_cache_write() -> Result<()> {
+async fn test_found_entry_rejects_resource_mismatch_without_cache_write() -> Result<()> {
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
     let resource = Did::from(10u32);
@@ -571,7 +571,7 @@ async fn found_entry_rejects_resource_mismatch_without_cache_write() -> Result<(
 }
 
 #[tokio::test]
-async fn storage_miss_observation_buffer_is_bounded() -> Result<()> {
+async fn test_storage_miss_observation_buffer_is_bounded() -> Result<()> {
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
     for index in 0..(STORAGE_LOOKUP_OBSERVATION_CAPACITY + 8) {
         let resource = Did::from((index + 1) as u32);
@@ -590,7 +590,7 @@ async fn storage_miss_observation_buffer_is_bounded() -> Result<()> {
 }
 
 #[tokio::test]
-async fn storage_fetch_starts_fresh_observation_round() -> Result<()> {
+async fn test_storage_fetch_starts_fresh_observation_round() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
     let resource = Did::from(10u32);
     let placement = Did::from(100u32);
@@ -608,7 +608,7 @@ async fn storage_fetch_starts_fresh_observation_round() -> Result<()> {
 }
 
 #[tokio::test]
-async fn expired_storage_response_does_not_update_cache_or_repair() -> Result<()> {
+async fn test_expired_storage_response_does_not_update_cache_or_repair() -> Result<()> {
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
     let entry = Entry::new(

@@ -20,4 +20,4 @@ pub use quality::PeerQualityEvidence;
 pub use quality::PeerQualityThresholds;
 
 #[cfg(test)]
-mod tests;
+mod test_measure;

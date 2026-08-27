@@ -162,7 +162,7 @@ impl RouteEntropy for FixedEntropy {
 }
 
 #[test]
-fn route_builder_uses_presence_relays_and_exit_registry() -> Result<()> {
+fn test_route_builder_uses_presence_relays_and_exit_registry() -> Result<()> {
     let local = node_key().map_err(Error::CoreError)?.account_did();
     let first_relay = node_key().map_err(Error::CoreError)?;
     let second_relay = node_key().map_err(Error::CoreError)?;
@@ -191,7 +191,7 @@ fn route_builder_uses_presence_relays_and_exit_registry() -> Result<()> {
 }
 
 #[test]
-fn route_builder_canonicalizes_service_before_constructing_route() -> Result<()> {
+fn test_route_builder_canonicalizes_service_before_constructing_route() -> Result<()> {
     let local = node_key().map_err(Error::CoreError)?.account_did();
     let exit = signed_exit_at(20, 100)?;
     let request = route_request("WeB", 1, false)?;
@@ -211,7 +211,7 @@ fn route_builder_canonicalizes_service_before_constructing_route() -> Result<()>
 }
 
 #[test]
-fn directory_candidates_reject_expired_remote_descriptors() -> Result<()> {
+fn test_directory_candidates_reject_expired_remote_descriptors() -> Result<()> {
     let local = node_key().map_err(Error::CoreError)?.account_did();
     let relay = node_key().map_err(Error::CoreError)?;
     let exit = signed_exit_at(20, 40)?;
@@ -230,7 +230,7 @@ fn directory_candidates_reject_expired_remote_descriptors() -> Result<()> {
 }
 
 #[test]
-fn directory_candidates_reject_foreign_network_descriptors() -> Result<()> {
+fn test_directory_candidates_reject_foreign_network_descriptors() -> Result<()> {
     let local = node_key().map_err(Error::CoreError)?.account_did();
     let relay = node_key().map_err(Error::CoreError)?;
     let exit_key = node_key().map_err(Error::CoreError)?;
@@ -255,7 +255,7 @@ fn directory_candidates_reject_foreign_network_descriptors() -> Result<()> {
 }
 
 #[test]
-fn route_builder_rejects_too_short_production_route() -> Result<()> {
+fn test_route_builder_rejects_too_short_production_route() -> Result<()> {
     let local = node_key().map_err(Error::CoreError)?.account_did();
     let relay = node_key().map_err(Error::CoreError)?;
     let exit = signed_exit_at(20, 100)?;
@@ -281,7 +281,7 @@ fn route_builder_rejects_too_short_production_route() -> Result<()> {
 }
 
 #[test]
-fn route_builder_rejects_nodes_without_relay_capability() -> Result<()> {
+fn test_route_builder_rejects_nodes_without_relay_capability() -> Result<()> {
     let local = node_key().map_err(Error::CoreError)?.account_did();
     let relay = node_key().map_err(Error::CoreError)?;
     let exit = signed_exit_at(20, 100)?;
@@ -307,7 +307,7 @@ fn route_builder_rejects_nodes_without_relay_capability() -> Result<()> {
 }
 
 #[test]
-fn route_builder_reports_no_live_exit_before_first_hop_filter() -> Result<()> {
+fn test_route_builder_reports_no_live_exit_before_first_hop_filter() -> Result<()> {
     let request = route_request("web", 1, false)?;
     let candidates = OnionRouteCandidates {
         relays: Vec::new(),
@@ -333,7 +333,7 @@ fn route_builder_reports_no_live_exit_before_first_hop_filter() -> Result<()> {
 }
 
 #[test]
-fn route_builder_samples_relays_by_quality_weight() -> Result<()> {
+fn test_route_builder_samples_relays_by_quality_weight() -> Result<()> {
     let local = node_key().map_err(Error::CoreError)?.account_did();
     let degraded = node_key().map_err(Error::CoreError)?;
     let healthy = node_key().map_err(Error::CoreError)?;
@@ -364,7 +364,7 @@ fn route_builder_samples_relays_by_quality_weight() -> Result<()> {
 }
 
 #[test]
-fn route_builder_entropy_can_select_second_unknown_relay() -> Result<()> {
+fn test_route_builder_entropy_can_select_second_unknown_relay() -> Result<()> {
     let first = node_key().map_err(Error::CoreError)?;
     let second = node_key().map_err(Error::CoreError)?;
     let exit = signed_exit_at(20, 100)?;
@@ -391,7 +391,7 @@ fn route_builder_entropy_can_select_second_unknown_relay() -> Result<()> {
 }
 
 #[test]
-fn route_builder_first_hop_filter_preserves_remote_later_relays() -> Result<()> {
+fn test_route_builder_first_hop_filter_preserves_remote_later_relays() -> Result<()> {
     let direct = node_key().map_err(Error::CoreError)?;
     let remote = node_key().map_err(Error::CoreError)?;
     let exit = signed_exit_at(20, 100)?;
@@ -422,7 +422,7 @@ fn route_builder_first_hop_filter_preserves_remote_later_relays() -> Result<()> 
 }
 
 #[test]
-fn route_builder_does_not_consume_only_direct_relay_as_exit_first() -> Result<()> {
+fn test_route_builder_does_not_consume_only_direct_relay_as_exit_first() -> Result<()> {
     let direct = node_key().map_err(Error::CoreError)?;
     let direct_exit = signed_exit_for_session_at(&direct, 20, 100)?;
     let remote_exit = signed_exit_at(21, 100)?;
@@ -447,7 +447,7 @@ fn route_builder_does_not_consume_only_direct_relay_as_exit_first() -> Result<()
 }
 
 #[test]
-fn route_builder_rejects_route_without_permitted_first_hop() -> Result<()> {
+fn test_route_builder_rejects_route_without_permitted_first_hop() -> Result<()> {
     let permitted = node_key().map_err(Error::CoreError)?.account_did();
     let remote = node_key().map_err(Error::CoreError)?;
     let exit = signed_exit_at(20, 100)?;
@@ -477,7 +477,7 @@ fn route_builder_rejects_route_without_permitted_first_hop() -> Result<()> {
 }
 
 #[test]
-fn route_builder_shortens_to_permitted_exit_when_no_first_relay_is_allowed() -> Result<()> {
+fn test_route_builder_shortens_to_permitted_exit_when_no_first_relay_is_allowed() -> Result<()> {
     let remote = node_key().map_err(Error::CoreError)?;
     let exit = signed_exit_at(20, 100)?;
     let exit_did = exit.did;

@@ -348,7 +348,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn serves_a_hosted_page_back_to_the_requester() {
+    fn test_serves_a_hosted_page_back_to_the_requester() {
         let site: Site = Rc::new(RefCell::new(HashMap::from([(
             "/".to_string(),
             "<h1>hi</h1>".to_string(),
@@ -379,7 +379,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn unknown_path_yields_404() {
+    fn test_unknown_path_yields_404() {
         let site: Site = Rc::new(RefCell::new(HashMap::new()));
         let result = dweb_handle(
             &ctx_null(),
@@ -396,7 +396,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn a_response_is_surfaced_and_sends_nothing() {
+    fn test_a_response_is_surfaced_and_sends_nothing() {
         let site: Site = Rc::new(RefCell::new(HashMap::new()));
         let got: Rc<RefCell<Option<(String, String)>>> = Rc::new(RefCell::new(None));
         let cb = {
@@ -455,7 +455,7 @@ mod tests {
 
     /// Two nodes: B hosts `/`, A connects and fetches it over rings, expecting B's page.
     #[wasm_bindgen_test]
-    async fn two_nodes_fetch_a_hosted_page() {
+    async fn test_two_nodes_fetch_a_hosted_page() {
         use rings_node::prelude::rings_core::utils::js_utils::window_sleep;
 
         // B hosts a page.

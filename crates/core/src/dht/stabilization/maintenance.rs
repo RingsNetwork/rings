@@ -387,7 +387,7 @@ mod tests {
     const PERIOD: Duration = Duration::from_secs(15);
 
     #[test]
-    fn maintenance_phases_are_staggered_within_each_period() {
+    fn test_maintenance_phases_are_staggered_within_each_period() {
         let mut schedule = MaintenanceSchedule::new(0, PERIOD);
 
         assert_eq!(schedule.poll(14_999, false).task, None);
@@ -407,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_stabilization_overruns_preserve_repair_intent() {
+    fn test_repeated_stabilization_overruns_preserve_repair_intent() {
         let mut schedule = MaintenanceSchedule::new(0, PERIOD);
 
         assert_eq!(
@@ -425,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn long_stabilization_skips_missed_stabilization_deadlines() {
+    fn test_long_stabilization_skips_missed_stabilization_deadlines() {
         let mut schedule = MaintenanceSchedule::new(0, PERIOD);
 
         assert_eq!(
@@ -442,7 +442,7 @@ mod tests {
     }
 
     #[test]
-    fn stabilization_reserves_a_window_for_pending_repair() {
+    fn test_stabilization_reserves_a_window_for_pending_repair() {
         let mut schedule = MaintenanceSchedule::new(0, PERIOD);
 
         assert_eq!(
@@ -468,7 +468,7 @@ mod tests {
     }
 
     #[test]
-    fn reserved_repair_turn_survives_timer_overshoot() {
+    fn test_reserved_repair_turn_survives_timer_overshoot() {
         let mut schedule = MaintenanceSchedule::new(0, Duration::from_millis(100));
 
         assert_eq!(
@@ -489,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_timer_overshoots_preserve_repair_and_stabilization_fairness() {
+    fn test_repeated_timer_overshoots_preserve_repair_and_stabilization_fairness() {
         let mut schedule = MaintenanceSchedule::new(0, Duration::from_millis(500));
         let mut stabilization_start_ms = 500;
 
@@ -510,7 +510,7 @@ mod tests {
     }
 
     #[test]
-    fn repair_overrun_reconciles_stabilization_with_actual_completion() {
+    fn test_repair_overrun_reconciles_stabilization_with_actual_completion() {
         let mut schedule = MaintenanceSchedule::new(0, PERIOD);
 
         assert_eq!(
@@ -533,7 +533,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_repair_waits_for_the_next_topology_phase() {
+    fn test_failed_repair_waits_for_the_next_topology_phase() {
         let mut schedule = MaintenanceSchedule::new(0, PERIOD);
 
         assert_eq!(
@@ -560,7 +560,7 @@ mod tests {
     }
 
     #[test]
-    fn late_timer_wake_recomputes_from_absolute_deadline() {
+    fn test_late_timer_wake_recomputes_from_absolute_deadline() {
         assert_eq!(remaining_delay(100, 90), Duration::from_millis(10));
         assert_eq!(remaining_delay(100, 125), Duration::ZERO);
     }

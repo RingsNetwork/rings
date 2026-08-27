@@ -183,4 +183,4 @@ impl FingerTable {
 }
 
 #[cfg(test)]
-mod tests;
+mod test_finger;

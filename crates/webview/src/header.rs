@@ -164,7 +164,7 @@ mod tests {
     use crate::types::GatewayRequestKind;
 
     #[test]
-    fn response_header_classification_is_pure_and_explicit() -> Result<()> {
+    fn test_response_header_classification_is_pure_and_explicit() -> Result<()> {
         let target = Url::parse("https://example.com/app/page")?;
         let prefix = GatewayPrefix::new("/webview/")?;
 
@@ -197,7 +197,8 @@ mod tests {
     }
 
     #[test]
-    fn request_header_allowlist_removes_browser_fingerprints_and_normalizes_accept() -> Result<()> {
+    fn test_request_header_allowlist_removes_browser_fingerprints_and_normalizes_accept(
+    ) -> Result<()> {
         let policy = HeaderPolicy::new(GatewayPrefix::new("/webview/")?);
         let mut request = GatewayRequest::navigation(Url::parse("https://example.com/")?);
         request.headers = vec![
@@ -240,7 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn redirect_location_rewrites_to_gateway_url() -> Result<()> {
+    fn test_redirect_location_rewrites_to_gateway_url() -> Result<()> {
         let target = Url::parse("https://example.com/app/page")?;
         let policy = HeaderPolicy::new(GatewayPrefix::new("/webview/")?);
         let response = GatewayResponse::new(
@@ -273,7 +274,7 @@ mod tests {
     }
 
     #[test]
-    fn gateway_sandbox_intentionally_creates_an_opaque_origin() {
+    fn test_gateway_sandbox_intentionally_creates_an_opaque_origin() {
         let policy = gateway_content_security_policy();
         assert!(policy.starts_with("sandbox "));
         assert!(policy.contains("allow-scripts"));
@@ -281,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn response_policy_strips_headers_invalidated_by_gateway_rewrites() -> Result<()> {
+    fn test_response_policy_strips_headers_invalidated_by_gateway_rewrites() -> Result<()> {
         let target = Url::parse("https://example.com/app/page")?;
         let policy = HeaderPolicy::new(GatewayPrefix::new("/webview/")?);
         let response = GatewayResponse::new(
@@ -318,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn refresh_header_rewrites_to_gateway_url() -> Result<()> {
+    fn test_refresh_header_rewrites_to_gateway_url() -> Result<()> {
         let target = Url::parse("https://example.com/app/page")?;
         let policy = HeaderPolicy::new(GatewayPrefix::new("/webview/")?);
         let response = GatewayResponse::new(
@@ -344,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn request_policy_strips_controlled_origin_and_hop_headers() -> Result<()> {
+    fn test_request_policy_strips_controlled_origin_and_hop_headers() -> Result<()> {
         let target = Url::parse("https://example.com/app/page")?;
         let policy = HeaderPolicy::new(GatewayPrefix::new("/webview/")?);
         let request = GatewayRequest {
@@ -397,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn request_policy_does_not_synthesize_origin_for_subresources() -> Result<()> {
+    fn test_request_policy_does_not_synthesize_origin_for_subresources() -> Result<()> {
         let target = Url::parse("https://cdn.example.test/app.js")?;
         let policy = HeaderPolicy::new(GatewayPrefix::new("/webview/")?);
         let request = GatewayRequest::subresource(target)

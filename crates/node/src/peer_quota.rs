@@ -102,7 +102,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn reserve_and_release_preserve_global_and_peer_projection() {
+    fn test_reserve_and_release_preserve_global_and_peer_projection() {
         let mut quota = PeerQuota::new(2, 1);
         let first = Did::from(1_u32);
         let second = Did::from(2_u32);

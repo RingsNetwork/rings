@@ -27,7 +27,7 @@ fn small_limits() -> ReassemblyLimits {
 }
 
 #[test]
-fn constrained_reassembly_limits_are_smaller_than_production() {
+fn test_constrained_reassembly_limits_are_smaller_than_production() {
     let production = ReassemblyLimits::production();
     let constrained = ReassemblyLimits::constrained();
 
@@ -59,12 +59,12 @@ fn test_data_chunks() {
 }
 
 #[test]
-fn split_empty_yields_no_chunks() {
+fn test_split_empty_yields_no_chunks() {
     assert!(ChunkList::split(&Bytes::new(), 32).to_vec().is_empty());
 }
 
 #[test]
-fn split_exact_multiple_all_full() {
+fn test_split_exact_multiple_all_full() {
     let data: Bytes = vec![0u8; 64].into();
     let chunks = ChunkList::split(&data, 32).to_vec();
     assert_eq!(chunks.len(), 2);
@@ -74,7 +74,7 @@ fn split_exact_multiple_all_full() {
 }
 
 #[test]
-fn split_non_multiple_last_is_remainder() {
+fn test_split_non_multiple_last_is_remainder() {
     let data: Bytes = vec![0u8; 70].into();
     let chunks = ChunkList::split(&data, 32).to_vec();
     assert_eq!(chunks.len(), 3);
@@ -84,7 +84,7 @@ fn split_non_multiple_last_is_remainder() {
 }
 
 #[test]
-fn split_larger_than_data_is_single_chunk() {
+fn test_split_larger_than_data_is_single_chunk() {
     let data: Bytes = vec![0u8; 10].into();
     let chunks = ChunkList::split(&data, 1024).to_vec();
     assert_eq!(chunks.len(), 1);
@@ -92,7 +92,7 @@ fn split_larger_than_data_is_single_chunk() {
 }
 
 #[test]
-fn split_zero_size_is_clamped_to_one() {
+fn test_split_zero_size_is_clamped_to_one() {
     let data: Bytes = vec![0u8; 4].into();
     let chunks = ChunkList::split(&data, 0).to_vec();
     assert_eq!(chunks.len(), 4);
@@ -100,7 +100,7 @@ fn split_zero_size_is_clamped_to_one() {
 }
 
 #[test]
-fn split_chunks_share_one_message_id() {
+fn test_split_chunks_share_one_message_id() {
     let data: Bytes = vec![0u8; 100].into();
     let chunks = ChunkList::split(&data, 32).to_vec();
     let id = chunks[0].meta.id;
@@ -110,7 +110,7 @@ fn split_chunks_share_one_message_id() {
 /// Cutting at any size and feeding the pieces back through the reassembler (in order) yields the
 /// original bytes — across exact multiples, remainders, single-chunk, and one-byte cuts.
 #[test]
-fn split_then_reassemble_round_trips() {
+fn test_split_then_reassemble_round_trips() {
     for (len, size) in [
         (1usize, 7usize),
         (7, 7),
@@ -140,7 +140,7 @@ fn reserves(whole: usize, chunk: usize, min_chunk_data: usize) -> WireReserves {
 }
 
 #[test]
-fn plan_whole_includes_whole_overhead() {
+fn test_plan_whole_includes_whole_overhead() {
     let r = reserves(10, 20, 1);
     // Whole fits while payload + whole ≤ limit, up to and including the boundary.
     assert_eq!(r.plan(0, 100), Some(Framing::Whole));
@@ -152,7 +152,7 @@ fn plan_whole_includes_whole_overhead() {
 /// The chunk size reserves the chunk overhead, so `chunk_size + chunk ≤ limit`: a wrapped chunk
 /// can never exceed the negotiated limit.
 #[test]
-fn plan_chunk_size_reserves_overhead() {
+fn test_plan_chunk_size_reserves_overhead() {
     let (limit, chunk_overhead) = (65536usize, 4096usize);
     let Some(Framing::Chunked { chunk_size }) =
         reserves(16, chunk_overhead, 16).plan(limit * 2, limit)
@@ -164,7 +164,7 @@ fn plan_chunk_size_reserves_overhead() {
 }
 
 #[test]
-fn plan_none_when_chunk_too_small() {
+fn test_plan_none_when_chunk_too_small() {
     // A limit that cannot fit `chunk + min_chunk_data` is rejected outright, not split tiny.
     assert_eq!(reserves(4, 10, 1).plan(100, 5), None); // below the overhead
     assert_eq!(reserves(4, 10, 1).plan(100, 10), None); // == overhead, 0 data bytes
@@ -182,7 +182,7 @@ fn plan_none_when_chunk_too_small() {
 }
 
 #[test]
-fn plan_is_total_on_overflow() {
+fn test_plan_is_total_on_overflow() {
     // `payload_len + whole` overflows usize; must not panic, and (not a whole fit) falls through
     // to the chunked decision rather than wrapping around.
     assert_eq!(
@@ -194,7 +194,7 @@ fn plan_is_total_on_overflow() {
 }
 
 #[test]
-fn reassembles_in_order() {
+fn test_reassembles_in_order() {
     let data: Bytes = "helloworld".repeat(1024).into();
     let mut r = MessageReassembler::new();
     let chunks = chunks_of(&data, 32);
@@ -207,7 +207,7 @@ fn reassembles_in_order() {
 }
 
 #[test]
-fn reassembles_out_of_order() {
+fn test_reassembles_out_of_order() {
     let data: Bytes = "helloworld".repeat(64).into();
     let mut chunks = chunks_of(&data, 32);
     chunks.reverse();
@@ -220,7 +220,7 @@ fn reassembles_out_of_order() {
 }
 
 #[test]
-fn full_retransmit_after_completion_is_not_redelivered() {
+fn test_full_retransmit_after_completion_is_not_redelivered() {
     // A message that completes, then is *fully* retransmitted within its TTL window, must not be
     // delivered a second time — the completed id is tombstoned.
     let data: Bytes = "helloworld".repeat(64).into();
@@ -250,7 +250,7 @@ fn full_retransmit_after_completion_is_not_redelivered() {
 }
 
 #[test]
-fn duplicate_chunk_does_not_break_reassembly() {
+fn test_duplicate_chunk_does_not_break_reassembly() {
     // Regression: arrival order [0, 1, 0] used to dedup-before-sort and never complete.
     let data: Bytes = "helloworld".repeat(8).into(); // > 32 bytes => 3 chunks
     let chunks = chunks_of(&data, 32);
@@ -271,7 +271,7 @@ fn duplicate_chunk_does_not_break_reassembly() {
 }
 
 #[test]
-fn interleaved_messages_are_isolated() {
+fn test_interleaved_messages_are_isolated() {
     let d1: Bytes = "hello".repeat(64).into();
     let d2: Bytes = "world".repeat(64).into();
     let c1 = chunks_of(&d1, 32);
@@ -295,7 +295,7 @@ fn interleaved_messages_are_isolated() {
 }
 
 #[test]
-fn incomplete_message_stays_pending() {
+fn test_incomplete_message_stays_pending() {
     let data: Bytes = "helloworld".repeat(64).into();
     let chunks = chunks_of(&data, 32);
     let mut r = MessageReassembler::new();
@@ -308,7 +308,7 @@ fn incomplete_message_stays_pending() {
 }
 
 #[test]
-fn malformed_chunks_are_dropped() {
+fn test_malformed_chunks_are_dropped() {
     let mut r = MessageReassembler::new();
     // total == 0
     assert!(r
@@ -330,7 +330,7 @@ fn malformed_chunks_are_dropped() {
 }
 
 #[test]
-fn reassembly_outcome_distinguishes_invalid_and_replayed_chunks() {
+fn test_reassembly_outcome_distinguishes_invalid_and_replayed_chunks() {
     let mut reassembler = MessageReassembler::new();
     let invalid = reassembler.handle_retained_outcome(Chunk {
         chunk: [0, 0],
@@ -367,7 +367,7 @@ fn reassembly_outcome_distinguishes_invalid_and_replayed_chunks() {
 }
 
 #[test]
-fn old_timestamp_is_dropped_without_panic() {
+fn test_old_timestamp_is_dropped_without_panic() {
     // ts_ms < TS_OFFSET_TOLERANCE_MS would underflow a plain `u128` subtraction (no panic with
     // saturating arithmetic), and a chunk stamped at the epoch is already long expired — it must
     // be dropped, not delivered, even though it is a complete `total == 1` message.
@@ -386,7 +386,7 @@ fn old_timestamp_is_dropped_without_panic() {
 }
 
 #[test]
-fn expired_single_chunk_is_not_delivered() {
+fn test_expired_single_chunk_is_not_delivered() {
     // Regression: sweeping *other* pending entries before insertion let an already-expired
     // `total == 1` chunk be delivered immediately. It must be rejected up front.
     let mut r = MessageReassembler::new();
@@ -405,7 +405,7 @@ fn expired_single_chunk_is_not_delivered() {
 }
 
 #[test]
-fn oversize_chunk_data_is_rejected() {
+fn test_oversize_chunk_data_is_rejected() {
     let limits = small_limits();
     let mut r = MessageReassembler::with_limits(limits);
     let data: Bytes = vec![0u8; limits.max_chunk_data_len + 1].into();
@@ -420,7 +420,7 @@ fn oversize_chunk_data_is_rejected() {
 }
 
 #[test]
-fn buffered_cost_returns_to_zero_after_completion() {
+fn test_buffered_cost_returns_to_zero_after_completion() {
     let data: Bytes = "helloworld".repeat(100).into();
     let mut r = MessageReassembler::new();
     for c in ChunkList::split(&data, 32) {
@@ -433,7 +433,7 @@ fn buffered_cost_returns_to_zero_after_completion() {
 /// A single id advertising a huge `total` and streaming distinct positions cannot grow without
 /// bound: the per-message byte cap stops it.
 #[test]
-fn per_message_byte_cap_bounds_one_id() {
+fn test_per_message_byte_cap_bounds_one_id() {
     let limits = small_limits();
     let mut r = MessageReassembler::with_limits(limits);
     let meta = ChunkMeta::default();
@@ -474,7 +474,7 @@ fn per_message_byte_cap_bounds_one_id() {
 /// Spreading the flood across many ids is bounded too: the global buffered-cost ceiling caps
 /// total memory regardless of how many ids are used.
 #[test]
-fn global_cost_cap_bounds_total() {
+fn test_global_cost_cap_bounds_total() {
     let limits = small_limits();
     let mut r = MessageReassembler::with_limits(limits);
     // Each id contributes one slot of `max_chunk_data_len` data; keep them all pending.
@@ -494,7 +494,7 @@ fn global_cost_cap_bounds_total() {
 }
 
 #[test]
-fn shared_budget_bounds_multiple_peer_reassemblers() {
+fn test_shared_budget_bounds_multiple_peer_reassemblers() {
     let mut limits = small_limits();
     limits.max_total_buffered_cost = 96;
     let budget = Arc::new(ReassemblyBudget::new(limits));
@@ -526,7 +526,7 @@ fn shared_budget_bounds_multiple_peer_reassemblers() {
 }
 
 #[test]
-fn peer_budget_preserves_shared_capacity_for_another_peer() {
+fn test_peer_budget_preserves_shared_capacity_for_another_peer() {
     let mut limits = small_limits();
     limits.max_message_bytes = 32;
     limits.max_chunks_per_message = 2;
@@ -563,7 +563,7 @@ fn peer_budget_preserves_shared_capacity_for_another_peer() {
 }
 
 #[test]
-fn completed_output_keeps_shared_budget_until_released() {
+fn test_completed_output_keeps_shared_budget_until_released() {
     let mut limits = small_limits();
     limits.slot_overhead = 0;
     limits.max_total_buffered_cost = 6;
@@ -602,7 +602,7 @@ fn completed_output_keeps_shared_budget_until_released() {
 }
 
 #[test]
-fn future_timestamp_is_dropped() {
+fn test_future_timestamp_is_dropped() {
     let mut r = MessageReassembler::new();
     let out = r.handle(Chunk {
         chunk: [0, 1],
@@ -617,7 +617,7 @@ fn future_timestamp_is_dropped() {
 }
 
 #[test]
-fn expired_partial_messages_are_evicted() {
+fn test_expired_partial_messages_are_evicted() {
     let mut r = MessageReassembler::new();
     let now = get_epoch_ms();
     // a partial (1 of 2) message that is already expired
@@ -644,7 +644,7 @@ fn expired_partial_messages_are_evicted() {
 }
 
 #[test]
-fn pending_messages_are_capped() {
+fn test_pending_messages_are_capped() {
     let limits = small_limits();
     let mut r = MessageReassembler::with_limits(limits);
     // each is the first of two chunks => stays pending
@@ -659,7 +659,7 @@ fn pending_messages_are_capped() {
 }
 
 #[test]
-fn round_trip_reordered_with_duplicates() {
+fn test_round_trip_reordered_with_duplicates() {
     let data: Bytes = "abcdefghij".repeat(500).into();
     let mut chunks = chunks_of(&data, 64);
     // reorder + inject duplicates mid-stream (not after the final chunk, which would just
@@ -681,7 +681,7 @@ fn round_trip_reordered_with_duplicates() {
 /// A forged `total` larger than the per-message slot cap is rejected before it can allocate a
 /// huge slot map, even though each individual chunk's data is tiny.
 #[test]
-fn total_over_slot_cap_is_rejected() {
+fn test_total_over_slot_cap_is_rejected() {
     let limits = small_limits();
     let mut r = MessageReassembler::with_limits(limits);
     let out = r.handle(Chunk {
@@ -697,7 +697,7 @@ fn total_over_slot_cap_is_rejected() {
 /// Two chunks sharing an id/total but from different transmissions (different `ts_ms`/`ttl_ms`)
 /// must not be merged into one pending entry.
 #[test]
-fn mismatched_ts_or_ttl_for_same_id_is_rejected() {
+fn test_mismatched_ts_or_ttl_for_same_id_is_rejected() {
     let mut r = MessageReassembler::new();
     let id = Uuid::new_v4();
     let now = get_epoch_ms();
@@ -731,7 +731,7 @@ fn mismatched_ts_or_ttl_for_same_id_is_rejected() {
 /// `remove_expired_at` path (driven here by an injected clock, not by poking internal state),
 /// and a fresh message reusing the same id is then accepted rather than suppressed.
 #[test]
-fn tombstone_expires_then_id_is_reusable() {
+fn test_tombstone_expires_then_id_is_reusable() {
     let mut r = MessageReassembler::new();
     let id = Uuid::new_v4();
     // A fixed base well above the future-skew tolerance, so timestamps are unambiguous.

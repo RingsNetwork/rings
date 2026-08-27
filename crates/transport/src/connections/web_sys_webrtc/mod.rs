@@ -715,7 +715,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn rejected_permit_does_not_call_browser_send_primitive() {
+    fn test_rejected_permit_does_not_call_browser_send_primitive() {
         let (_peer_connection, connection_state, connection) = test_backend();
         let called = Rc::new(Cell::new(false));
         let observed = called.clone();
@@ -733,7 +733,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    async fn browser_send_failure_retires_connection_and_rejects_later_send() {
+    async fn test_browser_send_failure_retires_connection_and_rejects_later_send() {
         let (_peer_connection, connection_state, connection) = test_backend();
         connection_state.observe_webrtc(WebrtcConnectionState::Connected);
         connection_state.observe_outbound_data_channels(true);
@@ -763,7 +763,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn oversized_browser_frame_is_rejected_before_copy() {
+    fn test_oversized_browser_frame_is_rejected_before_copy() {
         let length = u32::try_from(MAX_DATA_CHANNEL_MESSAGE_SIZE + 1)
             .expect("protocol ceiling must fit in a JavaScript array length");
         let array = js_sys::Uint8Array::new_with_length(length);
@@ -774,7 +774,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    async fn registered_browser_onmessage_coalesces_invalid_frame_accounting() {
+    async fn test_registered_browser_onmessage_coalesces_invalid_frame_accounting() {
         let invalid_frames = Rc::new(Cell::new(0));
         let callback = Rc::new(InnerTransportCallback::new_for_test(
             "peer",
@@ -800,7 +800,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    async fn round_robin_backend_checks_permit_before_real_browser_send() {
+    async fn test_round_robin_backend_checks_permit_before_real_browser_send() {
         let connection = RtcPeerConnection::new().expect("browser peer connection must construct");
         let channel = connection.create_data_channel("permit-boundary-test");
         let enqueued = Arc::new(AtomicU64::new(0));

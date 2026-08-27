@@ -12,7 +12,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::storage::MemStorage;
 
-mod finger;
-mod stabilization;
-mod topology;
-mod two_node;
+mod test_finger;
+mod test_stabilization;
+mod test_topology;
+mod test_two_node;

@@ -10,4 +10,4 @@ pub use snapshot::StorageInspect;
 pub use snapshot::SwarmInspect;
 
 #[cfg(test)]
-mod tests;
+mod test_inspect;

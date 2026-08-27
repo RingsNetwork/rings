@@ -499,4 +499,4 @@ fn aead_associated_data(encrypted_key: &[CiphertextBlock], aad: &[u8]) -> Result
 }
 
 #[cfg(test)]
-mod tests;
+mod test_secp256k1;

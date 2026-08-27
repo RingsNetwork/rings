@@ -8,7 +8,7 @@ use crate::provider::Provider;
 /// Namespace collision: registering two protocols on the same namespace is rejected, so a
 /// later extension cannot silently shadow an earlier one.
 #[tokio::test]
-async fn duplicate_namespace_registration_is_rejected() {
+async fn test_duplicate_namespace_registration_is_rejected() {
     let provider = Provider::from_processor(Arc::new(prepare_processor().await));
     provider
         .register_protocol(Echo, EchoShell)

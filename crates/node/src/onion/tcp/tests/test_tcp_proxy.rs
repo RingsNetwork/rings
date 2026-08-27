@@ -44,7 +44,7 @@ fn runtime() -> OnionTcpRuntime {
 }
 
 #[test]
-fn native_tcp_and_https_share_one_node_wide_exit_budget() {
+fn test_native_tcp_and_https_share_one_node_wide_exit_budget() {
     let session = session();
     let policy = OnionExitPolicy {
         max_circuits: 1,
@@ -65,7 +65,7 @@ fn native_tcp_and_https_share_one_node_wide_exit_budget() {
 }
 
 #[test]
-fn exit_target_admission_returns_the_canonical_parsed_target() -> Result<()> {
+fn test_exit_target_admission_returns_the_canonical_parsed_target() -> Result<()> {
     let policy =
         OnionExitPolicy::from_target_strings(vec!["example.com:443".to_string()], Vec::new())?;
 
@@ -128,7 +128,7 @@ fn insert_test_client_stream_for_service(
 }
 
 #[test]
-fn tcp_duplex_state_closes_only_after_both_halves_close() {
+fn test_tcp_duplex_state_closes_only_after_both_halves_close() {
     let mut state = TcpDuplexState::open();
     assert!(state.should_announce_terminal());
 
@@ -143,7 +143,7 @@ fn tcp_duplex_state_closes_only_after_both_halves_close() {
 }
 
 #[test]
-fn tcp_duplex_state_suppresses_terminal_after_remote_close() {
+fn test_tcp_duplex_state_suppresses_terminal_after_remote_close() {
     let mut state = TcpDuplexState::open();
 
     state.observe_remote_terminal();
@@ -153,7 +153,7 @@ fn tcp_duplex_state_suppresses_terminal_after_remote_close() {
 }
 
 #[test]
-fn saturated_client_inbound_queue_closes_stream_without_waiting() -> Result<()> {
+fn test_saturated_client_inbound_queue_closes_stream_without_waiting() -> Result<()> {
     let runtime = runtime();
     let expected = did();
     let exit = session();
@@ -178,7 +178,7 @@ fn saturated_client_inbound_queue_closes_stream_without_waiting() -> Result<()> 
 }
 
 #[test]
-fn saturated_exit_inbound_queue_closes_stream_without_waiting() -> Result<()> {
+fn test_saturated_exit_inbound_queue_closes_stream_without_waiting() -> Result<()> {
     let runtime = runtime();
     let peer = did();
     let service = OnionServiceName::tcp();
@@ -212,7 +212,7 @@ fn saturated_exit_inbound_queue_closes_stream_without_waiting() -> Result<()> {
 }
 
 #[test]
-fn client_stream_accepts_only_expected_return_peer() -> Result<()> {
+fn test_client_stream_accepts_only_expected_return_peer() -> Result<()> {
     let runtime = runtime();
     let expected = did();
     let attacker = did();
@@ -235,7 +235,7 @@ fn client_stream_accepts_only_expected_return_peer() -> Result<()> {
 }
 
 #[test]
-fn client_stream_rejects_payload_from_wrong_exit_session() -> Result<()> {
+fn test_client_stream_rejects_payload_from_wrong_exit_session() -> Result<()> {
     let runtime = runtime();
     let expected = did();
     let selected_exit = session();
@@ -262,7 +262,7 @@ fn client_stream_rejects_payload_from_wrong_exit_session() -> Result<()> {
 }
 
 #[test]
-fn client_stream_rejects_replayed_backward_nonce() -> Result<()> {
+fn test_client_stream_rejects_replayed_backward_nonce() -> Result<()> {
     let runtime = runtime();
     let expected = did();
     let exit = session();
@@ -282,7 +282,7 @@ fn client_stream_rejects_replayed_backward_nonce() -> Result<()> {
 }
 
 #[test]
-fn exit_runtime_rejects_replayed_forward_nonce() -> Result<()> {
+fn test_exit_runtime_rejects_replayed_forward_nonce() -> Result<()> {
     let runtime = runtime();
     let peer = Did::from(99_u32);
     let circuit_id = OnionCircuitId::new([1; 16]);
@@ -299,7 +299,7 @@ fn exit_runtime_rejects_replayed_forward_nonce() -> Result<()> {
 }
 
 #[test]
-fn busy_forward_stream_uses_constant_memory_sequence_window() -> Result<()> {
+fn test_busy_forward_stream_uses_constant_memory_sequence_window() -> Result<()> {
     let runtime = runtime();
     let peer = Did::from(101_u32);
     let service = OnionServiceName::tcp();
@@ -320,7 +320,7 @@ fn busy_forward_stream_uses_constant_memory_sequence_window() -> Result<()> {
 }
 
 #[test]
-fn one_peers_open_replay_partition_cannot_fill_another_peers_partition() -> Result<()> {
+fn test_one_peers_open_replay_partition_cannot_fill_another_peers_partition() -> Result<()> {
     let runtime = runtime();
     let busy_peer = Did::from(102_u32);
     let other_peer = Did::from(103_u32);
@@ -350,7 +350,7 @@ fn one_peers_open_replay_partition_cannot_fill_another_peers_partition() -> Resu
 }
 
 #[test]
-fn busy_backward_stream_uses_constant_memory_sequence_window() -> Result<()> {
+fn test_busy_backward_stream_uses_constant_memory_sequence_window() -> Result<()> {
     let runtime = runtime();
     let expected = Did::from(104_u32);
     let exit = session();
@@ -369,7 +369,7 @@ fn busy_backward_stream_uses_constant_memory_sequence_window() -> Result<()> {
 }
 
 #[test]
-fn tcp_payload_uses_selected_route_service() -> Result<()> {
+fn test_tcp_payload_uses_selected_route_service() -> Result<()> {
     let service = OnionServiceName::parse("web")?;
     let payload = encode_tcp_payload(&service, OnionTcpPayload::Close)?;
 
@@ -379,7 +379,7 @@ fn tcp_payload_uses_selected_route_service() -> Result<()> {
 }
 
 #[test]
-fn native_tcp_exit_config_rejects_empty_or_non_tcp_services() {
+fn test_native_tcp_exit_config_rejects_empty_or_non_tcp_services() {
     assert!(matches!(
         NativeOnionTcpExitConfig::new(Vec::new(), OnionExitPolicy::default()),
         Err(Error::InvalidConfig(_))
@@ -399,7 +399,7 @@ fn native_tcp_exit_config_rejects_empty_or_non_tcp_services() {
 }
 
 #[test]
-fn native_https_proxy_requires_explicit_valid_exit_configuration() -> Result<()> {
+fn test_native_https_proxy_requires_explicit_valid_exit_configuration() -> Result<()> {
     let configured =
         NativeOnionTcpExitConfig::new(vec![OnionExitService::https()], OnionExitPolicy::default())?
             .with_https_proxy("http://127.0.0.1:6152")?;
@@ -419,7 +419,7 @@ fn native_https_proxy_requires_explicit_valid_exit_configuration() -> Result<()>
 }
 
 #[test]
-fn exit_runtime_accepts_only_installed_tcp_services() -> Result<()> {
+fn test_exit_runtime_accepts_only_installed_tcp_services() -> Result<()> {
     let service = OnionServiceName::parse("web")?;
     let config = NativeOnionTcpExitConfig::new(
         vec![OnionExitService::new("web", OnionExitTransport::Tcp)?],
@@ -438,7 +438,7 @@ fn exit_runtime_accepts_only_installed_tcp_services() -> Result<()> {
 }
 
 #[test]
-fn client_stream_rejects_backward_payload_for_wrong_service() -> Result<()> {
+fn test_client_stream_rejects_backward_payload_for_wrong_service() -> Result<()> {
     let runtime = runtime();
     let expected = did();
     let exit = session();
@@ -467,7 +467,7 @@ fn client_stream_rejects_backward_payload_for_wrong_service() -> Result<()> {
 }
 
 #[test]
-fn exit_limiter_enforces_streams_per_circuit() {
+fn test_exit_limiter_enforces_streams_per_circuit() {
     let runtime = runtime();
     let policy = OnionExitPolicy {
         max_streams_per_circuit: 1,
@@ -490,7 +490,7 @@ fn exit_limiter_enforces_streams_per_circuit() {
 }
 
 #[test]
-fn exit_stream_rejects_duplicate_live_circuit() {
+fn test_exit_stream_rejects_duplicate_live_circuit() {
     let runtime = runtime();
     let key = TcpStreamKey {
         circuit_id: OnionCircuitId::new([3; 16]),
@@ -509,7 +509,7 @@ fn exit_stream_rejects_duplicate_live_circuit() {
 }
 
 #[test]
-fn exit_limiter_counts_distinct_circuit_ids() {
+fn test_exit_limiter_counts_distinct_circuit_ids() {
     let runtime = runtime();
     let policy = OnionExitPolicy {
         max_circuits: 1,
@@ -533,7 +533,7 @@ fn exit_limiter_counts_distinct_circuit_ids() {
 }
 
 #[tokio::test]
-async fn install_rejects_duplicate_namespace_instead_of_splitting_runtime() -> Result<()> {
+async fn test_install_rejects_duplicate_namespace_instead_of_splitting_runtime() -> Result<()> {
     let processor = Arc::new(crate::tests::native::prepare_processor().await);
     let session_sk = processor.session_sk().clone();
     let extensions = Extensions::new(processor);

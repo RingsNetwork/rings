@@ -918,4 +918,4 @@ impl SwarmTransport {
 }
 
 #[cfg(test)]
-mod lifecycle_model;
+mod test_lifecycle_model;

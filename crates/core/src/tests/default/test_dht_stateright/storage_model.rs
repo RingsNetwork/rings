@@ -29,7 +29,7 @@ use crate::message::Encoded;
 //   Merge changes phase from Partitioned to Merged, enabling every edge.
 //
 // Carrier safety:
-//   `storage_entry_join_satisfies_semilattice_laws` proves the real Entry
+//   `test_storage_entry_join_satisfies_semilattice_laws` proves the real Entry
 //   carriers are join-semilattices over this finite domain. This topology
 //   model therefore does not duplicate the carrier <= LUB invariant; its
 //   distinct obligation is the liveness/closure step below.
@@ -46,7 +46,7 @@ use crate::message::Encoded;
 //
 // Quotient:
 //   `StorageJoinValue` hashes and compares only `(carrier, bits)` so BFS stays
-//   finite. The test `storage_entry_join_satisfies_semilattice_laws` is the
+//   finite. The test `test_storage_entry_join_satisfies_semilattice_laws` is the
 //   refinement witness: for every finite carrier state, real Entry::join equals
 //   canonical(bits_a union bits_b). The topology model is therefore checked on
 //   the quotient, while carrier correctness is checked on the real entries.

@@ -304,7 +304,7 @@ impl StatusPool<TrackedChannel> for RoundRobinPool<TrackedChannel> {
 }
 
 #[cfg(test)]
-mod send_cancellation_tests;
+mod test_send_cancellation;
 
 /// A connection that implemented by webrtc-rs library.
 /// Used for native environment.
@@ -905,4 +905,4 @@ impl From<RTCPeerConnectionState> for WebrtcConnectionState {
 }
 
 #[cfg(test)]
-mod tests;
+mod test_native_webrtc;

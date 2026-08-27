@@ -220,7 +220,7 @@ mod tests {
     use super::LogLevel;
 
     #[test]
-    fn default_log_level_is_error() {
+    fn test_default_log_level_is_error() {
         assert_eq!(LogLevel::default(), LogLevel::Error);
     }
 }

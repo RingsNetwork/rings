@@ -111,4 +111,4 @@ pub fn verify(
 }
 
 #[cfg(test)]
-mod tests;
+mod test_secp256r1;

@@ -18,7 +18,7 @@ use crate::tests::default::wait_for_msgs;
 use crate::tests::manually_establish_connection;
 
 #[tokio::test]
-async fn storage_store_fetches_remote_entry_into_cache() -> Result<()> {
+async fn test_storage_store_fetches_remote_entry_into_cache() -> Result<()> {
     let mut keys = gen_ordered_keys(2).into_iter();
     let key1 = next_generated_key(&mut keys)?;
     let key2 = next_generated_key(&mut keys)?;
@@ -97,7 +97,7 @@ async fn storage_store_fetches_remote_entry_into_cache() -> Result<()> {
 }
 
 #[tokio::test]
-async fn storage_append_data_preserves_entry_payload_order() -> Result<()> {
+async fn test_storage_append_data_preserves_entry_payload_order() -> Result<()> {
     let mut keys = gen_ordered_keys(2).into_iter();
     let key1 = next_generated_key(&mut keys)?;
     let key2 = next_generated_key(&mut keys)?;
@@ -171,7 +171,7 @@ async fn storage_append_data_preserves_entry_payload_order() -> Result<()> {
 }
 
 #[tokio::test]
-async fn storage_touch_data_moves_existing_entry_payload_to_end_once() -> Result<()> {
+async fn test_storage_touch_data_moves_existing_entry_payload_to_end_once() -> Result<()> {
     let mut keys = gen_ordered_keys(2).into_iter();
     let key1 = next_generated_key(&mut keys)?;
     let key2 = next_generated_key(&mut keys)?;
@@ -218,7 +218,7 @@ async fn storage_touch_data_moves_existing_entry_payload_to_end_once() -> Result
 }
 
 #[tokio::test]
-async fn storage_tombstone_data_removes_observed_payload() -> Result<()> {
+async fn test_storage_tombstone_data_removes_observed_payload() -> Result<()> {
     let mut keys = gen_ordered_keys(2).into_iter();
     let key1 = next_generated_key(&mut keys)?;
     let key2 = next_generated_key(&mut keys)?;
@@ -269,7 +269,7 @@ async fn storage_tombstone_data_removes_observed_payload() -> Result<()> {
 }
 
 #[tokio::test]
-async fn storage_compact_data_prunes_tombstones_and_preserves_owner_values() -> Result<()> {
+async fn test_storage_compact_data_prunes_tombstones_and_preserves_owner_values() -> Result<()> {
     let mut keys = gen_ordered_keys(2).into_iter();
     let key1 = next_generated_key(&mut keys)?;
     let key2 = next_generated_key(&mut keys)?;

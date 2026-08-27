@@ -934,7 +934,7 @@ mod tests {
     }
 
     #[test]
-    fn cli_default_log_level_is_error() {
+    fn test_cli_default_log_level_is_error() {
         let parsed =
             parse_without_log_level_env(["rings", "--runtime", "current-thread", "new-session"]);
 
@@ -948,7 +948,7 @@ mod tests {
     }
 
     #[test]
-    fn cli_explicit_log_level_overrides_default() {
+    fn test_cli_explicit_log_level_overrides_default() {
         let parsed = parse_without_log_level_env([
             "rings",
             "--log-level",

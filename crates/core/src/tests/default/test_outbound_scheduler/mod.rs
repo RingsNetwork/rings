@@ -76,7 +76,7 @@ fn tracked_payload(node: &Node, peer: Did, body: &[u8]) -> Result<MessagePayload
 }
 
 #[tokio::test]
-async fn tracked_completion_releases_capacity_before_returning() -> Result<()> {
+async fn test_tracked_completion_releases_capacity_before_returning() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
     let payload = tracked_payload(&node1, peer, b"tracked-capacity-release")?;
@@ -88,7 +88,7 @@ async fn tracked_completion_releases_capacity_before_returning() -> Result<()> {
 }
 
 #[tokio::test]
-async fn tracked_timeout_removes_queued_capacity_before_predecessor_finishes() -> Result<()> {
+async fn test_tracked_timeout_removes_queued_capacity_before_predecessor_finishes() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
     let paused_delivery = PausedDeliveryGuard::new();
@@ -122,7 +122,7 @@ async fn tracked_timeout_removes_queued_capacity_before_predecessor_finishes() -
 }
 
 #[tokio::test]
-async fn tracked_timeout_removes_target_behind_multiple_predecessors() -> Result<()> {
+async fn test_tracked_timeout_removes_target_behind_multiple_predecessors() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
     let paused_delivery = PausedDeliveryGuard::new();
@@ -180,7 +180,7 @@ async fn tracked_timeout_removes_target_behind_multiple_predecessors() -> Result
 }
 
 #[tokio::test]
-async fn irrevocable_send_timeout_releases_scheduler_capacity() -> Result<()> {
+async fn test_irrevocable_send_timeout_releases_scheduler_capacity() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
     let payload = tracked_payload(&node1, peer, b"irrevocable-send-timeout")?;
@@ -217,7 +217,7 @@ async fn irrevocable_send_timeout_releases_scheduler_capacity() -> Result<()> {
 }
 
 #[tokio::test]
-async fn detached_deadline_cannot_succeed_after_irrevocable_chunk_admission() -> Result<()> {
+async fn test_detached_deadline_cannot_succeed_after_irrevocable_chunk_admission() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
     let _max_message_size = MaxMessageSizeGuard::new(8192);
@@ -259,7 +259,7 @@ async fn detached_deadline_cannot_succeed_after_irrevocable_chunk_admission() ->
 }
 
 #[tokio::test]
-async fn detached_first_frame_timeout_cancels_queued_transfer() -> Result<()> {
+async fn test_detached_first_frame_timeout_cancels_queued_transfer() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
     let paused_delivery = PausedDeliveryGuard::new();
@@ -297,7 +297,7 @@ async fn detached_first_frame_timeout_cancels_queued_transfer() -> Result<()> {
 }
 
 #[tokio::test]
-async fn dropping_detached_caller_after_submit_cancels_queued_transfer() -> Result<()> {
+async fn test_dropping_detached_caller_after_submit_cancels_queued_transfer() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
     let paused_delivery = PausedDeliveryGuard::new();
@@ -349,7 +349,7 @@ async fn dropping_detached_caller_after_submit_cancels_queued_transfer() -> Resu
 }
 
 #[tokio::test]
-async fn cancelled_transfer_is_rejected_when_cancel_command_precedes_submit() -> Result<()> {
+async fn test_cancelled_transfer_is_rejected_when_cancel_command_precedes_submit() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
     let paused_delivery = PausedDeliveryGuard::new();
@@ -383,7 +383,7 @@ async fn cancelled_transfer_is_rejected_when_cancel_command_precedes_submit() ->
 }
 
 #[tokio::test]
-async fn shutdown_releases_batch_before_first_tracked_completion() -> Result<()> {
+async fn test_shutdown_releases_batch_before_first_tracked_completion() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
     dummy_controlled::reset_sent_count();
@@ -624,7 +624,7 @@ fn assert_transfer_positions(chunks: &[&Chunk]) {
 }
 
 #[tokio::test]
-async fn same_class_chunked_transfers_are_contiguous_on_the_wire() -> Result<()> {
+async fn test_same_class_chunked_transfers_are_contiguous_on_the_wire() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
     let _max_size = MaxMessageSizeGuard::new(8192);
@@ -694,7 +694,7 @@ async fn same_class_chunked_transfers_are_contiguous_on_the_wire() -> Result<()>
 }
 
 #[tokio::test]
-async fn submitted_control_preempts_a_ready_bulk_tail() -> Result<()> {
+async fn test_submitted_control_preempts_a_ready_bulk_tail() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
     let _max_size = MaxMessageSizeGuard::new(8192);
@@ -916,7 +916,7 @@ async fn disconnect_and_join_capacity_transfers(
 }
 
 #[tokio::test]
-async fn transfer_capacity_bounds_real_waiting_and_queued_lifetimes() -> Result<()> {
+async fn test_transfer_capacity_bounds_real_waiting_and_queued_lifetimes() -> Result<()> {
     let (node1, node2) = connected_nodes().await?;
     let peer = node2.did();
     let _pending_delivery = PendingDeliveryGuard::new();
@@ -928,5 +928,5 @@ async fn transfer_capacity_bounds_real_waiting_and_queued_lifetimes() -> Result<
     disconnect_and_join_capacity_transfers(&node1, peer, sends).await
 }
 
-mod boundaries;
-mod delivery;
+mod test_boundaries;
+mod test_delivery;

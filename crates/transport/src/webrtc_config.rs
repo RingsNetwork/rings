@@ -80,7 +80,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn udp_port_range_preserves_valid_bounds() {
+    fn test_udp_port_range_preserves_valid_bounds() {
         let range = WebrtcUdpPortRange::new(49160, 49200);
 
         assert_eq!(
@@ -93,7 +93,7 @@ mod tests {
     }
 
     #[test]
-    fn udp_port_range_rejects_zero_bound() {
+    fn test_udp_port_range_rejects_zero_bound() {
         let range = WebrtcUdpPortRange::new(0, 49200);
 
         assert_eq!(
@@ -103,7 +103,7 @@ mod tests {
     }
 
     #[test]
-    fn udp_port_range_rejects_inverted_bounds() {
+    fn test_udp_port_range_rejects_inverted_bounds() {
         let range = WebrtcUdpPortRange::new(49200, 49160);
 
         assert_eq!(

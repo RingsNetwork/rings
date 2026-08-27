@@ -974,4 +974,4 @@ fn spawn_actor(actor: InboundActor) -> bool {
 }
 
 #[cfg(test)]
-mod tests;
+mod test_inbound;

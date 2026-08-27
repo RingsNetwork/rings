@@ -455,7 +455,7 @@ mod tests {
 
     /// Representative schedule #1: oldest-first delivery converges.
     #[tokio::test]
-    async fn schedule_fifo_converges() {
+    async fn test_schedule_fifo_converges() {
         run_schedule(fifo).await;
     }
 
@@ -463,7 +463,7 @@ mod tests {
     /// fixpoint — the two extremes giving reproducible evidence of the
     /// order-insensitivity reasoned about above (not a proof over all orders).
     #[tokio::test]
-    async fn schedule_lifo_converges() {
+    async fn test_schedule_lifo_converges() {
         run_schedule(lifo).await;
     }
 }

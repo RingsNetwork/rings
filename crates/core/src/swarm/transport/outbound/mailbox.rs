@@ -200,7 +200,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn priority_submission_bypasses_regular_backlog_beyond_drain_budget() {
+    fn test_priority_submission_bypasses_regular_backlog_beyond_drain_budget() {
         let (sender, mut receiver) = channel();
         for index in 0..64 {
             sender.send(index, Regular).expect("regular mailbox open");
@@ -217,7 +217,7 @@ mod tests {
     }
 
     #[test]
-    fn validation_and_regular_drain_share_the_sender_linearization_boundary() {
+    fn test_validation_and_regular_drain_share_the_sender_linearization_boundary() {
         let (sender, mut receiver) = channel();
         sender.send(1, Regular).expect("regular mailbox open");
         assert_eq!(sender.send_if(2, Regular, |_| false), Err(2));
@@ -228,7 +228,7 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_scan_reaches_the_tail_of_a_regular_backlog() {
+    fn test_cancellation_scan_reaches_the_tail_of_a_regular_backlog() {
         #[derive(Debug, Eq, PartialEq)]
         enum Command {
             Submit(usize),
@@ -252,7 +252,7 @@ mod tests {
     }
 
     #[test]
-    fn drain_all_grows_from_actual_items_instead_of_the_unbounded_budget() {
+    fn test_drain_all_grows_from_actual_items_instead_of_the_unbounded_budget() {
         let (sender, mut receiver) = channel();
         sender.send(1, Priority).expect("priority mailbox open");
         sender.send(2, Regular).expect("regular mailbox open");
@@ -261,7 +261,7 @@ mod tests {
     }
 
     #[test]
-    fn send_validation_linearizes_with_close_under_contention() {
+    fn test_send_validation_linearizes_with_close_under_contention() {
         let (sender, mut receiver) = channel();
         let sender = std::sync::Arc::new(sender);
         let (validation_entered_tx, validation_entered_rx) = std::sync::mpsc::sync_channel(0);

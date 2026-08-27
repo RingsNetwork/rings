@@ -640,7 +640,7 @@ mod tests {
     }
 
     #[test]
-    fn registration_publish_remembers_attempted_values_before_effects() {
+    fn test_registration_publish_remembers_attempted_values_before_effects() {
         let old = encoded("old");
         let attempted = encoded("attempted");
         let current = BTreeSet::from([attempted.clone()]);
@@ -653,7 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn registration_publish_retry_tombstones_values_from_cancelled_attempts() {
+    fn test_registration_publish_retry_tombstones_values_from_cancelled_attempts() {
         let old = encoded("old");
         let cancelled = encoded("cancelled");
         let replacement = encoded("replacement");
@@ -674,7 +674,7 @@ mod tests {
     }
 
     #[test]
-    fn registration_publish_begin_finish_preserve_known_set_law() {
+    fn test_registration_publish_begin_finish_preserve_known_set_law() {
         for old_mask in 0..8 {
             for current_mask in 0..8 {
                 for replacement_mask in 0..8 {
@@ -705,7 +705,7 @@ mod tests {
     }
 
     #[test]
-    fn registration_publish_tombstones_matching_observed_values() {
+    fn test_registration_publish_tombstones_matching_observed_values() {
         let current = BTreeSet::from([encoded("self-new")]);
         let observed_self_old = encoded("self-old");
         let observed_other = encoded("other");
@@ -723,7 +723,7 @@ mod tests {
     }
 
     #[test]
-    fn registration_pruning_removes_replaced_or_unpreserved_observed_values() {
+    fn test_registration_pruning_removes_replaced_or_unpreserved_observed_values() {
         let observed_self_old = encoded("self-old");
         let observed_live = encoded("other-live");
         let observed_invalid = encoded("invalid");
@@ -742,7 +742,7 @@ mod tests {
     }
 
     #[test]
-    fn registration_publish_tombstones_unpreserved_observed_values() {
+    fn test_registration_publish_tombstones_unpreserved_observed_values() {
         let current = BTreeSet::from([encoded("self-new")]);
         let observed_self_old = encoded("self-old");
         let observed_live = encoded("other-live");

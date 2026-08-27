@@ -114,4 +114,4 @@ impl FromStr for IceServer {
 }
 
 #[cfg(test)]
-mod tests;
+mod test_ice_server;

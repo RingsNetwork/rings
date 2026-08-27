@@ -66,7 +66,7 @@ mod tests {
     use crate::ecc::SecretKey;
 
     #[tokio::test]
-    async fn memstorage_basic_interface_should_work() {
+    async fn test_memstorage_basic_interface_should_work() {
         let store = MemStorage::new();
         let addr = SecretKey::random().address().to_string();
 

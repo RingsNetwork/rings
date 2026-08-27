@@ -277,4 +277,4 @@ where
 }
 
 #[cfg(test)]
-mod tests;
+mod test_elgamal;

@@ -45,7 +45,7 @@ fn next_generated_key(keys: &mut impl Iterator<Item = SecretKey>) -> Result<Secr
 }
 
 #[tokio::test]
-async fn notify_predecessor_rejects_origin_mismatch_without_mutating_topology() -> Result<()> {
+async fn test_notify_predecessor_rejects_origin_mismatch_without_mutating_topology() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
     let origin = SecretKey::random();
     let spoofed = SecretKey::random().address().into();
@@ -68,7 +68,8 @@ async fn notify_predecessor_rejects_origin_mismatch_without_mutating_topology() 
 }
 
 #[tokio::test]
-async fn notify_predecessor_rejects_unadmitted_origin_without_mutating_topology() -> Result<()> {
+async fn test_notify_predecessor_rejects_unadmitted_origin_without_mutating_topology() -> Result<()>
+{
     let node = prepare_node(SecretKey::random()).await;
     let origin = SecretKey::random();
     let origin_did = origin.address().into();
@@ -132,7 +133,7 @@ async fn test_triple_nodes_stabilization_1_3_2() -> Result<()> {
 }
 
 #[tokio::test]
-async fn notify_predecessor_report_acks_local_branch_when_predecessor_already_connected(
+async fn test_notify_predecessor_report_acks_local_branch_when_predecessor_already_connected(
 ) -> Result<()> {
     let mut keys = gen_ordered_keys(3).into_iter();
     let key1 = next_generated_key(&mut keys)?;

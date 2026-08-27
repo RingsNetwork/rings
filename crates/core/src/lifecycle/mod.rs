@@ -11,4 +11,4 @@ pub use stop::StopSource;
 pub use stop::StopToken;
 
 #[cfg(test)]
-mod tests;
+mod test_lifecycle;

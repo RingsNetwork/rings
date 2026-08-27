@@ -35,7 +35,7 @@ use crate::message::types::SyncEntriesWithSuccessor;
 use crate::storage::KvStorageInterface;
 use crate::storage::MemStorage;
 
-mod repair;
+mod test_repair;
 
 fn data_entry(did: Did) -> Entry {
     Entry::new(did, vec![], EntryKind::Data)
@@ -162,7 +162,7 @@ fn placed_entries_by_key(entries: impl IntoIterator<Item = PlacedEntry>) -> BTre
 }
 
 #[test]
-fn coalesced_storage_sync_deliveries_merge_identical_physical_destinations() -> Result<()> {
+fn test_coalesced_storage_sync_deliveries_merge_identical_physical_destinations() -> Result<()> {
     let owner = Did::from(50u32);
     let first = PlacedEntry::new(Did::from(100u32), data_entry(Did::from(10u32)));
     let second = PlacedEntry::new(Did::from(120u32), data_entry(Did::from(20u32)));
@@ -192,7 +192,7 @@ fn coalesced_storage_sync_deliveries_merge_identical_physical_destinations() -> 
 }
 
 #[test]
-fn coalesced_storage_sync_deliveries_keep_placement_destinations_separate() -> Result<()> {
+fn test_coalesced_storage_sync_deliveries_keep_placement_destinations_separate() -> Result<()> {
     let first_key = Did::from(100u32);
     let second_key = Did::from(120u32);
     let first = PlacedEntry::new(first_key, data_entry(Did::from(10u32)));
@@ -223,7 +223,7 @@ fn coalesced_storage_sync_deliveries_keep_placement_destinations_separate() -> R
 }
 
 #[test]
-fn repair_cursor_identity_ignores_entry_iteration_order() {
+fn test_repair_cursor_identity_ignores_entry_iteration_order() {
     let destination = StorageSyncDestination::PhysicalOwner(Did::from(50u32));
     let first = PlacedEntry::new(Did::from(100u32), data_entry(Did::from(10u32)));
     let second = PlacedEntry::new(Did::from(120u32), data_entry(Did::from(20u32)));
@@ -242,7 +242,7 @@ fn repair_cursor_identity_ignores_entry_iteration_order() {
 }
 
 #[test]
-fn repair_phase_admits_one_bounded_storage_sync_batch() {
+fn test_repair_phase_admits_one_bounded_storage_sync_batch() {
     let frame_bytes = rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 
     assert_eq!(SYNC_BATCH_MAX_BYTES, frame_bytes / 4);
@@ -283,7 +283,7 @@ impl KvStorageInterface<Entry> for FailingGetStorageFixture {
 }
 
 #[tokio::test]
-async fn entry_lookup_reports_local_storage_failure() -> Result<()> {
+async fn test_entry_lookup_reports_local_storage_failure() -> Result<()> {
     let did = Did::from(1u32);
     let node = PeerRing::new_with_storage(did, 3, Box::new(FailingGetStorageFixture));
 
@@ -297,7 +297,7 @@ async fn entry_lookup_reports_local_storage_failure() -> Result<()> {
 }
 
 #[tokio::test]
-async fn virtual_storage_owner_routes_operate_to_physical_owner() -> Result<()> {
+async fn test_virtual_storage_owner_routes_operate_to_physical_owner() -> Result<()> {
     let local = Did::from(1u32);
     let remote = Did::from(2u32);
     let node = PeerRing::new_with_storage_finger_table_size_and_virtual_nodes(
@@ -335,7 +335,7 @@ async fn virtual_storage_owner_routes_operate_to_physical_owner() -> Result<()> 
 }
 
 #[tokio::test]
-async fn virtual_storage_owner_routes_interval_key_to_successor_position() -> Result<()> {
+async fn test_virtual_storage_owner_routes_interval_key_to_successor_position() -> Result<()> {
     let local = Did::from(1u32);
     let remote = Did::from(2u32);
     let node = PeerRing::new_with_storage_finger_table_size_and_virtual_nodes(
@@ -370,7 +370,7 @@ async fn virtual_storage_owner_routes_interval_key_to_successor_position() -> Re
 }
 
 #[tokio::test]
-async fn virtual_storage_owner_stores_local_position_locally() -> Result<()> {
+async fn test_virtual_storage_owner_stores_local_position_locally() -> Result<()> {
     let local = Did::from(1u32);
     let node = PeerRing::new_with_storage_finger_table_size_and_virtual_nodes(
         local,
@@ -393,7 +393,7 @@ async fn virtual_storage_owner_stores_local_position_locally() -> Result<()> {
 }
 
 #[tokio::test]
-async fn local_fetch_falls_back_when_local_virtual_owner_has_no_entry() -> Result<()> {
+async fn test_local_fetch_falls_back_when_local_virtual_owner_has_no_entry() -> Result<()> {
     let local = Did::from(1u32);
     let remote = Did::from(2u32);
     let node = PeerRing::new_with_storage_finger_table_size_and_virtual_nodes(
@@ -426,7 +426,7 @@ async fn local_fetch_falls_back_when_local_virtual_owner_has_no_entry() -> Resul
 }
 
 #[tokio::test]
-async fn virtual_storage_sync_copies_entries_to_observed_virtual_owner() -> Result<()> {
+async fn test_virtual_storage_sync_copies_entries_to_observed_virtual_owner() -> Result<()> {
     let local = Did::from(1u32);
     let remote = Did::from(2u32);
     let node = PeerRing::new_with_storage_finger_table_size_and_virtual_nodes(
@@ -458,7 +458,7 @@ async fn virtual_storage_sync_copies_entries_to_observed_virtual_owner() -> Resu
 }
 
 #[test]
-fn physical_owner_route_permits_a_nonlocal_owner_through_the_current_next_hop() -> Result<()> {
+fn test_physical_owner_route_permits_a_nonlocal_owner_through_the_current_next_hop() -> Result<()> {
     let local = Did::from(1u32);
     let next_hop = Did::from(10u32);
     let remote_owner = Did::from(5u32);
@@ -478,7 +478,7 @@ fn physical_owner_route_permits_a_nonlocal_owner_through_the_current_next_hop() 
 }
 
 #[test]
-fn physical_owner_route_cancels_when_its_direct_next_hop_leaves_topology() -> Result<()> {
+fn test_physical_owner_route_cancels_when_its_direct_next_hop_leaves_topology() -> Result<()> {
     let local = Did::from(1u32);
     let remote_owner = Did::from(2u32);
     let node = PeerRing::new_with_storage_finger_table_size_and_virtual_nodes(
@@ -500,7 +500,7 @@ fn physical_owner_route_cancels_when_its_direct_next_hop_leaves_topology() -> Re
 }
 
 #[test]
-fn physical_owner_route_cancels_when_its_next_hop_changes() -> Result<()> {
+fn test_physical_owner_route_cancels_when_its_next_hop_changes() -> Result<()> {
     let local = Did::from(1u32);
     let old_next_hop = Did::from(20u32);
     let new_next_hop = Did::from(5u32);
@@ -531,7 +531,7 @@ fn physical_owner_route_cancels_when_its_next_hop_changes() -> Result<()> {
 }
 
 #[test]
-fn placement_key_route_uses_one_virtual_owner_topology_snapshot() -> Result<()> {
+fn test_placement_key_route_uses_one_virtual_owner_topology_snapshot() -> Result<()> {
     let local = Did::from(1u32);
     let remote = Did::from(10u32);
     let node = PeerRing::new_with_storage_finger_table_size_and_virtual_nodes(
@@ -556,7 +556,7 @@ fn placement_key_route_uses_one_virtual_owner_topology_snapshot() -> Result<()> 
 }
 
 #[tokio::test]
-async fn sync_without_ack_retains_entry_for_next_handoff() -> Result<()> {
+async fn test_sync_without_ack_retains_entry_for_next_handoff() -> Result<()> {
     let node_did = Did::from(0u32);
     let new_successor = Did::from(50u32);
     let placement_key = Did::from(100u32);
@@ -582,7 +582,7 @@ async fn sync_without_ack_retains_entry_for_next_handoff() -> Result<()> {
 }
 
 #[tokio::test]
-async fn sync_ack_deletes_local_entry_after_copy() -> Result<()> {
+async fn test_sync_ack_deletes_local_entry_after_copy() -> Result<()> {
     let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
     let new_successor = Did::from(50u32);
     let placement_key = Did::from(100u32);
@@ -602,7 +602,7 @@ async fn sync_ack_deletes_local_entry_after_copy() -> Result<()> {
 }
 
 #[tokio::test]
-async fn sync_ack_retains_changed_local_value() -> Result<()> {
+async fn test_sync_ack_retains_changed_local_value() -> Result<()> {
     let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
     let new_successor = Did::from(50u32);
     let placement_key = Did::from(100u32);
@@ -630,7 +630,7 @@ async fn sync_ack_retains_changed_local_value() -> Result<()> {
 }
 
 #[tokio::test]
-async fn sync_partial_ack_retains_unacked_entries() -> Result<()> {
+async fn test_sync_partial_ack_retains_unacked_entries() -> Result<()> {
     let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
     let acked_key = Did::from(100u32);
     let pending_key = Did::from(120u32);
@@ -655,7 +655,7 @@ async fn sync_partial_ack_retains_unacked_entries() -> Result<()> {
 }
 
 #[tokio::test]
-async fn sync_ack_deletes_placement_key_not_entry_identity() -> Result<()> {
+async fn test_sync_ack_deletes_placement_key_not_entry_identity() -> Result<()> {
     let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
     let placement_key = Did::from(100u32);
     let resource_id = Did::from(10u32);
@@ -680,7 +680,7 @@ async fn sync_ack_deletes_placement_key_not_entry_identity() -> Result<()> {
 }
 
 #[tokio::test]
-async fn sync_entries_with_successor_batches_by_wire_budget() -> Result<()> {
+async fn test_sync_entries_with_successor_batches_by_wire_budget() -> Result<()> {
     let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
     let new_successor = Did::from(50u32);
     let payload_len = SYNC_BATCH_MAX_BYTES / 2;
@@ -725,7 +725,7 @@ async fn sync_entries_with_successor_batches_by_wire_budget() -> Result<()> {
 }
 
 #[test]
-fn sync_entries_batching_emits_oversized_single_entry_alone() -> Result<()> {
+fn test_sync_entries_batching_emits_oversized_single_entry_alone() -> Result<()> {
     let placed = PlacedEntry::new(
         Did::from(100u32),
         data_entry_with_data(Did::from(10u32), "x"),
@@ -739,7 +739,7 @@ fn sync_entries_batching_emits_oversized_single_entry_alone() -> Result<()> {
 }
 
 #[test]
-fn sync_entries_batching_preserves_input_order_across_batches() -> Result<()> {
+fn test_sync_entries_batching_preserves_input_order_across_batches() -> Result<()> {
     let entries = vec![
         PlacedEntry::new(
             Did::from(100u32),
@@ -768,7 +768,7 @@ fn sync_entries_batching_preserves_input_order_across_batches() -> Result<()> {
 }
 
 #[test]
-fn sync_entries_batch_wire_cost_matches_serialized_message_cost() -> Result<()> {
+fn test_sync_entries_batch_wire_cost_matches_serialized_message_cost() -> Result<()> {
     let entries = vec![
         PlacedEntry::new(
             Did::from(100u32),
@@ -796,7 +796,7 @@ fn sync_entries_batch_wire_cost_matches_serialized_message_cost() -> Result<()> 
 }
 
 #[tokio::test]
-async fn sync_batch_ack_deletes_acked_batch_and_retries_unacked_batches() -> Result<()> {
+async fn test_sync_batch_ack_deletes_acked_batch_and_retries_unacked_batches() -> Result<()> {
     let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
     let new_successor = Did::from(50u32);
     let payload_len = SYNC_BATCH_MAX_BYTES / 2;

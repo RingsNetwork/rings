@@ -75,10 +75,10 @@ impl TransportCallback for PendingInvalidCallback {
 }
 
 #[cfg(not(target_family = "wasm"))]
-mod admission;
-mod capacity;
+mod test_admission;
+mod test_capacity;
 #[cfg(not(target_family = "wasm"))]
-mod capacity_handoff;
+mod test_capacity_handoff;
 #[cfg(not(target_family = "wasm"))]
-mod invalid_report;
-mod wire;
+mod test_invalid_report;
+mod test_wire;

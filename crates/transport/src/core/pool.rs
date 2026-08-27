@@ -133,7 +133,7 @@ pub mod tests {
     }
 
     #[test]
-    fn empty_rr_pool_returns_typed_error() {
+    fn test_empty_rr_pool_returns_typed_error() {
         let pool = RoundRobinPool::<usize>::default();
         assert!(matches!(pool.select(), Err(Error::RoundRobinPoolEmpty)));
     }

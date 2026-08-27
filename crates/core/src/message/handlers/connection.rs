@@ -325,7 +325,7 @@ pub mod tests {
     use crate::tests::manually_establish_connection;
 
     #[test]
-    fn topology_report_keeps_only_confirmed_peers() {
+    fn test_topology_report_keeps_only_confirmed_peers() {
         let active = SecretKey::random().address().into();
         let pending_successor = SecretKey::random().address().into();
         let pending_predecessor = SecretKey::random().address().into();
@@ -343,7 +343,7 @@ pub mod tests {
     }
 
     #[test]
-    fn connect_successor_hint_skips_requester_self_report() -> Result<()> {
+    fn test_connect_successor_hint_skips_requester_self_report() -> Result<()> {
         let keys = gen_ordered_keys(4);
         let local = keys[0].address().into();
         let requester = keys[1].address().into();
@@ -361,7 +361,7 @@ pub mod tests {
     }
 
     #[tokio::test]
-    async fn sync_successor_report_connects_advertised_successor() -> Result<()> {
+    async fn test_sync_successor_report_connects_advertised_successor() -> Result<()> {
         let keys = gen_ordered_keys(3);
         let node1 = prepare_node(keys[0]).await;
         let node2 = prepare_node(keys[1]).await;
@@ -822,7 +822,7 @@ pub mod tests {
 
     #[cfg(feature = "dummy")]
     #[tokio::test]
-    async fn joining_between_bootstrap_and_successor_connects_successor_hint() -> Result<()> {
+    async fn test_joining_between_bootstrap_and_successor_connects_successor_hint() -> Result<()> {
         let keys = gen_ordered_keys(4);
         let (node1, node2, node3) =
             test_triple_ordered_nodes_connection(keys[0], keys[2], keys[3]).await?;

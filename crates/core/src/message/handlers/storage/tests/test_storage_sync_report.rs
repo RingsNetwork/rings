@@ -36,7 +36,7 @@ use crate::tests::default::wait_for_msgs;
 use crate::tests::manually_establish_connection;
 
 #[tokio::test]
-async fn sync_entries_handler_reports_persisted_entries() -> Result<()> {
+async fn test_sync_entries_handler_reports_persisted_entries() -> Result<()> {
     let sender = prepare_node(SecretKey::random()).await;
     let receiver = prepare_node(SecretKey::random()).await;
     manually_establish_connection(&sender.swarm, &receiver.swarm).await;
@@ -100,7 +100,7 @@ async fn sync_entries_handler_reports_persisted_entries() -> Result<()> {
 }
 
 #[tokio::test]
-async fn persist_synced_entries_returns_acks_for_owned_entries() -> Result<()> {
+async fn test_persist_synced_entries_returns_acks_for_owned_entries() -> Result<()> {
     let receiver = prepare_node(SecretKey::random()).await;
     let entry = Entry::new(
         Did::from(10u32),
@@ -137,7 +137,7 @@ async fn persist_synced_entries_returns_acks_for_owned_entries() -> Result<()> {
 }
 
 #[tokio::test]
-async fn sync_entries_handler_skips_entries_owned_by_another_virtual_owner() -> Result<()> {
+async fn test_sync_entries_handler_skips_entries_owned_by_another_virtual_owner() -> Result<()> {
     let mut keys = gen_ordered_keys(2).into_iter();
     let sender = prepare_node_with_virtual_nodes(next_generated_key(&mut keys)?, 2)?;
     let receiver = prepare_node_with_virtual_nodes(next_generated_key(&mut keys)?, 2)?;
@@ -220,8 +220,8 @@ async fn sync_entries_handler_skips_entries_owned_by_another_virtual_owner() -> 
 }
 
 #[tokio::test]
-async fn sync_entries_physical_destination_routes_by_physical_did_not_storage_owner() -> Result<()>
-{
+async fn test_sync_entries_physical_destination_routes_by_physical_did_not_storage_owner(
+) -> Result<()> {
     let mut keys = gen_ordered_keys(6).into_iter();
     let node = prepare_node_with_virtual_nodes(next_generated_key(&mut keys)?, 4)?;
     let mut peers = Vec::new();

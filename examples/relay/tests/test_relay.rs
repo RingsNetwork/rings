@@ -16,7 +16,7 @@ use tokio::net::UdpSocket;
 const CONNECT_BUDGET: Duration = Duration::from_secs(45);
 
 #[tokio::test]
-async fn tcp_echo_helper_round_trips_locally() {
+async fn test_tcp_echo_helper_round_trips_locally() {
     let addr = rings_relay_example::spawn_tcp_echo().await;
     let payload = b"local tcp echo";
     let mut stream = TcpStream::connect(addr).await.expect("connect echo");
@@ -29,7 +29,7 @@ async fn tcp_echo_helper_round_trips_locally() {
 }
 
 #[tokio::test]
-async fn udp_echo_helper_round_trips_locally() {
+async fn test_udp_echo_helper_round_trips_locally() {
     let addr = rings_relay_example::spawn_udp_echo().await;
     let socket = UdpSocket::bind("127.0.0.1:0").await.expect("bind client");
     let payload = b"local udp echo";
@@ -48,7 +48,7 @@ async fn udp_echo_helper_round_trips_locally() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn tcp_relay_round_trip() {
+async fn test_tcp_relay_round_trip() {
     let payload = b"ping rings tcp relay";
     match tokio::time::timeout(CONNECT_BUDGET, rings_relay_example::tcp_round_trip(payload)).await {
         Ok(Ok(got)) => assert_eq!(got.as_slice(), payload, "relay must echo the bytes back"),
@@ -58,7 +58,7 @@ async fn tcp_relay_round_trip() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn tcp_stream_relay_round_trip() {
+async fn test_tcp_stream_relay_round_trip() {
     let payload = b"ping accepted tcp relay stream";
     match tokio::time::timeout(
         CONNECT_BUDGET,
@@ -73,7 +73,7 @@ async fn tcp_stream_relay_round_trip() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn udp_relay_round_trip() {
+async fn test_udp_relay_round_trip() {
     let payload = b"ping rings udp relay";
     match tokio::time::timeout(CONNECT_BUDGET, rings_relay_example::udp_round_trip(payload)).await {
         Ok(Ok(got)) => assert_eq!(got.as_slice(), payload, "relay must echo the bytes back"),
@@ -87,7 +87,7 @@ async fn udp_relay_round_trip() {
 /// genuine HTTP response from Google. Needs both overlay connectivity and outbound
 /// internet on the relay node; skips (with a notice) if either is unavailable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn relay_to_google() {
+async fn test_relay_to_google() {
     let request = b"GET / HTTP/1.0\r\nHost: www.google.com\r\nConnection: close\r\n\r\n";
     match tokio::time::timeout(
         Duration::from_secs(60),

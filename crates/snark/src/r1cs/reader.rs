@@ -479,7 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn json_reader_rejects_more_recursive_outputs_than_inputs() {
+    fn test_json_reader_rejects_more_recursive_outputs_than_inputs() {
         let source = r1cs_json(1, 3);
         let error = load_r1cs_from_json::<Fp, _>(Cursor::new(source.as_bytes()));
 
@@ -493,7 +493,7 @@ mod tests {
     }
 
     #[test]
-    fn json_reader_rejects_more_recursive_inputs_than_outputs() {
+    fn test_json_reader_rejects_more_recursive_inputs_than_outputs() {
         let source = r1cs_json(3, 1);
         let error = load_r1cs_from_json::<Fp, _>(Cursor::new(source.as_bytes()));
 

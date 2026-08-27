@@ -15,7 +15,7 @@ use crate::types::GatewayRequestKind;
 use crate::url::TargetUrl;
 use crate::WebviewError;
 
-mod xhtml;
+mod test_xhtml;
 
 trait TestMutex<T> {
     fn test_lock(&self) -> Result<std::sync::MutexGuard<'_, T>>;
@@ -32,7 +32,7 @@ struct StaticTransport;
 
 #[cfg(not(target_family = "wasm"))]
 #[test]
-fn native_gateway_transport_preserves_send_and_sync_bounds() {
+fn test_native_gateway_transport_preserves_send_and_sync_bounds() {
     fn assert_send_sync<T: GatewayTransport + Send + Sync>() {}
     assert_send_sync::<StaticTransport>();
 }
@@ -62,7 +62,7 @@ impl GatewayTransport for StaticTransport {
 
 #[cfg(all(target_family = "wasm", not(feature = "browser")))]
 #[test]
-fn wasm_without_browser_reports_clock_unavailable_before_transport_io() -> Result<()> {
+fn test_wasm_without_browser_reports_clock_unavailable_before_transport_io() -> Result<()> {
     let gateway = ConcurrentWebviewGateway::new(GatewayPrefix::new("/webview/")?, StaticTransport);
     let request = GatewayRequest::navigation(Url::parse("https://example.test/")?);
 
@@ -76,7 +76,7 @@ fn wasm_without_browser_reports_clock_unavailable_before_transport_io() -> Resul
 }
 
 #[test]
-fn gateway_rewrites_html_and_stores_cookies() -> Result<()> {
+fn test_gateway_rewrites_html_and_stores_cookies() -> Result<()> {
     let target = TargetUrl::parse("https://example.com/index.html")?.into_url();
     let gateway = ConcurrentWebviewGateway::new(GatewayPrefix::new("/webview/")?, StaticTransport)
         .with_bootstrap_script("globalThis.__rings = true;");
@@ -125,7 +125,7 @@ impl GatewayTransport for InvalidUtf8TextTransport {
 }
 
 #[test]
-fn gateway_rejects_non_utf8_rewritable_documents() -> Result<()> {
+fn test_gateway_rejects_non_utf8_rewritable_documents() -> Result<()> {
     let target = TargetUrl::parse("https://example.com/index.html")?.into_url();
     for content_type in [
         "text/html; charset=iso-8859-1",
@@ -171,7 +171,7 @@ impl GatewayTransport for DocumentTransport {
 }
 
 #[test]
-fn declared_active_and_undeclared_active_navigation_documents_are_rewritten() -> Result<()> {
+fn test_declared_active_and_undeclared_active_navigation_documents_are_rewritten() -> Result<()> {
     let target = TargetUrl::parse("https://example.com/index")?.into_url();
     for (content_type, body) in [
         (
@@ -207,7 +207,7 @@ fn declared_active_and_undeclared_active_navigation_documents_are_rewritten() ->
 }
 
 #[test]
-fn declared_inert_navigation_bodies_are_not_activated_by_markup_bytes() -> Result<()> {
+fn test_declared_inert_navigation_bodies_are_not_activated_by_markup_bytes() -> Result<()> {
     let target = TargetUrl::parse("https://example.com/index")?.into_url();
     for content_type in [
         "text/plain",
@@ -235,7 +235,7 @@ fn declared_inert_navigation_bodies_are_not_activated_by_markup_bytes() -> Resul
 }
 
 #[test]
-fn unknown_navigation_media_type_is_rejected_instead_of_passed_through() -> Result<()> {
+fn test_unknown_navigation_media_type_is_rejected_instead_of_passed_through() -> Result<()> {
     let target = TargetUrl::parse("https://example.com/index")?.into_url();
     let gateway =
         ConcurrentWebviewGateway::new(GatewayPrefix::new("/webview/")?, DocumentTransport {
@@ -252,7 +252,7 @@ fn unknown_navigation_media_type_is_rejected_instead_of_passed_through() -> Resu
 }
 
 #[test]
-fn missing_navigation_media_type_is_rejected_when_no_active_prefix_is_proven() -> Result<()> {
+fn test_missing_navigation_media_type_is_rejected_when_no_active_prefix_is_proven() -> Result<()> {
     let target = TargetUrl::parse("https://example.com/index")?.into_url();
     let gateway =
         ConcurrentWebviewGateway::new(GatewayPrefix::new("/webview/")?, DocumentTransport {
@@ -268,7 +268,7 @@ fn missing_navigation_media_type_is_rejected_when_no_active_prefix_is_proven() -
 }
 
 #[test]
-fn invalid_tail_cannot_hide_active_document_without_content_type() -> Result<()> {
+fn test_invalid_tail_cannot_hide_active_document_without_content_type() -> Result<()> {
     let target = TargetUrl::parse("https://example.com/index")?.into_url();
     let gateway =
         ConcurrentWebviewGateway::new(GatewayPrefix::new("/webview/")?, DocumentTransport {
@@ -285,7 +285,7 @@ fn invalid_tail_cannot_hide_active_document_without_content_type() -> Result<()>
 }
 
 #[test]
-fn gateway_rejects_response_before_rewriting_when_body_budget_is_exceeded() -> Result<()> {
+fn test_gateway_rejects_response_before_rewriting_when_body_budget_is_exceeded() -> Result<()> {
     let target = TargetUrl::parse("https://example.com/index")?.into_url();
     let gateway =
         ConcurrentWebviewGateway::new(GatewayPrefix::new("/webview/")?, DocumentTransport {
@@ -303,7 +303,7 @@ fn gateway_rejects_response_before_rewriting_when_body_budget_is_exceeded() -> R
 }
 
 #[test]
-fn gateway_rejects_oversized_request_before_transport_preparation() -> Result<()> {
+fn test_gateway_rejects_oversized_request_before_transport_preparation() -> Result<()> {
     let target = TargetUrl::parse("https://example.com/upload")?.into_url();
     let gateway = ConcurrentWebviewGateway::new(GatewayPrefix::new("/webview/")?, StaticTransport);
     let request = GatewayRequest::navigation(target).with_body(vec![0; MAX_GATEWAY_BODY_BYTES + 1]);
@@ -318,7 +318,7 @@ fn gateway_rejects_oversized_request_before_transport_preparation() -> Result<()
 }
 
 #[test]
-fn gateway_rejects_response_when_rewriting_exceeds_body_budget() -> Result<()> {
+fn test_gateway_rejects_response_when_rewriting_exceeds_body_budget() -> Result<()> {
     let target = TargetUrl::parse("https://example.com/index")?.into_url();
     for (content_type, body) in [
         ("text/html", "<img src=\"/x\">".repeat(200_000)),
@@ -349,7 +349,7 @@ fn request_bootstrap(request: &GatewayRequest) -> String {
 }
 
 #[test]
-fn per_request_bootstrap_tracks_navigation_context() -> Result<()> {
+fn test_per_request_bootstrap_tracks_navigation_context() -> Result<()> {
     let gateway = ConcurrentWebviewGateway::new(GatewayPrefix::new("/webview/")?, StaticTransport)
         .with_request_bootstrap(request_bootstrap);
     let target = TargetUrl::parse("https://frame.example.test/nested")?.into_url();
@@ -364,7 +364,7 @@ fn per_request_bootstrap_tracks_navigation_context() -> Result<()> {
 }
 
 #[test]
-fn source_free_runtime_gateway_requests_are_rejected() -> Result<()> {
+fn test_source_free_runtime_gateway_requests_are_rejected() -> Result<()> {
     let target = TargetUrl::parse("https://api.example.test/data")?.into_url();
     let gateway = ConcurrentWebviewGateway::new(GatewayPrefix::new("/webview/")?, StaticTransport);
 
@@ -398,7 +398,7 @@ impl GatewayTransport for DomainCookieTransport {
 }
 
 #[test]
-fn gateway_accepts_safe_domain_cookie_without_exposing_set_cookie() -> Result<()> {
+fn test_gateway_accepts_safe_domain_cookie_without_exposing_set_cookie() -> Result<()> {
     let target = TargetUrl::parse("https://example.com/index.html")?.into_url();
     let gateway =
         ConcurrentWebviewGateway::new(GatewayPrefix::new("/webview/")?, DomainCookieTransport);
@@ -449,7 +449,7 @@ impl GatewayTransport for RecordingTransport {
 }
 
 #[test]
-fn gateway_replaces_caller_cookie_header_with_virtual_target_cookie() -> Result<()> {
+fn test_gateway_replaces_caller_cookie_header_with_virtual_target_cookie() -> Result<()> {
     let transport = RecordingTransport::new();
     let target = TargetUrl::parse("https://example.com/index.html")?.into_url();
     let fetch_target = TargetUrl::parse("https://example.com/api")?.into_url();
@@ -480,7 +480,7 @@ fn gateway_replaces_caller_cookie_header_with_virtual_target_cookie() -> Result<
 }
 
 #[test]
-fn gateway_normalizes_direct_struct_source_origin_before_transport() -> Result<()> {
+fn test_gateway_normalizes_direct_struct_source_origin_before_transport() -> Result<()> {
     let transport = RecordingTransport::new();
     let request = GatewayRequest {
         target: TargetUrl::parse("https://app.example.test:8443/data")?.into_url(),
@@ -511,7 +511,7 @@ fn gateway_normalizes_direct_struct_source_origin_before_transport() -> Result<(
 }
 
 #[test]
-fn gateway_strips_controlled_origin_headers_before_transport() -> Result<()> {
+fn test_gateway_strips_controlled_origin_headers_before_transport() -> Result<()> {
     let transport = RecordingTransport::new();
     let target = TargetUrl::parse("https://example.com/index.html")?.into_url();
     let gateway = ConcurrentWebviewGateway::new(GatewayPrefix::new("/webview/")?, transport);
@@ -577,7 +577,8 @@ impl GatewayTransport for CorsRecordingTransport {
 }
 
 #[test]
-fn gateway_forwards_cross_origin_runtime_requests_after_virtual_cors_preflight() -> Result<()> {
+fn test_gateway_forwards_cross_origin_runtime_requests_after_virtual_cors_preflight() -> Result<()>
+{
     let target = TargetUrl::parse("https://api.example.test/data")?.into_url();
     let source = TargetUrl::parse("https://app.example.test/page")?.into_url();
     let transport = CorsRecordingTransport {
@@ -671,7 +672,7 @@ fn parity_request_sequence() -> Result<Vec<GatewayRequest>> {
 }
 
 #[test]
-fn concurrent_gateway_applies_cookie_cors_and_response_policy() -> Result<()> {
+fn test_concurrent_gateway_applies_cookie_cors_and_response_policy() -> Result<()> {
     let gateway =
         ConcurrentWebviewGateway::new(GatewayPrefix::new("/webview/")?, ParityTransport::new());
     for request in parity_request_sequence()? {
@@ -732,7 +733,8 @@ impl GatewayTransport for DelayedCookieTransport {
 }
 
 #[test]
-fn concurrent_gateway_cookie_commits_follow_response_order_and_source_visibility() -> Result<()> {
+fn test_concurrent_gateway_cookie_commits_follow_response_order_and_source_visibility() -> Result<()>
+{
     let (started_sender, mut started_receiver) = mpsc::unbounded();
     let (release_slow_sender, release_slow_receiver) = oneshot::channel();
     let gateway = Rc::new(ConcurrentWebviewGateway::new(
@@ -867,7 +869,7 @@ fn concurrent_gateway_cookie_commits_follow_response_order_and_source_visibility
 }
 
 #[test]
-fn concurrent_gateway_cookie_commits_in_mirror_response_order() -> Result<()> {
+fn test_concurrent_gateway_cookie_commits_in_mirror_response_order() -> Result<()> {
     let (started_sender, mut started_receiver) = mpsc::unbounded();
     let (release_fast_sender, release_fast_receiver) = oneshot::channel();
     let gateway = Rc::new(ConcurrentWebviewGateway::new(

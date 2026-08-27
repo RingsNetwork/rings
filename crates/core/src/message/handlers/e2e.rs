@@ -137,7 +137,7 @@ mod tests {
     }
 
     #[test]
-    fn local_handshake_request_sends_responder_key_to_signer() -> Result<()> {
+    fn test_local_handshake_request_sends_responder_key_to_signer() -> Result<()> {
         let requester = SecretKey::random();
         let responder = SecretKey::random();
         let request = E2eHandshakeRequest::new(requester.pubkey());
@@ -169,7 +169,7 @@ mod tests {
     }
 
     #[test]
-    fn local_handshake_request_rejects_key_not_owned_by_signer() -> Result<()> {
+    fn test_local_handshake_request_rejects_key_not_owned_by_signer() -> Result<()> {
         let requester = SecretKey::random();
         let responder = SecretKey::random();
         let request = E2eHandshakeRequest::new(responder.pubkey());
@@ -183,7 +183,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_e2e_message_forwards_payload() -> Result<()> {
+    fn test_remote_e2e_message_forwards_payload() -> Result<()> {
         let local = SecretKey::random().address().into();
         let remote = SecretKey::random().address().into();
         let payload = e2e_payload(remote)?;

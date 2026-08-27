@@ -232,4 +232,4 @@ pub fn outbound_capacity_released(transport: &SwarmTransport, peer: Did) -> bool
 }
 
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
-mod structured_log_assertion_tests;
+mod test_structured_log_assertion;

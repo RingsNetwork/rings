@@ -450,7 +450,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn recoverable_account_verifier_verifies_and_recovers_key() {
+    fn test_recoverable_account_verifier_verifies_and_recovers_key() {
         let secret =
             SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")
                 .unwrap();
@@ -471,7 +471,7 @@ mod tests {
     }
 
     #[test]
-    fn bip137_signing_secret_signs_and_recovers_key() {
+    fn test_bip137_signing_secret_signs_and_recovers_key() {
         let secret = SigningSecretKey::Bip137(
             SecretKey::try_from("65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0")
                 .unwrap(),
@@ -495,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn bls_signing_secret_signs_and_verifies_key() {
+    fn test_bls_signing_secret_signs_and_verifies_key() {
         let secret = SigningSecretKey::random_bls12381().unwrap();
         let public_key = secret.public_key().unwrap();
         let did = public_key.did();
@@ -524,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn ed25519_signing_secret_signs_and_verifies_key() {
+    fn test_ed25519_signing_secret_signs_and_verifies_key() {
         let secret = SigningSecretKey::random_ed25519();
         let public_key = secret.public_key().unwrap();
         let did = public_key.did();
@@ -553,7 +553,7 @@ mod tests {
     }
 
     #[test]
-    fn ed25519_random_with_rng_is_reproducible_for_same_seed() {
+    fn test_ed25519_random_with_rng_is_reproducible_for_same_seed() {
         let mut rng_a = Hc128Rng::seed_from_u64(42);
         let mut rng_b = Hc128Rng::seed_from_u64(42);
 
@@ -564,7 +564,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_verification_keys_domain_separate_dids() {
+    fn test_explicit_verification_keys_domain_separate_dids() {
         let pk = SecretKey::random().pubkey();
         let secp = VerificationPublicKey::Secp256k1(pk);
         let ed = VerificationPublicKey::Ed25519(pk);
@@ -578,7 +578,7 @@ mod tests {
     }
 
     #[test]
-    fn secp256r1_secret_derives_p256_public_key() {
+    fn test_secp256r1_secret_derives_p256_public_key() {
         let secret = SigningSecretKey::Secp256r1(
             SecretKey::try_from("2544acda37415a476d42312969926dc48e529867036cec71922d4177ea9c1038")
                 .unwrap(),

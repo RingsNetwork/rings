@@ -127,4 +127,4 @@ fn run_timer_thread(receiver: mpsc::Receiver<ScheduledWake>) {
 }
 
 #[cfg(test)]
-mod tests;
+mod test_native_timeout_scheduler;

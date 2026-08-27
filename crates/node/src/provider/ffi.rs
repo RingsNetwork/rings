@@ -456,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn ffi_provider_handle_create_listen_request_destroy_cycles() {
+    fn test_ffi_provider_handle_create_listen_request_destroy_cycles() {
         for _ in 0..3 {
             let ice_server = c_string("stun://stun.l.google.com");
             let account = c_string(TEST_ACCOUNT);
@@ -495,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn ffi_free_functions_accept_null() {
+    fn test_ffi_free_functions_accept_null() {
         unsafe {
             rings_node_string_free(ptr::null_mut());
             rings_node_provider_destroy(ptr::null_mut());

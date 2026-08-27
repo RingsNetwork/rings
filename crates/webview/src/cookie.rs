@@ -510,7 +510,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn http_date_wire_forms_are_one_platform_independent_instant() {
+    fn test_http_date_wire_forms_are_one_platform_independent_instant() {
         const EXPECTED: i64 = 784_111_777_000;
         for value in [
             "Sun, 06 Nov 1994 08:49:37 GMT",
@@ -527,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn set_cookie_evaluation_is_a_pure_total_decision() -> Result<()> {
+    fn test_set_cookie_evaluation_is_a_pure_total_decision() -> Result<()> {
         let origin = Url::parse("https://example.com/app/index.html")?;
 
         assert!(matches!(
@@ -571,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn cookie_matching_respects_host_only_path_and_secure() -> Result<()> {
+    fn test_cookie_matching_respects_host_only_path_and_secure() -> Result<()> {
         let mut jar = CookieJar::new();
         let origin = Url::parse("https://example.com/app/index.html")?;
         jar.store_set_cookie(&origin, "sid=one; Path=/app; Secure; HttpOnly")?;
@@ -592,7 +592,7 @@ mod tests {
     }
 
     #[test]
-    fn third_party_cookies_are_partitioned_by_schemeful_top_level_site() -> Result<()> {
+    fn test_third_party_cookies_are_partitioned_by_schemeful_top_level_site() -> Result<()> {
         let mut jar = CookieJar::new();
         let tracker = Url::parse("https://tracker.example/pixel")?;
         let under_news =
@@ -629,7 +629,7 @@ mod tests {
     }
 
     #[test]
-    fn cookie_accepts_safe_parent_domain_attributes() -> Result<()> {
+    fn test_cookie_accepts_safe_parent_domain_attributes() -> Result<()> {
         let mut jar = CookieJar::new();
         let origin = Url::parse("https://login.example.com/set-cookie")?;
 
@@ -640,7 +640,7 @@ mod tests {
     }
 
     #[test]
-    fn cookie_ignores_registry_controlled_and_platform_domain_attributes() -> Result<()> {
+    fn test_cookie_ignores_registry_controlled_and_platform_domain_attributes() -> Result<()> {
         let mut jar = CookieJar::new();
         let dot_com_origin = Url::parse("https://evil.com/set-cookie")?;
         let dot_uk_origin = Url::parse("https://service.co.uk/set-cookie")?;
@@ -654,7 +654,7 @@ mod tests {
     }
 
     #[test]
-    fn cookie_ignores_unrelated_domain_attributes() -> Result<()> {
+    fn test_cookie_ignores_unrelated_domain_attributes() -> Result<()> {
         let mut jar = CookieJar::new();
         let origin = Url::parse("https://app.example.co.uk/set-cookie")?;
 
@@ -664,7 +664,7 @@ mod tests {
     }
 
     #[test]
-    fn cookie_jar_has_deterministic_count_and_entry_size_bounds() -> Result<()> {
+    fn test_cookie_jar_has_deterministic_count_and_entry_size_bounds() -> Result<()> {
         let mut jar = CookieJar::new();
         let origin = Url::parse("https://example.com/")?;
         for index in 0..=MAX_COOKIES {
@@ -686,7 +686,7 @@ mod tests {
     }
 
     #[test]
-    fn cookie_path_matching_respects_segment_boundary() -> Result<()> {
+    fn test_cookie_path_matching_respects_segment_boundary() -> Result<()> {
         let mut jar = CookieJar::new();
         let origin = Url::parse("https://example.com/app/index.html")?;
         jar.store_set_cookie(&origin, "sid=one; Path=/app")?;
@@ -700,7 +700,7 @@ mod tests {
     }
 
     #[test]
-    fn cookie_max_age_zero_deletes_existing_cookie() -> Result<()> {
+    fn test_cookie_max_age_zero_deletes_existing_cookie() -> Result<()> {
         let mut jar = CookieJar::new();
         let origin = Url::parse("https://example.com/app/index.html")?;
 
@@ -714,7 +714,7 @@ mod tests {
     }
 
     #[test]
-    fn cookie_past_expires_deletes_existing_cookie() -> Result<()> {
+    fn test_cookie_past_expires_deletes_existing_cookie() -> Result<()> {
         let mut jar = CookieJar::new();
         let origin = Url::parse("https://example.com/app/index.html")?;
 
@@ -731,7 +731,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_max_age_does_not_suppress_valid_expires() -> Result<()> {
+    fn test_invalid_max_age_does_not_suppress_valid_expires() -> Result<()> {
         let mut jar = CookieJar::new();
         let origin = Url::parse("https://example.com/app/index.html")?;
 
@@ -746,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn default_cookie_path_uses_directory_without_trailing_slash() -> Result<()> {
+    fn test_default_cookie_path_uses_directory_without_trailing_slash() -> Result<()> {
         let mut jar = CookieJar::new();
         let origin = Url::parse("https://example.com/app/index.html")?;
         jar.store_set_cookie(&origin, "sid=one")?;
@@ -764,7 +764,7 @@ mod tests {
     }
 
     #[test]
-    fn max_age_expiry_is_visible_until_its_exact_boundary() -> Result<()> {
+    fn test_max_age_expiry_is_visible_until_its_exact_boundary() -> Result<()> {
         let mut jar = CookieJar::new();
         let origin = Url::parse("https://example.com/app/index.html")?;
         let target = Url::parse("https://example.com/app/page")?;
@@ -782,7 +782,7 @@ mod tests {
     }
 
     #[test]
-    fn replacement_and_deletion_are_replayable_at_one_instant() -> Result<()> {
+    fn test_replacement_and_deletion_are_replayable_at_one_instant() -> Result<()> {
         let mut jar = CookieJar::new();
         let origin = Url::parse("https://example.com/app/index.html")?;
         let target = Url::parse("https://example.com/app/page")?;
@@ -803,7 +803,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_cookie_is_not_sent_for_cross_site_subresource() -> Result<()> {
+    fn test_strict_cookie_is_not_sent_for_cross_site_subresource() -> Result<()> {
         let mut jar = CookieJar::new();
         let origin = Url::parse("https://auth.example.test/app/index.html")?;
         jar.store_set_cookie(&origin, "sid=strict; Path=/; SameSite=Strict; Secure")?;
@@ -818,7 +818,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_cookie_is_sent_for_same_site_subdomain_subresource() -> Result<()> {
+    fn test_strict_cookie_is_sent_for_same_site_subdomain_subresource() -> Result<()> {
         let mut jar = CookieJar::new();
         let origin = Url::parse("https://auth.example.com/app/index.html")?;
         jar.store_set_cookie(&origin, "sid=strict; Path=/; SameSite=Strict; Secure")?;
@@ -836,7 +836,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_cookie_is_not_sent_between_public_suffix_siblings() -> Result<()> {
+    fn test_strict_cookie_is_not_sent_between_public_suffix_siblings() -> Result<()> {
         let mut jar = CookieJar::new();
         let origin = Url::parse("https://owner.github.io/app/index.html")?;
         jar.store_set_cookie(&origin, "sid=strict; Path=/; SameSite=Strict; Secure")?;
@@ -851,7 +851,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_cookie_ip_sources_use_exact_host_site() -> Result<()> {
+    fn test_strict_cookie_ip_sources_use_exact_host_site() -> Result<()> {
         let mut jar = CookieJar::new();
         let origin = Url::parse("https://127.0.0.1/app/index.html")?;
         jar.store_set_cookie(&origin, "sid=strict; Path=/; SameSite=Strict; Secure")?;
@@ -873,7 +873,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_and_lax_cookies_are_not_sent_without_subresource_source_context() -> Result<()> {
+    fn test_strict_and_lax_cookies_are_not_sent_without_subresource_source_context() -> Result<()> {
         let mut jar = CookieJar::new();
         let origin = Url::parse("https://auth.example.test/app/index.html")?;
         jar.store_set_cookie(&origin, "strict=one; Path=/; SameSite=Strict; Secure")?;
@@ -892,7 +892,7 @@ mod tests {
     }
 
     #[test]
-    fn lax_cookie_is_only_sent_on_safe_cross_site_top_level_navigation() -> Result<()> {
+    fn test_lax_cookie_is_only_sent_on_safe_cross_site_top_level_navigation() -> Result<()> {
         let mut jar = CookieJar::new();
         let origin = Url::parse("https://auth.example.test/app/index.html")?;
         jar.store_set_cookie(&origin, "sid=lax; Path=/; SameSite=Lax; Secure")?;
@@ -933,7 +933,7 @@ mod tests {
     }
 
     #[test]
-    fn samesite_none_requires_secure_and_allows_cross_site_subresource() -> Result<()> {
+    fn test_samesite_none_requires_secure_and_allows_cross_site_subresource() -> Result<()> {
         let mut jar = CookieJar::new();
         let origin = Url::parse("https://auth.example.test/app/index.html")?;
 

@@ -20,7 +20,7 @@ async fn test_window_sleep_not_panic() {
 }
 
 #[wasm_bindgen_test]
-async fn core_actor_steps_yield_to_a_queued_browser_task() {
+async fn test_core_actor_steps_yield_to_a_queued_browser_task() {
     let channel = web_sys::MessageChannel::new().unwrap();
     let observed = Rc::new(Cell::new(false));
     let callback_observed = observed.clone();
@@ -40,7 +40,7 @@ async fn core_actor_steps_yield_to_a_queued_browser_task() {
 }
 
 #[wasm_bindgen_test]
-async fn cancelled_browser_task_yield_clears_its_js_handler() {
+async fn test_cancelled_browser_task_yield_clears_its_js_handler() {
     reset_browser_task_yield_guard_counts_for_test();
     assert!(yield_browser_task().now_or_never().is_none());
     assert_eq!(browser_task_yield_guard_counts_for_test(), (0, 1));

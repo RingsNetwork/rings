@@ -336,7 +336,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closed_measurement_receiver_drains_buffered_events() {
+    async fn test_closed_measurement_receiver_drains_buffered_events() {
         let (measure, calls, _, _) = test_measure(false);
         let (mut recorder, receiver) =
             MeasurementRecorder::channel(Some(measure), Did::from(1_u32));
@@ -350,7 +350,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn full_wake_channel_coalesces_without_losing_measurements() {
+    async fn test_full_wake_channel_coalesces_without_losing_measurements() {
         let (measure, calls, _, _) = test_measure(false);
         let (mut recorder, receiver) =
             MeasurementRecorder::channel(Some(measure), Did::from(3_u32));
@@ -377,7 +377,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_measurement_is_not_starved_by_sent_backlog() {
+    async fn test_failed_measurement_is_not_starved_by_sent_backlog() {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let measure: MeasureImpl = Arc::new(OrderedMeasure {
             calls: calls.clone(),
@@ -414,7 +414,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_count_is_retained_until_recording_completes() {
+    async fn test_pending_count_is_retained_until_recording_completes() {
         let (measure, calls, started, released) = test_measure(true);
         let (mut recorder, receiver) =
             MeasurementRecorder::channel(Some(measure), Did::from(2_u32));
@@ -442,7 +442,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blocked_measurement_is_cancelled_and_receiver_exits() {
+    async fn test_blocked_measurement_is_cancelled_and_receiver_exits() {
         let (measure, calls, started, _) = test_measure(true);
         let (mut recorder, receiver) =
             MeasurementRecorder::channel(Some(measure), Did::from(5_u32));

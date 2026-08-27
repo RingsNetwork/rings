@@ -40,13 +40,13 @@ use crate::tests::default::wait_for_msgs;
 use crate::tests::manually_establish_connection;
 
 #[test]
-fn finish_storage_action_accepts_empty_action() -> Result<()> {
+fn test_finish_storage_action_accepts_empty_action() -> Result<()> {
     finish_storage_action(PeerRingAction::None)?;
     Ok(())
 }
 
 #[test]
-fn finish_storage_action_rejects_unhandled_action() -> Result<()> {
+fn test_finish_storage_action_rejects_unhandled_action() -> Result<()> {
     let did = SecretKey::random().address().into();
     match finish_storage_action(PeerRingAction::Some(did)) {
         Err(Error::PeerRingUnexpectedAction(action)) => {
@@ -60,7 +60,7 @@ fn finish_storage_action_rejects_unhandled_action() -> Result<()> {
 }
 
 #[tokio::test]
-async fn sync_entries_handler_stores_entry_at_placement_key() -> Result<()> {
+async fn test_sync_entries_handler_stores_entry_at_placement_key() -> Result<()> {
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
     let resource_id = Did::from(10u32);
@@ -105,7 +105,7 @@ async fn sync_entries_handler_stores_entry_at_placement_key() -> Result<()> {
 }
 
 #[tokio::test]
-async fn sync_entries_handler_caps_inbound_entry_payloads() -> Result<()> {
+async fn test_sync_entries_handler_caps_inbound_entry_payloads() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
     let entry = Entry::new(
@@ -151,7 +151,7 @@ async fn sync_entries_handler_caps_inbound_entry_payloads() -> Result<()> {
 }
 
 #[tokio::test]
-async fn sync_entries_handler_rejects_non_affine_placement_before_writing() -> Result<()> {
+async fn test_sync_entries_handler_rejects_non_affine_placement_before_writing() -> Result<()> {
     let node = prepare_node_with_storage_redundancy(SecretKey::random(), 2)?;
     let handler = MessageHandler::new(node.swarm.transport.clone(), Arc::new(NoopCallback));
     let valid_entry = Entry::new(
@@ -202,7 +202,7 @@ async fn sync_entries_handler_rejects_non_affine_placement_before_writing() -> R
 }
 
 #[tokio::test]
-async fn storage_sync_batch_persists_one_entry_per_step_after_validation() -> Result<()> {
+async fn test_storage_sync_batch_persists_one_entry_per_step_after_validation() -> Result<()> {
     let node = prepare_node(SecretKey::random()).await;
     let first = Entry::new(
         Did::from(31u32),
@@ -273,7 +273,7 @@ async fn storage_sync_batch_persists_one_entry_per_step_after_validation() -> Re
 }
 
 #[tokio::test]
-async fn sync_entries_handler_accepts_placement_destination_on_local_branch() -> Result<()> {
+async fn test_sync_entries_handler_accepts_placement_destination_on_local_branch() -> Result<()> {
     let mut keys = gen_ordered_keys(2).into_iter();
     let node1 = prepare_node(next_generated_key(&mut keys)?).await;
     let node2 = prepare_node(next_generated_key(&mut keys)?).await;
@@ -329,7 +329,7 @@ async fn sync_entries_handler_accepts_placement_destination_on_local_branch() ->
 }
 
 #[tokio::test]
-async fn additive_repair_sync_persists_without_cleanup_report() -> Result<()> {
+async fn test_additive_repair_sync_persists_without_cleanup_report() -> Result<()> {
     let sender = prepare_node(SecretKey::random()).await;
     let receiver = prepare_node(SecretKey::random()).await;
     manually_establish_connection(&sender.swarm, &receiver.swarm).await;
@@ -380,7 +380,7 @@ async fn additive_repair_sync_persists_without_cleanup_report() -> Result<()> {
 }
 
 #[tokio::test]
-async fn sync_entries_handler_rejects_mismatched_placement_destination() -> Result<()> {
+async fn test_sync_entries_handler_rejects_mismatched_placement_destination() -> Result<()> {
     let mut keys = gen_ordered_keys(2).into_iter();
     let sender = prepare_node(next_generated_key(&mut keys)?).await;
     let receiver = prepare_node(next_generated_key(&mut keys)?).await;
@@ -430,7 +430,8 @@ async fn sync_entries_handler_rejects_mismatched_placement_destination() -> Resu
 }
 
 #[tokio::test]
-async fn sync_entries_handler_rejects_physical_destination_for_unowned_placement() -> Result<()> {
+async fn test_sync_entries_handler_rejects_physical_destination_for_unowned_placement() -> Result<()>
+{
     let mut keys = gen_ordered_keys(2).into_iter();
     let sender = prepare_node(next_generated_key(&mut keys)?).await;
     let receiver = prepare_node(next_generated_key(&mut keys)?).await;
@@ -479,7 +480,7 @@ async fn sync_entries_handler_rejects_physical_destination_for_unowned_placement
 }
 
 #[tokio::test]
-async fn sync_entries_handler_acks_local_branch_with_successor_witness() -> Result<()> {
+async fn test_sync_entries_handler_acks_local_branch_with_successor_witness() -> Result<()> {
     let mut keys = gen_ordered_keys(2).into_iter();
     let sender = prepare_node(next_generated_key(&mut keys)?).await;
     let receiver = prepare_node(next_generated_key(&mut keys)?).await;

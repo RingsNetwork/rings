@@ -9,7 +9,7 @@ use crate::error::Error;
 use crate::error::Result;
 
 #[tokio::test]
-async fn connect_header_read_times_out() -> Result<()> {
+async fn test_connect_header_read_times_out() -> Result<()> {
     let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
         .await
         .map_err(|error| Error::HttpRequestError(error.to_string()))?;

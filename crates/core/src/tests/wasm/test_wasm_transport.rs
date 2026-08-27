@@ -442,7 +442,7 @@ async fn test_message_handler() {
 }
 
 #[wasm_bindgen_test]
-async fn storage_repair_load_does_not_starve_three_node_stabilization() {
+async fn test_storage_repair_load_does_not_starve_three_node_stabilization() {
     let scenario = async {
         get_fake_permission().await;
         let nodes = prepare_repair_mesh().await;

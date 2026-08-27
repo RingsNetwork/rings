@@ -552,7 +552,7 @@ mod tests {
         wasm_bindgen_test::wasm_bindgen_test
     )]
     #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), tokio::test)]
-    async fn terminalization_failure_still_attempts_physical_close() {
+    async fn test_terminalization_failure_still_attempts_physical_close() {
         let closed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let close_observer = Arc::clone(&closed);
 
@@ -571,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn initial_cancel_reports_generation_revocation_explicitly() {
+    fn test_initial_cancel_reports_generation_revocation_explicitly() {
         let attempt = PendingConnectionAttempt {
             peer: Did::from(1_u32),
             generation: 7,
@@ -585,14 +585,14 @@ mod tests {
     }
 
     #[test]
-    fn initial_cancel_treats_route_revocation_as_cancelled() {
+    fn test_initial_cancel_treats_route_revocation_as_cancelled() {
         assert!(ChunkSendCancelReason::RouteNoLongerPermitted
             .resolve_initial()
             .is_ok());
     }
 
     #[test]
-    fn initial_cancel_keeps_route_check_error_explicit() {
+    fn test_initial_cancel_keeps_route_check_error_explicit() {
         let error = Error::InvalidMessage("route check failed".to_string());
 
         assert!(matches!(

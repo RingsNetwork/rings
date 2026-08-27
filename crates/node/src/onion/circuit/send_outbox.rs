@@ -546,7 +546,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pure_queue_preserves_peer_fifo_and_atomic_retirement() {
+    fn test_pure_queue_preserves_peer_fifo_and_atomic_retirement() {
         let peer = Did::from(1_u32);
         let mut state = OrderedSendState::default();
 
@@ -563,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_quota_release_does_not_half_retire_in_flight_item() {
+    fn test_failed_quota_release_does_not_half_retire_in_flight_item() {
         let peer = Did::from(12_u32);
         let mut state = OrderedSendState::default();
 
@@ -579,7 +579,7 @@ mod tests {
     }
 
     #[test]
-    fn pre_batch_cancellation_atomically_retires_the_peer_lane() {
+    fn test_pre_batch_cancellation_atomically_retires_the_peer_lane() {
         let peer = Did::from(13_u32);
         let other = Did::from(14_u32);
         let mut state = OrderedSendState::default();
@@ -597,7 +597,7 @@ mod tests {
     }
 
     #[test]
-    fn pre_batch_cancellation_rejects_an_in_flight_lane_without_mutation() {
+    fn test_pre_batch_cancellation_rejects_an_in_flight_lane_without_mutation() {
         let peer = Did::from(15_u32);
         let mut state = OrderedSendState::default();
 
@@ -610,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn one_peer_cannot_exceed_its_queue_share() {
+    fn test_one_peer_cannot_exceed_its_queue_share() {
         let peer = Did::from(2_u32);
         let other = Did::from(3_u32);
         let mut state = OrderedSendState::default();
@@ -625,7 +625,7 @@ mod tests {
     }
 
     #[test]
-    fn global_bound_rejects_exact_overflow_and_recovers_after_completion() {
+    fn test_global_bound_rejects_exact_overflow_and_recovers_after_completion() {
         let mut state = OrderedSendState::default();
         for peer_id in 1_u32..=8 {
             let peer = Did::from(peer_id);
@@ -646,7 +646,7 @@ mod tests {
     }
 
     #[test]
-    fn queued_cell_bytes_have_global_and_per_peer_hard_bounds() {
+    fn test_queued_cell_bytes_have_global_and_per_peer_hard_bounds() {
         let peer = Did::from(10_u32);
         let other = Did::from(11_u32);
         let mut state = OrderedSendState::default();
@@ -682,7 +682,7 @@ mod tests {
     }
 
     #[test]
-    fn production_pacing_maps_entropy_into_the_documented_closed_interval() {
+    fn test_production_pacing_maps_entropy_into_the_documented_closed_interval() {
         assert_eq!(onion_send_jitter(0), Duration::from_millis(5));
         assert_eq!(onion_send_jitter(20), Duration::from_millis(25));
         assert_eq!(onion_send_jitter(u8::MAX), Duration::from_millis(8));
@@ -694,7 +694,7 @@ mod tests {
     }
 
     #[test]
-    fn fixed_link_batch_algebra_bounds_cover_amplification() {
+    fn test_fixed_link_batch_algebra_bounds_cover_amplification() {
         assert_eq!(cover_cells_for_batch(0), None);
         assert_eq!(cover_cells_for_batch(ONION_LINK_BATCH_CELLS + 1), None);
 

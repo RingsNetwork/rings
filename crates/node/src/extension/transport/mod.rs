@@ -307,7 +307,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn outbound_budget_preserves_both_operation_and_byte_bounds() {
+    fn test_outbound_budget_preserves_both_operation_and_byte_bounds() {
         let mut operation_bound = OutboundQueueBudget::default();
         for _ in 0..MAX_OUTBOUND_QUEUE_OPS {
             assert!(operation_bound.try_reserve(0));
@@ -320,14 +320,14 @@ mod tests {
     }
 
     #[test]
-    fn rejected_outbound_budget_reservation_does_not_consume_capacity() {
+    fn test_rejected_outbound_budget_reservation_does_not_consume_capacity() {
         let mut budget = OutboundQueueBudget::default();
         assert!(!budget.try_reserve(MAX_OUTBOUND_QUEUE_BYTES + 1));
         assert!(budget.try_reserve(MAX_OUTBOUND_QUEUE_BYTES));
     }
 
     #[test]
-    fn released_outbound_budget_can_be_reserved_again() {
+    fn test_released_outbound_budget_can_be_reserved_again() {
         let mut budget = OutboundQueueBudget::default();
         assert!(budget.try_reserve(MAX_OUTBOUND_QUEUE_BYTES));
         assert!(budget.release(MAX_OUTBOUND_QUEUE_BYTES));
@@ -335,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn invalid_outbound_budget_release_is_total_and_does_not_mutate() {
+    fn test_invalid_outbound_budget_release_is_total_and_does_not_mutate() {
         let mut budget = OutboundQueueBudget::default();
         assert!(budget.try_reserve(4));
         assert!(!budget.release(5));
@@ -344,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn outbound_drain_has_exactly_one_owner_until_empty() {
+    fn test_outbound_drain_has_exactly_one_owner_until_empty() {
         let mut drain = OutboundDrainState::Idle;
         assert!(drain.claim());
         assert!(!drain.claim());
@@ -353,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn non_reusing_allocator_is_total_at_exhaustion() {
+    fn test_non_reusing_allocator_is_total_at_exhaustion() {
         let counter = AtomicU64::new(u64::MAX - 1);
         assert_eq!(allocate_non_reusing(&counter), Some(u64::MAX - 1));
         assert_eq!(allocate_non_reusing(&counter), None);

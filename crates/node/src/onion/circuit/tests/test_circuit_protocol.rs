@@ -296,7 +296,7 @@ impl OnionCircuitHandler for BlockingExitHandler {
 }
 
 #[test]
-fn initial_forward_targets_first_hop_and_hides_payload() {
+fn test_initial_forward_targets_first_hop_and_hides_payload() {
     let client = session();
     let first = session();
     let second = session();
@@ -323,7 +323,7 @@ fn initial_forward_targets_first_hop_and_hides_payload() {
 }
 
 #[test]
-fn relay_layer_uses_distinct_next_edge_circuit_id() {
+fn test_relay_layer_uses_distinct_next_edge_circuit_id() {
     let client = session();
     let first = session();
     let exit = session();
@@ -351,7 +351,7 @@ fn relay_layer_uses_distinct_next_edge_circuit_id() {
 
 #[cfg(rings_native)]
 #[test]
-fn circuit_path_reuses_edge_ids_for_stream_payloads() {
+fn test_circuit_path_reuses_edge_ids_for_stream_payloads() {
     let client = session();
     let first = session();
     let exit = session();
@@ -393,7 +393,7 @@ fn relay_next_circuit_id(
 }
 
 #[test]
-fn route_constructor_rejects_mismatched_exit_hop() {
+fn test_route_constructor_rejects_mismatched_exit_hop() {
     let first = session();
     let exit = session();
     let route = route(&[], &exit);
@@ -413,7 +413,7 @@ fn route_constructor_rejects_mismatched_exit_hop() {
 }
 
 #[test]
-fn initial_forward_requires_route_payload_service_match() {
+fn test_initial_forward_requires_route_payload_service_match() {
     let client = session();
     let exit = session();
     let route = route(&[], &exit);
@@ -431,7 +431,7 @@ fn initial_forward_requires_route_payload_service_match() {
 }
 
 #[test]
-fn initial_forward_accepts_canonical_payload_for_mixed_case_route_service() {
+fn test_initial_forward_accepts_canonical_payload_for_mixed_case_route_service() {
     let client = session();
     let exit = session();
     let route = route_for_service("HTTPS", &[], &exit);
@@ -448,7 +448,7 @@ fn initial_forward_accepts_canonical_payload_for_mixed_case_route_service() {
 }
 
 #[test]
-fn hidden_cell_direction_defers_relay_capability_check_until_after_cell_decrypt() {
+fn test_hidden_cell_direction_defers_relay_capability_check_until_after_cell_decrypt() {
     let client = session();
     let relay = session();
     let exit = session();
@@ -503,7 +503,7 @@ fn hidden_cell_direction_defers_relay_capability_check_until_after_cell_decrypt(
 
 #[cfg(rings_native)]
 #[tokio::test]
-async fn relay_capability_does_not_execute_exit_layer() {
+async fn test_relay_capability_does_not_execute_exit_layer() {
     let client = session();
     let relay = session();
     let route = route(&[], &relay);
@@ -586,7 +586,7 @@ async fn relay_capability_does_not_execute_exit_layer() {
 
 #[cfg(rings_native)]
 #[tokio::test]
-async fn exit_effect_releases_transition_turn_before_adapter_io_completes() {
+async fn test_exit_effect_releases_transition_turn_before_adapter_io_completes() {
     let client = session();
     let exit = session();
     let handler = BlockingExitHandler::default();
@@ -616,7 +616,7 @@ async fn exit_effect_releases_transition_turn_before_adapter_io_completes() {
 
 #[cfg(rings_native)]
 #[tokio::test]
-async fn send_effect_releases_transition_turn_and_preserves_peer_order() {
+async fn test_send_effect_releases_transition_turn_and_preserves_peer_order() {
     let local = session();
     let peer = session();
     let hook = Arc::new(OnionSendTestHook::default());
@@ -678,7 +678,7 @@ async fn send_effect_releases_transition_turn_and_preserves_peer_order() {
 
 #[cfg(rings_native)]
 #[tokio::test]
-async fn endpoint_send_awaits_the_same_paced_link_lane_and_emits_cover() {
+async fn test_endpoint_send_awaits_the_same_paced_link_lane_and_emits_cover() {
     let local = session();
     let peer = session();
     let hook = Arc::new(OnionSendTestHook::default());
@@ -726,7 +726,7 @@ async fn endpoint_send_awaits_the_same_paced_link_lane_and_emits_cover() {
 }
 
 #[test]
-fn expired_exit_layer_emits_no_exit_effect() {
+fn test_expired_exit_layer_emits_no_exit_effect() {
     let client = session();
     let reducer = OnionCircuitReducer::new(OnionCircuitCapabilities::exit());
     let state = OnionCircuitState::default();
@@ -752,7 +752,7 @@ fn expired_exit_layer_emits_no_exit_effect() {
 }
 
 #[test]
-fn read_only_reducer_arm_structurally_shares_return_state() {
+fn test_read_only_reducer_arm_structurally_shares_return_state() {
     let peer = session();
     let reducer = OnionCircuitReducer::new(OnionCircuitCapabilities::relay());
     let state = OnionCircuitState::default();
@@ -769,7 +769,7 @@ fn read_only_reducer_arm_structurally_shares_return_state() {
 }
 
 #[test]
-fn overlong_exit_layer_emits_no_exit_effect() {
+fn test_overlong_exit_layer_emits_no_exit_effect() {
     let client = session();
     let reducer = OnionCircuitReducer::new(OnionCircuitCapabilities::exit());
     let state = OnionCircuitState::default();
@@ -799,7 +799,7 @@ fn overlong_exit_layer_emits_no_exit_effect() {
 
 #[cfg(rings_native)]
 #[tokio::test]
-async fn relay_decrypts_one_layer_and_remembers_return_hop() {
+async fn test_relay_decrypts_one_layer_and_remembers_return_hop() {
     let client = session();
     let relay = session();
     let exit = session();
@@ -887,7 +887,7 @@ async fn relay_decrypts_one_layer_and_remembers_return_hop() {
 
 #[cfg(rings_native)]
 #[tokio::test]
-async fn two_relays_peel_fixed_size_cells_through_the_exit_reducer_and_shell() {
+async fn test_two_relays_peel_fixed_size_cells_through_the_exit_reducer_and_shell() {
     let client = session();
     let first = session();
     let second = session();
@@ -998,7 +998,7 @@ async fn two_relays_peel_fixed_size_cells_through_the_exit_reducer_and_shell() {
 
 #[cfg(rings_native)]
 #[tokio::test]
-async fn client_backward_payload_decryption_runs_in_shell_handler() {
+async fn test_client_backward_payload_decryption_runs_in_shell_handler() {
     let client = session();
     let exit = session();
     let protocol = OnionCircuitProtocol::new(OnionCircuitCapabilities::client());

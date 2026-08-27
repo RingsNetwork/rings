@@ -356,7 +356,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_cache_rejects_duplicates_inside_window() {
+    fn test_replay_cache_rejects_duplicates_inside_window() {
         let mut cache = OnionForwardReplayCache::with_limits(2, 10);
         let key = forward_key(1);
 
@@ -365,7 +365,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_witness_covers_every_still_valid_forward_instant() {
+    fn test_replay_witness_covers_every_still_valid_forward_instant() {
         let mut cache = OnionForwardReplayCache::default();
         let key = forward_key(33);
         let received_at_ms = 10_000;
@@ -387,7 +387,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_cache_rejects_new_keys_when_full() {
+    fn test_replay_cache_rejects_new_keys_when_full() {
         let mut cache = OnionForwardReplayCache::with_limits(1, 10);
 
         assert_eq!(cache.consume(forward_key(1), 0), ReplayAdmission::Consumed);
@@ -395,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_cache_reclaims_expired_keys_before_capacity_check() {
+    fn test_replay_cache_reclaims_expired_keys_before_capacity_check() {
         let mut cache = OnionForwardReplayCache::with_limits(1, 10);
 
         assert_eq!(cache.consume(forward_key(1), 0), ReplayAdmission::Consumed);
@@ -403,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_partitions_evict_lru_peer_without_reopening_consumed_nonce() {
+    fn test_replay_partitions_evict_lru_peer_without_reopening_consumed_nonce() {
         let mut partitions = OnionForwardReplayPartitions::with_limits(1, 2, 10);
         let first_peer = peer();
         let second_peer = peer();
@@ -426,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_partitions_reclaim_expired_peer_only_at_admission_bound() {
+    fn test_replay_partitions_reclaim_expired_peer_only_at_admission_bound() {
         let mut partitions = OnionForwardReplayPartitions::with_limits(1, 2, 10);
         let first_peer = peer();
         let second_peer = peer();
@@ -444,7 +444,7 @@ mod tests {
     }
 
     #[test]
-    fn busy_peer_does_not_consume_another_peers_entry_budget() {
+    fn test_busy_peer_does_not_consume_another_peers_entry_budget() {
         let mut partitions = OnionForwardReplayPartitions::with_limits(2, 1, 10);
         let first_peer = peer();
         let second_peer = peer();
@@ -464,7 +464,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_key_is_global_across_authenticated_peer_partitions() {
+    fn test_replay_key_is_global_across_authenticated_peer_partitions() {
         let mut partitions = OnionForwardReplayPartitions::with_limits(2, 2, 10);
         let first_peer = peer();
         let second_peer = peer();
@@ -481,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_partition_or_entry_budget_fails_closed_without_metadata() {
+    fn test_zero_partition_or_entry_budget_fails_closed_without_metadata() {
         for mut partitions in [
             OnionForwardReplayPartitions::with_limits(0, 1, 10),
             OnionForwardReplayPartitions::with_limits(1, 0, 10),
@@ -496,7 +496,7 @@ mod tests {
     }
 
     #[test]
-    fn live_owner_witnesses_bound_identity_rotation_memory() {
+    fn test_live_owner_witnesses_bound_identity_rotation_memory() {
         let mut partitions = OnionForwardReplayPartitions::with_limits(1, 2, 10);
         let first_peer = peer();
         let second_peer = peer();
@@ -519,7 +519,7 @@ mod tests {
     }
 
     #[test]
-    fn expired_global_key_can_move_to_another_peer_without_aba_removal() {
+    fn test_expired_global_key_can_move_to_another_peer_without_aba_removal() {
         let mut partitions = OnionForwardReplayPartitions::with_limits(2, 2, 10);
         let first_peer = peer();
         let second_peer = peer();
@@ -545,7 +545,7 @@ mod tests {
 
     #[test]
     #[cfg(rings_native)]
-    fn sequence_window_accepts_bounded_reordering_once() {
+    fn test_sequence_window_accepts_bounded_reordering_once() {
         let mut window = OnionSequenceWindow::default();
 
         assert_eq!(window.consume(0), SequenceAdmission::Consumed);
@@ -556,7 +556,7 @@ mod tests {
 
     #[test]
     #[cfg(rings_native)]
-    fn sequence_window_rejects_values_left_of_fixed_window() {
+    fn test_sequence_window_rejects_values_left_of_fixed_window() {
         let mut window = OnionSequenceWindow::with_initial(0);
 
         assert_eq!(window.consume(128), SequenceAdmission::Consumed);

@@ -76,7 +76,7 @@ async fn drain_node_messages(nodes: &[&Node]) {
 
 #[cfg(feature = "dummy")]
 #[tokio::test]
-async fn wait_for_msgs_does_not_ignore_controlled_transport_events() {
+async fn test_wait_for_msgs_does_not_ignore_controlled_transport_events() {
     let _controlled = ControlledDeliveryGuard::new();
     let node1 = prepare_node(SecretKey::random()).await;
     let node2 = prepare_node(SecretKey::random()).await;

@@ -398,7 +398,7 @@ mod tests {
     }
 
     #[test]
-    fn changing_delivery_sets_preserve_repair_progress_across_stabilizers() -> Result<()> {
+    fn test_changing_delivery_sets_preserve_repair_progress_across_stabilizers() -> Result<()> {
         let session = SessionSk::new_with_seckey(&SecretKey::random())?;
         let swarm = Arc::new(
             SwarmBuilder::new(
@@ -427,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn deferred_delivery_rotates_without_losing_its_retry() -> Result<()> {
+    fn test_deferred_delivery_rotates_without_losing_its_retry() -> Result<()> {
         let session = SessionSk::new_with_seckey(&SecretKey::random())?;
         let swarm = Arc::new(
             SwarmBuilder::new(

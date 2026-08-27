@@ -29,18 +29,18 @@ where V: DeserializeOwned + Serialize + Sized {
 }
 
 #[wasm_bindgen_test]
-fn next_visit_time_uses_wall_clock_when_it_advances() {
+fn test_next_visit_time_uses_wall_clock_when_it_advances() {
     assert_eq!(next_visit_time_after(10, 15), 15);
 }
 
 #[wasm_bindgen_test]
-fn next_visit_time_advances_when_wall_clock_stalls_or_rewinds() {
+fn test_next_visit_time_advances_when_wall_clock_stalls_or_rewinds() {
     assert_eq!(next_visit_time_after(10, 10), 11);
     assert_eq!(next_visit_time_after(10, 5), 11);
 }
 
 #[wasm_bindgen_test]
-fn next_visit_time_saturates_at_i64_max() {
+fn test_next_visit_time_saturates_at_i64_max() {
     assert_eq!(next_visit_time_after(i64::MAX, i64::MIN), i64::MAX);
 }
 

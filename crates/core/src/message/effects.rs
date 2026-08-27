@@ -491,7 +491,7 @@ mod tests {
 
     #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
     #[test]
-    fn core_actor_step_yields_for_exactly_one_poll() {
+    fn test_core_actor_step_yields_for_exactly_one_poll() {
         let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
         let waker = Waker::from(Arc::clone(&wake_counter));
         let mut context = Context::from_waker(&waker);
@@ -504,7 +504,7 @@ mod tests {
     }
 
     #[test]
-    fn core_actor_steps_marks_only_real_yield_boundaries() {
+    fn test_core_actor_steps_marks_only_real_yield_boundaries() {
         assert_eq!(core_actor_steps([1, 2, 3]).collect::<Vec<_>>(), vec![
             (1, true),
             (2, true),
@@ -514,7 +514,7 @@ mod tests {
     }
 
     #[test]
-    fn send_report_message_effect_borrows_payload_and_owns_message() -> Result<()> {
+    fn test_send_report_message_effect_borrows_payload_and_owns_message() -> Result<()> {
         let destination = did();
         let payload = payload(destination)?;
         let effect = CoreEffect::send_report_message(
@@ -549,7 +549,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_destination_effect_borrows_payload_and_next_hop() -> Result<()> {
+    fn test_reset_destination_effect_borrows_payload_and_next_hop() -> Result<()> {
         let destination = did();
         let next_hop = did();
         let payload = payload(destination)?;
@@ -573,7 +573,7 @@ mod tests {
     }
 
     #[test]
-    fn storage_sync_effect_owns_sync_message() -> Result<()> {
+    fn test_storage_sync_effect_owns_sync_message() -> Result<()> {
         let destination = did();
         let msg = SyncEntriesWithSuccessor {
             purpose: StorageSyncPurpose::OwnershipHandoff,
@@ -598,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn dht_find_successor_for_connect_sends_direct_report() -> Result<()> {
+    fn test_dht_find_successor_for_connect_sends_direct_report() -> Result<()> {
         let next = did();
         let target = did();
 
@@ -641,7 +641,7 @@ mod tests {
     }
 
     #[test]
-    fn dht_find_successor_for_connect_to_self_is_noop() -> Result<()> {
+    fn test_dht_find_successor_for_connect_to_self_is_noop() -> Result<()> {
         let target = did();
 
         assert!(lower_dht_action(
@@ -656,7 +656,7 @@ mod tests {
     }
 
     #[test]
-    fn dht_find_successor_for_fix_sends_direct_indexed_report() -> Result<()> {
+    fn test_dht_find_successor_for_fix_sends_direct_indexed_report() -> Result<()> {
         let next = did();
         let target = did();
         let index = 11;
@@ -702,7 +702,7 @@ mod tests {
     }
 
     #[test]
-    fn dht_query_successor_list_connects_before_query() -> Result<()> {
+    fn test_dht_query_successor_list_connects_before_query() -> Result<()> {
         let target = did();
 
         let effect = single_effect(lower_dht_action(
@@ -724,7 +724,7 @@ mod tests {
     }
 
     #[test]
-    fn dht_query_successor_list_sends_when_connected() -> Result<()> {
+    fn test_dht_query_successor_list_sends_when_connected() -> Result<()> {
         let target = did();
 
         let effect = single_effect(lower_dht_action(
@@ -762,7 +762,7 @@ mod tests {
     }
 
     #[test]
-    fn dht_notify_sends_predecessor_to_target() -> Result<()> {
+    fn test_dht_notify_sends_predecessor_to_target() -> Result<()> {
         let target = did();
         let predecessor = did();
 
@@ -793,7 +793,7 @@ mod tests {
     }
 
     #[test]
-    fn dht_notify_connects_target_before_sending() -> Result<()> {
+    fn test_dht_notify_connects_target_before_sending() -> Result<()> {
         let target = did();
         let predecessor = did();
 
@@ -816,7 +816,7 @@ mod tests {
     }
 
     #[test]
-    fn dht_notify_to_self_is_noop() -> Result<()> {
+    fn test_dht_notify_to_self_is_noop() -> Result<()> {
         let target = did();
 
         assert!(lower_dht_action(

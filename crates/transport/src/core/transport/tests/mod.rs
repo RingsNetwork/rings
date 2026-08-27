@@ -9,5 +9,5 @@ use super::TransportMessage;
 use super::WebrtcConnectionState;
 use super::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 
-mod send_permit;
-mod state;
+mod test_send_permit;
+mod test_state;

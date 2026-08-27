@@ -164,7 +164,7 @@ impl ChordNode {
     /// (predecessor becomes the candidate closer *behind* `me`), used instead of
     /// a throwaway `PeerRing` (which allocates a `DashMap`) so the checker can
     /// expand states cheaply. It is NOT assumed equivalent: the test
-    /// `apply_notify_matches_peer_ring` checks it against the real
+    /// `test_apply_notify_matches_peer_ring` checks it against the real
     /// `PeerRing::notify` across representative states, so it remains a faithful
     /// regression guard even though the model doesn't call the production fn.
     fn apply_notify(&self, me: Did, current: Option<Did>, from: Did) -> Did {
@@ -519,7 +519,7 @@ fn discovery_model(all: Vec<Did>, rounds: u8) -> ActorModel<DiscoveryNode, Cfg, 
     // (convergence is reachable). We deliberately do NOT assert `Eventually`
     // (convergence on *every* interleaving within `rounds`): Stateright shows it
     // is FALSE, and the counterexample is the whole point — see
-    // `discovery_has_no_bounded_convergence`.
+    // `test_discovery_has_no_bounded_convergence`.
     ActorModel::new(Cfg { all }, ())
         .actors(actors)
         .init_network(Network::new_unordered_nonduplicating([]))
@@ -558,7 +558,7 @@ mod tests {
     /// `PeerRing::notify` on every representative (current, from) state, so the
     /// model stays a regression guard even though it doesn't call the real fn.
     #[test]
-    fn apply_notify_matches_peer_ring() {
+    fn test_apply_notify_matches_peer_ring() {
         let all: Vec<Did> = (0..4u64).map(|i| did_frac(i, 4)).collect();
         let node = ChordNode { all: all.clone() };
         let candidates = std::iter::once(None).chain(all.iter().copied().map(Some));
@@ -590,7 +590,7 @@ mod tests {
     /// explores. (Routing / multi-hop `find_successor` is out of scope here — it
     /// stays a documented abstraction; see the stage-2 SCOPE note.)
     #[test]
-    fn successors_match_peer_ring_on_partial_states() {
+    fn test_successors_match_peer_ring_on_partial_states() {
         let all: Vec<Did> = (0..4u64).map(|i| did_frac(i, 4)).collect();
         let node = DiscoveryNode {
             all: all.clone(),
@@ -630,7 +630,7 @@ mod tests {
     /// The snapshot <-> PeerRing round-trip must be lossless: this is what lets
     /// the Stateright actor carry a hashable state yet run real chord operations.
     #[test]
-    fn snapshot_round_trip_is_lossless() {
+    fn test_snapshot_round_trip_is_lossless() {
         for n in 2..=6u64 {
             let dids: Vec<Did> = (0..n).map(|i| did_frac(i, n)).collect();
             for &node in &dids {
@@ -646,7 +646,7 @@ mod tests {
     /// predecessor to the `spec` fixpoint. This is the predecessor subprotocol,
     /// not successor discovery (see the SCOPE note on the stage-1 model).
     #[test]
-    fn notify_predecessor_converges_under_full_mesh() {
+    fn test_notify_predecessor_converges_under_full_mesh() {
         let all: Vec<Did> = (0..3u64).map(|i| did_frac(i, 3)).collect();
         notify_model(all)
             .checker()
@@ -659,7 +659,7 @@ mod tests {
     /// star bootstrap, the discovery protocol never corrupts a node's state
     /// (`Always`) and *can* reach the full `spec` fixpoint (`Sometimes`).
     #[test]
-    fn discovery_is_safe_and_can_converge() {
+    fn test_discovery_is_safe_and_can_converge() {
         let all: Vec<Did> = (0..3u64).map(|i| did_frac(i, 3)).collect();
         discovery_model(all, 2)
             .checker()
@@ -681,7 +681,7 @@ mod tests {
     /// integration test's residual, order-sensitive flakiness. We assert the
     /// counterexample EXISTS rather than chase it away.
     #[test]
-    fn discovery_has_no_bounded_convergence() {
+    fn test_discovery_has_no_bounded_convergence() {
         // Two bounds suffice as evidence; `rounds=3` blows the state space up
         // without adding signal. The general "no fixed bound" claim is the
         // analytical argument in the doc comment, not an exhaustive sweep.
@@ -712,7 +712,7 @@ mod tests {
     /// Stage 3 — CRDT SEC law. Storage values are real finite [`Entry`]
     /// carriers; anti-entropy messages only deliver more joins.
     #[test]
-    fn storage_entry_join_satisfies_semilattice_laws() {
+    fn test_storage_entry_join_satisfies_semilattice_laws() {
         for carrier in storage_join_carriers() {
             let values = (0u8..8)
                 .map(|bits| storage_value_from_bits(carrier, bits))
@@ -745,13 +745,13 @@ mod tests {
     }
 
     /// Stage 3 — topology-aware SEC. Carrier safety is proved by
-    /// `storage_entry_join_satisfies_semilattice_laws`; this model checks the
+    /// `test_storage_entry_join_satisfies_semilattice_laws`; this model checks the
     /// topology-specific liveness obligation that every merged state reaches the
     /// global lub under fair repeated send/deliver. The finite carriers cover
     /// bounded top-N data, overwrite reset floors, and relay tombstones. The
     /// copy/ack/delete model below is only local cleanup safety.
     #[test]
-    fn storage_join_topology_model_converges_after_partition_merge() {
+    fn test_storage_join_topology_model_converges_after_partition_merge() {
         for scenario in storage_join_scenarios() {
             let global_lub = scenario.global_lub();
             for partition in STORAGE_PARTITION_MASKS {
@@ -774,7 +774,7 @@ mod tests {
     /// deleting the local placement key is allowed only when the successor has
     /// durably stored the same value.
     #[test]
-    fn storage_sync_model_preserves_no_update_loss() {
+    fn test_storage_sync_model_preserves_no_update_loss() {
         let mut seen = BTreeSet::new();
         let mut frontier = vec![StorageSyncState::initial()];
         while let Some(state) = frontier.pop() {
