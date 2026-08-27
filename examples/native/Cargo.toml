@@ -8,7 +8,6 @@ repository.workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
-uuid = { version = "0.8.2", features = ["v4"] }
 base64 = "0.13"
 bytes = "1.2.1"
 rings-core = { workspace = true }
@@ -16,3 +15,4 @@ rings-node = { path = "../../crates/node", version = "0.18.0", default-features 
 rings-rpc = { workspace = true }
 serde_json = "1.0.70"
 tokio = { version = "1.13.0", features = ["macros", "rt-multi-thread", "time"] }
+uuid = { version = "0.8.2", features = ["v4"] }
