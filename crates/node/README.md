@@ -83,19 +83,18 @@ rings <command> [options]
 - `-h, --help`: displays the usage information.
 - `-V, --version`: displays the version information for rings-node.
 
+Run `rings daemon --help` for the current daemon command syntax.
+
 `daemon start` records the current working directory so the managed process can
 load the same `.env` file as `run`. `CONFIG`, `LOG_LEVEL`, and `RUNTIME` from the
 installing shell or that `.env` file are copied into the service definition;
 other shell variables are not copied. Persist node settings in the
 configuration file or the captured `.env` file. macOS logs are stored under
 `~/.rings/logs/`; Linux logs are available through
-`journalctl --user -u rings-node.service`. See the repository
-README for Linux lingering requirements and manual service removal. The captured
-working directory must remain at the same path; rerun `daemon start` from a
-persistent directory after moving or deleting it. `daemon stop` and `daemon
-restart` preserve the current login-autostart setting unless the service manager
-reports that its recovery step failed. Start and restart use a bounded sequence
-of manager observations rather than a wall-clock deadline. The command succeeds
-if the service runs and otherwise exits non-zero with its last observed state.
-The repository README documents the platform-specific respawn-delay, detached
-unit, and hard unload-confirmation failure semantics in one place.
+`journalctl --user -u rings-node.service`. The captured working directory must
+remain at the same path; rerun `daemon start` from a persistent directory after
+moving or deleting it. `daemon stop` and `daemon restart` preserve the current
+login-autostart setting unless the service manager reports that its recovery
+step failed. Start and restart use a bounded sequence of manager observations
+rather than a wall-clock deadline. The command succeeds if the service runs and
+otherwise exits non-zero with its last observed state.
