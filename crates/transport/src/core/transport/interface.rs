@@ -109,7 +109,9 @@ pub trait ConnectionInterface {
     /// proof token. This requirement also applies to synchronous send primitives
     /// so higher layers can atomically arbitrate deadlines at the same boundary.
     /// After the backend accepts the bytes, implementations must consume that
-    /// proof with [`IrrevocableSendPermit::mark_accepted`] before returning
+    /// proof with
+    /// [`IrrevocableSendPermit::mark_accepted`](crate::core::transport::IrrevocableSendPermit::mark_accepted)
+    /// before returning
     /// success. If work fails or is abandoned after claiming the proof but before
     /// acceptance, the implementation must retire and close that connection
     /// generation before returning.
