@@ -1,5 +1,12 @@
-use super::*;
+use std::str::FromStr;
+
+use super::SessionSk;
+use super::SessionSkBuilder;
 use crate::ecc::keys::SigningSecretKey;
+use crate::ecc::keys::VerificationPublicKey;
+use crate::ecc::signers;
+use crate::ecc::PublicKey;
+use crate::ecc::SecretKey;
 
 #[test]
 pub fn test_session_verify() {

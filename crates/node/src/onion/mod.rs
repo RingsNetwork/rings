@@ -838,7 +838,7 @@ impl OnionExitRegistration {
 
     /// Decode onion-exit descriptors from a DHT entry.
     pub fn decode_descriptors_from_entry(
-        entry: &rings_core::prelude::entry::Entry,
+        entry: &rings_core::dht::entry::Entry,
     ) -> OnionExitDescriptorDecodeReport {
         let mut report = OnionExitDescriptorDecodeReport::default();
         for value in &entry.data {
@@ -857,7 +857,7 @@ impl OnionExitRegistration {
 
     /// Decode onion-exit descriptors from a DHT entry, dropping values rejected at the schema boundary.
     pub fn descriptors_from_entry(
-        entry: &rings_core::prelude::entry::Entry,
+        entry: &rings_core::dht::entry::Entry,
     ) -> Vec<OnionExitDescriptor> {
         let report = Self::decode_descriptors_from_entry(entry);
         if report.has_rejections() {

@@ -4279,6 +4279,7 @@ dependencies = [
  "arrayref",
  "async-trait",
  "backtrace",
+ "base58",
  "base64 0.13.1",
  "bytes",
  "chrono",

@@ -304,7 +304,6 @@ impl StatusPool<TrackedChannel> for RoundRobinPool<TrackedChannel> {
 }
 
 #[cfg(test)]
-#[path = "send_tests.rs"]
 mod send_cancellation_tests;
 
 /// A connection that implemented by webrtc-rs library.

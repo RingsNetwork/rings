@@ -4308,6 +4308,7 @@ dependencies = [
  "rings-rpc",
  "serde_json",
  "tokio",
+ "uuid 0.8.2",
 ]
 
 [[package]]
@@ -4320,6 +4321,7 @@ dependencies = [
  "async-trait",
  "axum",
  "backtrace",
+ "base58",
  "base64 0.13.1",
  "bytes",
  "cbindgen",

@@ -1,9 +1,13 @@
+use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
 
 use futures::task::noop_waker;
 
-use super::*;
+use super::wait_queue::FairAdmission;
+use super::wait_queue::FairWaiter;
+use super::FairWaitBudget;
+use super::FairWaitQueue;
 
 fn queue(max_waiters: usize) -> Arc<FairWaitQueue> {
     Arc::new(FairWaitQueue::with_budget(Arc::new(FairWaitBudget::new(

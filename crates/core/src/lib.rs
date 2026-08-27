@@ -78,7 +78,6 @@ mod fair_admission;
 pub mod lifecycle;
 pub mod macros;
 pub mod message;
-pub mod prelude;
 pub mod session;
 pub mod storage;
 pub mod swarm;

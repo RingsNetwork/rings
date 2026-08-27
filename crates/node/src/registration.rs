@@ -11,12 +11,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::lock::Mutex as AsyncMutex;
+use rings_core::dht::entry;
 use rings_core::dht::Did;
 use rings_core::ecc::VerificationPublicKey;
 use rings_core::lifecycle::StopToken;
 use rings_core::message::Encoded;
 use rings_core::message::Encoder;
-use rings_core::prelude::entry;
 use rings_core::session::SessionSk;
 use rings_core::utils::get_epoch_ms;
 
@@ -592,7 +592,7 @@ impl OnlineNodeRegistration {
 
     /// Decode online-node descriptors from a DHT entry.
     pub fn descriptors_from_entry(
-        entry: &rings_core::prelude::entry::Entry,
+        entry: &rings_core::dht::entry::Entry,
     ) -> Vec<OnlineNodeDescriptor> {
         entry
             .data

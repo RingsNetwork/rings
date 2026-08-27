@@ -1,6 +1,6 @@
+use rings_core::dht::entry;
 use rings_core::ecc::SecretKey;
 use rings_core::message::Encoder;
-use rings_core::prelude::entry;
 use rings_core::session::SessionSk;
 
 use super::super::*;

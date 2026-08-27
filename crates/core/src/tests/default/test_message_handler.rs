@@ -11,6 +11,7 @@ use tokio::time::timeout;
 use tokio::time::Duration;
 
 use crate::dht::entry::Entry;
+use crate::dht::entry::EntryOperation;
 use crate::dht::entry::PlacedEntryOperation;
 use crate::dht::successor::SuccessorReader;
 #[cfg(feature = "dummy")]
@@ -28,7 +29,6 @@ use crate::message::FindSuccessorThen;
 use crate::message::Message;
 #[cfg(feature = "dummy")]
 use crate::message::MessageHandler;
-use crate::prelude::entry::EntryOperation;
 #[cfg(feature = "dummy")]
 use crate::swarm::callback::SwarmCallback;
 #[cfg(feature = "dummy")]

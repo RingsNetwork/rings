@@ -44,7 +44,7 @@ async fn advance_chunk_event(
     event: &mut InboundEvent,
 ) -> Result<Option<ReassembledEvent>> {
     let chunk = take_prepared_chunk(&mut event.prepared_message)?;
-    let bytes = match processor.handle_chunk(chunk).await {
+    let bytes: crate::chunk::RetainedReassembly = match processor.handle_chunk(chunk).await {
         ReassemblyOutcome::Complete(bytes) => bytes,
         ReassemblyOutcome::Incomplete
         | ReassemblyOutcome::Rejected(ReassemblyRejection::Capacity)

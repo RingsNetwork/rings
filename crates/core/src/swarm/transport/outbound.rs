@@ -48,24 +48,15 @@ use crate::error::Result;
 use crate::lifecycle::StopSource;
 use crate::measure::MeasureImpl;
 
-#[path = "outbound/admission.rs"]
 mod admission;
-#[path = "outbound/capacity.rs"]
 mod capacity;
-#[path = "outbound/mailbox.rs"]
 mod mailbox;
-#[path = "outbound/measurement.rs"]
 mod measurement;
-#[path = "outbound/model.rs"]
 mod model;
-#[path = "outbound/queue.rs"]
 mod queue;
-#[path = "outbound/spawn.rs"]
 mod spawn;
 #[cfg(test)]
-#[path = "outbound/trace.rs"]
 mod trace;
-#[path = "outbound/transfer.rs"]
 mod transfer;
 
 pub(super) use admission::DetachedAdmission;
@@ -982,5 +973,4 @@ impl Drop for OutboundWorker {
 }
 
 #[cfg(test)]
-#[path = "outbound/tests.rs"]
 mod tests;

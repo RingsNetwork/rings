@@ -16,11 +16,11 @@ fn invalid_release_keeps_aggregate_and_class_totals_equal() {
     let mut capacity = ReservedCapacity::<2>::new();
     assert!(capacity.try_reserve(0, 4, 8, &[0, 0]));
     capacity.release(2, 1);
-    assert_eq!(capacity.admitted, 4);
-    assert_eq!(capacity.admitted_by_class, [4, 0]);
+    assert_eq!(capacity.admitted(), 4);
+    assert_eq!(capacity.admitted_by_class(), &[4, 0]);
     capacity.release(0, 5);
-    assert_eq!(capacity.admitted, 4);
-    assert_eq!(capacity.admitted_by_class, [4, 0]);
+    assert_eq!(capacity.admitted(), 4);
+    assert_eq!(capacity.admitted_by_class(), &[4, 0]);
 }
 
 #[test]
@@ -29,6 +29,6 @@ fn valid_release_preserves_capacity_sum_invariant() {
     assert!(capacity.try_reserve(0, 3, 8, &[0, 0]));
     assert!(capacity.try_reserve(1, 2, 8, &[0, 0]));
     capacity.release(0, 2);
-    assert_eq!(capacity.admitted, 3);
-    assert_eq!(capacity.admitted_by_class.iter().sum::<usize>(), 3);
+    assert_eq!(capacity.admitted(), 3);
+    assert_eq!(capacity.admitted_by_class().iter().sum::<usize>(), 3);
 }

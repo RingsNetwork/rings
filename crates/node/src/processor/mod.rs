@@ -24,7 +24,6 @@ use rings_core::message::DhtProtocolMode;
 use rings_core::message::Encoded;
 use rings_core::message::Encoder;
 use rings_core::message::Message;
-use rings_core::prelude::uuid;
 use rings_core::storage::MemStorage;
 use rings_core::swarm::Swarm;
 use rings_core::swarm::SwarmBuilder;
@@ -33,6 +32,7 @@ use rings_rpc::protos::rings_node::*;
 use rings_transport::webrtc_config::WebrtcUdpPortRange;
 use serde::Deserialize;
 use serde::Serialize;
+use uuid;
 
 use crate::consts::DATA_REDUNDANT;
 use crate::error::Error;

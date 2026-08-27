@@ -8,6 +8,7 @@ use tokio::time::Instant;
 
 use super::super::ChordStorageInterfaceCacheChecker;
 use crate::dht::entry::Entry;
+use crate::dht::entry::EntryKind;
 use crate::dht::successor::SuccessorWriter;
 use crate::dht::Chord;
 use crate::dht::Did;
@@ -24,7 +25,6 @@ use crate::message::MessagePayload;
 use crate::message::MessageRelay;
 use crate::message::PayloadSender;
 use crate::message::Transaction;
-use crate::prelude::entry::EntryKind;
 use crate::session::SessionSk;
 use crate::storage::MemStorage;
 use crate::swarm::callback::SwarmCallback;

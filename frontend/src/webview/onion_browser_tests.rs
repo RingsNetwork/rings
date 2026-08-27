@@ -4,7 +4,7 @@ use js_sys::Object;
 use js_sys::Reflect;
 use rings_node::onion::OnionExitPolicy;
 use rings_node::prelude::rings_core::ecc::SecretKey;
-use rings_node::prelude::rings_core::prelude::uuid;
+use rings_node::prelude::uuid;
 use rings_node::prelude::rings_core::session::SessionSk;
 use rings_node::prelude::rings_core::storage::idb::IdbStorage;
 use rings_node::prelude::rings_core::utils::js_utils::window_sleep;

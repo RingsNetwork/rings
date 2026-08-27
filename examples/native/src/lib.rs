@@ -173,7 +173,7 @@ pub fn e2e_example_round_trip(
     plaintext: &[u8],
     max_plaintext_frame_len: usize,
 ) -> rings_core::error::Result<Vec<u8>> {
-    let stream_id = rings_core::prelude::uuid::Uuid::new_v4();
+    let stream_id = uuid::Uuid::new_v4();
     let frames = e2e::encrypt_stream_frames(
         plaintext,
         stream_id,

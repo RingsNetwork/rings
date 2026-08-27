@@ -918,5 +918,4 @@ impl SwarmTransport {
 }
 
 #[cfg(test)]
-#[path = "pending/lifecycle_model.rs"]
 mod lifecycle_model;

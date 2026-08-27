@@ -173,7 +173,6 @@ impl ControlledDeliveryState {
 }
 
 #[cfg(test)]
-#[path = "tests.rs"]
 mod tests;
 
 /// Test-only controlled delivery scheduler. When enabled (per thread), dummy

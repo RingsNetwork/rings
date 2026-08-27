@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
+uuid = { version = "0.8.2", features = ["v4"] }
 base64 = "0.13"
 bytes = "1.2.1"
 rings-core = { workspace = true }
