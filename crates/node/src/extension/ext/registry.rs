@@ -656,7 +656,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn committed_transitions_execute_effects_in_commit_order() -> Result<()> {
+    async fn test_committed_transitions_execute_effects_in_commit_order() -> Result<()> {
         // Invariant: while A's effect is blocked, B cannot commit or emit; releasing A
         // produces the unique effect trace [A, B] for the protocol's state-transition order.
         let extensions = extensions()?;
@@ -738,7 +738,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_effect_releases_ordered_turn_for_later_transition() -> Result<()> {
+    async fn test_failed_effect_releases_ordered_turn_for_later_transition() -> Result<()> {
         // Law: failure is an outcome of the committed transition, not a leaked gate. The next
         // transition can run after the failed application has ended.
         let extensions = extensions()?;
@@ -765,7 +765,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn returned_feedback_precedes_a_waiting_transition() -> Result<()> {
+    async fn test_returned_feedback_precedes_a_waiting_transition() -> Result<()> {
         // Invariant: the first inbound Open returns a real RelayCommand::Untrack feedback before
         // a duplicate Open may inspect relay state. Therefore the duplicate is accepted and emits
         // its own Connect; the old queue-after-gate implementation dropped it as a live duplicate.
@@ -840,7 +840,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_open_accepted_resource_returns_synchronous_untrack() -> Result<()> {
+    async fn test_missing_open_accepted_resource_returns_synchronous_untrack() -> Result<()> {
         let extensions = extensions()?;
         let effect_scope = EffectScope::new(Scope::new(extensions.core(), TCP.to_string()));
         let interpreter = NativeRelay::new(Arc::new(TransportSessions::new()));
@@ -868,7 +868,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn terminal_relay_control_effect_does_not_await_overlay_send() -> Result<()> {
+    async fn test_terminal_relay_control_effect_does_not_await_overlay_send() -> Result<()> {
         let extensions = extensions()?;
         let hook = Arc::new(ControlSendTestHook::default());
         let interpreter = Arc::new(NativeRelay::new_with_control_send_test_hook(
@@ -909,7 +909,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn saturated_peer_control_lane_does_not_block_another_peer() -> Result<()> {
+    async fn test_saturated_peer_control_lane_does_not_block_another_peer() -> Result<()> {
         let extensions = extensions()?;
         let hook = Arc::new(ControlSendTestHook::default());
         let interpreter = NativeRelay::new_with_control_send_test_hook(

@@ -359,7 +359,7 @@ mod tests {
     use super::*;
 
     #[wasm_bindgen_test]
-    fn js_error_label_uses_error_message_without_stack() {
+    fn test_js_error_label_uses_error_message_without_stack() {
         let error = Error::new("Onion route error: no live onion exit offers service \"https\"");
 
         assert_eq!(
@@ -369,7 +369,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn js_error_label_compacts_debug_fallback() {
+    fn test_js_error_label_compacts_debug_fallback() {
         assert_eq!(
             compact_js_error_text("JsValue(Error: boom\n    at wasm-function[1])"),
             "Error: boom"
@@ -377,7 +377,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn browser_internal_debug_urls_are_detected() {
+    fn test_browser_internal_debug_urls_are_detected() {
         assert!(is_browser_internal_url("chrome://webrtc-internals/"));
         assert!(is_browser_internal_url("about:webrtc"));
         assert!(!is_browser_internal_url("https://example.test/"));

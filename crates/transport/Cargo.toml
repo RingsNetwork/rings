@@ -36,12 +36,12 @@ js-sys = { workspace = true, optional = true }
 wasm-bindgen = { workspace = true, optional = true }
 wasm-bindgen-futures = { workspace = true, optional = true }
 web-sys = { version = "0.3.64", optional = true, features = [
-    "Blob",
     "MessageEvent",
     "RtcConfiguration",
     "RtcDataChannel",
     "RtcDataChannelEvent",
     "RtcDataChannelState",
+    "RtcDataChannelType",
     "RtcIceCredentialType",
     "RtcIceGatheringState",
     "RtcIceServer",
@@ -70,4 +70,7 @@ url = { version = "2.4.0", features = ["serde"] }
 
 [dev-dependencies]
 futures = "0.3.28"
+wasm-bindgen-test = { workspace = true }
+
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 tokio = { version = "1.32.0", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }

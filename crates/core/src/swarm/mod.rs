@@ -76,11 +76,7 @@ impl Swarm {
 
     /// Get this swarm's full DHT protocol mode descriptor.
     pub fn dht_protocol_mode(&self) -> DhtProtocolMode {
-        DhtProtocolMode::new(
-            self.network_id(),
-            self.storage_redundancy(),
-            self.dht_virtual_nodes(),
-        )
+        self.transport.dht_protocol_mode()
     }
 
     /// Get DHT(Distributed Hash Table) of self.

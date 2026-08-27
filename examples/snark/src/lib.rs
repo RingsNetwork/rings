@@ -230,12 +230,12 @@ mod tests {
     type MerkleTreeTestField = <PallasEngine as Engine>::Scalar;
 
     #[test]
-    fn bundled_circuit_assets_exist() {
+    fn test_bundled_circuit_assets_exist() {
         verify_bundled_circuit_assets().expect("bundled circuit assets");
     }
 
     #[test]
-    fn simple_bn256_inputs_match_the_example_shape() {
+    fn test_simple_bn256_inputs_match_the_example_shape() {
         let initial = simple_bn256_initial_input::<Bn256TestField>();
         let private = simple_bn256_private_inputs::<Bn256TestField>();
 
@@ -250,14 +250,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn simple_bn256_example_runs_one_step_prove_verify() {
+    async fn test_simple_bn256_example_runs_one_step_prove_verify() {
         simple_bn256_one_step_prove_verify()
             .await
             .expect("simple BN256 one-step prove and verify");
     }
 
     #[test]
-    fn merkle_tree_inputs_match_the_example_shape() {
+    fn test_merkle_tree_inputs_match_the_example_shape() {
         let initial = merkle_tree_initial_input::<MerkleTreeTestField>();
         let private = merkle_tree_private_inputs::<MerkleTreeTestField>();
 

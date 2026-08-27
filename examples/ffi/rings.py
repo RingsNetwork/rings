@@ -162,7 +162,7 @@ def create_provider(
 ) -> ProviderHandle:
     # Inbound messages are routed to namespaced protocols by the extension registry;
     # the old per-variant C message callbacks have been removed.
-    runtime.rings.rings_node_init_logging(runtime.rings.Debug)
+    runtime.rings.rings_node_init_logging(runtime.rings.Error)
     signer = gen_signer(runtime.ffi, acc)
     provider = runtime.rings.rings_node_new_provider_with_callback(
         network_id,

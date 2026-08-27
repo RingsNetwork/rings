@@ -60,7 +60,7 @@ impl SwarmCallback for SwarmCallbackInstance {
     async fn on_inbound(
         &self,
         payload: &MessagePayload,
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    ) -> std::result::Result<(), rings_core::error::CallbackError> {
         let msg: Message = payload.transaction.data().map_err(Box::new)?;
         {
             let mut inbound = self.inbound.lock().unwrap();
@@ -74,7 +74,7 @@ impl SwarmCallback for SwarmCallbackInstance {
     async fn on_event(
         &self,
         event: &SwarmEvent,
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    ) -> std::result::Result<(), rings_core::error::CallbackError> {
         if let SwarmEvent::ConnectionStateChange {
             state: WebrtcConnectionState::Connected,
             ..

@@ -242,7 +242,7 @@ impl OnlineNodeDescriptor {
     }
 
     /// Return whether this descriptor belongs to the local DHT protocol mode.
-    pub const fn matches_dht_protocol(&self, expected: DhtProtocolMode) -> bool {
+    pub fn matches_dht_protocol(&self, expected: DhtProtocolMode) -> bool {
         self.dht_protocol_mode().matches(expected)
     }
 
@@ -346,7 +346,7 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_signature_covers_mutable_fields() -> Result<()> {
+    fn test_descriptor_signature_covers_mutable_fields() -> Result<()> {
         let mut descriptor = descriptor_at(20, 30)?;
         assert!(descriptor.verify_signature());
 
@@ -359,7 +359,7 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_round_trips_through_dht_encoding() -> Result<()> {
+    fn test_descriptor_round_trips_through_dht_encoding() -> Result<()> {
         let descriptor = descriptor_at(20, 30)?;
         let encoded = descriptor.encode()?;
         let decoded = OnlineNodeDescriptor::from_encoded(&encoded)?;
@@ -370,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn latest_valid_by_did_filters_expired_and_keeps_newest() -> Result<()> {
+    fn test_latest_valid_by_did_filters_expired_and_keeps_newest() -> Result<()> {
         let key = SecretKey::random();
         let session_sk = SessionSk::new_with_seckey(&key)?;
         let did = session_sk.account_did();

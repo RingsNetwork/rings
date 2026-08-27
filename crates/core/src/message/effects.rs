@@ -5,7 +5,20 @@
 //! [`CoreEffect`], and [`CoreEffectInterpreter`] applies those values to the
 //! current transport implementation.
 
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+use std::cell::Cell;
+use std::future::poll_fn;
 use std::sync::Arc;
+use std::task::Poll;
+
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+use futures::channel::oneshot;
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+use wasm_bindgen::closure::Closure;
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+use wasm_bindgen::JsCast;
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+use wasm_bindgen::JsValue;
 
 use crate::dht::Did;
 use crate::dht::PeerRingAction;
@@ -24,6 +37,148 @@ use crate::message::SyncEntriesWithSuccessor;
 use crate::swarm::callback::InnerSwarmCallback;
 use crate::swarm::callback::SharedSwarmCallback;
 use crate::swarm::transport::SwarmTransport;
+
+/// Yield one executor poll without depending on a particular async runtime.
+async fn yield_executor_once() {
+    let mut yielded = false;
+    poll_fn(move |context| {
+        if yielded {
+            Poll::Ready(())
+        } else {
+            yielded = true;
+            context.waker().wake_by_ref();
+            Poll::Pending
+        }
+    })
+    .await;
+}
+
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+pub(crate) const CORE_ACTOR_BROWSER_YIELD_INTERVAL: u8 = 32;
+
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+thread_local! {
+    static CORE_ACTOR_STEPS_SINCE_BROWSER_YIELD: Cell<u8> = const { Cell::new(0) };
+    #[cfg(test)]
+    static LIVE_BROWSER_TASK_YIELD_GUARDS: Cell<usize> = const { Cell::new(0) };
+    #[cfg(test)]
+    static CLEARED_BROWSER_TASK_YIELD_HANDLERS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+struct BrowserTaskYieldGuard {
+    channel: web_sys::MessageChannel,
+    _callback: Closure<dyn FnMut(web_sys::MessageEvent)>,
+}
+
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+impl BrowserTaskYieldGuard {
+    fn new(
+        channel: web_sys::MessageChannel,
+        callback: Closure<dyn FnMut(web_sys::MessageEvent)>,
+    ) -> Self {
+        channel
+            .port1()
+            .set_onmessage(Some(callback.as_ref().unchecked_ref()));
+        #[cfg(test)]
+        LIVE_BROWSER_TASK_YIELD_GUARDS.with(|live| live.set(live.get().saturating_add(1)));
+        Self {
+            channel,
+            _callback: callback,
+        }
+    }
+
+    fn post(&self) -> std::result::Result<(), JsValue> {
+        self.channel.port2().post_message(&JsValue::NULL)
+    }
+}
+
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+impl Drop for BrowserTaskYieldGuard {
+    fn drop(&mut self) {
+        self.channel.port1().set_onmessage(None);
+        self.channel.port1().close();
+        self.channel.port2().close();
+        #[cfg(test)]
+        {
+            LIVE_BROWSER_TASK_YIELD_GUARDS.with(|live| live.set(live.get().saturating_sub(1)));
+            CLEARED_BROWSER_TASK_YIELD_HANDLERS
+                .with(|cleared| cleared.set(cleared.get().saturating_add(1)));
+        }
+    }
+}
+
+/// Yield after one bounded core actor work item.
+///
+/// Native tasks yield for one executor poll. Browser tasks do the same cheap
+/// yield and additionally cross a `MessageChannel` task boundary every
+/// [`CORE_ACTOR_BROWSER_YIELD_INTERVAL`] steps, bounding event-loop starvation
+/// without the nested-timer clamp of `setTimeout(0)`.
+pub(crate) async fn yield_core_actor_step() {
+    yield_executor_once().await;
+    #[cfg(all(feature = "wasm", target_family = "wasm"))]
+    if browser_task_yield_due() {
+        yield_browser_task().await;
+    }
+}
+
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+fn browser_task_yield_due() -> bool {
+    CORE_ACTOR_STEPS_SINCE_BROWSER_YIELD.with(|steps| {
+        let next = steps.get().saturating_add(1);
+        if next >= CORE_ACTOR_BROWSER_YIELD_INTERVAL {
+            steps.set(0);
+            true
+        } else {
+            steps.set(next);
+            false
+        }
+    })
+}
+
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+pub(crate) async fn yield_browser_task() {
+    let Ok(channel) = web_sys::MessageChannel::new() else {
+        return;
+    };
+    let (sender, receiver) = oneshot::channel();
+    let mut sender = Some(sender);
+    let callback = Closure::wrap(Box::new(move |_event: web_sys::MessageEvent| {
+        if let Some(sender) = sender.take() {
+            let _ = sender.send(());
+        }
+    }) as Box<dyn FnMut(_)>);
+    let guard = BrowserTaskYieldGuard::new(channel, callback);
+    if guard.post().is_err() {
+        return;
+    }
+    let _ = receiver.await;
+}
+
+#[cfg(all(test, feature = "wasm", target_family = "wasm"))]
+pub(crate) fn reset_browser_task_yield_guard_counts_for_test() {
+    LIVE_BROWSER_TASK_YIELD_GUARDS.with(|live| live.set(0));
+    CLEARED_BROWSER_TASK_YIELD_HANDLERS.with(|cleared| cleared.set(0));
+}
+
+#[cfg(all(test, feature = "wasm", target_family = "wasm"))]
+pub(crate) fn browser_task_yield_guard_counts_for_test() -> (usize, usize) {
+    (
+        LIVE_BROWSER_TASK_YIELD_GUARDS.with(Cell::get),
+        CLEARED_BROWSER_TASK_YIELD_HANDLERS.with(Cell::get),
+    )
+}
+
+/// Pair each work item with whether another item follows it.
+pub(crate) fn core_actor_steps<T>(
+    items: impl IntoIterator<Item = T>,
+) -> impl Iterator<Item = (T, bool)> {
+    let mut items = items.into_iter().peekable();
+    std::iter::from_fn(move || {
+        let item = items.next()?;
+        Some((item, items.peek().is_some()))
+    })
+}
 
 /// One side effect requested by a Core message handler.
 #[derive(Clone, Debug)]
@@ -124,6 +279,23 @@ impl<'payload> CoreEffect<'payload> {
     }
 }
 
+fn find_successor_effect<'payload>(
+    next: Did,
+    did: Did,
+    handler: FindSuccessorReportHandler,
+) -> Option<CoreEffect<'payload>> {
+    (next != did).then(|| {
+        CoreEffect::send_direct_message(
+            Message::FindSuccessorSend(FindSuccessorSend {
+                did,
+                strict: false,
+                then: FindSuccessorThen::Report(handler),
+            }),
+            next,
+        )
+    })
+}
+
 /// Lower one DHT leaf action directly into a transport effect.
 pub(crate) fn lower_dht_action<'payload>(
     act: &PeerRingAction,
@@ -132,40 +304,20 @@ pub(crate) fn lower_dht_action<'payload>(
     match act {
         PeerRingAction::None => Ok(None),
         PeerRingAction::RemoteAction(next, PeerRingRemoteAction::FindSuccessorForConnect(did)) => {
-            let (next, did) = (*next, *did);
-            Ok(if next == did {
-                None
-            } else {
-                Some(CoreEffect::send_direct_message(
-                    Message::FindSuccessorSend(FindSuccessorSend {
-                        did,
-                        strict: false,
-                        then: FindSuccessorThen::Report(FindSuccessorReportHandler::Connect),
-                    }),
-                    next,
-                ))
-            })
+            Ok(find_successor_effect(
+                *next,
+                *did,
+                FindSuccessorReportHandler::Connect,
+            ))
         }
         PeerRingAction::RemoteAction(
             next,
             PeerRingRemoteAction::FindSuccessorForFix { did, index },
-        ) => {
-            let (next, did, index) = (*next, *did, *index);
-            Ok(if next == did {
-                None
-            } else {
-                Some(CoreEffect::send_direct_message(
-                    Message::FindSuccessorSend(FindSuccessorSend {
-                        did,
-                        strict: false,
-                        then: FindSuccessorThen::Report(
-                            FindSuccessorReportHandler::FixFingerTable { index },
-                        ),
-                    }),
-                    next,
-                ))
-            })
-        }
+        ) => Ok(find_successor_effect(
+            *next,
+            *did,
+            FindSuccessorReportHandler::FixFingerTable { index: *index },
+        )),
         PeerRingAction::RemoteAction(successor, PeerRingRemoteAction::QueryForSuccessorList) => {
             Ok(Some(if is_connected(*successor) {
                 CoreEffect::send_direct_message(
@@ -274,8 +426,11 @@ impl<'handler> CoreEffectInterpreter<'handler> {
         &self,
         effects: impl IntoIterator<Item = CoreEffect<'payload>>,
     ) -> Result<()> {
-        for effect in effects {
+        for (effect, has_next) in core_actor_steps(effects) {
             self.run(effect).await?;
+            if has_next {
+                yield_core_actor_step().await;
+            }
         }
         Ok(())
     }
@@ -283,6 +438,19 @@ impl<'handler> CoreEffectInterpreter<'handler> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+    use std::future::Future;
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+    use std::sync::atomic::AtomicUsize;
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+    use std::sync::atomic::Ordering;
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+    use std::task::Context;
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+    use std::task::Wake;
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+    use std::task::Waker;
+
     use super::*;
     use crate::dht::StorageSyncDestination;
     use crate::dht::StorageSyncPurpose;
@@ -311,8 +479,42 @@ mod tests {
         effect?.ok_or_else(|| Error::InvalidMessage("expected one effect".to_string()))
     }
 
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+    struct WakeCounter(AtomicUsize);
+
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+    impl Wake for WakeCounter {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
     #[test]
-    fn send_report_message_effect_borrows_payload_and_owns_message() -> Result<()> {
+    fn test_core_actor_step_yields_for_exactly_one_poll() {
+        let wake_counter = Arc::new(WakeCounter(AtomicUsize::new(0)));
+        let waker = Waker::from(Arc::clone(&wake_counter));
+        let mut context = Context::from_waker(&waker);
+        let mut future = std::pin::pin!(yield_core_actor_step());
+
+        assert_eq!(Future::poll(future.as_mut(), &mut context), Poll::Pending);
+        assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
+        assert_eq!(Future::poll(future.as_mut(), &mut context), Poll::Ready(()));
+        assert_eq!(wake_counter.0.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn test_core_actor_steps_marks_only_real_yield_boundaries() {
+        assert_eq!(core_actor_steps([1, 2, 3]).collect::<Vec<_>>(), vec![
+            (1, true),
+            (2, true),
+            (3, false),
+        ]);
+        assert_eq!(core_actor_steps(Vec::<u8>::new()).next(), None);
+    }
+
+    #[test]
+    fn test_send_report_message_effect_borrows_payload_and_owns_message() -> Result<()> {
         let destination = did();
         let payload = payload(destination)?;
         let effect = CoreEffect::send_report_message(
@@ -347,7 +549,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_destination_effect_borrows_payload_and_next_hop() -> Result<()> {
+    fn test_reset_destination_effect_borrows_payload_and_next_hop() -> Result<()> {
         let destination = did();
         let next_hop = did();
         let payload = payload(destination)?;
@@ -371,7 +573,7 @@ mod tests {
     }
 
     #[test]
-    fn storage_sync_effect_owns_sync_message() -> Result<()> {
+    fn test_storage_sync_effect_owns_sync_message() -> Result<()> {
         let destination = did();
         let msg = SyncEntriesWithSuccessor {
             purpose: StorageSyncPurpose::OwnershipHandoff,
@@ -396,7 +598,7 @@ mod tests {
     }
 
     #[test]
-    fn dht_find_successor_for_connect_sends_direct_report() -> Result<()> {
+    fn test_dht_find_successor_for_connect_sends_direct_report() -> Result<()> {
         let next = did();
         let target = did();
 
@@ -439,7 +641,7 @@ mod tests {
     }
 
     #[test]
-    fn dht_find_successor_for_connect_to_self_is_noop() -> Result<()> {
+    fn test_dht_find_successor_for_connect_to_self_is_noop() -> Result<()> {
         let target = did();
 
         assert!(lower_dht_action(
@@ -454,7 +656,7 @@ mod tests {
     }
 
     #[test]
-    fn dht_find_successor_for_fix_sends_direct_indexed_report() -> Result<()> {
+    fn test_dht_find_successor_for_fix_sends_direct_indexed_report() -> Result<()> {
         let next = did();
         let target = did();
         let index = 11;
@@ -500,7 +702,7 @@ mod tests {
     }
 
     #[test]
-    fn dht_query_successor_list_connects_before_query() -> Result<()> {
+    fn test_dht_query_successor_list_connects_before_query() -> Result<()> {
         let target = did();
 
         let effect = single_effect(lower_dht_action(
@@ -522,7 +724,7 @@ mod tests {
     }
 
     #[test]
-    fn dht_query_successor_list_sends_when_connected() -> Result<()> {
+    fn test_dht_query_successor_list_sends_when_connected() -> Result<()> {
         let target = did();
 
         let effect = single_effect(lower_dht_action(
@@ -560,7 +762,7 @@ mod tests {
     }
 
     #[test]
-    fn dht_notify_sends_predecessor_to_target() -> Result<()> {
+    fn test_dht_notify_sends_predecessor_to_target() -> Result<()> {
         let target = did();
         let predecessor = did();
 
@@ -591,7 +793,7 @@ mod tests {
     }
 
     #[test]
-    fn dht_notify_connects_target_before_sending() -> Result<()> {
+    fn test_dht_notify_connects_target_before_sending() -> Result<()> {
         let target = did();
         let predecessor = did();
 
@@ -614,7 +816,7 @@ mod tests {
     }
 
     #[test]
-    fn dht_notify_to_self_is_noop() -> Result<()> {
+    fn test_dht_notify_to_self_is_noop() -> Result<()> {
         let target = did();
 
         assert!(lower_dht_action(

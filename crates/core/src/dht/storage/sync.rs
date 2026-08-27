@@ -34,13 +34,11 @@ const SYNC_BATCH_ENVELOPE_HEADROOM_BYTES: usize =
 
 fn serialized_wire_size<T: Serialize>(value: &T) -> Result<usize> {
     let bytes = rings_codec::serialized_size(value).map_err(Error::CodecSerialize)?;
-    usize::try_from(bytes).map_err(|_| Error::MessageTooLarge(usize::MAX))
+    usize::try_from(bytes).map_err(|_| Error::MessageSizeOverflow)
 }
 
 fn add_wire_cost(total: usize, next: usize) -> Result<usize> {
-    total
-        .checked_add(next)
-        .ok_or(Error::MessageTooLarge(usize::MAX))
+    total.checked_add(next).ok_or(Error::MessageSizeOverflow)
 }
 
 fn sync_entries_fixed_wire_cost() -> Result<usize> {

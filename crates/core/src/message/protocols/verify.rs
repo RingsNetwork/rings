@@ -147,7 +147,7 @@ mod tests {
     }
 
     #[test]
-    fn expiration_handles_timestamp_below_tolerance_without_underflow() -> Result<()> {
+    fn test_expiration_handles_timestamp_below_tolerance_without_underflow() -> Result<()> {
         let key = SecretKey::random();
         let session_sk = SessionSk::new_with_seckey(&key)?;
         let mut verification = MessageVerification::new(&[], &session_sk)?;
@@ -174,7 +174,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_unexpired_rejects_ttl_above_max() -> Result<()> {
+    fn test_verify_unexpired_rejects_ttl_above_max() -> Result<()> {
         let key = SecretKey::random();
         let session_sk = SessionSk::new_with_seckey(&key)?;
         let proof = signed_verification(&[], &session_sk, get_epoch_ms(), MAX_TTL_MS + 1)?;
@@ -185,7 +185,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_unexpired_rejects_timestamp_beyond_future_tolerance() -> Result<()> {
+    fn test_verify_unexpired_rejects_timestamp_beyond_future_tolerance() -> Result<()> {
         let key = SecretKey::random();
         let session_sk = SessionSk::new_with_seckey(&key)?;
         let proof = signed_verification(

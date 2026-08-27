@@ -6,6 +6,9 @@ use std::error::Error as StdError;
 use std::fmt;
 
 use serde::de::DeserializeOwned;
+use serde::de::EnumAccess;
+use serde::de::Visitor;
+use serde::Deserialize;
 use serde::Serialize;
 
 /// Codec error returned by Rings wire helper functions.
@@ -81,16 +84,61 @@ where T: DeserializeOwned {
     }
 }
 
+/// Deserialize one value from the start of `bytes` and return the unconsumed suffix.
+///
+/// Borrowing outputs such as `&[u8]` remain views into the input. This is used
+/// for allocation-free inspection of bounded-admission envelope prefixes.
+pub fn deserialize_prefix<'de, T>(bytes: &'de [u8]) -> Result<(T, &'de [u8])>
+where T: Deserialize<'de> {
+    postcard::take_from_bytes(bytes).map_err(Error::deserialize)
+}
+
+struct EnumVariant(u32);
+
+impl<'de> Deserialize<'de> for EnumVariant {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where D: serde::Deserializer<'de> {
+        deserializer.deserialize_enum("RingsEnum", &[], EnumVariantVisitor)
+    }
+}
+
+struct EnumVariantVisitor;
+
+impl<'de> Visitor<'de> for EnumVariantVisitor {
+    type Value = EnumVariant;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a Rings wire enum discriminant")
+    }
+
+    fn visit_enum<A>(self, data: A) -> std::result::Result<Self::Value, A::Error>
+    where A: EnumAccess<'de> {
+        let (variant, _) = data.variant::<u32>()?;
+        Ok(EnumVariant(variant))
+    }
+}
+
+/// Read an enum variant index without deserializing its body.
+///
+/// This supports bounded admission decisions that must inspect a Rings postcard
+/// envelope before allocating its potentially large variant payload.
+pub fn deserialize_enum_variant(bytes: &[u8]) -> Result<u32> {
+    let mut deserializer = postcard::Deserializer::from_bytes(bytes);
+    EnumVariant::deserialize(&mut deserializer)
+        .map(|variant| variant.0)
+        .map_err(Error::deserialize)
+}
+
 /// Return the serialized size of a serde value using the default wire encoding.
 pub fn serialized_size<T>(value: &T) -> Result<u64>
 where T: Serialize {
-    serialize(value).map(|bytes| bytes.len() as u64)
+    postcard::experimental::serialized_size(value)
+        .map(|bytes| bytes as u64)
+        .map_err(Error::from)
 }
 
 #[cfg(test)]
 mod tests {
-    use serde::Deserialize;
-
     use super::*;
 
     #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -104,6 +152,12 @@ mod tests {
     struct WideIntegers {
         signed: i128,
         unsigned: u128,
+    }
+
+    #[derive(Debug, Deserialize, Eq, PartialEq, Serialize)]
+    enum TaggedBody {
+        Empty,
+        Bytes(Vec<u8>),
     }
 
     #[test]
@@ -135,6 +189,34 @@ mod tests {
         let encoded = serialize(&value)?;
         assert_eq!(u64::try_from(encoded.len())?, serialized_size(&value)?);
         assert_eq!(deserialize::<WideIntegers>(&encoded)?, value);
+        Ok(())
+    }
+
+    #[test]
+    fn test_enum_variant_decode_does_not_require_the_variant_body() -> Result<()> {
+        assert_eq!(
+            deserialize_enum_variant(&serialize(&TaggedBody::Empty)?)?,
+            0
+        );
+        let encoded = serialize(&TaggedBody::Bytes(vec![7; 1024]))?;
+
+        assert_eq!(deserialize_enum_variant(&encoded)?, 1);
+        assert!(encoded.starts_with(&[1]));
+        let variant_only = [1];
+        assert_eq!(deserialize_enum_variant(&variant_only)?, 1);
+        assert!(deserialize::<TaggedBody>(&variant_only).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn test_prefix_decode_borrows_byte_slices_without_consuming_suffix() -> Result<()> {
+        let mut encoded = serialize(&vec![1_u8, 2, 3])?;
+        encoded.push(99);
+
+        let (borrowed, remaining) = deserialize_prefix::<&[u8]>(&encoded)?;
+
+        assert_eq!(borrowed, &[1, 2, 3]);
+        assert_eq!(remaining, &[99]);
         Ok(())
     }
 

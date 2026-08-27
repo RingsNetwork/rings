@@ -220,12 +220,12 @@ mod tests {
     }
 
     #[test]
-    fn r1cs_validate_accepts_declared_variable_range() -> Result<()> {
+    fn test_r1cs_validate_accepts_declared_variable_range() -> Result<()> {
         valid_r1cs().validate()
     }
 
     #[test]
-    fn r1cs_validate_rejects_constraint_index_outside_variable_range() {
+    fn test_r1cs_validate_rejects_constraint_index_outside_variable_range() {
         let mut r1cs = valid_r1cs();
         r1cs.constraints = vec![(vec![(4, Fp::from(1))], vec![], vec![])];
 
@@ -239,7 +239,7 @@ mod tests {
     }
 
     #[test]
-    fn r1cs_validate_rejects_public_io_that_cannot_split_evenly() {
+    fn test_r1cs_validate_rejects_public_io_that_cannot_split_evenly() {
         let mut r1cs = valid_r1cs();
         r1cs.num_inputs = 4;
         r1cs.num_aux = 0;

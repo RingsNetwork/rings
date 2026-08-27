@@ -52,9 +52,69 @@ pub enum Error {
     #[error("Message was not delivered: {0}")]
     MessageNotDelivered(String),
 
+    /// A data-channel message used an unsupported representation: {0}
+    #[error("Unsupported data-channel message: {0}")]
+    DataChannelMessage(String),
+
     /// The higher-level authorization was revoked before backend send admission.
     #[error("Send permit was revoked before transport send admission")]
     SendPermitRevoked,
+
+    #[cfg(feature = "native-webrtc")]
+    /// No Tokio runtime is available to drive a native data-channel write.
+    #[error("Native data-channel send requires an active Tokio runtime")]
+    NativeSendRuntimeUnavailable,
+
+    #[cfg(feature = "native-webrtc")]
+    /// An irrevocable native data-channel write exceeded its completion bound.
+    #[error("Native data-channel send did not complete within {timeout_ms}ms")]
+    NativeSendCompletionTimeout {
+        /// Completion bound applied after the write became irrevocable.
+        timeout_ms: u128,
+    },
+
+    #[cfg(feature = "native-webrtc")]
+    /// A native task driving an irrevocable data-channel write stopped unexpectedly.
+    #[error("Native data-channel send task stopped: {0}")]
+    NativeSendTask(#[source] tokio::task::JoinError),
+
+    #[cfg(feature = "native-webrtc")]
+    /// A native data-channel send panicked while still owned by its caller.
+    #[error("Native data-channel send panicked: {0}")]
+    NativeSendPanic(String),
+
+    #[cfg(feature = "native-webrtc")]
+    /// A native task driving physical connection close stopped unexpectedly.
+    #[error("Native connection close task stopped: {0}")]
+    NativeConnectionCloseTask(#[source] tokio::task::JoinError),
+
+    #[cfg(feature = "native-webrtc")]
+    /// A native connection did not close within its bounded retirement interval.
+    #[error("Native connection retirement did not complete within {timeout_ms}ms")]
+    NativeConnectionRetirementTimeout {
+        /// Retirement bound in milliseconds.
+        timeout_ms: u128,
+    },
+
+    #[cfg(feature = "dummy")]
+    /// The dummy connection retired before an irrevocable frame could be dispatched.
+    #[error("Dummy connection retired before irrevocable dispatch")]
+    DummyConnectionRetiredBeforeDispatch,
+
+    #[cfg(feature = "dummy")]
+    /// The paired dummy connection was unavailable before dispatch.
+    #[error("Dummy remote connection is unavailable before dispatch")]
+    DummyRemoteConnectionUnavailable,
+
+    #[cfg(feature = "dummy")]
+    /// The paired dummy connection stopped accepting events before dispatch.
+    #[error("Dummy remote connection is closed")]
+    DummyRemoteConnectionClosed,
+
+    #[cfg(feature = "dummy")]
+    /// The task driving an irrevocable dummy send stopped before publishing its result.
+    #[error("Dummy irrevocable send task stopped before completion")]
+    DummyIrrevocableSendTaskStopped,
 
     /// WebRTC local SDP generation error: {0}
     #[error("WebRTC local SDP generation error: {0}")]

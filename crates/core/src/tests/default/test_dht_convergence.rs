@@ -408,7 +408,7 @@ fn assert_correct_rectify_matches_spec(layout: &Layout) -> Result<()> {
 /// predecessor notifications update only the predecessor slot, using the same
 /// closest-behind rule as the formal model.
 #[test]
-fn correct_rectify_matches_predecessor_spec() -> Result<()> {
+fn test_correct_rectify_matches_predecessor_spec() -> Result<()> {
     for layout in [
         Layout::Even(3),
         Layout::Even(6),
@@ -425,7 +425,7 @@ fn correct_rectify_matches_predecessor_spec() -> Result<()> {
 /// several inductive steps concretely (the general P(N) is the TLAPS obligation
 /// in the module doc).
 #[test]
-fn convergence_inductive_ladder_even() {
+fn test_convergence_inductive_ladder_even() {
     for n in 2..=8 {
         assert_converged_matches_spec(&Layout::Even(n));
     }
@@ -435,14 +435,14 @@ fn convergence_inductive_ladder_even() {
 /// resolves to a distinct node — so this exercises the whole finger structure,
 /// the regime Chord's `O(log N)` routing depends on.
 #[test]
-fn convergence_pow2_full_finger_n8() {
+fn test_convergence_pow2_full_finger_n8() {
     assert_converged_matches_spec(&Layout::Pow2(8));
 }
 
 /// Representative non-uniform layouts: clustered production addresses cover the
 /// collapsed-finger regime, and the dyadic layout covers `dist == 2^k` ties.
 #[test]
-fn convergence_representative_non_uniform_layouts() {
+fn test_convergence_representative_non_uniform_layouts() {
     for layout in [Layout::Clustered, Layout::DyadicBoundary] {
         assert_converged_matches_spec(&layout);
     }
@@ -452,7 +452,7 @@ fn convergence_representative_non_uniform_layouts() {
 /// a successor's predecessor that is closer than the old head is adopted,
 /// queried for its successor list, then notified as the new successor.
 #[test]
-fn correct_stabilize_improved_predecessor_matches_spec() {
+fn test_correct_stabilize_improved_predecessor_matches_spec() {
     let dids = Layout::Even(5).dids();
     assert_correct_stabilize_matches_spec(
         dids[0],
@@ -466,7 +466,7 @@ fn correct_stabilize_improved_predecessor_matches_spec() {
 /// notifies the current successor; the predecessor absence only suppresses the
 /// improved-successor query.
 #[test]
-fn correct_stabilize_without_predecessor_still_notifies_successor() {
+fn test_correct_stabilize_without_predecessor_still_notifies_successor() {
     let dids = Layout::Even(4).dids();
     assert_correct_stabilize_matches_spec(dids[0], &[dids[1]], &[dids[2], dids[3]], None);
 }
@@ -474,7 +474,7 @@ fn correct_stabilize_without_predecessor_still_notifies_successor() {
 /// A successor reporting this node as its predecessor is not an improved
 /// successor and must not trigger a self-query.
 #[test]
-fn correct_stabilize_self_predecessor_does_not_query_self() {
+fn test_correct_stabilize_self_predecessor_does_not_query_self() {
     let dids = Layout::Even(3).dids();
     assert_correct_stabilize_matches_spec(dids[0], &[dids[1]], &[dids[2]], Some(dids[0]));
 }
@@ -482,7 +482,7 @@ fn correct_stabilize_self_predecessor_does_not_query_self() {
 /// The production successor list is distance-sorted by `SuccessorSeq::update`;
 /// the spec mirror must not depend on the raw order of test fixtures.
 #[test]
-fn correct_stabilize_unsorted_current_successors_matches_spec() {
+fn test_correct_stabilize_unsorted_current_successors_matches_spec() {
     let dids = Layout::Even(6).dids();
     assert_correct_stabilize_matches_spec(
         dids[0],
@@ -496,7 +496,7 @@ fn correct_stabilize_unsorted_current_successors_matches_spec() {
 /// learned as a backup successor, but must not trigger the improved-successor
 /// query side effect.
 #[test]
-fn correct_stabilize_farther_predecessor_does_not_query() {
+fn test_correct_stabilize_farther_predecessor_does_not_query() {
     let dids = Layout::Even(6).dids();
     assert_correct_stabilize_matches_spec(
         dids[0],
@@ -509,7 +509,7 @@ fn correct_stabilize_farther_predecessor_does_not_query() {
 /// Duplicate candidates and self references are ignored by `SuccessorSeq`,
 /// then the merged known set is truncated to the K nearest forward nodes.
 #[test]
-fn correct_stabilize_deduplicates_self_and_truncates_candidates() {
+fn test_correct_stabilize_deduplicates_self_and_truncates_candidates() {
     let dids = Layout::Even(8).dids();
     assert_correct_stabilize_matches_spec(
         dids[0],
@@ -523,14 +523,14 @@ fn correct_stabilize_deduplicates_self_and_truncates_candidates() {
 /// successor list. A close node in the last position must not be learned from
 /// this operation.
 #[test]
-fn correct_stabilize_ignores_last_topo_successor() {
+fn test_correct_stabilize_ignores_last_topo_successor() {
     let dids = Layout::Even(6).dids();
     assert_correct_stabilize_matches_spec(dids[0], &[dids[4]], &[dids[5], dids[1]], None);
 }
 
 /// Empty TopoInfo is a no-op when the node has no successor to notify.
 #[test]
-fn correct_stabilize_empty_topo_without_successor_is_noop() {
+fn test_correct_stabilize_empty_topo_without_successor_is_noop() {
     let dids = Layout::Even(2).dids();
     assert_correct_stabilize_matches_spec(dids[0], &[], &[], None);
 }

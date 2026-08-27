@@ -66,7 +66,7 @@ fn dummy_authenticated_payload(
 }
 
 #[test]
-fn normalizes_empty_request_defaults() {
+fn test_normalizes_empty_request_defaults() {
     let request = OnionHttpsClientRequest {
         method: String::new(),
         path: Some(String::new()),
@@ -86,7 +86,7 @@ fn normalizes_empty_request_defaults() {
 }
 
 #[test]
-fn client_request_from_url_uses_https_url_target_and_path() -> Result<()> {
+fn test_client_request_from_url_uses_https_url_target_and_path() -> Result<()> {
     let (target, wire) = client_request_from_url(
         "https://Example.COM/search?q=rust#ignored",
         Default::default(),
@@ -100,7 +100,7 @@ fn client_request_from_url_uses_https_url_target_and_path() -> Result<()> {
 }
 
 #[test]
-fn client_request_from_url_preserves_explicit_port_and_path_override() -> Result<()> {
+fn test_client_request_from_url_preserves_explicit_port_and_path_override() -> Result<()> {
     let request = OnionHttpsClientRequest {
         path: Some("?override=1".to_string()),
         ..OnionHttpsClientRequest::default()
@@ -114,7 +114,7 @@ fn client_request_from_url_preserves_explicit_port_and_path_override() -> Result
 }
 
 #[test]
-fn client_request_from_url_rejects_non_https_urls() {
+fn test_client_request_from_url_rejects_non_https_urls() {
     assert!(matches!(
         client_request_from_url("http://example.com/", Default::default()),
         Err(Error::HttpRequestError(_))
@@ -122,7 +122,7 @@ fn client_request_from_url_rejects_non_https_urls() {
 }
 
 #[test]
-fn rejects_relative_path_without_slash() {
+fn test_rejects_relative_path_without_slash() {
     assert!(matches!(
         normalize_path("index.html"),
         Err(Error::HttpRequestError(_))
@@ -130,7 +130,7 @@ fn rejects_relative_path_without_slash() {
 }
 
 #[test]
-fn default_body_limit_applies_when_policy_is_unlimited() {
+fn test_default_body_limit_applies_when_policy_is_unlimited() {
     assert_eq!(
         https_response_body_limit(None),
         DEFAULT_HTTPS_RESPONSE_BODY_LIMIT_BYTES
@@ -143,7 +143,7 @@ fn default_body_limit_applies_when_policy_is_unlimited() {
 }
 
 #[test]
-fn checked_status_code_rejects_invalid_js_status_values() {
+fn test_checked_status_code_rejects_invalid_js_status_values() {
     assert_eq!(checked_status_code(200.0).expect("status"), 200);
     assert!(matches!(
         checked_status_code(99.0),
@@ -161,7 +161,7 @@ fn checked_status_code_rejects_invalid_js_status_values() {
 
 #[cfg_attr(target_family = "wasm", wasm_bindgen_test::wasm_bindgen_test)]
 #[cfg_attr(not(target_family = "wasm"), test)]
-fn dropping_pending_request_future_removes_waiting_circuit() {
+fn test_dropping_pending_request_future_removes_waiting_circuit() {
     let runtime = Arc::new(OnionHttpsRuntime::new());
     let exit = session();
     let return_id = OnionReturnId::new([3; 16]);
@@ -178,7 +178,7 @@ fn dropping_pending_request_future_removes_waiting_circuit() {
 }
 
 #[test]
-fn pending_request_completes_only_from_expected_return_peer() {
+fn test_pending_request_completes_only_from_expected_return_peer() {
     let runtime = Arc::new(OnionHttpsRuntime::new());
     let expected = did();
     let other = did();
@@ -194,7 +194,7 @@ fn pending_request_completes_only_from_expected_return_peer() {
 }
 
 #[test]
-fn pending_request_rejects_payload_from_wrong_exit_session() {
+fn test_pending_request_rejects_payload_from_wrong_exit_session() {
     let runtime = Arc::new(OnionHttpsRuntime::new());
     let expected = did();
     let selected_exit = session();
@@ -215,7 +215,7 @@ fn pending_request_rejects_payload_from_wrong_exit_session() {
 }
 
 #[test]
-fn pending_request_reports_authenticated_request_as_unexpected_backward_payload() {
+fn test_pending_request_reports_authenticated_request_as_unexpected_backward_payload() {
     let runtime = Arc::new(OnionHttpsRuntime::new());
     let expected = did();
     let exit = session();
@@ -249,7 +249,7 @@ fn pending_request_reports_authenticated_request_as_unexpected_backward_payload(
 }
 
 #[test]
-fn forward_nonce_is_consumed_once_for_https_exit_requests() {
+fn test_forward_nonce_is_consumed_once_for_https_exit_requests() {
     let runtime = OnionHttpsRuntime::new();
     let peer = Did::from(99_u32);
     let circuit_id = OnionCircuitId::new([1; 16]);
@@ -265,7 +265,7 @@ fn forward_nonce_is_consumed_once_for_https_exit_requests() {
 }
 
 #[test]
-fn exit_limiter_rejects_bytes_over_policy_window() {
+fn test_exit_limiter_rejects_bytes_over_policy_window() {
     let runtime = OnionHttpsRuntime::new();
     let policy = OnionExitPolicy {
         max_bytes_per_minute: 8,
@@ -285,7 +285,7 @@ fn exit_limiter_rejects_bytes_over_policy_window() {
 }
 
 #[test]
-fn exit_limiter_enforces_streams_per_circuit() {
+fn test_exit_limiter_enforces_streams_per_circuit() {
     let runtime = OnionHttpsRuntime::new();
     let policy = OnionExitPolicy {
         max_streams_per_circuit: 1,
@@ -308,7 +308,7 @@ fn exit_limiter_enforces_streams_per_circuit() {
 }
 
 #[test]
-fn exit_limiter_counts_distinct_circuit_ids() {
+fn test_exit_limiter_counts_distinct_circuit_ids() {
     let runtime = OnionHttpsRuntime::new();
     let policy = OnionExitPolicy {
         max_circuits: 1,
@@ -333,7 +333,7 @@ fn exit_limiter_counts_distinct_circuit_ids() {
 
 #[cfg(rings_native)]
 #[tokio::test]
-async fn native_fetch_times_out_stalled_response() {
+async fn test_native_fetch_times_out_stalled_response() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -370,7 +370,7 @@ async fn native_fetch_times_out_stalled_response() {
 
 #[cfg(rings_native)]
 #[tokio::test]
-async fn native_fetch_records_response_bytes_as_chunks_arrive() {
+async fn test_native_fetch_records_response_bytes_as_chunks_arrive() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -419,7 +419,7 @@ async fn native_fetch_records_response_bytes_as_chunks_arrive() {
 
 #[cfg(rings_native)]
 #[test]
-fn native_egress_selection_pins_public_addresses_and_proxies_only_synthetic_dns() {
+fn test_native_egress_selection_pins_public_addresses_and_proxies_only_synthetic_dns() {
     let target = OnionProxyTarget::parse_authority("example.com:443").unwrap();
     let public = "8.8.8.8:443".parse().unwrap();
     let synthetic = "198.18.1.113:443".parse().unwrap();
@@ -453,7 +453,7 @@ fn native_egress_selection_pins_public_addresses_and_proxies_only_synthetic_dns(
 
 #[cfg(rings_native)]
 #[test]
-fn native_proxy_fallback_rejects_private_loopback_and_literal_synthetic_targets() {
+fn test_native_proxy_fallback_rejects_private_loopback_and_literal_synthetic_targets() {
     let proxy = Some("http://127.0.0.1:6152".to_string());
     for (authority, address) in [
         ("localhost:443", "127.0.0.1:443"),
@@ -471,7 +471,7 @@ fn native_proxy_fallback_rejects_private_loopback_and_literal_synthetic_targets(
 #[cfg(rings_native)]
 #[cfg(rings_native)]
 #[tokio::test]
-async fn native_proxy_egress_delegates_target_resolution() {
+async fn test_native_proxy_egress_delegates_target_resolution() {
     let proxy = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let proxy_address = proxy.local_addr().unwrap();
     let server = tokio::spawn(async move {
@@ -511,7 +511,7 @@ async fn native_proxy_egress_delegates_target_resolution() {
 }
 
 #[test]
-fn runtime_exit_policy_starts_empty_then_sets() -> Result<()> {
+fn test_runtime_exit_policy_starts_empty_then_sets() -> Result<()> {
     let runtime = OnionHttpsRuntime::new();
     let policy = OnionExitPolicy::from_target_strings(vec!["example.com:443".to_string()], vec![])?;
 

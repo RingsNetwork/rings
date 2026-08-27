@@ -975,7 +975,7 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn webview_gateway_unready_disables_the_control() {
+    fn test_webview_gateway_unready_disables_the_control() {
         let availability = webview_availability(false, false);
 
         assert!(!availability.ready);
@@ -987,7 +987,7 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn webview_gateway_readiness_does_not_guess_onion_routes_from_direct_peers() {
+    fn test_webview_gateway_readiness_does_not_guess_onion_routes_from_direct_peers() {
         let availability = webview_availability(true, false);
 
         assert_eq!(availability, WebviewAvailability {
@@ -998,7 +998,7 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn extension_webview_requires_an_online_node_identity() {
+    fn test_extension_webview_requires_an_online_node_identity() {
         assert!(!webview_gateway_ready(true, "", true));
         assert!(webview_gateway_ready(true, "did:ring:online", false));
         assert_eq!(
@@ -1009,7 +1009,7 @@ mod tests {
 
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
-    fn browser_webview_uses_the_local_gateway_witness() {
+    fn test_browser_webview_uses_the_local_gateway_witness() {
         assert!(!webview_gateway_ready(false, "did:ring:online", false));
         assert!(webview_gateway_ready(false, "", true));
     }

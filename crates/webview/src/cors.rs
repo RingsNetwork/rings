@@ -282,7 +282,7 @@ mod tests {
     }
 
     #[test]
-    fn preflight_contains_virtual_origin_method_and_headers() -> Result<()> {
+    fn test_preflight_contains_virtual_origin_method_and_headers() -> Result<()> {
         let request = request(GatewayCredentials::SameOrigin)?;
         let preflight =
             preflight_request(&request)?.ok_or(CorsFailure::PreflightMethodNotAllowed)?;
@@ -299,7 +299,7 @@ mod tests {
     }
 
     #[test]
-    fn wildcard_response_is_denied_for_credentialed_runtime_requests() -> Result<()> {
+    fn test_wildcard_response_is_denied_for_credentialed_runtime_requests() -> Result<()> {
         let request = request(GatewayCredentials::Include)?;
         let response = GatewayResponse::new(
             200,
@@ -315,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_origin_and_credentials_allow_cross_origin_runtime_response() -> Result<()> {
+    fn test_exact_origin_and_credentials_allow_cross_origin_runtime_response() -> Result<()> {
         let request = request(GatewayCredentials::Include)?;
         let response = GatewayResponse::new(
             200,
@@ -330,7 +330,7 @@ mod tests {
     }
 
     #[test]
-    fn credentialed_preflight_treats_allow_headers_wildcard_as_literal() -> Result<()> {
+    fn test_credentialed_preflight_treats_allow_headers_wildcard_as_literal() -> Result<()> {
         let request = request(GatewayCredentials::Include)?;
         let response = GatewayResponse::new(
             200,
@@ -351,7 +351,7 @@ mod tests {
     }
 
     #[test]
-    fn cross_origin_runtime_response_headers_are_filtered_to_cors_visibility() -> Result<()> {
+    fn test_cross_origin_runtime_response_headers_are_filtered_to_cors_visibility() -> Result<()> {
         let request = GatewayRequest::fetch(Url::parse("https://api.example.test/data")?, "GET")
             .with_source_origin(Url::parse("https://app.example.test/page")?);
         let response = GatewayResponse::new(

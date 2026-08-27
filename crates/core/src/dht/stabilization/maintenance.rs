@@ -24,6 +24,74 @@ enum MaintenanceTask {
     Repair,
 }
 
+#[cfg(all(test, target_family = "wasm"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MaintenancePhaseKind {
+    Stabilize,
+    Repair,
+}
+
+#[cfg(all(test, target_family = "wasm"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct MaintenancePhaseEvent {
+    pub(crate) local: crate::dht::Did,
+    pub(crate) kind: MaintenancePhaseKind,
+    pub(crate) started_at_ms: u64,
+}
+
+#[cfg(all(test, target_family = "wasm"))]
+thread_local! {
+    static MAINTENANCE_PHASE_TRACE: std::cell::RefCell<Vec<MaintenancePhaseEvent>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
+}
+
+#[cfg(all(test, target_family = "wasm"))]
+pub(crate) fn reset_maintenance_phase_trace_for_test() {
+    MAINTENANCE_PHASE_TRACE.with(|trace| trace.borrow_mut().clear());
+}
+
+#[cfg(all(test, target_family = "wasm"))]
+pub(crate) fn maintenance_phase_trace_for_test(
+    local: crate::dht::Did,
+) -> Vec<MaintenancePhaseEvent> {
+    MAINTENANCE_PHASE_TRACE.with(|trace| {
+        trace
+            .borrow()
+            .iter()
+            .copied()
+            .filter(|event| event.local == local)
+            .collect()
+    })
+}
+
+#[cfg(all(test, target_family = "wasm"))]
+fn record_maintenance_phase_for_test(
+    local: crate::dht::Did,
+    task: MaintenanceTask,
+    started_at_ms: u64,
+) {
+    let kind = match task {
+        MaintenanceTask::Stabilize => MaintenancePhaseKind::Stabilize,
+        MaintenanceTask::Repair => MaintenancePhaseKind::Repair,
+    };
+    MAINTENANCE_PHASE_TRACE.with(|trace| {
+        trace.borrow_mut().push(MaintenancePhaseEvent {
+            local,
+            kind,
+            started_at_ms,
+        });
+    });
+}
+
+#[cfg(not(all(test, target_family = "wasm")))]
+fn record_maintenance_phase_for_test(
+    _local: crate::dht::Did,
+    _task: MaintenanceTask,
+    _started_at_ms: u64,
+) {
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct MaintenanceDecision {
     task: Option<MaintenanceTask>,
@@ -41,7 +109,10 @@ struct MaintenanceDecision {
 ///   admission budget and a post-repair quiet gap fit before
 ///   `next_stabilize_ms`.
 /// - when repair is pending at stabilization completion, the following
-///   stabilization deadline reserves enough time for one repair attempt.
+///   repair turn takes precedence over the following stabilization, even when
+///   timer jitter wakes the loop after the reserved deadline.
+/// - every repair attempt consumes that precedence before stabilization may
+///   reserve another turn, preserving fairness between both maintenance tasks.
 /// - repair is tracked to its final frame. If its tail exceeds the admission
 ///   estimate, this serial loop cannot overlap it with stabilization and
 ///   reconciles the next deadline from actual completion.
@@ -51,6 +122,7 @@ struct MaintenanceSchedule {
     next_repair_ms: u64,
     repair_not_before_ms: u64,
     repair_admission_budget_ms: u64,
+    repair_turn_reserved: bool,
 }
 
 impl MaintenanceSchedule {
@@ -66,6 +138,7 @@ impl MaintenanceSchedule {
             next_repair_ms: next_stabilize_ms.saturating_add(offset_ms),
             repair_not_before_ms: now_ms,
             repair_admission_budget_ms: duration_ms(STORAGE_REPAIR_ADMISSION_BUDGET),
+            repair_turn_reserved: false,
         }
     }
 
@@ -74,9 +147,15 @@ impl MaintenanceSchedule {
     fn poll(&mut self, now_ms: u64, repair_pending: bool) -> MaintenanceDecision {
         let periodic_repair_due = self.advance_repair_deadline_if_due(now_ms);
         let effective_repair_pending = repair_pending || periodic_repair_due;
+        if !effective_repair_pending {
+            self.repair_turn_reserved = false;
+        }
+        let reserved_repair_ready = self.reserved_repair_ready(now_ms, effective_repair_pending);
         let stabilization_due = now_ms >= self.next_stabilize_ms;
         let repair_has_window = effective_repair_pending && self.can_start_storage_repair(now_ms);
-        let task = if stabilization_due {
+        let task = if reserved_repair_ready {
+            Some(MaintenanceTask::Repair)
+        } else if stabilization_due {
             Some(MaintenanceTask::Stabilize)
         } else if repair_has_window {
             Some(MaintenanceTask::Repair)
@@ -88,6 +167,7 @@ impl MaintenanceSchedule {
             task,
             periodic_repair_due,
             repair_deferred_for_window: effective_repair_pending
+                && !self.repair_turn_reserved
                 && !stabilization_due
                 && !self.has_storage_repair_window(now_ms),
         }
@@ -101,7 +181,8 @@ impl MaintenanceSchedule {
             next_deadline_after(self.next_stabilize_ms, self.period_ms, completed_at_ms);
         self.repair_not_before_ms =
             completed_at_ms.saturating_add(duration_ms(MAINTENANCE_QUIET_GAP));
-        if repair_pending || periodic_repair_due {
+        self.repair_turn_reserved = repair_pending || periodic_repair_due;
+        if self.repair_turn_reserved {
             let reserved_deadline = self
                 .repair_not_before_ms
                 .saturating_add(self.required_repair_window_ms());
@@ -111,6 +192,7 @@ impl MaintenanceSchedule {
     }
 
     fn complete_repair(&mut self, completed_at_ms: u64, succeeded: bool) {
+        self.repair_turn_reserved = false;
         let post_repair_deadline =
             completed_at_ms.saturating_add(duration_ms(MAINTENANCE_QUIET_GAP));
         self.next_stabilize_ms = self.next_stabilize_ms.max(post_repair_deadline);
@@ -131,6 +213,10 @@ impl MaintenanceSchedule {
 
     fn can_start_storage_repair(&self, now_ms: u64) -> bool {
         now_ms >= self.repair_not_before_ms && self.has_storage_repair_window(now_ms)
+    }
+
+    fn reserved_repair_ready(&self, now_ms: u64, repair_pending: bool) -> bool {
+        self.repair_turn_reserved && repair_pending && now_ms >= self.repair_not_before_ms
     }
 
     fn has_storage_repair_window(&self, now_ms: u64) -> bool {
@@ -217,6 +303,11 @@ impl Stabilizer {
 
             match decision.task {
                 Some(MaintenanceTask::Stabilize) => {
+                    record_maintenance_phase_for_test(
+                        self.dht.did,
+                        MaintenanceTask::Stabilize,
+                        now_ms,
+                    );
                     self.stabilize_topology_with_step_timeout(STABILIZATION_STEP_TIMEOUT)
                         .await;
                     let periodic_repair_due = schedule.complete_stabilization(
@@ -228,6 +319,11 @@ impl Stabilizer {
                     }
                 }
                 Some(MaintenanceTask::Repair) => {
+                    record_maintenance_phase_for_test(
+                        self.dht.did,
+                        MaintenanceTask::Repair,
+                        now_ms,
+                    );
                     if let Some(outcome) = self.run_requested_storage_repair().await {
                         schedule
                             .complete_repair(monotonic_elapsed_ms(&origin), outcome.is_complete());
@@ -291,7 +387,7 @@ mod tests {
     const PERIOD: Duration = Duration::from_secs(15);
 
     #[test]
-    fn maintenance_phases_are_staggered_within_each_period() {
+    fn test_maintenance_phases_are_staggered_within_each_period() {
         let mut schedule = MaintenanceSchedule::new(0, PERIOD);
 
         assert_eq!(schedule.poll(14_999, false).task, None);
@@ -311,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_stabilization_overruns_preserve_repair_intent() {
+    fn test_repeated_stabilization_overruns_preserve_repair_intent() {
         let mut schedule = MaintenanceSchedule::new(0, PERIOD);
 
         assert_eq!(
@@ -329,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn long_stabilization_skips_missed_stabilization_deadlines() {
+    fn test_long_stabilization_skips_missed_stabilization_deadlines() {
         let mut schedule = MaintenanceSchedule::new(0, PERIOD);
 
         assert_eq!(
@@ -346,7 +442,7 @@ mod tests {
     }
 
     #[test]
-    fn stabilization_reserves_a_window_for_pending_repair() {
+    fn test_stabilization_reserves_a_window_for_pending_repair() {
         let mut schedule = MaintenanceSchedule::new(0, PERIOD);
 
         assert_eq!(
@@ -354,22 +450,67 @@ mod tests {
             Some(MaintenanceTask::Stabilize)
         );
         assert!(schedule.complete_stabilization(26_000, false));
-        assert_eq!(schedule.next_stabilize_ms, 31_100);
+        let reserved_stabilization_ms = schedule.next_stabilize_ms;
+        assert!(schedule.has_storage_repair_window(schedule.repair_not_before_ms));
         assert_eq!(schedule.poll(26_000, true).task, None);
         assert_eq!(
             schedule.poll(26_050, true).task,
             Some(MaintenanceTask::Repair)
         );
-        schedule.complete_repair(31_050, true);
-        assert_eq!(schedule.poll(31_050, false).task, None);
+        let quiet_gap_ms = duration_ms(MAINTENANCE_QUIET_GAP);
+        let repair_completed_ms = reserved_stabilization_ms.saturating_sub(quiet_gap_ms);
+        schedule.complete_repair(repair_completed_ms, true);
+        assert_eq!(schedule.poll(repair_completed_ms, false).task, None);
         assert_eq!(
-            schedule.poll(31_100, false).task,
+            schedule.poll(reserved_stabilization_ms, false).task,
             Some(MaintenanceTask::Stabilize)
         );
     }
 
     #[test]
-    fn repair_overrun_reconciles_stabilization_with_actual_completion() {
+    fn test_reserved_repair_turn_survives_timer_overshoot() {
+        let mut schedule = MaintenanceSchedule::new(0, Duration::from_millis(100));
+
+        assert_eq!(
+            schedule.poll(100, false).task,
+            Some(MaintenanceTask::Stabilize)
+        );
+        schedule.complete_stabilization(100, true);
+        let first_missed_deadline = schedule
+            .repair_not_before_ms
+            .saturating_add(schedule.required_repair_window_ms())
+            .saturating_add(1);
+
+        assert_eq!(first_missed_deadline, schedule.next_stabilize_ms + 1);
+        assert_eq!(
+            schedule.poll(first_missed_deadline, true).task,
+            Some(MaintenanceTask::Repair)
+        );
+    }
+
+    #[test]
+    fn test_repeated_timer_overshoots_preserve_repair_and_stabilization_fairness() {
+        let mut schedule = MaintenanceSchedule::new(0, Duration::from_millis(500));
+        let mut stabilization_start_ms = 500;
+
+        for _ in 0..3 {
+            assert_eq!(
+                schedule.poll(stabilization_start_ms, true).task,
+                Some(MaintenanceTask::Stabilize)
+            );
+            schedule.complete_stabilization(stabilization_start_ms, true);
+            let late_wake_ms = schedule.next_stabilize_ms.saturating_add(1);
+            assert_eq!(
+                schedule.poll(late_wake_ms, true).task,
+                Some(MaintenanceTask::Repair)
+            );
+            schedule.complete_repair(late_wake_ms.saturating_add(1), false);
+            stabilization_start_ms = schedule.next_stabilize_ms;
+        }
+    }
+
+    #[test]
+    fn test_repair_overrun_reconciles_stabilization_with_actual_completion() {
         let mut schedule = MaintenanceSchedule::new(0, PERIOD);
 
         assert_eq!(
@@ -392,7 +533,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_repair_waits_for_the_next_topology_phase() {
+    fn test_failed_repair_waits_for_the_next_topology_phase() {
         let mut schedule = MaintenanceSchedule::new(0, PERIOD);
 
         assert_eq!(
@@ -419,7 +560,7 @@ mod tests {
     }
 
     #[test]
-    fn late_timer_wake_recomputes_from_absolute_deadline() {
+    fn test_late_timer_wake_recomputes_from_absolute_deadline() {
         assert_eq!(remaining_delay(100, 90), Duration::from_millis(10));
         assert_eq!(remaining_delay(100, 125), Duration::ZERO);
     }

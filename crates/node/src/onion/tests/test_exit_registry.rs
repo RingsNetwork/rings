@@ -1,6 +1,6 @@
+use rings_core::dht::entry;
 use rings_core::ecc::SecretKey;
 use rings_core::message::Encoder;
-use rings_core::prelude::entry;
 use rings_core::session::SessionSk;
 
 use super::super::*;
@@ -58,7 +58,7 @@ fn signed_exit_for_session_at(
 }
 
 #[test]
-fn default_exit_services_include_native_tcp_and_https() {
+fn test_default_exit_services_include_native_tcp_and_https() {
     assert_eq!(default_onion_exit_services(), vec![
         OnionExitService::tcp(),
         OnionExitService::https()
@@ -67,7 +67,7 @@ fn default_exit_services_include_native_tcp_and_https() {
 }
 
 #[test]
-fn reserved_service_name_accepts_tcp_and_legacy_https_for_routes() {
+fn test_reserved_service_name_accepts_tcp_and_legacy_https_for_routes() {
     assert!(OnionExitService::https().matches_route_service("https"));
     assert!(OnionExitService::new("https", OnionExitTransport::Tcp)
         .expect("valid service")
@@ -81,7 +81,7 @@ fn reserved_service_name_accepts_tcp_and_legacy_https_for_routes() {
 }
 
 #[test]
-fn legacy_https_descriptor_satisfies_tcp_proxy_transport_filter() -> Result<()> {
+fn test_legacy_https_descriptor_satisfies_tcp_proxy_transport_filter() -> Result<()> {
     let session = SessionSk::new_with_seckey(&SecretKey::random()).map_err(Error::CoreError)?;
     let descriptor = signed_exit_for_session_at(
         &session,
@@ -97,7 +97,7 @@ fn legacy_https_descriptor_satisfies_tcp_proxy_transport_filter() -> Result<()> 
 }
 
 #[test]
-fn onion_exit_service_name_is_validated_and_canonicalized() -> Result<()> {
+fn test_onion_exit_service_name_is_validated_and_canonicalized() -> Result<()> {
     let service = OnionExitService::new("WeB-Api.1", OnionExitTransport::Tcp)?;
 
     assert_eq!(service.name.as_str(), "web-api.1");
@@ -108,7 +108,7 @@ fn onion_exit_service_name_is_validated_and_canonicalized() -> Result<()> {
 }
 
 #[test]
-fn default_exit_policy_is_closed() -> Result<()> {
+fn test_default_exit_policy_is_closed() -> Result<()> {
     let policy = OnionExitPolicy::default();
     let target = OnionExitTarget::parse("example.com:443")?;
 
@@ -122,7 +122,7 @@ fn default_exit_policy_is_closed() -> Result<()> {
 }
 
 #[test]
-fn exit_policy_allow_list_controls_targets() -> Result<()> {
+fn test_exit_policy_allow_list_controls_targets() -> Result<()> {
     let policy = OnionExitPolicy::from_target_strings(
         vec![
             "Example.COM.:443".to_string(),
@@ -142,7 +142,7 @@ fn exit_policy_allow_list_controls_targets() -> Result<()> {
 }
 
 #[test]
-fn exit_policy_wildcard_allows_all_targets_with_specific_denies() -> Result<()> {
+fn test_exit_policy_wildcard_allows_all_targets_with_specific_denies() -> Result<()> {
     let policy = OnionExitPolicy::from_target_strings(vec!["*:*".to_string()], vec![
         "api.example.com:443".to_string(),
     ])?;
@@ -158,7 +158,7 @@ fn exit_policy_wildcard_allows_all_targets_with_specific_denies() -> Result<()> 
 }
 
 #[test]
-fn exit_policy_rejects_invalid_target_entries() {
+fn test_exit_policy_rejects_invalid_target_entries() {
     assert!(matches!(
         OnionExitPolicy::from_target_strings(vec!["example.com".to_string()], vec![]),
         Err(Error::InvalidConfig(message)) if message.contains("expected host:port")
@@ -174,7 +174,7 @@ fn exit_policy_rejects_invalid_target_entries() {
 }
 
 #[test]
-fn exit_descriptor_signature_covers_policy() -> Result<()> {
+fn test_exit_descriptor_signature_covers_policy() -> Result<()> {
     let mut descriptor = signed_exit_at(20, 100)?;
     assert!(descriptor.verify_signature());
 
@@ -185,7 +185,7 @@ fn exit_descriptor_signature_covers_policy() -> Result<()> {
 }
 
 #[test]
-fn exit_descriptor_signature_covers_schema_version() -> Result<()> {
+fn test_exit_descriptor_signature_covers_schema_version() -> Result<()> {
     let mut descriptor = signed_exit_at(20, 100)?;
     assert_eq!(
         descriptor.schema_version,
@@ -200,7 +200,7 @@ fn exit_descriptor_signature_covers_schema_version() -> Result<()> {
 }
 
 #[test]
-fn exit_registry_decode_reports_rejected_schema_values() -> Result<()> {
+fn test_exit_registry_decode_reports_rejected_schema_values() -> Result<()> {
     let valid = signed_exit_at(20, 100)?;
     let mut unsupported = signed_exit_at(21, 100)?;
     unsupported.schema_version = unsupported.schema_version.saturating_add(1);
@@ -222,7 +222,7 @@ fn exit_registry_decode_reports_rejected_schema_values() -> Result<()> {
 }
 
 #[test]
-fn latest_valid_by_service_did_filters_expired_and_keeps_newest() -> Result<()> {
+fn test_latest_valid_by_service_did_filters_expired_and_keeps_newest() -> Result<()> {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).map_err(Error::CoreError)?;
     let did = session_sk.account_did();
@@ -295,7 +295,7 @@ fn latest_valid_by_service_did_filters_expired_and_keeps_newest() -> Result<()> 
 }
 
 #[test]
-fn latest_valid_by_service_did_preserves_same_did_distinct_services() -> Result<()> {
+fn test_latest_valid_by_service_did_preserves_same_did_distinct_services() -> Result<()> {
     let key = SecretKey::random();
     let session_sk = SessionSk::new_with_seckey(&key).map_err(Error::CoreError)?;
     let old_tcp =

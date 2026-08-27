@@ -28,6 +28,14 @@ pub use chord::TopoInfo;
 pub use did::Did;
 pub use finger::FingerTable;
 pub use finger::DEFAULT_FINGER_TABLE_SIZE;
+#[cfg(all(test, target_family = "wasm"))]
+pub(crate) use stabilization::maintenance_phase_trace_for_test;
+#[cfg(all(test, target_family = "wasm"))]
+pub(crate) use stabilization::reset_maintenance_phase_trace_for_test;
+#[cfg(all(test, target_family = "wasm"))]
+pub(crate) use stabilization::MaintenancePhaseEvent;
+#[cfg(all(test, target_family = "wasm"))]
+pub(crate) use stabilization::MaintenancePhaseKind;
 pub use stabilization::Stabilizer;
 pub use stabilization::StorageRepairOutcome;
 pub(crate) use storage::StorageSyncDelivery;

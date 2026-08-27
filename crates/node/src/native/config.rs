@@ -319,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn deserialization_defaults_online_registration_fields() {
+    fn test_deserialization_defaults_online_registration_fields() {
         let yaml = r#"
 network_id: 1
 session_sk: session_sk
@@ -366,7 +366,7 @@ measure_storage:
     }
 
     #[test]
-    fn deserialization_preserves_explicit_disabled_dht_virtual_nodes() {
+    fn test_deserialization_preserves_explicit_disabled_dht_virtual_nodes() {
         let yaml = r#"
 network_id: 1
 session_sk: session_sk
@@ -393,7 +393,7 @@ measure_storage:
     }
 
     #[test]
-    fn config_with_valid_webrtc_udp_range_builds_processor_config() {
+    fn test_config_with_valid_webrtc_udp_range_builds_processor_config() {
         let mut config = Config::new(dumped_session_sk());
         config.webrtc_udp_port_min = Some(49160);
         config.webrtc_udp_port_max = Some(49200);
@@ -407,7 +407,7 @@ measure_storage:
     }
 
     #[test]
-    fn config_with_partial_webrtc_udp_range_is_rejected() {
+    fn test_config_with_partial_webrtc_udp_range_is_rejected() {
         let mut config = Config::new(dumped_session_sk());
         config.webrtc_udp_port_min = Some(49160);
 

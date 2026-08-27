@@ -48,7 +48,7 @@ mod tests {
     }
 
     #[test]
-    fn local_custom_message_has_no_core_effects() -> Result<()> {
+    fn test_local_custom_message_has_no_core_effects() -> Result<()> {
         let local = SecretKey::random().address().into();
         let payload = custom_payload(local)?;
 
@@ -57,7 +57,7 @@ mod tests {
     }
 
     #[test]
-    fn remote_custom_message_forwards_payload() -> Result<()> {
+    fn test_remote_custom_message_forwards_payload() -> Result<()> {
         let local = SecretKey::random().address().into();
         let remote = SecretKey::random().address().into();
         let payload = custom_payload(remote)?;

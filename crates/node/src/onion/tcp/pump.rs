@@ -203,7 +203,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shared_pump_preserves_data_half_close_and_terminal_order() -> Result<()> {
+    async fn test_shared_pump_preserves_data_half_close_and_terminal_order() -> Result<()> {
         let (mut client, server) = connected_pair().await?;
         let (inbound_tx, inbound_rx) = mpsc::channel(1);
         let recorded = Arc::new(RecordedEffects::default());
@@ -252,7 +252,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_terminal_suppresses_terminal_echo() -> Result<()> {
+    async fn test_remote_terminal_suppresses_terminal_echo() -> Result<()> {
         let (_client, server) = connected_pair().await?;
         let (inbound_tx, inbound_rx) = mpsc::channel(1);
         inbound_tx
@@ -277,7 +277,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn idle_stream_is_reclaimed_and_announces_close() -> Result<()> {
+    async fn test_idle_stream_is_reclaimed_and_announces_close() -> Result<()> {
         let (_client, server) = connected_pair().await?;
         let (_inbound_tx, inbound_rx) = mpsc::channel(1);
         let recorded = Arc::new(RecordedEffects::default());
@@ -302,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    fn read_chunk_rejects_a_length_beyond_the_buffer() {
+    fn test_read_chunk_rejects_a_length_beyond_the_buffer() {
         assert!(read_chunk(&[1, 2], 3).is_err());
     }
 }

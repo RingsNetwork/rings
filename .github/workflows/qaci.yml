@@ -148,6 +148,9 @@ jobs:
       - name: Run clippy for core wasm
         run: cargo clippy -p rings-core --features wasm --no-deps --no-default-features --target=wasm32-unknown-unknown --tests -- -D warnings
 
+      - name: Run clippy for transport wasm
+        run: cargo clippy -p rings-transport --features web-sys-webrtc --no-deps --no-default-features --target=wasm32-unknown-unknown --tests -- -D warnings
+
       - name: Run strict clippy for node browser lib
         run: |
           cargo clippy -p rings-node --features browser --no-deps --no-default-features --target=wasm32-unknown-unknown --lib -- \
@@ -228,6 +231,12 @@ jobs:
           run: cargo test -p rings-core --release --target=wasm32-unknown-unknown --features wasm --no-default-features
           working-directory: ./
 
+      - name: Run transport browser tests
+        uses: coactions/setup-xvfb@b6b4fcfb9f5a895edadc3bc76318fae0ac17c8b3 # v1
+        with:
+          run: cargo test -p rings-transport --release --target=wasm32-unknown-unknown --features web-sys-webrtc --no-default-features
+          working-directory: ./
+
       - name: Run node browser tests
         uses: coactions/setup-xvfb@b6b4fcfb9f5a895edadc3bc76318fae0ac17c8b3 # v1
         with:
@@ -258,6 +267,9 @@ jobs:
 
       - name: Run dummy tests
         run: cargo test -p rings-core --features dummy --verbose
+
+      - name: Run transport dummy tests
+        run: cargo test -p rings-transport --no-default-features --features dummy --verbose
 
       - name: Run tests
         run: cargo test --release --all --all-targets --verbose
@@ -338,6 +350,9 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all --tests -- -D warnings
 
+      - name: Run clippy for transport without a runtime backend
+        run: cargo clippy -p rings-transport --no-default-features --lib -- -D warnings
+
       - name: Check formating
         run: cargo +"$NIGHTLY_TOOLCHAIN" fmt --all -- --check
 
@@ -345,6 +360,11 @@ jobs:
         env:
           RUSTDOCFLAGS: -Dwarnings
         run: cargo doc --all --no-deps
+
+      - name: Check transport docs without a runtime backend
+        env:
+          RUSTDOCFLAGS: -Dwarnings
+        run: cargo doc -p rings-transport --no-default-features --no-deps
 
       - name: Install taplo
         run: cargo install taplo-cli --version "$TAPLO_CLI_VERSION" --locked

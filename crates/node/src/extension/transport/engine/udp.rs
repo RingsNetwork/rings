@@ -225,7 +225,7 @@ mod tests {
     use crate::sync_lock::lock;
 
     #[tokio::test]
-    async fn idle_connected_udp_relay_releases_its_session() -> Result<()> {
+    async fn test_idle_connected_udp_relay_releases_its_session() -> Result<()> {
         let peer = UdpSocket::bind("127.0.0.1:0").await.map_err(io_error)?;
         let socket = UdpSocket::bind("127.0.0.1:0").await.map_err(io_error)?;
         socket
@@ -245,7 +245,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn idle_udp_return_path_reclaims_session_and_flow_projection() -> Result<()> {
+    async fn test_idle_udp_return_path_reclaims_session_and_flow_projection() -> Result<()> {
         let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("bind UDP"));
         let src = "127.0.0.1:19001".parse().expect("UDP source");
         let (task, sessions, key) = relay_task_for_test_with_src("udp", Some(src))?;
@@ -263,7 +263,7 @@ mod tests {
     }
 
     #[test]
-    fn received_datagram_rejects_length_beyond_buffer() {
+    fn test_received_datagram_rejects_length_beyond_buffer() {
         assert_eq!(
             received_bytes(&[1, 2], 2),
             Some(Bytes::from_static(&[1, 2]))

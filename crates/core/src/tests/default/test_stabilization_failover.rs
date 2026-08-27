@@ -64,7 +64,7 @@ async fn assert_unavailable_successor_fails_over(
 }
 
 #[tokio::test]
-async fn unavailable_successor_states_only_promote_a_live_replacement() -> Result<()> {
+async fn test_unavailable_successor_states_only_promote_a_live_replacement() -> Result<()> {
     for (state, data_channel_open) in [
         (WebrtcConnectionState::Disconnected, None),
         (WebrtcConnectionState::Failed, None),

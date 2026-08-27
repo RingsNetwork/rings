@@ -50,7 +50,7 @@ struct Cli {
     #[command(subcommand)]
     command: Command,
 
-    #[arg(long, default_value_t = LogLevel::Info, value_enum, env)]
+    #[arg(long, default_value_t = LogLevel::default(), value_enum, env)]
     log_level: LogLevel,
 
     #[arg(

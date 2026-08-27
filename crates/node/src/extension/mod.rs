@@ -15,6 +15,7 @@ use rings_core::swarm::callback::SwarmCallback;
 
 use crate::extension::ext::Envelope;
 use crate::extension::ext::Extensions;
+use crate::extension::transport::platform::run_detached;
 use crate::provider::Provider;
 
 /// Backend handles inbound custom messages from the Swarm, routing each decoded
@@ -22,6 +23,8 @@ use crate::provider::Provider;
 /// registry is shared with the [`Provider`], so protocols registered there are visible
 /// to inbound dispatch here. Each protocol's interpreter does its IO through a
 /// namespace-scoped [`Scope`](ext::Scope); the underlying router capability is internal.
+/// Dispatch owns a detached task so a swarm callback deadline stops waiting without
+/// cancelling an already committed protocol transition or its ordered effect trace.
 pub struct Backend {
     extensions: Extensions,
 }
@@ -38,7 +41,10 @@ impl Backend {
 #[cfg_attr(rings_browser, async_trait(?Send))]
 #[cfg_attr(rings_native, async_trait)]
 impl SwarmCallback for Backend {
-    async fn on_inbound(&self, payload: &MessagePayload) -> Result<(), Box<dyn std::error::Error>> {
+    async fn on_inbound(
+        &self,
+        payload: &MessagePayload,
+    ) -> Result<(), rings_core::error::CallbackError> {
         let data: Message = payload.transaction.data()?;
 
         let Message::CustomMessage(CustomMessage(msg)) = data else {
@@ -47,7 +53,10 @@ impl SwarmCallback for Backend {
 
         let envelope = Envelope::decode(&msg)?;
         let from = payload.transaction.signer();
-        self.extensions.dispatch(from, envelope).await?;
+        let extensions = self.extensions.clone();
+        let dispatch =
+            run_detached(async move { extensions.dispatch(from, envelope).await }).await?;
+        dispatch?;
 
         Ok(())
     }

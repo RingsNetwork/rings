@@ -112,7 +112,7 @@ mod tests {
     }
 
     #[test]
-    fn transport_readiness_classifies_the_complete_product_state() {
+    fn test_transport_readiness_classifies_the_complete_product_state() {
         for state in [
             WebrtcConnectionState::Unspecified,
             WebrtcConnectionState::New,
@@ -155,7 +155,7 @@ mod tests {
     }
 
     #[test]
-    fn only_ready_transport_can_make_progress() {
+    fn test_only_ready_transport_can_make_progress() {
         for state in [
             WebrtcConnectionState::Unspecified,
             WebrtcConnectionState::New,
@@ -184,7 +184,7 @@ mod tests {
     }
 
     #[test]
-    fn only_terminal_readiness_errors_degrade_peer_quality() {
+    fn test_only_terminal_readiness_errors_degrade_peer_quality() {
         assert!(!Error::TransportNotReady {
             state: WebrtcConnectionState::Disconnected,
             data_channel_open: true,
@@ -204,10 +204,78 @@ mod tests {
             !Error::Transport(rings_transport::error::Error::SendPermitRevoked)
                 .records_peer_send_failure()
         );
+        let invariant = Error::CancelledDetachedAdmissionPublishedSuccess;
+        assert!(!invariant.is_deferrable_data_plane_send());
+        assert!(!invariant.records_peer_send_failure());
     }
 
     #[test]
-    fn data_plane_deferral_errors_require_fresh_topology() {
+    fn test_pre_acceptance_backpressure_is_deferrable_and_never_degrades_peer_quality() {
+        let peer: crate::dht::Did = crate::ecc::SecretKey::random().address().into();
+        let backpressure = [
+            Error::DataChannelSendQueueTimeout {
+                peer,
+                timeout_ms: 1,
+                bytes: 1,
+                context: "test",
+            },
+            Error::OutboundTransferCapacityExceeded { peer, capacity: 1 },
+            Error::OutboundTransferMemoryCapacityExceeded {
+                peer,
+                requested_bytes: 1,
+                capacity_bytes: 1,
+            },
+            Error::OutboundTransferAdmissionTimeout {
+                peer,
+                timeout_ms: 1,
+            },
+            Error::OutboundFirstFrameAdmissionTimeout {
+                peer,
+                timeout_ms: 1,
+            },
+        ];
+
+        for error in backpressure {
+            assert!(error.is_local_send_backpressure(), "{error:?}");
+            assert!(error.is_deferrable_data_plane_send(), "{error:?}");
+            assert!(!error.records_peer_send_failure(), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn test_post_acceptance_timeouts_are_ambiguous_and_not_retryable() {
+        let peer: crate::dht::Did = crate::ecc::SecretKey::random().address().into();
+        let ambiguous = [
+            Error::DataChannelSendCompletionTimeout {
+                peer,
+                timeout_ms: 1,
+                bytes: 1,
+                context: "test",
+            },
+            Error::DataChannelDeliveryTimeout {
+                peer,
+                timeout_ms: 1,
+                context: "test",
+            },
+            Error::DetachedPayloadCleanupTimeout {
+                peer,
+                timeout_ms: 1,
+            },
+            Error::TrackedPayloadCleanupTimeout {
+                peer,
+                timeout_ms: 1,
+            },
+        ];
+
+        for error in ambiguous {
+            assert!(!error.is_local_send_backpressure(), "{error:?}");
+            assert!(!error.is_deferrable_data_plane_send(), "{error:?}");
+            assert!(!error.records_peer_send_failure(), "{error:?}");
+        }
+    }
+
+    #[test]
+    fn test_data_plane_deferral_errors_require_fresh_topology() {
         let peer: crate::dht::Did = crate::ecc::SecretKey::random().address().into();
         let deferrals = [
             Error::DataChannelSendQueueTimeout {

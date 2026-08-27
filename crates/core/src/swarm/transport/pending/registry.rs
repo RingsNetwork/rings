@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
 use super::PendingConnectionAttempt;
 use super::PENDING_CONNECTION_TIMEOUT_MS;
@@ -67,17 +68,13 @@ pub(in crate::swarm::transport) struct ExpiredUnadmittedPeer {
     pub(in crate::swarm::transport) phase: UnadmittedPhase,
 }
 
-/// Read-only projection of the currently admitted connection generations.
+/// Read-only projection of active generations still eligible for data-plane work.
 #[derive(Debug)]
 pub(in crate::swarm::transport) struct ActiveConnectionSet {
     attempts: BTreeMap<Did, PendingConnectionAttempt>,
 }
 
 impl ActiveConnectionSet {
-    pub(in crate::swarm::transport) fn contains(&self, peer: Did) -> bool {
-        self.attempts.contains_key(&peer)
-    }
-
     pub(in crate::swarm::transport) fn attempt(
         &self,
         peer: Did,
@@ -94,18 +91,21 @@ impl ActiveConnectionSet {
 
 /// Registry of mutually exclusive pending, admitting, and active generations.
 ///
-/// Model: `State = Did ->?
-/// (Pending(attempt, started_at) | Admitting(attempt, started_at) | Active(attempt))`.
+/// Model: `State = (Did ->?
+/// (Pending(attempt, started_at) | Admitting(attempt, started_at) | Active(attempt)), Terminal)`.
 /// Initial state is the empty map. The complete next-state relation is
-/// `reserve | begin_admission | activate | remove_unadmitted | remove_active | expire`.
+/// `reserve | begin_admission | activate | mark_send_terminal | remove_unadmitted |
+/// remove_active | expire`.
 ///
 /// Invariant: every peer has at most one generation and one lifecycle phase.
-/// Only `Active` belongs to the routable projection.
+/// `Active` belongs to the admitted projection; send-terminal generations are
+/// excluded from the routable projection until retirement removes them.
 #[derive(Debug)]
 #[cfg_attr(test, derive(Clone))]
 pub(in crate::swarm::transport) struct ConnectionLifecycleRegistry<const MAX_PENDING: usize> {
     next_generation: u64,
     peers: BTreeMap<Did, PeerConnectionLifecycle>,
+    send_terminal: BTreeSet<PendingConnectionAttempt>,
 }
 
 impl<const MAX_PENDING: usize> ConnectionLifecycleRegistry<MAX_PENDING> {
@@ -113,6 +113,7 @@ impl<const MAX_PENDING: usize> ConnectionLifecycleRegistry<MAX_PENDING> {
         Self {
             next_generation: 0,
             peers: BTreeMap::new(),
+            send_terminal: BTreeSet::new(),
         }
     }
 
@@ -201,7 +202,54 @@ impl<const MAX_PENDING: usize> ConnectionLifecycleRegistry<MAX_PENDING> {
         }
     }
 
+    pub(in crate::swarm::transport) fn sendable_attempt(
+        &self,
+        peer: Did,
+    ) -> Option<PendingConnectionAttempt> {
+        self.active_attempt(peer)
+            .filter(|attempt| !self.send_terminal.contains(attempt))
+    }
+
+    /// Revoke new sends for an exact active generation without consuming the
+    /// lifecycle record needed by asynchronous DHT and transport cleanup.
+    pub(in crate::swarm::transport) fn mark_send_terminal(
+        &mut self,
+        attempt: PendingConnectionAttempt,
+    ) -> bool {
+        if self.active_attempt(attempt.peer) != Some(attempt) {
+            return false;
+        }
+        self.send_terminal.insert(attempt);
+        true
+    }
+
+    pub(in crate::swarm::transport) fn is_send_terminal(
+        &self,
+        attempt: PendingConnectionAttempt,
+    ) -> bool {
+        self.send_terminal.contains(&attempt)
+    }
+
     pub(in crate::swarm::transport) fn active_connections(&self) -> ActiveConnectionSet {
+        ActiveConnectionSet {
+            attempts: self
+                .peers
+                .iter()
+                .filter_map(|(peer, state)| match state {
+                    PeerConnectionLifecycle::Active(attempt)
+                        if !self.send_terminal.contains(attempt) =>
+                    {
+                        Some((*peer, *attempt))
+                    }
+                    PeerConnectionLifecycle::Active(_) => None,
+                    PeerConnectionLifecycle::Pending { .. }
+                    | PeerConnectionLifecycle::Admitting { .. } => None,
+                })
+                .collect(),
+        }
+    }
+
+    pub(in crate::swarm::transport) fn admitted_connections(&self) -> ActiveConnectionSet {
         ActiveConnectionSet {
             attempts: self
                 .peers
@@ -311,6 +359,7 @@ impl<const MAX_PENDING: usize> ConnectionLifecycleRegistry<MAX_PENDING> {
             return false;
         }
         self.peers.remove(&attempt.peer);
+        self.send_terminal.remove(&attempt);
         true
     }
 

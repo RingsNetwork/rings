@@ -122,7 +122,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gateway_url_round_trips_absolute_target() -> Result<()> {
+    fn test_gateway_url_round_trips_absolute_target() -> Result<()> {
         let prefix = GatewayPrefix::new("/webview")?;
         let target = TargetUrl::parse("https://example.com/a path/?q=1#section")?;
 
@@ -135,7 +135,7 @@ mod tests {
     }
 
     #[test]
-    fn gateway_rejects_non_http_targets() {
+    fn test_gateway_rejects_non_http_targets() {
         assert!(matches!(
             TargetUrl::parse("file:///tmp/index.html"),
             Err(WebviewError::UnsupportedScheme(_))
@@ -143,7 +143,7 @@ mod tests {
     }
 
     #[test]
-    fn gateway_rejects_network_path_prefixes() {
+    fn test_gateway_rejects_network_path_prefixes() {
         assert!(matches!(
             GatewayPrefix::new("//attacker.example/"),
             Err(WebviewError::InvalidGatewayPrefix(_))
@@ -151,7 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn gateway_url_stays_on_gateway_origin_after_join() -> Result<()> {
+    fn test_gateway_url_stays_on_gateway_origin_after_join() -> Result<()> {
         let origin = Url::parse("https://rings.local/")?;
         let prefix = GatewayPrefix::new("/webview/")?;
         let target = TargetUrl::parse("https://example.com/")?;
@@ -164,7 +164,7 @@ mod tests {
     }
 
     #[test]
-    fn relative_url_rewrites_against_document_url() -> Result<()> {
+    fn test_relative_url_rewrites_against_document_url() -> Result<()> {
         let prefix = GatewayPrefix::new("/webview/")?;
         let document = TargetUrl::parse("https://example.com/a/page.html")?;
 

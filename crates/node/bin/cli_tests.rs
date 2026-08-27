@@ -1,12 +1,55 @@
 use clap::CommandFactory;
+use clap::FromArgMatches;
 use clap::Parser;
 use clap::ValueEnum;
+use rings_node::logging::LogLevel;
 
 use super::apply_storage_overrides;
 use super::config;
 use super::daemon::DaemonCommand;
 use super::Cli;
 use super::Command;
+
+fn parse_without_log_level_env<const N: usize>(args: [&str; N]) -> Result<Cli, clap::Error> {
+    let matches = Cli::command()
+        .mut_arg("log_level", |arg| arg.env(None::<&'static str>))
+        .try_get_matches_from(args)?;
+    Cli::from_arg_matches(&matches)
+}
+
+#[test]
+fn cli_default_log_level_is_error() {
+    let parsed =
+        parse_without_log_level_env(["rings", "--runtime", "current-thread", "new-session"]);
+
+    assert!(matches!(
+        parsed,
+        Ok(Cli {
+            log_level: LogLevel::Error,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn cli_explicit_log_level_overrides_default() {
+    let parsed = parse_without_log_level_env([
+        "rings",
+        "--log-level",
+        "debug",
+        "--runtime",
+        "current-thread",
+        "new-session",
+    ]);
+
+    assert!(matches!(
+        parsed,
+        Ok(Cli {
+            log_level: LogLevel::Debug,
+            ..
+        })
+    ));
+}
 
 #[test]
 fn daemon_command_tree_accepts_the_four_supported_actions() {

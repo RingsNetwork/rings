@@ -71,7 +71,7 @@ ed25519-dalek = "2.2.0"
 elliptic-curve = "0.13.6"
 ethereum-types = "0.14.1"
 flate2 = "1.0.22"
-futures = "0.3.21"
+futures = "0.3.32"
 futures-timer = "3.0.2"
 hex = "0.4.3"
 hkdf = "0.12.4"
@@ -115,6 +115,9 @@ wasm-bindgen = { workspace = true, optional = true }
 wasm-bindgen-futures = { workspace = true, optional = true }
 web-sys = { version = "0.3.56", optional = true, features = [
     "MediaDevices",
+    "MessageChannel",
+    "MessageEvent",
+    "MessagePort",
     "Navigator",
     "ServiceWorkerGlobalScope",
     "Window",

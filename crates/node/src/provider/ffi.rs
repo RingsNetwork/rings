@@ -33,7 +33,6 @@
 //!
 //! Please check python example at examples/ffi/rings.py
 
-use std::error::Error as StdError;
 use std::ffi::c_char;
 use std::ffi::CStr;
 use std::ffi::CString;
@@ -103,7 +102,7 @@ impl SwarmCallback for FfiBackend {
     async fn on_inbound(
         &self,
         payload: &MessagePayload,
-    ) -> std::result::Result<(), Box<dyn StdError>> {
+    ) -> std::result::Result<(), rings_core::error::CallbackError> {
         let data: Message = payload.transaction.data()?;
         let from = payload.transaction.signer().to_string();
 
@@ -457,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn ffi_provider_handle_create_listen_request_destroy_cycles() {
+    fn test_ffi_provider_handle_create_listen_request_destroy_cycles() {
         for _ in 0..3 {
             let ice_server = c_string("stun://stun.l.google.com");
             let account = c_string(TEST_ACCOUNT);
@@ -496,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn ffi_free_functions_accept_null() {
+    fn test_ffi_free_functions_accept_null() {
         unsafe {
             rings_node_string_free(ptr::null_mut());
             rings_node_provider_destroy(ptr::null_mut());

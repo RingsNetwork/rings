@@ -234,7 +234,7 @@ mod tests {
     }
 
     #[test]
-    fn small_messages_share_one_observable_cell_size() {
+    fn test_small_messages_share_one_observable_cell_size() {
         let recipient = session();
         let short = seal_message(&backward_message(1), recipient.session_public_key(), None)
             .expect("seal short");
@@ -248,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn cell_round_trip_rejects_wrong_recipient() {
+    fn test_cell_round_trip_rejects_wrong_recipient() {
         let recipient = session();
         let wrong = session();
         let message = backward_message(1);
@@ -263,7 +263,7 @@ mod tests {
     }
 
     #[test]
-    fn one_hop_cover_is_authenticated_inside_the_same_cell_algebra() {
+    fn test_one_hop_cover_is_authenticated_inside_the_same_cell_algebra() {
         let recipient = session();
         let encoded = seal_message(
             &OnionWireMessage::Cover,
@@ -284,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn local_bucket_selection_is_minimal_at_every_boundary() {
+    fn test_local_bucket_selection_is_minimal_at_every_boundary() {
         for (index, bucket) in OnionCellBucket::ALL.into_iter().enumerate() {
             let encoded_capacity = bucket.plaintext_len() - CELL_LENGTH_PREFIX_BYTES;
             assert_eq!(

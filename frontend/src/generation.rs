@@ -49,7 +49,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bump_revokes_every_previous_owner_without_counter_reuse() {
+    fn test_bump_revokes_every_previous_owner_without_counter_reuse() {
         let clock = GenerationClock::default();
         let initial = clock.token();
         let first = clock.bump();

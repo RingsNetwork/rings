@@ -240,6 +240,9 @@ pub enum Error {
     /// An extension runtime returned an error.
     #[error("Extension error: {0}")]
     ExtensionError(String) = 1502,
+    /// An owned extension task ended before publishing its result.
+    #[error("Detached extension task closed before publishing its result")]
+    DetachedExtensionTaskClosed = 1503,
     /// Onion route construction or validation failed.
     #[error("Onion route error: {0}")]
     OnionRouteError(OnionRouteError) = 1601,

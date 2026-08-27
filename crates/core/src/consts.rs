@@ -21,7 +21,8 @@ pub const TRANSPORT_CUSTOM_OVERHEAD: usize = 64;
 /// sending (signature, DIDs, relay, codec framing) — *not* counting the outer
 /// [`TRANSPORT_CUSTOM_OVERHEAD`], which is added separately. The chunk *data* size is the
 /// connection's negotiated `max_message_size` minus both reserves, so the wrapped on-wire message
-/// stays within the data-channel limit. Generous; bounded by the `chunk_envelope_fits_reserve` test.
+/// stays within the data-channel limit. Generous; bounded by the
+/// `test_chunk_envelope_fits_reserve` test.
 pub const MAX_CHUNK_ENVELOPE_OVERHEAD: usize = 4096;
 /// Smallest per-chunk *data* payload we are willing to produce. A peer that advertises a
 /// `max_message_size` so small that, after the envelope reserves, fewer than this many data bytes

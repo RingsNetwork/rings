@@ -230,7 +230,7 @@ mod tests {
     }
 
     #[test]
-    fn lex_splits_type_and_value_and_drops_junk() {
+    fn test_lex_splits_type_and_value_and_drops_junk() {
         let lines: Vec<Line> = lex("v=0\r\na=sendrecv\r\n\r\nnonsense\r\n").collect();
         assert_eq!(lines, vec![
             Line {
@@ -245,13 +245,13 @@ mod tests {
     }
 
     #[test]
-    fn lex_rejects_multi_char_type() {
+    fn test_lex_rejects_multi_char_type() {
         // `ab=...` is not a valid SDP line (type must be one char).
         assert_eq!(lex("ab=1\r\n").count(), 0);
     }
 
     #[test]
-    fn parse_attribute_flag_vs_pair() {
+    fn test_parse_attribute_flag_vs_pair() {
         assert_eq!(parse_attribute("sendrecv"), Attribute::Flag("sendrecv"));
         assert_eq!(
             parse_attribute("max-message-size:262144"),
@@ -263,7 +263,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_routes_attributes_by_section() {
+    fn test_parse_routes_attributes_by_section() {
         let sdp = "a=group:BUNDLE 0\r\n\
                    m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
                    a=max-message-size:65536\r\n";
@@ -286,13 +286,13 @@ mod tests {
     }
 
     #[test]
-    fn data_channel_section_value_is_selected() {
+    fn test_data_channel_section_value_is_selected() {
         let sdp = data_channel_sdp("a=max-message-size:65536\r\n");
         assert_eq!(parse_sdp_max_message_size(&sdp), Some(65536));
     }
 
     #[test]
-    fn session_level_value_is_ignored() {
+    fn test_session_level_value_is_ignored() {
         // `max-message-size` before the first `m=` is session-level and must not be used.
         let sdp = "a=max-message-size:1234\r\n\
                    m=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
@@ -301,7 +301,7 @@ mod tests {
     }
 
     #[test]
-    fn other_media_section_value_is_ignored() {
+    fn test_other_media_section_value_is_ignored() {
         // a value on an audio section must not leak into the data-channel limit.
         let sdp = "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\n\
                    a=max-message-size:99999\r\n\
@@ -311,31 +311,31 @@ mod tests {
     }
 
     #[test]
-    fn no_data_channel_section_is_none() {
+    fn test_no_data_channel_section_is_none() {
         let sdp = "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=max-message-size:99999\r\n";
         assert_eq!(parse_sdp_max_message_size(sdp), None);
     }
 
     #[test]
-    fn absent_attribute_is_none() {
+    fn test_absent_attribute_is_none() {
         let sdp = data_channel_sdp("a=sctp-port:5000\r\n");
         assert_eq!(parse_sdp_max_message_size(&sdp), None);
     }
 
     #[test]
-    fn zero_is_preserved() {
+    fn test_zero_is_preserved() {
         let sdp = data_channel_sdp("a=max-message-size:0\r\n");
         assert_eq!(parse_sdp_max_message_size(&sdp), Some(0));
     }
 
     #[test]
-    fn tolerates_surrounding_whitespace() {
+    fn test_tolerates_surrounding_whitespace() {
         let sdp = data_channel_sdp("   a=max-message-size: 1200 \r\n");
         assert_eq!(parse_sdp_max_message_size(&sdp), Some(1200));
     }
 
     #[test]
-    fn malformed_value_is_none() {
+    fn test_malformed_value_is_none() {
         assert_eq!(
             parse_sdp_max_message_size(&data_channel_sdp("a=max-message-size:notanumber\r\n")),
             None
@@ -347,20 +347,20 @@ mod tests {
     }
 
     #[test]
-    fn first_within_section_wins_when_repeated() {
+    fn test_first_within_section_wins_when_repeated() {
         let sdp = data_channel_sdp("a=max-message-size:1024\r\na=max-message-size:2048\r\n");
         assert_eq!(parse_sdp_max_message_size(&sdp), Some(1024));
     }
 
     #[test]
-    fn tcp_dtls_sctp_proto_is_accepted() {
+    fn test_tcp_dtls_sctp_proto_is_accepted() {
         let sdp = "m=application 9 TCP/DTLS/SCTP webrtc-datachannel\r\n\
                    a=max-message-size:65536\r\n";
         assert_eq!(parse_sdp_max_message_size(sdp), Some(65536));
     }
 
     #[test]
-    fn substring_only_proto_is_rejected() {
+    fn test_substring_only_proto_is_rejected() {
         // `SCTPX` contains the substring "SCTP" but is not the `SCTP` proto token; a substring
         // match would wrongly accept this section.
         let sdp = "m=application 9 UDP/DTLS/SCTPX webrtc-datachannel\r\n\
@@ -369,7 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn substring_only_fmt_is_rejected() {
+    fn test_substring_only_fmt_is_rejected() {
         // `webrtc-datachannel-x` contains the substring but is not the `webrtc-datachannel` fmt.
         let sdp = "m=application 9 UDP/DTLS/SCTP webrtc-datachannel-x\r\n\
                    a=max-message-size:65536\r\n";
@@ -377,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn non_application_media_with_datachannel_token_is_rejected() {
+    fn test_non_application_media_with_datachannel_token_is_rejected() {
         // an `m=` line that merely names `webrtc-datachannel` as a format on a non-application media
         // must not be treated as the data channel.
         let sdp = "m=audio 9 UDP/DTLS/SCTP webrtc-datachannel\r\n\
@@ -386,7 +386,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_numeric_fmt_with_sctpmap_is_detected() {
+    fn test_legacy_numeric_fmt_with_sctpmap_is_detected() {
         // Pre-RFC-8841 form: numeric `<fmt>` (5000) and an `a=sctpmap`/`a=sctp-port` instead of the
         // `webrtc-datachannel` token. We must still recognise it and read its limit.
         let sdp = "m=application 9 DTLS/SCTP 5000\r\n\
@@ -401,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn rejected_data_channel_section_is_skipped() {
+    fn test_rejected_data_channel_section_is_skipped() {
         // A rejected (`port 0`) data-channel section before the active one must not be selected.
         let sdp = "m=application 0 UDP/DTLS/SCTP webrtc-datachannel\r\n\
                    a=max-message-size:111\r\n\
@@ -411,7 +411,7 @@ mod tests {
     }
 
     #[test]
-    fn matching_is_case_insensitive() {
+    fn test_matching_is_case_insensitive() {
         // Lowercase proto token, mixed-case media, and mixed-case attribute key.
         let sdp = "m=Application 9 udp/dtls/sctp webrtc-datachannel\r\n\
                    a=Max-Message-Size:262144\r\n";

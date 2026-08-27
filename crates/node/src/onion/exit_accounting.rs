@@ -251,7 +251,7 @@ mod tests {
     use crate::onion::OnionExitPolicy;
 
     #[test]
-    fn unspecified_or_excessive_policy_uses_hard_resource_limits() {
+    fn test_unspecified_or_excessive_policy_uses_hard_resource_limits() {
         assert_eq!(
             effective_limit(0, HARD_MAX_ACTIVE_CIRCUITS),
             HARD_MAX_ACTIVE_CIRCUITS
@@ -264,7 +264,7 @@ mod tests {
     }
 
     #[test]
-    fn admission_decision_does_not_mutate_limiter_before_commit() {
+    fn test_admission_decision_does_not_mutate_limiter_before_commit() {
         let mut limiter = ExitLimiter::default();
         let circuit = ExitCircuitKey::new(OnionCircuitId::new([1; 16]), Did::from(9_u32));
         let policy = OnionExitPolicy {
@@ -292,7 +292,7 @@ mod tests {
     }
 
     #[test]
-    fn unspecified_stream_limit_is_still_bounded() {
+    fn test_unspecified_stream_limit_is_still_bounded() {
         let accounting = OnionExitAccounting::default();
         let policy = OnionExitPolicy::default();
         let circuit = OnionCircuitId::random();
@@ -310,7 +310,7 @@ mod tests {
     }
 
     #[test]
-    fn unspecified_circuit_limit_is_still_bounded() {
+    fn test_unspecified_circuit_limit_is_still_bounded() {
         let accounting = OnionExitAccounting::default();
         let policy = OnionExitPolicy::default();
         let mut leases = Vec::new();
@@ -331,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn one_return_peer_cannot_pin_the_global_exit_circuit_budget() {
+    fn test_one_return_peer_cannot_pin_the_global_exit_circuit_budget() {
         let accounting = OnionExitAccounting::default();
         let policy = OnionExitPolicy::default();
         let peer = Did::from(8_u32);

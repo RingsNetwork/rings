@@ -179,7 +179,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn one_peer_cannot_consume_another_peers_share() -> crate::error::Result<()> {
+    fn test_one_peer_cannot_consume_another_peers_share() -> crate::error::Result<()> {
         let mut budget = PeerQuota::new(
             MAX_PENDING_RELAY_CONTROL_SENDS,
             MAX_PENDING_RELAY_CONTROL_SENDS_PER_PEER,
@@ -201,7 +201,7 @@ mod tests {
     }
 
     #[test]
-    fn global_budget_rejects_at_the_exact_bound_and_recovers() {
+    fn test_global_budget_rejects_at_the_exact_bound_and_recovers() {
         let mut budget = PeerQuota::new(
             MAX_PENDING_RELAY_CONTROL_SENDS,
             MAX_PENDING_RELAY_CONTROL_SENDS_PER_PEER,
@@ -224,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn permit_drop_reclaims_capacity() -> crate::error::Result<()> {
+    fn test_permit_drop_reclaims_capacity() -> crate::error::Result<()> {
         let peer = Did::from(3_u32);
         let budget = Arc::new(Mutex::new(PeerQuota::new(
             MAX_PENDING_RELAY_CONTROL_SENDS,

@@ -21,7 +21,7 @@ use crate::prelude::wasm_export;
 /// Copying a log level preserves the same immutable verbosity selection.
 #[repr(C)]
 #[wasm_export]
-#[derive(ValueEnum, Debug, Clone, Copy)]
+#[derive(ValueEnum, Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub enum LogLevel {
     /// Debug-level diagnostic output.
     Debug,
@@ -30,6 +30,7 @@ pub enum LogLevel {
     /// Warning-level runtime output.
     Warn,
     /// Error-level runtime output.
+    #[default]
     Error,
     /// Trace-level diagnostic output.
     Trace,
@@ -213,5 +214,15 @@ pub mod browser {
 
         // Ignore errors returned by set_global_default.
         let _ = tracing::subscriber::set_global_default(subscriber);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LogLevel;
+
+    #[test]
+    fn test_default_log_level_is_error() {
+        assert_eq!(LogLevel::default(), LogLevel::Error);
     }
 }

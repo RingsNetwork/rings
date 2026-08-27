@@ -60,6 +60,14 @@ impl<C> ConnectionRef<C> {
     }
 }
 
+#[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
+impl ConnectionRef<crate::connections::WebrtcConnection> {
+    /// Capture a witness that survives pool removal and observes completed native close.
+    pub fn physical_close_witness(&self) -> Result<crate::connections::NativePhysicalCloseWitness> {
+        Ok(self.upgrade()?.physical_close_witness())
+    }
+}
+
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 impl ConnectionRef<crate::connections::DummyConnection> {
     /// Test hook: force a dummy connection state without dispatching lifecycle callbacks.
@@ -237,7 +245,7 @@ mod tests {
     /// A live ref forwards to the inner connection; a released one reports the interop default
     /// rather than erroring (see the deliberate-design note on `max_message_size`).
     #[test]
-    fn released_ref_max_message_size_falls_back_to_default() {
+    fn test_released_ref_max_message_size_falls_back_to_default() {
         let conn = Arc::new(Mock);
         let reference = ConnectionRef::new("cid", &conn);
         assert_eq!(reference.max_message_size(), 4242, "live ref forwards");
@@ -253,7 +261,7 @@ mod tests {
     /// A released ref surfaces the release as an error on the data path (so the default reported
     /// above is never actually transmitted against).
     #[test]
-    fn released_ref_upgrade_errors() {
+    fn test_released_ref_upgrade_errors() {
         let conn = Arc::new(Mock);
         let reference = ConnectionRef::new("cid", &conn);
         assert!(reference.upgrade().is_ok(), "live ref upgrades");
