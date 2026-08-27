@@ -129,14 +129,39 @@ fn healthy_restart_waits_past_an_exited_action_record() -> Result<(), DaemonErro
 }
 
 #[test]
-fn healthy_restart_waits_past_its_own_clean_exit() -> Result<(), DaemonError> {
-    let root = test_root("restart-clean-action-exit");
+fn restart_settles_on_an_attributable_clean_exit_under_keepalive() -> Result<(), DaemonError> {
+    let root = test_root("restart-attributed-clean-exit");
     let target = test_target();
     let manager = scripted_manager(&root, [
         loaded_service(&target, "state = running\nruns = 3\n"),
         CommandStep::success(LAUNCHCTL, &["kickstart", "-k", &target], ""),
-        loaded_service(&target, "state = exited\nruns = 4\nlast exit code = 0\n"),
-        loaded_service(&target, "state = running\nruns = 4\n"),
+        loaded_service(&target, "state = exited\nruns = 6\nlast exit code = 0\n"),
+        enabled_autostart(TEST_DOMAIN),
+    ]);
+    install_test_definition(&root)?;
+
+    let status = manager.restart()?;
+
+    assert_eq!(
+        status,
+        DaemonStatus::installed(DaemonState::Stopped, AutostartState::Enabled)
+    );
+    Ok(())
+}
+
+#[test]
+fn restart_keeps_polling_after_a_clean_exit_without_keepalive_evidence() -> Result<(), DaemonError>
+{
+    let root = test_root("restart-clean-exit-unknown-policy");
+    let target = test_target();
+    let manager = scripted_manager(&root, [
+        loaded_service_without_respawn_policy(&target, "state = running\nruns = 3\n"),
+        CommandStep::success(LAUNCHCTL, &["kickstart", "-k", &target], ""),
+        loaded_service_without_respawn_policy(
+            &target,
+            "state = exited\nruns = 6\nlast exit code = 0\n",
+        ),
+        loaded_service_without_respawn_policy(&target, "state = running\nruns = 6\n"),
         enabled_autostart(TEST_DOMAIN),
     ]);
     install_test_definition(&root)?;

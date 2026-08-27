@@ -483,6 +483,10 @@ mod tests {
         CommandStep::success(LAUNCHCTL, &["print", target], &output)
     }
 
+    fn loaded_service_without_respawn_policy(target: &str, properties: &str) -> CommandStep {
+        CommandStep::success(LAUNCHCTL, &["print", target], properties)
+    }
+
     fn enabled_autostart(domain: &str) -> CommandStep {
         let output = format!("\"{LAUNCHD_LABEL}\" => false\n");
         CommandStep::success(LAUNCHCTL, &["print-disabled", domain], &output)

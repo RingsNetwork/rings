@@ -47,6 +47,37 @@ fn stop_reports_the_loaded_job_it_acted_on_even_without_a_plist() -> Result<(), 
 }
 
 #[test]
+fn stop_reports_an_absent_job_with_a_plist_as_stopped() -> Result<(), DaemonError> {
+    let root = test_root("stop-absent-with-plist");
+    let target = test_target();
+    install_test_definition(&root)?;
+    let manager = scripted_manager(&root, [
+        missing_service(&target),
+        enabled_autostart(TEST_DOMAIN),
+    ]);
+
+    let status = manager.stop()?;
+
+    assert_eq!(
+        status,
+        DaemonStatus::installed(DaemonState::Stopped, AutostartState::Enabled)
+    );
+    Ok(())
+}
+
+#[test]
+fn stop_reports_an_absent_job_without_a_plist_as_not_installed() -> Result<(), DaemonError> {
+    let root = test_root("stop-absent-without-plist");
+    let target = test_target();
+    let manager = scripted_manager(&root, [missing_service(&target)]);
+
+    let status = manager.stop()?;
+
+    assert_eq!(status, DaemonStatus::NotInstalled);
+    Ok(())
+}
+
+#[test]
 fn stop_reports_a_job_that_never_unloads() -> Result<(), DaemonError> {
     let root = test_root("stop-timeout");
     let target = test_target();
