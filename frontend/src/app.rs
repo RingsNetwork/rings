@@ -95,12 +95,6 @@ struct LinkState {
     link_tab: UseStateHandle<LinkTab>,
 }
 
-struct ProofState {
-    prover_did: UseStateHandle<String>,
-    r1cs_url: UseStateHandle<String>,
-    wasm_url: UseStateHandle<String>,
-}
-
 struct CustomState {
     namespace: UseStateHandle<String>,
     registered: UseStateHandle<Vec<String>>,
@@ -132,7 +126,6 @@ struct AppRenderContext<'a> {
     shell: &'a ShellState,
     node: &'a NodeState,
     link: &'a LinkState,
-    proof: &'a ProofState,
     custom_state: &'a CustomState,
     onion: &'a OnionState,
     launch_actions: LaunchActions,
@@ -233,15 +226,6 @@ fn use_link_state() -> LinkState {
 }
 
 #[hook]
-fn use_proof_state() -> ProofState {
-    ProofState {
-        prover_did: use_state(String::new),
-        r1cs_url: use_state(|| "http://127.0.0.1:8080/simple_bn256.r1cs".to_string()),
-        wasm_url: use_state(|| "http://127.0.0.1:8080/simple_bn256.wasm".to_string()),
-    }
-}
-
-#[hook]
 fn use_custom_state() -> CustomState {
     CustomState {
         namespace: use_state(|| "custom".to_string()),
@@ -315,7 +299,6 @@ pub fn app() -> Html {
     let shell = use_shell_state();
     let node = use_node_state();
     let link = use_link_state();
-    let proof = use_proof_state();
     let custom_state = use_custom_state();
     let onion = use_onion_state();
     let on_wallet_kind = wallet_kind_callback(&node.wallet_kind);
@@ -331,7 +314,6 @@ pub fn app() -> Html {
         shell: &shell,
         node: &node,
         link: &link,
-        proof: &proof,
         custom_state: &custom_state,
         onion: &onion,
         launch_actions,
@@ -745,7 +727,6 @@ fn connect_state<'a>(link: &'a LinkState, shell: &ShellState) -> ConnectState<'a
 fn render_workbench_body(ctx: &AppRenderContext<'_>) -> Html {
     match *ctx.shell.active_panel {
         Panel::Onion => render_onion_panel(ctx.node, ctx.onion),
-        Panel::Proof => render_proof_panel(ctx.node, ctx.proof),
         Panel::Custom => render_custom_panel(ctx.node, ctx.custom_state),
     }
 }
@@ -766,16 +747,6 @@ fn render_onion_panel(node: &NodeState, onion: &OnionState) -> Html {
         },
         node.node_ref.clone(),
         node.generation.clone(),
-        node.status.clone(),
-    )
-}
-
-fn render_proof_panel(node: &NodeState, proof: &ProofState) -> Html {
-    workbench::proof_panel(
-        &proof.prover_did,
-        &proof.r1cs_url,
-        &proof.wasm_url,
-        node.node_ref.clone(),
         node.status.clone(),
     )
 }

@@ -31,9 +31,6 @@ pub mod e2e;
 pub mod stabilization;
 /// Operator and Handler for Storage
 pub mod storage;
-/// Operator and Handler for Subring
-pub mod subring;
-
 /// Shared message-handler handle.
 ///
 /// Clone law: cloning duplicates `Arc` handles to the same transport, DHT

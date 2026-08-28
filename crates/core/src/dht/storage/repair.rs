@@ -133,7 +133,7 @@ impl PeerRing {
         // the authoritative backstop. This scan is O(entries * redundancy) and
         // may race with another terminal-state trigger, but repair only
         // delivers joins, so duplicate triggers preserve storage state.
-        for (_, entry) in self.storage.get_all().await? {
+        for (_, entry) in self.supported_storage_entries().await? {
             for placement_key in entry.did.rotate_affine(redundancy)? {
                 match self.find_successor(placement_key)? {
                     PeerRingAction::Some(owner) if owner == peer => return Ok(true),
@@ -236,7 +236,7 @@ impl ChordStorageRepair<PeerRingAction> for PeerRing {
         // redundancy) is either joined locally when self accepts it or emitted
         // as a copy action toward the local view's storage-sync destination.
         let mut actions = Vec::new();
-        for (_, entry) in self.storage.get_all().await? {
+        for (_, entry) in self.supported_storage_entries().await? {
             let action = self.republish_entry(entry, redundancy).await?;
             push_action(&mut actions, action);
         }
@@ -249,6 +249,7 @@ impl ChordStorageRepair<PeerRingAction> for PeerRing {
         misses: &[PlacementMiss],
         redundancy: u16,
     ) -> Result<PeerRingAction> {
+        let entry = entry.try_into_storage_entry()?;
         // Pre: misses = repair_targets(o) for the lookup observation that found
         // entry, and each miss.owner was observed while querying miss.key.
         // Pre: redundancy is the same redundancy that produced the lookup

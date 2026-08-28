@@ -59,12 +59,11 @@ The substrate both layers build on:
 > over the same extension runtime.
 
 **Shipped**
-- **zkSNARK** proving/verification as a protocol — fold-scheme based (`crates/snark`).
 - Signed messaging with selectable signature schemes; plaintext and signed message paths.
 
 **Planned**
 - End-to-end encryption across the messaging layer (sender-to-recipient, not hop-by-hop).
-- Zero-knowledge identity and verifiable off-chain compute built on the SNARK protocol.
+- User-installed zero-knowledge identity and verifiable off-chain compute protocols.
 - Secret sharing and private storage primitives.
 - Metadata-resistant routing (reducing what intermediaries can observe).
 

@@ -23,7 +23,6 @@ pub use self::rings_core::message::MessagePayload;
 pub use self::rings_core::message::MessageRelay;
 pub use self::rings_core::message::PayloadSender;
 pub use self::rings_core::message::ReportReturnPolicy;
-pub use self::rings_core::message::SubringInterface;
 pub use self::rings_core::session::Session;
 pub use self::rings_core::session::SessionSk;
 pub use self::rings_core::session::SessionSkBuilder;

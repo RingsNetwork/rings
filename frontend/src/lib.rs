@@ -20,7 +20,6 @@ mod hex;
 mod node;
 mod onion;
 mod peer_sync;
-mod proof;
 mod styles;
 mod topology;
 mod wallet;

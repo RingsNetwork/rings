@@ -16,6 +16,33 @@ use crate::error::Error;
 use crate::error::Result;
 
 impl PeerRing {
+    /// Load one live storage entry while ignoring decode-compatible legacy carriers.
+    ///
+    /// Legacy Subring values remain readable at the codec boundary but are
+    /// treated as absent here. This shared boundary applies equally to native
+    /// persistent storage and browser IndexedDB without rewriting either store.
+    pub(crate) async fn supported_storage_entry(&self, key: Did) -> Result<Option<Entry>> {
+        Ok(self
+            .storage
+            .get(&key.to_string())
+            .await?
+            .filter(Entry::is_supported))
+    }
+
+    /// Load all live entries while excluding decode-compatible legacy carriers.
+    ///
+    /// Post: returned entries can participate in repair and replication.
+    /// Post: reserved legacy Subring entries are never returned.
+    pub(crate) async fn supported_storage_entries(&self) -> Result<Vec<(String, Entry)>> {
+        Ok(self
+            .storage
+            .get_all()
+            .await?
+            .into_iter()
+            .filter(|(_, entry)| entry.is_supported())
+            .collect())
+    }
+
     /// Join an incoming replicated entry delta into local storage.
     ///
     /// Post: the stored value is the least upper bound of the previous local
@@ -23,7 +50,7 @@ impl PeerRing {
     /// `incoming` normalized for storage.
     pub(crate) async fn join_storage_entry(&self, key: Did, incoming: Entry) -> Result<Entry> {
         let incoming = incoming.try_into_storage_entry()?;
-        let stored = if let Some(local) = self.storage.get(&key.to_string()).await? {
+        let stored = if let Some(local) = self.supported_storage_entry(key).await? {
             local.join(incoming)?
         } else {
             incoming
@@ -52,7 +79,7 @@ impl PeerRing {
             let query = EntryLookupKey::new(entry_key, placement_key);
             let act = match self.find_storage_owner(placement_key) {
                 Ok(PeerRingAction::Some(succ)) => {
-                    match self.storage.get(&placement_key.to_string()).await {
+                    match self.supported_storage_entry(placement_key).await {
                         Ok(Some(value)) => {
                             let observed_misses = std::mem::take(&mut misses);
                             Ok(PeerRingAction::SomeEntry(EntryLookupEvidence::new(
@@ -142,7 +169,7 @@ impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing 
         for entry_key in entry_key.rotate_affine(REDUNDANT)? {
             let act = match self.find_storage_owner(entry_key) {
                 Ok(PeerRingAction::Some(_)) => {
-                    let this = match self.storage.get(&entry_key.to_string()).await? {
+                    let this = match self.supported_storage_entry(entry_key).await? {
                         Some(this) => this,
                         None => op.clone().gen_default_entry()?,
                     };
@@ -174,10 +201,17 @@ impl<const REDUNDANT: u16> ChordStorage<PeerRingAction, REDUNDANT> for PeerRing 
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 impl ChordStorageCache<PeerRingAction> for PeerRing {
     async fn local_cache_put(&self, entry: Entry) -> Result<()> {
+        if !entry.is_supported() {
+            return Err(Error::UnsupportedEntryKind);
+        }
         self.cache.put(&entry.did.to_string(), &entry).await
     }
 
     async fn local_cache_get(&self, entry_key: Did) -> Result<Option<Entry>> {
-        self.cache.get(&entry_key.to_string()).await
+        Ok(self
+            .cache
+            .get(&entry_key.to_string())
+            .await?
+            .filter(Entry::is_supported))
     }
 }

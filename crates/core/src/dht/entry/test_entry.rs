@@ -69,9 +69,8 @@ fn assert_entry_keeps_recent_overflow(
     Ok(())
 }
 
-fn subring_entry(name: &str) -> Result<Entry> {
-    let creator = Entry::gen_did("creator")?;
-    Subring::new(name, creator)?.try_into()
+fn reserved_subring_entry() -> Entry {
+    Entry::new(Did::from(7u32), Vec::new(), EntryKind::ReservedSubring)
 }
 
 fn actor() -> Did {
@@ -130,19 +129,6 @@ fn entry_dot_for_value(entry: &Entry, value: &str) -> Result<EntryDot> {
 
 fn relay_delta(did: Did, value: &str, counter: u32) -> Result<Entry> {
     Entry::new(did, vec![encoded(value)?], EntryKind::RelayMessage).stamp_delta(version(counter))
-}
-
-#[test]
-fn test_gset_satisfies_join_semilattice_laws() {
-    let mut a = GSet::new();
-    a.insert(Did::from(1u32));
-    let mut b = GSet::new();
-    b.insert(Did::from(2u32));
-    let mut ab = GSet::new();
-    ab.insert(Did::from(1u32));
-    ab.insert(Did::from(2u32));
-
-    assert_join_semilattice_laws(&[GSet::new(), a, b, ab]);
 }
 
 #[test]
@@ -359,12 +345,12 @@ fn test_overwrite_replaces_data_for_same_data_entry() -> Result<()> {
 
 #[test]
 fn test_overwrite_rejects_non_data_entry() -> Result<()> {
-    let entry = subring_entry("ring")?;
+    let entry = reserved_subring_entry();
     let other = entry.clone();
 
     assert!(matches!(
         entry.overwrite(other, actor()),
-        Err(Error::EntryNotOverwritable)
+        Err(Error::UnsupportedEntryKind)
     ));
     Ok(())
 }
@@ -451,12 +437,12 @@ fn test_extend_caps_incoming_payloads_larger_than_max_len() -> Result<()> {
 
 #[test]
 fn test_extend_rejects_non_data_entry() -> Result<()> {
-    let entry = subring_entry("ring")?;
+    let entry = reserved_subring_entry();
     let other = entry.clone();
 
     assert!(matches!(
         entry.extend(other, actor()),
-        Err(Error::EntryNotAppendable)
+        Err(Error::UnsupportedEntryKind)
     ));
     Ok(())
 }
@@ -662,12 +648,12 @@ fn test_delayed_data_compaction_preserves_newer_register_floor() -> Result<()> {
 
 #[test]
 fn test_tombstone_rejects_non_data_or_relay_entry() -> Result<()> {
-    let entry = subring_entry("ring")?;
+    let entry = reserved_subring_entry();
     let other = entry.clone();
 
     assert!(matches!(
         entry.tombstone(other),
-        Err(Error::EntryNotTombstonable)
+        Err(Error::UnsupportedEntryKind)
     ));
     Ok(())
 }
@@ -682,23 +668,70 @@ fn test_touch_caps_incoming_payloads_larger_than_max_len() -> Result<()> {
 }
 
 #[test]
-fn test_join_subring_adds_member_to_subring_entry() -> Result<()> {
-    let entry = subring_entry("ring")?;
-    let member = Entry::gen_did("member")?;
-    let updated = entry.join_subring(member)?;
-    let subring = Subring::try_from(updated)?;
-    assert_eq!(subring.finger.first(), Some(member));
+fn test_entry_kind_wire_slots_preserve_live_postcard_discriminants() -> Result<()> {
+    let cases = [
+        (EntryKind::Data, 0u32, vec![0u8]),
+        (EntryKind::ReservedSubring, 1u32, vec![1u8]),
+        (EntryKind::RelayMessage, 2u32, vec![2u8]),
+    ];
+
+    for (kind, expected_variant, expected_bytes) in cases {
+        let encoded = rings_codec::serialize(&kind).map_err(Error::CodecSerialize)?;
+        assert_eq!(encoded, expected_bytes);
+        assert_eq!(
+            rings_codec::deserialize_enum_variant(&encoded).map_err(Error::CodecDeserialize)?,
+            expected_variant
+        );
+    }
     Ok(())
 }
 
 #[test]
-fn test_join_subring_rejects_non_subring_entry() -> Result<()> {
+fn test_entry_operation_wire_slots_preserve_live_postcard_discriminants() -> Result<()> {
     let entry = data_entry("topic", "value")?;
-    let member = Entry::gen_did("member")?;
+    let cases = [
+        (EntryOperation::Overwrite(entry.clone()), 0u32),
+        (EntryOperation::Extend(entry.clone()), 1u32),
+        (EntryOperation::Touch(entry.clone()), 2u32),
+        (
+            EntryOperation::UnsupportedJoinSubring("legacy".to_string(), Did::from(9u32)),
+            3u32,
+        ),
+        (EntryOperation::Tombstone(entry.clone()), 4u32),
+        (EntryOperation::CompactData(entry), 5u32),
+    ];
 
+    for (operation, expected_variant) in cases {
+        let encoded = rings_codec::serialize(&operation).map_err(Error::CodecSerialize)?;
+        assert_eq!(
+            rings_codec::deserialize_enum_variant(&encoded).map_err(Error::CodecDeserialize)?,
+            expected_variant
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn test_legacy_subring_slots_decode_but_cannot_execute_or_persist() -> Result<()> {
+    let decoded: EntryKind = rings_codec::deserialize(&[1u8]).map_err(Error::CodecDeserialize)?;
+    assert_eq!(decoded, EntryKind::ReservedSubring);
+    assert_eq!(
+        serde_json::to_string(&decoded).map_err(Error::Serialize)?,
+        "\"Subring\""
+    );
     assert!(matches!(
-        entry.join_subring(member),
-        Err(Error::EntryNotJoinable)
+        reserved_subring_entry().try_into_storage_entry(),
+        Err(Error::UnsupportedEntryKind)
+    ));
+
+    let operation = EntryOperation::UnsupportedJoinSubring("legacy".to_string(), Did::from(9u32));
+    let encoded = rings_codec::serialize(&operation).map_err(Error::CodecSerialize)?;
+    let decoded_operation: EntryOperation =
+        rings_codec::deserialize(&encoded).map_err(Error::CodecDeserialize)?;
+    assert_eq!(decoded_operation, operation);
+    assert!(matches!(
+        decoded_operation.stamped(actor()),
+        Err(Error::UnsupportedEntryOperation)
     ));
     Ok(())
 }

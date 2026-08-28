@@ -1,6 +1,5 @@
 @media (max-width: 860px) {
-  .workflow-grid,
-  .proof-grid {
+  .workflow-grid {
     grid-template-columns: 1fr;
   }
 

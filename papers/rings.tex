@@ -120,7 +120,7 @@ zero-knowledge protocols use their own fields or groups.
 
 The resulting design has three practical consequences.  First, DIDs and virtual
 DIDs (VIDs) share the same 160-bit placement surface, so identities, mailboxes,
-service descriptors, chunks, subrings, and application rendezvous points can be
+service descriptors, chunks, and application rendezvous points can be
 routed by one owner function.  Second, Rings builds on Chord and CorrectChord
 rather than replacing the overlay literature: successor lists, predecessor
 relations, join, rectify, and stabilize are the maintenance substrate on which
@@ -884,19 +884,6 @@ h&=&(\nu,\rho,Intro,Relay,\\
 VID(h)&=&H_H(h),\\
 \mathsf{Lookup}(h)&=&P^N_H(h),\\
 \mathsf{Valid}(h,\sigma)&=&\operatorname{Auth}_H(h,\sigma).
-\end{array}
-\]
-\end{definition}
-
-\begin{definition}[Subring]
-\[
-  \mathcal{S}_u=(u,N_u,\operatorname{owner}_{N_u},
-  \operatorname{Succ}^{r_u}_{N_u},E_u)
-\]
-\[
-\begin{array}{rcl}
-u&=&H_U(policy),\\
-memberlog_u&\in&\mathsf{MergeLog}\cup\mathsf{FinalState}.
 \end{array}
 \]
 \end{definition}

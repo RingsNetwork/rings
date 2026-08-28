@@ -121,9 +121,13 @@ pub enum Error {
     #[error("The type of Entry is not allowed to be appended")]
     EntryNotAppendable,
 
-    /// The type of Entry is not allowed to be joined as a subring
-    #[error("The type of Entry is not allowed to be joined as a subring")]
-    EntryNotJoinable,
+    /// The decoded entry kind occupies a reserved compatibility slot.
+    #[error("The entry kind is reserved and unsupported")]
+    UnsupportedEntryKind,
+
+    /// The decoded entry operation occupies a reserved compatibility slot.
+    #[error("The entry operation is reserved and unsupported")]
+    UnsupportedEntryOperation,
 
     /// The type of Entry is not allowed to be tombstoned
     #[error("The type of Entry is not allowed to be tombstoned")]
@@ -540,10 +544,6 @@ pub enum Error {
     /// Invalid peer type
     #[error("Invalid peer type")]
     InvalidPeerType,
-
-    /// Invalid entry kind
-    #[error("Invalid entry kind")]
-    InvalidEntryKind,
 
     #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
     /// RTC new peer connection failed

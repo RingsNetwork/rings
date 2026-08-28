@@ -185,7 +185,7 @@ async fn operate_entry_at_placement(
     op: EntryOperation,
 ) -> Result<()> {
     let op = op.stamped(dht.did)?;
-    let this = match dht.storage.get(&placement.to_string()).await? {
+    let this = match dht.supported_storage_entry(placement).await? {
         Some(this) => this,
         None => op.clone().gen_default_entry()?,
     };

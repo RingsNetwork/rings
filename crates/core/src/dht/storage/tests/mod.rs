@@ -49,6 +49,60 @@ fn data_entry_with_payload_len(did: Did, len: usize) -> Entry {
     Entry::new(did, vec!["x".repeat(len).into()], EntryKind::Data)
 }
 
+#[tokio::test]
+async fn test_legacy_subring_entry_is_ignored_by_memory_and_repair_boundaries() -> Result<()> {
+    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(MemStorage::new()));
+    let key = Did::from(10u32);
+    let legacy = Entry::new(key, vec![], EntryKind::ReservedSubring);
+    node.storage.put(&key.to_string(), &legacy).await?;
+
+    assert_eq!(node.supported_storage_entry(key).await?, None);
+    assert!(node.supported_storage_entries().await?.is_empty());
+    assert_eq!(node.republish_local_entries(2).await?, PeerRingAction::None);
+    assert!(matches!(
+        node.read_repair_entry(legacy, &[], 2).await,
+        Err(Error::UnsupportedEntryKind)
+    ));
+
+    let live = data_entry_with_data(key, "replacement");
+    let normalized = live.clone().try_into_storage_entry()?;
+    assert_eq!(
+        node.join_storage_entry(key, live).await?,
+        normalized.clone()
+    );
+    assert_eq!(node.supported_storage_entry(key).await?, Some(normalized));
+    Ok(())
+}
+
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+#[tokio::test]
+async fn test_native_reopen_ignores_legacy_subring_entry() -> Result<()> {
+    let path = std::env::temp_dir().join(format!(
+        "rings-legacy-subring-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| Error::InvalidMessage(error.to_string()))?
+            .as_nanos()
+    ));
+    let key = Did::from(10u32);
+    let legacy = Entry::new(key, Vec::new(), EntryKind::ReservedSubring);
+
+    {
+        let storage = crate::storage::sled::SledStorage::new_with_cap_and_path(4096, &path).await?;
+        storage.put(&key.to_string(), &legacy).await?;
+    }
+
+    let reopened = crate::storage::sled::SledStorage::new_with_cap_and_path(4096, &path).await?;
+    let node = PeerRing::new_with_storage(Did::from(0u32), 3, Box::new(reopened));
+    assert_eq!(node.supported_storage_entry(key).await?, None);
+    assert!(node.supported_storage_entries().await?.is_empty());
+
+    node.storage.clear().await?;
+    std::fs::remove_dir(&path).map_err(Error::ServiceIOError)?;
+    Ok(())
+}
+
 fn first_two_affine_keys(did: Did) -> Result<(Did, Did)> {
     let mut keys = did.rotate_affine(2)?.into_iter();
     let Some(first) = keys.next() else {

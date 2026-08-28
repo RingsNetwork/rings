@@ -314,7 +314,7 @@ mod tests {
 
     use super::*;
 
-    // Run in a real (headless) browser for parity with proof-demo:
+    // Run in a real headless browser:
     // `wasm-pack test --headless --chrome` (needs a chromedriver matching your Chrome;
     // `webdriver.json` supplies the launch flags). The logic itself is browser-free.
     wasm_bindgen_test_configure!(run_in_browser);

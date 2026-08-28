@@ -656,6 +656,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_unknown_legacy_namespace_is_a_nonfatal_drop() -> Result<()> {
+        let extensions = extensions()?;
+        let from = extensions.core().did();
+
+        extensions
+            .dispatch(
+                from,
+                Envelope::new("snark", Bytes::from_static(b"legacy-task")),
+            )
+            .await?;
+
+        assert!(extensions.core.handler("snark").is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_committed_transitions_execute_effects_in_commit_order() -> Result<()> {
         // Invariant: while A's effect is blocked, B cannot commit or emit; releasing A
         // produces the unique effect trace [A, B] for the protocol's state-transition order.

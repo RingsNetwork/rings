@@ -4,6 +4,16 @@
 
 ### Breaking changes
 
+- The unused Subring DHT model and `SubringInterface` are removed. Legacy Postcard tags remain
+  decode-compatible reserved slots so live entry and operation discriminants do not shift; old
+  Subring values are ignored at native and IndexedDB DHT storage boundaries and are never repaired
+  or replicated.
+- The repository-maintained Nova proof application is removed, including `rings-snark`,
+  `rings-snark-extension`, its examples, and the browser proof workbench. The last tagged Rings
+  source release containing that application is `v0.17.0`; the last published `rings-snark` crate
+  is `0.12.0`, while `rings-snark-extension` was not published on crates.io. Existing users can pin
+  or fork those versions. Rings does not select a replacement proof system and does not yank the
+  historical crate.
 - `rings_transport::core::transport::TransportMessage::Custom` now stores `bytes::Bytes` instead
   of `Vec<u8>`.
   Migrate owned vectors with `TransportMessage::Custom(data.into())`. Its wire encoding remains

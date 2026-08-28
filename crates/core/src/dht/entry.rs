@@ -6,7 +6,6 @@ use std::str::FromStr;
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::subring::Subring;
 use crate::algebra::JoinSemilattice;
 use crate::consts::ENTRY_DATA_MAX_LEN;
 use crate::dht::Did;
@@ -24,17 +23,20 @@ pub use crdt::DataTopicBuffer;
 pub use crdt::EntryCrdt;
 pub use crdt::EntryDot;
 pub use crdt::EntryVersion;
-pub use crdt::GSet;
 pub use crdt::RelayMessageSet;
-pub use crdt::SubringMemberSet;
 
 /// DHT storage entry categories.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EntryKind {
     /// Encoded data stored in DHT
     Data,
-    /// Finger table of a Subring
-    Subring,
+    /// Reserved legacy wire/storage slot for the removed Subring feature.
+    ///
+    /// This variant remains only so Postcard discriminant `1` and legacy
+    /// human-readable `"Subring"` values can be decoded without shifting the
+    /// live [`EntryKind::RelayMessage`] slot. All entry operations reject it.
+    #[serde(rename = "Subring")]
+    ReservedSubring,
     /// A relayed but unreached message, which should be stored on
     /// the successor of the destination Did.
     RelayMessage,
@@ -69,8 +71,12 @@ pub enum EntryOperation {
     /// If any element is already existed, move it to the end of the data vector.
     /// This operation will create an [`Entry`] if it does not exist.
     Touch(Entry),
-    /// Join subring.
-    JoinSubring(String, Did),
+    /// Reserved legacy wire slot for the removed `JoinSubring` operation.
+    ///
+    /// The fields preserve the old payload shape and Postcard discriminant
+    /// `3`. The operation is decode-only and every execution path rejects it.
+    #[serde(rename = "JoinSubring")]
+    UnsupportedJoinSubring(String, Did),
     /// Tombstone observed data or relay-message payloads in a two-phase set.
     ///
     /// The payload identifies the entry carrier and the values to
@@ -139,7 +145,6 @@ fn placement_belongs_to_entry_key(entry_key: Did, placement: Did, redundancy: u1
 ///
 /// The [`Did`] of an [`Entry`] is in the following format:
 /// * If kind value is [EntryKind::Data], it's sha1 of data topic.
-/// * If kind value is [EntryKind::Subring], it's sha1 of Subring name.
 /// * If kind value is [EntryKind::RelayMessage], it's the destination Did of
 ///   message plus 1 (to ensure that the message is sent to the successor of destination),
 ///   thus while destination node going online, it will sync message from its successor.
@@ -305,7 +310,7 @@ impl EntryOperation {
     /// Existing CRDT witnesses are preserved so forwarded operations keep the
     /// origin's dot/version instead of being reissued by every routing hop.
     pub fn stamped(self, actor: Did) -> Result<Self> {
-        Ok(match self {
+        let stamped = match self {
             EntryOperation::Overwrite(entry) => EntryOperation::Overwrite(
                 entry.ensure_stamp_after(actor, None, EntryStampKind::Overwrite)?,
             ),
@@ -319,24 +324,32 @@ impl EntryOperation {
                 None,
                 EntryStampKind::Delta,
             )?),
-            EntryOperation::JoinSubring(name, did) => EntryOperation::JoinSubring(name, did),
+            EntryOperation::UnsupportedJoinSubring(..) => {
+                return Err(Error::UnsupportedEntryOperation)
+            }
             EntryOperation::Tombstone(entry) => EntryOperation::Tombstone(entry),
             EntryOperation::CompactData(entry) => {
                 EntryOperation::CompactData(entry.ensure_overwrite_stamp_after(actor, None)?)
             }
-        })
+        };
+        stamped.ensure_supported()?;
+        Ok(stamped)
     }
 
     /// Extract the did of target Entry.
     pub fn did(&self) -> Result<Did> {
-        Ok(match self {
+        let entry = match self {
             EntryOperation::Overwrite(entry) => entry.did,
             EntryOperation::Extend(entry) => entry.did,
             EntryOperation::Touch(entry) => entry.did,
-            EntryOperation::JoinSubring(name, _) => Entry::gen_did(name)?,
+            EntryOperation::UnsupportedJoinSubring(..) => {
+                return Err(Error::UnsupportedEntryOperation)
+            }
             EntryOperation::Tombstone(entry) => entry.did,
             EntryOperation::CompactData(entry) => entry.did,
-        })
+        };
+        self.ensure_supported()?;
+        Ok(entry)
     }
 
     /// Extract the kind of target Entry.
@@ -345,7 +358,7 @@ impl EntryOperation {
             EntryOperation::Overwrite(entry) => entry.kind,
             EntryOperation::Extend(entry) => entry.kind,
             EntryOperation::Touch(entry) => entry.kind,
-            EntryOperation::JoinSubring(..) => EntryKind::Subring,
+            EntryOperation::UnsupportedJoinSubring(..) => EntryKind::ReservedSubring,
             EntryOperation::Tombstone(entry) => entry.kind,
             EntryOperation::CompactData(entry) => entry.kind,
         }
@@ -353,9 +366,21 @@ impl EntryOperation {
 
     /// Generate a target Entry when it is not existed.
     pub fn gen_default_entry(self) -> Result<Entry> {
+        self.ensure_supported()?;
+        Ok(Entry::new(self.did()?, vec![], self.kind()))
+    }
+
+    fn ensure_supported(&self) -> Result<()> {
         match self {
-            EntryOperation::JoinSubring(name, did) => Subring::new(&name, did)?.try_into(),
-            _ => Ok(Entry::new(self.did()?, vec![], self.kind())),
+            EntryOperation::UnsupportedJoinSubring(..) => Err(Error::UnsupportedEntryOperation),
+            EntryOperation::Overwrite(entry)
+            | EntryOperation::Extend(entry)
+            | EntryOperation::Touch(entry)
+            | EntryOperation::Tombstone(entry)
+            | EntryOperation::CompactData(entry) => {
+                entry.ensure_supported_kind()?;
+                Ok(())
+            }
         }
     }
 }
@@ -521,15 +546,6 @@ impl Entry {
         ))
     }
 
-    fn subring_member_set(&self) -> Result<SubringMemberSet> {
-        let subring: Subring = self.clone().try_into()?;
-        let mut members = SubringMemberSet::new();
-        for member in subring.finger.list().iter().flatten().copied() {
-            members.insert(member);
-        }
-        Ok(members)
-    }
-
     fn materialize_elements(
         did: Did,
         kind: EntryKind,
@@ -657,24 +673,15 @@ impl Entry {
             .collect()
     }
 
-    fn join_subring_entry(&self, other: &Self) -> Result<Self> {
-        let members = self.subring_member_set()?.join(other.subring_member_set()?);
-        let mut subring: Subring = self.clone().try_into()?;
-        for member in members.iter().copied() {
-            subring.finger.join(member);
-        }
-        let mut entry: Entry = subring.try_into()?;
-        entry.crdt.register = self.crdt.register.max(other.crdt.register);
-        Ok(entry)
-    }
-
     /// Merge two entries from the same replicated carrier.
     ///
     /// Law: for a fixed `(did, kind)` carrier, this is the state-based CRDT
     /// join. Data entries are bounded LWW element sets with an LWW overwrite
-    /// register; subring entries are grow-only member sets; relay entries are
-    /// two-phase sets whose remove side is carried by tombstones.
+    /// register; relay entries are two-phase sets whose remove side is carried
+    /// by tombstones. The reserved legacy Subring carrier is rejected.
     pub fn join(&self, other: Self) -> Result<Self> {
+        self.ensure_supported_kind()?;
+        other.ensure_supported_kind()?;
         self.validate_same_carrier(&other)?;
         match self.kind {
             EntryKind::Data => {
@@ -683,7 +690,7 @@ impl Entry {
             EntryKind::RelayMessage => {
                 Ok(self.materialize_relay_set(self.relay_set()?.join(other.relay_set()?)))
             }
-            EntryKind::Subring => self.join_subring_entry(&other),
+            EntryKind::ReservedSubring => Err(Error::UnsupportedEntryKind),
         }
     }
 
@@ -708,10 +715,6 @@ impl Entry {
         self.kind == EntryKind::Data
     }
 
-    fn is_subring_entry(&self) -> bool {
-        self.kind == EntryKind::Subring
-    }
-
     fn is_relay_entry(&self) -> bool {
         self.kind == EntryKind::RelayMessage
     }
@@ -722,6 +725,18 @@ impl Entry {
 
     fn same_key_as(&self, other: &Self) -> bool {
         self.did == other.did
+    }
+
+    /// Return whether this entry belongs to a live DHT storage model.
+    pub fn is_supported(&self) -> bool {
+        self.kind != EntryKind::ReservedSubring
+    }
+
+    fn ensure_supported_kind(&self) -> Result<()> {
+        match self.is_supported() {
+            true => Ok(()),
+            false => Err(Error::UnsupportedEntryKind),
+        }
     }
 
     /// Normalize an entry immediately before it is persisted.
@@ -741,7 +756,7 @@ impl Entry {
                 let set = self.relay_set()?;
                 Ok(self.materialize_relay_set(set))
             }
-            EntryKind::Subring => Ok(self),
+            EntryKind::ReservedSubring => Err(Error::UnsupportedEntryKind),
         }
     }
 
@@ -752,7 +767,7 @@ impl Entry {
             EntryOperation::Overwrite(entry) => self.overwrite(entry, actor),
             EntryOperation::Extend(entry) => self.extend(entry, actor),
             EntryOperation::Touch(entry) => self.touch(entry, actor),
-            EntryOperation::JoinSubring(_, did) => self.join_subring(did),
+            EntryOperation::UnsupportedJoinSubring(..) => Err(Error::UnsupportedEntryOperation),
             EntryOperation::Tombstone(entry) => self.tombstone(entry),
             EntryOperation::CompactData(entry) => self.compact_data(entry, actor),
         }
@@ -767,6 +782,8 @@ impl Entry {
     ///
     /// The handler of [EntryOperation::Overwrite].
     pub fn overwrite(&self, other: Self, actor: Did) -> Result<Self> {
+        self.ensure_supported_kind()?;
+        other.ensure_supported_kind()?;
         if !self.is_data_entry() {
             return Err(Error::EntryNotOverwritable);
         }
@@ -780,6 +797,8 @@ impl Entry {
     /// This method is used to extend data to a Data kind [`Entry`].
     /// The handler of [EntryOperation::Extend].
     pub fn extend(&self, other: Self, actor: Did) -> Result<Self> {
+        self.ensure_supported_kind()?;
+        other.ensure_supported_kind()?;
         if !self.is_data_entry() {
             return Err(Error::EntryNotAppendable);
         }
@@ -794,6 +813,8 @@ impl Entry {
     /// If any element is already existed, move it to the end of the data vector.
     /// The handler of [EntryOperation::Touch].
     pub fn touch(&self, other: Self, actor: Did) -> Result<Self> {
+        self.ensure_supported_kind()?;
+        other.ensure_supported_kind()?;
         if !self.is_data_entry() {
             return Err(Error::EntryNotAppendable);
         }
@@ -804,25 +825,14 @@ impl Entry {
         )?)
     }
 
-    /// This method is used to join a subring.
-    /// The handler of [EntryOperation::JoinSubring].
-    pub fn join_subring(&self, did: Did) -> Result<Self> {
-        if !self.is_subring_entry() {
-            return Err(Error::EntryNotJoinable);
-        }
-
-        let mut subring: Subring = self.clone().try_into()?;
-        subring.finger.join(did);
-        let other: Entry = subring.try_into()?;
-        self.join(other)
-    }
-
     /// Tombstone observed data or relay-message payloads.
     ///
     /// Pre: `self` and `other` are the same data or relay-message carrier.
     /// Post: every removed payload is represented by an add-dot tombstone, so
     /// future joins with stale add replicas cannot resurrect it.
     pub fn tombstone(&self, other: Self) -> Result<Self> {
+        self.ensure_supported_kind()?;
+        other.ensure_supported_kind()?;
         if !self.is_data_entry() && !self.is_relay_entry() {
             return Err(Error::EntryNotTombstonable);
         }
@@ -855,7 +865,7 @@ impl Entry {
                 }
                 Ok(self.materialize_relay_set(set))
             }
-            EntryKind::Subring => Err(Error::EntryNotTombstonable),
+            EntryKind::ReservedSubring => Err(Error::UnsupportedEntryKind),
         }
     }
 
@@ -866,6 +876,8 @@ impl Entry {
     /// under the greatest observed register floor, and older tombstone metadata
     /// is pruned by that floor.
     pub fn compact_data(&self, removals: Self, actor: Did) -> Result<Self> {
+        self.ensure_supported_kind()?;
+        removals.ensure_supported_kind()?;
         match self.is_data_entry() {
             true => self.compact_data_entry(removals, actor),
             false => Err(Error::EntryNotOverwritable),

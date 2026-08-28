@@ -18,7 +18,6 @@ futures = "0.3"
 gloo-timers = { version = "0.3", features = ["futures"] }
 js-sys = "=0.3.98"
 rings-node = { path = "../crates/node", default-features = false, features = ["browser"] }
-rings-snark-extension = { path = "../extension/snark", default-features = false, features = ["browser"] }
 rings-webview = { path = "../crates/webview", features = ["browser"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
