@@ -1,9 +1,10 @@
 //! Shared imperative TCP duplex pump.
 
 use bytes::Bytes;
+use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
-use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
 use super::duplex::TcpDuplexState;
@@ -36,25 +37,27 @@ pub(super) trait TcpDuplexEffects: Send {
 /// Invariant: socket-read openness and socket-write openness are independent affine capabilities.
 /// Preservation: EOF consumes only the read capability, `Shutdown` consumes only the write
 /// capability, and a remote terminal consumes both without echoing another terminal frame.
-pub(super) async fn pump_tcp_duplex<E>(
-    stream: TcpStream,
+pub(super) async fn pump_tcp_duplex<S, E>(
+    stream: S,
     inbound: mpsc::Receiver<TcpInbound>,
     effects: &mut E,
 ) where
+    S: AsyncRead + AsyncWrite + Unpin,
     E: TcpDuplexEffects,
 {
     pump_tcp_duplex_with_idle(stream, inbound, effects, RELAY_IDLE_TIMEOUT).await;
 }
 
-async fn pump_tcp_duplex_with_idle<E>(
-    stream: TcpStream,
+async fn pump_tcp_duplex_with_idle<S, E>(
+    stream: S,
     mut inbound: mpsc::Receiver<TcpInbound>,
     effects: &mut E,
     idle_timeout: std::time::Duration,
 ) where
+    S: AsyncRead + AsyncWrite + Unpin,
     E: TcpDuplexEffects,
 {
-    let (mut read, mut write) = stream.into_split();
+    let (mut read, mut write) = tokio::io::split(stream);
     let mut read_buf = vec![0_u8; TCP_BUF];
     let mut state = TcpDuplexState::open();
     let idle = tokio::time::sleep(idle_timeout);
@@ -148,6 +151,7 @@ mod tests {
     use std::time::Duration;
 
     use tokio::net::TcpListener;
+    use tokio::net::TcpStream;
     use tokio::sync::Notify;
 
     use super::*;
@@ -200,6 +204,42 @@ mod tests {
         let client = TcpStream::connect(address).await.map_err(test_io_error)?;
         let (server, _) = listener.accept().await.map_err(test_io_error)?;
         Ok((client, server))
+    }
+
+    #[tokio::test]
+    async fn test_shared_pump_accepts_a_runtime_neutral_duplex_stream() -> Result<()> {
+        let (mut client, gateway) = tokio::io::duplex(128);
+        let (inbound_tx, inbound_rx) = mpsc::channel(1);
+        let recorded = Arc::new(RecordedEffects::default());
+        let task_recorded = Arc::clone(&recorded);
+        let pump = tokio::spawn(async move {
+            let mut route = RecordingRoute {
+                effects: task_recorded,
+            };
+            pump_tcp_duplex(gateway, inbound_rx, &mut route).await;
+        });
+
+        client.write_all(b"generic").await.map_err(test_io_error)?;
+        client.shutdown().await.map_err(test_io_error)?;
+        tokio::time::timeout(Duration::from_secs(1), recorded.wait_for_shutdown())
+            .await
+            .map_err(|_| {
+                Error::ExtensionError("duplex stream did not observe EOF".to_string())
+            })??;
+        inbound_tx
+            .send(TcpInbound::Close)
+            .await
+            .map_err(|error| Error::ExtensionError(error.to_string()))?;
+        tokio::time::timeout(Duration::from_secs(1), pump)
+            .await
+            .map_err(|_| Error::ExtensionError("duplex stream pump did not stop".to_string()))?
+            .map_err(|error| Error::ExtensionError(error.to_string()))?;
+
+        let payloads = lock(&recorded.payloads)?;
+        assert!(payloads.iter().any(
+            |payload| matches!(payload, OnionTcpPayload::Data { bytes } if bytes.as_ref() == b"generic")
+        ));
+        Ok(())
     }
 
     #[tokio::test]

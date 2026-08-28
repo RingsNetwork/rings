@@ -45,6 +45,18 @@ impl Client {
         }
     }
 
+    /// Creates a client with a caller-configured HTTP transport.
+    ///
+    /// Native gateway callers use this to pin DNS results to already-admitted underlay routes and
+    /// to reject redirects to destinations that have not passed the same admission boundary.
+    #[cfg(all(feature = "std", not(target_family = "wasm")))]
+    pub fn with_http_client(endpoint_url: &str, client: HttpClient) -> Self {
+        Self {
+            client,
+            endpoint_url: endpoint_url.to_string(),
+        }
+    }
+
     /// Sends a typed JSON-RPC request and decodes the typed response body.
     pub async fn call_method<T>(&self, method: Method, req: &impl Serialize) -> Result<T>
     where T: DeserializeOwned {

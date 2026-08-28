@@ -40,6 +40,8 @@ RINGS_FFI_REQUIRE_LIBRARY=1 pytest examples/ffi/tests
 ```
 
 `crates/node/include/rings.h` is the crate-owned FFI header consumed by the
-Python example. The Python tests create two FFI providers and connect them with
-the raw offer/answer/accept RPC path, so the FFI example is not only a nodeInfo
-smoke test.
+Python, Swift, and Kotlin/JNA examples. The Python tests create two FFI providers
+and connect them with the raw offer/answer/accept RPC path. The desktop Swift and
+Kotlin smoke tests retain two distinct signer callbacks and verify response/free
+and provider-destroy ownership against the same deterministic C fixture. See the
+[desktop FFI guide](ffi/README.md) for their build and test commands.

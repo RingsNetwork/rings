@@ -31,6 +31,11 @@ pub enum Error {
     #[error("WebRTC error: {0}")]
     Webrtc(#[from] webrtc::error::Error),
 
+    #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
+    /// The host failed to install underlay exclusions for remote ICE candidates.
+    #[error(transparent)]
+    UnderlayCandidateAdmission(#[from] crate::connections::UnderlayCandidateAdmissionError),
+
     #[cfg(all(feature = "web-sys-webrtc", target_family = "wasm"))]
     /// WebSysWebRTC error: {}
     #[error("WebSysWebRTC error: {}", dump_js_value(.0))]

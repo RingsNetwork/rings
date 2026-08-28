@@ -7,11 +7,16 @@ mod builder;
 pub mod callback;
 pub(crate) mod transport;
 
+use std::net::IpAddr;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::RwLock;
 
 pub use builder::SwarmBuilder;
+#[cfg(not(target_family = "wasm"))]
+use rings_transport::connections::UnderlayCandidateAdmission;
+#[cfg(not(target_family = "wasm"))]
+use rings_transport::connections::UnderlayCandidateAdmissionError;
 
 use self::callback::InnerSwarmCallback;
 use crate::dht::Did;
@@ -170,6 +175,42 @@ impl Swarm {
     /// List DIDs whose direct WebRTC transport connection is active.
     pub fn connected_peer_dids(&self) -> Vec<Did> {
         self.transport.get_connection_ids()
+    }
+
+    /// Return remote IPs advertised by every physical WebRTC transport, including pending ones.
+    ///
+    /// Native packet gateways use these destinations for OpenVPN-style host-route exclusions so
+    /// Rings underlay packets cannot recurse into the gateway capture route. Pending transports
+    /// are included because candidate checks begin before a connection becomes routable.
+    pub async fn underlay_remote_ips(&self) -> Vec<IpAddr> {
+        self.transport.underlay_remote_ips()
+    }
+
+    /// Install or clear the native host policy that admits remote ICE candidates.
+    ///
+    /// Policy installation is an asynchronous handshake barrier: when it returns, older remote
+    /// descriptions have finished and newer ones cannot start ICE checks without policy approval.
+    #[cfg(not(target_family = "wasm"))]
+    pub async fn set_underlay_candidate_admission(
+        &self,
+        admission: Option<Arc<dyn UnderlayCandidateAdmission>>,
+    ) {
+        self.transport
+            .set_underlay_candidate_admission(admission)
+            .await;
+    }
+
+    /// Admit native signaling/bootstrap targets through the installed underlay policy.
+    ///
+    /// Packet gateways use the same monotonic host-route gate as remote ICE candidate handling,
+    /// so control traffic cannot recurse through the captured data plane. Without an installed
+    /// policy this method is a no-op.
+    #[cfg(not(target_family = "wasm"))]
+    pub async fn admit_underlay_targets(
+        &self,
+        targets: &[IpAddr],
+    ) -> std::result::Result<(), UnderlayCandidateAdmissionError> {
+        self.transport.admit_underlay_targets(targets).await
     }
 
     /// Return local measurement counters for `peer`, if observed.

@@ -397,7 +397,7 @@ async fn drain_peer(
             if let Some(hook) = test_hook.as_ref() {
                 hook.before_send(&payload).await;
             }
-            let send_result = scope.send(peer, payload).await;
+            let send_result = scope.send_direct(peer, payload).await;
             match completion {
                 Some(completion) => {
                     let _ = completion.send(send_result);
@@ -441,7 +441,7 @@ async fn drain_peer(
                 if let Some(hook) = test_hook.as_ref() {
                     hook.before_cover();
                 }
-                if let Err(error) = scope.send(peer, cover).await {
+                if let Err(error) = scope.send_direct(peer, cover).await {
                     tracing::debug!(%peer, ?error, "onion link-cover send failed");
                 }
             }

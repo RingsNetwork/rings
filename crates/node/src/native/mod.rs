@@ -4,3 +4,5 @@ pub mod cli;
 pub mod config;
 /// Native JSON-RPC endpoint server.
 pub mod endpoint;
+/// Foreground native TUN gateway supervision.
+pub mod gateway;

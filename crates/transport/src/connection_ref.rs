@@ -1,5 +1,6 @@
 //! This module contains the [ConnectionRef] struct.
 
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::Weak;
 
@@ -162,6 +163,12 @@ where
             return Vec::new();
         };
         c.get_stats().await
+    }
+
+    fn underlay_remote_ips(&self) -> Vec<IpAddr> {
+        self.upgrade()
+            .map(|connection| connection.underlay_remote_ips())
+            .unwrap_or_default()
     }
 
     async fn webrtc_create_offer(&self) -> Result<Self::Sdp> {

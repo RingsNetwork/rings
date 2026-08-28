@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::net::IpAddr;
 use std::sync::atomic::AtomicBool;
@@ -5,6 +6,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -59,6 +61,7 @@ use crate::pool::Pool;
 use crate::webrtc_config::WebrtcUdpPortRange;
 
 mod send_runtime;
+mod underlay;
 
 use send_runtime::native_send_runtime;
 use send_runtime::poll_once_while_guarded;
@@ -68,6 +71,12 @@ use send_runtime::run_irrevocable_send_with_timeout;
 use send_runtime::run_native_close_task;
 use send_runtime::run_send_with_retirement;
 use send_runtime::NativeRetirementFence;
+use underlay::admission_policy;
+use underlay::replace_admission;
+use underlay::shared_admission;
+use underlay::SharedUnderlayCandidateAdmission;
+pub use underlay::UnderlayCandidateAdmission;
+pub use underlay::UnderlayCandidateAdmissionError;
 
 const WEBRTC_WAIT_FOR_DATA_CHANNEL_OPEN_TIMEOUT: u8 = 8; // seconds
 const WEBRTC_GATHER_TIMEOUT: u8 = 60; // seconds
@@ -103,6 +112,16 @@ fn sdp_candidate_count(sdp: &str) -> usize {
     sdp.lines()
         .filter(|line| line.starts_with("a=candidate:"))
         .count()
+}
+
+fn sdp_candidate_ips(sdp: &str) -> Vec<IpAddr> {
+    sdp.lines()
+        .filter_map(|line| line.strip_prefix("a=candidate:"))
+        .filter_map(|candidate| candidate.split_whitespace().nth(4))
+        .filter_map(|address| address.parse::<IpAddr>().ok())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn external_address_candidates(external_address: Option<&str>) -> Vec<String> {
@@ -316,6 +335,8 @@ pub struct WebrtcConnection {
     cancel_token: CancellationToken,
     retirement_fence: NativeRetirementFence,
     sdp_extra_host_candidates: Vec<String>,
+    candidate_admission: SharedUnderlayCandidateAdmission,
+    remote_candidate_ips: RwLock<Vec<IpAddr>>,
     /// Negotiated SCTP `max_message_size` (RFC 8841), parsed from the remote SDP at handshake.
     /// `0` means not yet negotiated. webrtc-rs exposes no getter, so we track it ourselves.
     remote_max_message_size: Arc<AtomicUsize>,
@@ -343,6 +364,7 @@ pub struct WebrtcTransport {
     udp_port_range: Option<WebrtcUdpPortRange>,
     pool: Pool<WebrtcConnection>,
     inbound_frames: Arc<InboundFrameCapacity>,
+    candidate_admission: SharedUnderlayCandidateAdmission,
 }
 
 impl WebrtcConnection {
@@ -352,6 +374,7 @@ impl WebrtcConnection {
         webrtc_data_channel_state_notifier: Notifier,
         connection_state: ConnectionStateCell,
         sdp_extra_host_candidates: Vec<String>,
+        candidate_admission: SharedUnderlayCandidateAdmission,
     ) -> Self {
         let cancel_token = CancellationToken::new();
         let retirement_fence =
@@ -364,6 +387,8 @@ impl WebrtcConnection {
             cancel_token,
             retirement_fence,
             sdp_extra_host_candidates,
+            candidate_admission,
+            remote_candidate_ips: RwLock::new(Vec::new()),
             remote_max_message_size: Arc::new(AtomicUsize::new(0)),
             physical_close_completed: Arc::new(AtomicBool::new(false)),
         }
@@ -377,6 +402,20 @@ impl WebrtcConnection {
 
     fn request_close(&self) {
         self.retirement_fence.request();
+    }
+
+    fn replace_remote_candidate_ips(&self, candidates: Vec<IpAddr>) {
+        match self.remote_candidate_ips.write() {
+            Ok(mut stored) => *stored = candidates,
+            Err(poisoned) => *poisoned.into_inner() = candidates,
+        }
+    }
+
+    fn remote_candidate_ips(&self) -> Vec<IpAddr> {
+        match self.remote_candidate_ips.read() {
+            Ok(stored) => stored.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
     }
 
     async fn webrtc_gather(
@@ -444,7 +483,34 @@ impl WebrtcTransport {
             udp_port_range,
             pool: Pool::new(),
             inbound_frames: Arc::new(InboundFrameCapacity::new()),
+            candidate_admission: shared_admission(),
         }
+    }
+
+    /// Replace the host policy that admits remote ICE candidate IPs before connectivity checks.
+    ///
+    /// The write waits for any remote descriptions already being applied, creating a barrier that
+    /// lets a newly enabled gateway take a complete candidate snapshot before capture starts.
+    pub async fn set_underlay_candidate_admission(
+        &self,
+        admission: Option<Arc<dyn UnderlayCandidateAdmission>>,
+    ) {
+        replace_admission(&self.candidate_admission, admission).await;
+    }
+
+    /// Admit non-ICE underlay targets through the same policy used by remote SDP application.
+    ///
+    /// The read guard prevents policy replacement until admission completes. When no native
+    /// gateway policy is installed this is deliberately a no-op.
+    pub async fn admit_underlay_targets(
+        &self,
+        targets: &[IpAddr],
+    ) -> std::result::Result<(), UnderlayCandidateAdmissionError> {
+        let admission = admission_policy(&self.candidate_admission).await;
+        if let Some(policy) = admission.as_ref() {
+            policy.admit(targets).await?;
+        }
+        Ok(())
     }
 }
 
@@ -553,6 +619,10 @@ impl ConnectionInterface for WebrtcConnection {
             .collect()
     }
 
+    fn underlay_remote_ips(&self) -> Vec<IpAddr> {
+        self.remote_candidate_ips()
+    }
+
     fn webrtc_connection_state(&self) -> WebrtcConnectionState {
         self.connection_state.snapshot().webrtc()
     }
@@ -585,8 +655,15 @@ impl ConnectionInterface for WebrtcConnection {
         // path (create_answer + set_local_description + gather) has succeeded, so a failure midway
         // does not leave a partially-updated connection carrying a stale negotiated size.
         let negotiated_max_message_size = effective_max_message_size(&offer);
+        let remote_candidate_ips = sdp_candidate_ips(&offer);
         let offer = RTCSessionDescription::offer(offer)?;
+        let admission = admission_policy(&self.candidate_admission).await;
+        if let Some(policy) = admission.as_ref() {
+            policy.admit(&remote_candidate_ips).await?;
+        }
         self.webrtc_conn.set_remote_description(offer).await?;
+        self.replace_remote_candidate_ips(remote_candidate_ips);
+        drop(admission);
 
         let answer = self.webrtc_conn.create_answer(None).await?;
         let gathering_complete_promise = self.webrtc_conn.gathering_complete_promise().await;
@@ -603,8 +680,15 @@ impl ConnectionInterface for WebrtcConnection {
     async fn webrtc_accept_answer(&self, answer: Self::Sdp) -> Result<()> {
         tracing::debug!("webrtc_accept_answer, answer: {answer:?}");
         let negotiated_max_message_size = effective_max_message_size(&answer);
+        let remote_candidate_ips = sdp_candidate_ips(&answer);
         let answer = RTCSessionDescription::answer(answer)?;
+        let admission = admission_policy(&self.candidate_admission).await;
+        if let Some(policy) = admission.as_ref() {
+            policy.admit(&remote_candidate_ips).await?;
+        }
         self.webrtc_conn.set_remote_description(answer).await?;
+        self.replace_remote_candidate_ips(remote_candidate_ips);
+        drop(admission);
         self.remote_max_message_size
             .store(negotiated_max_message_size, Ordering::SeqCst);
         Ok(())
@@ -841,6 +925,7 @@ impl TransportInterface for WebrtcTransport {
             webrtc_data_channel_state_notifier,
             connection_state,
             sdp_extra_host_candidates,
+            Arc::clone(&self.candidate_admission),
         );
 
         self.pool.safely_insert(cid, conn).await

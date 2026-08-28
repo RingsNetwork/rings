@@ -41,6 +41,7 @@ node = [
     "lazy_static",
     "axum/ws",
     "rings-core/default",
+    "dep:rings-gateway",
     "rings-rpc/std",
     "rings-derive/default",
     "rings-transport/native-webrtc",
@@ -108,7 +109,7 @@ home = { version = "0.5.5", optional = true }
 lazy_static = { version = "1.4.0", optional = true }
 pin-project = { version = "1", optional = true }
 reqwest = { version = "0.12.22", optional = true, default-features = false }
-tokio = { version = "1.13.0", features = ["io-std", "io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"], optional = true }
+tokio = { version = "1.13.0", features = ["io-std", "io-util", "macros", "net", "rt", "rt-multi-thread", "signal", "sync", "time"], optional = true }
 tokio-util = { version = "0.7.8", optional = true }
 tower-http = { version = "0.6.11", features = ["cors"], optional = true }
 
@@ -135,8 +136,21 @@ web-sys = { version = "0.3.64", optional = true, features = [
     "AbortController",
     "AbortSignal",
 ] }
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+rings-gateway = { workspace = true, optional = true }
+
 [dev-dependencies]
+smoltcp = { version = "0.14.0", default-features = false, features = [
+    "std",
+    "medium-ip",
+    "proto-ipv4",
+    "socket-tcp",
+] }
 wasm-bindgen-test = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc = "0.2"
 
 [build-dependencies]
 cbindgen = { version = "0.29.4", optional = true }

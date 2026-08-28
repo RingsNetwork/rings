@@ -15,6 +15,8 @@ use axum::routing::get;
 use axum::routing::post;
 use axum::Router;
 use jsonrpc_core::MetaIoHandler;
+use rings_gateway::GatewayStatus;
+use rings_gateway::GatewayStatusHandle;
 use rings_rpc::protos::rings_node::NodeInfoResponse;
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
@@ -44,11 +46,27 @@ pub struct StatusState {
     processor: Arc<Processor>,
 }
 
+/// Gateway status endpoint state.
+#[derive(Clone)]
+pub struct GatewayStatusState {
+    status: GatewayStatusHandle,
+}
+
 struct ExternalRpcMiddleware;
 struct InternalRpcMiddleware;
 
 /// Run a web server to handle jsonrpc request locally
 pub async fn run_internal_api(port: u16, processor: Arc<Processor>) -> anyhow::Result<()> {
+    run_internal_api_with_gateway(port, processor, None).await
+}
+
+/// Run the local JSON-RPC server with an optional foreground-gateway status endpoint.
+pub async fn run_internal_api_with_gateway(
+    port: u16,
+    processor: Arc<Processor>,
+    gateway: Option<GatewayStatusHandle>,
+) -> anyhow::Result<()> {
+    let gateway_configured = gateway.is_some();
     let binding_addr = SocketAddr::from(([127, 0, 0, 1], port));
 
     let jsonrpc_handler = MetaIoHandler::with_middleware(InternalRpcMiddleware);
@@ -63,19 +81,29 @@ pub async fn run_internal_api(port: u16, processor: Arc<Processor>) -> anyhow::R
 
     let status_state = Arc::new(StatusState { processor });
 
-    let axum_make_service = Router::new()
+    let mut router = Router::new()
         .route(
             "/",
             post(jsonrpc_io_handler).with_state(jsonrpc_state.clone()),
         )
         .route("/ws", get(ws_handler).with_state(ws_state))
-        .route("/status", get(status_handler).with_state(status_state))
+        .route("/status", get(status_handler).with_state(status_state));
+    if let Some(status) = gateway {
+        router = router.route(
+            "/gateway/status",
+            get(gateway_status_handler).with_state(Arc::new(GatewayStatusState { status })),
+        );
+    }
+    let axum_make_service = router
         .layer(CorsLayer::permissive())
         .layer(axum::middleware::from_fn(node_info_header))
         .into_make_service_with_connect_info::<SocketAddr>();
 
     println!("JSON-RPC endpoint: http://{binding_addr}");
     println!("WebSocket endpoint: http://{binding_addr}/ws");
+    if gateway_configured {
+        println!("Gateway status endpoint: http://{binding_addr}/gateway/status");
+    }
     let listener = TcpListener::bind(binding_addr).await?;
     axum::serve(listener, axum_make_service).await?;
     Ok(())
@@ -83,6 +111,15 @@ pub async fn run_internal_api(port: u16, processor: Arc<Processor>) -> anyhow::R
 
 /// Run a web server to handle jsonrpc request from external
 pub async fn run_external_api(addr: String, processor: Arc<Processor>) -> anyhow::Result<()> {
+    run_external_api_with_gateway(addr, processor, None).await
+}
+
+/// Run the external JSON-RPC server with an optional foreground-gateway status endpoint.
+pub async fn run_external_api_with_gateway(
+    addr: String,
+    processor: Arc<Processor>,
+    gateway: Option<GatewayStatusHandle>,
+) -> anyhow::Result<()> {
     let binding_addr: SocketAddr = addr.parse()?;
 
     let jsonrpc_handler = MetaIoHandler::with_middleware(ExternalRpcMiddleware);
@@ -93,12 +130,19 @@ pub async fn run_external_api(addr: String, processor: Arc<Processor>) -> anyhow
 
     let status_state = Arc::new(StatusState { processor });
 
-    let axum_make_service = Router::new()
+    let mut router = Router::new()
         .route(
             "/",
             post(jsonrpc_io_handler).with_state(jsonrpc_state.clone()),
         )
-        .route("/status", get(status_handler).with_state(status_state))
+        .route("/status", get(status_handler).with_state(status_state));
+    if let Some(status) = gateway {
+        router = router.route(
+            "/gateway/status",
+            get(gateway_status_handler).with_state(Arc::new(GatewayStatusState { status })),
+        );
+    }
+    let axum_make_service = router
         .layer(CorsLayer::permissive())
         .layer(axum::middleware::from_fn(node_info_header))
         .into_make_service_with_connect_info::<SocketAddr>();
@@ -143,6 +187,12 @@ async fn status_handler(
         .await
         .map_err(|_| HttpError::Internal)?;
     Ok(axum::Json(info))
+}
+
+async fn gateway_status_handler(
+    State(state): State<Arc<GatewayStatusState>>,
+) -> axum::Json<GatewayStatus> {
+    axum::Json(state.status.snapshot())
 }
 
 /// JSON response struct

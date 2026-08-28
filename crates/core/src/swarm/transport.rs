@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::net::IpAddr;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -71,6 +72,7 @@ pub(crate) use storage_sync::StorageSyncBatch;
 #[cfg(all(test, not(target_family = "wasm")))]
 pub(crate) use storage_sync::StorageSyncBatchStep;
 mod timeouts;
+mod underlay;
 pub(crate) use self::connection::AdmittedConnection;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::delivery::SendCompletionOutcome;
@@ -932,6 +934,14 @@ impl SwarmConnection {
     /// `max_message_size`. Used to size payload chunks so each wrapped chunk stays within the limit.
     pub fn max_message_size(&self) -> usize {
         self.connection.max_message_size()
+    }
+
+    /// Return every currently known remote ICE-candidate IP.
+    ///
+    /// Candidate checks happen before nomination, so the gateway must bypass all candidates to
+    /// avoid preventing WebRTC from ever selecting a pair.
+    pub async fn underlay_remote_ips(&self) -> Vec<IpAddr> {
+        self.connection.underlay_remote_ips()
     }
 }
 

@@ -157,6 +157,16 @@ jobs:
             -D clippy::unimplemented \
             -D clippy::indexing_slicing
 
+      - name: Verify native gateway dependencies are absent from browser builds
+        run: |
+          set -euo pipefail
+          if cargo tree -p rings-node --target wasm32-unknown-unknown --no-default-features --features browser -e features \
+            | grep -E 'rings-gateway|route_manager|tun-rs'
+          then
+            echo "native gateway dependency leaked into the WASM browser graph" >&2
+            exit 1
+          fi
+
       - name: Run clippy for node browser
         run: cargo clippy -p rings-node --features browser_default --no-deps --no-default-features --target=wasm32-unknown-unknown --tests -- -D warnings
 
@@ -263,6 +273,63 @@ jobs:
       - name: Run tests
         run: cargo test --release --all --all-targets --verbose
 
+      - name: Exercise captured TCP through a two-hop Onion public exit
+        run: |
+          cargo test --release -p rings-node \
+            processor::tests::test_gateway::captured_tcp_reaches_public_http_only_through_two_hop_onion_route \
+            -- --ignored --exact --nocapture
+
+      - name: Exercise privileged Linux TUN and route cleanup
+        run: |
+          set -euo pipefail
+          gateway_test="$(
+            cargo test --release -p rings-gateway --lib --no-run --message-format=json |
+              python3 -c 'import json, sys
+          for line in sys.stdin:
+              event = json.loads(line)
+              target = event.get("target", {})
+              if event.get("reason") == "compiler-artifact" and target.get("name") == "rings_gateway" and event.get("profile", {}).get("test"):
+                  print(event["executable"])'
+          )"
+          test -n "$gateway_test"
+          sudo "$gateway_test" \
+            bindings::native::tests::privileged_native_tunnel_establishes_and_cleans_up \
+            --ignored --exact --nocapture
+
+      - name: Exercise privileged Linux helper, fd transfer, and disconnect cleanup
+        run: |
+          set -euo pipefail
+          helper_test="$(
+            cargo test --release -p rings-gateway --test unix_helper --no-run --message-format=json |
+              python3 -c 'import json, sys
+          for line in sys.stdin:
+              event = json.loads(line)
+              target = event.get("target", {})
+              if event.get("reason") == "compiler-artifact" and target.get("name") == "unix_helper" and event.get("profile", {}).get("test"):
+                  print(event["executable"])'
+          )"
+          test -n "$helper_test"
+          sudo "$helper_test" \
+            privileged_helper_transfers_tun_and_cleans_normal_and_disconnected_leases \
+            --ignored --exact --nocapture
+
+      - name: Exercise kernel TCP through Linux TUN and two-hop Onion exit
+        run: |
+          set -euo pipefail
+          node_test="$(
+            cargo test --release -p rings-node --lib --no-run --message-format=json |
+              python3 -c 'import json, sys
+          for line in sys.stdin:
+              event = json.loads(line)
+              target = event.get("target", {})
+              if event.get("reason") == "compiler-artifact" and target.get("name") == "rings_node" and event.get("profile", {}).get("test"):
+                  print(event["executable"])'
+          )"
+          test -n "$node_test"
+          sudo "$node_test" \
+            processor::tests::test_gateway::real_linux_tun_tcp_reaches_public_http_through_two_hop_onion_route \
+            --ignored --exact --nocapture
+
   build_ffi:
     name: Build and test for examples
     timeout-minutes: 20
@@ -297,8 +364,107 @@ jobs:
           RINGS_FFI_REQUIRE_LIBRARY: "1"
         run: pytest examples/ffi/tests
 
+      - name: Run Swift FFI desktop smoke test
+        if: runner.os == 'macOS'
+        env:
+          RINGS_FFI_REQUIRE_LIBRARY: "1"
+        run: bash examples/ffi/swift/test.sh "$PWD/target/debug/librings_node.dylib"
+
+      - name: Exercise privileged macOS utun and route cleanup
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          gateway_test="$(
+            cargo test -p rings-gateway --lib --no-run --message-format=json |
+              python3 -c 'import json, sys
+          for line in sys.stdin:
+              event = json.loads(line)
+              target = event.get("target", {})
+              if event.get("reason") == "compiler-artifact" and target.get("name") == "rings_gateway" and event.get("profile", {}).get("test"):
+                  print(event["executable"])'
+          )"
+          test -n "$gateway_test"
+          sudo "$gateway_test" \
+            bindings::native::tests::privileged_native_tunnel_establishes_and_cleans_up \
+            --ignored --exact --nocapture
+
+          helper_test="$(
+            cargo test -p rings-gateway --test unix_helper --no-run --message-format=json |
+              python3 -c 'import json, sys
+          for line in sys.stdin:
+              event = json.loads(line)
+              target = event.get("target", {})
+              if event.get("reason") == "compiler-artifact" and target.get("name") == "unix_helper" and event.get("profile", {}).get("test"):
+                  print(event["executable"])'
+          )"
+          test -n "$helper_test"
+          sudo "$helper_test" \
+            privileged_helper_transfers_tun_and_cleans_normal_and_disconnected_leases \
+            --ignored --exact --nocapture
+
+      - name: Setup Java for Kotlin FFI example
+        if: runner.os == 'Linux'
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Gradle for Kotlin FFI example
+        if: runner.os == 'Linux'
+        uses: gradle/actions/setup-gradle@748248ddd2a24f49513d8f472f81c3a07d4d50e1 # v4.4.4
+        with:
+          gradle-version: "7.6.4"
+
+      - name: Run Kotlin/JNA FFI desktop smoke test
+        if: runner.os == 'Linux'
+        env:
+          RINGS_FFI_LIBRARY: ${{ github.workspace }}/target/debug/librings_node.so
+          RINGS_FFI_REQUIRE_LIBRARY: "1"
+        run: gradle -p examples/ffi/kotlin test --no-daemon
+
       # - name: Smoke test native
       #   run: cargo run -p rings-native-example
+
+  gateway_windows:
+    name: Check Windows Wintun gateway
+    timeout-minutes: 20
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@a37ce9120846195fa4ece8f58b268e6043cb2f26 # v3
+
+      - name: Setup Rust toolchain
+        shell: bash
+        run: |
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup default "$RUST_TOOLCHAIN"
+          rustup show
+
+      - name: Check shared data plane and Wintun binding
+        run: cargo check -p rings-gateway --all-targets
+
+      - name: Check native node gateway integration
+        run: cargo check -p rings-node --no-default-features --features node
+
+      - name: Download the signed Wintun runtime
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP "wintun-0.14.1.zip"
+          $destination = Join-Path $env:RUNNER_TEMP "wintun-0.14.1"
+          Invoke-WebRequest -Uri "https://www.wintun.net/builds/wintun-0.14.1.zip" -OutFile $archive
+          $actual = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          $expected = "07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51"
+          if ($actual -ne $expected) {
+            throw "Wintun archive checksum mismatch: expected $expected, got $actual"
+          }
+          Expand-Archive -LiteralPath $archive -DestinationPath $destination
+          $dll = Join-Path $destination "wintun\bin\amd64\wintun.dll"
+          if (-not (Test-Path -LiteralPath $dll -PathType Leaf)) {
+            throw "Wintun DLL was not found at $dll"
+          }
+          "RINGS_GATEWAY_WINTUN_DLL=$dll" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Exercise Wintun and Windows route cleanup
+        run: cargo test -p rings-gateway --lib bindings::native::tests::privileged_native_tunnel_establishes_and_cleans_up -- --ignored --exact --nocapture
 
   rustfmt_and_clippy:
     name: Check rustfmt style && run clippy
