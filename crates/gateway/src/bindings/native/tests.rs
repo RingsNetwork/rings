@@ -182,6 +182,28 @@ fn bypass_inherits_the_most_specific_baseline_route() {
     );
 }
 
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[test]
+fn bypass_inherits_the_lowest_metric_route_at_the_same_prefix() {
+    let expensive = Route::new("0.0.0.0".parse().expect("default"), 0)
+        .with_gateway("192.0.2.1".parse().expect("expensive gateway"))
+        .with_metric(50);
+    let preferred = Route::new("0.0.0.0".parse().expect("default"), 0)
+        .with_gateway("198.51.100.1".parse().expect("preferred gateway"))
+        .with_metric(5);
+    let inherited = inherit_baseline_route(
+        &[expensive, preferred],
+        "203.0.113.7/32".parse().expect("host route"),
+    )
+    .expect("baseline route");
+
+    assert_eq!(
+        inherited.gateway(),
+        Some("198.51.100.1".parse().expect("preferred gateway"))
+    );
+    assert_eq!(inherited.metric(), Some(5));
+}
+
 #[test]
 fn exact_capture_route_cannot_also_be_an_underlay_bypass() {
     let target = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));

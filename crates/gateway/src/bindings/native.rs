@@ -1,5 +1,6 @@
 //! Shared desktop TUN/Wintun device, route transaction, and stale-state lease.
 
+use std::cmp::Reverse;
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::ErrorKind;
@@ -578,7 +579,7 @@ fn inherit_baseline_route(baseline: &[Route], network: IpNet) -> Result<Route, G
     let original = baseline
         .iter()
         .filter(|route| route.contains(&target))
-        .max_by_key(|route| route.prefix())
+        .max_by_key(|route| baseline_route_rank(route))
         .ok_or_else(|| GatewayError::Platform {
             operation: "resolve-bypass-route",
             message: format!("no baseline route reaches {target}"),
@@ -622,6 +623,20 @@ fn inherit_baseline_route(baseline: &[Route], network: IpNet) -> Result<Route, G
         });
     }
     Ok(route)
+}
+
+fn baseline_route_rank(route: &Route) -> (u8, Reverse<u32>) {
+    (route.prefix(), Reverse(baseline_route_metric(route)))
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+fn baseline_route_metric(route: &Route) -> u32 {
+    route.metric().unwrap_or(u32::MAX)
+}
+
+#[cfg(target_os = "macos")]
+fn baseline_route_metric(_route: &Route) -> u32 {
+    0
 }
 
 fn capture_route(network: IpNet, interface_index: u32) -> Route {
