@@ -12,6 +12,7 @@ use crate::consts::TRANSPORT_CUSTOM_OVERHEAD;
 use crate::dht::chord::PeerRing;
 use crate::dht::chord::PeerRingAction;
 use crate::dht::did::BiasId;
+use crate::dht::entry::Entry;
 use crate::dht::entry::PlacedEntry;
 use crate::dht::entry::SyncedEntryAck;
 use crate::dht::ChordStorageSync;
@@ -121,7 +122,7 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
         }
 
         let mut data = Vec::<PlacedEntry>::new();
-        let all_items = self.supported_storage_entries().await?;
+        let all_items: Vec<(String, Entry)> = self.storage.get_all().await?;
 
         // Pre: new_successor is the successor adopted by stabilization.
         // Post S1: forall key in local_before, local_after[key] =
@@ -166,7 +167,7 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
         // canonical local value, so confirms_local_value is false and delete
         // is skipped.
         for ack in acks {
-            let Some(local_entry) = self.supported_storage_entry(ack.key).await? else {
+            let Some(local_entry) = self.storage.get(&ack.key.to_string()).await? else {
                 continue;
             };
             if ack.confirms_local_value(&local_entry)? {
@@ -180,7 +181,7 @@ impl ChordStorageSync<PeerRingAction> for PeerRing {
 
 impl PeerRing {
     async fn copy_entries_to_observed_virtual_storage_owners(&self) -> Result<PeerRingAction> {
-        let all_items = self.supported_storage_entries().await?;
+        let all_items: Vec<(String, Entry)> = self.storage.get_all().await?;
         let mut by_target =
             std::collections::BTreeMap::<StorageSyncDestination, Vec<PlacedEntry>>::new();
 

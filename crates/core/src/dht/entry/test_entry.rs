@@ -69,8 +69,8 @@ fn assert_entry_keeps_recent_overflow(
     Ok(())
 }
 
-fn reserved_subring_entry() -> Entry {
-    Entry::new(Did::from(7u32), Vec::new(), EntryKind::ReservedSubring)
+fn relay_entry() -> Entry {
+    Entry::new(Did::from(7u32), Vec::new(), EntryKind::RelayMessage)
 }
 
 fn actor() -> Did {
@@ -345,12 +345,12 @@ fn test_overwrite_replaces_data_for_same_data_entry() -> Result<()> {
 
 #[test]
 fn test_overwrite_rejects_non_data_entry() -> Result<()> {
-    let entry = reserved_subring_entry();
+    let entry = relay_entry();
     let other = entry.clone();
 
     assert!(matches!(
         entry.overwrite(other, actor()),
-        Err(Error::UnsupportedEntryKind)
+        Err(Error::EntryNotOverwritable)
     ));
     Ok(())
 }
@@ -437,12 +437,12 @@ fn test_extend_caps_incoming_payloads_larger_than_max_len() -> Result<()> {
 
 #[test]
 fn test_extend_rejects_non_data_entry() -> Result<()> {
-    let entry = reserved_subring_entry();
+    let entry = relay_entry();
     let other = entry.clone();
 
     assert!(matches!(
         entry.extend(other, actor()),
-        Err(Error::UnsupportedEntryKind)
+        Err(Error::EntryNotAppendable)
     ));
     Ok(())
 }
@@ -647,93 +647,12 @@ fn test_delayed_data_compaction_preserves_newer_register_floor() -> Result<()> {
 }
 
 #[test]
-fn test_tombstone_rejects_non_data_or_relay_entry() -> Result<()> {
-    let entry = reserved_subring_entry();
-    let other = entry.clone();
-
-    assert!(matches!(
-        entry.tombstone(other),
-        Err(Error::UnsupportedEntryKind)
-    ));
-    Ok(())
-}
-
-#[test]
 fn test_touch_caps_incoming_payloads_larger_than_max_len() -> Result<()> {
     let overflow = 3;
     let (incoming, incoming_count) = overflowing_data_entry("topic", overflow)?;
     let entry = data_entry("topic", "base")?;
     let updated = entry.touch(incoming, actor())?;
     assert_entry_keeps_recent_overflow(&updated, incoming_count, overflow)
-}
-
-#[test]
-fn test_entry_kind_wire_slots_preserve_live_postcard_discriminants() -> Result<()> {
-    let cases = [
-        (EntryKind::Data, 0u32, vec![0u8]),
-        (EntryKind::ReservedSubring, 1u32, vec![1u8]),
-        (EntryKind::RelayMessage, 2u32, vec![2u8]),
-    ];
-
-    for (kind, expected_variant, expected_bytes) in cases {
-        let encoded = rings_codec::serialize(&kind).map_err(Error::CodecSerialize)?;
-        assert_eq!(encoded, expected_bytes);
-        assert_eq!(
-            rings_codec::deserialize_enum_variant(&encoded).map_err(Error::CodecDeserialize)?,
-            expected_variant
-        );
-    }
-    Ok(())
-}
-
-#[test]
-fn test_entry_operation_wire_slots_preserve_live_postcard_discriminants() -> Result<()> {
-    let entry = data_entry("topic", "value")?;
-    let cases = [
-        (EntryOperation::Overwrite(entry.clone()), 0u32),
-        (EntryOperation::Extend(entry.clone()), 1u32),
-        (EntryOperation::Touch(entry.clone()), 2u32),
-        (
-            EntryOperation::UnsupportedJoinSubring("legacy".to_string(), Did::from(9u32)),
-            3u32,
-        ),
-        (EntryOperation::Tombstone(entry.clone()), 4u32),
-        (EntryOperation::CompactData(entry), 5u32),
-    ];
-
-    for (operation, expected_variant) in cases {
-        let encoded = rings_codec::serialize(&operation).map_err(Error::CodecSerialize)?;
-        assert_eq!(
-            rings_codec::deserialize_enum_variant(&encoded).map_err(Error::CodecDeserialize)?,
-            expected_variant
-        );
-    }
-    Ok(())
-}
-
-#[test]
-fn test_legacy_subring_slots_decode_but_cannot_execute_or_persist() -> Result<()> {
-    let decoded: EntryKind = rings_codec::deserialize(&[1u8]).map_err(Error::CodecDeserialize)?;
-    assert_eq!(decoded, EntryKind::ReservedSubring);
-    assert_eq!(
-        serde_json::to_string(&decoded).map_err(Error::Serialize)?,
-        "\"Subring\""
-    );
-    assert!(matches!(
-        reserved_subring_entry().try_into_storage_entry(),
-        Err(Error::UnsupportedEntryKind)
-    ));
-
-    let operation = EntryOperation::UnsupportedJoinSubring("legacy".to_string(), Did::from(9u32));
-    let encoded = rings_codec::serialize(&operation).map_err(Error::CodecSerialize)?;
-    let decoded_operation: EntryOperation =
-        rings_codec::deserialize(&encoded).map_err(Error::CodecDeserialize)?;
-    assert_eq!(decoded_operation, operation);
-    assert!(matches!(
-        decoded_operation.stamped(actor()),
-        Err(Error::UnsupportedEntryOperation)
-    ));
-    Ok(())
 }
 
 #[test]

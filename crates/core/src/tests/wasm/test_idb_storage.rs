@@ -6,10 +6,6 @@ use serde_json::Value as JsonValue;
 use wasm_bindgen::JsValue;
 use wasm_bindgen_test::wasm_bindgen_test;
 
-use crate::dht::entry::Entry;
-use crate::dht::entry::EntryKind;
-use crate::dht::Did;
-use crate::dht::PeerRing;
 use crate::storage::idb::next_visit_time_after;
 use crate::storage::idb::IdbStorage;
 use crate::storage::KvStorageInterface;
@@ -30,40 +26,6 @@ async fn create_db_instance(cap: u32) -> IdbStorage {
 async fn create_kv_db<V>(cap: u32) -> Box<dyn KvStorageInterface<V>>
 where V: DeserializeOwned + Serialize + Sized {
     Box::new(create_db_instance(cap).await)
-}
-
-#[wasm_bindgen_test]
-async fn test_indexed_db_legacy_subring_entry_is_ignored_at_dht_boundary() {
-    let storage_name = uuid::Uuid::new_v4().to_string();
-    let storage = IdbStorage::new_with_cap_and_name(4, &storage_name)
-        .await
-        .unwrap();
-    let key = Did::from(10u32);
-    let legacy = Entry::new(key, Vec::new(), EntryKind::ReservedSubring);
-    storage.put(&key.to_string(), &legacy).await.unwrap();
-    drop(storage);
-
-    let reopened = Box::new(
-        IdbStorage::new_with_cap_and_name(4, &storage_name)
-            .await
-            .unwrap(),
-    );
-    let node = PeerRing::new_with_storage(Did::from(0u32), 3, reopened);
-
-    assert_eq!(node.supported_storage_entry(key).await.unwrap(), None);
-    assert!(node.supported_storage_entries().await.unwrap().is_empty());
-
-    let live = Entry::new(key, vec!["replacement".into()], EntryKind::Data);
-    let normalized = live.clone().try_into_storage_entry().unwrap();
-    assert_eq!(
-        node.join_storage_entry(key, live).await.unwrap(),
-        normalized.clone()
-    );
-    assert_eq!(
-        node.supported_storage_entry(key).await.unwrap(),
-        Some(normalized)
-    );
-    node.storage.clear().await.unwrap();
 }
 
 #[wasm_bindgen_test]

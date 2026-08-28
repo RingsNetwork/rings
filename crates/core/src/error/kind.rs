@@ -121,18 +121,6 @@ pub enum Error {
     #[error("The type of Entry is not allowed to be appended")]
     EntryNotAppendable,
 
-    /// The decoded entry kind occupies a reserved compatibility slot.
-    #[error("The entry kind is reserved and unsupported")]
-    UnsupportedEntryKind,
-
-    /// The decoded entry operation occupies a reserved compatibility slot.
-    #[error("The entry operation is reserved and unsupported")]
-    UnsupportedEntryOperation,
-
-    /// The type of Entry is not allowed to be tombstoned
-    #[error("The type of Entry is not allowed to be tombstoned")]
-    EntryNotTombstonable,
-
     /// Entry dot index {index} is out of bounds
     #[error("Entry dot index {index} is out of bounds")]
     EntryDotIndexOutOfBounds {

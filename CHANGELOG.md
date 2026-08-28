@@ -4,10 +4,12 @@
 
 ### Breaking changes
 
-- The unused Subring DHT model and `SubringInterface` are removed. Legacy Postcard tags remain
-  decode-compatible reserved slots so live entry and operation discriminants do not shift; old
-  Subring values are ignored at native and IndexedDB DHT storage boundaries and are never repaired
-  or replicated.
+- The unused Subring DHT model and `SubringInterface` are removed. This shifts the Postcard
+  discriminants for `EntryKind::RelayMessage` and the operations after the former
+  `EntryOperation::JoinSubring` slot. Mixed-version networking with nodes running `v0.17.x` or
+  earlier is unsupported. Native and browser persistent DHT storage must be wiped before upgrading:
+  old Subring entries can otherwise decode as relay messages, while old relay-message entries fail
+  to decode from native Sled storage.
 - The repository-maintained Nova proof application is removed, including `rings-snark`,
   `rings-snark-extension`, its examples, and the browser proof workbench. The last tagged Rings
   source release containing that application is `v0.17.0`; the last published `rings-snark` crate
