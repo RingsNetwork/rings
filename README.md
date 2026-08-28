@@ -25,9 +25,8 @@ resistance for permissionless public membership.
 
 At the application layer, Rings gives developers a namespace-scoped protocol runtime:
 write a pure state machine, attach an interpreter shell, and run it over a decentralized
-overlay. Built-in protocols already cover peer service relay and fold-scheme zkSNARK
-proving; the roadmap extends this into a fully server-less network layer and privacy
-layer.
+overlay. Built-in protocols cover peer service relay and echo; the roadmap extends
+this into a fully server-less network layer and privacy layer.
 
 ## Whitepaper
 
@@ -126,8 +125,8 @@ rings --help
 
 The browser and extension frontend lives in [`frontend`](./frontend). It is the
 user-facing Rings web surface for the landing guide, browser node console,
-onion proxy WorkBench, wallet login, SDP/HTTP connectivity, topology, proof
-workbench, and custom messages.
+onion proxy WorkBench, wallet login, SDP/HTTP connectivity, topology, and custom
+messages.
 
 ## Examples
 
@@ -137,8 +136,6 @@ Runnable examples live in [`examples/`](./examples):
 |---|---|
 | [`native`](./examples/native) | A minimal native node registering a custom namespaced protocol |
 | [`relay`](./examples/relay) | TCP & UDP tunnels to a peer's service over the overlay (`tcp.rs` / `udp.rs`) |
-| [`snark`](./examples/snark) | Fold-scheme zkSNARK proving / verification |
-| [`proof-demo`](./examples/proof-demo) | A browser zk-proof app (Yew / Trunk) |
 | [`dweb`](./examples/dweb) | A decentralized-web app (Yew / Trunk) |
 | [`ffi`](./examples/ffi) | Driving a node over the C FFI |
 
@@ -162,6 +159,11 @@ In the browser a protocol can be a JS handler instead: `provider.on(namespace, i
 handler)`. See [`examples/relay`](./examples/relay) and
 [`crates/node/src/extension`](./crates/node/src/extension).
 
+Proof systems use the same user-owned protocol boundary: register a private namespace, encode
+versioned proof requests and results as application payloads, and perform proving or verification
+in the protocol interpreter. Rings authenticates and routes the envelope but does not select,
+execute, or maintain a proving backend.
+
 ## Resources
 
 | Resource | Link | Notes |
@@ -169,7 +171,7 @@ handler)`. See [`examples/relay`](./examples/relay) and
 | Rings Whitepaper | [PDF](./papers/rings.pdf), [LaTeX source](./papers/rings.tex), [citation](#whitepaper) | Canonical protocol paper |
 | Security model | [SECURITY.md](./SECURITY.md) | Overlay assumptions, deployment models, and Sybil boundary |
 | Browser frontend | [`frontend`](./frontend) | Landing guide, web app, and extension workflow |
-| Examples | [`examples/`](./examples) | Native, dweb, proof, relay, snark, and FFI examples |
+| Examples | [`examples/`](./examples) | Native, dweb, relay, and FFI examples |
 
 ## Components
 
@@ -183,8 +185,6 @@ handler)`. See [`examples/relay`](./examples/relay) and
 
 * transport: Native WebRTC transport and `web_sys`-based browser transport.
 
-* snark: Fold-scheme zkSNARK proving and verification protocol.
-
 ## Architecture
 
 Rings is layered so that **every layer is decentralized — there is no server in the data
@@ -193,10 +193,10 @@ claim; see [SECURITY.md](./SECURITY.md). Each layer maps directly to a crate/mod
 
 ```text
 ┌──────────────────────────────────────────────────────────────────────┐
-│  Applications   dWeb · zk-proof demo · relay/tunnel · your own app     │
+│  Applications   dWeb · relay/tunnel · your own app                     │
 ├──────────────────────────────────────────────────────────────────────┤
-│  Protocols      built-ins: relay (tcp/udp tunnels), SNARK, echo —      │  node::extension::protocols
-│  (namespaced)   plus any user Protocol, addressed by namespace         │  crates/snark
+│  Protocols      built-ins: relay (tcp/udp tunnels), echo —             │  node::extension::protocols
+│  (namespaced)   plus any user Protocol, addressed by namespace         │
 ├──────────────────────────────────────────────────────────────────────┤
 │  Extension      pure `Protocol::step` → `Effect` → `Interpret` shell   │  node::extension::ext
 │  runtime        over a namespace-scoped `Scope` (send / self-inject)   │
@@ -226,7 +226,7 @@ claim; see [SECURITY.md](./SECURITY.md). Each layer maps directly to a crate/mod
   a protocol never touches it, and a protocol cannot reach another namespace.
 - **Protocols** are addressed by namespace. Built-ins include a **relay** that tunnels local
   TCP/UDP sockets to a peer's service across the overlay (server-less tunneling / peer exit), and
-  **SNARK** (fold-scheme zkSNARK) proving/verification. Register your own with
+  an echo protocol used by examples and tests. Register your own with
   `provider.register_protocol(..)` (Rust) or `provider.on(namespace, ..)` (JS).
 
 Where this is heading — a fully server-less, sovereign **network layer** and **privacy layer** —

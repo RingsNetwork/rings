@@ -69,9 +69,8 @@ fn assert_entry_keeps_recent_overflow(
     Ok(())
 }
 
-fn subring_entry(name: &str) -> Result<Entry> {
-    let creator = Entry::gen_did("creator")?;
-    Subring::new(name, creator)?.try_into()
+fn relay_entry() -> Entry {
+    Entry::new(Did::from(7u32), Vec::new(), EntryKind::RelayMessage)
 }
 
 fn actor() -> Did {
@@ -130,19 +129,6 @@ fn entry_dot_for_value(entry: &Entry, value: &str) -> Result<EntryDot> {
 
 fn relay_delta(did: Did, value: &str, counter: u32) -> Result<Entry> {
     Entry::new(did, vec![encoded(value)?], EntryKind::RelayMessage).stamp_delta(version(counter))
-}
-
-#[test]
-fn test_gset_satisfies_join_semilattice_laws() {
-    let mut a = GSet::new();
-    a.insert(Did::from(1u32));
-    let mut b = GSet::new();
-    b.insert(Did::from(2u32));
-    let mut ab = GSet::new();
-    ab.insert(Did::from(1u32));
-    ab.insert(Did::from(2u32));
-
-    assert_join_semilattice_laws(&[GSet::new(), a, b, ab]);
 }
 
 #[test]
@@ -359,7 +345,7 @@ fn test_overwrite_replaces_data_for_same_data_entry() -> Result<()> {
 
 #[test]
 fn test_overwrite_rejects_non_data_entry() -> Result<()> {
-    let entry = subring_entry("ring")?;
+    let entry = relay_entry();
     let other = entry.clone();
 
     assert!(matches!(
@@ -451,7 +437,7 @@ fn test_extend_caps_incoming_payloads_larger_than_max_len() -> Result<()> {
 
 #[test]
 fn test_extend_rejects_non_data_entry() -> Result<()> {
-    let entry = subring_entry("ring")?;
+    let entry = relay_entry();
     let other = entry.clone();
 
     assert!(matches!(
@@ -661,46 +647,12 @@ fn test_delayed_data_compaction_preserves_newer_register_floor() -> Result<()> {
 }
 
 #[test]
-fn test_tombstone_rejects_non_data_or_relay_entry() -> Result<()> {
-    let entry = subring_entry("ring")?;
-    let other = entry.clone();
-
-    assert!(matches!(
-        entry.tombstone(other),
-        Err(Error::EntryNotTombstonable)
-    ));
-    Ok(())
-}
-
-#[test]
 fn test_touch_caps_incoming_payloads_larger_than_max_len() -> Result<()> {
     let overflow = 3;
     let (incoming, incoming_count) = overflowing_data_entry("topic", overflow)?;
     let entry = data_entry("topic", "base")?;
     let updated = entry.touch(incoming, actor())?;
     assert_entry_keeps_recent_overflow(&updated, incoming_count, overflow)
-}
-
-#[test]
-fn test_join_subring_adds_member_to_subring_entry() -> Result<()> {
-    let entry = subring_entry("ring")?;
-    let member = Entry::gen_did("member")?;
-    let updated = entry.join_subring(member)?;
-    let subring = Subring::try_from(updated)?;
-    assert_eq!(subring.finger.first(), Some(member));
-    Ok(())
-}
-
-#[test]
-fn test_join_subring_rejects_non_subring_entry() -> Result<()> {
-    let entry = data_entry("topic", "value")?;
-    let member = Entry::gen_did("member")?;
-
-    assert!(matches!(
-        entry.join_subring(member),
-        Err(Error::EntryNotJoinable)
-    ));
-    Ok(())
 }
 
 #[test]

@@ -8,7 +8,7 @@ publish = false
 # Standalone wasm/Yew app (build with Trunk). Excluded from the root workspace (own
 # `[workspace]`) to avoid feature-unification dragging `rings-node`'s native (`node`)
 # features into the wasm build; a committed `Cargo.lock` pins deps to wasm-buildable
-# versions. dweb does not need SNARK, so it uses the lighter `browser` feature.
+# versions. dweb uses the browser-only node feature set.
 [workspace]
 
 [dependencies]

@@ -50,8 +50,3 @@ node_modules/
 .playwright-cli/
 output/
 frontend/.generated/
-
-# snark
-.!*
-*.circom
-docs

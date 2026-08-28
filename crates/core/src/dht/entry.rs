@@ -6,7 +6,6 @@ use std::str::FromStr;
 use serde::Deserialize;
 use serde::Serialize;
 
-use super::subring::Subring;
 use crate::algebra::JoinSemilattice;
 use crate::consts::ENTRY_DATA_MAX_LEN;
 use crate::dht::Did;
@@ -24,17 +23,13 @@ pub use crdt::DataTopicBuffer;
 pub use crdt::EntryCrdt;
 pub use crdt::EntryDot;
 pub use crdt::EntryVersion;
-pub use crdt::GSet;
 pub use crdt::RelayMessageSet;
-pub use crdt::SubringMemberSet;
 
 /// DHT storage entry categories.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EntryKind {
     /// Encoded data stored in DHT
     Data,
-    /// Finger table of a Subring
-    Subring,
     /// A relayed but unreached message, which should be stored on
     /// the successor of the destination Did.
     RelayMessage,
@@ -69,8 +64,6 @@ pub enum EntryOperation {
     /// If any element is already existed, move it to the end of the data vector.
     /// This operation will create an [`Entry`] if it does not exist.
     Touch(Entry),
-    /// Join subring.
-    JoinSubring(String, Did),
     /// Tombstone observed data or relay-message payloads in a two-phase set.
     ///
     /// The payload identifies the entry carrier and the values to
@@ -139,7 +132,6 @@ fn placement_belongs_to_entry_key(entry_key: Did, placement: Did, redundancy: u1
 ///
 /// The [`Did`] of an [`Entry`] is in the following format:
 /// * If kind value is [EntryKind::Data], it's sha1 of data topic.
-/// * If kind value is [EntryKind::Subring], it's sha1 of Subring name.
 /// * If kind value is [EntryKind::RelayMessage], it's the destination Did of
 ///   message plus 1 (to ensure that the message is sent to the successor of destination),
 ///   thus while destination node going online, it will sync message from its successor.
@@ -319,7 +311,6 @@ impl EntryOperation {
                 None,
                 EntryStampKind::Delta,
             )?),
-            EntryOperation::JoinSubring(name, did) => EntryOperation::JoinSubring(name, did),
             EntryOperation::Tombstone(entry) => EntryOperation::Tombstone(entry),
             EntryOperation::CompactData(entry) => {
                 EntryOperation::CompactData(entry.ensure_overwrite_stamp_after(actor, None)?)
@@ -333,7 +324,6 @@ impl EntryOperation {
             EntryOperation::Overwrite(entry) => entry.did,
             EntryOperation::Extend(entry) => entry.did,
             EntryOperation::Touch(entry) => entry.did,
-            EntryOperation::JoinSubring(name, _) => Entry::gen_did(name)?,
             EntryOperation::Tombstone(entry) => entry.did,
             EntryOperation::CompactData(entry) => entry.did,
         })
@@ -345,7 +335,6 @@ impl EntryOperation {
             EntryOperation::Overwrite(entry) => entry.kind,
             EntryOperation::Extend(entry) => entry.kind,
             EntryOperation::Touch(entry) => entry.kind,
-            EntryOperation::JoinSubring(..) => EntryKind::Subring,
             EntryOperation::Tombstone(entry) => entry.kind,
             EntryOperation::CompactData(entry) => entry.kind,
         }
@@ -353,10 +342,7 @@ impl EntryOperation {
 
     /// Generate a target Entry when it is not existed.
     pub fn gen_default_entry(self) -> Result<Entry> {
-        match self {
-            EntryOperation::JoinSubring(name, did) => Subring::new(&name, did)?.try_into(),
-            _ => Ok(Entry::new(self.did()?, vec![], self.kind())),
-        }
+        Ok(Entry::new(self.did()?, vec![], self.kind()))
     }
 }
 
@@ -521,15 +507,6 @@ impl Entry {
         ))
     }
 
-    fn subring_member_set(&self) -> Result<SubringMemberSet> {
-        let subring: Subring = self.clone().try_into()?;
-        let mut members = SubringMemberSet::new();
-        for member in subring.finger.list().iter().flatten().copied() {
-            members.insert(member);
-        }
-        Ok(members)
-    }
-
     fn materialize_elements(
         did: Did,
         kind: EntryKind,
@@ -657,23 +634,12 @@ impl Entry {
             .collect()
     }
 
-    fn join_subring_entry(&self, other: &Self) -> Result<Self> {
-        let members = self.subring_member_set()?.join(other.subring_member_set()?);
-        let mut subring: Subring = self.clone().try_into()?;
-        for member in members.iter().copied() {
-            subring.finger.join(member);
-        }
-        let mut entry: Entry = subring.try_into()?;
-        entry.crdt.register = self.crdt.register.max(other.crdt.register);
-        Ok(entry)
-    }
-
     /// Merge two entries from the same replicated carrier.
     ///
     /// Law: for a fixed `(did, kind)` carrier, this is the state-based CRDT
     /// join. Data entries are bounded LWW element sets with an LWW overwrite
-    /// register; subring entries are grow-only member sets; relay entries are
-    /// two-phase sets whose remove side is carried by tombstones.
+    /// register; relay entries are two-phase sets whose remove side is carried
+    /// by tombstones.
     pub fn join(&self, other: Self) -> Result<Self> {
         self.validate_same_carrier(&other)?;
         match self.kind {
@@ -683,7 +649,6 @@ impl Entry {
             EntryKind::RelayMessage => {
                 Ok(self.materialize_relay_set(self.relay_set()?.join(other.relay_set()?)))
             }
-            EntryKind::Subring => self.join_subring_entry(&other),
         }
     }
 
@@ -706,14 +671,6 @@ impl Entry {
 
     fn is_data_entry(&self) -> bool {
         self.kind == EntryKind::Data
-    }
-
-    fn is_subring_entry(&self) -> bool {
-        self.kind == EntryKind::Subring
-    }
-
-    fn is_relay_entry(&self) -> bool {
-        self.kind == EntryKind::RelayMessage
     }
 
     fn same_kind_as(&self, other: &Self) -> bool {
@@ -741,7 +698,6 @@ impl Entry {
                 let set = self.relay_set()?;
                 Ok(self.materialize_relay_set(set))
             }
-            EntryKind::Subring => Ok(self),
         }
     }
 
@@ -752,7 +708,6 @@ impl Entry {
             EntryOperation::Overwrite(entry) => self.overwrite(entry, actor),
             EntryOperation::Extend(entry) => self.extend(entry, actor),
             EntryOperation::Touch(entry) => self.touch(entry, actor),
-            EntryOperation::JoinSubring(_, did) => self.join_subring(did),
             EntryOperation::Tombstone(entry) => self.tombstone(entry),
             EntryOperation::CompactData(entry) => self.compact_data(entry, actor),
         }
@@ -804,28 +759,12 @@ impl Entry {
         )?)
     }
 
-    /// This method is used to join a subring.
-    /// The handler of [EntryOperation::JoinSubring].
-    pub fn join_subring(&self, did: Did) -> Result<Self> {
-        if !self.is_subring_entry() {
-            return Err(Error::EntryNotJoinable);
-        }
-
-        let mut subring: Subring = self.clone().try_into()?;
-        subring.finger.join(did);
-        let other: Entry = subring.try_into()?;
-        self.join(other)
-    }
-
     /// Tombstone observed data or relay-message payloads.
     ///
     /// Pre: `self` and `other` are the same data or relay-message carrier.
     /// Post: every removed payload is represented by an add-dot tombstone, so
     /// future joins with stale add replicas cannot resurrect it.
     pub fn tombstone(&self, other: Self) -> Result<Self> {
-        if !self.is_data_entry() && !self.is_relay_entry() {
-            return Err(Error::EntryNotTombstonable);
-        }
         self.validate_same_carrier(&other)?;
 
         let target_values = other.data.into_iter().collect::<BTreeSet<_>>();
@@ -855,7 +794,6 @@ impl Entry {
                 }
                 Ok(self.materialize_relay_set(set))
             }
-            EntryKind::Subring => Err(Error::EntryNotTombstonable),
         }
     }
 

@@ -1,2 +1,0 @@
-[alias]
-tex_doc = "rustdoc --lib -- --html-in-header crates/snark/docs/katex.html"

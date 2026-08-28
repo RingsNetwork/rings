@@ -1,4 +1,4 @@
-//! Workbench panels for onion proxy, proof, and custom messages.
+//! Workbench panels for onion proxy and custom messages.
 
 use std::cell::RefCell;
 use std::future::Future;
@@ -8,7 +8,6 @@ use std::time::Duration;
 use futures::future::Either;
 use futures::FutureExt;
 use gloo_timers::future::sleep;
-use rings_snark_extension::ProofResult;
 use wasm_bindgen::JsCast;
 use web_sys::Event;
 use web_sys::HtmlInputElement;
@@ -23,7 +22,6 @@ use crate::generation::GenerationClock;
 use crate::generation::GenerationToken;
 use crate::node::DemoNode;
 use crate::onion;
-use crate::proof;
 
 const ONION_ROUTE_TIMEOUT: Duration = Duration::from_secs(20);
 const ONION_REQUEST_TIMEOUT: Duration = Duration::from_secs(35);
@@ -323,7 +321,7 @@ fn onion_result_panel(state: &OnionProxyState<'_>) -> Html {
     html! {
         <div class="tool-block">
             <h3>{ "Result" }</h3>
-            <div class="proof-states">
+            <div class="metric-stack">
                 { metric("HTTP", (**state.response_status).clone()) }
             </div>
             { readonly_output("Route", (**state.route_result).clone(), "No route built") }
@@ -347,60 +345,6 @@ where
     match futures::future::select(operation, timer).await {
         Either::Left((result, _)) => result,
         Either::Right((_, _)) => Err(format!("{label} timed out")),
-    }
-}
-
-pub(crate) fn proof_panel(
-    prover_did: &UseStateHandle<String>,
-    r1cs_url: &UseStateHandle<String>,
-    wasm_url: &UseStateHandle<String>,
-    node_ref: Rc<RefCell<Option<DemoNode>>>,
-    status: UseStateHandle<String>,
-) -> Html {
-    let on_prove = {
-        let node_ref = node_ref.clone();
-        let prover_did = prover_did.clone();
-        let r1cs_url = r1cs_url.clone();
-        let wasm_url = wasm_url.clone();
-        let status = status.clone();
-        Callback::from(move |_| {
-            let Some(node) = node_ref.borrow().clone() else {
-                status.set("start the node first".to_string());
-                return;
-            };
-            let prover = (*prover_did).clone();
-            let r1cs = (*r1cs_url).clone();
-            let wasm = (*wasm_url).clone();
-            let status = status.clone();
-            status.set("offloading proof task".to_string());
-            wasm_bindgen_futures::spawn_local(async move {
-                match proof::run(node, prover, r1cs, wasm).await {
-                    Ok(result) => status.set(proof::result_label(result).to_string()),
-                    Err(error) => status.set(error),
-                }
-            });
-        })
-    };
-    html! {
-        <section class="feature-panel" id="proof">
-            <div class="section-heading">
-                <p class="eyebrow">{ "Proof demo" }</p>
-                <h2>{ "Offload and verify proof work" }</h2>
-            </div>
-            <div class="proof-grid">
-                <div class="tool-block">
-                    { text_input("Prover DID", prover_did.clone()) }
-                    { text_input("R1CS URL", r1cs_url.clone()) }
-                    { text_input("WASM URL", wasm_url.clone()) }
-                    <button onclick={on_prove}>{ "Generate proof" }</button>
-                </div>
-                <div class="proof-states">
-                    { metric("Verified", proof::result_label(ProofResult::Verified).to_string()) }
-                    { metric("Invalid", proof::result_label(ProofResult::Invalid).to_string()) }
-                    { metric("Pending", proof::result_label(ProofResult::Pending).to_string()) }
-                </div>
-            </div>
-        </section>
     }
 }
 

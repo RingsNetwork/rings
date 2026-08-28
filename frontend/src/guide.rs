@@ -170,8 +170,6 @@ fn examples_section() -> Html {
             <div class="landing-example-grid">
                 { landing_link_card("native", "Start here for a minimal native node. It shows wallet setup, node bootstrapping, and registration of a custom namespaced protocol without browser-specific APIs.", "https://github.com/RingsNetwork/rings/tree/master/examples/native") }
                 { landing_link_card("relay", "Open TCP and UDP tunnels through the overlay. This example is the practical path for exposing a peer service and carrying traffic without a public server hop.", "https://github.com/RingsNetwork/rings/tree/master/examples/relay") }
-                { landing_link_card("snark", "Run fold-scheme zkSNARK proving and verification over the Rings protocol model. It demonstrates how proof workloads fit beside ordinary peer messages.", "https://github.com/RingsNetwork/rings/tree/master/examples/snark") }
-                { landing_link_card("proof-demo", "Use the browser proof surface built with Yew and Trunk. It connects the frontend runtime to the proof flow so the browser can drive a live proving interaction.", "https://github.com/RingsNetwork/rings/tree/master/examples/proof-demo") }
                 { landing_link_card("dweb", "Explore the decentralized-web application shape. It demonstrates how application content can be addressed through Rings instead of relying on a conventional hosted backend.", "https://github.com/RingsNetwork/rings/tree/master/examples/dweb") }
                 { landing_link_card("ffi", "Drive a Rings node from another runtime through the C FFI. This is the integration point for embedding Rings into hosts that cannot call the Rust API directly.", "https://github.com/RingsNetwork/rings/tree/master/examples/ffi") }
             </div>
@@ -186,7 +184,7 @@ fn final_section(open_console: Callback<MouseEvent>) -> Html {
                 <p>{ "Frontend" }</p>
                 <h2>{ "Use the browser node for the live network surface." }</h2>
                 <span>
-                    { "Wallet login, SDP/HTTP connectivity, topology inspection, onion proxy requests, proof tools, and custom messages live here." }
+                    { "Wallet login, SDP/HTTP connectivity, topology inspection, onion proxy requests, and custom messages live here." }
                 </span>
             </div>
             <button class="landing-primary-action" type="button" onclick={open_console}>
@@ -212,20 +210,20 @@ const ARCHITECTURE_LAYERS: [ArchitectureLayer; 6] = [
         index: "01",
         label: "applications",
         role: "runs user-facing workflows.",
-        title: "dWeb, zk-proof demo, relay, custom apps",
+        title: "dWeb, relay, and custom apps",
         summary: "Apps run over the protocol layer instead of a hosted backend data path.",
-        detail: "Application surfaces are repository examples and browser node panels. They compose wallet login, dWeb content, proof workflows, relay tunnels, and custom protocol messages on top of the same peer runtime. The application layer should read as product-facing behavior: it chooses what to ask the network to do, while the lower layers keep addressing, routing, and transport concerns out of the UI code.",
-        surface: "frontend Node page, examples/dweb, examples/snark, examples/relay",
+        detail: "Application surfaces are repository examples and browser node panels. They compose wallet login, dWeb content, relay tunnels, and custom protocol messages on top of the same peer runtime. The application layer should read as product-facing behavior: it chooses what to ask the network to do, while the lower layers keep addressing, routing, and transport concerns out of the UI code.",
+        surface: "frontend Node page, examples/dweb, examples/relay",
         contract: "Application code addresses peers and namespaces; it does not own overlay routing or transport setup.",
     },
     ArchitectureLayer {
         index: "02",
         label: "protocols",
         role: "defines namespaced behavior.",
-        title: "relay, SNARK, echo, user namespaces",
-        summary: "Built-ins cover TCP/UDP relay and fold-scheme zkSNARK proving; user protocols are addressed by namespace.",
-        detail: "Protocols are registered behind stable namespaces. Built-in protocols cover relay and proving flows, while external applications can install their own protocol state machines without changing the overlay. This layer is the extension boundary: new behavior is added by registering a protocol and its interpreter, not by branching the node or adding a new transport path.",
-        surface: "protocol registry, relay handles, proof protocol, custom namespaces",
+        title: "relay, echo, and user namespaces",
+        summary: "Built-ins cover TCP/UDP relay and echo; user protocols are addressed by namespace.",
+        detail: "Protocols are registered behind stable namespaces. Built-in protocols cover relay and echo flows, while external applications can install their own protocol state machines without changing the overlay. This layer is the extension boundary: new behavior is added by registering a protocol and its interpreter, not by branching the node or adding a new transport path.",
+        surface: "protocol registry, relay handles, echo protocol, custom namespaces",
         contract: "Every inbound envelope is dispatched by namespace before it reaches application-specific logic.",
     },
     ArchitectureLayer {

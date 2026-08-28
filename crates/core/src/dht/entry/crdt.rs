@@ -6,7 +6,6 @@
 //! - `removes` is a two-phase tombstone set for observed data dots.
 //!
 //! Semilattice laws:
-//! - `GSet` join is set union.
 //! - `DataTopicBuffer` join is idempotent, commutative, and associative over
 //!   normalized LWW element sets.
 //! - `RelayMessageSet` join is idempotent, commutative, and associative over
@@ -125,38 +124,6 @@ impl EntryCrdt {
     }
 }
 
-/// Grow-only set used by subring membership.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct GSet<T: Ord> {
-    members: BTreeSet<T>,
-}
-
-impl<T: Ord> GSet<T> {
-    /// Construct an empty grow-only set.
-    pub fn new() -> Self {
-        Self {
-            members: BTreeSet::new(),
-        }
-    }
-
-    /// Insert one member.
-    pub fn insert(&mut self, member: T) {
-        self.members.insert(member);
-    }
-
-    /// Iterate over members in deterministic order.
-    pub fn iter(&self) -> impl Iterator<Item = &T> {
-        self.members.iter()
-    }
-}
-
-impl<T: Ord> JoinSemilattice for GSet<T> {
-    fn join(mut self, other: Self) -> Self {
-        self.members.extend(other.members);
-        self
-    }
-}
-
 /// Bounded LWW element set used by data topic buffers.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DataTopicBuffer {
@@ -221,6 +188,3 @@ impl JoinSemilattice for RelayMessageSet {
         Self::new(self.adds, self.removes)
     }
 }
-
-/// Grow-only subring membership CRDT.
-pub type SubringMemberSet = GSet<Did>;

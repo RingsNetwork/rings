@@ -44,7 +44,6 @@ impl ShellPage {
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(crate) enum Panel {
     Onion,
-    Proof,
     Custom,
 }
 
@@ -52,7 +51,6 @@ impl Panel {
     fn label(self) -> &'static str {
         match self {
             Self::Onion => "Onion Proxy",
-            Self::Proof => "Proof",
             Self::Custom => "Custom",
         }
     }
@@ -527,7 +525,7 @@ fn workspace_tabs(
 ) -> Html {
     html! {
         <nav class="workspace-tabs" aria-label="Node workspace">
-            { for [Panel::Onion, Panel::Proof, Panel::Custom].into_iter().map(|panel| {
+            { for [Panel::Onion, Panel::Custom].into_iter().map(|panel| {
                 let active_panel = active_panel.clone();
                 let class = if panel == active { "workspace-tab active" } else { "workspace-tab" };
                 let disabled = extension_mode && panel != Panel::Onion;

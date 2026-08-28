@@ -59,12 +59,7 @@ jobs:
         run: cargo install cargo-deny --version "$CARGO_DENY_VERSION" --locked
 
       - name: Check dependency policy
-        run: |
-          cargo deny --locked \
-            --exclude rings-snark \
-            --exclude rings-snark-example \
-            --exclude rings-snark-extension \
-            check -A unmatched-source advisories licenses bans sources
+        run: cargo deny --locked check -A unmatched-source advisories licenses bans sources
 
   miri_core:
     name: Miri core invariants
@@ -218,12 +213,6 @@ jobs:
             wasm-pack test --release --headless --chrome . -- --skip two_nodes_fetch_a_hosted_page
             wasm-pack test --release --headless --chrome . -- two_nodes_fetch_a_hosted_page --nocapture
           working-directory: ./examples/dweb
-
-      - name: Run proof-demo browser tests
-        uses: coactions/setup-xvfb@b6b4fcfb9f5a895edadc3bc76318fae0ac17c8b3 # v1
-        with:
-          run: wasm-pack test --release --headless --chrome
-          working-directory: ./examples/proof-demo
 
       - name: Run core browser tests
         uses: coactions/setup-xvfb@b6b4fcfb9f5a895edadc3bc76318fae0ac17c8b3 # v1

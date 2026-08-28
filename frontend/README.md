@@ -2,9 +2,9 @@
 
 Repository-level browser frontend for Rings. This replaces the historical
 browser connectivity example as the shared landing guide, web app, and
-browser-extension package. The standalone `dweb` and `proof-demo` surfaces remain
-conceptually separate; this frontend includes onion proxy, proof, and
-custom-message workbench panels for operating a browser node from one screen.
+browser-extension package. The standalone `dweb` surface remains conceptually
+separate; this frontend includes onion proxy and custom-message workbench panels
+for operating a browser node from one screen.
 
 The implementation is Rust/Yew. Browser APIs for WebCrypto, MetaMask, and Phantom
 are called from Rust through `js_sys` and `wasm_bindgen`; the core application has
@@ -34,7 +34,6 @@ Styles are split under `src/styles/` by responsibility:
 - Render connected peers as a circular topology.
 - Present a landing guide with links into the node console and GitHub.
 - Build HTTPS onion proxy routes and send HTTPS requests through onion exits.
-- Run the distributed SNARK proof workbench flow alongside the retained proof demo.
 - Register and send user custom namespace messages.
 
 ## Run as a Web App
@@ -44,10 +43,8 @@ cd frontend
 trunk serve --release true
 ```
 
-Then open the Trunk URL. The release profile avoids debug wasm-bindgen local
-limits from the proof stack while keeping the application source Rust/Yew-only.
-Use the guide as the landing page, then open the node console for connection,
-onion proxy, proof, and custom-message workflows.
+Then open the Trunk URL. Use the guide as the landing page, then open the node
+console for connection, onion proxy, and custom-message workflows.
 
 ## Package as a Chrome Extension
 

@@ -121,14 +121,6 @@ pub enum Error {
     #[error("The type of Entry is not allowed to be appended")]
     EntryNotAppendable,
 
-    /// The type of Entry is not allowed to be joined as a subring
-    #[error("The type of Entry is not allowed to be joined as a subring")]
-    EntryNotJoinable,
-
-    /// The type of Entry is not allowed to be tombstoned
-    #[error("The type of Entry is not allowed to be tombstoned")]
-    EntryNotTombstonable,
-
     /// Entry dot index {index} is out of bounds
     #[error("Entry dot index {index} is out of bounds")]
     EntryDotIndexOutOfBounds {
@@ -540,10 +532,6 @@ pub enum Error {
     /// Invalid peer type
     #[error("Invalid peer type")]
     InvalidPeerType,
-
-    /// Invalid entry kind
-    #[error("Invalid entry kind")]
-    InvalidEntryKind,
 
     #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
     /// RTC new peer connection failed

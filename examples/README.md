@@ -10,7 +10,6 @@ Run the workspace examples that are Cargo workspace members:
 ```bash
 cargo test -p rings-native-example
 cargo test -p rings-relay-example
-cargo test -p rings-snark-example
 ```
 
 `rings-native-example` includes the example extension protocol and a direct
@@ -26,11 +25,10 @@ cd ../frontend && cargo test --release --target wasm32-unknown-unknown
 cd ../frontend && trunk serve --release true
 ```
 
-Run the standalone dweb and proof wasm/Yew demos from their own workspaces:
+Run the standalone dweb wasm/Yew demo from its own workspace:
 
 ```bash
 cd examples/dweb && wasm-pack test --headless --chrome
-cd examples/proof-demo && wasm-pack test --headless --chrome
 ```
 
 Run the FFI Python integration tests after building the cdylib:

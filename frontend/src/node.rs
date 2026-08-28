@@ -10,7 +10,6 @@ use rings_node::prelude::rings_core::session::SessionSkBuilder;
 use rings_node::processor::ProcessorConfig;
 use rings_node::provider::browser::ProviderListener;
 use rings_node::provider::Provider;
-use rings_snark_extension::SNARKBehaviour;
 use rings_webview::Result as WebviewResult;
 use rings_webview::WebviewError;
 use wasm_bindgen::JsValue;
@@ -20,13 +19,11 @@ use crate::wallet::WalletAccount;
 use crate::webview::WebviewNode;
 use crate::webview::WebviewOnionSettings;
 
-/// A browser Rings node with all demo protocols installed.
+/// A browser Rings node with its application adapters initialized.
 #[derive(Clone)]
 pub struct DemoNode {
     /// Local provider handle.
     pub provider: Arc<Provider>,
-    /// SNARK behaviour and task store.
-    pub snark: SNARKBehaviour,
     /// Controlled webview gateway attached through an HTTP(S) host or the extension adapter.
     pub webview: Option<WebviewNode>,
     listener: ProviderListener,
@@ -143,10 +140,6 @@ pub async fn build_node(
             .map_err(|error| format!("build provider: {error}"))?,
     );
 
-    let snark = SNARKBehaviour::default();
-    snark
-        .register(&provider)
-        .map_err(|error| format!("register snark protocol: {error}"))?;
     let webview = match webview_host {
         WebviewHost::CurrentWindow => {
             WebviewNode::for_current_window(provider.clone(), settings.webview_onion_settings)
@@ -160,7 +153,6 @@ pub async fn build_node(
 
     Ok(DemoNode {
         provider,
-        snark,
         webview,
         listener,
     })
@@ -284,8 +276,8 @@ mod tests {
     use futures::FutureExt;
     use gloo_timers::future::sleep;
     use rings_node::prelude::rings_core::ecc::SecretKey;
-    use rings_node::prelude::uuid;
     use rings_node::prelude::rings_core::session::SessionSk;
+    use rings_node::prelude::uuid;
     use wasm_bindgen_test::wasm_bindgen_test;
 
     use super::*;
@@ -385,7 +377,6 @@ mod tests {
         let listener = provider.listen();
         let node = DemoNode {
             provider,
-            snark: SNARKBehaviour::default(),
             webview: None,
             listener,
         };

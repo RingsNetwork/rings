@@ -11,8 +11,6 @@ pub mod entry;
 pub mod finger;
 mod stabilization;
 mod storage;
-/// Subring model stored through DHT entries.
-pub mod subring;
 pub mod successor;
 /// Pure Chord topology transition model.
 pub mod topology;
