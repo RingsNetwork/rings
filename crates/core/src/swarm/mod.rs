@@ -175,6 +175,11 @@ impl Swarm {
         self.transport.peer_measurement(peer).await
     }
 
+    /// Return every retained local peer measurement.
+    pub async fn peer_measurements(&self) -> Vec<PeerMeasurement> {
+        self.transport.peer_measurements().await
+    }
+
     /// Check the status of swarm
     pub async fn inspect(&self) -> SwarmInspect {
         SwarmInspect::inspect(self).await

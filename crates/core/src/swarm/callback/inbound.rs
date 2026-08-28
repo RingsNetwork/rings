@@ -423,7 +423,10 @@ impl InboundMailbox {
         if !processor.pending_connection_allows_message(peer).await? {
             return Ok(());
         }
-        let payload = processor.accept_preverified_message(peer, payload).await?;
+        let record_as_logical_message = !matches!(message, crate::message::Message::Chunk(_));
+        let payload = processor
+            .accept_preverified_message(peer, payload, record_as_logical_message)
+            .await?;
         let (reply, completion) = oneshot::channel();
         let sequence = ticket.sequence();
         ticket.commit(InboundEvent {

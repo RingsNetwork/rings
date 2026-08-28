@@ -1,28 +1,46 @@
-//! This module implemented the `Measure` trait for swarm.
+//! Runtime adapter for the pure `rings-measure` state relation.
 
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::DateTime;
-use chrono::Duration;
-use chrono::Utc;
-use dashmap::mapref::one::RefMut;
-use dashmap::DashMap;
+use futures::channel::mpsc;
+use futures::lock::Mutex as AsyncMutex;
+use futures::FutureExt;
+use futures::StreamExt;
 use rings_core::dht::Did;
 use rings_core::measure;
+use rings_core::measure::ApplyOutcome;
 use rings_core::measure::Measure;
 use rings_core::measure::MeasureCounter;
+use rings_core::measure::MeasureError;
+use rings_core::measure::MeasurementEvent;
+use rings_core::measure::PeerMeasurement;
 use rings_core::measure::PeerQuality;
-use rings_core::measure::PeerQualityEvidence;
 use rings_core::measure::PeerQualityThresholds;
+use rings_core::measure::UnixTime;
 use rings_core::storage::KvStorageInterface;
-use rings_derive::MeasureBehaviour;
+use rings_measure::Authentication;
+use rings_measure::CreditPolicy;
+use rings_measure::MeasurementLedger;
+use rings_measure::MeasurementSnapshot;
+use rings_measure::ReliabilityPolicy;
 
 #[cfg(test)]
 const DURATION: u64 = 1;
 #[cfg(not(test))]
 const DURATION: u64 = 60 * 60;
+// Legacy `PeriodicMeasure/counters/...` values intentionally remain unread:
+// a bare count proves neither byte-credit direction nor a live epoch timestamp.
+const SNAPSHOT_KEY: &str = "MeasurementLedger/v1";
+const PERSISTENCE_WAKE_CAPACITY: usize = 1;
+const PRUNE_INTERVAL_SECONDS: u64 = 60 * 60;
+const RELIABILITY_WINDOW: NonZeroU64 = match NonZeroU64::new(DURATION) {
+    Some(window) => window,
+    None => NonZeroU64::MIN,
+};
 
 /// Shared peer-quality thresholds used by measurement and route selection.
 pub(crate) const fn peer_quality_thresholds() -> PeerQualityThresholds {
@@ -33,199 +51,327 @@ pub(crate) const fn peer_quality_thresholds() -> PeerQualityThresholds {
     )
 }
 
-/// `MeasureStorage` is the type accepted by `PeriodicMeasure::new`.
-/// It's used to store counts in a storage media provided by user.
+const fn reliability_policy() -> ReliabilityPolicy {
+    ReliabilityPolicy::from_nonzero_window(RELIABILITY_WINDOW, 1, peer_quality_thresholds())
+}
+
+/// Storage used for one versioned complete measurement snapshot.
 #[cfg(all(feature = "browser", target_family = "wasm"))]
-pub type MeasureStorage = Box<dyn KvStorageInterface<u64>>;
+pub type MeasureStorage = Box<dyn KvStorageInterface<MeasurementSnapshot<Did>>>;
 
-/// `MeasureStorage` is the type accepted by `PeriodicMeasure::new`.
-/// It's used to store counts in a storage media provided by user.
+/// Storage used for one versioned complete measurement snapshot.
 #[cfg(not(all(feature = "browser", target_family = "wasm")))]
-pub type MeasureStorage = Box<dyn KvStorageInterface<u64> + Sync + Send>;
+pub type MeasureStorage = Box<dyn KvStorageInterface<MeasurementSnapshot<Did>> + Sync + Send>;
 
-/// `PeriodicMeasure` is used to assess the reliability of peers by counting their behaviour.
-/// It currently count the number of sent and received messages in a given period (1 hour).
-/// The method [Measure::incr] should be called in the proper places.
-#[derive(MeasureBehaviour)]
+#[cfg(all(feature = "browser", target_family = "wasm"))]
+type SharedMeasureStorage = Arc<dyn KvStorageInterface<MeasurementSnapshot<Did>>>;
+#[cfg(not(all(feature = "browser", target_family = "wasm")))]
+type SharedMeasureStorage = Arc<dyn KvStorageInterface<MeasurementSnapshot<Did>> + Sync + Send>;
+
+/// Failure while loading or explicitly flushing the runtime measurement adapter.
+#[derive(Debug, thiserror::Error)]
+pub enum MeasureRuntimeError {
+    /// The configured key-value backend failed.
+    #[error("measurement storage failed: {0}")]
+    Storage(#[from] rings_core::error::Error),
+    /// Persisted or live state violated the pure measurement model.
+    #[error("measurement model failed: {0}")]
+    Model(#[from] MeasureError),
+    /// A bounded explicit flush did not complete before its deadline.
+    #[error("measurement persistence flush timed out")]
+    FlushTimeout,
+    /// The runtime stopped the owned flush task before it returned a result.
+    #[error("measurement persistence flush task stopped")]
+    FlushTaskStopped,
+}
+
+/// Pure-ledger runtime adapter with coalesced asynchronous snapshot persistence.
+///
+/// Network callbacks update only in-memory state and replace the pending full
+/// snapshot. A runtime task serializes storage writes. The algorithm, time
+/// projection, pruning, and snapshot schema remain in `rings-measure`.
 pub struct PeriodicMeasure {
-    storage: MeasureStorage,
-    counters: DashMap<(Did, MeasureCounter), Mutex<PeriodicCounter>>,
+    state: Arc<MeasureState>,
+    persistence_wake: mpsc::Sender<()>,
+}
+
+struct MeasureState {
+    storage: SharedMeasureStorage,
+    runtime: Mutex<RuntimeLedger>,
+    persistence_lock: AsyncMutex<()>,
     clock: Arc<dyn MeasureClock>,
 }
 
-// Boundary: wall-clock time is injected here. The counter transition below is
-// pure with respect to its `now` input, so tests can advance time without
-// sleeping while production still reads `Utc::now`.
+struct RuntimeLedger {
+    ledger: MeasurementLedger<Did>,
+    dirty: bool,
+    next_prune_at: UnixTime,
+}
+
+// Boundary: the adapter supplies wall-clock seconds to the pure state relation.
 trait MeasureClock: Send + Sync {
-    fn now(&self) -> DateTime<Utc>;
+    fn now(&self) -> UnixTime;
 }
 
 struct SystemMeasureClock;
 
 impl MeasureClock for SystemMeasureClock {
     #[cfg(not(all(feature = "browser", target_family = "wasm")))]
-    fn now(&self) -> DateTime<Utc> {
-        Utc::now()
+    fn now(&self) -> UnixTime {
+        let seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        UnixTime::from_secs(seconds)
     }
 
     #[cfg(all(feature = "browser", target_family = "wasm"))]
-    fn now(&self) -> DateTime<Utc> {
-        let now = js_sys::Date::now();
-        if !now.is_finite() {
-            return DateTime::UNIX_EPOCH;
+    fn now(&self) -> UnixTime {
+        let milliseconds = js_sys::Date::now();
+        if !milliseconds.is_finite() || milliseconds <= 0.0 {
+            return UnixTime::EPOCH;
         }
-        match DateTime::from_timestamp_millis(now as i64) {
-            Some(value) => value,
-            None => DateTime::UNIX_EPOCH,
-        }
-    }
-}
-
-#[derive(Debug)]
-struct PeriodicCounter {
-    // Invariant: `previous` is the start time of the current counting window;
-    // `count` records the current window; `previous_count` records the most
-    // recently completed window persisted through `barely_get`.
-    period: Duration,
-    count: u64,
-    previous: DateTime<Utc>,
-    previous_count: u64,
-}
-
-impl PeriodicCounter {
-    fn new(period: u64, previous_count: u64, now: DateTime<Utc>) -> Self {
-        Self {
-            period: Duration::seconds(period as i64),
-            count: 0,
-            previous: now,
-            previous_count,
-        }
-    }
-
-    // Reset periodic count on next period
-    fn refresh_at(&mut self, now: DateTime<Utc>) -> bool {
-        if now - self.previous < self.period {
-            return false;
-        }
-
-        self.previous_count = self.count;
-        self.count = 0;
-        self.previous = now;
-        true
-    }
-
-    // If there is no recourd in current period, get previous_count instead
-    fn barely_get(&self) -> u64 {
-        if self.previous_count == 0 {
-            self.count
-        } else {
-            self.previous_count
-        }
-    }
-
-    // Check period, then increase
-    fn incr_at(&mut self, now: DateTime<Utc>) -> (u64, bool) {
-        let is_refreshed = self.refresh_at(now);
-        self.count += 1;
-        (self.barely_get(), is_refreshed)
-    }
-
-    // Check period, return count or previous count
-    fn get_at(&mut self, now: DateTime<Utc>) -> (u64, bool) {
-        let is_refreshed = self.refresh_at(now);
-        (self.barely_get(), is_refreshed)
+        UnixTime::from_secs((milliseconds / 1_000.0) as u64)
     }
 }
 
 impl PeriodicMeasure {
-    /// Create a new `PeriodicMeasure` with the given storage.
-    pub fn new(storage: MeasureStorage) -> Self {
-        Self {
-            storage,
-            counters: DashMap::new(),
-            clock: Arc::new(SystemMeasureClock),
-        }
+    /// Load the complete ledger once and start the coalescing persistence task.
+    pub async fn new(storage: MeasureStorage) -> Result<Self, MeasureRuntimeError> {
+        Self::new_with_clock(storage, Arc::new(SystemMeasureClock)).await
     }
 
-    #[cfg(all(test, feature = "node"))]
-    fn new_with_clock(storage: MeasureStorage, clock: Arc<dyn MeasureClock>) -> Self {
-        Self {
+    async fn new_with_clock(
+        storage: MeasureStorage,
+        clock: Arc<dyn MeasureClock>,
+    ) -> Result<Self, MeasureRuntimeError> {
+        let storage = SharedMeasureStorage::from(storage);
+        let mut ledger = match storage.get(SNAPSHOT_KEY).await? {
+            Some(snapshot) => MeasurementLedger::from_snapshot(snapshot)?,
+            None => MeasurementLedger::new(),
+        };
+        let now = clock.now();
+        let pruned = ledger.prune(now, CreditPolicy::amule())?;
+        let state = Arc::new(MeasureState {
             storage,
-            counters: DashMap::new(),
+            runtime: Mutex::new(RuntimeLedger {
+                ledger,
+                dirty: pruned > 0,
+                next_prune_at: next_prune_time(now),
+            }),
+            persistence_lock: AsyncMutex::new(()),
             clock,
+        });
+        let (mut persistence_wake, receiver) = mpsc::channel(PERSISTENCE_WAKE_CAPACITY);
+        spawn_persistence_worker(state.clone(), receiver);
+        if pruned > 0 {
+            let _ = persistence_wake.try_send(());
+        }
+        Ok(Self {
+            state,
+            persistence_wake,
+        })
+    }
+
+    /// Persist a snapshot containing every update visible when this method starts.
+    pub async fn flush(&self) -> Result<(), MeasureRuntimeError> {
+        flush_state(&self.state).await
+    }
+
+    /// Persist all applied updates unless the supplied deadline expires first.
+    pub async fn flush_with_timeout(&self, timeout: Duration) -> Result<(), MeasureRuntimeError> {
+        let (sender, flush) = futures::channel::oneshot::channel();
+        spawn_bounded_flush(self.state.clone(), sender);
+        let flush = flush.fuse();
+        let deadline = futures_timer::Delay::new(timeout).fuse();
+        futures::pin_mut!(flush, deadline);
+        futures::select! {
+            result = flush => match result {
+                Ok(result) => result,
+                Err(_) => Err(MeasureRuntimeError::FlushTaskStopped),
+            },
+            () = deadline => Err(MeasureRuntimeError::FlushTimeout),
         }
     }
 
-    fn gen_storage_key(did: Did, counter: MeasureCounter) -> String {
-        format!("PeriodicMeasure/counters/{did}/{counter:?}")
+    fn count(&self, did: Did, counter: MeasureCounter) -> u64 {
+        let now = self.state.clock.now();
+        let runtime = lock_or_recover(&self.state.runtime);
+        let measurement =
+            runtime
+                .ledger
+                .measurement(&did, now, CreditPolicy::amule(), reliability_policy());
+        let Ok(Some(measurement)) = measurement else {
+            return 0;
+        };
+        let evidence = measurement.reliability;
+        match counter {
+            MeasureCounter::Sent => evidence.sent,
+            MeasureCounter::FailedToSend => evidence.failed_to_send,
+            MeasureCounter::Received => evidence.received,
+            MeasureCounter::FailedToReceive => evidence.failed_to_receive,
+            MeasureCounter::Connect => evidence.connected,
+            MeasureCounter::Disconnected => evidence.disconnected,
+        }
     }
+}
 
-    // Get count from storage, or create a new count instance.
-    async fn ensure_counter(
-        &self,
-        did: Did,
-        counter: MeasureCounter,
-        now: DateTime<Utc>,
-    ) -> RefMut<'_, (Did, MeasureCounter), Mutex<PeriodicCounter>> {
-        let k = Self::gen_storage_key(did, counter);
-        let count = self
-            .storage
-            .get(&k)
-            .await
-            .unwrap_or_else(|e| {
-                log::error!("Failed to get counter: {e:?}");
-                Some(0)
-            })
-            .unwrap_or(0);
-        self.counters
-            .entry((did, counter))
-            .or_insert_with(|| Mutex::new(PeriodicCounter::new(DURATION, count, now)))
+async fn flush_state(state: &MeasureState) -> Result<(), MeasureRuntimeError> {
+    let _guard = state.persistence_lock.lock().await;
+    let snapshot = {
+        let mut runtime = lock_or_recover(&state.runtime);
+        runtime.dirty = false;
+        runtime.ledger.snapshot()
+    };
+    if let Err(error) = state.storage.put(SNAPSHOT_KEY, &snapshot).await {
+        lock_or_recover(&state.runtime).dirty = true;
+        return Err(error.into());
     }
+    Ok(())
+}
 
-    async fn save_counter(&self, did: Did, counter: MeasureCounter, count: u64) {
-        let k = Self::gen_storage_key(did, counter);
-        self.storage.put(&k, &count).await.unwrap_or_else(|e| {
-            log::error!("Failed to save counter: {e:?}");
-        })
+type FlushSender = futures::channel::oneshot::Sender<Result<(), MeasureRuntimeError>>;
+
+#[cfg(not(all(feature = "browser", target_family = "wasm")))]
+fn spawn_bounded_flush(state: Arc<MeasureState>, sender: FlushSender) {
+    tokio::spawn(async move {
+        let _ = sender.send(flush_state(&state).await);
+    });
+}
+
+#[cfg(all(feature = "browser", target_family = "wasm"))]
+fn spawn_bounded_flush(state: Arc<MeasureState>, sender: FlushSender) {
+    wasm_bindgen_futures::spawn_local(async move {
+        let _ = sender.send(flush_state(&state).await);
+    });
+}
+
+fn next_prune_time(now: UnixTime) -> UnixTime {
+    UnixTime::from_secs(now.as_secs().saturating_add(PRUNE_INTERVAL_SECONDS))
+}
+
+fn lock_or_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(not(all(feature = "browser", target_family = "wasm")))]
+fn spawn_persistence_worker(state: Arc<MeasureState>, receiver: mpsc::Receiver<()>) {
+    tokio::spawn(run_persistence_worker(state, receiver));
+}
+
+#[cfg(all(feature = "browser", target_family = "wasm"))]
+fn spawn_persistence_worker(state: Arc<MeasureState>, receiver: mpsc::Receiver<()>) {
+    wasm_bindgen_futures::spawn_local(run_persistence_worker(state, receiver));
+}
+
+async fn run_persistence_worker(state: Arc<MeasureState>, mut receiver: mpsc::Receiver<()>) {
+    while receiver.next().await.is_some() {
+        persist_pending(&state).await;
+    }
+    persist_pending(&state).await;
+}
+
+async fn persist_pending(state: &MeasureState) {
+    loop {
+        let _guard = state.persistence_lock.lock().await;
+        let snapshot = {
+            let mut runtime = lock_or_recover(&state.runtime);
+            if !runtime.dirty {
+                return;
+            }
+            runtime.dirty = false;
+            runtime.ledger.snapshot()
+        };
+        if let Err(error) = state.storage.put(SNAPSHOT_KEY, &snapshot).await {
+            lock_or_recover(&state.runtime).dirty = true;
+            tracing::error!(%error, "failed to persist measurement snapshot");
+            return;
+        }
     }
 }
 
 #[cfg_attr(feature = "node", async_trait)]
 #[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
 impl Measure for PeriodicMeasure {
-    /// `incr` increments the counter of the given peer.
     async fn incr(&self, did: Did, counter: MeasureCounter) {
-        let now = self.clock.now();
-        let (count, is_refreshed) = {
-            let c = self.ensure_counter(did, counter, now).await;
-            let result = if let Ok(mut c) = c.lock() {
-                c.incr_at(now)
-            } else {
-                return;
-            };
-            result
+        let event = match counter {
+            MeasureCounter::Sent => MeasurementEvent::Sent { useful_bytes: 0 },
+            MeasureCounter::FailedToSend => MeasurementEvent::FailedToSend,
+            MeasureCounter::Received => MeasurementEvent::Received { useful_bytes: 0 },
+            MeasureCounter::FailedToReceive => MeasurementEvent::FailedToReceive,
+            MeasureCounter::Connect => MeasurementEvent::Connected,
+            MeasureCounter::Disconnected => MeasurementEvent::Disconnected,
         };
-        if is_refreshed {
-            self.save_counter(did, counter, count).await;
+        if let Err(error) = self.record(did, event).await {
+            tracing::error!(peer = %did, %error, "failed to apply compatibility measurement");
         }
     }
 
-    /// `get_count` returns the counter of a peer in the current or previous period.
     async fn get_count(&self, did: Did, counter: MeasureCounter) -> u64 {
-        let now = self.clock.now();
-        let (count, is_refreshed) = {
-            let c = self.ensure_counter(did, counter, now).await;
-            let result = if let Ok(mut c) = c.lock() {
-                c.get_at(now)
-            } else {
-                return 0;
-            };
-            result
+        self.count(did, counter)
+    }
+
+    async fn record(
+        &self,
+        did: Did,
+        event: MeasurementEvent,
+    ) -> Result<ApplyOutcome, MeasureError> {
+        let now = self.state.clock.now();
+        let outcome = {
+            let mut runtime = lock_or_recover(&self.state.runtime);
+            let outcome = runtime.ledger.apply(
+                did,
+                Authentication::Authenticated,
+                event,
+                now,
+                reliability_policy(),
+            )?;
+            if now >= runtime.next_prune_at {
+                match runtime.ledger.prune(now, CreditPolicy::amule()) {
+                    Ok(_) => runtime.next_prune_at = next_prune_time(now),
+                    Err(error) => {
+                        tracing::error!(%error, "failed to prune measurement ledger");
+                    }
+                }
+            }
+            runtime.dirty = true;
+            outcome
         };
-        if is_refreshed {
-            self.save_counter(did, counter, count).await;
+        let mut sender = self.persistence_wake.clone();
+        match sender.try_send(()) {
+            Ok(()) => {}
+            Err(error) if error.is_full() => {}
+            Err(error) => tracing::error!(%error, "measurement persistence worker stopped"),
         }
-        count
+        Ok(outcome)
+    }
+
+    async fn peer_measurement(&self, did: Did) -> Result<Option<PeerMeasurement>, MeasureError> {
+        let projected = lock_or_recover(&self.state.runtime).ledger.measurement(
+            &did,
+            self.state.clock.now(),
+            CreditPolicy::amule(),
+            reliability_policy(),
+        )?;
+        Ok(projected.map(PeerMeasurement::from_projected))
+    }
+
+    async fn peer_measurements(&self) -> Result<Vec<PeerMeasurement>, MeasureError> {
+        lock_or_recover(&self.state.runtime)
+            .ledger
+            .measurements(
+                self.state.clock.now(),
+                CreditPolicy::amule(),
+                reliability_policy(),
+            )
+            .map(|measurements| {
+                measurements
+                    .into_iter()
+                    .map(PeerMeasurement::from_projected)
+                    .collect()
+            })
     }
 }
 
@@ -233,211 +379,379 @@ impl Measure for PeriodicMeasure {
 #[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
 impl measure::BehaviourJudgement for PeriodicMeasure {
     async fn quality(&self, did: Did) -> PeerQuality {
-        let thresholds = peer_quality_thresholds();
-        PeerQualityEvidence::from_measure(self, did)
-            .await
-            .classify(thresholds)
+        match self.peer_measurement(did).await {
+            Ok(Some(measurement)) => measurement.quality,
+            Ok(None) => PeerQuality::Unknown,
+            Err(error) => {
+                tracing::error!(peer = %did, %error, "failed to project peer reliability");
+                PeerQuality::Unknown
+            }
+        }
     }
 
     async fn good(&self, did: Did) -> bool {
-        let connection_is_good = <Self as measure::ConnectBehaviour<
-            { crate::consts::CONNECT_FAILED_LIMIT },
-        >>::good(self, did)
-        .await;
-        let send_is_good = <Self as measure::MessageSendBehaviour<
-            { crate::consts::MSG_SEND_FAILED_LIMIT },
-        >>::good(self, did)
-        .await;
-        let receive_is_good = <Self as measure::MessageRecvBehaviour<
-            { crate::consts::MSG_RECV_FAILED_LIMIT },
-        >>::good(self, did)
-        .await;
-        connection_is_good && send_is_good && receive_is_good
+        !matches!(self.quality(did).await, PeerQuality::Degraded)
     }
 }
 
 #[cfg(test)]
 #[cfg(feature = "node")]
+#[allow(clippy::panic)]
 mod tests {
     use std::str::FromStr;
-    use std::sync::Arc;
-    use std::sync::Mutex;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering;
 
+    use rings_core::error::Error as CoreError;
     use rings_core::measure::BehaviourJudgement;
     use rings_core::storage::sled::SledStorage;
+    use rings_core::storage::KvStorageInterface;
     use rings_core::storage::MemStorage;
+    use tokio::sync::Notify;
 
     use super::*;
 
-    #[derive(Clone)]
     struct ManualMeasureClock {
-        now: Arc<Mutex<DateTime<Utc>>>,
+        now: AtomicU64,
     }
 
     impl ManualMeasureClock {
-        fn new(now: DateTime<Utc>) -> Self {
+        const fn new(now: u64) -> Self {
             Self {
-                now: Arc::new(Mutex::new(now)),
+                now: AtomicU64::new(now),
             }
         }
 
-        fn advance(&self, duration: Duration) {
-            let Ok(mut now) = self.now.lock() else {
-                panic!("manual measure clock lock poisoned");
-            };
-            let Some(advanced) = now.checked_add_signed(duration) else {
-                panic!("manual measure clock overflow");
-            };
-            *now = advanced;
+        fn advance(&self, seconds: u64) {
+            self.now.fetch_add(seconds, Ordering::SeqCst);
         }
     }
 
     impl MeasureClock for ManualMeasureClock {
-        fn now(&self) -> DateTime<Utc> {
-            let Ok(now) = self.now.lock() else {
-                panic!("manual measure clock lock poisoned");
-            };
-            now.to_owned()
+        fn now(&self) -> UnixTime {
+            UnixTime::from_secs(self.now.load(Ordering::SeqCst))
         }
     }
 
-    fn advance_period(clock: &ManualMeasureClock) {
-        clock.advance(Duration::seconds(DURATION as i64));
+    #[derive(Clone, Default)]
+    struct GatedStorage {
+        state: Arc<GatedStorageState>,
+    }
+
+    #[derive(Default)]
+    struct GatedStorageState {
+        value: Mutex<Option<MeasurementSnapshot<Did>>>,
+        writes: AtomicU64,
+        write_started: Notify,
+        release_first_write: Notify,
+    }
+
+    impl GatedStorage {
+        async fn wait_for_first_write(&self) {
+            if self.state.writes.load(Ordering::SeqCst) == 0 {
+                self.state.write_started.notified().await;
+            }
+        }
+
+        fn release_first_write(&self) {
+            self.state.release_first_write.notify_one();
+        }
+    }
+
+    #[async_trait]
+    impl KvStorageInterface<MeasurementSnapshot<Did>> for GatedStorage {
+        async fn get(
+            &self,
+            _key: &str,
+        ) -> rings_core::error::Result<Option<MeasurementSnapshot<Did>>> {
+            Ok(lock_or_recover(&self.state.value).clone())
+        }
+
+        async fn put(
+            &self,
+            _key: &str,
+            value: &MeasurementSnapshot<Did>,
+        ) -> rings_core::error::Result<()> {
+            if self.state.writes.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.state.write_started.notify_one();
+                self.state.release_first_write.notified().await;
+            }
+            *lock_or_recover(&self.state.value) = Some(value.clone());
+            Ok(())
+        }
+
+        async fn get_all(
+            &self,
+        ) -> rings_core::error::Result<Vec<(String, MeasurementSnapshot<Did>)>> {
+            Ok(Vec::new())
+        }
+
+        async fn remove(&self, _key: &str) -> rings_core::error::Result<()> {
+            *lock_or_recover(&self.state.value) = None;
+            Ok(())
+        }
+
+        async fn clear(&self) -> rings_core::error::Result<()> {
+            *lock_or_recover(&self.state.value) = None;
+            Ok(())
+        }
+
+        async fn count(&self) -> rings_core::error::Result<u32> {
+            Ok(u32::from(lock_or_recover(&self.state.value).is_some()))
+        }
+    }
+
+    struct FailingStorage;
+
+    #[async_trait]
+    impl KvStorageInterface<MeasurementSnapshot<Did>> for FailingStorage {
+        async fn get(
+            &self,
+            _key: &str,
+        ) -> rings_core::error::Result<Option<MeasurementSnapshot<Did>>> {
+            Ok(None)
+        }
+
+        async fn put(
+            &self,
+            _key: &str,
+            _value: &MeasurementSnapshot<Did>,
+        ) -> rings_core::error::Result<()> {
+            Err(CoreError::InvalidTransport)
+        }
+
+        async fn get_all(
+            &self,
+        ) -> rings_core::error::Result<Vec<(String, MeasurementSnapshot<Did>)>> {
+            Ok(Vec::new())
+        }
+
+        async fn remove(&self, _key: &str) -> rings_core::error::Result<()> {
+            Ok(())
+        }
+
+        async fn clear(&self) -> rings_core::error::Result<()> {
+            Ok(())
+        }
+
+        async fn count(&self) -> rings_core::error::Result<u32> {
+            Ok(0)
+        }
+    }
+
+    fn did() -> Did {
+        Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0")
+            .unwrap_or_else(|error| panic!("test DID must parse: {error}"))
+    }
+
+    async fn memory_measure(clock: Arc<ManualMeasureClock>) -> PeriodicMeasure {
+        PeriodicMeasure::new_with_clock(Box::new(MemStorage::new()), clock)
+            .await
+            .unwrap_or_else(|error| panic!("memory measurement must initialize: {error}"))
     }
 
     #[tokio::test]
-    async fn test_measure_counter() {
-        let ms = Box::new(MemStorage::new());
-
-        let did1 = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
-        let did2 = Did::from_str("0x999999cf1046e68e36E1aA2E0E07105eDDD1f08E").unwrap();
-
-        let clock = ManualMeasureClock::new(Utc::now());
-        let measure = PeriodicMeasure::new_with_clock(ms, Arc::new(clock.clone()));
-        assert_eq!(measure.get_count(did1, MeasureCounter::Sent).await, 0);
-        assert_eq!(measure.get_count(did2, MeasureCounter::Sent).await, 0);
-        assert_eq!(measure.get_count(did1, MeasureCounter::Received).await, 0);
-        assert_eq!(measure.get_count(did2, MeasureCounter::Received).await, 0);
-
-        measure.incr(did1, MeasureCounter::Sent).await;
-        measure.incr(did1, MeasureCounter::Received).await;
-
-        measure.incr(did2, MeasureCounter::Sent).await;
-        measure.incr(did2, MeasureCounter::Sent).await;
-        measure.incr(did2, MeasureCounter::Received).await;
-        measure.incr(did2, MeasureCounter::Received).await;
-        measure.incr(did2, MeasureCounter::Received).await;
-
-        assert_eq!(measure.get_count(did1, MeasureCounter::Sent).await, 1);
-        assert_eq!(measure.get_count(did2, MeasureCounter::Sent).await, 2);
-        assert_eq!(measure.get_count(did1, MeasureCounter::Received).await, 1);
-        assert_eq!(measure.get_count(did2, MeasureCounter::Received).await, 3);
+    async fn compatibility_counters_follow_the_live_epoch() {
+        let clock = Arc::new(ManualMeasureClock::new(10));
+        let measure = memory_measure(clock.clone()).await;
+        measure.incr(did(), MeasureCounter::Sent).await;
+        measure.incr(did(), MeasureCounter::Sent).await;
+        assert_eq!(measure.get_count(did(), MeasureCounter::Sent).await, 2);
+        clock.advance(DURATION);
+        assert_eq!(measure.get_count(did(), MeasureCounter::Sent).await, 0);
     }
 
     #[tokio::test]
-    async fn test_measure_period() {
-        let ms = Box::new(MemStorage::new());
-
-        let did = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
-
-        let clock = ManualMeasureClock::new(Utc::now());
-        let measure = PeriodicMeasure::new_with_clock(ms, Arc::new(clock.clone()));
-        assert_eq!(measure.get_count(did, MeasureCounter::Sent).await, 0);
-        assert_eq!(measure.get_count(did, MeasureCounter::Received).await, 0);
-
-        measure.incr(did, MeasureCounter::Sent).await;
-        measure.incr(did, MeasureCounter::Sent).await;
-        measure.incr(did, MeasureCounter::Received).await;
-
-        // Will take current count since previous count is 0.
-        assert_eq!(measure.get_count(did, MeasureCounter::Sent).await, 2);
-        assert_eq!(measure.get_count(did, MeasureCounter::Received).await, 1);
-
-        advance_period(&clock);
-
-        measure.incr(did, MeasureCounter::Sent).await;
-        measure.incr(did, MeasureCounter::Received).await;
-        measure.incr(did, MeasureCounter::Received).await;
-        measure.incr(did, MeasureCounter::Received).await;
-
-        // Will take previous count.
-        assert_eq!(measure.get_count(did, MeasureCounter::Sent).await, 2);
-        assert_eq!(measure.get_count(did, MeasureCounter::Received).await, 1);
-
-        advance_period(&clock);
-
-        // Will take previous count.
-        assert_eq!(measure.get_count(did, MeasureCounter::Sent).await, 1);
-        assert_eq!(measure.get_count(did, MeasureCounter::Received).await, 3);
-
-        advance_period(&clock);
-
-        // Will take previous count.
-        assert_eq!(measure.get_count(did, MeasureCounter::Sent).await, 0);
-        assert_eq!(measure.get_count(did, MeasureCounter::Received).await, 0);
-    }
-
-    #[tokio::test]
-    async fn test_persistent_measure_storage() {
-        let ms: MeasureStorage = Box::new(
-            SledStorage::new_with_cap_and_path(4096, "tmp/measure_test_db")
-                .await
-                .unwrap(),
+    async fn useful_bytes_produce_amule_credit_and_one_reliability_event() {
+        let clock = Arc::new(ManualMeasureClock::new(10));
+        let measure = memory_measure(clock).await;
+        assert_eq!(
+            measure
+                .record(did(), MeasurementEvent::Received {
+                    useful_bytes: 2_000_000,
+                },)
+                .await,
+            Ok(ApplyOutcome::Applied)
         );
-        ms.clear().await.unwrap();
+        let projected = measure
+            .peer_measurement(did())
+            .await
+            .unwrap_or_else(|error| panic!("projection must succeed: {error}"))
+            .unwrap_or_else(|| panic!("measurement must exist"));
+        assert_eq!(projected.evidence.received, 1);
+        assert_eq!(
+            projected
+                .credit
+                .map(|credit| credit.bytes_received_from_peer()),
+            Some(2_000_000)
+        );
+        assert!(projected.credit_score.as_f64() > 1.0);
+    }
 
-        let did = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0").unwrap();
-        let clock = ManualMeasureClock::new(Utc::now());
-        let measure = PeriodicMeasure::new_with_clock(ms, Arc::new(clock.clone()));
-        assert_eq!(measure.get_count(did, MeasureCounter::Sent).await, 0);
-        assert_eq!(measure.get_count(did, MeasureCounter::Received).await, 0);
-
-        measure.incr(did, MeasureCounter::Sent).await;
-        measure.incr(did, MeasureCounter::Sent).await;
-        measure.incr(did, MeasureCounter::Received).await;
-
-        advance_period(&clock);
-
-        // Flush to storage.
-        let c1 = measure.get_count(did, MeasureCounter::Sent).await;
-        assert_eq!(c1, 2);
-        let c2 = measure.get_count(did, MeasureCounter::Received).await;
-        assert_eq!(c2, 1);
-
-        // Release lock of measure storage.
+    #[tokio::test]
+    async fn persistence_restores_complete_credit_and_epoch_state() {
+        let path = "tmp/measure_snapshot_test_db";
+        let storage: MeasureStorage = Box::new(
+            SledStorage::new_with_cap_and_path(4096, path)
+                .await
+                .unwrap_or_else(|error| panic!("test storage must open: {error}")),
+        );
+        storage
+            .clear()
+            .await
+            .unwrap_or_else(|error| panic!("test storage must clear: {error}"));
+        let clock = Arc::new(ManualMeasureClock::new(10));
+        let measure = PeriodicMeasure::new_with_clock(storage, clock.clone())
+            .await
+            .unwrap_or_else(|error| panic!("measurement must initialize: {error}"));
+        measure
+            .record(did(), MeasurementEvent::Sent { useful_bytes: 17 })
+            .await
+            .unwrap_or_else(|error| panic!("measurement must apply: {error}"));
+        measure
+            .flush()
+            .await
+            .unwrap_or_else(|error| panic!("measurement must flush: {error}"));
         drop(measure);
 
-        // Create new measure.
-        let ms2 = Box::new(
-            SledStorage::new_with_cap_and_path(4096, "tmp/measure_test_db")
-                .await
-                .unwrap(),
+        let restored = PeriodicMeasure::new_with_clock(
+            Box::new(
+                SledStorage::new_with_cap_and_path(4096, path)
+                    .await
+                    .unwrap_or_else(|error| panic!("test storage must reopen: {error}")),
+            ),
+            clock,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("measurement must restore: {error}"));
+        let projected = restored
+            .peer_measurement(did())
+            .await
+            .unwrap_or_else(|error| panic!("projection must succeed: {error}"))
+            .unwrap_or_else(|| panic!("restored measurement must exist"));
+        assert_eq!(projected.evidence.sent, 1);
+        assert_eq!(
+            projected.credit.map(|credit| credit.bytes_sent_to_peer()),
+            Some(17)
         );
-        let measure2 = PeriodicMeasure::new_with_clock(ms2, Arc::new(clock));
-
-        // Will take previous count from storage.
-        assert_eq!(measure2.get_count(did, MeasureCounter::Sent).await, 2);
-        assert_eq!(measure2.get_count(did, MeasureCounter::Received).await, 1);
     }
 
     #[tokio::test]
-    async fn test_repeated_disconnections_degrade_peer_quality(
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let ms = Box::new(MemStorage::new());
-        let did = Did::from_str("0x11E807fcc88dD319270493fB2e822e388Fe36ab0")?;
-        let clock = ManualMeasureClock::new(Utc::now());
-        let measure = PeriodicMeasure::new_with_clock(ms, Arc::new(clock));
+    async fn startup_prunes_records_at_the_retention_boundary() {
+        let storage = MemStorage::new();
+        let mut ledger = MeasurementLedger::new();
+        ledger
+            .apply(
+                did(),
+                Authentication::Authenticated,
+                MeasurementEvent::Connected,
+                UnixTime::from_secs(10),
+                reliability_policy(),
+            )
+            .unwrap_or_else(|error| panic!("fixture event must apply: {error}"));
+        storage
+            .put(SNAPSHOT_KEY, &ledger.snapshot())
+            .await
+            .unwrap_or_else(|error| panic!("fixture snapshot must persist: {error}"));
 
-        assert_eq!(measure.quality(did).await, PeerQuality::Unknown);
+        let expiry = 10 + CreditPolicy::amule().retention_seconds();
+        let measure = PeriodicMeasure::new_with_clock(
+            Box::new(storage),
+            Arc::new(ManualMeasureClock::new(expiry)),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("measurement must initialize: {error}"));
 
-        measure.incr(did, MeasureCounter::Connect).await;
-        assert_eq!(measure.quality(did).await, PeerQuality::Healthy);
+        assert!(measure
+            .peer_measurement(did())
+            .await
+            .unwrap_or_else(|error| panic!("projection must succeed: {error}"))
+            .is_none());
+    }
 
+    #[tokio::test]
+    async fn bulk_query_includes_retained_peer_without_connection_enumeration() {
+        let clock = Arc::new(ManualMeasureClock::new(10));
+        let measure = memory_measure(clock).await;
+        measure.incr(did(), MeasureCounter::Connect).await;
+        let all = measure
+            .peer_measurements()
+            .await
+            .unwrap_or_else(|error| panic!("bulk projection must succeed: {error}"));
+        assert_eq!(all.len(), 1);
+        assert_eq!(all.first().map(|measurement| measurement.did), Some(did()));
+    }
+
+    #[tokio::test]
+    async fn repeated_disconnections_degrade_peer_quality() {
+        let clock = Arc::new(ManualMeasureClock::new(10));
+        let measure = memory_measure(clock).await;
+        assert_eq!(measure.quality(did()).await, PeerQuality::Unknown);
+        measure.incr(did(), MeasureCounter::Connect).await;
+        assert_eq!(measure.quality(did()).await, PeerQuality::Healthy);
         for _ in 0..crate::consts::CONNECT_FAILED_LIMIT {
-            measure.incr(did, MeasureCounter::Disconnected).await;
+            measure.incr(did(), MeasureCounter::Disconnected).await;
         }
+        assert_eq!(measure.quality(did()).await, PeerQuality::Degraded);
+    }
 
-        assert_eq!(measure.quality(did).await, PeerQuality::Degraded);
-        Ok(())
+    #[tokio::test]
+    async fn storage_latency_does_not_block_memory_first_updates() {
+        let storage = GatedStorage::default();
+        let clock = Arc::new(ManualMeasureClock::new(10));
+        let measure = PeriodicMeasure::new_with_clock(Box::new(storage.clone()), clock)
+            .await
+            .unwrap_or_else(|error| panic!("measurement must initialize: {error}"));
+
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            measure.record(did(), MeasurementEvent::Sent { useful_bytes: 23 }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("storage latency must not block record"))
+        .unwrap_or_else(|error| panic!("measurement must apply: {error}"));
+        tokio::time::timeout(Duration::from_secs(1), storage.wait_for_first_write())
+            .await
+            .unwrap_or_else(|_| panic!("persistence worker must attempt a write"));
+        let projected = measure
+            .peer_measurement(did())
+            .await
+            .unwrap_or_else(|error| panic!("projection must succeed: {error}"))
+            .unwrap_or_else(|| panic!("memory-first measurement must exist"));
+        assert_eq!(
+            projected.credit.map(|credit| credit.bytes_sent_to_peer()),
+            Some(23)
+        );
+        assert!(matches!(
+            measure.flush_with_timeout(Duration::from_millis(10)).await,
+            Err(MeasureRuntimeError::FlushTimeout)
+        ));
+
+        storage.release_first_write();
+        measure
+            .flush_with_timeout(Duration::from_secs(1))
+            .await
+            .unwrap_or_else(|error| panic!("released storage must flush: {error}"));
+        assert!(storage.state.writes.load(Ordering::SeqCst) >= 2);
+    }
+
+    #[tokio::test]
+    async fn storage_failure_is_observable_without_rolling_back_memory() {
+        let clock = Arc::new(ManualMeasureClock::new(10));
+        let measure = PeriodicMeasure::new_with_clock(Box::new(FailingStorage), clock)
+            .await
+            .unwrap_or_else(|error| panic!("measurement must initialize: {error}"));
+        assert_eq!(
+            measure
+                .record(did(), MeasurementEvent::Received { useful_bytes: 29 })
+                .await,
+            Ok(ApplyOutcome::Applied)
+        );
+        assert_eq!(measure.get_count(did(), MeasureCounter::Received).await, 1);
+        assert!(matches!(
+            measure.flush_with_timeout(Duration::from_secs(1)).await,
+            Err(MeasureRuntimeError::Storage(CoreError::InvalidTransport))
+        ));
+        assert_eq!(measure.get_count(did(), MeasureCounter::Received).await, 1);
     }
 }

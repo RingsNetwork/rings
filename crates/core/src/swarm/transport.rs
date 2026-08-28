@@ -45,8 +45,8 @@ use crate::dht::VirtualNodeConfig;
 use crate::error::Error;
 use crate::error::Result;
 use crate::measure::order_peers_by_quality;
-use crate::measure::MeasureCounter;
 use crate::measure::MeasureImpl;
+use crate::measure::MeasurementEvent;
 use crate::measure::PeerMeasurement;
 use crate::measure::PeerQuality;
 use crate::message::ConnectNodeReport;
@@ -390,8 +390,8 @@ impl SwarmTransport {
         self.inbound_capacity.admitted_count_for_test()
     }
 
-    async fn record_peer_measurement(&self, peer: Did, counter: MeasureCounter) {
-        record_measurement(self.measure.clone(), peer, counter).await;
+    async fn record_peer_measurement(&self, peer: Did, event: MeasurementEvent) {
+        record_measurement(self.measure.clone(), peer, event).await;
     }
 
     pub(crate) fn swarm_event_delivery_lock(&self, peer: Did) -> SwarmEventDeliveryLock {
@@ -435,7 +435,7 @@ impl SwarmTransport {
                 return;
             }
         }
-        self.record_peer_measurement(attempt.peer, MeasureCounter::Connect)
+        self.record_peer_measurement(attempt.peer, MeasurementEvent::Connected)
             .await;
     }
 
@@ -466,7 +466,7 @@ impl SwarmTransport {
             }
         };
         if should_record {
-            self.record_peer_measurement(attempt.peer, MeasureCounter::Disconnected)
+            self.record_peer_measurement(attempt.peer, MeasurementEvent::Disconnected)
                 .await;
         }
     }
@@ -530,21 +530,25 @@ impl SwarmTransport {
     }
 
     /// Record that a payload from `peer` was accepted and verified by the swarm.
-    pub(crate) async fn record_peer_message_received(&self, attempt: PendingConnectionAttempt) {
+    pub(crate) async fn record_peer_message_received(
+        &self,
+        attempt: PendingConnectionAttempt,
+        useful_bytes: u64,
+    ) {
         self.mark_peer_liveness_inbound(attempt);
-        self.record_peer_measurement(attempt.peer, MeasureCounter::Received)
+        self.record_peer_measurement(attempt.peer, MeasurementEvent::Received { useful_bytes })
             .await;
     }
 
     /// Record that a payload from `peer` could not be decoded or verified.
     pub(crate) async fn record_peer_message_receive_failed(&self, peer: Did) {
-        self.record_peer_measurement(peer, MeasureCounter::FailedToReceive)
+        self.record_peer_measurement(peer, MeasurementEvent::FailedToReceive)
             .await;
     }
 
     /// Record that an outbound payload to `peer` failed before delivery.
     pub(crate) async fn record_peer_message_send_failed(&self, peer: Did) {
-        self.record_peer_measurement(peer, MeasureCounter::FailedToSend)
+        self.record_peer_measurement(peer, MeasurementEvent::FailedToSend)
             .await;
     }
 
@@ -559,8 +563,28 @@ impl SwarmTransport {
     /// Return this node's local measurement counters for `peer`, if observed.
     pub(crate) async fn peer_measurement(&self, peer: Did) -> Option<PeerMeasurement> {
         match &self.measure {
-            Some(measure) => PeerMeasurement::from_measure(measure.as_ref(), peer).await,
+            Some(measure) => match measure.peer_measurement(peer).await {
+                Ok(measurement) => measurement,
+                Err(error) => {
+                    tracing::error!(peer = %peer, %error, "failed to project peer measurement");
+                    None
+                }
+            },
             None => None,
+        }
+    }
+
+    /// Return every retained local peer measurement.
+    pub(crate) async fn peer_measurements(&self) -> Vec<PeerMeasurement> {
+        match &self.measure {
+            Some(measure) => match measure.peer_measurements().await {
+                Ok(measurements) => measurements,
+                Err(error) => {
+                    tracing::error!(%error, "failed to project peer measurements");
+                    Vec::new()
+                }
+            },
+            None => Vec::new(),
         }
     }
 

@@ -26,7 +26,6 @@ use crate::measure::Measure;
 use crate::measure::MeasureCounter;
 use crate::measure::MeasureImpl;
 use crate::measure::PeerQuality;
-use crate::measure::PeerQualityEvidence;
 use crate::measure::PeerQualityThresholds;
 use crate::session::SessionSk;
 use crate::storage::MemStorage;
@@ -83,9 +82,14 @@ impl Measure for CountingMeasure {
 #[async_trait]
 impl BehaviourJudgement for CountingMeasure {
     async fn quality(&self, did: Did) -> PeerQuality {
-        PeerQualityEvidence::from_measure(self, did)
+        crate::measure::PeerMeasurement::from_measure(self, did)
             .await
-            .classify(PeerQualityThresholds::new(3, 10, 10))
+            .map(|measurement| {
+                measurement
+                    .evidence
+                    .classify(PeerQualityThresholds::new(3, 10, 10))
+            })
+            .unwrap_or(PeerQuality::Unknown)
     }
 
     async fn good(&self, did: Did) -> bool {
@@ -719,7 +723,7 @@ async fn test_clean_unavailable_connections_removes_stale_topology_peer() -> Res
 }
 
 #[tokio::test]
-async fn test_clean_unavailable_connections_removes_degraded_admitted_peer() -> Result<()> {
+async fn test_clean_unavailable_connections_keeps_degraded_admitted_peer() -> Result<()> {
     let measure = Arc::new(CountingMeasure::default());
     let measure_impl: MeasureImpl = measure.clone();
     let node1 = prepare_node_with_measure(SecretKey::random(), measure_impl)?;
@@ -757,10 +761,10 @@ async fn test_clean_unavailable_connections_removes_degraded_admitted_peer() -> 
         .clean_unavailable_connections()
         .await?;
 
-    assert!(node1.swarm.transport.get_connection(node2.did()).is_none());
-    assert!(!node1.dht().successors().contains(&node2.did())?);
-    assert_eq!(*node1.dht().lock_predecessor()?, None);
-    assert!(!node1.dht().lock_finger()?.contains(Some(node2.did())));
+    assert!(node1.swarm.transport.get_connection(node2.did()).is_some());
+    assert!(node1.dht().successors().contains(&node2.did())?);
+    assert_eq!(*node1.dht().lock_predecessor()?, Some(node2.did()));
+    assert!(node1.dht().lock_finger()?.contains(Some(node2.did())));
 
     Ok(())
 }

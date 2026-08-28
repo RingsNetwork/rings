@@ -1,124 +1,137 @@
-//! Bounded, coalesced outbound measurement delivery.
+//! Constant-space, coalesced outbound measurement delivery.
 //!
-//! Producers retain only counters and a one-slot wake channel, so measurement
-//! I/O never blocks the scheduler. Overflow is deliberately lossy. Shutdown
-//! drains a bounded tail and clears any remainder; dropping either side releases
-//! all pending state without affecting transfer completion.
+//! Producers aggregate logical outcome counts and useful-byte totals behind a
+//! short synchronous lock. The one-slot channel is only a wake signal; a full
+//! wake channel cannot lose state. Closing the producer drains the complete
+//! aggregate before the worker exits.
 
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::Mutex;
 
 use futures::channel::mpsc;
-use futures::future::FutureExt;
-use futures::pin_mut;
-use futures::select;
 use futures::StreamExt;
 
 use crate::dht::Did;
-use crate::measure::MeasureCounter;
 use crate::measure::MeasureImpl;
-use crate::utils::sleep;
+use crate::measure::MeasurementEvent;
 
 const MEASUREMENT_WAKE_CAPACITY: usize = 1;
-const MAX_PENDING_MEASUREMENTS: usize = 2048;
-const MEASUREMENT_SHUTDOWN_DRAIN_LIMIT: usize = 16;
-#[cfg(test)]
-const MEASUREMENT_RECORD_TIMEOUT: Duration = Duration::from_millis(50);
-#[cfg(not(test))]
-const MEASUREMENT_RECORD_TIMEOUT: Duration = Duration::from_secs(5);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum OutboundMeasurement {
-    Sent,
+    Sent { useful_bytes: u64 },
     FailedToSend,
 }
 
 impl OutboundMeasurement {
-    const fn counter(self) -> MeasureCounter {
+    const fn other(self) -> Self {
         match self {
-            Self::Sent => MeasureCounter::Sent,
-            Self::FailedToSend => MeasureCounter::FailedToSend,
+            Self::Sent { .. } => Self::FailedToSend,
+            Self::FailedToSend => Self::Sent { useful_bytes: 0 },
         }
     }
 
-    const fn other(self) -> Self {
+    const fn event(self) -> MeasurementEvent {
         match self {
-            Self::Sent => Self::FailedToSend,
-            Self::FailedToSend => Self::Sent,
+            Self::Sent { useful_bytes } => MeasurementEvent::Sent { useful_bytes },
+            Self::FailedToSend => MeasurementEvent::FailedToSend,
+        }
+    }
+}
+
+#[derive(Default)]
+struct PendingState {
+    sent_count: u64,
+    sent_bytes: u64,
+    failed_to_send: u64,
+}
+
+impl PendingState {
+    fn increment(&mut self, measurement: OutboundMeasurement) -> bool {
+        match measurement {
+            OutboundMeasurement::Sent { useful_bytes } => {
+                let Some(sent_count) = self.sent_count.checked_add(1) else {
+                    return false;
+                };
+                let Some(sent_bytes) = self.sent_bytes.checked_add(useful_bytes) else {
+                    return false;
+                };
+                self.sent_count = sent_count;
+                self.sent_bytes = sent_bytes;
+            }
+            OutboundMeasurement::FailedToSend => {
+                let Some(failed_to_send) = self.failed_to_send.checked_add(1) else {
+                    return false;
+                };
+                self.failed_to_send = failed_to_send;
+            }
+        }
+        true
+    }
+
+    fn take_next(&mut self, first: OutboundMeasurement) -> Option<OutboundMeasurement> {
+        match first {
+            OutboundMeasurement::Sent { .. } if self.sent_count > 0 => {
+                self.sent_count -= 1;
+                let useful_bytes = if self.sent_count == 0 {
+                    std::mem::take(&mut self.sent_bytes)
+                } else {
+                    0
+                };
+                Some(OutboundMeasurement::Sent { useful_bytes })
+            }
+            OutboundMeasurement::FailedToSend if self.failed_to_send > 0 => {
+                self.failed_to_send -= 1;
+                Some(OutboundMeasurement::FailedToSend)
+            }
+            _ => self.take_other(first),
+        }
+    }
+
+    fn take_other(&mut self, first: OutboundMeasurement) -> Option<OutboundMeasurement> {
+        match first.other() {
+            OutboundMeasurement::Sent { .. } if self.sent_count > 0 => {
+                self.sent_count -= 1;
+                let useful_bytes = if self.sent_count == 0 {
+                    std::mem::take(&mut self.sent_bytes)
+                } else {
+                    0
+                };
+                Some(OutboundMeasurement::Sent { useful_bytes })
+            }
+            OutboundMeasurement::FailedToSend if self.failed_to_send > 0 => {
+                self.failed_to_send -= 1;
+                Some(OutboundMeasurement::FailedToSend)
+            }
+            _ => None,
         }
     }
 }
 
 struct PendingMeasurements {
-    sent: AtomicUsize,
-    failed_to_send: AtomicUsize,
-    total: AtomicUsize,
+    state: Mutex<PendingState>,
 }
 
 impl PendingMeasurements {
     fn new() -> Self {
         Self {
-            sent: AtomicUsize::new(0),
-            failed_to_send: AtomicUsize::new(0),
-            total: AtomicUsize::new(0),
+            state: Mutex::new(PendingState::default()),
         }
     }
 
     fn increment(&self, measurement: OutboundMeasurement) -> bool {
-        if self
-            .total
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
-                (value < MAX_PENDING_MEASUREMENTS).then_some(value + 1)
-            })
-            .is_err()
-        {
-            return false;
-        }
-        let pending = self.counter(measurement);
-        let _ = pending.fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
-            Some(value.saturating_add(1))
-        });
-        true
+        lock_or_recover(&self.state).increment(measurement)
     }
 
-    fn next(&self, first: OutboundMeasurement) -> Option<OutboundMeasurement> {
-        [first, first.other()]
-            .into_iter()
-            .find(|measurement| self.counter(*measurement).load(Ordering::Acquire) > 0)
+    fn take_next(&self, first: OutboundMeasurement) -> Option<OutboundMeasurement> {
+        lock_or_recover(&self.state).take_next(first)
     }
+}
 
-    fn complete_one(&self, measurement: OutboundMeasurement) {
-        if self
-            .counter(measurement)
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
-                value.checked_sub(1)
-            })
-            .is_err()
-        {
-            tracing::error!("completed an outbound measurement with no pending count");
-            return;
-        }
-        let _ = self
-            .total
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
-                value.checked_sub(1)
-            });
-    }
-
-    fn clear(&self) {
-        self.sent.store(0, Ordering::Release);
-        self.failed_to_send.store(0, Ordering::Release);
-        self.total.store(0, Ordering::Release);
-    }
-
-    const fn counter(&self, measurement: OutboundMeasurement) -> &AtomicUsize {
-        match measurement {
-            OutboundMeasurement::Sent => &self.sent,
-            OutboundMeasurement::FailedToSend => &self.failed_to_send,
-        }
-    }
+fn lock_or_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 pub(super) struct MeasurementRecorder {
@@ -142,7 +155,7 @@ impl MeasurementRecorder {
                 pending,
                 measure,
                 did,
-                next: OutboundMeasurement::Sent,
+                next: OutboundMeasurement::Sent { useful_bytes: 0 },
             },
         )
     }
@@ -152,7 +165,7 @@ impl MeasurementRecorder {
             return;
         }
         if !self.pending.increment(measurement) {
-            tracing::warn!("outbound measurement backlog is full; dropping measurement");
+            tracing::error!("outbound measurement aggregate overflowed");
             return;
         }
         let _ = self.sender.try_send(());
@@ -169,26 +182,10 @@ pub(super) struct MeasurementReceiver {
 
 impl MeasurementReceiver {
     pub(super) async fn run(mut self) {
-        let mut shutdown_remaining: Option<usize> = None;
         loop {
-            if let Some(measurement) = self.pending.next(self.next) {
-                let outcome = self.record(measurement).await;
-                self.pending.complete_one(measurement);
+            while let Some(measurement) = self.pending.take_next(self.next) {
                 self.next = measurement.other();
-                if let Some(remaining) = shutdown_remaining.as_mut() {
-                    *remaining = remaining.saturating_sub(1);
-                    if matches!(outcome, MeasurementRecordOutcome::TimedOut) || *remaining == 0 {
-                        self.pending.clear();
-                        return;
-                    }
-                } else if self.receiver_is_closed() {
-                    if matches!(outcome, MeasurementRecordOutcome::TimedOut) {
-                        self.pending.clear();
-                        return;
-                    }
-                    shutdown_remaining = Some(MEASUREMENT_SHUTDOWN_DRAIN_LIMIT);
-                }
-                continue;
+                self.record(measurement).await;
             }
             if self.receiver.next().await.is_none() {
                 return;
@@ -196,87 +193,62 @@ impl MeasurementReceiver {
         }
     }
 
-    fn receiver_is_closed(&mut self) -> bool {
-        loop {
-            match self.receiver.try_recv() {
-                Ok(()) => {}
-                Err(error) if error.is_closed() => return true,
-                Err(_) => return false,
-            }
-        }
-    }
-
-    async fn record(&self, measurement: OutboundMeasurement) -> MeasurementRecordOutcome {
+    async fn record(&self, measurement: OutboundMeasurement) {
         let Some(measure) = &self.measure else {
-            return MeasurementRecordOutcome::Recorded;
+            return;
         };
-        let record = measure.incr(self.did, measurement.counter()).fuse();
-        let timeout = sleep(MEASUREMENT_RECORD_TIMEOUT).fuse();
-        pin_mut!(record, timeout);
-        select! {
-            _ = record => MeasurementRecordOutcome::Recorded,
-            _ = timeout => {
-                tracing::warn!(
-                    peer = %self.did,
-                    counter = ?measurement.counter(),
-                    timeout_ms = MEASUREMENT_RECORD_TIMEOUT.as_millis(),
-                    "outbound measurement recording timed out"
-                );
-                MeasurementRecordOutcome::TimedOut
-            }
+        if let Err(error) = measure.record(self.did, measurement.event()).await {
+            tracing::error!(
+                peer = %self.did,
+                event = ?measurement.event(),
+                %error,
+                "failed to apply outbound measurement"
+            );
         }
     }
-}
-
-#[derive(Clone, Copy)]
-enum MeasurementRecordOutcome {
-    Recorded,
-    TimedOut,
 }
 
 #[cfg(all(test, not(target_family = "wasm")))]
+#[allow(clippy::panic)]
 mod tests {
-    use std::sync::atomic::AtomicBool;
-    use std::sync::atomic::AtomicUsize;
-    use std::sync::atomic::Ordering;
     use std::sync::Arc;
     use std::sync::Mutex;
-    use std::time::Duration;
 
     use async_trait::async_trait;
 
     use super::*;
+    use crate::measure::ApplyOutcome;
     use crate::measure::BehaviourJudgement;
     use crate::measure::Measure;
+    use crate::measure::MeasureCounter;
+    use crate::measure::MeasureError;
     use crate::measure::PeerQuality;
-    use crate::message::yield_core_actor_step;
 
-    struct CountingMeasure {
-        calls: Arc<AtomicUsize>,
-        started: Arc<AtomicBool>,
-        pending: bool,
-        released: Arc<AtomicBool>,
+    #[derive(Default)]
+    struct RecordingMeasure {
+        events: Mutex<Vec<MeasurementEvent>>,
     }
 
     #[async_trait]
-    impl Measure for CountingMeasure {
-        async fn incr(&self, _did: Did, _counter: MeasureCounter) {
-            self.started.store(true, Ordering::Release);
-            if self.pending {
-                while !self.released.load(Ordering::Acquire) {
-                    yield_core_actor_step().await;
-                }
-            }
-            self.calls.fetch_add(1, Ordering::AcqRel);
-        }
+    impl Measure for RecordingMeasure {
+        async fn incr(&self, _did: Did, _counter: MeasureCounter) {}
 
         async fn get_count(&self, _did: Did, _counter: MeasureCounter) -> u64 {
             0
         }
+
+        async fn record(
+            &self,
+            _did: Did,
+            event: MeasurementEvent,
+        ) -> Result<ApplyOutcome, MeasureError> {
+            lock_or_recover(&self.events).push(event);
+            Ok(ApplyOutcome::Applied)
+        }
     }
 
     #[async_trait]
-    impl BehaviourJudgement for CountingMeasure {
+    impl BehaviourJudgement for RecordingMeasure {
         async fn quality(&self, _did: Did) -> PeerQuality {
             PeerQuality::Unknown
         }
@@ -284,181 +256,48 @@ mod tests {
         async fn good(&self, _did: Did) -> bool {
             true
         }
-    }
-
-    struct OrderedMeasure {
-        calls: Arc<Mutex<Vec<MeasureCounter>>>,
-    }
-
-    #[async_trait]
-    impl Measure for OrderedMeasure {
-        async fn incr(&self, _did: Did, counter: MeasureCounter) {
-            self.calls
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(counter);
-        }
-
-        async fn get_count(&self, _did: Did, _counter: MeasureCounter) -> u64 {
-            0
-        }
-    }
-
-    #[async_trait]
-    impl BehaviourJudgement for OrderedMeasure {
-        async fn quality(&self, _did: Did) -> PeerQuality {
-            PeerQuality::Unknown
-        }
-
-        async fn good(&self, _did: Did) -> bool {
-            true
-        }
-    }
-
-    fn test_measure(
-        pending: bool,
-    ) -> (
-        MeasureImpl,
-        Arc<AtomicUsize>,
-        Arc<AtomicBool>,
-        Arc<AtomicBool>,
-    ) {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let started = Arc::new(AtomicBool::new(false));
-        let released = Arc::new(AtomicBool::new(!pending));
-        let measure: MeasureImpl = Arc::new(CountingMeasure {
-            calls: calls.clone(),
-            started: started.clone(),
-            pending,
-            released: released.clone(),
-        });
-        (measure, calls, started, released)
     }
 
     #[tokio::test]
-    async fn test_closed_measurement_receiver_drains_buffered_events() {
-        let (measure, calls, _, _) = test_measure(false);
-        let (mut recorder, receiver) =
-            MeasurementRecorder::channel(Some(measure), Did::from(1_u32));
-        recorder.record(OutboundMeasurement::Sent);
+    async fn coalescing_preserves_logical_count_and_total_useful_bytes() {
+        let measure = Arc::new(RecordingMeasure::default());
+        let did = Did::from(7_u32);
+        let implementation: MeasureImpl = measure.clone();
+        let (mut recorder, receiver) = MeasurementRecorder::channel(Some(implementation), did);
+        recorder.record(OutboundMeasurement::Sent { useful_bytes: 3 });
+        recorder.record(OutboundMeasurement::Sent { useful_bytes: 5 });
         recorder.record(OutboundMeasurement::FailedToSend);
-
         drop(recorder);
         receiver.run().await;
 
-        assert_eq!(calls.load(Ordering::Acquire), 2);
+        let events = lock_or_recover(&measure.events);
+        assert_eq!(events.len(), 3);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, MeasurementEvent::Sent { .. }))
+                .count(),
+            2
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter_map(|event| match event {
+                    MeasurementEvent::Sent { useful_bytes } => Some(*useful_bytes),
+                    _ => None,
+                })
+                .sum::<u64>(),
+            8
+        );
+        assert!(events.contains(&MeasurementEvent::FailedToSend));
     }
 
     #[tokio::test]
-    async fn test_full_wake_channel_coalesces_without_losing_measurements() {
-        let (measure, calls, _, _) = test_measure(false);
-        let (mut recorder, receiver) =
-            MeasurementRecorder::channel(Some(measure), Did::from(3_u32));
-        for index in 0..1_024 {
-            let measurement = if index % 2 == 0 {
-                OutboundMeasurement::Sent
-            } else {
-                OutboundMeasurement::FailedToSend
-            };
-            recorder.record(measurement);
-        }
-        let run = tokio::spawn(receiver.run());
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while calls.load(Ordering::Acquire) < 1_024 {
-                yield_core_actor_step().await;
-            }
-        })
-        .await
-        .expect("active receiver must drain every coalesced measurement");
+    async fn disabled_recorder_retains_no_events() {
+        let did = Did::from(7_u32);
+        let (mut recorder, receiver) = MeasurementRecorder::channel(None, did);
+        recorder.record(OutboundMeasurement::Sent { useful_bytes: 3 });
         drop(recorder);
-        run.await.expect("measurement receiver must not panic");
-
-        assert_eq!(calls.load(Ordering::Acquire), 1_024);
-    }
-
-    #[tokio::test]
-    async fn test_failed_measurement_is_not_starved_by_sent_backlog() {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let measure: MeasureImpl = Arc::new(OrderedMeasure {
-            calls: calls.clone(),
-        });
-        let (mut recorder, receiver) =
-            MeasurementRecorder::channel(Some(measure), Did::from(4_u32));
-        for _ in 0..1_024 {
-            recorder.record(OutboundMeasurement::Sent);
-        }
-        recorder.record(OutboundMeasurement::FailedToSend);
-        let run = tokio::spawn(receiver.run());
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                let len = calls
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .len();
-                if len == 1_025 {
-                    break;
-                }
-                yield_core_actor_step().await;
-            }
-        })
-        .await
-        .expect("active receiver must drain the measurement backlog");
-        drop(recorder);
-        run.await.expect("measurement receiver must not panic");
-
-        let calls = calls
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert_eq!(calls.get(1), Some(&MeasureCounter::FailedToSend));
-        assert_eq!(calls.len(), 1_025);
-    }
-
-    #[tokio::test]
-    async fn test_pending_count_is_retained_until_recording_completes() {
-        let (measure, calls, started, released) = test_measure(true);
-        let (mut recorder, receiver) =
-            MeasurementRecorder::channel(Some(measure), Did::from(2_u32));
-        recorder.record(OutboundMeasurement::Sent);
-        let pending = receiver.pending.clone();
-        let run = tokio::spawn(receiver.run());
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !started.load(Ordering::Acquire) {
-                yield_core_actor_step().await;
-            }
-        })
-        .await
-        .expect("measurement must start");
-
-        assert_eq!(pending.sent.load(Ordering::Acquire), 1);
-        released.store(true, Ordering::Release);
-        drop(recorder);
-        tokio::time::timeout(Duration::from_secs(1), run)
-            .await
-            .expect("measurement receiver must drain after release")
-            .expect("measurement receiver task must not panic");
-
-        assert_eq!(calls.load(Ordering::Acquire), 1);
-        assert_eq!(pending.sent.load(Ordering::Acquire), 0);
-    }
-
-    #[tokio::test]
-    async fn test_blocked_measurement_is_cancelled_and_receiver_exits() {
-        let (measure, calls, started, _) = test_measure(true);
-        let (mut recorder, receiver) =
-            MeasurementRecorder::channel(Some(measure), Did::from(5_u32));
-        for _ in 0..MAX_PENDING_MEASUREMENTS {
-            recorder.record(OutboundMeasurement::Sent);
-        }
-        let pending = receiver.pending.clone();
-        drop(recorder);
-
-        tokio::time::timeout(Duration::from_secs(1), receiver.run())
-            .await
-            .expect("blocked measurement must be cancelled by its deadline");
-
-        assert!(started.load(Ordering::Acquire));
-        assert_eq!(calls.load(Ordering::Acquire), 0);
-        assert_eq!(pending.sent.load(Ordering::Acquire), 0);
-        assert_eq!(pending.total.load(Ordering::Acquire), 0);
+        receiver.run().await;
     }
 }

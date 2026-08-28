@@ -20,6 +20,7 @@ jsonrpc-core = "18.0.0"
 rings-codec = { path = "crates/codec", version = "0.19.0" }
 rings-core = { path = "crates/core", version = "0.19.0", default-features = false }
 rings-derive = { path = "crates/derive", version = "0.19.0", default-features = false }
+rings-measure = { path = "crates/measure", version = "0.19.0" }
 rings-node = { path = "crates/node", version = "0.19.0" }
 rings-rpc = { path = "crates/rpc", version = "0.19.0", default-features = false }
 rings-transport = { path = "crates/transport", version = "0.19.0" }

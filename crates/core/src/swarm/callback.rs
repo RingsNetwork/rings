@@ -620,13 +620,16 @@ impl InboundProcessor {
                 "message verification failed or message expired".to_string(),
             ));
         }
-        self.accept_preverified_message(peer, payload).await
+        let is_chunk = matches!(payload.transaction.data::<Message>()?, Message::Chunk(_));
+        self.accept_preverified_message(peer, payload, !is_chunk)
+            .await
     }
 
     pub(super) async fn accept_preverified_message(
         &self,
         peer: Option<Did>,
         payload: MessagePayload,
+        record_as_logical_message: bool,
     ) -> crate::error::Result<MessagePayload> {
         if payload.is_expired() || payload.transaction.is_expired() {
             self.record_receive_failure(peer).await;
@@ -634,9 +637,15 @@ impl InboundProcessor {
                 "message expired after transport admission".to_string(),
             ));
         }
-        if let (Some(peer), Some(attempt)) = (peer, self.pending_attempt()) {
-            if attempt.peer() == peer {
-                self.transport.record_peer_message_received(attempt).await;
+        if record_as_logical_message {
+            let useful_bytes = u64::try_from(payload.transaction.data.len())
+                .map_err(|_| crate::error::Error::MessageSizeOverflow)?;
+            if let (Some(peer), Some(attempt)) = (peer, self.pending_attempt()) {
+                if attempt.peer() == peer {
+                    self.transport
+                        .record_peer_message_received(attempt, useful_bytes)
+                        .await;
+                }
             }
         }
         Ok(payload)

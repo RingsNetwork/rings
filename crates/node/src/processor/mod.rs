@@ -68,6 +68,8 @@ use crate::prelude::entry;
 use crate::prelude::wasm_export;
 use crate::prelude::ChordStorageInterface;
 use crate::prelude::ChordStorageInterfaceCacheChecker;
+
+const MEASUREMENT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 use crate::prelude::SessionSk;
 use crate::registration::default_advertise_presence;
 use crate::registration::default_online_node_heartbeat_interval_secs;
@@ -135,6 +137,7 @@ pub struct Processor {
     session_sk: SessionSk,
     stabilize_interval: Duration,
     online_node_registration: OnlineNodeRegistration,
+    measure: Option<Arc<PeriodicMeasure>>,
     #[cfg(all(feature = "browser", target_family = "wasm"))]
     advertise_onion_relay: bool,
     registration_tasks: Vec<Arc<dyn RegistrationTask>>,
@@ -440,6 +443,19 @@ impl Processor {
             )
             .await;
         }
+        if let Err(error) = self.flush_measurements().await {
+            tracing::error!(%error, "failed to flush measurements during graceful shutdown");
+        }
+    }
+
+    /// Flush all applied measurement updates with the graceful-shutdown deadline.
+    pub async fn flush_measurements(&self) -> Result<()> {
+        if let Some(measure) = &self.measure {
+            measure
+                .flush_with_timeout(MEASUREMENT_FLUSH_TIMEOUT)
+                .await?;
+        }
+        Ok(())
     }
 
     /// Connect peer with web3 did.
@@ -706,18 +722,9 @@ impl Processor {
         self.swarm.peer_measurement(did).await
     }
 
-    /// Return observed local measurement counters for all connected peers.
+    /// Return every retained local peer measurement.
     pub async fn peer_measurements(&self) -> Vec<PeerMeasurement> {
-        let mut measurements = join_all(
-            self.swarm
-                .peer_dids()
-                .into_iter()
-                .map(|did| self.peer_measurement(did)),
-        )
-        .await
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+        let mut measurements = self.swarm.peer_measurements().await;
         measurements.sort_by_key(|measurement| measurement.did);
         measurements
     }

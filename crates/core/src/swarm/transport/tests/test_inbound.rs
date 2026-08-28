@@ -462,6 +462,14 @@ fn failed_receive_count(measure: &RecordingMeasure, peer: Did) -> Result<usize> 
         .count())
 }
 
+fn successful_receive_count(measure: &RecordingMeasure, peer: Did) -> Result<usize> {
+    Ok(measure
+        .snapshot_measurements()?
+        .into_iter()
+        .filter(|(did, event)| *did == peer && matches!(event, MeasurementEvent::Received { .. }))
+        .count())
+}
+
 fn spawn_inbound_delivery(
     callback: Arc<InnerSwarmCallback>,
     cid: String,
@@ -507,6 +515,68 @@ async fn saturate_application_lane(
     .await
     .map_err(|_| Error::InvalidMessage("application lane did not fill".to_string()))?;
     Ok(pending_deliveries)
+}
+
+#[tokio::test]
+async fn test_chunk_reassembly_records_one_exact_logical_receive() -> Result<()> {
+    let measure = Arc::new(RecordingMeasure::default());
+    let transport = Arc::new(transport_with_measure(measure.clone())?);
+    let peer_key = SecretKey::random();
+    let peer: Did = peer_key.address().into();
+    let peer_session = SessionSk::new_with_seckey(&peer_key)?;
+    let app_callback = Arc::new(CountingSwarmCallback::default());
+    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
+    let (attempt, _offer) = transport
+        .prepare_connection_offer_with_attempt(peer, offer_callback)
+        .await?;
+    let callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone())
+        .with_pending_connection_attempt(attempt);
+    open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
+    callback
+        .on_data_channel_open(&peer.to_string())
+        .await
+        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+    let logical_payload = MessagePayload::new_send(
+        Message::custom(&vec![41; 512])?,
+        &peer_session,
+        transport.dht.did,
+        transport.dht.did,
+    )?;
+    let expected_useful_bytes = u64::try_from(logical_payload.transaction.data.len())
+        .map_err(|_| Error::MessageSizeOverflow)?;
+    let chunks: Vec<Chunk> = ChunkList::split(&logical_payload.to_wire()?, 32).into();
+    assert!(chunks.len() > 1);
+
+    for chunk in chunks {
+        let frame = local_wire(Message::Chunk(chunk), &peer_session, transport.dht.did)?;
+        callback
+            .on_admitted_message_for_test(&peer.to_string(), &frame)
+            .await
+            .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+    }
+
+    let measurements = measure.snapshot_measurements()?;
+    let received = measurements
+        .iter()
+        .filter_map(|(observed_peer, event)| match event {
+            MeasurementEvent::Received { useful_bytes } if *observed_peer == peer => {
+                Some(*useful_bytes)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(received, vec![expected_useful_bytes]);
+    assert_eq!(
+        measurements
+            .iter()
+            .filter(|(observed_peer, event)| {
+                *observed_peer == peer && matches!(event, MeasurementEvent::FailedToReceive)
+            })
+            .count(),
+        0
+    );
+    assert_eq!(app_callback.inbounds(), 1);
+    Ok(())
 }
 
 #[tokio::test]
@@ -857,6 +927,7 @@ async fn test_reassembly_rejections_score_only_invalid_input_and_release_resourc
         Some(Error::InvalidChunkMessage)
     ));
     assert_eq!(failed_receive_count(&measure, peer)?, 1);
+    assert_eq!(successful_receive_count(&measure, peer)?, 0);
     assert_eq!(callback.inbound_admitted_count_for_test(), 0);
 
     callback.close_inbound_for_test();

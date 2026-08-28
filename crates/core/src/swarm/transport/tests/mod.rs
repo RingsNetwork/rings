@@ -35,8 +35,11 @@ use crate::dht::DEFAULT_FINGER_TABLE_SIZE;
 use crate::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use crate::dht::MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use crate::ecc::SecretKey;
+use crate::measure::ApplyOutcome;
 use crate::measure::BehaviourJudgement;
 use crate::measure::Measure;
+use crate::measure::MeasureCounter;
+use crate::measure::MeasureError;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::message::MessageClass;
 use crate::message::MessagePayload;
@@ -64,6 +67,7 @@ mod test_retirement;
 #[derive(Default)]
 struct RecordingMeasure {
     counters: Mutex<Vec<(Did, MeasureCounter)>>,
+    measurements: Mutex<Vec<(Did, MeasurementEvent)>>,
     qualities: Mutex<BTreeMap<Did, PeerQuality>>,
 }
 
@@ -73,6 +77,14 @@ impl RecordingMeasure {
             .lock()
             .map(|counters| counters.clone())
             .map_err(|_| std::io::Error::other("counters poisoned"))
+    }
+
+    #[cfg(feature = "dummy")]
+    fn snapshot_measurements(&self) -> std::io::Result<Vec<(Did, MeasurementEvent)>> {
+        self.measurements
+            .lock()
+            .map(|measurements| measurements.clone())
+            .map_err(|_| std::io::Error::other("measurements poisoned"))
     }
 
     fn set_quality(&self, did: Did, quality: PeerQuality) -> std::io::Result<()> {
@@ -107,6 +119,27 @@ impl Measure for RecordingMeasure {
                 0
             }
         }
+    }
+
+    async fn record(
+        &self,
+        did: Did,
+        event: MeasurementEvent,
+    ) -> std::result::Result<ApplyOutcome, MeasureError> {
+        match self.measurements.lock() {
+            Ok(mut measurements) => measurements.push((did, event)),
+            Err(_) => tracing::error!("RecordingMeasure measurements mutex is poisoned"),
+        }
+        let counter = match event {
+            MeasurementEvent::Connected => MeasureCounter::Connect,
+            MeasurementEvent::Disconnected => MeasureCounter::Disconnected,
+            MeasurementEvent::Sent { .. } => MeasureCounter::Sent,
+            MeasurementEvent::FailedToSend => MeasureCounter::FailedToSend,
+            MeasurementEvent::Received { .. } => MeasureCounter::Received,
+            MeasurementEvent::FailedToReceive => MeasureCounter::FailedToReceive,
+        };
+        self.incr(did, counter).await;
+        Ok(ApplyOutcome::Applied)
     }
 }
 

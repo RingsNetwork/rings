@@ -507,6 +507,32 @@ pub struct PeerMeasurementCountersInfo {
     pub failed_to_receive: u64,
 }
 
+/// Persistent local byte-credit values for one authenticated peer.
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct PeerCreditInfo {
+    /// Useful payload bytes sent by the local node to the peer.
+    pub bytes_sent_to_peer: u64,
+    /// Useful payload bytes received and verified from the peer.
+    pub bytes_received_from_peer: u64,
+    /// Most recent authenticated local observation in Unix seconds.
+    pub last_seen_seconds: u64,
+    /// aMule-compatible local resource-priority multiplier in `[1, 10]`.
+    pub score: f64,
+}
+
+/// Advisory recent local reliability class.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PeerReliabilityInfo {
+    /// Enough positive recent evidence remains below failure limits.
+    Healthy,
+    /// The local node has insufficient recent evidence.
+    #[default]
+    Unknown,
+    /// Recent local evidence reached a configured failure limit.
+    Degraded,
+}
+
 /// Measurements collected for a single peer.
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct PeerMeasurementInfo {
@@ -514,6 +540,10 @@ pub struct PeerMeasurementInfo {
     pub did: String,
     /// Transport measurement counters for the peer.
     pub counters: PeerMeasurementCountersInfo,
+    /// Persistent local byte credits, absent for counter-only custom implementations.
+    pub credit: Option<PeerCreditInfo>,
+    /// Advisory recent reliability class.
+    pub reliability: PeerReliabilityInfo,
 }
 
 /// Response containing measurements for all measured peers.

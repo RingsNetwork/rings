@@ -129,7 +129,7 @@ impl Provider {
         self.processor.peer_measurement(did).await
     }
 
-    /// Return observed local measurement counters for all connected peers.
+    /// Return every retained local peer measurement.
     pub async fn peer_measurements(&self) -> Vec<PeerMeasurement> {
         self.processor.peer_measurements().await
     }
@@ -143,7 +143,7 @@ impl Provider {
         let entry_storage = entry_storage.unwrap_or_else(|| Box::new(MemStorage::new()));
         let measure_storage = measure_storage.unwrap_or_else(|| Box::new(MemStorage::new()));
 
-        let measure = PeriodicMeasure::new(measure_storage);
+        let measure = PeriodicMeasure::new(measure_storage).await?;
 
         let processor_builder = ProcessorBuilder::from_config(&config)?
             .storage(entry_storage)
