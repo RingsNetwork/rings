@@ -18,8 +18,11 @@ pub struct SnapshotRecord<P> {
 /// Versioned, deterministic serialization boundary for a measurement ledger.
 ///
 /// Snapshot fields are intentionally public because persisted data is untrusted
-/// input. [`crate::MeasurementLedger::from_snapshot`] validates the version and
-/// duplicate-key invariant before constructing live state.
+/// input. [`crate::MeasurementLedger::from_snapshot`] validates the version,
+/// default retained-peer bound, and duplicate identities before constructing
+/// live state. Adapters using a custom bound must restore with
+/// [`crate::MeasurementLedger::from_snapshot_with_max_records`] so the same
+/// resource policy is preserved.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MeasurementSnapshot<P> {
     /// Schema version used to encode `records`.

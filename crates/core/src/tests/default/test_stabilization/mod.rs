@@ -56,7 +56,18 @@ struct CountingMeasure {
 
 #[async_trait]
 impl Measure for CountingMeasure {
-    async fn incr(&self, did: Did, counter: MeasureCounter) {
+    async fn incr(
+        &self,
+        did: Did,
+        authentication: crate::measure::Authentication,
+        counter: MeasureCounter,
+    ) {
+        if matches!(
+            authentication,
+            crate::measure::Authentication::Unauthenticated
+        ) {
+            return;
+        }
         match self.counters.lock() {
             Ok(mut counters) => counters.push((did, counter)),
             Err(_) => tracing::error!("CountingMeasure counters mutex is poisoned"),
@@ -76,6 +87,29 @@ impl Measure for CountingMeasure {
                 0
             }
         }
+    }
+
+    async fn record_batch(
+        &self,
+        did: Did,
+        authentication: crate::measure::Authentication,
+        batch: crate::measure::MeasurementBatch,
+    ) -> std::result::Result<crate::measure::ApplyOutcome, crate::measure::MeasureError> {
+        if matches!(
+            authentication,
+            crate::measure::Authentication::Unauthenticated
+        ) {
+            return Ok(crate::measure::ApplyOutcome::IgnoredUnauthenticated);
+        }
+        for _ in 0..batch.occurrences().get() {
+            self.incr(
+                did,
+                authentication,
+                MeasureCounter::from_event(batch.event()),
+            )
+            .await;
+        }
+        Ok(crate::measure::ApplyOutcome::Applied)
     }
 }
 
@@ -741,7 +775,10 @@ async fn test_clean_unavailable_connections_keeps_degraded_admitted_peer() -> Re
         node1
             .swarm
             .transport
-            .record_peer_message_send_failed(node2.did())
+            .record_peer_message_send_failed(
+                node2.did(),
+                crate::measure::Authentication::Authenticated,
+            )
             .await;
     }
     assert_eq!(

@@ -31,11 +31,31 @@ pub(crate) async fn sleep(duration: std::time::Duration) {
     futures_timer::Delay::new(duration).await;
 }
 
+/// Wait for `duration`, reporting whether the native timer completed.
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+pub(crate) async fn try_sleep(duration: std::time::Duration) -> bool {
+    futures_timer::Delay::new(duration).await;
+    true
+}
+
 /// Sleep for `duration` on the JavaScript event loop.
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 pub(crate) async fn sleep(duration: std::time::Duration) {
+    // One-shot timeout users fail closed when the JavaScript timer is
+    // unavailable. Repeating loops must call `try_sleep` and stop explicitly
+    // so a rejected timer cannot become a hot retry loop.
+    let _ = try_sleep(duration).await;
+}
+
+/// Wait for `duration`, reporting a rejected JavaScript timer.
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+pub(crate) async fn try_sleep(duration: std::time::Duration) -> bool {
     let millis = i32::try_from(duration.as_millis()).unwrap_or(i32::MAX);
-    if let Err(error) = js_utils::window_sleep(millis).await {
-        tracing::error!("failed to wait for timeout: {:?}", error);
+    match js_utils::window_sleep(millis).await {
+        Ok(_) => true,
+        Err(error) => {
+            tracing::error!("failed to wait for timeout: {:?}", error);
+            false
+        }
     }
 }

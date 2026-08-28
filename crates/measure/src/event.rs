@@ -1,3 +1,5 @@
+use std::num::NonZeroU64;
+
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -40,6 +42,41 @@ pub enum MeasurementEvent {
     },
     /// One logical inbound message failed reassembly, decoding, or verification.
     FailedToReceive,
+}
+
+/// One or more homogeneous logical observations applied atomically.
+///
+/// For successful transfer events, `useful_bytes` is the aggregate useful
+/// payload across every occurrence. Reliability evidence advances by
+/// [`Self::occurrences`], while byte credit advances once by that aggregate.
+/// This representation lets effect adapters coalesce events in constant space
+/// without inventing zero-byte messages or exposing partial transitions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MeasurementBatch {
+    event: MeasurementEvent,
+    occurrences: NonZeroU64,
+}
+
+impl MeasurementBatch {
+    /// Construct an atomic homogeneous batch.
+    pub const fn new(event: MeasurementEvent, occurrences: NonZeroU64) -> Self {
+        Self { event, occurrences }
+    }
+
+    /// Construct a batch containing exactly one observation.
+    pub const fn single(event: MeasurementEvent) -> Self {
+        Self::new(event, NonZeroU64::MIN)
+    }
+
+    /// Aggregate event, including aggregate useful bytes for transfers.
+    pub const fn event(self) -> MeasurementEvent {
+        self.event
+    }
+
+    /// Number of logical observations represented by this batch.
+    pub const fn occurrences(self) -> NonZeroU64 {
+        self.occurrences
+    }
 }
 
 /// A named counter whose checked update can overflow.

@@ -444,6 +444,15 @@ pub enum Error {
         timeout_ms: u128,
     },
 
+    /// The browser runtime could not schedule an inbound deadline timer.
+    #[error("Inbound {operation} timer unavailable for {peer:?}")]
+    InboundTimerUnavailable {
+        /// Peer associated with the inbound connection, when its DID parsed successfully.
+        peer: Option<crate::dht::Did>,
+        /// Inbound phase whose deadline could not be scheduled.
+        operation: &'static str,
+    },
+
     /// Recv message through channel failed {0}
     #[error("Recv message through channel failed {0}")]
     ChannelRecvMessageFailed(String),

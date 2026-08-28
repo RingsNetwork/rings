@@ -24,6 +24,7 @@ use crate::dht::StorageSyncDestination;
 use crate::error::Error;
 use crate::error::Result;
 use crate::lifecycle::StopToken;
+use crate::measure::Authentication;
 use crate::measure::MeasureImpl;
 use crate::measure::MeasurementEvent;
 use crate::message::Message;
@@ -378,11 +379,12 @@ async fn complete_irrevocable_send(
 pub(super) async fn record_measurement(
     measure: Option<MeasureImpl>,
     did: Did,
+    authentication: Authentication,
     event: MeasurementEvent,
 ) {
     if let Some(measure) = measure {
-        if let Err(error) = measure.record(did, event).await {
-            tracing::error!(peer = %did, ?event, %error, "failed to apply peer measurement");
+        if let Err(error) = measure.record(did, authentication, event).await {
+            tracing::error!(peer = %did, ?authentication, ?event, %error, "failed to apply peer measurement");
         }
     }
 }

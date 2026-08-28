@@ -3,6 +3,8 @@ use super::*;
 
 struct StoppedRegistration;
 
+struct CountingRegistration(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
 struct CapabilityProtocol;
 
 impl crate::extension::ext::Protocol for CapabilityProtocol {
@@ -68,6 +70,22 @@ impl RegistrationTask for StoppedRegistration {
     }
 }
 
+#[async_trait]
+impl RegistrationTask for CountingRegistration {
+    fn name(&self) -> &'static str {
+        "counting-test"
+    }
+
+    fn interval(&self) -> Duration {
+        Duration::from_secs(60)
+    }
+
+    async fn register_once(&self, _context: &RegistrationContext<'_>) -> Result<()> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Ok(())
+    }
+}
+
 #[tokio::test]
 async fn test_extension_declared_capability_is_advertised_after_registration() -> Result<()> {
     let processor = prepare_processor().await;
@@ -95,10 +113,36 @@ async fn test_registration_daemon_treats_expected_stop_as_terminal() {
 
     tokio::time::timeout(
         Duration::from_millis(100),
-        processor.registration_task_daemon_with(&task, StopToken::never()),
+        processor.registration_task_daemon_with(&task, StopToken::never(), StopToken::never()),
     )
     .await
     .expect("RegistrationStopped should terminate the registration daemon");
+}
+
+#[tokio::test]
+async fn test_registration_daemon_stops_after_sibling_maintenance_exits() {
+    let processor = prepare_processor().await;
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let task = CountingRegistration(std::sync::Arc::clone(&calls));
+    let sibling_stop_source = StopSource::new();
+    let daemon = processor.registration_task_daemon_with(
+        &task,
+        StopToken::never(),
+        sibling_stop_source.token(),
+    );
+    tokio::pin!(daemon);
+    while calls.load(std::sync::atomic::Ordering::Acquire) == 0 {
+        tokio::select! {
+            () = tokio::task::yield_now() => {},
+            () = &mut daemon => panic!("registration daemon exited before sibling stop"),
+        }
+    }
+
+    sibling_stop_source.request_stop();
+    tokio::time::timeout(Duration::from_millis(200), &mut daemon)
+        .await
+        .expect("sibling exit should cooperatively stop registration daemon");
+    assert_eq!(calls.load(std::sync::atomic::Ordering::Acquire), 1);
 }
 
 #[tokio::test]

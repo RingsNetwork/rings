@@ -12,6 +12,7 @@ use crate::CreditPolicy;
 use crate::CreditRecord;
 use crate::CreditScore;
 use crate::MeasureError;
+use crate::MeasurementBatch;
 use crate::MeasurementEvent;
 use crate::MeasurementSnapshot;
 use crate::ReliabilityClass;
@@ -21,6 +22,14 @@ use crate::ReliabilityWindow;
 use crate::SnapshotRecord;
 use crate::UnixTime;
 use crate::MEASUREMENT_SNAPSHOT_VERSION;
+
+/// Default hard bound on authenticated peer records retained by one ledger.
+///
+/// Adapters with a different memory budget can construct a ledger with
+/// [`MeasurementLedger::with_max_records`]. The bound turns identity rotation
+/// into a typed rejected transition instead of unbounded resident and snapshot
+/// state.
+pub const DEFAULT_MAX_RETAINED_PEERS: usize = 16_384;
 
 /// Pure credit and reliability state for one peer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,7 +51,7 @@ impl PeerRecord {
     pub const fn empty(first_seen: UnixTime) -> Self {
         Self::new(
             CreditRecord::empty(first_seen),
-            ReliabilityWindow::new(None, ReliabilityEvidence::new(0, 0, 0, 0, 0, 0)),
+            ReliabilityWindow::new(None, None, ReliabilityEvidence::new(0, 0, 0, 0, 0, 0)),
         )
     }
 
@@ -56,15 +65,16 @@ impl PeerRecord {
         self.reliability
     }
 
-    fn transition(
+    fn transition_batch(
         self,
-        event: MeasurementEvent,
+        batch: MeasurementBatch,
         at: UnixTime,
         reliability_policy: ReliabilityPolicy,
     ) -> Result<Self, MeasureError> {
         let mut next = self;
-        next.reliability.observe(event, at, reliability_policy)?;
-        match event {
+        next.reliability
+            .observe_batch(batch, at, reliability_policy)?;
+        match batch.event() {
             MeasurementEvent::Sent { useful_bytes } => {
                 next.credit.record_sent(useful_bytes, at)?;
             }
@@ -82,21 +92,32 @@ impl PeerRecord {
     fn validate_snapshot(self) -> Result<(), MeasureError> {
         match (
             self.reliability.epoch_start(),
+            self.reliability.window_seconds(),
             self.reliability.stored_evidence().is_unobserved(),
         ) {
-            (None, false) => Err(MeasureError::SnapshotEvidenceWithoutEpoch),
-            (Some(_), true) => Err(MeasureError::SnapshotEpochWithoutEvidence),
-            (Some(epoch_start), false) if epoch_start > self.credit.last_seen() => {
+            (None, _, false) => Err(MeasureError::SnapshotEvidenceWithoutEpoch),
+            (Some(_), _, true) => Err(MeasureError::SnapshotEpochWithoutEvidence),
+            (Some(_), None, false) => Err(MeasureError::SnapshotReliabilityWindowMissing),
+            (None, Some(_), true) => Err(MeasureError::SnapshotReliabilityWindowWithoutEpoch),
+            (Some(_), Some(0), false) => Err(MeasureError::SnapshotReliabilityWindowMissing),
+            (Some(epoch_start), Some(window), false) if epoch_start.as_secs() % window != 0 => {
+                Err(MeasureError::SnapshotReliabilityEpochMisaligned)
+            }
+            (Some(epoch_start), Some(_), false) if epoch_start > self.credit.last_seen() => {
                 Err(MeasureError::SnapshotEpochAfterLastSeen)
             }
             _ => Ok(()),
         }
     }
 
-    fn reconcile_clock(&mut self, now: UnixTime, policy: ReliabilityPolicy) -> bool {
+    fn reconcile_clock(
+        &mut self,
+        now: UnixTime,
+        policy: ReliabilityPolicy,
+    ) -> Result<bool, MeasureError> {
         let credit_adjusted = self.credit.reconcile_clock(now);
-        let reliability_adjusted = self.reliability.reconcile_clock(now, policy);
-        credit_adjusted || reliability_adjusted
+        let reliability_adjusted = self.reliability.reconcile_clock(now, policy)?;
+        Ok(credit_adjusted || reliability_adjusted)
     }
 }
 
@@ -249,9 +270,18 @@ impl ClockReconciliation {
 /// `Ledger × Peer × Authentication × Event × Time -> Result<(Ledger, Outcome), Error>`.
 /// The implementation mutates in place only after a complete peer transition
 /// succeeds, so every error preserves the prior ledger.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MeasurementLedger<P> {
     records: BTreeMap<P, PeerRecord>,
+    max_records: usize,
+}
+
+impl<P> Default for MeasurementLedger<P>
+where P: Ord
+{
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl<P> MeasurementLedger<P>
@@ -261,7 +291,21 @@ where P: Ord
     pub const fn new() -> Self {
         Self {
             records: BTreeMap::new(),
+            max_records: DEFAULT_MAX_RETAINED_PEERS,
         }
+    }
+
+    /// Construct an empty ledger with an explicit non-zero retained-peer bound.
+    pub const fn with_max_records(max_records: NonZeroUsize) -> Self {
+        Self {
+            records: BTreeMap::new(),
+            max_records: max_records.get(),
+        }
+    }
+
+    /// Maximum number of authenticated peer records this ledger can retain.
+    pub const fn max_records(&self) -> usize {
+        self.max_records
     }
 
     /// Number of retained authenticated peer records.
@@ -283,8 +327,35 @@ where P: Ord
         at: UnixTime,
         reliability_policy: ReliabilityPolicy,
     ) -> Result<ApplyOutcome, MeasureError> {
+        self.apply_batch(
+            peer,
+            authentication,
+            MeasurementBatch::single(event),
+            at,
+            reliability_policy,
+        )
+    }
+
+    /// Apply a homogeneous batch as one atomic peer transition.
+    ///
+    /// On any counter, clock, or policy error, both byte credit and reliability
+    /// evidence retain their complete prior state.
+    pub fn apply_batch(
+        &mut self,
+        peer: P,
+        authentication: Authentication,
+        batch: MeasurementBatch,
+        at: UnixTime,
+        reliability_policy: ReliabilityPolicy,
+    ) -> Result<ApplyOutcome, MeasureError> {
         if matches!(authentication, Authentication::Unauthenticated) {
             return Ok(ApplyOutcome::IgnoredUnauthenticated);
+        }
+
+        if !self.records.contains_key(&peer) && self.records.len() >= self.max_records {
+            return Err(MeasureError::RetainedPeerLimitExceeded {
+                max: self.max_records,
+            });
         }
 
         let current = self
@@ -292,7 +363,7 @@ where P: Ord
             .get(&peer)
             .copied()
             .unwrap_or_else(|| PeerRecord::empty(at));
-        let next = current.transition(event, at, reliability_policy)?;
+        let next = current.transition_batch(batch, at, reliability_policy)?;
         self.records.insert(peer, next);
         Ok(ApplyOutcome::Applied)
     }
@@ -302,11 +373,47 @@ where P: Ord
         self.records.get(peer).copied()
     }
 
+    /// Earliest exact retention boundary among retained records.
+    ///
+    /// Runtime adapters can schedule maintenance at this value without polling
+    /// or allowing a coarse interval to expose already-expired credit.
+    pub fn next_retention_boundary(&self, credit_policy: CreditPolicy) -> Option<UnixTime> {
+        self.records
+            .values()
+            .map(|record| {
+                UnixTime::from_secs(
+                    record
+                        .credit
+                        .last_seen()
+                        .as_secs()
+                        .saturating_add(credit_policy.retention_seconds()),
+                )
+            })
+            .min()
+    }
+
     /// Validate and restore a ledger snapshot.
     pub fn from_snapshot(snapshot: MeasurementSnapshot<P>) -> Result<Self, MeasureError> {
+        Self::from_snapshot_with_max_records(
+            snapshot,
+            NonZeroUsize::new(DEFAULT_MAX_RETAINED_PEERS).unwrap_or(NonZeroUsize::MIN),
+        )
+    }
+
+    /// Validate and restore a ledger snapshot under an explicit non-zero retained-peer bound.
+    pub fn from_snapshot_with_max_records(
+        snapshot: MeasurementSnapshot<P>,
+        max_records: NonZeroUsize,
+    ) -> Result<Self, MeasureError> {
         if snapshot.schema_version != MEASUREMENT_SNAPSHOT_VERSION {
             return Err(MeasureError::UnsupportedSnapshotVersion {
                 found: snapshot.schema_version,
+            });
+        }
+        if snapshot.records.len() > max_records.get() {
+            return Err(MeasureError::SnapshotPeerLimitExceeded {
+                found: snapshot.records.len(),
+                max: max_records.get(),
             });
         }
 
@@ -317,7 +424,10 @@ where P: Ord
                 return Err(MeasureError::DuplicatePeerInSnapshot);
             }
         }
-        Ok(Self { records })
+        Ok(Self {
+            records,
+            max_records: max_records.get(),
+        })
     }
 }
 
@@ -454,11 +564,15 @@ where P: Clone + Ord
         &mut self,
         now: UnixTime,
         reliability_policy: ReliabilityPolicy,
-    ) -> ClockReconciliation {
-        let adjusted_records = self.records.values_mut().fold(0, |count, record| {
-            count + usize::from(record.reconcile_clock(now, reliability_policy))
-        });
-        ClockReconciliation { adjusted_records }
+    ) -> Result<ClockReconciliation, MeasureError> {
+        for record in self.records.values() {
+            record.reliability.ensure_policy(reliability_policy)?;
+        }
+        let mut adjusted_records = 0;
+        for record in self.records.values_mut() {
+            adjusted_records += usize::from(record.reconcile_clock(now, reliability_policy)?);
+        }
+        Ok(ClockReconciliation { adjusted_records })
     }
 
     /// Produce a deterministic versioned snapshot in peer-key order.
@@ -497,436 +611,4 @@ fn project_record<P>(
 
 #[cfg(test)]
 #[allow(clippy::panic)]
-mod tests {
-    use super::*;
-    use crate::PolicyError;
-    use crate::ReliabilityThresholds;
-
-    fn reliability_policy() -> ReliabilityPolicy {
-        ReliabilityPolicy::new(60, 1, ReliabilityThresholds::new(3, 4, 5))
-            .unwrap_or_else(|error| unreachable_policy(error))
-    }
-
-    fn unreachable_policy(error: PolicyError) -> ! {
-        panic!("test policy must be valid: {error}")
-    }
-
-    #[test]
-    fn unauthenticated_events_cannot_create_or_change_credit() {
-        let mut ledger = MeasurementLedger::<u8>::new();
-        assert_eq!(
-            ledger.apply(
-                7,
-                Authentication::Unauthenticated,
-                MeasurementEvent::Received {
-                    useful_bytes: 2_000_000,
-                },
-                UnixTime::from_secs(10),
-                reliability_policy(),
-            ),
-            Ok(ApplyOutcome::IgnoredUnauthenticated)
-        );
-        assert!(ledger.is_empty());
-    }
-
-    #[test]
-    fn logical_transfer_updates_credit_and_reliability_once() {
-        let mut ledger = MeasurementLedger::<u8>::new();
-        assert_eq!(
-            ledger.apply(
-                7,
-                Authentication::Authenticated,
-                MeasurementEvent::Received { useful_bytes: 42 },
-                UnixTime::from_secs(10),
-                reliability_policy(),
-            ),
-            Ok(ApplyOutcome::Applied)
-        );
-        let record = ledger.record(&7).unwrap_or_else(|| missing_record());
-        assert_eq!(record.credit().bytes_received_from_peer(), 42);
-        assert_eq!(record.reliability().stored_evidence().received, 1);
-    }
-
-    fn missing_record() -> ! {
-        panic!("authenticated event must create a record")
-    }
-
-    #[test]
-    fn failed_transition_preserves_complete_prior_record() {
-        let snapshot = MeasurementSnapshot {
-            schema_version: MEASUREMENT_SNAPSHOT_VERSION,
-            records: vec![SnapshotRecord {
-                peer: 7_u8,
-                record: PeerRecord::new(
-                    CreditRecord::new(u64::MAX, 0, UnixTime::from_secs(10)),
-                    ReliabilityWindow::new(
-                        Some(UnixTime::EPOCH),
-                        ReliabilityEvidence::new(0, 0, 9, 0, 0, 0),
-                    ),
-                ),
-            }],
-        };
-        let mut ledger = MeasurementLedger::from_snapshot(snapshot)
-            .unwrap_or_else(|error| invalid_fixture(error));
-        let before = ledger.clone();
-        assert_eq!(
-            ledger.apply(
-                7,
-                Authentication::Authenticated,
-                MeasurementEvent::Sent { useful_bytes: 1 },
-                UnixTime::from_secs(10),
-                reliability_policy(),
-            ),
-            Err(MeasureError::CounterOverflow {
-                metric: crate::Metric::BytesSent,
-            })
-        );
-        assert_eq!(ledger, before);
-    }
-
-    fn invalid_fixture(error: MeasureError) -> ! {
-        panic!("test snapshot must be valid: {error}")
-    }
-
-    #[test]
-    fn snapshot_json_round_trip_preserves_projected_measurements() {
-        let mut ledger = MeasurementLedger::<u8>::new();
-        let policy = reliability_policy();
-        for event in [
-            MeasurementEvent::Connected,
-            MeasurementEvent::Sent { useful_bytes: 13 },
-            MeasurementEvent::Received {
-                useful_bytes: 2_000_000,
-            },
-        ] {
-            assert_eq!(
-                ledger.apply(
-                    7,
-                    Authentication::Authenticated,
-                    event,
-                    UnixTime::from_secs(10),
-                    policy,
-                ),
-                Ok(ApplyOutcome::Applied)
-            );
-        }
-        let encoded = serde_json::to_string(&ledger.snapshot())
-            .unwrap_or_else(|error| panic!("snapshot must serialize: {error}"));
-        let decoded: MeasurementSnapshot<u8> = serde_json::from_str(&encoded)
-            .unwrap_or_else(|error| panic!("snapshot must deserialize: {error}"));
-        let restored = MeasurementLedger::from_snapshot(decoded)
-            .unwrap_or_else(|error| invalid_fixture(error));
-        assert_eq!(restored, ledger);
-        assert_eq!(
-            restored.measurements(UnixTime::from_secs(10), CreditPolicy::amule(), policy),
-            ledger.measurements(UnixTime::from_secs(10), CreditPolicy::amule(), policy)
-        );
-    }
-
-    #[test]
-    fn snapshot_rejects_unknown_version_and_duplicate_peer() {
-        let unsupported = MeasurementSnapshot::<u8> {
-            schema_version: MEASUREMENT_SNAPSHOT_VERSION + 1,
-            records: Vec::new(),
-        };
-        assert!(matches!(
-            MeasurementLedger::from_snapshot(unsupported),
-            Err(MeasureError::UnsupportedSnapshotVersion { .. })
-        ));
-
-        let record = SnapshotRecord {
-            peer: 7_u8,
-            record: PeerRecord::empty(UnixTime::EPOCH),
-        };
-        let duplicate = MeasurementSnapshot {
-            schema_version: MEASUREMENT_SNAPSHOT_VERSION,
-            records: vec![record.clone(), record],
-        };
-        assert_eq!(
-            MeasurementLedger::from_snapshot(duplicate),
-            Err(MeasureError::DuplicatePeerInSnapshot)
-        );
-    }
-
-    #[test]
-    fn snapshot_rejects_inconsistent_reliability_state() {
-        let evidence_without_epoch = MeasurementSnapshot {
-            schema_version: MEASUREMENT_SNAPSHOT_VERSION,
-            records: vec![SnapshotRecord {
-                peer: 1_u8,
-                record: PeerRecord::new(
-                    CreditRecord::empty(UnixTime::from_secs(10)),
-                    ReliabilityWindow::new(None, ReliabilityEvidence::new(1, 0, 0, 0, 0, 0)),
-                ),
-            }],
-        };
-        assert_eq!(
-            MeasurementLedger::from_snapshot(evidence_without_epoch),
-            Err(MeasureError::SnapshotEvidenceWithoutEpoch)
-        );
-
-        let future_epoch = MeasurementSnapshot {
-            schema_version: MEASUREMENT_SNAPSHOT_VERSION,
-            records: vec![SnapshotRecord {
-                peer: 1_u8,
-                record: PeerRecord::new(
-                    CreditRecord::empty(UnixTime::from_secs(10)),
-                    ReliabilityWindow::new(
-                        Some(UnixTime::from_secs(60)),
-                        ReliabilityEvidence::new(1, 0, 0, 0, 0, 0),
-                    ),
-                ),
-            }],
-        };
-        assert_eq!(
-            MeasurementLedger::from_snapshot(future_epoch),
-            Err(MeasureError::SnapshotEpochAfterLastSeen)
-        );
-    }
-
-    #[test]
-    fn query_clock_rollback_does_not_project_future_state() {
-        let mut ledger = MeasurementLedger::<u8>::new();
-        let policy = reliability_policy();
-        assert_eq!(
-            ledger.apply(
-                7,
-                Authentication::Authenticated,
-                MeasurementEvent::Connected,
-                UnixTime::from_secs(50),
-                policy,
-            ),
-            Ok(ApplyOutcome::Applied)
-        );
-        assert!(matches!(
-            ledger.measurement(&7, UnixTime::from_secs(49), CreditPolicy::amule(), policy,),
-            Err(MeasureError::ClockRegression { .. })
-        ));
-    }
-
-    #[test]
-    fn bulk_projection_and_pruning_isolate_future_dated_peer() {
-        let policy = reliability_policy();
-        let valid = SnapshotRecord {
-            peer: 1_u8,
-            record: PeerRecord::new(
-                CreditRecord::empty(UnixTime::from_secs(10)),
-                ReliabilityWindow::new(
-                    Some(UnixTime::EPOCH),
-                    ReliabilityEvidence::new(1, 0, 0, 0, 0, 0),
-                ),
-            ),
-        };
-        let future = SnapshotRecord {
-            peer: 2_u8,
-            record: PeerRecord::new(
-                CreditRecord::empty(UnixTime::from_secs(100)),
-                ReliabilityWindow::new(
-                    Some(UnixTime::from_secs(60)),
-                    ReliabilityEvidence::new(1, 0, 0, 0, 0, 0),
-                ),
-            ),
-        };
-        let mut ledger = MeasurementLedger::from_snapshot(MeasurementSnapshot {
-            schema_version: MEASUREMENT_SNAPSHOT_VERSION,
-            records: vec![valid, future],
-        })
-        .unwrap_or_else(|error| invalid_fixture(error));
-        let now = UnixTime::from_secs(20);
-
-        let projection = ledger.measurements(now, CreditPolicy::amule(), policy);
-        assert_eq!(
-            projection
-                .measurements()
-                .first()
-                .map(|measurement| measurement.peer),
-            Some(1)
-        );
-        assert_eq!(projection.measurements().len(), 1);
-        assert_eq!(projection.failures().len(), 1);
-        assert_eq!(
-            projection
-                .failures()
-                .first()
-                .map(PeerMeasurementFailure::peer),
-            Some(&2)
-        );
-
-        let retention = CreditPolicy::new(0, 10).unwrap_or_else(|error| unreachable_policy(error));
-        let pruning = ledger.prune(now, retention);
-        assert_eq!(pruning.removed(), &[1]);
-        assert_eq!(pruning.failures().len(), 1);
-        assert!(ledger.record(&2).is_some());
-    }
-
-    #[test]
-    fn bounded_page_projects_only_scanned_records_and_advances_past_failures() {
-        let policy = reliability_policy();
-        let record_at = |last_seen| {
-            PeerRecord::new(
-                CreditRecord::empty(UnixTime::from_secs(last_seen)),
-                ReliabilityWindow::new(
-                    Some(UnixTime::EPOCH),
-                    ReliabilityEvidence::new(1, 0, 0, 0, 0, 0),
-                ),
-            )
-        };
-        let ledger = MeasurementLedger::from_snapshot(MeasurementSnapshot {
-            schema_version: MEASUREMENT_SNAPSHOT_VERSION,
-            records: vec![
-                SnapshotRecord {
-                    peer: 1_u8,
-                    record: record_at(10),
-                },
-                SnapshotRecord {
-                    peer: 2_u8,
-                    record: record_at(10),
-                },
-                SnapshotRecord {
-                    peer: 3_u8,
-                    record: record_at(100),
-                },
-                SnapshotRecord {
-                    peer: 4_u8,
-                    record: record_at(10),
-                },
-            ],
-        })
-        .unwrap_or_else(|error| invalid_fixture(error));
-        let limit = NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN);
-
-        let first = ledger.measurements_page(
-            None,
-            limit,
-            UnixTime::from_secs(20),
-            CreditPolicy::amule(),
-            policy,
-        );
-        assert_eq!(
-            first
-                .measurements()
-                .iter()
-                .map(|measurement| measurement.peer)
-                .collect::<Vec<_>>(),
-            vec![1, 2]
-        );
-        assert!(first.failures().is_empty());
-        assert_eq!(first.next_cursor(), Some(&2));
-
-        let second = ledger.measurements_page(
-            first.next_cursor(),
-            limit,
-            UnixTime::from_secs(20),
-            CreditPolicy::amule(),
-            policy,
-        );
-        assert_eq!(
-            second
-                .measurements()
-                .first()
-                .map(|measurement| measurement.peer),
-            Some(4)
-        );
-        assert_eq!(second.measurements().len(), 1);
-        assert_eq!(
-            second.failures().first().map(PeerMeasurementFailure::peer),
-            Some(&3)
-        );
-        assert!(second.next_cursor().is_none());
-    }
-
-    #[test]
-    fn explicit_clock_reconciliation_clamps_future_timestamps() {
-        let policy = reliability_policy();
-        let mut ledger = MeasurementLedger::from_snapshot(MeasurementSnapshot {
-            schema_version: MEASUREMENT_SNAPSHOT_VERSION,
-            records: vec![SnapshotRecord {
-                peer: 2_u8,
-                record: PeerRecord::new(
-                    CreditRecord::empty(UnixTime::from_secs(100)),
-                    ReliabilityWindow::new(
-                        Some(UnixTime::from_secs(60)),
-                        ReliabilityEvidence::new(1, 0, 0, 0, 0, 0),
-                    ),
-                ),
-            }],
-        })
-        .unwrap_or_else(|error| invalid_fixture(error));
-        let now = UnixTime::from_secs(20);
-
-        let reconciliation = ledger.reconcile_clock(now, policy);
-
-        assert_eq!(reconciliation.adjusted_records(), 1);
-        let record = ledger.record(&2).unwrap_or_else(|| missing_record());
-        assert_eq!(record.credit().last_seen(), now);
-        assert_eq!(record.reliability().epoch_start(), Some(UnixTime::EPOCH));
-        assert!(ledger
-            .measurement(&2, now, CreditPolicy::amule(), policy)
-            .is_ok());
-    }
-
-    #[test]
-    fn pruning_is_idempotent_at_retention_boundary() {
-        let mut ledger = MeasurementLedger::<u8>::new();
-        assert_eq!(
-            ledger.apply(
-                7,
-                Authentication::Authenticated,
-                MeasurementEvent::Connected,
-                UnixTime::from_secs(10),
-                reliability_policy(),
-            ),
-            Ok(ApplyOutcome::Applied)
-        );
-        let expiry = UnixTime::from_secs(10 + CreditPolicy::amule().retention_seconds());
-        assert_eq!(
-            ledger.prune(expiry, CreditPolicy::amule()).removed_count(),
-            1
-        );
-        assert_eq!(
-            ledger.prune(expiry, CreditPolicy::amule()).removed_count(),
-            0
-        );
-        assert!(ledger.is_empty());
-    }
-
-    #[test]
-    fn every_two_event_sequence_matches_counter_homomorphism() {
-        let events = [
-            MeasurementEvent::Connected,
-            MeasurementEvent::Disconnected,
-            MeasurementEvent::Sent { useful_bytes: 3 },
-            MeasurementEvent::FailedToSend,
-            MeasurementEvent::Received { useful_bytes: 5 },
-            MeasurementEvent::FailedToReceive,
-        ];
-        for first in events {
-            for second in events {
-                let mut ledger = MeasurementLedger::<u8>::new();
-                for event in [first, second] {
-                    assert_eq!(
-                        ledger.apply(
-                            1,
-                            Authentication::Authenticated,
-                            event,
-                            UnixTime::from_secs(1),
-                            reliability_policy(),
-                        ),
-                        Ok(ApplyOutcome::Applied)
-                    );
-                }
-                let record = ledger.record(&1).unwrap_or_else(|| missing_record());
-                let evidence = record.reliability().stored_evidence();
-                assert_eq!(
-                    evidence.connected
-                        + evidence.disconnected
-                        + evidence.sent
-                        + evidence.failed_to_send
-                        + evidence.received
-                        + evidence.failed_to_receive,
-                    2
-                );
-            }
-        }
-    }
-}
+mod tests;

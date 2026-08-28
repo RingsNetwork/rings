@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CRATES="rings-derive rings-transport rings-core rings-rpc rings-node"
-INTERNAL_CRATES="rings-core rings-derive rings-node rings-rpc rings-transport"
+CRATES="rings-derive rings-transport rings-measure rings-core rings-rpc rings-node"
+INTERNAL_CRATES="rings-core rings-derive rings-measure rings-node rings-rpc rings-transport"
 ROOT_MANIFEST="Cargo.toml"
 
 usage() {
@@ -19,6 +19,7 @@ manifest_for() {
   case "$1" in
     rings-core) echo "crates/core/Cargo.toml" ;;
     rings-derive) echo "crates/derive/Cargo.toml" ;;
+    rings-measure) echo "crates/measure/Cargo.toml" ;;
     rings-node) echo "crates/node/Cargo.toml" ;;
     rings-rpc) echo "crates/rpc/Cargo.toml" ;;
     rings-transport) echo "crates/transport/Cargo.toml" ;;

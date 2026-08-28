@@ -17,6 +17,12 @@ pub enum PolicyError {
 /// Failure of a pure measurement state transition or snapshot validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum MeasureError {
+    /// A new authenticated peer would exceed the ledger's retained-record bound.
+    #[error("measurement retained-peer limit {max} reached")]
+    RetainedPeerLimitExceeded {
+        /// Configured maximum number of retained peer records.
+        max: usize,
+    },
     /// A checked counter update exceeded `u64::MAX`.
     #[error("measurement counter overflow: {metric:?}")]
     CounterOverflow {
@@ -31,11 +37,29 @@ pub enum MeasureError {
         /// Latest timestamp or aligned epoch already represented by the record.
         current: UnixTime,
     },
+    /// A live record was used with a different reliability window.
+    #[error(
+        "reliability window changed from {stored_seconds}s to {supplied_seconds}s without migration"
+    )]
+    ReliabilityWindowMismatch {
+        /// Window stored with the retained reliability epoch.
+        stored_seconds: u64,
+        /// Window supplied by the caller for this operation.
+        supplied_seconds: u64,
+    },
     /// A snapshot uses a schema version this crate cannot interpret.
     #[error("unsupported measurement snapshot version {found}")]
     UnsupportedSnapshotVersion {
         /// Unrecognized schema version.
         found: u16,
+    },
+    /// A snapshot contains more peer records than the configured ledger bound.
+    #[error("measurement snapshot has {found} peers, exceeding limit {max}")]
+    SnapshotPeerLimitExceeded {
+        /// Number of records encoded in the snapshot.
+        found: usize,
+        /// Configured maximum number of retained peer records.
+        max: usize,
     },
     /// A snapshot contains more than one record for the same peer key.
     #[error("measurement snapshot contains a duplicate peer")]
@@ -49,4 +73,13 @@ pub enum MeasureError {
     /// A snapshot reliability epoch begins after the record's latest observation.
     #[error("measurement snapshot reliability epoch is after last_seen")]
     SnapshotEpochAfterLastSeen,
+    /// A snapshot reliability epoch has no associated window policy.
+    #[error("measurement snapshot reliability epoch has no window policy")]
+    SnapshotReliabilityWindowMissing,
+    /// A snapshot stores a reliability policy without an observed epoch.
+    #[error("measurement snapshot has a reliability window without an epoch")]
+    SnapshotReliabilityWindowWithoutEpoch,
+    /// A snapshot reliability epoch is not aligned to its stored window.
+    #[error("measurement snapshot reliability epoch is not window-aligned")]
+    SnapshotReliabilityEpochMisaligned,
 }

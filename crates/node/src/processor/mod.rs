@@ -12,6 +12,7 @@ use rings_core::dht::EntryStorage;
 use rings_core::dht::DEFAULT_FINGER_TABLE_SIZE;
 use rings_core::ecc::PublicKey;
 use rings_core::ecc::SecretKey;
+use rings_core::lifecycle::StopSource;
 use rings_core::lifecycle::StopToken;
 use rings_core::measure::MeasureImpl;
 use rings_core::measure::PeerMeasurement;
@@ -114,17 +115,18 @@ async fn sleep_dht_lookup_poll_interval(interval: Duration) -> Result<()> {
 async fn sleep_registration_interval_with_stop(
     interval: Duration,
     stop: &StopToken,
+    sibling_stop: &StopToken,
 ) -> Result<bool> {
     let mut remaining = interval;
     while !remaining.is_zero() {
-        if stop.should_stop() {
+        if stop.should_stop() || sibling_stop.should_stop() {
             return Ok(false);
         }
         let step = std::cmp::min(remaining, REGISTRATION_STOP_POLL_INTERVAL);
         sleep_registration_interval(step).await?;
         remaining = remaining.saturating_sub(step);
     }
-    Ok(!stop.should_stop())
+    Ok(!(stop.should_stop() || sibling_stop.should_stop()))
 }
 
 /// Processor for rings-node rpc server.
@@ -379,9 +381,14 @@ impl Processor {
         task.register_once(&context).await
     }
 
-    async fn registration_task_daemon_with(&self, task: &dyn RegistrationTask, stop: StopToken) {
+    async fn registration_task_daemon_with(
+        &self,
+        task: &dyn RegistrationTask,
+        stop: StopToken,
+        sibling_stop: StopToken,
+    ) {
         loop {
-            if stop.should_stop() {
+            if stop.should_stop() || sibling_stop.should_stop() {
                 return;
             }
             if let Err(error) = self.run_registration_once(task, stop.clone()).await {
@@ -394,10 +401,11 @@ impl Processor {
                 }
                 tracing::warn!("Failed to run {} registration task: {error:?}", task.name());
             }
-            if stop.should_stop() {
+            if stop.should_stop() || sibling_stop.should_stop() {
                 return;
             }
-            match sleep_registration_interval_with_stop(task.interval(), &stop).await {
+            match sleep_registration_interval_with_stop(task.interval(), &stop, &sibling_stop).await
+            {
                 Ok(true) => {}
                 Ok(false) => return,
                 Err(error) => {
@@ -411,12 +419,10 @@ impl Processor {
         }
     }
 
-    async fn registration_daemons_with(&self, stop: StopToken) {
-        join_all(
-            self.registration_tasks
-                .iter()
-                .map(|task| self.registration_task_daemon_with(task.as_ref(), stop.clone())),
-        )
+    async fn registration_daemons_with(&self, stop: StopToken, sibling_stop: StopToken) {
+        join_all(self.registration_tasks.iter().map(|task| {
+            self.registration_task_daemon_with(task.as_ref(), stop.clone(), sibling_stop.clone())
+        }))
         .await;
     }
 
@@ -439,9 +445,18 @@ impl Processor {
         if self.registration_tasks.is_empty() {
             stabilizer.wait_with(self.stabilize_interval, stop).await;
         } else {
+            let registration_stop_source = StopSource::new();
+            let registration_stop = registration_stop_source.token();
+            let stabilizer_stop = stop.clone();
+            let stabilization = async {
+                stabilizer
+                    .wait_with(self.stabilize_interval, stabilizer_stop)
+                    .await;
+                registration_stop_source.request_stop();
+            };
             let _ = futures::future::join(
-                stabilizer.wait_with(self.stabilize_interval, stop.clone()),
-                self.registration_daemons_with(stop),
+                stabilization,
+                self.registration_daemons_with(stop, registration_stop),
             )
             .await;
         }

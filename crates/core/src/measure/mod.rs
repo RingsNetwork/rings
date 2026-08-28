@@ -17,7 +17,9 @@ pub use quality::PeerQuality;
 pub use quality::PeerQualityEvidence;
 pub use quality::PeerQualityThresholds;
 pub use rings_measure::ApplyOutcome;
+pub use rings_measure::Authentication;
 pub use rings_measure::MeasureError;
+pub use rings_measure::MeasurementBatch;
 pub use rings_measure::MeasurementEvent;
 
 #[cfg(test)]

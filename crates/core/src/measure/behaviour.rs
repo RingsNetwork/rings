@@ -16,7 +16,9 @@ pub type MeasureImpl = Arc<dyn BehaviourJudgement>;
 use rings_measure::ApplyOutcome;
 use rings_measure::MeasureError;
 
+use super::Authentication;
 use super::MeasureCounter;
+use super::MeasurementBatch;
 use super::MeasurementEvent;
 use super::PeerMeasurement;
 use super::PeerMeasurementPage;
@@ -28,12 +30,15 @@ use super::PeerQuality;
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait Measure {
-    /// `incr` increments the counter of the given peer.
-    async fn incr(&self, did: Did, counter: MeasureCounter);
+    /// Increment a legacy counter for an already-authenticated peer.
+    ///
+    /// New transport code should use [`Self::record`] so the authentication
+    /// state remains explicit at the runtime boundary.
+    async fn incr(&self, did: Did, authentication: Authentication, counter: MeasureCounter);
     /// `get_count` returns the counter of the given peer.
     async fn get_count(&self, did: Did, counter: MeasureCounter) -> u64;
 
-    /// Record one authenticated logical transport event.
+    /// Record one logical transport event with its explicit identity proof state.
     ///
     /// Implementations backed by [`rings_measure::MeasurementLedger`] should
     /// override this method so useful-byte credits are retained. The default is
@@ -41,11 +46,27 @@ pub trait Measure {
     async fn record(
         &self,
         did: Did,
+        authentication: Authentication,
         event: MeasurementEvent,
     ) -> Result<ApplyOutcome, MeasureError> {
-        self.incr(did, MeasureCounter::from_event(event)).await;
+        if matches!(authentication, Authentication::Unauthenticated) {
+            return Ok(ApplyOutcome::IgnoredUnauthenticated);
+        }
+        self.incr(did, authentication, MeasureCounter::from_event(event))
+            .await;
         Ok(ApplyOutcome::Applied)
     }
+
+    /// Record a homogeneous batch as one atomic logical transition.
+    ///
+    /// Implementations must preserve both occurrence count and aggregate useful
+    /// bytes without exposing a partially applied prefix.
+    async fn record_batch(
+        &self,
+        did: Did,
+        authentication: Authentication,
+        batch: MeasurementBatch,
+    ) -> Result<ApplyOutcome, MeasureError>;
 
     /// Return the projected local measurement for one peer.
     ///

@@ -25,30 +25,37 @@ use futures::stream::FuturesUnordered;
 use futures::FutureExt;
 use futures::StreamExt;
 use rings_transport::core::callback::InboundFrameCapacityLease;
-use rings_transport::core::transport::MAX_DATA_CHANNEL_MESSAGE_SIZE;
 use web_time::Instant;
 
-use super::CallbackError;
 use super::InboundProcessor;
 use super::PreparedInboundFrame;
 use crate::dht::Did;
 use crate::error::Error;
 use crate::error::Result;
-use crate::fair_admission::admissible_capacity;
-use crate::fair_admission::retained_wire_bytes;
 use crate::fair_admission::CountedReservationRejection;
 use crate::fair_admission::CountedReservedCapacity;
+use crate::measure::Authentication;
 use crate::message::MessagePayload;
-use crate::utils::sleep;
+use crate::utils::try_sleep;
 
+mod capacity;
 mod deadline;
+mod failure;
 mod lane;
 mod reassembly;
 mod reassembly_clock;
 mod ticket;
 
+use capacity::memory_capacity_error;
+use capacity::memory_reservation;
+use capacity::peer_memory_capacity_error;
+use capacity::validate_memory_request;
+use capacity::validate_peer_memory_request;
+
 use self::deadline::await_inbound_deadline;
 use self::deadline::InboundDeadline;
+use self::failure::inbound_failure_error;
+use self::failure::InboundFailure;
 pub(crate) use self::lane::InboundLane;
 use self::lane::INBOUND_LANE_COUNT;
 use self::reassembly::process_chunk_event;
@@ -98,17 +105,6 @@ const INBOUND_CALLBACK_TIMEOUT: Duration = Duration::from_secs(30);
 const REASSEMBLY_CLEANUP_INTERVAL: Duration = Duration::from_millis(50);
 #[cfg(not(all(test, feature = "dummy", not(target_family = "wasm"))))]
 const REASSEMBLY_CLEANUP_INTERVAL: Duration = Duration::from_secs(1);
-const _: () = {
-    // One peer cannot consume the node budget, every lane retains a fixed
-    // minimum, and one maximum legal frame always fits that minimum.
-    assert!(INBOUND_PEER_CAPACITY < INBOUND_MAILBOX_CAPACITY);
-    assert!(INBOUND_PEER_BYTE_CAPACITY < INBOUND_MAILBOX_BYTE_CAPACITY);
-    assert!(retained_wire_bytes(crate::consts::TRANSPORT_MAX_SIZE) <= INBOUND_PEER_BYTE_CAPACITY);
-    assert!(INBOUND_RESERVED_TRANSFERS_PER_LANE * INBOUND_LANE_COUNT <= INBOUND_MAILBOX_CAPACITY);
-    assert!(INBOUND_RESERVED_BYTES_PER_LANE * INBOUND_LANE_COUNT <= INBOUND_MAILBOX_BYTE_CAPACITY);
-    assert!(memory_reservation(MAX_DATA_CHANNEL_MESSAGE_SIZE) <= INBOUND_RESERVED_BYTES_PER_LANE);
-};
-
 #[derive(Clone, Copy)]
 struct InboundCapacityState(CountedReservedCapacity<INBOUND_LANE_COUNT>);
 
@@ -323,14 +319,6 @@ impl Drop for InboundCapacityPermit {
     }
 }
 
-enum InboundFailure {
-    Core(Error),
-    Validation(CallbackError),
-    Callback(CallbackError),
-    ValidationTimeout { peer: Option<Did> },
-    ProcessingTimeout { peer: Option<Did> },
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum InboundValidation {
     Dispatch,
@@ -342,6 +330,7 @@ type InboundReply = oneshot::Sender<std::result::Result<(), InboundFailure>>;
 struct InboundEvent {
     sequence: u64,
     peer: Option<Did>,
+    authentication: Authentication,
     payload: MessagePayload,
     prepared_message: Option<crate::message::Message>,
     lane: InboundLane,
@@ -381,14 +370,21 @@ impl InboundMailbox {
         &self,
         processor: &InboundProcessor,
         peer: Option<Did>,
+        authentication: Authentication,
         bytes: Bytes,
         prepared: PreparedInboundFrame,
         transport_capacity: Option<InboundFrameCapacityLease>,
     ) -> Result<()> {
         self.ensure_actor_available()?;
-        let lane = prepared.lane;
-        self.submit_to_lane(processor, peer, bytes, lane, prepared, transport_capacity)
-            .await
+        self.submit_to_lane(
+            processor,
+            peer,
+            authentication,
+            bytes,
+            prepared,
+            transport_capacity,
+        )
+        .await
     }
 
     fn ensure_actor_available(&self) -> Result<()> {
@@ -403,11 +399,12 @@ impl InboundMailbox {
         &self,
         processor: &InboundProcessor,
         peer: Option<Did>,
+        authentication: Authentication,
         bytes: Bytes,
-        lane: InboundLane,
         prepared: PreparedInboundFrame,
         transport_capacity: Option<InboundFrameCapacityLease>,
     ) -> Result<()> {
+        let lane = prepared.lane;
         let mut ticket = self.reserve_ticket(lane)?;
         let permit = self
             .capacity
@@ -428,12 +425,12 @@ impl InboundMailbox {
         }
         let payload = if kind.is_chunk() {
             processor
-                .validate_preverified_payload(peer, &payload)
+                .validate_preverified_payload(peer, authentication, &payload)
                 .await?;
             payload
         } else {
             processor
-                .accept_verified_logical_message(peer, payload)
+                .accept_verified_logical_message(peer, authentication, payload)
                 .await?
         };
         let (reply, completion) = oneshot::channel();
@@ -441,6 +438,7 @@ impl InboundMailbox {
         ticket.commit(InboundEvent {
             sequence,
             peer,
+            authentication,
             payload,
             prepared_message: Some(message),
             lane,
@@ -607,17 +605,20 @@ impl InboundActor {
             self.release_started_reassembly_handoff();
             self.drain_available();
             if self.input_closed {
+                self.finish_reassembly_after_close().await;
                 return;
             }
             self.dispatch_runnable();
             if self.active.is_empty() {
-                self.wait_for_input().await;
+                if !self.wait_for_input().await {
+                    return;
+                }
                 continue;
             }
             let cleanup_delay = self.reassembly_cleanup_delay();
             let input = self.receiver.next().fuse();
             let completed = self.active.next().fuse();
-            let cleanup = sleep(cleanup_delay).fuse();
+            let cleanup = try_sleep(cleanup_delay).fuse();
             futures::pin_mut!(input, completed, cleanup);
             futures::select! {
                 event = input => self.handle_input(event),
@@ -626,7 +627,11 @@ impl InboundActor {
                         self.handle_completion(completion);
                     }
                 },
-                _ = cleanup => self.cleanup_expired_reassembly().await,
+                completed = cleanup => {
+                    if !self.handle_reassembly_cleanup_timer(completed).await {
+                        return;
+                    }
+                },
             }
         }
     }
@@ -703,15 +708,30 @@ impl InboundActor {
         .min()
     }
 
-    async fn wait_for_input(&mut self) {
+    async fn wait_for_input(&mut self) -> bool {
         let cleanup_delay = self.reassembly_cleanup_delay();
         let input = self.receiver.next().fuse();
-        let cleanup = sleep(cleanup_delay).fuse();
+        let cleanup = try_sleep(cleanup_delay).fuse();
         futures::pin_mut!(input, cleanup);
         futures::select! {
-            event = input => self.handle_input(event),
-            _ = cleanup => self.cleanup_expired_reassembly().await,
+            event = input => {
+                self.handle_input(event);
+                true
+            },
+            completed = cleanup => self.handle_reassembly_cleanup_timer(completed).await,
         }
+    }
+
+    async fn handle_reassembly_cleanup_timer(&mut self, completed: bool) -> bool {
+        if completed {
+            self.cleanup_expired_reassembly().await;
+            return true;
+        }
+        tracing::error!("stopping inbound actor after reassembly timer scheduling failed");
+        self.processor
+            .discard_reassembly_after_close_timer_failure()
+            .await;
+        false
     }
 
     fn reassembly_cleanup_delay(&self) -> Duration {
@@ -723,6 +743,36 @@ impl InboundActor {
         let now_ms = self.reassembly_cleanup_clock.now_ms();
         self.processor.remove_expired_reassembly_at(now_ms).await;
         self.next_reassembly_cleanup = Instant::now() + REASSEMBLY_CLEANUP_INTERVAL;
+    }
+
+    async fn finish_reassembly_after_close(&mut self) {
+        // Preserve the old shutdown contract for queued/application work: all
+        // unfinished futures and their permits are cancelled immediately.
+        // Only the bounded reassembly state survives until its protocol TTL so
+        // an authenticated peer cannot erase an incomplete-message outcome by
+        // closing its callback early.
+        self.queues = InboundQueues::new();
+        self.active = FuturesUnordered::new();
+        self.active_lanes = [None; INBOUND_LANE_COUNT];
+        self.reassembly_handoff_barrier = None;
+        if !self.processor.prepare_reassembly_for_close().await {
+            return;
+        }
+        loop {
+            self.cleanup_expired_reassembly().await;
+            if !self.processor.has_pending_reassembly().await {
+                return;
+            }
+            if !try_sleep(self.reassembly_cleanup_delay()).await {
+                tracing::error!(
+                    "disabled close-time reassembly cleanup after timer scheduling failed"
+                );
+                self.processor
+                    .discard_reassembly_after_close_timer_failure()
+                    .await;
+                return;
+            }
+        }
     }
 
     fn handle_input(&mut self, command: Option<InboundCommand>) {
@@ -870,6 +920,12 @@ async fn validate_event(
         InboundDeadline::TimedOut => {
             return Err(InboundFailure::ValidationTimeout { peer: event.peer });
         }
+        InboundDeadline::TimerUnavailable => {
+            return Err(InboundFailure::TimerUnavailable {
+                peer: event.peer,
+                operation: "validation",
+            });
+        }
     }
     let still_admitted = processor
         .pending_connection_allows_message(event.peer)
@@ -898,76 +954,26 @@ async fn process_logical_message(
     match await_inbound_deadline(processor.on_inbound(payload), INBOUND_CALLBACK_TIMEOUT).await {
         InboundDeadline::Completed(result) => result.map_err(InboundFailure::Callback),
         InboundDeadline::TimedOut => Err(InboundFailure::ProcessingTimeout { peer }),
+        InboundDeadline::TimerUnavailable => Err(InboundFailure::TimerUnavailable {
+            peer,
+            operation: "processing",
+        }),
     }
 }
 
 async fn decode_payload(
     processor: &InboundProcessor,
     peer: Option<Did>,
+    authentication: Authentication,
     bytes: &[u8],
 ) -> Result<MessagePayload> {
-    processor.decode_verified_payload(peer, bytes).await
+    processor
+        .decode_verified_payload(peer, authentication, bytes)
+        .await
 }
 
 fn finish_reply(reply: InboundReply, result: std::result::Result<(), InboundFailure>) {
     let _ = reply.send(result);
-}
-
-fn inbound_failure_error(failure: InboundFailure) -> Error {
-    match failure {
-        InboundFailure::Core(error) => error,
-        InboundFailure::Validation(source) => Error::InboundValidationFailed { source },
-        InboundFailure::Callback(source) => Error::InboundCallbackFailed { source },
-        InboundFailure::ValidationTimeout { peer } => Error::InboundValidationTimeout {
-            peer,
-            timeout_ms: INBOUND_CALLBACK_TIMEOUT.as_millis(),
-        },
-        InboundFailure::ProcessingTimeout { peer } => Error::InboundProcessingTimeout {
-            peer,
-            timeout_ms: INBOUND_CALLBACK_TIMEOUT.as_millis(),
-        },
-    }
-}
-
-const fn memory_reservation(bytes: usize) -> usize {
-    retained_wire_bytes(bytes)
-}
-
-fn memory_capacity_error(requested_bytes: usize) -> Error {
-    Error::InboundMailboxMemoryCapacityExceeded {
-        requested_bytes,
-        capacity_bytes: INBOUND_MAILBOX_BYTE_CAPACITY,
-    }
-}
-
-fn peer_memory_capacity_error(peer: Option<Did>, requested_bytes: usize) -> Error {
-    Error::InboundPeerMemoryCapacityExceeded {
-        peer,
-        requested_bytes,
-        capacity_bytes: INBOUND_PEER_BYTE_CAPACITY,
-    }
-}
-
-fn validate_peer_memory_request(peer: Option<Did>, requested_bytes: usize) -> Result<()> {
-    if requested_bytes > INBOUND_PEER_BYTE_CAPACITY {
-        return Err(peer_memory_capacity_error(peer, requested_bytes));
-    }
-    Ok(())
-}
-
-fn validate_memory_request(lane: InboundLane, requested_bytes: usize) -> Result<()> {
-    let limit = admissible_capacity(
-        INBOUND_MAILBOX_BYTE_CAPACITY,
-        &INBOUND_RESERVED_BYTES,
-        lane.index(),
-    );
-    if requested_bytes > limit {
-        return Err(Error::InboundMailboxMemoryCapacityExceeded {
-            requested_bytes,
-            capacity_bytes: limit,
-        });
-    }
-    Ok(())
 }
 
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]

@@ -22,11 +22,13 @@ use crate::ecc::SecretKey;
 use crate::error::Error;
 use crate::error::Result;
 use crate::measure::ApplyOutcome;
+use crate::measure::Authentication;
 use crate::measure::BehaviourJudgement;
 use crate::measure::Measure;
 use crate::measure::MeasureCounter;
 use crate::measure::MeasureError;
 use crate::measure::MeasureImpl;
+use crate::measure::MeasurementBatch;
 use crate::measure::MeasurementEvent;
 use crate::measure::PeerQuality;
 use crate::message::Message;
@@ -98,7 +100,15 @@ impl CountingMeasure {
 
 #[async_trait]
 impl Measure for CountingMeasure {
-    async fn incr(&self, did: crate::dht::Did, counter: MeasureCounter) {
+    async fn incr(
+        &self,
+        did: crate::dht::Did,
+        authentication: Authentication,
+        counter: MeasureCounter,
+    ) {
+        if matches!(authentication, Authentication::Unauthenticated) {
+            return;
+        }
         if let Ok(mut counters) = self.counters.lock() {
             counters.push((did, counter));
         }
@@ -111,12 +121,32 @@ impl Measure for CountingMeasure {
     async fn record(
         &self,
         did: crate::dht::Did,
+        authentication: Authentication,
         event: MeasurementEvent,
     ) -> std::result::Result<ApplyOutcome, MeasureError> {
+        if matches!(authentication, Authentication::Unauthenticated) {
+            return Ok(ApplyOutcome::IgnoredUnauthenticated);
+        }
         if let Ok(mut events) = self.events.lock() {
             events.push((did, event));
         }
-        self.incr(did, MeasureCounter::from_event(event)).await;
+        self.incr(did, authentication, MeasureCounter::from_event(event))
+            .await;
+        Ok(ApplyOutcome::Applied)
+    }
+
+    async fn record_batch(
+        &self,
+        did: crate::dht::Did,
+        authentication: Authentication,
+        batch: MeasurementBatch,
+    ) -> std::result::Result<ApplyOutcome, MeasureError> {
+        if matches!(authentication, Authentication::Unauthenticated) {
+            return Ok(ApplyOutcome::IgnoredUnauthenticated);
+        }
+        for _ in 0..batch.occurrences().get() {
+            self.record(did, authentication, batch.event()).await?;
+        }
         Ok(ApplyOutcome::Applied)
     }
 }
@@ -206,7 +236,7 @@ async fn test_whole_and_chunked_payloads_have_identical_measurement_delta() {
     assert_eq!(whole, big);
     wait_for_test_condition("whole send must be measured once", || {
         sender_measure.logical_transfer_count(node2.did(), false, expected_useful_bytes)
-            >= sent_before + 1
+            > sent_before
     })
     .await;
     assert_eq!(

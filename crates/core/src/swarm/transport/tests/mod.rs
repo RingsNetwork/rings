@@ -36,10 +36,13 @@ use crate::dht::DEFAULT_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use crate::dht::MAX_STORAGE_VIRTUAL_POSITIONS_PER_OWNER;
 use crate::ecc::SecretKey;
 use crate::measure::ApplyOutcome;
+use crate::measure::Authentication;
 use crate::measure::BehaviourJudgement;
 use crate::measure::Measure;
 use crate::measure::MeasureCounter;
 use crate::measure::MeasureError;
+use crate::measure::MeasurementBatch;
+use crate::measure::PeerQuality;
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 use crate::message::MessageClass;
 use crate::message::MessagePayload;
@@ -99,7 +102,10 @@ impl RecordingMeasure {
 
 #[async_trait]
 impl Measure for RecordingMeasure {
-    async fn incr(&self, did: Did, counter: MeasureCounter) {
+    async fn incr(&self, did: Did, authentication: Authentication, counter: MeasureCounter) {
+        if matches!(authentication, Authentication::Unauthenticated) {
+            return;
+        }
         match self.counters.lock() {
             Ok(mut counters) => counters.push((did, counter)),
             Err(_) => tracing::error!("RecordingMeasure counters mutex is poisoned"),
@@ -124,13 +130,33 @@ impl Measure for RecordingMeasure {
     async fn record(
         &self,
         did: Did,
+        authentication: Authentication,
         event: MeasurementEvent,
     ) -> std::result::Result<ApplyOutcome, MeasureError> {
+        if matches!(authentication, Authentication::Unauthenticated) {
+            return Ok(ApplyOutcome::IgnoredUnauthenticated);
+        }
         match self.measurements.lock() {
             Ok(mut measurements) => measurements.push((did, event)),
             Err(_) => tracing::error!("RecordingMeasure measurements mutex is poisoned"),
         }
-        self.incr(did, MeasureCounter::from_event(event)).await;
+        self.incr(did, authentication, MeasureCounter::from_event(event))
+            .await;
+        Ok(ApplyOutcome::Applied)
+    }
+
+    async fn record_batch(
+        &self,
+        did: Did,
+        authentication: Authentication,
+        batch: MeasurementBatch,
+    ) -> std::result::Result<ApplyOutcome, MeasureError> {
+        if matches!(authentication, Authentication::Unauthenticated) {
+            return Ok(ApplyOutcome::IgnoredUnauthenticated);
+        }
+        for _ in 0..batch.occurrences().get() {
+            self.record(did, authentication, batch.event()).await?;
+        }
         Ok(ApplyOutcome::Applied)
     }
 }
@@ -247,17 +273,26 @@ impl BlockingConnectMeasure {
 #[cfg(feature = "dummy")]
 #[async_trait]
 impl Measure for BlockingConnectMeasure {
-    async fn incr(&self, did: Did, counter: MeasureCounter) {
+    async fn incr(&self, did: Did, authentication: Authentication, counter: MeasureCounter) {
         if counter == MeasureCounter::Connect {
             self.connect_started.store(true, Ordering::SeqCst);
             self.connect_started_notify.notify_waiters();
             self.release_connect.notified().await;
         }
-        self.inner.incr(did, counter).await;
+        self.inner.incr(did, authentication, counter).await;
     }
 
     async fn get_count(&self, did: Did, counter: MeasureCounter) -> u64 {
         self.inner.get_count(did, counter).await
+    }
+
+    async fn record_batch(
+        &self,
+        did: Did,
+        authentication: Authentication,
+        batch: MeasurementBatch,
+    ) -> std::result::Result<ApplyOutcome, MeasureError> {
+        self.inner.record_batch(did, authentication, batch).await
     }
 }
 
@@ -577,7 +612,13 @@ async fn test_nested_reassembled_chunk_is_rejected_without_recursive_callback_en
     let peer: Did = peer_key.address().into();
     let peer_session = SessionSk::new_with_seckey(&peer_key)?;
     let app_callback = Arc::new(CountingSwarmCallback::default());
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
+    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
+    let (attempt, _offer) = transport
+        .prepare_connection_offer_with_attempt(peer, offer_callback)
+        .await?;
+    assert!(transport.activate_connection_for_test(attempt)?);
+    let callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone())
+        .with_pending_connection_attempt(attempt);
     let mut current: Bytes = MessagePayload::new_send(
         Message::custom(b"mailbox-drained")?,
         &peer_session,
@@ -628,9 +669,8 @@ async fn test_nested_reassembled_chunk_is_rejected_without_recursive_callback_en
 #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
 #[tokio::test]
 async fn test_missing_peer_error_precedes_outbound_capacity_admission() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
+    let measure = Arc::new(RecordingMeasure::default());
+    let transport = Arc::new(transport_with_measure(measure.clone())?);
     let peer = Did::from(700_u32);
     let mut permits = Vec::with_capacity(OUTBOUND_DATA_TRANSFER_CAPACITY);
     for _ in 0..OUTBOUND_DATA_TRANSFER_CAPACITY {
@@ -654,6 +694,10 @@ async fn test_missing_peer_error_precedes_outbound_capacity_admission() -> Resul
         .expect_err("missing route must be checked before capacity");
 
     assert!(matches!(error, Error::SwarmMissDidInTable(did) if did == peer));
+    assert!(
+        measure.snapshot_measurements()?.is_empty(),
+        "a caller-provided DID without an admitted connection is not authenticated evidence"
+    );
     drop(permits);
     Ok(())
 }

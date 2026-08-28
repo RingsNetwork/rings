@@ -5,6 +5,7 @@
 //! wake channel cannot lose state. Closing the producer drains the complete
 //! aggregate before the worker exits.
 
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -12,7 +13,9 @@ use futures::channel::mpsc;
 use futures::StreamExt;
 
 use crate::dht::Did;
+use crate::measure::Authentication;
 use crate::measure::MeasureImpl;
+use crate::measure::MeasurementBatch;
 use crate::measure::MeasurementEvent;
 
 const MEASUREMENT_WAKE_CAPACITY: usize = 1;
@@ -21,22 +24,6 @@ const MEASUREMENT_WAKE_CAPACITY: usize = 1;
 pub(super) enum OutboundMeasurement {
     Sent { useful_bytes: u64 },
     FailedToSend,
-}
-
-impl OutboundMeasurement {
-    const fn kind(self) -> OutboundMeasurementKind {
-        match self {
-            Self::Sent { .. } => OutboundMeasurementKind::Sent,
-            Self::FailedToSend => OutboundMeasurementKind::FailedToSend,
-        }
-    }
-
-    const fn event(self) -> MeasurementEvent {
-        match self {
-            Self::Sent { useful_bytes } => MeasurementEvent::Sent { useful_bytes },
-            Self::FailedToSend => MeasurementEvent::FailedToSend,
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -84,33 +71,34 @@ impl PendingState {
         true
     }
 
-    fn take(&mut self, kind: OutboundMeasurementKind) -> Option<OutboundMeasurement> {
+    fn take(&mut self, kind: OutboundMeasurementKind) -> Option<MeasurementBatch> {
         match kind {
             OutboundMeasurementKind::Sent if self.sent_count > 0 => {
-                self.sent_count -= 1;
-                // Constant-space coalescing preserves logical count and total
-                // bytes, not the association between each send and its size.
-                // The accumulated byte total is attached to the final replayed
-                // sent event; the ledger observes the exact count and sum.
-                let useful_bytes = if self.sent_count == 0 {
-                    std::mem::take(&mut self.sent_bytes)
-                } else {
-                    0
-                };
-                Some(OutboundMeasurement::Sent { useful_bytes })
+                let occurrences = NonZeroU64::new(std::mem::take(&mut self.sent_count))?;
+                let useful_bytes = std::mem::take(&mut self.sent_bytes);
+                Some(MeasurementBatch::new(
+                    MeasurementEvent::Sent { useful_bytes },
+                    occurrences,
+                ))
             }
             OutboundMeasurementKind::FailedToSend if self.failed_to_send > 0 => {
-                self.failed_to_send -= 1;
-                Some(OutboundMeasurement::FailedToSend)
+                let occurrences = NonZeroU64::new(std::mem::take(&mut self.failed_to_send))?;
+                Some(MeasurementBatch::new(
+                    MeasurementEvent::FailedToSend,
+                    occurrences,
+                ))
             }
             _ => None,
         }
     }
 
-    fn take_next(&mut self, first: OutboundMeasurementKind) -> Option<OutboundMeasurement> {
+    fn take_next(
+        &mut self,
+        first: OutboundMeasurementKind,
+    ) -> Option<(OutboundMeasurementKind, MeasurementBatch)> {
         [first, first.other()]
             .into_iter()
-            .find_map(|kind| self.take(kind))
+            .find_map(|kind| self.take(kind).map(|batch| (kind, batch)))
     }
 }
 
@@ -129,7 +117,10 @@ impl PendingMeasurements {
         lock_or_recover(&self.state).increment(measurement)
     }
 
-    fn take_next(&self, first: OutboundMeasurementKind) -> Option<OutboundMeasurement> {
+    fn take_next(
+        &self,
+        first: OutboundMeasurementKind,
+    ) -> Option<(OutboundMeasurementKind, MeasurementBatch)> {
         lock_or_recover(&self.state).take_next(first)
     }
 }
@@ -189,9 +180,9 @@ pub(super) struct MeasurementReceiver {
 impl MeasurementReceiver {
     pub(super) async fn run(mut self) {
         loop {
-            while let Some(measurement) = self.pending.take_next(self.next) {
-                self.next = measurement.kind().other();
-                self.record(measurement).await;
+            while let Some((kind, batch)) = self.pending.take_next(self.next) {
+                self.next = kind.other();
+                self.record(batch).await;
             }
             if self.receiver.next().await.is_none() {
                 return;
@@ -199,14 +190,17 @@ impl MeasurementReceiver {
         }
     }
 
-    async fn record(&self, measurement: OutboundMeasurement) {
+    async fn record(&self, batch: MeasurementBatch) {
         let Some(measure) = &self.measure else {
             return;
         };
-        if let Err(error) = measure.record(self.did, measurement.event()).await {
+        if let Err(error) = measure
+            .record_batch(self.did, Authentication::Authenticated, batch)
+            .await
+        {
             tracing::error!(
                 peer = %self.did,
-                event = ?measurement.event(),
+                batch = ?batch,
                 %error,
                 "failed to apply outbound measurement"
             );
@@ -232,12 +226,13 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingMeasure {
-        events: Mutex<Vec<MeasurementEvent>>,
+        batches: Mutex<Vec<MeasurementBatch>>,
     }
 
     #[async_trait]
     impl Measure for RecordingMeasure {
-        async fn incr(&self, _did: Did, _counter: MeasureCounter) {}
+        async fn incr(&self, _did: Did, _authentication: Authentication, _counter: MeasureCounter) {
+        }
 
         async fn get_count(&self, _did: Did, _counter: MeasureCounter) -> u64 {
             0
@@ -246,9 +241,26 @@ mod tests {
         async fn record(
             &self,
             _did: Did,
+            authentication: Authentication,
             event: MeasurementEvent,
         ) -> Result<ApplyOutcome, MeasureError> {
-            lock_or_recover(&self.events).push(event);
+            if matches!(authentication, Authentication::Unauthenticated) {
+                return Ok(ApplyOutcome::IgnoredUnauthenticated);
+            }
+            lock_or_recover(&self.batches).push(MeasurementBatch::single(event));
+            Ok(ApplyOutcome::Applied)
+        }
+
+        async fn record_batch(
+            &self,
+            _did: Did,
+            authentication: Authentication,
+            batch: MeasurementBatch,
+        ) -> Result<ApplyOutcome, MeasureError> {
+            if matches!(authentication, Authentication::Unauthenticated) {
+                return Ok(ApplyOutcome::IgnoredUnauthenticated);
+            }
+            lock_or_recover(&self.batches).push(batch);
             Ok(ApplyOutcome::Applied)
         }
     }
@@ -276,26 +288,30 @@ mod tests {
         drop(recorder);
         receiver.run().await;
 
-        let events = lock_or_recover(&measure.events);
-        assert_eq!(events.len(), 3);
+        let batches = lock_or_recover(&measure.batches);
+        assert_eq!(batches.len(), 2);
         assert_eq!(
-            events
+            batches
                 .iter()
-                .filter(|event| matches!(event, MeasurementEvent::Sent { .. }))
-                .count(),
+                .filter(|batch| matches!(batch.event(), MeasurementEvent::Sent { .. }))
+                .map(|batch| batch.occurrences().get())
+                .sum::<u64>(),
             2
         );
         assert_eq!(
-            events
+            batches
                 .iter()
-                .filter_map(|event| match event {
-                    MeasurementEvent::Sent { useful_bytes } => Some(*useful_bytes),
+                .filter_map(|batch| match batch.event() {
+                    MeasurementEvent::Sent { useful_bytes } => Some(useful_bytes),
                     _ => None,
                 })
                 .sum::<u64>(),
             8
         );
-        assert!(events.contains(&MeasurementEvent::FailedToSend));
+        assert!(batches.iter().any(|batch| {
+            matches!(batch.event(), MeasurementEvent::FailedToSend)
+                && batch.occurrences().get() == 1
+        }));
     }
 
     #[tokio::test]

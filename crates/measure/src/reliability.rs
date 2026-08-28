@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::MeasureError;
+use crate::MeasurementBatch;
 use crate::MeasurementEvent;
 use crate::Metric;
 use crate::PolicyError;
@@ -194,7 +195,11 @@ impl ReliabilityEvidence {
             .saturating_add(self.received)
     }
 
-    fn increment(&mut self, event: MeasurementEvent) -> Result<(), MeasureError> {
+    fn increment_by(
+        &mut self,
+        event: MeasurementEvent,
+        occurrences: NonZeroU64,
+    ) -> Result<(), MeasureError> {
         let (counter, metric) = match event {
             MeasurementEvent::Connected => (&mut self.connected, Metric::Connected),
             MeasurementEvent::Disconnected => (&mut self.disconnected, Metric::Disconnected),
@@ -206,7 +211,7 @@ impl ReliabilityEvidence {
             }
         };
         *counter = counter
-            .checked_add(1)
+            .checked_add(occurrences.get())
             .ok_or(MeasureError::CounterOverflow { metric })?;
         Ok(())
     }
@@ -221,14 +226,20 @@ impl ReliabilityEvidence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ReliabilityWindow {
     epoch_start: Option<UnixTime>,
+    window_seconds: Option<u64>,
     evidence: ReliabilityEvidence,
 }
 
 impl ReliabilityWindow {
     /// Construct an explicit persisted window.
-    pub const fn new(epoch_start: Option<UnixTime>, evidence: ReliabilityEvidence) -> Self {
+    pub const fn new(
+        epoch_start: Option<UnixTime>,
+        window_seconds: Option<u64>,
+        evidence: ReliabilityEvidence,
+    ) -> Self {
         Self {
             epoch_start,
+            window_seconds,
             evidence,
         }
     }
@@ -238,9 +249,26 @@ impl ReliabilityWindow {
         self.epoch_start
     }
 
+    /// Aligned reliability window associated with the retained epoch.
+    pub const fn window_seconds(self) -> Option<u64> {
+        self.window_seconds
+    }
+
     /// Stored evidence before time-based projection.
     pub const fn stored_evidence(self) -> ReliabilityEvidence {
         self.evidence
+    }
+
+    pub(crate) fn ensure_policy(self, policy: ReliabilityPolicy) -> Result<(), MeasureError> {
+        match self.window_seconds {
+            None if self.epoch_start.is_none() => Ok(()),
+            Some(stored_seconds) if stored_seconds == policy.window_seconds() => Ok(()),
+            Some(stored_seconds) => Err(MeasureError::ReliabilityWindowMismatch {
+                stored_seconds,
+                supplied_seconds: policy.window_seconds(),
+            }),
+            None => Err(MeasureError::SnapshotReliabilityWindowMissing),
+        }
     }
 
     /// Return evidence live at `now`; later epochs project to no evidence.
@@ -252,6 +280,7 @@ impl ReliabilityWindow {
         let Some(current) = self.epoch_start else {
             return Ok(ReliabilityEvidence::default());
         };
+        self.ensure_policy(policy)?;
         let observed = policy.epoch_start(now);
         if observed < current {
             return Err(MeasureError::ClockRegression { observed, current });
@@ -263,12 +292,23 @@ impl ReliabilityWindow {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn observe(
         &mut self,
         event: MeasurementEvent,
         at: UnixTime,
         policy: ReliabilityPolicy,
     ) -> Result<(), MeasureError> {
+        self.observe_batch(MeasurementBatch::single(event), at, policy)
+    }
+
+    pub(crate) fn observe_batch(
+        &mut self,
+        batch: MeasurementBatch,
+        at: UnixTime,
+        policy: ReliabilityPolicy,
+    ) -> Result<(), MeasureError> {
+        self.ensure_policy(policy)?;
         let observed = policy.epoch_start(at);
         match self.epoch_start {
             Some(current) if observed < current => {
@@ -278,22 +318,31 @@ impl ReliabilityWindow {
                 self.epoch_start = Some(observed);
                 self.evidence = ReliabilityEvidence::default();
             }
-            None => self.epoch_start = Some(observed),
+            None => {
+                self.epoch_start = Some(observed);
+                self.window_seconds = Some(policy.window_seconds());
+            }
             Some(_) => {}
         }
-        self.evidence.increment(event)
+        self.evidence
+            .increment_by(batch.event(), batch.occurrences())
     }
 
-    pub(crate) fn reconcile_clock(&mut self, now: UnixTime, policy: ReliabilityPolicy) -> bool {
+    pub(crate) fn reconcile_clock(
+        &mut self,
+        now: UnixTime,
+        policy: ReliabilityPolicy,
+    ) -> Result<bool, MeasureError> {
+        self.ensure_policy(policy)?;
         let observed = policy.epoch_start(now);
         let Some(current) = self.epoch_start else {
-            return false;
+            return Ok(false);
         };
         if current <= observed {
-            return false;
+            return Ok(false);
         }
         self.epoch_start = Some(observed);
-        true
+        Ok(true)
     }
 }
 
@@ -411,6 +460,25 @@ mod tests {
             Err(MeasureError::ClockRegression { .. })
         ));
         assert_eq!(window, before);
+    }
+
+    #[test]
+    fn changing_window_at_the_same_time_is_an_explicit_policy_error() {
+        let mut window = ReliabilityWindow::default();
+        let short = policy();
+        let long = ReliabilityPolicy::new(3_600, 1, short.thresholds())
+            .unwrap_or_else(|error| unreachable_policy(error));
+        assert!(window
+            .observe(MeasurementEvent::Connected, UnixTime::from_secs(120), short,)
+            .is_ok());
+
+        assert_eq!(
+            window.evidence_at(UnixTime::from_secs(120), long),
+            Err(MeasureError::ReliabilityWindowMismatch {
+                stored_seconds: 60,
+                supplied_seconds: 3_600,
+            })
+        );
     }
 
     #[test]

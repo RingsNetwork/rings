@@ -13,8 +13,8 @@ use rings_transport::core::callback::TransportCallback;
 use rings_transport::core::transport::WebrtcConnectionState;
 
 use crate::chunk::MessageReassembler;
-use crate::chunk::ReassemblyOutcome;
 use crate::dht::Did;
+use crate::measure::Authentication;
 use crate::message::with_message_variants;
 use crate::message::HandleMsg;
 use crate::message::Message;
@@ -204,10 +204,25 @@ impl InboundProcessor {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(attempt);
     }
 
-    pub(super) async fn record_receive_failure(&self, peer: Option<Did>) {
+    fn peer_authentication(&self, peer: Did) -> Authentication {
+        let Some(attempt) = self.pending_attempt() else {
+            return Authentication::Unauthenticated;
+        };
+        if attempt.peer() == peer && self.transport.is_admitted_connection_attempt(attempt) {
+            Authentication::Authenticated
+        } else {
+            Authentication::Unauthenticated
+        }
+    }
+
+    pub(super) async fn record_receive_failure(
+        &self,
+        peer: Option<Did>,
+        authentication: Authentication,
+    ) {
         if let Some(peer) = peer {
             self.transport
-                .record_peer_message_receive_failed(peer)
+                .record_peer_message_receive_failed(peer, authentication)
                 .await;
         }
     }
@@ -593,29 +608,22 @@ impl InboundProcessor {
         self.callback.on_inbound(payload).await
     }
 
-    pub(super) async fn handle_chunk(&self, chunk: crate::chunk::Chunk) -> ReassemblyOutcome {
-        self.reassembler.lock().await.handle_retained_outcome(chunk)
-    }
-
-    pub(super) async fn remove_expired_reassembly_at(&self, now_ms: u128) {
-        self.reassembler.lock().await.remove_expired_at(now_ms);
-    }
-
     pub(super) async fn decode_verified_payload(
         &self,
         peer: Option<Did>,
+        authentication: Authentication,
         msg: &[u8],
     ) -> crate::error::Result<MessagePayload> {
         let payload = match MessagePayload::from_wire(msg) {
             Ok(payload) => payload,
             Err(e) => {
-                self.record_receive_failure(peer).await;
+                self.record_receive_failure(peer, authentication).await;
                 return Err(e);
             }
         };
         if !(payload.verify() && payload.transaction.verify()) {
             log_inbound_verification_failure(peer, &payload, msg.len());
-            self.record_receive_failure(peer).await;
+            self.record_receive_failure(peer, authentication).await;
             return Err(crate::error::Error::InvalidMessage(
                 "message verification failed or message expired".to_string(),
             ));
@@ -626,10 +634,11 @@ impl InboundProcessor {
     pub(super) async fn validate_preverified_payload(
         &self,
         peer: Option<Did>,
+        authentication: Authentication,
         payload: &MessagePayload,
     ) -> crate::error::Result<()> {
         if payload.is_expired() || payload.transaction.is_expired() {
-            self.record_receive_failure(peer).await;
+            self.record_receive_failure(peer, authentication).await;
             return Err(crate::error::Error::InvalidMessage(
                 "message expired after transport admission".to_string(),
             ));
@@ -640,15 +649,17 @@ impl InboundProcessor {
     pub(super) async fn accept_verified_logical_message(
         &self,
         peer: Option<Did>,
+        authentication: Authentication,
         payload: MessagePayload,
     ) -> crate::error::Result<MessagePayload> {
-        self.validate_preverified_payload(peer, &payload).await?;
+        self.validate_preverified_payload(peer, authentication, &payload)
+            .await?;
         let useful_bytes = u64::try_from(payload.transaction.data.len())
             .map_err(|_| crate::error::Error::MessageSizeOverflow)?;
         if let (Some(peer), Some(attempt)) = (peer, self.pending_attempt()) {
             if attempt.peer() == peer {
                 self.transport
-                    .record_peer_message_received(attempt, useful_bytes)
+                    .record_peer_message_received(attempt, authentication, useful_bytes)
                     .await;
             }
         }
@@ -703,15 +714,27 @@ impl InnerSwarmCallback {
         let _depth_guard = OnMessageRecursionDepthGuard::enter();
 
         let peer = Did::from_str(cid).ok();
+        let authentication = peer.map_or(Authentication::Unauthenticated, |peer| {
+            self.processor.peer_authentication(peer)
+        });
         let prepared = match prepare_transport_frame(peer, msg.as_ref()) {
             Ok(prepared) => prepared,
             Err(error) => {
-                self.processor.record_receive_failure(peer).await;
+                self.processor
+                    .record_receive_failure(peer, authentication)
+                    .await;
                 return Err(error.into());
             }
         };
         self.inbound
-            .submit_prepared(&self.processor, peer, msg, prepared, transport_capacity)
+            .submit_prepared(
+                &self.processor,
+                peer,
+                authentication,
+                msg,
+                prepared,
+                transport_capacity,
+            )
             .await
             .map_err(Into::into)
     }
@@ -740,8 +763,12 @@ impl TransportCallback for InnerSwarmCallback {
     }
 
     async fn on_invalid_inbound_frame(&self, cid: &str) -> Result<(), TransportCallbackError> {
+        let peer = Did::from_str(cid).ok();
+        let authentication = peer.map_or(Authentication::Unauthenticated, |peer| {
+            self.processor.peer_authentication(peer)
+        });
         self.processor
-            .record_receive_failure(Did::from_str(cid).ok())
+            .record_receive_failure(peer, authentication)
             .await;
         Ok(())
     }

@@ -407,7 +407,11 @@ impl SwarmTransport {
             OutboundCompletion::Detached => {
                 let Some(connection) = self.get_and_check_send_connection(did).await else {
                     if records_missing_connection_failure {
-                        self.record_peer_message_send_failed(did).await;
+                        self.record_peer_message_send_failed(
+                            did,
+                            crate::measure::Authentication::Unauthenticated,
+                        )
+                        .await;
                     }
                     return Err(Error::SwarmMissDidInTable(did));
                 };
@@ -568,7 +572,11 @@ impl SwarmTransport {
         }
         if self.admitted_send_connection(did)?.is_none() {
             if records_missing_connection_failure {
-                self.record_peer_message_send_failed(did).await;
+                self.record_peer_message_send_failed(
+                    did,
+                    crate::measure::Authentication::Unauthenticated,
+                )
+                .await;
             }
             return Err(Error::SwarmMissDidInTable(did));
         }
@@ -597,7 +605,11 @@ impl SwarmTransport {
         let handle = handle?;
         let max_message_size = admitted.connection().max_message_size();
         let Some(plan) = WireReserves::PRODUCTION.plan(wire_bytes, max_message_size) else {
-            self.record_peer_message_send_failed(did).await;
+            self.record_peer_message_send_failed(
+                did,
+                crate::measure::Authentication::Authenticated,
+            )
+            .await;
             return Err(Error::PeerMaxMessageSizeTooSmall(max_message_size));
         };
         admitted.ensure_current()?;

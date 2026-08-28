@@ -30,17 +30,26 @@ impl BlockingDisconnectMeasure {
 #[cfg(feature = "dummy")]
 #[async_trait]
 impl Measure for BlockingDisconnectMeasure {
-    async fn incr(&self, did: Did, counter: MeasureCounter) {
+    async fn incr(&self, did: Did, authentication: Authentication, counter: MeasureCounter) {
         if counter == MeasureCounter::Disconnected {
             self.disconnect_started.store(true, Ordering::SeqCst);
             self.disconnect_started_notify.notify_waiters();
             self.release_disconnect.notified().await;
         }
-        self.inner.incr(did, counter).await;
+        self.inner.incr(did, authentication, counter).await;
     }
 
     async fn get_count(&self, did: Did, counter: MeasureCounter) -> u64 {
         self.inner.get_count(did, counter).await
+    }
+
+    async fn record_batch(
+        &self,
+        did: Did,
+        authentication: Authentication,
+        batch: crate::measure::MeasurementBatch,
+    ) -> std::result::Result<ApplyOutcome, MeasureError> {
+        self.inner.record_batch(did, authentication, batch).await
     }
 }
 
