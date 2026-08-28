@@ -3,6 +3,7 @@ use std::io::Read;
 use std::io::Write;
 use std::net::SocketAddrV4;
 use std::time::Duration;
+use std::time::Instant;
 
 use super::*;
 
@@ -45,12 +46,8 @@ async fn privileged_native_tunnel_establishes_and_cleans_up(
         let response = probe_bypass_http(BYPASS_TARGET)
             .await
             .map_err(|error| io_context("bypass HTTP probe", error))?;
-        let socket = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
-        socket
-            .send_to(b"must-capture", (CAPTURE_TARGET, 9))
-            .map_err(|error| io_context("captured UDP injection", error))?;
         let mut packet = vec![0_u8; usize::from(plan.mtu.get())];
-        let captured = tokio::time::timeout(Duration::from_secs(10), async {
+        let capture = tokio::time::timeout(Duration::from_secs(15), async {
             loop {
                 let length = device
                     .read_packet(packet.as_mut_slice())
@@ -73,9 +70,11 @@ async fn privileged_native_tunnel_establishes_and_cleans_up(
                     return Ok(length);
                 }
             }
-        })
-        .await
-        .map_err(|_| std::io::Error::other("timed out waiting for captured packet"))??;
+        });
+        let (captured, injection) = tokio::join!(capture, inject_captured_udp(CAPTURE_TARGET));
+        let captured = captured
+            .map_err(|_| std::io::Error::other("timed out waiting for captured packet"))??;
+        injection?;
         Ok::<_, std::io::Error>((response, captured))
     }
     .await;
@@ -103,6 +102,35 @@ async fn privileged_native_tunnel_establishes_and_cleans_up(
     recovery.reconcile_stale()?;
     assert!(!ledger.exists());
     Ok(())
+}
+
+async fn inject_captured_udp(target: Ipv4Addr) -> std::io::Result<()> {
+    tokio::task::spawn_blocking(move || {
+        let socket = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match socket.send_to(b"must-capture", (target, 9)) {
+                Ok(_) => return Ok(()),
+                Err(error)
+                    if capture_route_may_be_converging(&error) && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(error) => return Err(io_context("captured UDP injection", error)),
+            }
+        }
+    })
+    .await
+    .map_err(|error| {
+        std::io::Error::other(format!("captured UDP injection task failed: {error}"))
+    })?
+}
+
+fn capture_route_may_be_converging(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::HostUnreachable | std::io::ErrorKind::NetworkUnreachable
+    )
 }
 
 fn io_context(operation: &'static str, error: std::io::Error) -> std::io::Error {
