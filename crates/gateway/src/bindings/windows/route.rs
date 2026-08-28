@@ -20,6 +20,7 @@ use windows_sys::Win32::NetworkManagement::IpHelper::ConvertInterfaceLuidToIndex
 use windows_sys::Win32::NetworkManagement::IpHelper::CreateIpForwardEntry2;
 use windows_sys::Win32::NetworkManagement::IpHelper::DeleteIpForwardEntry2;
 use windows_sys::Win32::NetworkManagement::IpHelper::FreeMibTable;
+use windows_sys::Win32::NetworkManagement::IpHelper::GetBestRoute2;
 use windows_sys::Win32::NetworkManagement::IpHelper::GetIpForwardTable2;
 use windows_sys::Win32::NetworkManagement::IpHelper::InitializeIpForwardEntry;
 use windows_sys::Win32::NetworkManagement::IpHelper::MIB_IPFORWARD_ROW2;
@@ -190,6 +191,29 @@ impl RouteManager {
             std::slice::from_raw_parts(first, count)
         };
         Ok(rows.iter().filter_map(row_to_route).collect())
+    }
+
+    pub(crate) fn find_route(&mut self, destination: &IpAddr) -> io::Result<Option<Route>> {
+        // SAFETY: all structures are valid writable values for the duration of the call. The
+        // interface and source pointers are null by contract so Windows chooses the effective
+        // route and source exactly as it would for an unconstrained connection.
+        unsafe {
+            let mut row: MIB_IPFORWARD_ROW2 = std::mem::zeroed();
+            let mut destination_address: SOCKADDR_INET = std::mem::zeroed();
+            let mut best_source_address: SOCKADDR_INET = std::mem::zeroed();
+            write_sockaddr(&mut destination_address, *destination);
+            let status = GetBestRoute2(
+                ptr::null(),
+                0,
+                ptr::null(),
+                &destination_address,
+                0,
+                &mut row,
+                &mut best_source_address,
+            );
+            status_to_result(status)?;
+            Ok(row_to_route(&row))
+        }
     }
 
     pub(crate) fn add(&mut self, route: &Route) -> io::Result<()> {

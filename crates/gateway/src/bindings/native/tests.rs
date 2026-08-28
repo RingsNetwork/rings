@@ -42,9 +42,13 @@ async fn privileged_native_tunnel_establishes_and_cleans_up(
     let ledger_was_written = ledger.exists();
 
     let observation = async {
-        let response = probe_bypass_http(BYPASS_TARGET).await?;
+        let response = probe_bypass_http(BYPASS_TARGET)
+            .await
+            .map_err(|error| io_context("bypass HTTP probe", error))?;
         let socket = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
-        socket.send_to(b"must-capture", (CAPTURE_TARGET, 9))?;
+        socket
+            .send_to(b"must-capture", (CAPTURE_TARGET, 9))
+            .map_err(|error| io_context("captured UDP injection", error))?;
         let mut packet = vec![0_u8; usize::from(plan.mtu.get())];
         let captured = tokio::time::timeout(Duration::from_secs(10), async {
             loop {
@@ -99,6 +103,10 @@ async fn privileged_native_tunnel_establishes_and_cleans_up(
     recovery.reconcile_stale()?;
     assert!(!ledger.exists());
     Ok(())
+}
+
+fn io_context(operation: &'static str, error: std::io::Error) -> std::io::Error {
+    std::io::Error::new(error.kind(), format!("{operation} failed: {error}"))
 }
 
 async fn probe_bypass_http(target: Ipv4Addr) -> std::io::Result<Vec<u8>> {

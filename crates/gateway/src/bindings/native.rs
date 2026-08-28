@@ -207,7 +207,7 @@ impl NativeTunnelControl {
 
         let result: Result<(tun_rs::AsyncDevice, String), GatewayError> = (|| {
             for network in bypass_routes(plan, &self.underlay_targets) {
-                let route = inherit_baseline_route(&baseline, network)?;
+                let route = resolve_current_route(&mut self.manager, network)?;
                 if !baseline.contains(&route) && !installed.contains(&route) {
                     self.install_route(route.clone(), &mut installed)?;
                     installed_bypass.push(route);
@@ -584,6 +584,26 @@ fn inherit_baseline_route(baseline: &[Route], network: IpNet) -> Result<Route, G
             operation: "resolve-bypass-route",
             message: format!("no baseline route reaches {target}"),
         })?;
+    inherit_route(original, network)
+}
+
+fn resolve_current_route(
+    manager: &mut RouteManager,
+    network: IpNet,
+) -> Result<Route, GatewayError> {
+    let target = network.addr();
+    let original = manager
+        .find_route(&target)
+        .map_err(|error| platform_error("resolve-current-bypass-route", error))?
+        .ok_or_else(|| GatewayError::Platform {
+            operation: "resolve-current-bypass-route",
+            message: format!("no current route reaches {target}"),
+        })?;
+    inherit_route(&original, network)
+}
+
+fn inherit_route(original: &Route, network: IpNet) -> Result<Route, GatewayError> {
+    let target = network.addr();
     let mut route = Route::new(network.network(), network.prefix_len());
     if let Some(gateway) = original.gateway() {
         route = route.with_gateway(gateway);
