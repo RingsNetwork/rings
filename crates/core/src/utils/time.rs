@@ -1,5 +1,9 @@
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 use chrono::Utc;
+#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
+pub(crate) use tokio::time::Instant;
+#[cfg(all(feature = "wasm", target_family = "wasm"))]
+pub(crate) use web_time::Instant;
 
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 use super::js_utils;
@@ -7,6 +11,10 @@ use super::js_utils;
 /// Get local utc timestamp (millisecond)
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 pub fn get_epoch_ms() -> u128 {
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    if let Some(now_ms) = crate::simulation::epoch_ms_override() {
+        return now_ms;
+    }
     Utc::now().timestamp_millis() as u128
 }
 
@@ -25,15 +33,28 @@ pub(crate) fn get_epoch_ms_i64() -> i64 {
     i64::try_from(get_epoch_ms()).unwrap_or(i64::MAX)
 }
 
-/// Sleep for `duration` on the active runtime.
+/// Sleep for `duration` without imposing an executor on production callers.
+///
+/// Deterministic dummy simulations use Tokio's paused clock; every other native
+/// caller retains the executor-neutral timer contract of this shared boundary.
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 pub(crate) async fn sleep(duration: std::time::Duration) {
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    if crate::simulation::epoch_ms_override().is_some() {
+        tokio::time::sleep(duration).await;
+        return;
+    }
     futures_timer::Delay::new(duration).await;
 }
 
 /// Wait for `duration`, reporting whether the native timer completed.
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
 pub(crate) async fn try_sleep(duration: std::time::Duration) -> bool {
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    if crate::simulation::epoch_ms_override().is_some() {
+        tokio::time::sleep(duration).await;
+        return true;
+    }
     futures_timer::Delay::new(duration).await;
     true
 }

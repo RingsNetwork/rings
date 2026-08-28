@@ -392,7 +392,10 @@ pub(super) async fn record_measurement(
 /// Frame one chunk into the bytes a data-channel send carries: wrap it in a `MessagePayload`
 /// addressed to `did` and serialize it. Pure (the only failure is serialization).
 pub(super) fn frame_chunk(session_sk: &SessionSk, did: Did, chunk: Chunk) -> Result<Bytes> {
-    MessagePayload::new_send(Message::Chunk(chunk), session_sk, did, did)?.to_wire()
+    let payload = MessagePayload::new_send(Message::Chunk(chunk), session_sk, did, did)?;
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    crate::simulation::record_outbound_submission(payload.transaction.tx_id);
+    payload.to_wire()
 }
 
 fn chunk_send_cancel_reason(

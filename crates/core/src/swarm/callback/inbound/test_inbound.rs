@@ -40,6 +40,20 @@ fn test_reassembly_handoff_blocks_later_data_and_reassembly_until_first_poll() {
     assert!(barrier.has_started());
 }
 
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+#[test]
+fn test_barrier_exemption_ablation_blocks_real_control_lane() {
+    let _runtime = crate::simulation::SimulationRuntimeGuard::enter(
+        43,
+        1_700_000_000_000,
+        crate::simulation::ProtectionProfile::without_barrier_control_exemption(),
+    )
+    .expect("simulation runtime must install");
+    let barrier = ReassemblyHandoffBarrier::new(7);
+
+    assert!(barrier.blocks(DHT_CONTROL_LANE, 8));
+}
+
 #[test]
 fn test_maximum_transport_frame_fits_every_lane_reservation() {
     let reserved = memory_reservation(MAX_DATA_CHANNEL_MESSAGE_SIZE);

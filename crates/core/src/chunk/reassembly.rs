@@ -703,6 +703,15 @@ impl MessageReassembler {
 
         if !pending.is_complete() {
             self.pending.insert(id, pending);
+            #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+            crate::simulation::observe_reassembly_capacity(
+                self.budget.buffered_cost.load(Ordering::Acquire),
+                self.budget.limit,
+                self.buffered_cost,
+                self.limits.max_peer_buffered_cost(),
+                self.pending.len(),
+                self.limits.max_pending_messages,
+            );
             return ReassemblyOutcome::Incomplete;
         }
         let output_cost = pending.data_bytes;
@@ -719,6 +728,15 @@ impl MessageReassembler {
             );
             return ReassemblyOutcome::Rejected(ReassemblyRejection::Capacity);
         }
+        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+        crate::simulation::observe_reassembly_capacity(
+            self.budget.buffered_cost.load(Ordering::Acquire),
+            self.budget.limit,
+            self.buffered_cost,
+            self.limits.max_peer_buffered_cost(),
+            self.pending.len().saturating_add(1),
+            self.limits.max_pending_messages,
+        );
         let done = pending;
         let done_cost = done.cost(self.limits.slot_overhead);
         let expiry = done.ts_ms.saturating_add(done.ttl_ms as u128);

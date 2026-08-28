@@ -130,6 +130,14 @@ fn buffered_submissions(peer: Did) -> usize {
     submitted.saturating_sub(handled)
 }
 
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+fn submitted_transfers(peer: Did) -> usize {
+    lock_counts(&SUBMITTED_TRANSFERS)
+        .get(&peer)
+        .copied()
+        .unwrap_or_default()
+}
+
 pub(super) fn record(peer: Did, class: TransferClass, transfer_id: u64) {
     if let Some(trace) = lock_traces().get_mut(&peer) {
         let frame_ordinal = trace
@@ -154,6 +162,11 @@ impl super::super::SwarmTransport {
     #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn outbound_buffered_submissions_for_test(&self, peer: Did) -> usize {
         buffered_submissions(peer)
+    }
+
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) fn outbound_submitted_transfers_for_test(&self, peer: Did) -> usize {
+        submitted_transfers(peer)
     }
 
     #[cfg(all(feature = "dummy", not(target_family = "wasm")))]

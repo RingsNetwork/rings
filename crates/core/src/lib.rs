@@ -79,6 +79,8 @@ pub mod lifecycle;
 pub mod macros;
 pub mod message;
 pub mod session;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) mod simulation;
 pub mod storage;
 pub mod swarm;
 #[cfg(test)]

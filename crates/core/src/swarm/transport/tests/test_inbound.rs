@@ -483,38 +483,18 @@ fn spawn_inbound_delivery(
     })
 }
 
-async fn saturate_application_lane(
-    transport: &Arc<SwarmTransport>,
-    callback: &Arc<InnerSwarmCallback>,
-) -> Result<Vec<tokio::task::JoinHandle<Result<()>>>> {
+fn hold_saturated_application_capacity(callback: &InnerSwarmCallback) -> Result<Vec<impl Drop>> {
     let lane_capacity = inbound_application_capacity_for_test();
     let peer_capacity = inbound_peer_capacity_for_test();
-    let mut pending_deliveries = Vec::with_capacity(lane_capacity);
-    while pending_deliveries.len() < lane_capacity {
-        let peer_key = SecretKey::random();
-        let peer: Did = peer_key.address().into();
-        let session = SessionSk::new_with_seckey(&peer_key)?;
-        let frame = local_wire(
-            Message::custom(b"application-capacity")?,
-            &session,
-            transport.dht.did,
-        )?;
-        for _ in 0..peer_capacity.min(lane_capacity - pending_deliveries.len()) {
-            pending_deliveries.push(spawn_inbound_delivery(
-                Arc::clone(callback),
-                peer.to_string(),
-                frame.clone(),
-            ));
+    let mut capacity_holds = Vec::with_capacity(lane_capacity);
+    while capacity_holds.len() < lane_capacity {
+        let peer: Did = SecretKey::random().address().into();
+        for _ in 0..peer_capacity.min(lane_capacity - capacity_holds.len()) {
+            capacity_holds.push(callback.hold_application_capacity_for_test(peer)?);
         }
     }
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while callback.inbound_admitted_count_for_test() < lane_capacity {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .map_err(|_| Error::InvalidMessage("application lane did not fill".to_string()))?;
-    Ok(pending_deliveries)
+    assert_eq!(callback.inbound_admitted_count_for_test(), lane_capacity);
+    Ok(capacity_holds)
 }
 
 #[tokio::test]
@@ -795,12 +775,11 @@ async fn test_reassembled_control_shape_is_verified_before_lane_transition() -> 
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
     ))?);
-    let pending_callback = Arc::new(PendingValidateSwarmCallback::default());
     let saturated = Arc::new(InnerSwarmCallback::new(
         Arc::clone(&transport),
-        pending_callback,
+        Arc::new(NoopSwarmCallback),
     ));
-    let pending_deliveries = saturate_application_lane(&transport, &saturated).await?;
+    let capacity_holds = hold_saturated_application_capacity(&saturated)?;
 
     let peer_key = SecretKey::random();
     let peer: Did = peer_key.address().into();
@@ -846,10 +825,7 @@ async fn test_reassembled_control_shape_is_verified_before_lane_transition() -> 
             if message == "message verification failed or message expired"
     ));
 
-    saturated.close_inbound_for_test();
-    for delivery in pending_deliveries {
-        let _ = delivery.await;
-    }
+    drop(capacity_holds);
     Ok(())
 }
 

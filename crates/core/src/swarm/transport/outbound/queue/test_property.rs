@@ -282,3 +282,24 @@ fn test_fourth_control_frame_is_followed_by_waiting_lower_work() {
         TransferClass::Storage,
     ]);
 }
+
+#[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+#[test]
+fn test_bounded_control_burst_ablation_changes_the_real_queue_policy() {
+    let _runtime = crate::simulation::SimulationRuntimeGuard::enter(
+        41,
+        1_700_000_000_000,
+        crate::simulation::ProtectionProfile::without_bounded_control_burst(),
+    )
+    .expect("simulation runtime must install");
+    let mut queue = TransferQueues::default();
+    for id in 0..5 {
+        queue.push(TransferClass::DhtControl, id);
+    }
+    queue.push(TransferClass::Storage, 100);
+
+    let selected = (0..=OUTBOUND_CONTROL_BURST)
+        .map(|_| admit_single_frame(&mut queue).0)
+        .collect::<Vec<_>>();
+    assert_eq!(selected, vec![TransferClass::DhtControl; 5]);
+}

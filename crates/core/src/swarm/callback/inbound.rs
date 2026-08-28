@@ -25,7 +25,6 @@ use futures::stream::FuturesUnordered;
 use futures::FutureExt;
 use futures::StreamExt;
 use rings_transport::core::callback::InboundFrameCapacityLease;
-use web_time::Instant;
 
 use super::InboundProcessor;
 use super::PreparedInboundFrame;
@@ -37,21 +36,25 @@ use crate::fair_admission::CountedReservedCapacity;
 use crate::measure::Authentication;
 use crate::message::MessagePayload;
 use crate::utils::try_sleep;
+use crate::utils::Instant;
 
+mod barrier;
 mod capacity;
 mod deadline;
 mod failure;
 mod lane;
 mod reassembly;
 mod reassembly_clock;
+mod spawn;
 mod ticket;
 
-use capacity::memory_capacity_error;
-use capacity::memory_reservation;
-use capacity::peer_memory_capacity_error;
-use capacity::validate_memory_request;
-use capacity::validate_peer_memory_request;
-
+use self::barrier::lane_waits_for_reassembly;
+use self::barrier::ReassemblyHandoffBarrier;
+use self::capacity::memory_capacity_error;
+use self::capacity::memory_reservation;
+use self::capacity::peer_memory_capacity_error;
+use self::capacity::validate_memory_request;
+use self::capacity::validate_peer_memory_request;
 use self::deadline::await_inbound_deadline;
 use self::deadline::InboundDeadline;
 use self::failure::inbound_failure_error;
@@ -60,6 +63,7 @@ pub(crate) use self::lane::InboundLane;
 use self::lane::INBOUND_LANE_COUNT;
 use self::reassembly::process_chunk_event;
 pub(super) use self::reassembly_clock::ReassemblyCleanupClock;
+use self::spawn::spawn_actor;
 use self::ticket::InboundCommand;
 use self::ticket::InboundSender;
 use self::ticket::InboundTicket;
@@ -211,6 +215,21 @@ impl InboundCapacity {
             }
             Err(CountedReservationRejection::Bytes) => return Err(memory_capacity_error(bytes)),
         }
+        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+        crate::simulation::observe_inbound_capacity(
+            (
+                next_peer.0.admitted_count(),
+                next_peer.0.admitted_bytes(),
+                INBOUND_PEER_CAPACITY,
+                INBOUND_PEER_BYTE_CAPACITY,
+            ),
+            (
+                state.0.admitted_count(),
+                state.0.admitted_bytes(),
+                INBOUND_MAILBOX_CAPACITY,
+                INBOUND_MAILBOX_BYTE_CAPACITY,
+            ),
+        );
         peer_states.insert(peer, next_peer);
         Ok(InboundCapacityPermit {
             capacity: self.clone(),
@@ -285,6 +304,21 @@ impl InboundCapacityPermit {
             Ok(()) => {
                 peer_states.insert(self.peer, next_peer);
                 *state = next;
+                #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+                crate::simulation::observe_inbound_capacity(
+                    (
+                        next_peer.0.admitted_count(),
+                        next_peer.0.admitted_bytes(),
+                        INBOUND_PEER_CAPACITY,
+                        INBOUND_PEER_BYTE_CAPACITY,
+                    ),
+                    (
+                        next.0.admitted_count(),
+                        next.0.admitted_bytes(),
+                        INBOUND_MAILBOX_CAPACITY,
+                        INBOUND_MAILBOX_BYTE_CAPACITY,
+                    ),
+                );
                 self.lane = lane;
                 self.bytes = bytes;
                 Ok(())
@@ -334,6 +368,7 @@ struct InboundEvent {
     payload: MessagePayload,
     prepared_message: Option<crate::message::Message>,
     lane: InboundLane,
+    wire_bytes: usize,
     permit: InboundCapacityPermit,
     reply: InboundReply,
 }
@@ -418,6 +453,7 @@ impl InboundMailbox {
         } = prepared;
         // Core now owns both retained decoded representations. Release the raw
         // bytes and their transport lease together at this handoff boundary.
+        let wire_bytes = bytes.len();
         drop((bytes, transport_capacity));
         ticket.release_admission_turn();
         if !processor.pending_connection_allows_message(peer).await? {
@@ -442,6 +478,7 @@ impl InboundMailbox {
             payload,
             prepared_message: Some(message),
             lane,
+            wire_bytes,
             permit,
             reply,
         })?;
@@ -467,6 +504,15 @@ impl InboundMailbox {
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(super) fn hold_application_admission_for_test(&self) -> Result<impl Drop> {
         self.reserve_ticket(InboundLane::Application)
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(super) fn hold_application_capacity_for_test(
+        &self,
+        peer: crate::dht::Did,
+    ) -> Result<impl Drop> {
+        self.capacity
+            .try_acquire(Some(peer), InboundLane::Application, 1)
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
@@ -670,9 +716,13 @@ impl InboundActor {
             }
             // The nested class is unknown until reassembly completes. Preserve data-plane order
             // across that handoff, while keeping control traffic independent for liveness.
-            if lane.is_logical_data()
-                && reassembly_barrier.is_some_and(|barrier| sequence > barrier)
-            {
+            let waits_for_reassembly = lane_waits_for_reassembly(lane)
+                && reassembly_barrier.is_some_and(|barrier| sequence > barrier);
+            if waits_for_reassembly {
+                #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+                if lane == InboundLane::from_class(crate::message::MessageClass::DhtControl) {
+                    crate::simulation::record_barrier_control_blocked();
+                }
                 continue;
             }
             let Some(event) = self.queues.pop(lane) else {
@@ -820,32 +870,6 @@ impl InboundActor {
     }
 }
 
-struct ReassemblyHandoffBarrier {
-    sequence: u64,
-    started: Arc<AtomicBool>,
-}
-
-impl ReassemblyHandoffBarrier {
-    fn new(sequence: u64) -> Self {
-        Self {
-            sequence,
-            started: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
-    fn start_marker(&self) -> Arc<AtomicBool> {
-        self.started.clone()
-    }
-
-    fn has_started(&self) -> bool {
-        self.started.load(Ordering::Acquire)
-    }
-
-    fn blocks(&self, lane: InboundLane, sequence: u64) -> bool {
-        lane == InboundLane::Reassembly || (lane.is_logical_data() && sequence > self.sequence)
-    }
-}
-
 async fn process_event(
     processor: InboundProcessor,
     event: InboundEvent,
@@ -876,6 +900,8 @@ async fn process_event(
         }
     }
     if event.lane() == InboundLane::Reassembly {
+        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+        crate::simulation::wait_reassembly_service(event.wire_bytes).await;
         let next = process_chunk_event(&processor, event).await;
         return InboundTaskCompletion {
             lane,
@@ -961,34 +987,8 @@ async fn process_logical_message(
     }
 }
 
-async fn decode_payload(
-    processor: &InboundProcessor,
-    peer: Option<Did>,
-    authentication: Authentication,
-    bytes: &[u8],
-) -> Result<MessagePayload> {
-    processor
-        .decode_verified_payload(peer, authentication, bytes)
-        .await
-}
-
 fn finish_reply(reply: InboundReply, result: std::result::Result<(), InboundFailure>) {
     let _ = reply.send(result);
-}
-
-#[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-fn spawn_actor(actor: InboundActor) -> bool {
-    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-        return false;
-    };
-    runtime.spawn(actor.run());
-    true
-}
-
-#[cfg(all(feature = "wasm", target_family = "wasm"))]
-fn spawn_actor(actor: InboundActor) -> bool {
-    wasm_bindgen_futures::spawn_local(actor.run());
-    true
 }
 
 #[cfg(test)]

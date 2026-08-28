@@ -1,4 +1,3 @@
-use super::decode_payload;
 use super::finish_reply;
 use super::memory_reservation;
 use super::InboundEvent;
@@ -98,6 +97,7 @@ pub(super) async fn process_chunk_event(
                 payload: reassembled.payload,
                 prepared_message: Some(reassembled.message),
                 lane: reassembled.lane,
+                wire_bytes: event.wire_bytes,
                 permit: event.permit,
                 reply: event.reply,
             });
@@ -112,11 +112,20 @@ async fn advance_chunk_event(
     processor: &InboundProcessor,
     event: &mut InboundEvent,
 ) -> Result<Option<ReassembledEvent>> {
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    let transaction_id = event.payload.transaction.tx_id;
     let chunk = take_prepared_chunk(&mut event.prepared_message)?;
-    let bytes: crate::chunk::RetainedReassembly = match processor
+    let outcome = processor
         .handle_chunk(event.peer, event.authentication, chunk)
-        .await
-    {
+        .await;
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    if matches!(
+        &outcome,
+        ReassemblyOutcome::Incomplete | ReassemblyOutcome::Complete(_)
+    ) {
+        crate::simulation::record_reassembly_advance(transaction_id);
+    }
+    let bytes: crate::chunk::RetainedReassembly = match outcome {
         ReassemblyOutcome::Complete(bytes) => bytes,
         ReassemblyOutcome::Incomplete
         | ReassemblyOutcome::Rejected(ReassemblyRejection::Capacity)
@@ -132,8 +141,9 @@ async fn advance_chunk_event(
     };
     let reservation = memory_reservation(bytes.as_ref().len());
     event.permit.try_transition(event.lane, reservation)?;
-    let payload =
-        decode_payload(processor, event.peer, event.authentication, bytes.as_ref()).await?;
+    let payload = processor
+        .decode_verified_payload(event.peer, event.authentication, bytes.as_ref())
+        .await?;
     let message = match payload.transaction.data::<crate::message::Message>() {
         Ok(message) => message,
         Err(error) => {

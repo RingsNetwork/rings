@@ -298,6 +298,14 @@ impl InnerSwarmCallback {
     }
 
     #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) fn hold_application_capacity_for_test(
+        &self,
+        peer: Did,
+    ) -> crate::error::Result<impl Drop> {
+        self.inbound.hold_application_capacity_for_test(peer)
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
     pub(crate) fn close_inbound_for_test(&self) {
         self.inbound.close_for_test();
     }

@@ -1,8 +1,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use web_time::Instant;
-
 use super::storage_repair::StorageRepairOutcome;
 use super::Stabilizer;
 use super::STABILIZATION_STEP_TIMEOUT;
@@ -10,6 +8,7 @@ use super::STABILIZATION_STOP_POLL_INTERVAL;
 use crate::lifecycle::StopToken;
 use crate::swarm::transport::DATA_CHANNEL_SEND_ACCEPT_BUDGET;
 use crate::utils::try_sleep;
+use crate::utils::Instant;
 
 /// The quiet phase reserved for topology stabilization before periodic repair.
 const STORAGE_REPAIR_PHASE_OFFSET: Duration = Duration::from_secs(5);
