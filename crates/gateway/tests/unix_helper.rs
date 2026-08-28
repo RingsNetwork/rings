@@ -32,6 +32,10 @@ const CAPTURE_TARGET: Ipv4Addr = Ipv4Addr::new(1, 1, 1, 254);
 const EXTRA_BYPASS_TARGET: Ipv4Addr = Ipv4Addr::new(8, 8, 8, 8);
 const HELPER_START_TIMEOUT: Duration = Duration::from_secs(10);
 const HELPER_EXIT_TIMEOUT: Duration = Duration::from_secs(10);
+#[cfg(target_os = "linux")]
+const HELPER_STATE_PARENT: &str = "/var/run";
+#[cfg(target_os = "macos")]
+const HELPER_STATE_PARENT: &str = "/var/db";
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -40,7 +44,7 @@ type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 async fn privileged_helper_transfers_tun_and_cleans_normal_and_disconnected_leases() -> TestResult {
     let directory = tempfile::Builder::new()
         .prefix("rings-gateway-helper-")
-        .tempdir_in("/var/run")?;
+        .tempdir_in(HELPER_STATE_PARENT)?;
     let socket = directory.path().join("helper.sock");
     let ledger = directory.path().join("routes.json");
     let plan = gateway_plan()?;

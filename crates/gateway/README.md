@@ -43,10 +43,11 @@ target/release/gateway-config-unix \
   --interface rings0
 
 # macOS option: keep elevation explicit and leave the helper in the foreground.
+sudo install -d -o root -g wheel -m 0755 /var/db/rings-gateway
 sudo target/release/gateway-config-unix \
-  --socket "/var/run/rings-gateway-$(id -u).sock" \
+  --socket "/var/db/rings-gateway/helper-$(id -u).sock" \
   --socket-owner "$(id -u)" \
-  --ledger "/var/run/rings-gateway-$(id -u)-routes.json"
+  --ledger "/var/db/rings-gateway/routes-$(id -u).json"
 ```
 
 Both direct parents must belong to the helper's effective UID. Every canonicalized ancestor must
@@ -86,7 +87,7 @@ gateway:
   flow_idle_timeout: 300
   tcp_buffer_bytes: 65536
   # Must exactly match the foreground helper's --socket path.
-  unix_helper_socket: "/var/run/rings-gateway-501.sock"
+  unix_helper_socket: "/var/db/rings-gateway/helper-501.sock"
   # Used directly on Windows; the Unix helper owns its separate --ledger path.
   route_ledger_path: "~/.rings/gateway-routes.json"
   underlay_bypass_targets: []
