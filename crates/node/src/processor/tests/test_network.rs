@@ -220,7 +220,6 @@ async fn test_provider_exposes_sent_and_received_peer_measurements() {
     p1.swarm.set_callback(callback1.clone()).unwrap();
     p2.swarm.set_callback(callback2.clone()).unwrap();
     connect_processors(&p1, &p2, &callback1, &callback2).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
     let sent_before = p1.peer_measurement(p2.did()).await.unwrap();
     let received_before = p2.peer_measurement(p1.did()).await.unwrap();
     let sent_bytes_before = sent_before
@@ -296,7 +295,10 @@ async fn test_provider_exposes_sent_and_received_peer_measurements() {
     );
 
     let list_value = provider
-        .request(Method::ListPeerMeasurements, ListPeerMeasurementsRequest {})
+        .request(Method::ListPeerMeasurements, ListPeerMeasurementsRequest {
+            limit: Some(100),
+            cursor: None,
+        })
         .await
         .unwrap();
     let list_measurements: ListPeerMeasurementsResponse =
@@ -309,6 +311,7 @@ async fn test_provider_exposes_sent_and_received_peer_measurements() {
                 .as_ref()
                 .is_some_and(|credit| credit.bytes_sent_to_peer >= sent_credit.bytes_sent_to_peer())
     }));
+    assert!(list_measurements.next_cursor.is_none());
 }
 
 #[tokio::test]

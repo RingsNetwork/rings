@@ -414,7 +414,10 @@ impl InboundMailbox {
             .acquire(peer, lane, memory_reservation(bytes.len()))?;
         ticket.wait_for_admission_turn().await;
         let PreparedInboundFrame {
-            payload, message, ..
+            payload,
+            message,
+            kind,
+            ..
         } = prepared;
         // Core now owns both retained decoded representations. Release the raw
         // bytes and their transport lease together at this handoff boundary.
@@ -423,10 +426,16 @@ impl InboundMailbox {
         if !processor.pending_connection_allows_message(peer).await? {
             return Ok(());
         }
-        let record_as_logical_message = !matches!(message, crate::message::Message::Chunk(_));
-        let payload = processor
-            .accept_preverified_message(peer, payload, record_as_logical_message)
-            .await?;
+        let payload = if kind.is_chunk() {
+            processor
+                .validate_preverified_payload(peer, &payload)
+                .await?;
+            payload
+        } else {
+            processor
+                .accept_verified_logical_message(peer, payload)
+                .await?
+        };
         let (reply, completion) = oneshot::channel();
         let sequence = ticket.sequence();
         ticket.commit(InboundEvent {
@@ -897,7 +906,7 @@ async fn decode_payload(
     peer: Option<Did>,
     bytes: &[u8],
 ) -> Result<MessagePayload> {
-    processor.decode_verified_message(peer, bytes).await
+    processor.decode_verified_payload(peer, bytes).await
 }
 
 fn finish_reply(reply: InboundReply, result: std::result::Result<(), InboundFailure>) {

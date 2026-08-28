@@ -1,4 +1,7 @@
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
+use std::ops::Bound::Excluded;
+use std::ops::Bound::Unbounded;
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -89,6 +92,12 @@ impl PeerRecord {
             _ => Ok(()),
         }
     }
+
+    fn reconcile_clock(&mut self, now: UnixTime, policy: ReliabilityPolicy) -> bool {
+        let credit_adjusted = self.credit.reconcile_clock(now);
+        let reliability_adjusted = self.reliability.reconcile_clock(now, policy);
+        credit_adjusted || reliability_adjusted
+    }
 }
 
 /// Projected measurement values for one peer at a caller-supplied time.
@@ -104,6 +113,134 @@ pub struct PeerMeasurement<P> {
     pub reliability: ReliabilityEvidence,
     /// Advisory class derived from `reliability`.
     pub reliability_class: ReliabilityClass,
+}
+
+/// A peer whose retained state could not be projected or pruned independently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerMeasurementFailure<P> {
+    peer: P,
+    error: MeasureError,
+}
+
+impl<P> PeerMeasurementFailure<P> {
+    fn new(peer: P, error: MeasureError) -> Self {
+        Self { peer, error }
+    }
+
+    /// Stable peer key associated with the failure.
+    pub const fn peer(&self) -> &P {
+        &self.peer
+    }
+
+    /// Pure model error isolated to this peer.
+    pub const fn error(&self) -> MeasureError {
+        self.error
+    }
+}
+
+/// Partial-success result from projecting every retained peer.
+///
+/// One malformed or future-dated record cannot hide healthy peers. Effectful
+/// adapters should expose `measurements` and log or meter `failures`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MeasurementProjection<P> {
+    measurements: Vec<PeerMeasurement<P>>,
+    failures: Vec<PeerMeasurementFailure<P>>,
+}
+
+/// Bounded partial-success projection over a stable peer-key range.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MeasurementPage<P> {
+    measurements: Vec<PeerMeasurement<P>>,
+    failures: Vec<PeerMeasurementFailure<P>>,
+    next_cursor: Option<P>,
+}
+
+impl<P> MeasurementPage<P> {
+    /// Successfully projected peers among the bounded records scanned.
+    pub fn measurements(&self) -> &[PeerMeasurement<P>] {
+        &self.measurements
+    }
+
+    /// Per-peer failures among the bounded records scanned.
+    pub fn failures(&self) -> &[PeerMeasurementFailure<P>] {
+        &self.failures
+    }
+
+    /// Last scanned key when another retained record remains.
+    pub const fn next_cursor(&self) -> Option<&P> {
+        self.next_cursor.as_ref()
+    }
+
+    /// Consume the page into projections, failures, and its continuation key.
+    pub fn into_parts(
+        self,
+    ) -> (
+        Vec<PeerMeasurement<P>>,
+        Vec<PeerMeasurementFailure<P>>,
+        Option<P>,
+    ) {
+        (self.measurements, self.failures, self.next_cursor)
+    }
+}
+
+impl<P> MeasurementProjection<P> {
+    /// Successfully projected peers in stable key order.
+    pub fn measurements(&self) -> &[PeerMeasurement<P>] {
+        &self.measurements
+    }
+
+    /// Per-peer failures excluded from the successful projection.
+    pub fn failures(&self) -> &[PeerMeasurementFailure<P>] {
+        &self.failures
+    }
+
+    /// Consume the report into successful projections and isolated failures.
+    pub fn into_parts(self) -> (Vec<PeerMeasurement<P>>, Vec<PeerMeasurementFailure<P>>) {
+        (self.measurements, self.failures)
+    }
+}
+
+/// Partial-success result from retention pruning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PruneReport<P> {
+    removed: Vec<P>,
+    failures: Vec<PeerMeasurementFailure<P>>,
+}
+
+impl<P> PruneReport<P> {
+    /// Peer keys removed at the retention boundary.
+    pub fn removed(&self) -> &[P] {
+        &self.removed
+    }
+
+    /// Per-peer failures retained without blocking independent expiry.
+    pub fn failures(&self) -> &[PeerMeasurementFailure<P>] {
+        &self.failures
+    }
+
+    /// Number of records removed by this transition.
+    pub fn removed_count(&self) -> usize {
+        self.removed.len()
+    }
+}
+
+/// Summary of future timestamps clamped to an adapter-supplied wall clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ClockReconciliation {
+    adjusted_records: usize,
+}
+
+impl ClockReconciliation {
+    /// Number of peer records whose credit or reliability timestamp changed.
+    pub const fn adjusted_records(self) -> usize {
+        self.adjusted_records
+    }
+
+    /// Return whether any record required reconciliation.
+    pub const fn is_adjusted(self) -> bool {
+        self.adjusted_records > 0
+    }
 }
 
 /// Pure local state relation keyed by a caller-defined stable peer identifier.
@@ -199,53 +336,129 @@ where P: Clone + Ord
             .get(peer)
             .copied()
             .map(|record| {
-                record.credit.ensure_not_before_last_seen(now)?;
-                let reliability = record.reliability.evidence_at(now, reliability_policy)?;
-                Ok(PeerMeasurement {
-                    peer: peer.clone(),
-                    credit: record.credit,
-                    credit_score: record.credit.score(credit_policy),
-                    reliability,
-                    reliability_class: reliability.classify_with_policy(reliability_policy),
-                })
+                project_record(peer.clone(), record, now, credit_policy, reliability_policy)
             })
             .transpose()
     }
 
-    /// Project every retained peer in stable key order.
+    /// Project every retained peer in stable key order with per-peer failures.
     pub fn measurements(
         &self,
         now: UnixTime,
         credit_policy: CreditPolicy,
         reliability_policy: ReliabilityPolicy,
-    ) -> Result<Vec<PeerMeasurement<P>>, MeasureError> {
-        self.records
-            .keys()
-            .map(|peer| self.measurement(peer, now, credit_policy, reliability_policy))
-            .filter_map(Result::transpose)
-            .collect()
+    ) -> MeasurementProjection<P> {
+        let mut measurements = Vec::with_capacity(self.records.len());
+        let mut failures = Vec::new();
+        for (peer, record) in &self.records {
+            match project_record(
+                peer.clone(),
+                *record,
+                now,
+                credit_policy,
+                reliability_policy,
+            ) {
+                Ok(measurement) => measurements.push(measurement),
+                Err(error) => {
+                    failures.push(PeerMeasurementFailure::new(peer.clone(), error));
+                }
+            }
+        }
+        MeasurementProjection {
+            measurements,
+            failures,
+        }
+    }
+
+    /// Project at most `limit` retained records after an exclusive peer cursor.
+    ///
+    /// Work and allocation are bounded by the requested page plus one key used
+    /// to determine whether another page exists. Projection failures consume a
+    /// page slot and are reported without preventing the cursor from advancing.
+    pub fn measurements_page(
+        &self,
+        after: Option<&P>,
+        limit: NonZeroUsize,
+        now: UnixTime,
+        credit_policy: CreditPolicy,
+        reliability_policy: ReliabilityPolicy,
+    ) -> MeasurementPage<P> {
+        let mut records = match after {
+            Some(peer) => self.records.range((Excluded(peer), Unbounded)),
+            None => self.records.range(..),
+        };
+        let mut measurements = Vec::with_capacity(self.records.len().min(limit.get()));
+        let mut failures = Vec::new();
+        let mut last_scanned = None;
+        for _ in 0..limit.get() {
+            let Some((peer, record)) = records.next() else {
+                break;
+            };
+            last_scanned = Some(peer.clone());
+            match project_record(
+                peer.clone(),
+                *record,
+                now,
+                credit_policy,
+                reliability_policy,
+            ) {
+                Ok(measurement) => measurements.push(measurement),
+                Err(error) => failures.push(PeerMeasurementFailure::new(peer.clone(), error)),
+            }
+        }
+        let next_cursor = if records.next().is_some() {
+            last_scanned
+        } else {
+            None
+        };
+        MeasurementPage {
+            measurements,
+            failures,
+            next_cursor,
+        }
     }
 
     /// Remove records whose authenticated `last_seen` reached the retention boundary.
     ///
-    /// The transition is atomic with respect to clock validation: a regression
-    /// returns an error before any record is removed.
-    pub fn prune(
-        &mut self,
-        now: UnixTime,
-        credit_policy: CreditPolicy,
-    ) -> Result<usize, MeasureError> {
+    /// A future-dated record is retained and reported without preventing other
+    /// peers from expiring.
+    pub fn prune(&mut self, now: UnixTime, credit_policy: CreditPolicy) -> PruneReport<P> {
         let mut expired = Vec::new();
+        let mut failures = Vec::new();
         for (peer, record) in &self.records {
-            if record.credit.is_expired(now, credit_policy)? {
-                expired.push(peer.clone());
+            match record.credit.is_expired(now, credit_policy) {
+                Ok(true) => expired.push(peer.clone()),
+                Ok(false) => {}
+                Err(error) => {
+                    failures.push(PeerMeasurementFailure::new(peer.clone(), error));
+                }
             }
         }
-        let removed = expired.len();
-        for peer in expired {
-            self.records.remove(&peer);
+        for peer in &expired {
+            self.records.remove(peer);
         }
-        Ok(removed)
+        PruneReport {
+            removed: expired,
+            failures,
+        }
+    }
+
+    /// Clamp future timestamps after an external wall-clock regression.
+    ///
+    /// Credit totals and reliability evidence are preserved. `last_seen` is
+    /// clamped to `now`, and a future reliability epoch is moved to the epoch
+    /// containing `now`. This explicit recovery transition lets runtime
+    /// adapters fail open while the default update/query relation continues to
+    /// reject unacknowledged clock rollback.
+    pub fn reconcile_clock(
+        &mut self,
+        now: UnixTime,
+        reliability_policy: ReliabilityPolicy,
+    ) -> ClockReconciliation {
+        let adjusted_records = self.records.values_mut().fold(0, |count, record| {
+            count + usize::from(record.reconcile_clock(now, reliability_policy))
+        });
+        ClockReconciliation { adjusted_records }
     }
 
     /// Produce a deterministic versioned snapshot in peer-key order.
@@ -262,6 +475,24 @@ where P: Clone + Ord
                 .collect(),
         }
     }
+}
+
+fn project_record<P>(
+    peer: P,
+    record: PeerRecord,
+    now: UnixTime,
+    credit_policy: CreditPolicy,
+    reliability_policy: ReliabilityPolicy,
+) -> Result<PeerMeasurement<P>, MeasureError> {
+    record.credit.ensure_not_before_last_seen(now)?;
+    let reliability = record.reliability.evidence_at(now, reliability_policy)?;
+    Ok(PeerMeasurement {
+        peer,
+        credit: record.credit,
+        credit_score: record.credit.score(credit_policy),
+        reliability,
+        reliability_class: reliability.classify_with_policy(reliability_policy),
+    })
 }
 
 #[cfg(test)]
@@ -474,6 +705,167 @@ mod tests {
     }
 
     #[test]
+    fn bulk_projection_and_pruning_isolate_future_dated_peer() {
+        let policy = reliability_policy();
+        let valid = SnapshotRecord {
+            peer: 1_u8,
+            record: PeerRecord::new(
+                CreditRecord::empty(UnixTime::from_secs(10)),
+                ReliabilityWindow::new(
+                    Some(UnixTime::EPOCH),
+                    ReliabilityEvidence::new(1, 0, 0, 0, 0, 0),
+                ),
+            ),
+        };
+        let future = SnapshotRecord {
+            peer: 2_u8,
+            record: PeerRecord::new(
+                CreditRecord::empty(UnixTime::from_secs(100)),
+                ReliabilityWindow::new(
+                    Some(UnixTime::from_secs(60)),
+                    ReliabilityEvidence::new(1, 0, 0, 0, 0, 0),
+                ),
+            ),
+        };
+        let mut ledger = MeasurementLedger::from_snapshot(MeasurementSnapshot {
+            schema_version: MEASUREMENT_SNAPSHOT_VERSION,
+            records: vec![valid, future],
+        })
+        .unwrap_or_else(|error| invalid_fixture(error));
+        let now = UnixTime::from_secs(20);
+
+        let projection = ledger.measurements(now, CreditPolicy::amule(), policy);
+        assert_eq!(
+            projection
+                .measurements()
+                .first()
+                .map(|measurement| measurement.peer),
+            Some(1)
+        );
+        assert_eq!(projection.measurements().len(), 1);
+        assert_eq!(projection.failures().len(), 1);
+        assert_eq!(
+            projection
+                .failures()
+                .first()
+                .map(PeerMeasurementFailure::peer),
+            Some(&2)
+        );
+
+        let retention = CreditPolicy::new(0, 10).unwrap_or_else(|error| unreachable_policy(error));
+        let pruning = ledger.prune(now, retention);
+        assert_eq!(pruning.removed(), &[1]);
+        assert_eq!(pruning.failures().len(), 1);
+        assert!(ledger.record(&2).is_some());
+    }
+
+    #[test]
+    fn bounded_page_projects_only_scanned_records_and_advances_past_failures() {
+        let policy = reliability_policy();
+        let record_at = |last_seen| {
+            PeerRecord::new(
+                CreditRecord::empty(UnixTime::from_secs(last_seen)),
+                ReliabilityWindow::new(
+                    Some(UnixTime::EPOCH),
+                    ReliabilityEvidence::new(1, 0, 0, 0, 0, 0),
+                ),
+            )
+        };
+        let ledger = MeasurementLedger::from_snapshot(MeasurementSnapshot {
+            schema_version: MEASUREMENT_SNAPSHOT_VERSION,
+            records: vec![
+                SnapshotRecord {
+                    peer: 1_u8,
+                    record: record_at(10),
+                },
+                SnapshotRecord {
+                    peer: 2_u8,
+                    record: record_at(10),
+                },
+                SnapshotRecord {
+                    peer: 3_u8,
+                    record: record_at(100),
+                },
+                SnapshotRecord {
+                    peer: 4_u8,
+                    record: record_at(10),
+                },
+            ],
+        })
+        .unwrap_or_else(|error| invalid_fixture(error));
+        let limit = NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN);
+
+        let first = ledger.measurements_page(
+            None,
+            limit,
+            UnixTime::from_secs(20),
+            CreditPolicy::amule(),
+            policy,
+        );
+        assert_eq!(
+            first
+                .measurements()
+                .iter()
+                .map(|measurement| measurement.peer)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert!(first.failures().is_empty());
+        assert_eq!(first.next_cursor(), Some(&2));
+
+        let second = ledger.measurements_page(
+            first.next_cursor(),
+            limit,
+            UnixTime::from_secs(20),
+            CreditPolicy::amule(),
+            policy,
+        );
+        assert_eq!(
+            second
+                .measurements()
+                .first()
+                .map(|measurement| measurement.peer),
+            Some(4)
+        );
+        assert_eq!(second.measurements().len(), 1);
+        assert_eq!(
+            second.failures().first().map(PeerMeasurementFailure::peer),
+            Some(&3)
+        );
+        assert!(second.next_cursor().is_none());
+    }
+
+    #[test]
+    fn explicit_clock_reconciliation_clamps_future_timestamps() {
+        let policy = reliability_policy();
+        let mut ledger = MeasurementLedger::from_snapshot(MeasurementSnapshot {
+            schema_version: MEASUREMENT_SNAPSHOT_VERSION,
+            records: vec![SnapshotRecord {
+                peer: 2_u8,
+                record: PeerRecord::new(
+                    CreditRecord::empty(UnixTime::from_secs(100)),
+                    ReliabilityWindow::new(
+                        Some(UnixTime::from_secs(60)),
+                        ReliabilityEvidence::new(1, 0, 0, 0, 0, 0),
+                    ),
+                ),
+            }],
+        })
+        .unwrap_or_else(|error| invalid_fixture(error));
+        let now = UnixTime::from_secs(20);
+
+        let reconciliation = ledger.reconcile_clock(now, policy);
+
+        assert_eq!(reconciliation.adjusted_records(), 1);
+        let record = ledger.record(&2).unwrap_or_else(|| missing_record());
+        assert_eq!(record.credit().last_seen(), now);
+        assert_eq!(record.reliability().epoch_start(), Some(UnixTime::EPOCH));
+        assert!(ledger
+            .measurement(&2, now, CreditPolicy::amule(), policy)
+            .is_ok());
+    }
+
+    #[test]
     fn pruning_is_idempotent_at_retention_boundary() {
         let mut ledger = MeasurementLedger::<u8>::new();
         assert_eq!(
@@ -487,8 +879,14 @@ mod tests {
             Ok(ApplyOutcome::Applied)
         );
         let expiry = UnixTime::from_secs(10 + CreditPolicy::amule().retention_seconds());
-        assert_eq!(ledger.prune(expiry, CreditPolicy::amule()), Ok(1));
-        assert_eq!(ledger.prune(expiry, CreditPolicy::amule()), Ok(0));
+        assert_eq!(
+            ledger.prune(expiry, CreditPolicy::amule()).removed_count(),
+            1
+        );
+        assert_eq!(
+            ledger.prune(expiry, CreditPolicy::amule()).removed_count(),
+            0
+        );
         assert!(ledger.is_empty());
     }
 

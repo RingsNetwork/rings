@@ -1,5 +1,6 @@
 //! Processor of rings-node rpc server.
 
+use std::num::NonZeroUsize;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,6 +15,7 @@ use rings_core::ecc::SecretKey;
 use rings_core::lifecycle::StopToken;
 use rings_core::measure::MeasureImpl;
 use rings_core::measure::PeerMeasurement;
+use rings_core::measure::PeerMeasurementPage;
 use rings_core::measure::PeerQuality;
 use rings_core::message::e2e;
 use rings_core::message::e2e::E2eHandshakeRequest;
@@ -68,8 +70,6 @@ use crate::prelude::entry;
 use crate::prelude::wasm_export;
 use crate::prelude::ChordStorageInterface;
 use crate::prelude::ChordStorageInterfaceCacheChecker;
-
-const MEASUREMENT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 use crate::prelude::SessionSk;
 use crate::registration::default_advertise_presence;
 use crate::registration::default_online_node_heartbeat_interval_secs;
@@ -80,6 +80,8 @@ use crate::registration::validate_online_node_registration_timing;
 use crate::registration::OnlineNodeRegistration;
 use crate::registration::RegistrationContext;
 use crate::registration::RegistrationTask;
+
+const MEASUREMENT_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
 
 mod builder;
 mod config;
@@ -727,6 +729,15 @@ impl Processor {
         let mut measurements = self.swarm.peer_measurements().await;
         measurements.sort_by_key(|measurement| measurement.did);
         measurements
+    }
+
+    /// Return one bounded page of retained local peer measurements.
+    pub async fn peer_measurements_page(
+        &self,
+        after: Option<Did>,
+        limit: NonZeroUsize,
+    ) -> PeerMeasurementPage {
+        self.swarm.peer_measurements_page(after, limit).await
     }
 
     /// register service

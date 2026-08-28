@@ -29,36 +29,16 @@ pub struct PeerMeasurement {
     pub quality: PeerQuality,
 }
 
-impl PeerMeasurement {
-    /// Read counter-only compatibility evidence for `did`.
-    ///
-    /// Returns `None` when every counter is zero. Counter-only implementations
-    /// cannot provide byte credits and therefore project neutral credit.
-    pub async fn from_measure<M>(measure: &M, did: Did) -> Option<Self>
-    where M: Measure + ?Sized {
-        let evidence = PeerQualityEvidence {
-            connected: measure.get_count(did, MeasureCounter::Connect).await,
-            disconnected: measure.get_count(did, MeasureCounter::Disconnected).await,
-            sent: measure.get_count(did, MeasureCounter::Sent).await,
-            failed_to_send: measure.get_count(did, MeasureCounter::FailedToSend).await,
-            received: measure.get_count(did, MeasureCounter::Received).await,
-            failed_to_receive: measure
-                .get_count(did, MeasureCounter::FailedToReceive)
-                .await,
-        };
-        if evidence.is_unobserved() {
-            return None;
-        }
-        let thresholds = PeerQualityThresholds::new(u64::MAX, u64::MAX, u64::MAX);
-        Some(Self {
-            did,
-            evidence,
-            credit: None,
-            credit_score: rings_measure::CreditScore::NEUTRAL,
-            quality: evidence.classify(thresholds),
-        })
-    }
+/// One bounded page of local peer measurements in DID order.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PeerMeasurementPage {
+    /// Successfully projected measurements in the scanned page.
+    pub measurements: Vec<PeerMeasurement>,
+    /// Exclusive DID cursor for the next page, absent at the end.
+    pub next_cursor: Option<Did>,
+}
 
+impl PeerMeasurement {
     /// Convert a pure generic ledger projection into the Rings DTO boundary.
     pub fn from_projected(projected: rings_measure::PeerMeasurement<Did>) -> Self {
         Self {
@@ -69,6 +49,25 @@ impl PeerMeasurement {
             quality: projected.reliability_class,
         }
     }
+}
+
+/// Read policy-free evidence from a counter-only compatibility implementation.
+///
+/// Classification remains the caller's responsibility; this avoids encoding
+/// the absence of a policy as sentinel failure thresholds.
+pub async fn peer_evidence_from_counters<M>(measure: &M, did: Did) -> Option<PeerQualityEvidence>
+where M: Measure + ?Sized {
+    let evidence = PeerQualityEvidence {
+        connected: measure.get_count(did, MeasureCounter::Connect).await,
+        disconnected: measure.get_count(did, MeasureCounter::Disconnected).await,
+        sent: measure.get_count(did, MeasureCounter::Sent).await,
+        failed_to_send: measure.get_count(did, MeasureCounter::FailedToSend).await,
+        received: measure.get_count(did, MeasureCounter::Received).await,
+        failed_to_receive: measure
+            .get_count(did, MeasureCounter::FailedToReceive)
+            .await,
+    };
+    (!evidence.is_unobserved()).then_some(evidence)
 }
 
 /// Stably order DHT candidates by advisory reliability.

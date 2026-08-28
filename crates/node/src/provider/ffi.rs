@@ -41,7 +41,6 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use futures::executor;
 use rings_core::ecc::PublicKey;
 use rings_core::lifecycle::StopSource;
 use rings_core::message::Message;
@@ -198,8 +197,15 @@ impl ProviderHandle {
     }
 
     fn shutdown(self) {
-        self.stop.request_stop();
-        let listener_threads = match self.listener_threads.into_inner() {
+        let Self {
+            provider,
+            runtime,
+            e2e_events: _,
+            stop,
+            listener_threads,
+        } = self;
+        stop.request_stop();
+        let listener_threads = match listener_threads.into_inner() {
             Ok(listener_threads) => listener_threads,
             Err(poisoned) => poisoned.into_inner(),
         };
@@ -208,8 +214,18 @@ impl ProviderHandle {
                 tracing::warn!("FFI provider listener thread panicked during shutdown");
             }
         }
-        if let Err(error) = self.provider.clear_swarm_callback_internal() {
+        if let Err(error) = provider.clear_swarm_callback_internal() {
             tracing::warn!("failed to clear FFI provider callback during shutdown: {error}");
+        }
+        drop(provider);
+        match Arc::try_unwrap(runtime) {
+            Ok(runtime) => runtime.shutdown_background(),
+            Err(runtime) => {
+                tracing::error!(
+                    "FFI runtime still has owners after listener shutdown; leaking it to avoid a panic across the C ABI"
+                );
+                std::mem::forget(runtime);
+            }
         }
     }
 }
@@ -368,19 +384,30 @@ pub unsafe extern "C" fn rings_node_new_provider_with_callback(
         let acc: String = c_char_to_string(account)?;
         let acc_ty: String = c_char_to_string(account_type)?;
 
-        let provider = executor::block_on(Provider::new_provider_internal(
-            network_id,
-            ice,
-            stabilize_interval,
-            acc,
-            acc_ty,
-            Signer::Sync(Box::new(wrapped_signer(signer))),
-            None,
-            None,
-        ))?;
-        let runtime = Arc::new(Runtime::new().map_err(|error| {
-            Error::ExtensionError(format!("failed to create runtime: {error}"))
-        })?);
+        let creation = std::thread::Builder::new()
+            .name("rings-ffi-provider-init".to_owned())
+            .spawn(move || -> Result<(Provider, Arc<Runtime>)> {
+                let runtime = Arc::new(Runtime::new().map_err(|error| {
+                    Error::ExtensionError(format!("failed to create runtime: {error}"))
+                })?);
+                let provider = runtime.block_on(Provider::new_provider_internal(
+                    network_id,
+                    ice,
+                    stabilize_interval,
+                    acc,
+                    acc_ty,
+                    Signer::Sync(Box::new(wrapped_signer(signer))),
+                    None,
+                    None,
+                ))?;
+                Ok((provider, runtime))
+            })
+            .map_err(|error| {
+                Error::ExtensionError(format!("failed to start FFI provider runtime: {error}"))
+            })?;
+        let (provider, runtime) = creation.join().map_err(|_| {
+            Error::ExtensionError("FFI provider initialization thread panicked".to_owned())
+        })??;
         let provider = Arc::new(provider);
         let backend = Backend::new(provider.clone());
         let e2e_events = Arc::new(Mutex::new(Vec::new()));
@@ -500,5 +527,25 @@ mod tests {
             rings_node_string_free(ptr::null_mut());
             rings_node_provider_destroy(ptr::null_mut());
         }
+    }
+
+    #[tokio::test]
+    async fn test_ffi_provider_creation_and_destroy_are_safe_inside_tokio() {
+        let ice_server = c_string("stun://stun.l.google.com");
+        let account = c_string(TEST_ACCOUNT);
+        let account_type = c_string("eip191");
+        let handle = unsafe {
+            rings_node_new_provider_with_callback(
+                0,
+                ice_server.as_ptr(),
+                1,
+                account.as_ptr(),
+                account_type.as_ptr(),
+                test_signer,
+            )
+        };
+
+        assert!(!handle.is_null());
+        unsafe { rings_node_provider_destroy(handle) };
     }
 }

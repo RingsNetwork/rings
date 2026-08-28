@@ -601,7 +601,7 @@ impl InboundProcessor {
         self.reassembler.lock().await.remove_expired_at(now_ms);
     }
 
-    pub(super) async fn decode_verified_message(
+    pub(super) async fn decode_verified_payload(
         &self,
         peer: Option<Did>,
         msg: &[u8],
@@ -620,32 +620,36 @@ impl InboundProcessor {
                 "message verification failed or message expired".to_string(),
             ));
         }
-        let is_chunk = matches!(payload.transaction.data::<Message>()?, Message::Chunk(_));
-        self.accept_preverified_message(peer, payload, !is_chunk)
-            .await
+        Ok(payload)
     }
 
-    pub(super) async fn accept_preverified_message(
+    pub(super) async fn validate_preverified_payload(
         &self,
         peer: Option<Did>,
-        payload: MessagePayload,
-        record_as_logical_message: bool,
-    ) -> crate::error::Result<MessagePayload> {
+        payload: &MessagePayload,
+    ) -> crate::error::Result<()> {
         if payload.is_expired() || payload.transaction.is_expired() {
             self.record_receive_failure(peer).await;
             return Err(crate::error::Error::InvalidMessage(
                 "message expired after transport admission".to_string(),
             ));
         }
-        if record_as_logical_message {
-            let useful_bytes = u64::try_from(payload.transaction.data.len())
-                .map_err(|_| crate::error::Error::MessageSizeOverflow)?;
-            if let (Some(peer), Some(attempt)) = (peer, self.pending_attempt()) {
-                if attempt.peer() == peer {
-                    self.transport
-                        .record_peer_message_received(attempt, useful_bytes)
-                        .await;
-                }
+        Ok(())
+    }
+
+    pub(super) async fn accept_verified_logical_message(
+        &self,
+        peer: Option<Did>,
+        payload: MessagePayload,
+    ) -> crate::error::Result<MessagePayload> {
+        self.validate_preverified_payload(peer, &payload).await?;
+        let useful_bytes = u64::try_from(payload.transaction.data.len())
+            .map_err(|_| crate::error::Error::MessageSizeOverflow)?;
+        if let (Some(peer), Some(attempt)) = (peer, self.pending_attempt()) {
+            if attempt.peer() == peer {
+                self.transport
+                    .record_peer_message_received(attempt, useful_bytes)
+                    .await;
             }
         }
         Ok(payload)
@@ -655,6 +659,7 @@ impl InboundProcessor {
 pub(super) struct PreparedInboundFrame {
     payload: MessagePayload,
     message: Message,
+    kind: MessageKind,
     lane: InboundLane,
 }
 
@@ -670,10 +675,12 @@ fn prepare_transport_frame(
         ));
     }
     let message = payload.transaction.data::<Message>()?;
-    let lane = InboundLane::from_kind(MessageKind::from_message(&message));
+    let kind = MessageKind::from_message(&message);
+    let lane = InboundLane::from_kind(kind);
     Ok(PreparedInboundFrame {
         payload,
         message,
+        kind,
         lane,
     })
 }

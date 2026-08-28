@@ -82,13 +82,9 @@ impl Measure for CountingMeasure {
 #[async_trait]
 impl BehaviourJudgement for CountingMeasure {
     async fn quality(&self, did: Did) -> PeerQuality {
-        crate::measure::PeerMeasurement::from_measure(self, did)
+        crate::measure::peer_evidence_from_counters(self, did)
             .await
-            .map(|measurement| {
-                measurement
-                    .evidence
-                    .classify(PeerQualityThresholds::new(3, 10, 10))
-            })
+            .map(|evidence| evidence.classify(PeerQualityThresholds::new(3, 10, 10)))
             .unwrap_or(PeerQuality::Unknown)
     }
 

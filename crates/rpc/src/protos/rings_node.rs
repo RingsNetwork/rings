@@ -486,9 +486,14 @@ pub struct PeerMeasurementRequest {
     pub did: String,
 }
 
-/// Request to list measurements for all peers.
+/// Request to list a bounded page of retained peer measurements.
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
-pub struct ListPeerMeasurementsRequest {}
+pub struct ListPeerMeasurementsRequest {
+    /// Maximum entries to return; omitted uses the server default.
+    pub limit: Option<u32>,
+    /// Exclusive DID cursor returned by the previous page.
+    pub cursor: Option<String>,
+}
 
 /// Counter set for peer transport measurements.
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
@@ -546,11 +551,13 @@ pub struct PeerMeasurementInfo {
     pub reliability: PeerReliabilityInfo,
 }
 
-/// Response containing measurements for all measured peers.
+/// Response containing one bounded page of measured peers.
 #[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
 pub struct ListPeerMeasurementsResponse {
     /// Per-peer measurement entries.
     pub measurements: Vec<PeerMeasurementInfo>,
+    /// Exclusive cursor for the next page, absent at the end of the ledger.
+    pub next_cursor: Option<String>,
 }
 
 /// Response containing measurements for one peer.

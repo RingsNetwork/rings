@@ -24,10 +24,10 @@ pub(super) enum OutboundMeasurement {
 }
 
 impl OutboundMeasurement {
-    const fn other(self) -> Self {
+    const fn kind(self) -> OutboundMeasurementKind {
         match self {
-            Self::Sent { .. } => Self::FailedToSend,
-            Self::FailedToSend => Self::Sent { useful_bytes: 0 },
+            Self::Sent { .. } => OutboundMeasurementKind::Sent,
+            Self::FailedToSend => OutboundMeasurementKind::FailedToSend,
         }
     }
 
@@ -35,6 +35,21 @@ impl OutboundMeasurement {
         match self {
             Self::Sent { useful_bytes } => MeasurementEvent::Sent { useful_bytes },
             Self::FailedToSend => MeasurementEvent::FailedToSend,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum OutboundMeasurementKind {
+    Sent,
+    FailedToSend,
+}
+
+impl OutboundMeasurementKind {
+    const fn other(self) -> Self {
+        match self {
+            Self::Sent => Self::FailedToSend,
+            Self::FailedToSend => Self::Sent,
         }
     }
 }
@@ -69,10 +84,14 @@ impl PendingState {
         true
     }
 
-    fn take_next(&mut self, first: OutboundMeasurement) -> Option<OutboundMeasurement> {
-        match first {
-            OutboundMeasurement::Sent { .. } if self.sent_count > 0 => {
+    fn take(&mut self, kind: OutboundMeasurementKind) -> Option<OutboundMeasurement> {
+        match kind {
+            OutboundMeasurementKind::Sent if self.sent_count > 0 => {
                 self.sent_count -= 1;
+                // Constant-space coalescing preserves logical count and total
+                // bytes, not the association between each send and its size.
+                // The accumulated byte total is attached to the final replayed
+                // sent event; the ledger observes the exact count and sum.
                 let useful_bytes = if self.sent_count == 0 {
                     std::mem::take(&mut self.sent_bytes)
                 } else {
@@ -80,31 +99,18 @@ impl PendingState {
                 };
                 Some(OutboundMeasurement::Sent { useful_bytes })
             }
-            OutboundMeasurement::FailedToSend if self.failed_to_send > 0 => {
-                self.failed_to_send -= 1;
-                Some(OutboundMeasurement::FailedToSend)
-            }
-            _ => self.take_other(first),
-        }
-    }
-
-    fn take_other(&mut self, first: OutboundMeasurement) -> Option<OutboundMeasurement> {
-        match first.other() {
-            OutboundMeasurement::Sent { .. } if self.sent_count > 0 => {
-                self.sent_count -= 1;
-                let useful_bytes = if self.sent_count == 0 {
-                    std::mem::take(&mut self.sent_bytes)
-                } else {
-                    0
-                };
-                Some(OutboundMeasurement::Sent { useful_bytes })
-            }
-            OutboundMeasurement::FailedToSend if self.failed_to_send > 0 => {
+            OutboundMeasurementKind::FailedToSend if self.failed_to_send > 0 => {
                 self.failed_to_send -= 1;
                 Some(OutboundMeasurement::FailedToSend)
             }
             _ => None,
         }
+    }
+
+    fn take_next(&mut self, first: OutboundMeasurementKind) -> Option<OutboundMeasurement> {
+        [first, first.other()]
+            .into_iter()
+            .find_map(|kind| self.take(kind))
     }
 }
 
@@ -123,7 +129,7 @@ impl PendingMeasurements {
         lock_or_recover(&self.state).increment(measurement)
     }
 
-    fn take_next(&self, first: OutboundMeasurement) -> Option<OutboundMeasurement> {
+    fn take_next(&self, first: OutboundMeasurementKind) -> Option<OutboundMeasurement> {
         lock_or_recover(&self.state).take_next(first)
     }
 }
@@ -155,7 +161,7 @@ impl MeasurementRecorder {
                 pending,
                 measure,
                 did,
-                next: OutboundMeasurement::Sent { useful_bytes: 0 },
+                next: OutboundMeasurementKind::Sent,
             },
         )
     }
@@ -177,14 +183,14 @@ pub(super) struct MeasurementReceiver {
     pending: Arc<PendingMeasurements>,
     measure: Option<MeasureImpl>,
     did: Did,
-    next: OutboundMeasurement,
+    next: OutboundMeasurementKind,
 }
 
 impl MeasurementReceiver {
     pub(super) async fn run(mut self) {
         loop {
             while let Some(measurement) = self.pending.take_next(self.next) {
-                self.next = measurement.other();
+                self.next = measurement.kind().other();
                 self.record(measurement).await;
             }
             if self.receiver.next().await.is_none() {

@@ -2,6 +2,12 @@ use serde::Deserialize;
 use serde::Serialize;
 
 /// Whether the runtime authenticated the stable identity associated with an event.
+///
+/// This is an explicit proof token at the pure transition boundary. A runtime
+/// whose transport only emits post-verification events will pass
+/// [`Authentication::Authenticated`]; pre-authentication ingress can use the
+/// other variant without gaining credit. Keeping the axis in the pure model
+/// makes the identity gate testable without coupling this crate to a protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Authentication {
     /// The event belongs to a cryptographically authenticated stable peer identity.

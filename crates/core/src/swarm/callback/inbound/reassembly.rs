@@ -73,6 +73,9 @@ async fn advance_chunk_event(
     }
     let lane = InboundLane::from_kind(kind);
     event.permit.try_transition(lane, reservation)?;
+    let payload = processor
+        .accept_verified_logical_message(event.peer, payload)
+        .await?;
     Ok(Some(ReassembledEvent {
         payload,
         message,

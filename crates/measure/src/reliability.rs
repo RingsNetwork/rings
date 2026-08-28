@@ -212,7 +212,12 @@ impl ReliabilityEvidence {
     }
 }
 
-/// One aligned reliability epoch for a peer.
+/// One non-overlapping aligned reliability epoch for a peer.
+///
+/// Evidence belongs only to the represented epoch. Projecting into a later
+/// epoch returns no evidence, so a previously degraded peer becomes unknown at
+/// the next boundary until new observations arrive. This deliberate reset
+/// prevents historical reliability from becoming a long-lived reputation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ReliabilityWindow {
     epoch_start: Option<UnixTime>,
@@ -277,6 +282,18 @@ impl ReliabilityWindow {
             Some(_) => {}
         }
         self.evidence.increment(event)
+    }
+
+    pub(crate) fn reconcile_clock(&mut self, now: UnixTime, policy: ReliabilityPolicy) -> bool {
+        let observed = policy.epoch_start(now);
+        let Some(current) = self.epoch_start else {
+            return false;
+        };
+        if current <= observed {
+            return false;
+        }
+        self.epoch_start = Some(observed);
+        true
     }
 }
 

@@ -196,6 +196,14 @@ impl CreditRecord {
         }
         Ok(())
     }
+
+    pub(crate) fn reconcile_clock(&mut self, now: UnixTime) -> bool {
+        if self.last_seen <= now {
+            return false;
+        }
+        self.last_seen = now;
+        true
+    }
 }
 
 #[cfg(test)]

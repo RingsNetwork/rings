@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -48,6 +49,7 @@ use crate::measure::order_peers_by_quality;
 use crate::measure::MeasureImpl;
 use crate::measure::MeasurementEvent;
 use crate::measure::PeerMeasurement;
+use crate::measure::PeerMeasurementPage;
 use crate::measure::PeerQuality;
 use crate::message::ConnectNodeReport;
 use crate::message::ConnectNodeSend;
@@ -585,6 +587,24 @@ impl SwarmTransport {
                 }
             },
             None => Vec::new(),
+        }
+    }
+
+    /// Return one bounded page of retained local peer measurements.
+    pub(crate) async fn peer_measurements_page(
+        &self,
+        after: Option<Did>,
+        limit: NonZeroUsize,
+    ) -> PeerMeasurementPage {
+        match &self.measure {
+            Some(measure) => match measure.peer_measurements_page(after, limit).await {
+                Ok(page) => page,
+                Err(error) => {
+                    tracing::error!(%error, "failed to project peer measurement page");
+                    PeerMeasurementPage::default()
+                }
+            },
+            None => PeerMeasurementPage::default(),
         }
     }
 

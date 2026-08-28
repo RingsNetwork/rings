@@ -1,3 +1,4 @@
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -18,6 +19,7 @@ use rings_measure::MeasureError;
 use super::MeasureCounter;
 use super::MeasurementEvent;
 use super::PeerMeasurement;
+use super::PeerMeasurementPage;
 use super::PeerQuality;
 
 /// `Measure` is used to assess the reliability of peers by counting their behaviour.
@@ -41,21 +43,16 @@ pub trait Measure {
         did: Did,
         event: MeasurementEvent,
     ) -> Result<ApplyOutcome, MeasureError> {
-        let counter = match event {
-            MeasurementEvent::Connected => MeasureCounter::Connect,
-            MeasurementEvent::Disconnected => MeasureCounter::Disconnected,
-            MeasurementEvent::Sent { .. } => MeasureCounter::Sent,
-            MeasurementEvent::FailedToSend => MeasureCounter::FailedToSend,
-            MeasurementEvent::Received { .. } => MeasureCounter::Received,
-            MeasurementEvent::FailedToReceive => MeasureCounter::FailedToReceive,
-        };
-        self.incr(did, counter).await;
+        self.incr(did, MeasureCounter::from_event(event)).await;
         Ok(ApplyOutcome::Applied)
     }
 
     /// Return the projected local measurement for one peer.
-    async fn peer_measurement(&self, did: Did) -> Result<Option<PeerMeasurement>, MeasureError> {
-        Ok(PeerMeasurement::from_measure(self, did).await)
+    ///
+    /// Counter-only compatibility implementations have no complete policy or
+    /// credit state and therefore return no projection by default.
+    async fn peer_measurement(&self, _did: Did) -> Result<Option<PeerMeasurement>, MeasureError> {
+        Ok(None)
     }
 
     /// Return every retained local peer measurement.
@@ -64,6 +61,18 @@ pub trait Measure {
     /// space and therefore return an empty vector by default.
     async fn peer_measurements(&self) -> Result<Vec<PeerMeasurement>, MeasureError> {
         Ok(Vec::new())
+    }
+
+    /// Return one bounded page after an exclusive DID cursor.
+    ///
+    /// Counter-only compatibility implementations cannot enumerate their key
+    /// space and therefore return an empty page by default.
+    async fn peer_measurements_page(
+        &self,
+        _after: Option<Did>,
+        _limit: NonZeroUsize,
+    ) -> Result<PeerMeasurementPage, MeasureError> {
+        Ok(PeerMeasurementPage::default())
     }
 }
 

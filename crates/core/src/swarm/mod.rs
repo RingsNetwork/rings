@@ -7,6 +7,7 @@ mod builder;
 pub mod callback;
 pub(crate) mod transport;
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::RwLock;
 
@@ -23,6 +24,7 @@ use crate::error::Result;
 use crate::inspect::ConnectionInspect;
 use crate::inspect::SwarmInspect;
 use crate::measure::PeerMeasurement;
+use crate::measure::PeerMeasurementPage;
 use crate::message::DhtProtocolMode;
 use crate::message::Message;
 use crate::message::MessagePayload;
@@ -178,6 +180,15 @@ impl Swarm {
     /// Return every retained local peer measurement.
     pub async fn peer_measurements(&self) -> Vec<PeerMeasurement> {
         self.transport.peer_measurements().await
+    }
+
+    /// Return one bounded page of retained local peer measurements.
+    pub async fn peer_measurements_page(
+        &self,
+        after: Option<Did>,
+        limit: NonZeroUsize,
+    ) -> PeerMeasurementPage {
+        self.transport.peer_measurements_page(after, limit).await
     }
 
     /// Check the status of swarm

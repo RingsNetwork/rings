@@ -130,15 +130,7 @@ impl Measure for RecordingMeasure {
             Ok(mut measurements) => measurements.push((did, event)),
             Err(_) => tracing::error!("RecordingMeasure measurements mutex is poisoned"),
         }
-        let counter = match event {
-            MeasurementEvent::Connected => MeasureCounter::Connect,
-            MeasurementEvent::Disconnected => MeasureCounter::Disconnected,
-            MeasurementEvent::Sent { .. } => MeasureCounter::Sent,
-            MeasurementEvent::FailedToSend => MeasureCounter::FailedToSend,
-            MeasurementEvent::Received { .. } => MeasureCounter::Received,
-            MeasurementEvent::FailedToReceive => MeasureCounter::FailedToReceive,
-        };
-        self.incr(did, counter).await;
+        self.incr(did, MeasureCounter::from_event(event)).await;
         Ok(ApplyOutcome::Applied)
     }
 }

@@ -580,6 +580,53 @@ async fn test_chunk_reassembly_records_one_exact_logical_receive() -> Result<()>
 }
 
 #[tokio::test]
+async fn test_reassembled_undecodable_message_records_one_failure_only() -> Result<()> {
+    let measure = Arc::new(RecordingMeasure::default());
+    let transport = Arc::new(transport_with_measure(measure.clone())?);
+    let peer_key = SecretKey::random();
+    let peer: Did = peer_key.address().into();
+    let peer_session = SessionSk::new_with_seckey(&peer_key)?;
+    let app_callback = Arc::new(CountingSwarmCallback::default());
+    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
+    let (attempt, _offer) = transport
+        .prepare_connection_offer_with_attempt(peer, offer_callback)
+        .await?;
+    let callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone())
+        .with_pending_connection_attempt(attempt);
+    open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
+    callback
+        .on_data_channel_open(&peer.to_string())
+        .await
+        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+    let undecodable = MessagePayload::new_send(
+        vec![0xff_u8; 512],
+        &peer_session,
+        transport.dht.did,
+        transport.dht.did,
+    )?;
+    let chunks: Vec<Chunk> = ChunkList::split(&undecodable.to_wire()?, 32).into();
+    let final_index = chunks.len().saturating_sub(1);
+    assert!(final_index > 0);
+
+    for (index, chunk) in chunks.into_iter().enumerate() {
+        let frame = local_wire(Message::Chunk(chunk), &peer_session, transport.dht.did)?;
+        let delivery = callback
+            .on_admitted_message_for_test(&peer.to_string(), &frame)
+            .await;
+        if index == final_index {
+            assert!(delivery.is_err());
+        } else {
+            delivery.map_err(|error| Error::InvalidMessage(error.to_string()))?;
+        }
+    }
+
+    assert_eq!(failed_receive_count(&measure, peer)?, 1);
+    assert_eq!(successful_receive_count(&measure, peer)?, 0);
+    assert_eq!(app_callback.inbounds(), 0);
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_reassembly_handoff_preserves_data_order_without_blocking_control() -> Result<()> {
     let transport = Arc::new(transport_with_measure(Arc::new(
         RecordingMeasure::default(),
