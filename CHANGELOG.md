@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.18.0
+## 0.19.0
 
 ### Breaking changes
 
