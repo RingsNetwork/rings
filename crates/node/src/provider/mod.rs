@@ -134,6 +134,10 @@ impl Provider {
         self.processor.peer_measurements().await
     }
 
+    pub(crate) async fn flush_measurements(&self) -> Result<()> {
+        self.processor.flush_measurements().await
+    }
+
     /// Create a provider instance with storage name
     pub(crate) async fn new_provider_with_storage_internal(
         config: ProcessorConfig,

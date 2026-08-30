@@ -214,6 +214,7 @@ impl ProviderHandle {
                 tracing::warn!("FFI provider listener thread panicked during shutdown");
             }
         }
+        flush_provider_before_runtime_shutdown(&provider, &runtime);
         if let Err(error) = provider.clear_swarm_callback_internal() {
             tracing::warn!("failed to clear FFI provider callback during shutdown: {error}");
         }
@@ -226,6 +227,28 @@ impl ProviderHandle {
                 );
                 std::mem::forget(runtime);
             }
+        }
+    }
+}
+
+fn flush_provider_before_runtime_shutdown(provider: &Arc<Provider>, runtime: &Arc<Runtime>) {
+    let provider = provider.clone();
+    let runtime = runtime.clone();
+    let flush_thread = std::thread::Builder::new()
+        .name("rings-ffi-measurement-flush".to_owned())
+        .spawn(move || runtime.block_on(provider.flush_measurements()));
+    match flush_thread {
+        Ok(flush_thread) => match flush_thread.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "failed to flush FFI provider measurements during shutdown");
+            }
+            Err(_) => {
+                tracing::warn!("FFI measurement flush thread panicked during shutdown");
+            }
+        },
+        Err(error) => {
+            tracing::warn!(%error, "failed to start FFI measurement flush thread during shutdown");
         }
     }
 }
@@ -325,7 +348,8 @@ pub unsafe extern "C" fn rings_node_string_free(value: *mut c_char) {
 /// Destroy a provider handle returned by [`rings_node_new_provider_with_callback`].
 ///
 /// Passing null is a no-op. The function requests cooperative listener
-/// shutdown, joins listener threads started through [`rings_node_listen`], and
+/// shutdown, joins listener threads started through [`rings_node_listen`],
+/// explicitly flushes measurement state even when listening never started, and
 /// then releases the handle. The pointer is invalid after this call.
 ///
 /// # Safety
@@ -440,14 +464,74 @@ mod tests {
     use std::ffi::CStr;
     use std::ffi::CString;
 
+    use rings_core::dht::Did;
     use rings_core::ecc::signers::eip191;
     use rings_core::ecc::SecretKey;
+    use rings_core::measure::MeasureError;
+    use rings_core::session::SessionSk;
+    use rings_core::storage::KvStorageInterface;
+    use rings_measure::MeasurementSnapshot;
 
     use super::*;
+    use crate::processor::ProcessorConfig;
 
     const TEST_ACCOUNT: &str = "0x11E807fcc88dD319270493fB2e822e388Fe36ab0";
     const TEST_SECRET_KEY: &str =
         "65860affb4b570dba06db294aa7c676f68e04a5bf2721243ad3cbc05a79c68c0";
+
+    #[derive(Clone, Default)]
+    struct ObservedMeasureStorage {
+        value: Arc<Mutex<Option<MeasurementSnapshot<Did>>>>,
+    }
+
+    fn poisoned_measure_storage() -> rings_core::error::Error {
+        std::io::Error::other("observed measurement storage mutex poisoned").into()
+    }
+
+    #[async_trait]
+    impl KvStorageInterface<MeasurementSnapshot<Did>> for ObservedMeasureStorage {
+        async fn get(
+            &self,
+            _key: &str,
+        ) -> rings_core::error::Result<Option<MeasurementSnapshot<Did>>> {
+            self.value
+                .lock()
+                .map(|value| value.clone())
+                .map_err(|_| poisoned_measure_storage())
+        }
+
+        async fn put(
+            &self,
+            _key: &str,
+            value: &MeasurementSnapshot<Did>,
+        ) -> rings_core::error::Result<()> {
+            *self.value.lock().map_err(|_| poisoned_measure_storage())? = Some(value.clone());
+            Ok(())
+        }
+
+        async fn get_all(
+            &self,
+        ) -> rings_core::error::Result<Vec<(String, MeasurementSnapshot<Did>)>> {
+            Ok(Vec::new())
+        }
+
+        async fn remove(&self, _key: &str) -> rings_core::error::Result<()> {
+            *self.value.lock().map_err(|_| poisoned_measure_storage())? = None;
+            Ok(())
+        }
+
+        async fn clear(&self) -> rings_core::error::Result<()> {
+            *self.value.lock().map_err(|_| poisoned_measure_storage())? = None;
+            Ok(())
+        }
+
+        async fn count(&self) -> rings_core::error::Result<u32> {
+            self.value
+                .lock()
+                .map(|value| u32::from(value.is_some()))
+                .map_err(|_| poisoned_measure_storage())
+        }
+    }
 
     extern "C" fn test_signer(data: *const c_char, output: *mut c_char) {
         if data.is_null() || output.is_null() {
@@ -547,5 +631,52 @@ mod tests {
 
         assert!(!handle.is_null());
         unsafe { rings_node_provider_destroy(handle) };
+    }
+
+    #[test]
+    fn test_ffi_destroy_without_listen_flushes_dirty_measurements() {
+        let runtime = Arc::new(Runtime::new().expect("test runtime must initialize"));
+        let storage = ObservedMeasureStorage::default();
+        let provider = runtime
+            .block_on(async {
+                let session_sk = SessionSk::new_with_seckey(&SecretKey::random())?;
+                let config = ProcessorConfig::new(
+                    0,
+                    "stun://stun.l.google.com:19302".to_owned(),
+                    session_sk,
+                    1,
+                );
+                Provider::new_provider_with_storage_internal(
+                    config,
+                    None,
+                    Some(Box::new(storage.clone())),
+                )
+                .await
+            })
+            .expect("test provider must initialize");
+        let provider = Arc::new(provider);
+        let peer: Did = SecretKey::random().address().into();
+        runtime
+            .block_on(
+                provider
+                    .processor
+                    .record_locally_addressed_send_failure_for_test(peer),
+            )
+            .expect("test mutation must be applied");
+        ProviderHandle::new(provider, runtime, Arc::new(Mutex::new(Vec::new()))).shutdown();
+
+        let snapshot = storage
+            .value
+            .lock()
+            .expect("observed storage mutex must remain available")
+            .clone()
+            .expect("destroy must flush the dirty measurement snapshot");
+        let ledger = rings_measure::MeasurementLedger::from_snapshot(snapshot).unwrap_or_else(
+            |error: MeasureError| panic!("flushed snapshot must validate: {error}"),
+        );
+        let record = ledger
+            .record(&peer)
+            .expect("locally addressed failure must be retained");
+        assert_eq!(record.reliability().stored_evidence().failed_to_send, 1);
     }
 }

@@ -415,15 +415,17 @@ impl HandleRpc<ListPeerMeasurementsRequest, ListPeerMeasurementsResponse> for Pr
 fn peer_measurement_page_request(
     request: &ListPeerMeasurementsRequest,
 ) -> Result<(Option<Did>, NonZeroUsize)> {
-    let limit = request.limit.unwrap_or(DEFAULT_PEER_MEASUREMENT_PAGE_SIZE);
-    if limit == 0 || limit > MAX_PEER_MEASUREMENT_PAGE_SIZE {
-        return Err(Error::invalid_params(format!(
-            "measurement page limit must be between 1 and {MAX_PEER_MEASUREMENT_PAGE_SIZE}"
-        )));
-    }
+    let requested = request.limit.unwrap_or(DEFAULT_PEER_MEASUREMENT_PAGE_SIZE);
+    let limit = usize::try_from(requested)
+        .ok()
+        .and_then(NonZeroUsize::new)
+        .filter(|limit| limit.get() <= MAX_PEER_MEASUREMENT_PAGE_SIZE as usize)
+        .ok_or_else(|| {
+            Error::invalid_params(format!(
+                "measurement page limit must be between 1 and {MAX_PEER_MEASUREMENT_PAGE_SIZE}"
+            ))
+        })?;
     let after = request.cursor.as_deref().map(s2d).transpose()?;
-    let limit = NonZeroUsize::new(limit as usize)
-        .ok_or_else(|| Error::invalid_params("measurement page limit must be greater than zero"))?;
     Ok((after, limit))
 }
 

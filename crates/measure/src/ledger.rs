@@ -23,13 +23,13 @@ use crate::SnapshotRecord;
 use crate::UnixTime;
 use crate::MEASUREMENT_SNAPSHOT_VERSION;
 
-/// Default hard bound on authenticated peer records retained by one ledger.
+/// Default hard bound on attributable peer records retained by one ledger.
 ///
 /// Adapters with a different memory budget can construct a ledger with
-/// [`MeasurementLedger::with_max_records`]. The bound turns identity rotation
-/// into a typed rejected transition instead of unbounded resident and snapshot
-/// state.
-pub const DEFAULT_MAX_RETAINED_PEERS: usize = 16_384;
+/// [`MeasurementLedger::with_max_records`]. At the bound, a successful event for
+/// a new peer deterministically replaces the stalest record, keeping resident
+/// and snapshot state bounded under identity rotation.
+pub const DEFAULT_MAX_RETAINED_PEERS: NonZeroUsize = NonZeroUsize::MIN.saturating_add(16_383);
 
 /// Pure credit and reliability state for one peer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -110,15 +110,25 @@ impl PeerRecord {
         }
     }
 
-    fn reconcile_clock(
+    fn reconcile_runtime(
         &mut self,
         now: UnixTime,
         policy: ReliabilityPolicy,
-    ) -> Result<bool, MeasureError> {
+    ) -> RecordReconciliation {
+        let reliability_reset = self.reliability.reset_for_policy_change(policy);
         let credit_adjusted = self.credit.reconcile_clock(now);
-        let reliability_adjusted = self.reliability.reconcile_clock(now, policy)?;
-        Ok(credit_adjusted || reliability_adjusted)
+        let reliability_adjusted = self.reliability.reconcile_clock(now, policy);
+        RecordReconciliation {
+            clock_adjusted: credit_adjusted || reliability_adjusted,
+            reliability_reset,
+        }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct RecordReconciliation {
+    clock_adjusted: bool,
+    reliability_reset: bool,
 }
 
 /// Projected measurement values for one peer at a caller-supplied time.
@@ -246,21 +256,27 @@ impl<P> PruneReport<P> {
     }
 }
 
-/// Summary of future timestamps clamped to an adapter-supplied wall clock.
+/// Summary of runtime-policy and wall-clock recovery transitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct ClockReconciliation {
-    adjusted_records: usize,
+pub struct LedgerReconciliation {
+    clock_adjusted_records: usize,
+    reliability_reset_records: usize,
 }
 
-impl ClockReconciliation {
-    /// Number of peer records whose credit or reliability timestamp changed.
-    pub const fn adjusted_records(self) -> usize {
-        self.adjusted_records
+impl LedgerReconciliation {
+    /// Number of peer records whose credit or reliability timestamp was clamped.
+    pub const fn clock_adjusted_records(self) -> usize {
+        self.clock_adjusted_records
     }
 
-    /// Return whether any record required reconciliation.
+    /// Number of peer records whose short-term evidence used an obsolete window.
+    pub const fn reliability_reset_records(self) -> usize {
+        self.reliability_reset_records
+    }
+
+    /// Return whether any record changed and therefore requires persistence.
     pub const fn is_adjusted(self) -> bool {
-        self.adjusted_records > 0
+        self.clock_adjusted_records > 0 || self.reliability_reset_records > 0
     }
 }
 
@@ -273,7 +289,7 @@ impl ClockReconciliation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MeasurementLedger<P> {
     records: BTreeMap<P, PeerRecord>,
-    max_records: usize,
+    max_records: NonZeroUsize,
 }
 
 impl<P> Default for MeasurementLedger<P>
@@ -299,21 +315,21 @@ where P: Ord
     pub const fn with_max_records(max_records: NonZeroUsize) -> Self {
         Self {
             records: BTreeMap::new(),
-            max_records: max_records.get(),
+            max_records,
         }
     }
 
-    /// Maximum number of authenticated peer records this ledger can retain.
+    /// Maximum number of attributable peer records this ledger can retain.
     pub const fn max_records(&self) -> usize {
-        self.max_records
+        self.max_records.get()
     }
 
-    /// Number of retained authenticated peer records.
+    /// Number of retained attributable peer records.
     pub fn len(&self) -> usize {
         self.records.len()
     }
 
-    /// Return whether no authenticated peer record is retained.
+    /// Return whether no attributable peer record is retained.
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
     }
@@ -326,7 +342,10 @@ where P: Ord
         event: MeasurementEvent,
         at: UnixTime,
         reliability_policy: ReliabilityPolicy,
-    ) -> Result<ApplyOutcome, MeasureError> {
+    ) -> Result<ApplyOutcome, MeasureError>
+    where
+        P: Clone,
+    {
         self.apply_batch(
             peer,
             authentication,
@@ -339,7 +358,10 @@ where P: Ord
     /// Apply a homogeneous batch as one atomic peer transition.
     ///
     /// On any counter, clock, or policy error, both byte credit and reliability
-    /// evidence retain their complete prior state.
+    /// evidence retain their complete prior state. A successful new-peer
+    /// transition at capacity evicts the record with the earliest `last_seen`;
+    /// peer-key order breaks timestamp ties. This deterministic LRU policy keeps
+    /// active peers measurable without exceeding the configured bound.
     pub fn apply_batch(
         &mut self,
         peer: P,
@@ -347,23 +369,36 @@ where P: Ord
         batch: MeasurementBatch,
         at: UnixTime,
         reliability_policy: ReliabilityPolicy,
-    ) -> Result<ApplyOutcome, MeasureError> {
-        if matches!(authentication, Authentication::Unauthenticated) {
-            return Ok(ApplyOutcome::IgnoredUnauthenticated);
+    ) -> Result<ApplyOutcome, MeasureError>
+    where
+        P: Clone,
+    {
+        if !authentication.permits(batch.event()) {
+            return Ok(ApplyOutcome::IgnoredUnattributable);
         }
-
-        if !self.records.contains_key(&peer) && self.records.len() >= self.max_records {
-            return Err(MeasureError::RetainedPeerLimitExceeded {
-                max: self.max_records,
-            });
-        }
-
+        let is_new_peer = !self.records.contains_key(&peer);
         let current = self
             .records
             .get(&peer)
             .copied()
             .unwrap_or_else(|| PeerRecord::empty(at));
         let next = current.transition_batch(batch, at, reliability_policy)?;
+        if is_new_peer && self.records.len() >= self.max_records.get() {
+            let stalest = self
+                .records
+                .iter()
+                .min_by(|(left_peer, left_record), (right_peer, right_record)| {
+                    left_record
+                        .credit
+                        .last_seen()
+                        .cmp(&right_record.credit.last_seen())
+                        .then_with(|| left_peer.cmp(right_peer))
+                })
+                .map(|(oldest_peer, _)| oldest_peer.clone());
+            if let Some(stalest) = stalest {
+                self.records.remove(&stalest);
+            }
+        }
         self.records.insert(peer, next);
         Ok(ApplyOutcome::Applied)
     }
@@ -394,10 +429,7 @@ where P: Ord
 
     /// Validate and restore a ledger snapshot.
     pub fn from_snapshot(snapshot: MeasurementSnapshot<P>) -> Result<Self, MeasureError> {
-        Self::from_snapshot_with_max_records(
-            snapshot,
-            NonZeroUsize::new(DEFAULT_MAX_RETAINED_PEERS).unwrap_or(NonZeroUsize::MIN),
-        )
+        Self::from_snapshot_with_max_records(snapshot, DEFAULT_MAX_RETAINED_PEERS)
     }
 
     /// Validate and restore a ledger snapshot under an explicit non-zero retained-peer bound.
@@ -426,7 +458,7 @@ where P: Ord
         }
         Ok(Self {
             records,
-            max_records: max_records.get(),
+            max_records,
         })
     }
 }
@@ -528,7 +560,7 @@ where P: Clone + Ord
         }
     }
 
-    /// Remove records whose authenticated `last_seen` reached the retention boundary.
+    /// Remove records whose attributable `last_seen` reached the retention boundary.
     ///
     /// A future-dated record is retained and reported without preventing other
     /// peers from expiring.
@@ -553,26 +585,24 @@ where P: Clone + Ord
         }
     }
 
-    /// Clamp future timestamps after an external wall-clock regression.
+    /// Reconcile persisted advisory state with the active runtime policy and clock.
     ///
-    /// Credit totals and reliability evidence are preserved. `last_seen` is
-    /// clamped to `now`, and a future reliability epoch is moved to the epoch
-    /// containing `now`. This explicit recovery transition lets runtime
-    /// adapters fail open while the default update/query relation continues to
-    /// reject unacknowledged clock rollback.
-    pub fn reconcile_clock(
+    /// Credit totals are always preserved. A future `last_seen` is clamped to
+    /// `now`; a future reliability epoch moves to the epoch containing `now`.
+    /// Reliability evidence recorded under a different aligned-window duration
+    /// is reset because it cannot be projected into the new epoch relation.
+    pub fn reconcile_runtime(
         &mut self,
         now: UnixTime,
         reliability_policy: ReliabilityPolicy,
-    ) -> Result<ClockReconciliation, MeasureError> {
-        for record in self.records.values() {
-            record.reliability.ensure_policy(reliability_policy)?;
-        }
-        let mut adjusted_records = 0;
+    ) -> LedgerReconciliation {
+        let mut reconciliation = LedgerReconciliation::default();
         for record in self.records.values_mut() {
-            adjusted_records += usize::from(record.reconcile_clock(now, reliability_policy)?);
+            let adjusted = record.reconcile_runtime(now, reliability_policy);
+            reconciliation.clock_adjusted_records += usize::from(adjusted.clock_adjusted);
+            reconciliation.reliability_reset_records += usize::from(adjusted.reliability_reset);
         }
-        Ok(ClockReconciliation { adjusted_records })
+        reconciliation
     }
 
     /// Produce a deterministic versioned snapshot in peer-key order.

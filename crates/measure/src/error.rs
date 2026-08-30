@@ -17,12 +17,6 @@ pub enum PolicyError {
 /// Failure of a pure measurement state transition or snapshot validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum MeasureError {
-    /// A new authenticated peer would exceed the ledger's retained-record bound.
-    #[error("measurement retained-peer limit {max} reached")]
-    RetainedPeerLimitExceeded {
-        /// Configured maximum number of retained peer records.
-        max: usize,
-    },
     /// A checked counter update exceeded `u64::MAX`.
     #[error("measurement counter overflow: {metric:?}")]
     CounterOverflow {

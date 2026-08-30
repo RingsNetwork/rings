@@ -1,6 +1,28 @@
 use super::*;
 
 #[tokio::test]
+async fn test_missing_connection_records_locally_addressed_failure() -> Result<()> {
+    let measure = Arc::new(FailedSendMeasure::default());
+    let measure_impl: MeasureImpl = measure.clone();
+    let node = prepare_node_with_measure(SecretKey::random(), measure_impl)?;
+    let peer: Did = SecretKey::random().address().into();
+
+    let error = node
+        .swarm
+        .send_direct_message(Message::custom(b"missing-connection")?, peer)
+        .await
+        .expect_err("a direct send without a connection must fail");
+
+    assert!(matches!(error, Error::SwarmMissDidInTable(missing) if missing == peer));
+    assert_eq!(
+        measure.count(),
+        1,
+        "a locally selected destination DID makes the failed send attributable"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_detached_delivery_timeout_releases_transfer_capacity() -> Result<()> {
     let measure = Arc::new(FailedSendMeasure::default());
     let measure_impl: MeasureImpl = measure.clone();

@@ -24,17 +24,15 @@ use super::PeerMeasurement;
 use super::PeerMeasurementPage;
 use super::PeerQuality;
 
-/// `Measure` is used to assess the reliability of peers by counting their behaviour.
-/// It currently count the number of sent and received messages in a given period (1 hour).
-/// The method [Measure::incr] should be called in the proper places.
+/// Runtime boundary for local peer-credit and reliability observations.
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait Measure {
-    /// Increment a legacy counter for an already-authenticated peer.
+    /// Increment a legacy counter whose peer attribution was already established.
     ///
     /// New transport code should use [`Self::record`] so the authentication
     /// state remains explicit at the runtime boundary.
-    async fn incr(&self, did: Did, authentication: Authentication, counter: MeasureCounter);
+    async fn incr(&self, did: Did, counter: MeasureCounter);
     /// `get_count` returns the counter of the given peer.
     async fn get_count(&self, did: Did, counter: MeasureCounter) -> u64;
 
@@ -49,24 +47,34 @@ pub trait Measure {
         authentication: Authentication,
         event: MeasurementEvent,
     ) -> Result<ApplyOutcome, MeasureError> {
-        if matches!(authentication, Authentication::Unauthenticated) {
-            return Ok(ApplyOutcome::IgnoredUnauthenticated);
+        if !authentication.permits(event) {
+            return Ok(ApplyOutcome::IgnoredUnattributable);
         }
-        self.incr(did, authentication, MeasureCounter::from_event(event))
-            .await;
+        self.incr(did, MeasureCounter::from_event(event)).await;
         Ok(ApplyOutcome::Applied)
     }
 
     /// Record a homogeneous batch as one atomic logical transition.
     ///
-    /// Implementations must preserve both occurrence count and aggregate useful
-    /// bytes without exposing a partially applied prefix.
+    /// The provided compatibility implementation is deliberately non-atomic and
+    /// projects only occurrence counts through [`Self::incr`]. Byte-aware or
+    /// transactional implementations must override it to preserve aggregate
+    /// useful bytes and all-or-nothing application.
     async fn record_batch(
         &self,
         did: Did,
         authentication: Authentication,
         batch: MeasurementBatch,
-    ) -> Result<ApplyOutcome, MeasureError>;
+    ) -> Result<ApplyOutcome, MeasureError> {
+        if !authentication.permits(batch.event()) {
+            return Ok(ApplyOutcome::IgnoredUnattributable);
+        }
+        let counter = MeasureCounter::from_event(batch.event());
+        for _ in 0..batch.occurrences().get() {
+            self.incr(did, counter).await;
+        }
+        Ok(ApplyOutcome::Applied)
+    }
 
     /// Return the projected local measurement for one peer.
     ///
@@ -106,11 +114,4 @@ pub trait BehaviourJudgement: Measure {
     /// This value is advisory. It orders connection attempts and does not gate
     /// Chord membership, routing, ownership, or storage placement.
     async fn quality(&self, did: Did) -> PeerQuality;
-
-    /// Return the legacy boolean judgement for callers that need a yes/no decision.
-    ///
-    /// This method is intentionally independent from [Self::quality]. Mapping
-    /// the three-valued quality order to a boolean would turn advisory DHT
-    /// scheduling evidence into a hidden gating rule.
-    async fn good(&self, did: Did) -> bool;
 }

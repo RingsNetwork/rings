@@ -231,8 +231,7 @@ mod tests {
 
     #[async_trait]
     impl Measure for RecordingMeasure {
-        async fn incr(&self, _did: Did, _authentication: Authentication, _counter: MeasureCounter) {
-        }
+        async fn incr(&self, _did: Did, _counter: MeasureCounter) {}
 
         async fn get_count(&self, _did: Did, _counter: MeasureCounter) -> u64 {
             0
@@ -244,8 +243,8 @@ mod tests {
             authentication: Authentication,
             event: MeasurementEvent,
         ) -> Result<ApplyOutcome, MeasureError> {
-            if matches!(authentication, Authentication::Unauthenticated) {
-                return Ok(ApplyOutcome::IgnoredUnauthenticated);
+            if !authentication.permits(event) {
+                return Ok(ApplyOutcome::IgnoredUnattributable);
             }
             lock_or_recover(&self.batches).push(MeasurementBatch::single(event));
             Ok(ApplyOutcome::Applied)
@@ -257,8 +256,8 @@ mod tests {
             authentication: Authentication,
             batch: MeasurementBatch,
         ) -> Result<ApplyOutcome, MeasureError> {
-            if matches!(authentication, Authentication::Unauthenticated) {
-                return Ok(ApplyOutcome::IgnoredUnauthenticated);
+            if !authentication.permits(batch.event()) {
+                return Ok(ApplyOutcome::IgnoredUnattributable);
             }
             lock_or_recover(&self.batches).push(batch);
             Ok(ApplyOutcome::Applied)
@@ -269,10 +268,6 @@ mod tests {
     impl BehaviourJudgement for RecordingMeasure {
         async fn quality(&self, _did: Did) -> PeerQuality {
             PeerQuality::Unknown
-        }
-
-        async fn good(&self, _did: Did) -> bool {
-            true
         }
     }
 

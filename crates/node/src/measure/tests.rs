@@ -238,18 +238,24 @@ async fn memory_measure(clock: Arc<ManualMeasureClock>) -> PeriodicMeasure {
         .unwrap_or_else(|error| panic!("memory measurement must initialize: {error}"))
 }
 
+#[cfg(not(all(feature = "browser", target_family = "wasm")))]
+#[test]
+fn native_construction_without_tokio_returns_typed_error() {
+    let result = futures::executor::block_on(PeriodicMeasure::new(Box::new(MemStorage::new())));
+    assert!(matches!(
+        result,
+        Err(MeasureRuntimeError::RuntimeUnavailable(_))
+    ));
+}
+
 #[tokio::test]
 async fn compatibility_counters_follow_the_live_epoch() {
     let clock = Arc::new(ManualMeasureClock::new(10));
     let measure = memory_measure(clock.clone()).await;
-    measure
-        .incr(did(), Authentication::Authenticated, MeasureCounter::Sent)
-        .await;
-    measure
-        .incr(did(), Authentication::Authenticated, MeasureCounter::Sent)
-        .await;
+    measure.incr(did(), MeasureCounter::Sent).await;
+    measure.incr(did(), MeasureCounter::Sent).await;
     assert_eq!(measure.get_count(did(), MeasureCounter::Sent).await, 2);
-    clock.advance(DURATION);
+    clock.advance(RELIABILITY_WINDOW.get());
     assert_eq!(measure.get_count(did(), MeasureCounter::Sent).await, 0);
 }
 
@@ -547,6 +553,44 @@ async fn startup_reconciles_future_snapshot_timestamps() {
 }
 
 #[tokio::test]
+async fn startup_migrates_obsolete_reliability_window_without_losing_credit() {
+    let storage = MemStorage::new();
+    let old_policy = ReliabilityPolicy::new(60, 1, peer_quality_thresholds())
+        .unwrap_or_else(|error| panic!("old fixture policy must be valid: {error}"));
+    let mut ledger = MeasurementLedger::new();
+    ledger
+        .apply(
+            did(),
+            Authentication::Authenticated,
+            MeasurementEvent::Sent { useful_bytes: 41 },
+            UnixTime::from_secs(120),
+            old_policy,
+        )
+        .unwrap_or_else(|error| panic!("fixture event must apply: {error}"));
+    storage
+        .put(SNAPSHOT_KEY, &ledger.snapshot())
+        .await
+        .unwrap_or_else(|error| panic!("fixture snapshot must persist: {error}"));
+
+    let measure =
+        PeriodicMeasure::new_with_clock(Box::new(storage), Arc::new(ManualMeasureClock::new(120)))
+            .await
+            .unwrap_or_else(|error| panic!("window migration must not abort startup: {error}"));
+    let projected = measure
+        .peer_measurement(did())
+        .await
+        .unwrap_or_else(|error| panic!("projection must succeed after migration: {error}"))
+        .unwrap_or_else(|| panic!("migrated record must remain visible"));
+
+    assert_eq!(
+        projected.credit.map(|credit| credit.bytes_sent_to_peer()),
+        Some(41)
+    );
+    assert!(projected.evidence.is_unobserved());
+    assert!(lock_or_recover(&measure.state.runtime).dirty);
+}
+
+#[tokio::test]
 async fn live_query_reconciles_a_wall_clock_regression() {
     let clock = Arc::new(ManualMeasureClock::new(100));
     let measure = memory_measure(clock.clone()).await;
@@ -577,13 +621,7 @@ async fn live_query_reconciles_a_wall_clock_regression() {
 async fn bulk_query_includes_retained_peer_without_connection_enumeration() {
     let clock = Arc::new(ManualMeasureClock::new(10));
     let measure = memory_measure(clock).await;
-    measure
-        .incr(
-            did(),
-            Authentication::Authenticated,
-            MeasureCounter::Connect,
-        )
-        .await;
+    measure.incr(did(), MeasureCounter::Connect).await;
     let all = measure
         .peer_measurements()
         .await
@@ -605,7 +643,7 @@ async fn bounded_query_uses_an_exclusive_did_cursor() {
             .await
             .unwrap_or_else(|error| panic!("fixture measurement must apply: {error}"));
     }
-    let limit = NonZeroUsize::new(2).unwrap_or(NonZeroUsize::MIN);
+    let limit = NonZeroUsize::MIN.saturating_add(1);
 
     let first = measure
         .peer_measurements_page(None, limit)
@@ -641,22 +679,10 @@ async fn repeated_disconnections_degrade_peer_quality() {
     let clock = Arc::new(ManualMeasureClock::new(10));
     let measure = memory_measure(clock).await;
     assert_eq!(measure.quality(did()).await, PeerQuality::Unknown);
-    measure
-        .incr(
-            did(),
-            Authentication::Authenticated,
-            MeasureCounter::Connect,
-        )
-        .await;
+    measure.incr(did(), MeasureCounter::Connect).await;
     assert_eq!(measure.quality(did()).await, PeerQuality::Healthy);
     for _ in 0..crate::consts::CONNECT_FAILED_LIMIT {
-        measure
-            .incr(
-                did(),
-                Authentication::Authenticated,
-                MeasureCounter::Disconnected,
-            )
-            .await;
+        measure.incr(did(), MeasureCounter::Disconnected).await;
     }
     assert_eq!(measure.quality(did()).await, PeerQuality::Degraded);
 }

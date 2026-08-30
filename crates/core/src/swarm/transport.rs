@@ -569,7 +569,7 @@ impl SwarmTransport {
                 }
                 self.record_peer_message_send_failed(
                     peer,
-                    crate::measure::Authentication::Unauthenticated,
+                    crate::measure::Authentication::LocallyAddressed,
                 )
                 .await;
                 return Err(e);

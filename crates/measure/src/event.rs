@@ -3,19 +3,36 @@ use std::num::NonZeroU64;
 use serde::Deserialize;
 use serde::Serialize;
 
-/// Whether the runtime authenticated the stable identity associated with an event.
+/// Why an observation can be attributed to a stable peer identity.
 ///
-/// This is an explicit proof token at the pure transition boundary. A runtime
-/// whose transport only emits post-verification events will pass
-/// [`Authentication::Authenticated`]; pre-authentication ingress can use the
-/// other variant without gaining credit. Keeping the axis in the pure model
-/// makes the identity gate testable without coupling this crate to a protocol.
+/// This is an explicit proof token at the pure transition boundary. Inbound
+/// observations require a cryptographically verified peer. An outbound failure
+/// may instead be attributed to the stable DID selected by the local caller;
+/// it makes no remote identity claim. Pre-authentication ingress remains
+/// unattributable and cannot change the ledger.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Authentication {
     /// The event belongs to a cryptographically authenticated stable peer identity.
     Authenticated,
+    /// Local code explicitly addressed the event to this stable peer identity.
+    ///
+    /// This variant is valid only for locally originated observations, such as
+    /// [`MeasurementEvent::FailedToSend`] when no connection exists. It must
+    /// never authenticate bytes or claims received from the network.
+    LocallyAddressed,
     /// The transport has not authenticated the stable peer identity.
     Unauthenticated,
+}
+
+impl Authentication {
+    /// Return whether this proof source permits attribution of `event`.
+    pub const fn permits(self, event: MeasurementEvent) -> bool {
+        match self {
+            Self::Authenticated => true,
+            Self::LocallyAddressed => matches!(event, MeasurementEvent::FailedToSend),
+            Self::Unauthenticated => false,
+        }
+    }
 }
 
 /// One logical local observation about a remote peer.
@@ -34,6 +51,10 @@ pub enum MeasurementEvent {
         useful_bytes: u64,
     },
     /// One logical message could not be delivered to the peer.
+    ///
+    /// A failure after selecting a destination DID is locally attributable even
+    /// when no authenticated connection exists. Remote-originated failures still
+    /// require authenticated ingress.
     FailedToSend,
     /// One logical message from the peer was fully received and verified.
     Received {
@@ -103,8 +124,8 @@ pub enum Metric {
 /// Result of applying an observation at the authentication boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApplyOutcome {
-    /// The authenticated observation changed the peer record.
+    /// The attributable observation changed the peer record.
     Applied,
-    /// The observation was ignored because no stable peer identity was authenticated.
-    IgnoredUnauthenticated,
+    /// The proof source cannot attribute this event to the supplied peer.
+    IgnoredUnattributable,
 }

@@ -500,18 +500,7 @@ impl FailedSendMeasure {
 
 #[async_trait]
 impl Measure for FailedSendMeasure {
-    async fn incr(
-        &self,
-        _did: Did,
-        authentication: crate::measure::Authentication,
-        counter: MeasureCounter,
-    ) {
-        if matches!(
-            authentication,
-            crate::measure::Authentication::Unauthenticated
-        ) {
-            return;
-        }
+    async fn incr(&self, _did: Did, counter: MeasureCounter) {
         if counter == MeasureCounter::FailedToSend {
             self.count.fetch_add(1, Ordering::AcqRel);
         }
@@ -524,30 +513,6 @@ impl Measure for FailedSendMeasure {
             0
         }
     }
-
-    async fn record_batch(
-        &self,
-        _did: Did,
-        authentication: crate::measure::Authentication,
-        batch: crate::measure::MeasurementBatch,
-    ) -> std::result::Result<crate::measure::ApplyOutcome, crate::measure::MeasureError> {
-        if matches!(
-            authentication,
-            crate::measure::Authentication::Unauthenticated
-        ) {
-            return Ok(crate::measure::ApplyOutcome::IgnoredUnauthenticated);
-        }
-        if matches!(
-            batch.event(),
-            crate::measure::MeasurementEvent::FailedToSend
-        ) {
-            self.count.fetch_add(
-                usize::try_from(batch.occurrences().get()).unwrap_or(usize::MAX),
-                Ordering::AcqRel,
-            );
-        }
-        Ok(crate::measure::ApplyOutcome::Applied)
-    }
 }
 
 #[async_trait]
@@ -555,20 +520,11 @@ impl BehaviourJudgement for FailedSendMeasure {
     async fn quality(&self, _did: Did) -> PeerQuality {
         PeerQuality::Unknown
     }
-
-    async fn good(&self, _did: Did) -> bool {
-        true
-    }
 }
 
 #[async_trait]
 impl Measure for PendingMeasure {
-    async fn incr(
-        &self,
-        _did: Did,
-        _authentication: crate::measure::Authentication,
-        _counter: MeasureCounter,
-    ) {
+    async fn incr(&self, _did: Did, _counter: MeasureCounter) {
         self.started.store(true, Ordering::Release);
         pending::<()>().await;
     }
@@ -576,27 +532,12 @@ impl Measure for PendingMeasure {
     async fn get_count(&self, _did: Did, _counter: MeasureCounter) -> u64 {
         0
     }
-
-    async fn record_batch(
-        &self,
-        _did: Did,
-        _authentication: crate::measure::Authentication,
-        _batch: crate::measure::MeasurementBatch,
-    ) -> std::result::Result<crate::measure::ApplyOutcome, crate::measure::MeasureError> {
-        self.started.store(true, Ordering::Release);
-        pending::<()>().await;
-        Ok(crate::measure::ApplyOutcome::Applied)
-    }
 }
 
 #[async_trait]
 impl BehaviourJudgement for PendingMeasure {
     async fn quality(&self, _did: Did) -> PeerQuality {
         PeerQuality::Unknown
-    }
-
-    async fn good(&self, _did: Did) -> bool {
-        true
     }
 }
 

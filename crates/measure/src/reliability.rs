@@ -32,7 +32,7 @@ impl ReliabilityThresholds {
 /// Policy for recent local transport reliability.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReliabilityPolicy {
-    window_seconds: u64,
+    window_seconds: NonZeroU64,
     minimum_positive_observations: u64,
     thresholds: ReliabilityThresholds,
 }
@@ -45,7 +45,7 @@ impl ReliabilityPolicy {
         thresholds: ReliabilityThresholds,
     ) -> Self {
         Self {
-            window_seconds: window_seconds.get(),
+            window_seconds,
             minimum_positive_observations,
             thresholds,
         }
@@ -72,7 +72,7 @@ impl ReliabilityPolicy {
 
     /// Window size in seconds.
     pub const fn window_seconds(self) -> u64 {
-        self.window_seconds
+        self.window_seconds.get()
     }
 
     /// Minimum successful observations required before a peer becomes healthy.
@@ -86,7 +86,7 @@ impl ReliabilityPolicy {
     }
 
     fn epoch_start(self, at: UnixTime) -> UnixTime {
-        UnixTime::from_secs(at.as_secs() - at.as_secs() % self.window_seconds)
+        UnixTime::from_secs(at.as_secs() - at.as_secs() % self.window_seconds.get())
     }
 }
 
@@ -328,21 +328,26 @@ impl ReliabilityWindow {
             .increment_by(batch.event(), batch.occurrences())
     }
 
-    pub(crate) fn reconcile_clock(
-        &mut self,
-        now: UnixTime,
-        policy: ReliabilityPolicy,
-    ) -> Result<bool, MeasureError> {
-        self.ensure_policy(policy)?;
+    pub(crate) fn reconcile_clock(&mut self, now: UnixTime, policy: ReliabilityPolicy) -> bool {
         let observed = policy.epoch_start(now);
         let Some(current) = self.epoch_start else {
-            return Ok(false);
+            return false;
         };
         if current <= observed {
-            return Ok(false);
+            return false;
         }
         self.epoch_start = Some(observed);
-        Ok(true)
+        true
+    }
+
+    pub(crate) fn reset_for_policy_change(&mut self, policy: ReliabilityPolicy) -> bool {
+        let has_mismatched_epoch =
+            self.epoch_start.is_some() && self.window_seconds != Some(policy.window_seconds());
+        if !has_mismatched_epoch {
+            return false;
+        }
+        *self = Self::default();
+        true
     }
 }
 

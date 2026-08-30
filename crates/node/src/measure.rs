@@ -31,10 +31,6 @@ use rings_measure::MeasurementSnapshot;
 use rings_measure::ReliabilityPolicy;
 use rings_measure::UnixTime;
 
-#[cfg(test)]
-const DURATION: u64 = 1;
-#[cfg(not(test))]
-const DURATION: u64 = 60 * 60;
 // Legacy `PeriodicMeasure/counters/...` values intentionally remain unread:
 // a bare count proves neither byte-credit direction nor a live epoch timestamp.
 const SNAPSHOT_KEY: &str = "MeasurementLedger/v1";
@@ -43,12 +39,14 @@ const PERSISTENCE_SHUTDOWN_ATTEMPTS: usize = 3;
 const PRUNE_INTERVAL_SECONDS: u64 = 60 * 60;
 #[cfg(test)]
 const PERSISTENCE_MIN_INTERVAL: Duration = Duration::from_millis(50);
+// The first mutation and every later coalesced snapshot intentionally wait for
+// this interval. A hard crash may lose at most one interval of advisory state.
 #[cfg(not(test))]
 const PERSISTENCE_MIN_INTERVAL: Duration = Duration::from_secs(60);
-const RELIABILITY_WINDOW: NonZeroU64 = match NonZeroU64::new(DURATION) {
-    Some(window) => window,
-    None => panic!("measurement reliability window must be non-zero"),
-};
+#[cfg(test)]
+const RELIABILITY_WINDOW: NonZeroU64 = NonZeroU64::MIN;
+#[cfg(not(test))]
+const RELIABILITY_WINDOW: NonZeroU64 = NonZeroU64::MIN.saturating_add(3_599);
 
 /// Shared peer-quality thresholds used by measurement and route selection.
 pub(crate) const fn peer_quality_thresholds() -> PeerQualityThresholds {
@@ -94,6 +92,10 @@ pub enum MeasureRuntimeError {
     /// The browser could not schedule a measurement timer.
     #[error("measurement timer failed: {0}")]
     Timer(String),
+    /// Native construction was attempted without a live Tokio runtime.
+    #[cfg(not(all(feature = "browser", target_family = "wasm")))]
+    #[error("measurement persistence requires a live Tokio runtime: {0}")]
+    RuntimeUnavailable(String),
 }
 
 /// Pure-ledger runtime adapter with coalesced asynchronous snapshot persistence.
@@ -111,6 +113,8 @@ struct MeasureState {
     runtime: Mutex<RuntimeLedger>,
     persistence_lock: AsyncMutex<()>,
     clock: Arc<dyn MeasureClock>,
+    #[cfg(not(all(feature = "browser", target_family = "wasm")))]
+    runtime_handle: tokio::runtime::Handle,
 }
 
 impl MeasureState {
@@ -160,6 +164,10 @@ impl MeasureClock for SystemMeasureClock {
 
 impl PeriodicMeasure {
     /// Load the complete ledger once and start the coalescing persistence task.
+    ///
+    /// On native targets this captures the active Tokio runtime handle. The
+    /// constructor returns `MeasureRuntimeError::RuntimeUnavailable` instead
+    /// of panicking when called outside a live runtime.
     pub async fn new(storage: MeasureStorage) -> Result<Self, MeasureRuntimeError> {
         Self::new_with_clock(storage, Arc::new(SystemMeasureClock)).await
     }
@@ -168,17 +176,21 @@ impl PeriodicMeasure {
         storage: MeasureStorage,
         clock: Arc<dyn MeasureClock>,
     ) -> Result<Self, MeasureRuntimeError> {
+        #[cfg(not(all(feature = "browser", target_family = "wasm")))]
+        let runtime_handle = tokio::runtime::Handle::try_current()
+            .map_err(|error| MeasureRuntimeError::RuntimeUnavailable(error.to_string()))?;
         let storage = SharedMeasureStorage::from(storage);
         let mut ledger = match storage.get(SNAPSHOT_KEY).await? {
             Some(snapshot) => MeasurementLedger::from_snapshot(snapshot)?,
             None => MeasurementLedger::new(),
         };
         let now = clock.now();
-        let reconciliation = ledger.reconcile_clock(now, reliability_policy())?;
+        let reconciliation = ledger.reconcile_runtime(now, reliability_policy());
         if reconciliation.is_adjusted() {
             tracing::warn!(
-                adjusted_records = reconciliation.adjusted_records(),
-                "reconciled future measurement timestamps during startup"
+                clock_adjusted_records = reconciliation.clock_adjusted_records(),
+                reliability_reset_records = reconciliation.reliability_reset_records(),
+                "reconciled measurement state during startup"
             );
         }
         let pruning = ledger.prune(now, CreditPolicy::amule());
@@ -197,6 +209,8 @@ impl PeriodicMeasure {
             }),
             persistence_lock: AsyncMutex::new(()),
             clock,
+            #[cfg(not(all(feature = "browser", target_family = "wasm")))]
+            runtime_handle,
         });
         let (mut persistence_wake, receiver) = mpsc::channel(PERSISTENCE_WAKE_CAPACITY);
         spawn_persistence_worker(state.clone(), receiver);
@@ -257,8 +271,13 @@ impl PeriodicMeasure {
         if reconciled {
             self.wake_persistence();
         }
-        let Ok(Some(measurement)) = measurement else {
-            return 0;
+        let measurement = match measurement {
+            Ok(Some(measurement)) => measurement,
+            Ok(None) => return 0,
+            Err(error) => {
+                tracing::warn!(peer = %did, %error, "failed to project measurement counter");
+                return 0;
+            }
         };
         let evidence = measurement.reliability;
         match counter {
@@ -296,7 +315,8 @@ type FlushSender = futures::channel::oneshot::Sender<Result<(), MeasureRuntimeEr
 
 #[cfg(not(all(feature = "browser", target_family = "wasm")))]
 fn spawn_bounded_flush(state: Arc<MeasureState>, sender: FlushSender) {
-    tokio::spawn(async move {
+    let runtime_handle = state.runtime_handle.clone();
+    runtime_handle.spawn(async move {
         let _ = sender.send(flush_state(&state).await);
     });
 }
@@ -340,15 +360,16 @@ fn reconcile_runtime_clock(
         return Ok(false);
     }
     runtime.last_clock = now;
-    let reconciliation = runtime.ledger.reconcile_clock(now, reliability_policy())?;
+    let reconciliation = runtime.ledger.reconcile_runtime(now, reliability_policy());
     runtime.next_prune_at = next_prune_time(&runtime.ledger, now);
     if !reconciliation.is_adjusted() {
         return Ok(false);
     }
     mark_runtime_dirty(runtime);
     tracing::warn!(
-        adjusted_records = reconciliation.adjusted_records(),
-        "reconciled future measurement timestamps after wall-clock regression"
+        clock_adjusted_records = reconciliation.clock_adjusted_records(),
+        reliability_reset_records = reconciliation.reliability_reset_records(),
+        "reconciled measurement state after wall-clock regression"
     );
     Ok(true)
 }
@@ -408,7 +429,8 @@ fn lock_or_recover<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 #[cfg(not(all(feature = "browser", target_family = "wasm")))]
 fn spawn_persistence_worker(state: Arc<MeasureState>, receiver: mpsc::Receiver<()>) {
-    tokio::spawn(run_persistence_worker(state, receiver));
+    let runtime_handle = state.runtime_handle.clone();
+    runtime_handle.spawn(run_persistence_worker(state, receiver));
 }
 
 #[cfg(all(feature = "browser", target_family = "wasm"))]
@@ -506,6 +528,9 @@ async fn wait_for_retry_or_close_with_delay(
 }
 
 async fn persist_final_with_retries(state: &MeasureState) {
+    // Shutdown retries are deliberately back-to-back: this path must remain
+    // bounded and can recover immediate backend races, but must not add another
+    // timer dependency while the owning runtime is stopping.
     for attempt in 1..=PERSISTENCE_SHUTDOWN_ATTEMPTS {
         match persist_pending_once(state).await {
             Ok(()) => return,
@@ -544,8 +569,11 @@ async fn persist_pending_once(state: &MeasureState) -> Result<(), MeasureRuntime
 #[cfg_attr(feature = "node", async_trait)]
 #[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
 impl Measure for PeriodicMeasure {
-    async fn incr(&self, did: Did, authentication: Authentication, counter: MeasureCounter) {
-        if let Err(error) = self.record(did, authentication, counter.into_event()).await {
+    async fn incr(&self, did: Did, counter: MeasureCounter) {
+        if let Err(error) = self
+            .record(did, Authentication::Authenticated, counter.into_event())
+            .await
+        {
             tracing::error!(peer = %did, %error, "failed to apply compatibility measurement");
         }
     }
@@ -682,10 +710,6 @@ impl measure::BehaviourJudgement for PeriodicMeasure {
                 PeerQuality::Unknown
             }
         }
-    }
-
-    async fn good(&self, did: Did) -> bool {
-        !matches!(self.quality(did).await, PeerQuality::Degraded)
     }
 }
 

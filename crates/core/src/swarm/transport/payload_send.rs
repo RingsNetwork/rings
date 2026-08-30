@@ -409,7 +409,7 @@ impl SwarmTransport {
                     if records_missing_connection_failure {
                         self.record_peer_message_send_failed(
                             did,
-                            crate::measure::Authentication::Unauthenticated,
+                            crate::measure::Authentication::LocallyAddressed,
                         )
                         .await;
                     }
@@ -574,7 +574,7 @@ impl SwarmTransport {
             if records_missing_connection_failure {
                 self.record_peer_message_send_failed(
                     did,
-                    crate::measure::Authentication::Unauthenticated,
+                    crate::measure::Authentication::LocallyAddressed,
                 )
                 .await;
             }

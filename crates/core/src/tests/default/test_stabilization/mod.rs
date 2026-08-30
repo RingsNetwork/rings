@@ -56,18 +56,7 @@ struct CountingMeasure {
 
 #[async_trait]
 impl Measure for CountingMeasure {
-    async fn incr(
-        &self,
-        did: Did,
-        authentication: crate::measure::Authentication,
-        counter: MeasureCounter,
-    ) {
-        if matches!(
-            authentication,
-            crate::measure::Authentication::Unauthenticated
-        ) {
-            return;
-        }
+    async fn incr(&self, did: Did, counter: MeasureCounter) {
         match self.counters.lock() {
             Ok(mut counters) => counters.push((did, counter)),
             Err(_) => tracing::error!("CountingMeasure counters mutex is poisoned"),
@@ -88,29 +77,6 @@ impl Measure for CountingMeasure {
             }
         }
     }
-
-    async fn record_batch(
-        &self,
-        did: Did,
-        authentication: crate::measure::Authentication,
-        batch: crate::measure::MeasurementBatch,
-    ) -> std::result::Result<crate::measure::ApplyOutcome, crate::measure::MeasureError> {
-        if matches!(
-            authentication,
-            crate::measure::Authentication::Unauthenticated
-        ) {
-            return Ok(crate::measure::ApplyOutcome::IgnoredUnauthenticated);
-        }
-        for _ in 0..batch.occurrences().get() {
-            self.incr(
-                did,
-                authentication,
-                MeasureCounter::from_event(batch.event()),
-            )
-            .await;
-        }
-        Ok(crate::measure::ApplyOutcome::Applied)
-    }
 }
 
 #[async_trait]
@@ -120,10 +86,6 @@ impl BehaviourJudgement for CountingMeasure {
             .await
             .map(|evidence| evidence.classify(PeerQualityThresholds::new(3, 10, 10)))
             .unwrap_or(PeerQuality::Unknown)
-    }
-
-    async fn good(&self, did: Did) -> bool {
-        self.quality(did).await != PeerQuality::Degraded
     }
 }
 

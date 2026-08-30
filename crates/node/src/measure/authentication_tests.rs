@@ -28,7 +28,7 @@ async fn unauthenticated_identity_flood_does_not_consume_retained_peer_capacity(
             .await
             .unwrap_or_else(|error| panic!("measurement must initialize: {error}"));
 
-    for raw_peer in 0..=DEFAULT_MAX_RETAINED_PEERS {
+    for raw_peer in 0..=DEFAULT_MAX_RETAINED_PEERS.get() {
         let raw_peer = u32::try_from(raw_peer)
             .unwrap_or_else(|error| panic!("fixture peer id must fit u32: {error}"));
         assert_eq!(
@@ -39,7 +39,7 @@ async fn unauthenticated_identity_flood_does_not_consume_retained_peer_capacity(
                     MeasurementEvent::FailedToSend,
                 )
                 .await,
-            Ok(ApplyOutcome::IgnoredUnauthenticated)
+            Ok(ApplyOutcome::IgnoredUnattributable)
         );
     }
 

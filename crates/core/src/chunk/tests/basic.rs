@@ -365,7 +365,7 @@ fn test_expired_single_chunk_is_not_delivered() {
     // `total == 1` chunk be delivered immediately. It must be rejected up front.
     let mut r = MessageReassembler::new();
     let now = get_epoch_ms();
-    let out = r.handle(Chunk {
+    let expired = Chunk {
         chunk: [0, 1],
         data: Bytes::from_static(b"x"),
         meta: ChunkMeta {
@@ -373,8 +373,15 @@ fn test_expired_single_chunk_is_not_delivered() {
             ts_ms: now.saturating_sub(1000),
             ttl_ms: 100, // expired 900ms ago
         },
-    });
-    assert!(out.is_none());
+    };
+    assert!(matches!(
+        r.handle_retained_outcome_at(expired.clone(), now),
+        ReassemblyOutcome::Rejected(ReassemblyRejection::Invalid)
+    ));
+    assert!(matches!(
+        r.handle_retained_outcome_at(expired, now),
+        ReassemblyOutcome::Rejected(ReassemblyRejection::Replay)
+    ));
     assert_eq!(r.pending_count(), 0);
 }
 

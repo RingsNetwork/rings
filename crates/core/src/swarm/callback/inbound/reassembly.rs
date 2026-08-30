@@ -69,6 +69,8 @@ impl InboundProcessor {
             );
             return;
         };
+        // Pre: `count` includes only pending entries marked peer-attributable at
+        // authenticated ingress, and one reassembler serves one connection peer.
         for _ in 0..count {
             self.record_receive_failure(Some(peer), Authentication::Authenticated)
                 .await;

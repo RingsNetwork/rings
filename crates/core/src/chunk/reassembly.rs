@@ -71,6 +71,22 @@ impl Pending {
     }
 }
 
+/// Stable identity of one logical transmission. A UUID may be reused after the
+/// prior transmission's TTL, so terminal evidence also includes its timestamp
+/// and TTL rather than blocking that UUID indefinitely.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct LogicalTransmission {
+    id: Uuid,
+    ts_ms: u128,
+    ttl_ms: u64,
+}
+
+impl LogicalTransmission {
+    const fn new(id: Uuid, ts_ms: u128, ttl_ms: u64) -> Self {
+        Self { id, ts_ms, ttl_ms }
+    }
+}
+
 /// Receiver side: **whole-message** reassembly for reliable data-channel `MessagePayload`
 /// fragments. Buffers a message's chunks keyed by id and yields the complete [`Bytes`] once every
 /// position has arrived (then forgets it).
@@ -97,12 +113,13 @@ pub struct MessageReassembler {
     /// `HashSet` for an O(1) membership check; the two are kept in lockstep.
     completed: VecDeque<(Uuid, u128)>,
     pub(super) completed_ids: HashSet<Uuid>,
-    /// Invalid message ids retained until a bounded local horizon. Once an invalid chunk has been
-    /// attributed to a logical id, later chunks for that id are replays rather than a second
-    /// failure or a successful delivery. New failures are fail-open (not attributed) while this
-    /// bounded set is full, so hostile UUID rotation cannot make memory unbounded.
-    failed: VecDeque<(Uuid, u128)>,
-    failed_ids: HashSet<Uuid>,
+    /// Failed or expired logical transmissions retained until a bounded local horizon. Once a
+    /// transmission has produced a terminal failure, later chunks with the same UUID, timestamp,
+    /// and TTL are replays rather than a second failure or a successful delivery. New failures are
+    /// fail-open (not attributed) while this bounded set is full, so hostile UUID rotation cannot
+    /// make memory unbounded.
+    failed: VecDeque<(LogicalTransmission, u128)>,
+    failed_ids: HashSet<LogicalTransmission>,
     /// Transmissions rejected by local capacity before any pending state was retained. Their ids
     /// are blocked until expiry, preventing a later tail from becoming an incomplete message that
     /// is incorrectly attributed to the peer.
@@ -320,22 +337,36 @@ impl MessageReassembler {
     /// [`remove_expired`](Self::remove_expired) with the clock injected (tests pass a controlled
     /// `now` to drive the real eviction logic).
     pub(crate) fn remove_expired_at(&mut self, now: u128) -> usize {
+        self.evict_expired_terminal_history(now);
         let mut expired_count = 0_usize;
+        let mut expired_transmissions = Vec::new();
         let buffered_cost = &mut self.buffered_cost;
         let budget = &self.budget;
         let slot_overhead = self.limits.slot_overhead;
-        self.pending.retain(|_, p| {
+        self.pending.retain(|id, p| {
             let alive = p.ts_ms.saturating_add(p.ttl_ms as u128) > now;
             if !alive {
                 let cost = p.cost(slot_overhead);
                 *buffered_cost = buffered_cost.saturating_sub(cost);
                 budget.release(cost);
+                expired_transmissions.push(LogicalTransmission::new(*id, p.ts_ms, p.ttl_ms));
                 if !(p.failure_charged || p.local_capacity_rejected) && p.peer_attributable {
                     expired_count = expired_count.saturating_add(1);
                 }
             }
             alive
         });
+        // Keep a bounded terminal witness after removing the pending buffer. This distinguishes a
+        // late chunk for an already-scored expiry from a first expired-on-arrival chunk, which is
+        // invalid evidence. At capacity `mark_failed_transmission` fails closed to Replay without
+        // growing memory, preserving exact-once attribution.
+        for transmission in expired_transmissions {
+            let _ = self.mark_failed_transmission(transmission, now);
+        }
+        expired_count
+    }
+
+    fn evict_expired_terminal_history(&mut self, now: u128) {
         // Evict every expired tombstone, not just a leading run: completion order need not equal
         // expiry order, so a `retain` is correct where front-popping would leave an out-of-order
         // early-expiry entry behind a still-live front.
@@ -348,10 +379,10 @@ impl MessageReassembler {
             alive
         });
         let failed_ids = &mut self.failed_ids;
-        self.failed.retain(|&(id, expiry)| {
+        self.failed.retain(|&(transmission, expiry)| {
             let alive = expiry > now;
             if !alive {
-                failed_ids.remove(&id);
+                failed_ids.remove(&transmission);
             }
             alive
         });
@@ -363,7 +394,6 @@ impl MessageReassembler {
             }
             alive
         });
-        expired_count
     }
 
     /// Forget a message (e.g. after it has been delivered), returning its cost to the budget.
@@ -476,11 +506,12 @@ impl MessageReassembler {
     /// [`admit`]: Self::admit
     fn classify(&self, chunk: &Chunk, now: u128) -> std::result::Result<usize, Rejected> {
         let meta = &chunk.meta;
+        let transmission = LogicalTransmission::new(meta.id, meta.ts_ms, meta.ttl_ms);
         if self
             .pending
             .get(&meta.id)
             .is_some_and(|pending| pending.failure_charged)
-            || self.failed_ids.contains(&meta.id)
+            || self.failed_ids.contains(&transmission)
         {
             return Err(Rejected::AlreadyFailed);
         }
@@ -575,7 +606,14 @@ impl MessageReassembler {
             return true;
         }
 
-        if self.failed_ids.contains(&meta.id)
+        self.mark_failed_transmission(
+            LogicalTransmission::new(meta.id, meta.ts_ms, meta.ttl_ms),
+            now,
+        )
+    }
+
+    fn mark_failed_transmission(&mut self, transmission: LogicalTransmission, now: u128) -> bool {
+        if self.failed_ids.contains(&transmission)
             || self.failed_ids.len() >= self.limits.max_completed_ids
         {
             return false;
@@ -583,8 +621,8 @@ impl MessageReassembler {
         // Invalid timestamps/TTLs must not pin terminal state longer than the protocol maximum.
         // Using a local horizon also gives a well-defined reuse point for a malformed identity.
         let expiry = now.saturating_add(MAX_TTL_MS as u128);
-        self.failed_ids.insert(meta.id);
-        self.failed.push_back((meta.id, expiry));
+        self.failed_ids.insert(transmission);
+        self.failed.push_back((transmission, expiry));
         true
     }
 
@@ -730,8 +768,7 @@ impl Rejected {
         match self {
             Self::AlreadyCompleted
             | Self::AlreadyFailed
-            | Self::DuplicatePosition
-            | Self::Expired => ReassemblyRejection::Replay,
+            | Self::DuplicatePosition => ReassemblyRejection::Replay,
             Self::CapacityRejectedId
             | Self::CapacityTrackingFull
             | Self::PendingFull
@@ -739,6 +776,9 @@ impl Rejected {
             | Self::GlobalBudget => ReassemblyRejection::Capacity,
             Self::TtlTooLarge
             | Self::FutureTimestamp
+            // An expired-on-arrival id has no retained expiry outcome. Treat it
+            // as invalid once; `mark_logical_failure` tombstones duplicate ids.
+            | Self::Expired
             | Self::Malformed
             | Self::TooManyChunks
             | Self::ChunkTooLarge

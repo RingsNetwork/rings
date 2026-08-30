@@ -40,7 +40,6 @@ use uuid;
 use crate::consts::DATA_REDUNDANT;
 use crate::error::Error;
 use crate::error::Result;
-use crate::measure::peer_quality_thresholds;
 use crate::measure::PeriodicMeasure;
 use crate::onion::default_advertise_onion_exit;
 use crate::onion::default_advertise_onion_relay;
@@ -475,6 +474,23 @@ impl Processor {
         Ok(())
     }
 
+    #[cfg(all(test, feature = "ffi"))]
+    pub(crate) async fn record_locally_addressed_send_failure_for_test(
+        &self,
+        peer: Did,
+    ) -> std::result::Result<(), rings_core::measure::MeasureError> {
+        if let Some(measure) = &self.measure {
+            rings_core::measure::Measure::record(
+                measure.as_ref(),
+                peer,
+                rings_core::measure::Authentication::LocallyAddressed,
+                rings_core::measure::MeasurementEvent::FailedToSend,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
     /// Connect peer with web3 did.
     /// There are 3 peers: PeerA, PeerB, PeerC.
     /// 1. PeerA has a connection with PeerB.
@@ -802,11 +818,10 @@ impl OnionDirectoryReader for Processor {
     }
 
     async fn peer_qualities(&self) -> Vec<(Did, PeerQuality)> {
-        let thresholds = peer_quality_thresholds();
         self.peer_measurements()
             .await
             .into_iter()
-            .map(|measurement| (measurement.did, measurement.evidence.classify(thresholds)))
+            .map(|measurement| (measurement.did, measurement.quality))
             .collect()
     }
 }

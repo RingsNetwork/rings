@@ -100,15 +100,7 @@ impl CountingMeasure {
 
 #[async_trait]
 impl Measure for CountingMeasure {
-    async fn incr(
-        &self,
-        did: crate::dht::Did,
-        authentication: Authentication,
-        counter: MeasureCounter,
-    ) {
-        if matches!(authentication, Authentication::Unauthenticated) {
-            return;
-        }
+    async fn incr(&self, did: crate::dht::Did, counter: MeasureCounter) {
         if let Ok(mut counters) = self.counters.lock() {
             counters.push((did, counter));
         }
@@ -124,14 +116,13 @@ impl Measure for CountingMeasure {
         authentication: Authentication,
         event: MeasurementEvent,
     ) -> std::result::Result<ApplyOutcome, MeasureError> {
-        if matches!(authentication, Authentication::Unauthenticated) {
-            return Ok(ApplyOutcome::IgnoredUnauthenticated);
+        if !authentication.permits(event) {
+            return Ok(ApplyOutcome::IgnoredUnattributable);
         }
         if let Ok(mut events) = self.events.lock() {
             events.push((did, event));
         }
-        self.incr(did, authentication, MeasureCounter::from_event(event))
-            .await;
+        self.incr(did, MeasureCounter::from_event(event)).await;
         Ok(ApplyOutcome::Applied)
     }
 
@@ -141,11 +132,15 @@ impl Measure for CountingMeasure {
         authentication: Authentication,
         batch: MeasurementBatch,
     ) -> std::result::Result<ApplyOutcome, MeasureError> {
-        if matches!(authentication, Authentication::Unauthenticated) {
-            return Ok(ApplyOutcome::IgnoredUnauthenticated);
+        if !authentication.permits(batch.event()) {
+            return Ok(ApplyOutcome::IgnoredUnattributable);
         }
+        if let Ok(mut events) = self.events.lock() {
+            events.push((did, batch.event()));
+        }
+        let counter = MeasureCounter::from_event(batch.event());
         for _ in 0..batch.occurrences().get() {
-            self.record(did, authentication, batch.event()).await?;
+            self.incr(did, counter).await;
         }
         Ok(ApplyOutcome::Applied)
     }
@@ -155,10 +150,6 @@ impl Measure for CountingMeasure {
 impl BehaviourJudgement for CountingMeasure {
     async fn quality(&self, _did: crate::dht::Did) -> PeerQuality {
         PeerQuality::Unknown
-    }
-
-    async fn good(&self, _did: crate::dht::Did) -> bool {
-        true
     }
 }
 

@@ -102,10 +102,7 @@ impl RecordingMeasure {
 
 #[async_trait]
 impl Measure for RecordingMeasure {
-    async fn incr(&self, did: Did, authentication: Authentication, counter: MeasureCounter) {
-        if matches!(authentication, Authentication::Unauthenticated) {
-            return;
-        }
+    async fn incr(&self, did: Did, counter: MeasureCounter) {
         match self.counters.lock() {
             Ok(mut counters) => counters.push((did, counter)),
             Err(_) => tracing::error!("RecordingMeasure counters mutex is poisoned"),
@@ -133,15 +130,14 @@ impl Measure for RecordingMeasure {
         authentication: Authentication,
         event: MeasurementEvent,
     ) -> std::result::Result<ApplyOutcome, MeasureError> {
-        if matches!(authentication, Authentication::Unauthenticated) {
-            return Ok(ApplyOutcome::IgnoredUnauthenticated);
+        if !authentication.permits(event) {
+            return Ok(ApplyOutcome::IgnoredUnattributable);
         }
         match self.measurements.lock() {
             Ok(mut measurements) => measurements.push((did, event)),
             Err(_) => tracing::error!("RecordingMeasure measurements mutex is poisoned"),
         }
-        self.incr(did, authentication, MeasureCounter::from_event(event))
-            .await;
+        self.incr(did, MeasureCounter::from_event(event)).await;
         Ok(ApplyOutcome::Applied)
     }
 
@@ -151,11 +147,16 @@ impl Measure for RecordingMeasure {
         authentication: Authentication,
         batch: MeasurementBatch,
     ) -> std::result::Result<ApplyOutcome, MeasureError> {
-        if matches!(authentication, Authentication::Unauthenticated) {
-            return Ok(ApplyOutcome::IgnoredUnauthenticated);
+        if !authentication.permits(batch.event()) {
+            return Ok(ApplyOutcome::IgnoredUnattributable);
         }
+        match self.measurements.lock() {
+            Ok(mut measurements) => measurements.push((did, batch.event())),
+            Err(_) => tracing::error!("RecordingMeasure measurements mutex is poisoned"),
+        }
+        let counter = MeasureCounter::from_event(batch.event());
         for _ in 0..batch.occurrences().get() {
-            self.record(did, authentication, batch.event()).await?;
+            self.incr(did, counter).await;
         }
         Ok(ApplyOutcome::Applied)
     }
@@ -171,10 +172,6 @@ impl BehaviourJudgement for RecordingMeasure {
                 PeerQuality::Unknown
             }
         }
-    }
-
-    async fn good(&self, _did: Did) -> bool {
-        true
     }
 }
 
@@ -273,26 +270,17 @@ impl BlockingConnectMeasure {
 #[cfg(feature = "dummy")]
 #[async_trait]
 impl Measure for BlockingConnectMeasure {
-    async fn incr(&self, did: Did, authentication: Authentication, counter: MeasureCounter) {
+    async fn incr(&self, did: Did, counter: MeasureCounter) {
         if counter == MeasureCounter::Connect {
             self.connect_started.store(true, Ordering::SeqCst);
             self.connect_started_notify.notify_waiters();
             self.release_connect.notified().await;
         }
-        self.inner.incr(did, authentication, counter).await;
+        self.inner.incr(did, counter).await;
     }
 
     async fn get_count(&self, did: Did, counter: MeasureCounter) -> u64 {
         self.inner.get_count(did, counter).await
-    }
-
-    async fn record_batch(
-        &self,
-        did: Did,
-        authentication: Authentication,
-        batch: MeasurementBatch,
-    ) -> std::result::Result<ApplyOutcome, MeasureError> {
-        self.inner.record_batch(did, authentication, batch).await
     }
 }
 
@@ -301,10 +289,6 @@ impl Measure for BlockingConnectMeasure {
 impl BehaviourJudgement for BlockingConnectMeasure {
     async fn quality(&self, did: Did) -> PeerQuality {
         self.inner.quality(did).await
-    }
-
-    async fn good(&self, did: Did) -> bool {
-        self.inner.good(did).await
     }
 }
 
@@ -694,9 +678,10 @@ async fn test_missing_peer_error_precedes_outbound_capacity_admission() -> Resul
         .expect_err("missing route must be checked before capacity");
 
     assert!(matches!(error, Error::SwarmMissDidInTable(did) if did == peer));
-    assert!(
-        measure.snapshot_measurements()?.is_empty(),
-        "a caller-provided DID without an admitted connection is not authenticated evidence"
+    assert_eq!(
+        measure.snapshot_measurements()?,
+        vec![(peer, MeasurementEvent::FailedToSend)],
+        "a failed local send to an explicit DID is attributable without claiming remote evidence"
     );
     drop(permits);
     Ok(())

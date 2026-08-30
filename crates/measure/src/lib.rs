@@ -10,7 +10,7 @@
 //!   a [`ReliabilityClass`] used only for advisory ordering.
 //!
 //! Time, storage, networking, tasks, locks, and process lifecycle are effects.
-//! Callers pass timestamps and authenticated events into the pure
+//! Callers pass timestamps and explicitly attributable events into the pure
 //! [`MeasurementLedger`] transition and persist [`MeasurementSnapshot`] values
 //! outside this crate.
 
@@ -32,7 +32,7 @@ pub use event::Authentication;
 pub use event::MeasurementBatch;
 pub use event::MeasurementEvent;
 pub use event::Metric;
-pub use ledger::ClockReconciliation;
+pub use ledger::LedgerReconciliation;
 pub use ledger::MeasurementLedger;
 pub use ledger::MeasurementPage;
 pub use ledger::MeasurementProjection;
