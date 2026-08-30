@@ -281,6 +281,15 @@ fn client_packet_with_payload(
     packet
 }
 
+fn with_source_port(mut packet: Vec<u8>, source_port: u16) -> Vec<u8> {
+    packet[20..22].copy_from_slice(&source_port.to_be_bytes());
+    TcpPacket::new_unchecked(&mut packet[20..]).fill_checksum(
+        &Ipv4Addr::new(100, 64, 0, 2).into(),
+        &Ipv4Addr::new(93, 184, 216, 34).into(),
+    );
+    packet
+}
+
 #[test]
 fn block_dns_policy_never_opens_a_tcp_53_flow() {
     let (opened_tx, _opened_rx) = mpsc::channel(1);
@@ -290,15 +299,182 @@ fn block_dns_policy_never_opens_a_tcp_53_flow() {
         .activate("memory-tun".to_string())
         .expect("activate runtime");
 
-    runtime
+    let outcome = runtime
         .ingest_packet(
             client_packet_to_port(TcpControl::Syn, TcpSeqNumber(7), None, 53),
             Duration::ZERO,
         )
         .expect("blocked DNS packet is handled");
 
+    assert!(matches!(outcome, PacketOutcome::FlowRejected {
+        reason: FlowRejectReason::DnsBlocked,
+        ..
+    }));
     assert_eq!(runtime.status().active_flows, 0);
-    assert!(runtime.tcp.take_egress().is_empty());
+    assert!(runtime.tcp.take_egress().iter().any(|packet| {
+        matches!(
+            crate::classify_ipv4_packet(packet),
+            PacketDisposition::Tcp(crate::TcpSegment { rst: true, .. })
+        )
+    }));
+}
+
+#[test]
+fn malformed_fragmented_and_bad_checksum_packets_are_scoped_drops() {
+    let (opened_tx, _opened_rx) = mpsc::channel(1);
+    let connector = Arc::new(RecordingConnector { opened: opened_tx });
+    let mut runtime = GatewayRuntime::new(config(), connector, 29).expect("valid runtime");
+    runtime
+        .activate("memory-tun".to_string())
+        .expect("activate runtime");
+
+    let malformed = runtime
+        .ingest_packet(vec![0x45, 0, 0], Duration::ZERO)
+        .expect("malformed packet is a drop outcome");
+    assert_eq!(
+        malformed,
+        PacketOutcome::Dropped(crate::PacketDropReason::MalformedIpv4)
+    );
+
+    let mut fragmented = client_packet(TcpControl::Syn, TcpSeqNumber(7), None);
+    fragmented[6] |= 0x20;
+    assert_eq!(
+        runtime
+            .ingest_packet(fragmented, Duration::ZERO)
+            .expect("fragment is a drop outcome"),
+        PacketOutcome::Dropped(crate::PacketDropReason::FragmentedIpv4)
+    );
+
+    let mut invalid_checksum = client_packet(TcpControl::Syn, TcpSeqNumber(7), None);
+    invalid_checksum[36] ^= 0xff;
+    assert_eq!(
+        runtime
+            .ingest_packet(invalid_checksum, Duration::ZERO)
+            .expect("bad checksum is a drop outcome"),
+        PacketOutcome::Dropped(crate::PacketDropReason::InvalidTcpChecksum)
+    );
+    assert_eq!(runtime.status().active_flows, 0);
+}
+
+#[test]
+fn stray_ack_and_capacity_refusal_emit_reset_without_failing_gateway() {
+    let (opened_tx, _opened_rx) = mpsc::channel(1);
+    let connector = Arc::new(RecordingConnector { opened: opened_tx });
+    let mut candidate = config();
+    candidate.max_flows = 1;
+    let mut runtime = GatewayRuntime::new(candidate, connector, 31).expect("valid runtime");
+    runtime
+        .activate("memory-tun".to_string())
+        .expect("activate runtime");
+
+    let stray = runtime
+        .ingest_packet(
+            client_packet(TcpControl::None, TcpSeqNumber(7), Some(TcpSeqNumber(8))),
+            Duration::ZERO,
+        )
+        .expect("stray ACK is flow-scoped");
+    assert!(matches!(stray, PacketOutcome::FlowRejected {
+        reason: FlowRejectReason::MissingInitialSyn,
+        ..
+    }));
+
+    let accepted = runtime
+        .ingest_packet(
+            client_packet(TcpControl::Syn, TcpSeqNumber(7), None),
+            Duration::from_millis(1),
+        )
+        .expect("first SYN is accepted");
+    assert!(matches!(accepted, PacketOutcome::Consumed(_)));
+    let refused = runtime
+        .ingest_packet(
+            with_source_port(
+                client_packet(TcpControl::Syn, TcpSeqNumber(7), None),
+                41_001,
+            ),
+            Duration::from_millis(2),
+        )
+        .expect("capacity refusal is flow-scoped");
+    assert_eq!(refused, PacketOutcome::FlowRejected {
+        flow: match refused {
+            PacketOutcome::FlowRejected { flow, .. } => flow,
+            _ => panic!("capacity outcome changed"),
+        },
+        reason: FlowRejectReason::CapacityExhausted { limit: 1 },
+    });
+    assert_eq!(runtime.status().active_flows, 1);
+    assert!(runtime.tcp.take_egress().iter().any(|packet| matches!(
+        crate::classify_ipv4_packet(packet),
+        PacketDisposition::Tcp(crate::TcpSegment { rst: true, .. })
+    )));
+}
+
+#[test]
+fn pending_handshake_exit_clock_releases_flow_capacity() {
+    let (opened_tx, _opened_rx) = mpsc::channel(1);
+    let connector = Arc::new(RecordingConnector { opened: opened_tx });
+    let mut candidate = config();
+    candidate.flow_idle_timeout = Duration::from_secs(1);
+    let mut runtime = GatewayRuntime::new(candidate, connector, 37).expect("valid runtime");
+    runtime
+        .activate("memory-tun".to_string())
+        .expect("activate runtime");
+    runtime
+        .ingest_packet(
+            client_packet(TcpControl::Syn, TcpSeqNumber(7), None),
+            Duration::ZERO,
+        )
+        .expect("capture pending handshake");
+    assert_eq!(runtime.status().active_flows, 1);
+
+    let scope = runtime
+        .process_input(LoopInput::Tick, &[], Duration::from_secs(2))
+        .expect("pending exit clock is processed");
+    assert!(matches!(scope, ReconcileScope::All));
+    runtime
+        .reconcile_all(Duration::from_secs(2))
+        .expect("expired handshake is released");
+    assert_eq!(runtime.status().active_flows, 0);
+    assert_eq!(runtime.tcp.flow_count(), 0);
+}
+
+#[test]
+fn stream_io_failure_is_flow_scoped_not_exit_scoped() {
+    let (opened_tx, _opened_rx) = mpsc::channel(1);
+    let connector = Arc::new(RecordingConnector { opened: opened_tx });
+    let mut runtime = GatewayRuntime::new(config(), connector, 41).expect("valid runtime");
+    runtime
+        .activate("memory-tun".to_string())
+        .expect("activate runtime");
+    runtime.set_exit_availability(ExitAvailability::Available, None);
+    let outcome = runtime
+        .ingest_packet(
+            client_packet(TcpControl::Syn, TcpSeqNumber(7), None),
+            Duration::ZERO,
+        )
+        .expect("capture flow");
+    let flow = match outcome {
+        PacketOutcome::Consumed(flow) => flow,
+        _ => panic!("SYN was not consumed"),
+    };
+
+    runtime
+        .handle_bridge_event(
+            BridgeEvent::Failed {
+                flow,
+                error: GatewayError::StreamIo {
+                    flow,
+                    operation: "read",
+                    message: "test stream reset".to_string(),
+                },
+            },
+            Duration::from_millis(1),
+        )
+        .expect("stream failure is contained to one flow");
+
+    let status = runtime.status();
+    assert_eq!(status.exit_availability, ExitAvailability::Available);
+    assert_eq!(status.reason, None);
+    assert_eq!(status.active_flows, 0);
 }
 
 fn handshake_ack(syn_ack: &[u8]) -> Vec<u8> {
@@ -317,6 +493,50 @@ fn handshake_ack_from_observation(syn_ack: &TcpObservation) -> Vec<u8> {
         TcpSeqNumber(8),
         Some(syn_ack.sequence + 1),
     )
+}
+
+#[tokio::test]
+async fn packet_scoped_drop_does_not_stop_the_runtime_loop() {
+    let (ingress_tx, ingress_rx) = mpsc::channel(4);
+    let (egress_tx, mut egress_rx) = mpsc::channel(8);
+    let (opened_tx, _opened_rx) = mpsc::channel(1);
+    let connector = Arc::new(RecordingConnector { opened: opened_tx });
+    let mut runtime = GatewayRuntime::new(config(), connector, 43).expect("valid runtime");
+    runtime
+        .activate("memory-tun".to_string())
+        .expect("activate runtime");
+    let stop = Arc::new(AtomicBool::new(false));
+    let task_stop = Arc::clone(&stop);
+    let task = tokio::spawn(async move {
+        let mut device = ChannelPacketIo {
+            ingress: ingress_rx,
+            egress: egress_tx,
+        };
+        runtime
+            .run(&mut device, || task_stop.load(Ordering::Acquire))
+            .await
+    });
+
+    ingress_tx
+        .send(vec![0x45, 0, 0])
+        .await
+        .expect("send malformed packet");
+    ingress_tx
+        .send(client_packet(TcpControl::Syn, TcpSeqNumber(7), None))
+        .await
+        .expect("send SYN after malformed packet");
+    let syn_ack = receive_matching_tcp(&mut egress_rx, |packet| {
+        packet.acknowledgment.is_some() && packet.payload.is_empty() && !packet.rst
+    })
+    .await;
+    assert!(syn_ack.acknowledgment.is_some());
+
+    stop.store(true, Ordering::Release);
+    tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("runtime stop deadline")
+        .expect("runtime task")
+        .expect("packet drop did not fail runtime");
 }
 
 #[tokio::test]
@@ -571,46 +791,5 @@ async fn onion_open_failure_resets_captured_flow_without_fallback() {
     assert_eq!(runtime.status().active_flows, 0);
 }
 
-#[test]
-fn late_bridge_events_for_a_released_flow_are_idempotent() {
-    let (opened_tx, _opened_rx) = mpsc::channel(1);
-    let connector = Arc::new(RecordingConnector { opened: opened_tx });
-    let mut runtime = GatewayRuntime::new(config(), connector, 17).expect("valid runtime");
-    runtime
-        .activate("memory-tun".to_string())
-        .expect("activate runtime");
-    let packet = client_packet(TcpControl::Syn, TcpSeqNumber(7), None);
-    let flow = match crate::classify_ipv4_packet(&packet).expect("valid SYN") {
-        PacketDisposition::Tcp(segment) => segment.flow,
-        _ => panic!("SYN must be classified as TCP"),
-    };
-
-    runtime
-        .handle_bridge_event(
-            BridgeEvent::Data {
-                flow,
-                bytes: b"late".to_vec(),
-                consumed: oneshot::channel().0,
-            },
-            Duration::ZERO,
-        )
-        .expect("late data is ignored");
-    runtime
-        .handle_bridge_event(BridgeEvent::PeerClosed(flow), Duration::ZERO)
-        .expect("late EOF is ignored");
-    runtime
-        .handle_bridge_event(
-            BridgeEvent::Failed {
-                flow,
-                error: GatewayError::OnionUnavailable {
-                    target: flow.target,
-                    message: "late failure".to_string(),
-                },
-            },
-            Duration::ZERO,
-        )
-        .expect("late failure is ignored");
-
-    assert_eq!(runtime.status().active_flows, 0);
-    assert_eq!(runtime.status().reason, None);
-}
+#[path = "late_events_tests.rs"]
+mod late_events_tests;

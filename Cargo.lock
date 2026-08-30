@@ -3278,6 +3278,7 @@ dependencies = [
  "ed25519-dalek",
  "elliptic-curve",
  "ethereum-types",
+ "event-listener 5.4.2",
  "flate2",
  "futures",
  "futures-timer",

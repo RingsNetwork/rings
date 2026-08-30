@@ -20,7 +20,7 @@ use rings_node::logging::LogLevel;
 use rings_node::measure::PeriodicMeasure;
 use rings_node::native::cli::Client;
 use rings_node::native::config;
-use rings_node::native::endpoint::run_external_api_with_gateway;
+use rings_node::native::endpoint::run_external_api;
 use rings_node::native::endpoint::run_internal_api_with_gateway;
 use rings_node::native::gateway::NativeGatewayRunner;
 use rings_node::onion::proxy::http::run_onion_http_proxy;
@@ -804,9 +804,8 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
             .context("internal API stopped")
     });
     let external_processor = processor.clone();
-    let external_gateway = gateway_status;
     tasks.spawn(async move {
-        run_external_api_with_gateway(c.external_api_addr, external_processor, external_gateway)
+        run_external_api(c.external_api_addr, external_processor)
             .await
             .context("external API stopped")
     });

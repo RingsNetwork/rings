@@ -111,15 +111,6 @@ pub async fn run_internal_api_with_gateway(
 
 /// Run a web server to handle jsonrpc request from external
 pub async fn run_external_api(addr: String, processor: Arc<Processor>) -> anyhow::Result<()> {
-    run_external_api_with_gateway(addr, processor, None).await
-}
-
-/// Run the external JSON-RPC server with an optional foreground-gateway status endpoint.
-pub async fn run_external_api_with_gateway(
-    addr: String,
-    processor: Arc<Processor>,
-    gateway: Option<GatewayStatusHandle>,
-) -> anyhow::Result<()> {
     let binding_addr: SocketAddr = addr.parse()?;
 
     let jsonrpc_handler = MetaIoHandler::with_middleware(ExternalRpcMiddleware);
@@ -130,18 +121,12 @@ pub async fn run_external_api_with_gateway(
 
     let status_state = Arc::new(StatusState { processor });
 
-    let mut router = Router::new()
+    let router = Router::new()
         .route(
             "/",
             post(jsonrpc_io_handler).with_state(jsonrpc_state.clone()),
         )
         .route("/status", get(status_handler).with_state(status_state));
-    if let Some(status) = gateway {
-        router = router.route(
-            "/gateway/status",
-            get(gateway_status_handler).with_state(Arc::new(GatewayStatusState { status })),
-        );
-    }
     let axum_make_service = router
         .layer(CorsLayer::permissive())
         .layer(axum::middleware::from_fn(node_info_header))

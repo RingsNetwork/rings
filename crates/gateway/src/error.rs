@@ -121,47 +121,12 @@ pub enum PacketIoError {
     Closed,
 }
 
-/// Rejected packet at the IPv4/TCP parser boundary.
-#[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
-pub enum PacketParseError {
-    /// The packet is shorter than its declared IPv4 header or total length.
-    #[error("malformed IPv4 packet")]
-    MalformedIpv4,
-    /// A non-IPv4 packet reached the IPv4/TCP milestone.
-    #[error("non-IPv4 packet reached the IPv4/TCP gateway")]
-    NonIpv4,
-    /// IPv4 fragmentation is not supported by this milestone.
-    #[error("fragmented IPv4 packet is unsupported")]
-    FragmentedIpv4,
-    /// The TCP header is malformed.
-    #[error("malformed TCP segment")]
-    MalformedTcp,
-    /// TCP port zero cannot identify an admitted flow.
-    #[error("TCP source and destination ports must be nonzero")]
-    ZeroTcpPort,
-}
-
 /// Failure while adapting captured packets to the shared userspace TCP stack.
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
 pub enum TcpStackError {
-    /// The first packet for a flow was not an initial SYN.
-    #[error("gateway TCP flow {0:?} did not begin with an initial SYN")]
-    MissingInitialSyn(FlowId),
-    /// An IPv6 flow reached the IPv4-only TCP stack.
-    #[error("gateway TCP flow {0:?} is not IPv4")]
-    NonIpv4Flow(FlowId),
-    /// The configured concurrent TCP endpoint limit has been reached.
-    #[error("gateway TCP endpoint capacity {limit} is exhausted")]
-    TcpCapacityExhausted {
-        /// Configured maximum concurrent endpoint count.
-        limit: usize,
-    },
     /// A packet referred to a flow that is not tracked by the TCP stack.
     #[error("gateway TCP flow {0:?} is not tracked by the TCP stack")]
     UnknownFlow(FlowId),
-    /// The TCP listener rejected the captured destination endpoint.
-    #[error("gateway TCP listener rejected target {0}")]
-    ListenRejected(SocketAddr),
     /// The interface route table could not install the AnyIP capture route.
     #[error("gateway TCP interface route table is full")]
     RouteTableFull,
@@ -206,9 +171,6 @@ pub enum GatewayError {
     /// Packet-device IO failed.
     #[error(transparent)]
     PacketIo(#[from] PacketIoError),
-    /// Captured packet parsing failed closed.
-    #[error(transparent)]
-    PacketParse(#[from] PacketParseError),
     /// Shared userspace TCP processing failed.
     #[error(transparent)]
     TcpStack(#[from] TcpStackError),

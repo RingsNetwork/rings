@@ -7,8 +7,6 @@ use std::net::IpAddr;
 use std::net::Ipv4Addr;
 #[cfg(any(test, target_os = "windows"))]
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -41,6 +39,7 @@ use super::config::NativeGatewayConfig;
 use crate::onion::proxy::OnionProxyConfig;
 use crate::onion::tcp::NativeOnionCircuitHandle;
 use crate::onion::NativeOnionGatewayConnector;
+use crate::prelude::StopSource;
 use crate::prelude::StopToken;
 use crate::processor::Processor;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
@@ -215,24 +214,26 @@ impl NativeGatewayRunner {
             return combine_gateway_results(Err(error), Ok(()), cleanup);
         }
 
-        let runtime_done = Arc::new(AtomicBool::new(false));
-        let updater_failed = Arc::new(AtomicBool::new(false));
-        let update = refresh_underlay_and_exit(
-            self.processor.clone(),
-            Arc::clone(&underlay),
-            self.runtime.control_handle(),
-            self.config.onion_service.as_str().to_string(),
-            Duration::from_secs(self.config.underlay_refresh_secs),
-            stop.clone(),
-            Arc::clone(&runtime_done),
-            Arc::clone(&updater_failed),
-        );
+        let runtime_done = StopSource::new();
+        let updater_failed = StopSource::new();
+        let update = refresh_underlay_and_exit(UnderlayRefresh {
+            processor: self.processor.clone(),
+            underlay: Arc::clone(&underlay),
+            gateway: self.runtime.control_handle(),
+            onion_service: self.config.onion_service.as_str().to_string(),
+            interval: Duration::from_secs(self.config.underlay_refresh_secs),
+            stop: stop.clone(),
+            runtime_done: runtime_done.token(),
+            updater_failed: updater_failed.clone(),
+        });
+        let updater_failed_token = updater_failed.token();
+        let runtime_done_after_run = runtime_done.clone();
         let run = async {
             let result = self.runtime.run(&mut device, || {
-                stop.should_stop() || updater_failed.load(Ordering::Acquire)
+                stop.should_stop() || updater_failed_token.should_stop()
             });
             let result = result.await;
-            runtime_done.store(true, Ordering::Release);
+            runtime_done_after_run.request_stop();
             result
         };
         let (runtime_result, updater_result) = tokio::join!(run, update);
@@ -325,34 +326,60 @@ fn select_wintun_dll_path(
     selected.map(expand_home).transpose()
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn refresh_underlay_and_exit(
+struct UnderlayRefresh {
     processor: Arc<Processor>,
     underlay: Arc<GatewayUnderlayGate<PlatformTunnelControl>>,
     gateway: GatewayControlHandle,
     onion_service: String,
     interval: Duration,
     stop: StopToken,
-    runtime_done: Arc<AtomicBool>,
-    updater_failed: Arc<AtomicBool>,
-) -> Result<(), GatewayError> {
-    let mut ticker = tokio::time::interval(interval);
+    runtime_done: StopToken,
+    updater_failed: StopSource,
+}
+
+enum RefreshWake {
+    Tick,
+    Stop,
+}
+
+async fn wait_for_refresh(
+    ticker: &mut tokio::time::Interval,
+    stop: &StopToken,
+    runtime_done: &StopToken,
+) -> RefreshWake {
+    tokio::select! {
+        _ = stop.stopped() => RefreshWake::Stop,
+        _ = runtime_done.stopped() => RefreshWake::Stop,
+        _ = ticker.tick() => RefreshWake::Tick,
+    }
+}
+
+async fn refresh_underlay_and_exit(refresh: UnderlayRefresh) -> Result<(), GatewayError> {
+    let mut ticker = tokio::time::interval(refresh.interval);
     loop {
-        ticker.tick().await;
-        if stop.should_stop() || runtime_done.load(Ordering::Acquire) {
+        if matches!(
+            wait_for_refresh(&mut ticker, &refresh.stop, &refresh.runtime_done).await,
+            RefreshWake::Stop
+        ) {
             return Ok(());
         }
-        let targets = processor.swarm.underlay_remote_ips().await;
-        if let Err(error) = underlay.admit_targets(&targets).await {
-            updater_failed.store(true, Ordering::Release);
+        let targets = refresh.processor.swarm.underlay_remote_ips().await;
+        if let Err(error) = refresh.underlay.admit_targets(&targets).await {
+            refresh.updater_failed.request_stop();
             return Err(error);
         }
 
-        let (availability, reason) = match processor.lookup_onion_exits(&onion_service, false).await
+        let (availability, reason) = match refresh
+            .processor
+            .lookup_onion_exits(&refresh.onion_service, false)
+            .await
         {
             Ok(exits) if exits.is_empty() => (
                 ExitAvailability::Unavailable,
-                Some(format!("no live Onion TCP exit advertises {onion_service}")),
+                Some(format!(
+                    "no live Onion TCP exit advertises {}",
+                    refresh.onion_service
+                )),
             ),
             Ok(_) => (ExitAvailability::Available, None),
             Err(error) => (
@@ -360,13 +387,20 @@ async fn refresh_underlay_and_exit(
                 Some(format!("Onion exit discovery failed: {error}")),
             ),
         };
-        if gateway
+        if refresh
+            .gateway
             .set_exit_availability(availability, reason)
             .await
             .is_err()
-            && runtime_done.load(Ordering::Acquire)
         {
-            return Ok(());
+            if refresh.runtime_done.should_stop() {
+                return Ok(());
+            }
+            refresh.updater_failed.request_stop();
+            return Err(GatewayError::Platform {
+                operation: "update-gateway-exit-availability",
+                message: "gateway runtime control channel closed".to_string(),
+            });
         }
     }
 }
@@ -400,14 +434,17 @@ async fn resolve_ice_server_ips(config: &str) -> Result<Vec<IpAddr>, GatewayErro
                 operation: "resolve-ice-underlay",
                 message: format!("failed to resolve ICE server {host}:{port}: {error}"),
             })?;
-        let before = addresses.len();
-        addresses.extend(resolved.map(|address| address.ip()).filter(IpAddr::is_ipv4));
-        if addresses.len() == before {
+        let resolved = resolved
+            .map(|address| address.ip())
+            .filter(IpAddr::is_ipv4)
+            .collect::<BTreeSet<_>>();
+        if resolved.is_empty() {
             return Err(GatewayError::Platform {
                 operation: "resolve-ice-underlay",
                 message: format!("ICE server {host}:{port} has no IPv4 address"),
             });
         }
+        addresses.extend(resolved);
     }
     Ok(addresses.into_iter().collect())
 }
@@ -563,6 +600,31 @@ mod tests {
             "198.51.100.2".parse::<IpAddr>().expect("test IP"),
             "203.0.113.1".parse::<IpAddr>().expect("test IP")
         ]);
+    }
+
+    #[tokio::test]
+    async fn refresh_wait_wakes_immediately_when_stopped() {
+        let stop = StopSource::new();
+        let runtime_done = StopSource::new();
+        let mut ticker = tokio::time::interval(Duration::from_secs(3_600));
+        ticker.tick().await;
+        let stop_token = stop.token();
+        let runtime_done_token = runtime_done.token();
+        let wait = wait_for_refresh(&mut ticker, &stop_token, &runtime_done_token);
+        stop.request_stop();
+
+        let wake = tokio::time::timeout(Duration::from_secs(1), wait)
+            .await
+            .expect("stop wakes long refresh interval");
+        assert!(matches!(wake, RefreshWake::Stop));
+    }
+
+    #[tokio::test]
+    async fn duplicate_ice_urls_share_one_valid_ipv4_result() {
+        let resolved = resolve_ice_server_ips("stun://127.0.0.1:3478;turn://127.0.0.1:3478")
+            .await
+            .expect("each duplicate ICE URL resolves independently");
+        assert_eq!(resolved, vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]);
     }
 
     #[tokio::test]

@@ -21,8 +21,6 @@ pub struct FlowId {
 pub enum FlowEvent {
     /// The captured target passed admission and became immutable flow authority.
     BindTarget,
-    /// Route construction began.
-    BuildRoute,
     /// A valid route was selected and the onion stream is opening.
     Open,
     /// The exit confirmed that its public TCP connection is established.
@@ -42,8 +40,6 @@ pub enum FlowState {
     Captured(FlowId),
     /// The immutable target passed admission.
     TargetBound(FlowId),
-    /// Onion route construction is in progress.
-    RouteBuilding(FlowId),
     /// The onion stream open handshake is in progress.
     Opening(FlowId),
     /// Both directions are open.
@@ -62,7 +58,6 @@ impl FlowState {
         match self {
             Self::Captured(id)
             | Self::TargetBound(id)
-            | Self::RouteBuilding(id)
             | Self::Opening(id)
             | Self::Established(id)
             | Self::HalfClosed(id)
@@ -76,15 +71,13 @@ impl FlowState {
         let id = self.id();
         match (self, event) {
             (Self::Captured(_), FlowEvent::BindTarget) => Ok(Self::TargetBound(id)),
-            (Self::TargetBound(_), FlowEvent::BuildRoute) => Ok(Self::RouteBuilding(id)),
-            (Self::RouteBuilding(_), FlowEvent::Open) => Ok(Self::Opening(id)),
+            (Self::TargetBound(_), FlowEvent::Open) => Ok(Self::Opening(id)),
             (Self::Opening(_), FlowEvent::Establish) => Ok(Self::Established(id)),
             (Self::Established(_), FlowEvent::HalfClose) => Ok(Self::HalfClosed(id)),
             (Self::Established(_) | Self::HalfClosed(_), FlowEvent::Close) => Ok(Self::Closed(id)),
             (
                 Self::Captured(_)
                 | Self::TargetBound(_)
-                | Self::RouteBuilding(_)
                 | Self::Opening(_)
                 | Self::Established(_)
                 | Self::HalfClosed(_),
@@ -119,7 +112,6 @@ mod tests {
         let id = flow();
         let events = [
             FlowEvent::BindTarget,
-            FlowEvent::BuildRoute,
             FlowEvent::Open,
             FlowEvent::Establish,
             FlowEvent::HalfClose,

@@ -20,13 +20,26 @@ use smoltcp::wire::IpAddress;
 use smoltcp::wire::IpCidr;
 
 use self::device::PacketQueueDevice;
-use crate::classify_ipv4_packet;
 use crate::FlowId;
+use crate::FlowRejectReason;
 use crate::GatewayConfig;
 use crate::GatewayError;
-use crate::PacketDisposition;
 use crate::TcpSegment;
 use crate::TcpStackError;
+
+/// Result of attempting to allocate one TCP endpoint for a captured flow.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TcpFlowAdmission {
+    /// The endpoint exists and may consume the captured initial SYN.
+    Accepted,
+    /// This flow was refused without affecting the gateway or other flows.
+    Rejected(FlowRejectReason),
+}
+
+struct TcpEndpoint {
+    handle: SocketHandle,
+    pending_deadline: Option<Duration>,
+}
 
 /// Stable projection of the internal TCP endpoint state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -60,6 +73,21 @@ impl From<tcp::State> for TcpEndpointState {
     }
 }
 
+impl TcpEndpointState {
+    /// Return the runtime-owned exit clock for states not timed out by smoltcp itself.
+    ///
+    /// Established and closing sockets delegate liveness to smoltcp's configured idle,
+    /// retransmission, and TIME-WAIT timers. Closed sockets are terminal and are released during
+    /// reconciliation. Listening and handshaking have no such socket-owned guarantee, so the
+    /// runtime enforces the configured flow timeout from endpoint admission.
+    pub const fn exit_clock(self, flow_timeout: Duration) -> Option<Duration> {
+        match self {
+            Self::Listening | Self::Handshaking => Some(flow_timeout),
+            Self::Closed | Self::Established | Self::Closing => None,
+        }
+    }
+}
+
 /// Platform-neutral IPv4/TCP endpoint engine for captured TUN packets.
 ///
 /// The stack never opens an operating-system TCP socket. It consumes complete IPv4 packets and
@@ -68,8 +96,7 @@ pub struct TcpStack {
     interface: Interface,
     device: PacketQueueDevice,
     sockets: SocketSet<'static>,
-    handles: HashMap<FlowId, SocketHandle>,
-    max_flows: usize,
+    endpoints: HashMap<FlowId, TcpEndpoint>,
     tcp_buffer_bytes: usize,
     flow_idle_timeout: Duration,
 }
@@ -103,29 +130,63 @@ impl TcpStack {
             interface,
             device,
             sockets: SocketSet::new(Vec::new()),
-            handles: HashMap::with_capacity(config.max_flows),
-            max_flows: config.max_flows,
+            endpoints: HashMap::with_capacity(config.max_flows),
             tcp_buffer_bytes: config.tcp_buffer_bytes,
             flow_idle_timeout: config.flow_idle_timeout,
         })
     }
 
-    /// Validate and ingest one complete captured IPv4 packet.
+    /// Allocate a listening endpoint for one initial SYN.
     ///
-    /// UDP and unsupported protocols are returned as explicit drop dispositions. The first packet
-    /// for a TCP flow must be an initial SYN; subsequent packets must preserve the same [`FlowId`].
-    pub fn ingest_packet(
+    /// Flow capacity is owned only by [`crate::FlowTable`]. This stack mirrors already-admitted
+    /// endpoints but does not maintain a second capacity counter.
+    pub fn admit_flow(&mut self, segment: TcpSegment, elapsed: Duration) -> TcpFlowAdmission {
+        if self.endpoints.contains_key(&segment.flow) {
+            return TcpFlowAdmission::Accepted;
+        }
+        if !segment.opens_flow() {
+            return TcpFlowAdmission::Rejected(FlowRejectReason::MissingInitialSyn);
+        }
+        let SocketAddr::V4(target) = segment.flow.target else {
+            return TcpFlowAdmission::Rejected(FlowRejectReason::ListenRejected);
+        };
+
+        let receive = tcp::SocketBuffer::new(vec![0_u8; self.tcp_buffer_bytes]);
+        let transmit = tcp::SocketBuffer::new(vec![0_u8; self.tcp_buffer_bytes]);
+        let mut socket = tcp::Socket::new(receive, transmit);
+        socket.set_timeout(Some(SmolDuration::from(self.flow_idle_timeout)));
+        if socket.listen(target).is_err() {
+            return TcpFlowAdmission::Rejected(FlowRejectReason::ListenRejected);
+        }
+        let handle = self.sockets.add(socket);
+        self.endpoints.insert(segment.flow, TcpEndpoint {
+            handle,
+            pending_deadline: TcpEndpointState::Listening
+                .exit_clock(self.flow_idle_timeout)
+                .map(|timeout| elapsed.saturating_add(timeout)),
+        });
+        TcpFlowAdmission::Accepted
+    }
+
+    /// Consume one already-classified TCP segment for an admitted flow.
+    pub fn ingest_segment(
         &mut self,
         packet: Vec<u8>,
+        segment: TcpSegment,
         elapsed: Duration,
-    ) -> Result<PacketDisposition, GatewayError> {
-        let disposition = classify_ipv4_packet(&packet)?;
-        if let PacketDisposition::Tcp(segment) = disposition {
-            self.ensure_flow(segment)?;
-            self.device.enqueue_ingress(packet);
-            self.poll(elapsed);
+    ) -> Result<(), TcpStackError> {
+        if !self.endpoints.contains_key(&segment.flow) {
+            return Err(TcpStackError::UnknownFlow(segment.flow));
         }
-        Ok(disposition)
+        self.device.enqueue_ingress(packet);
+        self.poll(elapsed);
+        Ok(())
+    }
+
+    /// Feed a refused segment to smoltcp without a listener so it can emit a TCP reset.
+    pub fn reject_segment(&mut self, packet: Vec<u8>, elapsed: Duration) {
+        self.device.enqueue_ingress(packet);
+        self.poll(elapsed);
     }
 
     /// Advance TCP timers and process all currently queued ingress.
@@ -182,8 +243,16 @@ impl TcpStack {
         flow: FlowId,
         length: usize,
     ) -> Result<(), TcpStackError> {
-        let mut discarded = vec![0_u8; length];
-        let actual = self.read_application_data(flow, &mut discarded)?;
+        let actual = match self
+            .socket_mut(flow)?
+            .recv(|available| (length.min(available.len()), length.min(available.len())))
+        {
+            Ok(actual) => actual,
+            Err(tcp::RecvError::Finished) => 0,
+            Err(tcp::RecvError::InvalidState) => {
+                return Err(TcpStackError::ReceiveUnavailable(flow));
+            }
+        };
         if actual != length {
             return Err(TcpStackError::ReceiveCommitMismatch {
                 flow,
@@ -223,7 +292,34 @@ impl TcpStack {
 
     /// Return the number of TCP endpoints currently owned by the stack.
     pub fn flow_count(&self) -> usize {
-        self.handles.len()
+        self.endpoints.len()
+    }
+
+    /// Return pending endpoints whose runtime-owned exit clock has elapsed.
+    pub fn expired_pending_flows(
+        &mut self,
+        elapsed: Duration,
+    ) -> Result<Vec<FlowId>, TcpStackError> {
+        let due = self
+            .endpoints
+            .iter()
+            .filter_map(|(flow, endpoint)| {
+                endpoint
+                    .pending_deadline
+                    .filter(|deadline| elapsed >= *deadline)
+                    .map(|_| *flow)
+            })
+            .collect::<Vec<_>>();
+        let mut expired = Vec::new();
+        for flow in due {
+            let state = self.endpoint_state(flow)?;
+            if state.exit_clock(self.flow_idle_timeout).is_some() {
+                expired.push(flow);
+            } else if let Some(endpoint) = self.endpoints.get_mut(&flow) {
+                endpoint.pending_deadline = None;
+            }
+        }
+        Ok(expired)
     }
 
     /// Abort a flow, emit its terminal TCP packet, and release its endpoint capacity.
@@ -243,40 +339,14 @@ impl TcpStack {
         Ok(true)
     }
 
-    fn ensure_flow(&mut self, segment: TcpSegment) -> Result<(), TcpStackError> {
-        if self.handles.contains_key(&segment.flow) {
-            return Ok(());
-        }
-        if !segment.opens_flow() {
-            return Err(TcpStackError::MissingInitialSyn(segment.flow));
-        }
-        if self.handles.len() >= self.max_flows {
-            return Err(TcpStackError::TcpCapacityExhausted {
-                limit: self.max_flows,
-            });
-        }
-        let SocketAddr::V4(target) = segment.flow.target else {
-            return Err(TcpStackError::NonIpv4Flow(segment.flow));
-        };
-
-        let receive = tcp::SocketBuffer::new(vec![0_u8; self.tcp_buffer_bytes]);
-        let transmit = tcp::SocketBuffer::new(vec![0_u8; self.tcp_buffer_bytes]);
-        let mut socket = tcp::Socket::new(receive, transmit);
-        socket.set_timeout(Some(SmolDuration::from(self.flow_idle_timeout)));
-        socket
-            .listen(target)
-            .map_err(|_| TcpStackError::ListenRejected(segment.flow.target))?;
-        let handle = self.sockets.add(socket);
-        self.handles.insert(segment.flow, handle);
-        Ok(())
-    }
-
     fn socket(&self, flow: FlowId) -> Result<&tcp::Socket<'static>, TcpStackError> {
         let handle = self
-            .handles
+            .endpoints
             .get(&flow)
-            .copied()
+            .map(|endpoint| endpoint.handle)
             .ok_or(TcpStackError::UnknownFlow(flow))?;
+        // `SocketSet::get` is O(1) but panics for a stale or mistyped handle. Keep the checked
+        // lookup so an internal ownership mismatch remains a typed gateway failure.
         self.sockets
             .iter()
             .find_map(|(candidate, socket)| match socket {
@@ -288,10 +358,12 @@ impl TcpStack {
 
     fn socket_mut(&mut self, flow: FlowId) -> Result<&mut tcp::Socket<'static>, TcpStackError> {
         let handle = self
-            .handles
+            .endpoints
             .get(&flow)
-            .copied()
+            .map(|endpoint| endpoint.handle)
             .ok_or(TcpStackError::UnknownFlow(flow))?;
+        // See `socket`: preserving a panic-free production path takes precedence over the
+        // unchecked O(1) accessor exposed by smoltcp.
         self.sockets
             .iter_mut()
             .find_map(|(candidate, socket)| match socket {
@@ -303,9 +375,9 @@ impl TcpStack {
 
     fn release_socket(&mut self, flow: FlowId) -> Result<(), TcpStackError> {
         let handle = self
-            .handles
+            .endpoints
             .get(&flow)
-            .copied()
+            .map(|endpoint| endpoint.handle)
             .ok_or(TcpStackError::UnknownFlow(flow))?;
         let exists = self
             .sockets
@@ -316,7 +388,7 @@ impl TcpStack {
         }
         // The handle was returned by this owned SocketSet and was checked immediately above.
         let _ = self.sockets.remove(handle);
-        self.handles.remove(&flow);
+        self.endpoints.remove(&flow);
         Ok(())
     }
 }
@@ -354,9 +426,12 @@ mod tests {
     use smoltcp::wire::TcpSeqNumber;
 
     use super::*;
+    use crate::classify_ipv4_packet;
     use crate::DnsPolicy;
     use crate::GatewayPlan;
     use crate::Mtu;
+    use crate::PacketDisposition;
+    use crate::PacketDropReason;
     use crate::RoutingMode;
 
     fn route(address: Ipv4Addr, prefix: u8) -> IpNet {
@@ -427,13 +502,29 @@ mod tests {
         packet
     }
 
-    fn establish(stack: &mut TcpStack) -> (FlowId, TcpSeqNumber) {
-        let disposition = stack
-            .ingest_packet(tcp_packet(TcpControl::Syn, None), Duration::from_millis(1))
-            .expect("valid SYN");
-        let PacketDisposition::Tcp(segment) = disposition else {
-            panic!("SYN must remain TCP");
+    fn ingest_tcp(stack: &mut TcpStack, packet: Vec<u8>, elapsed: Duration) -> TcpSegment {
+        let segment = match classify_ipv4_packet(&packet) {
+            PacketDisposition::Tcp(segment) => segment,
+            PacketDisposition::Drop(reason) => panic!("test TCP packet was dropped: {reason:?}"),
         };
+        if !stack.endpoints.contains_key(&segment.flow) {
+            assert_eq!(
+                stack.admit_flow(segment, elapsed),
+                TcpFlowAdmission::Accepted
+            );
+        }
+        stack
+            .ingest_segment(packet, segment, elapsed)
+            .expect("test TCP packet is admitted");
+        segment
+    }
+
+    fn establish(stack: &mut TcpStack) -> (FlowId, TcpSeqNumber) {
+        let segment = ingest_tcp(
+            stack,
+            tcp_packet(TcpControl::Syn, None),
+            Duration::from_millis(1),
+        );
         let syn_ack = stack
             .take_egress()
             .into_iter()
@@ -442,17 +533,16 @@ mod tests {
         let ipv4 = Ipv4Packet::new_checked(syn_ack.as_slice()).expect("valid SYN-ACK IPv4");
         let tcp = TcpPacket::new_checked(ipv4.payload()).expect("valid SYN-ACK TCP");
         let server_sequence = tcp.seq_number();
-        stack
-            .ingest_packet(
-                tcp_packet_with_payload(
-                    TcpControl::None,
-                    TcpSeqNumber(8),
-                    Some(server_sequence + 1),
-                    &[],
-                ),
-                Duration::from_millis(2),
-            )
-            .expect("valid handshake ACK");
+        ingest_tcp(
+            stack,
+            tcp_packet_with_payload(
+                TcpControl::None,
+                TcpSeqNumber(8),
+                Some(server_sequence + 1),
+                &[],
+            ),
+            Duration::from_millis(2),
+        );
         assert_eq!(
             stack.endpoint_state(segment.flow),
             Ok(TcpEndpointState::Established)
@@ -463,12 +553,11 @@ mod tests {
     #[test]
     fn initial_syn_creates_one_endpoint_and_emits_syn_ack() {
         let mut stack = TcpStack::new(&config(), 7).expect("valid TCP stack");
-        let disposition = stack
-            .ingest_packet(tcp_packet(TcpControl::Syn, None), Duration::from_millis(1))
-            .expect("valid SYN");
-        let PacketDisposition::Tcp(segment) = disposition else {
-            panic!("SYN must remain TCP");
-        };
+        let segment = ingest_tcp(
+            &mut stack,
+            tcp_packet(TcpControl::Syn, None),
+            Duration::from_millis(1),
+        );
 
         assert_eq!(stack.flow_count(), 1);
         assert_eq!(
@@ -479,11 +568,11 @@ mod tests {
         assert_eq!(egress.len(), 1);
         assert!(matches!(
             classify_ipv4_packet(&egress[0]),
-            Ok(PacketDisposition::Tcp(TcpSegment {
+            PacketDisposition::Tcp(TcpSegment {
                 syn: true,
                 ack: true,
                 ..
-            }))
+            })
         ));
     }
 
@@ -491,30 +580,31 @@ mod tests {
     fn unknown_flow_must_begin_with_initial_syn() {
         let mut stack = TcpStack::new(&config(), 7).expect("valid TCP stack");
         let packet = tcp_packet(TcpControl::None, Some(TcpSeqNumber(8)));
-        let flow = match classify_ipv4_packet(&packet).expect("valid ACK") {
-            PacketDisposition::Tcp(segment) => segment.flow,
+        let segment = match classify_ipv4_packet(&packet) {
+            PacketDisposition::Tcp(segment) => segment,
             _ => panic!("ACK must be TCP"),
         };
-        assert!(matches!(
-            stack.ingest_packet(packet, Duration::from_millis(1)),
-            Err(GatewayError::TcpStack(TcpStackError::MissingInitialSyn(id))) if id == flow
-        ));
+        assert_eq!(
+            stack.admit_flow(segment, Duration::from_millis(1)),
+            TcpFlowAdmission::Rejected(FlowRejectReason::MissingInitialSyn)
+        );
         assert_eq!(stack.flow_count(), 0);
+        stack.reject_segment(packet, Duration::from_millis(1));
+        assert!(stack.take_egress().iter().any(|packet| matches!(
+            classify_ipv4_packet(packet),
+            PacketDisposition::Tcp(TcpSegment { flow: reply, rst: true, .. })
+                if reply.source == segment.flow.target && reply.target == segment.flow.source
+        )));
     }
 
     #[test]
     fn captured_udp_is_not_fed_into_the_tcp_stack() {
         let mut packet = tcp_packet(TcpControl::Syn, None);
         packet[9] = 17;
-        let mut stack = TcpStack::new(&config(), 7).expect("valid TCP stack");
         assert_eq!(
-            stack
-                .ingest_packet(packet, Duration::from_millis(1))
-                .expect("UDP is an explicit disposition"),
-            PacketDisposition::DropUdp
+            classify_ipv4_packet(&packet),
+            PacketDisposition::Drop(PacketDropReason::Udp)
         );
-        assert_eq!(stack.flow_count(), 0);
-        assert!(stack.take_egress().is_empty());
     }
 
     #[test]
@@ -528,39 +618,46 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_capacity_is_released_after_abort() {
+    fn every_pending_tcp_state_has_a_runtime_exit_clock() {
+        let timeout = Duration::from_secs(30);
+        assert_eq!(
+            TcpEndpointState::Listening.exit_clock(timeout),
+            Some(timeout)
+        );
+        assert_eq!(
+            TcpEndpointState::Handshaking.exit_clock(timeout),
+            Some(timeout)
+        );
+        assert_eq!(TcpEndpointState::Established.exit_clock(timeout), None);
+        assert_eq!(TcpEndpointState::Closing.exit_clock(timeout), None);
+        assert_eq!(TcpEndpointState::Closed.exit_clock(timeout), None);
+    }
+
+    #[test]
+    fn stack_does_not_duplicate_flow_table_capacity_accounting() {
         let mut candidate = config();
         candidate.max_flows = 1;
         let mut stack = TcpStack::new(&candidate, 7).expect("valid TCP stack");
-        let first = stack
-            .ingest_packet(tcp_packet(TcpControl::Syn, None), Duration::from_millis(1))
-            .expect("first SYN");
-        let PacketDisposition::Tcp(first) = first else {
-            panic!("first SYN must be TCP");
-        };
+        let first = ingest_tcp(
+            &mut stack,
+            tcp_packet(TcpControl::Syn, None),
+            Duration::from_millis(1),
+        );
 
         let mut second_packet = tcp_packet(TcpControl::Syn, None);
         second_packet[0x14..0x16].copy_from_slice(&41_001_u16.to_be_bytes());
-        let second_flow = match classify_ipv4_packet(&second_packet).expect("second SYN") {
+        TcpPacket::new_unchecked(&mut second_packet[20..]).fill_checksum(
+            &Ipv4Addr::new(100, 64, 0, 2).into(),
+            &Ipv4Addr::new(93, 184, 216, 34).into(),
+        );
+        let second = match classify_ipv4_packet(&second_packet) {
             PacketDisposition::Tcp(segment) => segment.flow,
             _ => panic!("second SYN must be TCP"),
         };
-        assert!(matches!(
-            stack.ingest_packet(second_packet.clone(), Duration::from_millis(2)),
-            Err(GatewayError::TcpStack(
-                TcpStackError::TcpCapacityExhausted { limit: 1 }
-            ))
-        ));
-
-        stack
-            .abort_flow(first.flow, Duration::from_millis(3))
-            .expect("abort first flow");
-        assert_eq!(stack.flow_count(), 0);
-        stack
-            .ingest_packet(second_packet, Duration::from_millis(4))
-            .expect("released capacity accepts second flow");
-        assert_eq!(stack.flow_count(), 1);
-        assert!(stack.endpoint_state(second_flow).is_ok());
+        ingest_tcp(&mut stack, second_packet, Duration::from_millis(2));
+        assert_eq!(stack.flow_count(), 2);
+        assert!(stack.endpoint_state(first.flow).is_ok());
+        assert!(stack.endpoint_state(second).is_ok());
     }
 
     #[test]
@@ -577,17 +674,11 @@ mod tests {
         let (flow, server_sequence) = establish(&mut stack);
         let acknowledgment = Some(server_sequence + 1);
 
-        stack
-            .ingest_packet(
-                tcp_packet_with_payload(
-                    TcpControl::None,
-                    TcpSeqNumber(12),
-                    acknowledgment,
-                    b"efgh",
-                ),
-                Duration::from_millis(3),
-            )
-            .expect("out-of-order suffix");
+        ingest_tcp(
+            &mut stack,
+            tcp_packet_with_payload(TcpControl::None, TcpSeqNumber(12), acknowledgment, b"efgh"),
+            Duration::from_millis(3),
+        );
         let mut received = [0_u8; 16];
         assert_eq!(
             stack
@@ -598,17 +689,13 @@ mod tests {
 
         let prefix =
             tcp_packet_with_payload(TcpControl::None, TcpSeqNumber(8), acknowledgment, b"abcd");
-        stack
-            .ingest_packet(prefix.clone(), Duration::from_millis(4))
-            .expect("in-order prefix");
+        ingest_tcp(&mut stack, prefix.clone(), Duration::from_millis(4));
         let length = stack
             .read_application_data(flow, &mut received)
             .expect("read reassembled payload");
         assert_eq!(received.get(..length), Some(b"abcdefgh".as_slice()));
 
-        stack
-            .ingest_packet(prefix, Duration::from_millis(5))
-            .expect("retransmitted prefix");
+        ingest_tcp(&mut stack, prefix, Duration::from_millis(5));
         assert_eq!(
             stack
                 .read_application_data(flow, &mut received)

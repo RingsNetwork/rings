@@ -17,7 +17,9 @@ use crate::DnsPolicy;
 use crate::ExitAvailability;
 use crate::FlowEvent;
 use crate::FlowId;
+use crate::FlowRejectReason;
 use crate::FlowState;
+use crate::FlowTableError;
 use crate::GatewayConfig;
 use crate::GatewayError;
 use crate::GatewayEvent;
@@ -29,13 +31,15 @@ use crate::OnionStreamConnector;
 use crate::PacketDisposition;
 use crate::PacketIo;
 use crate::PacketIoError;
+use crate::PacketOutcome;
 use crate::TcpEndpointState;
+use crate::TcpFlowAdmission;
 use crate::TcpStack;
 use crate::TcpStackError;
 
 const TCP_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const BRIDGE_IO_CHUNK_BYTES: usize = 16 * 1_024;
-const EVENTS_PER_FLOW: usize = 2;
+const EVENTS_PER_FLOW: usize = 3;
 const CONTROL_QUEUE_CAPACITY: usize = 8;
 
 enum RuntimeControl {
@@ -107,6 +111,7 @@ impl PendingChunk {
 
 struct RuntimeFlow {
     bridge: Option<BridgeHandle>,
+    client_to_onion_buffer: Option<Vec<u8>>,
     pending_to_client: VecDeque<PendingChunk>,
     client_eof_sent: bool,
     onion_eof_seen: bool,
@@ -114,9 +119,10 @@ struct RuntimeFlow {
 }
 
 impl RuntimeFlow {
-    fn captured() -> Self {
+    fn captured(chunk_bytes: usize) -> Self {
         Self {
             bridge: None,
+            client_to_onion_buffer: Some(vec![0_u8; chunk_bytes]),
             pending_to_client: VecDeque::new(),
             client_eof_sent: false,
             onion_eof_seen: false,
@@ -136,6 +142,21 @@ enum ReconcileScope {
     None,
     Flow(FlowId),
     All,
+}
+
+/// Runtime-loop failures are gateway-scoped by construction. Packet drops and flow refusals
+/// never inhabit this type and therefore cannot short-circuit the loop through `?`.
+#[derive(Debug)]
+struct GatewayFatal(GatewayError);
+
+impl GatewayFatal {
+    fn gateway(error: impl Into<GatewayError>) -> Self {
+        Self(error.into())
+    }
+
+    fn into_gateway(self) -> GatewayError {
+        self.0
+    }
 }
 
 /// Foreground, platform-neutral gateway data plane.
@@ -252,20 +273,19 @@ impl GatewayRuntime {
             let elapsed = started.elapsed();
             let reconcile = match self.process_input(input, &packet, elapsed) {
                 Ok(reconcile) => reconcile,
-                Err(error) => break Err(error),
+                Err(error) => break Err(error.into_gateway()),
             };
             let reconciled = match reconcile {
                 ReconcileScope::None => Ok(()),
                 ReconcileScope::Flow(flow) => self.reconcile_flow(flow, elapsed),
                 ReconcileScope::All => self.reconcile_all(elapsed),
             };
-            if let Err(error) = reconciled {
-                break Err(error);
+            if let Err(error) = reconciled.map_err(GatewayFatal::gateway) {
+                break Err(error.into_gateway());
             }
             if let Err(error) = self.flush_egress(device).await {
                 break Err(error);
             }
-            self.publish_status();
         };
 
         match result {
@@ -300,34 +320,50 @@ impl GatewayRuntime {
         input: LoopInput,
         packet_buffer: &[u8],
         elapsed: Duration,
-    ) -> Result<ReconcileScope, GatewayError> {
+    ) -> Result<ReconcileScope, GatewayFatal> {
         match input {
             LoopInput::Packet(result) => {
-                let length = result?;
+                let length = result.map_err(GatewayFatal::gateway)?;
                 let packet = packet_buffer
                     .get(..length)
                     .ok_or(PacketIoError::InvalidLength {
                         length,
                         capacity: packet_buffer.len(),
-                    })?;
-                self.ingest_packet(packet.to_vec(), elapsed)
-                    .map(|flow| flow.map_or(ReconcileScope::None, ReconcileScope::Flow))
+                    })
+                    .map_err(GatewayFatal::gateway)?;
+                match self.ingest_packet(packet.to_vec(), elapsed)? {
+                    PacketOutcome::Consumed(flow) => Ok(ReconcileScope::Flow(flow)),
+                    PacketOutcome::Dropped(_) | PacketOutcome::FlowRejected { .. } => {
+                        Ok(ReconcileScope::None)
+                    }
+                }
             }
-            LoopInput::Bridge(Some(event)) => self.handle_bridge_event(event, elapsed),
-            LoopInput::Bridge(None) => Err(GatewayError::Platform {
+            LoopInput::Bridge(Some(event)) => self
+                .handle_bridge_event(event, elapsed)
+                .map_err(GatewayFatal::gateway),
+            LoopInput::Bridge(None) => Err(GatewayFatal::gateway(GatewayError::Platform {
                 operation: "bridge-events",
                 message: "gateway bridge event channel closed".to_string(),
-            }),
+            })),
             LoopInput::Control(Some(RuntimeControl::ExitAvailability {
                 availability,
                 reason,
             })) => {
                 self.server.set_exit_availability(availability, reason);
+                self.publish_status();
                 Ok(ReconcileScope::None)
             }
             LoopInput::Control(None) => Ok(ReconcileScope::None),
             LoopInput::Tick => {
                 self.tcp.poll(elapsed);
+                let expired = self
+                    .tcp
+                    .expired_pending_flows(elapsed)
+                    .map_err(GatewayFatal::gateway)?;
+                for flow in expired {
+                    self.fail_flow(flow, elapsed)
+                        .map_err(GatewayFatal::gateway)?;
+                }
                 Ok(ReconcileScope::All)
             }
         }
@@ -337,35 +373,71 @@ impl GatewayRuntime {
         &mut self,
         packet: Vec<u8>,
         elapsed: Duration,
-    ) -> Result<Option<FlowId>, GatewayError> {
-        let classified = crate::classify_ipv4_packet(&packet)?;
-        if matches!(classified, PacketDisposition::Tcp(segment)
-            if self.config.plan.dns_policy == DnsPolicy::Block && segment.flow.target.port() == 53)
-        {
-            return Ok(None);
+    ) -> Result<PacketOutcome, GatewayFatal> {
+        let segment = match crate::classify_ipv4_packet(&packet) {
+            PacketDisposition::Tcp(segment) => segment,
+            PacketDisposition::Drop(reason) => return Ok(PacketOutcome::Dropped(reason)),
+        };
+        if self.config.plan.dns_policy == DnsPolicy::Block && segment.flow.target.port() == 53 {
+            self.tcp.reject_segment(packet, elapsed);
+            return Ok(PacketOutcome::FlowRejected {
+                flow: segment.flow,
+                reason: FlowRejectReason::DnsBlocked,
+            });
         }
-        let known = match classified {
-            PacketDisposition::Tcp(segment) => self.flows.contains_key(&segment.flow),
-            PacketDisposition::DropUdp | PacketDisposition::DropUnsupportedProtocol => false,
-        };
-        let disposition = self.tcp.ingest_packet(packet, elapsed)?;
-        let PacketDisposition::Tcp(segment) = disposition else {
-            return Ok(None);
-        };
-        if !known {
-            if let Err(error) = self.capture_flow(segment.flow) {
-                let _ = self.tcp.abort_flow(segment.flow, elapsed);
-                return Err(error);
+        if !self.flows.contains_key(&segment.flow) {
+            if !segment.opens_flow() {
+                self.tcp.reject_segment(packet, elapsed);
+                return Ok(PacketOutcome::FlowRejected {
+                    flow: segment.flow,
+                    reason: FlowRejectReason::MissingInitialSyn,
+                });
+            }
+            if let Some(reason) = self.admit_flow(segment, elapsed)? {
+                self.tcp.reject_segment(packet, elapsed);
+                return Ok(PacketOutcome::FlowRejected {
+                    flow: segment.flow,
+                    reason,
+                });
             }
         }
-        Ok(Some(segment.flow))
+        self.tcp
+            .ingest_segment(packet, segment, elapsed)
+            .map_err(GatewayFatal::gateway)?;
+        Ok(PacketOutcome::Consumed(segment.flow))
     }
 
-    fn capture_flow(&mut self, flow: FlowId) -> Result<(), GatewayError> {
-        self.server.capture_flow(flow)?;
-        self.server.transition_flow(flow, FlowEvent::BindTarget)?;
-        self.flows.insert(flow, RuntimeFlow::captured());
-        Ok(())
+    fn admit_flow(
+        &mut self,
+        segment: crate::TcpSegment,
+        elapsed: Duration,
+    ) -> Result<Option<FlowRejectReason>, GatewayFatal> {
+        match self.server.capture_flow(segment.flow) {
+            Ok(_) => {}
+            Err(GatewayError::FlowTable(FlowTableError::CapacityExhausted { limit })) => {
+                return Ok(Some(FlowRejectReason::CapacityExhausted { limit }));
+            }
+            Err(error) => return Err(GatewayFatal::gateway(error)),
+        }
+        self.server
+            .transition_flow(segment.flow, FlowEvent::BindTarget)
+            .map_err(GatewayFatal::gateway)?;
+        match self.tcp.admit_flow(segment, elapsed) {
+            TcpFlowAdmission::Accepted => {
+                let chunk_bytes = self.config.tcp_buffer_bytes.min(BRIDGE_IO_CHUNK_BYTES);
+                self.flows
+                    .insert(segment.flow, RuntimeFlow::captured(chunk_bytes));
+                self.publish_status();
+                Ok(None)
+            }
+            TcpFlowAdmission::Rejected(reason) => {
+                self.server
+                    .transition_flow(segment.flow, FlowEvent::Fail)
+                    .map_err(GatewayFatal::gateway)?;
+                self.publish_status();
+                Ok(Some(reason))
+            }
+        }
     }
 
     fn handle_bridge_event(
@@ -377,6 +449,7 @@ impl GatewayRuntime {
             BridgeEvent::Opened(flow) => {
                 if self.server.flow_state(flow) == Some(FlowState::Opening(flow)) {
                     self.server.transition_flow(flow, FlowEvent::Establish)?;
+                    self.publish_status();
                 }
                 Ok(ReconcileScope::Flow(flow))
             }
@@ -394,12 +467,21 @@ impl GatewayRuntime {
                 self.flush_pending_to_client(flow, elapsed)?;
                 Ok(ReconcileScope::Flow(flow))
             }
+            BridgeEvent::ClientBuffer { flow, mut buffer } => {
+                let Some(runtime) = self.flows.get_mut(&flow) else {
+                    return Ok(ReconcileScope::None);
+                };
+                buffer.resize(self.config.tcp_buffer_bytes.min(BRIDGE_IO_CHUNK_BYTES), 0);
+                runtime.client_to_onion_buffer = Some(buffer);
+                Ok(ReconcileScope::Flow(flow))
+            }
             BridgeEvent::PeerClosed(flow) => {
                 let Some(runtime) = self.flows.get_mut(&flow) else {
                     return Ok(ReconcileScope::None);
                 };
                 runtime.onion_eof_seen = true;
                 self.mark_half_closed(flow)?;
+                self.publish_status();
                 Ok(ReconcileScope::Flow(flow))
             }
             BridgeEvent::Failed { flow, error } => {
@@ -407,8 +489,11 @@ impl GatewayRuntime {
                     return Ok(ReconcileScope::None);
                 }
                 self.fail_flow(flow, elapsed)?;
-                self.server
-                    .set_exit_availability(ExitAvailability::Unknown, Some(error.to_string()));
+                if matches!(error, GatewayError::OnionUnavailable { .. }) {
+                    self.server
+                        .set_exit_availability(ExitAvailability::Unknown, Some(error.to_string()));
+                }
+                self.publish_status();
                 Ok(ReconcileScope::None)
             }
         }
@@ -438,7 +523,6 @@ impl GatewayRuntime {
         {
             return Ok(());
         }
-        self.server.transition_flow(flow, FlowEvent::BuildRoute)?;
         self.server.transition_flow(flow, FlowEvent::Open)?;
         let chunk_bytes = self.config.tcp_buffer_bytes.min(BRIDGE_IO_CHUNK_BYTES);
         let bridge = spawn_bridge(
@@ -467,35 +551,51 @@ impl GatewayRuntime {
         ) {
             return Ok(());
         }
-        let mut buffer = vec![0_u8; self.config.tcp_buffer_bytes.min(BRIDGE_IO_CHUNK_BYTES)];
+        let Some(mut buffer) = self
+            .flows
+            .get_mut(&flow)
+            .and_then(|runtime| runtime.client_to_onion_buffer.take())
+        else {
+            return Ok(());
+        };
         let length = match self.tcp.peek_application_data(flow, &mut buffer) {
             Ok(length) => length,
             Err(TcpStackError::ReceiveUnavailable(_)) => 0,
             Err(error) => return Err(error.into()),
         };
         if length > 0 {
-            let Some(bytes) = buffer.get(..length).map(<[u8]>::to_vec) else {
+            if length > buffer.len() {
                 return Err(TcpStackError::ReceiveCommitMismatch {
                     flow,
                     expected: length,
                     actual: buffer.len(),
                 }
                 .into());
-            };
+            }
+            buffer.truncate(length);
             let send = self
                 .flows
                 .get(&flow)
                 .and_then(|runtime| runtime.bridge.as_ref())
                 .ok_or(TcpStackError::UnknownFlow(flow))?
-                .try_send(BridgeCommand::Data(bytes));
+                .try_send(BridgeCommand::Data(buffer));
             match send {
                 Ok(()) => self.tcp.commit_application_read(flow, length)?,
-                Err(mpsc::error::TrySendError::Full(_)) => return Ok(()),
+                Err(mpsc::error::TrySendError::Full(BridgeCommand::Data(mut buffer))) => {
+                    buffer.resize(self.config.tcp_buffer_bytes.min(BRIDGE_IO_CHUNK_BYTES), 0);
+                    if let Some(runtime) = self.flows.get_mut(&flow) {
+                        runtime.client_to_onion_buffer = Some(buffer);
+                    }
+                    return Ok(());
+                }
+                Err(mpsc::error::TrySendError::Full(BridgeCommand::CloseWrite)) => return Ok(()),
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     self.fail_flow(flow, elapsed)?;
                     return Ok(());
                 }
             }
+        } else if let Some(runtime) = self.flows.get_mut(&flow) {
+            runtime.client_to_onion_buffer = Some(buffer);
         }
 
         if !self.tcp.client_read_open(flow)? {
@@ -615,6 +715,7 @@ impl GatewayRuntime {
         }
         self.server.transition_flow(flow, FlowEvent::Close)?;
         let _ = self.tcp.release_closed_flow(flow)?;
+        self.publish_status();
         Ok(())
     }
 
@@ -632,6 +733,7 @@ impl GatewayRuntime {
             Err(TcpStackError::UnknownFlow(_)) => {}
             Err(error) => return Err(error.into()),
         }
+        self.publish_status();
         Ok(())
     }
 

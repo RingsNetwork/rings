@@ -121,7 +121,8 @@ The same constraint applies to HTTP seed/signaling URLs supplied at runtime: nam
 `dns_policy: bypass`, while `dns_policy: block` callers must use literal IPv4 endpoints. Resolution
 or underlay admission failure aborts bootstrap before the first HTTP request.
 
-The status endpoint is exposed only when the gateway is configured:
+The status endpoint is exposed only on the loopback-bound internal API when the gateway is
+configured; it is never mounted on the externally bound API:
 
 ```text
 GET /gateway/status

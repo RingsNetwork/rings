@@ -26,6 +26,10 @@ pub(super) enum BridgeEvent {
         bytes: Vec<u8>,
         consumed: oneshot::Sender<()>,
     },
+    ClientBuffer {
+        flow: FlowId,
+        buffer: Vec<u8>,
+    },
     PeerClosed(FlowId),
     Failed {
         flow: FlowId,
@@ -47,6 +51,12 @@ impl BridgeHandle {
     }
 
     pub(super) fn abort(self) {
+        self.task.abort();
+    }
+}
+
+impl Drop for BridgeHandle {
+    fn drop(&mut self) {
         self.task.abort();
     }
 }
@@ -131,22 +141,36 @@ async fn run_bridge(
             }
             command = commands.recv() => {
                 match command {
-                    Some(BridgeCommand::Data(bytes)) if write_open => {
+                    Some(BridgeCommand::Data(mut bytes)) if write_open => {
                         if let Err(error) = gateway.write_all(&bytes).await {
                             send_stream_error(&events, flow, "write", &error.to_string()).await;
                             return;
                         }
+                        bytes.clear();
+                        if events
+                            .send(BridgeEvent::ClientBuffer { flow, buffer: bytes })
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
                     }
                     Some(BridgeCommand::Data(_)) => {}
-                    Some(BridgeCommand::CloseWrite) | None if write_open => {
+                    Some(BridgeCommand::CloseWrite) if write_open => {
                         if let Err(error) = gateway.shutdown().await {
                             send_stream_error(&events, flow, "shutdown", &error.to_string()).await;
                             return;
                         }
                         write_open = false;
                     }
-                    Some(BridgeCommand::CloseWrite) | None => {
+                    Some(BridgeCommand::CloseWrite) => {
                         write_open = false;
+                    }
+                    None => {
+                        if write_open {
+                            let _ = gateway.shutdown().await;
+                        }
+                        return;
                     }
                 }
             }
@@ -248,9 +272,16 @@ mod tests {
         handle
             .try_send(BridgeCommand::Data(b"echo".to_vec()))
             .expect("empty bounded command queue");
-        let echoed = tokio::time::timeout(Duration::from_secs(1), events_rx.recv())
-            .await
-            .expect("echo deadline");
+        let echoed = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match events_rx.recv().await {
+                    Some(BridgeEvent::ClientBuffer { .. }) => {}
+                    event => return event,
+                }
+            }
+        })
+        .await
+        .expect("echo deadline");
         let Some(BridgeEvent::Data {
             flow: id,
             bytes,
@@ -307,5 +338,16 @@ mod tests {
         assert_eq!(bytes, b"efgh");
         consumed.send(()).expect("acknowledge second chunk");
         handle.abort();
+    }
+
+    #[tokio::test]
+    async fn dropping_handle_aborts_bridge_task() {
+        let (events_tx, mut events_rx) = mpsc::channel(1);
+        let handle = spawn_bridge(flow(), Arc::new(EchoConnector), events_tx, 64, 32);
+        assert!(matches!(events_rx.recv().await, Some(BridgeEvent::Opened(id)) if id == flow()));
+        let task = handle.task.abort_handle();
+        drop(handle);
+        tokio::task::yield_now().await;
+        assert!(task.is_finished());
     }
 }
