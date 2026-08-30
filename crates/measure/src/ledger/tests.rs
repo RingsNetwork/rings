@@ -2,6 +2,22 @@ use super::*;
 use crate::PolicyError;
 use crate::ReliabilityThresholds;
 
+#[allow(
+    clippy::unwrap_used,
+    reason = "test helpers receive explicit non-zero literals"
+)]
+fn nonzero_usize(value: usize) -> NonZeroUsize {
+    NonZeroUsize::new(value).unwrap()
+}
+
+#[allow(
+    clippy::unwrap_used,
+    reason = "test helpers receive explicit non-zero literals"
+)]
+fn nonzero_u64(value: u64) -> std::num::NonZeroU64 {
+    std::num::NonZeroU64::new(value).unwrap()
+}
+
 fn reliability_policy() -> ReliabilityPolicy {
     ReliabilityPolicy::new(60, 1, ReliabilityThresholds::new(3, 4, 5))
         .unwrap_or_else(|error| unreachable_policy(error))
@@ -24,7 +40,7 @@ fn unauthenticated_events_cannot_create_or_change_credit() {
             UnixTime::from_secs(10),
             reliability_policy(),
         ),
-        Ok(ApplyOutcome::IgnoredUnattributable)
+        Ok(ApplyReport::ignored_unattributable())
     );
     assert!(ledger.is_empty());
 }
@@ -40,7 +56,7 @@ fn logical_transfer_updates_credit_and_reliability_once() {
             UnixTime::from_secs(10),
             reliability_policy(),
         ),
-        Ok(ApplyOutcome::Applied)
+        Ok(ApplyReport::applied(None))
     );
     let record = ledger.record(&7).unwrap_or_else(|| missing_record());
     assert_eq!(record.credit().bytes_received_from_peer(), 42);
@@ -48,7 +64,7 @@ fn logical_transfer_updates_credit_and_reliability_once() {
 }
 
 #[test]
-fn locally_addressed_failure_is_attributable_without_remote_authentication() {
+fn locally_addressed_failure_cannot_establish_an_unknown_peer() {
     let mut ledger = MeasurementLedger::<u8>::new();
     assert_eq!(
         ledger.apply(
@@ -58,10 +74,87 @@ fn locally_addressed_failure_is_attributable_without_remote_authentication() {
             UnixTime::from_secs(10),
             reliability_policy(),
         ),
-        Ok(ApplyOutcome::Applied)
+        Ok(ApplyReport::ignored_unknown_peer())
     );
+    assert!(ledger.is_empty());
+}
+
+#[test]
+fn locally_addressed_failure_updates_known_reliability_without_refreshing_retention() {
+    let mut ledger = MeasurementLedger::<u8>::new();
+    let policy = reliability_policy();
+    assert_eq!(
+        ledger.apply(
+            7,
+            Authentication::Authenticated,
+            MeasurementEvent::Connected,
+            UnixTime::from_secs(10),
+            policy,
+        ),
+        Ok(ApplyReport::applied(None))
+    );
+    assert_eq!(
+        ledger.apply(
+            7,
+            Authentication::LocallyAddressed,
+            MeasurementEvent::FailedToSend,
+            UnixTime::from_secs(70),
+            policy,
+        ),
+        Ok(ApplyReport::applied(None))
+    );
+
     let record = ledger.record(&7).unwrap_or_else(|| missing_record());
+    assert_eq!(record.credit().last_seen(), UnixTime::from_secs(10));
     assert_eq!(record.reliability().stored_evidence().failed_to_send, 1);
+    let restored = MeasurementLedger::from_snapshot(ledger.snapshot())
+        .unwrap_or_else(|error| invalid_fixture(error));
+    assert_eq!(restored.record(&7), Some(record));
+
+    let retention_boundary = UnixTime::from_secs(10 + CreditPolicy::amule().retention_seconds());
+    assert_eq!(
+        ledger
+            .prune(retention_boundary, CreditPolicy::amule())
+            .removed(),
+        &[7]
+    );
+}
+
+#[test]
+fn locally_addressed_identity_rotation_cannot_evict_authenticated_credit() {
+    let mut ledger = MeasurementLedger::<u8>::with_max_records(nonzero_usize(2));
+    let policy = reliability_policy();
+    for peer in [1, 2] {
+        assert_eq!(
+            ledger.apply(
+                peer,
+                Authentication::Authenticated,
+                MeasurementEvent::Received {
+                    useful_bytes: 2_000_000,
+                },
+                UnixTime::from_secs(u64::from(peer)),
+                policy,
+            ),
+            Ok(ApplyReport::applied(None))
+        );
+    }
+
+    for peer in 3..=u8::MAX {
+        assert_eq!(
+            ledger.apply(
+                peer,
+                Authentication::LocallyAddressed,
+                MeasurementEvent::FailedToSend,
+                UnixTime::from_secs(100),
+                policy,
+            ),
+            Ok(ApplyReport::ignored_unknown_peer())
+        );
+    }
+
+    assert_eq!(ledger.len(), 2);
+    assert!(ledger.record(&1).is_some());
+    assert!(ledger.record(&2).is_some());
 }
 
 #[test]
@@ -79,7 +172,7 @@ fn locally_addressed_proof_cannot_claim_successful_transfer_credit() {
                 UnixTime::from_secs(10),
                 reliability_policy(),
             ),
-            Ok(ApplyOutcome::IgnoredUnattributable)
+            Ok(ApplyReport::ignored_unattributable())
         );
     }
     assert!(ledger.is_empty());
@@ -87,7 +180,7 @@ fn locally_addressed_proof_cannot_claim_successful_transfer_credit() {
 
 #[test]
 fn retained_peer_bound_evicts_the_stalest_record_at_n_plus_one() {
-    let limit = NonZeroUsize::MIN.saturating_add(1);
+    let limit = nonzero_usize(2);
     let mut ledger = MeasurementLedger::<u8>::with_max_records(limit);
     let policy = reliability_policy();
     for (peer, observed_at) in [(1, 1), (2, 2)] {
@@ -99,7 +192,7 @@ fn retained_peer_bound_evicts_the_stalest_record_at_n_plus_one() {
                 UnixTime::from_secs(observed_at),
                 policy,
             ),
-            Ok(ApplyOutcome::Applied)
+            Ok(ApplyReport::applied(None))
         );
     }
     assert_eq!(
@@ -110,7 +203,7 @@ fn retained_peer_bound_evicts_the_stalest_record_at_n_plus_one() {
             UnixTime::from_secs(3),
             policy,
         ),
-        Ok(ApplyOutcome::Applied),
+        Ok(ApplyReport::applied(None)),
         "updating a retained peer must refresh its eviction priority"
     );
     assert_eq!(
@@ -121,7 +214,7 @@ fn retained_peer_bound_evicts_the_stalest_record_at_n_plus_one() {
             UnixTime::from_secs(4),
             policy,
         ),
-        Ok(ApplyOutcome::Applied)
+        Ok(ApplyReport::applied(Some(2)))
     );
     assert_eq!(ledger.len(), 2);
     assert_eq!(ledger.snapshot().records.len(), 2);
@@ -193,7 +286,7 @@ fn failed_transition_preserves_complete_prior_record() {
 #[test]
 fn homogeneous_batch_updates_count_and_aggregate_bytes_atomically() {
     let mut ledger = MeasurementLedger::<u8>::new();
-    let occurrences = std::num::NonZeroU64::MIN.saturating_add(2);
+    let occurrences = nonzero_u64(3);
     assert_eq!(
         ledger.apply_batch(
             7,
@@ -202,7 +295,7 @@ fn homogeneous_batch_updates_count_and_aggregate_bytes_atomically() {
             UnixTime::from_secs(10),
             reliability_policy(),
         ),
-        Ok(ApplyOutcome::Applied)
+        Ok(ApplyReport::applied(None))
     );
     let record = ledger.record(&7).unwrap_or_else(|| missing_record());
     assert_eq!(record.credit().bytes_sent_to_peer(), 21);
@@ -228,7 +321,7 @@ fn batch_byte_overflow_preserves_reliability_and_credit() {
     let mut ledger =
         MeasurementLedger::from_snapshot(snapshot).unwrap_or_else(|error| invalid_fixture(error));
     let before = ledger.clone();
-    let occurrences = std::num::NonZeroU64::MIN.saturating_add(1);
+    let occurrences = nonzero_u64(2);
     assert_eq!(
         ledger.apply_batch(
             7,
@@ -263,7 +356,7 @@ fn batch_reliability_overflow_preserves_complete_prior_record() {
     let mut ledger =
         MeasurementLedger::from_snapshot(snapshot).unwrap_or_else(|error| invalid_fixture(error));
     let before = ledger.clone();
-    let occurrences = std::num::NonZeroU64::MIN.saturating_add(1);
+    let occurrences = nonzero_u64(2);
     assert_eq!(
         ledger.apply_batch(
             7,
@@ -302,7 +395,7 @@ fn snapshot_json_round_trip_preserves_projected_measurements() {
                 UnixTime::from_secs(10),
                 policy,
             ),
-            Ok(ApplyOutcome::Applied)
+            Ok(ApplyReport::applied(None))
         );
     }
     let encoded = serde_json::to_string(&ledger.snapshot())
@@ -358,25 +451,6 @@ fn snapshot_rejects_inconsistent_reliability_state() {
     assert_eq!(
         MeasurementLedger::from_snapshot(evidence_without_epoch),
         Err(MeasureError::SnapshotEvidenceWithoutEpoch)
-    );
-
-    let future_epoch = MeasurementSnapshot {
-        schema_version: MEASUREMENT_SNAPSHOT_VERSION,
-        records: vec![SnapshotRecord {
-            peer: 1_u8,
-            record: PeerRecord::new(
-                CreditRecord::empty(UnixTime::from_secs(10)),
-                ReliabilityWindow::new(
-                    Some(UnixTime::from_secs(60)),
-                    Some(60),
-                    ReliabilityEvidence::new(1, 0, 0, 0, 0, 0),
-                ),
-            ),
-        }],
-    };
-    assert_eq!(
-        MeasurementLedger::from_snapshot(future_epoch),
-        Err(MeasureError::SnapshotEpochAfterLastSeen)
     );
 
     let missing_window = MeasurementSnapshot {
@@ -447,7 +521,7 @@ fn changing_reliability_window_rejects_without_mutation() {
             UnixTime::from_secs(120),
             short,
         ),
-        Ok(ApplyOutcome::Applied)
+        Ok(ApplyReport::applied(None))
     );
     let before = ledger.clone();
     assert_eq!(
@@ -480,7 +554,7 @@ fn runtime_reconciliation_resets_obsolete_window_and_preserves_credit() {
             UnixTime::from_secs(120),
             short,
         ),
-        Ok(ApplyOutcome::Applied)
+        Ok(ApplyReport::applied(None))
     );
 
     let reconciliation = ledger.reconcile_runtime(UnixTime::from_secs(120), long);
@@ -498,7 +572,7 @@ fn runtime_reconciliation_resets_obsolete_window_and_preserves_credit() {
             UnixTime::from_secs(120),
             long,
         ),
-        Ok(ApplyOutcome::Applied)
+        Ok(ApplyReport::applied(None))
     );
 }
 
@@ -514,7 +588,7 @@ fn query_clock_rollback_does_not_project_future_state() {
             UnixTime::from_secs(50),
             policy,
         ),
-        Ok(ApplyOutcome::Applied)
+        Ok(ApplyReport::applied(None))
     );
     assert!(matches!(
         ledger.measurement(&7, UnixTime::from_secs(49), CreditPolicy::amule(), policy,),
@@ -614,7 +688,7 @@ fn bounded_page_projects_only_scanned_records_and_advances_past_failures() {
         ],
     })
     .unwrap_or_else(|error| invalid_fixture(error));
-    let limit = NonZeroUsize::MIN.saturating_add(1);
+    let limit = nonzero_usize(2);
 
     let first = ledger.measurements_page(
         None,
@@ -699,7 +773,7 @@ fn pruning_is_idempotent_at_retention_boundary() {
             UnixTime::from_secs(10),
             reliability_policy(),
         ),
-        Ok(ApplyOutcome::Applied)
+        Ok(ApplyReport::applied(None))
     );
     let expiry = UnixTime::from_secs(10 + CreditPolicy::amule().retention_seconds());
     assert_eq!(
@@ -726,7 +800,7 @@ fn next_retention_boundary_tracks_the_earliest_peer_exactly() {
                 UnixTime::from_secs(observed_at),
                 policy,
             ),
-            Ok(ApplyOutcome::Applied)
+            Ok(ApplyReport::applied(None))
         );
     }
     assert_eq!(
@@ -759,7 +833,7 @@ fn every_two_event_sequence_matches_counter_homomorphism() {
                         UnixTime::from_secs(1),
                         reliability_policy(),
                     ),
-                    Ok(ApplyOutcome::Applied)
+                    Ok(ApplyReport::applied(None))
                 );
             }
             let record = ledger.record(&1).unwrap_or_else(|| missing_record());

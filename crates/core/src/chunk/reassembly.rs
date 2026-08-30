@@ -120,6 +120,10 @@ pub struct MessageReassembler {
     /// make memory unbounded.
     failed: VecDeque<(LogicalTransmission, u128)>,
     failed_ids: HashSet<LogicalTransmission>,
+    /// When invalid-terminal tracking saturates, new invalid arrivals fail open and untracked
+    /// already-scored expiries remain replays until this horizon. This prevents a retained expiry
+    /// from being charged again merely because an older tombstone drains first.
+    failure_tracking_saturated_until: u128,
     /// Transmissions rejected by local capacity before any pending state was retained. Their ids
     /// are blocked until expiry, preventing a later tail from becoming an incomplete message that
     /// is incorrectly attributed to the peer.
@@ -249,6 +253,7 @@ impl MessageReassembler {
             completed_ids: HashSet::new(),
             failed: VecDeque::new(),
             failed_ids: HashSet::new(),
+            failure_tracking_saturated_until: 0,
             capacity_rejected: VecDeque::new(),
             capacity_rejected_ids: HashSet::new(),
             capacity_tracking_saturated_until: 0,
@@ -329,6 +334,7 @@ impl MessageReassembler {
         self.completed_ids.clear();
         self.failed.clear();
         self.failed_ids.clear();
+        self.failure_tracking_saturated_until = 0;
         self.capacity_rejected.clear();
         self.capacity_rejected_ids.clear();
         self.capacity_tracking_saturated_until = 0;
@@ -358,10 +364,16 @@ impl MessageReassembler {
         });
         // Keep a bounded terminal witness after removing the pending buffer. This distinguishes a
         // late chunk for an already-scored expiry from a first expired-on-arrival chunk, which is
-        // invalid evidence. At capacity `mark_failed_transmission` fails closed to Replay without
-        // growing memory, preserving exact-once attribution.
+        // invalid evidence. At capacity `mark_failed_transmission` fails open for reputation by
+        // classifying the event as Replay without growing memory. Its saturation horizon keeps
+        // that classification stable if an older tombstone drains first; after the bounded
+        // horizon, exact-once history is intentionally forgotten with the tombstones.
         for transmission in expired_transmissions {
-            let _ = self.mark_failed_transmission(transmission, now);
+            if !self.mark_failed_transmission(transmission, now) {
+                // This expiry has already contributed to `expired_count`. Keep its untracked
+                // witness horizon alive even when a prior saturation interval was already active.
+                self.extend_failure_tracking_saturation(now);
+            }
         }
         expired_count
     }
@@ -613,9 +625,11 @@ impl MessageReassembler {
     }
 
     fn mark_failed_transmission(&mut self, transmission: LogicalTransmission, now: u128) -> bool {
-        if self.failed_ids.contains(&transmission)
-            || self.failed_ids.len() >= self.limits.max_completed_ids
-        {
+        if self.failed_ids.contains(&transmission) || self.failure_tracking_saturated_until > now {
+            return false;
+        }
+        if self.failed_ids.len() >= self.limits.max_completed_ids {
+            self.extend_failure_tracking_saturation(now);
             return false;
         }
         // Invalid timestamps/TTLs must not pin terminal state longer than the protocol maximum.
@@ -624,6 +638,12 @@ impl MessageReassembler {
         self.failed_ids.insert(transmission);
         self.failed.push_back((transmission, expiry));
         true
+    }
+
+    fn extend_failure_tracking_saturation(&mut self, now: u128) {
+        self.failure_tracking_saturated_until = self
+            .failure_tracking_saturated_until
+            .max(now.saturating_add(MAX_TTL_MS as u128));
     }
 
     fn mark_pending_capacity_rejection(&mut self, chunk: &Chunk) {

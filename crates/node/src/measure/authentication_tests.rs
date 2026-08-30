@@ -22,7 +22,7 @@ impl MeasureClock for FixedClock {
 }
 
 #[tokio::test]
-async fn unauthenticated_identity_flood_does_not_consume_retained_peer_capacity() {
+async fn untrusted_and_local_only_identity_floods_do_not_consume_retained_peer_capacity() {
     let measure =
         PeriodicMeasure::new_with_clock(Box::new(MemStorage::new()), Arc::new(FixedClock))
             .await
@@ -40,6 +40,16 @@ async fn unauthenticated_identity_flood_does_not_consume_retained_peer_capacity(
                 )
                 .await,
             Ok(ApplyOutcome::IgnoredUnattributable)
+        );
+        assert_eq!(
+            measure
+                .record(
+                    Did::from(raw_peer),
+                    Authentication::LocallyAddressed,
+                    MeasurementEvent::FailedToSend,
+                )
+                .await,
+            Ok(ApplyOutcome::IgnoredUnknownPeer)
         );
     }
 

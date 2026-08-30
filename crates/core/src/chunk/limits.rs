@@ -33,9 +33,11 @@ pub struct ReassemblyLimits {
     /// re-delivery if a message is fully retransmitted after it already completed (within its TTL
     /// window). The same number separately caps invalid-terminal ids and ids rejected before local
     /// capacity could retain state. Invalid ids fail open without peer attribution when their set
-    /// is full; capacity-history saturation temporarily rejects all new ids for that peer. Thus
+    /// is full, with a bounded saturation horizon preserving that decision while tombstones drain;
+    /// capacity-history saturation temporarily rejects all new ids for that peer. Thus
     /// terminal bookkeeping retains at most three times this many ids across the independent
-    /// completed, invalid, and capacity sets. NOTE: past this many *concurrent* live completion
+    /// completed, invalid, and capacity sets, plus two scalar saturation horizons. NOTE: past
+    /// this many *concurrent* live completion
     /// tombstones the oldest is dropped even if its TTL has not elapsed, so the "no
     /// post-completion redelivery" guarantee holds only for the most recent `max_completed_ids`
     /// completions within a TTL window.

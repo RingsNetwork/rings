@@ -79,7 +79,7 @@ impl CreditScore {
     }
 }
 
-/// Persistent useful-byte totals for one authenticated peer.
+/// Persistent useful-byte totals and observation time for one authenticated peer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CreditRecord {
     bytes_sent_to_peer: u64,
@@ -101,7 +101,7 @@ impl CreditRecord {
         }
     }
 
-    /// Construct an empty record first observed at `last_seen`.
+    /// Construct an empty record first authenticated at `last_seen`.
     pub const fn empty(last_seen: UnixTime) -> Self {
         Self::new(0, 0, last_seen)
     }
@@ -116,7 +116,10 @@ impl CreditRecord {
         self.bytes_received_from_peer
     }
 
-    /// Most recent authenticated local observation.
+    /// Most recent observation backed by authenticated peer identity.
+    ///
+    /// A locally addressed send failure is useful reliability evidence for a
+    /// known peer, but does not refresh this retention timestamp.
     pub const fn last_seen(self) -> UnixTime {
         self.last_seen
     }

@@ -247,6 +247,82 @@ fn test_invalid_terminal_tracking_fails_open_at_its_memory_bound() {
 }
 
 #[test]
+fn test_invalid_terminal_saturation_preserves_replay_after_older_witness_drains() {
+    let mut limits = small_limits();
+    limits.max_completed_ids = 1;
+    let mut reassembler = MessageReassembler::with_limits(limits);
+    let now = get_epoch_ms();
+    let occupying_failure = Chunk {
+        chunk: [0, 0],
+        data: Bytes::from_static(b"invalid"),
+        meta: ChunkMeta {
+            id: Uuid::new_v4(),
+            ts_ms: now,
+            ttl_ms: DEFAULT_TTL_MS,
+        },
+    };
+    assert!(matches!(
+        reassembler.handle_retained_outcome_at(occupying_failure, now),
+        ReassemblyOutcome::Rejected(ReassemblyRejection::Invalid)
+    ));
+
+    let pending_at = now.saturating_add(100);
+    let ttl_ms = 100;
+    let untracked_expiry = Chunk {
+        chunk: [0, 2],
+        data: Bytes::from_static(b"partial"),
+        meta: ChunkMeta {
+            id: Uuid::new_v4(),
+            ts_ms: pending_at,
+            ttl_ms,
+        },
+    };
+    assert!(matches!(
+        reassembler.handle_retained_outcome_at(untracked_expiry.clone(), pending_at),
+        ReassemblyOutcome::Incomplete
+    ));
+    let expiry = pending_at.saturating_add(ttl_ms as u128);
+    assert_eq!(reassembler.remove_expired_at(expiry), 1);
+
+    // The older occupying witness has drained, but the later untracked failure's bounded
+    // saturation horizon still prevents the same logical transmission from being charged twice.
+    let after_older_witness = now.saturating_add(MAX_TTL_MS as u128).saturating_add(1);
+    assert!(after_older_witness < expiry.saturating_add(MAX_TTL_MS as u128));
+    assert!(matches!(
+        reassembler.handle_retained_outcome_at(untracked_expiry, after_older_witness),
+        ReassemblyOutcome::Rejected(ReassemblyRejection::Replay)
+    ));
+
+    // A second scored expiry near the first saturation deadline must extend the horizon. Merely
+    // observing that a prior saturation interval is active is insufficient: this pending message
+    // has just contributed a real failure and therefore needs its own bounded replay protection.
+    let first_saturation_end = expiry.saturating_add(MAX_TTL_MS as u128);
+    let second_pending_at = first_saturation_end.saturating_sub(50);
+    let second_untracked_expiry = Chunk {
+        chunk: [0, 2],
+        data: Bytes::from_static(b"second-partial"),
+        meta: ChunkMeta {
+            id: Uuid::new_v4(),
+            ts_ms: second_pending_at,
+            ttl_ms: 10,
+        },
+    };
+    assert!(matches!(
+        reassembler.handle_retained_outcome_at(second_untracked_expiry.clone(), second_pending_at),
+        ReassemblyOutcome::Incomplete
+    ));
+    let second_expiry = second_pending_at.saturating_add(10);
+    assert_eq!(reassembler.remove_expired_at(second_expiry), 1);
+    assert!(matches!(
+        reassembler.handle_retained_outcome_at(
+            second_untracked_expiry,
+            first_saturation_end.saturating_add(1),
+        ),
+        ReassemblyOutcome::Rejected(ReassemblyRejection::Replay)
+    ));
+}
+
+#[test]
 fn test_invalid_oversize_ttl_cannot_immediately_expire_its_terminal_id() {
     let mut reassembler = MessageReassembler::new();
     let now = get_epoch_ms();

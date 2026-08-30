@@ -219,6 +219,9 @@ impl ProviderHandle {
             tracing::warn!("failed to clear FFI provider callback during shutdown: {error}");
         }
         drop(provider);
+        // Invariant: joined listeners, the completed flush thread, and the dropped provider have
+        // released every intentional runtime clone. If an unexpected in-flight owner remains,
+        // leaking the final Arc avoids dropping a Tokio runtime from an asynchronous/C-ABI path.
         match Arc::try_unwrap(runtime) {
             Ok(runtime) => runtime.shutdown_background(),
             Err(runtime) => {
@@ -660,7 +663,7 @@ mod tests {
             .block_on(
                 provider
                     .processor
-                    .record_locally_addressed_send_failure_for_test(peer),
+                    .record_authenticated_measurement_for_test(peer),
             )
             .expect("test mutation must be applied");
         ProviderHandle::new(provider, runtime, Arc::new(Mutex::new(Vec::new()))).shutdown();
@@ -676,7 +679,7 @@ mod tests {
         );
         let record = ledger
             .record(&peer)
-            .expect("locally addressed failure must be retained");
-        assert_eq!(record.reliability().stored_evidence().failed_to_send, 1);
+            .expect("authenticated test measurement must be retained");
+        assert_eq!(record.reliability().stored_evidence().connected, 1);
     }
 }

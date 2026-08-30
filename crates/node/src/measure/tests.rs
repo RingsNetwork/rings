@@ -12,6 +12,14 @@ use tokio::sync::Semaphore;
 
 use super::*;
 
+#[allow(
+    clippy::unwrap_used,
+    reason = "test helpers receive explicit non-zero literals"
+)]
+fn nonzero_usize(value: usize) -> NonZeroUsize {
+    NonZeroUsize::new(value).unwrap()
+}
+
 struct ManualMeasureClock {
     now: AtomicU64,
 }
@@ -643,7 +651,7 @@ async fn bounded_query_uses_an_exclusive_did_cursor() {
             .await
             .unwrap_or_else(|error| panic!("fixture measurement must apply: {error}"));
     }
-    let limit = NonZeroUsize::MIN.saturating_add(1);
+    let limit = nonzero_usize(2);
 
     let first = measure
         .peer_measurements_page(None, limit)

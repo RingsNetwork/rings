@@ -18,7 +18,9 @@ pub enum Authentication {
     ///
     /// This variant is valid only for locally originated observations, such as
     /// [`MeasurementEvent::FailedToSend`] when no connection exists. It must
-    /// never authenticate bytes or claims received from the network.
+    /// never authenticate bytes or claims received from the network. A ledger
+    /// may use it to update reliability for an already-retained peer, but it
+    /// must not create a peer record or refresh authenticated-observation time.
     LocallyAddressed,
     /// The transport has not authenticated the stable peer identity.
     Unauthenticated,
@@ -32,6 +34,16 @@ impl Authentication {
             Self::LocallyAddressed => matches!(event, MeasurementEvent::FailedToSend),
             Self::Unauthenticated => false,
         }
+    }
+
+    /// Return whether this proof can establish a new retained peer record.
+    pub const fn establishes_peer(self) -> bool {
+        matches!(self, Self::Authenticated)
+    }
+
+    /// Return whether this proof refreshes authenticated peer-observation time.
+    pub const fn refreshes_peer_observation(self) -> bool {
+        matches!(self, Self::Authenticated)
     }
 }
 
@@ -53,8 +65,9 @@ pub enum MeasurementEvent {
     /// One logical message could not be delivered to the peer.
     ///
     /// A failure after selecting a destination DID is locally attributable even
-    /// when no authenticated connection exists. Remote-originated failures still
-    /// require authenticated ingress.
+    /// when no authenticated connection exists. A bounded ledger retains that
+    /// evidence only for a peer already established by authenticated observation.
+    /// Remote-originated failures still require authenticated ingress.
     FailedToSend,
     /// One logical message from the peer was fully received and verified.
     Received {
@@ -128,4 +141,53 @@ pub enum ApplyOutcome {
     Applied,
     /// The proof source cannot attribute this event to the supplied peer.
     IgnoredUnattributable,
+    /// Local evidence addressed a peer with no retained authenticated record.
+    ///
+    /// Purely local failures cannot establish that the remote peer was ever
+    /// observed, so ignoring them keeps identity rotation from consuming ledger
+    /// capacity or evicting authenticated credit.
+    IgnoredUnknownPeer,
+}
+
+/// Complete result of applying an observation to a bounded ledger.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyReport<P> {
+    outcome: ApplyOutcome,
+    evicted_peer: Option<P>,
+}
+
+impl<P> ApplyReport<P> {
+    /// Construct a report for an applied transition and its optional eviction.
+    pub(crate) const fn applied(evicted_peer: Option<P>) -> Self {
+        Self {
+            outcome: ApplyOutcome::Applied,
+            evicted_peer,
+        }
+    }
+
+    /// Construct a report for an observation without attributable identity proof.
+    pub(crate) const fn ignored_unattributable() -> Self {
+        Self {
+            outcome: ApplyOutcome::IgnoredUnattributable,
+            evicted_peer: None,
+        }
+    }
+
+    /// Construct a report for local evidence about an unknown peer.
+    pub(crate) const fn ignored_unknown_peer() -> Self {
+        Self {
+            outcome: ApplyOutcome::IgnoredUnknownPeer,
+            evicted_peer: None,
+        }
+    }
+
+    /// Whether the requested observation changed retained state.
+    pub const fn outcome(&self) -> ApplyOutcome {
+        self.outcome
+    }
+
+    /// Peer deterministically removed to admit this transition, if any.
+    pub const fn evicted_peer(&self) -> Option<&P> {
+        self.evicted_peer.as_ref()
+    }
 }

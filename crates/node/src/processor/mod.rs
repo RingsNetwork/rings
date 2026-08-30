@@ -475,7 +475,7 @@ impl Processor {
     }
 
     #[cfg(all(test, feature = "ffi"))]
-    pub(crate) async fn record_locally_addressed_send_failure_for_test(
+    pub(crate) async fn record_authenticated_measurement_for_test(
         &self,
         peer: Did,
     ) -> std::result::Result<(), rings_core::measure::MeasureError> {
@@ -483,8 +483,8 @@ impl Processor {
             rings_core::measure::Measure::record(
                 measure.as_ref(),
                 peer,
-                rings_core::measure::Authentication::LocallyAddressed,
-                rings_core::measure::MeasurementEvent::FailedToSend,
+                rings_core::measure::Authentication::Authenticated,
+                rings_core::measure::MeasurementEvent::Connected,
             )
             .await?;
         }

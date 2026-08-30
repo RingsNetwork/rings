@@ -28,6 +28,7 @@ pub use credit::CreditScore;
 pub use error::MeasureError;
 pub use error::PolicyError;
 pub use event::ApplyOutcome;
+pub use event::ApplyReport;
 pub use event::Authentication;
 pub use event::MeasurementBatch;
 pub use event::MeasurementEvent;

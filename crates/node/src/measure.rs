@@ -46,7 +46,11 @@ const PERSISTENCE_MIN_INTERVAL: Duration = Duration::from_secs(60);
 #[cfg(test)]
 const RELIABILITY_WINDOW: NonZeroU64 = NonZeroU64::MIN;
 #[cfg(not(test))]
-const RELIABILITY_WINDOW: NonZeroU64 = NonZeroU64::MIN.saturating_add(3_599);
+#[allow(
+    clippy::unwrap_used,
+    reason = "the non-zero integer literal is validated during const evaluation"
+)]
+const RELIABILITY_WINDOW: NonZeroU64 = NonZeroU64::new(3_600).unwrap();
 
 /// Shared peer-quality thresholds used by measurement and route selection.
 pub(crate) const fn peer_quality_thresholds() -> PeerQualityThresholds {
@@ -224,6 +228,9 @@ impl PeriodicMeasure {
     }
 
     /// Persist a snapshot containing every update visible when this method starts.
+    ///
+    /// On native targets, the Tokio runtime captured by [`Self::new`] must
+    /// remain alive until the returned future completes.
     pub async fn flush(&self) -> Result<(), MeasureRuntimeError> {
         let (sender, flush) = futures::channel::oneshot::channel();
         spawn_bounded_flush(self.state.clone(), sender);
@@ -234,6 +241,9 @@ impl PeriodicMeasure {
     }
 
     /// Persist all applied updates unless the supplied deadline expires first.
+    ///
+    /// On native targets, the Tokio runtime captured by [`Self::new`] must
+    /// remain alive until the returned future completes or reaches `timeout`.
     pub async fn flush_with_timeout(&self, timeout: Duration) -> Result<(), MeasureRuntimeError> {
         let (sender, flush) = futures::channel::oneshot::channel();
         spawn_bounded_flush(self.state.clone(), sender);
@@ -601,10 +611,19 @@ impl Measure for PeriodicMeasure {
         let (outcome, persistence_required) = {
             let (mut runtime, now) = self.state.runtime_at_now();
             let persistence_required = maintain_runtime(&mut runtime, now)?;
-            let outcome =
-                runtime
-                    .ledger
-                    .apply_batch(did, authentication, batch, now, reliability_policy());
+            let outcome = runtime
+                .ledger
+                .apply_batch(did, authentication, batch, now, reliability_policy())
+                .map(|report| {
+                    if let Some(evicted_peer) = report.evicted_peer() {
+                        tracing::warn!(
+                            ?evicted_peer,
+                            replacement_peer = ?did,
+                            "measurement ledger evicted its stalest authenticated peer"
+                        );
+                    }
+                    report.outcome()
+                });
             let applied = matches!(outcome, Ok(ApplyOutcome::Applied));
             if applied {
                 mark_runtime_dirty(&mut runtime);

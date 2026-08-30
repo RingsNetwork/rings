@@ -64,9 +64,6 @@ pub enum MeasureError {
     /// A snapshot stores an epoch even though its reliability bucket is empty.
     #[error("measurement snapshot has an empty timestamped reliability epoch")]
     SnapshotEpochWithoutEvidence,
-    /// A snapshot reliability epoch begins after the record's latest observation.
-    #[error("measurement snapshot reliability epoch is after last_seen")]
-    SnapshotEpochAfterLastSeen,
     /// A snapshot reliability epoch has no associated window policy.
     #[error("measurement snapshot reliability epoch has no window policy")]
     SnapshotReliabilityWindowMissing,

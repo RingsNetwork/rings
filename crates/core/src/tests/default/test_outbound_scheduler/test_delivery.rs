@@ -17,7 +17,7 @@ async fn test_missing_connection_records_locally_addressed_failure() -> Result<(
     assert_eq!(
         measure.count(),
         1,
-        "a locally selected destination DID makes the failed send attributable"
+        "a locally selected destination DID reaches the measurement boundary"
     );
     Ok(())
 }

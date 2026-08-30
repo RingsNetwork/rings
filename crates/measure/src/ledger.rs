@@ -6,7 +6,7 @@ use std::ops::Bound::Unbounded;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::ApplyOutcome;
+use crate::ApplyReport;
 use crate::Authentication;
 use crate::CreditPolicy;
 use crate::CreditRecord;
@@ -28,8 +28,14 @@ use crate::MEASUREMENT_SNAPSHOT_VERSION;
 /// Adapters with a different memory budget can construct a ledger with
 /// [`MeasurementLedger::with_max_records`]. At the bound, a successful event for
 /// a new peer deterministically replaces the stalest record, keeping resident
-/// and snapshot state bounded under identity rotation.
-pub const DEFAULT_MAX_RETAINED_PEERS: NonZeroUsize = NonZeroUsize::MIN.saturating_add(16_383);
+/// and snapshot state bounded under identity rotation. Only authenticated peer
+/// observations can establish new records; locally addressed failures for
+/// unknown identities cannot consume this capacity.
+#[allow(
+    clippy::unwrap_used,
+    reason = "the non-zero integer literal is validated during const evaluation"
+)]
+pub const DEFAULT_MAX_RETAINED_PEERS: NonZeroUsize = NonZeroUsize::new(16_384).unwrap();
 
 /// Pure credit and reliability state for one peer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,7 +53,7 @@ impl PeerRecord {
         }
     }
 
-    /// Construct an empty peer record at its first observation time.
+    /// Construct an empty peer record at its first authenticated observation time.
     pub const fn empty(first_seen: UnixTime) -> Self {
         Self::new(
             CreditRecord::empty(first_seen),
@@ -67,6 +73,7 @@ impl PeerRecord {
 
     fn transition_batch(
         self,
+        authentication: Authentication,
         batch: MeasurementBatch,
         at: UnixTime,
         reliability_policy: ReliabilityPolicy,
@@ -74,17 +81,21 @@ impl PeerRecord {
         let mut next = self;
         next.reliability
             .observe_batch(batch, at, reliability_policy)?;
-        match batch.event() {
-            MeasurementEvent::Sent { useful_bytes } => {
+        match (authentication.refreshes_peer_observation(), batch.event()) {
+            (true, MeasurementEvent::Sent { useful_bytes }) => {
                 next.credit.record_sent(useful_bytes, at)?;
             }
-            MeasurementEvent::Received { useful_bytes } => {
+            (true, MeasurementEvent::Received { useful_bytes }) => {
                 next.credit.record_received(useful_bytes, at)?;
             }
-            MeasurementEvent::Connected
-            | MeasurementEvent::Disconnected
-            | MeasurementEvent::FailedToSend
-            | MeasurementEvent::FailedToReceive => next.credit.touch(at)?,
+            (
+                true,
+                MeasurementEvent::Connected
+                | MeasurementEvent::Disconnected
+                | MeasurementEvent::FailedToSend
+                | MeasurementEvent::FailedToReceive,
+            ) => next.credit.touch(at)?,
+            (false, _) => next.credit.ensure_not_before_last_seen(at)?,
         }
         Ok(next)
     }
@@ -102,9 +113,6 @@ impl PeerRecord {
             (Some(_), Some(0), false) => Err(MeasureError::SnapshotReliabilityWindowMissing),
             (Some(epoch_start), Some(window), false) if epoch_start.as_secs() % window != 0 => {
                 Err(MeasureError::SnapshotReliabilityEpochMisaligned)
-            }
-            (Some(epoch_start), Some(_), false) if epoch_start > self.credit.last_seen() => {
-                Err(MeasureError::SnapshotEpochAfterLastSeen)
             }
             _ => Ok(()),
         }
@@ -342,7 +350,7 @@ where P: Ord
         event: MeasurementEvent,
         at: UnixTime,
         reliability_policy: ReliabilityPolicy,
-    ) -> Result<ApplyOutcome, MeasureError>
+    ) -> Result<ApplyReport<P>, MeasureError>
     where
         P: Clone,
     {
@@ -358,10 +366,12 @@ where P: Ord
     /// Apply a homogeneous batch as one atomic peer transition.
     ///
     /// On any counter, clock, or policy error, both byte credit and reliability
-    /// evidence retain their complete prior state. A successful new-peer
-    /// transition at capacity evicts the record with the earliest `last_seen`;
-    /// peer-key order breaks timestamp ties. This deterministic LRU policy keeps
-    /// active peers measurable without exceeding the configured bound.
+    /// evidence retain their complete prior state. Locally addressed evidence
+    /// can update only a record previously established by authenticated peer
+    /// observation and does not refresh its retention timestamp. A successful
+    /// new-peer transition at capacity evicts the record with the earliest
+    /// `last_seen`; peer-key order breaks timestamp ties. The report exposes the
+    /// evicted key so effect adapters can make that loss observable.
     pub fn apply_batch(
         &mut self,
         peer: P,
@@ -369,21 +379,24 @@ where P: Ord
         batch: MeasurementBatch,
         at: UnixTime,
         reliability_policy: ReliabilityPolicy,
-    ) -> Result<ApplyOutcome, MeasureError>
+    ) -> Result<ApplyReport<P>, MeasureError>
     where
         P: Clone,
     {
         if !authentication.permits(batch.event()) {
-            return Ok(ApplyOutcome::IgnoredUnattributable);
+            return Ok(ApplyReport::ignored_unattributable());
         }
         let is_new_peer = !self.records.contains_key(&peer);
+        if is_new_peer && !authentication.establishes_peer() {
+            return Ok(ApplyReport::ignored_unknown_peer());
+        }
         let current = self
             .records
             .get(&peer)
             .copied()
             .unwrap_or_else(|| PeerRecord::empty(at));
-        let next = current.transition_batch(batch, at, reliability_policy)?;
-        if is_new_peer && self.records.len() >= self.max_records.get() {
+        let next = current.transition_batch(authentication, batch, at, reliability_policy)?;
+        let evicted_peer = if is_new_peer && self.records.len() >= self.max_records.get() {
             let stalest = self
                 .records
                 .iter()
@@ -395,12 +408,15 @@ where P: Ord
                         .then_with(|| left_peer.cmp(right_peer))
                 })
                 .map(|(oldest_peer, _)| oldest_peer.clone());
-            if let Some(stalest) = stalest {
-                self.records.remove(&stalest);
+            if let Some(stalest_peer) = &stalest {
+                self.records.remove(stalest_peer);
             }
-        }
+            stalest
+        } else {
+            None
+        };
         self.records.insert(peer, next);
-        Ok(ApplyOutcome::Applied)
+        Ok(ApplyReport::applied(evicted_peer))
     }
 
     /// Read raw retained state for a peer without time projection.
