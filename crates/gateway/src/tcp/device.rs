@@ -2,6 +2,7 @@
 
 use std::collections::VecDeque;
 
+use smoltcp::phy::Checksum;
 use smoltcp::phy::Device;
 use smoltcp::phy::DeviceCapabilities;
 use smoltcp::phy::Medium;
@@ -79,6 +80,10 @@ impl Device for PacketQueueDevice {
         let mut capabilities = DeviceCapabilities::default();
         capabilities.medium = Medium::Ip;
         capabilities.max_transmission_unit = self.mtu;
+        // The packet classifier has already verified every TCP packet queued for RX. Keep TX
+        // generation enabled while avoiding duplicate RX work inside smoltcp. IPv4 remains at its
+        // default because the classifier deliberately leaves header-checksum validation to smoltcp.
+        capabilities.checksum.tcp = Checksum::Tx;
         capabilities
     }
 }
@@ -97,5 +102,15 @@ mod tests {
         assert_eq!(rx.consume(<[u8]>::to_vec), vec![1, 2, 3]);
         tx.consume(3, |packet| packet.copy_from_slice(&[4, 5, 6]));
         assert_eq!(device.drain_egress(), vec![vec![4, 5, 6]]);
+    }
+
+    #[test]
+    fn queue_device_delegates_only_unverified_checksums_to_smoltcp() {
+        let capabilities = PacketQueueDevice::new(1_280).capabilities();
+
+        assert!(!capabilities.checksum.tcp.rx());
+        assert!(capabilities.checksum.tcp.tx());
+        assert!(capabilities.checksum.ipv4.rx());
+        assert!(capabilities.checksum.ipv4.tx());
     }
 }

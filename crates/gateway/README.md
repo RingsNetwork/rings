@@ -66,10 +66,11 @@ rings run --gateway --config "$HOME/.rings/config.yaml"
 The current milestone is IPv4/TCP. UDP and fragmented IPv4 fail closed; IPv6 configuration is
 rejected rather than leaking outside an undefined policy. Both DNS policies require the operator
 to list every IPv4 resolver used by applications; Rings does not discover or mutate system DNS.
-With `dns_policy: block`, each listed resolver gets a more-specific capture route and captured UDP
-plus TCP port 53 are dropped. With `dns_policy: bypass`, each listed resolver gets a more-specific
-baseline-gateway route and DNS explicitly bypasses Onion. An omitted resolver is outside the
-policy guarantee, so operators must keep this declarative list aligned with host configuration.
+With `dns_policy: block`, each listed resolver gets a more-specific capture route; captured UDP is
+dropped, while TCP port 53 is refused with a reset. With `dns_policy: bypass`, each listed resolver
+gets a more-specific baseline-gateway route and DNS explicitly bypasses Onion. An omitted resolver
+is outside the policy guarantee, so operators must keep this declarative list aligned with host
+configuration.
 
 ```yaml
 gateway:

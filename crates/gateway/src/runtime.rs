@@ -280,7 +280,7 @@ impl GatewayRuntime {
                 ReconcileScope::Flow(flow) => self.reconcile_flow(flow, elapsed),
                 ReconcileScope::All => self.reconcile_all(elapsed),
             };
-            if let Err(error) = reconciled.map_err(GatewayFatal::gateway) {
+            if let Err(error) = reconciled {
                 break Err(error.into_gateway());
             }
             if let Err(error) = self.flush_egress(device).await {
@@ -499,7 +499,7 @@ impl GatewayRuntime {
         }
     }
 
-    fn reconcile_all(&mut self, elapsed: Duration) -> Result<(), GatewayError> {
+    fn reconcile_all(&mut self, elapsed: Duration) -> Result<(), GatewayFatal> {
         let flows = self.flows.keys().copied().collect::<Vec<_>>();
         for flow in flows {
             self.reconcile_flow(flow, elapsed)?;
@@ -507,14 +507,18 @@ impl GatewayRuntime {
         Ok(())
     }
 
-    fn reconcile_flow(&mut self, flow: FlowId, elapsed: Duration) -> Result<(), GatewayError> {
+    fn reconcile_flow(&mut self, flow: FlowId, elapsed: Duration) -> Result<(), GatewayFatal> {
         if !self.flows.contains_key(&flow) {
             return Ok(());
         }
-        self.maybe_start_bridge(flow)?;
-        self.flush_pending_to_client(flow, elapsed)?;
-        self.drive_client_to_onion(flow, elapsed)?;
+        self.maybe_start_bridge(flow)
+            .map_err(GatewayFatal::gateway)?;
+        self.flush_pending_to_client(flow, elapsed)
+            .map_err(GatewayFatal::gateway)?;
+        self.drive_client_to_onion(flow, elapsed)
+            .map_err(GatewayFatal::gateway)?;
         self.finish_if_closed(flow, elapsed)
+            .map_err(GatewayFatal::gateway)
     }
 
     fn maybe_start_bridge(&mut self, flow: FlowId) -> Result<(), GatewayError> {
