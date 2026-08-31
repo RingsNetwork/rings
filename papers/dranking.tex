@@ -15,6 +15,8 @@
 \usepackage[english]{babel}
 \usepackage{algorithm}
 \usepackage[noend]{algpseudocode}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows}
 
 \newtheorem{definition}{Definition}
 \newtheorem{constraint}{Constraint}
@@ -26,7 +28,8 @@
 
 \author{Ryan~J.~Kung%
 \thanks{Ryan J. Kung can be reached at ryankung@ieee.org.
-Manuscript created February 11, 2023; rewritten August 31, 2026.
+Manuscript created February 11, 2023; rewritten August 31, 2026;
+revised September 1, 2026.
 This document supersedes the 2023 draft \emph{The Ranking Protocol}.}}
 \title{\huge The DRanking Protocol:\\
 Verifiable Distributed Ranking and Sybil-Bounded Admission\\
@@ -128,6 +131,34 @@ T_k(\mathsf{Adv})\;<\;\tfrac13\,T_k(V)\qquad\forall k.
 No bound is assumed on $|\mathsf{Adv}|$.
 \end{assumption}
 
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[>=latex,
+  box/.style={draw,minimum width=1.35cm,minimum height=.52cm,
+    align=center,font=\footnotesize}]
+\node[box] (w) {$W_k$};
+\node[box,right=0.62cm of w] (f) {$F$};
+\node[box,right=0.62cm of f] (t) {$t_{k+1}$};
+\node[box,right=0.62cm of t] (sig) {$\Sigma_{k+1}$};
+\node[box,below=0.55cm of sig] (qc) {$\mathsf{QC}_{2/3}$};
+\node[box,below=0.55cm of t] (com) {committee};
+\node[box,below=0.55cm of f] (sor) {sortition};
+\node[box,below=0.55cm of w] (b) {$B_{k+1}$};
+\draw[->] (w) -- node[above,font=\scriptsize]{$\S\ref{sec:receipts}$} (f);
+\draw[->] (f) -- node[above,font=\scriptsize]{$\S\ref{sec:trust}$} (t);
+\draw[->] (t) -- (sig);
+\draw[->] (sig) -- node[right,font=\scriptsize]{$\S\ref{sec:ledger}$} (qc);
+\draw[->] (qc.south) -- ++(0,-0.3) -| (b.south);
+\draw[->] (b) -- node[right,font=\scriptsize]{$\S\ref{sec:sampling}$} (sor);
+\draw[->] (sor) -- (com);
+\draw[->] (com) -- (qc);
+\draw[->] (t) -- (sor);
+\end{tikzpicture}
+\caption{Epoch cycle: receipts fold into trust, trust seats the
+committee, the committee finalizes the ledger, finality seeds the beacon.}
+\label{fig:cycle}
+\end{figure}
+
 \section{Service Receipts}\label{sec:receipts}
 
 Unsigned counters are first-person testimony; aggregated, they are hearsay.
@@ -142,7 +173,7 @@ The unit of evidence is a countersigned receipt.
 \mathsf{srv}&\in&\{\mathsf{relay},\mathsf{store},\mathsf{probe}\},\\
 a&=&\text{server},\quad b=\text{signer/served},\\
 \mathsf{valid}(\rho)&\equiv&
-  V(k_b,\sigma_b,\mathsf{srv}\Vert a\Vert b\Vert k\Vert n)=\top\\
+  \mathsf{Vrfy}(k_b,\sigma_b,\mathsf{srv}\Vert a\Vert b\Vert k\Vert n)=\top\\
 &&\land\ (b,k,n)\ \text{fresh}.
 \end{array}
 \]
@@ -166,6 +197,8 @@ signer-trust weighting (Section~\ref{sec:trust}).
 \begin{definition}[Receipt graph]\label{def:graph}
 \[
 \begin{array}{rcl}
+\mathsf{val}(\rho)&=&\mu_{\mathsf{srv}(\rho)}\cdot
+  \mathsf{units}(\rho),\quad\mu\ \text{published per kind},\\
 W_k&\in&\mathbb{R}_{\geq0}^{V\times V},\\
 W_k[b,a]&=&\textstyle\sum\{\mathsf{val}(\rho):
   \rho\ \text{valid},\ \mathsf{sig}\ b,\ \mathsf{srv}\ a,\ \mathsf{ep}\ k\},\\
@@ -275,6 +308,55 @@ $|A|$.  Defense concentrates on $g$: endorsement spends budget
 (Law~\ref{law:conservation}), and detection claws it back
 (Law~\ref{law:revocation}).
 
+\begin{proposition}[Farming price]\label{prop:farm-price}
+Instantiating Proposition~\ref{prop:sybil-bound} at $A=\{v\}$:
+sustaining weight $w$ requires per-epoch honest endorsement
+\[
+g_v\;\geq\;\frac{1-\alpha}{\alpha}\,w
+\qquad\text{for every epoch the weight is held},
+\]
+so
+\[
+\mathsf{farm}(w,\ell\ \text{epochs})
+\;\geq\;
+\ell\cdot\mathsf{cost}\Bigl(\tfrac{1-\alpha}{\alpha}\,w\Bigr)
+\;+\;
+\Pr[\mathsf{detect}]\cdot w ,
+\]
+the second term by Law~\ref{law:revocation}: one accepted equivocation
+forfeits the stock.  This is the $\mathsf{farm}$ function of
+Proposition~\ref{prop:soulbound}, made explicit.
+\begin{proof}
+$T_k(\{v\})\leq\alpha g_v/(1-\alpha)$; rearrange, multiply by holding
+duration, add the slash expectation.
+\end{proof}
+\end{proposition}
+
+\begin{proposition}[Geometric convergence]\label{prop:convergence}
+For stationary $C_k=C$, the map
+$\Phi(x)=\alpha C^{\mathsf T}x+(1-\alpha)s$ satisfies
+\[
+\Vert\Phi(x)-\Phi(y)\Vert_1\leq\alpha\Vert x-y\Vert_1,
+\]
+hence $t^{*}$ is the unique fixpoint and
+\[
+\Vert t_k-t^{*}\Vert_1\;\leq\;\alpha^{k}\,\Vert t_0-t^{*}\Vert_1 .
+\]
+\begin{proof}
+\[
+\begin{aligned}
+\Vert C^{\mathsf T}(x-y)\Vert_1
+&=\textstyle\sum_a\bigl|\sum_b C[b,a](x_b-y_b)\bigr|\\
+&\leq\textstyle\sum_b\bigl(\sum_a C[b,a]\bigr)|x_b-y_b|
+\leq\Vert x-y\Vert_1
+\end{aligned}
+\]
+by Law~\ref{law:conservation}; Banach on the affine contraction.
+Under drifting $C_k$ the iterate tracks the moving fixpoint with lag
+$O(\alpha^{j})$ per $j$ epochs of stability.
+\end{proof}
+\end{proposition}
+
 \begin{definition}[Soulbound rank]\label{def:soulbound}
 \[
 \begin{array}{rcl}
@@ -293,7 +375,23 @@ $|A|$.  Defense concentrates on $g$: endorsement spends budget
 \begin{array}{rcl}
 \mathsf{vol}_k&=&\textstyle\sum_{i\leq k}\mathbf{1}^{\mathsf T}W_i\,\mathbf{1},\\
 1-\alpha_k&=&D(\mathsf{vol}_k),\quad D\ \text{non-increasing, published},\\
+\bar\alpha&=&\sup_k\alpha_k\;<\;1,\\
 t_0&=&s\quad\text{(cold start)}.
+\end{array}
+\]
+Propositions~\ref{prop:sybil-bound}--\ref{prop:convergence} hold under the
+time-varying schedule with $\alpha:=\bar\alpha$.
+\end{definition}
+
+\begin{definition}[Threshold authority]\label{def:threshold}
+\[
+\begin{array}{rcl}
+\mathsf{Ops}(S)&=&\{\mathsf{withdraw},\mathsf{rotate},
+  \mathsf{endorse}_0\},\\
+o\in\mathsf{Ops}(S)&\Rightarrow&\mathsf{QC}_{\theta}(S)(o),
+  \quad\theta\geq\tfrac23,\\
+|\mathsf{compromised}|<\theta|S|&\Rightarrow&
+  \mathsf{Cap}(\mathsf{Adv})\cap\mathsf{Ops}(S)=\varnothing .
 \end{array}
 \]
 \end{definition}
@@ -301,18 +399,18 @@ t_0&=&s\quad\text{(cold start)}.
 \section{Sortition}\label{sec:sampling}
 
 \begin{proposition}[Statistical undetectability]\label{prop:stat}
-Model $\mathsf{did}=H(\mathsf{pk})$, $H$ a random oracle.  For the
-adversarial placement strategy ``sample fresh keys,'' honest and
-adversarial positions are identically distributed on $R$:
+Model $\mathsf{did}=\mathsf{h}(\mathsf{pk})$, $\mathsf{h}$ a random
+oracle.  For the adversarial placement strategy ``sample fresh keys,''
+honest and adversarial positions are identically distributed on $R$:
 \[
-\Delta_{\mathrm{TV}}\bigl(\mathsf{pos}(H\cup A),\ \mathsf{pos}(H')\bigr)=0
+\Delta_{\mathrm{TV}}\bigl(\mathsf{pos}(H\uplus A),\ \mathsf{pos}(H')\bigr)=0
 \quad\forall\,|A|,
 \]
 hence every position-based test (entropy, Kolmogorov--Smirnov) has
 distinguishing advantage $0$ against Sybil density.
 \begin{proof}
-$H(\cdot)$ uniform on $R$ for every key, honest or adversarial; a union of
-i.i.d.\ uniforms is distribution-invariant in its partition.
+$\mathsf{h}(\cdot)$ uniform on $R$ for every key, honest or adversarial; a
+union of i.i.d.\ uniforms is distribution-invariant in its partition.
 \end{proof}
 \end{proposition}
 
@@ -484,8 +582,11 @@ hence IVC applies with no re-folding branch; probabilistic-finality chains
 admit no such reduction.
 \begin{proof}
 Quorum intersection: two finalized blocks at one height require
-$\geq\tfrac13$ equivocating signers, contradicting
-Assumption~\ref{asm:honest-weight} via Definition~\ref{def:equiv}.
+$\geq\tfrac13$ of the finality committee to equivocate
+(Definition~\ref{def:equiv}) --- contradicting
+Definition~\ref{def:threshold} in the authority phase, and
+Proposition~\ref{prop:committee} with
+Assumption~\ref{asm:honest-weight} in the staked phase.
 \end{proof}
 \end{proposition}
 
@@ -514,10 +615,82 @@ shipped at genesis, not retrofitted.
 
 Folding provides validity only:
 $\mathsf{canonicity}\in\mathsf{consensus}$,
-$\mathsf{availability}\in\mathsf{overlay}$,
-$\mathsf{privacy}(W_k)$ open (granularity of $\mathsf{rt}(W_k)$:
-full graph, aggregates, or blinded commitments --- a standing design
-decision with surveillance consequences).
+$\mathsf{availability}\in\mathsf{overlay}$.
+
+\begin{definition}[Commitment granularity]\label{def:granularity}
+\[
+\begin{array}{rcl}
+\Gamma&\in&\{\mathsf{full},\mathsf{agg},\mathsf{blind}\},\\
+\mathsf{leak}(\mathsf{full})&=&\{(b,a,W[b,a])\}
+  \quad\text{(the traffic graph)},\\
+\mathsf{leak}(\mathsf{agg})&=&\{(v,\ \mathsf{deg}^{\pm}(v))\},\\
+\mathsf{leak}(\mathsf{blind})&=&\varnothing,\quad
+  F\ \text{consumes ZK openings},\\
+\mathsf{replay}(\Gamma)&=&\top\iff\Gamma=\mathsf{full}.
+\end{array}
+\]
+$\Gamma$ trades public replayability against surveillance of the service
+graph; the choice is a standing design decision, and
+$\Gamma=\mathsf{blind}$ prices its privacy in circuit cost
+(Obligation~\ref{obl:circuit}).
+\end{definition}
+
+\section{State Relation}\label{sec:spec}
+
+The ledger state machine in TLA
+form~\cite{LamportSpecifyingSystems}, the model-checking surface for
+finite instances~\cite{Stateright}:
+
+\[
+\begin{array}{rcl}
+\mathsf{Spec}&\triangleq&
+  \mathsf{Init}\land\Box[\mathsf{Next}]_{\Sigma},\\[2pt]
+\mathsf{Init}&\triangleq&
+  \Sigma=\langle\mathsf{rt}(s),\mathsf{rt}(S),\varnothing,
+  \mathsf{rt}(\mathbf{0}),\mathsf{ver}_0\rangle,\\[2pt]
+\mathsf{Next}&\triangleq&
+  \exists\,W:\ \mathsf{QC}_{2/3}(\Sigma')\ \land\
+  \Sigma'=F(\Sigma,\mathsf{rt}(W)).
+\end{array}
+\]
+
+\begin{invariant}[Slash monotone]\label{inv:slash}
+\[
+\mathsf{sl}\subseteq\mathsf{sl}',\qquad
+v\in\mathsf{sl}\Rightarrow t(v)=0 .
+\]
+\begin{proof}
+Lines 1--2 of Algorithm~\ref{alg:step}: $\mathsf{sl}$ only grows by
+union; the restriction $t\restriction_{V\setminus\mathsf{sl}}$ zeroes
+slashed carriers before every update, and Equation~\eqref{eq:update}
+grants no mass to $v\notin\mathsf{carrier}$.
+\end{proof}
+\end{invariant}
+
+\begin{invariant}[Version monotone]\label{inv:version}
+\[
+\mathsf{ver}'\geq\mathsf{ver},
+\]
+by Obligation~\ref{obl:upgrade}: $\mathsf{vk}$ rebinding occurs only at
+committed epoch boundaries, forward.
+\end{invariant}
+
+\begin{invariant}[Unique chain]\label{inv:unique}
+\[
+\mathsf{fin}(\Sigma_k)\land\mathsf{fin}(\Sigma_k')
+\;\Rightarrow\;
+\Sigma_k=\Sigma_k',
+\]
+by Proposition~\ref{prop:linear} (quorum intersection under
+Assumption~\ref{asm:honest-weight}).
+\end{invariant}
+
+\begin{obligation}[Checkable instances]\label{obl:model}
+Every implementation change to $F$ ships with a finite-instance model
+($|V|\leq n_0$, bounded epochs) checking
+Invariants~\ref{inv:mass},
+\ref{inv:slash}--\ref{inv:unique} before merge.
+\end{obligation}
 
 \section{Economics}\label{sec:economics}
 
@@ -550,6 +723,16 @@ the second branch of the $\min$, restoring
 $\mathsf{farm}(m)=\text{service}+\text{time}+\text{slash risk}$ as the sole
 path. \qed
 \end{proposition}
+
+\begin{invariant}[Balance conservation]\label{inv:balance}
+\[
+\mathbf{1}^{\mathsf T}\mathsf{bal}_{k+1}
+=\mathbf{1}^{\mathsf T}\mathsf{bal}_k
++\mathsf{issue}_k-\mathsf{burn}_k,
+\]
+by line 4 of Algorithm~\ref{alg:step}: no other term touches
+$\mathsf{bal}$; supply changes only through published issuance and burn.
+\end{invariant}
 
 \begin{definition}[Fee loop]\label{def:sinks}
 \[
