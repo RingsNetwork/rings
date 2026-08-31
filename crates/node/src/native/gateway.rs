@@ -19,6 +19,7 @@ use rings_gateway::bindings::EstablishedTunnel;
 use rings_gateway::bindings::NativeTunnelControl;
 #[cfg(target_os = "windows")]
 use rings_gateway::bindings::NativeTunnelOptions;
+use rings_gateway::bindings::TeardownFailure;
 use rings_gateway::bindings::TunnelControl;
 use rings_gateway::bindings::UnderlayPolicy;
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -54,38 +55,62 @@ type PlatformTunnelControl = UnixTunnelControl;
 type PlatformTunnelControl = UnsupportedTunnelControl;
 
 const TURN_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_UNDERLAY_REFRESH_SECS: u64 = 30;
 
-/// Owns the fixed, operator-authorized underlay exclusions for one gateway lease.
+/// Owns operator authorization and the refreshed routed exclusions for one gateway lease.
 ///
 /// Remote SDP is deliberately excluded from this authority. Enabling this gate switches native
 /// WebRTC to relay-only ICE, so only configured TURN servers require host-route exclusions.
 struct GatewayUnderlayGate<C> {
-    fixed_targets: BTreeSet<IpAddr>,
-    control: Mutex<C>,
+    authorized_targets: BTreeSet<IpAddr>,
+    state: Mutex<GatewayUnderlayState<C>>,
+}
+
+struct GatewayUnderlayState<C> {
+    control: C,
+    routed_targets: BTreeSet<IpAddr>,
 }
 
 impl<C> GatewayUnderlayGate<C>
 where C: UnderlayPolicy
 {
-    fn new(control: C, fixed_targets: Vec<IpAddr>) -> Self {
+    fn new(control: C, authorized_targets: Vec<IpAddr>, turn_targets: Vec<IpAddr>) -> Self {
+        let authorized_targets = authorized_targets.into_iter().collect::<BTreeSet<_>>();
+        let mut routed_targets = authorized_targets.clone();
+        routed_targets.extend(turn_targets);
         Self {
-            fixed_targets: fixed_targets.into_iter().filter(IpAddr::is_ipv4).collect(),
-            control: Mutex::new(control),
+            authorized_targets,
+            state: Mutex::new(GatewayUnderlayState {
+                control,
+                routed_targets,
+            }),
         }
     }
 
-    async fn install_fixed_targets(&self) -> Result<(), GatewayError> {
-        self.control
-            .lock()
-            .await
-            .replace_bypass_targets(&self.fixed_targets.iter().copied().collect::<Vec<_>>())
-            .await
+    async fn install_routed_targets(&self) -> Result<(), GatewayError> {
+        let mut state = self.state.lock().await;
+        let targets = state.routed_targets.iter().copied().collect::<Vec<_>>();
+        state.control.replace_bypass_targets(&targets).await
+    }
+
+    async fn refresh_turn_targets(&self, turn_targets: Vec<IpAddr>) -> Result<(), GatewayError> {
+        let mut state = self.state.lock().await;
+        // Retain prior resolutions for the lease lifetime: an established TURN allocation may
+        // keep using an older address after DNS rotates. Remote SDP never reaches this set.
+        let mut routed_targets = state.routed_targets.clone();
+        routed_targets.extend(turn_targets);
+        let targets = routed_targets.iter().copied().collect::<Vec<_>>();
+        // Invoke replacement even when DNS is unchanged. Besides making refresh semantics
+        // explicit, this is the bounded keepalive for the foreground Unix helper connection.
+        state.control.replace_bypass_targets(&targets).await?;
+        state.routed_targets = routed_targets;
+        Ok(())
     }
 
     fn authorize_targets(&self, targets: &[IpAddr]) -> Result<(), UnderlayCandidateAdmissionError> {
         if let Some(target) = targets
             .iter()
-            .find(|target| !target.is_ipv4() || !self.fixed_targets.contains(target))
+            .find(|target| !target.is_ipv4() || !self.authorized_targets.contains(target))
         {
             return Err(UnderlayCandidateAdmissionError::new(format!(
                 "underlay target {target} is not operator-authorized; add it to gateway \
@@ -103,11 +128,11 @@ where C: TunnelControl + UnderlayPolicy
         &self,
         plan: &GatewayPlan,
     ) -> Result<EstablishedTunnel<C::Device, C::Lease>, GatewayError> {
-        self.control.lock().await.establish(plan).await
+        self.state.lock().await.control.establish(plan).await
     }
 
-    async fn teardown(&self, lease: C::Lease) -> Result<(), GatewayError> {
-        self.control.lock().await.teardown(lease).await
+    async fn teardown(&self, lease: C::Lease) -> Result<(), TeardownFailure<C::Lease>> {
+        self.state.lock().await.control.teardown(lease).await
     }
 }
 
@@ -136,10 +161,9 @@ impl NativeGatewayRunner {
         config: NativeGatewayConfig,
         ice_servers: String,
     ) -> anyhow::Result<Self> {
-        if config.underlay_refresh_secs == 0 {
-            anyhow::bail!("gateway underlay_refresh_secs must be greater than zero");
-        }
+        validate_underlay_refresh_secs(config.underlay_refresh_secs)?;
         config.runtime.validate()?;
+        validate_underlay_bypass_targets(&config.underlay_bypass_targets)?;
         validate_turn_dns_compatibility(&config.runtime.plan, &ice_servers)?;
         validate_gateway_turn_server(&ice_servers)?;
         let proxy = OnionProxyConfig::tcp_connect_service(
@@ -190,9 +214,13 @@ impl NativeGatewayRunner {
         started: Option<oneshot::Sender<()>>,
     ) -> anyhow::Result<()> {
         let control = self.platform_control()?;
-        let fixed_targets = self.fixed_underlay_targets().await?;
-        let underlay = Arc::new(GatewayUnderlayGate::new(control, fixed_targets));
-        underlay.install_fixed_targets().await?;
+        let turn_targets = resolve_turn_server_ips(&self.ice_servers).await?;
+        let underlay = Arc::new(GatewayUnderlayGate::new(
+            control,
+            self.config.underlay_bypass_targets.clone(),
+            turn_targets,
+        ));
+        underlay.install_routed_targets().await?;
         let admission: Arc<dyn UnderlayCandidateAdmission> = underlay.clone();
         self.processor
             .swarm
@@ -214,7 +242,10 @@ impl NativeGatewayRunner {
         };
 
         if let Err(error) = self.runtime.activate(interface_name) {
-            let cleanup = underlay.teardown(lease).await;
+            let cleanup = underlay
+                .teardown(lease)
+                .await
+                .map_err(TeardownFailure::into_error);
             let cleanup =
                 finish_gateway_cleanup(&self.processor, &mut self.runtime, device, cleanup).await;
             return combine_gateway_results(Err(error), Ok(()), cleanup);
@@ -229,6 +260,8 @@ impl NativeGatewayRunner {
             processor: self.processor.clone(),
             gateway: self.runtime.control_handle(),
             onion_service: self.config.onion_service.as_str().to_string(),
+            underlay: Arc::clone(&underlay),
+            ice_servers: self.ice_servers.clone(),
             interval: Duration::from_secs(self.config.underlay_refresh_secs),
             stop: stop.clone(),
             runtime_done: runtime_done.token(),
@@ -246,7 +279,10 @@ impl NativeGatewayRunner {
         };
         let (runtime_result, updater_result) = tokio::join!(run, update);
 
-        let cleanup_result = underlay.teardown(lease).await;
+        let cleanup_result = underlay
+            .teardown(lease)
+            .await
+            .map_err(TeardownFailure::into_error);
         let cleanup_result =
             finish_gateway_cleanup(&self.processor, &mut self.runtime, device, cleanup_result)
                 .await;
@@ -279,17 +315,28 @@ impl NativeGatewayRunner {
     fn platform_control(&self) -> anyhow::Result<PlatformTunnelControl> {
         Ok(UnsupportedTunnelControl::new())
     }
+}
 
-    async fn fixed_underlay_targets(&self) -> Result<Vec<IpAddr>, GatewayError> {
-        let mut targets = self
-            .config
-            .underlay_bypass_targets
-            .iter()
-            .copied()
-            .collect::<BTreeSet<_>>();
-        targets.extend(resolve_turn_server_ips(&self.ice_servers).await?);
-        Ok(targets.into_iter().collect())
+fn validate_underlay_bypass_targets(targets: &[IpAddr]) -> Result<(), GatewayError> {
+    if let Some(target) = targets.iter().find(|target| target.is_ipv6()) {
+        return Err(GatewayError::Platform {
+            operation: "validate-gateway-underlay-bypass",
+            message: format!("IPv6 underlay target {target} is outside the IPv4 gateway milestone"),
+        });
     }
+    Ok(())
+}
+
+fn validate_underlay_refresh_secs(seconds: u64) -> Result<(), GatewayError> {
+    if seconds == 0 || seconds > MAX_UNDERLAY_REFRESH_SECS {
+        return Err(GatewayError::Platform {
+            operation: "validate-gateway-underlay-refresh",
+            message: format!(
+                "gateway underlay_refresh_secs must be in 1..={MAX_UNDERLAY_REFRESH_SECS}, got {seconds}"
+            ),
+        });
+    }
+    Ok(())
 }
 
 async fn finish_gateway_cleanup<D: rings_gateway::PacketIo>(
@@ -404,6 +451,8 @@ struct GatewayRefresh {
     processor: Arc<Processor>,
     gateway: GatewayControlHandle,
     onion_service: String,
+    underlay: Arc<GatewayUnderlayGate<PlatformTunnelControl>>,
+    ice_servers: String,
     interval: Duration,
     stop: StopToken,
     runtime_done: StopToken,
@@ -436,6 +485,8 @@ async fn refresh_exit_availability(refresh: GatewayRefresh) -> Result<(), Gatewa
         ) {
             return Ok(());
         }
+        let turn_targets = resolve_turn_server_ips(&refresh.ice_servers).await?;
+        refresh.underlay.refresh_turn_targets(turn_targets).await?;
         let (availability, reason) = match refresh
             .processor
             .lookup_onion_exits(&refresh.onion_service, false)
@@ -706,18 +757,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn underlay_gate_installs_only_fixed_authorized_targets() {
+    async fn underlay_gate_separates_fixed_authority_from_refreshed_turn_routes() {
         let updates = Arc::new(StdMutex::new(Vec::new()));
         let gate = GatewayUnderlayGate::new(
             RecordingUnderlayControl {
                 updates: Arc::clone(&updates),
             },
             vec!["192.0.2.10".parse().expect("fixed IP")],
+            vec!["198.51.100.10".parse().expect("initial TURN IP")],
         );
 
-        gate.install_fixed_targets()
+        gate.install_routed_targets()
             .await
-            .expect("install fixed target");
+            .expect("install initial routed targets");
+        gate.refresh_turn_targets(vec!["198.51.100.20".parse().expect("rotated TURN IP")])
+            .await
+            .expect("refresh TURN target");
         gate.admit(&["192.0.2.10".parse().expect("fixed IP")])
             .await
             .expect("authorize fixed target");
@@ -728,8 +783,35 @@ mod tests {
 
         assert_eq!(
             updates.lock().expect("recording underlay lock").as_slice(),
-            &[vec!["192.0.2.10".parse::<IpAddr>().expect("fixed IP")]]
+            &[
+                vec![
+                    "192.0.2.10".parse::<IpAddr>().expect("fixed IP"),
+                    "198.51.100.10".parse::<IpAddr>().expect("initial TURN IP"),
+                ],
+                vec![
+                    "192.0.2.10".parse::<IpAddr>().expect("fixed IP"),
+                    "198.51.100.10".parse::<IpAddr>().expect("initial TURN IP"),
+                    "198.51.100.20".parse::<IpAddr>().expect("rotated TURN IP"),
+                ],
+            ]
         );
         assert!(error.to_string().contains("underlay_bypass_targets"));
+    }
+
+    #[test]
+    fn ipv6_underlay_bypass_is_rejected_instead_of_silently_dropped() {
+        let error =
+            validate_underlay_bypass_targets(&["2001:db8::7".parse().expect("IPv6 target")])
+                .expect_err("IPv6 underlay is unsupported");
+
+        assert!(error.to_string().contains("IPv6 underlay target"));
+    }
+
+    #[test]
+    fn underlay_refresh_interval_preserves_helper_keepalive_bound() {
+        assert!(validate_underlay_refresh_secs(0).is_err());
+        assert!(validate_underlay_refresh_secs(1).is_ok());
+        assert!(validate_underlay_refresh_secs(MAX_UNDERLAY_REFRESH_SECS).is_ok());
+        assert!(validate_underlay_refresh_secs(MAX_UNDERLAY_REFRESH_SECS + 1).is_err());
     }
 }

@@ -481,6 +481,11 @@ impl WebrtcTransport {
         *self.candidate_admission.write().await = None;
     }
 
+    /// Return whether explicit native-underlay admission is currently installed.
+    pub async fn underlay_candidate_admission_enabled(&self) -> bool {
+        self.candidate_admission.read().await.is_some()
+    }
+
     /// Authorize a non-ICE underlay target through the installed gateway policy.
     ///
     /// The read guard prevents policy replacement until authorization completes. When no native

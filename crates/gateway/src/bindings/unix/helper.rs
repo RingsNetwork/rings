@@ -10,6 +10,7 @@ use std::os::unix::net::UnixListener;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use nix::unistd::chown;
 use nix::unistd::dup;
@@ -17,6 +18,7 @@ use nix::unistd::Uid;
 
 use super::config::UnixConfigRequest;
 use super::config::UnixConfigResponse;
+use super::transport::is_request_timeout;
 use super::transport::read_request;
 use super::transport::send_response;
 use crate::bindings::NativeTunnelControl;
@@ -26,6 +28,8 @@ use crate::bindings::TunnelControl;
 use crate::bindings::UnderlayPolicy;
 use crate::GatewayError;
 use crate::GatewayPlan;
+
+const HELPER_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Configuration for one foreground Unix helper lifecycle.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -110,6 +114,11 @@ fn serve_listener(
         };
         match serve_connection(&runtime, &mut control, &mut active, &mut stream) {
             Ok(HelperConnectionExit::Disconnected) => {}
+            Ok(HelperConnectionExit::TimedOut) => {
+                eprintln!(
+                    "gateway helper client request timed out; any active capture remains fail-closed"
+                );
+            }
             Ok(HelperConnectionExit::TornDown) => return Ok(()),
             Err(error) if active.is_some() => {
                 eprintln!(
@@ -131,6 +140,7 @@ struct ActiveHelperTunnel {
 
 enum HelperConnectionExit {
     Disconnected,
+    TimedOut,
     TornDown,
 }
 
@@ -144,6 +154,9 @@ fn serve_connection(
         let request = match read_request(stream) {
             Ok(Some(request)) => request,
             Ok(None) => return Ok(HelperConnectionExit::Disconnected),
+            Err(error) if is_request_timeout(&error) => {
+                return Ok(HelperConnectionExit::TimedOut);
+            }
             Err(error) => return Err(error),
         };
         match request {
@@ -196,9 +209,15 @@ fn serve_connection(
                         response?;
                         return Ok(HelperConnectionExit::TornDown);
                     }
-                    Err(error) => {
+                    Err(failure) => {
+                        let (lease, error) = failure.into_parts();
+                        if let Some(tunnel) = active.as_mut() {
+                            tunnel.lease = Some(lease);
+                        }
                         send_failure(stream, "teardown", error.to_string())?;
-                        return Err(error);
+                        // Keep serving this authenticated connection. The client receives the
+                        // failure together with its linear lease and may retry without restarting
+                        // either side of the privilege boundary.
                     }
                 }
             }
@@ -253,7 +272,9 @@ fn establish_or_resume(
     let descriptor = match device.into_owned_fd() {
         Ok(descriptor) => descriptor,
         Err(error) => {
-            let cleanup = runtime.block_on(control.teardown(lease));
+            let cleanup = runtime
+                .block_on(control.teardown(lease))
+                .map_err(crate::bindings::TeardownFailure::into_error);
             return combine_results(Err(error), cleanup, "export-unix-helper-device");
         }
     };
@@ -292,6 +313,10 @@ fn accept_authorized(
             .accept()
             .map_err(|error| GatewayError::platform("accept-unix-helper", error))?;
         if peer_uid(&stream)? == authorized_uid {
+            stream
+                .set_read_timeout(Some(HELPER_REQUEST_TIMEOUT))
+                .and_then(|()| stream.set_write_timeout(Some(HELPER_REQUEST_TIMEOUT)))
+                .map_err(|error| GatewayError::platform("configure-unix-helper-peer", error))?;
             return Ok(stream);
         }
     }

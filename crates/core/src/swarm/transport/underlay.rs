@@ -35,6 +35,19 @@ impl SwarmTransport {
         self.transport.clear_underlay_candidate_admission().await;
     }
 
+    /// Return whether the native gateway's explicit-underlay gate is installed.
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) async fn underlay_candidate_admission_enabled(&self) -> bool {
+        #[cfg(not(feature = "dummy"))]
+        {
+            self.transport.underlay_candidate_admission_enabled().await
+        }
+        #[cfg(feature = "dummy")]
+        {
+            false
+        }
+    }
+
     /// Admit direct underlay targets through the installed native gateway policy.
     #[cfg(not(target_family = "wasm"))]
     pub(crate) async fn admit_underlay_targets(

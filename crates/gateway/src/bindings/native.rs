@@ -23,6 +23,7 @@ use super::route::RouteManager;
 use super::routes::bypass_routes;
 use super::routes::capture_routes;
 use super::EstablishedTunnel;
+use super::TeardownFailure;
 use super::TunnelControl;
 use super::UnderlayPolicy;
 use crate::GatewayError;
@@ -403,29 +404,33 @@ impl TunnelControl for NativeTunnelControl {
         self.establish_inner(plan)
     }
 
-    async fn teardown(&mut self, lease: Self::Lease) -> Result<(), GatewayError> {
+    async fn teardown(&mut self, lease: Self::Lease) -> Result<(), TeardownFailure<Self::Lease>> {
         let Some(mut active) = self.active.take() else {
-            return Err(GatewayError::Platform {
+            return Err(TeardownFailure::new(lease, GatewayError::Platform {
                 operation: "teardown",
                 message: "no native tunnel lease is active".to_string(),
-            });
+            }));
         };
         if active.id != lease.id {
             let active_id = active.id;
             self.active = Some(active);
-            return Err(GatewayError::Platform {
+            let error = GatewayError::Platform {
                 operation: "teardown",
                 message: format!(
                     "lease {} does not own active native tunnel lease {active_id}",
                     lease.id
                 ),
-            });
+            };
+            return Err(TeardownFailure::new(lease, error));
         }
         let result = self.cleanup_routes(&mut active.routes);
-        if result.is_err() {
-            self.active = Some(active);
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.active = Some(active);
+                Err(TeardownFailure::new(lease, error))
+            }
         }
-        result
     }
 }
 

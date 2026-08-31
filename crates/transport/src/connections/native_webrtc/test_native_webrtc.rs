@@ -169,3 +169,20 @@ async fn test_explicit_underlay_target_uses_installed_admission_policy() {
         targets.as_slice()
     );
 }
+
+#[tokio::test]
+async fn test_underlay_policy_presence_tracks_gateway_lifetime() {
+    let transport = WebrtcTransport::new("", None, None);
+    assert!(!transport.underlay_candidate_admission_enabled().await);
+
+    transport
+        .enable_underlay_candidate_admission(Arc::new(RejectingAdmission {
+            observed: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }))
+        .await
+        .expect("enable gateway policy");
+    assert!(transport.underlay_candidate_admission_enabled().await);
+
+    transport.clear_underlay_candidate_admission().await;
+    assert!(!transport.underlay_candidate_admission_enabled().await);
+}

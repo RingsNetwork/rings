@@ -3,6 +3,7 @@
 mod device;
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -11,7 +12,6 @@ use smoltcp::iface::Interface;
 use smoltcp::iface::SocketHandle;
 use smoltcp::iface::SocketSet;
 use smoltcp::socket::tcp;
-use smoltcp::socket::Socket;
 use smoltcp::time::Duration as SmolDuration;
 use smoltcp::time::Instant;
 use smoltcp::wire::HardwareAddress;
@@ -99,6 +99,7 @@ pub struct TcpStack {
     device: PacketQueueDevice,
     sockets: SocketSet<'static>,
     endpoints: HashMap<FlowId, TcpEndpoint>,
+    owned_handles: HashSet<SocketHandle>,
     tcp_buffer_bytes: usize,
     flow_idle_timeout: Duration,
 }
@@ -133,6 +134,7 @@ impl TcpStack {
             device,
             sockets: SocketSet::new(Vec::new()),
             endpoints: HashMap::with_capacity(config.max_flows),
+            owned_handles: HashSet::with_capacity(config.max_flows),
             tcp_buffer_bytes: config.tcp_buffer_bytes,
             flow_idle_timeout: config.flow_idle_timeout,
         })
@@ -161,6 +163,7 @@ impl TcpStack {
             return TcpFlowAdmission::Rejected(FlowRejectReason::ListenRejected);
         }
         let handle = self.sockets.add(socket);
+        self.owned_handles.insert(handle);
         self.endpoints.insert(segment.flow, TcpEndpoint {
             handle,
             pending_deadline: TcpEndpointState::Listening
@@ -213,11 +216,8 @@ impl TcpStack {
             .map(|socket| TcpEndpointState::from(socket.state()))
     }
 
-    /// Copy application bytes received from the captured client into `output`.
-    ///
-    /// A zero return value means either no bytes are buffered yet or the receive half is finished;
-    /// callers use [`Self::endpoint_state`] to distinguish those cases.
-    pub fn read_application_data(
+    #[cfg(test)]
+    fn read_application_data(
         &mut self,
         flow: FlowId,
         output: &mut [u8],
@@ -290,11 +290,6 @@ impl TcpStack {
         self.socket(flow).map(tcp::Socket::may_recv)
     }
 
-    /// Return whether the application may still send bytes to the captured client.
-    pub fn client_write_open(&self, flow: FlowId) -> Result<bool, TcpStackError> {
-        self.socket(flow).map(tcp::Socket::may_send)
-    }
-
     /// Return the number of TCP endpoints currently owned by the stack.
     pub fn flow_count(&self) -> usize {
         self.endpoints.len()
@@ -350,15 +345,14 @@ impl TcpStack {
             .get(&flow)
             .map(|endpoint| endpoint.handle)
             .ok_or(TcpStackError::UnknownFlow(flow))?;
-        // `SocketSet::get` is O(1) but panics for a stale or mistyped handle. Keep the checked
-        // lookup so an internal ownership mismatch remains a typed gateway failure.
-        self.sockets
-            .iter()
-            .find_map(|(candidate, socket)| match socket {
-                Socket::Tcp(tcp) if candidate == handle => Some(tcp),
-                Socket::Tcp(_) => None,
-            })
-            .ok_or(TcpStackError::UnknownFlow(flow))
+        if !self.owned_handles.contains(&handle) {
+            return Err(TcpStackError::UnknownFlow(flow));
+        }
+        // Ownership invariant: every handle is inserted into `SocketSet`, `endpoints`, and
+        // `owned_handles` together, and `release_socket` removes it from all three together. This
+        // crate inserts only TCP sockets. The O(1) membership proof therefore satisfies both
+        // preconditions of smoltcp's O(1) typed accessor.
+        Ok(self.sockets.get::<tcp::Socket<'static>>(handle))
     }
 
     fn socket_mut(&mut self, flow: FlowId) -> Result<&mut tcp::Socket<'static>, TcpStackError> {
@@ -367,15 +361,11 @@ impl TcpStack {
             .get(&flow)
             .map(|endpoint| endpoint.handle)
             .ok_or(TcpStackError::UnknownFlow(flow))?;
-        // See `socket`: preserving a panic-free production path takes precedence over the
-        // unchecked O(1) accessor exposed by smoltcp.
-        self.sockets
-            .iter_mut()
-            .find_map(|(candidate, socket)| match socket {
-                Socket::Tcp(tcp) if candidate == handle => Some(tcp),
-                Socket::Tcp(_) => None,
-            })
-            .ok_or(TcpStackError::UnknownFlow(flow))
+        if !self.owned_handles.contains(&handle) {
+            return Err(TcpStackError::UnknownFlow(flow));
+        }
+        // See `socket`: the three owned indexes share one private insertion/removal boundary.
+        Ok(self.sockets.get_mut::<tcp::Socket<'static>>(handle))
     }
 
     fn release_socket(&mut self, flow: FlowId) -> Result<(), TcpStackError> {
@@ -384,15 +374,13 @@ impl TcpStack {
             .get(&flow)
             .map(|endpoint| endpoint.handle)
             .ok_or(TcpStackError::UnknownFlow(flow))?;
-        let exists = self
-            .sockets
-            .iter()
-            .any(|(candidate, _)| candidate == handle);
-        if !exists {
+        if !self.owned_handles.contains(&handle) {
             return Err(TcpStackError::UnknownFlow(flow));
         }
-        // The handle was returned by this owned SocketSet and was checked immediately above.
+        // Membership proves that this handle was returned by this `SocketSet` and has not been
+        // removed. Remove the smoltcp entry before dropping the two ownership witnesses.
         let _ = self.sockets.remove(handle);
+        self.owned_handles.remove(&handle);
         self.endpoints.remove(&flow);
         Ok(())
     }

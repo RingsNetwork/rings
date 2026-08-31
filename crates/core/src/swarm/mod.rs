@@ -198,6 +198,12 @@ impl Swarm {
         self.transport.clear_underlay_candidate_admission().await;
     }
 
+    /// Return whether native gateway underlay admission is installed.
+    #[cfg(not(target_family = "wasm"))]
+    pub async fn underlay_candidate_admission_enabled(&self) -> bool {
+        self.transport.underlay_candidate_admission_enabled().await
+    }
+
     /// Admit native signaling/bootstrap targets through the installed underlay policy.
     ///
     /// Packet gateways accept only operator-authorized fixed exclusions, so an arbitrary remote

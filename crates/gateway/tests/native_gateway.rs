@@ -47,7 +47,10 @@ async fn privileged_native_tunnel_establishes_and_cleans_up() -> TestResult {
     );
     let bypass_response = bypass_response?;
     let captured_length = captured_length?;
-    control.teardown(lease).await?;
+    control
+        .teardown(lease)
+        .await
+        .map_err(rings_gateway::bindings::TeardownFailure::into_error)?;
     drop(device);
 
     assert!(!interface_name.is_empty());

@@ -19,7 +19,7 @@ impl FlowTable {
     /// Create an empty table with a nonzero bound.
     pub fn new(capacity: usize) -> Result<Self, FlowTableError> {
         if capacity == 0 {
-            return Err(FlowTableError::CapacityExhausted { limit: capacity });
+            return Err(FlowTableError::ZeroCapacity);
         }
         if capacity > crate::config::MAX_GATEWAY_FLOWS {
             return Err(FlowTableError::CapacityLimitExceeded {
@@ -125,6 +125,14 @@ mod tests {
         assert!(matches!(
             FlowTable::new(usize::MAX),
             Err(FlowTableError::CapacityLimitExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn table_rejects_zero_capacity_as_invalid_construction() {
+        assert!(matches!(
+            FlowTable::new(0),
+            Err(FlowTableError::ZeroCapacity)
         ));
     }
 

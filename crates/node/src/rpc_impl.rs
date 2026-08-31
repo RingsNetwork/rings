@@ -44,9 +44,13 @@ impl HandleRpc<ConnectPeerViaHttpRequest, ConnectPeerViaHttpResponse> for Proces
     ) -> Result<ConnectPeerViaHttpResponse> {
         #[cfg(all(feature = "node", not(target_family = "wasm")))]
         let client = {
-            let targets = admit_http_signaling_underlay(self, &req.url).await?;
-            let http_client = pinned_signaling_http_client(&req.url, &targets)?;
-            rings_rpc::jsonrpc::Client::with_http_client(&req.url, http_client)
+            if self.swarm.underlay_candidate_admission_enabled().await {
+                let targets = admit_http_signaling_underlay(self, &req.url).await?;
+                let http_client = pinned_signaling_http_client(&req.url, &targets)?;
+                rings_rpc::jsonrpc::Client::with_http_client(&req.url, http_client)
+            } else {
+                rings_rpc::jsonrpc::Client::new(&req.url)
+            }
         };
         #[cfg(not(all(feature = "node", not(target_family = "wasm"))))]
         let client = rings_rpc::jsonrpc::Client::new(&req.url);

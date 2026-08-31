@@ -86,7 +86,10 @@ async fn privileged_helper_retains_and_recovers_a_disconnected_lease() -> TestRe
         interface_name: resumed_interface_name,
     } = resumed.establish(&plan).await?;
     let resumed_capture = capture_packet(&mut device, &plan).await?;
-    resumed.teardown(lease).await?;
+    resumed
+        .teardown(lease)
+        .await
+        .map_err(rings_gateway::bindings::TeardownFailure::into_error)?;
     drop(device);
     helper.wait_for_success().await?;
 

@@ -40,6 +40,59 @@ pub struct EstablishedTunnel<D, L> {
     pub interface_name: String,
 }
 
+/// Failed cleanup together with the still-live linear cleanup capability.
+///
+/// Callers may inspect the error and retry [`TunnelControl::teardown`] with the returned lease.
+/// Dropping the failure does not promise cleanup.
+pub struct TeardownFailure<L> {
+    lease: L,
+    error: GatewayError,
+}
+
+impl<L> std::fmt::Debug for TeardownFailure<L> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TeardownFailure")
+            .field("lease", &"<retained>")
+            .field("error", &self.error)
+            .finish()
+    }
+}
+
+impl<L> std::fmt::Display for TeardownFailure<L> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.error, formatter)
+    }
+}
+
+impl<L: 'static> std::error::Error for TeardownFailure<L> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+impl<L> TeardownFailure<L> {
+    /// Pair a failed cleanup with the lease required to retry it.
+    pub const fn new(lease: L, error: GatewayError) -> Self {
+        Self { lease, error }
+    }
+
+    /// Borrow the cleanup failure without consuming the retained lease.
+    pub const fn error(&self) -> &GatewayError {
+        &self.error
+    }
+
+    /// Recover both the linear cleanup capability and its failure.
+    pub fn into_parts(self) -> (L, GatewayError) {
+        (self.lease, self.error)
+    }
+
+    /// Consume the retained lease and return only the failure.
+    pub fn into_error(self) -> GatewayError {
+        self.error
+    }
+}
+
 /// Platform boundary for establishing and reconciling tunnel resources.
 #[async_trait::async_trait]
 pub trait TunnelControl: Send {
@@ -55,7 +108,9 @@ pub trait TunnelControl: Send {
     ) -> Result<EstablishedTunnel<Self::Device, Self::Lease>, GatewayError>;
 
     /// Tear down exactly the resources represented by `lease`.
-    async fn teardown(&mut self, lease: Self::Lease) -> Result<(), GatewayError>;
+    ///
+    /// Failure returns the lease so a transient platform error remains retryable.
+    async fn teardown(&mut self, lease: Self::Lease) -> Result<(), TeardownFailure<Self::Lease>>;
 }
 
 /// Platform boundary that keeps Rings underlay traffic outside capture routes.
@@ -167,8 +222,8 @@ impl TunnelControl for UnsupportedTunnelControl {
         Err(Self::unsupported())
     }
 
-    async fn teardown(&mut self, _lease: Self::Lease) -> Result<(), GatewayError> {
-        Err(Self::unsupported())
+    async fn teardown(&mut self, lease: Self::Lease) -> Result<(), TeardownFailure<Self::Lease>> {
+        Err(TeardownFailure::new(lease, Self::unsupported()))
     }
 }
 

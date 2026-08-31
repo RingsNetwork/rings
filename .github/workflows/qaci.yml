@@ -284,12 +284,7 @@ jobs:
           set -euo pipefail
           gateway_test="$(
             cargo test --release -p rings-gateway --test native_gateway --no-run --message-format=json |
-              python3 -c 'import json, sys
-          for line in sys.stdin:
-              event = json.loads(line)
-              target = event.get("target", {})
-              if event.get("reason") == "compiler-artifact" and target.get("name") == "native_gateway" and event.get("profile", {}).get("test"):
-                  print(event["executable"])'
+              python3 scripts/find-cargo-test-binary.py native_gateway
           )"
           test -n "$gateway_test"
           sudo "$gateway_test" \
@@ -301,12 +296,7 @@ jobs:
           set -euo pipefail
           helper_test="$(
             cargo test --release -p rings-gateway --test unix_helper --no-run --message-format=json |
-              python3 -c 'import json, sys
-          for line in sys.stdin:
-              event = json.loads(line)
-              target = event.get("target", {})
-              if event.get("reason") == "compiler-artifact" and target.get("name") == "unix_helper" and event.get("profile", {}).get("test"):
-                  print(event["executable"])'
+              python3 scripts/find-cargo-test-binary.py unix_helper
           )"
           test -n "$helper_test"
           sudo "$helper_test" \
@@ -318,12 +308,7 @@ jobs:
           set -euo pipefail
           node_test="$(
             cargo test --release -p rings-node --lib --no-run --message-format=json |
-              python3 -c 'import json, sys
-          for line in sys.stdin:
-              event = json.loads(line)
-              target = event.get("target", {})
-              if event.get("reason") == "compiler-artifact" and target.get("name") == "rings_node" and event.get("profile", {}).get("test"):
-                  print(event["executable"])'
+              python3 scripts/find-cargo-test-binary.py rings_node
           )"
           test -n "$node_test"
           sudo "$node_test" \
@@ -376,12 +361,7 @@ jobs:
           set -euo pipefail
           gateway_test="$(
             cargo test -p rings-gateway --test native_gateway --no-run --message-format=json |
-              python3 -c 'import json, sys
-          for line in sys.stdin:
-              event = json.loads(line)
-              target = event.get("target", {})
-              if event.get("reason") == "compiler-artifact" and target.get("name") == "native_gateway" and event.get("profile", {}).get("test"):
-                  print(event["executable"])'
+              python3 scripts/find-cargo-test-binary.py native_gateway
           )"
           test -n "$gateway_test"
           sudo "$gateway_test" \
@@ -390,12 +370,7 @@ jobs:
 
           helper_test="$(
             cargo test -p rings-gateway --test unix_helper --no-run --message-format=json |
-              python3 -c 'import json, sys
-          for line in sys.stdin:
-              event = json.loads(line)
-              target = event.get("target", {})
-              if event.get("reason") == "compiler-artifact" and target.get("name") == "unix_helper" and event.get("profile", {}).get("test"):
-                  print(event["executable"])'
+              python3 scripts/find-cargo-test-binary.py unix_helper
           )"
           test -n "$helper_test"
           sudo "$helper_test" \

@@ -2,6 +2,23 @@ use std::cell::RefCell;
 
 use super::*;
 
+#[tokio::test]
+async fn failed_teardown_returns_the_same_linear_lease() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let options = NativeTunnelOptions::new(directory.path().join("routes.json"));
+    let mut control = NativeTunnelControl::new(options).expect("native control");
+    let failure = control
+        .teardown(NativeTunnelLease { id: 41 })
+        .await
+        .expect_err("inactive control cannot clean up a lease");
+
+    let (lease, error) = failure.into_parts();
+    assert_eq!(lease.id, 41);
+    assert!(error
+        .to_string()
+        .contains("no native tunnel lease is active"));
+}
+
 #[test]
 fn route_record_round_trip_preserves_cleanup_identity() {
     let route = Route::new("203.0.113.7".parse().expect("test route"), 32)

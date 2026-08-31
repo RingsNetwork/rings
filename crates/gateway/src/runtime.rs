@@ -599,12 +599,19 @@ impl GatewayRuntime {
                 .try_send(BridgeCommand::Data(buffer));
             match send {
                 Ok(()) => self.tcp.commit_application_read(flow, length)?,
-                Err(mpsc::error::TrySendError::Full(BridgeCommand::Data(mut buffer))) => {
-                    buffer.resize(self.chunk_bytes(), 0);
-                    self.runtime_flow_mut(flow)?.client_to_onion_buffer = Some(buffer);
-                    return Ok(());
-                }
-                Err(mpsc::error::TrySendError::Full(BridgeCommand::CloseWrite)) => return Ok(()),
+                Err(mpsc::error::TrySendError::Full(command)) => match command {
+                    BridgeCommand::Data(mut buffer) => {
+                        buffer.resize(self.chunk_bytes(), 0);
+                        self.runtime_flow_mut(flow)?.client_to_onion_buffer = Some(buffer);
+                        return Ok(());
+                    }
+                    BridgeCommand::CloseWrite => {
+                        return Err(GatewayError::platform(
+                            "bridge-client-to-onion",
+                            "data send returned an unrelated close-write command",
+                        ));
+                    }
+                },
                 Err(mpsc::error::TrySendError::Closed(_)) => {
                     self.fail_flow(flow, elapsed)?;
                     return Ok(());

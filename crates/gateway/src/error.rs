@@ -90,6 +90,9 @@ pub struct FlowTransitionError {
 /// A rejected flow-table operation.
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 pub enum FlowTableError {
+    /// A caller attempted to construct a table that can never admit a flow.
+    #[error("gateway flow-table capacity must be greater than zero")]
+    ZeroCapacity,
     /// A packet attempted to capture a flow that is already tracked.
     #[error("gateway flow {0:?} is already tracked")]
     Duplicate(FlowId),

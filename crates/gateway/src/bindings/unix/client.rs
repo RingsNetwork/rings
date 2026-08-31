@@ -15,6 +15,7 @@ use super::transport::write_request;
 use crate::bindings::normalize_underlay_targets;
 use crate::bindings::EstablishedTunnel;
 use crate::bindings::NativePacketIo;
+use crate::bindings::TeardownFailure;
 use crate::bindings::TunnelControl;
 use crate::bindings::UnderlayPolicy;
 use crate::GatewayError;
@@ -243,31 +244,38 @@ impl TunnelControl for UnixTunnelControl {
         })
     }
 
-    async fn teardown(&mut self, lease: Self::Lease) -> Result<(), GatewayError> {
-        let active = self.active.as_ref().ok_or_else(|| GatewayError::Platform {
-            operation: "teardown-unix-helper",
-            message: "no Unix helper tunnel lease is active".to_string(),
-        })?;
+    async fn teardown(&mut self, lease: Self::Lease) -> Result<(), TeardownFailure<Self::Lease>> {
+        let Some(active) = self.active.as_ref() else {
+            return Err(TeardownFailure::new(lease, GatewayError::Platform {
+                operation: "teardown-unix-helper",
+                message: "no Unix helper tunnel lease is active".to_string(),
+            }));
+        };
         if active != &lease.id {
-            return Err(GatewayError::Platform {
+            let error = GatewayError::Platform {
                 operation: "teardown-unix-helper",
                 message: format!(
                     "lease {} does not own active Unix helper lease {}",
                     lease.id.as_str(),
                     active.as_str()
                 ),
-            });
+            };
+            return Err(TeardownFailure::new(lease, error));
         }
-        let (response, descriptor) = self
+        let exchange = self
             .exchange(UnixConfigRequest::Teardown {
                 lease_id: lease.id.as_str().to_string(),
             })
-            .await?;
+            .await;
+        let (response, descriptor) = match exchange {
+            Ok(reply) => reply,
+            Err(error) => return Err(TeardownFailure::new(lease, error)),
+        };
         if descriptor.is_some() {
-            return Err(GatewayError::Platform {
+            return Err(TeardownFailure::new(lease, GatewayError::Platform {
                 operation: "teardown-unix-helper",
                 message: "helper transferred an unexpected descriptor during teardown".to_string(),
-            });
+            }));
         }
         match response {
             UnixConfigResponse::TornDown => {
@@ -275,10 +283,14 @@ impl TunnelControl for UnixTunnelControl {
                 self.stream = None;
                 Ok(())
             }
-            UnixConfigResponse::Failed { operation, message } => {
-                Err(helper_failure(operation, message))
-            }
-            response => Err(unexpected_response("teardown-unix-helper", response)),
+            UnixConfigResponse::Failed { operation, message } => Err(TeardownFailure::new(
+                lease,
+                helper_failure(operation, message),
+            )),
+            response => Err(TeardownFailure::new(
+                lease,
+                unexpected_response("teardown-unix-helper", response),
+            )),
         }
     }
 }

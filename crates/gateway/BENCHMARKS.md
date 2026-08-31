@@ -20,7 +20,8 @@ flow. It is not a steady-state per-node minimum.
 The benchmark initially exposed a packet-event path that reconciled the entire active-flow table.
 At 1,024 flows that version took 4.6438 s at 0.215 MiB/s and consumed 4.51 s user CPU. Scoping
 packet and bridge reconciliation to the affected flow reduced the same fixture to 0.1136 s at
-8.81 MiB/s and 0.08 s user CPU. Timer ticks retain the full scan required for idle timeouts.
+8.81 MiB/s and 0.08 s user CPU. Timer ticks retain the linear full scan required for idle
+timeouts, with constant-time socket access for every visited flow.
 
 Reproduce the 1,024-flow reference run after warming the release binary:
 

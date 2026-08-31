@@ -111,21 +111,28 @@ DNS destinations under `bypass`, resolved configured TURN servers, and explicit
 `block` instead get more-specific capture routes. Gateway activation switches native WebRTC to
 relay-only ICE and requires at least one configured TURN server. Remote SDP is data, not route
 authority: host, server-reflexive, and relay candidates received from a peer never add host routes.
+Every `underlay_refresh_secs` (1--30 seconds), configured TURN names are resolved again and newly
+observed IPv4 addresses are added through the same atomic bypass-replacement boundary. Prior TURN
+answers remain routed for the lease lifetime because an established relay allocation may still use
+them after DNS rotation; restarting the gateway begins a fresh set.
 
-Before `connectPeerViaHttp` sends its first request, Rings resolves the endpoint, requires every
-IPv4 result to match the fixed operator-authorized set, and pins the HTTP client to exactly those
-addresses. Redirects are rejected because their destination has not crossed that gate. Add each
-signaling/bootstrap destination to `underlay_bypass_targets` before capture starts; runtime RPC
-input cannot punch a new route around the gateway.
+While gateway underlay admission is installed, `connectPeerViaHttp` resolves the endpoint before
+its first request, requires every IPv4 result to match the fixed operator-authorized set, and pins
+the HTTP client to exactly those addresses. Redirects are rejected because their destination has
+not crossed that gate. Add each signaling/bootstrap destination to `underlay_bypass_targets` before
+capture starts; runtime RPC input cannot punch a new route around the gateway. Without gateway
+admission, native nodes retain the ordinary HTTP client behavior, including IPv6 and redirects.
 
 ## Fail-closed lifetime and platform limits
 
 On Linux and macOS, the foreground helper is part of the kill-switch boundary. It keeps the TUN or
 utun descriptor and capture routes after an ungraceful node disconnect; without a data-plane
 reader, captured IPv4 and IPv6 traffic blackholes. Only an authenticated explicit teardown removes
-the routes. The helper must therefore remain alive. Killing the helper itself destroys the final
-interface descriptor, and the kernel may remove interface-bound routes; direct routing can then
-resume. The durable ledger supports later reconciliation but cannot keep a kernel interface alive.
+the routes. A failed teardown returns its lease to both helper and client so the same control
+connection can retry; reconnecting with the identical plan also resumes the retained lease. The
+helper must therefore remain alive. Killing the helper itself destroys the final interface
+descriptor, and the kernel may remove interface-bound routes; direct routing can then resume. The
+durable ledger supports later reconciliation but cannot keep a kernel interface alive.
 
 Windows has no separate privileged helper in this milestone. While the node process is alive, a
 cleanup failure retains the Wintun device and underlay-authorization gate to fail closed. If the
@@ -145,12 +152,18 @@ The same constraint applies to HTTP seed/signaling URLs supplied at runtime: nam
 resolved address must also already be present in `underlay_bypass_targets`. Resolution or
 authorization failure aborts bootstrap before the first HTTP request.
 
+Bypass routes intentionally use the establish-time physical default-route snapshot, never the live
+table containing Rings' own `/1` capture routes. If the host migrates its physical default route
+while the gateway is active (for example Wi-Fi to wired), newly refreshed bypasses can therefore
+retain the old gateway. Restart the gateway after such a network migration.
+
 Runtime limits reject more than 16,384 flows, TCP buffers larger than 1 MiB, or a declared
 four-buffer-per-flow budget above 1 GiB. These checks happen before hash tables, Tokio channels, or
-per-flow byte buffers are allocated. Unix helper connection and request/response operations have a
-10-second default control deadline with a hard 30-second maximum, so a wedged privileged helper
-cannot keep a blocking runtime alive forever. TURN resolution during gateway startup is also bounded
-to 10 seconds per endpoint.
+per-flow byte buffers are allocated. Unix client connection and request/response operations have a
+10-second default control deadline with a hard 30-second maximum. The foreground helper also closes
+an authenticated control stream that sends no complete request for 60 seconds; the refresh loop
+supplies the bounded keepalive while retaining any active capture fail-closed. TURN resolution
+during startup and refresh is bounded to 10 seconds per endpoint.
 
 The status endpoint is exposed only on the loopback-bound internal API when the gateway is
 configured; it is never mounted on the externally bound API:

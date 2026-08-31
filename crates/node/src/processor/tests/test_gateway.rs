@@ -397,6 +397,7 @@ fn start_linux_namespace_tunnel(
                     return setup
                         .runtime
                         .block_on(setup.control.teardown(lease))
+                        .map_err(rings_gateway::bindings::TeardownFailure::into_error)
                         .map_err(|error| format!("teardown namespace tunnel: {error}"));
                 }
             }

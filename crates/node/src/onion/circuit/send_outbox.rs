@@ -2,13 +2,13 @@
 //!
 //! Traffic-shaping contract: let `B = ONION_LINK_BATCH_CELLS` and let a non-empty batch contain
 //! `r` real cells, where `1 <= r <= B`. The drain attempts exactly `B - r` authenticated one-hop
-//! cover cells after the real cells. When encryption and overlay sends succeed, every observable
+//! cover cells after the real cells. When encryption and direct-edge sends succeed, every observable
 //! batch therefore contains exactly `B` cells and the visible cell-count amplification is
 //! `B / r <= B`. Cover is generated only for a real-driven batch; an idle lane emits nothing.
 //!
 //! One injected pacing delay precedes each batch. Production delays lie in the closed interval
 //! `[MIN_ONION_SEND_JITTER_MS, MAX_ONION_SEND_JITTER_MS]`; with `B = 4`, the pacing-only nominal
-//! rate is 160--800 visible cells per second before overlay backpressure. Sparse traffic can cost
+//! rate is 160--800 visible cells per second before direct-edge backpressure. Sparse traffic can cost
 //! four visible cells for one real cell. These bounded bandwidth, latency, and throughput costs are
 //! intentional privacy properties, not queue inefficiencies to optimize away.
 
@@ -232,7 +232,7 @@ impl<T> OrderedSendState<T> {
     }
 }
 
-/// Per-next-hop ordered outbox. Enqueue is synchronous; overlay backpressure lives in drains.
+/// Per-next-hop ordered outbox. Enqueue is synchronous; direct-edge backpressure lives in drains.
 #[derive(Clone)]
 struct OnionSendOutbox {
     state: Arc<Mutex<OrderedSendState<OverlaySend>>>,
@@ -397,6 +397,8 @@ async fn drain_peer(
             if let Some(hook) = test_hook.as_ref() {
                 hook.before_send(&payload).await;
             }
+            // `peer` is the circuit's exact physical next hop. Overlay routing could select a
+            // different Chord path and would invalidate both adjacency and per-link cover shape.
             let send_result = scope.send_direct(peer, payload).await;
             match completion {
                 Some(completion) => {
@@ -404,7 +406,7 @@ async fn drain_peer(
                 }
                 None => {
                     if let Err(error) = send_result {
-                        tracing::debug!(%peer, ?error, "ordered onion overlay send failed");
+                        tracing::debug!(%peer, ?error, "ordered onion direct-edge send failed");
                     }
                 }
             }
