@@ -120,5 +120,10 @@ struct ProviderHandle *rings_node_new_provider_with_callback(
   }
   char signature[65];
   signer("rings ffi fixture", signature);
+  if (strcmp(account, "fixture-create-failure") == 0 && signature[0] == 0) {
+    free(provider->account);
+    free(provider);
+    return NULL;
+  }
   return provider;
 }

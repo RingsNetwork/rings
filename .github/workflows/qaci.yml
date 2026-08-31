@@ -283,20 +283,20 @@ jobs:
         run: |
           set -euo pipefail
           gateway_test="$(
-            cargo test --release -p rings-gateway --lib --no-run --message-format=json |
+            cargo test --release -p rings-gateway --test native_gateway --no-run --message-format=json |
               python3 -c 'import json, sys
           for line in sys.stdin:
               event = json.loads(line)
               target = event.get("target", {})
-              if event.get("reason") == "compiler-artifact" and target.get("name") == "rings_gateway" and event.get("profile", {}).get("test"):
+              if event.get("reason") == "compiler-artifact" and target.get("name") == "native_gateway" and event.get("profile", {}).get("test"):
                   print(event["executable"])'
           )"
           test -n "$gateway_test"
           sudo "$gateway_test" \
-            bindings::native::tests::privileged_native_tunnel_establishes_and_cleans_up \
+            privileged_native_tunnel_establishes_and_cleans_up \
             --ignored --exact --nocapture
 
-      - name: Exercise privileged Linux helper, fd transfer, and disconnect cleanup
+      - name: Exercise privileged Linux helper, fd retention, and disconnect recovery
         run: |
           set -euo pipefail
           helper_test="$(
@@ -310,7 +310,7 @@ jobs:
           )"
           test -n "$helper_test"
           sudo "$helper_test" \
-            privileged_helper_transfers_tun_and_cleans_normal_and_disconnected_leases \
+            privileged_helper_retains_and_recovers_a_disconnected_lease \
             --ignored --exact --nocapture
 
       - name: Exercise kernel TCP through Linux TUN and two-hop Onion exit
@@ -375,17 +375,17 @@ jobs:
         run: |
           set -euo pipefail
           gateway_test="$(
-            cargo test -p rings-gateway --lib --no-run --message-format=json |
+            cargo test -p rings-gateway --test native_gateway --no-run --message-format=json |
               python3 -c 'import json, sys
           for line in sys.stdin:
               event = json.loads(line)
               target = event.get("target", {})
-              if event.get("reason") == "compiler-artifact" and target.get("name") == "rings_gateway" and event.get("profile", {}).get("test"):
+              if event.get("reason") == "compiler-artifact" and target.get("name") == "native_gateway" and event.get("profile", {}).get("test"):
                   print(event["executable"])'
           )"
           test -n "$gateway_test"
           sudo "$gateway_test" \
-            bindings::native::tests::privileged_native_tunnel_establishes_and_cleans_up \
+            privileged_native_tunnel_establishes_and_cleans_up \
             --ignored --exact --nocapture
 
           helper_test="$(
@@ -399,7 +399,7 @@ jobs:
           )"
           test -n "$helper_test"
           sudo "$helper_test" \
-            privileged_helper_transfers_tun_and_cleans_normal_and_disconnected_leases \
+            privileged_helper_retains_and_recovers_a_disconnected_lease \
             --ignored --exact --nocapture
 
       - name: Setup Java for Kotlin FFI example
@@ -464,7 +464,7 @@ jobs:
           "RINGS_GATEWAY_WINTUN_DLL=$dll" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Exercise Wintun and Windows route cleanup
-        run: cargo test -p rings-gateway --lib bindings::native::tests::privileged_native_tunnel_establishes_and_cleans_up -- --ignored --exact --nocapture
+        run: cargo test -p rings-gateway --test native_gateway privileged_native_tunnel_establishes_and_cleans_up -- --ignored --exact --nocapture
 
   rustfmt_and_clippy:
     name: Check rustfmt style && run clippy

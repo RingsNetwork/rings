@@ -1,7 +1,6 @@
 //! Shared desktop TUN/Wintun device, route transaction, and stale-state lease.
 
 use std::cmp::Reverse;
-use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::ErrorKind;
 use std::io::Write;
@@ -16,6 +15,7 @@ use serde::Serialize;
 use tun_rs::DeviceBuilder;
 use tun_rs::Layer;
 
+use super::normalize_underlay_targets;
 use super::route::Route;
 use super::route::RouteManager;
 use super::routes::bypass_routes;
@@ -84,7 +84,7 @@ impl NativePacketIo {
         let raw_fd = self
             .device
             .into_fd()
-            .map_err(|error| platform_error("export-packet-device", error))?;
+            .map_err(|error| GatewayError::platform("export-packet-device", error))?;
         // SAFETY: tun-rs transfers ownership of the valid descriptor returned by `into_fd`.
         // Wrapping it immediately gives the descriptor one RAII owner until SCM_RIGHTS transfer.
         Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(raw_fd) })
@@ -102,7 +102,7 @@ impl NativePacketIo {
         // construction fails.
         unsafe { tun_rs::AsyncDevice::from_fd(raw_fd) }
             .map(Self::new)
-            .map_err(|error| platform_error("import-packet-device", error))
+            .map_err(|error| GatewayError::platform("import-packet-device", error))
     }
 }
 
@@ -154,7 +154,7 @@ impl NativeTunnelControl {
     /// Open the platform route manager without mutating host state.
     pub fn new(options: NativeTunnelOptions) -> Result<Self, GatewayError> {
         let manager =
-            RouteManager::new().map_err(|error| platform_error("route-manager", error))?;
+            RouteManager::new().map_err(|error| GatewayError::platform("route-manager", error))?;
         Ok(Self {
             manager,
             options,
@@ -201,7 +201,7 @@ impl NativeTunnelControl {
         let baseline = self
             .manager
             .list()
-            .map_err(|error| platform_error("list-baseline-routes", error))?;
+            .map_err(|error| GatewayError::platform("list-baseline-routes", error))?;
         let mut installed = Vec::new();
         let mut installed_bypass = Vec::new();
 
@@ -214,28 +214,28 @@ impl NativeTunnelControl {
                 }
             }
 
-            let (address, prefix) = first_ipv4_address(plan)?;
+            let (address, prefix) = plan.first_ipv4_address()?;
             let builder = DeviceBuilder::new()
                 .layer(Layer::L3)
                 .mtu(plan.mtu.get())
                 .ipv4(address, prefix, None::<Ipv4Addr>);
             let device = configure_builder(builder, &self.options)
                 .build_async()
-                .map_err(|error| platform_error("create-packet-device", error))?;
+                .map_err(|error| GatewayError::platform("create-packet-device", error))?;
             for network in plan.addresses.iter().skip(1) {
                 let IpNet::V4(network) = network else {
                     continue;
                 };
                 device
                     .add_address_v4(network.addr(), network.prefix_len())
-                    .map_err(|error| platform_error("add-interface-address", error))?;
+                    .map_err(|error| GatewayError::platform("add-interface-address", error))?;
             }
             let interface_name = device
                 .name()
-                .map_err(|error| platform_error("read-interface-name", error))?;
+                .map_err(|error| GatewayError::platform("read-interface-name", error))?;
             let interface_index = device
                 .if_index()
-                .map_err(|error| platform_error("read-interface-index", error))?;
+                .map_err(|error| GatewayError::platform("read-interface-index", error))?;
 
             for network in capture_routes(plan) {
                 let route = capture_route(network, interface_index);
@@ -289,7 +289,7 @@ impl NativeTunnelControl {
             |route| {
                 manager
                     .add(route)
-                    .map_err(|error| platform_error("add-route", error))
+                    .map_err(|error| GatewayError::platform("add-route", error))
             },
         )
     }
@@ -300,7 +300,7 @@ impl NativeTunnelControl {
                 if !route_is_absent(&error) {
                     routes.push(route);
                     write_lease(&self.options.route_ledger_path, routes)?;
-                    return Err(platform_error("delete-route", error));
+                    return Err(GatewayError::platform("delete-route", error));
                 }
             }
             write_lease(&self.options.route_ledger_path, routes)?;
@@ -341,7 +341,10 @@ impl NativeTunnelControl {
         for route in obsolete {
             if let Err(error) = self.manager.delete(&route) {
                 if !route_is_absent(&error) {
-                    return (active, Err(platform_error("delete-bypass-route", error)));
+                    return (
+                        active,
+                        Err(GatewayError::platform("delete-bypass-route", error)),
+                    );
                 }
             }
             active.bypass.retain(|candidate| candidate != &route);
@@ -417,18 +420,7 @@ impl TunnelControl for NativeTunnelControl {
 #[async_trait::async_trait]
 impl UnderlayPolicy for NativeTunnelControl {
     async fn replace_bypass_targets(&mut self, targets: &[IpAddr]) -> Result<(), GatewayError> {
-        if let Some(address) = targets.iter().find(|address| address.is_ipv6()) {
-            return Err(GatewayError::Platform {
-                operation: "replace-underlay-bypass",
-                message: format!("IPv6 underlay target {address} is outside the IPv4 milestone"),
-            });
-        }
-        let normalized: Vec<IpAddr> = targets
-            .iter()
-            .copied()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
+        let normalized = normalize_underlay_targets(targets)?;
         if let Some(active) = self.active.as_ref() {
             validate_underlay_capture_conflicts(&active.plan, &normalized)?;
         }
@@ -541,16 +533,6 @@ impl RouteRecord {
     }
 }
 
-fn first_ipv4_address(plan: &GatewayPlan) -> Result<(Ipv4Addr, u8), GatewayError> {
-    plan.addresses
-        .iter()
-        .find_map(|network| match network {
-            IpNet::V4(network) => Some((network.addr(), network.prefix_len())),
-            IpNet::V6(_) => None,
-        })
-        .ok_or_else(|| crate::ConfigError::MissingInterfaceAddress.into())
-}
-
 fn validate_underlay_capture_conflicts(
     plan: &GatewayPlan,
     targets: &[IpAddr],
@@ -594,7 +576,7 @@ fn resolve_current_route(
     let target = network.addr();
     let original = manager
         .find_route(&target)
-        .map_err(|error| platform_error("resolve-current-bypass-route", error))?
+        .map_err(|error| GatewayError::platform("resolve-current-bypass-route", error))?
         .ok_or_else(|| GatewayError::Platform {
             operation: "resolve-current-bypass-route",
             message: format!("no current route reaches {target}"),
@@ -706,7 +688,7 @@ fn read_ledger_file(path: &Path) -> Result<Option<Vec<Route>>, GatewayError> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(platform_error("read-route-ledger", error)),
+        Err(error) => return Err(GatewayError::platform("read-route-ledger", error)),
     };
     let ledger =
         serde_json::from_slice::<RouteLedger>(&bytes).map_err(|error| GatewayError::Platform {
@@ -731,7 +713,7 @@ fn write_lease(path: &Path, routes: &[Route]) -> Result<(), GatewayError> {
         .filter(|parent| !parent.as_os_str().is_empty())
     {
         std::fs::create_dir_all(parent)
-            .map_err(|error| platform_error("create-ledger-directory", error))?;
+            .map_err(|error| GatewayError::platform("create-ledger-directory", error))?;
     }
     let ledger = RouteLedger {
         routes: routes.iter().map(RouteRecord::from_route).collect(),
@@ -741,16 +723,17 @@ fn write_lease(path: &Path, routes: &[Route]) -> Result<(), GatewayError> {
         message: error.to_string(),
     })?;
     let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
-    let mut file =
-        File::create(&temporary).map_err(|error| platform_error("create-route-ledger", error))?;
+    let mut file = File::create(&temporary)
+        .map_err(|error| GatewayError::platform("create-route-ledger", error))?;
     file.write_all(&bytes)
-        .map_err(|error| platform_error("write-route-ledger", error))?;
+        .map_err(|error| GatewayError::platform("write-route-ledger", error))?;
     file.sync_all()
-        .map_err(|error| platform_error("sync-route-ledger", error))?;
+        .map_err(|error| GatewayError::platform("sync-route-ledger", error))?;
     #[cfg(target_os = "windows")]
     return commit_windows_ledger(path, &temporary);
     #[cfg(not(target_os = "windows"))]
-    std::fs::rename(&temporary, path).map_err(|error| platform_error("commit-route-ledger", error))
+    std::fs::rename(&temporary, path)
+        .map_err(|error| GatewayError::platform("commit-route-ledger", error))
 }
 
 fn remove_ledger(path: &Path) -> Result<(), GatewayError> {
@@ -773,7 +756,7 @@ fn remove_ledger_file(path: &Path) -> Result<(), GatewayError> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(platform_error("remove-route-ledger", error)),
+        Err(error) => Err(GatewayError::platform("remove-route-ledger", error)),
     }
 }
 
@@ -787,16 +770,16 @@ fn commit_windows_ledger(path: &Path, temporary: &Path) -> Result<(), GatewayErr
     let backup = ledger_backup_path(path);
     if !path.exists() && backup.exists() {
         std::fs::rename(&backup, path)
-            .map_err(|error| platform_error("restore-route-ledger-backup", error))?;
+            .map_err(|error| GatewayError::platform("restore-route-ledger-backup", error))?;
     }
     remove_ledger_file(&backup)?;
     let had_primary = path.exists();
     if had_primary {
         std::fs::rename(path, &backup)
-            .map_err(|error| platform_error("backup-route-ledger", error))?;
+            .map_err(|error| GatewayError::platform("backup-route-ledger", error))?;
     }
     if let Err(error) = std::fs::rename(temporary, path) {
-        let primary = platform_error("commit-route-ledger", error);
+        let primary = GatewayError::platform("commit-route-ledger", error);
         if had_primary {
             return match std::fs::rename(&backup, path) {
                 Ok(()) => Err(primary),
@@ -809,13 +792,6 @@ fn commit_windows_ledger(path: &Path, temporary: &Path) -> Result<(), GatewayErr
         return Err(primary);
     }
     remove_ledger_file(&backup)
-}
-
-fn platform_error(operation: &'static str, error: impl std::fmt::Display) -> GatewayError {
-    GatewayError::Platform {
-        operation,
-        message: error.to_string(),
-    }
 }
 
 fn route_is_absent(error: &std::io::Error) -> bool {

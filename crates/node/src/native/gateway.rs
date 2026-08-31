@@ -203,14 +203,9 @@ impl NativeGatewayRunner {
         };
 
         if let Err(error) = self.runtime.activate(interface_name) {
-            release_packet_device(device);
             let cleanup = underlay.teardown(lease).await;
-            if cleanup.is_ok() {
-                self.processor
-                    .swarm
-                    .set_underlay_candidate_admission(None)
-                    .await;
-            }
+            let cleanup =
+                finish_gateway_cleanup(&self.processor, &mut self.runtime, device, cleanup).await;
             return combine_gateway_results(Err(error), Ok(()), cleanup);
         }
 
@@ -238,14 +233,10 @@ impl NativeGatewayRunner {
         };
         let (runtime_result, updater_result) = tokio::join!(run, update);
 
-        release_packet_device(device);
         let cleanup_result = underlay.teardown(lease).await;
-        if cleanup_result.is_ok() {
-            self.processor
-                .swarm
-                .set_underlay_candidate_admission(None)
+        let cleanup_result =
+            finish_gateway_cleanup(&self.processor, &mut self.runtime, device, cleanup_result)
                 .await;
-        }
         combine_gateway_results(runtime_result, updater_result, cleanup_result)
     }
 
@@ -288,7 +279,34 @@ impl NativeGatewayRunner {
     }
 }
 
-fn release_packet_device<D: rings_gateway::PacketIo>(_device: D) {}
+async fn finish_gateway_cleanup<D: rings_gateway::PacketIo>(
+    processor: &Processor,
+    runtime: &mut GatewayRuntime,
+    device: D,
+    cleanup: Result<(), GatewayError>,
+) -> Result<(), GatewayError> {
+    match cleanup {
+        Ok(()) => {
+            // Routes are gone before direct candidate admission is restored or the final packet
+            // descriptor is closed. This keeps orderly teardown from opening a direct-leak window.
+            processor.swarm.set_underlay_candidate_admission(None).await;
+            drop(device);
+            Ok(())
+        }
+        Err(error) => {
+            // Capture state may still exist. Retain both the admission gate and packet descriptor
+            // so a cleanup failure degrades connectivity instead of silently restoring direct IO.
+            let reason = format!(
+                "gateway route cleanup failed; direct underlay admission and packet-device release \
+                 remain blocked until privileged cleanup succeeds: {error}"
+            );
+            runtime.set_exit_availability(ExitAvailability::Unknown, Some(reason.clone()));
+            tracing::error!("{reason}");
+            std::mem::forget(device);
+            Err(error)
+        }
+    }
+}
 
 fn validate_ice_dns_compatibility(plan: &GatewayPlan, config: &str) -> Result<(), GatewayError> {
     if plan.dns_policy != DnsPolicy::Block || config.trim().is_empty() {

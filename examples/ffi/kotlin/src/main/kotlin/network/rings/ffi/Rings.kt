@@ -128,7 +128,13 @@ class RingsProvider internal constructor(
         account,
         accountType,
         callback,
-    ) ?: throw RingsFfiException("rings_node_new_provider_with_callback returned NULL")
+    ) ?: run {
+        val signerError = signerFailure.getAndSet(null)
+        throw RingsFfiException(
+            "rings_node_new_provider_with_callback returned NULL",
+            signerError,
+        )
+    }
 
     fun listen() {
         native.rings_node_listen(requireHandle())

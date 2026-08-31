@@ -1,5 +1,6 @@
 //! Native operating-system effect boundaries.
 
+use std::collections::BTreeSet;
 use std::net::IpAddr;
 
 use crate::GatewayError;
@@ -62,6 +63,45 @@ pub trait TunnelControl: Send {
 pub trait UnderlayPolicy: Send {
     /// Replace the current bypass set before packet admission or after peer topology changes.
     async fn replace_bypass_targets(&mut self, targets: &[IpAddr]) -> Result<(), GatewayError>;
+}
+
+fn normalize_underlay_targets(targets: &[IpAddr]) -> Result<Vec<IpAddr>, GatewayError> {
+    if let Some(address) = targets.iter().find(|address| address.is_ipv6()) {
+        return Err(GatewayError::platform(
+            "normalize-underlay-bypass",
+            format!("IPv6 underlay target {address} is outside the IPv4 milestone"),
+        ));
+    }
+    Ok(targets
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn underlay_targets_are_normalized_once_for_every_binding() {
+        assert_eq!(
+            normalize_underlay_targets(&[
+                "203.0.113.7".parse().expect("test address"),
+                "192.0.2.1".parse().expect("test address"),
+                "203.0.113.7".parse().expect("test address"),
+            ])
+            .expect("normalized targets"),
+            vec![
+                "192.0.2.1".parse::<IpAddr>().expect("test address"),
+                "203.0.113.7".parse::<IpAddr>().expect("test address"),
+            ]
+        );
+        assert!(
+            normalize_underlay_targets(&["2001:db8::1".parse().expect("test address")]).is_err()
+        );
+    }
 }
 
 /// Fail-closed packet boundary for native targets whose VPN integration is deferred.

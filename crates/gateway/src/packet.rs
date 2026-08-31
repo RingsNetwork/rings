@@ -277,4 +277,21 @@ mod tests {
             PacketDisposition::Drop(PacketDropReason::InvalidTcpChecksum)
         );
     }
+
+    #[test]
+    fn classifier_is_total_over_deterministic_arbitrary_bytes() {
+        for length in 0..=1_500 {
+            for seed in 0_u64..4 {
+                let mut state = seed ^ u64::try_from(length).expect("bounded length") ^ 0x9e37_79b9;
+                let mut packet = vec![0_u8; length];
+                for byte in &mut packet {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    *byte = state.to_le_bytes().first().copied().unwrap_or_default();
+                }
+                std::hint::black_box(classify_ipv4_packet(&packet));
+            }
+        }
+    }
 }

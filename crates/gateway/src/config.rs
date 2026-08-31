@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::net::IpAddr;
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use ipnet::IpNet;
@@ -89,6 +90,17 @@ pub struct GatewayPlan {
 }
 
 impl GatewayPlan {
+    /// Return the primary IPv4 interface address and prefix.
+    pub fn first_ipv4_address(&self) -> Result<(Ipv4Addr, u8), ConfigError> {
+        self.addresses
+            .iter()
+            .find_map(|network| match network {
+                IpNet::V4(network) => Some((network.addr(), network.prefix_len())),
+                IpNet::V6(_) => None,
+            })
+            .ok_or(ConfigError::MissingInterfaceAddress)
+    }
+
     /// Validate the platform-neutral routing plan.
     pub fn validate(&self) -> Result<(), ConfigError> {
         self.validate_ipv4_only()?;
@@ -319,6 +331,15 @@ mod tests {
                 Ipv4Addr::UNSPECIFIED,
                 32
             )))
+        );
+    }
+
+    #[test]
+    fn primary_ipv4_address_is_plan_vocabulary() {
+        let candidate = plan();
+        assert_eq!(
+            candidate.first_ipv4_address(),
+            Ok((Ipv4Addr::new(100, 64, 0, 1), 30))
         );
     }
 

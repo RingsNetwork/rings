@@ -56,7 +56,7 @@ pub(crate) fn send_response(
         ),
         None => sendmsg::<()>(stream.as_raw_fd(), &slices, &[], MsgFlags::empty(), None),
     }
-    .map_err(|error| platform_error("send-helper-response-marker", error))?;
+    .map_err(|error| GatewayError::platform("send-helper-response-marker", error))?;
     if sent != marker.len() {
         return Err(GatewayError::Platform {
             operation: "send-helper-response-marker",
@@ -79,11 +79,11 @@ pub(crate) fn receive_response(
             Some(&mut control),
             MsgFlags::empty(),
         )
-        .map_err(|error| platform_error("receive-helper-response-marker", error))?;
+        .map_err(|error| GatewayError::platform("receive-helper-response-marker", error))?;
         let mut received = Vec::new();
         for message in message
             .cmsgs()
-            .map_err(|error| platform_error("decode-helper-control-message", error))?
+            .map_err(|error| GatewayError::platform("decode-helper-control-message", error))?
         {
             if let ControlMessageOwned::ScmRights(descriptors) = message {
                 for descriptor in descriptors {
@@ -123,7 +123,8 @@ fn write_frame<T: Serialize>(
     value: &T,
     operation: &'static str,
 ) -> Result<(), GatewayError> {
-    let payload = serde_json::to_vec(value).map_err(|error| platform_error(operation, error))?;
+    let payload =
+        serde_json::to_vec(value).map_err(|error| GatewayError::platform(operation, error))?;
     if payload.len() > MAX_FRAME_BYTES {
         return Err(GatewayError::Platform {
             operation,
@@ -133,11 +134,12 @@ fn write_frame<T: Serialize>(
             ),
         });
     }
-    let length = u32::try_from(payload.len()).map_err(|error| platform_error(operation, error))?;
+    let length =
+        u32::try_from(payload.len()).map_err(|error| GatewayError::platform(operation, error))?;
     stream
         .write_all(&length.to_be_bytes())
         .and_then(|()| stream.write_all(&payload))
-        .map_err(|error| platform_error(operation, error))
+        .map_err(|error| GatewayError::platform(operation, error))
 }
 
 fn read_optional_frame<T: DeserializeOwned>(
@@ -147,7 +149,7 @@ fn read_optional_frame<T: DeserializeOwned>(
     let mut length = [0_u8; 4];
     let first = stream
         .read(&mut length)
-        .map_err(|error| platform_error(operation, error))?;
+        .map_err(|error| GatewayError::platform(operation, error))?;
     if first == 0 {
         return Ok(None);
     }
@@ -160,7 +162,7 @@ fn read_optional_frame<T: DeserializeOwned>(
                     message: format!("invalid frame prefix length {first}"),
                 })?,
         )
-        .map_err(|error| platform_error(operation, error))?;
+        .map_err(|error| GatewayError::platform(operation, error))?;
     decode_frame(stream, length, operation).map(Some)
 }
 
@@ -180,7 +182,7 @@ fn decode_frame<T: DeserializeOwned>(
     operation: &'static str,
 ) -> Result<T, GatewayError> {
     let length = usize::try_from(u32::from_be_bytes(length))
-        .map_err(|error| platform_error(operation, error))?;
+        .map_err(|error| GatewayError::platform(operation, error))?;
     if length > MAX_FRAME_BYTES {
         return Err(GatewayError::Platform {
             operation,
@@ -190,15 +192,8 @@ fn decode_frame<T: DeserializeOwned>(
     let mut payload = vec![0_u8; length];
     stream
         .read_exact(&mut payload)
-        .map_err(|error| platform_error(operation, error))?;
-    serde_json::from_slice(&payload).map_err(|error| platform_error(operation, error))
-}
-
-fn platform_error(operation: &'static str, error: impl std::fmt::Display) -> GatewayError {
-    GatewayError::Platform {
-        operation,
-        message: error.to_string(),
-    }
+        .map_err(|error| GatewayError::platform(operation, error))?;
+    serde_json::from_slice(&payload).map_err(|error| GatewayError::platform(operation, error))
 }
 
 #[cfg(test)]

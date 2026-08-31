@@ -213,3 +213,13 @@ pub enum GatewayError {
         message: String,
     },
 }
+
+impl GatewayError {
+    /// Construct a platform-boundary failure without erasing its stable operation label.
+    pub(crate) fn platform(operation: &'static str, error: impl std::fmt::Display) -> Self {
+        Self::Platform {
+            operation,
+            message: error.to_string(),
+        }
+    }
+}

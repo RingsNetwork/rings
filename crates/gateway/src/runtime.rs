@@ -315,6 +315,22 @@ impl GatewayRuntime {
         self.status_handle.publish(self.server.status());
     }
 
+    fn chunk_bytes(&self) -> usize {
+        self.config.tcp_buffer_bytes.min(BRIDGE_IO_CHUNK_BYTES)
+    }
+
+    fn runtime_flow(&self, flow: FlowId) -> Result<&RuntimeFlow, TcpStackError> {
+        self.flows
+            .get(&flow)
+            .ok_or(TcpStackError::UnknownFlow(flow))
+    }
+
+    fn runtime_flow_mut(&mut self, flow: FlowId) -> Result<&mut RuntimeFlow, TcpStackError> {
+        self.flows
+            .get_mut(&flow)
+            .ok_or(TcpStackError::UnknownFlow(flow))
+    }
+
     fn process_input(
         &mut self,
         input: LoopInput,
@@ -424,7 +440,7 @@ impl GatewayRuntime {
             .map_err(GatewayFatal::gateway)?;
         match self.tcp.admit_flow(segment, elapsed) {
             TcpFlowAdmission::Accepted => {
-                let chunk_bytes = self.config.tcp_buffer_bytes.min(BRIDGE_IO_CHUNK_BYTES);
+                let chunk_bytes = self.chunk_bytes();
                 self.flows
                     .insert(segment.flow, RuntimeFlow::captured(chunk_bytes));
                 self.publish_status();
@@ -468,10 +484,11 @@ impl GatewayRuntime {
                 Ok(ReconcileScope::Flow(flow))
             }
             BridgeEvent::ClientBuffer { flow, mut buffer } => {
+                let chunk_bytes = self.chunk_bytes();
                 let Some(runtime) = self.flows.get_mut(&flow) else {
                     return Ok(ReconcileScope::None);
                 };
-                buffer.resize(self.config.tcp_buffer_bytes.min(BRIDGE_IO_CHUNK_BYTES), 0);
+                buffer.resize(chunk_bytes, 0);
                 runtime.client_to_onion_buffer = Some(buffer);
                 Ok(ReconcileScope::Flow(flow))
             }
@@ -528,7 +545,7 @@ impl GatewayRuntime {
             return Ok(());
         }
         self.server.transition_flow(flow, FlowEvent::Open)?;
-        let chunk_bytes = self.config.tcp_buffer_bytes.min(BRIDGE_IO_CHUNK_BYTES);
+        let chunk_bytes = self.chunk_bytes();
         let bridge = spawn_bridge(
             flow,
             Arc::clone(&self.connector),
@@ -536,10 +553,7 @@ impl GatewayRuntime {
             self.config.tcp_buffer_bytes,
             chunk_bytes,
         );
-        let runtime = self
-            .flows
-            .get_mut(&flow)
-            .ok_or(TcpStackError::UnknownFlow(flow))?;
+        let runtime = self.runtime_flow_mut(flow)?;
         runtime.bridge = Some(bridge);
         Ok(())
     }
@@ -578,18 +592,16 @@ impl GatewayRuntime {
             }
             buffer.truncate(length);
             let send = self
-                .flows
-                .get(&flow)
-                .and_then(|runtime| runtime.bridge.as_ref())
+                .runtime_flow(flow)?
+                .bridge
+                .as_ref()
                 .ok_or(TcpStackError::UnknownFlow(flow))?
                 .try_send(BridgeCommand::Data(buffer));
             match send {
                 Ok(()) => self.tcp.commit_application_read(flow, length)?,
                 Err(mpsc::error::TrySendError::Full(BridgeCommand::Data(mut buffer))) => {
-                    buffer.resize(self.config.tcp_buffer_bytes.min(BRIDGE_IO_CHUNK_BYTES), 0);
-                    if let Some(runtime) = self.flows.get_mut(&flow) {
-                        runtime.client_to_onion_buffer = Some(buffer);
-                    }
+                    buffer.resize(self.chunk_bytes(), 0);
+                    self.runtime_flow_mut(flow)?.client_to_onion_buffer = Some(buffer);
                     return Ok(());
                 }
                 Err(mpsc::error::TrySendError::Full(BridgeCommand::CloseWrite)) => return Ok(()),
@@ -598,8 +610,8 @@ impl GatewayRuntime {
                     return Ok(());
                 }
             }
-        } else if let Some(runtime) = self.flows.get_mut(&flow) {
-            runtime.client_to_onion_buffer = Some(buffer);
+        } else {
+            self.runtime_flow_mut(flow)?.client_to_onion_buffer = Some(buffer);
         }
 
         if !self.tcp.client_read_open(flow)? {
@@ -609,17 +621,14 @@ impl GatewayRuntime {
                 .is_some_and(|runtime| !runtime.client_eof_sent);
             if should_close {
                 let send = self
-                    .flows
-                    .get(&flow)
-                    .and_then(|runtime| runtime.bridge.as_ref())
+                    .runtime_flow(flow)?
+                    .bridge
+                    .as_ref()
                     .ok_or(TcpStackError::UnknownFlow(flow))?
                     .try_send(BridgeCommand::CloseWrite);
                 match send {
                     Ok(()) => {
-                        let runtime = self
-                            .flows
-                            .get_mut(&flow)
-                            .ok_or(TcpStackError::UnknownFlow(flow))?;
+                        let runtime = self.runtime_flow_mut(flow)?;
                         runtime.client_eof_sent = true;
                         self.mark_half_closed(flow)?;
                     }
@@ -656,10 +665,7 @@ impl GatewayRuntime {
                     }
                 }
             };
-            let runtime = self
-                .flows
-                .get_mut(&flow)
-                .ok_or(TcpStackError::UnknownFlow(flow))?;
+            let runtime = self.runtime_flow_mut(flow)?;
             let Some(chunk) = runtime.pending_to_client.front_mut() else {
                 break;
             };
@@ -684,10 +690,7 @@ impl GatewayRuntime {
         });
         if should_close {
             self.tcp.close_application_write(flow)?;
-            let runtime = self
-                .flows
-                .get_mut(&flow)
-                .ok_or(TcpStackError::UnknownFlow(flow))?;
+            let runtime = self.runtime_flow_mut(flow)?;
             runtime.client_write_closed = true;
             self.tcp.poll(elapsed);
         }

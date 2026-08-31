@@ -405,3 +405,53 @@ fn masked_v6(address: Ipv6Addr, prefix: u8) -> u128 {
     let mask = u128::MAX.checked_shl(shift).unwrap_or(0);
     u128::from(address) & mask
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sockaddr_round_trip_preserves_both_address_families() {
+        for address in [
+            "203.0.113.7".parse().expect("test IPv4 address"),
+            "2001:db8::7".parse().expect("test IPv6 address"),
+        ] {
+            // SAFETY: SOCKADDR_INET is plain address storage and is initialized before reading.
+            let mut sockaddr: SOCKADDR_INET = unsafe { std::mem::zeroed() };
+            write_sockaddr(&mut sockaddr, address);
+            assert_eq!(sockaddr_to_ip(&sockaddr), Some(address));
+        }
+    }
+
+    #[test]
+    fn route_contains_masks_v4_and_v6_prefixes() {
+        let ipv4 = Route::new("192.0.2.0".parse().expect("test route"), 24);
+        assert!(ipv4.contains(&"192.0.2.99".parse().expect("test address")));
+        assert!(!ipv4.contains(&"192.0.3.1".parse().expect("test address")));
+
+        let ipv6 = Route::new("2001:db8::".parse().expect("test route"), 32);
+        assert!(ipv6.contains(&"2001:db8:1::1".parse().expect("test address")));
+        assert!(!ipv6.contains(&"2001:db9::1".parse().expect("test address")));
+    }
+
+    #[test]
+    fn route_validation_rejects_invalid_prefix_and_mixed_gateway_family() {
+        assert!(Route::new("192.0.2.0".parse().expect("test route"), 33)
+            .validate()
+            .is_err());
+        assert!(Route::new("2001:db8::".parse().expect("test route"), 129)
+            .validate()
+            .is_err());
+        assert!(Route::new("192.0.2.0".parse().expect("test route"), 24)
+            .with_gateway("2001:db8::1".parse().expect("test gateway"))
+            .validate()
+            .is_err());
+    }
+
+    #[test]
+    fn luid_storage_round_trip_preserves_every_bit() {
+        for luid in [0, 1, u64::MAX, 0x0123_4567_89ab_cdef] {
+            assert_eq!(luid_to_u64(u64_to_luid(luid)), luid);
+        }
+    }
+}

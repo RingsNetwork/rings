@@ -2,8 +2,22 @@ package network.rings.ffi
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 
 class RingsTest {
+    @Test
+    fun providerCreationSurfacesSignerFailure() {
+        val library = requireNotNull(System.getProperty("rings.fake.library"))
+        val runtime = RingsRuntime.load(library)
+        val failure = assertFailsWith<RingsFfiException> {
+            runtime.createProvider("fixture-create-failure", RingsSigner {
+                error("fixture signer failure")
+            })
+        }
+
+        assertEquals("fixture signer failure", failure.cause?.message)
+    }
+
     @Test
     fun actualRustAbiLoadsResolvesSymbolsAndInitializesLogging() {
         val library = System.getProperty("rings.actual.library")

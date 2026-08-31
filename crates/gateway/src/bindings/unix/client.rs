@@ -1,6 +1,5 @@
 //! Unprivileged client for the foreground Unix tunnel-configuration helper.
 
-use std::collections::BTreeSet;
 use std::net::IpAddr;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -12,6 +11,7 @@ use super::config::UnixConfigResponse;
 use super::lease::UnixLeaseId;
 use super::transport::receive_response;
 use super::transport::write_request;
+use crate::bindings::normalize_underlay_targets;
 use crate::bindings::EstablishedTunnel;
 use crate::bindings::NativePacketIo;
 use crate::bindings::TunnelControl;
@@ -40,8 +40,9 @@ pub struct UnixTunnelLease {
 
 /// Privilege-separated Unix tunnel controller.
 ///
-/// A single persistent connection covers establishment, bypass refreshes, and teardown. Closing
-/// the connection early asks the helper to clean up the active route lease.
+/// A single persistent connection covers establishment, bypass refreshes, and teardown. If this
+/// connection disappears early, the foreground helper retains the active interface and routes;
+/// constructing a new controller with the same plan resumes that fail-closed lease.
 pub struct UnixTunnelControl {
     options: UnixTunnelOptions,
     underlay_targets: Vec<IpAddr>,
@@ -213,18 +214,7 @@ impl TunnelControl for UnixTunnelControl {
 #[async_trait::async_trait]
 impl UnderlayPolicy for UnixTunnelControl {
     async fn replace_bypass_targets(&mut self, targets: &[IpAddr]) -> Result<(), GatewayError> {
-        if let Some(address) = targets.iter().find(|address| address.is_ipv6()) {
-            return Err(GatewayError::Platform {
-                operation: "replace-unix-helper-bypass",
-                message: format!("IPv6 underlay target {address} is outside the IPv4 milestone"),
-            });
-        }
-        let normalized = targets
-            .iter()
-            .copied()
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>();
+        let normalized = normalize_underlay_targets(targets)?;
         let Some(active) = self.active.as_ref() else {
             self.underlay_targets = normalized;
             return Ok(());

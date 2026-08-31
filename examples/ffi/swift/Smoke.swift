@@ -16,6 +16,15 @@ struct Smoke {
         }
         let runtime = try RingsRuntime(libraryPath: CommandLine.arguments[1])
         runtime.initializeLogging()
+        do {
+            _ = try RingsProvider(
+                runtime: runtime,
+                account: "fixture-create-failure"
+            ) { _ in Data([1]) }
+            throw RingsFfiError.invalidResponse("provider creation unexpectedly succeeded")
+        } catch RingsFfiError.signerLength(let length) where length == 1 {
+            // The wrapper must surface the signer cause recorded during native construction.
+        }
         let first = try RingsProvider(runtime: runtime, account: "fixture-one") { message in
             Data(repeating: UInt8(message.count), count: ringsSignatureLength)
         }

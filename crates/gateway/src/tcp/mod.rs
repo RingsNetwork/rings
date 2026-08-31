@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use ipnet::IpNet;
 use smoltcp::iface::Config as InterfaceConfig;
 use smoltcp::iface::Interface;
 use smoltcp::iface::SocketHandle;
@@ -92,6 +91,9 @@ impl TcpEndpointState {
 ///
 /// The stack never opens an operating-system TCP socket. It consumes complete IPv4 packets and
 /// emits complete IPv4 packets for the platform binding to inject through [`crate::PacketIo`].
+/// Direct callers own two cross-model invariants: each endpoint must mirror one admitted
+/// [`crate::FlowTable`] entry, and each packet passed to [`Self::ingest_segment`] or
+/// [`Self::reject_segment`] must have passed [`crate::classify_ipv4_packet`].
 pub struct TcpStack {
     interface: Interface,
     device: PacketQueueDevice,
@@ -105,7 +107,7 @@ impl TcpStack {
     /// Create a shared TCP stack from validated gateway configuration.
     pub fn new(config: &GatewayConfig, random_seed: u64) -> Result<Self, GatewayError> {
         config.validate()?;
-        let (interface_address, prefix_len) = first_ipv4_address(config)?;
+        let (interface_address, prefix_len) = config.plan.first_ipv4_address()?;
         let mut device = PacketQueueDevice::new(usize::from(config.plan.mtu.get()));
         let mut interface_config = InterfaceConfig::new(HardwareAddress::Ip);
         interface_config.random_seed = random_seed;
@@ -169,6 +171,9 @@ impl TcpStack {
     }
 
     /// Consume one already-classified TCP segment for an admitted flow.
+    ///
+    /// `packet` must be the same validated packet from which `segment` was classified. The queue
+    /// delegates TCP checksum verification to that classifier and performs only TX checksums.
     pub fn ingest_segment(
         &mut self,
         packet: Vec<u8>,
@@ -183,7 +188,7 @@ impl TcpStack {
         Ok(())
     }
 
-    /// Feed a refused segment to smoltcp without a listener so it can emit a TCP reset.
+    /// Feed a classified, refused segment to smoltcp without a listener so it can emit a TCP reset.
     pub fn reject_segment(&mut self, packet: Vec<u8>, elapsed: Duration) {
         self.device.enqueue_ingress(packet);
         self.poll(elapsed);
@@ -393,18 +398,6 @@ impl TcpStack {
     }
 }
 
-fn first_ipv4_address(config: &GatewayConfig) -> Result<(std::net::Ipv4Addr, u8), GatewayError> {
-    config
-        .plan
-        .addresses
-        .iter()
-        .find_map(|network| match network {
-            IpNet::V4(network) => Some((network.addr(), network.prefix_len())),
-            IpNet::V6(_) => None,
-        })
-        .ok_or_else(|| crate::ConfigError::MissingInterfaceAddress.into())
-}
-
 fn timestamp(elapsed: Duration) -> Instant {
     let micros = elapsed.as_micros().min(i64::MAX as u128) as i64;
     Instant::from_micros(micros)
@@ -414,6 +407,7 @@ fn timestamp(elapsed: Duration) -> Instant {
 mod tests {
     use std::net::Ipv4Addr;
 
+    use ipnet::IpNet;
     use smoltcp::phy::ChecksumCapabilities;
     use smoltcp::phy::Device as _;
     use smoltcp::phy::Medium;

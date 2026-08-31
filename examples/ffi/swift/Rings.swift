@@ -168,8 +168,9 @@ public final class RingsProvider {
             }
         }
         guard let provider else {
+            let signerFailure = signerRegistry.takeFailure(slot)
             signerRegistry.release(slot)
-            throw RingsFfiError.providerCreation
+            throw signerFailure ?? RingsFfiError.providerCreation
         }
         self.runtime = runtime
         self.handle = provider

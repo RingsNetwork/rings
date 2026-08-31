@@ -15,11 +15,12 @@ wrap systemd, launchd, the Windows Service Control Manager, or another superviso
 On Linux and macOS, privileged network configuration is isolated in the separately launched
 `gateway-config-unix` foreground helper. The node keeps one mode-0600 Unix socket connected for the
 whole gateway lease. The helper creates the TUN/utun interface, installs routes, passes the packet
-descriptor with `SCM_RIGHTS`, and owns cleanup. A normal teardown, node disconnect, malformed
-control stream, or failed descriptor handoff triggers reverse-order cleanup. If the helper itself
-is killed, its durable route ledger is reconciled by the next establish request. The helper also
-checks kernel-reported peer credentials: the connecting UID must match `--socket-owner`, or the
-helper's effective UID when no owner override is supplied.
+descriptor with `SCM_RIGHTS`, and owns cleanup. It retains a separate descriptor after transfer. A
+normal teardown removes routes in reverse order; a node disconnect or malformed control stream
+keeps the interface and routes alive so captured traffic blackholes rather than reverting to the
+physical default route. A restarted node may resume that lease by reconnecting with the same plan.
+The helper also checks kernel-reported peer credentials: the connecting UID must match
+`--socket-owner`, or the helper's effective UID when no owner override is supplied.
 
 The helper never invokes privilege elevation itself. Operators choose the narrow mechanism:
 
@@ -64,13 +65,14 @@ rings run --gateway --config "$HOME/.rings/config.yaml"
 ## Node configuration
 
 The current milestone is IPv4/TCP. UDP and fragmented IPv4 fail closed; IPv6 configuration is
-rejected rather than leaking outside an undefined policy. Both DNS policies require the operator
-to list every IPv4 resolver used by applications; Rings does not discover or mutate system DNS.
-With `dns_policy: block`, each listed resolver gets a more-specific capture route; captured UDP is
-dropped, while TCP port 53 is refused with a reset. With `dns_policy: bypass`, each listed resolver
-gets a more-specific baseline-gateway route and DNS explicitly bypasses Onion. An omitted resolver
-is outside the policy guarantee, so operators must keep this declarative list aligned with host
-configuration.
+rejected, while host IPv6 traffic is routed into the packet interface by `::/1` and `8000::/1` and
+dropped there. IPv6 therefore fails closed while forwarding support is deferred. Both DNS policies
+require the operator to list every IPv4 resolver used by applications; Rings does not discover or
+mutate system DNS. With `dns_policy: block`, each listed resolver gets a more-specific capture
+route; captured UDP is dropped, while TCP port 53 is refused with a reset. With
+`dns_policy: bypass`, each listed resolver gets a more-specific baseline-gateway route and DNS
+explicitly bypasses Onion. An omitted resolver is outside the policy guarantee, so operators must
+keep this declarative list aligned with host configuration.
 
 ```yaml
 gateway:
@@ -112,6 +114,22 @@ snapshots may add routes but cannot remove a newly admitted signaling endpoint o
 host names are not literal-IP evidence; this milestone relies on numeric server-reflexive/relay
 candidates plus fixed ICE-server and explicitly configured bypass targets.
 
+## Fail-closed lifetime and platform limits
+
+On Linux and macOS, the foreground helper is part of the kill-switch boundary. It keeps the TUN or
+utun descriptor and capture routes after an ungraceful node disconnect; without a data-plane
+reader, captured IPv4 and IPv6 traffic blackholes. Only an authenticated explicit teardown removes
+the routes. The helper must therefore remain alive. Killing the helper itself destroys the final
+interface descriptor, and the kernel may remove interface-bound routes; direct routing can then
+resume. The durable ledger supports later reconciliation but cannot keep a kernel interface alive.
+
+Windows has no separate privileged helper in this milestone. While the node process is alive, a
+cleanup failure retains the Wintun device and underlay-admission gate to fail closed. If the whole
+Windows node process dies, Wintun and its interface-bound routes can disappear and direct routing
+can resume. Operators requiring a process-independent Windows kill switch must supply an external
+firewall or supervisor policy. `routing_mode: disabled` deliberately installs no capture or
+kill-switch routes on any platform.
+
 `dns_policy: block` requires every configured ICE server host to be a literal IPv4 address. A
 hostname-based STUN/TURN URL needs DNS again when a later WebRTC peer connection starts; resolving
 it once before installing routes is not a durable substitute. Rings therefore rejects that
@@ -131,6 +149,15 @@ GET /gateway/status
 
 It reports interface, lifecycle, active-flow, last-error, and Onion-exit availability without
 granting route mutation authority.
+
+## Library model API
+
+The lifecycle, parser, flow-table, and `TcpStack` types are deliberately public as deterministic
+model and embedding surfaces, even though the node integration normally uses `GatewayRuntime`.
+This is an intentional API commitment rather than accidental exposure. Direct `TcpStack` callers
+own the cross-model invariant that every endpoint mirrors an admitted flow and every ingested or
+rejected packet is the exact validated packet represented by its `TcpSegment`; `GatewayRuntime`
+enforces that invariant automatically.
 
 ## Validation and benchmarks
 
@@ -172,12 +199,13 @@ sudo target/debug/deps/rings_node-... \
 ```
 
 Finally, `privileged_native_tunnel_establishes_and_cleans_up` must run natively on Linux, macOS,
-and Windows. While capturing `1.1.1.0/24`, it proves real TCP/HTTP reachability to the more-specific
-`1.1.1.1/32` baseline-gateway bypass, confirms another destination in the prefix reaches the real
+and Windows. While capturing `1.0.0.0/24`, it proves real TCP/HTTP reachability to the more-specific
+`1.1.1.1/32` baseline-gateway bypass, confirms `1.0.0.1` reaches the real
 TUN/utun/Wintun descriptor, and verifies normal teardown plus crash-ledger reconciliation. It
 requires public connectivity. On Linux and macOS,
-`privileged_helper_transfers_tun_and_cleans_normal_and_disconnected_leases` additionally launches
+`privileged_helper_retains_and_recovers_a_disconnected_lease` additionally launches
 the real `gateway-config-unix` process and proves peer-authenticated socket control, `SCM_RIGHTS`
-packet-descriptor transfer, live bypass replacement, normal teardown, and disconnect cleanup.
+packet-descriptor transfer, live bypass replacement, normal teardown, fail-closed disconnect, and
+same-plan lease recovery.
 These evidence classes are intentionally reported separately; none alone is described as a
 complete VPN or a full end-to-end platform proof.
