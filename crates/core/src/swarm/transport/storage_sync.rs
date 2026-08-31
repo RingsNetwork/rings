@@ -152,9 +152,60 @@ impl<'data> StorageSyncBatch<'data> {
     }
 
     async fn run(mut self, transport: &SwarmTransport) -> Result<Vec<SyncedEntryAck>> {
+        let mut persistence_steps_without_yield = 0usize;
+        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+        let mut progress_probe_epoch = None;
+        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+        let mut progress_witness_recorded = false;
         loop {
-            match self.step(transport).await? {
-                StorageSyncBatchStep::Pending => yield_core_actor_step().await,
+            let previous_persist_index = self.persist_index;
+            let step = self.step(transport).await?;
+            let persisted = self.persist_index > previous_persist_index;
+            if persisted && !per_entry_yield_enabled() {
+                persistence_steps_without_yield = persistence_steps_without_yield.saturating_add(1);
+                #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+                if persistence_steps_without_yield == 1 {
+                    progress_probe_epoch = crate::simulation::signal_storage_progress_probe();
+                } else if progress_probe_epoch.is_some()
+                    && progress_probe_epoch == crate::simulation::storage_progress_epoch()
+                {
+                    crate::simulation::record_protection_violation(
+                        crate::simulation::ProtectionLayer::PerEntryYield,
+                    );
+                }
+            }
+            #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+            if persisted
+                && per_entry_yield_enabled()
+                && progress_probe_epoch.is_none()
+                && !progress_witness_recorded
+            {
+                progress_probe_epoch = crate::simulation::signal_storage_progress_probe();
+            }
+            match step {
+                StorageSyncBatchStep::Pending => {
+                    if per_entry_yield_enabled() {
+                        yield_core_actor_step().await;
+                        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+                        if persisted {
+                            crate::simulation::record_storage_actor_yield(transport.dht.did);
+                        }
+                        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+                        if let Some(epoch_before_yield) = progress_probe_epoch.take() {
+                            if crate::simulation::storage_progress_epoch()
+                                .is_some_and(|epoch| epoch > epoch_before_yield)
+                            {
+                                crate::simulation::record_storage_progress_between_entries();
+                                progress_witness_recorded = true;
+                            } else {
+                                crate::simulation::record_protection_violation(
+                                    crate::simulation::ProtectionLayer::PerEntryYield,
+                                );
+                            }
+                        }
+                        persistence_steps_without_yield = 0;
+                    }
+                }
                 StorageSyncBatchStep::Complete(acks) => return Ok(acks),
             }
         }
@@ -199,6 +250,8 @@ impl<'data> StorageSyncBatch<'data> {
         let entry = ack.entry.clone();
 
         transport.dht.join_storage_entry(key, entry).await?;
+        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+        crate::simulation::record_storage_persisted(transport.dht.did);
         self.persist_index += 1;
 
         if self.persist_index == self.accepted.len() {
@@ -211,6 +264,30 @@ impl<'data> StorageSyncBatch<'data> {
     fn complete(&mut self) -> StorageSyncBatchStep {
         StorageSyncBatchStep::Complete(mem::take(&mut self.accepted))
     }
+}
+
+fn per_entry_yield_enabled() -> bool {
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    {
+        crate::simulation::protection_profile().per_entry_yield()
+    }
+    #[cfg(not(all(test, feature = "dummy", not(target_family = "wasm"))))]
+    {
+        true
+    }
+}
+
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+#[test]
+fn test_per_entry_yield_ablation_reaches_real_storage_batch_policy() {
+    assert!(per_entry_yield_enabled());
+    let _runtime = crate::simulation::SimulationRuntimeGuard::enter(
+        44,
+        1_700_000_000_000,
+        crate::simulation::ProtectionProfile::without_per_entry_yield(),
+    )
+    .expect("simulation runtime must install");
+    assert!(!per_entry_yield_enabled());
 }
 
 fn should_persist_synced_entry(

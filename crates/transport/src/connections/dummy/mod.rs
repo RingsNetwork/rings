@@ -1,6 +1,3 @@
-use std::cell::Cell;
-use std::cell::RefCell;
-use std::collections::VecDeque;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -16,7 +13,6 @@ use tokio::sync::oneshot;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
-use crate::callback::AdmittedInboundFrame;
 use crate::callback::InboundFrameCapacity;
 use crate::callback::InnerTransportCallback;
 use crate::connection_ref::ConnectionRef;
@@ -39,11 +35,36 @@ use crate::sync_utils::lock_recover;
 use crate::webrtc_config::WebrtcUdpPortRange;
 
 mod delay;
+mod event;
 mod retirement;
+mod state;
 
 use self::delay::random;
 use self::delay::random_delay;
+use self::event::Event;
 use self::retirement::DummyRetirementFence;
+use self::state::ControlledDeliveryEntry;
+use self::state::ACTIVE_DELIVERY_GATE;
+use self::state::CLOSE_PENDING;
+use self::state::CONTROLLED;
+use self::state::CONTROLLED_RNG_STATE;
+use self::state::CONTROLLED_VIRTUAL_MS;
+use self::state::DELIVERY;
+use self::state::DELIVERY_FUTURE_PENDING;
+use self::state::DROP_MESSAGES;
+use self::state::IRREVOCABLE_SEND_GATE;
+use self::state::IRREVOCABLE_SEND_GATE_WAITING;
+use self::state::MAX_MESSAGE_SIZE;
+use self::state::NEXT_CALLBACK_CID;
+use self::state::NEXT_DELIVERY_GATE;
+use self::state::POST_PERMIT_SEND_GATE;
+use self::state::POST_PERMIT_SEND_GATE_WAITING;
+use self::state::SEND_MESSAGE_GATE;
+use self::state::SEND_MESSAGE_GATE_WAITING;
+use self::state::SEND_MESSAGE_PENDING;
+use self::state::SEND_MESSAGE_PENDING_AFTER_SENT_COUNT;
+use self::state::SENT_COUNT;
+use self::state::WAIT_FOR_DATA_CHANNEL_OPEN_PENDING;
 
 /// Max delay in ms on sending message
 const DUMMY_DELAY_MAX: u64 = 100;
@@ -70,108 +91,6 @@ impl DeliveryGate {
     }
 }
 
-thread_local! {
-    /// Per-(test-)thread controlled-delivery state. THREAD-LOCAL on purpose: the
-    /// flag and queue are scoped to the current thread so a controlled test is
-    /// isolated from any other dummy test running in parallel. With the default
-    /// current-thread `#[tokio::test]` runtime, all of a test's dummy activity
-    /// (its connections' event listeners, sends, and the cascaded handlers) runs
-    /// on that one thread — so only that test ever sees `CONTROLLED == true`, and
-    /// only its events land in its own `DELIVERY` queue. Other tests, on other
-    /// threads, keep auto-dispatching as usual.
-    static CONTROLLED: Cell<bool> = const { Cell::new(false) };
-    /// Test-only controlled delivery state, populated instead of auto-dispatching
-    /// while `CONTROLLED` is on.
-    static DELIVERY: RefCell<ControlledDeliveryState> = const { RefCell::new(ControlledDeliveryState::new()) };
-    /// Test-only per-thread counter of data-channel messages dispatched by `send_message`, so a
-    /// test can prove an expected send happened (or, after an error, did *not* happen). Thread-local
-    /// for the same isolation reason as the controlled queue.
-    static SENT_COUNT: Cell<usize> = const { Cell::new(0) };
-    /// Test-only per-thread override for the negotiated `max_message_size` the dummy backend
-    /// reports. `0` = report the default; a smaller value lets a test force the chunked send path
-    /// through `do_send_payload` and exercise real reassembly. Thread-local for the same isolation
-    /// reason as the controlled queue.
-    static MAX_MESSAGE_SIZE: Cell<usize> = const { Cell::new(0) };
-    /// Test-only per-thread override for the next lifecycle callback's cid. This lets dummy tests
-    /// exercise malformed transport events without changing the production callback path.
-    static NEXT_CALLBACK_CID: RefCell<Option<String>> = const { RefCell::new(None) };
-    /// Test-only per-thread switch that makes `webrtc_wait_for_data_channel_open` stay pending.
-    /// This models a lifecycle notifier/callback wedge after a connection was already admitted.
-    static WAIT_FOR_DATA_CHANNEL_OPEN_PENDING: Cell<bool> = const { Cell::new(false) };
-    /// Test-only per-thread switch that makes `send_message` stay pending after
-    /// the data channel is already open.
-    static SEND_MESSAGE_PENDING: Cell<bool> = const { Cell::new(false) };
-    /// Test-only releasable gate immediately before dummy message dispatch.
-    static SEND_MESSAGE_GATE: RefCell<Option<Arc<Notify>>> = const { RefCell::new(None) };
-    /// Whether a dummy send is currently suspended at [`SEND_MESSAGE_GATE`].
-    static SEND_MESSAGE_GATE_WAITING: Cell<bool> = const { Cell::new(false) };
-    /// Test-only releasable gate immediately after the send permit linearizes.
-    static POST_PERMIT_SEND_GATE: RefCell<Option<Arc<Notify>>> = const { RefCell::new(None) };
-    /// Whether a dummy send is suspended after its initial permit check.
-    static POST_PERMIT_SEND_GATE_WAITING: Cell<bool> = const { Cell::new(false) };
-    /// Test-only releasable gate after the send becomes irrevocable.
-    static IRREVOCABLE_SEND_GATE: RefCell<Option<Arc<Notify>>> = const { RefCell::new(None) };
-    /// Whether a dummy send is suspended after becoming irrevocable.
-    static IRREVOCABLE_SEND_GATE_WAITING: Cell<bool> = const { Cell::new(false) };
-    /// Test-only per-thread threshold that makes `send_message` stay pending after
-    /// this many messages have already been dispatched.
-    static SEND_MESSAGE_PENDING_AFTER_SENT_COUNT: Cell<Option<usize>> = const { Cell::new(None) };
-    /// Test-only per-thread switch that returns a delivery future which never
-    /// observes completion after the message has been accepted.
-    static DELIVERY_FUTURE_PENDING: Cell<bool> = const { Cell::new(false) };
-    /// Test-only per-thread switch that makes connection cleanup stay pending.
-    static CLOSE_PENDING: Cell<bool> = const { Cell::new(false) };
-    /// One-shot gate captured by the next accepted delivery future.
-    static NEXT_DELIVERY_GATE: RefCell<Option<Arc<DeliveryGate>>> = const { RefCell::new(None) };
-    /// Gate currently held by an accepted delivery future.
-    static ACTIVE_DELIVERY_GATE: RefCell<Option<Arc<DeliveryGate>>> = const { RefCell::new(None) };
-    /// Test-only per-thread switch that makes `send_message` report local success
-    /// without dispatching the message to the remote callback.
-    static DROP_MESSAGES: Cell<bool> = const { Cell::new(false) };
-}
-
-struct ControlledDeliveryState {
-    queue: VecDeque<(String, Event)>,
-    generation: u64,
-}
-
-impl ControlledDeliveryState {
-    const fn new() -> Self {
-        Self {
-            queue: VecDeque::new(),
-            generation: 0,
-        }
-    }
-
-    fn push_back(&mut self, entry: (String, Event)) {
-        self.queue.push_back(entry);
-        self.advance_generation();
-    }
-
-    fn remove(&mut self, index: usize) -> Option<(String, Event)> {
-        let entry = self.queue.remove(index);
-        if entry.is_some() {
-            self.advance_generation();
-        }
-        entry
-    }
-
-    fn clear(&mut self) {
-        if !self.queue.is_empty() {
-            self.queue.clear();
-            self.advance_generation();
-        }
-    }
-
-    fn snapshot(&self) -> controlled::DeliverySnapshot {
-        controlled::DeliverySnapshot::new(self.queue.len(), self.generation)
-    }
-
-    fn advance_generation(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
-    }
-}
-
 #[cfg(test)]
 mod test_dummy;
 
@@ -183,10 +102,15 @@ mod test_dummy;
 pub mod controlled {
     use std::sync::Arc;
 
+    use bytes::Bytes;
+
+    pub use super::delay::mix_seed;
     use super::ACTIVE_DELIVERY_GATE;
     use super::CLOSE_PENDING;
     use super::CONNS;
     use super::CONTROLLED;
+    use super::CONTROLLED_RNG_STATE;
+    use super::CONTROLLED_VIRTUAL_MS;
     use super::DELIVERY;
     use super::DELIVERY_FUTURE_PENDING;
     use super::DROP_MESSAGES;
@@ -202,6 +126,7 @@ pub mod controlled {
     use super::SEND_MESSAGE_PENDING;
     use super::SEND_MESSAGE_PENDING_AFTER_SENT_COUNT;
     use super::WAIT_FOR_DATA_CHANNEL_OPEN_PENDING;
+    use crate::core::transport::WebrtcConnectionState;
 
     /// Atomic observation of the current thread's controlled delivery queue.
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -234,11 +159,71 @@ pub mod controlled {
         }
     }
 
+    /// Stable observation of one event waiting in the controlled queue.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct QueuedDelivery {
+        sequence: u64,
+        connection_id: String,
+        kind: QueuedDeliveryKind,
+        enqueued_virtual_ms: u64,
+    }
+
+    impl QueuedDelivery {
+        pub(super) fn new(
+            sequence: u64,
+            connection_id: String,
+            kind: QueuedDeliveryKind,
+            enqueued_virtual_ms: u64,
+        ) -> Self {
+            Self {
+                sequence,
+                connection_id,
+                kind,
+                enqueued_virtual_ms,
+            }
+        }
+
+        /// Monotonic enqueue sequence within the active controlled runtime.
+        pub const fn sequence(&self) -> u64 {
+            self.sequence
+        }
+
+        /// Dummy connection identifier receiving this event.
+        pub fn connection_id(&self) -> &str {
+            &self.connection_id
+        }
+
+        /// Semantic event kind and message bytes, when this is a message event.
+        pub const fn kind(&self) -> &QueuedDeliveryKind {
+            &self.kind
+        }
+
+        /// Virtual monotonic time at which this event entered the controlled queue.
+        pub const fn enqueued_virtual_ms(&self) -> u64 {
+            self.enqueued_virtual_ms
+        }
+    }
+
+    /// Observable event kinds retained by the controlled dummy scheduler.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub enum QueuedDeliveryKind {
+        /// A WebRTC state transition.
+        PeerConnectionStateChange(WebrtcConnectionState),
+        /// The data channel became writable.
+        DataChannelOpen,
+        /// The data channel closed.
+        DataChannelClose,
+        /// One exact callback payload, before core decoding and dispatch.
+        Message(Bytes),
+    }
+
     /// Turn the controlled scheduler on/off for the current thread. Turning it
     /// off clears this thread's queue.
     pub fn enable(on: bool) {
         CONTROLLED.with(|c| c.set(on));
-        if !on {
+        if on {
+            DELIVERY.with(|state| state.borrow_mut().reset());
+        } else {
             DELIVERY.with(|state| state.borrow_mut().clear());
             super::SENT_COUNT.with(|count| count.set(0));
             MAX_MESSAGE_SIZE.with(|size| size.set(0));
@@ -255,7 +240,32 @@ pub mod controlled {
             CLOSE_PENDING.with(|pending| pending.set(false));
             release_delivery_future_gate();
             DROP_MESSAGES.with(|drop| drop.set(false));
+            CONTROLLED_RNG_STATE.with(|state| state.set(None));
+            CONTROLLED_VIRTUAL_MS.with(|time| time.set(0));
         }
+    }
+
+    /// Seed dummy connection identifiers used by a controlled simulation.
+    pub fn set_seed(seed: u64) {
+        CONTROLLED_RNG_STATE.with(|state| state.set(Some(seed)));
+    }
+    /// Set the virtual monotonic clock attached to subsequent queue admissions.
+    pub fn set_virtual_time(now_ms: u64) {
+        CONTROLLED_VIRTUAL_MS.with(|time| time.set(now_ms));
+    }
+
+    /// Whether explicit controlled delivery is active on this test thread.
+    pub fn is_enabled() -> bool {
+        CONTROLLED.with(|controlled| controlled.get())
+    }
+
+    /// Whether dummy identifiers and delay choices have a deterministic seed.
+    pub fn is_seeded() -> bool {
+        CONTROLLED_RNG_STATE.with(|state| state.get().is_some())
+    }
+    /// Whether the process-wide registry retains this connection generation.
+    pub fn is_connection_registered(id: &str) -> bool {
+        CONNS.contains_key(id)
     }
 
     /// Test hook: override the `max_message_size` the dummy backend reports on this thread (`0`
@@ -419,12 +429,50 @@ pub mod controlled {
         DELIVERY.with(|state| state.borrow().snapshot())
     }
 
+    /// Inspect one queued event without removing or delivering it.
+    pub fn inspect(index: usize) -> Option<QueuedDelivery> {
+        DELIVERY.with(|state| state.borrow().inspect(index))
+    }
+
+    /// Inspect events with a stable sequence newer than `sequence`.
+    pub fn inspect_after(sequence: Option<u64>) -> Vec<QueuedDelivery> {
+        DELIVERY.with(|state| state.borrow().inspect_after(sequence))
+    }
+
+    /// Remove one queued event without invoking its callback.
+    ///
+    /// Simulation bootstrap uses this to discard topology traffic while still
+    /// delivering the explicit connection lifecycle being installed.
+    pub fn discard(index: usize) -> bool {
+        DELIVERY.with(|state| state.borrow_mut().remove(index).is_some())
+    }
+
+    /// Remove one queued event by stable sequence without invoking its callback.
+    pub fn discard_sequence(sequence: u64) -> bool {
+        DELIVERY.with(|state| state.borrow_mut().remove_sequence(sequence).is_some())
+    }
+
     /// Deliver the queued event at `index` to its target connection — invoking
     /// the real handler, which may enqueue further events. Returns false if the
     /// index is out of range or the target connection is gone.
     pub async fn deliver(index: usize) -> bool {
         let entry = DELIVERY.with(|state| state.borrow_mut().remove(index));
-        let Some((rand_id, mut event)) = entry else {
+        deliver_entry(entry).await
+    }
+
+    /// Deliver a queued event by stable sequence in logarithmic queue time.
+    pub async fn deliver_sequence(sequence: u64) -> bool {
+        let entry = DELIVERY.with(|state| state.borrow_mut().remove_sequence(sequence));
+        deliver_entry(entry).await
+    }
+
+    async fn deliver_entry(entry: Option<super::ControlledDeliveryEntry>) -> bool {
+        let Some(super::ControlledDeliveryEntry {
+            connection_id: rand_id,
+            mut event,
+            ..
+        }) = entry
+        else {
             return false;
         };
         let Some(conn) = CONNS.get(&rand_id).map(|c| c.clone()) else {
@@ -445,38 +493,14 @@ pub mod controlled {
             state
                 .borrow()
                 .queue
-                .iter()
-                .position(|(_, event)| matches!(event, super::Event::DataChannelOpen(_)))
+                .values()
+                .position(|entry| matches!(entry.event, super::Event::DataChannelOpen(_)))
         });
         let Some(index) = index else {
             return false;
         };
         set_next_callback_cid(cid);
         deliver(index).await
-    }
-}
-
-enum Event {
-    PeerConnectionStateChange(WebrtcConnectionState, Option<String>),
-    DataChannelOpen(Option<String>),
-    DataChannelClose(Option<String>),
-    Message(AdmittedInboundFrame),
-}
-
-impl Event {
-    fn is_lifecycle_event(&self) -> bool {
-        !matches!(self, Self::Message(_))
-    }
-
-    fn set_callback_cid(&mut self, cid: String) {
-        match self {
-            Self::PeerConnectionStateChange(_, callback_cid)
-            | Self::DataChannelOpen(callback_cid)
-            | Self::DataChannelClose(callback_cid) => {
-                *callback_cid = Some(cid);
-            }
-            Self::Message(_) => {}
-        }
     }
 }
 
@@ -521,6 +545,10 @@ pub struct DummyTransport {
 }
 
 impl DummyConnection {
+    pub(crate) fn generation_id(&self) -> &str {
+        &self.rand_id
+    }
+
     fn new(callback: InnerTransportCallback) -> Self {
         let rand_id = random(0, 10000000000).to_string();
         let retirement_runtime = tokio::runtime::Handle::current();

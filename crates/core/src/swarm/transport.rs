@@ -90,9 +90,13 @@ use self::outbound::OutboundSchedulers;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::OUTBOUND_COMMAND_DRAIN_BUDGET;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::outbound::OUTBOUND_CONTROL_BURST;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::OUTBOUND_CONTROL_RESERVED_TRANSFERS;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::OUTBOUND_DATA_TRANSFER_CAPACITY;
+#[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+pub(crate) use self::outbound::OUTBOUND_GLOBAL_BYTE_CAPACITY;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::outbound::OUTBOUND_TRANSFER_QUEUE_CAPACITY;
 pub(crate) use self::pending::ConnectionEventDisposition;
@@ -344,6 +348,15 @@ impl SwarmTransport {
             .map_err(|_| Error::DHTSyncLockError)?;
         *cursor = Some(scheduled);
         Ok(())
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) fn storage_repair_cursor_for_simulation(&self) -> Result<Option<String>> {
+        let cursor = self
+            .storage_repair_cursor
+            .lock()
+            .map_err(|_| Error::DHTSyncLockError)?;
+        Ok(cursor.as_ref().map(|cursor| format!("{cursor:?}")))
     }
 
     /// Storage virtual-node positions required by this DHT protocol mode.
@@ -884,6 +897,11 @@ impl SwarmTransport {
 }
 
 impl SwarmConnection {
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) fn dummy_generation_id(&self) -> Result<String> {
+        self.connection.dummy_generation_id().map_err(Into::into)
+    }
+
     async fn send_data(&self, data: Bytes, permit: SendPermit) -> Result<DeliveryFuture> {
         self.connection
             .send_message_with_permit(TransportMessage::Custom(data), permit)

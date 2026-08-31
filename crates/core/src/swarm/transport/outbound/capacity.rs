@@ -28,6 +28,7 @@ const OUTBOUND_TRANSFER_RESERVATIONS: [usize; TransferClass::COUNT] = [
     OUTBOUND_DATA_RESERVED_TRANSFERS,
     OUTBOUND_DATA_RESERVED_TRANSFERS,
 ];
+#[cfg(test)]
 pub(crate) const OUTBOUND_DATA_TRANSFER_CAPACITY: usize = admissible_capacity(
     OUTBOUND_TRANSFER_QUEUE_CAPACITY,
     &OUTBOUND_TRANSFER_RESERVATIONS,
@@ -60,10 +61,10 @@ fn fixed_request_bytes(
 
 /// Native-wide retained outbound bytes across all peers.
 #[cfg(not(all(feature = "wasm", target_family = "wasm")))]
-const OUTBOUND_GLOBAL_BYTE_CAPACITY: usize = 256 * 1024 * 1024;
+pub(crate) const OUTBOUND_GLOBAL_BYTE_CAPACITY: usize = 256 * 1024 * 1024;
 /// Browser-wide retained outbound bytes across all peers.
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
-const OUTBOUND_GLOBAL_BYTE_CAPACITY: usize = 128 * 1024 * 1024;
+pub(crate) const OUTBOUND_GLOBAL_BYTE_CAPACITY: usize = 128 * 1024 * 1024;
 /// Global bytes unavailable to non-control traffic.
 const OUTBOUND_GLOBAL_CONTROL_RESERVED_BYTES: usize = 2 * 1024 * 1024;
 const OUTBOUND_GLOBAL_DATA_RESERVED_BYTES: usize = 1024 * 1024;
@@ -74,6 +75,40 @@ const OUTBOUND_GLOBAL_BYTE_RESERVATIONS: [usize; TransferClass::COUNT] = [
     OUTBOUND_GLOBAL_DATA_RESERVED_BYTES,
     OUTBOUND_GLOBAL_DATA_RESERVED_BYTES,
 ];
+const NO_RESERVATIONS: [usize; TransferClass::COUNT] = [0; TransferClass::COUNT];
+
+fn class_reservations_enabled() -> bool {
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    {
+        crate::simulation::protection_profile().class_reservations()
+    }
+    #[cfg(not(all(test, feature = "dummy", not(target_family = "wasm"))))]
+    {
+        true
+    }
+}
+
+fn active_reservations(
+    reservations: &'static [usize; TransferClass::COUNT],
+) -> &'static [usize; TransferClass::COUNT] {
+    if class_reservations_enabled() {
+        reservations
+    } else {
+        &NO_RESERVATIONS
+    }
+}
+
+fn transfer_reservations() -> &'static [usize; TransferClass::COUNT] {
+    active_reservations(&OUTBOUND_TRANSFER_RESERVATIONS)
+}
+
+fn peer_byte_reservations() -> &'static [usize; TransferClass::COUNT] {
+    active_reservations(&OUTBOUND_PEER_BYTE_RESERVATIONS)
+}
+
+fn global_byte_reservations() -> &'static [usize; TransferClass::COUNT] {
+    active_reservations(&OUTBOUND_GLOBAL_BYTE_RESERVATIONS)
+}
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum CapacityScope {
@@ -136,8 +171,9 @@ impl GlobalTransferCapacity {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut next = *state;
+        let reservations = global_byte_reservations();
         if scope == CapacityScope::FixedReservation
-            && !next.reservation_covers(class.index(), bytes, &OUTBOUND_GLOBAL_BYTE_RESERVATIONS)
+            && !next.reservation_covers(class.index(), bytes, reservations)
         {
             return Err(memory_capacity_error(peer, bytes, global_byte_limit(class)));
         }
@@ -145,10 +181,15 @@ impl GlobalTransferCapacity {
             class.index(),
             bytes,
             OUTBOUND_GLOBAL_BYTE_CAPACITY,
-            &OUTBOUND_GLOBAL_BYTE_RESERVATIONS,
+            reservations,
         ) {
             return Err(memory_capacity_error(peer, bytes, global_byte_limit(class)));
         }
+        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+        crate::simulation::observe_outbound_global_capacity(
+            next.admitted(),
+            OUTBOUND_GLOBAL_BYTE_CAPACITY,
+        );
         *state = next;
         Ok(GlobalCapacityPermit {
             capacity: self.clone(),
@@ -166,7 +207,7 @@ impl GlobalTransferCapacity {
         acquire_with_fixed_reservation(
             &self.waiters,
             bytes,
-            fixed_request_bytes(&OUTBOUND_GLOBAL_BYTE_RESERVATIONS, class),
+            fixed_request_bytes(global_byte_reservations(), class),
             || memory_capacity_error(peer, bytes, global_byte_limit(class)),
             || self.try_acquire_inner(peer, class, bytes, CapacityScope::FixedReservation),
             || self.try_acquire_inner(peer, class, bytes, CapacityScope::Shared),
@@ -191,8 +232,8 @@ impl PeerCapacityState {
         self.capacity.reservation_covers(
             class.index(),
             bytes,
-            &OUTBOUND_TRANSFER_RESERVATIONS,
-            &OUTBOUND_PEER_BYTE_RESERVATIONS,
+            transfer_reservations(),
+            peer_byte_reservations(),
         )
     }
 
@@ -205,9 +246,9 @@ impl PeerCapacityState {
             class.index(),
             bytes,
             OUTBOUND_TRANSFER_QUEUE_CAPACITY,
-            &OUTBOUND_TRANSFER_RESERVATIONS,
+            transfer_reservations(),
             OUTBOUND_PEER_BYTE_CAPACITY,
-            &OUTBOUND_PEER_BYTE_RESERVATIONS,
+            peer_byte_reservations(),
         )
     }
 
@@ -259,6 +300,13 @@ impl TransferCapacity {
                 return Err(memory_capacity_error(peer, bytes, peer_byte_limit(class)));
             }
         }
+        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+        crate::simulation::observe_outbound_peer_capacity(
+            next.capacity.admitted_count(),
+            OUTBOUND_TRANSFER_QUEUE_CAPACITY,
+            next.capacity.admitted_bytes(),
+            OUTBOUND_PEER_BYTE_CAPACITY,
+        );
         *state = next;
         Ok(PeerCapacityPermit {
             capacity: self.clone(),
@@ -276,7 +324,7 @@ impl TransferCapacity {
         acquire_with_fixed_reservation(
             &self.waiters,
             bytes,
-            fixed_request_bytes(&OUTBOUND_PEER_BYTE_RESERVATIONS, class),
+            fixed_request_bytes(peer_byte_reservations(), class),
             || memory_capacity_error(peer, bytes, peer_byte_limit(class)),
             || self.try_acquire_peer_inner(peer, class, bytes, CapacityScope::FixedReservation),
             || self.try_acquire_peer_inner(peer, class, bytes, CapacityScope::Shared),
@@ -377,20 +425,31 @@ impl Drop for GlobalCapacityPermit {
     }
 }
 
-pub(super) const fn transfer_limit(class: TransferClass) -> usize {
-    match class {
-        TransferClass::DhtControl => admissible_capacity(
-            OUTBOUND_TRANSFER_QUEUE_CAPACITY,
-            &OUTBOUND_TRANSFER_RESERVATIONS,
-            class.index(),
-        ),
-        TransferClass::Storage | TransferClass::E2e | TransferClass::Application => {
-            OUTBOUND_DATA_TRANSFER_CAPACITY
-        }
-    }
+pub(super) fn transfer_limit(class: TransferClass) -> usize {
+    admissible_capacity(
+        OUTBOUND_TRANSFER_QUEUE_CAPACITY,
+        transfer_reservations(),
+        class.index(),
+    )
 }
 
-pub(super) const fn peer_byte_limit(class: TransferClass) -> usize {
+const fn production_transfer_limit(class: TransferClass) -> usize {
+    admissible_capacity(
+        OUTBOUND_TRANSFER_QUEUE_CAPACITY,
+        &OUTBOUND_TRANSFER_RESERVATIONS,
+        class.index(),
+    )
+}
+
+pub(super) fn peer_byte_limit(class: TransferClass) -> usize {
+    admissible_capacity(
+        OUTBOUND_PEER_BYTE_CAPACITY,
+        peer_byte_reservations(),
+        class.index(),
+    )
+}
+
+const fn production_peer_byte_limit(class: TransferClass) -> usize {
     admissible_capacity(
         OUTBOUND_PEER_BYTE_CAPACITY,
         &OUTBOUND_PEER_BYTE_RESERVATIONS,
@@ -398,7 +457,15 @@ pub(super) const fn peer_byte_limit(class: TransferClass) -> usize {
     )
 }
 
-const fn global_byte_limit(class: TransferClass) -> usize {
+fn global_byte_limit(class: TransferClass) -> usize {
+    admissible_capacity(
+        OUTBOUND_GLOBAL_BYTE_CAPACITY,
+        global_byte_reservations(),
+        class.index(),
+    )
+}
+
+const fn production_global_byte_limit(class: TransferClass) -> usize {
     admissible_capacity(
         OUTBOUND_GLOBAL_BYTE_CAPACITY,
         &OUTBOUND_GLOBAL_BYTE_RESERVATIONS,
@@ -408,11 +475,17 @@ const fn global_byte_limit(class: TransferClass) -> usize {
 
 const _: () = {
     let maximum_payload_reservation = retained_wire_bytes(crate::consts::TRANSPORT_MAX_SIZE);
-    assert!(maximum_payload_reservation <= peer_byte_limit(TransferClass::DhtControl));
-    assert!(maximum_payload_reservation <= peer_byte_limit(TransferClass::Application));
-    assert!(maximum_payload_reservation <= global_byte_limit(TransferClass::DhtControl));
-    assert!(maximum_payload_reservation <= global_byte_limit(TransferClass::Application));
+    assert_production_capacity(TransferClass::DhtControl, maximum_payload_reservation);
+    assert_production_capacity(TransferClass::Storage, maximum_payload_reservation);
+    assert_production_capacity(TransferClass::E2e, maximum_payload_reservation);
+    assert_production_capacity(TransferClass::Application, maximum_payload_reservation);
 };
+
+const fn assert_production_capacity(class: TransferClass, maximum_payload_reservation: usize) {
+    assert!(production_transfer_limit(class) > 0);
+    assert!(maximum_payload_reservation <= production_peer_byte_limit(class));
+    assert!(maximum_payload_reservation <= production_global_byte_limit(class));
+}
 
 fn memory_capacity_error(peer: Did, requested_bytes: usize, capacity_bytes: usize) -> Error {
     Error::OutboundTransferMemoryCapacityExceeded {
@@ -465,6 +538,28 @@ mod tests {
                 assert!(capacity.admitted() <= CAPACITY);
             }
         }
+    }
+
+    #[cfg(all(feature = "dummy", not(target_family = "wasm")))]
+    #[test]
+    fn test_class_reservation_ablation_changes_real_admission_limits() {
+        assert!(transfer_limit(TransferClass::Application) < OUTBOUND_TRANSFER_QUEUE_CAPACITY);
+        assert!(peer_byte_limit(TransferClass::Application) < OUTBOUND_PEER_BYTE_CAPACITY);
+
+        let _runtime = crate::simulation::SimulationRuntimeGuard::enter(
+            42,
+            1_700_000_000_000,
+            crate::simulation::ProtectionProfile::without_class_reservations(),
+        )
+        .expect("simulation runtime must install");
+        assert_eq!(
+            transfer_limit(TransferClass::Application),
+            OUTBOUND_TRANSFER_QUEUE_CAPACITY
+        );
+        assert_eq!(
+            peer_byte_limit(TransferClass::Application),
+            OUTBOUND_PEER_BYTE_CAPACITY
+        );
     }
 
     #[cfg_attr(

@@ -11,7 +11,7 @@ use super::commit_irrevocable_dispatch;
 use super::complete_irrevocable_send;
 use super::controlled;
 use super::retirement::mark_connection_state_closed_with_observer_for_test;
-use super::ControlledDeliveryState;
+use super::state::ControlledDeliveryState;
 use super::DummyConnection;
 use super::DummyConnectionState;
 use super::DummySendTarget;
@@ -121,6 +121,32 @@ fn test_snapshot_generation_witnesses_transient_queue_activity() {
     let drained = state.snapshot();
     assert!(drained.is_idle());
     assert_ne!(drained.generation(), idle.generation());
+}
+
+#[test]
+fn test_sequence_index_survives_arbitrary_removal() {
+    let mut state = ControlledDeliveryState::new();
+    for _ in 0..3 {
+        state.push_back(("peer".to_owned(), Event::DataChannelOpen(None)));
+    }
+
+    assert!(state.remove_sequence(1).is_some());
+    assert_eq!(
+        state
+            .inspect_after(Some(0))
+            .into_iter()
+            .map(|delivery| delivery.sequence())
+            .collect::<Vec<_>>(),
+        vec![2]
+    );
+    assert_eq!(
+        state.inspect(0).map(|delivery| delivery.sequence()),
+        Some(0)
+    );
+    assert_eq!(
+        state.inspect(1).map(|delivery| delivery.sequence()),
+        Some(2)
+    );
 }
 
 #[test]

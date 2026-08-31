@@ -10,7 +10,6 @@ use futures::future::FutureExt;
 use futures::pin_mut;
 use futures::select;
 use rings_transport::core::transport::WebrtcConnectionState;
-use web_time::Instant;
 
 pub use self::storage_repair::StorageRepairOutcome;
 use crate::dht::successor::SuccessorReader;
@@ -39,6 +38,7 @@ use crate::swarm::transport::PEER_LIVENESS_IDLE_MS;
 use crate::swarm::transport::TRACKED_PAYLOAD_COMPLETION_BOUND;
 use crate::utils::get_epoch_ms_i64;
 use crate::utils::sleep;
+use crate::utils::Instant;
 
 const STABILIZATION_STEP_TIMEOUT: Duration =
     TRACKED_PAYLOAD_COMPLETION_BOUND.saturating_add(Duration::from_secs(1));
@@ -649,6 +649,11 @@ impl Stabilizer {
             }
         }
         Ok(())
+    }
+
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    pub(crate) async fn probe_peer_liveness_for_simulation(&self) -> Result<()> {
+        self.probe_peer_liveness().await
     }
 
     /// Notify predecessor, this is a DHT operation.

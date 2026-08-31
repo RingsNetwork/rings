@@ -4,7 +4,7 @@ use super::model::TransferClass;
 
 /// Four control frames followed by one lower-class frame gives control at most
 /// 80% of frame admissions under sustained mixed load.
-pub(super) const OUTBOUND_CONTROL_BURST: usize = 4;
+pub(crate) const OUTBOUND_CONTROL_BURST: usize = 4;
 const LOWER_CLASSES: [TransferClass; 3] = [
     TransferClass::Storage,
     TransferClass::E2e,
@@ -187,13 +187,25 @@ impl<T> TransferQueues<T> {
 
     pub(super) fn pop(&mut self) -> Option<RunnableTransfer<T>> {
         let has_control = self.is_runnable(TransferClass::DhtControl);
+        let has_lower = self.has_lower();
         let selected = if has_control
-            && (self.consecutive_control < OUTBOUND_CONTROL_BURST || !self.has_lower())
+            && (!bounded_control_burst_enabled()
+                || self.consecutive_control < OUTBOUND_CONTROL_BURST
+                || !has_lower)
         {
             Some(TransferClass::DhtControl)
         } else {
             self.next_lower_class()
         }?;
+        #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+        if selected == TransferClass::DhtControl
+            && has_lower
+            && self.consecutive_control >= OUTBOUND_CONTROL_BURST
+        {
+            crate::simulation::record_protection_violation(
+                crate::simulation::ProtectionLayer::BoundedControlBurst,
+            );
+        }
         self.take(selected).map(|item| RunnableTransfer {
             class: selected,
             item,
@@ -301,6 +313,17 @@ impl<T> TransferQueues<T> {
             .skip(self.lower_cursor)
             .take(LOWER_CLASSES.len())
             .find(|class| self.is_runnable(*class))
+    }
+}
+
+fn bounded_control_burst_enabled() -> bool {
+    #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
+    {
+        crate::simulation::protection_profile().bounded_control_burst()
+    }
+    #[cfg(not(all(test, feature = "dummy", not(target_family = "wasm"))))]
+    {
+        true
     }
 }
 
