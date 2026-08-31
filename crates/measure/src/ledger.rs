@@ -6,7 +6,7 @@ use std::ops::Bound::Unbounded;
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::ApplyReport;
+use crate::ApplyOutcome;
 use crate::Authentication;
 use crate::CreditPolicy;
 use crate::CreditRecord;
@@ -137,6 +137,49 @@ impl PeerRecord {
 struct RecordReconciliation {
     clock_adjusted: bool,
     reliability_reset: bool,
+}
+
+/// Complete result of applying an observation to a bounded ledger.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyReport<P> {
+    outcome: ApplyOutcome,
+    evicted_peer: Option<P>,
+}
+
+impl<P> ApplyReport<P> {
+    /// Construct a report for an applied transition and its optional eviction.
+    const fn applied(evicted_peer: Option<P>) -> Self {
+        Self {
+            outcome: ApplyOutcome::Applied,
+            evicted_peer,
+        }
+    }
+
+    /// Construct a report for an observation without attributable identity proof.
+    const fn ignored_unattributable() -> Self {
+        Self {
+            outcome: ApplyOutcome::IgnoredUnattributable,
+            evicted_peer: None,
+        }
+    }
+
+    /// Construct a report for local evidence about an unknown peer.
+    const fn ignored_unknown_peer() -> Self {
+        Self {
+            outcome: ApplyOutcome::IgnoredUnknownPeer,
+            evicted_peer: None,
+        }
+    }
+
+    /// Whether the requested observation changed retained state.
+    pub const fn outcome(&self) -> ApplyOutcome {
+        self.outcome
+    }
+
+    /// Peer deterministically removed to admit this transition, if any.
+    pub const fn evicted_peer(&self) -> Option<&P> {
+        self.evicted_peer.as_ref()
+    }
 }
 
 /// Projected measurement values for one peer at a caller-supplied time.

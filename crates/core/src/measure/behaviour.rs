@@ -40,7 +40,7 @@ pub trait Measure {
     ///
     /// Implementations backed by [`rings_measure::MeasurementLedger`] should
     /// override this method so useful-byte credits are retained. The default is
-    /// a compatibility bridge for counter-only test implementations: because
+    /// a compatibility bridge for counter-only implementations: because
     /// they have no retained-peer set, they observe every proof-permitted local
     /// failure, while a ledger-backed override enforces known-peer retention.
     async fn record(
