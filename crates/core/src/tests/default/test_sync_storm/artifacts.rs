@@ -40,6 +40,14 @@ fn persist_json(path: &std::path::Path, artifact: &impl serde::Serialize) -> Res
         .map_err(|error| format!("write artifact {}: {error}", path.display()))
 }
 
+fn trace_json(state: &SimState) -> Result<serde_json::Value, String> {
+    let bytes = state
+        .trace()
+        .canonical_json()
+        .map_err(|error| format!("serialize canonical trace: {error}"))?;
+    serde_json::from_slice(&bytes).map_err(|error| format!("decode canonical trace: {error}"))
+}
+
 pub(super) type FailureState = std::rc::Rc<std::cell::RefCell<FailureDiagnostic>>;
 
 pub(super) struct FailureDiagnostic {
@@ -154,11 +162,6 @@ pub(super) fn persist_trace_artifact(outcome: &ScenarioOutcome) -> Result<(), St
     let Some(path) = artifact_path(filename)? else {
         return Ok(());
     };
-    let trace = outcome
-        .state
-        .trace()
-        .canonical_json()
-        .map_err(|error| format!("serialize trace {}: {error}", path.display()))?;
     let artifact = serde_json::json!({
         "scenario": {
             "topology": outcome.topology.name(),
@@ -168,8 +171,7 @@ pub(super) fn persist_trace_artifact(outcome: &ScenarioOutcome) -> Result<(), St
             "strategy": outcome.strategy.name(),
             "replay_command": outcome.replay_command(),
         },
-        "trace": serde_json::from_slice::<serde_json::Value>(&trace)
-            .map_err(|error| format!("decode canonical trace {}: {error}", path.display()))?,
+        "trace": trace_json(&outcome.state)?,
         "pressure_snapshot": outcome.pressure_snapshot,
         "protection_observations": outcome.protection_observations,
         "capacity_observations": outcome.capacity_observations,
@@ -219,14 +221,9 @@ pub(super) fn persist_inflight_trace_artifact(
     let Some(path) = identified_artifact_path(runtime, "inflight", &format!("-{label}"))? else {
         return Ok(());
     };
-    let trace = state
-        .trace()
-        .canonical_json()
-        .map_err(|error| format!("serialize trace {}: {error}", path.display()))?;
     let artifact = serde_json::json!({
         "scenario": runtime.artifact_context().map_err(|error| error.to_string())?,
-        "trace": serde_json::from_slice::<serde_json::Value>(&trace)
-            .map_err(|error| format!("decode trace {}: {error}", path.display()))?,
+        "trace": trace_json(state)?,
         "runtime": runtime_replay_snapshot(runtime)?,
     });
     persist_json(&path, &artifact)
@@ -240,14 +237,23 @@ pub(super) fn persist_named_trace_artifact(
     let Some(path) = artifact_path(format!("{label}.json"))? else {
         return Ok(());
     };
-    let trace = state
-        .trace()
-        .canonical_json()
-        .map_err(|error| format!("serialize trace {}: {error}", path.display()))?;
     let artifact = serde_json::json!({
         "scenario": runtime.artifact_context().map_err(|error| error.to_string())?,
-        "trace": serde_json::from_slice::<serde_json::Value>(&trace)
-            .map_err(|error| format!("decode trace {}: {error}", path.display()))?,
+        "trace": trace_json(state)?,
     });
     persist_json(&path, &artifact)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trace_json_preserves_the_canonical_trace_shape() -> Result<(), String> {
+        assert_eq!(
+            trace_json(&SimState::default())?,
+            serde_json::json!({"events": []})
+        );
+        Ok(())
+    }
 }
