@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::future::Future;
 use std::net::IpAddr;
 use std::sync::atomic::AtomicBool;
@@ -6,7 +5,6 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::sync::RwLock;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -24,6 +22,7 @@ use webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
+use webrtc::peer_connection::policy::ice_transport_policy::RTCIceTransportPolicy;
 use webrtc::peer_connection::sdp::session_description::RTCSessionDescription;
 use webrtc::peer_connection::RTCPeerConnection;
 
@@ -72,7 +71,6 @@ use send_runtime::run_native_close_task;
 use send_runtime::run_send_with_retirement;
 use send_runtime::NativeRetirementFence;
 use underlay::admission_policy;
-use underlay::replace_admission;
 use underlay::shared_admission;
 use underlay::SharedUnderlayCandidateAdmission;
 pub use underlay::UnderlayCandidateAdmission;
@@ -112,16 +110,6 @@ fn sdp_candidate_count(sdp: &str) -> usize {
     sdp.lines()
         .filter(|line| line.starts_with("a=candidate:"))
         .count()
-}
-
-fn sdp_candidate_ips(sdp: &str) -> Vec<IpAddr> {
-    sdp.lines()
-        .filter_map(|line| line.strip_prefix("a=candidate:"))
-        .filter_map(|candidate| candidate.split_whitespace().nth(4))
-        .filter_map(|address| address.parse::<IpAddr>().ok())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
 }
 
 fn external_address_candidates(external_address: Option<&str>) -> Vec<String> {
@@ -335,8 +323,6 @@ pub struct WebrtcConnection {
     cancel_token: CancellationToken,
     retirement_fence: NativeRetirementFence,
     sdp_extra_host_candidates: Vec<String>,
-    candidate_admission: SharedUnderlayCandidateAdmission,
-    remote_candidate_ips: RwLock<Vec<IpAddr>>,
     /// Negotiated SCTP `max_message_size` (RFC 8841), parsed from the remote SDP at handshake.
     /// `0` means not yet negotiated. webrtc-rs exposes no getter, so we track it ourselves.
     remote_max_message_size: Arc<AtomicUsize>,
@@ -374,7 +360,6 @@ impl WebrtcConnection {
         webrtc_data_channel_state_notifier: Notifier,
         connection_state: ConnectionStateCell,
         sdp_extra_host_candidates: Vec<String>,
-        candidate_admission: SharedUnderlayCandidateAdmission,
     ) -> Self {
         let cancel_token = CancellationToken::new();
         let retirement_fence =
@@ -387,8 +372,6 @@ impl WebrtcConnection {
             cancel_token,
             retirement_fence,
             sdp_extra_host_candidates,
-            candidate_admission,
-            remote_candidate_ips: RwLock::new(Vec::new()),
             remote_max_message_size: Arc::new(AtomicUsize::new(0)),
             physical_close_completed: Arc::new(AtomicBool::new(false)),
         }
@@ -402,20 +385,6 @@ impl WebrtcConnection {
 
     fn request_close(&self) {
         self.retirement_fence.request();
-    }
-
-    fn replace_remote_candidate_ips(&self, candidates: Vec<IpAddr>) {
-        match self.remote_candidate_ips.write() {
-            Ok(mut stored) => *stored = candidates,
-            Err(poisoned) => *poisoned.into_inner() = candidates,
-        }
-    }
-
-    fn remote_candidate_ips(&self) -> Vec<IpAddr> {
-        match self.remote_candidate_ips.read() {
-            Ok(stored) => stored.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
-        }
     }
 
     async fn webrtc_gather(
@@ -487,20 +456,34 @@ impl WebrtcTransport {
         }
     }
 
-    /// Replace the host policy that admits remote ICE candidate IPs before connectivity checks.
+    /// Install the host policy that authorizes explicit direct-underlay targets.
     ///
-    /// The write waits for any remote descriptions already being applied, creating a barrier that
-    /// lets a newly enabled gateway take a complete candidate snapshot before capture starts.
-    pub async fn set_underlay_candidate_admission(
+    /// Installing a policy switches future connections to relay-only ICE. The operation fails if
+    /// any connection already exists, because an already-created ICE agent may retain direct host
+    /// candidates. Connection creation holds the same lock until pool insertion, so the emptiness
+    /// check is race-free.
+    pub async fn enable_underlay_candidate_admission(
         &self,
-        admission: Option<Arc<dyn UnderlayCandidateAdmission>>,
-    ) {
-        replace_admission(&self.candidate_admission, admission).await;
+        admission: Arc<dyn UnderlayCandidateAdmission>,
+    ) -> std::result::Result<(), UnderlayCandidateAdmissionError> {
+        let mut installed = self.candidate_admission.write().await;
+        if !self.pool.connection_ids().is_empty() {
+            return Err(UnderlayCandidateAdmissionError::new(
+                "cannot enable relay-only gateway policy while native WebRTC connections exist",
+            ));
+        }
+        *installed = Some(admission);
+        Ok(())
     }
 
-    /// Admit non-ICE underlay targets through the same policy used by remote SDP application.
+    /// Clear the explicit-target policy after gateway capture has been removed.
+    pub async fn clear_underlay_candidate_admission(&self) {
+        *self.candidate_admission.write().await = None;
+    }
+
+    /// Authorize a non-ICE underlay target through the installed gateway policy.
     ///
-    /// The read guard prevents policy replacement until admission completes. When no native
+    /// The read guard prevents policy replacement until authorization completes. When no native
     /// gateway policy is installed this is deliberately a no-op.
     pub async fn admit_underlay_targets(
         &self,
@@ -536,6 +519,7 @@ fn set_udp_network_range(
 
 async fn create_peer_connection(
     transport: &WebrtcTransport,
+    relay_only: bool,
 ) -> Result<(RTCPeerConnection, Vec<String>)> {
     let ice_servers = transport
         .ice_servers
@@ -545,6 +529,11 @@ async fn create_peer_connection(
         .collect();
     let configuration = RTCConfiguration {
         ice_servers,
+        ice_transport_policy: if relay_only {
+            RTCIceTransportPolicy::Relay
+        } else {
+            RTCIceTransportPolicy::default()
+        },
         ..Default::default()
     };
 
@@ -619,10 +608,6 @@ impl ConnectionInterface for WebrtcConnection {
             .collect()
     }
 
-    fn underlay_remote_ips(&self) -> Vec<IpAddr> {
-        self.remote_candidate_ips()
-    }
-
     fn webrtc_connection_state(&self) -> WebrtcConnectionState {
         self.connection_state.snapshot().webrtc()
     }
@@ -655,15 +640,8 @@ impl ConnectionInterface for WebrtcConnection {
         // path (create_answer + set_local_description + gather) has succeeded, so a failure midway
         // does not leave a partially-updated connection carrying a stale negotiated size.
         let negotiated_max_message_size = effective_max_message_size(&offer);
-        let remote_candidate_ips = sdp_candidate_ips(&offer);
         let offer = RTCSessionDescription::offer(offer)?;
-        let admission = admission_policy(&self.candidate_admission).await;
-        if let Some(policy) = admission.as_ref() {
-            policy.admit(&remote_candidate_ips).await?;
-        }
         self.webrtc_conn.set_remote_description(offer).await?;
-        self.replace_remote_candidate_ips(remote_candidate_ips);
-        drop(admission);
 
         let answer = self.webrtc_conn.create_answer(None).await?;
         let gathering_complete_promise = self.webrtc_conn.gathering_complete_promise().await;
@@ -680,15 +658,8 @@ impl ConnectionInterface for WebrtcConnection {
     async fn webrtc_accept_answer(&self, answer: Self::Sdp) -> Result<()> {
         tracing::debug!("webrtc_accept_answer, answer: {answer:?}");
         let negotiated_max_message_size = effective_max_message_size(&answer);
-        let remote_candidate_ips = sdp_candidate_ips(&answer);
         let answer = RTCSessionDescription::answer(answer)?;
-        let admission = admission_policy(&self.candidate_admission).await;
-        if let Some(policy) = admission.as_ref() {
-            policy.admit(&remote_candidate_ips).await?;
-        }
         self.webrtc_conn.set_remote_description(answer).await?;
-        self.replace_remote_candidate_ips(remote_candidate_ips);
-        drop(admission);
         self.remote_max_message_size
             .store(negotiated_max_message_size, Ordering::SeqCst);
         Ok(())
@@ -887,7 +858,9 @@ impl TransportInterface for WebrtcTransport {
     ) -> Result<ConnectionRef<Self::Connection>> {
         self.pool.ensure_peer_slot_available(cid)?;
 
-        let (webrtc_conn, sdp_extra_host_candidates) = create_peer_connection(self).await?;
+        let admission = admission_policy(&self.candidate_admission).await;
+        let (webrtc_conn, sdp_extra_host_candidates) =
+            create_peer_connection(self, admission.is_some()).await?;
 
         //
         // Set callbacks
@@ -925,10 +898,11 @@ impl TransportInterface for WebrtcTransport {
             webrtc_data_channel_state_notifier,
             connection_state,
             sdp_extra_host_candidates,
-            Arc::clone(&self.candidate_admission),
         );
 
-        self.pool.safely_insert(cid, conn).await
+        let inserted = self.pool.safely_insert(cid, conn).await;
+        drop(admission);
+        inserted
     }
 
     async fn close_connection(&self, cid: &str) -> Result<()> {

@@ -5,6 +5,7 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use super::config::UnixConfigRequest;
 use super::config::UnixConfigResponse;
@@ -19,17 +20,31 @@ use crate::bindings::UnderlayPolicy;
 use crate::GatewayError;
 use crate::GatewayPlan;
 
+const DEFAULT_UNIX_HELPER_CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_UNIX_HELPER_CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Connection options for the unprivileged Unix gateway client.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UnixTunnelOptions {
     /// Filesystem path of the already-running foreground helper socket.
     pub socket_path: PathBuf,
+    /// Maximum duration of one helper connection or request/response exchange.
+    pub control_timeout: Duration,
 }
 
 impl UnixTunnelOptions {
     /// Select the helper socket used for one gateway lifecycle.
     pub fn new(socket_path: PathBuf) -> Self {
-        Self { socket_path }
+        Self {
+            socket_path,
+            control_timeout: DEFAULT_UNIX_HELPER_CONTROL_TIMEOUT,
+        }
+    }
+
+    /// Override the helper control-operation deadline.
+    pub fn with_control_timeout(mut self, control_timeout: Duration) -> Self {
+        self.control_timeout = control_timeout;
+        self
     }
 }
 
@@ -66,12 +81,25 @@ impl UnixTunnelControl {
         request: UnixConfigRequest,
     ) -> Result<HelperReply, GatewayError> {
         let socket_path = self.options.socket_path.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut stream =
-                UnixStream::connect(&socket_path).map_err(|error| GatewayError::Platform {
-                    operation: "connect-unix-helper",
-                    message: format!("{}: {error}", socket_path.display()),
-                })?;
+        let control_timeout = self.validated_control_timeout()?;
+        let stream = tokio::time::timeout(
+            control_timeout,
+            tokio::net::UnixStream::connect(&socket_path),
+        )
+        .await
+        .map_err(|_| control_timeout_error("connect-unix-helper", control_timeout))?
+        .map_err(|error| GatewayError::Platform {
+            operation: "connect-unix-helper",
+            message: format!("{}: {error}", socket_path.display()),
+        })?
+        .into_std()
+        .map_err(|error| GatewayError::Platform {
+            operation: "convert-unix-helper-stream",
+            message: error.to_string(),
+        })?;
+        configure_control_stream(&stream, control_timeout)?;
+        let task = tokio::task::spawn_blocking(move || {
+            let mut stream = stream;
             write_request(&mut stream, &request)?;
             let (response, descriptor) = receive_response(&mut stream)?;
             Ok(HelperReply {
@@ -79,12 +107,14 @@ impl UnixTunnelControl {
                 response,
                 descriptor,
             })
-        })
-        .await
-        .map_err(|error| GatewayError::Platform {
-            operation: "join-unix-helper-establish",
-            message: error.to_string(),
-        })?
+        });
+        tokio::time::timeout(control_timeout, task)
+            .await
+            .map_err(|_| control_timeout_error("exchange-unix-helper-establish", control_timeout))?
+            .map_err(|error| GatewayError::Platform {
+                operation: "join-unix-helper-establish",
+                message: error.to_string(),
+            })?
     }
 
     async fn exchange(
@@ -99,19 +129,61 @@ impl UnixTunnelControl {
                 operation: "exchange-unix-helper",
                 message: "Unix helper control connection is not active".to_string(),
             })?;
-        tokio::task::spawn_blocking(move || {
+        let control_timeout = self.validated_control_timeout()?;
+        let task = tokio::task::spawn_blocking(move || {
             let mut stream = match stream.lock() {
                 Ok(stream) => stream,
                 Err(poisoned) => poisoned.into_inner(),
             };
             write_request(&mut stream, &request)?;
             receive_response(&mut stream)
-        })
-        .await
+        });
+        tokio::time::timeout(control_timeout, task)
+            .await
+            .map_err(|_| control_timeout_error("exchange-unix-helper", control_timeout))?
+            .map_err(|error| GatewayError::Platform {
+                operation: "join-unix-helper-exchange",
+                message: error.to_string(),
+            })?
+    }
+
+    fn validated_control_timeout(&self) -> Result<Duration, GatewayError> {
+        if self.options.control_timeout.is_zero() {
+            return Err(GatewayError::Platform {
+                operation: "validate-unix-helper-timeout",
+                message: "Unix helper control timeout must be greater than zero".to_string(),
+            });
+        }
+        if self.options.control_timeout > MAX_UNIX_HELPER_CONTROL_TIMEOUT {
+            return Err(GatewayError::Platform {
+                operation: "validate-unix-helper-timeout",
+                message: format!(
+                    "Unix helper control timeout must not exceed {MAX_UNIX_HELPER_CONTROL_TIMEOUT:?}"
+                ),
+            });
+        }
+        Ok(self.options.control_timeout)
+    }
+}
+
+fn configure_control_stream(
+    stream: &UnixStream,
+    control_timeout: Duration,
+) -> Result<(), GatewayError> {
+    stream
+        .set_nonblocking(false)
+        .and_then(|()| stream.set_read_timeout(Some(control_timeout)))
+        .and_then(|()| stream.set_write_timeout(Some(control_timeout)))
         .map_err(|error| GatewayError::Platform {
-            operation: "join-unix-helper-exchange",
+            operation: "configure-unix-helper-stream",
             message: error.to_string(),
-        })?
+        })
+}
+
+fn control_timeout_error(operation: &'static str, timeout: Duration) -> GatewayError {
+    GatewayError::Platform {
+        operation,
+        message: format!("Unix helper control operation timed out after {timeout:?}"),
     }
 }
 
@@ -263,6 +335,7 @@ fn unexpected_response(operation: &'static str, response: UnixConfigResponse) ->
 mod tests {
     use std::net::IpAddr;
     use std::path::PathBuf;
+    use std::time::Duration;
 
     use super::UnixTunnelControl;
     use super::UnixTunnelOptions;
@@ -279,5 +352,41 @@ mod tests {
             .await
             .expect("replace bypass");
         assert_eq!(control.underlay_targets, vec![target]);
+    }
+
+    #[tokio::test]
+    async fn stalled_helper_exchange_is_bounded() {
+        let (client, _stalled_helper) =
+            std::os::unix::net::UnixStream::pair().expect("create Unix helper stream pair");
+        let timeout = Duration::from_millis(25);
+        super::configure_control_stream(&client, timeout).expect("configure client stream");
+        let mut control = UnixTunnelControl::new(
+            UnixTunnelOptions::new(PathBuf::from("/unused")).with_control_timeout(timeout),
+        );
+        control.stream = Some(std::sync::Arc::new(std::sync::Mutex::new(client)));
+
+        let started = tokio::time::Instant::now();
+        let result = control
+            .exchange(super::UnixConfigRequest::Teardown {
+                lease_id: "test-lease".to_string(),
+            })
+            .await;
+
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn helper_timeout_rejects_zero_and_effectively_unbounded_values() {
+        let zero = UnixTunnelControl::new(
+            UnixTunnelOptions::new(PathBuf::from("/unused")).with_control_timeout(Duration::ZERO),
+        );
+        assert!(zero.validated_control_timeout().is_err());
+
+        let too_large = UnixTunnelControl::new(
+            UnixTunnelOptions::new(PathBuf::from("/unused"))
+                .with_control_timeout(Duration::from_secs(31)),
+        );
+        assert!(too_large.validated_control_timeout().is_err());
     }
 }

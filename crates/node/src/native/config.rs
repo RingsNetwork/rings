@@ -48,7 +48,7 @@ pub const DEFAULT_ICE_SERVERS: &str = "stun://stun.l.google.com:19302";
 pub const DEFAULT_STABILIZE_INTERVAL: u64 = 15;
 /// Default storage capacity in bytes for native storage backends.
 pub const DEFAULT_STORAGE_CAPACITY: u32 = 200000000;
-/// Default interval for refreshing WebRTC underlay bypass host routes.
+/// Default interval for refreshing gateway dependency state.
 pub const DEFAULT_GATEWAY_UNDERLAY_REFRESH_SECS: u64 = 2;
 
 /// Native foreground-gateway configuration.
@@ -75,7 +75,7 @@ pub struct NativeGatewayConfig {
     /// Additional fixed IPv4 underlay destinations that must bypass capture.
     #[serde(default)]
     pub underlay_bypass_targets: Vec<IpAddr>,
-    /// Interval for polling every known remote WebRTC candidate address.
+    /// Interval for refreshing gateway dependency state, including Onion exit availability.
     #[serde(default = "default_gateway_underlay_refresh_secs")]
     pub underlay_refresh_secs: u64,
     /// Onion TCP exit service selected for captured flows.
@@ -135,7 +135,7 @@ pub struct Config {
     pub external_api_addr: String,
     /// Internal endpoint URL used by local clients.
     pub endpoint_url: String,
-    /// WebRTC ICE server list.
+    /// WebRTC ICE server list; gateway mode requires an authenticated TURN entry.
     pub ice_servers: String,
     /// Chord stabilization interval in seconds.
     pub stabilize_interval: u64,

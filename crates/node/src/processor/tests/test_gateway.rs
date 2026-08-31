@@ -314,33 +314,6 @@ async fn prepare_two_hop_public_gateway(config: GatewayConfig) -> Result<TwoHopG
     })
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn pending_remote_ice_candidates_are_visible_before_nomination() -> Result<()> {
-    let _network_guard = network_test_guard().await;
-    let initiator = prepare_processor().await;
-    let responder = prepare_processor().await;
-    initiator.swarm.set_callback(test_callback())?;
-    responder.swarm.set_callback(test_callback())?;
-
-    let offer = initiator.swarm.create_offer(responder.did()).await?;
-    let _answer = responder.swarm.answer_offer(offer).await?;
-    assert!(responder.swarm.peers().is_empty());
-
-    let candidates = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            let candidates = responder.swarm.underlay_remote_ips().await;
-            if !candidates.is_empty() {
-                return candidates;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("remote ICE candidates become visible while connection is pending");
-    assert!(candidates.iter().any(IpAddr::is_ipv4));
-    Ok(())
-}
-
 #[cfg(target_os = "linux")]
 struct LinuxNamespaceSetup {
     runtime: tokio::runtime::Runtime,

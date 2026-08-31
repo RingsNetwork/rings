@@ -32,7 +32,7 @@ pub enum Error {
     Webrtc(#[from] webrtc::error::Error),
 
     #[cfg(all(feature = "native-webrtc", not(target_family = "wasm")))]
-    /// The host failed to install underlay exclusions for remote ICE candidates.
+    /// The host failed to enable or apply its direct-underlay authorization policy.
     #[error(transparent)]
     UnderlayCandidateAdmission(#[from] crate::connections::UnderlayCandidateAdmissionError),
 

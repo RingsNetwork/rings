@@ -1,4 +1,3 @@
-use std::net::IpAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -145,14 +144,6 @@ pub trait ConnectionInterface {
 
     /// This is a debug method to dump the stats of webrtc connection.
     async fn get_stats(&self) -> Vec<String>;
-
-    /// Return remote ICE-candidate IPs known before or after pair nomination.
-    ///
-    /// Native gateway routing uses this pre-connect projection to keep the transport underlay out
-    /// of its own capture route. Backends without IP-addressed underlay candidates return empty.
-    fn underlay_remote_ips(&self) -> Vec<IpAddr> {
-        Vec::new()
-    }
 
     /// Create a webrtc offer to start handshake.
     async fn webrtc_create_offer(&self) -> Result<Self::Sdp, Self::Error>;

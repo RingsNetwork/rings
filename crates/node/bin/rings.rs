@@ -45,7 +45,10 @@ use rings_node::util::expand_home;
 use tokio::io;
 use tokio::io::AsyncBufReadExt;
 use tokio::task::JoinError;
+use tokio::task::JoinHandle;
 use tokio::task::JoinSet;
+
+const FOREGROUND_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Parser, Debug)]
 #[command(about, version, author)]
@@ -221,7 +224,7 @@ struct RunCommand {
 
     #[arg(
         long,
-        help = "ICE server list. If not provided, use ice_servers in config file or stun://stun.l.google.com:19302",
+        help = "ICE server list. If not provided, use ice_servers in config file or stun://stun.l.google.com:19302. Gateway mode requires an authenticated turn:// URL",
         env
     )]
     pub ice_servers: Option<String>,
@@ -778,17 +781,23 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
     let stop = StopSource::new();
     let gateway_configured = gateway_runner.is_some();
     let gateway_stop = stop.token();
+    let (gateway_started, gateway_startup) = tokio::sync::oneshot::channel();
     let mut gateway_task = tokio::spawn(async move {
         match gateway_runner {
-            Some(runner) => runner.run(gateway_stop).await,
+            Some(runner) => {
+                runner
+                    .run_with_startup_barrier(gateway_stop, gateway_started)
+                    .await
+            }
             None => std::future::pending::<anyhow::Result<()>>().await,
         }
     });
+    await_gateway_startup(gateway_configured, gateway_startup, &mut gateway_task).await?;
 
     let mut tasks = JoinSet::new();
     let processor_task = processor.clone();
     let processor_stop = stop.token();
-    tasks.spawn(async move {
+    let mut processor_task = tokio::spawn(async move {
         processor_task.listen_with(processor_stop.clone()).await;
         if processor_stop.should_stop() {
             Ok(())
@@ -830,45 +839,41 @@ async fn foreground_run(args: RunCommand) -> anyhow::Result<()> {
         Signal(anyhow::Result<()>),
         Service(Option<Result<anyhow::Result<()>, JoinError>>),
         Gateway(Result<anyhow::Result<()>, JoinError>),
+        Processor(Result<anyhow::Result<()>, JoinError>),
     }
     let exit = tokio::select! {
         signal = shutdown_signal() => ForegroundExit::Signal(signal),
         service = tasks.join_next() => ForegroundExit::Service(service),
         gateway = &mut gateway_task => ForegroundExit::Gateway(gateway),
+        processor = &mut processor_task => ForegroundExit::Processor(processor),
     };
     stop.request_stop();
+    // Stop request-serving tasks immediately, but keep the processor task separate so it can
+    // flush measurements through its cooperative `listen_with` shutdown path.
+    tasks.abort_all();
 
-    let (primary, gateway_finished) = match exit {
-        ForegroundExit::Signal(result) => (result, false),
-        ForegroundExit::Service(result) => (joined_service_result(result), false),
-        ForegroundExit::Gateway(result) => (joined_gateway_result(result), true),
+    let (primary, gateway_finished, processor_finished) = match exit {
+        ForegroundExit::Signal(result) => (result, false, false),
+        ForegroundExit::Service(result) => (joined_service_result(result), false, false),
+        ForegroundExit::Gateway(result) => (joined_task_result(result, "gateway"), true, false),
+        ForegroundExit::Processor(result) => {
+            (joined_task_result(result, "node processor"), false, true)
+        }
     };
     let gateway_cleanup = if gateway_configured && !gateway_finished {
-        match tokio::time::timeout(Duration::from_secs(30), &mut gateway_task).await {
-            Ok(result) => joined_gateway_result(result),
-            Err(_) => {
-                gateway_task.abort();
-                Err(anyhow::anyhow!(
-                    "gateway did not finish route cleanup within 30 seconds"
-                ))
-            }
-        }
+        await_task_cleanup(&mut gateway_task, "gateway route cleanup").await
     } else {
         if !gateway_finished {
             gateway_task.abort();
         }
         Ok(())
     };
-    tasks.abort_all();
-
-    match (primary, gateway_cleanup) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(primary), Ok(())) => Err(primary),
-        (Ok(()), Err(cleanup)) => Err(cleanup),
-        (Err(primary), Err(cleanup)) => Err(anyhow::anyhow!(
-            "foreground service failed: {primary}; gateway cleanup failed: {cleanup}"
-        )),
-    }
+    let processor_cleanup = if processor_finished {
+        Ok(())
+    } else {
+        await_task_cleanup(&mut processor_task, "node processor shutdown").await
+    };
+    combine_foreground_results(primary, gateway_cleanup, processor_cleanup)
 }
 
 fn joined_service_result(
@@ -881,10 +886,66 @@ fn joined_service_result(
     }
 }
 
-fn joined_gateway_result(result: Result<anyhow::Result<()>, JoinError>) -> anyhow::Result<()> {
+fn joined_task_result(
+    result: Result<anyhow::Result<()>, JoinError>,
+    task: &'static str,
+) -> anyhow::Result<()> {
     match result {
         Ok(result) => result,
-        Err(error) => Err(anyhow::anyhow!("gateway task failed: {error}")),
+        Err(error) => Err(anyhow::anyhow!("{task} task failed: {error}")),
+    }
+}
+
+async fn await_gateway_startup(
+    configured: bool,
+    startup: tokio::sync::oneshot::Receiver<()>,
+    gateway_task: &mut JoinHandle<anyhow::Result<()>>,
+) -> anyhow::Result<()> {
+    if !configured {
+        return Ok(());
+    }
+    match startup.await {
+        Ok(()) => Ok(()),
+        Err(_) => joined_task_result(gateway_task.await, "gateway startup"),
+    }
+}
+
+async fn await_task_cleanup(
+    task: &mut JoinHandle<anyhow::Result<()>>,
+    operation: &'static str,
+) -> anyhow::Result<()> {
+    match tokio::time::timeout(FOREGROUND_CLEANUP_TIMEOUT, &mut *task).await {
+        Ok(result) => joined_task_result(result, operation),
+        Err(_) => {
+            task.abort();
+            Err(anyhow::anyhow!(
+                "{operation} did not finish within {FOREGROUND_CLEANUP_TIMEOUT:?}"
+            ))
+        }
+    }
+}
+
+fn combine_foreground_results(
+    primary: anyhow::Result<()>,
+    gateway_cleanup: anyhow::Result<()>,
+    processor_cleanup: anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    let failures = [
+        primary.err().map(|error| format!("foreground: {error}")),
+        gateway_cleanup
+            .err()
+            .map(|error| format!("gateway cleanup: {error}")),
+        processor_cleanup
+            .err()
+            .map(|error| format!("processor cleanup: {error}")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(failures.join("; ")))
     }
 }
 
@@ -1052,10 +1113,16 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
     use clap::CommandFactory;
     use clap::FromArgMatches;
     use rings_node::logging::LogLevel;
 
+    use super::await_gateway_startup;
+    use super::await_task_cleanup;
     use super::Cli;
 
     fn parse_without_log_level_env<const N: usize>(args: [&str; N]) -> Result<Cli, clap::Error> {
@@ -1096,6 +1163,41 @@ mod tests {
                 log_level: LogLevel::Debug,
                 ..
             })
+        ));
+    }
+
+    #[tokio::test]
+    async fn processor_cleanup_gets_a_cooperative_stop_window() {
+        let stop = rings_node::prelude::StopSource::new();
+        let token = stop.token();
+        let flushed = Arc::new(AtomicBool::new(false));
+        let task_flushed = Arc::clone(&flushed);
+        let mut task = tokio::spawn(async move {
+            token.stopped().await;
+            task_flushed.store(true, Ordering::Release);
+            Ok(())
+        });
+        stop.request_stop();
+
+        let cleanup = await_task_cleanup(&mut task, "test processor cleanup").await;
+
+        assert!(cleanup.is_ok());
+        assert!(flushed.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn gateway_startup_barrier_reports_early_failure() {
+        let (started, startup) = tokio::sync::oneshot::channel();
+        drop(started);
+        let mut task = tokio::spawn(async {
+            Err(anyhow::anyhow!("gateway activation failed before startup"))
+        });
+
+        let result = await_gateway_startup(true, startup, &mut task).await;
+
+        assert!(matches!(
+            result,
+            Err(error) if error.to_string().contains("activation failed before startup")
         ));
     }
 }

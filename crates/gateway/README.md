@@ -75,6 +75,9 @@ explicitly bypasses Onion. An omitted resolver is outside the policy guarantee, 
 keep this declarative list aligned with host configuration.
 
 ```yaml
+# Gateway mode deliberately uses relay-only ICE. Supply an authenticated TURN server.
+ice_servers: turn://username:password@turn.example.net:3478
+
 gateway:
   enabled: true
   plan:
@@ -93,7 +96,8 @@ gateway:
   unix_helper_socket: "/var/db/rings-gateway/helper-501.sock"
   # Used directly on Windows; the Unix helper owns its separate --ledger path.
   route_ledger_path: "~/.rings/gateway-routes.json"
-  underlay_bypass_targets: []
+  # Add literal IPv4 HTTP signaling/bootstrap destinations here before using them.
+  underlay_bypass_targets: ["203.0.113.20"]
   underlay_refresh_secs: 2
   onion_service: tcp
   onion_hop_count: 0
@@ -102,17 +106,17 @@ gateway:
 
 For default capture, the route binding follows OpenVPN's `def1` technique: it installs
 `0.0.0.0/1` and `128.0.0.0/1` instead of deleting the host's default route. Configured exclusions,
-DNS destinations under `bypass`, resolved ICE servers, native HTTP signaling/bootstrap endpoints,
-and every remote WebRTC ICE candidate parsed directly from SDP as a literal IPv4 address before
-pair nomination get more-specific baseline-gateway routes. DNS destinations under `block` instead
-get more-specific capture routes. Before `connectPeerViaHttp` sends its first request, Rings
-resolves the endpoint, admits every IPv4 result through the same underlay gate, and pins the HTTP
-client to exactly those admitted addresses. Redirects are rejected because their destination has
-not crossed that gate. The WebRTC handshake likewise awaits underlay-route admission before
-applying remote SDP. Underlay bypasses are monotonic for one tunnel lease: periodic topology
-snapshots may add routes but cannot remove a newly admitted signaling endpoint or candidate. mDNS
-host names are not literal-IP evidence; this milestone relies on numeric server-reflexive/relay
-candidates plus fixed ICE-server and explicitly configured bypass targets.
+DNS destinations under `bypass`, resolved configured TURN servers, and explicit
+`underlay_bypass_targets` get more-specific baseline-gateway routes. DNS destinations under
+`block` instead get more-specific capture routes. Gateway activation switches native WebRTC to
+relay-only ICE and requires at least one configured TURN server. Remote SDP is data, not route
+authority: host, server-reflexive, and relay candidates received from a peer never add host routes.
+
+Before `connectPeerViaHttp` sends its first request, Rings resolves the endpoint, requires every
+IPv4 result to match the fixed operator-authorized set, and pins the HTTP client to exactly those
+addresses. Redirects are rejected because their destination has not crossed that gate. Add each
+signaling/bootstrap destination to `underlay_bypass_targets` before capture starts; runtime RPC
+input cannot punch a new route around the gateway.
 
 ## Fail-closed lifetime and platform limits
 
@@ -124,21 +128,29 @@ interface descriptor, and the kernel may remove interface-bound routes; direct r
 resume. The durable ledger supports later reconciliation but cannot keep a kernel interface alive.
 
 Windows has no separate privileged helper in this milestone. While the node process is alive, a
-cleanup failure retains the Wintun device and underlay-admission gate to fail closed. If the whole
-Windows node process dies, Wintun and its interface-bound routes can disappear and direct routing
-can resume. Operators requiring a process-independent Windows kill switch must supply an external
-firewall or supervisor policy. `routing_mode: disabled` deliberately installs no capture or
-kill-switch routes on any platform.
+cleanup failure retains the Wintun device and underlay-authorization gate to fail closed. If the
+whole Windows node process dies, Wintun and its interface-bound routes can disappear and direct
+routing can resume. Operators requiring a process-independent Windows kill switch must supply an
+external firewall or supervisor policy. `routing_mode: disabled` deliberately installs no capture
+or kill-switch routes on any platform.
 
-`dns_policy: block` requires every configured ICE server host to be a literal IPv4 address. A
-hostname-based STUN/TURN URL needs DNS again when a later WebRTC peer connection starts; resolving
+`dns_policy: block` requires every configured TURN server host to be a literal IPv4 address. A
+hostname-based TURN URL needs DNS again when a later WebRTC peer connection starts; resolving
 it once before installing routes is not a durable substitute. Rings therefore rejects that
-combination instead of relying on resolver cache state. Use explicit DNS bypass for named ICE
-servers, or configure numeric ICE endpoints. An underlay target also cannot equal an exact `/32`
+combination instead of relying on resolver cache state. Use explicit DNS bypass for named TURN
+servers, or configure numeric TURN endpoints. An underlay target also cannot equal an exact `/32`
 capture route; broader capture prefixes remain valid because the underlay `/32` is more specific.
 The same constraint applies to HTTP seed/signaling URLs supplied at runtime: named URLs require
-`dns_policy: bypass`, while `dns_policy: block` callers must use literal IPv4 endpoints. Resolution
-or underlay admission failure aborts bootstrap before the first HTTP request.
+`dns_policy: bypass`, while `dns_policy: block` callers must use literal IPv4 endpoints. Every
+resolved address must also already be present in `underlay_bypass_targets`. Resolution or
+authorization failure aborts bootstrap before the first HTTP request.
+
+Runtime limits reject more than 16,384 flows, TCP buffers larger than 1 MiB, or a declared
+four-buffer-per-flow budget above 1 GiB. These checks happen before hash tables, Tokio channels, or
+per-flow byte buffers are allocated. Unix helper connection and request/response operations have a
+10-second default control deadline with a hard 30-second maximum, so a wedged privileged helper
+cannot keep a blocking runtime alive forever. TURN resolution during gateway startup is also bounded
+to 10 seconds per endpoint.
 
 The status endpoint is exposed only on the loopback-bound internal API when the gateway is
 configured; it is never mounted on the externally bound API:

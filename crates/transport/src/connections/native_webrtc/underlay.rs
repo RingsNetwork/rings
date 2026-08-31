@@ -1,4 +1,4 @@
-//! Admission boundary for native underlay targets that need host-route exclusions.
+//! Authorization boundary for native underlay targets that need host-route exclusions.
 
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -23,11 +23,12 @@ impl UnderlayCandidateAdmissionError {
     }
 }
 
-/// Host policy that must admit direct underlay IPs before native traffic reaches them.
+/// Host policy that must authorize direct underlay IPs before native traffic reaches them.
 ///
-/// Native packet gateways implement this by installing more-specific underlay routes. Callers use
-/// the same policy for remote ICE candidates and signaling/bootstrap endpoints, avoiding separate
-/// routing mechanisms. A transport without an installed policy preserves its ordinary behavior.
+/// Installing a policy also switches newly-created native WebRTC connections to relay-only ICE.
+/// Remote SDP therefore cannot grant itself host-route exclusions; only explicit
+/// signaling/bootstrap endpoints pass through this authorization boundary. A transport without an
+/// installed policy preserves its ordinary direct-ICE behavior.
 #[async_trait]
 pub trait UnderlayCandidateAdmission: Send + Sync {
     /// Admit one complete target set before any direct traffic is allowed to reach it.
@@ -41,16 +42,9 @@ pub(super) fn shared_admission() -> SharedUnderlayCandidateAdmission {
     Arc::new(RwLock::new(None))
 }
 
-pub(super) async fn replace_admission(
-    shared: &SharedUnderlayCandidateAdmission,
-    admission: Option<Arc<dyn UnderlayCandidateAdmission>>,
-) {
-    *shared.write().await = admission;
-}
-
-/// Hold this guard through remote-description application. A policy replacement takes the write
-/// lock, so once gateway registration completes, every older handshake has either published its
-/// candidates or failed and every newer handshake observes the gateway policy.
+/// Hold this guard through connection creation or explicit-target authorization. A policy
+/// replacement takes the write lock, so gateway activation cannot race an older direct-ICE
+/// connection into the pool or an authorization decision.
 pub(super) async fn admission_policy(
     shared: &SharedUnderlayCandidateAdmission,
 ) -> OwnedRwLockReadGuard<Option<Arc<dyn UnderlayCandidateAdmission>>> {
@@ -82,16 +76,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn installed_policy_observes_candidates_before_transport_progress() {
+    async fn installed_policy_authorizes_explicit_targets() {
         let shared = shared_admission();
         let observed = Arc::new(Mutex::new(Vec::new()));
-        replace_admission(
-            &shared,
-            Some(Arc::new(RecordingAdmission {
-                observed: Arc::clone(&observed),
-            })),
-        )
-        .await;
+        *shared.write().await = Some(Arc::new(RecordingAdmission {
+            observed: Arc::clone(&observed),
+        }));
         let candidates = vec!["203.0.113.9".parse().expect("test candidate")];
 
         let admission = admission_policy(&shared).await;
@@ -112,12 +102,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn policy_replacement_waits_for_in_flight_remote_description_guard() {
+    async fn policy_replacement_waits_for_in_flight_authorization_guard() {
         let shared = shared_admission();
         let guard = admission_policy(&shared).await;
         let replacement_shared = Arc::clone(&shared);
         let replacement = tokio::spawn(async move {
-            replace_admission(&replacement_shared, None).await;
+            *replacement_shared.write().await = None;
         });
 
         tokio::task::yield_now().await;

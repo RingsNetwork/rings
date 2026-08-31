@@ -177,34 +177,31 @@ impl Swarm {
         self.transport.get_connection_ids()
     }
 
-    /// Return remote IPs advertised by every physical WebRTC transport, including pending ones.
+    /// Install the native host policy for explicit direct-underlay targets.
     ///
-    /// Native packet gateways use these destinations for OpenVPN-style host-route exclusions so
-    /// Rings underlay packets cannot recurse into the gateway capture route. Pending transports
-    /// are included because candidate checks begin before a connection becomes routable.
-    pub async fn underlay_remote_ips(&self) -> Vec<IpAddr> {
-        self.transport.underlay_remote_ips()
+    /// Installing a policy is also the relay-only ICE activation barrier. It fails when an
+    /// already-created native connection could retain direct candidates.
+    #[cfg(not(target_family = "wasm"))]
+    pub async fn enable_underlay_candidate_admission(
+        &self,
+        admission: Arc<dyn UnderlayCandidateAdmission>,
+    ) -> std::result::Result<(), UnderlayCandidateAdmissionError> {
+        self.transport
+            .enable_underlay_candidate_admission(admission)
+            .await
     }
 
-    /// Install or clear the native host policy that admits remote ICE candidates.
-    ///
-    /// Policy installation is an asynchronous handshake barrier: when it returns, older remote
-    /// descriptions have finished and newer ones cannot start ICE checks without policy approval.
+    /// Clear the native direct-underlay policy after gateway capture is gone.
     #[cfg(not(target_family = "wasm"))]
-    pub async fn set_underlay_candidate_admission(
-        &self,
-        admission: Option<Arc<dyn UnderlayCandidateAdmission>>,
-    ) {
-        self.transport
-            .set_underlay_candidate_admission(admission)
-            .await;
+    pub async fn clear_underlay_candidate_admission(&self) {
+        self.transport.clear_underlay_candidate_admission().await;
     }
 
     /// Admit native signaling/bootstrap targets through the installed underlay policy.
     ///
-    /// Packet gateways use the same monotonic host-route gate as remote ICE candidate handling,
-    /// so control traffic cannot recurse through the captured data plane. Without an installed
-    /// policy this method is a no-op.
+    /// Packet gateways accept only operator-authorized fixed exclusions, so an arbitrary remote
+    /// endpoint cannot punch a host route around capture. Without an installed policy this method
+    /// is a no-op.
     #[cfg(not(target_family = "wasm"))]
     pub async fn admit_underlay_targets(
         &self,

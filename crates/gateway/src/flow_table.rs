@@ -21,10 +21,17 @@ impl FlowTable {
         if capacity == 0 {
             return Err(FlowTableError::CapacityExhausted { limit: capacity });
         }
-        Ok(Self {
-            capacity,
-            states: HashMap::with_capacity(capacity),
-        })
+        if capacity > crate::config::MAX_GATEWAY_FLOWS {
+            return Err(FlowTableError::CapacityLimitExceeded {
+                requested: capacity,
+                limit: crate::config::MAX_GATEWAY_FLOWS,
+            });
+        }
+        let mut states = HashMap::new();
+        states
+            .try_reserve(capacity)
+            .map_err(|_| FlowTableError::AllocationFailed { capacity })?;
+        Ok(Self { capacity, states })
     }
 
     /// Return the configured concurrent flow bound.
@@ -111,6 +118,14 @@ mod tests {
             Err(FlowTableError::CapacityExhausted { limit: 1 })
         );
         assert_eq!(table.len(), 1);
+    }
+
+    #[test]
+    fn table_rejects_pathological_capacity_before_allocation() {
+        assert!(matches!(
+            FlowTable::new(usize::MAX),
+            Err(FlowTableError::CapacityLimitExceeded { .. })
+        ));
     }
 
     #[test]

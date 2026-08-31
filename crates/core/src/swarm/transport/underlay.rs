@@ -1,4 +1,4 @@
-//! Native underlay candidate projections and admission-policy wiring.
+//! Native direct-underlay authorization-policy wiring.
 
 use std::net::IpAddr;
 #[cfg(not(target_family = "wasm"))]
@@ -8,41 +8,30 @@ use std::sync::Arc;
 use rings_transport::connections::UnderlayCandidateAdmission;
 #[cfg(not(target_family = "wasm"))]
 use rings_transport::connections::UnderlayCandidateAdmissionError;
-use rings_transport::core::transport::ConnectionInterface;
-use rings_transport::core::transport::TransportInterface;
 
 use super::SwarmTransport;
 
 impl SwarmTransport {
-    /// Return remote underlay candidate IPs from every physical transport in the pool.
-    ///
-    /// This deliberately does not use the logical connection-lifecycle projections: ICE needs
-    /// its bypass routes while a connection is still pending, before it can become routable and
-    /// enter the active DHT projection.
-    pub(crate) fn underlay_remote_ips(&self) -> Vec<IpAddr> {
-        let mut addresses = self
-            .transport
-            .connections()
-            .into_iter()
-            .flat_map(|(_, connection)| connection.underlay_remote_ips())
-            .collect::<Vec<_>>();
-        addresses.sort_unstable();
-        addresses.dedup();
-        addresses
-    }
-
-    /// Install or clear the native policy that gates remote SDP application.
+    /// Install the native policy that enables relay-only ICE and gates explicit targets.
     #[cfg(not(target_family = "wasm"))]
-    pub(crate) async fn set_underlay_candidate_admission(
+    pub(crate) async fn enable_underlay_candidate_admission(
         &self,
-        admission: Option<Arc<dyn UnderlayCandidateAdmission>>,
-    ) {
+        admission: Arc<dyn UnderlayCandidateAdmission>,
+    ) -> Result<(), UnderlayCandidateAdmissionError> {
         #[cfg(not(feature = "dummy"))]
         self.transport
-            .set_underlay_candidate_admission(admission)
-            .await;
+            .enable_underlay_candidate_admission(admission)
+            .await?;
         #[cfg(feature = "dummy")]
         let _ = admission;
+        Ok(())
+    }
+
+    /// Clear the native direct-underlay policy after capture is removed.
+    #[cfg(not(target_family = "wasm"))]
+    pub(crate) async fn clear_underlay_candidate_admission(&self) {
+        #[cfg(not(feature = "dummy"))]
+        self.transport.clear_underlay_candidate_admission().await;
     }
 
     /// Admit direct underlay targets through the installed native gateway policy.

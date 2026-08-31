@@ -17,12 +17,40 @@ pub enum ConfigError {
     /// The configured maximum flow count is zero.
     #[error("gateway max_flows must be greater than zero")]
     ZeroMaxFlows,
+    /// The configured maximum flow count exceeds the implementation bound.
+    #[error("gateway max_flows {configured} exceeds supported limit {limit}")]
+    MaxFlowsExceeded {
+        /// Configured maximum concurrent flow count.
+        configured: usize,
+        /// Highest supported concurrent flow count.
+        limit: usize,
+    },
     /// The configured flow idle timeout is zero.
     #[error("gateway flow_idle_timeout must be greater than zero")]
     ZeroFlowIdleTimeout,
     /// The configured per-flow TCP buffer size is zero.
     #[error("gateway tcp_buffer_bytes must be greater than zero")]
     ZeroTcpBuffer,
+    /// The configured per-flow TCP buffer exceeds the implementation bound.
+    #[error("gateway tcp_buffer_bytes {configured} exceeds supported limit {limit}")]
+    TcpBufferExceeded {
+        /// Configured bytes for each TCP receive or transmit buffer.
+        configured: usize,
+        /// Highest supported per-buffer byte count.
+        limit: usize,
+    },
+    /// The declared flow count and buffers exceed the aggregate allocation budget.
+    #[error(
+        "gateway max_flows {max_flows} with tcp_buffer_bytes {tcp_buffer_bytes} exceeds the {limit_bytes}-byte flow-buffer budget"
+    )]
+    FlowBufferBudgetExceeded {
+        /// Configured maximum concurrent flow count.
+        max_flows: usize,
+        /// Configured bytes for each TCP receive or transmit buffer.
+        tcp_buffer_bytes: usize,
+        /// Highest supported aggregate flow-buffer allocation.
+        limit_bytes: usize,
+    },
     /// The configured interface MTU is outside the IPv4 packet range.
     #[error("gateway MTU {0} is outside the supported IPv4 range 576..=65535")]
     InvalidMtu(u32),
@@ -73,6 +101,20 @@ pub enum FlowTableError {
     CapacityExhausted {
         /// Configured maximum concurrent flow count.
         limit: usize,
+    },
+    /// A caller requested a table larger than the implementation resource bound.
+    #[error("gateway flow-table capacity {requested} exceeds supported limit {limit}")]
+    CapacityLimitExceeded {
+        /// Requested table capacity.
+        requested: usize,
+        /// Highest supported table capacity.
+        limit: usize,
+    },
+    /// The bounded flow table could not reserve its declared capacity.
+    #[error("gateway flow table could not reserve capacity {capacity}")]
+    AllocationFailed {
+        /// Requested table capacity.
+        capacity: usize,
     },
     /// The tracked flow rejected a lifecycle event.
     #[error(transparent)]

@@ -13,6 +13,11 @@ use crate::ConfigError;
 
 const MIN_IPV4_MTU: u32 = 576;
 const MAX_IPV4_PACKET: u32 = 65_535;
+pub(crate) const MAX_GATEWAY_FLOWS: usize = 16_384;
+const MAX_TCP_BUFFER_BYTES: usize = 1_024 * 1_024;
+// smoltcp receive/transmit buffers plus the two directions of Tokio's duplex bridge.
+const FLOW_BUFFER_ALLOCATION_FACTOR: usize = 4;
+const MAX_TOTAL_FLOW_BUFFER_BYTES: usize = 1_024 * 1_024 * 1_024;
 
 /// Host-routing behavior owned by the gateway.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -230,11 +235,39 @@ impl GatewayConfig {
         if self.max_flows == 0 {
             return Err(ConfigError::ZeroMaxFlows);
         }
+        if self.max_flows > MAX_GATEWAY_FLOWS {
+            return Err(ConfigError::MaxFlowsExceeded {
+                configured: self.max_flows,
+                limit: MAX_GATEWAY_FLOWS,
+            });
+        }
         if self.flow_idle_timeout.is_zero() {
             return Err(ConfigError::ZeroFlowIdleTimeout);
         }
         if self.tcp_buffer_bytes == 0 {
             return Err(ConfigError::ZeroTcpBuffer);
+        }
+        if self.tcp_buffer_bytes > MAX_TCP_BUFFER_BYTES {
+            return Err(ConfigError::TcpBufferExceeded {
+                configured: self.tcp_buffer_bytes,
+                limit: MAX_TCP_BUFFER_BYTES,
+            });
+        }
+        let flow_buffer_bytes = self
+            .max_flows
+            .checked_mul(self.tcp_buffer_bytes)
+            .and_then(|bytes| bytes.checked_mul(FLOW_BUFFER_ALLOCATION_FACTOR))
+            .ok_or(ConfigError::FlowBufferBudgetExceeded {
+                max_flows: self.max_flows,
+                tcp_buffer_bytes: self.tcp_buffer_bytes,
+                limit_bytes: MAX_TOTAL_FLOW_BUFFER_BYTES,
+            })?;
+        if flow_buffer_bytes > MAX_TOTAL_FLOW_BUFFER_BYTES {
+            return Err(ConfigError::FlowBufferBudgetExceeded {
+                max_flows: self.max_flows,
+                tcp_buffer_bytes: self.tcp_buffer_bytes,
+                limit_bytes: MAX_TOTAL_FLOW_BUFFER_BYTES,
+            });
         }
         self.plan.validate()
     }
@@ -385,5 +418,34 @@ mod tests {
         assert_eq!(config.max_flows, default_max_flows());
         assert_eq!(config.flow_idle_timeout, default_flow_idle_timeout());
         assert_eq!(config.tcp_buffer_bytes, default_tcp_buffer_bytes());
+    }
+
+    #[test]
+    fn runtime_limits_reject_pathological_allocations() {
+        let mut candidate = GatewayConfig {
+            plan: plan(),
+            max_flows: default_max_flows(),
+            flow_idle_timeout: default_flow_idle_timeout(),
+            tcp_buffer_bytes: default_tcp_buffer_bytes(),
+        };
+        candidate.max_flows = MAX_GATEWAY_FLOWS + 1;
+        assert!(matches!(
+            candidate.validate(),
+            Err(ConfigError::MaxFlowsExceeded { .. })
+        ));
+
+        candidate.max_flows = default_max_flows();
+        candidate.tcp_buffer_bytes = MAX_TCP_BUFFER_BYTES + 1;
+        assert!(matches!(
+            candidate.validate(),
+            Err(ConfigError::TcpBufferExceeded { .. })
+        ));
+
+        candidate.max_flows = MAX_GATEWAY_FLOWS;
+        candidate.tcp_buffer_bytes = default_tcp_buffer_bytes();
+        assert!(matches!(
+            candidate.validate(),
+            Err(ConfigError::FlowBufferBudgetExceeded { .. })
+        ));
     }
 }

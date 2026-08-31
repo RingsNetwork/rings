@@ -33,6 +33,7 @@ use rings_gateway::GatewayStatusHandle;
 use rings_transport::connections::UnderlayCandidateAdmission;
 use rings_transport::connections::UnderlayCandidateAdmissionError;
 use rings_transport::ice_server::IceServer;
+use tokio::sync::oneshot;
 use tokio::sync::Mutex;
 
 use super::config::NativeGatewayConfig;
@@ -52,19 +53,15 @@ type PlatformTunnelControl = UnixTunnelControl;
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 type PlatformTunnelControl = UnsupportedTunnelControl;
 
-struct GatewayUnderlayState<C> {
-    control: C,
-    dynamic_targets: BTreeSet<IpAddr>,
-}
+const TURN_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Serializes every host-route update and retains admitted candidates until teardown.
+/// Owns the fixed, operator-authorized underlay exclusions for one gateway lease.
 ///
-/// Candidate routes are deliberately monotonic during one gateway lease. A periodic topology
-/// snapshot can lag behind a just-admitted SDP, so removing a route from such a snapshot could
-/// make ICE recurse into the capture route between admission and candidate nomination.
+/// Remote SDP is deliberately excluded from this authority. Enabling this gate switches native
+/// WebRTC to relay-only ICE, so only configured TURN servers require host-route exclusions.
 struct GatewayUnderlayGate<C> {
     fixed_targets: BTreeSet<IpAddr>,
-    state: Mutex<GatewayUnderlayState<C>>,
+    control: Mutex<C>,
 }
 
 impl<C> GatewayUnderlayGate<C>
@@ -73,25 +70,28 @@ where C: UnderlayPolicy
     fn new(control: C, fixed_targets: Vec<IpAddr>) -> Self {
         Self {
             fixed_targets: fixed_targets.into_iter().filter(IpAddr::is_ipv4).collect(),
-            state: Mutex::new(GatewayUnderlayState {
-                control,
-                dynamic_targets: BTreeSet::new(),
-            }),
+            control: Mutex::new(control),
         }
     }
 
-    async fn admit_targets(&self, candidates: &[IpAddr]) -> Result<(), GatewayError> {
-        let mut state = self.state.lock().await;
-        let mut next_dynamic = state.dynamic_targets.clone();
-        next_dynamic.extend(candidates.iter().copied().filter(IpAddr::is_ipv4));
-        let desired = self
-            .fixed_targets
+    async fn install_fixed_targets(&self) -> Result<(), GatewayError> {
+        self.control
+            .lock()
+            .await
+            .replace_bypass_targets(&self.fixed_targets.iter().copied().collect::<Vec<_>>())
+            .await
+    }
+
+    fn authorize_targets(&self, targets: &[IpAddr]) -> Result<(), UnderlayCandidateAdmissionError> {
+        if let Some(target) = targets
             .iter()
-            .copied()
-            .chain(next_dynamic.iter().copied())
-            .collect::<Vec<_>>();
-        state.control.replace_bypass_targets(&desired).await?;
-        state.dynamic_targets = next_dynamic;
+            .find(|target| !target.is_ipv4() || !self.fixed_targets.contains(target))
+        {
+            return Err(UnderlayCandidateAdmissionError::new(format!(
+                "underlay target {target} is not operator-authorized; add it to gateway \
+                 underlay_bypass_targets before capture starts"
+            )));
+        }
         Ok(())
     }
 }
@@ -103,11 +103,11 @@ where C: TunnelControl + UnderlayPolicy
         &self,
         plan: &GatewayPlan,
     ) -> Result<EstablishedTunnel<C::Device, C::Lease>, GatewayError> {
-        self.state.lock().await.control.establish(plan).await
+        self.control.lock().await.establish(plan).await
     }
 
     async fn teardown(&self, lease: C::Lease) -> Result<(), GatewayError> {
-        self.state.lock().await.control.teardown(lease).await
+        self.control.lock().await.teardown(lease).await
     }
 }
 
@@ -116,9 +116,7 @@ impl<C> UnderlayCandidateAdmission for GatewayUnderlayGate<C>
 where C: UnderlayPolicy
 {
     async fn admit(&self, candidates: &[IpAddr]) -> Result<(), UnderlayCandidateAdmissionError> {
-        self.admit_targets(candidates)
-            .await
-            .map_err(|error| UnderlayCandidateAdmissionError::new(error.to_string()))
+        self.authorize_targets(candidates)
     }
 }
 
@@ -142,7 +140,8 @@ impl NativeGatewayRunner {
             anyhow::bail!("gateway underlay_refresh_secs must be greater than zero");
         }
         config.runtime.validate()?;
-        validate_ice_dns_compatibility(&config.runtime.plan, &ice_servers)?;
+        validate_turn_dns_compatibility(&config.runtime.plan, &ice_servers)?;
+        validate_gateway_turn_server(&ice_servers)?;
         let proxy = OnionProxyConfig::tcp_connect_service(
             config.onion_service.clone(),
             config.onion_hop_count,
@@ -168,25 +167,37 @@ impl NativeGatewayRunner {
     }
 
     /// Establish routes and the packet interface, run until stopped, then reconcile the lease.
-    pub async fn run(mut self, stop: StopToken) -> anyhow::Result<()> {
+    pub async fn run(self, stop: StopToken) -> anyhow::Result<()> {
+        self.run_inner(stop, None).await
+    }
+
+    /// Run the gateway and publish when relay-only policy and packet capture are both active.
+    ///
+    /// Foreground supervisors use this barrier before starting the processor listener. Without it,
+    /// TURN resolution could yield long enough for a direct native WebRTC connection to enter the
+    /// pool before gateway policy is installed.
+    pub async fn run_with_startup_barrier(
+        self,
+        stop: StopToken,
+        started: oneshot::Sender<()>,
+    ) -> anyhow::Result<()> {
+        self.run_inner(stop, Some(started)).await
+    }
+
+    async fn run_inner(
+        mut self,
+        stop: StopToken,
+        started: Option<oneshot::Sender<()>>,
+    ) -> anyhow::Result<()> {
         let control = self.platform_control()?;
         let fixed_targets = self.fixed_underlay_targets().await?;
         let underlay = Arc::new(GatewayUnderlayGate::new(control, fixed_targets));
+        underlay.install_fixed_targets().await?;
         let admission: Arc<dyn UnderlayCandidateAdmission> = underlay.clone();
         self.processor
             .swarm
-            .set_underlay_candidate_admission(Some(admission))
-            .await;
-        if let Err(error) = underlay
-            .admit_targets(&self.processor.swarm.underlay_remote_ips().await)
-            .await
-        {
-            self.processor
-                .swarm
-                .set_underlay_candidate_admission(None)
-                .await;
-            return Err(error.into());
-        }
+            .enable_underlay_candidate_admission(admission)
+            .await?;
         let EstablishedTunnel {
             mut device,
             lease,
@@ -196,7 +207,7 @@ impl NativeGatewayRunner {
             Err(error) => {
                 self.processor
                     .swarm
-                    .set_underlay_candidate_admission(None)
+                    .clear_underlay_candidate_admission()
                     .await;
                 return Err(error.into());
             }
@@ -208,12 +219,14 @@ impl NativeGatewayRunner {
                 finish_gateway_cleanup(&self.processor, &mut self.runtime, device, cleanup).await;
             return combine_gateway_results(Err(error), Ok(()), cleanup);
         }
+        if let Some(started) = started {
+            let _ = started.send(());
+        }
 
         let runtime_done = StopSource::new();
         let updater_failed = StopSource::new();
-        let update = refresh_underlay_and_exit(UnderlayRefresh {
+        let update = refresh_exit_availability(GatewayRefresh {
             processor: self.processor.clone(),
-            underlay: Arc::clone(&underlay),
             gateway: self.runtime.control_handle(),
             onion_service: self.config.onion_service.as_str().to_string(),
             interval: Duration::from_secs(self.config.underlay_refresh_secs),
@@ -274,7 +287,7 @@ impl NativeGatewayRunner {
             .iter()
             .copied()
             .collect::<BTreeSet<_>>();
-        targets.extend(resolve_ice_server_ips(&self.ice_servers).await?);
+        targets.extend(resolve_turn_server_ips(&self.ice_servers).await?);
         Ok(targets.into_iter().collect())
     }
 }
@@ -287,15 +300,16 @@ async fn finish_gateway_cleanup<D: rings_gateway::PacketIo>(
 ) -> Result<(), GatewayError> {
     match cleanup {
         Ok(()) => {
-            // Routes are gone before direct candidate admission is restored or the final packet
+            // Routes are gone before direct underlay access is restored or the final packet
             // descriptor is closed. This keeps orderly teardown from opening a direct-leak window.
-            processor.swarm.set_underlay_candidate_admission(None).await;
+            processor.swarm.clear_underlay_candidate_admission().await;
             drop(device);
             Ok(())
         }
         Err(error) => {
-            // Capture state may still exist. Retain both the admission gate and packet descriptor
-            // so a cleanup failure degrades connectivity instead of silently restoring direct IO.
+            // Capture state may still exist. Retain both the authorization gate and packet
+            // descriptor so a cleanup failure degrades connectivity instead of silently restoring
+            // direct IO.
             let reason = format!(
                 "gateway route cleanup failed; direct underlay admission and packet-device release \
                  remain blocked until privileged cleanup succeeds: {error}"
@@ -308,27 +322,69 @@ async fn finish_gateway_cleanup<D: rings_gateway::PacketIo>(
     }
 }
 
-fn validate_ice_dns_compatibility(plan: &GatewayPlan, config: &str) -> Result<(), GatewayError> {
+fn validate_turn_dns_compatibility(plan: &GatewayPlan, config: &str) -> Result<(), GatewayError> {
     if plan.dns_policy != DnsPolicy::Block || config.trim().is_empty() {
         return Ok(());
     }
     let servers = IceServer::vec_from_str(config).map_err(|error| GatewayError::Platform {
-        operation: "validate-ice-dns-policy",
+        operation: "validate-turn-dns-policy",
         message: error.to_string(),
     })?;
-    for url in servers.into_iter().flat_map(|server| server.urls) {
+    for url in servers
+        .into_iter()
+        .flat_map(|server| server.urls)
+        .filter(|url| ice_scheme(url) == Some("turn"))
+    {
         let (host, _) = ice_host_port(&url)?;
         if host.parse::<Ipv4Addr>().is_err() {
             return Err(GatewayError::Platform {
-                operation: "validate-ice-dns-policy",
+                operation: "validate-turn-dns-policy",
                 message: format!(
-                    "gateway DNS block requires literal IPv4 ICE hosts, but {url:?} uses \
-                     {host:?}; configure DNS bypass or a numeric ICE endpoint"
+                    "gateway DNS block requires literal IPv4 TURN hosts, but {url:?} uses \
+                     {host:?}; configure DNS bypass or a numeric TURN endpoint"
                 ),
             });
         }
     }
     Ok(())
+}
+
+fn validate_gateway_turn_server(config: &str) -> Result<(), GatewayError> {
+    let servers = IceServer::vec_from_str(config).map_err(|error| GatewayError::Platform {
+        operation: "validate-gateway-turn-server",
+        message: error.to_string(),
+    })?;
+    let mut turn_count = 0_usize;
+    for server in &servers {
+        if !server
+            .urls
+            .iter()
+            .any(|url| ice_scheme(url) == Some("turn"))
+        {
+            continue;
+        }
+        turn_count += 1;
+        if server.username.is_empty() || server.credential.is_empty() {
+            return Err(GatewayError::Platform {
+                operation: "validate-gateway-turn-server",
+                message: "native gateway TURN servers require non-empty username and password credentials"
+                    .to_string(),
+            });
+        }
+    }
+    if turn_count > 0 {
+        return Ok(());
+    }
+    Err(GatewayError::Platform {
+        operation: "validate-gateway-turn-server",
+        message:
+            "native gateway requires at least one TURN server because WebRTC uses relay-only ICE"
+                .to_string(),
+    })
+}
+
+fn ice_scheme(url: &str) -> Option<&str> {
+    url.split_once(':').map(|(scheme, _)| scheme)
 }
 
 #[cfg(any(test, target_os = "windows"))]
@@ -344,9 +400,8 @@ fn select_wintun_dll_path(
     selected.map(expand_home).transpose()
 }
 
-struct UnderlayRefresh {
+struct GatewayRefresh {
     processor: Arc<Processor>,
-    underlay: Arc<GatewayUnderlayGate<PlatformTunnelControl>>,
     gateway: GatewayControlHandle,
     onion_service: String,
     interval: Duration,
@@ -372,7 +427,7 @@ async fn wait_for_refresh(
     }
 }
 
-async fn refresh_underlay_and_exit(refresh: UnderlayRefresh) -> Result<(), GatewayError> {
+async fn refresh_exit_availability(refresh: GatewayRefresh) -> Result<(), GatewayError> {
     let mut ticker = tokio::time::interval(refresh.interval);
     loop {
         if matches!(
@@ -381,12 +436,6 @@ async fn refresh_underlay_and_exit(refresh: UnderlayRefresh) -> Result<(), Gatew
         ) {
             return Ok(());
         }
-        let targets = refresh.processor.swarm.underlay_remote_ips().await;
-        if let Err(error) = refresh.underlay.admit_targets(&targets).await {
-            refresh.updater_failed.request_stop();
-            return Err(error);
-        }
-
         let (availability, reason) = match refresh
             .processor
             .lookup_onion_exits(&refresh.onion_service, false)
@@ -423,19 +472,7 @@ async fn refresh_underlay_and_exit(refresh: UnderlayRefresh) -> Result<(), Gatew
     }
 }
 
-#[cfg(test)]
-fn merged_underlay_targets(fixed: &[IpAddr], dynamic: Vec<IpAddr>) -> Vec<IpAddr> {
-    fixed
-        .iter()
-        .copied()
-        .chain(dynamic)
-        .filter(IpAddr::is_ipv4)
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
-}
-
-async fn resolve_ice_server_ips(config: &str) -> Result<Vec<IpAddr>, GatewayError> {
+async fn resolve_turn_server_ips(config: &str) -> Result<Vec<IpAddr>, GatewayError> {
     if config.trim().is_empty() {
         return Ok(Vec::new());
     }
@@ -444,14 +481,27 @@ async fn resolve_ice_server_ips(config: &str) -> Result<Vec<IpAddr>, GatewayErro
         message: error.to_string(),
     })?;
     let mut addresses = BTreeSet::new();
-    for url in servers.into_iter().flat_map(|server| server.urls) {
+    for url in servers
+        .into_iter()
+        .flat_map(|server| server.urls)
+        .filter(|url| ice_scheme(url) == Some("turn"))
+    {
         let (host, port) = ice_host_port(&url)?;
-        let resolved = tokio::net::lookup_host((host.as_str(), port))
-            .await
-            .map_err(|error| GatewayError::Platform {
-                operation: "resolve-ice-underlay",
-                message: format!("failed to resolve ICE server {host}:{port}: {error}"),
-            })?;
+        let resolved = tokio::time::timeout(
+            TURN_RESOLUTION_TIMEOUT,
+            tokio::net::lookup_host((host.as_str(), port)),
+        )
+        .await
+        .map_err(|_| GatewayError::Platform {
+            operation: "resolve-ice-underlay",
+            message: format!(
+                "timed out after {TURN_RESOLUTION_TIMEOUT:?} resolving TURN server {host}:{port}"
+            ),
+        })?
+        .map_err(|error| GatewayError::Platform {
+            operation: "resolve-ice-underlay",
+            message: format!("failed to resolve TURN server {host}:{port}: {error}"),
+        })?;
         let resolved = resolved
             .map(|address| address.ip())
             .filter(IpAddr::is_ipv4)
@@ -459,7 +509,7 @@ async fn resolve_ice_server_ips(config: &str) -> Result<Vec<IpAddr>, GatewayErro
         if resolved.is_empty() {
             return Err(GatewayError::Platform {
                 operation: "resolve-ice-underlay",
-                message: format!("ICE server {host}:{port} has no IPv4 address"),
+                message: format!("TURN server {host}:{port} has no IPv4 address"),
             });
         }
         addresses.extend(resolved);
@@ -577,18 +627,40 @@ mod tests {
     }
 
     #[test]
-    fn blocked_dns_requires_literal_ipv4_ice_hosts() {
+    fn blocked_dns_requires_literal_ipv4_turn_hosts() {
         let blocked = gateway_plan(DnsPolicy::Block);
-        assert!(validate_ice_dns_compatibility(&blocked, "stun://203.0.113.7:3478").is_ok());
-        assert!(validate_ice_dns_compatibility(&blocked, "").is_ok());
-        let error = validate_ice_dns_compatibility(&blocked, "stun://stun.example.test:3478")
-            .expect_err("named ICE host must need DNS after capture");
+        assert!(
+            validate_turn_dns_compatibility(&blocked, "turn://user:pass@203.0.113.7:3478").is_ok()
+        );
+        assert!(validate_turn_dns_compatibility(&blocked, "").is_ok());
+        let error =
+            validate_turn_dns_compatibility(&blocked, "turn://user:pass@turn.example.test:3478")
+                .expect_err("named TURN host must need DNS after capture");
         assert!(error
             .to_string()
-            .contains("requires literal IPv4 ICE hosts"));
+            .contains("requires literal IPv4 TURN hosts"));
 
         let bypassed = gateway_plan(DnsPolicy::Bypass);
-        assert!(validate_ice_dns_compatibility(&bypassed, "stun://stun.example.test:3478").is_ok());
+        assert!(validate_turn_dns_compatibility(
+            &bypassed,
+            "turn://user:pass@turn.example.test:3478"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn gateway_requires_turn_for_relay_only_ice() {
+        assert!(validate_gateway_turn_server("turn://user:pass@203.0.113.7:3478").is_ok());
+        assert!(validate_gateway_turn_server(
+            "stun://203.0.113.7:3478;turn://user:pass@203.0.113.8:3478"
+        )
+        .is_ok());
+        let error = validate_gateway_turn_server("turn://203.0.113.7:3478")
+            .expect_err("unauthenticated TURN cannot gather a relay candidate");
+        assert!(error.to_string().contains("username and password"));
+        let error = validate_gateway_turn_server("stun://203.0.113.7:3478")
+            .expect_err("STUN alone cannot support relay-only ICE");
+        assert!(error.to_string().contains("requires at least one TURN"));
     }
 
     #[test]
@@ -604,20 +676,6 @@ mod tests {
             select_wintun_dll_path(None, Some(OsString::from("/environment/wintun.dll")))
                 .expect("select environment path");
         assert_eq!(fallback, Some(PathBuf::from("/environment/wintun.dll")));
-    }
-
-    #[test]
-    fn merged_underlay_targets_are_sorted_and_unique() {
-        let fixed = vec!["203.0.113.1".parse().expect("test IP")];
-        let dynamic = vec![
-            "198.51.100.2".parse().expect("test IP"),
-            "203.0.113.1".parse().expect("test IP"),
-            "2001:db8::1".parse().expect("test IPv6 candidate"),
-        ];
-        assert_eq!(merged_underlay_targets(&fixed, dynamic), vec![
-            "198.51.100.2".parse::<IpAddr>().expect("test IP"),
-            "203.0.113.1".parse::<IpAddr>().expect("test IP")
-        ]);
     }
 
     #[tokio::test]
@@ -638,15 +696,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn duplicate_ice_urls_share_one_valid_ipv4_result() {
-        let resolved = resolve_ice_server_ips("stun://127.0.0.1:3478;turn://127.0.0.1:3478")
-            .await
-            .expect("each duplicate ICE URL resolves independently");
+    async fn duplicate_turn_urls_share_one_valid_ipv4_result() {
+        let resolved = resolve_turn_server_ips(
+            "turn://first:pass@127.0.0.1:3478;turn://second:pass@127.0.0.1:3478",
+        )
+        .await
+        .expect("each duplicate TURN URL resolves independently");
         assert_eq!(resolved, vec![IpAddr::V4(Ipv4Addr::LOCALHOST)]);
     }
 
     #[tokio::test]
-    async fn candidate_admission_never_removes_an_earlier_candidate() {
+    async fn underlay_gate_installs_only_fixed_authorized_targets() {
         let updates = Arc::new(StdMutex::new(Vec::new()));
         let gate = GatewayUnderlayGate::new(
             RecordingUnderlayControl {
@@ -655,26 +715,21 @@ mod tests {
             vec!["192.0.2.10".parse().expect("fixed IP")],
         );
 
-        gate.admit_targets(&["198.51.100.20".parse().expect("first candidate")])
+        gate.install_fixed_targets()
             .await
-            .expect("first admission");
-        gate.admit_targets(&["203.0.113.30".parse().expect("second candidate")])
+            .expect("install fixed target");
+        gate.admit(&["192.0.2.10".parse().expect("fixed IP")])
             .await
-            .expect("second admission");
+            .expect("authorize fixed target");
+        let error = gate
+            .admit(&["198.51.100.20".parse().expect("remote target")])
+            .await
+            .expect_err("unconfigured remote target must not punch a route");
 
         assert_eq!(
             updates.lock().expect("recording underlay lock").as_slice(),
-            &[
-                vec![
-                    "192.0.2.10".parse::<IpAddr>().expect("fixed IP"),
-                    "198.51.100.20".parse().expect("first candidate"),
-                ],
-                vec![
-                    "192.0.2.10".parse::<IpAddr>().expect("fixed IP"),
-                    "198.51.100.20".parse().expect("first candidate"),
-                    "203.0.113.30".parse().expect("second candidate"),
-                ],
-            ]
+            &[vec!["192.0.2.10".parse::<IpAddr>().expect("fixed IP")]]
         );
+        assert!(error.to_string().contains("underlay_bypass_targets"));
     }
 }
