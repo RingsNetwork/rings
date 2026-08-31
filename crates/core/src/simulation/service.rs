@@ -8,6 +8,10 @@ use super::with_runtime_mut;
 use super::SimulationRuntimeError;
 use super::SimulationRuntimeGuard;
 
+// This deliberately slower actor-local cost keeps reassembly callbacks pending
+// for barrier and legacy pressure witnesses. The regular storm drain uses its
+// own 256 B/ms, 64 ms-capped transport-dispatch cost and disables this adapter
+// before applying the recovery bound; the two clocks model distinct effects.
 const REASSEMBLY_BYTES_PER_MS: usize = 32;
 const MAX_REASSEMBLY_FRAME_SERVICE_MS: u64 = 2_000;
 

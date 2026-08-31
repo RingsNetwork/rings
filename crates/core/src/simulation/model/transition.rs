@@ -380,31 +380,22 @@ impl SimState {
         parent: Option<SimEventId>,
         event_id: SimEventId,
     ) -> Result<Option<u64>, SimTransitionError> {
-        let active = self
+        let generations = &self.connection_generations;
+        let transfer = self
             .in_flight
-            .get(&transfer_id)
+            .get_mut(&transfer_id)
             .ok_or(SimTransitionError::UnknownTransfer { transfer_id })?;
-        if !self.frame_generation_active(active.pending.node, &active.pending.identity) {
+        if !frame_generation_active(
+            generations,
+            transfer.pending.node,
+            &transfer.pending.identity,
+        ) {
             return Err(SimTransitionError::InvalidTransferPhase {
                 transfer_id,
                 expected: "active-generation",
                 observed: "closed-generation",
             });
         }
-        if active.pending.node != node
-            || active.pending.class != SimTransferClass::Reassembly
-            || active.reassembly_event.is_some()
-        {
-            return Err(SimTransitionError::InvalidTransferPhase {
-                transfer_id,
-                expected: "dispatched-reassembly",
-                observed: "different-phase",
-            });
-        }
-        let transfer = self
-            .in_flight
-            .get_mut(&transfer_id)
-            .ok_or(SimTransitionError::UnknownTransfer { transfer_id })?;
         if transfer.pending.node != node
             || transfer.pending.class != SimTransferClass::Reassembly
             || transfer.reassembly_event.is_some()
@@ -733,11 +724,7 @@ impl SimState {
             .get(&edge)
             .is_some_and(|generation| generation.state == SimConnectionState::Active)
         {
-            return Err(SimTransitionError::InvalidLivenessVerdict {
-                node,
-                peer,
-                generation: "missing".to_owned(),
-            });
+            return Err(SimTransitionError::InvalidFailureInjection { node, peer });
         }
         self.injected_failures.insert(edge);
         self.failure_events.insert(edge, event_id);
@@ -757,10 +744,10 @@ impl SimState {
             self.peer_health.get(&edge),
             Some(SimPeerHealth::Failed | SimPeerHealth::Removed)
         ) {
-            return Err(SimTransitionError::InvalidLivenessVerdict {
+            return Err(SimTransitionError::InvalidDisconnect {
                 node,
                 peer,
-                generation: "healthy".to_owned(),
+                reason: super::SimDisconnectReason::HealthyPeer,
             });
         }
         let expected_parent = match self.peer_health.get(&edge) {
@@ -770,17 +757,17 @@ impl SimState {
             Some(SimPeerHealth::Failed) => self.failure_events.get(&edge).copied(),
             _ => None,
         }
-        .ok_or(SimTransitionError::InvalidLivenessVerdict {
+        .ok_or(SimTransitionError::InvalidDisconnect {
             node,
             peer,
-            generation: "missing-cause".to_owned(),
+            reason: super::SimDisconnectReason::MissingCause,
         })?;
         require_parent(parent, expected_parent)?;
         if !self.disconnects.insert(edge) {
-            return Err(SimTransitionError::InvalidLivenessVerdict {
+            return Err(SimTransitionError::InvalidDisconnect {
                 node,
                 peer,
-                generation: "duplicate-disconnect".to_owned(),
+                reason: super::SimDisconnectReason::Duplicate,
             });
         }
         self.repair_intents.insert(node, event_id);
@@ -857,13 +844,8 @@ impl SimState {
     fn transaction_deadline_missed(&self, transaction_id: uuid::Uuid, generation: &str) -> bool {
         self.pending
             .values()
-            .map(|pending| (pending, None))
-            .chain(
-                self.in_flight
-                    .values()
-                    .map(|transfer| (&transfer.pending, Some(transfer.dispatch_event))),
-            )
-            .any(|(pending, _)| {
+            .chain(self.in_flight.values().map(|transfer| &transfer.pending))
+            .any(|pending| {
                 pending.identity.transaction_id == Some(transaction_id)
                     && pending.identity.connection_generation == generation
                     && pending.class == SimTransferClass::Control
@@ -874,15 +856,7 @@ impl SimState {
     }
 
     fn frame_generation_active(&self, node: SimNodeId, identity: &SimFrameIdentity) -> bool {
-        self.connection_generations
-            .iter()
-            .any(|((local, _), known)| {
-                *local == node
-                    && known.generation == identity.connection_generation
-                    && known.local_did == identity.local_did
-                    && known.peer_did == identity.peer_did
-                    && known.state == SimConnectionState::Active
-            })
+        frame_generation_active(&self.connection_generations, node, identity)
     }
 
     fn generation_matches_edge(&self, node: SimNodeId, peer: SimNodeId, generation: &str) -> bool {
@@ -927,6 +901,20 @@ fn validate_parent(parent: Option<SimEventId>, next: SimEventId) -> Result<(), S
         }
     }
     Ok(())
+}
+
+fn frame_generation_active(
+    generations: &BTreeMap<(SimNodeId, SimNodeId), super::SimConnectionGeneration>,
+    node: SimNodeId,
+    identity: &SimFrameIdentity,
+) -> bool {
+    generations.iter().any(|((local, _), known)| {
+        *local == node
+            && known.generation == identity.connection_generation
+            && known.local_did == identity.local_did
+            && known.peer_did == identity.peer_did
+            && known.state == SimConnectionState::Active
+    })
 }
 
 fn checked_add(left: u64, right: u64) -> Result<u64, SimTransitionError> {

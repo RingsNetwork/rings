@@ -63,6 +63,11 @@ const CHUNK_MESSAGE_SIZE: usize = 8 * 1024;
 const ENTRY_PAYLOAD_BYTES: usize = 8 * 1024;
 const MAX_DRAIN_STEPS: usize = 100_000;
 const QUIESCENT_POLLS: usize = 8;
+// The normal storm drain models transport dispatch at 256 B/ms and caps each
+// frame at 64 ms; that cap is the service term in `recovery_bound_ms`.
+// Reassembly pressure separately uses the slower actor cost in
+// `simulation::service` only while barrier/legacy witnesses deliberately hold
+// inbound work pending, and disables it before bounded recovery is measured.
 const VIRTUAL_SERVICE_BYTES_PER_MS: usize = 256;
 const MAX_FRAME_SERVICE_MS: u64 = 64;
 
@@ -458,7 +463,7 @@ fn entry_owned_by(owner: &Node, label: &str) -> PlacedEntry {
     panic!("failed to derive an entry owned by {}", owner.did());
 }
 
-async fn submit_workload(nodes: &[Node], kind: ScenarioTopology) -> usize {
+async fn submit_workload(nodes: &[Node], kind: ScenarioTopology) {
     let edges = workload_edges(nodes, kind);
     for (job, &(sender, receiver)) in edges.iter().enumerate() {
         let receiver_did = nodes[receiver].did();
@@ -497,7 +502,6 @@ async fn submit_workload(nodes: &[Node], kind: ScenarioTopology) -> usize {
             .await
             .expect("control probe must enter the real outbound scheduler");
     }
-    edges.len()
 }
 
 fn network_busy(nodes: &[Node]) -> bool {
@@ -831,7 +835,13 @@ mod pressure;
 mod scenario;
 mod trace;
 
-use artifacts::*;
+use artifacts::persist_inflight_trace_artifact;
+use artifacts::persist_named_trace_artifact;
+use artifacts::persist_runtime_artifact;
+use artifacts::persist_trace_artifact;
+use artifacts::runtime_replay_snapshot;
+use artifacts::FailureState;
+use artifacts::ScenarioFailureGuard;
 use legacy::legacy_feedback_loop_state;
 use pressure::exercise_barrier_control_exemption;
 use pressure::exercise_bounded_control_burst;

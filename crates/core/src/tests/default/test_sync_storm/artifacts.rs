@@ -2,6 +2,44 @@
 
 use super::*;
 
+fn artifact_directory() -> Result<Option<std::path::PathBuf>, String> {
+    let Ok(directory) = std::env::var("SYNC_STORM_TRACE_DIR") else {
+        return Ok(None);
+    };
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("create artifact directory {directory}: {error}"))?;
+    Ok(Some(std::path::PathBuf::from(directory)))
+}
+
+fn artifact_path(
+    filename: impl AsRef<std::path::Path>,
+) -> Result<Option<std::path::PathBuf>, String> {
+    Ok(artifact_directory()?.map(|directory| directory.join(filename)))
+}
+
+fn identified_artifact_path(
+    runtime: &SimulationRuntimeGuard,
+    prefix: &str,
+    suffix: &str,
+) -> Result<Option<std::path::PathBuf>, String> {
+    let Some(directory) = artifact_directory()? else {
+        return Ok(None);
+    };
+    let identity = runtime
+        .artifact_identity()
+        .map_err(|error| error.to_string())?;
+    Ok(Some(
+        directory.join(format!("{prefix}-{identity}{suffix}.json")),
+    ))
+}
+
+fn persist_json(path: &std::path::Path, artifact: &impl serde::Serialize) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(artifact)
+        .map_err(|error| format!("serialize artifact {}: {error}", path.display()))?;
+    std::fs::write(path, bytes)
+        .map_err(|error| format!("write artifact {}: {error}", path.display()))
+}
+
 pub(super) type FailureState = std::rc::Rc<std::cell::RefCell<FailureDiagnostic>>;
 
 pub(super) struct FailureDiagnostic {
@@ -98,27 +136,13 @@ fn persist_failure_artifact(
     runtime: &SimulationRuntimeGuard,
     failure: &serde_json::Value,
 ) -> Result<(), String> {
-    let Ok(directory) = std::env::var("SYNC_STORM_TRACE_DIR") else {
+    let Some(path) = identified_artifact_path(runtime, "failure", "")? else {
         return Ok(());
     };
-    std::fs::create_dir_all(&directory)
-        .map_err(|error| format!("create failure directory {directory}: {error}"))?;
-    let identity = runtime
-        .artifact_identity()
-        .map_err(|error| error.to_string())?;
-    let path = std::path::Path::new(&directory).join(format!("failure-{identity}.json"));
-    let bytes = serde_json::to_vec_pretty(failure)
-        .map_err(|error| format!("serialize failure {}: {error}", path.display()))?;
-    std::fs::write(&path, bytes)
-        .map_err(|error| format!("write failure {}: {error}", path.display()))
+    persist_json(&path, failure)
 }
 
 pub(super) fn persist_trace_artifact(outcome: &ScenarioOutcome) -> Result<(), String> {
-    let Ok(directory) = std::env::var("SYNC_STORM_TRACE_DIR") else {
-        return Ok(());
-    };
-    std::fs::create_dir_all(&directory)
-        .map_err(|error| format!("create trace directory {directory}: {error}"))?;
     let filename = format!(
         "{}-n{}-seed{}-{}-{}.json",
         outcome.topology.name(),
@@ -127,7 +151,9 @@ pub(super) fn persist_trace_artifact(outcome: &ScenarioOutcome) -> Result<(), St
         outcome.profile.name(),
         outcome.strategy.name(),
     );
-    let path = std::path::Path::new(&directory).join(filename);
+    let Some(path) = artifact_path(filename)? else {
+        return Ok(());
+    };
     let trace = outcome
         .state
         .trace()
@@ -150,33 +176,22 @@ pub(super) fn persist_trace_artifact(outcome: &ScenarioOutcome) -> Result<(), St
         "overload_witness": outcome.overload_witness,
         "diagnostic": outcome.diagnostic(),
     });
-    let bytes = serde_json::to_vec_pretty(&artifact)
-        .map_err(|error| format!("serialize artifact {}: {error}", path.display()))?;
-    std::fs::write(&path, bytes).map_err(|error| format!("write trace {}: {error}", path.display()))
+    persist_json(&path, &artifact)
 }
 
 pub(super) fn persist_runtime_artifact(
     label: &str,
     runtime: &SimulationRuntimeGuard,
 ) -> Result<(), String> {
-    let Ok(directory) = std::env::var("SYNC_STORM_TRACE_DIR") else {
+    let Some(path) = identified_artifact_path(runtime, "runtime", &format!("-{label}"))? else {
         return Ok(());
     };
-    std::fs::create_dir_all(&directory)
-        .map_err(|error| format!("create trace directory {directory}: {error}"))?;
     let artifact = serde_json::json!({
         "label": label,
         "scenario": runtime.artifact_context().map_err(|error| error.to_string())?,
         "runtime": runtime_replay_snapshot(runtime)?,
     });
-    let identity = runtime
-        .artifact_identity()
-        .map_err(|error| error.to_string())?;
-    let path = std::path::Path::new(&directory).join(format!("runtime-{identity}-{label}.json"));
-    let bytes = serde_json::to_vec_pretty(&artifact)
-        .map_err(|error| format!("serialize runtime artifact {}: {error}", path.display()))?;
-    std::fs::write(&path, bytes)
-        .map_err(|error| format!("write runtime artifact {}: {error}", path.display()))
+    persist_json(&path, &artifact)
 }
 
 pub(super) fn runtime_replay_snapshot(
@@ -201,15 +216,9 @@ pub(super) fn persist_inflight_trace_artifact(
     runtime: &SimulationRuntimeGuard,
     state: &SimState,
 ) -> Result<(), String> {
-    let Ok(directory) = std::env::var("SYNC_STORM_TRACE_DIR") else {
+    let Some(path) = identified_artifact_path(runtime, "inflight", &format!("-{label}"))? else {
         return Ok(());
     };
-    std::fs::create_dir_all(&directory)
-        .map_err(|error| format!("create trace directory {directory}: {error}"))?;
-    let identity = runtime
-        .artifact_identity()
-        .map_err(|error| error.to_string())?;
-    let path = std::path::Path::new(&directory).join(format!("inflight-{identity}-{label}.json"));
     let trace = state
         .trace()
         .canonical_json()
@@ -220,9 +229,7 @@ pub(super) fn persist_inflight_trace_artifact(
             .map_err(|error| format!("decode trace {}: {error}", path.display()))?,
         "runtime": runtime_replay_snapshot(runtime)?,
     });
-    let bytes = serde_json::to_vec_pretty(&artifact)
-        .map_err(|error| format!("serialize trace {}: {error}", path.display()))?;
-    std::fs::write(&path, bytes).map_err(|error| format!("write trace {}: {error}", path.display()))
+    persist_json(&path, &artifact)
 }
 
 pub(super) fn persist_named_trace_artifact(
@@ -230,21 +237,17 @@ pub(super) fn persist_named_trace_artifact(
     runtime: &SimulationRuntimeGuard,
     state: &SimState,
 ) -> Result<(), String> {
-    let Ok(directory) = std::env::var("SYNC_STORM_TRACE_DIR") else {
+    let Some(path) = artifact_path(format!("{label}.json"))? else {
         return Ok(());
     };
-    std::fs::create_dir_all(&directory)
-        .map_err(|error| format!("create trace directory {directory}: {error}"))?;
-    let path = std::path::Path::new(&directory).join(format!("{label}.json"));
     let trace = state
         .trace()
         .canonical_json()
         .map_err(|error| format!("serialize trace {}: {error}", path.display()))?;
-    let bytes = serde_json::to_vec_pretty(&serde_json::json!({
+    let artifact = serde_json::json!({
         "scenario": runtime.artifact_context().map_err(|error| error.to_string())?,
         "trace": serde_json::from_slice::<serde_json::Value>(&trace)
             .map_err(|error| format!("decode trace {}: {error}", path.display()))?,
-    }))
-    .map_err(|error| format!("serialize trace {}: {error}", path.display()))?;
-    std::fs::write(&path, bytes).map_err(|error| format!("write trace {}: {error}", path.display()))
+    });
+    persist_json(&path, &artifact)
 }

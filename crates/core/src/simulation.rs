@@ -28,6 +28,9 @@ mod spawn;
 use delivery::inspect_message;
 use delivery::refresh_delivery_cache;
 use delivery::remove_cached_delivery;
+pub(crate) use delivery::DeliveryStrategy;
+pub(crate) use delivery::ScheduledDelivery;
+pub(crate) use delivery::ScheduledDeliveryClass;
 pub(crate) use observations::observe_inbound_capacity;
 pub(crate) use observations::observe_outbound_global_capacity;
 pub(crate) use observations::observe_outbound_peer_capacity;
@@ -363,6 +366,12 @@ pub(crate) enum SimulationRuntimeError {
     /// A delivery choice was requested for an empty queue.
     #[error("cannot choose a delivery from an empty controlled queue")]
     EmptyDeliveryQueue,
+    /// A stable delivery sequence was absent from the controlled queue.
+    #[error("controlled delivery sequence {sequence} is not queued")]
+    UnknownDelivery {
+        /// Stable controlled-queue sequence requested by the harness.
+        sequence: u64,
+    },
     /// A platform-sized delivery count could not be represented by the seeded scheduler.
     #[error("pending delivery count {pending} cannot be represented by the scheduler")]
     PendingDeliveryCountOverflow {
@@ -383,70 +392,6 @@ pub(crate) enum SimulationRuntimeError {
         /// Effect boundary that was not configured deterministically.
         effect: &'static str,
     },
-}
-
-/// Delivery classes visible to deterministic schedule policies.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
-pub(crate) enum ScheduledDeliveryClass {
-    /// Connection or data-channel lifecycle callback.
-    Lifecycle,
-    /// Chord or liveness control payload.
-    Control,
-    /// Storage synchronization payload.
-    Storage,
-    /// One chunk frame requiring reassembly.
-    Reassembly,
-    /// End-to-end encrypted payload.
-    E2e,
-    /// Application payload.
-    Application,
-}
-
-/// Reproducible policies for selecting the next real dummy-transport event.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum DeliveryStrategy {
-    /// Oldest queued event first.
-    Fifo,
-    /// Newest queued event first.
-    Lifo,
-    /// Seeded selection owned by [`SimulationRuntimeGuard`].
-    Seeded,
-    /// Prefer non-control work to maximize control latency reproducibly.
-    AdversarialControlLast,
-}
-
-impl DeliveryStrategy {
-    /// Stable name used by trace artifacts and replay commands.
-    pub(crate) const fn name(self) -> &'static str {
-        match self {
-            Self::Fifo => "fifo",
-            Self::Lifo => "lifo",
-            Self::Seeded => "seeded",
-            Self::AdversarialControlLast => "adversarial-control-last",
-        }
-    }
-}
-
-/// Stable metadata for a queued event selected by the simulation scheduler.
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
-pub(crate) struct ScheduledDelivery {
-    /// Current queue index passed to dummy delivery.
-    pub(crate) index: usize,
-    /// Monotonic enqueue sequence, stable across removals.
-    pub(crate) sequence: u64,
-    /// Stable dummy connection generation receiving this event.
-    pub(crate) connection_generation: String,
-    /// Production transaction identifier decoded from message bytes.
-    pub(crate) transaction_id: Option<uuid::Uuid>,
-    /// Semantic class decoded through the production wire format.
-    pub(crate) class: ScheduledDeliveryClass,
-    /// Exact core payload bytes, or zero for lifecycle events.
-    pub(crate) bytes: usize,
-    /// Virtual monotonic production submission time, including admission and
-    /// scheduler waiting; lifecycle events fall back to dummy enqueue time.
-    pub(crate) enqueued_virtual_ms: u64,
-    /// Virtual deadline for control delivery, when this class has one.
-    pub(crate) deadline_virtual_ms: Option<u64>,
 }
 
 /// Owns one deterministic simulation runtime on the current OS thread.
@@ -556,12 +501,11 @@ impl SimulationRuntimeGuard {
                     .copied(),
             };
             let sequence = sequence.ok_or(SimulationRuntimeError::EmptyDeliveryQueue)?;
-            let mut delivery = runtime
+            let delivery = runtime
                 .delivery_cache
                 .get(&sequence)
                 .cloned()
-                .ok_or(SimulationRuntimeError::EmptyDeliveryQueue)?;
-            delivery.index = 0;
+                .ok_or(SimulationRuntimeError::UnknownDelivery { sequence })?;
             Ok(Some(delivery))
         })?
     }
@@ -576,15 +520,12 @@ impl SimulationRuntimeGuard {
             runtime
                 .delivery_order
                 .iter()
-                .enumerate()
-                .map(|(index, sequence)| {
-                    let mut delivery = runtime
-                        .delivery_cache
-                        .get(sequence)
-                        .cloned()
-                        .ok_or(SimulationRuntimeError::EmptyDeliveryQueue)?;
-                    delivery.index = index;
-                    Ok(delivery)
+                .map(|sequence| {
+                    runtime.delivery_cache.get(sequence).cloned().ok_or(
+                        SimulationRuntimeError::UnknownDelivery {
+                            sequence: *sequence,
+                        },
+                    )
                 })
                 .collect()
         })?
@@ -600,15 +541,12 @@ impl SimulationRuntimeGuard {
             let newly_reported = std::mem::take(&mut runtime.unreported_deliveries);
             newly_reported
                 .into_iter()
-                .enumerate()
-                .map(|(index, sequence)| {
-                    let mut delivery = runtime
+                .map(|sequence| {
+                    runtime
                         .delivery_cache
                         .get(&sequence)
                         .cloned()
-                        .ok_or(SimulationRuntimeError::EmptyDeliveryQueue)?;
-                    delivery.index = index;
-                    Ok(delivery)
+                        .ok_or(SimulationRuntimeError::UnknownDelivery { sequence })
                 })
                 .collect()
         })?
@@ -809,6 +747,7 @@ mod tests {
     use super::inspect_message;
     use super::DeliveryStrategy;
     use super::ProtectionProfile;
+    use super::ScheduledDelivery;
     use super::ScheduledDeliveryClass;
     use super::SimulationRuntimeError;
     use super::SimulationRuntimeGuard;
@@ -913,6 +852,26 @@ mod tests {
         assert!(!guard
             .take_reassembly_advance_observed(transaction_id)
             .expect("same-UUID replay must not reuse the accepted occurrence"));
+    }
+
+    #[test]
+    fn stale_delivery_identity_reports_the_unknown_sequence() {
+        let guard = SimulationRuntimeGuard::enter(6, 100, ProtectionProfile::ALL_ENABLED)
+            .expect("runtime must install");
+        let stale = ScheduledDelivery {
+            sequence: 41,
+            connection_generation: "retired-generation".to_owned(),
+            transaction_id: None,
+            class: ScheduledDeliveryClass::Lifecycle,
+            bytes: 0,
+            enqueued_virtual_ms: 0,
+            deadline_virtual_ms: None,
+        };
+
+        assert!(matches!(
+            guard.discard(&stale),
+            Err(SimulationRuntimeError::UnknownDelivery { sequence: 41 })
+        ));
     }
 
     #[tokio::test(start_paused = true)]

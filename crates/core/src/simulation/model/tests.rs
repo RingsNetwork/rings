@@ -334,6 +334,74 @@ fn disconnect_and_repair_require_exact_causal_parents() {
 }
 
 #[test]
+fn failure_and_disconnect_rejections_preserve_domain_semantics() {
+    let inactive = SimState::default().transition(SimAction::InjectPeerFailure {
+        node: SimNodeId(0),
+        peer: SimNodeId(1),
+    });
+    assert!(matches!(
+        inactive,
+        Err(SimTransitionError::InvalidFailureInjection {
+            node: SimNodeId(0),
+            peer: SimNodeId(1),
+        })
+    ));
+
+    let state = active_state(0);
+    let healthy = state.clone().transition(SimAction::Disconnect {
+        node: SimNodeId(0),
+        peer: SimNodeId(1),
+        causal_parent: Some(SimEventId(1)),
+    });
+    assert!(matches!(
+        healthy,
+        Err(SimTransitionError::InvalidDisconnect {
+            reason: SimDisconnectReason::HealthyPeer,
+            ..
+        })
+    ));
+
+    let (state, failure) = transition(state, SimAction::InjectPeerFailure {
+        node: SimNodeId(0),
+        peer: SimNodeId(1),
+    });
+    let (state, _) = transition(state, SimAction::Disconnect {
+        node: SimNodeId(0),
+        peer: SimNodeId(1),
+        causal_parent: Some(failure),
+    });
+    let duplicate = state.transition(SimAction::Disconnect {
+        node: SimNodeId(0),
+        peer: SimNodeId(1),
+        causal_parent: Some(failure),
+    });
+    assert!(matches!(
+        duplicate,
+        Err(SimTransitionError::InvalidDisconnect {
+            reason: SimDisconnectReason::Duplicate,
+            ..
+        })
+    ));
+
+    let mut missing_cause = active_state(0);
+    missing_cause
+        .peer_health
+        .insert((SimNodeId(0), SimNodeId(1)), SimPeerHealth::Failed);
+    let missing_cause = missing_cause.transition(SimAction::Disconnect {
+        node: SimNodeId(0),
+        peer: SimNodeId(1),
+        causal_parent: Some(SimEventId(1)),
+    });
+    assert!(matches!(
+        missing_cause,
+        Err(SimTransitionError::InvalidDisconnect {
+            reason: SimDisconnectReason::MissingCause,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn stop_repair_and_yield_preconditions_are_checked() {
     let state = active_state(0);
     let (state, stop) = transition(state, SimAction::StopStorm {

@@ -39,7 +39,6 @@ async fn run_storm_and_recovery(
     nodes: &[Node],
     kind: ScenarioTopology,
     strategy: DeliveryStrategy,
-    expected_entries: usize,
     expected_endpoints: &BTreeMap<String, (String, String)>,
     driver: &mut TraceDriver,
 ) -> u128 {
@@ -51,7 +50,7 @@ async fn run_storm_and_recovery(
         .await
         .expect("liveness idle interval must advance deterministically");
     driver.advance_virtual(idle_ms);
-    assert_eq!(submit_workload(nodes, kind).await, expected_entries);
+    submit_workload(nodes, kind).await;
     let storm_backlog = runtime
         .new_pending_deliveries()
         .expect("storm backlog must remain observable before maintenance");
@@ -176,16 +175,8 @@ pub(super) async fn run_scenario(
     );
     let (overload_witness, pressure_snapshot) =
         exercise_pressure_suite(&runtime, &nodes, kind, &mut driver).await;
-    let recovery_elapsed_ms = run_storm_and_recovery(
-        &runtime,
-        &nodes,
-        kind,
-        strategy,
-        expected_entries,
-        &endpoints,
-        &mut driver,
-    )
-    .await;
+    let recovery_elapsed_ms =
+        run_storm_and_recovery(&runtime, &nodes, kind, strategy, &endpoints, &mut driver).await;
     let persisted_by_node = count_persisted(&nodes).await;
     let persisted_entries = persisted_by_node.iter().sum();
     driver.observe_production_handlers(&runtime);

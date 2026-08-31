@@ -308,6 +308,20 @@ pub(crate) struct SimOutput {
     pub(crate) control_latency_ms: Option<u64>,
 }
 
+/// Typed reason a modeled disconnect cannot follow the current peer state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub(crate) enum SimDisconnectReason {
+    /// The peer has neither failed nor been removed by liveness.
+    #[error("peer is still healthy")]
+    HealthyPeer,
+    /// The peer state has no matching failure or liveness event.
+    #[error("the disconnect has no causal failure event")]
+    MissingCause,
+    /// The same directed peer edge was already disconnected.
+    #[error("the peer edge was already disconnected")]
+    Duplicate,
+}
+
 /// Structural failures that make a trace invalid rather than unsafe.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub(crate) enum SimTransitionError {
@@ -374,6 +388,24 @@ pub(crate) enum SimTransitionError {
         peer: SimNodeId,
         /// Stable production generation.
         generation: String,
+    },
+    /// Failure injection named an edge without an active generation.
+    #[error("cannot inject a peer failure for inactive edge {node:?}->{peer:?}")]
+    InvalidFailureInjection {
+        /// Local node requesting failure injection.
+        node: SimNodeId,
+        /// Remote peer that has no active generation.
+        peer: SimNodeId,
+    },
+    /// Disconnect contradicted the peer lifecycle or its causal evidence.
+    #[error("invalid disconnect for {node:?}->{peer:?}: {reason}")]
+    InvalidDisconnect {
+        /// Local node disconnecting the edge.
+        node: SimNodeId,
+        /// Remote peer being disconnected.
+        peer: SimNodeId,
+        /// Typed lifecycle contradiction.
+        reason: SimDisconnectReason,
     },
     /// Repair was scheduled without a preceding removal intent.
     #[error("node {node:?} scheduled repair without a removal intent")]
