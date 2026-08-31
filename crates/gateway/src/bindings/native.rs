@@ -6,6 +6,8 @@ use std::io::ErrorKind;
 use std::io::Write;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
+#[cfg(target_os = "macos")]
+use std::net::Ipv6Addr;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -219,6 +221,16 @@ impl NativeTunnelControl {
                 .layer(Layer::L3)
                 .mtu(plan.mtu.get())
                 .ipv4(address, prefix, None::<Ipv4Addr>);
+            #[cfg(target_os = "macos")]
+            let builder = if plan.routing_mode == crate::RoutingMode::Disabled {
+                builder
+            } else {
+                // macOS rejects an AF_INET6 interface route with ENETUNREACH until the utun is
+                // IPv6-capable. This deterministic /128 ULA is only a capability anchor: the two
+                // global IPv6 capture halves remain unscoped, and the IPv4-only classifier drops
+                // every IPv6 packet they deliver. tun-rs configures it through SIOCAIFADDR_IN6.
+                builder.ipv6(macos_capture_anchor(address), 128)
+            };
             let device = configure_builder(builder, &self.options)
                 .build_async()
                 .map_err(|error| GatewayError::platform("create-packet-device", error))?;
@@ -646,6 +658,21 @@ fn capture_route(network: IpNet, interface_index: u32) -> Route {
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     let route = route.with_metric(0);
     route
+}
+
+#[cfg(target_os = "macos")]
+fn macos_capture_anchor(address: Ipv4Addr) -> Ipv6Addr {
+    let octets = address.octets();
+    Ipv6Addr::new(
+        0xfd72,
+        0x696e,
+        0x6773,
+        0,
+        0,
+        0,
+        u16::from_be_bytes([octets[0], octets[1]]),
+        u16::from_be_bytes([octets[2], octets[3]]),
+    )
 }
 
 #[cfg(target_os = "linux")]

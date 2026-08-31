@@ -123,6 +123,18 @@ fn missing_interface_and_missing_route_errors_satisfy_cleanup() {
     )));
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_ipv6_capture_uses_a_stable_ula_without_scoping_the_global_route() {
+    let first = macos_capture_anchor(Ipv4Addr::new(100, 64, 0, 1));
+    let second = macos_capture_anchor(Ipv4Addr::new(100, 64, 0, 2));
+    assert!(first.is_unique_local());
+    assert_ne!(first, second);
+
+    let route = capture_route("::/1".parse().expect("IPv6 capture half"), 42);
+    assert!(!route.if_scope());
+}
+
 #[cfg(target_os = "windows")]
 #[test]
 fn interrupted_windows_commit_recovers_backup_ledger() {
