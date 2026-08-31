@@ -189,6 +189,9 @@ pub enum Error {
     /// A periodic registration task observed a cooperative stop request.
     #[error("registration task stopped")]
     RegistrationStopped = 815,
+    /// Loading or explicitly flushing local peer measurements failed.
+    #[error("Measurement runtime error: {0}")]
+    MeasurementRuntime(#[from] crate::measure::MeasureRuntimeError) = 816,
     /// Creating a file on disk failed.
     #[error("Create File Error: {0}")]
     CreateFileError(String) = 900,

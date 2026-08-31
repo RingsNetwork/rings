@@ -1,3 +1,4 @@
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -12,19 +13,98 @@ pub type MeasureImpl = Arc<dyn BehaviourJudgement + Send + Sync>;
 #[cfg(all(feature = "wasm", target_family = "wasm"))]
 pub type MeasureImpl = Arc<dyn BehaviourJudgement>;
 
+use rings_measure::ApplyOutcome;
+use rings_measure::MeasureError;
+
+use super::Authentication;
 use super::MeasureCounter;
+use super::MeasurementBatch;
+use super::MeasurementEvent;
+use super::PeerMeasurement;
+use super::PeerMeasurementPage;
 use super::PeerQuality;
 
-/// `Measure` is used to assess the reliability of peers by counting their behaviour.
-/// It currently count the number of sent and received messages in a given period (1 hour).
-/// The method [Measure::incr] should be called in the proper places.
+/// Runtime boundary for local peer-credit and reliability observations.
 #[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
 pub trait Measure {
-    /// `incr` increments the counter of the given peer.
+    /// Increment a legacy counter whose peer attribution was already established.
+    ///
+    /// New transport code should use [`Self::record`] so the authentication
+    /// state remains explicit at the runtime boundary.
     async fn incr(&self, did: Did, counter: MeasureCounter);
     /// `get_count` returns the counter of the given peer.
     async fn get_count(&self, did: Did, counter: MeasureCounter) -> u64;
+
+    /// Record one logical transport event with its explicit identity proof state.
+    ///
+    /// Implementations backed by [`rings_measure::MeasurementLedger`] should
+    /// override this method so useful-byte credits are retained. The default is
+    /// a compatibility bridge for counter-only implementations: because
+    /// they have no retained-peer set, they observe every proof-permitted local
+    /// failure, while a ledger-backed override enforces known-peer retention.
+    async fn record(
+        &self,
+        did: Did,
+        authentication: Authentication,
+        event: MeasurementEvent,
+    ) -> Result<ApplyOutcome, MeasureError> {
+        if !authentication.permits(event) {
+            return Ok(ApplyOutcome::IgnoredUnattributable);
+        }
+        self.incr(did, MeasureCounter::from_event(event)).await;
+        Ok(ApplyOutcome::Applied)
+    }
+
+    /// Record a homogeneous batch as one atomic logical transition.
+    ///
+    /// The provided compatibility implementation is deliberately non-atomic and
+    /// projects only occurrence counts through [`Self::incr`]. Byte-aware or
+    /// transactional implementations must override it to preserve aggregate
+    /// useful bytes and all-or-nothing application.
+    async fn record_batch(
+        &self,
+        did: Did,
+        authentication: Authentication,
+        batch: MeasurementBatch,
+    ) -> Result<ApplyOutcome, MeasureError> {
+        if !authentication.permits(batch.event()) {
+            return Ok(ApplyOutcome::IgnoredUnattributable);
+        }
+        let counter = MeasureCounter::from_event(batch.event());
+        for _ in 0..batch.occurrences().get() {
+            self.incr(did, counter).await;
+        }
+        Ok(ApplyOutcome::Applied)
+    }
+
+    /// Return the projected local measurement for one peer.
+    ///
+    /// Counter-only compatibility implementations have no complete policy or
+    /// credit state and therefore return no projection by default.
+    async fn peer_measurement(&self, _did: Did) -> Result<Option<PeerMeasurement>, MeasureError> {
+        Ok(None)
+    }
+
+    /// Return every retained local peer measurement.
+    ///
+    /// Counter-only compatibility implementations cannot enumerate their key
+    /// space and therefore return an empty vector by default.
+    async fn peer_measurements(&self) -> Result<Vec<PeerMeasurement>, MeasureError> {
+        Ok(Vec::new())
+    }
+
+    /// Return one bounded page after an exclusive DID cursor.
+    ///
+    /// Counter-only compatibility implementations cannot enumerate their key
+    /// space and therefore return an empty page by default.
+    async fn peer_measurements_page(
+        &self,
+        _after: Option<Did>,
+        _limit: NonZeroUsize,
+    ) -> Result<PeerMeasurementPage, MeasureError> {
+        Ok(PeerMeasurementPage::default())
+    }
 }
 
 /// `BehaviourJudgement` classifies local evidence about a peer.
@@ -36,57 +116,4 @@ pub trait BehaviourJudgement: Measure {
     /// This value is advisory. It orders connection attempts and does not gate
     /// Chord membership, routing, ownership, or storage placement.
     async fn quality(&self, did: Did) -> PeerQuality;
-
-    /// Return the legacy boolean judgement for callers that need a yes/no decision.
-    ///
-    /// This method is intentionally independent from [Self::quality]. Mapping
-    /// the three-valued quality order to a boolean would turn advisory DHT
-    /// scheduling evidence into a hidden gating rule.
-    async fn good(&self, did: Did) -> bool;
-}
-
-/// `ConnectBehaviour` trait offers a default implementation for the `good` method, providing a judgement
-/// based on a node's behavior in establishing connections.
-/// The "goodness" of a node is measured by comparing disconnection counts against a given threshold.
-#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
-#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
-pub trait ConnectBehaviour<const THRESHOLD: u64>: Measure {
-    /// This asynchronous method returns a boolean indicating whether the node identified by `did` has a satisfactory connection behavior.
-    async fn good(&self, did: Did) -> bool {
-        let conn = self.get_count(did, MeasureCounter::Connect).await;
-        let disconn = self.get_count(did, MeasureCounter::Disconnected).await;
-        tracing::debug!(
-            "[ConnectBehaviour] in threshold: {:}, connect: {:}, disconn: {:}",
-            THRESHOLD,
-            conn,
-            disconn
-        );
-        disconn < THRESHOLD
-    }
-}
-
-/// `MessageSendBehaviour` trait provides a default implementation for the `good` method, judging a node's
-/// behavior based on its message sending capabilities.
-/// The "goodness" of a node is measured by comparing the sent and failed-to-send counts against a given threshold.
-#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
-#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
-pub trait MessageSendBehaviour<const THRESHOLD: u64>: Measure {
-    /// This asynchronous method returns a boolean indicating whether the node identified by `did` has a satisfactory message sending behavior.
-    async fn good(&self, did: Did) -> bool {
-        let failed = self.get_count(did, MeasureCounter::FailedToSend).await;
-        failed < THRESHOLD
-    }
-}
-
-/// `MessageRecvBehaviour` trait provides a default implementation for the `good` method, assessing a node's
-/// behavior based on its message receiving capabilities.
-/// The "goodness" of a node is measured by comparing the received and failed-to-receive counts against a given threshold.
-#[cfg_attr(all(feature = "wasm", target_family = "wasm"), async_trait(?Send))]
-#[cfg_attr(not(all(feature = "wasm", target_family = "wasm")), async_trait)]
-pub trait MessageRecvBehaviour<const THRESHOLD: u64>: Measure {
-    /// This asynchronous method returns a boolean indicating whether the node identified by `did` has a satisfactory message receiving behavior.
-    async fn good(&self, did: Did) -> bool {
-        let failed = self.get_count(did, MeasureCounter::FailedToReceive).await;
-        failed < THRESHOLD
-    }
 }

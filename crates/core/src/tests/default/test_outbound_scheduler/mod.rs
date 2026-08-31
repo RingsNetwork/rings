@@ -520,10 +520,6 @@ impl BehaviourJudgement for FailedSendMeasure {
     async fn quality(&self, _did: Did) -> PeerQuality {
         PeerQuality::Unknown
     }
-
-    async fn good(&self, _did: Did) -> bool {
-        true
-    }
 }
 
 #[async_trait]
@@ -542,10 +538,6 @@ impl Measure for PendingMeasure {
 impl BehaviourJudgement for PendingMeasure {
     async fn quality(&self, _did: Did) -> PeerQuality {
         PeerQuality::Unknown
-    }
-
-    async fn good(&self, _did: Did) -> bool {
-        true
     }
 }
 

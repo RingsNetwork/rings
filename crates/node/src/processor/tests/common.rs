@@ -366,7 +366,9 @@ pub(super) async fn prepare_measured_processor() -> Processor {
         3,
     );
     let storage = Box::new(MemStorage::new());
-    let measure = PeriodicMeasure::new(Box::new(MemStorage::new()));
+    let measure = PeriodicMeasure::new(Box::new(MemStorage::new()))
+        .await
+        .unwrap();
 
     ProcessorBuilder::from_config(&config)
         .unwrap()

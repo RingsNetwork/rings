@@ -4,6 +4,7 @@
 //! For the browser environment, we use `InternalRpcHandler` to process the requests.
 
 use std::collections::HashSet;
+use std::num::NonZeroUsize;
 use std::str::FromStr;
 
 use async_trait::async_trait;
@@ -26,6 +27,9 @@ use rings_rpc::protos::rings_node_handler::HandleRpc;
 use crate::error::Error as ServerError;
 use crate::processor::Processor;
 use crate::seed::Seed;
+
+const DEFAULT_PEER_MEASUREMENT_PAGE_SIZE: u32 = 100;
+const MAX_PEER_MEASUREMENT_PAGE_SIZE: u32 = 1_000;
 
 #[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
 #[cfg_attr(not(all(feature = "browser", target_family = "wasm")), async_trait)]
@@ -397,12 +401,32 @@ impl HandleRpc<PeerMeasurementRequest, PeerMeasurementResponse> for Processor {
 impl HandleRpc<ListPeerMeasurementsRequest, ListPeerMeasurementsResponse> for Processor {
     async fn handle_rpc(
         &self,
-        _req: ListPeerMeasurementsRequest,
+        req: ListPeerMeasurementsRequest,
     ) -> Result<ListPeerMeasurementsResponse> {
+        let (after, limit) = peer_measurement_page_request(&req)?;
+        let page = self.peer_measurements_page(after, limit).await;
         Ok(ListPeerMeasurementsResponse {
-            measurements: crate::rpc_dto::peer_measurement_infos(self.peer_measurements().await)?,
+            measurements: crate::rpc_dto::peer_measurement_infos(page.measurements)?,
+            next_cursor: page.next_cursor.map(|did| did.to_string()),
         })
     }
+}
+
+fn peer_measurement_page_request(
+    request: &ListPeerMeasurementsRequest,
+) -> Result<(Option<Did>, NonZeroUsize)> {
+    let requested = request.limit.unwrap_or(DEFAULT_PEER_MEASUREMENT_PAGE_SIZE);
+    let limit = usize::try_from(requested)
+        .ok()
+        .and_then(NonZeroUsize::new)
+        .filter(|limit| limit.get() <= MAX_PEER_MEASUREMENT_PAGE_SIZE as usize)
+        .ok_or_else(|| {
+            Error::invalid_params(format!(
+                "measurement page limit must be between 1 and {MAX_PEER_MEASUREMENT_PAGE_SIZE}"
+            ))
+        })?;
+    let after = request.cursor.as_deref().map(s2d).transpose()?;
+    Ok((after, limit))
 }
 
 #[cfg_attr(all(feature = "browser", target_family = "wasm"), async_trait(?Send))]
@@ -425,4 +449,35 @@ fn s2pk(s: &str) -> Result<PublicKey<33>> {
     PublicKey::try_from_b58m(s)
         .or_else(|_| PublicKey::from_hex_string(s))
         .map_err(|_| Error::invalid_params("Invalid secp256k1 public key"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn peer_measurement_page_request_applies_defaults_and_parses_cursor() {
+        let request = ListPeerMeasurementsRequest {
+            limit: None,
+            cursor: Some(Did::from(2_u32).to_string()),
+        };
+        let (after, limit) = peer_measurement_page_request(&request)
+            .unwrap_or_else(|error| panic!("bounded page request must parse: {error}"));
+        assert_eq!(after, Some(Did::from(2_u32)));
+        assert_eq!(limit.get(), DEFAULT_PEER_MEASUREMENT_PAGE_SIZE as usize);
+    }
+
+    #[test]
+    fn peer_measurement_page_rejects_unbounded_or_zero_limit() {
+        let too_large = ListPeerMeasurementsRequest {
+            limit: Some(MAX_PEER_MEASUREMENT_PAGE_SIZE + 1),
+            cursor: None,
+        };
+        let zero = ListPeerMeasurementsRequest {
+            limit: Some(0),
+            cursor: None,
+        };
+        assert!(peer_measurement_page_request(&too_large).is_err());
+        assert!(peer_measurement_page_request(&zero).is_err());
+    }
 }

@@ -778,12 +778,14 @@ impl OutboundWorker {
             }
             ActiveFrameStep::Complete => {
                 if let Some(runnable) = self.active.take() {
+                    let useful_bytes = runnable.item().scheduled.transfer.useful_bytes();
                     self.terminate_transfer(
                         runnable,
                         Ok(SendCompletionOutcome::Succeeded),
                         TerminationFairness::AlreadyAdvanced,
                     );
-                    self.measurements.record(OutboundMeasurement::Sent);
+                    self.measurements
+                        .record(OutboundMeasurement::Sent { useful_bytes });
                 }
             }
             ActiveFrameStep::Failed(error) => {

@@ -79,6 +79,13 @@ struct FramedOutboundTransfer {
     receiver: futures::channel::oneshot::Receiver<Result<SendCompletionOutcome>>,
 }
 
+struct OutboundTransferProperties {
+    useful_bytes: u64,
+    completion: OutboundCompletion,
+    stop: StopToken,
+    detached_admission: Option<DetachedAdmission>,
+}
+
 struct StopOnDrop {
     cleanup: ArmedDropGuard<StopCleanup, fn(StopCleanup)>,
 }
@@ -400,7 +407,11 @@ impl SwarmTransport {
             OutboundCompletion::Detached => {
                 let Some(connection) = self.get_and_check_send_connection(did).await else {
                     if records_missing_connection_failure {
-                        self.record_peer_message_send_failed(did).await;
+                        self.record_peer_message_send_failed(
+                            did,
+                            crate::measure::Authentication::LocallyAddressed,
+                        )
+                        .await;
                     }
                     return Err(Error::SwarmMissDidInTable(did));
                 };
@@ -537,6 +548,8 @@ impl SwarmTransport {
     ) -> Result<Option<PreparedOutboundTransfer>> {
         let message_kind = OutboundMessageKind::from_wire(&payload.transaction.data)?;
         let wire_bytes = payload.wire_size()?;
+        let useful_bytes = u64::try_from(payload.transaction.data.len())
+            .map_err(|_| Error::MessageSizeOverflow)?;
         let message_kind_name = message_kind.as_str();
         let records_missing_connection_failure = completion == OutboundCompletion::Detached
             && message_kind.records_missing_connection_failure();
@@ -559,7 +572,11 @@ impl SwarmTransport {
         }
         if self.admitted_send_connection(did)?.is_none() {
             if records_missing_connection_failure {
-                self.record_peer_message_send_failed(did).await;
+                self.record_peer_message_send_failed(
+                    did,
+                    crate::measure::Authentication::LocallyAddressed,
+                )
+                .await;
             }
             return Err(Error::SwarmMissDidInTable(did));
         }
@@ -588,7 +605,11 @@ impl SwarmTransport {
         let handle = handle?;
         let max_message_size = admitted.connection().max_message_size();
         let Some(plan) = WireReserves::PRODUCTION.plan(wire_bytes, max_message_size) else {
-            self.record_peer_message_send_failed(did).await;
+            self.record_peer_message_send_failed(
+                did,
+                crate::measure::Authentication::Authenticated,
+            )
+            .await;
             return Err(Error::PeerMaxMessageSizeTooSmall(max_message_size));
         };
         admitted.ensure_current()?;
@@ -608,10 +629,13 @@ impl SwarmTransport {
         let framed = self.frame_outbound_transfer(
             OutboundTransferRoute::new(message_kind.class(), did, admitted.clone(), permit),
             data,
-            completion,
-            stop,
-            detached_admission,
             plan,
+            OutboundTransferProperties {
+                useful_bytes,
+                completion,
+                stop,
+                detached_admission,
+            },
         );
         Ok(Some(PreparedOutboundTransfer {
             admitted,
@@ -634,21 +658,31 @@ impl SwarmTransport {
         &self,
         route: OutboundTransferRoute,
         data: bytes::Bytes,
-        completion: OutboundCompletion,
-        stop: StopToken,
-        detached_admission: Option<DetachedAdmission>,
         framing: Framing,
+        properties: OutboundTransferProperties,
     ) -> FramedOutboundTransfer {
+        let OutboundTransferProperties {
+            useful_bytes,
+            completion,
+            stop,
+            detached_admission,
+        } = properties;
         let (transfer, receiver) = match framing {
-            Framing::Whole => {
-                OutboundTransfer::whole(route, data, completion, stop, detached_admission)
-            }
+            Framing::Whole => OutboundTransfer::whole(
+                route,
+                data,
+                useful_bytes,
+                completion,
+                stop,
+                detached_admission,
+            ),
             Framing::Chunked { chunk_size } => {
                 let chunks: ChunkFrames = Box::new(ChunkList::stream(data, chunk_size));
                 OutboundTransfer::chunked(
                     route,
                     self.session_sk.clone(),
                     chunks,
+                    useful_bytes,
                     completion,
                     stop,
                     detached_admission,

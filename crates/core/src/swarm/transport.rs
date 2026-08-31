@@ -44,11 +44,8 @@ use crate::dht::StorageSyncDeliveryCursor;
 use crate::dht::VirtualNodeConfig;
 use crate::error::Error;
 use crate::error::Result;
-use crate::measure::order_peers_by_quality;
-use crate::measure::MeasureCounter;
 use crate::measure::MeasureImpl;
-use crate::measure::PeerMeasurement;
-use crate::measure::PeerQuality;
+use crate::measure::MeasurementEvent;
 use crate::message::ConnectNodeReport;
 use crate::message::ConnectNodeSend;
 use crate::message::DhtProtocolMode;
@@ -62,6 +59,7 @@ mod connection;
 mod delivery;
 mod event_delivery;
 mod liveness;
+mod measurement;
 mod outbound;
 mod payload_send;
 mod pending;
@@ -74,7 +72,6 @@ pub(crate) use storage_sync::StorageSyncBatch;
 pub(crate) use storage_sync::StorageSyncBatchStep;
 mod timeouts;
 pub(crate) use self::connection::AdmittedConnection;
-use self::delivery::record_measurement;
 #[cfg(all(test, feature = "dummy", not(target_family = "wasm")))]
 pub(crate) use self::delivery::SendCompletionOutcome;
 use self::event_delivery::PeerOperationLocks;
@@ -390,10 +387,6 @@ impl SwarmTransport {
         self.inbound_capacity.admitted_count_for_test()
     }
 
-    async fn record_peer_measurement(&self, peer: Did, counter: MeasureCounter) {
-        record_measurement(self.measure.clone(), peer, counter).await;
-    }
-
     pub(crate) fn swarm_event_delivery_lock(&self, peer: Did) -> SwarmEventDeliveryLock {
         self.swarm_event_delivery.lock(peer)
     }
@@ -435,8 +428,12 @@ impl SwarmTransport {
                 return;
             }
         }
-        self.record_peer_measurement(attempt.peer, MeasureCounter::Connect)
-            .await;
+        self.record_peer_measurement(
+            attempt.peer,
+            crate::measure::Authentication::Authenticated,
+            MeasurementEvent::Connected,
+        )
+        .await;
     }
 
     /// Record that `peer` left the usable connection epoch.
@@ -466,8 +463,12 @@ impl SwarmTransport {
             }
         };
         if should_record {
-            self.record_peer_measurement(attempt.peer, MeasureCounter::Disconnected)
-                .await;
+            self.record_peer_measurement(
+                attempt.peer,
+                crate::measure::Authentication::Authenticated,
+                MeasurementEvent::Disconnected,
+            )
+            .await;
         }
     }
 
@@ -529,57 +530,6 @@ impl SwarmTransport {
         .map(|_| ())
     }
 
-    /// Record that a payload from `peer` was accepted and verified by the swarm.
-    pub(crate) async fn record_peer_message_received(&self, attempt: PendingConnectionAttempt) {
-        self.mark_peer_liveness_inbound(attempt);
-        self.record_peer_measurement(attempt.peer, MeasureCounter::Received)
-            .await;
-    }
-
-    /// Record that a payload from `peer` could not be decoded or verified.
-    pub(crate) async fn record_peer_message_receive_failed(&self, peer: Did) {
-        self.record_peer_measurement(peer, MeasureCounter::FailedToReceive)
-            .await;
-    }
-
-    /// Record that an outbound payload to `peer` failed before delivery.
-    pub(crate) async fn record_peer_message_send_failed(&self, peer: Did) {
-        self.record_peer_measurement(peer, MeasureCounter::FailedToSend)
-            .await;
-    }
-
-    /// Return this node's local quality judgement for `peer`.
-    pub(crate) async fn peer_quality(&self, peer: Did) -> PeerQuality {
-        match &self.measure {
-            Some(measure) => measure.quality(peer).await,
-            None => PeerQuality::Unknown,
-        }
-    }
-
-    /// Return this node's local measurement counters for `peer`, if observed.
-    pub(crate) async fn peer_measurement(&self, peer: Did) -> Option<PeerMeasurement> {
-        match &self.measure {
-            Some(measure) => PeerMeasurement::from_measure(measure.as_ref(), peer).await,
-            None => None,
-        }
-    }
-
-    /// Order DHT-produced connection candidates by local quality evidence.
-    ///
-    /// Invariant: this is a stable permutation of the DHT-produced candidate
-    /// sequence. It changes attempt order only; it never changes Chord ownership,
-    /// successor responsibility, or storage placement.
-    pub(crate) async fn order_dht_candidates_by_quality(
-        &self,
-        candidates: impl IntoIterator<Item = Did>,
-    ) -> Vec<Did> {
-        let mut measured = Vec::new();
-        for did in candidates {
-            measured.push((did, self.peer_quality(did).await));
-        }
-        order_peers_by_quality(measured)
-    }
-
     /// Ensure the storage API redundancy matches repair redundancy.
     pub(crate) fn ensure_storage_redundancy<const REDUNDANT: u16>(&self) -> Result<()> {
         self.ensure_storage_redundancy_value(REDUNDANT)
@@ -617,7 +567,11 @@ impl SwarmTransport {
                     );
                     return Ok(());
                 }
-                self.record_peer_message_send_failed(peer).await;
+                self.record_peer_message_send_failed(
+                    peer,
+                    crate::measure::Authentication::LocallyAddressed,
+                )
+                .await;
                 return Err(e);
             }
         };

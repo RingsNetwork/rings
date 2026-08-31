@@ -462,6 +462,14 @@ fn failed_receive_count(measure: &RecordingMeasure, peer: Did) -> Result<usize> 
         .count())
 }
 
+fn successful_receive_count(measure: &RecordingMeasure, peer: Did) -> Result<usize> {
+    Ok(measure
+        .snapshot_measurements()?
+        .into_iter()
+        .filter(|(did, event)| *did == peer && matches!(event, MeasurementEvent::Received { .. }))
+        .count())
+}
+
 fn spawn_inbound_delivery(
     callback: Arc<InnerSwarmCallback>,
     cid: String,
@@ -507,6 +515,115 @@ async fn saturate_application_lane(
     .await
     .map_err(|_| Error::InvalidMessage("application lane did not fill".to_string()))?;
     Ok(pending_deliveries)
+}
+
+#[tokio::test]
+async fn test_chunk_reassembly_records_one_exact_logical_receive() -> Result<()> {
+    let measure = Arc::new(RecordingMeasure::default());
+    let transport = Arc::new(transport_with_measure(measure.clone())?);
+    let peer_key = SecretKey::random();
+    let peer: Did = peer_key.address().into();
+    let peer_session = SessionSk::new_with_seckey(&peer_key)?;
+    let app_callback = Arc::new(CountingSwarmCallback::default());
+    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
+    let (attempt, _offer) = transport
+        .prepare_connection_offer_with_attempt(peer, offer_callback)
+        .await?;
+    let callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone())
+        .with_pending_connection_attempt(attempt);
+    open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
+    callback
+        .on_data_channel_open(&peer.to_string())
+        .await
+        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+    let logical_payload = MessagePayload::new_send(
+        Message::custom(&vec![41; 512])?,
+        &peer_session,
+        transport.dht.did,
+        transport.dht.did,
+    )?;
+    let expected_useful_bytes = u64::try_from(logical_payload.transaction.data.len())
+        .map_err(|_| Error::MessageSizeOverflow)?;
+    let chunks: Vec<Chunk> = ChunkList::split(&logical_payload.to_wire()?, 32).into();
+    assert!(chunks.len() > 1);
+
+    for chunk in chunks {
+        let frame = local_wire(Message::Chunk(chunk), &peer_session, transport.dht.did)?;
+        callback
+            .on_admitted_message_for_test(&peer.to_string(), &frame)
+            .await
+            .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+    }
+
+    let measurements = measure.snapshot_measurements()?;
+    let received = measurements
+        .iter()
+        .filter_map(|(observed_peer, event)| match event {
+            MeasurementEvent::Received { useful_bytes } if *observed_peer == peer => {
+                Some(*useful_bytes)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(received, vec![expected_useful_bytes]);
+    assert_eq!(
+        measurements
+            .iter()
+            .filter(|(observed_peer, event)| {
+                *observed_peer == peer && matches!(event, MeasurementEvent::FailedToReceive)
+            })
+            .count(),
+        0
+    );
+    assert_eq!(app_callback.inbounds(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_reassembled_undecodable_message_records_one_failure_only() -> Result<()> {
+    let measure = Arc::new(RecordingMeasure::default());
+    let transport = Arc::new(transport_with_measure(measure.clone())?);
+    let peer_key = SecretKey::random();
+    let peer: Did = peer_key.address().into();
+    let peer_session = SessionSk::new_with_seckey(&peer_key)?;
+    let app_callback = Arc::new(CountingSwarmCallback::default());
+    let offer_callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone());
+    let (attempt, _offer) = transport
+        .prepare_connection_offer_with_attempt(peer, offer_callback)
+        .await?;
+    let callback = InnerSwarmCallback::new(Arc::clone(&transport), app_callback.clone())
+        .with_pending_connection_attempt(attempt);
+    open_dummy_data_channel_before_ice_connected(&transport, peer).await?;
+    callback
+        .on_data_channel_open(&peer.to_string())
+        .await
+        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
+    let undecodable = MessagePayload::new_send(
+        vec![0xff_u8; 512],
+        &peer_session,
+        transport.dht.did,
+        transport.dht.did,
+    )?;
+    let chunks: Vec<Chunk> = ChunkList::split(&undecodable.to_wire()?, 32).into();
+    let final_index = chunks.len().saturating_sub(1);
+    assert!(final_index > 0);
+
+    for (index, chunk) in chunks.into_iter().enumerate() {
+        let frame = local_wire(Message::Chunk(chunk), &peer_session, transport.dht.did)?;
+        let delivery = callback
+            .on_admitted_message_for_test(&peer.to_string(), &frame)
+            .await;
+        if index == final_index {
+            assert!(delivery.is_err());
+        } else {
+            delivery.map_err(|error| Error::InvalidMessage(error.to_string()))?;
+        }
+    }
+
+    assert_eq!(failed_receive_count(&measure, peer)?, 1);
+    assert_eq!(successful_receive_count(&measure, peer)?, 0);
+    assert_eq!(app_callback.inbounds(), 0);
+    Ok(())
 }
 
 #[tokio::test]
@@ -736,240 +853,4 @@ async fn test_reassembled_control_shape_is_verified_before_lane_transition() -> 
     Ok(())
 }
 
-#[tokio::test]
-async fn test_malformed_transport_preparation_records_peer_receive_failure() -> Result<()> {
-    let measure = Arc::new(RecordingMeasure::default());
-    let transport = Arc::new(transport_with_measure(measure.clone())?);
-    let peer: Did = SecretKey::random().address().into();
-    let callback = InnerSwarmCallback::new(transport, Arc::new(NoopSwarmCallback));
-
-    callback
-        .on_admitted_message_for_test(&peer.to_string(), &[0xff])
-        .await
-        .expect_err("truncated wire metadata must fail");
-
-    assert_eq!(
-        measure
-            .snapshot_counters()?
-            .into_iter()
-            .filter(|(did, counter)| {
-                *did == peer && *counter == MeasureCounter::FailedToReceive
-            })
-            .count(),
-        1
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_invalid_chunk_shape_records_peer_receive_failure() -> Result<()> {
-    let measure = Arc::new(RecordingMeasure::default());
-    let transport = Arc::new(transport_with_measure(measure.clone())?);
-    let peer_key = SecretKey::random();
-    let peer: Did = peer_key.address().into();
-    let session = SessionSk::new_with_seckey(&peer_key)?;
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
-    let frame = local_wire(
-        Message::Chunk(Chunk {
-            chunk: [0, 0],
-            data: Bytes::from_static(b"invalid"),
-            meta: crate::chunk::ChunkMeta::default(),
-        }),
-        &session,
-        transport.dht.did,
-    )?;
-
-    let error = callback
-        .on_admitted_message_for_test(&peer.to_string(), &frame)
-        .await
-        .expect_err("invalid chunk shape must fail");
-
-    assert!(matches!(
-        error.downcast_ref::<Error>(),
-        Some(Error::InvalidChunkMessage)
-    ));
-    assert_eq!(failed_receive_count(&measure, peer)?, 1);
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_reassembly_rejections_score_only_invalid_input_and_release_resources() -> Result<()> {
-    let measure = Arc::new(RecordingMeasure::default());
-    let limits = ReassemblyLimits {
-        max_pending_messages: 1,
-        max_chunk_data_len: 1_024,
-        max_message_bytes: 1_024,
-        max_chunks_per_message: 4,
-        max_total_buffered_cost: 4_096,
-        slot_overhead: 8,
-        max_completed_ids: 4,
-    };
-    let transport = Arc::new(transport_with_measure_and_reassembly_limits(
-        measure.clone(),
-        limits,
-    )?);
-    let budget = transport.reassembly_budget();
-    let peer_key = SecretKey::random();
-    let peer: Did = peer_key.address().into();
-    let session = SessionSk::new_with_seckey(&peer_key)?;
-    let callback = InnerSwarmCallback::new(Arc::clone(&transport), Arc::new(NoopSwarmCallback));
-    let first = Chunk {
-        chunk: [0, 2],
-        data: Bytes::from_static(b"first"),
-        meta: crate::chunk::ChunkMeta::default(),
-    };
-    let deliver = |chunk: Chunk| local_wire(Message::Chunk(chunk), &session, transport.dht.did);
-
-    let first_frame = deliver(first.clone())?;
-    callback
-        .on_admitted_message_for_test(&peer.to_string(), &first_frame)
-        .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
-    assert!(budget.buffered_cost_for_test() > 0);
-
-    let replay_frame = deliver(first.clone())?;
-    callback
-        .on_admitted_message_for_test(&peer.to_string(), &replay_frame)
-        .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
-
-    let capacity_frame = deliver(Chunk {
-        chunk: [0, 2],
-        data: Bytes::from_static(b"second"),
-        meta: crate::chunk::ChunkMeta::default(),
-    })?;
-    callback
-        .on_admitted_message_for_test(&peer.to_string(), &capacity_frame)
-        .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
-    assert_eq!(failed_receive_count(&measure, peer)?, 0);
-
-    let conflict_frame = deliver(Chunk {
-        data: Bytes::from_static(b"conflict"),
-        ..first
-    })?;
-    let error = callback
-        .on_admitted_message_for_test(&peer.to_string(), &conflict_frame)
-        .await
-        .expect_err("conflicting bytes at one position must fail");
-    assert!(matches!(
-        error.downcast_ref::<Error>(),
-        Some(Error::InvalidChunkMessage)
-    ));
-    assert_eq!(failed_receive_count(&measure, peer)?, 1);
-    assert_eq!(callback.inbound_admitted_count_for_test(), 0);
-
-    callback.close_inbound_for_test();
-    drop(callback);
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while budget.buffered_cost_for_test() != 0 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .map_err(|_| Error::InvalidMessage("reassembly budget was not released".to_string()))?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_expired_partial_reassembly_releases_shared_budget_without_more_peer_traffic(
-) -> Result<()> {
-    let limits = ReassemblyLimits {
-        max_pending_messages: 1,
-        max_chunk_data_len: 1_024,
-        max_message_bytes: 1_024,
-        max_chunks_per_message: 4,
-        max_total_buffered_cost: 4_096,
-        slot_overhead: 8,
-        max_completed_ids: 4,
-    };
-    let transport = Arc::new(transport_with_measure_and_reassembly_limits(
-        Arc::new(RecordingMeasure::default()),
-        limits,
-    )?);
-    let budget = transport.reassembly_budget();
-    let peer_key = SecretKey::random();
-    let peer: Did = peer_key.address().into();
-    let session = SessionSk::new_with_seckey(&peer_key)?;
-    let meta = crate::chunk::ChunkMeta::default();
-    let expiry = meta.ts_ms.saturating_add(meta.ttl_ms as u128);
-    let cleanup_now_ms = Arc::new(Mutex::new(meta.ts_ms));
-    let callback = InnerSwarmCallback::new_with_reassembly_cleanup_clock_for_test(
-        Arc::clone(&transport),
-        Arc::new(NoopSwarmCallback),
-        Arc::clone(&cleanup_now_ms),
-    );
-    let frame = local_wire(
-        Message::Chunk(Chunk {
-            chunk: [0, 2],
-            data: Bytes::from_static(b"partial"),
-            meta,
-        }),
-        &session,
-        transport.dht.did,
-    )?;
-
-    callback
-        .on_admitted_message_for_test(&peer.to_string(), &frame)
-        .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
-    assert!(budget.buffered_cost_for_test() > 0);
-    *cleanup_now_ms
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = expiry;
-
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while budget.buffered_cost_for_test() != 0 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .map_err(|_| Error::InvalidMessage("expired reassembly budget was retained".to_string()))?;
-    Ok(())
-}
-
-#[tokio::test]
-async fn test_invalid_transport_envelope_records_peer_receive_failure() -> Result<()> {
-    let measure = Arc::new(RecordingMeasure::default());
-    let transport = Arc::new(transport_with_measure(measure.clone())?);
-    let peer: Did = SecretKey::random().address().into();
-    let callback = InnerSwarmCallback::new(transport, Arc::new(NoopSwarmCallback));
-
-    callback
-        .on_invalid_inbound_frame(&peer.to_string())
-        .await
-        .map_err(|error| Error::InvalidMessage(error.to_string()))?;
-
-    assert_eq!(failed_receive_count(&measure, peer)?, 1);
-    Ok(())
-}
-
-#[test]
-fn test_inbound_mailbox_without_runtime_returns_typed_error() -> Result<()> {
-    let transport = Arc::new(transport_with_measure(Arc::new(
-        RecordingMeasure::default(),
-    ))?);
-    let peer_key = SecretKey::random();
-    let peer_session = SessionSk::new_with_seckey(&peer_key)?;
-    let wire = local_wire(
-        Message::custom(b"valid-message")?,
-        &peer_session,
-        transport.dht.did,
-    )?;
-    let callback = InnerSwarmCallback::new(transport, Arc::new(NoopSwarmCallback));
-    let is_runtime_error = futures::executor::block_on(async {
-        match callback
-            .on_admitted_message_for_test("not-a-did", &wire)
-            .await
-        {
-            Err(error) => matches!(
-                error.downcast_ref::<Error>(),
-                Some(Error::InboundMailboxRuntimeUnavailable)
-            ),
-            Ok(()) => false,
-        }
-    });
-
-    assert!(is_runtime_error);
-    Ok(())
-}
+mod measurement;

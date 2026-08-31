@@ -9,7 +9,7 @@ use super::STABILIZATION_STEP_TIMEOUT;
 use super::STABILIZATION_STOP_POLL_INTERVAL;
 use crate::lifecycle::StopToken;
 use crate::swarm::transport::DATA_CHANNEL_SEND_ACCEPT_BUDGET;
-use crate::utils::sleep;
+use crate::utils::try_sleep;
 
 /// The quiet phase reserved for topology stabilization before periodic repair.
 const STORAGE_REPAIR_PHASE_OFFSET: Duration = Duration::from_secs(5);
@@ -372,7 +372,10 @@ async fn sleep_until_or_stop(origin: &Instant, deadline_ms: u64, stop: &StopToke
         if delay.is_zero() {
             return !stop.should_stop();
         }
-        sleep(delay.min(STABILIZATION_STOP_POLL_INTERVAL)).await;
+        if !try_sleep(delay.min(STABILIZATION_STOP_POLL_INTERVAL)).await {
+            tracing::error!("stopping stabilization maintenance after timer scheduling failed");
+            return false;
+        }
     }
 }
 

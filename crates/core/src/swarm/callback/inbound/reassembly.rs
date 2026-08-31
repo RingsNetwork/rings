@@ -9,6 +9,74 @@ use crate::chunk::ReassemblyOutcome;
 use crate::chunk::ReassemblyRejection;
 use crate::error::Error;
 use crate::error::Result;
+use crate::measure::Authentication;
+
+impl InboundProcessor {
+    pub(super) async fn handle_chunk(
+        &self,
+        peer: Option<crate::dht::Did>,
+        authentication: Authentication,
+        chunk: crate::chunk::Chunk,
+    ) -> ReassemblyOutcome {
+        let (outcome, expired) = self
+            .reassembler
+            .lock()
+            .await
+            .handle_retained_outcome_with_expiry(
+                chunk,
+                matches!(authentication, Authentication::Authenticated),
+            );
+        self.record_expired_reassembly_failures(peer, expired).await;
+        outcome
+    }
+
+    pub(super) async fn remove_expired_reassembly_at(&self, now_ms: u128) {
+        let expired = self.reassembler.lock().await.remove_expired_at(now_ms);
+        self.record_expired_reassembly_failures(None, expired).await;
+    }
+
+    pub(super) async fn has_pending_reassembly(&self) -> bool {
+        self.reassembler.lock().await.has_pending()
+    }
+
+    pub(super) async fn prepare_reassembly_for_close(&self) -> bool {
+        self.reassembler.lock().await.prepare_for_close()
+    }
+
+    pub(super) async fn discard_reassembly_after_close_timer_failure(&self) {
+        self.reassembler
+            .lock()
+            .await
+            .discard_after_close_timer_failure();
+    }
+
+    async fn record_expired_reassembly_failures(
+        &self,
+        fallback_peer: Option<crate::dht::Did>,
+        count: usize,
+    ) {
+        if count == 0 {
+            return;
+        }
+        let peer = self
+            .pending_attempt()
+            .map(|attempt| attempt.peer())
+            .or(fallback_peer);
+        let Some(peer) = peer else {
+            tracing::warn!(
+                expired_messages = count,
+                "expired incomplete reassemblies had no authenticated peer"
+            );
+            return;
+        };
+        // Pre: `count` includes only pending entries marked peer-attributable at
+        // authenticated ingress, and one reassembler serves one connection peer.
+        for _ in 0..count {
+            self.record_receive_failure(Some(peer), Authentication::Authenticated)
+                .await;
+        }
+    }
+}
 
 struct ReassembledEvent {
     payload: crate::message::MessagePayload,
@@ -26,6 +94,7 @@ pub(super) async fn process_chunk_event(
             return Some(InboundEvent {
                 sequence: event.sequence,
                 peer: event.peer,
+                authentication: event.authentication,
                 payload: reassembled.payload,
                 prepared_message: Some(reassembled.message),
                 lane: reassembled.lane,
@@ -44,7 +113,10 @@ async fn advance_chunk_event(
     event: &mut InboundEvent,
 ) -> Result<Option<ReassembledEvent>> {
     let chunk = take_prepared_chunk(&mut event.prepared_message)?;
-    let bytes: crate::chunk::RetainedReassembly = match processor.handle_chunk(chunk).await {
+    let bytes: crate::chunk::RetainedReassembly = match processor
+        .handle_chunk(event.peer, event.authentication, chunk)
+        .await
+    {
         ReassemblyOutcome::Complete(bytes) => bytes,
         ReassemblyOutcome::Incomplete
         | ReassemblyOutcome::Rejected(ReassemblyRejection::Capacity)
@@ -52,27 +124,37 @@ async fn advance_chunk_event(
             return Ok(None);
         }
         ReassemblyOutcome::Rejected(ReassemblyRejection::Invalid) => {
-            processor.record_receive_failure(event.peer).await;
+            processor
+                .record_receive_failure(event.peer, event.authentication)
+                .await;
             return Err(Error::InvalidChunkMessage);
         }
     };
     let reservation = memory_reservation(bytes.as_ref().len());
     event.permit.try_transition(event.lane, reservation)?;
-    let payload = decode_payload(processor, event.peer, bytes.as_ref()).await?;
+    let payload =
+        decode_payload(processor, event.peer, event.authentication, bytes.as_ref()).await?;
     let message = match payload.transaction.data::<crate::message::Message>() {
         Ok(message) => message,
         Err(error) => {
-            processor.record_receive_failure(event.peer).await;
+            processor
+                .record_receive_failure(event.peer, event.authentication)
+                .await;
             return Err(error);
         }
     };
     let kind = crate::message::MessageKind::from_message(&message);
     if kind.is_chunk() {
-        processor.record_receive_failure(event.peer).await;
+        processor
+            .record_receive_failure(event.peer, event.authentication)
+            .await;
         return Err(Error::NestedChunkMessage);
     }
     let lane = InboundLane::from_kind(kind);
     event.permit.try_transition(lane, reservation)?;
+    let payload = processor
+        .accept_verified_logical_message(event.peer, event.authentication, payload)
+        .await?;
     Ok(Some(ReassembledEvent {
         payload,
         message,

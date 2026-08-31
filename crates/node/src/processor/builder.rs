@@ -9,7 +9,7 @@ pub struct ProcessorBuilder {
     pub(in crate::processor) webrtc_udp_port_range: Option<WebrtcUdpPortRange>,
     pub(in crate::processor) session_sk: SessionSk,
     pub(in crate::processor) storage: Option<EntryStorage>,
-    pub(in crate::processor) measure: Option<MeasureImpl>,
+    pub(in crate::processor) measure: Option<Arc<PeriodicMeasure>>,
     pub(in crate::processor) stabilize_interval: Duration,
     pub(in crate::processor) online_node_heartbeat_interval: Duration,
     pub(in crate::processor) online_node_ttl: Duration,
@@ -205,8 +205,10 @@ impl ProcessorBuilder {
             swarm_builder = swarm_builder.webrtc_udp_port_range(range);
         }
 
-        if let Some(measure) = self.measure {
-            swarm_builder = swarm_builder.measure(measure);
+        let measure = self.measure;
+        if let Some(measure) = &measure {
+            let implementation: MeasureImpl = measure.clone();
+            swarm_builder = swarm_builder.measure(implementation);
         }
         let swarm = Arc::new(swarm_builder.build());
 
@@ -215,6 +217,7 @@ impl ProcessorBuilder {
             session_sk,
             stabilize_interval: self.stabilize_interval,
             online_node_registration,
+            measure,
             #[cfg(all(feature = "browser", target_family = "wasm"))]
             advertise_onion_relay: self.advertise_onion_relay,
             registration_tasks,
